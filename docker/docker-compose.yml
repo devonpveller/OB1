@@ -8,6 +8,8 @@
 # can reach the local models (llama-cpp for chat, llama-cpp-embed for
 # embeddings). Secrets live in .env (not committed).
 
+name: open-brain
+
 services:
   openbrain-db:
     image: pgvector/pgvector:pg16
@@ -61,12 +63,47 @@ services:
       - llm-net
     restart: unless-stopped
 
+  # MCP -> OpenAPI bridge so Open WebUI (which consumes OpenAPI tool
+  # servers, not raw MCP) can use Open Brain. Reachable from the
+  # openwebui container as http://openbrain-mcpo:8000/open-brain
+  # over the shared ai-stack_llm-net network.
+  openbrain-mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    container_name: openbrain-mcpo
+    depends_on:
+      - openbrain-mcp
+    command:
+      - --config
+      - /config/mcpo.config.json
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --api-key
+      - ${MCPO_API_KEY}
+    volumes:
+      - ./mcpo.config.json:/config/mcpo.config.json:ro
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/open-brain/openapi.json')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
 volumes:
   openbrain-db-data:
 
 networks:
+  # internal: true -> no gateway, no internet egress. The whole
+  # open-brain stack can only talk to itself and (via llm-net) the
+  # local models. Nothing in this stack can reach the public internet.
   obnet:
     driver: bridge
+    internal: true
   # The internal-only network defined by the ai-stack compose project.
   # Gives openbrain-mcp access to llama-cpp / llama-cpp-embed by name.
   llm-net:

@@ -54,6 +54,30 @@ claude mcp add --transport http open-brain http://127.0.0.1:8808/ \
   --header "x-brain-key: $KEY"
 ```
 
+### Connect from Open WebUI (via the mcpo bridge)
+
+Open WebUI consumes **OpenAPI** tool servers, not raw MCP, so the stack
+includes an `openbrain-mcpo` bridge container (MCP → OpenAPI). It is on
+the shared `ai-stack_llm-net` network, so Open WebUI reaches it by
+container name — **not** the host loopback port.
+
+In Open WebUI: **Admin Panel → Settings → Tools → Add Tool Server**
+
+- **URL:** `http://openbrain-mcpo:8000/open-brain`
+- **API Key:** the `MCPO_API_KEY` value from `.env` (Bearer auth)
+
+Save, then enable the tools on a model/chat. Every Open WebUI model can
+then call `capture_thought`, `search_thoughts`, `list_thoughts`,
+`thought_stats` (plus `search`/`fetch`). OpenAPI docs for sanity-checking:
+`http://openbrain-mcpo:8000/open-brain/docs` (reachable from inside the
+ai-stack network).
+
+### Connect from Claude Code
+
+A gitignored `.mcp.json` in the ai-stack repo registers `open-brain`
+(`http://127.0.0.1:8808/`). Reload Claude Code and approve the project
+MCP server when prompted.
+
 ### Connect from Claude Desktop / other MCP clients
 
 ```json
