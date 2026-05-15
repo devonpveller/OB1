@@ -20,7 +20,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - openbrain-db-data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro
     networks:
       - obnet
     restart: unless-stopped
@@ -63,12 +64,40 @@ services:
       - llm-net
     restart: unless-stopped
 
-  # MCP -> OpenAPI bridge so Open WebUI (which consumes OpenAPI tool
-  # servers, not raw MCP) can use Open Brain. Reachable from the
-  # openwebui container as http://openbrain-mcpo:8000/open-brain
-  # over the shared ai-stack_llm-net network.
+  # Combined extensions MCP server: all 6 OB1 extensions (39 tools),
+  # ported to raw PostgreSQL. Shares openbrain-db; no model/internet
+  # access needed.
+  openbrain-ext:
+    build:
+      context: ./extensions-server
+      dockerfile: Dockerfile
+    image: openbrain-ext-server:local
+    container_name: openbrain-ext
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DEFAULT_USER_ID: ${DEFAULT_USER_ID}
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8809:8000"
+    networks:
+      - obnet
+    restart: unless-stopped
+
+  # MCP -> OpenAPI bridges for Open WebUI (which consumes OpenAPI tool
+  # servers, not raw MCP). ONE mcpo per MCP server: mcpo's Python client
+  # crashes (anyio cancel-scope) when a single instance proxies multiple
+  # streamable-http servers, so core and extensions get separate
+  # instances. Reachable from openwebui over the shared ai-stack_llm-net.
   openbrain-mcpo:
-    image: ghcr.io/open-webui/mcpo:main
+    image: ghcr.io/open-webui/mcpo:latest
     container_name: openbrain-mcpo
     depends_on:
       - openbrain-mcp
@@ -94,16 +123,44 @@ services:
       retries: 3
       start_period: 20s
 
+  openbrain-mcpo-ext:
+    image: ghcr.io/open-webui/mcpo:latest
+    container_name: openbrain-mcpo-ext
+    depends_on:
+      - openbrain-ext
+    command:
+      - --config
+      - /config/mcpo-ext.config.json
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --api-key
+      - ${MCPO_API_KEY}
+    volumes:
+      - ./mcpo-ext.config.json:/config/mcpo-ext.config.json:ro
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/open-brain-extensions/openapi.json')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
 volumes:
   openbrain-db-data:
 
 networks:
-  # internal: true -> no gateway, no internet egress. The whole
-  # open-brain stack can only talk to itself and (via llm-net) the
-  # local models. Nothing in this stack can reach the public internet.
+  # Normal bridge (user-authorized 2026-05-15): required so the host can
+  # reach the published 127.0.0.1:8808/8809 ports (Claude Code on Windows
+  # connects there) and so mcpo works. "No cloud" is enforced at the
+  # application layer instead: there are no cloud API keys anywhere in
+  # this stack and every model/DB URL points only at local containers.
   obnet:
     driver: bridge
-    internal: true
   # The internal-only network defined by the ai-stack compose project.
   # Gives openbrain-mcp access to llama-cpp / llama-cpp-embed by name.
   llm-net:

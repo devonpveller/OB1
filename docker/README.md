@@ -9,8 +9,10 @@ own GPUs.
 
 | Service         | Image                          | Role |
 |-----------------|--------------------------------|------|
-| `openbrain-db`  | `pgvector/pgvector:pg16`       | `thoughts` table + `match_thoughts`, auto-initialised from `init.sql` |
-| `openbrain-mcp` | built from `../integrations/kubernetes-deployment` | Deno MCP HTTP server (4 tools + ChatGPT-compat `search`/`fetch`) |
+| `openbrain-db`  | `pgvector/pgvector:pg16`       | `thoughts` + 18 extension tables, auto-initialised from `init.sql` + `init-extensions.sql` |
+| `openbrain-mcp` | built from `../integrations/kubernetes-deployment` | Core Deno MCP server (4 tools + ChatGPT-compat `search`/`fetch`) — port `8808` |
+| `openbrain-ext` | built from `./extensions-server` | Combined extensions MCP server — all 6 OB1 extensions, **39 tools** — port `8809` |
+| `openbrain-mcpo` / `openbrain-mcpo-ext` | `ghcr.io/open-webui/mcpo:latest` | Two MCP→OpenAPI bridges for Open WebUI (core / extensions) |
 
 The MCP server joins the external `ai-stack_llm-net` network and calls:
 
@@ -54,29 +56,64 @@ claude mcp add --transport http open-brain http://127.0.0.1:8808/ \
   --header "x-brain-key: $KEY"
 ```
 
-### Connect from Open WebUI (via the mcpo bridge)
+### Connect from Open WebUI (via the mcpo bridges)
 
-Open WebUI consumes **OpenAPI** tool servers, not raw MCP, so the stack
-includes an `openbrain-mcpo` bridge container (MCP → OpenAPI). It is on
-the shared `ai-stack_llm-net` network, so Open WebUI reaches it by
-container name — **not** the host loopback port.
+Open WebUI v0.8.10 has **no native MCP** — its URL-based "tool server" /
+integration speaks **OpenAPI**. So the stack runs **two** `mcpo`
+bridge containers (one per MCP server: a single mcpo instance crashes
+when proxying multiple streamable-http servers — anyio cancel-scope bug).
+They sit on the shared `ai-stack_llm-net`, reachable from the `openwebui`
+container by name (not the host loopback port).
 
-In Open WebUI: **Admin Panel → Settings → Tools → Add Tool Server**
+In Open WebUI, add **two** OpenAPI tool servers (Settings → Tools /
+Integrations → add server), both using the **same API key**:
 
-- **URL:** `http://openbrain-mcpo:8000/open-brain`
-- **API Key:** the `MCPO_API_KEY` value from `.env` (Bearer auth)
+| URL | API Key |
+|-----|---------|
+| `http://openbrain-mcpo:8000/open-brain` | `MCPO_API_KEY` from `.env` |
+| `http://openbrain-mcpo-ext:8000/open-brain-extensions` | `MCPO_API_KEY` from `.env` |
 
-Save, then enable the tools on a model/chat. Every Open WebUI model can
-then call `capture_thought`, `search_thoughts`, `list_thoughts`,
-`thought_stats` (plus `search`/`fetch`). OpenAPI docs for sanity-checking:
-`http://openbrain-mcpo:8000/open-brain/docs` (reachable from inside the
-ai-stack network).
+That exposes the 6 core tools + 39 extension tools to every Open WebUI
+model. Verified: both bridges discover their tools and proxy real calls
+(`thought_stats`, `list_vendors`, …) with zero errors. OpenAPI docs:
+`…/open-brain/docs` and `…/open-brain-extensions/docs`.
 
 ### Connect from Claude Code
 
-A gitignored `.mcp.json` in the ai-stack repo registers `open-brain`
-(`http://127.0.0.1:8808/`). Reload Claude Code and approve the project
-MCP server when prompted.
+A gitignored `.mcp.json` in the ai-stack repo registers both
+`open-brain` (`http://127.0.0.1:8808/`, core) and
+`open-brain-extensions` (`http://127.0.0.1:8809/`, 39 extension tools).
+Reload Claude Code and approve the project MCP servers when prompted.
+
+## Extensions
+
+All six OB1 extensions run in the single `openbrain-ext` server, ported
+from Supabase to raw PostgreSQL (39 tools, same names/inputs as upstream):
+
+| Extension | Tools | Examples |
+|-----------|-------|----------|
+| Household Knowledge | 5 | `add_household_item`, `search_household_items`, `add_vendor` |
+| Home Maintenance | 4 | `add_maintenance_task`, `log_maintenance`, `get_upcoming_maintenance` |
+| Family Calendar | 6 | `add_family_member`, `add_activity`, `get_week_schedule` |
+| Meal Planning | 6 | `add_recipe`, `create_meal_plan`, `generate_shopping_list` |
+| Professional CRM | 8 | `add_professional_contact`, `log_interaction`, `link_thought_to_contact` |
+| Job Hunt Pipeline | 10 | `add_company`, `submit_application`, `get_pipeline_overview` |
+
+Schema notes: upstream `auth.uid()`/`auth.jwt()` RLS is preserved verbatim
+behind a no-op `auth` shim schema; the server connects as superuser
+(RLS bypassed) and scopes every query by `DEFAULT_USER_ID` (single user).
+`init-extensions.sql` auto-runs on a fresh DB; for the current DB it was
+applied manually. The 39 tools add up — see upstream
+`docs/05-tool-audit.md` for managing tool-context cost on agentic clients.
+
+### mcpo note (resolved)
+
+A single mcpo instance proxying **both** streamable-http servers reliably
+crashes its Python client (anyio "cancel scope" / `GeneratorExit`). Fixed
+by running **one mcpo per server** (`openbrain-mcpo` + `openbrain-mcpo-ext`),
+each with a single-server config. Both verified discovering tools and
+proxying real calls with zero errors. Keep them split if adding more
+extensions/servers later.
 
 ### Connect from Claude Desktop / other MCP clients
 

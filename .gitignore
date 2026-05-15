@@ -27,4 +27,6 @@ docs/walkthroughs/*/public/
 docs/assets/agent-memory/promotional/generated-backgrounds/**/result.json
 docs/assets/agent-memory/screenshots/**/.chrome-*/
 integrations/openclaw-agent-memory/dist/
-docker/mcpo.config.json
+# mcpo config files embed the x-brain-key secret — never commit them
+docker/mcpo*.config.json
+docker/.env
