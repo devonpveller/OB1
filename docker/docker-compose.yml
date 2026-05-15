@@ -1,0 +1,74 @@
+# Open Brain (OB1) — self-hosted Docker Compose stack.
+#
+# Two services:
+#   openbrain-db   PostgreSQL + pgvector, auto-initialised from init.sql
+#   openbrain-mcp  Deno MCP server (from integrations/kubernetes-deployment)
+#
+# The MCP server joins the existing external `ai-stack_llm-net` network so it
+# can reach the local models (llama-cpp for chat, llama-cpp-embed for
+# embeddings). Secrets live in .env (not committed).
+
+services:
+  openbrain-db:
+    image: pgvector/pgvector:pg16
+    container_name: openbrain-db
+    environment:
+      POSTGRES_DB: openbrain
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - openbrain-db-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - obnet
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  openbrain-mcp:
+    build:
+      context: ../integrations/kubernetes-deployment
+      dockerfile: Dockerfile
+    image: openbrain-mcp-server:local
+    container_name: openbrain-mcp
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      PORT: "8000"
+      # Embeddings -> local bge-m3 (1024-dim) on the ai-stack llm-net
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      # Chat (metadata extraction) -> local Qwen, non-thinking variant
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      CHAT_API_KEY: not-needed
+      CHAT_MODEL: qwen36-27b:nothink
+    ports:
+      - "127.0.0.1:8808:8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+
+volumes:
+  openbrain-db-data:
+
+networks:
+  obnet:
+    driver: bridge
+  # The internal-only network defined by the ai-stack compose project.
+  # Gives openbrain-mcp access to llama-cpp / llama-cpp-embed by name.
+  llm-net:
+    external: true
+    name: ai-stack_llm-net
