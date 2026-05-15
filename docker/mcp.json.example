@@ -1,0 +1,15 @@
+{
+  "_comment": "Template for connecting a host MCP client (e.g. Claude Code). Place this as `.mcp.json` in your client's project root, replace the placeholder with the MCP_ACCESS_KEY value from .env, and gitignore the real file. Uses the published loopback ports.",
+  "mcpServers": {
+    "open-brain": {
+      "type": "http",
+      "url": "http://127.0.0.1:8808/",
+      "headers": { "x-brain-key": "REPLACE_WITH_MCP_ACCESS_KEY" }
+    },
+    "open-brain-extensions": {
+      "type": "http",
+      "url": "http://127.0.0.1:8809/",
+      "headers": { "x-brain-key": "REPLACE_WITH_MCP_ACCESS_KEY" }
+    }
+  }
+}

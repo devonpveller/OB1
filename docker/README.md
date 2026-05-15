@@ -20,7 +20,42 @@ The MCP server joins the external `ai-stack_llm-net` network and calls:
   (the schema uses `vector(1024)`; upstream OB1 defaults to 1536 for OpenAI)
 - **Chat (metadata):** `http://llama-cpp:8080/v1` — `qwen36-27b:nothink`
 
-Secrets (`MCP_ACCESS_KEY`, `POSTGRES_PASSWORD`) are generated in `.env`.
+Secrets live in `.env` (gitignored). Committable templates with the same
+keys are provided as `*.example` files.
+
+## First-time setup (for a fresh environment)
+
+```bash
+cd OB1/docker
+
+# 1. Create the real config from templates (all gitignored)
+cp .env.example                   .env
+cp mcpo.config.json.example       mcpo.config.json
+cp mcpo-ext.config.json.example   mcpo-ext.config.json
+
+# 2. Generate secrets and put them in .env
+openssl rand -hex 32   # -> MCP_ACCESS_KEY
+openssl rand -hex 16   # -> POSTGRES_PASSWORD
+openssl rand -hex 24   # -> MCPO_API_KEY
+uuidgen                # -> DEFAULT_USER_ID  (any UUID)
+
+# 3. Put the SAME MCP_ACCESS_KEY value into the x-brain-key field of
+#    mcpo.config.json AND mcpo-ext.config.json (replace the placeholder)
+
+# 4. (host MCP clients, e.g. Claude Code) copy mcp.json.example to your
+#    client project's .mcp.json, set the same MCP_ACCESS_KEY, gitignore it
+
+# 5. Adjust model endpoints in docker-compose.yml if your local
+#    OpenAI-compatible API differs (EMBEDDING_API_BASE / CHAT_API_BASE
+#    and model names). Embedding dim must match init.sql's vector(N).
+
+docker compose up -d --build
+```
+
+The stack expects an external Docker network `ai-stack_llm-net` with
+`llama-cpp` (chat) and `llama-cpp-embed` (embeddings) reachable by name.
+Point the `*_API_BASE` env vars at any OpenAI-compatible endpoint if your
+setup differs.
 
 ## Usage
 

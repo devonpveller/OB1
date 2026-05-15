@@ -1,0 +1,10 @@
+{
+  "_comment": "Template for the CORE mcpo bridge. Copy to mcpo.config.json and replace the placeholder with the MCP_ACCESS_KEY value from .env. The real file is gitignored.",
+  "mcpServers": {
+    "open-brain": {
+      "type": "streamable-http",
+      "url": "http://openbrain-mcp:8000/",
+      "headers": { "x-brain-key": "REPLACE_WITH_MCP_ACCESS_KEY" }
+    }
+  }
+}

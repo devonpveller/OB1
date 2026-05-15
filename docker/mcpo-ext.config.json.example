@@ -1,0 +1,10 @@
+{
+  "_comment": "Template for the EXTENSIONS mcpo bridge. Copy to mcpo-ext.config.json and replace the placeholder with the MCP_ACCESS_KEY value from .env. One mcpo per server is required (a single instance proxying both servers crashes). The real file is gitignored.",
+  "mcpServers": {
+    "open-brain-extensions": {
+      "type": "streamable-http",
+      "url": "http://openbrain-ext:8000/",
+      "headers": { "x-brain-key": "REPLACE_WITH_MCP_ACCESS_KEY" }
+    }
+  }
+}
