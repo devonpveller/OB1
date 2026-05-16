@@ -70,9 +70,11 @@ function parseArgs(argv) {
     batchMinLinked: 3,
     batchLimit: 25,
     semanticExpand: false,
+    includeSources: false,
     dryRun: false,
     maxLinked: 25,
     maxSemantic: 15,
+    maxSources: 10,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -96,11 +98,14 @@ function parseArgs(argv) {
     else if (a === "--batch-limit") args.batchLimit = Number(next());
     else if (a.startsWith("--batch-limit=")) args.batchLimit = Number(a.slice(14));
     else if (a === "--semantic-expand") args.semanticExpand = true;
+    else if (a === "--include-sources") args.includeSources = true;
     else if (a === "--dry-run") args.dryRun = true;
     else if (a === "--max-linked") args.maxLinked = Number(next());
     else if (a.startsWith("--max-linked=")) args.maxLinked = Number(a.slice(13));
     else if (a === "--max-semantic") args.maxSemantic = Number(next());
     else if (a.startsWith("--max-semantic=")) args.maxSemantic = Number(a.slice(15));
+    else if (a === "--max-sources") args.maxSources = Number(next());
+    else if (a.startsWith("--max-sources=")) args.maxSources = Number(a.slice(14));
     else if (a === "--help" || a === "-h") {
       args.help = true;
     }
@@ -129,6 +134,9 @@ function printUsage() {
       "  --max-linked <N>              Max linked thoughts sent to model (default: 25).",
       "  --max-semantic <N>            Max semantic matches sent to model (default: 15).",
       "  --semantic-expand             Enable semantic expansion (requires EMBEDDING_* env).",
+      "  --include-sources             Pull related external source documents from the",
+      "                                `sources` table via match_sources (requires EMBEDDING_* env).",
+      "  --max-sources <N>             Max source documents sent to model (default: 10).",
       "  --batch-min-linked <N>        Batch threshold (default: 3).",
       "  --batch-limit <N>             Max entities processed per batch run (default: 25).",
       "  --dry-run                     Print wiki to stdout, skip writes.",
@@ -384,11 +392,38 @@ async function semanticExpand(sb, env, entity) {
   }));
 }
 
+// Pull external source documents (deep_research output + ingested URLs)
+// semantically related to the entity. Mirrors semanticExpand() but hits
+// the `sources` table via the match_sources RPC (init-sources.sql).
+// Returns rows carrying provenance (id + url) so the wiki can link every
+// source-derived claim back to its origin row (req 14).
+async function semanticExpandSources(sb, env, entity, maxSources) {
+  const query = `${entity.canonical_name} (${entity.entity_type})`;
+  const embedding = await embedQuery(env, query);
+  if (!embedding) return [];
+  const rows = await sb.rpc("match_sources", {
+    query_embedding: embedding,
+    match_threshold: 0.35,
+    match_count: Math.max(1, maxSources || 10),
+    filter: {},
+  });
+  return (rows || []).map((r) => ({
+    id: r.id,
+    url: r.url ?? null,
+    title: r.title ?? "",
+    content: r.content ?? "",
+    content_type: r.content_type ?? null,
+    notebook: r.notebook ?? null,
+    research_key: r.research_key ?? null,
+    similarity: r.similarity,
+  }));
+}
+
 // ---------------------------------------------------------------
 // LLM synthesis (provider-agnostic Chat Completions)
 // ---------------------------------------------------------------
 
-function buildSynthesisInput(entity, linked, semantic, nameMap, maxLinked, maxSemantic) {
+function buildSynthesisInput(entity, linked, semantic, sources, nameMap, maxLinked, maxSemantic, maxSources) {
   // Prepare snippets: truncate long content, cap counts, prefer typed mentions.
   const linkedSnippets = (linked || []).slice(0, maxLinked).map((t) => ({
     id: t.id,
@@ -439,15 +474,28 @@ function buildSynthesisInput(entity, linked, semantic, nameMap, maxLinked, maxSe
     typedByRelation[rel] = typedByRelation[rel].slice(0, 12);
   }
 
+  // External source documents (req 2). Each keeps id + url so the model
+  // can attribute claims and the page can record provenance (req 14).
+  const sourceSnippets = (sources || []).slice(0, maxSources).map((s) => ({
+    id: s.id,
+    url: s.url,
+    title: String(s.title || "").slice(0, 200),
+    content_type: s.content_type,
+    notebook: s.notebook,
+    content: String(s.content || "").slice(0, 600),
+  }));
+
   return {
     entity: `${entity.canonical_name} (${entity.entity_type})`,
     entity_metadata: entity.metadata || {},
     typed_edges_by_relation: typedByRelation,
     linked_thoughts: linkedSnippets,
     semantic_matches: semanticSnippets,
+    source_documents: sourceSnippets,
     provenance: {
       linked_ids: linkedSnippets.map((l) => l.id),
       semantic_ids: semanticSnippets.map((s) => s.id),
+      source_ids: sourceSnippets.map((s) => s.id),
     },
   };
 }
@@ -457,9 +505,21 @@ The subject is a single entity (person, project, topic, organization, tool, or p
 Output well-structured markdown with these sections in order:
 # {Entity Name}, ## Summary (2-3 sentences), ## Key Facts (bulleted),
 ## Timeline (chronological, most recent first, max 8 items),
-## Relationships, ## Open Questions (3-5 genuine gaps).
+## Relationships, ## Sources, ## Open Questions (3-5 genuine gaps).
 
-Ground every claim in the input snippets. Cite thought ids in square brackets like [#id].
+Ground every claim in the input snippets. Cite thought ids in square
+brackets like [#id]. Two evidence kinds appear in the INPUT block:
+- <thought> snippets: the user's own captured records. Cite as [#id].
+- <source> snippets: EXTERNAL reference documents (research output,
+  ingested web pages / papers). Cite as [S:id]. These are background
+  reference, NOT the user's own assertions — attribute accordingly
+  (e.g. "According to [S:id], …") and never state an external claim as
+  the user's own.
+
+For the ## Sources section: list every <source> you actually cited, one
+bullet each, as \`- [S:id] {title} — {url}\` (omit the url if absent).
+This is the provenance trail — include only sources you drew a claim
+from; omit the section entirely if no sources were cited.
 Skip sections with no material rather than filling with generic text.
 
 For the Relationships section specifically:
@@ -489,9 +549,10 @@ function scrubSnippetContent(raw) {
   return String(raw)
     // Remove control chars except tab/newline/CR.
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    // Neutralize literal <thought ...> / </thought> so a malicious snippet
-    // cannot close the outer fence and inject sibling tags.
-    .replace(/<\s*\/?\s*thought\b[^>]*>/gi, "[thought-tag-redacted]")
+    // Neutralize literal <thought ...> / </thought> and <source ...> /
+    // </source> so a malicious snippet cannot close the outer fence and
+    // inject sibling tags.
+    .replace(/<\s*\/?\s*(thought|source)\b[^>]*>/gi, "[$1-tag-redacted]")
     // Flag common injection phrases in-place (visible in output, not silent).
     .replace(/ignore\s+(all\s+)?previous\s+instructions?/gi, "[redacted injection attempt]")
     .replace(/disregard\s+(the\s+)?above/gi, "[redacted injection attempt]")
@@ -512,6 +573,17 @@ function fenceSnippets(payload) {
   for (const s of payload.semantic_matches || []) {
     fenced.push(
       `<thought id="${s.id}" kind="semantic" date="${s.date}" type="${s.type ?? ""}">\n${scrubSnippetContent(s.content)}\n</thought>`,
+    );
+  }
+  // Source documents are arbitrary external web/PDF/research text — at
+  // least as untrusted as thoughts. Scrub + fence the body; title/url are
+  // also scrubbed since they come from external pages too.
+  for (const s of payload.source_documents || []) {
+    fenced.push(
+      `<source id="${s.id}" kind="source" type="${s.content_type ?? ""}" ` +
+        `url="${scrubSnippetContent(s.url ?? "")}" ` +
+        `title="${scrubSnippetContent(s.title ?? "")}">\n` +
+        `${scrubSnippetContent(s.content)}\n</source>`,
     );
   }
   return fenced.join("\n\n");
@@ -539,6 +611,16 @@ async function synthesize(env, model, payload) {
     entity: payload.entity,
     entity_metadata: payload.entity_metadata,
     typed_edges_by_relation: payload.typed_edges_by_relation,
+    // Source identity (id/url/title/type) for the ## Sources provenance
+    // list. Bodies stay in the fenced untrusted block; the system-prompt
+    // boundary already treats JSON string fields as data only.
+    source_documents: (payload.source_documents || []).map((s) => ({
+      id: s.id,
+      url: s.url,
+      title: s.title,
+      content_type: s.content_type,
+      notebook: s.notebook,
+    })),
     provenance: payload.provenance,
   };
   const userContent =
@@ -579,7 +661,7 @@ function slugify(name, entityType) {
   return `${entityType}-${base}`;
 }
 
-function buildFrontmatter(entity, sourceCounts, provenance) {
+function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance) {
   const lines = [
     "---",
     `title: ${JSON.stringify(`${entity.canonical_name} Wiki`)}`,
@@ -590,7 +672,11 @@ function buildFrontmatter(entity, sourceCounts, provenance) {
     `generated_at: ${new Date().toISOString()}`,
     `linked_thought_count: ${sourceCounts.linked}`,
     `semantic_match_count: ${sourceCounts.semantic}`,
+    `source_doc_count: ${sourceCounts.sources ?? 0}`,
     `derived_from_ids: ${JSON.stringify(provenance)}`,
+    // Source-row provenance (req 14): every source-derived claim traces
+    // back to these `sources` rows.
+    `source_doc_ids: ${JSON.stringify(sourceProvenance || [])}`,
     "tags: [wiki, generated]",
     "---",
     "",
@@ -641,15 +727,19 @@ function resolveOutputPath(outDir, baseSlug, entity) {
   );
 }
 
-function writeFile(wiki, entity, sourceCounts, provenance, outDir) {
+function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir) {
   fs.mkdirSync(outDir, { recursive: true });
   const baseSlug = slugify(entity.canonical_name, entity.entity_type);
   const filepath = resolveOutputPath(outDir, baseSlug, entity);
-  fs.writeFileSync(filepath, buildFrontmatter(entity, sourceCounts, provenance) + wiki + "\n", "utf8");
+  fs.writeFileSync(
+    filepath,
+    buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance) + wiki + "\n",
+    "utf8",
+  );
   return filepath;
 }
 
-async function writeEntityMetadata(sb, entity, wiki, sourceCounts, provenance) {
+async function writeEntityMetadata(sb, entity, wiki, sourceCounts, provenance, sourceProvenance) {
   const patch = {
     metadata: {
       ...(entity.metadata || {}),
@@ -658,7 +748,9 @@ async function writeEntityMetadata(sb, entity, wiki, sourceCounts, provenance) {
         generated_at: new Date().toISOString(),
         linked_thought_count: sourceCounts.linked,
         semantic_match_count: sourceCounts.semantic,
+        source_doc_count: sourceCounts.sources ?? 0,
         derived_from: provenance,
+        source_doc_ids: sourceProvenance || [],
       },
     },
   };
@@ -666,7 +758,7 @@ async function writeEntityMetadata(sb, entity, wiki, sourceCounts, provenance) {
   return Array.isArray(updated) ? updated[0] : updated;
 }
 
-async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenance) {
+async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenance, sourceProvenance) {
   // Trade-off: storing the wiki as a thought pollutes semantic search.
   // Mitigations applied here:
   //   - metadata.type = 'dossier' and metadata.generated_by tag so readers
@@ -685,7 +777,8 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
   const content =
     `# Dossier: ${entity.canonical_name} (${entity.entity_type})\n\n` +
     `Synthesized from ` +
-    `${sourceCounts.linked} linked thoughts + ${sourceCounts.semantic} semantic matches.\n\n` +
+    `${sourceCounts.linked} linked thoughts + ${sourceCounts.semantic} semantic matches` +
+    `${sourceCounts.sources ? ` + ${sourceCounts.sources} source documents` : ""}.\n\n` +
     wiki;
   const metadata = {
     type: "dossier",
@@ -699,6 +792,7 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
     wiki_slug: slug,
     source_thought_counts: sourceCounts,
     derived_from: provenance,
+    source_doc_ids: sourceProvenance || [],
     // Hint for search filters — users can exclude metadata.type = 'dossier'
     // from their default search view.
     exclude_from_default_search: true,
@@ -796,14 +890,31 @@ async function generateForEntity(sb, env, entity, args) {
     }
   }
 
+  // 4. External source documents (opt-in — req 2). Failure is non-fatal:
+  // the page still builds from thoughts/edges.
+  let sources = [];
+  if (args.includeSources) {
+    try {
+      sources = await semanticExpandSources(sb, env, entity, args.maxSources);
+    } catch (err) {
+      console.error(`[wiki] source expand failed for #${entity.id}: ${err.message}`);
+    }
+  }
+
   console.log(
     `[wiki] #${entity.id} ${entity.canonical_name} (${entity.entity_type}): ` +
       `${linked.length} linked, ${eOut.length + eIn.length} typed edges, ` +
-      `${semantic.length} semantic`,
+      `${semantic.length} semantic, ${sources.length} sources`,
   );
 
   // Bail early if there is truly nothing to write about.
-  if (linked.length === 0 && eOut.length === 0 && eIn.length === 0 && semantic.length === 0) {
+  if (
+    linked.length === 0 &&
+    eOut.length === 0 &&
+    eIn.length === 0 &&
+    semantic.length === 0 &&
+    sources.length === 0
+  ) {
     console.log(`[wiki] skip #${entity.id} — no evidence`);
     return { skipped: true };
   }
@@ -812,14 +923,24 @@ async function generateForEntity(sb, env, entity, args) {
     entity,
     linked,
     semantic,
+    sources,
     nameMap,
     args.maxLinked,
     args.maxSemantic,
+    args.maxSources,
   );
   const model = args.model || env.LLM_MODEL || "anthropic/claude-haiku-4-5";
   const wiki = await synthesize(env, model, payload);
-  const sourceCounts = { linked: linked.length, semantic: semantic.length };
-  const provenance = [...payload.provenance.linked_ids, ...payload.provenance.semantic_ids];
+  const sourceCounts = {
+    linked: linked.length,
+    semantic: semantic.length,
+    sources: payload.source_documents.length,
+  };
+  const provenance = [
+    ...payload.provenance.linked_ids,
+    ...payload.provenance.semantic_ids,
+  ];
+  const sourceProvenance = payload.provenance.source_ids;
 
   if (args.dryRun) {
     console.log("───── WIKI ─────");
@@ -830,17 +951,17 @@ async function generateForEntity(sb, env, entity, args) {
 
   if (args.outputMode === "file") {
     const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
-    const filepath = writeFile(wiki, entity, sourceCounts, provenance, outDir);
+    const filepath = writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir);
     console.log(`[wiki] wrote file: ${filepath}`);
     return { filepath };
   }
   if (args.outputMode === "entity-metadata") {
-    await writeEntityMetadata(sb, entity, wiki, sourceCounts, provenance);
+    await writeEntityMetadata(sb, entity, wiki, sourceCounts, provenance, sourceProvenance);
     console.log(`[wiki] wrote entities.metadata.wiki_page for #${entity.id}`);
     return { entity_metadata: true };
   }
   if (args.outputMode === "thought") {
-    const thoughtId = await writeDossierThought(sb, env, entity, wiki, sourceCounts, provenance);
+    const thoughtId = await writeDossierThought(sb, env, entity, wiki, sourceCounts, provenance, sourceProvenance);
     console.log(`[wiki] wrote dossier thought id=${thoughtId}`);
     return { thought_id: thoughtId };
   }
@@ -893,12 +1014,14 @@ async function main() {
   // only needs the dimension check (it writes embeddings, doesn't query them),
   // so skip the match_thoughts-RPC signature probe unless --semantic-expand
   // is on. Users without match_thoughts can still use --output-mode=thought.
-  if (args.semanticExpand || args.outputMode === "thought") {
+  if (args.semanticExpand || args.includeSources || args.outputMode === "thought") {
     try {
       await preflightEmbeddingDim(sb, env, _DEFAULT_EMBED_DIM, args.semanticExpand);
     } catch (err) {
       const label = args.semanticExpand
         ? "--semantic-expand"
+        : args.includeSources
+        ? "--include-sources"
         : "--output-mode=thought";
       console.error(`[wiki] ${label} preflight failed: ${err.message}`);
       process.exit(1);
