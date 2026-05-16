@@ -325,7 +325,11 @@ async function embedQuery(env, text) {
 // match_thoughts-signature probe, which is only needed for --semantic-expand;
 // thought-mode only writes embeddings, it doesn't query them.
 let _embedDimCache = null;
-async function preflightEmbeddingDim(sb, env, expected = 1536, checkMatchRpc = true) {
+// Default expected dim is env-driven: EMBEDDING_DIMENSION (ai-stack
+// bge-m3 = 1024) overrides the stock 1536. Callers may still pass an
+// explicit `expected` which wins over the env default.
+const _DEFAULT_EMBED_DIM = Number(process.env.EMBEDDING_DIMENSION || "1536");
+async function preflightEmbeddingDim(sb, env, expected = _DEFAULT_EMBED_DIM, checkMatchRpc = true) {
   if (_embedDimCache !== null) return _embedDimCache;
   const probe = await embedQuery(env, "dimension check");
   _embedDimCache = Array.isArray(probe) ? probe.length : 0;
@@ -891,7 +895,7 @@ async function main() {
   // is on. Users without match_thoughts can still use --output-mode=thought.
   if (args.semanticExpand || args.outputMode === "thought") {
     try {
-      await preflightEmbeddingDim(sb, env, 1536, args.semanticExpand);
+      await preflightEmbeddingDim(sb, env, _DEFAULT_EMBED_DIM, args.semanticExpand);
     } catch (err) {
       const label = args.semanticExpand
         ? "--semantic-expand"

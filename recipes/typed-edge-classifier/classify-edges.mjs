@@ -240,8 +240,15 @@ function printHelp() {
 
 function loadEnv() {
   const env = process.env;
+  const localChat = !!env.CHAT_API_BASE;
+  // ANTHROPIC_API_KEY is only required for the cloud path. When
+  // CHAT_API_BASE is set we run against a local OpenAI-compatible
+  // endpoint (ai-stack llama-cpp / qwen36-27b:nothink) and need no key.
+  const required = localChat
+    ? ["OPEN_BRAIN_URL", "OPEN_BRAIN_SERVICE_KEY"]
+    : ["OPEN_BRAIN_URL", "OPEN_BRAIN_SERVICE_KEY", "ANTHROPIC_API_KEY"];
   const missing = [];
-  for (const k of ["OPEN_BRAIN_URL", "OPEN_BRAIN_SERVICE_KEY", "ANTHROPIC_API_KEY"]) {
+  for (const k of required) {
     if (!env[k]) missing.push(k);
   }
   if (missing.length > 0) {
@@ -255,7 +262,28 @@ function loadEnv() {
     OPEN_BRAIN_URL: base,
     OPEN_BRAIN_SERVICE_KEY: env.OPEN_BRAIN_SERVICE_KEY,
     ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+    CHAT_API_BASE: localChat ? String(env.CHAT_API_BASE).replace(/\/+$/, "") : "",
+    CHAT_API_KEY: env.CHAT_API_KEY || "not-needed",
+    CHAT_MODEL: env.CHAT_MODEL || "qwen36-27b:nothink",
   };
+}
+
+/**
+ * When CHAT_API_BASE is set, run entirely against a local
+ * OpenAI-compatible endpoint. Local inference is free, so collapse to a
+ * single model, register zero pricing (keeps the --max-cost-usd gate
+ * satisfied rather than refusing on unknown pricing), and skip the
+ * Haiku→Opus tier (no benefit when both legs hit the same local model).
+ */
+function applyLocalChatOverride(args) {
+  const base = process.env.CHAT_API_BASE;
+  if (!base) return;
+  const model = process.env.CHAT_MODEL || "qwen36-27b:nothink";
+  args.hybrid = false;
+  args.singleModel = model;
+  args.filterModel = model;
+  args.classifyModel = model;
+  PRICING[model] = { in: 0, out: 0 };
 }
 
 // ── Supabase REST client ───────────────────────────────────────────────────
@@ -423,7 +451,47 @@ function backoffDelayMs(attempt) {
   return Math.floor(jitter);
 }
 
+/** Local OpenAI-compatible chat call (ai-stack llama-cpp). Mirrors the
+ * Anthropic call's return contract: { raw, inTokens, outTokens } with the
+ * same retryable-status semantics. */
+async function callLocalChatOnce(env, model, system, userMsg, maxTokens) {
+  const res = await fetch(`${env.CHAT_API_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.CHAT_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      temperature: 0.1,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: userMsg },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    const err = new Error(`Local chat ${model}: ${res.status} ${body.slice(0, 400)}`);
+    err.status = res.status;
+    err.retryable = shouldRetryAnthropicStatus(res.status);
+    throw err;
+  }
+  const body = await res.json();
+  const raw = body?.choices?.[0]?.message?.content?.trim() ?? "";
+  const usage = body?.usage || {};
+  return {
+    raw,
+    inTokens: usage.prompt_tokens || 0,
+    outTokens: usage.completion_tokens || 0,
+  };
+}
+
 async function callAnthropicOnce(env, model, system, userMsg, maxTokens) {
+  if (env.CHAT_API_BASE) {
+    return callLocalChatOnce(env, model, system, userMsg, maxTokens);
+  }
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -845,6 +913,11 @@ async function processInChunks(items, fn, parallelism, costState, maxCostUsd, wo
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+
+  // Repoint to a local OpenAI-compatible endpoint when CHAT_API_BASE is
+  // set (must run before assertPricingKnown so the local model's zero
+  // pricing is registered).
+  applyLocalChatOverride(args);
 
   // Preflight: if any model we're about to call has no pricing entry,
   // refuse to run with --max-cost-usd unless --no-cost-cap is set. See

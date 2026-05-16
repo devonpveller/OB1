@@ -5,8 +5,12 @@
 /** OpenAI embedding model via OpenRouter (OB1 standard). */
 export const EMBEDDING_MODEL = "openai/text-embedding-3-small";
 
-/** Dimensionality of the embedding vectors stored in pgvector. */
-export const EMBEDDING_DIMENSION = 1536;
+/** Dimensionality of the embedding vectors stored in pgvector.
+ * Override with EMBEDDING_DIMENSION for local models (ai-stack bge-m3 = 1024);
+ * defaults to 1536 (OpenAI text-embedding-3-small) when unset. */
+export const EMBEDDING_DIMENSION = Number(
+  Deno.env.get("EMBEDDING_DIMENSION") ?? "1536",
+);
 
 /** Maximum content length (chars) before truncation for embedding calls. */
 export const MAX_CONTENT_LENGTH = 8000;

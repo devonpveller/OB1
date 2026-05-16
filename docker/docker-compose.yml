@@ -191,6 +191,46 @@ services:
       - obnet
     restart: unless-stopped
 
+  # Entity-extraction worker (upstream OB1 integration, B.5-patched for
+  # local LLM). Drains entity_extraction_queue (auto-filled by the
+  # thoughts trigger), calls qwen36-27b:nothink for entity/relation
+  # extraction + bge-m3 for embeddings, writes entities/thought_entities/
+  # edges. Talks to the DB via the Caddy /rest/v1 proxy (supabase-js
+  # appends /rest/v1; Caddy strips it → PostgREST). On obnet (reach
+  # openbrain-rest) + llm-net (reach the local models). HTTP-invoked
+  # (loopback 8810) — drain on demand / via a future scheduler.
+  openbrain-entity-worker:
+    build:
+      context: ../integrations/entity-extraction-worker
+      dockerfile: Dockerfile
+    image: openbrain-entity-worker:local
+    container_name: openbrain-entity-worker
+    depends_on:
+      - openbrain-rest
+    environment:
+      # supabase-js → Caddy /rest/v1 proxy → PostgREST (anon=service_role).
+      # PostgREST has no JWT secret, so the key value is not verified;
+      # supabase-js only requires it be non-empty.
+      SUPABASE_URL: http://openbrain-rest
+      SUPABASE_SERVICE_ROLE_KEY: ${MCP_ACCESS_KEY}
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # Local OpenAI-compatible chat (entity/relation extraction).
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      CHAT_API_KEY: not-needed
+      CHAT_MODEL: qwen36-27b:nothink
+      # Local embeddings (bge-m3, 1024-dim).
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSION: "1024"
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8810:8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+
 volumes:
   openbrain-db-data:
 

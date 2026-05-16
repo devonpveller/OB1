@@ -4,7 +4,17 @@
 # Local only; obnet. Keeps the recipe scripts unmodified.
 :80 {
 	handle_path /rest/v1/* {
-		reverse_proxy openbrain-postgrest:3000
+		# Strip client auth headers. PostgREST runs with no JWT secret
+		# (db-anon-role = service_role, app-layer single-user trust). Any
+		# inbound `Authorization: Bearer <key>` — sent unconditionally by
+		# supabase-js and the recipe sbClient — triggers PGRST300
+		# "Server lacks JWT secret". Removing it lets every caller fall
+		# through to the anon=service_role identity. `apikey` is a
+		# Supabase/Kong convention PostgREST ignores; drop it too.
+		reverse_proxy openbrain-postgrest:3000 {
+			header_up -Authorization
+			header_up -apikey
+		}
 	}
 	respond /healthz 200
 	respond "open-brain REST proxy" 200

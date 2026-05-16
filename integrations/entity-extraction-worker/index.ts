@@ -37,6 +37,13 @@ const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") ?? "";
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 
+// Local OpenAI-compatible chat endpoint (ai-stack llama-cpp /
+// qwen36-27b:nothink). When CHAT_API_BASE is set it takes priority over
+// the cloud providers; unset = upstream behaviour unchanged.
+const CHAT_API_BASE = (Deno.env.get("CHAT_API_BASE") ?? "").replace(/\/+$/, "");
+const CHAT_API_KEY = Deno.env.get("CHAT_API_KEY") ?? "not-needed";
+const CHAT_MODEL = Deno.env.get("CHAT_MODEL") ?? "qwen36-27b:nothink";
+
 const WORKER_VERSION = "entity-extraction-worker-v1";
 const MAX_ATTEMPTS = 5;
 
@@ -295,6 +302,22 @@ async function extractEntities(content: string): Promise<ExtractionResult> {
   // Wrap untrusted thought content in <thought_content> tags; escape any
   // literal occurrences of the tags so an adversarial thought can't break out.
   const prompt = ENTITY_EXTRACTION_PROMPT.replace("{content}", wrapThoughtContent(content));
+
+  // Local OpenAI-compatible endpoint (highest priority when configured)
+  if (CHAT_API_BASE) {
+    const response = await fetchWithTimeout(`${CHAT_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${CHAT_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: CHAT_MODEL,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!response.ok) throw new Error(`Local chat failed (${response.status}): ${await response.text()}`);
+    return parseExtractionResult(readChatCompletionText(await response.json()));
+  }
 
   // OpenRouter (primary)
   if (OPENROUTER_API_KEY) {
@@ -563,8 +586,8 @@ Deno.serve(async (req) => {
     return json({ error: "Unauthorized" }, 401);
   }
 
-  if (!OPENROUTER_API_KEY && !OPENAI_API_KEY && !ANTHROPIC_API_KEY) {
-    return json({ error: "No LLM API key configured" }, 503);
+  if (!CHAT_API_BASE && !OPENROUTER_API_KEY && !OPENAI_API_KEY && !ANTHROPIC_API_KEY) {
+    return json({ error: "No LLM endpoint configured (set CHAT_API_BASE or a cloud API key)" }, 503);
   }
 
   const url = new URL(req.url);

@@ -95,6 +95,35 @@ export function safeEmbedding(emb: number[] | null | undefined): number[] | unde
  * OB1 adaptation: OpenRouter is tried first (reversed from ExoCortex).
  */
 export async function embedText(text: string): Promise<number[]> {
+  // Highest priority: local OpenAI-compatible embeddings endpoint
+  // (ai-stack llama-cpp-embed / bge-m3). Set EMBEDDING_API_BASE to enable;
+  // when unset, behaviour falls through to the upstream cloud providers
+  // unchanged (non-breaking).
+  const embedBase = (Deno.env.get("EMBEDDING_API_BASE") ?? "").replace(/\/+$/, "");
+  if (embedBase) {
+    const embedKey = Deno.env.get("EMBEDDING_API_KEY") ?? "not-needed";
+    const embedModel = Deno.env.get("EMBEDDING_MODEL") ?? "bge-m3";
+    const response = await fetch(`${embedBase}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${embedKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: embedModel, input: text }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Local embedding failed (${response.status}): ${await response.text()}`);
+    }
+
+    const payload = await response.json();
+    const embedding = payload?.data?.[0]?.embedding;
+    if (!Array.isArray(embedding) || embedding.length === 0) {
+      throw new Error("Local embedding response missing vector data");
+    }
+    return embedding as number[];
+  }
+
   const openRouterKey = Deno.env.get("OPENROUTER_API_KEY") ?? "";
   const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
   const openRouterModel = Deno.env.get("OPENROUTER_EMBEDDING_MODEL") ?? "openai/text-embedding-3-small";
@@ -151,15 +180,49 @@ export async function embedText(text: string): Promise<number[]> {
 
 // ── Metadata extraction ────────────────────────────────────────────────────
 
-type MetadataProvider = "openrouter" | "openai" | "anthropic";
+type MetadataProvider = "local" | "openrouter" | "openai" | "anthropic";
 
-/** Read env and return configured providers in OB1 priority order (openrouter first). */
+/** Read env and return configured providers in OB1 priority order.
+ * `local` (OpenAI-compatible CHAT_API_BASE, e.g. ai-stack llama-cpp /
+ * qwen36-27b:nothink) wins when set; otherwise the upstream cloud order
+ * (openrouter > openai > anthropic) is unchanged. */
 function getConfiguredMetadataProviders(): MetadataProvider[] {
   const providers: MetadataProvider[] = [];
+  if (Deno.env.get("CHAT_API_BASE")) providers.push("local");
   if (Deno.env.get("OPENROUTER_API_KEY")) providers.push("openrouter");
   if (Deno.env.get("OPENAI_API_KEY")) providers.push("openai");
   if (Deno.env.get("ANTHROPIC_API_KEY")) providers.push("anthropic");
   return providers;
+}
+
+/** Fetch metadata from a local OpenAI-compatible chat completions endpoint. */
+async function fetchLocalMetadata(text: string): Promise<string> {
+  const base = (Deno.env.get("CHAT_API_BASE") ?? "").replace(/\/+$/, "");
+  if (!base) throw new Error("CHAT_API_BASE is not configured");
+
+  const apiKey = Deno.env.get("CHAT_API_KEY") ?? "not-needed";
+  const model = Deno.env.get("CHAT_MODEL") ?? "qwen36-27b:nothink";
+  const response = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      messages: [
+        { role: "system", content: `${EXTRACTION_PROMPT}\nReturn only the JSON object.` },
+        { role: "user", content: text },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Local classification failed (${response.status}): ${await response.text()}`);
+  }
+
+  return readChatCompletionText(await response.json());
 }
 
 /** Fetch metadata from OpenRouter chat completions endpoint. */
@@ -317,7 +380,9 @@ export async function extractMetadata(
   }
 
   const fetchProvider = (p: MetadataProvider) =>
-    p === "openrouter"
+    p === "local"
+      ? fetchLocalMetadata(text)
+      : p === "openrouter"
       ? fetchOpenRouterMetadata(text)
       : p === "openai"
       ? fetchOpenAIMetadata(text)
