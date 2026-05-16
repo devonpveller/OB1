@@ -734,9 +734,135 @@ server.registerTool(
   },
 );
 
-// --- Hono App with Auth Check ---
+// --- Research persistence REST API (deep_research -> open-brain) ---
+//
+// deep_research_tool.py (running in Open WebUI) calls these instead of
+// misusing mnemory. open-brain returns full structured rows, so the old
+// ⟦EV:research⟧ header / label / artifact workarounds are gone — volatility
+// and staleness are real columns on `sources`.
 
 const app = new Hono();
+
+function researchAuthed(c: { req: { header: (k: string) => string | undefined; url: string } }): boolean {
+  const provided = c.req.header("x-brain-key") ||
+    new URL(c.req.url).searchParams.get("key");
+  return !!provided && provided === MCP_ACCESS_KEY;
+}
+
+// GET /research/lookup?key=<research_key> — current synthesis row + staleness.
+app.get("/research/lookup", async (c) => {
+  if (!researchAuthed(c)) return c.json({ error: "unauthorized" }, 401);
+  const key = c.req.query("key");
+  if (!key) return c.json({ found: false });
+  const client = await pool.connect();
+  try {
+    const r = await client.queryObject<{
+      id: string; content: string; researched_on: string | null;
+      volatility: string | null; revalidate_days: number | null;
+      run_kind: string | null;
+    }>(
+      `SELECT id, content, researched_on, volatility, revalidate_days, run_kind
+         FROM sources
+        WHERE content_type='research_synthesis' AND research_key=$1
+        LIMIT 1`,
+      [key],
+    );
+    if (r.rows.length === 0) return c.json({ found: false });
+    const row = r.rows[0];
+    let isStale = false, ageDays: number | null = null, dueDate: string | null = null;
+    if (row.researched_on && row.revalidate_days != null) {
+      const ro = new Date(row.researched_on);
+      const due = new Date(ro.getTime() + row.revalidate_days * 86400000);
+      const today = new Date();
+      ageDays = Math.floor((today.getTime() - ro.getTime()) / 86400000);
+      dueDate = due.toISOString().slice(0, 10);
+      isStale = today > due;
+    }
+    return c.json({
+      found: true, id: row.id, claim: row.content,
+      researched_on: row.researched_on, volatility: row.volatility,
+      revalidate_days: row.revalidate_days, run_kind: row.run_kind,
+      is_stale: isStale, age_days: ageDays, due_date: dueDate,
+    });
+  } catch (err) {
+    return c.json({ found: false, error: (err as Error).message }, 500);
+  } finally {
+    client.release();
+  }
+});
+
+// POST /research/persist — supersede-in-place synthesis + its source rows.
+app.post("/research/persist", async (c) => {
+  if (!researchAuthed(c)) return c.json({ error: "unauthorized" }, 401);
+  let body: {
+    research_key?: string; query?: string; claim?: string; kind?: string;
+    volatility?: string; revalidate_days?: number; notebook?: string;
+    sources?: Array<{ url?: string; title?: string; content?: string; summary?: string; domain?: string }>;
+  };
+  try { body = await c.req.json(); } catch { return c.json({ error: "bad json" }, 400); }
+  const key = body.research_key;
+  const claim = (body.claim || "").trim();
+  if (!key || !claim) return c.json({ error: "research_key and claim required" }, 400);
+
+  const client = await pool.connect();
+  try {
+    const claimEmb = `[${(await getEmbedding(claim.slice(0, 1600))).join(",")}]`;
+    // Supersede the synthesis row in place (unique partial index on research_key).
+    const synth = await client.queryObject<{ id: string }>(
+      `INSERT INTO sources
+         (url, title, content, content_type, notebook, research_key,
+          research_query, run_kind, volatility, revalidate_days,
+          researched_on, fetched_at, embedding, metadata)
+       VALUES (NULL, $1, $2, 'research_synthesis', $3, $4, $5, $6, $7, $8,
+               CURRENT_DATE, now(), $9::vector, $10::jsonb)
+       ON CONFLICT (research_key) WHERE content_type='research_synthesis'
+       DO UPDATE SET content=EXCLUDED.content, notebook=EXCLUDED.notebook,
+         research_query=EXCLUDED.research_query, run_kind=EXCLUDED.run_kind,
+         volatility=EXCLUDED.volatility, revalidate_days=EXCLUDED.revalidate_days,
+         researched_on=CURRENT_DATE, fetched_at=now(),
+         embedding=EXCLUDED.embedding, updated_at=now()
+       RETURNING id`,
+      [
+        (body.query || "research").slice(0, 200), claim, body.notebook ?? null,
+        key, body.query ?? null, body.kind ?? null,
+        body.volatility ?? null, body.revalidate_days ?? null,
+        claimEmb, JSON.stringify({ source: "deep-research" }),
+      ],
+    );
+    // Replace the per-source rows for this research_key.
+    await client.queryObject(
+      `DELETE FROM sources WHERE research_key=$1 AND content_type<>'research_synthesis'`,
+      [key],
+    );
+    let written = 0;
+    for (const s of (body.sources || [])) {
+      const url = (s.url || "").trim();
+      const content = (s.content || s.summary || "").trim();
+      if (!url && !content) continue;
+      const title = (s.title || s.domain || url || "source").slice(0, 300);
+      const emb = `[${(await getEmbedding(`${title}\n\n${content}`.slice(0, 1600))).join(",")}]`;
+      await client.queryObject(
+        `INSERT INTO sources
+           (url, title, content, content_type, notebook, domain,
+            research_key, research_query, fetched_at, embedding, metadata)
+         VALUES ($1,$2,$3,'web_article',$4,$5,$6,$7, now(), $8::vector, $9::jsonb)`,
+        [
+          url || null, title, content, body.notebook ?? null,
+          s.domain ?? null, key, body.query ?? null, emb,
+          JSON.stringify({ source: "deep-research-source" }),
+        ],
+      );
+      written++;
+    }
+    return c.json({ synthesis_id: synth.rows[0]?.id, sources_written: written });
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500);
+  } finally {
+    client.release();
+  }
+});
+
+// --- MCP catch-all with Auth Check ---
 
 app.all("*", async (c) => {
   const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
