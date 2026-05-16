@@ -1,0 +1,11 @@
+# Maps the Supabase REST convention the wiki-compiler scripts expect
+# (`${OPEN_BRAIN_URL}/rest/v1/<table>` and `/rest/v1/rpc/<fn>`) onto
+# raw PostgREST (which serves `/<table>` and `/rpc/<fn>` at root).
+# Local only; obnet. Keeps the recipe scripts unmodified.
+:80 {
+	handle_path /rest/v1/* {
+		reverse_proxy openbrain-postgrest:3000
+	}
+	respond /healthz 200
+	respond "open-brain REST proxy" 200
+}

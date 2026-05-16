@@ -24,6 +24,7 @@ services:
       - ./init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro
       - ./init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro
       - ./init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro
+      - ./init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro
     networks:
       - obnet
     restart: unless-stopped
@@ -151,6 +152,44 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  # PostgREST over openbrain-db — the API surface the wiki-compiler
+  # scripts expect (they were written for Supabase /rest/v1). Local
+  # only: loopback host port + obnet. anon-role = service_role (single
+  # user, same app-layer-trust posture as the MCP server as superuser).
+  openbrain-postgrest:
+    image: postgrest/postgrest:v12.2.3
+    container_name: openbrain-postgrest
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD}@openbrain-db:5432/openbrain
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: service_role
+      PGRST_DB_POOL: "10"
+      PGRST_SERVER_PORT: "3000"
+    networks:
+      - obnet
+    restart: unless-stopped
+
+  # Path-stripping proxy: exposes the Supabase `/rest/v1/*` convention
+  # the wiki-compiler scripts expect, onto root-served PostgREST. This
+  # is what the recipe scripts point OPEN_BRAIN_URL at — keeping them
+  # unmodified. Loopback host port for host-run compiles; obnet name
+  # for in-container scheduled compiles.
+  openbrain-rest:
+    image: caddy:2-alpine
+    container_name: openbrain-rest
+    depends_on:
+      - openbrain-postgrest
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "127.0.0.1:3001:80"
+    networks:
+      - obnet
+    restart: unless-stopped
 
 volumes:
   openbrain-db-data:
