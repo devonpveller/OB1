@@ -75,6 +75,8 @@ function parseArgs(argv) {
     maxLinked: 25,
     maxSemantic: 15,
     maxSources: 10,
+    graph: true,
+    graphLimit: 5000,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -106,6 +108,9 @@ function parseArgs(argv) {
     else if (a.startsWith("--max-semantic=")) args.maxSemantic = Number(a.slice(15));
     else if (a === "--max-sources") args.maxSources = Number(next());
     else if (a.startsWith("--max-sources=")) args.maxSources = Number(a.slice(14));
+    else if (a === "--no-graph") args.graph = false;
+    else if (a === "--graph-limit") args.graphLimit = Number(next());
+    else if (a.startsWith("--graph-limit=")) args.graphLimit = Number(a.slice(14));
     else if (a === "--help" || a === "-h") {
       args.help = true;
     }
@@ -137,6 +142,8 @@ function printUsage() {
       "  --include-sources             Pull related external source documents from the",
       "                                `sources` table via match_sources (requires EMBEDDING_* env).",
       "  --max-sources <N>             Max source documents sent to model (default: 10).",
+      "  --no-graph                    Skip writing graph.json (file mode only; default: write it).",
+      "  --graph-limit <N>             Max nodes/edges in graph.json (default: 5000).",
       "  --batch-min-linked <N>        Batch threshold (default: 3).",
       "  --batch-limit <N>             Max entities processed per batch run (default: 25).",
       "  --dry-run                     Print wiki to stdout, skip writes.",
@@ -451,11 +458,16 @@ function buildSynthesisInput(entity, linked, semantic, sources, nameMap, maxLink
   function describe(edge, dir) {
     const otherId = dir === "out" ? edge.to_entity_id : edge.from_entity_id;
     const other = nameMap.get(otherId) || { name: `#${otherId}`, type: "unknown" };
+    // Stable Obsidian link target = the related entity's page slug (req 6,
+    // req 8). null when the entity is unresolved (no page to link to).
+    const other_slug =
+      other.type && other.type !== "unknown" ? slugify(other.name, other.type) : null;
     return {
       relation: edge.relation,
       direction: dir,
       other_name: other.name,
       other_type: other.type,
+      other_slug,
       support: edge.support_count,
       confidence: edge.confidence,
     };
@@ -526,6 +538,10 @@ For the Relationships section specifically:
 organize connections by relation type using \`### {relation_type}\` subheadings
 (e.g. ### supports, ### depends_on, ### member_of, ### works_on).
 Under each subheading, list entities with support counts.
+Render each related entity as an Obsidian wikilink using the edge's
+\`other_slug\` and \`other_name\`: \`[[other_slug|other_name]]\` (e.g.
+\`[[tool-postgresql|PostgreSQL]]\`). If \`other_slug\` is null, write the
+plain name with no link. Do not invent slugs; use only the provided value.
 Order subheadings by total count desc.
 If typed_edges_by_relation is empty, omit the Relationships section entirely.
 Do not render a co-mention subsection; co_occurs_with edges are excluded upstream.
@@ -661,6 +677,38 @@ function slugify(name, entityType) {
   return `${entityType}-${base}`;
 }
 
+// Deterministic backstop for req 6: ensure related-entity mentions are
+// Obsidian `[[slug|name]]` wikilinks even if the model didn't emit them.
+// Idempotent and conservative: existing `[[...]]`, inline/code fences, and
+// URLs are protected (split out and left untouched); only whole-word,
+// non-URL occurrences in the remaining prose are linked. `related` is the
+// bounded set of THIS page's connected entities, so false positives stay
+// within genuinely-related names.
+function linkifyEntities(markdown, related) {
+  const items = (related || [])
+    .filter((r) => r && r.slug && r.name && String(r.name).length >= 2)
+    .sort((a, b) => String(b.name).length - String(a.name).length);
+  if (items.length === 0) return markdown;
+  // Capturing split → odd indices are the protected delimiters.
+  const protectedRe = /(\[\[[^\]]*\]\]|```[\s\S]*?```|`[^`]*`|https?:\/\/\S+)/g;
+  const parts = String(markdown).split(protectedRe);
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) continue; // protected span — leave as-is
+    let seg = parts[i];
+    for (const { name, slug } of items) {
+      const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // Word-ish boundaries that also exclude '/' so we don't touch
+      // path-like text that slipped past the URL guard.
+      seg = seg.replace(
+        new RegExp(`(?<![\\w/])(${esc})(?![\\w/])`, "g"),
+        `[[${slug}|$1]]`,
+      );
+    }
+    parts[i] = seg;
+  }
+  return parts.join("");
+}
+
 function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance) {
   const lines = [
     "---",
@@ -725,6 +773,54 @@ function resolveOutputPath(outDir, baseSlug, entity) {
     `[wiki] gave up finding a non-colliding path for "${baseSlug}.md" ` +
       `(entity #${entity.id}); too many collisions in ${outDir}.`,
   );
+}
+
+// req 7: emit a graph.json manifest of the whole entity graph alongside
+// the markdown — nodes (entities) + edges (typed relations), with stable
+// slugs/filenames so a viewer (Obsidian graph, Quartz, D3/Cytoscape) can
+// resolve each node to its page. co_occurs_with is excluded as noise
+// (mirrors fetchTypedEdges). Whole-graph artifact, written once per run.
+async function writeGraphManifest(sb, outDir, limit) {
+  const cap = Math.max(1, limit || 5000);
+  const entities =
+    (await sb.get(
+      "entities",
+      `select=id,canonical_name,entity_type&order=id.asc&limit=${cap}`,
+    )) || [];
+  const edges =
+    (await sb.get(
+      "edges",
+      `select=from_entity_id,to_entity_id,relation,support_count,confidence` +
+        `&relation=neq.co_occurs_with&order=support_count.desc.nullslast&limit=${cap}`,
+    )) || [];
+  const nodes = entities.map((e) => {
+    const slug = slugify(e.canonical_name, e.entity_type);
+    return { id: e.id, label: e.canonical_name, type: e.entity_type, slug, file: `${slug}.md` };
+  });
+  const known = new Set(nodes.map((n) => n.id));
+  const links = edges
+    // Drop dangling edges whose endpoints were truncated by the cap so
+    // viewers don't choke on unresolvable node ids.
+    .filter((x) => known.has(x.from_entity_id) && known.has(x.to_entity_id))
+    .map((x) => ({
+      source: x.from_entity_id,
+      target: x.to_entity_id,
+      relation: x.relation,
+      weight: x.support_count ?? 1,
+      confidence: x.confidence ?? null,
+    }));
+  const manifest = {
+    generated_at: new Date().toISOString(),
+    node_count: nodes.length,
+    edge_count: links.length,
+    truncated: entities.length >= cap || edges.length >= cap,
+    nodes,
+    edges: links,
+  };
+  fs.mkdirSync(outDir, { recursive: true });
+  const p = path.join(outDir, "graph.json");
+  fs.writeFileSync(p, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  return { path: p, node_count: nodes.length, edge_count: links.length };
 }
 
 function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir) {
@@ -930,7 +1026,19 @@ async function generateForEntity(sb, env, entity, args) {
     args.maxSources,
   );
   const model = args.model || env.LLM_MODEL || "anthropic/claude-haiku-4-5";
-  const wiki = await synthesize(env, model, payload);
+  const wikiRaw = await synthesize(env, model, payload);
+  // Backstop the model's wikilinks (req 6) against this page's connected
+  // entities. Dedup by slug so a name appearing under multiple relations
+  // is linked once per occurrence consistently.
+  const relatedBySlug = new Map();
+  for (const rel of Object.values(payload.typed_edges_by_relation || {})) {
+    for (const e of rel) {
+      if (e.other_slug && !relatedBySlug.has(e.other_slug)) {
+        relatedBySlug.set(e.other_slug, { name: e.other_name, slug: e.other_slug });
+      }
+    }
+  }
+  const wiki = linkifyEntities(wikiRaw, [...relatedBySlug.values()]);
   const sourceCounts = {
     linked: linked.length,
     semantic: semantic.length,
@@ -1045,6 +1153,15 @@ async function main() {
       }
     }
     console.log(`[wiki] batch done: ${ok} ok, ${failed} failed`);
+    if (args.outputMode === "file" && args.graph) {
+      const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
+      try {
+        const g = await writeGraphManifest(sb, outDir, args.graphLimit);
+        console.log(`[wiki] wrote ${g.path} (${g.node_count} nodes, ${g.edge_count} edges)`);
+      } catch (err) {
+        console.error(`[wiki] graph.json export failed: ${err.message}`);
+      }
+    }
     return;
   }
 
@@ -1058,6 +1175,15 @@ async function main() {
     process.exit(1);
   }
   await generateForEntity(sb, env, entity, args);
+  if (args.outputMode === "file" && args.graph) {
+    const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
+    try {
+      const g = await writeGraphManifest(sb, outDir, args.graphLimit);
+      console.log(`[wiki] wrote ${g.path} (${g.node_count} nodes, ${g.edge_count} edges)`);
+    } catch (err) {
+      console.error(`[wiki] graph.json export failed: ${err.message}`);
+    }
+  }
 }
 
 main().catch((err) => {
