@@ -88,6 +88,11 @@ services:
       DEFAULT_USER_ID: ${DEFAULT_USER_ID}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       PORT: "8000"
+      # Compiled wiki (read-only) for the wiki_* tools (req 13).
+      WIKI_DIR: /wiki/content
+      WIKI_RECOMPILE_URL: http://openbrain-wiki:8000/recompile
+    volumes:
+      - openbrain-wiki-data:/wiki:ro
     ports:
       - "127.0.0.1:8809:8000"
     networks:
@@ -231,8 +236,75 @@ services:
       - llm-net
     restart: unless-stopped
 
+  # Wiki compiler + scheduler + on-demand trigger. Runs the (B.2/B.3-
+  # extended) entity-wiki recipe --batch into the shared wiki volume,
+  # then git-commits (D16: local commits only — no remote, no secrets).
+  # Compiles on boot, every RECOMPILE_INTERVAL_HOURS, and on
+  # POST /recompile (called by the wiki_trigger_recompile MCP tool).
+  # obnet (openbrain-rest) + llm-net (qwen36-27b:nothink / bge-m3).
+  openbrain-wiki:
+    build:
+      context: ./wiki-service
+      dockerfile: Dockerfile
+    image: openbrain-wiki:local
+    container_name: openbrain-wiki
+    depends_on:
+      - openbrain-rest
+    environment:
+      OPEN_BRAIN_URL: http://openbrain-rest
+      OPEN_BRAIN_SERVICE_KEY: local-trust
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      LLM_BASE_URL: http://llama-cpp:8080/v1
+      LLM_API_KEY: not-needed
+      LLM_MODEL: qwen36-27b:nothink
+      EMBEDDING_BASE_URL: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSION: "1024"
+      WIKI_OUT_DIR: /wiki/content
+      WIKI_GIT_DIR: /wiki
+      RECIPE_PATH: /recipes/entity-wiki/generate-wiki.mjs
+      RECOMPILE_INTERVAL_HOURS: "24"
+      COMPILE_ON_BOOT: "true"
+      WIKI_BATCH_MIN_LINKED: "1"
+      WIKI_MAX_SOURCES: "5"
+      # Optional notebook/project scoping (req 10). Empty = whole brain.
+      # Set to a notebook name to compile only in-scope sources + thoughts
+      # (thoughts tagged metadata.notebook=<name>).
+      WIKI_NOTEBOOK: ""
+      PORT: "8000"
+    volumes:
+      - openbrain-wiki-data:/wiki
+      - ../recipes:/recipes:ro
+    ports:
+      - "127.0.0.1:8811:8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+
+  # Read-only Quartz 4 viewer (D15). Renders the compiled markdown +
+  # [[wikilinks]] + graph into a static site, rebuilding on change.
+  # Content is the shared wiki volume (read-only); fully regenerable.
+  openbrain-wiki-viewer:
+    build:
+      context: ./wiki-viewer
+      dockerfile: Dockerfile
+    image: openbrain-wiki-viewer:local
+    container_name: openbrain-wiki-viewer
+    depends_on:
+      - openbrain-wiki
+    volumes:
+      - openbrain-wiki-data:/wiki:ro
+    ports:
+      - "127.0.0.1:8812:8080"
+    networks:
+      - obnet
+    restart: unless-stopped
+
 volumes:
   openbrain-db-data:
+  openbrain-wiki-data:
 
 networks:
   # Normal bridge (user-authorized 2026-05-15): required so the host can

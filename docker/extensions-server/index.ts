@@ -30,6 +30,12 @@ const pool = new Pool({
 const USER_ID = Deno.env.get("DEFAULT_USER_ID")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
+// Compiled wiki (read-only). Markdown pages + graph.json live on a
+// shared volume written by the openbrain-wiki compiler service.
+// WIKI_RECOMPILE_URL is that service's on-demand trigger endpoint.
+const WIKI_DIR = Deno.env.get("WIKI_DIR") || "/wiki/content";
+const WIKI_RECOMPILE_URL = Deno.env.get("WIKI_RECOMPILE_URL") || "";
+
 if (!/^[0-9a-f-]{36}$/i.test(USER_ID)) {
   console.error("DEFAULT_USER_ID is not a valid UUID:", USER_ID);
 }
@@ -1284,6 +1290,218 @@ server.tool(
         job_contact,
         professional_contact,
       });
+    } catch (e) { return fail(e); }
+  },
+);
+
+/* ===========================================================================
+ * Extension 7: Compiled Wiki (read-only) — req 13
+ *
+ * Reads the markdown + graph.json the openbrain-wiki compiler writes to
+ * the shared volume (WIKI_DIR). Slug = filename without `.md`. No DB.
+ * ========================================================================= */
+
+// Minimal YAML-frontmatter reader for the keys generate-wiki.mjs emits
+// (scalars + JSON-array values like derived_from_ids/source_doc_ids).
+function parseFrontmatter(md: string): { fm: Record<string, unknown>; body: string } {
+  const m = md.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { fm: {}, body: md };
+  const fm: Record<string, unknown> = {};
+  for (const line of m[1].split("\n")) {
+    const kv = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+    if (!kv) continue;
+    const key = kv[1];
+    let raw = kv[2].trim();
+    let val: unknown = raw;
+    if ((raw.startsWith("[") && raw.endsWith("]")) ||
+        (raw.startsWith('"') && raw.endsWith('"'))) {
+      try { val = JSON.parse(raw); } catch { val = raw; }
+    } else if (/^-?\d+$/.test(raw)) {
+      val = Number(raw);
+    }
+    fm[key] = val;
+  }
+  return { fm, body: m[2] };
+}
+
+async function listWikiFiles(): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    for await (const e of Deno.readDir(WIKI_DIR)) {
+      if (e.isFile && e.name.endsWith(".md")) out.push(e.name);
+    }
+  } catch (_e) { /* dir not created yet → empty wiki */ }
+  return out.sort();
+}
+
+function slugOf(file: string): string {
+  return file.replace(/\.md$/, "");
+}
+
+async function readGraph(): Promise<{
+  nodes: Array<Record<string, unknown>>;
+  edges: Array<Record<string, unknown>>;
+}> {
+  try {
+    const txt = await Deno.readTextFile(`${WIKI_DIR}/graph.json`);
+    const g = JSON.parse(txt);
+    return { nodes: g.nodes ?? [], edges: g.edges ?? [] };
+  } catch (_e) {
+    return { nodes: [], edges: [] };
+  }
+}
+
+server.tool(
+  "wiki_list_pages",
+  "List compiled wiki pages (slug, title, entity type/name, generation metadata). Optionally filter by entity type.",
+  {
+    entity_type: z.string().optional().describe("Filter by entity_type (e.g. 'person', 'tool', 'project')"),
+    limit: z.number().optional().describe("Max pages to return (default 200)"),
+  },
+  async ({ entity_type, limit }) => {
+    try {
+      const files = await listWikiFiles();
+      const pages: Array<Record<string, unknown>> = [];
+      for (const f of files) {
+        const { fm } = parseFrontmatter(await Deno.readTextFile(`${WIKI_DIR}/${f}`));
+        if (entity_type && fm.entity_type !== entity_type) continue;
+        pages.push({
+          slug: slugOf(f),
+          title: fm.title ?? slugOf(f),
+          entity_name: fm.entity_name ?? null,
+          entity_type: fm.entity_type ?? null,
+          generated_at: fm.generated_at ?? null,
+          linked_thought_count: fm.linked_thought_count ?? 0,
+          source_doc_count: fm.source_doc_count ?? 0,
+        });
+        if (pages.length >= (limit ?? 200)) break;
+      }
+      return ok({ success: true, count: pages.length, pages });
+    } catch (e) { return fail(e); }
+  },
+);
+
+server.tool(
+  "wiki_read_page",
+  "Read one compiled wiki page by slug. Returns markdown body + parsed frontmatter (incl. provenance: derived_from_ids thoughts, source_doc_ids sources).",
+  { slug: z.string().describe("Page slug (filename without .md, e.g. 'tool-postgresql')") },
+  async ({ slug }) => {
+    try {
+      const safe = slug.replace(/[^A-Za-z0-9_-]/g, "");
+      const md = await Deno.readTextFile(`${WIKI_DIR}/${safe}.md`);
+      const { fm, body } = parseFrontmatter(md);
+      return ok({ success: true, slug: safe, frontmatter: fm, markdown: body });
+    } catch (e) { return fail(e); }
+  },
+);
+
+server.tool(
+  "wiki_search",
+  "Full-text search across compiled wiki pages. Returns matching pages with a snippet around the first hit.",
+  {
+    query: z.string().describe("Case-insensitive search term"),
+    limit: z.number().optional().describe("Max matching pages (default 15)"),
+  },
+  async ({ query, limit }) => {
+    try {
+      const needle = query.toLowerCase();
+      const files = await listWikiFiles();
+      const hits: Array<Record<string, unknown>> = [];
+      for (const f of files) {
+        const md = await Deno.readTextFile(`${WIKI_DIR}/${f}`);
+        const idx = md.toLowerCase().indexOf(needle);
+        if (idx === -1) continue;
+        const { fm } = parseFrontmatter(md);
+        const start = Math.max(0, idx - 120);
+        hits.push({
+          slug: slugOf(f),
+          title: fm.title ?? slugOf(f),
+          entity_type: fm.entity_type ?? null,
+          snippet: md.slice(start, idx + 160).replace(/\s+/g, " ").trim(),
+        });
+        if (hits.length >= (limit ?? 15)) break;
+      }
+      return ok({ success: true, count: hits.length, results: hits });
+    } catch (e) { return fail(e); }
+  },
+);
+
+server.tool(
+  "wiki_get_backlinks",
+  "Find compiled pages that link TO the given slug via Obsidian [[wikilinks]] (true backlinks, as the viewer resolves them).",
+  { slug: z.string().describe("Target page slug (filename without .md)") },
+  async ({ slug }) => {
+    try {
+      const safe = slug.replace(/[^A-Za-z0-9_-]/g, "");
+      // Match [[safe]] or [[safe|alias]] — the slug must be the link target.
+      const re = new RegExp(`\\[\\[${safe}(\\||\\]\\])`);
+      const files = await listWikiFiles();
+      const backlinks: Array<Record<string, unknown>> = [];
+      for (const f of files) {
+        if (slugOf(f) === safe) continue;
+        const md = await Deno.readTextFile(`${WIKI_DIR}/${f}`);
+        if (re.test(md)) {
+          const { fm } = parseFrontmatter(md);
+          backlinks.push({ slug: slugOf(f), title: fm.title ?? slugOf(f), entity_type: fm.entity_type ?? null });
+        }
+      }
+      return ok({ success: true, target: safe, count: backlinks.length, backlinks });
+    } catch (e) { return fail(e); }
+  },
+);
+
+server.tool(
+  "wiki_get_related",
+  "Get entities related to the given page slug from the typed graph (graph.json): neighbors with relation type, direction, and weight.",
+  {
+    slug: z.string().describe("Page slug (filename without .md)"),
+    limit: z.number().optional().describe("Max related entities (default 50)"),
+  },
+  async ({ slug, limit }) => {
+    try {
+      const safe = slug.replace(/[^A-Za-z0-9_-]/g, "");
+      const { nodes, edges } = await readGraph();
+      const self = nodes.find((n) => n.slug === safe);
+      if (!self) throw new Error(`No graph node for slug '${safe}' (is graph.json built?)`);
+      const byId = new Map(nodes.map((n) => [n.id, n]));
+      const related: Array<Record<string, unknown>> = [];
+      for (const e of edges) {
+        let other: unknown = null;
+        let dir = "";
+        if (e.source === self.id) { other = byId.get(e.target); dir = "out"; }
+        else if (e.target === self.id) { other = byId.get(e.source); dir = "in"; }
+        else continue;
+        if (!other) continue;
+        const o = other as Record<string, unknown>;
+        related.push({
+          slug: o.slug, label: o.label, type: o.type,
+          relation: e.relation, direction: dir, weight: e.weight ?? 1,
+        });
+        if (related.length >= (limit ?? 50)) break;
+      }
+      return ok({ success: true, slug: safe, count: related.length, related });
+    } catch (e) { return fail(e); }
+  },
+);
+
+server.tool(
+  "wiki_trigger_recompile",
+  "Trigger an on-demand wiki recompile (the scheduled compile still runs independently). Returns the compiler service's response.",
+  {},
+  async () => {
+    try {
+      if (!WIKI_RECOMPILE_URL) {
+        throw new Error("WIKI_RECOMPILE_URL not configured; recompile runs on schedule only.");
+      }
+      const r = await fetch(WIKI_RECOMPILE_URL, {
+        method: "POST",
+        headers: { "x-brain-key": MCP_ACCESS_KEY, "content-type": "application/json" },
+      });
+      const text = await r.text();
+      let parsed: unknown = text;
+      try { parsed = JSON.parse(text); } catch { /* keep text */ }
+      if (!r.ok) throw new Error(`recompile trigger failed (${r.status}): ${text.slice(0, 300)}`);
+      return ok({ success: true, triggered: true, response: parsed });
     } catch (e) { return fail(e); }
   },
 );

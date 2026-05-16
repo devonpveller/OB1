@@ -77,6 +77,7 @@ function parseArgs(argv) {
     maxSources: 10,
     graph: true,
     graphLimit: 5000,
+    notebook: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -111,6 +112,8 @@ function parseArgs(argv) {
     else if (a === "--no-graph") args.graph = false;
     else if (a === "--graph-limit") args.graphLimit = Number(next());
     else if (a.startsWith("--graph-limit=")) args.graphLimit = Number(a.slice(14));
+    else if (a === "--notebook") args.notebook = next();
+    else if (a.startsWith("--notebook=")) args.notebook = a.slice(11);
     else if (a === "--help" || a === "-h") {
       args.help = true;
     }
@@ -144,6 +147,9 @@ function printUsage() {
       "  --max-sources <N>             Max source documents sent to model (default: 10).",
       "  --no-graph                    Skip writing graph.json (file mode only; default: write it).",
       "  --graph-limit <N>             Max nodes/edges in graph.json (default: 5000).",
+      "  --notebook <name>             Scope to a notebook/project: only sources with this",
+      "                                notebook and linked thoughts tagged metadata.notebook=<name>",
+      "                                are used; entities with no in-scope evidence are skipped.",
       "  --batch-min-linked <N>        Batch threshold (default: 3).",
       "  --batch-limit <N>             Max entities processed per batch run (default: 25).",
       "  --dry-run                     Print wiki to stdout, skip writes.",
@@ -247,6 +253,7 @@ async function fetchLinkedThoughts(sb, entityId, limit = 200) {
       content: r.thoughts.content,
       type: r.thoughts.metadata?.type ?? null,
       topics: r.thoughts.metadata?.topics ?? null,
+      notebook: r.thoughts.metadata?.notebook ?? null,
       created_at: r.thoughts.created_at,
       mention_role: r.mention_role,
       link_confidence: r.confidence,
@@ -404,17 +411,23 @@ async function semanticExpand(sb, env, entity) {
 // the `sources` table via the match_sources RPC (init-sources.sql).
 // Returns rows carrying provenance (id + url) so the wiki can link every
 // source-derived claim back to its origin row (req 14).
-async function semanticExpandSources(sb, env, entity, maxSources) {
+async function semanticExpandSources(sb, env, entity, maxSources, notebook) {
   const query = `${entity.canonical_name} (${entity.entity_type})`;
   const embedding = await embedQuery(env, query);
   if (!embedding) return [];
-  const rows = await sb.rpc("match_sources", {
+  // match_sources filters on metadata @> filter, but `notebook` is a
+  // first-class column — over-fetch and post-filter so notebook scoping
+  // (req 10) still returns up to maxSources in-scope rows.
+  const want = Math.max(1, maxSources || 10);
+  let rows = await sb.rpc("match_sources", {
     query_embedding: embedding,
     match_threshold: 0.35,
-    match_count: Math.max(1, maxSources || 10),
+    match_count: notebook ? want * 4 : want,
     filter: {},
   });
-  return (rows || []).map((r) => ({
+  rows = rows || [];
+  if (notebook) rows = rows.filter((r) => r.notebook === notebook).slice(0, want);
+  return rows.map((r) => ({
     id: r.id,
     url: r.url ?? null,
     title: r.title ?? "",
@@ -709,7 +722,7 @@ function linkifyEntities(markdown, related) {
   return parts.join("");
 }
 
-function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance) {
+function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, notebook) {
   const lines = [
     "---",
     `title: ${JSON.stringify(`${entity.canonical_name} Wiki`)}`,
@@ -717,6 +730,7 @@ function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance) {
     `entity_id: ${entity.id}`,
     `entity_name: ${JSON.stringify(entity.canonical_name)}`,
     `entity_type: ${entity.entity_type}`,
+    ...(notebook ? [`notebook: ${JSON.stringify(notebook)}`] : []),
     `generated_at: ${new Date().toISOString()}`,
     `linked_thought_count: ${sourceCounts.linked}`,
     `semantic_match_count: ${sourceCounts.semantic}`,
@@ -820,16 +834,41 @@ async function writeGraphManifest(sb, outDir, limit) {
   fs.mkdirSync(outDir, { recursive: true });
   const p = path.join(outDir, "graph.json");
   fs.writeFileSync(p, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+
+  // index.md home page so the viewer (Quartz) has a root. Groups pages
+  // by entity type with [[wikilinks]]; regenerated every compile.
+  const byType = {};
+  for (const n of nodes) (byType[n.type] ||= []).push(n);
+  const idx = [
+    "---",
+    'title: "Knowledge Wiki"',
+    "tags: [wiki, index]",
+    "---",
+    "",
+    "# Knowledge Wiki",
+    "",
+    `Compiled from OpenBrain — ${nodes.length} entities, ${links.length} relations. ` +
+      "Regenerated each compile; never hand-edit (changes are overwritten).",
+    "",
+  ];
+  for (const type of Object.keys(byType).sort()) {
+    idx.push(`## ${type} (${byType[type].length})`, "");
+    for (const n of byType[type].sort((a, b) => String(a.label).localeCompare(String(b.label)))) {
+      idx.push(`- [[${n.slug}|${n.label}]]`);
+    }
+    idx.push("");
+  }
+  fs.writeFileSync(path.join(outDir, "index.md"), idx.join("\n") + "\n", "utf8");
   return { path: p, node_count: nodes.length, edge_count: links.length };
 }
 
-function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir) {
+function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir, notebook) {
   fs.mkdirSync(outDir, { recursive: true });
   const baseSlug = slugify(entity.canonical_name, entity.entity_type);
   const filepath = resolveOutputPath(outDir, baseSlug, entity);
   fs.writeFileSync(
     filepath,
-    buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance) + wiki + "\n",
+    buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, notebook) + wiki + "\n",
     "utf8",
   );
   return filepath;
@@ -967,8 +1006,11 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
 // ---------------------------------------------------------------
 
 async function generateForEntity(sb, env, entity, args) {
-  // 1. Linked thoughts
-  const linked = await fetchLinkedThoughts(sb, entity.id);
+  const notebook = args.notebook || null;
+  // 1. Linked thoughts (notebook-scoped if requested — req 10: only
+  //    thoughts tagged metadata.notebook=<name> count as in-scope evidence)
+  let linked = await fetchLinkedThoughts(sb, entity.id);
+  if (notebook) linked = linked.filter((t) => t.notebook === notebook);
   // 2. Typed edges + connected entity names
   const { out: eOut, in: eIn } = await fetchTypedEdges(sb, entity.id);
   const otherIds = [...eOut.map((e) => e.to_entity_id), ...eIn.map((e) => e.from_entity_id)];
@@ -976,14 +1018,18 @@ async function generateForEntity(sb, env, entity, args) {
   entity.__edges_out = eOut;
   entity.__edges_in = eIn;
 
-  // 3. Semantic expansion (opt-in — avoids forcing an embedding provider)
+  // 3. Semantic expansion (opt-in). Disabled under --notebook: match_thoughts
+  //    can't be notebook-filtered here, so allowing it would leak
+  //    out-of-scope thoughts. Notebook mode favours precision.
   let semantic = [];
-  if (args.semanticExpand) {
+  if (args.semanticExpand && !notebook) {
     try {
       semantic = await semanticExpand(sb, env, entity);
     } catch (err) {
       console.error(`[wiki] semantic expand failed for #${entity.id}: ${err.message}`);
     }
+  } else if (args.semanticExpand && notebook) {
+    console.log(`[wiki] #${entity.id}: semantic expand skipped (--notebook scope)`);
   }
 
   // 4. External source documents (opt-in — req 2). Failure is non-fatal:
@@ -991,7 +1037,7 @@ async function generateForEntity(sb, env, entity, args) {
   let sources = [];
   if (args.includeSources) {
     try {
-      sources = await semanticExpandSources(sb, env, entity, args.maxSources);
+      sources = await semanticExpandSources(sb, env, entity, args.maxSources, notebook);
     } catch (err) {
       console.error(`[wiki] source expand failed for #${entity.id}: ${err.message}`);
     }
@@ -1000,18 +1046,24 @@ async function generateForEntity(sb, env, entity, args) {
   console.log(
     `[wiki] #${entity.id} ${entity.canonical_name} (${entity.entity_type}): ` +
       `${linked.length} linked, ${eOut.length + eIn.length} typed edges, ` +
-      `${semantic.length} semantic, ${sources.length} sources`,
+      `${semantic.length} semantic, ${sources.length} sources` +
+      `${notebook ? ` [notebook=${notebook}]` : ""}`,
   );
 
-  // Bail early if there is truly nothing to write about.
-  if (
-    linked.length === 0 &&
-    eOut.length === 0 &&
-    eIn.length === 0 &&
-    semantic.length === 0 &&
-    sources.length === 0
-  ) {
-    console.log(`[wiki] skip #${entity.id} — no evidence`);
+  // Bail early if there is nothing to write about. Under --notebook the
+  // global typed-edge graph is NOT in-scope evidence, so an entity needs
+  // at least one in-scope linked thought or source to get a page.
+  const noEvidence = notebook
+    ? linked.length === 0 && sources.length === 0
+    : linked.length === 0 &&
+      eOut.length === 0 &&
+      eIn.length === 0 &&
+      semantic.length === 0 &&
+      sources.length === 0;
+  if (noEvidence) {
+    console.log(
+      `[wiki] skip #${entity.id} — no${notebook ? ` in-notebook` : ""} evidence`,
+    );
     return { skipped: true };
   }
 
@@ -1059,7 +1111,7 @@ async function generateForEntity(sb, env, entity, args) {
 
   if (args.outputMode === "file") {
     const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
-    const filepath = writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir);
+    const filepath = writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir, notebook);
     console.log(`[wiki] wrote file: ${filepath}`);
     return { filepath };
   }
