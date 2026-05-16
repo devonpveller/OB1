@@ -563,6 +563,177 @@ server.registerTool(
   }
 );
 
+// --- Source ingest (v2 three-layer: external documents -> `sources`) ---
+//
+// Local, dependency-free fetch + extraction. NOT smolcrawl (that is a
+// separate whole-domain tool). End users feed URLs here for wiki use;
+// deep_research writes its gathered sources through the same table.
+
+function detectContentType(url: string, ctHeader: string): string {
+  const u = url.toLowerCase();
+  if (/youtube\.com\/watch|youtu\.be\//.test(u)) return "youtube_transcript";
+  if (u.endsWith(".pdf") || ctHeader.includes("application/pdf")) return "pdf";
+  if (/arxiv\.org\/(abs|pdf)\//.test(u)) return "paper";
+  return "web_article";
+}
+
+function stripHtml(html: string): { title: string; text: string } {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = (titleMatch?.[1] || "").replace(/\s+/g, " ").trim().slice(0, 300);
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(nav|footer|header|aside)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { title, text };
+}
+
+type IngestOutcome = {
+  url: string;
+  ok: boolean;
+  id?: string;
+  title?: string;
+  content_type?: string;
+  chars?: number;
+  error?: string;
+};
+
+async function ingestOne(
+  url: string,
+  notebook: string | undefined,
+  tags: string[],
+): Promise<IngestOutcome> {
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "open-brain-ingest/1.0" },
+      redirect: "follow",
+    });
+    if (!resp.ok) {
+      return { url, ok: false, error: `fetch ${resp.status}` };
+    }
+    const ctHeader = (resp.headers.get("content-type") || "").toLowerCase();
+    const contentType = detectContentType(url, ctHeader);
+
+    let title = "";
+    let body = "";
+    if (contentType === "pdf") {
+      // No PDF text extraction without a heavy dep; store a stub the
+      // user/agent can replace. Modular: a future extractor can fill this.
+      body = `[PDF source not text-extracted: ${url}]`;
+    } else {
+      const raw = await resp.text();
+      if (/^\s*</.test(raw) || ctHeader.includes("html")) {
+        const ex = stripHtml(raw);
+        title = ex.title;
+        body = ex.text;
+      } else {
+        body = raw.replace(/\s+/g, " ").trim();
+      }
+    }
+    if (!body) return { url, ok: false, error: "no extractable content" };
+
+    let domain = "";
+    try {
+      domain = new URL(url).hostname;
+    } catch { /* ignore */ }
+    if (!title) title = domain || url.slice(0, 120);
+
+    // llama-cpp-embed (bge-m3) rejects inputs over its physical batch
+    // (512 tokens). Cap the embed input well under that (~1600 chars);
+    // the FULL body is still stored. Richer embeddings require raising
+    // the embed server batch size (VRAM-costed — see tracker F7).
+    const embInput = `${title}\n\n${body}`.slice(0, 1600);
+    const embedding = await getEmbedding(embInput);
+    const embStr = `[${embedding.join(",")}]`;
+
+    const client = await pool.connect();
+    try {
+      const res = await client.queryObject<{ id: string }>(
+        `INSERT INTO sources
+           (url, title, content, content_type, tags, notebook, domain,
+            fetched_at, embedding, metadata)
+         VALUES ($1,$2,$3,$4,$5,$6,$7, now(), $8::vector, $9::jsonb)
+         RETURNING id`,
+        [
+          url, title, body, contentType, tags, notebook ?? null, domain,
+          embStr, JSON.stringify({ source: "ingest_url" }),
+        ],
+      );
+      return {
+        url, ok: true, id: res.rows[0]?.id, title,
+        content_type: contentType, chars: body.length,
+      };
+    } finally {
+      client.release();
+    }
+  } catch (err: unknown) {
+    return { url, ok: false, error: (err as Error).message };
+  }
+}
+
+server.registerTool(
+  "ingest_url",
+  {
+    title: "Ingest URL",
+    description:
+      "Fetch a single URL, extract its text, embed it, and store it as an external source document for wiki/research use. Use when the user wants to add a web page, article, or paper to Open Brain.",
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      url: z.string().describe("The URL to ingest"),
+      notebook: z.string().optional().describe("Optional notebook/project to group this source under"),
+      tags: z.array(z.string()).optional().describe("Optional tags"),
+    },
+  },
+  async ({ url, notebook, tags }) => {
+    const r = await ingestOne(url, notebook, tags ?? []);
+    const text = r.ok
+      ? `Ingested source ${r.id} — "${r.title}" (${r.content_type}, ${r.chars} chars)`
+      : `Failed to ingest ${url}: ${r.error}`;
+    return { content: [{ type: "text" as const, text }], isError: !r.ok };
+  },
+);
+
+server.registerTool(
+  "ingest_urls",
+  {
+    title: "Ingest URLs (batch)",
+    description:
+      "Fetch a list of URLs in parallel, extract and embed each, and store them as external source documents. Use for batch-adding sources for wiki/research use.",
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      urls: z.array(z.string()).describe("The URLs to ingest"),
+      notebook: z.string().optional().describe("Optional notebook/project for all of them"),
+      tags: z.array(z.string()).optional().describe("Optional tags applied to all"),
+    },
+  },
+  async ({ urls, notebook, tags }) => {
+    const results = await Promise.all(
+      urls.map((u) => ingestOne(u, notebook, tags ?? [])),
+    );
+    const ok = results.filter((r) => r.ok);
+    const failed = results.filter((r) => !r.ok);
+    const lines = [
+      `Ingested ${ok.length}/${results.length} source(s).`,
+      ...ok.map((r) => `  ✓ ${r.id} — "${r.title}" (${r.content_type})`),
+      ...failed.map((r) => `  ✗ ${r.url}: ${r.error}`),
+    ];
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
+      isError: ok.length === 0,
+    };
+  },
+);
+
 // --- Hono App with Auth Check ---
 
 const app = new Hono();

@@ -22,6 +22,7 @@ services:
       - openbrain-db-data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
       - ./init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro
+      - ./init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro
     networks:
       - obnet
     restart: unless-stopped
