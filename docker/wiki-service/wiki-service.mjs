@@ -57,7 +57,10 @@ const GIT_BRANCH = ENV.WIKI_GIT_BRANCH || "main";
 // content is fully regenerable, so on any non-fast-forward rejection it
 // reconciles with an unconditional `git push --force` (always overwrite
 // — user-directed). Set "false" to require manual reconciliation.
-const GIT_FORCE = ENV.WIKI_GIT_FORCE || "true";
+// Evolving-vault model: pull --rebase before compile keeps pushes
+// fast-forward, so force is OFF by default (manual escape only).
+const GIT_FORCE = ENV.WIKI_GIT_FORCE || "false";
+const OB_URL = (ENV.OPEN_BRAIN_URL || "http://openbrain-rest").replace(/\/+$/, "");
 // IdentitiesOnly so it can't fall back to other keys; accept-new trusts
 // github.com's host key on first contact (written to a tmp known_hosts).
 const GIT_SSH_COMMAND =
@@ -71,28 +74,94 @@ async function git(args) {
   return pexec("git", ["-C", WIKI_GIT_DIR, ...args], { maxBuffer: 8 * 1024 * 1024 });
 }
 
+const NOTES_DIR = `${WIKI_GIT_DIR}/notes`;
+const STATE_FILE = `${WIKI_GIT_DIR}/.wikistate.json`;
+
+async function readState() {
+  try {
+    return JSON.parse(await readFile(STATE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+async function writeState(s) {
+  await writeFile(STATE_FILE, JSON.stringify(s, null, 2) + "\n");
+}
+
 async function ensureRepo() {
   await mkdir(WIKI_OUT_DIR, { recursive: true });
-  if (!existsSync(`${WIKI_GIT_DIR}/.git`)) {
+  // notes/ is the human-owned layer — created once, then never touched
+  // by the compiler (it only writes under content/).
+  await mkdir(NOTES_DIR, { recursive: true });
+  const freshRepo = !existsSync(`${WIKI_GIT_DIR}/.git`);
+  if (freshRepo) {
     await git(["init", "-q"]);
     await git(["config", "user.email", "wiki@openbrain.local"]);
     await git(["config", "user.name", "openbrain-wiki"]);
-    // Keep .git out of the rendered site; record provenance of the layout.
+  }
+  // Idempotent every run (existing repos created before these existed
+  // must still get them): pull.rebase, .gitignore (so .wikistate.json is
+  // never committed/pulled), notes/ README.
+  await git(["config", "pull.rebase", "true"]).catch(() => {});
+  const wantIgnore = ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\n";
+  let curIgnore = "";
+  try { curIgnore = await readFile(`${WIKI_GIT_DIR}/.gitignore`, "utf8"); } catch { /* */ }
+  if (!curIgnore.includes(".wikistate.json")) {
+    await writeFile(`${WIKI_GIT_DIR}/.gitignore`, wantIgnore);
+  }
+  // If a prior (pre-fix) run already tracked the state file, untrack it.
+  await git(["rm", "--cached", "-q", "--ignore-unmatch", ".wikistate.json"]).catch(() => {});
+  if (!existsSync(`${NOTES_DIR}/README.md`)) {
     await writeFile(
-      `${WIKI_GIT_DIR}/.gitignore`,
-      ".quartz-cache/\npublic/\nnode_modules/\n",
+      `${NOTES_DIR}/README.md`,
+      "# Notes\n\nHand-written notes live here. The wiki compiler NEVER " +
+        "edits this folder. Each note is tethered to one OpenBrain record " +
+        "(by path) and ingested back so it joins the research effort. " +
+        "Link freely into `content/` with [[wikilinks]].\n",
     );
+  }
+  if (freshRepo) {
     await git(["add", "-A"]);
     await git(["commit", "-q", "-m", "wiki: initial repo"]).catch(() => {});
     console.log("[wiki-service] initialized git repo at", WIKI_GIT_DIR);
   }
-  // Keep the `origin` remote in sync with config (idempotent).
   if (GIT_REMOTE) {
     try {
       await git(["remote", "set-url", "origin", GIT_REMOTE]);
     } catch {
       await git(["remote", "add", "origin", GIT_REMOTE]).catch(() => {});
     }
+  }
+}
+
+// Pull the user's note commits before regenerating, so their notes/
+// edits and our content/ regen interleave as a normal evolving repo
+// (rebase: our generated commits replay on top of theirs). On conflict
+// (only if a human edited content/, which they shouldn't) we abort and
+// skip this cycle rather than clobber — never force in normal flow.
+async function gitPullRebase() {
+  if (!GIT_REMOTE || !existsSync(GIT_SSH_KEY)) return { ok: true, skipped: true };
+  const key = await preparedKeyPath();
+  const sshCmd =
+    `ssh -i ${key} -o IdentitiesOnly=yes ` +
+    `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts`;
+  const gitEnv = { env: { ...ENV, GIT_SSH_COMMAND: sshCmd }, maxBuffer: 8 * 1024 * 1024 };
+  try {
+    await pexec("git", ["-C", WIKI_GIT_DIR, "fetch", "origin", GIT_BRANCH], gitEnv);
+    // No-op if origin/<branch> doesn't exist yet (fresh remote).
+    const { stdout: refs } = await pexec(
+      "git", ["-C", WIKI_GIT_DIR, "ls-remote", "--heads", "origin", GIT_BRANCH], gitEnv,
+    );
+    if (!refs.trim()) return { ok: true, fresh: true };
+    await pexec(
+      "git", ["-C", WIKI_GIT_DIR, "rebase", `origin/${GIT_BRANCH}`], gitEnv,
+    );
+    return { ok: true };
+  } catch (e) {
+    const msg = (e?.stderr || e?.message || String(e)).toString().slice(0, 400);
+    console.error("[wiki-service] pull --rebase failed; aborting rebase:", msg);
+    await pexec("git", ["-C", WIKI_GIT_DIR, "rebase", "--abort"], gitEnv).catch(() => {});
+    return { ok: false, error: msg };
   }
 }
 
@@ -201,6 +270,112 @@ async function drainWorkerQueues() {
   }
 }
 
+// ── OpenBrain (PostgREST via Caddy) client + tethered note ingest ───────────
+
+async function obFetch(method, pathq, body) {
+  const r = await fetch(`${OB_URL}/rest/v1/${pathq}`, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      // Caddy strips auth; PostgREST uses anon=service_role. Non-empty
+      // just to satisfy any client that expects it.
+      apikey: "local-trust",
+      prefer: method === "POST" ? "return=representation" : "return=minimal",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw new Error(`OB ${method} ${pathq}: ${r.status} ${(await r.text()).slice(0, 300)}`);
+  const t = await r.text();
+  return t ? JSON.parse(t) : null;
+}
+
+// One note file ↔ one OpenBrain thought, tethered by metadata.note_path.
+// Edit a note → PATCH the SAME row (no duplicate); the content-change
+// trigger re-enqueues entity extraction. Delete a note → delete its row.
+async function ingestNotes(prevCommit) {
+  if (!existsSync(NOTES_DIR)) return { ingested: 0, deleted: 0 };
+  let changed = [];
+  let deleted = [];
+  try {
+    if (prevCommit) {
+      const { stdout } = await git([
+        "diff", "--name-status", `${prevCommit}..HEAD`, "--", "notes/",
+      ]);
+      for (const line of stdout.split("\n")) {
+        const m = line.match(/^([ACMRD])\S*\t(.+?)(?:\t(.+))?$/);
+        if (!m) continue;
+        const status = m[1];
+        const file = (m[3] || m[2]).trim();
+        if (!file.endsWith(".md") || /(^|\/)README\.md$/i.test(file)) continue;
+        if (status === "D") deleted.push(file);
+        else changed.push(file);
+      }
+    } else {
+      const { stdout } = await git(["ls-files", "notes/"]);
+      changed = stdout.split("\n").filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f));
+    }
+  } catch (e) {
+    console.error("[wiki-service] note diff failed (non-fatal):", e?.message || e);
+    return { ingested: 0, deleted: 0 };
+  }
+
+  let ingested = 0;
+  for (const rel of changed) {
+    try {
+      const abs = `${WIKI_GIT_DIR}/${rel}`;
+      if (!existsSync(abs)) continue;
+      const content = await readFile(abs, "utf8");
+      // notebook = first folder under notes/, else "notes".
+      const parts = rel.split("/"); // notes/<maybe-nb>/file.md
+      const notebook = parts.length > 2 ? parts[1] : "notes";
+      const title = parts[parts.length - 1].replace(/\.md$/, "");
+      const meta = { source: "user_note", note_path: rel, notebook, title };
+      const enc = encodeURIComponent(rel);
+      const existing = await obFetch(
+        "GET",
+        `thoughts?select=id&metadata->>note_path=eq.${enc}&limit=1`,
+      );
+      if (Array.isArray(existing) && existing[0]) {
+        await obFetch("PATCH", `thoughts?id=eq.${existing[0].id}`, { content, metadata: meta });
+      } else {
+        await obFetch("POST", "thoughts", { content, metadata: meta });
+      }
+      ingested++;
+    } catch (e) {
+      console.error(`[wiki-service] note ingest failed for ${rel}:`, e?.message || e);
+    }
+  }
+  let delc = 0;
+  for (const rel of deleted) {
+    try {
+      const enc = encodeURIComponent(rel);
+      await obFetch("DELETE", `thoughts?metadata->>note_path=eq.${enc}`);
+      delc++;
+    } catch (e) {
+      console.error(`[wiki-service] note delete failed for ${rel}:`, e?.message || e);
+    }
+  }
+  console.log(`[wiki-service] notes ingested: ${ingested} upserted, ${delc} deleted`);
+  return { ingested, deleted: delc };
+}
+
+// Entities whose links/metadata changed since the last compile (the set
+// that needs regeneration). upsertEntity bumps entities.updated_at on
+// every extraction, so this captures note- and source-driven changes.
+async function dirtyEntityIds(prevIso) {
+  if (!prevIso) return null; // null → full rebuild
+  try {
+    const rows = await obFetch(
+      "GET",
+      `entities?select=id&updated_at=gte.${encodeURIComponent(prevIso)}&limit=5000`,
+    );
+    return Array.isArray(rows) ? rows.map((r) => r.id) : [];
+  } catch (e) {
+    console.error("[wiki-service] dirty-entity query failed; full rebuild:", e?.message || e);
+    return null;
+  }
+}
+
 async function compile(reason) {
   if (running) return { skipped: true, reason: "compile already in progress" };
   running = true;
@@ -208,31 +383,46 @@ async function compile(reason) {
   console.log(`[wiki-service] compile start (${reason})`);
   try {
     await ensureRepo();
-    // The wiki is fully regenerable — wipe prior output so renamed/moved
-    // pages (e.g. flat → type subfolders) and deleted entities don't
-    // leave stale duplicates. .git + .gitignore live at WIKI_GIT_DIR,
-    // not under WIKI_OUT_DIR, so they're untouched; the commit captures
-    // the deletions + fresh tree.
-    await rm(WIKI_OUT_DIR, { recursive: true, force: true });
-    await mkdir(WIKI_OUT_DIR, { recursive: true });
-    // Fresh entity / source_entities links before the wiki is built.
+    // Pull the user's note commits first (evolving repo; no wipe/force).
+    const pull = await gitPullRebase();
+    const state = await readState();
+    const prevIso = state.last_compile_iso || null;
+    const prevCommit = state.last_commit || null;
+
+    // Tethered note ingest → enqueues extraction for changed notes.
+    await ingestNotes(prevCommit);
+    // Extract from the freshly-ingested notes + any pending sources.
     await drainWorkerQueues();
+
     const childEnv = {
       ...ENV,
-      OPEN_BRAIN_URL: ENV.OPEN_BRAIN_URL || "http://openbrain-rest",
+      OPEN_BRAIN_URL: OB_URL,
       OPEN_BRAIN_SERVICE_KEY: ENV.OPEN_BRAIN_SERVICE_KEY || "local-trust",
       OB_WIKI_OUT_DIR: WIKI_OUT_DIR,
     };
-    const args = [
-      RECIPE_PATH,
-      "--batch",
-      "--batch-min-linked", String(BATCH_MIN_LINKED),
-      "--batch-limit", String(BATCH_LIMIT),
-      "--include-sources",
-      "--max-sources", String(MAX_SOURCES),
-      "--out-dir", WIKI_OUT_DIR,
-    ];
+    // Incremental: regenerate only entities touched since last compile.
+    // First run (no state) or huge delta → full batch. graph.json +
+    // index.md are whole-graph aggregates the recipe always rewrites.
+    const dirty = await dirtyEntityIds(prevIso);
+    const fullRebuild = dirty === null || dirty.length > Number(BATCH_LIMIT);
+    const args = fullRebuild
+      ? [
+          RECIPE_PATH, "--batch",
+          "--batch-min-linked", String(BATCH_MIN_LINKED),
+          "--batch-limit", String(BATCH_LIMIT),
+          "--include-sources", "--max-sources", String(MAX_SOURCES),
+          "--out-dir", WIKI_OUT_DIR,
+        ]
+      : [
+          RECIPE_PATH, "--ids", dirty.join(","),
+          "--include-sources", "--max-sources", String(MAX_SOURCES),
+          "--out-dir", WIKI_OUT_DIR,
+        ];
     if (ENV.WIKI_NOTEBOOK) args.push("--notebook", ENV.WIKI_NOTEBOOK);
+    console.log(
+      `[wiki-service] ${fullRebuild ? "FULL" : "incremental"} compile` +
+        `${fullRebuild ? "" : ` (${dirty.length} dirty entities)`}`,
+    );
     const { stdout } = await pexec("node", args, {
       env: childEnv,
       maxBuffer: 32 * 1024 * 1024,
@@ -254,6 +444,30 @@ async function compile(reason) {
         (e?.stderr || e?.message || String(e)).toString().slice(0, 300));
     }
 
+    // Vault-root home (Quartz `/`). Compiler-owned, distinct basename
+    // from content/entities.md and notes/. Links across both layers.
+    await writeFile(
+      `${WIKI_GIT_DIR}/index.md`,
+      [
+        "---",
+        'title: "Knowledge Vault"',
+        "tags: [wiki, home]",
+        "---",
+        "",
+        "# Knowledge Vault",
+        "",
+        "Generated from OpenBrain; your notes evolve alongside it.",
+        "",
+        "- [[entities|Entities]] — people, tools, projects, orgs (auto-generated)",
+        "- [[topic|Topics]] — cross-source research syntheses (auto-generated)",
+        "- `notes/` — your own notes (hand-written; tethered back into OpenBrain)",
+        "",
+        "Generated pages regenerate from OpenBrain; never hand-edit them — " +
+          "edit the source/thought (or your note) and the next compile reflects it.",
+        "",
+      ].join("\n"),
+    );
+
     // Commit only if the compile changed something.
     await git(["add", "-A"]);
     const { stdout: status } = await git(["status", "--porcelain"]);
@@ -268,9 +482,22 @@ async function compile(reason) {
     // compile — the local commit (D16) is still the source of truth.
     let push = { pushed: false, reason: "skipped" };
     if (GIT_REMOTE && committed) push = await gitPush();
+
+    // Persist compile watermark for the next incremental run. Use the
+    // post-commit HEAD so the next note-diff starts after our own commit.
+    let head = "";
+    try { head = (await git(["rev-parse", "HEAD"])).stdout.trim(); } catch { /* */ }
+    await writeState({
+      last_compile_iso: new Date().toISOString(),
+      last_commit: head || prevCommit || null,
+      mode: fullRebuild ? "full" : "incremental",
+    }).catch(() => {});
+
     lastStatus = {
       state: "idle", at: new Date().toISOString(), ok: true,
       summary: tail, committed, push,
+      mode: fullRebuild ? "full" : "incremental",
+      pull_ok: pull.ok !== false,
     };
     console.log(
       `[wiki-service] compile ok (committed=${committed}, ` +

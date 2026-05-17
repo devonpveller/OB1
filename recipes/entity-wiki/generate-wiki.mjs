@@ -63,6 +63,7 @@ function parseArgs(argv) {
     entity: null,
     type: null,
     id: null,
+    ids: null,
     outputMode: "file",
     outDir: null,
     model: null,
@@ -89,6 +90,8 @@ function parseArgs(argv) {
     else if (a.startsWith("--type=")) args.type = a.slice(7);
     else if (a === "--id") args.id = Number(next());
     else if (a.startsWith("--id=")) args.id = Number(a.slice(5));
+    else if (a === "--ids") args.ids = next();
+    else if (a.startsWith("--ids=")) args.ids = a.slice(6);
     else if (a === "--output-mode") args.outputMode = next();
     else if (a.startsWith("--output-mode=")) args.outputMode = a.slice(14);
     else if (a === "--out-dir") args.outDir = next();
@@ -288,8 +291,10 @@ async function fetchEntityNames(sb, ids) {
   for (const chunk of chunks) {
     const list = chunk.join(",");
     const rows =
-      (await sb.get("entities", `select=id,canonical_name,entity_type&id=in.(${list})`)) || [];
-    for (const r of rows) out.set(r.id, { name: r.canonical_name, type: r.entity_type });
+      (await sb.get("entities", `select=id,canonical_name,entity_type,metadata&id=in.(${list})`)) || [];
+    for (const r of rows) {
+      out.set(r.id, { name: r.canonical_name, type: r.entity_type, slug: slugFor(r) });
+    }
   }
   return out;
 }
@@ -485,10 +490,12 @@ function buildSynthesisInput(entity, linked, semantic, sources, nameMap, maxLink
   function describe(edge, dir) {
     const otherId = dir === "out" ? edge.to_entity_id : edge.from_entity_id;
     const other = nameMap.get(otherId) || { name: `#${otherId}`, type: "unknown" };
-    // Stable Obsidian link target = the related entity's page slug (req 6,
-    // req 8). null when the entity is unresolved (no page to link to).
+    // Stable Obsidian link target = the related entity's PINNED slug
+    // (req 6, req 8 — from nameMap via slugFor). null when unresolved.
     const other_slug =
-      other.type && other.type !== "unknown" ? slugify(other.name, other.type) : null;
+      other.type && other.type !== "unknown"
+        ? (other.slug || slugify(other.name, other.type))
+        : null;
     return {
       relation: edge.relation,
       direction: dir,
@@ -704,6 +711,35 @@ function slugify(name, entityType) {
   return `${entityType}-${base}`;
 }
 
+// req 8 — stable link targets. The slug is PINNED to the entity for
+// life: stored in entities.metadata.wiki_slug on first generation and
+// reused forever, even if canonical_name later changes. So a renamed
+// entity keeps the same filename → existing [[slug]] links never break.
+// (Display renames are additionally covered by `aliases:` frontmatter.)
+function slugFor(e) {
+  const pinned =
+    e && e.metadata && typeof e.metadata.wiki_slug === "string" &&
+    e.metadata.wiki_slug.trim();
+  return pinned ? e.metadata.wiki_slug : slugify(e.canonical_name, e.entity_type);
+}
+
+// Persist the pinned slug once (idempotent). Mutates `entity.metadata`
+// locally so the rest of this run uses the pinned value.
+async function ensurePinnedSlug(sb, entity) {
+  if (entity.metadata && typeof entity.metadata.wiki_slug === "string" &&
+      entity.metadata.wiki_slug.trim()) {
+    return entity.metadata.wiki_slug;
+  }
+  const slug = slugify(entity.canonical_name, entity.entity_type);
+  entity.metadata = { ...(entity.metadata || {}), wiki_slug: slug };
+  try {
+    await sb.patch(`entities?id=eq.${entity.id}`, { metadata: entity.metadata });
+  } catch (err) {
+    console.error(`[wiki] could not pin slug for #${entity.id}: ${err.message}`);
+  }
+  return slug;
+}
+
 // Deterministic backstop for req 6: ensure related-entity mentions are
 // Obsidian `[[slug|name]]` wikilinks even if the model didn't emit them.
 // Idempotent and conservative: existing `[[...]]`, inline/code fences, and
@@ -744,6 +780,10 @@ function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, no
     `entity_id: ${entity.id}`,
     `entity_name: ${JSON.stringify(entity.canonical_name)}`,
     `entity_type: ${entity.entity_type}`,
+    // req 8: alias the current display name so `[[Canonical Name]]`
+    // resolves even though the page filename is the pinned slug — and
+    // keeps resolving if the name later changes (slug stays pinned).
+    `aliases: ${JSON.stringify([entity.canonical_name])}`,
     ...(notebook ? [`notebook: ${JSON.stringify(notebook)}`] : []),
     `generated_at: ${new Date().toISOString()}`,
     `linked_thought_count: ${sourceCounts.linked}`,
@@ -818,7 +858,7 @@ async function writeGraphManifest(sb, outDir, limit) {
   const entities =
     (await sb.get(
       "entities",
-      `select=id,canonical_name,entity_type&order=id.asc&limit=${cap}`,
+      `select=id,canonical_name,entity_type,metadata&order=id.asc&limit=${cap}`,
     )) || [];
   const edges =
     (await sb.get(
@@ -827,7 +867,7 @@ async function writeGraphManifest(sb, outDir, limit) {
         `&relation=neq.co_occurs_with&order=support_count.desc.nullslast&limit=${cap}`,
     )) || [];
   const nodes = entities.map((e) => {
-    const slug = slugify(e.canonical_name, e.entity_type);
+    const slug = slugFor(e); // pinned (req 8)
     return { id: e.id, label: e.canonical_name, type: e.entity_type, slug, file: `${e.entity_type}/${slug}.md` };
   });
   const known = new Set(nodes.map((n) => n.id));
@@ -879,13 +919,15 @@ async function writeGraphManifest(sb, outDir, limit) {
     }
     idx.push("");
   }
-  fs.writeFileSync(path.join(outDir, "index.md"), idx.join("\n") + "\n", "utf8");
+  // Generated entity index is `entities.md` (the vault-root `index.md`
+  // home is owned by wiki-service so Quartz `/` works across both layers).
+  fs.writeFileSync(path.join(outDir, "entities.md"), idx.join("\n") + "\n", "utf8");
   return { path: p, node_count: nodes.length, edge_count: links.length };
 }
 
 function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, outDir, notebook) {
   fs.mkdirSync(outDir, { recursive: true });
-  const baseSlug = slugify(entity.canonical_name, entity.entity_type);
+  const baseSlug = slugFor(entity); // pinned (req 8)
   const filepath = resolveOutputPath(outDir, baseSlug, entity);
   fs.writeFileSync(
     filepath,
@@ -1028,6 +1070,9 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
 
 async function generateForEntity(sb, env, entity, args) {
   const notebook = args.notebook || null;
+  // req 8: pin this entity's slug for life before anything derives a
+  // filename/link from it (no-op if already pinned).
+  await ensurePinnedSlug(sb, entity);
   // 1. Linked thoughts (notebook-scoped if requested — req 10: only
   //    thoughts tagged metadata.notebook=<name> count as in-scope evidence)
   let linked = await fetchLinkedThoughts(sb, entity.id);
@@ -1157,7 +1202,7 @@ async function main() {
     printUsage();
     return;
   }
-  if (!args.batch && !args.id && !args.entity) {
+  if (!args.batch && !args.id && !args.entity && args.ids === null) {
     printUsage();
     process.exit(2);
   }
@@ -1208,6 +1253,42 @@ async function main() {
       console.error(`[wiki] ${label} preflight failed: ${err.message}`);
       process.exit(1);
     }
+  }
+
+  // Incremental mode: regenerate only the given entity ids (the
+  // wiki-service "dirty since last compile" set). Whole-graph
+  // aggregates (graph.json + index.md) are always rewritten so links
+  // and the graph stay consistent even when only a few pages changed.
+  // An empty list = refresh aggregates only (no per-entity work).
+  if (args.ids !== null) {
+    const ids = String(args.ids)
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    let ok = 0;
+    let failed = 0;
+    for (const id of ids) {
+      const entity = await resolveEntityById(sb, id);
+      if (!entity) continue;
+      try {
+        await generateForEntity(sb, env, entity, args);
+        ok++;
+      } catch (err) {
+        failed++;
+        console.error(`[wiki] FAILED #${id}: ${err.message}`);
+      }
+    }
+    console.log(`[wiki] incremental: ${ok} regenerated, ${failed} failed (of ${ids.length} dirty)`);
+    if (args.outputMode === "file" && args.graph) {
+      const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
+      try {
+        const g = await writeGraphManifest(sb, outDir, args.graphLimit);
+        console.log(`[wiki] wrote ${g.path} (${g.node_count} nodes, ${g.edge_count} edges)`);
+      } catch (err) {
+        console.error(`[wiki] graph.json export failed: ${err.message}`);
+      }
+    }
+    return;
   }
 
   if (args.batch) {
