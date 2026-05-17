@@ -272,10 +272,19 @@ services:
       # Set to a notebook name to compile only in-scope sources + thoughts
       # (thoughts tagged metadata.notebook=<name>).
       WIKI_NOTEBOOK: ""
+      # Optional private-remote push (opt-in). Unset WIKI_GIT_REMOTE =
+      # D16 local-commits-only (unchanged). When set, the deploy key is
+      # read from WIKI_GIT_SSH_KEY (mounted, gitignored). SSH URL form.
+      WIKI_GIT_REMOTE: "git@github.com:devonpveller/openbrain-wiki-data.git"
+      WIKI_GIT_SSH_KEY: /secrets/deploy_key
+      WIKI_GIT_BRANCH: main
       PORT: "8000"
     volumes:
       - openbrain-wiki-data:/wiki
       - ../recipes:/recipes:ro
+      # Passphrase-less deploy private key for the wiki repo (host path
+      # is gitignored via /secrets/). Read-only.
+      - ../../secrets/openbrain-wiki-deploy_key:/secrets/deploy_key:ro
     ports:
       - "127.0.0.1:8811:8000"
     networks:

@@ -1,7 +1,8 @@
 FROM node:22-alpine
 
 # git: D16 local commit-per-compile of the wiki volume.
-RUN apk add --no-cache git
+# openssh-client: optional private-remote push (deploy key over SSH).
+RUN apk add --no-cache git openssh-client
 
 WORKDIR /app
 COPY wiki-service.mjs ./

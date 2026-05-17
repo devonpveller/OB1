@@ -19,7 +19,7 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, copyFile, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 const pexec = promisify(execFile);
@@ -34,6 +34,18 @@ const INTERVAL_MS = Math.max(1, Number(ENV.RECOMPILE_INTERVAL_HOURS || "24")) * 
 const COMPILE_ON_BOOT = (ENV.COMPILE_ON_BOOT || "true") !== "false";
 const BATCH_MIN_LINKED = ENV.WIKI_BATCH_MIN_LINKED || "1";
 const MAX_SOURCES = ENV.WIKI_MAX_SOURCES || "5";
+
+// Optional private-remote push (opt-in; unset = D16 local-commits-only,
+// unchanged). WIKI_GIT_REMOTE is an SSH URL; WIKI_GIT_SSH_KEY is the
+// mounted (gitignored) deploy private key; pushes go to WIKI_GIT_BRANCH.
+const GIT_REMOTE = ENV.WIKI_GIT_REMOTE || "";
+const GIT_SSH_KEY = ENV.WIKI_GIT_SSH_KEY || "/secrets/deploy_key";
+const GIT_BRANCH = ENV.WIKI_GIT_BRANCH || "main";
+// IdentitiesOnly so it can't fall back to other keys; accept-new trusts
+// github.com's host key on first contact (written to a tmp known_hosts).
+const GIT_SSH_COMMAND =
+  `ssh -i ${GIT_SSH_KEY} -o IdentitiesOnly=yes ` +
+  `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts`;
 
 let running = false;
 let lastStatus = { state: "idle", at: null, ok: null, summary: null, error: null };
@@ -56,6 +68,50 @@ async function ensureRepo() {
     await git(["add", "-A"]);
     await git(["commit", "-q", "-m", "wiki: initial repo"]).catch(() => {});
     console.log("[wiki-service] initialized git repo at", WIKI_GIT_DIR);
+  }
+  // Keep the `origin` remote in sync with config (idempotent).
+  if (GIT_REMOTE) {
+    try {
+      await git(["remote", "set-url", "origin", GIT_REMOTE]);
+    } catch {
+      await git(["remote", "add", "origin", GIT_REMOTE]).catch(() => {});
+    }
+  }
+}
+
+// Push to the private remote over SSH with the mounted deploy key.
+// Pushes whatever HEAD is to <branch>; never blocks the compile result.
+// SSH refuses a key file with group/other-readable perms. Bind mounts
+// from a Windows host expose the key as 0644, so copy it to a private
+// 0600 path inside the container and point ssh at that.
+async function preparedKeyPath() {
+  const dst = "/tmp/wiki_deploy_key";
+  await copyFile(GIT_SSH_KEY, dst);
+  await chmod(dst, 0o600);
+  return dst;
+}
+
+async function gitPush() {
+  if (!GIT_REMOTE) return { pushed: false, reason: "no remote configured" };
+  if (!existsSync(GIT_SSH_KEY)) {
+    return { pushed: false, error: `deploy key missing at ${GIT_SSH_KEY}` };
+  }
+  try {
+    const key = await preparedKeyPath();
+    const sshCmd =
+      `ssh -i ${key} -o IdentitiesOnly=yes ` +
+      `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts`;
+    await pexec(
+      "git",
+      ["-C", WIKI_GIT_DIR, "push", "origin", `HEAD:refs/heads/${GIT_BRANCH}`],
+      { env: { ...ENV, GIT_SSH_COMMAND: sshCmd }, maxBuffer: 8 * 1024 * 1024 },
+    );
+    console.log(`[wiki-service] pushed to ${GIT_REMOTE} (${GIT_BRANCH})`);
+    return { pushed: true };
+  } catch (e) {
+    const msg = (e?.stderr || e?.message || String(e)).toString().slice(0, 500);
+    console.error("[wiki-service] git push failed:", msg);
+    return { pushed: false, error: msg };
   }
 }
 
@@ -96,11 +152,19 @@ async function compile(reason) {
       await git(["commit", "-q", "-m", `wiki compile ${ts} (${reason}) — ${tail}`]);
       committed = true;
     }
+    // Push when there's a new commit (or always, if a remote is set, to
+    // recover from a prior failed push). Push failure never fails the
+    // compile — the local commit (D16) is still the source of truth.
+    let push = { pushed: false, reason: "skipped" };
+    if (GIT_REMOTE && committed) push = await gitPush();
     lastStatus = {
       state: "idle", at: new Date().toISOString(), ok: true,
-      summary: tail, committed,
+      summary: tail, committed, push,
     };
-    console.log(`[wiki-service] compile ok (committed=${committed}): ${tail}`);
+    console.log(
+      `[wiki-service] compile ok (committed=${committed}, ` +
+        `pushed=${push.pushed}): ${tail}`,
+    );
     return { ok: true, committed, summary: tail };
   } catch (e) {
     const msg = (e?.stderr || e?.message || String(e)).toString().slice(0, 1000);
