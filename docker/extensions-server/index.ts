@@ -1324,18 +1324,28 @@ function parseFrontmatter(md: string): { fm: Record<string, unknown>; body: stri
   return { fm, body: m[2] };
 }
 
-async function listWikiFiles(): Promise<string[]> {
+// Recurse: the wiki is now organized into type/topic subfolders
+// (content/<type>/<slug>.md, content/topic/<slug>.md, index.md). Paths
+// are returned relative to WIKI_DIR.
+async function listWikiFiles(dir: string = WIKI_DIR, rel = ""): Promise<string[]> {
   const out: string[] = [];
   try {
-    for await (const e of Deno.readDir(WIKI_DIR)) {
-      if (e.isFile && e.name.endsWith(".md")) out.push(e.name);
+    for await (const e of Deno.readDir(dir)) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory) {
+        out.push(...(await listWikiFiles(`${dir}/${e.name}`, r)));
+      } else if (e.isFile && e.name.endsWith(".md")) {
+        out.push(r);
+      }
     }
   } catch (_e) { /* dir not created yet → empty wiki */ }
   return out.sort();
 }
 
+// Slug = basename without .md (folder-independent). Wikilinks/backlinks
+// resolve by basename, so subfoldering doesn't change slug semantics.
 function slugOf(file: string): string {
-  return file.replace(/\.md$/, "");
+  return file.split("/").pop()!.replace(/\.md$/, "");
 }
 
 async function readGraph(): Promise<{
@@ -1388,9 +1398,13 @@ server.tool(
   async ({ slug }) => {
     try {
       const safe = slug.replace(/[^A-Za-z0-9_-]/g, "");
-      const md = await Deno.readTextFile(`${WIKI_DIR}/${safe}.md`);
+      // Resolve by basename across the type/topic subfolders.
+      const files = await listWikiFiles();
+      const match = files.find((f) => slugOf(f) === safe);
+      if (!match) throw new Error(`No wiki page for slug '${safe}'`);
+      const md = await Deno.readTextFile(`${WIKI_DIR}/${match}`);
       const { fm, body } = parseFrontmatter(md);
-      return ok({ success: true, slug: safe, frontmatter: fm, markdown: body });
+      return ok({ success: true, slug: safe, path: match, frontmatter: fm, markdown: body });
     } catch (e) { return fail(e); }
   },
 );

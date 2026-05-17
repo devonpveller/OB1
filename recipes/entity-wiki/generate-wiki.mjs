@@ -306,12 +306,24 @@ async function listBatchCandidates(sb, minLinked, limit) {
   )) || [];
   const withCounts = [];
   for (const e of ents) {
-    const rows =
+    // Evidence = thought links OR source links. Source-derived entities
+    // (extracted from `sources`) must also get pages so topic-page and
+    // cross-entity [[wikilinks]] resolve and graph nodes have targets.
+    const tRows =
       (await sb.get(
         "thought_entities",
         `select=thought_id&entity_id=eq.${e.id}&limit=${minLinked}`,
       )) || [];
-    if (rows.length >= minLinked) withCounts.push(e);
+    let count = tRows.length;
+    if (count < minLinked) {
+      const sRows =
+        (await sb.get(
+          "source_entities",
+          `select=source_id&entity_id=eq.${e.id}&limit=${minLinked}`,
+        )) || [];
+      count += sRows.length;
+    }
+    if (count >= minLinked) withCounts.push(e);
     if (withCounts.length >= limit) break;
   }
   return withCounts;
@@ -406,37 +418,39 @@ async function semanticExpand(sb, env, entity) {
   }));
 }
 
-// Pull external source documents (deep_research output + ingested URLs)
-// semantically related to the entity. Mirrors semanticExpand() but hits
-// the `sources` table via the match_sources RPC (init-sources.sql).
-// Returns rows carrying provenance (id + url) so the wiki can link every
-// source-derived claim back to its origin row (req 14).
-async function semanticExpandSources(sb, env, entity, maxSources, notebook) {
-  const query = `${entity.canonical_name} (${entity.entity_type})`;
-  const embedding = await embedQuery(env, query);
-  if (!embedding) return [];
-  // match_sources filters on metadata @> filter, but `notebook` is a
-  // first-class column — over-fetch and post-filter so notebook scoping
-  // (req 10) still returns up to maxSources in-scope rows.
+// Pull source documents that are GENUINELY about this entity, via the
+// real source↔entity link table (source_entities, written by the
+// entity-extraction worker draining the source queue). This replaces
+// the old semantic-NN approach that vacuumed topically-adjacent
+// research onto whatever entity was nearest in vector space (the
+// "Anthropic page cites unrelated Brave-API research" bleed). A source
+// now appears on an entity page only if entity extraction actually
+// found that entity in the source's content. Provenance (id + url) is
+// preserved for req 14; notebook still scopes (req 10).
+async function fetchLinkedSources(sb, entityId, maxSources, notebook) {
   const want = Math.max(1, maxSources || 10);
-  let rows = await sb.rpc("match_sources", {
-    query_embedding: embedding,
-    match_threshold: 0.35,
-    match_count: notebook ? want * 4 : want,
-    filter: {},
-  });
-  rows = rows || [];
-  if (notebook) rows = rows.filter((r) => r.notebook === notebook).slice(0, want);
-  return rows.map((r) => ({
-    id: r.id,
-    url: r.url ?? null,
-    title: r.title ?? "",
-    content: r.content ?? "",
-    content_type: r.content_type ?? null,
-    notebook: r.notebook ?? null,
-    research_key: r.research_key ?? null,
-    similarity: r.similarity,
-  }));
+  const filters = [
+    `entity_id=eq.${entityId}`,
+    // !inner so rows whose embedded source is filtered out drop entirely.
+    `select=source_id,confidence,mention_role,` +
+      `sources!inner(id,url,title,content,content_type,notebook,research_key)`,
+    `order=confidence.desc.nullslast`,
+    `limit=${want}`,
+  ];
+  if (notebook) filters.push(`sources.notebook=eq.${encodeURIComponent(notebook)}`);
+  const rows = (await sb.get("source_entities", filters.join("&"))) || [];
+  return rows
+    .filter((r) => r.sources)
+    .map((r) => ({
+      id: r.sources.id,
+      url: r.sources.url ?? null,
+      title: r.sources.title ?? "",
+      content: r.sources.content ?? "",
+      content_type: r.sources.content_type ?? null,
+      notebook: r.sources.notebook ?? null,
+      research_key: r.sources.research_key ?? null,
+      link_confidence: r.confidence ?? null,
+    }));
 }
 
 // ---------------------------------------------------------------
@@ -759,7 +773,12 @@ function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, no
 // Logs a warning on every collision so users see when their entities are
 // colliding and can pick better canonical names.
 function resolveOutputPath(outDir, baseSlug, entity) {
-  const tryPath = (suffix) => path.join(outDir, `${baseSlug}${suffix}.md`);
+  // Type subfolder (browsability). The basename stays the globally
+  // unique slug (`<type>-<name>`), so `[[slug]]` wikilinks/backlinks and
+  // wiki_read_page still resolve by basename regardless of folder.
+  const typeDir = path.join(outDir, String(entity.entity_type));
+  fs.mkdirSync(typeDir, { recursive: true });
+  const tryPath = (suffix) => path.join(typeDir, `${baseSlug}${suffix}.md`);
   const ownedBy = (p) => {
     try {
       const head = fs.readFileSync(p, "utf8").slice(0, 2048);
@@ -809,7 +828,7 @@ async function writeGraphManifest(sb, outDir, limit) {
     )) || [];
   const nodes = entities.map((e) => {
     const slug = slugify(e.canonical_name, e.entity_type);
-    return { id: e.id, label: e.canonical_name, type: e.entity_type, slug, file: `${slug}.md` };
+    return { id: e.id, label: e.canonical_name, type: e.entity_type, slug, file: `${e.entity_type}/${slug}.md` };
   });
   const known = new Set(nodes.map((n) => n.id));
   const links = edges
@@ -849,6 +868,8 @@ async function writeGraphManifest(sb, outDir, limit) {
     "",
     `Compiled from OpenBrain — ${nodes.length} entities, ${links.length} relations. ` +
       "Regenerated each compile; never hand-edit (changes are overwritten).",
+    "",
+    "See [[topic|Topics]] for cross-source research syntheses (one per notebook).",
     "",
   ];
   for (const type of Object.keys(byType).sort()) {
@@ -1032,14 +1053,15 @@ async function generateForEntity(sb, env, entity, args) {
     console.log(`[wiki] #${entity.id}: semantic expand skipped (--notebook scope)`);
   }
 
-  // 4. External source documents (opt-in — req 2). Failure is non-fatal:
-  // the page still builds from thoughts/edges.
+  // 4. Source documents genuinely ABOUT this entity (real source↔entity
+  // links from source_entities — req 2, no semantic-NN bleed). Failure
+  // is non-fatal: the page still builds from thoughts/edges.
   let sources = [];
   if (args.includeSources) {
     try {
-      sources = await semanticExpandSources(sb, env, entity, args.maxSources, notebook);
+      sources = await fetchLinkedSources(sb, entity.id, args.maxSources, notebook);
     } catch (err) {
-      console.error(`[wiki] source expand failed for #${entity.id}: ${err.message}`);
+      console.error(`[wiki] linked-source fetch failed for #${entity.id}: ${err.message}`);
     }
   }
 
@@ -1174,14 +1196,14 @@ async function main() {
   // only needs the dimension check (it writes embeddings, doesn't query them),
   // so skip the match_thoughts-RPC signature probe unless --semantic-expand
   // is on. Users without match_thoughts can still use --output-mode=thought.
-  if (args.semanticExpand || args.includeSources || args.outputMode === "thought") {
+  // --include-sources no longer needs embeddings (real source_entities
+  // links, not semantic NN), so it's not in this gate anymore.
+  if (args.semanticExpand || args.outputMode === "thought") {
     try {
       await preflightEmbeddingDim(sb, env, _DEFAULT_EMBED_DIM, args.semanticExpand);
     } catch (err) {
       const label = args.semanticExpand
         ? "--semantic-expand"
-        : args.includeSources
-        ? "--include-sources"
         : "--output-mode=thought";
       console.error(`[wiki] ${label} preflight failed: ${err.message}`);
       process.exit(1);

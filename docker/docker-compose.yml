@@ -25,6 +25,7 @@ services:
       - ./init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro
       - ./init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro
       - ./init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro
+      - ./init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro
     networks:
       - obnet
     restart: unless-stopped
@@ -250,6 +251,7 @@ services:
     container_name: openbrain-wiki
     depends_on:
       - openbrain-rest
+      - openbrain-entity-worker
     environment:
       OPEN_BRAIN_URL: http://openbrain-rest
       OPEN_BRAIN_SERVICE_KEY: local-trust

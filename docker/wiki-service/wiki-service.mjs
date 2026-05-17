@@ -19,7 +19,7 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile, readFile, copyFile, chmod } from "node:fs/promises";
+import { mkdir, writeFile, readFile, copyFile, chmod, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 const pexec = promisify(execFile);
@@ -30,10 +30,22 @@ const MCP_ACCESS_KEY = ENV.MCP_ACCESS_KEY || "";
 const WIKI_OUT_DIR = ENV.WIKI_OUT_DIR || "/wiki/content";
 const WIKI_GIT_DIR = ENV.WIKI_GIT_DIR || "/wiki";
 const RECIPE_PATH = ENV.RECIPE_PATH || "/recipes/entity-wiki/generate-wiki.mjs";
+const SYNTH_PATH = ENV.SYNTH_PATH || "/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs";
 const INTERVAL_MS = Math.max(1, Number(ENV.RECOMPILE_INTERVAL_HOURS || "24")) * 3600_000;
 const COMPILE_ON_BOOT = (ENV.COMPILE_ON_BOOT || "true") !== "false";
 const BATCH_MIN_LINKED = ENV.WIKI_BATCH_MIN_LINKED || "1";
+const BATCH_LIMIT = ENV.WIKI_BATCH_LIMIT || "1000";
 const MAX_SOURCES = ENV.WIKI_MAX_SOURCES || "5";
+
+// Pre-compile entity extraction. The worker drains the thought + source
+// queues so entity/source_entities links are fresh before the wiki is
+// built (this is what makes sources attach to the RIGHT entity). Each
+// worker call processes a bounded batch; we loop until both queues are
+// empty or WORKER_DRAIN_MAX_MIN is hit. Non-fatal: a compile still runs
+// on whatever has been extracted so far.
+const WORKER_URL = ENV.WORKER_URL || "http://openbrain-entity-worker:8000";
+const DRAIN_BEFORE_COMPILE = (ENV.DRAIN_BEFORE_COMPILE || "true") !== "false";
+const WORKER_DRAIN_MAX_MIN = Math.max(1, Number(ENV.WORKER_DRAIN_MAX_MIN || "30"));
 
 // Optional private-remote push (opt-in; unset = D16 local-commits-only,
 // unchanged). WIKI_GIT_REMOTE is an SSH URL; WIKI_GIT_SSH_KEY is the
@@ -41,6 +53,11 @@ const MAX_SOURCES = ENV.WIKI_MAX_SOURCES || "5";
 const GIT_REMOTE = ENV.WIKI_GIT_REMOTE || "";
 const GIT_SSH_KEY = ENV.WIKI_GIT_SSH_KEY || "/secrets/deploy_key";
 const GIT_BRANCH = ENV.WIKI_GIT_BRANCH || "main";
+// This service is the SOLE generator of the wiki repo's content and the
+// content is fully regenerable, so on any non-fast-forward rejection it
+// reconciles with an unconditional `git push --force` (always overwrite
+// — user-directed). Set "false" to require manual reconciliation.
+const GIT_FORCE = ENV.WIKI_GIT_FORCE || "true";
 // IdentitiesOnly so it can't fall back to other keys; accept-new trusts
 // github.com's host key on first contact (written to a tmp known_hosts).
 const GIT_SSH_COMMAND =
@@ -101,17 +118,86 @@ async function gitPush() {
     const sshCmd =
       `ssh -i ${key} -o IdentitiesOnly=yes ` +
       `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts`;
-    await pexec(
-      "git",
-      ["-C", WIKI_GIT_DIR, "push", "origin", `HEAD:refs/heads/${GIT_BRANCH}`],
-      { env: { ...ENV, GIT_SSH_COMMAND: sshCmd }, maxBuffer: 8 * 1024 * 1024 },
-    );
-    console.log(`[wiki-service] pushed to ${GIT_REMOTE} (${GIT_BRANCH})`);
-    return { pushed: true };
+    const gitEnv = { env: { ...ENV, GIT_SSH_COMMAND: sshCmd }, maxBuffer: 8 * 1024 * 1024 };
+    try {
+      await pexec(
+        "git",
+        ["-C", WIKI_GIT_DIR, "push", "origin", `HEAD:refs/heads/${GIT_BRANCH}`],
+        gitEnv,
+      );
+      console.log(`[wiki-service] pushed to ${GIT_REMOTE} (${GIT_BRANCH})`);
+      return { pushed: true };
+    } catch (e) {
+      const msg = (e?.stderr || e?.message || "").toString();
+      const nonFF = /\[rejected\]|fetch first|non-fast-forward/i.test(msg);
+      // Sole generator + regenerable content: a non-FF rejection only
+      // ever means an earlier auto-snapshot is on the remote, superseded
+      // by this compile. Unconditionally overwrite it (user-directed).
+      if (!nonFF || GIT_FORCE !== "true") throw e;
+      console.warn("[wiki-service] non-FF; reconciling with --force (sole generator)");
+      await pexec(
+        "git",
+        ["-C", WIKI_GIT_DIR, "push", "--force", "origin", `HEAD:refs/heads/${GIT_BRANCH}`],
+        gitEnv,
+      );
+      console.log(`[wiki-service] force-pushed to ${GIT_REMOTE} (${GIT_BRANCH})`);
+      return { pushed: true, reconciled: true };
+    }
   } catch (e) {
     const msg = (e?.stderr || e?.message || String(e)).toString().slice(0, 500);
     console.error("[wiki-service] git push failed:", msg);
     return { pushed: false, error: msg };
+  }
+}
+
+// Drain one worker queue (suffix "" = thoughts, "/sources" = sources)
+// until empty or the shared time budget is exhausted.
+async function drainQueue(suffix, label, deadlineMs) {
+  let totalProcessed = 0;
+  let calls = 0;
+  let connErrs = 0;
+  while (Date.now() < deadlineMs) {
+    let j;
+    try {
+      const r = await fetch(`${WORKER_URL}${suffix}?limit=50`, {
+        method: "POST",
+        headers: { "x-brain-key": MCP_ACCESS_KEY, "content-type": "application/json" },
+      });
+      if (!r.ok) {
+        console.error(`[wiki-service] worker ${label} drain HTTP ${r.status}`);
+        break;
+      }
+      j = await r.json();
+      connErrs = 0;
+    } catch (e) {
+      // Worker may not be listening yet on a cold boot — retry a few
+      // times before giving up rather than skipping extraction.
+      connErrs++;
+      if (connErrs > 6) {
+        console.error(`[wiki-service] worker ${label} unreachable, giving up:`, e?.message || e);
+        break;
+      }
+      console.warn(`[wiki-service] worker ${label} not ready (try ${connErrs}); retrying in 10s`);
+      await new Promise((r) => setTimeout(r, 10_000));
+      continue;
+    }
+    calls++;
+    const processed = Number(j?.processed ?? 0);
+    totalProcessed += processed;
+    if (processed === 0) break; // queue empty
+  }
+  console.log(`[wiki-service] drained ${label}: ${totalProcessed} processed in ${calls} call(s)`);
+  return totalProcessed;
+}
+
+async function drainWorkerQueues() {
+  if (!DRAIN_BEFORE_COMPILE) return;
+  const deadline = Date.now() + WORKER_DRAIN_MAX_MIN * 60_000;
+  try {
+    await drainQueue("", "thoughts", deadline);
+    await drainQueue("/sources", "sources", deadline);
+  } catch (e) {
+    console.error("[wiki-service] pre-compile drain failed (non-fatal):", e?.message || e);
   }
 }
 
@@ -122,15 +208,26 @@ async function compile(reason) {
   console.log(`[wiki-service] compile start (${reason})`);
   try {
     await ensureRepo();
+    // The wiki is fully regenerable — wipe prior output so renamed/moved
+    // pages (e.g. flat → type subfolders) and deleted entities don't
+    // leave stale duplicates. .git + .gitignore live at WIKI_GIT_DIR,
+    // not under WIKI_OUT_DIR, so they're untouched; the commit captures
+    // the deletions + fresh tree.
+    await rm(WIKI_OUT_DIR, { recursive: true, force: true });
+    await mkdir(WIKI_OUT_DIR, { recursive: true });
+    // Fresh entity / source_entities links before the wiki is built.
+    await drainWorkerQueues();
     const childEnv = {
       ...ENV,
       OPEN_BRAIN_URL: ENV.OPEN_BRAIN_URL || "http://openbrain-rest",
       OPEN_BRAIN_SERVICE_KEY: ENV.OPEN_BRAIN_SERVICE_KEY || "local-trust",
+      OB_WIKI_OUT_DIR: WIKI_OUT_DIR,
     };
     const args = [
       RECIPE_PATH,
       "--batch",
       "--batch-min-linked", String(BATCH_MIN_LINKED),
+      "--batch-limit", String(BATCH_LIMIT),
       "--include-sources",
       "--max-sources", String(MAX_SOURCES),
       "--out-dir", WIKI_OUT_DIR,
@@ -141,7 +238,21 @@ async function compile(reason) {
       maxBuffer: 32 * 1024 * 1024,
       timeout: 55 * 60_000,
     });
-    const tail = stdout.trim().split("\n").slice(-3).join(" | ");
+    let tail = stdout.trim().split("\n").slice(-3).join(" | ");
+
+    // Notebook → topic synthesis (research lives here, not on entity
+    // pages). Non-fatal: entity pages already written above.
+    try {
+      const { stdout: so } = await pexec("node", [SYNTH_PATH], {
+        env: childEnv,
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: 30 * 60_000,
+      });
+      tail += " | " + so.trim().split("\n").slice(-1)[0];
+    } catch (e) {
+      console.error("[wiki-service] notebook synthesis failed (non-fatal):",
+        (e?.stderr || e?.message || String(e)).toString().slice(0, 300));
+    }
 
     // Commit only if the compile changed something.
     await git(["add", "-A"]);

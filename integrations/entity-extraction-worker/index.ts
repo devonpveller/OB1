@@ -571,6 +571,206 @@ async function markError(thoughtId: string, error: string, attemptCount: number)
     .eq("thought_id", thoughtId);
 }
 
+// ── Source queue (sibling of the thought queue; sources.id is UUID) ─────────
+
+async function peekSourceQueue(limit: number): Promise<Array<{ source_id: string }>> {
+  const { data, error } = await supabase
+    .from("source_extraction_queue")
+    .select("source_id")
+    .eq("status", "pending")
+    .order("queued_at", { ascending: true })
+    .limit(limit);
+  if (error || !data) return [];
+  return data;
+}
+
+async function claimSourceQueue(limit: number): Promise<Array<{ source_id: string }>> {
+  const { data: pending, error: fetchError } = await supabase
+    .from("source_extraction_queue")
+    .select("source_id")
+    .eq("status", "pending")
+    .order("queued_at", { ascending: true })
+    .limit(limit);
+  if (fetchError || !pending || pending.length === 0) return [];
+  const ids = pending.map((p) => p.source_id);
+  const { data: claimed, error: updateError } = await supabase
+    .from("source_extraction_queue")
+    .update({
+      status: "processing",
+      started_at: new Date().toISOString(),
+      worker_version: WORKER_VERSION,
+    })
+    .in("source_id", ids)
+    .eq("status", "pending")
+    .select("source_id");
+  if (updateError) {
+    console.error("Failed to claim source queue items:", updateError);
+    return [];
+  }
+  return claimed ?? [];
+}
+
+async function markSourceComplete(sourceId: string): Promise<void> {
+  await supabase
+    .from("source_extraction_queue")
+    .update({ status: "complete", processed_at: new Date().toISOString() })
+    .eq("source_id", sourceId);
+}
+
+async function markSourceError(sourceId: string, error: string, attemptCount: number): Promise<void> {
+  const newStatus = attemptCount + 1 >= MAX_ATTEMPTS ? "failed" : "pending";
+  const isRetry = newStatus === "pending";
+  await supabase
+    .from("source_extraction_queue")
+    .update({
+      status: newStatus,
+      attempt_count: attemptCount + 1,
+      last_error: error.slice(0, 500),
+      processed_at: newStatus === "failed" ? new Date().toISOString() : null,
+      started_at: isRetry ? null : undefined,
+      worker_version: isRetry ? null : undefined,
+    })
+    .eq("source_id", sourceId);
+}
+
+/** Real source↔entity link (analogue of linkThoughtEntity). */
+async function linkSourceEntity(
+  sourceId: string,
+  entityId: number,
+  confidence: number,
+): Promise<boolean> {
+  const { error } = await supabase
+    .from("source_entities")
+    .upsert(
+      { source_id: sourceId, entity_id: entityId, mention_role: "mentioned", confidence },
+      { onConflict: "source_id,entity_id" },
+    );
+  if (error) {
+    console.error(`Failed to link source ${sourceId} -> entity ${entityId}:`, error);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Drain the source-extraction queue: extract entities/relations from
+ * source CONTENT and write REAL source↔entity links + shared edges.
+ * This is what makes the wiki cite sources that are genuinely about an
+ * entity (no more semantic-NN bleed). Self-contained: own claim loop,
+ * budget, and summary; reuses extractEntities/upsertEntity/upsertEdge.
+ */
+async function drainSources(limit: number, dryRun: boolean, startTime: number): Promise<Response> {
+  const INVOCATION_BUDGET_MS = 140_000;
+  const claimed = dryRun ? await peekSourceQueue(limit) : await claimSourceQueue(limit);
+  const summary = {
+    queue: "sources",
+    processed: 0, succeeded: 0, failed: 0,
+    entities_created: 0, edges_created: 0,
+    dry_run: dryRun, truncated: false, truncated_reason: null as string | null,
+    llm_calls: 0, details: [] as Record<string, unknown>[],
+  };
+  if (claimed.length === 0) return json(summary);
+
+  for (const item of claimed) {
+    const elapsed = Date.now() - startTime;
+    const capTripped =
+      ENTITY_EXTRACTION_MAX_CALLS > 0 && llmCallCount >= ENTITY_EXTRACTION_MAX_CALLS;
+    if (elapsed >= INVOCATION_BUDGET_MS || capTripped) {
+      summary.truncated = true;
+      summary.truncated_reason = capTripped ? "call_cap_reached" : "wall_clock_budget";
+      if (!dryRun) {
+        const remaining = claimed.slice(claimed.indexOf(item)).map((r) => r.source_id);
+        if (remaining.length > 0) {
+          await supabase
+            .from("source_extraction_queue")
+            .update({ status: "pending", started_at: null, worker_version: null })
+            .in("source_id", remaining)
+            .eq("status", "processing");
+        }
+      }
+      break;
+    }
+    summary.processed++;
+
+    const { data: src, error: srcErr } = await supabase
+      .from("sources")
+      .select("id, content")
+      .eq("id", item.source_id)
+      .single();
+    if (srcErr || !src?.content) {
+      if (!dryRun) await markSourceError(item.source_id, srcErr?.message ?? "Source not found", 0);
+      summary.failed++;
+      continue;
+    }
+
+    const { data: q } = await supabase
+      .from("source_extraction_queue")
+      .select("attempt_count")
+      .eq("source_id", item.source_id)
+      .single();
+    const attemptCount = q?.attempt_count ?? 0;
+
+    let result: ExtractionResult;
+    try {
+      result = await extractEntities(String(src.content).slice(0, 16000));
+    } catch (err) {
+      if (err instanceof ExtractionCostCapError) {
+        summary.truncated = true;
+        summary.truncated_reason = "call_cap_reached";
+        if (!dryRun) {
+          const remaining = claimed.slice(claimed.indexOf(item)).map((r) => r.source_id);
+          if (remaining.length > 0) {
+            await supabase
+              .from("source_extraction_queue")
+              .update({ status: "pending", started_at: null, worker_version: null })
+              .in("source_id", remaining)
+              .eq("status", "processing");
+          }
+        }
+        break;
+      }
+      const m = err instanceof Error ? err.message : String(err);
+      if (!dryRun) await markSourceError(item.source_id, m, attemptCount);
+      summary.failed++;
+      continue;
+    }
+
+    if (dryRun) {
+      summary.details.push({ source_id: item.source_id, entities: result.entities });
+      summary.entities_created += result.entities.length;
+      summary.edges_created += result.relationships.length;
+      summary.succeeded++;
+      continue;
+    }
+
+    // Idempotent re-extraction: we own all source_entities for this
+    // source, so clear ours before rewriting.
+    await supabase.from("source_entities").delete().eq("source_id", item.source_id);
+
+    const nameToId = new Map<string, number>();
+    for (const e of result.entities) {
+      const id = await upsertEntity(e.name, e.type);
+      if (!id) continue;
+      nameToId.set(normalizeName(e.name), id);
+      summary.entities_created++;
+      await linkSourceEntity(item.source_id, id, e.confidence);
+    }
+    for (const rel of result.relationships) {
+      const f = nameToId.get(normalizeName(rel.from));
+      const t = nameToId.get(normalizeName(rel.to));
+      if (!f || !t || f === t) continue;
+      if (await upsertEdge(f, t, rel.relation, rel.confidence)) summary.edges_created++;
+    }
+
+    await markSourceComplete(item.source_id);
+    summary.succeeded++;
+  }
+
+  summary.llm_calls = llmCallCount;
+  (summary as Record<string, unknown>).elapsed_ms = Date.now() - startTime;
+  return json(summary);
+}
+
 // ── Main Handler ────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
@@ -599,6 +799,12 @@ Deno.serve(async (req) => {
   // return a real JSON response rather than a 504.
   const INVOCATION_BUDGET_MS = 140_000;
   const startTime = Date.now();
+
+  // Route: POST /sources drains the source-extraction queue (real
+  // source↔entity links). Anything else = the thought queue (unchanged).
+  if (url.pathname.replace(/\/+$/, "").endsWith("/sources")) {
+    return await drainSources(limit, dryRun, startTime);
+  }
 
   // Step 1: Fetch queue items — peek only for dry-run, claim for real processing
   const claimed = dryRun
