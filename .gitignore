@@ -30,3 +30,4 @@ integrations/openclaw-agent-memory/dist/
 # mcpo config files embed the x-brain-key secret — never commit them
 docker/mcpo*.config.json
 docker/.env
+open-brain-wiki-data.ssh
