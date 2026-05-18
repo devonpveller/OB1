@@ -26,7 +26,14 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// Local-repoint (self-hosted fork): never OpenRouter. Summarization ->
+// llama-swap (qwen36-27b:nothink); embeddings -> llama-cpp-embed (bge-m3,
+// 1024-dim, matches thoughts.embedding vector(1024)). Runs inside Docker, so
+// defaults are internal service names; the bearer is a non-secret placeholder.
+const LLM_BASE = process.env.LOCAL_LLM_BASE || "http://llama-cpp:8080/v1";
+const LLM_MODEL = process.env.LOCAL_LLM_MODEL || "qwen36-27b:nothink";
+const EMBED_BASE = process.env.LOCAL_EMBED_BASE || "http://llama-cpp-embed:8080/v1";
+const EMBED_MODEL = process.env.LOCAL_EMBED_MODEL || "bge-m3";
 const SYNC_LOG_PATH = "google-activity-sync-log.json";
 
 // Categories worth importing (skip low-signal ones like Ads, Assistant, etc.)
@@ -276,13 +283,13 @@ async function summarizeDay(category, day, entries) {
   const truncated = transcript.slice(0, 6000);
 
   const resp = await httpPost(
-    `${OPENROUTER_BASE}/chat/completions`,
+    `${LLM_BASE}/chat/completions`,
     {
       "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
     {
-      model: "openai/gpt-4o-mini",
+      model: LLM_MODEL,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: SUMMARIZATION_PROMPT },
@@ -315,13 +322,13 @@ async function generateEmbedding(text) {
   const truncated = text.slice(0, 8000);
 
   const resp = await httpPost(
-    `${OPENROUTER_BASE}/embeddings`,
+    `${EMBED_BASE}/embeddings`,
     {
       "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
     {
-      model: "openai/text-embedding-3-small",
+      model: EMBED_MODEL,
       input: truncated,
     }
   );
