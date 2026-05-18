@@ -31,3 +31,4 @@ integrations/openclaw-agent-memory/dist/
 docker/mcpo*.config.json
 docker/.env
 open-brain-wiki-data.ssh
+/recipes/brain-backup

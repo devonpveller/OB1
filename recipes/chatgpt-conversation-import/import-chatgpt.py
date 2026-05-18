@@ -67,7 +67,13 @@ from chatgpt_parser import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 SYNC_LOG_PATH = SCRIPT_DIR / "chatgpt-sync-log.json"
 
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+# Local-repoint (self-hosted fork): never OpenRouter. Extraction -> llama-swap
+# (qwen36-27b:nothink) at :8081; embeddings -> llama-cpp-embed (bge-m3, 1024-dim)
+# at :8082. Both are OpenAI-compatible; the bearer is a non-secret placeholder
+# (llama.cpp ignores it). Override via env if the host ports differ.
+OPENROUTER_BASE = os.environ.get("LOCAL_LLM_BASE", "http://127.0.0.1:8081/v1")
+EMBEDDING_BASE = os.environ.get("LOCAL_EMBED_BASE", "http://127.0.0.1:8082/v1")
+EMBEDDING_MODEL = os.environ.get("LOCAL_EMBED_MODEL", "bge-m3")
 OLLAMA_BASE = "http://localhost:11434"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -461,17 +467,22 @@ def summarize(title, date_str, dialogue_text, message_count, model_slug, args):
 
 
 def generate_embedding(text):
-    """Generate a 1536-dim embedding via OpenRouter (text-embedding-3-small)."""
+    """Generate a local 1024-dim embedding via llama-cpp-embed (bge-m3).
+
+    Repointed off OpenRouter to the self-hosted OpenAI-compatible embed
+    endpoint; output dimension matches the fork's thoughts.embedding
+    vector(1024) column.
+    """
     truncated = text[:8000]
 
     resp = http_post_with_retry(
-        f"{OPENROUTER_BASE}/embeddings",
+        f"{EMBEDDING_BASE}/embeddings",
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
         },
         body={
-            "model": "openai/text-embedding-3-small",
+            "model": EMBEDDING_MODEL,
             "input": truncated,
         },
     )
@@ -734,7 +745,7 @@ Examples:
     parser.add_argument("--min-messages", type=int, default=0, help="Override minimum message count for filtering")
     parser.add_argument("--min-words", type=int, default=0, help="Override minimum word count for borderline filtering (default: 50)")
     parser.add_argument("--max-words", type=int, default=50000, help="Skip conversations exceeding this word count (default: 50000, ~$1+ per conversation with gpt-4o)")
-    parser.add_argument("--openrouter-model", default="openai/gpt-4o-mini", help="OpenRouter model for extraction (default: openai/gpt-4o-mini)")
+    parser.add_argument("--openrouter-model", default=os.environ.get("LOCAL_LLM_MODEL", "qwen36-27b:nothink"), help="Extraction model on the local OpenAI-compatible endpoint (default: qwen36-27b:nothink)")
     parser.add_argument("--focus", type=str, default=None, metavar="TOPICS", help="""\
 Focus extraction on specific topics. Accepts a preset name or custom description.
 

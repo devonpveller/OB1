@@ -240,8 +240,10 @@ services:
   # Wiki compiler + scheduler + on-demand trigger. Runs the (B.2/B.3-
   # extended) entity-wiki recipe --batch into the shared wiki volume,
   # then git-commits (D16: local commits only — no remote, no secrets).
-  # Compiles on boot, every RECOMPILE_INTERVAL_HOURS, and on
-  # POST /recompile (called by the wiki_trigger_recompile MCP tool).
+  # Compiles: on boot, deterministically at WIKI_RECOMPILE_HOUR local
+  # time daily (default 01:00 — set TZ so that = your 1am), whenever new
+  # research/sources/thoughts settle (change-watch, debounced), and on
+  # POST /recompile (the wiki_trigger_recompile MCP tool).
   # obnet (openbrain-rest) + llm-net (qwen36-27b:nothink / bge-m3).
   openbrain-wiki:
     build:
@@ -266,8 +268,18 @@ services:
       WIKI_OUT_DIR: /wiki/content
       WIKI_GIT_DIR: /wiki
       RECIPE_PATH: /recipes/entity-wiki/generate-wiki.mjs
-      RECOMPILE_INTERVAL_HOURS: "24"
-      COMPILE_ON_BOOT: "true"
+      # ── Wiki compile schedule (override via .env / shell, no edits
+      #    needed): WIKI_TZ, WIKI_RECOMPILE_HOUR, WIKI_WATCH_* ──────────
+      # Timezone the daily hour is interpreted in (IANA name; handles
+      # EST/EDT automatically). Default America/New_York (US Eastern).
+      TZ: ${WIKI_TZ:-America/New_York}
+      # Deterministic daily compile at this LOCAL hour (0-23), in TZ above.
+      WIKI_RECOMPILE_HOUR: ${WIKI_RECOMPILE_HOUR:-1}
+      # Change-driven recompile: research/sources land → debounced compile
+      # a few minutes after activity settles (no fixed-interval GPU churn).
+      WIKI_WATCH_ENABLED: ${WIKI_WATCH_ENABLED:-true}
+      WIKI_WATCH_INTERVAL_MIN: ${WIKI_WATCH_INTERVAL_MIN:-3}
+      COMPILE_ON_BOOT: ${WIKI_COMPILE_ON_BOOT:-true}
       WIKI_BATCH_MIN_LINKED: "1"
       WIKI_MAX_SOURCES: "5"
       # Optional notebook/project scoping (req 10). Empty = whole brain.

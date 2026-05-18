@@ -13,8 +13,10 @@
  *   OPEN_BRAIN_SERVICE_KEY MCP_ACCESS_KEY
  *   WIKI_OUT_DIR (=/wiki/content)  WIKI_GIT_DIR (=/wiki)
  *   RECIPE_PATH (=/recipes/entity-wiki/generate-wiki.mjs)
- *   RECOMPILE_INTERVAL_HOURS (=24)  COMPILE_ON_BOOT (=true)
+ *   WIKI_RECOMPILE_HOUR (=1, local-time daily) COMPILE_ON_BOOT (=true)
+ *   WIKI_WATCH_ENABLED (=true) WIKI_WATCH_INTERVAL_MIN (=3)
  *   WIKI_BATCH_MIN_LINKED (=1)  WIKI_MAX_SOURCES (=5)  PORT (=8000)
+ *   TZ (set on the service so the daily hour = your local time)
  */
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
@@ -31,8 +33,16 @@ const WIKI_OUT_DIR = ENV.WIKI_OUT_DIR || "/wiki/content";
 const WIKI_GIT_DIR = ENV.WIKI_GIT_DIR || "/wiki";
 const RECIPE_PATH = ENV.RECIPE_PATH || "/recipes/entity-wiki/generate-wiki.mjs";
 const SYNTH_PATH = ENV.SYNTH_PATH || "/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs";
-const INTERVAL_MS = Math.max(1, Number(ENV.RECOMPILE_INTERVAL_HOURS || "24")) * 3600_000;
+// Deterministic daily compile at a fixed local-time hour (default 01:00),
+// NOT a 24h-from-boot interval (that drifts and can hit during work).
+// Set the container TZ so this hour means your local time.
+const RECOMPILE_HOUR = Math.min(23, Math.max(0, Number(ENV.WIKI_RECOMPILE_HOUR || "1")));
 const COMPILE_ON_BOOT = (ENV.COMPILE_ON_BOOT || "true") !== "false";
+// Change-driven recompile: poll OpenBrain for new/edited sources or
+// thoughts since the last compile; when activity settles (no new arrivals
+// for one watch interval = debounce/coalesce a research burst), compile.
+const WATCH_ENABLED = (ENV.WIKI_WATCH_ENABLED || "true") !== "false";
+const WATCH_INTERVAL_MIN = Math.max(1, Number(ENV.WIKI_WATCH_INTERVAL_MIN || "3"));
 const BATCH_MIN_LINKED = ENV.WIKI_BATCH_MIN_LINKED || "1";
 const BATCH_LIMIT = ENV.WIKI_BATCH_LIMIT || "1000";
 const MAX_SOURCES = ENV.WIKI_MAX_SOURCES || "5";
@@ -545,8 +555,77 @@ const httpServer = createServer((req, res) => {
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`[wiki-service] listening on :${PORT} (interval ${INTERVAL_MS / 3600000}h)`);
+  console.log(
+    `[wiki-service] listening on :${PORT} ` +
+      `(daily compile ~${String(RECOMPILE_HOUR).padStart(2, "0")}:00 local; ` +
+      `change-watch ${WATCH_ENABLED ? `every ${WATCH_INTERVAL_MIN}m` : "off"})`,
+  );
 });
 
+// ── Deterministic daily compile at RECOMPILE_HOUR local time ────────────────
+function msUntilNextDaily() {
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(RECOMPILE_HOUR, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  return next.getTime() - now.getTime();
+}
+function scheduleDaily() {
+  const ms = msUntilNextDaily();
+  console.log(
+    `[wiki-service] next daily compile in ${(ms / 3600000).toFixed(1)}h ` +
+      `(~${String(RECOMPILE_HOUR).padStart(2, "0")}:00 local)`,
+  );
+  setTimeout(async () => {
+    await compile("daily").catch(() => {});
+    scheduleDaily();
+  }, ms);
+}
+
+// ── Change-driven recompile (debounced) ─────────────────────────────────────
+// Poll OpenBrain for sources/thoughts newer than the last compile. Only
+// compile once activity SETTLES: a tick must see no growth vs the prior
+// tick (so a research burst coalesces into one compile a few minutes
+// after it stops landing) — no GPU churn while nothing changed.
+let _watchPrevCount = -1;
+async function changeWatchTick() {
+  try {
+    // Stand down entirely while ANY compile (boot/daily/on-demand/change)
+    // is in progress. Firing compile() now would just skip (running
+    // guard) without advancing last_compile_iso → the watcher would
+    // re-detect the same rows forever (infinite-loop bug). Let the
+    // running compile finish and advance the watermark first.
+    if (running) return;
+    const st = await readState();
+    const since = st.last_compile_iso;
+    if (!since) return; // no baseline yet (pre-first-compile)
+    const enc = encodeURIComponent(since);
+    const orF = `or=(created_at.gt.${enc},updated_at.gt.${enc})`;
+    let n = 0;
+    for (const tbl of ["sources", "thoughts"]) {
+      const rows = await obFetch("GET", `${tbl}?select=id&${orF}&limit=200`);
+      n += Array.isArray(rows) ? rows.length : 0;
+    }
+    if (n === 0) { _watchPrevCount = -1; return; }
+    if (_watchPrevCount === n) {
+      // Settled (no new arrivals since the previous tick) → compile.
+      // compile() advances last_compile_iso on success, so the next
+      // tick's query returns ~0 and the watcher goes quiet.
+      console.log(`[wiki-service] change-watch: ${n} new since last compile, settled → compiling`);
+      _watchPrevCount = -1;
+      const r = await compile("change").catch(() => ({ skipped: true }));
+      // If it skipped (a compile slipped in), keep the count so the
+      // next idle tick retries rather than dropping the signal.
+      if (r && r.skipped) _watchPrevCount = n;
+    } else {
+      console.log(`[wiki-service] change-watch: ${n} new (was ${_watchPrevCount}); waiting for quiet`);
+      _watchPrevCount = n;
+    }
+  } catch (e) {
+    console.error("[wiki-service] change-watch error (non-fatal):", e?.message || e);
+  }
+}
+
 if (COMPILE_ON_BOOT) compile("boot").catch(() => {});
-setInterval(() => compile("scheduled").catch(() => {}), INTERVAL_MS);
+scheduleDaily();
+if (WATCH_ENABLED) setInterval(() => changeWatchTick(), WATCH_INTERVAL_MIN * 60_000);
