@@ -17,6 +17,7 @@ __pycache__/
 .env.local
 .env.*.local
 credentials.json
+client_secret_*.json
 token.json
 gmail-sync-log.json
 sync-log.json

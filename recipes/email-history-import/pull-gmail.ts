@@ -43,7 +43,14 @@ const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || "";
 const INGEST_URL = Deno.env.get("INGEST_URL") || "";
 const INGEST_KEY = Deno.env.get("INGEST_KEY") || "";
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+// Local-repoint (self-hosted fork): never OpenRouter. Metadata extraction ->
+// llama-swap (qwen36-27b:nothink); embeddings -> llama-cpp-embed (bge-m3,
+// 1024-dim, matches thoughts.embedding vector(1024)). Defaults are internal
+// Docker service names; the bearer is a non-secret placeholder.
+const LLM_BASE = Deno.env.get("LOCAL_LLM_BASE") || "http://llama-cpp:8080/v1";
+const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "qwen36-27b:nothink";
+const EMBED_BASE = Deno.env.get("LOCAL_EMBED_BASE") || "http://llama-cpp-embed:8080/v1";
+const EMBED_MODEL = Deno.env.get("LOCAL_EMBED_MODEL") || "bge-m3";
 
 // ─── Sync Log (deduplication) ────────────────────────────────────────────────
 
@@ -584,14 +591,14 @@ function processEmail(msg: GmailMessage): ProcessedEmail | null {
 
 async function getEmbedding(text: string): Promise<number[]> {
   const truncated = text.slice(0, 8000);
-  const res = await fetch(`${OPENROUTER_BASE}/embeddings`, {
+  const res = await fetch(`${EMBED_BASE}/embeddings`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: EMBED_MODEL,
       input: truncated,
     }),
   });
@@ -604,14 +611,14 @@ async function getEmbedding(text: string): Promise<number[]> {
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+  const res = await fetch(`${LLM_BASE}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
+      model: LLM_MODEL,
       response_format: { type: "json_object" },
       messages: [
         {
