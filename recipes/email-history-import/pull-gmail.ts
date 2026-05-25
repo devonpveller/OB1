@@ -107,7 +107,11 @@ function parseArgs(): CliArgs {
     if (arg.startsWith("--window=")) {
       args.window = arg.split("=")[1];
     } else if (arg.startsWith("--labels=")) {
-      args.labels = arg.split("=")[1].split(",").map((l) => l.trim().toUpperCase());
+      // Preserve case: user-created labels are case-sensitive (e.g. "Notes",
+      // "Work - IST"). System labels (SENT/INBOX/STARRED/IMPORTANT) are
+      // upper-case anyway, so this is safe for both. Name→ID resolution
+      // happens later via the /labels API.
+      args.labels = arg.split("=")[1].split(",").map((l) => l.trim());
     } else if (arg === "--dry-run") {
       args.dryRun = true;
     } else if (arg.startsWith("--limit=")) {
@@ -590,7 +594,11 @@ function processEmail(msg: GmailMessage): ProcessedEmail | null {
 // ─── Embedding & Metadata (Supabase direct mode) ───────────────────────────
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const truncated = text.slice(0, 8000);
+  // Local bge-m3 has a 512-token physical batch. ~3.5 chars/token in noisy
+  // email bodies (URLs, HTML remnants) plus 5.4 tokens/word seen in practice
+  // ⇒ keep the embed input well under that. Full content still lands in the
+  // `content` column; only the embedding vector is from the truncated head.
+  const truncated = text.slice(0, 1500);
   const res = await fetch(`${EMBED_BASE}/embeddings`, {
     method: "POST",
     headers: {
@@ -818,6 +826,30 @@ async function main() {
   for (const l of allLabels) {
     labelMap.set(l.id, l.name);
   }
+
+  // Resolve user-supplied label names -> Gmail IDs. System labels
+  // (SENT/INBOX/STARRED/IMPORTANT/...) use their name as the ID and pass
+  // through; user-created labels have IDs like Label_8 that don't match the
+  // name Gmail returns, so we look them up. Unknown names produce a hard
+  // error early instead of a downstream 400 from Gmail.
+  const nameToId = new Map<string, string>();
+  for (const l of allLabels) {
+    nameToId.set(l.name, l.id);
+    nameToId.set(l.id, l.id);
+  }
+  const resolved: string[] = [];
+  const unknown: string[] = [];
+  for (const requested of args.labels) {
+    const id = nameToId.get(requested);
+    if (id) resolved.push(id);
+    else unknown.push(requested);
+  }
+  if (unknown.length > 0) {
+    console.error(`\nUnknown label(s): ${unknown.join(", ")}`);
+    console.error("Run with --list-labels to see all available labels for this account.");
+    Deno.exit(1);
+  }
+  args.labels = resolved;
 
   // Determine ingestion mode
   const useEndpoint = args.ingestEndpoint;

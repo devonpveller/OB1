@@ -282,6 +282,12 @@ services:
       COMPILE_ON_BOOT: ${WIKI_COMPILE_ON_BOOT:-true}
       WIKI_BATCH_MIN_LINKED: "1"
       WIKI_MAX_SOURCES: "5"
+      # Recipe-execution timeouts (minutes). A FULL compile of the whole
+      # graph plus topic synthesis can outrun 1-2h once the thought corpus
+      # grows; killing pexec mid-write leaves an unstaged dirty tree that
+      # blocks the next pull --rebase. Generous defaults; tune if needed.
+      WIKI_COMPILE_TIMEOUT_MIN: ${WIKI_COMPILE_TIMEOUT_MIN:-240}
+      WIKI_SYNTH_TIMEOUT_MIN: ${WIKI_SYNTH_TIMEOUT_MIN:-120}
       # Optional notebook/project scoping (req 10). Empty = whole brain.
       # Set to a notebook name to compile only in-scope sources + thoughts
       # (thoughts tagged metadata.notebook=<name>).

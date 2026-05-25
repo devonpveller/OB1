@@ -57,6 +57,14 @@ const WORKER_URL = ENV.WORKER_URL || "http://openbrain-entity-worker:8000";
 const DRAIN_BEFORE_COMPILE = (ENV.DRAIN_BEFORE_COMPILE || "true") !== "false";
 const WORKER_DRAIN_MAX_MIN = Math.max(1, Number(ENV.WORKER_DRAIN_MAX_MIN || "30"));
 
+// Recipe-execution timeouts. A FULL compile of the whole graph + topic
+// synthesis can outrun the prior 55/30-min defaults once the thought
+// corpus grows (post-import floods of new entities). Killing pexec
+// mid-write leaves an unstaged dirty tree that blocks the next
+// pull --rebase (Catch-22). Defaults raised; tunable per environment.
+const COMPILE_TIMEOUT_MS = Math.max(1, Number(ENV.WIKI_COMPILE_TIMEOUT_MIN || "120")) * 60_000;
+const SYNTH_TIMEOUT_MS = Math.max(1, Number(ENV.WIKI_SYNTH_TIMEOUT_MIN || "60")) * 60_000;
+
 // Optional private-remote push (opt-in; unset = D16 local-commits-only,
 // unchanged). WIKI_GIT_REMOTE is an SSH URL; WIKI_GIT_SSH_KEY is the
 // mounted (gitignored) deploy private key; pushes go to WIKI_GIT_BRANCH.
@@ -436,7 +444,7 @@ async function compile(reason) {
     const { stdout } = await pexec("node", args, {
       env: childEnv,
       maxBuffer: 32 * 1024 * 1024,
-      timeout: 55 * 60_000,
+      timeout: COMPILE_TIMEOUT_MS,
     });
     let tail = stdout.trim().split("\n").slice(-3).join(" | ");
 
@@ -446,7 +454,7 @@ async function compile(reason) {
       const { stdout: so } = await pexec("node", [SYNTH_PATH], {
         env: childEnv,
         maxBuffer: 32 * 1024 * 1024,
-        timeout: 30 * 60_000,
+        timeout: SYNTH_TIMEOUT_MS,
       });
       tail += " | " + so.trim().split("\n").slice(-1)[0];
     } catch (e) {
@@ -516,9 +524,31 @@ async function compile(reason) {
     return { ok: true, committed, summary: tail };
   } catch (e) {
     const msg = (e?.stderr || e?.message || String(e)).toString().slice(0, 1000);
-    lastStatus = { state: "idle", at: new Date().toISOString(), ok: false, error: msg };
-    console.error("[wiki-service] compile FAILED:", msg);
-    return { ok: false, error: msg };
+    // Recovery commit: snapshot any files the recipe wrote before throwing,
+    // so the next cycle's pull --rebase doesn't fail on a dirty tree
+    // (otherwise: throw → unstaged files → rebase blocked → loop forever).
+    let recoveryCommitted = false;
+    try {
+      await git(["add", "-A"]);
+      const { stdout: status } = await git(["status", "--porcelain"]);
+      if (status.trim()) {
+        const ts = new Date().toISOString();
+        await git(["commit", "-q", "-m",
+          `wiki compile RECOVERY ${ts} — partial work after error: ${msg.slice(0, 200)}`,
+        ]);
+        recoveryCommitted = true;
+        if (GIT_REMOTE) await gitPush().catch(() => {});
+      }
+    } catch (_) { /* recovery is best-effort; never mask the original error */ }
+    lastStatus = {
+      state: "idle", at: new Date().toISOString(), ok: false,
+      error: msg, recovery_committed: recoveryCommitted,
+    };
+    console.error(
+      `[wiki-service] compile FAILED (recovery_committed=${recoveryCommitted}):`,
+      msg,
+    );
+    return { ok: false, error: msg, recovery_committed: recoveryCommitted };
   } finally {
     running = false;
   }
