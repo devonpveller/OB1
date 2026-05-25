@@ -1,6 +1,8 @@
 # Gmail → Open Brain — Scheduled Pull (design)
 
-**Status:** Design only. Not yet implemented. Build is a later turn.
+**Status:** Implemented (2026-05-25). Recipe patches, prune script,
+wiki delete-propagation (DB trigger + compiler orphan-sweep), and
+scheduled-task wrappers are in place.
 
 ## Purpose
 
@@ -49,6 +51,24 @@ hand-launched runs after this is in place.
       original labels in the brain. Source-of-truth lives in Gmail.
 11. **Deletes in Gmail do not propagate.** Accepted. The brain is a
     snapshot/archive; if you want a row gone, delete it directly.
+12. **Wiki delete-propagation is in scope.** Brain deletes MUST propagate
+    to the wiki — orphan pages from pruned thoughts are a bug, not an
+    accepted trade-off. Two coupled mechanisms make this work:
+    - **DB trigger** (`init-graph.sql`) — on `DELETE FROM thoughts`,
+      bump `entities.updated_at` for every entity in the cascade-deleted
+      `thought_entities` rows. This puts the affected entities into the
+      next wiki compile's "dirty" set so their pages regenerate.
+    - **Compiler orphan sweep** (`wiki-service.mjs`) — after every
+      compile, query the DB for the authoritative kept-set
+      (entities with `linked_thought_count >= WIKI_BATCH_MIN_LINKED`)
+      and delete any `content/<type>/<slug>.md` file not in that set.
+      Same idea for `content/topic/<slug>.md` against active notebooks.
+13. **Daily ordering: pull → prune → wiki compile.** All three serial,
+    in this order. The wiki's in-container daily scheduler is moved off
+    01:00 to avoid colliding with the pull; the prune script triggers
+    the wiki by POSTing `/recompile` to `openbrain-wiki:8000` at the
+    end of its run, so ordering is enforced by the prune script itself,
+    not by clock-math.
 
 ## Components to build
 
@@ -68,23 +88,54 @@ hand-launched runs after this is in place.
 
 ### B. Prune job (new, small)
 
-- Standalone script. Could be a tiny Python or Deno script — anything
-  that can hit the local PostgREST proxy. Same dual-network container
-  pattern as the import.
+- Standalone Deno script alongside the recipe
+  (`recipes/email-history-import/prune-short-term.ts`). Same
+  dual-network container pattern as the import.
 - Logic: `DELETE` from `thoughts` where `metadata->>source = 'gmail'`
   AND `metadata->'gmail_labels' ? 'brain/keep-short-term'` AND
   `(metadata->>email_date)::timestamptz < now() - interval '<retention> days'`.
 - Logs what it deleted (count + a sample of subjects/dates) for the
   morning review trail. Idempotent — safe to re-run.
+- **After deletion, POSTs to `http://openbrain-wiki:8000/recompile`**
+  with the `MCP_ACCESS_KEY` header so the wiki regenerates dirty entity
+  pages and runs the orphan sweep on the post-prune brain state.
 
-### C. Scheduling (Windows Task Scheduler)
+### B'. Wiki delete-propagation (new, in two places)
 
-- **Task 1: pull** — daily, 1:00 local, runs the recipe in the
+- **DB trigger** added in `docker/init-graph.sql`: a `BEFORE DELETE`
+  trigger on `thoughts` that bumps `entities.updated_at = now()` for
+  every entity linked through `thought_entities` to the dying thought.
+  Effect: those entities land in the next compile's `dirtyEntityIds`
+  set automatically, so their pages get rewritten with the now-missing
+  source removed.
+- **Orphan sweep** added in `docker/wiki-service/wiki-service.mjs` at
+  the end of each compile, before the git-commit step:
+  1. Query the authoritative kept-set from the DB
+     (entities with at least `WIKI_BATCH_MIN_LINKED` linked thoughts).
+  2. Compute expected files `content/<type>/<slug>.md` (using the
+     pinned `wiki_slug` when present).
+  3. Walk `content/<type>/*.md` on disk; delete any file not in the
+     expected set.
+  4. Same logic for `content/topic/<slug>.md` against notebooks that
+     still have ≥1 source.
+  5. Deletions become part of the same compile commit, so the git log
+     shows the wiki shrinking in lockstep with the brain.
+
+### C. Scheduling (Windows Task Scheduler) — order: pull → prune → wiki
+
+- **Task 1: pull** — daily, 01:00 local, runs the recipe in the
   dual-network container with `--labels-prefix=brain/`. Reuse the
   pattern from the one-shot ChatGPT scheduled task
   (`OB1-ChatGPT-Full-Import`) but recurring.
-- **Task 2: prune** — daily, 1:30 local (after the pull is reasonably
-  done). Runs the prune script.
+- **Task 2: prune** — daily, 01:30 local (after the pull is reasonably
+  done). Runs the prune script, which deletes expired
+  `brain/keep-short-term` rows and then POSTs `/recompile` to the wiki
+  service. Wiki regen + orphan sweep happen inside that triggered run.
+- **Wiki's in-container daily scheduler is moved off 01:00**
+  (`WIKI_RECOMPILE_HOUR=4`) so it cannot race the pull. Change-watch
+  remains on, so any work landed by the pull will trigger a debounced
+  recompile naturally — and the explicit POST from the prune script is
+  the authoritative end-of-cycle compile.
 - Both tasks log to `D:\_data\gmail-pull-<timestamp>.log` and
   `D:\_data\gmail-prune-<timestamp>.log` for morning review.
 - Both inherit the Docker Desktop / interactive-logon caveat: machine
@@ -97,11 +148,14 @@ hand-launched runs after this is in place.
   Llama-swap queues; nothing fails, just slows. If contention becomes
   a problem, stagger the pull (e.g. 2am) — config decision, not a code
   decision.
-- **Wiki cascading.** Every new gmail thought feeds the wiki on its
-  next regeneration. Pruning removes thoughts → wiki regenerates
-  without them. Wiki agent owns that pipeline (out of scope here);
-  design assumes the prune happens before whatever the wiki agent uses
-  as its source-of-truth read window for the next regen.
+- **Wiki delete-propagation (now in scope, see locked decision 12).**
+  Default wiki compile is incremental and skips deletes — orphan pages
+  would remain forever. Resolved with the DB trigger + compiler
+  orphan-sweep. Verify in the morning log that the wiki commit after a
+  prune actually contains `D <type>/<slug>.md` lines when retention
+  removed rows. The first scheduled prune-with-deletions should be
+  spot-checked: pick a deleted email's `gmail_id` from the prune log,
+  then `grep -r <id>` the wiki content to confirm it's gone.
 - **OAuth token rot.** The Google refresh token lives in `token.json`
   and refreshes automatically on each run. If the user revokes the
   OAuth grant in their Google account, the daily pull breaks until
@@ -126,8 +180,10 @@ hand-launched runs after this is in place.
 - **No prune by ingestion date.** Only by email received date.
 - **No prune of long-term `brain/*` rows.** Only `brain/keep-short-term`
   is subject to retention.
-- **No wiki coordination.** Wiki regeneration is owned by the parallel
-  wiki agent; this design doesn't touch it.
+- **No bidirectional sync from wiki to brain.** The compiler's
+  delete-propagation only operates wiki ← brain. A hand-edit or hand
+  deletion of a `content/*.md` file is reverted on the next compile.
+  (Note files under `notes/` are user-owned and remain untouched.)
 
 ## File / artifact locations (planned)
 

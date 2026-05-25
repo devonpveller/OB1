@@ -222,6 +222,36 @@ CREATE TRIGGER trg_queue_entity_extraction
   FOR EACH ROW
   EXECUTE FUNCTION public.queue_entity_extraction();
 
+-- Wiki delete-propagation. When a thought is deleted, every entity it
+-- linked through thought_entities loses a citation; bump those entities'
+-- updated_at so the next wiki compile's dirtyEntityIds() picks them up
+-- and regenerates the page (orphan sweep then deletes any page whose
+-- entity has fallen below WIKI_BATCH_MIN_LINKED). Without this, the
+-- cascade FK silently drops thought_entities rows and the wiki keeps
+-- ghost pages citing the deleted source.
+CREATE OR REPLACE FUNCTION public.touch_entities_for_deleted_thought()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE public.entities
+     SET updated_at = now()
+   WHERE id IN (
+     SELECT entity_id FROM public.thought_entities
+      WHERE thought_id = OLD.id
+   );
+  RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_touch_entities_on_thought_delete ON public.thoughts;
+CREATE TRIGGER trg_touch_entities_on_thought_delete
+  BEFORE DELETE ON public.thoughts
+  FOR EACH ROW
+  EXECUTE FUNCTION public.touch_entities_for_deleted_thought();
+
 ALTER TABLE public.entities                ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.edges                   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.thought_entities        ENABLE ROW LEVEL SECURITY;
@@ -274,6 +304,7 @@ GRANT SELECT ON public.entity_extraction_queue TO authenticated;
 GRANT SELECT ON public.consolidation_log       TO authenticated;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
 GRANT EXECUTE ON FUNCTION public.queue_entity_extraction() TO service_role;
+GRANT EXECUTE ON FUNCTION public.touch_entities_for_deleted_thought() TO service_role;
 
 -- ============================================================
 -- 3. TYPED REASONING EDGES (schemas/typed-reasoning-edges,

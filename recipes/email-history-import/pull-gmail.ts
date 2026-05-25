@@ -18,6 +18,24 @@
  * Options:
  *   --window=24h|7d|30d|90d|1y|all  Time window to fetch (default: 24h)
  *   --labels=SENT,STARRED           Comma-separated Gmail labels (default: SENT)
+ *   --labels-prefix=brain/          Dynamic mode: pull every label whose NAME
+ *                                   starts with this prefix (excludes the bare
+ *                                   prefix label, e.g. "brain", and any
+ *                                   prefix+"/keep-short-term" if --short-term-label
+ *                                   was set to that exact value — it's a holding
+ *                                   pen, not part of dynamic discovery). New
+ *                                   sub-labels in Gmail are picked up automatically
+ *                                   on the next run; flat at the API level so this
+ *                                   is the only way hierarchical labels work right.
+ *   --short-term-label=brain/keep-short-term
+ *                                   Holding-pen label. Emails tagged with this AND
+ *                                   older than the short-term retention cutoff are
+ *                                   skipped at pull-time (never embedded, never
+ *                                   inserted). Only enters the brain via a
+ *                                   long-term label.
+ *   --short-term-retention-days=N   Retention cutoff for short-term pre-filter
+ *                                   (default: env BRAIN_SHORT_TERM_RETENTION_DAYS
+ *                                   or 90). Match the value the prune job uses.
  *   --dry-run                       Parse and show emails without ingesting
  *   --limit=N                       Max emails to process (default: 50)
  *   --list-labels                   List all Gmail labels and exit
@@ -87,6 +105,9 @@ async function sha256(text: string): Promise<string> {
 interface CliArgs {
   window: string;
   labels: string[];
+  labelsPrefix: string;
+  shortTermLabel: string;
+  shortTermRetentionDays: number;
   dryRun: boolean;
   limit: number;
   listLabels: boolean;
@@ -94,15 +115,23 @@ interface CliArgs {
 }
 
 function parseArgs(): CliArgs {
+  const envRetention = parseInt(
+    Deno.env.get("BRAIN_SHORT_TERM_RETENTION_DAYS") || "90",
+    10,
+  );
   const args: CliArgs = {
     window: "24h",
     labels: ["SENT"],
+    labelsPrefix: "",
+    shortTermLabel: "brain/keep-short-term",
+    shortTermRetentionDays: Number.isFinite(envRetention) && envRetention > 0 ? envRetention : 90,
     dryRun: false,
     limit: 50,
     listLabels: false,
     ingestEndpoint: false,
   };
 
+  let labelsExplicit = false;
   for (const arg of Deno.args) {
     if (arg.startsWith("--window=")) {
       args.window = arg.split("=")[1];
@@ -112,6 +141,14 @@ function parseArgs(): CliArgs {
       // upper-case anyway, so this is safe for both. Name→ID resolution
       // happens later via the /labels API.
       args.labels = arg.split("=")[1].split(",").map((l) => l.trim());
+      labelsExplicit = true;
+    } else if (arg.startsWith("--labels-prefix=")) {
+      args.labelsPrefix = arg.split("=")[1];
+    } else if (arg.startsWith("--short-term-label=")) {
+      args.shortTermLabel = arg.split("=")[1];
+    } else if (arg.startsWith("--short-term-retention-days=")) {
+      const n = parseInt(arg.split("=")[1], 10);
+      if (Number.isFinite(n) && n > 0) args.shortTermRetentionDays = n;
     } else if (arg === "--dry-run") {
       args.dryRun = true;
     } else if (arg.startsWith("--limit=")) {
@@ -122,6 +159,11 @@ function parseArgs(): CliArgs {
       args.ingestEndpoint = true;
     }
   }
+
+  // If --labels-prefix was supplied without --labels, the resolved list
+  // is populated dynamically in main() from the /labels API. Clear the
+  // SENT default so it doesn't get mixed in.
+  if (args.labelsPrefix && !labelsExplicit) args.labels = [];
 
   return args;
 }
@@ -827,6 +869,31 @@ async function main() {
     labelMap.set(l.id, l.name);
   }
 
+  // Dynamic label discovery (locked decision 2): when --labels-prefix is
+  // set, enumerate every label whose NAME starts with the prefix. The
+  // bare prefix label itself (e.g. "brain" when prefix is "brain/") is
+  // excluded — that exclusion happens for free because the prefix has a
+  // trailing slash. Effect: adding `brain/foo` in Gmail flows in on the
+  // next run with zero config edits.
+  if (args.labelsPrefix) {
+    const discovered = allLabels
+      .filter((l) => l.name.startsWith(args.labelsPrefix))
+      .map((l) => l.name);
+    if (discovered.length === 0) {
+      console.error(
+        `\nNo labels found matching prefix "${args.labelsPrefix}". ` +
+          `Run with --list-labels to see what exists.`,
+      );
+      Deno.exit(1);
+    }
+    // Merge with any --labels= the user also passed; dedupe.
+    args.labels = Array.from(new Set([...args.labels, ...discovered]));
+    console.log(
+      `\nDynamic label discovery (prefix "${args.labelsPrefix}"): ` +
+        `${discovered.length} label(s) — ${discovered.join(", ")}`,
+    );
+  }
+
   // Resolve user-supplied label names -> Gmail IDs. System labels
   // (SENT/INBOX/STARRED/IMPORTANT/...) use their name as the ID and pass
   // through; user-created labels have IDs like Label_8 that don't match the
@@ -895,6 +962,10 @@ async function main() {
   let ingested = 0;
   let errors = 0;
   let totalWords = 0;
+  let shortTermExpired = 0;
+
+  const shortTermCutoffMs =
+    Date.now() - args.shortTermRetentionDays * 24 * 60 * 60 * 1000;
 
   for (const ref of messageRefs) {
     if (syncLog.ingested_ids[ref.id]) {
@@ -917,6 +988,24 @@ async function main() {
       .map((id) => labelMap.get(id) || id)
       .filter((name) => !name.startsWith("CATEGORY_"));
 
+    // Short-term pre-filter (locked decision 8): an email tagged
+    // `brain/keep-short-term` whose received date is already past the
+    // retention cutoff would be inserted by this run and then immediately
+    // deleted by the next prune. Skip it here — never embed, never insert.
+    // The only path into the brain for an old email is via a long-term
+    // brain/<X> label, which this filter does not match.
+    if (args.shortTermLabel && readableLabels.includes(args.shortTermLabel)) {
+      const emailDateMs = Date.parse(email.date);
+      if (Number.isFinite(emailDateMs) && emailDateMs < shortTermCutoffMs) {
+        shortTermExpired++;
+        console.log(
+          `${processed}. [short-term-expired, skipped] ${email.subject || "(no subject)"}` +
+            ` — received ${new Date(email.date).toLocaleDateString()}`,
+        );
+        continue;
+      }
+    }
+
     console.log(`${processed}. ${email.subject || "(no subject)"}`);
     console.log(
       `   From: ${email.from} | ${email.wordCount} words | ${new Date(email.date).toLocaleDateString()}`,
@@ -937,6 +1026,10 @@ async function main() {
       gmail_labels: gmailLabels,
       gmail_id: email.gmailId,
       gmail_thread_id: email.threadId,
+      // Provenance, NOT content. The prune job queries
+      // (metadata->>'email_date')::timestamptz directly; relying on the
+      // LLM-extracted dates_mentioned would mix content into provenance.
+      email_date: email.date,
     };
 
     const content = buildEmailContent(email.body, email.from, email.subject, email.date);
@@ -973,6 +1066,9 @@ async function main() {
   }
   console.log(`  Processed:        ${processed}`);
   console.log(`  Skipped (noise):  ${skipped}`);
+  if (shortTermExpired > 0) {
+    console.log(`  Short-term expired (skipped): ${shortTermExpired}`);
+  }
   console.log(`  Total words:      ${totalWords.toLocaleString()}`);
   if (!args.dryRun) {
     console.log(`  Ingested:         ${ingested}`);

@@ -21,7 +21,7 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile, readFile, copyFile, chmod, rm } from "node:fs/promises";
+import { mkdir, writeFile, readFile, copyFile, chmod, rm, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 const pexec = promisify(execFile);
@@ -394,6 +394,164 @@ async function dirtyEntityIds(prevIso) {
   }
 }
 
+// ── Orphan sweep ────────────────────────────────────────────────────────────
+// Mirror of recipes/entity-wiki/generate-wiki.mjs slugify() (kept in sync
+// by hand; the recipe owns the canonical version). Only used when the
+// entity has no pinned wiki_slug yet.
+function slugifyEntity(name, entityType) {
+  const base = String(name || "")
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "unnamed";
+  return entityType ? `${entityType}-${base}` : base;
+}
+
+function slugifyNotebook(name) {
+  return String(name || "")
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "default";
+}
+
+// Walks one level under outDir/<subdir>/ and returns absolute paths of
+// .md files, skipping README.md.
+async function listEntityFiles(outDir) {
+  const out = [];
+  let typeDirs;
+  try {
+    typeDirs = await readdir(outDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const d of typeDirs) {
+    if (!d.isDirectory()) continue;
+    // `topic/` is handled by sweepOrphanTopics; skip it here so we don't
+    // accidentally sweep topic pages against the entity kept-set.
+    if (d.name === "topic") continue;
+    const dirPath = `${outDir}/${d.name}`;
+    let entries;
+    try {
+      entries = await readdir(dirPath, { withFileTypes: true });
+    } catch { continue; }
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      if (!e.name.endsWith(".md")) continue;
+      if (/^README\.md$/i.test(e.name)) continue;
+      out.push(`${dirPath}/${e.name}`);
+    }
+  }
+  return out;
+}
+
+// Brain → wiki delete-propagation. After each compile, query the
+// authoritative kept-set from OpenBrain (entities meeting the
+// BATCH_MIN_LINKED threshold) and remove any content/<type>/<slug>.md
+// not in that set. This is what makes a thought-delete in the brain
+// erase the corresponding wiki page on the next compile.
+async function sweepOrphanEntityPages() {
+  const minLinked = Math.max(1, Number(BATCH_MIN_LINKED) || 1);
+  // Two queries: (1) every entity with id/type/canonical_name/wiki_slug,
+  // (2) link counts per entity_id. Joining client-side keeps the query
+  // shape simple (PostgREST doesn't easily compose HAVING).
+  let entities = [];
+  let counts = new Map();
+  try {
+    entities = (await obFetch(
+      "GET",
+      "entities?select=id,canonical_name,entity_type,metadata&limit=20000",
+    )) || [];
+    const rows = (await obFetch(
+      "GET",
+      "thought_entities?select=entity_id&limit=200000",
+    )) || [];
+    for (const r of rows) {
+      const k = r.entity_id;
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+  } catch (e) {
+    console.error("[wiki-service] orphan-sweep query failed (skipping sweep):",
+      e?.message || e);
+    return { kept: 0, deleted: 0, error: true };
+  }
+  const kept = new Set();
+  for (const e of entities) {
+    if ((counts.get(e.id) || 0) < minLinked) continue;
+    const slug =
+      (e.metadata && typeof e.metadata.wiki_slug === "string" && e.metadata.wiki_slug.trim())
+      || slugifyEntity(e.canonical_name, e.entity_type);
+    kept.add(`${e.entity_type}/${slug}.md`);
+  }
+  const files = await listEntityFiles(WIKI_OUT_DIR);
+  let deleted = 0;
+  for (const abs of files) {
+    const rel = abs.slice(WIKI_OUT_DIR.length + 1).replace(/\\/g, "/");
+    if (kept.has(rel)) continue;
+    try {
+      await rm(abs, { force: true });
+      deleted++;
+    } catch (e) {
+      console.error(`[wiki-service] orphan-sweep delete failed for ${rel}:`, e?.message || e);
+    }
+  }
+  if (deleted > 0) {
+    console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale entity page(s)`);
+  }
+  return { kept: kept.size, deleted };
+}
+
+// Same idea for topic pages: keep only notebooks that still have at
+// least one source backing them. A notebook whose every source got
+// pruned should not leave a topic page on disk.
+async function sweepOrphanTopicPages() {
+  const topicDir = `${WIKI_OUT_DIR}/topic`;
+  if (!existsSync(topicDir)) return { kept: 0, deleted: 0 };
+  let notebooks = new Set();
+  try {
+    // `sources.metadata.notebook` and `thoughts.metadata.notebook` both
+    // feed topic synthesis. Union the two.
+    for (const tbl of ["sources", "thoughts"]) {
+      const rows = (await obFetch(
+        "GET",
+        `${tbl}?select=metadata&metadata->>notebook=not.is.null&limit=20000`,
+      )) || [];
+      for (const r of rows) {
+        const nb = r?.metadata?.notebook;
+        if (nb) notebooks.add(slugifyNotebook(nb));
+      }
+    }
+  } catch (e) {
+    console.error("[wiki-service] orphan-sweep topic query failed (skipping):",
+      e?.message || e);
+    return { kept: 0, deleted: 0, error: true };
+  }
+  let entries;
+  try { entries = await readdir(topicDir, { withFileTypes: true }); } catch { return { kept: 0, deleted: 0 }; }
+  let deleted = 0;
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    if (!e.name.endsWith(".md")) continue;
+    const slug = e.name.replace(/\.md$/, "");
+    if (notebooks.has(slug)) continue;
+    try {
+      await rm(`${topicDir}/${e.name}`, { force: true });
+      deleted++;
+    } catch (err) {
+      console.error(`[wiki-service] topic orphan delete failed for ${e.name}:`,
+        err?.message || err);
+    }
+  }
+  if (deleted > 0) {
+    console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale topic page(s)`);
+  }
+  return { kept: notebooks.size, deleted };
+}
+
 async function compile(reason) {
   if (running) return { skipped: true, reason: "compile already in progress" };
   running = true;
@@ -485,6 +643,24 @@ async function compile(reason) {
         "",
       ].join("\n"),
     );
+
+    // Brain → wiki delete-propagation. Run AFTER the recipe writes
+    // dirty entity pages and BEFORE we git-commit, so deletions land in
+    // the same commit as regenerations (the git log then shows the wiki
+    // shrinking in lockstep with the brain). Non-fatal: a failed sweep
+    // just leaves stale pages until next compile.
+    let sweepEntities = { kept: 0, deleted: 0 };
+    let sweepTopics = { kept: 0, deleted: 0 };
+    try {
+      sweepEntities = await sweepOrphanEntityPages();
+      sweepTopics = await sweepOrphanTopicPages();
+      if (sweepEntities.deleted || sweepTopics.deleted) {
+        tail += ` | swept ${sweepEntities.deleted}+${sweepTopics.deleted} orphan(s)`;
+      }
+    } catch (e) {
+      console.error("[wiki-service] orphan-sweep failed (non-fatal):",
+        e?.message || e);
+    }
 
     // Commit only if the compile changed something.
     await git(["add", "-A"]);
