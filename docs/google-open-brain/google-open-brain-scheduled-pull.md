@@ -24,9 +24,14 @@ hand-launched runs after this is in place.
 4. **Hierarchy is flat at the API level.** Gmail's `labelIds` query does
    not include child labels when you target a parent. Dynamic discovery
    handles this by enumerating every matching leaf.
-5. **Short-term holding pen: `brain/keep-short-term`.** Anything tagged
-   with this label is treated as "maybe keep" — subject to autonomous
-   retention.
+5. **Short-term holding pen: `brain/keep-short-term`** *(and any
+   sub-label under it)*. Anything tagged with this label OR any
+   sub-label of it (e.g. `brain/keep-short-term/Y-12`,
+   `brain/keep-short-term/Cozy Kidz Academy`) is treated as "maybe
+   keep" — subject to autonomous retention. Sub-labels are a
+   user-organizing convenience; retention semantics are identical.
+   Match rule (mirrored in both pull pre-filter and prune):
+   `label === stl || label.startsWith(stl + "/")`.
 6. **Retention is configurable, not hardcoded.** A single config value
    (env var on the prune job, e.g. `BRAIN_SHORT_TERM_RETENTION_DAYS`)
    controls the cutoff. Default 90 days.
@@ -123,19 +128,33 @@ hand-launched runs after this is in place.
 
 ### C. Scheduling (Windows Task Scheduler) — order: pull → prune → wiki
 
-- **Task 1: pull** — daily, 01:00 local, runs the recipe in the
-  dual-network container with `--labels-prefix=brain/`. Reuse the
-  pattern from the one-shot ChatGPT scheduled task
-  (`OB1-ChatGPT-Full-Import`) but recurring.
-- **Task 2: prune** — daily, 01:30 local (after the pull is reasonably
-  done). Runs the prune script, which deletes expired
-  `brain/keep-short-term` rows and then POSTs `/recompile` to the wiki
-  service. Wiki regen + orphan sweep happen inside that triggered run.
+Both jobs run as **compose services** under the `open-brain` project
+with `profiles: ["scheduled"]` so they do not auto-start with
+`docker compose up -d`. They fire only when invoked by the scheduled
+task wrapper via `docker compose --profile scheduled run --rm <svc>`.
+This keeps mounts/env/networks declared in YAML and the containers
+appearing under the `open-brain` project in Docker Desktop.
+
+- **Service `openbrain-gmail-pull`** — Task `OB1-Gmail-Pull-Scheduled`,
+  daily at 01:00 local. Default flags (in YAML): `--labels-prefix=brain/
+  --window=24h --limit=500`. Wrapper: `D:\_data\gmail-pull-scheduled.ps1`.
+- **Service `openbrain-gmail-prune`** — Task
+  `OB1-Gmail-Prune-Scheduled`, daily at 01:30 local. The script deletes
+  expired short-term rows (label OR any sub-label) then POSTs
+  `/recompile` to `http://openbrain-wiki:8000/recompile`. Wrapper:
+  `D:\_data\gmail-prune-scheduled.ps1`.
 - **Wiki's in-container daily scheduler is moved off 01:00**
-  (`WIKI_RECOMPILE_HOUR=4`) so it cannot race the pull. Change-watch
-  remains on, so any work landed by the pull will trigger a debounced
-  recompile naturally — and the explicit POST from the prune script is
-  the authoritative end-of-cycle compile.
+  (`WIKI_RECOMPILE_HOUR=4` in `docker/.env`) so it cannot race the
+  pull. Change-watch remains on, so any work landed by the pull
+  triggers a debounced recompile naturally — and the explicit POST
+  from the prune script is the authoritative end-of-cycle compile.
+- **OAuth secrets** are bind-mounted INDIVIDUALLY in the compose
+  service definitions from `OB1/secrets/google/open-brain-email/` over
+  the in-repo placeholder paths (the recipe-dir `credentials.json` and
+  `token.json` are intentionally 0-byte stubs). The `token.json` mount
+  is RW so `refreshAccessToken()` persists. If the OAuth client is
+  re-issued, update the `client_secret_*.apps.googleusercontent.com.json`
+  filename in both service blocks.
 - Both tasks log to `D:\_data\gmail-pull-<timestamp>.log` and
   `D:\_data\gmail-prune-<timestamp>.log` for morning review.
 - Both inherit the Docker Desktop / interactive-logon caveat: machine
@@ -185,19 +204,32 @@ hand-launched runs after this is in place.
   deletion of a `content/*.md` file is reverted on the next compile.
   (Note files under `notes/` are user-owned and remain untouched.)
 
-## File / artifact locations (planned)
+## File / artifact locations
 
-- Recipe (already exists, patched):
-  `OB1/recipes/email-history-import/`
-- Secrets (already in place):
-  `OB1/secrets/google/open-brain-email/`
-  (`credentials.json` + `token.json`)
-- Prune script (to create):
+- Recipe (patched in this work):
+  `OB1/recipes/email-history-import/pull-gmail.ts`
+- Prune script (new in this work):
   `OB1/recipes/email-history-import/prune-short-term.ts`
-  (or equivalent — keeps it co-located with the import; gitignored).
-- Scheduled task scripts (to create, kept outside git):
+- OAuth secrets (canonical location, outside the recipe dir):
+  `OB1/secrets/google/open-brain-email/`
+  - `token.json` (RW; refresh persists here)
+  - `client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json` (RO)
+  - The recipe-dir `credentials.json` and `token.json` are intentional
+    0-byte placeholders, overlaid by the compose bind-mounts.
+- Compose services (new in this work, under the `open-brain` project):
+  `OB1/docker/docker-compose.yml` →
+  `openbrain-gmail-pull`, `openbrain-gmail-prune` (profile: `scheduled`).
+- DB trigger (new):
+  `OB1/docker/init-graph.sql` →
+  `trg_touch_entities_on_thought_delete` + function.
+- Wiki orphan sweep (new):
+  `OB1/docker/wiki-service/wiki-service.mjs` → `sweepOrphanEntityPages()`
+  and `sweepOrphanTopicPages()`, called from `compile()`.
+- Scheduled task wrappers (kept outside git, in `D:\_data\`):
   - `D:\_data\gmail-pull-scheduled.ps1`
   - `D:\_data\gmail-prune-scheduled.ps1`
-- Logs (to create):
+- Logs:
   - `D:\_data\gmail-pull-<timestamp>.log`
   - `D:\_data\gmail-prune-<timestamp>.log`
+- Wiki schedule offset (so 01:00 stays clear):
+  `OB1/docker/.env` → `WIKI_RECOMPILE_HOUR=4`

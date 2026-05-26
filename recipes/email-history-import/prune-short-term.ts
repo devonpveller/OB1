@@ -74,19 +74,18 @@ function pgrHeaders(prefer?: string): HeadersInit {
   return h;
 }
 
-// Build the filter URL once and reuse it for the preview SELECT and the
-// DELETE. JSONB array containment uses PostgREST's cs. operator with a
-// JSON-encoded array value; the `metadata->>email_date` cast to text
-// works for ISO-8601 lexicographic comparison.
-function buildFilterQuery(args: PruneArgs): string {
-  const cutoff = new Date(Date.now() - args.retentionDays * 24 * 60 * 60 * 1000).toISOString();
-  const labelArr = encodeURIComponent(JSON.stringify([args.label]));
-  const cutoffEnc = encodeURIComponent(cutoff);
-  return [
-    `metadata->>source=eq.gmail`,
-    `metadata->gmail_labels=cs.${labelArr}`,
-    `metadata->>email_date=lt.${cutoffEnc}`,
-  ].join("&");
+// 2-pass approach. Pass 1: SELECT all gmail rows past the cutoff —
+// PostgREST can express source/date filters cleanly but JSONB array
+// "any element starts with X" needs to be done in script (the cs.
+// containment operator only matches exact label strings, which would
+// miss sub-labels like `brain/keep-short-term/Y-12`). Pass 2: filter
+// in JS by prefix match on metadata.gmail_labels, then DELETE by IDs.
+//
+// Matcher mirrors pull-gmail.ts pre-filter: a label is "short-term" if
+// it equals args.label OR starts with args.label + "/".
+function isShortTermLabel(labels: string[] | undefined, stl: string): boolean {
+  if (!labels) return false;
+  return labels.some((l) => l === stl || l.startsWith(stl + "/"));
 }
 
 interface Candidate {
@@ -101,32 +100,45 @@ interface Candidate {
 }
 
 async function previewCandidates(args: PruneArgs): Promise<Candidate[]> {
-  const q = buildFilterQuery(args);
+  const cutoff = new Date(Date.now() - args.retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  const cutoffEnc = encodeURIComponent(cutoff);
+  // Pre-filter at the DB side: only gmail rows with email_date past
+  // the cutoff. The label prefix-match runs client-side below.
   const url =
-    `${SUPABASE_URL}/rest/v1/thoughts?select=id,metadata,content&${q}` +
-    `&order=metadata->>email_date.asc&limit=5000`;
+    `${SUPABASE_URL}/rest/v1/thoughts?select=id,metadata,content` +
+    `&metadata->>source=eq.gmail` +
+    `&metadata->>email_date=lt.${cutoffEnc}` +
+    `&order=metadata->>email_date.asc&limit=10000`;
   const res = await fetch(url, { headers: pgrHeaders() });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Preview query failed: HTTP ${res.status}: ${body.slice(0, 300)}`);
   }
-  return await res.json();
+  const rows = (await res.json()) as Candidate[];
+  return rows.filter((r) => isShortTermLabel(r.metadata?.gmail_labels, args.label));
 }
 
-async function deleteExpired(args: PruneArgs): Promise<number> {
-  const q = buildFilterQuery(args);
-  // return=representation so we get back exactly what was deleted —
-  // gives us a deterministic count regardless of how many rows matched.
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/thoughts?${q}&select=id`,
-    { method: "DELETE", headers: pgrHeaders("return=representation") },
-  );
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`DELETE failed: HTTP ${res.status}: ${body.slice(0, 300)}`);
+async function deleteByIds(ids: number[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  // PostgREST `in.(1,2,3)` filter; batched to keep URL length sane.
+  let deleted = 0;
+  const batchSize = 200;
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    const url =
+      `${SUPABASE_URL}/rest/v1/thoughts?id=in.(${batch.join(",")})&select=id`;
+    const res = await fetch(url, {
+      method: "DELETE",
+      headers: pgrHeaders("return=representation"),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`DELETE batch failed: HTTP ${res.status}: ${body.slice(0, 300)}`);
+    }
+    const rows = await res.json();
+    deleted += Array.isArray(rows) ? rows.length : 0;
   }
-  const rows = await res.json();
-  return Array.isArray(rows) ? rows.length : 0;
+  return deleted;
 }
 
 async function triggerWikiRecompile(): Promise<void> {
@@ -198,7 +210,7 @@ async function main() {
   if (candidates.length === 0) {
     console.log(`\nNothing to prune. Triggering wiki anyway (entity-touch may have queued work).`);
   } else {
-    const deleted = await deleteExpired(args);
+    const deleted = await deleteByIds(candidates.map((c) => c.id));
     console.log(`\nDeleted ${deleted} row(s).`);
   }
 

@@ -61,8 +61,11 @@ services:
       CHAT_API_BASE: http://llama-cpp:8080/v1
       CHAT_API_KEY: not-needed
       CHAT_MODEL: qwen36-27b:nothink
-    ports:
-      - "127.0.0.1:8808:8000"
+    # No host port: openbrain-mcp is reachable only on internal networks.
+    # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
+    # obnet) talk to it directly. Cloud services (Claude Code, etc.)
+    # must go through openbrain-gateway, which is the only host-published
+    # door and enforces the privacy policy (mirrors the mnemory lockdown).
     networks:
       - obnet
       - llm-net
@@ -94,11 +97,50 @@ services:
       WIKI_RECOMPILE_URL: http://openbrain-wiki:8000/recompile
     volumes:
       - openbrain-wiki-data:/wiki:ro
-    ports:
-      - "127.0.0.1:8809:8000"
+    # No host port: extensions (39 CRM/family/household tools) are
+    # personal-by-design and have no cloud surface. Reachable internally
+    # via openbrain-mcpo-ext for OWUI; cloud is denied entirely (the
+    # openbrain-gateway allow-list excludes every extension tool).
     networks:
       - obnet
     restart: unless-stopped
+
+  # Privacy-enforcing MCP proxy for CLOUD services (Claude Code, ChatGPT,
+  # etc). Only host-published openbrain door. Holds the real x-brain-key;
+  # cloud clients use OPENBRAIN_GATEWAY_KEY and never see the upstream
+  # key. Forces metadata.share=cloud on reads, stamps metadata.origin=
+  # cloud,share=cloud on writes, blocks thought_stats (unfilterable
+  # aggregate) + all extension tools. Mirrors mnemory-gateway/app.py.
+  openbrain-gateway:
+    build:
+      context: ../../openbrain-gateway
+      dockerfile: Dockerfile
+    image: openbrain-gateway:local
+    container_name: openbrain-gateway
+    depends_on:
+      - openbrain-mcp
+    environment:
+      OPENBRAIN_URL: http://openbrain-mcp:8000
+      OPENBRAIN_KEY: ${MCP_ACCESS_KEY}
+      GATEWAY_KEY: ${OPENBRAIN_GATEWAY_KEY}
+      SHARE_LABEL_VALUE: cloud
+    ports:
+      - "127.0.0.1:8061:8061"
+    # obnet is a normal bridge (not internal), so host port publishing
+    # works directly from it — no extra network needed (unlike the main
+    # stack where mnemory-gateway joins `default` because llm-net is
+    # internal).
+    networks:
+      - obnet
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8061/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # MCP -> OpenAPI bridges for Open WebUI (which consumes OpenAPI tool
   # servers, not raw MCP). ONE mcpo per MCP server: mcpo's Python client
@@ -330,6 +372,55 @@ services:
     networks:
       - obnet
     restart: unless-stopped
+
+  # ── Scheduled gmail jobs (profile: scheduled) ───────────────────────
+  # Not started by `docker compose up -d`. Windows Task Scheduler fires
+  # them via `docker compose --profile scheduled run --rm <svc>` so each
+  # invocation gets a fresh, one-shot container under the open-brain
+  # project. Daily ordering (locked decision 13): pull (01:00) → prune
+  # (01:30) → wiki recompile (triggered by prune script). See
+  # docs/google-open-brain/google-open-brain-scheduled-pull.md.
+  #
+  # OAuth secrets are bind-mounted INDIVIDUALLY from
+  # ../secrets/google/open-brain-email/ on top of the in-repo placeholder
+  # paths (the recipe-dir credentials.json/token.json are intentionally
+  # 0-byte). token.json mount is RW so refreshAccessToken() persists.
+  # If the OAuth client is ever re-issued, the client_secret filename
+  # below must be updated.
+  openbrain-gmail-pull:
+    image: denoland/deno:alpine
+    profiles: ["scheduled"]
+    working_dir: /app
+    env_file:
+      - ../recipes/email-history-import/.env
+    volumes:
+      - ../recipes/email-history-import:/app
+      - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      - ../secrets/google/open-brain-email/token.json:/app/token.json
+    networks:
+      - obnet
+      - llm-net
+    # entrypoint = the script; command = default flags. `docker compose
+    # run --rm openbrain-gmail-pull <args>` overrides the flags so ad-hoc
+    # runs (e.g. --dry-run, --window=7d) don't need a different service.
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "pull-gmail.ts"]
+    command: ["--labels-prefix=brain/", "--window=24h", "--limit=500"]
+
+  openbrain-gmail-prune:
+    image: denoland/deno:alpine
+    profiles: ["scheduled"]
+    working_dir: /app
+    env_file:
+      - ../recipes/email-history-import/.env
+    volumes:
+      - ../recipes/email-history-import:/app
+      - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      - ../secrets/google/open-brain-email/token.json:/app/token.json
+    networks:
+      - obnet
+      - llm-net
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "prune-short-term.ts"]
+    command: []
 
 volumes:
   openbrain-db-data:

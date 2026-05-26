@@ -988,21 +988,30 @@ async function main() {
       .map((id) => labelMap.get(id) || id)
       .filter((name) => !name.startsWith("CATEGORY_"));
 
-    // Short-term pre-filter (locked decision 8): an email tagged
-    // `brain/keep-short-term` whose received date is already past the
-    // retention cutoff would be inserted by this run and then immediately
-    // deleted by the next prune. Skip it here — never embed, never insert.
-    // The only path into the brain for an old email is via a long-term
-    // brain/<X> label, which this filter does not match.
-    if (args.shortTermLabel && readableLabels.includes(args.shortTermLabel)) {
-      const emailDateMs = Date.parse(email.date);
-      if (Number.isFinite(emailDateMs) && emailDateMs < shortTermCutoffMs) {
-        shortTermExpired++;
-        console.log(
-          `${processed}. [short-term-expired, skipped] ${email.subject || "(no subject)"}` +
-            ` — received ${new Date(email.date).toLocaleDateString()}`,
-        );
-        continue;
+    // Short-term pre-filter (locked decision 8): an email tagged with
+    // the short-term label (or any sub-label of it, e.g.
+    // brain/keep-short-term/Y-12) whose received date is already past
+    // the retention cutoff would be inserted by this run and then
+    // immediately deleted by the next prune. Skip it here — never
+    // embed, never insert. The only path into the brain for an old
+    // email is via a long-term brain/<X> label that doesn't fall under
+    // the short-term prefix. Prefix match (label === stl || label.startsWith(stl+"/"))
+    // mirrors the same matcher in prune-short-term.ts.
+    if (args.shortTermLabel) {
+      const stl = args.shortTermLabel;
+      const isShortTerm = readableLabels.some(
+        (l) => l === stl || l.startsWith(stl + "/"),
+      );
+      if (isShortTerm) {
+        const emailDateMs = Date.parse(email.date);
+        if (Number.isFinite(emailDateMs) && emailDateMs < shortTermCutoffMs) {
+          shortTermExpired++;
+          console.log(
+            `${processed}. [short-term-expired, skipped] ${email.subject || "(no subject)"}` +
+              ` — received ${new Date(email.date).toLocaleDateString()}`,
+          );
+          continue;
+        }
       }
     }
 

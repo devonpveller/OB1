@@ -142,6 +142,31 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// Optional caller-supplied JSONB metadata predicate. Used by the cloud
+// gateway (../../../../openbrain-gateway/app.py) to scope reads to
+// share=cloud; default-unset = unconstrained (local-zone behaviour).
+// Mirrors mnemory's `labels` mechanic — keep the arg optional so trusted
+// local clients are unaffected.
+// Zod 4 requires the two-arg form: z.record(keySchema, valueSchema).
+// Single-arg z.record(z.unknown()) breaks at runtime ("Cannot read
+// properties of undefined (reading '_zod')").
+const metadataFilterArg = z
+  .record(z.string(), z.unknown())
+  .optional()
+  .describe(
+    "Optional JSONB metadata predicate (rows must contain it). Cloud gateway forces {share:'cloud'}.",
+  );
+const metadataExtraArg = z
+  .record(z.string(), z.unknown())
+  .optional()
+  .describe(
+    "Optional metadata merged into the stored row. Cloud gateway forces {origin:'cloud',share:'cloud'}.",
+  );
+
+function hasMd(m: Record<string, unknown> | undefined): m is Record<string, unknown> {
+  return !!m && Object.keys(m).length > 0;
+}
+
 // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
 // research look for exact read-only `search` and `fetch` tool shapes.
 server.registerTool(
@@ -155,23 +180,28 @@ server.registerTool(
     },
     inputSchema: {
       query: z.string().describe("The search query to run against Open Brain thoughts"),
+      metadata_filter: metadataFilterArg,
     },
   },
-  async ({ query }) => {
+  async ({ query, metadata_filter }) => {
     try {
       const qEmb = await getEmbedding(query);
       const embStr = `[${qEmb.join(",")}]`;
 
       const client = await pool.connect();
       try {
+        const mdOn = hasMd(metadata_filter);
+        const params: unknown[] = [embStr, 0.5, 10];
+        if (mdOn) params.push(JSON.stringify(metadata_filter));
         const result = await client.queryObject<ThoughtMatch>(
           `SELECT id, content, metadata, created_at,
                   1 - (embedding <=> $1::vector) AS similarity
            FROM thoughts
            WHERE 1 - (embedding <=> $1::vector) >= $2
+             ${mdOn ? "AND metadata @> $4::jsonb" : ""}
            ORDER BY embedding <=> $1::vector
            LIMIT $3`,
-          [embStr, 0.5, 10]
+          params,
         );
 
         const results = result.rows.map((t) => ({
@@ -206,18 +236,23 @@ server.registerTool(
     },
     inputSchema: {
       id: z.string().describe("The Open Brain thought ID returned by the search tool"),
+      metadata_filter: metadataFilterArg,
     },
   },
-  async ({ id }) => {
+  async ({ id, metadata_filter }) => {
     try {
       const client = await pool.connect();
       try {
+        const mdOn = hasMd(metadata_filter);
+        const params: unknown[] = [id];
+        if (mdOn) params.push(JSON.stringify(metadata_filter));
         const result = await client.queryObject<ThoughtRecord>(
           `SELECT id, content, metadata, created_at, updated_at
            FROM thoughts
            WHERE id = $1
+             ${mdOn ? "AND metadata @> $2::jsonb" : ""}
            LIMIT 1`,
-          [id]
+          params,
         );
 
         const thought = result.rows[0];
@@ -269,23 +304,28 @@ server.registerTool(
       query: z.string().describe("What to search for"),
       limit: z.number().optional().default(10),
       threshold: z.number().optional().default(0.5),
+      metadata_filter: metadataFilterArg,
     },
   },
-  async ({ query, limit, threshold }) => {
+  async ({ query, limit, threshold, metadata_filter }) => {
     try {
       const qEmb = await getEmbedding(query);
       const embStr = `[${qEmb.join(",")}]`;
 
       const client = await pool.connect();
       try {
+        const mdOn = hasMd(metadata_filter);
+        const params: unknown[] = [embStr, threshold, limit];
+        if (mdOn) params.push(JSON.stringify(metadata_filter));
         const result = await client.queryObject<ThoughtMatch>(
           `SELECT id, content, metadata, created_at,
                   1 - (embedding <=> $1::vector) AS similarity
            FROM thoughts
            WHERE 1 - (embedding <=> $1::vector) >= $2
+             ${mdOn ? "AND metadata @> $4::jsonb" : ""}
            ORDER BY embedding <=> $1::vector
            LIMIT $3`,
-          [embStr, threshold, limit]
+          params,
         );
 
         if (!result.rows.length) {
@@ -347,9 +387,10 @@ server.registerTool(
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
       days: z.number().optional().describe("Only thoughts from the last N days"),
+      metadata_filter: metadataFilterArg,
     },
   },
-  async ({ limit, type, topic, person, days }) => {
+  async ({ limit, type, topic, person, days, metadata_filter }) => {
     try {
       const conditions: string[] = [];
       const params: unknown[] = [];
@@ -372,6 +413,11 @@ server.registerTool(
       }
       if (days) {
         conditions.push(`created_at >= NOW() - INTERVAL '${days} days'`);
+      }
+      if (hasMd(metadata_filter)) {
+        conditions.push(`metadata @> $${paramIdx}::jsonb`);
+        params.push(JSON.stringify(metadata_filter));
+        paramIdx++;
       }
 
       const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -520,9 +566,10 @@ server.registerTool(
     },
     inputSchema: {
       content: z.string().describe("The thought to capture"),
+      metadata_extra: metadataExtraArg,
     },
   },
-  async ({ content }) => {
+  async ({ content, metadata_extra }) => {
     try {
       const [embedding, metadata] = await Promise.all([
         getEmbedding(content),
@@ -530,7 +577,11 @@ server.registerTool(
       ]);
 
       const embStr = `[${embedding.join(",")}]`;
-      const meta: Record<string, unknown> = { ...metadata, source: "mcp" };
+      const meta: Record<string, unknown> = {
+        ...metadata,
+        source: "mcp",
+        ...(metadata_extra ?? {}),
+      };
 
       const client = await pool.connect();
       try {
@@ -612,6 +663,7 @@ async function ingestOne(
   url: string,
   notebook: string | undefined,
   tags: string[],
+  metadata_extra?: Record<string, unknown>,
 ): Promise<IngestOutcome> {
   try {
     const resp = await fetch(url, {
@@ -658,6 +710,10 @@ async function ingestOne(
 
     const client = await pool.connect();
     try {
+      const meta: Record<string, unknown> = {
+        source: "ingest_url",
+        ...(metadata_extra ?? {}),
+      };
       const res = await client.queryObject<{ id: string }>(
         `INSERT INTO sources
            (url, title, content, content_type, tags, notebook, domain,
@@ -666,7 +722,7 @@ async function ingestOne(
          RETURNING id`,
         [
           url, title, body, contentType, tags, notebook ?? null, domain,
-          embStr, JSON.stringify({ source: "ingest_url" }),
+          embStr, JSON.stringify(meta),
         ],
       );
       return {
@@ -692,10 +748,11 @@ server.registerTool(
       url: z.string().describe("The URL to ingest"),
       notebook: z.string().optional().describe("Optional notebook/project to group this source under"),
       tags: z.array(z.string()).optional().describe("Optional tags"),
+      metadata_extra: metadataExtraArg,
     },
   },
-  async ({ url, notebook, tags }) => {
-    const r = await ingestOne(url, notebook, tags ?? []);
+  async ({ url, notebook, tags, metadata_extra }) => {
+    const r = await ingestOne(url, notebook, tags ?? [], metadata_extra);
     const text = r.ok
       ? `Ingested source ${r.id} — "${r.title}" (${r.content_type}, ${r.chars} chars)`
       : `Failed to ingest ${url}: ${r.error}`;
@@ -714,11 +771,12 @@ server.registerTool(
       urls: z.array(z.string()).describe("The URLs to ingest"),
       notebook: z.string().optional().describe("Optional notebook/project for all of them"),
       tags: z.array(z.string()).optional().describe("Optional tags applied to all"),
+      metadata_extra: metadataExtraArg,
     },
   },
-  async ({ urls, notebook, tags }) => {
+  async ({ urls, notebook, tags, metadata_extra }) => {
     const results = await Promise.all(
-      urls.map((u) => ingestOne(u, notebook, tags ?? [])),
+      urls.map((u) => ingestOne(u, notebook, tags ?? [], metadata_extra)),
     );
     const ok = results.filter((r) => r.ok);
     const failed = results.filter((r) => !r.ok);
