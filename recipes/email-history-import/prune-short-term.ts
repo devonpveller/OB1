@@ -230,7 +230,8 @@ const HAS_CLI_ARGS = Deno.args.some((a) => a.startsWith("--") && a !== "--server
 const FORCE_SERVER = Deno.args.includes("--server");
 const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") || "";
 
-async function chainTrigger(): Promise<void> {
+async function chainTrigger(opts: { skip?: boolean } = {}): Promise<void> {
+  if (opts.skip) return;
   if (!NEXT_TRIGGER_URL) return;
   try {
     const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
@@ -238,6 +239,12 @@ async function chainTrigger(): Promise<void> {
   } catch (err) {
     console.warn(`Chain trigger failed for ${NEXT_TRIGGER_URL}: ${err}`);
   }
+}
+
+function isNoopInvocation(override?: Partial<PruneArgs>): boolean {
+  if (override?.dryRun) return true;
+  if (Deno.args.includes("--dry-run")) return true;
+  return false;
 }
 
 if (HAS_CLI_ARGS && !FORCE_SERVER) {
@@ -249,8 +256,9 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
 }
 
 function mainCli() {
+  const noChain = Deno.args.includes("--no-chain");
   main()
-    .then(() => chainTrigger())
+    .then(() => chainTrigger({ skip: noChain || isNoopInvocation() }))
     .catch((err) => {
       console.error("Fatal error:", err);
       Deno.exit(1);
@@ -286,19 +294,26 @@ function startServer() {
       if (running) {
         return jsonResponse({ started: false, reason: "run already in progress" }, 409);
       }
-      let bodyOverride: Partial<PruneArgs> | undefined;
+      let bodyOverride: (Partial<PruneArgs> & { chain?: boolean }) | undefined;
       try {
         const text = await req.text();
         if (text.trim().length > 0) bodyOverride = JSON.parse(text);
       } catch (err) {
         return jsonResponse({ started: false, reason: `bad JSON body: ${err}` }, 400);
       }
+      const skipChain =
+        bodyOverride?.chain === false || isNoopInvocation(bodyOverride);
+      const cliOverride = bodyOverride
+        ? Object.fromEntries(
+            Object.entries(bodyOverride).filter(([k]) => k !== "chain"),
+          ) as Partial<PruneArgs>
+        : undefined;
       running = true;
       lastError = null;
       (async () => {
         try {
-          await main(bodyOverride);
-          await chainTrigger();
+          await main(cliOverride);
+          await chainTrigger({ skip: skipChain });
         } catch (err) {
           lastError = err instanceof Error ? err.message : String(err);
           console.error(`Prune run failed: ${lastError}`);
@@ -307,7 +322,7 @@ function startServer() {
           lastRunAt = new Date().toISOString();
         }
       })();
-      return jsonResponse({ started: true }, 202);
+      return jsonResponse({ started: true, chain_will_fire: !skipChain }, 202);
     }
 
     return jsonResponse({ error: "not found", path: url.pathname }, 404);

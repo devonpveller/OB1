@@ -106,6 +106,7 @@ interface CliArgs {
   window: string;
   labels: string[];
   labelsPrefix: string;
+  excludeLabels: string[];
   shortTermLabel: string;
   shortTermRetentionDays: number;
   dryRun: boolean;
@@ -123,6 +124,13 @@ function parseArgs(): CliArgs {
     window: "24h",
     labels: ["SENT"],
     labelsPrefix: "",
+    // Labels here are skipped during fetch even if they would otherwise
+    // match via labelsPrefix expansion. The default excludes the
+    // user's self-sent digest emails (label "brain/ai/daily digest"),
+    // which would otherwise create a feedback loop — each digest body
+    // contains action items from the source emails; ingesting the
+    // digest re-amplifies those action items in the next digest.
+    excludeLabels: ["brain/ai/daily digest"],
     shortTermLabel: "brain/keep-short-term",
     shortTermRetentionDays: Number.isFinite(envRetention) && envRetention > 0 ? envRetention : 90,
     dryRun: false,
@@ -144,6 +152,14 @@ function parseArgs(): CliArgs {
       labelsExplicit = true;
     } else if (arg.startsWith("--labels-prefix=")) {
       args.labelsPrefix = arg.split("=")[1];
+    } else if (arg.startsWith("--exclude-labels=")) {
+      // Comma-separated list of labels to skip even if labelsPrefix
+      // matches them. Replaces the default exclusion (pass empty string
+      // to disable: --exclude-labels=).
+      const raw = arg.split("=")[1];
+      args.excludeLabels = raw.length > 0
+        ? raw.split(",").map((l) => l.trim()).filter(Boolean)
+        : [];
     } else if (arg.startsWith("--short-term-label=")) {
       args.shortTermLabel = arg.split("=")[1];
     } else if (arg.startsWith("--short-term-retention-days=")) {
@@ -985,9 +1001,12 @@ async function main(argsOverride?: Partial<CliArgs>) {
   // trailing slash. Effect: adding `brain/foo` in Gmail flows in on the
   // next run with zero config edits.
   if (args.labelsPrefix) {
-    const discovered = allLabels
-      .filter((l) => l.name.startsWith(args.labelsPrefix))
-      .map((l) => l.name);
+    const excludeSet = new Set(args.excludeLabels);
+    const allMatching = allLabels.filter((l) => l.name.startsWith(args.labelsPrefix));
+    const discovered = allMatching
+      .map((l) => l.name)
+      .filter((name) => !excludeSet.has(name));
+    const skipped = allMatching.map((l) => l.name).filter((name) => excludeSet.has(name));
     if (discovered.length === 0) {
       console.error(
         `\nNo labels found matching prefix "${args.labelsPrefix}". ` +
@@ -1001,6 +1020,9 @@ async function main(argsOverride?: Partial<CliArgs>) {
       `\nDynamic label discovery (prefix "${args.labelsPrefix}"): ` +
         `${discovered.length} label(s) — ${discovered.join(", ")}`,
     );
+    if (skipped.length > 0) {
+      console.log(`  Excluded: ${skipped.join(", ")}`);
+    }
   }
 
   // Resolve user-supplied label names -> Gmail IDs. System labels
@@ -1444,7 +1466,13 @@ const HAS_CLI_ARGS = Deno.args.some((a) => a.startsWith("--") && a !== "--server
 const FORCE_SERVER = Deno.args.includes("--server");
 const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") || "";
 
-async function chainTrigger(): Promise<void> {
+// Chain-trigger gate. Skip chaining when:
+//   - NEXT_TRIGGER_URL unset (end of chain or chain disabled by env)
+//   - skip=true (caller explicitly opted out via body {"chain": false},
+//     CLI --no-chain, list-labels mode, or dry-run — none of these
+//     produce new ingest the digest needs to see)
+async function chainTrigger(opts: { skip?: boolean } = {}): Promise<void> {
+  if (opts.skip) return;
   if (!NEXT_TRIGGER_URL) return;
   try {
     const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
@@ -1454,10 +1482,19 @@ async function chainTrigger(): Promise<void> {
   }
 }
 
+// Was this a real ingest run, or a noop (list-labels, dry-run)?
+// Determined by inspecting CLI args + env to predict what main() will do.
+function isNoopInvocation(override?: Partial<CliArgs>): boolean {
+  if (override?.dryRun || override?.listLabels) return true;
+  if (Deno.args.includes("--dry-run") || Deno.args.includes("--list-labels")) return true;
+  return false;
+}
+
 if (HAS_CLI_ARGS && !FORCE_SERVER) {
-  // One-shot mode (legacy / ad-hoc).
+  // One-shot mode (legacy / ad-hoc). --no-chain disables the chain.
+  const noChain = Deno.args.includes("--no-chain");
   main()
-    .then(() => chainTrigger())
+    .then(() => chainTrigger({ skip: noChain || isNoopInvocation() }))
     .catch((err) => {
       console.error("Fatal error:", err);
       Deno.exit(1);
@@ -1493,19 +1530,31 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
       if (running) {
         return jsonResponse({ started: false, reason: "run already in progress" }, 409);
       }
-      let bodyOverride: Partial<CliArgs> | undefined;
+      let bodyOverride: (Partial<CliArgs> & { chain?: boolean }) | undefined;
       try {
         const text = await req.text();
         if (text.trim().length > 0) bodyOverride = JSON.parse(text);
       } catch (err) {
         return jsonResponse({ started: false, reason: `bad JSON body: ${err}` }, 400);
       }
+      // Explicit opt-out: body {"chain": false} skips downstream chain
+      // trigger (useful for ad-hoc /run tests that shouldn't fire
+      // prune+digest). Default is to chain. dry-run / list-labels
+      // automatically skip via isNoopInvocation regardless.
+      const skipChain =
+        bodyOverride?.chain === false || isNoopInvocation(bodyOverride);
+      // Strip 'chain' so it doesn't leak into CliArgs override semantics.
+      const cliOverride = bodyOverride
+        ? Object.fromEntries(
+            Object.entries(bodyOverride).filter(([k]) => k !== "chain"),
+          ) as Partial<CliArgs>
+        : undefined;
       running = true;
       lastError = null;
       (async () => {
         try {
-          await main(bodyOverride);
-          await chainTrigger();
+          await main(cliOverride);
+          await chainTrigger({ skip: skipChain });
         } catch (err) {
           lastError = err instanceof Error ? err.message : String(err);
           console.error(`Pull run failed: ${lastError}`);
@@ -1514,7 +1563,7 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
           lastRunAt = new Date().toISOString();
         }
       })();
-      return jsonResponse({ started: true }, 202);
+      return jsonResponse({ started: true, chain_will_fire: !skipChain }, 202);
     }
 
     return jsonResponse({ error: "not found", path: url.pathname }, 404);

@@ -19,6 +19,12 @@
 # service's /run endpoint. To insert a step into an existing chain:
 # adjust the relevant NEXT_TRIGGER_URL env in docker-compose.scheduled.yml.
 
-# Daily ingest cascade: 01:00 local. Canonical body matches the previous
-# Windows Task Scheduler invocation (--labels-prefix=brain/ --window=24h --limit=500).
-0 1 * * *   curl -fsS -X POST -H 'content-type: application/json' -d '{"labelsPrefix":"brain/","window":"24h","limit":500}' http://openbrain-gmail-pull:8080/run
+# Daily ingest cascade: 01:00 local.
+#   window=90d: re-check the trailing 90 days every run. Dedup via the
+#   pull's sync-log (gmail_id-keyed) and the brain's content fingerprint
+#   short-circuits already-ingested emails, so the heavy work (LLM
+#   metadata + embeddings) only happens for truly new emails. Daily
+#   incremental cost is low; the wide window catches retroactive
+#   labeling (e.g. tagging an old email brain/* yesterday).
+#   limit=500: ceiling on a single pull, not the typical case.
+0 1 * * *   curl -fsS -X POST -H 'content-type: application/json' -d '{"labelsPrefix":"brain/","window":"90d","limit":500}' http://openbrain-gmail-pull:8080/run
