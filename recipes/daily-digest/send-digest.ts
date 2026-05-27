@@ -539,14 +539,30 @@ async function writeReport(subject: string, body: string): Promise<void> {
   }
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
+// ─── Run + HTTP server ──────────────────────────────────────────────────────
+//
+// Container is long-running and triggered via HTTP. openbrain-cron POSTs
+// /run on the daily cadence in docker/cron/crontab. Manual ad-hoc runs:
+//   curl -fsS -X POST http://openbrain-digest:8080/run
+//
+// Concurrent /run calls return 409. Pattern mirrors openbrain-wiki's
+// /recompile endpoint (docker/wiki-service/wiki-service.mjs).
 
-async function main() {
+interface RunResult {
+  thoughts: number;
+  emails: number;
+  senders: number;
+  ungrouped: number;
+  actionItems: number;
+  subject: string;
+}
+
+async function runDigest(): Promise<RunResult> {
   console.log(
-    `Open Brain Daily Digest — window=${WINDOW_HOURS}h limit=${LIMIT} to=${TO_EMAIL}`,
+    `Digest run — window=${WINDOW_HOURS}h limit=${LIMIT} to=${TO_EMAIL}`,
   );
   const thoughts = await fetchThoughts();
-  console.log(`Found ${thoughts.length} thought(s).`);
+  console.log(`  Found ${thoughts.length} thought(s).`);
 
   const data = buildDigestData(thoughts, WINDOW_HOURS);
   const dateStr = new Date().toISOString().slice(0, 10);
@@ -560,12 +576,77 @@ async function main() {
   const markdown = renderMarkdown(data);
   await writeReport(subject, markdown);
 
-  // Then email. OAuth issues raise here and exit non-zero, but the
-  // markdown report is already on disk for morning review.
+  // Then email. OAuth issues raise here; the markdown report is already
+  // on disk for morning review.
   const html = renderHtml(data);
   const accessToken = await getAccessToken();
   await sendEmail(accessToken, subject, html);
-  console.log(`Sent digest "${subject}" to ${TO_EMAIL}.`);
+  console.log(`  Sent "${subject}" to ${TO_EMAIL}.`);
+
+  return {
+    thoughts: thoughts.length,
+    emails: data.emails.length,
+    senders: data.bySender.size,
+    ungrouped: data.ungrouped.length,
+    actionItems: data.totalActionItems,
+    subject,
+  };
 }
 
-main();
+const PORT = parseInt(Deno.env.get("DIGEST_PORT") || "8080", 10);
+
+let running = false;
+let lastRunAt: string | null = null;
+let lastResult: RunResult | null = null;
+let lastError: string | null = null;
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
+  const url = new URL(req.url);
+
+  if (req.method === "GET" && url.pathname === "/health") {
+    return jsonResponse({
+      service: "openbrain-digest",
+      running,
+      last_run_at: lastRunAt,
+      last_result: lastResult,
+      last_error: lastError,
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/run") {
+    if (running) {
+      return jsonResponse(
+        { started: false, reason: "run already in progress" },
+        409,
+      );
+    }
+    running = true;
+    lastError = null;
+    // Fire and forget — return 202 immediately, the caller (cron) shouldn't
+    // hold a connection for the duration of the digest.
+    (async () => {
+      try {
+        lastResult = await runDigest();
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        lastResult = null;
+        console.error(`Digest run failed: ${lastError}`);
+      } finally {
+        running = false;
+        lastRunAt = new Date().toISOString();
+      }
+    })();
+    return jsonResponse({ started: true }, 202);
+  }
+
+  return jsonResponse({ error: "not found", path: url.pathname }, 404);
+});
+
+console.log(`openbrain-digest listening on :${PORT}`);

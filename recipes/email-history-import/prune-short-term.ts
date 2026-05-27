@@ -171,8 +171,13 @@ async function triggerWikiRecompile(): Promise<void> {
   }
 }
 
-async function main() {
-  const args = parseArgs();
+async function main(argsOverride?: Partial<PruneArgs>) {
+  const args: PruneArgs = { ...parseArgs() };
+  if (argsOverride) {
+    for (const [k, v] of Object.entries(argsOverride)) {
+      if (v !== undefined) (args as unknown as Record<string, unknown>)[k] = v;
+    }
+  }
 
   if (!SUPABASE_URL) {
     console.error("SUPABASE_URL is required (set via env or .env file).");
@@ -219,7 +224,95 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  Deno.exit(1);
-});
+// ─── Run mode: CLI one-shot vs HTTP server ──────────────────────────────────
+
+const HAS_CLI_ARGS = Deno.args.some((a) => a.startsWith("--") && a !== "--server");
+const FORCE_SERVER = Deno.args.includes("--server");
+const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") || "";
+
+async function chainTrigger(): Promise<void> {
+  if (!NEXT_TRIGGER_URL) return;
+  try {
+    const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
+    console.log(`Chain trigger ${NEXT_TRIGGER_URL} → ${res.status}`);
+  } catch (err) {
+    console.warn(`Chain trigger failed for ${NEXT_TRIGGER_URL}: ${err}`);
+  }
+}
+
+if (HAS_CLI_ARGS && !FORCE_SERVER) {
+  // One-shot mode (legacy / ad-hoc).
+  mainCli();
+} else {
+  // HTTP-server mode (default for the always-on container).
+  startServer();
+}
+
+function mainCli() {
+  main()
+    .then(() => chainTrigger())
+    .catch((err) => {
+      console.error("Fatal error:", err);
+      Deno.exit(1);
+    });
+}
+
+function startServer() {
+  const PORT = parseInt(Deno.env.get("PRUNE_PORT") || "8080", 10);
+  let running = false;
+  let lastRunAt: string | null = null;
+  let lastError: string | null = null;
+
+  function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body, null, 2), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
+    const url = new URL(req.url);
+
+    if (req.method === "GET" && url.pathname === "/health") {
+      return jsonResponse({
+        service: "openbrain-gmail-prune",
+        running,
+        last_run_at: lastRunAt,
+        last_error: lastError,
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/run") {
+      if (running) {
+        return jsonResponse({ started: false, reason: "run already in progress" }, 409);
+      }
+      let bodyOverride: Partial<PruneArgs> | undefined;
+      try {
+        const text = await req.text();
+        if (text.trim().length > 0) bodyOverride = JSON.parse(text);
+      } catch (err) {
+        return jsonResponse({ started: false, reason: `bad JSON body: ${err}` }, 400);
+      }
+      running = true;
+      lastError = null;
+      (async () => {
+        try {
+          await main(bodyOverride);
+          await chainTrigger();
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          console.error(`Prune run failed: ${lastError}`);
+        } finally {
+          running = false;
+          lastRunAt = new Date().toISOString();
+        }
+      })();
+      return jsonResponse({ started: true }, 202);
+    }
+
+    return jsonResponse({ error: "not found", path: url.pathname }, 404);
+  });
+
+  console.log(`openbrain-gmail-prune listening on :${PORT}`);
+}
+

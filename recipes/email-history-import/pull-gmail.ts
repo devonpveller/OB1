@@ -941,8 +941,21 @@ function buildEmailContent(
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-async function main() {
-  const args = parseArgs();
+async function main(argsOverride?: Partial<CliArgs>) {
+  // CLI mode: just parseArgs(). HTTP mode: parseArgs() supplies env-based
+  // defaults; argsOverride (the JSON body posted to /run) wins. Mirror the
+  // CLI special case where setting labelsPrefix without labels clears the
+  // SENT default — otherwise the cron's canonical body would pull both
+  // SENT and brain/* and over-ingest.
+  const args: CliArgs = { ...parseArgs() };
+  if (argsOverride) {
+    for (const [k, v] of Object.entries(argsOverride)) {
+      if (v !== undefined) (args as unknown as Record<string, unknown>)[k] = v;
+    }
+    if (argsOverride.labelsPrefix !== undefined && argsOverride.labels === undefined) {
+      args.labels = [];
+    }
+  }
   const creds = await loadCredentials();
   const accessToken = await authorize(creds);
 
@@ -1415,7 +1428,97 @@ async function writePullReport(r: PullReportInputs): Promise<void> {
   console.log(`  Report written:   ${wroteTo}/gmail-pull-latest.md`);
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  Deno.exit(1);
-});
+// ─── Run mode: CLI one-shot vs HTTP server ──────────────────────────────────
+//
+// When invoked with --once OR with any --flag in Deno.args, run once and
+// exit (the old behavior, used for ad-hoc runs and the deprecated Task
+// Scheduler path). Otherwise start the HTTP server: POST /run triggers
+// a pull, GET /health reports status. openbrain-cron fires /run on the
+// schedule in docker/cron/crontab.
+//
+// On a successful pull, chains to NEXT_TRIGGER_URL if set — that's how
+// pull → prune → digest ordering is enforced. Failure to POST the chain
+// is logged but doesn't fail the run.
+
+const HAS_CLI_ARGS = Deno.args.some((a) => a.startsWith("--") && a !== "--server");
+const FORCE_SERVER = Deno.args.includes("--server");
+const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") || "";
+
+async function chainTrigger(): Promise<void> {
+  if (!NEXT_TRIGGER_URL) return;
+  try {
+    const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
+    console.log(`Chain trigger ${NEXT_TRIGGER_URL} → ${res.status}`);
+  } catch (err) {
+    console.warn(`Chain trigger failed for ${NEXT_TRIGGER_URL}: ${err}`);
+  }
+}
+
+if (HAS_CLI_ARGS && !FORCE_SERVER) {
+  // One-shot mode (legacy / ad-hoc).
+  main()
+    .then(() => chainTrigger())
+    .catch((err) => {
+      console.error("Fatal error:", err);
+      Deno.exit(1);
+    });
+} else {
+  // HTTP-server mode (default for the always-on container).
+  const PORT = parseInt(Deno.env.get("PULL_PORT") || "8080", 10);
+
+  let running = false;
+  let lastRunAt: string | null = null;
+  let lastError: string | null = null;
+
+  function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body, null, 2), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
+    const url = new URL(req.url);
+
+    if (req.method === "GET" && url.pathname === "/health") {
+      return jsonResponse({
+        service: "openbrain-gmail-pull",
+        running,
+        last_run_at: lastRunAt,
+        last_error: lastError,
+      });
+    }
+
+    if (req.method === "POST" && url.pathname === "/run") {
+      if (running) {
+        return jsonResponse({ started: false, reason: "run already in progress" }, 409);
+      }
+      let bodyOverride: Partial<CliArgs> | undefined;
+      try {
+        const text = await req.text();
+        if (text.trim().length > 0) bodyOverride = JSON.parse(text);
+      } catch (err) {
+        return jsonResponse({ started: false, reason: `bad JSON body: ${err}` }, 400);
+      }
+      running = true;
+      lastError = null;
+      (async () => {
+        try {
+          await main(bodyOverride);
+          await chainTrigger();
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          console.error(`Pull run failed: ${lastError}`);
+        } finally {
+          running = false;
+          lastRunAt = new Date().toISOString();
+        }
+      })();
+      return jsonResponse({ started: true }, 202);
+    }
+
+    return jsonResponse({ error: "not found", path: url.pathname }, 404);
+  });
+
+  console.log(`openbrain-gmail-pull listening on :${PORT}`);
+}

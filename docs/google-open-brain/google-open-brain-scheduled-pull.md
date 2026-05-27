@@ -4,6 +4,15 @@
 wiki delete-propagation (DB trigger + compiler orphan-sweep), and
 scheduled-task wrappers are in place.
 
+> [!IMPORTANT]
+> **Trigger mechanism updated 2026-05-27.** The "Windows Task Scheduler
+> wrappers" referenced below are superseded by the `openbrain-cron`
+> container + HTTP-trigger chain (pull → prune → digest via
+> `NEXT_TRIGGER_URL` env vars). See
+> [google-open-brain-scheduled-digest.md](./google-open-brain-scheduled-digest.md)
+> for the current cascade. All locked decisions below about *what* is
+> pulled and *when* still apply; only the *how-to-fire* changed.
+
 ## Purpose
 
 Make the Gmail-to-Open-Brain integration autonomous: a Gmail label drives

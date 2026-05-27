@@ -1,9 +1,10 @@
 # Open Brain → Gmail — Scheduled Digest (design)
 
-**Status:** Implemented (2026-05-26). Container, OAuth bootstrap, and
-audit-trail reports are in place. Windows Task Scheduler trigger is the
-remaining manual step (owner: user, parallels the existing pull/prune
-wrappers).
+**Status:** Implemented (2026-05-27). Container, OAuth bootstrap,
+audit-trail reports, and HTTP-trigger wiring are in place. Trigger
+mechanism is the openbrain-cron container; no Windows Task Scheduler
+entry needed. Pull → prune → digest cascades via `NEXT_TRIGGER_URL`,
+so digest fires automatically after every successful pull.
 
 ## Purpose
 
@@ -16,10 +17,12 @@ sees what landed without searching.
 
 ## Locked decisions
 
-1. **Server-side scheduled container.** Mirrors the pull/prune pattern.
-   Profile `scheduled`, runs via `docker compose run --rm
-   openbrain-digest`, fired by Windows Task Scheduler. Independent of
-   any AI client being open.
+1. **Long-running HTTP-triggered container.** Exposes `POST /run` on
+   `obnet:8080`. openbrain-cron fires the start of the chain
+   (gmail-pull) at 01:00; pull and prune cascade through
+   `NEXT_TRIGGER_URL` env vars to fire digest on completion. Independent
+   of any AI client being open. (Earlier draft used `profile: scheduled`
+   one-shot containers + Windows Task Scheduler — superseded 2026-05-27.)
 2. **Mechanical formatting, no LLM call.** Group by `metadata.type`,
    show counts and the first ~160 chars of each thought. The whole
    point of a digest is determinism — a local LLM summary adds latency
@@ -83,20 +86,42 @@ Cloud Console):
 `gmail.readonly` (pull/prune) and `gmail.send` (digest) are independent
 grants. Adding the send scope does not affect the existing pull token.
 
-## Windows Task Scheduler wrapper
+## Trigger wiring (cron-based, event-chained)
 
-Pattern matches the pull/prune wrappers. Suggested trigger:
+The digest is the END of the email pipeline chain. Schedule lives in
+`OB1/docker/cron/crontab` (single line: pull at 01:00). The cascade is:
 
 ```
-Trigger:   Daily at 07:00 local
-Action:    powershell.exe
-Arguments: -NoProfile -Command "docker compose -f 'd:\Open WebUI\ai-stack\OB1\docker\docker-compose.yml' --profile scheduled run --rm openbrain-digest *>&1 | Tee-Object 'D:\_data\openbrain-digest-<date>.log'"
+openbrain-cron  (01:00)
+   │  POST /run
+   ▼
+openbrain-gmail-pull
+   │  on success, POST $NEXT_TRIGGER_URL
+   ▼
+openbrain-gmail-prune
+   │  on success, POST $NEXT_TRIGGER_URL  (+ separately, wiki recompile)
+   ▼
+openbrain-digest
+   │  end of chain
 ```
 
-Log capture exists primarily for diagnosis; the canonical artifact is
-`D:\_data\openbrain-digest-latest.md`, written by the script itself
-inside the container. If Tee-Object silently breaks again (it did once
-for pull), the markdown report is still there.
+`NEXT_TRIGGER_URL` for each service is declared in
+`OB1/docker/docker-compose.scheduled.yml`:
+- pull: `http://openbrain-gmail-prune:8080/run`
+- prune: `http://openbrain-digest:8080/run`
+- digest: (unset)
+
+If any step fails, the chain stops; the absence of the morning digest
+signals an upstream problem.
+
+To change digest timing relative to the pull (e.g. run digest twice
+daily): add a second cron line pointing at `openbrain-digest:8080/run`
+directly. Concurrent-run protection (HTTP 409) prevents overlap.
+
+Log capture: the canonical artifact is `D:\_data\openbrain-digest-latest.md`
+plus a dated archive, written inside the container regardless of email
+delivery outcome. Container stdout/stderr are available via
+`docker logs openbrain-digest` for the live HTTP-server tail.
 
 ## Failure modes and recoveries
 

@@ -1,0 +1,129 @@
+# Open Brain — scheduled-services slice of the compose project.
+#
+# Included from docker-compose.yml via the `include:` directive. Holds
+# every container whose job is to run on a schedule (currently: digest,
+# gmail-pull, gmail-prune) plus the cron container that fires them via
+# HTTP.
+#
+# Design notes:
+#  - The cron container (openbrain-cron) holds the only source of truth
+#    for when jobs fire (../docker/cron/crontab). No Windows Task
+#    Scheduler entries needed.
+#  - Each scheduled service is long-running and exposes POST /run on
+#    port 8080 (obnet-internal only). Cron fires it via curl.
+#  - No docker socket is mounted anywhere; cron talks to the services
+#    over the internal network, which is the policy the rest of the
+#    stack enforces.
+#  - OAuth secrets are bind-mounted INDIVIDUALLY from
+#    ../secrets/google/<dir>/ on top of in-repo 0-byte placeholder paths
+#    (see the comment in each service below).
+
+name: open-brain
+
+services:
+  # ── Cron engine ─────────────────────────────────────────────────────
+  # supercronic + curl in a small alpine image. Reads ./cron/crontab and
+  # curls each scheduled service's /run endpoint on cadence. No Docker
+  # socket; nothing privileged. New scheduled jobs = one line in
+  # crontab + a /run endpoint on the target service.
+  openbrain-cron:
+    build:
+      context: ./cron
+      dockerfile: Dockerfile
+    image: openbrain-cron:local
+    container_name: openbrain-cron
+    restart: unless-stopped
+    networks:
+      - obnet
+    # Bind-mount the crontab from host so schedules can be edited
+    # without rebuilding the image. `docker compose restart openbrain-cron`
+    # reloads. The Dockerfile COPYs a default copy for the no-bind case.
+    volumes:
+      - ./cron/crontab:/etc/openbrain-crontab:ro
+    # supercronic forwards SIGTERM cleanly via tini in the Dockerfile.
+
+  # ── Daily digest (HTTP-triggered) ───────────────────────────────────
+  # Long-running Deno HTTP service. POST /run triggers the digest; cron
+  # fires at 07:00 local. No LLM call (mechanical formatting), so this
+  # service does NOT join llm-net. Dedicated OAuth token at
+  # secrets/google/openbrain-digest/token.json with gmail.send scope.
+  openbrain-digest:
+    image: denoland/deno:alpine
+    container_name: openbrain-digest
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - ../recipes/daily-digest/.env
+    volumes:
+      - ../recipes/daily-digest:/app
+      - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      - ../secrets/google/openbrain-digest/token.json:/app/token.json
+      - D:\_data:/reports
+    networks:
+      - obnet
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "send-digest.ts"]
+    command: []
+
+  # ── Gmail pull (HTTP-triggered) ─────────────────────────────────────
+  # Long-running Deno HTTP service. POST /run with optional JSON body
+  # triggers a pull cycle; cron fires at 01:00 local with the canonical
+  # flag set (labelsPrefix=brain/, window=24h, limit=500). Ad-hoc runs
+  # POST a different body. Reuses the open-brain-email OAuth client.
+  openbrain-gmail-pull:
+    image: denoland/deno:alpine
+    container_name: openbrain-gmail-pull
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - ../recipes/email-history-import/.env
+    environment:
+      # On a successful pull, chain to prune (locked decision 13). Prune
+      # then chains to digest. End-to-end: cron fires pull at 01:00, the
+      # rest cascades. Set to empty string to disable chaining.
+      NEXT_TRIGGER_URL: http://openbrain-gmail-prune:8080/run
+    volumes:
+      - ../recipes/email-history-import:/app
+      - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      - ../secrets/google/open-brain-email/token.json:/app/token.json
+      - D:\_data:/reports
+    networks:
+      - obnet
+      - llm-net
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "pull-gmail.ts"]
+    command: []
+
+  # ── Gmail prune (HTTP-triggered) ────────────────────────────────────
+  # Long-running Deno HTTP service. POST /run triggers a prune cycle;
+  # cron fires at 01:30 local (30 min after pull, per locked decision 13).
+  # On completion, triggers wiki recompile via WIKI_RECOMPILE_URL.
+  openbrain-gmail-prune:
+    image: denoland/deno:alpine
+    container_name: openbrain-gmail-prune
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - ../recipes/email-history-import/.env
+    environment:
+      # End of email cascade: on success chain to the digest. Wiki
+      # recompile is triggered separately inside the script (it's a
+      # different concern — content compilation, not delivery).
+      NEXT_TRIGGER_URL: http://openbrain-digest:8080/run
+    volumes:
+      - ../recipes/email-history-import:/app
+      - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      - ../secrets/google/open-brain-email/token.json:/app/token.json
+      - D:\_data:/reports
+    networks:
+      - obnet
+      - llm-net
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "prune-short-term.ts"]
+    command: []
+
+networks:
+  # Declared identically in docker-compose.yml; compose merges the
+  # definitions when this file is included.
+  obnet:
+    driver: bridge
+  llm-net:
+    external: true
+    name: ai-stack_llm-net

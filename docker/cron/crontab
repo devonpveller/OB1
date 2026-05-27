@@ -1,0 +1,24 @@
+# openbrain-cron — single source of truth for scheduled jobs.
+#
+# Bind-mounted from the host (../docker/cron/crontab). Edit freely, then
+# `docker compose restart openbrain-cron` to reload. All times are
+# container-local (UTC unless you set TZ on the openbrain-cron service).
+#
+# Trigger model is **event-chained**, not multi-cron. Cron only fires the
+# start of the chain (pull). On success:
+#   pull   → POSTs http://openbrain-gmail-prune:8080/run  (NEXT_TRIGGER_URL on pull)
+#   prune  → POSTs http://openbrain-digest:8080/run        (NEXT_TRIGGER_URL on prune)
+#   prune  → also triggers wiki recompile (separate, inside the script)
+#   digest → end of chain
+#
+# This guarantees digest sees the latest pull's output. If any step
+# fails, the chain stops — absence of the morning digest signals an
+# upstream problem.
+#
+# To schedule a new top-of-chain job: add a line below pointing at the
+# service's /run endpoint. To insert a step into an existing chain:
+# adjust the relevant NEXT_TRIGGER_URL env in docker-compose.scheduled.yml.
+
+# Daily ingest cascade: 01:00 local. Canonical body matches the previous
+# Windows Task Scheduler invocation (--labels-prefix=brain/ --window=24h --limit=500).
+0 1 * * *   curl -fsS -X POST -H 'content-type: application/json' -d '{"labelsPrefix":"brain/","window":"24h","limit":500}' http://openbrain-gmail-pull:8080/run
