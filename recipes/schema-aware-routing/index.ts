@@ -18,6 +18,18 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 // ---------------------------------------------------------------------------
+// Local-repoint (self-hosted fork): never OpenRouter. Metadata extraction ->
+// llama-swap (qwen36-27b:nothink); embeddings -> llama-cpp-embed (bge-m3,
+// 1024-dim, matches thoughts.embedding vector(1024)). Defaults are internal
+// Docker service names; the bearer is a non-secret placeholder.
+// ---------------------------------------------------------------------------
+const LLM_BASE = Deno.env.get("LOCAL_LLM_BASE") || "http://llama-cpp:8080/v1";
+const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "qwen36-27b:nothink";
+const EMBED_BASE = Deno.env.get("LOCAL_EMBED_BASE") || "http://llama-cpp-embed:8080/v1";
+const EMBED_MODEL = Deno.env.get("LOCAL_EMBED_MODEL") || "bge-m3";
+const LLM_BEARER = Deno.env.get("LOCAL_LLM_BEARER") || "no-key";
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -80,39 +92,60 @@ const EXTRACTION_SYSTEM_PROMPT = `Extract metadata from a captured thought. Retu
 Only extract what is explicitly there.`;
 
 /**
- * Call your LLM of choice to extract structured metadata from raw text.
- * Replace this with your own LLM integration (OpenAI, Anthropic, OpenRouter, etc.)
+ * Local-llama-cpp metadata extraction. Sends EXTRACTION_SYSTEM_PROMPT as the
+ * system message and `text` as the user message, asking for a JSON object.
+ * Override the base/model with LOCAL_LLM_BASE / LOCAL_LLM_MODEL env vars to
+ * swap providers (OpenAI/Anthropic/OpenRouter); the OpenAI-compatible request
+ * shape stays the same.
  */
 async function extractMetadata(text: string): Promise<ExtractedMetadata> {
-  // YOUR LLM CALL HERE — send EXTRACTION_SYSTEM_PROMPT as system message,
-  // text as user message, request JSON response format.
-  //
-  // Example with OpenAI-compatible API:
-  //
-  //   const response = await fetch("https://api.openai.com/v1/chat/completions", {
-  //     method: "POST",
-  //     headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-  //     body: JSON.stringify({
-  //       model: "gpt-4o-mini",
-  //       response_format: { type: "json_object" },
-  //       messages: [
-  //         { role: "system", content: EXTRACTION_SYSTEM_PROMPT },
-  //         { role: "user", content: text },
-  //       ],
-  //     }),
-  //   });
-  //   return JSON.parse((await response.json()).choices[0].message.content);
-
-  throw new Error("Replace this with your LLM call");
+  const res = await fetch(`${LLM_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${LLM_BEARER}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: LLM_MODEL,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: EXTRACTION_SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(`Metadata extraction failed: ${res.status} ${msg}`);
+  }
+  const d = await res.json();
+  return JSON.parse(d.choices[0].message.content) as ExtractedMetadata;
 }
 
 /**
- * Generate an embedding vector for the input text.
- * Used for semantic search across thoughts and interactions.
+ * Local bge-m3 embedding (1024-dim). bge-m3 has a 512-token physical batch;
+ * truncating the head keeps embeds within the window while the full content
+ * still lands in the `thoughts.content` column.
  */
 async function getEmbedding(text: string): Promise<number[]> {
-  // YOUR EMBEDDING CALL HERE — e.g. OpenAI text-embedding-3-small
-  throw new Error("Replace this with your embedding call");
+  const truncated = text.slice(0, 1500);
+  const res = await fetch(`${EMBED_BASE}/embeddings`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${LLM_BEARER}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: EMBED_MODEL,
+      input: truncated,
+    }),
+  });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(`Embedding failed: ${res.status} ${msg}`);
+  }
+  const d = await res.json();
+  return d.data[0].embedding;
 }
 
 // ---------------------------------------------------------------------------

@@ -397,6 +397,12 @@ services:
       - ../recipes/email-history-import:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
       - ../secrets/google/open-brain-email/token.json:/app/token.json
+      # Morning-report mount. The pull script writes gmail-pull-latest.md
+      # (overwritten each run) plus a dated archive gmail-pull-<ts>.md so
+      # the morning-review trail survives even if the Task Scheduler
+      # wrapper's stdout capture (Tee-Object in D:\_data\gmail-pull-*.log)
+      # silently breaks again. RW so the container can write reports.
+      - D:\_data:/reports
     networks:
       - obnet
       - llm-net
@@ -416,6 +422,9 @@ services:
       - ../recipes/email-history-import:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
       - ../secrets/google/open-brain-email/token.json:/app/token.json
+      # Mirrors the pull service; the prune script will write its own
+      # morning report once that wiring is added.
+      - D:\_data:/reports
     networks:
       - obnet
       - llm-net

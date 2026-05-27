@@ -635,12 +635,66 @@ function processEmail(msg: GmailMessage): ProcessedEmail | null {
 
 // ─── Embedding & Metadata (Supabase direct mode) ───────────────────────────
 
+// bge-m3 on llama-cpp-embed runs with n_ubatch=512 (llama.cpp default).
+// The /embeddings endpoint rejects any input that tokenizes longer than that
+// physical batch — see the 2026-05-26 incident where a 531-token chunk
+// 500'd and silently killed the nightly pull. Callers must pre-chunk to
+// stay under EMBED_CHUNK_MAX_CHARS.
+const EMBED_CHUNK_MAX_CHARS = 1100;
+
+// Paragraph-aware greedy packing. Falls back to sentence split, then hard
+// char split, if a single paragraph/sentence exceeds the limit. Target
+// ~1100 chars ≈ ~360 tokens for English (bge-m3 lands around 3 chars/token
+// on noisy substack-style bodies), leaving comfortable headroom under the
+// 512-token ubatch ceiling.
+function chunkForEmbedding(text: string, maxChars = EMBED_CHUNK_MAX_CHARS): string[] {
+  if (text.length <= maxChars) return [text];
+  const paragraphs = text.split(/\n\s*\n+/);
+  const out: string[] = [];
+  let buf = "";
+  for (const para of paragraphs) {
+    const candidate = buf ? `${buf}\n\n${para}` : para;
+    if (candidate.length <= maxChars) {
+      buf = candidate;
+    } else {
+      if (buf) out.push(buf);
+      if (para.length > maxChars) {
+        out.push(...splitOverlongParagraph(para, maxChars));
+        buf = "";
+      } else {
+        buf = para;
+      }
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
+function splitOverlongParagraph(text: string, maxChars: number): string[] {
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const out: string[] = [];
+  let buf = "";
+  for (const s of sentences) {
+    const candidate = buf ? `${buf} ${s}` : s;
+    if (candidate.length <= maxChars) {
+      buf = candidate;
+    } else {
+      if (buf) out.push(buf);
+      if (s.length > maxChars) {
+        for (let i = 0; i < s.length; i += maxChars) {
+          out.push(s.slice(i, i + maxChars));
+        }
+        buf = "";
+      } else {
+        buf = s;
+      }
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
 async function getEmbedding(text: string): Promise<number[]> {
-  // Local bge-m3 has a 512-token physical batch. ~3.5 chars/token in noisy
-  // email bodies (URLs, HTML remnants) plus 5.4 tokens/word seen in practice
-  // ⇒ keep the embed input well under that. Full content still lands in the
-  // `content` column; only the embedding vector is from the truncated head.
-  const truncated = text.slice(0, 1500);
   const res = await fetch(`${EMBED_BASE}/embeddings`, {
     method: "POST",
     headers: {
@@ -649,7 +703,7 @@ async function getEmbedding(text: string): Promise<number[]> {
     },
     body: JSON.stringify({
       model: EMBED_MODEL,
-      input: truncated,
+      input: text,
     }),
   });
   if (!res.ok) {
@@ -713,27 +767,17 @@ interface IngestResult {
 
 let fingerprintSupported: boolean | null = null;
 
-async function ingestThoughtDirect(
+// Low-level: POST one row to /rest/v1/thoughts. Handles the one-time
+// fingerprint-column-missing retry handshake and 409 duplicate-fingerprint
+// short-circuit. Caller supplies the already-computed embedding + metadata.
+async function insertThoughtRow(
   content: string,
-  source: string,
-  extraMetadata?: Record<string, unknown>,
-): Promise<IngestResult> {
-  const fingerprint = await contentFingerprint(content);
-
-  const [embedding, metadata] = await Promise.all([
-    getEmbedding(content),
-    extractMetadata(content),
-  ]);
-
-  const row: Record<string, unknown> = {
-    content,
-    embedding,
-    metadata: { ...metadata, source, ...extraMetadata },
-  };
-
-  if (fingerprintSupported !== false) {
-    row.content_fingerprint = fingerprint;
-  }
+  embedding: number[],
+  metadata: Record<string, unknown>,
+  fingerprint: string,
+): Promise<{ ok: boolean; id?: string; duplicate?: boolean; error?: string }> {
+  const row: Record<string, unknown> = { content, embedding, metadata };
+  if (fingerprintSupported !== false) row.content_fingerprint = fingerprint;
 
   const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts`, {
     method: "POST",
@@ -746,18 +790,8 @@ async function ingestThoughtDirect(
     body: JSON.stringify(row),
   });
 
-  // 409 = duplicate fingerprint — content already exists, treat as success
-  if (res.status === 409) {
-    const meta = metadata as Record<string, unknown>;
-    return {
-      ok: true,
-      type: meta.type as string,
-      topics: meta.topics as string[],
-      duplicate: true,
-    };
-  }
+  if (res.status === 409) return { ok: true, duplicate: true };
 
-  // If fingerprint column doesn't exist, retry without it
   if (!res.ok && fingerprintSupported === null) {
     const body = await res.text();
     if (body.includes("content_fingerprint")) {
@@ -780,13 +814,7 @@ async function ingestThoughtDirect(
         return { ok: false, error: `HTTP ${retry.status}: ${retryBody}` };
       }
       const data = await retry.json();
-      const meta = metadata as Record<string, unknown>;
-      return {
-        ok: true,
-        id: Array.isArray(data) ? data[0]?.id : data?.id,
-        type: meta.type as string,
-        topics: meta.topics as string[],
-      };
+      return { ok: true, id: Array.isArray(data) ? data[0]?.id : data?.id };
     }
     return { ok: false, error: `HTTP ${res.status}: ${body}` };
   }
@@ -797,14 +825,82 @@ async function ingestThoughtDirect(
   }
 
   if (fingerprintSupported === null) fingerprintSupported = true;
-
   const data = await res.json();
-  const meta = metadata as Record<string, unknown>;
+  return { ok: true, id: Array.isArray(data) ? data[0]?.id : data?.id };
+}
+
+interface EmailIngestResult {
+  ok: boolean;
+  chunksInserted: number;
+  chunksAttempted: number;
+  type?: string;
+  topics?: string[];
+  firstError?: string;
+}
+
+// Email-specific multi-chunk ingest. The full email body is split into
+// embed-safe chunks, each becomes its own thoughts row carrying identical
+// gmail metadata (gmail_id, thread_id, labels, email_date) plus
+// chunk_index/chunk_count so every chunk traces back to the source email.
+// Pruning and sync-log dedup key on gmail_id, so the per-email identity
+// downstream mechanisms expect is preserved across however many chunks
+// the body required.
+//
+// llmMetadata is extracted ONCE per email by the caller (qwen3-27b handles
+// the full body cheaply) and replicated to every chunk so topics/people/
+// action_items describe the email as a whole, not a paragraph in isolation.
+//
+// Per-chunk failures break out of the chunk loop early but do NOT throw —
+// the email is reported as a partial ingest and the next email proceeds.
+// Already-inserted chunks stay in the DB; on the next run, content_fingerprint
+// dedup short-circuits them and only the missing chunks get embedded.
+async function ingestEmailMultiChunk(
+  fullContent: string,
+  source: string,
+  baseMetadata: Record<string, unknown>,
+  llmMetadata: Record<string, unknown>,
+): Promise<EmailIngestResult> {
+  const chunks = chunkForEmbedding(fullContent);
+  let inserted = 0;
+  let firstError: string | undefined;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkContent = chunks[i];
+    try {
+      const fingerprint = await contentFingerprint(chunkContent);
+      const embedding = await getEmbedding(chunkContent);
+      const result = await insertThoughtRow(
+        chunkContent,
+        embedding,
+        {
+          ...llmMetadata,
+          source,
+          ...baseMetadata,
+          chunk_index: i,
+          chunk_count: chunks.length,
+        },
+        fingerprint,
+      );
+      if (!result.ok) {
+        if (!firstError) firstError = `chunk ${i + 1}/${chunks.length}: ${result.error}`;
+        break;
+      }
+      inserted++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!firstError) firstError = `chunk ${i + 1}/${chunks.length}: ${msg}`;
+      break;
+    }
+  }
+
+  const lm = llmMetadata as Record<string, unknown>;
   return {
-    ok: true,
-    id: Array.isArray(data) ? data[0]?.id : data?.id,
-    type: meta.type as string,
-    topics: meta.topics as string[],
+    ok: inserted === chunks.length,
+    chunksInserted: inserted,
+    chunksAttempted: chunks.length,
+    type: lm.type as string | undefined,
+    topics: lm.topics as string[] | undefined,
+    firstError,
   };
 }
 
@@ -963,6 +1059,16 @@ async function main() {
   let errors = 0;
   let totalWords = 0;
   let shortTermExpired = 0;
+  let chunksInserted = 0;
+
+  interface EmailFailure {
+    subject: string;
+    gmail_id: string;
+    chunks_inserted: number;
+    chunks_attempted: number;
+    reason: string;
+  }
+  const failures: EmailFailure[] = [];
 
   const shortTermCutoffMs =
     Date.now() - args.shortTermRetentionDays * 24 * 60 * 60 * 1000;
@@ -1042,28 +1148,94 @@ async function main() {
     };
 
     const content = buildEmailContent(email.body, email.from, email.subject, email.date);
-    const result = useEndpoint
-      ? await ingestThoughtEndpoint(content, "gmail", emailMeta)
-      : await ingestThoughtDirect(content, "gmail", emailMeta);
 
-    if (result.ok) {
-      ingested++;
-      syncLog.ingested_ids[ref.id] = new Date().toISOString();
-      const dupTag = result.duplicate ? " (duplicate — skipped)" : "";
-      console.log(`   -> Ingested: ${result.type} — ${(result.topics || []).join(", ")}${dupTag}`);
-    } else {
+    try {
+      if (useEndpoint) {
+        // Endpoint mode: the remote ingester owns chunking + embedding.
+        const result = await ingestThoughtEndpoint(content, "gmail", emailMeta);
+        if (result.ok) {
+          ingested++;
+          chunksInserted++;
+          syncLog.ingested_ids[ref.id] = new Date().toISOString();
+          const dupTag = result.duplicate ? " (duplicate — skipped)" : "";
+          console.log(`   -> Ingested: ${result.type} — ${(result.topics || []).join(", ")}${dupTag}`);
+        } else {
+          errors++;
+          failures.push({
+            subject: email.subject || "(no subject)",
+            gmail_id: email.gmailId,
+            chunks_inserted: 0,
+            chunks_attempted: 1,
+            reason: result.error || "(unknown)",
+          });
+          console.error(`   -> ERROR: ${result.error}`);
+        }
+      } else {
+        // Direct mode: one LLM metadata pass per email (qwen3-27b handles
+        // the full body fine), then N embed+insert calls — one per chunk.
+        const llmMeta = await extractMetadata(content);
+        const result = await ingestEmailMultiChunk(content, "gmail", emailMeta, llmMeta);
+        chunksInserted += result.chunksInserted;
+
+        const chunkTag = result.chunksAttempted > 1
+          ? ` (${result.chunksInserted}/${result.chunksAttempted} chunks)`
+          : "";
+
+        if (result.ok) {
+          ingested++;
+          // Persist sync-log immediately — a later-email crash should
+          // never lose progress already made.
+          syncLog.ingested_ids[ref.id] = new Date().toISOString();
+          syncLog.last_sync = new Date().toISOString();
+          try {
+            await saveSyncLog(syncLog);
+          } catch (e) {
+            console.error(`   (sync-log save failed: ${e instanceof Error ? e.message : String(e)})`);
+          }
+          console.log(`   -> Ingested: ${result.type} — ${(result.topics || []).join(", ")}${chunkTag}`);
+        } else {
+          errors++;
+          failures.push({
+            subject: email.subject || "(no subject)",
+            gmail_id: email.gmailId,
+            chunks_inserted: result.chunksInserted,
+            chunks_attempted: result.chunksAttempted,
+            reason: result.firstError || "(unknown)",
+          });
+          console.error(
+            `   -> PARTIAL/ERROR${chunkTag}: ${result.firstError}` +
+              (result.chunksInserted > 0
+                ? " — already-inserted chunks stay (gmail_id matches); next run will dedup-skip and retry the rest."
+                : ""),
+          );
+        }
+      }
+    } catch (err) {
       errors++;
-      console.error(`   -> ERROR: ${result.error}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      failures.push({
+        subject: email.subject || "(no subject)",
+        gmail_id: email.gmailId,
+        chunks_inserted: 0,
+        chunks_attempted: 0,
+        reason: `uncaught: ${msg}`,
+      });
+      console.error(`   -> ERROR (uncaught): ${msg}`);
     }
 
     console.log();
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  // Save sync log
+  // Final sync-log timestamp save (in case the per-email saves above all
+  // succeeded; this is the canonical "loop finished cleanly" mark).
   if (!args.dryRun) {
     syncLog.last_sync = new Date().toISOString();
-    await saveSyncLog(syncLog);
+    try {
+      await saveSyncLog(syncLog);
+    } catch (e) {
+      console.error(`(final sync-log save failed: ${e instanceof Error ? e.message : String(e)})`);
+    }
   }
 
   // Summary
@@ -1080,12 +1252,167 @@ async function main() {
   }
   console.log(`  Total words:      ${totalWords.toLocaleString()}`);
   if (!args.dryRun) {
-    console.log(`  Ingested:         ${ingested}`);
+    console.log(`  Ingested:         ${ingested} email(s) / ${chunksInserted} chunk row(s)`);
     console.log(`  Errors:           ${errors}`);
+    if (failures.length > 0) {
+      console.log(`  Failures detail:`);
+      for (const f of failures) {
+        const chunkInfo = f.chunks_attempted > 0
+          ? ` [${f.chunks_inserted}/${f.chunks_attempted} chunks]`
+          : "";
+        console.log(`    - ${f.subject}${chunkInfo}`);
+        console.log(`      gmail_id=${f.gmail_id}`);
+        console.log(`      reason:  ${f.reason}`);
+      }
+    }
   }
 
   const estimatedCost = (totalWords / 750) * 0.00002 + (processed * 0.00015);
   console.log(`  Est. API cost:    $${estimatedCost.toFixed(4)}`);
+
+  // Morning report: a structured markdown the user can open after a
+  // scheduled run to see exactly what landed, what was skipped, and what
+  // failed (so a silent embed-server 500 like the 2026-05-26 incident
+  // can never go unnoticed again). Written to /reports (bind-mounted to
+  // D:\_data on the host). Falls back to /app if the mount isn't there
+  // for ad-hoc runs that don't bother with the volume.
+  if (!args.dryRun) {
+    await writePullReport({
+      windowFlag: args.window,
+      query,
+      labelsResolved: args.labels.length,
+      labelsPrefix: args.labelsPrefix,
+      messagesFound: messageRefs.length,
+      alreadyIngested,
+      noiseSkipped: skipped,
+      shortTermExpired,
+      processed,
+      ingested,
+      chunksInserted,
+      errors,
+      totalWords,
+      failures,
+      syncLogTotal: Object.keys(syncLog.ingested_ids).length,
+      lastSync: syncLog.last_sync,
+    });
+  }
+}
+
+const REPORTS_DIR_PRIMARY = "/reports";
+const REPORTS_DIR_FALLBACK = SCRIPT_DIR; // /app when running in the compose service
+
+interface PullReportInputs {
+  windowFlag: string;
+  query: string;
+  labelsResolved: number;
+  labelsPrefix: string;
+  messagesFound: number;
+  alreadyIngested: number;
+  noiseSkipped: number;
+  shortTermExpired: number;
+  processed: number;
+  ingested: number;
+  chunksInserted: number;
+  errors: number;
+  totalWords: number;
+  failures: Array<{ subject: string; gmail_id: string; chunks_inserted: number; chunks_attempted: number; reason: string }>;
+  syncLogTotal: number;
+  lastSync: string;
+}
+
+async function writePullReport(r: PullReportInputs): Promise<void> {
+  const now = new Date();
+  const isoDay = now.toISOString().slice(0, 10);
+  const isoTs = now.toISOString().replace(/[:.]/g, "-");
+  const status = r.errors > 0 ? "ERRORS" : "ok";
+
+  const lines: string[] = [];
+  lines.push(`# Open Brain \u2014 Gmail pull report (${isoDay})`);
+  lines.push("");
+  lines.push(`- **Status:** ${status}`);
+  lines.push(`- **Run finished:** ${now.toISOString()}`);
+  lines.push(`- **Window flag:** \`${r.windowFlag}\` \u2192 Gmail query: \`${r.query || "(none)"}\``);
+  if (r.labelsPrefix) {
+    lines.push(`- **Label discovery:** prefix \`${r.labelsPrefix}\` \u2192 ${r.labelsResolved} label(s)`);
+  } else {
+    lines.push(`- **Labels:** ${r.labelsResolved} explicit`);
+  }
+  lines.push("");
+  lines.push("## Counts");
+  lines.push("");
+  lines.push(`| Stage | Count |`);
+  lines.push(`|---|---:|`);
+  lines.push(`| Messages found in window | ${r.messagesFound} |`);
+  lines.push(`| Already-ingested (sync-log skip) | ${r.alreadyIngested} |`);
+  lines.push(`| Noise-filtered (auto-gen, receipts, css-heavy, &lt; 10 words) | ${r.noiseSkipped} |`);
+  lines.push(`| Short-term expired (pre-filter) | ${r.shortTermExpired} |`);
+  lines.push(`| Processed (entered ingest) | ${r.processed} |`);
+  lines.push(`| **Ingested (whole emails)** | **${r.ingested}** |`);
+  lines.push(`| Chunk rows inserted | ${r.chunksInserted} |`);
+  lines.push(`| **Errors** | **${r.errors}** |`);
+  lines.push(`| Total words processed | ${r.totalWords.toLocaleString()} |`);
+  lines.push("");
+
+  if (r.failures.length > 0) {
+    lines.push("## Failures");
+    lines.push("");
+    for (const f of r.failures) {
+      const chunkInfo = f.chunks_attempted > 0
+        ? ` \u2014 ${f.chunks_inserted}/${f.chunks_attempted} chunks inserted before failure`
+        : "";
+      lines.push(`### ${f.subject}${chunkInfo}`);
+      lines.push("");
+      lines.push(`- **gmail_id:** \`${f.gmail_id}\``);
+      lines.push(`- **Reason:** ${f.reason}`);
+      lines.push("");
+      if (f.chunks_inserted > 0 && f.chunks_attempted > f.chunks_inserted) {
+        lines.push(
+          `> Partial: ${f.chunks_inserted} chunk row(s) are already in the brain with this ` +
+            `gmail_id. The next scheduled run will see this gmail_id is NOT in sync-log, ` +
+            `re-chunk identically, dedup-skip the inserted chunks via content_fingerprint, ` +
+            `and only embed the missing tail.`,
+        );
+        lines.push("");
+      }
+    }
+  } else {
+    lines.push("## Failures");
+    lines.push("");
+    lines.push("_None._");
+    lines.push("");
+  }
+
+  lines.push("## Sync-log");
+  lines.push("");
+  lines.push(`- **Total tracked gmail_ids:** ${r.syncLogTotal}`);
+  lines.push(`- **last_sync:** ${r.lastSync || "(never)"}`);
+  lines.push("");
+
+  const body = lines.join("\n");
+
+  // Try the primary (mounted) path; fall back to the recipe dir if the
+  // mount isn't available (ad-hoc dev runs without the compose volume).
+  const primaryLatest = `${REPORTS_DIR_PRIMARY}/gmail-pull-latest.md`;
+  const primaryDated  = `${REPORTS_DIR_PRIMARY}/gmail-pull-${isoTs}.md`;
+  const fallbackLatest = `${REPORTS_DIR_FALLBACK}gmail-pull-latest.md`;
+  const fallbackDated  = `${REPORTS_DIR_FALLBACK}gmail-pull-${isoTs}.md`;
+
+  let wroteTo = "";
+  try {
+    await Deno.writeTextFile(primaryLatest, body);
+    await Deno.writeTextFile(primaryDated, body);
+    wroteTo = REPORTS_DIR_PRIMARY;
+  } catch {
+    try {
+      await Deno.writeTextFile(fallbackLatest, body);
+      await Deno.writeTextFile(fallbackDated, body);
+      wroteTo = REPORTS_DIR_FALLBACK;
+    } catch (e) {
+      console.error(`(could not write pull report: ${e instanceof Error ? e.message : String(e)})`);
+      return;
+    }
+  }
+  console.log(`  Report written:   ${wroteTo}/gmail-pull-latest.md`);
 }
 
 main().catch((err) => {

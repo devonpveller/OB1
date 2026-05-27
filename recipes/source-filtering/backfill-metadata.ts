@@ -19,19 +19,26 @@
  *   --dry-run               Show what would be updated without writing
  *   --batch-size=10         Concurrent requests per batch (default: 10)
  *
- * Requires: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY
+ * Requires: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+ *
+ * Local-repoint (self-hosted fork): never OpenRouter. Metadata extraction ->
+ * llama-swap (qwen36-27b:nothink). Defaults are internal Docker service names;
+ * the bearer is a non-secret placeholder. Override with LOCAL_LLM_BASE /
+ * LOCAL_LLM_MODEL to swap providers — the OpenAI-compatible request shape
+ * stays the same.
  */
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !OPENROUTER_API_KEY) {
-  console.error("Missing required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("Missing required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY");
   Deno.exit(1);
 }
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const LLM_BASE = Deno.env.get("LOCAL_LLM_BASE") || "http://llama-cpp:8080/v1";
+const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "qwen36-27b:nothink";
+const LLM_BEARER = Deno.env.get("LOCAL_LLM_BEARER") || "no-key";
 
 // ─── Args ────────────────────────────────────────────────────────────────────
 
@@ -65,14 +72,14 @@ const EXTRACT_PROMPT = `Extract metadata from the user's captured thought. Retur
 Only extract what's explicitly there.`;
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+  const r = await fetch(`${LLM_BASE}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${LLM_BEARER}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
+      model: LLM_MODEL,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: EXTRACT_PROMPT },
@@ -83,7 +90,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
 
   if (!r.ok) {
     const msg = await r.text().catch(() => "");
-    throw new Error(`OpenRouter failed: ${r.status} ${msg}`);
+    throw new Error(`Metadata extraction failed: ${r.status} ${msg}`);
   }
 
   const d = await r.json();
