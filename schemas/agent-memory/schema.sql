@@ -19,9 +19,11 @@ BEGIN
   END IF;
 END $$;
 
+-- Local fork divergence: our docker/init.sql gives thoughts.id BIGSERIAL,
+-- not UUID like upstream Supabase OB1. thought_id matches that locally.
 CREATE TABLE IF NOT EXISTS public.agent_memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  thought_id UUID REFERENCES public.thoughts(id) ON DELETE SET NULL,
+  thought_id BIGINT REFERENCES public.thoughts(id) ON DELETE SET NULL,
   workspace_id TEXT NOT NULL,
   project_id TEXT,
   channel_kind TEXT,

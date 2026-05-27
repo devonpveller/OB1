@@ -431,6 +431,29 @@ services:
     entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "prune-short-term.ts"]
     command: []
 
+  # Daily digest of yesterday's thoughts, delivered as a self-addressed
+  # Gmail message. Mechanical formatting only — no LLM call — so this
+  # service does NOT need llm-net. Uses a dedicated OAuth token at
+  # secrets/google/openbrain-digest/token.json with gmail.send scope
+  # (bootstrap via setup-token.ts on the host once). The pull/prune
+  # OAuth client (same client_id) is reused; only the consented scope
+  # set differs, so credentials.json is mounted from the same dir.
+  openbrain-digest:
+    image: denoland/deno:alpine
+    profiles: ["scheduled"]
+    working_dir: /app
+    env_file:
+      - ../recipes/daily-digest/.env
+    volumes:
+      - ../recipes/daily-digest:/app
+      - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      - ../secrets/google/openbrain-digest/token.json:/app/token.json
+      - D:\_data:/reports
+    networks:
+      - obnet
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "send-digest.ts"]
+    command: []
+
 volumes:
   openbrain-db-data:
   openbrain-wiki-data:

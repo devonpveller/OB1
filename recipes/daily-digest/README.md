@@ -134,3 +134,40 @@ DELIVERY METHOD
 
 --------------------------------------
 ```
+
+---
+
+## Approach C: Self-hosted scheduled container (this fork)
+
+The self-hosted ai-stack ships a server-side variant of Approach B that runs entirely on local infrastructure plus the user's own Gmail. No Supabase cloud, no OpenRouter, no Resend/SendGrid — just a Deno container that queries the local PostgREST proxy, formats a digest, and delivers it as a self-addressed Gmail message.
+
+Components in this directory:
+
+| File | Purpose |
+|------|---------|
+| [`send-digest.ts`](./send-digest.ts) | The container entrypoint. Mechanical formatting only (no LLM call). |
+| [`setup-token.ts`](./setup-token.ts) | One-time OAuth bootstrap. Run on the host before scheduling. |
+| [`.env.example`](./.env.example) | Recipient address, time window, PostgREST URL. |
+
+The compose service `openbrain-digest` is defined under profile `scheduled` next to `openbrain-gmail-pull` and `openbrain-gmail-prune` in [`docker/docker-compose.yml`](../../docker/docker-compose.yml). The full design + ordering vs. the gmail pull/prune cycle is in [`docs/google-open-brain/google-open-brain-scheduled-digest.md`](../../docs/google-open-brain/google-open-brain-scheduled-digest.md).
+
+### One-time setup
+
+1. Copy `.env.example` to `.env` and edit `DIGEST_TO` / `DIGEST_FROM` to your Gmail address.
+2. Make sure the OAuth client's consent screen (Google Cloud Console) includes the `https://www.googleapis.com/auth/gmail.send` scope, and that your Google account is added as a test user if the app is in testing mode.
+3. On the host, from this directory, symlink (or copy) the OAuth client secret you already use for gmail-pull, then bootstrap the token:
+
+   ```powershell
+   Copy-Item ..\..\secrets\google\open-brain-email\client_secret_*.json .\credentials.json
+   deno run --allow-net --allow-read --allow-write --allow-env setup-token.ts
+   ```
+
+4. Move the resulting `token.json` to `secrets/google/openbrain-digest/token.json` so the container can mount it.
+5. Trigger a one-off run from PowerShell to verify:
+
+   ```powershell
+   docker compose --profile scheduled run --rm openbrain-digest
+   ```
+
+   The digest arrives in your Gmail inbox; a copy lands in `D:\_data\openbrain-digest-latest.md` regardless.
+6. Add a Windows Task Scheduler trigger that fires daily at your preferred time (mirrors the wrappers for `openbrain-gmail-pull` / `openbrain-gmail-prune`).
