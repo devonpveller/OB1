@@ -58,6 +58,10 @@ services:
       - ../recipes/daily-digest:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
       - ../secrets/google/openbrain-digest/token.json:/app/token.json
+      # Calendar OAuth token (calendar.readonly scope). Bootstrap once
+      # via setup-calendar-token.ts. Missing token = CalendarSection
+      # silently skips and the rest of the digest still goes out.
+      - ../secrets/google/openbrain-digest/calendar-token.json:/app/calendar-token.json
       - D:\_data:/reports
     networks:
       # obnet for PostgREST queries; llm-net so the local LLM can write
