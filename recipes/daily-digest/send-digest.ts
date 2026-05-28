@@ -118,9 +118,12 @@ async function fetchThoughts(): Promise<Thought[]> {
   // openbrain-rest (Caddy) strips the /rest/v1 prefix and forwards to
   // PostgREST at root. Same convention supabase-js uses; the base URL
   // is /openbrain-rest/, and /rest/v1 is the well-known path mount.
+  // metadata->>'type'=neq.profile_field excludes user-profile fields
+  // from the AI-news section (they have their own consumer).
   const url =
     `${REST_URL}/rest/v1/thoughts?select=id,content,metadata,created_at` +
     `&created_at=gte.${encodeURIComponent(since)}` +
+    `&metadata->>type=not.eq.profile_field` +
     `&order=created_at.desc&limit=${LIMIT}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
   if (!res.ok) {
@@ -128,6 +131,162 @@ async function fetchThoughts(): Promise<Thought[]> {
     throw new Error(`PostgREST query failed: ${res.status} ${msg}`);
   }
   return await res.json();
+}
+
+// ─── Profile lookup ─────────────────────────────────────────────────────────
+//
+// User profile data (address, name, timezone, etc.) lives in the same
+// thoughts table, tagged metadata.type=profile_field with a
+// metadata.field_name discriminator. Latest-by-created_at wins so the
+// user can update by capturing a new thought without touching SQL.
+// See: docs/open-brain-profile-convention.md.
+
+async function fetchProfileField(fieldName: string): Promise<string | null> {
+  const url =
+    `${REST_URL}/rest/v1/thoughts?select=content` +
+    `&metadata->>type=eq.profile_field` +
+    `&metadata->>field_name=eq.${encodeURIComponent(fieldName)}` +
+    `&order=created_at.desc&limit=1`;
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return null;
+    const rows: Array<{ content: string }> = await res.json();
+    return rows[0]?.content?.trim() || null;
+  } catch (err) {
+    console.warn(`Profile lookup for "${fieldName}" failed: ${err}`);
+    return null;
+  }
+}
+
+// ─── Weather (wttr.in + local LLM brief) ────────────────────────────────────
+//
+// wttr.in returns structured JSON (?format=j1) with current conditions
+// plus today's 8 three-hour blocks plus 2 more days. We render a small
+// HTML card from the structured data, then ask the local llama-cpp to
+// generate a 1–2 sentence morning brief grounded in the same data.
+
+interface WttrCurrent {
+  temp_F: string; temp_C: string; FeelsLikeF: string; FeelsLikeC: string;
+  weatherDesc: Array<{ value: string }>; humidity: string;
+  windspeedMiles: string; winddir16Point: string;
+}
+interface WttrHourly {
+  time: string; tempF: string; tempC: string;
+  weatherDesc: Array<{ value: string }>; chanceofrain: string;
+}
+interface WttrDay {
+  date: string; maxtempF: string; maxtempC: string;
+  mintempF: string; mintempC: string;
+  hourly: WttrHourly[];
+}
+interface WttrPayload {
+  current_condition: WttrCurrent[];
+  weather: WttrDay[];
+}
+
+interface WeatherBlock {
+  location: string;
+  currentDesc: string;
+  currentTempF: string;
+  currentTempC: string;
+  feelsLikeF: string;
+  feelsLikeC: string;
+  humidity: string;
+  windMph: string;
+  windDir: string;
+  todayHighF: string;
+  todayLowF: string;
+  todayHighC: string;
+  todayLowC: string;
+  tomorrowHighF: string;
+  tomorrowLowF: string;
+  tomorrowDesc: string;
+  brief: string | null;
+  payload: WttrPayload;
+}
+
+async function fetchWeather(location: string): Promise<WeatherBlock | null> {
+  const url = `https://wttr.in/${encodeURIComponent(location)}?format=j1`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "openbrain-digest/1.0" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      console.warn(`wttr.in returned ${res.status} for "${location}"`);
+      return null;
+    }
+    const data = await res.json() as WttrPayload;
+    const cur = data.current_condition?.[0];
+    const today = data.weather?.[0];
+    const tomorrow = data.weather?.[1];
+    if (!cur || !today) return null;
+
+    const tomorrowMidday = tomorrow?.hourly?.find((h) => h.time === "1200")
+      ?? tomorrow?.hourly?.[Math.floor((tomorrow?.hourly?.length ?? 0) / 2)];
+
+    return {
+      location,
+      currentDesc: cur.weatherDesc?.[0]?.value?.trim() ?? "—",
+      currentTempF: cur.temp_F,
+      currentTempC: cur.temp_C,
+      feelsLikeF: cur.FeelsLikeF,
+      feelsLikeC: cur.FeelsLikeC,
+      humidity: cur.humidity,
+      windMph: cur.windspeedMiles,
+      windDir: cur.winddir16Point,
+      todayHighF: today.maxtempF,
+      todayLowF: today.mintempF,
+      todayHighC: today.maxtempC,
+      todayLowC: today.mintempC,
+      tomorrowHighF: tomorrow?.maxtempF ?? "",
+      tomorrowLowF: tomorrow?.mintempF ?? "",
+      tomorrowDesc: tomorrowMidday?.weatherDesc?.[0]?.value?.trim() ?? "",
+      brief: null,
+      payload: data,
+    };
+  } catch (err) {
+    console.warn(`Weather fetch failed for "${location}": ${err}`);
+    return null;
+  }
+}
+
+const LLM_BASE = (Deno.env.get("LOCAL_LLM_BASE") || "http://llama-cpp:8080/v1").replace(/\/$/, "");
+const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "qwen36-27b:nothink";
+const LLM_BEARER = Deno.env.get("LOCAL_LLM_BEARER") || "no-key";
+
+async function llmWeatherBrief(weather: WeatherBlock): Promise<string | null> {
+  // Single-shot summarization grounded in the wttr.in data. No tool use;
+  // the LLM doesn't search the web — it just summarizes the structured
+  // payload we already fetched. Keeps the round-trip cheap (~1–2s on
+  // qwen36-27b) and avoids hallucinated facts the user can't verify.
+  const prompt = `Write a 1-2 sentence morning weather brief for ${weather.location}. Use Fahrenheit. Be concrete and practical (mention if a jacket/umbrella is needed, what the day feels like). Plain text, no markdown, no preamble.
+
+Current: ${weather.currentDesc}, ${weather.currentTempF}°F, feels like ${weather.feelsLikeF}°F, humidity ${weather.humidity}%, wind ${weather.windMph}mph ${weather.windDir}.
+Today's high/low: ${weather.todayHighF}°F / ${weather.todayLowF}°F.
+Tomorrow: ${weather.tomorrowDesc}, high ${weather.tomorrowHighF}°F low ${weather.tomorrowLowF}°F.`;
+  try {
+    const res = await fetch(`${LLM_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${LLM_BEARER}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: LLM_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 120,
+        temperature: 0.3,
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return (d.choices?.[0]?.message?.content as string | undefined)?.trim() || null;
+  } catch (err) {
+    console.warn(`LLM weather brief failed: ${err}`);
+    return null;
+  }
 }
 
 // ─── Digest formatting ──────────────────────────────────────────────────────
@@ -257,6 +416,7 @@ function topTopics(emails: EmailGroup[], limit: number): Array<{ topic: string; 
 interface DigestData {
   generatedAt: string;
   windowHours: number;
+  weather: WeatherBlock | null;
   emails: EmailGroup[];
   ungrouped: Thought[];
   bySender: Map<string, EmailGroup[]>;
@@ -264,11 +424,29 @@ interface DigestData {
   totalActionItems: number;
 }
 
-function buildDigestData(thoughts: Thought[], windowHours: number): DigestData {
+async function buildDigestData(
+  thoughts: Thought[],
+  windowHours: number,
+): Promise<DigestData> {
   const { emails, ungrouped } = groupGmail(thoughts);
+
+  // Weather. Skip silently if the user hasn't set profile_field/address
+  // yet (capture via Claude Code: "remember my address is X"). Skip
+  // also if wttr.in is unreachable or the LLM brief fails — partial
+  // weather is better than no digest.
+  let weather: WeatherBlock | null = null;
+  const location = await fetchProfileField("address");
+  if (location) {
+    weather = await fetchWeather(location);
+    if (weather) {
+      weather.brief = await llmWeatherBrief(weather);
+    }
+  }
+
   return {
     generatedAt: new Date().toISOString(),
     windowHours,
+    weather,
     emails,
     ungrouped,
     bySender: groupEmailsBySender(emails),
@@ -279,12 +457,39 @@ function buildDigestData(thoughts: Thought[], windowHours: number): DigestData {
 
 // ─── Markdown renderer (audit trail) ────────────────────────────────────────
 
+function renderMarkdownWeather(w: WeatherBlock | null): string[] {
+  if (!w) return [];
+  const lines: string[] = [
+    `## Weather — ${w.location}`,
+    "",
+  ];
+  if (w.brief) {
+    lines.push(`> ${w.brief}`);
+    lines.push("");
+  }
+  lines.push(
+    `**Now:** ${w.currentDesc}, ${w.currentTempF}°F (feels like ${w.feelsLikeF}°F). ` +
+      `Wind ${w.windMph}mph ${w.windDir}. Humidity ${w.humidity}%.`,
+  );
+  lines.push(`**Today:** high ${w.todayHighF}°F / low ${w.todayLowF}°F.`);
+  if (w.tomorrowHighF) {
+    lines.push(
+      `**Tomorrow:** ${w.tomorrowDesc || "—"}, high ${w.tomorrowHighF}°F / low ${w.tomorrowLowF}°F.`,
+    );
+  }
+  lines.push("");
+  return lines;
+}
+
 function renderMarkdown(d: DigestData): string {
-  if (d.emails.length === 0 && d.ungrouped.length === 0) {
-    return `No new thoughts captured in the last ${d.windowHours}h.\n`;
+  if (d.emails.length === 0 && d.ungrouped.length === 0 && !d.weather) {
+    return `No new thoughts captured in the last ${d.windowHours}h, and no weather available.\n`;
   }
   const lines: string[] = [];
   const chunkSum = d.emails.reduce((s, e) => s + e.chunkCount, 0);
+
+  // Weather block goes first — the user's morning ground-truth.
+  lines.push(...renderMarkdownWeather(d.weather));
 
   lines.push(`## Summary`);
   lines.push("");
@@ -362,8 +567,32 @@ function escHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function renderHtmlWeather(w: WeatherBlock | null): string {
+  if (!w) return "";
+  const briefBlock = w.brief
+    ? `<div style="font-size:15px;color:#222;margin:6px 0 12px 0;line-height:1.45;">${escHtml(w.brief)}</div>`
+    : "";
+  const tomorrowRow = w.tomorrowHighF
+    ? `<tr><td style="color:#777;font-size:12px;padding:2px 8px 2px 0;">Tomorrow</td><td style="font-size:13px;">${escHtml(w.tomorrowDesc || "—")}, ${escHtml(w.tomorrowHighF)}°F / ${escHtml(w.tomorrowLowF)}°F</td></tr>`
+    : "";
+  return `
+<div style="background:linear-gradient(180deg,#e3f2fd 0%,#f5f7fa 100%);padding:16px 18px;border-radius:8px;margin-bottom:24px;">
+  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;">
+    <h2 style="margin:0;font-size:17px;color:#1565c0;">Weather — ${escHtml(w.location)}</h2>
+    <div style="font-size:24px;font-weight:600;color:#1565c0;">${escHtml(w.currentTempF)}°F</div>
+  </div>
+  <div style="color:#555;font-size:14px;margin-bottom:4px;">${escHtml(w.currentDesc)} · feels ${escHtml(w.feelsLikeF)}°F · wind ${escHtml(w.windMph)}mph ${escHtml(w.windDir)} · humidity ${escHtml(w.humidity)}%</div>
+  ${briefBlock}
+  <table style="border-collapse:collapse;font-size:13px;color:#333;margin-top:8px;">
+    <tr><td style="color:#777;font-size:12px;padding:2px 8px 2px 0;">Today</td><td style="font-size:13px;">high ${escHtml(w.todayHighF)}°F / low ${escHtml(w.todayLowF)}°F</td></tr>
+    ${tomorrowRow}
+  </table>
+</div>`;
+}
+
 function renderHtml(d: DigestData): string {
   const chunkSum = d.emails.reduce((s, e) => s + e.chunkCount, 0);
+  const weatherHtml = renderHtmlWeather(d.weather);
 
   const summary = (() => {
     if (d.emails.length === 0 && d.ungrouped.length === 0) {
@@ -466,6 +695,7 @@ function renderHtml(d: DigestData): string {
 
   return `<!DOCTYPE html>
 <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:720px;margin:0 auto;padding:16px;color:#333;line-height:1.5;">
+${weatherHtml}
 <div style="background:#f5f5f5;padding:14px 18px;border-radius:6px;margin-bottom:24px;">
   <div style="font-size:13px;color:#666;margin-bottom:6px;">Captured in the last ${d.windowHours}h</div>
   ${summary}
@@ -564,12 +794,15 @@ async function runDigest(): Promise<RunResult> {
   const thoughts = await fetchThoughts();
   console.log(`  Found ${thoughts.length} thought(s).`);
 
-  const data = buildDigestData(thoughts, WINDOW_HOURS);
+  const data = await buildDigestData(thoughts, WINDOW_HOURS);
   const dateStr = new Date().toISOString().slice(0, 10);
   const subject = `Open Brain Daily Digest — ${dateStr}`;
 
   console.log(
     `  ${data.emails.length} email(s) from ${data.bySender.size} sender(s), ${data.ungrouped.length} other capture(s), ${data.totalActionItems} action item(s).`,
+  );
+  console.log(
+    `  Weather: ${data.weather ? `${data.weather.location} — ${data.weather.currentDesc}, ${data.weather.currentTempF}°F` : "(no profile_field/address set; section skipped)"}.`,
   );
 
   // File first — guaranteed audit trail even if email fails.

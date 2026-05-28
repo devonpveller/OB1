@@ -60,7 +60,10 @@ services:
       - ../secrets/google/openbrain-digest/token.json:/app/token.json
       - D:\_data:/reports
     networks:
+      # obnet for PostgREST queries; llm-net so the local LLM can write
+      # the morning weather brief from wttr.in's JSON payload.
       - obnet
+      - llm-net
     entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "send-digest.ts"]
     command: []
 
