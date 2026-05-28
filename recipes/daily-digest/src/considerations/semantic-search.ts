@@ -63,7 +63,7 @@ export class SemanticSearch {
       });
       return rows.map((r) => ({
         id: r.id,
-        snippet: trimSnippet(r.content, 200),
+        snippet: trimSnippet(cleanContent(r.content), 200),
         source: (r.metadata?.source as string | undefined) ?? null,
         similarity: r.similarity,
       }));
@@ -72,6 +72,18 @@ export class SemanticSearch {
       return [];
     }
   }
+}
+
+/**
+ * Strip leading boilerplate that bloats snippets:
+ *   - gmail-pull's "[Email from X <addr> | Subject: Y | Date: Z]" header
+ *   - leading "View this post on the web at <url>" lines from substack-style emails
+ * Done before snippet truncation so the user sees actual content.
+ */
+function cleanContent(text: string): string {
+  let cleaned = text.replace(/^\[Email from[^\]]+\]\s*/, "");
+  cleaned = cleaned.replace(/^View this post on the web at \S+\s*/, "");
+  return cleaned.trim();
 }
 
 function trimSnippet(text: string, max: number): string {

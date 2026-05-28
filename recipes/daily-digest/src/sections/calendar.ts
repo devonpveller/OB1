@@ -25,6 +25,7 @@
 import { BrainClient, Thought } from "../clients/postgrest.ts";
 import { GoogleCalendarClient, CalendarEvent, CalendarListEntry } from "../clients/google-calendar.ts";
 import { SemanticSearch } from "../considerations/semantic-search.ts";
+import { LlmRelevanceFilter } from "../considerations/relevance-filter.ts";
 import { Section, SectionData } from "./section.ts";
 
 // ─── Payload ────────────────────────────────────────────────────────────────
@@ -74,10 +75,16 @@ export interface CalendarSectionOptions {
   excludeCalendarIds?: string[];
   /** Override the default keyword list used to flag prep-worthy events. */
   prepKeywords?: PrepKeywords;
-  /** Top-K considerations per shown event. 0 disables the pass. */
+  /** Top-K considerations per shown event (after LLM rerank). 0 disables. */
   considerationsTopK?: number;
   /** Minimum similarity (0–1) for an event consideration. */
   considerationsThreshold?: number;
+  /**
+   * How many candidates to fetch from the embedding pass before the LLM
+   * relevance filter prunes. Bigger = more recall but more LLM input.
+   * Default 8.
+   */
+  considerationsCandidatePool?: number;
 }
 
 export interface PrepKeywords {
@@ -103,6 +110,7 @@ export class CalendarSection implements Section {
     private readonly brain: BrainClient,
     private readonly gcal: GoogleCalendarClient,
     private readonly considerations: SemanticSearch,
+    private readonly relevanceFilter: LlmRelevanceFilter | null,
     private readonly opts: CalendarSectionOptions,
   ) {}
 
@@ -335,20 +343,57 @@ export class CalendarSection implements Section {
 
   // ─── Considerations enrichment ──────────────────────────────────────────
 
+  /**
+   * Two-stage considerations pipeline:
+   *   1. Embedding search returns a wide candidate pool (top-N by cosine
+   *      similarity — surface-level "related").
+   *   2. LLM relevance filter prunes name-overlap-only matches, leaving
+   *      thoughts the user would actually want to see for THIS event.
+   *      If the filter is unavailable or returns nothing, we fall back
+   *      to the unfiltered top-K from step 1.
+   *
+   * Both stages cap their own work; the final list is bounded by
+   * considerationsTopK (default 3) regardless.
+   */
   private async populateConsiderations(items: CalendarItem[]): Promise<void> {
     const k = this.opts.considerationsTopK ?? 3;
     if (k <= 0 || items.length === 0) return;
     const threshold = this.opts.considerationsThreshold ?? 0.5;
+    const poolSize = this.opts.considerationsCandidatePool ?? 8;
+
     await Promise.all(items.map(async (item) => {
       const query = [item.summary, item.location, item.description]
         .filter(Boolean)
         .join(". ")
         .slice(0, 800);
-      const related = await this.considerations.findRelated(query, { k, threshold });
-      item.considerations = related.filter((r) =>
+
+      // Wide pool from the embedding pass.
+      const candidates = await this.considerations.findRelated(query, {
+        k: poolSize,
+        threshold,
+      });
+
+      // Drop self-matches (a brain calendar_event thought IS the event).
+      const filtered = candidates.filter((r) =>
         !item.sources.includes("openbrain") ||
-          r.id !== Number(item.id.replace(/^brain-/, "")),
+          r.id !== Number(item.id.replace(/^brain-/, ""))
       );
+
+      if (filtered.length === 0) {
+        item.considerations = [];
+        return;
+      }
+
+      // Relevance pass — skipped (degrades to embedding-only) if the
+      // filter wasn't injected or if LLM is unreachable.
+      const vetted = this.relevanceFilter
+        ? await this.relevanceFilter.filter(
+          { summary: item.summary, description: item.description },
+          filtered,
+        )
+        : filtered;
+
+      item.considerations = vetted.slice(0, k);
     }));
   }
 

@@ -21,6 +21,7 @@ import { GoogleOAuth } from "./src/clients/google-oauth.ts";
 import { GmailClient } from "./src/clients/gmail.ts";
 import { GoogleCalendarClient } from "./src/clients/google-calendar.ts";
 import { SemanticSearch } from "./src/considerations/semantic-search.ts";
+import { LlmRelevanceFilter } from "./src/considerations/relevance-filter.ts";
 import { WeatherSection } from "./src/sections/weather.ts";
 import { CalendarSection } from "./src/sections/calendar.ts";
 import { AiNewsSection } from "./src/sections/ai-news.ts";
@@ -94,6 +95,15 @@ const considerations = new SemanticSearch(brain, llm, {
   threshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
 });
 
+// Optional second pass — LLM asks "which of these embedding matches
+// are ACTUALLY relevant to this event?" before they hit the digest.
+// Filters out name-overlap-only matches (e.g. wife's old emails being
+// pulled into every event tagged with her name). Off by default; turn
+// on by setting CONSIDERATIONS_RERANK=true.
+const relevanceFilter = env("CONSIDERATIONS_RERANK", "true").toLowerCase() === "true"
+  ? new LlmRelevanceFilter(llm)
+  : null;
+
 const excludeCalendarIds = env("DIGEST_EXCLUDE_CALENDAR_IDS", "")
   .split(",")
   .map((s) => s.trim())
@@ -101,11 +111,12 @@ const excludeCalendarIds = env("DIGEST_EXCLUDE_CALENDAR_IDS", "")
 
 const sections: Section[] = [
   new WeatherSection(brain, wttr, llm),
-  new CalendarSection(brain, gcal, considerations, {
+  new CalendarSection(brain, gcal, considerations, relevanceFilter, {
     prepWindowDays: envInt("DIGEST_PREP_WINDOW_DAYS", 30),
     excludeCalendarIds,
     considerationsTopK: envInt("CONSIDERATIONS_TOP_K", 3),
     considerationsThreshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
+    considerationsCandidatePool: envInt("CONSIDERATIONS_POOL", 8),
   }),
   new AiNewsSection(brain, {
     windowHours: envInt("DIGEST_WINDOW_HOURS", 24),
