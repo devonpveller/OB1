@@ -8,7 +8,7 @@
 import { SectionData } from "../sections/section.ts";
 import { WeatherPayload } from "../sections/weather.ts";
 import { AiNewsPayload, EmailGroup } from "../sections/ai-news.ts";
-import { CalendarItem, CalendarPayload } from "../sections/calendar.ts";
+import { CalendarItem, CalendarPayload, PrepItem } from "../sections/calendar.ts";
 
 export class MarkdownRenderer {
   render(sections: SectionData[], opts: { subject: string }): string {
@@ -29,28 +29,45 @@ export class MarkdownRenderer {
 }
 
 function renderCalendar(c: CalendarPayload): string {
-  if (c.today.length === 0 && c.upcoming.length === 0) return "";
+  if (c.today.length === 0 && c.tomorrow.length === 0 && c.needsPrep.length === 0) return "";
   const lines: string[] = [];
   if (!c.liveSource) {
     lines.push(`> ⚠ Google Calendar unreachable this run; showing brain-only items.`);
     lines.push("");
   }
-  if (c.today.length > 0) {
-    lines.push(`## Today (${c.today.length})`, "");
+
+  lines.push(`## Today (${c.today.length})`, "");
+  if (c.today.length === 0) {
+    lines.push("*Nothing scheduled.*", "");
+  } else {
     for (const e of c.today) lines.push(...renderEventLines(e));
   }
-  if (c.upcoming.length > 0) {
-    lines.push(`## Upcoming (${c.upcoming.length})`, "");
-    for (const e of c.upcoming) lines.push(...renderEventLines(e));
+
+  lines.push(`## Tomorrow (${c.tomorrow.length})`, "");
+  if (c.tomorrow.length === 0) {
+    lines.push("*Nothing scheduled.*", "");
+  } else {
+    for (const e of c.tomorrow) lines.push(...renderEventLines(e));
+  }
+
+  if (c.needsPrep.length > 0) {
+    lines.push(`## Needs prep — next ${c.windowDays}d (${c.needsPrep.length})`, "");
+    for (const p of c.needsPrep) lines.push(...renderEventLines(p, p.reasons));
   }
   return lines.join("\n");
 }
 
-function renderEventLines(e: CalendarItem): string[] {
+function renderEventLines(e: CalendarItem, prepReasons?: string[]): string[] {
   const out: string[] = [];
   const sourceTag = `[${e.sources.join(",")}]`;
-  out.push(`### ${e.summary} ${sourceTag}`);
+  const calName = e.calendarName && e.calendarName !== "primary"
+    ? ` *(cal: ${e.calendarName.replace(/@.*$/, "").slice(0, 24)})*`
+    : "";
+  out.push(`### ${e.summary} ${sourceTag}${calName}`);
   out.push(`*${formatEventTime(e)}*${e.htmlLink ? ` · [Open in Calendar](${e.htmlLink})` : ""}`);
+  if (prepReasons && prepReasons.length > 0) {
+    out.push(`**Flagged for prep:** ${prepReasons.join("; ")}`);
+  }
   if (e.location) out.push(`**Location:** ${e.location}`);
   if (e.attendees.length > 0) {
     out.push(

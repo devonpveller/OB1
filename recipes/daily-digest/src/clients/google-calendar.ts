@@ -41,8 +41,40 @@ export interface ListEventsOptions {
   excludeCancelled?: boolean;
 }
 
+export interface CalendarListEntry {
+  id: string;
+  summary: string;
+  /** "owner" | "writer" | "reader" | "freeBusyReader" */
+  accessRole: string;
+  /** True for the account's primary calendar. */
+  primary: boolean;
+}
+
 export class GoogleCalendarClient {
   constructor(private readonly opts: GoogleCalendarClientOptions) {}
+
+  /**
+   * Enumerate every calendar visible on the account. Used by the
+   * digest to auto-discover secondary calendars (family, shared,
+   * subscribed Holidays, etc.) instead of hard-coding IDs.
+   */
+  async listCalendars(): Promise<CalendarListEntry[]> {
+    const accessToken = await this.opts.oauth.getAccessToken();
+    const url = "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=100";
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) {
+      const err = await res.text().catch(() => "");
+      throw new Error(`calendarList failed: ${res.status} ${err}`);
+    }
+    const data = await res.json();
+    const items: Array<Record<string, unknown>> = data.items ?? [];
+    return items.map((c) => ({
+      id: String(c.id ?? ""),
+      summary: String(c.summaryOverride ?? c.summary ?? c.id ?? ""),
+      accessRole: String(c.accessRole ?? "reader"),
+      primary: Boolean(c.primary),
+    }));
+  }
 
   async listEvents(args: ListEventsOptions): Promise<CalendarEvent[]> {
     const accessToken = await this.opts.oauth.getAccessToken();

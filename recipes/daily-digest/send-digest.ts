@@ -94,10 +94,16 @@ const considerations = new SemanticSearch(brain, llm, {
   threshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
 });
 
+const excludeCalendarIds = env("DIGEST_EXCLUDE_CALENDAR_IDS", "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const sections: Section[] = [
   new WeatherSection(brain, wttr, llm),
   new CalendarSection(brain, gcal, considerations, {
-    upcomingDays: envInt("DIGEST_UPCOMING_DAYS", 7),
+    prepWindowDays: envInt("DIGEST_PREP_WINDOW_DAYS", 30),
+    excludeCalendarIds,
     considerationsTopK: envInt("CONSIDERATIONS_TOP_K", 3),
     considerationsThreshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
   }),

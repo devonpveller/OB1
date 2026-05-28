@@ -33,3 +33,5 @@ docker/mcpo*.config.json
 docker/.env
 open-brain-wiki-data.ssh
 /recipes/brain-backup
+/secrets
+calendar-token.json

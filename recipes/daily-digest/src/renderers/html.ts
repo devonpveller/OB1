@@ -11,7 +11,7 @@
 import { SectionData } from "../sections/section.ts";
 import { WeatherPayload } from "../sections/weather.ts";
 import { AiNewsPayload, EmailGroup } from "../sections/ai-news.ts";
-import { CalendarItem, CalendarPayload } from "../sections/calendar.ts";
+import { CalendarItem, CalendarPayload, PrepItem } from "../sections/calendar.ts";
 
 export class HtmlRenderer {
   render(sections: SectionData[], opts: { generatedAt: string }): string {
@@ -63,25 +63,46 @@ function renderWeather(w: WeatherPayload): string {
 // ─── Calendar ───────────────────────────────────────────────────────────────
 
 function renderCalendar(c: CalendarPayload): string {
-  if (c.today.length === 0 && c.upcoming.length === 0) return "";
-  const todayBlock = c.today.length > 0
-    ? `<h2 style="border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:28px;font-size:18px;color:#222;">Today (${c.today.length})</h2>${c.today.map(renderEventCard).join("")}`
-    : "";
-  const upcomingBlock = c.upcoming.length > 0
-    ? `<h2 style="border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:28px;font-size:18px;color:#222;">Upcoming (${c.upcoming.length})</h2>${c.upcoming.map(renderEventCard).join("")}`
-    : "";
+  if (c.today.length === 0 && c.tomorrow.length === 0 && c.needsPrep.length === 0) return "";
+
   const banner = c.liveSource
     ? ""
     : `<div style="background:#fff3e0;color:#7c5800;padding:6px 10px;font-size:12px;border-radius:4px;margin-bottom:8px;">⚠ Google Calendar unreachable this run; showing brain-only items.</div>`;
-  return banner + todayBlock + upcomingBlock;
+
+  const todayBlock = renderCalendarBucket("Today", c.today.length === 0 ? "(nothing scheduled)" : null, c.today);
+  const tomorrowBlock = renderCalendarBucket("Tomorrow", c.tomorrow.length === 0 ? "(nothing scheduled)" : null, c.tomorrow);
+  const prepBlock = c.needsPrep.length === 0
+    ? ""
+    : renderPrepBucket(c.needsPrep, c.windowDays);
+
+  return banner + todayBlock + tomorrowBlock + prepBlock;
 }
 
-function renderEventCard(e: CalendarItem): string {
+function renderCalendarBucket(label: string, emptyText: string | null, items: CalendarItem[]): string {
+  const heading = `<h2 style="border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:28px;font-size:18px;color:#222;">${escHtml(label)} (${items.length})</h2>`;
+  if (emptyText) {
+    return `${heading}<div style="color:#888;font-size:14px;margin:8px 0 16px 0;font-style:italic;">${escHtml(emptyText)}</div>`;
+  }
+  return `${heading}${items.map((e) => renderEventCard(e)).join("")}`;
+}
+
+function renderPrepBucket(items: PrepItem[], windowDays: number): string {
+  const heading = `<h2 style="border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:28px;font-size:18px;color:#222;">Needs prep <span style="color:#888;font-size:13px;font-weight:normal;">— next ${windowDays}d (${items.length})</span></h2>`;
+  return heading + items.map((p: PrepItem) => renderEventCard(p, p.reasons)).join("");
+}
+
+function renderEventCard(e: CalendarItem, prepReasons?: string[]): string {
   const timeLabel = formatEventTime(e);
   const link = e.htmlLink
     ? ` · <a href="${escHtml(e.htmlLink)}" style="color:#1967d2;">Open in Calendar</a>`
     : "";
   const sourceTag = renderSourceTags(e.sources);
+  const calendarTag = e.calendarName && e.calendarName !== "primary"
+    ? ` <span style="display:inline-block;background:#eceff1;color:#546e7a;font-size:11px;padding:1px 6px;border-radius:3px;vertical-align:middle;">${escHtml(shortCalendarName(e.calendarName))}</span>`
+    : "";
+  const prepReasonsBlock = prepReasons && prepReasons.length > 0
+    ? `<div style="color:#6a1b9a;font-size:12px;margin:4px 0;"><strong>Flagged for prep:</strong> ${prepReasons.map(escHtml).join("; ")}</div>`
+    : "";
   const locationLine = e.location
     ? `<div style="color:#666;font-size:13px;margin:2px 0;">📍 ${escHtml(e.location)}</div>`
     : "";
@@ -96,13 +117,19 @@ function renderEventCard(e: CalendarItem): string {
     : "";
   return `
 <div style="margin:14px 0;padding:12px 16px;border-left:3px solid #34a853;background:#fff;">
-  <h3 style="margin:0 0 4px 0;font-size:16px;">${escHtml(e.summary)} ${sourceTag}</h3>
+  <h3 style="margin:0 0 4px 0;font-size:16px;">${escHtml(e.summary)} ${sourceTag}${calendarTag}</h3>
   <div style="color:#777;font-size:13px;">${escHtml(timeLabel)}${link}</div>
+  ${prepReasonsBlock}
   ${locationLine}
   ${peopleLine}
   ${descriptionLine}
   ${considerations}
 </div>`;
+}
+
+function shortCalendarName(name: string): string {
+  // Email-like calendar IDs are noisy. Strip @group.calendar.google.com etc.
+  return name.replace(/@.*$/, "").slice(0, 24);
 }
 
 function renderSourceTags(sources: Array<"google" | "openbrain">): string {
