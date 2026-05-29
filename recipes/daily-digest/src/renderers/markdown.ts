@@ -78,12 +78,11 @@ function renderEventLines(e: CalendarItem, prepReasons?: string[]): string[] {
     out.push("");
     out.push(`> ${e.description.replace(/\n/g, "\n> ").slice(0, 400)}${e.description.length > 400 ? "…" : ""}`);
   }
-  if (e.considerations.length > 0) {
+  if (e.considerationsSummary) {
     out.push("");
-    out.push(`**Related from your brain:**`);
-    for (const r of e.considerations) {
-      out.push(`- ${r.snippet}${r.source ? ` *(${r.source})*` : ""}`);
-    }
+    out.push(`**Related from your brain** *(synthesized from ${e.considerationsSourceCount} brain item${e.considerationsSourceCount === 1 ? "" : "s"})*`);
+    out.push("");
+    out.push(`> ${e.considerationsSummary.replace(/\n/g, "\n> ")}`);
   }
   out.push("");
   return out;

@@ -21,7 +21,7 @@ import { GoogleOAuth } from "./src/clients/google-oauth.ts";
 import { GmailClient } from "./src/clients/gmail.ts";
 import { GoogleCalendarClient } from "./src/clients/google-calendar.ts";
 import { SemanticSearch } from "./src/considerations/semantic-search.ts";
-import { LlmRelevanceFilter } from "./src/considerations/relevance-filter.ts";
+import { ConsiderationsSynthesizer } from "./src/considerations/synthesizer.ts";
 import { WeatherSection } from "./src/sections/weather.ts";
 import { CalendarSection } from "./src/sections/calendar.ts";
 import { AiNewsSection } from "./src/sections/ai-news.ts";
@@ -88,20 +88,21 @@ const gcal = new GoogleCalendarClient({
 // section: import it above, instantiate, append to this list. No edits
 // to clients, renderers, orchestrator, or server.
 
-// Shared "related from your brain" lookup. Reused by every section
-// that wants per-item context (calendar today; todos later).
-const considerations = new SemanticSearch(brain, llm, {
-  k: envInt("CONSIDERATIONS_TOP_K", 3),
-  threshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
-});
+// Brain similarity lookup, reused by the synthesizer to seed candidates.
+const semanticSearch = new SemanticSearch(brain, llm);
 
-// Optional second pass — LLM asks "which of these embedding matches
-// are ACTUALLY relevant to this event?" before they hit the digest.
-// Filters out name-overlap-only matches (e.g. wife's old emails being
-// pulled into every event tagged with her name). Off by default; turn
-// on by setting CONSIDERATIONS_RERANK=true.
-const relevanceFilter = env("CONSIDERATIONS_RERANK", "true").toLowerCase() === "true"
-  ? new LlmRelevanceFilter(llm)
+// Event-aware synthesizer: takes a calendar item, runs targeted brain
+// queries (birthday → gift/personality angle; generic → event-topic
+// angle), and asks the LLM to produce a 1–3 sentence brief grounded in
+// what it finds. Returns null when nothing useful exists — the digest
+// then renders no "Related from your brain" block for that event.
+//
+// Disable by setting CONSIDERATIONS_SYNTH=false.
+const synthesizer = env("CONSIDERATIONS_SYNTH", "true").toLowerCase() === "true"
+  ? new ConsiderationsSynthesizer(semanticSearch, llm, {
+    candidatePoolSize: envInt("CONSIDERATIONS_POOL", 8),
+    similarityThreshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
+  })
   : null;
 
 const excludeCalendarIds = env("DIGEST_EXCLUDE_CALENDAR_IDS", "")
@@ -111,12 +112,9 @@ const excludeCalendarIds = env("DIGEST_EXCLUDE_CALENDAR_IDS", "")
 
 const sections: Section[] = [
   new WeatherSection(brain, wttr, llm),
-  new CalendarSection(brain, gcal, considerations, relevanceFilter, {
+  new CalendarSection(brain, gcal, synthesizer, {
     prepWindowDays: envInt("DIGEST_PREP_WINDOW_DAYS", 30),
     excludeCalendarIds,
-    considerationsTopK: envInt("CONSIDERATIONS_TOP_K", 3),
-    considerationsThreshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
-    considerationsCandidatePool: envInt("CONSIDERATIONS_POOL", 8),
   }),
   new AiNewsSection(brain, {
     windowHours: envInt("DIGEST_WINDOW_HOURS", 24),

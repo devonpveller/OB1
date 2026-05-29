@@ -112,8 +112,8 @@ function renderEventCard(e: CalendarItem, prepReasons?: string[]): string {
   const descriptionLine = e.description
     ? `<div style="color:#444;font-size:13px;margin:6px 0;padding:6px 10px;border-left:2px solid #ddd;background:#fafafa;white-space:pre-wrap;">${escHtml(e.description.slice(0, 400))}${e.description.length > 400 ? "…" : ""}</div>`
     : "";
-  const considerations = e.considerations.length > 0
-    ? `<div style="background:#f3e5f5;border-left:3px solid #8e24aa;padding:8px 12px;margin:8px 0;border-radius:0 4px 4px 0;font-size:13px;"><strong>Related from your brain:</strong><ul style="margin:4px 0 0 0;padding-left:20px;">${e.considerations.map((r) => `<li>${escHtml(r.snippet)}${r.source ? ` <em style="color:#999;">(${escHtml(r.source)})</em>` : ""}</li>`).join("")}</ul></div>`
+  const considerations = e.considerationsSummary
+    ? `<div style="background:#f3e5f5;border-left:3px solid #8e24aa;padding:10px 14px;margin:8px 0;border-radius:0 4px 4px 0;font-size:13.5px;line-height:1.5;color:#333;"><strong style="color:#6a1b9a;">Related from your brain</strong><div style="margin:4px 0;">${escHtml(e.considerationsSummary)}</div><div style="color:#9e9e9e;font-size:11px;">Synthesized from ${e.considerationsSourceCount} brain item${e.considerationsSourceCount === 1 ? "" : "s"}</div></div>`
     : "";
   return `
 <div style="margin:14px 0;padding:12px 16px;border-left:3px solid #34a853;background:#fff;">

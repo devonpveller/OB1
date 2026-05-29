@@ -24,8 +24,7 @@
 
 import { BrainClient, Thought } from "../clients/postgrest.ts";
 import { GoogleCalendarClient, CalendarEvent, CalendarListEntry } from "../clients/google-calendar.ts";
-import { SemanticSearch } from "../considerations/semantic-search.ts";
-import { LlmRelevanceFilter } from "../considerations/relevance-filter.ts";
+import { ConsiderationsSynthesizer } from "../considerations/synthesizer.ts";
 import { Section, SectionData } from "./section.ts";
 
 // ─── Payload ────────────────────────────────────────────────────────────────
@@ -52,18 +51,15 @@ export interface CalendarItem {
   htmlLink: string;
   calendarName: string;
   sources: Array<"google" | "openbrain">;
-  considerations: ConsiderationRef[];
+  /** LLM-synthesized "Related from your brain" paragraph. Null = nothing useful. */
+  considerationsSummary: string | null;
+  /** How many brain items the synthesis was grounded in (transparency). */
+  considerationsSourceCount: number;
 }
 
 export interface PrepItem extends CalendarItem {
   /** Human-readable explanations for why this event needs prep. */
   reasons: string[];
-}
-
-export interface ConsiderationRef {
-  id: number;
-  snippet: string;
-  source: string | null;
 }
 
 // ─── Options ────────────────────────────────────────────────────────────────
@@ -75,16 +71,8 @@ export interface CalendarSectionOptions {
   excludeCalendarIds?: string[];
   /** Override the default keyword list used to flag prep-worthy events. */
   prepKeywords?: PrepKeywords;
-  /** Top-K considerations per shown event (after LLM rerank). 0 disables. */
-  considerationsTopK?: number;
-  /** Minimum similarity (0–1) for an event consideration. */
-  considerationsThreshold?: number;
-  /**
-   * How many candidates to fetch from the embedding pass before the LLM
-   * relevance filter prunes. Bigger = more recall but more LLM input.
-   * Default 8.
-   */
-  considerationsCandidatePool?: number;
+  /** Set false to skip the synthesis pass entirely. Default true. */
+  synthesizeConsiderations?: boolean;
 }
 
 export interface PrepKeywords {
@@ -109,8 +97,7 @@ export class CalendarSection implements Section {
   constructor(
     private readonly brain: BrainClient,
     private readonly gcal: GoogleCalendarClient,
-    private readonly considerations: SemanticSearch,
-    private readonly relevanceFilter: LlmRelevanceFilter | null,
+    private readonly synthesizer: ConsiderationsSynthesizer | null,
     private readonly opts: CalendarSectionOptions,
   ) {}
 
@@ -316,7 +303,8 @@ export class CalendarSection implements Section {
       htmlLink: e.htmlLink,
       calendarName: e.calendarId,
       sources: ["google"],
-      considerations: [],
+      considerationsSummary: null,
+      considerationsSourceCount: 0,
     };
   }
 
@@ -337,63 +325,48 @@ export class CalendarSection implements Section {
       htmlLink: (meta.html_link as string) ?? "",
       calendarName: (meta.calendar_id as string) ?? "openbrain",
       sources: ["openbrain"],
-      considerations: [],
+      considerationsSummary: null,
+      considerationsSourceCount: 0,
     };
   }
 
   // ─── Considerations enrichment ──────────────────────────────────────────
 
   /**
-   * Two-stage considerations pipeline:
-   *   1. Embedding search returns a wide candidate pool (top-N by cosine
-   *      similarity — surface-level "related").
-   *   2. LLM relevance filter prunes name-overlap-only matches, leaving
-   *      thoughts the user would actually want to see for THIS event.
-   *      If the filter is unavailable or returns nothing, we fall back
-   *      to the unfiltered top-K from step 1.
+   * Per-event synthesis: ask the ConsiderationsSynthesizer to produce
+   * one 1–3 sentence brief grounded in semantically related brain
+   * items. Returns null when nothing actually useful exists — events
+   * with no synthesis render no "Related from your brain" block at
+   * all (better than filler).
    *
-   * Both stages cap their own work; the final list is bounded by
-   * considerationsTopK (default 3) regardless.
+   * Synthesizer-internal logic decides strategy:
+   *   - Birthday events → targeted query about the person (gifts,
+   *     interests, personality), de-prioritizes location/activity noise.
+   *   - Generic events → bridge via event title + description.
    */
   private async populateConsiderations(items: CalendarItem[]): Promise<void> {
-    const k = this.opts.considerationsTopK ?? 3;
-    if (k <= 0 || items.length === 0) return;
-    const threshold = this.opts.considerationsThreshold ?? 0.5;
-    const poolSize = this.opts.considerationsCandidatePool ?? 8;
+    if (!this.synthesizer || items.length === 0) return;
 
     await Promise.all(items.map(async (item) => {
-      const query = [item.summary, item.location, item.description]
-        .filter(Boolean)
-        .join(". ")
-        .slice(0, 800);
-
-      // Wide pool from the embedding pass.
-      const candidates = await this.considerations.findRelated(query, {
-        k: poolSize,
-        threshold,
-      });
-
-      // Drop self-matches (a brain calendar_event thought IS the event).
-      const filtered = candidates.filter((r) =>
-        !item.sources.includes("openbrain") ||
-          r.id !== Number(item.id.replace(/^brain-/, ""))
-      );
-
-      if (filtered.length === 0) {
-        item.considerations = [];
-        return;
+      try {
+        const result = await this.synthesizer!.forEvent({
+          summary: item.summary,
+          description: item.description,
+          location: item.location,
+        });
+        if (result) {
+          item.considerationsSummary = result.summary;
+          item.considerationsSourceCount = result.sourceCount;
+        }
+      } catch (err) {
+        // Synthesis failure is non-fatal — event just renders without
+        // the brain block.
+        console.warn(
+          `Synthesis failed for "${item.summary}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
       }
-
-      // Relevance pass — skipped (degrades to embedding-only) if the
-      // filter wasn't injected or if LLM is unreachable.
-      const vetted = this.relevanceFilter
-        ? await this.relevanceFilter.filter(
-          { summary: item.summary, description: item.description },
-          filtered,
-        )
-        : filtered;
-
-      item.considerations = vetted.slice(0, k);
     }));
   }
 
