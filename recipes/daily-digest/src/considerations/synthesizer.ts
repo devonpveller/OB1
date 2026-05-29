@@ -168,25 +168,33 @@ Title: ${event.summary}${event.location ? `\nLocation: ${event.location}` : ""}$
 Items from the user's brain that semantic search picked as potentially related:
 ${numbered}
 
-═══ CRITICAL GROUNDING RULES (read carefully) ═══
+═══ YOUR JOB ═══
 
-1. Only present facts EXPLICITLY stated in the source items. Do not infer, extrapolate, or assume implications that aren't there.
+Surface FACTUAL CONTEXT from the items that would be useful for this event. The user wants brain context they may have forgotten about. Examples of useful surfacing:
+  - "You navigated to this office in 2021" (factual; user history)
+  - "Your brain has past research on this topic from <date>"
+  - "Previous emails about this organization mention X"
+  - "You've been to this location before for <reason>"
 
-2. Treat any "personal status" facts (relationships, ages, roles) in the items as potentially STALE. An item from 2018 saying "X is Y's guardian" does NOT mean X is still Y's guardian today. Do not suggest implications of stale facts as if they're current ("they may need to be present", "they're likely responsible for").
+═══ HARD RULES (do not violate) ═══
 
-3. Do not invent suggestions or implications. If an item shows the user navigated to a DMV in 2021, that is useful as familiarity context — it does NOT mean the user should do something specific now. Just state the fact ("you've navigated to this office before").
+1. SURFACE, DO NOT IMPLY. State the brain fact directly. Do NOT add "this may help with...", "they likely need to...", "you should consider...". The user can draw their own conclusions.
 
-4. Distinguish the USER from event participants. If an item shows the user's own search, navigation, or interest, attribute it to the USER, not to a person named in the event.
+2. STALE FACTS STAY STALE. If an item from years ago says "X is Y's guardian", you may say "Per a 2018 brain note, X is Y's guardian" — but you may NOT extrapolate ("X may need to attend"). When in doubt, omit stale personal-status facts entirely.
 
-═══ DECISION ═══
+3. DON'T MIX UP THE USER WITH PEOPLE NAMED IN THE EVENT. If items show the user's own searches/navigation/research, attribute to the user ("you researched X"), NOT to event participants ("[name] is interested in X").
 
-If items have at least one CONCRETE, CURRENT, EXPLICITLY-STATED connection to the event:
-  → Output: 1–3 sentences of synthesis grounded ONLY in what the items literally state. Be specific about what you're surfacing (e.g. "Your past DMV navigation logs..." not "It might help with logistics").
+4. NO INVENTED SUGGESTIONS. Don't propose actions ("consider bringing Y"), products, or routes that aren't explicitly in the brain.
 
-If items only have surface keyword overlap, stale facts, or speculative implications:
-  → Output: none
+═══ OUTPUT ═══
 
-Default to "none" when in doubt. The user prefers silence over fabricated context.`;
+If items contain at least one factual brain entry plausibly useful for this event:
+  → 1–3 sentences surfacing those facts. Attribute correctly. State, don't suggest.
+
+If items are pure keyword noise with no factual value:
+  → none
+
+Lean toward surfacing — factual context is the whole point of this section. Only say "none" when truly nothing factual would help.`;
   }
 }
 
