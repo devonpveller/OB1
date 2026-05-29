@@ -124,7 +124,7 @@ export class CalendarSection implements Section {
     const today = merged.filter((e) => withinDay(e.start, bounds.todayStart, bounds.tomorrowStart));
     const tomorrow = merged.filter((e) => withinDay(e.start, bounds.tomorrowStart, bounds.dayAfterTomorrowStart));
     const lookahead = merged
-      .filter((e) => e.start >= bounds.dayAfterTomorrowStart && e.start < bounds.windowEnd);
+      .filter((e) => withinDay(e.start, bounds.dayAfterTomorrowStart, bounds.windowEnd));
 
     const needsPrep = lookahead
       .map((item) => this.classifyPrep(item, keywords, familyNames))
@@ -397,8 +397,34 @@ function addDays(d: Date, n: number): Date {
   return x;
 }
 
+/**
+ * Inclusive-start, exclusive-end window check that handles BOTH ISO-8601
+ * datetime strings (timed events: "2026-05-29T17:10:00-04:00") AND
+ * date-only strings from Google all-day events ("2026-05-29").
+ *
+ * Naive string comparison fails on the mixed case: "2026-05-29" sorts
+ * BEFORE "2026-05-29T04:00:00.000Z" so an all-day event on today's
+ * date would be wrongly excluded from the "today" bucket. We parse
+ * each side to millisecond timestamps; date-only strings are anchored
+ * to local midnight of that day.
+ */
 function withinDay(iso: string, startIso: string, endIso: string): boolean {
-  return iso >= startIso && iso < endIso;
+  const t = toLocalMs(iso);
+  const s = toLocalMs(startIso);
+  const e = toLocalMs(endIso);
+  if (t === null || s === null || e === null) return false;
+  return t >= s && t < e;
+}
+
+function toLocalMs(iso: string): number | null {
+  if (!iso) return null;
+  // Date-only "YYYY-MM-DD" → local midnight on that calendar day.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const [y, m, d] = iso.split("-").map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+  }
+  const parsed = new Date(iso).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function matchKeywords(haystack: string, words: string[], onHit: (word: string) => void) {
