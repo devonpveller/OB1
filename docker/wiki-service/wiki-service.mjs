@@ -23,6 +23,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, writeFile, readFile, copyFile, chmod, rm, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
+// Canonical slug algorithm — shared single source of truth (G5, plan §14.1).
+// Imported from the bind-mounted recipes dir (../recipes:/recipes:ro), the
+// same mount this service already reads the recipe from (RECIPE_PATH). The
+// hand-synced slugifyEntity/slugifyNotebook copies are gone — no more drift.
+import { slugifyEntity, slugifyNotebook } from "file:///recipes/_shared/slug.mjs";
 
 const pexec = promisify(execFile);
 
@@ -121,10 +126,12 @@ async function ensureRepo() {
   // must still get them): pull.rebase, .gitignore (so .wikistate.json is
   // never committed/pulled), notes/ README.
   await git(["config", "pull.rebase", "true"]).catch(() => {});
-  const wantIgnore = ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\n";
+  // assets/ is the wiki-assets volume (binaries, D-I) — keep it OUT of vault
+  // git so the workbench's note commits never stage images.
+  const wantIgnore = ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n";
   let curIgnore = "";
   try { curIgnore = await readFile(`${WIKI_GIT_DIR}/.gitignore`, "utf8"); } catch { /* */ }
-  if (!curIgnore.includes(".wikistate.json")) {
+  if (!curIgnore.includes(".wikistate.json") || !curIgnore.includes("assets/")) {
     await writeFile(`${WIKI_GIT_DIR}/.gitignore`, wantIgnore);
   }
   // If a prior (pre-fix) run already tracked the state file, untrack it.
@@ -343,11 +350,20 @@ async function ingestNotes(prevCommit) {
       const abs = `${WIKI_GIT_DIR}/${rel}`;
       if (!existsSync(abs)) continue;
       const content = await readFile(abs, "utf8");
-      // notebook = first folder under notes/, else "notes".
-      const parts = rel.split("/"); // notes/<maybe-nb>/file.md
+      // notebook = first folder under notes/ (the pinned notebook slug — P3.1),
+      // else "notes".
+      const parts = rel.split("/"); // notes/<notebook-slug>/file.md
       const notebook = parts.length > 2 ? parts[1] : "notes";
       const title = parts[parts.length - 1].replace(/\.md$/, "");
-      const meta = { source: "user_note", note_path: rel, notebook, title };
+      // P3.4 — honor the note's own provenance frontmatter (`source: ai_note`
+      // for assistant-emitted notes, plus optional agent/chat) so the hub +
+      // search can distinguish authorship; default to user_note.
+      const fmBlock = content.match(/^---\n([\s\S]*?)\n---/);
+      const fmSource = fmBlock?.[1].match(/^source:\s*(\S+)/m)?.[1];
+      const fmAgent = fmBlock?.[1].match(/^agent:\s*"?([^"\n]+)"?/m)?.[1];
+      const source = fmSource === "ai_note" ? "ai_note" : "user_note";
+      const meta = { source, note_path: rel, notebook, title };
+      if (source === "ai_note" && fmAgent) meta.agent = fmAgent;
       const enc = encodeURIComponent(rel);
       const existing = await obFetch(
         "GET",
@@ -395,29 +411,8 @@ async function dirtyEntityIds(prevIso) {
 }
 
 // ── Orphan sweep ────────────────────────────────────────────────────────────
-// Mirror of recipes/entity-wiki/generate-wiki.mjs slugify() (kept in sync
-// by hand; the recipe owns the canonical version). Only used when the
-// entity has no pinned wiki_slug yet.
-function slugifyEntity(name, entityType) {
-  const base = String(name || "")
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    || "unnamed";
-  return entityType ? `${entityType}-${base}` : base;
-}
-
-function slugifyNotebook(name) {
-  return String(name || "")
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    || "default";
-}
+// slugifyEntity / slugifyNotebook are imported from the shared canonical
+// module (top of file). Only used when an entity has no pinned wiki_slug yet.
 
 // Walks one level under outDir/<subdir>/ and returns absolute paths of
 // .md files, skipping README.md.
@@ -431,9 +426,14 @@ async function listEntityFiles(outDir) {
   }
   for (const d of typeDirs) {
     if (!d.isDirectory()) continue;
-    // `topic/` is handled by sweepOrphanTopics; skip it here so we don't
-    // accidentally sweep topic pages against the entity kept-set.
-    if (d.name === "topic") continue;
+    // Non-entity page classes, each with its OWN kept-set, skipped here so the
+    // entity sweep never deletes them against the wrong set: `notebook/` (P2
+    // hubs → sweepOrphanNotebookPages), `topic/` (retired, swept wholesale),
+    // `thought/`+`source/` (P1 leaves → sweepOrphanLeafPages).
+    if (
+      d.name === "notebook" || d.name === "topic" ||
+      d.name === "thought" || d.name === "source"
+    ) continue;
     const dirPath = `${outDir}/${d.name}`;
     let entries;
     try {
@@ -505,51 +505,132 @@ async function sweepOrphanEntityPages() {
   return { kept: kept.size, deleted };
 }
 
-// Same idea for topic pages: keep only notebooks that still have at
-// least one source backing them. A notebook whose every source got
-// pruned should not leave a topic page on disk.
-async function sweepOrphanTopicPages() {
+// P2.3 — notebook hubs replace topic pages. Keep only `content/notebook/<slug>.md`
+// for an ACTIVE thread (the slug kept-set comes from threads.slug), and RETIRE
+// the old `topic/` layer wholesale (synthesis now lands in notebook/). The
+// `notebook/` dir has its own kept-set here, exactly as `topic/` used to —
+// don't let the entity sweep eat hubs (same bug-class as the leaf sweep).
+async function sweepOrphanNotebookPages() {
+  // 1. Retire the old topic layer (one-time, idempotent): the synthesizer no
+  //    longer writes topic/, so any remaining topic pages + MOC are stale.
+  let retired = 0;
   const topicDir = `${WIKI_OUT_DIR}/topic`;
-  if (!existsSync(topicDir)) return { kept: 0, deleted: 0 };
-  let notebooks = new Set();
-  try {
-    // `sources.metadata.notebook` and `thoughts.metadata.notebook` both
-    // feed topic synthesis. Union the two.
-    for (const tbl of ["sources", "thoughts"]) {
-      const rows = (await obFetch(
-        "GET",
-        `${tbl}?select=metadata&metadata->>notebook=not.is.null&limit=20000`,
-      )) || [];
-      for (const r of rows) {
-        const nb = r?.metadata?.notebook;
-        if (nb) notebooks.add(slugifyNotebook(nb));
-      }
+  if (existsSync(topicDir)) {
+    try {
+      await rm(topicDir, { recursive: true, force: true });
+      retired++;
+    } catch (e) {
+      console.error("[wiki-service] topic retire failed:", e?.message || e);
     }
+  }
+  await rm(`${WIKI_OUT_DIR}/topic.md`, { force: true }).catch(() => {});
+
+  // 2. Sweep notebook hubs whose thread is gone/archived.
+  const nbDir = `${WIKI_OUT_DIR}/notebook`;
+  if (!existsSync(nbDir)) return { kept: 0, deleted: retired };
+  let kept = new Set();
+  try {
+    const rows = (await obFetch(
+      "GET",
+      "threads?select=slug,status&status=eq.active&slug=not.is.null&limit=20000",
+    )) || [];
+    for (const r of rows) if (r.slug) kept.add(`${r.slug}.md`);
   } catch (e) {
-    console.error("[wiki-service] orphan-sweep topic query failed (skipping):",
-      e?.message || e);
-    return { kept: 0, deleted: 0, error: true };
+    console.error("[wiki-service] notebook-sweep query failed (skipping):", e?.message || e);
+    return { kept: 0, deleted: retired, error: true };
   }
   let entries;
-  try { entries = await readdir(topicDir, { withFileTypes: true }); } catch { return { kept: 0, deleted: 0 }; }
+  try { entries = await readdir(nbDir, { withFileTypes: true }); } catch { return { kept: kept.size, deleted: retired }; }
   let deleted = 0;
   for (const e of entries) {
-    if (!e.isFile()) continue;
-    if (!e.name.endsWith(".md")) continue;
-    const slug = e.name.replace(/\.md$/, "");
-    if (notebooks.has(slug)) continue;
+    if (!e.isFile() || !e.name.endsWith(".md")) continue;
+    if (kept.has(e.name)) continue;
     try {
-      await rm(`${topicDir}/${e.name}`, { force: true });
+      await rm(`${nbDir}/${e.name}`, { force: true });
       deleted++;
     } catch (err) {
-      console.error(`[wiki-service] topic orphan delete failed for ${e.name}:`,
-        err?.message || err);
+      console.error(`[wiki-service] notebook orphan delete failed for ${e.name}:`, err?.message || err);
+    }
+  }
+  if (deleted > 0 || retired > 0) {
+    console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale notebook hub(s)${retired ? " + retired topic/ layer" : ""}`);
+  }
+  return { kept: kept.size, deleted: deleted + retired };
+}
+
+// Recursively collect absolute paths of .md files under `dir`, skipping any
+// directory whose absolute path is in `skip` (plus the usual build/git dirs).
+async function collectMarkdown(dir, skip, acc = []) {
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); } catch { return acc; }
+  for (const e of entries) {
+    const abs = `${dir}/${e.name}`;
+    if (e.isDirectory()) {
+      if (skip.has(abs)) continue;
+      if (/^(\.git|\.quartz-cache|public|node_modules)$/.test(e.name)) continue;
+      await collectMarkdown(abs, skip, acc);
+    } else if (e.isFile() && e.name.endsWith(".md")) {
+      acc.push(abs);
+    }
+  }
+  return acc;
+}
+
+// P1.5 — sweep provenance leaf pages (content/thought/<id>.md,
+// content/source/<uuid>.md) no longer cited by ANY vault page. A leaf exists
+// only to back a citation; once nothing links to it, remove it. CRITICAL: the
+// kept-set is read from ON-DISK citations ([[thought/<id>…]] /
+// [[source/<uuid>…]]) across every content/ + notes/ page — NOT from "ids
+// cited this compile" — so an incremental compile (which regenerates only
+// dirty pages) never deletes a leaf still cited by an unchanged page. This is
+// a DEDICATED sweep, never the entity sweep (which keys on entity slugs and
+// would delete every leaf — the P1.5 data-loss bug).
+async function sweepOrphanLeafPages() {
+  const thoughtDir = `${WIKI_OUT_DIR}/thought`;
+  const sourceDir = `${WIKI_OUT_DIR}/source`;
+  if (!existsSync(thoughtDir) && !existsSync(sourceDir)) return { kept: 0, deleted: 0 };
+  // Scan content/ (minus the leaf dirs themselves) + the author-owned notes/
+  // layer, since a hand-written note may also [[source/…]] a leaf.
+  const skip = new Set([thoughtDir, sourceDir]);
+  const pages = [
+    ...(await collectMarkdown(WIKI_OUT_DIR, skip)),
+    ...(await collectMarkdown(NOTES_DIR, skip)),
+  ];
+  const keptThoughts = new Set();
+  const keptSources = new Set();
+  const reThought = /\[\[thought\/(\d+)/g;
+  const reSource = /\[\[source\/([0-9a-fA-F-]{36})/g;
+  for (const p of pages) {
+    let text;
+    try { text = await readFile(p, "utf8"); } catch { continue; }
+    let m;
+    while ((m = reThought.exec(text)) !== null) keptThoughts.add(m[1]);
+    while ((m = reSource.exec(text)) !== null) keptSources.add(m[1].toLowerCase());
+  }
+  let deleted = 0;
+  for (const [dir, kept, isSource] of [
+    [thoughtDir, keptThoughts, false],
+    [sourceDir, keptSources, true],
+  ]) {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isFile() || !e.name.endsWith(".md")) continue;
+      const id = e.name.replace(/\.md$/, "");
+      const key = isSource ? id.toLowerCase() : id;
+      if (kept.has(key)) continue;
+      try {
+        await rm(`${dir}/${e.name}`, { force: true });
+        deleted++;
+      } catch (err) {
+        console.error(`[wiki-service] leaf orphan delete failed for ${e.name}:`, err?.message || err);
+      }
     }
   }
   if (deleted > 0) {
-    console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale topic page(s)`);
+    console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale leaf page(s)`);
   }
-  return { kept: notebooks.size, deleted };
+  return { kept: keptThoughts.size + keptSources.size, deleted };
 }
 
 async function compile(reason) {
@@ -635,7 +716,7 @@ async function compile(reason) {
         "Generated from OpenBrain; your notes evolve alongside it.",
         "",
         "- [[entities|Entities]] — people, tools, projects, orgs (auto-generated)",
-        "- [[topic|Topics]] — cross-source research syntheses (auto-generated)",
+        "- [[notebook|Notebooks]] — research groups: synthesis + sources + notes per notebook (auto-generated)",
         "- `notes/` — your own notes (hand-written; tethered back into OpenBrain)",
         "",
         "Generated pages regenerate from OpenBrain; never hand-edit them — " +
@@ -650,12 +731,17 @@ async function compile(reason) {
     // shrinking in lockstep with the brain). Non-fatal: a failed sweep
     // just leaves stale pages until next compile.
     let sweepEntities = { kept: 0, deleted: 0 };
-    let sweepTopics = { kept: 0, deleted: 0 };
+    let sweepNotebooks = { kept: 0, deleted: 0 };
+    let sweepLeaves = { kept: 0, deleted: 0 };
     try {
       sweepEntities = await sweepOrphanEntityPages();
-      sweepTopics = await sweepOrphanTopicPages();
-      if (sweepEntities.deleted || sweepTopics.deleted) {
-        tail += ` | swept ${sweepEntities.deleted}+${sweepTopics.deleted} orphan(s)`;
+      sweepNotebooks = await sweepOrphanNotebookPages();
+      // P1.5 — run AFTER entity/notebook sweeps so the leaf kept-set reflects
+      // the final on-disk page set (deleted entity pages no longer count as
+      // citing their leaves).
+      sweepLeaves = await sweepOrphanLeafPages();
+      if (sweepEntities.deleted || sweepNotebooks.deleted || sweepLeaves.deleted) {
+        tail += ` | swept ${sweepEntities.deleted}+${sweepNotebooks.deleted}+${sweepLeaves.deleted} orphan(s)`;
       }
     } catch (e) {
       console.error("[wiki-service] orphan-sweep failed (non-fatal):",

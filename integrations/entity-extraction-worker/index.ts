@@ -592,7 +592,25 @@ async function claimSourceQueue(limit: number): Promise<Array<{ source_id: strin
     .order("queued_at", { ascending: true })
     .limit(limit);
   if (fetchError || !pending || pending.length === 0) return [];
-  const ids = pending.map((p) => p.source_id);
+  let ids = pending.map((p) => p.source_id);
+  // P6.4 / P4 4.5 — never re-extract a committed-retracted source (a tomb must
+  // stop producing fresh source_entities). Drain such items from the queue so
+  // they don't linger as `pending` forever.
+  const { data: tombs } = await supabase
+    .from("sources")
+    .select("id")
+    .in("id", ids)
+    .not("retraction_committed_at", "is", null);
+  if (tombs && tombs.length) {
+    const tombIds = tombs.map((t) => t.id);
+    await supabase
+      .from("source_extraction_queue")
+      .update({ status: "complete", processed_at: new Date().toISOString() })
+      .in("source_id", tombIds);
+    const tombSet = new Set(tombIds);
+    ids = ids.filter((id) => !tombSet.has(id));
+  }
+  if (ids.length === 0) return [];
   const { data: claimed, error: updateError } = await supabase
     .from("source_extraction_queue")
     .update({
@@ -639,11 +657,16 @@ async function linkSourceEntity(
   entityId: number,
   confidence: number,
 ): Promise<boolean> {
+  // `user_linked` WINS on PK collision (P6.4): the scoped delete (above) already
+  // removed stale auto rows, so a fresh `mentioned` insert has no conflict in the
+  // normal case; the only surviving row a pair can collide with is a manual
+  // `user_linked` one — `ignoreDuplicates` then leaves it intact rather than
+  // downgrading it back to `mentioned`.
   const { error } = await supabase
     .from("source_entities")
     .upsert(
       { source_id: sourceId, entity_id: entityId, mention_role: "mentioned", confidence },
-      { onConflict: "source_id,entity_id" },
+      { onConflict: "source_id,entity_id", ignoreDuplicates: true },
     );
   if (error) {
     console.error(`Failed to link source ${sourceId} -> entity ${entityId}:`, error);
@@ -743,9 +766,15 @@ async function drainSources(limit: number, dryRun: boolean, startTime: number): 
       continue;
     }
 
-    // Idempotent re-extraction: we own all source_entities for this
-    // source, so clear ours before rewriting.
-    await supabase.from("source_entities").delete().eq("source_id", item.source_id);
+    // Idempotent re-extraction: clear only the AUTO-extracted links for this
+    // source — NEVER the user's manual grounding links (P6.4). Without the
+    // `.neq` scope every `user_linked` row would be deleted on each
+    // fingerprint-change re-extraction, silently undoing deliberate grounding.
+    await supabase
+      .from("source_entities")
+      .delete()
+      .eq("source_id", item.source_id)
+      .neq("mention_role", "user_linked");
 
     const nameToId = new Map<string, number>();
     for (const e of result.entities) {

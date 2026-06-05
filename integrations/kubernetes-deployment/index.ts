@@ -792,6 +792,478 @@ server.registerTool(
   },
 );
 
+// --- Research threads + suggestions (Integrated Knowledge System) ------
+//
+// Thread / session / suggestion tools over the Phase-1 schema (threads,
+// thread_sources, sessions, session_sources + find_or_create_source /
+// link_source_to_thread / set_thread_source_status).
+//
+// PRIVACY (guardrail 5 / Task 2.2): these are personal/local tools. They
+// are deliberately NOT added to the openbrain-gateway cloud allow-list
+// (../../../../openbrain-gateway/app.py ALLOWED_TOOLS), mirroring the
+// extensions server. Cloud clients cannot see or call them. Do not expose
+// them there without explicit operator sign-off; if you do, give the read
+// tools a metadata_filter the way search/fetch get one.
+
+type ThreadRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+// create_thread
+server.registerTool(
+  "create_thread",
+  {
+    title: "Create Research Thread",
+    description:
+      "Create a new research thread (a durable, named line of inquiry that accumulates sources across tools and sessions).",
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      name: z.string().describe("Short thread name"),
+      description: z.string().optional().describe("Optional guiding question / description"),
+    },
+  },
+  async ({ name, description }) => {
+    try {
+      const client = await pool.connect();
+      try {
+        const r = await client.queryObject<ThreadRow>(
+          `INSERT INTO threads (name, description)
+           VALUES ($1, $2)
+           RETURNING id, name, description, status, created_at, updated_at`,
+          [name, description ?? null],
+        );
+        return { content: [{ type: "text" as const, text: JSON.stringify(r.rows[0]) }] };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// list_threads
+server.registerTool(
+  "list_threads",
+  {
+    title: "List Research Threads",
+    description:
+      "List research threads. Defaults to active threads; pass status='archived' or status='all'.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      status: z
+        .enum(["active", "archived", "all"])
+        .optional()
+        .default("active")
+        .describe("Filter by status (default active)"),
+    },
+  },
+  async ({ status }) => {
+    try {
+      const filter = !status || status === "all" ? null : status;
+      const client = await pool.connect();
+      try {
+        const r = await client.queryObject<ThreadRow & { source_count: number }>(
+          `SELECT t.id, t.name, t.description, t.status, t.created_at, t.updated_at,
+                  (SELECT COUNT(*)::int FROM thread_sources ts
+                    WHERE ts.thread_id = t.id AND ts.status = 'confirmed') AS source_count
+           FROM threads t
+           WHERE ($1::text IS NULL OR t.status = $1)
+           ORDER BY t.updated_at DESC`,
+          [filter],
+        );
+        return { content: [{ type: "text" as const, text: JSON.stringify({ threads: r.rows }) }] };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+type ThreadSourceView = {
+  source_id: string;
+  url: string | null;
+  title: string;
+  content_type: string;
+  link_type: string;
+  status: string;
+  suggestion_reason: string | null;
+  created_at: string;
+  confirmed_at: string | null;
+};
+
+// get_thread_sources — only CONFIRMED links (the thread "view").
+server.registerTool(
+  "get_thread_sources",
+  {
+    title: "Get Thread Sources",
+    description:
+      "Return all confirmed sources linked to a thread (regardless of which tool ingested them). This is the thread/notebook view.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      thread_id: z.string().describe("Thread UUID"),
+    },
+  },
+  async ({ thread_id }) => {
+    try {
+      const client = await pool.connect();
+      try {
+        const r = await client.queryObject<ThreadSourceView>(
+          `SELECT ts.source_id, s.url, s.title, s.content_type,
+                  ts.link_type, ts.status, ts.suggestion_reason,
+                  ts.created_at, ts.confirmed_at
+           FROM thread_sources ts
+           JOIN sources s ON s.id = ts.source_id
+           WHERE ts.thread_id = $1 AND ts.status = 'confirmed'
+           ORDER BY ts.confirmed_at DESC NULLS LAST, ts.created_at DESC`,
+          [thread_id],
+        );
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ thread_id, sources: r.rows }) }],
+        };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// add_to_thread — deliberate link of an existing source.
+server.registerTool(
+  "add_to_thread",
+  {
+    title: "Add Source to Thread",
+    description:
+      "Deliberately link an existing source to a thread (link_type=deliberate, confirmed). Additive — never removes it from any other thread.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      thread_id: z.string().describe("Thread UUID"),
+      source_id: z.string().describe("Source UUID"),
+    },
+  },
+  async ({ thread_id, source_id }) => {
+    try {
+      const client = await pool.connect();
+      try {
+        await client.queryObject(
+          `SELECT link_source_to_thread($1, $2, 'deliberate', NULL, 'confirmed')`,
+          [thread_id, source_id],
+        );
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ thread_id, source_id, link_type: "deliberate", status: "confirmed" }),
+          }],
+        };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// Helper: register the soft status-flip tools (remove/accept/hide/restore).
+// All call set_thread_source_status — pure flag flips, never deletes.
+function registerStatusTool(
+  name: string,
+  title: string,
+  description: string,
+  targetStatus: string,
+) {
+  server.registerTool(
+    name,
+    {
+      title,
+      description,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      inputSchema: {
+        thread_id: z.string().describe("Thread UUID"),
+        source_id: z.string().describe("Source UUID"),
+      },
+    },
+    async ({ thread_id, source_id }) => {
+      try {
+        const client = await pool.connect();
+        try {
+          const r = await client.queryObject<{ status: string; link_type: string }>(
+            `SELECT (set_thread_source_status($1, $2, $3)).status AS status`,
+            [thread_id, source_id, targetStatus],
+          );
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify({ thread_id, source_id, status: r.rows[0]?.status ?? targetStatus }),
+            }],
+          };
+        } finally {
+          client.release();
+        }
+      } catch (err: unknown) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
+registerStatusTool(
+  "remove_from_thread",
+  "Remove Source from Thread (soft)",
+  "Soft-remove a source from a thread: marks the link inactive (recoverable). Never deletes the source or the join row.",
+  "inactive",
+);
+registerStatusTool(
+  "accept_suggestion",
+  "Accept Suggestion",
+  "Confirm a pending cross-thread suggestion: the source now appears in the thread view, indistinguishable from auto/deliberate links.",
+  "confirmed",
+);
+registerStatusTool(
+  "hide_suggestion",
+  "Hide Suggestion",
+  "Hide a pending suggestion: removes it from the triage queue but keeps it in the recoverable hidden pool.",
+  "hidden",
+);
+registerStatusTool(
+  "restore_suggestion",
+  "Restore Suggestion",
+  "Restore a hidden suggestion back to pending so it re-appears in the triage queue.",
+  "pending",
+);
+
+// Helper: list thread_sources rows in a given status (suggestions / hidden).
+type SuggestionView = {
+  thread_id: string;
+  source_id: string;
+  url: string | null;
+  title: string;
+  link_type: string;
+  suggestion_reason: string | null;
+  created_at: string;
+};
+
+function registerSuggestionList(
+  name: string,
+  title: string,
+  description: string,
+  whereStatus: string,
+) {
+  server.registerTool(
+    name,
+    {
+      title,
+      description,
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        thread_id: z.string().optional().describe("Optional thread UUID to scope to; omit for global"),
+      },
+    },
+    async ({ thread_id }) => {
+      try {
+        const client = await pool.connect();
+        try {
+          const r = await client.queryObject<SuggestionView>(
+            `SELECT ts.thread_id, ts.source_id, s.url, s.title,
+                    ts.link_type, ts.suggestion_reason, ts.created_at
+             FROM thread_sources ts
+             JOIN sources s ON s.id = ts.source_id
+             WHERE ts.status = $1
+               AND ($2::uuid IS NULL OR ts.thread_id = $2)
+             ORDER BY ts.created_at DESC`,
+            [whereStatus, thread_id ?? null],
+          );
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ status: whereStatus, items: r.rows }) }],
+          };
+        } finally {
+          client.release();
+        }
+      } catch (err: unknown) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
+registerSuggestionList(
+  "get_suggestions",
+  "Get Pending Suggestions",
+  "Return pending cross-thread suggestions (the triage queue), optionally scoped to one thread.",
+  "pending",
+);
+registerSuggestionList(
+  "get_hidden_suggestions",
+  "Get Hidden Suggestions",
+  "Return hidden/rejected suggestions (the recoverable pool), optionally scoped to one thread.",
+  "hidden",
+);
+
+// fetchExtract — minimal fetch + text extraction for capture_with_thread
+// when only a URL is supplied. Mirrors ingestOne's extraction (kept
+// separate so the live ingest path is untouched).
+async function fetchExtract(
+  url: string,
+): Promise<{ title: string; body: string; contentType: string; domain: string }> {
+  const resp = await fetch(url, {
+    headers: { "User-Agent": "open-brain-ingest/1.0" },
+    redirect: "follow",
+  });
+  if (!resp.ok) throw new Error(`fetch ${resp.status}`);
+  const ctHeader = (resp.headers.get("content-type") || "").toLowerCase();
+  const contentType = detectContentType(url, ctHeader);
+  let title = "";
+  let body = "";
+  if (contentType === "pdf") {
+    body = `[PDF source not text-extracted: ${url}]`;
+  } else {
+    const raw = await resp.text();
+    if (/^\s*</.test(raw) || ctHeader.includes("html")) {
+      const ex = stripHtml(raw);
+      title = ex.title;
+      body = ex.text;
+    } else {
+      body = raw.replace(/\s+/g, " ").trim();
+    }
+  }
+  let domain = "";
+  try {
+    domain = new URL(url).hostname;
+  } catch { /* ignore */ }
+  if (!title) title = domain || url.slice(0, 120);
+  return { title, body, contentType, domain };
+}
+
+// capture_with_thread — one-transaction capture: find-or-create the source
+// (dedup) + automatic/confirmed thread link + optional session link.
+server.registerTool(
+  "capture_with_thread",
+  {
+    title: "Capture Source into Thread",
+    description:
+      "Write a source and link it to a thread in one operation. Dedups on url/content_hash (find_or_create_source); links automatic/confirmed. Pass `content`, or a `url` to fetch. Optionally attach to a session.",
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      thread_id: z.string().describe("Thread UUID to link the source to"),
+      content: z.string().optional().describe("Source body. If omitted and url is given, the url is fetched."),
+      url: z.string().optional().describe("Source URL (used for dedup + optional fetch)"),
+      title: z.string().optional().describe("Optional title"),
+      content_type: z
+        .enum(["web_article", "pdf", "youtube_transcript", "podcast_transcript", "paper", "manual"])
+        .optional()
+        .describe("Optional content type (default web_article / inferred)"),
+      notebook: z.string().optional().describe("Optional notebook/project scope"),
+      session_id: z.string().optional().describe("Optional session UUID to also record provenance"),
+      metadata_extra: metadataExtraArg,
+    },
+  },
+  async ({ thread_id, content, url, title, content_type, notebook, session_id, metadata_extra }) => {
+    try {
+      let body = (content ?? "").trim();
+      let ttl = (title ?? "").trim();
+      let ctype: string | undefined = content_type;
+      let domain: string | undefined;
+
+      if (!body && url) {
+        const ex = await fetchExtract(url);
+        body = ex.body;
+        if (!ttl) ttl = ex.title;
+        if (!ctype) ctype = ex.contentType;
+        domain = ex.domain;
+      }
+      if (!body) {
+        return {
+          content: [{ type: "text" as const, text: "capture_with_thread needs `content` or a fetchable `url`." }],
+          isError: true,
+        };
+      }
+      if (!ctype) ctype = "web_article";
+      if (!ttl) ttl = url ? url.slice(0, 120) : body.slice(0, 80);
+      if (!domain && url) {
+        try { domain = new URL(url).hostname; } catch { /* ignore */ }
+      }
+
+      const embInput = `${ttl}\n\n${body}`.slice(0, 1600);
+      const embedding = await getEmbedding(embInput);
+      const embStr = `[${embedding.join(",")}]`;
+      const meta = { source: "capture_with_thread", ...(metadata_extra ?? {}) };
+
+      const client = await pool.connect();
+      try {
+        await client.queryArray("BEGIN");
+        const src = await client.queryObject<{ id: string; was_duplicate: boolean }>(
+          `SELECT * FROM find_or_create_source($1, $2, NULL, $3, $4, $5, $6, $7::vector, $8::jsonb)`,
+          [url ?? null, body, ttl, ctype, notebook ?? null, domain ?? null, embStr, JSON.stringify(meta)],
+        );
+        const sourceId = src.rows[0].id;
+        const wasDup = src.rows[0].was_duplicate;
+        await client.queryObject(
+          `SELECT link_source_to_thread($1, $2, 'automatic', NULL, 'confirmed')`,
+          [thread_id, sourceId],
+        );
+        if (session_id) {
+          await client.queryObject(
+            `INSERT INTO session_sources (session_id, source_id)
+             VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [session_id, sourceId],
+          );
+        }
+        await client.queryArray("COMMIT");
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              source_id: sourceId,
+              was_duplicate: wasDup,
+              thread_id,
+              link: "automatic/confirmed",
+              session_id: session_id ?? null,
+              note: wasDup ? "source already existed — linked to this thread" : "source created and linked",
+            }),
+          }],
+        };
+      } catch (e) {
+        await client.queryArray("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // --- Research persistence REST API (deep_research -> open-brain) ---
 //
 // deep_research_tool.py (running in Open WebUI) calls these instead of
@@ -849,21 +1321,37 @@ app.get("/research/lookup", async (c) => {
   }
 });
 
-// POST /research/persist — supersede-in-place synthesis + its source rows.
+// POST /research/persist — supersede-in-place synthesis + provenance.
+//
+// Phase 3 (Integrated Knowledge System):
+//   * C1 fix: per-source rows are dedup-and-relinked via
+//     find_or_create_source (stable ids) instead of the old destructive
+//     DELETE+INSERT, so thread_sources/session_sources FKs survive a
+//     re-run. Sources accumulate (additive); nothing source-shaped is
+//     deleted. The synthesis row still upserts in place.
+//   * Every persist creates one `sessions` row (origin_tool='owui') and
+//     links each gathered source via session_sources (provenance).
+//   * If `thread_id` is supplied, each source is auto-linked to that
+//     thread (link_type='automatic', confirmed). No thread_id => the
+//     sources land in the unthreaded inbox (session only).
 app.post("/research/persist", async (c) => {
   if (!researchAuthed(c)) return c.json({ error: "unauthorized" }, 401);
   let body: {
     research_key?: string; query?: string; claim?: string; kind?: string;
     volatility?: string; revalidate_days?: number; notebook?: string;
+    thread_id?: string;   // active thread; absent => unthreaded inbox
+    model?: string;       // originating model (provenance metadata)
     sources?: Array<{ url?: string; title?: string; content?: string; summary?: string; domain?: string }>;
   };
   try { body = await c.req.json(); } catch { return c.json({ error: "bad json" }, 400); }
   const key = body.research_key;
   const claim = (body.claim || "").trim();
   if (!key || !claim) return c.json({ error: "research_key and claim required" }, 400);
+  const threadId = (body.thread_id || "").trim() || null;
 
   const client = await pool.connect();
   try {
+    await client.queryArray("BEGIN");
     const claimEmb = `[${(await getEmbedding(claim.slice(0, 1600))).join(",")}]`;
     // Supersede the synthesis row in place (unique partial index on research_key).
     const synth = await client.queryObject<{ id: string }>(
@@ -887,11 +1375,19 @@ app.post("/research/persist", async (c) => {
         claimEmb, JSON.stringify({ source: "deep-research" }),
       ],
     );
-    // Replace the per-source rows for this research_key.
-    await client.queryObject(
-      `DELETE FROM sources WHERE research_key=$1 AND content_type<>'research_synthesis'`,
-      [key],
+
+    // One session per persist run (provenance: where did these come from?).
+    const sess = await client.queryObject<{ id: string }>(
+      `INSERT INTO sessions (origin_tool, query_text, thread_id, metadata)
+       VALUES ('owui', $1, $2, $3::jsonb)
+       RETURNING id`,
+      [
+        body.query ?? null, threadId,
+        JSON.stringify({ research_key: key, kind: body.kind ?? null, model: body.model ?? null }),
+      ],
     );
+    const sessionId = sess.rows[0].id;
+
     let written = 0;
     for (const s of (body.sources || [])) {
       const url = (s.url || "").trim();
@@ -899,21 +1395,61 @@ app.post("/research/persist", async (c) => {
       if (!url && !content) continue;
       const title = (s.title || s.domain || url || "source").slice(0, 300);
       const emb = `[${(await getEmbedding(`${title}\n\n${content}`.slice(0, 1600))).join(",")}]`;
-      await client.queryObject(
-        `INSERT INTO sources
-           (url, title, content, content_type, notebook, domain,
-            research_key, research_query, fetched_at, embedding, metadata)
-         VALUES ($1,$2,$3,'web_article',$4,$5,$6,$7, now(), $8::vector, $9::jsonb)`,
-        [
-          url || null, title, content, body.notebook ?? null,
-          s.domain ?? null, key, body.query ?? null, emb,
-          JSON.stringify({ source: "deep-research-source" }),
-        ],
+      const provMeta = {
+        source: "deep-research-source",
+        research_key: key,
+        originating_query: body.query ?? null,
+        model: body.model ?? null,
+        session_id: sessionId,
+      };
+      // C1: dedup-and-relink (stable id), never delete.
+      const fc = await client.queryObject<{ id: string; was_duplicate: boolean }>(
+        `SELECT * FROM find_or_create_source($1, $2, NULL, $3, 'web_article', $4, $5, $6::vector, $7::jsonb)`,
+        [url || null, content, title, body.notebook ?? null, s.domain ?? null, emb, JSON.stringify(provMeta)],
       );
+      const sid = fc.rows[0].id;
+      // Update content in place + (re)stamp research linkage & provenance.
+      // (Nothing reads per-source rows by research_key except this writer,
+      // so re-stamping a deduped row is safe — see /research/lookup.)
+      await client.queryObject(
+        `UPDATE sources SET
+           content       = $2,
+           title         = COALESCE(NULLIF($3,''), title),
+           domain        = COALESCE($4, domain),
+           research_key  = $5,
+           research_query= $6,
+           fetched_at    = now(),
+           embedding     = $7::vector,
+           content_hash  = COALESCE(content_hash, md5($2)),
+           metadata      = COALESCE(metadata,'{}'::jsonb) || $8::jsonb
+         WHERE id = $1`,
+        [sid, content, title, s.domain ?? null, key, body.query ?? null, emb, JSON.stringify(provMeta)],
+      );
+      // Provenance link (session) — always.
+      await client.queryObject(
+        `INSERT INTO session_sources (session_id, source_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [sessionId, sid],
+      );
+      // Thread auto-link — only when a thread is active.
+      if (threadId) {
+        await client.queryObject(
+          `SELECT link_source_to_thread($1, $2, 'automatic', NULL, 'confirmed')`,
+          [threadId, sid],
+        );
+      }
       written++;
     }
-    return c.json({ synthesis_id: synth.rows[0]?.id, sources_written: written });
+    await client.queryArray("COMMIT");
+    return c.json({
+      synthesis_id: synth.rows[0]?.id,
+      sources_written: written,
+      session_id: sessionId,
+      thread_id: threadId,
+      threaded: !!threadId,
+    });
   } catch (err) {
+    await client.queryArray("ROLLBACK").catch(() => {});
     return c.json({ error: (err as Error).message }, 500);
   } finally {
     client.release();

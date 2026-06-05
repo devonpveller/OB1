@@ -21,7 +21,10 @@
  *   deno run --allow-net --allow-read --allow-write --allow-env setup-calendar-token.ts
  */
 
-const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
+// On Windows, URL.pathname yields an unreadable "/D:/Open%20WebUI/..." form
+// (leading slash + percent-encoded spaces). Decode and strip the slash so the
+// path resolves on both Windows and POSIX.
+const SCRIPT_DIR = decodeURIComponent(new URL(".", import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, "$1");
 const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
 const TOKEN_PATH = `${SCRIPT_DIR}calendar-token.json`;
 const SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"];

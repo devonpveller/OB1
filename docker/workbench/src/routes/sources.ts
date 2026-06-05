@@ -1,0 +1,88 @@
+// /workbench/sources sub-router (P4). Update-with-history, staged retract /
+// restore, per-notebook unlink, and operator-confirmed purge. Retract +
+// (P6) grounding write a Changes-log entry (G11).
+import { Hono } from "hono";
+import * as repo from "../repositories/sources.ts";
+import { logChange } from "../util/changeslog.ts";
+
+export const sources = new Hono();
+
+// GET /workbench/sources/:id — read view (+ live staged-retract marker fields).
+sources.get("/:id", async (c) => {
+  const src = await repo.getSource(c.req.param("id"));
+  if (!src) return c.json({ error: "not found" }, 404);
+  return c.json({ source: src, gravity: await repo.gravity(src.id) });
+});
+
+// GET /workbench/sources/:id/revisions — version history.
+sources.get("/:id/revisions", async (c) => {
+  return c.json({ revisions: await repo.listRevisions(c.req.param("id")) });
+});
+
+// PATCH /workbench/sources/:id { content?, title? } — UPDATE (records a
+// revision). No "replace" affordance exists; "a better source" = add a new one.
+sources.patch("/:id", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const res = await repo.updateSource(
+    c.req.param("id"),
+    body?.content ?? null,
+    body?.title ?? null,
+    body?.edited_by ?? "operator",
+  );
+  if (!res) return c.json({ error: "not found" }, 404);
+  return c.json(res);
+});
+
+// POST /workbench/sources/:id/refetch — URL re-fetch → new revision.
+sources.post("/:id/refetch", async (c) => {
+  try {
+    const res = await repo.refetch(c.req.param("id"));
+    if (!res) return c.json({ error: "not found" }, 404);
+    return c.json(res);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
+// POST /workbench/sources/:id/retract { scope: 'notebook'|'global', thread_id? }
+// notebook → soft unlink; global (default) → STAGED retract (reversible).
+sources.post("/:id/retract", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const scope = body?.scope ?? "global";
+  if (scope === "notebook") {
+    const threadId = (body?.thread_id ?? "").toString();
+    if (!threadId) return c.json({ error: "thread_id required for notebook scope" }, 400);
+    const row = await repo.unlinkFromNotebook(threadId, id);
+    return c.json({ scope, link: row });
+  }
+  const src = await repo.retractStaged(id, body?.by ?? "operator");
+  if (!src) return c.json({ error: "not found" }, 404);
+  const g = await repo.gravity(id);
+  await logChange({
+    action: "retract (staged)",
+    detail: `source ${id} "${src.title || src.url || id}"`,
+    affected: `${g.notebooks} notebook(s), ${g.pages} page(s)`,
+  });
+  return c.json({ scope: "global", staged: true, source: src, gravity: g });
+});
+
+// POST /workbench/sources/:id/restore — clear a (staged or committed) retract.
+sources.post("/:id/restore", async (c) => {
+  const src = await repo.restore(c.req.param("id"));
+  if (!src) return c.json({ error: "not found" }, 404);
+  await logChange({ action: "restore", detail: `source ${src.id}` });
+  return c.json({ source: src });
+});
+
+// DELETE /workbench/sources/:id { confirm: true } — irreversible purge.
+sources.delete("/:id", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  if (body?.confirm !== true) {
+    return c.json({ error: "purge requires { confirm: true } (irreversible)" }, 400);
+  }
+  const ok = await repo.purge(c.req.param("id"));
+  if (!ok) return c.json({ error: "not found" }, 404);
+  await logChange({ action: "purge (irreversible)", detail: `source ${c.req.param("id")}` });
+  return c.json({ purged: true });
+});

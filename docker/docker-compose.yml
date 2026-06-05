@@ -31,6 +31,19 @@ services:
       - ./init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro
       - ./init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro
       - ./init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro
+      # Integrated Knowledge System net-new schema (threads/sessions/joins
+      # + content_hash + find_or_create_source). Runs after sources exist.
+      # NB: initdb scripts only run on a FRESH volume; for the existing
+      # openbrain-db-data volume the promotion runbook applies this via psql.
+      - ./init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro
+      # ── Quartz-4-expansion additive migrations (fresh-volume only; the
+      #    promotion runbook applies these to the live DB via psql — G3). ──
+      - ./init-threads-slug.sql:/docker-entrypoint-initdb.d/72-init-threads-slug.sql:ro          # P2
+      - ./init-source-revisions.sql:/docker-entrypoint-initdb.d/80-init-source-revisions.sql:ro  # P4
+      - ./init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro      # P4
+      - ./init-content-types.sql:/docker-entrypoint-initdb.d/84-init-content-types.sql:ro        # P5
+      - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro        # P5
+      - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/88-init-import-jobs.sql:ro            # P5
     networks:
       - obnet
     restart: unless-stopped
@@ -284,6 +297,41 @@ services:
       - llm-net
     restart: unless-stopped
 
+  # Cross-thread suggestion worker (Integrated Knowledge System, Phase 5).
+  # Proposes (never auto-creates) cross-thread source links by semantic
+  # similarity over `sources.embedding`; writes only suggested/pending rows
+  # (confirmation is a deliberate user act in the Open Notebook triage UI).
+  # Talks to openbrain-db DIRECTLY (deno-postgres, like openbrain-mcp) and to
+  # llama-cpp-embed for bge-m3 backfill. HTTP-invoked (loopback 8813):
+  # POST /suggest drains + scores on demand / via a future scheduler.
+  openbrain-suggestion-worker:
+    build:
+      context: ../integrations/suggestion-worker
+      dockerfile: Dockerfile
+    image: openbrain-suggestion-worker:local
+    container_name: openbrain-suggestion-worker
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      # Cross-thread similarity cutoff (tune with real data — open-Q #1).
+      SUGGESTION_THRESHOLD: ${SUGGESTION_THRESHOLD:-0.50}
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8813:8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+
   # Wiki compiler + scheduler + on-demand trigger. Runs the (B.2/B.3-
   # extended) entity-wiki recipe --batch into the shared wiki volume,
   # then git-commits (D16: local commits only — no remote, no secrets).
@@ -372,15 +420,132 @@ services:
       - openbrain-wiki
     volumes:
       - openbrain-wiki-data:/wiki:ro
+      # Binary assets (images now, audio later) live on their own volume,
+      # decoupled from the git vault (D-I). Mounted at the vault-root `assets/`
+      # path so Quartz resolves `![](assets/<id>/img.png)` links; read-only
+      # here (the workbench is the writer).
+      - wiki-assets:/wiki/assets:ro
     ports:
       - "127.0.0.1:8812:8080"
     networks:
       - obnet
+      # ai-stack portal network (external). The viewer joins it so BOTH the
+      # portal Caddy (external link, wiki.${PUBLIC_DOMAIN}) and the tailscale
+      # container — which shares openwebui's netns, and openwebui is on
+      # app-net — can reach openbrain-wiki-viewer:8080 by name.
+      - app-net
+    restart: unless-stopped
+
+  # Browser-facing read/write API behind the Quartz viewer (D-A). Deno+Hono,
+  # internal :8000. Reached SAME-ORIGIN via the portal Caddy
+  # `handle /workbench/* { reverse_proxy openbrain-workbench:8000 }`, which
+  # injects the shared secret as X-Brain-Key — the browser never holds it (G7).
+  # Talks to openbrain-db DIRECTLY (deno-postgres) for atomic writes (G8) and to
+  # PostgREST (openbrain-rest) for reads. NOT host-published except an optional
+  # loopback debug port. Networks: obnet + llm-net + app-net (app-net is
+  # REQUIRED so the portal Caddy can resolve this name by DNS — §2.3).
+  openbrain-workbench:
+    build:
+      context: ./workbench
+      dockerfile: Dockerfile
+    image: openbrain-workbench:local
+    container_name: openbrain-workbench
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+      openbrain-rest:
+        condition: service_started
+    environment:
+      PORT: "8000"
+      # Caddy injects this as X-Brain-Key when proxying; reuse MCP_ACCESS_KEY.
+      WORKBENCH_KEY: ${MCP_ACCESS_KEY}
+      # Direct Postgres (atomic multi-row writes — G8).
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      # PostgREST reads (via the OB1 Caddy /rest/v1 proxy).
+      OPEN_BRAIN_URL: http://openbrain-rest
+      # Local embeddings (bge-m3, 1024-dim) for chunk/source embedding (P5/P6).
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSION: "1024"
+      # Extraction sidecar (P5).
+      EXTRACT_URL: http://openbrain-extract:8000
+      # Vault (notes write path + Changes log, P3) + binary assets (P5).
+      WIKI_GIT_DIR: /wiki
+      WIKI_OUT_DIR: /wiki/content
+      WIKI_ASSETS_DIR: /wiki/assets
+    volumes:
+      # rw: the workbench is the asset writer and the notes/Changes-log writer.
+      - openbrain-wiki-data:/wiki
+      - wiki-assets:/wiki/assets
+      # Shared canonical slug module (G5), same mount the wiki container uses.
+      - ../recipes:/recipes:ro
+    # Optional loopback debug publish ONLY (same-origin path is via Caddy).
+    ports:
+      - "127.0.0.1:8814:8000"
+    networks:
+      - obnet
+      - llm-net
+      - app-net
+    healthcheck:
+      test: ["CMD", "deno", "eval", "--allow-net", "const r=await fetch('http://localhost:8000/health');Deno.exit(r.ok?0:1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # Content extraction sidecar (P5.1). Stable POST /extract over a
+  # format→extractor registry (PDF/DOCX/PPTX/image-OCR/audio-STT). Parses
+  # UNTRUSTED files → sandboxed: non-root (Dockerfile uid 10020), cap_drop ALL,
+  # no-new-privileges, read-only root FS + tmpfs. Reaches the host STT endpoint
+  # (the one allowed egress) via host.docker.internal; otherwise obnet-only so
+  # the workbench can call it by name. Not host-published except a loopback
+  # debug port.
+  openbrain-extract:
+    build:
+      context: ./extract
+      dockerfile: Dockerfile
+    image: openbrain-extract:local
+    container_name: openbrain-extract
+    environment:
+      # Local STT (OpenAI-compatible) for audio/video transcription.
+      STT_API_BASE: ${EXTRACT_STT_API_BASE:-http://host.docker.internal:8000/v1}
+      STT_MODEL: ${EXTRACT_STT_MODEL:-whisper-1}
+      EXTRACT_MAX_BYTES: ${EXTRACT_MAX_BYTES:-104857600}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8815:8000"   # loopback debug only
+    networks:
+      - obnet
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
   openbrain-db-data:
   openbrain-wiki-data:
+  # Binary assets (images, later audio) decoupled from the git vault (D-I, P0.4).
+  # Written by openbrain-workbench, served read-only by openbrain-wiki-viewer.
+  # NOT mounted into openbrain-wiki (the git committer), so binaries never enter
+  # the vault git history.
+  wiki-assets:
 
 networks:
   # Normal bridge (user-authorized 2026-05-15): required so the host can
@@ -395,3 +560,11 @@ networks:
   llm-net:
     external: true
     name: ai-stack_llm-net
+  # The ai-stack compose project's portal "app" network. External so the
+  # Quartz wiki viewer can attach for BOTH the portal Caddy (external link)
+  # and the tailnet `tailscale serve` path (openwebui is on app-net, and
+  # the tailscale container shares openwebui's netns). It already exists
+  # whenever the main stack is up — bring OB1 up after the main stack.
+  app-net:
+    external: true
+    name: ai-stack_app-net

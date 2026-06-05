@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "hono": "jsr:@hono/hono@^4.6.14",
+    "postgres": "https://deno.land/x/postgres@v0.19.3/mod.ts",
+    "@shared/slug": "file:///recipes/_shared/slug.mjs"
+  },
+  "tasks": {
+    "dev": "deno run --allow-net --allow-env --allow-read src/main.ts"
+  },
+  "fmt": {
+    "lineWidth": 100
+  }
+}

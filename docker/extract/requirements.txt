@@ -1,0 +1,12 @@
+# openbrain-extract (P5.1). Pinned for reproducible, correctness-first
+# per-format extraction. Versions are conservative; bump behind the per-format
+# acceptance gate.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+httpx==0.28.1
+PyMuPDF==1.25.2          # PDF text + embedded images (correctness-first)
+python-docx==1.1.2       # DOCX
+python-pptx==1.0.2       # PPTX
+Pillow==11.1.0           # image decode + asset passthrough
+pytesseract==0.3.13      # OCR (needs the tesseract binary, installed in the image)
