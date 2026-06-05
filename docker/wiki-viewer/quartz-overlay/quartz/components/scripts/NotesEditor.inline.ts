@@ -20,6 +20,7 @@ import {
 import { EditorState, EditorSelection } from "@codemirror/state"
 import { history, historyKeymap, defaultKeymap, indentWithTab } from "@codemirror/commands"
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown"
+import { Strikethrough } from "@lezer/markdown"
 import { syntaxTree, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language"
 import { autocompletion, startCompletion } from "@codemirror/autocomplete"
 
@@ -103,7 +104,7 @@ function buildDecorations(view: EditorView) {
           return
         }
         if (raw) return
-        if (name === "HeaderMark" || name === "EmphasisMark" || name === "CodeMark") {
+        if (name === "HeaderMark" || name === "EmphasisMark" || name === "CodeMark" || name === "StrikethroughMark") {
           out.push(Decoration.replace({}).range(node.from, node.to))
         } else if (name === "StrongEmphasis") {
           out.push(Decoration.mark({ class: "ne-cm-strong" }).range(node.from, node.to))
@@ -111,6 +112,8 @@ function buildDecorations(view: EditorView) {
           out.push(Decoration.mark({ class: "ne-cm-em" }).range(node.from, node.to))
         } else if (name === "InlineCode") {
           out.push(Decoration.mark({ class: "ne-cm-code" }).range(node.from, node.to))
+        } else if (name === "Strikethrough") {
+          out.push(Decoration.mark({ class: "ne-cm-strike" }).range(node.from, node.to))
         }
       },
     })
@@ -192,15 +195,62 @@ const smartWrap = EditorView.inputHandler.of((view, from, to, text) => {
 })
 
 // ── cursor-following, collapsible formatting toolbar ─────────────────────────
-function wrapSel(view: EditorView, open: string, close?: string) {
-  const c = close == null ? open : close
+// The word (\w run) around a bare cursor, so a toggle with no selection acts on
+// the word under the caret (Obsidian behaviour).
+function wordAt(state: EditorState, pos: number) {
+  const line = state.doc.lineAt(pos)
+  const text = line.text
+  let s = pos - line.from
+  let e = pos - line.from
+  while (s > 0 && /\w/.test(text[s - 1])) s--
+  while (e < text.length && /\w/.test(text[e])) e++
+  return { from: line.from + s, to: line.from + e }
+}
+// Toggle an inline format, driven by the markdown SYNTAX TREE so it disambiguates
+// `**` (strong) from `*` (emphasis) and nests cleanly: if the (word- or
+// selection-) range is already inside a node of `typeName`, remove just that
+// node's own open/close marks; otherwise wrap with `marker`. Each mod manages
+// only its own markers → **bold** +I → ***bold*** +I → **bold**.
+function formatToggle(view: EditorView, typeName: string, marker: string) {
+  const state = view.state
   view.dispatch(
-    view.state.changeByRange((range) => {
-      const sel = view.state.sliceDoc(range.from, range.to)
-      const insert = open + sel + c
+    state.changeByRange((range) => {
+      let from = range.from
+      let to = range.to
+      if (from === to) {
+        const w = wordAt(state, from)
+        from = w.from
+        to = w.to
+      }
+      let target: any = null
+      for (let n: any = syntaxTree(state).resolveInner(from, 1); n; n = n.parent) {
+        if (n.name === typeName && n.from <= from && n.to >= to) {
+          target = n
+          break
+        }
+      }
+      if (target) {
+        const marks: { from: number; to: number }[] = []
+        for (let c: any = target.firstChild; c; c = c.nextSibling) {
+          if (c.name.endsWith("Mark")) marks.push({ from: c.from, to: c.to })
+        }
+        if (marks.length >= 2) {
+          const open = marks[0]
+          const close = marks[marks.length - 1]
+          const lo = open.to - open.from
+          return {
+            changes: [
+              { from: open.from, to: open.to, insert: "" },
+              { from: close.from, to: close.to, insert: "" },
+            ],
+            range: EditorSelection.range(from - lo, to - lo),
+          }
+        }
+      }
+      const sel = state.sliceDoc(from, to)
       return {
-        changes: { from: range.from, to: range.to, insert },
-        range: EditorSelection.range(range.from + open.length, range.from + open.length + sel.length),
+        changes: { from, to, insert: marker + sel + marker },
+        range: EditorSelection.range(from + marker.length, from + marker.length + sel.length),
       }
     }),
   )
@@ -241,9 +291,10 @@ function insertWiki(view: EditorView) {
   startCompletion(view)
 }
 const TB_BTNS = [
-  { t: "Bold", l: "B", run: (v: EditorView) => wrapSel(v, "**") },
-  { t: "Italic", l: "I", run: (v: EditorView) => wrapSel(v, "*") },
-  { t: "Inline code", l: "</>", run: (v: EditorView) => wrapSel(v, "`") },
+  { t: "Bold", l: "B", run: (v: EditorView) => formatToggle(v, "StrongEmphasis", "**") },
+  { t: "Italic", l: "I", run: (v: EditorView) => formatToggle(v, "Emphasis", "*") },
+  { t: "Strikethrough", l: "S", run: (v: EditorView) => formatToggle(v, "Strikethrough", "~~") },
+  { t: "Inline code", l: "</>", run: (v: EditorView) => formatToggle(v, "InlineCode", "`") },
   { t: "Heading", l: "H", run: (v: EditorView) => toggleLinePrefix(v, "# ") },
   { t: "Quote", l: "❝", run: (v: EditorView) => toggleLinePrefix(v, "> ") },
   { t: "Bulleted list", l: "•", run: (v: EditorView) => toggleLinePrefix(v, "- ") },
@@ -354,7 +405,7 @@ function makeEditor(parent: HTMLElement, doc: string, onChange: (s: string) => v
       history(),
       keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
       EditorView.lineWrapping,
-      markdown({ base: markdownLanguage }),
+      markdown({ base: markdownLanguage, extensions: [Strikethrough] }),
       syntaxHighlighting(defaultHighlightStyle),
       livePreview,
       smartWrap,

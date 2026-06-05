@@ -89,6 +89,7 @@ NotesEditor.css = `
 .ne-cm-host .ne-cm-strong { font-weight: 700; }
 .ne-cm-host .ne-cm-em { font-style: italic; }
 .ne-cm-host .ne-cm-code { font-family: var(--codeFont); background: var(--lightgray); border-radius: 4px; padding: 0 .25em; font-size: .9em; }
+.ne-cm-host .ne-cm-strike { text-decoration: line-through; }
 .ne-cm-host .ne-cm-link { color: var(--secondary); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--secondary) 40%, transparent); cursor: pointer; }
 .ne-cm-host .cm-tooltip-autocomplete { font-size: .82rem; }
 .ne-cm-host .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--secondary); color: var(--light); }
@@ -101,6 +102,7 @@ NotesEditor.css = `
 .ne-cm-host .ne-tb-btn:hover, .ne-cm-host .ne-tb-toggle:hover { background: var(--lightgray); color: var(--dark); }
 .ne-cm-host .ne-tb-btn:nth-child(2) { font-weight: 700; }
 .ne-cm-host .ne-tb-btn:nth-child(3) { font-style: italic; }
+.ne-cm-host .ne-tb-btn:nth-child(4) { text-decoration: line-through; }
 `
 
 export default (() => NotesEditor) satisfies QuartzComponentConstructor
