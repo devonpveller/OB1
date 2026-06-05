@@ -15,14 +15,17 @@ import { QuartzComponent, QuartzComponentConstructor, QuartzComponentProps } fro
 const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponentProps) => {
   const fm = (fileData?.frontmatter ?? {}) as Record<string, unknown>
   const showLauncher = fm.type === "notebook"
-  // A user note is a page served straight from the author-owned notes/ layer.
-  // The page's own slug IS its vault path (notes are 1:1 files) — so "edit this
-  // note" derives the path from the slug, NOT from a guessed backing id. The
-  // Changes log is author-owned but not hand-editable, so it's excluded.
+  // A user note is ANY page served straight from the author-owned notes/ layer —
+  // both notes/notebooks/<nb>/x.md AND a flat notes/x.md (no notebook). The
+  // page's own slug IS its vault path (notes are 1:1 files), so "edit this note"
+  // derives the path from the slug, NOT a guessed backing id. The API path is
+  // RELATIVE TO notes/ (the route prepends it), so strip the leading "notes/".
+  // The Changes log is author-owned but machine-written, so it's excluded.
   const slug = String(fileData?.slug ?? "")
-  const isUserNote = slug.startsWith("notes/notebooks/")
+  const isUserNote = slug.startsWith("notes/") && !slug.startsWith("notes/Changes")
   const noteParts = slug.split("/")
-  const noteNbSlug = noteParts.length > 2 ? noteParts[2] : ""
+  const noteApiPath = slug.replace(/^notes\//, "") + ".md"
+  const noteNbSlug = (noteParts[1] === "notebooks" && noteParts.length > 3) ? noteParts[2] : ""
   return (
     <div
       class={`notes-editor-root ${displayClass ?? ""}`}
@@ -32,7 +35,7 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
       data-notebook-name={String(fm.title ?? "")}
     >
       {showLauncher ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
-      {isUserNote ? <button class="ne-launch ne-edit" data-ne-edit data-note-path={`${slug}.md`} data-note-nbslug={noteNbSlug}>✎ Edit this note</button> : null}
+      {isUserNote ? <button class="ne-launch ne-edit" data-ne-edit data-note-path={noteApiPath} data-note-nbslug={noteNbSlug}>✎ Edit this note</button> : null}
       <div class="ne-overlay" data-notes-modal hidden>
         <div class="ne-backdrop" data-ne-close></div>
         <div class="ne-box" role="dialog" aria-modal="true">
