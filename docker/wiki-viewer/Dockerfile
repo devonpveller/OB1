@@ -12,6 +12,20 @@ WORKDIR /quartz
 RUN git clone --depth 1 --branch ${QUARTZ_REF} https://github.com/jackyzha0/quartz.git . \
   && npm ci
 
+# CodeMirror 6 for the NotesEditor Live-Preview overlay (P3.5). Bundled into the
+# client by Quartz's inline-script-loader (`NotesEditor.inline.ts`). Installed
+# here (own layer) so it's cached independent of overlay/source changes. No
+# runtime CDN — these ship inside the image (self-hosted rule).
+RUN npm install --no-audit --no-fund \
+  @codemirror/state \
+  @codemirror/view \
+  @codemirror/language \
+  @codemirror/commands \
+  @codemirror/autocomplete \
+  @codemirror/lang-markdown \
+  @lezer/markdown \
+  @lezer/highlight
+
 # Idempotency patch (duplication fix). Vanilla Quartz's Explorer and Search
 # render their content client-side on every `nav` event and APPEND without
 # clearing the previous render first (explorer.inline.ts `insertBefore`,
@@ -31,6 +45,18 @@ RUN set -e; \
   grep -q 'if (!searchLayout) return' "$S"; \
   sed -i 's#^\(\s*\)if (!searchLayout) return$#\1if (!searchLayout) return\n\1searchLayout.replaceChildren()#' "$S"; \
   grep -q 'searchLayout.replaceChildren()' "$S"
+
+# Guard the dev hot-reload so the NotesEditor (P3.5) can suppress it while a
+# Live-Preview editor is open (autosave must not hard-reload the page out from
+# under the editor on every keystroke). The injected `--serve` reload client
+# hard-reloads on every vault change; we gate it behind `window.__neEditing`,
+# which the editor sets while open and clears on Done. grep-asserted so a
+# QUARTZ_REF bump that moves this line fails the build loudly.
+RUN set -e; \
+  P=/quartz/quartz/plugins/index.ts; \
+  grep -q "() => document.location.reload(true)" "$P"; \
+  sed -i "s#() => document.location.reload(true)#() => { if (!window.__neEditing) document.location.reload(true) }#" "$P"; \
+  grep -q "if (!window.__neEditing) document.location.reload(true)" "$P"
 
 # ── Workbench overlay (plan §2.5 / P0.4) ────────────────────────────────────
 # Layer custom Quartz components over the pinned clone ADDITIVELY, so
