@@ -255,21 +255,30 @@ const cursorToolbar = ViewPlugin.fromClass(
   class {
     view: EditorView
     bar: HTMLElement
-    host: HTMLElement
     collapsed = false
+    raf = 0
     constructor(view: EditorView) {
       this.view = view
       try {
         this.collapsed = localStorage.getItem("ne-tb-collapsed") === "1"
       } catch {}
-      // Anchor to the host container (.ne-cm-host, position:relative) rather than
-      // CodeMirror's managed .cm-editor — absolute positioning is reliable there.
-      this.host = (view.dom.parentElement as HTMLElement) || view.dom
       this.bar = document.createElement("div")
       this.bar.className = "ne-tb"
       this.render()
-      this.host.appendChild(this.bar)
-      requestAnimationFrame(() => this.place())
+      // place() reads layout (coordsAtPos), which CodeMirror forbids DURING an
+      // update — so always defer it to an animation frame (outside the update
+      // cycle). Lazy attach too: at construction view.dom isn't parented yet.
+      this.schedulePlace()
+    }
+    hostEl(): HTMLElement {
+      return (this.view.dom.parentElement as HTMLElement) || this.view.dom
+    }
+    schedulePlace() {
+      if (this.raf) return
+      this.raf = requestAnimationFrame(() => {
+        this.raf = 0
+        this.place()
+      })
     }
     render() {
       this.bar.innerHTML = ""
@@ -303,6 +312,9 @@ const cursorToolbar = ViewPlugin.fromClass(
     }
     place() {
       const view = this.view
+      const host = this.hostEl()
+      // (re)attach to the real host once it's available.
+      if (this.bar.parentElement !== host) host.appendChild(this.bar)
       if (!view.hasFocus) {
         this.bar.style.display = "none"
         return
@@ -314,9 +326,9 @@ const cursorToolbar = ViewPlugin.fromClass(
         return
       }
       this.bar.style.display = "inline-flex"
-      const box = this.host.getBoundingClientRect()
+      const box = host.getBoundingClientRect()
       let left = coords.left - box.left
-      const maxLeft = this.host.clientWidth - this.bar.offsetWidth - 6
+      const maxLeft = host.clientWidth - this.bar.offsetWidth - 6
       if (left > maxLeft) left = maxLeft
       if (left < 0) left = 0
       let top = coords.top - box.top - this.bar.offsetHeight - 8
@@ -325,9 +337,10 @@ const cursorToolbar = ViewPlugin.fromClass(
       this.bar.style.top = top + "px"
     }
     update(u: any) {
-      if (u.selectionSet || u.geometryChanged || u.docChanged || u.focusChanged) this.place()
+      if (u.selectionSet || u.geometryChanged || u.docChanged || u.focusChanged) this.schedulePlace()
     }
     destroy() {
+      if (this.raf) cancelAnimationFrame(this.raf)
       this.bar.remove()
     }
   },
