@@ -21,6 +21,29 @@ async function requireUuid(c: Context, next: Next) {
 sources.use("/:id", requireUuid);
 sources.use("/:id/*", requireUuid);
 
+// GET /workbench/sources?q=… — search existing sources (the modal's "link
+// existing" mode). No :id, so the UUID guard doesn't apply.
+sources.get("/", async (c) => {
+  return c.json({ sources: await repo.searchSources(c.req.query("q") || "") });
+});
+
+// POST /workbench/sources/:id/link-entity { entity_id } — ground an entity with
+// an EXISTING source (#3). POST …/link-notebook { thread_id } — add to a notebook.
+sources.post("/:id/link-entity", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const eid = Number(body?.entity_id);
+  if (!Number.isInteger(eid)) return c.json({ error: "entity_id (integer) required" }, 400);
+  const link = await repo.linkEntity(c.req.param("id"), eid);
+  await logChange({ action: "grounding (linked existing source)", detail: `source ${c.req.param("id")}`, affected: `entity #${eid}` });
+  return c.json({ link });
+});
+sources.post("/:id/link-notebook", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const threadId = (body?.thread_id ?? "").toString();
+  if (!threadId) return c.json({ error: "thread_id required" }, 400);
+  return c.json({ link: await repo.linkNotebook(threadId, c.req.param("id")) });
+});
+
 // GET /workbench/sources/:id — read view (+ live staged-retract marker fields).
 sources.get("/:id", async (c) => {
   const src = await repo.getSource(c.req.param("id"));

@@ -14,42 +14,64 @@ const SourceRetractor: QuartzComponent = ({ fileData, displayClass }: QuartzComp
       <div class="sr-gravity" data-sr-gravity>checking impact…</div>
       <div class="sr-verbs">
         <button data-sr="retract" class="sr-default">Retract (reversible)</button>
+        <button data-sr="restore" class="sr-alt">Restore</button>
         <button data-sr="purge" class="sr-danger" hidden>Purge (irreversible)</button>
-        <label class="sr-purge-toggle"><input type="checkbox" data-sr-show-purge /> show purge</label>
+        <label class="sr-purge-toggle"><input type="checkbox" data-sr-show-purge /> show purge — irreversible delete</label>
       </div>
       <div class="sr-status" data-sr-status></div>
     </div>
   )
 }
 
+// NOTE: init MUST run on Quartz's "nav" event (fires on initial load AND every
+// SPA navigation), not once at script-execution — otherwise only the
+// first-loaded page is wired and every navigation after leaves components dead.
 SourceRetractor.afterDOMLoaded = `
-document.querySelectorAll("[data-source-retractor]").forEach(async (el) => {
-  const id = el.dataset.sourceId
-  const grav = el.querySelector("[data-sr-gravity]")
-  const status = el.querySelector("[data-sr-status]")
-  let gravity = { notebooks: 0, pages: 0 }
-  try {
-    const r = await fetch("/workbench/sources/" + encodeURIComponent(id))
-    const j = await r.json()
-    gravity = j.gravity || gravity
-    grav.textContent = "Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s)."
-  } catch { grav.textContent = "" }
-  el.querySelector("[data-sr-show-purge]").addEventListener("change", (e) => {
-    el.querySelector('[data-sr="purge"]').hidden = !e.target.checked
-  })
-  el.querySelector('[data-sr="retract"]').addEventListener("click", async () => {
-    status.textContent = "staging retract…"
-    const r = await fetch("/workbench/sources/" + encodeURIComponent(id) + "/retract", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scope: "global" }),
+document.addEventListener("nav", () => {
+  document.querySelectorAll("[data-source-retractor]").forEach(async (el) => {
+    if (el.dataset.srInit) return // idempotent across repeated nav events
+    el.dataset.srInit = "1"
+    const id = el.dataset.sourceId
+    const grav = el.querySelector("[data-sr-gravity]")
+    const status = el.querySelector("[data-sr-status]")
+    let gravity = { notebooks: 0, pages: 0 }
+    try {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 8000)
+      const r = await fetch("/workbench/sources/" + encodeURIComponent(id), { signal: ctrl.signal })
+      clearTimeout(t)
+      const j = await r.json()
+      gravity = j.gravity || gravity
+      grav.textContent = "Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s)."
+    } catch (e) { grav.textContent = "impact unavailable (" + (e && e.message ? e.message : e) + ")" }
+    el.querySelector("[data-sr-show-purge]").addEventListener("change", (e) => {
+      el.querySelector('[data-sr="purge"]').hidden = !e.target.checked
     })
-    status.textContent = r.ok ? "Retract staged — reversible until the next compile (see the Changes log)." : "✗ retract failed"
-  })
-  el.querySelector('[data-sr="purge"]').addEventListener("click", async () => {
-    if (!confirm("Purge is IRREVERSIBLE and cascades. Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s). Proceed?")) return
-    const r = await fetch("/workbench/sources/" + encodeURIComponent(id), {
-      method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: true }),
+    el.querySelector('[data-sr="retract"]').addEventListener("click", async () => {
+      status.textContent = "staging retract…"
+      try {
+        const r = await fetch("/workbench/sources/" + encodeURIComponent(id) + "/retract", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scope: "global" }),
+        })
+        status.textContent = r.ok ? "Retract staged — reversible (click Restore, or it commits at the next compile)." : "✗ retract failed (" + r.status + ")"
+      } catch (e) { status.textContent = "✗ retract error: " + (e && e.message ? e.message : e) }
     })
-    status.textContent = r.ok ? "Purged." : "✗ purge failed"
+    el.querySelector('[data-sr="restore"]').addEventListener("click", async () => {
+      status.textContent = "restoring…"
+      try {
+        const r = await fetch("/workbench/sources/" + encodeURIComponent(id) + "/restore", { method: "POST" })
+        status.textContent = r.ok ? "Restored — the retract was reversed." : "✗ restore failed (" + r.status + ")"
+      } catch (e) { status.textContent = "✗ restore error: " + (e && e.message ? e.message : e) }
+    })
+    el.querySelector('[data-sr="purge"]').addEventListener("click", async () => {
+      if (!confirm("Purge is IRREVERSIBLE and cascades. Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s). Proceed?")) return
+      try {
+        const r = await fetch("/workbench/sources/" + encodeURIComponent(id), {
+          method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: true }),
+        })
+        status.textContent = r.ok ? "Purged." : "✗ purge failed (" + r.status + ")"
+      } catch (e) { status.textContent = "✗ purge error: " + (e && e.message ? e.message : e) }
+    })
   })
 })
 `
@@ -59,6 +81,7 @@ SourceRetractor.css = `
 .source-retractor .sr-gravity { font-size: .8rem; opacity: .8; margin-bottom: .5rem; }
 .source-retractor .sr-verbs { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 .source-retractor .sr-default { font-weight: 600; }
+.source-retractor .sr-alt { background: var(--gray); }
 .source-retractor .sr-danger { color: #fff; background: #c0392b; }
 .source-retractor .sr-purge-toggle { font-size: .75rem; opacity: .7; }
 .source-retractor .sr-status { font-size: .8rem; margin-top: .5rem; min-height: 1.2em; }

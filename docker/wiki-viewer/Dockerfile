@@ -48,9 +48,8 @@ COPY quartz-overlay/quartz/ /quartz/quartz/
 RUN { \
   echo ''; \
   echo '// --- openbrain workbench overlay components (additive) ---'; \
-  echo 'export { default as WorkbenchProbe } from "./WorkbenchProbe"'; \
   echo 'export { default as GroundingBadge } from "./GroundingBadge"'; \
-  echo 'export { default as ImportDropzone } from "./ImportDropzone"'; \
+  echo 'export { default as UploadModal } from "./UploadModal"'; \
   echo 'export { default as SourceRetractor } from "./SourceRetractor"'; \
   } >> /quartz/quartz/components/index.ts
 
@@ -60,8 +59,8 @@ RUN { \
 RUN set -e; \
   L=/quartz/quartz.layout.ts; \
   grep -q 'Component.Backlinks(),' "$L"; \
-  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.WorkbenchProbe(),\n\1Component.GroundingBadge(),\n\1Component.SourceRetractor(),\n\1Component.ImportDropzone(),#' "$L"; \
-  grep -q 'Component.GroundingBadge(),' "$L"
+  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.GroundingBadge(),\n\1Component.SourceRetractor(),\n\1Component.UploadModal(),#' "$L"; \
+  grep -q 'Component.UploadModal(),' "$L"
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

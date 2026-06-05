@@ -97,6 +97,7 @@ export interface ImportJob {
   error: string | null;
   staged: boolean;
   committed: boolean;
+  duplicate: boolean;
   created_at: string;
   updated_at: string;
 }

@@ -47,7 +47,7 @@ async function runPipeline(
     await repo.updateJob(jobId, { status: "extracting" });
     const ex = await callExtract(bytes, filename);
     await repo.updateJob(jobId, { status: "embedding" });
-    const { sourceId } = await repo.ingestSource({
+    const { sourceId, wasDuplicate } = await repo.ingestSource({
       markdown: ex.markdown,
       title: ex.title || filename,
       contentType: (ex.metadata?.content_type as string) || "web_article",
@@ -55,7 +55,7 @@ async function runPipeline(
       targetEntityIds,
       metadata: { source_format: ex.metadata?.source_format },
     });
-    await repo.updateJob(jobId, { status: "linking", source_id: sourceId });
+    await repo.updateJob(jobId, { status: "linking", source_id: sourceId, duplicate: wasDuplicate });
     // Image attach runs POST-commit (assets are filesystem, not in the DB tx).
     // The source + chunks + links are already durable, so an asset-write hiccup
     // (e.g. volume perms) must NOT fail the whole import — log and continue. The
@@ -83,18 +83,56 @@ async function runPipeline(
   }
 }
 
-// POST /workbench/import  (multipart: file, [target_notebook], [target_entity_ids])
+// URL-ingest pipeline (P6.2: ground with a document OR a URL). Fetches the URL
+// server-side and stores a crude HTML→text web_article source (an extractor for
+// rich HTML is a future registry entry; this covers the common case).
+async function runUrlPipeline(
+  jobId: string,
+  url: string,
+  targetNotebook: string | null,
+  targetEntityIds: number[],
+) {
+  try {
+    await repo.updateJob(jobId, { status: "extracting" });
+    const r = await fetch(url, { redirect: "follow" });
+    if (!r.ok) throw new Error(`fetch ${r.status}`);
+    const raw = await r.text();
+    const md = raw
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    await repo.updateJob(jobId, { status: "embedding" });
+    const { sourceId, wasDuplicate } = await repo.ingestSource({
+      markdown: md, title: url, contentType: "web_article", url, targetNotebook, targetEntityIds,
+    });
+    await repo.updateJob(jobId, { status: "done", source_id: sourceId, duplicate: wasDuplicate });
+    if (targetEntityIds.length) {
+      await logChange({ action: "grounding (staged)", detail: `URL ${url}`, affected: `${targetEntityIds.length} entity page(s)` });
+    }
+  } catch (e) {
+    await repo.updateJob(jobId, { status: "failed", error: String((e as Error).message).slice(0, 500) });
+  }
+}
+
+// POST /workbench/import  (multipart: file OR url, [target_notebook], [target_entity_ids])
 imports.post("/", async (c) => {
   const body = await c.req.parseBody();
   const file = body["file"];
-  if (!(file instanceof File)) return c.json({ error: "file is required (multipart)" }, 400);
+  const url = ((body["url"] as string) || "").trim();
+  if (!(file instanceof File) && !url) return c.json({ error: "a file or a url is required" }, 400);
   const targetNotebook = (body["target_notebook"] as string) || null;
   const targetEntityIds = parseEntityIds(body["target_entity_ids"]);
-  const bytes = new Uint8Array(await file.arrayBuffer());
 
   const job = await repo.createJob(targetEntityIds, targetNotebook, targetEntityIds.length > 0);
   // Fire-and-forget; state is durable in import_jobs.
-  runPipeline(job.id, bytes, file.name, targetNotebook, targetEntityIds);
+  if (file instanceof File) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    runPipeline(job.id, bytes, file.name, targetNotebook, targetEntityIds);
+  } else {
+    runUrlPipeline(job.id, url, targetNotebook, targetEntityIds);
+  }
   return c.json({ job_id: job.id, status: job.status }, 202);
 });
 

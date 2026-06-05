@@ -34,9 +34,16 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 app = FastAPI(title="openbrain-extract", version="0.1.0")
 
-# Local STT (OpenAI-compatible) for audio/video — the ONE allowed egress.
-STT_BASE = os.environ.get("STT_API_BASE", "http://host.docker.internal:8000/v1").rstrip("/")
-STT_MODEL = os.environ.get("STT_MODEL", "whisper-1")
+# Local STT for audio/video — the ONE allowed egress. Defaults match the
+# ai-stack realtime-audio server's one-shot HTTP endpoint:
+#   POST http://host.docker.internal:8000/stt  (multipart field "audio_file")
+#   -> { "transcript": "...", "language": "...", ... }
+# (NOT the OpenAI `/v1/audio/transcriptions` convention.) All overridable.
+STT_BASE = os.environ.get("STT_API_BASE", "http://host.docker.internal:8000").rstrip("/")
+STT_PATH = os.environ.get("STT_TRANSCRIBE_PATH", "/stt")
+STT_FIELD = os.environ.get("STT_FILE_FIELD", "audio_file")
+# Fail FAST rather than hanging if the STT service is wrong/slow.
+STT_TIMEOUT = float(os.environ.get("STT_TIMEOUT_SEC", "120"))
 MAX_BYTES = int(os.environ.get("EXTRACT_MAX_BYTES", str(100 * 1024 * 1024)))
 
 
@@ -179,17 +186,21 @@ def extract_image(data: bytes, filename: str) -> dict:
 def extract_audio(data: bytes, filename: str) -> dict:
     import httpx
 
-    files = {"file": (os.path.basename(filename), data)}
-    r = httpx.post(
-        f"{STT_BASE}/audio/transcriptions",
-        files=files,
-        data={"model": STT_MODEL},
-        timeout=600,
-    )
-    r.raise_for_status()
-    text = r.json().get("text", "")
+    files = {STT_FIELD: (os.path.basename(filename), data)}
+    url = f"{STT_BASE}{STT_PATH}"
+    try:
+        r = httpx.post(url, files=files, timeout=STT_TIMEOUT)
+    except httpx.TimeoutException:
+        raise RuntimeError(f"STT timed out after {STT_TIMEOUT}s calling {url} — is the STT service up at STT_API_BASE?")
+    except httpx.ConnectError:
+        raise RuntimeError(f"STT unreachable at {url} — check STT_API_BASE / host.docker.internal")
+    if r.status_code != 200:
+        raise RuntimeError(f"STT {r.status_code} at {url}: {r.text[:200]}")
+    body = r.json()
+    # The realtime-audio server returns `transcript`; tolerate `text` too.
+    text = body.get("transcript") or body.get("text") or ""
     title = os.path.splitext(os.path.basename(filename))[0]
-    return result(text, title, pages=[text], transcribed=True)
+    return result(text, title, pages=[text], transcribed=True, stt_language=body.get("language"))
 
 
 # ── Registry (extension → handler). A new format = one entry here. ──────────

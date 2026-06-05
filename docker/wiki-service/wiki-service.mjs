@@ -322,9 +322,12 @@ async function ingestNotes(prevCommit) {
   let changed = [];
   let deleted = [];
   try {
+    // Both author-owned trees are ingested: notes/ (user) + ai/ (AI-authored,
+    // segregated per #5). The folder sets the default authorship; frontmatter
+    // `source:` can override.
     if (prevCommit) {
       const { stdout } = await git([
-        "diff", "--name-status", `${prevCommit}..HEAD`, "--", "notes/",
+        "diff", "--name-status", `${prevCommit}..HEAD`, "--", "notes/", "ai/",
       ]);
       for (const line of stdout.split("\n")) {
         const m = line.match(/^([ACMRD])\S*\t(.+?)(?:\t(.+))?$/);
@@ -336,7 +339,7 @@ async function ingestNotes(prevCommit) {
         else changed.push(file);
       }
     } else {
-      const { stdout } = await git(["ls-files", "notes/"]);
+      const { stdout } = await git(["ls-files", "notes/", "ai/"]);
       changed = stdout.split("\n").filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f));
     }
   } catch (e) {
@@ -352,16 +355,18 @@ async function ingestNotes(prevCommit) {
       const content = await readFile(abs, "utf8");
       // notebook = first folder under notes/ (the pinned notebook slug — P3.1),
       // else "notes".
-      const parts = rel.split("/"); // notes/<notebook-slug>/file.md
-      const notebook = parts.length > 2 ? parts[1] : "notes";
+      const parts = rel.split("/"); // <tree>/<notebook-slug>/file.md
+      const notebook = parts.length > 2 ? parts[1] : parts[0];
       const title = parts[parts.length - 1].replace(/\.md$/, "");
-      // P3.4 — honor the note's own provenance frontmatter (`source: ai_note`
-      // for assistant-emitted notes, plus optional agent/chat) so the hub +
-      // search can distinguish authorship; default to user_note.
+      // Authorship: the `ai/` tree defaults to ai_note, `notes/` to user_note;
+      // frontmatter `source:` overrides either way (P3.4 / #5).
+      const isAiTree = rel.startsWith("ai/");
       const fmBlock = content.match(/^---\n([\s\S]*?)\n---/);
       const fmSource = fmBlock?.[1].match(/^source:\s*(\S+)/m)?.[1];
       const fmAgent = fmBlock?.[1].match(/^agent:\s*"?([^"\n]+)"?/m)?.[1];
-      const source = fmSource === "ai_note" ? "ai_note" : "user_note";
+      const source = fmSource === "ai_note" || (isAiTree && fmSource !== "user_note")
+        ? "ai_note"
+        : "user_note";
       const meta = { source, note_path: rel, notebook, title };
       if (source === "ai_note" && fmAgent) meta.agent = fmAgent;
       const enc = encodeURIComponent(rel);

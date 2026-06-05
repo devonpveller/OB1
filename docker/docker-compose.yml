@@ -513,9 +513,11 @@ services:
     image: openbrain-extract:local
     container_name: openbrain-extract
     environment:
-      # Local STT (OpenAI-compatible) for audio/video transcription.
-      STT_API_BASE: ${EXTRACT_STT_API_BASE:-http://host.docker.internal:8000/v1}
-      STT_MODEL: ${EXTRACT_STT_MODEL:-whisper-1}
+      # Local STT for audio/video. The ai-stack realtime-audio server's one-shot
+      # endpoint is POST /stt (field "audio_file") → { transcript } — NOT the
+      # OpenAI /v1/audio/transcriptions path.
+      STT_API_BASE: ${EXTRACT_STT_API_BASE:-http://host.docker.internal:8000}
+      STT_TRANSCRIBE_PATH: ${EXTRACT_STT_PATH:-/stt}
       EXTRACT_MAX_BYTES: ${EXTRACT_MAX_BYTES:-104857600}
     extra_hosts:
       - "host.docker.internal:host-gateway"

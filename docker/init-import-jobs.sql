@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS public.import_jobs (
     error             TEXT,
     staged            BOOLEAN NOT NULL DEFAULT false,    -- G11 grounding lifecycle
     committed         BOOLEAN NOT NULL DEFAULT false,
+    duplicate         BOOLEAN NOT NULL DEFAULT false,    -- find_or_create_source dedup hit (UX feedback)
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );

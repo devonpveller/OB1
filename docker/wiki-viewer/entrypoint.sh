@@ -10,8 +10,12 @@ set -e
 rm -rf /quartz/content
 ln -sfn /wiki /quartz/content
 
-# Don't let Quartz scan .git / build caches / local state.
-sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", ".git", ".quartz-cache", "public", "node_modules", ".wikistate.json"]#' \
+# Don't let Quartz scan .git / build caches / local state. NOTE: `.git` alone
+# does NOT exclude files INSIDE the repo metadata (e.g. `.git/index.lock`); the
+# `.git/**` glob is required, otherwise Quartz tries to copy the live git
+# directory and crashes on git's transient lock files when another container
+# (the compiler, or the workbench writing notes/Changes) commits mid-rebuild.
+sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", ".git", ".git/**", "**/.git/**", ".quartz-cache", "public", "node_modules", ".wikistate.json"]#' \
   /quartz/quartz.config.ts
 
 # On a cold stack the compiler may not have produced pages yet. Quartz

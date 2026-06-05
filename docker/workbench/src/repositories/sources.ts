@@ -13,6 +13,42 @@ export async function getSource(id: string): Promise<Source | null> {
   return rows[0] ?? null;
 }
 
+// Search existing (non-retracted) sources by title/content — backs the modal's
+// "link an existing source" mode (#3, the deliberate-link path).
+export async function searchSources(q: string, limit = 20): Promise<Partial<Source>[]> {
+  const like = `%${q}%`;
+  return await query<Partial<Source>>(
+    `SELECT id, title, url, content_type FROM public.sources
+      WHERE retraction_committed_at IS NULL
+        AND ($1 = '' OR title ILIKE $2 OR content ILIKE $2)
+      ORDER BY updated_at DESC LIMIT $3`,
+    [q, like, limit],
+  );
+}
+
+// Link an EXISTING source to an entity (grounding via the existing link system).
+// user_linked wins on PK collision (P6.3).
+export async function linkEntity(sourceId: string, entityId: number): Promise<unknown> {
+  const rows = await query(
+    `INSERT INTO public.source_entities (source_id, entity_id, mention_role, confidence, evidence)
+     VALUES ($1,$2,'user_linked',1.0,$3)
+     ON CONFLICT (source_id, entity_id)
+     DO UPDATE SET mention_role='user_linked', confidence=1.0, evidence=EXCLUDED.evidence
+     RETURNING source_id, entity_id`,
+    [sourceId, entityId, `manual:operator@${new Date().toISOString()}`],
+  );
+  return rows[0];
+}
+
+// Link an EXISTING source into a notebook (deliberate membership).
+export async function linkNotebook(threadId: string, sourceId: string): Promise<unknown> {
+  const rows = await query(
+    `SELECT * FROM public.link_source_to_thread($1,$2,'deliberate',NULL,'confirmed')`,
+    [threadId, sourceId],
+  );
+  return rows[0];
+}
+
 // "Gravity" for the retract confirm dialog: N notebooks linked, M pages citing.
 export async function gravity(id: string): Promise<{ notebooks: number; pages: number }> {
   const nb = await query<{ n: number }>(

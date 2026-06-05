@@ -6,9 +6,9 @@ import * as repo from "../repositories/notes.ts";
 
 export const notes = new Hono();
 
-// GET /workbench/notes — index of all notes (paths relative to notes/).
+// GET /workbench/notes — index split by ownership: { user: [...], ai: [...] }.
 notes.get("/", async (c) => {
-  return c.json({ notes: await repo.notesIndex() });
+  return c.json(await repo.notesIndex());
 });
 
 // POST /workbench/notes — structured / AI-note hand-off (3.3/3.4).

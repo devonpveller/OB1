@@ -58,7 +58,11 @@ export async function writeStructuredNote(input: {
 }): Promise<{ path: string; hash: string }> {
   const nbSlug = slugifyNotebook(input.notebook);
   const fileSlug = slugifyNotebook(input.title) || "note";
-  const rel = `${nbSlug}/${fileSlug}.md`;
+  // AI-authored content lives in the SEPARATE `ai/` tree, segregated from the
+  // user-owned `notes/` layer — user notes are NEVER touched by AI (#5). Both
+  // tether to their notebook and the wiki ingests both (ai/ as ai_note); they
+  // just live in distinct, clearly-owned folders.
+  const rel = `ai/${nbSlug}/${fileSlug}.md`;
   const fm = [
     "---",
     `title: ${JSON.stringify(input.title)}`,
@@ -66,31 +70,32 @@ export async function writeStructuredNote(input: {
     ...(input.agent ? [`agent: ${JSON.stringify(input.agent)}`] : []),
     ...(input.chat ? [`chat: ${JSON.stringify(input.chat)}`] : []),
     `notebook: ${JSON.stringify(input.notebook)}`,
-    "tags: [note]",
+    "tags: [note, ai]",
     "---",
     "",
   ].join("\n");
   const body = fm + input.content + "\n";
-  const res = await writeNote(rel, body);
-  if ("conflict" in res) {
-    // Structured notes overwrite their slug deterministically; treat as write.
-    await vaultWrite(`notes/${rel}`, body);
-    await vaultCommit(`notes: write notes/${rel}`);
-    return { path: rel, hash: await sha256(body) };
-  }
-  return { path: rel, hash: res.hash };
+  await vaultWrite(rel, body);
+  await vaultCommit(`ai-note: write ${rel}`);
+  return { path: rel, hash: await sha256(body) };
 }
 
-// Notes index — git-tracked .md under notes/ (excluding READMEs).
-export async function notesIndex(): Promise<string[]> {
-  const cmd = new Deno.Command("git", {
-    args: ["-C", config.vault.gitDir, "ls-files", "notes/"],
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const { stdout } = await cmd.output();
-  return new TextDecoder().decode(stdout)
-    .split("\n")
-    .filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f))
-    .map((f) => f.replace(/^notes\//, ""));
+// Notes index — git-tracked .md, split by ownership: `user` (notes/) vs `ai`
+// (ai/). Paths are relative to their tree. READMEs excluded.
+export async function notesIndex(): Promise<{ user: string[]; ai: string[] }> {
+  const ls = async (dir: string): Promise<string[]> => {
+    const cmd = new Deno.Command("git", {
+      args: ["-C", config.vault.gitDir, "ls-files", dir],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const { stdout } = await cmd.output();
+    return new TextDecoder().decode(stdout)
+      .split("\n")
+      .filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f));
+  };
+  return {
+    user: (await ls("notes/")).map((f) => f.replace(/^notes\//, "")),
+    ai: (await ls("ai/")).map((f) => f.replace(/^ai\//, "")),
+  };
 }

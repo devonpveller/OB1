@@ -23,28 +23,42 @@ const GroundingBadge: QuartzComponent = ({ fileData, displayClass }: QuartzCompo
   )
 }
 
+// Init on Quartz's "nav" event (initial load + every SPA navigation).
 GroundingBadge.afterDOMLoaded = `
-document.querySelectorAll("[data-grounding-badge]").forEach(async (el) => {
-  const id = el.dataset.entityId
-  const stateEl = el.querySelector("[data-gb-state]")
-  const cta = el.querySelector("[data-gb-cta]")
-  const LABELS = {
-    mental_model:      { t: "Mental model — ungrounded belief", cls: "gb-mental" },
-    grounding_pending: { t: "⏳ Grounding pending",             cls: "gb-pending" },
-    grounded:          { t: "Grounded",                          cls: "gb-grounded" },
-    ingest_failed:     { t: "⚠ Ingest failed",                  cls: "gb-failed" },
-  }
-  try {
-    const r = await fetch("/workbench/grounding/" + encodeURIComponent(id), { headers: { accept: "application/json" } })
-    const j = await r.json()
-    const meta = LABELS[j.state] || LABELS.mental_model
-    stateEl.textContent = j.state === "grounded" ? "Grounded by " + j.grounded_sources + " source(s)" : meta.t
-    el.classList.add(meta.cls)
-    // The CTA is an invitation to legitimize a belief — NOT an "incomplete page".
-    if (j.state === "mental_model") cta.hidden = false
-  } catch {
-    stateEl.textContent = "grounding state unavailable"
-  }
+document.addEventListener("nav", () => {
+  document.querySelectorAll("[data-grounding-badge]").forEach(async (el) => {
+    if (el.dataset.gbInit) return
+    el.dataset.gbInit = "1"
+    const id = el.dataset.entityId
+    const stateEl = el.querySelector("[data-gb-state]")
+    const cta = el.querySelector("[data-gb-cta]")
+    const LABELS = {
+      mental_model:      { t: "Mental model — ungrounded belief", cls: "gb-mental" },
+      grounding_pending: { t: "⏳ Grounding pending",             cls: "gb-pending" },
+      grounded:          { t: "Grounded",                          cls: "gb-grounded" },
+      ingest_failed:     { t: "⚠ Ingest failed",                  cls: "gb-failed" },
+    }
+    try {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 8000)
+      const r = await fetch("/workbench/grounding/" + encodeURIComponent(id), { headers: { accept: "application/json" }, signal: ctrl.signal })
+      clearTimeout(t)
+      const j = await r.json()
+      const meta = LABELS[j.state] || LABELS.mental_model
+      stateEl.textContent = j.state === "grounded" ? "Grounded by " + j.grounded_sources + " source(s)" : meta.t
+      el.classList.add(meta.cls)
+      // The CTA is an invitation to legitimize a belief — NOT an "incomplete page".
+      if (j.state === "mental_model" || j.state === "ingest_failed") cta.hidden = false
+    } catch (e) {
+      stateEl.textContent = "grounding state unavailable (" + (e && e.message ? e.message : e) + ")"
+    }
+    // "Ground this claim" opens the shared upload modal, pre-targeted to this
+    // entity (provide a doc or URL) — it does NOT live on the page (#5/#6).
+    cta.addEventListener("click", (ev) => {
+      ev.preventDefault()
+      document.dispatchEvent(new CustomEvent("open-upload-modal", { detail: { entityId: id, title: "Ground this claim with a source" } }))
+    })
+  })
 })
 `
 
