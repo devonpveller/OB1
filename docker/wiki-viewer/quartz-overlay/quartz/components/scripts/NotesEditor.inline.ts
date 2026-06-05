@@ -39,6 +39,66 @@ async function loadCandidates() {
   return _cands
 }
 
+// ── link hover popover ───────────────────────────────────────────────────────
+// Quartz attaches its popover handler to a.internal links only at `nav`; our
+// in-editor link widgets are created later, so they get their own (self-
+// contained, reusing Quartz's .popover-hint content + a small floating box).
+let _pop: HTMLElement | null = null
+let _popTimer: any = null
+function hideLinkPopover() {
+  if (_popTimer) {
+    clearTimeout(_popTimer)
+    _popTimer = null
+  }
+  if (_pop) {
+    _pop.remove()
+    _pop = null
+  }
+}
+function showLinkPopover(anchor: HTMLAnchorElement) {
+  hideLinkPopover()
+  const href = anchor.getAttribute("href") || ""
+  if (!href.startsWith("/")) return
+  _popTimer = setTimeout(async () => {
+    try {
+      const res = await fetch(href)
+      if (!res.ok) return
+      const doc = new DOMParser().parseFromString(await res.text(), "text/html")
+      const inner = document.createElement("div")
+      inner.className = "ne-cm-popover-inner"
+      const hints = doc.querySelectorAll(".popover-hint")
+      if (hints.length) hints.forEach((h) => inner.appendChild(h.cloneNode(true)))
+      else {
+        const art = doc.querySelector("article")
+        if (!art) return
+        inner.appendChild(art.cloneNode(true))
+      }
+      const pop = document.createElement("div")
+      pop.className = "ne-cm-popover"
+      pop.appendChild(inner)
+      // keep open while hovering the popover itself
+      pop.addEventListener("mouseenter", () => {
+        if (_popTimer) {
+          clearTimeout(_popTimer)
+          _popTimer = null
+        }
+      })
+      pop.addEventListener("mouseleave", hideLinkPopover)
+      document.body.appendChild(pop)
+      const r = anchor.getBoundingClientRect()
+      let left = r.left
+      if (left + pop.offsetWidth > window.innerWidth - 8) left = window.innerWidth - pop.offsetWidth - 8
+      let top = r.bottom + 6
+      if (top + pop.offsetHeight > window.innerHeight - 8) top = r.top - pop.offsetHeight - 6
+      pop.style.left = Math.max(8, left) + "px"
+      pop.style.top = Math.max(8, top) + "px"
+      _pop = pop
+    } catch {
+      /* ignore */
+    }
+  }, 250)
+}
+
 // ── a rendered internal link (used for both [text](url) and [[wikilinks]]) ───
 class LinkWidget extends WidgetType {
   constructor(readonly href: string, readonly text: string) {
@@ -52,6 +112,11 @@ class LinkWidget extends WidgetType {
     a.className = "internal ne-cm-link"
     a.href = this.href
     a.textContent = this.text
+    a.addEventListener("mouseenter", () => showLinkPopover(a))
+    a.addEventListener("mouseleave", () => {
+      // small grace period so the cursor can travel into the popover
+      _popTimer = setTimeout(hideLinkPopover, 200)
+    })
     return a
   }
   ignoreEvent() {
@@ -458,6 +523,9 @@ document.addEventListener("nav", () => {
     let toolbar: HTMLElement | null = null
     let statusEl: HTMLElement | null = null
     let fm = ""
+    // Composes the file content from the body — replaced in enterEdit() with one
+    // that serializes the editable frontmatter properties panel.
+    let composeContent: (b: string) => string = (b) => fm + b
     let lastHash: string | null = null
     let timer: any = null
 
@@ -465,7 +533,7 @@ document.addEventListener("nav", () => {
       if (statusEl) statusEl.textContent = t
     }
     const save = async (body: string) => {
-      const content = fm + body
+      const content = composeContent(body)
       try {
         const r = await fetch(api(apiPath), {
           method: "PUT",
@@ -487,7 +555,7 @@ document.addEventListener("nav", () => {
     }
     const flush = () => {
       if (!view) return
-      const content = fm + view.state.doc.toString()
+      const content = composeContent(view.state.doc.toString())
       // keepalive lets the save outlive a navigation away mid-edit.
       fetch(api(apiPath), {
         method: "PUT",
@@ -531,7 +599,96 @@ document.addEventListener("nav", () => {
       } else {
         root.appendChild(host)
       }
-      view = makeEditor(host, split.body, (body) => {
+
+      const scheduleSave = () => {
+        setStatus("editing…")
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => save(view ? view.state.doc.toString() : ""), 1500)
+      }
+
+      // ── editable frontmatter "properties" (collapsible key/value rows) ──
+      const propRows: { ki: HTMLInputElement; vi: HTMLInputElement }[] = []
+      const propsBox = document.createElement("div")
+      propsBox.className = "ne-props"
+      const propsToggle = document.createElement("button")
+      propsToggle.type = "button"
+      propsToggle.className = "ne-props-toggle"
+      const propsBody = document.createElement("div")
+      propsBody.className = "ne-props-body"
+      let propsCollapsed = true
+      try {
+        propsCollapsed = localStorage.getItem("ne-props-collapsed") !== "0"
+      } catch {}
+      const syncToggle = () => {
+        propsBody.hidden = propsCollapsed
+        propsToggle.textContent = (propsCollapsed ? "▸" : "▾") + " Properties"
+      }
+      propsToggle.addEventListener("click", () => {
+        propsCollapsed = !propsCollapsed
+        try {
+          localStorage.setItem("ne-props-collapsed", propsCollapsed ? "1" : "0")
+        } catch {}
+        syncToggle()
+      })
+      const addBtn = document.createElement("button")
+      addBtn.type = "button"
+      addBtn.className = "ne-prop-add"
+      addBtn.textContent = "+ add property"
+      propsBody.appendChild(addBtn)
+      const addRow = (k: string, v: string) => {
+        const row = document.createElement("div")
+        row.className = "ne-prop-row"
+        const ki = document.createElement("input")
+        ki.className = "ne-prop-key"
+        ki.value = k
+        ki.placeholder = "key"
+        const vi = document.createElement("input")
+        vi.className = "ne-prop-val"
+        vi.value = v
+        vi.placeholder = "value"
+        const rm = document.createElement("button")
+        rm.type = "button"
+        rm.className = "ne-prop-rm"
+        rm.textContent = "×"
+        rm.title = "remove property"
+        const rec = { ki, vi }
+        ki.addEventListener("input", scheduleSave)
+        vi.addEventListener("input", scheduleSave)
+        rm.addEventListener("click", () => {
+          row.remove()
+          const i = propRows.indexOf(rec)
+          if (i >= 0) propRows.splice(i, 1)
+          scheduleSave()
+        })
+        row.appendChild(ki)
+        row.appendChild(vi)
+        row.appendChild(rm)
+        propsBody.insertBefore(row, addBtn)
+        propRows.push(rec)
+      }
+      addBtn.addEventListener("click", () => addRow("", ""))
+      const fmInner = fm.replace(/^---\r?\n/, "").replace(/\r?\n?---\r?\n?$/, "")
+      fmInner.split(/\r?\n/).forEach((line) => {
+        if (!line.trim()) return
+        const idx = line.indexOf(":")
+        if (idx === -1) addRow(line.trim(), "")
+        else addRow(line.slice(0, idx).trim(), line.slice(idx + 1).trim())
+      })
+      syncToggle()
+      propsBox.appendChild(propsToggle)
+      propsBox.appendChild(propsBody)
+      host.appendChild(propsBox)
+
+      const serializeProps = () => {
+        const valid = propRows.filter((r) => r.ki.value.trim())
+        if (!valid.length) return ""
+        return "---\n" + valid.map((r) => r.ki.value.trim() + ": " + r.vi.value).join("\n") + "\n---\n\n"
+      }
+      composeContent = (b) => serializeProps() + b
+
+      // Strip leading blank lines (they live between the fm block and the body)
+      // so the editor starts at the content; serializeProps re-adds the gap.
+      view = makeEditor(host, split.body.replace(/^\n+/, ""), (body) => {
         setStatus("editing…")
         if (timer) clearTimeout(timer)
         timer = setTimeout(() => save(body), 1500)
@@ -553,6 +710,50 @@ document.addEventListener("nav", () => {
     if (article && article.parentElement) {
       article.parentElement.insertBefore(toolbar, article)
       toolbar.appendChild(editBtn)
+      // Export-as buttons (pandoc) — available whether or not you're editing.
+      const exp = document.createElement("span")
+      exp.className = "ne-export"
+      exp.appendChild(document.createTextNode("⬇"))
+      ;[
+        ["MD", "md"],
+        ["PDF", "pdf"],
+        ["TEXT", "txt"],
+        ["DOCX", "docx"],
+      ].forEach(([label, f]) => {
+        const b = document.createElement("button")
+        b.type = "button"
+        b.className = "ne-export-btn"
+        b.textContent = label
+        b.title = "Export this note as " + label
+        b.addEventListener("click", async () => {
+          setStatus("exporting " + label + "…")
+          try {
+            const r = await fetch("/workbench/export?path=" + encodeURIComponent("notes/" + apiPath) + "&format=" + f)
+            if (!r.ok) {
+              const j = await r.json().catch(() => ({}))
+              setStatus("✗ export failed: " + (j.error || "HTTP " + r.status))
+              return
+            }
+            const blob = await r.blob()
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement("a")
+            a.href = url
+            a.download = (apiPath.split("/").pop() || "note").replace(/\.md$/, "") + "." + f
+            // Quartz's SPA router hijacks <a> clicks and would pushState() the
+            // blob: URL (SecurityError). data-router-ignore makes it skip this.
+            a.dataset.routerIgnore = ""
+            document.body.appendChild(a)
+            a.click()
+            a.remove()
+            setTimeout(() => URL.revokeObjectURL(url), 4000)
+            setStatus("✓ exported " + label)
+          } catch (e: any) {
+            setStatus("✗ " + (e && e.message ? e.message : e))
+          }
+        })
+        exp.appendChild(b)
+      })
+      toolbar.appendChild(exp)
       toolbar.appendChild(statusEl)
     }
     editBtn.addEventListener("click", () => (view ? exitEdit() : enterEdit()))

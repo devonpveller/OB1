@@ -2,8 +2,11 @@ FROM denoland/deno:2.3.3
 
 # git: the workbench commits notes + the Changes log into the vault repo (P3 /
 # the G1 exception). The Deno base image doesn't ship it.
+# pandoc + weasyprint: the note exporter (P3.5) converts markdown → DOCX/HTML/
+# PDF/ODT/EPUB locally (no network). weasyprint is pandoc's PDF engine (HTML/CSS
+# based — avoids a full TeX install; wkhtmltopdf was dropped from Debian).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates \
+  && apt-get install -y --no-install-recommends git ca-certificates pandoc weasyprint \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -27,6 +27,7 @@ import { notes } from "./routes/notes.ts";
 import { sources } from "./routes/sources.ts";
 import { imports, jobs } from "./routes/import.ts";
 import { grounding } from "./routes/grounding.ts";
+import { exporter } from "./routes/export.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
 
 // deno-postgres returns BIGINT columns (e.g. entities.id, thoughts.id) as JS
@@ -56,6 +57,7 @@ app.route("/workbench/sources", sources); // P4
 app.route("/workbench/import", imports); // P5 (single upload route; P6 grounding too)
 app.route("/workbench/jobs", jobs); // P5
 app.route("/workbench/grounding", grounding); // P6
+app.route("/workbench/export", exporter); // P3.5 — pandoc note export
 
 app.notFound((c) => c.json({ error: "not found" }, 404));
 app.onError((err, c) => {

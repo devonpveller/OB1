@@ -72,6 +72,28 @@ NotesEditor.css = `
 .ne-toolbar { display: flex; align-items: center; gap: .6rem; margin: 0 0 .5rem; }
 .ne-toolbar .ne-launch { margin-left: 0; }
 .ne-toolbar .ne-status { font-size: .78rem; color: var(--gray); }
+.ne-toolbar .ne-export { display: inline-flex; align-items: center; gap: .25rem; color: var(--gray); font-size: .8rem; }
+.ne-toolbar .ne-export-btn { font-size: .72rem; padding: .2rem .45rem; border: 1px solid var(--lightgray); background: transparent; color: var(--secondary); border-radius: 5px; cursor: pointer; }
+.ne-toolbar .ne-export-btn:hover { background: var(--lightgray); }
+
+/* editable frontmatter properties panel */
+.ne-props { margin: 0 0 .6rem; border: 1px solid var(--lightgray); border-radius: 7px; }
+.ne-props-toggle { width: 100%; text-align: left; background: var(--lightgray); border: 0; padding: .35rem .6rem; font-size: .75rem; color: var(--gray); cursor: pointer; border-radius: 7px; text-transform: uppercase; letter-spacing: .04em; }
+.ne-props-body { padding: .5rem .6rem; display: flex; flex-direction: column; gap: .35rem; }
+.ne-props-body[hidden] { display: none; }
+.ne-prop-row { display: flex; gap: .4rem; align-items: center; }
+.ne-prop-key { flex: 0 0 28%; padding: .25rem .4rem; font-family: var(--codeFont); font-size: .8rem; border: 1px solid var(--lightgray); border-radius: 5px; background: var(--light); color: var(--dark); }
+.ne-prop-val { flex: 1; padding: .25rem .4rem; font-size: .82rem; border: 1px solid var(--lightgray); border-radius: 5px; background: var(--light); color: var(--dark); }
+.ne-prop-rm { border: 0; background: transparent; color: var(--gray); font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0 .25rem; }
+.ne-prop-rm:hover { color: #c0392b; }
+.ne-prop-add { align-self: flex-start; border: 1px dashed var(--lightgray); background: transparent; color: var(--secondary); font-size: .75rem; padding: .2rem .5rem; border-radius: 5px; cursor: pointer; }
+
+/* link hover popover (in-editor) */
+.ne-cm-popover { position: fixed; z-index: 1002; max-width: 420px; max-height: 420px; overflow: auto; background: var(--light); color: var(--dark); border: 1px solid var(--lightgray); border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
+.ne-cm-popover-inner { padding: .6rem .9rem; font-size: .82rem; }
+.ne-cm-popover-inner h1, .ne-cm-popover-inner h2 { font-size: 1rem; margin: .3rem 0; }
+.ne-cm-popover-inner :is(h3,h4,h5,h6) { font-size: .9rem; margin: .25rem 0; }
+.ne-cm-popover-inner img { max-width: 100%; height: auto; }
 
 /* the CodeMirror host — sized + typed like the article it replaces */
 .ne-cm-host { margin: 0 0 1rem; position: relative; }
