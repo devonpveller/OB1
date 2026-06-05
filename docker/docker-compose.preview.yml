@@ -82,9 +82,20 @@ services:
       - pnet
       - llm-net
 
+  # The actual Quartz viewer — builds the overlay (.tsx) components and renders
+  # the seeded wiki pages. Shares the preview-wiki volume (read-only).
+  preview-viewer:
+    build:
+      context: ./wiki-viewer
+    image: openbrain-wiki-viewer:local
+    depends_on: [preview-workbench]
+    volumes:
+      - preview-wiki:/wiki:ro
+    networks: [pnet]
+
   preview-caddy:
     image: caddy:2-alpine
-    depends_on: [preview-workbench]
+    depends_on: [preview-workbench, preview-viewer]
     environment:
       WORKBENCH_KEY: preview-key
     volumes:

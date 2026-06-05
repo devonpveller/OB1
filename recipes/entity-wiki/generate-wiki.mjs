@@ -838,10 +838,15 @@ export function rewriteCitations(markdown, validThoughtIds, sourceTokenMap, run)
       return `[[source/${uuid}|S${n}]]`;
     });
     // Thoughts: [#11173] — literal id; not-on-this-page id → plain text.
+    // The "#" is kept OUTSIDE the wikilink (`#[[thought/id|id]]`, not
+    // `[[thought/id|#id]]`): Quartz's wikilink parser treats a "#" at the start
+    // of the alias as a heading/anchor ref and fails to render the link at all
+    // (verified). The "#" as a literal prefix still reads "#11173", and the id
+    // is the clickable link → popover/SPA/backlinks all work.
     seg = seg.replace(/\[#(\d+)\]/g, (m, d) => {
       if (!validThoughtIds.has(Number(d))) return m;
       run.citedThoughtIds.add(Number(d));
-      return `[[thought/${d}|#${d}]]`;
+      return `#[[thought/${d}|${d}]]`;
     });
     parts[i] = seg;
   }

@@ -1,18 +1,27 @@
-# Preview front proxy. Serves the test harness at / and proxies /workbench/* to
-# the workbench (injecting X-Brain-Key, just like the portal does in prod), so
-# the browser hits everything same-origin. PREVIEW ONLY — no Authelia.
+# Preview front proxy. Routes:
+#   /workbench/*  → the workbench API (X-Brain-Key injected, like prod)
+#   /harness      → the bare API test page (/srv/index.html)
+#   everything else → the Quartz viewer (the wiki, at the root — Quartz emits
+#                     root-relative asset URLs, so it must own /)
+# PREVIEW ONLY — no Authelia.
 :8080 {
 	handle /workbench/* {
 		reverse_proxy preview-workbench:8000 {
 			header_up X-Brain-Key {$WORKBENCH_KEY}
 		}
 	}
-	# Silence the browser's automatic favicon probe (cosmetic).
+
+	handle /harness {
+		root * /srv
+		rewrite * /index.html
+		file_server
+	}
+
 	handle /favicon.ico {
 		respond 204
 	}
+
 	handle {
-		root * /srv
-		file_server
+		reverse_proxy preview-viewer:8080
 	}
 }

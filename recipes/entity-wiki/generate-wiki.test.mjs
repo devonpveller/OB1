@@ -15,7 +15,8 @@ test("rewrites valid thought + source citations into wikilinks", () => {
     new Map([["S1", UUID]]),
     run,
   );
-  assert.equal(out, `Aurora ships Q3 [[source/${UUID}|S1]], contradicting [[thought/11173|#11173]].`);
+  // Thought "#" stays OUTSIDE the wikilink (Quartz parser fails on `|#…` alias).
+  assert.equal(out, `Aurora ships Q3 [[source/${UUID}|S1]], contradicting #[[thought/11173|11173]].`);
   assert.deepEqual([...run.citedSourceIds], [UUID]);
   assert.deepEqual([...run.citedThoughtIds], [11173]);
 });
@@ -30,12 +31,12 @@ test("mis-cites (unknown token / not-on-page id) stay plain text", () => {
 test("code spans are protected", () => {
   const run = newRun();
   const out = rewriteCitations("real [#1] but `code [#1]`", new Set([1]), new Map(), run);
-  assert.equal(out, "real [[thought/1|#1]] but `code [#1]`");
+  assert.equal(out, "real #[[thought/1|1]] but `code [#1]`");
 });
 
 test("does not double-rewrite an already-wikilinked citation", () => {
   const run = newRun();
-  const src = `[[source/${UUID}|S1]] and [[thought/1|#1]]`;
+  const src = `[[source/${UUID}|S1]] and #[[thought/1|1]]`;
   assert.equal(rewriteCitations(src, new Set([1]), new Map([["S1", UUID]]), run), src);
 });
 
