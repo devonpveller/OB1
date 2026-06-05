@@ -317,30 +317,34 @@ async function obFetch(method, pathq, body) {
 // One note file ↔ one OpenBrain thought, tethered by metadata.note_path.
 // Edit a note → PATCH the SAME row (no duplicate); the content-change
 // trigger re-enqueues entity extraction. Delete a note → delete its row.
+// Author-owned content trees (operator layout #4/#5):
+//   notes/notebooks/<nb>/…    user notes  (user_note)
+//   content/notebooks/<nb>/…  AI-generated from external inlets  (ai_note)
+// The Changes log (notes/Changes/…) is excluded — it's a log, not a note.
+const NOTE_TREES = ["notes/notebooks/", "content/notebooks/"];
+function isExcludedNote(file) {
+  return !file.endsWith(".md") || /(^|\/)README\.md$/i.test(file) || file.startsWith("notes/Changes/");
+}
 async function ingestNotes(prevCommit) {
-  if (!existsSync(NOTES_DIR)) return { ingested: 0, deleted: 0 };
   let changed = [];
   let deleted = [];
   try {
-    // Both author-owned trees are ingested: notes/ (user) + ai/ (AI-authored,
-    // segregated per #5). The folder sets the default authorship; frontmatter
-    // `source:` can override.
     if (prevCommit) {
       const { stdout } = await git([
-        "diff", "--name-status", `${prevCommit}..HEAD`, "--", "notes/", "ai/",
+        "diff", "--name-status", `${prevCommit}..HEAD`, "--", ...NOTE_TREES,
       ]);
       for (const line of stdout.split("\n")) {
         const m = line.match(/^([ACMRD])\S*\t(.+?)(?:\t(.+))?$/);
         if (!m) continue;
         const status = m[1];
         const file = (m[3] || m[2]).trim();
-        if (!file.endsWith(".md") || /(^|\/)README\.md$/i.test(file)) continue;
+        if (isExcludedNote(file)) continue;
         if (status === "D") deleted.push(file);
         else changed.push(file);
       }
     } else {
-      const { stdout } = await git(["ls-files", "notes/", "ai/"]);
-      changed = stdout.split("\n").filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f));
+      const { stdout } = await git(["ls-files", ...NOTE_TREES]);
+      changed = stdout.split("\n").filter((f) => f && !isExcludedNote(f));
     }
   } catch (e) {
     console.error("[wiki-service] note diff failed (non-fatal):", e?.message || e);
@@ -353,14 +357,14 @@ async function ingestNotes(prevCommit) {
       const abs = `${WIKI_GIT_DIR}/${rel}`;
       if (!existsSync(abs)) continue;
       const content = await readFile(abs, "utf8");
-      // notebook = first folder under notes/ (the pinned notebook slug — P3.1),
-      // else "notes".
-      const parts = rel.split("/"); // <tree>/<notebook-slug>/file.md
-      const notebook = parts.length > 2 ? parts[1] : parts[0];
+      // notebook = the segment right after "notebooks/"; title = filename.
+      const parts = rel.split("/"); // <tree>/notebooks/<nb-slug>/file.md
+      const nbIdx = parts.indexOf("notebooks");
+      const notebook = nbIdx >= 0 && parts[nbIdx + 1] ? parts[nbIdx + 1] : "notes";
       const title = parts[parts.length - 1].replace(/\.md$/, "");
-      // Authorship: the `ai/` tree defaults to ai_note, `notes/` to user_note;
+      // Authorship: content/notebooks/ defaults to ai_note, notes/ to user_note;
       // frontmatter `source:` overrides either way (P3.4 / #5).
-      const isAiTree = rel.startsWith("ai/");
+      const isAiTree = rel.startsWith("content/notebooks/");
       const fmBlock = content.match(/^---\n([\s\S]*?)\n---/);
       const fmSource = fmBlock?.[1].match(/^source:\s*(\S+)/m)?.[1];
       const fmAgent = fmBlock?.[1].match(/^agent:\s*"?([^"\n]+)"?/m)?.[1];
@@ -435,8 +439,10 @@ async function listEntityFiles(outDir) {
     // entity sweep never deletes them against the wrong set: `notebook/` (P2
     // hubs → sweepOrphanNotebookPages), `topic/` (retired, swept wholesale),
     // `thought/`+`source/` (P1 leaves → sweepOrphanLeafPages).
+    // `notebooks/` (plural) holds AI-authored notes (content/notebooks/<nb>/) —
+    // author-owned-in-content, never swept. `notebook/` (singular) = the hubs.
     if (
-      d.name === "notebook" || d.name === "topic" ||
+      d.name === "notebook" || d.name === "notebooks" || d.name === "topic" ||
       d.name === "thought" || d.name === "source"
     ) continue;
     const dirPath = `${outDir}/${d.name}`;

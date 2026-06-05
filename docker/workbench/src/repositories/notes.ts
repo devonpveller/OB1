@@ -58,11 +58,11 @@ export async function writeStructuredNote(input: {
 }): Promise<{ path: string; hash: string }> {
   const nbSlug = slugifyNotebook(input.notebook);
   const fileSlug = slugifyNotebook(input.title) || "note";
-  // AI-authored content lives in the SEPARATE `ai/` tree, segregated from the
-  // user-owned `notes/` layer — user notes are NEVER touched by AI (#5). Both
-  // tether to their notebook and the wiki ingests both (ai/ as ai_note); they
-  // just live in distinct, clearly-owned folders.
-  const rel = `ai/${nbSlug}/${fileSlug}.md`;
+  // Layout (operator-chosen): AI-generated content (from external inlets) lives
+  // on the wiki/AI side under content/notebooks/<notebook>/ so it propagates;
+  // user notes live under notes/notebooks/<notebook>/ (#4/#5). They never mix.
+  // The compiler skips content/notebooks/ in its sweeps (author-owned-in-content).
+  const rel = `content/notebooks/${nbSlug}/${fileSlug}.md`;
   const fm = [
     "---",
     `title: ${JSON.stringify(input.title)}`,
@@ -80,8 +80,9 @@ export async function writeStructuredNote(input: {
   return { path: rel, hash: await sha256(body) };
 }
 
-// Notes index — git-tracked .md, split by ownership: `user` (notes/) vs `ai`
-// (ai/). Paths are relative to their tree. READMEs excluded.
+// Notes index — git-tracked .md, split by ownership: `user`
+// (notes/notebooks/…) vs `ai` (content/notebooks/…). Paths are relative to
+// `notebooks/`. READMEs + the Changes log excluded.
 export async function notesIndex(): Promise<{ user: string[]; ai: string[] }> {
   const ls = async (dir: string): Promise<string[]> => {
     const cmd = new Deno.Command("git", {
@@ -95,7 +96,7 @@ export async function notesIndex(): Promise<{ user: string[]; ai: string[] }> {
       .filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f));
   };
   return {
-    user: (await ls("notes/")).map((f) => f.replace(/^notes\//, "")),
-    ai: (await ls("ai/")).map((f) => f.replace(/^ai\//, "")),
+    user: (await ls("notes/notebooks/")).map((f) => f.replace(/^notes\/notebooks\//, "")),
+    ai: (await ls("content/notebooks/")).map((f) => f.replace(/^content\/notebooks\//, "")),
   };
 }

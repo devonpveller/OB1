@@ -29,6 +29,14 @@ import { imports, jobs } from "./routes/import.ts";
 import { grounding } from "./routes/grounding.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
 
+// deno-postgres returns BIGINT columns (e.g. entities.id, thoughts.id) as JS
+// BigInt, which JSON.stringify cannot serialize → every response carrying one
+// would 500. Make BigInt serialize as a number globally (all our ids are well
+// under 2^53). One line, app-wide.
+(BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function (this: bigint) {
+  return Number(this);
+};
+
 const app = new Hono();
 
 // Health is unauthenticated (Docker healthcheck + overlay connectivity proof).
