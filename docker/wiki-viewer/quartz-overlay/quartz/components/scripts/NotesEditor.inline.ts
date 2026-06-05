@@ -43,26 +43,56 @@ async function loadCandidates() {
 // Quartz attaches its popover handler to a.internal links only at `nav`; our
 // in-editor link widgets are created later, so they get their own (self-
 // contained, reusing Quartz's .popover-hint content + a small floating box).
+// Separate show/hide timers + a hover guard. The earlier single-timer version
+// could let a pending "show" fire after the cursor had left and wipe the "hide",
+// stranding the popover. Now: the show timer is cancelled on leave, and after
+// the (async) fetch we re-check that the link/popover is still hovered.
 let _pop: HTMLElement | null = null
-let _popTimer: any = null
-function hideLinkPopover() {
-  if (_popTimer) {
-    clearTimeout(_popTimer)
-    _popTimer = null
+let _showTimer: any = null
+let _hideTimer: any = null
+let _hoverLink = false
+let _hoverPop = false
+function clearShow() {
+  if (_showTimer) {
+    clearTimeout(_showTimer)
+    _showTimer = null
   }
+}
+function clearHide() {
+  if (_hideTimer) {
+    clearTimeout(_hideTimer)
+    _hideTimer = null
+  }
+}
+function hideLinkPopover() {
+  clearShow()
+  clearHide()
+  _hoverLink = false
+  _hoverPop = false
   if (_pop) {
     _pop.remove()
     _pop = null
   }
 }
-function showLinkPopover(anchor: HTMLAnchorElement) {
-  hideLinkPopover()
+function scheduleHide() {
+  clearHide()
+  _hideTimer = setTimeout(() => {
+    _hideTimer = null
+    if (!_hoverLink && !_hoverPop) hideLinkPopover()
+  }, 200)
+}
+function onLinkEnter(anchor: HTMLAnchorElement) {
+  _hoverLink = true
+  clearHide()
+  clearShow()
   const href = anchor.getAttribute("href") || ""
   if (!href.startsWith("/")) return
-  _popTimer = setTimeout(async () => {
+  _showTimer = setTimeout(async () => {
+    _showTimer = null
     try {
       const res = await fetch(href)
       if (!res.ok) return
+      if (!_hoverLink) return // cursor left during the fetch — don't strand a popover
       const doc = new DOMParser().parseFromString(await res.text(), "text/html")
       const inner = document.createElement("div")
       inner.className = "ne-cm-popover-inner"
@@ -73,17 +103,21 @@ function showLinkPopover(anchor: HTMLAnchorElement) {
         if (!art) return
         inner.appendChild(art.cloneNode(true))
       }
+      if (_pop) {
+        _pop.remove() // replace any existing popover (keep hover state/timers)
+        _pop = null
+      }
       const pop = document.createElement("div")
       pop.className = "ne-cm-popover"
       pop.appendChild(inner)
-      // keep open while hovering the popover itself
       pop.addEventListener("mouseenter", () => {
-        if (_popTimer) {
-          clearTimeout(_popTimer)
-          _popTimer = null
-        }
+        _hoverPop = true
+        clearHide()
       })
-      pop.addEventListener("mouseleave", hideLinkPopover)
+      pop.addEventListener("mouseleave", () => {
+        _hoverPop = false
+        scheduleHide()
+      })
       document.body.appendChild(pop)
       const r = anchor.getBoundingClientRect()
       let left = r.left
@@ -97,6 +131,11 @@ function showLinkPopover(anchor: HTMLAnchorElement) {
       /* ignore */
     }
   }, 250)
+}
+function onLinkLeave() {
+  _hoverLink = false
+  clearShow()
+  scheduleHide()
 }
 
 // ── a rendered internal link (used for both [text](url) and [[wikilinks]]) ───
@@ -112,11 +151,8 @@ class LinkWidget extends WidgetType {
     a.className = "internal ne-cm-link"
     a.href = this.href
     a.textContent = this.text
-    a.addEventListener("mouseenter", () => showLinkPopover(a))
-    a.addEventListener("mouseleave", () => {
-      // small grace period so the cursor can travel into the popover
-      _popTimer = setTimeout(hideLinkPopover, 200)
-    })
+    a.addEventListener("mouseenter", () => onLinkEnter(a))
+    a.addEventListener("mouseleave", () => onLinkLeave())
     return a
   }
   ignoreEvent() {
