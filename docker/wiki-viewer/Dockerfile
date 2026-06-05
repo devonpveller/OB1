@@ -51,6 +51,7 @@ RUN { \
   echo 'export { default as GroundingBadge } from "./GroundingBadge"'; \
   echo 'export { default as UploadModal } from "./UploadModal"'; \
   echo 'export { default as SourceRetractor } from "./SourceRetractor"'; \
+  echo 'export { default as NotesEditor } from "./NotesEditor"'; \
   } >> /quartz/quartz/components/index.ts
 
 # Mount the overlay components in the content page (after Backlinks).
@@ -59,8 +60,8 @@ RUN { \
 RUN set -e; \
   L=/quartz/quartz.layout.ts; \
   grep -q 'Component.Backlinks(),' "$L"; \
-  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.GroundingBadge(),\n\1Component.SourceRetractor(),\n\1Component.UploadModal(),#' "$L"; \
-  grep -q 'Component.UploadModal(),' "$L"
+  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.GroundingBadge(),\n\1Component.SourceRetractor(),\n\1Component.UploadModal(),\n\1Component.NotesEditor(),#' "$L"; \
+  grep -q 'Component.NotesEditor(),' "$L"
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

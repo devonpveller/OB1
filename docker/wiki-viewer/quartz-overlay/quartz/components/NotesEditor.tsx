@@ -15,6 +15,14 @@ import { QuartzComponent, QuartzComponentConstructor, QuartzComponentProps } fro
 const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponentProps) => {
   const fm = (fileData?.frontmatter ?? {}) as Record<string, unknown>
   const showLauncher = fm.type === "notebook"
+  // A user note is a page served straight from the author-owned notes/ layer.
+  // The page's own slug IS its vault path (notes are 1:1 files) — so "edit this
+  // note" derives the path from the slug, NOT from a guessed backing id. The
+  // Changes log is author-owned but not hand-editable, so it's excluded.
+  const slug = String(fileData?.slug ?? "")
+  const isUserNote = slug.startsWith("notes/notebooks/")
+  const noteParts = slug.split("/")
+  const noteNbSlug = noteParts.length > 2 ? noteParts[2] : ""
   return (
     <div
       class={`notes-editor-root ${displayClass ?? ""}`}
@@ -24,6 +32,7 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
       data-notebook-name={String(fm.title ?? "")}
     >
       {showLauncher ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
+      {isUserNote ? <button class="ne-launch ne-edit" data-ne-edit data-note-path={`${slug}.md`} data-note-nbslug={noteNbSlug}>✎ Edit this note</button> : null}
       <div class="ne-overlay" data-notes-modal hidden>
         <div class="ne-backdrop" data-ne-close></div>
         <div class="ne-box" role="dialog" aria-modal="true">
@@ -202,13 +211,22 @@ document.addEventListener("nav", () => {
     opts = opts || {}
     status.textContent = ""; currentHash = null; editingPath = opts.path || null
     nbSel.value = opts.notebook || seedNb.id || ""
+    // When editing from a note page we know the notebook by SLUG, not id —
+    // select the matching option (the dropdown is populated by then).
+    if (opts.notebookSlug) {
+      const opt = Array.from(nbSel.options).find(o => o.dataset.slug === opts.notebookSlug)
+      if (opt) nbSel.value = opt.value
+    }
     if (editingPath) {
       heading.textContent = "Edit note"
       status.textContent = "loading…"
       try {
         const r = await fetch("/workbench/notes/" + editingPath.split("/").map(encodeURIComponent).join("/"))
-        if (r.ok) { const j = await r.json(); currentHash = j.hash; const p = parseNote(j.content); nameEl.value = p.title; area.value = p.body; status.textContent = "" }
-        else { status.textContent = "could not load note (" + r.status + ")"; nameEl.value = ""; area.value = "" }
+        if (r.ok) {
+          const j = await r.json(); currentHash = j.hash; const p = parseNote(j.content)
+          const fname = (editingPath.split("/").pop() || "note").replace(/\\.md$/, "")
+          nameEl.value = p.title || fname; area.value = p.body; status.textContent = ""
+        } else { status.textContent = "could not load note (" + r.status + ")"; nameEl.value = ""; area.value = "" }
       } catch (e) { status.textContent = "load failed: " + (e && e.message ? e.message : e) }
     } else {
       heading.textContent = "Write a note"
@@ -221,6 +239,8 @@ document.addEventListener("nav", () => {
   const close = () => { modal.hidden = true; hideAc() }
   const launch = root.querySelector("[data-ne-launch]")
   if (launch) launch.addEventListener("click", () => open({ notebook: seedNb.id }))
+  const editBtn = root.querySelector("[data-ne-edit]")
+  if (editBtn) editBtn.addEventListener("click", () => open({ path: editBtn.dataset.notePath, notebookSlug: editBtn.dataset.noteNbslug }))
   root.querySelectorAll("[data-ne-close]").forEach(b => b.addEventListener("click", close))
   document.addEventListener("open-notes-editor", (e) => open((e && e.detail) || {}))
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden && ac.hidden) close() })
