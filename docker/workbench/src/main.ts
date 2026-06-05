@@ -27,6 +27,7 @@ import { notes } from "./routes/notes.ts";
 import { sources } from "./routes/sources.ts";
 import { imports, jobs } from "./routes/import.ts";
 import { grounding } from "./routes/grounding.ts";
+import { ensureVaultRepo } from "./util/vault.ts";
 
 const app = new Hono();
 
@@ -53,6 +54,9 @@ app.onError((err, c) => {
   console.error("[workbench] error:", err?.message || err);
   return c.json({ error: "internal", detail: String(err?.message || err) }, 500);
 });
+
+// Make sure we can commit notes / the Changes log into the vault (best-effort).
+await ensureVaultRepo();
 
 Deno.serve({ port: config.port }, app.fetch);
 console.log(`[workbench] listening on :${config.port} (auth=${config.workbenchKey ? "on" : "OPEN — set WORKBENCH_KEY"})`);

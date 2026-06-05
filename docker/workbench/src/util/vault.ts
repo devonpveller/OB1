@@ -18,6 +18,26 @@ async function git(args: string[]): Promise<{ ok: boolean; out: string; err: str
   return { ok: success, out: dec.decode(stdout), err: dec.decode(stderr) };
 }
 
+// Ensure the vault is a git repo the workbench can commit to (notes + Changes
+// log). Idempotent — `git init` is a no-op on an existing repo, and we only set
+// a default identity if none exists, so this never disturbs the wiki-service's
+// repo config in prod. Best-effort; logged, never fatal.
+export async function ensureVaultRepo(): Promise<void> {
+  try {
+    await Deno.mkdir(config.vault.gitDir, { recursive: true });
+    if (!(await vaultExists(".git"))) {
+      await git(["init", "-q"]);
+    }
+    const who = await git(["config", "user.email"]);
+    if (!who.out.trim()) {
+      await git(["config", "user.email", "workbench@openbrain.local"]);
+      await git(["config", "user.name", "openbrain-workbench"]);
+    }
+  } catch (e) {
+    console.error("[workbench] ensureVaultRepo (non-fatal):", (e as Error).message);
+  }
+}
+
 export async function vaultRead(relPath: string): Promise<string> {
   return await Deno.readTextFile(safeJoin(config.vault.gitDir, relPath));
 }

@@ -51,6 +51,23 @@
   <pre id="imp-out">—</pre>
 </div>
 
+<h2>3b. Notes (P3) — authored layer (human + AI)</h2>
+<div class="card">
+  <div class="row">
+    <input id="note-path" placeholder="path under notes/ e.g. project-aurora/idea.md" size="42" value="project-aurora/idea.md" />
+    <button class="alt" onclick="noteGet()">Read</button>
+  </div>
+  <textarea id="note-body" rows="4" style="width:100%;margin:.5rem 0" placeholder="# My note&#10;&#10;A human note. Links resolve: [[notebook/project-aurora]]."># My note
+
+A human-authored note. Wikilinks resolve, e.g. [[notebook/project-aurora]].</textarea>
+  <div class="row">
+    <button onclick="notePut()">Write note (human)</button>
+    <button class="alt" onclick="noteAi()">Write AI note (POST /notes)</button>
+    <button class="alt" onclick="noteIndex()">Index</button>
+  </div>
+  <pre id="note-out">—</pre>
+</div>
+
 <h2>4. Grounding state (P6)</h2>
 <div class="card">
   <div class="row">
@@ -84,6 +101,22 @@ async function createNb() {
   j("nb-out", await api("/workbench/notebooks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) }));
 }
 async function listNb() { j("nb-out", await api("/workbench/notebooks")); }
+async function noteGet() {
+  const p = document.getElementById("note-path").value.trim();
+  const res = await api("/workbench/notes/" + p);
+  j("note-out", res);
+  if (res.body && res.body.content) document.getElementById("note-body").value = res.body.content;
+}
+async function notePut() {
+  const p = document.getElementById("note-path").value.trim();
+  const content = document.getElementById("note-body").value;
+  j("note-out", await api("/workbench/notes/" + p, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ content }) }));
+}
+async function noteAi() {
+  j("note-out", await api("/workbench/notes", { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ notebook: "Project Aurora", title: "AI synthesis", content: "## Synthesis\n\nAn AI-authored note.", source: "ai_note", agent: "preview-harness" }) }));
+}
+async function noteIndex() { j("note-out", await api("/workbench/notes")); }
 async function grounding() {
   const id = document.getElementById("gr-ent").value.trim();
   j("gr-out", await api("/workbench/grounding/" + encodeURIComponent(id)));
