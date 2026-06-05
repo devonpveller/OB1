@@ -112,6 +112,10 @@ NotesEditor.css = `
 .ne-cm-host .ne-cm-em { font-style: italic; }
 .ne-cm-host .ne-cm-code { font-family: var(--codeFont); background: var(--lightgray); border-radius: 4px; padding: 0 .25em; font-size: .9em; }
 .ne-cm-host .ne-cm-strike { text-decoration: line-through; }
+/* inline frontmatter ("properties") region */
+.ne-cm-host .ne-cm-fm { font-family: var(--codeFont); font-size: .8rem; color: var(--gray); background: color-mix(in srgb, var(--lightgray) 45%, transparent); }
+.ne-cm-host .ne-cm-fm-fence { font-family: var(--codeFont); font-size: .7rem; color: var(--lightgray); background: color-mix(in srgb, var(--lightgray) 45%, transparent); }
+.ne-cm-host .ne-cm-fm-key { color: var(--secondary); font-weight: 600; }
 .ne-cm-host .ne-cm-link { color: var(--secondary); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--secondary) 40%, transparent); cursor: pointer; }
 .ne-cm-host .cm-tooltip-autocomplete { font-size: .82rem; }
 .ne-cm-host .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--secondary); color: var(--light); }

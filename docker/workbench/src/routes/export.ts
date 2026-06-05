@@ -65,6 +65,12 @@ exporter.get("/", async (c) => {
   }
 
   const spec = FORMATS[fmt];
+  // pandoc doesn't understand Obsidian `[[wikilinks]]` and would print them
+  // literally. Convert to plain readable text: `[[target|alias]]` → alias,
+  // `[[target]]` → the target's basename. (md export keeps them verbatim.)
+  const pandocMd = md
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
+    .replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
   const noteDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
   // Resolve relative images from both the vault root and the note's folder
   // (absolute paths — pandoc's cwd is the scratch tmp dir, not the vault).
@@ -76,7 +82,7 @@ exporter.get("/", async (c) => {
   try {
     const args = [
       "-f",
-      "markdown+yaml_metadata_block",
+      "markdown+yaml_metadata_block+strikeout",
       "-t",
       spec.to,
       "--resource-path",
@@ -93,7 +99,7 @@ exporter.get("/", async (c) => {
       stderr: "piped",
     }).spawn();
     const w = child.stdin.getWriter();
-    await w.write(new TextEncoder().encode(md));
+    await w.write(new TextEncoder().encode(pandocMd));
     await w.close();
     const { code, stderr } = await child.output();
     if (code !== 0) {

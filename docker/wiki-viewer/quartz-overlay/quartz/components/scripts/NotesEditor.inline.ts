@@ -143,6 +143,29 @@ function buildDecorations(view: EditorView) {
   const isActive = (pos: number) => active.has(state.doc.lineAt(pos).number)
   const out: any[] = []
 
+  // Frontmatter block (leading ---/--- fences): style it as a muted, code-ish
+  // "properties" region so editing it inline reads as metadata, not body text.
+  if (state.doc.lines >= 2 && state.doc.line(1).text.trim() === "---") {
+    let close = 0
+    for (let n = 2; n <= state.doc.lines; n++) {
+      if (state.doc.line(n).text.trim() === "---") {
+        close = n
+        break
+      }
+    }
+    if (close > 1) {
+      for (let n = 1; n <= close; n++) {
+        const line = state.doc.line(n)
+        out.push(Decoration.line({ class: n === 1 || n === close ? "ne-cm-fm-fence" : "ne-cm-fm" }).range(line.from))
+        // bold the `key:` of a property line (when the caret isn't on it)
+        if (n !== 1 && n !== close && !active.has(n)) {
+          const ci = line.text.indexOf(":")
+          if (ci > 0) out.push(Decoration.mark({ class: "ne-cm-fm-key" }).range(line.from, line.from + ci))
+        }
+      }
+    }
+  }
+
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
       from,
@@ -509,6 +532,7 @@ document.addEventListener("nav", () => {
   // CM editor is open (the injected reload client checks window.__neEditing —
   // patched in the viewer Dockerfile), so autosave persists without flashing.
   ;(window as any).__neEditing = false
+  hideLinkPopover() // never let an in-editor popover survive a navigation
   const root = document.querySelector("[data-notes-root]") as HTMLElement | null
   if (!root) return
 
@@ -572,6 +596,7 @@ document.addEventListener("nav", () => {
       }
       setStatus("saving…")
       await save(view.state.doc.toString())
+      hideLinkPopover()
       window.removeEventListener("beforeunload", flush)
       ;(window as any).__neEditing = false
       // Reload once to render the saved note (hot-reloads were suppressed while
@@ -589,8 +614,6 @@ document.addEventListener("nav", () => {
       } catch {
         /* new/missing — start blank */
       }
-      const split = splitFrontmatter(raw)
-      fm = split.fm
       host = document.createElement("div")
       host.className = "ne-cm-host"
       if (article) {
@@ -600,95 +623,12 @@ document.addEventListener("nav", () => {
         root.appendChild(host)
       }
 
-      const scheduleSave = () => {
-        setStatus("editing…")
-        if (timer) clearTimeout(timer)
-        timer = setTimeout(() => save(view ? view.state.doc.toString() : ""), 1500)
-      }
-
-      // ── editable frontmatter "properties" (collapsible key/value rows) ──
-      const propRows: { ki: HTMLInputElement; vi: HTMLInputElement }[] = []
-      const propsBox = document.createElement("div")
-      propsBox.className = "ne-props"
-      const propsToggle = document.createElement("button")
-      propsToggle.type = "button"
-      propsToggle.className = "ne-props-toggle"
-      const propsBody = document.createElement("div")
-      propsBody.className = "ne-props-body"
-      let propsCollapsed = true
-      try {
-        propsCollapsed = localStorage.getItem("ne-props-collapsed") !== "0"
-      } catch {}
-      const syncToggle = () => {
-        propsBody.hidden = propsCollapsed
-        propsToggle.textContent = (propsCollapsed ? "▸" : "▾") + " Properties"
-      }
-      propsToggle.addEventListener("click", () => {
-        propsCollapsed = !propsCollapsed
-        try {
-          localStorage.setItem("ne-props-collapsed", propsCollapsed ? "1" : "0")
-        } catch {}
-        syncToggle()
-      })
-      const addBtn = document.createElement("button")
-      addBtn.type = "button"
-      addBtn.className = "ne-prop-add"
-      addBtn.textContent = "+ add property"
-      propsBody.appendChild(addBtn)
-      const addRow = (k: string, v: string) => {
-        const row = document.createElement("div")
-        row.className = "ne-prop-row"
-        const ki = document.createElement("input")
-        ki.className = "ne-prop-key"
-        ki.value = k
-        ki.placeholder = "key"
-        const vi = document.createElement("input")
-        vi.className = "ne-prop-val"
-        vi.value = v
-        vi.placeholder = "value"
-        const rm = document.createElement("button")
-        rm.type = "button"
-        rm.className = "ne-prop-rm"
-        rm.textContent = "×"
-        rm.title = "remove property"
-        const rec = { ki, vi }
-        ki.addEventListener("input", scheduleSave)
-        vi.addEventListener("input", scheduleSave)
-        rm.addEventListener("click", () => {
-          row.remove()
-          const i = propRows.indexOf(rec)
-          if (i >= 0) propRows.splice(i, 1)
-          scheduleSave()
-        })
-        row.appendChild(ki)
-        row.appendChild(vi)
-        row.appendChild(rm)
-        propsBody.insertBefore(row, addBtn)
-        propRows.push(rec)
-      }
-      addBtn.addEventListener("click", () => addRow("", ""))
-      const fmInner = fm.replace(/^---\r?\n/, "").replace(/\r?\n?---\r?\n?$/, "")
-      fmInner.split(/\r?\n/).forEach((line) => {
-        if (!line.trim()) return
-        const idx = line.indexOf(":")
-        if (idx === -1) addRow(line.trim(), "")
-        else addRow(line.slice(0, idx).trim(), line.slice(idx + 1).trim())
-      })
-      syncToggle()
-      propsBox.appendChild(propsToggle)
-      propsBox.appendChild(propsBody)
-      host.appendChild(propsBox)
-
-      const serializeProps = () => {
-        const valid = propRows.filter((r) => r.ki.value.trim())
-        if (!valid.length) return ""
-        return "---\n" + valid.map((r) => r.ki.value.trim() + ": " + r.vi.value).join("\n") + "\n---\n\n"
-      }
-      composeContent = (b) => serializeProps() + b
-
-      // Strip leading blank lines (they live between the fm block and the body)
-      // so the editor starts at the content; serializeProps re-adds the gap.
-      view = makeEditor(host, split.body.replace(/^\n+/, ""), (body) => {
+      // Frontmatter is edited INLINE in the editor (operator preference): the
+      // whole file — including the `---` block — IS the document, so save writes
+      // it back verbatim (composeContent stays identity). The fm block renders as
+      // a styled, muted region via the live-preview decorations, with the actual
+      // current values shown (edit tags etc. in place; nothing is defaulted).
+      view = makeEditor(host, raw, (body) => {
         setStatus("editing…")
         if (timer) clearTimeout(timer)
         timer = setTimeout(() => save(body), 1500)
