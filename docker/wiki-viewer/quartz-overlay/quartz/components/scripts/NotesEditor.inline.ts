@@ -17,11 +17,11 @@ import {
   WidgetType,
   placeholder,
 } from "@codemirror/view"
-import { EditorState } from "@codemirror/state"
+import { EditorState, EditorSelection } from "@codemirror/state"
 import { history, historyKeymap, defaultKeymap, indentWithTab } from "@codemirror/commands"
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown"
 import { syntaxTree, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language"
-import { autocompletion } from "@codemirror/autocomplete"
+import { autocompletion, startCompletion } from "@codemirror/autocomplete"
 
 // ── [[ ]] link candidates (every existing page + notebook, from Quartz) ──────
 let _cands: { slug: string; title: string }[] | null = null
@@ -162,7 +162,7 @@ async function wikiComplete(context: any) {
 }
 
 const editorTheme = EditorView.theme({
-  "&": { backgroundColor: "transparent", color: "inherit", fontSize: "1rem" },
+  "&": { backgroundColor: "transparent", color: "inherit", fontSize: "1rem", position: "relative" },
   "&.cm-focused": { outline: "none" },
   ".cm-content": {
     fontFamily: "inherit",
@@ -173,6 +173,165 @@ const editorTheme = EditorView.theme({
   ".cm-line": { padding: "0" },
   ".cm-cursor": { borderLeftColor: "var(--secondary)" },
 })
+
+// ── QOL: select text + type a pair char ( * _ ` ~ ( [ { " ' ) → wrap it ───────
+const WRAP: Record<string, string> = {
+  "*": "*", _: "_", "`": "`", "~": "~", "(": ")", "[": "]", "{": "}", '"': '"', "'": "'",
+}
+const smartWrap = EditorView.inputHandler.of((view, from, to, text) => {
+  if (from === to) return false
+  const close = WRAP[text]
+  if (!close) return false
+  const sel = view.state.sliceDoc(from, to)
+  view.dispatch({
+    changes: { from, to, insert: text + sel + close },
+    selection: EditorSelection.range(from + text.length, from + text.length + sel.length),
+    userEvent: "input.type.wrap",
+  })
+  return true
+})
+
+// ── cursor-following, collapsible formatting toolbar ─────────────────────────
+function wrapSel(view: EditorView, open: string, close?: string) {
+  const c = close == null ? open : close
+  view.dispatch(
+    view.state.changeByRange((range) => {
+      const sel = view.state.sliceDoc(range.from, range.to)
+      const insert = open + sel + c
+      return {
+        changes: { from: range.from, to: range.to, insert },
+        range: EditorSelection.range(range.from + open.length, range.from + open.length + sel.length),
+      }
+    }),
+  )
+  view.focus()
+}
+function toggleLinePrefix(view: EditorView, prefix: string) {
+  const state = view.state
+  const changes: any[] = []
+  const seen = new Set<number>()
+  for (const r of state.selection.ranges) {
+    const a = state.doc.lineAt(r.from).number
+    const b = state.doc.lineAt(r.to).number
+    for (let n = a; n <= b; n++) {
+      if (seen.has(n)) continue
+      seen.add(n)
+      const line = state.doc.line(n)
+      if (line.text.startsWith(prefix)) changes.push({ from: line.from, to: line.from + prefix.length, insert: "" })
+      else changes.push({ from: line.from, insert: prefix })
+    }
+  }
+  view.dispatch({ changes })
+  view.focus()
+}
+function insertLink(view: EditorView) {
+  view.dispatch(
+    view.state.changeByRange((range) => {
+      const sel = view.state.sliceDoc(range.from, range.to)
+      const insert = "[" + sel + "]()"
+      return { changes: { from: range.from, to: range.to, insert }, range: EditorSelection.cursor(range.from + insert.length - 1) }
+    }),
+  )
+  view.focus()
+}
+function insertWiki(view: EditorView) {
+  const pos = view.state.selection.main.head
+  view.dispatch({ changes: { from: pos, insert: "[[]]" }, selection: EditorSelection.cursor(pos + 2) })
+  view.focus()
+  startCompletion(view)
+}
+const TB_BTNS = [
+  { t: "Bold", l: "B", run: (v: EditorView) => wrapSel(v, "**") },
+  { t: "Italic", l: "I", run: (v: EditorView) => wrapSel(v, "*") },
+  { t: "Inline code", l: "</>", run: (v: EditorView) => wrapSel(v, "`") },
+  { t: "Heading", l: "H", run: (v: EditorView) => toggleLinePrefix(v, "# ") },
+  { t: "Quote", l: "❝", run: (v: EditorView) => toggleLinePrefix(v, "> ") },
+  { t: "Bulleted list", l: "•", run: (v: EditorView) => toggleLinePrefix(v, "- ") },
+  { t: "Numbered list", l: "1.", run: (v: EditorView) => toggleLinePrefix(v, "1. ") },
+  { t: "Link", l: "🔗", run: (v: EditorView) => insertLink(v) },
+  { t: "Wikilink", l: "[[", run: (v: EditorView) => insertWiki(v) },
+]
+const cursorToolbar = ViewPlugin.fromClass(
+  class {
+    view: EditorView
+    bar: HTMLElement
+    host: HTMLElement
+    collapsed = false
+    constructor(view: EditorView) {
+      this.view = view
+      try {
+        this.collapsed = localStorage.getItem("ne-tb-collapsed") === "1"
+      } catch {}
+      // Anchor to the host container (.ne-cm-host, position:relative) rather than
+      // CodeMirror's managed .cm-editor — absolute positioning is reliable there.
+      this.host = (view.dom.parentElement as HTMLElement) || view.dom
+      this.bar = document.createElement("div")
+      this.bar.className = "ne-tb"
+      this.render()
+      this.host.appendChild(this.bar)
+      requestAnimationFrame(() => this.place())
+    }
+    render() {
+      this.bar.innerHTML = ""
+      const toggle = document.createElement("button")
+      toggle.className = "ne-tb-toggle"
+      toggle.textContent = this.collapsed ? "✎" : "⌄"
+      toggle.title = this.collapsed ? "show formatting tools" : "collapse"
+      toggle.addEventListener("mousedown", (e) => {
+        e.preventDefault()
+        this.collapsed = !this.collapsed
+        try {
+          localStorage.setItem("ne-tb-collapsed", this.collapsed ? "1" : "0")
+        } catch {}
+        this.render()
+        this.place()
+      })
+      this.bar.appendChild(toggle)
+      if (!this.collapsed) {
+        for (const b of TB_BTNS) {
+          const btn = document.createElement("button")
+          btn.className = "ne-tb-btn"
+          btn.textContent = b.l
+          btn.title = b.t
+          btn.addEventListener("mousedown", (e) => {
+            e.preventDefault()
+            b.run(this.view)
+          })
+          this.bar.appendChild(btn)
+        }
+      }
+    }
+    place() {
+      const view = this.view
+      if (!view.hasFocus) {
+        this.bar.style.display = "none"
+        return
+      }
+      const head = view.state.selection.main.head
+      const coords = view.coordsAtPos(head)
+      if (!coords) {
+        this.bar.style.display = "none"
+        return
+      }
+      this.bar.style.display = "inline-flex"
+      const box = this.host.getBoundingClientRect()
+      let left = coords.left - box.left
+      const maxLeft = this.host.clientWidth - this.bar.offsetWidth - 6
+      if (left > maxLeft) left = maxLeft
+      if (left < 0) left = 0
+      let top = coords.top - box.top - this.bar.offsetHeight - 8
+      if (top < 0) top = coords.bottom - box.top + 8 // flip below the caret if no room above
+      this.bar.style.left = left + "px"
+      this.bar.style.top = top + "px"
+    }
+    update(u: any) {
+      if (u.selectionSet || u.geometryChanged || u.docChanged || u.focusChanged) this.place()
+    }
+    destroy() {
+      this.bar.remove()
+    }
+  },
+)
 
 function makeEditor(parent: HTMLElement, doc: string, onChange: (s: string) => void) {
   return new EditorView({
@@ -185,8 +344,10 @@ function makeEditor(parent: HTMLElement, doc: string, onChange: (s: string) => v
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(defaultHighlightStyle),
       livePreview,
+      smartWrap,
+      cursorToolbar,
       autocompletion({ override: [wikiComplete] }),
-      placeholder("Write in markdown — type [[ to link to another page…"),
+      placeholder("Write in markdown — type [[ to link, or select text and hit * ` _ to wrap…"),
       editorTheme,
       EditorView.updateListener.of((u) => {
         if (u.docChanged) onChange(u.state.doc.toString())
@@ -369,12 +530,13 @@ document.addEventListener("nav", () => {
 
     const create = async () => {
       const title = input.value.trim()
-      if (!title || !nbSlug) {
+      if (!title) {
         input.hidden = true
         return
       }
       const fileSlug = slugify(title) || "note"
-      const path = "notebooks/" + nbSlug + "/" + fileSlug + ".md"
+      // Notebook context → notes/notebooks/<nb>/…; otherwise a flat notes/… note.
+      const path = (nbSlug ? "notebooks/" + nbSlug + "/" : "") + fileSlug + ".md"
       const content =
         ["---", "title: " + JSON.stringify(title), "source: user_note", "notebook: " + JSON.stringify(nbName), "tags: [note]", "---", "", ""].join("\n")
       launch.textContent = "creating…"

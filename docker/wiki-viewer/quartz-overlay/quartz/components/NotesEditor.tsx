@@ -12,23 +12,45 @@ import script from "./scripts/NotesEditor.inline"
 
 const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponentProps) => {
   const fm = (fileData?.frontmatter ?? {}) as Record<string, unknown>
-  const showLauncher = fm.type === "notebook"
-  // A user note is ANY page from the author-owned notes/ layer (notes/notebooks/
-  // <nb>/x.md AND a flat notes/x.md). The page's own slug IS its vault path; the
-  // API path is relative to notes/, so strip the leading "notes/". The Changes
-  // log is machine-written, so it's excluded.
   const slug = String(fileData?.slug ?? "")
-  const isUserNote = slug.startsWith("notes/") && !slug.startsWith("notes/Changes")
+  // Quartz folder/list pages have a slug ending in "/index" (or the bare home
+  // "index"); leaf pages never do. That cleanly separates a folder listing from
+  // an actual note file at the same path.
+  const isFolderPage = slug === "index" || slug.endsWith("/index")
+  const folder = slug.replace(/\/index$/, "")
+  const fParts = folder.split("/")
+
+  // A user note is ANY leaf page from the author-owned notes/ layer
+  // (notes/notebooks/<nb>/x.md AND a flat notes/x.md), excluding folder pages
+  // and the machine-written Changes log. The slug IS the vault path; the API
+  // path is relative to notes/, so strip the leading "notes/".
+  const isUserNote = !isFolderPage && slug.startsWith("notes/") && !slug.startsWith("notes/Changes")
   const noteApiPath = slug.replace(/^notes\//, "") + ".md"
+
+  // "Write a note" is offered ONLY in the author-owned `notes/` tree — never
+  // under `content/` (the knowledge wiki), where hand-authoring would bypass the
+  // intentional generation design. A notebook folder (notes/notebooks/<nb>/)
+  // targets that notebook; notes/ root makes a flat note.
+  let canCreate = false
+  let createNbSlug = ""
+  let createNbName = ""
+  if (isFolderPage && (folder === "notes" || folder.startsWith("notes/"))) {
+    canCreate = true
+    if (fParts[1] === "notebooks" && fParts[2]) {
+      createNbSlug = fParts[2]
+      createNbName = fParts[2]
+    }
+  }
+
   return (
     <div
       class={`notes-editor-root ${displayClass ?? ""}`}
       data-notes-root
       data-notebook-id={String(fm.thread_id ?? "")}
-      data-notebook-slug={String(fm.slug ?? "")}
-      data-notebook-name={String(fm.title ?? "")}
+      data-notebook-slug={createNbSlug}
+      data-notebook-name={createNbName}
     >
-      {showLauncher ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
+      {canCreate ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
       {isUserNote ? (
         <button class="ne-launch ne-edit" data-ne-edit data-note-path={noteApiPath} data-note-slug={slug}>
           ✎ Edit this note
@@ -52,7 +74,7 @@ NotesEditor.css = `
 .ne-toolbar .ne-status { font-size: .78rem; color: var(--gray); }
 
 /* the CodeMirror host — sized + typed like the article it replaces */
-.ne-cm-host { margin: 0 0 1rem; }
+.ne-cm-host { margin: 0 0 1rem; position: relative; }
 .ne-cm-host .cm-editor { min-height: 60vh; }
 .ne-cm-host .cm-scroller { font-family: var(--bodyFont); line-height: 1.6; overflow: visible; }
 .ne-cm-host .cm-content { padding: 0; }
@@ -71,6 +93,14 @@ NotesEditor.css = `
 .ne-cm-host .cm-tooltip-autocomplete { font-size: .82rem; }
 .ne-cm-host .cm-tooltip-autocomplete ul li[aria-selected] { background: var(--secondary); color: var(--light); }
 .ne-cm-host .cm-completionDetail { color: var(--gray); font-style: normal; font-family: var(--codeFont); font-size: .9em; margin-left: .5em; }
+
+/* cursor-following collapsible formatting toolbar */
+.ne-cm-host .ne-tb { position: absolute; z-index: 6; display: inline-flex; align-items: center; gap: 1px; padding: 2px; background: var(--light); border: 1px solid var(--lightgray); border-radius: 7px; box-shadow: 0 3px 12px rgba(0,0,0,.18); }
+.ne-cm-host .ne-tb-toggle, .ne-cm-host .ne-tb-btn { font-family: var(--bodyFont); font-size: .8rem; line-height: 1; min-width: 1.7em; height: 1.7em; padding: 0 .35em; border: 0; background: transparent; color: var(--darkgray); border-radius: 5px; cursor: pointer; }
+.ne-cm-host .ne-tb-toggle { color: var(--gray); }
+.ne-cm-host .ne-tb-btn:hover, .ne-cm-host .ne-tb-toggle:hover { background: var(--lightgray); color: var(--dark); }
+.ne-cm-host .ne-tb-btn:nth-child(2) { font-weight: 700; }
+.ne-cm-host .ne-tb-btn:nth-child(3) { font-style: italic; }
 `
 
 export default (() => NotesEditor) satisfies QuartzComponentConstructor

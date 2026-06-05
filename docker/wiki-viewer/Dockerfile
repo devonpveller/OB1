@@ -89,6 +89,15 @@ RUN set -e; \
   sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.GroundingBadge(),\n\1Component.SourceRetractor(),\n\1Component.UploadModal(),\n\1Component.NotesEditor(),#' "$L"; \
   grep -q 'Component.NotesEditor(),' "$L"
 
+# Also mount NotesEditor on the LIST/FOLDER page layout (its beforeBody is a
+# single-line array), so "✎ Write a note" is reachable from every folder level,
+# not just the notebook hub. grep-asserted anchor.
+RUN set -e; \
+  L=/quartz/quartz.layout.ts; \
+  grep -q 'Component.ContentMeta()]' "$L"; \
+  sed -i 's#Component.ContentMeta()]#Component.ContentMeta(), Component.NotesEditor()]#' "$L"; \
+  grep -q 'Component.ContentMeta(), Component.NotesEditor()]' "$L"
+
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
