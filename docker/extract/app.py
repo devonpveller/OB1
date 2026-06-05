@@ -26,6 +26,8 @@ from __future__ import annotations
 import base64
 import io
 import os
+import subprocess
+import tempfile
 from typing import Callable
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -103,6 +105,39 @@ def extract_docx(data: bytes, filename: str) -> dict:
     return result("\n\n".join(lines), title, pages=["\n\n".join(lines)])
 
 
+# Legacy OLE binary formats (.doc / .ppt) — python-docx/-pptx only read OOXML.
+# catdoc/catppt parse the binary DIRECTLY without executing macros, so they keep
+# the sandbox posture (no LibreOffice/headless converter). List-arg subprocess
+# (no shell) over a tmpfile in the tmpfs /tmp.
+def _convert(cmd: list[str], data: bytes, suffix: str) -> str:
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, dir="/tmp") as f:
+        f.write(data)
+        path = f.name
+    try:
+        out = subprocess.run(cmd + [path], capture_output=True, timeout=120)
+        if out.returncode != 0:
+            msg = out.stderr.decode("utf-8", "replace")[:200] or "converter failed"
+            raise RuntimeError(msg)
+        return out.stdout.decode("utf-8", "replace")
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def extract_doc(data: bytes, filename: str) -> dict:
+    text = _convert(["catdoc", "-w"], data, ".doc")  # -w: no hard line wrapping
+    title = os.path.splitext(os.path.basename(filename))[0]
+    return result(text, title, pages=[text])
+
+
+def extract_ppt(data: bytes, filename: str) -> dict:
+    text = _convert(["catppt"], data, ".ppt")
+    title = os.path.splitext(os.path.basename(filename))[0]
+    return result(text, title, pages=[text])
+
+
 def extract_pptx(data: bytes, filename: str) -> dict:
     from pptx import Presentation  # python-pptx
 
@@ -161,8 +196,8 @@ def extract_audio(data: bytes, filename: str) -> dict:
 REGISTRY: dict[str, Callable[[bytes, str], dict]] = {
     "txt": extract_text, "md": extract_text, "markdown": extract_text,
     "pdf": extract_pdf,
-    "docx": extract_docx,
-    "pptx": extract_pptx,
+    "docx": extract_docx, "doc": extract_doc,
+    "pptx": extract_pptx, "ppt": extract_ppt,
     "png": extract_image, "jpg": extract_image, "jpeg": extract_image,
     "gif": extract_image, "webp": extract_image, "bmp": extract_image, "tiff": extract_image,
     "mp3": extract_audio, "wav": extract_audio, "m4a": extract_audio,
@@ -172,6 +207,7 @@ REGISTRY: dict[str, Callable[[bytes, str], dict]] = {
 # content_type the resulting `sources` row should carry per extension group.
 CONTENT_TYPE = {
     "pdf": "pdf", "docx": "docx", "pptx": "pptx",
+    "doc": "docx", "ppt": "pptx",  # legacy → same document kind (source_format keeps .doc/.ppt)
     "txt": "txt", "md": "md", "markdown": "md",
     "png": "image", "jpg": "image", "jpeg": "image", "gif": "image",
     "webp": "image", "bmp": "image", "tiff": "image",

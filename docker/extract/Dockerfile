@@ -3,10 +3,11 @@
 # tesseract binary is the only system dep beyond the Python wheels.
 FROM python:3.12-slim
 
-# tesseract-ocr for image OCR; nothing else (keep the untrusted-parsing
-# surface minimal — no LibreOffice/headless converters that exec macros).
+# tesseract-ocr for image OCR; catdoc for legacy .doc/.ppt (catdoc + catppt) —
+# both parse the OLE binary directly, NO macro execution (unlike LibreOffice),
+# so the untrusted-parsing surface stays minimal.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends tesseract-ocr \
+  && apt-get install -y --no-install-recommends tesseract-ocr catdoc \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

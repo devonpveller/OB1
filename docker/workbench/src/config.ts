@@ -31,6 +31,9 @@ export const config = {
     key: Deno.env.get("EMBEDDING_API_KEY") || "not-needed",
     model: Deno.env.get("EMBEDDING_MODEL") || "bge-m3",
     dimension: parseInt(Deno.env.get("EMBEDDING_DIMENSION") || "1024", 10),
+    // Starting char budget per embedding call; embed() halves on a
+    // physical-batch overflow until it fits (see util/embed.ts).
+    maxChars: parseInt(Deno.env.get("EMBEDDING_MAX_CHARS") || "4000", 10),
   },
 
   // openbrain-extract sidecar (P5).

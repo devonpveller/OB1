@@ -12,7 +12,12 @@ COPY src ./src
 # `|| true` keeps the build green; runtime resolves it from the mount.
 RUN deno cache src/main.ts || true
 
-USER deno
+# Runs as root: the workbench WRITES the shared vault (notes, the Changes log,
+# and image assets under /wiki/assets), which the root-running wiki-service
+# owns. A non-root user can't write that root-owned volume. The workbench does
+# not parse untrusted files (that's the sandboxed openbrain-extract sidecar), so
+# root here is the low-risk way to share the vault. It is internal-only (behind
+# Caddy + Authelia, never host-published except the loopback debug port).
 
 EXPOSE 8000
 

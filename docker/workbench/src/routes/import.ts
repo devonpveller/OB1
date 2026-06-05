@@ -56,7 +56,17 @@ async function runPipeline(
       metadata: { source_format: ex.metadata?.source_format },
     });
     await repo.updateJob(jobId, { status: "linking", source_id: sourceId });
-    if (ex.images?.length) await repo.attachImages(sourceId, ex.markdown, ex.images);
+    // Image attach runs POST-commit (assets are filesystem, not in the DB tx).
+    // The source + chunks + links are already durable, so an asset-write hiccup
+    // (e.g. volume perms) must NOT fail the whole import — log and continue. The
+    // text source stays fully usable; only inline images are missing.
+    if (ex.images?.length) {
+      try {
+        await repo.attachImages(sourceId, ex.markdown, ex.images);
+      } catch (imgErr) {
+        console.error(`[workbench] image attach failed for ${sourceId} (non-fatal):`, (imgErr as Error).message);
+      }
+    }
     // committed stays false until the compile that regenerates the grounded
     // page completes (the wiki-service flips it); the badge reads that.
     await repo.updateJob(jobId, { status: "done" });

@@ -1,0 +1,106 @@
+# Throwaway PREVIEW stack — a browsable, isolated instance to drive the
+# workbench + extract by hand before merging. Fresh volumes (the init-*.sql run
+# automatically → full schema), its own bridge net, no prod contact. Open
+# http://127.0.0.1:8099 after `up`.
+#
+#   docker compose -f OB1/docker/docker-compose.preview.yml up -d --build
+#   ...try it at http://127.0.0.1:8099 ...
+#   docker compose -f OB1/docker/docker-compose.preview.yml down -v   # wipes it
+#
+# Needs the main stack's embedding model reachable (import embeds via bge-m3 on
+# the external ai-stack_llm-net). Everything else is self-contained.
+name: ob-preview
+
+services:
+  preview-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: openbrain
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: preview
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro
+      - ./init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro
+      - ./init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro
+      - ./init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro
+      - ./init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro
+      - ./init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro
+      - ./init-threads-slug.sql:/docker-entrypoint-initdb.d/72-init-threads-slug.sql:ro
+      - ./init-source-revisions.sql:/docker-entrypoint-initdb.d/80-init-source-revisions.sql:ro
+      - ./init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro
+      - ./init-content-types.sql:/docker-entrypoint-initdb.d/84-init-content-types.sql:ro
+      - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro
+      - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/88-init-import-jobs.sql:ro
+    networks: [pnet]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  preview-extract:
+    build:
+      context: ./extract
+    image: openbrain-extract:local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [pnet]
+
+  preview-workbench:
+    build:
+      context: ./workbench
+    image: openbrain-workbench:local
+    depends_on:
+      preview-db:
+        condition: service_healthy
+    environment:
+      PORT: "8000"
+      WORKBENCH_KEY: preview-key
+      DB_HOST: preview-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: preview
+      # No PostgREST in the preview (only /health probes it → reports rest:false,
+      # harmless; every write/read path uses the direct pg pool).
+      OPEN_BRAIN_URL: http://preview-db
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSION: "1024"
+      EXTRACT_URL: http://preview-extract:8000
+      WIKI_GIT_DIR: /wiki
+      WIKI_OUT_DIR: /wiki/content
+      WIKI_ASSETS_DIR: /wiki/assets
+    volumes:
+      - preview-wiki:/wiki
+      # The shared canonical slug module is imported at runtime via
+      # file:///recipes/_shared/slug.mjs — same bind-mount the base stack uses.
+      - ../recipes:/recipes:ro
+    networks:
+      - pnet
+      - llm-net
+
+  preview-caddy:
+    image: caddy:2-alpine
+    depends_on: [preview-workbench]
+    environment:
+      WORKBENCH_KEY: preview-key
+    volumes:
+      - ./preview/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./preview/site:/srv:ro
+    ports:
+      - "127.0.0.1:8099:8080"
+    networks: [pnet]
+
+volumes:
+  preview-wiki:
+
+networks:
+  pnet:
+    driver: bridge
+  # The main stack's embedding network (for bge-m3 during import).
+  llm-net:
+    external: true
+    name: ai-stack_llm-net

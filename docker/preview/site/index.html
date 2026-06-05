@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quartz-4 Workbench — Preview Test Harness</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1rem; margin-top: 1.75rem; border-bottom: 1px solid #ddd; padding-bottom: .25rem; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: .75rem 0; }
+  input, button, textarea { font: inherit; padding: .4rem .5rem; }
+  button { cursor: pointer; background: #2563eb; color: #fff; border: 0; border-radius: 6px; }
+  button.alt { background: #555; } button.danger { background: #c0392b; }
+  pre { background: #f6f8fa; padding: .6rem; border-radius: 6px; overflow: auto; font-size: 13px; max-height: 260px; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .drop { border: 2px dashed #bbb; border-radius: 8px; padding: 1.5rem; text-align: center; cursor: pointer; }
+  .drop.over { border-color: #2563eb; background: #eff6ff; }
+  small { color: #666; }
+</style>
+</head>
+<body>
+<h1>Quartz-4 Workbench — Preview Test Harness</h1>
+<p><small>Throwaway instance (fresh DB volume, isolated project). Exercises the real workbench API + extract sidecar. Not the styled Quartz UI — this is a bare harness to drive the endpoints by hand.</small></p>
+
+<h2>1. Health</h2>
+<div class="card">
+  <button onclick="health()">Check /workbench/health</button>
+  <pre id="health-out">—</pre>
+</div>
+
+<h2>2. Notebooks (P2)</h2>
+<div class="card">
+  <div class="row">
+    <input id="nb-name" placeholder="notebook name e.g. Project Aurora" />
+    <button onclick="createNb()">Create notebook</button>
+    <button class="alt" onclick="listNb()">List</button>
+  </div>
+  <pre id="nb-out">—</pre>
+</div>
+
+<h2>3. Import a source (P5) — upload a doc/image</h2>
+<div class="card">
+  <label class="drop" id="drop">
+    <input type="file" id="file" hidden />
+    Drop a PDF / DOCX / PPTX / PNG / TXT here, or click to pick
+  </label>
+  <div class="row" style="margin-top:.5rem">
+    <input id="imp-nb" placeholder="link to notebook id (optional)" size="40" />
+    <input id="imp-ent" placeholder="ground to entity id(s), comma-sep (optional)" size="30" />
+  </div>
+  <pre id="imp-out">—</pre>
+</div>
+
+<h2>4. Grounding state (P6)</h2>
+<div class="card">
+  <div class="row">
+    <input id="gr-ent" placeholder="entity id (integer)" />
+    <button onclick="grounding()">Get grounding state</button>
+  </div>
+  <pre id="gr-out">—</pre>
+</div>
+
+<h2>5. Source lifecycle (P4)</h2>
+<div class="card">
+  <div class="row">
+    <input id="src-id" placeholder="source id (uuid, e.g. from an import above)" size="40" />
+    <button class="alt" onclick="srcGet()">Get + gravity</button>
+    <button class="danger" onclick="srcRetract()">Retract (staged)</button>
+    <button onclick="srcRestore()">Restore</button>
+  </div>
+  <pre id="src-out">—</pre>
+</div>
+
+<script>
+const j = (id, v) => document.getElementById(id).textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2);
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  let body; try { body = await r.json(); } catch { body = await r.text(); }
+  return { status: r.status, body };
+};
+async function health() { j("health-out", await api("/workbench/health")); }
+async function createNb() {
+  const name = document.getElementById("nb-name").value.trim();
+  j("nb-out", await api("/workbench/notebooks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) }));
+}
+async function listNb() { j("nb-out", await api("/workbench/notebooks")); }
+async function grounding() {
+  const id = document.getElementById("gr-ent").value.trim();
+  j("gr-out", await api("/workbench/grounding/" + encodeURIComponent(id)));
+}
+async function srcGet() { j("src-out", await api("/workbench/sources/" + encodeURIComponent(document.getElementById("src-id").value.trim()))); }
+async function srcRetract() {
+  const id = document.getElementById("src-id").value.trim();
+  j("src-out", await api("/workbench/sources/" + encodeURIComponent(id) + "/retract", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scope: "global" }) }));
+}
+async function srcRestore() {
+  const id = document.getElementById("src-id").value.trim();
+  j("src-out", await api("/workbench/sources/" + encodeURIComponent(id) + "/restore", { method: "POST" }));
+}
+// Import: upload + poll the job
+const drop = document.getElementById("drop"), fileInput = document.getElementById("file");
+fileInput.addEventListener("change", e => upload(e.target.files[0]));
+["dragover","dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove("over")));
+drop.addEventListener("drop", e => { e.preventDefault(); upload(e.dataTransfer.files[0]); });
+async function upload(file) {
+  if (!file) return;
+  const fd = new FormData(); fd.append("file", file);
+  const nb = document.getElementById("imp-nb").value.trim(); if (nb) fd.append("target_notebook", nb);
+  const ent = document.getElementById("imp-ent").value.trim(); if (ent) fd.append("target_entity_ids", ent);
+  j("imp-out", "uploading " + file.name + " …");
+  const { status, body } = await api("/workbench/import", { method: "POST", body: fd });
+  if (status !== 202) { j("imp-out", { status, body }); return; }
+  const jobId = body.job_id;
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const { body: jb } = await api("/workbench/jobs/" + jobId);
+    j("imp-out", jb);
+    if (jb.job && (jb.job.status === "done" || jb.job.status === "failed")) {
+      // Auto-fill the source id into the P4 section so you can test it in one click.
+      if (jb.job.status === "done" && jb.job.source_id) {
+        document.getElementById("src-id").value = jb.job.source_id;
+        document.getElementById("imp-out").textContent += "\n\n→ source_id copied into section 5 (Source lifecycle).";
+      }
+      return;
+    }
+  }
+}
+</script>
+</body>
+</html>

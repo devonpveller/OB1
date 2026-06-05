@@ -2,10 +2,24 @@
 // restore, per-notebook unlink, and operator-confirmed purge. Retract +
 // (P6) grounding write a Changes-log entry (G11).
 import { Hono } from "hono";
+import type { Context, Next } from "hono";
 import * as repo from "../repositories/sources.ts";
 import { logChange } from "../util/changeslog.ts";
 
 export const sources = new Hono();
+
+// Reject a non-UUID :id with a clean 400 up front, instead of letting Postgres
+// 500 on "invalid input syntax for type uuid" (e.g. an entity id typed into a
+// source field). Guards every /:id and /:id/* route.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function requireUuid(c: Context, next: Next) {
+  if (!UUID_RE.test(c.req.param("id") ?? "")) {
+    return c.json({ error: "not a valid source id (expected a UUID)" }, 400);
+  }
+  await next();
+}
+sources.use("/:id", requireUuid);
+sources.use("/:id/*", requireUuid);
 
 // GET /workbench/sources/:id — read view (+ live staged-retract marker fields).
 sources.get("/:id", async (c) => {

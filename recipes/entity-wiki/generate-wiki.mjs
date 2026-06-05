@@ -37,6 +37,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 // Canonical slug algorithm — shared single source of truth (G5, plan §14.1).
 // `slugify` here keeps the historical (name, entityType) → "<type>-<base>"
 // signature this file already used; it is now the canonical impl, not a copy.
@@ -823,7 +824,7 @@ function linkifyEntities(markdown, related) {
 // The ids actually turned into links are accumulated into `run` so the
 // caller emits exactly the cited leaves and the sweep removes the rest
 // (P1.1/1.5). Idempotent and conservative: fenced/inline code is protected.
-function rewriteCitations(markdown, validThoughtIds, sourceTokenMap, run) {
+export function rewriteCitations(markdown, validThoughtIds, sourceTokenMap, run) {
   const protectedRe = /(```[\s\S]*?```|`[^`]*`)/g;
   const parts = String(markdown).split(protectedRe);
   for (let i = 0; i < parts.length; i++) {
@@ -1562,7 +1563,12 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("[wiki] FAILED:", err.stack || err.message);
-  process.exit(1);
-});
+// Run as a CLI only when invoked directly (`node generate-wiki.mjs …`); stays
+// silent when imported (e.g. by generate-wiki.test.mjs), so the pure helpers
+// can be unit-tested without main() reading env / calling process.exit.
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
+  main().catch((err) => {
+    console.error("[wiki] FAILED:", err.stack || err.message);
+    process.exit(1);
+  });
+}
