@@ -11,8 +11,9 @@ tags: [wiki, generated, notebook]
 
 ## Synthesis
 
-A seeded notebook hub (the live `NotebookPage` hydration component is one of the
-not-yet-built UI pieces; this shows the baked shell the compiler emits).
+A seeded notebook hub. Everything for this notebook lives in
+`content/notebooks/project-aurora/`: this hub page plus the AI-generated notes
+beside it. User notes live under `notes/notebooks/project-aurora/`.
 
 ## Sources
 
@@ -20,4 +21,4 @@ not-yet-built UI pieces; this shows the baked shell the compiler emits).
 
 ## Notes
 
-_Notes under `notes/project-aurora/` appear here._
+_AI notes in this folder + user notes under `notes/notebooks/project-aurora/`._

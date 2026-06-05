@@ -994,7 +994,7 @@ async function writeGraphManifest(sb, outDir, limit) {
     `Compiled from OpenBrain — ${nodes.length} entities, ${links.length} relations. ` +
       "Regenerated each compile; never hand-edit (changes are overwritten).",
     "",
-    "See [[notebook|Notebooks]] for research groups (synthesis + sources + notes, one per notebook).",
+    "See [[notebooks|Notebooks]] for research groups (synthesis + sources + notes, one per notebook).",
     "",
   ];
   for (const type of Object.keys(byType).sort()) {

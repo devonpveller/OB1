@@ -8,7 +8,7 @@ tags: [wiki, home]
 A hand-seeded vault to exercise the workbench UI components on real pages.
 
 - [[entities|Entities]] — entity pages
-- [[notebook/project-aurora|Project Aurora]] — a notebook hub
+- [[project-aurora|Project Aurora]] — a notebook hub (content/notebooks/project-aurora/)
 
 Open **[[tool-aurora|Project Aurora]]** (an entity page) to see the **grounding
 badge**, citation **wikilinks → leaf pages** (hover popover), and the

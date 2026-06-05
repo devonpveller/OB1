@@ -230,7 +230,9 @@ async function main() {
     }
   }
   const outDir = env.OB_WIKI_OUT_DIR || "./wikis";
-  const nbDir = path.join(outDir, "notebook");
+  // One folder per notebook holds EVERYTHING for it: the hub page
+  // (<slug>/<slug>.md, compiler-owned) + AI notes (author-owned, same folder).
+  const nbDir = path.join(outDir, "notebooks");
   const model = env.LLM_MODEL || "anthropic/claude-haiku-4-5";
   const sb = sbClient(env);
 
@@ -294,20 +296,22 @@ async function main() {
         "",
         "## Notes",
         "",
-        `_Notes under \`notes/${slug}/\` appear here (hydrated)._`,
+        `_User notes under \`notes/notebooks/${slug}/\` and AI notes in this folder appear here (hydrated)._`,
         "",
       ].join("\n");
-      fs.writeFileSync(path.join(nbDir, `${slug}.md`), fm + body + "\n", "utf8");
-      moc.push(`- [[notebook/${slug}|${t.name}]] — ${srcs.length} sources`);
+      const hubDir = path.join(nbDir, slug);
+      fs.mkdirSync(hubDir, { recursive: true });
+      fs.writeFileSync(path.join(hubDir, `${slug}.md`), fm + body + "\n", "utf8");
+      moc.push(`- [[${slug}|${t.name}]] — ${srcs.length} sources`);
       ok++;
-      console.log(`[notebook-synth] wrote notebook/${slug}.md (${srcs.length} sources)`);
+      console.log(`[notebook-synth] wrote notebooks/${slug}/${slug}.md (${srcs.length} sources)`);
     } catch (e) {
       console.error(`[notebook-synth] FAILED notebook "${t.name}": ${e.message}`);
     }
   }
   moc.push("");
-  fs.writeFileSync(path.join(outDir, "notebook.md"), moc.join("\n"), "utf8");
-  console.log(`[notebook-synth] done: ${ok}/${active.length} notebook hubs + notebook.md MOC`);
+  fs.writeFileSync(path.join(outDir, "notebooks.md"), moc.join("\n"), "utf8");
+  console.log(`[notebook-synth] done: ${ok}/${active.length} notebook hubs + notebooks.md MOC`);
 }
 
 main().catch((e) => {

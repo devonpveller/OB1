@@ -522,51 +522,53 @@ async function sweepOrphanEntityPages() {
 // `notebook/` dir has its own kept-set here, exactly as `topic/` used to —
 // don't let the entity sweep eat hubs (same bug-class as the leaf sweep).
 async function sweepOrphanNotebookPages() {
-  // 1. Retire the old topic layer (one-time, idempotent): the synthesizer no
-  //    longer writes topic/, so any remaining topic pages + MOC are stale.
+  // 1. Retire the old layers (one-time, idempotent): `topic/` (research
+  //    synthesis, superseded) and the SINGULAR `notebook/` (hubs moved into
+  //    content/notebooks/<slug>/<slug>.md).
   let retired = 0;
-  const topicDir = `${WIKI_OUT_DIR}/topic`;
-  if (existsSync(topicDir)) {
-    try {
-      await rm(topicDir, { recursive: true, force: true });
-      retired++;
-    } catch (e) {
-      console.error("[wiki-service] topic retire failed:", e?.message || e);
+  for (const d of ["topic", "notebook"]) {
+    const dir = `${WIKI_OUT_DIR}/${d}`;
+    if (existsSync(dir)) {
+      try { await rm(dir, { recursive: true, force: true }); retired++; }
+      catch (e) { console.error(`[wiki-service] ${d}/ retire failed:`, e?.message || e); }
     }
   }
   await rm(`${WIKI_OUT_DIR}/topic.md`, { force: true }).catch(() => {});
+  await rm(`${WIKI_OUT_DIR}/notebook.md`, { force: true }).catch(() => {});
 
-  // 2. Sweep notebook hubs whose thread is gone/archived.
-  const nbDir = `${WIKI_OUT_DIR}/notebook`;
+  // 2. Sweep notebook HUB pages (content/notebooks/<slug>/<slug>.md) whose
+  //    thread is gone/archived. The folder also holds author-owned AI notes —
+  //    only the hub file (named after its folder) is swept; AI notes are left.
+  const nbDir = `${WIKI_OUT_DIR}/notebooks`;
   if (!existsSync(nbDir)) return { kept: 0, deleted: retired };
-  let kept = new Set();
+  let active = new Set();
   try {
     const rows = (await obFetch(
       "GET",
       "threads?select=slug,status&status=eq.active&slug=not.is.null&limit=20000",
     )) || [];
-    for (const r of rows) if (r.slug) kept.add(`${r.slug}.md`);
+    for (const r of rows) if (r.slug) active.add(r.slug);
   } catch (e) {
     console.error("[wiki-service] notebook-sweep query failed (skipping):", e?.message || e);
     return { kept: 0, deleted: retired, error: true };
   }
   let entries;
-  try { entries = await readdir(nbDir, { withFileTypes: true }); } catch { return { kept: kept.size, deleted: retired }; }
+  try { entries = await readdir(nbDir, { withFileTypes: true }); } catch { return { kept: active.size, deleted: retired }; }
   let deleted = 0;
   for (const e of entries) {
-    if (!e.isFile() || !e.name.endsWith(".md")) continue;
-    if (kept.has(e.name)) continue;
-    try {
-      await rm(`${nbDir}/${e.name}`, { force: true });
-      deleted++;
-    } catch (err) {
-      console.error(`[wiki-service] notebook orphan delete failed for ${e.name}:`, err?.message || err);
+    if (!e.isDirectory()) continue;
+    const slug = e.name;
+    if (active.has(slug)) continue;
+    const hub = `${nbDir}/${slug}/${slug}.md`;
+    if (existsSync(hub)) {
+      try { await rm(hub, { force: true }); deleted++; }
+      catch (err) { console.error(`[wiki-service] notebook hub delete failed for ${slug}:`, err?.message || err); }
     }
   }
   if (deleted > 0 || retired > 0) {
-    console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale notebook hub(s)${retired ? " + retired topic/ layer" : ""}`);
+    console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale notebook hub(s)${retired ? " + retired topic/+notebook/ layers" : ""}`);
   }
-  return { kept: kept.size, deleted: deleted + retired };
+  return { kept: active.size, deleted: deleted + retired };
 }
 
 // Recursively collect absolute paths of .md files under `dir`, skipping any
@@ -727,7 +729,7 @@ async function compile(reason) {
         "Generated from OpenBrain; your notes evolve alongside it.",
         "",
         "- [[entities|Entities]] — people, tools, projects, orgs (auto-generated)",
-        "- [[notebook|Notebooks]] — research groups: synthesis + sources + notes per notebook (auto-generated)",
+        "- [[notebooks|Notebooks]] — research groups: synthesis + sources + notes per notebook (auto-generated)",
         "- `notes/` — your own notes (hand-written; tethered back into OpenBrain)",
         "",
         "Generated pages regenerate from OpenBrain; never hand-edit them — " +
