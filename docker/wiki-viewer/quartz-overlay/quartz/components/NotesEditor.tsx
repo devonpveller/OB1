@@ -52,7 +52,7 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
     >
       {canCreate ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
       {isUserNote ? (
-        <button class="ne-launch ne-edit" data-ne-edit data-note-path={noteApiPath} data-note-slug={slug}>
+        <button class="ne-launch ne-edit" data-wb-edit data-edit-kind="note" data-note-path={noteApiPath} data-note-slug={slug}>
           ✎ Edit this note
         </button>
       ) : null}

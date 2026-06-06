@@ -561,7 +561,111 @@ function api(path: string) {
   return "/workbench/notes/" + path.split("/").map(encodeURIComponent).join("/")
 }
 
-// ── per-page wiring: edit-in-place on note pages, create on notebook hubs ────
+// ── compact markdown → HTML, for hydrating a SOURCE page body with its LIVE
+// content (the static leaf isn't recompiled in the preview; in prod the compile
+// regenerates it). Injected into <article>, so it inherits Quartz's prose CSS.
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+function inlineMd(t: string): string {
+  return t
+    .replace(/\[\[([^\]|]+)(\|([^\]]+))?\]\]/g, (_m, tgt, _g, alias) =>
+      '<a class="internal" href="/' + String(tgt).trim() + '">' + String((alias != null ? alias : tgt)).trim() + "</a>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+}
+function renderMd(src: string): string {
+  const lines = escHtml(src || "").split("\n")
+  const out: string[] = []
+  let para: string[] = []
+  let list: string[] = []
+  let listType = ""
+  let inCode = false
+  let code: string[] = []
+  const flushP = () => {
+    if (para.length) {
+      out.push("<p>" + para.map(inlineMd).join("<br>") + "</p>")
+      para = []
+    }
+  }
+  const flushL = () => {
+    if (list.length) {
+      out.push("<" + listType + ">" + list.join("") + "</" + listType + ">")
+      list = []
+      listType = ""
+    }
+  }
+  for (const line of lines) {
+    if (/^```/.test(line.trim())) {
+      if (inCode) {
+        out.push("<pre><code>" + code.join("\n") + "</code></pre>")
+        code = []
+        inCode = false
+      } else {
+        flushP()
+        flushL()
+        inCode = true
+      }
+      continue
+    }
+    if (inCode) {
+      code.push(line)
+      continue
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/)
+    if (h) {
+      flushP()
+      flushL()
+      out.push("<h" + h[1].length + ">" + inlineMd(h[2]) + "</h" + h[1].length + ">")
+      continue
+    }
+    if (/^\s*>\s?/.test(line)) {
+      flushP()
+      flushL()
+      out.push("<blockquote>" + inlineMd(line.replace(/^\s*>\s?/, "")) + "</blockquote>")
+      continue
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      flushP()
+      if (listType !== "ul") {
+        flushL()
+        listType = "ul"
+      }
+      list.push("<li>" + inlineMd(line.replace(/^\s*[-*]\s+/, "")) + "</li>")
+      continue
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      flushP()
+      if (listType !== "ol") {
+        flushL()
+        listType = "ol"
+      }
+      list.push("<li>" + inlineMd(line.replace(/^\s*\d+\.\s+/, "")) + "</li>")
+      continue
+    }
+    if (/^\s*---+\s*$/.test(line)) {
+      flushP()
+      flushL()
+      out.push("<hr>")
+      continue
+    }
+    if (line.trim() === "") {
+      flushP()
+      flushL()
+      continue
+    }
+    para.push(line)
+  }
+  flushP()
+  flushL()
+  if (inCode && code.length) out.push("<pre><code>" + code.join("\n") + "</code></pre>")
+  return out.join("\n")
+}
+
+// ── per-page wiring: edit-in-place on note AND source pages; create on hubs ──
 document.addEventListener("nav", () => {
   // Any navigation re-enables the dev hot-reload (the viewer's `quartz build
   // --serve` hard-reloads on every vault change). We suppress it ONLY while a
@@ -569,15 +673,19 @@ document.addEventListener("nav", () => {
   // patched in the viewer Dockerfile), so autosave persists without flashing.
   ;(window as any).__neEditing = false
   hideLinkPopover() // never let an in-editor popover survive a navigation
-  const root = document.querySelector("[data-notes-root]") as HTMLElement | null
-  if (!root) return
 
-  // (1) Edit-in-place on a user-note page.
-  const editBtn = root.querySelector("[data-ne-edit]") as HTMLElement | null
+  // (1) Edit-in-place on any editable target — a user NOTE or a SOURCE. Found
+  // page-wide (the source edit button is rendered by the SourceEditor card,
+  // outside the notes root) so the SAME CodeMirror editor drives both kinds.
+  const editBtn = document.querySelector("[data-wb-edit]") as HTMLElement | null
   if (editBtn && !editBtn.dataset.neWired) {
     editBtn.dataset.neWired = "1"
+    const kind = editBtn.dataset.editKind || "note"
+    const isSource = kind === "source"
     const apiPath = editBtn.dataset.notePath || ""
+    const sourceId = editBtn.dataset.sourceId || ""
     const article = document.querySelector("article") as HTMLElement | null
+    const origLabel = editBtn.textContent || (isSource ? "✎ Edit this source" : "✎ Edit this note")
     let view: EditorView | null = null
     let host: HTMLElement | null = null
     let toolbar: HTMLElement | null = null
@@ -592,18 +700,24 @@ document.addEventListener("nav", () => {
     const setStatus = (t: string) => {
       if (statusEl) statusEl.textContent = t
     }
+    // Sources PATCH the working head (a revision commits at the next compile);
+    // notes PUT the vault file (If-Match optimistic concurrency).
+    const saveUrl = () =>
+      isSource ? "/workbench/sources/" + encodeURIComponent(sourceId) : api(apiPath)
+    const savePayload = (content: string) =>
+      isSource ? { content } : (lastHash ? { content, if_match: lastHash } : { content })
     const save = async (body: string) => {
       const content = composeContent(body)
       try {
-        const r = await fetch(api(apiPath), {
-          method: "PUT",
+        const r = await fetch(saveUrl(), {
+          method: isSource ? "PATCH" : "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(lastHash ? { content, if_match: lastHash } : { content }),
+          body: JSON.stringify(savePayload(content)),
         })
         const j = await r.json().catch(() => ({}))
         if (r.ok) {
-          lastHash = j.hash
-          setStatus("✓ saved")
+          if (!isSource) lastHash = j.hash
+          setStatus(isSource ? "✓ saved (working draft — a revision commits at the next compile)" : "✓ saved")
         } else if (r.status === 409) {
           setStatus("⚠ changed elsewhere — reopen to merge")
         } else {
@@ -617,10 +731,10 @@ document.addEventListener("nav", () => {
       if (!view) return
       const content = composeContent(view.state.doc.toString())
       // keepalive lets the save outlive a navigation away mid-edit.
-      fetch(api(apiPath), {
-        method: "PUT",
+      fetch(saveUrl(), {
+        method: isSource ? "PATCH" : "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(lastHash ? { content, if_match: lastHash } : { content }),
+        body: JSON.stringify(savePayload(content)),
         keepalive: true,
       }).catch(() => {})
     }
@@ -631,24 +745,55 @@ document.addEventListener("nav", () => {
         timer = null
       }
       setStatus("saving…")
-      await save(view.state.doc.toString())
+      const body = view.state.doc.toString()
+      await save(body)
       hideLinkPopover()
       window.removeEventListener("beforeunload", flush)
       ;(window as any).__neEditing = false
-      // Reload once to render the saved note (hot-reloads were suppressed while
-      // editing) — a single refresh on Done, not a flash on every keystroke.
-      location.reload()
+      if (isSource) {
+        // Re-render the body from the saved content so the edit is visible
+        // immediately (the static leaf isn't recompiled in the preview; in prod
+        // the compile regenerates it identically). No reload.
+        view.destroy()
+        view = null
+        if (host) {
+          host.remove()
+          host = null
+        }
+        if (article) {
+          article.style.display = ""
+          article.innerHTML = renderMd(composeContent(body))
+        }
+        editBtn.textContent = origLabel
+        editBtn.classList.remove("ne-editing")
+        setStatus("✓ saved (working draft — a revision commits at the next compile)")
+        // refresh the SourceRevisions card (its uncommitted diff updates live)
+        document.dispatchEvent(new CustomEvent("workbench-source-saved"))
+      } else {
+        // Notes: reload once to render the saved note (hot-reloads were
+        // suppressed while editing) — a single refresh, not a per-keystroke flash.
+        location.reload()
+      }
     }
     const enterEdit = async () => {
       if (view) return exitEdit()
       setStatus("loading…")
       let raw = ""
-      try {
-        const j = await (await fetch(api(apiPath))).json()
-        raw = j.content || ""
-        lastHash = j.hash
-      } catch {
-        /* new/missing — start blank */
+      if (isSource) {
+        try {
+          const j = await (await fetch(saveUrl())).json()
+          raw = (j.source && j.source.content) || ""
+        } catch {
+          /* start blank */
+        }
+      } else {
+        try {
+          const j = await (await fetch(api(apiPath))).json()
+          raw = j.content || ""
+          lastHash = j.hash
+        } catch {
+          /* new/missing — start blank */
+        }
       }
       host = document.createElement("div")
       host.className = "ne-cm-host"
@@ -656,7 +801,7 @@ document.addEventListener("nav", () => {
         article.style.display = "none"
         article.parentElement!.insertBefore(host, article)
       } else {
-        root.appendChild(host)
+        document.body.appendChild(host)
       }
 
       // Frontmatter is edited INLINE in the editor (operator preference): the
@@ -678,19 +823,37 @@ document.addEventListener("nav", () => {
       setStatus("")
     }
 
-    // Relocate the Edit button into a toolbar ABOVE the article (over content).
-    toolbar = document.createElement("div")
-    toolbar.className = "ne-toolbar"
     statusEl = document.createElement("span")
     statusEl.className = "ne-status"
     if (article && article.parentElement) {
+      // Relocate the Edit button into a toolbar ABOVE the article (over content)
+      // — same UX for notes AND sources. (Export lives in the global PageTools.)
+      toolbar = document.createElement("div")
+      toolbar.className = "ne-toolbar"
       article.parentElement.insertBefore(toolbar, article)
       toolbar.appendChild(editBtn)
-      // (Export lives in the global PageTools toolbar now — one export UI for
-      // every page, notes included.)
       toolbar.appendChild(statusEl)
+    } else {
+      editBtn.insertAdjacentElement("afterend", statusEl)
     }
     editBtn.addEventListener("click", () => (view ? exitEdit() : enterEdit()))
+
+    // Sources: hydrate the body with the LIVE content so what you see equals
+    // what you edit (the static leaf can be stale in the preview / between
+    // compiles), and RE-hydrate on any source save — inline edit OR re-upload.
+    if (isSource && article) {
+      const hydrateBody = () => {
+        fetch(saveUrl())
+          .then((r) => r.json())
+          .then((j) => {
+            const c = j && j.source && j.source.content
+            if (c != null && !view) article.innerHTML = renderMd(c)
+          })
+          .catch(() => {})
+      }
+      hydrateBody()
+      document.addEventListener("workbench-source-saved", hydrateBody)
+    }
 
     // Auto-enter edit when we just created this note (see create flow below).
     try {
@@ -705,8 +868,9 @@ document.addEventListener("nav", () => {
   }
 
   // (2) Create a new note from a notebook hub (lightweight inline input).
-  const launch = root.querySelector("[data-ne-launch]") as HTMLElement | null
-  if (launch && !launch.dataset.neWired) {
+  const root = document.querySelector("[data-notes-root]") as HTMLElement | null
+  const launch = root ? (root.querySelector("[data-ne-launch]") as HTMLElement | null) : null
+  if (launch && root && !launch.dataset.neWired) {
     launch.dataset.neWired = "1"
     const nbSlug = root.dataset.notebookSlug || ""
     const nbName = root.dataset.notebookName || ""

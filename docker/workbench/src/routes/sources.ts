@@ -4,6 +4,7 @@
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import * as repo from "../repositories/sources.ts";
+import { config } from "../config.ts";
 import { logChange } from "../util/changeslog.ts";
 
 export const sources = new Hono();
@@ -94,6 +95,32 @@ sources.patch("/:id", async (c) => {
   );
   if (!res) return c.json({ error: "not found" }, 404);
   return c.json(res);
+});
+
+// POST /workbench/sources/:id/replace-from-upload (multipart file) — re-upload a
+// new version (P4.7 "upload-to-merge"): extract the document's text and set it as
+// the working head (diffed vs the prior in the revision history). Preserves the
+// source's legitimacy — the text comes from a real file, not free hand-editing.
+// NOTE: needs the raised Caddy body cap (added to the @import matcher in prod).
+sources.post("/:id/replace-from-upload", async (c) => {
+  const body = await c.req.parseBody();
+  const file = body["file"];
+  if (!(file instanceof File)) return c.json({ error: "a file is required" }, 400);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  try {
+    const fd = new FormData();
+    fd.append("file", new Blob([bytes]), file.name);
+    const er = await fetch(`${config.extractUrl}/extract`, { method: "POST", body: fd });
+    if (!er.ok) {
+      return c.json({ error: `extract failed (${er.status}): ${(await er.text()).slice(0, 200)}` }, 422);
+    }
+    const ex = await er.json();
+    const res = await repo.updateSource(c.req.param("id"), ex.markdown ?? "", null, authorOf(c));
+    if (!res) return c.json({ error: "not found" }, 404);
+    return c.json({ source: res.source, extracted_title: ex.title ?? null, from: file.name });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 500);
+  }
 });
 
 // POST /workbench/sources/:id/refetch — URL re-fetch → new revision.
