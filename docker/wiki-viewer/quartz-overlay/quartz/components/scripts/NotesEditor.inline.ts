@@ -723,9 +723,7 @@ document.addEventListener("nav", () => {
           setStatus(
             isSource
               ? "✓ saved (working draft — a revision commits at the next compile)"
-              : commitNow
-              ? "✓ committed a revision"
-              : "✓ saved (draft — commit on Done, or at the next compile)",
+              : "✓ saved (draft — use “Commit now” to add a revision, or it commits at the next compile)",
           )
           if (!isSource) document.dispatchEvent(new CustomEvent("workbench-note-saved"))
         } else if (r.status === 409) {
@@ -756,8 +754,9 @@ document.addEventListener("nav", () => {
       }
       setStatus("saving…")
       const body = view.state.doc.toString()
-      // Notes: Done commits the working draft as an authored revision.
-      await save(body, !isSource)
+      // Done just saves the working draft; committing is DELIBERATE ("Commit
+      // now" on the revision card) or caught at the next compile.
+      await save(body)
       hideLinkPopover()
       window.removeEventListener("beforeunload", flush)
       ;(window as any).__neEditing = false

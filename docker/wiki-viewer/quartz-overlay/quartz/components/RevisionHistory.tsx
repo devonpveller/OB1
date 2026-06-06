@@ -134,7 +134,12 @@ document.addEventListener("nav", () => {
 
   const afterMutate = (reloadNote) => {
     document.dispatchEvent(new CustomEvent(savedEvent))
-    if (kind === "note" && reloadNote) { location.reload(); return }
+    if (kind === "note" && reloadNote) {
+      // the note's static page rebuilds from the changed file; reload to show it
+      status.textContent = "↻ updating…"
+      setTimeout(() => location.reload(), 1000)
+      return
+    }
     load()
   }
   const doCommit = async () => {
@@ -163,7 +168,7 @@ document.addEventListener("nav", () => {
       const dirty = latest ? working !== latest.content : !!working
       commitBtn.hidden = !dirty
       list.innerHTML = ""
-      if (dirty) list.appendChild(item("Uncommitted changes", "working draft · commit now, or at next compile", latest ? latest.content : "", working, true, { label: "Discard", cls: "rh-danger", fn: doDiscard }))
+      if (dirty) list.appendChild(item("Uncommitted changes", "working draft · commit now, or at next compile", latest ? latest.content : "", working, true, { label: "Discard edit", cls: "rh-danger", fn: doDiscard }))
       revisions.forEach((r, idx) => {
         const prev = revisions[idx + 1]
         const sub = (r.author || "?") + " · " + fmtDate(r.date) + (r.message ? " · " + r.message : "")
