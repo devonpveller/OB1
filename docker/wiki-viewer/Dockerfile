@@ -78,6 +78,7 @@ RUN { \
   echo 'export { default as UploadModal } from "./UploadModal"'; \
   echo 'export { default as SourceRetractor } from "./SourceRetractor"'; \
   echo 'export { default as NotesEditor } from "./NotesEditor"'; \
+  echo 'export { default as NotebookPage } from "./NotebookPage"'; \
   } >> /quartz/quartz/components/index.ts
 
 # Mount the overlay components in the content page (after Backlinks).
@@ -86,8 +87,8 @@ RUN { \
 RUN set -e; \
   L=/quartz/quartz.layout.ts; \
   grep -q 'Component.Backlinks(),' "$L"; \
-  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.GroundingBadge(),\n\1Component.SourceRetractor(),\n\1Component.UploadModal(),\n\1Component.NotesEditor(),#' "$L"; \
-  grep -q 'Component.NotesEditor(),' "$L"
+  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.GroundingBadge(),\n\1Component.SourceRetractor(),\n\1Component.UploadModal(),\n\1Component.NotesEditor(),\n\1Component.NotebookPage(),#' "$L"; \
+  grep -q 'Component.NotebookPage(),' "$L"
 
 # Also mount NotesEditor on the LIST/FOLDER page layout (its beforeBody is a
 # single-line array), so "✎ Write a note" is reachable from every folder level,
