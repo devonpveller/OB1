@@ -11,7 +11,16 @@ const SourceRetractor: QuartzComponent = ({ fileData, displayClass }: QuartzComp
   if (fm.type !== "source" || fm.id == null) return null
   return (
     <div class={`source-retractor ${displayClass ?? ""}`} data-source-retractor data-source-id={String(fm.id)}>
-      <div class="sr-gravity" data-sr-gravity>checking impact…</div>
+      <div class="sr-head">
+        <span class="sr-title">🗂 Source lifecycle</span>
+        <span class="sr-gravity" data-sr-gravity>checking impact…</span>
+      </div>
+      <p class="sr-help">
+        Sources are kept, never destroyed by default. <strong>Retract</strong> (the default) hides this
+        source from all wiki generation but keeps the record — reversible until the next compile.
+        <strong> Restore</strong> reverses it. <strong>Purge</strong> permanently deletes it and
+        everything it supports (rare, irreversible — revealed behind a checkbox).
+      </p>
       <div class="sr-verbs">
         <button data-sr="retract" class="sr-default">Retract (reversible)</button>
         <button data-sr="restore" class="sr-alt">Restore</button>
@@ -77,14 +86,18 @@ document.addEventListener("nav", () => {
 `
 
 SourceRetractor.css = `
-.source-retractor { margin: 1rem 0; padding: .75rem; border: 1px solid var(--lightgray); border-radius: 8px; }
-.source-retractor .sr-gravity { font-size: .8rem; opacity: .8; margin-bottom: .5rem; }
+.source-retractor { margin: 1rem 0; padding: .75rem 1rem; border: 1px solid var(--lightgray); border-radius: 10px; background: color-mix(in srgb, var(--lightgray) 25%, transparent); }
+.source-retractor .sr-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.source-retractor .sr-title { font-weight: 600; font-size: .95rem; }
+.source-retractor .sr-gravity { font-size: .78rem; color: var(--gray); }
+.source-retractor .sr-help { font-size: .76rem; color: var(--gray); line-height: 1.5; margin: .45rem 0 .6rem; max-width: 72ch; }
 .source-retractor .sr-verbs { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-.source-retractor .sr-default { font-weight: 600; }
-.source-retractor .sr-alt { background: var(--gray); }
-.source-retractor .sr-danger { color: #fff; background: #c0392b; }
-.source-retractor .sr-purge-toggle { font-size: .75rem; opacity: .7; }
-.source-retractor .sr-status { font-size: .8rem; margin-top: .5rem; min-height: 1.2em; }
+.source-retractor .sr-verbs button { font-size: .82rem; padding: .35rem .8rem; border: 1px solid var(--lightgray); border-radius: 7px; cursor: pointer; background: transparent; color: var(--dark); }
+.source-retractor .sr-default { font-weight: 600; border-color: var(--secondary) !important; color: var(--secondary) !important; }
+.source-retractor .sr-alt { color: var(--gray) !important; }
+.source-retractor .sr-danger { color: #fff !important; background: #c0392b !important; border-color: #c0392b !important; }
+.source-retractor .sr-purge-toggle { font-size: .74rem; color: var(--gray); }
+.source-retractor .sr-status { font-size: .8rem; margin-top: .5rem; min-height: 1.2em; color: var(--gray); }
 `
 
 export default (() => SourceRetractor) satisfies QuartzComponentConstructor

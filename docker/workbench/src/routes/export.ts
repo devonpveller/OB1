@@ -10,10 +10,46 @@
 // a file that vanishes (ENOENT unlink). Keep all conversion scratch out of /wiki.
 import { Hono } from "hono";
 import { config } from "../config.ts";
+import { query } from "../db/pool.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 import { safeJoin, safeRelPath } from "../util/paths.ts";
 
 export const exporter = new Hono();
+
+// Build a clean "## References" markdown list from a note's sources — the union
+// of frontmatter `sources:` (deliberately added) and `[[…source/<uuid>…]]`
+// cited in the body. Origin is intentionally DROPPED: the export is an official
+// citation list, not a record of how each entry got there.
+const UUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
+async function referencesSection(md: string): Promise<string> {
+  const ids: string[] = [];
+  const add = (u: string) => {
+    if (UUID_RE.test(u) && !ids.includes(u)) ids.push(u);
+  };
+  const fmMatch = md.match(/^---\n([\s\S]*?)\n---/);
+  if (fmMatch) {
+    const sm = fmMatch[1].match(/^sources:\s*\[([^\]]*)\]\s*$/m);
+    if (sm) sm[1].split(",").forEach((s) => add(s.trim().replace(/^["']|["']$/g, "")));
+  }
+  const bodyRe = /\[\[[^\]]*source\/([0-9a-fA-F-]{36})/g;
+  let m: RegExpExecArray | null;
+  while ((m = bodyRe.exec(md))) add(m[1]);
+  if (!ids.length) return "";
+  const rows = await query<{ id: string; title: string; url: string }>(
+    `SELECT id::text AS id, title, url FROM public.sources WHERE id = ANY($1::uuid[])`,
+    [ids],
+  ).catch(() => []);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const items = ids
+    .map((u) => byId.get(u))
+    .filter(Boolean)
+    .map((r) => {
+      const title = (r!.title || "Untitled source").replace(/\n/g, " ");
+      return r!.url ? `1. ${title}. <${r!.url}>` : `1. ${title}.`;
+    });
+  if (!items.length) return "";
+  return "\n\n## References\n\n" + items.join("\n") + "\n";
+}
 
 interface Fmt {
   to: string;
@@ -65,10 +101,13 @@ exporter.get("/", async (c) => {
   }
 
   const spec = FORMATS[fmt];
+  // Append a clean "## References" list (cited + deliberately-added sources)
+  // BEFORE stripping wikilinks, so the export carries an official citation list.
+  const withRefs = md + (await referencesSection(md));
   // pandoc doesn't understand Obsidian `[[wikilinks]]` and would print them
   // literally. Convert to plain readable text: `[[target|alias]]` → alias,
   // `[[target]]` → the target's basename. (md export keeps them verbatim.)
-  const pandocMd = md
+  const pandocMd = withRefs
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
     .replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
   const noteDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";

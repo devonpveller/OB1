@@ -80,6 +80,7 @@ RUN { \
   echo 'export { default as NotesEditor } from "./NotesEditor"'; \
   echo 'export { default as NotebookPage } from "./NotebookPage"'; \
   echo 'export { default as GroundingPanel } from "./GroundingPanel"'; \
+  echo 'export { default as NoteReferences } from "./NoteReferences"'; \
   } >> /quartz/quartz/components/index.ts
 
 # Mount the overlay components in the content page (after Backlinks).
@@ -88,7 +89,7 @@ RUN { \
 RUN set -e; \
   L=/quartz/quartz.layout.ts; \
   grep -q 'Component.Backlinks(),' "$L"; \
-  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.SourceRetractor(),\n\1Component.UploadModal(),\n\1Component.NotesEditor(),#' "$L"; \
+  sed -i 's#\(\s*\)Component.Backlinks(),#\1Component.Backlinks(),\n\1Component.UploadModal(),\n\1Component.NotesEditor(),#' "$L"; \
   grep -q 'Component.NotesEditor(),' "$L"
 
 # Wide hydrated CARDS (NotebookPage on hubs, GroundingPanel on entity pages) go
@@ -99,8 +100,8 @@ RUN set -e; \
 RUN set -e; \
   L=/quartz/quartz.layout.ts; \
   grep -q 'afterBody: \[\],' "$L"; \
-  sed -i 's#afterBody: \[\],#afterBody: [Component.NotebookPage(), Component.GroundingPanel()],#' "$L"; \
-  grep -q 'afterBody: \[Component.NotebookPage(), Component.GroundingPanel()\],' "$L"
+  sed -i 's#afterBody: \[\],#afterBody: [Component.NotebookPage(), Component.GroundingPanel(), Component.SourceRetractor(), Component.NoteReferences()],#' "$L"; \
+  grep -q 'afterBody: \[Component.NotebookPage(), Component.GroundingPanel(), Component.SourceRetractor(), Component.NoteReferences()\],' "$L"
 
 # Also mount NotesEditor on the LIST/FOLDER page layout (its beforeBody is a
 # single-line array), so "✎ Write a note" is reachable from every folder level,
