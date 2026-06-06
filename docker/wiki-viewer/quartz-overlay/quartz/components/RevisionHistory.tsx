@@ -16,26 +16,41 @@ const RevisionHistory: QuartzComponent = ({ fileData, displayClass }: QuartzComp
   const isFolderPage = slug === "index" || slug.endsWith("/index")
   const isSource = fm.type === "source" && fm.id != null
   const isUserNote = !isFolderPage && slug.startsWith("notes/") && !slug.startsWith("notes/Changes")
-  if (!isSource && !isUserNote) return null
+  // Generated wiki pages (entity wikis, notebook hubs, thought leaves) are
+  // committed to the vault on every compile, so they HAVE a git history — but
+  // it's READ-ONLY (a revert would be overwritten by the next compile).
+  const isWikiGen =
+    !isFolderPage && !isSource && !isUserNote &&
+    (fm.type === "wiki" || fm.type === "notebook" || fm.type === "thought")
+  if (!isSource && !isUserNote && !isWikiGen) return null
+  const kind = isSource ? "source" : isUserNote ? "note" : "wiki"
   return (
     <div
       class={`revision-history ${displayClass ?? ""}`}
       data-revision-history
-      data-kind={isSource ? "source" : "note"}
+      data-kind={kind}
       data-ref={isSource ? String(fm.id) : `${slug}.md`}
     >
       <div class="rh-head">
         <span class="rh-title">🕘 Revision history</span>
         <span class="rh-right">
-          <button class="rh-commit" data-rh-commit hidden>Commit now</button>
+          {kind !== "wiki" && <button class="rh-commit" data-rh-commit hidden>Commit now</button>}
           <span class="rh-status" data-rh-status></span>
         </span>
       </div>
-      <p class="rh-help">
-        Edits are a working draft. <strong>Commit now</strong> (or Done) records an authored revision —
-        otherwise the next compile commits it. <strong>Revert</strong> a revision to restore it (current
-        edits are committed first); <strong>Discard</strong> drops uncommitted edits.
-      </p>
+      {kind === "wiki" ? (
+        <p class="rh-help">
+          This page is <strong>generated each compile</strong>, so its history is read-only. Each entry is a
+          compile that changed the page — expand one to see what changed. Edit the underlying{" "}
+          <strong>sources &amp; notes</strong> to shape what the next compile produces here.
+        </p>
+      ) : (
+        <p class="rh-help">
+          Edits are a working draft. <strong>Commit now</strong> (or Done) records an authored revision —
+          otherwise the next compile commits it. <strong>Revert</strong> a revision to restore it (current
+          edits are committed first); <strong>Discard</strong> drops uncommitted edits.
+        </p>
+      )}
       <div class="rh-list" data-rh-list></div>
     </div>
   )
@@ -48,13 +63,20 @@ document.addEventListener("nav", () => {
   root.dataset.rhInit = "1"
   const kind = root.dataset.kind
   const ref = root.dataset.ref
+  const readOnly = kind === "wiki"
   const enc = encodeURIComponent
   const list = root.querySelector("[data-rh-list]")
   const status = root.querySelector("[data-rh-status]")
   const commitBtn = root.querySelector("[data-rh-commit]")
 
-  // kind adapter — same UI, different endpoints
-  const A = kind === "source" ? {
+  // kind adapter — same UI, different endpoints. "wiki" is READ-ONLY: the git
+  // log of the generated page (no commit/revert/discard — the compiler owns it).
+  const A = readOnly ? {
+    history: async () => {
+      const j = await (await fetch("/workbench/note-history?path=" + enc(ref))).json()
+      return { revisions: (j.revisions || []).map(r => ({ ref: r.hash, author: r.author, date: r.date, content: r.content || "", label: "compile " + String(r.hash || "").slice(0, 8), message: r.message || "" })), working: j.working || "" }
+    },
+  } : kind === "source" ? {
     history: async () => {
       const revs = (await (await fetch("/workbench/sources/" + enc(ref) + "/revisions")).json()).revisions || []
       const head = ((await (await fetch("/workbench/sources/" + enc(ref))).json()).source || {}).content || ""
@@ -165,20 +187,20 @@ document.addEventListener("nav", () => {
     try {
       const { revisions, working } = await A.history()
       const latest = revisions[0]
-      const dirty = latest ? working !== latest.content : !!working
-      commitBtn.hidden = !dirty
+      const dirty = !readOnly && (latest ? working !== latest.content : !!working)
+      if (commitBtn) commitBtn.hidden = !dirty
       list.innerHTML = ""
       if (dirty) list.appendChild(item("Uncommitted changes", "working draft · commit now, or at next compile", latest ? latest.content : "", working, true, { label: "Discard edit", cls: "rh-danger", fn: doDiscard }))
       revisions.forEach((r, idx) => {
         const prev = revisions[idx + 1]
         const sub = (r.author || "?") + " · " + fmtDate(r.date) + (r.message ? " · " + r.message : "")
-        list.appendChild(item(r.label, sub, prev ? prev.content : "", r.content, false, { label: "Revert", fn: () => doRevert(r.ref) }))
+        list.appendChild(item(r.label, sub, prev ? prev.content : "", r.content, false, readOnly ? null : { label: "Revert", fn: () => doRevert(r.ref) }))
       })
       if (!revisions.length && !dirty) list.innerHTML = "<div class='rh-muted'>no revisions yet.</div>"
       status.textContent = ""
     } catch (e) { status.textContent = "history unavailable" }
   }
-  commitBtn.addEventListener("click", doCommit)
+  if (commitBtn) commitBtn.addEventListener("click", doCommit)
   document.addEventListener(savedEvent, () => load())
   load()
 })

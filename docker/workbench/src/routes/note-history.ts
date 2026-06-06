@@ -25,12 +25,24 @@ function authorOf(c: Context): string {
   ).toString();
 }
 
-// `path` is the FULL vault-relative note path (notes/…/x.md).
+// `path` is the FULL vault-relative note path (notes/…/x.md) — for the WRITE
+// ops (commit/revert/discard), notes only.
 function notePath(c: Context): string {
   const rel = safeRelPath(c.req.query("path") || "");
   if (!rel.startsWith("notes/") || !rel.endsWith(".md")) {
     throw new Error("path must be a notes/*.md file");
   }
+  return rel;
+}
+
+// READ-ONLY history is allowed for ANY vault markdown — notes AND generated
+// pages (entity wikis, notebook hubs, thought leaves). The vault root is the
+// content/ dir, and the compiler commits it on every compile, so a page's git
+// log IS its revision history (read-only — a revert would be overwritten by the
+// next compile). safeRelPath already blocks traversal out of the vault.
+function readPath(c: Context): string {
+  const rel = safeRelPath(c.req.query("path") || "");
+  if (!rel.endsWith(".md")) throw new Error("path must be a .md file");
   return rel;
 }
 
@@ -41,7 +53,7 @@ export const noteHistory = new Hono();
 noteHistory.get("/", async (c) => {
   let rel: string;
   try {
-    rel = notePath(c);
+    rel = readPath(c);
   } catch (e) {
     return c.json({ error: String((e as Error).message) }, 400);
   }
