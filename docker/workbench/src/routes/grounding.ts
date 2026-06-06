@@ -23,6 +23,16 @@ grounding.get("/:entityId", async (c) => {
   );
   const groundedCount = grounded[0]?.n ?? 0;
 
+  // The actual grounding sources (so the panel can list what's backing the page).
+  const sources = await query(
+    `SELECT s.id, s.title, s.url, s.content_type, se.mention_role
+       FROM public.source_entities se
+       JOIN public.sources s ON s.id = se.source_id
+      WHERE se.entity_id = $1 AND s.retraction_committed_at IS NULL
+      ORDER BY se.created_at DESC NULLS LAST`,
+    [entityId],
+  ).catch(() => []);
+
   // Staged / failed grounding attempts for this entity (import_jobs).
   const jobRows = await query<{ status: string; staged: boolean; committed: boolean }>(
     `SELECT status, staged, committed FROM public.import_jobs
@@ -53,6 +63,7 @@ grounding.get("/:entityId", async (c) => {
     entity_id: entityId,
     state,
     grounded_sources: groundedCount,
+    sources,
     pending: pendingJob || backlogCount > 0,
     failed,
     extraction_backlog: backlogCount,

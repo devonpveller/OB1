@@ -10,7 +10,10 @@ import { QuartzComponent, QuartzComponentConstructor, QuartzComponentProps } fro
 
 const UploadModal: QuartzComponent = ({ fileData, displayClass }: QuartzComponentProps) => {
   const fm = (fileData?.frontmatter ?? {}) as Record<string, unknown>
-  const showLauncher = fm.type === "notebook"
+  // The standalone launcher is retired on notebook hubs — NotebookPage now owns
+  // the "+ Add source" entry (and GroundingBadge opens the modal on entity
+  // pages). The modal still opens via the `open-upload-modal` event.
+  const showLauncher = false
   return (
     <div class={`upload-modal-root ${displayClass ?? ""}`} data-upload-root data-notebook-id={String(fm.thread_id ?? "")}>
       {showLauncher ? <button class="um-launch" data-um-launch>+ Add source to this notebook</button> : null}
@@ -105,6 +108,8 @@ document.addEventListener("nav", () => {
       html += "<a href='/content/source/" + job.source_id + "'>open the source page →</a> (after the next compile)"
     } catch { html += " source id: " + job.source_id }
     result.innerHTML = html
+    // tell NotebookPage (and any listener) to re-hydrate its live source list
+    document.dispatchEvent(new CustomEvent("workbench-notebook-changed"))
   }
   const pollJob = async (jobId, name) => {
     for (let i = 0; i < 200; i++) {
@@ -154,6 +159,7 @@ document.addEventListener("nav", () => {
         if (!r.ok) throw new Error("HTTP " + r.status)
         status.textContent = "✓ linked '" + title + "' to the notebook."
       }
+      document.dispatchEvent(new CustomEvent("workbench-notebook-changed"))
     } catch (e) { status.textContent = "✗ link failed: " + (e && e.message ? e.message : e) }
   }
   let searchTimer = null

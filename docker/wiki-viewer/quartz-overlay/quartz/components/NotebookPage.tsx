@@ -21,7 +21,16 @@ const NotebookPage: QuartzComponent = ({ fileData, displayClass }: QuartzCompone
         <span class="nbp-status" data-nbp-status>loading…</span>
       </div>
       <section class="nbp-sec" data-nbp-sources hidden>
-        <h3 class="nbp-h">Sources <span class="nbp-count" data-nbp-src-count></span></h3>
+        <h3 class="nbp-h">
+          Sources <span class="nbp-count" data-nbp-src-count></span>
+          <button class="nbp-add" data-nbp-add>+ Add source</button>
+        </h3>
+        <p class="nbp-help">
+          Linked sources are this notebook's <strong>evidence</strong>: on the next wiki compile they
+          ground its generated synthesis (the page text above) with real material, and they appear here
+          and on the hub. Unlinking removes a source from <em>this</em> notebook only — it stays in its
+          other notebooks and in generation, and isn't deleted.
+        </p>
         <ul class="nbp-list" data-nbp-src-list></ul>
       </section>
       <section class="nbp-sec" data-nbp-suggestions hidden>
@@ -70,6 +79,11 @@ document.addEventListener("nav", () => {
       rm.textContent = "unlink"
       rm.title = "remove from this notebook (stays in its other notebooks + in generation)"
       rm.addEventListener("click", async () => {
+        const sure = window.confirm(
+          "Unlink “" + (s.title || s.id) + "” from this notebook?\\n\\n" +
+          "This removes it from THIS notebook only — the source stays in any other notebooks it belongs to and keeps feeding wiki generation. It is not deleted and can be re-added later."
+        )
+        if (!sure) return
         rm.disabled = true; rm.textContent = "…"
         try {
           const r = await fetch(nb + "/sources/" + encodeURIComponent(s.id), { method: "DELETE" })
@@ -157,6 +171,16 @@ document.addEventListener("nav", () => {
       renderNotes(n.user || [], n.ai || [])
     } catch (e) {}
   }
+
+  // "+ Add source" opens the shared upload modal, pre-targeted to this notebook.
+  const addBtn = root.querySelector("[data-nbp-add]")
+  if (addBtn) addBtn.addEventListener("click", () => {
+    document.dispatchEvent(new CustomEvent("open-upload-modal", { detail: { notebook: threadId, title: "Add a source to this notebook" } }))
+  })
+  // Re-hydrate when a source is imported/linked via the modal (so it shows here
+  // immediately, without waiting for a recompile).
+  document.addEventListener("workbench-notebook-changed", () => refresh())
+
   refresh()
 })
 `
@@ -169,6 +193,9 @@ NotebookPage.css = `
 .notebook-page .nbp-sec { margin-top: .6rem; }
 .notebook-page .nbp-h { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--gray); margin: .3rem 0; }
 .notebook-page .nbp-count { color: var(--gray); font-weight: 400; }
+.notebook-page .nbp-add { float: right; text-transform: none; letter-spacing: 0; font-size: .74rem; padding: .15rem .55rem; border: 1px solid var(--secondary); background: transparent; color: var(--secondary); border-radius: 6px; cursor: pointer; }
+.notebook-page .nbp-add:hover { background: var(--secondary); color: var(--light); }
+.notebook-page .nbp-help { font-size: .76rem; color: var(--gray); line-height: 1.5; margin: .1rem 0 .5rem; max-width: 70ch; }
 .notebook-page .nbp-list { list-style: none; margin: 0; padding: 0; }
 .notebook-page .nbp-list li { display: flex; align-items: center; gap: .5rem; padding: .25rem 0; border-bottom: 1px solid color-mix(in srgb, var(--lightgray) 50%, transparent); font-size: .85rem; }
 .notebook-page .nbp-list li:last-child { border-bottom: 0; }
