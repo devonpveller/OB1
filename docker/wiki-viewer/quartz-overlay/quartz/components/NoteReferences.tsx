@@ -17,7 +17,10 @@ const NoteReferences: QuartzComponent = ({ fileData, displayClass }: QuartzCompo
     <div class={`note-refs ${displayClass ?? ""}`} data-note-refs data-note-path={notePath}>
       <div class="nr-head">
         <span class="nr-title">🔗 References</span>
-        <span class="nr-status" data-nr-status></span>
+        <span class="nr-head-right">
+          <button class="nr-copy" data-nr-copy hidden>⧉ copy list</button>
+          <span class="nr-status" data-nr-status></span>
+        </span>
       </div>
       <p class="nr-help">
         This note's sources. <strong>Cited</strong> ones are linked in the text; <strong>added</strong>
@@ -82,9 +85,17 @@ document.addEventListener("nav", () => {
     })
   }
 
+  const copyBtn = root.querySelector("[data-nr-copy]")
   const apply = (data) => {
     renderList(root.querySelector("[data-nr-cited-list]"), root.querySelector("[data-nr-cited]"), root.querySelector("[data-nr-cited-count]"), data.cited || [], false)
     renderList(root.querySelector("[data-nr-added-list]"), root.querySelector("[data-nr-added]"), root.querySelector("[data-nr-added-count]"), data.added || [], true)
+    // a copyable numbered citation list (cited first, then added)
+    const all = (data.cited || []).concat(data.added || [])
+    copyBtn.hidden = all.length === 0
+    copyBtn.onclick = () => {
+      const lines = all.map((s, i) => "[" + (i + 1) + "] " + (s.title || s.url || s.id) + (s.url ? ". " + s.url : "."))
+      navigator.clipboard.writeText(lines.join("\\n")).then(() => { copyBtn.textContent = "✓ copied"; setTimeout(() => copyBtn.textContent = "⧉ copy list", 1200) }).catch(() => { status.textContent = "copy blocked" })
+    }
   }
   const load = async () => {
     try { apply(await (await fetch(refsUrl)).json()); status.textContent = "" }
@@ -138,6 +149,9 @@ NoteReferences.css = `
 .note-refs .nr-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
 .note-refs .nr-title { font-weight: 600; font-size: .95rem; }
 .note-refs .nr-status { font-size: .76rem; color: var(--gray); }
+.note-refs .nr-head-right { display: inline-flex; align-items: center; gap: .5rem; }
+.note-refs .nr-copy { font-size: .72rem; padding: .15rem .5rem; border: 1px solid var(--lightgray); background: transparent; color: var(--secondary); border-radius: 5px; cursor: pointer; }
+.note-refs .nr-copy:hover { background: var(--lightgray); }
 .note-refs .nr-help { font-size: .76rem; color: var(--gray); line-height: 1.5; margin: .45rem 0 .5rem; max-width: 72ch; }
 .note-refs .nr-sec { margin-top: .5rem; }
 .note-refs .nr-h { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--gray); margin: .3rem 0; }

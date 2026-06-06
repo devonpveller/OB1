@@ -44,6 +44,19 @@ sources.post("/:id/link-notebook", async (c) => {
   return c.json({ link: await repo.linkNotebook(threadId, c.req.param("id")) });
 });
 
+// GET /workbench/sources/:id/notebooks — notebooks this source belongs to
+// (SourceLinker: membership from the source side).
+sources.get("/:id/notebooks", async (c) => {
+  return c.json({ notebooks: await repo.listSourceNotebooks(c.req.param("id")) });
+});
+
+// DELETE /workbench/sources/:id/notebooks/:threadId — unlink from one notebook
+// (soft → hidden; the source stays elsewhere + in generation).
+sources.delete("/:id/notebooks/:threadId", async (c) => {
+  const row = await repo.unlinkFromNotebook(c.req.param("threadId"), c.req.param("id"));
+  return c.json({ link: row });
+});
+
 // GET /workbench/sources/:id — read view (+ live staged-retract marker fields).
 sources.get("/:id", async (c) => {
   const src = await repo.getSource(c.req.param("id"));

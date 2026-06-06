@@ -81,6 +81,11 @@ RUN { \
   echo 'export { default as NotebookPage } from "./NotebookPage"'; \
   echo 'export { default as GroundingPanel } from "./GroundingPanel"'; \
   echo 'export { default as NoteReferences } from "./NoteReferences"'; \
+  echo 'export { default as PageTools } from "./PageTools"'; \
+  echo 'export { default as NotebookIndex } from "./NotebookIndex"'; \
+  echo 'export { default as SourceEditor } from "./SourceEditor"'; \
+  echo 'export { default as SourceLinker } from "./SourceLinker"'; \
+  echo 'export { default as ImportStatus } from "./ImportStatus"'; \
   } >> /quartz/quartz/components/index.ts
 
 # Mount the overlay components in the content page (after Backlinks).
@@ -100,8 +105,8 @@ RUN set -e; \
 RUN set -e; \
   L=/quartz/quartz.layout.ts; \
   grep -q 'afterBody: \[\],' "$L"; \
-  sed -i 's#afterBody: \[\],#afterBody: [Component.NotebookPage(), Component.GroundingPanel(), Component.SourceRetractor(), Component.NoteReferences()],#' "$L"; \
-  grep -q 'afterBody: \[Component.NotebookPage(), Component.GroundingPanel(), Component.SourceRetractor(), Component.NoteReferences()\],' "$L"
+  sed -i 's#afterBody: \[\],#afterBody: [Component.PageTools(), Component.NotebookPage(), Component.NotebookIndex(), Component.ImportStatus(), Component.GroundingPanel(), Component.SourceEditor(), Component.SourceLinker(), Component.SourceRetractor(), Component.NoteReferences()],#' "$L"; \
+  grep -q 'Component.SourceEditor(), Component.SourceLinker(), Component.SourceRetractor()' "$L"
 
 # Also mount NotesEditor on the LIST/FOLDER page layout (its beforeBody is a
 # single-line array), so "✎ Write a note" is reachable from every folder level,

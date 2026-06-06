@@ -686,50 +686,8 @@ document.addEventListener("nav", () => {
     if (article && article.parentElement) {
       article.parentElement.insertBefore(toolbar, article)
       toolbar.appendChild(editBtn)
-      // Export-as buttons (pandoc) — available whether or not you're editing.
-      const exp = document.createElement("span")
-      exp.className = "ne-export"
-      exp.appendChild(document.createTextNode("⬇"))
-      ;[
-        ["MD", "md"],
-        ["PDF", "pdf"],
-        ["TEXT", "txt"],
-        ["DOCX", "docx"],
-      ].forEach(([label, f]) => {
-        const b = document.createElement("button")
-        b.type = "button"
-        b.className = "ne-export-btn"
-        b.textContent = label
-        b.title = "Export this note as " + label
-        b.addEventListener("click", async () => {
-          setStatus("exporting " + label + "…")
-          try {
-            const r = await fetch("/workbench/export?path=" + encodeURIComponent("notes/" + apiPath) + "&format=" + f)
-            if (!r.ok) {
-              const j = await r.json().catch(() => ({}))
-              setStatus("✗ export failed: " + (j.error || "HTTP " + r.status))
-              return
-            }
-            const blob = await r.blob()
-            const url = URL.createObjectURL(blob)
-            const a = document.createElement("a")
-            a.href = url
-            a.download = (apiPath.split("/").pop() || "note").replace(/\.md$/, "") + "." + f
-            // Quartz's SPA router hijacks <a> clicks and would pushState() the
-            // blob: URL (SecurityError). data-router-ignore makes it skip this.
-            a.dataset.routerIgnore = ""
-            document.body.appendChild(a)
-            a.click()
-            a.remove()
-            setTimeout(() => URL.revokeObjectURL(url), 4000)
-            setStatus("✓ exported " + label)
-          } catch (e: any) {
-            setStatus("✗ " + (e && e.message ? e.message : e))
-          }
-        })
-        exp.appendChild(b)
-      })
-      toolbar.appendChild(exp)
+      // (Export lives in the global PageTools toolbar now — one export UI for
+      // every page, notes included.)
       toolbar.appendChild(statusEl)
     }
     editBtn.addEventListener("click", () => (view ? exitEdit() : enterEdit()))

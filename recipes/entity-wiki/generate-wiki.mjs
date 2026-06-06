@@ -446,7 +446,7 @@ async function fetchLinkedSources(sb, entityId, maxSources, notebook) {
   const filters = [
     `entity_id=eq.${entityId}`,
     // !inner so rows whose embedded source is filtered out drop entirely.
-    `select=source_id,confidence,mention_role,` +
+    `select=source_id,confidence,mention_role,created_at,` +
       `sources!inner(id,url,title,content,content_type,notebook,research_key)`,
     // P4 tombstone filter (4.5): a COMMITTED-retracted source vanishes from
     // generation; a STAGED retract (retraction_committed_at IS NULL) still
@@ -468,6 +468,7 @@ async function fetchLinkedSources(sb, entityId, maxSources, notebook) {
       notebook: r.sources.notebook ?? null,
       research_key: r.sources.research_key ?? null,
       link_confidence: r.confidence ?? null,
+      linked_at: r.created_at ?? null, // when this source was attached (P6.7 Evolution)
     }));
 }
 
@@ -853,6 +854,35 @@ export function rewriteCitations(markdown, validThoughtIds, sourceTokenMap, run)
   return parts.join("");
 }
 
+// P6.7 — a DERIVED `## Evolution` timeline: when the entity was first captured
+// (earliest thought) and when each grounding source attached
+// (source_entities.created_at). No new storage — works on today's data, and the
+// vault git history (every compile is a commit) complements it externally. The
+// source links keep their P1 leaves alive (the caller registers them in `run`).
+export function buildEvolutionSection(entity, sources, linked) {
+  const srcs = sources || [];
+  const thoughtDates = (linked || [])
+    .map((t) => String(t.created_at || "").slice(0, 10))
+    .filter(Boolean)
+    .sort();
+  const firstSeen = String(entity?.created_at || "").slice(0, 10) || thoughtDates[0] || "";
+  if (!firstSeen && !srcs.length) return "";
+  const events = [{ date: firstSeen, text: "First captured as a thought-based mental model (ungrounded belief)." }];
+  for (const s of srcs) {
+    const date = String(s.linked_at || "").slice(0, 10);
+    const title = scrubSnippetContent(String(s.title || s.url || s.id))
+      .replace(/[\[\]|]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+    const ct = s.content_type ? ` (${s.content_type})` : "";
+    events.push({ date, text: `Grounded by [[source/${s.id}|${title || s.id}]]${ct}.` });
+  }
+  events.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const lines = events.map((e) => `- ${e.date ? `**${e.date}** — ` : ""}${e.text}`);
+  return "\n\n## Evolution\n\n" + lines.join("\n") + "\n";
+}
+
 function buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, notebook) {
   const lines = [
     "---",
@@ -967,13 +997,58 @@ async function writeGraphManifest(sb, outDir, limit) {
       weight: x.support_count ?? 1,
       confidence: x.confidence ?? null,
     }));
+  // P2.6 — notebook nodes (id "nb:<thread>") + membership edges to the entities
+  // they contain (thread_sources(confirmed) → source_entities → entity). Lets a
+  // graph viewer show research groups as first-class nodes. Best-effort: a query
+  // failure just omits the notebook layer, never breaks the entity graph.
+  let nbNodes = [];
+  let nbEdges = [];
+  try {
+    const notebooks =
+      (await sb.get("threads", `select=id,name,slug&status=eq.active&limit=${cap}`)) || [];
+    nbNodes = notebooks.map((t) => ({
+      id: `nb:${t.id}`,
+      label: t.name,
+      type: "notebook",
+      slug: t.slug,
+      file: `notebooks/${t.slug}/${t.slug}.md`,
+    }));
+    const tsRows =
+      (await sb.get("thread_sources", `select=thread_id,source_id&status=eq.confirmed&limit=${cap * 4}`)) || [];
+    const srcIds = [...new Set(tsRows.map((r) => r.source_id))];
+    const srcToEntities = new Map();
+    for (let i = 0; i < srcIds.length; i += 100) {
+      const chunk = srcIds.slice(i, i + 100);
+      const part =
+        (await sb.get("source_entities", `select=source_id,entity_id&source_id=in.(${chunk.join(",")})`)) || [];
+      for (const r of part) {
+        if (!srcToEntities.has(r.source_id)) srcToEntities.set(r.source_id, new Set());
+        srcToEntities.get(r.source_id).add(r.entity_id);
+      }
+    }
+    const seen = new Set();
+    for (const r of tsRows) {
+      const ents = srcToEntities.get(r.source_id);
+      if (!ents) continue;
+      for (const eid of ents) {
+        if (!known.has(eid)) continue; // entity truncated out of the node set
+        const key = `${r.thread_id}>${eid}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        nbEdges.push({ source: `nb:${r.thread_id}`, target: eid, relation: "contains", weight: 1, confidence: null });
+      }
+    }
+  } catch (err) {
+    console.error(`[wiki] notebook graph nodes skipped: ${err.message}`);
+  }
+
   const manifest = {
     generated_at: new Date().toISOString(),
-    node_count: nodes.length,
-    edge_count: links.length,
+    node_count: nodes.length + nbNodes.length,
+    edge_count: links.length + nbEdges.length,
     truncated: entities.length >= cap || edges.length >= cap,
-    nodes,
-    edges: links,
+    nodes: [...nodes, ...nbNodes],
+    edges: [...links, ...nbEdges],
   };
   fs.mkdirSync(outDir, { recursive: true });
   const p = path.join(outDir, "graph.json");
@@ -1357,7 +1432,12 @@ async function generateForEntity(sb, env, entity, args, run = { citedThoughtIds:
       }
     }
   }
-  const wiki = linkifyEntities(wikiCited, [...relatedBySlug.values()]);
+  let wiki = linkifyEntities(wikiCited, [...relatedBySlug.values()]);
+  // P6.7 — append the derived ## Evolution timeline. The source links it adds
+  // must keep their P1 leaves alive, so register them as cited (P1.5 sweep keys
+  // on on-disk citations, but emitLeafPages keys on run.citedSourceIds).
+  for (const s of sources) run.citedSourceIds.add(s.id);
+  wiki += buildEvolutionSection(entity, sources, linked);
   const sourceCounts = {
     linked: linked.length,
     semantic: semantic.length,

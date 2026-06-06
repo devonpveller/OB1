@@ -24,6 +24,7 @@ const NotebookPage: QuartzComponent = ({ fileData, displayClass }: QuartzCompone
         <h3 class="nbp-h">
           Sources <span class="nbp-count" data-nbp-src-count></span>
           <button class="nbp-add" data-nbp-add>+ Add source</button>
+          <button class="nbp-copy" data-nbp-copy hidden>⧉ copy</button>
         </h3>
         <p class="nbp-help">
           Linked sources are this notebook's <strong>evidence</strong>: on the next wiki compile they
@@ -65,6 +66,12 @@ document.addEventListener("nav", () => {
     list.innerHTML = ""
     setCount(root.querySelector("[data-nbp-src-count]"), sources.length)
     sec.hidden = false
+    const copyBtn = root.querySelector("[data-nbp-copy]")
+    copyBtn.hidden = sources.length === 0
+    copyBtn.onclick = () => {
+      const lines = sources.map((s, i) => "[" + (i + 1) + "] " + (s.title || s.url || s.id) + (s.url ? ". " + s.url : "."))
+      navigator.clipboard.writeText(lines.join("\\n")).then(() => { copyBtn.textContent = "✓ copied"; setTimeout(() => copyBtn.textContent = "⧉ copy", 1200) }).catch(() => { status.textContent = "copy blocked" })
+    }
     if (!sources.length) { list.innerHTML = "<li class='nbp-empty'>no sources linked yet — use “+ Add source”.</li>"; return }
     sources.forEach(s => {
       const li = document.createElement("li")
@@ -195,6 +202,8 @@ NotebookPage.css = `
 .notebook-page .nbp-count { color: var(--gray); font-weight: 400; }
 .notebook-page .nbp-add { float: right; text-transform: none; letter-spacing: 0; font-size: .74rem; padding: .15rem .55rem; border: 1px solid var(--secondary); background: transparent; color: var(--secondary); border-radius: 6px; cursor: pointer; }
 .notebook-page .nbp-add:hover { background: var(--secondary); color: var(--light); }
+.notebook-page .nbp-copy { float: right; text-transform: none; letter-spacing: 0; font-size: .72rem; padding: .15rem .5rem; margin-right: .4rem; border: 1px solid var(--lightgray); background: transparent; color: var(--secondary); border-radius: 6px; cursor: pointer; }
+.notebook-page .nbp-copy:hover { background: var(--lightgray); }
 .notebook-page .nbp-help { font-size: .76rem; color: var(--gray); line-height: 1.5; margin: .1rem 0 .5rem; max-width: 70ch; }
 .notebook-page .nbp-list { list-style: none; margin: 0; padding: 0; }
 .notebook-page .nbp-list li { display: flex; align-items: center; gap: .5rem; padding: .25rem 0; border-bottom: 1px solid color-mix(in srgb, var(--lightgray) 50%, transparent); font-size: .85rem; }

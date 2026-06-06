@@ -49,6 +49,18 @@ export async function linkNotebook(threadId: string, sourceId: string): Promise<
   return rows[0];
 }
 
+// The notebooks this source is currently a confirmed member of (SourceLinker).
+export async function listSourceNotebooks(sourceId: string): Promise<unknown[]> {
+  return await query(
+    `SELECT t.id, t.name, t.slug
+       FROM public.thread_sources ts
+       JOIN public.threads t ON t.id = ts.thread_id
+      WHERE ts.source_id = $1 AND ts.status = 'confirmed'
+      ORDER BY t.name`,
+    [sourceId],
+  );
+}
+
 // "Gravity" for the retract confirm dialog: N notebooks linked, M pages citing.
 export async function gravity(id: string): Promise<{ notebooks: number; pages: number }> {
   const nb = await query<{ n: number }>(

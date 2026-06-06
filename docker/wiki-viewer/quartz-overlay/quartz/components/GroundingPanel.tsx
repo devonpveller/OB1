@@ -24,7 +24,10 @@ const GroundingPanel: QuartzComponent = ({ fileData, displayClass }: QuartzCompo
         page deliberately, not an error report.
       </p>
       <section class="gp-sec" data-gp-sources hidden>
-        <h3 class="gp-h">Grounding sources <span class="gp-count" data-gp-src-count></span></h3>
+        <h3 class="gp-h">
+          Grounding sources <span class="gp-count" data-gp-src-count></span>
+          <button class="gp-copy" data-gp-copy hidden>⧉ copy</button>
+        </h3>
         <ul class="gp-list" data-gp-src-list></ul>
       </section>
       <button class="gp-ground" data-gp-ground>Ground this claim with a source</button>
@@ -54,6 +57,12 @@ document.addEventListener("nav", () => {
     list.innerHTML = ""
     root.querySelector("[data-gp-src-count]").textContent = "(" + sources.length + ")"
     sec.hidden = sources.length === 0
+    const copyBtn = root.querySelector("[data-gp-copy]")
+    copyBtn.hidden = sources.length === 0
+    copyBtn.onclick = () => {
+      const lines = sources.map((s, i) => "[" + (i + 1) + "] " + (s.title || s.url || s.id) + (s.url ? ". " + s.url : "."))
+      navigator.clipboard.writeText(lines.join("\\n")).then(() => { copyBtn.textContent = "✓ copied"; setTimeout(() => copyBtn.textContent = "⧉ copy", 1200) }).catch(() => {})
+    }
     sources.forEach(s => {
       const li = document.createElement("li")
       const a = document.createElement("a")
@@ -106,6 +115,8 @@ GroundingPanel.css = `
 .grounding-panel .gp-help { font-size: .76rem; color: var(--gray); line-height: 1.5; margin: .45rem 0 .5rem; max-width: 72ch; }
 .grounding-panel .gp-h { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--gray); margin: .3rem 0; }
 .grounding-panel .gp-count { color: var(--gray); font-weight: 400; }
+.grounding-panel .gp-copy { float: right; text-transform: none; letter-spacing: 0; font-size: .72rem; padding: .15rem .5rem; border: 1px solid var(--lightgray); background: transparent; color: var(--secondary); border-radius: 6px; cursor: pointer; }
+.grounding-panel .gp-copy:hover { background: var(--lightgray); }
 .grounding-panel .gp-list { list-style: none; margin: 0 0 .6rem; padding: 0; }
 .grounding-panel .gp-list li { display: flex; align-items: center; gap: .5rem; padding: .25rem 0; border-bottom: 1px solid color-mix(in srgb, var(--lightgray) 50%, transparent); font-size: .85rem; }
 .grounding-panel .gp-list li:last-child { border-bottom: 0; }

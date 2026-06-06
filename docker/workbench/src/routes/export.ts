@@ -16,39 +16,64 @@ import { safeJoin, safeRelPath } from "../util/paths.ts";
 
 export const exporter = new Hono();
 
-// Build a clean "## References" markdown list from a note's sources — the union
-// of frontmatter `sources:` (deliberately added) and `[[…source/<uuid>…]]`
-// cited in the body. Origin is intentionally DROPPED: the export is an official
-// citation list, not a record of how each entry got there.
+// Academic numbered-citation rewrite for export. Turns each `[[…source/<uuid>…|
+// alias]]` in the body into an inline marker `alias [N]` (or just `[N]`), numbered
+// by first appearance, and emits a matching numbered "## References" list — so the
+// export reads like a modern paper (Vancouver/IEEE-style). Frontmatter `sources:`
+// that aren't cited inline are appended to References after the cited ones. Origin
+// is dropped — the References list is just the citations. Non-source wikilinks
+// degrade to their alias text. Returns the citation-rewritten markdown.
 const UUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
-async function referencesSection(md: string): Promise<string> {
-  const ids: string[] = [];
-  const add = (u: string) => {
-    if (UUID_RE.test(u) && !ids.includes(u)) ids.push(u);
+const SOURCE_LINK_RE = /\[\[([^\]|]*?source\/([0-9a-fA-F-]{36}))(?:\|([^\]]+))?\]\]/g;
+async function applyCitations(md: string): Promise<string> {
+  const order: string[] = [];
+  const numFor = new Map<string, number>();
+  const enrol = (u: string) => {
+    if (UUID_RE.test(u) && !numFor.has(u)) {
+      order.push(u);
+      numFor.set(u, order.length);
+    }
   };
+  // 1) number cited source links by first appearance
+  let m: RegExpExecArray | null;
+  SOURCE_LINK_RE.lastIndex = 0;
+  while ((m = SOURCE_LINK_RE.exec(md))) enrol(m[2]);
+  // 2) then deliberately-added (frontmatter) sources, appended
   const fmMatch = md.match(/^---\n([\s\S]*?)\n---/);
   if (fmMatch) {
     const sm = fmMatch[1].match(/^sources:\s*\[([^\]]*)\]\s*$/m);
-    if (sm) sm[1].split(",").forEach((s) => add(s.trim().replace(/^["']|["']$/g, "")));
+    if (sm) sm[1].split(",").forEach((s) => enrol(s.trim().replace(/^["']|["']$/g, "")));
   }
-  const bodyRe = /\[\[[^\]]*source\/([0-9a-fA-F-]{36})/g;
-  let m: RegExpExecArray | null;
-  while ((m = bodyRe.exec(md))) add(m[1]);
-  if (!ids.length) return "";
-  const rows = await query<{ id: string; title: string; url: string }>(
-    `SELECT id::text AS id, title, url FROM public.sources WHERE id = ANY($1::uuid[])`,
-    [ids],
-  ).catch(() => []);
-  const byId = new Map(rows.map((r) => [r.id, r]));
-  const items = ids
-    .map((u) => byId.get(u))
-    .filter(Boolean)
-    .map((r) => {
-      const title = (r!.title || "Untitled source").replace(/\n/g, " ");
-      return r!.url ? `1. ${title}. <${r!.url}>` : `1. ${title}.`;
-    });
-  if (!items.length) return "";
-  return "\n\n## References\n\n" + items.join("\n") + "\n";
+
+  // 3) replace cited links inline with `alias [N]` / `[N]`
+  let out = md.replace(SOURCE_LINK_RE, (_full, _target, uuid, alias) => {
+    const n = numFor.get(uuid);
+    const label = (alias || "").trim();
+    return label ? `${label} [${n}]` : `[${n}]`;
+  });
+  // 4) non-source wikilinks → alias text / basename
+  out = out
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
+    .replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
+
+  // 5) numbered References list matching the [N] markers
+  if (order.length) {
+    const rows = await query<{ id: string; title: string; url: string }>(
+      `SELECT id::text AS id, title, url FROM public.sources WHERE id = ANY($1::uuid[])`,
+      [order],
+    ).catch(() => []);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const lines = order
+      .map((u) => {
+        const r = byId.get(u);
+        if (!r) return null;
+        const title = (r.title || "Untitled source").replace(/\n/g, " ");
+        return `[${numFor.get(u)}] ${title}${r.url ? `. <${r.url}>` : "."}`;
+      })
+      .filter(Boolean);
+    if (lines.length) out += "\n\n## References\n\n" + lines.join("\n\n");
+  }
+  return out;
 }
 
 interface Fmt {
@@ -76,6 +101,8 @@ const FORMATS: Record<string, Fmt> = {
 exporter.get("/", async (c) => {
   const path = c.req.query("path") || "";
   const fmt = (c.req.query("format") || "pdf").toLowerCase();
+  // wrap=none → no hard line-wrapping (used by "Copy page" so pasted text flows).
+  const noWrap = (c.req.query("wrap") || "").toLowerCase() === "none";
   if (fmt !== "md" && !FORMATS[fmt]) return c.json({ error: `unsupported format: ${fmt}` }, 400);
 
   let rel: string;
@@ -101,15 +128,9 @@ exporter.get("/", async (c) => {
   }
 
   const spec = FORMATS[fmt];
-  // Append a clean "## References" list (cited + deliberately-added sources)
-  // BEFORE stripping wikilinks, so the export carries an official citation list.
-  const withRefs = md + (await referencesSection(md));
-  // pandoc doesn't understand Obsidian `[[wikilinks]]` and would print them
-  // literally. Convert to plain readable text: `[[target|alias]]` → alias,
-  // `[[target]]` → the target's basename. (md export keeps them verbatim.)
-  const pandocMd = withRefs
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
+  // Rewrite citations to numbered [N] markers + a matching ## References list,
+  // and degrade non-source wikilinks to plain text (pandoc can't read [[…]]).
+  const pandocMd = await applyCitations(md);
   const noteDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
   // Resolve relative images from both the vault root and the note's folder
   // (absolute paths — pandoc's cwd is the scratch tmp dir, not the vault).
@@ -126,6 +147,7 @@ exporter.get("/", async (c) => {
       spec.to,
       "--resource-path",
       resPath,
+      ...(noWrap ? ["--wrap=none"] : []),
       ...spec.extra,
       "-o",
       outFile,
