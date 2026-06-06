@@ -6,7 +6,15 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { safeRelPath } from "../util/paths.ts";
-import { vaultCommitPath, vaultExists, vaultFileHistory, vaultRead } from "../util/vault.ts";
+import {
+  vaultCommitPath,
+  vaultDiscard,
+  vaultExists,
+  vaultFileHistory,
+  vaultGitShow,
+  vaultRead,
+  vaultWrite,
+} from "../util/vault.ts";
 
 function authorOf(c: Context): string {
   return (
@@ -61,4 +69,36 @@ noteCommit.post("/", async (c) => {
   }
   const res = await vaultCommitPath("notes/", "notes: commit pending edits (compile)");
   return c.json(res);
+});
+
+// POST /workbench/note-commit/revert?path=…&hash=… — commit current edits, then
+// restore the note's content from commit <hash> (a new working draft = revert).
+noteCommit.post("/revert", async (c) => {
+  let rel: string;
+  try {
+    rel = notePath(c);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+  const hash = (c.req.query("hash") || "").toString();
+  if (!hash) return c.json({ error: "hash is required" }, 400);
+  const content = await vaultGitShow(hash, rel);
+  if (content == null) return c.json({ error: "revision not found" }, 404);
+  await vaultCommitPath(rel, `notes: commit before revert ${rel}`, authorOf(c));
+  await vaultWrite(rel, content);
+  return c.json({ ok: true });
+});
+
+// POST /workbench/note-commit/discard?path=… — drop uncommitted edits (restore
+// the working file from HEAD).
+noteCommit.post("/discard", async (c) => {
+  let rel: string;
+  try {
+    rel = notePath(c);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+  if (!(await vaultExists(rel))) return c.json({ error: "note not found" }, 404);
+  await vaultDiscard(rel);
+  return c.json({ ok: true });
 });

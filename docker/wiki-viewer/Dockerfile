@@ -86,8 +86,7 @@ RUN { \
   echo 'export { default as SourceEditor } from "./SourceEditor"'; \
   echo 'export { default as SourceLinker } from "./SourceLinker"'; \
   echo 'export { default as ImportStatus } from "./ImportStatus"'; \
-  echo 'export { default as SourceRevisions } from "./SourceRevisions"'; \
-  echo 'export { default as NoteRevisions } from "./NoteRevisions"'; \
+  echo 'export { default as RevisionHistory } from "./RevisionHistory"'; \
   } >> /quartz/quartz/components/index.ts
 
 # Mount the overlay components in the content page (after Backlinks).
@@ -107,8 +106,8 @@ RUN set -e; \
 RUN set -e; \
   L=/quartz/quartz.layout.ts; \
   grep -q 'afterBody: \[\],' "$L"; \
-  sed -i 's#afterBody: \[\],#afterBody: [Component.PageTools(), Component.NotebookPage(), Component.NotebookIndex(), Component.ImportStatus(), Component.GroundingPanel(), Component.SourceEditor(), Component.SourceLinker(), Component.SourceRetractor(), Component.SourceRevisions(), Component.NoteReferences(), Component.NoteRevisions()],#' "$L"; \
-  grep -q 'Component.NoteReferences(), Component.NoteRevisions()' "$L"
+  sed -i 's#afterBody: \[\],#afterBody: [Component.PageTools(), Component.NotebookPage(), Component.NotebookIndex(), Component.ImportStatus(), Component.GroundingPanel(), Component.SourceEditor(), Component.SourceLinker(), Component.SourceRetractor(), Component.NoteReferences(), Component.RevisionHistory()],#' "$L"; \
+  grep -q 'Component.NoteReferences(), Component.RevisionHistory()' "$L"
 
 # Also mount NotesEditor on the LIST/FOLDER page layout (its beforeBody is a
 # single-line array), so "✎ Write a note" is reachable from every folder level,

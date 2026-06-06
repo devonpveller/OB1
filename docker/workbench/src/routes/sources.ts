@@ -83,6 +83,25 @@ sources.get("/:id/revisions", async (c) => {
   return c.json({ revisions: await repo.listRevisions(c.req.param("id")) });
 });
 
+// POST /workbench/sources/:id/commit — deliberate "commit now" (head → revision).
+sources.post("/:id/commit", async (c) => {
+  return c.json(await repo.commitOne(c.req.param("id"), authorOf(c)));
+});
+
+// POST /workbench/sources/:id/revert/:rev — commit current, restore revision :rev.
+sources.post("/:id/revert/:rev", async (c) => {
+  const res = await repo.revertToRevision(c.req.param("id"), Number(c.req.param("rev")), authorOf(c));
+  if (!res) return c.json({ error: "revision not found" }, 404);
+  return c.json(res);
+});
+
+// POST /workbench/sources/:id/discard — drop uncommitted edits (reset to latest).
+sources.post("/:id/discard", async (c) => {
+  const res = await repo.discardToLatest(c.req.param("id"), authorOf(c));
+  if (!res) return c.json({ error: "nothing to discard (no committed revision)" }, 400);
+  return c.json(res);
+});
+
 // PATCH /workbench/sources/:id { content?, title? } — UPDATE (records a
 // revision). No "replace" affordance exists; "a better source" = add a new one.
 sources.patch("/:id", async (c) => {

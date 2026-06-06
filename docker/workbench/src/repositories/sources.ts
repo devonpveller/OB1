@@ -160,6 +160,63 @@ export async function commitPending(): Promise<{ committed: number }> {
   });
 }
 
+// Deliberate commit-now: snapshot THIS source's head as a revision if it differs
+// from the latest committed one (used by "Commit now" + the revert flow).
+export async function commitOne(
+  id: string,
+  author = "operator",
+): Promise<{ committed: boolean; revision?: number }> {
+  return await withTransaction(async (c) => {
+    const head = (await c.queryObject<{ content: string; title: string }>(
+      `SELECT content, title FROM public.sources WHERE id = $1`,
+      [id],
+    )).rows[0];
+    if (!head) return { committed: false };
+    const latest = (await c.queryObject<{ content: string; title: string }>(
+      `SELECT content, title FROM public.source_revisions WHERE source_id = $1 ORDER BY revision DESC LIMIT 1`,
+      [id],
+    )).rows[0];
+    if (latest && latest.content === head.content && latest.title === head.title) return { committed: false };
+    const next = (await c.queryObject<{ n: number }>(
+      `SELECT COALESCE(MAX(revision), 0) + 1 AS n FROM public.source_revisions WHERE source_id = $1`,
+      [id],
+    )).rows[0].n;
+    await c.queryObject(
+      `INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by) VALUES ($1, $2, $3, $4, $5)`,
+      [id, next, head.content, head.title, author],
+    );
+    return { committed: true, revision: next };
+  });
+}
+
+async function revisionContent(id: string, rev: number): Promise<{ content: string; title: string } | null> {
+  const rows = await query<{ content: string; title: string }>(
+    `SELECT content, title FROM public.source_revisions WHERE source_id = $1 AND revision = $2`,
+    [id, rev],
+  );
+  return rows[0] ?? null;
+}
+
+// Revert: preserve current edits as a revision, then set the head to revision
+// `rev`'s content (a new working draft that re-commits as the revert).
+export async function revertToRevision(id: string, rev: number, author = "operator"): Promise<{ source: Source } | null> {
+  const target = await revisionContent(id, rev);
+  if (!target) return null;
+  await commitOne(id, author);
+  return await updateSource(id, target.content, target.title, author);
+}
+
+// Discard: drop uncommitted edits — reset the head to the latest committed
+// revision (no new revision). No-op if there are no revisions yet.
+export async function discardToLatest(id: string, author = "operator"): Promise<{ source: Source } | null> {
+  const latest = (await query<{ content: string; title: string }>(
+    `SELECT content, title FROM public.source_revisions WHERE source_id = $1 ORDER BY revision DESC LIMIT 1`,
+    [id],
+  ))[0];
+  if (!latest) return null;
+  return await updateSource(id, latest.content, latest.title, author);
+}
+
 // Reversible STAGED retract (global). retraction_committed_at stays NULL =
 // staged; the compile tick commits it. Restore clears all three.
 export async function retractStaged(id: string, by = "operator"): Promise<Source | null> {

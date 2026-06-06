@@ -66,6 +66,17 @@ export async function vaultCommitPath(
   return { committed: true };
 }
 
+// File content at a specific commit (for revert) — `git show <hash>:<path>`.
+export async function vaultGitShow(hash: string, relPath: string): Promise<string | null> {
+  const r = await git(["show", `${hash}:${relPath}`]);
+  return r.ok ? r.out : null;
+}
+
+// Discard uncommitted working changes to a file — restore it from HEAD.
+export async function vaultDiscard(relPath: string): Promise<void> {
+  await git(["checkout", "HEAD", "--", relPath]);
+}
+
 // Git history of a single file: recent commits (hash, author, date, message) +
 // the file content at each (for line diffs). Bounded to `limit` commits.
 export async function vaultFileHistory(
