@@ -35,7 +35,10 @@ const UploadModal: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
               <input type="file" data-iz-file hidden />
               <span>Drop a file or click to import (PDF, DOC/DOCX, PPT/PPTX, image, audio…)</span>
             </label>
-            <input class="um-url" data-iz-url placeholder="…or paste a URL to ingest" />
+            <div class="um-url-row">
+              <input class="um-url" data-iz-url placeholder="…or paste a URL to ingest" />
+              <button type="button" class="um-url-go" data-iz-url-go>Import URL</button>
+            </div>
           </div>
           <div data-um-panel="link" hidden>
             <input class="um-search" data-um-search placeholder="search existing sources by title/content…" />
@@ -141,6 +144,10 @@ document.addEventListener("nav", () => {
     } catch (e) { status.textContent = "✗ " + (e && e.message ? e.message : e) }
   }
   root.querySelector("[data-iz-file]").addEventListener("change", (e) => send(e.target.files[0]))
+  // URL ingest: a submit button + Enter both commit the pasted URL (was missing).
+  const urlInput = root.querySelector("[data-iz-url]")
+  root.querySelector("[data-iz-url-go]").addEventListener("click", () => send())
+  urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); send() } })
   ;["dragover","dragenter"].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("iz-over") }))
   ;["dragleave","drop"].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove("iz-over")))
   drop.addEventListener("drop", (e) => { e.preventDefault(); send(e.dataTransfer.files[0]) })
@@ -200,7 +207,10 @@ UploadModal.css = `
 .um-box .um-modes button.um-mode-active { background: var(--secondary); color: var(--light); border-color: var(--secondary); }
 .um-box .iz-drop { border: 2px dashed var(--lightgray); border-radius: 8px; padding: 1.5rem; text-align: center; cursor: pointer; display: block; }
 .um-box .iz-drop.iz-over { border-color: var(--secondary); background: var(--lightgray); }
-.um-box .um-url, .um-box .um-search { width: 100%; padding: .4rem .5rem; margin-top: .5rem; }
+.um-box .um-url-row { display: flex; gap: .4rem; margin-top: .5rem; }
+.um-box .um-url { flex: 1; padding: .4rem .5rem; }
+.um-box .um-url-go { font-size: .8rem; padding: .4rem .7rem; border: 1px solid var(--secondary); background: var(--secondary); color: var(--light); border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.um-box .um-search { width: 100%; padding: .4rem .5rem; margin-top: .5rem; }
 .um-box .um-results { margin-top: .5rem; max-height: 220px; overflow: auto; }
 .um-box .um-result-item { padding: .4rem .5rem; border: 1px solid var(--lightgray); border-radius: 6px; margin-bottom: .3rem; cursor: pointer; font-size: .82rem; }
 .um-box .um-result-item:hover { background: var(--lightgray); }

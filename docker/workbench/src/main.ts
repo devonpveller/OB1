@@ -24,7 +24,7 @@ import { requireBrainKey } from "./middleware/auth.ts";
 import { health } from "./routes/health.ts";
 import { notebooks } from "./routes/notebooks.ts";
 import { notes } from "./routes/notes.ts";
-import { sources } from "./routes/sources.ts";
+import { sources, sourceCommit } from "./routes/sources.ts";
 import { imports, jobs } from "./routes/import.ts";
 import { grounding } from "./routes/grounding.ts";
 import { exporter } from "./routes/export.ts";
@@ -55,6 +55,7 @@ app.use("/workbench/*", requireBrainKey);
 app.route("/workbench/notebooks", notebooks); // P2
 app.route("/workbench/notes", notes); // P3
 app.route("/workbench/sources", sources); // P4
+app.route("/workbench/source-commit", sourceCommit); // P4.7 — compile-time revision commit
 app.route("/workbench/import", imports); // P5 (single upload route; P6 grounding too)
 app.route("/workbench/jobs", jobs); // P5
 app.route("/workbench/grounding", grounding); // P6

@@ -32,6 +32,7 @@ services:
       - ./init-content-types.sql:/docker-entrypoint-initdb.d/84-init-content-types.sql:ro
       - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro
       - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/88-init-import-jobs.sql:ro
+      - ./init-source-editing.sql:/docker-entrypoint-initdb.d/90-init-source-editing.sql:ro
     networks: [pnet]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]

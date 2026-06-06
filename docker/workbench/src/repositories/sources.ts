@@ -6,7 +6,7 @@ import type { Source, SourceRevision } from "../types.ts";
 
 const COLS =
   "id, url, title, content, content_type, notebook, retracted_at, retracted_by, " +
-  "retraction_committed_at, created_at, updated_at";
+  "retraction_committed_at, last_edited_by, last_edited_at, created_at, updated_at";
 
 export async function getSource(id: string): Promise<Source | null> {
   const rows = await query<Source>(`SELECT ${COLS} FROM public.sources WHERE id = $1`, [id]);
@@ -76,47 +76,87 @@ export async function gravity(id: string): Promise<{ notebooks: number; pages: n
 
 export async function listRevisions(id: string): Promise<Partial<SourceRevision>[]> {
   return await query<Partial<SourceRevision>>(
-    `SELECT revision, title, edited_at, edited_by, length(content) AS content_len
+    // content INCLUDED so the UI can compute per-revision line diffs.
+    `SELECT revision, title, content, edited_at, edited_by, length(content) AS content_len
        FROM public.source_revisions WHERE source_id = $1 ORDER BY revision DESC`,
     [id],
   );
 }
 
-// Update IN PLACE, never replace (D-D): snapshot the prior head into
-// source_revisions, then update sources.content/title. `source_id` is stable, so
-// thread_sources / source_entities / search stay valid. Re-embed is automatic
-// via the fingerprint-gated queue trigger; a metadata/title-only edit (content
-// unchanged) leaves the content fingerprint untouched. ONE transaction (G8).
+// Update the WORKING HEAD in place (P4.7 redesign). Edits do NOT each create a
+// revision — they update sources.content/title and stamp last_edited_by/at. A
+// revision is committed once per compile (commitPending). To keep a baseline for
+// the first diff, the ORIGINAL head is snapshotted as revision 1 on the very
+// first edit (only if no revisions exist yet). `source_id` is stable, so
+// thread_sources / source_entities / search stay valid. ONE transaction (G8).
 export async function updateSource(
   id: string,
   content: string | null,
   title: string | null,
   editedBy = "operator",
-): Promise<{ source: Source; revision: number } | null> {
+): Promise<{ source: Source } | null> {
   return await withTransaction(async (c) => {
     const exists = await c.queryObject<{ id: string }>(
       `SELECT id FROM public.sources WHERE id = $1`,
       [id],
     );
     if (exists.rows.length === 0) return null;
-    const next = (await c.queryObject<{ n: number }>(
-      `SELECT COALESCE(MAX(revision), 0) + 1 AS n FROM public.source_revisions WHERE source_id = $1`,
+    const revCount = (await c.queryObject<{ n: number }>(
+      `SELECT count(*)::int AS n FROM public.source_revisions WHERE source_id = $1`,
       [id],
     )).rows[0].n;
-    // Snapshot the CURRENT head as the prior revision.
-    await c.queryObject(
-      `INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by)
-       SELECT id, $2, content, title, $3 FROM public.sources WHERE id = $1`,
-      [id, next, editedBy],
-    );
+    if (revCount === 0) {
+      // Baseline = the original (pre-edit) head, so a diff has a "before".
+      await c.queryObject(
+        `INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by)
+         SELECT id, 1, content, title, 'original' FROM public.sources WHERE id = $1`,
+        [id],
+      );
+    }
     const upd = await c.queryObject<Source>(
       `UPDATE public.sources
-          SET content = COALESCE($2, content), title = COALESCE($3, title)
+          SET content = COALESCE($2, content), title = COALESCE($3, title),
+              last_edited_by = $4, last_edited_at = now()
         WHERE id = $1
         RETURNING ${COLS}`,
-      [id, content, title],
+      [id, content, title, editedBy],
     );
-    return { source: upd.rows[0], revision: next };
+    return { source: upd.rows[0] };
+  });
+}
+
+// Commit working heads to source_revisions — ONE revision per dirty source per
+// compile (the wiki-service calls this at compile start). "Dirty" = the head
+// content/title differs from the source's latest committed revision. The new
+// revision is stamped with last_edited_by (the working-head author).
+export async function commitPending(): Promise<{ committed: number }> {
+  return await withTransaction(async (c) => {
+    const dirty = await c.queryObject<
+      { id: string; content: string; title: string; last_edited_by: string }
+    >(
+      `SELECT s.id, s.content, s.title, COALESCE(s.last_edited_by, 'operator') AS last_edited_by
+         FROM public.sources s
+         LEFT JOIN LATERAL (
+           SELECT content, title FROM public.source_revisions r
+            WHERE r.source_id = s.id ORDER BY revision DESC LIMIT 1
+         ) lr ON true
+        WHERE s.last_edited_at IS NOT NULL
+          AND (lr.content IS DISTINCT FROM s.content OR lr.title IS DISTINCT FROM s.title)`,
+    );
+    let committed = 0;
+    for (const s of dirty.rows) {
+      const next = (await c.queryObject<{ n: number }>(
+        `SELECT COALESCE(MAX(revision), 0) + 1 AS n FROM public.source_revisions WHERE source_id = $1`,
+        [s.id],
+      )).rows[0].n;
+      await c.queryObject(
+        `INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [s.id, next, s.content, s.title, s.last_edited_by],
+      );
+      committed++;
+    }
+    return { committed };
   });
 }
 
@@ -164,12 +204,13 @@ export async function purge(id: string): Promise<boolean> {
 // URL re-fetch → NEW revision (never head overwrite, never a duplicate). A
 // real deployment would route the fetched HTML through openbrain-extract; this
 // stores the fetched text and appends it as a revision via updateSource.
-export async function refetch(id: string): Promise<{ source: Source; revision: number } | null> {
+export async function refetch(id: string): Promise<{ source: Source } | null> {
   const src = await getSource(id);
   if (!src) return null;
   if (!src.url) throw new Error("source has no URL to re-fetch");
   const r = await fetch(src.url, { redirect: "follow" });
   if (!r.ok) throw new Error(`re-fetch HTTP ${r.status}`);
   const text = await r.text();
+  // Re-fetch updates the working head; the new revision commits at the next compile.
   return await updateSource(id, text, null, "refetch");
 }

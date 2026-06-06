@@ -646,6 +646,28 @@ async function sweepOrphanLeafPages() {
   return { kept: keptThoughts.size + keptSources.size, deleted };
 }
 
+// P4.7 — commit working source-content edits as revisions, ONE per compile.
+// The workbench tracks edits as a working head; this snapshots every dirty head
+// into source_revisions (stamped with its author). Best-effort: a failure must
+// never abort the compile.
+const WORKBENCH_URL = ENV.WORKBENCH_URL || "http://openbrain-workbench:8000";
+async function commitSourceEdits() {
+  try {
+    const r = await fetch(`${WORKBENCH_URL}/workbench/source-commit`, {
+      method: "POST",
+      headers: { "X-Brain-Key": ENV.WORKBENCH_KEY || "" },
+    });
+    if (r.ok) {
+      const j = await r.json().catch(() => ({}));
+      if (j.committed) console.log(`[wiki-service] committed ${j.committed} source revision(s)`);
+    } else {
+      console.error(`[wiki-service] source-commit HTTP ${r.status} (non-fatal)`);
+    }
+  } catch (e) {
+    console.error(`[wiki-service] source-commit failed (non-fatal): ${e.message}`);
+  }
+}
+
 async function compile(reason) {
   if (running) return { skipped: true, reason: "compile already in progress" };
   running = true;
@@ -653,6 +675,8 @@ async function compile(reason) {
   console.log(`[wiki-service] compile start (${reason})`);
   try {
     await ensureRepo();
+    // P4.7 — commit dirty source working-heads as revisions (one per compile).
+    await commitSourceEdits();
     // Pull the user's note commits first (evolving repo; no wipe/force).
     const pull = await gitPullRebase();
     const state = await readState();

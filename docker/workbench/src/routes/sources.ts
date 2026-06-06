@@ -8,6 +8,19 @@ import { logChange } from "../util/changeslog.ts";
 
 export const sources = new Hono();
 
+// Change author = the Authelia-forwarded user (P4.7). Caddy/Authelia inject one
+// of these on the authenticated request; the preview has no auth → "operator".
+// The id can later be mapped to a display name.
+function authorOf(c: Context): string {
+  return (
+    c.req.header("Remote-User") ||
+    c.req.header("X-Forwarded-User") ||
+    c.req.header("X-Remote-User") ||
+    c.req.header("X-Forwarded-Preferred-Username") ||
+    "operator"
+  ).toString();
+}
+
 // Reject a non-UUID :id with a clean 400 up front, instead of letting Postgres
 // 500 on "invalid input syntax for type uuid" (e.g. an entity id typed into a
 // source field). Guards every /:id and /:id/* route.
@@ -77,7 +90,7 @@ sources.patch("/:id", async (c) => {
     c.req.param("id"),
     body?.content ?? null,
     body?.title ?? null,
-    body?.edited_by ?? "operator",
+    authorOf(c),
   );
   if (!res) return c.json({ error: "not found" }, 404);
   return c.json(res);
@@ -135,4 +148,16 @@ sources.delete("/:id", async (c) => {
   if (!ok) return c.json({ error: "not found" }, 404);
   await logChange({ action: "purge (irreversible)", detail: `source ${c.req.param("id")}` });
   return c.json({ purged: true });
+});
+
+// Separate router (no :id UUID guard) — the wiki-service POSTs this at compile
+// start to commit every dirty working head as ONE revision (P4.7). Mounted at
+// /workbench/source-commit in main.ts.
+export const sourceCommit = new Hono();
+sourceCommit.post("/", async (c) => {
+  const res = await repo.commitPending();
+  if (res.committed > 0) {
+    await logChange({ action: "source revisions committed", detail: `${res.committed} source(s) at compile` });
+  }
+  return c.json(res);
 });

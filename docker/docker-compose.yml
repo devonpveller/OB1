@@ -44,6 +44,7 @@ services:
       - ./init-content-types.sql:/docker-entrypoint-initdb.d/84-init-content-types.sql:ro        # P5
       - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro        # P5
       - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/88-init-import-jobs.sql:ro            # P5
+      - ./init-source-editing.sql:/docker-entrypoint-initdb.d/90-init-source-editing.sql:ro     # P4.7
     networks:
       - obnet
     restart: unless-stopped
@@ -353,6 +354,10 @@ services:
       OPEN_BRAIN_URL: http://openbrain-rest
       OPEN_BRAIN_SERVICE_KEY: local-trust
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # P4.7 — commit working source-content edits as revisions, one per compile
+      # (service-to-service call to the workbench; needs the X-Brain-Key).
+      WORKBENCH_URL: http://openbrain-workbench:8000
+      WORKBENCH_KEY: ${MCP_ACCESS_KEY}
       LLM_BASE_URL: http://llama-cpp:8080/v1
       LLM_API_KEY: not-needed
       LLM_MODEL: qwen36-27b:nothink

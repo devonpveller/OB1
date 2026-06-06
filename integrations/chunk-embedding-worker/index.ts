@@ -99,6 +99,43 @@ async function embed(text: string): Promise<number[]> {
 }
 const toVector = (v: number[]) => `[${v.join(",")}]`;
 
+// Detect non-text/binary content (e.g. raw PDF bytes that slipped past
+// extraction). The embedding endpoint rejects invalid UTF-8 with a 500, and a
+// source that never embeds would otherwise be re-scanned forever (poison pill).
+function looksBinary(s: string): boolean {
+  if (!s) return false;
+  if (s.startsWith("%PDF-")) return true;
+  const sample = s.slice(0, 4000);
+  let bad = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    if (c === 0) return true; // NUL → binary
+    if (c >= 0xd800 && c <= 0xdfff) return true; // lone/UTF-16 surrogate → binary
+    if (c < 9 || (c > 13 && c < 32)) bad++; // control chars
+  }
+  return bad / Math.max(1, sample.length) > 0.05;
+}
+
+const CONTENT_ERROR_RE = /parse_error|surrogate|invalid string|invalid utf|not.?valid|byte sequence/i;
+
+// Stamp a source as processed (chunked_hash) — optionally with an error note —
+// so it is NOT re-scanned until its content actually changes (md5 differs).
+async function markProcessed(id: string, h: string, error?: string): Promise<void> {
+  const tx = await pool.connect();
+  try {
+    await tx.queryObject(
+      `UPDATE public.sources
+          SET metadata = COALESCE(metadata, '{}'::jsonb)
+                         || jsonb_build_object('chunked_hash', $2::text)
+                         || $3::jsonb
+        WHERE id = $1::uuid`,
+      [id, h, error ? JSON.stringify({ chunk_error: error }) : "{}"],
+    );
+  } finally {
+    tx.release();
+  }
+}
+
 // ── drain: (re)chunk sources whose content changed since last chunked ────
 async function drainChunks(limit: number): Promise<{ sources: number; chunks: number }> {
   // Fetch the due set, then release the scan connection before the (slow,
@@ -112,6 +149,7 @@ async function drainChunks(limit: number): Promise<{ sources: number; chunks: nu
         WHERE COALESCE(content, '') <> ''
           AND content_type <> 'research_synthesis'
           AND retraction_committed_at IS NULL
+          AND NOT COALESCE((metadata->>'deleted')::boolean, false)
           AND md5(content) IS DISTINCT FROM (metadata->>'chunked_hash')
         ORDER BY updated_at DESC
         LIMIT $1`,
@@ -124,13 +162,29 @@ async function drainChunks(limit: number): Promise<{ sources: number; chunks: nu
 
   let nSources = 0, nChunks = 0;
   for (const row of due) {
+    // Skip non-text/binary content up front (e.g. raw PDF bytes that escaped
+    // extraction) — it can never embed, and marking it processed stops it from
+    // being re-scanned every cycle (the poison-pill loop that hammered the
+    // embed endpoint).
+    if (looksBinary(row.content)) {
+      console.error(`skipping binary/non-text content for ${row.id}`);
+      await markProcessed(row.id, row.h, "binary_content");
+      continue;
+    }
     const chunks = chunkText(row.content);
     let embs: string[];
     try {
       embs = [];
       for (const c of chunks) embs.push(toVector(await embed(c)));
     } catch (e) {
-      console.error(`embed failed for ${row.id}:`, (e as Error).message);
+      const msg = (e as Error).message;
+      console.error(`embed failed for ${row.id}:`, msg);
+      // A CONTENT problem (invalid UTF-8 etc.) will never succeed → mark it
+      // processed so it doesn't loop. A TRANSIENT failure (endpoint down) is
+      // left un-stamped so it retries on the next scan.
+      if (CONTENT_ERROR_RE.test(msg)) {
+        await markProcessed(row.id, row.h, `embed_failed: ${msg.slice(0, 120)}`);
+      }
       continue;
     }
     const tx = await pool.connect();
