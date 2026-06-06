@@ -706,10 +706,13 @@ document.addEventListener("nav", () => {
       isSource ? "/workbench/sources/" + encodeURIComponent(sourceId) : api(apiPath)
     const savePayload = (content: string) =>
       isSource ? { content } : (lastHash ? { content, if_match: lastHash } : { content })
-    const save = async (body: string) => {
+    const save = async (body: string, commitNow?: boolean) => {
       const content = composeContent(body)
+      // Notes: autosave is a working draft (no git commit); Done adds ?commit=1
+      // to record an authored revision. Sources PATCH the head (commit at compile).
+      const url = isSource ? saveUrl() : api(apiPath) + (commitNow ? "?commit=1" : "")
       try {
-        const r = await fetch(saveUrl(), {
+        const r = await fetch(url, {
           method: isSource ? "PATCH" : "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(savePayload(content)),
@@ -717,7 +720,14 @@ document.addEventListener("nav", () => {
         const j = await r.json().catch(() => ({}))
         if (r.ok) {
           if (!isSource) lastHash = j.hash
-          setStatus(isSource ? "✓ saved (working draft — a revision commits at the next compile)" : "✓ saved")
+          setStatus(
+            isSource
+              ? "✓ saved (working draft — a revision commits at the next compile)"
+              : commitNow
+              ? "✓ committed a revision"
+              : "✓ saved (draft — commit on Done, or at the next compile)",
+          )
+          if (!isSource) document.dispatchEvent(new CustomEvent("workbench-note-saved"))
         } else if (r.status === 409) {
           setStatus("⚠ changed elsewhere — reopen to merge")
         } else {
@@ -746,7 +756,8 @@ document.addEventListener("nav", () => {
       }
       setStatus("saving…")
       const body = view.state.doc.toString()
-      await save(body)
+      // Notes: Done commits the working draft as an authored revision.
+      await save(body, !isSource)
       hideLinkPopover()
       window.removeEventListener("beforeunload", flush)
       ;(window as any).__neEditing = false

@@ -5,7 +5,7 @@ import { config } from "../config.ts";
 import { safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
-import { vaultCommit, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
+import { vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
 
 const enc = new TextEncoder();
 
@@ -34,6 +34,7 @@ export async function writeNote(
   notePath: string,
   content: string,
   ifMatch?: string | null,
+  opts?: { commit?: boolean; author?: string },
 ): Promise<{ hash: string } | { conflict: true; current: string }> {
   const rel = notesRel(notePath);
   if (ifMatch != null && (await vaultExists(rel))) {
@@ -41,7 +42,10 @@ export async function writeNote(
     if (current !== ifMatch) return { conflict: true, current };
   }
   await vaultWrite(rel, content);
-  await vaultCommit(`notes: write ${rel}`);
+  // Working-draft model (P4.7): autosave writes WITHOUT committing; only an
+  // explicit commit (Done / "commit now") records a git revision — authored by
+  // the Authelia user. The compile catches any still-uncommitted notes.
+  if (opts?.commit) await vaultCommitPath(rel, `notes: edit ${rel}`, opts.author);
   return { hash: await sha256(content) };
 }
 

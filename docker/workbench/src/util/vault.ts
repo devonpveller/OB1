@@ -42,6 +42,54 @@ export async function vaultRead(relPath: string): Promise<string> {
   return await Deno.readTextFile(safeJoin(config.vault.gitDir, relPath));
 }
 
+// Commit ONLY the given path (a note, or a dir like "notes/") if it has staged
+// changes, optionally attributing the commit to `author` (the Authelia user, for
+// note "commit now" / Done). P4.7-style working-draft model for notes: writes
+// don't commit; this does. Retries once on the wiki-service's index lock.
+export async function vaultCommitPath(
+  relPath: string,
+  message: string,
+  author?: string,
+): Promise<{ committed: boolean }> {
+  await git(["add", relPath]);
+  const status = await git(["status", "--porcelain", relPath]);
+  if (!status.out.trim()) return { committed: false };
+  const args = ["commit", "-q"];
+  if (author) args.push(`--author=${author} <${author}@notes.local>`);
+  args.push("-m", message);
+  let res = await git(args);
+  if (!res.ok && /index\.lock/.test(res.err)) {
+    await new Promise((r) => setTimeout(r, 500));
+    res = await git(args);
+  }
+  if (!res.ok) throw new Error(`git commit failed: ${res.err.slice(0, 300)}`);
+  return { committed: true };
+}
+
+// Git history of a single file: recent commits (hash, author, date, message) +
+// the file content at each (for line diffs). Bounded to `limit` commits.
+export async function vaultFileHistory(
+  relPath: string,
+  limit = 20,
+): Promise<{ hash: string; author: string; date: string; message: string; content: string }[]> {
+  const log = await git([
+    "log",
+    `-n${limit}`,
+    "--format=%H%x1f%an%x1f%aI%x1f%s",
+    "--",
+    relPath,
+  ]);
+  if (!log.ok) return [];
+  const rows = log.out.split("\n").filter((l) => l.trim());
+  const out: { hash: string; author: string; date: string; message: string; content: string }[] = [];
+  for (const r of rows) {
+    const [hash, author, date, message] = r.split("\x1f");
+    const show = await git(["show", `${hash}:${relPath}`]);
+    out.push({ hash, author, date, message, content: show.ok ? show.out : "" });
+  }
+  return out;
+}
+
 export async function vaultExists(relPath: string): Promise<boolean> {
   try {
     await Deno.stat(safeJoin(config.vault.gitDir, relPath));

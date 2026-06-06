@@ -2,9 +2,20 @@
 // layer + a notes index + the AI-note hand-off. Path is validated under notes/
 // by the ONE shared no-`../`-escape validator (in the repository).
 import { Hono } from "hono";
+import type { Context } from "hono";
 import * as repo from "../repositories/notes.ts";
 
 export const notes = new Hono();
+
+// Change author = the Authelia-forwarded user (preview has no auth → "operator").
+function authorOf(c: Context): string {
+  return (
+    c.req.header("Remote-User") ||
+    c.req.header("X-Forwarded-User") ||
+    c.req.header("X-Remote-User") ||
+    "operator"
+  ).toString();
+}
 
 // GET /workbench/notes — index split by ownership: { user: [...], ai: [...] }.
 notes.get("/", async (c) => {
@@ -48,8 +59,11 @@ notes.put("/:notePath{.+}", async (c) => {
   } else {
     content = await c.req.text();
   }
+  // ?commit=1 → record a git revision (Done / commit-now), authored. Otherwise
+  // it's a working-draft write (autosave) — committed later at the next compile.
+  const commit = c.req.query("commit") === "1";
   try {
-    const res = await repo.writeNote(notePath, content, ifMatch);
+    const res = await repo.writeNote(notePath, content, ifMatch, { commit, author: authorOf(c) });
     if ("conflict" in res) {
       return c.json({ error: "conflict", current_hash: res.current }, 409);
     }

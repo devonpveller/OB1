@@ -668,6 +668,24 @@ async function commitSourceEdits() {
   }
 }
 
+// P4.7 — commit any still-uncommitted NOTE edits (working-draft model) as git
+// revisions before the compile reads/commits the tree. Authored "commit now"
+// happens in the workbench; this is the catch-all. Best-effort.
+async function commitNoteEdits() {
+  try {
+    const r = await fetch(`${WORKBENCH_URL}/workbench/note-commit`, {
+      method: "POST",
+      headers: { "X-Brain-Key": ENV.WORKBENCH_KEY || "" },
+    });
+    if (r.ok) {
+      const j = await r.json().catch(() => ({}));
+      if (j.committed) console.log(`[wiki-service] committed pending note edits`);
+    }
+  } catch (e) {
+    console.error(`[wiki-service] note-commit failed (non-fatal): ${e.message}`);
+  }
+}
+
 async function compile(reason) {
   if (running) return { skipped: true, reason: "compile already in progress" };
   running = true;
@@ -675,8 +693,10 @@ async function compile(reason) {
   console.log(`[wiki-service] compile start (${reason})`);
   try {
     await ensureRepo();
-    // P4.7 — commit dirty source working-heads as revisions (one per compile).
+    // P4.7 — commit dirty source working-heads + pending note edits as revisions
+    // (one per compile) BEFORE the compile reads/commits the tree.
     await commitSourceEdits();
+    await commitNoteEdits();
     // Pull the user's note commits first (evolving repo; no wipe/force).
     const pull = await gitPullRebase();
     const state = await readState();
