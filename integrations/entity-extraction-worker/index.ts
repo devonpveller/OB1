@@ -715,23 +715,29 @@ async function drainSources(limit: number, dryRun: boolean, startTime: number): 
     }
     summary.processed++;
 
-    const { data: src, error: srcErr } = await supabase
-      .from("sources")
-      .select("id, content")
-      .eq("id", item.source_id)
-      .single();
-    if (srcErr || !src?.content) {
-      if (!dryRun) await markSourceError(item.source_id, srcErr?.message ?? "Source not found", 0);
-      summary.failed++;
-      continue;
-    }
-
+    // Read the REAL attempt_count BEFORE the content check so the early
+    // bail-out can terminal-fail. Passing a hardcoded 0 (the old bug) made
+    // markSourceError always recompute 0+1=1 < MAX_ATTEMPTS → status reset to
+    // `pending` forever → empty-content/missing sources looped on every drain
+    // (30-min poison-queue stalls).
     const { data: q } = await supabase
       .from("source_extraction_queue")
       .select("attempt_count")
       .eq("source_id", item.source_id)
       .single();
     const attemptCount = q?.attempt_count ?? 0;
+
+    const { data: src, error: srcErr } = await supabase
+      .from("sources")
+      .select("id, content")
+      .eq("id", item.source_id)
+      .single();
+    if (srcErr || !src?.content) {
+      const msg = srcErr?.message ?? (src ? "Source has empty content" : "Source not found");
+      if (!dryRun) await markSourceError(item.source_id, msg, attemptCount);
+      summary.failed++;
+      continue;
+    }
 
     let result: ExtractionResult;
     try {
@@ -887,6 +893,16 @@ Deno.serve(async (req) => {
 
     summary.processed++;
 
+    // Read the REAL attempt_count BEFORE the content check (same fix as the
+    // source path) so an empty-content/missing thought eventually reaches
+    // `failed` instead of looping `pending`.
+    const { data: queueItem } = await supabase
+      .from("entity_extraction_queue")
+      .select("attempt_count")
+      .eq("thought_id", item.thought_id)
+      .single();
+    const attemptCount = queueItem?.attempt_count ?? 0;
+
     // Fetch thought content
     const { data: thought, error: thoughtError } = await supabase
       .from("thoughts")
@@ -896,7 +912,8 @@ Deno.serve(async (req) => {
 
     if (thoughtError || !thought?.content) {
       console.error(`Failed to fetch thought ${item.thought_id}:`, thoughtError);
-      if (!dryRun) await markError(item.thought_id, thoughtError?.message ?? "Thought not found", 0);
+      const msg = thoughtError?.message ?? (thought ? "Thought has empty content" : "Thought not found");
+      if (!dryRun) await markError(item.thought_id, msg, attemptCount);
       summary.failed++;
       continue;
     }
@@ -913,14 +930,6 @@ Deno.serve(async (req) => {
       summary.succeeded++;
       continue;
     }
-
-    // Get current attempt count for error handling
-    const { data: queueItem } = await supabase
-      .from("entity_extraction_queue")
-      .select("attempt_count")
-      .eq("thought_id", item.thought_id)
-      .single();
-    const attemptCount = queueItem?.attempt_count ?? 0;
 
     // Call LLM for extraction
     let result: ExtractionResult;
