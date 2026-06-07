@@ -49,8 +49,10 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
       data-notebook-id={String(fm.thread_id ?? "")}
       data-notebook-slug={createNbSlug}
       data-notebook-name={createNbName}
+      data-folder-rel={folder.replace(/^notes\/?/, "")}
     >
       {canCreate ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
+      {canCreate ? <button class="ne-launch" data-nf-launch>📁 New folder</button> : null}
       {isUserNote ? (
         <button class="ne-launch ne-edit" data-wb-edit data-edit-kind="note" data-note-path={noteApiPath} data-note-slug={slug}>
           ✎ Edit this note
@@ -67,6 +69,9 @@ NotesEditor.css = `
 .notes-editor-root .ne-launch { font-size: .85rem; padding: .3rem .7rem; border: 1px solid var(--secondary); background: transparent; color: var(--secondary); border-radius: 6px; cursor: pointer; margin-left: .4rem; }
 .notes-editor-root .ne-launch.ne-editing { background: var(--secondary); color: var(--light); }
 .ne-create-input { font-size: .85rem; padding: .28rem .5rem; margin-left: .4rem; border: 1px solid var(--lightgray); border-radius: 6px; min-width: 220px; }
+.nf-create-input { font-size: .85rem; padding: .28rem .5rem; margin-left: .4rem; border: 1px solid var(--lightgray); border-radius: 6px; min-width: 200px; }
+.ne-move-picker { display: inline-flex; align-items: center; gap: .4rem; margin-left: .2rem; }
+.ne-move-picker .ne-move-select { font-size: .82rem; padding: .25rem .4rem; border: 1px solid var(--lightgray); border-radius: 6px; background: var(--light); color: var(--dark); max-width: 260px; }
 
 /* edit-in-place toolbar over the article */
 .ne-toolbar { display: flex; align-items: center; gap: .6rem; margin: 0 0 .5rem; }

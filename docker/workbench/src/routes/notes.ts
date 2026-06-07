@@ -33,6 +33,47 @@ notes.post("/", async (c) => {
   return c.json(res, 201);
 });
 
+// ── Folder management (MUST be registered before the /:notePath wildcards below
+// — Hono matches in registration order, else "folders"/"move" get captured as a
+// note path). ──
+
+// GET /workbench/notes/folders — the user notes/ folder tree (for the move
+// picker). { folders: ["", "ideas", "notebooks/<slug>", ...] }.
+notes.get("/folders", async (c) => {
+  return c.json(await repo.notesFolders());
+});
+
+// POST /workbench/notes/folders — create a folder under notes/. { path }.
+notes.post("/folders", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const path = (body?.path ?? "").toString();
+  if (!path.trim()) return c.json({ error: "path is required" }, 400);
+  try {
+    const res = await repo.createFolder(path, authorOf(c));
+    return c.json(res, res.created ? 201 : 200);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
+// POST /workbench/notes/move — move a note to another folder (git mv; history
+// preserved; frontmatter unchanged). { from, to_folder, if_match? }.
+notes.post("/move", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const from = (body?.from ?? "").toString();
+  const toFolder = (body?.to_folder ?? "").toString();
+  const ifMatch = body?.if_match ?? c.req.header("If-Match") ?? null;
+  if (!from.trim()) return c.json({ error: "from is required" }, 400);
+  try {
+    const res = await repo.moveNote(from, toFolder, ifMatch, authorOf(c));
+    if ("conflict" in res) return c.json({ error: "conflict", current_hash: res.current }, 409);
+    if ("error" in res) return c.json({ error: res.error }, res.code);
+    return c.json(res);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
 // GET /workbench/notes/<path> — read a note + its content hash (for If-Match).
 notes.get("/:notePath{.+}", async (c) => {
   try {

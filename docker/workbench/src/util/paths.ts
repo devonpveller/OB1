@@ -17,6 +17,14 @@ export function safeRelPath(rel: string): string {
   return parts.join("/");
 }
 
+// Like safeRelPath but for FOLDER paths: no `.md` requirement, and also rejects
+// a `.git` segment so a folder op can never touch the repo metadata.
+export function safeFolderRel(rel: string): string {
+  const safe = safeRelPath(rel);
+  if (safe.split("/").some((p) => p === ".git")) throw new Error("invalid folder name");
+  return safe;
+}
+
 export function safeJoin(baseDir: string, rel: string): string {
   return `${baseDir.replace(/\/+$/, "")}/${safeRelPath(rel)}`;
 }

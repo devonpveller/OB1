@@ -848,6 +848,114 @@ document.addEventListener("nav", () => {
     }
     editBtn.addEventListener("click", () => (view ? exitEdit() : enterEdit()))
 
+    // Move this NOTE to another folder anywhere under notes/ (git mv on the
+    // backend → history preserved; frontmatter untouched). Sources are immutable
+    // wiki leaves — no move. The picker lists the whole notes/ folder tree.
+    if (!isSource && toolbar) {
+      const moveBtn = document.createElement("button")
+      moveBtn.className = "ne-launch"
+      moveBtn.textContent = "⤴ Move"
+      const picker = document.createElement("span")
+      picker.className = "ne-move-picker"
+      picker.hidden = true
+      toolbar.appendChild(moveBtn)
+      toolbar.appendChild(picker)
+      const curFolder = apiPath.includes("/") ? apiPath.slice(0, apiPath.lastIndexOf("/")) : ""
+
+      const doMove = async (toFolder: string) => {
+        // Persist any open draft first, so the file moved on disk is current and
+        // lastHash matches (the move's If-Match guard).
+        if (view) {
+          try {
+            await save(view.state.doc.toString())
+          } catch {
+            /* surfaced in status */
+          }
+        }
+        setStatus("moving…")
+        try {
+          const r = await fetch("/workbench/notes/move", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ from: apiPath, to_folder: toFolder, if_match: lastHash || undefined }),
+          })
+          const j = await r.json().catch(() => ({}))
+          if (r.ok && j.to) {
+            // The move recompiles the vault, so the moved note's new URL exists
+            // only AFTER the rebuild. Suppress hot-reload, then poll for the new
+            // page and navigate once it's ready (never land on a transient 404),
+            // reopening the editor on arrival. Fall back to a refresh.
+            ;(window as any).__neEditing = true
+            try {
+              sessionStorage.setItem("ne-autoedit", j.to)
+            } catch {
+              /* ignore */
+            }
+            setStatus("✓ moved — opening…")
+            const target = "/notes/" + j.to.replace(/\.md$/, "")
+            const deadline = Date.now() + 9000
+            const tryGo = async () => {
+              try {
+                if ((await fetch(target, { cache: "no-store" })).ok) {
+                  window.location.href = target
+                  return
+                }
+              } catch {
+                /* keep polling */
+              }
+              if (Date.now() < deadline) {
+                setTimeout(tryGo, 700)
+              } else {
+                window.location.reload()
+              }
+            }
+            setTimeout(tryGo, 700)
+          } else if (r.status === 409) {
+            setStatus("⚠ " + (j.error === "conflict" ? "changed elsewhere — finish editing, then move" : j.error))
+          } else {
+            setStatus("✗ " + (j.error || "HTTP " + r.status))
+          }
+        } catch (e: any) {
+          setStatus("✗ " + (e && e.message ? e.message : e))
+        }
+      }
+
+      moveBtn.addEventListener("click", async () => {
+        if (!picker.hidden) {
+          picker.hidden = true
+          return
+        }
+        picker.textContent = "loading…"
+        picker.hidden = false
+        let folders: string[] = []
+        try {
+          const j = await (await fetch("/workbench/notes/folders")).json()
+          folders = Array.isArray(j.folders) ? j.folders : []
+        } catch {
+          /* empty list */
+        }
+        picker.textContent = ""
+        const sel = document.createElement("select")
+        sel.className = "ne-move-select"
+        for (const f of folders) {
+          const opt = document.createElement("option")
+          opt.value = f
+          opt.textContent = f === "" ? "notes/ (root)" : "notes/" + f
+          if (f === curFolder) opt.selected = true
+          sel.appendChild(opt)
+        }
+        const go = document.createElement("button")
+        go.className = "ne-launch"
+        go.textContent = "Move here"
+        go.addEventListener("click", () => {
+          picker.hidden = true
+          doMove(sel.value)
+        })
+        picker.appendChild(sel)
+        picker.appendChild(go)
+      })
+    }
+
     // Sources: hydrate the body with the LIVE content so what you see equals
     // what you edit (the static leaf can be stale in the preview / between
     // compiles), and RE-hydrate on any source save — inline edit OR re-upload.
@@ -882,8 +990,8 @@ document.addEventListener("nav", () => {
   const launch = root ? (root.querySelector("[data-ne-launch]") as HTMLElement | null) : null
   if (launch && root && !launch.dataset.neWired) {
     launch.dataset.neWired = "1"
-    const nbSlug = root.dataset.notebookSlug || ""
     const nbName = root.dataset.notebookName || ""
+    const folderRel = root.dataset.folderRel || "" // current folder, relative to notes/
     const wrap = document.createElement("span")
     wrap.className = "ne-create"
     const input = document.createElement("input")
@@ -908,8 +1016,9 @@ document.addEventListener("nav", () => {
         return
       }
       const fileSlug = slugify(title) || "note"
-      // Notebook context → notes/notebooks/<nb>/…; otherwise a flat notes/… note.
-      const path = (nbSlug ? "notebooks/" + nbSlug + "/" : "") + fileSlug + ".md"
+      // Create the note in the CURRENT folder (notes/<folderRel>/…): a notebook
+      // folder, a top-level folder, or the notes/ root (folderRel === "").
+      const path = (folderRel ? folderRel + "/" : "") + fileSlug + ".md"
       const content =
         ["---", "title: " + JSON.stringify(title), "source: user_note", "notebook: " + JSON.stringify(nbName), "tags: [note]", "---", "", ""].join("\n")
       launch.textContent = "creating…"
@@ -949,6 +1058,88 @@ document.addEventListener("nav", () => {
       if (e.key === "Enter") {
         e.preventDefault()
         create()
+      } else if (e.key === "Escape") {
+        input.hidden = true
+      }
+    })
+  }
+
+  // (3) Create a new FOLDER under the current notes/ folder (mirrors create-note:
+  // inline input → POST /workbench/notes/folders → navigate into it). Folders may
+  // be made anywhere in the notes/ tree (the root page, or inside a notebook).
+  const nfLaunch = root ? (root.querySelector("[data-nf-launch]") as HTMLElement | null) : null
+  if (nfLaunch && root && !nfLaunch.dataset.nfWired) {
+    nfLaunch.dataset.nfWired = "1"
+    const folderRel = root.dataset.folderRel || "" // current folder, relative to notes/
+    const slugifySeg = (s: string) =>
+      (s || "")
+        .normalize("NFKD")
+        .replace(/[̀-ͯ]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+    const wrap = document.createElement("span")
+    wrap.className = "ne-create"
+    const input = document.createElement("input")
+    input.placeholder = "new folder name…"
+    input.className = "nf-create-input"
+    input.hidden = true
+    nfLaunch.after(wrap)
+    wrap.appendChild(input)
+    const createFolder = async () => {
+      const sub = slugifySeg(input.value.trim())
+      if (!sub) {
+        input.hidden = true
+        return
+      }
+      const path = (folderRel ? folderRel + "/" : "") + sub
+      nfLaunch.textContent = "creating…"
+      ;(window as any).__neEditing = true // hold hot-reload during the create→open hop
+      try {
+        const r = await fetch("/workbench/notes/folders", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path }),
+        })
+        if (!r.ok) throw new Error("HTTP " + r.status)
+        input.hidden = true
+        input.value = ""
+        nfLaunch.textContent = "✓ created — opening…"
+        // The folder page exists only AFTER Quartz recompiles. Poll for it, then
+        // navigate in — never land on a transient 404 (the proxied hot-reload WS
+        // can't self-heal one). Fall back to refreshing this (existing) page.
+        const target = "/notes/" + path + "/"
+        const deadline = Date.now() + 9000
+        const tryGo = async () => {
+          try {
+            if ((await fetch(target, { cache: "no-store" })).ok) {
+              window.location.href = target
+              return
+            }
+          } catch {
+            /* keep polling */
+          }
+          if (Date.now() < deadline) {
+            setTimeout(tryGo, 700)
+          } else {
+            ;(window as any).__neEditing = false
+            window.location.reload()
+          }
+        }
+        setTimeout(tryGo, 700)
+      } catch (e: any) {
+        ;(window as any).__neEditing = false
+        nfLaunch.textContent = "✗ " + (e && e.message ? e.message : e)
+      }
+    }
+    nfLaunch.addEventListener("click", () => {
+      input.hidden = !input.hidden
+      if (!input.hidden) input.focus()
+    })
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault()
+        createFolder()
       } else if (e.key === "Escape") {
         input.hidden = true
       }

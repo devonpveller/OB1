@@ -134,6 +134,51 @@ export async function vaultDelete(relPath: string): Promise<void> {
   } catch { /* already gone */ }
 }
 
+// Move/rename a file with `git mv` (history preserved), then commit — optionally
+// authored. Falls back to a plain filesystem move for an untracked draft note
+// (never-committed); git still detects the rename by content at diff time, so
+// `log --follow` history survives. Creates the destination's parent dir first;
+// retries once on the wiki-service's index lock (same volume).
+export async function gitMv(
+  fromRel: string,
+  toRel: string,
+  message: string,
+  author?: string,
+): Promise<{ committed: boolean }> {
+  const absFrom = safeJoin(config.vault.gitDir, fromRel);
+  const absTo = safeJoin(config.vault.gitDir, toRel);
+  await Deno.mkdir(absTo.slice(0, absTo.lastIndexOf("/")), { recursive: true });
+
+  let mv = await git(["mv", fromRel, toRel]);
+  if (!mv.ok && /index\.lock/.test(mv.err)) {
+    await new Promise((r) => setTimeout(r, 500));
+    mv = await git(["mv", fromRel, toRel]);
+  }
+  if (!mv.ok) {
+    if (/not under version control|bad source|source.*not exist|did not match/i.test(mv.err)) {
+      // Untracked draft (autosave never committed): git mv can't move it. Plain
+      // rename, then stage ONLY the new path — the old path was never tracked, so
+      // there is nothing in the index to clean up (and `git add` of a now-deleted
+      // untracked pathspec errors and stages nothing).
+      await Deno.rename(absFrom, absTo);
+      await git(["add", "--", toRel]);
+    } else {
+      throw new Error(`git mv failed: ${mv.err.slice(0, 300)}`);
+    }
+  }
+
+  const args = ["commit", "-q"];
+  if (author) args.push(`--author=${author} <${author}@notes.local>`);
+  args.push("-m", message);
+  let res = await git(args);
+  if (!res.ok && /index\.lock/.test(res.err)) {
+    await new Promise((r) => setTimeout(r, 500));
+    res = await git(args);
+  }
+  if (!res.ok) throw new Error(`git commit failed: ${res.err.slice(0, 300)}`);
+  return { committed: true };
+}
+
 // Commit the working tree if (and only if) something changed. Best-effort: a
 // failure is surfaced but never corrupts state. Retries once on an index lock
 // (the wiki-service may be mid-commit on the same volume).

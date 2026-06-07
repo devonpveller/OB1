@@ -2,10 +2,10 @@
 // vault layer (NOT the generation pool). The workbench writes them + commits
 // (G1 exception). One ingestion surface for both human and AI notes (3.3).
 import { config } from "../config.ts";
-import { safeRelPath } from "../util/paths.ts";
+import { safeFolderRel, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
-import { vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
+import { gitMv, vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
 
 const enc = new TextEncoder();
 
@@ -97,10 +97,109 @@ export async function notesIndex(): Promise<{ user: string[]; ai: string[] }> {
     const { stdout } = await cmd.output();
     return new TextDecoder().decode(stdout)
       .split("\n")
-      .filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f));
+      .filter((f) => f.endsWith(".md") && !/README\.md$/i.test(f) && !/\/index\.md$/i.test(f));
   };
   return {
     user: (await ls("notes/notebooks/")).map((f) => f.replace(/^notes\/notebooks\//, "")),
     ai: (await ls("content/notebooks/")).map((f) => f.replace(/^content\/notebooks\//, "")),
+  };
+}
+
+// ── Folder management for the user notes/ layer (folders may live ANYWHERE under
+// notes/: top-level notes/<folder>/ AND inside a notebook notes/notebooks/<nb>/<folder>/) ──
+
+// Every folder in the user notes/ tree, derived from tracked paths + `.gitkeep`
+// markers (git can't track empty dirs) — so folders-with-notes AND explicitly
+// created empty folders both appear. Paths are RELATIVE to notes/ ("" = root).
+export async function notesFolders(): Promise<{ folders: string[] }> {
+  const cmd = new Deno.Command("git", {
+    args: ["-C", config.vault.gitDir, "ls-files", "notes/"],
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const { stdout } = await cmd.output();
+  const files = new TextDecoder().decode(stdout).split("\n").filter((f) => f.trim());
+  const dirs = new Set<string>([""]); // the notes/ root itself
+  for (const f of files) {
+    const parts = f.replace(/^notes\//, "").split("/");
+    parts.pop(); // drop the filename, keep ancestor dirs
+    let acc = "";
+    for (const p of parts) {
+      acc = acc ? `${acc}/${p}` : p;
+      dirs.add(acc);
+    }
+  }
+  return { folders: [...dirs].sort() };
+}
+
+// Create a folder under notes/ by committing an empty `.gitkeep`. Idempotent —
+// a no-op (created:false) if the folder already exists. `folderPath` is relative
+// to notes/.
+export async function createFolder(
+  folderPath: string,
+  author?: string,
+): Promise<{ path: string; created: boolean }> {
+  const rel = safeFolderRel(folderPath);
+  // Materialize the folder as a real landing page (index.md), NOT a hidden
+  // .gitkeep: Quartz only renders folders that contain a page, so an empty
+  // .gitkeep folder 404s and never appears in the Explorer. index.md gives the
+  // folder a navigable page + an Explorer entry immediately, and the NotesEditor
+  // (folder-page detection keys on the trailing /index) shows its create buttons.
+  const index = `notes/${rel}/index.md`;
+  if ((await vaultExists(`notes/${rel}`)) || (await vaultExists(index))) {
+    return { path: rel, created: false };
+  }
+  const name = rel
+    .split("/")
+    .pop()!
+    .replace(/-+/g, " ")
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+  const body = [
+    "---",
+    `title: ${JSON.stringify(name)}`,
+    "tags: [notes, folder]",
+    "---",
+    "",
+    `# ${name}`,
+    "",
+    "_Notes folder — use “✎ Write a note” to add a note here, or move notes into it._",
+    "",
+  ].join("\n");
+  await vaultWrite(index, body);
+  await vaultCommitPath(index, `notes: create folder ${rel}`, author);
+  return { path: rel, created: true };
+}
+
+// Move a note to another folder under notes/ — `git mv` so history is preserved,
+// and the frontmatter is left untouched (only the path moves). `fromPath` is
+// notes-relative + must be .md; `toFolder` is the destination folder ("" = root).
+// Returns the new note-relative path + content hash so an open editor can keep
+// autosaving against the new location.
+export async function moveNote(
+  fromPath: string,
+  toFolder: string,
+  ifMatch?: string | null,
+  author?: string,
+): Promise<
+  | { from: string; to: string; hash: string }
+  | { conflict: true; current: string }
+  | { error: string; code: 400 | 404 | 409 }
+> {
+  const fromRel = notesRel(fromPath); // notes/<…>.md, traversal-safe + .md-checked
+  const filename = fromRel.slice(fromRel.lastIndexOf("/") + 1);
+  const folderRel = toFolder ? safeFolderRel(toFolder) : "";
+  const toRel = `notes/${folderRel ? `${folderRel}/` : ""}${filename}`;
+  if (toRel === fromRel) return { error: "note is already in that folder", code: 400 };
+  if (!(await vaultExists(fromRel))) return { error: "note not found", code: 404 };
+  if (await vaultExists(toRel)) return { error: "a note with that name already exists there", code: 409 };
+  const content = await vaultRead(fromRel);
+  if (ifMatch != null && (await sha256(content)) !== ifMatch) {
+    return { conflict: true, current: await sha256(content) };
+  }
+  await gitMv(fromRel, toRel, `notes: move ${fromRel} -> ${toRel}`, author);
+  return {
+    from: fromRel.replace(/^notes\//, ""),
+    to: toRel.replace(/^notes\//, ""),
+    hash: await sha256(content),
   };
 }

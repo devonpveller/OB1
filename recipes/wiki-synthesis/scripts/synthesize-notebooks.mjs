@@ -353,8 +353,16 @@ async function main() {
     }
   }
   moc.push("");
-  fs.writeFileSync(path.join(outDir, "notebooks.md"), moc.join("\n"), "utf8");
-  console.log(`[notebook-synth] done: ${ok}/${active.length} notebook hubs + notebooks.md MOC`);
+  // Write the MOC as the FOLDER INDEX (notebooks/index.md), NOT a sibling
+  // notebooks.md. A sibling .md collides with the notebooks/ folder: Quartz then
+  // gives the folder-listing page the simplified slug "content/notebooks" (one
+  // ../) instead of "content/notebooks/index" (two ../), so its child links
+  // undercount and resolve to /content/content/notebooks/... (404). As the
+  // folder index there is exactly one page, slugged correctly, and no auto
+  // FolderPage is generated. (Every clean folder — organization, person… —
+  // already works this way.)
+  fs.writeFileSync(path.join(nbDir, "index.md"), moc.join("\n"), "utf8");
+  console.log(`[notebook-synth] done: ${ok}/${active.length} notebook hubs + notebooks/index.md MOC`);
 }
 
 main().catch((e) => {

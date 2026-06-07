@@ -1395,6 +1395,26 @@ app.post("/research/persist", async (c) => {
     );
     const sessionId = sess.rows[0].id;
 
+    // Make the synthesis row a first-class MEMBER of its session + thread. Without
+    // this the research_synthesis source is an orphan (findable only by
+    // research_key), so it never surfaces in the notebook — the wiki compiler's
+    // "## Deep Research" section is driven by thread membership. Linking it here
+    // makes the originating AI synthesis appear (and be referenceable) under the
+    // curator-resolved thread.
+    const synthesisId = synth.rows[0]?.id;
+    if (synthesisId) {
+      await client.queryObject(
+        `INSERT INTO session_sources (session_id, source_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [sessionId, synthesisId],
+      );
+      if (threadId) {
+        await client.queryObject(
+          `SELECT link_source_to_thread($1, $2, 'automatic', NULL, 'confirmed')`,
+          [threadId, synthesisId],
+        );
+      }
+    }
+
     let written = 0;
     for (const s of (body.sources || [])) {
       const url = (s.url || "").trim();
