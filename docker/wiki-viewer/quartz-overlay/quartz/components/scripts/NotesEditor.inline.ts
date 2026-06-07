@@ -674,6 +674,39 @@ document.addEventListener("nav", () => {
   ;(window as any).__neEditing = false
   hideLinkPopover() // never let an in-editor popover survive a navigation
 
+  // Mark trashed notes with a 🗑 + dim wherever they're linked (the Explorer and
+  // folder listings), so a folder view shows at a glance what's marked for trash.
+  // Live from the workbench, so it stays correct between the periodic clean
+  // rebuilds even while the static HTML still lists the note.
+  ;(async () => {
+    try {
+      const j = await (await fetch("/workbench/notes/trashed", { cache: "no-store" })).json()
+      const trashed = new Set<string>((j.trashed || []).map((p: string) => "/notes/" + p.replace(/\.md$/, "")))
+      if (!trashed.size) return
+      document.querySelectorAll("a[href]").forEach((node) => {
+        const a = node as HTMLAnchorElement
+        if (a.dataset.neTrashMarked) return
+        let pathname: string
+        try {
+          pathname = new URL(a.href).pathname.replace(/\/$/, "")
+        } catch {
+          return
+        }
+        if (trashed.has(pathname)) {
+          a.dataset.neTrashMarked = "1"
+          a.classList.add("ne-trashed-link")
+          a.title = "In Trash — removed at the nightly cleanup"
+          const ico = document.createElement("span")
+          ico.className = "ne-trash-ico"
+          ico.textContent = "🗑 "
+          a.insertBefore(ico, a.firstChild)
+        }
+      })
+    } catch {
+      /* best-effort marker */
+    }
+  })()
+
   // (1) Edit-in-place on any editable target — a user NOTE or a SOURCE. Found
   // page-wide (the source edit button is rendered by the SourceEditor card,
   // outside the notes root) so the SAME CodeMirror editor drives both kinds.
@@ -1077,13 +1110,26 @@ document.addEventListener("nav", () => {
         } catch {
           /* ignore */
         }
-        const href = "/notes/" + path.replace(/\.md$/, "")
-        launch.textContent = "✎ Write a note"
         input.hidden = true
         input.value = ""
-        setTimeout(() => {
-          window.location.href = href
-        }, 1500)
+        launch.textContent = "✓ created — opening…"
+        // Poll for the new note page (after Quartz rebuilds), then open it — same
+        // hop as New folder, so it never lands on a transient 404.
+        const target = "/notes/" + path.replace(/\.md$/, "")
+        const deadline = Date.now() + 9000
+        const tryGo = async () => {
+          try {
+            if ((await fetch(target, { cache: "no-store" })).ok) {
+              window.location.href = target
+              return
+            }
+          } catch {
+            /* keep polling */
+          }
+          if (Date.now() < deadline) setTimeout(tryGo, 700)
+          else window.location.reload()
+        }
+        setTimeout(tryGo, 700)
       } catch (e: any) {
         ;(window as any).__neEditing = false
         launch.textContent = "✗ " + (e && e.message ? e.message : e)

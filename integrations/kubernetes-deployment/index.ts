@@ -1308,11 +1308,30 @@ app.get("/research/lookup", async (c) => {
       dueDate = due.toISOString().slice(0, 10);
       isStale = today > due;
     }
+    // Grounding signal (Research Engine P2.3). The reuse path must NOT re-serve
+    // a synthesis with no grounded claims (that is how a fabricated answer got
+    // re-cached as fact). `grounded` = this synthesis has >=1 reusable claim
+    // (grounded ∧ fresh ∧ >= confidence floor). Guarded: the claims layer is
+    // additive (P1.5) and may not be applied yet — degrade to null, never 500.
+    let groundedClaims: number | null = null, totalClaims: number | null = null;
+    try {
+      const g = await client.queryObject<{ grounded: bigint; total: bigint }>(
+        `SELECT
+           (SELECT count(*) FROM reusable_claims WHERE synthesis_id = $1) AS grounded,
+           (SELECT count(*) FROM claims WHERE synthesis_id = $1 AND status='active') AS total`,
+        [row.id],
+      );
+      groundedClaims = Number(g.rows[0]?.grounded ?? 0);
+      totalClaims = Number(g.rows[0]?.total ?? 0);
+    } catch { /* claims layer not applied yet — leave null (unknown) */ }
     return c.json({
       found: true, id: row.id, claim: row.content,
       researched_on: row.researched_on, volatility: row.volatility,
       revalidate_days: row.revalidate_days, run_kind: row.run_kind,
       is_stale: isStale, age_days: ageDays, due_date: dueDate,
+      grounded_claims: groundedClaims, total_claims: totalClaims,
+      // null = unknown (pre-migration); true/false once the claims layer exists.
+      grounded: groundedClaims == null ? null : groundedClaims > 0,
     });
   } catch (err) {
     return c.json({ found: false, error: (err as Error).message }, 500);
@@ -1416,10 +1435,15 @@ app.post("/research/persist", async (c) => {
     }
 
     let written = 0;
+    // Index-aligned with body.sources so [Source N] in the synthesis maps to
+    // source_ids[N-1] (null = a source that was skipped/empty). The curator
+    // uses this to resolve the synthesis's citations into claim→source
+    // grounding edges (Research Engine P1.6/P2.1).
+    const sourceIds: Array<string | null> = [];
     for (const s of (body.sources || [])) {
       const url = (s.url || "").trim();
       const content = (s.content || s.summary || "").trim();
-      if (!url && !content) continue;
+      if (!url && !content) { sourceIds.push(null); continue; }
       const title = (s.title || s.domain || url || "source").slice(0, 300);
       const emb = `[${(await getEmbedding(`${title}\n\n${content}`.slice(0, 1600))).join(",")}]`;
       const provMeta = {
@@ -1465,12 +1489,14 @@ app.post("/research/persist", async (c) => {
           [threadId, sid],
         );
       }
+      sourceIds.push(sid);
       written++;
     }
     await client.queryArray("COMMIT");
     return c.json({
       synthesis_id: synth.rows[0]?.id,
       sources_written: written,
+      source_ids: sourceIds,   // index-aligned with body.sources ([Source N] => [N-1])
       session_id: sessionId,
       thread_id: threadId,
       threaded: !!threadId,

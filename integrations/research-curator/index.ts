@@ -35,6 +35,7 @@
  *      NEW_THREAD_MIN_CONFIDENCE (0.60), MERGE_FLOOR_DISTANCE (0.45), PORT (8000).
  */
 import { Pool } from "postgres";
+import { writeClaims, type WriteClaimsResult } from "./claims.ts";
 
 // --- Config -----------------------------------------------------------------
 const DB_HOST = Deno.env.get("DB_HOST") || "openbrain-db";
@@ -377,6 +378,48 @@ async function delegatePersist(pkg: Pkg, threadId: string, notebookLabel: string
   return json;
 }
 
+// --- Grounded-claim ingestion (Research Engine P2.1) ------------------------
+// After the verbatim synthesis + sources are persisted, decompose the
+// synthesis's own [SOURCED]/[INFERRED]/[Source N] tags into grounded claims +
+// typed edges (claims.ts → init-claims.sql helpers). The synthesis blob stays
+// the human-readable rendering; the claims are the machine-truth the cache/
+// reuse layer trusts. Best-effort: a failure here never fails the ingest, and
+// claims are additive + idempotent so a later re-run heals it.
+//
+// Index contract: source_ids from /research/persist is aligned with pkg.sources
+// (source_ids[N-1] == the synthesis's [Source N]); the parser drops any
+// citation that doesn't resolve to a real source (rule #1 — nothing ungrounded
+// is stored).
+async function writeGroundedClaims(
+  pkg: Pkg,
+  threadId: string,
+  synthesisId: string | null,
+  sourceIds: Array<string | null>,
+): Promise<WriteClaimsResult | null> {
+  const synthesis = (pkg.synthesis || "").trim();
+  if (!synthesis || !synthesisId) return null; // nothing to parse / nowhere to anchor
+  const client = await pool.connect();
+  try {
+    await client.queryArray("BEGIN");
+    const res = await writeClaims(client, synthesis, {
+      threadId,
+      synthesisId,
+      sourceIds,
+      volatility: pkg.volatility ?? null,
+      revalidateDays: pkg.revalidate_days ?? null,
+      embed,
+    });
+    await client.queryArray("COMMIT");
+    return res;
+  } catch (e) {
+    await client.queryArray("ROLLBACK").catch(() => {});
+    console.error("claims: grounded-claim write failed:", (e as Error).message);
+    return null;
+  } finally {
+    client.release();
+  }
+}
+
 // --- HTTP server ------------------------------------------------------------
 function authed(req: Request, url: URL): boolean {
   const provided = req.headers.get("x-brain-key") || req.headers.get("X-Brain-Key") || url.searchParams.get("key");
@@ -420,13 +463,24 @@ Deno.serve({ port: PORT }, async (req) => {
         );
       }
 
+      // Decompose the synthesis into grounded claims + edges (P2.1) — awaited
+      // so the result is reported, but never fatal to the ingest.
+      const synthesisId = (typeof persist.synthesis_id === "string" ? persist.synthesis_id : null);
+      const sourceIds = Array.isArray(persist.source_ids) ? persist.source_ids as Array<string | null> : [];
+      let claims: WriteClaimsResult | null = null;
+      try {
+        claims = await writeGroundedClaims(pkg, res.thread_id, synthesisId, sourceIds);
+      } catch (e) {
+        console.error("ingest: claim write threw:", (e as Error).message);
+      }
+
       // Maintain the thread so future matching improves — best-effort.
       refreshThread(res.thread_id, pkg).catch((e) =>
         console.error("ingest: thread refresh failed:", (e as Error).message)
       );
 
       console.log(
-        `ingest: decision=${res.decision} conf=${res.confidence.toFixed(2)} thread="${res.name}" (${res.thread_id}) sources=${persist.sources_written ?? "?"}`,
+        `ingest: decision=${res.decision} conf=${res.confidence.toFixed(2)} thread="${res.name}" (${res.thread_id}) sources=${persist.sources_written ?? "?"} claims=${claims ? `${claims.claimsWritten}+${claims.claimsDeduped}dup/${claims.gaps.length}gap/${claims.ungroundedSkipped}skip` : "0"}`,
       );
       return Response.json({
         thread_id: res.thread_id,
@@ -435,6 +489,7 @@ Deno.serve({ port: PORT }, async (req) => {
         thread_name: res.name,
         shortlist: res.shortlist.map((c) => ({ thread_id: c.thread_id, name: c.name, distance: c.distance })),
         persist,
+        claims,
       });
     } catch (e) {
       console.error("ingest failed:", (e as Error).message);

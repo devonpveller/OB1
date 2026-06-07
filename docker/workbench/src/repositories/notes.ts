@@ -300,6 +300,19 @@ export async function restoreFolder(
   return { restored: rel, count: files.length };
 }
 
+// All currently-trashed note paths (notes-relative, without the notes/ prefix),
+// so the viewer can mark them with a 🗑 in every listing/Explorer entry live.
+export async function listTrashed(): Promise<{ trashed: string[] }> {
+  const trashed: string[] = [];
+  for (const rel of await listNoteMd("notes")) {
+    try {
+      const fm = (await vaultRead(rel)).match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (fm && /^\s*trashed\s*:\s*true\s*$/m.test(fm[1])) trashed.push(rel.replace(/^notes\//, ""));
+    } catch { /* skip unreadable */ }
+  }
+  return { trashed };
+}
+
 // Empty the trash: hard-delete (git rm) every note flagged `trashed: true` across
 // notes/. Run by the nightly cleanup, just before the daily wiki rebuild. Returns
 // the paths removed (recoverable from git history).

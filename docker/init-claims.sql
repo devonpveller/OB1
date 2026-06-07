@@ -340,7 +340,7 @@ BEGIN
                volatility    = COALESCE(p_volatility, volatility),
                revalidate_days = COALESCE(p_revalidate_days, revalidate_days),
                status        = CASE WHEN status = 'retracted' THEN status ELSE 'active' END
-         WHERE id = v_id;
+         WHERE public.claims.id = v_id;
         id := v_id; was_duplicate := TRUE;
         RETURN NEXT; RETURN;
     END IF;

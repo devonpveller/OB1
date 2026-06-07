@@ -77,6 +77,12 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
       {canCreate && !isTrashed && folder !== "notes" && folder !== "notes/notebooks" ? (
         <button class="ne-launch ne-danger" data-nf-delete>🗑 Delete folder</button>
       ) : null}
+      {canCreate && !isTrashed ? (
+        <span class="ne-fresh-note">
+          ℹ Newly created or restored notes can take a moment to appear in this list — the wiki rebuilds
+          periodically. Trashed notes are marked 🗑 and removed at the nightly cleanup.
+        </span>
+      ) : null}
       {isUserNote && !isTrashed ? (
         <button class="ne-launch ne-edit" data-wb-edit data-edit-kind="note" data-note-path={noteApiPath} data-note-slug={slug}>
           ✎ Edit this note
@@ -105,6 +111,9 @@ NotesEditor.css = `
 .ne-trash-card .ne-launch { border-color: #c0392b; color: #c0392b; margin-left: 0; }
 .ne-trash-card .ne-launch:hover { background: #c0392b; color: var(--light); }
 .ne-trash-card .ne-status { font-size: .78rem; color: var(--gray); }
+.ne-fresh-note { display: block; font-size: .72rem; color: var(--gray); margin: .4rem 0 0; max-width: 70ch; line-height: 1.45; }
+a.ne-trashed-link { opacity: .5; text-decoration: line-through; }
+a.ne-trashed-link .ne-trash-ico { text-decoration: none; opacity: .85; }
 
 /* edit-in-place toolbar over the article */
 .ne-toolbar { display: flex; align-items: center; gap: .6rem; margin: 0 0 .5rem; }

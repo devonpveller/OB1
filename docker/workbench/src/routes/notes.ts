@@ -43,6 +43,13 @@ notes.get("/folders", async (c) => {
   return c.json(await repo.notesFolders());
 });
 
+// GET /workbench/notes/trashed — paths of all currently-trashed notes, so the
+// viewer can 🗑-mark them live in every listing/Explorer entry. MUST precede the
+// /:notePath wildcard (registration order).
+notes.get("/trashed", async (c) => {
+  return c.json(await repo.listTrashed());
+});
+
 // POST /workbench/notes/folders — create a folder under notes/. { path }.
 notes.post("/folders", async (c) => {
   const body = await c.req.json().catch(() => ({}));
