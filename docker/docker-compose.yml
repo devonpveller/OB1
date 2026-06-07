@@ -603,6 +603,42 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # Canonical chunk-embedding worker (Integrated Knowledge System / passage-level
+  # retrieval). Writer-agnostic: chunks ANY OB1 source into `source_chunks`
+  # (1200/150 chars + bge-m3, 1024-dim) so every frontend's vector retrieval
+  # works — including Open Notebook's "ask your knowledge base" (chat/search RPCs
+  # read source_chunks). Scans on an interval; also drainable via POST /chunks.
+  # Talks to openbrain-db DIRECTLY (deno-postgres, like the suggestion worker)
+  # and to llama-cpp-embed for embeddings. obnet (db) + llm-net (models).
+  # HTTP-invoked (loopback 8817).
+  openbrain-chunk-worker:
+    build:
+      context: ../integrations/chunk-embedding-worker
+      dockerfile: Dockerfile
+    image: openbrain-chunk-worker:local
+    container_name: openbrain-chunk-worker
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      CHUNK_BATCH: ${CHUNK_BATCH:-25}
+      CHUNK_INTERVAL_MS: ${CHUNK_INTERVAL_MS:-15000}
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8817:8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+
 volumes:
   openbrain-db-data:
   openbrain-wiki-data:

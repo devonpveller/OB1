@@ -74,15 +74,15 @@ notes.post("/move", async (c) => {
   }
 });
 
-// DELETE /workbench/notes/folders — delete a folder AND its contents (git rm -r
-// + commit; recoverable). { path }. Root + the `notebooks` container are
-// protected. MUST precede the /:notePath wildcard (registration order).
+// DELETE /workbench/notes/folders — TRASH a folder + its contents (soft; the
+// nightly cleanup hard-removes). { path }. Root + `notebooks` protected. MUST
+// precede the /:notePath wildcard (registration order).
 notes.delete("/folders", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const path = (body?.path ?? "").toString();
   if (!path.trim()) return c.json({ error: "path is required" }, 400);
   try {
-    const res = await repo.deleteFolder(path, authorOf(c));
+    const res = await repo.trashFolder(path, authorOf(c));
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {
@@ -90,11 +90,47 @@ notes.delete("/folders", async (c) => {
   }
 });
 
-// DELETE /workbench/notes/<path> — delete a single note (git rm + commit;
-// recoverable).
+// POST /workbench/notes/empty-trash — hard-remove every trashed note (run by the
+// nightly cleanup, just before the daily wiki rebuild).
+notes.post("/empty-trash", async (c) => {
+  try {
+    return c.json(await repo.emptyTrash(authorOf(c)));
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
+// POST /workbench/notes/folders/restore — un-trash a folder + its contents.
+// Before /:notePath/restore so it isn't captured as a note path.
+notes.post("/folders/restore", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const path = (body?.path ?? "").toString();
+  if (!path.trim()) return c.json({ error: "path is required" }, 400);
+  try {
+    const res = await repo.restoreFolder(path, authorOf(c));
+    if ("error" in res) return c.json({ error: res.error }, res.code);
+    return c.json(res);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
+// DELETE /workbench/notes/<path> — TRASH a single note (soft; recoverable). The
+// trash card + nightly cleanup live on top of this.
 notes.delete("/:notePath{.+}", async (c) => {
   try {
-    const res = await repo.deleteNote(c.req.param("notePath"), authorOf(c));
+    const res = await repo.trashNote(c.req.param("notePath"), authorOf(c));
+    if ("error" in res) return c.json({ error: res.error }, res.code);
+    return c.json(res);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
+// POST /workbench/notes/<path>/restore — un-trash a note (clears the flag).
+notes.post("/:notePath{.+}/restore", async (c) => {
+  try {
+    const res = await repo.restoreNote(c.req.param("notePath"), authorOf(c));
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {

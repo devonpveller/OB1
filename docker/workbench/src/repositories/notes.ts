@@ -2,10 +2,10 @@
 // vault layer (NOT the generation pool). The workbench writes them + commits
 // (G1 exception). One ingestion surface for both human and AI notes (3.3).
 import { config } from "../config.ts";
-import { safeFolderRel, safeRelPath } from "../util/paths.ts";
+import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
-import { gitMv, gitRm, gitRmRecursive, vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
+import { gitMv, gitRm, vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
 
 const enc = new TextEncoder();
 
@@ -204,31 +204,119 @@ export async function moveNote(
   };
 }
 
-// Delete a single note. `git rm` + commit, so the note's prior content stays
-// recoverable in git history. `notePath` is notes-relative + must be .md.
-export async function deleteNote(
-  notePath: string,
-  author?: string,
-): Promise<{ deleted: string } | { error: string; code: 404 }> {
-  const rel = notesRel(notePath); // notes/<…>.md, traversal-safe + .md-checked
-  if (!(await vaultExists(rel))) return { error: "note not found", code: 404 };
-  await gitRm(rel, `notes: delete ${rel}`, author);
-  return { deleted: rel.replace(/^notes\//, "") };
+// ── Trash (soft-delete) ─────────────────────────────────────────────────────
+// "Delete" is a SOFT delete: it stamps `trashed: true` + `trashed_at` into the
+// note's frontmatter (the file stays, fully recoverable via Restore). A clear
+// trash card surfaces it in the viewer immediately. The actual removal happens
+// at the nightly clean rebuild (emptyTrash → git rm), so the heavy 4.6-min wiki
+// build runs once a day rather than on every delete.
+
+const PROTECTED_FOLDERS = new Set(["", "notebooks"]);
+
+// Add or remove the `trashed`/`trashed_at` frontmatter keys on a note's content.
+function setTrashed(content: string, trashed: boolean, at?: string): string {
+  const m = content.match(/^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n?)/);
+  if (!m) {
+    return trashed ? `---\ntrashed: true\ntrashed_at: ${at}\n---\n\n${content}` : content;
+  }
+  const keep = m[2].split(/\r?\n/).filter((l) => !/^\s*trashed(_at)?\s*:/.test(l));
+  if (trashed) keep.push("trashed: true", `trashed_at: ${at}`);
+  return m[1] + keep.join("\n") + m[3] + content.slice(m[0].length);
 }
 
-// Delete a folder AND all notes inside it (one commit; recoverable via history).
-// Protections: the notes/ root and the top-level `notebooks` container can never
-// be deleted; safeFolderRel blocks traversal/empty/.git. `folderPath` is
-// notes-relative.
-const PROTECTED_FOLDERS = new Set(["", "notebooks"]);
-export async function deleteFolder(
+// Recursively list git-relative .md paths under a vault dir (incl. untracked
+// drafts; excludes folder-landing index.md unless asked).
+async function listNoteMd(vaultDir: string, includeIndex = true): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (rel: string) => {
+    let entries;
+    try {
+      entries = [];
+      for await (const e of Deno.readDir(safeJoin(config.vault.gitDir, rel))) entries.push(e);
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const child = `${rel}/${e.name}`;
+      if (e.isDirectory) await walk(child);
+      else if (e.name.endsWith(".md") && (includeIndex || e.name !== "index.md")) out.push(child);
+    }
+  };
+  await walk(vaultDir);
+  return out;
+}
+
+// Trash a single note (soft).
+export async function trashNote(
+  notePath: string,
+  author?: string,
+): Promise<{ trashed: string } | { error: string; code: 404 }> {
+  const rel = notesRel(notePath);
+  if (!(await vaultExists(rel))) return { error: "note not found", code: 404 };
+  await vaultWrite(rel, setTrashed(await vaultRead(rel), true, new Date().toISOString()));
+  await vaultCommitPath(rel, `notes: trash ${rel}`, author);
+  return { trashed: rel.replace(/^notes\//, "") };
+}
+
+// Restore a trashed note (clears the flag).
+export async function restoreNote(
+  notePath: string,
+  author?: string,
+): Promise<{ restored: string } | { error: string; code: 404 }> {
+  const rel = notesRel(notePath);
+  if (!(await vaultExists(rel))) return { error: "note not found", code: 404 };
+  await vaultWrite(rel, setTrashed(await vaultRead(rel), false));
+  await vaultCommitPath(rel, `notes: restore ${rel}`, author);
+  return { restored: rel.replace(/^notes\//, "") };
+}
+
+// Trash a folder + every note inside it (soft; one commit). Protections as before.
+export async function trashFolder(
   folderPath: string,
   author?: string,
-): Promise<{ deleted: string } | { error: string; code: 403 | 404 }> {
-  const rel = safeFolderRel(folderPath); // throws on empty / .. / .git
+): Promise<{ trashed: string; count: number } | { error: string; code: 403 | 404 }> {
+  const rel = safeFolderRel(folderPath);
   if (PROTECTED_FOLDERS.has(rel)) return { error: "this folder is protected and cannot be deleted", code: 403 };
   const dir = `notes/${rel}`;
   if (!(await vaultExists(dir))) return { error: "folder not found", code: 404 };
-  await gitRmRecursive(dir, `notes: delete folder ${rel} (and contents)`, author);
-  return { deleted: rel };
+  const at = new Date().toISOString();
+  const files = await listNoteMd(dir);
+  for (const f of files) await vaultWrite(f, setTrashed(await vaultRead(f), true, at));
+  await vaultCommitPath(dir, `notes: trash folder ${rel} (and contents)`, author);
+  return { trashed: rel, count: files.length };
+}
+
+// Restore a trashed folder + every note inside it (clears the flags).
+export async function restoreFolder(
+  folderPath: string,
+  author?: string,
+): Promise<{ restored: string; count: number } | { error: string; code: 404 }> {
+  const rel = safeFolderRel(folderPath);
+  const dir = `notes/${rel}`;
+  if (!(await vaultExists(dir))) return { error: "folder not found", code: 404 };
+  const files = await listNoteMd(dir);
+  for (const f of files) await vaultWrite(f, setTrashed(await vaultRead(f), false));
+  await vaultCommitPath(dir, `notes: restore folder ${rel}`, author);
+  return { restored: rel, count: files.length };
+}
+
+// Empty the trash: hard-delete (git rm) every note flagged `trashed: true` across
+// notes/. Run by the nightly cleanup, just before the daily wiki rebuild. Returns
+// the paths removed (recoverable from git history).
+export async function emptyTrash(author?: string): Promise<{ removed: string[] }> {
+  const removed: string[] = [];
+  for (const rel of await listNoteMd("notes")) {
+    let content: string;
+    try {
+      content = await vaultRead(rel);
+    } catch {
+      continue;
+    }
+    const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    if (fm && /^\s*trashed\s*:\s*true\s*$/m.test(fm[1])) {
+      await gitRm(rel, `notes: empty trash — remove ${rel}`, author);
+      removed.push(rel.replace(/^notes\//, ""));
+    }
+  }
+  return { removed };
 }

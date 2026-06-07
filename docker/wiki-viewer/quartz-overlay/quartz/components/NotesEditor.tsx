@@ -26,6 +26,9 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
   // path is relative to notes/, so strip the leading "notes/".
   const isUserNote = !isFolderPage && slug.startsWith("notes/") && !slug.startsWith("notes/Changes")
   const noteApiPath = slug.replace(/^notes\//, "") + ".md"
+  // A trashed note/folder (frontmatter `trashed: true`) shows a recoverable trash
+  // card instead of edit/create actions; the nightly cleanup hard-removes it.
+  const isTrashed = !!fm.trashed
 
   // "Write a note" is offered ONLY in the author-owned `notes/` tree — never
   // under `content/` (the knowledge wiki), where hand-authoring would bypass the
@@ -50,13 +53,31 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
       data-notebook-slug={createNbSlug}
       data-notebook-name={createNbName}
       data-folder-rel={folder.replace(/^notes\/?/, "")}
+      data-trashed={isTrashed ? "1" : ""}
     >
-      {canCreate ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
-      {canCreate ? <button class="ne-launch" data-nf-launch>📁 New folder</button> : null}
-      {canCreate && folder !== "notes" && folder !== "notes/notebooks" ? (
+      {isTrashed ? (
+        <div
+          class="ne-trash-card"
+          data-ne-trash
+          data-note-path={noteApiPath}
+          data-folder-rel={folder.replace(/^notes\/?/, "")}
+          data-is-folder={isFolderPage ? "1" : ""}
+        >
+          <span class="ne-trash-title">🗑 In Trash</span>
+          <span class="ne-trash-msg">
+            This {isFolderPage ? "folder and its notes are" : "note is"} in the trash and will be
+            permanently removed at the nightly cleanup. Until then it's fully recoverable.
+          </span>
+          <button class="ne-launch" data-ne-restore>↩ Restore</button>
+          <span class="ne-status" data-ne-trash-status></span>
+        </div>
+      ) : null}
+      {canCreate && !isTrashed ? <button class="ne-launch" data-ne-launch>✎ Write a note</button> : null}
+      {canCreate && !isTrashed ? <button class="ne-launch" data-nf-launch>📁 New folder</button> : null}
+      {canCreate && !isTrashed && folder !== "notes" && folder !== "notes/notebooks" ? (
         <button class="ne-launch ne-danger" data-nf-delete>🗑 Delete folder</button>
       ) : null}
-      {isUserNote ? (
+      {isUserNote && !isTrashed ? (
         <button class="ne-launch ne-edit" data-wb-edit data-edit-kind="note" data-note-path={noteApiPath} data-note-slug={slug}>
           ✎ Edit this note
         </button>
@@ -77,6 +98,13 @@ NotesEditor.css = `
 .ne-move-picker .ne-move-select { font-size: .82rem; padding: .25rem .4rem; border: 1px solid var(--lightgray); border-radius: 6px; background: var(--light); color: var(--dark); max-width: 260px; }
 .notes-editor-root .ne-launch.ne-danger, .ne-toolbar .ne-launch.ne-danger { border-color: color-mix(in srgb, #c0392b 55%, var(--lightgray)); color: #c0392b; }
 .notes-editor-root .ne-launch.ne-danger:hover, .ne-toolbar .ne-launch.ne-danger:hover { background: #c0392b; color: var(--light); border-color: #c0392b; }
+.notes-editor-root[data-trashed="1"] { display: block; }
+.ne-trash-card { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .7rem; padding: .55rem .9rem; border: 1px solid color-mix(in srgb, #c0392b 55%, var(--lightgray)); border-radius: 9px; background: color-mix(in srgb, #c0392b 13%, transparent); }
+.ne-trash-card .ne-trash-title { font-weight: 700; color: #c0392b; }
+.ne-trash-card .ne-trash-msg { font-size: .8rem; color: var(--gray); line-height: 1.45; flex: 1 1 55%; min-width: 16ch; }
+.ne-trash-card .ne-launch { border-color: #c0392b; color: #c0392b; margin-left: 0; }
+.ne-trash-card .ne-launch:hover { background: #c0392b; color: var(--light); }
+.ne-trash-card .ne-status { font-size: .78rem; color: var(--gray); }
 
 /* edit-in-place toolbar over the article */
 .ne-toolbar { display: flex; align-items: center; gap: .6rem; margin: 0 0 .5rem; }

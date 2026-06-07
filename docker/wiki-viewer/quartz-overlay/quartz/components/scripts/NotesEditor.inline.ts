@@ -959,21 +959,33 @@ document.addEventListener("nav", () => {
       // stays recoverable in history. Navigate to the parent folder afterward.
       const delBtn = document.createElement("button")
       delBtn.className = "ne-launch ne-danger"
-      delBtn.textContent = "🗑 Delete"
+      delBtn.textContent = "🗑 Move to Trash"
       toolbar.appendChild(delBtn)
       delBtn.addEventListener("click", async () => {
-        if (!confirm("Delete this note? Its history stays in git and can be recovered.")) return
-        setStatus("deleting…")
+        if (!confirm("Move this note to the Trash?\n\nIt will be permanently removed at the nightly cleanup, and can be Restored until then.")) return
+        setStatus("moving to trash…")
         try {
           const r = await fetch(api(apiPath), { method: "DELETE" })
           const j = await r.json().catch(() => ({}))
           if (r.ok) {
             ;(window as any).__neEditing = true
-            const parent = apiPath.includes("/") ? apiPath.slice(0, apiPath.lastIndexOf("/")) : ""
-            setStatus("✓ deleted")
-            setTimeout(() => {
-              window.location.href = "/notes/" + (parent ? parent + "/" : "")
-            }, 1200)
+            setStatus("✓ moved to trash — refreshing…")
+            // Reload once the rebuilt page carries the trash card.
+            const here = location.pathname
+            const deadline = Date.now() + 9000
+            const tryReload = async () => {
+              try {
+                if ((await (await fetch(here, { cache: "no-store" })).text()).includes("data-ne-trash")) {
+                  location.reload()
+                  return
+                }
+              } catch {
+                /* keep polling */
+              }
+              if (Date.now() < deadline) setTimeout(tryReload, 700)
+              else location.reload()
+            }
+            setTimeout(tryReload, 700)
           } else {
             setStatus("✗ " + (j.error || "HTTP " + r.status))
           }
@@ -1184,13 +1196,13 @@ document.addEventListener("nav", () => {
       if (!folderRel) return
       if (
         !confirm(
-          "Delete the folder “" + folderRel + "” and ALL notes inside it?\n\n" +
-            "History stays in git and can be recovered.",
+          "Move the folder “" + folderRel + "” and ALL notes inside it to the Trash?\n\n" +
+            "Permanently removed at the nightly cleanup; Restorable until then.",
         )
       ) {
         return
       }
-      nfDelete.textContent = "deleting…"
+      nfDelete.textContent = "moving to trash…"
       ;(window as any).__neEditing = true
       try {
         const r = await fetch("/workbench/notes/folders", {
@@ -1200,10 +1212,22 @@ document.addEventListener("nav", () => {
         })
         const j = await r.json().catch(() => ({}))
         if (r.ok) {
-          const parent = folderRel.includes("/") ? folderRel.slice(0, folderRel.lastIndexOf("/")) : ""
-          setTimeout(() => {
-            window.location.href = "/notes/" + (parent ? parent + "/" : "")
-          }, 1300)
+          // Reload the folder page once its (trashed) landing carries the card.
+          const here = location.pathname
+          const deadline = Date.now() + 9000
+          const tryReload = async () => {
+            try {
+              if ((await (await fetch(here, { cache: "no-store" })).text()).includes("data-ne-trash")) {
+                location.reload()
+                return
+              }
+            } catch {
+              /* keep polling */
+            }
+            if (Date.now() < deadline) setTimeout(tryReload, 700)
+            else location.reload()
+          }
+          setTimeout(tryReload, 800)
         } else {
           ;(window as any).__neEditing = false
           nfDelete.textContent = "✗ " + (j.error || "HTTP " + r.status)
@@ -1211,6 +1235,55 @@ document.addEventListener("nav", () => {
       } catch (e: any) {
         ;(window as any).__neEditing = false
         nfDelete.textContent = "✗ " + (e && e.message ? e.message : e)
+      }
+    })
+  }
+
+  // (5) Restore a trashed note/folder from the trash card.
+  const trashCard = document.querySelector("[data-ne-trash]") as HTMLElement | null
+  const restoreBtn = trashCard ? (trashCard.querySelector("[data-ne-restore]") as HTMLElement | null) : null
+  if (trashCard && restoreBtn && !restoreBtn.dataset.neWired) {
+    restoreBtn.dataset.neWired = "1"
+    const tStatus = trashCard.querySelector("[data-ne-trash-status]") as HTMLElement | null
+    const isFolder = trashCard.dataset.isFolder === "1"
+    const notePath = trashCard.dataset.notePath || ""
+    const tFolderRel = trashCard.dataset.folderRel || ""
+    restoreBtn.addEventListener("click", async () => {
+      if (tStatus) tStatus.textContent = "restoring…"
+      ;(window as any).__neEditing = true
+      try {
+        const r = isFolder
+          ? await fetch("/workbench/notes/folders/restore", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ path: tFolderRel }),
+            })
+          : await fetch(api(notePath) + "/restore", { method: "POST" })
+        if (r.ok) {
+          if (tStatus) tStatus.textContent = "✓ restored — refreshing…"
+          const here = location.pathname
+          const deadline = Date.now() + 9000
+          const tryReload = async () => {
+            try {
+              const html = await (await fetch(here, { cache: "no-store" })).text()
+              if (!html.includes("data-ne-trash")) {
+                location.reload()
+                return
+              }
+            } catch {
+              /* keep polling */
+            }
+            if (Date.now() < deadline) setTimeout(tryReload, 700)
+            else location.reload()
+          }
+          setTimeout(tryReload, 700)
+        } else {
+          ;(window as any).__neEditing = false
+          if (tStatus) tStatus.textContent = "✗ restore failed (" + r.status + ")"
+        }
+      } catch (e: any) {
+        ;(window as any).__neEditing = false
+        if (tStatus) tStatus.textContent = "✗ " + (e && e.message ? e.message : e)
       }
     })
   }
