@@ -347,7 +347,7 @@ async function resolve(pkg: Pkg, claimEmb: number[]): Promise<{
 }
 
 // --- Delegate the write to the existing /research/persist -------------------
-async function delegatePersist(pkg: Pkg, threadId: string): Promise<Record<string, unknown>> {
+async function delegatePersist(pkg: Pkg, threadId: string, notebookLabel: string): Promise<Record<string, unknown>> {
   const body = {
     research_key: pkg.research_key,
     query: pkg.query,
@@ -356,7 +356,13 @@ async function delegatePersist(pkg: Pkg, threadId: string): Promise<Record<strin
     kind: pkg.kind,
     volatility: pkg.volatility,
     revalidate_days: pkg.revalidate_days,
-    notebook: pkg.topic_hint || pkg.notebook, // persist still stamps a notebook label
+    // CRITICAL: stamp the RESOLVED THREAD NAME (not the raw topic_hint) as the
+    // notebook on the persisted sources. The wiki compiler's backfillNotebooks
+    // turns any sources.notebook string that matches no thread NAME into a brand
+    // new thread — so using the topic_hint here would re-fragment exactly what
+    // the curator just consolidated. Matching the thread name makes backfill a
+    // no-op for curator-routed research.
+    notebook: notebookLabel || pkg.topic_hint || pkg.notebook,
     thread_id: threadId,
     model: pkg.model,
     sources: pkg.sources || [],
@@ -401,8 +407,9 @@ Deno.serve({ port: PORT }, async (req) => {
       const res = await resolve(pkg, claimEmb);
 
       let persist: Record<string, unknown>;
+      // res.name is passed as the notebook label (see delegatePersist).
       try {
-        persist = await delegatePersist(pkg, res.thread_id);
+        persist = await delegatePersist(pkg, res.thread_id, res.name);
       } catch (e) {
         // Persist failed AFTER we resolved a thread. Surface it so the caller
         // can fall back to its own unthreaded persist (best-effort, never block).
