@@ -25,6 +25,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { slugifyNotebook } from "../../_shared/slug.mjs";
+import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
 
 function loadDotEnv() {
   for (const rel of [".env.local", ".env"]) {
@@ -217,7 +218,7 @@ async function backfillNotebooks(sb, threads) {
 // Confirmed, non-retracted sources for a thread (P4 4.5 tombstone filter).
 async function confirmedSources(sb, threadId) {
   const rows = await sb.get(
-    `thread_sources?select=source_id,sources!inner(id,title,url,content,content_type)` +
+    `thread_sources?select=source_id,sources!inner(id,title,url,content,content_type,created_at,notebook)` +
       `&thread_id=eq.${threadId}&status=eq.confirmed&sources.retraction_committed_at=is.null&limit=200`,
   );
   return rows.filter((r) => r.sources).map((r) => r.sources);
@@ -338,9 +339,15 @@ async function main() {
       const hubDir = path.join(nbDir, slug);
       fs.mkdirSync(hubDir, { recursive: true });
       fs.writeFileSync(path.join(hubDir, `${slug}.md`), fm + body + "\n", "utf8");
+      // Emit a source leaf for every source this hub cites, so the [Sn] links
+      // resolve even for web_articles never extracted into an entity page
+      // (entity-wiki's emitLeafPages only covers ENTITY-cited sources). Shared
+      // renderer → byte-identical to those leaves; the orphan sweep keeps them
+      // because the hub references them.
+      const leaves = writeSourceLeaves(srcs, outDir);
       moc.push(`- [[${slug}|${t.name}]] — ${srcs.length} sources`);
       ok++;
-      console.log(`[notebook-synth] wrote notebooks/${slug}/${slug}.md (${srcs.length} sources)`);
+      console.log(`[notebook-synth] wrote notebooks/${slug}/${slug}.md (${srcs.length} sources, ${leaves} leaf page(s))`);
     } catch (e) {
       console.error(`[notebook-synth] FAILED notebook "${t.name}": ${e.message}`);
     }

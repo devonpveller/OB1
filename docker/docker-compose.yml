@@ -555,7 +555,7 @@ services:
       - llm-net
       - app-net
     healthcheck:
-      test: ["CMD", "deno", "eval", "--allow-net", "const r=await fetch('http://localhost:8000/health');Deno.exit(r.ok?0:1)"]
+      test: ["CMD", "deno", "eval", "const r=await fetch('http://localhost:8000/health');Deno.exit(r.ok?0:1)"]
       interval: 30s
       timeout: 5s
       retries: 3

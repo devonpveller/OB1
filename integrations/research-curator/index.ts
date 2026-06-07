@@ -76,7 +76,8 @@ const pool = new Pool({
 interface Pkg {
   research_key?: string;
   query?: string;
-  claim?: string; // the synthesis (required)
+  claim?: string; // short standalone summary (required) — used for the resolver embedding
+  synthesis?: string; // the FULL detailed research result — stored as source content
   kind?: string;
   volatility?: string;
   revalidate_days?: number;
@@ -351,6 +352,7 @@ async function delegatePersist(pkg: Pkg, threadId: string): Promise<Record<strin
     research_key: pkg.research_key,
     query: pkg.query,
     claim: pkg.claim,
+    synthesis: pkg.synthesis, // full detailed result -> stored as source content
     kind: pkg.kind,
     volatility: pkg.volatility,
     revalidate_days: pkg.revalidate_days,

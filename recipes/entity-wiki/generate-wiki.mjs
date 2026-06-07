@@ -42,6 +42,7 @@ import { pathToFileURL } from "node:url";
 // `slugify` here keeps the historical (name, entityType) → "<type>-<base>"
 // signature this file already used; it is now the canonical impl, not a copy.
 import { slugifyEntity as slugify, slugifyNotebook } from "../_shared/slug.mjs";
+import { writeSourceLeaves } from "../_shared/source-leaf.mjs";
 
 // ---------------------------------------------------------------
 // Config + CLI parsing
@@ -1142,11 +1143,11 @@ async function emitLeafPages(sb, outDir, run) {
     }
   }
 
-  // source leaves → content/source/<uuid>.md (id is UUID).
+  // source leaves → content/source/<uuid>.md (id is UUID). Shared renderer
+  // (writeSourceLeaves) is also used by notebook-synth, so a source cited by
+  // both emitters renders byte-identically — no per-compile churn.
   const sIds = [...run.citedSourceIds];
   if (sIds.length) {
-    const dir = path.join(outDir, "source");
-    fs.mkdirSync(dir, { recursive: true });
     for (let i = 0; i < sIds.length; i += CHUNK) {
       const list = sIds.slice(i, i + CHUNK).join(",");
       const rows =
@@ -1154,30 +1155,7 @@ async function emitLeafPages(sb, outDir, run) {
           "sources",
           `select=id,url,title,content,content_type,notebook,created_at&id=in.(${list})`,
         )) || [];
-      for (const r of rows) {
-        const date = String(r.created_at || "").slice(0, 10);
-        const title = r.title || r.url || `Source ${r.id}`;
-        const fm = [
-          "---",
-          `title: ${frontmatterScalar(title)}`,
-          "type: source", // P0.6/G12 leaf id contract = type + id
-          `id: ${frontmatterScalar(r.id)}`,
-          ...(date ? [`date: ${date}`] : []),
-          ...(r.url ? [`url: ${frontmatterScalar(r.url)}`] : []),
-          ...(r.content_type ? [`content_type: ${frontmatterScalar(r.content_type)}`] : []),
-          ...(r.notebook ? [`notebook: ${frontmatterScalar(r.notebook)}`] : []),
-          "tags: [leaf, source]",
-          "---",
-          "",
-          `# ${scrubSnippetContent(title)}`,
-          "",
-          ...(r.url ? [`Source: ${scrubSnippetContent(r.url)}`, ""] : []),
-          scrubSnippetContent(r.content || ""),
-          "",
-        ].join("\n");
-        fs.writeFileSync(path.join(dir, `${r.id}.md`), fm + "\n", "utf8");
-        srcs++;
-      }
+      srcs += writeSourceLeaves(rows, outDir);
     }
   }
 

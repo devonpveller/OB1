@@ -1337,7 +1337,7 @@ app.get("/research/lookup", async (c) => {
 app.post("/research/persist", async (c) => {
   if (!researchAuthed(c)) return c.json({ error: "unauthorized" }, 401);
   let body: {
-    research_key?: string; query?: string; claim?: string; kind?: string;
+    research_key?: string; query?: string; claim?: string; synthesis?: string; kind?: string;
     volatility?: string; revalidate_days?: number; notebook?: string;
     thread_id?: string;   // active thread; absent => unthreaded inbox
     model?: string;       // originating model (provenance metadata)
@@ -1347,11 +1347,18 @@ app.post("/research/persist", async (c) => {
   const key = body.research_key;
   const claim = (body.claim || "").trim();
   if (!key || !claim) return c.json({ error: "research_key and claim required" }, 400);
+  // The synthesis row's CONTENT is the FULL detailed research result when the
+  // caller provides it; `claim` is the short standalone summary, kept for the
+  // topical embedding + cache display. Older callers that only send `claim`
+  // still work (content falls back to claim).
+  const content = (body.synthesis || "").trim() || claim;
   const threadId = (body.thread_id || "").trim() || null;
 
   const client = await pool.connect();
   try {
     await client.queryArray("BEGIN");
+    // Embed the short claim (focused, topical) — chunk-level retrieval over the
+    // full content is handled separately by the chunk-embedding worker.
     const claimEmb = `[${(await getEmbedding(claim.slice(0, 1600))).join(",")}]`;
     // Supersede the synthesis row in place (unique partial index on research_key).
     const synth = await client.queryObject<{ id: string }>(
@@ -1369,10 +1376,10 @@ app.post("/research/persist", async (c) => {
          embedding=EXCLUDED.embedding, updated_at=now()
        RETURNING id`,
       [
-        (body.query || "research").slice(0, 200), claim, body.notebook ?? null,
+        (body.query || "research").slice(0, 200), content, body.notebook ?? null,
         key, body.query ?? null, body.kind ?? null,
         body.volatility ?? null, body.revalidate_days ?? null,
-        claimEmb, JSON.stringify({ source: "deep-research" }),
+        claimEmb, JSON.stringify({ source: "deep-research", claim }),
       ],
     );
 
