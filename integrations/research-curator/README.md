@@ -12,6 +12,8 @@ Full design: [`../../../documentation/implementation-guide/expand-OB1-research-i
 | File | Role |
 |------|------|
 | `index.ts` | the service: `GET /health`, `POST /ingest/research-package` |
+| `claims.ts` | Research Engine **P1.3** — `parseSynthesisClaims` (pure) + `writeClaims`: turn a synthesis's `[SOURCED]/[INFERRED]/[Source N]` tags into grounded claims + typed edges via `init-claims.sql` helpers. Not yet wired into `index.ts` (P2). |
+| `claims.test.ts` | 9 deno unit tests for the parser (`deno test --allow-net claims.test.ts`) |
 | `backfill-thread-embeddings.ts` | one-time: embed existing threads (P0.2) |
 | `consolidate-threads.ts` | one-time: fold the existing fragmented threads (P5) |
 

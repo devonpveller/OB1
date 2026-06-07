@@ -48,6 +48,9 @@ services:
       # ── Research-inlet additive migration (fresh-volume only; the promotion
       #    runbook applies this to the live DB via psql — G3). ──
       - ./init-thread-embedding.sql:/docker-entrypoint-initdb.d/92-init-thread-embedding.sql:ro  # research-inlet P0
+      # ── Research Engine claims layer (fresh-volume only; the promotion
+      #    runbook applies this to the live DB via psql — G3). ──
+      - ./init-claims.sql:/docker-entrypoint-initdb.d/94-init-claims.sql:ro                      # research-engine P1
     networks:
       - obnet
     restart: unless-stopped

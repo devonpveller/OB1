@@ -8,6 +8,7 @@ RUN deno install
 
 # Server source + operator-run one-time scripts (backfill, consolidation)
 COPY index.ts ./
+COPY claims.ts ./
 COPY backfill-thread-embeddings.ts ./
 COPY consolidate-threads.ts ./
 
