@@ -5,7 +5,17 @@ import { config } from "../config.ts";
 import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
-import { gitMv, gitRm, vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
+import {
+  gitMv,
+  gitRm,
+  vaultCommit,
+  vaultCommitPath,
+  vaultExists,
+  vaultFolderHistory,
+  vaultGitShow,
+  vaultRead,
+  vaultWrite,
+} from "../util/vault.ts";
 
 const enc = new TextEncoder();
 
@@ -332,4 +342,41 @@ export async function emptyTrash(author?: string): Promise<{ removed: string[] }
     }
   }
   return { removed };
+}
+
+// ── Folder history + recover ────────────────────────────────────────────────
+
+// Recent git history of a folder: commits with their changed NOTES (status
+// A/M/D/R), notes-relative. So a folder view can show what was added/edited/
+// trashed/removed over time and recover any of it.
+export async function folderHistory(folderPath: string, limit = 40): Promise<{
+  commits: { hash: string; author: string; date: string; message: string; files: { status: string; path: string }[] }[];
+}> {
+  const rel = folderPath ? safeFolderRel(folderPath) : "";
+  const dir = rel ? `notes/${rel}` : "notes";
+  const commits = (await vaultFolderHistory(dir, limit)).map((c) => ({
+    ...c,
+    files: c.files
+      .filter((f) => f.path.endsWith(".md") && f.path.startsWith("notes/"))
+      .map((f) => ({ status: f.status, path: f.path.replace(/^notes\//, "") })),
+  }));
+  return { commits };
+}
+
+// Recover a note's content from a past commit (e.g. one the nightly cleanup
+// hard-removed). Writes it back un-trashed + commits. `notePath` notes-relative.
+export async function recoverNote(
+  notePath: string,
+  fromCommit: string,
+  author?: string,
+): Promise<{ recovered: string } | { error: string; code: 400 | 404 }> {
+  const rel = notesRel(notePath);
+  if (!/^[0-9a-fA-F]{7,40}$/.test(fromCommit)) return { error: "bad commit hash", code: 400 };
+  // The note exists AT this commit (edit/add) → use it; if it was REMOVED in this
+  // commit (a delete/empty-trash) the content lives in the parent.
+  const content = (await vaultGitShow(fromCommit, rel)) ?? (await vaultGitShow(`${fromCommit}~1`, rel));
+  if (content == null) return { error: "note not found at that revision", code: 404 };
+  await vaultWrite(rel, setTrashed(content, false));
+  await vaultCommitPath(rel, `notes: recover ${rel} @ ${fromCommit.slice(0, 8)}`, author);
+  return { recovered: rel.replace(/^notes\//, "") };
 }

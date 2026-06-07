@@ -51,6 +51,7 @@ services:
       # ── Research Engine claims layer (fresh-volume only; the promotion
       #    runbook applies this to the live DB via psql — G3). ──
       - ./init-claims.sql:/docker-entrypoint-initdb.d/94-init-claims.sql:ro                      # research-engine P1
+      - ./init-research-jobs.sql:/docker-entrypoint-initdb.d/96-init-research-jobs.sql:ro         # research-engine P4
     networks:
       - obnet
     restart: unless-stopped
@@ -389,6 +390,66 @@ services:
       PORT: "8000"
     ports:
       - "127.0.0.1:8816:8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+
+  # Shared research harness (Research Engine P3/P4). One harness, many thin
+  # inlets (OWUI deep_research tool, future agents, Open Notebook). It reuses
+  # grounded+fresh claims from the OB KB, analyses coverage → gaps, stages ONLY
+  # the gaps (SearXNG search → per-page fetch+extract), synthesizes verbatim with
+  # claim-level [Source N] citations, ENFORCES grounding (degrades to honest
+  # [GAP]s on backstop, never fabricates), and DELEGATES placement + claim
+  # writing to openbrain-curator (OD-2). Async job+poll (OD-3): POST /research →
+  # job_id; GET /research/jobs/:id (or .../stream SSE). Talks to openbrain-db
+  # (deno-postgres, KB read + staging), llama-cpp (chat) + llama-cpp-embed
+  # (bge-m3), the curator, and the private SearXNG gateway. obnet + llm-net.
+  # HTTP-invoked (loopback 8818). NOTE: reaching the SearXNG gateway is a
+  # cross-stack seam — set SEARCH_API_BASE to a URL reachable from obnet/llm-net
+  # (the gateway lives in the MAIN stack); if search is unreachable the harness
+  # degrades to honest gaps (rule #1), it never fabricates.
+  openbrain-research:
+    build:
+      context: ../integrations/research-service
+      dockerfile: Dockerfile
+    image: openbrain-research:local
+    container_name: openbrain-research
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+      openbrain-curator:
+        condition: service_started
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # Delegate placement + grounded-claim writing to the deployed curator (OD-2).
+      CURATOR_URL: http://openbrain-curator:8000
+      # Private SearXNG-over-Tor gateway (cross-stack — override to a reachable URL).
+      SEARCH_API_BASE: ${RESEARCH_SEARCH_API_BASE:-http://gateway:8080}
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      CHAT_API_KEY: not-needed
+      CHAT_MODEL: ${RESEARCH_CHAT_MODEL:-qwen36-27b}
+      NOTHINK_SUFFIX: ":nothink"
+      # Harness tuning (override via .env). See PLAN §5/§6 + OD-5/OD-6.
+      SEARCH_K: ${RESEARCH_SEARCH_K:-8}
+      CLAIM_SHORTLIST_K: ${RESEARCH_CLAIM_SHORTLIST_K:-12}
+      CONFIDENCE_FLOOR: ${RESEARCH_CONFIDENCE_FLOOR:-0.50}
+      FETCH_TIMEOUT_MS: ${RESEARCH_FETCH_TIMEOUT_MS:-15000}
+      FETCH_MAX_CHARS: ${RESEARCH_FETCH_MAX_CHARS:-8000}
+      FETCH_CONCURRENCY: ${RESEARCH_FETCH_CONCURRENCY:-4}
+      MAX_FETCH: ${RESEARCH_MAX_FETCH:-24}
+      MAX_WALL_MS: ${RESEARCH_MAX_WALL_MS:-180000}
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8818:8000"
     networks:
       - obnet
       - llm-net

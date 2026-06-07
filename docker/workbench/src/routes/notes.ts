@@ -50,6 +50,13 @@ notes.get("/trashed", async (c) => {
   return c.json(await repo.listTrashed());
 });
 
+// GET /workbench/notes/folder-history?path=<rel> — recent git history of a folder
+// (added/edited/trashed/removed notes) for the history panel + recover. Literal
+// path, MUST precede the /:notePath wildcard.
+notes.get("/folder-history", async (c) => {
+  return c.json(await repo.folderHistory(c.req.query("path") ?? ""));
+});
+
 // POST /workbench/notes/folders — create a folder under notes/. { path }.
 notes.post("/folders", async (c) => {
   const body = await c.req.json().catch(() => ({}));
@@ -138,6 +145,21 @@ notes.delete("/:notePath{.+}", async (c) => {
 notes.post("/:notePath{.+}/restore", async (c) => {
   try {
     const res = await repo.restoreNote(c.req.param("notePath"), authorOf(c));
+    if ("error" in res) return c.json({ error: res.error }, res.code);
+    return c.json(res);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
+// POST /workbench/notes/<path>/recover { from } — restore a note's content from a
+// past commit (recovers even after the nightly cleanup hard-removed it).
+notes.post("/:notePath{.+}/recover", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const from = (body?.from ?? "").toString();
+  if (!from.trim()) return c.json({ error: "from (commit) is required" }, 400);
+  try {
+    const res = await repo.recoverNote(c.req.param("notePath"), from, authorOf(c));
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {

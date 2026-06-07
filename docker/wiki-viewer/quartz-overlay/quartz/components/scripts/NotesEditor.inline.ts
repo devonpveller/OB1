@@ -1094,6 +1094,7 @@ document.addEventListener("nav", () => {
       const content =
         ["---", "title: " + JSON.stringify(title), "source: user_note", "notebook: " + JSON.stringify(nbName), "tags: [note]", "---", "", ""].join("\n")
       launch.textContent = "creating…"
+      ;(launch as HTMLButtonElement).disabled = true // no re-clicks during the hop
       // Suppress the hub's hot-reload so the create→navigate hop isn't interrupted.
       ;(window as any).__neEditing = true
       try {
@@ -1132,6 +1133,7 @@ document.addEventListener("nav", () => {
         setTimeout(tryGo, 700)
       } catch (e: any) {
         ;(window as any).__neEditing = false
+        ;(launch as HTMLButtonElement).disabled = false
         launch.textContent = "✗ " + (e && e.message ? e.message : e)
       }
     }
@@ -1179,6 +1181,7 @@ document.addEventListener("nav", () => {
       }
       const path = (folderRel ? folderRel + "/" : "") + sub
       nfLaunch.textContent = "creating…"
+      ;(nfLaunch as HTMLButtonElement).disabled = true // no re-clicks during the hop
       ;(window as any).__neEditing = true // hold hot-reload during the create→open hop
       try {
         const r = await fetch("/workbench/notes/folders", {
@@ -1214,6 +1217,7 @@ document.addEventListener("nav", () => {
         setTimeout(tryGo, 700)
       } catch (e: any) {
         ;(window as any).__neEditing = false
+        ;(nfLaunch as HTMLButtonElement).disabled = false
         nfLaunch.textContent = "✗ " + (e && e.message ? e.message : e)
       }
     }
@@ -1330,6 +1334,81 @@ document.addEventListener("nav", () => {
       } catch (e: any) {
         ;(window as any).__neEditing = false
         if (tStatus) tStatus.textContent = "✗ " + (e && e.message ? e.message : e)
+      }
+    })
+  }
+
+  // (6) Folder commit history + recover-a-note (on folder pages).
+  const nfHistory = root ? (root.querySelector("[data-nf-history]") as HTMLElement | null) : null
+  if (nfHistory && root && !nfHistory.dataset.nfWired) {
+    nfHistory.dataset.nfWired = "1"
+    const hFolderRel = root.dataset.folderRel || ""
+    let panel: HTMLElement | null = null
+    const STAT: Record<string, string> = { A: "added", M: "edited", D: "removed", R: "renamed" }
+    nfHistory.addEventListener("click", async () => {
+      if (panel) {
+        panel.remove()
+        panel = null
+        nfHistory.textContent = "📜 History"
+        return
+      }
+      nfHistory.textContent = "loading history…"
+      try {
+        const j = await (await fetch("/workbench/notes/folder-history?path=" + encodeURIComponent(hFolderRel))).json()
+        panel = document.createElement("div")
+        panel.className = "ne-history"
+        const commits = j.commits || []
+        if (!commits.length) {
+          panel.textContent = "No history yet for this folder."
+        } else {
+          for (const c of commits) {
+            const cd = document.createElement("div")
+            cd.className = "ne-hist-commit"
+            const head = document.createElement("div")
+            head.className = "ne-hist-head"
+            let when = c.date
+            try {
+              when = new Date(c.date).toLocaleString()
+            } catch {
+              /* raw */
+            }
+            head.textContent = when + " — " + c.message
+            cd.appendChild(head)
+            for (const f of c.files || []) {
+              const st = (f.status || "")[0] || ""
+              const row = document.createElement("div")
+              row.className = "ne-hist-file ne-hist-" + st
+              row.textContent = (STAT[st] || f.status) + ": " + f.path
+              if (st === "D" || st === "R") {
+                const rec = document.createElement("button")
+                rec.className = "ne-hist-recover"
+                rec.textContent = "↩ Recover"
+                rec.addEventListener("click", async () => {
+                  rec.textContent = "recovering…"
+                  rec.disabled = true
+                  try {
+                    const rr = await fetch(api(f.path) + "/recover", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ from: c.hash }),
+                    })
+                    const rj = await rr.json().catch(() => ({}))
+                    rec.textContent = rr.ok ? "✓ recovered — refresh to view" : "✗ " + (rj.error || rr.status)
+                  } catch (e: any) {
+                    rec.textContent = "✗ " + (e && e.message ? e.message : e)
+                  }
+                })
+                row.appendChild(rec)
+              }
+              cd.appendChild(row)
+            }
+            panel.appendChild(cd)
+          }
+        }
+        nfHistory.after(panel)
+        nfHistory.textContent = "📜 Hide history"
+      } catch (e: any) {
+        nfHistory.textContent = "✗ " + (e && e.message ? e.message : e)
       }
     })
   }

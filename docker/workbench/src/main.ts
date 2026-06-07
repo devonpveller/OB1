@@ -31,6 +31,7 @@ import { exporter } from "./routes/export.ts";
 import { noteRefs } from "./routes/note-refs.ts";
 import { noteHistory, noteCommit } from "./routes/note-history.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
+import { emptyTrash } from "./repositories/notes.ts";
 
 // deno-postgres returns BIGINT columns (e.g. entities.id, thoughts.id) as JS
 // BigInt, which JSON.stringify cannot serialize → every response carrying one
@@ -73,6 +74,31 @@ app.onError((err, c) => {
 
 // Make sure we can commit notes / the Changes log into the vault (best-effort).
 await ensureVaultRepo();
+
+// Nightly: empty the notes trash (hard-remove `trashed: true` notes) just before
+// the viewer's daily clean rebuild, so they're gone for good ahead of the 1am
+// compile. Local time; defaults to 23:55. Reschedules itself each run.
+function scheduleEmptyTrash(): void {
+  const hh = Math.min(23, Math.max(0, parseInt(Deno.env.get("WB_EMPTY_TRASH_HOUR") ?? "23", 10)));
+  const mm = Math.min(59, Math.max(0, parseInt(Deno.env.get("WB_EMPTY_TRASH_MIN") ?? "55", 10)));
+  const arm = () => {
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(hh, mm, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    setTimeout(async () => {
+      try {
+        const { removed } = await emptyTrash("nightly-cleanup");
+        if (removed.length) console.log(`[workbench] nightly empty-trash removed ${removed.length} note(s)`);
+      } catch (e) {
+        console.error("[workbench] nightly empty-trash failed:", (e as Error).message);
+      }
+      arm();
+    }, next.getTime() - now.getTime());
+  };
+  arm();
+}
+scheduleEmptyTrash();
 
 Deno.serve({ port: config.port }, app.fetch);
 console.log(`[workbench] listening on :${config.port} (auth=${config.workbenchKey ? "on" : "OPEN — set WORKBENCH_KEY"})`);

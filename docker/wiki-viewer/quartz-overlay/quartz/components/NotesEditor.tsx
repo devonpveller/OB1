@@ -77,6 +77,7 @@ const NotesEditor: QuartzComponent = ({ fileData, displayClass }: QuartzComponen
       {canCreate && !isTrashed && folder !== "notes" && folder !== "notes/notebooks" ? (
         <button class="ne-launch ne-danger" data-nf-delete>🗑 Delete folder</button>
       ) : null}
+      {canCreate && !isTrashed ? <button class="ne-launch" data-nf-history>📜 History</button> : null}
       {canCreate && !isTrashed ? (
         <span class="ne-fresh-note">
           ℹ Newly created or restored notes can take a moment to appear in this list — the wiki rebuilds
@@ -114,6 +115,15 @@ NotesEditor.css = `
 .ne-fresh-note { display: block; font-size: .72rem; color: var(--gray); margin: .4rem 0 0; max-width: 70ch; line-height: 1.45; }
 a.ne-trashed-link { opacity: .5; text-decoration: line-through; }
 a.ne-trashed-link .ne-trash-ico { text-decoration: none; opacity: .85; }
+.ne-history { display: block; margin: .6rem 0 0; border: 1px solid var(--lightgray); border-radius: 8px; padding: .5rem .75rem; max-height: 52vh; overflow: auto; background: color-mix(in srgb, var(--lightgray) 18%, transparent); }
+.ne-hist-commit { padding: .35rem 0; border-bottom: 1px solid color-mix(in srgb, var(--lightgray) 60%, transparent); }
+.ne-hist-commit:last-child { border-bottom: 0; }
+.ne-hist-head { font-size: .76rem; color: var(--dark); font-weight: 600; }
+.ne-hist-file { font-size: .74rem; color: var(--gray); margin: .15rem 0 0 .85rem; display: flex; align-items: center; gap: .5rem; }
+.ne-hist-file.ne-hist-D { color: #c0392b; }
+.ne-hist-file.ne-hist-A { color: #2e7d32; }
+.ne-hist-recover { font-size: .7rem; padding: .12rem .5rem; border: 1px solid var(--secondary); color: var(--secondary); background: transparent; border-radius: 5px; cursor: pointer; margin-left: auto; }
+.ne-hist-recover:hover { background: var(--secondary); color: var(--light); }
 
 /* edit-in-place toolbar over the article */
 .ne-toolbar { display: flex; align-items: center; gap: .6rem; margin: 0 0 .5rem; }

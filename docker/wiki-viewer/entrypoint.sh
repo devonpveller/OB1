@@ -40,5 +40,30 @@ while [ "$i" -lt 60 ]; do
   sleep 10
 done
 
-# build --serve: build, then watch + serve. Quartz binds 0.0.0.0:8080.
-exec npx quartz build --serve --port 8080
+# build --serve: build, then watch + serve (fast incremental for live edits).
+# BUT `--serve` never deletes the emitted HTML of removed/trashed/moved notes, so
+# once a day (WIKI_VIEWER_REBUILD_HOUR, default 0 = midnight, before the 1am
+# compile + after the workbench empties trash at 23:55) we restart it for a CLEAN
+# build that sweeps those orphans. At that hour no one is using the wiki, so the
+# ~5-min rebuild is invisible. node computes the sleep (this minimal image has no
+# `date -d`); the loop manages its own restarts + forwards container stop.
+set +e
+REBUILD_HOUR="${WIKI_VIEWER_REBUILD_HOUR:-0}"
+export REBUILD_HOUR
+SERVE_PID=""
+trap 'kill "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
+while true; do
+  npx quartz build --serve --port 8080 &
+  SERVE_PID=$!
+  node -e '
+    const h = Math.min(23, Math.max(0, parseInt(process.env.REBUILD_HOUR || "0", 10)));
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(h, 0, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    setTimeout(() => process.exit(0), next.getTime() - now.getTime());
+  '
+  echo "[wiki-viewer] nightly clean rebuild — restarting quartz"
+  kill "$SERVE_PID" 2>/dev/null
+  wait "$SERVE_PID" 2>/dev/null
+done

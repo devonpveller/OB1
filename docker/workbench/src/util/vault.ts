@@ -101,6 +101,33 @@ export async function vaultFileHistory(
   return out;
 }
 
+// Recent git history of a DIRECTORY: commits touching anything under it, each with
+// its changed-file list + status (A/M/D/R…). Powers the folder-history view and
+// recover-a-trashed-note. Bounded to `limit` commits.
+export async function vaultFolderHistory(
+  relDir: string,
+  limit = 40,
+): Promise<
+  { hash: string; author: string; date: string; message: string; files: { status: string; path: string }[] }[]
+> {
+  const log = await git(["log", `-n${limit}`, "--name-status", "--format=%x1e%H%x1f%an%x1f%aI%x1f%s", "--", relDir]);
+  if (!log.ok) return [];
+  const out: { hash: string; author: string; date: string; message: string; files: { status: string; path: string }[] }[] = [];
+  for (const block of log.out.split("\x1e").filter((b) => b.trim())) {
+    const lines = block.split("\n");
+    const [hash, author, date, message] = (lines.shift() || "").split("\x1f");
+    if (!hash) continue;
+    const files = lines
+      .filter((l) => l.trim())
+      .map((l) => {
+        const parts = l.split("\t");
+        return { status: parts[0], path: parts[parts.length - 1] };
+      });
+    out.push({ hash, author, date, message, files });
+  }
+  return out;
+}
+
 export async function vaultExists(relPath: string): Promise<boolean> {
   try {
     await Deno.stat(safeJoin(config.vault.gitDir, relPath));
