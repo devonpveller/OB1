@@ -18,6 +18,15 @@ ln -sfn /wiki /quartz/content
 sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", ".git", ".git/**", "**/.git/**", ".quartz-cache", "public", "node_modules", ".wikistate.json"]#' \
   /quartz/quartz.config.ts
 
+# Disable Quartz's CustomOgImages emitter. It throws on ZWJ-sequence emojis
+# (e.g. codepoint 1f9d1-200d-1f4bc / 🧑‍💼) absent from its emoji map, which
+# crashes the ENTIRE build → viewer crash-loop (the splash never clears). OG /
+# social-preview images are pointless for a private Authelia/tailnet-gated wiki.
+# The upstream quartz.config.ts ships CustomOgImages ENABLED; this comments it
+# out. Idempotent (no-op if already commented).
+sed -i 's#^\([[:space:]]*\)Plugin.CustomOgImages(),#\1// Plugin.CustomOgImages(), // DISABLED: ZWJ-emoji codepoint crashes emit#' \
+  /quartz/quartz.config.ts
+
 # On a cold stack the compiler may not have produced pages yet. Quartz
 # build errors on empty content, so wait (bounded) for the home page.
 i=0

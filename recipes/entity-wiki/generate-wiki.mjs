@@ -539,7 +539,7 @@ function buildSynthesisInput(entity, linked, semantic, sources, nameMap, maxLink
   // a high error rate, so the model NEVER sees or emits the UUID. Instead
   // each source gets a short, stable PER-PAGE token (S1, S2, …) that the
   // model cites; the deterministic token→UUID map below is resolved at the
-  // citation-rewrite step ([rewriteCitations]) into `[[source/<uuid>|Sn]]`.
+  // citation-rewrite step ([rewriteCitations]) into `[[content/source/<uuid>|Sn]]`.
   const sourceSnippets = (sources || []).slice(0, maxSources).map((s, i) => ({
     token: `S${i + 1}`,
     id: s.id, // UUID — internal only; not exposed to the model
@@ -816,9 +816,9 @@ function linkifyEntities(markdown, related) {
 // P1.3/1.4 — turn inline citations into real internal wikilinks so native
 // Quartz popover + SPA + backlinks + search apply with no custom interaction
 // code:
-//   [#<digits>] → [[thought/<digits>|#<digits>]]  (thoughts.id is BIGSERIAL —
+//   [#<digits>] → [[content/thought/<digits>|#<digits>]]  (thoughts.id is BIGSERIAL —
 //                 small ints the LLM reproduces reliably; matched literally)
-//   [S<n>]      → [[source/<uuid>|S<n>]]           (resolved via the per-page
+//   [S<n>]      → [[content/source/<uuid>|S<n>]]           (resolved via the per-page
 //                 token→UUID map; the model never sees or emits the UUID)
 // A token with no known leaf (a genuine mis-cite) is LEFT AS PLAIN TEXT,
 // mirroring broken-[[wikilink]] handling — so no broken links ever appear.
@@ -836,18 +836,18 @@ export function rewriteCitations(markdown, validThoughtIds, sourceTokenMap, run)
       const uuid = sourceTokenMap.get(`S${n}`);
       if (!uuid) return m; // mis-cite — leave as plain text
       run.citedSourceIds.add(uuid);
-      return `[[source/${uuid}|S${n}]]`;
+      return `[[content/source/${uuid}|S${n}]]`;
     });
     // Thoughts: [#11173] — literal id; not-on-this-page id → plain text.
-    // The "#" is kept OUTSIDE the wikilink (`#[[thought/id|id]]`, not
-    // `[[thought/id|#id]]`): Quartz's wikilink parser treats a "#" at the start
+    // The "#" is kept OUTSIDE the wikilink (`#[[content/thought/id|id]]`, not
+    // `[[content/thought/id|#id]]`): Quartz's wikilink parser treats a "#" at the start
     // of the alias as a heading/anchor ref and fails to render the link at all
     // (verified). The "#" as a literal prefix still reads "#11173", and the id
     // is the clickable link → popover/SPA/backlinks all work.
     seg = seg.replace(/\[#(\d+)\]/g, (m, d) => {
       if (!validThoughtIds.has(Number(d))) return m;
       run.citedThoughtIds.add(Number(d));
-      return `#[[thought/${d}|${d}]]`;
+      return `#[[content/thought/${d}|${d}]]`;
     });
     parts[i] = seg;
   }
@@ -876,7 +876,7 @@ export function buildEvolutionSection(entity, sources, linked) {
       .trim()
       .slice(0, 120);
     const ct = s.content_type ? ` (${s.content_type})` : "";
-    events.push({ date, text: `Grounded by [[source/${s.id}|${title || s.id}]]${ct}.` });
+    events.push({ date, text: `Grounded by [[content/source/${s.id}|${title || s.id}]]${ct}.` });
   }
   events.sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const lines = events.map((e) => `- ${e.date ? `**${e.date}** — ` : ""}${e.text}`);
@@ -1409,7 +1409,7 @@ async function generateForEntity(sb, env, entity, args, run = { citedThoughtIds:
   const model = args.model || env.LLM_MODEL || "anthropic/claude-haiku-4-5";
   const wikiRaw = await synthesize(env, model, payload);
   // P1.3/1.4 — rewrite inline citations into real wikilinks FIRST (before
-  // entity linkify, so the new [[thought/..]]/[[source/..]] links are
+  // entity linkify, so the new [[content/thought/..]]/[[content/source/..]] links are
   // protected by linkifyEntities' [[...]] guard). Valid thought ids for this
   // page = the linked + semantic ids actually sent to the model; source
   // tokens (S1, S2, …) resolve to UUIDs via the per-page map. Cited ids are

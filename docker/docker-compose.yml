@@ -45,6 +45,9 @@ services:
       - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro        # P5
       - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/88-init-import-jobs.sql:ro            # P5
       - ./init-source-editing.sql:/docker-entrypoint-initdb.d/90-init-source-editing.sql:ro     # P4.7
+      # ── Research-inlet additive migration (fresh-volume only; the promotion
+      #    runbook applies this to the live DB via psql — G3). ──
+      - ./init-thread-embedding.sql:/docker-entrypoint-initdb.d/92-init-thread-embedding.sql:ro  # research-inlet P0
     networks:
       - obnet
     restart: unless-stopped
@@ -328,6 +331,61 @@ services:
       PORT: "8000"
     ports:
       - "127.0.0.1:8813:8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+
+  # Research-package ingestion inlet / curator (research-inlet plan). The single
+  # front door for deep-research output: deep_research POSTs a "package"
+  # (synthesis + sources + topic hint) here instead of straight to
+  # /research/persist. The curator OWNS the thread decision — it resolves each
+  # package onto the best existing thread (Stage 1: pgvector shortlist over
+  # threads.embedding; Stage 2: LLM decision, conservative-merge bias) or creates
+  # a new thread, then DELEGATES the write to openbrain-mcp's /research/persist
+  # with the resolved thread_id injected, and refreshes the thread's
+  # description+embedding so matching improves over time. Stops OB1 fragmenting
+  # into one thread per run. Talks to openbrain-db DIRECTLY (deno-postgres) +
+  # llama-cpp (chat) + llama-cpp-embed (bge-m3). obnet (reach openbrain-mcp /
+  # db) + llm-net (reach the models). HTTP-invoked (loopback 8816):
+  # POST /ingest/research-package.
+  openbrain-curator:
+    build:
+      context: ../integrations/research-curator
+      dockerfile: Dockerfile
+    image: openbrain-curator:local
+    container_name: openbrain-curator
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+      openbrain-mcp:
+        condition: service_started
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      # Shared brain key — authenticates inbound ingests AND the outbound
+      # delegation to openbrain-mcp /research/persist.
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # Delegate the actual write to the existing persist endpoint.
+      PERSIST_URL: http://openbrain-mcp:8000
+      # Local embeddings (bge-m3, 1024-dim) for the thread shortlist.
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      # Local chat (qwen, non-thinking) for the thread-resolution decision.
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      CHAT_API_KEY: not-needed
+      CHAT_MODEL: qwen36-27b:nothink
+      # Resolver tuning (override via .env). See PLAN §3.4.
+      SHORTLIST_K: ${CURATOR_SHORTLIST_K:-5}
+      NEW_THREAD_MIN_CONFIDENCE: ${CURATOR_NEW_THREAD_MIN_CONFIDENCE:-0.60}
+      MERGE_FLOOR_DISTANCE: ${CURATOR_MERGE_FLOOR_DISTANCE:-0.45}
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8816:8000"
     networks:
       - obnet
       - llm-net

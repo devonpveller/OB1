@@ -611,8 +611,14 @@ async function sweepOrphanLeafPages() {
   ];
   const keptThoughts = new Set();
   const keptSources = new Set();
-  const reThought = /\[\[thought\/(\d+)/g;
-  const reSource = /\[\[source\/([0-9a-fA-F-]{36})/g;
+  // Match BOTH the bare (`[[source/<uuid>]]`) and content-prefixed
+  // (`[[content/source/<uuid>]]`) link forms. The compiler emits the prefixed
+  // form (viewer's Quartz root is the whole vault, so leaf slugs are
+  // `content/source/<uuid>`); the bare form is kept for backward-compat. If this
+  // regex misses the emitted form, the keep-set is empty and EVERY leaf is
+  // wrongly swept as an orphan.
+  const reThought = /\[\[(?:content\/)?thought\/(\d+)/g;
+  const reSource = /\[\[(?:content\/)?source\/([0-9a-fA-F-]{36})/g;
   for (const p of pages) {
     let text;
     try { text = await readFile(p, "utf8"); } catch { continue; }

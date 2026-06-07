@@ -134,7 +134,10 @@ async function synthesize(env, model, topic, sources) {
 // taken this run. Uses the SHARED canonical module (G5) so it can never diverge
 // from how the workbench pins new notebooks.
 async function pinThreadSlugs(sb) {
-  const threads = await sb.get("threads?select=id,name,slug&order=created_at.asc&limit=5000");
+  // status is REQUIRED here: the hub-generation step (main) filters on
+  // `status === 'active'`, so omitting it made every thread read as active and
+  // regenerated hubs for archived/consolidated threads (defeating the sweep).
+  const threads = await sb.get("threads?select=id,name,slug,status&order=created_at.asc&limit=5000");
   const taken = new Set(threads.filter((t) => t.slug).map((t) => t.slug));
   let pinned = 0;
   for (const t of threads) {
@@ -264,7 +267,26 @@ async function main() {
       let synthesis = "";
       if (srcs.length) {
         synthesis = await synthesize(env, model, t.name, srcs);
+        // synthesize() tells the model to cite inline as [S:<source-uuid>].
+        // Rewrite those into clickable wikilinks, mapping each source id to a
+        // stable S-number (matches the entity-page citation style). A malformed
+        // or unknown id stays literal (graceful) instead of a broken link.
+        const sNum = new Map(srcs.map((s, i) => [s.id, i + 1]));
+        let extra = srcs.length;
+        synthesis = synthesis.replace(/\[S:([0-9a-fA-F-]{36})\]/g, (_m, id) => {
+          let n = sNum.get(id);
+          if (!n) {
+            n = ++extra;
+            sNum.set(id, n);
+          }
+          return `[[content/source/${id}|S${n}]]`;
+        });
       }
+      // Deep-research syntheses (the deep_research.py output) are surfaced in
+      // their own section so the notebook's originating AI synthesis is one
+      // click away rather than buried among the web sources.
+      const researchSrcs = srcs.filter((s) => s.content_type === "research_synthesis");
+      const otherSrcs = srcs.filter((s) => s.content_type !== "research_synthesis");
       const fm = [
         "---",
         `title: ${JSON.stringify(t.name)}`,
@@ -287,11 +309,25 @@ async function main() {
         ...(t.description ? [scrub(t.description), ""] : []),
         synthesis || "## Synthesis\n\n_No sources linked yet — link sources to this notebook to generate a synthesis._",
         "",
+        // Deep-research synthesis (deep_research.py output) — surfaced first so
+        // the notebook's originating AI synthesis is obvious and one click away.
+        ...(researchSrcs.length
+          ? [
+              "## Deep Research",
+              "",
+              "Original AI research synthesis this notebook was generated from:",
+              "",
+              ...researchSrcs.map((s) => `- [[content/source/${s.id}|${(s.title || s.id)}]]`),
+              "",
+            ]
+          : []),
         // Baked `## Sources` fallback (NotebookPage.inline.ts overlays live data).
         "## Sources",
         "",
-        ...(srcs.length
-          ? srcs.map((s) => `- [[source/${s.id}|${(s.title || s.url || s.id)}]]`)
+        ...(otherSrcs.length
+          ? otherSrcs.map((s) => `- [[content/source/${s.id}|${(s.title || s.url || s.id)}]]`)
+          : researchSrcs.length
+          ? ["_See **Deep Research** above._"]
           : ["_None yet._"]),
         "",
         "## Notes",
