@@ -954,6 +954,33 @@ document.addEventListener("nav", () => {
         picker.appendChild(sel)
         picker.appendChild(go)
       })
+
+      // Delete this note — git rm + commit on the backend, so the prior content
+      // stays recoverable in history. Navigate to the parent folder afterward.
+      const delBtn = document.createElement("button")
+      delBtn.className = "ne-launch ne-danger"
+      delBtn.textContent = "🗑 Delete"
+      toolbar.appendChild(delBtn)
+      delBtn.addEventListener("click", async () => {
+        if (!confirm("Delete this note? Its history stays in git and can be recovered.")) return
+        setStatus("deleting…")
+        try {
+          const r = await fetch(api(apiPath), { method: "DELETE" })
+          const j = await r.json().catch(() => ({}))
+          if (r.ok) {
+            ;(window as any).__neEditing = true
+            const parent = apiPath.includes("/") ? apiPath.slice(0, apiPath.lastIndexOf("/")) : ""
+            setStatus("✓ deleted")
+            setTimeout(() => {
+              window.location.href = "/notes/" + (parent ? parent + "/" : "")
+            }, 1200)
+          } else {
+            setStatus("✗ " + (j.error || "HTTP " + r.status))
+          }
+        } catch (e: any) {
+          setStatus("✗ " + (e && e.message ? e.message : e))
+        }
+      })
     }
 
     // Sources: hydrate the body with the LIVE content so what you see equals
@@ -1142,6 +1169,48 @@ document.addEventListener("nav", () => {
         createFolder()
       } else if (e.key === "Escape") {
         input.hidden = true
+      }
+    })
+  }
+
+  // (4) Delete the CURRENT folder + ALL its notes (git rm -r + commit on the
+  // backend; recoverable). Root + the notebooks container have no button (server
+  // also protects them). Navigate to the parent folder afterward.
+  const nfDelete = root ? (root.querySelector("[data-nf-delete]") as HTMLElement | null) : null
+  if (nfDelete && root && !nfDelete.dataset.nfWired) {
+    nfDelete.dataset.nfWired = "1"
+    const folderRel = root.dataset.folderRel || ""
+    nfDelete.addEventListener("click", async () => {
+      if (!folderRel) return
+      if (
+        !confirm(
+          "Delete the folder “" + folderRel + "” and ALL notes inside it?\n\n" +
+            "History stays in git and can be recovered.",
+        )
+      ) {
+        return
+      }
+      nfDelete.textContent = "deleting…"
+      ;(window as any).__neEditing = true
+      try {
+        const r = await fetch("/workbench/notes/folders", {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ path: folderRel }),
+        })
+        const j = await r.json().catch(() => ({}))
+        if (r.ok) {
+          const parent = folderRel.includes("/") ? folderRel.slice(0, folderRel.lastIndexOf("/")) : ""
+          setTimeout(() => {
+            window.location.href = "/notes/" + (parent ? parent + "/" : "")
+          }, 1300)
+        } else {
+          ;(window as any).__neEditing = false
+          nfDelete.textContent = "✗ " + (j.error || "HTTP " + r.status)
+        }
+      } catch (e: any) {
+        ;(window as any).__neEditing = false
+        nfDelete.textContent = "✗ " + (e && e.message ? e.message : e)
       }
     })
   }

@@ -5,7 +5,7 @@ import { config } from "../config.ts";
 import { safeFolderRel, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
-import { gitMv, vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
+import { gitMv, gitRm, gitRmRecursive, vaultCommit, vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
 
 const enc = new TextEncoder();
 
@@ -202,4 +202,33 @@ export async function moveNote(
     to: toRel.replace(/^notes\//, ""),
     hash: await sha256(content),
   };
+}
+
+// Delete a single note. `git rm` + commit, so the note's prior content stays
+// recoverable in git history. `notePath` is notes-relative + must be .md.
+export async function deleteNote(
+  notePath: string,
+  author?: string,
+): Promise<{ deleted: string } | { error: string; code: 404 }> {
+  const rel = notesRel(notePath); // notes/<…>.md, traversal-safe + .md-checked
+  if (!(await vaultExists(rel))) return { error: "note not found", code: 404 };
+  await gitRm(rel, `notes: delete ${rel}`, author);
+  return { deleted: rel.replace(/^notes\//, "") };
+}
+
+// Delete a folder AND all notes inside it (one commit; recoverable via history).
+// Protections: the notes/ root and the top-level `notebooks` container can never
+// be deleted; safeFolderRel blocks traversal/empty/.git. `folderPath` is
+// notes-relative.
+const PROTECTED_FOLDERS = new Set(["", "notebooks"]);
+export async function deleteFolder(
+  folderPath: string,
+  author?: string,
+): Promise<{ deleted: string } | { error: string; code: 403 | 404 }> {
+  const rel = safeFolderRel(folderPath); // throws on empty / .. / .git
+  if (PROTECTED_FOLDERS.has(rel)) return { error: "this folder is protected and cannot be deleted", code: 403 };
+  const dir = `notes/${rel}`;
+  if (!(await vaultExists(dir))) return { error: "folder not found", code: 404 };
+  await gitRmRecursive(dir, `notes: delete folder ${rel} (and contents)`, author);
+  return { deleted: rel };
 }

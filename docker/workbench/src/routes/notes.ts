@@ -74,6 +74,34 @@ notes.post("/move", async (c) => {
   }
 });
 
+// DELETE /workbench/notes/folders — delete a folder AND its contents (git rm -r
+// + commit; recoverable). { path }. Root + the `notebooks` container are
+// protected. MUST precede the /:notePath wildcard (registration order).
+notes.delete("/folders", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const path = (body?.path ?? "").toString();
+  if (!path.trim()) return c.json({ error: "path is required" }, 400);
+  try {
+    const res = await repo.deleteFolder(path, authorOf(c));
+    if ("error" in res) return c.json({ error: res.error }, res.code);
+    return c.json(res);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
+// DELETE /workbench/notes/<path> — delete a single note (git rm + commit;
+// recoverable).
+notes.delete("/:notePath{.+}", async (c) => {
+  try {
+    const res = await repo.deleteNote(c.req.param("notePath"), authorOf(c));
+    if ("error" in res) return c.json({ error: res.error }, res.code);
+    return c.json(res);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message) }, 400);
+  }
+});
+
 // GET /workbench/notes/<path> — read a note + its content hash (for If-Match).
 notes.get("/:notePath{.+}", async (c) => {
   try {

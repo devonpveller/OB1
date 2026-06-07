@@ -179,6 +179,68 @@ export async function gitMv(
   return { committed: true };
 }
 
+// Commit whatever is currently staged under `pathspec` (if anything), optionally
+// authored. Lock-retry like the other commit helpers. Used by the delete ops,
+// where `git rm` has already staged the removal.
+async function commitIfStaged(
+  pathspec: string,
+  message: string,
+  author?: string,
+): Promise<{ committed: boolean }> {
+  const staged = await git(["diff", "--cached", "--name-only", "--", pathspec]);
+  if (!staged.out.trim()) return { committed: false };
+  const args = ["commit", "-q"];
+  if (author) args.push(`--author=${author} <${author}@notes.local>`);
+  args.push("-m", message);
+  let res = await git(args);
+  if (!res.ok && /index\.lock/.test(res.err)) {
+    await new Promise((r) => setTimeout(r, 500));
+    res = await git(args);
+  }
+  if (!res.ok) throw new Error(`git commit failed: ${res.err.slice(0, 300)}`);
+  return { committed: true };
+}
+
+// Delete a single file: `git rm` the tracked file (the removal is a recorded
+// commit, so the prior content stays recoverable via history), then commit. An
+// untracked draft (never committed) is just removed — no revision to preserve.
+export async function gitRm(
+  relPath: string,
+  message: string,
+  author?: string,
+): Promise<{ committed: boolean }> {
+  let rm = await git(["rm", "--quiet", "--", relPath]);
+  if (!rm.ok && /index\.lock/.test(rm.err)) {
+    await new Promise((r) => setTimeout(r, 500));
+    rm = await git(["rm", "--quiet", "--", relPath]);
+  }
+  if (!rm.ok) {
+    if (/did not match|not under version control/i.test(rm.err)) {
+      try {
+        await Deno.remove(safeJoin(config.vault.gitDir, relPath));
+      } catch { /* already gone */ }
+      return { committed: false };
+    }
+    throw new Error(`git rm failed: ${rm.err.slice(0, 300)}`);
+  }
+  return await commitIfStaged(relPath, message, author);
+}
+
+// Delete a folder and ALL its contents: `git rm -r` the tracked files (recorded
+// for recovery), then remove the directory (sweeping any untracked drafts), then
+// commit. `--ignore-unmatch` so a folder of only-untracked files doesn't error.
+export async function gitRmRecursive(
+  relPath: string,
+  message: string,
+  author?: string,
+): Promise<{ committed: boolean }> {
+  await git(["rm", "-r", "--quiet", "--ignore-unmatch", "--", relPath]);
+  try {
+    await Deno.remove(safeJoin(config.vault.gitDir, relPath), { recursive: true });
+  } catch { /* already gone */ }
+  return await commitIfStaged(relPath, message, author);
+}
+
 // Commit the working tree if (and only if) something changed. Best-effort: a
 // failure is surfaced but never corrupts state. Retries once on an index lock
 // (the wiki-service may be mid-commit on the same volume).
