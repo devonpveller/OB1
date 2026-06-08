@@ -1,0 +1,28 @@
+{
+  "generatedAt": "2026-06-08T10:27:40.176Z",
+  "windowHours": 168,
+  "committed": false,
+  "totals": {
+    "emailsScanned": 1,
+    "emailsWithNoLinks": 0,
+    "linksConsidered": 1,
+    "enriched": 1,
+    "emailOnly": 0,
+    "previouslySeen": 0
+  },
+  "entries": [
+    {
+      "gmailId": "19ea2d904101e6fc",
+      "label": "brain/ai/nate b jones",
+      "rawUrl": "https://natesnewsletter.substack.com/p/ai-token-cost-management",
+      "url": "https://natesnewsletter.substack.com/p/ai-token-cost-management",
+      "domain": "natesnewsletter.substack.com",
+      "status": "enriched",
+      "preview": {
+        "claim": "How to Read Your AI Token Bill Without a Blunt Cap",
+        "synthesisChars": 2366,
+        "taggedClaimLines": 18
+      }
+    }
+  ]
+}

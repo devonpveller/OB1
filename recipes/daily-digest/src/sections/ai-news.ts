@@ -15,6 +15,14 @@ export interface AiNewsPayload {
   emails: EmailGroup[];
   ungrouped: Thought[];
   bySender: Map<string, EmailGroup[]>;
+  /**
+   * Emails grouped by gmail label (the `brain/*` labels the pull is driven by:
+   * brain/slow-ai, brain/nate-b-jones, brain/ai-break, …). An email with N
+   * labels appears under each. This is the grouping axis the podcast narrates
+   * by ("From your feeds — one segment per label") and the link-enrichment
+   * stage iterates over. Additive: the email renderers still use bySender.
+   */
+  byLabel: Map<string, EmailGroup[]>;
   topTopics: Array<{ topic: string; count: number }>;
   totalActionItems: number;
 }
@@ -64,6 +72,7 @@ export class AiNewsSection implements Section {
 
     const { emails, ungrouped } = this.groupGmail(thoughts);
     const bySender = this.groupBySender(emails);
+    const byLabel = this.groupByLabel(emails);
     return {
       kind: "ai_news",
       payload: {
@@ -71,6 +80,7 @@ export class AiNewsSection implements Section {
         emails,
         ungrouped,
         bySender,
+        byLabel,
         topTopics: this.topTopics(emails, 6),
         totalActionItems: emails.reduce((s, e) => s + e.actionItems.length, 0),
       },
@@ -122,6 +132,24 @@ export class AiNewsSection implements Section {
       const key = e.header ? `${e.header.sender} <${e.header.address}>` : "(unknown sender)";
       if (!by.has(key)) by.set(key, []);
       by.get(key)!.push(e);
+    }
+    return by;
+  }
+
+  /**
+   * Group by gmail label. An email carrying multiple `brain/*` labels lands in
+   * each bucket. Emails with no labels go under "(unlabeled)" so nothing is
+   * silently dropped. New `brain/*` labels are auto-discovered — nothing here
+   * hard-codes the label set.
+   */
+  private groupByLabel(emails: EmailGroup[]): Map<string, EmailGroup[]> {
+    const by = new Map<string, EmailGroup[]>();
+    for (const e of emails) {
+      const labels = e.gmailLabels.length > 0 ? e.gmailLabels : ["(unlabeled)"];
+      for (const label of labels) {
+        if (!by.has(label)) by.set(label, []);
+        by.get(label)!.push(e);
+      }
     }
     return by;
   }

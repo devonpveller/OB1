@@ -91,6 +91,21 @@ export class BrainClient {
   }
 
   /**
+   * All chunks of a single email, by gmail_id. The link-enrichment stage
+   * reassembles the full newsletter body from these (chunk_index order) since
+   * a link can sit in any chunk, not just chunk 0. Unbounded by window — the
+   * caller already knows the gmail_id is in range.
+   */
+  async fetchThoughtsByGmailId(gmailId: string): Promise<Thought[]> {
+    const params = new URLSearchParams({
+      select: "id,content,metadata,created_at",
+      "metadata->>gmail_id": `eq.${gmailId}`,
+      limit: "200",
+    });
+    return await this.getJson<Thought[]>(`/rest/v1/thoughts?${params}`);
+  }
+
+  /**
    * Vector-similarity search via the local match_thoughts RPC (defined
    * in OB1/docker/init.sql). Returns top-K most similar thoughts to
    * the supplied embedding. Threshold is the minimum cosine similarity
@@ -117,6 +132,38 @@ export class BrainClient {
       throw new Error(`semanticSearch failed: ${res.status} ${msg}`);
     }
     return await res.json();
+  }
+
+  /**
+   * Merge a metadata patch into a `sources` row (read-modify-write, since the
+   * PostgREST layer doesn't deep-merge jsonb). Used by the link-enrichment
+   * stage to stamp gmail_id/labels/email_date onto an ingested source so the
+   * podcast can join sources back to the originating email. Returns false (not
+   * throwing) when the row/column isn't reachable — the caller treats stamping
+   * as best-effort. VERIFY the live `sources` schema before relying on this.
+   */
+  async mergeSourceMetadata(
+    sourceId: string,
+    patch: Record<string, unknown>,
+  ): Promise<boolean> {
+    const sel = await fetch(
+      `${this.baseUrl}/rest/v1/sources?id=eq.${encodeURIComponent(sourceId)}&select=metadata`,
+      { headers: { Accept: "application/json" } },
+    );
+    if (!sel.ok) return false;
+    const rows = await sel.json() as Array<{ metadata: Record<string, unknown> | null }>;
+    if (rows.length === 0) return false;
+    const merged = { ...(rows[0].metadata ?? {}), ...patch };
+
+    const res = await fetch(
+      `${this.baseUrl}/rest/v1/sources?id=eq.${encodeURIComponent(sourceId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+        body: JSON.stringify({ metadata: merged }),
+      },
+    );
+    return res.ok;
   }
 
   private async getJson<T>(path: string): Promise<T> {
