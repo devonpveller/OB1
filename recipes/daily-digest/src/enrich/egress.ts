@@ -7,6 +7,12 @@
  * outbound article / robots / redirect fetches through that same Tor proxy so
  * following newsletter links doesn't reveal the home IP to publishers.
  *
+ * ⚠️ Scheme MUST be `socks5h://` (not `socks5://`). The `h` forces hostname
+ * resolution THROUGH Tor; plain `socks5://` resolves DNS locally first = a
+ * deanonymizing DNS leak. This matches SearXNG's intended config exactly
+ * (search-gateway/searxng/settings.yml: `socks5h://tor:9050`, "socks5h => remote
+ * DNS"). Verified end-to-end in Deno on the internal search-net (IsTor:true).
+ *
  * Privacy-by-default + fail-closed: `FETCH_PROXY_URL` defaults to the Tor SOCKS
  * proxy. If it's unreachable (e.g. the container isn't on search-net), the
  * fetch fails and the caller marks the link `email-only` — it never silently
@@ -17,7 +23,7 @@
  * postgrest) stay on plain `fetch`.
  */
 
-const DEFAULT_PROXY = "socks5://tor:9050";
+const DEFAULT_PROXY = "socks5h://tor:9050"; // socks5h = DNS over Tor (no leak)
 
 let client: Deno.HttpClient | null | undefined; // undefined=uninit, null=direct
 

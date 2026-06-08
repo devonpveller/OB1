@@ -118,6 +118,7 @@ RUN set -e; \
   sed -i 's#Component.ContentMeta()]#Component.ContentMeta(), Component.NotesEditor()]#' "$L"; \
   grep -q 'Component.ContentMeta(), Component.NotesEditor()]' "$L"
 
+COPY serve.mjs /serve.mjs
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

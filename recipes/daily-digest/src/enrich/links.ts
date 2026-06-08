@@ -143,7 +143,11 @@ export async function unwrapRedirect(
         method: "GET",
         redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
-        headers: { "user-agent": "openbrain-digest-link-resolver/1.0" },
+        // Generic UA — don't fingerprint the automated follower (see extract.ts).
+        headers: {
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+        },
       });
       // Manual mode: a 3xx exposes Location; a 2xx/other means we've arrived.
       if (res.status >= 300 && res.status < 400) {

@@ -97,7 +97,7 @@ document.addEventListener("nav", () => {
       } catch (e) { status.textContent = "✗ restore error: " + (e && e.message ? e.message : e) }
     })
     purgeBtn.addEventListener("click", async () => {
-      if (!confirm("Purge permanently hides this source from ALL wiki generation + search and cannot be restored from here.\n\nThe record + embeddings are KEPT (operator-recoverable from the database, auditable). Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s). Proceed?")) return
+      if (!confirm("Purge permanently hides this source from ALL wiki generation + search and cannot be restored from here.\\n\\nThe record + embeddings are KEPT (operator-recoverable from the database, auditable). Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s). Proceed?")) return
       try {
         const r = await fetch("/workbench/sources/" + encodeURIComponent(id), {
           method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: true }),

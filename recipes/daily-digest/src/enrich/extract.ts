@@ -14,7 +14,12 @@
 import { ExtractResult } from "./types.ts";
 import { proxiedFetch } from "./egress.ts";
 
-const UA = "openbrain-digest/1.0 (+https://github.com/; respectful link follower)";
+// Common desktop browser UA. A unique "openbrain-digest" UA both fingerprints
+// the automated follower (defeating the Tor IP masking by identifying the
+// client) and tripped 403s in the eyeball. A generic UA blends in, the way Tor
+// Browser standardizes its UA. Robots are still respected, so this stays polite.
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
 /** A fetched page shorter than this (after extraction) is treated as a stub. */
 const MIN_ARTICLE_CHARS = 400;

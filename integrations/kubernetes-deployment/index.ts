@@ -371,6 +371,83 @@ server.registerTool(
   }
 );
 
+// Search grounded CLAIMS (Research Engine). Distinct from `search`/
+// `search_thoughts` (which return raw thoughts): this returns the GROUNDED
+// CLAIMS the research engine produced — each anchored to the source(s) that
+// make it, with a computed confidence. Use to recall what research has
+// ESTABLISHED (trustworthy, sourced knowledge) rather than raw captures.
+server.registerTool(
+  "search_claims",
+  {
+    title: "Search Grounded Claims",
+    description:
+      "Search Open Brain's GROUNDED CLAIMS by meaning — assertions established by research, each anchored to the source(s) that ground it, with a computed confidence (0-1). Prefer this over `search` when you want trustworthy, sourced facts the research engine has already established. Every claim returned is grounded (terminates in a primary source); claims flagged contradicted have conflicting evidence and are shown with low confidence.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      query: z.string().describe("What to search for"),
+      limit: z.number().optional().default(10),
+      threshold: z.number().optional().default(0.5).describe("Min semantic similarity 0-1"),
+      min_confidence: z.number().optional().default(0).describe("Min claim confidence 0-1 (0.5 = grounded+reusable floor)"),
+      thread_id: z.string().optional().describe("Restrict to one research thread (uuid)"),
+    },
+  },
+  async ({ query, limit, threshold, min_confidence, thread_id }) => {
+    try {
+      const qEmb = await getEmbedding(query);
+      const embStr = `[${qEmb.join(",")}]`;
+      const client = await pool.connect();
+      try {
+        const params: unknown[] = [embStr, threshold, limit, min_confidence];
+        let threadClause = "";
+        if (thread_id) { params.push(thread_id); threadClause = `AND c.thread_id = $5`; }
+        const result = await client.queryObject<{
+          id: string; text: string; confidence: number; contradicted: boolean;
+          thread_id: string | null; similarity: number;
+          sources: Array<{ title: string; url: string | null }>;
+        }>(
+          `SELECT c.id, c.text, c.confidence, c.contradicted, c.thread_id,
+                  1 - (c.embedding <=> $1::vector) AS similarity,
+                  COALESCE((
+                    SELECT json_agg(json_build_object('title', s.title, 'url', s.url))
+                    FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
+                    WHERE cs.claim_id = c.id AND cs.edge_type <> 'contradicts'
+                  ), '[]'::json) AS sources
+             FROM public.claims c
+            WHERE c.status = 'active' AND c.embedding IS NOT NULL
+              AND 1 - (c.embedding <=> $1::vector) >= $2
+              AND c.confidence >= $4
+              ${threadClause}
+            ORDER BY c.embedding <=> $1::vector
+            LIMIT $3`,
+          params,
+        );
+        if (!result.rows.length) {
+          return { content: [{ type: "text" as const, text: `No grounded claims found matching "${query}".` }] };
+        }
+        const results = result.rows.map((c, i) => {
+          const srcs = (c.sources || []).map((s) => s.url ? `${s.title} (${s.url})` : s.title);
+          const flag = c.contradicted ? " ⚠ CONTRADICTED (conflicting evidence)" : "";
+          return [
+            `--- Claim ${i + 1} (${(c.similarity * 100).toFixed(0)}% match · confidence ${c.confidence.toFixed(2)})${flag} ---`,
+            c.text,
+            srcs.length ? `Grounded in: ${srcs.join("; ")}` : "Grounded (sources omitted)",
+          ].join("\n");
+        });
+        return {
+          content: [{ type: "text" as const, text: `Found ${result.rows.length} grounded claim(s):\n\n${results.join("\n\n")}` }],
+        };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // Tool 2: List Recent (replaces supabase query builder with raw SQL)
 server.registerTool(
   "list_thoughts",

@@ -24,6 +24,10 @@ const REUSE_MAX_DISTANCE = parseFloat(env("REUSE_MAX_DISTANCE", "0.55"));
 // #1 — iterative deepening: up to this many gather rounds, refining queries from
 // what was found until the needs are covered or the backstop trips.
 const MAX_ROUNDS = parseInt(env("MAX_ROUNDS", "3"), 10);
+// Article mode — PRELIMINARY gap research bounds. A gap the article + OB claims
+// can't resolve gets a SMALL, clearly-tentative web look (not full research).
+const PRELIM_MAX_FETCH = parseInt(env("PRELIM_MAX_FETCH", "6"), 10);
+const PRELIM_GAP_LIMIT = parseInt(env("PRELIM_GAP_LIMIT", "3"), 10);
 
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
@@ -74,8 +78,61 @@ Use comma-separated numbers for multiple sources: [Source 1, 2, 4] (NOT "[Source
 
 ABSOLUTE RULES: never invent a fact, number, name, URL, or quote that no source supports — if unsupported, it is a [GAP]. Do not cite a source number that is not in the SOURCES list. A [SOURCED]/[INFERRED]/[UNCERTAIN] line WITHOUT a [Source N] citation is invalid — either cite it or make it a [GAP]. Be specific.`;
 
+// Article-primary synthesis: the episode is ABOUT the seed article. Present the
+// article's own substance first; use already-grounded OB claims only as
+// supporting context. (Seed-only / disable_web_search flows — the digest podcast.)
+const ARTICLE_SYNTH_SYS =
+  `You are Open Brain's grounded synthesizer preparing material for a short podcast ABOUT a specific article. The article is provided in SOURCES as [Source 1] (there may be more). The article is the SUBJECT of the episode — present its own substance.
+
+OUTPUT FORMAT — STRICT. ONE claim per line. Each line begins with its tag and ends with its citation:
+  [SOURCED] <an assertion the article makes>. [Source 1]
+  [INFERRED] <an assertion reasoned from the article, optionally relating it to prior knowledge>. [Source 1]
+Tags: [SOURCED] the article states it; [INFERRED] reasoned from the article; [UNCERTAIN] the article only hints at it; [GAP] a fact the article clearly leaves open (state it on its own line, NO citation, do NOT fill from your own knowledge).
+
+WRITE IN THIS ORDER:
+1. OVERVIEW — 1-2 [SOURCED] lines stating what the article is about / its central thesis.
+2. KEY POINTS — the article's substantive points of interest, each its own [SOURCED]/[INFERRED] line citing the article.
+3. CONTEXT — the KNOWN CLAIMS provided below are already-grounded Open Brain knowledge. Where one corroborates or extends a point the article makes, add an [INFERRED] line drawing that connection, citing [Source 1] (the article is what the episode is about). If a known claim notably diverges from the article, you MAY add ONE [UNCERTAIN] "worth noting" line — but keep the focus on the article, not the disagreement.
+
+ABSOLUTE RULES: never invent a fact, number, name, URL, or quote the article does not support — if unsupported it is a [GAP]. The article is PRIMARY; prior knowledge is supporting context only. A [SOURCED]/[INFERRED]/[UNCERTAIN] line WITHOUT a [Source N] citation is invalid. Be specific.`;
+
+// Pass 2 of article mode: PRELIMINARY follow-up on the gaps the article left open.
+// Findings here are explicitly tentative and lower-confidence than the article.
+const PRELIM_GAP_SYNTH_SYS =
+  `You are doing PRELIMINARY follow-up research on open questions a specific article left unanswered, for a podcast segment. You are given the OPEN GAPS and some preliminary web SOURCES numbered from [Source 2] ([Source 1] is the original article, already covered — do NOT cite it here).
+
+For each gap the SOURCES actually address, write ONE line, explicitly tentative:
+  [UNCERTAIN] Preliminary research suggests <tentative finding>. [Source 2]
+Cite the web source(s) that support it (N >= 2). If the SOURCES do not address a gap, restate it as still open:
+  [GAP] <the still-open question>
+
+ABSOLUTE RULES: these are PRELIMINARY, lower-confidence findings from OUTSIDE the article — never present them as settled fact, and always phrase them as "preliminary research suggests…". Never invent: an unsupported tentative claim is a [GAP], not an [UNCERTAIN]. One item per line. Every [UNCERTAIN] line must end with a [Source N] citation (N >= 2).`;
+
 // ── Public types ─────────────────────────────────────────────────────────────
-export interface RunOptions { threadId?: string | null; origin?: string; confidenceFloor?: number; }
+/** A pre-fetched source the caller supplies to be staged directly (not searched/fetched). */
+export interface SeedSource { url: string; title: string; content: string; }
+export interface RunOptions {
+  threadId?: string | null;
+  origin?: string;
+  confidenceFloor?: number;
+  /** Pre-fetched sources to stage directly (e.g. a newsletter article). */
+  seedSources?: SeedSource[];
+  /** Skip the web-search gap-gather entirely; corroborate only from reused OB claims. */
+  disableWebSearch?: boolean;
+  /** "article" → article-primary synthesis prompt (podcast-about-the-article). */
+  mode?: "default" | "article";
+  /**
+   * Article mode only. How to treat gaps the article + OB claims can't resolve:
+   *   "none"        — surface them as open POIs, no web research (pure seed-only).
+   *   "preliminary" — a BOUNDED, clearly-tentative web look at the open gaps,
+   *                   written as low-confidence "preliminary research suggests…".
+   * Default "none". Ignored when disableWebSearch is set.
+   */
+  gapResearch?: "none" | "preliminary";
+  /** Run the harness (recall + synthesis) but write NOTHING canonical — no
+   *  staging, no curator delegate. Returns the synthesis for preview. */
+  dryRun?: boolean;
+}
 export interface RunResult {
   synthesis: string;
   needs: string[];
@@ -119,100 +176,174 @@ export async function runResearch(
   const threadId = opts.threadId ?? null;
   const now = new Date();
 
-  // 1. Reuse pass — recall relevant grounded claims (cheap).
+  const seeds = opts.seedSources ?? [];
+  const articleMode = opts.mode === "article";
+  const skipSearch = opts.disableWebSearch === true;
+  const gapResearch = opts.gapResearch ?? "none";
+  const dryRun = opts.dryRun === true;
+
+  // 1. Reuse pass — recall relevant grounded claims (cheap). In article mode the
+  //    recall is against the ARTICLE itself (its points are what we want to
+  //    corroborate from existing OB knowledge), not a short query string.
   await progress("reuse", "recalling grounded claims from the KB");
-  const queryEmb = await deps.embed(query);
+  const recallText = articleMode && seeds.length
+    ? `${seeds[0].title}\n\n${seeds[0].content}`
+    : query;
+  const queryEmb = await deps.embed(recallText);
   const relevant = await retrieveRelevantClaims(client, queryEmb, threadId, CLAIM_SHORTLIST_K, REUSE_MAX_DISTANCE);
   const reuseClaims = relevant.filter((c) => decideReuse(c, floor, now) === "reuse");
 
-  // 2. Plan → coverage → gaps.
-  await progress("plan", "decomposing the question into needs");
-  const decomp = await jsonChat(deps, DECOMPOSE_SYS, `QUESTION: ${query}`);
-  const needs: string[] = Array.isArray(decomp.needs) && decomp.needs.length
-    ? decomp.needs.map(String).slice(0, 7) : [query];
-
-  let gapNeeds: string[] = needs;
-  if (reuseClaims.length && needs.length) {
-    const cov = await jsonChat(
-      deps, COVERAGE_SYS,
-      `NEEDS:\n${needs.map((n, i) => `${i}. ${n}`).join("\n")}\n\nKNOWN CLAIMS:\n${reuseClaims.map((c) => `- ${c.text}`).join("\n")}`,
-    );
-    const gapIdx = new Set<number>(Array.isArray(cov.gaps) ? cov.gaps.map(Number) : needs.map((_, i) => i));
-    gapNeeds = needs.filter((_, i) => gapIdx.has(i));
-  }
-  await progress("plan", `needs=${needs.length} reused=${reuseClaims.length} gaps=${gapNeeds.length}`,
-    { needs: needs.length, reused: reuseClaims.length, gaps: gapNeeds.length });
-
-  // 3. Stage gaps only — ITERATIVE deepening (#1): gather a round, re-check which
-  //    needs the gathered sources actually cover, refine queries for the
-  //    still-open needs, and gather again — up to MAX_ROUNDS or the backstop.
-  const sessionId = await createStagingSession(client, query, threadId, opts.origin || "owui");
-  const staged: Page[] = [];
+  // Seed sources (e.g. a newsletter article the caller already fetched through
+  // Tor) are staged directly — never re-fetched. In article mode they are THE
+  // subject of the episode.
+  const sessionId = dryRun ? null : await createStagingSession(client, query, threadId, opts.origin || "owui");
+  const staged: Page[] = seeds.map((s) => ({
+    url: s.url, title: s.title, content: s.content, domain: domainOf(s.url),
+  }));
   let fetches = 0;
   let backstop = "complete";
+  let needs: string[] = [query];
+  let gapNeeds: string[] = [];
 
-  // One gather pass over a list of search queries. Returns false if the backstop
-  // tripped mid-pass (caller stops).
-  const gatherQueries = async (queries: string[]): Promise<boolean> => {
-    for (const q of queries) {
-      const d = backstopDecision({ elapsedMs: Date.now() - t0, maxMs: MAX_WALL_MS, fetches, maxFetches: MAX_FETCH, openGaps: 1 });
-      if (d.stop && d.reason !== "complete") { backstop = d.reason; return false; }
-      await progress("gather", `searching: ${q}`);
-      let hits: SearchHit[] = [];
-      try { hits = await deps.searchWeb(q, SEARCH_K); } catch { hits = []; }
-      const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url));
-      const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, MAX_FETCH - fetches)));
-      const pages = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
-        const existing = await existingFreshSource(client, h.url).catch(() => null);
-        if (existing) return { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page;
-        return await deps.fetchPage(h.url);
-      });
-      fetches += toFetch.length;
-      for (const p of pages) if (p && p.content) staged.push(p);
-      await progress("gather", `staged ${staged.length} sources (${fetches} fetched)`, { staged: staged.length, fetches });
+  // 2/3. Plan → coverage → gap-gather (the DEFAULT topic-research path). Article
+  //      mode never runs this — it grounds the seed article first and only then
+  //      does bounded preliminary gap research (handled at synthesis). Also
+  //      skipped when the caller disables web search.
+  if (!articleMode && !skipSearch) {
+    await progress("plan", "decomposing the question into needs");
+    const decomp = await jsonChat(deps, DECOMPOSE_SYS, `QUESTION: ${query}`);
+    needs = Array.isArray(decomp.needs) && decomp.needs.length
+      ? decomp.needs.map(String).slice(0, 7) : [query];
+
+    gapNeeds = needs;
+    if (reuseClaims.length && needs.length) {
+      const cov = await jsonChat(
+        deps, COVERAGE_SYS,
+        `NEEDS:\n${needs.map((n, i) => `${i}. ${n}`).join("\n")}\n\nKNOWN CLAIMS:\n${reuseClaims.map((c) => `- ${c.text}`).join("\n")}`,
+      );
+      const gapIdx = new Set<number>(Array.isArray(cov.gaps) ? cov.gaps.map(Number) : needs.map((_, i) => i));
+      gapNeeds = needs.filter((_, i) => gapIdx.has(i));
     }
-    return true;
-  };
+    await progress("plan", `needs=${needs.length} reused=${reuseClaims.length} gaps=${gapNeeds.length}`,
+      { needs: needs.length, reused: reuseClaims.length, gaps: gapNeeds.length });
 
-  let pendingNeeds = [...gapNeeds];
-  for (let round = 1; round <= MAX_ROUNDS && pendingNeeds.length; round++) {
-    const ok = await gatherQueries(pendingNeeds);
-    if (!ok) break;                       // backstop tripped
-    if (round >= MAX_ROUNDS) break;       // no point re-planning on the last round
-    // Which needs are now actually answered by the gathered sources?
-    const cov = await jsonChat(
-      deps, COVERAGE_STAGED_SYS,
-      `NEEDS:\n${pendingNeeds.map((n, i) => `${i}. ${n}`).join("\n")}\n\nGATHERED SOURCES:\n${staged.map((s) => `- ${s.title}: ${s.content.slice(0, 200)}`).join("\n")}`,
-    );
-    const openIdx = new Set<number>(Array.isArray(cov.open) ? cov.open.map(Number) : []);
-    const stillOpen = pendingNeeds.filter((_, i) => openIdx.has(i));
-    if (!stillOpen.length) break;          // everything covered → stop deepening
-    // Refine into more specific queries for the next round.
-    const deep = await jsonChat(
-      deps, DEEPEN_SYS,
-      `STILL-OPEN NEEDS:\n${stillOpen.map((n, i) => `${i}. ${n}`).join("\n")}\n\nWHAT WAS FOUND:\n${staged.map((s) => `- ${s.title}`).join("\n")}`,
-    );
-    pendingNeeds = Array.isArray(deep.queries) && deep.queries.length
-      ? deep.queries.map(String).slice(0, stillOpen.length) : stillOpen;
-    await progress("deepen", `round ${round}: ${stillOpen.length} need(s) still open`, { round, open: stillOpen.length });
+    // ITERATIVE deepening (#1): gather a round, re-check which needs the gathered
+    // sources actually cover, refine queries for the still-open needs, gather
+    // again — up to MAX_ROUNDS or the backstop.
+    const gatherQueries = async (queries: string[]): Promise<boolean> => {
+      for (const q of queries) {
+        const d = backstopDecision({ elapsedMs: Date.now() - t0, maxMs: MAX_WALL_MS, fetches, maxFetches: MAX_FETCH, openGaps: 1 });
+        if (d.stop && d.reason !== "complete") { backstop = d.reason; return false; }
+        await progress("gather", `searching: ${q}`);
+        let hits: SearchHit[] = [];
+        try { hits = await deps.searchWeb(q, SEARCH_K); } catch { hits = []; }
+        const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url));
+        const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, MAX_FETCH - fetches)));
+        const pages = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
+          const existing = await existingFreshSource(client, h.url).catch(() => null);
+          if (existing) return { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page;
+          return await deps.fetchPage(h.url);
+        });
+        fetches += toFetch.length;
+        for (const p of pages) if (p && p.content) staged.push(p);
+        await progress("gather", `staged ${staged.length} sources (${fetches} fetched)`, { staged: staged.length, fetches });
+      }
+      return true;
+    };
+
+    let pendingNeeds = [...gapNeeds];
+    for (let round = 1; round <= MAX_ROUNDS && pendingNeeds.length; round++) {
+      const ok = await gatherQueries(pendingNeeds);
+      if (!ok) break;                       // backstop tripped
+      if (round >= MAX_ROUNDS) break;       // no point re-planning on the last round
+      // Which needs are now actually answered by the gathered sources?
+      const cov = await jsonChat(
+        deps, COVERAGE_STAGED_SYS,
+        `NEEDS:\n${pendingNeeds.map((n, i) => `${i}. ${n}`).join("\n")}\n\nGATHERED SOURCES:\n${staged.map((s) => `- ${s.title}: ${s.content.slice(0, 200)}`).join("\n")}`,
+      );
+      const openIdx = new Set<number>(Array.isArray(cov.open) ? cov.open.map(Number) : []);
+      const stillOpen = pendingNeeds.filter((_, i) => openIdx.has(i));
+      if (!stillOpen.length) break;          // everything covered → stop deepening
+      // Refine into more specific queries for the next round.
+      const deep = await jsonChat(
+        deps, DEEPEN_SYS,
+        `STILL-OPEN NEEDS:\n${stillOpen.map((n, i) => `${i}. ${n}`).join("\n")}\n\nWHAT WAS FOUND:\n${staged.map((s) => `- ${s.title}`).join("\n")}`,
+      );
+      pendingNeeds = Array.isArray(deep.queries) && deep.queries.length
+        ? deep.queries.map(String).slice(0, stillOpen.length) : stillOpen;
+      await progress("deepen", `round ${round}: ${stillOpen.length} need(s) still open`, { round, open: stillOpen.length });
+    }
+  } else {
+    await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
+      { staged: staged.length });
   }
 
-  // Persist staged candidates into the session pool (dedup vs OB).
-  await mapLimit(staged, FETCH_CONCURRENCY, async (p) => {
-    try {
-      const emb = await deps.embed(`${p.title}\n\n${p.content}`.slice(0, EMBEDDING_MAX_CHARS));
-      await stageSource(client, sessionId, p, emb);
-    } catch { /* best-effort staging */ }
-  });
+  // Persist staged candidates into the session pool (dedup vs OB). Skipped on
+  // dry-run (no canonical write).
+  if (!dryRun && sessionId) {
+    await mapLimit(staged, FETCH_CONCURRENCY, async (p) => {
+      try {
+        const emb = await deps.embed(`${p.title}\n\n${p.content}`.slice(0, EMBEDDING_MAX_CHARS));
+        await stageSource(client, sessionId, p, emb);
+      } catch { /* best-effort staging */ }
+    });
+  }
 
   // 4. Synthesize verbatim with claim-level citations (sources 1-indexed).
   await progress("synthesize", "writing the grounded synthesis");
-  const sourceList = staged.map((p, i) => `[Source ${i + 1}] ${p.title} (${p.domain})\n${p.content.slice(0, 2000)}`).join("\n\n");
   const claimList = reuseClaims.map((c) => `- ${c.text}`).join("\n") || "(none)";
-  const rawSynthesis = (await deps.chat(
-    SYNTH_SYS,
-    `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded; reuse as support):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
-  )).trim();
+  const sourceLine = (p: Page, i: number) => `[Source ${i + 1}] ${p.title} (${p.domain})\n${p.content.slice(0, 2000)}`;
+
+  let rawSynthesis: string;
+  if (articleMode) {
+    // Pass 1 — ground the article itself (the article is the only staged source
+    // here; OB known claims resolve gaps where they can).
+    const articleSynth = (await deps.chat(
+      ARTICLE_SYNTH_SYS,
+      `QUESTION: ${query}\n\nKNOWN CLAIMS (already-grounded Open Brain knowledge — supporting context; use to RESOLVE gaps where possible):\n${claimList}\n\nARTICLE:\n${staged.map(sourceLine).join("\n\n")}`,
+    )).trim();
+
+    // Pass 2 — bounded PRELIMINARY research on the gaps the article + OB left open.
+    let prelimSynth = "";
+    if (gapResearch === "preliminary" && !skipSearch) {
+      const gapLines = (articleSynth.match(/^\[GAP\]\s*.+$/gim) || [])
+        .map((l) => l.replace(/^\[GAP\]\s*/i, "").trim()).filter(Boolean)
+        .slice(0, PRELIM_GAP_LIMIT);
+      if (gapLines.length) {
+        await progress("gather", `preliminary research on ${gapLines.length} open gap(s)`, { gaps: gapLines.length });
+        const base = staged.length; // the article occupies [Source 1..base]
+        for (const gap of gapLines) {
+          if (fetches >= PRELIM_MAX_FETCH) { backstop = "max_fetch"; break; }
+          let hits: SearchHit[] = [];
+          try { hits = await deps.searchWeb(gap, SEARCH_K); } catch { hits = []; }
+          const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url))
+            .slice(0, Math.max(0, Math.min(2, PRELIM_MAX_FETCH - fetches)));
+          const pages = await mapLimit(fresh, FETCH_CONCURRENCY, (h) => deps.fetchPage(h.url));
+          fetches += fresh.length;
+          for (const p of pages) if (p && p.content) staged.push(p);
+        }
+        if (staged.length > base) {
+          const gapSources = staged.slice(base).map((p, i) => sourceLine(p, base + i)).join("\n\n");
+          prelimSynth = (await deps.chat(
+            PRELIM_GAP_SYNTH_SYS,
+            `OPEN GAPS (from the article):\n${gapLines.map((g, i) => `${i + 1}. ${g}`).join("\n")}\n\nPRELIMINARY SOURCES (the article is [Source 1], already covered):\n${gapSources}`,
+          )).trim();
+          if (!dryRun && sessionId) {
+            await mapLimit(staged.slice(base), FETCH_CONCURRENCY, async (p) => {
+              try { const emb = await deps.embed(`${p.title}\n\n${p.content}`.slice(0, EMBEDDING_MAX_CHARS)); await stageSource(client, sessionId, p, emb); } catch { /* best-effort */ }
+            });
+          }
+        }
+      }
+    }
+    rawSynthesis = prelimSynth ? `${articleSynth}\n${prelimSynth}` : articleSynth;
+  } else {
+    const sourceList = staged.map(sourceLine).join("\n\n");
+    rawSynthesis = (await deps.chat(
+      SYNTH_SYS,
+      `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded; reuse as support):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
+    )).trim();
+  }
 
   // 5. Cited-only sources (GROUNDING-MODEL §6.3) + renumber citations so the
   //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
@@ -226,9 +357,9 @@ export async function runResearch(
   const coveredNeeds = Math.max(0, needs.length - gapNeeds.length);
   const metrics = reuseMetric(coveredNeeds, cited.length, gapMatches.length);
 
-  await progress("persist", "delegating placement + grounding to the curator");
+  await progress("persist", dryRun ? "dry-run: skipping curator write" : "delegating placement + grounding to the curator");
   let curator: Record<string, unknown> | null = null;
-  if (cited.length || reuseClaims.length) {
+  if (!dryRun && (cited.length || reuseClaims.length)) {
     const pkg = {
       research_key: `rs-${await sha1(query + (threadId || ""))}`,
       query,

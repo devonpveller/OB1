@@ -43,6 +43,30 @@ const FETCH_TIMEOUT_MS = parseInt(env("FETCH_TIMEOUT_MS", "15000"), 10);
 const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "8000"), 10);
 const PORT = parseInt(env("PORT", "8000"), 10);
 
+// Privacy: page fetches egress through Tor (socks5h = DNS resolved through Tor,
+// matching SearXNG's settings.yml). Reaches `tor:9050` via ai-stack_default.
+// Needs `--unstable-net`; if unavailable we warn and fall back to direct rather
+// than break research for all callers. Set FETCH_PROXY_URL="" to force direct.
+const FETCH_PROXY_URL = env("FETCH_PROXY_URL", "socks5h://tor:9050");
+const FETCH_UA = env(
+  "FETCH_UA",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+);
+let _httpClient: Deno.HttpClient | null | undefined; // undefined=uninit, null=direct
+function fetchClient(): Deno.HttpClient | null {
+  if (_httpClient !== undefined) return _httpClient;
+  const url = FETCH_PROXY_URL.trim();
+  if (!url) { _httpClient = null; return _httpClient; }
+  try {
+    _httpClient = Deno.createHttpClient({ proxy: { url } });
+    console.log(`fetchPage egress via ${url}`);
+  } catch (e) {
+    console.warn(`FETCH_PROXY_URL=${url} unavailable (${(e as Error).message}); needs --unstable-net. Falling back to DIRECT.`);
+    _httpClient = null;
+  }
+  return _httpClient;
+}
+
 const pool = new Pool({ hostname: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER, password: DB_PASSWORD }, 8);
 
 // ── Real seams ───────────────────────────────────────────────────────────────
@@ -101,7 +125,12 @@ async function fetchPage(url: string): Promise<Page | null> {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
-    const r = await fetch(url, { signal: ac.signal, headers: { "user-agent": "openbrain-research/1.0" } });
+    const client = fetchClient();
+    const r = await fetch(url, {
+      signal: ac.signal,
+      headers: { "user-agent": FETCH_UA },
+      ...(client ? { client } : {}),
+    });
     if (!r.ok) return null;
     const ct = r.headers.get("content-type") || "";
     if (ct && !/text\/html|text\/plain|application\/xhtml/i.test(ct)) return null;
@@ -146,9 +175,17 @@ async function runJob(jobId: string): Promise<void> {
     );
     if (!j.rows.length) return;
     const { query, thread_id, origin, options } = j.rows[0];
+    const seedSources = Array.isArray(options?.seed_sources)
+      ? (options.seed_sources as Array<{ url: string; title: string; content: string }>)
+      : undefined;
     const res = await runResearch(realDeps, client, query, {
       threadId: thread_id, origin,
       confidenceFloor: typeof options?.confidence_floor === "number" ? options.confidence_floor : undefined,
+      seedSources,
+      disableWebSearch: options?.disable_web_search === true,
+      mode: options?.mode === "article" ? "article" : undefined,
+      gapResearch: options?.gap_research === "preliminary" ? "preliminary" : undefined,
+      dryRun: options?.dry_run === true,
     }, progress);
     await client.queryObject(
       `UPDATE research_jobs SET status='done', finished_at=now(),
@@ -187,10 +224,29 @@ Deno.serve({ port: PORT }, async (req) => {
 
   if (req.method === "POST" && url.pathname === "/research") {
     if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
-    let body: { query?: string; thread_id?: string; origin?: string; options?: Record<string, unknown> };
+    let body: {
+      query?: string; thread_id?: string; origin?: string; options?: Record<string, unknown>;
+      seed_sources?: Array<{ url?: string; title?: string; content?: string }>;
+      disable_web_search?: boolean; mode?: string; dry_run?: boolean; gap_research?: string;
+    };
     try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const query = (body.query || "").trim();
     if (!query) return Response.json({ error: "query required" }, { status: 400 });
+    // Seed sources + flags ride in the options jsonb (no schema change). Normalize
+    // seeds to {url,title,content}; drop empties.
+    const seeds = Array.isArray(body.seed_sources)
+      ? body.seed_sources
+        .map((s) => ({ url: String(s?.url || ""), title: String(s?.title || ""), content: String(s?.content || "") }))
+        .filter((s) => s.content.trim().length > 0)
+      : [];
+    const options = {
+      ...(body.options || {}),
+      ...(seeds.length ? { seed_sources: seeds } : {}),
+      ...(body.disable_web_search === true ? { disable_web_search: true } : {}),
+      ...(body.mode === "article" ? { mode: "article" } : {}),
+      ...(body.dry_run === true ? { dry_run: true } : {}),
+      ...(body.gap_research === "preliminary" ? { gap_research: "preliminary" } : {}),
+    };
     const c = await pool.connect();
     let jobId: string;
     try {
@@ -198,7 +254,7 @@ Deno.serve({ port: PORT }, async (req) => {
         `INSERT INTO research_jobs (status, origin, query, thread_id, options)
          VALUES ('queued', $1, $2, $3, $4::jsonb) RETURNING id`,
         [["owui", "agent", "notebook", "manual"].includes(body.origin || "") ? body.origin : "owui",
-         query, body.thread_id || null, JSON.stringify(body.options || {})],
+         query, body.thread_id || null, JSON.stringify(options)],
       );
       jobId = r.rows[0].id;
     } finally { c.release(); }
