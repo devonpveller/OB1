@@ -387,6 +387,9 @@ services:
       SHORTLIST_K: ${CURATOR_SHORTLIST_K:-5}
       NEW_THREAD_MIN_CONFIDENCE: ${CURATOR_NEW_THREAD_MIN_CONFIDENCE:-0.60}
       MERGE_FLOOR_DISTANCE: ${CURATOR_MERGE_FLOOR_DISTANCE:-0.45}
+      # Conflict detection (#2): judge a new claim against an existing thread claim
+      # within this cosine distance; reciprocal contradicts edges on conflict.
+      CONFLICT_DISTANCE: ${CURATOR_CONFLICT_DISTANCE:-0.25}
       PORT: "8000"
     ports:
       - "127.0.0.1:8816:8000"
@@ -442,6 +445,10 @@ services:
       SEARCH_K: ${RESEARCH_SEARCH_K:-8}
       CLAIM_SHORTLIST_K: ${RESEARCH_CLAIM_SHORTLIST_K:-12}
       CONFIDENCE_FLOOR: ${RESEARCH_CONFIDENCE_FLOOR:-0.50}
+      # Reuse recall: drop claims farther than this cosine distance (#5).
+      REUSE_MAX_DISTANCE: ${RESEARCH_REUSE_MAX_DISTANCE:-0.55}
+      # Iterative deepening: max gather rounds (refine queries until covered) (#1).
+      MAX_ROUNDS: ${RESEARCH_MAX_ROUNDS:-3}
       FETCH_TIMEOUT_MS: ${RESEARCH_FETCH_TIMEOUT_MS:-15000}
       FETCH_MAX_CHARS: ${RESEARCH_FETCH_MAX_CHARS:-8000}
       FETCH_CONCURRENCY: ${RESEARCH_FETCH_CONCURRENCY:-4}

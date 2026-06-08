@@ -29,7 +29,9 @@ const deps: Deps = {
   embed: (t) => Promise.resolve(fakeEmbed(t)),
   chat: (sys) => {
     if (sys.includes("research planner")) return Promise.resolve(JSON.stringify({ needs: ["Are cats mammals?", "Do cats purr?"] }));
-    if (sys.includes("research NEEDS")) return Promise.resolve(JSON.stringify({ covered: [0], gaps: [1] }));
+    if (sys.includes("already covered by KNOWN CLAIMS")) return Promise.resolve(JSON.stringify({ covered: [0], gaps: [1] }));
+    if (sys.includes("GATHERED SOURCES")) return Promise.resolve(JSON.stringify({ covered: [0], open: [] })); // gap covered → stop deepening
+    if (sys.includes("research strategist")) return Promise.resolve(JSON.stringify({ queries: [] }));
     if (sys.includes("grounded synthesizer")) {
       return Promise.resolve("## Cats\n[SOURCED] Cats purr when content. [Source 1]\n[INFERRED] Purring may self-soothe. [Source 1]\nReused fact: cats are mammals.");
     }

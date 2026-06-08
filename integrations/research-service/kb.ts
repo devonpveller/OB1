@@ -41,6 +41,7 @@ export async function retrieveRelevantClaims(
   queryEmb: number[],
   threadId: string | null,
   k: number,
+  maxDistance = 1,
 ): Promise<RelevantClaim[]> {
   const vec = toVector(queryEmb);
   const where = threadId ? "AND c.thread_id = $3" : "";
@@ -63,12 +64,16 @@ export async function retrieveRelevantClaims(
       LIMIT $2`,
     args,
   );
-  return r.rows.map((row) => ({
-    id: row.id, text: row.text, confidence: row.confidence, contradicted: row.contradicted,
-    grounded: row.grounded, hasStrongEdge: row.has_strong, researchedOn: row.researched_on,
-    volatility: row.volatility, revalidateDays: row.revalidate_days,
-    distance: Number(row.distance), // pgvector distance decodes as string over the wire
-  }));
+  return r.rows
+    .map((row) => ({
+      id: row.id, text: row.text, confidence: row.confidence, contradicted: row.contradicted,
+      grounded: row.grounded, hasStrongEdge: row.has_strong, researchedOn: row.researched_on,
+      volatility: row.volatility, revalidateDays: row.revalidate_days,
+      distance: Number(row.distance), // pgvector distance decodes as string over the wire
+    }))
+    // Drop semantically-far claims so an unscoped query doesn't drag in
+    // irrelevant grounded claims as "reuse" (#5). Cosine distance: 0 = identical.
+    .filter((c) => c.distance <= maxDistance);
 }
 
 // ── Staging ─────────────────────────────────────────────────────────────────

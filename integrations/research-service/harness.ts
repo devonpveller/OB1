@@ -18,6 +18,12 @@ const FETCH_CONCURRENCY = parseInt(env("FETCH_CONCURRENCY", "4"), 10);
 const MAX_FETCH = parseInt(env("MAX_FETCH", "24"), 10);
 const MAX_WALL_MS = parseInt(env("MAX_WALL_MS", "180000"), 10);
 const EMBEDDING_MAX_CHARS = parseInt(env("EMBEDDING_MAX_CHARS", "4000"), 10);
+// #5 — drop claims farther than this (cosine distance) from the query so an
+// unscoped run doesn't reuse irrelevant grounded claims.
+const REUSE_MAX_DISTANCE = parseFloat(env("REUSE_MAX_DISTANCE", "0.55"));
+// #1 — iterative deepening: up to this many gather rounds, refining queries from
+// what was found until the needs are covered or the backstop trips.
+const MAX_ROUNDS = parseInt(env("MAX_ROUNDS", "3"), 10);
 
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
@@ -48,6 +54,11 @@ const DECOMPOSE_SYS =
   `You are a research planner. Given a QUESTION, list the key sub-questions / facts that must be answered to give a complete, grounded answer. Return ONLY JSON: {"needs": ["...", "..."]}. 3-7 concise needs, each a single factual sub-question.`;
 const COVERAGE_SYS =
   `You decide which research NEEDS are already covered by KNOWN CLAIMS. A need is "covered" only if a known claim directly answers it. Return ONLY JSON: {"covered": [need_index,...], "gaps": [need_index,...]}. Indices refer to the NEEDS list (0-based). When unsure, mark it a gap (never assume coverage).`;
+const COVERAGE_STAGED_SYS =
+  `You judge whether each NEED is now answered by the GATHERED SOURCES (titles + excerpts). A need is "covered" only if a source actually answers it. Return ONLY JSON: {"covered": [need_index,...], "open": [need_index,...]} (0-based indices into the NEEDS list). When unsure, mark it open.`;
+const DEEPEN_SYS =
+  `You are a research strategist. Some NEEDS are still unanswered after the searches so far. For each still-open need, propose ONE more specific search query that would find the missing information (use specifics/terms surfaced by what was already found). Return ONLY JSON: {"queries": ["...", ...]} — at most one per open need, concise web-search queries.`;
+
 const SYNTH_SYS =
   `You are Open Brain's grounded synthesizer. Write a thorough answer to the QUESTION using ONLY the KNOWN CLAIMS and SOURCES provided.
 
@@ -111,7 +122,7 @@ export async function runResearch(
   // 1. Reuse pass — recall relevant grounded claims (cheap).
   await progress("reuse", "recalling grounded claims from the KB");
   const queryEmb = await deps.embed(query);
-  const relevant = await retrieveRelevantClaims(client, queryEmb, threadId, CLAIM_SHORTLIST_K);
+  const relevant = await retrieveRelevantClaims(client, queryEmb, threadId, CLAIM_SHORTLIST_K, REUSE_MAX_DISTANCE);
   const reuseClaims = relevant.filter((c) => decideReuse(c, floor, now) === "reuse");
 
   // 2. Plan → coverage → gaps.
@@ -132,28 +143,58 @@ export async function runResearch(
   await progress("plan", `needs=${needs.length} reused=${reuseClaims.length} gaps=${gapNeeds.length}`,
     { needs: needs.length, reused: reuseClaims.length, gaps: gapNeeds.length });
 
-  // 3. Stage gaps only — search + fetch full pages, deduped against OB (P3).
+  // 3. Stage gaps only — ITERATIVE deepening (#1): gather a round, re-check which
+  //    needs the gathered sources actually cover, refine queries for the
+  //    still-open needs, and gather again — up to MAX_ROUNDS or the backstop.
   const sessionId = await createStagingSession(client, query, threadId, opts.origin || "owui");
   const staged: Page[] = [];
   let fetches = 0;
   let backstop = "complete";
 
-  for (const need of gapNeeds) {
-    const d = backstopDecision({ elapsedMs: Date.now() - t0, maxMs: MAX_WALL_MS, fetches, maxFetches: MAX_FETCH, openGaps: 1 });
-    if (d.stop && d.reason !== "complete") { backstop = d.reason; break; }
-    await progress("gather", `searching: ${need}`);
-    let hits: SearchHit[] = [];
-    try { hits = await deps.searchWeb(need, SEARCH_K); } catch { hits = []; }
-    const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url));
-    const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, MAX_FETCH - fetches)));
-    const pages = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
-      const existing = await existingFreshSource(client, h.url).catch(() => null);
-      if (existing) return { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page;
-      return await deps.fetchPage(h.url);
-    });
-    fetches += toFetch.length;
-    for (const p of pages) if (p && p.content) staged.push(p);
-    await progress("gather", `staged ${staged.length} sources (${fetches} fetched)`, { staged: staged.length, fetches });
+  // One gather pass over a list of search queries. Returns false if the backstop
+  // tripped mid-pass (caller stops).
+  const gatherQueries = async (queries: string[]): Promise<boolean> => {
+    for (const q of queries) {
+      const d = backstopDecision({ elapsedMs: Date.now() - t0, maxMs: MAX_WALL_MS, fetches, maxFetches: MAX_FETCH, openGaps: 1 });
+      if (d.stop && d.reason !== "complete") { backstop = d.reason; return false; }
+      await progress("gather", `searching: ${q}`);
+      let hits: SearchHit[] = [];
+      try { hits = await deps.searchWeb(q, SEARCH_K); } catch { hits = []; }
+      const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url));
+      const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, MAX_FETCH - fetches)));
+      const pages = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
+        const existing = await existingFreshSource(client, h.url).catch(() => null);
+        if (existing) return { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page;
+        return await deps.fetchPage(h.url);
+      });
+      fetches += toFetch.length;
+      for (const p of pages) if (p && p.content) staged.push(p);
+      await progress("gather", `staged ${staged.length} sources (${fetches} fetched)`, { staged: staged.length, fetches });
+    }
+    return true;
+  };
+
+  let pendingNeeds = [...gapNeeds];
+  for (let round = 1; round <= MAX_ROUNDS && pendingNeeds.length; round++) {
+    const ok = await gatherQueries(pendingNeeds);
+    if (!ok) break;                       // backstop tripped
+    if (round >= MAX_ROUNDS) break;       // no point re-planning on the last round
+    // Which needs are now actually answered by the gathered sources?
+    const cov = await jsonChat(
+      deps, COVERAGE_STAGED_SYS,
+      `NEEDS:\n${pendingNeeds.map((n, i) => `${i}. ${n}`).join("\n")}\n\nGATHERED SOURCES:\n${staged.map((s) => `- ${s.title}: ${s.content.slice(0, 200)}`).join("\n")}`,
+    );
+    const openIdx = new Set<number>(Array.isArray(cov.open) ? cov.open.map(Number) : []);
+    const stillOpen = pendingNeeds.filter((_, i) => openIdx.has(i));
+    if (!stillOpen.length) break;          // everything covered → stop deepening
+    // Refine into more specific queries for the next round.
+    const deep = await jsonChat(
+      deps, DEEPEN_SYS,
+      `STILL-OPEN NEEDS:\n${stillOpen.map((n, i) => `${i}. ${n}`).join("\n")}\n\nWHAT WAS FOUND:\n${staged.map((s) => `- ${s.title}`).join("\n")}`,
+    );
+    pendingNeeds = Array.isArray(deep.queries) && deep.queries.length
+      ? deep.queries.map(String).slice(0, stillOpen.length) : stillOpen;
+    await progress("deepen", `round ${round}: ${stillOpen.length} need(s) still open`, { round, open: stillOpen.length });
   }
 
   // Persist staged candidates into the session pool (dedup vs OB).

@@ -35,7 +35,7 @@
  *      NEW_THREAD_MIN_CONFIDENCE (0.60), MERGE_FLOOR_DISTANCE (0.45), PORT (8000).
  */
 import { Pool } from "postgres";
-import { writeClaims, type WriteClaimsResult } from "./claims.ts";
+import { writeClaims, detectConflicts, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
 
 // --- Config -----------------------------------------------------------------
 const DB_HOST = Deno.env.get("DB_HOST") || "openbrain-db";
@@ -63,6 +63,9 @@ const NEW_THREAD_MIN_CONFIDENCE = parseFloat(Deno.env.get("NEW_THREAD_MIN_CONFID
 // Cosine-distance floor used only on the LLM-down fallback: if the top candidate
 // is at least this close, attach to it; otherwise cold-start a new thread.
 const MERGE_FLOOR_DISTANCE = parseFloat(Deno.env.get("MERGE_FLOOR_DISTANCE") || "0.45");
+// Conflict detection (#2): a new claim within this cosine distance of an existing
+// thread claim (different synthesis) is judged for contradiction.
+const CONFLICT_DISTANCE = parseFloat(Deno.env.get("CONFLICT_DISTANCE") || "0.25");
 const PORT = parseInt(Deno.env.get("PORT") || "8000", 10);
 
 const pool = new Pool({
@@ -410,6 +413,21 @@ async function writeGroundedClaims(
       embed,
     });
     await client.queryArray("COMMIT");
+
+    // Conflict auto-detection (#2) — separate txn; LLM judge calls shouldn't hold
+    // the write lock. Best-effort: a failure never undoes the committed claims.
+    if (threadId && res.claimIds.length) {
+      try {
+        await client.queryArray("BEGIN");
+        const conf = await detectConflicts(client, res.claimIds, threadId, conflictJudge, CONFLICT_DISTANCE);
+        await client.queryArray("COMMIT");
+        (res as WriteClaimsResult & { conflicts?: number }).conflicts = conf.conflicts;
+        if (conf.conflicts) console.log(`claims: ${conf.conflicts} conflict(s) flagged in thread ${threadId}`);
+      } catch (e) {
+        await client.queryArray("ROLLBACK").catch(() => {});
+        console.error("claims: conflict detection failed:", (e as Error).message);
+      }
+    }
     return res;
   } catch (e) {
     await client.queryArray("ROLLBACK").catch(() => {});
@@ -418,6 +436,15 @@ async function writeGroundedClaims(
   } finally {
     client.release();
   }
+}
+
+// LLM judge for conflict detection — does claim A contradict claim B?
+const CONFLICT_JUDGE_SYS =
+  `You compare two factual claims and decide their relationship. Return ONLY JSON: {"verdict":"contradict"|"agree"|"unrelated"}. "contradict" = they cannot both be true. "agree" = same or compatible. "unrelated" = about different things. Be strict: only "contradict" when they are genuinely incompatible.`;
+async function conflictJudge(a: string, b: string): Promise<ConflictVerdict> {
+  const out = await chatJson(CONFLICT_JUDGE_SYS, `CLAIM A: ${a}\nCLAIM B: ${b}`);
+  const v = out.verdict;
+  return v === "contradict" || v === "agree" ? v : "unrelated";
 }
 
 // --- HTTP server ------------------------------------------------------------

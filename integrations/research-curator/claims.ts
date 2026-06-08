@@ -174,6 +174,7 @@ export interface WriteClaimsResult {
   edgesSkipped: number;   // citation pointed at a source not in sourceIds
   ungroundedSkipped: number; // claim whose every edge was unresolvable
   gaps: string[];
+  claimIds: string[];     // ids of the claims written/deduped (for conflict detection)
 }
 
 const toVector = (v: number[]): string => `[${v.join(",")}]`;
@@ -191,7 +192,7 @@ export async function writeClaims(
   const { claims, gaps } = parseSynthesisClaims(synthesis);
   const res: WriteClaimsResult = {
     claimsWritten: 0, claimsDeduped: 0, edgesWritten: 0,
-    edgesSkipped: 0, ungroundedSkipped: 0, gaps,
+    edgesSkipped: 0, ungroundedSkipped: 0, gaps, claimIds: [],
   };
 
   for (const claim of claims) {
@@ -219,6 +220,7 @@ export async function writeClaims(
       ],
     );
     const claimId = fc.rows[0].id;
+    res.claimIds.push(claimId);
     if (fc.rows[0].was_duplicate) res.claimsDeduped++; else res.claimsWritten++;
 
     for (const e of resolved) {
@@ -228,6 +230,61 @@ export async function writeClaims(
       );
       res.edgesWritten++;
     }
+  }
+  return res;
+}
+
+// ── Conflict auto-detection (#2 / GROUNDING-MODEL §6.5) ──────────────────────
+// "Conflict surfaces — new evidence that contradicts a stored claim raises a
+// revision event; never silently prefers the cached claim." For each freshly
+// written claim, find the nearest EXISTING claim in the same thread (different
+// synthesis) and, if it's close enough to be about the same thing, ask the judge
+// whether they CONTRADICT. On contradiction we write reciprocal `contradicts`
+// edges — the confidence function caps BOTH claims at 0.30 and flags them
+// `contradicted` (neither is silently trusted) until a human/next run resolves it.
+
+export type ConflictVerdict = "contradict" | "agree" | "unrelated";
+export interface ConflictJudge { (a: string, b: string): Promise<ConflictVerdict>; }
+
+export interface DetectConflictsResult { compared: number; conflicts: number; }
+
+export async function detectConflicts(
+  client: QueryClient,
+  claimIds: string[],
+  threadId: string | null,
+  judge: ConflictJudge,
+  maxDistance = 0.25,
+): Promise<DetectConflictsResult> {
+  const res: DetectConflictsResult = { compared: 0, conflicts: 0 };
+  if (!threadId || !claimIds.length) return res;
+
+  for (const id of claimIds) {
+    // Nearest other active claim in the same thread, from a DIFFERENT synthesis
+    // (don't flag a run against itself), by embedding distance.
+    const r = await client.queryObject<{ id: string; text: string; mytext: string; distance: string }>(
+      `SELECT n.id, n.text,
+              c.text AS mytext,
+              (n.embedding <=> c.embedding) AS distance
+         FROM public.claims c
+         JOIN public.claims n
+           ON n.thread_id = c.thread_id AND n.id <> c.id AND n.status = 'active'
+          AND n.synthesis_id IS DISTINCT FROM c.synthesis_id
+          AND n.embedding IS NOT NULL
+        WHERE c.id = $1 AND c.embedding IS NOT NULL
+        ORDER BY n.embedding <=> c.embedding
+        LIMIT 1`,
+      [id],
+    );
+    const cand = r.rows[0];
+    if (!cand || Number(cand.distance) > maxDistance) continue;
+    res.compared++;
+    let verdict: ConflictVerdict;
+    try { verdict = await judge(cand.mytext, cand.text); } catch { continue; }
+    if (verdict !== "contradict") continue;
+    // Reciprocal contradicts edges — surface on both, prefer neither.
+    await client.queryObject(`SELECT link_claim_to_claim($1, $2, 'contradicts', 1.0)`, [id, cand.id]);
+    await client.queryObject(`SELECT link_claim_to_claim($1, $2, 'contradicts', 1.0)`, [cand.id, id]);
+    res.conflicts++;
   }
   return res;
 }

@@ -8,7 +8,7 @@
  * Exits non-zero on any assertion failure.
  */
 import { Pool } from "postgres";
-import { writeClaims } from "./claims.ts";
+import { writeClaims, detectConflicts, type ConflictVerdict } from "./claims.ts";
 
 const pool = new Pool({
   hostname: Deno.env.get("DB_HOST") || "ob-claims-test",
@@ -97,7 +97,36 @@ try {
   const total = await client.queryObject<{ n: bigint }>(`SELECT count(*) AS n FROM claims WHERE thread_id=$1`, [threadId]);
   assert(Number(total.rows[0].n) === 3, "still only 3 claims after re-run (idempotent)");
 
-  console.log("\nALL P2.5 ASSERTIONS PASSED");
+  // ── #2 Conflict auto-detection ──────────────────────────────────────────
+  // Two claims in the SAME thread, from DIFFERENT syntheses, that contradict.
+  // A nearest-neighbour match + a "contradict" judge must flag BOTH (reciprocal
+  // contradicts edges → confidence capped, contradicted=true on each).
+  const tc = await client.queryObject<{ id: string }>(`INSERT INTO threads (name,description,status) VALUES ('Conflict','x','active') RETURNING id`);
+  const ct = tc.rows[0].id;
+  const synA = await client.queryObject<{ id: string }>(`INSERT INTO sources (title,content,content_type) VALUES ('synA','a','research_synthesis') RETURNING id`);
+  const synB = await client.queryObject<{ id: string }>(`INSERT INTO sources (title,content,content_type) VALUES ('synB','b','research_synthesis') RETURNING id`);
+  const srcA = await client.queryObject<{ id: string }>(`INSERT INTO sources (url,title,content,content_type,domain) VALUES ('https://a.gov/x','a','c','web_article','a.gov') RETURNING id`);
+  const srcB = await client.queryObject<{ id: string }>(`INSERT INTO sources (url,title,content,content_type,domain) VALUES ('https://b.gov/y','b','c','web_article','b.gov') RETURNING id`);
+  // identical embedding so the two claims are nearest neighbours (distance ~0).
+  const cEmb = `[${Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
+  const ca = await client.queryObject<{ id: string }>(`SELECT id FROM find_or_create_claim('The tower is 300 metres tall.', $1, $2, 'sourced','slow',1095, $3::vector, '{}'::jsonb)`, [ct, synA.rows[0].id, cEmb]);
+  await client.queryObject(`SELECT link_claim_to_source($1,$2,'states',1.0)`, [ca.rows[0].id, srcA.rows[0].id]);
+  const cb = await client.queryObject<{ id: string }>(`SELECT id FROM find_or_create_claim('The tower is 200 metres tall.', $1, $2, 'sourced','slow',1095, $3::vector, '{}'::jsonb)`, [ct, synB.rows[0].id, cEmb]);
+  await client.queryObject(`SELECT link_claim_to_source($1,$2,'states',1.0)`, [cb.rows[0].id, srcB.rows[0].id]);
+
+  const fakeJudge = (a: string, b: string): Promise<ConflictVerdict> =>
+    Promise.resolve(/\d/.test(a) && /\d/.test(b) && a !== b ? "contradict" : "unrelated");
+  const conflictRes = await detectConflicts(client, [cb.rows[0].id], ct, fakeJudge, 0.25);
+  assert(conflictRes.conflicts === 1, `detected 1 conflict (got ${conflictRes.conflicts})`);
+
+  const flagged = await client.queryObject<{ n: bigint }>(
+    `SELECT count(*) AS n FROM claims WHERE thread_id=$1 AND contradicted=true`, [ct]);
+  assert(Number(flagged.rows[0].n) === 2, "BOTH contradicting claims flagged contradicted (neither preferred)");
+  const capped = await client.queryObject<{ n: bigint }>(
+    `SELECT count(*) AS n FROM claims WHERE thread_id=$1 AND confidence <= 0.301`, [ct]);
+  assert(Number(capped.rows[0].n) === 2, "BOTH conflicting claims' confidence capped at 0.30");
+
+  console.log("\nALL P2.5 + CONFLICT ASSERTIONS PASSED");
 } finally {
   client.release();
   await pool.end();
