@@ -3,7 +3,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   extractTextFromHtml, extractTitle, domainOf, decodeEntities,
   isStale, revalidateWindow, decideReuse, backstopDecision, reuseMetric,
-  citedNumbers, citedSubset,
+  citedNumbers, citedSubset, buildCitedAndRenumber,
 } from "./lib.ts";
 
 Deno.test("extractTextFromHtml strips scripts/styles/tags, keeps text", () => {
@@ -72,4 +72,33 @@ Deno.test("citedNumbers + citedSubset (cited-only)", () => {
   assertEquals(citedNumbers(synth), [1, 3]);
   const sources = ["s1", "s2", "s3"];
   assertEquals(citedSubset(synth, sources), ["s1", "s3"]); // s2 found-but-uncited dropped
+});
+
+Deno.test("buildCitedAndRenumber compacts + renumbers (fixes edge-skip misalignment)", () => {
+  const staged = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"];
+  // synthesis cites the FULL staged indices; cited-only subset must renumber.
+  const synth = "[SOURCED] Everest is tallest. [Source 1, 2, 4, 6, 7, 9]\n[SOURCED] Height 8848m. [Source 4, 6, 7, 9]";
+  const { synthesis, cited } = buildCitedAndRenumber(synth, staged);
+  // cited sources = the 6 distinct cited, in order: s1,s2,s4,s6,s7,s9
+  assertEquals(cited, ["s1", "s2", "s4", "s6", "s7", "s9"]);
+  // renumbered to 1..6: old 1,2,4,6,7,9 -> new 1,2,3,4,5,6
+  assertEquals(citedNumbers(synthesis), [1, 2, 3, 4, 5, 6]);
+  // every citation now resolves within cited[] (no out-of-range -> no edge skip)
+  assertEquals(citedNumbers(synthesis).every((n) => cited[n - 1] != null), true);
+});
+
+Deno.test("buildCitedAndRenumber drops citations with no staged source", () => {
+  const staged = ["s1", "s2"];
+  const { synthesis, cited } = buildCitedAndRenumber("[SOURCED] X. [Source 1, 5]", staged);
+  assertEquals(cited, ["s1"]);          // source 5 doesn't exist -> dropped
+  assertEquals(citedNumbers(synthesis), [1]);
+});
+
+Deno.test("citedNumbers tolerates every bracket shape (live-model regression)", () => {
+  // The exact shape the live model produced that broke the old regex.
+  assertEquals(citedNumbers("Paris [SOURCED] [Source 1, Source 2, Source 4, Source 7]."), [1, 2, 4, 7]);
+  assertEquals(citedNumbers("[Sources 1 and 2]"), [1, 2]);
+  assertEquals(citedNumbers("x [Source 1] y [Source 2]"), [1, 2]);
+  assertEquals(citedNumbers("[Source 11, 14]"), [11, 14]);
+  assertEquals(citedNumbers("no citations here"), []);
 });

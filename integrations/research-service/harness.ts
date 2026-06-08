@@ -6,7 +6,7 @@
  *
  * Governing specs: GROUNDING-MODEL.md + PLAN-research-engine.md §6 + OD-5/OD-6.
  */
-import { domainOf, decideReuse, backstopDecision, reuseMetric, citedSubset } from "./lib.ts";
+import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
 import { retrieveRelevantClaims, createStagingSession, stageSource, existingFreshSource } from "./kb.ts";
 
 // Tunables (env-read; reading env does not start a server).
@@ -49,12 +49,19 @@ const DECOMPOSE_SYS =
 const COVERAGE_SYS =
   `You decide which research NEEDS are already covered by KNOWN CLAIMS. A need is "covered" only if a known claim directly answers it. Return ONLY JSON: {"covered": [need_index,...], "gaps": [need_index,...]}. Indices refer to the NEEDS list (0-based). When unsure, mark it a gap (never assume coverage).`;
 const SYNTH_SYS =
-  `You are Open Brain's grounded synthesizer. Write a thorough answer to the QUESTION using ONLY the KNOWN CLAIMS and SOURCES provided. Every assertion MUST carry an epistemic tag and, where it rests on sources, a [Source N] citation:
-  [SOURCED] — directly stated by a source you cite [Source N]
-  [INFERRED] — reasoned from one or more sources [Source N, M]
-  [UNCERTAIN] — weakly supported; cite what you have
-  [GAP] — a needed fact NO source supports. State the gap; do NOT fill it from your own knowledge.
-ABSOLUTE RULES: never invent a fact, number, name, URL, or quote that no source supports — if unsupported, it is a [GAP]. Do not cite a source number that is not in the SOURCES list. Be specific and cite precisely. Return the answer as markdown (no JSON).`;
+  `You are Open Brain's grounded synthesizer. Write a thorough answer to the QUESTION using ONLY the KNOWN CLAIMS and SOURCES provided.
+
+OUTPUT FORMAT — STRICT. Write the answer as a list, ONE claim per line. Each line MUST begin with its tag and end with its citation, in this exact shape:
+  [SOURCED] <a single assertion>. [Source 2]
+  [INFERRED] <a single assertion>. [Source 1, 3]
+Tags:
+  [SOURCED]  — a source directly states it; cite the source(s)
+  [INFERRED] — reasoned from one or more sources; cite them
+  [UNCERTAIN]— weakly supported; cite what you have
+  [GAP]      — a needed fact NO source supports. State the gap on its own line; do NOT fill it from your own knowledge and do NOT cite a source.
+Use comma-separated numbers for multiple sources: [Source 1, 2, 4] (NOT "[Source 1, Source 2]"). Put the tag at the START of the line and the citation at the END. One assertion per line.
+
+ABSOLUTE RULES: never invent a fact, number, name, URL, or quote that no source supports — if unsupported, it is a [GAP]. Do not cite a source number that is not in the SOURCES list. A [SOURCED]/[INFERRED]/[UNCERTAIN] line WITHOUT a [Source N] citation is invalid — either cite it or make it a [GAP]. Be specific.`;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 export interface RunOptions { threadId?: string | null; origin?: string; confidenceFloor?: number; }
@@ -161,16 +168,22 @@ export async function runResearch(
   await progress("synthesize", "writing the grounded synthesis");
   const sourceList = staged.map((p, i) => `[Source ${i + 1}] ${p.title} (${p.domain})\n${p.content.slice(0, 2000)}`).join("\n\n");
   const claimList = reuseClaims.map((c) => `- ${c.text}`).join("\n") || "(none)";
-  const synthesis = (await deps.chat(
+  const rawSynthesis = (await deps.chat(
     SYNTH_SYS,
     `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded; reuse as support):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
   )).trim();
 
-  // 5. Cited-only sources (GROUNDING-MODEL §6.3); delegate to curator (verbatim
-  //    synthesis storage + grounded claim writing, P2).
-  const cited = citedSubset(synthesis, staged);
+  // 5. Cited-only sources (GROUNDING-MODEL §6.3) + renumber citations so the
+  //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
+  //    compacted cited list. Delegate to curator (verbatim storage + claims, P2).
+  const { synthesis, cited } = buildCitedAndRenumber(rawSynthesis, staged);
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
-  const metrics = reuseMetric(reuseClaims.length, cited.length, gapMatches.length);
+  // Reuse signal = needs actually COVERED by existing claims (needs - gaps), not
+  // every grounded claim the recall pulled (which overcounts when an unscoped
+  // query drags in semantically-near but irrelevant claims). This is the honest
+  // compounding-reuse number for the trend (PLAN §6 / P4.5).
+  const coveredNeeds = Math.max(0, needs.length - gapNeeds.length);
+  const metrics = reuseMetric(coveredNeeds, cited.length, gapMatches.length);
 
   await progress("persist", "delegating placement + grounding to the curator");
   let curator: Record<string, unknown> | null = null;

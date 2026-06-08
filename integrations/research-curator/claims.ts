@@ -50,17 +50,16 @@ export interface ParseResult {
 }
 
 const TAG_RE = /\[(SOURCED|INFERRED|UNCERTAIN|GAP)\]/gi;
-// [Source 1] / [Source 1, 2] / [Sources 1, 2 and 3]
-const SRC_RE = /\[Sources?\s+([\d,\s&and]+?)\]/gi;
+// Tolerant of every shape: [Source 1] / [Source 1, 2] / [Sources 1, 2 and 3] /
+// [Source 1, Source 2, Source 4] — extract every number inside a [Source...] bracket.
+const SRC_RE = /\[Sources?\b[^\]]*\]/gi;
 
 function parseSourceNumbers(segment: string): number[] {
   const nums: number[] = [];
-  let m: RegExpExecArray | null;
-  SRC_RE.lastIndex = 0;
-  while ((m = SRC_RE.exec(segment)) !== null) {
-    for (const tok of m[1].split(/[,\s&]+|and/i)) {
-      const n = parseInt(tok.trim(), 10);
-      if (Number.isFinite(n) && n > 0 && !nums.includes(n)) nums.push(n);
+  for (const bracket of segment.match(SRC_RE) || []) {
+    for (const d of bracket.match(/\d+/g) || []) {
+      const n = parseInt(d, 10);
+      if (n > 0 && !nums.includes(n)) nums.push(n);
     }
   }
   return nums;

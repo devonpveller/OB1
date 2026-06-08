@@ -6,7 +6,8 @@ import type { Source, SourceRevision } from "../types.ts";
 
 const COLS =
   "id, url, title, content, content_type, notebook, retracted_at, retracted_by, " +
-  "retraction_committed_at, last_edited_by, last_edited_at, created_at, updated_at";
+  "retraction_committed_at, last_edited_by, last_edited_at, created_at, updated_at, " +
+  "COALESCE((metadata->>'purged')::boolean, false) AS purged";
 
 export async function getSource(id: string): Promise<Source | null> {
   const rows = await query<Source>(`SELECT ${COLS} FROM public.sources WHERE id = $1`, [id]);
@@ -230,10 +231,13 @@ export async function retractStaged(id: string, by = "operator"): Promise<Source
 }
 
 export async function restore(id: string): Promise<Source | null> {
+  // A PURGED source is a permanent suppression (OD-1) — restore must refuse it.
+  // The data is kept, but it never returns to generation via the UI.
   const rows = await query<Source>(
     `UPDATE public.sources
         SET retracted_at = NULL, retracted_by = NULL, retraction_committed_at = NULL
-      WHERE id = $1 RETURNING ${COLS}`,
+      WHERE id = $1 AND COALESCE((metadata->>'purged')::boolean, false) = false
+      RETURNING ${COLS}`,
     [id],
   );
   return rows[0] ?? null;
@@ -248,12 +252,22 @@ export async function unlinkFromNotebook(threadId: string, sourceId: string): Pr
   return rows[0];
 }
 
-// Irreversible purge (cascades source_entities/thread_sources/session_sources/
-// source_revisions/source_chunks). Qualified DELETE — operator-confirmed only.
+// Irreversible purge — OD-1 decision: SUPPRESSION, not erasure. The row, its
+// content, and its embeddings are KEPT (admin-recoverable, auditable, and visible
+// to a future read-only wiki-history MCP); purge just hides it from ALL wiki
+// generation/search by committing a retraction, and stamps metadata.purged so the
+// UI shows it as purged (no Restore) — distinct from a reversible retract. Was a
+// hard `DELETE FROM sources`. Operator-confirmed only.
 export async function purge(id: string): Promise<boolean> {
   const rows = await query<{ id: string }>(
-    `DELETE FROM public.sources WHERE id = $1 RETURNING id`,
-    [id],
+    `UPDATE public.sources
+        SET retracted_at = COALESCE(retracted_at, now()),
+            retraction_committed_at = COALESCE(retraction_committed_at, now()),
+            metadata = COALESCE(metadata, '{}'::jsonb)
+                       || jsonb_build_object('purged', true, 'purged_at', $2::text)
+      WHERE id = $1
+      RETURNING id`,
+    [id, new Date().toISOString()],
   );
   return rows.length > 0;
 }

@@ -74,6 +74,13 @@ Deno.test("'Sources 1 and 2' phrasing parses", () => {
   assertEquals(claims[0].edges.map((e) => e.sourceIndex), [1, 2]);
 });
 
+Deno.test("repeated 'Source' keyword parses (live-model regression)", () => {
+  const { claims } = parseSynthesisClaims("[SOURCED] Paris is the capital. [Source 1, Source 2, Source 4]");
+  assertEquals(claims[0].edges.map((e) => e.sourceIndex), [1, 2, 4]);
+  // first → states, rest → corroborates
+  assertEquals(claims[0].edges.map((e) => e.edgeType), ["states", "corroborates", "corroborates"]);
+});
+
 Deno.test("duplicate claim text is deduped within a parse", () => {
   const { claims } = parseSynthesisClaims(
     "[SOURCED] Same fact. [Source 1]\n[SOURCED] Same fact. [Source 2]",

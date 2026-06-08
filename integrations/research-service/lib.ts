@@ -128,15 +128,16 @@ export function reuseMetric(reused: number, freshlyGathered: number, openGaps: n
 }
 
 // ── Citation parsing ([Source N]) — cited-only subset (GROUNDING-MODEL §6.3) ─
-const CITE_RE = /\[Sources?\s+([\d,\s&and]+?)\]/gi;
+// Tolerant of every shape the model emits: [Source 1], [Source 1, 2],
+// [Sources 1 and 2], [Source 1, Source 2, Source 4] — extract every number
+// inside any [Source...] bracket.
+const CITE_BRACKET_RE = /\[Sources?\b[^\]]*\]/gi;
 export function citedNumbers(synthesis: string): number[] {
   const nums = new Set<number>();
-  let m: RegExpExecArray | null;
-  CITE_RE.lastIndex = 0;
-  while ((m = CITE_RE.exec(String(synthesis || ""))) !== null) {
-    for (const tok of m[1].split(/[,\s&]+|and/i)) {
-      const n = parseInt(tok.trim(), 10);
-      if (Number.isFinite(n) && n > 0) nums.add(n);
+  for (const bracket of String(synthesis || "").match(CITE_BRACKET_RE) || []) {
+    for (const d of bracket.match(/\d+/g) || []) {
+      const n = parseInt(d, 10);
+      if (n > 0) nums.add(n);
     }
   }
   return [...nums].sort((a, b) => a - b);
@@ -147,4 +148,29 @@ export function citedSubset<T>(synthesis: string, sources: T[]): T[] {
   return citedNumbers(synthesis)
     .map((n) => sources[n - 1])
     .filter((x): x is T => x != null);
+}
+
+/**
+ * Build the cited-only source subset AND renumber the synthesis's `[Source N]`
+ * citations to match it, so the curator (which resolves `[Source N]` →
+ * source_ids[N-1]) stays aligned. Citations indexing the FULL staged list would
+ * otherwise point past the end of the compacted cited list and drop edges.
+ *
+ * Mechanical renumber only — claim TEXT is untouched, so the synthesis is still
+ * stored "verbatim" in the sense that matters (no re-synthesis/truncation); the
+ * citation indices simply reference the sources that are actually stored.
+ * Unresolvable citations (a number with no staged source) are dropped.
+ */
+export function buildCitedAndRenumber<T>(synthesis: string, sources: T[]): { synthesis: string; cited: T[] } {
+  const oldNums = citedNumbers(synthesis).filter((n) => sources[n - 1] != null);
+  const map = new Map<number, number>();
+  oldNums.forEach((n, i) => map.set(n, i + 1));
+  const cited = oldNums.map((n) => sources[n - 1]);
+  const renum = String(synthesis || "").replace(CITE_BRACKET_RE, (bracket) => {
+    const mapped = (bracket.match(/\d+/g) || [])
+      .map((d) => map.get(parseInt(d, 10)))
+      .filter((x): x is number => x != null);
+    return mapped.length ? `[Source ${mapped.join(", ")}]` : "";
+  });
+  return { synthesis: renum, cited };
 }

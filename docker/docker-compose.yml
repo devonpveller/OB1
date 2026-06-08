@@ -453,6 +453,7 @@ services:
     networks:
       - obnet
       - llm-net
+      - search-gw-net   # reach the private SearXNG gateway (search-over-Tor)
     restart: unless-stopped
 
   # Wiki compiler + scheduler + on-demand trigger. Runs the (B.2/B.3-
@@ -733,3 +734,11 @@ networks:
   app-net:
     external: true
     name: ai-stack_app-net
+  # The main stack's default bridge — where the private SearXNG `gateway`
+  # (search-over-Tor) is reachable by name. openbrain-research joins it to reach
+  # http://gateway:8080 for search. We connect TO the privacy boundary, never
+  # bypass it (the gateway still routes every query via Tor). External: exists
+  # whenever the main stack is up.
+  search-gw-net:
+    external: true
+    name: ai-stack_default

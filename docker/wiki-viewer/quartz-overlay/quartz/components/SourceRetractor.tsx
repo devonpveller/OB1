@@ -23,7 +23,7 @@ const SourceRetractor: QuartzComponent = ({ fileData, displayClass }: QuartzComp
         <button data-sr="restore" class="sr-alt">Restore</button>
       </div>
       <div class="sr-purge-row">
-        <label class="sr-purge-toggle"><input type="checkbox" data-sr-show-purge /> show purge — irreversible delete</label>
+        <label class="sr-purge-toggle"><input type="checkbox" data-sr-show-purge /> show purge — permanent suppression (record kept)</label>
         <button data-sr="purge" class="sr-danger" hidden>Purge (irreversible)</button>
       </div>
       <div class="sr-status" data-sr-status></div>
@@ -46,11 +46,12 @@ document.addEventListener("nav", () => {
     const purgeBtn = el.querySelector('[data-sr="purge"]')
     let gravity = { notebooks: 0, pages: 0 }
 
-    const ACTIVE_HELP = "Sources are kept, never destroyed by default. <strong>Retract</strong> (the default) hides this source from all wiki generation but keeps the record — reversible until the next compile. <strong>Restore</strong> reverses it. <strong>Purge</strong> permanently deletes it and everything it supports (rare, irreversible — revealed behind the checkbox)."
+    const ACTIVE_HELP = "Sources are kept, never destroyed. <strong>Retract</strong> (the default) hides this source from all wiki generation but keeps the record — reversible until the next compile. <strong>Restore</strong> reverses it. <strong>Purge</strong> permanently hides it from all generation + search and can't be restored from here — but the record + embeddings are still KEPT (operator-recoverable, auditable). Rare; revealed behind the checkbox."
     const STATES = {
       active:    { pill: "Active",              cls: "",                 help: ACTIVE_HELP, retract: true,  restore: false },
       staged:    { pill: "Retracted (staged)",  cls: "sr-state-retracted", help: "<strong>⚠ This source is retracted (staged).</strong> It's hidden from wiki generation but still <strong>reversible</strong> — click <strong>Restore</strong> to bring it back before the next compile commits the retraction. The record is always kept.", retract: false, restore: true },
       committed: { pill: "Retracted",           cls: "sr-state-retracted", help: "<strong>⚠ This source is retracted.</strong> It's hidden from all wiki generation; the record is kept. Click <strong>Restore</strong> to bring it back.", retract: false, restore: true },
+      purged:    { pill: "Purged",               cls: "sr-state-retracted", help: "<strong>⛔ This source is purged.</strong> It's permanently hidden from all wiki generation + search. The record + embeddings are KEPT (operator-recoverable from the database, and auditable) — but it cannot be restored from here.", retract: false, restore: false },
     }
     const setState = (key) => {
       const s = STATES[key] || STATES.active
@@ -72,7 +73,7 @@ document.addEventListener("nav", () => {
       gravity = j.gravity || gravity
       grav.textContent = "Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s)."
       const src = j.source || {}
-      setState(src.retracted_at ? (src.retraction_committed_at ? "committed" : "staged") : "active")
+      setState(src.purged ? "purged" : src.retracted_at ? (src.retraction_committed_at ? "committed" : "staged") : "active")
     } catch (e) { grav.textContent = "impact unavailable (" + (e && e.message ? e.message : e) + ")" }
 
     el.querySelector("[data-sr-show-purge]").addEventListener("change", (e) => { purgeBtn.hidden = !e.target.checked })
@@ -96,12 +97,13 @@ document.addEventListener("nav", () => {
       } catch (e) { status.textContent = "✗ restore error: " + (e && e.message ? e.message : e) }
     })
     purgeBtn.addEventListener("click", async () => {
-      if (!confirm("Purge is IRREVERSIBLE and cascades. Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s). Proceed?")) return
+      if (!confirm("Purge permanently hides this source from ALL wiki generation + search and cannot be restored from here.\n\nThe record + embeddings are KEPT (operator-recoverable from the database, auditable). Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s). Proceed?")) return
       try {
         const r = await fetch("/workbench/sources/" + encodeURIComponent(id), {
           method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: true }),
         })
-        status.textContent = r.ok ? "Purged." : "✗ purge failed (" + r.status + ")"
+        if (r.ok) { setState("purged"); status.textContent = "Purged — permanently suppressed (record kept)." }
+        else status.textContent = "✗ purge failed (" + r.status + ")"
       } catch (e) { status.textContent = "✗ purge error: " + (e && e.message ? e.message : e) }
     })
   })
