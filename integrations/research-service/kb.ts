@@ -129,6 +129,47 @@ export async function stageSource(
   return { id, url, wasDuplicate: fc.rows[0].was_duplicate };
 }
 
+export interface ReuseSourceRow { id: string; url: string | null; title: string; content: string; domain: string | null; }
+
+/**
+ * The grounding sources behind a set of reused claims — one PRIMARY source per
+ * claim (prefer states > corroborates > inferred_from), deduped across claims.
+ * The harness folds these into the synthesis's numbered SOURCES pool so reused
+ * facts can be cited [Source N] (not left as uncited [SOURCED]), and so the
+ * curator re-links the new synthesis to those grounded sources/claims
+ * (provenance) — closing the reuse-only citation gap.
+ */
+export async function getReuseSources(
+  client: QueryClient,
+  claimIds: string[],
+): Promise<{ sources: ReuseSourceRow[]; claimToSource: Record<string, string> }> {
+  if (!claimIds.length) return { sources: [], claimToSource: {} };
+  const r = await client.queryObject<{
+    claim_id: string; id: string; url: string | null; title: string; content: string; domain: string | null;
+  }>(
+    `SELECT DISTINCT ON (cs.claim_id)
+            cs.claim_id, s.id, s.url, s.title, s.content, s.domain
+       FROM public.claim_sources cs
+       JOIN public.sources s ON s.id = cs.source_id
+      WHERE cs.claim_id = ANY($1::uuid[])
+        AND cs.edge_type <> 'contradicts'
+        AND s.retraction_committed_at IS NULL
+      ORDER BY cs.claim_id,
+               CASE cs.edge_type WHEN 'states' THEN 0 WHEN 'corroborates' THEN 1 ELSE 2 END,
+               cs.created_at`,
+    [claimIds],
+  );
+  const claimToSource: Record<string, string> = {};
+  const seen = new Map<string, ReuseSourceRow>();
+  for (const row of r.rows) {
+    claimToSource[row.claim_id] = row.id;
+    if (!seen.has(row.id)) {
+      seen.set(row.id, { id: row.id, url: row.url, title: row.title, content: row.content, domain: row.domain });
+    }
+  }
+  return { sources: [...seen.values()], claimToSource };
+}
+
 /**
  * P3.3 — is this URL already a FRESH source in OB? If so the caller reuses it
  * instead of re-fetching. Returns the source row (with content) or null.

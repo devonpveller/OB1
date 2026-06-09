@@ -7,7 +7,7 @@
  * Governing specs: GROUNDING-MODEL.md + PLAN-research-engine.md §6 + OD-5/OD-6.
  */
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
-import { retrieveRelevantClaims, createStagingSession, stageSource, existingFreshSource } from "./kb.ts";
+import { retrieveRelevantClaims, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
 
 // Tunables (env-read; reading env does not start a server).
 const env = (k: string, d: string) => Deno.env.get(k) ?? d;
@@ -291,8 +291,13 @@ export async function runResearch(
 
   // 4. Synthesize verbatim with claim-level citations (sources 1-indexed).
   await progress("synthesize", "writing the grounded synthesis");
-  const claimList = reuseClaims.map((c) => `- ${c.text}`).join("\n") || "(none)";
-  const sourceLine = (p: Page, i: number) => `[Source ${i + 1}] ${p.title} (${p.domain})\n${p.content.slice(0, 2000)}`;
+  let claimList = reuseClaims.map((c) => `- ${c.text}`).join("\n") || "(none)";
+  const sourceLine = (p: Page, i: number, max = 2000) => `[Source ${i + 1}] ${p.title} (${p.domain})\n${p.content.slice(0, max)}`;
+
+  // The source pool the synthesizer can cite, and the buildCitedAndRenumber input.
+  // Defaults to `staged`; the default path extends it with reused-claim sources.
+  let pool: Page[] = staged;
+  let reuseUrls = new Set<string>();
 
   let rawSynthesis: string;
   if (articleMode) {
@@ -300,7 +305,7 @@ export async function runResearch(
     // here; OB known claims resolve gaps where they can).
     const articleSynth = (await deps.chat(
       ARTICLE_SYNTH_SYS,
-      `QUESTION: ${query}\n\nKNOWN CLAIMS (already-grounded Open Brain knowledge — supporting context; use to RESOLVE gaps where possible):\n${claimList}\n\nARTICLE:\n${staged.map(sourceLine).join("\n\n")}`,
+      `QUESTION: ${query}\n\nKNOWN CLAIMS (already-grounded Open Brain knowledge — supporting context; use to RESOLVE gaps where possible):\n${claimList}\n\nARTICLE:\n${staged.map((p, i) => sourceLine(p, i)).join("\n\n")}`,
     )).trim();
 
     // Pass 2 — bounded PRELIMINARY research on the gaps the article + OB left open.
@@ -338,24 +343,57 @@ export async function runResearch(
     }
     rawSynthesis = prelimSynth ? `${articleSynth}\n${prelimSynth}` : articleSynth;
   } else {
-    const sourceList = staged.map(sourceLine).join("\n\n");
+    // Fold the REUSED claims' grounding sources into the citable pool (after the
+    // freshly-staged ones, deduped by url). This lets the synthesizer cite reused
+    // facts [Source N] instead of emitting uncited [SOURCED] lines — and, since
+    // those sources flow to the curator, re-grounds the synthesis + re-links it
+    // to the reused claims (provenance). Closes the reuse-only gap; a reuse-only
+    // run (no fresh gather) now still produces a cited, grounded synthesis.
+    const reuse = reuseClaims.length
+      ? await getReuseSources(client, reuseClaims.map((c) => c.id))
+      : { sources: [], claimToSource: {} };
+    const stagedUrls = new Set(staged.map((s) => s.url).filter(Boolean));
+    const reuseEntries = reuse.sources.filter((s) => !(s.url && stagedUrls.has(s.url)));
+    const reusePages: Page[] = reuseEntries.map((s) => ({
+      url: s.url || "", title: s.title, content: s.content, domain: s.domain || "",
+    }));
+    reuseUrls = new Set(reusePages.map((p) => p.url).filter(Boolean));
+    pool = [...staged, ...reusePages];
+
+    // source id → its 0-based index in the pool (reuse sources occupy [staged.length..])
+    const idToPoolIdx = new Map<string, number>();
+    reuseEntries.forEach((s, i) => idToPoolIdx.set(s.id, staged.length + i));
+    // Annotate each reused claim with the [Source N] that grounds it, so the
+    // synthesizer cites that number when it uses the fact.
+    claimList = reuseClaims.map((c) => {
+      const sid = reuse.claimToSource[c.id];
+      const idx = sid != null ? idToPoolIdx.get(sid) : undefined;
+      return idx != null ? `- ${c.text} [Source ${idx + 1}]` : `- ${c.text}`;
+    }).join("\n") || "(none)";
+
+    // Fresh sources get full content; reuse sources get a shorter slice (the claim
+    // text already carries the substance — the source is for citation attribution).
+    const sourceList = pool
+      .map((p, i) => sourceLine(p, i, i < staged.length ? 2000 : 900))
+      .join("\n\n");
     rawSynthesis = (await deps.chat(
       SYNTH_SYS,
-      `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded; reuse as support):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
+      `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded — when you assert one, cite the [Source N] shown next to it):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
     )).trim();
   }
 
   // 5. Cited-only sources (GROUNDING-MODEL §6.3) + renumber citations so the
   //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
   //    compacted cited list. Delegate to curator (verbatim storage + claims, P2).
-  const { synthesis, cited } = buildCitedAndRenumber(rawSynthesis, staged);
+  const { synthesis, cited } = buildCitedAndRenumber(rawSynthesis, pool);
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
   // Reuse signal = needs actually COVERED by existing claims (needs - gaps), not
   // every grounded claim the recall pulled (which overcounts when an unscoped
-  // query drags in semantically-near but irrelevant claims). This is the honest
-  // compounding-reuse number for the trend (PLAN §6 / P4.5).
+  // query drags in semantically-near but irrelevant claims). claims_freshly_
+  // gathered counts only NEWLY-gathered cited sources (reuse sources excluded).
   const coveredNeeds = Math.max(0, needs.length - gapNeeds.length);
-  const metrics = reuseMetric(coveredNeeds, cited.length, gapMatches.length);
+  const freshCited = cited.filter((p) => !(p.url && reuseUrls.has(p.url)));
+  const metrics = reuseMetric(coveredNeeds, freshCited.length, gapMatches.length);
 
   await progress("persist", dryRun ? "dry-run: skipping curator write" : "delegating placement + grounding to the curator");
   let curator: Record<string, unknown> | null = null;

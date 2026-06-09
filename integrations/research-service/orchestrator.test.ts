@@ -33,7 +33,10 @@ const deps: Deps = {
     if (sys.includes("GATHERED SOURCES")) return Promise.resolve(JSON.stringify({ covered: [0], open: [] })); // gap covered → stop deepening
     if (sys.includes("research strategist")) return Promise.resolve(JSON.stringify({ queries: [] }));
     if (sys.includes("grounded synthesizer")) {
-      return Promise.resolve("## Cats\n[SOURCED] Cats purr when content. [Source 1]\n[INFERRED] Purring may self-soothe. [Source 1]\nReused fact: cats are mammals.");
+      // [Source 1] = freshly-gathered purr page; [Source 3] = the REUSED claim's
+      // grounding source (animals.gov), now in the pool so the reused fact is
+      // citable instead of an uncited [SOURCED] line.
+      return Promise.resolve("## Cats\n[SOURCED] Cats purr when content. [Source 1]\n[SOURCED] Cats are mammals. [Source 3]");
     }
     return Promise.resolve("{}");
   },
@@ -64,17 +67,22 @@ try {
   const res = await runResearch(deps, client, "Tell me about cats", { threadId, origin: "owui" });
   console.log("metrics:", JSON.stringify(res.metrics), "backstop:", res.backstop);
 
+  const citedUrls = res.citedSources.map((c) => c.url);
   assert(res.needs.length === 2, "decomposed into 2 needs");
   assert(res.reuseClaims.some((c) => c.text.includes("mammals")), "reused the grounded 'cats are mammals' claim");
-  assert(res.citedSources.length === 1, `cited exactly the 1 source the synthesis used (got ${res.citedSources.length})`);
-  assert(res.citedSources[0].url === "https://vet.example.org/purr", "cited source is the purr page ([Source 1])");
+  // GAP FIX: the synthesis cites BOTH a fresh source AND the reused claim's
+  // grounding source (so the reused fact is cited, not an uncited [SOURCED]).
+  assert(res.citedSources.length === 2, `cited 2 sources: 1 fresh + 1 reuse-grounding (got ${res.citedSources.length})`);
+  assert(citedUrls.includes("https://vet.example.org/purr"), "cited the fresh purr page");
+  assert(citedUrls.includes("https://animals.gov/cats"), "cited the REUSED claim's grounding source (gap closed)");
   assert(res.metrics.claims_reused === 1, "metric: 1 claim reused");
-  assert(res.metrics.claims_freshly_gathered === 1, "metric: 1 freshly gathered (cited)");
+  assert(res.metrics.claims_freshly_gathered === 1, "metric: 1 freshly gathered (reuse source excluded)");
 
-  // ── Curator got the VERBATIM synthesis + cited-only sources. ──
+  // ── Curator got the VERBATIM synthesis + cited-only sources (now incl. the
+  //    reuse-grounding source so it re-links the synthesis to the reused claim). ──
   assert(curatorPkg !== null, "curator was called");
   assert((curatorPkg!.synthesis as string).includes("[Source 1]"), "curator package carries the verbatim synthesis");
-  assert((curatorPkg!.sources as unknown[]).length === 1, "curator package sources are cited-only (1, not 2 found)");
+  assert((curatorPkg!.sources as unknown[]).length === 2, "curator package = cited-only (2: fresh + reuse-grounding; uncited blog excluded)");
   assert((curatorPkg!.thread_id as string) === threadId, "curator package carries the thread scope");
 
   // ── Staging really happened (P3): the gap page is in the session pool. ──

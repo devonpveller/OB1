@@ -1354,56 +1354,82 @@ document.addEventListener("nav", () => {
       }
       nfHistory.textContent = "loading history…"
       try {
-        const j = await (await fetch("/workbench/notes/folder-history?path=" + encodeURIComponent(hFolderRel))).json()
-        panel = document.createElement("div")
-        panel.className = "ne-history"
-        const commits = j.commits || []
-        if (!commits.length) {
-          panel.textContent = "No history yet for this folder."
-        } else {
-          for (const c of commits) {
-            const cd = document.createElement("div")
-            cd.className = "ne-hist-commit"
-            const head = document.createElement("div")
-            head.className = "ne-hist-head"
-            let when = c.date
-            try {
-              when = new Date(c.date).toLocaleString()
-            } catch {
-              /* raw */
-            }
-            head.textContent = when + " — " + c.message
-            cd.appendChild(head)
-            for (const f of c.files || []) {
-              const st = (f.status || "")[0] || ""
-              const row = document.createElement("div")
-              row.className = "ne-hist-file ne-hist-" + st
-              row.textContent = (STAT[st] || f.status) + ": " + f.path
-              if (st === "D" || st === "R") {
-                const rec = document.createElement("button")
-                rec.className = "ne-hist-recover"
-                rec.textContent = "↩ Recover"
-                rec.addEventListener("click", async () => {
-                  rec.textContent = "recovering…"
-                  rec.disabled = true
-                  try {
-                    const rr = await fetch(api(f.path) + "/recover", {
-                      method: "POST",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ from: c.hash }),
-                    })
-                    const rj = await rr.json().catch(() => ({}))
-                    rec.textContent = rr.ok ? "✓ recovered — refresh to view" : "✗ " + (rj.error || rr.status)
-                  } catch (e: any) {
-                    rec.textContent = "✗ " + (e && e.message ? e.message : e)
-                  }
-                })
-                row.appendChild(rec)
-              }
-              cd.appendChild(row)
-            }
-            panel.appendChild(cd)
+        const fmtDate = (s: string) => {
+          try {
+            return s ? new Date(s).toLocaleString() : ""
+          } catch {
+            return s || ""
           }
+        }
+        const esc = (s: string) =>
+          String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        // Compiler commits dump verbose messages (incl. DB errors); show a clean
+        // label instead, and strip the "notes:" prefix from workbench commits.
+        const cleanMsg = (m: string) =>
+          /^wiki compile/i.test(m) ? "Saved at compile" : String(m || "").replace(/^notes:\s*/, "")
+        const j = await (await fetch("/workbench/notes/folder-history?path=" + encodeURIComponent(hFolderRel))).json()
+        // Reuse the RevisionHistory card look (.rh-*) so it matches per-note history.
+        panel = document.createElement("div")
+        panel.className = "revision-history ne-folder-history"
+        const commits = (j.commits || []).filter((c: any) => (c.files || []).length)
+        panel.innerHTML =
+          "<div class='rh-head'><span class='rh-title'>🕘 Folder history</span></div>" +
+          (commits.length ? "" : "<div class='rh-muted'>No note changes recorded for this folder yet.</div>")
+        const listEl = document.createElement("div")
+        listEl.className = "rh-list"
+        panel.appendChild(listEl)
+        for (const c of commits) {
+          const it = document.createElement("div")
+          it.className = "rh-item"
+          const hd = document.createElement("div")
+          hd.className = "rh-item-head"
+          const tog = document.createElement("button")
+          tog.type = "button"
+          tog.className = "rh-toggle"
+          tog.innerHTML =
+            "<span class='rh-arrow'>▸</span> <strong>" + esc(cleanMsg(c.message).slice(0, 90)) +
+            "</strong> <span class='rh-sub'>" + esc(fmtDate(c.date)) + "</span>"
+          hd.appendChild(tog)
+          const body = document.createElement("div")
+          body.className = "rh-diff"
+          body.hidden = true
+          body.style.padding = ".35rem .55rem"
+          for (const f of c.files || []) {
+            const st = (f.status || "")[0] || ""
+            const row = document.createElement("div")
+            row.className = "ne-hist-file ne-hist-" + st
+            row.textContent = (STAT[st] || f.status) + ": " + f.path
+            if (st === "D" || st === "R") {
+              const rec = document.createElement("button")
+              rec.className = "ne-hist-recover"
+              rec.textContent = "↩ Recover"
+              rec.addEventListener("click", async () => {
+                rec.textContent = "recovering…"
+                rec.disabled = true
+                try {
+                  const rr = await fetch(api(f.path) + "/recover", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ from: c.hash }),
+                  })
+                  const rj = await rr.json().catch(() => ({}))
+                  rec.textContent = rr.ok ? "✓ recovered — refresh to view" : "✗ " + (rj.error || rr.status)
+                } catch (e: any) {
+                  rec.textContent = "✗ " + (e && e.message ? e.message : e)
+                }
+              })
+              row.appendChild(rec)
+            }
+            body.appendChild(row)
+          }
+          tog.addEventListener("click", () => {
+            body.hidden = !body.hidden
+            const arrow = tog.querySelector(".rh-arrow")
+            if (arrow) arrow.textContent = body.hidden ? "▸" : "▾"
+          })
+          it.appendChild(hd)
+          it.appendChild(body)
+          listEl.appendChild(it)
         }
         nfHistory.after(panel)
         nfHistory.textContent = "📜 Hide history"
