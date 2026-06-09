@@ -9,6 +9,7 @@ import { SectionData } from "../sections/section.ts";
 import { WeatherPayload } from "../sections/weather.ts";
 import { AiNewsPayload, EmailGroup } from "../sections/ai-news.ts";
 import { CalendarItem, CalendarPayload, PrepItem } from "../sections/calendar.ts";
+import { PodcastBriefPayload } from "../sections/podcast-brief.ts";
 
 export class MarkdownRenderer {
   render(sections: SectionData[], opts: { subject: string }): string {
@@ -22,10 +23,40 @@ export class MarkdownRenderer {
       case "weather":  return renderWeather(s.payload as WeatherPayload);
       case "calendar": return renderCalendar(s.payload as CalendarPayload);
       case "ai_news":  return renderAiNews(s.payload as AiNewsPayload);
+      case "podcast_brief": return renderPodcastBrief(s.payload as PodcastBriefPayload);
       case "todos":    return ""; // Phase 4
       default:         return "";
     }
   }
+}
+
+function renderPodcastBrief(d: PodcastBriefPayload): string {
+  const lines: string[] = ["## Today's deep dive", ""];
+  if (d.episode) {
+    lines.push(`🎧 **Today's episode:** ${d.episode.title}`);
+    if (d.episode.viewUrl) lines.push(`▶ Open in Open Notebook: ${d.episode.viewUrl}`);
+    if (d.episode.downloadUrl) lines.push(`⬇ Download: ${d.episode.downloadUrl}`);
+    if (!d.episode.viewUrl && !d.episode.downloadUrl) lines.push(`(audio still rendering)`);
+    lines.push("");
+  }
+  for (const s of d.segments) {
+    if (!s.items.length) continue;
+    const label = (s.label.split("/").pop() ?? s.label).replace(/[-_]+/g, " ");
+    lines.push(`### ${label}`, "");
+    for (const it of s.items) {
+      lines.push(`**[${it.title || it.url}](${it.url})**`);
+      if (it.emailOnly) lines.push(`- _Only the newsletter blurb — couldn't open the article._`);
+      for (const p of it.keyPoints) lines.push(`- ${p}`);
+      if (it.preliminary[0]) lines.push(`- _Preliminary: ${it.preliminary[0]}_`);
+      lines.push("");
+    }
+  }
+  if (d.followUps.length) {
+    lines.push("### Open threads to follow up", "");
+    for (const g of d.followUps) lines.push(`- ${g}`);
+    lines.push("");
+  }
+  return lines.join("\n");
 }
 
 function renderCalendar(c: CalendarPayload): string {

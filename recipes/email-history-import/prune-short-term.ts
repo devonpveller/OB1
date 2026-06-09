@@ -229,6 +229,11 @@ async function main(argsOverride?: Partial<PruneArgs>) {
 const HAS_CLI_ARGS = Deno.args.some((a) => a.startsWith("--") && a !== "--server");
 const FORCE_SERVER = Deno.args.includes("--server");
 const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") || "";
+// If the primary next step (the podcast pipeline) is UNREACHABLE, fall back to
+// this (the digest) so the morning email always goes out — just without the
+// research enrichment. A 2xx/409 from the podcast means it has the job and will
+// trigger the digest itself, so the fallback does NOT fire then.
+const CHAIN_FALLBACK_URL = Deno.env.get("CHAIN_FALLBACK_URL") || "";
 
 async function chainTrigger(opts: { skip?: boolean } = {}): Promise<void> {
   if (opts.skip) return;
@@ -236,8 +241,18 @@ async function chainTrigger(opts: { skip?: boolean } = {}): Promise<void> {
   try {
     const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
     console.log(`Chain trigger ${NEXT_TRIGGER_URL} → ${res.status}`);
+    if (res.ok || res.status === 409) return; // accepted, or already running
+    throw new Error(`status ${res.status}`);
   } catch (err) {
     console.warn(`Chain trigger failed for ${NEXT_TRIGGER_URL}: ${err}`);
+    if (CHAIN_FALLBACK_URL && CHAIN_FALLBACK_URL !== NEXT_TRIGGER_URL) {
+      try {
+        const res2 = await fetch(CHAIN_FALLBACK_URL, { method: "POST" });
+        console.log(`Chain FALLBACK → ${CHAIN_FALLBACK_URL} → ${res2.status}`);
+      } catch (e2) {
+        console.warn(`Chain fallback failed for ${CHAIN_FALLBACK_URL}: ${e2}`);
+      }
+    }
   }
 }
 

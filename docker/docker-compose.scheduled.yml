@@ -55,10 +55,12 @@ services:
     env_file:
       - ../recipes/daily-digest/.env
     environment:
-      # Chain tail: after the morning email is sent, trigger the podcast
-      # pipeline (best-effort, fired AFTER delivery — never delays the email).
-      # Set empty to keep the digest as the end of the chain.
-      NEXT_TRIGGER_URL: http://openbrain-podcast:8080/run
+      # The digest is now the END of the chain (prune → podcast → digest). The
+      # podcast triggers this digest when its research + episode are ready, so the
+      # email is enriched (PodcastBriefSection reads the shared artifact). The
+      # email still always sends: if the podcast produced nothing, the section is
+      # omitted and the rest of the digest goes out. No onward trigger.
+      NEXT_TRIGGER_URL: ""
     volumes:
       - ../recipes/daily-digest:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
@@ -116,10 +118,14 @@ services:
     env_file:
       - ../recipes/email-history-import/.env
     environment:
-      # End of email cascade: on success chain to the digest. Wiki
-      # recompile is triggered separately inside the script (it's a
-      # different concern — content compilation, not delivery).
-      NEXT_TRIGGER_URL: http://openbrain-digest:8080/run
+      # Chain to the PODCAST pipeline (reordered 2026-06-08). The podcast
+      # researches the day's links and produces the episode, then triggers the
+      # digest — so the morning email WAITS for and is enriched by the research.
+      # Wiki recompile is triggered separately inside the script.
+      NEXT_TRIGGER_URL: http://openbrain-podcast:8080/run
+      # Safety: if the podcast service is unreachable (down/not deployed), send
+      # the un-enriched email anyway so the morning digest is never lost.
+      CHAIN_FALLBACK_URL: http://openbrain-digest:8080/run
     volumes:
       - ../recipes/email-history-import:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
@@ -153,8 +159,14 @@ services:
     environment:
       PORT: "8080"
       PODCAST_RUN_ARGS: "--commit --audio"
+      # When the pipeline finishes (success OR failure), trigger the digest so
+      # the email goes out — enriched if the run produced a brief, plain if not.
+      # This is what makes "email waits while healthy, sends when done/failed".
+      NEXT_TRIGGER_URL: http://openbrain-digest:8080/run
       RESEARCH_URL: http://openbrain-research:8000
       ON_BASE: http://open_notebook:5055
+      # User-facing base for the EMAIL episode links — external + Authelia-gated.
+      ON_PUBLIC_BASE: ${ON_PUBLIC_BASE:-https://notebook.devinveller.ai}
       CHAT_API_BASE: http://llama-cpp:8080/v1
       BRAIN_REST_URL: http://openbrain-rest
       FETCH_PROXY_URL: socks5h://tor:9050

@@ -59,7 +59,8 @@ import {
   Segment,
   SegmentItem,
 } from "./src/podcast/script-renderer.ts";
-import { OnClient } from "./src/podcast/on-client.ts";
+import { OnClient, OnEpisode } from "./src/podcast/on-client.ts";
+import { EmailEnrichment, EnrichedSegment, parseSynthesisForEmail } from "./src/podcast/enrichment.ts";
 
 // ── config ───────────────────────────────────────────────────────────────────
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
@@ -104,7 +105,13 @@ const scriptChat = makeScriptChat({
 // style). Opt-in with --audio; works in dry-run too (audio is an ON artifact,
 // not a brain write). ON reachable via open-brain_obnet.
 const AUDIO = args.has("--audio");
-const onClient = new OnClient({ baseUrl: env("ON_BASE", "http://open_notebook:5055") });
+const ON_BASE = env("ON_BASE", "http://open_notebook:5055"); // internal — used to GENERATE audio
+// User-facing base for the EMAIL links — external + Authelia-gated (NOT tailnet,
+// NOT the internal docker host). On notebook.<domain>: everything → Next.js UI,
+// /api/* → FastAPI. So /podcasts opens the episode in ON; /api/podcasts/episodes/
+// {id}/audio downloads it. Both behind Authelia (user signs in once).
+const ON_PUBLIC_BASE = env("ON_PUBLIC_BASE", "https://notebook.devinveller.ai").replace(/\/$/, "");
+const onClient = new OnClient({ baseUrl: ON_BASE });
 const ON_EPISODE_PROFILE = env("ON_EPISODE_PROFILE", "tech_discussion");
 const ON_SPEAKER_PROFILE = env("ON_SPEAKER_PROFILE", "tech_experts");
 const ON_BRIEFING = env(
@@ -227,9 +234,11 @@ async function main() {
 
   await writeReport();
   const ep = await maybeRenderEpisode();
-  let audioUrl: string | null = null;
-  if (ep && AUDIO) audioUrl = await generateAudio(ep);
-  if (COMMIT && ep && threadIds.size) await closeLoop(ep, audioUrl);
+  let onEp: OnEpisode | null = null;
+  if (ep && AUDIO) onEp = await generateAudio(ep);
+  const urls = buildEpisodeUrls(onEp);
+  if (COMMIT && ep && threadIds.size) await closeLoop(ep, urls.downloadUrl);
+  if (ep) await writeEnrichment(ep, urls);
   const t = report.totals;
   console.log(
     `[link-enrich] done. emails=${t.emailsScanned} no-links=${t.emailsWithNoLinks} ` +
@@ -337,6 +346,46 @@ async function stampGmailMetadata(
   return ok;
 }
 
+/** Write the email-enrichment artifact for the digest. The email is SHORT (a
+ *  scannable few points per article + episode link + tight follow-ups); the
+ *  podcast keeps the full richness. So we cap here. */
+async function writeEnrichment(ep: Episode, urls: { viewUrl: string | null; downloadUrl: string | null }) {
+  const KP = num("EMAIL_KEYPOINTS", 3), PRE = num("EMAIL_PRELIM", 1), GAP = num("EMAIL_GAPS", 2);
+  const segs: EnrichedSegment[] = [];
+  const followUps: string[] = [];
+  for (const [label, items] of segments) {
+    segs.push({
+      label,
+      items: items.map((it) => {
+        const p = parseSynthesisForEmail(it.synthesis);
+        followUps.push(...p.gaps);
+        return {
+          title: it.title, url: it.url,
+          keyPoints: p.keyPoints.slice(0, KP),
+          preliminary: p.preliminary.slice(0, PRE),
+          gaps: p.gaps.slice(0, GAP),
+          emailOnly: !!it.emailOnly,
+        };
+      }),
+    });
+  }
+  const enrichment: EmailEnrichment = {
+    generatedAt: report.generatedAt,
+    date: report.generatedAt.slice(0, 10),
+    episode: { name: ep.name, title: ep.title, viewUrl: urls.viewUrl, downloadUrl: urls.downloadUrl },
+    segments: segs,
+    followUps: [...new Set(followUps.map((g) => g.trim()).filter(Boolean))].slice(0, 6),
+  };
+  const path = `${REPORTS_DIR}/podcast-brief-latest.json`;
+  try {
+    await Deno.mkdir(REPORTS_DIR, { recursive: true });
+    await Deno.writeTextFile(path, JSON.stringify(enrichment, null, 2));
+    console.log(`[link-enrich] 📧 wrote concise email enrichment ${path}`);
+  } catch (err) {
+    console.warn(`[link-enrich] enrichment write failed (non-fatal): ${err}`);
+  }
+}
+
 /** Next daily episode number. Peeks in dry-run; persists+increments on commit. */
 async function nextEpisodeNumber(): Promise<number> {
   const path = `${REPORTS_DIR}/.episode-seq`;
@@ -376,7 +425,7 @@ async function maybeRenderEpisode(): Promise<Episode | null> {
 
 /** S4b — hand the grounded script to Open Notebook for transcript + audio.
  *  Returns the absolute audio URL, or null. */
-async function generateAudio(ep: Episode): Promise<string | null> {
+async function generateAudio(ep: Episode): Promise<OnEpisode | null> {
   console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})… this takes minutes.`);
   try {
     const jobId = await onClient.generate({
@@ -389,13 +438,26 @@ async function generateAudio(ep: Episode): Promise<string | null> {
     const status = await onClient.waitForJob(jobId);
     if (status !== "completed") { console.log(`[link-enrich] ON job ended '${status}' — no audio.`); return null; }
     const episode = await onClient.episodeByName(ep.name);
-    const url = episode ? onClient.audioUrlFor(episode) : null;
-    console.log(`[link-enrich] 🎧 episode audio ready: ${url ?? "(produced; url unavailable)"}`);
-    return url;
+    console.log(`[link-enrich] 🎧 episode audio ready (id ${episode?.id ?? "?"}).`);
+    return episode;
   } catch (err) {
     console.warn(`[link-enrich] audio generation failed (best-effort): ${err}`);
     return null;
   }
+}
+
+/** User-facing email links — external + Authelia-gated (notebook.<domain>):
+ *  view opens the episode in ON's UI, download streams the mp3. */
+function buildEpisodeUrls(onEp: OnEpisode | null): { viewUrl: string | null; downloadUrl: string | null } {
+  if (!onEp) return { viewUrl: null, downloadUrl: null };
+  if (ON_PUBLIC_BASE) {
+    return {
+      viewUrl: `${ON_PUBLIC_BASE}/podcasts`,
+      downloadUrl: `${ON_PUBLIC_BASE}/api/podcasts/episodes/${encodeURIComponent(onEp.id)}/audio`,
+    };
+  }
+  // No public base → internal audio only (dev/testing); no UI link.
+  return { viewUrl: null, downloadUrl: onEp.audioUrl ? `${ON_BASE}${onEp.audioUrl}` : null };
 }
 
 /** Loop-close (commit only) — ingest the episode as a `podcast_transcript`

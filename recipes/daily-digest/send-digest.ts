@@ -25,6 +25,7 @@ import { ConsiderationsSynthesizer } from "./src/considerations/synthesizer.ts";
 import { WeatherSection } from "./src/sections/weather.ts";
 import { CalendarSection } from "./src/sections/calendar.ts";
 import { AiNewsSection } from "./src/sections/ai-news.ts";
+import { PodcastBriefSection } from "./src/sections/podcast-brief.ts";
 import { HtmlRenderer } from "./src/renderers/html.ts";
 import { MarkdownRenderer } from "./src/renderers/markdown.ts";
 import { DigestOrchestrator } from "./src/digest.ts";
@@ -115,6 +116,14 @@ const sections: Section[] = [
   new CalendarSection(brain, gcal, synthesizer, {
     prepWindowDays: envInt("DIGEST_PREP_WINDOW_DAYS", 30),
     excludeCalendarIds,
+  }),
+  // Researched "deep dive" + episode link, from the podcast pipeline that ran
+  // just before this digest (chain: prune → podcast → digest). Reads the shared
+  // enrichment artifact; omitted (no-op) if the podcast didn't produce one, so
+  // the email still goes out.
+  new PodcastBriefSection({
+    path: env("PODCAST_BRIEF_PATH", "/reports/podcast-brief-latest.json"),
+    maxAgeMs: envInt("PODCAST_BRIEF_MAX_AGE_MS", 12 * 3600 * 1000),
   }),
   new AiNewsSection(brain, {
     windowHours: envInt("DIGEST_WINDOW_HOURS", 24),

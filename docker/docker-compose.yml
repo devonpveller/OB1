@@ -454,6 +454,13 @@ services:
       FETCH_CONCURRENCY: ${RESEARCH_FETCH_CONCURRENCY:-4}
       MAX_FETCH: ${RESEARCH_MAX_FETCH:-40}
       MAX_WALL_MS: ${RESEARCH_MAX_WALL_MS:-300000}
+      # Page fetches egress through Tor (socks5h = DNS via Tor too, matching
+      # SearXNG). Reaches tor:9050 over ai-stack_default. "" = direct. Needs the
+      # --unstable-net flag (added in the Dockerfile).
+      FETCH_PROXY_URL: ${RESEARCH_FETCH_PROXY_URL:-socks5h://tor:9050}
+      # Bounded preliminary gap research for article-mode (podcast) jobs.
+      PRELIM_MAX_FETCH: ${RESEARCH_PRELIM_MAX_FETCH:-6}
+      PRELIM_GAP_LIMIT: ${RESEARCH_PRELIM_GAP_LIMIT:-3}
       PORT: "8000"
     ports:
       - "127.0.0.1:8818:8000"

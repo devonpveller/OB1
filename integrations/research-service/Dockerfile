@@ -16,4 +16,6 @@ USER deno
 
 EXPOSE 8000
 
-CMD ["deno", "run", "--allow-net", "--allow-env", "index.ts"]
+# --unstable-net: required for Deno.createHttpClient({proxy}) — page fetches
+# egress through the Tor SOCKS proxy (socks5h://tor:9050) for privacy.
+CMD ["deno", "run", "--unstable-net", "--allow-net", "--allow-env", "index.ts"]

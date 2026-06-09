@@ -12,6 +12,7 @@ import { SectionData } from "../sections/section.ts";
 import { WeatherPayload } from "../sections/weather.ts";
 import { AiNewsPayload, EmailGroup } from "../sections/ai-news.ts";
 import { CalendarItem, CalendarPayload, PrepItem } from "../sections/calendar.ts";
+import { PodcastBriefPayload } from "../sections/podcast-brief.ts";
 
 export class HtmlRenderer {
   render(sections: SectionData[], opts: { generatedAt: string }): string {
@@ -30,6 +31,7 @@ ${body}
       case "weather":  return renderWeather(s.payload as WeatherPayload);
       case "calendar": return renderCalendar(s.payload as CalendarPayload);
       case "ai_news":  return renderAiNews(s.payload as AiNewsPayload);
+      case "podcast_brief": return renderPodcastBrief(s.payload as PodcastBriefPayload);
       case "todos":    return ""; // wired in Phase 4
       default:         return "";
     }
@@ -149,6 +151,64 @@ function formatEventTime(e: CalendarItem): string {
   if (!end) return `${dateStr} · ${startTime}`;
   const endTime = end.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
   return `${dateStr} · ${startTime} – ${endTime}`;
+}
+
+// ─── Podcast brief (researched deep-dive + episode link) ────────────────────
+
+function prettyLabel(label: string): string {
+  const last = (label.split("/").pop() ?? label).replace(/[-_]+/g, " ").trim();
+  return last.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function renderPodcastBrief(d: PodcastBriefPayload): string {
+  const ep = d.episode;
+  const epBlock = ep
+    ? `<div style="background:#ede7f6;border-left:3px solid #5e35b1;padding:12px 16px;border-radius:0 6px 6px 0;margin:8px 0 18px 0;">
+  <div style="font-size:15px;color:#4527a0;"><strong>🎧 Today's episode</strong></div>
+  <div style="font-size:15px;margin:4px 0;">${escHtml(ep.title)}</div>
+  ${
+      [
+        ep.viewUrl ? `<a href="${escHtml(ep.viewUrl)}" style="color:#5e35b1;font-weight:600;">▶ Open in Open Notebook</a>` : "",
+        ep.downloadUrl ? `<a href="${escHtml(ep.downloadUrl)}" style="color:#5e35b1;">⬇ Download</a>` : "",
+      ].filter(Boolean).join(" &nbsp;·&nbsp; ") ||
+      `<span style="color:#888;font-size:13px;">(audio still rendering — links fill in shortly)</span>`
+    }
+</div>`
+    : "";
+
+  const segBlocks = d.segments
+    .filter((s) => s.items.length > 0)
+    .map((s) => {
+      const cards = s.items.map((it) => {
+        if (it.emailOnly) {
+          return `<div style="margin:10px 0;padding:8px 14px;border-left:3px solid #bbb;background:#fafafa;">
+  <a href="${escHtml(it.url)}" style="color:#1967d2;font-size:14px;">${escHtml(it.title || it.url)}</a>
+  <div style="color:#999;font-size:12px;margin-top:3px;">Only the newsletter blurb — couldn't open the linked article.</div>
+</div>`;
+        }
+        const points = it.keyPoints.length > 0
+          ? `<ul style="margin:6px 0;padding-left:20px;font-size:13.5px;color:#333;">${it.keyPoints.map((p) => `<li>${escHtml(p)}</li>`).join("")}</ul>`
+          : "";
+        const prelim = it.preliminary.length > 0
+          ? `<div style="font-size:12.5px;color:#6a4caf;margin:4px 0;font-style:italic;">Preliminary: ${escHtml(it.preliminary[0])}</div>`
+          : "";
+        return `<div style="margin:10px 0;padding:8px 14px;border-left:3px solid #5e35b1;background:#fff;">
+  <a href="${escHtml(it.url)}" style="color:#1967d2;font-size:14px;font-weight:600;">${escHtml(it.title || it.url)}</a>
+  ${points}${prelim}
+</div>`;
+      }).join("");
+      return `<h3 style="margin:18px 0 6px 0;font-size:15px;color:#4527a0;">${escHtml(prettyLabel(s.label))}</h3>${cards}`;
+    }).join("");
+
+  const followBlock = d.followUps.length > 0
+    ? `<div style="background:#fff8e1;border-left:3px solid #f9a825;padding:10px 14px;margin:14px 0;border-radius:0 4px 4px 0;">
+  <strong>Open threads to follow up</strong>
+  <ul style="margin:4px 0 0 0;padding-left:20px;font-size:13.5px;">${d.followUps.map((g) => `<li>${escHtml(g)}</li>`).join("")}</ul>
+</div>`
+    : "";
+
+  if (!epBlock && !segBlocks && !followBlock) return "";
+  return `<h2 style="border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:8px;font-size:18px;color:#222;">Today's deep dive</h2>${epBlock}${segBlocks}${followBlock}`;
 }
 
 // ─── AI News (emails) ───────────────────────────────────────────────────────
