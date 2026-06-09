@@ -22,17 +22,24 @@
  * Best-effort throughout: a dead link / paywall / robots block / submit failure /
  * research timeout → `email-only`, logged, never fatal.
  *
+ * Output: a link-enrichment report (JSON+MD) AND the day's episode SCRIPT
+ * `[###]-daily-[primary-poi-topic].md` (S4a) — both in /reports. Audio (S4b via
+ * Open Notebook) is a separate step gated on the one-time voice-profile setup.
+ *
  * Egress: external article fetches go through Tor (socks5h://tor:9050,
  * privacy-by-default + fail-closed). The research service does its own Tor-routed
- * fetching for the preliminary-gap step. The runner must join
- * `ai-stack_search-net` (tor) + `open-brain_obnet` (rest + research). Tor needs
- * `--unstable-net`.
+ * fetching for the preliminary-gap step. The runner joins three networks:
+ *   open-brain_obnet  (openbrain-rest + openbrain-research)
+ *   ai-stack_search-net (tor egress)
+ *   ai-stack_llm-net  (llama-cpp, for the S4a two-host script pass)
+ * Tor proxying needs `--unstable-net`.
  *
  *   docker create --rm --network open-brain_obnet \
  *     -e MCP_ACCESS_KEY=$KEY \
  *     -v "D:\Open WebUI\ai-stack\OB1\recipes\daily-digest:/app:ro" \
  *     denoland/deno:2.3.3 deno run --unstable-net -A /app/link-enrich.ts --window=168 --limit=2
  *   # then: docker network connect ai-stack_search-net <id>
+ *   #       docker network connect ai-stack_llm-net <id>
  */
 
 import { BrainClient } from "./src/clients/postgrest.ts";
@@ -43,6 +50,16 @@ import { fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
 import { JobRecord, ResearchClient, waitForAll } from "./src/enrich/research-client.ts";
 import { DayReport, DayReportEntry } from "./src/enrich/types.ts";
+import {
+  Episode,
+  EpisodeInput,
+  makeScriptChat,
+  pad3,
+  renderEpisode,
+  Segment,
+  SegmentItem,
+} from "./src/podcast/script-renderer.ts";
+import { OnClient } from "./src/podcast/on-client.ts";
 
 // ── config ───────────────────────────────────────────────────────────────────
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
@@ -71,6 +88,25 @@ const research = new ResearchClient({
   baseUrl: env("RESEARCH_URL", "http://openbrain-research:8000"),
   brainKey: env("MCP_ACCESS_KEY"),
 });
+// S4a — the two-host script pass runs on llama-cpp directly (think model for
+// better dialogue). Requires the runner to also join `ai-stack_llm-net`.
+const scriptChat = makeScriptChat({
+  chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
+  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  nothinkSuffix: env("SCRIPT_NOTHINK_SUFFIX", ":nothink"), // nothink = fast + reliable; set "" for think-model dialogue
+});
+
+// S4b — audio via Open Notebook (D5: content-only renderer; D12: accept ON's
+// style). Opt-in with --audio; works in dry-run too (audio is an ON artifact,
+// not a brain write). ON reachable via open-brain_obnet.
+const AUDIO = args.has("--audio");
+const onClient = new OnClient({ baseUrl: env("ON_BASE", "http://open_notebook:5055") });
+const ON_EPISODE_PROFILE = env("ON_EPISODE_PROFILE", "tech_discussion");
+const ON_SPEAKER_PROFILE = env("ON_SPEAKER_PROFILE", "tech_experts");
+const ON_BRIEFING = env(
+  "ON_BRIEFING",
+  "Base the discussion STRICTLY on the provided grounded material. Do NOT introduce any fact, number, company, name, or claim that is not present in it. Keep anything marked 'preliminary' explicitly tentative, and present any open question as unresolved. Cover one segment per labeled topic.",
+);
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function pickTopicHint(labels: string[]): string | undefined {
@@ -108,6 +144,16 @@ interface Pending {
   base: DayReportEntry;
   jobId: string;
   email: { gmailId: string; gmailThreadId: string; emailDate: string; gmailLabels: string[] };
+  title: string;
+  subject: string;
+}
+
+// S4a — per-label segment material (grounded syntheses) collected for the episode.
+const segments = new Map<string, SegmentItem[]>();
+function addSegmentItem(label: string, item: SegmentItem) {
+  const arr = segments.get(label) ?? [];
+  arr.push(item);
+  segments.set(label, arr);
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -156,6 +202,7 @@ async function main() {
       const ex = await fetchAndExtract(link.url, { timeoutMs: LINK_TIMEOUT_MS });
       if (!ex.ok) {
         record({ ...base, note: `extract: ${ex.reason}` });
+        addSegmentItem(label, { title: subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
         console.log(`      ✗ ${link.domain} — email-only (${ex.reason})`);
         continue;
       }
@@ -168,10 +215,11 @@ async function main() {
           dryRun: !COMMIT,
           origin: "notebook",
         });
-        pending.push({ base, jobId, email });
+        pending.push({ base, jobId, email, title: ex.title, subject });
         console.log(`      → ${link.domain} submitted (job ${jobId.slice(0, 8)})`);
       } catch (err) {
         record({ ...base, note: `research-submit: ${err}` });
+        addSegmentItem(label, { title: subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
         console.log(`      ✗ ${link.domain} — email-only (submit failed: ${err})`);
       }
     }
@@ -189,8 +237,10 @@ async function main() {
     for (const p of pending) {
       const outcome = outcomes.get(p.jobId);
       if (!outcome || !outcome.ok) {
-        record({ ...p.base, note: `research: ${outcome && !outcome.ok ? outcome.error : "no outcome"}` });
-        console.log(`      ✗ ${p.base.domain} — email-only (${outcome && !outcome.ok ? outcome.error : "no outcome"})`);
+        const why = outcome && !outcome.ok ? outcome.error : "no outcome";
+        record({ ...p.base, note: `research: ${why}` });
+        addSegmentItem(p.base.label, { title: p.title || p.subject || p.base.domain, url: p.base.url, synthesis: "", emailOnly: true });
+        console.log(`      ✗ ${p.base.domain} — email-only (${why})`);
         continue;
       }
       await recordDoneJob(p, outcome.job);
@@ -198,6 +248,8 @@ async function main() {
   }
 
   await writeReport();
+  const ep = await maybeRenderEpisode();
+  if (ep && AUDIO) await generateAudio(ep);
   const t = report.totals;
   console.log(
     `[link-enrich] done. emails=${t.emailsScanned} no-links=${t.emailsWithNoLinks} ` +
@@ -213,6 +265,15 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
     console.log(`\n----- synthesis for ${p.base.url} -----\n${synthesis}\n----- end -----\n`);
   }
   const curator = result.curator ?? null;
+
+  // Collect the grounded synthesis as this label's segment material (both modes).
+  addSegmentItem(p.base.label, {
+    title: p.title || p.subject || p.base.domain,
+    url: p.base.url,
+    threadName: curator?.thread_name,
+    synthesis,
+    emailOnly: false,
+  });
 
   // dry-run: no canonical write; report the previewed synthesis.
   if (!COMMIT) {
@@ -260,6 +321,64 @@ async function stampGmailMetadata(
     catch (err) { console.warn(`      (gmail-stamp failed for source ${id}: ${err})`); ok = false; }
   }
   return ok;
+}
+
+/** Next daily episode number. Peeks in dry-run; persists+increments on commit. */
+async function nextEpisodeNumber(): Promise<number> {
+  const path = `${REPORTS_DIR}/.episode-seq`;
+  let n = 0;
+  try { n = parseInt(await Deno.readTextFile(path), 10) || 0; } catch { n = 0; }
+  const next = n + 1;
+  if (COMMIT) {
+    try { await Deno.mkdir(REPORTS_DIR, { recursive: true }); await Deno.writeTextFile(path, String(next)); } catch { /* */ }
+  }
+  return next;
+}
+
+/** S4a — render the day's episode SCRIPT from the collected grounded segments. */
+async function maybeRenderEpisode(): Promise<Episode | null> {
+  if (segments.size === 0) { console.log("[link-enrich] no segments → no episode."); return null; }
+  const epNum = await nextEpisodeNumber();
+  const input: EpisodeInput = {
+    date: report.generatedAt.slice(0, 10),
+    episodeNumber: epNum,
+    segments: [...segments.entries()].map(([label, items]): Segment => ({ label, items })),
+  };
+  console.log(`[link-enrich] rendering episode #${pad3(epNum)} from ${segments.size} segment(s)…`);
+  const ep = await renderEpisode(input, scriptChat);
+  const stem = `${ep.name}${COMMIT ? "" : "-dryrun"}`;
+  const md = `# ${ep.title}\n\n> Episode \`${ep.name}\` · ${input.date} · ${COMMIT ? "COMMIT" : "DRY-RUN"}\n\n${ep.script}\n`;
+  const path = `${REPORTS_DIR}/${stem}.md`;
+  try {
+    await Deno.mkdir(REPORTS_DIR, { recursive: true });
+    await Deno.writeTextFile(path, md);
+    console.log(`[link-enrich] 🎙  wrote episode ${path}`);
+  } catch (err) {
+    await Deno.writeTextFile(`./${stem}.md`, md);
+    console.log(`[link-enrich] ${REPORTS_DIR} unwritable (${err}); wrote ./${stem}.md`);
+  }
+  return ep;
+}
+
+/** S4b — hand the grounded script to Open Notebook for transcript + audio. */
+async function generateAudio(ep: Episode) {
+  console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})… this takes minutes.`);
+  try {
+    const jobId = await onClient.generate({
+      episodeProfile: ON_EPISODE_PROFILE,
+      speakerProfile: ON_SPEAKER_PROFILE,
+      episodeName: ep.name,
+      content: ep.script,
+      briefingSuffix: ON_BRIEFING,
+    });
+    const status = await onClient.waitForJob(jobId);
+    if (status !== "completed") { console.log(`[link-enrich] ON job ended '${status}' — no audio.`); return; }
+    const episode = await onClient.episodeByName(ep.name);
+    const url = episode ? onClient.audioUrlFor(episode) : null;
+    console.log(`[link-enrich] 🎧 episode audio ready: ${url ?? "(produced; url unavailable)"}`);
+  } catch (err) {
+    console.warn(`[link-enrich] audio generation failed (best-effort): ${err}`);
+  }
 }
 
 async function writeReport() {

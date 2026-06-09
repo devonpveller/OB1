@@ -1,0 +1,38 @@
+{
+  "generatedAt": "2026-06-09T00:44:55.420Z",
+  "windowHours": 168,
+  "committed": false,
+  "totals": {
+    "emailsScanned": 2,
+    "emailsWithNoLinks": 0,
+    "linksConsidered": 2,
+    "enriched": 1,
+    "emailOnly": 1,
+    "previouslySeen": 0
+  },
+  "entries": [
+    {
+      "gmailId": "19ea2d904101e6fc",
+      "label": "brain/ai/nate b jones",
+      "rawUrl": "https://natesnewsletter.substack.com/p/ai-token-cost-management",
+      "url": "https://natesnewsletter.substack.com/p/ai-token-cost-management",
+      "domain": "natesnewsletter.substack.com",
+      "status": "enriched",
+      "preview": {
+        "claim": "[SOURCED] The article argues that surging AI token consumption, highlighted by Uber exhausting its 2026 AI budget early,",
+        "synthesisChars": 2303,
+        "taggedClaimLines": 11
+      },
+      "note": "dry-run preview; reuse=11 gaps=0"
+    },
+    {
+      "gmailId": "19ea16ecaef5485a",
+      "label": "brain/keep-short-term/ai break",
+      "rawUrl": "https://theaibreak.substack.com/p/time-to-step-up-your-ai-game-what-da5",
+      "url": "https://theaibreak.substack.com/p/time-to-step-up-your-ai-game-what-da5",
+      "domain": "theaibreak.substack.com",
+      "status": "email-only",
+      "note": "research: Error: research job abe4916a-130b-4d3c-82bc-960f7949f5bc did not complete within deadline (last status: running)"
+    }
+  ]
+}
