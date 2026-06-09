@@ -48,7 +48,7 @@ import { reconstructEmailBody } from "./src/enrich/email-body.ts";
 import { gatherLinks } from "./src/enrich/links.ts";
 import { fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
-import { JobRecord, ResearchClient, waitForAll } from "./src/enrich/research-client.ts";
+import { JobRecord, ResearchClient } from "./src/enrich/research-client.ts";
 import { DayReport, DayReportEntry } from "./src/enrich/types.ts";
 import {
   Episode,
@@ -79,8 +79,12 @@ const ONLY_LABEL = argVal("label");
 const LABEL_PREFIX = env("TARGET_LABEL_PREFIX", "brain/");
 const MAX_LINKS_PER_EMAIL = num("MAX_LINKS_PER_EMAIL", 5);
 const LINK_TIMEOUT_MS = num("LINK_TIMEOUT_MS", 60_000);
-const RESEARCH_WAIT_MS = num("RESEARCH_WAIT_MS", 300_000);
+const RESEARCH_WAIT_MS = num("RESEARCH_WAIT_MS", 600_000); // per-job deadline; bumped — concurrent jobs share GPU
 const RESEARCH_POLL_MS = num("RESEARCH_POLL_MS", 3_000);
+// Bound how many research jobs are in flight at once (each = an LLM synthesis +
+// preliminary-gap search on llama-cpp). Throttles GPU contention; the "all
+// research done before the podcast" gate still holds (we await every item).
+const RESEARCH_CONCURRENCY = num("RESEARCH_CONCURRENCY", 2);
 const REPORTS_DIR = env("REPORTS_DIR", "/reports");
 
 const brain = new BrainClient({ baseUrl: env("BRAIN_REST_URL", "http://openbrain-rest") });
@@ -155,6 +159,24 @@ function addSegmentItem(label: string, item: SegmentItem) {
   arr.push(item);
   segments.set(label, arr);
 }
+// Threads the day's research resolved to (commit only) — for loop-close.
+const threadIds = new Set<string>();
+
+interface WorkItem {
+  email: { gmailId: string; gmailThreadId: string; emailDate: string; gmailLabels: string[] };
+  label: string;
+  subject: string;
+  link: { rawUrl: string; url: string; domain: string };
+}
+
+/** Bounded-concurrency map — caps in-flight research jobs (GPU throttle). */
+async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void>): Promise<void> {
+  let i = 0;
+  const n = Math.min(Math.max(1, limit), items.length) || 1;
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (i < items.length) { const idx = i++; await fn(items[idx]); }
+  }));
+}
 
 // ── main ─────────────────────────────────────────────────────────────────────
 async function main() {
@@ -178,14 +200,12 @@ async function main() {
     .slice(0, MAX_EMAILS);
   console.log(`[link-enrich] ${emails.length} target email(s) of ${payload.emails.length} in window.`);
 
-  // ── Phase 1: extract + submit a research job per link ──────────────────────
-  const pending: Pending[] = [];
+  // ── Gather work items (links) across all target emails ─────────────────────
+  const items: WorkItem[] = [];
   for (const email of emails) {
     report.totals.emailsScanned++;
-    const topicHint = pickTopicHint(email.gmailLabels);
-    const label = topicHint ?? "(unlabeled)";
+    const label = pickTopicHint(email.gmailLabels) ?? "(unlabeled)";
     const subject = email.header?.subject ?? "";
-
     const body = await reconstructEmailBody(brain, email.gmailId);
     const links = await gatherLinks(body, { maxLinks: MAX_LINKS_PER_EMAIL });
     if (links.length === 0) {
@@ -194,67 +214,60 @@ async function main() {
       continue;
     }
     console.log(`  · ${label} | "${subject.slice(0, 60)}" → ${links.length} link(s)`);
-
-    for (const link of links) {
-      const base: DayReportEntry = {
-        gmailId: email.gmailId, label, rawUrl: link.rawUrl, url: link.url, domain: link.domain, status: "email-only",
-      };
-      const ex = await fetchAndExtract(link.url, { timeoutMs: LINK_TIMEOUT_MS });
-      if (!ex.ok) {
-        record({ ...base, note: `extract: ${ex.reason}` });
-        addSegmentItem(label, { title: subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
-        console.log(`      ✗ ${link.domain} — email-only (${ex.reason})`);
-        continue;
-      }
-      try {
-        const jobId = await research.submit({
-          query: buildQuery(ex.title, subject, ex.text),
-          seedSources: [{ url: link.url, title: ex.title, content: ex.text }],
-          mode: "article",
-          gapResearch: "preliminary",
-          dryRun: !COMMIT,
-          origin: "notebook",
-        });
-        pending.push({ base, jobId, email, title: ex.title, subject });
-        console.log(`      → ${link.domain} submitted (job ${jobId.slice(0, 8)})`);
-      } catch (err) {
-        record({ ...base, note: `research-submit: ${err}` });
-        addSegmentItem(label, { title: subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
-        console.log(`      ✗ ${link.domain} — email-only (submit failed: ${err})`);
-      }
-    }
+    for (const link of links) items.push({ email, label, subject, link });
   }
 
-  // ── WAIT-GATE: every research job must reach a terminal `done` before we read
-  //    any result. Bounded; a job that doesn't finish in time → email-only. ────
-  if (pending.length) {
-    console.log(`[link-enrich] wait-gate: awaiting ${pending.length} research job(s) to complete…`);
-    const outcomes = await waitForAll(research, pending.map((p) => p.jobId), {
-      timeoutMs: RESEARCH_WAIT_MS, intervalMs: RESEARCH_POLL_MS,
-    });
-
-    // ── Phase 2: build report from completed jobs ────────────────────────────
-    for (const p of pending) {
-      const outcome = outcomes.get(p.jobId);
-      if (!outcome || !outcome.ok) {
-        const why = outcome && !outcome.ok ? outcome.error : "no outcome";
-        record({ ...p.base, note: `research: ${why}` });
-        addSegmentItem(p.base.label, { title: p.title || p.subject || p.base.domain, url: p.base.url, synthesis: "", emailOnly: true });
-        console.log(`      ✗ ${p.base.domain} — email-only (${why})`);
-        continue;
-      }
-      await recordDoneJob(p, outcome.job);
-    }
+  // ── Process links through the research channel at bounded concurrency.
+  //    Awaiting mapLimit IS the wait-gate: every job reaches a terminal state
+  //    before the podcast is built. A job that times out → email-only. ────────
+  if (items.length) {
+    console.log(`[link-enrich] researching ${items.length} link(s) — concurrency=${RESEARCH_CONCURRENCY}, ≤${Math.round(RESEARCH_WAIT_MS / 1000)}s/job…`);
+    await mapLimit(items, RESEARCH_CONCURRENCY, processLink);
   }
 
   await writeReport();
   const ep = await maybeRenderEpisode();
-  if (ep && AUDIO) await generateAudio(ep);
+  let audioUrl: string | null = null;
+  if (ep && AUDIO) audioUrl = await generateAudio(ep);
+  if (COMMIT && ep && threadIds.size) await closeLoop(ep, audioUrl);
   const t = report.totals;
   console.log(
     `[link-enrich] done. emails=${t.emailsScanned} no-links=${t.emailsWithNoLinks} ` +
       `links=${t.linksConsidered} enriched=${t.enriched} email-only=${t.emailOnly}`,
   );
+}
+
+/** Fetch → submit research (article mode) → wait for done → record. One link. */
+async function processLink(item: WorkItem) {
+  const { email, label, subject, link } = item;
+  const base: DayReportEntry = {
+    gmailId: email.gmailId, label, rawUrl: link.rawUrl, url: link.url, domain: link.domain, status: "email-only",
+  };
+  const fallback = (note: string) => {
+    record({ ...base, note });
+    addSegmentItem(label, { title: subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
+    console.log(`      ✗ ${link.domain} — email-only (${note})`);
+  };
+
+  const ex = await fetchAndExtract(link.url, { timeoutMs: LINK_TIMEOUT_MS });
+  if (!ex.ok) return fallback(`extract: ${ex.reason}`);
+
+  let jobId: string;
+  try {
+    jobId = await research.submit({
+      query: buildQuery(ex.title, subject, ex.text),
+      seedSources: [{ url: link.url, title: ex.title, content: ex.text }],
+      mode: "article", gapResearch: "preliminary", dryRun: !COMMIT, origin: "notebook",
+    });
+  } catch (err) { return fallback(`research-submit: ${err}`); }
+  console.log(`      → ${link.domain} researching (job ${jobId.slice(0, 8)})…`);
+
+  let job: JobRecord;
+  try { job = await research.waitForDone(jobId, { timeoutMs: RESEARCH_WAIT_MS, intervalMs: RESEARCH_POLL_MS }); }
+  catch (err) { return fallback(`research: ${err}`); }
+  if (job.status !== "done") return fallback(`research: ${job.status}: ${job.error ?? ""}`);
+
+  await recordDoneJob({ base, jobId, email, title: ex.title, subject }, job);
 }
 
 async function recordDoneJob(p: Pending, job: JobRecord) {
@@ -288,6 +301,7 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
 
   // commit: claims + thread written by the curator; stamp gmail metadata on the sources.
   const stamped = await stampGmailMetadata(curator?.persist?.source_ids ?? [], p.email);
+  if (curator?.thread_id) threadIds.add(curator.thread_id); // for loop-close
   record({
     ...p.base, status: "enriched",
     threadId: curator?.thread_id ?? result.thread_id,
@@ -360,8 +374,9 @@ async function maybeRenderEpisode(): Promise<Episode | null> {
   return ep;
 }
 
-/** S4b — hand the grounded script to Open Notebook for transcript + audio. */
-async function generateAudio(ep: Episode) {
+/** S4b — hand the grounded script to Open Notebook for transcript + audio.
+ *  Returns the absolute audio URL, or null. */
+async function generateAudio(ep: Episode): Promise<string | null> {
   console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})… this takes minutes.`);
   try {
     const jobId = await onClient.generate({
@@ -372,12 +387,52 @@ async function generateAudio(ep: Episode) {
       briefingSuffix: ON_BRIEFING,
     });
     const status = await onClient.waitForJob(jobId);
-    if (status !== "completed") { console.log(`[link-enrich] ON job ended '${status}' — no audio.`); return; }
+    if (status !== "completed") { console.log(`[link-enrich] ON job ended '${status}' — no audio.`); return null; }
     const episode = await onClient.episodeByName(ep.name);
     const url = episode ? onClient.audioUrlFor(episode) : null;
     console.log(`[link-enrich] 🎧 episode audio ready: ${url ?? "(produced; url unavailable)"}`);
+    return url;
   } catch (err) {
     console.warn(`[link-enrich] audio generation failed (best-effort): ${err}`);
+    return null;
+  }
+}
+
+/** Loop-close (commit only) — ingest the episode as a `podcast_transcript`
+ *  source and link it to every thread the day's research resolved to. Closes
+ *  the research loop back into the brain (P4.2/4.3). Best-effort. */
+async function closeLoop(ep: Episode, audioUrl: string | null) {
+  const tids = [...threadIds];
+  console.log(`[link-enrich] 🔗 loop-close: ingesting episode + linking to ${tids.length} thread(s)…`);
+  try {
+    const rows = await brain.rpc<Array<{ id: string; was_duplicate: boolean }>>("find_or_create_source", {
+      p_url: audioUrl ?? `podcast://episode/${ep.name}`,
+      p_content: ep.script,
+      p_title: ep.title,
+      p_content_type: "podcast_transcript",
+      p_metadata: {
+        source: "daily-digest-podcast",
+        episode: ep.name,
+        episode_number: ep.number,
+        audio_url: audioUrl,
+        date: report.generatedAt.slice(0, 10),
+      },
+    });
+    const sourceId = rows?.[0]?.id;
+    if (!sourceId) { console.warn("[link-enrich] loop-close: find_or_create_source returned no id"); return; }
+    let linked = 0;
+    for (const tid of tids) {
+      try {
+        await brain.rpc("link_source_to_thread", {
+          p_thread_id: tid, p_source_id: sourceId,
+          p_link_type: "deliberate", p_reason: `daily podcast ${ep.name}`, p_status: "confirmed",
+        });
+        linked++;
+      } catch (e) { console.warn(`[link-enrich]   link thread ${tid.slice(0, 8)} failed: ${e}`); }
+    }
+    console.log(`[link-enrich] 🔗 episode source ${sourceId.slice(0, 8)} linked into ${linked}/${tids.length} thread(s).`);
+  } catch (err) {
+    console.warn(`[link-enrich] loop-close failed (best-effort): ${err}`);
   }
 }
 

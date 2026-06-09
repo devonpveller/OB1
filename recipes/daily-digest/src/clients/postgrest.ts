@@ -166,6 +166,25 @@ export class BrainClient {
     return res.ok;
   }
 
+  /**
+   * Call a PostgREST-exposed SQL function (`/rest/v1/rpc/<fn>`). Arg keys must
+   * match the function's parameter names (e.g. `p_url`). Used for loop-close:
+   * `find_or_create_source` + `link_source_to_thread` (both service_role-granted).
+   * The openbrain-rest proxy strips Authorization → anon=service_role.
+   */
+  async rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+    const res = await fetch(`${this.baseUrl}/rest/v1/rpc/${fn}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(args),
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => "");
+      throw new Error(`rpc ${fn} failed: ${res.status} ${msg}`);
+    }
+    return await res.json() as T;
+  }
+
   private async getJson<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       headers: { Accept: "application/json" },

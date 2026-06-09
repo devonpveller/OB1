@@ -27,6 +27,21 @@ export function startServer(opts: ServerOptions): void {
   let lastResult: DigestResult | null = null;
   let lastError: string | null = null;
 
+  // Chain tail: after the email is sent, optionally trigger the next step
+  // (openbrain-podcast). Best-effort and fired AFTER the run — it can never
+  // delay or fail the email. Inert until NEXT_TRIGGER_URL is set (same env
+  // convention as pull/prune). The digest stays the end of the chain otherwise.
+  const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") ?? "";
+  const chainTrigger = async () => {
+    if (!NEXT_TRIGGER_URL) return;
+    try {
+      const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
+      console.log(`digest chain → ${NEXT_TRIGGER_URL} ${res.status}`);
+    } catch (err) {
+      console.warn(`digest chain trigger failed (non-fatal): ${err}`);
+    }
+  };
+
   const jsonResponse = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body, null, 2), {
       status,
@@ -68,6 +83,7 @@ export function startServer(opts: ServerOptions): void {
           running = false;
           lastRunAt = new Date().toISOString();
         }
+        await chainTrigger(); // email already sent; trigger the podcast step
       })();
       return jsonResponse({ started: true }, 202);
     }

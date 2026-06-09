@@ -54,6 +54,11 @@ services:
     working_dir: /app
     env_file:
       - ../recipes/daily-digest/.env
+    environment:
+      # Chain tail: after the morning email is sent, trigger the podcast
+      # pipeline (best-effort, fired AFTER delivery — never delays the email).
+      # Set empty to keep the digest as the end of the chain.
+      NEXT_TRIGGER_URL: http://openbrain-podcast:8080/run
     volumes:
       - ../recipes/daily-digest:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
@@ -126,6 +131,44 @@ services:
     entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "prune-short-term.ts"]
     command: []
 
+  # ── Daily podcast (chain tail, HTTP-triggered) ──────────────────────
+  # Long-running Deno HTTP service. openbrain-digest POSTs /run after the
+  # morning email is sent. On /run it spawns the link-enrich pipeline:
+  # follow newsletter links (via Tor) → grounded research through
+  # openbrain-research (article mode: seed + OB-claim corroboration +
+  # bounded preliminary gaps) → two-host script → Open Notebook audio →
+  # loop-close (episode linked to the day's threads). Best-effort; the
+  # email never waits on it.
+  #
+  # Networks: obnet (openbrain-rest / -research / open_notebook), llm-net
+  # (llama-cpp for the script pass), search-net (Tor egress for fetches).
+  # Needs --unstable-net (Tor proxy) + --allow-run (spawns link-enrich.ts).
+  openbrain-podcast:
+    image: denoland/deno:alpine
+    container_name: openbrain-podcast
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - ../recipes/daily-digest/.env
+    environment:
+      PORT: "8080"
+      PODCAST_RUN_ARGS: "--commit --audio"
+      RESEARCH_URL: http://openbrain-research:8000
+      ON_BASE: http://open_notebook:5055
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      BRAIN_REST_URL: http://openbrain-rest
+      FETCH_PROXY_URL: socks5h://tor:9050
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+    volumes:
+      - ../recipes/daily-digest:/app
+      - D:\_data:/reports
+    networks:
+      - obnet
+      - llm-net
+      - search-net
+    entrypoint: ["deno", "run", "--unstable-net", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "--allow-run", "podcast-server.ts"]
+    command: []
+
 networks:
   # Declared identically in docker-compose.yml; compose merges the
   # definitions when this file is included.
@@ -134,3 +177,7 @@ networks:
   llm-net:
     external: true
     name: ai-stack_llm-net
+  # Tor egress for the podcast's article fetches (socks5h://tor:9050).
+  search-net:
+    external: true
+    name: ai-stack_search-net
