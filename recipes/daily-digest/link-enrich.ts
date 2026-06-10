@@ -43,13 +43,16 @@
  */
 
 import { BrainClient } from "./src/clients/postgrest.ts";
+import { GoogleOAuth } from "./src/clients/google-oauth.ts";
 import { AiNewsSection } from "./src/sections/ai-news.ts";
 import { reconstructEmailBody } from "./src/enrich/email-body.ts";
-import { gatherLinks } from "./src/enrich/links.ts";
-import { fetchAndExtract } from "./src/enrich/extract.ts";
+import { extractUrls, gatherAnchors, gatherLinks } from "./src/enrich/links.ts";
+import { extractAnchors, GmailReader } from "./src/enrich/gmail-fetch.ts";
+import { selectPOI } from "./src/enrich/poi.ts";
+import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
 import { JobRecord, ResearchClient } from "./src/enrich/research-client.ts";
-import { DayReport, DayReportEntry } from "./src/enrich/types.ts";
+import { DayReport, DayReportEntry, LinkCandidate } from "./src/enrich/types.ts";
 import {
   Episode,
   EpisodeInput,
@@ -78,7 +81,7 @@ const WINDOW_HOURS = Number(argVal("window") ?? num("WINDOW_HOURS", 24));
 const MAX_EMAILS = Number(argVal("limit") ?? num("MAX_EMAILS", 1000));
 const ONLY_LABEL = argVal("label");
 const LABEL_PREFIX = env("TARGET_LABEL_PREFIX", "brain/");
-const MAX_LINKS_PER_EMAIL = num("MAX_LINKS_PER_EMAIL", 5);
+const MAX_LINKS_PER_EMAIL = num("MAX_LINKS_PER_EMAIL", 10);
 const LINK_TIMEOUT_MS = num("LINK_TIMEOUT_MS", 60_000);
 const RESEARCH_WAIT_MS = num("RESEARCH_WAIT_MS", 600_000); // per-job deadline; bumped — concurrent jobs share GPU
 const RESEARCH_POLL_MS = num("RESEARCH_POLL_MS", 3_000);
@@ -112,6 +115,17 @@ const ON_BASE = env("ON_BASE", "http://open_notebook:5055"); // internal — use
 // {id}/audio downloads it. Both behind Authelia (user signs in once).
 const ON_PUBLIC_BASE = env("ON_PUBLIC_BASE", "https://notebook.devinveller.ai").replace(/\/$/, "");
 const onClient = new OnClient({ baseUrl: ON_BASE });
+// Raw-Gmail reader (readonly token) — re-fetch original HTML so every link
+// survives (the stored body lost hrefs), then POI-select the interesting ones.
+const gmailReader = new GmailReader(new GoogleOAuth({
+  credentialsPath: env("GMAIL_READ_CREDENTIALS", "/app/gmail-read-credentials.json"),
+  tokenPath: env("GMAIL_READ_TOKEN", "/app/gmail-read-token.json"),
+}));
+const poiChat = makeScriptChat({
+  chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
+  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  nothinkSuffix: ":nothink",
+});
 const ON_EPISODE_PROFILE = env("ON_EPISODE_PROFILE", "tech_discussion");
 const ON_SPEAKER_PROFILE = env("ON_SPEAKER_PROFILE", "tech_experts");
 const ON_BRIEFING = env(
@@ -173,7 +187,11 @@ interface WorkItem {
   email: { gmailId: string; gmailThreadId: string; emailDate: string; gmailLabels: string[] };
   label: string;
   subject: string;
-  link: { rawUrl: string; url: string; domain: string };
+  link: LinkCandidate;
+  /** Pre-supplied content (the email body itself) — skip the fetch when set. */
+  preContent?: string;
+  /** Source title for a body item (the newsletter subject). */
+  title?: string;
 }
 
 /** Bounded-concurrency map — caps in-flight research jobs (GPU throttle). */
@@ -207,21 +225,64 @@ async function main() {
     .slice(0, MAX_EMAILS);
   console.log(`[link-enrich] ${emails.length} target email(s) of ${payload.emails.length} in window.`);
 
-  // ── Gather work items (links) across all target emails ─────────────────────
+  // ── Gather work items: the EMAIL BODY (the newsletter's curated content — news,
+  //    tools, summaries) is the primary source; PLUS genuinely-external content
+  //    links for depth. The newsletter's own substack posts are dropped (the body
+  //    already covers them, and the web posts are often paywalled). ─────────────
   const items: WorkItem[] = [];
   for (const email of emails) {
     report.totals.emailsScanned++;
     const label = pickTopicHint(email.gmailLabels) ?? "(unlabeled)";
     const subject = email.header?.subject ?? "";
-    const body = await reconstructEmailBody(brain, email.gmailId);
-    const links = await gatherLinks(body, { maxLinks: MAX_LINKS_PER_EMAIL });
-    if (links.length === 0) {
-      report.totals.emailsWithNoLinks++;
-      console.log(`  · ${label} | "${subject.slice(0, 60)}" → 0 links (likely HTML-only / no inline URLs)`);
-      continue;
+    const gmailUrl = `https://mail.google.com/mail/u/0/#inbox/${email.gmailThreadId}`;
+
+    // Original HTML (for links + body); fall back to the lossy stored body.
+    let html = "";
+    let bodyText = "";
+    try {
+      html = await gmailReader.fetchHtml(email.gmailId);
+      bodyText = extractTextFromHtml(html);
+    } catch (err) {
+      console.warn(`    (raw-gmail fetch failed for ${email.gmailId}: ${err} — using stored body)`);
+      bodyText = await reconstructEmailBody(brain, email.gmailId);
     }
-    console.log(`  · ${label} | "${subject.slice(0, 60)}" → ${links.length} link(s)`);
-    for (const link of links) items.push({ email, label, subject, link });
+
+    // EXTERNAL content links (arxiv, anthropic, …). Drop substack self/meta.
+    let external: LinkCandidate[] = [];
+    if (html) {
+      const anchored = extractAnchors(html);
+      let raw = anchored;
+      if (anchored.length < 3) {
+        const seen = new Set(anchored.map((a) => a.url));
+        raw = [...anchored, ...extractUrls(html).filter((u) => !seen.has(u)).map((u) => ({ url: u, text: "" }))];
+      }
+      external = (await gatherAnchors(raw, { maxRaw: 80 }))
+        .filter((c) => c.domain && !c.domain.endsWith("substack.com"));
+    }
+    let selected: LinkCandidate[] = [];
+    if (external.length) {
+      const keepIdx = await selectPOI(poiChat, subject, external, MAX_LINKS_PER_EMAIL);
+      selected = keepIdx.map((i) => external[i]);
+    }
+    // The email body is a FALLBACK source ONLY when there are no external content
+    // links (single-post / promo emails). For news editions the per-source links
+    // carry the content and the curator can place each on a thread; a multi-topic
+    // roundup body can't be placed on one thread (→ 0 claims) and just adds noise.
+    const bodyItem: WorkItem | null = (bodyText.trim().length > 400 && selected.length === 0)
+      ? {
+        email, label, subject, title: subject, preContent: bodyText,
+        link: { rawUrl: gmailUrl, url: gmailUrl, domain: "newsletter", text: subject },
+      }
+      : null;
+    console.log(`  · ${label} | "${subject.slice(0, 55)}" → ${external.length} ext link(s), ${selected.length} selected${bodyItem ? " + body-fallback" : ""}`);
+    if (args.has("--dump-links")) {
+      const keep = new Set(selected.map((s) => s.url));
+      console.log(`      BODY ${bodyText.length} chars${bodyItem ? " (fallback)" : " (skipped — has ext links)"}`);
+      external.forEach((c) => console.log(`      ${keep.has(c.url) ? "KEEP" : "drop"} [${c.domain}] ${(c.text || "(no text)").slice(0, 60)} — ${c.url.slice(0, 80)}`));
+      continue; // inspect only; no research
+    }
+    if (bodyItem) items.push(bodyItem);
+    for (const link of selected) items.push({ email, label, subject, link });
   }
 
   // ── Process links through the research channel at bounded concurrency.
@@ -246,7 +307,7 @@ async function main() {
   );
 }
 
-/** Fetch → submit research (article mode) → wait for done → record. One link. */
+/** Fetch (already resolved) → submit research (article mode) → wait → record. */
 async function processLink(item: WorkItem) {
   const { email, label, subject, link } = item;
   const base: DayReportEntry = {
@@ -254,29 +315,38 @@ async function processLink(item: WorkItem) {
   };
   const fallback = (note: string) => {
     record({ ...base, note });
-    addSegmentItem(label, { title: subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
+    addSegmentItem(label, { title: link.text || subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
     console.log(`      ✗ ${link.domain} — email-only (${note})`);
   };
 
-  const ex = await fetchAndExtract(link.url, { timeoutMs: LINK_TIMEOUT_MS });
-  if (!ex.ok) return fallback(`extract: ${ex.reason}`);
+  // Body item → use the supplied content; link item → fetch the article.
+  let title: string, content: string;
+  if (item.preContent) {
+    title = item.title || subject;
+    content = item.preContent;
+  } else {
+    const ex = await fetchAndExtract(link.url, { timeoutMs: LINK_TIMEOUT_MS });
+    if (!ex.ok) return fallback(`extract: ${ex.reason}`);
+    title = ex.title;
+    content = ex.text;
+  }
 
   let jobId: string;
   try {
     jobId = await research.submit({
-      query: buildQuery(ex.title, subject, ex.text),
-      seedSources: [{ url: link.url, title: ex.title, content: ex.text }],
+      query: buildQuery(title, subject, content),
+      seedSources: [{ url: link.url, title, content }],
       mode: "article", gapResearch: "preliminary", dryRun: !COMMIT, origin: "notebook",
     });
   } catch (err) { return fallback(`research-submit: ${err}`); }
-  console.log(`      → ${link.domain} researching (job ${jobId.slice(0, 8)})…`);
+  console.log(`      → ${item.preContent ? "newsletter-body" : link.domain} researching (job ${jobId.slice(0, 8)})…`);
 
   let job: JobRecord;
   try { job = await research.waitForDone(jobId, { timeoutMs: RESEARCH_WAIT_MS, intervalMs: RESEARCH_POLL_MS }); }
   catch (err) { return fallback(`research: ${err}`); }
   if (job.status !== "done") return fallback(`research: ${job.status}: ${job.error ?? ""}`);
 
-  await recordDoneJob({ base, jobId, email, title: ex.title, subject }, job);
+  await recordDoneJob({ base, jobId, email, title, subject }, job);
 }
 
 async function recordDoneJob(p: Pending, job: JobRecord) {
@@ -376,7 +446,9 @@ async function writeEnrichment(ep: Episode, urls: { viewUrl: string | null; down
     segments: segs,
     followUps: [...new Set(followUps.map((g) => g.trim()).filter(Boolean))].slice(0, 6),
   };
-  const path = `${REPORTS_DIR}/podcast-brief-latest.json`;
+  // Dry-run writes a separate file so it never clobbers the digest's production
+  // artifact (the digest only reads podcast-brief-latest.json).
+  const path = `${REPORTS_DIR}/podcast-brief-latest${COMMIT ? "" : "-dryrun"}.json`;
   try {
     await Deno.mkdir(REPORTS_DIR, { recursive: true });
     await Deno.writeTextFile(path, JSON.stringify(enrichment, null, 2));

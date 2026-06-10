@@ -173,6 +173,10 @@ services:
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
     volumes:
       - ../recipes/daily-digest:/app
+      # Readonly Gmail token (same as the pull) — re-fetch raw email HTML so every
+      # link survives for POI discovery. Token writable (OAuth refresh writes back).
+      - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/gmail-read-credentials.json:ro
+      - ../secrets/google/open-brain-email/token.json:/app/gmail-read-token.json
       - D:\_data:/reports
     networks:
       - obnet

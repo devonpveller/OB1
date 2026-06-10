@@ -28,6 +28,8 @@ export interface LinkCandidate {
   url: string;
   /** Registrable-ish host of `url`, for grouping/logging. */
   domain: string;
+  /** Anchor text from the raw email HTML — the key POI signal. */
+  text?: string;
   /** Why a candidate was dropped before fetch (kept = undefined). */
   dropped?: string;
 }

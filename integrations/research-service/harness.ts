@@ -28,6 +28,10 @@ const MAX_ROUNDS = parseInt(env("MAX_ROUNDS", "3"), 10);
 // can't resolve gets a SMALL, clearly-tentative web look (not full research).
 const PRELIM_MAX_FETCH = parseInt(env("PRELIM_MAX_FETCH", "6"), 10);
 const PRELIM_GAP_LIMIT = parseInt(env("PRELIM_GAP_LIMIT", "3"), 10);
+// Article mode — how much of the seed article/body to feed the synthesis. A
+// newsletter-body roundup (many news items + tools) exceeds the default
+// gather-source slice, so the primary article gets a larger window.
+const ARTICLE_SOURCE_CHARS = parseInt(env("ARTICLE_SOURCE_CHARS", "8000"), 10);
 
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
@@ -305,7 +309,7 @@ export async function runResearch(
     // here; OB known claims resolve gaps where they can).
     const articleSynth = (await deps.chat(
       ARTICLE_SYNTH_SYS,
-      `QUESTION: ${query}\n\nKNOWN CLAIMS (already-grounded Open Brain knowledge — supporting context; use to RESOLVE gaps where possible):\n${claimList}\n\nARTICLE:\n${staged.map((p, i) => sourceLine(p, i)).join("\n\n")}`,
+      `QUESTION: ${query}\n\nKNOWN CLAIMS (already-grounded Open Brain knowledge — supporting context; use to RESOLVE gaps where possible):\n${claimList}\n\nARTICLE:\n${staged.map((p, i) => sourceLine(p, i, ARTICLE_SOURCE_CHARS)).join("\n\n")}`,
     )).trim();
 
     // Pass 2 — bounded PRELIMINARY research on the gaps the article + OB left open.

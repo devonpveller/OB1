@@ -31,6 +31,8 @@ const NOISE_HOST_SUBSTR = [
   "t.me",
   "whatsapp.com",
   "mailto:",
+  "open.substack.com", // "READ IN APP" duplicate of the post
+  "substackcdn.com", // image / asset CDN, never content
 ];
 
 /** Path/query markers that signal a non-content link even on a content host. */
@@ -51,6 +53,15 @@ const NOISE_PATH_SUBSTR = [
   "/comments", // comment threads, not the article body
   "support.substack.com",
   "/hc/", // zendesk-style help-center articles
+  // Substack meta — author profiles, signup/referral. Not content. NOTE:
+  // `/app-link/post` is NOT dropped here — it is the link to the newsletter's
+  // own post, which IS the content for single-post emails. It's treated as a
+  // redirect wrapper (below) and unwrapped to the real /p/ URL instead.
+  "/@", // substack.com/@author profile
+  "/profile/", // substack.com/profile/<id>
+  "/signup",
+  "/leaderboard",
+  "/lead", // leader/leaderboard/invite-friends programs
 ];
 
 /** File extensions we never treat as article content. */
@@ -61,6 +72,7 @@ const REDIRECT_HOST_SUBSTR = [
   "link.mail.beehiiv.com",
   "elink.beehiiv.com",
   "substack.com/redirect",
+  "substack.com/app-link", // deep-link to a post → unwrap to the real /p/ URL
   "email.mg",
   "mandrillapp.com",
   "list-manage.com/track",
@@ -165,6 +177,62 @@ export async function unwrapRedirect(
     }
   }
   return current;
+}
+
+/** Anchor-text patterns that mark a link as navigation/promo/chrome. */
+const NOISE_TEXT_RE =
+  /\b(unsubscribe|subscribe|sign ?up|manage (your )?(subscription|preferences|account)|view (this )?in (your )?browser|read in app|update your profile|invite (friends|a friend)|share|tweet|re-?stack|forward (this|to a friend)|follow us|privacy policy|terms of service|upgrade|annual plan|become a (paid )?(member|subscriber)|\d+% off)\b/i;
+
+/** Substack encodes the real destination in redirect/2/<base64-json>.{e}.
+ *  Decode it locally (no network). Returns the destination URL or null. */
+function decodeSubstackRedirect(url: string): string | null {
+  const m = url.match(/substack\.com\/redirect\/2\/([A-Za-z0-9_-]+)/i);
+  if (!m) return null;
+  try {
+    const obj = JSON.parse(atob(m[1].replace(/-/g, "+").replace(/_/g, "/")));
+    return typeof obj?.e === "string" && /^https?:\/\//i.test(obj.e) ? obj.e : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pre-filter + RESOLVE raw HTML anchors so POI sees real destinations, not
+ * opaque tracker wrappers. Resolves locally where possible (substack base64),
+ * network-unwraps the rest (bounded by maxUnwrap), and drops noise on the
+ * RESOLVED url + anchor text. Returns candidates carrying anchor text.
+ */
+export async function gatherAnchors(
+  anchors: Array<{ url: string; text: string }>,
+  opts: { maxRaw?: number; maxUnwrap?: number; unwrapTimeoutMs?: number } = {},
+): Promise<LinkCandidate[]> {
+  const max = opts.maxRaw ?? 80;
+  const maxUnwrap = opts.maxUnwrap ?? 25;
+  const kept: LinkCandidate[] = [];
+  const seen = new Set<string>();
+  let unwraps = 0;
+  for (const a of anchors) {
+    const raw = tidyUrl(a.url);
+    if (!/^https?:\/\//i.test(raw)) continue;
+    if (a.text && NOISE_TEXT_RE.test(a.text)) continue; // text-based noise (free)
+
+    // Resolve to the real destination so POI/hygiene see a real URL. Substack
+    // base64 decodes for free; cap the NETWORK unwraps for opaque wrappers.
+    let url = decodeSubstackRedirect(raw) ?? raw;
+    if (url === raw && isRedirectWrapper(raw)) {
+      if (unwraps >= maxUnwrap) continue; // out of unwrap budget → skip opaque wrapper
+      unwraps++;
+      url = await unwrapRedirect(raw, { timeoutMs: opts.unwrapTimeoutMs });
+    }
+
+    if (classifyLink(url)) continue; // noise on the RESOLVED url (catches substack meta)
+    const key = url.split("#")[0];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push({ rawUrl: a.url, url, domain: hostOf(url), text: a.text?.replace(/\s+/g, " ").trim().slice(0, 160) });
+    if (kept.length >= max) break;
+  }
+  return kept;
 }
 
 /**

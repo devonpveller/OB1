@@ -532,7 +532,13 @@ services:
       # Optional private-remote push (opt-in). Unset WIKI_GIT_REMOTE =
       # D16 local-commits-only (unchanged). When set, the deploy key is
       # read from WIKI_GIT_SSH_KEY (mounted, gitignored). SSH URL form.
-      WIKI_GIT_REMOTE: "git@github.com:devonpveller/openbrain-wiki-data.git"
+      # ── 2026-06-10: remote push SEVERED at operator request ("sever the git
+      #    link for now and stop pushing to git"). WIKI_GIT_REMOTE blanked →
+      #    compiler reverts to local-commits-only: vault history is kept (the
+      #    notes/revision system needs it) but nothing is pulled or pushed to
+      #    openbrain-wiki-data.git. To re-enable: restore the SSH URL below.
+      WIKI_GIT_REMOTE: ""
+      # WIKI_GIT_REMOTE: "git@github.com:devonpveller/openbrain-wiki-data.git"
       WIKI_GIT_SSH_KEY: /secrets/deploy_key
       WIKI_GIT_BRANCH: main
       PORT: "8000"
