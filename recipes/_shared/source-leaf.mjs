@@ -47,7 +47,10 @@ export function scrubSnippetContent(raw) {
 export function renderSourceLeaf(r) {
   const date = String(r.created_at || "").slice(0, 10);
   const title = r.title || r.url || `Source ${r.id}`;
-  const fm = [
+  const md = r.metadata && typeof r.metadata === "object" ? r.metadata : {};
+  const prose = r.content_type === "research_synthesis" ? String(md.prose_synthesis || "").trim() : "";
+
+  const head = [
     "---",
     `title: ${frontmatterScalar(title)}`,
     "type: source", // P0.6/G12 leaf id contract = type + id
@@ -61,11 +64,48 @@ export function renderSourceLeaf(r) {
     "",
     `# ${scrubSnippetContent(title)}`,
     "",
-    ...(r.url ? [`Source: ${scrubSnippetContent(r.url)}`, ""] : []),
-    scrubSnippetContent(r.content || ""),
-    "",
-  ].join("\n");
-  return fm + "\n";
+  ];
+
+  let body;
+  if (prose) {
+    // Research synthesis: the READABLE prose is the page. Rewrite its [Source N]
+    // citations into clickable source-leaf wikilinks (N → source_ids[N-1], the
+    // curator's persisted citation order). The grounded one-claim-per-line
+    // evidence is kept verbatim in a collapsible callout below (audit trail);
+    // the research questions are surfaced as breadcrumbs.
+    const sids = Array.isArray(md.source_ids) ? md.source_ids : [];
+    const linked = scrubSnippetContent(prose).replace(/\[Source\s+(\d+)\]/g, (m, n) => {
+      const id = sids[parseInt(n, 10) - 1];
+      return id ? `[[content/source/${id}|Source ${n}]]` : m;
+    });
+    const origQ = String(r.research_query || "").trim();
+    const needs = Array.isArray(md.needs) ? md.needs.filter(Boolean) : [];
+    const follow = Array.isArray(md.followup_queries) ? md.followup_queries.filter(Boolean) : [];
+    const qs = [];
+    if (origQ || needs.length || follow.length) {
+      qs.push("## Research questions", "");
+      if (origQ) qs.push(`**Original question:** ${scrubSnippetContent(origQ)}`, "");
+      if (needs.length) qs.push("**Sub-questions explored:**", ...needs.map((x) => `- ${scrubSnippetContent(String(x))}`), "");
+      if (follow.length) qs.push("**Follow-up queries:**", ...follow.map((x) => `- ${scrubSnippetContent(String(x))}`), "");
+    }
+    const ev = scrubSnippetContent(r.content || "").trim();
+    const evidence = ev
+      ? [
+          "> [!note]- Evidence — the grounded claims &amp; gaps this synthesis is built from",
+          ...ev.split("\n").map((l) => `> ${l}`),
+          "",
+        ]
+      : [];
+    body = [linked, "", ...qs, ...evidence];
+  } else {
+    body = [
+      ...(r.url ? [`Source: ${scrubSnippetContent(r.url)}`, ""] : []),
+      scrubSnippetContent(r.content || ""),
+      "",
+    ];
+  }
+
+  return [...head, ...body].join("\n") + "\n";
 }
 
 // Write `content/source/<id>.md` for each row under `<outDir>/source/`.

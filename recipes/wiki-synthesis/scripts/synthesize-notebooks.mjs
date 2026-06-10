@@ -218,7 +218,7 @@ async function backfillNotebooks(sb, threads) {
 // Confirmed, non-retracted sources for a thread (P4 4.5 tombstone filter).
 async function confirmedSources(sb, threadId) {
   const rows = await sb.get(
-    `thread_sources?select=source_id,sources!inner(id,title,url,content,content_type,created_at,notebook)` +
+    `thread_sources?select=source_id,sources!inner(id,title,url,content,content_type,created_at,notebook,metadata,research_query)` +
       `&thread_id=eq.${threadId}&status=eq.confirmed&sources.retraction_committed_at=is.null&limit=200`,
   );
   return rows.filter((r) => r.sources).map((r) => r.sources);
@@ -316,9 +316,18 @@ async function main() {
           ? [
               "## Deep Research",
               "",
-              "Original AI research synthesis this notebook was generated from:",
+              "AI research syntheses for this notebook — open one for the full readable write-up, its sources, and the grounded evidence:",
               "",
-              ...researchSrcs.map((s) => `- [[content/source/${s.id}|${(s.title || s.id)}]]`),
+              ...researchSrcs.flatMap((s) => {
+                const m = s.metadata && typeof s.metadata === "object" ? s.metadata : {};
+                const q = String(s.research_query || "").trim();
+                const follow = Array.isArray(m.followup_queries) ? m.followup_queries.filter(Boolean) : [];
+                const out = [`- [[content/source/${s.id}|${scrub(q || s.title || s.id)}]]`];
+                if (follow.length) {
+                  out.push(`  - follow-up queries: ${follow.slice(0, 8).map((x) => scrub(String(x))).join("; ")}`);
+                }
+                return out;
+              }),
               "",
             ]
           : []),

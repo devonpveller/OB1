@@ -724,6 +724,46 @@ services:
       - llm-net
     restart: unless-stopped
 
+  # ── Grounding backfiller (S2 — brain-health) ────────────────────────────────
+  # Drains `ungrounded_claims`: per claim → extract its entity (local :nothink
+  # LLM) → Wikipedia page (via Tor) → find_or_create_source + link_claim_to_source
+  # 'corroborates' → the claim_sources trigger recomputes confidence → the claim
+  # leaves the view. General brain-health (grounds every inlet's claims, not just
+  # the podcast). HTTP-invoked (loopback 8819): POST /backfill?limit=N {thread_ids?}.
+  # obnet (db) + llm-net (entity LLM) + search-gw-net (Tor egress for Wikipedia via
+  # tor:9050, the same boundary openbrain-research uses; D10).
+  openbrain-grounding-backfiller:
+    build:
+      context: ../integrations/grounding-backfiller
+      dockerfile: Dockerfile
+    image: openbrain-grounding-backfiller:local
+    container_name: openbrain-grounding-backfiller
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      CHAT_MODEL: ${BACKFILL_CHAT_MODEL:-qwen36-27b}
+      # Tor egress for Wikipedia (privacy-by-default). Set "" for direct if
+      # Wikipedia-over-Tor proves unreliable on this exit set.
+      FETCH_PROXY_URL: ${BACKFILL_FETCH_PROXY_URL:-socks5h://tor:9050}
+      BACKFILL_BATCH: ${BACKFILL_BATCH:-20}
+      BACKFILL_CONCURRENCY: ${BACKFILL_CONCURRENCY:-2}
+      BACKFILL_INTERVAL_MS: ${BACKFILL_INTERVAL_MS:-0}
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:8819:8000"
+    networks:
+      - obnet
+      - llm-net
+      - search-gw-net
+    restart: unless-stopped
+
 volumes:
   openbrain-db-data:
   openbrain-wiki-data:

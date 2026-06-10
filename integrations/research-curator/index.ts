@@ -81,7 +81,10 @@ interface Pkg {
   research_key?: string;
   query?: string;
   claim?: string; // short standalone summary (required) — used for the resolver embedding
-  synthesis?: string; // the FULL detailed research result — stored as source content
+  synthesis?: string; // the FULL detailed research result (tagged claims) — stored as source content
+  prose?: string; // human-readable rendering of the synthesis → sources.metadata.prose_synthesis
+  needs?: string[]; // decomposed sub-questions → sources.metadata.needs (breadcrumbs)
+  followup_queries?: string[]; // refined/deepen queries → sources.metadata.followup_queries
   kind?: string;
   volatility?: string;
   revalidate_days?: number;
@@ -494,6 +497,30 @@ Deno.serve({ port: PORT }, async (req) => {
       // so the result is reported, but never fatal to the ingest.
       const synthesisId = (typeof persist.synthesis_id === "string" ? persist.synthesis_id : null);
       const sourceIds = Array.isArray(persist.source_ids) ? persist.source_ids as Array<string | null> : [];
+
+      // Stamp the readable prose + query breadcrumbs onto the synthesis row's
+      // metadata, so the wiki renders a readable synthesis + a "Research
+      // questions" section (the tagged `content` stays the grounded machine-truth
+      // that claim decomposition reads). Best-effort — never fails the ingest.
+      if (synthesisId && (pkg.prose || pkg.needs?.length || pkg.followup_queries?.length)) {
+        try {
+          const c = await pool.connect();
+          try {
+            await c.queryObject(
+              `UPDATE sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+              [synthesisId, JSON.stringify({
+                prose_synthesis: pkg.prose || null,
+                needs: pkg.needs || [],
+                followup_queries: pkg.followup_queries || [],
+                source_ids: sourceIds, // [Source N] → source_ids[N-1] for clickable citations
+              })],
+            );
+          } finally { c.release(); }
+        } catch (e) {
+          console.error("ingest: synthesis metadata stamp failed:", (e as Error).message);
+        }
+      }
+
       let claims: WriteClaimsResult | null = null;
       try {
         claims = await writeGroundedClaims(pkg, res.thread_id, synthesisId, sourceIds);

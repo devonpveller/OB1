@@ -52,3 +52,12 @@
 #   30 11 * * * → 11:30 UTC = 07:30 EDT / 06:30 EST
 #   0 12 * * 1  → noon UTC every Monday only
 0 5 * * *   curl -fsS -X POST -H 'content-type: application/json' -d '{"labelsPrefix":"brain/","window":"90d","limit":500}' http://openbrain-gmail-pull:8080/run
+
+# Grounding backfiller (S2) — bounded off-peak GLOBAL sweep, 07:00 UTC (= 03:00
+# EDT), after the daily chain has settled the day's new claims. Drains the
+# `ungrounded_claims` view: per claim → entity → Wikipedia `corroborates` source
+# → confidence recomputes → claim leaves the view. Brain-health for EVERY inlet
+# (not just the podcast). Bounded (limit=50/run); un-groundable claims stamp
+# backfill_skip so they're never re-attempted (no retry storm). Stand-alone, not
+# chained — independent of the email pipeline.
+0 7 * * *   curl -fsS -X POST 'http://openbrain-grounding-backfiller:8000/backfill?limit=50' || true

@@ -191,7 +191,8 @@ async function runJob(jobId: string): Promise<void> {
       `UPDATE research_jobs SET status='done', finished_at=now(),
          result=$2::jsonb, metrics=$3::jsonb, progress=$4::jsonb WHERE id=$1`,
       [jobId, JSON.stringify({
-        synthesis: res.synthesis, needs: res.needs, gaps: res.gaps,
+        synthesis: res.synthesis, prose: res.prose, needs: res.needs,
+        followup_queries: res.followupQueries, gaps: res.gaps,
         cited_sources: res.citedSources, reuse_claims: res.reuseClaims,
         thread_id: (res.curator?.thread_id as string) ?? thread_id, reuse_ratio: 1 - res.metrics.gap_ratio,
         curator: res.curator, backstop: res.backstop,

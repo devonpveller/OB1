@@ -112,6 +112,24 @@ Cite the web source(s) that support it (N >= 2). If the SOURCES do not address a
 
 ABSOLUTE RULES: these are PRELIMINARY, lower-confidence findings from OUTSIDE the article — never present them as settled fact, and always phrase them as "preliminary research suggests…". Never invent: an unsupported tentative claim is a [GAP], not an [UNCERTAIN]. One item per line. Every [UNCERTAIN] line must end with a [Source N] citation (N >= 2).`;
 
+// Readable-prose pass: turns the grounded one-claim-per-line answer into a
+// human-readable synthesis WITHOUT losing grounding — every [Source N] citation
+// is preserved verbatim so the wiki's source-leaf deep-links still resolve. The
+// tagged synthesis stays the machine-truth (it's what the curator decomposes
+// into claims); this prose is the human-facing rendering stored alongside it.
+const PROSE_SYS =
+  `You are Open Brain's research writer. You are given a QUESTION and a GROUNDED ANSWER — a list of verified assertions, each tagged [SOURCED]/[INFERRED]/[UNCERTAIN] and ending with its citation [Source N], plus [GAP] lines for points no source covered.
+
+Rewrite it into a clear, readable Markdown synthesis that answers the QUESTION for a human reader.
+
+RULES:
+- Open with a direct answer, then supporting detail. Use ## section headers and short paragraphs or bullet lists where natural.
+- PRESERVE every citation: keep each fact's [Source N] marker inline, using the SAME numbers (e.g. "The official repo is github.com/anthropics/skills [Source 1]."). Never renumber or drop a citation.
+- Introduce NO fact, number, name, URL, or quote that is not in the grounded answer. If it is not supported there, do not write it.
+- Drop the [SOURCED]/[INFERRED]/[UNCERTAIN] tags themselves — convey that nuance in prose ("directly reports…", "this suggests…") but keep the [Source N] citations.
+- End with a short "## Gaps" section listing the [GAP] items as open questions (no citations). Omit the section entirely if there are no gaps.
+- Be faithful and complete — cover every claim — but readable. Do not add a preamble like "Here is the synthesis"; start with the answer.`;
+
 // ── Public types ─────────────────────────────────────────────────────────────
 /** A pre-fetched source the caller supplies to be staged directly (not searched/fetched). */
 export interface SeedSource { url: string; title: string; content: string; }
@@ -139,7 +157,11 @@ export interface RunOptions {
 }
 export interface RunResult {
   synthesis: string;
+  /** Human-readable prose rendering of `synthesis` (same [Source N] citations). */
+  prose: string;
   needs: string[];
+  /** Refined/deepened queries generated across gather rounds (breadcrumbs). */
+  followupQueries: string[];
   gaps: string[];
   reuseClaims: { id: string; text: string }[];
   citedSources: { url: string | null; title: string }[];
@@ -208,6 +230,7 @@ export async function runResearch(
   let backstop = "complete";
   let needs: string[] = [query];
   let gapNeeds: string[] = [];
+  const followupQueries: string[] = []; // refined/deepen queries across rounds (breadcrumbs)
 
   // 2/3. Plan → coverage → gap-gather (the DEFAULT topic-research path). Article
   //      mode never runs this — it grounds the seed article first and only then
@@ -275,6 +298,7 @@ export async function runResearch(
       );
       pendingNeeds = Array.isArray(deep.queries) && deep.queries.length
         ? deep.queries.map(String).slice(0, stillOpen.length) : stillOpen;
+      followupQueries.push(...pendingNeeds); // record the refined queries as breadcrumbs
       await progress("deepen", `round ${round}: ${stillOpen.length} need(s) still open`, { round, open: stillOpen.length });
     }
   } else {
@@ -390,6 +414,20 @@ export async function runResearch(
   //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
   //    compacted cited list. Delegate to curator (verbatim storage + claims, P2).
   const { synthesis, cited } = buildCitedAndRenumber(rawSynthesis, pool);
+
+  // Readable-prose rendering of the grounded synthesis (best-effort). The tagged
+  // `synthesis` is preserved as the machine-truth the curator decomposes into
+  // claims; this prose is the human-facing answer, stored alongside it. Same
+  // [Source N] numbers, so wiki source-leaf deep-links still resolve.
+  let prose = "";
+  if (synthesis.trim()) {
+    try {
+      prose = (await deps.chat(PROSE_SYS, `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${synthesis}`)).trim();
+    } catch (e) {
+      await progress("synthesize", `prose rendering skipped: ${(e as Error).message}`);
+    }
+  }
+
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
   // Reuse signal = needs actually COVERED by existing claims (needs - gaps), not
   // every grounded claim the recall pulled (which overcounts when an unscoped
@@ -407,6 +445,9 @@ export async function runResearch(
       query,
       claim: firstParagraph(synthesis).slice(0, 600),
       synthesis,
+      prose,                              // human-readable rendering (curator → sources.metadata)
+      needs,                             // the decomposed sub-questions (breadcrumbs)
+      followup_queries: followupQueries, // refined/deepen queries across rounds (breadcrumbs)
       kind: "deep_research",
       topic_hint: opts.origin || "research",
       thread_id: threadId || undefined,
@@ -416,7 +457,7 @@ export async function runResearch(
   }
 
   return {
-    synthesis, needs,
+    synthesis, prose, needs, followupQueries,
     gaps: gapMatches.length ? gapNeeds : [],
     reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
     citedSources: cited.map((p) => ({ url: p.url, title: p.title })),
