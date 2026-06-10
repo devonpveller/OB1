@@ -1153,7 +1153,11 @@ async function emitLeafPages(sb, outDir, run) {
       const rows =
         (await sb.get(
           "sources",
-          `select=id,url,title,content,content_type,notebook,created_at&id=in.(${list})`,
+          // metadata + research_query feed the research-synthesis leaf (prose
+          // body, [Source N] links, Research-questions breadcrumb). MUST match
+          // notebook-synth's confirmedSources select, or whichever emitter runs
+          // last would overwrite the prose leaf with a metadata-less one.
+          `select=id,url,title,content,content_type,notebook,created_at,metadata,research_query&id=in.(${list})`,
         )) || [];
       srcs += writeSourceLeaves(rows, outDir);
     }

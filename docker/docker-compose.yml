@@ -566,6 +566,15 @@ services:
     container_name: openbrain-wiki-viewer
     depends_on:
       - openbrain-wiki
+    environment:
+      # Quartz's `build --serve` watcher uses inotify by default, which does NOT
+      # reliably fire for the compiler's writes across the /quartz/content→/wiki
+      # symlink to a Docker volume owned by openbrain-wiki (cross-container). That
+      # left the served build refreshing only at the nightly clean rebuild. Poll
+      # instead so intraday content updates re-render within seconds and the
+      # idle-swap publishes them.
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "${WIKI_VIEWER_POLL_INTERVAL_MS:-5000}"
     volumes:
       - openbrain-wiki-data:/wiki:ro
       # Binary assets (images now, audio later) live on their own volume,
