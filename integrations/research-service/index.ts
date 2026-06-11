@@ -183,6 +183,7 @@ async function runJob(jobId: string): Promise<void> {
       confidenceFloor: typeof options?.confidence_floor === "number" ? options.confidence_floor : undefined,
       seedSources,
       disableWebSearch: options?.disable_web_search === true,
+      sourcesOnly: options?.sources_only === true,
       mode: options?.mode === "article" ? "article" : undefined,
       gapResearch: options?.gap_research === "preliminary" ? "preliminary" : undefined,
       dryRun: options?.dry_run === true,
@@ -228,7 +229,7 @@ Deno.serve({ port: PORT }, async (req) => {
     let body: {
       query?: string; thread_id?: string; origin?: string; options?: Record<string, unknown>;
       seed_sources?: Array<{ url?: string; title?: string; content?: string }>;
-      disable_web_search?: boolean; mode?: string; dry_run?: boolean; gap_research?: string;
+      disable_web_search?: boolean; sources_only?: boolean; mode?: string; dry_run?: boolean; gap_research?: string;
     };
     try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const query = (body.query || "").trim();
@@ -244,6 +245,7 @@ Deno.serve({ port: PORT }, async (req) => {
       ...(body.options || {}),
       ...(seeds.length ? { seed_sources: seeds } : {}),
       ...(body.disable_web_search === true ? { disable_web_search: true } : {}),
+      ...(body.sources_only === true ? { sources_only: true } : {}),
       ...(body.mode === "article" ? { mode: "article" } : {}),
       ...(body.dry_run === true ? { dry_run: true } : {}),
       ...(body.gap_research === "preliminary" ? { gap_research: "preliminary" } : {}),

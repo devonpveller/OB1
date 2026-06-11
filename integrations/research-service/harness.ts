@@ -141,6 +141,11 @@ export interface RunOptions {
   seedSources?: SeedSource[];
   /** Skip the web-search gap-gather entirely; corroborate only from reused OB claims. */
   disableWebSearch?: boolean;
+  /** STRICTLY the provided seed_sources: skip web search AND the brain-wide claim
+   *  reuse pass — answer only from the linked sources. For ON "ask-a-source": if the
+   *  sources fall short, the result's [GAP]s let the caller suggest a wider research
+   *  query in another round. Implies disableWebSearch. */
+  sourcesOnly?: boolean;
   /** "article" → article-primary synthesis prompt (podcast-about-the-article). */
   mode?: "default" | "article";
   /**
@@ -204,19 +209,23 @@ export async function runResearch(
 
   const seeds = opts.seedSources ?? [];
   const articleMode = opts.mode === "article";
-  const skipSearch = opts.disableWebSearch === true;
+  const sourcesOnly = opts.sourcesOnly === true;
+  const skipSearch = opts.disableWebSearch === true || sourcesOnly; // sources-only ⇒ no web
   const gapResearch = opts.gapResearch ?? "none";
   const dryRun = opts.dryRun === true;
 
   // 1. Reuse pass — recall relevant grounded claims (cheap). In article mode the
   //    recall is against the ARTICLE itself (its points are what we want to
   //    corroborate from existing OB knowledge), not a short query string.
-  await progress("reuse", "recalling grounded claims from the KB");
+  await progress("reuse", sourcesOnly ? "sources-only: skipping KB claim reuse" : "recalling grounded claims from the KB");
   const recallText = articleMode && seeds.length
     ? `${seeds[0].title}\n\n${seeds[0].content}`
     : query;
   const queryEmb = await deps.embed(recallText);
-  const relevant = await retrieveRelevantClaims(client, queryEmb, threadId, CLAIM_SHORTLIST_K, REUSE_MAX_DISTANCE);
+  // sources-only ⇒ no brain-wide reuse; ground strictly from the seed_sources.
+  const relevant = sourcesOnly
+    ? []
+    : await retrieveRelevantClaims(client, queryEmb, threadId, CLAIM_SHORTLIST_K, REUSE_MAX_DISTANCE);
   const reuseClaims = relevant.filter((c) => decideReuse(c, floor, now) === "reuse");
 
   // Seed sources (e.g. a newsletter article the caller already fetched through
