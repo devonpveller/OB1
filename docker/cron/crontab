@@ -61,3 +61,9 @@
 # backfill_skip so they're never re-attempted (no retry storm). Stand-alone, not
 # chained — independent of the email pipeline.
 0 7 * * *   curl -fsS -X POST 'http://openbrain-grounding-backfiller:8000/backfill?limit=50' || true
+
+# Source re-fetch (S2) — heal thin/failed web sources whose original ingestion
+# truncated them to ~150-char stubs. 07:30 UTC, after the backfiller sweep.
+# Tor-first/direct-fallback; recovered → content updated (chunk-worker re-embeds);
+# 3 attempts then marked refetch_failed (no retry storm). Bounded (limit=120/run).
+30 7 * * *  curl -fsS -X POST 'http://openbrain-grounding-backfiller:8000/refetch?limit=120' || true

@@ -14,11 +14,18 @@
  * every claim it grounds raises the brain's reusable-claim ratio for ALL inlets,
  * not just the podcast.
  *
+ * Also re-fetches thin/failed web SOURCES (POST /refetch) whose original ingestion
+ * truncated them (~150-char stubs) — a plain re-fetch (Tor first, direct fallback)
+ * recovers the real body for ~80% of them. Same brain-health worker, same Tor+DB.
+ *
  * Routes (obnet loopback):
  *   GET  /health   -> { ok, running, egress }
  *   POST /backfill?limit=N  body: { "thread_ids"?: [uuid,...] }
  *        scoped run (today's digest threads, pre-script) passes thread_ids;
  *        the global off-peak sweep omits them.
+ *   POST /refetch?limit=N   -> re-fetch thin (<300-char) web_article sources;
+ *        recovered → content updated (chunk-worker re-embeds); still-thin → marked
+ *        refetch_failed (no retry storm).
  *
  * No-entity / no-Wikipedia-match → stamp `metadata.backfill_skip=true` + log, so
  * an un-groundable claim is never re-attempted every sweep (no retry storm; clear
@@ -49,6 +56,14 @@ const NOTHINK = env("CHAT_NOTHINK_SUFFIX", ":nothink");
 const WIKI_BASE = env("WIKI_BASE", "https://en.wikipedia.org");
 const EDGE_WEIGHT = parseFloat(env("BACKFILL_EDGE_WEIGHT", "0.7"));
 const FETCH_TIMEOUT_MS = parseInt(env("BACKFILL_FETCH_TIMEOUT_MS", "15000"), 10);
+// Source re-fetch (fill thin/failed web sources whose original ingestion
+// truncated them). Empirically ~80% of <300-char web sources recover a full body.
+const REFETCH_THIN_MAX = parseInt(env("REFETCH_THIN_MAX", "300"), 10); // shorter than this = candidate
+const REFETCH_MIN_RECOVERED = parseInt(env("REFETCH_MIN_RECOVERED", "500"), 10); // accept only a real body
+const REFETCH_MAX_CHARS = parseInt(env("REFETCH_MAX_CHARS", "8000"), 10); // match the ingestion cap
+const REFETCH_ALLOW_DIRECT = env("REFETCH_ALLOW_DIRECT", "true") !== "false"; // direct fallback when Tor is blocked
+const REFETCH_CONCURRENCY = parseInt(env("REFETCH_CONCURRENCY", "6"), 10); // network-bound → wider than the GPU-bound backfill
+const REFETCH_MAX_ATTEMPTS = parseInt(env("REFETCH_MAX_ATTEMPTS", "3"), 10); // give up (mark failed) only after this many tries
 
 const pool = new Pool(DB, 6);
 
@@ -267,6 +282,112 @@ async function runBackfill(limit: number, threadIds: string[] | null): Promise<R
   return res;
 }
 
+// ── Source re-fetch (fill thin/failed web sources) ───────────────────────────
+function stripHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<(nav|header|footer|aside|form|svg)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ").trim();
+}
+
+async function fetchExtract(targetUrl: string, useTor: boolean): Promise<string | null> {
+  try {
+    const init: RequestInit & { client?: Deno.HttpClient } = {
+      redirect: "follow",
+      headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    };
+    if (useTor) { const c = getClient(); if (c) init.client = c; }
+    const r = await fetch(targetUrl, init);
+    if (!r.ok) { r.body?.cancel().catch(() => {}); return null; }
+    const ct = r.headers.get("content-type") || "";
+    if (!/text\/html|application\/xhtml|text\/plain/i.test(ct)) { r.body?.cancel().catch(() => {}); return null; } // skip PDFs/binaries
+    return stripHtml(await r.text());
+  } catch {
+    return null;
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+async function refetchOne(client: any, src: { id: string; url: string; oldlen: number }): Promise<"recovered" | "still-thin"> {
+  let text = await fetchExtract(src.url, true); // Tor first (privacy)
+  if ((!text || text.length < REFETCH_MIN_RECOVERED) && REFETCH_ALLOW_DIRECT) {
+    const d = await fetchExtract(src.url, false); // direct fallback when Tor is blocked/thin
+    if (d && (!text || d.length > text.length)) text = d;
+  }
+  if (text && text.length >= REFETCH_MIN_RECOVERED && text.length > src.oldlen) {
+    const capped = text.slice(0, REFETCH_MAX_CHARS);
+    await client.queryObject(
+      `UPDATE public.sources
+         SET content = $2, content_hash = md5($2),
+             metadata = metadata || jsonb_build_object('refetched_at', $3::text, 'refetch_len', $4::int),
+             updated_at = now()
+       WHERE id = $1`,
+      [src.id, capped, new Date().toISOString(), capped.length],
+    );
+    console.log(`[refetch] recovered ${src.url.slice(0, 64)} (${src.oldlen} -> ${capped.length})`);
+    return "recovered";
+  }
+  // Count the attempt; only mark permanently failed after MAX_ATTEMPTS so a
+  // transient Tor timeout / 503 isn't given up on forever (no retry storm: once
+  // refetch_failed is set, the drain query excludes it).
+  await client.queryObject(
+    `UPDATE public.sources
+       SET metadata = metadata
+         || jsonb_build_object('refetch_attempts', COALESCE((metadata->>'refetch_attempts')::int, 0) + 1, 'refetch_attempted_at', $2::text)
+         || CASE WHEN COALESCE((metadata->>'refetch_attempts')::int, 0) + 1 >= $3
+                 THEN jsonb_build_object('refetch_failed', true) ELSE '{}'::jsonb END
+     WHERE id = $1`,
+    [src.id, new Date().toISOString(), REFETCH_MAX_ATTEMPTS],
+  );
+  return "still-thin";
+}
+
+async function runRefetch(limit: number): Promise<{ scanned: number; recovered: number; stillThin: number }> {
+  const res = { scanned: 0, recovered: 0, stillThin: 0 };
+  const scan = await pool.connect();
+  let rows: Array<{ id: string; url: string; oldlen: number }>;
+  try {
+    const q = await scan.queryObject(
+      `SELECT id, url, length(coalesce(content,'')) AS oldlen
+       FROM public.sources
+       WHERE url ~* '^https?://' AND content_type = 'web_article'
+         AND length(coalesce(content,'')) < $2
+         AND COALESCE((metadata->>'refetch_failed')::boolean, false) = false
+       ORDER BY created_at DESC LIMIT $1`,
+      [limit, REFETCH_THIN_MAX],
+    );
+    rows = q.rows as Array<{ id: string; url: string; oldlen: number }>;
+  } finally {
+    scan.release();
+  }
+  res.scanned = rows.length;
+  if (rows.length === 0) return res;
+  let i = 0;
+  const worker = async () => {
+    while (i < rows.length) {
+      const src = rows[i++];
+      const client = await pool.connect();
+      try {
+        const o = await refetchOne(client, src);
+        if (o === "recovered") res.recovered++;
+        else res.stillThin++;
+      } catch (e) {
+        console.warn(`[refetch] ${src.id} error: ${e}`);
+        res.stillThin++;
+      } finally {
+        client.release();
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(REFETCH_CONCURRENCY, rows.length) }, worker));
+  return res;
+}
+
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 const J = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -297,6 +418,22 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
       return J({ ok: true, ...r, ms: Date.now() - t0 });
     } catch (e) {
       console.error(`[backfill] run failed: ${e}`);
+      return J({ ok: false, error: String(e) }, 500);
+    } finally {
+      running = false;
+    }
+  }
+  if (req.method === "POST" && url.pathname === "/refetch") {
+    if (running) return J({ ok: false, error: "already running" }, 409);
+    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10) || 50, 500);
+    running = true;
+    const t0 = Date.now();
+    try {
+      const r = await runRefetch(limit);
+      console.log(`[refetch] done scanned=${r.scanned} recovered=${r.recovered} still-thin=${r.stillThin}`);
+      return J({ ok: true, ...r, ms: Date.now() - t0 });
+    } catch (e) {
+      console.error(`[refetch] run failed: ${e}`);
       return J({ ok: false, error: String(e) }, 500);
     } finally {
       running = false;
