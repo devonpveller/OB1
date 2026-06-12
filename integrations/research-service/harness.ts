@@ -8,6 +8,7 @@
  */
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
 import { retrieveRelevantClaims, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
+import { INJECTION_GUARD, screenSources } from "./injection.ts";
 
 // Tunables (env-read; reading env does not start a server).
 const env = (k: string, d: string) => Deno.env.get(k) ?? d;
@@ -315,6 +316,19 @@ export async function runResearch(
       { staged: staged.length });
   }
 
+  // Prompt-injection screen — quarantine any fetched/seed source trying to hijack
+  // the reader (defense-in-depth with INJECTION_GUARD on the synth prompts below).
+  // A page attacking the reader isn't a trustworthy source; drop it before it can
+  // poison the synthesis or get persisted.
+  if (staged.length) {
+    const { clean, quarantined } = await screenSources(deps, staged);
+    if (quarantined.length) {
+      await progress("screen", `quarantined ${quarantined.length} source(s) for prompt injection`,
+        { quarantined: quarantined.length });
+      staged.splice(0, staged.length, ...clean);
+    }
+  }
+
   // Persist staged candidates into the session pool (dedup vs OB). Skipped on
   // dry-run (no canonical write).
   if (!dryRun && sessionId) {
@@ -341,7 +355,7 @@ export async function runResearch(
     // Pass 1 — ground the article itself (the article is the only staged source
     // here; OB known claims resolve gaps where they can).
     const articleSynth = (await deps.chat(
-      ARTICLE_SYNTH_SYS,
+      `${INJECTION_GUARD}\n\n${ARTICLE_SYNTH_SYS}`,
       `QUESTION: ${query}\n\nKNOWN CLAIMS (already-grounded Open Brain knowledge — supporting context; use to RESOLVE gaps where possible):\n${claimList}\n\nARTICLE:\n${staged.map((p, i) => sourceLine(p, i, ARTICLE_SOURCE_CHARS)).join("\n\n")}`,
     )).trim();
 
@@ -362,12 +376,18 @@ export async function runResearch(
             .slice(0, Math.max(0, Math.min(2, PRELIM_MAX_FETCH - fetches)));
           const pages = await mapLimit(fresh, FETCH_CONCURRENCY, (h) => deps.fetchPage(h.url));
           fetches += fresh.length;
-          for (const p of pages) if (p && p.content) staged.push(p);
+          const prelimPages = pages.filter((p): p is Page => !!(p && p.content));
+          const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, prelimPages);
+          if (qPrelim.length) {
+            await progress("screen", `quarantined ${qPrelim.length} preliminary source(s) for prompt injection`,
+              { quarantined: qPrelim.length });
+          }
+          for (const p of cleanPrelim) staged.push(p);
         }
         if (staged.length > base) {
           const gapSources = staged.slice(base).map((p, i) => sourceLine(p, base + i)).join("\n\n");
           prelimSynth = (await deps.chat(
-            PRELIM_GAP_SYNTH_SYS,
+            `${INJECTION_GUARD}\n\n${PRELIM_GAP_SYNTH_SYS}`,
             `OPEN GAPS (from the article):\n${gapLines.map((g, i) => `${i + 1}. ${g}`).join("\n")}\n\nPRELIMINARY SOURCES (the article is [Source 1], already covered):\n${gapSources}`,
           )).trim();
           if (!dryRun && sessionId) {
@@ -414,7 +434,7 @@ export async function runResearch(
       .map((p, i) => sourceLine(p, i, i < staged.length ? 2000 : 900))
       .join("\n\n");
     rawSynthesis = (await deps.chat(
-      SYNTH_SYS,
+      `${INJECTION_GUARD}\n\n${SYNTH_SYS}`,
       `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded — when you assert one, cite the [Source N] shown next to it):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
     )).trim();
   }

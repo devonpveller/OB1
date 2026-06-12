@@ -11,6 +11,7 @@ COPY index.ts ./
 COPY harness.ts ./
 COPY lib.ts ./
 COPY kb.ts ./
+COPY injection.ts ./
 
 USER deno
 
