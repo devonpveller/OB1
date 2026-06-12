@@ -41,6 +41,16 @@ const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "openai/gpt-4o-mini";
 
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
+// BigInt JSON safety: the postgres driver returns int8 columns (e.g. thoughts.id)
+// as BigInt, which JSON.stringify cannot serialize ("Do not know how to serialize
+// a BigInt") — this previously broke the `search`/`fetch` tools. All numbers in
+// this brain are far below 2^53, so render any BigInt that reaches JSON as a Number.
+// Tools that need a stable string id (the ChatGPT search/fetch contract) still
+// wrap their id in String(...) explicitly below.
+(BigInt.prototype as unknown as { toJSON: () => number }).toJSON = function () {
+  return Number(this as unknown as bigint);
+};
+
 // --- PostgreSQL Connection Pool ---
 
 const pool = new Pool({
@@ -229,7 +239,7 @@ server.registerTool(
         );
 
         const results = result.rows.map((t) => ({
-          id: t.id,
+          id: String(t.id), // ChatGPT search/fetch contract: id is a string
           title: thoughtTitle(t.content, t.created_at),
           url: thoughtUrl(t.id),
         }));
@@ -288,7 +298,7 @@ server.registerTool(
         }
 
         const document = {
-          id: thought.id,
+          id: String(thought.id), // ChatGPT search/fetch contract: id is a string
           title: thoughtTitle(thought.content, thought.created_at),
           text: thought.content,
           url: thoughtUrl(thought.id),

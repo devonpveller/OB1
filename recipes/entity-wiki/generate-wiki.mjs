@@ -794,22 +794,29 @@ function linkifyEntities(markdown, related) {
     .filter((r) => r && r.slug && r.name && String(r.name).length >= 2)
     .sort((a, b) => String(b.name).length - String(a.name).length);
   if (items.length === 0) return markdown;
+  // name → slug. Longest names first (items is pre-sorted) so the combined
+  // alternation prefers the longer entity at any position; first slug wins on a
+  // duplicate name.
+  const slugOf = new Map();
+  for (const { name, slug } of items) if (!slugOf.has(name)) slugOf.set(name, slug);
+  const alt = [...slugOf.keys()].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  // ONE left-to-right pass per unprotected segment via a single combined regex.
+  // A single pass never re-scans text it just inserted, so a shorter entity name
+  // can NOT get linked INSIDE a longer entity's freshly-created [[wikilink]] —
+  // the nested-link bug that produced `[[tool-steam-deck|[[tool-steam|Steam]]
+  // Deck]]` (literal `[[` leaking into the rendered page). The old loop re-ran
+  // every shorter name over links it had already written; this can't.
+  // Word-ish boundaries exclude '/' so path-like text past the URL guard is safe.
+  const linkRe = new RegExp(`(?<![\\w/])(${alt})(?![\\w/])`, "g");
   // Capturing split → odd indices are the protected delimiters.
   const protectedRe = /(\[\[[^\]]*\]\]|```[\s\S]*?```|`[^`]*`|https?:\/\/\S+)/g;
   const parts = String(markdown).split(protectedRe);
   for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 1) continue; // protected span — leave as-is
-    let seg = parts[i];
-    for (const { name, slug } of items) {
-      const esc = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      // Word-ish boundaries that also exclude '/' so we don't touch
-      // path-like text that slipped past the URL guard.
-      seg = seg.replace(
-        new RegExp(`(?<![\\w/])(${esc})(?![\\w/])`, "g"),
-        `[[${slug}|$1]]`,
-      );
-    }
-    parts[i] = seg;
+    parts[i] = parts[i].replace(linkRe, (m, name) => {
+      const slug = slugOf.get(name);
+      return slug ? `[[${slug}|${name}]]` : m;
+    });
   }
   return parts.join("");
 }

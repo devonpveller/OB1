@@ -42,6 +42,13 @@ export function scrubSnippetContent(raw) {
     // and turn markdown images into non-loading links (click to view, never auto-GET).
     .replace(/<\s*(script|style)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, "[$1 removed]")
     .replace(/<\s*\/?\s*(img|iframe|script|style|link|source|video|audio|embed|object|track)\b[^>]*>/gi, "[$1 removed]")
+    // Linked image — `[![alt](img)](href)` (README badges, newsletter tracking
+    // pixels wrapped in a link). Drop the auto-loading image URL, keep ONLY the
+    // outer link. MUST run before the standalone-image rule: otherwise that rule
+    // rewrites the inner `![alt](img)` into `[image: alt](img)`, and the outer
+    // `[` then forms a stray `[[image:` that Quartz mis-parses as a wikilink and
+    // leaks as literal text into the page.
+    .replace(/\[!\[([^\]]*)\]\([^)]*\)\]\(\s*(https?:[^)\s]+)[^)]*\)/gi, "[image: $1]($2)")
     .replace(/!\[([^\]]*)\]\(\s*(https?:[^)\s]+)[^)]*\)/gi, "[image: $1]($2)")
     .replace(/<\s*\/?\s*(thought|source)\b[^>]*>/gi, "[$1-tag-redacted]")
     .replace(/ignore\s+(all\s+)?previous\s+instructions?/gi, "[redacted injection attempt]")
