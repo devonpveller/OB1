@@ -52,6 +52,7 @@ import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
 import { JobRecord, ResearchClient } from "./src/enrich/research-client.ts";
+import { filterCandidates, isPromoBody, loadBlocklist, saveBlocklist } from "./src/enrich/promo-filter.ts";
 import { DayReport, DayReportEntry, LinkCandidate } from "./src/enrich/types.ts";
 import {
   Episode,
@@ -90,6 +91,9 @@ const RESEARCH_POLL_MS = num("RESEARCH_POLL_MS", 3_000);
 // research done before the podcast" gate still holds (we await every item).
 const RESEARCH_CONCURRENCY = num("RESEARCH_CONCURRENCY", 2);
 const REPORTS_DIR = env("REPORTS_DIR", "/reports");
+// Persisted promo blocklist (operator-editable JSON). Promos reuse the same
+// domains → dropped instantly; the nothink classifier grows this over time.
+const BLOCKLIST_PATH = env("PROMO_BLOCKLIST_PATH", `${REPORTS_DIR}/promo-blocklist.json`);
 
 const brain = new BrainClient({ baseUrl: env("BRAIN_REST_URL", "http://openbrain-rest") });
 const research = new ResearchClient({
@@ -125,6 +129,15 @@ const poiChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
   chatModel: env("CHAT_MODEL", "qwen36-27b"),
   nothinkSuffix: ":nothink",
+});
+// Body-fallback classifier — THINK model (no :nothink) for precision: a legit
+// single-post essay (e.g. an Anthropic-research story) must NOT be dropped as an
+// ad. Costlier than nothink, but the body decision is false-positive-prone.
+// Set BODY_CLASSIFY_NOTHINK=:nothink to trade precision for speed.
+const bodyClassifyChat = makeScriptChat({
+  chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
+  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  nothinkSuffix: env("BODY_CLASSIFY_NOTHINK", ""),
 });
 const ON_EPISODE_PROFILE = env("ON_EPISODE_PROFILE", "tech_discussion");
 const ON_SPEAKER_PROFILE = env("ON_SPEAKER_PROFILE", "tech_experts");
@@ -229,6 +242,8 @@ async function main() {
   //    tools, summaries) is the primary source; PLUS genuinely-external content
   //    links for depth. The newsletter's own substack posts are dropped (the body
   //    already covers them, and the web posts are often paywalled). ─────────────
+  const blocklist = await loadBlocklist(BLOCKLIST_PATH);
+  let promoDropped = 0;
   const items: WorkItem[] = [];
   for (const email of emails) {
     report.totals.emailsScanned++;
@@ -259,6 +274,16 @@ async function main() {
       external = (await gatherAnchors(raw, { maxRaw: 80 }))
         .filter((c) => c.domain && !c.domain.endsWith("substack.com"));
     }
+    // Promo filter (blocklist → nothink): drop ad/sponsor links before POI so
+    // they never become sources/claims. Domains judged promo are remembered.
+    if (external.length) {
+      const { kept, dropped } = await filterCandidates(poiChat, blocklist, external);
+      for (const d of dropped) {
+        console.log(`      ⊘ promo (${d.reason}) [${d.domain ?? "?"}] ${(d.text || d.url).slice(0, 60)}`);
+      }
+      promoDropped += dropped.length;
+      external = kept;
+    }
     let selected: LinkCandidate[] = [];
     if (external.length) {
       const keepIdx = await selectPOI(poiChat, subject, external, MAX_LINKS_PER_EMAIL);
@@ -268,12 +293,21 @@ async function main() {
     // links (single-post / promo emails). For news editions the per-source links
     // carry the content and the curator can place each on a thread; a multi-topic
     // roundup body can't be placed on one thread (→ 0 claims) and just adds noise.
-    const bodyItem: WorkItem | null = (bodyText.trim().length > 400 && selected.length === 0)
-      ? {
-        email, label, subject, title: subject, preContent: bodyText,
-        link: { rawUrl: gmailUrl, url: gmailUrl, domain: "newsletter", text: subject },
+    let bodyItem: WorkItem | null = null;
+    if (bodyText.trim().length > 400 && selected.length === 0) {
+      // Drop ONLY a primarily-promotional body (e.g. "20% off every plan"); keep
+      // a body with substantive content even if it carries some promo (the ad is
+      // filtered downstream). Conservative think-model call — defaults to KEEP.
+      if (await isPromoBody(bodyClassifyChat, subject, bodyText)) {
+        promoDropped++;
+        console.log(`  · ${label} | "${subject.slice(0, 55)}" → body is PROMO, dropped (no source)`);
+      } else {
+        bodyItem = {
+          email, label, subject, title: subject, preContent: bodyText,
+          link: { rawUrl: gmailUrl, url: gmailUrl, domain: "newsletter", text: subject },
+        };
       }
-      : null;
+    }
     console.log(`  · ${label} | "${subject.slice(0, 55)}" → ${external.length} ext link(s), ${selected.length} selected${bodyItem ? " + body-fallback" : ""}`);
     if (args.has("--dump-links")) {
       const keep = new Set(selected.map((s) => s.url));
@@ -283,6 +317,10 @@ async function main() {
     }
     if (bodyItem) items.push(bodyItem);
     for (const link of selected) items.push({ email, label, subject, link });
+  }
+  await saveBlocklist(BLOCKLIST_PATH, blocklist);
+  if (promoDropped) {
+    console.log(`[link-enrich] 🛡  dropped ${promoDropped} promo item(s); blocklist now ${blocklist.domains.size} domain(s).`);
   }
 
   // ── Process links through the research channel at bounded concurrency.

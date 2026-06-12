@@ -5,7 +5,7 @@
 // NEVER sees a "rebuilding" splash. Records each request's time to
 // /tmp/last-access so the rebuild loop can tell when the viewer is in use.
 import http from "node:http";
-import { createReadStream, existsSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, normalize, extname } from "node:path";
 
 const ROOT = "/srv/current"; // a symlink → /srv/build-N (swapped atomically)
@@ -63,7 +63,21 @@ http.createServer((req, res) => {
   }
   const file = resolve(req.url || "/");
   if (file) {
-    res.writeHead(200, { "content-type": MIME[extname(file)] || "application/octet-stream" });
+    const ext = extname(file);
+    if (ext === ".html") {
+      // Strip the Quartz dev-mode (`build --serve`) hot-reload client: it opens
+      // ws://localhost:3001 and reload()s resources via blob:http://localhost,
+      // both of which fail noisily in every remote viewer's console. We serve
+      // static snapshots, so live-reload is irrelevant — drop the script block.
+      const html = readFileSync(file, "utf8").replace(
+        /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*?ws:\/\/localhost(?:(?!<\/script>)[\s\S])*?<\/script>/gi,
+        "",
+      );
+      res.writeHead(200, { "content-type": MIME[ext] });
+      res.end(html);
+      return;
+    }
+    res.writeHead(200, { "content-type": MIME[ext] || "application/octet-stream" });
     createReadStream(file).pipe(res);
     return;
   }
