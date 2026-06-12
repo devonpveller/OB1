@@ -82,24 +82,48 @@ function thoughtUrl(id: string): string {
 
 // --- Embedding & Metadata Extraction ---
 
+// The embedding model has a fixed physical batch (512 tokens for the local
+// bge-m3 on llama-cpp-embed); a single input above it is hard-rejected. We embed
+// only a bounded prefix of the text. This loses NO retrievable information: the
+// full document is stored in source.content, and the chunk-worker embeds every
+// 1200-char chunk separately, so deep retrieval (match_source_chunks) covers the
+// whole document — only this coarse source-level summary vector is prefix-bounded.
+// The budget is halved and retried on a "too large" error so dense/CJK text that
+// tokenizes past the limit at MAX_EMBED_CHARS still succeeds with a smaller prefix.
+const MAX_EMBED_CHARS = Number(Deno.env.get("MAX_EMBED_CHARS") || "1500");
+
 async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${EMBEDDING_API_BASE}/embeddings`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${EMBEDDING_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: EMBEDDING_MODEL,
-      input: text,
-    }),
-  });
-  if (!r.ok) {
+  let budget = Math.min(text.length, MAX_EMBED_CHARS);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const r = await fetch(`${EMBEDDING_API_BASE}/embeddings`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${EMBEDDING_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        input: text.slice(0, budget),
+      }),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      return d.data[0].embedding;
+    }
     const msg = await r.text().catch(() => "");
+    if (
+      (r.status === 500 || r.status === 413) &&
+      /too large|batch size|context|n_tokens|exceed/i.test(msg) &&
+      budget > 200
+    ) {
+      budget = Math.floor(budget / 2); // shrink and retry under the batch limit
+      continue;
+    }
     throw new Error(`Embedding API failed: ${r.status} ${msg}`);
   }
-  const d = await r.json();
-  return d.data[0].embedding;
+  throw new Error(
+    "Embedding API failed: input could not be reduced under the embedding batch limit",
+  );
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
