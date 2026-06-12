@@ -36,6 +36,13 @@ export function scrubSnippetContent(raw) {
     if (n === 9 || n === 10 || n === 13 || (n > 31 && n !== 127)) stripped += ch;
   }
   return stripped
+    // Scraped pages carry ad pixels, trackers, and scripts. A private wiki must
+    // never auto-fire them or leak the reader's IP, so neutralize every external
+    // resource load: drop <script>/<style> blocks and standalone resource tags,
+    // and turn markdown images into non-loading links (click to view, never auto-GET).
+    .replace(/<\s*(script|style)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, "[$1 removed]")
+    .replace(/<\s*\/?\s*(img|iframe|script|style|link|source|video|audio|embed|object|track)\b[^>]*>/gi, "[$1 removed]")
+    .replace(/!\[([^\]]*)\]\(\s*(https?:[^)\s]+)[^)]*\)/gi, "[image: $1]($2)")
     .replace(/<\s*\/?\s*(thought|source)\b[^>]*>/gi, "[$1-tag-redacted]")
     .replace(/ignore\s+(all\s+)?previous\s+instructions?/gi, "[redacted injection attempt]")
     .replace(/disregard\s+(the\s+)?above/gi, "[redacted injection attempt]")
