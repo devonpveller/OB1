@@ -56,6 +56,26 @@ export function scrubSnippetContent(raw) {
     .replace(/new\s+instructions\s*:/gi, "[redacted injection attempt]");
 }
 
+// Cap pathologically large source bodies before they reach Quartz. The OWUI
+// knowledge-collection migration imported whole chat-history / document dumps as
+// single "sources" (some 12-17MB, 300k+ lines); Quartz's regex markdown/wikilink
+// parsers backtrack catastrophically on multi-megabyte content and HANG the
+// whole build (one bad file pins a worker at 100% CPU forever). A leaf page is a
+// readable preview, not a full archive — truncate with a visible notice. 128KB
+// is far larger than any real article yet safely below the megabyte scale that
+// bombs the parser.
+const MAX_LEAF_CHARS = 131072;
+export function capLeafContent(raw) {
+  const s = String(raw == null ? "" : raw);
+  if (s.length <= MAX_LEAF_CHARS) return s;
+  const droppedMb = ((s.length - MAX_LEAF_CHARS) / 1048576).toFixed(1);
+  return (
+    s.slice(0, MAX_LEAF_CHARS) +
+    `\n\n*[… truncated ${droppedMb} MB — this source exceeds the wiki page display limit; ` +
+    `open the original source for the full content …]*\n`
+  );
+}
+
 // Render one source row → the full `content/source/<id>.md` file body.
 // Expects: { id, title?, url?, content?, content_type?, notebook?, created_at? }.
 export function renderSourceLeaf(r) {
@@ -102,7 +122,7 @@ export function renderSourceLeaf(r) {
       if (needs.length) qs.push("**Sub-questions explored:**", ...needs.map((x) => `- ${scrubSnippetContent(String(x))}`), "");
       if (follow.length) qs.push("**Follow-up queries:**", ...follow.map((x) => `- ${scrubSnippetContent(String(x))}`), "");
     }
-    const ev = scrubSnippetContent(r.content || "").trim();
+    const ev = scrubSnippetContent(capLeafContent(r.content)).trim();
     const evidence = ev
       ? [
           "> [!note]- Evidence — the grounded claims &amp; gaps this synthesis is built from",
@@ -114,7 +134,7 @@ export function renderSourceLeaf(r) {
   } else {
     body = [
       ...(r.url ? [`Source: ${scrubSnippetContent(r.url)}`, ""] : []),
-      scrubSnippetContent(r.content || ""),
+      scrubSnippetContent(capLeafContent(r.content)),
       "",
     ];
   }

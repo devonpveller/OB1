@@ -58,6 +58,21 @@ RUN set -e; \
   sed -i "s#() => document.location.reload(true)#() => { if (!window.__neEditing) document.location.reload(true) }#" "$P"; \
   grep -q "if (!window.__neEditing) document.location.reload(true)" "$P"
 
+# Build resilience: the compiler's orphan-sweep deletes leaf pages while a
+# rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that
+# vanished underneath it. Upstream trace() then THROWS (in a worker) or
+# process.exit(1) (main thread), which deadlocks the shared esbuild service and
+# kills the ENTIRE build — a ~30-min loss every time a sweep overlaps a rebuild.
+# Make trace() SKIP a vanished file (warn + return) instead; a swept orphan
+# SHOULD be absent from the output anyway, and every other error path is
+# unchanged. grep-asserted so a QUARTZ_REF bump that moves the signature fails
+# the build loudly.
+RUN set -e; \
+  T=/quartz/quartz/util/trace.ts; \
+  grep -q 'export function trace(msg: string, err: Error) {' "$T"; \
+  sed -i 's#export function trace(msg: string, err: Error) {#&\n  if ((err as any)?.code === "ENOENT") { console.warn("[skip vanished file] " + msg); return }#' "$T"; \
+  grep -q 'skip vanished file' "$T"
+
 # ── Workbench overlay (plan §2.5 / P0.4) ────────────────────────────────────
 # Layer custom Quartz components over the pinned clone ADDITIVELY, so
 # QUARTZ_REF stays upgradeable. New component files are copied in; the upstream

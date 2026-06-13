@@ -581,6 +581,11 @@ services:
       # idle-swap publishes them.
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "${WIKI_VIEWER_POLL_INTERVAL_MS:-5000}"
+      # A cold full build of the whole vault holds every parsed AST in memory at
+      # once; the default ~2GB node heap OOMs as the vault grows (the OWUI
+      # knowledge-collection migration pushed it past 12k pages / ~200MB). Give
+      # the Quartz builder real headroom (host has ~94GB). Configurable.
+      NODE_OPTIONS: "--max-old-space-size=${WIKI_VIEWER_HEAP_MB:-20480}"
     volumes:
       - openbrain-wiki-data:/wiki:ro
       # Binary assets (images now, audio later) live on their own volume,
