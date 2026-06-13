@@ -54,11 +54,19 @@ Deno.test("decideReuse — OD-5 strict+stale", () => {
   assertEquals(decideReuse({ ...base, confidence: 0.3 }, 0.5, now), "research"); // below floor
 });
 
-Deno.test("backstopDecision — OD-6", () => {
-  assertEquals(backstopDecision({ elapsedMs: 0, maxMs: 1000, fetches: 0, maxFetches: 10, openGaps: 0 }).reason, "complete");
-  assertEquals(backstopDecision({ elapsedMs: 2000, maxMs: 1000, fetches: 0, maxFetches: 10, openGaps: 3 }).reason, "wall_time");
-  assertEquals(backstopDecision({ elapsedMs: 0, maxMs: 1000, fetches: 10, maxFetches: 10, openGaps: 3 }).reason, "max_fetch");
-  assertEquals(backstopDecision({ elapsedMs: 0, maxMs: 1000, fetches: 1, maxFetches: 10, openGaps: 3 }).stop, false);
+Deno.test("backstopDecision — OD-6 (sources vs timeouts are separate ceilings)", () => {
+  const base = { elapsedMs: 0, maxMs: 1000, sources: 0, maxSources: 10, timeouts: 0, maxTimeouts: 20, openGaps: 3 };
+  assertEquals(backstopDecision({ ...base, openGaps: 0 }).reason, "complete");
+  assertEquals(backstopDecision({ ...base, elapsedMs: 2000 }).reason, "wall_time");
+  // Source-yield ceiling: 10 real sources retrieved.
+  assertEquals(backstopDecision({ ...base, sources: 10 }).reason, "max_fetch");
+  // Timeout ceiling is SEPARATE: 20 timeouts with ZERO sources still stops, but
+  // for a DIFFERENT, nameable reason (the network, not the source budget).
+  assertEquals(backstopDecision({ ...base, timeouts: 20 }).reason, "max_timeouts");
+  // maxTimeouts=0 disables the timeout ceiling.
+  assertEquals(backstopDecision({ ...base, timeouts: 99, maxTimeouts: 0 }).stop, false);
+  // Under both ceilings → keep going.
+  assertEquals(backstopDecision({ ...base, sources: 1, timeouts: 1 }).stop, false);
 });
 
 Deno.test("reuseMetric gap ratio", () => {

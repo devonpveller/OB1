@@ -452,7 +452,13 @@ services:
       FETCH_TIMEOUT_MS: ${RESEARCH_FETCH_TIMEOUT_MS:-15000}
       FETCH_MAX_CHARS: ${RESEARCH_FETCH_MAX_CHARS:-8000}
       FETCH_CONCURRENCY: ${RESEARCH_FETCH_CONCURRENCY:-4}
+      # MAX_FETCH = source-YIELD budget (pages actually retrieved). NOT charged
+      # for timeouts or OB cache reuse — those are tracked separately.
       MAX_FETCH: ${RESEARCH_MAX_FETCH:-40}
+      # MAX_FETCH_TIMEOUTS = SEPARATE ceiling on wasted fetch timeouts (flaky
+      # Tor). Stops a run burning wall-time on dead fetches and surfaces a
+      # distinct "max_timeouts" stop reason. 0 disables this ceiling.
+      MAX_FETCH_TIMEOUTS: ${RESEARCH_MAX_FETCH_TIMEOUTS:-20}
       MAX_WALL_MS: ${RESEARCH_MAX_WALL_MS:-300000}
       # Page fetches egress through Tor (socks5h = DNS via Tor too, matching
       # SearXNG). Reaches tor:9050 over ai-stack_default. "" = direct. Needs the

@@ -96,19 +96,29 @@ export function decideReuse(c: ClaimReuseInput, floor: number, now: Date): Reuse
 }
 
 // ── OD-6 adaptive backstop (cannot hallucinate; degrades to honest gaps) ─────
+// `sources` and `timeouts` are tracked SEPARATELY and capped by DIFFERENT
+// variables: `maxSources` (MAX_FETCH) is the source-YIELD budget — how many
+// pages we actually retrieved — while `maxTimeouts` (MAX_FETCH_TIMEOUTS) bounds
+// WASTED attempts that timed out (a flaky Tor circuit). Conflating the two (the
+// old single `fetches` counter) meant a run that timed out 40 times reported the
+// same "max_fetch" as one that fetched 40 real sources. They are different
+// signals and now stop for different, nameable reasons.
 export interface BackstopState {
   elapsedMs: number;
   maxMs: number;
-  fetches: number;
-  maxFetches: number;
+  sources: number;       // successfully fetched pages (the yield)
+  maxSources: number;    // MAX_FETCH
+  timeouts: number;      // fetch attempts that timed out (wasted)
+  maxTimeouts: number;   // MAX_FETCH_TIMEOUTS (0 disables this ceiling)
   openGaps: number;
 }
-export interface BackstopDecision { stop: boolean; reason: "complete" | "wall_time" | "max_fetch" | "continue"; }
+export interface BackstopDecision { stop: boolean; reason: "complete" | "wall_time" | "max_fetch" | "max_timeouts" | "continue"; }
 
 export function backstopDecision(s: BackstopState): BackstopDecision {
   if (s.openGaps <= 0) return { stop: true, reason: "complete" };
   if (s.elapsedMs >= s.maxMs) return { stop: true, reason: "wall_time" };
-  if (s.fetches >= s.maxFetches) return { stop: true, reason: "max_fetch" };
+  if (s.sources >= s.maxSources) return { stop: true, reason: "max_fetch" };
+  if (s.maxTimeouts > 0 && s.timeouts >= s.maxTimeouts) return { stop: true, reason: "max_timeouts" };
   return { stop: false, reason: "continue" };
 }
 

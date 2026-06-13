@@ -16,7 +16,15 @@ const SEARCH_K = parseInt(env("SEARCH_K", "8"), 10);
 const CLAIM_SHORTLIST_K = parseInt(env("CLAIM_SHORTLIST_K", "12"), 10);
 const CONFIDENCE_FLOOR = parseFloat(env("CONFIDENCE_FLOOR", "0.50"));
 const FETCH_CONCURRENCY = parseInt(env("FETCH_CONCURRENCY", "4"), 10);
+// MAX_FETCH = the source-YIELD budget: how many pages we actually RETRIEVE
+// (successful fetches). It is NOT charged for timeouts or cache reuse anymore.
 const MAX_FETCH = parseInt(env("MAX_FETCH", "24"), 10);
+// MAX_FETCH_TIMEOUTS = a SEPARATE ceiling on wasted attempts that time out (a
+// flaky Tor circuit). Stops a run that is burning wall-time on dead fetches
+// without yielding sources, and surfaces "max_timeouts" as a distinct stop
+// reason so the operator knows it was the network, not the source budget. Set
+// 0 to disable the ceiling (only MAX_FETCH / wall-time then bound the run).
+const MAX_FETCH_TIMEOUTS = parseInt(env("MAX_FETCH_TIMEOUTS", "20"), 10);
 const MAX_WALL_MS = parseInt(env("MAX_WALL_MS", "180000"), 10);
 const EMBEDDING_MAX_CHARS = parseInt(env("EMBEDDING_MAX_CHARS", "4000"), 10);
 // #5 — drop claims farther than this (cosine distance) from the query so an
@@ -37,11 +45,15 @@ const ARTICLE_SOURCE_CHARS = parseInt(env("ARTICLE_SOURCE_CHARS", "8000"), 10);
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
 export interface Page { url: string; title: string; content: string; domain: string; }
+// A fetch attempt's outcome — distinguishes a retrieved source from a timeout
+// (flaky Tor) from any other failure. `page` is non-null only when outcome="ok".
+export type FetchOutcome = "ok" | "timeout" | "error";
+export interface FetchResult { page: Page | null; outcome: FetchOutcome; }
 export interface Deps {
   embed(text: string): Promise<number[]>;
   chat(system: string, user: string, opts?: { json?: boolean; nothink?: boolean }): Promise<string>;
   searchWeb(query: string, k: number): Promise<SearchHit[]>;
-  fetchPage(url: string): Promise<Page | null>;
+  fetchPage(url: string): Promise<FetchResult>;
   delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
 
@@ -174,6 +186,9 @@ export interface RunResult {
   metrics: ReturnType<typeof reuseMetric>;
   curator: Record<string, unknown> | null;
   backstop: string;
+  /** Separated fetch accounting — yield (sources) vs waste (timeouts/errors) vs
+   *  free OB cache reuse. `attempts` = sources + timeouts + errors. */
+  fetchStats: { sources: number; timeouts: number; errors: number; reused: number; attempts: number };
 }
 export type Progress = (phase: string, message: string, counters?: Record<string, number>) => Promise<void>;
 
@@ -236,7 +251,15 @@ export async function runResearch(
   const staged: Page[] = seeds.map((s) => ({
     url: s.url, title: s.title, content: s.content, domain: domainOf(s.url),
   }));
-  let fetches = 0;
+  // Separate fetch accounting (was a single conflated `fetches`):
+  //   sourcesFetched — pages successfully RETRIEVED over the network (the yield)
+  //   fetchTimeouts  — attempts that timed out (flaky Tor) — wasted, not yield
+  //   fetchErrors    — non-OK / non-HTML / empty / network errors
+  //   reuseHits      — OB cache hits (free; not a network fetch, not budget-charged)
+  let sourcesFetched = 0;
+  let fetchTimeouts = 0;
+  let fetchErrors = 0;
+  let reuseHits = 0;
   let backstop = "complete";
   let needs: string[] = [query];
   let gapNeeds: string[] = [];
@@ -269,21 +292,41 @@ export async function runResearch(
     // again — up to MAX_ROUNDS or the backstop.
     const gatherQueries = async (queries: string[]): Promise<boolean> => {
       for (const q of queries) {
-        const d = backstopDecision({ elapsedMs: Date.now() - t0, maxMs: MAX_WALL_MS, fetches, maxFetches: MAX_FETCH, openGaps: 1 });
+        const d = backstopDecision({
+          elapsedMs: Date.now() - t0, maxMs: MAX_WALL_MS,
+          sources: sourcesFetched, maxSources: MAX_FETCH,
+          timeouts: fetchTimeouts, maxTimeouts: MAX_FETCH_TIMEOUTS, openGaps: 1,
+        });
         if (d.stop && d.reason !== "complete") { backstop = d.reason; return false; }
         await progress("gather", `searching: ${q}`);
         let hits: SearchHit[] = [];
         try { hits = await deps.searchWeb(q, SEARCH_K); } catch { hits = []; }
         const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url));
-        const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, MAX_FETCH - fetches)));
-        const pages = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
+        // Headroom = remaining SOURCE budget plus remaining TIMEOUT budget, so we
+        // keep trying URLs while either bound has room (a timeout shouldn't burn
+        // the source budget). Cache hits below are free and never charged.
+        const sourceRoom = Math.max(0, MAX_FETCH - sourcesFetched);
+        const timeoutRoom = MAX_FETCH_TIMEOUTS > 0 ? Math.max(0, MAX_FETCH_TIMEOUTS - fetchTimeouts) : SEARCH_K;
+        const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, sourceRoom + timeoutRoom)));
+        const results = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
           const existing = await existingFreshSource(client, h.url).catch(() => null);
-          if (existing) return { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page;
-          return await deps.fetchPage(h.url);
+          if (existing) {
+            return { outcome: "reuse" as const, page: { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page };
+          }
+          const fr = await deps.fetchPage(h.url);
+          return { outcome: fr.outcome, page: fr.page };
         });
-        fetches += toFetch.length;
-        for (const p of pages) if (p && p.content) staged.push(p);
-        await progress("gather", `staged ${staged.length} sources (${fetches} fetched)`, { staged: staged.length, fetches });
+        for (const r of results) {
+          if (r.outcome === "reuse") { reuseHits++; if (r.page) staged.push(r.page); }
+          else if (r.outcome === "ok") { sourcesFetched++; if (r.page && r.page.content) staged.push(r.page); }
+          else if (r.outcome === "timeout") { fetchTimeouts++; }
+          else { fetchErrors++; }
+        }
+        await progress(
+          "gather",
+          `staged ${staged.length} (ok ${sourcesFetched} · timeout ${fetchTimeouts} · err ${fetchErrors} · reused ${reuseHits})`,
+          { staged: staged.length, sources: sourcesFetched, timeouts: fetchTimeouts, errors: fetchErrors, reused: reuseHits },
+        );
       }
       return true;
     };
@@ -369,14 +412,18 @@ export async function runResearch(
         await progress("gather", `preliminary research on ${gapLines.length} open gap(s)`, { gaps: gapLines.length });
         const base = staged.length; // the article occupies [Source 1..base]
         for (const gap of gapLines) {
-          if (fetches >= PRELIM_MAX_FETCH) { backstop = "max_fetch"; break; }
+          if (sourcesFetched >= PRELIM_MAX_FETCH) { backstop = "max_fetch"; break; }
           let hits: SearchHit[] = [];
           try { hits = await deps.searchWeb(gap, SEARCH_K); } catch { hits = []; }
           const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url))
-            .slice(0, Math.max(0, Math.min(2, PRELIM_MAX_FETCH - fetches)));
-          const pages = await mapLimit(fresh, FETCH_CONCURRENCY, (h) => deps.fetchPage(h.url));
-          fetches += fresh.length;
-          const prelimPages = pages.filter((p): p is Page => !!(p && p.content));
+            .slice(0, Math.max(0, Math.min(2, PRELIM_MAX_FETCH - sourcesFetched)));
+          const results = await mapLimit(fresh, FETCH_CONCURRENCY, (h) => deps.fetchPage(h.url));
+          const prelimPages: Page[] = [];
+          for (const fr of results) {
+            if (fr.outcome === "ok" && fr.page && fr.page.content) { sourcesFetched++; prelimPages.push(fr.page); }
+            else if (fr.outcome === "timeout") { fetchTimeouts++; }
+            else { fetchErrors++; }
+          }
           const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, prelimPages);
           if (qPrelim.length) {
             await progress("screen", `quarantined ${qPrelim.length} preliminary source(s) for prompt injection`,
@@ -491,5 +538,14 @@ export async function runResearch(
     reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
     citedSources: cited.map((p) => ({ url: p.url, title: p.title })),
     metrics, curator, backstop,
+    // Separated fetch accounting (yield vs waste) — informs the operator/user
+    // why a run stopped: sources retrieved vs timeouts vs errors vs cache reuse.
+    fetchStats: {
+      sources: sourcesFetched,
+      timeouts: fetchTimeouts,
+      errors: fetchErrors,
+      reused: reuseHits,
+      attempts: sourcesFetched + fetchTimeouts + fetchErrors,
+    },
   };
 }

@@ -16,7 +16,7 @@
  */
 import { Pool } from "postgres";
 import { extractTextFromHtml, extractTitle, domainOf } from "./lib.ts";
-import { runResearch, type Deps, type SearchHit, type Page, type Progress } from "./harness.ts";
+import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const DB_HOST = env("DB_HOST", "openbrain-db");
@@ -121,9 +121,16 @@ async function searchWeb(query: string, k: number): Promise<SearchHit[]> {
   })).filter((h: SearchHit) => h.url);
 }
 
-async function fetchPage(url: string): Promise<Page | null> {
+// Returns a DISCRIMINATED result so the harness can tell a real source from a
+// TIMEOUT (flaky Tor circuit) from another fetch error — three different signals
+// that used to collapse into a single `null`. `outcome`:
+//   "ok"      — a usable page was retrieved (page is non-null)
+//   "timeout" — the FETCH_TIMEOUT_MS abort fired (the page never responded)
+//   "error"   — non-OK HTTP, non-HTML content, empty body, or a network error
+async function fetchPage(url: string): Promise<FetchResult> {
   const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  let timedOut = false;
+  const t = setTimeout(() => { timedOut = true; ac.abort(); }, FETCH_TIMEOUT_MS);
   try {
     const client = fetchClient();
     const r = await fetch(url, {
@@ -131,15 +138,17 @@ async function fetchPage(url: string): Promise<Page | null> {
       headers: { "user-agent": FETCH_UA },
       ...(client ? { client } : {}),
     });
-    if (!r.ok) return null;
+    if (!r.ok) return { page: null, outcome: "error" };
     const ct = r.headers.get("content-type") || "";
-    if (ct && !/text\/html|text\/plain|application\/xhtml/i.test(ct)) return null;
+    if (ct && !/text\/html|text\/plain|application\/xhtml/i.test(ct)) return { page: null, outcome: "error" };
     const html = await r.text();
     const content = extractTextFromHtml(html).slice(0, FETCH_MAX_CHARS);
-    if (!content) return null;
-    return { url, title: extractTitle(html) || domainOf(url), content, domain: domainOf(url) };
-  } catch {
-    return null;
+    if (!content) return { page: null, outcome: "error" };
+    return { page: { url, title: extractTitle(html) || domainOf(url), content, domain: domainOf(url) }, outcome: "ok" };
+  } catch (e) {
+    // AbortError fired by our timeout vs any other network failure.
+    const isTimeout = timedOut || (e as Error)?.name === "AbortError";
+    return { page: null, outcome: isTimeout ? "timeout" : "error" };
   } finally {
     clearTimeout(t);
   }
@@ -196,7 +205,7 @@ async function runJob(jobId: string): Promise<void> {
         followup_queries: res.followupQueries, gaps: res.gaps,
         cited_sources: res.citedSources, reuse_claims: res.reuseClaims,
         thread_id: (res.curator?.thread_id as string) ?? thread_id, reuse_ratio: 1 - res.metrics.gap_ratio,
-        curator: res.curator, backstop: res.backstop,
+        curator: res.curator, backstop: res.backstop, fetch_stats: res.fetchStats,
       }), JSON.stringify(res.metrics), JSON.stringify({ phase: "done", message: `backstop=${res.backstop}` })],
     );
   } catch (e) {

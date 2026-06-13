@@ -7,7 +7,7 @@
  * Run: deno run --allow-net --allow-env orchestrator.test.ts
  */
 import { Pool } from "postgres";
-import { runResearch, type Deps, type SearchHit, type Page } from "./harness.ts";
+import { runResearch, type Deps, type SearchHit, type Page, type FetchResult } from "./harness.ts";
 
 const pool = new Pool({
   hostname: Deno.env.get("DB_HOST") || "ob-claims-test", port: 5432,
@@ -45,8 +45,8 @@ const deps: Deps = {
       { url: "https://vet.example.org/purr", title: "Why cats purr", snippet: "purring" },
       { url: "https://blog.example.com/cats", title: "Cat blog", snippet: "cats" },
     ]),
-  fetchPage: (url: string): Promise<Page | null> =>
-    Promise.resolve({ url, title: "Why cats purr", content: "Cats purr at ~25Hz when content and to self-soothe.", domain: "vet.example.org" }),
+  fetchPage: (url: string): Promise<FetchResult> =>
+    Promise.resolve({ page: { url, title: "Why cats purr", content: "Cats purr at ~25Hz when content and to self-soothe.", domain: "vet.example.org" }, outcome: "ok" }),
   delegateToCurator: (pkg) => { curatorPkg = pkg; return Promise.resolve({ thread_id: pkg.thread_id, persist: { sources_written: (pkg.sources as unknown[]).length }, claims: { claimsWritten: 2 } }); },
 };
 
