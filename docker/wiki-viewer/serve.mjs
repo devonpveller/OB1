@@ -19,6 +19,16 @@ const MIME = {
   ".map": "application/json", ".webmanifest": "application/manifest+json",
 };
 
+// Quartz emits the client bundle + styles under STABLE names (postscript.js,
+// prescript.js, index.css) whose CONTENT changes every rebuild. With no cache
+// headers, browsers/CDNs cache them by URL and keep serving the OLD bundle after
+// a fix ships (the cause of "I cleared cache but the page still misbehaves").
+// Force always-revalidate on rebuildable assets; let true static (fonts/images)
+// cache for a day.
+const REBUILDABLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".xml", ".map", ".webmanifest", ".txt"]);
+const cacheControl = (ext) =>
+  REBUILDABLE.has(ext) ? "no-cache, must-revalidate" : "public, max-age=86400";
+
 function resolve(urlPath) {
   // Quartz prettyURLs emit `foo/index.html`; also tolerate `foo.html`.
   let p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]);
@@ -73,11 +83,14 @@ http.createServer((req, res) => {
         /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*?ws:\/\/localhost(?:(?!<\/script>)[\s\S])*?<\/script>/gi,
         "",
       );
-      res.writeHead(200, { "content-type": MIME[ext] });
+      res.writeHead(200, { "content-type": MIME[ext], "cache-control": "no-cache, must-revalidate" });
       res.end(html);
       return;
     }
-    res.writeHead(200, { "content-type": MIME[ext] || "application/octet-stream" });
+    res.writeHead(200, {
+      "content-type": MIME[ext] || "application/octet-stream",
+      "cache-control": cacheControl(ext),
+    });
     createReadStream(file).pipe(res);
     return;
   }

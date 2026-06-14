@@ -1036,7 +1036,14 @@ document.addEventListener("nav", () => {
         fetch(saveUrl())
           .then((r) => r.json())
           .then((j) => {
-            const c = j && j.source && j.source.content
+            const src = (j && j.source) || {}
+            // research_synthesis leaves render the readable PROSE
+            // (metadata.prose_synthesis with [Source N] links + an Evidence
+            // callout), NOT the raw [SOURCED] grounded-claims `content`. Never
+            // overwrite that baked prose with the raw content — only hydrate
+            // sources whose `content` IS the display body (web_article/manual/…).
+            if (src.content_type === "research_synthesis") return
+            const c = src.content
             if (c != null && !view) article.innerHTML = renderMd(c)
           })
           .catch(() => {})
