@@ -1028,27 +1028,33 @@ document.addEventListener("nav", () => {
       })
     }
 
-    // Sources: hydrate the body with the LIVE content so what you see equals
-    // what you edit (the static leaf can be stale in the preview / between
-    // compiles), and RE-hydrate on any source save — inline edit OR re-upload.
+    // The baked leaf is the CANONICAL render: a "# title" heading, a
+    // "Source: <url>" line (web_article/manual), readable PROSE (research
+    // synthesis), all via Quartz's FULL markdown. We do NOT replace it on load —
+    // doing so with the lightweight client renderer dropped the Source link /
+    // heading / prose (the "renders for a few frames, then flips to a degraded
+    // view" bug). We only RE-render after an explicit in-page edit or re-upload,
+    // where a live refresh is expected; a normal compile regenerates the leaf.
     if (isSource && article) {
       const hydrateBody = () => {
         fetch(saveUrl())
           .then((r) => r.json())
           .then((j) => {
             const src = (j && j.source) || {}
-            // research_synthesis leaves render the readable PROSE
-            // (metadata.prose_synthesis with [Source N] links + an Evidence
-            // callout), NOT the raw [SOURCED] grounded-claims `content`. Never
-            // overwrite that baked prose with the raw content — only hydrate
-            // sources whose `content` IS the display body (web_article/manual/…).
+            // research_synthesis leaves are PROSE (metadata.prose_synthesis), not
+            // the raw [SOURCED] `content` — never overwrite them.
             if (src.content_type === "research_synthesis") return
             const c = src.content
-            if (c != null && !view) article.innerHTML = renderMd(c)
+            if (c == null || view) return
+            // Reproduce the non-prose leaf layout so the Source link survives the
+            // re-render (renderSourceLeaf prepends "Source: <url>" from the url;
+            // inlineMd needs an explicit [..](..) — it does not autolink bare URLs).
+            const head = src.url ? "Source: [" + src.url + "](" + src.url + ")\n\n" : ""
+            article.innerHTML = renderMd(head + c)
           })
           .catch(() => {})
       }
-      hydrateBody()
+      // NOTE: intentionally NOT called on load — only on explicit save/upload.
       document.addEventListener("workbench-source-saved", hydrateBody)
     }
 
