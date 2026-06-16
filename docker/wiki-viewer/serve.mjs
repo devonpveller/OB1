@@ -48,8 +48,19 @@ function resolve(urlPath) {
 // published)? Serve a self-refreshing splash so a reader who arrives mid-build
 // sees "Building…" rather than a connection error. Once a snapshot exists this
 // never shows again — nightly rebuilds keep serving the previous snapshot.
+//
+// COMPLETENESS gate (2026-06-15): a build is "ready" ONLY if it has index.html
+// AND the core ComponentResources (styles + client JS). A build that crashed
+// after emitting page HTML but before these would otherwise be served with every
+// asset 404'd as text/plain (the wiki-render incident). Requiring the full set
+// means an incomplete /srv/current falls back to the splash instead of serving a
+// broken, unstyled page. (Belt-and-suspenders with the entrypoint publish gate.)
+const REQUIRED = ["index.html", "index.css", "prescript.js", "postscript.js"];
 function buildReady() {
-  try { return statSync(join(ROOT, "index.html")).isFile(); } catch { return false; }
+  try {
+    for (const f of REQUIRED) if (!statSync(join(ROOT, f)).isFile()) return false;
+    return true;
+  } catch { return false; }
 }
 const SPLASH = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

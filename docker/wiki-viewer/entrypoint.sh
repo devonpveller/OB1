@@ -37,6 +37,31 @@ STABLE_SECONDS="${WIKI_REBUILD_STABLE_SECONDS:-8}" # build output must be unchan
 POLL="${WIKI_REBUILD_POLL_SECONDS:-15}"            # how often to check
 BUILD_PORT="${WIKI_BUILD_PORT:-8081}"
 
+# A build is COMPLETE only when index.html AND the core ComponentResources
+# (styles + client JS) are all present. A crashed / mid-emit build (page HTML but
+# no CSS/JS) must NEVER be published — serving it 404s every asset as text/plain
+# (the 2026-06-15 wiki-render incident: a racey nightly builder restart hit
+# EADDRINUSE :3001, crashed mid-emit, and the asset-less public got snapshotted +
+# served). This single gate is the durable fix; the self-heal + port-wait below
+# remove the trigger and stop a dead builder from freezing public forever.
+is_complete() {
+  d="$1"
+  [ -f "$d/index.html" ] && [ -f "$d/index.css" ] && \
+  [ -f "$d/prescript.js" ] && [ -f "$d/postscript.js" ]
+}
+# Quartz --serve binds a hot-reload WebSocket on :3001. Relaunching the builder
+# before the old one frees it → EADDRINUSE → the new build dies mid-emit. Wait
+# (bounded) for :3001 to be free. Uses /proc/net/tcp* (no tools needed): port
+# 3001 = 0x0BB9, listen state = 0A.
+wait_port_3001_free() {
+  k=0
+  while [ "$k" -lt 20 ]; do
+    if ! grep -qiE ':0BB9 .* 0A ' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then return 0; fi
+    sleep 1; k=$((k + 1))
+  done
+  echo "[wiki-viewer] WARN :3001 still busy after ${k}s — relaunching anyway (self-heal will retry)"
+}
+
 # On a cold stack the compiler may not have produced pages yet; Quartz errors on
 # empty content, so wait (bounded) for the home page before starting the builder.
 i=0
@@ -61,17 +86,23 @@ node /serve.mjs &
 SERVE_PID=$!
 trap 'kill "$BUILD_PID" "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
 
-# Wait (bounded) for the first emitted build. Generous — a large vault's first
-# build can take several minutes; we want a COMPLETE first snapshot.
+# Wait (bounded) for the first COMPLETE build (index.html + css + js, not just
+# index.html — the old check published build-0 too early, before ComponentResources
+# emitted, which is itself a way to serve an asset-less site). Generous — a large
+# vault's first build can take several minutes.
 i=0
 while [ "$i" -lt 240 ]; do
-  [ -f /quartz/public/index.html ] && { echo "[wiki-viewer] first build emitted"; break; }
+  is_complete /quartz/public && { echo "[wiki-viewer] first COMPLETE build emitted"; break; }
   sleep 2; i=$((i + 1))
 done
 
-# Publish the initial snapshot — serve.mjs now serves the site (splash ends).
-rm -rf /srv/build-0; cp -a /quartz/public /srv/build-0
-ln -sfn /srv/build-0 /srv/current
+# Publish the initial snapshot ONLY if complete — serve.mjs serves the splash
+# until /srv/current is a complete build, so a slow/failed first build shows
+# "Building…" rather than a broken page.
+if is_complete /quartz/public; then
+  rm -rf /srv/build-0; cp -a /quartz/public /srv/build-0
+  is_complete /srv/build-0 && ln -sfn /srv/build-0 /srv/current
+fi
 
 # Idle-gated snapshot loop + nightly clean rebuild.
 REBUILD_HH=$(printf '%02d' "${WIKI_VIEWER_REBUILD_HOUR:-0}" 2>/dev/null || echo 00)
@@ -93,6 +124,18 @@ while true; do
     last_rebuild_day="$(date +%j)"
     echo "[wiki-viewer] nightly clean rebuild — restarting builder (sweeps orphan pages)"
     kill "$BUILD_PID" 2>/dev/null || true; wait "$BUILD_PID" 2>/dev/null || true
+    wait_port_3001_free   # avoid EADDRINUSE :3001 on relaunch (the incident trigger)
+    npx quartz build --serve --port "$BUILD_PORT" &
+    BUILD_PID=$!
+    continue
+  fi
+
+  # Self-heal: if the builder process died (e.g. a crash mid-rebuild), restart it.
+  # Without this, public goes stale and the wiki freezes on the last snapshot
+  # forever — exactly how the 2026-06-15 incident persisted after the crash.
+  if ! kill -0 "$BUILD_PID" 2>/dev/null; then
+    echo "[wiki-viewer] builder process is dead — restarting"
+    wait_port_3001_free
     npx quartz build --serve --port "$BUILD_PORT" &
     BUILD_PID=$!
     continue
@@ -105,14 +148,26 @@ while true; do
   # builder is mid-rebuild, wait — never snapshot a half-written site.
   newest=$(find /quartz/public -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -1 | cut -d. -f1)
   [ -n "$newest" ] && [ $((now - newest)) -lt "$STABLE_SECONDS" ] && continue
+  # COMPLETENESS gate: never publish an asset-less build. If a crash/mid-emit
+  # left public with HTML but no CSS/JS, keep serving the last complete snapshot.
+  if ! is_complete /quartz/public; then
+    echo "[wiki-viewer] build output incomplete (missing css/js) — NOT publishing; keeping last good snapshot"
+    continue
+  fi
   # Is the viewer idle? If a reader is active, defer the swap (don't yank content).
   if [ "$idle" -lt "$IDLE_SECONDS" ]; then
     echo "[wiki-viewer] new build ready; viewer active (${idle}s < ${IDLE_SECONDS}s idle) — deferring swap"
     continue
   fi
   N=$((N + 1))
-  rm -rf "/srv/build-$N.tmp" && cp -a /quartz/public "/srv/build-$N.tmp" \
-    && rm -rf "/srv/build-$N" && mv "/srv/build-$N.tmp" "/srv/build-$N"
+  rm -rf "/srv/build-$N.tmp" && cp -a /quartz/public "/srv/build-$N.tmp"
+  # Re-verify the COPY is complete — guards against cp racing a build that started
+  # rewriting public mid-snapshot (would otherwise publish a torn dir).
+  if ! is_complete "/srv/build-$N.tmp"; then
+    echo "[wiki-viewer] snapshot copy was torn (build raced the cp) — discarding, will retry"
+    rm -rf "/srv/build-$N.tmp"; N=$((N - 1)); continue
+  fi
+  rm -rf "/srv/build-$N" && mv "/srv/build-$N.tmp" "/srv/build-$N"
   ln -sfn "/srv/build-$N" /srv/current     # atomic swap; in-flight reads keep the old dir
   rm -rf "/srv/build-$((N - 2))"           # keep current + one previous
   touch "$marker"
