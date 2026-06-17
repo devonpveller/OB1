@@ -55,7 +55,11 @@ function resolve(urlPath) {
 // asset 404'd as text/plain (the wiki-render incident). Requiring the full set
 // means an incomplete /srv/current falls back to the splash instead of serving a
 // broken, unstyled page. (Belt-and-suspenders with the entrypoint publish gate.)
-const REQUIRED = ["index.html", "index.css", "prescript.js", "postscript.js"];
+// static/contentIndex.json = the search/graph index. The entrypoint's publish
+// gate guarantees it's present AND a terminated JSON before a snapshot goes live
+// (a torn one truncates → client "Unterminated string in JSON"); requiring its
+// presence here too means a snapshot somehow missing it falls back to the splash.
+const REQUIRED = ["index.html", "index.css", "prescript.js", "postscript.js", "static/contentIndex.json"];
 function buildReady() {
   try {
     for (const f of REQUIRED) if (!statSync(join(ROOT, f)).isFile()) return false;

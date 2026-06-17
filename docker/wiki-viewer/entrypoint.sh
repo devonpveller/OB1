@@ -49,6 +49,21 @@ is_complete() {
   [ -f "$d/index.html" ] && [ -f "$d/index.css" ] && \
   [ -f "$d/prescript.js" ] && [ -f "$d/postscript.js" ]
 }
+# Quartz's search/graph index (static/contentIndex.json) is the LARGEST and
+# LAST-written emit (~32MB here). A snapshot cp that races a rebuild captures it
+# TORN — truncated mid-string — which the browser fails to parse ("Unterminated
+# string in JSON", the 2026-06-16 incident). Guard it: present AND terminated with
+# `}`. `tail -c 1` seeks to EOF, so this is cheap even on a 32MB file. If no index
+# is emitted (config without ContentIndex) there's nothing to guard → pass.
+index_ok() {
+  ci="$1/static/contentIndex.json"
+  [ -f "$ci" ] || return 0
+  [ "$(tail -c 1 "$ci")" = "}" ] || return 1
+  # searchIndex.json (split out 2026-06-16 for scalability: lean contentIndex for
+  # graph/explorer, full search index lazy-loaded) is even larger → validate it too.
+  si="$1/static/searchIndex.json"
+  [ ! -f "$si" ] || [ "$(tail -c 1 "$si")" = "}" ]
+}
 # Quartz --serve binds a hot-reload WebSocket on :3001. Relaunching the builder
 # before the old one frees it → EADDRINUSE → the new build dies mid-emit. Wait
 # (bounded) for :3001 to be free. Uses /proc/net/tcp* (no tools needed): port
@@ -92,16 +107,16 @@ trap 'kill "$BUILD_PID" "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
 # vault's first build can take several minutes.
 i=0
 while [ "$i" -lt 240 ]; do
-  is_complete /quartz/public && { echo "[wiki-viewer] first COMPLETE build emitted"; break; }
+  is_complete /quartz/public && index_ok /quartz/public && { echo "[wiki-viewer] first COMPLETE build emitted"; break; }
   sleep 2; i=$((i + 1))
 done
 
-# Publish the initial snapshot ONLY if complete — serve.mjs serves the splash
-# until /srv/current is a complete build, so a slow/failed first build shows
-# "Building…" rather than a broken page.
-if is_complete /quartz/public; then
+# Publish the initial snapshot ONLY if complete (render assets) AND its search
+# index is intact — serve.mjs serves the splash until /srv/current is a complete
+# build, so a slow/failed first build shows "Building…" rather than a broken page.
+if is_complete /quartz/public && index_ok /quartz/public; then
   rm -rf /srv/build-0; cp -a /quartz/public /srv/build-0
-  is_complete /srv/build-0 && ln -sfn /srv/build-0 /srv/current
+  is_complete /srv/build-0 && index_ok /srv/build-0 && ln -sfn /srv/build-0 /srv/current
 fi
 
 # Idle-gated snapshot loop + nightly clean rebuild.
@@ -148,10 +163,15 @@ while true; do
   # builder is mid-rebuild, wait — never snapshot a half-written site.
   newest=$(find /quartz/public -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -1 | cut -d. -f1)
   [ -n "$newest" ] && [ $((now - newest)) -lt "$STABLE_SECONDS" ] && continue
-  # COMPLETENESS gate: never publish an asset-less build. If a crash/mid-emit
-  # left public with HTML but no CSS/JS, keep serving the last complete snapshot.
+  # COMPLETENESS gate: never publish an asset-less build (missing css/js) OR one
+  # whose search index is still mid-write (torn JSON). Keep serving the last good
+  # snapshot until the build is whole.
   if ! is_complete /quartz/public; then
     echo "[wiki-viewer] build output incomplete (missing css/js) — NOT publishing; keeping last good snapshot"
+    continue
+  fi
+  if ! index_ok /quartz/public; then
+    echo "[wiki-viewer] search index mid-write (contentIndex.json not terminated) — NOT publishing yet"
     continue
   fi
   # Is the viewer idle? If a reader is active, defer the swap (don't yank content).
@@ -161,9 +181,10 @@ while true; do
   fi
   N=$((N + 1))
   rm -rf "/srv/build-$N.tmp" && cp -a /quartz/public "/srv/build-$N.tmp"
-  # Re-verify the COPY is complete — guards against cp racing a build that started
-  # rewriting public mid-snapshot (would otherwise publish a torn dir).
-  if ! is_complete "/srv/build-$N.tmp"; then
+  # Re-verify the COPY is complete AND its search index is intact — guards against
+  # cp racing a build that started rewriting public mid-snapshot (the torn-index
+  # 2026-06-16 incident: render assets fine but contentIndex.json truncated).
+  if ! is_complete "/srv/build-$N.tmp" || ! index_ok "/srv/build-$N.tmp"; then
     echo "[wiki-viewer] snapshot copy was torn (build raced the cp) — discarding, will retry"
     rm -rf "/srv/build-$N.tmp"; N=$((N - 1)); continue
   fi
