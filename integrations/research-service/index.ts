@@ -411,6 +411,30 @@ Deno.serve({ port: PORT }, async (req) => {
     return Response.json({ job_id: jobId, status: "queued" }, { status: 202 });
   }
 
+  // List recent jobs (pull model): a thin client calls this to show "your recent
+  // research" and retrieve completed runs without holding the chat open. Optional
+  // ?status= exact filter, ?limit= (1-50, default 10). Newest first.
+  if (req.method === "GET" && url.pathname === "/research/jobs") {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10) || 10));
+    const statusFilter = url.searchParams.get("status");
+    const c = await pool.connect();
+    try {
+      const r = await c.queryObject(
+        `SELECT j.id, j.status, left(j.query, 120) AS query, j.created_at, j.finished_at,
+           CASE WHEN j.status='queued' THEN
+             (SELECT count(*)+1 FROM research_jobs q
+              WHERE q.status='queued' AND q.created_at < j.created_at)::int
+           END AS queue_position
+         FROM research_jobs j
+         WHERE ($2::text IS NULL OR j.status = $2)
+         ORDER BY j.created_at DESC LIMIT $1`,
+        [limit, statusFilter],
+      );
+      return Response.json({ jobs: r.rows });
+    } finally { c.release(); }
+  }
+
   const jobMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})(\/stream)?$/i);
   if (req.method === "GET" && jobMatch) {
     if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -420,15 +444,33 @@ Deno.serve({ port: PORT }, async (req) => {
       const c = await pool.connect();
       try {
         // queue_position (1-based rank among queued jobs ahead of this one) +
-        // queue_depth (total queued) let an inlet show "Queued — position N of M"
-        // while a job waits behind others. Both are null/0 once it starts running.
+        // queue_depth (total queued) let an inlet show "Queued — position N of M".
+        // eta_seconds is a self-calibrating estimate off the average run duration
+        // over the last 7 days (fallback 1800s): for a QUEUED job it's position ×
+        // avg (time until it even starts); for the RUNNING job it's the remaining
+        // run time (avg − elapsed, floored at 0) so the active job reads "~Xm left"
+        // instead of an ambiguous position-less state. Null for terminal jobs.
         const r = await c.queryObject(
-          `SELECT j.id, j.status, j.progress, j.result, j.metrics, j.error,
+          `WITH avg_run AS (
+             SELECT coalesce((SELECT extract(epoch FROM avg(finished_at - started_at))
+                              FROM research_jobs
+                              WHERE status='done' AND started_at IS NOT NULL
+                                AND finished_at > now() - interval '7 days'), 1800) AS secs)
+           SELECT j.id, j.status, j.progress, j.result, j.metrics, j.error,
              CASE WHEN j.status='queued' THEN
                (SELECT count(*)+1 FROM research_jobs q
                 WHERE q.status='queued' AND q.created_at < j.created_at)::int
              END AS queue_position,
-             (SELECT count(*) FROM research_jobs r WHERE r.status='queued')::int AS queue_depth
+             (SELECT count(*) FROM research_jobs r WHERE r.status='queued')::int AS queue_depth,
+             CASE
+               WHEN j.status='queued' THEN
+                 round((SELECT count(*)+1 FROM research_jobs q
+                        WHERE q.status='queued' AND q.created_at < j.created_at)
+                       * (SELECT secs FROM avg_run))::int
+               WHEN j.status='running' AND j.started_at IS NOT NULL THEN
+                 greatest(0, round((SELECT secs FROM avg_run)
+                                   - extract(epoch FROM (now() - j.started_at))))::int
+             END AS eta_seconds
            FROM research_jobs j WHERE j.id=$1`, [id]);
         return r.rows[0] ?? null;
       } finally { c.release(); }
