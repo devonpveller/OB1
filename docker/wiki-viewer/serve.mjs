@@ -9,6 +9,14 @@ import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } f
 import { join, normalize, extname } from "node:path";
 
 const ROOT = "/srv/current"; // a symlink → /srv/build-N (swapped atomically)
+// The builder's LIVE output. Fallback for a just-created note/folder that the
+// incremental watcher has already emitted but the idle-gated snapshot hasn't
+// published yet — so user-created content appears in ~seconds instead of waiting
+// out the idle gate (2026-06-17). Serving an individual fresh page from here is
+// safe: render assets (css/js) still come from the complete snapshot.
+const LIVE = "/quartz/public";
+const PUBLISH_FLAG = "/tmp/ne-publish"; // serve.mjs sets it; the entrypoint loop
+// honors it to publish promptly (bypassing the idle gate) so the nav/index catch up.
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const MIME = {
   ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript",
@@ -29,19 +37,25 @@ const REBUILDABLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".xml", ".
 const cacheControl = (ext) =>
   REBUILDABLE.has(ext) ? "no-cache, must-revalidate" : "public, max-age=86400";
 
-function resolve(urlPath) {
-  // Quartz prettyURLs emit `foo/index.html`; also tolerate `foo.html`.
-  let p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]);
-  if (p.endsWith("/")) p = p.slice(0, -1);
-  const base = normalize(join(ROOT, p || "/"));
-  if (!base.startsWith(ROOT)) return null; // path traversal guard
+function resolveIn(root, p) {
+  const base = normalize(join(root, p || "/"));
+  if (!base.startsWith(root)) return null; // path traversal guard
   const candidates = p === "" || p === "/"
-    ? [join(ROOT, "index.html")]
+    ? [join(root, "index.html")]
     : [base, `${base}.html`, join(base, "index.html")];
   for (const c of candidates) {
     try { const st = statSync(c); if (st.isFile()) return c; } catch { /* next */ }
   }
   return null;
+}
+function resolve(urlPath) {
+  // Quartz prettyURLs emit `foo/index.html`; also tolerate `foo.html`.
+  let p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]);
+  if (p.endsWith("/")) p = p.slice(0, -1);
+  // Published snapshot first (stable, gated); fall back to the LIVE builder
+  // output for a page that exists there but isn't snapshotted yet (a brand-new
+  // note/folder), so it's reachable in ~seconds.
+  return resolveIn(ROOT, p) || resolveIn(LIVE, p);
 }
 
 // No good build yet (cold start / very first compile, before /srv/current is
@@ -88,6 +102,10 @@ http.createServer((req, res) => {
   }
   const file = resolve(req.url || "/");
   if (file) {
+    // Served from the LIVE builder output ⇒ this page isn't in the published
+    // snapshot yet (a just-created note/folder). Signal the snapshot loop to
+    // publish promptly (bypassing the idle gate) so the nav/index catch up.
+    if (file.startsWith(LIVE)) { try { writeFileSync(PUBLISH_FLAG, "1"); } catch { /* */ } }
     const ext = extname(file);
     if (ext === ".html") {
       // Strip the Quartz dev-mode (`build --serve`) hot-reload client: it opens

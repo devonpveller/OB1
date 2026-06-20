@@ -44,7 +44,10 @@ RUN set -e; \
   grep -q 'explorerUl.querySelectorAll(":scope > li:not(.overflow-end)")' "$E"; \
   grep -q 'if (!searchLayout) return' "$S"; \
   sed -i 's#^\(\s*\)if (!searchLayout) return$#\1if (!searchLayout) return\n\1searchLayout.replaceChildren()#' "$S"; \
-  grep -q 'searchLayout.replaceChildren()' "$S"
+  grep -q 'searchLayout.replaceChildren()' "$S"; \
+  grep -q 'if (!explorerUl) continue' "$E"; \
+  sed -i 's#    if (!explorerUl) continue#    if (!explorerUl) continue\n    const onExplorerWheel = (e) => { const b = explorerUl.scrollTop; const m = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? explorerUl.clientHeight : 1; explorerUl.scrollTop += e.deltaY * m; if (explorerUl.scrollTop !== b) e.preventDefault() }\n    explorerUl.addEventListener("wheel", onExplorerWheel, { passive: false })\n    window.addCleanup(() => explorerUl.removeEventListener("wheel", onExplorerWheel))#' "$E"; \
+  grep -q 'onExplorerWheel' "$E"
 
 # Guard the dev hot-reload so the NotesEditor (P3.5) can suppress it while a
 # Live-Preview editor is open (autosave must not hard-reload the page out from

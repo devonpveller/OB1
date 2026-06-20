@@ -174,8 +174,11 @@ while true; do
     echo "[wiki-viewer] search index mid-write (contentIndex.json not terminated) — NOT publishing yet"
     continue
   fi
-  # Is the viewer idle? If a reader is active, defer the swap (don't yank content).
-  if [ "$idle" -lt "$IDLE_SECONDS" ]; then
+  # Is the viewer idle? If a reader is active, defer the swap (don't yank content)
+  # — UNLESS a user just created a note/folder (serve.mjs set /tmp/ne-publish when
+  # it served fresh content from the live output), in which case publish promptly
+  # so the nav/contentIndex catch up in seconds instead of waiting out the idle gate.
+  if [ "$idle" -lt "$IDLE_SECONDS" ] && [ ! -f /tmp/ne-publish ]; then
     echo "[wiki-viewer] new build ready; viewer active (${idle}s < ${IDLE_SECONDS}s idle) — deferring swap"
     continue
   fi
@@ -192,5 +195,6 @@ while true; do
   ln -sfn "/srv/build-$N" /srv/current     # atomic swap; in-flight reads keep the old dir
   rm -rf "/srv/build-$((N - 2))"           # keep current + one previous
   touch "$marker"
-  echo "[wiki-viewer] viewer idle — snapshot #$N swapped live"
+  rm -f /tmp/ne-publish                    # consumed: prompt-publish request satisfied
+  echo "[wiki-viewer] snapshot #$N swapped live"
 done

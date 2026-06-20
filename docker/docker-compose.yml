@@ -441,6 +441,11 @@ services:
       CHAT_API_KEY: not-needed
       CHAT_MODEL: ${RESEARCH_CHAT_MODEL:-qwen36-27b}
       NOTHINK_SUFFIX: ":nothink"
+      # Concurrency: how many research jobs run at once across the stack. Default
+      # 1 = strict global serialization so a burst of research can't flood LiteLLM
+      # / the llm-queue admission controller; jobs queue FIFO and a drain loop
+      # dispatches them. Raise only if the inference plane can absorb concurrent fan-out.
+      RESEARCH_MAX_CONCURRENCY: ${RESEARCH_MAX_CONCURRENCY:-1}
       # Harness tuning (override via .env). See PLAN §5/§6 + OD-5/OD-6.
       SEARCH_K: ${RESEARCH_SEARCH_K:-8}
       CLAIM_SHORTLIST_K: ${RESEARCH_CLAIM_SHORTLIST_K:-12}

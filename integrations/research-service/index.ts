@@ -42,6 +42,13 @@ const SEARCH_K_DEFAULT = parseInt(env("SEARCH_K", "8"), 10);
 const FETCH_TIMEOUT_MS = parseInt(env("FETCH_TIMEOUT_MS", "15000"), 10);
 const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "8000"), 10);
 const PORT = parseInt(env("PORT", "8000"), 10);
+// How many research jobs may run at once across the whole stack. Default 1 =
+// strict global serialization: at most one job's ~12-15 LLM calls are ever in
+// flight, so a burst of research requests can't flood LiteLLM / the llm-queue
+// admission controller and delay all chat traffic. Raise only if the inference
+// plane can absorb concurrent research fan-out. Jobs queue (FIFO by created_at)
+// and a background drain loop dispatches them; see drainLoop() below.
+const MAX_CONCURRENCY = Math.max(1, parseInt(env("RESEARCH_MAX_CONCURRENCY", "1"), 10) || 1);
 
 // Privacy: page fetches egress through Tor (socks5h = DNS resolved through Tor,
 // matching SearXNG's settings.yml). Reaches `tor:9050` via ai-stack_default.
@@ -67,7 +74,69 @@ function fetchClient(): Deno.HttpClient | null {
   return _httpClient;
 }
 
-const pool = new Pool({ hostname: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER, password: DB_PASSWORD }, 8);
+// Self-reconnecting pool. deno-postgres v0.19.3 keeps handing back a pooled
+// connection whose socket died after an openbrain-db restart, so every query
+// throws `BrokenPipe (os error 32)` until the process restarts — surfacing to
+// the OWUI deep_research tool as a research 500 (while web search is fine).
+// ResilientPool preserves the `pool.connect()` / `client.release()` contract:
+// it builds the Pool lazily, liveness-probes each checkout with `SELECT 1`, and
+// rebuilds the Pool (single-flight) on a connection-class error, so a dropped DB
+// self-heals without an operator restart. See memory: openbrain-mcp-stale-db-connection.
+const DB_CONFIG = { hostname: DB_HOST, port: DB_PORT, database: DB_NAME, user: DB_USER, password: DB_PASSWORD };
+const POOL_SIZE = 8;
+type PgClient = Awaited<ReturnType<Pool["connect"]>>;
+
+function isConnError(e: unknown): boolean {
+  const m = (e instanceof Error ? `${e.name}: ${e.message}` : String(e)).toLowerCase();
+  // deno-postgres raises every connection-level failure as `ConnectionError`
+  // (name match = future-proof); the message list is a backstop for raw
+  // Deno/OS socket errors that surface before the driver wraps them.
+  return /connectionerror|broken pipe|os error 32|connection reset|connection refused|connection closed|connection terminated|session was terminated|terminated unexpectedly|econnreset|bad resource id|unexpected eof|not connected/.test(m);
+}
+
+class ResilientPool {
+  #pool = new Pool(DB_CONFIG, POOL_SIZE, true); // lazy: connect on first use
+  #rebuilding: Promise<void> | null = null;
+
+  async connect(): Promise<PgClient> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let client: PgClient | undefined;
+      try {
+        client = await this.#pool.connect();
+        await client.queryArray("SELECT 1"); // probe: rejects a dead socket here
+        return client;
+      } catch (e) {
+        lastErr = e;
+        try { client?.release(); } catch { /* already broken */ }
+        if (!isConnError(e)) throw e; // a real query/SQL error — surface it
+        await this.#rebuild(); // dead socket(s) in the pool — get fresh ones
+        // Brief backoff: Postgres refuses connections for a sub-second window
+        // right after a restart (even once pg_isready reports ready), so a tight
+        // retry would burn all attempts in that gap. Riding it out lets the
+        // in-flight request recover instead of returning one transient 500.
+        await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  // Swap in a fresh Pool synchronously, drain the old one in the background.
+  // Single-flight so concurrent failures share one rebuild.
+  #rebuild(): Promise<void> {
+    if (!this.#rebuilding) {
+      const old = this.#pool;
+      this.#pool = new Pool(DB_CONFIG, POOL_SIZE, true);
+      this.#rebuilding = (async () => { try { await old.end(); } catch { /* dead */ } })()
+        .finally(() => { this.#rebuilding = null; });
+    }
+    return this.#rebuilding;
+  }
+
+  end(): Promise<void> { return this.#pool.end(); }
+}
+
+const pool = new ResilientPool();
 
 // ── Real seams ───────────────────────────────────────────────────────────────
 async function embed(text: string): Promise<number[]> {
@@ -169,7 +238,13 @@ const realDeps: Deps = { embed, chat, searchWeb, fetchPage, delegateToCurator };
 void SEARCH_K_DEFAULT; // tunable also read inside harness.ts; surfaced here for ops visibility
 
 // ── Job runner (OD-3 async job+poll) ─────────────────────────────────────────
-async function runJob(jobId: string): Promise<void> {
+// A job claimed by the drain loop: it has already been flipped to status='running'
+// (started_at set) by the atomic claim, so executeJob only runs the harness and
+// persists the terminal state — it never re-claims.
+type ClaimedJob = { jobId: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown> };
+
+async function executeJob(job: ClaimedJob): Promise<void> {
+  const { jobId, query, thread_id, origin, options } = job;
   const client = await pool.connect();
   const progress: Progress = async (phase, message, counters = {}) => {
     await client.queryObject(
@@ -178,12 +253,6 @@ async function runJob(jobId: string): Promise<void> {
     ).catch(() => {});
   };
   try {
-    const j = await client.queryObject<{ query: string; thread_id: string | null; origin: string; options: Record<string, unknown> }>(
-      `UPDATE research_jobs SET status='running', started_at=now() WHERE id=$1
-       RETURNING query, thread_id, origin, options`, [jobId],
-    );
-    if (!j.rows.length) return;
-    const { query, thread_id, origin, options } = j.rows[0];
     const seedSources = Array.isArray(options?.seed_sources)
       ? (options.seed_sources as Array<{ url: string; title: string; content: string }>)
       : undefined;
@@ -216,6 +285,72 @@ async function runJob(jobId: string): Promise<void> {
   } finally {
     client.release();
   }
+}
+
+// ── Drain loop: serialize queued jobs, bounded by MAX_CONCURRENCY ────────────
+// POST /research only enqueues (status='queued'); this single background loop is
+// the sole dispatcher. It claims the oldest queued job FIFO with FOR UPDATE SKIP
+// LOCKED (atomic even if MAX_CONCURRENCY>1 claims overlap), runs it, and on
+// completion frees the slot. With the default MAX_CONCURRENCY=1 this is strict
+// global serialization — exactly one research fan-out hits the inference plane at
+// a time. wake() nudges the loop the instant a job arrives or finishes; a 2s
+// safety poll backstops any missed wake.
+let _wake: (() => void) | null = null;
+function wake(): void { _wake?.(); }
+function waitForWake(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => { if (settled) return; settled = true; _wake = null; clearTimeout(t); resolve(); };
+    const t = setTimeout(finish, timeoutMs);
+    _wake = finish;
+  });
+}
+
+async function claimNext(): Promise<ClaimedJob | null> {
+  const c = await pool.connect();
+  try {
+    const r = await c.queryObject<{ id: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown> }>(
+      `UPDATE research_jobs SET status='running', started_at=now()
+       WHERE id = (SELECT id FROM research_jobs WHERE status='queued'
+                   ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+       RETURNING id, query, thread_id, origin, options`,
+    );
+    if (!r.rows.length) return null;
+    const row = r.rows[0];
+    return { jobId: row.id, query: row.query, thread_id: row.thread_id, origin: row.origin, options: row.options };
+  } finally { c.release(); }
+}
+
+async function drainLoop(): Promise<void> {
+  let inFlight = 0;
+  while (true) {
+    // Fill every free slot with the next queued job.
+    while (inFlight < MAX_CONCURRENCY) {
+      let job: ClaimedJob | null = null;
+      try { job = await claimNext(); }
+      catch (e) { console.error("claimNext failed:", (e as Error).message); break; }
+      if (!job) break; // queue empty
+      inFlight++;
+      executeJob(job)
+        .catch((e) => console.error("executeJob failed:", (e as Error).message))
+        .finally(() => { inFlight--; wake(); });
+    }
+    // Slots full or queue drained — sleep until a job arrives/finishes (or poll).
+    await waitForWake(2000);
+  }
+}
+
+// On boot, any row still 'running' was orphaned by a restart/crash (its in-process
+// task is gone) and would hang 'running' forever — fixing a latent bug in the old
+// fire-and-forget dispatch. Requeue so the drain loop re-runs it from the top.
+async function recoverOrphanedJobs(): Promise<void> {
+  try {
+    const c = await pool.connect();
+    try {
+      const r = await c.queryObject(`UPDATE research_jobs SET status='queued', started_at=NULL WHERE status='running'`);
+      if (r.rowCount) console.log(`requeued ${r.rowCount} orphaned running job(s) at boot`);
+    } finally { c.release(); }
+  } catch (e) { console.error("orphan recovery failed:", (e as Error).message); }
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -270,7 +405,9 @@ Deno.serve({ port: PORT }, async (req) => {
       );
       jobId = r.rows[0].id;
     } finally { c.release(); }
-    runJob(jobId).catch((e) => console.error("runJob failed:", (e as Error).message));
+    // Enqueue only — the background drain loop is the sole dispatcher (serializes
+    // research fan-out so it can't flood LiteLLM). wake() lets it pick this up now.
+    wake();
     return Response.json({ job_id: jobId, status: "queued" }, { status: 202 });
   }
 
@@ -282,7 +419,17 @@ Deno.serve({ port: PORT }, async (req) => {
     const getJob = async () => {
       const c = await pool.connect();
       try {
-        const r = await c.queryObject(`SELECT id, status, progress, result, metrics, error FROM research_jobs WHERE id=$1`, [id]);
+        // queue_position (1-based rank among queued jobs ahead of this one) +
+        // queue_depth (total queued) let an inlet show "Queued — position N of M"
+        // while a job waits behind others. Both are null/0 once it starts running.
+        const r = await c.queryObject(
+          `SELECT j.id, j.status, j.progress, j.result, j.metrics, j.error,
+             CASE WHEN j.status='queued' THEN
+               (SELECT count(*)+1 FROM research_jobs q
+                WHERE q.status='queued' AND q.created_at < j.created_at)::int
+             END AS queue_position,
+             (SELECT count(*) FROM research_jobs r WHERE r.status='queued')::int AS queue_depth
+           FROM research_jobs j WHERE j.id=$1`, [id]);
         return r.rows[0] ?? null;
       } finally { c.release(); }
     };
@@ -309,4 +456,8 @@ Deno.serve({ port: PORT }, async (req) => {
   return new Response("not found", { status: 404 });
 });
 
-console.log(`openbrain-research listening on :${PORT} (curator=${CURATOR_URL}, search=${SEARCH_API_BASE})`);
+console.log(`openbrain-research listening on :${PORT} (curator=${CURATOR_URL}, search=${SEARCH_API_BASE}, max_concurrency=${MAX_CONCURRENCY})`);
+
+// Requeue any jobs orphaned by a restart, then start the single background
+// dispatcher. This is the ONLY thing that runs queued jobs.
+void recoverOrphanedJobs().then(() => { void drainLoop(); });

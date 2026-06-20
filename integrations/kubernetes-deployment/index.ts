@@ -51,15 +51,83 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
   return Number(this as unknown as bigint);
 };
 
-// --- PostgreSQL Connection Pool ---
-
-const pool = new Pool({
+// --- PostgreSQL Connection Pool (self-reconnecting) ---
+//
+// deno-postgres v0.19.3 does NOT recycle a pooled connection whose socket died
+// (e.g. after openbrain-db restarts: recovery scripts, gpu-reset, Docker Desktop
+// restart, watchtower). It hands the dead connection straight back, so every
+// subsequent query throws `BrokenPipe (os error 32)` until the PROCESS is
+// restarted — the failure that surfaces to Open WebUI tools as HTTP 500.
+// See memory: openbrain-mcp-stale-db-connection.
+//
+// ResilientPool keeps the exact `pool.connect()` / `client.release()` contract
+// (so no call site changes) but: (a) builds the underlying Pool LAZILY so a
+// down DB never throws at construction; (b) liveness-probes each checkout with a
+// cheap `SELECT 1` and, on a connection-class failure, (c) rebuilds the Pool
+// once (single-flight) and retries — so a dropped DB self-heals without an
+// operator `docker restart`.
+const DB_CONFIG = {
   hostname: DB_HOST,
   port: DB_PORT,
   database: DB_NAME,
   user: DB_USER,
   password: DB_PASSWORD,
-}, 20);
+};
+const POOL_SIZE = 20;
+type PgClient = Awaited<ReturnType<Pool["connect"]>>;
+
+function isConnError(e: unknown): boolean {
+  const m = (e instanceof Error ? `${e.name}: ${e.message}` : String(e)).toLowerCase();
+  // deno-postgres raises every connection-level failure as `ConnectionError`
+  // (name match = future-proof); the message list is a backstop for raw
+  // Deno/OS socket errors that surface before the driver wraps them.
+  return /connectionerror|broken pipe|os error 32|connection reset|connection refused|connection closed|connection terminated|session was terminated|terminated unexpectedly|econnreset|bad resource id|unexpected eof|not connected/.test(m);
+}
+
+class ResilientPool {
+  #pool = new Pool(DB_CONFIG, POOL_SIZE, true); // lazy: connect on first use
+  #rebuilding: Promise<void> | null = null;
+
+  async connect(): Promise<PgClient> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let client: PgClient | undefined;
+      try {
+        client = await this.#pool.connect();
+        await client.queryArray("SELECT 1"); // probe: rejects a dead socket here
+        return client;
+      } catch (e) {
+        lastErr = e;
+        try { client?.release(); } catch { /* already broken */ }
+        if (!isConnError(e)) throw e; // a real query/SQL error — surface it
+        await this.#rebuild(); // dead socket(s) in the pool — get fresh ones
+        // Brief backoff: Postgres refuses connections for a sub-second window
+        // right after a restart (even once pg_isready reports ready), so a tight
+        // retry would burn all attempts in that gap. Riding it out lets the
+        // in-flight request recover instead of returning one transient 500.
+        await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  // Swap in a fresh Pool synchronously (so concurrent connect()s immediately use
+  // it) and drain the old one in the background. Single-flight: concurrent
+  // failures share one rebuild instead of spawning a pool per caller.
+  #rebuild(): Promise<void> {
+    if (!this.#rebuilding) {
+      const old = this.#pool;
+      this.#pool = new Pool(DB_CONFIG, POOL_SIZE, true);
+      this.#rebuilding = (async () => { try { await old.end(); } catch { /* dead */ } })()
+        .finally(() => { this.#rebuilding = null; });
+    }
+    return this.#rebuilding;
+  }
+
+  end(): Promise<void> { return this.#pool.end(); }
+}
+
+const pool = new ResilientPool();
 
 type ThoughtMatch = {
   id: string;
