@@ -164,6 +164,17 @@ services:
       # This is what makes "email waits while healthy, sends when done/failed".
       NEXT_TRIGGER_URL: http://openbrain-digest:8080/run
       RESEARCH_URL: http://openbrain-research:8000
+      # Deep-dive research is allowed to take a long time (the chain starts ~01:00
+      # local for exactly this reason). The wait-gate must WAIT for each job's
+      # genuine terminal state (done/error), NOT bail on an early timeout — so the
+      # per-job poll deadline is hours, not the old 10 min. A job only becomes
+      # email-only on a real terminal error, never because the clock ran out while
+      # it was still queued/running. (research-service itself rides out llm-queue
+      # 429 backpressure now, so "running" means real progress.)
+      RESEARCH_WAIT_MS: ${RESEARCH_WAIT_MS:-7200000}   # 2h per job
+      # ON audio (TTS) terminal-wait — generous so a slow-but-working render is not
+      # cut off mid-generation. A genuine 'failed' still returns immediately.
+      ON_JOB_WAIT_MS: ${ON_JOB_WAIT_MS:-7200000}       # 2h
       ON_BASE: http://open_notebook:5055
       # User-facing base for the EMAIL episode links — external + Authelia-gated.
       ON_PUBLIC_BASE: ${ON_PUBLIC_BASE:-https://notebook.devinveller.ai}

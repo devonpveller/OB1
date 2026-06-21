@@ -710,7 +710,7 @@ function splitOverlongParagraph(text: string, maxChars: number): string[] {
   return out;
 }
 
-async function getEmbedding(text: string): Promise<number[]> {
+async function getEmbedding(text: string, attempt = 0): Promise<number[]> {
   const res = await fetch(`${EMBED_BASE}/embeddings`, {
     method: "POST",
     headers: {
@@ -724,6 +724,29 @@ async function getEmbedding(text: string): Promise<number[]> {
   });
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
+    // bge-m3 rejects any input longer than its 512-token physical batch with a
+    // 500 "input (N tokens) is too large to process". chunkForEmbedding sizes
+    // by CHARACTERS (~1100 ≈ ~360 tokens at the assumed 3 chars/token), but
+    // token-dense bodies (URLs, code, CJK, dense markdown) run closer to ~2
+    // chars/token — so a legal-length chunk can still tokenize to ~550 tokens
+    // and 500. Before this guard, that single chunk broke out of the email's
+    // chunk loop, the email never reached `ok`, its gmail_id was never written
+    // to the sync-log, and the WHOLE email re-ingested every day (fresh
+    // created_at), polluting the daily digest window with the same 3 emails
+    // (see 2026-06-21 incident). Halve-and-retry so a dense chunk degrades to
+    // a prefix embedding instead of failing the email. The full chunk text is
+    // still stored; only the embedding covers a prefix — acceptable, and the
+    // same approach as the OB1 getEmbedding fix.
+    const tooLarge = res.status === 500 &&
+      /too large to process|physical batch|n_ubatch|\(\d+ tokens\)/i.test(msg);
+    if (tooLarge && attempt < 5 && text.length > 256) {
+      const truncated = text.slice(0, Math.floor(text.length * 0.6));
+      console.log(
+        `   (embed input too large at ${text.length} chars; ` +
+          `retrying at ${truncated.length} chars [attempt ${attempt + 1}])`,
+      );
+      return await getEmbedding(truncated, attempt + 1);
+    }
     throw new Error(`Embedding failed: ${res.status} ${msg}`);
   }
   const d = await res.json();

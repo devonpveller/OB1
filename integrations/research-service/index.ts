@@ -34,6 +34,23 @@ const CHAT_API_BASE = env("CHAT_API_BASE", "http://llama-cpp:8080/v1").replace(/
 const CHAT_API_KEY = env("CHAT_API_KEY", "not-needed");
 const CHAT_MODEL = env("CHAT_MODEL", "qwen36-27b");
 const NOTHINK_SUFFIX = env("NOTHINK_SUFFIX", ":nothink");
+// llm-queue admission attribution. The B2 admission controller reads the OpenAI
+// `user` body field (LiteLLM forwards it — see config/litellm.config.yaml §B2)
+// as the caller key and maps it to a priority CLASS with its own acceptable-wait
+// budget (llm-queue policy.py). Only the ASYNC overnight digest/podcast lane
+// (origin "notebook") attributes to the generous `ob-research` batch budget — it
+// is happy to wait a long time for a deep dive. INTERACTIVE OWUI deep_research
+// (origin "owui") and agent/manual jobs are left UNattributed so they keep their
+// existing default-lane queue treatment — do not regress OWUI's separately-tuned
+// concurrent-research behaviour. Set per-origin via RESEARCH_QUEUE_USER.
+const RESEARCH_QUEUE_USER = env("RESEARCH_QUEUE_USER", "ob-research");
+const QUEUE_USER_BY_ORIGIN: Record<string, string> = { notebook: RESEARCH_QUEUE_USER };
+// A 429 from the llm-queue is BACKPRESSURE ("projected wait exceeds budget"), not
+// a failure — the queue expects the caller to come back. LiteLLM only retries 3×
+// before surfacing it, which a sustained morning saturation blows past, killing
+// the whole research job. The research fan-out is allowed to take hours, so ride
+// out saturation with capped exponential backoff for up to this budget per call.
+const CHAT_RETRY_BUDGET_MS = parseInt(env("CHAT_RETRY_BUDGET_MS", "1500000"), 10); // 25 min
 
 const MCP_ACCESS_KEY = env("MCP_ACCESS_KEY");
 const CURATOR_URL = env("CURATOR_URL", "http://openbrain-curator:8000").replace(/\/+$/, "");
@@ -162,20 +179,59 @@ async function embed(text: string): Promise<number[]> {
   throw new Error("embedding failed after shrinking");
 }
 
-async function chat(system: string, user: string, opts: { json?: boolean; nothink?: boolean } = {}): Promise<string> {
+async function chat(
+  system: string,
+  user: string,
+  opts: { json?: boolean; nothink?: boolean } = {},
+  queueUser = "",
+): Promise<string> {
   const model = opts.nothink ? `${CHAT_MODEL}${NOTHINK_SUFFIX}` : CHAT_MODEL;
-  const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${CHAT_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model, temperature: 0.2,
-      ...(opts.json ? { response_format: { type: "json_object" } } : {}),
-      messages: [{ role: "system", content: system }, { role: "user", content: user }],
-    }),
+  const body = JSON.stringify({
+    model, temperature: 0.2,
+    ...(queueUser ? { user: queueUser } : {}),
+    ...(opts.json ? { response_format: { type: "json_object" } } : {}),
+    messages: [{ role: "system", content: system }, { role: "user", content: user }],
   });
-  if (!r.ok) throw new Error(`chat ${r.status}: ${(await r.text()).slice(0, 300)}`);
-  const d = await r.json();
-  return d?.choices?.[0]?.message?.content ?? "";
+  const deadline = Date.now() + CHAT_RETRY_BUDGET_MS;
+  for (let attempt = 0; ; attempt++) {
+    let r: Response;
+    try {
+      r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${CHAT_API_KEY}`, "Content-Type": "application/json" },
+        body,
+      });
+    } catch (e) {
+      // Connection reset / network blip — transient. Ride it out within budget.
+      if (Date.now() >= deadline) throw e;
+      await sleep(backoffMs(attempt));
+      continue;
+    }
+    if (r.ok) {
+      const d = await r.json();
+      return d?.choices?.[0]?.message?.content ?? "";
+    }
+    const text = (await r.text()).slice(0, 300);
+    // 429 = llm-queue backpressure; 502/503/504 = upstream swap/restart blips.
+    // All are "come back later", not genuine errors — retry within budget. A
+    // real 4xx (400/401/422) or 500 surfaces immediately.
+    const retryable = r.status === 429 || r.status === 502 || r.status === 503 || r.status === 504;
+    if (retryable && Date.now() < deadline) {
+      console.log(`chat ${r.status} (backpressure); retry in ${Math.round(backoffMs(attempt) / 1000)}s [attempt ${attempt + 1}]`);
+      await sleep(backoffMs(attempt));
+      continue;
+    }
+    throw new Error(`chat ${r.status}: ${text}`);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+// Capped exponential backoff with jitter: ~10s, 15s, 22s … cap 90s.
+function backoffMs(attempt: number): number {
+  const base = Math.min(90_000, 10_000 * Math.pow(1.5, attempt));
+  return Math.floor(base * (0.75 + Math.random() * 0.5));
 }
 
 async function searchWeb(query: string, k: number): Promise<SearchHit[]> {
@@ -256,7 +312,14 @@ async function executeJob(job: ClaimedJob): Promise<void> {
     const seedSources = Array.isArray(options?.seed_sources)
       ? (options.seed_sources as Array<{ url: string; title: string; content: string }>)
       : undefined;
-    const res = await runResearch(realDeps, client, query, {
+    // Per-origin queue attribution: only the overnight digest/podcast lane gets the
+    // generous `ob-research` budget; OWUI/agent/manual keep the default lane (their
+    // own tuning). All origins still get chat()'s 429 backpressure retry.
+    const queueUser = QUEUE_USER_BY_ORIGIN[origin] ?? "";
+    const jobDeps: Deps = queueUser
+      ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
+      : realDeps;
+    const res = await runResearch(jobDeps, client, query, {
       threadId: thread_id, origin,
       confidenceFloor: typeof options?.confidence_floor === "number" ? options.confidence_floor : undefined,
       seedSources,

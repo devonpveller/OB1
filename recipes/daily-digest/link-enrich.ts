@@ -119,6 +119,10 @@ const ON_BASE = env("ON_BASE", "http://open_notebook:5055"); // internal — use
 // {id}/audio downloads it. Both behind Authelia (user signs in once).
 const ON_PUBLIC_BASE = env("ON_PUBLIC_BASE", "https://notebook.devinveller.ai").replace(/\/$/, "");
 const onClient = new OnClient({ baseUrl: ON_BASE });
+// ON TTS terminal-wait deadline. Generous (default 2h) so a slow-but-working
+// render is never cut off as an "early timeout" — the email waits for ON's
+// genuine terminal state. A real 'failed' returns immediately regardless.
+const ON_JOB_WAIT_MS = num("ON_JOB_WAIT_MS", 7_200_000);
 // Raw-Gmail reader (readonly token) — re-fetch original HTML so every link
 // survives (the stored body lost hrefs), then POI-select the interesting ones.
 const gmailReader = new GmailReader(new GoogleOAuth({
@@ -545,7 +549,7 @@ async function generateAudio(ep: Episode): Promise<OnEpisode | null> {
       content: ep.script,
       briefingSuffix: ON_BRIEFING,
     });
-    const status = await onClient.waitForJob(jobId);
+    const status = await onClient.waitForJob(jobId, { timeoutMs: ON_JOB_WAIT_MS });
     if (status !== "completed") { console.log(`[link-enrich] ON job ended '${status}' — no audio.`); return null; }
     const episode = await onClient.episodeByName(ep.name);
     console.log(`[link-enrich] 🎧 episode audio ready (id ${episode?.id ?? "?"}).`);
