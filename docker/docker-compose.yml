@@ -87,6 +87,16 @@ services:
       CHAT_API_BASE: http://llama-cpp:8080/v1
       CHAT_API_KEY: not-needed
       CHAT_MODEL: qwen36-27b:nothink
+      # Tool-result size caps (see index.ts capResultText). Every tool response
+      # is truncated to ~this many chars (~4/token) so multi-tool research turns
+      # can't blow past the qwen36-27b context lane (the "tools respond, model
+      # stops" / llama.cpp 400 overflow). On truncation the model is told to
+      # narrow and call again. Adjust freely; 0 disables. Per-tool override:
+      # OB_TOOL_RESULT_MAX_CHARS_<TOOL> (e.g. _LIST_THREADS, _SEARCH_CLAIMS).
+      OB_TOOL_RESULT_MAX_CHARS: "12000"
+      # fetch returns ONE full document for citation (not the accumulation
+      # culprit) — leave it uncapped so citations stay complete.
+      OB_TOOL_RESULT_MAX_CHARS_FETCH: "0"
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
     # obnet) talk to it directly. Cloud services (Claude Code, etc.)

@@ -110,3 +110,48 @@ Deno.test("citedNumbers tolerates every bracket shape (live-model regression)", 
   assertEquals(citedNumbers("[Source 11, 14]"), [11, 14]);
   assertEquals(citedNumbers("no citations here"), []);
 });
+
+// ── selectRepoFiles (REPO-SOURCES-WIRING §4) ─────────────────────────────────
+import { selectRepoFiles } from "./lib.ts";
+
+Deno.test("selectRepoFiles picks docs + manifests in priority order, skips code", () => {
+  const { selected } = selectRepoFiles([
+    "src/Murder/Murder.csproj",
+    "src/Murder/Game.cs",              // code — never selected
+    "docs/getting-started.md",
+    "LICENSE.md",                      // excluded
+    "README.md",
+    ".gitmodules",
+    "Murder.sln",
+    "Directory.Build.props",
+    "CHANGELOG.md",
+    "media/logo.png",                  // not a candidate
+  ]);
+  assertEquals(selected[0], "README.md");                    // root README first
+  assertEquals(selected[1], ".gitmodules");
+  assertEquals(selected.includes("Murder.sln"), true);
+  assertEquals(selected.includes("Directory.Build.props"), true);
+  assertEquals(selected.includes("docs/getting-started.md"), true);
+  assertEquals(selected.includes("CHANGELOG.md"), true);     // root md, non-license
+  assertEquals(selected.includes("src/Murder/Murder.csproj"), true);  // shallow csproj
+  assertEquals(selected.includes("LICENSE.md"), false);
+  assertEquals(selected.includes("src/Murder/Game.cs"), false);
+  assertEquals(selected.includes("media/logo.png"), false);
+});
+
+Deno.test("selectRepoFiles caps at maxFiles and reports the overflow as skipped", () => {
+  const paths = Array.from({ length: 10 }, (_, i) => `docs/page-${i}.md`);
+  const { selected, skipped } = selectRepoFiles(["README.md", ...paths], 5);
+  assertEquals(selected.length, 5);
+  assertEquals(selected[0], "README.md");
+  assertEquals(skipped.length, 6);                           // nothing dropped silently
+});
+
+Deno.test("selectRepoFiles takes depth-1 READMEs but not deep ones", () => {
+  const { selected } = selectRepoFiles([
+    "docs/README.md", "src/deep/nested/README.md", "very/deep/path/x.csproj",
+  ]);
+  assertEquals(selected.includes("docs/README.md"), true);
+  assertEquals(selected.includes("src/deep/nested/README.md"), false);
+  assertEquals(selected.includes("very/deep/path/x.csproj"), false);   // >2 deep
+});

@@ -244,6 +244,106 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// --- Tool result size caps (adjustable via env) -----------------------------
+// Large tool payloads (research dumps from list_threads / search_claims /
+// search_thoughts, etc.) accumulate across a multi-tool turn and can exceed the
+// model's context lane — llama.cpp then rejects the follow-up with HTTP 400
+// "exceeds context size" and the model stops mid-turn (tools respond, no answer).
+// So EVERY tool response is capped to a character budget (~4 chars/token). On
+// truncation the model is told to narrow its request and call again, so a topic
+// is gathered across several focused calls instead of one giant dump.
+//   OB_TOOL_RESULT_MAX_CHARS          global cap (default 12000 ~= 3k tokens)
+//   OB_TOOL_RESULT_MAX_CHARS_<TOOL>   per-tool override, e.g. _LIST_THREADS, _FETCH
+// A value of 0 disables the cap (globally or for that one tool).
+const TOOL_RESULT_MAX_CHARS = parseInt(Deno.env.get("OB_TOOL_RESULT_MAX_CHARS") || "12000", 10);
+
+function toolCap(tool: string): number {
+  const v = Deno.env.get(`OB_TOOL_RESULT_MAX_CHARS_${tool.toUpperCase()}`);
+  const n = v !== undefined && v !== "" ? parseInt(v, 10) : NaN;
+  if (Number.isFinite(n)) return n; // includes 0 = disabled for this tool
+  return Number.isFinite(TOOL_RESULT_MAX_CHARS) ? TOOL_RESULT_MAX_CHARS : 0;
+}
+
+function capNotice(tool: string, shown: number | null, total: number | null): string {
+  const scope = total != null ? ` (showing ${shown} of ${total})` : "";
+  return `[Open Brain: '${tool}' result truncated to fit the model context${scope}. ` +
+    `To see more, call again with a NARROWER request — add a filter (metadata_filter / ` +
+    `type / topic / person / thread_id / status), lower 'limit', or use a more specific ` +
+    `query — and gather a topic across several focused calls rather than one broad dump. ` +
+    `(cap = OB_TOOL_RESULT_MAX_CHARS.)]`;
+}
+
+// Cap one text payload. Keeps JSON valid (trims array items or the dominant
+// string field); truncates plain text on a paragraph boundary. Adds a notice.
+function capResultText(tool: string, text: string): string {
+  const cap = toolCap(tool);
+  if (!cap || cap <= 0 || text.length <= cap) return text;
+
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { parsed = undefined; }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const obj = parsed as Record<string, unknown>;
+    // (a) top-level array field (results/threads/sources/…): drop trailing items.
+    const arrKey = Object.keys(obj).find((k) => Array.isArray(obj[k]));
+    if (arrKey) {
+      const arr = obj[arrKey] as unknown[];
+      const total = arr.length;
+      let kept = total;
+      while (kept > 1) {
+        kept = Math.max(1, Math.floor(kept * 0.7));
+        const trial = JSON.stringify({ ...obj, [arrKey]: arr.slice(0, kept), _note: capNotice(tool, kept, total) });
+        if (trial.length <= cap) return trial;
+      }
+      return JSON.stringify({ ...obj, [arrKey]: arr.slice(0, 1), _note: capNotice(tool, 1, total) });
+    }
+    // (b) object with a dominant string field (e.g. fetch.text): trim that field.
+    let strKey = "";
+    let strLen = 0;
+    for (const k of Object.keys(obj)) {
+      const val = obj[k];
+      if (typeof val === "string" && val.length > strLen) { strKey = k; strLen = val.length; }
+    }
+    if (strKey) {
+      const overhead = JSON.stringify({ ...obj, [strKey]: "", _note: capNotice(tool, null, null) }).length;
+      const room = Math.max(200, cap - overhead);
+      return JSON.stringify({ ...obj, [strKey]: (obj[strKey] as string).slice(0, room), _note: capNotice(tool, null, null) });
+    }
+  }
+
+  // Plain text (search_thoughts / search_claims / list_thoughts): cut on a
+  // paragraph boundary, then append the notice.
+  const notice = "\n\n" + capNotice(tool, null, null);
+  const room = Math.max(200, cap - notice.length);
+  const head = text.slice(0, room);
+  const nl = head.lastIndexOf("\n\n");
+  const body = nl > room * 0.5 ? head.slice(0, nl) : head;
+  return body + notice;
+}
+
+// Wrap every server.registerTool so its text content is size-capped. Placed
+// before the first registerTool call, so every tool (and any added later)
+// inherits the cap with no per-handler changes.
+type ToolResponse = { content?: Array<Record<string, unknown>>; [k: string]: unknown };
+const _origRegisterTool = server.registerTool.bind(server);
+(server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = ((...args: unknown[]) => {
+  const [name, config, handler] = args as [string, unknown, (...a: unknown[]) => unknown];
+  return _origRegisterTool(
+    name as never,
+    config as never,
+    (async (...a: unknown[]): Promise<ToolResponse> => {
+      const res = (await handler(...a)) as ToolResponse;
+      if (res && Array.isArray(res.content)) {
+        res.content = res.content.map((c) =>
+          c && c.type === "text" && typeof c.text === "string"
+            ? { ...c, text: capResultText(name, c.text as string) }
+            : c
+        );
+      }
+      return res;
+    }) as never,
+  );
+}) as (...a: unknown[]) => unknown;
+
 // Optional caller-supplied JSONB metadata predicate. Used by the cloud
 // gateway (../../../../openbrain-gateway/app.py) to scope reads to
 // share=cloud; default-unset = unconstrained (local-zone behaviour).
@@ -398,7 +498,7 @@ server.registerTool(
   {
     title: "Search Thoughts",
     description:
-      "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea they've previously captured.",
+      "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea they've previously captured. Results are capped to fit the model context — prefer a specific query with a modest 'limit' and metadata_filter, and cover a broad topic across several focused searches rather than one large one.",
     annotations: {
       readOnlyHint: true,
     },
@@ -483,7 +583,7 @@ server.registerTool(
   {
     title: "Search Grounded Claims",
     description:
-      "Search Open Brain's GROUNDED CLAIMS by meaning — assertions established by research, each anchored to the source(s) that ground it, with a computed confidence (0-1). Prefer this over `search` when you want trustworthy, sourced facts the research engine has already established. Every claim returned is grounded (terminates in a primary source); claims flagged contradicted have conflicting evidence and are shown with low confidence.",
+      "Search Open Brain's GROUNDED CLAIMS by meaning — assertions established by research, each anchored to the source(s) that ground it, with a computed confidence (0-1). Prefer this over `search` when you want trustworthy, sourced facts the research engine has already established. Every claim returned is grounded (terminates in a primary source); claims flagged contradicted have conflicting evidence and are shown with low confidence. Results are capped to fit the model context — keep 'limit' modest, scope with thread_id / min_confidence, and gather a topic across several focused searches rather than one broad dump.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       query: z.string().describe("What to search for"),
@@ -556,7 +656,7 @@ server.registerTool(
   {
     title: "List Recent Thoughts",
     description:
-      "List recently captured thoughts with optional filters by type, topic, person, or time range.",
+      "List recently captured thoughts with optional filters by type, topic, person, or time range. Results are capped to fit the model context — use the filters and a modest 'limit', and page through a topic with successive narrower calls rather than requesting everything at once.",
     annotations: {
       readOnlyHint: true,
     },
@@ -1035,7 +1135,7 @@ server.registerTool(
   {
     title: "List Research Threads",
     description:
-      "List research threads. Defaults to active threads; pass status='archived' or status='all'.",
+      "List research threads (id, name, description, status, source_count), most-recently-updated first. Defaults to active threads; pass status='archived' or status='all'. Output is capped to fit the model context, so it may not include every thread at once — narrow with status, and pull a thread's detail on demand via get_thread_sources or search_claims(thread_id=...) instead of expecting the full description of every thread here.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       status: z

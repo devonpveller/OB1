@@ -184,3 +184,41 @@ export function buildCitedAndRenumber<T>(synthesis: string, sources: T[]): { syn
   });
   return { synthesis: renum, cited };
 }
+
+// ── Repo source selection (REPO-SOURCES-WIRING §4) ──────────────────────────
+/**
+ * Deterministic, bounded selection of a repo's KNOWLEDGE files for source
+ * ingestion — docs + structural manifests only, never wholesale code. Priority
+ * buckets (highest first) keep the most probative files inside `maxFiles`:
+ * root README* → .gitmodules → root build manifests (*.sln,
+ * Directory.Build.props, *.csproj) → docs/**\/*.md → other root *.md (LICENSE
+ * excluded) → depth-1 README* → shallow *.csproj (≤2 deep). Candidates beyond
+ * the cap are returned as `skipped` — logged by the caller, never silent.
+ */
+export interface RepoFileSelection { selected: string[]; skipped: string[] }
+
+export function selectRepoFiles(paths: string[], maxFiles = 40): RepoFileSelection {
+  const depth = (p: string) => p.split("/").length - 1;
+  const base = (p: string) => p.split("/").pop() || p;
+  const lb = (p: string) => base(p).toLowerCase();
+  const lp = (p: string) => p.toLowerCase();
+  const buckets: Array<(p: string) => boolean> = [
+    (p) => depth(p) === 0 && lb(p).startsWith("readme"),
+    (p) => depth(p) === 0 && base(p) === ".gitmodules",
+    (p) => depth(p) === 0 && (lp(p).endsWith(".sln") || base(p) === "Directory.Build.props"
+                              || lp(p).endsWith(".csproj")),
+    (p) => lp(p).startsWith("docs/") && lp(p).endsWith(".md"),
+    (p) => depth(p) === 0 && lp(p).endsWith(".md")
+           && !lb(p).startsWith("license") && !lb(p).startsWith("readme"),
+    (p) => depth(p) === 1 && lb(p).startsWith("readme"),
+    (p) => depth(p) >= 1 && depth(p) <= 2 && lp(p).endsWith(".csproj"),
+  ];
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  for (const match of buckets) {
+    for (const p of paths) {
+      if (!seen.has(p) && match(p)) { seen.add(p); candidates.push(p); }
+    }
+  }
+  return { selected: candidates.slice(0, maxFiles), skipped: candidates.slice(maxFiles) };
+}

@@ -76,6 +76,46 @@ export async function retrieveRelevantClaims(
     .filter((c) => c.distance <= maxDistance);
 }
 
+export interface RelevantSource {
+  id: string; url: string | null; title: string; content: string; domain: string | null;
+  distance: number;
+}
+
+/**
+ * Semantic recall of DURABLE SOURCES already in OB (REPO-SOURCES-WIRING §6) — e.g. repo docs
+ * synced via /sources/repo-sync. Web search can never surface these (raw repo files aren't
+ * usefully indexed), so the harness folds store recall into the staged pool ahead of any web
+ * gathering. Excludes retracted + empty sources; distance-filtered like claim recall.
+ */
+export async function retrieveRelevantSources(
+  client: QueryClient,
+  queryEmb: number[],
+  k: number,
+  maxDistance = 0.8,
+): Promise<RelevantSource[]> {
+  const vec = toVector(queryEmb);
+  const r = await client.queryObject<{
+    id: string; url: string | null; title: string; content: string; domain: string | null;
+    distance: string;
+  }>(
+    `SELECT s.id, s.url, s.title, s.content, s.domain,
+            (s.embedding <=> $1::vector) AS distance
+       FROM public.sources s
+      WHERE s.embedding IS NOT NULL
+        AND s.content IS NOT NULL AND length(s.content) > 0
+        AND s.retraction_committed_at IS NULL
+      ORDER BY s.embedding <=> $1::vector
+      LIMIT $2`,
+    [vec, k],
+  );
+  return r.rows
+    .map((row) => ({
+      id: row.id, url: row.url, title: row.title, content: row.content, domain: row.domain,
+      distance: Number(row.distance),
+    }))
+    .filter((s) => s.distance <= maxDistance);
+}
+
 // ── Staging ─────────────────────────────────────────────────────────────────
 export async function createStagingSession(
   client: QueryClient,

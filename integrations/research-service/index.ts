@@ -15,8 +15,10 @@
  *      SEARCH_API_BASE, FETCH_TIMEOUT_MS, FETCH_MAX_CHARS, PORT (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { extractTextFromHtml, extractTitle, domainOf } from "./lib.ts";
+import { extractTextFromHtml, extractTitle, domainOf, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
+import { createStagingSession, stageSource } from "./kb.ts";
+import { screenSources } from "./injection.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const DB_HOST = env("DB_HOST", "openbrain-db");
@@ -290,6 +292,86 @@ async function delegateToCurator(pkg: Record<string, unknown>): Promise<Record<s
   return json;
 }
 
+// ── Repo source sync (REPO-SOURCES-WIRING RS.1) ─────────────────────────────
+// Onboarded repos' docs + structural manifests become PRIMARY sources: fetched at a PINNED
+// commit sha (provenance + idempotency), injection-screened like any web page, staged +
+// promoted via find_or_create_source. Public repos need no token; a read-scoped token can be
+// provided via REPO_SYNC_GITHUB_TOKEN for private ones (never the bridge's App key).
+const REPO_FILE_MAX_BYTES = parseInt(env("REPO_FILE_MAX_BYTES", "131072"), 10);   // 128 KB/file
+const REPO_SYNC_MAX_FILES = parseInt(env("REPO_SYNC_MAX_FILES", "40"), 10);
+const REPO_SYNC_TOKEN = env("REPO_SYNC_GITHUB_TOKEN", "");
+
+function ghHeaders(): Record<string, string> {
+  return {
+    accept: "application/vnd.github+json",
+    "user-agent": FETCH_UA,
+    ...(REPO_SYNC_TOKEN ? { authorization: `Bearer ${REPO_SYNC_TOKEN}` } : {}),
+  };
+}
+
+function parseOwnerRepo(repoUrl: string): { owner: string; repo: string } | null {
+  const m = String(repoUrl || "").trim().replace(/\.git$/, "")
+    .match(/github\.com[/:]([^/]+)\/([^/?#]+)/i)
+    || String(repoUrl || "").trim().match(/^([A-Za-z0-9][\w.-]*)\/([A-Za-z0-9][\w.-]*)$/);
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+async function ghJson(url: string): Promise<Record<string, unknown>> {
+  const client = fetchClient();
+  const r = await fetch(url, {
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    headers: ghHeaders(),
+    ...(client ? { client } : {}),
+  });
+  if (!r.ok) throw new Error(`github ${r.status} for ${url.split("?")[0]}`);
+  return await r.json();
+}
+
+/** Resolve a ref (branch/tag/sha; default = the repo's default branch) to a full commit sha. */
+async function resolveRepoSha(owner: string, repo: string, ref: string): Promise<string> {
+  if (/^[0-9a-f]{40}$/i.test(ref)) return ref.toLowerCase();
+  const j = await ghJson(
+    `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(ref || "HEAD")}`);
+  const sha = String(j.sha || "");
+  if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error("could not resolve a commit sha");
+  return sha.toLowerCase();
+}
+
+/** All blob paths (+sizes) in the repo tree at `sha`. */
+async function listRepoTree(owner: string, repo: string, sha: string):
+    Promise<Array<{ path: string; size: number }>> {
+  const j = await ghJson(
+    `https://api.github.com/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`);
+  const tree = Array.isArray(j.tree) ? j.tree : [];
+  return tree
+    .filter((e: Record<string, unknown>) => e.type === "blob" && typeof e.path === "string")
+    .map((e: Record<string, unknown>) => ({ path: String(e.path), size: Number(e.size ?? 0) }));
+}
+
+/** Fetch one raw repo file at a pinned sha — PLAIN TEXT (no HTML extraction), repo-file cap. */
+async function fetchRawFile(owner: string, repo: string, sha: string, path: string):
+    Promise<{ content: string; outcome: "ok" | "timeout" | "error" }> {
+  const ac = new AbortController();
+  let timedOut = false;
+  const t = setTimeout(() => { timedOut = true; ac.abort(); }, FETCH_TIMEOUT_MS);
+  try {
+    const client = fetchClient();
+    const r = await fetch(
+      `https://raw.githubusercontent.com/${owner}/${repo}/${sha}/${path}`,
+      { signal: ac.signal, headers: { "user-agent": FETCH_UA }, ...(client ? { client } : {}) },
+    );
+    if (!r.ok) return { content: "", outcome: "error" };
+    const text = (await r.text()).slice(0, REPO_FILE_MAX_BYTES);
+    if (!text.trim()) return { content: "", outcome: "error" };
+    return { content: text, outcome: "ok" };
+  } catch (e) {
+    const isTimeout = timedOut || (e as Error)?.name === "AbortError";
+    return { content: "", outcome: isTimeout ? "timeout" : "error" };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 const realDeps: Deps = { embed, chat, searchWeb, fetchPage, delegateToCurator };
 void SEARCH_K_DEFAULT; // tunable also read inside harness.ts; surfaced here for ops visibility
 
@@ -429,6 +511,78 @@ Deno.serve({ port: PORT }, async (req) => {
     let db = false;
     try { const c = await pool.connect(); try { await c.queryArray("SELECT 1"); db = true; } finally { c.release(); } } catch { /* */ }
     return Response.json({ ok: db, db, service: "openbrain-research" }, { status: db ? 200 : 503 });
+  }
+
+  // REPO-SOURCES-WIRING RS.1: ingest an onboarded repo's docs + structural manifests as
+  // PRIMARY sources (pinned to a commit sha). Enumeration is engine-side + deterministic
+  // (selectRepoFiles); every file is injection-screened; skips are REPORTED, never silent.
+  if (req.method === "POST" && url.pathname === "/sources/repo-sync") {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    let body: { repo_url?: string; ref?: string; files?: string[]; thread_id?: string };
+    try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    const parsed = parseOwnerRepo(body.repo_url || "");
+    if (!parsed) return Response.json({ error: "repo_url required (github.com/<owner>/<repo>)" }, { status: 400 });
+    const { owner, repo } = parsed;
+    try {
+      const sha = await resolveRepoSha(owner, repo, (body.ref || "").trim());
+      const explicit = Array.isArray(body.files) ? body.files.map(String).filter(Boolean) : [];
+      const skipped: Array<{ path: string; reason: string }> = [];
+      let paths: string[];
+      if (explicit.length) {
+        paths = explicit.slice(0, REPO_SYNC_MAX_FILES);
+      } else {
+        const tree = await listRepoTree(owner, repo, sha);
+        const oversize = new Set(
+          tree.filter((e) => e.size > REPO_FILE_MAX_BYTES).map((e) => e.path));
+        const sel = selectRepoFiles(tree.map((e) => e.path).filter((p) => !oversize.has(p)),
+                                    REPO_SYNC_MAX_FILES);
+        paths = sel.selected;
+        for (const p of sel.skipped) skipped.push({ path: p, reason: "over file cap" });
+        for (const e of tree) {
+          if (oversize.has(e.path)) skipped.push({ path: e.path, reason: `>${REPO_FILE_MAX_BYTES}B` });
+        }
+      }
+      // Fetch each file at the PINNED sha (plain text; no HTML extraction).
+      const pages: Page[] = [];
+      for (const p of paths) {
+        const fr = await fetchRawFile(owner, repo, sha, p);
+        if (fr.outcome !== "ok") { skipped.push({ path: p, reason: `fetch ${fr.outcome}` }); continue; }
+        pages.push({
+          url: `https://github.com/${owner}/${repo}/blob/${sha}/${p}`,   // canonical provenance
+          title: `${owner}/${repo}/${p} @ ${sha.slice(0, 10)}`,
+          content: fr.content,
+          domain: "github.com",
+        });
+      }
+      // Same injection quarantine as web sources — repo docs are third-party text.
+      const { clean, quarantined } = await screenSources(realDeps, pages);
+      // Stage + promote (find_or_create_source dedups by url/hash — unchanged blobs no-op).
+      const c = await pool.connect();
+      let sessionId = "";
+      const synced: string[] = [];
+      try {
+        sessionId = await createStagingSession(
+          c, `repo-sync: ${owner}/${repo} @ ${sha.slice(0, 10)}`, body.thread_id || null, "manual");
+        for (const p of clean) {
+          try {
+            const emb = await embed(`${p.title}\n\n${p.content}`);
+            await stageSource(c, sessionId, p, emb);
+            synced.push(p.url);
+          } catch (e) {
+            skipped.push({ path: p.url, reason: `stage failed: ${String((e as Error).message).slice(0, 80)}` });
+          }
+        }
+      } finally { c.release(); }
+      return Response.json({
+        ok: true, repo: `${owner}/${repo}`, sha, session_id: sessionId,
+        synced: synced.length, synced_urls: synced,
+        quarantined: quarantined.map((q) => ({ url: q.url, reason: q.reason })),
+        skipped,
+      }, { status: 200 });
+    } catch (e) {
+      return Response.json({ ok: false, error: String((e as Error).message).slice(0, 200) },
+                           { status: 502 });
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/research") {

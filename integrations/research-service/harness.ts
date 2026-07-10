@@ -7,7 +7,7 @@
  * Governing specs: GROUNDING-MODEL.md + PLAN-research-engine.md §6 + OD-5/OD-6.
  */
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
-import { retrieveRelevantClaims, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
+import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
 
 // Tunables (env-read; reading env does not start a server).
@@ -27,6 +27,13 @@ const MAX_FETCH = parseInt(env("MAX_FETCH", "24"), 10);
 const MAX_FETCH_TIMEOUTS = parseInt(env("MAX_FETCH_TIMEOUTS", "20"), 10);
 const MAX_WALL_MS = parseInt(env("MAX_WALL_MS", "180000"), 10);
 const EMBEDDING_MAX_CHARS = parseInt(env("EMBEDDING_MAX_CHARS", "4000"), 10);
+// KB-source recall (REPO-SOURCES-WIRING §6): how many stored sources to fold into the pool
+// per run, and how semantically close they must be (cosine distance; 0 = identical). The
+// distance default MATCHES the proven claim-reuse bar (REUSE_MAX_DISTANCE) so recall is never
+// LOOSER than existing reuse semantics — a shared-service change must not shift relevance for
+// the other consumers (OWUI deep_research, digest, podcast, ON). K=0 disables recall entirely.
+const KB_SOURCES_K = parseInt(env("KB_SOURCES_K", "6"), 10);
+const KB_SOURCES_MAX_DISTANCE = parseFloat(env("KB_SOURCES_MAX_DISTANCE", "0.55"));
 // #5 — drop claims farther than this (cosine distance) from the query so an
 // unscoped run doesn't reuse irrelevant grounded claims.
 const REUSE_MAX_DISTANCE = parseFloat(env("REUSE_MAX_DISTANCE", "0.55"));
@@ -264,6 +271,30 @@ export async function runResearch(
   let needs: string[] = [query];
   let gapNeeds: string[] = [];
   const followupQueries: string[] = []; // refined/deepen queries across rounds (breadcrumbs)
+
+  // KB-SOURCE recall (REPO-SOURCES-WIRING §6): durable primary sources already in OB — e.g.
+  // repo docs synced via /sources/repo-sync — can answer repo-specific questions web search
+  // can never surface. Fold them into the staged pool BEFORE any web gathering so coverage
+  // sees them; they were injection-screened at sync time and are re-screened with the pool
+  // below anyway (defense in depth). Never in sources-only/article mode (those ground
+  // strictly from the caller's seeds/article).
+  if (!sourcesOnly && !articleMode) {
+    try {
+      const kbSources = await retrieveRelevantSources(
+        client, queryEmb, KB_SOURCES_K, KB_SOURCES_MAX_DISTANCE);
+      for (const s of kbSources) {
+        if (s.url && !staged.some((p) => p.url === s.url)) {
+          staged.push({ url: s.url, title: s.title, content: s.content,
+                        domain: s.domain || domainOf(s.url) });
+          reuseHits++;
+        }
+      }
+      if (kbSources.length) {
+        await progress("reuse", `recalled ${kbSources.length} KB source(s) into the pool`,
+          { kb_sources: kbSources.length });
+      }
+    } catch { /* best-effort — store recall must never break research */ }
+  }
 
   // 2/3. Plan → coverage → gap-gather (the DEFAULT topic-research path). Article
   //      mode never runs this — it grounds the seed article first and only then
