@@ -19,6 +19,7 @@ import { extractTextFromHtml, extractTitle, domainOf, selectRepoFiles } from "./
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
+import { resolveContract, permitsUrl, permitsQuery, type ResolvedContract } from "./contract.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const DB_HOST = env("DB_HOST", "openbrain-db");
@@ -375,6 +376,22 @@ async function fetchRawFile(owner: string, repo: string, sha: string, path: stri
 const realDeps: Deps = { embed, chat, searchWeb, fetchPage, delegateToCurator };
 void SEARCH_K_DEFAULT; // tunable also read inside harness.ts; surfaced here for ops visibility
 
+// Phase 1 — enforce a resolved contract at the deps boundary (the gather loop is
+// untouched): drop red-line queries + non-permitted search hits, and hard-block a
+// fetch of a non-permitted URL. Budget/seed enforcement lives in the harness.
+function withContract(deps: Deps, rc: ResolvedContract): Deps {
+  return {
+    ...deps,
+    searchWeb: async (q: string, k: number): Promise<SearchHit[]> => {
+      if (!permitsQuery(rc, q)) return [];
+      const hits = await deps.searchWeb(q, k);
+      return hits.filter((h) => permitsUrl(rc, h.url));
+    },
+    fetchPage: (url: string): Promise<FetchResult> =>
+      permitsUrl(rc, url) ? deps.fetchPage(url) : Promise.resolve({ page: null, outcome: "error" }),
+  };
+}
+
 // ── Job runner (OD-3 async job+poll) ─────────────────────────────────────────
 // A job claimed by the drain loop: it has already been flipped to status='running'
 // (started_at set) by the atomic claim, so executeJob only runs the harness and
@@ -391,6 +408,10 @@ async function executeJob(job: ClaimedJob): Promise<void> {
     ).catch(() => {});
   };
   try {
+    // Phase 1 — resolve the per-job contract FIRST (fail-closed: a malformed
+    // contract throws ContractError → the catch below writes status='error', so
+    // the job never runs wide-open).
+    const contract = resolveContract(options);
     const seedSources = Array.isArray(options?.seed_sources)
       ? (options.seed_sources as Array<{ url: string; title: string; content: string }>)
       : undefined;
@@ -398,9 +419,11 @@ async function executeJob(job: ClaimedJob): Promise<void> {
     // generous `ob-research` budget; OWUI/agent/manual keep the default lane (their
     // own tuning). All origins still get chat()'s 429 backpressure retry.
     const queueUser = QUEUE_USER_BY_ORIGIN[origin] ?? "";
-    const jobDeps: Deps = queueUser
+    const baseDeps: Deps = queueUser
       ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
       : realDeps;
+    // Contract enforcement wraps searchWeb/fetchPage (no gather-loop change).
+    const jobDeps: Deps = contract ? withContract(baseDeps, contract) : baseDeps;
     const res = await runResearch(jobDeps, client, query, {
       threadId: thread_id, origin,
       confidenceFloor: typeof options?.confidence_floor === "number" ? options.confidence_floor : undefined,
@@ -410,6 +433,7 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       mode: options?.mode === "article" ? "article" : undefined,
       gapResearch: options?.gap_research === "preliminary" ? "preliminary" : undefined,
       dryRun: options?.dry_run === true,
+      contract: contract ?? undefined,
     }, progress);
     await client.queryObject(
       `UPDATE research_jobs SET status='done', finished_at=now(),
@@ -420,6 +444,8 @@ async function executeJob(job: ClaimedJob): Promise<void> {
         cited_sources: res.citedSources, reuse_claims: res.reuseClaims,
         thread_id: (res.curator?.thread_id as string) ?? thread_id, reuse_ratio: 1 - res.metrics.gap_ratio,
         curator: res.curator, backstop: res.backstop, fetch_stats: res.fetchStats,
+        contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
+        skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
       }), JSON.stringify(res.metrics), JSON.stringify({ phase: "done", message: `backstop=${res.backstop}` })],
     );
   } catch (e) {

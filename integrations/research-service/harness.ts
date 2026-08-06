@@ -9,6 +9,8 @@
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
 import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
+import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
+import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
 
 // Tunables (env-read; reading env does not start a server).
 const env = (k: string, d: string) => Deno.env.get(k) ?? d;
@@ -48,6 +50,12 @@ const PRELIM_GAP_LIMIT = parseInt(env("PRELIM_GAP_LIMIT", "3"), 10);
 // newsletter-body roundup (many news items + tools) exceeds the default
 // gather-source slice, so the primary article gets a larger window.
 const ARTICLE_SOURCE_CHARS = parseInt(env("ARTICLE_SOURCE_CHARS", "8000"), 10);
+// Phase 2 — Skeptic defensive gate. Ships DARK: default off, so the OFF path is
+// byte-identical to today. When on, the judge-only tier runs (downgrade weak/
+// refuted claims + record the audit). The drop-and-replace re-gather tier (pool
+// mutation + re-synthesis) is deferred to on-site validation and NOT in this
+// build; SKEPTIC_REGATHER_MAX is reserved for it.
+const SKEPTIC_ENABLED = env("SKEPTIC_ENABLED", "0") === "1";
 
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
@@ -179,6 +187,10 @@ export interface RunOptions {
   /** Run the harness (recall + synthesis) but write NOTHING canonical — no
    *  staging, no curator delegate. Returns the synthesis for preview. */
   dryRun?: boolean;
+  /** Phase 1 — resolved per-job contract (narrowing-only). When present, clamps
+   *  the gather budget and drops denied seed sources; source allow/deny + red-line
+   *  query enforcement is applied by index.ts at the deps boundary. */
+  contract?: ResolvedContract;
 }
 export interface RunResult {
   synthesis: string;
@@ -196,6 +208,8 @@ export interface RunResult {
   /** Separated fetch accounting — yield (sources) vs waste (timeouts/errors) vs
    *  free OB cache reuse. `attempts` = sources + timeouts + errors. */
   fetchStats: { sources: number; timeouts: number; errors: number; reused: number; attempts: number };
+  /** Phase 2 — the Skeptic's verdict + per-run audit (undefined when SKEPTIC_ENABLED off). */
+  skeptic?: SkepticResult;
 }
 export type Progress = (phase: string, message: string, counters?: Record<string, number>) => Promise<void>;
 
@@ -237,6 +251,13 @@ export async function runResearch(
   const gapResearch = opts.gapResearch ?? "none";
   const dryRun = opts.dryRun === true;
 
+  // Phase 1 — a per-job contract can only NARROW the service ceilings, never
+  // raise them. Absent contract ⇒ Math.min(X, Infinity) = X (today's behavior).
+  const rcBudget = opts.contract?.budget;
+  const effMaxFetch = clampCeiling(MAX_FETCH, rcBudget?.maxFetch);
+  const effMaxMs = clampCeiling(MAX_WALL_MS, rcBudget?.wallMs);
+  const effRounds = clampCeiling(MAX_ROUNDS, rcBudget?.rounds);
+
   // 1. Reuse pass — recall relevant grounded claims (cheap). In article mode the
   //    recall is against the ARTICLE itself (its points are what we want to
   //    corroborate from existing OB knowledge), not a short query string.
@@ -255,9 +276,13 @@ export async function runResearch(
   // Tor) are staged directly — never re-fetched. In article mode they are THE
   // subject of the episode.
   const sessionId = dryRun ? null : await createStagingSession(client, query, threadId, opts.origin || "owui");
-  const staged: Page[] = seeds.map((s) => ({
-    url: s.url, title: s.title, content: s.content, domain: domainOf(s.url),
-  }));
+  // Seeds are exempt from the contract's allow-list (in article mode the seed IS
+  // the subject) but are still dropped if they hit a deny domain / red-line host.
+  const staged: Page[] = seeds
+    .filter((s) => !opts.contract || !deniedUrl(opts.contract, s.url))
+    .map((s) => ({
+      url: s.url, title: s.title, content: s.content, domain: domainOf(s.url),
+    }));
   // Separate fetch accounting (was a single conflated `fetches`):
   //   sourcesFetched — pages successfully RETRIEVED over the network (the yield)
   //   fetchTimeouts  — attempts that timed out (flaky Tor) — wasted, not yield
@@ -324,8 +349,8 @@ export async function runResearch(
     const gatherQueries = async (queries: string[]): Promise<boolean> => {
       for (const q of queries) {
         const d = backstopDecision({
-          elapsedMs: Date.now() - t0, maxMs: MAX_WALL_MS,
-          sources: sourcesFetched, maxSources: MAX_FETCH,
+          elapsedMs: Date.now() - t0, maxMs: effMaxMs,
+          sources: sourcesFetched, maxSources: effMaxFetch,
           timeouts: fetchTimeouts, maxTimeouts: MAX_FETCH_TIMEOUTS, openGaps: 1,
         });
         if (d.stop && d.reason !== "complete") { backstop = d.reason; return false; }
@@ -336,7 +361,7 @@ export async function runResearch(
         // Headroom = remaining SOURCE budget plus remaining TIMEOUT budget, so we
         // keep trying URLs while either bound has room (a timeout shouldn't burn
         // the source budget). Cache hits below are free and never charged.
-        const sourceRoom = Math.max(0, MAX_FETCH - sourcesFetched);
+        const sourceRoom = Math.max(0, effMaxFetch - sourcesFetched);
         const timeoutRoom = MAX_FETCH_TIMEOUTS > 0 ? Math.max(0, MAX_FETCH_TIMEOUTS - fetchTimeouts) : SEARCH_K;
         const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, sourceRoom + timeoutRoom)));
         const results = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
@@ -363,10 +388,10 @@ export async function runResearch(
     };
 
     let pendingNeeds = [...gapNeeds];
-    for (let round = 1; round <= MAX_ROUNDS && pendingNeeds.length; round++) {
+    for (let round = 1; round <= effRounds && pendingNeeds.length; round++) {
       const ok = await gatherQueries(pendingNeeds);
       if (!ok) break;                       // backstop tripped
-      if (round >= MAX_ROUNDS) break;       // no point re-planning on the last round
+      if (round >= effRounds) break;        // no point re-planning on the last round
       // Which needs are now actually answered by the gathered sources?
       const cov = await jsonChat(
         deps, COVERAGE_STAGED_SYS,
@@ -517,6 +542,40 @@ export async function runResearch(
     )).trim();
   }
 
+  // 4b. Skeptic defensive gate (Phase 2, judge-only tier; SKEPTIC_ENABLED, off by
+  //     default). Adversarially reviews the synthesis and DOWNGRADES weak/refuted
+  //     claims in place ([SOURCED]→[UNCERTAIN]/[GAP]) so they land below the reuse
+  //     floor instead of compounding as fact — index-safe (line count + [Source N]
+  //     numbers preserved), so buildCitedAndRenumber below stays aligned. Records a
+  //     per-run audit (result.skeptic). FAIL-OPEN: the skeptic never breaks a run.
+  //     The drop-and-replace re-gather tier (pool mutation + re-synthesis) is
+  //     deferred to on-site validation.
+  let skeptic: SkepticResult | undefined;
+  if (SKEPTIC_ENABLED && rawSynthesis.trim() && (Date.now() - t0) < effMaxMs) {
+    try {
+      await progress("skeptic", "adversarially reviewing the synthesis");
+      const judgeSources = pool
+        .map((p, i) => sourceLine(p, i, i < staged.length ? 1200 : 700))
+        .join("\n\n");
+      const raw = await deps.chat(
+        `${INJECTION_GUARD}\n\n${SKEPTIC_SYS}`,
+        `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${rawSynthesis}\n\nSOURCES:\n${judgeSources || "(none)"}`,
+        { json: true, nothink: true },
+      );
+      const verdict = parseSkepticResult(raw);
+      const { synthesis: downgraded, applied } = applyDowngrades(rawSynthesis, verdict.downgrades);
+      rawSynthesis = downgraded;
+      skeptic = verdict;
+      await progress(
+        "skeptic",
+        `challenges=${verdict.challenges.length} downgrades=${applied} refuted=${verdict.refuted.length} dropped_sources=${verdict.droppedSources.length}`,
+        { challenges: verdict.challenges.length, downgrades: applied, refuted: verdict.refuted.length, dropped_sources: verdict.droppedSources.length },
+      );
+    } catch (e) {
+      await progress("skeptic", `skeptic review skipped: ${(e as Error).message}`); // fail-open
+    }
+  }
+
   // 5. Cited-only sources (GROUNDING-MODEL §6.3) + renumber citations so the
   //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
   //    compacted cited list. Delegate to curator (verbatim storage + claims, P2).
@@ -578,5 +637,6 @@ export async function runResearch(
       reused: reuseHits,
       attempts: sourcesFetched + fetchTimeouts + fetchErrors,
     },
+    skeptic,
   };
 }
