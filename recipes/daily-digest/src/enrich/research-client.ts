@@ -23,8 +23,13 @@ export interface ResearchSeed { url: string; title: string; content: string }
 export interface SubmitArgs {
   /** Free-text query — the article's title/topic (drives recall + thread hint). */
   query: string;
-  seedSources: ResearchSeed[];
-  /** article-primary synthesis prompt. */
+  /**
+   * Pre-fetched seed sources. Article mode requires them (the article IS the
+   * seed). A gap dive OMITS them: topic mode gathers from the open web, so the
+   * research question in `query` is the whole input. Optional for that reason.
+   */
+  seedSources?: ResearchSeed[];
+  /** article-primary synthesis prompt. Omit for a full topic (gap-dive) run. */
   mode?: "article";
   /** seed-only: no web search at all; corroborate from OB claims only. */
   disableWebSearch?: boolean;

@@ -26,6 +26,13 @@ export interface SegmentItem {
   /** Article-mode synthesis: tagged [SOURCED]/[INFERRED]/[UNCERTAIN]/[GAP] lines. */
   synthesis: string;
   emailOnly?: boolean; // link couldn't be enriched → narrate the caveat
+  /**
+   * Same-night GAP DIVE result: a full research synthesis that filled context the
+   * email source lacked (tagged claim lines). Present ONLY when a dive returned
+   * grounded material — an empty/absent dive leaves the item narrated as unfilled
+   * (PLAN D0, honest-by-default). Narrated as "we dug deeper on this overnight".
+   */
+  dive?: string;
 }
 export interface Segment {
   label: string; // gmail label, e.g. "brain/ai/nate b jones"
@@ -55,6 +62,10 @@ export interface ScriptChatConfig {
   apiKey?: string;
   timeoutMs?: number;
   maxTokens?: number;
+  /** Sampling temperature. Default 0.5 (dialogue). Use 0 for deterministic
+   *  classification/triage — temperature 0.5 makes gap triage flaky (can drop to
+   *  zero dives on a given input). */
+  temperature?: number;
 }
 export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   return async (system, user) => {
@@ -64,7 +75,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
         headers: { Authorization: `Bearer ${cfg.apiKey ?? "not-needed"}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: `${cfg.chatModel}${cfg.nothinkSuffix ?? ""}`,
-          temperature: 0.5, // a touch of warmth for dialogue
+          temperature: cfg.temperature ?? 0.5, // a touch of warmth for dialogue; 0 for triage
           max_tokens: cfg.maxTokens ?? 2200,
           messages: [{ role: "system", content: system }, { role: "user", content: user }],
         }),
@@ -81,6 +92,9 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
 }
 
 // ── prompts ──────────────────────────────────────────────────────────────────
+/** Special segment label: carried-over dives that resolved overnight. */
+export const FOLLOWUPS_LABEL = "follow-ups from yesterday";
+
 const SCRIPT_SYS =
   `You are the writer for a short, daily, TWO-HOST morning podcast that reviews the listener's newsletter feeds. The hosts are HOST A and HOST B in a natural, friendly back-and-forth.
 
@@ -89,10 +103,15 @@ You are given SEGMENTS, one per newsletter label, each holding GROUNDED, already
   [UNCERTAIN]          — PRELIMINARY follow-up research; narrate it tentatively ("preliminary research suggests… though it isn't settled").
   [GAP]                — an open question the article left unanswered; raise it as an open point of interest.
 
+Some items ALSO carry a "DEEPER DIVE" block — our own overnight web research into context the newsletter itself didn't give. Weave it in as exactly that: "the newsletter just mentioned this, so we went and looked it up — here's what we found." It follows the same tag rules.
+
+A segment titled "${FOLLOWUPS_LABEL}" holds questions we flagged as unanswered on a PREVIOUS day and have now researched. Narrate it as a callback: "yesterday we flagged X — here's what we dug up." Same tag rules.
+
 HARD RULES:
 - Narrate ONLY what the material supports. NEVER add a fact, number, name, quote, or claim that is not in the material. If you're tempted to add color you can't ground, don't.
 - Keep [UNCERTAIN] explicitly preliminary, and [GAP] explicitly open.
-- If an item is marked email-only / incomplete, SAY so ("we only had the newsletter blurb on this one").
+- If an item is marked email-only / incomplete AND has no DEEPER DIVE block, SAY so ("we only had the newsletter blurb on this one"). If it has a DEEPER DIVE, say the newsletter only mentioned it but our own research filled it in.
+- Do NOT claim a gap was answered when it wasn't: an item with an open [GAP] and no DEEPER DIVE stays an open question.
 - One segment per label, in the order given, with smooth host-to-host and segment-to-segment transitions.
 - Cold open: the date + a one-line hello. Sign-off: a short, warm close.
 - Tight and listenable — no padding, no invented banter about facts.
@@ -120,13 +139,33 @@ function headlineOf(item: SegmentItem): string {
   return (m?.[1] ?? item.title ?? "").trim();
 }
 
+/** Keep only the first N tagged claim lines of a synthesis (prompt proportion). */
+function trimTagged(synthesis: string, max = 6): string {
+  const kept: string[] = [];
+  for (const raw of String(synthesis || "").split("\n")) {
+    const line = raw.trim();
+    if (/^\[(SOURCED|INFERRED|UNCERTAIN|GAP)\]/i.test(line)) {
+      kept.push(line);
+      if (kept.length >= max) break;
+    }
+  }
+  return kept.join("\n");
+}
+
 /** Compact, tagged view of a segment for the script prompt. */
 function renderSegmentForPrompt(seg: Segment): string {
   const lines: string[] = [`## SEGMENT: ${seg.label}`];
   for (const it of seg.items) {
-    lines.push(`### ${it.title || headlineOf(it)}${it.emailOnly ? "  (EMAIL-ONLY / incomplete)" : ""}`);
+    // An email-only item WITH a dive is no longer just a blurb — mark it so the
+    // hosts say "the newsletter only mentioned it, but our own digging filled it in".
+    const incomplete = it.emailOnly && !it.dive;
+    lines.push(`### ${it.title || headlineOf(it)}${incomplete ? "  (EMAIL-ONLY / incomplete)" : ""}`);
     if (it.threadName) lines.push(`(ongoing thread: ${it.threadName})`);
-    lines.push(it.synthesis.trim());
+    if (it.synthesis.trim()) lines.push(it.synthesis.trim());
+    if (it.dive && it.dive.trim()) {
+      lines.push(`DEEPER DIVE (our own overnight research — the newsletter only mentioned this):`);
+      lines.push(trimTagged(it.dive));
+    }
   }
   return lines.join("\n");
 }

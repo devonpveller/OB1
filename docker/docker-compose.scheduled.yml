@@ -181,6 +181,22 @@ services:
       CHAT_API_BASE: http://llama-cpp:8080/v1
       BRAIN_REST_URL: http://openbrain-rest
       FETCH_PROXY_URL: socks5h://tor:9050
+      # ── Gap dives ──────────────────────────────────────────────────────────
+      # When the email source lacked context (open [GAP]s, thin syntheses, email-
+      # only items), triage the day's gaps into full research sessions on the
+      # ob-research queue lane. THROTTLE = relevance to the source email (not a
+      # fixed count): every gap central to its newsletter is researched, tangential
+      # ones dropped. CEILING is only a runaway safety valve; overflow + unfinished
+      # dives carry via /reports/gap-dives-pending.json, freshness-bounded, and
+      # resolve into a follow-ups segment next morning. Best-effort; never blocks
+      # the email. Rollback = GAP_DIVE_ENABLED=0 + recreate.
+      # docs: implementation-guide/digest-gap-deep-research/
+      GAP_DIVE_ENABLED: ${GAP_DIVE_ENABLED:-1}
+      GAP_DIVE_CEILING: ${GAP_DIVE_CEILING:-12}          # runaway safety, NOT the throttle
+      GAP_DIVE_MIN_TAGGED: ${GAP_DIVE_MIN_TAGGED:-2}     # < this grounded lines = "thin"
+      GAP_DIVE_WAIT_MS: ${GAP_DIVE_WAIT_MS:-7200000}     # same-night budget (2h)
+      GAP_DIVE_MAX_ATTEMPTS: ${GAP_DIVE_MAX_ATTEMPTS:-2} # resubmits before drop
+      GAP_DIVE_MAX_AGE_DAYS: ${GAP_DIVE_MAX_AGE_DAYS:-3} # freshness: never dive staler
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
     volumes:
       - ../recipes/daily-digest:/app
@@ -194,6 +210,58 @@ services:
       - llm-net
       - search-net
     entrypoint: ["deno", "run", "--unstable-net", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "--allow-run", "podcast-server.ts"]
+    command: []
+
+  # ── Idea Refinery drain (IR.1, HTTP-triggered) ──────────────────────
+  # Long-running Deno HTTP service. POST /run walks the owed-research queue
+  # (ideas/idea_revisions, init-ideas.sql) and researches each owed idea via
+  # openbrain-research — bounded submit-on-complete + rollover (§6.2). Stand-
+  # alone (not chained); cron fires ~03:00 UTC, WELL BEFORE the 05:00-UTC gmail/
+  # wiki chain, so new claims land before the 1am-local wiki compile (flywheel).
+  #
+  # PROFILE-GATED (`idea-refinery`): NOT started by a default `up` — stays off until
+  # you deliberately enable it. IR.1 (drain) + IR.2 (Mattermost delivery) are built.
+  # To go live: set IDEA_REFINERY_MM_TOKEN (+ optionally MM_SITE_URL) in OB1/docker/
+  # .env, add that bot to your team and the #ideas channel, then:
+  #   docker compose -f docker-compose.yml --profile idea-refinery up -d openbrain-idea-refinery
+  # (At go-live, also sync the recovery-scripts inventory + /stack-map — new container.)
+  openbrain-idea-refinery:
+    profiles: ["idea-refinery"]
+    image: denoland/deno:alpine
+    container_name: openbrain-idea-refinery
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      PORT: "8080"
+      DB_HOST: openbrain-db
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      RESEARCH_URL: http://openbrain-research:8000
+      MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      IDEA_REFINERY_CHANNEL: "#ideas"
+      # Mattermost (agent-org project, published on the host at :8065) — reached via
+      # host.docker.internal. Set IDEA_REFINERY_MM_TOKEN in OB1/docker/.env to a bot
+      # token (AO_MATTERMOST_BOT_TOKEN's value or a dedicated bot); the bot must be
+      # ON A TEAM and in #ideas. MM_SITE_URL enables clickable permalinks (optional).
+      MATTERMOST_URL: ${IDEA_REFINERY_MM_URL:-http://host.docker.internal:8065}
+      MATTERMOST_TOKEN: ${IDEA_REFINERY_MM_TOKEN:-}
+      MATTERMOST_SITE_URL: ${MM_SITE_URL:-}
+      # LOCAL brainstorm (IR.4/IR.6): an operator reply under a dossier in #ideas is honed by the
+      # LOCAL model via the gateway — the same plane the research uses. Nothing goes to cloud.
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      # :nothink — brainstorm wants a direct reply; the thinking variant's reasoning tokens can eat
+      # the budget and leave content empty (a silent non-reply). See index.ts CHAT_MODEL note.
+      CHAT_MODEL: qwen36-27b:nothink
+      IDEA_BRAINSTORM_OPERATORS: ${IDEA_BRAINSTORM_OPERATORS:-profnovice}
+    volumes:
+      - ../integrations/openbrain-idea-refinery:/app
+    extra_hosts:
+      # reach the host-published Mattermost (:8065) from inside this container
+      - "host.docker.internal:host-gateway"
+    networks:
+      # obnet: openbrain-db + openbrain-research. llm-net kept for slice parity.
+      - obnet
+      - llm-net
+    entrypoint: ["deno", "run", "--allow-net", "--allow-env", "index.ts"]
     command: []
 
 networks:

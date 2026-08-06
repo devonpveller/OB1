@@ -51,12 +51,13 @@ import { extractAnchors, GmailReader } from "./src/enrich/gmail-fetch.ts";
 import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
-import { JobRecord, ResearchClient } from "./src/enrich/research-client.ts";
+import { JobRecord, ResearchClient, waitForAll } from "./src/enrich/research-client.ts";
 import { filterCandidates, isPromoBody, loadBlocklist, saveBlocklist } from "./src/enrich/promo-filter.ts";
 import { DayReport, DayReportEntry, LinkCandidate } from "./src/enrich/types.ts";
 import {
   Episode,
   EpisodeInput,
+  FOLLOWUPS_LABEL,
   makeScriptChat,
   pad3,
   renderEpisode,
@@ -64,7 +65,16 @@ import {
   SegmentItem,
 } from "./src/podcast/script-renderer.ts";
 import { OnClient, OnEpisode } from "./src/podcast/on-client.ts";
-import { EmailEnrichment, EnrichedSegment, parseSynthesisForEmail } from "./src/podcast/enrichment.ts";
+import { EmailEnrichment, EnrichedSegment, parseSynthesisForEmail, ResolvedFollowUp } from "./src/podcast/enrichment.ts";
+import {
+  GapCandidate,
+  LedgerEntry,
+  LedgerResolution,
+  loadLedger,
+  planDives,
+  resolveLedger,
+  saveLedger,
+} from "./src/enrich/gap-dive.ts";
 
 // ── config ───────────────────────────────────────────────────────────────────
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
@@ -95,6 +105,23 @@ const REPORTS_DIR = env("REPORTS_DIR", "/reports");
 // domains → dropped instantly; the nothink classifier grows this over time.
 const BLOCKLIST_PATH = env("PROMO_BLOCKLIST_PATH", `${REPORTS_DIR}/promo-blocklist.json`);
 
+// ── gap dives ────────────────────────────────────────────────────────────────
+// When the email source lacked context (open [GAP]s, thin syntheses, email-only
+// items), triage the day's gaps into FULL research sessions. The THROTTLE is
+// relevance-to-the-source-email (planDives), NOT a fixed count: every gap central
+// to its newsletter's topic is researched, tangential ones are dropped. The
+// CEILING below is only a runaway safety valve; overflow + unfinished dives carry
+// in a freshness-bounded ledger. See implementation-guide/digest-gap-deep-research/.
+const GAP_DIVE_ENABLED = env("GAP_DIVE_ENABLED", "1") === "1";
+const GAP_DIVE_CEILING = num("GAP_DIVE_CEILING", 12); // runaway safety, NOT the throttle
+const GAP_DIVE_MIN_TAGGED = num("GAP_DIVE_MIN_TAGGED", 2); // < this tagged lines = "thin"
+const GAP_DIVE_WAIT_MS = num("GAP_DIVE_WAIT_MS", 7_200_000); // same-night budget (2h)
+const GAP_DIVE_MAX_ATTEMPTS = num("GAP_DIVE_MAX_ATTEMPTS", 2); // resubmits before drop
+const GAP_DIVE_MAX_AGE_DAYS = num("GAP_DIVE_MAX_AGE_DAYS", 3); // freshness: never dive staler
+const GAP_MAX_PER_ITEM = num("GAP_DIVE_MAX_PER_ITEM", 3); // cap gaps taken per article
+// Durable carryover ledger (deferred + unfinished dives; freshness-bounded).
+const LEDGER_PATH = `${REPORTS_DIR}/gap-dives-pending${COMMIT ? "" : "-dryrun"}.json`;
+
 const brain = new BrainClient({ baseUrl: env("BRAIN_REST_URL", "http://openbrain-rest") });
 const research = new ResearchClient({
   baseUrl: env("RESEARCH_URL", "http://openbrain-research:8000"),
@@ -106,6 +133,15 @@ const scriptChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
   chatModel: env("CHAT_MODEL", "qwen36-27b"),
   nothinkSuffix: env("SCRIPT_NOTHINK_SUFFIX", ":nothink"), // nothink = fast + reliable; set "" for think-model dialogue
+});
+// Gap-dive triage — a CLASSIFICATION task, so temperature 0 (deterministic).
+// Reusing the default 0.5 chat made triage flaky: same gaps yielded 7-10 dives
+// one call and 0 the next. Verified temp 0 → stable ([6,6,6,6] across runs).
+const gapTriageChat = makeScriptChat({
+  chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
+  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  nothinkSuffix: ":nothink",
+  temperature: 0,
 });
 
 // S4b — audio via Open Notebook (D5: content-only renderer; D12: accept ON's
@@ -200,6 +236,23 @@ function addSegmentItem(label: string, item: SegmentItem) {
 // Threads the day's research resolved to (commit only) — for loop-close.
 const threadIds = new Set<string>();
 
+// ── gap-dive state ───────────────────────────────────────────────────────────
+// "Source lacked context" signals collected across the day's items.
+const gapCandidates: GapCandidate[] = [];
+// Carried-over dives that resolved (yesterday's / this run's retries) — email.
+const resolvedFollowUps: ResolvedFollowUp[] = [];
+// Dives still running at email time — "digging deeper overnight".
+const pendingFollowUpQuestions: string[] = [];
+
+/** Attach a same-night dive synthesis to its owning item's segment. */
+function attachDiveToItem(label: string, url: string, dive: string): boolean {
+  const arr = segments.get(label);
+  const it = arr?.find((x) => x.url === url);
+  if (!it) return false;
+  it.dive = dive;
+  return true;
+}
+
 interface WorkItem {
   email: { gmailId: string; gmailThreadId: string; emailDate: string; gmailLabels: string[] };
   label: string;
@@ -231,16 +284,34 @@ async function main() {
     Deno.exit(2);
   }
 
-  const news = await new AiNewsSection(brain, { windowHours: WINDOW_HOURS, limit: 500 }).produce();
-  if (!news) { console.log("[link-enrich] no emails in window."); await writeReport(); return; }
-  const payload = news.payload as import("./src/sections/ai-news.ts").AiNewsPayload;
+  // Resolve yesterday's carried-over gap dives (durable server-side jobs) before
+  // today's run — so a poll happens once, and results feed today's follow-ups.
+  const ledgerRes: LedgerResolution = GAP_DIVE_ENABLED
+    ? await resolveLedger((id) => research.poll(id), await loadLedger(LEDGER_PATH), {
+      maxAttempts: GAP_DIVE_MAX_ATTEMPTS,
+      maxAgeDays: GAP_DIVE_MAX_AGE_DAYS,
+      nowMs: Date.now(),
+    })
+    : { resolved: [], stillRunning: [], retry: [], deferred: [], dropped: [] };
+  if (GAP_DIVE_ENABLED && (ledgerRes.resolved.length || ledgerRes.retry.length || ledgerRes.stillRunning.length || ledgerRes.deferred.length || ledgerRes.dropped.length)) {
+    console.log(
+      `[gap-dive] carryover: resolved=${ledgerRes.resolved.length} deferred=${ledgerRes.deferred.length} ` +
+        `retry=${ledgerRes.retry.length} running=${ledgerRes.stillRunning.length} dropped=${ledgerRes.dropped.length}`,
+    );
+  }
 
-  const emails = payload.emails
-    .filter((e) =>
-      ONLY_LABEL ? e.gmailLabels.includes(ONLY_LABEL) : e.gmailLabels.some((l) => l.startsWith(LABEL_PREFIX))
-    )
-    .slice(0, MAX_EMAILS);
-  console.log(`[link-enrich] ${emails.length} target email(s) of ${payload.emails.length} in window.`);
+  const news = await new AiNewsSection(brain, { windowHours: WINDOW_HOURS, limit: 500 }).produce();
+  // No emails is NOT a hard stop: yesterday's carried-over gap dives may still
+  // have resolved and belong in today's episode. Continue with an empty set.
+  const payload = news?.payload as import("./src/sections/ai-news.ts").AiNewsPayload | undefined;
+  const emails = payload
+    ? payload.emails
+      .filter((e) =>
+        ONLY_LABEL ? e.gmailLabels.includes(ONLY_LABEL) : e.gmailLabels.some((l) => l.startsWith(LABEL_PREFIX))
+      )
+      .slice(0, MAX_EMAILS)
+    : [];
+  console.log(`[link-enrich] ${emails.length} target email(s) of ${payload?.emails.length ?? 0} in window.`);
 
   // ── Gather work items: the EMAIL BODY (the newsletter's curated content — news,
   //    tools, summaries) is the primary source; PLUS genuinely-external content
@@ -335,6 +406,13 @@ async function main() {
     await mapLimit(items, RESEARCH_CONCURRENCY, processLink);
   }
 
+  // ── Gap dives: turn the day's "source lacked context" signals + yesterday's
+  //    carryover into full research sessions. Best-effort; never blocks the chain.
+  if (GAP_DIVE_ENABLED) {
+    try { await runGapDives(ledgerRes); }
+    catch (err) { console.warn(`[gap-dive] stage failed (non-fatal): ${err}`); }
+  }
+
   await writeReport();
   const ep = await maybeRenderEpisode();
   let onEp: OnEpisode | null = null;
@@ -357,7 +435,20 @@ async function processLink(item: WorkItem) {
   };
   const fallback = (note: string) => {
     record({ ...base, note });
-    addSegmentItem(label, { title: link.text || subject || link.domain, url: link.url, synthesis: "", emailOnly: true });
+    const itemTitle = link.text || subject || link.domain;
+    addSegmentItem(label, { title: itemTitle, url: link.url, synthesis: "", emailOnly: true });
+    // Email-only = the source lacked context entirely → a gap-dive candidate.
+    if (GAP_DIVE_ENABLED) {
+      gapCandidates.push({
+        kind: "email-only",
+        text: itemTitle,
+        label,
+        gmailId: email.gmailId,
+        title: itemTitle,
+        emailSubject: subject || itemTitle || label,
+        url: link.url,
+      });
+    }
     console.log(`      ✗ ${link.domain} — email-only (${note})`);
   };
 
@@ -395,6 +486,9 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
   const result = job.result ?? {};
   const synthesis = result.synthesis ?? "";
   const taggedLines = countTaggedClaimLines(synthesis);
+  // The [GAP] lines are emitted INTO the synthesis (article mode leaves
+  // result.gaps empty), so parse them from there — this is the authoritative list.
+  const synthGaps = parseSynthesisForEmail(synthesis).gaps;
   if (Deno.env.get("DUMP_SYNTHESIS") && synthesis) {
     console.log(`\n----- synthesis for ${p.base.url} -----\n${synthesis}\n----- end -----\n`);
   }
@@ -409,12 +503,34 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
     emailOnly: false,
   });
 
+  // Gap-dive candidates: what the source left under-covered. (a) each remaining
+  // [GAP] line, (b) a thin synthesis = the item mentioned a story but grounded
+  // almost nothing behind it. The owning item carries the label/thread so a dive
+  // compounds the same thread and can narrate inline.
+  if (GAP_DIVE_ENABLED) {
+    const owner = {
+      label: p.base.label,
+      gmailId: p.email.gmailId,
+      title: p.title || p.subject || p.base.domain,
+      emailSubject: p.subject || p.title || p.base.label,
+      url: p.base.url,
+      threadId: curator?.thread_id ?? result.thread_id,
+    };
+    for (const g of synthGaps.slice(0, GAP_MAX_PER_ITEM)) {
+      if (g && g.trim()) gapCandidates.push({ kind: "gap", text: g.trim(), ...owner });
+    }
+    if (taggedLines < GAP_DIVE_MIN_TAGGED) {
+      const firstLine = synthesis.split("\n").map((s) => s.trim()).find(Boolean) ?? "";
+      gapCandidates.push({ kind: "thin", text: firstLine || owner.title, ...owner });
+    }
+  }
+
   // dry-run: no canonical write; report the previewed synthesis.
   if (!COMMIT) {
     record({
       ...p.base, status: "enriched",
       preview: { claim: (synthesis.split("\n")[0] ?? "").slice(0, 120), synthesisChars: synthesis.length, taggedClaimLines: taggedLines },
-      note: `dry-run preview; reuse=${result.reuse_claims?.length ?? 0} gaps=${result.gaps?.length ?? 0}`,
+      note: `dry-run preview; reuse=${result.reuse_claims?.length ?? 0} gaps=${synthGaps.length}`,
     });
     console.log(`      ✓ ${p.base.domain} — would enrich (${taggedLines} tagged claims, ${result.reuse_claims?.length ?? 0} OB reuse)`);
     return;
@@ -437,6 +553,153 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
     `      ✓ ${p.base.domain} → thread "${curator?.thread_name ?? "?"}" (${curator?.thread_decision ?? "?"}) ` +
       `claims=${curator?.claims?.claimsWritten ?? 0}/+${curator?.claims?.claimsDeduped ?? 0}`,
   );
+}
+
+/** Submit a full topic-mode research job (a gap dive). Returns the job id or null. */
+async function submitDive(question: string, threadId?: string): Promise<string | null> {
+  try {
+    // No seeds, no article mode → the default full-research path (web search ON,
+    // iterative deepening). origin "notebook" → the ob-research queue lane.
+    return await research.submit({ query: question, origin: "notebook", threadId, dryRun: !COMMIT });
+  } catch (err) {
+    console.warn(`      (gap-dive submit failed: ${err})`);
+    return null;
+  }
+}
+
+/** Build the email-side resolved-follow-up record from a dive synthesis. */
+function toResolvedFollowUp(question: string, title: string, url: string, synthesis: string): ResolvedFollowUp {
+  return { question, title, url, keyPoints: parseSynthesisForEmail(synthesis).keyPoints.slice(0, 3) };
+}
+
+/** Narrate a resolved dive as a follow-up (podcast segment + email). */
+function recordResolvedFollowUp(r: { question: string; title: string; url: string; synthesis: string; threadName?: string }) {
+  addSegmentItem(FOLLOWUPS_LABEL, { title: r.title, url: r.url, threadName: r.threadName, synthesis: r.synthesis, emailOnly: false });
+  resolvedFollowUps.push(toResolvedFollowUp(r.question, r.title, r.url, r.synthesis));
+}
+
+/** A dive queued for submission (from carried ledger entries or today's plan). */
+interface QueuedDive {
+  origin: "today" | "carry"; // today's fresh → inline attach; carried → follow-up
+  question: string;
+  label: string;
+  title: string;
+  url: string;
+  threadId?: string;
+  attempts: number;
+  firstSeen: string; // ISO — drives the freshness gate
+}
+interface DiveSub extends QueuedDive {
+  jobId: string;
+}
+
+function deferredEntry(q: QueuedDive, submittedAt: string): LedgerEntry {
+  return { jobId: "", question: q.question, label: q.label, title: q.title, url: q.url, threadId: q.threadId, attempts: q.attempts, firstSeen: q.firstSeen, submittedAt };
+}
+
+/**
+ * Gap-dive stage. (1) Narrate prior runs' resolved dives. (2) Triage today's
+ * candidates by RELEVANCE to their source email — every relevant gap is kept
+ * (no fixed count), tangential ones dropped. (3) Build a submission queue: carried
+ * (already-vetted deferred + retries) first, then today's relevant gaps ranked by
+ * triage. (4) Submit up to the runaway CEILING; defer the overflow (fresh, vetted)
+ * to tomorrow. (5) Wait the same-night budget; attach finished results (today →
+ * inline on the item; carried → follow-up) and carry the unfinished. Honest-by-
+ * default: a dive with no grounded material is dropped, item stays unfilled (D0).
+ */
+async function runGapDives(ledgerRes: LedgerResolution) {
+  const nowIso = new Date().toISOString();
+
+  // (1) Prior runs' resolved dives → follow-ups.
+  for (const r of ledgerRes.resolved) recordResolvedFollowUp(r);
+
+  // (2) Relevance triage — the throttle. Told what's already in flight/deferred.
+  const inFlight = [...ledgerRes.stillRunning, ...ledgerRes.retry, ...ledgerRes.deferred].map((e) => e.question);
+  const planned = await planDives(gapTriageChat, gapCandidates, { inFlight });
+  console.log(`[gap-dive] ${gapCandidates.length} candidate(s) collected; triage kept ${planned.length} relevant; carryover deferred=${ledgerRes.deferred.length} retry=${ledgerRes.retry.length}.`);
+
+  if (args.has("--dump-dives")) {
+    console.log(`\n[gap-dive] ${gapCandidates.length} candidate(s) → triage kept ${planned.length} relevant (submitting nothing):`);
+    for (const p of planned) console.log(`   KEEP [${p.label}] ${p.question}`);
+    const keptUrls = new Set(planned.map((p) => p.url));
+    for (const c of gapCandidates) {
+      if (!keptUrls.has(c.url)) console.log(`   drop (${c.kind}) [${c.label}] ${c.text.slice(0, 80)}`);
+    }
+    const carry = ledgerRes.deferred.length + ledgerRes.retry.length;
+    if (carry) console.log(`   (+${carry} carried dive(s) would also (re)submit)`);
+    if (planned.length + carry > GAP_DIVE_CEILING) {
+      console.log(`   ⚠ ${planned.length + carry} relevant > ceiling ${GAP_DIVE_CEILING} → overflow defers to tomorrow`);
+    }
+    console.log("");
+    return;
+  }
+
+  // (3) Submission queue: carried (already vetted) first, then today's ranked.
+  const queue: QueuedDive[] = [];
+  const seenQ = new Set<string>();
+  const pushQ = (q: QueuedDive) => {
+    const key = q.question.trim().toLowerCase();
+    if (!key || seenQ.has(key)) return;
+    seenQ.add(key);
+    queue.push(q);
+  };
+  for (const e of ledgerRes.deferred) pushQ({ origin: "carry", question: e.question, label: e.label, title: e.title, url: e.url, threadId: e.threadId, attempts: e.attempts, firstSeen: e.firstSeen || nowIso });
+  for (const e of ledgerRes.retry) pushQ({ origin: "carry", question: e.question, label: e.label, title: e.title, url: e.url, threadId: e.threadId, attempts: e.attempts, firstSeen: e.firstSeen || nowIso });
+  for (const p of planned) pushQ({ origin: "today", question: p.question, label: p.label, title: p.title, url: p.url, threadId: p.threadId, attempts: 0, firstSeen: nowIso });
+
+  // (4) Runaway safety: submit up to the ceiling; DEFER the overflow (still fresh,
+  //     still vetted) to tomorrow instead of dropping relevant work.
+  const toSubmit = queue.slice(0, GAP_DIVE_CEILING);
+  const overflow = queue.slice(GAP_DIVE_CEILING);
+  if (overflow.length) {
+    console.log(`[gap-dive] ⚠ ${queue.length} relevant dives exceed ceiling ${GAP_DIVE_CEILING}; deferring ${overflow.length} to tomorrow (freshness-bounded).`);
+  }
+
+  const newEntries: LedgerEntry[] = [...ledgerRes.stillRunning];
+  for (const q of overflow) newEntries.push(deferredEntry(q, nowIso));
+
+  if (toSubmit.length === 0) {
+    await saveLedger(LEDGER_PATH, { entries: newEntries });
+    if (newEntries.length) console.log(`[gap-dive] no new dives; ledger carries ${newEntries.length}.`);
+    return;
+  }
+
+  // (5) Submit.
+  const subs: DiveSub[] = [];
+  for (const q of toSubmit) {
+    const jobId = await submitDive(q.question, q.threadId);
+    if (jobId) subs.push({ ...q, jobId });
+    else if (q.origin === "carry") newEntries.push(deferredEntry(q, nowIso)); // keep for next run
+  }
+  console.log(`[gap-dive] submitted ${subs.length} dive(s); waiting ≤${Math.round(GAP_DIVE_WAIT_MS / 1000)}s…`);
+
+  // (6) Bounded same-night wait — never cancels; unfinished jobs keep draining.
+  const results = subs.length
+    ? await waitForAll(research, subs.map((s) => s.jobId), { timeoutMs: GAP_DIVE_WAIT_MS, intervalMs: RESEARCH_POLL_MS })
+    : new Map();
+
+  // (7) Classify + persist.
+  for (const s of subs) {
+    const out = results.get(s.jobId);
+    const job = out && out.ok ? out.job : null;
+    const synthesis = job?.result?.synthesis ?? "";
+    if (job && countTaggedClaimLines(synthesis) > 0) {
+      if (s.origin === "today" && attachDiveToItem(s.label, s.url, synthesis)) {
+        console.log(`      ✓ gap dive filled "${s.title.slice(0, 50)}" inline.`);
+      } else {
+        // carried (a prior-day gap), or owning item vanished → standalone follow-up.
+        recordResolvedFollowUp({ question: s.question, title: s.title, url: s.url, synthesis, threadName: job?.result?.curator?.thread_name });
+      }
+    } else if (job) {
+      // done but no grounded material → dropped (honest floor; item stays unfilled).
+    } else {
+      // still running / errored / timed out → carry over (freshness-bounded).
+      newEntries.push({ jobId: s.jobId, question: s.question, label: s.label, title: s.title, url: s.url, threadId: s.threadId, attempts: s.attempts, firstSeen: s.firstSeen, submittedAt: nowIso });
+      pendingFollowUpQuestions.push(s.question);
+    }
+  }
+  await saveLedger(LEDGER_PATH, { entries: newEntries });
+  console.log(`[gap-dive] done. resolved=${resolvedFollowUps.length} pending=${pendingFollowUpQuestions.length} ledger=${newEntries.length}.`);
 }
 
 /** Stamp gmail_id/labels/email_date onto the curator-written sources (commit only). */
@@ -466,17 +729,22 @@ async function writeEnrichment(ep: Episode, urls: { viewUrl: string | null; down
   const segs: EnrichedSegment[] = [];
   const followUps: string[] = [];
   for (const [label, items] of segments) {
+    // The follow-ups pseudo-segment is surfaced via resolvedFollowUps, not here.
+    if (label === FOLLOWUPS_LABEL) continue;
     segs.push({
       label,
       items: items.map((it) => {
         const p = parseSynthesisForEmail(it.synthesis);
-        followUps.push(...p.gaps);
+        // A same-night dive filled this item's context — fold its findings in and
+        // treat the item's own gaps as addressed (no longer "open").
+        const dv = it.dive ? parseSynthesisForEmail(it.dive) : null;
+        if (!dv) followUps.push(...p.gaps);
         return {
           title: it.title, url: it.url,
-          keyPoints: p.keyPoints.slice(0, KP),
-          preliminary: p.preliminary.slice(0, PRE),
-          gaps: p.gaps.slice(0, GAP),
-          emailOnly: !!it.emailOnly,
+          keyPoints: [...p.keyPoints, ...(dv?.keyPoints ?? [])].slice(0, KP),
+          preliminary: [...p.preliminary, ...(dv?.preliminary ?? [])].slice(0, PRE),
+          gaps: (dv ? [] : p.gaps).slice(0, GAP),
+          emailOnly: !!it.emailOnly && !it.dive,
         };
       }),
     });
@@ -487,6 +755,10 @@ async function writeEnrichment(ep: Episode, urls: { viewUrl: string | null; down
     episode: { name: ep.name, title: ep.title, viewUrl: urls.viewUrl, downloadUrl: urls.downloadUrl },
     segments: segs,
     followUps: [...new Set(followUps.map((g) => g.trim()).filter(Boolean))].slice(0, 6),
+    resolvedFollowUps: resolvedFollowUps.length ? resolvedFollowUps : undefined,
+    pendingFollowUps: pendingFollowUpQuestions.length
+      ? [...new Set(pendingFollowUpQuestions.map((q) => q.trim()).filter(Boolean))].slice(0, 6)
+      : undefined,
   };
   // Dry-run writes a separate file so it never clobbers the digest's production
   // artifact (the digest only reads podcast-brief-latest.json).

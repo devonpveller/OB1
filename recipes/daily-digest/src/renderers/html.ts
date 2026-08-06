@@ -200,6 +200,31 @@ function renderPodcastBrief(d: PodcastBriefPayload): string {
       return `<h3 style="margin:18px 0 6px 0;font-size:15px;color:#4527a0;">${escHtml(prettyLabel(s.label))}</h3>${cards}`;
     }).join("");
 
+  const resolved = d.resolvedFollowUps ?? [];
+  const resolvedBlock = resolved.length > 0
+    ? `<div style="background:#e8f5e9;border-left:3px solid #43a047;padding:10px 14px;margin:14px 0;border-radius:0 4px 4px 0;">
+  <strong>Answered since yesterday</strong>
+  <div style="color:#555;font-size:12px;margin:2px 0 6px 0;">Gaps we flagged earlier — now researched.</div>
+  ${
+      resolved.map((r) => {
+        const pts = r.keyPoints.length > 0
+          ? `<ul style="margin:4px 0;padding-left:20px;font-size:13px;color:#333;">${r.keyPoints.map((p) => `<li>${escHtml(p)}</li>`).join("")}</ul>`
+          : "";
+        return `<div style="margin:8px 0;"><div style="font-size:13.5px;color:#2e7d32;">${escHtml(r.question)}</div>${pts}</div>`;
+      }).join("")
+    }
+</div>`
+    : "";
+
+  const pending = d.pendingFollowUps ?? [];
+  const pendingBlock = pending.length > 0
+    ? `<div style="background:#e3f2fd;border-left:3px solid #1e88e5;padding:10px 14px;margin:14px 0;border-radius:0 4px 4px 0;">
+  <strong>Digging deeper overnight</strong>
+  <div style="color:#555;font-size:12px;margin:2px 0 4px 0;">Research still running — results in a future digest.</div>
+  <ul style="margin:4px 0 0 0;padding-left:20px;font-size:13.5px;">${pending.map((q) => `<li>${escHtml(q)}</li>`).join("")}</ul>
+</div>`
+    : "";
+
   const followBlock = d.followUps.length > 0
     ? `<div style="background:#fff8e1;border-left:3px solid #f9a825;padding:10px 14px;margin:14px 0;border-radius:0 4px 4px 0;">
   <strong>Open threads to follow up</strong>
@@ -207,8 +232,8 @@ function renderPodcastBrief(d: PodcastBriefPayload): string {
 </div>`
     : "";
 
-  if (!epBlock && !segBlocks && !followBlock) return "";
-  return `<h2 style="border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:8px;font-size:18px;color:#222;">Today's deep dive</h2>${epBlock}${segBlocks}${followBlock}`;
+  if (!epBlock && !segBlocks && !resolvedBlock && !pendingBlock && !followBlock) return "";
+  return `<h2 style="border-bottom:1px solid #ddd;padding-bottom:4px;margin-top:8px;font-size:18px;color:#222;">Today's deep dive</h2>${epBlock}${segBlocks}${resolvedBlock}${pendingBlock}${followBlock}`;
 }
 
 // ─── AI News (emails) ───────────────────────────────────────────────────────

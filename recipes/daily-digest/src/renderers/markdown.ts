@@ -51,6 +51,21 @@ function renderPodcastBrief(d: PodcastBriefPayload): string {
       lines.push("");
     }
   }
+  const resolved = d.resolvedFollowUps ?? [];
+  if (resolved.length) {
+    lines.push("### Answered since yesterday", "", "_Gaps we flagged earlier — now researched._", "");
+    for (const r of resolved) {
+      lines.push(`**${r.question}**`);
+      for (const p of r.keyPoints) lines.push(`- ${p}`);
+      lines.push("");
+    }
+  }
+  const pending = d.pendingFollowUps ?? [];
+  if (pending.length) {
+    lines.push("### Digging deeper overnight", "", "_Research still running — results in a future digest._", "");
+    for (const q of pending) lines.push(`- ${q}`);
+    lines.push("");
+  }
   if (d.followUps.length) {
     lines.push("### Open threads to follow up", "");
     for (const g of d.followUps) lines.push(`- ${g}`);

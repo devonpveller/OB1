@@ -23,6 +23,13 @@ export interface EnrichedSegment {
   label: string; // gmail label, e.g. "brain/ai/nate b jones"
   items: EnrichedArticle[];
 }
+/** A gap-dive question that resolved overnight (D5 carryover) — answered. */
+export interface ResolvedFollowUp {
+  question: string;
+  title: string;
+  url: string;
+  keyPoints: string[]; // grounded findings from the dive
+}
 export interface EmailEnrichment {
   generatedAt: string;
   date: string;
@@ -35,7 +42,11 @@ export interface EmailEnrichment {
     downloadUrl: string | null;
   } | null;
   segments: EnrichedSegment[];
-  followUps: string[]; // aggregated open questions across the day — the "actions"
+  followUps: string[]; // OPEN questions not (yet) turned into a dive
+  /** Gap dives that resolved since yesterday — "answered since yesterday". */
+  resolvedFollowUps?: ResolvedFollowUp[];
+  /** Gap dives submitted but still running — "digging deeper overnight". */
+  pendingFollowUps?: string[];
 }
 
 /** Strip tags/citations to email-ready prose. */
