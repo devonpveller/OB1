@@ -110,7 +110,21 @@ function looksBinary(s: string): boolean {
   for (let i = 0; i < sample.length; i++) {
     const c = sample.charCodeAt(i);
     if (c === 0) return true; // NUL → binary
-    if (c >= 0xd800 && c <= 0xdfff) return true; // lone/UTF-16 surrogate → binary
+    // Surrogates: JS strings are UTF-16, so EVERY character above U+FFFF
+    // (emoji, CJK ext, math alphanumerics) is stored as a surrogate PAIR.
+    // Rejecting any surrogate therefore rejects perfectly valid text.
+    // 2026-08-20: this mis-flagged 494 of 8,419 sources (5.9%) as
+    // "binary_content" -- 488 of them research-ingested web_articles, plus
+    // the SenseGlove Unreal 5.4 manual, which was excluded from chunk
+    // retrieval because it contains a rocket emoji. Zero were truly binary.
+    // Only an UNPAIRED surrogate indicates broken text.
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (i + 1 >= sample.length) break; // pair split by the 4000-char slice
+      const lo = sample.charCodeAt(i + 1);
+      if (lo >= 0xdc00 && lo <= 0xdfff) { i++; continue; } // valid pair -> text
+      return true; // unpaired high surrogate
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) return true; // unpaired low surrogate
     if (c < 9 || (c > 13 && c < 32)) bad++; // control chars
   }
   return bad / Math.max(1, sample.length) > 0.05;
