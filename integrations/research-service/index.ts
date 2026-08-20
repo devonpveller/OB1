@@ -497,6 +497,17 @@ async function notifyChat(
     return;
   }
 
+  // Send the SAME content again as `chat:message:delta`, purely so an already-open
+  // tab renders it. Open WebUI names this event differently on each side and does
+  // not alias them: the backend persists only `message`/`replace` (socket/main.py
+  // get_event_emitter), while the frontend only handles `chat:message` and
+  // `chat:message:delta`. So the `message` above makes the report durable but
+  // invisible to a viewer sitting on the page, and this makes it visible without
+  // writing anything. Verified against the live instance: a chat:message:delta
+  // leaves stored content byte-identical, so this cannot double-append. Drop this
+  // call if a future Open WebUI ever aliases the two names.
+  await send({ type: "chat:message:delta", data: { content: SEPARATOR + markdown } }).catch(() => {});
+
   // Clear the "researching..." status line, then ping. `notification` is
   // socket-only (it is not one of the persisted event types), so it reaches a
   // live tab and is silently dropped otherwise — fine, the report is durable.

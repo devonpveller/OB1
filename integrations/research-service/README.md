@@ -74,6 +74,16 @@ The callback POSTs the rendered report to Open WebUI's
 WebUI persists that write regardless of whether a browser is attached, so the
 report lands in the transcript even if the tab was closed an hour earlier.
 
+**It then posts the identical content a second time as `chat:message:delta`.**
+Open WebUI names this event differently on each side and does not alias them:
+the backend persists only `message`/`replace`, while the frontend renders only
+`chat:message`/`chat:message:delta`. Sending just `message` therefore produced a
+report that was durable but invisible to a tab already sitting on the page --
+the operator got the notification toast and an apparently unchanged chat, with
+the report visible only after a reload. The delta does not persist (verified
+against the live instance), so the pair cannot double-append. Drop the second
+call if a future Open WebUI aliases the two names.
+
 Two deliberate constraints:
 
 - **The caller names the message, not the host.** `OWUI_BASE_URL`/`OWUI_API_KEY`
