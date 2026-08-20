@@ -438,16 +438,70 @@ function settleBeforeAnnounce(claimedAt: number): Promise<void> {
 
 // Announce a terminal job into the Open WebUI chat that submitted it.
 //
-// `POST /api/v1/chats/:chat/messages/:msg/event` with type "message" APPENDS to
-// the stored message content, and Open WebUI persists that write independently of
-// whether a websocket is attached (socket/main.py: `save_to_chat` gates on the
-// chat being a saved one, not on a live listener). So the report lands in the
-// transcript even if the operator closed the tab an hour ago — which is the whole
-// point of going async. "replace" would have clobbered the model's ack, so append
-// is the only correct verb here.
+// WHY THIS IS NOT THE EVENT API. Open WebUI documents
+// `POST /api/v1/chats/:chat/messages/:msg/event` with type "message" for exactly
+// this, and it does persist — but only to the message's legacy `content` string.
+// An Open WebUI 0.11 assistant message also carries `output`: an array of
+// structured blocks (reasoning / message / function_call), and THAT is what the
+// interface renders. Nothing in the event API, and nothing in
+// `POST /chats/:id/messages/:msgId` either, can write `output`. So the first
+// real run delivered a report that was in the database, in chat_message, and
+// returned by the chat API — and still showed a blank chat, before and after a
+// reload. Synthetic test messages have no `output`, which is why smoke tests
+// passed while the real thing did not.
 //
-// Best-effort by design: the job row is already committed before this runs, so a
-// failed announce degrades to "retrievable by poll", never to a lost result.
+// So write the chat object directly. `merge_history` merges per message id, so
+// sending one message leaves every other message alone; it does replace that
+// message wholesale, hence read-modify-write of the complete object.
+async function deliverReport(
+  chatId: string,
+  messageId: string,
+  markdown: string,
+): Promise<boolean> {
+  const H = { "content-type": "application/json", authorization: `Bearer ${OWUI_API_KEY}` };
+  const chatUrl = `${OWUI_BASE_URL}/api/v1/chats/${encodeURIComponent(chatId)}`;
+
+  const r = await fetch(chatUrl, { headers: H });
+  if (!r.ok) throw new Error(`read chat ${r.status}`);
+  const payload = await r.json();
+  const history = payload?.chat?.history;
+  const message = history?.messages?.[messageId];
+  if (!message) throw new Error("message not found in chat history");
+
+  const addition = SEPARATOR + markdown;
+  message.content = (message.content ?? "") + addition;
+
+  // Append a rendered block only when the message already speaks that dialect.
+  // A message with no `output` renders from `content`, and inventing an array
+  // for it would hide everything the model actually said.
+  if (Array.isArray(message.output) && message.output.length > 0) {
+    message.output.push({
+      type: "message",
+      id: `msg_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text: addition }],
+    });
+  }
+
+  // currentId is deliberately omitted: merge_history keeps the existing one when
+  // the incoming history does not name a message it can resolve.
+  const w = await fetch(chatUrl, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify({ chat: { history: { messages: { [messageId]: message } } } }),
+  });
+  if (!w.ok) throw new Error(`write chat ${w.status}: ${(await w.text()).slice(0, 200)}`);
+
+  // Trust the read, not the 200. This is the only step that can silently no-op.
+  const v = await fetch(chatUrl, { headers: H });
+  const stored = (await v.json())?.chat?.history?.messages?.[messageId];
+  const inContent = typeof stored?.content === "string" && stored.content.endsWith(addition);
+  const needsBlock = Array.isArray(message.output) && message.output.length > 0;
+  const inOutput = !needsBlock || JSON.stringify(stored?.output ?? []).includes("output_text");
+  return inContent && inOutput;
+}
+
 async function notifyChat(
   callback: unknown,
   markdown: string,
@@ -459,58 +513,38 @@ async function notifyChat(
   const messageId = cb?.message_id;
   if (!chatId || !messageId) return;
 
-  const url = `${OWUI_BASE_URL}/api/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/event`;
-  const send = async (body: unknown): Promise<boolean> => {
-    const r = await fetch(url, {
+  const eventUrl =
+    `${OWUI_BASE_URL}/api/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/event`;
+  const send = async (body: unknown): Promise<void> => {
+    await fetch(eventUrl, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${OWUI_API_KEY}` },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(`owui event ${r.status}: ${(await r.text()).slice(0, 200)}`);
-    // The endpoint answers `false` when no emitter could be built for that
-    // chat/message — a wrong id, not a transport fault. Retrying will not help.
-    return (await r.json().catch(() => null)) !== false;
   };
 
-  // Only the content is retried. Status/notification are cosmetic: a spinner that
-  // never clears is a nuisance, a missing report is a bug.
   let delivered = false;
   for (let attempt = 1; attempt <= 3 && !delivered; attempt++) {
     try {
-      // Lead with a rule. The content APPENDS to whatever the model wrote when
-      // it handed off, with no separator of its own, so the report otherwise
-      // runs straight onto the end of that sentence. The two were written
-      // minutes apart by different authors; the seam should show.
-      const ok = await send({ type: "message", data: { content: SEPARATOR + markdown } });
-      if (!ok) {
-        console.warn(`[callback] job ${jobId}: chat ${chatId}/${messageId} rejected the event (stale ids?)`);
-        return;
+      delivered = await deliverReport(chatId, messageId, markdown);
+      if (!delivered) {
+        console.warn(`[callback] job ${jobId} attempt ${attempt}/3: write reported OK but the report is not in the chat`);
       }
-      delivered = true;
     } catch (e) {
       console.warn(`[callback] job ${jobId} attempt ${attempt}/3: ${(e as Error).message}`);
-      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 2000));
     }
+    if (!delivered && attempt < 3) await new Promise((r) => setTimeout(r, attempt * 2000));
   }
   if (!delivered) {
-    console.error(`[callback] job ${jobId}: gave up announcing to ${chatId}/${messageId}; result is still cached`);
+    console.error(`[callback] job ${jobId}: gave up delivering to ${chatId}/${messageId}; the result is still on the job row`);
     return;
   }
 
-  // Send the SAME content again as `chat:message:delta`, purely so an already-open
-  // tab renders it. Open WebUI names this event differently on each side and does
-  // not alias them: the backend persists only `message`/`replace` (socket/main.py
-  // get_event_emitter), while the frontend only handles `chat:message` and
-  // `chat:message:delta`. So the `message` above makes the report durable but
-  // invisible to a viewer sitting on the page, and this makes it visible without
-  // writing anything. Verified against the live instance: a chat:message:delta
-  // leaves stored content byte-identical, so this cannot double-append. Drop this
-  // call if a future Open WebUI ever aliases the two names.
+  // Cosmetic tail, all best-effort. `chat:message:delta` renders into a tab that
+  // is already open (the frontend handles that name; it does not handle
+  // "message"), and it does not persist, so it cannot double up with the write
+  // above. `notification` is socket-only by design — a live ping, not a record.
   await send({ type: "chat:message:delta", data: { content: SEPARATOR + markdown } }).catch(() => {});
-
-  // Clear the "researching..." status line, then ping. `notification` is
-  // socket-only (it is not one of the persisted event types), so it reaches a
-  // live tab and is silently dropped otherwise — fine, the report is durable.
   await send({ type: "status", data: { description: "Research complete.", done: true } }).catch(() => {});
   await send({ type: "notification", data: { type: "info", content: "Deep research finished." } }).catch(() => {});
 }

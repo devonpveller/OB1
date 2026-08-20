@@ -74,7 +74,20 @@ The callback POSTs the rendered report to Open WebUI's
 WebUI persists that write regardless of whether a browser is attached, so the
 report lands in the transcript even if the tab was closed an hour earlier.
 
-**It then posts the identical content a second time as `chat:message:delta`.**
+**The report is delivered by writing the chat object, not through the event API.**
+Open WebUI documents `POST /chats/:id/messages/:msgId/event` for exactly this and
+it does persist -- but only into the message's legacy `content` string. A 0.11
+assistant message also carries `output`, an array of structured blocks
+(reasoning / message / function_call), and that is what the interface renders.
+No endpoint can write `output`. So an event-API delivery lands in the database,
+in `chat_message`, and in the chat API response, and still shows a blank chat
+before and after a reload. Synthetic test messages have no `output`, which is
+why this passed smoke tests and failed the first real run. `deliverReport()`
+therefore reads the chat, appends to `content` AND pushes a rendered block onto
+`output`, and writes it back; `merge_history` merges per message id, so other
+messages are untouched. It re-reads to confirm rather than trusting the 200.
+
+**It then posts the content again as `chat:message:delta`.**
 Open WebUI names this event differently on each side and does not alias them:
 the backend persists only `message`/`replace`, while the frontend renders only
 `chat:message`/`chat:message:delta`. Sending just `message` therefore produced a

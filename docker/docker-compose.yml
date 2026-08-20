@@ -480,12 +480,22 @@ services:
       FETCH_CONCURRENCY: ${RESEARCH_FETCH_CONCURRENCY:-4}
       # MAX_FETCH = source-YIELD budget (pages actually retrieved). NOT charged
       # for timeouts or OB cache reuse — those are tracked separately.
-      MAX_FETCH: ${RESEARCH_MAX_FETCH:-40}
+      # Raised 40 -> 80 (2026-08-20): a broad "state of the field" run stopped on
+      # max_fetch at 40 pages having grounded only 25% of its claims. The three
+      # ceilings below are COUPLED — lifting this one alone just trades a
+      # max_fetch stop for a wall_time one, so they move together.
+      MAX_FETCH: ${RESEARCH_MAX_FETCH:-80}
       # MAX_FETCH_TIMEOUTS = SEPARATE ceiling on wasted fetch timeouts (flaky
       # Tor). Stops a run burning wall-time on dead fetches and surfaces a
-      # distinct "max_timeouts" stop reason. 0 disables this ceiling.
-      MAX_FETCH_TIMEOUTS: ${RESEARCH_MAX_FETCH_TIMEOUTS:-20}
-      MAX_WALL_MS: ${RESEARCH_MAX_WALL_MS:-300000}
+      # distinct "max_timeouts" stop reason. 0 disables this ceiling. Scaled with
+      # MAX_FETCH; left behind it would simply become the new binding stop.
+      MAX_FETCH_TIMEOUTS: ${RESEARCH_MAX_FETCH_TIMEOUTS:-40}
+      # 5 min -> 15 min. Affordable now only because a run no longer holds a chat
+      # turn open: the async callback returns the report to the chat message when
+      # the job finishes, so wall-time costs queue depth rather than an operator
+      # sitting and waiting. Jobs still run one at a time — this is the knob that
+      # decides how long a queued job waits behind a deep one.
+      MAX_WALL_MS: ${RESEARCH_MAX_WALL_MS:-900000}
       # Page fetches egress through Tor (socks5h = DNS via Tor too, matching
       # SearXNG). Reaches tor:9050 over ai-stack_default. "" = direct. Needs the
       # --unstable-net flag (added in the Dockerfile).
