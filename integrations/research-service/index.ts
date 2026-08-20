@@ -84,6 +84,15 @@ const OWUI_API_KEY = env("OWUI_API_KEY");
 // near-instant job (fully-reused claims) could be, and the failure is silent —
 // the report is on the job row, just missing from the chat. Cheaper to wait.
 const CALLBACK_MIN_AGE_MS = parseInt(env("CALLBACK_MIN_AGE_MS", "15000"), 10);
+// Prefix for an appended report. The event APPENDS to whatever the model wrote
+// when it handed off, which ends mid-sentence with no separator of its own, so
+// without this the report runs straight onto the end of that line. The two
+// halves were written minutes apart by different authors; the seam should show.
+const SEPARATOR = `
+
+---
+
+`;
 const CURATOR_URL = env("CURATOR_URL", "http://openbrain-curator:8000").replace(/\/+$/, "");
 const SEARCH_API_BASE = env("SEARCH_API_BASE", "http://gateway:8080").replace(/\/+$/, "");
 const SEARCH_K_DEFAULT = parseInt(env("SEARCH_K", "8"), 10);
@@ -468,7 +477,11 @@ async function notifyChat(
   let delivered = false;
   for (let attempt = 1; attempt <= 3 && !delivered; attempt++) {
     try {
-      const ok = await send({ type: "message", data: { content: markdown } });
+      // Lead with a rule. The content APPENDS to whatever the model wrote when
+      // it handed off, with no separator of its own, so the report otherwise
+      // runs straight onto the end of that sentence. The two were written
+      // minutes apart by different authors; the seam should show.
+      const ok = await send({ type: "message", data: { content: SEPARATOR + markdown } });
       if (!ok) {
         console.warn(`[callback] job ${jobId}: chat ${chatId}/${messageId} rejected the event (stale ids?)`);
         return;
