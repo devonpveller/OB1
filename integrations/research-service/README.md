@@ -58,9 +58,47 @@ GET  /health                     -> { ok, db }
   ```
 - **Open Notebook** (P6.2) → same `/research` API, retiring ON's redundant research code. **Gated**: whether ON survives vs the Quartz workbench is an open decision (see memory `quartz-workbench-retire-on`); whichever inlet survives consumes this service rather than re-implementing it.
 
+## Getting the answer back
+
+A research run routinely outlasts the request that submitted it, so the API is
+submit-then-collect. Two ways to collect:
+
+| | Poll | Callback |
+|---|---|---|
+| How | `GET /research/jobs/:id` until terminal | pass `callback: {chat_id, message_id}` on submit |
+| Caller must | stay alive for the whole run | nothing -- fire and forget |
+| Good for | scripts, agents, anything not in a chat | Open WebUI chats |
+
+The callback POSTs the rendered report to Open WebUI's
+`/api/v1/chats/:chat/messages/:msg/event` as an appending `message` event. Open
+WebUI persists that write regardless of whether a browser is attached, so the
+report lands in the transcript even if the tab was closed an hour earlier.
+
+Two deliberate constraints:
+
+- **The caller names the message, not the host.** `OWUI_BASE_URL`/`OWUI_API_KEY`
+  are service-side env. A caller-supplied callback URL would turn every enqueue
+  right into an SSRF primitive that leaks the key with it.
+- **The job row is committed before the announce.** A failed announce degrades to
+  "retrievable by poll"; the reverse order could show a chat a report the job then
+  failed to record. `callback_armed` in the 202 response tells the client whether
+  an announcement is actually coming -- if false, poll.
+
 ## Deploy notes (operator)
 
 - 3-place change done: compose (`openbrain-research`, loopback **8818**, obnet+llm-net), recovery (`emergency-recovery.ps1` inventory), stack-map.
 - **Schema**: needs `init-claims.sql` (P1) + `init-research-jobs.sql` (P4) applied to the live DB first (G10).
 - **Search seam (cross-stack)**: the SearXNG gateway lives in the MAIN stack. Set `RESEARCH_SEARCH_API_BASE` to a URL reachable from obnet/llm-net (or attach this service to the gateway's network). If search is unreachable the harness degrades to honest gaps — it never fabricates.
+- **Async chat callback (cross-stack)**: set `RESEARCH_OWUI_API_KEY` in
+  **`OB1/docker/.env`** -- the env file this compose project actually resolves
+  against (same file as `MCP_ACCESS_KEY`), NOT the main stack `.env`. Putting it
+  in the main `.env` resolves to empty, which reads as `callback_armed: false`
+  and silently keeps every client on the polling path. The value is an Open WebUI
+  API key (Settings -> Account -> API keys). The key
+  must belong to the chat's owner, or to an admin -- Open WebUI's event endpoint
+  authorises on `chat.user_id == user.id or user.role == "admin"`.
+  `RESEARCH_OWUI_BASE_URL` defaults to `http://openwebui:8080`, reachable because
+  both containers sit on `ai-stack_default`. Leave the key empty and the service
+  answers `callback_armed: false`, which makes every client fall back to polling --
+  the callback is an optimisation, never a dependency.
 - Build/run: `docker compose -f OB1/docker/docker-compose.yml up -d --build openbrain-research`.

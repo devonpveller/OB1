@@ -222,3 +222,74 @@ export function selectRepoFiles(paths: string[], maxFiles = 40): RepoFileSelecti
   }
   return { selected: candidates.slice(0, maxFiles), skipped: candidates.slice(maxFiles) };
 }
+
+// ---------------------------------------------------------------------------
+// Result rendering (single source of truth).
+//
+// The chat-facing markdown is rendered HERE, server-side, and stored on the job
+// as `result.rendered`. Both consumers use it verbatim: the OWUI async callback
+// posts it into the chat, and the thin OWUI tool returns it on the synchronous
+// path. Rendering used to live in the tool (deep_research.py `_render`); with an
+// async callback the tool is long gone by the time a job finishes, so a second
+// renderer would have had to exist in the service anyway — and two renderers
+// drift. The Python `_render` survives only as a fallback for jobs cached before
+// this field existed.
+// ---------------------------------------------------------------------------
+
+export interface RenderableResult {
+  synthesis?: string | null;
+  cited_sources?: Array<{ title?: string | null; url?: string | null }> | null;
+  gaps?: string[] | null;
+  backstop?: string | null;
+  reuse_ratio?: number | null;
+}
+
+export function renderResult(result: RenderableResult): string {
+  const parts: string[] = [(result.synthesis || "").trim() || "(no synthesis produced)"];
+
+  const cited = result.cited_sources ?? [];
+  if (cited.length) {
+    const lines = ["\n\n---\n\n**Sources** (only those the synthesis cited):"];
+    cited.forEach((s, i) => {
+      const title = s?.title || s?.url || `Source ${i + 1}`;
+      lines.push(s?.url ? `${i + 1}. [${title}](${s.url})` : `${i + 1}. ${title}`);
+    });
+    parts.push(lines.join("\n"));
+  }
+
+  const gaps = result.gaps ?? [];
+  const backstop = result.backstop;
+  const incomplete = gaps.length > 0 || Boolean(backstop && backstop !== "complete");
+
+  if (gaps.length) {
+    parts.push(
+      "\n\n**Open gaps** (NOT grounded — recorded for a future run):\n" +
+        gaps.map((g) => `- ${g}`).join("\n"),
+    );
+  }
+
+  // Directive to the reading model — keeps it from "finishing" with fabricated
+  // content. On the async path this text is what lands in the chat transcript,
+  // so it is still in context on the user's next turn (it is not addressed to a
+  // model that is mid-turn). The engine is the only grounded path; gaps are
+  // pursued by calling it again, never filled from the model's own knowledge.
+  if (incomplete) {
+    const reason = backstop && backstop !== "complete" ? `stopped early (${backstop})` : "left gaps open";
+    parts.push(
+      `\n\n> \u26a0 This research is grounded but INCOMPLETE — it ${reason}. The open ` +
+        `gaps above are not answered by any source. Do NOT fill them from your own ` +
+        `knowledge or other web/fetch tools (that fabricates). To pursue a gap, call ` +
+        `deep_research again with a query targeting it; otherwise present the gaps as ` +
+        `open unknowns.`,
+    );
+  }
+
+  const foot: string[] = [];
+  if (result.reuse_ratio !== null && result.reuse_ratio !== undefined) {
+    foot.push(`coverage ${Math.round(Number(result.reuse_ratio) * 100)}%`);
+  }
+  if (backstop && backstop !== "complete") foot.push(`stopped early: ${backstop}`);
+  if (foot.length) parts.push(`\n\n_— ${foot.join(" \u00b7 ")}_`);
+
+  return parts.join("\n");
+}

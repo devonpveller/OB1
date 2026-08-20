@@ -440,6 +440,17 @@ services:
       DB_USER: postgres
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # Async chat callback: where a finished job announces itself. A research run
+      # outlives the OWUI tool call that submitted it, so the report is POSTed into
+      # the originating chat message instead of the caller blocking on a poll.
+      # Cross-stack: openbrain-research reaches openwebui over ai-stack_default.
+      # The URL + key live HERE, never in the request body — a caller-supplied
+      # callback target would let anyone who can enqueue a job aim this service's
+      # authenticated POST at an arbitrary host. Leave OWUI_API_KEY empty to
+      # disable the callback; clients then fall back to polling. NOTE: this
+      # project resolves ${...} against OB1/docker/.env, not the main stack .env.
+      OWUI_BASE_URL: ${RESEARCH_OWUI_BASE_URL:-http://openwebui:8080}
+      OWUI_API_KEY: ${RESEARCH_OWUI_API_KEY:-}
       # Delegate placement + grounded-claim writing to the deployed curator (OD-2).
       CURATOR_URL: http://openbrain-curator:8000
       # Private SearXNG-over-Tor gateway (cross-stack — override to a reachable URL).

@@ -3,7 +3,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   extractTextFromHtml, extractTitle, domainOf, decodeEntities,
   isStale, revalidateWindow, decideReuse, backstopDecision, reuseMetric,
-  citedNumbers, citedSubset, buildCitedAndRenumber,
+  citedNumbers, citedSubset, buildCitedAndRenumber, renderResult,
 } from "./lib.ts";
 
 Deno.test("extractTextFromHtml strips scripts/styles/tags, keeps text", () => {
@@ -154,4 +154,43 @@ Deno.test("selectRepoFiles takes depth-1 READMEs but not deep ones", () => {
   assertEquals(selected.includes("docs/README.md"), true);
   assertEquals(selected.includes("src/deep/nested/README.md"), false);
   assertEquals(selected.includes("very/deep/path/x.csproj"), false);   // >2 deep
+});
+
+Deno.test("renderResult: complete run renders synthesis + only cited sources", () => {
+  const out = renderResult({
+    synthesis: "Answer [1].",
+    cited_sources: [{ url: "https://a.example", title: "A" }],
+    gaps: [],
+    backstop: "complete",
+    reuse_ratio: 0.75,
+  });
+  assertEquals(out.includes("Answer [1]."), true);
+  assertEquals(out.includes("1. [A](https://a.example)"), true);
+  assertEquals(out.includes("coverage 75%"), true);
+  // A complete run must NOT carry the anti-fabrication warning — crying wolf on
+  // every result trains the reader to ignore it on the runs that matter.
+  assertEquals(out.includes("INCOMPLETE"), false);
+});
+
+Deno.test("renderResult: gaps and early stops carry the do-not-fabricate directive", () => {
+  const gapped = renderResult({ synthesis: "Partial.", gaps: ["what about X?"], backstop: "complete" });
+  assertEquals(gapped.includes("- what about X?"), true);
+  assertEquals(gapped.includes("INCOMPLETE"), true);
+  assertEquals(gapped.includes("left gaps open"), true);
+
+  const stopped = renderResult({ synthesis: "Partial.", gaps: [], backstop: "wall_time" });
+  assertEquals(stopped.includes("INCOMPLETE"), true);
+  assertEquals(stopped.includes("stopped early (wall_time)"), true);
+  assertEquals(stopped.includes("stopped early: wall_time"), true);
+});
+
+Deno.test("renderResult: empty synthesis degrades honestly, never to an empty message", () => {
+  const out = renderResult({ synthesis: "   ", cited_sources: [], gaps: [] });
+  assertEquals(out.includes("(no synthesis produced)"), true);
+});
+
+Deno.test("renderResult: a source without a url is listed, not linked", () => {
+  const out = renderResult({ synthesis: "S.", cited_sources: [{ url: null, title: "Untitled paper" }] });
+  assertEquals(out.includes("1. Untitled paper"), true);
+  assertEquals(out.includes("]("), false);
 });

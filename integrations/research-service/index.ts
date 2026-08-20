@@ -11,11 +11,18 @@
  *
  * See harness.ts / GROUNDING-MODEL.md for the grounding guarantees.
  *
+ * A job outlives the request that submitted it. Callers may either poll
+ * `/research/jobs/:id`, or pass `callback: {chat_id, message_id}` to have the
+ * finished report POSTed straight into that Open WebUI chat message when the job
+ * terminates (see notifyChat) — required for runs longer than a chat turn.
+ *
  * Env: DB_*, EMBEDDING_API_*, CHAT_API_*, MCP_ACCESS_KEY, CURATOR_URL,
- *      SEARCH_API_BASE, FETCH_TIMEOUT_MS, FETCH_MAX_CHARS, PORT (+ harness.ts tunables).
+ *      SEARCH_API_BASE, FETCH_TIMEOUT_MS, FETCH_MAX_CHARS, PORT,
+ *      OWUI_BASE_URL + OWUI_API_KEY (async chat callback; unset = disabled)
+ *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { extractTextFromHtml, extractTitle, domainOf, selectRepoFiles } from "./lib.ts";
+import { extractTextFromHtml, extractTitle, domainOf, selectRepoFiles, renderResult } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -56,6 +63,27 @@ const QUEUE_USER_BY_ORIGIN: Record<string, string> = { notebook: RESEARCH_QUEUE_
 const CHAT_RETRY_BUDGET_MS = parseInt(env("CHAT_RETRY_BUDGET_MS", "1500000"), 10); // 25 min
 
 const MCP_ACCESS_KEY = env("MCP_ACCESS_KEY");
+// Open WebUI async completion callback. A research job outlives the tool call
+// that submitted it, so the finished report is POSTed back into the originating
+// chat message instead of the caller blocking on a poll loop.
+//
+// The base URL and key live HERE, not in the caller-supplied options: the client
+// only names which chat/message to write to. If the callback target were part of
+// the request body, anyone who could enqueue a job could aim this service's
+// authenticated POST at an arbitrary host (SSRF) and leak the key with it.
+// Unset OWUI_BASE_URL/OWUI_API_KEY disables the callback entirely; callers then
+// fall back to polling, which still works.
+const OWUI_BASE_URL = env("OWUI_BASE_URL", "").replace(/\/+$/, "");
+const OWUI_API_KEY = env("OWUI_API_KEY");
+// Floor on how soon after starting a job it may announce itself.
+//
+// Open WebUI runs with ENABLE_REALTIME_CHAT_SAVE off, so the BROWSER persists the
+// finished turn a moment after the model stops streaming, writing the message
+// content as the browser knows it. An announce that lands before that write gets
+// overwritten by it. Minutes-long research is nowhere near this window, but a
+// near-instant job (fully-reused claims) could be, and the failure is silent —
+// the report is on the job row, just missing from the chat. Cheaper to wait.
+const CALLBACK_MIN_AGE_MS = parseInt(env("CALLBACK_MIN_AGE_MS", "15000"), 10);
 const CURATOR_URL = env("CURATOR_URL", "http://openbrain-curator:8000").replace(/\/+$/, "");
 const SEARCH_API_BASE = env("SEARCH_API_BASE", "http://gateway:8080").replace(/\/+$/, "");
 const SEARCH_K_DEFAULT = parseInt(env("SEARCH_K", "8"), 10);
@@ -393,6 +421,76 @@ function withContract(deps: Deps, rc: ResolvedContract): Deps {
 }
 
 // ── Job runner (OD-3 async job+poll) ─────────────────────────────────────────
+/** Hold a too-fast job back until the chat turn that launched it has settled. */
+function settleBeforeAnnounce(claimedAt: number): Promise<void> {
+  const wait = CALLBACK_MIN_AGE_MS - (Date.now() - claimedAt);
+  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+
+// Announce a terminal job into the Open WebUI chat that submitted it.
+//
+// `POST /api/v1/chats/:chat/messages/:msg/event` with type "message" APPENDS to
+// the stored message content, and Open WebUI persists that write independently of
+// whether a websocket is attached (socket/main.py: `save_to_chat` gates on the
+// chat being a saved one, not on a live listener). So the report lands in the
+// transcript even if the operator closed the tab an hour ago — which is the whole
+// point of going async. "replace" would have clobbered the model's ack, so append
+// is the only correct verb here.
+//
+// Best-effort by design: the job row is already committed before this runs, so a
+// failed announce degrades to "retrievable by poll", never to a lost result.
+async function notifyChat(
+  callback: unknown,
+  markdown: string,
+  jobId: string,
+): Promise<void> {
+  if (!OWUI_BASE_URL || !OWUI_API_KEY) return;
+  const cb = callback as { chat_id?: string; message_id?: string } | undefined;
+  const chatId = cb?.chat_id;
+  const messageId = cb?.message_id;
+  if (!chatId || !messageId) return;
+
+  const url = `${OWUI_BASE_URL}/api/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/event`;
+  const send = async (body: unknown): Promise<boolean> => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${OWUI_API_KEY}` },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`owui event ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    // The endpoint answers `false` when no emitter could be built for that
+    // chat/message — a wrong id, not a transport fault. Retrying will not help.
+    return (await r.json().catch(() => null)) !== false;
+  };
+
+  // Only the content is retried. Status/notification are cosmetic: a spinner that
+  // never clears is a nuisance, a missing report is a bug.
+  let delivered = false;
+  for (let attempt = 1; attempt <= 3 && !delivered; attempt++) {
+    try {
+      const ok = await send({ type: "message", data: { content: markdown } });
+      if (!ok) {
+        console.warn(`[callback] job ${jobId}: chat ${chatId}/${messageId} rejected the event (stale ids?)`);
+        return;
+      }
+      delivered = true;
+    } catch (e) {
+      console.warn(`[callback] job ${jobId} attempt ${attempt}/3: ${(e as Error).message}`);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 2000));
+    }
+  }
+  if (!delivered) {
+    console.error(`[callback] job ${jobId}: gave up announcing to ${chatId}/${messageId}; result is still cached`);
+    return;
+  }
+
+  // Clear the "researching..." status line, then ping. `notification` is
+  // socket-only (it is not one of the persisted event types), so it reaches a
+  // live tab and is silently dropped otherwise — fine, the report is durable.
+  await send({ type: "status", data: { description: "Research complete.", done: true } }).catch(() => {});
+  await send({ type: "notification", data: { type: "info", content: "Deep research finished." } }).catch(() => {});
+}
+
 // A job claimed by the drain loop: it has already been flipped to status='running'
 // (started_at set) by the atomic claim, so executeJob only runs the harness and
 // persists the terminal state — it never re-claims.
@@ -400,6 +498,9 @@ type ClaimedJob = { jobId: string; query: string; thread_id: string | null; orig
 
 async function executeJob(job: ClaimedJob): Promise<void> {
   const { jobId, query, thread_id, origin, options } = job;
+  // Conservative: measured from CLAIM, not submit, so a job that queued first
+  // only ever waits longer than it needs to. See CALLBACK_MIN_AGE_MS.
+  const claimedAt = Date.now();
   const client = await pool.connect();
   const progress: Progress = async (phase, message, counters = {}) => {
     await client.queryObject(
@@ -435,6 +536,16 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       dryRun: options?.dry_run === true,
       contract: contract ?? undefined,
     }, progress);
+    // Render the chat-facing markdown ONCE, here, and persist it on the job. Both
+    // readers (the async callback below, and the tool's synchronous path) return
+    // this same string — see lib.ts renderResult for why it moved server-side.
+    const rendered = renderResult({
+      synthesis: res.synthesis,
+      cited_sources: res.citedSources,
+      gaps: res.gaps,
+      backstop: res.backstop,
+      reuse_ratio: 1 - res.metrics.gap_ratio,
+    });
     await client.queryObject(
       `UPDATE research_jobs SET status='done', finished_at=now(),
          result=$2::jsonb, metrics=$3::jsonb, progress=$4::jsonb WHERE id=$1`,
@@ -446,12 +557,37 @@ async function executeJob(job: ClaimedJob): Promise<void> {
         curator: res.curator, backstop: res.backstop, fetch_stats: res.fetchStats,
         contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
         skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
+        rendered, // chat-facing markdown; absent on jobs cached before this field
       }), JSON.stringify(res.metrics), JSON.stringify({ phase: "done", message: `backstop=${res.backstop}` })],
     );
+    // Persist first, announce second. If the announce fails the result is still
+    // retrievable by poll; the reverse order could show a chat a report the job
+    // then failed to record.
+    await settleBeforeAnnounce(claimedAt);
+    await notifyChat(options?.callback, rendered, jobId);
   } catch (e) {
+    const failure = String((e as Error).message);
     await client.queryObject(
       `UPDATE research_jobs SET status='error', finished_at=now(), error=$2 WHERE id=$1`,
-      [jobId, String((e as Error).message)],
+      [jobId, failure],
+    ).catch(() => {});
+    // A caller that no longer polls would otherwise wait forever on a dead job.
+    // Announce the failure with the same anti-fabrication directive the grounded
+    // path carries — a failed research run is the moment a model is most tempted
+    // to answer from its own weights.
+    await settleBeforeAnnounce(claimedAt);
+    await notifyChat(
+      options?.callback,
+      [
+        "",
+        "",
+        "> \u26a0 Deep research job `" + jobId + "` FAILED: " + failure,
+        ">",
+        "> Nothing was grounded and nothing was stored. Do NOT answer the question from " +
+          "your own knowledge or other web/fetch tools \u2014 say the research failed and " +
+          "offer to re-run it.",
+      ].join("\n"),
+      jobId,
     ).catch(() => {});
   } finally {
     client.release();
@@ -617,6 +753,7 @@ Deno.serve({ port: PORT }, async (req) => {
       query?: string; thread_id?: string; origin?: string; options?: Record<string, unknown>;
       seed_sources?: Array<{ url?: string; title?: string; content?: string }>;
       disable_web_search?: boolean; sources_only?: boolean; mode?: string; dry_run?: boolean; gap_research?: string;
+      callback?: { chat_id?: string; message_id?: string };
     };
     try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const query = (body.query || "").trim();
@@ -628,8 +765,15 @@ Deno.serve({ port: PORT }, async (req) => {
         .map((s) => ({ url: String(s?.url || ""), title: String(s?.title || ""), content: String(s?.content || "") }))
         .filter((s) => s.content.trim().length > 0)
       : [];
+    // Async completion target. Only the IDs are taken from the caller — the host
+    // and key are service-side env (see OWUI_BASE_URL above), so this cannot be
+    // pointed anywhere. Absent/incomplete => the caller polls, as before.
+    const cbChat = String(body.callback?.chat_id || "").trim();
+    const cbMessage = String(body.callback?.message_id || "").trim();
+    const callback = cbChat && cbMessage ? { chat_id: cbChat, message_id: cbMessage } : null;
     const options = {
       ...(body.options || {}),
+      ...(callback ? { callback } : {}),
       ...(seeds.length ? { seed_sources: seeds } : {}),
       ...(body.disable_web_search === true ? { disable_web_search: true } : {}),
       ...(body.sources_only === true ? { sources_only: true } : {}),
@@ -651,7 +795,14 @@ Deno.serve({ port: PORT }, async (req) => {
     // Enqueue only — the background drain loop is the sole dispatcher (serializes
     // research fan-out so it can't flood LiteLLM). wake() lets it pick this up now.
     wake();
-    return Response.json({ job_id: jobId, status: "queued" }, { status: 202 });
+    // `callback_armed` is the client's contract: false means nothing will be
+    // announced (no callback given, or the service has no OWUI credentials), so
+    // the client must poll. Never let a caller wait on a callback that is off.
+    return Response.json({
+      job_id: jobId,
+      status: "queued",
+      callback_armed: Boolean(callback && OWUI_BASE_URL && OWUI_API_KEY),
+    }, { status: 202 });
   }
 
   // List recent jobs (pull model): a thin client calls this to show "your recent
