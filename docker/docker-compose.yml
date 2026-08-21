@@ -921,6 +921,172 @@ services:
     cap_drop:
       - ALL
 
+
+  # ── Open Notebook trio (moved from the ai-stack parent 2026-08-21, Part
+  #    K.5b — operator decision: ON is tethered to OB1 on every axis, IKS
+  #    canonical store = openbrain-db over obnet, wiki-vault volume mount,
+  #    digest→podcast audio chain. NO retirement implied — ON stays live
+  #    until the wiki workbench matures (ai-stack D-10). Container names,
+  #    host ports (:8003, :8503, :5055) and tailnet serves unchanged. ──
+
+  surrealdb:
+    # Pinned by digest 2026-08-20 (was floating :v2 + pull_policy:always with
+    # NO watchtower opt-out — an unflagged auto-update path on the datastore
+    # behind open_notebook).
+    image: surrealdb/surrealdb@sha256:d653f6c8a89e81f865ee31cd2f587c50f50ace922175e04150b1e385d2f86011
+    container_name: surrealdb
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
+    # Credentials live in .env (pre-flight §6.3). Keeping root/root by user
+    # decision; localhost-only bind below + auth-net Docker isolation are the
+    # real defenses against external access.
+    command: start --log info --user ${SURREAL_USER} --pass ${SURREAL_PASSWORD} rocksdb:/mydata/mydatabase.db
+    user: root  # Required for bind mounts on Linux
+    ports:
+      - "127.0.0.1:8003:8000"   # pre-flight §6.2 — was "8003:8000" (LAN-exposed)
+    volumes:
+      - D:\Open WebUI\open-notebook\surreal_data:/mydata
+    environment:
+      - SURREAL_EXPERIMENTAL_GRAPHQL=true
+    networks:
+      - default
+    restart: always
+    pull_policy: always
+
+  open_notebook:
+    # IKS fork (open-notebook repo, Dockerfile.single) — OB1 Postgres is the
+    # canonical source-of-truth. Locally built + tagged; never pulled.
+    # Build/tag at promotion: docker build -t open_notebook:iks ...; see
+    # documentation/implementation-guide/open-notebook-integration-openbrain/.
+    image: open_notebook:iks
+    container_name: open_notebook
+    labels:
+      - com.centurylinklabs.watchtower.enable=false # local tag, never pulled
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - default               # OB1 project bridge: surrealdb + open-notebook-backup live here
+      - llm-net               # external ai-stack_llm-net — llama-cpp-embed alias
+      - app-net               # external ai-stack_app-net — portal Caddy + tailscale serves reach :8502 / :5055
+      - obnet                 # native since the K.5b move — openbrain-db (canonical store) + podcast (ON_BASE)
+    ports:
+      - "127.0.0.1:8503:8502" # pre-flight §6.1 — was "8503:8502" (LAN-exposed)
+      - "127.0.0.1:5055:5055" # pre-flight §6.1 — was "5055:5055" (LAN-exposed)
+    environment:
+      # Encryption key moved to .env (pre-flight §6.4). Same value preserved
+      # so existing encrypted-at-rest API keys remain decryptable.
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY}
+
+      # Database connection
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=${SURREAL_USER}
+      - SURREAL_PASSWORD=${SURREAL_PASSWORD}
+      - SURREAL_NAMESPACE=open_notebook
+      - SURREAL_DATABASE=open_notebook
+
+      # DO NOT set API_URL here. The Next.js runtime-config auto-detect
+      # logic (frontend/src/app/config/route.ts) constructs
+      # {proto}://{hostname}:5055 from incoming Host/X-Forwarded-Proto
+      # headers -- this is exactly what the tailscale-serve dual-port
+      # pattern in entrypoint.sh expects (UI on :8443, API on :5055).
+      # Setting API_URL forces ONE static URL for everyone and breaks
+      # tailnet access.
+      #
+      # For the public path (https://notebook.devinveller.ai), Caddy
+      # intercepts /config and returns the correct apiUrl directly --
+      # see Caddyfile. The browser uses same-origin /api/* and Caddy
+      # routes those to FastAPI.
+      - INTERNAL_API_URL=http://127.0.0.1:5055
+
+      # ----- IKS: OpenBrain (OB1) is the canonical source-of-truth ---------
+      # SurrealDB above stays as the local UI/queue/chat/cache store (D1, a
+      # thin regenerable mirror). Sources/threads live in openbrain-db.
+      # The OB1 password is NOT set here: it is injected as POSTGRES_PASSWORD
+      # via the `env_file: OB1/docker/.env` directive below (read automatically
+      # by `docker compose up` — no --env-file flag, no secret duplicated into
+      # ai-stack/.env). ob1_repository._cfg() falls back OB1_DB_PASSWORD →
+      # POSTGRES_PASSWORD, so the env_file value is what's used.
+      - OB1_DB_HOST=openbrain-db
+      - OB1_DB_PORT=5432
+      - OB1_DB_NAME=openbrain
+      - OB1_DB_USER=postgres
+      # bge-m3 (1024-dim) so OB1 source embeddings match every other writer.
+      - EMBEDDING_API_BASE=http://llama-cpp-embed:8080/v1
+      - EMBEDDING_API_KEY=${OPEN_NOTEBOOK_LLM_API_KEY:-not-needed}
+      - EMBEDDING_MODEL=bge-m3
+      # Wiki notebooks/ folder = the notebook registry (B1 folder sync), RO.
+      - WIKI_NOTEBOOKS_DIR=/wiki/content/notebooks
+      - NOTEBOOK_SYNC_INTERVAL_S=900
+    # Supplies POSTGRES_PASSWORD (+ SURREAL_*/encryption keys since K.5b).
+    env_file:
+      - ./.env
+    volumes:
+      - D:\Open WebUI\open-notebook\notebook_data:/app/data
+      # Read-only view of the live wiki tree so ON reconciles the notebooks
+      # folder → ON notebooks (folder is authority). External open-brain volume.
+      - openbrain-wiki-data:/wiki:ro
+    depends_on:
+      - surrealdb
+    restart: always
+    pull_policy: never
+
+  open-notebook-backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile.surreal
+    image: open-notebook-backup:local
+    container_name: open-notebook-backup
+    networks:
+      - default     # surrealdb is on default; we reach it via DNS name 'surrealdb'
+    environment:
+      # Same credentials the open_notebook runtime uses (proven valid against
+      # this datastore). Was hardcoded root/root — that leaned on SurrealDB's
+      # persisted first-boot root user, and left a literal credential in a
+      # tracked file. Note the datastore still ACCEPTS the legacy root login
+      # until a DEFINE USER pass rotates it (SurrealDB v2: start --user/--pass
+      # is only honored on first boot); network isolation (default bridge,
+      # localhost-only host port) remains the real boundary.
+      - SURREAL_URL=http://surrealdb:8000
+      - SURREAL_USER=${SURREAL_USER}
+      - SURREAL_PASSWORD=${SURREAL_PASSWORD}
+      - SURREAL_NS=open_notebook
+      - SURREAL_DB=open_notebook
+      - NOTEBOOK_DATA_DIR=/notebook-data
+      - BACKUP_DIR=/backups
+      - RETAIN_COUNT=${OPEN_NOTEBOOK_BACKUP_RETAIN_COUNT:-2}
+      - BACKUP_CRON=${OPEN_NOTEBOOK_BACKUP_CRON:-20 2 * * *}
+      - TZ=UTC
+    volumes:
+      - D:\Open WebUI\open-notebook\notebook_data:/notebook-data:ro
+      - ${BACKUPS_DIR:-../../backups}/open-notebook:/backups
+      - ./backup/open-notebook-backup.sh:/scripts/backup.sh:ro
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=256m       # large enough for the surreal export staging file
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+          pids: 50
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] open-notebook-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_COUNT} most recent)"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
 volumes:
   openbrain-db-data:
   openbrain-wiki-data:
