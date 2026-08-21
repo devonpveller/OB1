@@ -151,10 +151,14 @@ services:
   # cloud,share=cloud on writes, blocks thought_stats (unfilterable
   # aggregate) + all extension tools. Mirrors mnemory-gateway/app.py.
   openbrain-gateway:
-    build:
-      context: ../../openbrain-gateway
-      dockerfile: Dockerfile
+    # Image is BUILT IN THE ai-stack REPO (its source lives beside its twin
+    # mnemory-cloud-gateway there, so the E.1 unification stays in one place).
+    # Build/refresh from ai-stack: `docker build -t openbrain-gateway:local
+    # ./openbrain-gateway`. This project only CONSUMES the image, so an
+    # OB1-only clone (submodule) is self-contained. (Was a ../../ build
+    # context; decoupled 2026-08-21 for the H.1 submodule conversion.)
     image: openbrain-gateway:local
+    pull_policy: never
     container_name: openbrain-gateway
     depends_on:
       - openbrain-mcp
@@ -592,7 +596,9 @@ services:
       - ../recipes:/recipes:ro
       # Passphrase-less deploy private key for the wiki repo (host path
       # is gitignored via /secrets/). Read-only.
-      - ../../secrets/openbrain-wiki-deploy_key:/secrets/deploy_key:ro
+      # Path parameterized 2026-08-21 (H.1): the parent points this at its
+      # secrets dir; standalone OB1 sets WIKI_DEPLOY_KEY_PATH to its own.
+      - ${WIKI_DEPLOY_KEY_PATH:-../../secrets/openbrain-wiki-deploy_key}:/secrets/deploy_key:ro
     ports:
       - "127.0.0.1:8811:8000"
     networks:
