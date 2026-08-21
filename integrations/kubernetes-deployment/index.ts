@@ -893,6 +893,257 @@ server.registerTool(
   }
 );
 
+// ============================================================
+// Idea Refinery — the idea inlet (IR.0c). Mirrors the thoughts-capture family
+// (capture_thought / search_thoughts) but writes the idea LIFECYCLE aggregate
+// (ideas / idea_revisions, init-ideas.sql). These MCP tools are the only
+// writers of `ideas`; the refinery service owns research + Mattermost delivery.
+// Research is async and re-engages in Mattermost (a finished OWUI chat can't be
+// pushed to) — so these tools only ACKNOWLEDGE in OWUI, never return research.
+// Spec: documentation/implementation-guide/idea-refinery/DESIGN-idea-refinery.md
+// ============================================================
+
+// A capture whose embedding is within this cosine similarity of an existing
+// idea is treated as a near-duplicate (DT-3): capture_idea ASKS (update vs new),
+// it never auto-merges. ~0.70 sim == ~0.30 distance.
+const IDEA_DEDUP_SIM = Number(Deno.env.get("IDEA_DEDUP_SIM") || "0.70");
+const IDEA_CHANNEL = Deno.env.get("IDEA_REFINERY_CHANNEL") || "#ideas";
+
+server.registerTool(
+  "capture_idea",
+  {
+    title: "Capture Idea",
+    description:
+      "Log a new product/feature IDEA for the Idea Refinery. The idea is stored and researched in the background (existing industry products + what Open Brain already knows); findings are delivered to Mattermost for a follow-up brainstorm — they are NOT returned here. Use when the user shares an idea they want to develop later. Returns an acknowledgement only. If the idea closely matches one already captured, this returns a possible-duplicate notice instead of forking — call again with force_new=true to create a separate idea, or use update_idea to refine the existing one.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      idea: z.string().describe("The idea, in the user's words (what they want and why)."),
+      title: z.string().optional().describe("Short handle for the idea (defaults to the first line)."),
+      domain: z.string().optional().describe("Evaluative frame; defaults to 'ai-stack'."),
+      force_new: z.boolean().optional().default(false).describe("Skip the duplicate check and create a separate idea."),
+    },
+  },
+  async ({ idea, title, domain, force_new }) => {
+    try {
+      const body = idea.trim();
+      if (!body) throw new Error("idea text is required");
+      const ttl = (title?.trim() || body.split("\n")[0]).slice(0, 120);
+      const embedding = await getEmbedding(`${ttl}\n\n${body}`);
+      const embStr = `[${embedding.join(",")}]`;
+
+      const client = await pool.connect();
+      try {
+        if (!force_new) {
+          const dup = await client.queryObject<{ id: string; title: string; sim: number }>(
+            `SELECT id, title, 1 - (embedding <=> $1::vector) AS sim
+               FROM ideas
+              WHERE status <> 'archived' AND embedding IS NOT NULL
+              ORDER BY embedding <=> $1::vector
+              LIMIT 1`,
+            [embStr],
+          );
+          const top = dup.rows[0];
+          if (top && top.sim >= IDEA_DEDUP_SIM) {
+            return {
+              content: [{ type: "text" as const, text:
+                `This looks very similar to an existing idea: "${top.title}" (idea_id: ${top.id}, ${(top.sim * 100).toFixed(0)}% match). ` +
+                `To refine that one, call update_idea with that idea_id. To log this as a separate idea instead, call capture_idea again with force_new=true.` }],
+            };
+          }
+        }
+
+        let ideaId = "";
+        await client.queryArray("BEGIN");
+        try {
+          const ins = await client.queryObject<{ id: string }>(
+            `INSERT INTO ideas (title, summary, domain, embedding, status, current_revision)
+             VALUES ($1, $2, COALESCE($3,'ai-stack'), $4::vector, 'new', 1)
+             RETURNING id`,
+            [ttl, body, domain ?? null, embStr],
+          );
+          ideaId = ins.rows[0].id;
+          const th = await client.queryObject<{ id: bigint }>(
+            `INSERT INTO thoughts (content, embedding, metadata)
+             VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
+            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id: ideaId })],
+          );
+          await client.queryArray(
+            `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)
+             VALUES ($1, 1, $2, $3, md5(lower(btrim($2))))`,
+            [ideaId, body, th.rows[0].id],
+          );
+          await client.queryArray("COMMIT");
+        } catch (e) {
+          try { await client.queryArray("ROLLBACK"); } catch { /* connection already broken */ }
+          throw e;
+        }
+
+        return {
+          content: [{ type: "text" as const, text:
+            `Logged idea "${ttl}" (idea_id: ${ideaId}). It will be researched in the background batch ` +
+            `(existing industry tools + what Open Brain already knows); findings will arrive in Mattermost ${IDEA_CHANNEL} ` +
+            `for a follow-up brainstorm. Nothing to review here yet.` }],
+        };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "update_idea",
+  {
+    title: "Update Idea",
+    description:
+      "Refine an existing Idea Refinery idea (resolve the idea_id via find_idea first). Appends a new revision and marks it for re-research; the refreshed findings arrive as an update on the SAME Mattermost thread — not returned here. Use when the user changes or expands an idea they previously captured. Identical text is a no-op.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      idea_id: z.string().describe("The idea to update (from find_idea)."),
+      idea: z.string().describe("The updated idea text."),
+      title: z.string().optional().describe("Optional new title."),
+    },
+  },
+  async ({ idea_id, idea, title }) => {
+    try {
+      const body = idea.trim();
+      if (!body) throw new Error("idea text is required");
+      const client = await pool.connect();
+      try {
+        const cur = await client.queryObject<{ current_revision: number; title: string; hash: string | null }>(
+          `SELECT i.current_revision, i.title,
+                  (SELECT content_hash FROM idea_revisions r
+                    WHERE r.idea_id = i.id AND r.revision = i.current_revision) AS hash
+             FROM ideas i WHERE i.id = $1`,
+          [idea_id],
+        );
+        if (!cur.rows.length) throw new Error(`no idea with id ${idea_id}`);
+        const newHash = await client.queryObject<{ h: string }>(`SELECT md5(lower(btrim($1))) AS h`, [body]);
+        if (newHash.rows[0].h === cur.rows[0].hash) {
+          return { content: [{ type: "text" as const, text:
+            `No change — the text is identical to the current version (idea_id: ${idea_id}); nothing re-queued.` }] };
+        }
+        const newTtl = (title?.trim() || cur.rows[0].title).slice(0, 120);
+        const embedding = await getEmbedding(`${newTtl}\n\n${body}`);
+        const embStr = `[${embedding.join(",")}]`;
+        const newRev = cur.rows[0].current_revision + 1;
+
+        await client.queryArray("BEGIN");
+        try {
+          const th = await client.queryObject<{ id: bigint }>(
+            `INSERT INTO thoughts (content, embedding, metadata)
+             VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
+            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id, revision: newRev })],
+          );
+          await client.queryArray(
+            `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)
+             VALUES ($1, $2, $3, $4, md5(lower(btrim($3))))`,
+            [idea_id, newRev, body, th.rows[0].id],
+          );
+          await client.queryArray(
+            `UPDATE ideas SET summary=$2, title=$3, current_revision=$4, status='dirty', embedding=$5::vector
+              WHERE id=$1`,
+            [idea_id, body, newTtl, newRev, embStr],
+          );
+          await client.queryArray("COMMIT");
+        } catch (e) {
+          try { await client.queryArray("ROLLBACK"); } catch { /* connection already broken */ }
+          throw e;
+        }
+        return { content: [{ type: "text" as const, text:
+          `Updated idea "${newTtl}" (idea_id: ${idea_id}, revision ${newRev}). It will be re-researched in the background; ` +
+          `the refreshed findings will arrive as an update on its existing Mattermost ${IDEA_CHANNEL} thread.` }] };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "find_idea",
+  {
+    title: "Find Idea",
+    description:
+      "Search the user's captured ideas by meaning — use before update_idea to resolve which idea to refine, or to let the user browse and revisit parked ideas. Read-only; returns idea_id, title, status, and a snippet for each match.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      query: z.string().describe("What idea to look for."),
+      limit: z.number().optional().default(5),
+      threshold: z.number().optional().default(0.4).describe("Minimum cosine similarity (0-1)."),
+    },
+  },
+  async ({ query, limit, threshold }) => {
+    try {
+      const qEmb = await getEmbedding(query);
+      const embStr = `[${qEmb.join(",")}]`;
+      const client = await pool.connect();
+      try {
+        const res = await client.queryObject<{ id: string; title: string; status: string; summary: string; updated_at: string; sim: number }>(
+          `SELECT id, title, status, summary, updated_at,
+                  1 - (embedding <=> $1::vector) AS sim
+             FROM ideas
+            WHERE status <> 'archived' AND embedding IS NOT NULL
+              AND 1 - (embedding <=> $1::vector) >= $2
+            ORDER BY embedding <=> $1::vector
+            LIMIT $3`,
+          [embStr, threshold, limit],
+        );
+        if (!res.rows.length) {
+          return { content: [{ type: "text" as const, text: `No matching ideas found for "${query}".` }] };
+        }
+        const lines = res.rows.map((r, i) =>
+          `--- ${i + 1} (${(r.sim * 100).toFixed(0)}% match) ---\n` +
+          `idea_id: ${r.id}\nTitle: ${r.title}\nStatus: ${r.status}\nUpdated: ${new Date(r.updated_at).toLocaleDateString()}\n` +
+          `${(r.summary || "").slice(0, 240)}`);
+        return { content: [{ type: "text" as const, text: `Found ${res.rows.length} idea(s):\n\n${lines.join("\n\n")}` }] };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "research_idea",
+  {
+    title: "Research Idea Now",
+    description:
+      "Request IMMEDIATE background research on an existing idea (bypassing the nightly batch) — for when the user says 'look into this now'. Research is async; findings arrive in Mattermost, not here. Returns an acknowledgement.",
+    annotations: { readOnlyHint: false, idempotentHint: true },
+    inputSchema: { idea_id: z.string().describe("The idea to research now (from find_idea).") },
+  },
+  async ({ idea_id }) => {
+    try {
+      const client = await pool.connect();
+      try {
+        const res = await client.queryObject<{ title: string }>(
+          `UPDATE ideas
+              SET metadata = COALESCE(metadata,'{}'::jsonb)
+                             || jsonb_build_object('research_now', true, 'research_requested_at', now()::text)
+            WHERE id = $1
+            RETURNING title`,
+          [idea_id],
+        );
+        if (!res.rows.length) throw new Error(`no idea with id ${idea_id}`);
+        return { content: [{ type: "text" as const, text:
+          `Queued "${res.rows[0].title}" for immediate research (idea_id: ${idea_id}). ` +
+          `Findings will arrive in Mattermost ${IDEA_CHANNEL} shortly — follow along there.` }] };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  },
+);
+
 // --- Source ingest (v2 three-layer: external documents -> `sources`) ---
 //
 // Local, dependency-free fetch + extraction. NOT smolcrawl (that is a

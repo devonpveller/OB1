@@ -67,3 +67,11 @@
 # Tor-first/direct-fallback; recovered → content updated (chunk-worker re-embeds);
 # 3 attempts then marked refetch_failed (no retry storm). Bounded (limit=120/run).
 30 7 * * *  curl -fsS -X POST 'http://openbrain-grounding-backfiller:8000/refetch?limit=120' || true
+
+# Idea Refinery drain (IR.1) — researches owed ideas gently at 03:00 UTC (= 23:00
+# EDT), WELL BEFORE the 05:00-UTC gmail/wiki chain, so the night's new claims land
+# before the 1am-local wiki compile (the flywheel). Stand-alone, not chained.
+# Bounded submit-on-complete + rollover; a persistently-failing idea gives up after
+# 3 attempts (no retry storm). `|| true` so a fire while the (profile-gated) service
+# is absent is a harmless no-op until IR.2 ships and it goes live.
+0 3 * * *   curl -fsS -X POST 'http://openbrain-idea-refinery:8080/run' || true
