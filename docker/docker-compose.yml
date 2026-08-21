@@ -504,9 +504,10 @@ services:
       # decides how long a queued job waits behind a deep one.
       MAX_WALL_MS: ${RESEARCH_MAX_WALL_MS:-900000}
       # Page fetches egress through Tor (socks5h = DNS via Tor too, matching
-      # SearXNG). Reaches tor:9050 over ai-stack_default. "" = direct. Needs the
+      # SearXNG). Egress via the Mullvad HTTP proxy (vpn:8888; tor RETIRED
+      # 2026-08-21 - exits blocked by most sites). "" = direct. Needs the
       # --unstable-net flag (added in the Dockerfile).
-      FETCH_PROXY_URL: ${RESEARCH_FETCH_PROXY_URL:-socks5h://tor:9050}
+      FETCH_PROXY_URL: ${RESEARCH_FETCH_PROXY_URL:-http://vpn:8888}
       # Bounded preliminary gap research for article-mode (podcast) jobs.
       PRELIM_MAX_FETCH: ${RESEARCH_PRELIM_MAX_FETCH:-6}
       PRELIM_GAP_LIMIT: ${RESEARCH_PRELIM_GAP_LIMIT:-3}
@@ -801,7 +802,7 @@ services:
   # leaves the view. General brain-health (grounds every inlet's claims, not just
   # the podcast). HTTP-invoked (loopback 8819): POST /backfill?limit=N {thread_ids?}.
   # obnet (db) + llm-net (entity LLM) + search-gw-net (Tor egress for Wikipedia via
-  # tor:9050, the same boundary openbrain-research uses; D10).
+  # the Mullvad proxy, the same boundary openbrain-research uses; D10).
   openbrain-grounding-backfiller:
     build:
       context: ../integrations/grounding-backfiller
@@ -822,7 +823,7 @@ services:
       CHAT_MODEL: ${BACKFILL_CHAT_MODEL:-qwen36-27b}
       # Tor egress for Wikipedia (privacy-by-default). Set "" for direct if
       # Wikipedia-over-Tor proves unreliable on this exit set.
-      FETCH_PROXY_URL: ${BACKFILL_FETCH_PROXY_URL:-socks5h://tor:9050}
+      FETCH_PROXY_URL: ${BACKFILL_FETCH_PROXY_URL:-http://vpn:8888}
       BACKFILL_BATCH: ${BACKFILL_BATCH:-20}
       BACKFILL_CONCURRENCY: ${BACKFILL_CONCURRENCY:-2}
       BACKFILL_INTERVAL_MS: ${BACKFILL_INTERVAL_MS:-0}

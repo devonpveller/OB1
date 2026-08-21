@@ -182,7 +182,7 @@ services:
       # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
       CHAT_API_KEY: ${OB_PODCAST_LLM_KEY:-not-needed}
       BRAIN_REST_URL: http://openbrain-rest
-      FETCH_PROXY_URL: http://vpn:8888  # 2026-08-21: Mullvad proxy (tor exits blocked; tor = fallback)
+      FETCH_PROXY_URL: http://vpn:8888  # 2026-08-21: Mullvad proxy (tor RETIRED - exits blocked by most sites)
       # ── Gap dives ──────────────────────────────────────────────────────────
       # When the email source lacked context (open [GAP]s, thin syntheses, email-
       # only items), triage the day's gaps into full research sessions on the
@@ -276,7 +276,7 @@ networks:
   llm-net:
     external: true
     name: ai-stack_llm-net
-  # Tor egress for the podcast's article fetches (socks5h://tor:9050).
+  # Mullvad-proxy egress (was Tor until 2026-08-21) for the podcast article fetches.
   search-net:
     external: true
     name: ai-stack_search-net
