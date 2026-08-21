@@ -147,7 +147,9 @@ services:
   # email never waits on it.
   #
   # Networks: obnet (openbrain-rest / -research / open_notebook), llm-net
-  # (llama-cpp for the script pass), search-net (Tor egress for fetches).
+  # (llama-cpp for the script pass), search-gw-net (= ai-stack_default, where
+  # the Mullvad `vpn` proxy lives since the ai-stack K.3 split — same seam
+  # openbrain-research uses).
   # Needs --unstable-net (Tor proxy) + --allow-run (spawns link-enrich.ts).
   openbrain-podcast:
     image: denoland/deno:alpine
@@ -210,7 +212,7 @@ services:
     networks:
       - obnet
       - llm-net
-      - search-net
+      - search-gw-net
     entrypoint: ["deno", "run", "--unstable-net", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "--allow-run", "podcast-server.ts"]
     command: []
 
@@ -276,7 +278,10 @@ networks:
   llm-net:
     external: true
     name: ai-stack_llm-net
-  # Mullvad-proxy egress (was Tor until 2026-08-21) for the podcast article fetches.
-  search-net:
+  # Mullvad-proxy egress for the podcast article fetches. Repointed 2026-08-21:
+  # `vpn` moved to the ai-stack `search` plane project (K.3) and now presents
+  # its :8888 proxy on the shared ai-stack_default bridge — the OLD
+  # ai-stack_search-net no longer has it (that network is gone).
+  search-gw-net:
     external: true
-    name: ai-stack_search-net
+    name: ai-stack_default
