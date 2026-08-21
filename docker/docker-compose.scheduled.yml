@@ -179,8 +179,10 @@ services:
       # User-facing base for the EMAIL episode links — external + Authelia-gated.
       ON_PUBLIC_BASE: ${ON_PUBLIC_BASE:-https://notebook.devinveller.ai}
       CHAT_API_BASE: http://llama-cpp:8080/v1
+      # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
+      CHAT_API_KEY: ${OB_PODCAST_LLM_KEY:-not-needed}
       BRAIN_REST_URL: http://openbrain-rest
-      FETCH_PROXY_URL: socks5h://tor:9050
+      FETCH_PROXY_URL: http://vpn:8888  # 2026-08-21: Mullvad proxy (tor exits blocked; tor = fallback)
       # ── Gap dives ──────────────────────────────────────────────────────────
       # When the email source lacked context (open [GAP]s, thin syntheses, email-
       # only items), triage the day's gaps into full research sessions on the
@@ -248,6 +250,8 @@ services:
       # LOCAL brainstorm (IR.4/IR.6): an operator reply under a dossier in #ideas is honed by the
       # LOCAL model via the gateway — the same plane the research uses. Nothing goes to cloud.
       CHAT_API_BASE: http://llama-cpp:8080/v1
+      # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
+      CHAT_API_KEY: ${OB_PODCAST_LLM_KEY:-not-needed}
       # :nothink — brainstorm wants a direct reply; the thinking variant's reasoning tokens can eat
       # the budget and leave content empty (a silent non-reply). See index.ts CHAT_MODEL note.
       CHAT_MODEL: qwen36-27b:nothink

@@ -52,6 +52,9 @@ services:
       #    runbook applies this to the live DB via psql — G3). ──
       - ./init-claims.sql:/docker-entrypoint-initdb.d/94-init-claims.sql:ro                      # research-engine P1
       - ./init-research-jobs.sql:/docker-entrypoint-initdb.d/96-init-research-jobs.sql:ro         # research-engine P4
+      # ── Idea Refinery lifecycle tables (fresh-volume only; operator applies
+      #    to the live DB via psql — same pattern as the claims layer). ──
+      - ./init-ideas.sql:/docker-entrypoint-initdb.d/98-init-ideas.sql:ro                        # idea-refinery IR.0
     networks:
       - obnet
     restart: unless-stopped
@@ -81,11 +84,11 @@ services:
       PORT: "8000"
       # Embeddings -> local bge-m3 (1024-dim) on the ai-stack llm-net
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_MCP_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       # Chat (metadata extraction) -> local Qwen, non-thinking variant
       CHAT_API_BASE: http://llama-cpp:8080/v1
-      CHAT_API_KEY: not-needed
+      CHAT_API_KEY: ${OB_MCP_LLM_KEY:-not-needed}
       CHAT_MODEL: qwen36-27b:nothink
       # Tool-result size caps (see index.ts capResultText). Every tool response
       # is truncated to ~this many chars (~4/token) so multi-tool research turns
@@ -300,11 +303,11 @@ services:
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       # Local OpenAI-compatible chat (entity/relation extraction).
       CHAT_API_BASE: http://llama-cpp:8080/v1
-      CHAT_API_KEY: not-needed
+      CHAT_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       CHAT_MODEL: qwen36-27b:nothink
       # Local embeddings (bge-m3, 1024-dim).
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       EMBEDDING_DIMENSION: "1024"
       PORT: "8000"
@@ -338,7 +341,7 @@ services:
       DB_USER: postgres
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       # Cross-thread similarity cutoff (tune with real data — open-Q #1).
       SUGGESTION_THRESHOLD: ${SUGGESTION_THRESHOLD:-0.50}
@@ -387,11 +390,11 @@ services:
       PERSIST_URL: http://openbrain-mcp:8000
       # Local embeddings (bge-m3, 1024-dim) for the thread shortlist.
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_RESEARCH_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       # Local chat (qwen, non-thinking) for the thread-resolution decision.
       CHAT_API_BASE: http://llama-cpp:8080/v1
-      CHAT_API_KEY: not-needed
+      CHAT_API_KEY: ${OB_RESEARCH_LLM_KEY:-not-needed}
       CHAT_MODEL: qwen36-27b:nothink
       # Resolver tuning (override via .env). See PLAN §3.4.
       SHORTLIST_K: ${CURATOR_SHORTLIST_K:-5}
@@ -456,10 +459,10 @@ services:
       # Private SearXNG-over-Tor gateway (cross-stack — override to a reachable URL).
       SEARCH_API_BASE: ${RESEARCH_SEARCH_API_BASE:-http://gateway:8080}
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_RESEARCH_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       CHAT_API_BASE: http://llama-cpp:8080/v1
-      CHAT_API_KEY: not-needed
+      CHAT_API_KEY: ${OB_RESEARCH_LLM_KEY:-not-needed}
       CHAT_MODEL: ${RESEARCH_CHAT_MODEL:-qwen36-27b}
       NOTHINK_SUFFIX: ":nothink"
       # Concurrency: how many research jobs run at once across the stack. Default
@@ -541,7 +544,7 @@ services:
       LLM_API_KEY: not-needed
       LLM_MODEL: qwen36-27b:nothink
       EMBEDDING_BASE_URL: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_WIKI_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       EMBEDDING_DIMENSION: "1024"
       WIKI_OUT_DIR: /wiki/content
@@ -606,6 +609,11 @@ services:
       dockerfile: Dockerfile
     image: openbrain-wiki-viewer:local
     container_name: openbrain-wiki-viewer
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
     depends_on:
       - openbrain-wiki
     environment:
@@ -673,7 +681,7 @@ services:
       OPEN_BRAIN_URL: http://openbrain-rest
       # Local embeddings (bge-m3, 1024-dim) for chunk/source embedding (P5/P6).
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_MCP_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       EMBEDDING_DIMENSION: "1024"
       # Extraction sidecar (P5).
@@ -768,7 +776,7 @@ services:
       DB_USER: postgres
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
       CHUNK_BATCH: ${CHUNK_BATCH:-25}
       CHUNK_INTERVAL_MS: ${CHUNK_INTERVAL_MS:-15000}
@@ -804,6 +812,7 @@ services:
       DB_USER: postgres
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       CHAT_API_BASE: http://llama-cpp:8080/v1
+      CHAT_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       CHAT_MODEL: ${BACKFILL_CHAT_MODEL:-qwen36-27b}
       # Tor egress for Wikipedia (privacy-by-default). Set "" for direct if
       # Wikipedia-over-Tor proves unreliable on this exit set.
