@@ -836,6 +836,91 @@ services:
       - search-gw-net
     restart: unless-stopped
 
+
+  # ── Backup sidecars (moved from the ai-stack parent 2026-08-21: OB1 owns
+  #    its own backups now that it is a self-contained submodule project;
+  #    operator anomaly review #2). Output lands in the parent's backups/
+  #    tree by default (BACKUPS_DIR) so the NAS mirror + freshness watchers
+  #    (StackWatchdog recency table, sysadmin check_backups.py) keep working
+  #    unchanged; container names unchanged for the same reason. ──
+
+  openbrain-db-backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile.postgres
+    image: openbrain-db-backup:local
+    container_name: openbrain-db-backup
+    environment:
+      PGHOST: openbrain-db
+      PGPORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_DB: openbrain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_DIR: /backups
+      RETAIN_COUNT: ${OPENBRAIN_DB_BACKUP_RETAIN_COUNT:-2}
+      BACKUP_CRON: ${OPENBRAIN_DB_BACKUP_CRON:-0 2 * * *}
+      TZ: UTC
+    volumes:
+      - ${BACKUPS_DIR:-../../backups}/openbrain-db:/backups
+      - ./backup/openbrain-db-backup.sh:/scripts/backup.sh:ro
+    networks:
+      - obnet
+    user: "10008:10008"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+          pids: 50
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] openbrain-db-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_COUNT} most recent)"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
+
+  # tar of the wiki git-vault volume + the binary-assets volume. Runs as
+  # root (wiki files are root-owned); sleep-loop scheduler (crond misses
+  # fire-windows on Docker Desktop VM clock jumps).
+  openbrain-wiki-backup:
+    image: alpine:3.21
+    container_name: openbrain-wiki-backup
+    volumes:
+      - openbrain-wiki-data:/data:ro
+      - wiki-assets:/assets:ro
+      - ${BACKUPS_DIR:-../../backups}/openbrain-wiki:/backups
+      - ./backup/openbrain-wiki-backup.sh:/scripts/backup.sh:ro
+    environment:
+      BACKUP_DIR: /backups
+      DATA_DIR: /data
+      ASSETS_DIR: /assets
+      RETAIN_COUNT: ${OPENBRAIN_WIKI_BACKUP_RETAIN_COUNT:-2}
+      BACKUP_INTERVAL: ${OPENBRAIN_WIKI_BACKUP_INTERVAL:-86400}
+      TZ: UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "[$$(date -u +%FT%TZ)] openbrain-wiki-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] openbrain-wiki backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
 volumes:
   openbrain-db-data:
   openbrain-wiki-data:
