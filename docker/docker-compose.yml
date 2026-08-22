@@ -546,7 +546,10 @@ services:
       WORKBENCH_URL: http://openbrain-workbench:8000
       WORKBENCH_KEY: ${MCP_ACCESS_KEY}
       LLM_BASE_URL: http://llama-cpp:8080/v1
-      LLM_API_KEY: not-needed
+      # J.1 follow-up 2026-08-22: was HARDCODED not-needed (only the embed key
+      # got the variable at the cutover) -> every wiki-compile chat call 401d
+      # since the master-key flip (1,686 failures/20h in the spend log).
+      LLM_API_KEY: ${OB_WIKI_LLM_KEY:-not-needed}
       LLM_MODEL: qwen36-27b:nothink
       EMBEDDING_BASE_URL: http://llama-cpp-embed:8080/v1
       EMBEDDING_API_KEY: ${OB_WIKI_LLM_KEY:-not-needed}

@@ -238,6 +238,12 @@ export function selectRepoFiles(paths: string[], maxFiles = 40): RepoFileSelecti
 
 export interface RenderableResult {
   synthesis?: string | null;
+  /** Templated human-facing report (templates.ts, 2026-08-22). When present it
+   *  is the chat-facing body; the tagged synthesis remains the machine-truth
+   *  and the fallback. Same [Source N] numbers as the synthesis. */
+  prose?: string | null;
+  /** templates.ts id of the report template that rendered `prose`. */
+  report_type?: string | null;
   cited_sources?: Array<{ title?: string | null; url?: string | null }> | null;
   gaps?: string[] | null;
   backstop?: string | null;
@@ -245,7 +251,12 @@ export interface RenderableResult {
 }
 
 export function renderResult(result: RenderableResult): string {
-  const parts: string[] = [(result.synthesis || "").trim() || "(no synthesis produced)"];
+  // The templated report is the human-facing body (operator request 2026-08-22:
+  // the raw tagged claim list was unusable as a deliverable). Citations use the
+  // same numbers, so the Sources list below still resolves. The tagged
+  // synthesis remains the fallback for pre-template jobs / render failures.
+  const body = (result.prose || "").trim() || (result.synthesis || "").trim() || "(no synthesis produced)";
+  const parts: string[] = [body];
 
   const cited = result.cited_sources ?? [];
   if (cited.length) {

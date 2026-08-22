@@ -599,6 +599,8 @@ async function executeJob(job: ClaimedJob): Promise<void> {
     // this same string — see lib.ts renderResult for why it moved server-side.
     const rendered = renderResult({
       synthesis: res.synthesis,
+      prose: res.prose,
+      report_type: res.reportType,
       cited_sources: res.citedSources,
       gaps: res.gaps,
       backstop: res.backstop,
@@ -608,7 +610,7 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       `UPDATE research_jobs SET status='done', finished_at=now(),
          result=$2::jsonb, metrics=$3::jsonb, progress=$4::jsonb WHERE id=$1`,
       [jobId, JSON.stringify({
-        synthesis: res.synthesis, prose: res.prose, needs: res.needs,
+        synthesis: res.synthesis, prose: res.prose, report_type: res.reportType, needs: res.needs,
         followup_queries: res.followupQueries, gaps: res.gaps,
         cited_sources: res.citedSources, reuse_claims: res.reuseClaims,
         thread_id: (res.curator?.thread_id as string) ?? thread_id, reuse_ratio: 1 - res.metrics.gap_ratio,

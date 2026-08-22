@@ -9,6 +9,8 @@
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
 import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
+import { rankHits, partitionRelevant } from "./filtering.ts";
+import { classifyTemplate, renderSys } from "./templates.ts";
 import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
 
@@ -194,8 +196,11 @@ export interface RunOptions {
 }
 export interface RunResult {
   synthesis: string;
-  /** Human-readable prose rendering of `synthesis` (same [Source N] citations). */
+  /** Human-facing report rendering of `synthesis` (same [Source N] citations),
+   *  structured by the classified report template (templates.ts). */
   prose: string;
+  /** Which report template rendered `prose` (templates.ts id; "" if skipped). */
+  reportType: string;
   needs: string[];
   /** Refined/deepened queries generated across gather rounds (breadcrumbs). */
   followupQueries: string[];
@@ -278,6 +283,9 @@ export async function runResearch(
   const sessionId = dryRun ? null : await createStagingSession(client, query, threadId, opts.origin || "owui");
   // Seeds are exempt from the contract's allow-list (in article mode the seed IS
   // the subject) but are still dropped if they hit a deny domain / red-line host.
+  // Pages staged before web gathering (seeds + KB recalls) are exempt from the
+  // relevance gate below; everything after this index came from the open web.
+  let protectedCount = 0;
   const staged: Page[] = seeds
     .filter((s) => !opts.contract || !deniedUrl(opts.contract, s.url))
     .map((s) => ({
@@ -342,6 +350,7 @@ export async function runResearch(
     }
     await progress("plan", `needs=${needs.length} reused=${reuseClaims.length} gaps=${gapNeeds.length}`,
       { needs: needs.length, reused: reuseClaims.length, gaps: gapNeeds.length });
+    protectedCount = staged.length; // seeds + KB recalls staged so far are exempt from the relevance gate
 
     // ITERATIVE deepening (#1): gather a round, re-check which needs the gathered
     // sources actually cover, refine queries for the still-open needs, gather
@@ -357,6 +366,9 @@ export async function runResearch(
         await progress("gather", `searching: ${q}`);
         let hits: SearchHit[] = [];
         try { hits = await deps.searchWeb(q, SEARCH_K); } catch { hits = []; }
+        // Credibility-ranked: scholarly/reference domains first, retail last
+        // (filtering.ts). The engine's own order breaks ties within a tier.
+        hits = rankHits(hits);
         const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url));
         // Headroom = remaining SOURCE budget plus remaining TIMEOUT budget, so we
         // keep trying URLs while either bound has room (a timeout shouldn't burn
@@ -428,6 +440,24 @@ export async function runResearch(
     }
   }
 
+  // Relevance gate (filtering.ts, 2026-08-22): drop WEB-GATHERED pages that do
+  // not actually pertain to the question (the "SaaS api tools" → hardware-store
+  // results failure). Seeds and KB recalls are protected — the caller / vector
+  // relevance already vouched for them. Fail-open per page; a rejection here is
+  // a confident IRRELEVANT verdict, logged so the run's record shows what was
+  // discarded and why coverage may differ from raw fetch counts.
+  if (staged.length > protectedCount) {
+    const protectedPages = staged.slice(0, protectedCount);
+    const webPages = staged.slice(protectedCount);
+    const { relevant: relevantPages, rejected } = await partitionRelevant(deps, webPages, query);
+    if (rejected.length) {
+      await progress("screen",
+        `rejected ${rejected.length} irrelevant source(s): ${rejected.map((r) => r.url).slice(0, 4).join(", ")}${rejected.length > 4 ? ", …" : ""}`,
+        { irrelevant: rejected.length });
+      staged.splice(0, staged.length, ...protectedPages, ...relevantPages);
+    }
+  }
+
   // Persist staged candidates into the session pool (dedup vs OB). Skipped on
   // dry-run (no canonical write).
   if (!dryRun && sessionId) {
@@ -471,6 +501,7 @@ export async function runResearch(
           if (sourcesFetched >= PRELIM_MAX_FETCH) { backstop = "max_fetch"; break; }
           let hits: SearchHit[] = [];
           try { hits = await deps.searchWeb(gap, SEARCH_K); } catch { hits = []; }
+          hits = rankHits(hits);
           const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url))
             .slice(0, Math.max(0, Math.min(2, PRELIM_MAX_FETCH - sourcesFetched)));
           const results = await mapLimit(fresh, FETCH_CONCURRENCY, (h) => deps.fetchPage(h.url));
@@ -480,7 +511,12 @@ export async function runResearch(
             else if (fr.outcome === "timeout") { fetchTimeouts++; }
             else { fetchErrors++; }
           }
-          const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, prelimPages);
+          const { relevant: relPrelim, rejected: rejPrelim } = await partitionRelevant(deps, prelimPages, `${query} — ${gap}`);
+          if (rejPrelim.length) {
+            await progress("screen", `rejected ${rejPrelim.length} irrelevant preliminary source(s)`,
+              { irrelevant: rejPrelim.length });
+          }
+          const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, relPrelim);
           if (qPrelim.length) {
             await progress("screen", `quarantined ${qPrelim.length} preliminary source(s) for prompt injection`,
               { quarantined: qPrelim.length });
@@ -581,16 +617,24 @@ export async function runResearch(
   //    compacted cited list. Delegate to curator (verbatim storage + claims, P2).
   const { synthesis, cited } = buildCitedAndRenumber(rawSynthesis, pool);
 
-  // Readable-prose rendering of the grounded synthesis (best-effort). The tagged
-  // `synthesis` is preserved as the machine-truth the curator decomposes into
-  // claims; this prose is the human-facing answer, stored alongside it. Same
-  // [Source N] numbers, so wiki source-leaf deep-links still resolve.
+  // Templated report rendering (templates.ts, 2026-08-22) — the human-facing
+  // answer is now a PROFESSIONAL REPORT: the run is classified into a report
+  // type (scientific paper, technical proposal, product comparison, …) and the
+  // grounded synthesis is rendered into that template. The tagged `synthesis`
+  // is preserved as the machine-truth the curator decomposes into claims; the
+  // report keeps the SAME [Source N] numbers, so wiki source-leaf deep-links
+  // still resolve. Best-effort: a render failure leaves prose empty and the
+  // renderers fall back to the tagged synthesis.
   let prose = "";
+  let reportType = "";
   if (synthesis.trim()) {
     try {
-      prose = (await deps.chat(PROSE_SYS, `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${synthesis}`)).trim();
+      const tpl = await classifyTemplate(deps, query, synthesis);
+      reportType = tpl.id;
+      await progress("synthesize", `report template: ${tpl.name}`);
+      prose = (await deps.chat(renderSys(tpl), `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${synthesis}`)).trim();
     } catch (e) {
-      await progress("synthesize", `prose rendering skipped: ${(e as Error).message}`);
+      await progress("synthesize", `report rendering skipped: ${(e as Error).message}`);
     }
   }
 
@@ -623,7 +667,7 @@ export async function runResearch(
   }
 
   return {
-    synthesis, prose, needs, followupQueries,
+    synthesis, prose, reportType, needs, followupQueries,
     gaps: gapMatches.length ? gapNeeds : [],
     reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
     citedSources: cited.map((p) => ({ url: p.url, title: p.title })),
