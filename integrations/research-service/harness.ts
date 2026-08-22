@@ -450,7 +450,16 @@ export async function runResearch(
     const protectedPages = staged.slice(0, protectedCount);
     const webPages = staged.slice(protectedCount);
     const { relevant: relevantPages, rejected } = await partitionRelevant(deps, webPages, query);
-    if (rejected.length) {
+    // FAIL-SAFE FLOOR (operator concern 2026-08-22): the gate must never turn
+    // a run into a no-sources failure. If it would empty the web pool (and
+    // nothing protected remains to ground from), keep everything and say so -
+    // the synthesizer's grounding rules + the Sources-cited-only report are
+    // the backstop against weak pages, and a thin report beats a dead run.
+    if (relevantPages.length === 0 && protectedPages.length === 0 && webPages.length > 0) {
+      await progress("screen",
+        `relevance gate would empty the source pool - keeping all ${webPages.length} page(s) (fail-safe floor)`,
+        { irrelevant_overridden: webPages.length });
+    } else if (rejected.length) {
       await progress("screen",
         `rejected ${rejected.length} irrelevant source(s): ${rejected.map((r) => r.url).slice(0, 4).join(", ")}${rejected.length > 4 ? ", …" : ""}`,
         { irrelevant: rejected.length });
@@ -511,12 +520,20 @@ export async function runResearch(
             else if (fr.outcome === "timeout") { fetchTimeouts++; }
             else { fetchErrors++; }
           }
-          const { relevant: relPrelim, rejected: rejPrelim } = await partitionRelevant(deps, prelimPages, `${query} — ${gap}`);
-          if (rejPrelim.length) {
-            await progress("screen", `rejected ${rejPrelim.length} irrelevant preliminary source(s)`,
-              { irrelevant: rejPrelim.length });
+          const gatePrelim = await partitionRelevant(deps, prelimPages, `${query} — ${gap}`);
+          // Same fail-safe floor as the main pool: never let the gate zero
+          // out a preliminary batch that fetched real pages.
+          const keptPrelim = (gatePrelim.relevant.length === 0 && prelimPages.length > 0)
+            ? prelimPages
+            : gatePrelim.relevant;
+          if (keptPrelim === prelimPages && gatePrelim.rejected.length) {
+            await progress("screen", `relevance gate would empty the preliminary batch - keeping all ${prelimPages.length} (fail-safe floor)`,
+              { irrelevant_overridden: prelimPages.length });
+          } else if (gatePrelim.rejected.length) {
+            await progress("screen", `rejected ${gatePrelim.rejected.length} irrelevant preliminary source(s)`,
+              { irrelevant: gatePrelim.rejected.length });
           }
-          const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, relPrelim);
+          const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, keptPrelim);
           if (qPrelim.length) {
             await progress("screen", `quarantined ${qPrelim.length} preliminary source(s) for prompt injection`,
               { quarantined: qPrelim.length });
