@@ -44,9 +44,10 @@ services:
 
   # ── Daily digest (HTTP-triggered) ───────────────────────────────────
   # Long-running Deno HTTP service. POST /run triggers the digest; cron
-  # fires at 07:00 local. No LLM call (mechanical formatting), so this
-  # service does NOT join llm-net. Dedicated OAuth token at
-  # secrets/google/openbrain-digest/token.json with gmail.send scope.
+  # fires at 07:00 local. Calls the LLM gateway (weather brief,
+  # synthesizer, semantic search), so it joins llm-net. Dedicated OAuth
+  # token at secrets/google/openbrain-digest/token.json with gmail.send
+  # scope.
   openbrain-digest:
     image: denoland/deno:alpine
     container_name: openbrain-digest
@@ -61,6 +62,8 @@ services:
       # email still always sends: if the podcast produced nothing, the section is
       # omitted and the rest of the digest goes out. No onward trigger.
       NEXT_TRIGGER_URL: ""
+      # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
+      LOCAL_LLM_BEARER: ${OB_DIGEST_LLM_KEY:-no-key}
     volumes:
       - ../recipes/daily-digest:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
