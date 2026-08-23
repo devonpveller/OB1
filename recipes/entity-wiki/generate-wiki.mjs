@@ -44,6 +44,7 @@ import { pathToFileURL } from "node:url";
 import { slugifyEntity as slugify, slugifyNotebook } from "../_shared/slug.mjs";
 import { writeSourceLeaves } from "../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-changed.mjs";
+import { rewriteCitations } from "../_shared/citations.mjs";
 
 // ---------------------------------------------------------------
 // Config + CLI parsing
@@ -822,45 +823,32 @@ function linkifyEntities(markdown, related) {
   return parts.join("");
 }
 
-// P1.3/1.4 — turn inline citations into real internal wikilinks so native
-// Quartz popover + SPA + backlinks + search apply with no custom interaction
-// code:
-//   [#<digits>] → [[content/thought/<digits>|#<digits>]]  (thoughts.id is BIGSERIAL —
-//                 small ints the LLM reproduces reliably; matched literally)
-//   [S<n>]      → [[content/source/<uuid>|S<n>]]           (resolved via the per-page
-//                 token→UUID map; the model never sees or emits the UUID)
-// A token with no known leaf (a genuine mis-cite) is LEFT AS PLAIN TEXT,
-// mirroring broken-[[wikilink]] handling — so no broken links ever appear.
-// The ids actually turned into links are accumulated into `run` so the
-// caller emits exactly the cited leaves and the sweep removes the rest
-// (P1.1/1.5). Idempotent and conservative: fenced/inline code is protected.
-export function rewriteCitations(markdown, validThoughtIds, sourceTokenMap, run) {
-  const protectedRe = /(```[\s\S]*?```|`[^`]*`)/g;
-  const parts = String(markdown).split(protectedRe);
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 1) continue; // protected code span — leave as-is
-    let seg = parts[i];
-    // Sources: [S1], [S2], … — resolve token→UUID; unknown token → plain text.
-    seg = seg.replace(/\[S(\d+)\]/g, (m, n) => {
-      const uuid = sourceTokenMap.get(`S${n}`);
-      if (!uuid) return m; // mis-cite — leave as plain text
-      run.citedSourceIds.add(uuid);
-      return `[[content/source/${uuid}|S${n}]]`;
-    });
-    // Thoughts: [#11173] — literal id; not-on-this-page id → plain text.
-    // The "#" is kept OUTSIDE the wikilink (`#[[content/thought/id|id]]`, not
-    // `[[content/thought/id|#id]]`): Quartz's wikilink parser treats a "#" at the start
-    // of the alias as a heading/anchor ref and fails to render the link at all
-    // (verified). The "#" as a literal prefix still reads "#11173", and the id
-    // is the clickable link → popover/SPA/backlinks all work.
-    seg = seg.replace(/\[#(\d+)\]/g, (m, d) => {
-      if (!validThoughtIds.has(Number(d))) return m;
-      run.citedThoughtIds.add(Number(d));
-      return `#[[content/thought/${d}|${d}]]`;
-    });
-    parts[i] = seg;
+// P1.3/1.4 — citation rewriting now lives in the SHARED canonical module
+// (recipes/_shared/citations.mjs) so the entity, notebook and leaf emitters
+// can never diverge; re-exported here so existing imports/tests keep working.
+// The shared version also handles grouped markers ([S1, S3]) and legacy
+// [S:<uuid>] forms — see the module header.
+export { rewriteCitations };
+
+// Failed-entity retry ledger. A per-entity failure exits 0 (the rest of the
+// batch still lands) but the wiki-service watermark advances anyway, so a
+// failed page silently left the dirty set FOREVER (compounded by the J.1 26h
+// LLM outage: every page due in that window froze stale). The ids are written
+// here; wiki-service unions them into the next compile's dirty set. Removed
+// when a run has no failures.
+export const FAILED_IDS_FILE = ".failed-entity-ids.json";
+function recordFailedEntityIds(outDir, failedIds) {
+  const p = path.join(outDir, FAILED_IDS_FILE);
+  try {
+    if (failedIds.length) {
+      writeIfChanged(p, JSON.stringify([...new Set(failedIds)].sort((a, b) => a - b)) + "\n");
+      console.log(`[wiki] recorded ${failedIds.length} failed entity id(s) for retry next compile`);
+    } else {
+      fs.rmSync(p, { force: true });
+    }
+  } catch (err) {
+    console.error(`[wiki] failed-id ledger write failed: ${err.message}`);
   }
-  return parts.join("");
 }
 
 // P6.7 — a DERIVED `## Evolution` timeline: when the entity was first captured
@@ -1536,7 +1524,7 @@ async function main() {
       .map((s) => Number(s.trim()))
       .filter((n) => Number.isInteger(n) && n > 0);
     let ok = 0;
-    let failed = 0;
+    const failedIds = [];
     const run = { citedThoughtIds: new Set(), citedSourceIds: new Set() };
     for (const id of ids) {
       const entity = await resolveEntityById(sb, id);
@@ -1545,13 +1533,14 @@ async function main() {
         await generateForEntity(sb, env, entity, args, run);
         ok++;
       } catch (err) {
-        failed++;
+        failedIds.push(id);
         console.error(`[wiki] FAILED #${id}: ${err.message}`);
       }
     }
-    console.log(`[wiki] incremental: ${ok} regenerated, ${failed} failed (of ${ids.length} dirty)`);
+    console.log(`[wiki] incremental: ${ok} regenerated, ${failedIds.length} failed (of ${ids.length} dirty)`);
     if (args.outputMode === "file" && !args.dryRun) {
       const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
+      recordFailedEntityIds(outDir, failedIds);
       // P1.1 — emit the leaves cited by the pages regenerated this run.
       try {
         await emitLeafPages(sb, outDir, run);
@@ -1574,7 +1563,7 @@ async function main() {
     const candidates = await listBatchCandidates(sb, args.batchMinLinked, args.batchLimit);
     console.log(`[wiki] batch: ${candidates.length} candidate entities (min_linked=${args.batchMinLinked})`);
     let ok = 0;
-    let failed = 0;
+    const failedIds = [];
     const run = { citedThoughtIds: new Set(), citedSourceIds: new Set() };
     for (const cand of candidates) {
       const entity = await resolveEntityById(sb, cand.id);
@@ -1583,13 +1572,14 @@ async function main() {
         await generateForEntity(sb, env, entity, args, run);
         ok++;
       } catch (err) {
-        failed++;
+        failedIds.push(entity.id);
         console.error(`[wiki] FAILED #${entity.id} ${entity.canonical_name}: ${err.message}`);
       }
     }
-    console.log(`[wiki] batch done: ${ok} ok, ${failed} failed`);
+    console.log(`[wiki] batch done: ${ok} ok, ${failedIds.length} failed`);
     if (args.outputMode === "file" && !args.dryRun) {
       const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
+      recordFailedEntityIds(outDir, failedIds);
       // P1.1 — emit the union of leaves cited across the whole batch.
       try {
         await emitLeafPages(sb, outDir, run);

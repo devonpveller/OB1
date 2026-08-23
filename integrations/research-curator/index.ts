@@ -83,6 +83,7 @@ interface Pkg {
   claim?: string; // short standalone summary (required) — used for the resolver embedding
   synthesis?: string; // the FULL detailed research result (tagged claims) — stored as source content
   prose?: string; // human-readable rendering of the synthesis → sources.metadata.prose_synthesis
+  report_type?: string; // report template id → sources.metadata.report_type (wiki rendering hint)
   needs?: string[]; // decomposed sub-questions → sources.metadata.needs (breadcrumbs)
   followup_queries?: string[]; // refined/deepen queries → sources.metadata.followup_queries
   kind?: string;
@@ -506,14 +507,20 @@ Deno.serve({ port: PORT }, async (req) => {
         try {
           const c = await pool.connect();
           try {
+            // Merge semantics: prose_synthesis/report_type are stamped ONLY
+            // when present — a run whose template render failed must not null
+            // out a previously-good readable prose (the leaf page would fall
+            // back to the raw tagged claim lines).
+            const stamp: Record<string, unknown> = {
+              needs: pkg.needs || [],
+              followup_queries: pkg.followup_queries || [],
+              source_ids: sourceIds, // [Source N] → source_ids[N-1] for clickable citations
+            };
+            if (pkg.prose) stamp.prose_synthesis = pkg.prose;
+            if (pkg.report_type) stamp.report_type = pkg.report_type;
             await c.queryObject(
               `UPDATE sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
-              [synthesisId, JSON.stringify({
-                prose_synthesis: pkg.prose || null,
-                needs: pkg.needs || [],
-                followup_queries: pkg.followup_queries || [],
-                source_ids: sourceIds, // [Source N] → source_ids[N-1] for clickable citations
-              })],
+              [synthesisId, JSON.stringify(stamp)],
             );
           } finally { c.release(); }
         } catch (e) {

@@ -1922,7 +1922,15 @@ app.post("/research/persist", async (c) => {
          research_query=EXCLUDED.research_query, run_kind=EXCLUDED.run_kind,
          volatility=EXCLUDED.volatility, revalidate_days=EXCLUDED.revalidate_days,
          researched_on=CURRENT_DATE, fetched_at=now(),
-         embedding=EXCLUDED.embedding, updated_at=now()
+         embedding=EXCLUDED.embedding, updated_at=now(),
+         -- Supersede drops the PREVIOUS run's render keys (prose/source_ids/
+         -- report_type): the old prose no longer matches the new content, and
+         -- stale source_ids would resolve [Source N] to the old run's uuids
+         -- until the curator's follow-up stamp lands. The leaf falls back to
+         -- the tagged content for the seconds in between.
+         metadata=(COALESCE(sources.metadata,'{}'::jsonb)
+                   - 'prose_synthesis' - 'source_ids' - 'report_type')
+                  || EXCLUDED.metadata
        RETURNING id`,
       [
         (body.query || "research").slice(0, 200), content, body.notebook ?? null,

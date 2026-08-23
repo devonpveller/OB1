@@ -18,6 +18,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { rewriteResearchCitations } from "./citations.mjs";
 import { writeIfChanged } from "./write-if-changed.mjs";
 
 // YAML-safe scalar (quoted JSON string — handles colons, quotes, emoji).
@@ -93,6 +94,7 @@ export function renderSourceLeaf(r) {
     ...(date ? [`date: ${date}`] : []),
     ...(r.url ? [`url: ${frontmatterScalar(r.url)}`] : []),
     ...(r.content_type ? [`content_type: ${frontmatterScalar(r.content_type)}`] : []),
+    ...(md.report_type ? [`report_type: ${frontmatterScalar(md.report_type)}`] : []),
     ...(r.notebook ? [`notebook: ${frontmatterScalar(r.notebook)}`] : []),
     "tags: [leaf, source]",
     "---",
@@ -108,11 +110,11 @@ export function renderSourceLeaf(r) {
     // curator's persisted citation order). The grounded one-claim-per-line
     // evidence is kept verbatim in a collapsible callout below (audit trail);
     // the research questions are surfaced as breadcrumbs.
+    // Shared tolerant rewrite: also handles the grouped forms the renderer
+    // deliberately emits ([Source 1, 3]) and model variants ([Sources 1 and 2]),
+    // which the old single-number regex left raw and unlinked.
     const sids = Array.isArray(md.source_ids) ? md.source_ids : [];
-    const linked = scrubSnippetContent(prose).replace(/\[Source\s+(\d+)\]/g, (m, n) => {
-      const id = sids[parseInt(n, 10) - 1];
-      return id ? `[[content/source/${id}|Source ${n}]]` : m;
-    });
+    const linked = rewriteResearchCitations(scrubSnippetContent(prose), sids);
     const origQ = String(r.research_query || "").trim();
     const needs = Array.isArray(md.needs) ? md.needs.filter(Boolean) : [];
     const follow = Array.isArray(md.followup_queries) ? md.followup_queries.filter(Boolean) : [];

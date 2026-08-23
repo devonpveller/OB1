@@ -16,7 +16,7 @@ test("rewrites valid thought + source citations into wikilinks", () => {
     run,
   );
   // Thought "#" stays OUTSIDE the wikilink (Quartz parser fails on `|#…` alias).
-  assert.equal(out, `Aurora ships Q3 [[source/${UUID}|S1]], contradicting #[[thought/11173|11173]].`);
+  assert.equal(out, `Aurora ships Q3 [[content/source/${UUID}|S1]], contradicting #[[content/thought/11173|11173]].`);
   assert.deepEqual([...run.citedSourceIds], [UUID]);
   assert.deepEqual([...run.citedThoughtIds], [11173]);
 });
@@ -31,19 +31,19 @@ test("mis-cites (unknown token / not-on-page id) stay plain text", () => {
 test("code spans are protected", () => {
   const run = newRun();
   const out = rewriteCitations("real [#1] but `code [#1]`", new Set([1]), new Map(), run);
-  assert.equal(out, "real #[[thought/1|1]] but `code [#1]`");
+  assert.equal(out, "real #[[content/thought/1|1]] but `code [#1]`");
 });
 
 test("does not double-rewrite an already-wikilinked citation", () => {
   const run = newRun();
-  const src = `[[source/${UUID}|S1]] and #[[thought/1|1]]`;
+  const src = `[[content/source/${UUID}|S1]] and #[[content/thought/1|1]]`;
   assert.equal(rewriteCitations(src, new Set([1]), new Map([["S1", UUID]]), run), src);
 });
 
 test("Sources bullet line gets the source leaf link", () => {
   const run = newRun();
   const out = rewriteCitations("- [S1] Title — https://ex.com/a?b=1", new Set(), new Map([["S1", UUID]]), run);
-  assert.equal(out, `- [[source/${UUID}|S1]] Title — https://ex.com/a?b=1`);
+  assert.equal(out, `- [[content/source/${UUID}|S1]] Title — https://ex.com/a?b=1`);
 });
 
 // ── P6.7 derived ## Evolution timeline ─────────────────────────────────────
@@ -63,7 +63,7 @@ test("Evolution: first-seen from earliest thought + sorted grounding events", ()
   const iRfc = out.indexOf("2026-01-15");
   const iRev = out.indexOf("2026-03-02");
   assert.ok(iRfc > -1 && iRev > -1 && iRfc < iRev, "events sorted by date");
-  assert.ok(out.includes("[[source/" + UUID + "|Architecture review]] (pdf)"), "review source link present");
+  assert.ok(out.includes("[[content/source/" + UUID + "|Architecture review]] (pdf)"), "review source link present");
 });
 
 test("Evolution: empty when no first-seen and no sources", () => {
@@ -76,6 +76,6 @@ test("Evolution: source title sanitized of wikilink-breaking chars", () => {
   ], []);
   // the bracket/pipe chars in the title were neutralised so they can't break
   // the wikilink (no leftover "[title]" or "]] chars" leaking through)
-  assert.ok(out.includes("[[source/" + UUID + "|"), "link prefix present");
+  assert.ok(out.includes("[[content/source/" + UUID + "|"), "link prefix present");
   assert.ok(!out.includes("[title]") && !out.includes("]] chars"), "title sanitized");
 });

@@ -131,10 +131,14 @@ async function ensureRepo() {
   await git(["config", "pull.rebase", "true"]).catch(() => {});
   // assets/ is the wiki-assets volume (binaries, D-I) — keep it OUT of vault
   // git so the workbench's note commits never stage images.
-  const wantIgnore = ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n";
+  const wantIgnore =
+    ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n.failed-entity-ids.json\n";
   let curIgnore = "";
   try { curIgnore = await readFile(`${WIKI_GIT_DIR}/.gitignore`, "utf8"); } catch { /* */ }
-  if (!curIgnore.includes(".wikistate.json") || !curIgnore.includes("assets/")) {
+  if (
+    !curIgnore.includes(".wikistate.json") || !curIgnore.includes("assets/") ||
+    !curIgnore.includes(".failed-entity-ids.json")
+  ) {
     await writeFile(`${WIKI_GIT_DIR}/.gitignore`, wantIgnore);
   }
   // If a prior (pre-fix) run already tracked the state file, untrack it.
@@ -408,6 +412,9 @@ async function ingestNotes(prevCommit) {
 // Entities whose links/metadata changed since the last compile (the set
 // that needs regeneration). upsertEntity bumps entities.updated_at on
 // every extraction, so this captures note- and source-driven changes.
+// Entities that FAILED last compile (ledger written by generate-wiki) are
+// unioned in — before this, a failure exited 0, the watermark advanced, and
+// the page froze stale forever.
 async function dirtyEntityIds(prevIso) {
   if (!prevIso) return null; // null → full rebuild
   try {
@@ -415,7 +422,17 @@ async function dirtyEntityIds(prevIso) {
       "GET",
       `entities?select=id&updated_at=gte.${encodeURIComponent(prevIso)}&limit=5000`,
     );
-    return Array.isArray(rows) ? rows.map((r) => r.id) : [];
+    const ids = new Set(Array.isArray(rows) ? rows.map((r) => r.id) : []);
+    try {
+      const failed = JSON.parse(
+        await readFile(`${WIKI_OUT_DIR}/.failed-entity-ids.json`, "utf8"),
+      );
+      if (Array.isArray(failed) && failed.length) {
+        for (const id of failed) ids.add(id);
+        console.log(`[wiki-service] retrying ${failed.length} failed entity id(s) from last compile`);
+      }
+    } catch { /* no ledger — nothing failed last run */ }
+    return [...ids];
   } catch (e) {
     console.error("[wiki-service] dirty-entity query failed; full rebuild:", e?.message || e);
     return null;
@@ -487,6 +504,26 @@ async function sweepOrphanEntityPages() {
     for (const r of rows) {
       const k = r.entity_id;
       counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    // SOURCE links count too (tombstone-filtered), mirroring the candidate
+    // selection in generate-wiki listBatchCandidates. Counting only thought
+    // links here meant a source-only entity (exactly what research output
+    // creates) was WRITTEN by the compile and DELETED by this sweep in the
+    // same cycle — research-derived entity pages systematically vanished.
+    const sRows = (await obFetch(
+      "GET",
+      "source_entities?select=entity_id,sources!inner(id)&sources.retraction_committed_at=is.null&limit=200000",
+    )) || [];
+    for (const r of sRows) {
+      const k = r.entity_id;
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    // Truncation fail-safe: a kept-set built from a CLIPPED query would treat
+    // everything past the cap as an orphan and delete it. Skip the sweep and
+    // say so rather than sweep against partial truth.
+    if (entities.length >= 20000 || rows.length >= 200000 || sRows.length >= 200000) {
+      console.error("[wiki-service] orphan-sweep SKIPPED: kept-set query hit its limit cap (raise limits before sweeping)");
+      return { kept: 0, deleted: 0, error: true };
     }
   } catch (e) {
     console.error("[wiki-service] orphan-sweep query failed (skipping sweep):",

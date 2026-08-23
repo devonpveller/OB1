@@ -142,23 +142,9 @@ Cite the web source(s) that support it (N >= 2). If the SOURCES do not address a
 
 ABSOLUTE RULES: these are PRELIMINARY, lower-confidence findings from OUTSIDE the article — never present them as settled fact, and always phrase them as "preliminary research suggests…". Never invent: an unsupported tentative claim is a [GAP], not an [UNCERTAIN]. One item per line. Every [UNCERTAIN] line must end with a [Source N] citation (N >= 2).`;
 
-// Readable-prose pass: turns the grounded one-claim-per-line answer into a
-// human-readable synthesis WITHOUT losing grounding — every [Source N] citation
-// is preserved verbatim so the wiki's source-leaf deep-links still resolve. The
-// tagged synthesis stays the machine-truth (it's what the curator decomposes
-// into claims); this prose is the human-facing rendering stored alongside it.
-const PROSE_SYS =
-  `You are Open Brain's research writer. You are given a QUESTION and a GROUNDED ANSWER — a list of verified assertions, each tagged [SOURCED]/[INFERRED]/[UNCERTAIN] and ending with its citation [Source N], plus [GAP] lines for points no source covered.
-
-Rewrite it into a clear, readable Markdown synthesis that answers the QUESTION for a human reader.
-
-RULES:
-- Open with a direct answer, then supporting detail. Use ## section headers and short paragraphs or bullet lists where natural.
-- PRESERVE every citation: keep each fact's [Source N] marker inline, using the SAME numbers (e.g. "The official repo is github.com/anthropics/skills [Source 1]."). Never renumber or drop a citation.
-- Introduce NO fact, number, name, URL, or quote that is not in the grounded answer. If it is not supported there, do not write it.
-- Drop the [SOURCED]/[INFERRED]/[UNCERTAIN] tags themselves — convey that nuance in prose ("directly reports…", "this suggests…") but keep the [Source N] citations.
-- End with a short "## Gaps" section listing the [GAP] items as open questions (no citations). Omit the section entirely if there are no gaps.
-- Be faithful and complete — cover every claim — but readable. Do not add a preamble like "Here is the synthesis"; start with the answer.`;
+// (The pre-template PROSE_SYS readable-prose prompt lived here until
+// 2026-08-23 — dead code since the a627f31 template rework; templates.ts
+// renderSys() is the single prose renderer now.)
 
 // ── Public types ─────────────────────────────────────────────────────────────
 /** A pre-fetched source the caller supplies to be staged directly (not searched/fetched). */
@@ -673,6 +659,7 @@ export async function runResearch(
       claim: firstParagraph(synthesis).slice(0, 600),
       synthesis,
       prose,                              // human-readable rendering (curator → sources.metadata)
+      report_type: reportType || undefined, // template id (curator → sources.metadata → wiki)
       needs,                             // the decomposed sub-questions (breadcrumbs)
       followup_queries: followupQueries, // refined/deepen queries across rounds (breadcrumbs)
       kind: "deep_research",
