@@ -91,6 +91,12 @@ while [ "$i" -lt 60 ]; do
 done
 
 # Stage 1 — the internal builder/watcher (proven dev build; emits /quartz/public).
+# Marker BEFORE the builder starts: a vault file written DURING the initial
+# parse can be missed by both the parse set and the (later-armed) watcher —
+# its page then never emits until the next mtime bump (found 2026-08-23:
+# organization-anthropic.md written mid-cold-build stayed unemitted for
+# 45+ min). The post-first-build check below catches exactly that window.
+touch /tmp/builder-start
 npx quartz build --serve --port "$BUILD_PORT" &
 BUILD_PID=$!
 
@@ -125,6 +131,25 @@ if is_complete /quartz/public && index_ok /quartz/public; then
     && node /derive-graph-index.mjs /srv/build-0; then
     ln -sfn /srv/build-0 /srv/current
   fi
+fi
+
+# Cold-build race check: any compiler-tree markdown written since the builder
+# started whose HTML is missing from the build output was born inside the
+# parse window and is invisible to the watcher (the vault is :ro here, so we
+# cannot touch it) — restart the builder once for a fresh full parse. The
+# compiler tree is slug-named, so md→html mapping is the plain basename.
+missed=""
+for f in $(find /wiki/content -name "*.md" -newer /tmp/builder-start 2>/dev/null | head -50); do
+  rel="${f#/wiki/}"
+  [ -f "/quartz/public/${rel%.md}.html" ] || { missed="$rel"; break; }
+done
+if [ -n "$missed" ]; then
+  echo "[wiki-viewer] cold-build race: $missed written mid-parse and unemitted — restarting builder once"
+  kill "$BUILD_PID" 2>/dev/null || true; wait "$BUILD_PID" 2>/dev/null || true
+  wait_port_3001_free
+  touch /tmp/builder-start
+  npx quartz build --serve --port "$BUILD_PORT" &
+  BUILD_PID=$!
 fi
 
 # Idle-gated snapshot loop + nightly clean rebuild.
