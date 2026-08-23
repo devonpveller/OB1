@@ -59,8 +59,11 @@ index_ok() {
   ci="$1/static/contentIndex.json"
   [ -f "$ci" ] || return 0
   [ "$(tail -c 1 "$ci")" = "}" ] || return 1
-  # searchIndex.json (split out 2026-06-16 for scalability: lean contentIndex for
-  # graph/explorer, full search index lazy-loaded) is even larger → validate it too.
+  # (A 2026-06-16 searchIndex.json split was reverted the same day; the guard
+  # below is kept as a harmless no-op for any snapshot that still carries one.
+  # The 2026-08-23 index diet works differently: static/graphIndex.json is
+  # DERIVED from contentIndex at publish time — see derive-graph-index.mjs —
+  # so it can never be torn and needs no guard here.)
   si="$1/static/searchIndex.json"
   [ ! -f "$si" ] || [ "$(tail -c 1 "$si")" = "}" ]
 }
