@@ -975,8 +975,13 @@ async function writeGraphManifest(sb, outDir, limit) {
   const edges =
     (await sb.get(
       "edges",
+      // Stable tie-breaks after support_count: without them, rows tied at the
+      // limit cut line come back in arbitrary order, the edge SET wobbles
+      // between otherwise-identical compiles, and graph.json rewrites every
+      // run (churning one file + a git commit per compile for no real change).
       `select=from_entity_id,to_entity_id,relation,support_count,confidence` +
-        `&relation=neq.co_occurs_with&order=support_count.desc.nullslast&limit=${cap}`,
+        `&relation=neq.co_occurs_with` +
+        `&order=support_count.desc.nullslast,from_entity_id.asc,to_entity_id.asc,relation.asc&limit=${cap}`,
     )) || [];
   const nodes = entities.map((e) => {
     const slug = slugFor(e); // pinned (req 8)
@@ -1002,7 +1007,7 @@ async function writeGraphManifest(sb, outDir, limit) {
   let nbEdges = [];
   try {
     const notebooks =
-      (await sb.get("threads", `select=id,name,slug&status=eq.active&limit=${cap}`)) || [];
+      (await sb.get("threads", `select=id,name,slug&status=eq.active&order=id.asc&limit=${cap}`)) || [];
     nbNodes = notebooks.map((t) => ({
       id: `nb:${t.id}`,
       label: t.name,
@@ -1011,7 +1016,7 @@ async function writeGraphManifest(sb, outDir, limit) {
       file: `notebooks/${t.slug}/${t.slug}.md`,
     }));
     const tsRows =
-      (await sb.get("thread_sources", `select=thread_id,source_id&status=eq.confirmed&limit=${cap * 4}`)) || [];
+      (await sb.get("thread_sources", `select=thread_id,source_id&status=eq.confirmed&order=thread_id.asc,source_id.asc&limit=${cap * 4}`)) || [];
     const srcIds = [...new Set(tsRows.map((r) => r.source_id))];
     const srcToEntities = new Map();
     for (let i = 0; i < srcIds.length; i += 100) {
