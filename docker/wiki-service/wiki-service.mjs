@@ -706,8 +706,12 @@ async function writePlannedManifest() {
       "entities?select=id,canonical_name,entity_type,metadata&limit=20000",
     )) || [];
     const planned = {};
+    // The queue must be TRUE: types the compiler no longer emits (topic layer
+    // retired P2.3 — swept wholesale) would sit "queued" forever.
+    const RETIRED_TYPES = new Set(["topic"]);
     for (const e of entities) {
       if (!e.canonical_name || !e.entity_type) continue;
+      if (RETIRED_TYPES.has(e.entity_type)) continue;
       const slug =
         (e.metadata && typeof e.metadata.wiki_slug === "string" && e.metadata.wiki_slug.trim())
         || slugifyEntity(e.canonical_name, e.entity_type);
