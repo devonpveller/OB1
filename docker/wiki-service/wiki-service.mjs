@@ -132,12 +132,13 @@ async function ensureRepo() {
   // assets/ is the wiki-assets volume (binaries, D-I) — keep it OUT of vault
   // git so the workbench's note commits never stage images.
   const wantIgnore =
-    ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n.failed-entity-ids.json\n";
+    ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n" +
+    ".failed-entity-ids.json\nplanned.json\n";
   let curIgnore = "";
   try { curIgnore = await readFile(`${WIKI_GIT_DIR}/.gitignore`, "utf8"); } catch { /* */ }
   if (
     !curIgnore.includes(".wikistate.json") || !curIgnore.includes("assets/") ||
-    !curIgnore.includes(".failed-entity-ids.json")
+    !curIgnore.includes(".failed-entity-ids.json") || !curIgnore.includes("planned.json")
   ) {
     await writeFile(`${WIKI_GIT_DIR}/.gitignore`, wantIgnore);
   }
@@ -692,6 +693,40 @@ async function sweepOrphanLeafPages() {
   return { kept: keptThoughts.size + keptSources.size, deleted };
 }
 
+// The truthful "wiki filler" queue (2026-08-23). Entities the brain knows
+// about whose page does NOT exist on disk yet — because they haven't met the
+// link threshold, were beyond a batch cap, or simply haven't been compiled
+// yet. serve.mjs reads this from the shared volume and turns what used to be
+// a bare 404 into an honest "queued for synthesis" page. Derived data:
+// gitignored, quartz-ignored, rewritten (write-if-changed) each compile.
+async function writePlannedManifest() {
+  try {
+    const entities = (await obFetch(
+      "GET",
+      "entities?select=id,canonical_name,entity_type,metadata&limit=20000",
+    )) || [];
+    const planned = {};
+    for (const e of entities) {
+      if (!e.canonical_name || !e.entity_type) continue;
+      const slug =
+        (e.metadata && typeof e.metadata.wiki_slug === "string" && e.metadata.wiki_slug.trim())
+        || slugifyEntity(e.canonical_name, e.entity_type);
+      if (existsSync(`${WIKI_OUT_DIR}/${e.entity_type}/${slug}.md`)) continue;
+      planned[`content/${e.entity_type}/${slug}`] = {
+        name: e.canonical_name,
+        type: e.entity_type,
+      };
+    }
+    writeIfChanged(
+      `${WIKI_GIT_DIR}/planned.json`,
+      JSON.stringify({ generated_at: new Date().toISOString(), planned }) + "\n",
+    );
+    console.log(`[wiki-service] planned manifest: ${Object.keys(planned).length} queued page(s)`);
+  } catch (e) {
+    console.error("[wiki-service] planned-manifest write failed (non-fatal):", e?.message || e);
+  }
+}
+
 // P4.7 — commit working source-content edits as revisions, ONE per compile.
 // The workbench tracks edits as a working head; this snapshots every dirty head
 // into source_revisions (stamped with its author). Best-effort: a failure must
@@ -851,6 +886,9 @@ async function compile(reason) {
         e?.message || e);
     }
 
+    // AFTER pages + sweeps, so the on-disk diff is accurate.
+    await writePlannedManifest();
+
     // Commit only if the compile changed something.
     await git(["add", "-A"]);
     const { stdout: status } = await git(["status", "--porcelain"]);
@@ -1001,6 +1039,14 @@ async function changeWatchTick() {
       const rows = await obFetch("GET", `${tbl}?select=id&${orF}&limit=200`);
       n += Array.isArray(rows) ? rows.length : 0;
     }
+    // User notes are FILES first (working-draft model): a new/edited note is
+    // uncommitted vault dirt, not a DB row, so the DB polls above never saw
+    // it — a lone note waited for the 01:00 daily compile ("overnight" bug).
+    // Count dirty note-tree files so a note triggers the same settled-compile.
+    try {
+      const { stdout } = await git(["status", "--porcelain", "--", ...NOTE_TREES]);
+      n += stdout.split("\n").filter(Boolean).length;
+    } catch { /* status failure — DB signal still applies */ }
     if (n === 0) { _watchPrevCount = -1; return; }
     if (_watchPrevCount === n) {
       // Settled (no new arrivals since the previous tick) → compile.

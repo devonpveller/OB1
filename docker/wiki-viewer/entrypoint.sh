@@ -9,7 +9,7 @@ ln -sfn /wiki /quartz/content
 
 # Don't let Quartz scan .git / build caches / local state (live git lock files
 # crash a build mid-commit). `.git/**` glob is required (not just `.git`).
-sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", ".git", ".git/**", "**/.git/**", ".quartz-cache", "public", "node_modules", ".wikistate.json", "**/.failed-entity-ids.json"]#' \
+sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", ".git", ".git/**", "**/.git/**", ".quartz-cache", "public", "node_modules", ".wikistate.json", "**/.failed-entity-ids.json", "planned.json"]#' \
   /quartz/quartz.config.ts
 
 # Disable CustomOgImages emitter (ZWJ-emoji codepoints crash the whole build →

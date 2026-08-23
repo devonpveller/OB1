@@ -111,6 +111,81 @@ function markAccess() {
   writeFile("/tmp/last-access", String(Math.floor(now / 1000))).catch(() => {});
 }
 
+// ── Truthful miss-handling (2026-08-23) ─────────────────────────────────────
+// The vault is mounted read-only at /wiki, so an HTML miss can be told apart:
+//   1. JUST-CREATED — the markdown exists but the builder hasn't emitted the
+//      page yet → an auto-refreshing "building" page (+ prompt-publish flag),
+//      instead of the 404 that made a fresh note look broken.
+//   2. REGISTERED-BUT-UNBUILT — the slug is in the compiler's planned.json
+//      (entities the brain knows whose page hasn't been synthesized yet — the
+//      truthful wiki-filler queue) → a "queued for synthesis" page.
+//   3. Anything else → the real 404.
+const WIKI = "/wiki";
+
+let _planned = { at: 0, mtimeMs: 0, map: {} };
+async function plannedFor(urlPath) {
+  const key = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  const now = Date.now();
+  if (now - _planned.at > 10_000) {
+    _planned.at = now;
+    try {
+      const file = join(WIKI, "planned.json");
+      const st = await stat(file);
+      if (st.mtimeMs !== _planned.mtimeMs) {
+        _planned.mtimeMs = st.mtimeMs;
+        _planned.map = JSON.parse(await readFile(file, "utf8")).planned ?? {};
+      }
+    } catch {
+      _planned = { at: now, mtimeMs: 0, map: {} };
+    }
+  }
+  return _planned.map[key] ?? null;
+}
+
+async function freshMarkdownExists(urlPath) {
+  let rel = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  if (!rel || extname(rel)) return false; // page URLs only, never assets
+  const base = normalize(join(WIKI, rel));
+  if (!base.startsWith(WIKI)) return false; // traversal guard
+  const candidates = [`${base}.md`, join(base, "index.md")];
+  // Quartz slugifies spaces to dashes; author-owned trees may hold the
+  // space-named original of a dash URL.
+  if (/^(notes|content\/notebooks)\//.test(rel) && rel.includes("-")) {
+    candidates.push(`${normalize(join(WIKI, rel.replace(/-/g, " ")))}.md`);
+  }
+  for (const c of candidates) {
+    try {
+      const st = await stat(c);
+      // Only a RECENT file counts as "just created, still building" — an old
+      // markdown with no emitted HTML is some other condition, not a build lag.
+      if (st.isFile() && Date.now() - st.mtimeMs < 3600_000) return true;
+    } catch { /* next */ }
+  }
+  return false;
+}
+
+const miniPage = (title, heading, body, refresh) =>
+  `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+${refresh ? `<meta http-equiv="refresh" content="${refresh}">` : ""}<title>${title}</title>
+<style>html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;
+font-family:system-ui,-apple-system,sans-serif;background:#1e1e24;color:#d4d4dc}
+.box{text-align:center;max-width:34rem;padding:2rem}
+.badge{display:inline-block;padding:.15rem .6rem;border:1px solid #44454f;border-radius:1rem;
+font-size:.75rem;color:#9a9ba6;margin-bottom:1rem}
+h1{font-size:1.15rem;font-weight:600;margin:0 0 .5rem}
+p{font-size:.9rem;color:#9a9ba6;margin:.3rem 0;line-height:1.55}
+a{color:#84a9ff;text-decoration:none}</style>
+</head><body><div class="box"><div class="badge">${title}</div><h1>${heading}</h1>
+${body}<p><a href="/">← Knowledge Vault home</a></p></div></body></html>`;
+
+const esc = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
 const SPLASH = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="6"><title>Building the wiki…</title>
@@ -191,13 +266,41 @@ async function handle(req, res) {
     createReadStream(file).pipe(res);
     return;
   }
-  // Fall back to Quartz's generated 404 page if present.
+  const urlPath = req.url || "/";
+  // 1. Just-created page: markdown exists, HTML not emitted yet — show an
+  // auto-refreshing build notice and ask the snapshot loop to publish promptly.
+  if (await freshMarkdownExists(urlPath)) {
+    writeFile(PUBLISH_FLAG, "1").catch(() => {});
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+    res.end(miniPage(
+      "Building",
+      "This page was just created",
+      `<p>The wiki is rendering it now — this usually takes under a minute.
+       This page refreshes automatically and will load as soon as it's ready.</p>`,
+      5,
+    ));
+    return;
+  }
+  // 2. Registered-but-unbuilt entity: honest "queued" page from planned.json.
+  const planned = await plannedFor(urlPath);
+  if (planned) {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+    res.end(miniPage(
+      "Queued for synthesis",
+      esc(planned.name || "This page"),
+      `<p><strong>${esc(planned.name || "This entity")}</strong> (${esc(planned.type || "entity")})
+       is registered in Open Brain but its wiki page hasn't been synthesized yet.
+       It will appear automatically on an upcoming compile — no action needed.</p>`,
+      null,
+    ));
+    return;
+  }
+  // 3. True 404 — fall back to Quartz's generated 404 page if present.
   try {
     const nf = join(ROOT, "404.html");
-    const st = await stat(nf);
+    await stat(nf);
     res.writeHead(404, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
     createReadStream(nf).pipe(res);
-    void st;
     return;
   } catch { /* no 404 page */ }
   res.writeHead(404, { "content-type": "text/plain" });
