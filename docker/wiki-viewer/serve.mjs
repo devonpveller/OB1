@@ -122,7 +122,7 @@ function markAccess() {
 //   3. Anything else → the real 404.
 const WIKI = "/wiki";
 
-let _planned = { at: 0, mtimeMs: 0, map: {} };
+let _planned = { at: 0, mtimeMs: 0, map: {}, byBase: {} };
 async function plannedFor(urlPath) {
   const key = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
     .replace(/^\/+/, "")
@@ -134,14 +134,19 @@ async function plannedFor(urlPath) {
       const file = join(WIKI, "planned.json");
       const st = await stat(file);
       if (st.mtimeMs !== _planned.mtimeMs) {
-        _planned.mtimeMs = st.mtimeMs;
-        _planned.map = JSON.parse(await readFile(file, "utf8")).planned ?? {};
+        const map = JSON.parse(await readFile(file, "utf8")).planned ?? {};
+        // Quartz renders a wikilink to a nonexistent page as its BASENAME url
+        // (`/organization-anthropic`, not `/content/organization/…`), so the
+        // queue must also answer by basename.
+        const byBase = {};
+        for (const [k, v] of Object.entries(map)) byBase[k.split("/").pop()] = v;
+        _planned = { at: now, mtimeMs: st.mtimeMs, map, byBase };
       }
     } catch {
-      _planned = { at: now, mtimeMs: 0, map: {} };
+      _planned = { at: now, mtimeMs: 0, map: {}, byBase: {} };
     }
   }
-  return _planned.map[key] ?? null;
+  return _planned.map[key] ?? (key.includes("/") ? null : _planned.byBase[key] ?? null);
 }
 
 async function freshMarkdownExists(urlPath) {

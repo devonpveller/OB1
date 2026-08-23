@@ -54,6 +54,11 @@ const WATCH_INTERVAL_MIN = Math.max(1, Number(ENV.WIKI_WATCH_INTERVAL_MIN || "3"
 const BATCH_MIN_LINKED = ENV.WIKI_BATCH_MIN_LINKED || "1";
 const BATCH_LIMIT = ENV.WIKI_BATCH_LIMIT || "1000";
 const MAX_SOURCES = ENV.WIKI_MAX_SOURCES || "5";
+// Bounded queue drain: each incremental compile ALSO generates this many
+// pages from the planned manifest (most-recently-active first), so the
+// registered-but-never-built backlog shrinks steadily instead of sitting
+// "queued" forever. 0 disables.
+const BACKFILL_PER_COMPILE = Math.max(0, Number(ENV.WIKI_BACKFILL_PER_COMPILE || "25"));
 
 // Pre-compile entity extraction. The worker drains the thought + source
 // queues so entity/source_entities links are fresh before the wiki is
@@ -305,6 +310,25 @@ async function drainWorkerQueues() {
 
 // ── OpenBrain (PostgREST via Caddy) client + tethered note ingest ───────────
 
+// Offset-paginated fetch-ALL (pathq MUST carry a stable order=). The flat
+// `limit=` caps this file used silently clipped once tables outgrew them —
+// found 2026-08-23 with 68,712 entities vs the sweep's unordered limit=20000:
+// the kept-set was an ARBITRARY 20k-entity window and every other entity's
+// page was deleted as an "orphan" (the operator's "anthropic organization is
+// a 404, I'm sure there are many others"), and the planned manifest missed
+// the same rows. The hard ceiling is a runaway guard, far above real scale.
+async function obFetchAll(pathq, pageSize = 5000, hardCeiling = 500000) {
+  const out = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const rows = await obFetch("GET", `${pathq}&limit=${pageSize}&offset=${offset}`);
+    if (!Array.isArray(rows) || rows.length === 0) break;
+    out.push(...rows);
+    if (out.length > hardCeiling) throw new Error(`fetch exceeded ${hardCeiling} rows: ${pathq}`);
+    if (rows.length < pageSize) break;
+  }
+  return out;
+}
+
 async function obFetch(method, pathq, body) {
   const r = await fetch(`${OB_URL}/rest/v1/${pathq}`, {
     method,
@@ -419,11 +443,10 @@ async function ingestNotes(prevCommit) {
 async function dirtyEntityIds(prevIso) {
   if (!prevIso) return null; // null → full rebuild
   try {
-    const rows = await obFetch(
-      "GET",
-      `entities?select=id&updated_at=gte.${encodeURIComponent(prevIso)}&limit=5000`,
+    const rows = await obFetchAll(
+      `entities?select=id&updated_at=gte.${encodeURIComponent(prevIso)}&order=id.asc`,
     );
-    const ids = new Set(Array.isArray(rows) ? rows.map((r) => r.id) : []);
+    const ids = new Set(rows.map((r) => r.id));
     try {
       const failed = JSON.parse(
         await readFile(`${WIKI_OUT_DIR}/.failed-entity-ids.json`, "utf8"),
@@ -494,14 +517,14 @@ async function sweepOrphanEntityPages() {
   let entities = [];
   let counts = new Map();
   try {
-    entities = (await obFetch(
-      "GET",
-      "entities?select=id,canonical_name,entity_type,metadata&limit=20000",
-    )) || [];
-    const rows = (await obFetch(
-      "GET",
-      "thought_entities?select=entity_id&limit=200000",
-    )) || [];
+    // Paginated fetch-ALL — a partial kept-set here deletes real pages, so any
+    // failure (including the runaway ceiling) skips the whole sweep.
+    entities = await obFetchAll(
+      "entities?select=id,canonical_name,entity_type,metadata&order=id.asc",
+    );
+    const rows = await obFetchAll(
+      "thought_entities?select=entity_id&order=entity_id.asc,thought_id.asc",
+    );
     for (const r of rows) {
       const k = r.entity_id;
       counts.set(k, (counts.get(k) || 0) + 1);
@@ -511,20 +534,12 @@ async function sweepOrphanEntityPages() {
     // links here meant a source-only entity (exactly what research output
     // creates) was WRITTEN by the compile and DELETED by this sweep in the
     // same cycle — research-derived entity pages systematically vanished.
-    const sRows = (await obFetch(
-      "GET",
-      "source_entities?select=entity_id,sources!inner(id)&sources.retraction_committed_at=is.null&limit=200000",
-    )) || [];
+    const sRows = await obFetchAll(
+      "source_entities?select=entity_id,sources!inner(id)&sources.retraction_committed_at=is.null&order=entity_id.asc,source_id.asc",
+    );
     for (const r of sRows) {
       const k = r.entity_id;
       counts.set(k, (counts.get(k) || 0) + 1);
-    }
-    // Truncation fail-safe: a kept-set built from a CLIPPED query would treat
-    // everything past the cap as an orphan and delete it. Skip the sweep and
-    // say so rather than sweep against partial truth.
-    if (entities.length >= 20000 || rows.length >= 200000 || sRows.length >= 200000) {
-      console.error("[wiki-service] orphan-sweep SKIPPED: kept-set query hit its limit cap (raise limits before sweeping)");
-      return { kept: 0, deleted: 0, error: true };
     }
   } catch (e) {
     console.error("[wiki-service] orphan-sweep query failed (skipping sweep):",
@@ -701,10 +716,9 @@ async function sweepOrphanLeafPages() {
 // gitignored, quartz-ignored, rewritten (write-if-changed) each compile.
 async function writePlannedManifest() {
   try {
-    const entities = (await obFetch(
-      "GET",
-      "entities?select=id,canonical_name,entity_type,metadata&limit=20000",
-    )) || [];
+    const entities = await obFetchAll(
+      "entities?select=id,canonical_name,entity_type,metadata,updated_at&order=id.asc",
+    );
     const planned = {};
     // The queue must be TRUE: types the compiler no longer emits (topic layer
     // retired P2.3 — swept wholesale) would sit "queued" forever.
@@ -716,9 +730,13 @@ async function writePlannedManifest() {
         (e.metadata && typeof e.metadata.wiki_slug === "string" && e.metadata.wiki_slug.trim())
         || slugifyEntity(e.canonical_name, e.entity_type);
       if (existsSync(`${WIKI_OUT_DIR}/${e.entity_type}/${slug}.md`)) continue;
+      // id + updated_at: the bounded per-compile backfill reads LAST compile's
+      // manifest and generates the most-recently-active queued entities first.
       planned[`content/${e.entity_type}/${slug}`] = {
+        id: e.id,
         name: e.canonical_name,
         type: e.entity_type,
+        updated_at: e.updated_at,
       };
     }
     writeIfChanged(
@@ -804,6 +822,24 @@ async function compile(reason) {
     // index.md are whole-graph aggregates the recipe always rewrites.
     const dirty = await dirtyEntityIds(prevIso);
     const fullRebuild = dirty === null || dirty.length > Number(BATCH_LIMIT);
+    // Bounded backfill: drain the planned queue (LAST compile's manifest —
+    // freshly diffed against disk below after this run's pages land) a slice
+    // per compile, most-recently-active entities first.
+    if (!fullRebuild && BACKFILL_PER_COMPILE > 0) {
+      try {
+        const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
+        const queued = Object.values(manifest.planned || {})
+          .filter((p) => Number.isInteger(p.id))
+          .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
+          .slice(0, BACKFILL_PER_COMPILE)
+          .map((p) => p.id);
+        if (queued.length) {
+          const before = dirty.length;
+          for (const id of queued) if (!dirty.includes(id)) dirty.push(id);
+          console.log(`[wiki-service] backfill: +${dirty.length - before} queued page(s) this compile`);
+        }
+      } catch { /* no manifest yet — nothing to drain */ }
+    }
     const args = fullRebuild
       ? [
           RECIPE_PATH, "--batch",
