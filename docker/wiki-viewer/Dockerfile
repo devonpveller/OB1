@@ -5,7 +5,9 @@
 FROM node:22-slim
 
 ARG QUARTZ_REF=v4.5.1
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+# rsync: hardlink snapshots in entrypoint.sh (--link-dest) — a snapshot of an
+# unchanged build costs MBs instead of copying the full ~750MB tree.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates rsync \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /quartz

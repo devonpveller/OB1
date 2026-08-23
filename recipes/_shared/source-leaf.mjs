@@ -18,6 +18,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { writeIfChanged } from "./write-if-changed.mjs";
 
 // YAML-safe scalar (quoted JSON string — handles colons, quotes, emoji).
 export function frontmatterScalar(v) {
@@ -143,7 +144,9 @@ export function renderSourceLeaf(r) {
 }
 
 // Write `content/source/<id>.md` for each row under `<outDir>/source/`.
-// Idempotent (same row → same bytes). Returns the count written.
+// Idempotent (same row → same bytes), and an unchanged leaf is not rewritten
+// (no mtime bump → the viewer's watcher stays quiet). Returns the count of
+// files actually written.
 export function writeSourceLeaves(rows, outDir) {
   if (!rows || !rows.length) return 0;
   const dir = path.join(outDir, "source");
@@ -151,8 +154,7 @@ export function writeSourceLeaves(rows, outDir) {
   let n = 0;
   for (const r of rows) {
     if (!r || !r.id) continue;
-    fs.writeFileSync(path.join(dir, `${r.id}.md`), renderSourceLeaf(r), "utf8");
-    n++;
+    if (writeIfChanged(path.join(dir, `${r.id}.md`), renderSourceLeaf(r))) n++;
   }
   return n;
 }

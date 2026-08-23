@@ -43,6 +43,7 @@ import { pathToFileURL } from "node:url";
 // signature this file already used; it is now the canonical impl, not a copy.
 import { slugifyEntity as slugify, slugifyNotebook } from "../_shared/slug.mjs";
 import { writeSourceLeaves } from "../_shared/source-leaf.mjs";
+import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-changed.mjs";
 
 // ---------------------------------------------------------------
 // Config + CLI parsing
@@ -1060,7 +1061,7 @@ async function writeGraphManifest(sb, outDir, limit) {
   };
   fs.mkdirSync(outDir, { recursive: true });
   const p = path.join(outDir, "graph.json");
-  fs.writeFileSync(p, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  writeIfChangedStable(p, JSON.stringify(manifest, null, 2) + "\n");
 
   // index.md home page so the viewer (Quartz) has a root. Groups pages
   // by entity type with [[wikilinks]]; regenerated every compile.
@@ -1089,7 +1090,7 @@ async function writeGraphManifest(sb, outDir, limit) {
   }
   // Generated entity index is `entities.md` (the vault-root `index.md`
   // home is owned by wiki-service so Quartz `/` works across both layers).
-  fs.writeFileSync(path.join(outDir, "entities.md"), idx.join("\n") + "\n", "utf8");
+  writeIfChanged(path.join(outDir, "entities.md"), idx.join("\n") + "\n");
   return { path: p, node_count: nodes.length, edge_count: links.length };
 }
 
@@ -1144,8 +1145,7 @@ async function emitLeafPages(sb, outDir, run) {
           scrubSnippetContent(r.content || ""),
           "",
         ].join("\n");
-        fs.writeFileSync(path.join(dir, `${r.id}.md`), fm + "\n", "utf8");
-        thoughts++;
+        if (writeIfChanged(path.join(dir, `${r.id}.md`), fm + "\n")) thoughts++;
       }
     }
   }
@@ -1180,10 +1180,11 @@ function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, out
   fs.mkdirSync(outDir, { recursive: true });
   const baseSlug = slugFor(entity); // pinned (req 8)
   const filepath = resolveOutputPath(outDir, baseSlug, entity);
-  fs.writeFileSync(
+  // Only the volatile generated_at differing does not rewrite the page — an
+  // unchanged entity page keeps its mtime so the viewer's watcher stays quiet.
+  writeIfChangedStable(
     filepath,
     buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, notebook) + wiki + "\n",
-    "utf8",
   );
   return filepath;
 }

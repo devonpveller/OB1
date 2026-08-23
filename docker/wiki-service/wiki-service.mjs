@@ -28,6 +28,9 @@ import { existsSync } from "node:fs";
 // same mount this service already reads the recipe from (RECIPE_PATH). The
 // hand-synced slugifyEntity/slugifyNotebook copies are gone — no more drift.
 import { slugifyEntity, slugifyNotebook } from "file:///recipes/_shared/slug.mjs";
+// Idempotent writes (churn fix): an unchanged file keeps its mtime so the
+// viewer's polling watcher does not see a phantom change every compile.
+import { writeIfChanged } from "file:///recipes/_shared/write-if-changed.mjs";
 
 const pexec = promisify(execFile);
 
@@ -766,7 +769,7 @@ async function compile(reason) {
 
     // Vault-root home (Quartz `/`). Compiler-owned, distinct basename
     // from content/entities.md and notes/. Links across both layers.
-    await writeFile(
+    writeIfChanged(
       `${WIKI_GIT_DIR}/index.md`,
       [
         "---",

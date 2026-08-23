@@ -183,7 +183,17 @@ while true; do
     continue
   fi
   N=$((N + 1))
-  rm -rf "/srv/build-$N.tmp" && cp -a /quartz/public "/srv/build-$N.tmp"
+  # Snapshot via rsync --link-dest against the previous snapshot: unchanged
+  # files become hardlinks (no data copied), so a snapshot costs MBs, not the
+  # full ~750MB tree (102GB/6h of disk writes before this). Snapshots are
+  # immutable once published (only ever deleted), so sharing inodes is safe.
+  prev=$(readlink /srv/current 2>/dev/null || true)
+  rm -rf "/srv/build-$N.tmp"
+  if command -v rsync >/dev/null 2>&1 && [ -n "$prev" ] && [ -d "$prev" ]; then
+    rsync -a --delete --link-dest="$prev" /quartz/public/ "/srv/build-$N.tmp/"
+  else
+    cp -a /quartz/public "/srv/build-$N.tmp"
+  fi
   # Re-verify the COPY is complete AND its search index is intact — guards against
   # cp racing a build that started rewriting public mid-snapshot (the torn-index
   # 2026-06-16 incident: render assets fine but contentIndex.json truncated).
