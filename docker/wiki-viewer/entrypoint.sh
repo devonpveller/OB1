@@ -116,7 +116,12 @@ done
 # build, so a slow/failed first build shows "Building…" rather than a broken page.
 if is_complete /quartz/public && index_ok /quartz/public; then
   rm -rf /srv/build-0; cp -a /quartz/public /srv/build-0
-  is_complete /srv/build-0 && index_ok /srv/build-0 && ln -sfn /srv/build-0 /srv/current
+  # Lean graph/explorer index (see derive-graph-index.mjs) — derived on the
+  # immutable copy so it can never be torn; a failed derive = no publish.
+  if is_complete /srv/build-0 && index_ok /srv/build-0 \
+    && node /derive-graph-index.mjs /srv/build-0; then
+    ln -sfn /srv/build-0 /srv/current
+  fi
 fi
 
 # Idle-gated snapshot loop + nightly clean rebuild.
@@ -197,7 +202,10 @@ while true; do
   # Re-verify the COPY is complete AND its search index is intact — guards against
   # cp racing a build that started rewriting public mid-snapshot (the torn-index
   # 2026-06-16 incident: render assets fine but contentIndex.json truncated).
-  if ! is_complete "/srv/build-$N.tmp" || ! index_ok "/srv/build-$N.tmp"; then
+  # The lean graph/explorer index is derived here too (immutable copy → can't
+  # tear); a parse failure means the copy raced the build — discard.
+  if ! is_complete "/srv/build-$N.tmp" || ! index_ok "/srv/build-$N.tmp" \
+    || ! node /derive-graph-index.mjs "/srv/build-$N.tmp"; then
     echo "[wiki-viewer] snapshot copy was torn (build raced the cp) — discarding, will retry"
     rm -rf "/srv/build-$N.tmp"; N=$((N - 1)); continue
   fi

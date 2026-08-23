@@ -2,10 +2,17 @@
 // wiki availability rework). Always serves the CURRENT good build via the
 // /srv/current symlink — the entrypoint rebuilds into a new versioned dir and
 // atomically re-points the symlink only when the viewer is idle, so a reader
-// NEVER sees a "rebuilding" splash. Records each request's time to
+// NEVER sees a "rebuilding" splash. Records request activity to
 // /tmp/last-access so the rebuild loop can tell when the viewer is in use.
+//
+// 2026-08-23 perf rework: fully async I/O, ETag/Last-Modified validators with
+// 304 handling (the site is served `no-cache` so browsers/CDNs always
+// revalidate — before this there were NO validators, so every visit
+// re-downloaded everything, including the multi-MB index), throttled
+// last-access bookkeeping, and a cached readiness probe.
 import http from "node:http";
-import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
 
 const ROOT = "/srv/current"; // a symlink → /srv/build-N (swapped atomically)
@@ -28,34 +35,39 @@ const MIME = {
 };
 
 // Quartz emits the client bundle + styles under STABLE names (postscript.js,
-// prescript.js, index.css) whose CONTENT changes every rebuild. With no cache
-// headers, browsers/CDNs cache them by URL and keep serving the OLD bundle after
-// a fix ships (the cause of "I cleared cache but the page still misbehaves").
-// Force always-revalidate on rebuildable assets; let true static (fonts/images)
-// cache for a day.
+// prescript.js, index.css) whose CONTENT changes every rebuild. `no-cache`
+// forces revalidation on every use; the ETag/Last-Modified validators below
+// turn that revalidation into a cheap 304 instead of a re-download. True
+// static (fonts/images) may cache for a day.
 const REBUILDABLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".xml", ".map", ".webmanifest", ".txt"]);
 const cacheControl = (ext) =>
   REBUILDABLE.has(ext) ? "no-cache, must-revalidate" : "public, max-age=86400";
 
-function resolveIn(root, p) {
+// Snapshot dirs are immutable once published, so size+mtime is a sound ETag.
+const etagOf = (st) => `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
+
+async function resolveIn(root, p) {
   const base = normalize(join(root, p || "/"));
   if (!base.startsWith(root)) return null; // path traversal guard
   const candidates = p === "" || p === "/"
     ? [join(root, "index.html")]
     : [base, `${base}.html`, join(base, "index.html")];
   for (const c of candidates) {
-    try { const st = statSync(c); if (st.isFile()) return c; } catch { /* next */ }
+    try {
+      const st = await stat(c);
+      if (st.isFile()) return { file: c, st };
+    } catch { /* next */ }
   }
   return null;
 }
-function resolve(urlPath) {
+async function resolve(urlPath) {
   // Quartz prettyURLs emit `foo/index.html`; also tolerate `foo.html`.
   let p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]);
   if (p.endsWith("/")) p = p.slice(0, -1);
   // Published snapshot first (stable, gated); fall back to the LIVE builder
   // output for a page that exists there but isn't snapshotted yet (a brand-new
   // note/folder), so it's reachable in ~seconds.
-  return resolveIn(ROOT, p) || resolveIn(LIVE, p);
+  return (await resolveIn(ROOT, p)) || (await resolveIn(LIVE, p));
 }
 
 // No good build yet (cold start / very first compile, before /srv/current is
@@ -64,22 +76,41 @@ function resolve(urlPath) {
 // never shows again — nightly rebuilds keep serving the previous snapshot.
 //
 // COMPLETENESS gate (2026-06-15): a build is "ready" ONLY if it has index.html
-// AND the core ComponentResources (styles + client JS). A build that crashed
-// after emitting page HTML but before these would otherwise be served with every
-// asset 404'd as text/plain (the wiki-render incident). Requiring the full set
-// means an incomplete /srv/current falls back to the splash instead of serving a
-// broken, unstyled page. (Belt-and-suspenders with the entrypoint publish gate.)
-// static/contentIndex.json = the search/graph index. The entrypoint's publish
-// gate guarantees it's present AND a terminated JSON before a snapshot goes live
-// (a torn one truncates → client "Unterminated string in JSON"); requiring its
-// presence here too means a snapshot somehow missing it falls back to the splash.
-const REQUIRED = ["index.html", "index.css", "prescript.js", "postscript.js", "static/contentIndex.json"];
-function buildReady() {
+// AND the core ComponentResources (styles + client JS). Requiring the full set
+// means an incomplete /srv/current falls back to the splash instead of serving
+// a broken, unstyled page. (Belt-and-suspenders with the entrypoint publish
+// gate.) static/contentIndex.json = the search index; static/graphIndex.json =
+// the lean graph/explorer index derived at publish time (2026-08-23) — a
+// snapshot missing either falls back to the splash.
+const REQUIRED = [
+  "index.html", "index.css", "prescript.js", "postscript.js",
+  "static/contentIndex.json", "static/graphIndex.json",
+];
+// Readiness only changes when the /srv/current symlink is re-pointed — cache
+// the probe briefly instead of stat()ing 6 files on EVERY request.
+let _ready = { at: 0, ok: false };
+async function buildReady() {
+  const now = Date.now();
+  if (now - _ready.at < 2000) return _ready.ok;
+  let ok = true;
   try {
-    for (const f of REQUIRED) if (!statSync(join(ROOT, f)).isFile()) return false;
-    return true;
-  } catch { return false; }
+    for (const f of REQUIRED) {
+      if (!(await stat(join(ROOT, f))).isFile()) { ok = false; break; }
+    }
+  } catch { ok = false; }
+  _ready = { at: now, ok };
+  return ok;
 }
+
+// Throttled request-activity marker (was a SYNCHRONOUS write per request).
+let _lastAccessWrote = 0;
+function markAccess() {
+  const now = Date.now();
+  if (now - _lastAccessWrote < 5000) return;
+  _lastAccessWrote = now;
+  writeFile("/tmp/last-access", String(Math.floor(now / 1000))).catch(() => {});
+}
+
 const SPLASH = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="6"><title>Building the wiki…</title>
@@ -93,47 +124,92 @@ h1{font-size:1.1rem;font-weight:600;margin:0 0 .4rem}p{font-size:.85rem;color:#9
 <p>The site is compiling. This page refreshes automatically and will load as soon as a complete build is ready.</p>
 </div></body></html>`;
 
-http.createServer((req, res) => {
-  try { writeFileSync("/tmp/last-access", String(Math.floor(Date.now() / 1000))); } catch { /* */ }
-  if (!buildReady()) {
+// 304 when the client's validator still matches (site is no-cache → every use
+// revalidates; this makes that revalidation ~free).
+function notModified(req, st) {
+  const inm = req.headers["if-none-match"];
+  if (inm) return inm === etagOf(st);
+  const ims = req.headers["if-modified-since"];
+  if (ims) {
+    const since = Date.parse(ims);
+    return Number.isFinite(since) && Math.floor(st.mtimeMs / 1000) * 1000 <= since;
+  }
+  return false;
+}
+
+function baseHeaders(st, ext) {
+  return {
+    etag: etagOf(st),
+    "last-modified": new Date(st.mtimeMs).toUTCString(),
+    "cache-control": cacheControl(ext),
+  };
+}
+
+async function handle(req, res) {
+  markAccess();
+  if (!(await buildReady())) {
     res.writeHead(503, { "content-type": "text/html; charset=utf-8", "retry-after": "6" });
     res.end(SPLASH);
     return;
   }
-  const file = resolve(req.url || "/");
-  if (file) {
+  const hit = await resolve(req.url || "/");
+  if (hit) {
+    const { file, st } = hit;
     // Served from the LIVE builder output ⇒ this page isn't in the published
     // snapshot yet (a just-created note/folder). Signal the snapshot loop to
     // publish promptly (bypassing the idle gate) so the nav/index catch up.
-    if (file.startsWith(LIVE)) { try { writeFileSync(PUBLISH_FLAG, "1"); } catch { /* */ } }
+    if (file.startsWith(LIVE)) writeFile(PUBLISH_FLAG, "1").catch(() => {});
     const ext = extname(file);
-    if (ext === ".html") {
-      // Strip the Quartz dev-mode (`build --serve`) hot-reload client: it opens
-      // ws://localhost:3001 and reload()s resources via blob:http://localhost,
-      // both of which fail noisily in every remote viewer's console. We serve
-      // static snapshots, so live-reload is irrelevant — drop the script block.
-      const html = readFileSync(file, "utf8").replace(
-        /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*?ws:\/\/localhost(?:(?!<\/script>)[\s\S])*?<\/script>/gi,
-        "",
-      );
-      res.writeHead(200, { "content-type": MIME[ext], "cache-control": "no-cache, must-revalidate" });
-      res.end(html);
+    if (notModified(req, st)) {
+      res.writeHead(304, baseHeaders(st, ext));
+      res.end();
       return;
     }
-    res.writeHead(200, {
-      "content-type": MIME[ext] || "application/octet-stream",
-      "cache-control": cacheControl(ext),
-    });
+    const head = { ...baseHeaders(st, ext), "content-type": MIME[ext] || "application/octet-stream" };
+    if (req.method === "HEAD") {
+      res.writeHead(200, { ...head, "content-length": st.size });
+      res.end();
+      return;
+    }
+    if (ext === ".html") {
+      // Legacy dev-mode hot-reload strip. The builder no longer injects the
+      // ws://localhost reload client (patched out in the Dockerfile), so this
+      // only fires for pages built before that patch; the cheap substring
+      // check keeps the streaming path for everything else.
+      const html = await readFile(file, "utf8");
+      const cleaned = html.includes("ws://localhost")
+        ? html.replace(
+            /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*?ws:\/\/localhost(?:(?!<\/script>)[\s\S])*?<\/script>/gi,
+            "",
+          )
+        : html;
+      res.writeHead(200, { ...head, "content-length": Buffer.byteLength(cleaned) });
+      res.end(cleaned);
+      return;
+    }
+    res.writeHead(200, { ...head, "content-length": st.size });
     createReadStream(file).pipe(res);
     return;
   }
   // Fall back to Quartz's generated 404 page if present.
-  const nf = join(ROOT, "404.html");
-  if (existsSync(nf)) {
-    res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+  try {
+    const nf = join(ROOT, "404.html");
+    const st = await stat(nf);
+    res.writeHead(404, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
     createReadStream(nf).pipe(res);
+    void st;
     return;
-  }
+  } catch { /* no 404 page */ }
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
-}).listen(PORT, () => console.log(`[wiki-viewer] static idle-swap server on :${PORT}`));
+}
+
+http
+  .createServer((req, res) => {
+    handle(req, res).catch((e) => {
+      console.error("[wiki-viewer] request failed:", e?.message || e);
+      if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain" });
+      res.end("internal error");
+    });
+  })
+  .listen(PORT, () => console.log(`[wiki-viewer] static idle-swap server on :${PORT}`));

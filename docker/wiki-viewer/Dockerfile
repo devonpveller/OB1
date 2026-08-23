@@ -51,17 +51,50 @@ RUN set -e; \
   sed -i 's#    if (!explorerUl) continue#    if (!explorerUl) continue\n    const onExplorerWheel = (e) => { const b = explorerUl.scrollTop; const m = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? explorerUl.clientHeight : 1; explorerUl.scrollTop += e.deltaY * m; if (explorerUl.scrollTop !== b) e.preventDefault() }\n    explorerUl.addEventListener("wheel", onExplorerWheel, { passive: false })\n    window.addCleanup(() => explorerUl.removeEventListener("wheel", onExplorerWheel))#' "$E"; \
   grep -q 'onExplorerWheel' "$E"
 
-# Guard the dev hot-reload so the NotesEditor (P3.5) can suppress it while a
-# Live-Preview editor is open (autosave must not hard-reload the page out from
-# under the editor on every keystroke). The injected `--serve` reload client
-# hard-reloads on every vault change; we gate it behind `window.__neEditing`,
-# which the editor sets while open and clears on Done. grep-asserted so a
-# QUARTZ_REF bump that moves this line fails the build loudly.
+# Disable the dev hot-reload client injection entirely (2026-08-23; supersedes
+# the old `window.__neEditing` gate). The builder runs `--serve` purely as an
+# internal watcher — no reader ever browses it directly, and serve.mjs had to
+# regex-strip the injected ws://localhost reload script out of EVERY page on
+# EVERY request (a tempered-greedy scan over up-to-2MB HTML). Not injecting it
+# removes that cost at the source. Re-enable for interactive builder debugging
+# with WIKI_HOT_RELOAD=1. grep-asserted so a QUARTZ_REF bump fails loudly.
 RUN set -e; \
   P=/quartz/quartz/plugins/index.ts; \
-  grep -q "() => document.location.reload(true)" "$P"; \
-  sed -i "s#() => document.location.reload(true)#() => { if (!window.__neEditing) document.location.reload(true) }#" "$P"; \
-  grep -q "if (!window.__neEditing) document.location.reload(true)" "$P"
+  grep -q 'if (ctx.argv.serve) {' "$P"; \
+  sed -i 's#if (ctx.argv.serve) {#if (ctx.argv.serve \&\& process.env.WIKI_HOT_RELOAD === "1") {#' "$P"; \
+  grep -q 'WIKI_HOT_RELOAD' "$P"
+
+# ── Index diet + Explorer state fixes (2026-08-23) ──────────────────────────
+# The stock head script fetches static/contentIndex.json (45MB here: ~15k
+# pages, 83% full page text) on EVERY page load, and graph+explorer+search all
+# consume it. Repoint the shared fetchData at the LEAN static/graphIndex.json
+# (derived at publish time by derive-graph-index.mjs — title/links/tags only);
+# search alone lazily fetches the full contentIndex the first time a search is
+# actually opened. grep-asserted anchors throughout.
+RUN set -e; \
+  R=quartz/components/renderPage.tsx; \
+  S=quartz/components/scripts/search.inline.ts; \
+  E=quartz/components/scripts/explorer.inline.ts; \
+  grep -q 'static/contentIndex.json' "$R"; \
+  sed -i 's#static/contentIndex.json#static/graphIndex.json#' "$R"; \
+  grep -q 'static/graphIndex.json' "$R"; \
+  grep -q '^\s*const data = await fetchData$' "$S"; \
+  sed -i 's#^\(\s*\)const data = await fetchData$#\1const data = await ((window as any).__fullContentIndex ??= fetch("/static/contentIndex.json").then((r) => r.json()))#' "$S"; \
+  grep -q '__fullContentIndex' "$S"; \
+# Explorer state fix 1: a folder auto-opened because it contains the current
+# page must be RECORDED as open in currentExplorerState — otherwise the next
+# toggleFolder serializes the stale collapsed:true and the folder snaps shut on
+# the next navigation (the "explorer reverts to an old state" bug).
+  grep -q '^\s*folderOuter.classList.add("open")$' "$E"; \
+  sed -i 's#^\(\s*\)folderOuter.classList.add("open")$#\1folderOuter.classList.add("open")\n\1if (folderIsPrefixOfCurrentSlug \&\& isCollapsed) {\n\1  const st = currentExplorerState.find((item) => item.path === folderPath)\n\1  if (st) st.collapsed = false\n\1}#' "$E"; \
+  grep -q 'st.collapsed = false' "$E"; \
+# Explorer state fix 2: keep saved collapse state for folders that are absent
+# from the CURRENT index (the index changes across snapshot swaps mid-session).
+# Rebuilding the state from the current trie alone prunes them, and the next
+# toggle persists that loss.
+  grep -q '^\s*const explorerUl = explorer.querySelector(".explorer-ul")$' "$E"; \
+  sed -i 's#^\(\s*\)const explorerUl = explorer.querySelector(".explorer-ul")$#\1for (const [path, collapsed] of oldIndex) {\n\1  if (!currentExplorerState.some((item) => item.path === path)) {\n\1    currentExplorerState.push({ path: path as FullSlug, collapsed })\n\1  }\n\1}\n\1const explorerUl = explorer.querySelector(".explorer-ul")#' "$E"; \
+  grep -q 'currentExplorerState.some' "$E"
 
 # Build resilience: the compiler's orphan-sweep deletes leaf pages while a
 # rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that
@@ -78,12 +111,21 @@ RUN set -e; \
   sed -i 's#export function trace(msg: string, err: Error) {#&\n  if ((err as any)?.code === "ENOENT") { console.warn("[skip vanished file] " + msg); return }#' "$T"; \
   grep -q 'skip vanished file' "$T"
 
+# Fork-drift guard (2026-08-23): the overlay REPLACES stock graph.inline.ts
+# with a patched fork (O(1) graph data prep + global-view scoping — changes too
+# structural for seds). If a QUARTZ_REF bump changes the stock file, fail the
+# build loudly so the fork gets re-based instead of silently shipping stale
+# upstream behavior.
+RUN set -e; \
+  echo "3a1d516df85c68eca29f547f813acb09200fdc25468c7e7536038e8f38db8dfd  /quartz/quartz/components/scripts/graph.inline.ts" | sha256sum -c -
+
 # ── Workbench overlay (plan §2.5 / P0.4) ────────────────────────────────────
 # Layer custom Quartz components over the pinned clone ADDITIVELY, so
 # QUARTZ_REF stays upgradeable. New component files are copied in; the upstream
 # files that must change are touched with append-only / grep-asserted edits so
 # a future QUARTZ_REF bump fails the build loudly instead of silently dropping
-# the wiring. Later phases (P2–P6) add their components into quartz-overlay/.
+# the wiring (graph.inline.ts is the one FORKED file — guarded by the sha check
+# above). Later phases (P2–P6) add their components into quartz-overlay/.
 COPY quartz-overlay/quartz/ /quartz/quartz/
 
 # Register overlay components. Append-only re-export needs NO upstream anchor —
@@ -139,6 +181,7 @@ RUN set -e; \
   grep -q 'Component.ContentMeta(), Component.NotesEditor()]' "$L"
 
 COPY serve.mjs /serve.mjs
+COPY derive-graph-index.mjs /derive-graph-index.mjs
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

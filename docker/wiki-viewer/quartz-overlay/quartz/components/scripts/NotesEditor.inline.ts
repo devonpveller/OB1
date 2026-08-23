@@ -29,7 +29,9 @@ let _cands: { slug: string; title: string }[] | null = null
 async function loadCandidates() {
   if (_cands) return _cands
   try {
-    const idx = await (await fetch("/static/contentIndex.json")).json()
+    // Lean index (title/links/tags only) — autocomplete needs just slug+title,
+    // never the 45MB full-content contentIndex.
+    const idx = await (await fetch("/static/graphIndex.json")).json()
     _cands = Object.keys(idx)
       .map((slug) => ({ slug, title: (idx[slug] && idx[slug].title) || slug }))
       .filter((c) => c.slug && c.slug !== "index" && !c.slug.endsWith("/index"))
