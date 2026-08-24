@@ -103,9 +103,15 @@ async function buildReady() {
 }
 
 // Throttled request-activity marker (was a SYNCHRONOUS write per request).
+// lastAccessMs is exact (in memory) — the file write for the snapshot loop
+// stays throttled. Exposed at /__last-access so the COMPILER can defer its
+// bulk backfill while a human is actually using the wiki (operator
+// 2026-08-24: drain waits until 15min after the last interaction).
+let lastAccessMs = 0;
 let _lastAccessWrote = 0;
 function markAccess() {
   const now = Date.now();
+  lastAccessMs = now;
   if (now - _lastAccessWrote < 5000) return;
   _lastAccessWrote = now;
   writeFile("/tmp/last-access", String(Math.floor(now / 1000))).catch(() => {});
@@ -247,6 +253,12 @@ function baseHeaders(st, ext) {
 }
 
 async function handle(req, res) {
+  // Machine probe — must NOT count as user interaction.
+  if (req.url === "/__last-access") {
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ ts: lastAccessMs }));
+    return;
+  }
   markAccess();
   if (!(await buildReady())) {
     res.writeHead(503, { "content-type": "text/html; charset=utf-8", "retry-after": "6" });

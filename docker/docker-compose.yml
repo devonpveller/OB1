@@ -583,6 +583,11 @@ services:
       # minutes (0 = drain only on organic compiles). Keeps the backlog
       # converging on quiet days (operator: "working towards a completed state").
       WIKI_BACKFILL_CONTINUE_MIN: ${WIKI_BACKFILL_CONTINUE_MIN:-10}
+      # Interaction-aware drain (operator 2026-08-24): the bulk backfill slice
+      # DEFERS while the viewer served a real user request within this many
+      # minutes, and retries 15min after their last interaction. Organic
+      # compile work is unaffected. 0 disables the gate.
+      WIKI_BACKFILL_IDLE_MIN: ${WIKI_BACKFILL_IDLE_MIN:-15}
       # Recipe-execution timeouts (minutes). A FULL compile of the whole
       # graph plus topic synthesis can outrun 1-2h once the thought corpus
       # grows; killing pexec mid-write leaves an unstaged dirty tree that

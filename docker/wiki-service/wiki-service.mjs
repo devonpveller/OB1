@@ -67,6 +67,26 @@ const BACKFILL_PER_COMPILE = Math.max(0, Number(ENV.WIKI_BACKFILL_PER_COMPILE ||
 // converges continuously in bounded slices. 0 disables (queue then drains
 // only on organic compiles).
 const BACKFILL_CONTINUE_MIN = Math.max(0, Number(ENV.WIKI_BACKFILL_CONTINUE_MIN || "10"));
+// Interaction-aware drain (operator 2026-08-24): while a human is actively
+// using the wiki, the bulk backfill DEFERS — it resumes only once the viewer
+// has been idle this long (measured from the viewer's last real request via
+// its /__last-access probe endpoint). Organic compile work (fresh research,
+// notes ingest) still runs; only the backlog slice waits. 0 disables gating.
+const BACKFILL_IDLE_MIN = Math.max(0, Number(ENV.WIKI_BACKFILL_IDLE_MIN || "15"));
+const VIEWER_URL = (ENV.VIEWER_URL || "http://openbrain-wiki-viewer:8080").replace(/\/+$/, "");
+
+// ms since the viewer last served a real user request. Unreachable/down
+// viewer → Infinity (nobody can be browsing a dead viewer; never stall the
+// drain on an outage).
+async function viewerIdleMs() {
+  try {
+    const r = await fetch(`${VIEWER_URL}/__last-access`, { signal: AbortSignal.timeout(3000) });
+    const ts = Number((await r.json())?.ts || 0);
+    return ts > 0 ? Math.max(0, Date.now() - ts) : Infinity;
+  } catch {
+    return Infinity;
+  }
+}
 
 // Pre-compile entity extraction. The worker drains the thought + source
 // queues so entity/source_entities links are fresh before the wiki is
@@ -838,21 +858,35 @@ async function compile(reason) {
     // freshly diffed against disk below after this run's pages land) a slice
     // per compile, most-recently-active entities first.
     let backfillAdded = 0;
+    let backfillDeferredMs = 0;
     if (!fullRebuild && BACKFILL_PER_COMPILE > 0) {
-      try {
-        const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
-        const queued = Object.values(manifest.planned || {})
-          .filter((p) => Number.isInteger(p.id))
-          .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
-          .slice(0, BACKFILL_PER_COMPILE)
-          .map((p) => p.id);
-        if (queued.length) {
-          const before = dirty.length;
-          for (const id of queued) if (!dirty.includes(id)) dirty.push(id);
-          backfillAdded = dirty.length - before;
-          console.log(`[wiki-service] backfill: +${backfillAdded} queued page(s) this compile`);
-        }
-      } catch { /* no manifest yet — nothing to drain */ }
+      const idleMs = BACKFILL_IDLE_MIN > 0 ? await viewerIdleMs() : Infinity;
+      const needMs = BACKFILL_IDLE_MIN * 60_000;
+      if (idleMs < needMs) {
+        // Human at the wheel — skip the bulk slice this compile and come back
+        // 15min after their LAST interaction (re-checked then, so continued
+        // browsing keeps pushing the drain out).
+        backfillDeferredMs = needMs - idleMs + 30_000;
+        console.log(
+          `[wiki-service] backfill deferred: viewer active ${(idleMs / 60000).toFixed(1)}min ago — ` +
+            `retry ${(backfillDeferredMs / 60000).toFixed(1)}min after their last interaction`,
+        );
+      } else {
+        try {
+          const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
+          const queued = Object.values(manifest.planned || {})
+            .filter((p) => Number.isInteger(p.id))
+            .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
+            .slice(0, BACKFILL_PER_COMPILE)
+            .map((p) => p.id);
+          if (queued.length) {
+            const before = dirty.length;
+            for (const id of queued) if (!dirty.includes(id)) dirty.push(id);
+            backfillAdded = dirty.length - before;
+            console.log(`[wiki-service] backfill: +${backfillAdded} queued page(s) this compile`);
+          }
+        } catch { /* no manifest yet — nothing to drain */ }
+      }
     }
     const args = fullRebuild
       ? [
@@ -942,17 +976,25 @@ async function compile(reason) {
 
     // AFTER pages + sweeps, so the on-disk diff is accurate.
     const plannedRemaining = await writePlannedManifest();
-    // Keep the drain converging: this compile consumed a slice and more
-    // remains → schedule the next slice (single timer; any compile that runs
-    // in the meantime re-schedules through this same path).
-    if (backfillAdded > 0 && plannedRemaining > 0 && BACKFILL_CONTINUE_MIN > 0) {
+    // Keep the drain converging: this compile consumed a slice (or deferred
+    // one for user activity) and more remains → schedule the next attempt
+    // (single timer; any compile that runs in the meantime re-schedules
+    // through this same path). A deferral retries 15min after the user's
+    // last interaction; a consumed slice continues at the normal cadence.
+    const continueMs = backfillDeferredMs > 0
+      ? backfillDeferredMs
+      : backfillAdded > 0 && plannedRemaining > 0 && BACKFILL_CONTINUE_MIN > 0
+        ? BACKFILL_CONTINUE_MIN * 60_000
+        : 0;
+    if (continueMs > 0 && BACKFILL_PER_COMPILE > 0) {
       clearTimeout(backfillContinueTimer);
       backfillContinueTimer = setTimeout(
         () => { compile("backfill-continue").catch(() => {}); },
-        BACKFILL_CONTINUE_MIN * 60_000,
+        continueMs,
       );
       console.log(
-        `[wiki-service] backfill continues: ${plannedRemaining} still queued — next slice in ${BACKFILL_CONTINUE_MIN}min`,
+        `[wiki-service] backfill ${backfillDeferredMs ? "deferred" : "continues"}: ` +
+          `${plannedRemaining} still queued — next attempt in ${(continueMs / 60000).toFixed(1)}min`,
       );
     }
 
