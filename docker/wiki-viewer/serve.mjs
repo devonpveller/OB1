@@ -149,13 +149,13 @@ async function plannedFor(urlPath) {
   return _planned.map[key] ?? (key.includes("/") ? null : _planned.byBase[key] ?? null);
 }
 
-async function freshMarkdownExists(urlPath) {
+async function findFreshMarkdown(urlPath) {
   let rel = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
     .replace(/^\/+/, "")
     .replace(/\/+$/, "");
-  if (!rel || extname(rel)) return false; // page URLs only, never assets
+  if (!rel || extname(rel)) return null; // page URLs only, never assets
   const base = normalize(join(WIKI, rel));
-  if (!base.startsWith(WIKI)) return false; // traversal guard
+  if (!base.startsWith(WIKI)) return null; // traversal guard
   const candidates = [`${base}.md`, join(base, "index.md")];
   // Quartz slugifies spaces to dashes; author-owned trees may hold the
   // space-named original of a dash URL.
@@ -167,10 +167,31 @@ async function freshMarkdownExists(urlPath) {
       const st = await stat(c);
       // Only a RECENT file counts as "just created, still building" — an old
       // markdown with no emitted HTML is some other condition, not a build lag.
-      if (st.isFile() && Date.now() - st.mtimeMs < 3600_000) return true;
+      if (st.isFile() && Date.now() - st.mtimeMs < 3600_000) {
+        return { file: c, isNote: rel.startsWith("notes/") };
+      }
     } catch { /* next */ }
   }
-  return false;
+  return null;
+}
+
+// Interim rendering for a just-created page: the CONTENT is available (we
+// have the markdown) even though the built page isn't — show it. For user
+// notes this matters most (operator 2026-08-24: notes are the user's own
+// editable documents, not knowledge-base pages — a bare "wait for the build"
+// screen made a fresh note unusable). Minimal, safe markdown-ish rendering:
+// escaped text with headings/paragraph breaks preserved.
+function renderInterimContent(md) {
+  const body = md.replace(/^---\n[\s\S]*?\n---\n?/, ""); // drop frontmatter
+  const blocks = esc(body).split(/\n{2,}/).map((b) => {
+    const h = b.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const lvl = Math.min(6, h[1].length + 1);
+      return `<h${lvl}>${h[2]}</h${lvl}>`;
+    }
+    return `<p>${b.replace(/\n/g, "<br>")}</p>`;
+  });
+  return blocks.join("\n");
 }
 
 const miniPage = (title, heading, body, refresh) =>
@@ -272,18 +293,28 @@ async function handle(req, res) {
     return;
   }
   const urlPath = req.url || "/";
-  // 1. Just-created page: markdown exists, HTML not emitted yet — show an
-  // auto-refreshing build notice and ask the snapshot loop to publish promptly.
-  if (await freshMarkdownExists(urlPath)) {
+  // 1. Just-created page: markdown exists, HTML not emitted yet — serve the
+  // CONTENT immediately (readable interim render) with an auto-refresh, and
+  // ask the snapshot loop to publish promptly. A fresh user note is the
+  // user's own document — it must be readable the second it exists.
+  const fresh = await findFreshMarkdown(urlPath);
+  if (fresh) {
     writeFile(PUBLISH_FLAG, "1").catch(() => {});
+    let content = "";
+    try { content = renderInterimContent(await readFile(fresh.file, "utf8")); } catch { /* */ }
+    const banner = fresh.isNote
+      ? "Your note is saved. The full page (with editing) is rendering — this view refreshes automatically."
+      : "This page was just created and is rendering — this view refreshes automatically.";
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    res.end(miniPage(
-      "Building",
-      "This page was just created",
-      `<p>The wiki is rendering it now — this usually takes under a minute.
-       This page refreshes automatically and will load as soon as it's ready.</p>`,
-      5,
-    ));
+    res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="6"><title>Rendering…</title>
+<style>body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#1e1e24;color:#d4d4dc;line-height:1.6}
+.banner{background:#2a2b33;border-bottom:1px solid #44454f;padding:.6rem 1.2rem;font-size:.85rem;color:#9a9ba6}
+main{max-width:46rem;margin:0 auto;padding:1.5rem 1.2rem}
+h1,h2,h3,h4,h5,h6{line-height:1.25}a{color:#84a9ff}</style>
+</head><body><div class="banner">⏳ ${banner} <a href="/">Home</a></div>
+<main>${content || "<p><em>(empty page)</em></p>"}</main></body></html>`);
     return;
   }
   // 2. Registered-but-unbuilt entity: honest "queued" page from planned.json.

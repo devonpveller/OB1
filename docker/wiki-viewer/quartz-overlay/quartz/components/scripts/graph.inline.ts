@@ -181,7 +181,10 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     // global graph a minutes-long render. Drop them, then cap the rest by
     // connectivity so the simulation stays interactive; the current page is
     // always included.
-    const GLOBAL_MAX_NODES = 2000
+    // 800 (was 2000 at first cut): human testing 2026-08-24 showed the
+    // fullscreen open still stalled the tab — label rasterization dominates,
+    // and 2000 was past the interactive budget on a mid-range GPU.
+    const GLOBAL_MAX_NODES = 800
     const leafRe = /^content\/(source|thought)\//
     let candidates = [...validLinks].filter((id) => !leafRe.test(id))
     if (candidates.length > GLOBAL_MAX_NODES) {
@@ -349,6 +352,7 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     const defaultScale = 1 / scale
     const activeScale = defaultScale * 1.1
     for (const n of nodeRenderData) {
+      if (!n.label) continue // [ai-stack patch] over-budget nodes have no label
       const nodeId = n.simulationData.id
 
       if (hoveredNodeId === nodeId) {
@@ -442,25 +446,44 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
   const linkContainer = new Container<Graphics>({ zIndex: 1, isRenderGroup: true })
   stage.addChild(nodesContainer, labelsContainer, linkContainer)
 
+  // [ai-stack patch] Label budget: every Pixi Text is an individually
+  // rasterized GPU texture. On the global view that meant thousands of
+  // textures per open — the "tab stalls + viewer VRAM swells" report. Big
+  // graphs label only the best-connected nodes (plus the current page);
+  // unlabeled nodes still show their name via hover-neighbour highlighting.
+  const LABEL_BUDGET = 300
+  let labelled: Set<string> | null = null
+  if (graphData.nodes.length > 400) {
+    labelled = new Set(
+      [...graphData.nodes]
+        .sort((a, b) => (degreeById.get(b.id) ?? 0) - (degreeById.get(a.id) ?? 0))
+        .slice(0, LABEL_BUDGET)
+        .map((n) => n.id),
+    )
+    labelled.add(slug)
+  }
+
   for (const n of graphData.nodes) {
     const nodeId = n.id
 
-    const label = new Text({
-      interactive: false,
-      eventMode: "none",
-      text: n.text,
-      alpha: 0,
-      anchor: { x: 0.5, y: 1.2 },
-      style: {
-        fontSize: fontSize * 15,
-        fill: computedStyleMap["--dark"],
-        fontFamily: computedStyleMap["--bodyFont"],
-      },
-      // [ai-stack patch] 4× DPR rasterized one texture per node — thousands of
-      // labels at global scale. 2× stays crisp at label sizes.
-      resolution: window.devicePixelRatio * 2,
-    })
-    label.scale.set(1 / scale)
+    const label = labelled && !labelled.has(nodeId)
+      ? null
+      : new Text({
+          interactive: false,
+          eventMode: "none",
+          text: n.text,
+          alpha: 0,
+          anchor: { x: 0.5, y: 1.2 },
+          style: {
+            fontSize: fontSize * 15,
+            fill: computedStyleMap["--dark"],
+            fontFamily: computedStyleMap["--bodyFont"],
+          },
+          // [ai-stack patch] 4× DPR rasterized one texture per node — thousands of
+          // labels at global scale. 2× stays crisp at label sizes.
+          resolution: window.devicePixelRatio * 2,
+        })
+    label?.scale.set(1 / scale)
 
     let oldLabelOpacity = 0
     const isTagNode = nodeId.startsWith("tags/")
@@ -475,14 +498,14 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
       .fill({ color: isTagNode ? computedStyleMap["--light"] : color(n) })
       .on("pointerover", (e) => {
         updateHoverInfo(e.target.label)
-        oldLabelOpacity = label.alpha
+        if (label) oldLabelOpacity = label.alpha
         if (!dragging) {
           renderPixiFromD3()
         }
       })
       .on("pointerleave", () => {
         updateHoverInfo(null)
-        label.alpha = oldLabelOpacity
+        if (label) label.alpha = oldLabelOpacity
         if (!dragging) {
           renderPixiFromD3()
         }
@@ -493,7 +516,7 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     }
 
     nodesContainer.addChild(gfx)
-    labelsContainer.addChild(label)
+    if (label) labelsContainer.addChild(label)
 
     const nodeRenderDatum: NodeRenderData = {
       simulationData: n,
@@ -632,7 +655,11 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
   requestAnimationFrame(animate)
   return () => {
     stopAnimation = true
-    app.destroy()
+    // [ai-stack patch] bare app.destroy() leaves every child + label texture
+    // alive on the GPU; the local graph is torn down and rebuilt on EVERY
+    // navigation, so label textures accumulated forever — the "viewer
+    // machine's VRAM swells" report. Destroy the whole tree + textures.
+    app.destroy(true, { children: true, texture: true, textureSource: true })
   }
 }
 

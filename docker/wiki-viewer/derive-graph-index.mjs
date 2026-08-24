@@ -29,6 +29,10 @@ const full = JSON.parse(readFileSync(src, "utf8"));
 const lean = {};
 for (const [slug, e] of Object.entries(full)) {
   lean[slug] = {
+    // slug is REQUIRED inside the value too: the Explorer's FileTrieNode.add
+    // does `file.slug.split("/")` (fileTrie.ts:89) — omitting it crashed the
+    // Explorer on every page load (found via headless browser 2026-08-24).
+    slug: e.slug ?? slug,
     title: e.title,
     filePath: e.filePath,
     links: e.links ?? [],
