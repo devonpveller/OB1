@@ -578,6 +578,11 @@ services:
       # 25→100 per operator approval 2026-08-23 ("raise the pace"); at ~10-20
       # compiles/day that drains the backlog in roughly a month. 0 disables.
       WIKI_BACKFILL_PER_COMPILE: ${WIKI_BACKFILL_PER_COMPILE:-100}
+      # Self-continuing drain: when a compile backfilled a slice and the queue
+      # is still non-empty, the next compile self-schedules after this many
+      # minutes (0 = drain only on organic compiles). Keeps the backlog
+      # converging on quiet days (operator: "working towards a completed state").
+      WIKI_BACKFILL_CONTINUE_MIN: ${WIKI_BACKFILL_CONTINUE_MIN:-10}
       # Recipe-execution timeouts (minutes). A FULL compile of the whole
       # graph plus topic synthesis can outrun 1-2h once the thought corpus
       # grows; killing pexec mid-write leaves an unstaged dirty tree that

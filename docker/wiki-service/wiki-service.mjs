@@ -59,6 +59,14 @@ const MAX_SOURCES = ENV.WIKI_MAX_SOURCES || "5";
 // registered-but-never-built backlog shrinks steadily instead of sitting
 // "queued" forever. 0 disables.
 const BACKFILL_PER_COMPILE = Math.max(0, Number(ENV.WIKI_BACKFILL_PER_COMPILE || "25"));
+// Self-continuing drain (operator 2026-08-23: "all compilations should be
+// working towards a completed state"): backfill only rides compiles, and
+// compiles only fire on research activity + the daily — on a quiet day the
+// queue stalled. When a compile backfilled pages AND the queue is still
+// non-empty, another compile is scheduled after this delay, so the drain
+// converges continuously in bounded slices. 0 disables (queue then drains
+// only on organic compiles).
+const BACKFILL_CONTINUE_MIN = Math.max(0, Number(ENV.WIKI_BACKFILL_CONTINUE_MIN || "10"));
 
 // Pre-compile entity extraction. The worker drains the thought + source
 // queues so entity/source_entities links are fresh before the wiki is
@@ -100,6 +108,7 @@ const GIT_SSH_COMMAND =
 
 let running = false;
 let lastStatus = { state: "idle", at: null, ok: null, summary: null, error: null };
+let backfillContinueTimer = null; // single continuation timer (see compile())
 
 async function git(args) {
   return pexec("git", ["-C", WIKI_GIT_DIR, ...args], { maxBuffer: 8 * 1024 * 1024 });
@@ -743,9 +752,12 @@ async function writePlannedManifest() {
       `${WIKI_GIT_DIR}/planned.json`,
       JSON.stringify({ generated_at: new Date().toISOString(), planned }) + "\n",
     );
-    console.log(`[wiki-service] planned manifest: ${Object.keys(planned).length} queued page(s)`);
+    const n = Object.keys(planned).length;
+    console.log(`[wiki-service] planned manifest: ${n} queued page(s)`);
+    return n;
   } catch (e) {
     console.error("[wiki-service] planned-manifest write failed (non-fatal):", e?.message || e);
+    return 0;
   }
 }
 
@@ -825,6 +837,7 @@ async function compile(reason) {
     // Bounded backfill: drain the planned queue (LAST compile's manifest —
     // freshly diffed against disk below after this run's pages land) a slice
     // per compile, most-recently-active entities first.
+    let backfillAdded = 0;
     if (!fullRebuild && BACKFILL_PER_COMPILE > 0) {
       try {
         const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
@@ -836,7 +849,8 @@ async function compile(reason) {
         if (queued.length) {
           const before = dirty.length;
           for (const id of queued) if (!dirty.includes(id)) dirty.push(id);
-          console.log(`[wiki-service] backfill: +${dirty.length - before} queued page(s) this compile`);
+          backfillAdded = dirty.length - before;
+          console.log(`[wiki-service] backfill: +${backfillAdded} queued page(s) this compile`);
         }
       } catch { /* no manifest yet — nothing to drain */ }
     }
@@ -927,7 +941,20 @@ async function compile(reason) {
     }
 
     // AFTER pages + sweeps, so the on-disk diff is accurate.
-    await writePlannedManifest();
+    const plannedRemaining = await writePlannedManifest();
+    // Keep the drain converging: this compile consumed a slice and more
+    // remains → schedule the next slice (single timer; any compile that runs
+    // in the meantime re-schedules through this same path).
+    if (backfillAdded > 0 && plannedRemaining > 0 && BACKFILL_CONTINUE_MIN > 0) {
+      clearTimeout(backfillContinueTimer);
+      backfillContinueTimer = setTimeout(
+        () => { compile("backfill-continue").catch(() => {}); },
+        BACKFILL_CONTINUE_MIN * 60_000,
+      );
+      console.log(
+        `[wiki-service] backfill continues: ${plannedRemaining} still queued — next slice in ${BACKFILL_CONTINUE_MIN}min`,
+      );
+    }
 
     // Commit only if the compile changed something.
     await git(["add", "-A"]);
