@@ -31,6 +31,15 @@ import { slugifyEntity, slugifyNotebook } from "file:///recipes/_shared/slug.mjs
 // Idempotent writes (churn fix): an unchanged file keeps its mtime so the
 // viewer's polling watcher does not see a phantom change every compile.
 import { writeIfChanged } from "file:///recipes/_shared/write-if-changed.mjs";
+// One definition of "which entities have earned a page" — shared by the
+// orphan sweep, the planned manifest, and the backfill slice (see the
+// module header for the 2026-08-25 churn-loop invariant).
+import {
+  mergeLinkCounts,
+  keptEntityPages,
+  planEntityQueue,
+  backfillSlice,
+} from "./lib/entity-links.mjs";
 
 const pexec = promisify(execFile);
 
@@ -482,7 +491,13 @@ async function dirtyEntityIds(prevIso) {
       );
       if (Array.isArray(failed) && failed.length) {
         for (const id of failed) ids.add(id);
-        console.log(`[wiki-service] retrying ${failed.length} failed entity id(s) from last compile`);
+        // Name the ids: a ledger entry that never clears is invisible without
+        // them (entity 27198 retried+failed silently for days — the recipe's
+        // per-entity error only ever went to its swallowed stderr).
+        console.log(
+          `[wiki-service] retrying ${failed.length} failed entity id(s) from last compile: ` +
+            failed.slice(0, 10).join(","),
+        );
       }
     } catch { /* no ledger — nothing failed last run */ }
     return [...ids];
@@ -538,51 +553,38 @@ async function listEntityFiles(outDir) {
 // BATCH_MIN_LINKED threshold) and remove any content/<type>/<slug>.md
 // not in that set. This is what makes a thought-delete in the brain
 // erase the corresponding wiki page on the next compile.
-async function sweepOrphanEntityPages() {
+// The compile's shared Open-Brain snapshot: every entity + link counts
+// across BOTH junction tables. Paginated fetch-ALL — a partial result
+// deletes real pages downstream, so any failure (including the runaway
+// ceiling) makes the caller skip both consumers. SOURCE links count too
+// (tombstone-filtered), mirroring generate-wiki listBatchCandidates:
+// counting only thought links once made research-derived source-only
+// pages vanish in the same cycle they were written.
+async function fetchEntityLinkData() {
+  const entities = await obFetchAll(
+    "entities?select=id,canonical_name,entity_type,metadata,updated_at&order=id.asc",
+  );
+  const tRows = await obFetchAll(
+    "thought_entities?select=entity_id&order=entity_id.asc,thought_id.asc",
+  );
+  const sRows = await obFetchAll(
+    "source_entities?select=entity_id,sources!inner(id)&sources.retraction_committed_at=is.null&order=entity_id.asc,source_id.asc",
+  );
+  return { entities, counts: mergeLinkCounts(tRows, sRows) };
+}
+
+// Takes the compile's shared link snapshot (fetchEntityLinkData) so the
+// kept-set here and the planned manifest are computed from the SAME data —
+// they can never disagree about who deserves a page (lib/entity-links.mjs
+// holds the invariant + the churn story). null snapshot → skip: a partial
+// kept-set deletes real pages.
+async function sweepOrphanEntityPages(linkData) {
   const minLinked = Math.max(1, Number(BATCH_MIN_LINKED) || 1);
-  // Two queries: (1) every entity with id/type/canonical_name/wiki_slug,
-  // (2) link counts per entity_id. Joining client-side keeps the query
-  // shape simple (PostgREST doesn't easily compose HAVING).
-  let entities = [];
-  let counts = new Map();
-  try {
-    // Paginated fetch-ALL — a partial kept-set here deletes real pages, so any
-    // failure (including the runaway ceiling) skips the whole sweep.
-    entities = await obFetchAll(
-      "entities?select=id,canonical_name,entity_type,metadata&order=id.asc",
-    );
-    const rows = await obFetchAll(
-      "thought_entities?select=entity_id&order=entity_id.asc,thought_id.asc",
-    );
-    for (const r of rows) {
-      const k = r.entity_id;
-      counts.set(k, (counts.get(k) || 0) + 1);
-    }
-    // SOURCE links count too (tombstone-filtered), mirroring the candidate
-    // selection in generate-wiki listBatchCandidates. Counting only thought
-    // links here meant a source-only entity (exactly what research output
-    // creates) was WRITTEN by the compile and DELETED by this sweep in the
-    // same cycle — research-derived entity pages systematically vanished.
-    const sRows = await obFetchAll(
-      "source_entities?select=entity_id,sources!inner(id)&sources.retraction_committed_at=is.null&order=entity_id.asc,source_id.asc",
-    );
-    for (const r of sRows) {
-      const k = r.entity_id;
-      counts.set(k, (counts.get(k) || 0) + 1);
-    }
-  } catch (e) {
-    console.error("[wiki-service] orphan-sweep query failed (skipping sweep):",
-      e?.message || e);
+  if (!linkData) {
+    console.error("[wiki-service] orphan-sweep skipped: no entity link data this compile");
     return { kept: 0, deleted: 0, error: true };
   }
-  const kept = new Set();
-  for (const e of entities) {
-    if ((counts.get(e.id) || 0) < minLinked) continue;
-    const slug =
-      (e.metadata && typeof e.metadata.wiki_slug === "string" && e.metadata.wiki_slug.trim())
-      || slugifyEntity(e.canonical_name, e.entity_type);
-    kept.add(`${e.entity_type}/${slug}.md`);
-  }
+  const kept = keptEntityPages(linkData.entities, linkData.counts, minLinked, slugifyEntity);
   const files = await listEntityFiles(WIKI_OUT_DIR);
   let deleted = 0;
   for (const abs of files) {
@@ -738,43 +740,44 @@ async function sweepOrphanLeafPages() {
 }
 
 // The truthful "wiki filler" queue (2026-08-23). Entities the brain knows
-// about whose page does NOT exist on disk yet — because they haven't met the
-// link threshold, were beyond a batch cap, or simply haven't been compiled
-// yet. serve.mjs reads this from the shared volume and turns what used to be
-// a bare 404 into an honest "queued for synthesis" page. Derived data:
-// gitignored, quartz-ignored, rewritten (write-if-changed) each compile.
-async function writePlannedManifest() {
+// about whose page does NOT exist on disk yet. serve.mjs reads this from the
+// shared volume and turns what used to be a bare 404 into an honest status
+// page. Derived data: gitignored, quartz-ignored, rewritten (write-if-
+// changed) each compile.
+//
+// Split since 2026-08-25 (churn fix): entries below the sweep's link
+// threshold carry `unlinked: true` — the sweep would delete their page the
+// same compile it was written, so the backfill must never generate them.
+// They stay in the manifest only for the viewer. Returns the count of
+// BACKFILL-ELIGIBLE pages (the continue-loop must stop when the real work
+// is done, not idle forever on unlinked residue).
+async function writePlannedManifest(linkData) {
+  if (!linkData) {
+    console.error("[wiki-service] planned-manifest skipped: no entity link data (kept last manifest)");
+    return 0;
+  }
   try {
-    const entities = await obFetchAll(
-      "entities?select=id,canonical_name,entity_type,metadata,updated_at&order=id.asc",
-    );
-    const planned = {};
     // The queue must be TRUE: types the compiler no longer emits (topic layer
     // retired P2.3 — swept wholesale) would sit "queued" forever.
     const RETIRED_TYPES = new Set(["topic"]);
-    for (const e of entities) {
-      if (!e.canonical_name || !e.entity_type) continue;
-      if (RETIRED_TYPES.has(e.entity_type)) continue;
-      const slug =
-        (e.metadata && typeof e.metadata.wiki_slug === "string" && e.metadata.wiki_slug.trim())
-        || slugifyEntity(e.canonical_name, e.entity_type);
-      if (existsSync(`${WIKI_OUT_DIR}/${e.entity_type}/${slug}.md`)) continue;
-      // id + updated_at: the bounded per-compile backfill reads LAST compile's
-      // manifest and generates the most-recently-active queued entities first.
-      planned[`content/${e.entity_type}/${slug}`] = {
-        id: e.id,
-        name: e.canonical_name,
-        type: e.entity_type,
-        updated_at: e.updated_at,
-      };
-    }
+    const minLinked = Math.max(1, Number(BATCH_MIN_LINKED) || 1);
+    const { planned, linkedQueued, unlinkedQueued } = planEntityQueue({
+      entities: linkData.entities,
+      counts: linkData.counts,
+      minLinked,
+      retiredTypes: RETIRED_TYPES,
+      slugifyEntity,
+      pageExists: (rel) => existsSync(`${WIKI_OUT_DIR}/${rel}`),
+    });
     writeIfChanged(
       `${WIKI_GIT_DIR}/planned.json`,
       JSON.stringify({ generated_at: new Date().toISOString(), planned }) + "\n",
     );
-    const n = Object.keys(planned).length;
-    console.log(`[wiki-service] planned manifest: ${n} queued page(s)`);
-    return n;
+    console.log(
+      `[wiki-service] planned manifest: ${linkedQueued} queued page(s)` +
+        ` (+${unlinkedQueued} unlinked, not backfill-eligible)`,
+    );
+    return linkedQueued;
   } catch (e) {
     console.error("[wiki-service] planned-manifest write failed (non-fatal):", e?.message || e);
     return 0;
@@ -874,11 +877,9 @@ async function compile(reason) {
       } else {
         try {
           const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
-          const queued = Object.values(manifest.planned || {})
-            .filter((p) => Number.isInteger(p.id))
-            .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
-            .slice(0, BACKFILL_PER_COMPILE)
-            .map((p) => p.id);
+          // Only backfill-eligible entries (entity-links.mjs): generating a
+          // page the sweep deletes the same compile is the churn loop.
+          const queued = backfillSlice(manifest.planned, BACKFILL_PER_COMPILE);
           if (queued.length) {
             const before = dirty.length;
             for (const id of queued) if (!dirty.includes(id)) dirty.push(id);
@@ -906,12 +907,20 @@ async function compile(reason) {
       `[wiki-service] ${fullRebuild ? "FULL" : "incremental"} compile` +
         `${fullRebuild ? "" : ` (${dirty.length} dirty entities)`}`,
     );
-    const { stdout } = await pexec("node", args, {
+    const { stdout, stderr } = await pexec("node", args, {
       env: childEnv,
       maxBuffer: 32 * 1024 * 1024,
       timeout: COMPILE_TIMEOUT_MS,
     });
     let tail = stdout.trim().split("\n").slice(-3).join(" | ");
+    // Surface the recipe's per-entity failures: they exit 0 (the rest of the
+    // batch still lands) and only ever reached the child's stderr, which this
+    // service used to discard — a deterministic failure (e.g. the surrogate
+    // 500 on entity 27198) was invisible for days.
+    const errLines = (stderr || "").trim().split("\n").filter((l) => l.trim()).slice(-3);
+    if (errLines.length) {
+      console.error(`[wiki-service] recipe stderr tail: ${errLines.join(" | ").slice(0, 600)}`);
+    }
 
     // Notebook → topic synthesis (research lives here, not on entity
     // pages). Non-fatal: entity pages already written above.
@@ -959,8 +968,20 @@ async function compile(reason) {
     let sweepEntities = { kept: 0, deleted: 0 };
     let sweepNotebooks = { kept: 0, deleted: 0 };
     let sweepLeaves = { kept: 0, deleted: 0 };
+    // ONE Open-Brain link snapshot, shared by the entity sweep and the
+    // planned manifest below: both verdicts ("delete this page" / "queue
+    // this page for backfill") come from the same data, so they cannot
+    // disagree. On failure both degrade safely (sweep skips, manifest
+    // keeps last compile's file).
+    let linkData = null;
     try {
-      sweepEntities = await sweepOrphanEntityPages();
+      linkData = await fetchEntityLinkData();
+    } catch (e) {
+      console.error("[wiki-service] entity link-data fetch failed (sweep + manifest degrade):",
+        e?.message || e);
+    }
+    try {
+      sweepEntities = await sweepOrphanEntityPages(linkData);
       sweepNotebooks = await sweepOrphanNotebookPages();
       // P1.5 — run AFTER entity/notebook sweeps so the leaf kept-set reflects
       // the final on-disk page set (deleted entity pages no longer count as
@@ -975,7 +996,7 @@ async function compile(reason) {
     }
 
     // AFTER pages + sweeps, so the on-disk diff is accurate.
-    const plannedRemaining = await writePlannedManifest();
+    const plannedRemaining = await writePlannedManifest(linkData);
     // Keep the drain converging: this compile consumed a slice (or deferred
     // one for user activity) and more remains → schedule the next attempt
     // (single timer; any compile that runs in the meantime re-schedules

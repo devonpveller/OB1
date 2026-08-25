@@ -329,14 +329,21 @@ h1,h2,h3,h4,h5,h6{line-height:1.25}a{color:#84a9ff}</style>
 <main>${content || "<p><em>(empty page)</em></p>"}</main></body></html>`);
     return;
   }
-  // 2. Registered-but-unbuilt entity: honest "queued" page from planned.json.
+  // 2. Registered-but-unbuilt entity: honest status page from planned.json.
+  // `unlinked` entries (below the sweep's link threshold — see the wiki
+  // service's lib/entity-links.mjs) are NOT in the backfill queue, so
+  // promising "an upcoming compile" for them would be a lie.
   const planned = await plannedFor(urlPath);
   if (planned) {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
     res.end(miniPage(
-      "Queued for synthesis",
+      planned.unlinked ? "Known, not yet cited" : "Queued for synthesis",
       esc(planned.name || "This page"),
-      `<p><strong>${esc(planned.name || "This entity")}</strong> (${esc(planned.type || "entity")})
+      planned.unlinked
+        ? `<p><strong>${esc(planned.name || "This entity")}</strong> (${esc(planned.type || "entity")})
+       is registered in Open Brain, but no thought or source cites it yet.
+       A wiki page is synthesized automatically once something links to it.</p>`
+        : `<p><strong>${esc(planned.name || "This entity")}</strong> (${esc(planned.type || "entity")})
        is registered in Open Brain but its wiki page hasn't been synthesized yet.
        It will appear automatically on an upcoming compile — no action needed.</p>`,
       null,
