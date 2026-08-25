@@ -111,6 +111,24 @@ RUN set -e; \
   sed -i 's#export function trace(msg: string, err: Error) {#&\n  if ((err as any)?.code === "ENOENT") { console.warn("[skip vanished file] " + msg); return }#' "$T"; \
   grep -q 'skip vanished file' "$T"
 
+# Fault isolation (2026-08-25): both per-file try/catch blocks in parse.ts call
+# trace(), which process.exit(1)s on the main thread — so ONE unparseable page
+# killed the whole --serve builder. (Live incident: a Template-Toolkit man page
+# whose raw "[% ... %] (x)" text parses as a markdown link with a bare-% target
+# → decodeURI "URI malformed" → builder crash-looped every ~8min and snapshot
+# publishing froze.) Replace both catch bodies with log-and-skip: the poisoned
+# page drops out of the build, every other page publishes. grep-asserted like
+# the trace patch above so a QUARTZ_REF bump fails the build loudly.
+RUN set -e; \
+  P=/quartz/quartz/processors/parse.ts; \
+  grep -q 'Failed to process markdown' "$P"; \
+  grep -q 'Failed to process html' "$P"; \
+  sed -i \
+    -e 's#trace(`\\nFailed to process markdown \\`${fp}\\``, err as Error)#console.error(`[parse] SKIPPED (md) ${fp}: ${(err as Error).message}`)#' \
+    -e 's#trace(`\\nFailed to process html \\`${file.data.filePath}\\``, err as Error)#console.error(`[parse] SKIPPED (html) ${file.data.filePath}: ${(err as Error).message}`)#' \
+    "$P"; \
+  test "$(grep -c 'SKIPPED' "$P")" = "2"
+
 # Fork-drift guard (2026-08-23): the overlay REPLACES stock graph.inline.ts
 # with a patched fork (O(1) graph data prep + global-view scoping — changes too
 # structural for seds). If a QUARTZ_REF bump changes the stock file, fail the

@@ -20,6 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { rewriteResearchCitations } from "./citations.mjs";
 import { writeIfChanged } from "./write-if-changed.mjs";
+import { clip } from "./clip.mjs";
 
 // YAML-safe scalar (quoted JSON string — handles colons, quotes, emoji).
 export function frontmatterScalar(v) {
@@ -72,10 +73,22 @@ export function capLeafContent(raw) {
   if (s.length <= MAX_LEAF_CHARS) return s;
   const droppedMb = ((s.length - MAX_LEAF_CHARS) / 1048576).toFixed(1);
   return (
-    s.slice(0, MAX_LEAF_CHARS) +
+    // clip: surrogate-safe cut (never end mid-emoji — see _shared/clip.mjs).
+    clip(s, MAX_LEAF_CHARS) +
     `\n\n*[… truncated ${droppedMb} MB — this source exceeds the wiki page display limit; ` +
     `open the original source for the full content …]*\n`
   );
+}
+
+// Raw article text must never form INTERNAL markdown links. Fragments shaped
+// like "[% ... %] (x)" parse as [text](target); a target with a bare "%"
+// throws "URI malformed" inside the viewer's link transformer (2026-08-25: ONE
+// Template-Toolkit man-page leaf crash-looped the whole builder and froze
+// snapshot publishing). Break the "](": adjacency unless the target is an
+// absolute http(s) URL — scrubSnippetContent deliberately emits
+// "[image: …](https://…)" links, which stay clickable.
+export function breakAccidentalLinks(s) {
+  return String(s ?? "").replace(/\]\((?!https?:\/\/)/g, "] (");
 }
 
 // Render one source row → the full `content/source/<id>.md` file body.
@@ -125,7 +138,7 @@ export function renderSourceLeaf(r) {
       if (needs.length) qs.push("**Sub-questions explored:**", ...needs.map((x) => `- ${scrubSnippetContent(String(x))}`), "");
       if (follow.length) qs.push("**Follow-up queries:**", ...follow.map((x) => `- ${scrubSnippetContent(String(x))}`), "");
     }
-    const ev = scrubSnippetContent(capLeafContent(r.content)).trim();
+    const ev = breakAccidentalLinks(scrubSnippetContent(capLeafContent(r.content))).trim();
     const evidence = ev
       ? [
           "> [!note]- Evidence — the grounded claims &amp; gaps this synthesis is built from",
@@ -137,7 +150,7 @@ export function renderSourceLeaf(r) {
   } else {
     body = [
       ...(r.url ? [`Source: ${scrubSnippetContent(r.url)}`, ""] : []),
-      scrubSnippetContent(capLeafContent(r.content)),
+      breakAccidentalLinks(scrubSnippetContent(capLeafContent(r.content))),
       "",
     ];
   }

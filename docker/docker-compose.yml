@@ -663,6 +663,12 @@ services:
       # path so Quartz resolves `![](assets/<id>/img.png)` links; read-only
       # here (the workbench is the writer).
       - wiki-assets:/wiki/assets:ro
+      # Published snapshots survive container recreates (2026-08-25): without
+      # this, every recreate/image-deploy lost /srv and served the "Building…"
+      # splash for the whole ~9-min cold build. With it, serve.mjs keeps
+      # serving the last good snapshot instantly while the fresh builder
+      # catches up. Derived data (rebuildable) — deliberately NOT backed up.
+      - wiki-viewer-srv:/srv
     ports:
       - "127.0.0.1:8812:8080"
     networks:
@@ -1114,6 +1120,9 @@ volumes:
   # NOT mounted into openbrain-wiki (the git committer), so binaries never enter
   # the vault git history.
   wiki-assets:
+  # Viewer's published snapshots (/srv) — persists across recreates so a
+  # deploy never shows the "Building…" splash. Derived, rebuildable.
+  wiki-viewer-srv:
 
 networks:
   # Normal bridge (user-authorized 2026-05-15): required so the host can
