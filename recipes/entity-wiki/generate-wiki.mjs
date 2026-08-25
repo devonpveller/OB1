@@ -42,6 +42,11 @@ import { pathToFileURL } from "node:url";
 // `slugify` here keeps the historical (name, entityType) → "<type>-<base>"
 // signature this file already used; it is now the canonical impl, not a copy.
 import { slugifyEntity as slugify, slugifyNotebook } from "../_shared/slug.mjs";
+// Surrogate-safe truncation for anything that reaches an LLM payload: a
+// naked .slice() through an emoji leaves a lone surrogate and the whole
+// completion 500s ("'utf-8' codec can't encode character '\ud83d'…") —
+// one poisoned snippet pinned entity #27198 red on every compile.
+import { clip } from "../_shared/clip.mjs";
 import { writeSourceLeaves } from "../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-changed.mjs";
 import { rewriteCitations } from "../_shared/citations.mjs";
@@ -486,7 +491,7 @@ function buildSynthesisInput(entity, linked, semantic, sources, nameMap, maxLink
     date: String(t.created_at || "").slice(0, 10),
     type: t.type,
     role: t.mention_role,
-    content: String(t.content || "").slice(0, 300),
+    content: clip(t.content, 300),
   }));
 
   const linkedIds = new Set(linkedSnippets.map((l) => l.id));
@@ -497,7 +502,7 @@ function buildSynthesisInput(entity, linked, semantic, sources, nameMap, maxLink
       id: t.id,
       date: String(t.created_at || "").slice(0, 10),
       type: t.type,
-      content: String(t.content || "").slice(0, 300),
+      content: clip(t.content, 300),
     }));
 
   // Edges: resolve names, group by relation. Note: fetchTypedEdges already
@@ -547,10 +552,10 @@ function buildSynthesisInput(entity, linked, semantic, sources, nameMap, maxLink
     token: `S${i + 1}`,
     id: s.id, // UUID — internal only; not exposed to the model
     url: s.url,
-    title: String(s.title || "").slice(0, 200),
+    title: clip(s.title, 200),
     content_type: s.content_type,
     notebook: s.notebook,
-    content: String(s.content || "").slice(0, 600),
+    content: clip(s.content, 600),
   }));
 
   return {
@@ -867,11 +872,13 @@ export function buildEvolutionSection(entity, sources, linked) {
   const events = [{ date: firstSeen, text: "First captured as a thought-based mental model (ungrounded belief)." }];
   for (const s of srcs) {
     const date = String(s.linked_at || "").slice(0, 10);
-    const title = scrubSnippetContent(String(s.title || s.url || s.id))
-      .replace(/[\[\]|]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 120);
+    const title = clip(
+      scrubSnippetContent(String(s.title || s.url || s.id))
+        .replace(/[\[\]|]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+      120,
+    );
     const ct = s.content_type ? ` (${s.content_type})` : "";
     events.push({ date, text: `Grounded by [[content/source/${s.id}|${title || s.id}]]${ct}.` });
   }

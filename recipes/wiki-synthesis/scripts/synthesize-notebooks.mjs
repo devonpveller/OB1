@@ -28,6 +28,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { linkSafeLabel, rewriteCitations } from "../../_shared/citations.mjs";
 import { slugifyNotebook } from "../../_shared/slug.mjs";
+import { clip } from "../../_shared/clip.mjs"; // surrogate-safe truncation for LLM payloads
 import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../../_shared/write-if-changed.mjs";
 
@@ -160,7 +161,7 @@ async function synthesize(env, model, topic, sources) {
       (s, i) =>
         `<source id="S${i + 1}" type="${s.content_type ?? ""}" ` +
         `url="${scrub(s.url ?? "")}" title="${scrub(s.title ?? "")}">\n` +
-        `${scrub(inputText(s).slice(0, 1500))}\n</source>`,
+        `${scrub(clip(inputText(s), 1500))}\n</source>`,
     )
     .join("\n\n");
   const structure = sources.map((s, i) => ({ id: `S${i + 1}`, title: s.title, url: s.url, content_type: s.content_type }));
