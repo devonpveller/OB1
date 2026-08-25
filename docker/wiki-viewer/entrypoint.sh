@@ -67,6 +67,24 @@ index_ok() {
   si="$1/static/searchIndex.json"
   [ ! -f "$si" ] || [ "$(tail -c 1 "$si")" = "}" ]
 }
+# Launch/kill the builder as a PROCESS GROUP. `npx` is only a wrapper: killing
+# $BUILD_PID alone orphans the real node builder, which keeps :8081/:3001 —
+# every relaunch then dies EADDRINUSE mid-emit, the completeness gate keeps
+# refusing to publish, and the site freezes on the last good snapshot until the
+# container is recreated (the 2026-08-24 nightly crash-loop: 9-min 500%-CPU
+# builds forever, zero swaps). setsid makes $BUILD_PID the group leader so
+# `kill -- -PID` reaps wrapper + node + esbuild together; the :3001 port-wait
+# below stays as the backstop.
+start_builder() {
+  setsid npx quartz build --serve --port "$BUILD_PORT" &
+  BUILD_PID=$!
+}
+kill_builder() {
+  # NB: no `--` separator — BusyBox ash's kill builtin rejects it.
+  kill -TERM "-$BUILD_PID" 2>/dev/null || kill "$BUILD_PID" 2>/dev/null || true
+  wait "$BUILD_PID" 2>/dev/null || true
+}
+
 # Quartz --serve binds a hot-reload WebSocket on :3001. Relaunching the builder
 # before the old one frees it → EADDRINUSE → the new build dies mid-emit. Wait
 # (bounded) for :3001 to be free. Uses /proc/net/tcp* (no tools needed): port
@@ -97,8 +115,7 @@ done
 # organization-anthropic.md written mid-cold-build stayed unemitted for
 # 45+ min). The post-first-build check below catches exactly that window.
 touch /tmp/builder-start
-npx quartz build --serve --port "$BUILD_PORT" &
-BUILD_PID=$!
+start_builder
 
 # Stage 2 — the always-up static server starts IMMEDIATELY so :8080 is bound from
 # the start. Until the first snapshot is published (cold start / first build) it
@@ -108,7 +125,7 @@ mkdir -p /srv
 echo 0 > /tmp/last-access
 node /serve.mjs &
 SERVE_PID=$!
-trap 'kill "$BUILD_PID" "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
+trap 'kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
 
 # Wait (bounded) for the first COMPLETE build (index.html + css + js, not just
 # index.html — the old check published build-0 too early, before ComponentResources
@@ -145,11 +162,10 @@ for f in $(find /wiki/content -name "*.md" -newer /tmp/builder-start 2>/dev/null
 done
 if [ -n "$missed" ]; then
   echo "[wiki-viewer] cold-build race: $missed written mid-parse and unemitted — restarting builder once"
-  kill "$BUILD_PID" 2>/dev/null || true; wait "$BUILD_PID" 2>/dev/null || true
+  kill_builder
   wait_port_3001_free
   touch /tmp/builder-start
-  npx quartz build --serve --port "$BUILD_PORT" &
-  BUILD_PID=$!
+  start_builder
 fi
 
 # Idle-gated snapshot loop + nightly clean rebuild.
@@ -171,10 +187,9 @@ while true; do
   if [ "$idle" -ge "$IDLE_SECONDS" ] && [ "$(date +%H)" = "$REBUILD_HH" ] && [ "$(date +%j)" != "$last_rebuild_day" ]; then
     last_rebuild_day="$(date +%j)"
     echo "[wiki-viewer] nightly clean rebuild — restarting builder (sweeps orphan pages)"
-    kill "$BUILD_PID" 2>/dev/null || true; wait "$BUILD_PID" 2>/dev/null || true
+    kill_builder
     wait_port_3001_free   # avoid EADDRINUSE :3001 on relaunch (the incident trigger)
-    npx quartz build --serve --port "$BUILD_PORT" &
-    BUILD_PID=$!
+    start_builder
     continue
   fi
 
@@ -183,9 +198,11 @@ while true; do
   # forever — exactly how the 2026-06-15 incident persisted after the crash.
   if ! kill -0 "$BUILD_PID" 2>/dev/null; then
     echo "[wiki-viewer] builder process is dead — restarting"
+    # Reap any orphaned group members first (a dead wrapper can leave the
+    # node builder holding :3001 — the freeze trigger).
+    kill -TERM "-$BUILD_PID" 2>/dev/null || true
     wait_port_3001_free
-    npx quartz build --serve --port "$BUILD_PORT" &
-    BUILD_PID=$!
+    start_builder
     continue
   fi
 
