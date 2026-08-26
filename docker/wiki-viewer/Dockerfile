@@ -114,6 +114,30 @@ RUN set -e; \
   ! grep -q 'Plugin.ContentIndex' "$C"; \
   grep -q 'Plugin.Assets()' "$C"
 
+# -- wiki-dynamic-index P3: search from the DB, not a downloaded index -------
+# Basic searches now hit /workbench/search (same-origin, Caddy-injected key)
+# and render server-ranked results. The local index stays as the fall-through
+# for tag searches and for any failure, so search NEVER breaks the page.
+# The endpoint marks highlights with inert <<HL>> tokens; we escape FIRST and
+# only then swap them for <b>, because page bodies can contain raw markup.
+RUN set -e; \
+  S=/quartz/quartz/components/scripts/search.inline.ts; \
+  grep -q 'searchType = currentSearchTerm.startsWith("#") ? "tags" : "basic"' "$S"; \
+  sed -i 's#^\([[:space:]]*\)searchType = currentSearchTerm.startsWith("\#") ? "tags" : "basic"$#&\nif (searchType === "basic" && currentSearchTerm.trim().length >= 2) { try { const _r = await fetch("/workbench/search?q=" + encodeURIComponent(currentSearchTerm) + "&limit=" + numSearchResults); if (_r.ok) { const _j = await _r.json(); const _esc = (t: string) => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); const _hl = (t: string) => _esc(t).replace(/&lt;&lt;HL&gt;&gt;/g, "<b>").replace(/&lt;&lt;\/HL&gt;&gt;/g, "</b>"); await displayResults((_j.results || []).map((x: any, i: number) => ({ id: i, slug: x.slug, title: _esc(x.title), content: _hl(x.content), tags: [] }))); return; } } catch (e) { /* fall through to the local title/tag index */ } }#' "$S"; \
+  grep -q '/workbench/search?q=' "$S"
+
+# -- wiki-dynamic-index P4: stop fetching the index on every page load ------
+# renderPage injects a TOP-LEVEL fetch of the index into every page, so every
+# reader paid ~8MB before touching search or the graph. Swap the eager promise
+# for a memoising THENABLE: `await fetchData` still works unchanged in all
+# three consumers (explorer/search/graph), but nothing is fetched until one of
+# them actually awaits it.
+RUN set -e; \
+  R=/quartz/quartz/components/renderPage.tsx; \
+  grep -q 'const fetchData = fetch(' "$R"; \
+  sed -i 's#fetch("${contentIndexPath}").then(data => data.json())#{ _p: null, then(f, r) { return (this._p ??= fetch("${contentIndexPath}").then(d => d.json())).then(f, r) } }#' "$R"; \
+  grep -q '_p ??= fetch' "$R"
+
 # Build resilience: the compiler's orphan-sweep deletes leaf pages while a
 # rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that
 # vanished underneath it. Upstream trace() then THROWS (in a worker) or
