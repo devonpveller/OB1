@@ -239,7 +239,13 @@ RUN set -e; \
 COPY serve.mjs /serve.mjs
 COPY derive-graph-index.mjs /derive-graph-index.mjs
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Normalise line endings IN THE IMAGE. This repo is checked out on Windows,
+# where git restores CRLF; a CRLF shebang makes the kernel fail exec with
+# 'no such file or directory' and the container crash-loops (hit twice:
+# 2026-08-25 and again 2026-08-26 when building from the main checkout
+# rather than the LF worktree). Doing it here means the build is correct
+# regardless of how the tree was checked out.
+RUN sed -i 's/$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]
