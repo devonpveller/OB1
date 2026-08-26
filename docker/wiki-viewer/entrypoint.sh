@@ -175,6 +175,8 @@ marker=/tmp/last-snap; touch "$marker"
 # Notes reconciliation cadence (see the loop body).
 NOTES_CHECK_SECONDS="${WIKI_NOTES_CHECK_SECONDS:-60}"
 NOTES_FIX_COOLDOWN="${WIKI_NOTES_FIX_COOLDOWN:-900}"
+# How long a note may lack a page before we treat it as genuinely stuck.
+NOTES_GRACE_MIN="${WIKI_NOTES_GRACE_MIN:-10}"
 last_notes_check=0
 last_notes_fix=0
 N=0
@@ -226,7 +228,16 @@ while true; do
     for f in $(find /wiki/notes -name "*.md" 2>/dev/null | head -200); do
       rel="${f#/wiki/}"
       case "$rel" in */README.md|*/index.md|README.md|index.md) continue;; esac
-      [ -f "/quartz/public/${rel%.md}.html" ] || { missing_note="$rel"; break; }
+      [ -f "/quartz/public/${rel%.md}.html" ] && continue
+      # GRACE: a JUST-WRITTEN note is the watcher's job, not ours. Without
+      # this the reconciliation fired within 60s of every new note and
+      # restarted the builder - killing the incremental rebuild that would
+      # have emitted it in ~1min and starting a ~15min cold parse instead,
+      # so a new note took LONGER than before the safety net existed
+      # (measured 2026-08-26). Only act on a note still missing after the
+      # watcher has had a fair chance.
+      [ -n "$(find "$f" -mmin +"$NOTES_GRACE_MIN" 2>/dev/null)" ] || continue
+      missing_note="$rel"; break
     done
     if [ -n "$missing_note" ] && [ "$((now - last_notes_fix))" -ge "$NOTES_FIX_COOLDOWN" ]; then
       last_notes_fix="$now"
