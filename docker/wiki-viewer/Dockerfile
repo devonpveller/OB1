@@ -126,6 +126,14 @@ RUN set -e; \
   sed -i 's#fetch("${contentIndexPath}").then(data => data.json())#{ _p: null, then(f, r) { return (this._p ??= fetch("${contentIndexPath}").then(d => d.json())).then(f, r) } }#' "$R"; \
   grep -q '_p ??= fetch' "$R"
 
+# -- Watcher must POLL, or new files are never seen --------------------------
+# Root cause of 'my note never appears' (2026-08-26). Full story in the
+# patch script; in short: CHOKIDAR_USEPOLLING is not a chokidar feature, so
+# the watcher was on inotify across a cross-container symlinked volume where
+# `add` events never fire. Applied by script (multi-line replacement).
+COPY patches/watcher-polling.mjs /tmp/watcher-polling.mjs
+RUN node /tmp/watcher-polling.mjs
+
 # Build resilience: the compiler's orphan-sweep deletes leaf pages while a
 # rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that
 # vanished underneath it. Upstream trace() then THROWS (in a worker) or
