@@ -178,7 +178,7 @@ async function findFreshMarkdown(urlPath) {
       // Only a RECENT file counts as "just created, still building" — an old
       // markdown with no emitted HTML is some other condition, not a build lag.
       if (st.isFile() && Date.now() - st.mtimeMs < 3600_000) {
-        return { file: c, isNote: rel.startsWith("notes/") };
+        return { file: c, isNote: rel.startsWith("notes/"), mtimeMs: st.mtimeMs };
       }
     } catch { /* next */ }
   }
@@ -269,6 +269,20 @@ async function handle(req, res) {
     res.end(SPLASH);
     return;
   }
+  // Alias for clients cached from before the index change (see above).
+  if ((req.url || "").split("?")[0].endsWith("/static/contentIndex.json")) {
+    const lean = join(ROOT, "static", "graphIndex.json");
+    try {
+      const st = await stat(lean);
+      res.writeHead(200, {
+        ...baseHeaders(st, ".json"),
+        "content-type": "application/json; charset=utf-8",
+        "content-length": st.size,
+      });
+      createReadStream(lean).pipe(res);
+      return;
+    } catch { /* no lean index either - fall through to the normal 404 */ }
+  }
   const hit = await resolve(req.url || "/");
   if (hit) {
     const { file, st } = hit;
@@ -318,18 +332,43 @@ async function handle(req, res) {
     writeFile(PUBLISH_FLAG, "1").catch(() => {});
     let content = "";
     try { content = renderInterimContent(await readFile(fresh.file, "utf8")); } catch { /* */ }
+    // Operator feedback 2026-08-26: the old copy ("saved ... rendering ...
+    // refreshes automatically") told the reader nothing they could act on, and
+    // a blind meta-refresh looked broken when the page took minutes. Say what
+    // is happening, how long it has been, and poll the REAL url so the moment
+    // the built page exists we land on it.
+    const ageSec = Math.max(0, Math.round((Date.now() - fresh.mtimeMs) / 1000));
+    const ageTxt = ageSec < 90 ? `${ageSec}s ago` : `${Math.round(ageSec / 60)} min ago`;
     const banner = fresh.isNote
-      ? "Your note is saved. The full page (with editing) is rendering — this view refreshes automatically."
-      : "This page was just created and is rendering — this view refreshes automatically.";
+      ? `Saved ${ageTxt} — your text is below and is safe. The full editable page is still being built; ` +
+        "this view checks every few seconds and switches over on its own."
+      : `Created ${ageTxt} — showing the raw content while the page is built. ` +
+        "This view checks every few seconds and switches over on its own.";
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+    // Poll with fetch instead of a blind meta-refresh: reload ONLY once the
+    // built page actually exists, so the reader never watches the same interim
+    // screen reappear. The meta-refresh stays as a no-JS fallback.
     res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="6"><title>Rendering…</title>
+<meta http-equiv="refresh" content="30"><title>Building your page…</title>
+<script>
+(function () {
+  var since = Date.now();
+  setInterval(function () {
+    fetch(location.pathname, { cache: "no-store", headers: { "x-interim-poll": "1" } })
+      .then(function (r) { return r.text() })
+      .then(function (t) { if (t.indexOf("data-interim-page") === -1) location.reload() })
+      .catch(function () {});
+    var el = document.getElementById("waited");
+    if (el) el.textContent = Math.round((Date.now() - since) / 1000) + "s";
+  }, 5000);
+})();
+</script>
 <style>body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#1e1e24;color:#d4d4dc;line-height:1.6}
 .banner{background:#2a2b33;border-bottom:1px solid #44454f;padding:.6rem 1.2rem;font-size:.85rem;color:#9a9ba6}
 main{max-width:46rem;margin:0 auto;padding:1.5rem 1.2rem}
 h1,h2,h3,h4,h5,h6{line-height:1.25}a{color:#84a9ff}</style>
-</head><body><div class="banner">⏳ ${banner} <a href="/">Home</a></div>
+</head><body data-interim-page="1"><div class="banner">⏳ ${banner} <span style="opacity:.7">(waiting <span id="waited">0s</span>)</span> <a href="/">Home</a></div>
 <main>${content || "<p><em>(empty page)</em></p>"}</main></body></html>`);
     return;
   }

@@ -1107,7 +1107,7 @@ document.addEventListener("nav", () => {
       // folder, a top-level folder, or the notes/ root (folderRel === "").
       const path = (folderRel ? folderRel + "/" : "") + fileSlug + ".md"
       const content =
-        ["---", "title: " + JSON.stringify(title), "source: user_note", "notebook: " + JSON.stringify(nbName), "tags: [note]", "---", "", ""].join("\n")
+        ["---", "title: " + JSON.stringify(title), "source: user_note", "notebook: " + JSON.stringify(nbName), "tags: [note]", "---", "", "# " + title, "", ""].join("\n")
       launch.textContent = "creating…"
       ;(launch as HTMLButtonElement).disabled = true // no re-clicks during the hop
       // Suppress the hub's hot-reload so the create→navigate hop isn't interrupted.

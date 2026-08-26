@@ -156,7 +156,7 @@ fi
 # cannot touch it) — restart the builder once for a fresh full parse. The
 # compiler tree is slug-named, so md→html mapping is the plain basename.
 missed=""
-for f in $(find /wiki/content -name "*.md" -newer /tmp/builder-start 2>/dev/null | head -50); do
+for f in $(find /wiki/content /wiki/notes -name "*.md" -newer /tmp/builder-start 2>/dev/null | head -50); do
   rel="${f#/wiki/}"
   [ -f "/quartz/public/${rel%.md}.html" ] || { missed="$rel"; break; }
 done
@@ -172,6 +172,11 @@ fi
 REBUILD_HH=$(printf '%02d' "${WIKI_VIEWER_REBUILD_HOUR:-0}" 2>/dev/null || echo 00)
 last_rebuild_day=""
 marker=/tmp/last-snap; touch "$marker"
+# Notes reconciliation cadence (see the loop body).
+NOTES_CHECK_SECONDS="${WIKI_NOTES_CHECK_SECONDS:-60}"
+NOTES_FIX_COOLDOWN="${WIKI_NOTES_FIX_COOLDOWN:-900}"
+last_notes_check=0
+last_notes_fix=0
 N=0
 while true; do
   sleep "$POLL"
@@ -204,6 +209,30 @@ while true; do
     wait_port_3001_free
     start_builder
     continue
+  fi
+
+  # Notes reconciliation (operator report 2026-08-26): a USER NOTE whose page
+  # was never emitted is invisible forever - the vault is read-only here, so we
+  # cannot touch it into the watcher; restarting the builder re-parses the whole
+  # vault and picks it up. Rate-limited, and only for notes/ (a handful of
+  # files) so this can never thrash on the 24/7 knowledge churn.
+  if [ "$((now - last_notes_check))" -ge "$NOTES_CHECK_SECONDS" ]; then
+    last_notes_check="$now"
+    missing_note=""
+    for f in $(find /wiki/notes -name "*.md" 2>/dev/null | head -200); do
+      rel="${f#/wiki/}"
+      case "$rel" in */README.md) continue;; esac
+      [ -f "/quartz/public/${rel%.md}.html" ] || { missing_note="$rel"; break; }
+    done
+    if [ -n "$missing_note" ] && [ "$((now - last_notes_fix))" -ge "$NOTES_FIX_COOLDOWN" ]; then
+      last_notes_fix="$now"
+      echo "[wiki-viewer] note without a page ($missing_note) - restarting builder to re-parse"
+      kill_builder
+      wait_port_3001_free
+      touch /tmp/builder-start
+      start_builder
+      continue
+    fi
   fi
 
   # Anything new in the build output since our last snapshot?
