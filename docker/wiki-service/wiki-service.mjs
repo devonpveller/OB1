@@ -1014,7 +1014,9 @@ async function compile(reason) {
     // Tolerance absorbs the normal in-flight window (pages written after the
     // count, notes not yet compiled). Fix with backfill-wiki-pages.mjs.
     try {
-      const rows = await countWikiPages();
+      // ENTITY rows vs ENTITY files: listEntityFiles() skips leaf/notebook
+      // dirs, so an unfiltered row count can never match it.
+      const rows = await countWikiPages("entity");
       if (rows !== null) {
         const onDisk = (await listEntityFiles(WIKI_OUT_DIR)).length;
         if (onDisk > 0 && Math.abs(rows - onDisk) / onDisk > 0.25) {

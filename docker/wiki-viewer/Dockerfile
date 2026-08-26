@@ -79,7 +79,7 @@ RUN set -e; \
   sed -i 's#static/contentIndex.json#static/graphIndex.json#' "$R"; \
   grep -q 'static/graphIndex.json' "$R"; \
   grep -q '^\s*const data = await fetchData$' "$S"; \
-  sed -i 's#^\(\s*\)const data = await fetchData$#\1const data = await ((window as any).__fullContentIndex ??= fetch("/static/contentIndex.json").then((r) => r.json()))#' "$S"; \
+  sed -i 's#^\(\s*\)const data = await fetchData$#\1const data = await ((window as any).__fullContentIndex ??= fetch("/static/graphIndex.json").then((r) => r.json()))#' "$S"; \
   grep -q '__fullContentIndex' "$S"; \
 # Explorer state fix 1: a folder auto-opened because it contains the current
 # page must be RECORDED as open in currentExplorerState — otherwise the next
@@ -95,6 +95,24 @@ RUN set -e; \
   grep -q '^\s*const explorerUl = explorer.querySelector(".explorer-ul")$' "$E"; \
   sed -i 's#^\(\s*\)const explorerUl = explorer.querySelector(".explorer-ul")$#\1for (const [path, collapsed] of oldIndex) {\n\1  if (!currentExplorerState.some((item) => item.path === path)) {\n\1    currentExplorerState.push({ path: path as FullSlug, collapsed })\n\1  }\n\1}\n\1const explorerUl = explorer.querySelector(".explorer-ul")#' "$E"; \
   grep -q 'currentExplorerState.some' "$E"
+
+# -- wiki-dynamic-index P2: retire the whole-vault index --------------------
+# ContentIndex is the ONLY non-incremental Quartz emitter: it re-walks every
+# page and re-serialises the full text of the vault on EVERY rebuild (~75MB /
+# ~120s on a 29.6k-page vault, back-to-back forever) - the reason a new note
+# took >15 min to appear. The compiler now publishes each page into wiki_pages
+# as it writes it and derive-graph-index.mjs builds the lean index from that
+# table at publish time, so the emitter has no consumer left (the search sed
+# above reads graphIndex now too).
+# Range-delete the whole plugin block - commenting only its opening line would
+# leave its options dangling. Accepted loss: sitemap.xml + RSS (private wiki).
+# grep-asserted so a QUARTZ_REF bump fails the build loudly.
+RUN set -e; \
+  C=/quartz/quartz.config.ts; \
+  grep -q 'Plugin.ContentIndex({' "$C"; \
+  sed -i '/Plugin\.ContentIndex({/,/^[[:space:]]*}),$/d' "$C"; \
+  ! grep -q 'Plugin.ContentIndex' "$C"; \
+  grep -q 'Plugin.Assets()' "$C"
 
 # Build resilience: the compiler's orphan-sweep deletes leaf pages while a
 # rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that

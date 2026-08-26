@@ -84,7 +84,11 @@ async function resolve(urlPath) {
 // snapshot missing either falls back to the splash.
 const REQUIRED = [
   "index.html", "index.css", "prescript.js", "postscript.js",
-  "static/contentIndex.json", "static/graphIndex.json",
+  // contentIndex.json was dropped here in wiki-dynamic-index P2: Quartz's
+  // ContentIndex emitter is switched off (it was the last non-incremental
+  // emitter), so the file no longer exists and requiring it would pin
+  // buildReady() false forever -> the splash on every request.
+  "static/graphIndex.json",
 ];
 // Readiness only changes when the /srv/current symlink is re-pointed — cache
 // the probe briefly instead of stat()ing 6 files on EVERY request.

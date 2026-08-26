@@ -233,9 +233,13 @@ export async function deleteWikiPages(slugs) {
 
 // Row count, for the per-compile reconciliation log (rows vs files on disk).
 // Returns null when unavailable — the caller must not treat that as "0".
-export async function countWikiPages() {
+// `pageClass` MUST be passed when comparing against a class-specific file
+// listing: comparing ALL rows to entity-only files reported a permanent
+// false DRIFT (29,658 rows vs 20,101 entity pages) on the first live run.
+export async function countWikiPages(pageClass) {
+  const filter = pageClass ? `&page_class=eq.${encodeURIComponent(pageClass)}` : "";
   try {
-    const r = await fetch(`${OB_URL}/rest/v1/wiki_pages?select=slug&limit=1`, {
+    const r = await fetch(`${OB_URL}/rest/v1/wiki_pages?select=slug&limit=1${filter}`, {
       method: "HEAD",
       headers: { apikey: "local-trust", prefer: "count=exact" },
       signal: AbortSignal.timeout(TIMEOUT_MS),
