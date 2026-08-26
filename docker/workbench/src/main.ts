@@ -30,6 +30,7 @@ import { grounding } from "./routes/grounding.ts";
 import { exporter } from "./routes/export.ts";
 import { noteRefs } from "./routes/note-refs.ts";
 import { noteHistory, noteCommit } from "./routes/note-history.ts";
+import { search } from "./routes/search.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
 import { emptyTrash } from "./repositories/notes.ts";
 
@@ -65,6 +66,7 @@ app.route("/workbench/export", exporter); // P3.5 — pandoc note export
 app.route("/workbench/note-refs", noteRefs); // P3.5 — note reference list
 app.route("/workbench/note-history", noteHistory); // P4.7 — note git revisions
 app.route("/workbench/note-commit", noteCommit); // P4.7 — commit-now / compile-catch
+app.route("/workbench/search", search); // wiki-dynamic-index P3 — DB-backed wiki search
 
 app.notFound((c) => c.json({ error: "not found" }, 404));
 app.onError((err, c) => {
