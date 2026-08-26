@@ -20,6 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { rewriteResearchCitations } from "./citations.mjs";
 import { writeIfChanged } from "./write-if-changed.mjs";
+import { queueWikiPage } from "./wiki-pages.mjs";
 import { clip } from "./clip.mjs";
 
 // YAML-safe scalar (quoted JSON string — handles colons, quotes, emoji).
@@ -169,7 +170,10 @@ export function writeSourceLeaves(rows, outDir) {
   let n = 0;
   for (const r of rows) {
     if (!r || !r.id) continue;
-    if (writeIfChanged(path.join(dir, `${r.id}.md`), renderSourceLeaf(r))) n++;
+    const lp = path.join(dir, `${r.id}.md`);
+    const lmd = renderSourceLeaf(r);
+    if (writeIfChanged(lp, lmd)) n++;
+    queueWikiPage(lp, lmd);
   }
   return n;
 }

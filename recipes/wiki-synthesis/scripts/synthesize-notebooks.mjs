@@ -31,6 +31,7 @@ import { slugifyNotebook } from "../../_shared/slug.mjs";
 import { clip } from "../../_shared/clip.mjs"; // surrogate-safe truncation for LLM payloads
 import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../../_shared/write-if-changed.mjs";
+import { queueWikiPage, flushWikiPages } from "../../_shared/wiki-pages.mjs";
 
 function loadDotEnv() {
   for (const rel of [".env.local", ".env"]) {
@@ -420,6 +421,7 @@ async function main() {
       ].join("\n");
       fs.mkdirSync(hubDir, { recursive: true });
       writeIfChangedStable(hubPath, fm + body + "\n");
+      queueWikiPage(hubPath, fm + body + "\n");
       // Emit a source leaf for every source this hub cites, so the [Sn] links
       // resolve even for web_articles never extracted into an entity page
       // (entity-wiki's emitLeafPages only covers ENTITY-cited sources). Shared
@@ -452,7 +454,9 @@ async function main() {
 // Only run when executed directly (same guard as generate-wiki.mjs) — the
 // test file imports the exported helpers without kicking off a synthesis.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
-  main().catch((e) => {
+  main()
+    .finally(() => flushWikiPages())
+    .catch((e) => {
     console.error("[notebook-synth] FATAL:", e.stack || e.message);
     process.exit(1);
   });

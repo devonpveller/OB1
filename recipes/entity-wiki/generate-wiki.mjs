@@ -49,6 +49,10 @@ import { slugifyEntity as slugify, slugifyNotebook } from "../_shared/slug.mjs";
 import { clip } from "../_shared/clip.mjs";
 import { writeSourceLeaves } from "../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-changed.mjs";
+// Publish what we wrote into wiki_pages so the viewer's indexes become
+// queries instead of whole-vault walks (wiki-dynamic-index P1). The queue is
+// sync; ONE batched flush before exit (a CLI run cuts off fire-and-forget).
+import { queueWikiPage, flushWikiPages } from "../_shared/wiki-pages.mjs";
 import { rewriteCitations } from "../_shared/citations.mjs";
 
 // ---------------------------------------------------------------
@@ -1145,7 +1149,9 @@ async function emitLeafPages(sb, outDir, run) {
           scrubSnippetContent(r.content || ""),
           "",
         ].join("\n");
-        if (writeIfChanged(path.join(dir, `${r.id}.md`), fm + "\n")) thoughts++;
+        const tp = path.join(dir, `${r.id}.md`);
+        if (writeIfChanged(tp, fm + "\n")) thoughts++;
+        queueWikiPage(tp, fm + "\n");
       }
     }
   }
@@ -1182,10 +1188,9 @@ function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, out
   const filepath = resolveOutputPath(outDir, baseSlug, entity);
   // Only the volatile generated_at differing does not rewrite the page — an
   // unchanged entity page keeps its mtime so the viewer's watcher stays quiet.
-  writeIfChangedStable(
-    filepath,
-    buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, notebook) + wiki + "\n",
-  );
+  const md = buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, notebook) + wiki + "\n";
+  writeIfChangedStable(filepath, md);
+  queueWikiPage(filepath, md);
   return filepath;
 }
 
@@ -1644,7 +1649,11 @@ async function main() {
 // silent when imported (e.g. by generate-wiki.test.mjs), so the pure helpers
 // can be unit-tested without main() reading env / calling process.exit.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
-  main().catch((err) => {
+  main()
+    // Publish queued wiki_pages rows before exit (best-effort; runs on the
+    // failure path too so a partial compile still indexes what it wrote).
+    .finally(() => flushWikiPages())
+    .catch((err) => {
     console.error("[wiki] FAILED:", err.stack || err.message);
     process.exit(1);
   });

@@ -55,6 +55,9 @@ services:
       # ── Idea Refinery lifecycle tables (fresh-volume only; operator applies
       #    to the live DB via psql — same pattern as the claims layer). ──
       - ./init-ideas.sql:/docker-entrypoint-initdb.d/98-init-ideas.sql:ro                        # idea-refinery IR.0
+      # -- Viewer index substrate (fresh-volume only; the live DB gets it via
+      #    psql -- same pattern as the claims layer).
+      - ./init-wiki-pages.sql:/docker-entrypoint-initdb.d/99-init-wiki-pages.sql:ro              # wiki-dynamic-index P1
     networks:
       - obnet
     restart: unless-stopped

@@ -40,6 +40,10 @@ import {
   planEntityQueue,
   backfillSlice,
 } from "./lib/entity-links.mjs";
+// The sweeps are the DELETE half of the wiki_pages contract: a page removed
+// from disk must lose its row, or search/nav would keep serving a dead link
+// (wiki-dynamic-index P1). Best-effort: never fails a compile.
+import { deleteWikiPages, countWikiPages } from "file:///recipes/_shared/wiki-pages.mjs";
 
 const pexec = promisify(execFile);
 
@@ -587,18 +591,21 @@ async function sweepOrphanEntityPages(linkData) {
   const kept = keptEntityPages(linkData.entities, linkData.counts, minLinked, slugifyEntity);
   const files = await listEntityFiles(WIKI_OUT_DIR);
   let deleted = 0;
+  const droppedSlugs = [];
   for (const abs of files) {
     const rel = abs.slice(WIKI_OUT_DIR.length + 1).replace(/\\/g, "/");
     if (kept.has(rel)) continue;
     try {
       await rm(abs, { force: true });
       deleted++;
+      droppedSlugs.push(`content/${rel.replace(/\.md$/, "")}`);
     } catch (e) {
       console.error(`[wiki-service] orphan-sweep delete failed for ${rel}:`, e?.message || e);
     }
   }
   if (deleted > 0) {
     console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale entity page(s)`);
+    await deleteWikiPages(droppedSlugs);
   }
   return { kept: kept.size, deleted };
 }
@@ -689,6 +696,7 @@ async function sweepOrphanLeafPages() {
   const thoughtDir = `${WIKI_OUT_DIR}/thought`;
   const sourceDir = `${WIKI_OUT_DIR}/source`;
   if (!existsSync(thoughtDir) && !existsSync(sourceDir)) return { kept: 0, deleted: 0 };
+  const droppedLeafSlugs = [];
   // Scan content/ (minus the leaf dirs themselves) + the author-owned notes/
   // layer, since a hand-written note may also [[source/…]] a leaf.
   const skip = new Set([thoughtDir, sourceDir]);
@@ -728,6 +736,7 @@ async function sweepOrphanLeafPages() {
       try {
         await rm(`${dir}/${e.name}`, { force: true });
         deleted++;
+        droppedLeafSlugs.push(`content/${isSource ? "source" : "thought"}/${id}`);
       } catch (err) {
         console.error(`[wiki-service] leaf orphan delete failed for ${e.name}:`, err?.message || err);
       }
@@ -735,6 +744,7 @@ async function sweepOrphanLeafPages() {
   }
   if (deleted > 0) {
     console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale leaf page(s)`);
+    await deleteWikiPages(droppedLeafSlugs);
   }
   return { kept: keptThoughts.size + keptSources.size, deleted };
 }
@@ -997,6 +1007,24 @@ async function compile(reason) {
 
     // AFTER pages + sweeps, so the on-disk diff is accurate.
     const plannedRemaining = await writePlannedManifest(linkData);
+
+    // wiki_pages reconciliation (wiki-dynamic-index P1): the table is DERIVED
+    // from disk, so a drift between rows and pages means a sync outage - log
+    // it so it is visible before search/nav start serving stale entries.
+    // Tolerance absorbs the normal in-flight window (pages written after the
+    // count, notes not yet compiled). Fix with backfill-wiki-pages.mjs.
+    try {
+      const rows = await countWikiPages();
+      if (rows !== null) {
+        const onDisk = (await listEntityFiles(WIKI_OUT_DIR)).length;
+        if (onDisk > 0 && Math.abs(rows - onDisk) / onDisk > 0.25) {
+          console.error(
+            `[wiki-pages] DRIFT: ${rows} row(s) vs ${onDisk} entity page(s) on disk - ` +
+              `run backfill-wiki-pages.mjs`,
+          );
+        }
+      }
+    } catch { /* reconciliation is diagnostics only */ }
     // Keep the drain converging: this compile consumed a slice (or deferred
     // one for user activity) and more remains → schedule the next attempt
     // (single timer; any compile that runs in the meantime re-schedules
