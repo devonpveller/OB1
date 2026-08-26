@@ -216,12 +216,16 @@ while true; do
   # cannot touch it into the watcher; restarting the builder re-parses the whole
   # vault and picks it up. Rate-limited, and only for notes/ (a handful of
   # files) so this can never thrash on the 24/7 knowledge churn.
-  if [ "$((now - last_notes_check))" -ge "$NOTES_CHECK_SECONDS" ]; then
+  # GUARD (bug found 2026-08-26, minutes after shipping this): /quartz/public
+  # is EMPTY while a cold build runs, so an unguarded check saw every note as
+  # missing and restarted the builder before it could ever finish - a restart
+  # loop that blocked all publishing. Only compare against a COMPLETE build.
+  if is_complete /quartz/public && [ "$((now - last_notes_check))" -ge "$NOTES_CHECK_SECONDS" ]; then
     last_notes_check="$now"
     missing_note=""
     for f in $(find /wiki/notes -name "*.md" 2>/dev/null | head -200); do
       rel="${f#/wiki/}"
-      case "$rel" in */README.md) continue;; esac
+      case "$rel" in */README.md|*/index.md|README.md|index.md) continue;; esac
       [ -f "/quartz/public/${rel%.md}.html" ] || { missing_note="$rel"; break; }
     done
     if [ -n "$missing_note" ] && [ "$((now - last_notes_fix))" -ge "$NOTES_FIX_COOLDOWN" ]; then
