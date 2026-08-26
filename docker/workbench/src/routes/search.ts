@@ -17,7 +17,7 @@
 // <<HL>>/<</HL>> markers: the client escapes the snippet FIRST and only then
 // swaps the markers for <b> tags.
 import { Hono } from "hono";
-import { query } from "../db/pool.ts";
+import { withTransaction } from "../db/pool.ts";
 
 export const search = new Hono();
 
@@ -70,8 +70,12 @@ search.get("/", async (c) => {
     classFilter = `AND page_class = $${params.length}`;
   }
 
+  // NB: SET LOCAL must be its OWN statement on the SAME connection - Postgres
+  // rejects multiple commands inside a prepared (parameter-bound) statement
+  // ("cannot insert multiple commands into a prepared statement"), which is
+  // exactly how this failed on its first live call. withTransaction gives us
+  // one client for both, and LOCAL scopes the timeout to this transaction.
   const sql = `
-    SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS};
     SELECT slug,
            title,
            ts_headline('english', body, websearch_to_tsquery('english', $1),
@@ -86,7 +90,11 @@ search.get("/", async (c) => {
      LIMIT $2`;
 
   try {
-    const rows = await query<Row>(sql, params);
+    const rows = await withTransaction(async (client) => {
+      await client.queryObject(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
+      const res = await client.queryObject<Row>(sql, params);
+      return res.rows;
+    });
     return c.json({
       query: q,
       count: rows.length,
