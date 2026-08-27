@@ -134,6 +134,11 @@ RUN set -e; \
 COPY patches/watcher-polling.mjs /tmp/watcher-polling.mjs
 RUN node /tmp/watcher-polling.mjs
 
+# -- wiki-dynamic-index P3/D: search from the database ----------------------
+# Applied by a script (see patches/search-api.mjs for why sed is banned here).
+COPY patches/search-api.mjs /tmp/search-api.mjs
+RUN node /tmp/search-api.mjs
+
 # Build resilience: the compiler's orphan-sweep deletes leaf pages while a
 # rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that
 # vanished underneath it. Upstream trace() then THROWS (in a worker) or

@@ -17,6 +17,7 @@ import http from "node:http";
 import { renderMarkdown } from "./lib/render-page.mjs";
 import { pageDocument, notAvailableDocument } from "./lib/page-document.mjs";
 import { fetchWikiPage, dbRenderEnabled } from "./lib/wiki-db.mjs";
+import { getNavIndex, navIndexEnabled } from "./lib/nav-index.mjs";
 import { createReadStream } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
@@ -275,6 +276,31 @@ async function handle(req, res) {
     res.end(SPLASH);
     return;
   }
+  // Phase C: serve the nav/graph index LIVE from wiki_pages. Same url, same
+  // shape, so the Explorer/graph/autocomplete need no change - but a page
+  // created seconds ago is in the sidebar on the next load instead of waiting
+  // for a snapshot swap. Falls back to the published file if the DB is
+  // unavailable (handled by returning null).
+  if (navIndexEnabled() && (req.url || "").split("?")[0].endsWith("/static/graphIndex.json")) {
+    const nav = await getNavIndex();
+    if (nav) {
+      const headers = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-cache, must-revalidate",
+        etag: nav.etag,
+        "x-wiki-nav": "db",
+      };
+      if (req.headers["if-none-match"] === nav.etag) {
+        res.writeHead(304, headers);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { ...headers, "content-length": Buffer.byteLength(nav.json) });
+      res.end(req.method === "HEAD" ? undefined : nav.json);
+      return;
+    }
+  }
+
   // Alias for clients cached from before the index change (see above).
   if ((req.url || "").split("?")[0].endsWith("/static/contentIndex.json")) {
     const lean = join(ROOT, "static", "graphIndex.json");
