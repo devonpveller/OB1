@@ -34,6 +34,19 @@ export function pageDocument({ title, bodyHtml, slug, updatedAt, editable }) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${safeTitle}</title>
 <link rel="stylesheet" href="/index.css">
+<script>
+// Quartz applies light/dark via a saved-theme attribute that its CLIENT
+// BUNDLE sets from localStorage. This document deliberately loads no bundle
+// (audit A-1), so without this the page always rendered LIGHT and ignored
+// the user's theme (operator, 2026-08-26). Inline and first in head so it
+// applies before paint. NB: no backticks in here - this whole document is a
+// template literal and a stray backtick terminates it.
+try {
+  var t = localStorage.getItem("theme");
+  if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.setAttribute("saved-theme", t);
+} catch (e) {}
+</script>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;700&family=Source+Sans+Pro:ital,wght@0,400;0,600;1,400;1,600&family=IBM+Plex+Mono:wght@400;600&display=swap">
 <style>
 #quartz-body{display:block}

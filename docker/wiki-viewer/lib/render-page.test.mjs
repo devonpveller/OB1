@@ -74,3 +74,12 @@ test("editable notes get the note-specific banner", () => {
   // still no bundle, even on the note variant
   assert.ok(!/<script[^>]*src=/.test(doc));
 });
+
+test("THEME: the document applies the user's saved theme before paint", () => {
+  const doc = pageDocument({ slug: "notes/x" });
+  // Quartz themes via a saved-theme attribute its client bundle sets; this
+  // document loads no bundle, so it must set it itself or always render light.
+  assert.ok(doc.includes('setAttribute("saved-theme"'), "must set saved-theme");
+  assert.ok(doc.indexOf("saved-theme") < doc.indexOf("<body"), "must run before body (no flash)");
+  assert.ok(!/<script[^>]*src=/.test(doc), "still no external bundle");
+});

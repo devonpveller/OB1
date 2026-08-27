@@ -680,7 +680,12 @@ document.addEventListener("nav", () => {
   // folder listings), so a folder view shows at a glance what's marked for trash.
   // Live from the workbench, so it stays correct between the periodic clean
   // rebuilds even while the static HTML still lists the note.
-  ;(async () => {
+  // Re-runnable: the Explorer renders its links in its OWN `nav` handler, which
+  // fires AFTER this one, so a single pass marked nothing in the sidebar
+  // (operator, 2026-08-26: "trashed items aren't visually marked"). Run now and
+  // again on a short chain to catch late-rendered links; each anchor is marked
+  // at most once via dataset.neTrashMarked.
+  const markTrashedLinks = async () => {
     try {
       const j = await (await fetch("/workbench/notes/trashed", { cache: "no-store" })).json()
       const trashed = new Set<string>((j.trashed || []).map((p: string) => "/notes/" + p.replace(/\.md$/, "")))
@@ -707,7 +712,12 @@ document.addEventListener("nav", () => {
     } catch {
       /* best-effort marker */
     }
-  })()
+  }
+  // Expose so the trash/restore actions can refresh the markers immediately,
+  // without waiting for a rebuild or a navigation.
+  ;(window as any).__neMarkTrashed = markTrashedLinks
+  void markTrashedLinks()
+  for (const delay of [300, 1200, 3000]) setTimeout(() => void markTrashedLinks(), delay)
 
   // (1) Edit-in-place on any editable target — a user NOTE or a SOURCE. Found
   // page-wide (the source edit button is rendered by the SourceEditor card,
@@ -928,7 +938,7 @@ document.addEventListener("nav", () => {
             }
             setStatus("✓ moved — opening…")
             const target = "/notes/" + j.to.replace(/\.md$/, "")
-            const deadline = Date.now() + 9000
+            const deadline = Date.now() + 75000
             const tryGo = async () => {
               try {
                 if ((await fetch(target, { cache: "no-store" })).ok) {
@@ -1004,10 +1014,13 @@ document.addEventListener("nav", () => {
           const j = await r.json().catch(() => ({}))
           if (r.ok) {
             ;(window as any).__neEditing = true
-            setStatus("✓ moved to trash — refreshing…")
+            setStatus("✓ moved to trash — updating…")
+            // Strike it through in the Explorer straight away: that is the
+            // confirmation the user needs, and it does not wait on a rebuild.
+            void (window as any).__neMarkTrashed?.()
             // Reload once the rebuilt page carries the trash card.
             const here = location.pathname
-            const deadline = Date.now() + 9000
+            const deadline = Date.now() + 75000
             const tryReload = async () => {
               try {
                 if ((await (await fetch(here, { cache: "no-store" })).text()).includes("data-ne-trash")) {
@@ -1132,7 +1145,7 @@ document.addEventListener("nav", () => {
         // Poll for the new note page (after Quartz rebuilds), then open it — same
         // hop as New folder, so it never lands on a transient 404.
         const target = "/notes/" + path.replace(/\.md$/, "")
-        const deadline = Date.now() + 9000
+        const deadline = Date.now() + 75000
         const tryGo = async () => {
           try {
             if ((await fetch(target, { cache: "no-store" })).ok) {
@@ -1212,7 +1225,7 @@ document.addEventListener("nav", () => {
         // navigate in — never land on a transient 404 (the proxied hot-reload WS
         // can't self-heal one). Fall back to refreshing this (existing) page.
         const target = "/notes/" + path + "/"
-        const deadline = Date.now() + 9000
+        const deadline = Date.now() + 75000
         const tryGo = async () => {
           try {
             if ((await fetch(target, { cache: "no-store" })).ok) {
@@ -1279,7 +1292,7 @@ document.addEventListener("nav", () => {
         if (r.ok) {
           // Reload the folder page once its (trashed) landing carries the card.
           const here = location.pathname
-          const deadline = Date.now() + 9000
+          const deadline = Date.now() + 75000
           const tryReload = async () => {
             try {
               if ((await (await fetch(here, { cache: "no-store" })).text()).includes("data-ne-trash")) {
@@ -1327,7 +1340,7 @@ document.addEventListener("nav", () => {
         if (r.ok) {
           if (tStatus) tStatus.textContent = "✓ restored — refreshing…"
           const here = location.pathname
-          const deadline = Date.now() + 9000
+          const deadline = Date.now() + 75000
           const tryReload = async () => {
             try {
               const html = await (await fetch(here, { cache: "no-store" })).text()
