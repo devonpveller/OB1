@@ -123,7 +123,7 @@ start_builder
 # /srv/current exists it serves the real site (serve.mjs decides per request).
 mkdir -p /srv
 echo 0 > /tmp/last-access
-node /serve.mjs &
+node /quartz/serve.mjs &
 SERVE_PID=$!
 trap 'kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
 
@@ -150,23 +150,14 @@ if is_complete /quartz/public && index_ok /quartz/public; then
   fi
 fi
 
-# Cold-build race check: any compiler-tree markdown written since the builder
-# started whose HTML is missing from the build output was born inside the
-# parse window and is invisible to the watcher (the vault is :ro here, so we
-# cannot touch it) — restart the builder once for a fresh full parse. The
-# compiler tree is slug-named, so md→html mapping is the plain basename.
-missed=""
-for f in $(find /wiki/content /wiki/notes -name "*.md" -newer /tmp/builder-start 2>/dev/null | head -50); do
-  rel="${f#/wiki/}"
-  [ -f "/quartz/public/${rel%.md}.html" ] || { missed="$rel"; break; }
-done
-if [ -n "$missed" ]; then
-  echo "[wiki-viewer] cold-build race: $missed written mid-parse and unemitted — restarting builder once"
-  kill_builder
-  wait_port_3001_free
-  touch /tmp/builder-start
-  start_builder
-fi
+# Cold-build race guard REMOVED (Phase B, 2026-08-26). It restarted the
+# builder whenever any page was written mid-parse — with the 24/7 drain that
+# fired on essentially every cold build, doubling it (~15 → ~30 min per
+# deploy). Now that serve.mjs renders any unbuilt page straight from
+# wiki_pages (read-only, real renderer), a page missed by the initial parse is
+# STILL SERVED immediately; the builder picks it up on its next change or the
+# nightly clean rebuild. The notes reconciliation below remains as the
+# builder-side safety net.
 
 # Idle-gated snapshot loop + nightly clean rebuild.
 REBUILD_HH=$(printf '%02d' "${WIKI_VIEWER_REBUILD_HOUR:-0}" 2>/dev/null || echo 00)

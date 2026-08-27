@@ -236,7 +236,19 @@ RUN set -e; \
   sed -i 's#Component.ContentMeta()]#Component.ContentMeta(), Component.NotesEditor()]#' "$L"; \
   grep -q 'Component.ContentMeta(), Component.NotesEditor()]' "$L"
 
-COPY serve.mjs /serve.mjs
+# serve.mjs lives INSIDE /quartz (with lib/ beside it) so its unified/remark
+# imports resolve against /quartz/node_modules — ESM ignores NODE_PATH, and a
+# server at /serve.mjs would fail at the first lib import (Phase B).
+COPY serve.mjs /quartz/serve.mjs
+COPY lib /quartz/lib
+
+# Build gates for the DB-render fallback (Phase B):
+# 1. every transitive dependency the renderer leans on must resolve — they are
+#    QUARTZ'S deps, not ours, and a QUARTZ_REF bump may drop one silently;
+# 2. the renderer + live-document unit tests, including the audit A-1
+#    invariants (no identity attributes, no client bundle) as regex asserts.
+RUN set -e; cd /quartz;   node -e "await Promise.all(['unified','remark-parse','remark-gfm','remark-frontmatter','remark-rehype','hast-util-to-html'].map(m=>import(m)))" ;   node --test lib/render-page.test.mjs
+
 COPY derive-graph-index.mjs /derive-graph-index.mjs
 COPY entrypoint.sh /entrypoint.sh
 # Normalise line endings IN THE IMAGE. This repo is checked out on Windows,

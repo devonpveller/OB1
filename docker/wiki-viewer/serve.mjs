@@ -11,6 +11,12 @@
 // re-downloaded everything, including the multi-MB index), throttled
 // last-access bookkeeping, and a cached readiness probe.
 import http from "node:http";
+// Phase B (no-rebuild): DB-rendered fallback. lib/ is COPYed next to this
+// file at /quartz/serve.mjs so Quartz's own node_modules resolve the
+// unified/remark imports (ESM ignores NODE_PATH).
+import { renderMarkdown } from "./lib/render-page.mjs";
+import { pageDocument } from "./lib/page-document.mjs";
+import { fetchWikiPage, dbRenderEnabled } from "./lib/wiki-db.mjs";
 import { createReadStream } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
@@ -323,6 +329,32 @@ async function handle(req, res) {
     return;
   }
   const urlPath = req.url || "/";
+  // 1. Phase B — the page is not in any build but IS in Open Brain: render it
+  // from wiki_pages with the REAL markdown renderer. Read-only, no client
+  // bundle (audit A-1); no-store so a cached transient fallback can never pin
+  // itself over the real page (audit A-4). Runs BEFORE the fresh-file interim
+  // so drain-written pages get the real render; a brand-new NOTE (file exists,
+  // row not yet synced) falls through to the interim below.
+  if (dbRenderEnabled()) {
+    const key = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
+      .replace(/^\/+/, "").replace(/\/+$/, "");
+    if (key && !extname(key)) {
+      const row = await fetchWikiPage(key);
+      if (row) {
+        writeFile(PUBLISH_FLAG, "1").catch(() => {});
+        let bodyHtml = "";
+        try { bodyHtml = renderMarkdown(row.body); } catch { /* render never blocks the page */ }
+        res.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "x-wiki-render": "db",
+        });
+        res.end(pageDocument({ title: row.title, bodyHtml, slug: row.slug, updatedAt: row.updated_at }));
+        return;
+      }
+    }
+  }
+
   // 1. Just-created page: markdown exists, HTML not emitted yet — serve the
   // CONTENT immediately (readable interim render) with an auto-refresh, and
   // ask the snapshot loop to publish promptly. A fresh user note is the

@@ -2,6 +2,7 @@
 // vault layer (NOT the generation pool). The workbench writes them + commits
 // (G1 exception). One ingestion surface for both human and AI notes (3.3).
 import { config } from "../config.ts";
+import { query } from "../db/pool.ts";
 import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
@@ -31,6 +32,36 @@ function notesRel(notePath: string): string {
   return `notes/${rel}`;
 }
 
+// ── wiki_pages sync (no-rebuild Phase B, 2026-08-26) ────────────────────────
+// A note exists as a FILE the moment it is saved, but nothing published its
+// wiki_pages row until a backfill — so the viewer's DB-rendered fallback
+// could not serve brand-new notes and search could not find them. The
+// workbench is the notes writer, so it owns the row. Best-effort: a DB
+// hiccup must never fail a save (the file is the source of truth).
+export function parseNoteRow(rel: string, content: string): { slug: string; title: string; body: string } {
+  const slug = rel.replace(/\.md$/i, "");
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content);
+  const body = m ? content.slice(m[0].length) : content;
+  const t = m ? /^title:\s*(.*)$/m.exec(m[1]) : null;
+  let title = t ? t[1].trim().replace(/^["']|["']$/g, "") : "";
+  if (!title) title = slug.split("/").pop() ?? slug;
+  return { slug, title, body };
+}
+
+async function syncNoteRow(rel: string, content: string): Promise<void> {
+  try {
+    const { slug, title, body } = parseNoteRow(rel, content);
+    await query(
+      `INSERT INTO wiki_pages (slug, page_class, title, body, updated_at)
+       VALUES ($1, 'note', $2, $3, now())
+       ON CONFLICT (slug) DO UPDATE SET title = $2, body = $3, updated_at = now()`,
+      [slug, title, body],
+    );
+  } catch (e) {
+    console.error("[wiki-pages] note row sync failed (non-fatal):", (e as Error).message);
+  }
+}
+
 export async function readNote(notePath: string): Promise<{ content: string; hash: string } | null> {
   const rel = notesRel(notePath);
   if (!(await vaultExists(rel))) return null;
@@ -52,6 +83,7 @@ export async function writeNote(
     if (current !== ifMatch) return { conflict: true, current };
   }
   await vaultWrite(rel, content);
+  await syncNoteRow(rel, content);
   // Working-draft model (P4.7): autosave writes WITHOUT committing; only an
   // explicit commit (Done / "commit now") records a git revision — authored by
   // the Authelia user. The compile catches any still-uncommitted notes.
@@ -90,6 +122,7 @@ export async function writeStructuredNote(input: {
   ].join("\n");
   const body = fm + input.content + "\n";
   await vaultWrite(rel, body);
+  await syncNoteRow(rel, body);
   await vaultCommit(`ai-note: write ${rel}`);
   return { path: rel, hash: await sha256(body) };
 }
