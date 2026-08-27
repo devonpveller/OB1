@@ -718,6 +718,31 @@ document.addEventListener("nav", () => {
   ;(window as any).__neMarkTrashed = markTrashedLinks
   void markTrashedLinks()
   for (const delay of [300, 1200, 3000]) setTimeout(() => void markTrashedLinks(), delay)
+  // Timers alone are not enough: the Explorer awaits the (multi-MB) nav index
+  // before it renders, so on a folder navigation it re-creates its links AFTER
+  // the last timer and the strike-throughs vanished (operator, 2026-08-27).
+  // Observe instead - re-mark whenever nodes are added, whatever the timing.
+  const explorerRoot = document.getElementById("quartz-body") ?? document.body
+  if (explorerRoot && !(explorerRoot as any).__neTrashObserver) {
+    let queued = false
+    const observer = new MutationObserver((records) => {
+      if (queued) return
+      if (!records.some((r) => r.addedNodes.length)) return
+      queued = true
+      // Coalesce a render burst into one pass; markTrashedLinks is idempotent
+      // (each anchor carries dataset.neTrashMarked).
+      setTimeout(() => {
+        queued = false
+        void markTrashedLinks()
+      }, 120)
+    })
+    observer.observe(explorerRoot, { childList: true, subtree: true })
+    ;(explorerRoot as any).__neTrashObserver = observer
+    window.addCleanup?.(() => {
+      observer.disconnect()
+      delete (explorerRoot as any).__neTrashObserver
+    })
+  }
 
   // (1) Edit-in-place on any editable target — a user NOTE or a SOURCE. Found
   // page-wide (the source edit button is rendered by the SourceEditor card,

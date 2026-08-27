@@ -654,6 +654,10 @@ services:
       # idle-swap publishes them.
       CHOKIDAR_USEPOLLING: "true"
       CHOKIDAR_INTERVAL: "${WIKI_VIEWER_POLL_INTERVAL_MS:-5000}"
+      # Quartz's watcher polls at this interval (patches/watcher-polling.mjs).
+      # 10s -> 3s takes ~7s off the time a NEW note waits to be built; the
+      # stat load is trivial next to the emit that follows.
+      WIKI_WATCH_POLL_MS: "${WIKI_WATCH_POLL_MS:-3000}"
       # A cold full build of the whole vault holds every parsed AST in memory at
       # once; the default ~2GB node heap OOMs as the vault grows (the OWUI
       # knowledge-collection migration pushed it past 12k pages / ~200MB). Give
