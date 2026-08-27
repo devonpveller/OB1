@@ -87,7 +87,9 @@ test("THEME: the document applies the user's saved theme before paint", () => {
 test("EDITOR: notes get a save target derived from their OWN slug", () => {
   const doc = pageDocument({ slug: "notes/folder/my note", editable: true });
   // Derived, never inherited (audit A-1): the save path must be this note's.
-  assert.ok(doc.includes("/workbench/notes/folder/my%20note"), "save target from own slug");
+  // The .md matters: slugs are extension-less but the notes API addresses
+  // FILES — without it the editor read a 404 and saved to the WRONG filename.
+  assert.ok(doc.includes("/workbench/notes/folder/my%20note.md"), "save target = own slug AS A FILE");
   assert.ok(doc.includes("if_match"), "uses optimistic concurrency like the full editor");
   assert.ok(doc.includes("__wikiDirty"), "pauses the reload poll while unsaved");
   assert.ok(!/<script[^>]*src=/.test(doc), "still no client bundle");

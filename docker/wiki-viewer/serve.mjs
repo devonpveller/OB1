@@ -375,7 +375,16 @@ async function handle(req, res) {
           "cache-control": "no-store",
           "x-wiki-render": "db",
         });
-        res.end(pageDocument({ title: row.title, bodyHtml, slug: row.slug, updatedAt: row.updated_at }));
+        // editable on notes HERE too. A UI-created note always has a row (the
+        // workbench syncs wiki_pages at save time), so it resolves on THIS
+        // path; the fresh-file path below only catches notes with no row yet
+        // (written straight to disk). Setting the flag only there shipped the
+        // "editable immediately" feature on a path real notes never take
+        // (operator caught it, 2026-08-27).
+        res.end(pageDocument({
+          title: row.title, bodyHtml, slug: row.slug, updatedAt: row.updated_at,
+          editable: key.startsWith("notes/"),
+        }));
         return;
       }
     }

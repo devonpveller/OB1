@@ -111,7 +111,11 @@ export function notAvailableDocument({ slug }) {
 function liveEditor(slug) {
   const notePath = String(slug || "").replace(new RegExp("^notes/"), "");
   if (!notePath) return "";
-  const api = "/workbench/notes/" + notePath.split("/").map(encodeURIComponent).join("/");
+  // Page slugs are extension-less but the notes API addresses FILES (*.md).
+  // Without this the load 404'd and a save would have written a DIFFERENT
+  // file named like the slug (operator's "the feature is not here", 2026-08-27).
+  const noteFile = notePath.endsWith(".md") ? notePath : notePath + ".md";
+  const api = "/workbench/notes/" + noteFile.split("/").map(encodeURIComponent).join("/");
   return `<section class="live-editor">
 <h2>Edit now</h2>
 <p class="live-editor-hint">The full editor arrives with the built page. Until then you can edit here &mdash; it saves to the same note.</p>
