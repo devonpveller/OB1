@@ -138,6 +138,11 @@ RUN node /tmp/watcher-polling.mjs
 # Applied by a script (see patches/search-api.mjs for why sed is banned here).
 COPY patches/search-api.mjs /tmp/search-api.mjs
 RUN node /tmp/search-api.mjs
+# COMPILE GATE: the patch verified the text it wrote but not that the file
+# still PARSES - a mangled regex shipped invalid TS and broke the builder in
+# production (2026-08-26). esbuild parses the patched files here, so a bad
+# patch fails the image build instead of the site.
+RUN node_modules/.bin/esbuild --log-level=error --outfile=/dev/null quartz/components/scripts/search.inline.ts
 
 # Build resilience: the compiler's orphan-sweep deletes leaf pages while a
 # rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that
@@ -188,6 +193,8 @@ RUN set -e; \
 # the wiring (graph.inline.ts is the one FORKED file — guarded by the sha check
 # above). Later phases (P2–P6) add their components into quartz-overlay/.
 COPY quartz-overlay/quartz/ /quartz/quartz/
+# Compile gate for the OVERLAY sources (they only exist after the COPY above).
+RUN node_modules/.bin/esbuild --log-level=error --outfile=/dev/null quartz/components/scripts/NotesEditor.inline.ts
 
 # Register overlay components. Append-only re-export needs NO upstream anchor —
 # Quartz's `import * as Component from "./components"` picks up every named

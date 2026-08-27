@@ -49,8 +49,10 @@ const TO = `    } else if (searchType === "basic") {
             .replace(/>/g, "&gt;")
         const withHighlights = (value: string) =>
           escapeHtml(value)
-            .replace(/&lt;&lt;HL&gt;&gt;/g, "<b>")
-            .replace(/&lt;&lt;\/HL&gt;&gt;/g, "</b>")
+            .split("&lt;&lt;HL&gt;&gt;")
+            .join("<b>")
+            .split("&lt;&lt;/HL&gt;&gt;")
+            .join("</b>")
         await displayResults(
           apiResults.map((hit: any, i: number) => ({
             id: -1 - i,
