@@ -83,3 +83,15 @@ test("THEME: the document applies the user's saved theme before paint", () => {
   assert.ok(doc.indexOf("saved-theme") < doc.indexOf("<body"), "must run before body (no flash)");
   assert.ok(!/<script[^>]*src=/.test(doc), "still no external bundle");
 });
+
+test("EDITOR: notes get a save target derived from their OWN slug", () => {
+  const doc = pageDocument({ slug: "notes/folder/my note", editable: true });
+  // Derived, never inherited (audit A-1): the save path must be this note's.
+  assert.ok(doc.includes("/workbench/notes/folder/my%20note"), "save target from own slug");
+  assert.ok(doc.includes("if_match"), "uses optimistic concurrency like the full editor");
+  assert.ok(doc.includes("__wikiDirty"), "pauses the reload poll while unsaved");
+  assert.ok(!/<script[^>]*src=/.test(doc), "still no client bundle");
+  // and the read-only variant must NOT get an editor
+  const ro = pageDocument({ slug: "content/place/place-x" });
+  assert.ok(!ro.includes("live-editor"), "non-note pages stay read-only");
+});

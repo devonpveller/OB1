@@ -63,10 +63,13 @@ padding:.55rem 1.2rem;font-size:.85rem;color:var(--darkgray,#9a9ba6)}
 <a href="/">Home</a></div>
 <article class="popover-hint"><h1>${safeTitle}</h1>
 ${bodyHtml || "<p><em>(this page has no content yet)</em></p>"}</article>
+${editable ? liveEditor(slug) : ""}
 </div></div></div>
 <script>
 (function () {
   setInterval(function () {
+    // Never yank the page out from under an unsaved draft (data loss).
+    if (window.__wikiDirty) return;
     fetch(location.pathname, { cache: "no-store" })
       .then(function (r) { return r.text() })
       .then(function (t) { if (t.indexOf("data-live-page") === -1) location.reload() })
@@ -95,4 +98,75 @@ export function notAvailableDocument({ slug }) {
       `is simply nothing to show.</p>` +
       `<p><a href="/">Back to the Knowledge Vault</a></p>`,
   }).replace('data-live-page="1"', 'data-not-available="1"');
+}
+
+// A minimal editor for the window BEFORE a note's real page exists (~60s).
+//
+// SAFE BY CONSTRUCTION (audit A-1): the save target is DERIVED from the slug
+// this document was rendered for - never inherited from another page's markup,
+// which is the failure mode that made the shell-swap design unacceptable. It
+// also loads no client bundle; it is ~40 lines of its own code talking to the
+// same /workbench/notes API the full editor uses, including its optimistic
+// if_match concurrency check.
+function liveEditor(slug) {
+  const notePath = String(slug || "").replace(new RegExp("^notes/"), "");
+  if (!notePath) return "";
+  const api = "/workbench/notes/" + notePath.split("/").map(encodeURIComponent).join("/");
+  return `<section class="live-editor">
+<h2>Edit now</h2>
+<p class="live-editor-hint">The full editor arrives with the built page. Until then you can edit here &mdash; it saves to the same note.</p>
+<textarea id="live-md" spellcheck="false" rows="14"></textarea>
+<div class="live-editor-bar"><button id="live-save" type="button">Save</button>
+<span id="live-status"></span></div>
+</section>
+<style>
+.live-editor{margin:2rem 0 3rem}
+.live-editor textarea{width:100%;min-height:16rem;font-family:var(--codeFont,monospace);
+font-size:.9rem;line-height:1.5;padding:.75rem;border:1px solid var(--lightgray,#44454f);
+border-radius:5px;background:var(--light,#1e1e24);color:var(--dark,#d4d4dc)}
+.live-editor-bar{display:flex;gap:.75rem;align-items:center;margin-top:.5rem}
+.live-editor-bar button{padding:.4rem 1rem;border-radius:5px;cursor:pointer;
+border:1px solid var(--lightgray,#44454f);background:var(--secondary,#84a9ff);color:#fff}
+#live-status{font-size:.85rem;color:var(--darkgray,#9a9ba6)}
+.live-editor-hint{font-size:.85rem;color:var(--darkgray,#9a9ba6)}
+</style>
+<script>
+(function () {
+  var api = ${JSON.stringify(api)};
+  var ta = document.getElementById("live-md");
+  var btn = document.getElementById("live-save");
+  var st = document.getElementById("live-status");
+  var hash = null;
+  function status(m) { st.textContent = m; }
+  fetch(api, { cache: "no-store" })
+    .then(function (r) { return r.ok ? r.json() : null })
+    .then(function (j) {
+      if (!j) { status("could not load the note"); return }
+      ta.value = j.content || "";
+      hash = j.hash || null;
+    })
+    .catch(function () { status("could not load the note") });
+  ta.addEventListener("input", function () {
+    window.__wikiDirty = true;           // pauses the auto-reload poll
+    status("unsaved changes");
+  });
+  btn.addEventListener("click", function () {
+    status("saving...");
+    fetch(api, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: ta.value, if_match: hash }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j } }) })
+      .then(function (res) {
+        if (res.status === 409) { status("someone else changed this note - reload before saving"); return }
+        if (!res.ok) { status("save failed"); return }
+        hash = res.j.hash || hash;
+        window.__wikiDirty = false;      // the poll may take over again
+        status("saved");
+      })
+      .catch(function () { status("save failed") });
+  });
+})();
+</script>`;
 }
