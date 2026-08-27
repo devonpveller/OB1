@@ -196,6 +196,11 @@ COPY quartz-overlay/quartz/ /quartz/quartz/
 # Compile gate for the OVERLAY sources (they only exist after the COPY above).
 RUN node_modules/.bin/esbuild --log-level=error --outfile=/dev/null quartz/components/scripts/NotesEditor.inline.ts
 
+# -- Page-scoped graph (see patches/graph-api.mjs) --------------------------
+COPY patches/graph-api.mjs /tmp/graph-api.mjs
+RUN node /tmp/graph-api.mjs
+RUN node_modules/.bin/esbuild --log-level=error --outfile=/dev/null quartz/components/scripts/graph.inline.ts
+
 # Register overlay components. Append-only re-export needs NO upstream anchor —
 # Quartz's `import * as Component from "./components"` picks up every named
 # export, so appending here can never conflict with an upstream edit. Each
