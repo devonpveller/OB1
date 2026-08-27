@@ -15,7 +15,7 @@ import http from "node:http";
 // file at /quartz/serve.mjs so Quartz's own node_modules resolve the
 // unified/remark imports (ESM ignores NODE_PATH).
 import { renderMarkdown } from "./lib/render-page.mjs";
-import { pageDocument } from "./lib/page-document.mjs";
+import { pageDocument, notAvailableDocument } from "./lib/page-document.mjs";
 import { fetchWikiPage, dbRenderEnabled } from "./lib/wiki-db.mjs";
 import { createReadStream } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
@@ -361,47 +361,32 @@ async function handle(req, res) {
   // user's own document — it must be readable the second it exists.
   const fresh = await findFreshMarkdown(urlPath);
   if (fresh) {
+    // A file exists but has no build and no DB row yet (a note saved seconds
+    // ago). Render it with the SAME renderer + themed document as the DB path:
+    // the old bespoke interim markup linked NO stylesheet, which is exactly the
+    // unstyled "white screen with a title" the operator hit (2026-08-26).
     writeFile(PUBLISH_FLAG, "1").catch(() => {});
-    let content = "";
-    try { content = renderInterimContent(await readFile(fresh.file, "utf8")); } catch { /* */ }
-    // Operator feedback 2026-08-26: the old copy ("saved ... rendering ...
-    // refreshes automatically") told the reader nothing they could act on, and
-    // a blind meta-refresh looked broken when the page took minutes. Say what
-    // is happening, how long it has been, and poll the REAL url so the moment
-    // the built page exists we land on it.
-    const ageSec = Math.max(0, Math.round((Date.now() - fresh.mtimeMs) / 1000));
-    const ageTxt = ageSec < 90 ? `${ageSec}s ago` : `${Math.round(ageSec / 60)} min ago`;
-    const banner = fresh.isNote
-      ? `Saved ${ageTxt} — your text is below and is safe. The full editable page is still being built; ` +
-        "this view checks every few seconds and switches over on its own."
-      : `Created ${ageTxt} — showing the raw content while the page is built. ` +
-        "This view checks every few seconds and switches over on its own.";
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    // Poll with fetch instead of a blind meta-refresh: reload ONLY once the
-    // built page actually exists, so the reader never watches the same interim
-    // screen reappear. The meta-refresh stays as a no-JS fallback.
-    res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="30"><title>Building your page…</title>
-<script>
-(function () {
-  var since = Date.now();
-  setInterval(function () {
-    fetch(location.pathname, { cache: "no-store", headers: { "x-interim-poll": "1" } })
-      .then(function (r) { return r.text() })
-      .then(function (t) { if (t.indexOf("data-interim-page") === -1) location.reload() })
-      .catch(function () {});
-    var el = document.getElementById("waited");
-    if (el) el.textContent = Math.round((Date.now() - since) / 1000) + "s";
-  }, 5000);
-})();
-</script>
-<style>body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#1e1e24;color:#d4d4dc;line-height:1.6}
-.banner{background:#2a2b33;border-bottom:1px solid #44454f;padding:.6rem 1.2rem;font-size:.85rem;color:#9a9ba6}
-main{max-width:46rem;margin:0 auto;padding:1.5rem 1.2rem}
-h1,h2,h3,h4,h5,h6{line-height:1.25}a{color:#84a9ff}</style>
-</head><body data-interim-page="1"><div class="banner">⏳ ${banner} <span style="opacity:.7">(waiting <span id="waited">0s</span>)</span> <a href="/">Home</a></div>
-<main>${content || "<p><em>(empty page)</em></p>"}</main></body></html>`);
+    let md = "";
+    try { md = await readFile(fresh.file, "utf8"); } catch { /* vanished */ }
+    let bodyHtml = "";
+    let title = "";
+    try {
+      const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(md);
+      const body = fm ? md.slice(fm[0].length) : md;
+      const t = fm ? /^title:\s*(.*)$/m.exec(fm[1]) : null;
+      title = t ? t[1].trim().replace(/^["']|["']$/g, "") : "";
+      bodyHtml = renderMarkdown(body);
+    } catch { /* never block the page on a render error */ }
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-wiki-render": "fresh",
+    });
+    res.end(pageDocument({
+      title, bodyHtml,
+      slug: decodeURIComponent(urlPath.split("?")[0]).replace(/^\/+/, ""),
+      editable: fresh.isNote,
+    }));
     return;
   }
   // 2. Registered-but-unbuilt entity: honest status page from planned.json.
@@ -425,6 +410,24 @@ h1,h2,h3,h4,h5,h6{line-height:1.25}a{color:#84a9ff}</style>
     ));
     return;
   }
+  // 3. Nothing anywhere. For a wiki-looking (extension-less) path this is
+  // almost always a link to a RETIRED page class, so answer with a themed
+  // explanation rather than a bare 404: the client prefetches links for
+  // popovers and a non-2xx there logs a console error on every hover
+  // (operator, 2026-08-26). Assets and anything with an extension still 404.
+  {
+    const p3 = decodeURIComponent((req.url || "/").split("?")[0].split("#")[0]);
+    if (!extname(p3) && p3 !== "/") {
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-wiki-render": "not-available",
+      });
+      res.end(notAvailableDocument({ slug: p3.replace(/^\/+/, "") }));
+      return;
+    }
+  }
+
   // 3. True 404 — fall back to Quartz's generated 404 page if present.
   try {
     const nf = join(ROOT, "404.html");

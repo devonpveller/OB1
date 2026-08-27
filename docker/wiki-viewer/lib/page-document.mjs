@@ -22,35 +22,64 @@ const esc = (s) =>
 
 // data-live-page marks this as the fallback for its own poll script (and for
 // probes: distinct from the interim page's data-interim-page).
-export function pageDocument({ title, bodyHtml, slug, updatedAt }) {
+export function pageDocument({ title, bodyHtml, slug, updatedAt, editable }) {
   const safeTitle = esc(title || (slug || "").split("/").pop() || "Page");
   const when = updatedAt ? new Date(updatedAt).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "";
+  // Quartz's own wrapper structure (#quartz-root.page > #quartz-body > .center
+  // > article) so index.css actually applies. Without it the page rendered
+  // effectively unstyled - a white screen with a title (operator, 2026-08-26).
+  // Sidebars are intentionally omitted: they need the client bundle, which this
+  // document must not load (audit A-1).
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${safeTitle}</title>
 <link rel="stylesheet" href="/index.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;700&family=Source+Sans+Pro:ital,wght@0,400;0,600;1,400;1,600&family=IBM+Plex+Mono:wght@400;600&display=swap">
 <style>
-body{margin:0}
-.live-banner{position:sticky;top:0;background:#2a2b33;border-bottom:1px solid #44454f;
-padding:.55rem 1.2rem;font-size:.85rem;color:#9a9ba6;z-index:10}
-.live-banner a{color:#84a9ff}
-main.live-page{max-width:46rem;margin:0 auto;padding:1.5rem 1.2rem;line-height:1.6}
+#quartz-body{display:block}
+.center{max-width:750px;margin:0 auto;padding:0 1.5rem}
+.live-banner{background:var(--lightgray,#2a2b33);border-bottom:1px solid var(--gray,#44454f);
+padding:.55rem 1.2rem;font-size:.85rem;color:var(--darkgray,#9a9ba6)}
+.live-banner a{color:var(--secondary,#84a9ff)}
 </style></head>
-<body data-live-page="1">
-<div class="live-banner">&#9889; Live from Open Brain${when ? ` &middot; updated ${esc(when)}` : ""} &middot;
-read-only view; the full page (with editing) takes over automatically once built.
+<body data-live-page="1" data-slug="${esc(slug || "")}">
+<div id="quartz-root" class="page"><div id="quartz-body"><div class="center">
+<div class="live-banner">&#9889; Live from Open Brain${when ? ` &middot; updated ${esc(when)}` : ""}${
+  editable ? " &middot; the editable page is being prepared and will load automatically"
+           : " &middot; read-only; the full page takes over automatically once built"} &middot;
 <a href="/">Home</a></div>
-<main class="live-page"><h1>${safeTitle}</h1>
-${bodyHtml || "<p><em>(this page has no content yet)</em></p>"}</main>
+<article class="popover-hint"><h1>${safeTitle}</h1>
+${bodyHtml || "<p><em>(this page has no content yet)</em></p>"}</article>
+</div></div></div>
 <script>
 (function () {
   setInterval(function () {
     fetch(location.pathname, { cache: "no-store" })
       .then(function (r) { return r.text() })
-      .then(function (t) { if (t.indexOf("data-live-page") === -1 && t.indexOf("data-interim-page") === -1) location.reload() })
+      .then(function (t) { if (t.indexOf("data-live-page") === -1) location.reload() })
       .catch(function () {});
-  }, 5000);
+  }, 3000);
 })();
 </script>
 </body></html>`;
+}
+
+// A wiki-looking URL with nothing behind it: no build, no row, not planned.
+// In practice this is a link to a RETIRED page class (topic/* was swept in
+// P2.3) still baked into older page bodies. A bare 404 rendered as an
+// unstyled error AND made the client's popover prefetch log a console error
+// (operator, 2026-08-26). Serve a themed, explanatory page instead — same
+// no-bundle/no-identity rules as the live document.
+export function notAvailableDocument({ slug }) {
+  const name = esc((slug || "").split("/").pop() || "This page");
+  return pageDocument({
+    title: name,
+    slug,
+    bodyHtml:
+      `<p><strong>${name}</strong> isn't in the knowledge base.</p>` +
+      `<p>This usually means a link points at a page class that was retired, ` +
+      `or at something Open Brain has not captured. Nothing is broken — there ` +
+      `is simply nothing to show.</p>` +
+      `<p><a href="/">Back to the Knowledge Vault</a></p>`,
+  }).replace('data-live-page="1"', 'data-not-available="1"');
 }

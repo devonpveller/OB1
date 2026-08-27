@@ -55,11 +55,22 @@ test("SECURITY: the live document carries no identity attrs and no client bundle
   assert.ok(doc.includes("data-live-page"), "must self-identify for the poll/probe");
   assert.ok(doc.includes('href="/index.css"'), "site css for theme parity");
   assert.ok(doc.includes("&lt;script&gt;"), "title is escaped");
-  assert.ok(doc.includes("read-only view"));
+  assert.ok(/read-only|editable page is being prepared/.test(doc), "states what this view is");
+  // Theme parity: without Quartz's wrapper structure index.css does not
+  // apply and the page renders as a white screen (operator, 2026-08-26).
+  assert.ok(doc.includes('id="quartz-root"') && doc.includes('class="center"'),
+    "must use Quartz wrapper structure so the theme applies");
 });
 
 test("live document tolerates missing fields", () => {
   const doc = pageDocument({ slug: "notes/x" });
   assert.ok(doc.includes("<h1>x</h1>"));
   assert.ok(doc.includes("no content yet"));
+});
+
+test("editable notes get the note-specific banner", () => {
+  const doc = pageDocument({ slug: "notes/x", editable: true });
+  assert.ok(doc.includes("editable page is being prepared"));
+  // still no bundle, even on the note variant
+  assert.ok(!/<script[^>]*src=/.test(doc));
 });
