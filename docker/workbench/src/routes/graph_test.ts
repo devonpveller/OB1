@@ -33,3 +33,12 @@ Deno.test("buildGraph dedupes repeated edges and tolerates junk", () => {
   ], "a");
   assertEquals(g.links.length, 1);
 });
+
+Deno.test("parseGraphParams: limit clamps to [1, 800], defaults 400", () => {
+  assertEquals(parseGraphParams("a", "1").limit, 400);
+  assertEquals(parseGraphParams("a", "1", "800").limit, 800);
+  assertEquals(parseGraphParams("a", "1", "9999").limit, 800);
+  assertEquals(parseGraphParams("a", "1", "0").limit, 400);
+  assertEquals(parseGraphParams("a", "1", "junk").limit, 400);
+  assertEquals(parseGraphParams("a", "1", "250.9").limit, 250);
+});

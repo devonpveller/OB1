@@ -32,7 +32,8 @@ const TO = `  // [ai-stack patch] Page-scoped graph. depth < 0 means the compone
   const apiGraph = await (async () => {
     try {
       const r = await fetch(
-        "/workbench/graph?slug=" + encodeURIComponent(fullSlug) + "&depth=" + apiDepth,
+        "/workbench/graph?slug=" + encodeURIComponent(fullSlug) + "&depth=" + apiDepth +
+          (depth < 0 ? "&limit=800" : ""),
         { cache: "no-store" },
       )
       if (!r.ok) return null

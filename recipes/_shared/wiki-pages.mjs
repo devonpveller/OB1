@@ -69,20 +69,10 @@ function parseTags(raw) {
     .filter(Boolean);
 }
 
-// Outgoing [[wikilink]] targets, matching what ContentIndex recorded as
-// `links` (the graph's edge source). Alias syntax [[target|label]] keeps the
-// target; anchors are stripped.
-export function extractLinks(body) {
-  const out = [];
-  const seen = new Set();
-  for (const m of String(body || "").matchAll(/\[\[([^\]]+)\]\]/g)) {
-    const target = m[1].split("|")[0].split("#")[0].trim();
-    if (!target || seen.has(target)) continue;
-    seen.add(target);
-    out.push(target);
-  }
-  return out;
-}
+// extractLinks moved to links.mjs (2026-08-28) so the Deno workbench can
+// import it without this module's process.env load-time reads. Re-exported
+// here so existing consumers keep working.
+export { extractLinks } from "./links.mjs";
 
 // PURE: markdown + vault-relative path → the row this page should have.
 export function parseWikiPage(relPath, markdown) {

@@ -23,9 +23,10 @@ RUN deno cache src/main.ts || true
 
 # Build gate (wiki-dynamic-index P3): pure-logic tests run at image build so a
 # regression cannot ship silently - mirrors the wiki-service image, which runs
-# lib/entity-links.test.mjs. Only tests that need no DB/network run here;
-# anything requiring a live pool is exercised against the running stack.
-RUN deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/util/
+# lib/entity-links.test.mjs. Only tests that need no DB/network AND no
+# "@shared/*" import (the /recipes mount exists only at runtime) can run here —
+# which is why pure note parsing lives in src/util/, not repositories/.
+RUN deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/routes/graph_test.ts src/util/
 
 # Runs as root: the workbench WRITES the shared vault (notes, the Changes log,
 # and image assets under /wiki/assets), which the root-running wiki-service

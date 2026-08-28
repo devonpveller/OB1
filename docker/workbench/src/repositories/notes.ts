@@ -6,6 +6,8 @@ import { query } from "../db/pool.ts";
 import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
+import { parseNoteRow } from "../util/notes-parse.ts";
+export { parseNoteRow };
 import {
   gitMv,
   gitRm,
@@ -32,33 +34,57 @@ function notesRel(notePath: string): string {
   return `notes/${rel}`;
 }
 
-// ── wiki_pages sync (no-rebuild Phase B, 2026-08-26) ────────────────────────
-// A note exists as a FILE the moment it is saved, but nothing published its
-// wiki_pages row until a backfill — so the viewer's DB-rendered fallback
-// could not serve brand-new notes and search could not find them. The
-// workbench is the notes writer, so it owns the row. Best-effort: a DB
-// hiccup must never fail a save (the file is the source of truth).
-export function parseNoteRow(rel: string, content: string): { slug: string; title: string; body: string } {
-  const slug = rel.replace(/\.md$/i, "");
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content);
-  const body = m ? content.slice(m[0].length) : content;
-  const t = m ? /^title:\s*(.*)$/m.exec(m[1]) : null;
-  let title = t ? t[1].trim().replace(/^["']|["']$/g, "") : "";
-  if (!title) title = slug.split("/").pop() ?? slug;
-  return { slug, title, body };
+// ── wiki_pages sync (no-rebuild Phase B, 2026-08-26; chokepoint 2026-08-28) ──
+// A note exists as a FILE the moment it is saved; the workbench is the notes
+// writer, so it owns the row. EVERY mutation below (write, move, trash,
+// restore, recover, empty-trash) goes through syncNoteRow/deleteNoteRow —
+// the 2026-08-28 audit found move/trash/empty mutating files with no row
+// sync, which left ghost rows in the live nav ("removed item still in the
+// list") and moved notes invisible at their new location. Best-effort: a DB
+// hiccup must never fail a file op (the file is the source of truth;
+// backfill-wiki-pages.mjs can rebuild the table at any time).
+// Resolve raw [[wikilink]] targets to full wiki_pages slugs, the way Quartz
+// resolves them at build time: exact slug first, else a page whose slug ENDS
+// with "/<target>" (hand-written notes say [[tool-postgresql]], the page lives
+// at content/tool/tool-postgresql). Without this the graph endpoint dropped
+// every hand-written link — the operator's "3 nodes local, 2 fullscreen"
+// inconsistency (2026-08-28). Unresolvable targets are kept raw: harmless to
+// the graph (no matching node) and self-healing if the page appears later.
+async function resolveLinks(rawLinks: string[]): Promise<string[]> {
+  const raws = rawLinks.filter((l) => typeof l === "string" && l.length > 0).slice(0, 200);
+  if (!raws.length) return [];
+  const esc = (s: string) => s.replace(/([\\%_])/g, "\\$1");
+  const rows = await query<{ raw: string; slug: string }>(
+    `SELECT DISTINCT ON (t.raw) t.raw, w.slug
+       FROM unnest($1::text[], $2::text[]) AS t(raw, pat)
+       JOIN wiki_pages w ON w.slug = t.raw OR w.slug LIKE '%/' || t.pat
+      ORDER BY t.raw, (w.slug = t.raw) DESC, length(w.slug) ASC`,
+    [raws, raws.map(esc)],
+  );
+  const map = new Map(rows.map((r) => [r.raw, r.slug]));
+  return raws.map((r) => map.get(r) ?? r);
 }
 
 async function syncNoteRow(rel: string, content: string): Promise<void> {
   try {
-    const { slug, title, body } = parseNoteRow(rel, content);
+    const { slug, title, body, tags, rawLinks } = parseNoteRow(rel, content);
+    const links = await resolveLinks(rawLinks);
     await query(
-      `INSERT INTO wiki_pages (slug, page_class, title, body, updated_at)
-       VALUES ($1, 'note', $2, $3, now())
-       ON CONFLICT (slug) DO UPDATE SET title = $2, body = $3, updated_at = now()`,
-      [slug, title, body],
+      `INSERT INTO wiki_pages (slug, page_class, title, body, tags, links, updated_at)
+       VALUES ($1, 'note', $2, $3, $4, $5, now())
+       ON CONFLICT (slug) DO UPDATE SET title = $2, body = $3, tags = $4, links = $5, updated_at = now()`,
+      [slug, title, body, JSON.stringify(tags), JSON.stringify(links)],
     );
   } catch (e) {
     console.error("[wiki-pages] note row sync failed (non-fatal):", (e as Error).message);
+  }
+}
+
+async function deleteNoteRow(rel: string): Promise<void> {
+  try {
+    await query(`DELETE FROM wiki_pages WHERE slug = $1`, [rel.replace(/\.md$/i, "")]);
+  } catch (e) {
+    console.error("[wiki-pages] note row delete failed (non-fatal):", (e as Error).message);
   }
 }
 
@@ -240,6 +266,10 @@ export async function moveNote(
     return { conflict: true, current: await sha256(content) };
   }
   await gitMv(fromRel, toRel, `notes: move ${fromRel} -> ${toRel}`, author);
+  // The row follows the file: without this, the live nav kept showing the note
+  // at its OLD folder and never at the new one (2026-08-28 audit).
+  await deleteNoteRow(fromRel);
+  await syncNoteRow(toRel, content);
   return {
     from: fromRel.replace(/^notes\//, ""),
     to: toRel.replace(/^notes\//, ""),
@@ -296,7 +326,9 @@ export async function trashNote(
 ): Promise<{ trashed: string } | { error: string; code: 404 }> {
   const rel = notesRel(notePath);
   if (!(await vaultExists(rel))) return { error: "note not found", code: 404 };
-  await vaultWrite(rel, setTrashed(await vaultRead(rel), true, new Date().toISOString()));
+  const trashedContent = setTrashed(await vaultRead(rel), true, new Date().toISOString());
+  await vaultWrite(rel, trashedContent);
+  await syncNoteRow(rel, trashedContent);
   await vaultCommitPath(rel, `notes: trash ${rel}`, author);
   return { trashed: rel.replace(/^notes\//, "") };
 }
@@ -308,7 +340,9 @@ export async function restoreNote(
 ): Promise<{ restored: string } | { error: string; code: 404 }> {
   const rel = notesRel(notePath);
   if (!(await vaultExists(rel))) return { error: "note not found", code: 404 };
-  await vaultWrite(rel, setTrashed(await vaultRead(rel), false));
+  const restoredContent = setTrashed(await vaultRead(rel), false);
+  await vaultWrite(rel, restoredContent);
+  await syncNoteRow(rel, restoredContent);
   await vaultCommitPath(rel, `notes: restore ${rel}`, author);
   return { restored: rel.replace(/^notes\//, "") };
 }
@@ -324,7 +358,11 @@ export async function trashFolder(
   if (!(await vaultExists(dir))) return { error: "folder not found", code: 404 };
   const at = new Date().toISOString();
   const files = await listNoteMd(dir);
-  for (const f of files) await vaultWrite(f, setTrashed(await vaultRead(f), true, at));
+  for (const f of files) {
+    const c = setTrashed(await vaultRead(f), true, at);
+    await vaultWrite(f, c);
+    await syncNoteRow(f, c);
+  }
   await vaultCommitPath(dir, `notes: trash folder ${rel} (and contents)`, author);
   return { trashed: rel, count: files.length };
 }
@@ -338,7 +376,11 @@ export async function restoreFolder(
   const dir = `notes/${rel}`;
   if (!(await vaultExists(dir))) return { error: "folder not found", code: 404 };
   const files = await listNoteMd(dir);
-  for (const f of files) await vaultWrite(f, setTrashed(await vaultRead(f), false));
+  for (const f of files) {
+    const c = setTrashed(await vaultRead(f), false);
+    await vaultWrite(f, c);
+    await syncNoteRow(f, c);
+  }
   await vaultCommitPath(dir, `notes: restore folder ${rel}`, author);
   return { restored: rel, count: files.length };
 }
@@ -371,6 +413,9 @@ export async function emptyTrash(author?: string): Promise<{ removed: string[] }
     const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (fm && /^\s*trashed\s*:\s*true\s*$/m.test(fm[1])) {
       await gitRm(rel, `notes: empty trash — remove ${rel}`, author);
+      // Without this the row outlived the file: the live nav listed a note
+      // whose page said "not in the knowledge base" (2026-08-28 audit).
+      await deleteNoteRow(rel);
       removed.push(rel.replace(/^notes\//, ""));
     }
   }
@@ -409,7 +454,9 @@ export async function recoverNote(
   // commit (a delete/empty-trash) the content lives in the parent.
   const content = (await vaultGitShow(fromCommit, rel)) ?? (await vaultGitShow(`${fromCommit}~1`, rel));
   if (content == null) return { error: "note not found at that revision", code: 404 };
-  await vaultWrite(rel, setTrashed(content, false));
+  const recoveredContent = setTrashed(content, false);
+  await vaultWrite(rel, recoveredContent);
+  await syncNoteRow(rel, recoveredContent);
   await vaultCommitPath(rel, `notes: recover ${rel} @ ${fromCommit.slice(0, 8)}`, author);
   return { recovered: rel.replace(/^notes\//, "") };
 }
