@@ -314,6 +314,38 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     }
   }
 
+  // [ai-stack] Two-stage activation. A single click/tap SELECTS a node and
+  // highlights its chain; a second click on the SAME node navigates. On a
+  // touch screen there is no hover at all, so before this the only thing a tap
+  // could do was leave the page - you could never inspect a node's links.
+  let selectedNodeId: string | null = null
+  // Set on every node activation so the canvas click handler below can tell a
+  // click that LANDED ON A NODE from a click on empty space: the native click
+  // event fires a moment after the pointerup that activated the node.
+  let lastNodeActivationAt = 0
+
+  function clearSelection() {
+    if (selectedNodeId === null) return
+    selectedNodeId = null
+    updateHoverInfo(null)
+    renderPixiFromD3()
+  }
+
+  function activateNode(nodeId: string) {
+    lastNodeActivationAt = Date.now()
+    if (selectedNodeId === nodeId) {
+      const targ = resolveRelative(fullSlug, nodeId as SimpleSlug)
+      window.spaNavigate(new URL(targ, window.location.toString()))
+      return
+    }
+    // A different node: the previous selection is dropped. updateHoverInfo
+    // recomputes `active` for EVERY node from scratch, so exactly one node is
+    // ever selected - clicking B cannot leave A selected.
+    selectedNodeId = nodeId
+    updateHoverInfo(nodeId)
+    renderPixiFromD3()
+  }
+
   let dragStartTime = 0
   let dragging = false
   // [ai-stack patch] frames of link redraw still owed (see animate()).
@@ -395,8 +427,17 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
       let alpha = 1
 
       // if we are hovering over a node, we want to highlight the immediate neighbours
-      if (hoveredNodeId !== null && focusOnHover) {
-        alpha = n.active ? 1 : 0.2
+      // [ai-stack] dim non-neighbours when focusOnHover is configured OR when
+      // the user has click-selected a node: the inline graph sets
+      // focusOnHover:false, but click-to-highlight must work there too.
+      //
+      // THREE tiers, not two: the focused node itself stays at full opacity,
+      // its chain sits between, everything else recedes. With a flat "chain =
+      // 1" you cannot tell WHICH node is selected once you click a neighbour
+      // of the previous one - they both look lit.
+      if (hoveredNodeId !== null && (focusOnHover || selectedNodeId !== null)) {
+        const focusId = selectedNodeId ?? hoveredNodeId
+        alpha = n.simulationData.id === focusId ? 1 : n.active ? 0.65 : 0.2
       }
 
       tweenGroup.add(new Tweened<Graphics>(n.gfx, tweenGroup).to({ alpha }, 200))
@@ -437,6 +478,18 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     eventMode: "static",
   })
   graph.appendChild(app.canvas)
+
+  // [ai-stack] Click on empty space clears the selection. The Pixi stage is
+  // deliberately left non-interactive (d3-zoom/-drag own the canvas events),
+  // so this is a plain DOM listener: any click that did NOT just activate a
+  // node is a click on the background. Hit-testing by hand would mean
+  // reimplementing the zoom transform, whose failure mode is worse - a
+  // mis-mapped coordinate would clear the selection the user just made.
+  const onCanvasClick = () => {
+    if (Date.now() - lastNodeActivationAt < 400) return
+    clearSelection()
+  }
+  app.canvas.addEventListener("click", onCanvasClick)
 
   const stage = app.stage
   stage.interactive = false
@@ -504,7 +557,9 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
         }
       })
       .on("pointerleave", () => {
-        updateHoverInfo(null)
+        // [ai-stack] restore the SELECTED node's highlight rather than clearing,
+        // so a click-selected chain does not vanish when the pointer moves off.
+        updateHoverInfo(selectedNodeId)
         if (label) label.alpha = oldLabelOpacity
         if (!dragging) {
           renderPixiFromD3()
@@ -578,16 +633,14 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
           // if the time between mousedown and mouseup is short, we consider it a click
           if (Date.now() - dragStartTime < 500) {
             const node = graphData.nodes.find((n) => n.id === event.subject.id) as NodeData
-            const targ = resolveRelative(fullSlug, node.id)
-            window.spaNavigate(new URL(targ, window.location.toString()))
+            activateNode(node.id)
           }
         }),
     )
   } else {
     for (const node of nodeRenderData) {
       node.gfx.on("click", () => {
-        const targ = resolveRelative(fullSlug, node.simulationData.id)
-        window.spaNavigate(new URL(targ, window.location.toString()))
+        activateNode(node.simulationData.id)
       })
     }
   }

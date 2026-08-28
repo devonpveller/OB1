@@ -87,6 +87,49 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 ## Dev workflow
 
+- **CLIENT-side change? Do NOT wait for a cold rebuild.** The client bundle is
+  vault-INDEPENDENT: `postscript.js` is the same file whether the vault holds
+  1 page or 49,061. Building it from a one-page scratch vault takes **7
+  seconds**; the ~90-minute wait after a deploy is 49k pages of HTML that a JS
+  change has nothing to do with (measured 2026-08-28: `Parsed 49061 files in
+  46m` + `Emitted 87039 files in 38m`).
+
+  So iterate by building the bundle and swapping it into the live snapshot:
+
+  ```sh
+  # 1. build ONLY the bundle from the candidate image (~8s)
+  docker run --rm --entrypoint sh -v bundleout:/out <image> -c '
+    mkdir -p /tmp/v/content && printf "# Home
+" > /tmp/v/content/index.md
+    cd /quartz && npx quartz build -d /tmp/v/content -o /tmp/out >/dev/null 2>&1
+    cp /tmp/out/postscript.js /out/postscript.js'
+
+  # 2. swap it into the published snapshot - temp file + RENAME, never edit in
+  #    place: snapshots share files by HARDLINK, so an in-place write would
+  #    silently rewrite other snapshots too.
+  docker run --rm -v bundleout:/out -v open-brain_wiki-viewer-srv:/srv alpine sh -c '
+    T=$(readlink -f /srv/current)          # absolute already - do not prefix /srv
+    cp /out/postscript.js "$T/postscript.js.new"
+    mv "$T/postscript.js.new" "$T/postscript.js"'
+
+  # 3. verify THROUGH CADDY, not the container port
+  docker exec openbrain-wiki-viewer node -e 'fetch("http://caddy:8446/postscript.js").then(r=>r.text()).then(j=>console.log(j.length, /<marker>/.test(j)))'
+  ```
+
+  The ETag is size+mtime and the bundle is served `no-cache, must-revalidate`,
+  so browsers pick it up on the next load with no purge.
+
+  **Limits, so this is not mistaken for a deploy:** it is TEMPORARY - the next
+  published snapshot overwrites it - and it only covers client assets
+  (`postscript.js`, `prescript.js`, `index.css`). Changes to `serve.mjs` or
+  `lib/` still need a container recreate. Use it to get behaviour in front of a
+  human in seconds, then do ONE real image deploy when the behaviour is right.
+
+  **On a real deploy, do the swap too:** after recreating the container, swap
+  the new bundle in immediately so readers get the new client code at once
+  instead of waiting out the cold rebuild that is republishing it anyway.
+
+
 - **Sidecar, not live iteration** (each viewer deploy costs a ~25-min cold
   rebuild during which built-page takeover stalls; the DB fallback keeps
   serving):
