@@ -1,16 +1,25 @@
 /**
  * page-document — the self-owned document for DB-rendered pages (Phase B2).
  *
- * DESIGN (audit A-1): this document deliberately borrows NOTHING from built
- * pages. Built pages carry page identity the editing overlay reads back
- * (data-entity-id, editBtn.dataset.notePath, ... — NotesEditor.inline.ts:718-
- * 721); reusing one as a shell would point Edit at the WRONG page: silent
- * data loss. This document therefore:
- *   - links the site's /index.css so theme/typography match,
- *   - ships NO client bundle and NO data-* identity attributes (asserted by
- *     unit test, so reintroducing either fails the image build),
- *   - is READ-ONLY, says so, and polls the real URL to swap itself for the
- *     built page the moment it exists.
+ * DESIGN (audit A-1, as CORRECTED 2026-08-28): the A-1 hazard was INHERITED
+ * identity — reusing a built page as a shell would point Edit at the WRONG
+ * page (silent data loss), because the identity attributes came from another
+ * page's markup. The rule that survives is therefore about provenance, not
+ * about editors: identity is either GENERATED from the slug this document is
+ * rendering, or absent.
+ *
+ *   - READ-ONLY pages (everything that isn't a user note): no client bundle,
+ *     no data-* identity attributes at all. Asserted by unit test.
+ *   - EDITABLE note pages: emit the SAME editor contract a built note page
+ *     emits (NotesEditor.tsx — data-notes-root + the data-wb-edit button),
+ *     with every value derived from the rendered slug, and load the site's
+ *     real client bundle so the ONE CodeMirror editor drives both. A second
+ *     bespoke editor here was the wrong reading of A-1 (operator, 2026-08-27:
+ *     "why two editors?"). Unit tests pin the attribute values to the slug.
+ *
+ * Every bundle script was audited (2026-08-28) to no-op when its anchor
+ * element is absent, so loading the bundle on this reduced DOM is safe;
+ * mermaid needs `.center`, which this document has.
  *
  * Caller must send it with `Cache-Control: no-store` (audit A-4): a transient
  * fallback pinned by a browser/CDN over the real page is the exact failure
@@ -25,6 +34,7 @@ const esc = (s) =>
 export function pageDocument({ title, bodyHtml, slug, updatedAt, editable }) {
   const safeTitle = esc(title || (slug || "").split("/").pop() || "Page");
   const when = updatedAt ? new Date(updatedAt).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "";
+  const editor = editable ? editorContract(slug) : null;
   // Quartz's own wrapper structure (#quartz-root.page > #quartz-body > .center
   // > article) so index.css actually applies. Without it the page rendered
   // effectively unstyled - a white screen with a title (operator, 2026-08-26).
@@ -48,6 +58,8 @@ try {
 } catch (e) {}
 </script>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;700&family=Source+Sans+Pro:ital,wght@0,400;0,600;1,400;1,600&family=IBM+Plex+Mono:wght@400;600&display=swap">
+${editor ? `<script src="/prescript.js" type="application/javascript" spa-preserve></script>
+<script src="/postscript.js" type="module"></script>` : ""}
 <style>
 #quartz-body{display:block}
 .center{max-width:750px;margin:0 auto;padding:0 1.5rem}
@@ -58,18 +70,23 @@ padding:.55rem 1.2rem;font-size:.85rem;color:var(--darkgray,#9a9ba6)}
 <body data-live-page="1" data-slug="${esc(slug || "")}">
 <div id="quartz-root" class="page"><div id="quartz-body"><div class="center">
 <div class="live-banner">&#9889; Live from Open Brain${when ? ` &middot; updated ${esc(when)}` : ""}${
-  editable ? " &middot; the editable page is being prepared and will load automatically"
-           : " &middot; read-only; the full page takes over automatically once built"} &middot;
+  editor ? " &middot; editable right here; the full page takes over automatically once built"
+         : " &middot; read-only; the full page takes over automatically once built"} &middot;
 <a href="/">Home</a></div>
+${editor || ""}
 <article class="popover-hint"><h1>${safeTitle}</h1>
 ${bodyHtml || "<p><em>(this page has no content yet)</em></p>"}</article>
-${editable ? liveEditor(slug) : ""}
 </div></div></div>
 <script>
 (function () {
-  setInterval(function () {
-    // Never yank the page out from under an unsaved draft (data loss).
-    if (window.__wikiDirty) return;
+  var iv = setInterval(function () {
+    // With the bundle loaded, the SPA router can navigate AWAY from this
+    // document (micromorph swaps the body, so data-live-page disappears).
+    // The interval must then die, or it would reload a page the user
+    // deliberately navigated to.
+    if (!document.body || document.body.dataset.livePage !== "1") { clearInterval(iv); return }
+    // Never yank the page out from under an open editor (data loss).
+    if (window.__neEditing) return;
     fetch(location.pathname, { cache: "no-store" })
       .then(function (r) { return r.text() })
       .then(function (t) { if (t.indexOf("data-live-page") === -1) location.reload() })
@@ -100,77 +117,28 @@ export function notAvailableDocument({ slug }) {
   }).replace('data-live-page="1"', 'data-not-available="1"');
 }
 
-// A minimal editor for the window BEFORE a note's real page exists (~60s).
+// The editor contract for a note page, IDENTICAL in shape to what a built
+// note page emits (NotesEditor.tsx:48-91) so the site's ONE bundled CodeMirror
+// editor wires itself here exactly as it does there. Every value is DERIVED
+// from the slug this document is rendering — the corrected A-1 invariant:
+// generated identity is safe, inherited identity is the data-loss hazard.
+// The bespoke textarea editor that briefly lived here was deleted 2026-08-28
+// (operator: "why two editors?"); two write paths to the same file is how
+// divergence bugs start.
 //
-// SAFE BY CONSTRUCTION (audit A-1): the save target is DERIVED from the slug
-// this document was rendered for - never inherited from another page's markup,
-// which is the failure mode that made the shell-swap design unacceptable. It
-// also loads no client bundle; it is ~40 lines of its own code talking to the
-// same /workbench/notes API the full editor uses, including its optimistic
-// if_match concurrency check.
-function liveEditor(slug) {
-  const notePath = String(slug || "").replace(new RegExp("^notes/"), "");
-  if (!notePath) return "";
-  // Page slugs are extension-less but the notes API addresses FILES (*.md).
-  // Without this the load 404'd and a save would have written a DIFFERENT
-  // file named like the slug (operator's "the feature is not here", 2026-08-27).
-  const noteFile = notePath.endsWith(".md") ? notePath : notePath + ".md";
-  const api = "/workbench/notes/" + noteFile.split("/").map(encodeURIComponent).join("/");
-  return `<section class="live-editor">
-<h2>Edit now</h2>
-<p class="live-editor-hint">The full editor arrives with the built page. Until then you can edit here &mdash; it saves to the same note.</p>
-<textarea id="live-md" spellcheck="false" rows="14"></textarea>
-<div class="live-editor-bar"><button id="live-save" type="button">Save</button>
-<span id="live-status"></span></div>
-</section>
-<style>
-.live-editor{margin:2rem 0 3rem}
-.live-editor textarea{width:100%;min-height:16rem;font-family:var(--codeFont,monospace);
-font-size:.9rem;line-height:1.5;padding:.75rem;border:1px solid var(--lightgray,#44454f);
-border-radius:5px;background:var(--light,#1e1e24);color:var(--dark,#d4d4dc)}
-.live-editor-bar{display:flex;gap:.75rem;align-items:center;margin-top:.5rem}
-.live-editor-bar button{padding:.4rem 1rem;border-radius:5px;cursor:pointer;
-border:1px solid var(--lightgray,#44454f);background:var(--secondary,#84a9ff);color:#fff}
-#live-status{font-size:.85rem;color:var(--darkgray,#9a9ba6)}
-.live-editor-hint{font-size:.85rem;color:var(--darkgray,#9a9ba6)}
-</style>
-<script>
-(function () {
-  var api = ${JSON.stringify(api)};
-  var ta = document.getElementById("live-md");
-  var btn = document.getElementById("live-save");
-  var st = document.getElementById("live-status");
-  var hash = null;
-  function status(m) { st.textContent = m; }
-  fetch(api, { cache: "no-store" })
-    .then(function (r) { return r.ok ? r.json() : null })
-    .then(function (j) {
-      if (!j) { status("could not load the note"); return }
-      ta.value = j.content || "";
-      hash = j.hash || null;
-    })
-    .catch(function () { status("could not load the note") });
-  ta.addEventListener("input", function () {
-    window.__wikiDirty = true;           // pauses the auto-reload poll
-    status("unsaved changes");
-  });
-  btn.addEventListener("click", function () {
-    status("saving...");
-    fetch(api, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: ta.value, if_match: hash }),
-    })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j } }) })
-      .then(function (res) {
-        if (res.status === 409) { status("someone else changed this note - reload before saving"); return }
-        if (!res.ok) { status("save failed"); return }
-        hash = res.j.hash || hash;
-        window.__wikiDirty = false;      // the poll may take over again
-        status("saved");
-      })
-      .catch(function () { status("save failed") });
-  });
-})();
-</script>`;
+// The create flow's sessionStorage "ne-autoedit" handoff matches
+// data-note-path / data-note-slug (NotesEditor.inline.ts:1104), so a freshly
+// created note auto-opens CodeMirror HERE, on the fallback, in under a second.
+function editorContract(slug) {
+  const s = String(slug || "");
+  // Mirror NotesEditor.tsx's isUserNote: only leaf pages in the author-owned
+  // notes/ tree are editable; the machine-written Changes log is not.
+  if (!s.startsWith("notes/") || s.startsWith("notes/Changes")) return null;
+  const rel = s.replace(new RegExp("^notes/"), "");
+  if (!rel) return null;
+  const noteApiPath = rel.endsWith(".md") ? rel : rel + ".md";
+  const folderRel = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+  return `<div class="notes-editor-root" data-notes-root data-notebook-id="" data-notebook-slug="" data-notebook-name="" data-folder-rel="${esc(folderRel)}" data-trashed="">
+<button class="ne-launch ne-edit" data-wb-edit data-edit-kind="note" data-note-path="${esc(noteApiPath)}" data-note-slug="${esc(s)}">&#9998; Edit this note</button>
+</div>`;
 }

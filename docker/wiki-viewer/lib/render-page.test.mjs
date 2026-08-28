@@ -70,9 +70,7 @@ test("live document tolerates missing fields", () => {
 
 test("editable notes get the note-specific banner", () => {
   const doc = pageDocument({ slug: "notes/x", editable: true });
-  assert.ok(doc.includes("editable page is being prepared"));
-  // still no bundle, even on the note variant
-  assert.ok(!/<script[^>]*src=/.test(doc));
+  assert.ok(doc.includes("editable right here"));
 });
 
 test("THEME: the document applies the user's saved theme before paint", () => {
@@ -84,16 +82,32 @@ test("THEME: the document applies the user's saved theme before paint", () => {
   assert.ok(!/<script[^>]*src=/.test(doc), "still no external bundle");
 });
 
-test("EDITOR: notes get a save target derived from their OWN slug", () => {
+test("EDITOR: editable notes emit the BUILT page's editor contract, derived from their own slug", () => {
   const doc = pageDocument({ slug: "notes/folder/my note", editable: true });
-  // Derived, never inherited (audit A-1): the save path must be this note's.
-  // The .md matters: slugs are extension-less but the notes API addresses
-  // FILES — without it the editor read a 404 and saved to the WRONG filename.
-  assert.ok(doc.includes("/workbench/notes/folder/my%20note.md"), "save target = own slug AS A FILE");
-  assert.ok(doc.includes("if_match"), "uses optimistic concurrency like the full editor");
-  assert.ok(doc.includes("__wikiDirty"), "pauses the reload poll while unsaved");
-  assert.ok(!/<script[^>]*src=/.test(doc), "still no client bundle");
-  // and the read-only variant must NOT get an editor
-  const ro = pageDocument({ slug: "content/place/place-x" });
-  assert.ok(!ro.includes("live-editor"), "non-note pages stay read-only");
+  // The corrected A-1 invariant: identity is GENERATED from the rendered
+  // slug (never inherited), and it must be the exact contract the bundled
+  // NotesEditor wires (NotesEditor.tsx:88). The .md matters: slugs are
+  // extension-less but the notes API addresses FILES.
+  assert.ok(doc.includes('data-note-path="folder/my note.md"'), "note-path = own slug as a FILE");
+  assert.ok(doc.includes('data-note-slug="notes/folder/my note"'), "note-slug = own slug");
+  assert.ok(doc.includes("data-wb-edit") && doc.includes('data-edit-kind="note"'), "the real edit button");
+  assert.ok(doc.includes("data-notes-root") && doc.includes('data-folder-rel="folder"'), "notes root contract");
+  // ONE editor: the real client bundle drives it — no bespoke editor code.
+  assert.ok(doc.includes('src="/postscript.js"') && doc.includes('src="/prescript.js"'), "loads the site bundle");
+  assert.ok(!doc.includes("live-editor"), "the bespoke textarea editor is gone");
+  assert.ok(doc.includes("__neEditing"), "takeover poll defers to the open editor");
+  assert.ok(doc.includes('dataset.livePage !== "1"'), "poll self-cancels after SPA nav away");
+});
+
+test("EDITOR: everything that is not a user note stays bundle-free and identity-free", () => {
+  for (const [label, doc] of [
+    ["read-only entity", pageDocument({ slug: "content/place/place-x" })],
+    ["machine-written Changes log", pageDocument({ slug: "notes/Changes/2026", editable: true })],
+    ["editable flag on a non-note", pageDocument({ slug: "content/place/place-x", editable: true })],
+  ]) {
+    assert.ok(!/<script[^>]*src=/.test(doc), label + ": no client bundle");
+    assert.ok(!/data-(entity-id|note-path|folder-rel|source-id|notebook-name)=/.test(doc),
+      label + ": no identity attributes");
+    assert.ok(!doc.includes("data-wb-edit"), label + ": no edit button");
+  }
 });
