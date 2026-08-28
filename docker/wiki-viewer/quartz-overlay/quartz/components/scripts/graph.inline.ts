@@ -332,10 +332,24 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
   // event fires a moment after the pointerup that activated the node.
   let lastNodeActivationAt = 0
 
+  // Labels do NOT fall back on their own. renderLabels() tweens a non-hovered
+  // label to its OWN current alpha (upstream restores it from pointerleave
+  // instead), so a label raised to 1 by a selection stays lit forever - the
+  // operator's "labels remain after clicking empty space, but clear when I
+  // change zoom". Zoom repaired it because its handler recomputes every label
+  // alpha from the scale; this reapplies that same baseline.
+  function resetLabelAlphas() {
+    const scaleOpacity = Math.max((currentTransform.k * opacityScale - 1) / 3.75, 0)
+    for (const label of labelsContainer.children) {
+      label.alpha = scaleOpacity
+    }
+  }
+
   function clearSelection() {
     if (selectedNodeId === null) return
     selectedNodeId = null
     updateHoverInfo(null)
+    resetLabelAlphas()
     renderPixiFromD3()
   }
 
@@ -349,6 +363,9 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     // A different node: the previous selection is dropped. updateHoverInfo
     // recomputes `active` for EVERY node from scratch, so exactly one node is
     // ever selected - clicking B cannot leave A selected.
+    // Drop the PREVIOUS selection's raised label before raising the new one,
+    // for the same reason clearSelection has to (see resetLabelAlphas).
+    resetLabelAlphas()
     selectedNodeId = nodeId
     updateHoverInfo(nodeId)
     renderPixiFromD3()
