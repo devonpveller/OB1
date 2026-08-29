@@ -58,6 +58,17 @@ services:
       # -- Viewer index substrate (fresh-volume only; the live DB gets it via
       #    psql -- same pattern as the claims layer).
       - ./init-wiki-pages.sql:/docker-entrypoint-initdb.d/99-init-wiki-pages.sql:ro              # wiki-dynamic-index P1
+      # ── Agent memory plane (fresh-volume only; the promotion runbook applies
+      #    this to the live DB via psql — see ai-stack
+      #    documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md). ──
+      # Prefix "99a" and not "100": postgres runs these in LEXICOGRAPHIC order, so
+      # "100-…" would sort BEFORE "20-…" and this would run ahead of the tables it
+      # depends on. "99a" sorts after "99-" ('-' < 'a') and needs no renames. The
+      # two-digit scheme is full; a future migration wants 99b, or a deliberate
+      # renumbering of the whole chain.
+      # The file is a VERBATIM copy of ../schemas/agent-memory/schema.sql (the
+      # standing two-place mechanism) — if you edit one, copy it to the other.
+      - ./init-agent-memory.sql:/docker-entrypoint-initdb.d/99a-init-agent-memory.sql:ro         # agent-memory-plane P1.1
     networks:
       - obnet
     restart: unless-stopped
