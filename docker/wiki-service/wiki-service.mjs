@@ -40,6 +40,7 @@ import {
   planEntityQueue,
   backfillSlice,
 } from "./lib/entity-links.mjs";
+import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // The sweeps are the DELETE half of the wiki_pages contract: a page removed
 // from disk must lose its row, or search/nav would keep serving a dead link
 // (wiki-dynamic-index P1). Best-effort: never fails a compile.
@@ -80,6 +81,16 @@ const BACKFILL_PER_COMPILE = Math.max(0, Number(ENV.WIKI_BACKFILL_PER_COMPILE ||
 // converges continuously in bounded slices. 0 disables (queue then drains
 // only on organic compiles).
 const BACKFILL_CONTINUE_MIN = Math.max(0, Number(ENV.WIKI_BACKFILL_CONTINUE_MIN || "10"));
+// Drain SUPERVISOR (incident 2026-08-29). The backfill chain is re-armed at
+// the end of a SUCCESSFUL compile, so one failure ends it silently - a boot
+// compile that hit a PostgREST 503 left 6,274 pages queued for 3h35m. This is
+// the floor: every SUPERVISOR_MIN, if eligible pages are queued and no compile
+// has finished for SUPERVISOR_FLOOR_MIN, restart the chain. 0 disables.
+const BACKFILL_SUPERVISOR_MIN = Math.max(0, Number(ENV.WIKI_BACKFILL_SUPERVISOR_MIN || "15"));
+const BACKFILL_SUPERVISOR_FLOOR_MIN = Math.max(
+  1,
+  Number(ENV.WIKI_BACKFILL_SUPERVISOR_FLOOR_MIN || "45"),
+);
 // Interaction-aware drain (operator 2026-08-24): while a human is actively
 // using the wiki, the bulk backfill DEFERS — it resumes only once the viewer
 // has been idle this long (measured from the viewer's last real request via
@@ -140,6 +151,10 @@ const GIT_SSH_COMMAND =
   `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts`;
 
 let running = false;
+// When the last compile FINISHED, whatever its outcome. The supervisor uses
+// this rather than "last success" on purpose: a compile that fails but keeps
+// cycling is a different problem from a chain that has stopped cycling.
+let lastCompileEndedAt = Date.now();
 let lastStatus = { state: "idle", at: null, ok: null, summary: null, error: null };
 let backfillContinueTimer = null; // single continuation timer (see compile())
 
@@ -1114,6 +1129,7 @@ async function compile(reason) {
     return { ok: false, error: msg, recovery_committed: recoveryCommitted };
   } finally {
     running = false;
+    lastCompileEndedAt = Date.now();
   }
 }
 
@@ -1227,6 +1243,91 @@ async function changeWatchTick() {
   }
 }
 
-if (COMPILE_ON_BOOT) compile("boot").catch(() => {});
+// ── Drain supervisor (incident 2026-08-29) ──────────────────────────────────
+// How many BACKFILL-ELIGIBLE pages are waiting, without running a compile.
+// Reuses backfillSlice so "eligible" means exactly what the drain means by it
+// (unlinked entities sit in planned.json by design and are not work).
+async function queuedBackfillPages() {
+  try {
+    const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
+    // Count them ALL, not a slice of 1: this number goes into the stall
+    // warning, and "1 page(s) queued" while 7,026 wait would mislead exactly
+    // when someone is reading the log under pressure. Runs every
+    // SUPERVISOR_MIN over a few thousand entries — noise.
+    return backfillSlice(manifest.planned, Number.MAX_SAFE_INTEGER).length;
+  } catch {
+    return 0; // no manifest yet -> nothing to drain
+  }
+}
+
+async function backfillSupervisorTick() {
+  try {
+    const queued = await queuedBackfillPages();
+    const msSinceCompile = Date.now() - lastCompileEndedAt;
+    if (
+      !shouldSupervisorCompile({
+        running,
+        queued,
+        msSinceCompile,
+        idleFloorMs: BACKFILL_SUPERVISOR_FLOOR_MIN * 60_000,
+      })
+    ) {
+      return;
+    }
+    console.warn(
+      `[wiki-service] drain supervisor: ${queued} page(s) queued and no compile finished for ` +
+        `${(msSinceCompile / 60000).toFixed(1)}min — the backfill chain is not running; restarting it`,
+    );
+    await compile("backfill-supervisor").catch(() => {});
+  } catch (e) {
+    console.error("[wiki-service] drain supervisor error (non-fatal):", e?.message || e);
+  }
+}
+
+// ── Boot: wait for OpenBrain before the first compile ───────────────────────
+// The boot compile is ONE shot. On 2026-08-29 the containers restarted and
+// wiki-service came up before PostgREST was serving; the compile died on a 503
+// and took the drain chain with it. Poll until the dependency answers instead
+// of spending the only attempt on a race we can see coming.
+async function waitForOpenBrain(maxMs = 180_000) {
+  const started = Date.now();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await obFetch("GET", "entities?select=id&limit=1");
+      if (attempt > 1) {
+        console.log(
+          `[wiki-service] OpenBrain ready after ${((Date.now() - started) / 1000).toFixed(0)}s ` +
+            `(${attempt} attempts)`,
+        );
+      }
+      return true;
+    } catch (e) {
+      const waited = Date.now() - started;
+      if (waited >= maxMs) {
+        console.error(
+          `[wiki-service] OpenBrain still unready after ${(waited / 1000).toFixed(0)}s ` +
+            `(${e?.message || e}) — compiling anyway; the supervisor will retry if this fails`,
+        );
+        return false;
+      }
+      const backoff = Math.min(10_000, 1_000 * attempt);
+      console.log(
+        `[wiki-service] waiting for OpenBrain (attempt ${attempt}): ${e?.message || e} ` +
+          `— retry in ${(backoff / 1000).toFixed(0)}s`,
+      );
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+}
+
+if (COMPILE_ON_BOOT) {
+  (async () => {
+    await waitForOpenBrain();
+    await compile("boot").catch(() => {});
+  })();
+}
 scheduleDaily();
 if (WATCH_ENABLED) setInterval(() => changeWatchTick(), WATCH_INTERVAL_MIN * 60_000);
+if (BACKFILL_SUPERVISOR_MIN > 0) {
+  setInterval(() => backfillSupervisorTick(), BACKFILL_SUPERVISOR_MIN * 60_000);
+}
