@@ -143,6 +143,17 @@ RUN node /tmp/search-api.mjs
 # production (2026-08-26). esbuild parses the patched files here, so a bad
 # patch fails the image build instead of the site.
 RUN node_modules/.bin/esbuild --log-level=error --outfile=/dev/null quartz/components/scripts/search.inline.ts
+# -- PLAN-VIEWER-PERF V0/V1/V2: a navigation must not redo whole-vault work --
+# Measured 2026-08-28 on the 48,178-page vault: every nav event rebuilt the
+# Explorer (trie 92ms + sort 2,165ms + 98,210 DOM elements) and on a phone the
+# handler then COLLAPSED the result - so mobile paid all of it for a sidebar it
+# never showed (the operator's 'most clicks are unresponsive'). Details and
+# anchors: patches/explorer-perf.mjs.
+COPY patches/explorer-perf.mjs /tmp/explorer-perf.mjs
+RUN node /tmp/explorer-perf.mjs
+# COMPILE GATE for the Explorer - it was the one patched inline script with NO
+# esbuild gate, while search/NotesEditor/graph all had one.
+RUN node_modules/.bin/esbuild --log-level=error --outfile=/dev/null quartz/components/scripts/explorer.inline.ts
 
 # Build resilience: the compiler's orphan-sweep deletes leaf pages while a
 # rebuild is mid-flight, so a Quartz parse worker can hit ENOENT on a file that
@@ -264,7 +275,7 @@ COPY lib /quartz/lib
 #    QUARTZ'S deps, not ours, and a QUARTZ_REF bump may drop one silently;
 # 2. the renderer + live-document unit tests, including the audit A-1
 #    invariants (no identity attributes, no client bundle) as regex asserts.
-RUN set -e; cd /quartz;   node -e "await Promise.all(['unified','remark-parse','remark-gfm','remark-frontmatter','remark-rehype','hast-util-to-html'].map(m=>import(m)))" ;   node --test lib/render-page.test.mjs
+RUN set -e; cd /quartz;   node -e "await Promise.all(['unified','remark-parse','remark-gfm','remark-frontmatter','remark-rehype','hast-util-to-html'].map(m=>import(m)))" ;   node --test lib/*.test.mjs
 
 COPY derive-graph-index.mjs /derive-graph-index.mjs
 COPY entrypoint.sh /entrypoint.sh

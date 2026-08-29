@@ -26,14 +26,32 @@ const FROM = `  const data: Map<SimpleSlug, ContentDetails> = new Map(
   )`;
 
 const TO = `  // [ai-stack patch] Page-scoped graph. depth < 0 means the component asked
-  // for the "global" view; we answer with a DEEPER neighbourhood of THIS page
-  // rather than the whole vault.
-  const apiDepth = depth < 0 ? 3 : Math.max(1, depth)
+  // for the "global" view; we answer with the SAME neighbourhood as the inline
+  // graph, only rendered larger.
+  //
+  // Operator 2026-08-28: the inline panel showed ~20 nodes while fullscreen
+  // showed 100-200 for the same page. Cause: fullscreen asked for depth 3 with
+  // a limit of 800 while the inline graph asked for its configured depth (1)
+  // with the server default. Both now build the SAME query, so the two views
+  // cannot disagree about what the page's neighbourhood is. The depth is read
+  // from the inline graph's own config, so if that is retuned the fullscreen
+  // view follows it instead of drifting again.
+  const apiDepth =
+    depth < 0
+      ? (() => {
+          try {
+            const inline = document.querySelector(".graph-container") as HTMLElement | null
+            const d = inline ? JSON.parse(inline.dataset.cfg || "{}").depth : undefined
+            return typeof d === "number" && d > 0 ? d : 1
+          } catch {
+            return 1
+          }
+        })()
+      : Math.max(1, depth)
   const apiGraph = await (async () => {
     try {
       const r = await fetch(
-        "/workbench/graph?slug=" + encodeURIComponent(fullSlug) + "&depth=" + apiDepth +
-          (depth < 0 ? "&limit=800" : ""),
+        "/workbench/graph?slug=" + encodeURIComponent(fullSlug) + "&depth=" + apiDepth,
         { cache: "no-store" },
       )
       if (!r.ok) return null

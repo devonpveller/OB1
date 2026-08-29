@@ -314,6 +314,63 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     }
   }
 
+  // [ai-stack] Two-stage activation. A single click/tap SELECTS a node and
+  // highlights its chain; a second click on the SAME node navigates. On a
+  // touch screen there is no hover at all, so before this the only thing a tap
+  // could do was leave the page - you could never inspect a node's links.
+  let selectedNodeId: string | null = null
+  // What the pointer is ACTUALLY over right now. This must NOT be conflated
+  // with hoveredNodeId: since V7.2, hoveredNodeId stays pinned to the selected
+  // node after pointerleave so the highlight survives, and d3-drag's subject
+  // accessor reads it to decide which node a gesture targets. That made a
+  // click on EMPTY SPACE resolve to the selected node - so the background
+  // click navigated ("second click") instead of deselecting, and dragging the
+  // background dragged the selected node. Operator caught both, 2026-08-28.
+  let pointerNodeId: string | null = null
+  // Set on every node activation so the canvas click handler below can tell a
+  // click that LANDED ON A NODE from a click on empty space: the native click
+  // event fires a moment after the pointerup that activated the node.
+  let lastNodeActivationAt = 0
+
+  // Labels do NOT fall back on their own. renderLabels() tweens a non-hovered
+  // label to its OWN current alpha (upstream restores it from pointerleave
+  // instead), so a label raised to 1 by a selection stays lit forever - the
+  // operator's "labels remain after clicking empty space, but clear when I
+  // change zoom". Zoom repaired it because its handler recomputes every label
+  // alpha from the scale; this reapplies that same baseline.
+  function resetLabelAlphas() {
+    const scaleOpacity = Math.max((currentTransform.k * opacityScale - 1) / 3.75, 0)
+    for (const label of labelsContainer.children) {
+      label.alpha = scaleOpacity
+    }
+  }
+
+  function clearSelection() {
+    if (selectedNodeId === null) return
+    selectedNodeId = null
+    updateHoverInfo(null)
+    resetLabelAlphas()
+    renderPixiFromD3()
+  }
+
+  function activateNode(nodeId: string) {
+    lastNodeActivationAt = Date.now()
+    if (selectedNodeId === nodeId) {
+      const targ = resolveRelative(fullSlug, nodeId as SimpleSlug)
+      window.spaNavigate(new URL(targ, window.location.toString()))
+      return
+    }
+    // A different node: the previous selection is dropped. updateHoverInfo
+    // recomputes `active` for EVERY node from scratch, so exactly one node is
+    // ever selected - clicking B cannot leave A selected.
+    // Drop the PREVIOUS selection's raised label before raising the new one,
+    // for the same reason clearSelection has to (see resetLabelAlphas).
+    resetLabelAlphas()
+    selectedNodeId = nodeId
+    updateHoverInfo(nodeId)
+    renderPixiFromD3()
+  }
+
   let dragStartTime = 0
   let dragging = false
   // [ai-stack patch] frames of link redraw still owed (see animate()).
@@ -395,8 +452,17 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
       let alpha = 1
 
       // if we are hovering over a node, we want to highlight the immediate neighbours
-      if (hoveredNodeId !== null && focusOnHover) {
-        alpha = n.active ? 1 : 0.2
+      // [ai-stack] dim non-neighbours when focusOnHover is configured OR when
+      // the user has click-selected a node: the inline graph sets
+      // focusOnHover:false, but click-to-highlight must work there too.
+      //
+      // THREE tiers, not two: the focused node itself stays at full opacity,
+      // its chain sits between, everything else recedes. With a flat "chain =
+      // 1" you cannot tell WHICH node is selected once you click a neighbour
+      // of the previous one - they both look lit.
+      if (hoveredNodeId !== null && (focusOnHover || selectedNodeId !== null)) {
+        const focusId = selectedNodeId ?? hoveredNodeId
+        alpha = n.simulationData.id === focusId ? 1 : n.active ? 0.65 : 0.2
       }
 
       tweenGroup.add(new Tweened<Graphics>(n.gfx, tweenGroup).to({ alpha }, 200))
@@ -437,6 +503,24 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     eventMode: "static",
   })
   graph.appendChild(app.canvas)
+
+  // [ai-stack] Click on empty space clears the selection. The Pixi stage is
+  // deliberately left non-interactive (d3-zoom/-drag own the canvas events),
+  // so this is a plain DOM listener: any click that did NOT just activate a
+  // node is a click on the background. Hit-testing by hand would mean
+  // reimplementing the zoom transform, whose failure mode is worse - a
+  // mis-mapped coordinate would clear the selection the user just made.
+  const onCanvasClick = () => {
+    if (Date.now() - lastNodeActivationAt < 400) return
+    clearSelection()
+  }
+  // On the CONTAINER, not the canvas: in the fullscreen view the canvas does
+  // not necessarily cover the whole panel, and a click on the surrounding
+  // padding is still "empty space" to the user. Node clicks bubble here too,
+  // which the guard above filters out.
+  graph.addEventListener("click", onCanvasClick)
+  ;(window as any).__wikiGraph = "v7.4"
+
 
   const stage = app.stage
   stage.interactive = false
@@ -497,6 +581,7 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
       .circle(0, 0, nodeRadius(n))
       .fill({ color: isTagNode ? computedStyleMap["--light"] : color(n) })
       .on("pointerover", (e) => {
+        pointerNodeId = e.target.label
         updateHoverInfo(e.target.label)
         if (label) oldLabelOpacity = label.alpha
         if (!dragging) {
@@ -504,7 +589,10 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
         }
       })
       .on("pointerleave", () => {
-        updateHoverInfo(null)
+        pointerNodeId = null
+        // [ai-stack] restore the SELECTED node's highlight rather than clearing,
+        // so a click-selected chain does not vanish when the pointer moves off.
+        updateHoverInfo(selectedNodeId)
         if (label) label.alpha = oldLabelOpacity
         if (!dragging) {
           renderPixiFromD3()
@@ -550,7 +638,10 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     select<HTMLCanvasElement, NodeData | undefined>(app.canvas).call(
       drag<HTMLCanvasElement, NodeData | undefined>()
         .container(() => app.canvas)
-        .subject(() => (hoveredNodeId === null ? undefined : nodeById.get(hoveredNodeId as SimpleSlug)))
+        // [ai-stack] pointerNodeId, NOT hoveredNodeId: see the comment on its
+        // declaration. Using the sticky highlight here made background clicks
+        // and drags act on the selected node.
+        .subject(() => (pointerNodeId === null ? undefined : nodeById.get(pointerNodeId as SimpleSlug)))
         .on("start", function dragstarted(event) {
           if (!event.active) simulation.alphaTarget(1).restart()
           event.subject.fx = event.subject.x
@@ -578,16 +669,14 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
           // if the time between mousedown and mouseup is short, we consider it a click
           if (Date.now() - dragStartTime < 500) {
             const node = graphData.nodes.find((n) => n.id === event.subject.id) as NodeData
-            const targ = resolveRelative(fullSlug, node.id)
-            window.spaNavigate(new URL(targ, window.location.toString()))
+            activateNode(node.id)
           }
         }),
     )
   } else {
     for (const node of nodeRenderData) {
       node.gfx.on("click", () => {
-        const targ = resolveRelative(fullSlug, node.simulationData.id)
-        window.spaNavigate(new URL(targ, window.location.toString()))
+        activateNode(node.simulationData.id)
       })
     }
   }
