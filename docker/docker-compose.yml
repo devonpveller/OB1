@@ -25,50 +25,51 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - openbrain-db-data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
-      - ./init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro
-      - ./init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro
-      - ./init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro
-      - ./init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro
-      - ./init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro
+      - ./init.sql:/docker-entrypoint-initdb.d/010-init.sql:ro
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/020-init-extensions.sql:ro
+      - ./init-sources.sql:/docker-entrypoint-initdb.d/030-init-sources.sql:ro
+      - ./init-graph.sql:/docker-entrypoint-initdb.d/040-init-graph.sql:ro
+      - ./init-grants.sql:/docker-entrypoint-initdb.d/050-init-grants.sql:ro
+      - ./init-source-graph.sql:/docker-entrypoint-initdb.d/060-init-source-graph.sql:ro
       # Integrated Knowledge System net-new schema (threads/sessions/joins
       # + content_hash + find_or_create_source). Runs after sources exist.
       # NB: initdb scripts only run on a FRESH volume; for the existing
       # openbrain-db-data volume the promotion runbook applies this via psql.
-      - ./init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro
+      - ./init-threads.sql:/docker-entrypoint-initdb.d/070-init-threads.sql:ro
       # ── Quartz-4-expansion additive migrations (fresh-volume only; the
       #    promotion runbook applies these to the live DB via psql — G3). ──
-      - ./init-threads-slug.sql:/docker-entrypoint-initdb.d/72-init-threads-slug.sql:ro          # P2
-      - ./init-source-revisions.sql:/docker-entrypoint-initdb.d/80-init-source-revisions.sql:ro  # P4
-      - ./init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro      # P4
-      - ./init-content-types.sql:/docker-entrypoint-initdb.d/84-init-content-types.sql:ro        # P5
-      - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro        # P5
-      - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/88-init-import-jobs.sql:ro            # P5
-      - ./init-source-editing.sql:/docker-entrypoint-initdb.d/90-init-source-editing.sql:ro     # P4.7
+      - ./init-threads-slug.sql:/docker-entrypoint-initdb.d/072-init-threads-slug.sql:ro          # P2
+      - ./init-source-revisions.sql:/docker-entrypoint-initdb.d/080-init-source-revisions.sql:ro  # P4
+      - ./init-source-retract.sql:/docker-entrypoint-initdb.d/082-init-source-retract.sql:ro      # P4
+      - ./init-content-types.sql:/docker-entrypoint-initdb.d/084-init-content-types.sql:ro        # P5
+      - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/086-init-source-chunks.sql:ro        # P5
+      - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/088-init-import-jobs.sql:ro            # P5
+      - ./init-source-editing.sql:/docker-entrypoint-initdb.d/090-init-source-editing.sql:ro     # P4.7
       # ── Research-inlet additive migration (fresh-volume only; the promotion
       #    runbook applies this to the live DB via psql — G3). ──
-      - ./init-thread-embedding.sql:/docker-entrypoint-initdb.d/92-init-thread-embedding.sql:ro  # research-inlet P0
+      - ./init-thread-embedding.sql:/docker-entrypoint-initdb.d/092-init-thread-embedding.sql:ro  # research-inlet P0
       # ── Research Engine claims layer (fresh-volume only; the promotion
       #    runbook applies this to the live DB via psql — G3). ──
-      - ./init-claims.sql:/docker-entrypoint-initdb.d/94-init-claims.sql:ro                      # research-engine P1
-      - ./init-research-jobs.sql:/docker-entrypoint-initdb.d/96-init-research-jobs.sql:ro         # research-engine P4
+      - ./init-claims.sql:/docker-entrypoint-initdb.d/094-init-claims.sql:ro                      # research-engine P1
+      - ./init-research-jobs.sql:/docker-entrypoint-initdb.d/096-init-research-jobs.sql:ro         # research-engine P4
       # ── Idea Refinery lifecycle tables (fresh-volume only; operator applies
       #    to the live DB via psql — same pattern as the claims layer). ──
-      - ./init-ideas.sql:/docker-entrypoint-initdb.d/98-init-ideas.sql:ro                        # idea-refinery IR.0
+      - ./init-ideas.sql:/docker-entrypoint-initdb.d/098-init-ideas.sql:ro                        # idea-refinery IR.0
       # -- Viewer index substrate (fresh-volume only; the live DB gets it via
       #    psql -- same pattern as the claims layer).
-      - ./init-wiki-pages.sql:/docker-entrypoint-initdb.d/99-init-wiki-pages.sql:ro              # wiki-dynamic-index P1
+      - ./init-wiki-pages.sql:/docker-entrypoint-initdb.d/099-init-wiki-pages.sql:ro              # wiki-dynamic-index P1
       # ── Agent memory plane (fresh-volume only; the promotion runbook applies
       #    this to the live DB via psql — see ai-stack
       #    documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md). ──
-      # Prefix "99a" and not "100": postgres runs these in LEXICOGRAPHIC order, so
-      # "100-…" would sort BEFORE "20-…" and this would run ahead of the tables it
-      # depends on. "99a" sorts after "99-" ('-' < 'a') and needs no renames. The
-      # two-digit scheme is full; a future migration wants 99b, or a deliberate
-      # renumbering of the whole chain.
       # The file is a VERBATIM copy of ../schemas/agent-memory/schema.sql (the
       # standing two-place mechanism) — if you edit one, copy it to the other.
-      - ./init-agent-memory.sql:/docker-entrypoint-initdb.d/99a-init-agent-memory.sql:ro         # agent-memory-plane P1.1
+      - ./init-agent-memory.sql:/docker-entrypoint-initdb.d/100-init-agent-memory.sql:ro         # agent-memory-plane P1.1
+      # wiki_pages.links containment index. It was applied to the live DB by hand and
+      # never mounted, so a REBUILT volume came up without it and every wiki graph render
+      # fell back to a sequential scan over ~41k rows - a silent performance cliff, not a
+      # missing feature. Caught by the initdb-chain integrity check in
+      # scripts/checks/test-quartz4-offline.ps1.
+      - ./init-wiki-pages-links.sql:/docker-entrypoint-initdb.d/110-init-wiki-pages-links.sql:ro # wiki graph backlinks
     networks:
       - obnet
     restart: unless-stopped
