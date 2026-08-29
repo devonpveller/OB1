@@ -59,7 +59,18 @@ export interface ScriptChatConfig {
   chatApiBase: string;
   chatModel: string;
   nothinkSuffix?: string;
+  /** LiteLLM virtual key. Falls back to CHAT_API_KEY from the environment.
+   *  The gateway has REQUIRED an sk- key since the J.1 flip (2026-08-21), so a
+   *  missing key is a guaranteed 401 - never a soft default. */
   apiKey?: string;
+  /** Attempts for a TRANSIENT failure (network/timeout, 429, 5xx, empty 200).
+   *  Default 3. A 4xx that is not 429 is a config fault and is NOT retried. */
+  attempts?: number;
+  /** Base backoff between attempts (ms), multiplied by the attempt number.
+   *  Default 2000. Tests set 0. */
+  retryDelayMs?: number;
+  /** Name for this caller in the runner log, so a retry line says which stage. */
+  label?: string;
   timeoutMs?: number;
   maxTokens?: number;
   /** Sampling temperature. Default 0.5 (dialogue). Use 0 for deterministic
@@ -67,30 +78,64 @@ export interface ScriptChatConfig {
    *  zero dives on a given input). */
   temperature?: number;
 }
-export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
-  return async (system, user) => {
-    try {
-      const res = await fetch(`${cfg.chatApiBase}/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${cfg.apiKey ?? "not-needed"}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: `${cfg.chatModel}${cfg.nothinkSuffix ?? ""}`,
-          temperature: cfg.temperature ?? 0.5, // a touch of warmth for dialogue; 0 for triage
-          max_tokens: cfg.maxTokens ?? 2200,
-          messages: [{ role: "system", content: system }, { role: "user", content: user }],
-        }),
-        signal: AbortSignal.timeout(cfg.timeoutMs ?? 200_000),
-      });
-      if (!res.ok) { res.body?.cancel().catch(() => {}); return null; }
-      const d = await res.json();
-      return (d.choices?.[0]?.message?.content as string | undefined)?.trim() || null;
-    } catch (err) {
-      console.warn(`script chat failed: ${err}`);
-      return null;
-    }
-  };
+/** Transient = worth re-sampling: network/timeout, 429, 5xx, or an empty 200.
+ *  A 401/403/400 is a CONFIGURATION fault; retrying it just burns the clock. */
+function isTransientStatus(status: number): boolean {
+  return status === 429 || status >= 500;
 }
 
+export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
+  // The key is resolved ONCE, here, so every call site gets it whether or not it
+  // remembered to pass one. link-enrich.ts historically passed nothing, which sent
+  // `Bearer not-needed` and 401'd on every call from 2026-08-21 onward - the script
+  // stage silently fell back to dumping raw grounded material for days.
+  const apiKey = cfg.apiKey || Deno.env.get("CHAT_API_KEY") || "";
+  const attempts = Math.max(1, cfg.attempts ?? 3);
+  const label = cfg.label ?? "script chat";
+  return async (system, user) => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const last = attempt === attempts;
+      try {
+        const res = await fetch(`${cfg.chatApiBase}/chat/completions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: `${cfg.chatModel}${cfg.nothinkSuffix ?? ""}`,
+            temperature: cfg.temperature ?? 0.5, // a touch of warmth for dialogue; 0 for triage
+            max_tokens: cfg.maxTokens ?? 2200,
+            messages: [{ role: "system", content: system }, { role: "user", content: user }],
+          }),
+          signal: AbortSignal.timeout(cfg.timeoutMs ?? 200_000),
+        });
+        if (!res.ok) {
+          const detail = (await res.text().catch(() => "")).slice(0, 200);
+          if (!isTransientStatus(res.status) || last) {
+            console.warn(`[${label}] HTTP ${res.status} (giving up after ${attempt}): ${detail}`);
+            return null;
+          }
+          console.warn(`[${label}] HTTP ${res.status} - retrying (${attempt}/${attempts}): ${detail}`);
+        } else {
+          const d = await res.json();
+          const content = (d.choices?.[0]?.message?.content as string | undefined)?.trim();
+          if (content) return content;
+          if (last) {
+            console.warn(`[${label}] empty completion (giving up after ${attempt})`);
+            return null;
+          }
+          console.warn(`[${label}] empty completion - re-sampling (${attempt}/${attempts})`);
+        }
+      } catch (err) {
+        if (last) {
+          console.warn(`[${label}] failed (giving up after ${attempt}): ${err}`);
+          return null;
+        }
+        console.warn(`[${label}] failed - retrying (${attempt}/${attempts}): ${err}`);
+      }
+      await new Promise((r) => setTimeout(r, (cfg.retryDelayMs ?? 2000) * attempt));
+    }
+    return null;
+  };
+}
 // ── prompts ──────────────────────────────────────────────────────────────────
 /** Special segment label: carried-over dives that resolved overnight. */
 export const FOLLOWUPS_LABEL = "follow-ups from yesterday";

@@ -127,12 +127,20 @@ const research = new ResearchClient({
   baseUrl: env("RESEARCH_URL", "http://openbrain-research:8000"),
   brainKey: env("MCP_ACCESS_KEY"),
 });
+// LiteLLM virtual key for every direct chat call this runner makes. The gateway
+// has REQUIRED an sk- key since J.1 (2026-08-21); before this was wired the calls
+// sent `Bearer not-needed`, 401'd, and the script stage silently degraded to
+// dumping raw grounded material. CHAT_API_KEY was already in the container env.
+const CHAT_API_KEY = env("CHAT_API_KEY");
+
 // S4a — the two-host script pass runs on llama-cpp directly (think model for
 // better dialogue). Requires the runner to also join `ai-stack_llm-net`.
 const scriptChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
   chatModel: env("CHAT_MODEL", "qwen36-27b"),
   nothinkSuffix: env("SCRIPT_NOTHINK_SUFFIX", ":nothink"), // nothink = fast + reliable; set "" for think-model dialogue
+  apiKey: CHAT_API_KEY,
+  label: "script",
 });
 // Gap-dive triage — a CLASSIFICATION task, so temperature 0 (deterministic).
 // Reusing the default 0.5 chat made triage flaky: same gaps yielded 7-10 dives
@@ -142,6 +150,8 @@ const gapTriageChat = makeScriptChat({
   chatModel: env("CHAT_MODEL", "qwen36-27b"),
   nothinkSuffix: ":nothink",
   temperature: 0,
+  apiKey: CHAT_API_KEY,
+  label: "gap-triage",
 });
 
 // S4b — audio via Open Notebook (D5: content-only renderer; D12: accept ON's
@@ -169,6 +179,8 @@ const poiChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
   chatModel: env("CHAT_MODEL", "qwen36-27b"),
   nothinkSuffix: ":nothink",
+  apiKey: CHAT_API_KEY,
+  label: "poi-select",
 });
 // Body-fallback classifier — THINK model (no :nothink) for precision: a legit
 // single-post essay (e.g. an Anthropic-research story) must NOT be dropped as an
@@ -178,6 +190,8 @@ const bodyClassifyChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
   chatModel: env("CHAT_MODEL", "qwen36-27b"),
   nothinkSuffix: env("BODY_CLASSIFY_NOTHINK", ""),
+  apiKey: CHAT_API_KEY,
+  label: "body-classify",
 });
 const ON_EPISODE_PROFILE = env("ON_EPISODE_PROFILE", "tech_discussion");
 const ON_SPEAKER_PROFILE = env("ON_SPEAKER_PROFILE", "tech_experts");
@@ -811,25 +825,38 @@ async function maybeRenderEpisode(): Promise<Episode | null> {
 
 /** S4b — hand the grounded script to Open Notebook for transcript + audio.
  *  Returns the absolute audio URL, or null. */
+// ON transcript generation re-samples an LLM per segment, so a failure is often
+// a one-off rather than a property of the material - on 2026-08-29 a single
+// segment overran its token cap, ON returned "failed", and the day shipped with
+// no podcast even though an immediate resubmit succeeded first try. Try again
+// before accepting silence.
+const ON_AUDIO_ATTEMPTS = num("ON_AUDIO_ATTEMPTS", 2);
+
 async function generateAudio(ep: Episode): Promise<OnEpisode | null> {
-  console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})… this takes minutes.`);
-  try {
-    const jobId = await onClient.generate({
-      episodeProfile: ON_EPISODE_PROFILE,
-      speakerProfile: ON_SPEAKER_PROFILE,
-      episodeName: ep.name,
-      content: ep.script,
-      briefingSuffix: ON_BRIEFING,
-    });
-    const status = await onClient.waitForJob(jobId, { timeoutMs: ON_JOB_WAIT_MS });
-    if (status !== "completed") { console.log(`[link-enrich] ON job ended '${status}' — no audio.`); return null; }
-    const episode = await onClient.episodeByName(ep.name);
-    console.log(`[link-enrich] 🎧 episode audio ready (id ${episode?.id ?? "?"}).`);
-    return episode;
-  } catch (err) {
-    console.warn(`[link-enrich] audio generation failed (best-effort): ${err}`);
-    return null;
+  for (let attempt = 1; attempt <= Math.max(1, ON_AUDIO_ATTEMPTS); attempt++) {
+    const last = attempt === Math.max(1, ON_AUDIO_ATTEMPTS);
+    const suffix = attempt > 1 ? ` (attempt ${attempt}/${ON_AUDIO_ATTEMPTS})` : "";
+    console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})${suffix}… this takes minutes.`);
+    try {
+      const jobId = await onClient.generate({
+        episodeProfile: ON_EPISODE_PROFILE,
+        speakerProfile: ON_SPEAKER_PROFILE,
+        episodeName: ep.name,
+        content: ep.script,
+        briefingSuffix: ON_BRIEFING,
+      });
+      const status = await onClient.waitForJob(jobId, { timeoutMs: ON_JOB_WAIT_MS });
+      if (status === "completed") {
+        const episode = await onClient.episodeByName(ep.name);
+        console.log(`[link-enrich] 🎧 episode audio ready (id ${episode?.id ?? "?"}).`);
+        return episode;
+      }
+      console.log(`[link-enrich] ON job ended '${status}'${last ? " — no audio." : " — resubmitting."}`);
+    } catch (err) {
+      console.warn(`[link-enrich] audio generation failed${last ? " (best-effort)" : " - resubmitting"}: ${err}`);
+    }
   }
+  return null;
 }
 
 /** User-facing email links — external + Authelia-gated (notebook.<domain>):
