@@ -11,7 +11,7 @@ COPY wiki-service.mjs ./
 COPY lib ./lib
 # Build gate: the planner/sweep consistency invariant (lib/entity-links.mjs)
 # is unit-tested at image build — a regression cannot ship silently.
-RUN node --test ./lib/entity-links.test.mjs
+RUN node --test ./lib/entity-links.test.mjs ./lib/drain-supervisor.test.mjs
 
 # generate-wiki.mjs is bind-mounted read-only at /recipes (compose).
 # The wiki volume mounts at /wiki (content + .git live there).
