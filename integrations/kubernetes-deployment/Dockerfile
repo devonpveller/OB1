@@ -6,8 +6,11 @@ WORKDIR /app
 COPY deno.json ./
 RUN deno install
 
-# Copy server source
+# Copy server source. The agent-memory module is a SEPARATE file on purpose (the start of
+# the modular split), so it needs its own COPY - a Dockerfile that imports a file it never
+# copies fails at container start, not at build.
 COPY index.ts ./
+COPY agent-memory.ts agent-memory-policy.ts ./
 
 # Run as non-root
 USER deno

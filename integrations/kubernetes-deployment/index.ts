@@ -22,6 +22,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
+import { registerAgentMemory } from "./agent-memory.ts";
 
 // --- Configuration ---
 
@@ -2045,6 +2046,17 @@ app.post("/research/persist", async (c) => {
   } finally {
     client.release();
   }
+});
+
+// --- Agent memory plane (memory-plane P1.2) ---------------------------------
+// ONE call. The tool, its REST twin and all of its SQL live in agent-memory.ts; this file
+// gains no agent-memory logic. That is the start of the modular split this 2000-line file
+// needs, taken as new surface rather than as a risky refactor of what already works.
+// Registered BEFORE the catch-all, or the MCP transport would swallow the REST route.
+registerAgentMemory(server, app, {
+  pool,
+  getEmbedding,
+  authed: (c) => researchAuthed(c as Parameters<typeof researchAuthed>[0]),
 });
 
 // --- MCP catch-all with Auth Check ---
