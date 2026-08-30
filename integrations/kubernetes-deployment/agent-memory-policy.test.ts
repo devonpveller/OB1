@@ -20,11 +20,12 @@ import {
 } from "./agent-memory-policy.ts";
 
 // ── THE PLANE-AGREEMENT INVARIANT ────────────────────────────────────────────
-// Written before the tools exist, per the memory-plane plan. Upstream's Hermes
-// integration default-writes visibility='personal' while its recall scope drops
-// personal: writes succeed, recall returns nothing, and nothing errors. Locally the
-// same trap is one line wide - the DB default for review_status is 'pending', which the
-// default gate excludes.
+// Written before the tools exist, per the memory-plane plan. The failure it guards: the
+// write side and the read side each look correct alone and disagree in combination, so a
+// memory is written, nothing errors, and the default recall never returns it. Locally
+// that trap is one line wide - the DB default for review_status is 'pending', which the
+// default gate excludes - and a second instance (visibility 'project' with a NULL
+// project_id) was found the same way. Both were reproduced against a real database.
 
 Deno.test("INVARIANT: a default writeback is returned by the default recall", () => {
   // Composed, not asserted separately: checking "defaults are evidence_only" and "gate

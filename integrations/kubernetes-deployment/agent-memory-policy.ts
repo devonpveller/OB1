@@ -5,18 +5,28 @@
  * can be tested without a stack - and so the two sides of the plane can be checked
  * AGAINST EACH OTHER rather than each on its own.
  *
- * THE FAILURE THIS MODULE EXISTS TO PREVENT. Upstream's Hermes integration writes
- * `visibility='personal'` by default while its recall scope filter silently drops
- * personal. Writes succeed, recall returns nothing, and it fails exactly at the
- * ops/personal boundary. Nothing errors; the plane is simply always empty.
+ * THE FAILURE THIS MODULE EXISTS TO PREVENT, stated from what is verifiable HERE.
  *
- * Locally the same trap is one line wide and pointed the other way: the DATABASE default
- * for `review_status` is 'pending' (schemas/agent-memory/schema.sql), and the default
- * recall gate admits only 'confirmed' and 'evidence_only'. So a writeback that lets the
- * column default apply produces a memory that the default recall can never return.
- * WRITEBACK_DEFAULTS therefore sets review_status EXPLICITLY, and
- * `defaultWritebackIsRecallable()` composes the two sides so the invariant is a test
- * rather than a comment.
+ * The write side and the read side each look correct alone and disagree in combination:
+ * a memory is written, no error is raised, and the default recall never returns it. The
+ * plane reports healthy and holds nothing retrievable. Two instances of that were found
+ * in this codebase, both by executing a query rather than by reading the code:
+ *
+ *   1. The DATABASE default for `review_status` is 'pending'
+ *      (schemas/agent-memory/schema.sql), while the default recall gate admits only
+ *      'confirmed' and 'evidence_only'. A writeback that lets the column default apply
+ *      produces a memory the default recall can never return.
+ *   2. The defaults set `visibility: 'project'` while leaving `project_id` NULL, so a
+ *      project-scoped recall (`am.project_id = $n`) matched nothing.
+ *
+ * So WRITEBACK_DEFAULTS sets review_status EXPLICITLY, a row cannot claim project
+ * visibility without a project, and `isRowRecallableBy()` composes the two sides over
+ * every discriminating column - the invariant is a test rather than a comment.
+ *
+ * (The memory-plane plan attributes this failure mode to an upstream `hermes-agent-memory`
+ * integration. That package is NOT vendored in this repo and the claim was never verified
+ * here; it is recorded as provenance for the idea, not as evidence. The two instances
+ * above are local and were reproduced.)
  */
 
 /** review_status values the schema permits. */
@@ -110,9 +120,9 @@ export interface RecallableRow {
  * only ever compared `review_status`, so it could not see a disagreement in any OTHER
  * column - and there was one. The defaults set `visibility: 'project'` while leaving
  * `project_id` NULL, so a project-scoped recall (`am.project_id = $n`) matched nothing.
- * Writes succeeded, that recall returned nothing, nothing errored: the exact Hermes
- * failure this module's header claims to prevent, reproduced one column over and missed
- * because the invariant was too narrow to look there.
+ * Writes succeeded, that recall returned nothing, nothing errored - the same shape as the
+ * review_status trap in the header, one column over, and missed because the invariant was
+ * too narrow to look there. Reproduced against a real database, not reasoned about.
  *
  * Keep this in step with buildRecallScopeFilter. They are tested against each other.
  */
