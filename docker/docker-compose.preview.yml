@@ -45,6 +45,10 @@ services:
       - ./init-agent-memory-check-type.sql:/docker-entrypoint-initdb.d/140-init-agent-memory-check-type.sql:ro
       - ./init-agent-memory-access-refused.sql:/docker-entrypoint-initdb.d/150-init-agent-memory-access-refused.sql:ro
       - ./init-agent-memory-embedding.sql:/docker-entrypoint-initdb.d/160-init-agent-memory-embedding.sql:ro
+      # The exposure plane inside the DATABASE. `match_thoughts` RETURNS content and is
+      # reached by callers that touch none of the server code (PostgREST rpc, the edge
+      # functions, recipes) - the floor under the application boundary (U5).
+      - ./init-agent-memory-corpus-plane.sql:/docker-entrypoint-initdb.d/170-init-agent-memory-corpus-plane.sql:ro
     networks: [pnet]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]

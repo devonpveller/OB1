@@ -96,6 +96,26 @@ async function fetchWithTimeout(
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// --- THE CORPUS DOOR --------------------------------------------------------
+//
+// THIS WORKER READS `thoughts` CONTENT, and it was outside the exposure boundary. Found by
+// the U5 completeness gate once that gate learned the supabase-js shape - not by a person
+// reading the file, and not by any grep for `FROM thoughts`, because there is no SQL here.
+//
+// Why it matters even though nothing here answers a caller: the worker turns a thought's
+// content into ENTITIES and EDGES, which are read by the wiki, the graph tools and the
+// suggestion worker. Extracting a personal-plane row would put its subjects into a further
+// store, on the far side of the boundary, with no label to carry.
+//
+// SERVER-SIDE, DEFAULT 'ops'. The queue supplies the id, never a caller, so there is nothing
+// here for a request to influence; the plane is a property of the process.
+const DOOR_EXPOSURE = Deno.env.get("DOOR_EXPOSURE") || "ops";
+
+// The PostgREST spelling of the chokepoint's corpus predicate: unclaimed rows (no exposure
+// label - the whole general corpus, 12,989 of 12,993 production rows) plus rows claimed by
+// this plane. Written once, used at the one read below.
+const CORPUS_PLANE_OR = `metadata->>exposure.is.null,metadata->>exposure.in.(${DOOR_EXPOSURE})`;
+
 // ── CORS ────────────────────────────────────────────────────────────────────
 
 const CORS_HEADERS: Record<string, string> = {
@@ -904,11 +924,15 @@ Deno.serve(async (req) => {
     const attemptCount = queueItem?.attempt_count ?? 0;
 
     // Fetch thought content
+    // PLANE-BOUND. An off-plane row is simply not found, and the existing not-found path
+    // below marks the queue item errored - so a claimed thought is never extracted and never
+    // spins. No audit row: a queue drain skipping a row is not an agent's denied request.
     const { data: thought, error: thoughtError } = await supabase
       .from("thoughts")
       .select("id, content, metadata")
       .eq("id", item.thought_id)
-      .single();
+      .or(CORPUS_PLANE_OR)
+      .maybeSingle();
 
     if (thoughtError || !thought?.content) {
       console.error(`Failed to fetch thought ${item.thought_id}:`, thoughtError);

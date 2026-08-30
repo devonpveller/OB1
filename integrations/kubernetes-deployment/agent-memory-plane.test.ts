@@ -89,10 +89,14 @@ import {
   listTraceItemsOnPlane,
   mirrorsToUnifiedSearch,
   mirrorToUnifiedSearch,
+  corpusPlanePredicate,
   planePredicate,
+  resolveCorpusRowOnPlane,
   resolveIdempotentOnPlane,
   resolveMemoryOnPlane,
   resolveTraceOnPlane,
+  selectCorpusOnPlane,
+  stripCorpusClaim,
   tracePlanePredicate,
   UNIFIED_SEARCH_EXPOSURES,
   updateMemoryOnPlane,
@@ -103,57 +107,127 @@ import {
 // ════════════════════════════════════════════════════════════════════════════
 
 /** The chokepoint itself. Statements here ARE the guarded path. */
-const CHOKEPOINT = "agent-memory-plane.ts";
+const CHOKEPOINT = "integrations/kubernetes-deployment/agent-memory-plane.ts";
 
-/** The shared corpus. Not a memory table - see the header for why its rule is inverted. */
+/** The shared corpus. */
 const CORPUS = "thoughts";
 
 const HERE = new URL("./", import.meta.url);
-const SQL_DIR = new URL("../../docker/", import.meta.url);
+/** The OB1 repo root. Every key below is a path relative to this. */
+const REPO = new URL("../../", import.meta.url);
+const SQL_DIR = new URL("docker/", REPO);
+const COMPOSE = "docker/docker-compose.yml";
 
 /** FAIL-CLOSED. No try/catch: an unreadable file must fail a test, never skip it. */
 async function readSource(name: string): Promise<string> {
   return await Deno.readTextFile(new URL(`./${name}`, HERE));
 }
 
-/**
- * Every `.ts` that ships in the image.
- *
- * DERIVED FROM DISK, which is the whole correction this round is about. The Dockerfile
- * globs `COPY *.ts ./` and then deletes `*.test.ts`; this reproduces that rule instead of
- * restating a list of names, so a file called anything at all is in scope from the moment
- * it exists.
- */
-async function shippingFiles(): Promise<string[]> {
-  const out: string[] = [];
-  for await (const e of Deno.readDir(HERE)) {
-    if (!e.isFile) continue;
-    if (!e.name.endsWith(".ts")) continue;
-    if (e.name.endsWith(".test.ts")) continue;
-    out.push(e.name);
-  }
-  if (out.length === 0) {
-    throw new Error("no shipping .ts files found - every assertion below would be vacuous");
-  }
-  return out.sort();
+/** Read a path relative to the OB1 repo root. Fail-closed, same reason. */
+async function readRepo(rel: string): Promise<string> {
+  return await Deno.readTextFile(new URL(rel, REPO));
 }
 
-/** The shipping set as {name -> source}, which is what the audit function consumes. */
+/**
+ * Roots that ship code, DERIVED FROM THE DEPLOYMENT.
+ *
+ * ROUND FOUR'S GATE SCANNED ONE DIRECTORY, and that was its remaining hole. Two more
+ * readers of the same content were found outside it - `docker/extensions-server/index.ts`
+ * (the openbrain-ext container: read a thought by id with no plane and COPIED its content
+ * into professional_contacts.notes) and `integrations/agent-memory-api/index.ts` (selected
+ * from agent_memories with no plane at all). A gate scoped to one image cannot see either,
+ * however well it derives inside that image.
+ *
+ * So the roots come from `docker/docker-compose.yml`'s own `build: context:` lines: every
+ * directory this stack turns into a container. Add a service, its source is in scope the
+ * same day, with nobody editing this file.
+ */
+const EXTRA_ROOTS: { root: string; why: string }[] = [
+  {
+    root: "integrations/agent-memory-api",
+    why:
+      "A second door onto the same memory plane, shipped in the repo and deployed by NOTHING " +
+      "in this stack (it is a Supabase Edge Function; no compose context builds it). So it " +
+      "cannot be derived from compose, and a verifier found it unguarded anyway. Listed " +
+      "explicitly because an extra root can only ADD coverage - the risk of the list is that " +
+      "it is short, never that it is wrong.",
+  },
+];
+
+async function isDir(rel: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(new URL(rel, REPO))).isDirectory;
+  } catch {
+    return false;
+  }
+}
+
+async function scanRoots(): Promise<string[]> {
+  const compose = await readRepo(COMPOSE);
+  const roots = new Set<string>();
+  for (const m of compose.matchAll(/^\s*context:\s*(\S+)\s*$/gm)) {
+    // compose paths are relative to docker/, where the file lives.
+    const raw = m[1].replace(/^\.\//, "");
+    const rel = raw.startsWith("../") ? raw.slice(3) : `docker/${raw}`;
+    roots.add(rel.replace(/\/$/, ""));
+  }
+  // FAIL-CLOSED on the derivation. A compose file this cannot parse would give an empty
+  // root set, and a gate over an empty set passes over everything - the exact failure mode
+  // (a check that passes while checking nothing) this whole file exists to prevent.
+  if (roots.size === 0) {
+    throw new Error(`no build contexts parsed from ${COMPOSE} - every scan below would be empty`);
+  }
+  for (const e of EXTRA_ROOTS) roots.add(e.root);
+  const out = [...roots].sort();
+  for (const r of out) {
+    if (!await isDir(r)) throw new Error(`scan root does not exist: ${r}`);
+  }
+  return out;
+}
+
+/** Every `.ts` under a scan root, keyed by repo-relative path. */
+async function walkTs(root: string, out: Map<string, string>): Promise<void> {
+  for await (const e of Deno.readDir(new URL(`${root}/`, REPO))) {
+    const rel = `${root}/${e.name}`;
+    if (e.isDirectory) {
+      if (e.name === "node_modules" || e.name === ".git") continue;
+      await walkTs(rel, out);
+      continue;
+    }
+    if (!e.isFile) continue;
+    if (!e.name.endsWith(".ts")) continue;
+    // Tests do not ship (the openbrain-mcp Dockerfile deletes them; no other root has any).
+    if (e.name.endsWith(".test.ts")) continue;
+    out.set(rel, await readRepo(rel));
+  }
+}
+
+/**
+ * The whole scanned set as {repo-relative path -> source}.
+ *
+ * A SUPERSET OF WHAT SHIPS, on purpose. Some roots' Dockerfiles copy a single file; scanning
+ * a source that does not end up in an image costs a few milliseconds, while missing one that
+ * does is the bug this gate is for. The direction of the error is chosen.
+ */
 async function shippingSources(): Promise<Map<string, string>> {
   const m = new Map<string, string>();
-  for (const f of await shippingFiles()) m.set(f, await readSource(f));
+  for (const root of await scanRoots()) await walkTs(root, m);
+  if (m.size === 0) {
+    throw new Error("no .ts files found under any scan root - every assertion would be vacuous");
+  }
   return m;
 }
 
+async function shippingFiles(): Promise<string[]> {
+  return [...(await shippingSources()).keys()].sort();
+}
+
 /**
- * Every table that holds or references memory content, DERIVED FROM THE SQL THAT CREATES
- * IT.
+ * Every table that holds or references memory content, DERIVED FROM THE SQL THAT CREATES IT.
  *
- * The previous gate knew one table name because someone typed one table name. Eight exist:
- * agent_memories, and the source_refs / artifacts / relations / review_actions /
+ * Eight exist: agent_memories, and the source_refs / artifacts / relations / review_actions /
  * recall_traces / recall_items / audit_events sidecars. A recall trace carries the query
- * text; a recall item carries a memory id, a rank and a use-policy snapshot. Both were
- * outside the gate's vocabulary, and one of them was genuinely unguarded.
+ * text; a recall item carries a memory id, a rank and a use-policy snapshot.
  */
 async function memoryTables(): Promise<string[]> {
   const names = new Set<string>();
@@ -172,9 +246,6 @@ async function memoryTables(): Promise<string[]> {
       names.add(m[1].toLowerCase());
     }
   }
-  // FAIL-CLOSED on the enumeration itself. If the mount or the path is wrong this returns
-  // nothing, and a gate over an empty table list passes over everything - which is the
-  // exact failure mode (a check that passes while checking nothing) this round exists for.
   if (filesRead === 0) {
     throw new Error(`no init-agent-memory*.sql under ${SQL_DIR} - the table list would be empty`);
   }
@@ -182,6 +253,75 @@ async function memoryTables(): Promise<string[]> {
     throw new Error("read the schema files but found no agent_memor* CREATE TABLE");
   }
   return [...names].sort();
+}
+
+// ---------------------------------------------------------------------------------
+// THE CORPUS'S SQL FUNCTIONS - readers that are not a line of TypeScript
+// ---------------------------------------------------------------------------------
+
+interface SqlFn {
+  name: string;
+  file: string;
+  /** Position in the initdb chain, from the compose mount prefix. Later definitions win. */
+  order: number;
+  reads: boolean;
+  hasPlane: boolean;
+}
+
+/** The `NNN-` prefix each init file is mounted under, read from compose. */
+async function initdbOrder(): Promise<Map<string, number>> {
+  const compose = await readRepo(COMPOSE);
+  const order = new Map<string, number>();
+  for (
+    const m of compose.matchAll(
+      /-\s*\.\/([A-Za-z0-9._-]+\.sql):\/docker-entrypoint-initdb\.d\/(\d+)-/g,
+    )
+  ) {
+    order.set(m[1], parseInt(m[2], 10));
+  }
+  if (order.size === 0) {
+    throw new Error("parsed no initdb mounts from compose - the ordering check would be vacuous");
+  }
+  return order;
+}
+
+/**
+ * Every SQL function whose body touches `thoughts`, with whether it READS the corpus and
+ * whether its body carries an exposure predicate.
+ *
+ * WHY THIS EXISTS. `match_thoughts` RETURNS content and is called by things that touch no
+ * TypeScript in this repo at all - `openbrain-postgrest` exposes it as `rpc/match_thoughts`,
+ * and the edge functions and recipes call it directly. A file-level scan can never see it.
+ * `upsert_thought` turned out to be a reader too: its dedup lookup is a SELECT and the
+ * function `RETURNS public.thoughts`, so a caller that knows a thought's exact content gets
+ * the whole row back and the UPDATE branch merges its own metadata into it.
+ */
+async function corpusFunctions(): Promise<SqlFn[]> {
+  const order = await initdbOrder();
+  const out: SqlFn[] = [];
+  let filesRead = 0;
+  for await (const e of Deno.readDir(SQL_DIR)) {
+    if (!e.isFile || !e.name.endsWith(".sql")) continue;
+    filesRead++;
+    const sql = await Deno.readTextFile(new URL(e.name, SQL_DIR));
+    const re = /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?([a-z0-9_]+)\s*\(/gi;
+    for (const m of [...sql.matchAll(re)]) {
+      const start = m.index!;
+      const end = sql.indexOf("\n$$;", start);
+      const body = end === -1 ? sql.slice(start) : sql.slice(start, end);
+      if (!/\bthoughts\b/i.test(body)) continue;
+      out.push({
+        name: m[1].toLowerCase(),
+        file: e.name,
+        order: order.get(e.name) ?? -1,
+        reads: /(FROM|JOIN)\s+(?:public\.)?thoughts\b/i.test(body),
+        hasPlane: /metadata->>'exposure'/.test(body),
+      });
+    }
+  }
+  if (filesRead === 0) throw new Error(`no .sql under ${SQL_DIR}`);
+  if (out.length === 0) throw new Error("found no SQL function touching thoughts - vacuous");
+  return out;
 }
 
 /** Strip line and block comments, so prose mentioning a table is not a finding. */
@@ -198,41 +338,137 @@ interface TableRef {
 }
 
 /**
- * Every SQL reference to a named table, with the keyword that introduced it.
+ * Does this occurrence of a table name look like SQL, or like prose?
  *
- * Deliberately broad - FROM, JOIN, UPDATE, INTO, TABLE and DELETE FROM all count - and the
- * caller cross-checks the keyword-matched count against the raw count of the table name,
- * so a statement in a shape this regex does not know still fails rather than passing.
+ * THE RECONCILIATION NEEDS THIS OR IT CRIES WOLF. The bare-name count exists to catch a
+ * statement in a shape none of the three matchers knows - the "still fails" property. But
+ * these are MCP servers: `thoughts` appears in nine tool DESCRIPTIONS and in user-facing
+ * strings ("No thoughts found."), none of which is a statement. A gate that reports those is
+ * a gate whose output gets skimmed, and a skimmed gate is the one that stayed green while an
+ * unguarded resolver shipped.
+ *
+ * The discriminator is that SQL KEYWORDS IN THIS CODEBASE ARE UPPERCASE and prose is not.
+ * An occurrence counts when the string it sits in contains an uppercase SQL verb, when the
+ * next character is `(` (a PostgREST embedded resource - `agent_memories(*)`), or when it is
+ * not inside a string literal at all. All three err toward reporting: a false positive costs
+ * a pin with a written reason, a false negative costs the boundary.
  */
-function tableRefs(src: string, tables: readonly string[]): {
-  refs: TableRef[];
-  unrecognised: string[];
-} {
+function looksLikeSql(body: string, idx: number, table: string): boolean {
+  const end = idx + table.length;
+  if (body[end] === "(") return true;
+  const before = body.slice(0, idx);
+  const open = Math.max(before.lastIndexOf("`"), before.lastIndexOf('"'), before.lastIndexOf("'"));
+  const after = body.slice(end);
+  let close = after.length;
+  for (const ch of ["`", '"', "'"]) {
+    const i = after.indexOf(ch);
+    if (i !== -1 && i < close) close = i;
+  }
+  // No quote before it, or an implausibly long "string": treat it as bare code.
+  if (open === -1 || idx - open > 400) return true;
+  const frag = body.slice(open + 1, end + close);
+  // A quoted string that is EXACTLY the table name is a query-builder reference
+  // (`.from("agent_memories")`), never prose. Counting it is what keeps the reconciliation
+  // able to see ORM-shaped blindness: if the builder verb is one the matcher does not know,
+  // the bare count still exceeds the matched count and the gate reports it.
+  if (frag.trim() === table) return true;
+  return /\b(SELECT|INSERT|UPDATE|DELETE|FROM|JOIN|INTO|TRUNCATE|VALUES|WHERE)\b/.test(frag);
+}
+
+/** supabase-js verb -> the SQL keyword it means. */
+const ORM_VERB: Record<string, string> = {
+  select: "FROM",
+  insert: "INTO",
+  upsert: "INTO",
+  update: "UPDATE",
+  delete: "DELETE",
+};
+
+/**
+ * Every reference to a named table or corpus function, with the keyword that introduced it.
+ *
+ * THREE SHAPES, because the code uses three. Raw SQL (`FROM x`), the supabase-js query
+ * builder (`.from("x").select(...)`), and an RPC call to a function that reads the corpus
+ * (`.rpc("match_thoughts", ...)`). The ORM shape was invisible to the previous matcher
+ * except as an "unrecognised" discrepancy, and the RPC shape was invisible entirely -
+ * `match_thoughts` does not match `\bthoughts\b`, because `_` is a word character.
+ *
+ * The caller cross-checks the keyword-matched count against the raw count of the name, so a
+ * statement in a shape none of these know still fails rather than passing.
+ */
+function tableRefs(
+  src: string,
+  tables: readonly string[],
+  rpcs: readonly { name: string; reads: boolean }[] = [],
+): { refs: TableRef[]; unrecognised: string[] } {
   const body = stripComments(src);
   const refs: TableRef[] = [];
   const unrecognised: string[] = [];
   for (const table of tables) {
-    const bare = [...body.matchAll(new RegExp(`\\b${table}\\b`, "g"))].length;
-    const matched = [
-      ...body.matchAll(new RegExp(`(FROM|JOIN|UPDATE|INTO|TABLE)\\s+${table}\\b`, "gi")),
-    ];
-    for (const m of matched) refs.push({ table, keyword: m[1].toUpperCase(), text: m[0] });
+    const bare = [...body.matchAll(new RegExp(`\\b${table}\\b`, "g"))]
+      .filter((m) => looksLikeSql(body, m.index!, table)).length;
+    const matched: TableRef[] = [];
+    for (
+      const m of body.matchAll(
+        new RegExp(`(FROM|JOIN|UPDATE|INTO|TABLE)\\s+(?:public\\.)?${table}\\b`, "gi"),
+      )
+    ) {
+      matched.push({ table, keyword: m[1].toUpperCase(), text: m[0] });
+    }
+    for (
+      const m of body.matchAll(
+        new RegExp(
+          `\\.from\\(["']${table}["']\\)[\\s\\S]{0,120}?\\.(select|insert|upsert|update|delete)\\b`,
+          "g",
+        ),
+      )
+    ) {
+      matched.push({
+        table,
+        keyword: ORM_VERB[m[1]],
+        text: `.from("${table}").${m[1]}`,
+      });
+    }
+    refs.push(...matched);
     if (bare > matched.length) {
-      unrecognised.push(`${table} appears ${bare}x but only ${matched.length}x after a SQL keyword`);
+      unrecognised.push(
+        `${table} appears ${bare}x but only ${matched.length}x in a shape the matcher knows`,
+      );
+    }
+  }
+  // DEDUPED BY NAME: a function is defined more than once across the initdb chain
+  // (match_thoughts exists in init.sql and again, guarded, in the corpus-plane file), and
+  // scanning per definition would report one call site as many findings.
+  const seenRpc = new Set<string>();
+  for (const fn of rpcs) {
+    if (seenRpc.has(fn.name)) continue;
+    seenRpc.add(fn.name);
+    for (const m of body.matchAll(new RegExp(`\\brpc\\(["']${fn.name}["']`, "g"))) {
+      refs.push({
+        table: CORPUS,
+        // A corpus function that READS is a corpus read however it is invoked.
+        keyword: fn.reads ? "FROM" : "INTO",
+        text: m[0],
+      });
     }
   }
   return { refs, unrecognised };
 }
 
 /**
- * THE ALLOW-LIST. One entry per memory-table statement that is NOT routed through the
- * chokepoint, with the reason it is safe. Short on purpose: a long allow-list is a
- * chokepoint that has stopped being one.
+ * THE ALLOW-LIST. One entry per memory- or corpus-table statement that deliberately carries
+ * NO plane, with the reason it is safe anyway.
  *
- * `sql` must appear verbatim in the named file, comments stripped. `reason` is what a
- * reviewer reads instead of taking the exemption on trust. An entry that stops matching
- * anything is itself a failure - a stale exemption silently exempts a statement that has
- * moved.
+ * `sql` must appear verbatim in the named file, comments stripped, and is REMOVED from the
+ * body before the scan. `reason` is what a reviewer reads instead of taking the exemption on
+ * trust. An entry that stops matching anything is itself a failure - a stale exemption
+ * silently exempts a statement that has moved.
+ *
+ * THE LIST GREW THIS ROUND, from two to six, and that is a decision rather than a drift:
+ * the scan went from one directory to every build context in the deployment, so two files
+ * that were never scanned before are scanned now and their deliberate no-plane statements
+ * have to be named. Every new entry is an EXISTENCE PROBE whose answer never reaches the
+ * caller, or a WRITE. Neither can disclose a row.
  */
 interface Exemption {
   file: string;
@@ -242,7 +478,18 @@ interface Exemption {
 
 const EXEMPT: Exemption[] = [
   {
-    file: "agent-memory.ts",
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `await supabase.rpc("match_thoughts", {`,
+    reason:
+      "The corpus vector search, and the one statement here whose plane is not in the " +
+      "TypeScript at all: it is INSIDE THE FUNCTION. docker/init-agent-memory-corpus-plane.sql " +
+      "replaces match_thoughts with a body carrying the same predicate, and a test above " +
+      "asserts that the LAST definition in the initdb chain is the guarded one. Pinning it " +
+      "here would be a lie - there is no marker in this statement to pin - so it is an " +
+      "exemption that names where the guard actually lives.",
+  },
+  {
+    file: "integrations/kubernetes-deployment/agent-memory.ts",
     sql: "INSERT INTO agent_memories (",
     reason:
       "The WRITE. Exposure is stamped by buildWritebackRow from the DOOR (stampExposure, " +
@@ -252,7 +499,7 @@ const EXEMPT: Exemption[] = [
       "and agent-memory-policy.test.ts owns it.",
   },
   {
-    file: "agent-memory.ts",
+    file: "integrations/kubernetes-deployment/agent-memory.ts",
     sql: "FROM agent_memories am\n        WHERE am.embedding IS NOT NULL AND (${filter.sql})",
     reason:
       "performRecall. Its plane predicate comes from buildRecallScopeFilter, whose exposure " +
@@ -264,29 +511,249 @@ const EXEMPT: Exemption[] = [
       "PARENTHESISED here for the same reason PlaneQuery.and parenthesises: an OR inside a " +
       "concatenated fragment must not be able to escape the clauses around it.",
   },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `await supabase.from("agent_memories").select("id").eq("id", id).maybeSingle();`,
+    reason:
+      "auditIfOffPlane's EXISTENCE PROBE, and it is plane-free on purpose: its whole job is " +
+      "to ask whether a refused id exists at all, so that a typo does not file a refusal " +
+      "record while a real probe does. The answer never reaches the caller - it decides only " +
+      "whether an audit row is written - which is what keeps it from being an oracle. Same " +
+      "shape and same reasoning as auditIfOffPlane in the chokepoint.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql:
+      `.from("agent_memories").select("id").eq("idempotency_key", idempotency_key).maybeSingle();`,
+    reason:
+      "The idempotency EXISTENCE PROBE. Plane-free deliberately: the key is unique per " +
+      "workspace regardless of plane, so an off-plane hit must become a refusal rather than " +
+      "a duplicate insert that violates the index. It selects `id` and never returns it - " +
+      "the route answers 409 with no identifier, which is precisely the disclosure the " +
+      "openbrain-mcp version of this bug was handing over.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `const { data: memory, error: memoryError } = await supabase.from("agent_memories").insert({`,
+    reason:
+      "The WRITE, same reasoning as agent-memory.ts's INSERT above: a write cannot disclose " +
+      "an existing row. This one now stamps `exposure: DOOR_EXPOSURE` into the row's " +
+      "metadata from the door value, which it did not before - every memory this door wrote " +
+      "was unlabelled, and unlabelled reads as 'personal', so the door could not read back " +
+      "its own writes and anything that could was reading the restricted plane.",
+  },
+];
+
+/**
+ * PINNED STATEMENTS - guarded IN PLACE, because their file cannot import the chokepoint.
+ *
+ * A DIFFERENT THING FROM AN EXEMPTION, and kept in a different list so the difference stays
+ * visible. An exemption says "this statement carries no plane and that is safe". A pin says
+ * "this statement carries the plane INSIDE ITSELF, and here is the text that proves it".
+ *
+ * Two files need this and neither can be routed. `docker/extensions-server/index.ts` is a
+ * different image whose build context is its own directory - there is no import path to
+ * `integrations/kubernetes-deployment/agent-memory-plane.ts` that survives `docker build`,
+ * and widening the context to the repo root to get one would put every OB1 source file into
+ * an image that needs a single module. `integrations/agent-memory-api/index.ts` is a
+ * Supabase Edge Function talking to PostgREST through supabase-js, which has no queryObject
+ * and cannot execute the chokepoint's SQL at all.
+ *
+ * WHAT MAKES A PIN TWO-SIDED. `sql` must match verbatim AND must contain `marker`. Edit the
+ * statement to drop its predicate and the pin stops matching, which is itself a failure
+ * ("allow-list entry no longer matches"); the statement then falls through to the ordinary
+ * scan and is reported. There is no edit that removes the plane and leaves the gate green.
+ */
+interface Pin {
+  file: string;
+  sql: string;
+  marker: string;
+  reason: string;
+}
+
+const PINNED: Pin[] = [
+  {
+    file: "integrations/entity-extraction-worker/index.ts",
+    sql: `.from("thoughts")
+      .select("id, content, metadata")
+      .eq("id", item.thought_id)
+      .or(CORPUS_PLANE_OR)
+      .maybeSingle();`,
+    marker: "CORPUS_PLANE_OR",
+    reason:
+      "openbrain-entity-worker's read of a queued thought's content. FOUND BY THIS GATE, not " +
+      "by a person: there is no SQL in that file, so no grep for `FROM thoughts` could see " +
+      "it, and it only appeared once the matcher learned the supabase-js shape. It matters " +
+      "because the worker turns content into ENTITIES and EDGES - a further store, read by " +
+      "the wiki and the graph tools, with no label to carry.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql:
+      `await memoriesOnPlane("*, agent_memory_source_refs(*), agent_memory_artifacts(*)").eq("id", id).maybeSingle();`,
+    marker: "memoriesOnPlane",
+    reason:
+      "The by-id route's embedded read of two sidecars. PostgREST resolves `x(*)` through the " +
+      "parent row, so the plane on the parent bounds them - but that is exactly the ordering " +
+      "assumption the chokepoint refused to rest on elsewhere, which is why it is pinned to " +
+      "the call that carries the plane rather than waved through as 'the parent was checked'.",
+  },
+  {
+    file: "docker/extensions-server/index.ts",
+    sql: "`SELECT * FROM thoughts WHERE id = $2 AND ${corpusPlanePredicate(1)}`",
+    marker: "corpusPlanePredicate(1)",
+    reason:
+      "link_thought_to_contact's by-id read. This is the statement a verifier found returning " +
+      "any thought's full content to the openbrain-ext door AND copying it into " +
+      "professional_contacts.notes - a third home for the same text, in a table with no " +
+      "exposure label and no way to grow one.",
+  },
+  {
+    file: "docker/extensions-server/index.ts",
+    sql: "`SELECT 1 FROM thoughts WHERE id = $2 AND NOT ${corpusPlanePredicate(1)}`",
+    marker: "corpusPlanePredicate(1)",
+    reason:
+      "The existence probe behind that refusal, plane-NEGATED so it fires only for a row " +
+      "that really is off-plane. Pinned rather than exempted because the predicate is IN it: " +
+      "a probe that lost its NOT would audit every miss.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `const q = supabase.from("agent_memories").select((columns ?? "*") as Q);
+  if (DOOR_PLANE.includes("personal")) {
+    return q.or(
+      \`metadata->>exposure.in.(\${DOOR_PLANE.join(",")}),metadata->>exposure.is.null\`,
+    );
+  }
+  return q.filter("metadata->>exposure", "in", \`(\${DOOR_PLANE.join(",")})\`);`,
+    marker: "DOOR_PLANE",
+    reason:
+      "memoriesOnPlane - the ONLY way this file selects from agent_memories, and the whole " +
+      "body is pinned rather than the first line, so the predicate cannot be separated from " +
+      "the statement it bounds. PostgREST has no COALESCE, so the chokepoint's " +
+      "COALESCE(...,'personal') is written as its two halves.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `.from("agent_memories").update(updates).eq("id", id)
+    .filter("metadata->>exposure", "in", \`(\${DOOR_PLANE.join(",")})\`)`,
+    marker: "DOOR_PLANE",
+    reason:
+      "The review UPDATE. The plane is on the write as well as on the read that preceded it - " +
+      "both, not either, because the read is what refuses and this is what keeps the refusal " +
+      "true if a later edit reorders them. An unbounded review endpoint is how the " +
+      "openbrain-mcp escalation worked.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `if (mirrors && thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);`,
+    marker: "mirrors",
+    reason:
+      "The corpus mirror's embedding write. `mirrors` is UNIFIED_SEARCH_EXPOSURES membership " +
+      "for the door's exposure, so off the unified-search plane no corpus row is created and " +
+      "none is updated. Written redundantly into the statement (thoughtId is already null) " +
+      "so the thing that makes it safe is IN the text this pin matches.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `const mirrors = UNIFIED_SEARCH_EXPOSURES.includes(DOOR_EXPOSURE);
+    const { data: upsertResult, error: upsertError } = !mirrors
+      ? { data: null, error: null }
+      : await supabase.rpc("upsert_thought", {`,
+    marker: "mirrors",
+    reason:
+      "The corpus mirror itself, gated by the same `const mirrors = ...` ternary whose false " +
+      "branch is `{ data: null, error: null }`. Off the unified-search plane the memory's " +
+      "content never enters `thoughts` - not a redacted stub either, because a stub carrying " +
+      "the real embedding is still an oracle.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `await supabase.from("agent_memory_recall_traces").select("*")
+    .eq("request_id", request_id)
+    .containedBy("request_payload->enforced_exposure", DOOR_PLANE as string[])
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!trace) return c.json({ error: "not found" }, 404, corsHeaders);
+
+  for (const memory_id of parsed.data.used_memory_ids) {
+    await supabase.from("agent_memory_recall_items").update({ used: true }).eq("trace_id", trace.id).eq("memory_id", memory_id);`,
+    marker: "DOOR_PLANE",
+    reason:
+      "The usage route's trace read, pinned together with the recall_items UPDATE that " +
+      "follows it - the update is scoped to `trace.id` and inherits this bound, so pinning " +
+      "them as one block is what makes 'it inherits the bound' a fact about the text rather " +
+      "than a claim about the control flow. Containment rather than equality because " +
+      "enforced_exposure is a LIST.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `await supabase.from("agent_memory_recall_items").update({ used: false, ignored_reason: ignored.reason ?? null }).eq("trace_id", trace.id).eq("memory_id", ignored.memory_id);`,
+    marker: "trace.id",
+    reason:
+      "The other half of the same loop, scoped to the same plane-bounded `trace.id`. It " +
+      "returns no rows (no .select()), so it cannot disclose one; what it must not be able " +
+      "to do is write into a trace on another plane, and `trace` came from the pinned read " +
+      "above.",
+  },
+  {
+    file: "integrations/agent-memory-api/index.ts",
+    sql: `await supabase.from("agent_memory_recall_traces").select("*")
+    .eq("request_id", request_id)
+    .containedBy("request_payload->enforced_exposure", DOOR_PLANE as string[])
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!trace) return c.json({ error: "not found" }, 404, corsHeaders);
+  const { data: items, error: itemError } = await supabase.from("agent_memory_recall_items").select("*, agent_memories(*)").eq("trace_id", trace.id).order("rank");
+  if (itemError) return c.json({ error: itemError.message }, 500, corsHeaders);`,
+    marker: "DOOR_PLANE",
+    reason:
+      "The trace GET. The ENVELOPE is the disclosure here - it carries the recall's query " +
+      "text, which names what an agent went looking for even when every item is dropped - so " +
+      "the trace read and the item read are pinned as one block. The embedded " +
+      "`agent_memories(*)` join is NOT the boundary: an item carries memory_id, rank and the " +
+      "use-policy snapshot in its own columns, so the whole item is dropped and audited in " +
+      "the loop below, not merely blanked.",
+  },
 ];
 
 /**
  * THE AUDIT, as a pure function over {file -> source}.
  *
- * Pure on purpose. The real gate feeds it the shipping set read from disk; the red-proofs
- * below feed it the same set plus one synthetic file with an arbitrary NAME, so "a new
- * unguarded resolver is caught whatever it is called" is proven by the same code path that
- * does the real check - not by a second, friendlier one. It needs no write permission and
- * works against the read-only mount the runner uses.
+ * Pure on purpose. The real gate feeds it the scanned set read from disk; the red-proofs
+ * below feed it the same set plus one synthetic file with an arbitrary NAME IN AN ARBITRARY
+ * ROOT, so "a new unguarded resolver is caught wherever it lives" is proven by the same code
+ * path that does the real check - not by a second, friendlier one.
  */
 function auditSources(
   sources: Map<string, string>,
   tables: readonly string[],
+  corpusFns: readonly { name: string; reads: boolean }[],
   exempt: readonly Exemption[],
+  pinned: readonly Pin[],
 ): string[] {
   const offenders: string[] = [];
   for (const ex of exempt) {
-    if (!sources.has(ex.file)) offenders.push(`EXEMPT names a file that does not ship: ${ex.file}`);
+    if (!sources.has(ex.file)) offenders.push(`EXEMPT names a file that is not scanned: ${ex.file}`);
+  }
+  for (const pin of pinned) {
+    if (!sources.has(pin.file)) offenders.push(`PINNED names a file that is not scanned: ${pin.file}`);
+    if (!pin.sql.includes(pin.marker)) {
+      offenders.push(`PINNED entry for ${pin.file} does not contain its own marker "${pin.marker}"`);
+    }
   }
   for (const [file, src] of sources) {
     if (file === CHOKEPOINT) continue; // statements here ARE the guarded path
     let body = stripComments(src);
+    for (const pin of pinned.filter((p) => p.file === file)) {
+      const before = body;
+      body = body.replace(pin.sql, "");
+      if (body === before) {
+        offenders.push(
+          `${file}: PINNED statement no longer matches - "${pin.sql.slice(0, 60)}..."`,
+        );
+      }
+    }
     for (const ex of exempt.filter((e) => e.file === file)) {
       const before = body;
       body = body.replace(ex.sql, "");
@@ -296,19 +763,42 @@ function auditSources(
         );
       }
     }
-    const { refs, unrecognised } = tableRefs(body, tables);
+    const { refs, unrecognised } = tableRefs(body, [...tables, CORPUS], corpusFns);
     for (const u of unrecognised) offenders.push(`${file}: ${u}`);
+    const corpusWrites = refs.filter(
+      (r) => r.table === CORPUS && (r.keyword === "INTO" || r.keyword === "UPDATE"),
+    ).length;
+    const strips = [...body.matchAll(/stripCorpusClaim\(/g)].length;
     for (const ref of refs) {
+      if (ref.table === CORPUS) {
+        // THE CORPUS'S RULE IS ABOUT ITS LABEL. A row with no `metadata.exposure` is
+        // unclaimed general corpus and readable everywhere, so a hand-written corpus WRITE
+        // is safe exactly when it cannot mint a claim - which is what stripCorpusClaim
+        // guarantees, and why `capture_thought`'s caller-supplied metadata_extra goes
+        // through it. A corpus READ, by contrast, must be plane-bound like any other.
+        if (ref.keyword === "INTO" || ref.keyword === "UPDATE") {
+          if (strips >= corpusWrites) continue;
+          offenders.push(
+            `${file}: "${ref.text}" writes the shared corpus without stripCorpusClaim - a ` +
+              `caller-supplied metadata.exposure would mint a plane claim.`,
+          );
+          continue;
+        }
+        offenders.push(
+          `${file}: "${ref.text}" reads the shared corpus with no exposure plane. Route it ` +
+            `through ${CHOKEPOINT}, or PIN the statement with the predicate inside it.`,
+        );
+        continue;
+      }
       // AN APPEND TO A SIDECAR CANNOT DISCLOSE AN EXISTING ROW. `INSERT INTO
-      // agent_memory_audit_events` / `_recall_traces` / `_recall_items` writes new rows
-      // from values the caller already has; there is no result set for a plane predicate
-      // to bound. `INSERT INTO agent_memories` is NOT covered by this - that one stamps
-      // the exposure that every later read depends on, so it carries an explicit
-      // exemption naming the test that owns the stamp.
+      // agent_memory_audit_events` / `_recall_traces` / `_recall_items` writes new rows from
+      // values the caller already has; there is no result set for a plane predicate to
+      // bound. `INSERT INTO agent_memories` is NOT covered by this - that one stamps the
+      // exposure that every later read depends on, so it carries an explicit exemption.
       if (ref.keyword === "INTO" && ref.table !== "agent_memories") continue;
       offenders.push(
         `${file}: "${ref.text}" is neither routed through ${CHOKEPOINT} nor on the ` +
-          `allow-list. Route it through agent-memory-plane.ts, or add an EXEMPT entry ` +
+          `allow-list. Route it through the chokepoint, or add an EXEMPT/PINNED entry ` +
           `with a reason.`,
       );
     }
@@ -316,122 +806,187 @@ function auditSources(
   return offenders;
 }
 
-Deno.test("the shipping set is derived from the Dockerfile's OWN rule", async () => {
-  // The derivation above is only as true as the Dockerfile it reproduces. If the image
-  // stops being "*.ts minus *.test.ts", every file-level assertion below is scanning the
-  // wrong set - quietly, and in the direction that passes.
+Deno.test("the scan roots are derived from the DEPLOYMENT, not from a list", async () => {
+  const roots = await scanRoots();
+  // The two roots the last round's gate could not see, and the one it could.
+  for (
+    const r of [
+      "integrations/kubernetes-deployment",
+      "docker/extensions-server",
+      "integrations/agent-memory-api",
+    ]
+  ) {
+    assertEquals(roots.includes(r), true, `scan roots are missing ${r}: ${roots}`);
+  }
+  // A floor, so a compose file that parses to one context does not silently shrink the gate.
+  assertEquals(roots.length >= 10, true, `expected 10+ scan roots, derived ${roots.length}`);
+  const files = await shippingFiles();
+  assertEquals(files.includes(CHOKEPOINT), true);
+  assertEquals(files.includes("docker/extensions-server/index.ts"), true);
+  assertEquals(files.includes("integrations/agent-memory-api/index.ts"), true);
+  assertEquals(files.some((f) => f.endsWith(".test.ts")), false, "a test file must not be scanned");
+});
+
+Deno.test("the openbrain-mcp set still matches the Dockerfile's OWN rule", async () => {
+  // The derivation is only as true as the Dockerfile it reproduces. If the image stops being
+  // "*.ts minus *.test.ts", the file-level assertions are scanning the wrong set - quietly,
+  // and in the direction that passes.
   const df = await readSource("Dockerfile");
   assertEquals(df.includes("COPY *.ts ./"), true, "Dockerfile no longer globs *.ts");
   assertEquals(df.includes("rm -f *.test.ts"), true, "Dockerfile no longer drops the tests");
   const files = await shippingFiles();
-  assertEquals(files.includes("index.ts"), true, "index.ts must be in the derived set");
-  assertEquals(files.includes(CHOKEPOINT), true);
-  assertEquals(files.some((f) => f.endsWith(".test.ts")), false, "a test file must not ship");
+  assertEquals(files.includes("integrations/kubernetes-deployment/index.ts"), true);
 });
 
 Deno.test("the memory-table list is derived from the SQL that creates the tables", async () => {
   const tables = await memoryTables();
-  // Not an equality assertion against a typed list - that would be the hand-written
-  // registry again. These three are asserted because the gate is meaningless without them,
-  // and the count floor catches a derivation that silently found only one file.
   for (const t of ["agent_memories", "agent_memory_recall_traces", "agent_memory_recall_items"]) {
     assertEquals(tables.includes(t), true, `derived table list is missing ${t}: ${tables}`);
   }
   assertEquals(tables.length >= 8, true, `expected at least 8 memory tables, derived ${tables.length}`);
 });
 
-Deno.test("EVERY memory-table statement is in the chokepoint or on the allow-list", async () => {
-  // THE TEST THIS FILE EXISTS FOR - now over the derived file set and the derived table
-  // set rather than over two lists somebody typed.
-  const offenders = auditSources(await shippingSources(), await memoryTables(), EXEMPT);
+Deno.test("EVERY memory- or corpus-table statement is routed, pinned or allow-listed", async () => {
+  // THE TEST THIS FILE EXISTS FOR - over the derived root set, the derived file set, the
+  // derived table set and the derived corpus-function set, rather than over lists somebody
+  // typed.
+  const offenders = auditSources(
+    await shippingSources(),
+    await memoryTables(),
+    await corpusFunctions(),
+    EXEMPT,
+    PINNED,
+  );
   assertEquals(offenders, [], offenders.join("\n"));
 });
 
 Deno.test("ops and tools resolve NOTHING by hand - zero read statements", async () => {
-  // The two files the escalation lived in. Stated separately so the property is visible on
-  // its own: after the refactor their only memory-table SQL is an append to an audit
-  // sidecar.
   const tables = await memoryTables();
-  for (const file of ["agent-memory-ops.ts", "agent-memory-tools.ts"]) {
-    const { refs } = tableRefs(await readSource(file), tables);
+  for (
+    const file of [
+      "integrations/kubernetes-deployment/agent-memory-ops.ts",
+      "integrations/kubernetes-deployment/agent-memory-tools.ts",
+    ]
+  ) {
+    const { refs } = tableRefs(await readRepo(file), tables);
     const reads = refs.filter((r) => r.keyword !== "INTO");
     assertEquals(reads, [], `${file} still resolves memory rows by hand: ${JSON.stringify(reads)}`);
   }
 });
 
-Deno.test("every allow-list entry carries a real reason, and the list stays SHORT", async () => {
+Deno.test("index.ts resolves NO corpus row by hand - every read is the chokepoint's", async () => {
+  // The six `FROM thoughts` statements that leaked. There must be none left.
+  const src = await readRepo("integrations/kubernetes-deployment/index.ts");
+  const { refs } = tableRefs(src, [CORPUS]);
+  const reads = refs.filter((r) => r.keyword === "FROM" || r.keyword === "JOIN");
+  assertEquals(reads, [], `index.ts still reads the corpus by hand: ${JSON.stringify(reads)}`);
+  // ...and it really does read the corpus, so this is not passing over an empty file. The
+  // call sites are generic (`selectCorpusOnPlane<ThoughtMatch>(`), so the name is matched
+  // without the paren - the first version of this assertion looked for "name(" and was
+  // false for the right code, which is the direction that at least fails loudly.
+  assertEquals([...src.matchAll(/selectCorpusOnPlane</g)].length, 5, "five corpus SELECTs");
+  assertEquals([...src.matchAll(/resolveCorpusRowOnPlane</g)].length, 1, "one by-id resolve");
+});
+
+Deno.test("every allow-list and pin carries a real reason, and the lists stay SHORT", async () => {
   const sources = await shippingSources();
-  for (const ex of EXEMPT) {
-    assertEquals(sources.has(ex.file), true, `EXEMPT names a file that does not ship: ${ex.file}`);
-    assertEquals(ex.reason.length > 120, true, `EXEMPT reason too thin for ${ex.file}: ${ex.reason}`);
+  for (const ex of [...EXEMPT, ...PINNED]) {
+    assertEquals(sources.has(ex.file), true, `names a file that is not scanned: ${ex.file}`);
+    assertEquals(ex.reason.length > 120, true, `reason too thin for ${ex.file}: ${ex.reason}`);
   }
-  // Growing this is how a chokepoint dissolves one reasonable-looking exception at a time;
-  // raising the number should feel like a decision, because it is one.
-  assertEquals(EXEMPT.length <= 3, true, `the allow-list has grown to ${EXEMPT.length}`);
+  for (const pin of PINNED) {
+    assertEquals(
+      pin.sql.includes(pin.marker),
+      true,
+      `PINNED ${pin.file}: sql does not contain marker "${pin.marker}"`,
+    );
+  }
+  // Growing these is how a chokepoint dissolves one reasonable-looking exception at a time;
+  // raising a number should feel like a decision, because it is one.
+  assertEquals(EXEMPT.length <= 6, true, `the allow-list has grown to ${EXEMPT.length}`);
+  assertEquals(PINNED.length <= 12, true, `the pin list has grown to ${PINNED.length}`);
 });
 
 // ---------------------------------------------------------------------------------
-// THE CORPUS RULE - what may ENTER `thoughts`, since who reads it cannot be bounded
+// THE CORPUS'S OTHER READERS - SQL functions, and the copy in another image
 // ---------------------------------------------------------------------------------
 
-/**
- * The shipping files that know about the memory plane.
- *
- * DERIVED: a file is plane-aware if it names a memory table in SQL or imports the
- * chokepoint. index.ts is neither, so its ordinary capture/idea inserts into `thoughts`
- * are out of scope - and would come INTO scope the moment it grew a memory statement,
- * which is the direction that keeps this honest.
- */
-async function planeAwareFiles(tables: readonly string[]): Promise<string[]> {
-  const out: string[] = [];
-  for (const [file, src] of await shippingSources()) {
-    const body = stripComments(src);
-    const namesATable = tableRefs(body, tables).refs.length > 0;
-    const importsChokepoint = body.includes(`"./${CHOKEPOINT}"`);
-    if (namesATable || importsChokepoint) out.push(file);
+Deno.test("every corpus-READING SQL function's LAST definition carries the plane", async () => {
+  // `match_thoughts` RETURNS content and `upsert_thought` RETURNS public.thoughts, and both
+  // are reachable without touching a line of this repo's TypeScript - PostgREST exposes them
+  // as `rpc/*`. A boundary that stops at the application layer has a documented way round it.
+  //
+  // LAST definition, because init.sql defines match_thoughts unguarded and
+  // init-agent-memory-corpus-plane.sql replaces it later in the chain. The mount ORDER comes
+  // from compose's own `NNN-` prefixes, so adding an unguarded redefinition at a higher
+  // number is red.
+  const fns = await corpusFunctions();
+  const readers = fns.filter((f) => f.reads);
+  assertEquals(readers.length >= 2, true, `expected match_thoughts and upsert_thought: ${JSON.stringify(fns)}`);
+  const byName = new Map<string, SqlFn>();
+  for (const f of readers) {
+    const prev = byName.get(f.name);
+    if (!prev || f.order > prev.order) byName.set(f.name, f);
   }
-  return out;
-}
-
-Deno.test("no plane-aware file writes the SHARED CORPUS by hand", async () => {
-  // THE SECOND HOME, as a gate. `performWriteback` used to `INSERT INTO thoughts` itself,
-  // with a metadata.exposure label and a comment claiming search_thoughts enforced the
-  // same boundary. Nothing read the label. The write now goes through
-  // mirrorToUnifiedSearch, which writes nothing at all off the unified-search plane, and
-  // this asserts no plane-aware file can reintroduce a hand-written corpus row.
-  const tables = await memoryTables();
-  const aware = await planeAwareFiles(tables);
+  const bad = [...byName.values()].filter((f) => !f.hasPlane);
   assertEquals(
-    aware.includes("agent-memory.ts"),
-    true,
-    "the plane-aware derivation found nothing it should have - it is testing nobody",
+    bad,
+    [],
+    `corpus-reading functions whose final definition has no exposure predicate: ` +
+      JSON.stringify(bad),
   );
-  const offenders: string[] = [];
-  for (const file of aware) {
-    if (file === CHOKEPOINT) continue;
-    const { refs } = tableRefs(await readSource(file), [CORPUS]);
-    for (const r of refs) {
-      if (r.keyword === "INTO" || r.keyword === "UPDATE") {
-        offenders.push(
-          `${file}: "${r.text}" - a plane-aware file must reach the corpus only through ` +
-            `mirrorToUnifiedSearch, which writes nothing for a non-unified exposure.`,
-        );
-      }
-    }
+  for (const n of ["match_thoughts", "upsert_thought"]) {
+    assertEquals(byName.has(n), true, `${n} was not derived as a corpus reader: ${[...byName.keys()]}`);
   }
-  assertEquals(offenders, [], offenders.join("\n"));
 });
 
-Deno.test("the corpus mirror is the chokepoint's, and it is the ONLY one", async () => {
-  // Belt to the braces above: the chokepoint really does contain the insert, so the rule
-  // is "route it here", not "nobody may write the corpus".
-  const self = await readSource(CHOKEPOINT);
-  assertEquals(tableRefs(self, [CORPUS]).refs.length, 1, "expected exactly one corpus statement");
-  assertEquals(self.includes("INSERT INTO thoughts (content, embedding, metadata)"), true);
+Deno.test("the SQL predicate and the TypeScript predicate say the same thing", async () => {
+  // Two languages, one rule. The SQL cannot call corpusPlanePredicate, so the parts are
+  // asserted: the IS NULL half, the membership half, and the plane it hard-codes - which
+  // must be exactly UNIFIED_SEARCH_EXPOSURES, or the database would serve a plane the mirror
+  // refuses to write to (or worse, the other way round).
+  const sql = await readRepo("docker/init-agent-memory-corpus-plane.sql");
+  const ts = corpusPlanePredicate(1);
+  assertEquals(ts, `(metadata->>'exposure' IS NULL OR metadata->>'exposure' = ANY($1))`);
+  assertEquals(sql.includes("metadata->>'exposure' IS NULL"), true);
+  // Comments stripped first: the file's own header quotes the predicate, and counting the
+  // prose alongside the code is how a check starts passing for the wrong reason.
+  const sqlCode = sql.replace(/^[ 	]*--.*$/gm, "");
+  assertEquals([...sqlCode.matchAll(/= ANY\(ARRAY\['ops'\]\)/g)].length, 2, "both functions");
+  assertEquals([...UNIFIED_SEARCH_EXPOSURES], ["ops"], "the SQL hard-codes ['ops']");
+  // Mounted in BOTH compose files, or a fresh preview volume gets the unguarded function.
+  for (const f of ["docker/docker-compose.yml", "docker/docker-compose.preview.yml"]) {
+    assertEquals(
+      (await readRepo(f)).includes("init-agent-memory-corpus-plane.sql"),
+      true,
+      `${f} does not mount the corpus-plane SQL`,
+    );
+  }
+});
+
+Deno.test("extensions-server's COPY of the predicate is character-identical", async () => {
+  // The openbrain-ext image cannot import the chokepoint (different build context, and its
+  // Dockerfile copies one file), so it carries its own copy. Copying is what failed three
+  // rounds of this work, so the copy is pinned HERE: divergence is red, in either direction.
+  const ext = await readRepo("docker/extensions-server/index.ts");
+  const copied = ext.match(
+    /function corpusPlanePredicate\(paramIndex: number, alias = ""\): string \{([\s\S]*?)\n\}/,
+  );
+  assertEquals(!!copied, true, "extensions-server no longer defines corpusPlanePredicate");
+  const chokepoint = (await readSource("agent-memory-plane.ts")).match(
+    /export function corpusPlanePredicate\(paramIndex: number, alias = ""\): string \{([\s\S]*?)\n\}/,
+  );
+  assertEquals(!!chokepoint, true, "the chokepoint no longer defines corpusPlanePredicate");
+  assertEquals(copied![1].trim(), chokepoint![1].trim(), "the two predicates have diverged");
+  // ...and the copy is really the one the statements use.
+  assertEquals(ext.includes("${corpusPlanePredicate(1)}"), true);
+  // The door value is server-side and defaults to the narrow plane, exactly as doorPlane does.
+  assertEquals(ext.includes(`Deno.env.get("DOOR_EXPOSURE") || "ops"`), true);
+  assertEquals(ext.includes("Object.freeze([DOOR_EXPOSURE])"), true, "an unfrozen plane can be widened");
 });
 
 // ---------------------------------------------------------------------------------
-// RED-PROOFS - four properties, each demonstrated failing
+// RED-PROOFS - one per property, each demonstrated failing
 // ---------------------------------------------------------------------------------
 
 /** The real set plus one synthetic file, fed to the real audit function. */
@@ -439,43 +994,75 @@ async function withInjected(name: string, src: string): Promise<string[]> {
   const sources = await shippingSources();
   assertEquals(sources.has(name), false, `${name} already exists - pick another probe name`);
   sources.set(name, src);
-  return auditSources(sources, await memoryTables(), EXEMPT);
+  return auditSources(sources, await memoryTables(), await corpusFunctions(), EXEMPT, PINNED);
 }
 
 Deno.test("RED: a new unguarded resolver is caught WHATEVER IT IS NAMED", async () => {
-  // THE VERIFIER'S EXACT DEFEAT, as a permanent test. This is the file and the statement
-  // that produced `deno check` exit 0 and 154 passed | 0 failed under the old gate, and it
-  // is named nothing like the others on purpose - the old gate only looked at files whose
-  // name started with "agent-memory".
+  // THE VERIFIER'S EXACT DEFEAT, as a permanent test. This is the file and the statement that
+  // produced `deno check` exit 0 and 154 passed | 0 failed under the gate two rounds ago, and
+  // it is named nothing like the others on purpose.
   const offenders = await withInjected(
-    "corpus-index.ts",
+    "integrations/kubernetes-deployment/corpus-index.ts",
     "export async function lookup(c: { queryObject: (s: string, a: unknown[]) => Promise<{ rows: unknown[] }> }, id: string) {\n" +
       "  return await c.queryObject(`SELECT id, summary, content, metadata FROM agent_memories WHERE id = $1`, [id]);\n" +
       "}\n",
   );
   assertEquals(offenders.length, 1, `expected exactly one finding, got: ${offenders.join(" | ")}`);
-  assertEquals(offenders[0].startsWith("corpus-index.ts:"), true, offenders[0]);
+  assertEquals(offenders[0].includes("corpus-index.ts"), true, offenders[0]);
+});
+
+Deno.test("RED: caught in ANOTHER IMAGE's directory, not just this one", async () => {
+  // THE HOLE THIS ROUND CLOSED. Two real unguarded readers lived outside
+  // integrations/kubernetes-deployment and the gate could not see either of them. Same
+  // statement, planted in the openbrain-ext image under a name that belongs there.
+  const offenders = await withInjected(
+    "docker/extensions-server/contacts-util.ts",
+    "export const byId = `SELECT id, content, metadata FROM thoughts WHERE id = $1`;\n",
+  );
+  assertEquals(offenders.length, 1, offenders.join(" | "));
+  assertEquals(offenders[0].includes("contacts-util.ts"), true, offenders[0]);
+  assertEquals(offenders[0].includes("reads the shared corpus"), true, offenders[0]);
+});
+
+Deno.test("RED: caught in the supabase-js SHAPE, not just raw SQL", async () => {
+  // agent-memory-api does not write SQL strings at all. A gate that only knows `FROM x` sees
+  // nothing in it - which is how a whole door stayed unguarded through four rounds.
+  const offenders = await withInjected(
+    "integrations/agent-memory-api/helpers.ts",
+    'export const load = (s: { from: (t: string) => { select: (c: string) => unknown } }, id: string) =>\n' +
+      '  s.from("agent_memories").select("*");\n',
+  );
+  assertEquals(offenders.length, 1, offenders.join(" | "));
+  assertEquals(offenders[0].includes('.from("agent_memories").select'), true, offenders[0]);
+});
+
+Deno.test("RED: caught when it goes through an RPC instead of a table", async () => {
+  // `match_thoughts` RETURNS content and does not match \bthoughts\b, because `_` is a word
+  // character. Before the corpus-function derivation this was a completely silent way in.
+  const offenders = await withInjected(
+    "integrations/research-service/lookup.ts",
+    'export const search = (s: { rpc: (f: string, a: unknown) => unknown }, e: number[]) =>\n' +
+      '  s.rpc("match_thoughts", { query_embedding: e });\n',
+  );
+  assertEquals(offenders.length, 1, offenders.join(" | "));
+  assertEquals(offenders[0].includes("match_thoughts"), true, offenders[0]);
 });
 
 Deno.test("RED: caught whatever MEMORY TABLE it reads, not just agent_memories", async () => {
-  // The gate's one-word vocabulary, as a test. Each of these left the old gate green when
-  // injected into a file it WAS scanning.
   const offenders = await withInjected(
-    "trace-helpers.ts",
+    "integrations/kubernetes-deployment/trace-helpers.ts",
     "const a = `SELECT query FROM agent_memory_recall_traces WHERE id = $1`;\n" +
       "const b = `SELECT memory_id, rank FROM agent_memory_recall_items WHERE trace_id = $1`;\n" +
       "const c = `SELECT action FROM agent_memory_review_actions WHERE memory_id = $1`;\n" +
       "export const q = [a, b, c];\n",
   );
   assertEquals(offenders.length, 3, offenders.join(" | "));
-  assertEquals(offenders.every((o) => o.startsWith("trace-helpers.ts:")), true, offenders.join(" | "));
+  assertEquals(offenders.every((o) => o.includes("trace-helpers.ts")), true, offenders.join(" | "));
 });
 
 Deno.test("RED: caught whatever VERB it uses - an UPDATE is not a read", async () => {
-  // The escalation's shape. `promote_exposure` WIDENS exposure; a bare UPDATE with no plane
-  // in its WHERE moves a memory across the boundary without ever reading it.
   const offenders = await withInjected(
-    "fixups.ts",
+    "integrations/kubernetes-deployment/fixups.ts",
     "export const widen = `UPDATE agent_memories SET metadata = metadata || '{\"exposure\":\"ops\"}' WHERE id = $1`;\n",
   );
   assertEquals(offenders.length, 1, offenders.join(" | "));
@@ -483,32 +1070,40 @@ Deno.test("RED: caught whatever VERB it uses - an UPDATE is not a read", async (
 });
 
 Deno.test("RED: an INSERT into agent_memories is NOT waved through as an append", async () => {
-  // The append exemption is narrow on purpose. A second write path would stamp its own
-  // exposure, and "the stamp comes from the door" is the invariant the read side rests on.
   const offenders = await withInjected(
-    "importer.ts",
+    "integrations/kubernetes-deployment/importer.ts",
     "export const q = `INSERT INTO agent_memories (id, content, metadata) VALUES ($1,$2,$3)`;\n",
   );
   assertEquals(offenders.length, 1, offenders.join(" | "));
 });
 
-Deno.test("RED: a plane-aware file that writes the CORPUS by hand is caught", async () => {
-  // The second home, injected. Same shape as the statement that was really there.
-  const src = 'import { doorPlane } from "./agent-memory-plane.ts";\n' +
-    "export const q = `INSERT INTO thoughts (content, embedding, metadata) VALUES ($1,$2,$3)`;\n" +
-    "export const p = doorPlane({});\n";
-  const body = stripComments(src);
-  assertEquals(body.includes(`"./${CHOKEPOINT}"`), true, "precondition: the probe is plane-aware");
-  const refs = tableRefs(body, [CORPUS]).refs;
-  assertEquals(refs.length, 1);
-  assertEquals(refs[0].keyword, "INTO", "the corpus rule must see this as a write");
+Deno.test("RED: a hand-written corpus write that can MINT A CLAIM is caught", async () => {
+  // The label is a capability: whoever writes `metadata.exposure` decides which door sees the
+  // row. capture_thought merges caller-supplied metadata_extra verbatim, so without
+  // stripCorpusClaim a caller could mint one.
+  const offenders = await withInjected(
+    "integrations/kubernetes-deployment/inlet.ts",
+    "export const q = `INSERT INTO thoughts (content, embedding, metadata) VALUES ($1,$2,$3)`;\n",
+  );
+  assertEquals(offenders.length, 1, offenders.join(" | "));
+  assertEquals(offenders[0].includes("stripCorpusClaim"), true, offenders[0]);
+});
+
+Deno.test("a corpus write THROUGH stripCorpusClaim is deliberately not a finding", async () => {
+  // The other direction: the rule is "you may not mint a claim", not "nobody may write the
+  // corpus". capture_thought and the idea inlet are ordinary, legitimate corpus writers.
+  const offenders = await withInjected(
+    "integrations/kubernetes-deployment/inlet2.ts",
+    'import { stripCorpusClaim } from "./agent-memory-plane.ts";\n' +
+      "export const q = `INSERT INTO thoughts (content, embedding, metadata) VALUES ($1,$2,$3)`;\n" +
+      "export const m = (x: Record<string, unknown>) => stripCorpusClaim(x);\n",
+  );
+  assertEquals(offenders, []);
 });
 
 Deno.test("an append to a SIDECAR is deliberately not a finding", async () => {
-  // The other direction. A gate that reports every audit-event insert is a gate people
-  // route around, and an append genuinely cannot disclose a row that already exists.
   const offenders = await withInjected(
-    "eventlog.ts",
+    "integrations/kubernetes-deployment/eventlog.ts",
     "export const q = `INSERT INTO agent_memory_audit_events (memory_id, event_type) VALUES ($1,$2)`;\n",
   );
   assertEquals(offenders, []);
@@ -516,18 +1111,18 @@ Deno.test("an append to a SIDECAR is deliberately not a finding", async () => {
 
 Deno.test("a comment mentioning a table is NOT a finding", async () => {
   const offenders = await withInjected(
-    "notes.ts",
+    "integrations/kubernetes-deployment/notes.ts",
     "// see agent_memories for the schema\n/* agent_memory_recall_traces again */\nexport const x = 1;\n",
   );
   assertEquals(offenders, []);
 });
 
 Deno.test("a table name in a shape the matcher does not know still FAILS", async () => {
-  // The safe direction, asserted rather than assumed. If a statement uses a form the regex
-  // misses, the bare-name count exceeds the keyword count and that discrepancy is reported
-  // - the gate does not get to be silently blind.
+  // The safe direction, asserted rather than assumed. If a statement uses a form none of the
+  // three matchers knows, the bare-name count exceeds the matched count and that discrepancy
+  // is reported - the gate does not get to be silently blind.
   const offenders = await withInjected(
-    "weird.ts",
+    "integrations/kubernetes-deployment/weird.ts",
     'export const q = "SELECT * FROM " + "public." + `agent_memories WHERE id = $1`;\n',
   );
   assertEquals(offenders.length >= 1, true, "an unrecognised reference must not pass");
@@ -538,10 +1133,12 @@ Deno.test("the runner passes --allow-read, or this whole file proves nothing", a
   // Guards the trap named in the header. `deno test` without --allow-read cannot read a
   // sibling file; a test that swallows that error passes while comparing nothing, which is
   // what the memory_type cross-reader test did.
-  const self = await readSource(CHOKEPOINT);
+  const self = await readSource("agent-memory-plane.ts");
   assertEquals(self.length > 1000, true, "could not read the chokepoint's own source");
   const tables = await memoryTables();
   assertEquals(tables.length > 0, true, "could not read the schema directory");
+  const roots = await scanRoots();
+  assertEquals(roots.length > 0, true, "could not read the compose file");
 });
 
 // PART 2 - THE CHOKEPOINT'S OWN BEHAVIOUR
@@ -990,4 +1587,142 @@ Deno.test("listSidecarOnPlane re-applies the plane in its OWN statement", async 
   assertEquals(sql.includes("EXISTS ("), true, "the plane must be re-applied, not assumed");
   assertEquals(sql.includes(planePredicate(2, "am")), true);
   assertEquals(args, ["m-1", ["ops"]]);
+});
+
+// ---------------------------------------------------------------------------------
+// THE CORPUS DOOR - the read half of the second home
+// ---------------------------------------------------------------------------------
+
+Deno.test("the corpus predicate is PARENTHESISED, because it contains an OR", () => {
+  // Without the outer parentheses `x AND a OR b` reads as `(x AND a) OR b`, and the second
+  // branch has no plane in it. That precedence defeat was EXECUTED against this subsystem's
+  // other query builder, against real Postgres, and returned both personal fixtures with
+  // content. planePredicate is one equality and needs none; this one cannot go without.
+  const p = corpusPlanePredicate(1);
+  assertEquals(p.startsWith("("), true, p);
+  assertEquals(p.endsWith(")"), true, p);
+  assertEquals(p, `(metadata->>'exposure' IS NULL OR metadata->>'exposure' = ANY($1))`);
+  assertEquals(
+    corpusPlanePredicate(3, "t"),
+    `(t.metadata->>'exposure' IS NULL OR t.metadata->>'exposure' = ANY($3))`,
+  );
+});
+
+Deno.test("an UNCLAIMED corpus row is visible, a row claimed by another plane is not", () => {
+  // The semantic difference from planePredicate, stated as a test rather than a comment.
+  // `thoughts` predates the label: 12,989 of 12,993 production rows have none, and they are
+  // the user's own Open Brain. COALESCEing them to 'personal' would not contain anything -
+  // there is no agent-memory content among them - it would blank search_thoughts,
+  // list_thoughts, thought_stats and Open WebUI's bridge.
+  assertEquals(planePredicate(1).includes("COALESCE"), true, "memories default to personal");
+  assertEquals(corpusPlanePredicate(1).includes("COALESCE"), false, "the corpus does not");
+  assertEquals(corpusPlanePredicate(1).includes("IS NULL"), true, "unclaimed stays visible");
+});
+
+Deno.test("selectCorpusOnPlane starts the WHERE with the plane, before anything else", async () => {
+  const r = recorder(() => []);
+  await selectCorpusOnPlane(r.client, doorPlane({ doorExposure: "ops" }), (q) => {
+    q.and(`metadata->>'type' = ${q.param("idea")}`);
+    return { columns: "content", orderBy: "created_at DESC", limit: 10 };
+  });
+  const [sql, args] = r.seen[0];
+  const where = sql.slice(sql.indexOf("WHERE"));
+  assertEquals(
+    where.startsWith(`WHERE ${corpusPlanePredicate(1)}`),
+    true,
+    `the plane must be the FIRST clause: ${where}`,
+  );
+  assertEquals(args[0], ["ops"], "the plane binds $1");
+  assertEquals(args[1], "idea");
+  assertEquals(args[2], 10, "the limit is bound, never interpolated");
+});
+
+Deno.test("every selectCorpusOnPlane fragment is PARENTHESISED - one OR must not escape", async () => {
+  const r = recorder(() => []);
+  await selectCorpusOnPlane(r.client, doorPlane({}), (q) => {
+    // The exact shape that defeated the memory-side builder: an ordinary-looking OR.
+    q.and(`a = ${q.param(1)} OR b = ${q.param(2)}`);
+    q.and(`c = ${q.param(3)}`);
+    return { columns: "content" };
+  });
+  const [sql] = r.seen[0];
+  assertEquals(sql.includes("AND (a = $2 OR b = $3)"), true, sql);
+  assertEquals(sql.includes("AND (c = $4)"), true, sql);
+});
+
+Deno.test("selectCorpusOnPlane with no fragments at all is still plane-bounded", async () => {
+  // thought_stats' COUNT. A count is a disclosure too: "Total thoughts: 12,994" after a
+  // personal memory is written tells a caller that something it may not read exists.
+  const r = recorder(() => [{ count: 3 }]);
+  await selectCorpusOnPlane(r.client, doorPlane({}), () => ({ columns: "COUNT(*)::int AS count" }));
+  const [sql, args] = r.seen[0];
+  assertEquals(sql.includes(corpusPlanePredicate(1)), true, sql);
+  assertEquals(sql.includes("ORDER BY"), false, "no ORDER BY was asked for");
+  assertEquals(sql.includes("LIMIT"), false, "no LIMIT was asked for");
+  assertEquals(args, [["ops"]]);
+});
+
+Deno.test("resolveCorpusRowOnPlane returns an ON-plane row and writes NO audit row", async () => {
+  const r = recorder((sql) => (sql.includes("SELECT id, content") ? [{ id: 7 }] : []));
+  const out = await resolveCorpusRowOnPlane<{ id: number }>(
+    r.ctx,
+    doorPlane({ doorExposure: "ops" }),
+    "7",
+    { columns: "id, content", tool: "fetch" },
+  );
+  assertEquals(out, { ok: true, row: { id: 7 } });
+  assertEquals(r.seen.length, 1, "a hit must not run the existence probe");
+});
+
+Deno.test("an OFF-PLANE corpus row is not_found AND leaves an audit row naming the tool", async () => {
+  // The refusal shape U5 requires: mechanically stopped AND visible in an audit record.
+  const r = recorder((sql) => (sql.includes("NOT (metadata") ? [{ "?column?": 1 }] : []));
+  const out = await resolveCorpusRowOnPlane(r.ctx, doorPlane({}), "42", {
+    columns: "id, content",
+    tool: "fetch",
+  });
+  assertEquals(out, { ok: false, refused: "not_found" });
+  const audit = r.seen.find(([s]) => s.includes("agent_memory_audit_events"));
+  assertEquals(!!audit, true, "a refused corpus read must leave a record");
+  const payload = JSON.parse(audit![1][1] as string);
+  assertEquals(payload.tool, "fetch");
+  assertEquals(payload.reason, "off-plane-corpus-row:42");
+  // memory_id NULL: a corpus row is not a memory, and that column is a FK into agent_memories.
+  assertEquals(audit![1][0], null);
+});
+
+Deno.test("a genuinely ABSENT corpus id writes no audit row", async () => {
+  // Otherwise every typo becomes a refusal record and the rows that mean "somebody reached
+  // for the personal plane" are buried in them.
+  const r = recorder(() => []);
+  const out = await resolveCorpusRowOnPlane(r.ctx, doorPlane({}), "nope", {
+    columns: "id",
+    tool: "fetch",
+  });
+  assertEquals(out, { ok: false, refused: "not_found" });
+  assertEquals(r.seen.some(([s]) => s.includes("agent_memory_audit_events")), false);
+});
+
+Deno.test("the existence probe is plane-NEGATED, so a caller's own filter is not a refusal", async () => {
+  // The difference from resolveMemoryOnPlane. A corpus read carries the caller's
+  // metadata_filter, so a miss has three causes and only one of them is a refusal. A
+  // plane-FREE probe would file an ordinary filtered lookup as a probe.
+  const r = recorder(() => []);
+  await resolveCorpusRowOnPlane(r.ctx, doorPlane({}), "9", {
+    columns: "id",
+    tool: "fetch",
+    build: (q) => q.and(`metadata @> ${q.param('{"type":"idea"}')}::jsonb`),
+  });
+  const probe = r.seen[1][0];
+  assertEquals(probe.includes(`NOT ${corpusPlanePredicate(1)}`), true, probe);
+  assertEquals(probe.includes("metadata @>"), false, "the probe must not carry the caller's filter");
+  assertEquals(r.seen[0][0].includes("AND (metadata @> $3::jsonb)"), true, "...but the read must");
+});
+
+Deno.test("stripCorpusClaim removes an exposure a caller tried to mint", () => {
+  // capture_thought merges caller-supplied metadata_extra verbatim. The label decides which
+  // door sees a row, so writing it is a capability and it belongs to the chokepoint.
+  assertEquals(stripCorpusClaim({ type: "idea", exposure: "personal" }), { type: "idea" });
+  assertEquals(stripCorpusClaim({ exposure: "ops" }), {});
+  assertEquals(stripCorpusClaim({ a: 1 }), { a: 1 }, "it must not eat anything else");
 });

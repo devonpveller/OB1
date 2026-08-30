@@ -23,6 +23,12 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
 import { registerAgentMemory } from "./agent-memory.ts";
+import {
+  doorPlane,
+  resolveCorpusRowOnPlane,
+  selectCorpusOnPlane,
+  stripCorpusClaim,
+} from "./agent-memory-plane.ts";
 
 // --- Configuration ---
 
@@ -370,6 +376,29 @@ function hasMd(m: Record<string, unknown> | undefined): m is Record<string, unkn
   return !!m && Object.keys(m).length > 0;
 }
 
+// --- THE DOOR'S EXPOSURE PLANE ----------------------------------------------
+//
+// ONE value, read by the agent-memory registration below AND by every corpus reader in
+// this file. It was previously written once, inline, at the registerAgentMemory call at the
+// bottom of the file, and the six `FROM thoughts` statements above it consulted nothing at
+// all - the string "exposure" appeared in this file exactly once, in a comment.
+//
+// SERVER-SIDE AND NOT A PARAMETER, which is the property that matters. No tool below takes
+// an exposure argument, no caller can name a plane, and `metadata_filter` cannot reach it:
+// a caller-supplied filter is ANDed onto the plane predicate through PlaneQuery.and, which
+// parenthesises, so it can only ever NARROW what a door already reads. The one way to widen
+// this door is to edit this line, which is a commit.
+//
+// 'ops' because that is what this door is: the INTERNAL lane, first-party containers, the
+// plane §1.1's door table assigns it. If it were ever unset, `doorPlane` defaults to 'ops'
+// too - a missing value meaning "no filter" is exactly how this hole reopens.
+const DOOR_EXPOSURE = "ops";
+
+// The frozen plane value every corpus statement in this file binds. Built once: `doorPlane`
+// freezes both the object and the array, so nothing downstream can push 'personal' onto it
+// and re-bind every statement (a verifier did precisely that when the array was mutable).
+const CORPUS_PLANE = doorPlane({ doorExposure: DOOR_EXPOSURE });
+
 // ChatGPT compatibility: restricted connector surfaces, company knowledge, and deep
 // research look for exact read-only `search` and `fetch` tool shapes.
 server.registerTool(
@@ -393,21 +422,26 @@ server.registerTool(
 
       const client = await pool.connect();
       try {
-        const mdOn = hasMd(metadata_filter);
-        const params: unknown[] = [embStr, 0.5, 10];
-        if (mdOn) params.push(JSON.stringify(metadata_filter));
-        const result = await client.queryObject<ThoughtMatch>(
-          `SELECT id, content, metadata, created_at,
-                  1 - (embedding <=> $1::vector) AS similarity
-           FROM thoughts
-           WHERE 1 - (embedding <=> $1::vector) >= $2
-             ${mdOn ? "AND metadata @> $4::jsonb" : ""}
-           ORDER BY embedding <=> $1::vector
-           LIMIT $3`,
-          params,
-        );
+        // PLANE-BOUND. `selectCorpusOnPlane` emits the WHERE with the door's plane already
+        // in it; the threshold and the caller's metadata_filter are ANDed on through the
+        // builder, which parenthesises them. This tool returns a TITLE built from the row's
+        // content, so an unbounded search here leaks the payload's first line even though
+        // it never returns the `content` column.
+        const rows = await selectCorpusOnPlane<ThoughtMatch>(client, CORPUS_PLANE, (q) => {
+          const emb = q.param(embStr);
+          q.and(`1 - (embedding <=> ${emb}::vector) >= ${q.param(0.5)}`);
+          if (hasMd(metadata_filter)) {
+            q.and(`metadata @> ${q.param(JSON.stringify(metadata_filter))}::jsonb`);
+          }
+          return {
+            columns: `id, content, metadata, created_at,
+                  1 - (embedding <=> ${emb}::vector) AS similarity`,
+            orderBy: `embedding <=> ${emb}::vector`,
+            limit: 10,
+          };
+        });
 
-        const results = result.rows.map((t) => ({
+        const results = rows.map((t) => ({
           id: String(t.id), // ChatGPT search/fetch contract: id is a string
           title: thoughtTitle(t.content, t.created_at),
           url: thoughtUrl(t.id),
@@ -446,25 +480,35 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
-        const mdOn = hasMd(metadata_filter);
-        const params: unknown[] = [id];
-        if (mdOn) params.push(JSON.stringify(metadata_filter));
-        const result = await client.queryObject<ThoughtRecord>(
-          `SELECT id, content, metadata, created_at, updated_at
-           FROM thoughts
-           WHERE id = $1
-             ${mdOn ? "AND metadata @> $2::jsonb" : ""}
-           LIMIT 1`,
-          params,
+        // THE BY-ID RESOLVER, and the one corpus read that can REFUSE rather than filter.
+        // `resolveCorpusRowOnPlane` answers an off-plane row with the same `not_found` a
+        // never-issued id gets - existence is itself a disclosure, and `thoughts` ids are
+        // sequential bigints, so an oracle here needs no guesswork at all - and it writes
+        // the access_refused row itself, but only when the id really exists off-plane.
+        const found = await resolveCorpusRowOnPlane<ThoughtRecord>(
+          { client, pool },
+          CORPUS_PLANE,
+          id,
+          {
+            columns: "id, content, metadata, created_at, updated_at",
+            tool: "fetch",
+            build: (q) => {
+              if (hasMd(metadata_filter)) {
+                q.and(`metadata @> ${q.param(JSON.stringify(metadata_filter))}::jsonb`);
+              }
+            },
+          },
         );
-
-        const thought = result.rows[0];
-        if (!thought) {
+        if (!found.ok) {
+          // The message is BYTE-IDENTICAL to the absent-id message above it, and that is the
+          // point: a caller must not be able to tell the two apart by the wording, the
+          // status or the timing of the answer.
           return {
             content: [{ type: "text" as const, text: `No thought found for ID ${id}.` }],
             isError: true,
           };
         }
+        const thought = found.row;
 
         const document = {
           id: String(thought.id), // ChatGPT search/fetch contract: id is a string
@@ -517,19 +561,24 @@ server.registerTool(
 
       const client = await pool.connect();
       try {
-        const mdOn = hasMd(metadata_filter);
-        const params: unknown[] = [embStr, threshold, limit];
-        if (mdOn) params.push(JSON.stringify(metadata_filter));
-        const result = await client.queryObject<ThoughtMatch>(
-          `SELECT id, content, metadata, created_at,
-                  1 - (embedding <=> $1::vector) AS similarity
-           FROM thoughts
-           WHERE 1 - (embedding <=> $1::vector) >= $2
-             ${mdOn ? "AND metadata @> $4::jsonb" : ""}
-           ORDER BY embedding <=> $1::vector
-           LIMIT $3`,
-          params,
-        );
+        // THE STATEMENT THE LEAK WAS DEMONSTRATED THROUGH. On the unguarded tree this
+        // returned a personal-plane memory's full content at "100.0% match" while
+        // agent_memory_inspect refused the same memory's id and filed an access_refused
+        // row. Plane-bound now, by the same chokepoint that refused the id.
+        const rows = await selectCorpusOnPlane<ThoughtMatch>(client, CORPUS_PLANE, (q) => {
+          const emb = q.param(embStr);
+          q.and(`1 - (embedding <=> ${emb}::vector) >= ${q.param(threshold)}`);
+          if (hasMd(metadata_filter)) {
+            q.and(`metadata @> ${q.param(JSON.stringify(metadata_filter))}::jsonb`);
+          }
+          return {
+            columns: `id, content, metadata, created_at,
+                  1 - (embedding <=> ${emb}::vector) AS similarity`,
+            orderBy: `embedding <=> ${emb}::vector`,
+            limit,
+          };
+        });
+        const result = { rows };
 
         if (!result.rows.length) {
           return {
@@ -672,50 +721,32 @@ server.registerTool(
   },
   async ({ limit, type, topic, person, days, metadata_filter }) => {
     try {
-      const conditions: string[] = [];
-      const params: unknown[] = [];
-      let paramIdx = 1;
-
-      if (type) {
-        conditions.push(`metadata->>'type' = $${paramIdx}`);
-        params.push(type);
-        paramIdx++;
-      }
-      if (topic) {
-        conditions.push(`metadata->'topics' ? $${paramIdx}`);
-        params.push(topic);
-        paramIdx++;
-      }
-      if (person) {
-        conditions.push(`metadata->'people' ? $${paramIdx}`);
-        params.push(person);
-        paramIdx++;
-      }
-      if (days) {
-        conditions.push(`created_at >= NOW() - INTERVAL '${days} days'`);
-      }
-      if (hasMd(metadata_filter)) {
-        conditions.push(`metadata @> $${paramIdx}::jsonb`);
-        params.push(JSON.stringify(metadata_filter));
-        paramIdx++;
-      }
-
-      const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-
       const client = await pool.connect();
       try {
-        const result = await client.queryObject<{
+        // THE OTHER STATEMENT THE LEAK WAS DEMONSTRATED THROUGH - `list_thoughts{limit:5}`
+        // handed back the personal fixture verbatim with no audit row. It also assembled
+        // its own WHERE from a `conditions` array joined with " AND ", which is the shape
+        // that lost to SQL precedence elsewhere in this subsystem; every fragment now goes
+        // through PlaneQuery.and and is parenthesised individually.
+        const rows = await selectCorpusOnPlane<{
           content: string;
           metadata: Record<string, unknown>;
           created_at: string;
-        }>(
-          `SELECT content, metadata, created_at
-           FROM thoughts
-           ${whereClause}
-           ORDER BY created_at DESC
-           LIMIT $${paramIdx}`,
-          [...params, limit]
-        );
+        }>(client, CORPUS_PLANE, (q) => {
+          if (type) q.and(`metadata->>'type' = ${q.param(type)}`);
+          if (topic) q.and(`metadata->'topics' ? ${q.param(topic)}`);
+          if (person) q.and(`metadata->'people' ? ${q.param(person)}`);
+          // BOUND, not interpolated. `days` was spliced straight into an INTERVAL literal;
+          // zod types it as a number so it was not exploitable, but a bound parameter costs
+          // nothing and does not depend on a schema three hundred lines away staying that
+          // way.
+          if (days) q.and(`created_at >= NOW() - make_interval(days => ${q.param(days)})`);
+          if (hasMd(metadata_filter)) {
+            q.and(`metadata @> ${q.param(JSON.stringify(metadata_filter))}::jsonb`);
+          }
+          return { columns: "content, metadata, created_at", orderBy: "created_at DESC", limit };
+        });
+        const result = { rows };
 
         if (!result.rows.length) {
           return { content: [{ type: "text" as const, text: "No thoughts found." }] };
@@ -762,19 +793,28 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
-        const countResult = await client.queryObject<{ count: number }>(
-          "SELECT COUNT(*)::int AS count FROM thoughts"
+        // A COUNT IS A DISCLOSURE. "Total thoughts: 12,994" after a personal memory is
+        // written tells a caller that something it may not read exists, and the type/topic/
+        // people histograms below are built from the metadata of every row - which is where
+        // an off-plane memory's topics and named people would have surfaced. Both are
+        // plane-bound; on the ops door in production both return the same numbers they did
+        // before, because 12,989 corpus rows are unlabelled and the four labelled ones are
+        // labelled `ops`.
+        const countRows = await selectCorpusOnPlane<{ count: number }>(
+          client,
+          CORPUS_PLANE,
+          () => ({ columns: "COUNT(*)::int AS count" }),
         );
 
-        const dataResult = await client.queryObject<{
+        const data = await selectCorpusOnPlane<{
           metadata: Record<string, unknown>;
           created_at: string;
-        }>(
-          "SELECT metadata, created_at FROM thoughts ORDER BY created_at DESC"
-        );
+        }>(client, CORPUS_PLANE, () => ({
+          columns: "metadata, created_at",
+          orderBy: "created_at DESC",
+        }));
 
-        const count = countResult.rows[0]?.count || 0;
-        const data = dataResult.rows;
+        const count = countRows[0]?.count || 0;
 
         const types: Record<string, number> = {};
         const topics: Record<string, number> = {};
@@ -857,11 +897,14 @@ server.registerTool(
       ]);
 
       const embStr = `[${embedding.join(",")}]`;
-      const meta: Record<string, unknown> = {
+      // stripCorpusClaim: `metadata_extra` is CALLER INPUT merged verbatim, so without this
+      // a caller could pass {"exposure":"personal"} and mint a corpus row labelled for a
+      // plane it does not own. The exposure label is the chokepoint's to write.
+      const meta: Record<string, unknown> = stripCorpusClaim({
         ...metadata,
         source: "mcp",
         ...(metadata_extra ?? {}),
-      };
+      });
 
       const client = await pool.connect();
       try {
@@ -966,7 +1009,7 @@ server.registerTool(
           const th = await client.queryObject<{ id: bigint }>(
             `INSERT INTO thoughts (content, embedding, metadata)
              VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
-            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id: ideaId })],
+            [body, embStr, JSON.stringify(stripCorpusClaim({ type: "idea", source: "mcp", kind: "idea", idea_id: ideaId }))],
           );
           await client.queryArray(
             `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)
@@ -1036,7 +1079,7 @@ server.registerTool(
           const th = await client.queryObject<{ id: bigint }>(
             `INSERT INTO thoughts (content, embedding, metadata)
              VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
-            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id, revision: newRev })],
+            [body, embStr, JSON.stringify(stripCorpusClaim({ type: "idea", source: "mcp", kind: "idea", idea_id, revision: newRev }))],
           );
           await client.queryArray(
             `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)
@@ -2065,7 +2108,7 @@ registerAgentMemory(server, app, {
   //
   // The cloud door (:8061) is unaffected: it is default-deny and the agent-memory tools are
   // not on its allowlist. The ops door is a separate instance with its own forced value.
-  doorExposure: "ops",
+  doorExposure: DOOR_EXPOSURE,
 });
 
 // --- MCP catch-all with Auth Check ---

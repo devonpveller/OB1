@@ -53,6 +53,73 @@ async function q<T = Row>(sql: string, params: unknown[] = []): Promise<T[]> {
   }
 }
 
+// --- THE CORPUS DOOR --------------------------------------------------------
+//
+// THIS CONTAINER IS A READER OF `thoughts` AND WAS OUTSIDE THE BOUNDARY ENTIRELY.
+// `link_thought_to_contact` below resolves a thought BY ID with no plane predicate, returns
+// its full `content` to the caller, and APPENDS THAT CONTENT INTO
+// `professional_contacts.notes` - a third home for the same text, in a table with no
+// exposure label of its own and no way to grow one. Found by a U5 verifier reading past
+// openbrain-mcp; the containment rounds before it had all been scoped to one file in one
+// image.
+//
+// WHY THE PREDICATE IS COPIED RATHER THAN IMPORTED. `agent-memory-plane.ts` lives in the
+// openbrain-mcp image (`integrations/kubernetes-deployment`); this is the openbrain-ext
+// image, whose build context is `docker/extensions-server` and whose Dockerfile copies one
+// file. There is no import path between them that survives `docker build`, and widening the
+// build context to the repo root to get one would put every OB1 source file into an image
+// that needs a single module.
+//
+// Copying is what failed three rounds of this work, so the copy is PINNED BY A TEST: the
+// completeness gate (agent-memory-plane.test.ts) reads this file and asserts this predicate
+// is character-for-character what `corpusPlanePredicate` emits. Divergence is red. That is
+// the cross-reader pattern the plan already uses for shared config (PLAN section C.3.3) -
+// duplication with an executable invariant, rather than duplication with a comment asking
+// people to remember.
+//
+// SERVER-SIDE, FROM THE DOOR, DEFAULT 'ops'. No tool here takes an exposure argument and no
+// caller can name a plane. The env var exists so the value is configurable per deployment,
+// never per request; unset it and the default is the narrow plane, not "no filter".
+const DOOR_EXPOSURE = Deno.env.get("DOOR_EXPOSURE") || "ops";
+
+// Frozen at both levels, for the reason the chokepoint freezes its own: an unfrozen array
+// here could be pushed onto and re-bind every statement below to both planes, which is a
+// defeat a verifier executed against the memory-plane accessor when it returned a plain
+// mutable array.
+const CORPUS_PLANE: readonly string[] = Object.freeze([DOOR_EXPOSURE]);
+
+// THE PREDICATE, in one place. Parenthesised as a whole because it contains an OR - without
+// the outer parentheses `AND a OR b` reads as `(x AND a) OR b`, and the second branch has no
+// plane in it. That exact precedence defeat was executed against this subsystem's other
+// query builder.
+function corpusPlanePredicate(paramIndex: number, alias = ""): string {
+  const prefix = alias ? `${alias}.` : "";
+  return `(${prefix}metadata->>'exposure' IS NULL` +
+    ` OR ${prefix}metadata->>'exposure' = ANY($${paramIndex}))`;
+}
+
+/**
+ * Record that a corpus access was refused.
+ *
+ * U5's contract is "mechanically stopped AND visible in an audit record", and the second
+ * half is the half that is easy to believe you already have. Writes into the same
+ * `agent_memory_audit_events` table the memory plane's refusals go to, with `memory_id`
+ * NULL - a corpus row is not a memory and that column is a foreign key into
+ * `agent_memories`. Never throws: the caller is already being denied, and an error here
+ * would leak that the row exists through a different status.
+ */
+async function auditCorpusRefusal(tool: string, reason: string): Promise<void> {
+  try {
+    await q(
+      `INSERT INTO agent_memory_audit_events (memory_id, event_type, actor_kind, payload)
+       VALUES (NULL, 'access_refused', 'agent', $1::jsonb)`,
+      [JSON.stringify({ tool, reason })],
+    );
+  } catch {
+    // An audit write must not turn a refusal into an error.
+  }
+}
+
 const ok = (obj: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }],
 });
@@ -940,15 +1007,46 @@ server.tool(
   },
   async ({ thought_id, contact_id }) => {
     try {
-      const thought = (await q(`SELECT * FROM thoughts WHERE id = $1`, [thought_id]))[0];
-      if (!thought) throw new Error("Thought not found or access denied");
+      // PLANE-BOUND BY ID. The refusal is shaped exactly like a miss - same message, same
+      // path - because "that id exists but you may not see it" confirms the row to anyone
+      // who can guess an id, and `thoughts` ids are sequential bigints.
+      const thought = (await q(
+        `SELECT * FROM thoughts WHERE id = $2 AND ${corpusPlanePredicate(1)}`,
+        [CORPUS_PLANE, thought_id],
+      ))[0];
+      if (!thought) {
+        // AUDIT ONLY WHEN THE ROW REALLY EXISTS off-plane. A typo'd id must not file a
+        // refusal record, or the rows that mean "somebody reached for the personal plane"
+        // drown in ordinary mistakes.
+        const offPlane = (await q(
+          `SELECT 1 FROM thoughts WHERE id = $2 AND NOT ${corpusPlanePredicate(1)}`,
+          [CORPUS_PLANE, thought_id],
+        ))[0];
+        if (offPlane) {
+          await auditCorpusRefusal(
+            "link_thought_to_contact",
+            `off-plane-corpus-row:${thought_id}`,
+          );
+        }
+        throw new Error("Thought not found or access denied");
+      }
       const contact = (await q(
         `SELECT * FROM professional_contacts WHERE id = $1 AND user_id = $2`,
         [contact_id, USER_ID],
       ))[0];
       if (!contact) throw new Error("Contact not found or access denied");
+      // THE THIRD HOME, MADE FINDABLE. This appends a thought's full text into a CRM notes
+      // field, which has no exposure label and cannot be given one. Nothing can un-copy
+      // free text that has already been merged into an operator's notes, so the copy now
+      // carries the SOURCE ID: `[Linked Thought <id> <date>]`. Before this, a copy was
+      // anonymous prose and a retroactive scrub was impossible even in principle; now the
+      // provenance is in the row.
+      //
+      // Measured before the change (production, 2026-08-30): 1 contact, 0 rows containing
+      // "[Linked Thought" - nothing has ever been copied here. The door is closed before
+      // it was used, not after.
       const linkNote =
-        `\n\n[Linked Thought ${new Date().toISOString().split("T")[0]}]: ${thought.content}`;
+        `\n\n[Linked Thought ${thought_id} ${new Date().toISOString().split("T")[0]}]: ${thought.content}`;
       const updatedContact = await updateById(
         "professional_contacts",
         contact_id,

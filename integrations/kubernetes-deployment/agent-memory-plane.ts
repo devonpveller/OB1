@@ -623,5 +623,191 @@ async function auditIfOffPlane(
   if (exists.rows[0]) await auditRefusal(ctx.pool, memoryId, tool, "off-plane");
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// THE CORPUS DOOR - reading `thoughts`, which the write guard alone does not cover
+// ════════════════════════════════════════════════════════════════════════════
+//
+// ROUND FOUR MOVED THE BOUNDARY TO THE WRITE, AND THAT IS NOT THE WHOLE BOUNDARY.
+// `mirrorToUnifiedSearch` stops NEW personal content from entering the corpus. It does
+// nothing about a row that is ALREADY THERE, and rows are already there: the mirror shipped
+// and ran before the guard existed (production `thoughts` carries four rows labelled `ops`,
+// measured 2026-08-30), so a plane that had been used before the guard landed would have
+// left personal-labelled rows behind that no reader filters. It also does nothing about a
+// SECOND writer - the corpus is written by capture_thought, by the idea inlet, by importers,
+// and by whatever is added next.
+//
+// So the two halves are not alternatives, and neither is sufficient:
+//
+//   the WRITE guard says   no NEW off-plane content reaches the corpus
+//   the READ guard says    content in the corpus that IS labelled off-plane is not served
+//
+// A boundary made of one of them is a boundary that depends on nobody having gone first.
+//
+// ------------------------------------------------------------------------------------
+// WHY THE CORPUS PREDICATE IS NOT `planePredicate`, AND WHY THAT IS NOT A WEAKENING
+// ------------------------------------------------------------------------------------
+// `planePredicate` COALESCEs a missing label to 'personal', which is right for
+// `agent_memories`: every row in that table is written by one code path that stamps the
+// label, so an unlabelled row is a bug and reading it as the most restricted plane is safe.
+//
+// `thoughts` is the opposite. It is the general Open Brain corpus and it PREDATES the
+// exposure label entirely: 12,989 of its 12,993 production rows carry no label at all
+// (measured 2026-08-30). COALESCEing those to 'personal' would contain nothing - there is
+// no agent-memory content among them - it would blank Open Brain for every existing reader,
+// which is `search_thoughts`, `list_thoughts`, `thought_stats`, the ChatGPT `search`/`fetch`
+// pair and Open WebUI's bridge through `openbrain-mcpo`. A containment change that silently
+// empties the user's memory is not a safer default, it is an outage with a security-shaped
+// excuse.
+//
+// So the label means CLAIMED BY A PLANE, and the predicate reads: a row is visible when it
+// is unclaimed, or when the plane that claimed it is one the door reads. What makes that
+// safe rather than a hole is that the ONLY writer which claims a corpus row is
+// `mirrorToUnifiedSearch` above, it always writes the label, and it writes nothing at all
+// off the unified-search plane - the completeness gate holds both properties as tests. An
+// attacker who writes unlabelled personal text through `capture_thought` has disclosed
+// nothing to itself that it did not already have.
+//
+// PARENTHESISED AS A WHOLE, because it contains an OR. Unparenthesised it would be exactly
+// the defeat the drill executed against `listMemoriesOnPlane`, except emitted by the
+// chokepoint itself: `AND a OR b` reads as `(x AND a) OR b`, and the second branch has no
+// plane in it. `planePredicate` needs no parentheses (it is one equality); this one cannot
+// go without them.
+
+/** The one corpus predicate. `$n` binds the plane's exposures array. */
+export function corpusPlanePredicate(paramIndex: number, alias = ""): string {
+  const prefix = alias ? `${alias}.` : "";
+  return `(${prefix}metadata->>'exposure' IS NULL` +
+    ` OR ${prefix}metadata->>'exposure' = ANY($${paramIndex}))`;
+}
+
+/**
+ * SELECT from the corpus, on the door's plane.
+ *
+ * Same shape as `listMemoriesOnPlane` and for the same reason: the WHERE clause already
+ * starts with the plane predicate before the caller writes a character of it, so there is
+ * no path that produces an args array without the plane in it. The caller's fragments go
+ * through `PlaneQuery.and`, which PARENTHESISES - the SQL-precedence defeat is closed here
+ * by construction rather than by every call site remembering.
+ *
+ * `build` returns the projection because the corpus's read shapes need placeholders in the
+ * SELECT list and the ORDER BY, not only in the WHERE: a semantic search binds the query
+ * vector once and names it in all three. Handing the caller the same `PlaneQuery` it uses
+ * for predicates is what lets it do that without ever assembling its own args array.
+ *
+ * NO AUDIT ROW, deliberately, exactly as `listMemoriesOnPlane` writes none: this FILTERS,
+ * it does not REFUSE. A caller asked for "recent thoughts" and got the ones on its plane;
+ * there is no denied request to record, and a row per listing would file ordinary use as a
+ * probe and bury the rows that mean somebody reached for the personal plane.
+ */
+export async function selectCorpusOnPlane<T>(
+  client: PlaneClient,
+  plane: DoorPlane,
+  build: (q: PlaneQuery) => { columns: string; orderBy?: string; limit?: number },
+): Promise<T[]> {
+  const args: unknown[] = [plane.exposures];
+  let where = corpusPlanePredicate(1);
+  const q: PlaneQuery = {
+    param(value: unknown) {
+      args.push(value);
+      return `$${args.length}`;
+    },
+    and(sql: string) {
+      where += `\n          AND (${sql})`;
+    },
+  };
+  const spec = build(q);
+  const limitSql = spec.limit === undefined ? "" : `\n        LIMIT ${q.param(spec.limit)}`;
+  const orderSql = spec.orderBy ? `\n        ORDER BY ${spec.orderBy}` : "";
+  const res = await client.queryObject(
+    `SELECT ${spec.columns}
+         FROM thoughts
+        WHERE ${where}${orderSql}${limitSql}`,
+    args,
+  );
+  return res.rows as T[];
+}
+
+/**
+ * Resolve ONE corpus row by id, on the door's plane.
+ *
+ * `not_found` and never "forbidden", for the reason `resolveMemoryOnPlane` gives: "this id
+ * exists but you may not see it" confirms the row to anyone who can guess an id, and
+ * `thoughts` ids are SEQUENTIAL BIGINTS - guessing is not even work. The caller gets the
+ * same answer for an off-plane row as for an id that was never issued.
+ *
+ * THE EXISTENCE PROBE IS PLANE-NEGATED, not plane-free, which is the difference between
+ * this and `resolveMemoryOnPlane`. A corpus read carries the caller's own filters
+ * (`metadata_filter`), so a miss has three causes: the row is absent, the row is on-plane
+ * and the caller's filter excluded it, or the row is off-plane. Only the third is a
+ * refusal. A plane-free probe would file the second as one, and a refusal log where
+ * ordinary filtered lookups outnumber real probes is a log nobody reads.
+ */
+export async function resolveCorpusRowOnPlane<T>(
+  ctx: PlaneCtx,
+  plane: DoorPlane,
+  thoughtId: string,
+  opts: { columns: string; tool: string; build?: (q: PlaneQuery) => void },
+): Promise<PlaneLookup<T>> {
+  const args: unknown[] = [plane.exposures, thoughtId];
+  let where = `${corpusPlanePredicate(1)}\n          AND id = $2`;
+  const q: PlaneQuery = {
+    param(value: unknown) {
+      args.push(value);
+      return `$${args.length}`;
+    },
+    and(sql: string) {
+      where += `\n          AND (${sql})`;
+    },
+  };
+  opts.build?.(q);
+  const found = await ctx.client.queryObject(
+    `SELECT ${opts.columns}
+         FROM thoughts
+        WHERE ${where}
+        LIMIT 1`,
+    args,
+  );
+  const row = found.rows[0] as T | undefined;
+  if (row) return { ok: true, row };
+  const offPlane = await ctx.client.queryObject(
+    `SELECT 1 FROM thoughts
+       WHERE id = $2 AND NOT ${corpusPlanePredicate(1)}
+       LIMIT 1`,
+    [plane.exposures, thoughtId],
+  );
+  // memory_id null: a corpus row is not a memory, and the audit table's memory_id is a
+  // foreign key into agent_memories. The thought id goes in the PAYLOAD, where it discloses
+  // nothing - it is the value the caller supplied.
+  if (offPlane.rows[0]) {
+    await auditRefusal(ctx.pool, null, opts.tool, `off-plane-corpus-row:${thoughtId}`);
+  }
+  return { ok: false, refused: "not_found" };
+}
+
+/**
+ * Strip a plane CLAIM from metadata that is about to be written to the corpus by hand.
+ *
+ * THE FORGE PATH, closed. `corpusPlanePredicate` reads `metadata->>'exposure'` and treats an
+ * ABSENT label as an unclaimed general-corpus row - which is the only reading that does not
+ * blank 12,989 production rows. That makes the label a capability: whoever can write it can
+ * decide which door sees a row. `capture_thought` merges caller-supplied `metadata_extra`
+ * into the row's metadata verbatim, so a caller could pass `{"exposure":"personal"}` and
+ * mint a corpus row that the ops door - the door Open WebUI reads through - no longer
+ * returns. That is not a disclosure, it is the opposite, and it is still wrong: the label
+ * has one meaning ("the agent-memory mirror put this here on that plane") and a caller who
+ * can set it has taken it over.
+ *
+ * So the claim is the CHOKEPOINT'S TO MAKE. `mirrorToUnifiedSearch` writes the label; every
+ * hand-written corpus row passes its metadata through here first and cannot carry one. The
+ * completeness gate holds the second half - a file that writes the corpus by hand and does
+ * NOT call this is a finding.
+ */
+export function stripCorpusClaim(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const { exposure: _claimed, ...rest } = metadata;
+  return rest;
+}
+
 /** Re-exported so a caller that needs the type does not reach past this module. */
 export type { Exposure };

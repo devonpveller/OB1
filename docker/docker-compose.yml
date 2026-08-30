@@ -79,6 +79,10 @@ services:
       # The memory's OWN vector, so the `thoughts` mirror can be optional (U5). See the
       # file header: personal-plane content no longer enters the shared corpus at all.
       - ./init-agent-memory-embedding.sql:/docker-entrypoint-initdb.d/160-init-agent-memory-embedding.sql:ro
+      # The exposure plane inside the DATABASE. `match_thoughts` RETURNS content and is
+      # reached by callers that touch none of the server code (PostgREST rpc, the edge
+      # functions, recipes) - the floor under the application boundary (U5).
+      - ./init-agent-memory-corpus-plane.sql:/docker-entrypoint-initdb.d/170-init-agent-memory-corpus-plane.sql:ro
     networks:
       - obnet
     restart: unless-stopped

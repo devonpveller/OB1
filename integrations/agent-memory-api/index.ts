@@ -12,6 +12,93 @@ const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// --- THE DOOR'S EXPOSURE PLANE ----------------------------------------------
+//
+// THIS FILE IS A SECOND DOOR ONTO THE SAME MEMORY PLANE, AND IT HAD NO PLANE AT ALL.
+// Found by a U5 verifier: every `.from("agent_memories")` below selected without an exposure
+// predicate, `/memories/:id` returned any memory's full content by id, and the writeback
+// mirrored every memory into `thoughts` unconditionally - the second-home leak, in a second
+// file, on a door the containment rounds never looked at because they were scoped to
+// openbrain-mcp.
+//
+// WHAT IS AND IS NOT CLAIMED HERE. This is a Supabase Edge Function. NOTHING IN THIS STACK
+// DEPLOYS IT - no compose service builds `integrations/agent-memory-api`, and it talks to a
+// Supabase project ai-stack does not have. So the guards below are verified by `deno check`
+// and by the completeness gate in agent-memory-plane.test.ts, which reads this file from
+// disk; they are NOT verified by the U5 drill, which builds and attacks running containers
+// and cannot reach a function that runs nowhere. That distinction is stated rather than
+// blurred: "guarded in source, undrilled" is what this is.
+//
+// SERVER-SIDE, FROM THE DOOR, DEFAULT 'ops'. No route reads an exposure from the request.
+// Unset means the narrow plane, never "no filter".
+const DOOR_EXPOSURE = Deno.env.get("DOOR_EXPOSURE") || "ops";
+
+// Frozen, both levels - an unfrozen accessor array was pushed onto and re-bound every
+// guarded statement to both planes when a verifier attacked the openbrain-mcp chokepoint.
+const DOOR_PLANE: readonly string[] = Object.freeze([DOOR_EXPOSURE]);
+
+// The exposures whose CONTENT may enter the shared `thoughts` corpus. Same whitelist, same
+// default-deny, same reason as the chokepoint's UNIFIED_SEARCH_EXPOSURES: `thoughts` is read
+// by tools, by extensions, by a REST projection and by an RPC, so content that must not
+// appear in unified search does not go there - not even as a stub, because a stub carrying
+// the real embedding is still an oracle.
+const UNIFIED_SEARCH_EXPOSURES: readonly string[] = Object.freeze(["ops"]);
+
+/**
+ * A plane-bounded `agent_memories` query. THE ONLY WAY THIS FILE SELECTS FROM THAT TABLE.
+ *
+ * PostgREST has no COALESCE, so the two halves of the chokepoint's
+ * `COALESCE(metadata->>'exposure','personal') = ANY($1)` are written out: rows whose label
+ * is in the plane, plus - only when the plane itself contains 'personal' - rows with no
+ * label at all. Unlabelled means 'personal' in `agent_memories`, so on the default 'ops'
+ * door an unlabelled row is invisible, which is the same answer the chokepoint gives.
+ *
+ * `.or()` is used for the personal case rather than string concatenation into a filter,
+ * so there is no fragment a caller's value could be spliced into.
+ */
+function memoriesOnPlane<Q extends string = "*">(columns?: Q) {
+  // The generic keeps supabase-js's literal-driven row inference alive. A plain
+  // `columns = "*"` parameter widens the literal to `string`, and the client then types
+  // every row as GenericStringError - which type-checks at the call site only after a cast,
+  // and a cast is how a boundary stops being checked.
+  const q = supabase.from("agent_memories").select((columns ?? "*") as Q);
+  if (DOOR_PLANE.includes("personal")) {
+    return q.or(
+      `metadata->>exposure.in.(${DOOR_PLANE.join(",")}),metadata->>exposure.is.null`,
+    );
+  }
+  return q.filter("metadata->>exposure", "in", `(${DOOR_PLANE.join(",")})`);
+}
+
+/**
+ * Record that an access was refused, so a stop is not invisible.
+ *
+ * U5's contract is "mechanically stopped AND visible in an audit record". memory_id is left
+ * NULL on purpose: writing the id of a memory the caller may not see into a row the caller
+ * may read back would hand over the identifier the refusal exists to withhold.
+ */
+async function auditRefusal(tool: string, reason: string): Promise<void> {
+  try {
+    await supabase.from("agent_memory_audit_events").insert({
+      memory_id: null,
+      event_type: "access_refused",
+      actor_kind: "agent",
+      payload: { tool, reason },
+    });
+  } catch {
+    // An audit write must never turn a refusal into an error.
+  }
+}
+
+/**
+ * Did that id exist at all? Used ONLY to decide whether a miss was a refusal or a typo -
+ * the answer never reaches the caller, which is what keeps it from being an oracle.
+ */
+async function auditIfOffPlane(id: string, tool: string): Promise<void> {
+  const { data } = await supabase.from("agent_memories").select("id").eq("id", id).maybeSingle();
+  if (data) await auditRefusal(tool, "off-plane");
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-brain-key",
@@ -354,9 +441,9 @@ app.post("/recall", async (c) => {
   for (const item of matches || []) similarityByThought.set(item.id, item.similarity);
   const thoughtIds = Array.from(similarityByThought.keys());
 
-  let memoryQuery = supabase
-    .from("agent_memories")
-    .select("*")
+  // PLANE-BOUND. Filters rather than refuses - a recall that returns fewer rows is not a
+  // denied request, and a refusal row per recall would bury the ones that mean something.
+  let memoryQuery = memoriesOnPlane()
     .eq("workspace_id", req.workspace_id)
     .order("created_at", { ascending: false })
     .limit(100);
@@ -385,7 +472,13 @@ app.post("/recall", async (c) => {
     channel_id: req.channel.id ?? null,
     query: req.query,
     schema_version: req.schema_version,
-    request_payload: req,
+    // THE TRACE CARRIES THE PLANE IT WAS TAKEN ON. A trace row holds the recall's QUERY
+    // TEXT and its whole request payload - the envelope naming what an agent went looking
+    // for - and it has no metadata.exposure of its own, so without this field there is
+    // nothing for a reader to bound it by. `enforced_exposure` is the same field name the
+    // openbrain-mcp door writes, read the same way (jsonb containment) by the two trace
+    // readers below.
+    request_payload: { ...req, enforced_exposure: DOOR_PLANE },
     response_policy: { max_items: req.limits.max_items, include_unconfirmed: req.scope.include_unconfirmed },
   }).select("*").single();
   if (traceError) return c.json({ error: traceError.message }, 500, corsHeaders);
@@ -452,18 +545,37 @@ app.post("/writeback", async (c) => {
     const baseKey = req.idempotency_key || `${req.workspace_id}:${req.runtime.name}:${req.task_id || "taskless"}:${req.step_id || "step"}:${content_hash}`;
     const idempotency_key = `${baseKey}:${index}`;
 
-    const { data: existing } = await supabase
-      .from("agent_memories")
-      .select("*")
+    // THE ID ORACLE IN THE WRITE PATH. An off-plane row whose idempotency key a caller
+    // guessed used to come back here in full, as `created`. Plane-bound: an off-plane key
+    // is a refusal that names no memory. The key is unique per workspace regardless of
+    // plane, so the insert below would fail on the index anyway - what changes is that the
+    // caller no longer learns WHICH memory took it.
+    const { data: existing } = await memoriesOnPlane()
       .eq("idempotency_key", idempotency_key)
       .maybeSingle();
     if (existing) {
       created.push(existing);
       continue;
     }
+    {
+      const { data: taken } = await supabase
+        .from("agent_memories").select("id").eq("idempotency_key", idempotency_key).maybeSingle();
+      if (taken) {
+        await auditRefusal("writeback", "off-plane-idempotency-key");
+        return c.json({ error: "idempotency key is not available" }, 409, corsHeaders);
+      }
+    }
 
     const embedding = await getEmbedding(row.content);
-    const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
+    // THE SECOND HOME, GATED. `upsert_thought` puts the memory's full content into the
+    // shared `thoughts` corpus, which is read by tools this function does not control and
+    // published wholesale over PostgREST. Off the unified-search plane it is not written at
+    // all - not a redacted stub, nothing - and the memory keeps thought_id NULL, which the
+    // schema has always allowed.
+    const mirrors = UNIFIED_SEARCH_EXPOSURES.includes(DOOR_EXPOSURE);
+    const { data: upsertResult, error: upsertError } = !mirrors
+      ? { data: null, error: null }
+      : await supabase.rpc("upsert_thought", {
       p_content: row.content,
       p_payload: {
         metadata: {
@@ -483,8 +595,12 @@ app.post("/writeback", async (c) => {
     });
     if (upsertError) return c.json({ error: upsertError.message }, 500, corsHeaders);
 
-    const thoughtId = upsertResult?.id;
-    if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);
+    const thoughtId = upsertResult?.id ?? null;
+    // `mirrors &&` is redundant (thoughtId is null when the mirror was skipped) and it is
+    // written anyway, because the completeness gate pins this statement by its TEXT: the
+    // thing that makes a hand-written corpus write safe has to be visible IN the statement,
+    // not two lines above it where an edit can separate them.
+    if (mirrors && thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);
 
     const { data: memory, error: memoryError } = await supabase.from("agent_memories").insert({
       thought_id: thoughtId ?? null,
@@ -519,6 +635,11 @@ app.post("/writeback", async (c) => {
         models_used: req.models_used,
         retention: req.retention,
         writeback_schema_version: req.schema_version,
+        // THE STAMP COMES FROM THE DOOR, never from the request. Without it every memory
+        // this function wrote was unlabelled, which the plane predicate reads as
+        // 'personal' - so this door would have been unable to read back its own writes,
+        // and any door that DID read them would have been reading the restricted plane.
+        exposure: DOOR_EXPOSURE,
       },
     }).select("*").single();
     if (memoryError) return c.json({ error: memoryError.message }, 500, corsHeaders);
@@ -565,8 +686,19 @@ app.post("/recall/:request_id/usage", async (c) => {
   const parsed = usageSchema.safeParse(await c.req.json());
   if (!parsed.success) return c.json({ error: "Invalid usage payload", details: parsed.error.flatten() }, 400, corsHeaders);
 
-  const { data: trace, error } = await supabase.from("agent_memory_recall_traces").select("*").eq("request_id", request_id).single();
-  if (error) return c.json({ error: error.message }, 404, corsHeaders);
+  // PLANE-BOUND BY CONTAINMENT, because `enforced_exposure` is a LIST: a trace is visible
+  // when everything it was allowed to read is on the reading door's plane. A trace written
+  // before that field existed has no value, `containedBy` yields no row, and it is
+  // invisible to this door rather than visible to it - the safe end.
+  //
+  // The two recall_items UPDATEs below are scoped to `trace.id`, so they inherit this bound
+  // rather than needing their own.
+  const { data: trace, error } = await supabase.from("agent_memory_recall_traces").select("*")
+    .eq("request_id", request_id)
+    .containedBy("request_payload->enforced_exposure", DOOR_PLANE as string[])
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!trace) return c.json({ error: "not found" }, 404, corsHeaders);
 
   for (const memory_id of parsed.data.used_memory_ids) {
     await supabase.from("agent_memory_recall_items").update({ used: true }).eq("trace_id", trace.id).eq("memory_id", memory_id);
@@ -584,7 +716,9 @@ app.get("/memories/review", async (c) => {
   const workspace_id = c.req.query("workspace_id");
   if (!workspace_id) return c.json({ error: "workspace_id is required" }, 400, corsHeaders);
   const project_id = c.req.query("project_id");
-  let q = supabase.from("agent_memories").select("*").eq("workspace_id", workspace_id).eq("review_status", "pending").order("created_at", { ascending: false }).limit(100);
+  // PLANE-BOUND. Enumerating the review queue was one of the three ways the openbrain-mcp
+  // door leaked the plane before it was closed; this is the same tool on a different door.
+  let q = memoriesOnPlane().eq("workspace_id", workspace_id).eq("review_status", "pending").order("created_at", { ascending: false }).limit(100);
   if (project_id) q = q.eq("project_id", project_id);
   const { data, error } = await q;
   if (error) return c.json({ error: error.message }, 500, corsHeaders);
@@ -596,9 +730,7 @@ app.get("/memories", async (c) => {
   if (!workspace_id) return c.json({ error: "workspace_id is required" }, 400, corsHeaders);
 
   const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10), 1), 200);
-  let q = supabase
-    .from("agent_memories")
-    .select("*")
+  let q = memoriesOnPlane()
     .eq("workspace_id", workspace_id)
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -624,8 +756,15 @@ app.get("/memories", async (c) => {
 
 app.get("/memories/:id", async (c) => {
   const id = c.req.param("id");
-  const { data, error } = await supabase.from("agent_memories").select("*, agent_memory_source_refs(*), agent_memory_artifacts(*)").eq("id", id).single();
-  if (error) return c.json({ error: error.message }, 404, corsHeaders);
+  // THE BY-ID RESOLVER. `not_found` and never "forbidden": "this id exists but you may not
+  // see it" is itself a disclosure. The audit row is written only when the id really does
+  // exist, so a typo does not file a refusal record.
+  const { data, error } = await memoriesOnPlane("*, agent_memory_source_refs(*), agent_memory_artifacts(*)").eq("id", id).maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!data) {
+    await auditIfOffPlane(id, "get_memory");
+    return c.json({ error: "not found" }, 404, corsHeaders);
+  }
   return c.json({ memory: data }, 200, corsHeaders);
 });
 
@@ -635,8 +774,17 @@ app.patch("/memories/:id/review", async (c) => {
   if (!parsed.success) return c.json({ error: "Invalid review payload", details: parsed.error.flatten() }, 400, corsHeaders);
   const req = parsed.data;
 
-  const { data: before, error: beforeError } = await supabase.from("agent_memories").select("*").eq("id", id).single();
-  if (beforeError) return c.json({ error: beforeError.message }, 404, corsHeaders);
+  // A WRITE TOOL ON THE SAME DOOR, and the one that matters most: `restrict_scope` and the
+  // review actions move a memory's readability. An unbounded review endpoint lets an
+  // off-plane memory be edited by a door that may not read it - which is how the
+  // openbrain-mcp escalation worked (promote a memory onto your own plane, then read it
+  // entirely legitimately).
+  const { data: before, error: beforeError } = await memoriesOnPlane().eq("id", id).maybeSingle();
+  if (beforeError) return c.json({ error: beforeError.message }, 500, corsHeaders);
+  if (!before) {
+    await auditIfOffPlane(id, "review_memory");
+    return c.json({ error: "not found" }, 404, corsHeaders);
+  }
 
   const updates: Record<string, unknown> = {};
   if (req.action === "confirm") {
@@ -671,7 +819,14 @@ app.patch("/memories/:id/review", async (c) => {
     if (req.summary) updates.summary = req.summary;
   }
 
-  const { data: after, error: updateError } = await supabase.from("agent_memories").update(updates).eq("id", id).select("*").single();
+  // THE PLANE IS ON THE UPDATE AS WELL AS ON THE READ ABOVE. Both, not either: the read is
+  // what refuses, and this is what keeps the refusal true if some later edit reorders the
+  // two. `restrict_scope` cannot be used to widen anything, but a bare `.eq("id", id)`
+  // update is a statement that would happily write a row it may not read.
+  const { data: after, error: updateError } = await supabase
+    .from("agent_memories").update(updates).eq("id", id)
+    .filter("metadata->>exposure", "in", `(${DOOR_PLANE.join(",")})`)
+    .select("*").single();
   if (updateError) return c.json({ error: updateError.message }, 500, corsHeaders);
 
   await supabase.from("agent_memory_review_actions").insert({
@@ -714,11 +869,33 @@ app.patch("/memories/:id/review", async (c) => {
 
 app.get("/recall-traces/:request_id", async (c) => {
   const request_id = c.req.param("request_id");
-  const { data: trace, error } = await supabase.from("agent_memory_recall_traces").select("*").eq("request_id", request_id).single();
-  if (error) return c.json({ error: error.message }, 404, corsHeaders);
+  // PLANE-BOUND, same containment as the usage route. This one matters most: the ENVELOPE
+  // is the disclosure - it carries the recall's query text, which names what a personal-plane
+  // agent went looking for even when every item is dropped.
+  const { data: trace, error } = await supabase.from("agent_memory_recall_traces").select("*")
+    .eq("request_id", request_id)
+    .containedBy("request_payload->enforced_exposure", DOOR_PLANE as string[])
+    .maybeSingle();
+  if (error) return c.json({ error: error.message }, 500, corsHeaders);
+  if (!trace) return c.json({ error: "not found" }, 404, corsHeaders);
   const { data: items, error: itemError } = await supabase.from("agent_memory_recall_items").select("*, agent_memories(*)").eq("trace_id", trace.id).order("rank");
   if (itemError) return c.json({ error: itemError.message }, 500, corsHeaders);
-  return c.json({ trace, items }, 200, corsHeaders);
+  // THE EMBEDDED JOIN IS NOT THE BOUNDARY - it only blanks the columns it selects. A recall
+  // item carries `memory_id`, `rank`, `similarity` and the use-policy snapshot in its OWN
+  // columns, so dropping the joined memory would still hand over the identifier. The whole
+  // ITEM goes when its memory is off-plane, and the refusal is recorded. The COUNT of what
+  // was withheld is never returned: "3 items you may not see" confirms their existence.
+  const visible = [];
+  for (const item of (items || []) as Array<Record<string, unknown>>) {
+    const memory = item.agent_memories as { metadata?: Record<string, unknown> } | null;
+    const label = memory ? (memory.metadata?.exposure as string | undefined) ?? "personal" : null;
+    if (memory && DOOR_PLANE.includes(label as string)) {
+      visible.push(item);
+      continue;
+    }
+    await auditRefusal("recall_trace", "off-plane");
+  }
+  return c.json({ trace, items: visible }, 200, corsHeaders);
 });
 
 Deno.serve((req) => {
