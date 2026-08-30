@@ -118,14 +118,30 @@ const REPO = new URL("../../", import.meta.url);
 const SQL_DIR = new URL("docker/", REPO);
 const COMPOSE = "docker/docker-compose.yml";
 
+/**
+ * NORMALISE LINE ENDINGS AT THE READ, and this is not tidiness - it is a defect this gate
+ * had and shipped past its own green run.
+ *
+ * The PINNED entries below match MULTI-LINE statements verbatim, written with LF in a
+ * TypeScript template literal. This repo is developed on Windows with git's autocrlf on, so
+ * the same files come back off disk with CRLF after a commit and checkout. The gate was
+ * green in the working tree, went RED the moment git touched the files, and every failure
+ * read "PINNED statement no longer matches" - which is indistinguishable from someone having
+ * edited a guarded statement, and is exactly the alarm a reviewer would waste an afternoon
+ * on. A completeness gate whose verdict depends on how a file was checked out is not a gate.
+ */
+function normalise(text: string): string {
+  return text.split("\r\n").join("\n");
+}
+
 /** FAIL-CLOSED. No try/catch: an unreadable file must fail a test, never skip it. */
 async function readSource(name: string): Promise<string> {
-  return await Deno.readTextFile(new URL(`./${name}`, HERE));
+  return normalise(await Deno.readTextFile(new URL(`./${name}`, HERE)));
 }
 
 /** Read a path relative to the OB1 repo root. Fail-closed, same reason. */
 async function readRepo(rel: string): Promise<string> {
-  return await Deno.readTextFile(new URL(rel, REPO));
+  return normalise(await Deno.readTextFile(new URL(rel, REPO)));
 }
 
 /**
@@ -198,7 +214,7 @@ async function walkTs(root: string, out: Map<string, string>): Promise<void> {
     if (!e.name.endsWith(".ts")) continue;
     // Tests do not ship (the openbrain-mcp Dockerfile deletes them; no other root has any).
     if (e.name.endsWith(".test.ts")) continue;
-    out.set(rel, await readRepo(rel));
+    out.set(rel, await readRepo(rel));  // normalised - see normalise()
   }
 }
 
@@ -237,7 +253,7 @@ async function memoryTables(): Promise<string[]> {
     if (!e.name.startsWith("init-agent-memory")) continue;
     if (!e.name.endsWith(".sql")) continue;
     filesRead++;
-    const sql = await Deno.readTextFile(new URL(e.name, SQL_DIR));
+    const sql = normalise(await Deno.readTextFile(new URL(e.name, SQL_DIR)));
     for (
       const m of sql.matchAll(
         /CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:public\.)?(agent_memor[a-z_]+)/gi,
@@ -303,7 +319,7 @@ async function corpusFunctions(): Promise<SqlFn[]> {
   for await (const e of Deno.readDir(SQL_DIR)) {
     if (!e.isFile || !e.name.endsWith(".sql")) continue;
     filesRead++;
-    const sql = await Deno.readTextFile(new URL(e.name, SQL_DIR));
+    const sql = normalise(await Deno.readTextFile(new URL(e.name, SQL_DIR)));
     const re = /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?([a-z0-9_]+)\s*\(/gi;
     for (const m of [...sql.matchAll(re)]) {
       const start = m.index!;
