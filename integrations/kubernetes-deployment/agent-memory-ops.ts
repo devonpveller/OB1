@@ -1,0 +1,259 @@
+/**
+ * agent-memory-ops - executing a review decision, and listing what is waiting for one.
+ *
+ * The DECISION lives in agent-memory-review.ts and is pure. This file is the part that
+ * touches a database, kept separate so the policy can be tested without one and so this
+ * file has nothing in it but plumbing and a transaction.
+ *
+ * NOT REGISTERED ON THE AGENT-FACING SERVER. Promotion is the single operation that changes
+ * what a memory is allowed to be used for, so it must not sit on the surface agents already
+ * hold a key to: an agent that can reach the promote route can vouch for its own memory,
+ * and the only thing between it and instruction-grade material would be a key check on a
+ * server it has already authenticated to. `registerAgentMemoryOps` is called by the ops
+ * entrypoint alone, which binds to loopback - a routing mistake cannot expose what is not
+ * listening on a reachable interface, which is a stronger property than a correct check.
+ */
+
+import {
+  isReviewAction,
+  planTransition,
+  type ReviewAction,
+  validateActor,
+} from "./agent-memory-review.ts";
+import type { ReviewStatus } from "./agent-memory-policy.ts";
+
+export interface AgentMemoryOpsDeps {
+  pool: {
+    connect: () => Promise<{
+      queryObject: (sql: string, args?: unknown[]) => Promise<{ rows: unknown[] }>;
+      release: () => void;
+    }>;
+  };
+}
+
+export interface ReviewInput {
+  memory_id?: unknown;
+  action?: unknown;
+  actor?: unknown;
+  note?: unknown;
+  /** supersede only: the memory that replaces this one. Recorded, never dereferenced here. */
+  superseded_by?: unknown;
+}
+
+export type ReviewOutcome =
+  | {
+    ok: true;
+    memory_id: string;
+    action: ReviewAction;
+    from: ReviewStatus;
+    review_status: ReviewStatus;
+    lifecycle_status: string;
+  }
+  | { ok: false; refused: string; message: string };
+
+/**
+ * Apply a review decision.
+ *
+ * THE STATE IS READ AND WRITTEN IN ONE TRANSACTION, and the read is `FOR UPDATE`. Without
+ * the lock, two reviewers acting at once both read 'pending', both plan a legal transition
+ * from it, and the second silently overwrites the first - so a reject can be erased by a
+ * concurrent confirm and the audit trail shows both as if each had been applied to the
+ * state it saw. That is the same shape as the writeback's partial-commit bug: nothing
+ * errors, and the record afterwards is a lie.
+ */
+export async function performReview(
+  deps: AgentMemoryOpsDeps,
+  input: ReviewInput,
+): Promise<ReviewOutcome> {
+  const memoryId = typeof input.memory_id === "string" ? input.memory_id.trim() : "";
+  if (!memoryId) {
+    return { ok: false, refused: "invalid_request", message: "memory_id is required" };
+  }
+  if (!isReviewAction(input.action)) {
+    return {
+      ok: false,
+      refused: "invalid_request",
+      message: "action must be one of: confirm, reject, supersede, dispute",
+    };
+  }
+  const actor = validateActor(input.actor);
+  if (!actor) {
+    return {
+      ok: false,
+      refused: "invalid_request",
+      message:
+        "actor.label is required - this door exists to record that a PERSON vouched, and " +
+        "an audit row without one records that something happened without recording who " +
+        "is answerable for it",
+    };
+  }
+  const action = input.action;
+
+  const client = await deps.pool.connect();
+  try {
+    await client.queryObject("BEGIN");
+
+    const found = await client.queryObject(
+      `SELECT review_status, lifecycle_status FROM agent_memories WHERE id = $1 FOR UPDATE`,
+      [memoryId],
+    );
+    const row = found.rows[0] as
+      | { review_status: ReviewStatus; lifecycle_status: string }
+      | undefined;
+    if (!row) {
+      await client.queryObject("ROLLBACK");
+      return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
+    }
+
+    const plan = planTransition(row.review_status, action);
+    if (!plan.ok) {
+      await client.queryObject("ROLLBACK");
+      return { ok: false, refused: plan.reason, message: plan.message };
+    }
+
+    // Built as a list so the columns a given action does NOT touch are genuinely absent
+    // from the statement, rather than being set to their current values - which would make
+    // every action look like it rewrote the whole row in any future column-level audit.
+    const sets = ["review_status = $2", "updated_at = now()"];
+    const args: unknown[] = [memoryId, plan.review_status];
+    if (plan.lifecycle_status) {
+      sets.push(`lifecycle_status = $${args.length + 1}`);
+      args.push(plan.lifecycle_status);
+    }
+    if (plan.provenance_status) {
+      sets.push(`provenance_status = $${args.length + 1}`);
+      args.push(plan.provenance_status);
+      sets.push("last_confirmed_at = now()");
+    }
+    if (plan.clears_confirmation_requirement) {
+      sets.push("requires_user_confirmation = false");
+    }
+    const updated = await client.queryObject(
+      `UPDATE agent_memories SET ${sets.join(", ")} WHERE id = $1
+       RETURNING review_status, lifecycle_status, workspace_id, project_id`,
+      args,
+    );
+    const after = updated.rows[0] as {
+      review_status: ReviewStatus;
+      lifecycle_status: string;
+      workspace_id: string;
+      project_id: string | null;
+    };
+
+    // The audit event is part of the SAME transaction as the state change. A promotion
+    // nobody can trace is worse than no promotion: the recall path will hand the memory out
+    // as confirmed, and there is no record of who said so.
+    await client.queryObject(
+      `INSERT INTO agent_memory_audit_events
+         (memory_id, workspace_id, project_id, event_type, actor_kind, actor_label, payload)
+       VALUES ($1, $2, $3, $4, 'user', $5, $6::jsonb)`,
+      [
+        memoryId,
+        after.workspace_id,
+        after.project_id,
+        plan.event,
+        actor.label,
+        JSON.stringify({
+          from: row.review_status,
+          to: plan.review_status,
+          action,
+          note: typeof input.note === "string" ? input.note : null,
+          superseded_by: typeof input.superseded_by === "string" ? input.superseded_by : null,
+        }),
+      ],
+    );
+
+    await client.queryObject("COMMIT");
+    return {
+      ok: true,
+      memory_id: memoryId,
+      action,
+      from: row.review_status,
+      review_status: after.review_status,
+      lifecycle_status: after.lifecycle_status,
+    };
+  } catch (e) {
+    try { await client.queryObject("ROLLBACK"); } catch { /* the connection is already gone */ }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export interface ReviewQueueInput {
+  workspace_id?: unknown;
+  /** Defaults to the states a reviewer has not yet acted on. */
+  review_status?: unknown;
+  limit?: unknown;
+}
+
+/**
+ * What is waiting for a decision.
+ *
+ * Defaults to 'pending' and 'evidence_only' - the two states that mean "written, nobody has
+ * looked". It deliberately does NOT default to everything: a queue that includes rejected
+ * and superseded memories is a list nobody reads, and a review queue nobody reads is the
+ * same as not having one.
+ */
+export async function listForReview(
+  deps: AgentMemoryOpsDeps,
+  input: ReviewQueueInput,
+): Promise<{ ok: true; items: unknown[] }> {
+  const wanted = Array.isArray(input.review_status) && input.review_status.length
+    ? input.review_status.map(String)
+    : ["pending", "evidence_only"];
+  const rawLimit = typeof input.limit === "number" ? input.limit : 50;
+  // Clamped, like the recall path: one call must not be able to drain the store.
+  const limit = Math.max(1, Math.min(200, Math.floor(rawLimit)));
+
+  const args: unknown[] = [wanted, limit];
+  let where = "review_status = ANY($1)";
+  if (typeof input.workspace_id === "string" && input.workspace_id.trim()) {
+    args.push(input.workspace_id.trim());
+    where += ` AND workspace_id = $${args.length}`;
+  }
+
+  const client = await deps.pool.connect();
+  try {
+    const res = await client.queryObject(
+      `SELECT id, workspace_id, project_id, summary, memory_type, visibility,
+              review_status, lifecycle_status, provenance_status, created_at
+         FROM agent_memories
+        WHERE ${where}
+        ORDER BY created_at ASC
+        LIMIT $2`,
+      args,
+    );
+    return { ok: true, items: res.rows };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Register the ops routes. Called ONLY by the loopback ops entrypoint - see the module note.
+ */
+// deno-lint-ignore no-explicit-any
+export function registerAgentMemoryOps(app: any, deps: AgentMemoryOpsDeps) {
+  // deno-lint-ignore no-explicit-any
+  app.post("/ops/agent-memory/review", async (c: any) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body) return c.json({ ok: false, refused: "invalid_json" }, 400);
+    const out = await performReview(deps, body as ReviewInput);
+    if (out.ok) return c.json(out);
+    // 404 for a memory that is not there; 409 for a state that forbids the action (the
+    // request was fine, the WORLD says no); 400 for a malformed request.
+    const status = out.refused === "not_found"
+      ? 404
+      : out.refused === "invalid_request"
+      ? 400
+      : 409;
+    return c.json(out, status);
+  });
+
+  // deno-lint-ignore no-explicit-any
+  app.post("/ops/agent-memory/queue", async (c: any) => {
+    const body = (await c.req.json().catch(() => ({}))) ?? {};
+    return c.json(await listForReview(deps, body as ReviewQueueInput));
+  });
+}
