@@ -74,6 +74,7 @@ services:
       # obvious key collided, and the loser was handed the winner's memory id.
       - ./init-agent-memory-idempotency.sql:/docker-entrypoint-initdb.d/120-init-agent-memory-idempotency.sql:ro # agent-memory P1.2 fix
       - ./init-agent-memory-promote-exposure.sql:/docker-entrypoint-initdb.d/130-init-agent-memory-promote-exposure.sql:ro
+      - ./init-agent-memory-check-type.sql:/docker-entrypoint-initdb.d/140-init-agent-memory-check-type.sql:ro
     networks:
       - obnet
     restart: unless-stopped
