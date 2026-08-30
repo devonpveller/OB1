@@ -204,6 +204,63 @@ services:
       retries: 3
       start_period: 20s
 
+  # THE OPS DOOR (memory-plane PLAN §1.4). A SECOND INSTANCE of the same gateway image -
+  # not a second server, and not a bespoke one. An earlier attempt built a standalone Deno
+  # service on its own network with no authentication at all; it was reverted, and this is
+  # what the plan actually specifies.
+  #
+  # WHO IT IS FOR: host processes - the claude-sessions bridge, Claude Code sessions. They
+  # cannot reach openbrain-mcp, which publishes no host port, and giving a host process the
+  # raw MCP_ACCESS_KEY is exactly what this door exists to avoid. It holds its own
+  # OPS_GATEWAY_KEY and forwards the real key upstream itself.
+  #
+  # WHY NOT JUST WIDEN THE CLOUD DOOR: that one is default-deny with agent_memory_* absent
+  # on purpose, and it forces share=cloud on reads. Two profiles, two keys, two allow-lists.
+  #
+  # Published on 127.0.0.1 ONLY. The container still listens on 8061 (the image's CMD); the
+  # door's ADDRESS is 8062, which is what the plan specifies and what callers use.
+  openbrain-ops-gateway:
+    image: openbrain-gateway:local
+    pull_policy: never
+    container_name: openbrain-ops-gateway
+    depends_on:
+      - openbrain-mcp
+    environment:
+      OPENBRAIN_URL: http://openbrain-mcp:8000
+      OPENBRAIN_KEY: ${MCP_ACCESS_KEY}
+      GATEWAY_KEY: ${OPS_GATEWAY_KEY:?openbrain-ops-gateway needs its OWN key, never the cloud one}
+      GATEWAY_PROFILE: ops
+      # The agent-memory tools, and nothing else. No personal-plane tools, no search/fetch,
+      # no capture_thought - this door is not a second cloud door.
+      GATEWAY_READ_TOOLS: agent_memory_recall,agent_memory_inspect,agent_memory_recall_trace,agent_memory_list_review_queue
+      GATEWAY_WRITE_TOOLS: agent_memory_writeback,agent_memory_review,agent_memory_report_usage
+      # Reads: belt-and-braces. The exposure plane is forced SERVER-SIDE by performRecall
+      # from its own door value and a caller cannot widen it, so this filter is a second
+      # statement of the same boundary rather than the boundary itself.
+      GATEWAY_READ_FILTER_FIELD: exposure
+      GATEWAY_READ_FILTER_VALUE: ops
+      GATEWAY_WRITE_ORIGIN: ops
+      GATEWAY_WRITE_STAMP_FIELD: exposure
+      GATEWAY_WRITE_STAMP_VALUE: ops
+    ports:
+      - "127.0.0.1:8062:8061"
+    networks:
+      - obnet
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8061/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   # MCP -> OpenAPI bridges for Open WebUI (which consumes OpenAPI tool
   # servers, not raw MCP). ONE mcpo per MCP server: mcpo's Python client
   # crashes (anyio cancel-scope) when a single instance proxies multiple

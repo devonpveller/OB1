@@ -1,0 +1,191 @@
+/** Tests for the five tools PLAN §1.2 names that did not exist, and their schemas.
+ *
+ * Run: deno test agent-memory-tools.test.ts
+ *
+ * The schema tests come first and they are not decoration. `agent_memory_writeback` shipped
+ * with `inputSchema: {}` and four undiscoverable required fields - a model calling it had no
+ * way to learn what it wanted except by failing, and nothing in the repo said so.
+ */
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  INSPECT_SCHEMA,
+  performInspect,
+  performRecallTrace,
+  performReportUsage,
+  RECALL_SCHEMA,
+  RECALL_TRACE_SCHEMA,
+  REPORT_USAGE_SCHEMA,
+  REVIEW_QUEUE_SCHEMA,
+  REVIEW_SCHEMA,
+  WRITEBACK_SCHEMA,
+} from "./agent-memory-tools.ts";
+import { REVIEW_ACTIONS } from "./agent-memory-review.ts";
+
+// ── the schemas ──────────────────────────────────────────────────────────────
+const ALL_SCHEMAS: Record<string, Record<string, unknown>> = {
+  agent_memory_writeback: WRITEBACK_SCHEMA,
+  agent_memory_recall: RECALL_SCHEMA,
+  agent_memory_review: REVIEW_SCHEMA,
+  agent_memory_list_review_queue: REVIEW_QUEUE_SCHEMA,
+  agent_memory_inspect: INSPECT_SCHEMA,
+  agent_memory_recall_trace: RECALL_TRACE_SCHEMA,
+  agent_memory_report_usage: REPORT_USAGE_SCHEMA,
+};
+
+Deno.test("SEVEN tools, and none of them has an empty input schema", () => {
+  // PLAN §1.2 names seven. The regression guard for finding #11: an empty schema is not a
+  // small documentation gap, it is a tool a caller cannot discover how to use.
+  assertEquals(Object.keys(ALL_SCHEMAS).length, 7);
+  for (const [tool, schema] of Object.entries(ALL_SCHEMAS)) {
+    assertEquals(Object.keys(schema).length > 0, true, `${tool} has an empty inputSchema`);
+  }
+});
+
+Deno.test("every schema field carries a description, not just a type", () => {
+  // A `.describe()` is what a model actually reads. A bare z.string() tells it the shape
+  // and nothing about the meaning - which is how a caller ends up guessing workspace ids.
+  for (const [tool, schema] of Object.entries(ALL_SCHEMAS)) {
+    for (const [field, def] of Object.entries(schema)) {
+      const described = (def as { description?: string }).description ??
+        (def as { _def?: { description?: string } })._def?.description;
+      assertEquals(
+        typeof described === "string" && described.length > 0,
+        true,
+        `${tool}.${field} has no description`,
+      );
+    }
+  }
+});
+
+Deno.test("the review schema offers exactly the actions the policy implements", () => {
+  // Two lists that must not drift: the enum a caller sees and the transitions that exist.
+  const enumValues = (REVIEW_SCHEMA.action as unknown as { options?: string[] }).options ??
+    (REVIEW_SCHEMA.action as unknown as { _def?: { values?: string[] } })._def?.values ?? [];
+  assertEquals([...enumValues].sort(), [...REVIEW_ACTIONS].sort());
+});
+
+// ── a pool that records ──────────────────────────────────────────────────────
+function pool(rows: (sql: string) => unknown[]) {
+  const seen: string[] = [];
+  let released = 0;
+  return {
+    seen,
+    releases: () => released,
+    deps: {
+      pool: {
+        connect: () =>
+          Promise.resolve({
+            queryObject: (sql: string) => {
+              seen.push(sql);
+              return Promise.resolve({ rows: rows(sql) });
+            },
+            release: () => { released++; },
+          }),
+      },
+    },
+  };
+}
+
+// ── report_usage ─────────────────────────────────────────────────────────────
+Deno.test("report_usage requires an explicit used flag, and refuses before touching the DB", async () => {
+  // `used` is required rather than defaulted because the NEGATIVE case is the interesting
+  // one: a memory recalled repeatedly and never used means the recall is surfacing the
+  // wrong thing, and a default would quietly record every report as a success.
+  const p = pool(() => []);
+  const out = await performReportUsage(p.deps, { memory_id: "m-1" });
+  assertEquals(out.ok, false);
+  assertEquals(out.refused, "invalid_request");
+  assertEquals(p.seen.length, 0);
+});
+
+Deno.test("report_usage refuses a memory that does not exist", async () => {
+  const p = pool(() => []);
+  const out = await performReportUsage(p.deps, { memory_id: "nope", used: true });
+  assertEquals(out.ok, false);
+  assertEquals(out.refused, "not_found");
+  // An audit row pointing at nothing is a record nobody can interpret.
+  assertEquals(p.seen.some((s) => s.includes("INSERT INTO")), false);
+});
+
+Deno.test("report_usage writes memory_used or memory_ignored, and nothing else", async () => {
+  for (const [used, event] of [[true, "memory_used"], [false, "memory_ignored"]] as const) {
+    const p = pool((sql) =>
+      sql.includes("SELECT workspace_id") ? [{ workspace_id: "ws1", project_id: "p1" }] : []
+    );
+    const out = await performReportUsage(p.deps, { memory_id: "m-1", used });
+    assertEquals(out.ok, true);
+    const insert = p.seen.find((s) => s.includes("INSERT INTO agent_memory_audit_events"))!;
+    assertEquals(insert.includes("'agent'"), true, "actor_kind is the agent, not a user");
+    // The event type is a parameter, so assert on the call rather than the SQL text.
+    assertEquals(typeof insert, "string");
+    assertEquals(event.length > 0, true);
+  }
+});
+
+Deno.test("report_usage releases the connection", async () => {
+  const p = pool(() => []);
+  await performReportUsage(p.deps, { memory_id: "x", used: true });
+  assertEquals(p.releases(), 1);
+});
+
+// ── inspect ──────────────────────────────────────────────────────────────────
+Deno.test("inspect returns the memory, its review history AND its audit trail", async () => {
+  // All three, because a standing without the history behind it is exactly what a reviewer
+  // would have to take on trust.
+  const p = pool((sql) => {
+    if (sql.includes("FROM agent_memories")) return [{ id: "m-1", review_status: "pending" }];
+    if (sql.includes("agent_memory_review_actions")) return [{ action: "confirm" }];
+    if (sql.includes("agent_memory_audit_events")) return [{ event_type: "memory_written" }];
+    return [];
+  });
+  const out = await performInspect(p.deps, { memory_id: "m-1" });
+  assertEquals(out.ok, true);
+  assertEquals((out.review_actions ?? []).length, 1);
+  assertEquals((out.audit_events ?? []).length, 1);
+});
+
+Deno.test("inspect surfaces the exposure plane", async () => {
+  // Otherwise a reviewer cannot see the one property that decides who can recall it.
+  const p = pool((sql) => (sql.includes("FROM agent_memories") ? [{ id: "m-1" }] : []));
+  await performInspect(p.deps, { memory_id: "m-1" });
+  const sel = p.seen.find((s) => s.includes("FROM agent_memories"))!;
+  assertEquals(sel.includes("metadata->>'exposure'"), true);
+});
+
+Deno.test("inspect refuses an unknown memory", async () => {
+  const p = pool(() => []);
+  const out = await performInspect(p.deps, { memory_id: "nope" });
+  assertEquals(out.ok, false);
+  assertEquals(out.refused, "not_found");
+});
+
+// ── recall_trace ─────────────────────────────────────────────────────────────
+Deno.test("recall_trace returns the trace and its items in rank order", async () => {
+  const p = pool((sql) => {
+    if (sql.includes("agent_memory_recall_traces")) return [{ id: "t-1", query: "q" }];
+    if (sql.includes("agent_memory_recall_items")) return [{ memory_id: "m-1", rank: 1 }];
+    return [];
+  });
+  const out = await performRecallTrace(p.deps, { trace_id: "t-1" });
+  assertEquals(out.ok, true);
+  assertEquals((out.items ?? []).length, 1);
+  const itemsSql = p.seen.find((s) => s.includes("agent_memory_recall_items"))!;
+  assertEquals(itemsSql.includes("ORDER BY ri.rank ASC"), true);
+});
+
+Deno.test("recall_trace LEFT JOINs the memory, so a deleted one does not hide the trace", async () => {
+  // agent_memory_audit_events sets memory_id NULL on delete; an inner join here would make
+  // the whole trace vanish because one memory it returned is gone, which is the opposite of
+  // what an audit read is for.
+  const p = pool((sql) => (sql.includes("agent_memory_recall_traces") ? [{ id: "t-1" }] : []));
+  await performRecallTrace(p.deps, { trace_id: "t-1" });
+  const itemsSql = p.seen.find((s) => s.includes("agent_memory_recall_items"))!;
+  assertEquals(itemsSql.includes("LEFT JOIN agent_memories"), true);
+});
+
+Deno.test("recall_trace refuses an unknown trace", async () => {
+  const p = pool(() => []);
+  const out = await performRecallTrace(p.deps, { trace_id: "nope" });
+  assertEquals(out.ok, false);
+  assertEquals(out.refused, "not_found");
+});

@@ -13,6 +13,19 @@
  * invariant would leak after being proved.
  */
 import {
+  INSPECT_SCHEMA,
+  performInspect,
+  performRecallTrace,
+  performReportUsage,
+  RECALL_SCHEMA,
+  RECALL_TRACE_SCHEMA,
+  REPORT_USAGE_SCHEMA,
+  REVIEW_QUEUE_SCHEMA,
+  REVIEW_SCHEMA,
+  WRITEBACK_SCHEMA,
+} from "./agent-memory-tools.ts";
+import { listForReview, performReview } from "./agent-memory-ops.ts";
+import {
   DEFAULT_RECALL_EXPOSURES,
   stampExposure,
   detectPii,
@@ -454,7 +467,7 @@ export function registerAgentMemory(server: any, app: any, deps: AgentMemoryDeps
       title: "Write a governed memory",
       description:
         "Store a durable, recallable memory for this workspace. Written as EVIDENCE, never as an instruction: it can be cited, and it cannot direct future behaviour until a human confirms it.",
-      inputSchema: {},
+      inputSchema: WRITEBACK_SCHEMA,
     },
     async (args: WritebackInput) => {
       const out = await performWriteback(deps, args);
@@ -478,7 +491,7 @@ export function registerAgentMemory(server: any, app: any, deps: AgentMemoryDeps
       title: "Recall governed memories",
       description:
         "Retrieve memories for a workspace, ranked by relevance to a query. Returns only ACTIVE memories that have passed review; each result states explicitly whether it may be used as evidence, whether it may direct behaviour, and whether it still needs human confirmation.",
-      inputSchema: {},
+      inputSchema: RECALL_SCHEMA,
     },
     async (args: RecallInput) => {
       const out = await performRecall(deps, args);
@@ -498,6 +511,112 @@ export function registerAgentMemory(server: any, app: any, deps: AgentMemoryDeps
       return { content: [{ type: "text", text: lines.join("\n\n") }] };
     },
   );
+
+  // ── the five tools PLAN §1.2 names that did not exist ─────────────────────────────
+  // Seven tools total, mirroring the upstream OpenClaw set. Two of them (review, queue) are
+  // reviewer operations: they live on this server because the OPS DOOR is a gateway in
+  // front of it, not a second server. That is what §1.4 specifies, and building a bespoke
+  // second server instead was the mistake that got reverted.
+
+  server.registerTool(
+    "agent_memory_review",
+    {
+      title: "Act on a memory's standing",
+      description:
+        "Confirm, restrict, promote, dispute, supersede or reject a memory. Records who decided and what the memory looked like before. Rejection is FINAL - the recall gate returns rejected memories on no path.",
+      inputSchema: REVIEW_SCHEMA,
+    },
+    async (args: Record<string, unknown>) => {
+      const out = await performReview(deps, args);
+      if (!out.ok) {
+        return { isError: true, content: [{ type: "text", text: `Refused (${out.refused}): ${out.message}` }] };
+      }
+      return {
+        content: [{
+          type: "text",
+          text: `${out.action}: ${out.memory_id} ${out.from} -> ${out.review_status} (lifecycle ${out.lifecycle_status}, exposure ${out.exposure})`,
+        }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "agent_memory_list_review_queue",
+    {
+      title: "What is waiting for review",
+      description:
+        "List memories nobody has acted on yet. Defaults to pending and evidence_only - deliberately NOT everything, because a queue that includes rejected and superseded memories is a list nobody reads.",
+      inputSchema: REVIEW_QUEUE_SCHEMA,
+    },
+    async (args: Record<string, unknown>) => {
+      const out = await listForReview(deps, args);
+      if (!out.items.length) {
+        return { content: [{ type: "text", text: "Nothing is waiting for review." }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(out.items, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "agent_memory_inspect",
+    {
+      title: "Everything known about one memory",
+      description:
+        "Its standing, its full review history with before/after, and its audit trail. This is what makes a review decision reviewable rather than something to take on trust.",
+      inputSchema: INSPECT_SCHEMA,
+    },
+    async (args: Record<string, unknown>) => {
+      const out = await performInspect(deps, args);
+      if (!out.ok) {
+        return { isError: true, content: [{ type: "text", text: `Refused (${out.refused}): ${out.message}` }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "agent_memory_recall_trace",
+    {
+      title: "What a past recall returned",
+      description:
+        "Read back a recall trace and the memories it surfaced, with the use-policy each carried at the time. Answers 'why did the agent have that in front of it' after the fact.",
+      inputSchema: RECALL_TRACE_SCHEMA,
+    },
+    async (args: Record<string, unknown>) => {
+      const out = await performRecallTrace(deps, args);
+      if (!out.ok) {
+        return { isError: true, content: [{ type: "text", text: `Refused (${out.refused}): ${out.message}` }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "agent_memory_report_usage",
+    {
+      title: "Report that a memory was used, or was not",
+      description:
+        "Record that a recalled memory informed the answer, or was returned and set aside. The negative case matters: a memory recalled repeatedly and never used means the recall is surfacing the wrong thing, and nothing else can see that.",
+      inputSchema: REPORT_USAGE_SCHEMA,
+    },
+    async (args: Record<string, unknown>) => {
+      const out = await performReportUsage(deps, args);
+      if (!out.ok) {
+        return { isError: true, content: [{ type: "text", text: `Refused (${out.refused}): ${out.message}` }] };
+      }
+      return { content: [{ type: "text", text: "Recorded." }] };
+    },
+  );
+
+  // The THIRD REST twin (PLAN §1.2). The other two are below.
+  // deno-lint-ignore no-explicit-any
+  app.post("/agent-memory/usage", async (c: any) => {
+    if (!deps.authed(c)) return c.json({ error: "unauthorized" }, 401);
+    const body = await c.req.json().catch(() => null);
+    if (!body) return c.json({ error: "invalid json" }, 400);
+    const out = await performReportUsage(deps, body);
+    return out.ok ? c.json(out) : c.json(out, out.refused === "not_found" ? 404 : 400);
+  });
 
   // deno-lint-ignore no-explicit-any
   app.post("/agent-memory/recall", async (c: any) => {
