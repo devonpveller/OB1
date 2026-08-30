@@ -28,7 +28,7 @@ const workspaceArg = z.string().describe(
 const projectArg = z.string().optional().describe(
   "Project slug: the agent-org project, 'claude-sessions' for the bridge, 'owui' for OWUI surfaces.",
 );
-const memoryTypeArg = z.enum([
+export const memoryTypeArg = z.enum([
   "decision",
   "output",
   "lesson",
@@ -37,6 +37,12 @@ const memoryTypeArg = z.enum([
   "failure",
   "artifact_reference",
   "work_log",
+  // U3's finding->durable-check pipeline. Added to the SQL CHECK by
+  // init-agent-memory-check-type.sql; this enum is the SECOND definition of that
+  // vocabulary and drifted the moment the first was widened - the tool rejected 'check'
+  // before the database ever saw it. agent-memory-tools.test.ts now reads the .sql and
+  // asserts the two lists match, so the next widening cannot go one-sided.
+  "check",
 ]).describe("What kind of memory this is. Constrained by the schema CHECK.");
 
 export const WRITEBACK_SCHEMA = {

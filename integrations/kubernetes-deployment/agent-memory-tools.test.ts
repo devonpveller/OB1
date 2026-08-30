@@ -9,6 +9,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   INSPECT_SCHEMA,
+  memoryTypeArg,
   performInspect,
   performRecallTrace,
   performReportUsage,
@@ -188,4 +189,38 @@ Deno.test("recall_trace refuses an unknown trace", async () => {
   const out = await performRecallTrace(p.deps, { trace_id: "nope" });
   assertEquals(out.ok, false);
   assertEquals(out.refused, "not_found");
+});
+
+
+// ── the enum and the SQL CHECK are ONE vocabulary in TWO files ───────────────
+// They drifted the instant one was widened: init-agent-memory-check-type.sql added 'check'
+// to the database, and this enum kept rejecting it - so the tool refused a value the schema
+// permitted, before the database was ever consulted. Neither file is wrong on its own,
+// which is why nothing caught it.
+Deno.test("memory_type enum matches the SQL CHECK exactly", async () => {
+  const sqlPaths = [
+    "../../docker/init-agent-memory.sql",
+    "../../docker/init-agent-memory-check-type.sql",
+  ];
+  let allowed: string[] = [];
+  for (const rel of sqlPaths) {
+    let text: string;
+    try {
+      text = await Deno.readTextFile(new URL(rel, import.meta.url));
+    } catch {
+      continue; // a migration not present in this checkout
+    }
+    // The LAST memory_type CHECK wins - migrations replace the constraint.
+    const m = [...text.matchAll(/memory_type IN \(([^)]*)\)/g)].pop();
+    if (m) {
+      allowed = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
+    }
+  }
+  if (!allowed.length) return; // no schema in this checkout; nothing to compare
+
+  const enumValues =
+    (memoryTypeArg as unknown as { options?: string[] }).options ??
+    (memoryTypeArg as unknown as { _def?: { values?: string[] } })._def?.values ?? [];
+
+  assertEquals([...enumValues].sort(), [...allowed].sort());
 });
