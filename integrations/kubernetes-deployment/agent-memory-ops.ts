@@ -24,6 +24,8 @@ import {
 import type { ReviewStatus } from "./agent-memory-policy.ts";
 
 export interface AgentMemoryOpsDeps {
+  /** §1.1: the exposure plane this DOOR reads on. Forced server-side; a caller cannot widen it. */
+  doorExposure?: string;
   pool: {
     connect: () => Promise<{
       queryObject: (sql: string, args?: unknown[]) => Promise<{ rows: unknown[] }>;
@@ -266,7 +268,14 @@ export async function listForReview(
   const limit = Math.max(1, Math.min(200, Math.floor(rawLimit)));
 
   const args: unknown[] = [wanted, limit];
-  let where = "review_status = ANY($1)";
+  // THE EXPOSURE PLANE, forced from the door - the queue ENUMERATED the personal plane
+  // without it, which an adversarial verifier demonstrated against merged code. The
+  // gateway's forced metadata_filter cannot help here: this tool's schema has no such
+  // field, so the SDK strips it before the handler runs.
+  const doorExposure = (deps as { doorExposure?: string }).doorExposure;
+  args.push(doorExposure ? [doorExposure] : ["ops"]);
+  let where = `review_status = ANY($1)
+        AND COALESCE(metadata->>'exposure', 'personal') = ANY($${args.length})`;
   if (typeof input.workspace_id === "string" && input.workspace_id.trim()) {
     args.push(input.workspace_id.trim());
     where += ` AND workspace_id = $${args.length}`;

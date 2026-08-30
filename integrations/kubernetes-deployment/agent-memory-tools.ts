@@ -28,7 +28,7 @@ const workspaceArg = z.string().describe(
 const projectArg = z.string().optional().describe(
   "Project slug: the agent-org project, 'claude-sessions' for the bridge, 'owui' for OWUI surfaces.",
 );
-const memoryTypeArg = z.enum([
+export const memoryTypeArg = z.enum([
   "decision",
   "output",
   "lesson",
@@ -37,6 +37,12 @@ const memoryTypeArg = z.enum([
   "failure",
   "artifact_reference",
   "work_log",
+  // U3's finding->durable-check pipeline. Added to the SQL CHECK by
+  // init-agent-memory-check-type.sql; this enum is the SECOND definition of that
+  // vocabulary and drifted the moment the first was widened - the tool rejected 'check'
+  // before the database ever saw it. agent-memory-tools.test.ts now reads the .sql and
+  // asserts the two lists match, so the next widening cannot go one-sided.
+  "check",
 ]).describe("What kind of memory this is. Constrained by the schema CHECK.");
 
 export const WRITEBACK_SCHEMA = {
@@ -126,6 +132,51 @@ export const REPORT_USAGE_SCHEMA = {
 
 // ── operations ───────────────────────────────────────────────────────────────
 
+
+// ── THE EXPOSURE BOUNDARY, ON EVERY READ TOOL ───────────────────────────────
+//
+// FOUND BY AN ADVERSARIAL VERIFIER, in code that had already merged. `performRecall` forces
+// the exposure plane from the door and a smoke test proves it. These three tools were added
+// later, on the same allow-list, and did NOT: `agent_memory_inspect` returned a personal
+// memory's full `content` by id, and `agent_memory_list_review_queue` enumerated the
+// personal plane. Both with no audit row.
+//
+// The gateway's forced `metadata_filter` does not save them: these tools' zod schemas have
+// no such field, so the MCP SDK strips it before the handler ever sees it. A filter applied
+// at a door the callee ignores is not a filter.
+//
+// So the plane is forced HERE, server-side, from the same door value `performRecall` uses.
+// The lesson is narrower than "add a filter": proving a boundary on ONE tool and describing
+// the PLANE as contained is the over-claim. Every read tool is a door.
+const DEFAULT_READ_EXPOSURE = ["ops"];
+
+function readExposure(deps: AgentMemoryOpsDeps): string[] {
+  const door = (deps as { doorExposure?: string }).doorExposure;
+  return door ? [door] : DEFAULT_READ_EXPOSURE;
+}
+
+/** Record that an access was refused. U5: stopping without a record is indistinguishable
+ *  from a request that never happened, and nobody can tell a probing agent from a quiet one. */
+async function auditRefusal(
+  deps: AgentMemoryOpsDeps,
+  client: { queryObject: (sql: string, args?: unknown[]) => Promise<{ rows: unknown[] }> },
+  memoryId: string | null,
+  tool: string,
+  reason: string,
+): Promise<void> {
+  try {
+    await client.queryObject(
+      `INSERT INTO agent_memory_audit_events
+         (memory_id, event_type, actor_kind, payload)
+       VALUES ($1, 'access_refused', 'agent', $2::jsonb)`,
+      [memoryId, JSON.stringify({ tool, reason })],
+    );
+  } catch {
+    // An audit write must not turn a refusal into an error - the caller is already being
+    // denied, and a throw here would leak that the row exists via a different status.
+  }
+}
+
 /**
  * Record that a recalled memory was used, or deliberately not used.
  *
@@ -153,8 +204,9 @@ export async function performReportUsage(
     // The memory has to exist. An audit row pointing at nothing is a record of a report
     // nobody can interpret, and the FK would take it silently as NULL on delete.
     const found = await client.queryObject(
-      `SELECT workspace_id, project_id FROM agent_memories WHERE id = $1`,
-      [memoryId],
+      `SELECT workspace_id, project_id FROM agent_memories
+        WHERE id = $1 AND COALESCE(metadata->>'exposure', 'personal') = ANY($2)`,
+      [memoryId, readExposure(deps)],
     );
     const row = found.rows[0] as { workspace_id: string; project_id: string | null } | undefined;
     if (!row) return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
@@ -198,10 +250,23 @@ export async function performInspect(
               can_use_as_evidence, can_use_as_instruction, requires_user_confirmation,
               COALESCE(metadata->>'exposure', 'personal') AS exposure,
               created_at, updated_at, last_confirmed_at
-         FROM agent_memories WHERE id = $1`,
-      [memoryId],
+         FROM agent_memories
+        WHERE id = $1
+          AND COALESCE(metadata->>'exposure', 'personal') = ANY($2)`,
+      [memoryId, readExposure(deps)],
     );
-    if (!m.rows[0]) return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
+    if (!m.rows[0]) {
+      // NOT_FOUND, not "forbidden", and deliberately: "this id exists but you may not see
+      // it" is itself a disclosure - it confirms the memory to anyone who can guess an id.
+      // The caller cannot tell the two apart, which is exactly why the audit row below is
+      // required rather than optional.
+      const exists = await client.queryObject(
+        `SELECT 1 FROM agent_memories WHERE id = $1`, [memoryId]);
+      if (exists.rows[0]) {
+        await auditRefusal(deps, client, memoryId, "agent_memory_inspect", "off-plane");
+      }
+      return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
+    }
     const actions = await client.queryObject(
       `SELECT action, actor_label, notes, before, after, created_at
          FROM agent_memory_review_actions WHERE memory_id = $1 ORDER BY created_at ASC`,
@@ -243,9 +308,11 @@ export async function performRecallTrace(
       `SELECT ri.memory_id, ri.rank, ri.similarity, ri.use_policy_snapshot,
               am.summary, am.review_status
          FROM agent_memory_recall_items ri
-         LEFT JOIN agent_memories am ON am.id = ri.memory_id
+         LEFT JOIN agent_memories am
+                ON am.id = ri.memory_id
+               AND COALESCE(am.metadata->>'exposure', 'personal') = ANY($2)
         WHERE ri.trace_id = $1 ORDER BY ri.rank ASC`,
-      [traceId],
+      [traceId, readExposure(deps)],
     );
     return { ok: true, trace: t.rows[0], items: items.rows };
   } finally {

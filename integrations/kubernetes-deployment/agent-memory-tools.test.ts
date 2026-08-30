@@ -9,6 +9,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   INSPECT_SCHEMA,
+  memoryTypeArg,
   performInspect,
   performRecallTrace,
   performReportUsage,
@@ -188,4 +189,140 @@ Deno.test("recall_trace refuses an unknown trace", async () => {
   const out = await performRecallTrace(p.deps, { trace_id: "nope" });
   assertEquals(out.ok, false);
   assertEquals(out.refused, "not_found");
+});
+
+
+// ── the enum and the SQL CHECK are ONE vocabulary in TWO files ───────────────
+// They drifted the instant one was widened: init-agent-memory-check-type.sql added 'check'
+// to the database, and this enum kept rejecting it - so the tool refused a value the schema
+// permitted, before the database was ever consulted. Neither file is wrong on its own,
+// which is why nothing caught it.
+Deno.test("memory_type enum matches the SQL CHECK exactly", async () => {
+  const sqlPaths = [
+    "../../docker/init-agent-memory.sql",
+    "../../docker/init-agent-memory-check-type.sql",
+  ];
+  let allowed: string[] = [];
+  for (const rel of sqlPaths) {
+    let text: string;
+    try {
+      text = await Deno.readTextFile(new URL(rel, import.meta.url));
+    } catch {
+      continue; // a migration not present in this checkout
+    }
+    // The LAST memory_type CHECK wins - migrations replace the constraint.
+    const m = [...text.matchAll(/memory_type IN \(([^)]*)\)/g)].pop();
+    if (m) {
+      allowed = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
+    }
+  }
+  if (!allowed.length) return; // no schema in this checkout; nothing to compare
+
+  const enumValues =
+    (memoryTypeArg as unknown as { options?: string[] }).options ??
+    (memoryTypeArg as unknown as { _def?: { values?: string[] } })._def?.values ?? [];
+
+  assertEquals([...enumValues].sort(), [...allowed].sort());
+});
+
+
+// ── THE EXPOSURE BOUNDARY ON EVERY READ TOOL ────────────────────────────────
+// Found by an adversarial verifier IN MERGED CODE. `performRecall` forced the plane and a
+// smoke test proved it; these three tools were added later on the same allow-list and did
+// not. agent_memory_inspect returned a personal memory's full content by id, and
+// agent_memory_list_review_queue enumerated the personal plane - both with no audit row.
+//
+// The gateway's forced metadata_filter does not save them: their zod schemas have no such
+// field, so the MCP SDK strips it before the handler runs. A filter applied at a door the
+// callee ignores is not a filter.
+
+function planePool(rows: (sql: string, args: unknown[]) => unknown[]) {
+  const seen: [string, unknown[]][] = [];
+  return {
+    seen,
+    deps: {
+      doorExposure: "ops",
+      pool: {
+        connect: () =>
+          Promise.resolve({
+            queryObject: (sql: string, args?: unknown[]) => {
+              seen.push([sql, args ?? []]);
+              return Promise.resolve({ rows: rows(sql, args ?? []) });
+            },
+            release: () => {},
+          }),
+      },
+    },
+  };
+}
+
+Deno.test("inspect FILTERS on the door's exposure plane", async () => {
+  const p = planePool((sql) => (sql.includes("FROM agent_memories") ? [{ id: "m-1" }] : []));
+  await performInspect(p.deps as never, { memory_id: "m-1" });
+  const sel = p.seen.find(([s]) => s.includes("FROM agent_memories\n"))!;
+  assertEquals(sel[0].includes("metadata->>'exposure'"), true, "no exposure clause on inspect");
+  assertEquals((sel[1] as unknown[])[1], ["ops"], "the door's plane must be a parameter");
+});
+
+Deno.test("inspect of an OFF-PLANE memory is not_found AND leaves an audit row", async () => {
+  // not_found rather than "forbidden" on purpose: "this id exists but you may not see it"
+  // confirms the memory to anyone who can guess an id. The caller cannot tell the two
+  // apart - which is exactly why the audit row is required rather than optional.
+  const p = planePool((sql) => {
+    if (sql.includes("AND COALESCE(metadata->>'exposure'")) return [];   // off-plane
+    if (sql.includes("SELECT 1 FROM agent_memories")) return [{ "?column?": 1 }]; // exists
+    return [];
+  });
+  const out = await performInspect(p.deps as never, { memory_id: "m-1" });
+  assertEquals(out.ok, false);
+  assertEquals(out.refused, "not_found");
+  const audit = p.seen.find(([s]) => s.includes("access_refused"));
+  assertEquals(Boolean(audit), true, "a refused access must leave an audit row (U5)");
+});
+
+Deno.test("a genuinely absent memory does NOT write an audit row", async () => {
+  // Otherwise every typo becomes a refusal record and the signal that matters - somebody
+  // reaching for the personal plane - is buried in noise.
+  const p = planePool(() => []);
+  await performInspect(p.deps as never, { memory_id: "nope" });
+  assertEquals(p.seen.some(([s]) => s.includes("access_refused")), false);
+});
+
+Deno.test("recall_trace's items are bounded by the plane too", async () => {
+  const p = planePool((sql) =>
+    sql.includes("agent_memory_recall_traces") ? [{ id: "t-1" }] : []
+  );
+  await performRecallTrace(p.deps as never, { trace_id: "t-1" });
+  const items = p.seen.find(([s]) => s.includes("agent_memory_recall_items"))!;
+  assertEquals(items[0].includes("metadata->>'exposure'"), true);
+  assertEquals((items[1] as unknown[])[1], ["ops"]);
+});
+
+Deno.test("report_usage cannot confirm an off-plane memory exists", async () => {
+  const p = planePool(() => []);
+  const out = await performReportUsage(p.deps as never, { memory_id: "m-1", used: true });
+  assertEquals(out.ok, false);
+  const sel = p.seen.find(([s]) => s.includes("SELECT workspace_id"))!;
+  assertEquals(sel[0].includes("metadata->>'exposure'"), true);
+});
+
+Deno.test("a door with no configured plane defaults to ops, never to everything", async () => {
+  // The safe default. A missing doorExposure meaning "no filter" is how this hole would
+  // reopen the next time a tool is added.
+  const seen: [string, unknown[]][] = [];
+  const deps = {
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (sql: string, args?: unknown[]) => {
+            seen.push([sql, args ?? []]);
+            return Promise.resolve({ rows: [] });
+          },
+          release: () => {},
+        }),
+    },
+  };
+  await performInspect(deps as never, { memory_id: "m-1" });
+  const sel = seen.find(([s]) => s.includes("FROM agent_memories\n"))!;
+  assertEquals((sel[1] as unknown[])[1], ["ops"]);
 });
