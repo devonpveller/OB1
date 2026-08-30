@@ -70,6 +70,9 @@ services:
       # missing feature. Caught by the initdb-chain integrity check in
       # scripts/checks/test-quartz4-offline.ps1.
       - ./init-wiki-pages-links.sql:/docker-entrypoint-initdb.d/110-init-wiki-pages-links.sql:ro # wiki graph backlinks
+      # idempotency_key scoped per workspace, not globally - two tenants using the same
+      # obvious key collided, and the loser was handed the winner's memory id.
+      - ./init-agent-memory-idempotency.sql:/docker-entrypoint-initdb.d/120-init-agent-memory-idempotency.sql:ro # agent-memory P1.2 fix
     networks:
       - obnet
     restart: unless-stopped

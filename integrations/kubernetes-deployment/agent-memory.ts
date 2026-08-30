@@ -149,13 +149,20 @@ export async function performWriteback(
 
   const client = await deps.pool.connect();
   try {
-    // Idempotency first: a retry must not produce a second memory. The partial unique
-    // index on idempotency_key makes this safe under concurrency too, but checking first
-    // avoids burning an embedding call on a duplicate.
+    // Idempotency first: a retry must not produce a second memory. Checking before the
+    // embedding call also avoids burning a GPU cycle on a duplicate.
+    //
+    // SCOPED BY WORKSPACE, and that is not cosmetic. The lookup used to match on
+    // idempotency_key alone, so workspace B asking about its own key "daily-summary-…"
+    // was handed workspace A's memory id and thought id, and told duplicate:true while
+    // its own memory was never written. Two tenants sharing an obvious key string is the
+    // ordinary case, not an attack. Fixed together with the index, which was globally
+    // unique and would otherwise reject B's insert outright.
     if (row.idempotency_key) {
       const existing = await client.queryObject(
-        `SELECT id, thought_id FROM agent_memories WHERE idempotency_key = $1 LIMIT 1`,
-        [row.idempotency_key],
+        `SELECT id, thought_id FROM agent_memories
+          WHERE workspace_id = $1 AND idempotency_key = $2 LIMIT 1`,
+        [row.workspace_id, row.idempotency_key],
       );
       const hit = existing.rows[0] as { id: string; thought_id: number | null } | undefined;
       if (hit) {
@@ -166,6 +173,14 @@ export async function performWriteback(
     // The durable content stays in `thoughts` - the sidecar tables hold metadata, not a
     // second copy of the corpus.
     const embedding = await deps.getEmbedding(row.content);
+
+    // ALL THREE WRITES ARE ONE TRANSACTION. They were not, and it mattered: when the
+    // audit insert failed, the thought and the memory row had already committed. The
+    // caller was told the write failed while the memory sat in the corpus unaudited -
+    // and an idempotent retry then reported success for a memory that no audit event
+    // ever covered. A partial memory is worse than no memory, because nothing downstream
+    // can tell the difference.
+    await client.queryObject("BEGIN");
     const thought = await client.queryObject(
       `INSERT INTO thoughts (content, embedding, metadata)
        VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
@@ -196,13 +211,22 @@ export async function performWriteback(
     );
     const memoryId = (inserted.rows[0] as { id: string }).id;
 
+    // `payload`, not `detail`. There is no `detail` column - the first version of this
+    // named one, so EVERY writeback failed here after committing two rows. A stubbed
+    // pool cannot catch that: the test asserted the statement contained
+    // "INSERT INTO agent_memory_audit_events", which is true of a statement Postgres
+    // rejects. It is now covered by running this SQL against the real schema.
     await client.queryObject(
-      `INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, detail)
+      `INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, payload)
        VALUES ($1, $2, 'memory_written', $3::jsonb)`,
       [memoryId, row.workspace_id, JSON.stringify({ via: "agent_memory_writeback" })],
     );
 
+    await client.queryObject("COMMIT");
     return { ok: true, memory_id: memoryId, thought_id: thoughtId, duplicate: false };
+  } catch (e) {
+    try { await client.queryObject("ROLLBACK"); } catch { /* the connection is already gone */ }
+    throw e;
   } finally {
     client.release();
   }
