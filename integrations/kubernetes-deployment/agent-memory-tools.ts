@@ -304,9 +304,23 @@ export async function performRecallTrace(
       [traceId],
     );
     if (!t.rows[0]) return { ok: false, refused: "not_found", message: `no trace with id ${traceId}` };
+    // THE JOIN IS NOT THE BOUNDARY - IT ONLY BLANKS THE COLUMNS IT SELECTS. Found by the
+    // U5 drill after the exposure plane had already been bound to every read tool: the
+    // LEFT JOIN withheld an off-plane memory's `summary` and `review_status` and then
+    // returned its `memory_id`, `rank`, `similarity` and `use_policy_snapshot` anyway,
+    // because those columns come from `agent_memory_recall_items`, not from the joined
+    // side. An id IS the disclosure that matters here - it is the input
+    // `agent_memory_inspect` takes, so a trace was a working enumerator of the personal
+    // plane feeding the tool that had just been closed against it.
+    //
+    // The LEFT JOIN stays (an INNER JOIN would fold the plane predicate into the row set
+    // silently, and one existing test pins the join kind), but an off-plane row is now
+    // dropped in full and the withholding is audited, exactly as `performInspect` does.
+    // `on_plane` is the flag the join produces and it never reaches the caller.
     const items = await client.queryObject(
       `SELECT ri.memory_id, ri.rank, ri.similarity, ri.use_policy_snapshot,
-              am.summary, am.review_status
+              am.summary, am.review_status,
+              (am.id IS NOT NULL) AS on_plane
          FROM agent_memory_recall_items ri
          LEFT JOIN agent_memories am
                 ON am.id = ri.memory_id
@@ -314,7 +328,24 @@ export async function performRecallTrace(
         WHERE ri.trace_id = $1 ORDER BY ri.rank ASC`,
       [traceId, readExposure(deps)],
     );
-    return { ok: true, trace: t.rows[0], items: items.rows };
+    const rows = items.rows as Array<Record<string, unknown> & { memory_id: string; on_plane: boolean }>;
+    const visible: Record<string, unknown>[] = [];
+    for (const row of rows) {
+      if (row.on_plane) {
+        const { on_plane: _onPlane, ...rest } = row;
+        visible.push(rest);
+        continue;
+      }
+      // recall_items.memory_id is NOT NULL and cascades on delete, so a row that failed the
+      // join is never "the memory is gone" - it is always "the memory is on another plane".
+      // That makes this unambiguous enough to record, unlike inspect's absent-id case which
+      // deliberately writes nothing.
+      await auditRefusal(deps, client, row.memory_id, "agent_memory_recall_trace", "off-plane");
+    }
+    // The count of what was withheld is NOT returned. Saying "3 items you may not see"
+    // confirms their existence, which is the disclosure `not_found` exists to avoid; the
+    // audit row is where that fact belongs.
+    return { ok: true, trace: t.rows[0], items: visible };
   } finally {
     client.release();
   }

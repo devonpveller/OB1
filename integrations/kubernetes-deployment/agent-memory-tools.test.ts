@@ -164,7 +164,11 @@ Deno.test("inspect refuses an unknown memory", async () => {
 Deno.test("recall_trace returns the trace and its items in rank order", async () => {
   const p = pool((sql) => {
     if (sql.includes("agent_memory_recall_traces")) return [{ id: "t-1", query: "q" }];
-    if (sql.includes("agent_memory_recall_items")) return [{ memory_id: "m-1", rank: 1 }];
+    // on_plane is what the LEFT JOIN now yields per row; an item without it is off-plane
+    // and is dropped, so the fixture has to model the column the query actually selects.
+    if (sql.includes("agent_memory_recall_items")) {
+      return [{ memory_id: "m-1", rank: 1, on_plane: true }];
+    }
     return [];
   });
   const out = await performRecallTrace(p.deps, { trace_id: "t-1" });
@@ -296,6 +300,76 @@ Deno.test("recall_trace's items are bounded by the plane too", async () => {
   const items = p.seen.find(([s]) => s.includes("agent_memory_recall_items"))!;
   assertEquals(items[0].includes("metadata->>'exposure'"), true);
   assertEquals((items[1] as unknown[])[1], ["ops"]);
+});
+
+// ── recall_trace: the join blanked columns, it did not drop rows ──────────────
+// Found by the U5 drill, in code that had ALREADY bound the exposure plane to every read
+// tool. The test above proves the plane reaches the SQL; it does not prove the off-plane
+// row leaves the RESULT, and it did not. `memory_id`, `rank`, `similarity` and
+// `use_policy_snapshot` are selected from `agent_memory_recall_items` - the LEFT JOIN can
+// only null the columns it takes from the joined side, so the id came back intact. An id is
+// exactly what `agent_memory_inspect` consumes, so the trace enumerated the plane for the
+// tool that had just been closed against it.
+function traceRows(onPlane: boolean[]) {
+  return onPlane.map((ok, i) => ({
+    memory_id: `m-${i}`,
+    rank: i + 1,
+    similarity: 0.9,
+    use_policy_snapshot: {},
+    summary: ok ? "visible" : null,
+    review_status: ok ? "pending" : null,
+    on_plane: ok,
+  }));
+}
+
+Deno.test("recall_trace DROPS an off-plane item, id and all", async () => {
+  const p = planePool((sql) => {
+    if (sql.includes("agent_memory_recall_traces")) return [{ id: "t-1" }];
+    if (sql.includes("agent_memory_recall_items")) return traceRows([true, false]);
+    return [];
+  });
+  const out = await performRecallTrace(p.deps as never, { trace_id: "t-1" });
+  assertEquals(out.ok, true);
+  assertEquals((out.items ?? []).length, 1, "the off-plane item must not be in the result");
+  const ids = (out.items ?? []).map((i) => (i as { memory_id: string }).memory_id);
+  assertEquals(ids, ["m-0"], "an off-plane memory_id is a disclosure, not a blanked column");
+});
+
+Deno.test("recall_trace's withheld item leaves an access_refused audit row naming the tool", async () => {
+  const p = planePool((sql) => {
+    if (sql.includes("agent_memory_recall_traces")) return [{ id: "t-1" }];
+    if (sql.includes("agent_memory_recall_items")) return traceRows([true, false]);
+    return [];
+  });
+  await performRecallTrace(p.deps as never, { trace_id: "t-1" });
+  const audit = p.seen.find(([s]) => s.includes("access_refused"));
+  assertEquals(Boolean(audit), true, "a withheld item must leave an audit row (U5)");
+  const payload = JSON.parse(String((audit![1] as unknown[])[1]));
+  assertEquals(payload.tool, "agent_memory_recall_trace");
+  assertEquals((audit![1] as unknown[])[0], "m-1", "the row must name the memory withheld");
+});
+
+Deno.test("a trace with nothing off-plane writes NO audit row", async () => {
+  // Same discrimination inspect gets: if every read wrote a refusal row, the rows that mean
+  // "somebody reached for the personal plane" would be indistinguishable from ordinary use.
+  const p = planePool((sql) => {
+    if (sql.includes("agent_memory_recall_traces")) return [{ id: "t-1" }];
+    if (sql.includes("agent_memory_recall_items")) return traceRows([true, true]);
+    return [];
+  });
+  const out = await performRecallTrace(p.deps as never, { trace_id: "t-1" });
+  assertEquals((out.items ?? []).length, 2);
+  assertEquals(p.seen.some(([s]) => s.includes("access_refused")), false);
+});
+
+Deno.test("on_plane is an internal flag and never reaches the caller", async () => {
+  const p = planePool((sql) => {
+    if (sql.includes("agent_memory_recall_traces")) return [{ id: "t-1" }];
+    if (sql.includes("agent_memory_recall_items")) return traceRows([true]);
+    return [];
+  });
+  const out = await performRecallTrace(p.deps as never, { trace_id: "t-1" });
+  assertEquals(Object.hasOwn(out.items![0] as object, "on_plane"), false);
 });
 
 Deno.test("report_usage cannot confirm an off-plane memory exists", async () => {
