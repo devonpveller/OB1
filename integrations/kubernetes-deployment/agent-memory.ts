@@ -26,6 +26,13 @@ import {
 } from "./agent-memory-tools.ts";
 import { listForReview, performReview } from "./agent-memory-ops.ts";
 import {
+  DEFAULT_RECALL_TUNING,
+  overfetchLimit,
+  readRecallTuning,
+  type RecallTuning,
+  rerankByBlend,
+} from "./agent-memory-ranking.ts";
+import {
   DEFAULT_RECALL_EXPOSURES,
   stampExposure,
   detectPii,
@@ -180,6 +187,12 @@ export interface AgentMemoryDeps {
   getEmbedding: (text: string) => Promise<number[]>;
   /** Same auth predicate the rest of the server uses (x-brain-key). */
   authed: (c: unknown) => boolean;
+  /**
+   * Similarity floor + recency blend for recall. Omitted in production, where it is read
+   * from the environment per call so calibration is a config change and not a redeploy;
+   * injected in tests, which must not depend on the ambient environment.
+   */
+  recallTuning?: RecallTuning;
 }
 
 /**
@@ -375,27 +388,52 @@ export async function performRecall(
   if (!input.query?.trim()) throw new Error("recall requires a query");
   const limit = Math.min(Math.max(1, input.limit ?? 8), RECALL_MAX_LIMIT);
 
+  // TUNING PER CALL, from the environment, so calibrating the floor or the recency weight
+  // is a config change rather than a redeploy. Tests inject it instead of reaching for the
+  // ambient environment.
+  const tuning: RecallTuning = deps.recallTuning ??
+    (typeof Deno !== "undefined"
+      ? readRecallTuning((k) => Deno.env.get(k))
+      : DEFAULT_RECALL_TUNING);
+
   // $1 is the query embedding, so the scope filter's placeholders start at $2.
   const filter = buildRecallScopeFilter(scope, 2);
   const embedding = await deps.getEmbedding(input.query);
 
+  // TWO PHASE, and the phases are not interchangeable (PLAN §3, §6 `recency-boosted-match-
+  // thoughts`: "ADAPT - rewrite two-phase"). Phase 1 is an INDEX SCAN: it orders by the raw
+  // distance operator and nothing else, because that is the only ordering the HNSW index can
+  // serve - the upstream function puts the blended score in its ORDER BY and therefore
+  // seq-scans the whole table, at a cost that grows exactly as the corpus does. Phase 2
+  // re-ranks the bounded candidate set in memory, where the blend is free.
+  //
+  // The FLOOR is applied here, in the SQL, on the raw cosine - not in phase 2 and not in any
+  // client. A floor a caller applies is a floor a second door can skip.
+  const candidates = overfetchLimit(limit, RECALL_MAX_LIMIT);
+  const floorParam = 2 + filter.params.length;
+  const floorSql = tuning.minSimilarity === null ? "" : `\n     WHERE s.similarity >= $${floorParam}`;
+  const floorArgs = tuning.minSimilarity === null ? [] : [tuning.minSimilarity];
+
   const client = await deps.pool.connect();
   try {
     const found = await client.queryObject(
-      `SELECT am.id, am.summary, am.content, am.memory_type, am.visibility,
+      `SELECT * FROM (
+        SELECT am.id, am.summary, am.content, am.memory_type, am.visibility,
               am.review_status, am.can_use_as_evidence, am.can_use_as_instruction,
               COALESCE(am.metadata->>'exposure', 'personal') AS exposure,
-              am.requires_user_confirmation,
+              am.requires_user_confirmation, am.created_at,
               1 - (t.embedding <=> $1::vector) AS similarity
          FROM agent_memories am
          JOIN thoughts t ON t.id = am.thought_id
         WHERE ${filter.sql}
         ORDER BY t.embedding <=> $1::vector
-        LIMIT ${limit}`,
-      [`[${embedding.join(",")}]`, ...filter.params],
+        LIMIT ${candidates}
+      ) s${floorSql}`,
+      [`[${embedding.join(",")}]`, ...filter.params, ...floorArgs],
     );
 
-    const rows = found.rows as Array<Record<string, unknown>>;
+    const examined = (found.rows as Array<Record<string, unknown>>);
+    const rows = rerankByBlend(examined, tuning, Date.now()).slice(0, limit);
 
     // The trace is written even when nothing matched. An empty recall is the single most
     // useful thing to have a record of - it is what "the plane is silently empty" looks
@@ -409,8 +447,18 @@ export async function performRecall(
         input.workspace_id,
         input.project_id ?? null,
         input.query,
-        JSON.stringify({ limit, include_unconfirmed: !!scope.includeUnconfirmed }),
-        JSON.stringify({ returned: rows.length }),
+        // THE TUNING IS PART OF THE REQUEST RECORD. Without it "why did that recall return
+        // that" becomes unanswerable after a config change - the trace would hold the query
+        // and the rows and omit the thing that ranked them.
+        JSON.stringify({
+          limit,
+          include_unconfirmed: !!scope.includeUnconfirmed,
+          candidates,
+          min_similarity: tuning.minSimilarity,
+          recency_weight: tuning.recencyWeight,
+          half_life_days: tuning.halfLifeDays,
+        }),
+        JSON.stringify({ returned: rows.length, examined: examined.length }),
       ],
     );
     const traceId = (trace.rows[0] as { id: string }).id;

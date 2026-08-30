@@ -121,6 +121,16 @@ services:
       # fetch returns ONE full document for citation (not the accumulation
       # culprit) — leave it uncapped so citations stay complete.
       OB_TOOL_RESULT_MAX_CHARS_FETCH: "0"
+      # Agent-memory recall tuning (memory-plane PLAN §3). BOTH ARE UNSET ON PURPOSE.
+      # Upstream's 0.7 floor was tuned for text-embedding-3-small; bge-m3 puts related
+      # items around 0.4-0.6, so inheriting it would make recall return nothing while
+      # every test still passed. Picking a low number instead is the same mistake facing
+      # the other way. Empty = no floor / pure similarity, which is the ordering that
+      # shipped. Calibration procedure (and what it is waiting for — a corpus):
+      # ai-stack documentation/notes/agent-memory-recall-threshold.md.
+      AGENT_MEMORY_RECALL_MIN_SIMILARITY: ${AGENT_MEMORY_RECALL_MIN_SIMILARITY:-}
+      AGENT_MEMORY_RECALL_RECENCY_WEIGHT: ${AGENT_MEMORY_RECALL_RECENCY_WEIGHT:-}
+      AGENT_MEMORY_RECALL_HALF_LIFE_DAYS: ${AGENT_MEMORY_RECALL_HALF_LIFE_DAYS:-}
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
     # obnet) talk to it directly. Cloud services (Claude Code, etc.)

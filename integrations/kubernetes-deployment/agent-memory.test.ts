@@ -24,6 +24,7 @@ import {
   isRowRecallableBy,
   WRITEBACK_DEFAULTS,
 } from "./agent-memory-policy.ts";
+import { RECALL_OVERFETCH } from "./agent-memory-ranking.ts";
 
 const INPUT = {
   workspace_id: "ws-1",
@@ -383,10 +384,16 @@ Deno.test("recall parameterises the query embedding and every scope value", asyn
 });
 
 Deno.test("recall limit is clamped, so one call cannot drain the corpus", async () => {
-  const { deps, seen } = recallDeps([ROW]);
-  await performRecall(deps, { workspace_id: "ws1", query: "q", limit: 9999 });
+  // Asserted on the ANSWER, not on the SQL. Recall became two-phase (the index scan
+  // overfetches a candidate set, the blend re-ranks it, the caller gets `limit`), so a
+  // `LIMIT ${RECALL_MAX_LIMIT}` substring check now proves nothing about what a caller can
+  // extract. Both halves are pinned: the scan is bounded, and the return is clamped.
+  const many = Array.from({ length: 500 }, (_, i) => ({ ...ROW, id: `m-${i}` }));
+  const { deps, seen } = recallDeps(many);
+  const out = await performRecall(deps, { workspace_id: "ws1", query: "q", limit: 9999 });
+  assertEquals(out.items.length, RECALL_MAX_LIMIT);
   const select = seen.find((s) => s.includes("FROM agent_memories am"))!;
-  assertEquals(select.includes(`LIMIT ${RECALL_MAX_LIMIT}`), true);
+  assertEquals(select.includes(`LIMIT ${RECALL_MAX_LIMIT * RECALL_OVERFETCH}`), true);
 });
 
 Deno.test("a recall without a query is refused", async () => {
