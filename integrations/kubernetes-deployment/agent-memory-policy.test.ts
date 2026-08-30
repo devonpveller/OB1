@@ -8,6 +8,7 @@
 import { assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildRecallScopeFilter,
+  decideRecallExposure,
   DEFAULT_RECALL_EXPOSURES,
   detectPii,
   stampExposure,
@@ -299,4 +300,69 @@ Deno.test("refuses empty and oversized content", () => {
 Deno.test("isSafeToStore agrees with detectUnsafeContent", () => {
   assertEquals(isSafeToStore("a normal lesson worth keeping"), true);
   assertEquals(isSafeToStore("AKIAIOSFODNN7EXAMPLE"), false);
+});
+
+// -- decideRecallExposure: the attempt is a VALUE, not a discarded field (U5) ------------
+//
+// The forcing was never the gap. The gap was that a refusal looked exactly like ordinary
+// traffic, so no record could distinguish "an agent reached for the personal plane" from
+// "an agent asked for nothing and found nothing". These tests pin BOTH halves: what is
+// enforced, and whether the attempt is flagged.
+
+Deno.test("a caller naming the personal plane is refused it AND flagged", () => {
+  const d = decideRecallExposure("ops", ["personal"]);
+  assertEquals(d.enforced, ["ops"]);
+  assertEquals(d.requested, ["personal"]);
+  assertEquals(d.denied, true);
+});
+
+Deno.test("mixing a legal plane with an illegal one is still a denial", () => {
+  // The obvious bypass: bury 'personal' next to the plane you are allowed. `some` is the
+  // right quantifier here, and `every` would have been the bug.
+  const d = decideRecallExposure("ops", ["ops", "personal"]);
+  assertEquals(d.enforced, ["ops"]);
+  assertEquals(d.denied, true);
+});
+
+Deno.test("asking for nothing is NOT an attempt", () => {
+  // A flag that fires on ordinary traffic is a flag nobody reads. Both the omitted and the
+  // empty-array spellings have to stay quiet.
+  for (const asked of [undefined, [] as Exposure[]]) {
+    const d = decideRecallExposure("ops", asked);
+    assertEquals(d.requested, null);
+    assertEquals(d.denied, false);
+    assertEquals(d.enforced, ["ops"]);
+  }
+});
+
+Deno.test("asking for exactly what the door serves is not an attempt either", () => {
+  const d = decideRecallExposure("ops", ["ops"]);
+  assertEquals(d.denied, false);
+  assertEquals(d.requested, ["ops"]);
+});
+
+Deno.test("a door that says nothing still enforces the DEFAULT, and still flags", () => {
+  // deps.doorExposure is optional. A door that forgets to declare itself must not become
+  // the widest door in the building - it falls back to DEFAULT_RECALL_EXPOSURES ('ops').
+  const d = decideRecallExposure(undefined, ["personal"]);
+  assertEquals(d.enforced, [...DEFAULT_RECALL_EXPOSURES]);
+  assertEquals(d.denied, true);
+});
+
+Deno.test("a PERSONAL door serving a personal request is not a denial", () => {
+  // The OWUI-facing surface legitimately sits on the personal plane. The flag means
+  // "asked for a plane this door does not serve", not "said the word personal".
+  const d = decideRecallExposure("personal", ["personal"]);
+  assertEquals(d.enforced, ["personal"]);
+  assertEquals(d.denied, false);
+});
+
+Deno.test("the decision never hands back the caller's array to be mutated", () => {
+  // enforced is what the SQL filter is built from. If it aliased the caller's array, a
+  // later push() anywhere upstream would widen the filter after the decision was made.
+  const asked: Exposure[] = ["personal"];
+  const d = decideRecallExposure("ops", asked);
+  asked.push("ops");
+  assertEquals(d.enforced, ["ops"]);
+  assertEquals(d.requested, ["personal"]);
 });

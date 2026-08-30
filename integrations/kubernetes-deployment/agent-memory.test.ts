@@ -402,3 +402,67 @@ Deno.test("a pool failure propagates rather than reporting success", async () =>
   } as unknown as AgentMemoryDeps;
   await assertRejects(() => performWriteback(deps, INPUT), Error, "pool down");
 });
+
+// -- U5: the attempt has to be VISIBLE, not merely stopped ------------------------------
+//
+// PLAN 2 U5 is validated by "an agent instructed to ... reach personal-plane data is
+// mechanically stopped AND the attempt is visible in an audit record". The stopping was
+// already true and already tested. These cover the second half, which was missing
+// entirely: the read path wrote traces but never an audit EVENT, and the schema's
+// `recall_requested` event_type had no writer on this server at all.
+
+Deno.test("recall writes a recall_requested AUDIT EVENT, not only a trace", async () => {
+  const { deps, seen } = recallDeps([]);
+  await performRecall(deps, { workspace_id: "ws1", query: "anything" });
+  const audit = seen.filter((s) => s.includes("agent_memory_audit_events"));
+  assertEquals(audit.length, 1);
+  assertEquals(audit[0].includes("'recall_requested'"), true);
+});
+
+Deno.test("a widening attempt is FLAGGED in the audit payload; an ordinary recall is not", async () => {
+  // The discriminating assertion, and the reason it is one test rather than two: an audit
+  // writer that hardcodes the flag either way passes half of this and fails the other.
+  async function flagFor(exposure?: ("ops" | "personal")[]) {
+    const { deps, seen, params } = recallDeps([]);
+    await performRecall(
+      { ...deps, doorExposure: "ops" } as unknown as AgentMemoryDeps,
+      { workspace_id: "ws1", query: "q", exposure },
+    );
+    const i = seen.findIndex((s) => s.includes("agent_memory_audit_events"));
+    assertEquals(i >= 0, true);
+    return JSON.parse(String((params[i] ?? [])[3]));
+  }
+
+  const probe = await flagFor(["personal"]);
+  assertEquals(probe.exposure_override_denied, true);
+  assertEquals(probe.requested_exposure, ["personal"]);
+  assertEquals(probe.enforced_exposure, ["ops"]);
+  assertEquals(probe.door_exposure, "ops");
+
+  const ordinary = await flagFor(undefined);
+  assertEquals(ordinary.exposure_override_denied, false);
+  assertEquals(ordinary.requested_exposure, null);
+});
+
+Deno.test("the widening attempt is refused in the SQL, not only recorded", async () => {
+  // Recording an attempt you then honour is worse than not recording it. The scope filter
+  // must still be built from the door's plane.
+  const { deps, params, seen } = recallDeps([]);
+  await performRecall(
+    { ...deps, doorExposure: "ops" } as unknown as AgentMemoryDeps,
+    { workspace_id: "ws1", query: "q", exposure: ["personal"] },
+  );
+  const i = seen.findIndex((s) => s.includes("FROM agent_memories am"));
+  assertEquals(i >= 0, true);
+  const flat = JSON.stringify(params[i]);
+  assertEquals(flat.includes("personal"), false);
+  assertEquals(flat.includes("ops"), true);
+});
+
+Deno.test("the audit event points at the trace it belongs to", async () => {
+  // An audit row with no trace_id records that something happened and nothing about what.
+  const { deps, seen, params } = recallDeps([]);
+  await performRecall(deps, { workspace_id: "ws1", query: "q" });
+  const i = seen.findIndex((s) => s.includes("agent_memory_audit_events"));
+  assertEquals((params[i] ?? [])[2], "trace-1");
+});

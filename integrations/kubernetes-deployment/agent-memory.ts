@@ -26,7 +26,7 @@ import {
 } from "./agent-memory-tools.ts";
 import { listForReview, performReview } from "./agent-memory-ops.ts";
 import {
-  DEFAULT_RECALL_EXPOSURES,
+  decideRecallExposure,
   stampExposure,
   detectPii,
   buildRecallScopeFilter,
@@ -366,9 +366,17 @@ export async function performRecall(
   // could pass `exposure: ['personal']` would read across the boundary the write side is
   // built to maintain, which would make the whole invariant decorative. The caller's value
   // is dropped rather than merged - merging would let it widen.
+  //
+  // AND RECORD THE ATTEMPT. Forcing alone is half of U5's contract: "mechanically stopped
+  // AND the attempt is visible in an audit record". Before this, a caller asking for
+  // `exposure: ['personal']` and a caller asking for nothing produced BYTE-IDENTICAL
+  // records - same trace shape, same empty result - so nothing downstream could tell a
+  // probe from ordinary traffic. The decision is now a value (decideRecallExposure) that
+  // both the trace payload and the audit event carry.
+  const exposureDecision = decideRecallExposure(deps.doorExposure, input.exposure);
   const scope: RecallScope = {
     ...input,
-    exposure: deps.doorExposure ? [deps.doorExposure] : DEFAULT_RECALL_EXPOSURES,
+    exposure: exposureDecision.enforced,
     includeUnconfirmed: input.includeUnconfirmed ?? input.include_unconfirmed ?? false,
   };
 
@@ -409,11 +417,54 @@ export async function performRecall(
         input.workspace_id,
         input.project_id ?? null,
         input.query,
-        JSON.stringify({ limit, include_unconfirmed: !!scope.includeUnconfirmed }),
+        JSON.stringify({
+          limit,
+          include_unconfirmed: !!scope.includeUnconfirmed,
+          // §1.1: BOTH sides of the exposure decision, always - not only when they differ.
+          // A field that appears only on a denial is a field whose ABSENCE has to be
+          // trusted, and absence is what a truncated or tampered record also looks like.
+          requested_exposure: exposureDecision.requested,
+          enforced_exposure: exposureDecision.enforced,
+          exposure_override_denied: exposureDecision.denied,
+        }),
         JSON.stringify({ returned: rows.length }),
       ],
     );
     const traceId = (trace.rows[0] as { id: string }).id;
+
+    // THE AUDIT ROW FOR A READ. `recall_requested` has been in the schema's event_type
+    // CHECK since the table was created and nothing on this server ever wrote one: the
+    // read side left TRACES (an operational record of what a query returned) but no AUDIT
+    // event (a governance record of who reached for what), so "did anything try to read
+    // the personal plane?" had no answer to give. The sibling implementation at
+    // integrations/agent-memory-api/index.ts writes exactly this event; this brings the
+    // deployed server into line with it.
+    //
+    // Written for EVERY recall, not only refused ones, and on the recall's OWN connection,
+    // so a recall that answered cannot be missing its audit row.
+    await client.queryObject(
+      `INSERT INTO agent_memory_audit_events
+         (workspace_id, project_id, trace_id, event_type, actor_kind, payload)
+       VALUES ($1, $2, $3, 'recall_requested', 'agent', $4::jsonb)`,
+      [
+        input.workspace_id,
+        input.project_id ?? null,
+        traceId,
+        JSON.stringify({
+          door_exposure: deps.doorExposure ?? null,
+          requested_exposure: exposureDecision.requested,
+          enforced_exposure: exposureDecision.enforced,
+          // The flag U5's drill asserts on. True = a caller named a plane this door does
+          // not serve, and was refused it. The QUERY TEXT is deliberately NOT copied here:
+          // an audit table that mirrors query strings becomes a second corpus with none of
+          // the exposure gating the first one has. The trace holds the query; this row
+          // points at the trace.
+          exposure_override_denied: exposureDecision.denied,
+          include_unconfirmed: !!scope.includeUnconfirmed,
+          returned: rows.length,
+        }),
+      ],
+    );
 
     const items: RecalledMemory[] = [];
     let rank = 0;

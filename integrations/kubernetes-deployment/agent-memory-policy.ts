@@ -111,6 +111,46 @@ export function stampExposure(
   return "ops";
 }
 
+/**
+ * §1.1 RECALL EXPOSURE: what the caller asked for, what the door enforces, and whether
+ * those differ.
+ *
+ * Split out of `performRecall` so the DECISION is testable without a database, and - the
+ * reason it exists at all - so the ATTEMPT is a value rather than a discarded field.
+ *
+ * The forcing was already correct: `performRecall` overwrote the caller's `exposure` with
+ * the door's. What it did not do was NOTICE. An agent that asked to read the personal
+ * plane was silently handed the ops plane and an empty result set, indistinguishable in
+ * every record from an agent that asked for nothing and found nothing. The dark-factory
+ * contract (PLAN §C.7 / U5) requires the opposite: mechanically stopped AND visible in an
+ * audit record, because nobody is reading the work as it lands.
+ *
+ * `denied` is true when the caller named ANY exposure class the door does not enforce.
+ * Asking for exactly what the door already gives is not an attempt and is not flagged -
+ * a signal that fires on ordinary traffic is one nobody reads.
+ */
+export interface RecallExposureDecision {
+  /** What the caller asked for, verbatim. `null` when it named nothing. */
+  requested: Exposure[] | null;
+  /** What the door forces. This is what the SQL filter is built from. */
+  enforced: Exposure[];
+  /** The caller named a plane the door does not serve. */
+  denied: boolean;
+}
+
+export function decideRecallExposure(
+  doorExposure: Exposure | undefined,
+  requested: readonly Exposure[] | undefined,
+): RecallExposureDecision {
+  const enforced: Exposure[] = doorExposure ? [doorExposure] : [...DEFAULT_RECALL_EXPOSURES];
+  const asked = requested && requested.length ? [...requested] : null;
+  return {
+    requested: asked,
+    enforced,
+    denied: asked !== null && asked.some((e) => !enforced.includes(e)),
+  };
+}
+
 /** Statuses the CONSERVATIVE (default) recall admits. */
 export const DEFAULT_RECALL_STATUSES: readonly ReviewStatus[] = Object.freeze([
   "confirmed",
