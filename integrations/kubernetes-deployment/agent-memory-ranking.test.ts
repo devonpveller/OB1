@@ -236,3 +236,107 @@ Deno.test("the trace records the tuning that produced the result", async () => {
   assert(merged.includes("0.3") && merged.includes("0.25") && merged.includes("7"),
     "the recall trace must carry the tuning it ran under");
 });
+
+// ── the TWO-PHASE property itself ───────────────────────────────────────────
+//
+// Every overfetch test above computes its expectation FROM `overfetchLimit`, so all of them
+// stay green with `RECALL_OVERFETCH = 1` - which is single-phase: the scan takes exactly the
+// rows the caller asked for and the "re-rank" can only permute them. The property the module
+// claims is that the blend can change WHICH rows come back, and that needs a candidate set
+// strictly larger than the limit. These two tests are what a collapse to 1 has to break.
+//
+// The stub pool above returns every row regardless of the SQL, so it cannot see an overfetch
+// change at all. This one HONOURS THE `LIMIT` the way Postgres would, which is the only way a
+// test can be sensitive to the size of the candidate set.
+
+function limitAwareDeps(rows: Array<Record<string, unknown>>, tuning?: unknown) {
+  const seen: string[] = [];
+  const deps = {
+    recallTuning: tuning,
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (sql: string) => {
+            seen.push(sql);
+            if (sql.includes("FROM agent_memories am")) {
+              const m = sql.match(/LIMIT (\d+)/);
+              const n = m ? Number(m[1]) : rows.length;
+              return Promise.resolve({ rows: rows.slice(0, n) });
+            }
+            if (sql.includes("agent_memory_recall_traces")) {
+              return Promise.resolve({ rows: [{ id: "trace-1" }] });
+            }
+            return Promise.resolve({ rows: [] });
+          },
+          release: () => {},
+        }),
+    },
+    getEmbedding: () => Promise.resolve([0.1, 0.2]),
+    authed: () => true,
+  } as unknown as AgentMemoryDeps;
+  return { deps, seen };
+}
+
+Deno.test("the candidate set is STRICTLY LARGER than the limit - that is what makes it two-phase", () => {
+  // Single-phase is `overfetchLimit(n) === n`. Stated as its own assertion because it is the
+  // premise every other overfetch test quietly assumes.
+  assert(RECALL_OVERFETCH > 1, "RECALL_OVERFETCH = 1 collapses the two phases into one");
+  for (const n of [1, 3, 8]) {
+    assert(overfetchLimit(n, RECALL_MAX_LIMIT) > n,
+      `the scan must examine more than ${n} rows for the blend to be able to change the answer`);
+  }
+});
+
+Deno.test("TWO PHASE: recency can promote a row the distance ordering would have cut", async () => {
+  // The end-to-end statement of the property, against a pool that honours the SQL LIMIT.
+  // Ranks 0-3 by distance are stale; rank 4 is today's. With the overfetch the scan examines
+  // 12 rows, so the blend can pull the fresh one into the top 3. Collapse RECALL_OVERFETCH to
+  // 1 and the scan stops at 3 rows - the fresh memory is never even read, and no re-ranking
+  // in the world can return it.
+  const stale = "2024-01-01T00:00:00Z";
+  const rows = [
+    row("d0", 0.90, stale), row("d1", 0.89, stale), row("d2", 0.88, stale),
+    row("d3", 0.87, stale), row("fresh", 0.86, new Date().toISOString()),
+    row("d5", 0.85, stale), row("d6", 0.84, stale), row("d7", 0.83, stale),
+  ];
+  const tuning = { minSimilarity: null, recencyWeight: 0.5, halfLifeDays: 30 };
+  const { deps } = limitAwareDeps(rows, tuning);
+  const out = await performRecall(deps, { workspace_id: "ws1", query: "q", limit: 3 });
+  const ids = out.items.map((i) => i.memory_id);
+  assertEquals(ids.length, 3);
+  assert(ids.includes("fresh"),
+    "the blend could not reach past the requested limit - the scan is single-phase");
+});
+
+Deno.test("TWO PHASE: the trace records how many rows were EXAMINED, not just returned", async () => {
+  // The observable half of the same property: `examined` is what tells an operator whether
+  // the blend had anything to work with. Returned-only would hide a collapsed candidate set.
+  const rows = Array.from({ length: 40 }, (_, i) => row(`m${i}`, 0.9 - i / 100, "2026-08-01T00:00:00Z"));
+  const seenPayloads: string[] = [];
+  const deps = {
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (sql: string, args?: unknown[]) => {
+            if (sql.includes("FROM agent_memories am")) {
+              const m = sql.match(/LIMIT (\d+)/);
+              return Promise.resolve({ rows: rows.slice(0, m ? Number(m[1]) : rows.length) });
+            }
+            if (sql.includes("agent_memory_recall_traces")) {
+              for (const a of args ?? []) if (typeof a === "string") seenPayloads.push(a);
+              return Promise.resolve({ rows: [{ id: "trace-1" }] });
+            }
+            return Promise.resolve({ rows: [] });
+          },
+          release: () => {},
+        }),
+    },
+    getEmbedding: () => Promise.resolve([0.1, 0.2]),
+    authed: () => true,
+  } as unknown as AgentMemoryDeps;
+  await performRecall(deps, { workspace_id: "ws1", query: "q", limit: 4 });
+  const merged = seenPayloads.join(" ");
+  assert(merged.includes(`"examined":${overfetchLimit(4, RECALL_MAX_LIMIT)}`),
+    `the trace must record the candidate set it examined - got ${merged}`);
+  assert(merged.includes(`"returned":4`));
+});

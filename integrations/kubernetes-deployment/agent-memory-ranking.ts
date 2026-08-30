@@ -7,12 +7,24 @@
  *
  * TWO THINGS THIS MODULE EXISTS TO GET RIGHT, both named in PLAN §3 and §6:
  *
- * 1. THE EXECUTION SHAPE. Upstream's `recency-boosted-match-thoughts` puts the blended
- *    score in the ORDER BY. A computed ORDER BY cannot use the HNSW index, so it seq-scans
- *    the whole table and then sorts - the cost grows with the corpus, which is exactly the
- *    direction this plane is meant to grow. We take the formula and NOT the shape: the
- *    index scan picks a bounded candidate set by raw distance (`overfetchLimit`), and the
- *    blend re-ranks that set in memory, where it is free.
+ * 1. THE EXECUTION SHAPE, AND WHAT IS AND IS NOT CLAIMED ABOUT IT. Upstream's
+ *    `recency-boosted-match-thoughts` puts the blended score in the ORDER BY. A computed
+ *    ORDER BY can never use the HNSW index, so it seq-scans the whole table and then sorts -
+ *    a cost that grows with the corpus, which is exactly the direction this plane grows. We
+ *    take the formula and NOT the shape: phase 1 orders by the raw distance OPERATOR and
+ *    nothing else, so the ordering is INDEX-SERVABLE; phase 2 re-ranks the bounded candidate
+ *    set in memory, where the blend is free.
+ *
+ *    INDEX-SERVABLE IS THE CLAIM. NOT "index scan". Measured on the live openbrain DB
+ *    (2026-08-30, 4 agent_memories rows): `EXPLAIN ANALYZE` of the phase-1 statement gives
+ *    `Nested Loop` + `Sort`, driven from `idx_agent_memories_scope` - no HNSW anywhere. With
+ *    `enable_sort=off, enable_seqscan=off` the same statement plans as
+ *    `Index Scan using idx_thoughts_embedding ... Order By: (embedding <=> $1)`, so the HNSW
+ *    plan IS reachable and the SQL really is servable by the index. WHICH plan runs is the
+ *    planner's decision against the live statistics, and on a 4-row table it will keep
+ *    choosing the nested loop. What this module guarantees is the shape - that no computed
+ *    expression reaches the ORDER BY, which is the thing that would make the index plan
+ *    impossible rather than merely unchosen.
  *
  * 2. THE NUMBERS ARE NOT INHERITED, AND NOT INVENTED EITHER. Upstream's 0.7 floor was tuned
  *    for text-embedding-3-small; bge-m3 puts related items around 0.4-0.6, so adopting 0.7
@@ -28,9 +40,17 @@
  *    procedure. Turning either knob on is a config change, not a code change.
  */
 
-/** How many candidates the index scan takes per requested item, before re-ranking.
- *  4x: enough that recency can genuinely change the answer, small enough that the
- *  in-memory sort stays trivial and one call still cannot drain the store. */
+/** How many candidates phase 1 takes per requested item, before re-ranking.
+ *
+ *  MUST BE > 1, and that is a guarded property, not a preference: at 1 the candidate set
+ *  equals the answer, the "re-rank" can only permute rows the scan already chose, and the
+ *  two phases have collapsed into one. `the candidate set is STRICTLY LARGER than the limit`
+ *  and `TWO PHASE: recency can promote a row the distance ordering would have cut` both go
+ *  red at 1 - every other overfetch test computes its expectation from this constant and
+ *  therefore cannot see the collapse.
+ *
+ *  4x: enough that recency can genuinely change the answer, small enough that the in-memory
+ *  sort stays trivial and one call still cannot drain the store. */
 export const RECALL_OVERFETCH = 4;
 
 /** UNCALIBRATED - no floor. See the module docstring; this is deliberate, not a TODO. */

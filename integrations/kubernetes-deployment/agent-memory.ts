@@ -401,11 +401,15 @@ export async function performRecall(
   const embedding = await deps.getEmbedding(input.query);
 
   // TWO PHASE, and the phases are not interchangeable (PLAN §3, §6 `recency-boosted-match-
-  // thoughts`: "ADAPT - rewrite two-phase"). Phase 1 is an INDEX SCAN: it orders by the raw
-  // distance operator and nothing else, because that is the only ordering the HNSW index can
-  // serve - the upstream function puts the blended score in its ORDER BY and therefore
-  // seq-scans the whole table, at a cost that grows exactly as the corpus does. Phase 2
-  // re-ranks the bounded candidate set in memory, where the blend is free.
+  // thoughts`: "ADAPT - rewrite two-phase"). Phase 1 orders by the raw distance OPERATOR and
+  // nothing else, which is the only ordering an HNSW index can serve - the upstream function
+  // puts the blended score in its ORDER BY and therefore can never use the index at all.
+  // Phase 2 re-ranks the bounded candidate set in memory, where the blend is free.
+  //
+  // INDEX-SERVABLE, not "index scan": measured live 2026-08-30 this statement plans as a
+  // Nested Loop + Sort on a 4-row corpus, and as `Index Scan using idx_thoughts_embedding
+  // ... Order By: (embedding <=> $1)` once the planner is forced off the sort. The shape is
+  // what this code owns; the plan is the planner's, and it changes with the statistics.
   //
   // The FLOOR is applied here, in the SQL, on the raw cosine - not in phase 2 and not in any
   // client. A floor a caller applies is a floor a second door can skip.
