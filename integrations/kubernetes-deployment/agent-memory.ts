@@ -13,7 +13,9 @@
  * invariant would leak after being proved.
  */
 import {
+  buildRecallScopeFilter,
   detectUnsafeContent,
+  type RecallScope,
   type ReviewStatus,
   type UnsafeReason,
   type Visibility,
@@ -238,6 +240,129 @@ export async function performWriteback(
   }
 }
 
+export interface RecallInput extends RecallScope {
+  query: string;
+  limit?: number;
+}
+
+export interface RecalledMemory {
+  memory_id: string;
+  summary: string;
+  content: string;
+  memory_type: string;
+  visibility: Visibility;
+  review_status: ReviewStatus;
+  /** Use-policy, returned EXPLICITLY so a caller never has to infer what it may do. */
+  can_use_as_evidence: boolean;
+  can_use_as_instruction: boolean;
+  requires_user_confirmation: boolean;
+  similarity: number;
+}
+
+export interface RecallOutcome {
+  trace_id: string;
+  items: RecalledMemory[];
+}
+
+/** Hard ceiling on how many memories one recall may return. */
+export const RECALL_MAX_LIMIT = 25;
+
+/**
+ * Recall memories for a scope.
+ *
+ * WHY THIS EXISTS AT ALL, beyond the obvious: until it did, the write path was deployed
+ * and the read path it was proved compatible with had NO CALLERS. The plane-agreement
+ * invariant was demonstrated between the live writer and a reader nobody ran - which is
+ * an invariant about nothing. `buildRecallScopeFilter` is the same function the invariant
+ * tests use; this is what makes the proof bind.
+ *
+ * The scope filter is not optional and not reimplemented here. It owns the clauses that
+ * are dangerous to forget - lifecycle_status='active', the review whitelist, and a
+ * visibility default that excludes the personal plane - and it returns parameters rather
+ * than interpolated SQL.
+ */
+export async function performRecall(
+  deps: AgentMemoryDeps,
+  input: RecallInput,
+): Promise<RecallOutcome> {
+  if (!input.query?.trim()) throw new Error("recall requires a query");
+  const limit = Math.min(Math.max(1, input.limit ?? 8), RECALL_MAX_LIMIT);
+
+  // $1 is the query embedding, so the scope filter's placeholders start at $2.
+  const scope = buildRecallScopeFilter(input, 2);
+  const embedding = await deps.getEmbedding(input.query);
+
+  const client = await deps.pool.connect();
+  try {
+    const found = await client.queryObject(
+      `SELECT am.id, am.summary, am.content, am.memory_type, am.visibility,
+              am.review_status, am.can_use_as_evidence, am.can_use_as_instruction,
+              am.requires_user_confirmation,
+              1 - (t.embedding <=> $1::vector) AS similarity
+         FROM agent_memories am
+         JOIN thoughts t ON t.id = am.thought_id
+        WHERE ${scope.sql}
+        ORDER BY t.embedding <=> $1::vector
+        LIMIT ${limit}`,
+      [`[${embedding.join(",")}]`, ...scope.params],
+    );
+
+    const rows = found.rows as Array<Record<string, unknown>>;
+
+    // The trace is written even when nothing matched. An empty recall is the single most
+    // useful thing to have a record of - it is what "the plane is silently empty" looks
+    // like from the outside, and without a trace there is nothing to notice it by.
+    const trace = await client.queryObject(
+      `INSERT INTO agent_memory_recall_traces
+         (workspace_id, project_id, query, schema_version, request_payload, response_policy)
+       VALUES ($1, $2, $3, 'openbrain.agent_memory.recall.v1', $4::jsonb, $5::jsonb)
+       RETURNING id`,
+      [
+        input.workspace_id,
+        input.project_id ?? null,
+        input.query,
+        JSON.stringify({ limit, include_unconfirmed: !!input.includeUnconfirmed }),
+        JSON.stringify({ returned: rows.length }),
+      ],
+    );
+    const traceId = (trace.rows[0] as { id: string }).id;
+
+    const items: RecalledMemory[] = [];
+    let rank = 0;
+    for (const r of rows) {
+      rank++;
+      await client.queryObject(
+        `INSERT INTO agent_memory_recall_items
+           (trace_id, memory_id, rank, similarity, use_policy_snapshot)
+         VALUES ($1, $2, $3, $4, $5::jsonb)`,
+        [
+          traceId, r.id, rank, r.similarity,
+          JSON.stringify({
+            can_use_as_evidence: r.can_use_as_evidence,
+            can_use_as_instruction: r.can_use_as_instruction,
+            requires_user_confirmation: r.requires_user_confirmation,
+          }),
+        ],
+      );
+      items.push({
+        memory_id: String(r.id),
+        summary: String(r.summary),
+        content: String(r.content),
+        memory_type: String(r.memory_type),
+        visibility: r.visibility as Visibility,
+        review_status: r.review_status as ReviewStatus,
+        can_use_as_evidence: Boolean(r.can_use_as_evidence),
+        can_use_as_instruction: Boolean(r.can_use_as_instruction),
+        requires_user_confirmation: Boolean(r.requires_user_confirmation),
+        similarity: Number(r.similarity),
+      });
+    }
+    return { trace_id: traceId, items };
+  } finally {
+    client.release();
+  }
+}
+
 /**
  * Register the writeback tool and its REST twin.
  *
@@ -270,6 +395,41 @@ export function registerAgentMemory(server: any, app: any, deps: AgentMemoryDeps
       };
     },
   );
+
+  server.registerTool(
+    "agent_memory_recall",
+    {
+      title: "Recall governed memories",
+      description:
+        "Retrieve memories for a workspace, ranked by relevance to a query. Returns only ACTIVE memories that have passed review; each result states explicitly whether it may be used as evidence, whether it may direct behaviour, and whether it still needs human confirmation.",
+      inputSchema: {},
+    },
+    async (args: RecallInput) => {
+      const out = await performRecall(deps, args);
+      if (!out.items.length) {
+        return {
+          content: [{
+            type: "text",
+            text: "No memories matched that scope. (Unconfirmed memories are excluded by default - pass include_unconfirmed to see them.)",
+          }],
+        };
+      }
+      const lines = out.items.map((m, i) =>
+        `${i + 1}. [${m.memory_type}] ${m.summary}\n   ${m.content}\n   ` +
+        `use: evidence=${m.can_use_as_evidence} instruction=${m.can_use_as_instruction} ` +
+        `needs_confirmation=${m.requires_user_confirmation} (${m.review_status})`
+      );
+      return { content: [{ type: "text", text: lines.join("\n\n") }] };
+    },
+  );
+
+  // deno-lint-ignore no-explicit-any
+  app.post("/agent-memory/recall", async (c: any) => {
+    if (!deps.authed(c)) return c.json({ error: "unauthorized" }, 401);
+    const body = await c.req.json().catch(() => null);
+    if (!body) return c.json({ error: "invalid json" }, 400);
+    return c.json(await performRecall(deps, body as RecallInput));
+  });
 
   // deno-lint-ignore no-explicit-any
   app.post("/agent-memory/writeback", async (c: any) => {

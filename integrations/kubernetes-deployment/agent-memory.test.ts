@@ -9,13 +9,17 @@
 import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildWritebackRow,
+  performRecall,
   performWriteback,
+  RECALL_MAX_LIMIT,
   refusalMessage,
   type AgentMemoryDeps,
 } from "./agent-memory.ts";
 import {
+  buildRecallScopeFilter,
   DEFAULT_RECALL_STATUSES,
   defaultWritebackIsRecallable,
+  isRowRecallableBy,
   WRITEBACK_DEFAULTS,
 } from "./agent-memory-policy.ts";
 
@@ -208,6 +212,111 @@ Deno.test("a fresh write inserts and reports not-duplicate", async () => {
   assertEquals(seen.some((s) => s.includes("INSERT INTO thoughts")), true);
   assertEquals(seen.some((s) => s.includes("INSERT INTO agent_memories")), true);
   assertEquals(seen.some((s) => s.includes("INSERT INTO agent_memory_audit_events")), true);
+});
+
+// ── RECALL: the reader the invariant is proved against must be the one that ships ──
+// Before this existed, buildRecallScopeFilter had ZERO consumers: the write path was
+// deployed and the read path it was proved compatible with was called by nothing. An
+// invariant between a live writer and a reader nobody runs is an invariant about nothing.
+
+function recallDeps(rows: Array<Record<string, unknown>>) {
+  const seen: string[] = [];
+  const params: unknown[][] = [];
+  const deps = {
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (sql: string, args?: unknown[]) => {
+            seen.push(sql);
+            params.push(args ?? []);
+            if (sql.includes("FROM agent_memories am")) return Promise.resolve({ rows });
+            if (sql.includes("agent_memory_recall_traces")) {
+              return Promise.resolve({ rows: [{ id: "trace-1" }] });
+            }
+            return Promise.resolve({ rows: [] });
+          },
+          release: () => {},
+        }),
+    },
+    getEmbedding: () => Promise.resolve([0.1, 0.2]),
+    authed: () => true,
+  } as unknown as AgentMemoryDeps;
+  return { deps, seen, params };
+}
+
+const ROW = {
+  id: "m-1", summary: "s", content: "c", memory_type: "lesson",
+  visibility: "workspace", review_status: "evidence_only",
+  can_use_as_evidence: true, can_use_as_instruction: false,
+  requires_user_confirmation: true, similarity: 0.9,
+};
+
+Deno.test("SEAM: recall USES buildRecallScopeFilter, it does not restate it", async () => {
+  const { deps, seen } = recallDeps([ROW]);
+  await performRecall(deps, { workspace_id: "ws1", query: "anything" });
+  const select = seen.find((s) => s.includes("FROM agent_memories am"))!;
+  // The clauses the shared builder owns - the ones that are dangerous to forget.
+  const expected = buildRecallScopeFilter({ workspace_id: "ws1" }, 2);
+  assertEquals(select.includes(expected.sql), true, "recall must embed the shared filter verbatim");
+  assertEquals(select.includes("lifecycle_status = 'active'"), true);
+});
+
+Deno.test("SEAM: a default writeback is recalled by a default recall, end to end", async () => {
+  // Compose the two live paths rather than two constants: build the row the writer would
+  // insert, then assert the reader's own filter admits it.
+  const row = buildWritebackRow(INPUT);
+  assertEquals(
+    isRowRecallableBy(
+      {
+        workspace_id: row.workspace_id,
+        project_id: row.project_id,
+        visibility: row.visibility,
+        review_status: row.review_status,
+        lifecycle_status: row.lifecycle_status,
+      },
+      { workspace_id: row.workspace_id },
+    ),
+    true,
+  );
+});
+
+Deno.test("recall writes a trace EVEN WHEN nothing matched", async () => {
+  const { deps, seen } = recallDeps([]);
+  const out = await performRecall(deps, { workspace_id: "ws1", query: "nothing here" });
+  assertEquals(out.items.length, 0);
+  assertEquals(seen.some((s) => s.includes("agent_memory_recall_traces")), true);
+  // An empty recall is exactly what "the plane is silently empty" looks like from outside.
+  // Without a trace there is nothing to notice it by.
+});
+
+Deno.test("recall returns the use-policy explicitly, never left to inference", async () => {
+  const { deps } = recallDeps([ROW]);
+  const out = await performRecall(deps, { workspace_id: "ws1", query: "q" });
+  assertEquals(out.items[0].can_use_as_evidence, true);
+  assertEquals(out.items[0].can_use_as_instruction, false);
+  assertEquals(out.items[0].requires_user_confirmation, true);
+});
+
+Deno.test("recall parameterises the query embedding and every scope value", async () => {
+  const { deps, params } = recallDeps([ROW]);
+  await performRecall(deps, { workspace_id: "ws'; DROP TABLE agent_memories; --", query: "q" });
+  const selectParams = params.find((p) => p.length > 1)!;
+  assertEquals(String(selectParams[1]).includes("DROP TABLE"), true, "value is a PARAM…");
+  const { seen } = recallDeps([ROW]);
+  await performRecall(deps, { workspace_id: "ws1", query: "q" });
+  assertEquals(seen.every((s) => !s.includes("DROP TABLE")), true, "…never in the SQL text");
+});
+
+Deno.test("recall limit is clamped, so one call cannot drain the corpus", async () => {
+  const { deps, seen } = recallDeps([ROW]);
+  await performRecall(deps, { workspace_id: "ws1", query: "q", limit: 9999 });
+  const select = seen.find((s) => s.includes("FROM agent_memories am"))!;
+  assertEquals(select.includes(`LIMIT ${RECALL_MAX_LIMIT}`), true);
+});
+
+Deno.test("a recall without a query is refused", async () => {
+  const { deps } = recallDeps([ROW]);
+  await assertRejects(() => performRecall(deps, { workspace_id: "ws1", query: "  " }));
 });
 
 Deno.test("a pool failure propagates rather than reporting success", async () => {
