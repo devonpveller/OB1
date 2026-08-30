@@ -13,6 +13,9 @@
  * invariant would leak after being proved.
  */
 import {
+  DEFAULT_RECALL_EXPOSURES,
+  stampExposure,
+  detectPii,
   buildRecallScopeFilter,
   detectUnsafeContent,
   type RecallScope,
@@ -20,6 +23,7 @@ import {
   type UnsafeReason,
   type Visibility,
   WRITEBACK_DEFAULTS,
+  type Exposure,
 } from "./agent-memory-policy.ts";
 
 export interface WritebackInput {
@@ -33,6 +37,13 @@ export interface WritebackInput {
   visibility?: Visibility;
   idempotency_key?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * §1.1 taint signal, supplied by the CALLING RUNTIME (the orchestrator knows whether the
+   * effort consumed advisor output or a personal-plane goal). It can only ever demote -
+   * `stampExposure` has no path that widens - so a caller lying about it makes its own
+   * memory narrower, never wider.
+   */
+  tainted?: boolean;
 }
 
 /** The row this path inserts into agent_memories. */
@@ -46,11 +57,14 @@ export interface WritebackRow {
   memory_type: string;
   visibility: Visibility;
   review_status: ReviewStatus;
+  confidence: number;
   lifecycle_status: string;
   provenance_status: string;
   can_use_as_evidence: boolean;
   requires_user_confirmation: boolean;
   idempotency_key: string | null;
+  /** §1.1. Also written into metadata.exposure, which is what SQL filters on. */
+  exposure: Exposure;
   metadata: Record<string, unknown>;
 }
 
@@ -69,7 +83,14 @@ export interface WritebackRow {
 export function buildWritebackRow(
   input: WritebackInput,
   overrides: Partial<Pick<WritebackRow, "review_status">> = {},
+  door: { exposure?: Exposure; tainted?: boolean } = {},
 ): WritebackRow {
+  // §1.1 - stamped HERE, from the door, never taken from the caller. PII in the content
+  // demotes as well: the rule is that detection narrows the plane, it does not refuse.
+  const exposure = stampExposure(door.exposure ?? WRITEBACK_DEFAULTS.exposure, {
+    tainted: door.tainted,
+    piiDetected: detectPii(input.content ?? ""),
+  });
   if (!input.workspace_id?.trim()) throw new Error("workspace_id is required");
   if (!input.summary?.trim()) throw new Error("summary is required");
   if (!input.content?.trim()) throw new Error("content is required");
@@ -94,12 +115,17 @@ export function buildWritebackRow(
     visibility: input.visibility ??
       (input.project_id ? WRITEBACK_DEFAULTS.visibility : "workspace"),
     review_status: overrides.review_status ?? WRITEBACK_DEFAULTS.review_status,
+    confidence: WRITEBACK_DEFAULTS.confidence,
     lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
     provenance_status: WRITEBACK_DEFAULTS.provenance_status,
     can_use_as_evidence: WRITEBACK_DEFAULTS.can_use_as_evidence,
     requires_user_confirmation: WRITEBACK_DEFAULTS.requires_user_confirmation,
     idempotency_key: input.idempotency_key ?? null,
-    metadata: input.metadata ?? {},
+    exposure,
+    // metadata.exposure is the column the recall filter reads. Written from the STAMPED
+    // value, never from `input.metadata`, so a caller cannot smuggle one in by supplying
+    // its own metadata blob - the spread happens first and is then overwritten.
+    metadata: { ...(input.metadata ?? {}), exposure },
   };
 }
 
@@ -122,6 +148,15 @@ export function refusalMessage(reason: UnsafeReason | "invalid"): string {
 }
 
 export interface AgentMemoryDeps {
+  /**
+   * §1.1: the exposure this DOOR forces on everything written through it.
+   *
+   * A property of the door, not of the request - the internal lane stamps per the taint
+   * rule, the ops door forces 'ops', and an OWUI-facing surface forces 'personal'.
+   * Defaults to 'personal' when a door does not say, because the safe end of the axis is
+   * the one you get by forgetting.
+   */
+  doorExposure?: Exposure;
   /** Anything with the ResilientPool `connect()`/`release()` contract from index.ts. */
   pool: {
     connect: () => Promise<{
@@ -145,7 +180,15 @@ export async function performWriteback(
 ): Promise<WritebackOutcome> {
   let row: WritebackRow;
   try {
-    row = buildWritebackRow(input);
+    // The DOOR is threaded here - this is the only place the write path learns which plane
+    // it is on. An earlier edit targeted `const row = ...`, which is not what this line
+    // says, so the replacement silently did nothing and every memory was stamped with the
+    // default 'personal' while the door said 'ops'. The smoke script caught it because it
+    // asserts the stamped value in the DATABASE, not the code that computes it.
+    row = buildWritebackRow(input, {}, {
+      exposure: deps.doorExposure,
+      tainted: input.tainted === true,
+    });
   } catch (e) {
     return { ok: false, refused: "invalid", message: (e as Error).message };
   }
@@ -195,7 +238,16 @@ export async function performWriteback(
       [
         row.content,
         `[${embedding.join(",")}]`,
-        JSON.stringify({ source: "agent-memory", workspace_id: row.workspace_id }),
+        // §1.1: the exposure label is MIRRORED onto the thought, so the generic
+        // search_thoughts lane enforces the same boundary as the agent-memory recall. A
+        // memory whose thought was readable through another lane would make the whole
+        // gate decorative. No `share:'cloud'` label, per §1 - the cloud gateway's forced
+        // share=cloud read filter therefore excludes these automatically.
+        JSON.stringify({
+          source: "agent-memory",
+          workspace_id: row.workspace_id,
+          exposure: row.exposure,
+        }),
       ],
     );
     const thoughtId = (thought.rows[0] as { id: number }).id;
@@ -243,6 +295,14 @@ export async function performWriteback(
 export interface RecallInput extends RecallScope {
   query: string;
   limit?: number;
+  /**
+   * WIRE SPELLING. RecallScope names this `includeUnconfirmed`, but the tool schema, the
+   * REST twin and the plan all say `include_unconfirmed` - so a caller sending the
+   * documented parameter set a field nothing read, and the opt-in was UNREACHABLE through
+   * either door. The tool's own "pass include_unconfirmed to see them" message described a
+   * parameter that did nothing. Both spellings are accepted at the boundary now.
+   */
+  include_unconfirmed?: boolean;
 }
 
 export interface RecalledMemory {
@@ -257,6 +317,8 @@ export interface RecalledMemory {
   can_use_as_instruction: boolean;
   requires_user_confirmation: boolean;
   similarity: number;
+  /** §1.1 plane this memory was written on. */
+  exposure: string;
 }
 
 export interface RecallOutcome {
@@ -285,11 +347,23 @@ export async function performRecall(
   deps: AgentMemoryDeps,
   input: RecallInput,
 ): Promise<RecallOutcome> {
+  // NORMALISE THE WIRE SPELLING, and FORCE THE EXPOSURE PLANE FROM THE DOOR.
+  //
+  // §1.1: reads are forced by the door, exactly as writes are stamped by it. A caller that
+  // could pass `exposure: ['personal']` would read across the boundary the write side is
+  // built to maintain, which would make the whole invariant decorative. The caller's value
+  // is dropped rather than merged - merging would let it widen.
+  const scope: RecallScope = {
+    ...input,
+    exposure: deps.doorExposure ? [deps.doorExposure] : DEFAULT_RECALL_EXPOSURES,
+    includeUnconfirmed: input.includeUnconfirmed ?? input.include_unconfirmed ?? false,
+  };
+
   if (!input.query?.trim()) throw new Error("recall requires a query");
   const limit = Math.min(Math.max(1, input.limit ?? 8), RECALL_MAX_LIMIT);
 
   // $1 is the query embedding, so the scope filter's placeholders start at $2.
-  const scope = buildRecallScopeFilter(input, 2);
+  const filter = buildRecallScopeFilter(scope, 2);
   const embedding = await deps.getEmbedding(input.query);
 
   const client = await deps.pool.connect();
@@ -297,14 +371,15 @@ export async function performRecall(
     const found = await client.queryObject(
       `SELECT am.id, am.summary, am.content, am.memory_type, am.visibility,
               am.review_status, am.can_use_as_evidence, am.can_use_as_instruction,
+              COALESCE(am.metadata->>'exposure', 'personal') AS exposure,
               am.requires_user_confirmation,
               1 - (t.embedding <=> $1::vector) AS similarity
          FROM agent_memories am
          JOIN thoughts t ON t.id = am.thought_id
-        WHERE ${scope.sql}
+        WHERE ${filter.sql}
         ORDER BY t.embedding <=> $1::vector
         LIMIT ${limit}`,
-      [`[${embedding.join(",")}]`, ...scope.params],
+      [`[${embedding.join(",")}]`, ...filter.params],
     );
 
     const rows = found.rows as Array<Record<string, unknown>>;
@@ -321,7 +396,7 @@ export async function performRecall(
         input.workspace_id,
         input.project_id ?? null,
         input.query,
-        JSON.stringify({ limit, include_unconfirmed: !!input.includeUnconfirmed }),
+        JSON.stringify({ limit, include_unconfirmed: !!scope.includeUnconfirmed }),
         JSON.stringify({ returned: rows.length }),
       ],
     );
@@ -351,6 +426,7 @@ export async function performRecall(
         memory_type: String(r.memory_type),
         visibility: r.visibility as Visibility,
         review_status: r.review_status as ReviewStatus,
+        exposure: String(r.exposure ?? "personal"),
         can_use_as_evidence: Boolean(r.can_use_as_evidence),
         can_use_as_instruction: Boolean(r.can_use_as_instruction),
         requires_user_confirmation: Boolean(r.requires_user_confirmation),

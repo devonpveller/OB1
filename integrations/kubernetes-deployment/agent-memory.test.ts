@@ -17,6 +17,8 @@ import {
 } from "./agent-memory.ts";
 import {
   buildRecallScopeFilter,
+  DEFAULT_RECALL_EXPOSURES,
+  type Exposure,
   DEFAULT_RECALL_STATUSES,
   defaultWritebackIsRecallable,
   isRowRecallableBy,
@@ -50,19 +52,31 @@ Deno.test("SEAM: the built row derives its policy fields from WRITEBACK_DEFAULTS
   assertEquals(row.requires_user_confirmation, WRITEBACK_DEFAULTS.requires_user_confirmation);
 });
 
-Deno.test("SEAM: a default-built row is recallable by the default gate", () => {
-  // The invariant re-asserted at the layer that actually writes, not just where it was
-  // declared. This is the end-to-end form of the policy module's first test.
-  const row = buildWritebackRow(INPUT);
-  assertEquals(defaultWritebackIsRecallable(row, DEFAULT_RECALL_STATUSES), true);
+Deno.test("SEAM: the built row's EXPOSURE is one a default recall returns", () => {
+  // PLAN §1.3 states the invariant over visibility/exposure, and this is its end-to-end
+  // form: the row the writer actually builds, through an ops door, lands on a plane the
+  // default recall reads. (Its review_status deliberately does NOT - see below.)
+  const row = buildWritebackRow(INPUT, {}, { exposure: "ops" });
+  assertEquals(row.exposure, "ops");
+  assertEquals(DEFAULT_RECALL_EXPOSURES.includes(row.exposure), true);
 });
 
-Deno.test("SEAM test can FAIL - forcing the column default breaks recallability", () => {
-  // RED proof. 'pending' is what agent_memories.review_status defaults to; if this path
-  // ever stops setting it, this is the row it produces and the default recall would never
-  // return it. The assertion above must be able to catch that.
-  const broken = buildWritebackRow(INPUT, { review_status: "pending" });
-  assertEquals(defaultWritebackIsRecallable(broken, DEFAULT_RECALL_STATUSES), false);
+Deno.test("SEAM test can FAIL - a tainted write lands off the default recall plane", () => {
+  // RED proof for the invariant above, and the Hermes shape the plan names: the write side
+  // puts the memory on the personal plane while the default recall scope drops it. Writes
+  // succeed, recall returns nothing, nothing errors.
+  const tainted = buildWritebackRow(INPUT, {}, { exposure: "ops", tainted: true });
+  assertEquals(tainted.exposure, "personal");
+  assertEquals(DEFAULT_RECALL_EXPOSURES.includes(tainted.exposure), false);
+});
+
+Deno.test("SEAM: the built row is review-gated, and that is deliberate", () => {
+  // §1 locks review_status='pending'. An earlier version of this file asserted the
+  // opposite - that a fresh write is immediately recallable - and the write default had
+  // been changed to 'evidence_only' to make it true. That removed the review door.
+  const row = buildWritebackRow(INPUT);
+  assertEquals(row.review_status, "pending");
+  assertEquals(defaultWritebackIsRecallable(row, DEFAULT_RECALL_STATUSES), false);
 });
 
 Deno.test("instruction-grade is not reachable from the write path", () => {
@@ -251,6 +265,64 @@ const ROW = {
   requires_user_confirmation: true, similarity: 0.9,
 };
 
+Deno.test("SEAM: performWriteback THREADS THE DOOR - not just buildWritebackRow", async () => {
+  // The gap this closes cost a full smoke run. The door was wired into buildWritebackRow
+  // and the unit tests passed, because they call that function directly and pass the door
+  // themselves. The CALL SITE inside performWriteback was never updated - an edit targeted
+  // `const row = ...` where the line reads `row = ...` - so every memory shipped stamped
+  // 'personal' while the door said 'ops'. Testing the function a caller uses is not the
+  // same as testing the caller.
+  const seen: unknown[][] = [];
+  const deps = {
+    doorExposure: "ops" as Exposure,
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (sql: string, args?: unknown[]) => {
+            seen.push([sql, ...(args ?? [])]);
+            if (sql.includes("INSERT INTO thoughts")) return Promise.resolve({ rows: [{ id: 1 }] });
+            return Promise.resolve({ rows: [{ id: "m-1", thought_id: 1 }] });
+          },
+          release: () => {},
+        }),
+    },
+    getEmbedding: () => Promise.resolve([0.1]),
+  } as unknown as AgentMemoryDeps;
+
+  await performWriteback(deps, { ...INPUT, project_id: "p1" });
+
+  const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"))!;
+  const metadata = JSON.parse(String(insert[insert.length - 1]));
+  assertEquals(metadata.exposure, "ops", "the door's plane must reach the inserted row");
+
+  // And the thought carries the mirror, or another lane could read what this one hides.
+  const thought = seen.find((r) => String(r[0]).includes("INSERT INTO thoughts"))!;
+  assertEquals(JSON.parse(String(thought[3])).exposure, "ops");
+});
+
+Deno.test("SEAM: a tainted write is demoted at the call site too", async () => {
+  const seen: unknown[][] = [];
+  const deps = {
+    doorExposure: "ops" as Exposure,
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (sql: string, args?: unknown[]) => {
+            seen.push([sql, ...(args ?? [])]);
+            if (sql.includes("INSERT INTO thoughts")) return Promise.resolve({ rows: [{ id: 1 }] });
+            return Promise.resolve({ rows: [{ id: "m-1", thought_id: 1 }] });
+          },
+          release: () => {},
+        }),
+    },
+    getEmbedding: () => Promise.resolve([0.1]),
+  } as unknown as AgentMemoryDeps;
+
+  await performWriteback(deps, { ...INPUT, project_id: "p1", tainted: true });
+  const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"))!;
+  assertEquals(JSON.parse(String(insert[insert.length - 1])).exposure, "personal");
+});
+
 Deno.test("SEAM: recall USES buildRecallScopeFilter, it does not restate it", async () => {
   const { deps, seen } = recallDeps([ROW]);
   await performRecall(deps, { workspace_id: "ws1", query: "anything" });
@@ -261,18 +333,21 @@ Deno.test("SEAM: recall USES buildRecallScopeFilter, it does not restate it", as
   assertEquals(select.includes("lifecycle_status = 'active'"), true);
 });
 
-Deno.test("SEAM: a default writeback is recalled by a default recall, end to end", async () => {
+Deno.test("SEAM: a reviewed writeback is recalled by a default recall, end to end", async () => {
   // Compose the two live paths rather than two constants: build the row the writer would
-  // insert, then assert the reader's own filter admits it.
-  const row = buildWritebackRow(INPUT);
+  // insert, promote it the way the review door does, then assert the reader's own filter
+  // admits it. Every discriminating column is carried across, exposure included - the
+  // column the earlier version of this test could not see.
+  const row = buildWritebackRow(INPUT, {}, { exposure: "ops" });
   assertEquals(
     isRowRecallableBy(
       {
         workspace_id: row.workspace_id,
         project_id: row.project_id,
         visibility: row.visibility,
-        review_status: row.review_status,
+        review_status: "confirmed",
         lifecycle_status: row.lifecycle_status,
+        exposure: row.exposure as Exposure,
       },
       { workspace_id: row.workspace_id },
     ),

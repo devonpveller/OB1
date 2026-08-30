@@ -2057,6 +2057,15 @@ registerAgentMemory(server, app, {
   pool,
   getEmbedding,
   authed: (c) => researchAuthed(c as Parameters<typeof researchAuthed>[0]),
+  // §1.1 door table: the INTERNAL lane (containers - agent-bridge, OB1 services) is
+  // first-party and stamps exposure PER THE TAINT RULE. So the door's plane is 'ops', and
+  // stampExposure demotes to 'personal' when the calling runtime reports taint or when the
+  // content trips the PII heuristic. A writer cannot widen past this value; the only paths
+  // out of it go narrower.
+  //
+  // The cloud door (:8061) is unaffected: it is default-deny and the agent-memory tools are
+  // not on its allowlist. The ops door is a separate instance with its own forced value.
+  doorExposure: "ops",
 });
 
 // --- MCP catch-all with Auth Check ---

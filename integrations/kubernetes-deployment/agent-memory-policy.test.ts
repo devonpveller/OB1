@@ -8,6 +8,10 @@
 import { assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildRecallScopeFilter,
+  DEFAULT_RECALL_EXPOSURES,
+  detectPii,
+  stampExposure,
+  type Exposure,
   DEFAULT_RECALL_STATUSES,
   defaultWritebackIsRecallable,
   detectUnsafeContent,
@@ -19,55 +23,115 @@ import {
   WRITEBACK_DEFAULTS,
 } from "./agent-memory-policy.ts";
 
-// ── THE PLANE-AGREEMENT INVARIANT ────────────────────────────────────────────
-// Written before the tools exist, per the memory-plane plan. The failure it guards: the
-// write side and the read side each look correct alone and disagree in combination, so a
-// memory is written, nothing errors, and the default recall never returns it. Locally
-// that trap is one line wide - the DB default for review_status is 'pending', which the
-// default gate excludes - and a second instance (visibility 'project' with a NULL
-// project_id) was found the same way. Both were reproduced against a real database.
+// ── THE PLANE-AGREEMENT INVARIANT, AS THE PLAN STATES IT ─────────────────────
+// memory-plane PLAN §1.3: "the default writeback VISIBILITY/EXPOSURE must be provably
+// returned by the default recall scope". The failure it guards is silent - write and read
+// each look correct alone and disagree in combination, so a memory is written, nothing
+// errors, and the default recall never returns it.
+//
+// AN EARLIER VERSION OF THIS FILE STATED THE INVARIANT OVER review_status INSTEAD, and to
+// make that version pass, the write default was changed from the plan's locked 'pending'
+// to 'evidence_only' - which silently removed the review gate: every agent write became
+// immediately recallable. The test had been satisfied by bending its subject. The
+// invariant below is the plan's, and the review-gate behaviour it used to paper over is
+// now asserted directly, in the opposite direction.
 
-Deno.test("INVARIANT: a default writeback is returned by the default recall", () => {
-  // Composed, not asserted separately: checking "defaults are evidence_only" and "gate
-  // includes evidence_only" in two tests would let a future edit change both and keep
-  // them green while the plane broke.
-  assertEquals(defaultWritebackIsRecallable(), true);
+const OPS_ROW = {
+  workspace_id: "ws1",
+  project_id: "p1",
+  visibility: WRITEBACK_DEFAULTS.visibility,
+  review_status: "confirmed" as ReviewStatus,
+  lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
+  exposure: "ops" as Exposure,
+};
+
+Deno.test("INVARIANT: a default-visibility ops memory IS returned by a default recall", () => {
+  assertEquals(isRowRecallableBy(OPS_ROW, { workspace_id: "ws1", project_id: "p1" }), true);
 });
 
-Deno.test("INVARIANT test can FAIL - the DB default would break the plane", () => {
-  // Proof the invariant is load-bearing rather than tautological. 'pending' is what the
-  // COLUMN defaults to; if writeback ever stops setting review_status explicitly, this is
-  // the state it lands in, and the default recall would never return it.
-  const asIfColumnDefaultApplied = { review_status: "pending" as ReviewStatus };
-  assertEquals(defaultWritebackIsRecallable(asIfColumnDefaultApplied), false);
+Deno.test("INVARIANT test can FAIL - a personal-plane memory is NOT returned by default", () => {
+  // The Hermes shape, and the one the plan names: write defaults to the personal plane
+  // while the default recall scope drops it. Writes succeed, recall returns nothing, and
+  // nothing errors. This is the RED proof that the invariant above is load-bearing.
+  const personal = { ...OPS_ROW, exposure: "personal" as Exposure };
+  assertEquals(isRowRecallableBy(personal, { workspace_id: "ws1", project_id: "p1" }), false);
 });
 
-Deno.test("INVARIANT: the WHOLE row is recallable, not just its review_status", () => {
-  // The one-column check above missed a real hole: the defaults said
-  // visibility:'project' while project_id stayed NULL, so a project-scoped recall matched
-  // nothing. Compose every discriminating column, or the invariant only guards the column
-  // someone happened to think of.
-  const row = {
-    workspace_id: "ws1",
-    project_id: "p1",
-    visibility: WRITEBACK_DEFAULTS.visibility,
-    review_status: WRITEBACK_DEFAULTS.review_status,
-    lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
-  };
-  assertEquals(isRowRecallableBy(row, { workspace_id: "ws1" }), true);
-  assertEquals(isRowRecallableBy(row, { workspace_id: "ws1", project_id: "p1" }), true);
-});
-
-Deno.test("INVARIANT test can FAIL - project-visible with no project is unreachable", () => {
-  // The exact shape that shipped: RED proof that the widened invariant sees it.
-  const orphan = {
-    workspace_id: "ws1",
-    project_id: null,
-    visibility: "project" as const,
-    review_status: WRITEBACK_DEFAULTS.review_status,
-    lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
-  };
+Deno.test("INVARIANT: the WHOLE row is recallable, not just one column", () => {
+  // Compose every discriminating column, or the invariant only guards the one someone
+  // happened to think of. That is not hypothetical: checking review_status alone missed
+  // visibility 'project' with a NULL project_id, and could not see exposure at all.
+  assertEquals(isRowRecallableBy(OPS_ROW, { workspace_id: "ws1" }), true);
+  const orphan = { ...OPS_ROW, project_id: null, visibility: "project" as const };
   assertEquals(isRowRecallableBy(orphan, { workspace_id: "ws1", project_id: "p1" }), false);
+});
+
+// ── the review gate is REAL, and the defaults sit outside it ─────────────────
+Deno.test("§1: the locked write default is 'pending', NOT 'evidence_only'", () => {
+  // The regression guard for the correction described above. If this ever reads
+  // 'evidence_only' again, every agent write is recallable the moment it is made and the
+  // review door has been removed without anyone deciding to remove it.
+  assertEquals(WRITEBACK_DEFAULTS.review_status, "pending");
+});
+
+Deno.test("a default writeback is NOT returned by a conservative recall", () => {
+  // PLAN §1.3: "conservative recall returns nothing pending". This is the assertion the
+  // old invariant made impossible - it required the opposite.
+  const fresh = { ...OPS_ROW, review_status: WRITEBACK_DEFAULTS.review_status };
+  assertEquals(isRowRecallableBy(fresh, { workspace_id: "ws1" }), false);
+});
+
+Deno.test("include_unconfirmed DOES return it - the memory is reachable, just not by default", () => {
+  const fresh = { ...OPS_ROW, review_status: WRITEBACK_DEFAULTS.review_status };
+  assertEquals(
+    isRowRecallableBy(fresh, { workspace_id: "ws1", includeUnconfirmed: true }),
+    true,
+  );
+});
+
+// ── §1.1 exposure: stamped at doors, demoted mechanically ────────────────────
+Deno.test("§1.1: a writer cannot widen its own exposure", () => {
+  // The invariant is "access bounds writes", enforced mechanically and never by model
+  // self-restraint. There is no argument to stampExposure that widens, so the only way a
+  // memory reaches the ops plane is a door that was configured to put it there.
+  assertEquals(stampExposure("personal"), "personal");
+  assertEquals(stampExposure("personal", { tainted: false, piiDetected: false }), "personal");
+  assertEquals(stampExposure("ops"), "ops");
+});
+
+Deno.test("§1.1: taint demotes an ops door to personal", () => {
+  // An agent-org effort is ops-clean by construction UNLESS it consumed Tier-2 advisor
+  // output (that corpus includes gmail-derived, personal-plane sources) or its goal came
+  // from a personal-plane surface.
+  assertEquals(stampExposure("ops", { tainted: true }), "personal");
+});
+
+Deno.test("§1.1: detected PII demotes, and NEVER rejects", () => {
+  assertEquals(stampExposure("ops", { piiDetected: true }), "personal");
+  // And it is not part of the store/refuse decision - conflating them would turn a
+  // demotion into a refusal, and code is full of email-shaped strings.
+  assertEquals(detectUnsafeContent("mail me at someone@example.com"), null);
+});
+
+Deno.test("PII detection fires on the shapes it claims and not on ordinary prose", () => {
+  assertEquals(detectPii("reach me at someone@example.com"), true);
+  assertEquals(detectPii("call 555-867-5309 tomorrow"), true);
+  assertEquals(detectPii("the drain stalls when the planner churns"), false);
+  assertEquals(detectPii("see PLAN.md section 1.1 for the invariant"), false);
+});
+
+Deno.test("the default recall exposure is the OPS plane only", () => {
+  assertEquals(DEFAULT_RECALL_EXPOSURES, ["ops"]);
+  const f = buildRecallScopeFilter({ workspace_id: "w1" });
+  assertEquals(f.params.some((x) => Array.isArray(x) && x.length === 1 && x[0] === "ops"), true);
+});
+
+Deno.test("the SQL reads exposure out of metadata, defaulting to the SAFE end", () => {
+  // A row written before exposure shipped has no metadata.exposure. COALESCE makes it
+  // 'personal' - excluded by default - rather than NULL, which would drop out of `= ANY`
+  // for a reason nobody could see.
+  const f = buildRecallScopeFilter({ workspace_id: "w1" });
+  assertEquals(f.sql.includes("COALESCE(am.metadata->>'exposure', 'personal')"), true);
 });
 
 Deno.test("a superseded row is never recallable, whatever its review_status", () => {
@@ -77,6 +141,7 @@ Deno.test("a superseded row is never recallable, whatever its review_status", ()
     visibility: "workspace" as const,
     review_status: "confirmed" as ReviewStatus,
     lifecycle_status: "superseded",
+    exposure: "ops" as Exposure,
   };
   assertEquals(isRowRecallableBy(stale, { workspace_id: "ws1" }), false);
 });
@@ -86,8 +151,9 @@ Deno.test("personal memories are not reachable by a default recall", () => {
     workspace_id: "ws1",
     project_id: null,
     visibility: "personal" as const,
-    review_status: WRITEBACK_DEFAULTS.review_status,
+    review_status: "confirmed" as ReviewStatus,
     lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
+    exposure: "ops" as Exposure,
   };
   assertEquals(isRowRecallableBy(personal, { workspace_id: "ws1" }), false);
 });
@@ -96,13 +162,13 @@ Deno.test("the predicate agrees with the SQL builder on which columns it filters
   // If the SQL grows a clause the predicate does not mirror, the invariant quietly stops
   // covering it - which is how the visibility hole survived. Cheap structural pin.
   const f = buildRecallScopeFilter({ workspace_id: "ws1", project_id: "p1" });
-  for (const col of ["workspace_id", "project_id", "visibility", "lifecycle_status", "review_status"]) {
+  for (const col of ["workspace_id", "project_id", "visibility", "exposure", "lifecycle_status", "review_status"]) {
     assertEquals(f.sql.includes(col), true, `SQL must still filter ${col}`);
   }
 });
 
 Deno.test("writeback defaults are evidence, never instruction", () => {
-  assertEquals(WRITEBACK_DEFAULTS.review_status, "evidence_only");
+  assertEquals(WRITEBACK_DEFAULTS.review_status, "pending");
   assertEquals(WRITEBACK_DEFAULTS.can_use_as_evidence, true);
   assertEquals(WRITEBACK_DEFAULTS.requires_user_confirmation, true);
   // Instruction-grade must be impossible to mint from this side; the schema CHECK is the

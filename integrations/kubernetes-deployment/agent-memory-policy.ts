@@ -5,28 +5,28 @@
  * can be tested without a stack - and so the two sides of the plane can be checked
  * AGAINST EACH OTHER rather than each on its own.
  *
- * THE FAILURE THIS MODULE EXISTS TO PREVENT, stated from what is verifiable HERE.
+ * THE INVARIANT THIS MODULE ENFORCES, from the memory-plane plan (canonical copy in the
+ * sibling plans repo; in-repo pointer at
+ * documentation/implementation-guide/agent-memory-plane/PLAN.md):
  *
- * The write side and the read side each look correct alone and disagree in combination:
- * a memory is written, no error is raised, and the default recall never returns it. The
- * plane reports healthy and holds nothing retrievable. Two instances of that were found
- * in this codebase, both by executing a query rather than by reading the code:
+ *   §1.1 ACCESS BOUNDS WRITES (DECIDED, operator 2026-08-25, BINDING):
+ *   a record's maximum exposure equals the access plane of the context that wrote it. A
+ *   writer can never produce a memory more widely visible than the narrowest data plane it
+ *   could read. Enforced mechanically - NEVER by model self-restraint.
  *
- *   1. The DATABASE default for `review_status` is 'pending'
- *      (schemas/agent-memory/schema.sql), while the default recall gate admits only
- *      'confirmed' and 'evidence_only'. A writeback that lets the column default apply
- *      produces a memory the default recall can never return.
- *   2. The defaults set `visibility: 'project'` while leaving `project_id` NULL, so a
- *      project-scoped recall (`am.project_id = $n`) matched nothing.
+ *   §1.3 PLANE AGREEMENT: the default writeback's VISIBILITY/EXPOSURE must be provably
+ *   returned by the default recall scope. The failure it guards is silent: the write side
+ *   and the read side each look correct alone and disagree in combination, so a memory is
+ *   written, nothing errors, and the default recall never returns it.
  *
- * So WRITEBACK_DEFAULTS sets review_status EXPLICITLY, a row cannot claim project
- * visibility without a project, and `isRowRecallableBy()` composes the two sides over
- * every discriminating column - the invariant is a test rather than a comment.
- *
- * (The memory-plane plan attributes this failure mode to an upstream `hermes-agent-memory`
- * integration. That package is NOT vendored in this repo and the claim was never verified
- * here; it is recorded as provenance for the idea, not as evidence. The two instances
- * above are local and were reproduced.)
+ * A CORRECTION IS BAKED INTO THIS FILE. An earlier version of it stated the invariant over
+ * `review_status` instead of visibility/exposure, and then - to make that version pass -
+ * changed the write default from the plan's locked `pending` to `evidence_only`. That
+ * inverted the governance posture: every agent write became immediately recallable instead
+ * of waiting for a human. The subject under test had been bent to fit the test. The
+ * defaults below are §1's, unmodified, and `pending` deliberately sits OUTSIDE the default
+ * recall gate - a memory nobody has reviewed is not returned until someone asks for it with
+ * `include_unconfirmed`.
  */
 
 /** review_status values the schema permits. */
@@ -38,6 +38,16 @@ export type ReviewStatus =
   | "rejected"
   | "stale"
   | "merged";
+
+/**
+ * §1.1 exposure classes. NOT a caller field - see `stampExposure`.
+ *
+ *   ops      - the writing context had NO personal-plane inputs: agent-org efforts that
+ *              never consumed Tier-2 advisor output, little-coder, claude-sessions rollups.
+ *   personal - the writing context COULD read personal-plane data: OWUI assistant surfaces,
+ *              tainted efforts.
+ */
+export type Exposure = "ops" | "personal";
 
 export type Visibility =
   | "personal"
@@ -57,12 +67,49 @@ export type Visibility =
  */
 export const WRITEBACK_DEFAULTS = Object.freeze({
   visibility: "project" as Visibility,
-  review_status: "evidence_only" as ReviewStatus,
+  // §1, LOCKED: 'pending'. Not 'evidence_only' - see the correction in the module header.
+  // A memory no human has looked at is not recallable by default; that is the point of the
+  // review door, and writing 'evidence_only' here quietly removed it.
+  review_status: "pending" as ReviewStatus,
   lifecycle_status: "active" as const,
   provenance_status: "generated" as const,
   can_use_as_evidence: true,
   requires_user_confirmation: true,
+  // §1: confidence <= 0.6 for anything an agent writes unprompted.
+  confidence: 0.5,
+  // The SAFE end of the exposure axis. A writer that says nothing gets the narrowest
+  // plane, never the widest - the door overrides this with its own forced value.
+  exposure: "personal" as Exposure,
 });
+
+/** Exposure classes a recall returns when the caller does not narrow it. */
+export const DEFAULT_RECALL_EXPOSURES: readonly Exposure[] = Object.freeze(["ops"]);
+
+/**
+ * §1.1: LANE STAMPING HAPPENS AT DOORS, NOT BY WRITERS.
+ *
+ * The exposure of a memory is a property of the CONTEXT THAT WROTE IT, and a writer is
+ * exactly the party that cannot be trusted to report it - a compromised or confused agent
+ * would simply claim `ops`. So the caller's value is ignored, and the door supplies the
+ * forced value it was configured with.
+ *
+ * `tainted` is the mechanical demotion rule: an agent-org effort is ops-clean by
+ * construction UNLESS it consumed Tier-2 advisor output (that corpus includes
+ * personal-plane, gmail-derived sources) or its goal text came from a personal-plane
+ * surface. The orchestrator knows both; this function does not guess.
+ *
+ * Demotion only. There is no argument that widens exposure, because widening is a human
+ * decision and lives behind the review door's `promote_exposure` action.
+ */
+export function stampExposure(
+  doorExposure: Exposure,
+  opts: { tainted?: boolean; piiDetected?: boolean } = {},
+): Exposure {
+  if (doorExposure === "personal") return "personal";
+  if (opts.tainted) return "personal";
+  if (opts.piiDetected) return "personal";
+  return "ops";
+}
 
 /** Statuses the CONSERVATIVE (default) recall admits. */
 export const DEFAULT_RECALL_STATUSES: readonly ReviewStatus[] = Object.freeze([
@@ -111,6 +158,8 @@ export interface RecallableRow {
   visibility: Visibility;
   review_status: ReviewStatus;
   lifecycle_status: string;
+  /** §1.1. Stored in agent_memories.metadata->>'exposure'. */
+  exposure: Exposure;
 }
 
 /**
@@ -135,6 +184,11 @@ export function isRowRecallableBy(row: RecallableRow, scope: RecallScope): boole
     ? scope.visibility
     : (["project", "workspace", "organization"] as Visibility[]);
   if (!visibility.includes(row.visibility)) return false;
+  // §1.1, and the half the earlier version of this predicate could not see at all.
+  const exposure = scope.exposure && scope.exposure.length
+    ? scope.exposure
+    : DEFAULT_RECALL_EXPOSURES;
+  if (!exposure.includes(row.exposure)) return false;
   if (row.lifecycle_status !== "active") return false;
   return recallReviewStatuses(scope.includeUnconfirmed).includes(row.review_status);
 }
@@ -143,6 +197,8 @@ export interface RecallScope {
   workspace_id: string;
   project_id?: string | null;
   visibility?: readonly Visibility[];
+  /** §1.1. Omitted = the ops plane only. A door forces this; callers do not widen it. */
+  exposure?: readonly Exposure[];
   includeUnconfirmed?: boolean;
 }
 
@@ -190,12 +246,46 @@ export function buildRecallScopeFilter(scope: RecallScope, startIndex = 1): SqlF
   clauses.push(`am.visibility = ANY($${i++})`);
   params.push(visibility);
 
+  // §1.1 exposure gate. Lives in metadata (JSONB) because the schema is vendored verbatim
+  // from upstream and must stay diffable against it; the plan puts exposure there for the
+  // same reason. COALESCE so a row written before this shipped reads as 'personal' - the
+  // safe end - rather than as SQL NULL, which `= ANY` would silently drop either way but
+  // which would also make the predicate and this filter disagree about why.
+  const exposure = scope.exposure && scope.exposure.length
+    ? [...scope.exposure]
+    : [...DEFAULT_RECALL_EXPOSURES];
+  clauses.push(`COALESCE(am.metadata->>'exposure', 'personal') = ANY($${i++})`);
+  params.push(exposure);
+
   clauses.push(`am.lifecycle_status = 'active'`);
 
   clauses.push(`am.review_status = ANY($${i++})`);
   params.push(recallReviewStatuses(scope.includeUnconfirmed));
 
   return { sql: clauses.join(" AND "), params };
+}
+
+/**
+ * §1.1: PII HEURISTICS DEMOTE, THEY NEVER BLESS AND THEY NEVER REJECT.
+ *
+ * Code and operational prose are full of email-shaped strings, so rejecting on them would
+ * refuse ordinary writes and the gate would be switched off. Detection instead forces
+ * `exposure='personal'` (via `stampExposure`) and a review-queue entry, which is the
+ * conservative direction: the memory is kept, and it is kept where the narrower plane is.
+ *
+ * Deliberately NOT part of `detectUnsafeContent` - that function answers "may this be
+ * stored at all", and conflating the two would turn a demotion into a refusal.
+ */
+const PII_PATTERNS: readonly RegExp[] = Object.freeze([
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/,        // email address
+  /\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b/,        // NANP phone
+  /\b\d{3}-\d{2}-\d{4}\b/,                                    // US SSN shape
+  /\b(?:\d[ -]*?){13,16}\b/,                                   // payment card shape
+]);
+
+export function detectPii(content: string): boolean {
+  if (!content) return false;
+  return PII_PATTERNS.some((re) => re.test(content));
 }
 
 /** Why a writeback was refused. `null` means it is safe to store. */
