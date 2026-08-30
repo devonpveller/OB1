@@ -76,6 +76,9 @@ services:
       - ./init-agent-memory-promote-exposure.sql:/docker-entrypoint-initdb.d/130-init-agent-memory-promote-exposure.sql:ro
       - ./init-agent-memory-check-type.sql:/docker-entrypoint-initdb.d/140-init-agent-memory-check-type.sql:ro
       - ./init-agent-memory-access-refused.sql:/docker-entrypoint-initdb.d/150-init-agent-memory-access-refused.sql:ro
+      # The memory's OWN vector, so the `thoughts` mirror can be optional (U5). See the
+      # file header: personal-plane content no longer enters the shared corpus at all.
+      - ./init-agent-memory-embedding.sql:/docker-entrypoint-initdb.d/160-init-agent-memory-embedding.sql:ro
     networks:
       - obnet
     restart: unless-stopped
@@ -248,10 +251,19 @@ services:
       # own value - by performRecall on the recall path, and by agent-memory-plane.ts for
       # every other statement that resolves a memory, including the ones behind the write
       # tools above. A caller cannot widen it: the plane is a required argument of a
-      # nominal type, so a lookup that omits it does not compile, and
-      # agent-memory-plane.test.ts enumerates every `agent_memories` statement in the
-      # subsystem so a new unguarded one fails a test. This filter is therefore a second
-      # statement of the same boundary rather than the boundary itself.
+      # nominal type, so a lookup that omits it does not compile; the value it carries is
+      # FROZEN, so it cannot be pushed wider after the fact; and agent-memory-plane.test.ts
+      # enumerates every statement against every memory table in every .ts THE IMAGE SHIPS,
+      # with both sets DERIVED from disk rather than listed - so a new unguarded resolver
+      # fails a test wherever it lives and whatever it is named.
+      #
+      # (The earlier wording here said that test enumerates every agent_memories statement
+      # in the subsystem. It did that by scanning a HAND-WRITTEN six-file list, and a
+      # verifier put an unguarded resolver in a file called memory-lookup.ts and got a
+      # fully green suite. The gate is derived now, and this is the corrected claim.)
+      #
+      # This filter is therefore a second statement of the same boundary rather than the
+      # boundary itself.
       GATEWAY_READ_FILTER_FIELD: exposure
       GATEWAY_READ_FILTER_VALUE: ops
       GATEWAY_WRITE_ORIGIN: ops

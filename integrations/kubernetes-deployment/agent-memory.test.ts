@@ -197,7 +197,29 @@ Deno.test("an idempotency_key hit returns the existing memory and does not re-em
   assertEquals(embedCalls, 0, "a duplicate must not burn an embedding call");
 });
 
-Deno.test("a fresh write inserts and reports not-duplicate", async () => {
+/**
+ * The metadata JSON of the `agent_memories` insert, found BY SHAPE rather than by index.
+ *
+ * It used to be `args[args.length - 1]`. Then the row gained its own `embedding` and the
+ * last argument became a vector literal, so three tests failed on an off-by-one that had
+ * nothing to do with what they were asserting. A positional assumption about a 17-column
+ * insert is a test that breaks for the wrong reason; this finds the object that parses as
+ * JSON and is not an array (the vector literal parses as one).
+ */
+function insertedMetadata(seen: unknown[][]): Record<string, unknown> {
+  const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"));
+  if (!insert) throw new Error("no INSERT INTO agent_memories was issued");
+  for (const v of [...insert].reverse()) {
+    if (typeof v !== "string") continue;
+    try {
+      const o = JSON.parse(v);
+      if (o && typeof o === "object" && !Array.isArray(o)) return o as Record<string, unknown>;
+    } catch { /* not the metadata argument */ }
+  }
+  throw new Error("no metadata argument on the agent_memories insert");
+}
+
+Deno.test("a fresh PERSONAL write inserts NOTHING into the shared corpus", async () => {
   const seen: string[] = [];
   const deps = {
     pool: {
@@ -217,18 +239,52 @@ Deno.test("a fresh write inserts and reports not-duplicate", async () => {
     authed: () => true,
   } as unknown as AgentMemoryDeps;
 
+  // No doorExposure, so the write is stamped 'personal' (WRITEBACK_DEFAULTS, the safe end
+  // of the axis) - which is exactly the case that used to mirror the full content into
+  // `thoughts` for six unguarded readers to return.
   const out = await performWriteback(deps, INPUT);
   assertEquals(out.ok, true);
   if (out.ok) {
     assertEquals(out.duplicate, false);
-    assertEquals(out.thought_id, 7);
+    assertEquals(out.thought_id, null, "a personal memory must not be given a corpus row");
     assertEquals(out.memory_id, "mem-9");
   }
-  // The durable content goes to `thoughts`; the sidecar holds metadata, and the write is
-  // audited.
-  assertEquals(seen.some((s) => s.includes("INSERT INTO thoughts")), true);
+  assertEquals(
+    seen.some((s) => s.includes("INSERT INTO thoughts")),
+    false,
+    "THE F1 REGRESSION TEST: a personal memory must issue NO statement against `thoughts`",
+  );
   assertEquals(seen.some((s) => s.includes("INSERT INTO agent_memories")), true);
   assertEquals(seen.some((s) => s.includes("INSERT INTO agent_memory_audit_events")), true);
+});
+
+Deno.test("a fresh OPS write IS mirrored, and reports the thought id", async () => {
+  // The other half, so the test above is proving containment rather than a broken write
+  // path. Same code, one door value different.
+  const seen: string[] = [];
+  const deps = {
+    doorExposure: "ops" as Exposure,
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (sql: string) => {
+            seen.push(sql.trim().split("\n")[0]);
+            if (sql.includes("INSERT INTO thoughts")) {
+              return Promise.resolve({ rows: [{ id: 7 }] });
+            }
+            return Promise.resolve({ rows: [{ id: "mem-9" }] });
+          },
+          release: () => {},
+        }),
+    },
+    getEmbedding: () => Promise.resolve([0.1, 0.2]),
+    authed: () => true,
+  } as unknown as AgentMemoryDeps;
+
+  const out = await performWriteback(deps, INPUT);
+  assertEquals(out.ok, true);
+  if (out.ok) assertEquals(out.thought_id, 7);
+  assertEquals(seen.some((s) => s.includes("INSERT INTO thoughts")), true);
 });
 
 // ── RECALL: the reader the invariant is proved against must be the one that ships ──
@@ -294,13 +350,22 @@ Deno.test("SEAM: performWriteback THREADS THE DOOR - not just buildWritebackRow"
 
   await performWriteback(deps, { ...INPUT, project_id: "p1" });
 
-  const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"))!;
-  const metadata = JSON.parse(String(insert[insert.length - 1]));
-  assertEquals(metadata.exposure, "ops", "the door's plane must reach the inserted row");
+  assertEquals(
+    insertedMetadata(seen).exposure,
+    "ops",
+    "the door's plane must reach the inserted row",
+  );
 
-  // And the thought carries the mirror, or another lane could read what this one hides.
+  // An OPS memory IS mirrored, and the mirror carries the label. Not because anything
+  // reads the label as a boundary - nothing does, and believing otherwise is what F1 was -
+  // but because the cloud door's forced share=cloud filter and any future corpus-side
+  // filter both want it, and a label that is absent cannot be added retroactively.
   const thought = seen.find((r) => String(r[0]).includes("INSERT INTO thoughts"))!;
   assertEquals(JSON.parse(String(thought[3])).exposure, "ops");
+
+  // And the memory carries its OWN vector, which is what makes the mirror optional at all.
+  const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"))!;
+  assertEquals(String(insert[0]).includes("$17::vector"), true, "the memory must be embedded");
 });
 
 Deno.test("SEAM: a tainted write is demoted at the call site too", async () => {
@@ -322,8 +387,16 @@ Deno.test("SEAM: a tainted write is demoted at the call site too", async () => {
   } as unknown as AgentMemoryDeps;
 
   await performWriteback(deps, { ...INPUT, project_id: "p1", tainted: true });
-  const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"))!;
-  assertEquals(JSON.parse(String(insert[insert.length - 1])).exposure, "personal");
+  assertEquals(insertedMetadata(seen).exposure, "personal");
+  // AND THE DEMOTION KEEPS THE CONTENT OUT OF THE CORPUS. This is the end-to-end shape of
+  // F1: an ops DOOR, a tainted request, a memory demoted to the personal plane - and
+  // therefore no `thoughts` row, so list_thoughts and search_thoughts have nothing to
+  // return. Before this, taint demoted the memory and mirrored its content anyway.
+  assertEquals(
+    seen.some((r) => String(r[0]).includes("INSERT INTO thoughts")),
+    false,
+    "a demoted write must not reach the shared corpus",
+  );
 });
 
 Deno.test("SEAM: recall USES buildRecallScopeFilter, it does not restate it", async () => {

@@ -20,8 +20,10 @@ import { REVIEW_ACTIONS } from "./agent-memory-review.ts";
 import type { AgentMemoryOpsDeps } from "./agent-memory-ops.ts";
 import {
   doorPlane,
+  listSidecarOnPlane,
   listTraceItemsOnPlane,
   resolveMemoryOnPlane,
+  resolveTraceOnPlane,
 } from "./agent-memory-plane.ts";
 
 // ── shared field vocabulary ──────────────────────────────────────────────────
@@ -156,8 +158,16 @@ export const REPORT_USAGE_SCHEMA = {
 // caller could `promote_exposure` a personal memory ONTO the ops plane and read it here
 // legitimately. Every lookup now goes through `agent-memory-plane.ts`, whose functions
 // cannot be called without a `DoorPlane`, and `agent-memory-plane.test.ts` enumerates every
-// `agent_memories` statement in the subsystem so a new unguarded one fails a test rather
-// than waiting for the next verifier.
+// statement against every memory table in every .ts THE IMAGE SHIPS - both sets derived
+// from disk - so a new unguarded one fails a test rather than waiting for the next
+// verifier. (That sentence used to say "in the subsystem", which the gate defined as a
+// six-name list it could not check; a resolver in a file named anything else was invisible
+// to it, and to the runner as well.)
+//
+// AND ROUND FOUR WAS NOT A READ AT ALL. The memory's content was mirrored into `thoughts`,
+// which no tool here touches and six statements in index.ts read without a predicate. That
+// one is fixed at the WRITE - see mirrorToUnifiedSearch - because the corpus has readers
+// (a wholesale PostgREST projection among them) that have nowhere to put a predicate.
 
 /**
  * Record that a recalled memory was used, or deliberately not used.
@@ -256,17 +266,25 @@ export async function performInspect(
     if (!lookup.ok) {
       return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
     }
-    const actions = await client.queryObject(
-      `SELECT action, actor_label, notes, before, after, created_at
-         FROM agent_memory_review_actions WHERE memory_id = $1 ORDER BY created_at ASC`,
-      [memoryId],
+    // Through the chokepoint, though the resolve above has already refused anything
+    // off-plane. Belt and braces on purpose: "the caller checked first" is an ordering
+    // assumption, and every round of this bug has been an ordering assumption that stopped
+    // being true. listSidecarOnPlane re-applies the plane in the statement.
+    const actions = await listSidecarOnPlane(
+      client,
+      plane,
+      "review_actions",
+      "sc.action, sc.actor_label, sc.notes, sc.before, sc.after, sc.created_at",
+      memoryId,
     );
-    const events = await client.queryObject(
-      `SELECT event_type, actor_kind, actor_label, payload, created_at
-         FROM agent_memory_audit_events WHERE memory_id = $1 ORDER BY created_at ASC`,
-      [memoryId],
+    const events = await listSidecarOnPlane(
+      client,
+      plane,
+      "audit_events",
+      "sc.event_type, sc.actor_kind, sc.actor_label, sc.payload, sc.created_at",
+      memoryId,
     );
-    return { ok: true, memory: lookup.row, review_actions: actions.rows, audit_events: events.rows };
+    return { ok: true, memory: lookup.row, review_actions: actions, audit_events: events };
   } finally {
     client.release();
   }
@@ -287,13 +305,24 @@ export async function performRecallTrace(
   const plane = doorPlane(deps);
   const client = await deps.pool.connect();
   try {
-    const t = await client.queryObject(
-      `SELECT id, workspace_id, project_id, query, schema_version,
-              request_payload, response_policy, created_at
-         FROM agent_memory_recall_traces WHERE id = $1`,
-      [traceId],
+    // THE ENVELOPE IS PLANE-SENSITIVE TOO, and it was read by id with no predicate at
+    // all. The ITEMS were dropped correctly below; the trace row itself carries the
+    // recall's QUERY TEXT and its full request payload, so an ops-door caller with a
+    // trace id learned what a personal-plane agent went looking for. Found by the derived
+    // completeness gate, which now enumerates every memory-plane table rather than only
+    // `agent_memories` - the gate's previous one-word vocabulary is exactly why this
+    // statement sat here through three rounds of closing "every read tool".
+    const t = await resolveTraceOnPlane<Record<string, unknown>>(
+      { client, pool: deps.pool },
+      plane,
+      traceId,
+      {
+        columns: `id, workspace_id, project_id, query, schema_version,
+                  request_payload, response_policy, created_at`,
+        tool: "agent_memory_recall_trace",
+      },
     );
-    if (!t.rows[0]) return { ok: false, refused: "not_found", message: `no trace with id ${traceId}` };
+    if (!t.ok) return { ok: false, refused: "not_found", message: `no trace with id ${traceId}` };
     // THE JOIN IS NOT THE BOUNDARY - IT ONLY BLANKS THE COLUMNS IT SELECTS. That correction
     // and its audit row now live in the chokepoint (`listTraceItemsOnPlane`), because the
     // dropping is the part a caller can silently fail to do: this function used to select
@@ -304,7 +333,7 @@ export async function performRecallTrace(
       traceId,
       "agent_memory_recall_trace",
     );
-    return { ok: true, trace: t.rows[0], items: visible };
+    return { ok: true, trace: t.row, items: visible };
   } finally {
     client.release();
   }

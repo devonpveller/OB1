@@ -25,7 +25,11 @@ import {
   WRITEBACK_SCHEMA,
 } from "./agent-memory-tools.ts";
 import { listForReview, performReview } from "./agent-memory-ops.ts";
-import { doorPlane, resolveIdempotentOnPlane } from "./agent-memory-plane.ts";
+import {
+  doorPlane,
+  mirrorToUnifiedSearch,
+  resolveIdempotentOnPlane,
+} from "./agent-memory-plane.ts";
 import {
   decideRecallExposure,
   stampExposure,
@@ -266,8 +270,13 @@ export async function performWriteback(
       }
     }
 
-    // The durable content stays in `thoughts` - the sidecar tables hold metadata, not a
-    // second copy of the corpus.
+    // THE MEMORY CARRIES ITS OWN VECTOR NOW. It used to have none: recall found memories
+    // by joining `thoughts` and ordering on the THOUGHT'S embedding, which made a
+    // corpus row mandatory for a memory to be recallable at all - and a mandatory corpus
+    // row is what put personal content in a store six unguarded readers can see. Recall
+    // orders on `agent_memories.embedding` (init-agent-memory-embedding.sql, backfilled
+    // from the mirror for rows written before it), so the mirror is now OPTIONAL and the
+    // plane gets to decide.
     const embedding = await deps.getEmbedding(row.content);
 
     // ALL THREE WRITES ARE ONE TRANSACTION. They were not, and it mattered: when the
@@ -277,41 +286,53 @@ export async function performWriteback(
     // ever covered. A partial memory is worse than no memory, because nothing downstream
     // can tell the difference.
     await client.queryObject("BEGIN");
-    const thought = await client.queryObject(
-      `INSERT INTO thoughts (content, embedding, metadata)
-       VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
-      [
-        row.content,
-        `[${embedding.join(",")}]`,
-        // §1.1: the exposure label is MIRRORED onto the thought, so the generic
-        // search_thoughts lane enforces the same boundary as the agent-memory recall. A
-        // memory whose thought was readable through another lane would make the whole
-        // gate decorative. No `share:'cloud'` label, per §1 - the cloud gateway's forced
-        // share=cloud read filter therefore excludes these automatically.
-        JSON.stringify({
-          source: "agent-memory",
-          workspace_id: row.workspace_id,
-          exposure: row.exposure,
-        }),
-      ],
-    );
-    const thoughtId = (thought.rows[0] as { id: number }).id;
+    // THE MIRROR IS A DECISION, AND THE CHOKEPOINT MAKES IT.
+    //
+    // What this replaces was an unconditional `INSERT INTO thoughts` carrying the full
+    // content and a `metadata.exposure` label, justified by a comment that read "so the
+    // generic search_thoughts lane enforces the same boundary as the agent-memory
+    // recall". THAT SENTENCE WAS FALSE IN THIS TREE. Nothing read the label: index.ts has
+    // six `FROM thoughts` statements and no exposure predicate in any of them, and a
+    // verifier proved the whole path on one server - inspect refused the memory and left
+    // an audit row while list_thoughts and search_thoughts returned its content verbatim
+    // and left none. The label was doing nothing but making the mirror look safe.
+    //
+    // It could not be fixed at the readers either. `thoughts` is the SHARED CORPUS: this
+    // server's general tools, extensions-server, open-brain-rest, agent-memory-api, the
+    // `match_thoughts` SQL function and a wholesale PostgREST projection all read it. A
+    // REST projection of a table has nowhere to put a predicate, so "make every reader
+    // plane-aware" is not a slow option here, it is an impossible one.
+    //
+    // So the content simply does not go there. `mirrorToUnifiedSearch` returns null for
+    // any exposure outside UNIFIED_SEARCH_EXPOSURES and writes nothing at all; thought_id
+    // stays NULL, which the schema has always permitted. Six readers need no guard
+    // because there is nothing for them to find.
+    const thoughtId = await mirrorToUnifiedSearch(client, row.exposure, {
+      content: row.content,
+      embedding,
+      // No `share:'cloud'` label, per §1 - the cloud gateway's forced share=cloud read
+      // filter therefore excludes even the ops-plane mirror. Asserted by the drill
+      // (ATTACK 7b), which labels a mirrored row share=cloud and requires it to come back.
+      metadata: { source: "agent-memory", workspace_id: row.workspace_id },
+    });
 
     const inserted = await client.queryObject(
       `INSERT INTO agent_memories (
          thought_id, workspace_id, project_id, channel_kind, channel_id,
          summary, content, memory_type, visibility, review_status,
          lifecycle_status, provenance_status, can_use_as_evidence,
-         requires_user_confirmation, idempotency_key, content_hash, metadata
+         requires_user_confirmation, idempotency_key, content_hash, metadata,
+         embedding
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-         agent_memory_hash_text($7), $16::jsonb
+         agent_memory_hash_text($7), $16::jsonb, $17::vector
        ) RETURNING id`,
       [
         thoughtId, row.workspace_id, row.project_id, row.channel_kind, row.channel_id,
         row.summary, row.content, row.memory_type, row.visibility, row.review_status,
         row.lifecycle_status, row.provenance_status, row.can_use_as_evidence,
         row.requires_user_confirmation, row.idempotency_key, JSON.stringify(row.metadata),
+        `[${embedding.join(",")}]`,
       ],
     );
     const memoryId = (inserted.rows[0] as { id: string }).id;
@@ -426,11 +447,10 @@ export async function performRecall(
               am.review_status, am.can_use_as_evidence, am.can_use_as_instruction,
               COALESCE(am.metadata->>'exposure', 'personal') AS exposure,
               am.requires_user_confirmation,
-              1 - (t.embedding <=> $1::vector) AS similarity
+              1 - (am.embedding <=> $1::vector) AS similarity
          FROM agent_memories am
-         JOIN thoughts t ON t.id = am.thought_id
-        WHERE ${filter.sql}
-        ORDER BY t.embedding <=> $1::vector
+        WHERE am.embedding IS NOT NULL AND (${filter.sql})
+        ORDER BY am.embedding <=> $1::vector
         LIMIT ${limit}`,
       [`[${embedding.join(",")}]`, ...filter.params],
     );
