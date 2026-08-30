@@ -42,6 +42,14 @@ BEGIN
         t.created_at
     FROM thoughts t
     WHERE 1 - (t.embedding <=> query_embedding) >= match_threshold
+      -- U5 exposure plane. THE SECOND DEFINITION OF match_thoughts IN THIS REPO: the
+      -- docker deployment's copy is guarded by docker/init-agent-memory-corpus-plane.sql,
+      -- and this k8s copy was not - found by the completeness gate once it learned to scan
+      -- a build context's .sql, not only its .ts. Same predicate, same meaning: an ABSENT
+      -- label is unclaimed general corpus and stays visible; a PRESENT label was minted by
+      -- the agent-memory mirror, and only the ops plane's rows are served. No parameter,
+      -- deliberately - a caller that may name its own plane is not bounded by one.
+      AND (t.metadata->>'exposure' IS NULL OR t.metadata->>'exposure' = ANY(ARRAY['ops']))
     ORDER BY t.embedding <=> query_embedding
     LIMIT match_count;
 END;

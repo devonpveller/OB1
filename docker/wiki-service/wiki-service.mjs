@@ -45,6 +45,11 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // from disk must lose its row, or search/nav would keep serving a dead link
 // (wiki-dynamic-index P1). Best-effort: never fails a compile.
 import { deleteWikiPages, countWikiPages } from "file:///recipes/_shared/wiki-pages.mjs";
+// U5 (dark-factory-unification): the exposure plane. This service is the SCHEDULER of the
+// published wiki AND a corpus writer in its own right (the note-tree ingest), and it talks
+// to PostgREST directly - so it needs the same predicate the compiler it launches carries.
+// Same bind-mount, same reason as the imports above: one definition, no hand-synced copy.
+import { CORPUS_PLANE_OR, stripCorpusClaim } from "file:///recipes/_shared/corpus-plane.mjs";
 
 const pexec = promisify(execFile);
 
@@ -465,12 +470,12 @@ async function ingestNotes(prevCommit) {
       const enc = encodeURIComponent(rel);
       const existing = await obFetch(
         "GET",
-        `thoughts?select=id&metadata->>note_path=eq.${enc}&limit=1`,
+        `thoughts?select=id&metadata->>note_path=eq.${enc}&${CORPUS_PLANE_OR}&limit=1`,
       );
       if (Array.isArray(existing) && existing[0]) {
-        await obFetch("PATCH", `thoughts?id=eq.${existing[0].id}`, { content, metadata: meta });
+        await obFetch("PATCH", `thoughts?id=eq.${existing[0].id}&${CORPUS_PLANE_OR}`, { content, metadata: stripCorpusClaim(meta) });
       } else {
-        await obFetch("POST", "thoughts", { content, metadata: meta });
+        await obFetch("POST", "thoughts", { content, metadata: stripCorpusClaim(meta) });
       }
       ingested++;
     } catch (e) {
@@ -481,7 +486,7 @@ async function ingestNotes(prevCommit) {
   for (const rel of deleted) {
     try {
       const enc = encodeURIComponent(rel);
-      await obFetch("DELETE", `thoughts?metadata->>note_path=eq.${enc}`);
+      await obFetch("DELETE", `thoughts?metadata->>note_path=eq.${enc}&${CORPUS_PLANE_OR}`);
       delc++;
     } catch (e) {
       console.error(`[wiki-service] note delete failed for ${rel}:`, e?.message || e);
@@ -1212,7 +1217,8 @@ async function changeWatchTick() {
     const orF = `or=(created_at.gt.${enc},updated_at.gt.${enc})`;
     let n = 0;
     for (const tbl of ["sources", "thoughts"]) {
-      const rows = await obFetch("GET", `${tbl}?select=id&${orF}&limit=200`);
+      const plane = tbl === "thoughts" ? `&${CORPUS_PLANE_OR}` : "";
+      const rows = await obFetch("GET", `${tbl}?select=id&${orF}${plane}&limit=200`);
       n += Array.isArray(rows) ? rows.length : 0;
     }
     // User notes are FILES first (working-draft model): a new/edited note is

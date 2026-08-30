@@ -54,6 +54,17 @@ import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-change
 // sync; ONE batched flush before exit (a CLI run cuts off fire-and-forget).
 import { queueWikiPage, flushWikiPages } from "../_shared/wiki-pages.mjs";
 import { rewriteCitations } from "../_shared/citations.mjs";
+// U5 (dark-factory-unification): the exposure plane. This compiler PUBLISHES what it
+// reads - markdown pages, and `wiki_pages` rows the viewer serves - and it reads the
+// `thoughts` TABLE directly through PostgREST, so the SQL floor inside `match_thoughts`
+// is not underneath it. The predicate travels with each statement below. See
+// ../_shared/corpus-plane.mjs for why this is the application layer and not a view.
+import {
+  CORPUS_PLANE_OR,
+  embeddedCorpusPlaneOr,
+  keepOnCorpusPlane,
+  stripCorpusClaim,
+} from "../_shared/corpus-plane.mjs";
 
 // ---------------------------------------------------------------
 // Config + CLI parsing
@@ -258,15 +269,21 @@ async function resolveEntityByName(sb, name, type) {
 async function fetchLinkedThoughts(sb, entityId, limit = 200) {
   // thought_entities rows carry mention_role + confidence + evidence; join to thoughts for content.
   // PostgREST embedded resources syntax.
+  // U5: `thoughts!inner` plus the embedded plane filter, so an off-plane thought drops
+  // its WHOLE thought_entities row instead of nulling the embed - a surviving parent row
+  // still carries thought_id, and an id is a disclosure. keepOnCorpusPlane below is the
+  // second layer: a row that ARRIVES labelled off-plane is dropped whatever the URL said,
+  // so an edit that loses the filter can only publish less, never more.
   const query = [
     `entity_id=eq.${entityId}`,
-    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts(id,content,metadata,created_at)`,
+    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts!inner(id,content,metadata,created_at)`,
+    embeddedCorpusPlaneOr("thoughts"),
     `order=created_at.desc`,
     `limit=${limit}`,
   ].join("&");
   const rows = (await sb.get("thought_entities", query)) || [];
   // Flatten: prefer thought-level data for the model.
-  return rows
+  return keepOnCorpusPlane(rows, (r) => r.thoughts)
     .filter((r) => r.thoughts)
     .map((r) => ({
       id: r.thought_id,
@@ -429,13 +446,18 @@ async function semanticExpand(sb, env, entity) {
   const embedding = await embedQuery(env, query);
   if (!embedding) return [];
   // Call the stock match_thoughts RPC from the getting-started guide.
+  // U5: match_thoughts carries the plane inside its own body since
+  // docker/init-agent-memory-corpus-plane.sql - but that file lands on a FRESH volume, or
+  // by the promotion runbook, so a database it has not been applied to returns everything.
+  // Re-checked here: the compiler must not depend on a deploy step it does not perform in
+  // order to decide what it publishes.
   const rows = await sb.rpc("match_thoughts", {
     query_embedding: embedding,
     match_threshold: 0.35,
     match_count: 30,
     filter: {},
   });
-  return (rows || []).map((r) => ({
+  return keepOnCorpusPlane(rows || []).map((r) => ({
     id: r.id,
     content: r.content,
     type: r.metadata?.type ?? null,
@@ -1129,8 +1151,14 @@ async function emitLeafPages(sb, outDir, run) {
     fs.mkdirSync(dir, { recursive: true });
     for (let i = 0; i < tIds.length; i += CHUNK) {
       const list = tIds.slice(i, i + CHUNK).join(",");
-      const rows =
-        (await sb.get("thoughts", `select=id,content,metadata,created_at&id=in.(${list})`)) || [];
+      // U5: a leaf page renders a thought's RAW content into a published markdown file and
+      // a `wiki_pages` row. Plane predicate in the request, re-checked on arrival.
+      const rows = keepOnCorpusPlane(
+        (await sb.get(
+          "thoughts",
+          `select=id,content,metadata,created_at&id=in.(${list})&${CORPUS_PLANE_OR}`,
+        )) || [],
+      );
       for (const r of rows) {
         const date = String(r.created_at || "").slice(0, 10);
         const mtype = r.metadata?.type ?? null;
@@ -1252,6 +1280,11 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
     // from their default search view.
     exclude_from_default_search: true,
   };
+  // U5: the dossier is a corpus WRITE, and a write that can carry an `exposure` can MINT a
+  // plane claim - the one way to make a row invisible to the predicate every read above
+  // applies. Nothing here sets one today; stripCorpusClaim is what keeps that true when
+  // someone later spreads an entity's metadata into this object.
+  const corpusMetadata = stripCorpusClaim(metadata);
 
   // Compute embedding so the dossier is retrievable via match_thoughts. The
   // MCP capture flow in server/index.ts does the same (embed first, then
@@ -1272,16 +1305,20 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
   // 1. Check for an existing dossier for this entity (idempotency by
   //    entity_id, not by content fingerprint — lets us refresh the wiki
   //    when the evidence changes, rather than accumulating rows).
+  // U5: plane-bound like every other corpus read. Without the predicate this resolves an
+  // off-plane row by id and the PATCH below overwrites its content - a write INTO another
+  // plane's row, reached through a lookup that was never bounded.
   try {
     const existing =
       (await sb.get(
         "thoughts",
-        `select=id&metadata->>type=eq.dossier&metadata->>wiki_entity_id=eq.${entity.id}&limit=1`,
+        `select=id&metadata->>type=eq.dossier&metadata->>wiki_entity_id=eq.${entity.id}` +
+          `&${CORPUS_PLANE_OR}&limit=1`,
       )) || [];
     if (existing.length > 0) {
       const existingId = existing[0].id;
       // embedding is required (see fatal check above) — include it unconditionally.
-      await sb.patch(`thoughts?id=eq.${existingId}`, { content, metadata, embedding });
+      await sb.patch(`thoughts?id=eq.${existingId}`, { content, metadata: corpusMetadata, embedding });
       return existingId;
     }
   } catch (lookupErr) {
@@ -1295,7 +1332,7 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
   try {
     const rpcRes = await sb.rpc("upsert_thought", {
       p_content: content,
-      p_payload: { metadata },
+      p_payload: { metadata: corpusMetadata },
     });
     const thoughtId = Array.isArray(rpcRes) ? rpcRes[0]?.id : rpcRes?.id;
     if (!thoughtId) {
@@ -1312,7 +1349,7 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
     // in the insert payload so the dossier is immediately searchable.
     const inserted = await sb.post(
       "thoughts",
-      { content, metadata, embedding },
+      { content, metadata: corpusMetadata, embedding },
       { prefer: "return=representation" },
     );
     const row = Array.isArray(inserted) ? inserted[0] : inserted;

@@ -38,11 +38,15 @@
  * ------------------------------------------------------------------------------------
  * SO EVERYTHING THIS GATE ENUMERATES IS NOW DERIVED FROM THE CODE
  * ------------------------------------------------------------------------------------
- *   THE FILES  - every `.ts` in this directory that is not a `.test.ts`, read from disk.
- *                That is exactly what the image contains: `COPY *.ts ./` then
- *                `rm -f *.test.ts`. A test below reads the Dockerfile and asserts those
- *                two lines still say that, so the derivation cannot quietly stop matching
- *                what ships.
+ *   THE ROOTS  - every `build: context:` in `docker/docker-compose.yml`, PLUS every repo
+ *                directory a compose service BIND-MOUNTS into a container. The mount half
+ *                was round five's hole: `../recipes:/recipes:ro` is built by nothing, so no
+ *                `context:` names it, while wiki-service EXECUTES two of its scripts on a
+ *                schedule.
+ *   THE FILES  - every file under those roots that is not classified NON_CODE, read from
+ *                disk. NOT ".ts": see the walk below for the measurement that made that a
+ *                defect. A root that contributes ZERO scanned files is an ERROR, because
+ *                that is the shape the defect took.
  *   THE TABLES - every `agent_memor*` table CREATEd by `../../docker/init-agent-memory*.sql`.
  *                Eight of them today. A ninth arrives already in scope.
  *
@@ -178,6 +182,43 @@ async function isDir(rel: string): Promise<boolean> {
   }
 }
 
+/** A repo directory a compose service mounts into a container, with where it lands. */
+interface MountedRoot {
+  root: string;
+  mountPoint: string;
+}
+
+/**
+ * Repo directories BIND-MOUNTED into containers as executable code.
+ *
+ * ROUND FIVE'S GATE DERIVED ITS ROOTS FROM `build: context:` AND THAT WAS ITS NEXT HOLE.
+ * `../recipes:/recipes:ro` is mounted into openbrain-wiki and openbrain-workbench (compose
+ * lines 733 and 851). Nothing BUILDS it, so no `context:` names it, and it was in no root
+ * at all - while `wiki-service.mjs` executes `/recipes/entity-wiki/generate-wiki.mjs` on a
+ * schedule and the workbench imports `/recipes/_shared/slug.mjs` at runtime. Code that runs
+ * in a container is in scope whether the image contains it or the host hands it over.
+ *
+ * DERIVED, not listed: every `- <relative path>:<container path>` volume entry whose repo
+ * side resolves to a DIRECTORY. The initdb `.sql` mounts and the Caddyfile resolve to FILES
+ * and fall out on their own (and the `.sql` chain has its own reader below).
+ */
+async function mountedRoots(): Promise<MountedRoot[]> {
+  const compose = await readRepo(COMPOSE);
+  const out: MountedRoot[] = [];
+  const seen = new Set<string>();
+  for (
+    const m of compose.matchAll(/^\s*-\s*(\.\.?\/[A-Za-z0-9._\/-]+):(\/[A-Za-z0-9._\/-]+)/gm)
+  ) {
+    const raw = m[1].replace(/^\.\//, "");
+    const rel = (raw.startsWith("../") ? raw.slice(3) : `docker/${raw}`).replace(/\/$/, "");
+    if (seen.has(rel)) continue;
+    if (!await isDir(rel)) continue; // a FILE mount is not a code root
+    seen.add(rel);
+    out.push({ root: rel, mountPoint: m[2].replace(/\/$/, "") });
+  }
+  return out;
+}
+
 async function scanRoots(): Promise<string[]> {
   const compose = await readRepo(COMPOSE);
   const roots = new Set<string>();
@@ -193,6 +234,11 @@ async function scanRoots(): Promise<string[]> {
   if (roots.size === 0) {
     throw new Error(`no build contexts parsed from ${COMPOSE} - every scan below would be empty`);
   }
+  const mounts = await mountedRoots();
+  if (mounts.length === 0) {
+    throw new Error(`no directory bind-mounts parsed from ${COMPOSE} - ../recipes would be unscanned`);
+  }
+  for (const m of mounts) roots.add(m.root);
   for (const e of EXTRA_ROOTS) roots.add(e.root);
   const out = [...roots].sort();
   for (const r of out) {
@@ -201,35 +247,279 @@ async function scanRoots(): Promise<string[]> {
   return out;
 }
 
-/** Every `.ts` under a scan root, keyed by repo-relative path. */
-async function walkTs(root: string, out: Map<string, string>): Promise<void> {
+/**
+ * WHAT COUNTS AS CODE - and the answer being ".ts" is the defect round five shipped.
+ *
+ * The walk was `if (!e.name.endsWith(".ts")) continue`. Measured per root, that scanned
+ * NOTHING in five of fourteen: `docker/wiki-service` is 5 `.mjs` and 0 `.ts`;
+ * `docker/backup` is 3 `.sh`; `docker/extract` is 1 `.py`; `docker/wiki-viewer` is 2 `.ts`
+ * beside 13 `.mjs`/`.js`; `integrations/agent-memory-api` is 1 `.ts` beside 3 `.mjs`. A
+ * verifier put an unguarded reader of `thoughts`, `agent_memories`,
+ * `agent_memory_recall_items` and `agent_memory_review_actions` into `docker/wiki-service`,
+ * shipped by that image, and this suite stayed 213 passed / 0 failed - purely because the
+ * file was named `.mjs`. The identical bytes named `.ts` failed 13 tests.
+ *
+ * SO THE EXTENSION SET IS DERIVED THE WAY EVERYTHING ELSE HERE IS: it is whatever the roots
+ * CONTAIN, minus a written list of what is not code. The direction of the default is the
+ * whole point - a language nobody thought of is SCANNED, and the only way to stop scanning
+ * one is to name it below with a reason. Round five had the list the other way round, and a
+ * list of what to INCLUDE is a list you can be short of.
+ */
+interface NonCode {
+  ext: string;
+  why: string;
+}
+
+const NON_CODE: NonCode[] = [
+  { ext: ".json", why: "configuration and manifests - a key is not a statement" },
+  { ext: ".md", why: "prose. A comment naming a table is explicitly not a finding here" },
+  { ext: ".txt", why: "prose (requirements.txt, notes)" },
+  { ext: ".lock", why: "dependency lockfiles - machine-written, no statements" },
+  { ext: ".example", why: "`.env.example` templates - variable names, never a query" },
+  {
+    ext: ".yml",
+    why:
+      "compose and CI configuration. compose is READ by this file as the derivation source " +
+      "for roots, mounts and the initdb chain; it is not scanned as a reader",
+  },
+  { ext: ".css", why: "stylesheets - declarations, with no way to reach a database" },
+  { ext: ".svg", why: "vector image markup - shipped as an asset, executed by nothing" },
+  {
+    ext: ".pyc",
+    why: "compiled Python BYTECODE - binary, and reading it as text is a decode error, not a scan",
+  },
+];
+
+/**
+ * Files with NO EXTENSION, or whose suffix is not one (`Dockerfile.postgres`, `.env`).
+ *
+ * `extensionOf(".env")` is "" - a dotfile's leading dot is not an extension separator - so
+ * these cannot be classified by the list above and would fall through it. Anything here is
+ * matched by NAME.
+ */
+const NON_CODE_NAMES: NonCode[] = [
+  {
+    ext: ".env",
+    why:
+      "GITIGNORED secret VALUES. Not present in a fresh clone, so a gate that read them " +
+      "would give different verdicts in different checkouts - and it is credentials, not " +
+      "code. `.env.example` is excluded separately, by extension.",
+  },
+  {
+    ext: ".gitignore",
+    why:
+      "path patterns for git. Not executed by anything, and the only table name it could " +
+      "contain would be part of a filename.",
+  },
+  {
+    ext: "Dockerfile",
+    why:
+      "build instructions, not a running reader - and NOT waved through: a test below " +
+      "asserts that no Dockerfile under a scan root names a memory or corpus table, so a " +
+      "RUN line that shelled out to psql would still be caught.",
+  },
+];
+
+function extensionOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i <= 0 ? "" : name.slice(i);
+}
+
+function isNonCodeName(name: string): boolean {
+  return NON_CODE_NAMES.some((n) => name === n.ext || name.startsWith(`${n.ext}.`));
+}
+
+/** A test file - inventoried, never scanned as a shipping reader. */
+function isTestFile(name: string): boolean {
+  return /\.(test|spec)\.[a-z]+$/.test(name);
+}
+
+/**
+ * WHICH MOUNTED FILES THE DEPLOYMENT ACTUALLY RUNS - derived, never listed.
+ *
+ * `../recipes` is 300+ files. Two of them are executed by a service on a schedule
+ * (`RECIPE_PATH`, `SYNTH_PATH`), a handful more are imported by those two and by the
+ * workbench, and the rest are one-off import scripts a person runs by hand with their own
+ * credentials. Both classes read the corpus. They are NOT the same risk and this gate says
+ * so rather than averaging them:
+ *
+ *   INVOKED  - reached from compose or from an image's own source through the mount point,
+ *              plus everything those files import, transitively. These must be CLEAN: zero
+ *              findings, exactly like a built image's source.
+ *   RESIDUAL - mounted and readable inside two containers, but nothing in the deployment
+ *              starts them. These are INVENTORIED below with their finding counts. Not
+ *              waved through: the count is pinned, so a new unguarded reader anywhere under
+ *              a mounted root moves a number and the suite goes red.
+ *
+ * The seeds come from string literals naming the CONTAINER path (`/recipes/...`), which is
+ * how a mounted file is named by whatever runs it - `RECIPE_PATH: /recipes/entity-wiki/
+ * generate-wiki.mjs` in compose, `file:///recipes/_shared/slug.mjs` in wiki-service.mjs,
+ * `"file:///recipes/_shared/slug.mjs"` in the workbench's import map.
+ */
+function resolveRelative(fromFile: string, spec: string): string | null {
+  if (!spec.startsWith(".")) return null;
+  const parts = fromFile.split("/").slice(0, -1);
+  for (const seg of spec.split("/")) {
+    if (seg === "." || seg === "") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+function importSpecifiers(src: string): string[] {
+  const out: string[] = [];
+  for (const m of stripComments(src).matchAll(/from\s*["']([^"']+)["']/g)) out.push(m[1]);
+  for (const m of stripComments(src).matchAll(/import\(\s*["']([^"']+)["']/g)) out.push(m[1]);
+  for (const m of stripComments(src).matchAll(/require\(\s*["']([^"']+)["']/g)) out.push(m[1]);
+  return out;
+}
+
+async function invokedMountedFiles(sources: Map<string, string>): Promise<Set<string>> {
+  const mounts = await mountedRoots();
+  const invoked = new Set<string>();
+  if (mounts.length === 0) return invoked;
+
+  // Every text the deployment is made of: compose itself, plus every scanned source that
+  // is NOT under a mounted root (i.e. every built image's code).
+  const mountedRootNames = mounts.map((m) => m.root);
+  const isMounted = (f: string) => mountedRootNames.some((r) => f === r || f.startsWith(`${r}/`));
+  const haystacks: string[] = [await readRepo(COMPOSE)];
+  for (const [f, src] of sources) if (!isMounted(f)) haystacks.push(src);
+
+  const queue: string[] = [];
+  for (const mnt of mounts) {
+    const re = new RegExp(`${mnt.mountPoint}/([A-Za-z0-9._/-]+)`, "g");
+    for (const hay of haystacks) {
+      for (const m of hay.matchAll(re)) {
+        const rel = `${mnt.root}/${m[1]}`;
+        if (sources.has(rel) && !invoked.has(rel)) {
+          invoked.add(rel);
+          queue.push(rel);
+        }
+      }
+    }
+  }
+  // FAIL-CLOSED: a mount whose entry points cannot be found means the seeds stopped
+  // matching, and an empty INVOKED set would silently move every compiler statement into
+  // the residual inventory - a gate that passes by reclassifying its subject.
+  if (invoked.size === 0) {
+    throw new Error(
+      `no invoked file found under any bind-mount (${mountedRootNames.join(", ")}) - the ` +
+        `entry-point seeds no longer match, so nothing would be held to the clean standard`,
+    );
+  }
+  // Transitive closure over relative and mount-absolute imports.
+  while (queue.length) {
+    const file = queue.pop()!;
+    for (const spec of importSpecifiers(sources.get(file) ?? "")) {
+      let target: string | null = null;
+      const rel = resolveRelative(file, spec);
+      if (rel) target = rel;
+      else {
+        for (const mnt of mounts) {
+          const i = spec.indexOf(`${mnt.mountPoint}/`);
+          if (i !== -1) target = `${mnt.root}/${spec.slice(i + mnt.mountPoint.length + 1)}`;
+        }
+      }
+      if (target && sources.has(target) && !invoked.has(target)) {
+        invoked.add(target);
+        queue.push(target);
+      }
+    }
+  }
+  return invoked;
+}
+
+/** The files held to the CLEAN standard: every built image's source, plus invoked mounts. */
+async function guardedFiles(sources: Map<string, string>): Promise<Set<string>> {
+  const mounts = await mountedRoots();
+  const isMounted = (f: string) => mounts.some((m) => f === m.root || f.startsWith(`${m.root}/`));
+  const invoked = await invokedMountedFiles(sources);
+  const out = new Set<string>();
+  for (const f of sources.keys()) if (!isMounted(f) || invoked.has(f)) out.add(f);
+  return out;
+}
+
+/** Is this file code, by the derived rule? Everything is, unless NON_CODE says otherwise. */
+function isCodeFile(name: string): boolean {
+  if (isNonCodeName(name)) return false;
+  const ext = extensionOf(name);
+  if (ext === "") return false; // no extension and not a known name
+  return !NON_CODE.some((n) => n.ext === ext);
+}
+
+/** Every non-test code file under a scan root, keyed by repo-relative path. */
+async function walkCode(root: string, out: Map<string, string>): Promise<void> {
   for await (const e of Deno.readDir(new URL(`${root}/`, REPO))) {
     const rel = `${root}/${e.name}`;
     if (e.isDirectory) {
       if (e.name === "node_modules" || e.name === ".git") continue;
-      await walkTs(rel, out);
+      await walkCode(rel, out);
       continue;
     }
     if (!e.isFile) continue;
-    if (!e.name.endsWith(".ts")) continue;
-    // Tests do not ship (the openbrain-mcp Dockerfile deletes them; no other root has any).
-    if (e.name.endsWith(".test.ts")) continue;
-    out.set(rel, await readRepo(rel));  // normalised - see normalise()
+    if (isTestFile(e.name)) continue;
+    if (!isCodeFile(e.name)) continue;
+    out.set(rel, await readRepo(rel)); // normalised - see normalise()
   }
+}
+
+/** Every file under a scan root, code or not - for the classification tests below. */
+async function walkAll(root: string, out: Set<string>): Promise<void> {
+  for await (const e of Deno.readDir(new URL(`${root}/`, REPO))) {
+    const rel = `${root}/${e.name}`;
+    if (e.isDirectory) {
+      if (e.name === "node_modules" || e.name === ".git") continue;
+      await walkAll(rel, out);
+      continue;
+    }
+    if (e.isFile) out.add(rel);
+  }
+}
+
+async function allFilesUnderRoots(): Promise<string[]> {
+  const out = new Set<string>();
+  for (const root of await scanRoots()) await walkAll(root, out);
+  if (out.size === 0) throw new Error("no files under any scan root");
+  return [...out].sort();
 }
 
 /**
  * The whole scanned set as {repo-relative path -> source}.
  *
- * A SUPERSET OF WHAT SHIPS, on purpose. Some roots' Dockerfiles copy a single file; scanning
- * a source that does not end up in an image costs a few milliseconds, while missing one that
- * does is the bug this gate is for. The direction of the error is chosen.
+ * INTENDED AS A SUPERSET OF WHAT SHIPS - and round five's version WAS NOT ONE, which is the
+ * correction this round exists to make. That docblock said "a superset of what ships, on
+ * purpose ... missing one that does is the bug this gate is for", and the walk it described
+ * was `.ts`-only, so for five of fourteen roots it was a strict SUBSET containing nothing:
+ * `docker/wiki-service` 0 of 5 files, `docker/backup` 0 of 3, `docker/extract` 0 of 1,
+ * `docker/wiki-viewer` 2 of 15, `integrations/agent-memory-api` 1 of 4. A claim in a
+ * docblock is not a property of the code; this one is now asserted by
+ * "EVERY scan root contributes at least one scanned file" and by the membership test that
+ * names real `.mjs`, `.sh`, `.py` and `.sql` files in the scanned set.
+ *
+ * Scanning a source that does not end up in an image costs a few milliseconds; missing one
+ * that does is the bug this gate is for. The direction of the error is still chosen - it is
+ * now also checked.
  */
 async function shippingSources(): Promise<Map<string, string>> {
   const m = new Map<string, string>();
-  for (const root of await scanRoots()) await walkTs(root, m);
+  for (const root of await scanRoots()) {
+    const before = m.size;
+    await walkCode(root, m);
+    // A ROOT THAT CONTRIBUTES NOTHING IS THE SIGNATURE OF THIS BUG, so it is an error and
+    // not a quiet zero. Five roots were in exactly that state under the `.ts`-only walk
+    // while the suite was green; the count that would have said so was never taken.
+    if (m.size === before) {
+      throw new Error(
+        `scan root "${root}" contributed ZERO scanned files - either it is not a root, or ` +
+          `one of the NON_CODE classifications below is wrong. This is the shape of the ` +
+          `.ts-only defect.`,
+      );
+    }
+  }
   if (m.size === 0) {
-    throw new Error("no .ts files found under any scan root - every assertion would be vacuous");
+    throw new Error("no code files found under any scan root - every assertion would be vacuous");
   }
   return m;
 }
@@ -372,6 +662,11 @@ interface TableRef {
 function looksLikeSql(body: string, idx: number, table: string): boolean {
   const end = idx + table.length;
   if (body[end] === "(") return true;
+  // A POSTGREST EMBEDDED RESOURCE WITH A JOIN HINT: `thoughts!inner(id,content,...)`. The
+  // `(` is no longer the next character, and the whole thing lives inside a `select=`
+  // string with no SQL keyword near it - so the compiler's ONE read that actually joins
+  // the corpus was invisible to every matcher above until this line existed.
+  if (body.slice(end).startsWith("!inner(") || body.slice(end).startsWith("!left(")) return true;
   const before = body.slice(0, idx);
   const open = Math.max(before.lastIndexOf("`"), before.lastIndexOf('"'), before.lastIndexOf("'"));
   const after = body.slice(end);
@@ -388,6 +683,12 @@ function looksLikeSql(body: string, idx: number, table: string): boolean {
   // able to see ORM-shaped blindness: if the builder verb is one the matcher does not know,
   // the bare count still exceeds the matched count and the gate reports it.
   if (frag.trim() === table) return true;
+  // A POSTGREST RESOURCE: `thoughts?select=id&...`. The whole query is inside the string
+  // literal, so there is no SQL keyword anywhere near it - which is exactly why every
+  // statement in wiki-service.mjs and generate-wiki.mjs was invisible to the previous
+  // matcher. `thoughts` is not the corpus here by coincidence of naming; it is the REST
+  // resource for that table, and reading it is reading the table.
+  if (new RegExp(`^${table}\\?`).test(frag.trim())) return true;
   return /\b(SELECT|INSERT|UPDATE|DELETE|FROM|JOIN|INTO|TRUNCATE|VALUES|WHERE)\b/.test(frag);
 }
 
@@ -397,6 +698,24 @@ const ORM_VERB: Record<string, string> = {
   insert: "INTO",
   upsert: "INTO",
   update: "UPDATE",
+  delete: "DELETE",
+};
+
+/**
+ * HTTP method -> the SQL keyword PostgREST turns it into.
+ *
+ * THE FOURTH SHAPE, and the one the wiki plane is written in. `wiki-service.mjs` and the
+ * entity-wiki recipe do not use supabase-js and contain no SQL: they hand PostgREST a
+ * RESOURCE STRING (`thoughts?select=id&metadata->>note_path=eq.x`) through a small `sb`
+ * or `obFetch` helper. Every one of those statements reads or writes the shared corpus and
+ * NONE of them matched anything above - which is how a scheduled service materialised
+ * corpus content into a published wiki with no plane anywhere in the path.
+ */
+const REST_VERB: Record<string, string> = {
+  get: "FROM",
+  post: "INTO",
+  patch: "UPDATE",
+  put: "UPDATE",
   delete: "DELETE",
 };
 
@@ -431,6 +750,22 @@ function tableRefs(
     ) {
       matched.push({ table, keyword: m[1].toUpperCase(), text: m[0] });
     }
+    // SHAPE 5 - DDL. `CREATE TABLE thoughts (...)` / `CREATE INDEX ... ON thoughts` define
+    // the relation; they select no row and can disclose none. Matched rather than ignored
+    // so the bare-name reconciliation still balances - an unmatched name is what makes this
+    // gate report a shape it does not know, and schema files are full of them.
+    for (
+      const m of body.matchAll(
+        new RegExp(
+          `CREATE\\s+(?:UNIQUE\\s+)?(?:TABLE|INDEX|TRIGGER)[\\s\\S]{0,90}?\\b(?:public\\.)?${table}\\b`,
+          "gi",
+        ),
+      )
+    ) {
+      // A `CREATE TABLE x AS SELECT ... FROM thoughts` still matches FROM above, so a
+      // materialisation is not swallowed by this.
+      matched.push({ table, keyword: "DDL", text: m[0].replace(/\s+/g, " ").slice(0, 40) });
+    }
     for (
       const m of body.matchAll(
         new RegExp(
@@ -443,6 +778,37 @@ function tableRefs(
         table,
         keyword: ORM_VERB[m[1]],
         text: `.from("${table}").${m[1]}`,
+      });
+    }
+    // SHAPE 4a - a helper method named after the HTTP verb: sb.get("thoughts", "..."),
+    // sb.patch(`thoughts?id=eq.${id}`, {...}).
+    for (
+      const m of body.matchAll(
+        new RegExp(
+          `\\.(get|post|patch|put|delete)\\(\\s*["'\`]${table}(\\?[^"'\`]*)?["'\`]`,
+          "g",
+        ),
+      )
+    ) {
+      matched.push({
+        table,
+        keyword: REST_VERB[m[1]],
+        text: `.${m[1]}("${table}${m[2] ? "?..." : ""}")`,
+      });
+    }
+    // SHAPE 4b - the method as an ARGUMENT: obFetch("GET", `thoughts?select=id&...`).
+    for (
+      const m of body.matchAll(
+        new RegExp(
+          `["'](GET|POST|PATCH|PUT|DELETE)["']\\s*,\\s*["'\`]${table}(\\?[^"'\`]*)?["'\`]`,
+          "g",
+        ),
+      )
+    ) {
+      matched.push({
+        table,
+        keyword: REST_VERB[m[1].toLowerCase()],
+        text: `("${m[1]}", "${table}${m[2] ? "?..." : ""}")`,
       });
     }
     refs.push(...matched);
@@ -557,6 +923,40 @@ const EXEMPT: Exemption[] = [
       "metadata from the door value, which it did not before - every memory this door wrote " +
       "was unlabelled, and unlabelled reads as 'personal', so the door could not read back " +
       "its own writes and anything that could was reading the restricted plane.",
+  },
+  {
+    file: "docker/wiki-service/wiki-service.mjs",
+    sql: `await drainQueue("", "thoughts", deadline);`,
+    reason:
+      "NOT A STATEMENT. `\"thoughts\"` here is the LOG LABEL for one of the two worker " +
+      "queues this service drains before a compile (the other call passes \"sources\"); the " +
+      "drain itself is an HTTP POST to the entity worker and touches no table. Named " +
+      "explicitly rather than made invisible by a cleverer matcher, because the matcher " +
+      "erring toward reporting is what caught the real statements in this same file.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: `      await sb.rpc("match_thoughts", {
+        query_embedding: dummy,
+        match_threshold: 0.99,
+        match_count: 1,
+        filter: {},
+      });`,
+    reason:
+      "preflightEmbeddingDim's SIGNATURE PROBE. It calls the RPC with an all-zeros vector " +
+      "and a 0.99 threshold purely to find out whether the 4-argument function exists, and " +
+      "DISCARDS the result - there is no assignment. It cannot disclose a row because no " +
+      "row it might return is ever read; what it can do is fail early with an actionable " +
+      "message instead of 25 per-entity 404s, which is why it exists.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: "await sb.patch(`thoughts?id=eq.${thoughtId}`, { embedding });",
+    reason:
+      "The dossier's embedding write, onto the row `upsert_thought` returned one line " +
+      "earlier in the same function - this run's own row, by the id that call handed back. " +
+      "It writes ONLY `embedding`: no content, and no metadata, so there is no key through " +
+      "which a plane claim could be minted, and no result set for a predicate to bound.",
   },
 ];
 
@@ -731,6 +1131,205 @@ const PINNED: Pin[] = [
       "use-policy snapshot in its own columns, so the whole item is dropped and audited in " +
       "the loop below, not merely blanked.",
   },
+  // ────────────────────────────────────────────────────────────────────────────────────
+  // THE PUBLISHED WIKI - the reader round five did not have in any scan root.
+  //
+  // `wiki-service.mjs` runs `generate-wiki.mjs` on a schedule with `--batch` / `--ids` and
+  // NEVER with `--semantic-expand`, so the published compile does not call `match_thoughts`
+  // at all - the one corpus reader the SQL floor covers. It reads the TABLE, through
+  // PostgREST, and writes what comes back into markdown pages and `wiki_pages` rows that
+  // the viewer serves. These files are `.mjs` bind-mounted at runtime: they cannot import
+  // the TypeScript chokepoint, so the predicate is IN the statement, from the one shared
+  // module they CAN import (`_shared/corpus-plane.mjs`).
+  // ────────────────────────────────────────────────────────────────────────────────────
+  {
+    file: "docker/wiki-service/wiki-service.mjs",
+    sql: `const existing = await obFetch(
+        "GET",
+        \`thoughts?select=id&metadata->>note_path=eq.\${enc}&\${CORPUS_PLANE_OR}&limit=1\`,
+      );`,
+    marker: "CORPUS_PLANE_OR",
+    reason:
+      "The note-tree ingest's by-path lookup. Its answer decides which row the PATCH below " +
+      "OVERWRITES, so an unbounded lookup here is a write into another plane's row reached " +
+      "through a read nobody thought of as a read - the same shape as the dossier lookup in " +
+      "the recipe, and as `agent_memory_review` two rounds ago.",
+  },
+  {
+    file: "docker/wiki-service/wiki-service.mjs",
+    sql: `if (Array.isArray(existing) && existing[0]) {
+        await obFetch("PATCH", \`thoughts?id=eq.\${existing[0].id}&\${CORPUS_PLANE_OR}\`, { content, metadata: stripCorpusClaim(meta) });
+      } else {
+        await obFetch("POST", "thoughts", { content, metadata: stripCorpusClaim(meta) });
+      }`,
+    marker: "stripCorpusClaim",
+    reason:
+      "The note upsert, pinned as ONE block because the PATCH and the POST are the two " +
+      "halves of one decision and pinning either alone would let the other drift. The plane " +
+      "is on the PATCH's target as well as on the lookup that chose it, and both branches " +
+      "run their metadata through stripCorpusClaim so a note's frontmatter cannot mint an " +
+      "`exposure` and make its row invisible to every read above.",
+  },
+  {
+    file: "docker/wiki-service/wiki-service.mjs",
+    sql:
+      "await obFetch(\"DELETE\", `thoughts?metadata->>note_path=eq.${enc}&${CORPUS_PLANE_OR}`);",
+    marker: "CORPUS_PLANE_OR",
+    reason:
+      "The note delete. Bounded for the mirror-image reason to the reads: an unbounded " +
+      "DELETE by a path attribute would let a deleted vault file remove a row on another " +
+      "plane, which is a write across the boundary rather than a read across it - and this " +
+      "boundary is supposed to hold in both directions.",
+  },
+  {
+    file: "docker/wiki-service/wiki-service.mjs",
+    sql: `for (const tbl of ["sources", "thoughts"]) {
+      const plane = tbl === "thoughts" ? \`&\${CORPUS_PLANE_OR}\` : "";
+      const rows = await obFetch("GET", \`\${tbl}?select=id&\${orF}\${plane}&limit=200\`);`,
+    marker: "CORPUS_PLANE_OR",
+    reason:
+      "The change-watch poll. The table name is a LOOP VARIABLE, so no matcher can read the " +
+      "resource out of the template - which is exactly why it is pinned with the ternary " +
+      "that supplies the plane INSIDE the pinned text. It selects only ids and publishes " +
+      "nothing, but it is what decides that a compile should run, and a compile is the " +
+      "thing that publishes.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: `const query = [
+    \`entity_id=eq.\${entityId}\`,
+    \`select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts!inner(id,content,metadata,created_at)\`,
+    embeddedCorpusPlaneOr("thoughts"),
+    \`order=created_at.desc\`,
+    \`limit=\${limit}\`,
+  ].join("&");`,
+    marker: "embeddedCorpusPlaneOr",
+    reason:
+      "fetchLinkedThoughts - THE READ THE WHOLE PUBLISHED PAGE IS BUILT FROM. Every linked " +
+      "thought's full content goes into the synthesis payload and, for the cited ones, into " +
+      "a leaf page. `!inner` is load-bearing: without it PostgREST nulls the embedded child " +
+      "and KEEPS the parent, which still carries thought_id - an id is a disclosure.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: `const rows = await sb.rpc("match_thoughts", {
+    query_embedding: embedding,
+    match_threshold: 0.35,
+    match_count: 30,
+    filter: {},
+  });
+  return keepOnCorpusPlane(rows || []).map((r) => ({`,
+    marker: "keepOnCorpusPlane",
+    reason:
+      "semanticExpand, pinned TOGETHER WITH the filter that bounds it. The function's own " +
+      "body carries the plane (docker/init-agent-memory-corpus-plane.sql), but that file " +
+      "lands on a FRESH volume or by the promotion runbook - so on a database it has not " +
+      "been applied to the RPC returns everything. A compiler must not depend on a deploy " +
+      "step it does not perform to decide what it publishes.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: `const rows = keepOnCorpusPlane(
+        (await sb.get(
+          "thoughts",
+          \`select=id,content,metadata,created_at&id=in.(\${list})&\${CORPUS_PLANE_OR}\`,
+        )) || [],
+      );`,
+    marker: "CORPUS_PLANE_OR",
+    reason:
+      "emitLeafPages - the statement that renders a thought's RAW content into " +
+      "`content/thought/<id>.md` and into a `wiki_pages` row. This is the shortest path " +
+      "from the corpus to something a browser renders, and it was reached by id from a set " +
+      "the model cited, with no predicate anywhere between the table and the file.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: `(await sb.get(
+        "thoughts",
+        \`select=id&metadata->>type=eq.dossier&metadata->>wiki_entity_id=eq.\${entity.id}\` +
+          \`&\${CORPUS_PLANE_OR}&limit=1\`,
+      )) || [];`,
+    marker: "CORPUS_PLANE_OR",
+    reason:
+      "The dossier idempotency lookup. It selects only `id`, and that id is what the PATCH " +
+      "below overwrites - so unbounded it is a write into another plane's row through a " +
+      "lookup nobody would call a disclosure. Pinned with the predicate rather than " +
+      "exempted as an existence probe, because unlike a true probe its answer DOES reach " +
+      "the caller.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql:
+      "await sb.patch(`thoughts?id=eq.${existingId}`, { content, metadata: corpusMetadata, embedding });",
+    marker: "corpusMetadata",
+    reason:
+      "The dossier refresh. `corpusMetadata` is `stripCorpusClaim(metadata)`: the compiler " +
+      "spreads no caller metadata today, and this is what keeps that true when someone " +
+      "later folds an entity's own metadata into the dossier - a write that can carry an " +
+      "`exposure` can mint a claim, which is the one way to make a row invisible to every " +
+      "read predicate above.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: `const rpcRes = await sb.rpc("upsert_thought", {
+      p_content: content,
+      p_payload: { metadata: corpusMetadata },
+    });`,
+    marker: "corpusMetadata",
+    reason:
+      "The dossier insert through the dedup RPC. `upsert_thought` RETURNS public.thoughts, " +
+      "so it is a reader as well as a writer - its plane is inside its body, replaced by " +
+      "docker/init-agent-memory-corpus-plane.sql - and the payload is claim-stripped here " +
+      "for the same reason as the PATCH above.",
+  },
+  {
+    file: "recipes/entity-wiki/generate-wiki.mjs",
+    sql: `const inserted = await sb.post(
+      "thoughts",
+      { content, metadata: corpusMetadata, embedding },
+      { prefer: "return=representation" },
+    );`,
+    marker: "corpusMetadata",
+    reason:
+      "The dossier's direct-insert FALLBACK, taken when the RPC is missing - the path that " +
+      "bypasses `upsert_thought` and therefore bypasses the plane the database holds inside " +
+      "it. Claim-stripped in the statement, so the fallback is not the way a claim gets in.",
+  },
+  {
+    file: "recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs",
+    sql: `for (const tbl of ["sources", "thoughts"]) {
+    const plane = tbl === "thoughts" ? \`&\${CORPUS_PLANE_OR}\` : "";
+    const raw = await sb.get(\`\${tbl}?select=metadata,notebook&limit=20000\${plane}\`).catch(() => null) || [];
+    const rows = tbl === "thoughts" ? keepOnCorpusPlane(raw) : raw;`,
+    marker: "CORPUS_PLANE_OR",
+    reason:
+      "backfillNotebooks' enumeration, the OTHER script wiki-service executes (SYNTH_PATH). " +
+      "It reads only `metadata,notebook` - but a notebook name is the personal plane's own " +
+      "vocabulary, and every distinct string it finds becomes a THREAD, which becomes a " +
+      "published hub page. Per-table plane rather than one shared string, so a third table " +
+      "added to this loop cannot inherit 'no filter'.",
+  },
+  {
+    file: "integrations/kubernetes-deployment/k8s/init.sql",
+    sql: `    FROM thoughts t
+    WHERE 1 - (t.embedding <=> query_embedding) >= match_threshold
+      -- U5 exposure plane. THE SECOND DEFINITION OF match_thoughts IN THIS REPO: the
+      -- docker deployment's copy is guarded by docker/init-agent-memory-corpus-plane.sql,
+      -- and this k8s copy was not - found by the completeness gate once it learned to scan
+      -- a build context's .sql, not only its .ts. Same predicate, same meaning: an ABSENT
+      -- label is unclaimed general corpus and stays visible; a PRESENT label was minted by
+      -- the agent-memory mirror, and only the ops plane's rows are served. No parameter,
+      -- deliberately - a caller that may name its own plane is not bounded by one.
+      AND (t.metadata->>'exposure' IS NULL OR t.metadata->>'exposure' = ANY(ARRAY['ops']))`,
+    marker: "metadata->>'exposure'",
+    reason:
+      "The SECOND `match_thoughts` in this repo. `corpusFunctions()` below reads " +
+      "`docker/*.sql`, which is the initdb chain compose mounts - it cannot see this one, " +
+      "and neither could any previous scan, because a build context's `.sql` was not a file " +
+      "type this gate read. The k8s manifests are not what this stack deploys, but a second " +
+      "unguarded definition of the guarded function is precisely the thing a promotion " +
+      "runbook picks up by accident.",
+  },
 ];
 
 /**
@@ -786,6 +1385,9 @@ function auditSources(
     ).length;
     const strips = [...body.matchAll(/stripCorpusClaim\(/g)].length;
     for (const ref of refs) {
+      // DDL DEFINES THE RELATION AND READS NOTHING. Kept as an explicit skip beside the
+      // other verbs, not filtered out earlier, so the reason is where a reviewer looks.
+      if (ref.keyword === "DDL") continue;
       if (ref.table === CORPUS) {
         // THE CORPUS'S RULE IS ABOUT ITS LABEL. A row with no `metadata.exposure` is
         // unclaimed general corpus and readable everywhere, so a hand-written corpus WRITE
@@ -862,18 +1464,226 @@ Deno.test("the memory-table list is derived from the SQL that creates the tables
   assertEquals(tables.length >= 8, true, `expected at least 8 memory tables, derived ${tables.length}`);
 });
 
+/**
+ * THE RESIDUAL - mounted, readable inside two containers, and started by nothing.
+ *
+ * `../recipes` is bind-mounted read-only into openbrain-wiki and openbrain-workbench. Two
+ * of its scripts are RUN by the deployment (RECIPE_PATH, SYNTH_PATH) and a few more are
+ * imported by those; those are held to the clean standard by the test above this one. The
+ * rest are one-off import and backfill scripts that a person runs by hand with their own
+ * credentials - `import-chatgpt.py`, `enrich-thoughts.mjs`, the vercel/neon sample app, a
+ * second `match_thoughts` in a recipe's own SQL.
+ *
+ * THEY READ THE CORPUS WITH NO PLANE. That is a true finding and it is written down here
+ * rather than fixed, because fixing forty scripts nothing in this deployment executes is a
+ * different piece of work from closing the reader that does. What this register buys is
+ * that the set cannot grow quietly: the COUNT PER FILE is pinned, so a new unguarded reader
+ * anywhere under a mounted root - in a new file or an existing one - moves a number and
+ * this suite goes red. An inventory with a pinned count is not an exemption; it is the
+ * "here is precisely what remains" that the lift depends on.
+ *
+ * SO: DO NOT ADD A FILE HERE TO MAKE A FAILURE GO AWAY. A file belongs here only if the
+ * deployment does not start it. If it does, it goes in the guarded set above.
+ */
+const RESIDUAL: { file: string; findings: number }[] = [
+  { file: "recipes/adaptive-capture-classification/capture-with-gating.ts", findings: 1 },
+  { file: "recipes/brain-backup/backup-brain.mjs", findings: 1 },
+  { file: "recipes/chatgpt-conversation-import/chatgpt_parser.py", findings: 1 },
+  { file: "recipes/chatgpt-conversation-import/import-chatgpt.py", findings: 4 },
+  { file: "recipes/chatgpt-conversation-import/schema.sql", findings: 1 },
+  { file: "recipes/daily-digest/src/sections/ai-news.ts", findings: 1 },
+  { file: "recipes/email-history-import/rollback-chunking-columns.sql", findings: 4 },
+  { file: "recipes/google-activity-import/import-google-activity.mjs", findings: 1 },
+  { file: "recipes/grok-export-import/import-grok.mjs", findings: 1 },
+  { file: "recipes/instagram-import/import-instagram.mjs", findings: 1 },
+  { file: "recipes/journals-blogger-import/import-blogger.mjs", findings: 1 },
+  { file: "recipes/local-ollama-embeddings/embed-local.py", findings: 1 },
+  { file: "recipes/ob-graph/schema.sql", findings: 1 },
+  { file: "recipes/obsidian-vault-import/import-obsidian.py", findings: 3 },
+  { file: "recipes/perplexity-conversation-import/import-perplexity.py", findings: 4 },
+  { file: "recipes/repo-learning-coach/server/brain.ts", findings: 4 },
+  { file: "recipes/repo-learning-coach/src/App.tsx", findings: 1 },
+  { file: "recipes/schema-aware-routing/index.ts", findings: 2 },
+  { file: "recipes/thought-enrichment/enrich-thoughts.mjs", findings: 1 },
+  { file: "recipes/typed-edge-classifier/classify-edges.mjs", findings: 2 },
+  { file: "recipes/vercel-neon-telegram/sql/001-create-thoughts.sql", findings: 1 },
+  { file: "recipes/vercel-neon-telegram/sql/002-match-thoughts.sql", findings: 1 },
+  { file: "recipes/vercel-neon-telegram/src/lib/db.ts", findings: 2 },
+  { file: "recipes/wiki-compiler/compile-wiki.mjs", findings: 2 },
+  { file: "recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", findings: 5 },
+  { file: "recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", findings: 1 },
+  { file: "recipes/world-model-diagnostic-activation/schema-v2-draft.sql", findings: 1 },
+  { file: "recipes/x-twitter-import/import-x-twitter.mjs", findings: 1 },
+];
+
 Deno.test("EVERY memory- or corpus-table statement is routed, pinned or allow-listed", async () => {
   // THE TEST THIS FILE EXISTS FOR - over the derived root set, the derived file set, the
   // derived table set and the derived corpus-function set, rather than over lists somebody
   // typed.
+  //
+  // SCOPED TO THE GUARDED SET: every built image's source, plus the mounted files the
+  // deployment actually starts (derived - see invokedMountedFiles). The mounted-but-not-
+  // started remainder is inventoried by the next test, with counts, not waved through.
+  const sources = await shippingSources();
+  const guarded = await guardedFiles(sources);
+  const scoped = new Map([...sources].filter(([f]) => guarded.has(f)));
   const offenders = auditSources(
-    await shippingSources(),
+    scoped,
     await memoryTables(),
     await corpusFunctions(),
-    EXEMPT,
-    PINNED,
+    EXEMPT.filter((e) => guarded.has(e.file)),
+    PINNED.filter((pin) => guarded.has(pin.file)),
   );
   assertEquals(offenders, [], offenders.join("\n"));
+});
+
+Deno.test("the guarded set CONTAINS the wiki compiler, and it is not empty", async () => {
+  // The previous test can only be as good as the set it runs over, and the cheapest way to
+  // make it green would be to shrink that set. So the membership is asserted, not assumed:
+  // these are the files a verifier proved reach corpus content, in the order they were
+  // found.
+  const guarded = await guardedFiles(await shippingSources());
+  for (
+    const f of [
+      "integrations/kubernetes-deployment/index.ts",
+      "docker/extensions-server/index.ts",
+      "integrations/agent-memory-api/index.ts",
+      "integrations/entity-extraction-worker/index.ts",
+      // The three the deployment RUNS off the bind-mount, and the service that runs them.
+      "docker/wiki-service/wiki-service.mjs",
+      "recipes/entity-wiki/generate-wiki.mjs",
+      "recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs",
+      "recipes/_shared/wiki-pages.mjs",
+    ]
+  ) {
+    assertEquals(guarded.has(f), true, `the guarded set no longer contains ${f}`);
+  }
+  assertEquals(guarded.size > 100, true, `the guarded set collapsed to ${guarded.size} files`);
+});
+
+Deno.test("the RESIDUAL is an inventory with pinned counts, not an exemption", async () => {
+  const sources = await shippingSources();
+  const guarded = await guardedFiles(sources);
+  const rest = new Map([...sources].filter(([f]) => !guarded.has(f)));
+  assertEquals(rest.size > 0, true, "no mounted-but-unstarted files at all - derivation broke");
+  const offenders = auditSources(
+    rest,
+    await memoryTables(),
+    await corpusFunctions(),
+    EXEMPT.filter((e) => rest.has(e.file)),
+    PINNED.filter((pin) => rest.has(pin.file)),
+  );
+  const counts = new Map<string, number>();
+  for (const o of offenders) {
+    const file = o.slice(0, o.indexOf(":"));
+    counts.set(file, (counts.get(file) ?? 0) + 1);
+  }
+  const actual = [...counts].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([file, findings]) => `  { file: "${file}", findings: ${findings} },`).join("\n");
+  const expected = [...RESIDUAL].sort((a, b) => a.file.localeCompare(b.file))
+    .map((r) => `  { file: "${r.file}", findings: ${r.findings} },`).join("\n");
+  assertEquals(
+    actual,
+    expected,
+    "the mounted-but-unstarted inventory moved. If a file gained a finding, a new " +
+      "unguarded corpus reader was added to code that is mounted into two running " +
+      "containers. If one lost a finding, say so in the register. Current actual:\n" + actual,
+  );
+});
+
+Deno.test("no Dockerfile under a scan root names a memory or corpus table", async () => {
+  // NON_CODE_NAMES excludes Dockerfiles from the statement scan because they are build
+  // instructions. That exclusion is only honest if nothing is hiding in one - a RUN line
+  // that shells out to psql is a reader with no file extension.
+  const tables = [...await memoryTables(), CORPUS];
+  let read = 0;
+  for (const f of await allFilesUnderRoots()) {
+    const name = f.slice(f.lastIndexOf("/") + 1);
+    // DOCKERFILES ONLY. The other NON_CODE_NAMES entries are `.env` and `.gitignore`, and
+    // `.env` is the one file class this gate must NOT open: it is gitignored credentials,
+    // absent from a fresh clone, and reading it would make the verdict depend on whose
+    // checkout ran the suite. (It also, in this repo, contains the word `thoughts` - in a
+    // connection URL.)
+    if (!(name === "Dockerfile" || name.startsWith("Dockerfile."))) continue;
+    read++;
+    const src = await readRepo(f);
+    for (const t of tables) {
+      assertEquals(
+        new RegExp(`\\b${t}\\b`).test(src),
+        false,
+        `${f} names ${t} - a Dockerfile is excluded from the statement scan, so it must not ` +
+          `contain one`,
+      );
+    }
+  }
+  assertEquals(read > 0, true, "read no Dockerfiles at all - this test proved nothing");
+});
+
+Deno.test("every NON_CODE classification matches something real, and carries a reason", async () => {
+  // The same discipline the allow-list has: a classification that matches nothing is a
+  // stale opinion, and a stale opinion is how ".ts only" survived four rounds.
+  const files = await allFilesUnderRoots();
+  const names = files.map((f) => f.slice(f.lastIndexOf("/") + 1));
+  for (const n of [...NON_CODE, ...NON_CODE_NAMES]) {
+    assertEquals(n.why.length > 20, true, `NON_CODE ${n.ext} has no real reason: ${n.why}`);
+  }
+  for (const n of NON_CODE) {
+    assertEquals(
+      names.some((name) => extensionOf(name) === n.ext),
+      true,
+      `NON_CODE excludes "${n.ext}" but no file under any scan root has that extension - a ` +
+        `stale exclusion. Remove it, or find out why the files went away.`,
+    );
+  }
+  for (const n of NON_CODE_NAMES) {
+    assertEquals(
+      names.some((name) => name === n.ext || name.startsWith(`${n.ext}.`)),
+      true,
+      `NON_CODE_NAMES excludes "${n.ext}" but no file under any scan root is named that`,
+    );
+  }
+});
+
+Deno.test("EVERY file under a scan root is classified - code, non-code, or a test", async () => {
+  // The derivation is "scan everything, minus a written list". This is the test that says
+  // the minus-list is the ONLY thing keeping a file out: a file that is neither scanned nor
+  // named by a classification is the bug this round fixed, appearing again.
+  const files = await allFilesUnderRoots();
+  const scanned = new Set((await shippingSources()).keys());
+  for (const f of files) {
+    const name = f.slice(f.lastIndexOf("/") + 1);
+    if (scanned.has(f)) continue;
+    // NO BLANKET ESCAPE FOR "no extension". A file called `Makefile` or `run` is code that
+    // this walk would skip, so it has to be NAMED in NON_CODE_NAMES to be skipped.
+    const classified = isTestFile(name) || isNonCodeName(name) ||
+      NON_CODE.some((n) => n.ext === extensionOf(name));
+    assertEquals(classified, true, `${f} is neither scanned nor classified as non-code`);
+  }
+  assertEquals(files.length > scanned.size, true, "every file is scanned - suspicious");
+});
+
+Deno.test("EVERY scan root contributes at least one scanned file", async () => {
+  // The .ts-only walk scanned NOTHING in five of fourteen roots and the suite was green.
+  // shippingSources() now throws on the first empty root; this asserts the per-root count
+  // out loud, so the number is visible rather than merely non-zero somewhere.
+  const roots = await scanRoots();
+  const sources = await shippingSources();
+  for (const r of roots) {
+    const n = [...sources.keys()].filter((f) => f.startsWith(`${r}/`)).length;
+    assertEquals(n > 0, true, `scan root ${r} contributed ZERO scanned files`);
+  }
+  assertEquals(roots.length >= 14, true, `only ${roots.length} scan roots - a root went missing`);
+});
+
+Deno.test("the BIND-MOUNTED roots are in the scan, derived from compose volumes", async () => {
+  const mounts = await mountedRoots();
+  assertEquals(
+    mounts.map((m) => `${m.root}:${m.mountPoint}`),
+    ["recipes:/recipes"],
+    "the directory bind-mounts changed - a new one is IN SCOPE the same day",
+  );
+  const roots = await scanRoots();
+  for (const m of mounts) assertEquals(roots.includes(m.root), true, `${m.root} is not a root`);
 });
 
 Deno.test("ops and tools resolve NOTHING by hand - zero read statements", async () => {
@@ -919,8 +1729,19 @@ Deno.test("every allow-list and pin carries a real reason, and the lists stay SH
   }
   // Growing these is how a chokepoint dissolves one reasonable-looking exception at a time;
   // raising a number should feel like a decision, because it is one.
-  assertEquals(EXEMPT.length <= 6, true, `the allow-list has grown to ${EXEMPT.length}`);
-  assertEquals(PINNED.length <= 12, true, `the pin list has grown to ${PINNED.length}`);
+  //
+  // RAISED THIS ROUND, 6->9 and 12->25, and the reason is the same one that made the round
+  // legitimate: the scan went from `.ts` in fourteen build contexts to every code file in
+  // fourteen build contexts PLUS the `../recipes` bind-mount, and the published wiki
+  // compiler turned out to live in there. Twelve of the thirteen new pins are one statement
+  // each in `wiki-service.mjs`, `generate-wiki.mjs` and `synthesize-notebooks.mjs` - files
+  // that CANNOT import the TypeScript chokepoint because they are `.mjs` handed to a
+  // container by a bind-mount - and the thirteenth is a second `match_thoughts` definition
+  // in the k8s manifests. Each carries its predicate in its own text. A cap that forced
+  // those statements to stay unpinned would be a cap that preferred a short list to a
+  // closed boundary.
+  assertEquals(EXEMPT.length <= 9, true, `the allow-list has grown to ${EXEMPT.length}`);
+  assertEquals(PINNED.length <= 25, true, `the pin list has grown to ${PINNED.length}`);
 });
 
 // ---------------------------------------------------------------------------------
@@ -1005,13 +1826,155 @@ Deno.test("extensions-server's COPY of the predicate is character-identical", as
 // RED-PROOFS - one per property, each demonstrated failing
 // ---------------------------------------------------------------------------------
 
-/** The real set plus one synthetic file, fed to the real audit function. */
+/**
+ * The real GUARDED set plus one synthetic file, fed to the real audit function.
+ *
+ * Scoped exactly as the gate above is scoped, and that matters: a red-proof run over a
+ * wider set than the gate would be proving a property of code the gate does not enforce,
+ * and a red-proof run over a NARROWER one would be the easiest way to fake this whole file.
+ * The injected name is asserted to land inside the guarded set, so an injection that
+ * happened to fall into the residual inventory fails loudly instead of quietly passing.
+ */
 async function withInjected(name: string, src: string): Promise<string[]> {
   const sources = await shippingSources();
   assertEquals(sources.has(name), false, `${name} already exists - pick another probe name`);
+  const guarded = await guardedFiles(sources);
   sources.set(name, src);
-  return auditSources(sources, await memoryTables(), await corpusFunctions(), EXEMPT, PINNED);
+  const scoped = new Map([...sources].filter(([f]) => guarded.has(f) || f === name));
+  return auditSources(
+    scoped,
+    await memoryTables(),
+    await corpusFunctions(),
+    EXEMPT.filter((e) => scoped.has(e.file)),
+    PINNED.filter((pin) => scoped.has(pin.file)),
+  );
 }
+
+/**
+ * Same, but the synthetic file goes into a MOUNTED-BUT-UNSTARTED path, and it is checked
+ * against the residual inventory instead. This is the proof that the inventory is a gate
+ * and not a waiver: a new unguarded reader dropped into `../recipes` moves a count.
+ */
+async function withInjectedResidual(name: string, src: string): Promise<number> {
+  const sources = await shippingSources();
+  assertEquals(sources.has(name), false, `${name} already exists - pick another probe name`);
+  const guarded = await guardedFiles(sources);
+  assertEquals(guarded.has(name), false, `${name} is in the guarded set - wrong probe`);
+  sources.set(name, src);
+  const rest = new Map([...sources].filter(([f]) => !guarded.has(f)));
+  const offenders = auditSources(
+    rest,
+    await memoryTables(),
+    await corpusFunctions(),
+    EXEMPT.filter((e) => rest.has(e.file)),
+    PINNED.filter((pin) => rest.has(pin.file)),
+  );
+  return offenders.filter((o) => o.startsWith(`${name}:`)).length;
+}
+
+/**
+ * THE EXECUTED DEFEAT OF ROUND FIVE, verbatim, as a permanent test.
+ *
+ * These four statements, in this file, in this directory, left the suite at 213 passed /
+ * 0 failed. The identical bytes named `u5-probe.ts` failed 13 tests. `docker/wiki-service`
+ * has FIVE `.mjs` files and ZERO `.ts` files, so the gate scanned none of the openbrain-wiki
+ * image - and openbrain-wiki is the container that publishes the corpus to a browser.
+ */
+const MJS_DEFEAT = 'export async function leak(client, id) {\n' +
+  '  const a = await client.query(`SELECT id, content, metadata FROM thoughts WHERE id = $1`, [id]);\n' +
+  '  const b = await client.query(`SELECT id, summary, content FROM agent_memories WHERE id = $1`, [id]);\n' +
+  '  const c = await client.query(`SELECT * FROM agent_memory_recall_items WHERE trace_id = $1`, [id]);\n' +
+  '  const d = await client.query(`SELECT * FROM agent_memory_review_actions WHERE memory_id = $1`, [id]);\n' +
+  '  return { a, b, c, d };\n' +
+  '}\n';
+
+Deno.test("RED: the .mjs defeat - the SAME statements, in the image that publishes", async () => {
+  const offenders = await withInjected("docker/wiki-service/u5-probe.mjs", MJS_DEFEAT);
+  assertEquals(offenders.length, 4, `expected four findings, got: ${offenders.join(" | ")}`);
+  for (const o of offenders) assertEquals(o.includes("u5-probe.mjs"), true, o);
+});
+
+Deno.test("RED: extension is not the property - .mjs and .ts fail IDENTICALLY", async () => {
+  // The contrast that was measured on 2026-08-30: 0 findings vs 13 failing tests, for the
+  // same bytes. If these two ever diverge again, the walk has grown an extension rule.
+  const asMjs = await withInjected("docker/wiki-service/u5-probe.mjs", MJS_DEFEAT);
+  const asTs = await withInjected("docker/wiki-service/u5-probe.ts", MJS_DEFEAT);
+  assertEquals(
+    asMjs.map((o) => o.replace("u5-probe.mjs", "X")),
+    asTs.map((o) => o.replace("u5-probe.ts", "X")),
+    "the same statements are judged differently depending on the file extension",
+  );
+});
+
+Deno.test("RED: caught in a SHELL script - docker/backup ships three and no .ts", async () => {
+  const offenders = await withInjected(
+    "docker/backup/u5-probe.sh",
+    '#!/bin/sh\npsql -c "SELECT id, content FROM thoughts LIMIT 100" > /backup/dump.txt\n',
+  );
+  assertEquals(offenders.length, 1, offenders.join(" | "));
+  assertEquals(offenders[0].includes("reads the shared corpus"), true, offenders[0]);
+});
+
+Deno.test("RED: caught in PYTHON - docker/extract ships one .py and no .ts", async () => {
+  const offenders = await withInjected(
+    "docker/extract/u5_probe.py",
+    'rows = cur.execute("SELECT id, summary, content FROM agent_memories WHERE id = %s", (i,))\n',
+  );
+  assertEquals(offenders.length, 1, offenders.join(" | "));
+});
+
+Deno.test("RED: caught in a BIND-MOUNTED recipe the deployment RUNS", async () => {
+  // `../recipes` is in no build context, so round five's root derivation could not see it -
+  // while wiki-service executes two of its scripts on a schedule. A file imported by one of
+  // those is INVOKED, so it is held to the clean standard, not inventoried.
+  const sources = await shippingSources();
+  const guarded = await guardedFiles(sources);
+  assertEquals(
+    guarded.has("recipes/_shared/corpus-plane.mjs"),
+    true,
+    "the module the compiler imports for its predicate is not in the guarded set",
+  );
+  const offenders = await withInjected(
+    "recipes/_shared/citations.mjs.bak.mjs",
+    'export const q = (sb, id) => sb.get("thoughts", `select=id,content&id=eq.${id}`);\n',
+  );
+  assertEquals(offenders.length >= 1, true, "an unguarded corpus read in a mounted root passed");
+});
+
+Deno.test("RED: a new unguarded reader in the MOUNTED remainder moves the inventory", async () => {
+  // The residual register is a gate, not a waiver: a file nothing starts is still mounted
+  // read-only inside two running containers, and a new unguarded reader there changes a
+  // pinned number. Proven by injecting one and requiring the count to be non-zero - the
+  // inventory test compares the whole map, so a non-zero count for a file that is not in
+  // RESIDUAL is a failure there.
+  const n = await withInjectedResidual(
+    "recipes/x-twitter-import/u5-probe.mjs",
+    'export const q = (sb) => sb.get("thoughts", "select=id,content&limit=1000");\n',
+  );
+  assertEquals(n, 1, `expected one finding for the injected residual reader, got ${n}`);
+});
+
+Deno.test("the scanned set really CONTAINS non-.ts files, per root", async () => {
+  // The assertion that would have caught round five's defect the day it landed, stated as
+  // membership rather than as a count: these files exist, ship, and are not TypeScript.
+  const sources = await shippingSources();
+  for (
+    const f of [
+      "docker/wiki-service/wiki-service.mjs",
+      "docker/wiki-service/lib/entity-links.mjs",
+      "docker/backup/openbrain-db-backup.sh",
+      "recipes/entity-wiki/generate-wiki.mjs",
+      "recipes/_shared/corpus-plane.mjs",
+      "integrations/kubernetes-deployment/k8s/init.sql",
+    ]
+  ) {
+    assertEquals(sources.has(f), true, `${f} is not in the scanned set`);
+  }
+  const exts = new Set([...sources.keys()].map((f) => extensionOf(f.slice(f.lastIndexOf("/") + 1))));
+  for (const want of [".ts", ".mjs", ".sh", ".py", ".sql", ".tsx"]) {
+    assertEquals(exts.has(want), true, `no ${want} file is scanned anywhere`);
+  }
+});
 
 Deno.test("RED: a new unguarded resolver is caught WHATEVER IT IS NAMED", async () => {
   // THE VERIFIER'S EXACT DEFEAT, as a permanent test. This is the file and the statement that

@@ -32,6 +32,11 @@ import { clip } from "../../_shared/clip.mjs"; // surrogate-safe truncation for 
 import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../../_shared/write-if-changed.mjs";
 import { queueWikiPage, flushWikiPages } from "../../_shared/wiki-pages.mjs";
+// U5: this script PUBLISHES notebook hub pages, and it enumerates `thoughts` to discover
+// notebook names. A notebook name is short, but it is the personal plane's own vocabulary
+// ("therapy", a person's name), and a thread created from one becomes a published page.
+// Same predicate, same two layers, as the entity compiler. See _shared/corpus-plane.mjs.
+import { CORPUS_PLANE_OR, keepOnCorpusPlane } from "../../_shared/corpus-plane.mjs";
 
 function loadDotEnv() {
   for (const rel of [".env.local", ".env"]) {
@@ -228,10 +233,15 @@ async function backfillNotebooks(sb, threads) {
   const byName = new Map(threads.map((t) => [String(t.name).toLowerCase(), t]));
   const takenSlugs = new Set(threads.filter((t) => t.slug).map((t) => t.slug));
   const strings = new Set();
+  // U5: `sources` carries no exposure label and is not part of the corpus plane;
+  // `thoughts` is, so its enumeration takes the predicate in the request AND the re-check
+  // on arrival. Written as a per-table plane rather than one shared string, so adding a
+  // third table to this loop cannot silently inherit "no filter". `sources` has a real
+  // `notebook` column; thoughts store it under metadata.
   for (const tbl of ["sources", "thoughts"]) {
-    const rows = await sb.get(`${tbl}?select=metadata,notebook&limit=20000`).catch(() => null)
-      // sources has a real `notebook` column; thoughts store it under metadata.
-      || [];
+    const plane = tbl === "thoughts" ? `&${CORPUS_PLANE_OR}` : "";
+    const raw = await sb.get(`${tbl}?select=metadata,notebook&limit=20000${plane}`).catch(() => null) || [];
+    const rows = tbl === "thoughts" ? keepOnCorpusPlane(raw) : raw;
     for (const r of rows) {
       const nb = r.notebook ?? r?.metadata?.notebook;
       if (nb && String(nb).trim()) strings.add(String(nb));
