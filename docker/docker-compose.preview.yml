@@ -19,20 +19,28 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: preview
     volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
-      - ./init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro
-      - ./init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro
-      - ./init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro
-      - ./init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro
-      - ./init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro
-      - ./init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro
-      - ./init-threads-slug.sql:/docker-entrypoint-initdb.d/72-init-threads-slug.sql:ro
-      - ./init-source-revisions.sql:/docker-entrypoint-initdb.d/80-init-source-revisions.sql:ro
-      - ./init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro
-      - ./init-content-types.sql:/docker-entrypoint-initdb.d/84-init-content-types.sql:ro
-      - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro
-      - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/88-init-import-jobs.sql:ro
-      - ./init-source-editing.sql:/docker-entrypoint-initdb.d/90-init-source-editing.sql:ro
+      - ./init.sql:/docker-entrypoint-initdb.d/010-init.sql:ro
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/020-init-extensions.sql:ro
+      - ./init-sources.sql:/docker-entrypoint-initdb.d/030-init-sources.sql:ro
+      - ./init-graph.sql:/docker-entrypoint-initdb.d/040-init-graph.sql:ro
+      - ./init-grants.sql:/docker-entrypoint-initdb.d/050-init-grants.sql:ro
+      - ./init-source-graph.sql:/docker-entrypoint-initdb.d/060-init-source-graph.sql:ro
+      - ./init-threads.sql:/docker-entrypoint-initdb.d/070-init-threads.sql:ro
+      - ./init-threads-slug.sql:/docker-entrypoint-initdb.d/072-init-threads-slug.sql:ro
+      - ./init-source-revisions.sql:/docker-entrypoint-initdb.d/080-init-source-revisions.sql:ro
+      - ./init-source-retract.sql:/docker-entrypoint-initdb.d/082-init-source-retract.sql:ro
+      - ./init-content-types.sql:/docker-entrypoint-initdb.d/084-init-content-types.sql:ro
+      - ./init-source-chunks.sql:/docker-entrypoint-initdb.d/086-init-source-chunks.sql:ro
+      - ./init-import-jobs.sql:/docker-entrypoint-initdb.d/088-init-import-jobs.sql:ro
+      - ./init-source-editing.sql:/docker-entrypoint-initdb.d/090-init-source-editing.sql:ro
+      - ./init-thread-embedding.sql:/docker-entrypoint-initdb.d/092-init-thread-embedding.sql:ro
+      - ./init-claims.sql:/docker-entrypoint-initdb.d/094-init-claims.sql:ro
+      - ./init-research-jobs.sql:/docker-entrypoint-initdb.d/096-init-research-jobs.sql:ro
+      - ./init-ideas.sql:/docker-entrypoint-initdb.d/098-init-ideas.sql:ro
+      - ./init-wiki-pages.sql:/docker-entrypoint-initdb.d/099-init-wiki-pages.sql:ro
+      - ./init-agent-memory.sql:/docker-entrypoint-initdb.d/100-init-agent-memory.sql:ro
+      - ./init-wiki-pages-links.sql:/docker-entrypoint-initdb.d/110-init-wiki-pages-links.sql:ro
+      - ./init-agent-memory-idempotency.sql:/docker-entrypoint-initdb.d/120-init-agent-memory-idempotency.sql:ro
     networks: [pnet]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]

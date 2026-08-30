@@ -11,6 +11,7 @@ import {
   DEFAULT_RECALL_STATUSES,
   defaultWritebackIsRecallable,
   detectUnsafeContent,
+  isRowRecallableBy,
   isSafeToStore,
   MAX_CONTENT_CHARS,
   recallReviewStatuses,
@@ -38,6 +39,65 @@ Deno.test("INVARIANT test can FAIL - the DB default would break the plane", () =
   // the state it lands in, and the default recall would never return it.
   const asIfColumnDefaultApplied = { review_status: "pending" as ReviewStatus };
   assertEquals(defaultWritebackIsRecallable(asIfColumnDefaultApplied), false);
+});
+
+Deno.test("INVARIANT: the WHOLE row is recallable, not just its review_status", () => {
+  // The one-column check above missed a real hole: the defaults said
+  // visibility:'project' while project_id stayed NULL, so a project-scoped recall matched
+  // nothing. Compose every discriminating column, or the invariant only guards the column
+  // someone happened to think of.
+  const row = {
+    workspace_id: "ws1",
+    project_id: "p1",
+    visibility: WRITEBACK_DEFAULTS.visibility,
+    review_status: WRITEBACK_DEFAULTS.review_status,
+    lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
+  };
+  assertEquals(isRowRecallableBy(row, { workspace_id: "ws1" }), true);
+  assertEquals(isRowRecallableBy(row, { workspace_id: "ws1", project_id: "p1" }), true);
+});
+
+Deno.test("INVARIANT test can FAIL - project-visible with no project is unreachable", () => {
+  // The exact shape that shipped: RED proof that the widened invariant sees it.
+  const orphan = {
+    workspace_id: "ws1",
+    project_id: null,
+    visibility: "project" as const,
+    review_status: WRITEBACK_DEFAULTS.review_status,
+    lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
+  };
+  assertEquals(isRowRecallableBy(orphan, { workspace_id: "ws1", project_id: "p1" }), false);
+});
+
+Deno.test("a superseded row is never recallable, whatever its review_status", () => {
+  const stale = {
+    workspace_id: "ws1",
+    project_id: null,
+    visibility: "workspace" as const,
+    review_status: "confirmed" as ReviewStatus,
+    lifecycle_status: "superseded",
+  };
+  assertEquals(isRowRecallableBy(stale, { workspace_id: "ws1" }), false);
+});
+
+Deno.test("personal memories are not reachable by a default recall", () => {
+  const personal = {
+    workspace_id: "ws1",
+    project_id: null,
+    visibility: "personal" as const,
+    review_status: WRITEBACK_DEFAULTS.review_status,
+    lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
+  };
+  assertEquals(isRowRecallableBy(personal, { workspace_id: "ws1" }), false);
+});
+
+Deno.test("the predicate agrees with the SQL builder on which columns it filters", () => {
+  // If the SQL grows a clause the predicate does not mirror, the invariant quietly stops
+  // covering it - which is how the visibility hole survived. Cheap structural pin.
+  const f = buildRecallScopeFilter({ workspace_id: "ws1", project_id: "p1" });
+  for (const col of ["workspace_id", "project_id", "visibility", "lifecycle_status", "review_status"]) {
+    assertEquals(f.sql.includes(col), true, `SQL must still filter ${col}`);
+  }
 });
 
 Deno.test("writeback defaults are evidence, never instruction", () => {

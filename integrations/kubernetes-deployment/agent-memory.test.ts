@@ -32,7 +32,14 @@ Deno.test("SEAM: the built row derives its policy fields from WRITEBACK_DEFAULTS
   // Compared against the CONSTANTS, never against string literals - a literal here would
   // pass while the two drifted apart, which is the exact failure this guards.
   assertEquals(row.review_status, WRITEBACK_DEFAULTS.review_status);
-  assertEquals(row.visibility, WRITEBACK_DEFAULTS.visibility);
+  // Visibility comes from the defaults when the write NAMES a project. Without one the
+  // row is workspace-visible instead: it cannot honestly claim project scope with no
+  // project, and claiming it made the row unreachable to a project-scoped recall.
+  assertEquals(
+    buildWritebackRow({ ...INPUT, project_id: "p1" }).visibility,
+    WRITEBACK_DEFAULTS.visibility,
+  );
+  assertEquals(row.visibility, "workspace");
   assertEquals(row.lifecycle_status, WRITEBACK_DEFAULTS.lifecycle_status);
   assertEquals(row.provenance_status, WRITEBACK_DEFAULTS.provenance_status);
   assertEquals(row.can_use_as_evidence, WRITEBACK_DEFAULTS.can_use_as_evidence);

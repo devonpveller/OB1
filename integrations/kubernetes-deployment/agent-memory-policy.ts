@@ -94,6 +94,41 @@ export function defaultWritebackIsRecallable(
   return gate.includes(writebackDefaults.review_status);
 }
 
+/** The columns the recall filter actually discriminates on. */
+export interface RecallableRow {
+  workspace_id: string;
+  project_id: string | null;
+  visibility: Visibility;
+  review_status: ReviewStatus;
+  lifecycle_status: string;
+}
+
+/**
+ * Would `buildRecallScopeFilter(scope)` return this row?
+ *
+ * A TypeScript mirror of the SQL, and the reason it exists: the one-column check above
+ * only ever compared `review_status`, so it could not see a disagreement in any OTHER
+ * column - and there was one. The defaults set `visibility: 'project'` while leaving
+ * `project_id` NULL, so a project-scoped recall (`am.project_id = $n`) matched nothing.
+ * Writes succeeded, that recall returned nothing, nothing errored: the exact Hermes
+ * failure this module's header claims to prevent, reproduced one column over and missed
+ * because the invariant was too narrow to look there.
+ *
+ * Keep this in step with buildRecallScopeFilter. They are tested against each other.
+ */
+export function isRowRecallableBy(row: RecallableRow, scope: RecallScope): boolean {
+  if (row.workspace_id !== scope.workspace_id) return false;
+  if (scope.project_id !== undefined && scope.project_id !== null) {
+    if (row.project_id !== scope.project_id) return false;
+  }
+  const visibility = scope.visibility && scope.visibility.length
+    ? scope.visibility
+    : (["project", "workspace", "organization"] as Visibility[]);
+  if (!visibility.includes(row.visibility)) return false;
+  if (row.lifecycle_status !== "active") return false;
+  return recallReviewStatuses(scope.includeUnconfirmed).includes(row.review_status);
+}
+
 export interface RecallScope {
   workspace_id: string;
   project_id?: string | null;

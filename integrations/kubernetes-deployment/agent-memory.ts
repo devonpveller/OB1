@@ -84,7 +84,13 @@ export function buildWritebackRow(
     // Every one of these comes FROM the policy module. If you find yourself typing a
     // string literal into this block, the invariant test upstream has just stopped
     // meaning anything.
-    visibility: input.visibility ?? WRITEBACK_DEFAULTS.visibility,
+    // A row cannot be PROJECT-visible without naming a project. The defaults say
+    // visibility 'project', but a writeback with no project_id then produced a row that a
+    // project-scoped recall (`am.project_id = $n`) could never match - written fine,
+    // never returned, nothing logged. So an unscoped write is workspace-visible, which is
+    // what it actually is. An explicit caller visibility still wins.
+    visibility: input.visibility ??
+      (input.project_id ? WRITEBACK_DEFAULTS.visibility : "workspace"),
     review_status: overrides.review_status ?? WRITEBACK_DEFAULTS.review_status,
     lifecycle_status: WRITEBACK_DEFAULTS.lifecycle_status,
     provenance_status: WRITEBACK_DEFAULTS.provenance_status,
