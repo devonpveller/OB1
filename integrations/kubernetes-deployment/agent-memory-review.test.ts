@@ -8,6 +8,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   isReviewAction,
+  SCHEMA_REVIEW_ACTIONS,
   planTransition,
   REVIEW_ACTIONS,
   type ReviewAction,
@@ -29,7 +30,9 @@ Deno.test("INVARIANT: confirming a default writeback produces a recallable state
   const plan = planTransition(WRITEBACK_DEFAULTS.review_status, "confirm");
   assertEquals(plan.ok, true);
   if (!plan.ok) return;
-  assertEquals(DEFAULT_RECALL_STATUSES.includes(plan.review_status), true);
+  // confirm always sets a status; the null branch is other actions' business.
+  assertEquals(plan.review_status !== null, true);
+  assertEquals(DEFAULT_RECALL_STATUSES.includes(plan.review_status!), true);
 });
 
 Deno.test("INVARIANT: rejecting removes it from EVERY recall path, not just the default", () => {
@@ -39,7 +42,7 @@ Deno.test("INVARIANT: rejecting removes it from EVERY recall path, not just the 
   // Both gates - including the permissive one. An opt-in flag named include_unconfirmed
   // must never quietly also mean "include the things we threw away".
   for (const flag of [false, true]) {
-    assertEquals(recallReviewStatuses(flag).includes(plan.review_status), false);
+    assertEquals(recallReviewStatuses(flag).includes(plan.review_status!), false);
   }
 });
 
@@ -92,22 +95,31 @@ Deno.test("NOTHING here sets can_use_as_instruction - not even confirm", () => {
   assertEquals("can_use_as_instruction" in plan, false);
 });
 
-Deno.test("only confirm touches provenance", () => {
-  for (const action of ["reject", "supersede", "dispute"] as ReviewAction[]) {
+Deno.test("only confirm and promote_exposure vouch (provenance user_confirmed)", () => {
+  // Widening exposure IS a human vouching for what the memory contains, so it earns the
+  // same provenance. Everything else either records a different provenance or none.
+  for (const action of REVIEW_ACTIONS) {
     const plan = planTransition("confirmed", action);
-    assertEquals(plan.ok, true, action);
     if (!plan.ok) continue;
-    assertEquals(plan.provenance_status, null, action);
-    assertEquals(plan.clears_confirmation_requirement, false, action);
+    const vouches = action === "confirm" || action === "promote_exposure";
+    assertEquals(plan.provenance_status === "user_confirmed", vouches, action);
+  }
+  // And only confirm clears the confirmation requirement.
+  for (const action of REVIEW_ACTIONS) {
+    const plan = planTransition("evidence_only", action);
+    if (!plan.ok) continue;
+    assertEquals(plan.clears_confirmation_requirement, action === "confirm", action);
   }
 });
 
 // ── lifecycle side of each action ────────────────────────────────────────────
-Deno.test("reject, supersede and dispute each move lifecycle_status out of active", () => {
+Deno.test("reject, supersede, merge, dispute and mark_stale move lifecycle out of active", () => {
   const expected: Record<string, string> = {
     reject: "rejected",
     supersede: "superseded",
+    merge: "superseded",
     dispute: "disputed",
+    mark_stale: "stale",
   };
   for (const [action, lifecycle] of Object.entries(expected)) {
     const plan = planTransition("evidence_only", action as ReviewAction);
@@ -132,9 +144,57 @@ Deno.test("every review_status used here is one the schema permits", () => {
   const allowed = ["pending", "confirmed", "evidence_only", "restricted", "rejected", "stale", "merged"];
   for (const action of REVIEW_ACTIONS) {
     const plan = planTransition("evidence_only", action);
-    if (!plan.ok) continue;
+    // null is legitimate: `edit` and `promote_exposure` deliberately leave standing alone.
+    if (!plan.ok || plan.review_status === null) continue;
     assertEquals(allowed.includes(plan.review_status), true, `${action} -> ${plan.review_status}`);
   }
+});
+
+Deno.test("THE ACTION SET IS THE SCHEMA'S - all nine, not a subset", () => {
+  // An earlier version implemented four of the nine in agent_memory_review_actions' CHECK
+  // and wrote only audit events, never the review-actions table. The table was in a file
+  // that had been read.
+  const schemaNine = [
+    "confirm", "edit", "evidence_only", "restrict_scope", "mark_stale",
+    "merge", "reject", "dispute", "supersede",
+  ].sort();
+  assertEquals([...SCHEMA_REVIEW_ACTIONS].sort(), schemaNine);
+  // Plus the migrated tenth - the only widening path in the system.
+  assertEquals(REVIEW_ACTIONS.includes("promote_exposure"), true);
+});
+
+Deno.test("promote_exposure is the ONLY action that widens exposure", () => {
+  for (const action of REVIEW_ACTIONS) {
+    const plan = planTransition("confirmed", action);
+    if (!plan.ok) continue;
+    if (action === "promote_exposure") {
+      assertEquals(plan.exposure, "ops");
+    } else {
+      // Every other action either leaves the axis alone or narrows it.
+      assertEquals(plan.exposure === "ops", false, `${action} must not widen exposure`);
+    }
+  }
+});
+
+Deno.test("restrict_scope narrows the exposure axis, not just the review standing", () => {
+  // A "restrict scope" that left exposure alone would restrict nothing an agent-facing
+  // recall can see - the memory would stay on the ops plane and keep being returned.
+  const plan = planTransition("confirmed", "restrict_scope");
+  assertEquals(plan.ok, true);
+  if (!plan.ok) return;
+  assertEquals(plan.exposure, "personal");
+  assertEquals(plan.review_status, "restricted");
+});
+
+Deno.test("edit changes nothing about standing - an edit is not an endorsement", () => {
+  // Otherwise a reviewer could promote a memory by rewording it.
+  const plan = planTransition("pending", "edit");
+  assertEquals(plan.ok, true);
+  if (!plan.ok) return;
+  assertEquals(plan.review_status, null);
+  assertEquals(plan.lifecycle_status, null);
+  assertEquals(plan.provenance_status, null);
+  assertEquals(plan.exposure, null);
 });
 
 Deno.test("every audit event used here is one the schema permits", () => {

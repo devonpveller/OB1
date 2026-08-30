@@ -5,71 +5,145 @@
  * the interesting failures are DISAGREEMENTS between two sides, and they only show up when
  * the sides can be composed in a test.
  *
- * WHY THIS EXISTS. Verified before it was written: there is no `UPDATE agent_memories` and
- * no `SET review_status` anywhere in this codebase. Every memory is written 'evidence_only'
- * and stays there for ever. 'pending' can never become 'confirmed'; nothing can be
- * 'rejected', 'superseded' or 'merged'. The schema defines the entire lifecycle
- * (init-agent-memory.sql:74) and reserves the audit event types for it (:230) - and nothing
- * could emit one. The recall gate was a gate onto a room with no other door.
+ * THE ACTION SET IS THE SCHEMA'S, NOT A SUBSET OF IT. `agent_memory_review_actions`
+ * (init-agent-memory.sql:156) has a CHECK listing nine actions. An earlier version of this
+ * module implemented four of them and wrote only `agent_memory_audit_events` - it never
+ * touched the review-actions table at all, which exists precisely to record who changed a
+ * memory's standing and what it looked like before. The table was in a file I had read.
+ *
+ * `promote_exposure` is a TENTH, added by migration: PLAN §1.1 makes human review the only
+ * path that widens a memory's exposure, "a `promote_exposure` action beside the existing
+ * `restrict_scope`". Without it a demoted memory could never be elevated - the conservative
+ * direction, but not the designed one.
  *
  * THE RULE THAT SHAPES EVERYTHING HERE: a rejection must mean something. The recall gate
- * deliberately returns 'rejected' on NO path, including under `include_unconfirmed`,
- * because a reviewer who throws a memory away has to be able to trust it stays thrown away.
- * That guarantee is worth nothing if a later promote can quietly walk it back, so
- * 'rejected' is TERMINAL here. Reversing one is a deliberate act with a new memory and a
- * new review, not an UPDATE that leaves no trace of the disagreement.
+ * returns 'rejected' on NO path, including under `include_unconfirmed`, because a reviewer
+ * who throws a memory away has to be able to trust it stays thrown away. That guarantee is
+ * worth nothing if a later confirm can quietly walk it back, so 'rejected' is TERMINAL.
+ * Reversing one is a deliberate act with a new memory and a new review, not an UPDATE that
+ * leaves no trace of the disagreement.
  */
 
-import type { ReviewStatus } from "./agent-memory-policy.ts";
+import type { Exposure, ReviewStatus } from "./agent-memory-policy.ts";
 
-/** What a reviewer can ask for. Deliberately a small closed set. */
-export type ReviewAction = "confirm" | "reject" | "supersede" | "dispute";
+/** The schema's nine, plus the migration's `promote_exposure`. */
+export type ReviewAction =
+  | "confirm"
+  | "edit"
+  | "evidence_only"
+  | "restrict_scope"
+  | "promote_exposure"
+  | "mark_stale"
+  | "merge"
+  | "reject"
+  | "dispute"
+  | "supersede";
 
-/** Audit event types the schema permits for these actions (init-agent-memory.sql:230). */
+/** Audit event types the schema permits (init-agent-memory.sql:230). */
 export type ReviewAuditEvent =
   | "memory_confirmed"
+  | "memory_edited"
   | "memory_rejected"
   | "memory_superseded"
   | "memory_disputed";
 
 export type LifecycleStatus = "active" | "stale" | "superseded" | "disputed" | "rejected";
 
-/**
- * The states an action may be applied FROM.
- *
- * 'rejected' appears in no source list - see the module note. 'merged' and 'stale' are also
- * absent: both describe a memory that has already been dealt with, and quietly re-reviewing
- * one would hide that it had been.
- */
-const TRANSITIONS: Readonly<Record<ReviewAction, {
+/** Everything a reviewer may act on. 'rejected' is absent from every list - see the note. */
+const REVIEWABLE: readonly ReviewStatus[] = Object.freeze([
+  "pending",
+  "evidence_only",
+  "restricted",
+  "confirmed",
+]);
+
+interface Rule {
   from: readonly ReviewStatus[];
-  to: ReviewStatus;
+  review_status?: ReviewStatus;
   lifecycle?: LifecycleStatus;
+  provenance?: "user_confirmed" | "superseded" | "disputed";
+  /** Only two actions touch the exposure axis, and only one of them widens. */
+  exposure?: Exposure;
   event: ReviewAuditEvent;
-}>> = Object.freeze({
+  clears_confirmation_requirement?: boolean;
+}
+
+const TRANSITIONS: Readonly<Record<ReviewAction, Rule>> = Object.freeze({
+  // A human vouches. This is the only action that sets provenance 'user_confirmed', which
+  // is what makes a memory ELIGIBLE for instruction-grade under the schema CHECK - it does
+  // not grant it, and nothing here does.
   confirm: {
     from: ["pending", "evidence_only", "restricted"],
-    to: "confirmed",
+    review_status: "confirmed",
+    provenance: "user_confirmed",
     event: "memory_confirmed",
+    clears_confirmation_requirement: true,
   },
+  // Usable as evidence, but nobody is vouching for it as instruction. The deliberate
+  // middle rung of the trust ladder.
+  evidence_only: {
+    from: ["pending", "restricted", "confirmed"],
+    review_status: "evidence_only",
+    event: "memory_edited",
+  },
+  // The content changed. Standing is untouched on purpose: an edit is not an endorsement,
+  // and silently promoting an edited memory would let a reviewer confirm by rewording.
+  edit: { from: REVIEWABLE, event: "memory_edited" },
+  // Narrow it. Moves the memory to the personal plane as well as restricting its review
+  // standing - "restrict scope" that left the exposure axis alone would restrict nothing
+  // an agent-facing recall can see.
+  restrict_scope: {
+    from: ["pending", "evidence_only", "confirmed"],
+    review_status: "restricted",
+    exposure: "personal",
+    event: "memory_edited",
+  },
+  // THE ONLY WIDENING PATH IN THE SYSTEM (PLAN §1.1). It requires a human, it is recorded
+  // in agent_memory_review_actions with the before/after, and it also stamps provenance
+  // 'user_confirmed' - widening exposure IS a human vouching for what the memory contains.
+  promote_exposure: {
+    from: REVIEWABLE,
+    exposure: "ops",
+    provenance: "user_confirmed",
+    event: "memory_edited",
+  },
+  mark_stale: {
+    from: REVIEWABLE,
+    review_status: "stale",
+    lifecycle: "stale",
+    event: "memory_edited",
+  },
+  // merge and supersede reach the same STATE and record different INTENT. The schema has
+  // one review_status ('merged') and one lifecycle ('superseded') between them, so the
+  // distinction lives where distinctions belong - in the action row and its payload
+  // (`superseded_by`), not in a status value that does not exist.
+  merge: {
+    from: REVIEWABLE,
+    review_status: "merged",
+    lifecycle: "superseded",
+    provenance: "superseded",
+    event: "memory_superseded",
+  },
+  supersede: {
+    from: REVIEWABLE,
+    review_status: "merged",
+    lifecycle: "superseded",
+    provenance: "superseded",
+    event: "memory_superseded",
+  },
+  // Confirmed IS rejectable: a reviewer who later finds a confirmed memory wrong must be
+  // able to withdraw it, and that is the direction that makes the store safer.
   reject: {
-    // Confirmed IS rejectable: a reviewer who later finds a confirmed memory wrong must be
-    // able to withdraw it, and that is the direction that makes the store safer.
-    from: ["pending", "evidence_only", "restricted", "confirmed"],
-    to: "rejected",
+    from: REVIEWABLE,
+    review_status: "rejected",
     lifecycle: "rejected",
     event: "memory_rejected",
   },
-  supersede: {
-    from: ["pending", "evidence_only", "restricted", "confirmed"],
-    to: "merged",
-    lifecycle: "superseded",
-    event: "memory_superseded",
-  },
   dispute: {
-    from: ["pending", "evidence_only", "restricted", "confirmed"],
-    to: "restricted",
+    from: REVIEWABLE,
+    review_status: "restricted",
     lifecycle: "disputed",
+    provenance: "disputed",
     event: "memory_disputed",
   },
 });
@@ -77,12 +151,12 @@ const TRANSITIONS: Readonly<Record<ReviewAction, {
 export interface TransitionPlan {
   ok: true;
   action: ReviewAction;
-  review_status: ReviewStatus;
+  /** Absent when the action does not change review standing (`edit`, `promote_exposure`). */
+  review_status: ReviewStatus | null;
   lifecycle_status: LifecycleStatus | null;
+  provenance_status: "user_confirmed" | "superseded" | "disputed" | null;
+  exposure: Exposure | null;
   event: ReviewAuditEvent;
-  /** Set only by `confirm`: a human vouching is what 'user_confirmed' means. */
-  provenance_status: "user_confirmed" | null;
-  /** Set only by `confirm`: the row no longer needs a confirmation it has received. */
   clears_confirmation_requirement: boolean;
 }
 
@@ -92,13 +166,6 @@ export interface TransitionRefusal {
   message: string;
 }
 
-/**
- * Decide what an action does to a memory in a given state - or refuse, with a reason a
- * caller can show a human.
- *
- * Returns the WHOLE change as data rather than performing it, so the SQL and the policy can
- * be tested against each other instead of only through a database.
- */
 export function planTransition(
   current: ReviewStatus,
   action: ReviewAction,
@@ -127,17 +194,22 @@ export function planTransition(
   return {
     ok: true,
     action,
-    review_status: rule.to,
+    review_status: rule.review_status ?? null,
     lifecycle_status: rule.lifecycle ?? null,
+    provenance_status: rule.provenance ?? null,
+    exposure: rule.exposure ?? null,
     event: rule.event,
-    provenance_status: action === "confirm" ? "user_confirmed" : null,
-    clears_confirmation_requirement: action === "confirm",
+    clears_confirmation_requirement: rule.clears_confirmation_requirement === true,
   };
 }
 
-/** Every action this module accepts. Exported so a route can validate before touching a DB. */
 export const REVIEW_ACTIONS: readonly ReviewAction[] = Object.freeze(
   Object.keys(TRANSITIONS) as ReviewAction[],
+);
+
+/** The nine the schema's CHECK already permits, i.e. everything except the migrated one. */
+export const SCHEMA_REVIEW_ACTIONS: readonly ReviewAction[] = Object.freeze(
+  REVIEW_ACTIONS.filter((a) => a !== "promote_exposure"),
 );
 
 export function isReviewAction(x: unknown): x is ReviewAction {

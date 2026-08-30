@@ -41,6 +41,7 @@ services:
       - ./init-agent-memory.sql:/docker-entrypoint-initdb.d/100-init-agent-memory.sql:ro
       - ./init-wiki-pages-links.sql:/docker-entrypoint-initdb.d/110-init-wiki-pages-links.sql:ro
       - ./init-agent-memory-idempotency.sql:/docker-entrypoint-initdb.d/120-init-agent-memory-idempotency.sql:ro
+      - ./init-agent-memory-promote-exposure.sql:/docker-entrypoint-initdb.d/130-init-agent-memory-promote-exposure.sql:ro
     networks: [pnet]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]

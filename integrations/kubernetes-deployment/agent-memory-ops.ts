@@ -16,6 +16,7 @@
 
 import {
   isReviewAction,
+  REVIEW_ACTIONS,
   planTransition,
   type ReviewAction,
   validateActor,
@@ -48,6 +49,7 @@ export type ReviewOutcome =
     from: ReviewStatus;
     review_status: ReviewStatus;
     lifecycle_status: string;
+    exposure: string;
   }
   | { ok: false; refused: string; message: string };
 
@@ -73,7 +75,7 @@ export async function performReview(
     return {
       ok: false,
       refused: "invalid_request",
-      message: "action must be one of: confirm, reject, supersede, dispute",
+      message: `action must be one of: ${REVIEW_ACTIONS.join(", ")}`,
     };
   }
   const actor = validateActor(input.actor);
@@ -94,11 +96,18 @@ export async function performReview(
     await client.queryObject("BEGIN");
 
     const found = await client.queryObject(
-      `SELECT review_status, lifecycle_status FROM agent_memories WHERE id = $1 FOR UPDATE`,
+      `SELECT review_status, lifecycle_status, provenance_status,
+              COALESCE(metadata->>'exposure', 'personal') AS exposure
+         FROM agent_memories WHERE id = $1 FOR UPDATE`,
       [memoryId],
     );
     const row = found.rows[0] as
-      | { review_status: ReviewStatus; lifecycle_status: string }
+      | {
+        review_status: ReviewStatus;
+        lifecycle_status: string;
+        provenance_status: string;
+        exposure: string;
+      }
       | undefined;
     if (!row) {
       await client.queryObject("ROLLBACK");
@@ -114,8 +123,15 @@ export async function performReview(
     // Built as a list so the columns a given action does NOT touch are genuinely absent
     // from the statement, rather than being set to their current values - which would make
     // every action look like it rewrote the whole row in any future column-level audit.
-    const sets = ["review_status = $2", "updated_at = now()"];
-    const args: unknown[] = [memoryId, plan.review_status];
+    // Only the columns this action actually changes. `edit` and `promote_exposure` do not
+    // touch review_status at all, and a statement that set it to its current value would
+    // make every action look like a full-row rewrite to any later column-level audit.
+    const sets = ["updated_at = now()"];
+    const args: unknown[] = [memoryId];
+    if (plan.review_status) {
+      sets.push(`review_status = $${args.length + 1}`);
+      args.push(plan.review_status);
+    }
     if (plan.lifecycle_status) {
       sets.push(`lifecycle_status = $${args.length + 1}`);
       args.push(plan.lifecycle_status);
@@ -123,22 +139,64 @@ export async function performReview(
     if (plan.provenance_status) {
       sets.push(`provenance_status = $${args.length + 1}`);
       args.push(plan.provenance_status);
-      sets.push("last_confirmed_at = now()");
+      if (plan.provenance_status === "user_confirmed") sets.push("last_confirmed_at = now()");
+    }
+    // §1.1: exposure lives in metadata, so a change is a jsonb merge rather than a column
+    // assignment. jsonb_build_object, never a JSON literal - a literal would also have to
+    // survive whatever quoting the caller's transport applies.
+    if (plan.exposure) {
+      sets.push(
+        `metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('exposure', $${args.length + 1}::text)`,
+      );
+      args.push(plan.exposure);
     }
     if (plan.clears_confirmation_requirement) {
       sets.push("requires_user_confirmation = false");
     }
     const updated = await client.queryObject(
       `UPDATE agent_memories SET ${sets.join(", ")} WHERE id = $1
-       RETURNING review_status, lifecycle_status, workspace_id, project_id`,
+       RETURNING review_status, lifecycle_status, provenance_status, workspace_id, project_id,
+                 COALESCE(metadata->>'exposure', 'personal') AS exposure`,
       args,
     );
     const after = updated.rows[0] as {
       review_status: ReviewStatus;
       lifecycle_status: string;
+      provenance_status: string;
       workspace_id: string;
       project_id: string | null;
+      exposure: string;
     };
+
+    // THE REVIEW-ACTION ROW. This table exists to record who changed a memory's standing
+    // and what it looked like before, and an earlier version of this file never wrote to
+    // it - it recorded only the audit event, which carries no before/after. Same
+    // transaction as the change, for the same reason the audit event is: a standing change
+    // nobody can reconstruct is worse than none, because recall hands the memory out on
+    // its new standing and there is no record of what it used to be.
+    await client.queryObject(
+      `INSERT INTO agent_memory_review_actions
+         (memory_id, action, actor_label, notes, before, after)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)`,
+      [
+        memoryId,
+        action,
+        actor.label,
+        typeof input.note === "string" ? input.note : null,
+        JSON.stringify({
+          review_status: row.review_status,
+          lifecycle_status: row.lifecycle_status,
+          provenance_status: row.provenance_status,
+          exposure: row.exposure,
+        }),
+        JSON.stringify({
+          review_status: after.review_status,
+          lifecycle_status: after.lifecycle_status,
+          provenance_status: after.provenance_status,
+          exposure: after.exposure,
+        }),
+      ],
+    );
 
     // The audit event is part of the SAME transaction as the state change. A promotion
     // nobody can trace is worse than no promotion: the recall path will hand the memory out
@@ -171,6 +229,7 @@ export async function performReview(
       from: row.review_status,
       review_status: after.review_status,
       lifecycle_status: after.lifecycle_status,
+      exposure: after.exposure,
     };
   } catch (e) {
     try { await client.queryObject("ROLLBACK"); } catch { /* the connection is already gone */ }

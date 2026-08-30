@@ -73,6 +73,7 @@ services:
       # idempotency_key scoped per workspace, not globally - two tenants using the same
       # obvious key collided, and the loser was handed the winner's memory id.
       - ./init-agent-memory-idempotency.sql:/docker-entrypoint-initdb.d/120-init-agent-memory-idempotency.sql:ro # agent-memory P1.2 fix
+      - ./init-agent-memory-promote-exposure.sql:/docker-entrypoint-initdb.d/130-init-agent-memory-promote-exposure.sql:ro
     networks:
       - obnet
     restart: unless-stopped
