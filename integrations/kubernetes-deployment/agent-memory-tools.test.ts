@@ -211,8 +211,16 @@ Deno.test("memory_type enum matches the SQL CHECK exactly", async () => {
     let text: string;
     try {
       text = await Deno.readTextFile(new URL(rel, import.meta.url));
-    } catch {
-      continue; // a migration not present in this checkout
+    } catch (e) {
+      // FAIL CLOSED ON ANYTHING BUT "not there". This catch used to swallow every error,
+      // and the error it was actually swallowing was NotCapable: `deno test` without
+      // --allow-read cannot open a sibling file, so the loop found nothing, `allowed`
+      // stayed empty, and the early return below made the test PASS while comparing
+      // nothing. The repo's only runner did not pass the flag, so this cross-reader check
+      // was a no-op for as long as it had existed (verified 2026-08-30 by running it both
+      // ways). A missing migration is still a legitimate skip; a permission error is not.
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw e;
     }
     // The LAST memory_type CHECK wins - migrations replace the constraint.
     const m = [...text.matchAll(/memory_type IN \(([^)]*)\)/g)].pop();
@@ -220,7 +228,12 @@ Deno.test("memory_type enum matches the SQL CHECK exactly", async () => {
       allowed = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
     }
   }
-  if (!allowed.length) return; // no schema in this checkout; nothing to compare
+  // Not "nothing to compare, pass" - say so, so an empty comparison is never mistaken for
+  // an agreement. In this repo both migrations are present, so this branch is unreachable
+  // and the assertion below always runs.
+  if (!allowed.length) {
+    throw new Error("no memory_type CHECK found in either migration - nothing was compared");
+  }
 
   const enumValues =
     (memoryTypeArg as unknown as { options?: string[] }).options ??

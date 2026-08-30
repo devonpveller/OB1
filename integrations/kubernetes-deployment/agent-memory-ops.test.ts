@@ -11,6 +11,7 @@
  */
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { listForReview, performReview } from "./agent-memory-ops.ts";
+import { REVIEW_ACTIONS } from "./agent-memory-review.ts";
 
 /** A pool that RECORDS every statement, so the test can assert on the sequence. */
 function recordingPool(
@@ -207,19 +208,121 @@ Deno.test("a supersede records what replaced the memory", async () => {
 });
 
 // ── the queue ────────────────────────────────────────────────────────────────
+// ── THE PLANE ESCALATION ─────────────────────────────────────────────────────
+// Found by a verifier reading this branch, in code whose READ boundary had just been
+// proved live. performReview SELECTed `exposure` so it could report it and never FILTERED
+// on it, `agent_memory_review` is on the ops door's GATEWAY_WRITE_TOOLS, and
+// `promote_exposure` is the ONLY action that widens exposure (agent-memory-review.ts:
+// `exposure: "ops"`). So an ops-door caller could take a PERSONAL memory's id, promote it
+// onto the ops plane, and then read it through every closed read tool entirely
+// legitimately. The containment was never defeated - the memory was moved past it.
+//
+// The refusal is not_found for the same reason inspect's is: "it exists but you may not
+// see it" confirms the memory to anyone who can guess an id.
+
+/** A pool where the FOR UPDATE resolve finds nothing (off plane) but the id DOES exist. */
+function offPlanePool() {
+  const sql: string[] = [];
+  const args: unknown[][] = [];
+  const deps = {
+    doorExposure: "ops",
+    pool: {
+      connect: () =>
+        Promise.resolve({
+          queryObject: (s: string, a?: unknown[]) => {
+            sql.push(s);
+            args.push(a ?? []);
+            if (s.includes("SELECT 1 FROM agent_memories")) {
+              return Promise.resolve({ rows: [{ x: 1 }] as unknown[] });
+            }
+            return Promise.resolve({ rows: [] as unknown[] });
+          },
+          release: () => {},
+        }),
+    },
+  };
+  return { deps, sql, args };
+}
+
+Deno.test("promote_exposure CANNOT widen a memory this door may not see", async () => {
+  const { deps, sql } = offPlanePool();
+  const out = await performReview(deps, {
+    memory_id: "personal-1",
+    action: "promote_exposure",
+    actor: ACTOR,
+  });
+  assertEquals(out.ok, false);
+  if (!out.ok) assertEquals(out.refused, "not_found");
+  assertEquals(sql.some((s) => s.startsWith("UPDATE agent_memories")), false, "nothing may be written");
+  assertEquals(sql[sql.length - 1], "ROLLBACK");
+});
+
+Deno.test("the refused review leaves an access_refused row naming the tool", async () => {
+  const { deps, sql, args } = offPlanePool();
+  await performReview(deps, { memory_id: "personal-1", action: "promote_exposure", actor: ACTOR });
+  const i = sql.findIndex((s) => s.includes("access_refused"));
+  assertEquals(i >= 0, true, "stopped, but invisible - U5 requires the attempt to be recorded");
+  assertEquals(args[i][0], "personal-1");
+  assertEquals(JSON.parse(String(args[i][1])).tool, "agent_memory_review");
+});
+
+Deno.test("EVERY review action is bounded by the plane, not just promote_exposure", async () => {
+  // The enumerate-and-patch failure mode, closed at the level of the set: the guard is on
+  // the RESOLVE, so there is no action that reaches an off-plane row. A new action added to
+  // TRANSITIONS is covered the day it is added, without anyone remembering to cover it.
+  for (const action of REVIEW_ACTIONS) {
+    const { deps, sql } = offPlanePool();
+    const out = await performReview(deps, { memory_id: "personal-1", action, actor: ACTOR });
+    assertEquals(out.ok, false, action);
+    assertEquals(
+      sql.some((s) => s.startsWith("UPDATE agent_memories")),
+      false,
+      `${action} reached the UPDATE on an off-plane memory`,
+    );
+  }
+});
+
+Deno.test("the review resolve and the UPDATE are BOTH plane-bounded", async () => {
+  // Belt and braces on purpose. The resolve is what refuses; the WHERE is what keeps the
+  // refusal true if a future edit reorders them or drops one.
+  const { deps, sql, args } = recordingPool();
+  await performReview(deps, { memory_id: "m-1", action: "confirm", actor: ACTOR });
+  const sel = sql.findIndex((s) => s.includes("FOR UPDATE"));
+  assertEquals(sql[sel].includes("COALESCE(metadata->>'exposure', 'personal') = ANY($2)"), true);
+  assertEquals(args[sel][1], ["ops"]);
+  const upd = sql.findIndex((s) => s.startsWith("UPDATE agent_memories"));
+  assertEquals(sql[upd].includes("COALESCE(metadata->>'exposure', 'personal') = ANY("), true);
+  assertEquals(args[upd][args[upd].length - 1], ["ops"]);
+});
+
+// The queue's args are built by agent-memory-plane.ts's PlaneQuery, so $1 is the door's
+// exposure plane and everything else follows it. That ordering is not incidental: the
+// builder emits the plane predicate BEFORE the caller's build() callback runs, which is
+// what makes a queue query without the plane unconstructible rather than merely unusual.
+Deno.test("the queue is plane-bounded FIRST, then filtered", async () => {
+  const { deps, sql, args } = recordingPool();
+  await listForReview(deps, {});
+  assertEquals(
+    sql[0].includes("WHERE COALESCE(metadata->>'exposure', 'personal') = ANY($1)"),
+    true,
+    sql[0],
+  );
+  assertEquals(args[0][0], ["ops"]);
+});
+
 Deno.test("the queue defaults to the states nobody has acted on", async () => {
   const { deps, args } = recordingPool();
   await listForReview(deps, {});
-  assertEquals(args[0][0], ["pending", "evidence_only"]);
+  assertEquals(args[0][1], ["pending", "evidence_only"]);
 });
 
 Deno.test("the queue limit is clamped, so one call cannot drain the store", async () => {
   const { deps, args } = recordingPool();
   await listForReview(deps, { limit: 100000 });
-  assertEquals(args[0][1], 200);
+  assertEquals(args[0][2], 200);
   const b = recordingPool();
   await listForReview(b.deps, { limit: -5 });
-  assertEquals(b.args[0][1], 1);
+  assertEquals(b.args[0][2], 1);
 });
 
 Deno.test("the queue parameterises the workspace filter", async () => {

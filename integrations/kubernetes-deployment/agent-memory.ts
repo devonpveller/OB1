@@ -25,6 +25,7 @@ import {
   WRITEBACK_SCHEMA,
 } from "./agent-memory-tools.ts";
 import { listForReview, performReview } from "./agent-memory-ops.ts";
+import { doorPlane, resolveIdempotentOnPlane } from "./agent-memory-plane.ts";
 import {
   decideRecallExposure,
   stampExposure,
@@ -144,13 +145,16 @@ export function buildWritebackRow(
 
 export type WritebackOutcome =
   | { ok: true; memory_id: string; thought_id: number | null; duplicate: boolean }
-  | { ok: false; refused: UnsafeReason | "invalid"; message: string };
+  | { ok: false; refused: UnsafeReason | "invalid" | "idempotency_conflict"; message: string };
 
 /** Human-facing reasons, so a refused agent can fix the input rather than retry blindly. */
-export function refusalMessage(reason: UnsafeReason | "invalid"): string {
+export function refusalMessage(reason: UnsafeReason | "invalid" | "idempotency_conflict"): string {
   switch (reason) {
     case "empty":
       return "content is empty";
+    case "idempotency_conflict":
+      return "that idempotency_key is already held by a memory this door cannot see; " +
+        "choose another key";
     case "too_large":
       return "content exceeds the maximum size for a durable memory; summarise it first";
     case "secret_shaped":
@@ -222,13 +226,41 @@ export async function performWriteback(
     // its own memory was never written. Two tenants sharing an obvious key string is the
     // ordinary case, not an attack. Fixed together with the index, which was globally
     // unique and would otherwise reject B's insert outright.
+    //
+    // AND SCOPED BY PLANE, which it was not. Found by the U5 completeness test rather than
+    // by a verifier: this lookup matched on (workspace_id, idempotency_key) alone and
+    // handed the caller the hit's `id` and `thought_id`. An id is exactly what
+    // `agent_memory_inspect` consumes, so the WRITE path was a working id oracle for the
+    // personal plane - an ops-door caller that guessed a key ("daily-summary-2026-08-29"
+    // is not a hard guess) got a personal memory's identifier back as `duplicate: true`,
+    // through the one tool on the door nobody thought of as a read.
+    //
+    // THE PLANE COMES FROM `deps`, NOT FROM `row`. `row.exposure` is the STAMPED value and
+    // taint demotes it, so looking the duplicate up on the row's plane would let a caller
+    // pass `tainted: true` and reopen the same oracle from the other side. §1.1's rule
+    // holds: a property of the door, never of the request. A door that serves the personal
+    // plane says so (`doorExposure: 'personal'`, as AgentMemoryDeps describes for an
+    // OWUI-facing surface) and then finds its own retries; a door that says nothing reads
+    // 'ops', which is the safe end of the axis for any read.
     if (row.idempotency_key) {
-      const existing = await client.queryObject(
-        `SELECT id, thought_id FROM agent_memories
-          WHERE workspace_id = $1 AND idempotency_key = $2 LIMIT 1`,
-        [row.workspace_id, row.idempotency_key],
+      const existing = await resolveIdempotentOnPlane<{ id: string; thought_id: number | null }>(
+        { client, pool: deps.pool },
+        doorPlane(deps),
+        row.workspace_id,
+        row.idempotency_key,
+        { columns: "id, thought_id", tool: "agent_memory_writeback" },
       );
-      const hit = existing.rows[0] as { id: string; thought_id: number | null } | undefined;
+      if (!existing.ok) {
+        // The key is taken by a memory on another plane. The unique index would reject the
+        // insert below anyway, so this is the same outcome without the 500 - and without
+        // naming the memory that holds it.
+        return {
+          ok: false,
+          refused: "idempotency_conflict",
+          message: refusalMessage("idempotency_conflict"),
+        };
+      }
+      const hit = existing.row;
       if (hit) {
         return { ok: true, memory_id: hit.id, thought_id: hit.thought_id, duplicate: true };
       }

@@ -235,9 +235,22 @@ services:
       # The agent-memory tools, and nothing else. No personal-plane tools, no search/fetch,
       # no capture_thought - this door is not a second cloud door.
       GATEWAY_READ_TOOLS: agent_memory_recall,agent_memory_inspect,agent_memory_recall_trace,agent_memory_list_review_queue
+      # agent_memory_review IS A PLANE-SENSITIVE TOOL, not just a write. `promote_exposure`
+      # is the only action in the system that WIDENS a memory's exposure, so a caller with
+      # this tool and a personal memory's id could move that memory onto the ops plane and
+      # then read it through the four read tools above entirely legitimately. It is on this
+      # door because the ops door is where human review happens; it is safe on this door
+      # because performReview resolves the memory through agent-memory-plane.ts, which
+      # applies THIS door's exposure and refuses (not_found, plus a durable access_refused
+      # row) for anything off it. Drill: ATTACK 8 in scripts/checks/drill-personal-plane-exclusion.ps1.
       GATEWAY_WRITE_TOOLS: agent_memory_writeback,agent_memory_review,agent_memory_report_usage
-      # Reads: belt-and-braces. The exposure plane is forced SERVER-SIDE by performRecall
-      # from its own door value and a caller cannot widen it, so this filter is a second
+      # Reads: belt-and-braces. The exposure plane is forced SERVER-SIDE from this door's
+      # own value - by performRecall on the recall path, and by agent-memory-plane.ts for
+      # every other statement that resolves a memory, including the ones behind the write
+      # tools above. A caller cannot widen it: the plane is a required argument of a
+      # nominal type, so a lookup that omits it does not compile, and
+      # agent-memory-plane.test.ts enumerates every `agent_memories` statement in the
+      # subsystem so a new unguarded one fails a test. This filter is therefore a second
       # statement of the same boundary rather than the boundary itself.
       GATEWAY_READ_FILTER_FIELD: exposure
       GATEWAY_READ_FILTER_VALUE: ops

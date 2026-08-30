@@ -173,7 +173,10 @@ Deno.test("an idempotency_key hit returns the existing memory and does not re-em
       connect: () =>
         Promise.resolve({
           queryObject: (sql: string) => {
-            if (sql.includes("SELECT id, thought_id FROM agent_memories")) {
+            // The lookup lives in agent-memory-plane.ts now, and it is PLANE-SCOPED - the
+            // unscoped version handed an ops-door caller a personal memory's id whenever it
+            // guessed the key. Match on the predicate the chokepoint emits.
+            if (sql.includes("SELECT id, thought_id") && sql.includes("idempotency_key = $2")) {
               return Promise.resolve({ rows: [{ id: "existing-1", thought_id: 42 }] });
             }
             throw new Error("must not insert on an idempotency hit");

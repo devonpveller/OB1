@@ -18,6 +18,11 @@
 import { z } from "zod";
 import { REVIEW_ACTIONS } from "./agent-memory-review.ts";
 import type { AgentMemoryOpsDeps } from "./agent-memory-ops.ts";
+import {
+  doorPlane,
+  listTraceItemsOnPlane,
+  resolveMemoryOnPlane,
+} from "./agent-memory-plane.ts";
 
 // ── shared field vocabulary ──────────────────────────────────────────────────
 // Described, not just typed. A `.describe()` is what a model actually reads; a bare
@@ -145,37 +150,14 @@ export const REPORT_USAGE_SCHEMA = {
 // no such field, so the MCP SDK strips it before the handler ever sees it. A filter applied
 // at a door the callee ignores is not a filter.
 //
-// So the plane is forced HERE, server-side, from the same door value `performRecall` uses.
-// The lesson is narrower than "add a filter": proving a boundary on ONE tool and describing
-// the PLANE as contained is the over-claim. Every read tool is a door.
-const DEFAULT_READ_EXPOSURE = ["ops"];
-
-function readExposure(deps: AgentMemoryOpsDeps): string[] {
-  const door = (deps as { doorExposure?: string }).doorExposure;
-  return door ? [door] : DEFAULT_READ_EXPOSURE;
-}
-
-/** Record that an access was refused. U5: stopping without a record is indistinguishable
- *  from a request that never happened, and nobody can tell a probing agent from a quiet one. */
-async function auditRefusal(
-  deps: AgentMemoryOpsDeps,
-  client: { queryObject: (sql: string, args?: unknown[]) => Promise<{ rows: unknown[] }> },
-  memoryId: string | null,
-  tool: string,
-  reason: string,
-): Promise<void> {
-  try {
-    await client.queryObject(
-      `INSERT INTO agent_memory_audit_events
-         (memory_id, event_type, actor_kind, payload)
-       VALUES ($1, 'access_refused', 'agent', $2::jsonb)`,
-      [memoryId, JSON.stringify({ tool, reason })],
-    );
-  } catch {
-    // An audit write must not turn a refusal into an error - the caller is already being
-    // denied, and a throw here would leak that the row exists via a different status.
-  }
-}
+// THE FIX THAT ROUND WAS A LOCAL HELPER IN THIS FILE, AND IT WAS THE WRONG SHAPE. It closed
+// the three tools a verifier had used and left `performReview` - a WRITE tool on the same
+// allow-list, in the file next door - resolving memories by id with no plane at all, so a
+// caller could `promote_exposure` a personal memory ONTO the ops plane and read it here
+// legitimately. Every lookup now goes through `agent-memory-plane.ts`, whose functions
+// cannot be called without a `DoorPlane`, and `agent-memory-plane.test.ts` enumerates every
+// `agent_memories` statement in the subsystem so a new unguarded one fails a test rather
+// than waiting for the next verifier.
 
 /**
  * Record that a recalled memory was used, or deliberately not used.
@@ -199,17 +181,26 @@ export async function performReportUsage(
   if (typeof input.used !== "boolean") {
     return { ok: false, refused: "invalid_request", message: "used must be true or false" };
   }
+  const plane = doorPlane(deps);
   const client = await deps.pool.connect();
   try {
-    // The memory has to exist. An audit row pointing at nothing is a record of a report
-    // nobody can interpret, and the FK would take it silently as NULL on delete.
-    const found = await client.queryObject(
-      `SELECT workspace_id, project_id FROM agent_memories
-        WHERE id = $1 AND COALESCE(metadata->>'exposure', 'personal') = ANY($2)`,
-      [memoryId, readExposure(deps)],
+    // The memory has to exist AND be on this door's plane. An audit row pointing at nothing
+    // is a record of a report nobody can interpret, and the FK would take it silently as
+    // NULL on delete.
+    //
+    // Before the chokepoint this path filtered but wrote NO refusal row - the audit half of
+    // U5's contract was the caller's job here, and this caller had forgotten it. It is the
+    // resolver's job now, so forgetting is not available.
+    const lookup = await resolveMemoryOnPlane<{ workspace_id: string; project_id: string | null }>(
+      { client, pool: deps.pool },
+      plane,
+      memoryId,
+      { columns: "workspace_id, project_id", tool: "agent_memory_report_usage" },
     );
-    const row = found.rows[0] as { workspace_id: string; project_id: string | null } | undefined;
-    if (!row) return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
+    if (!lookup.ok) {
+      return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
+    }
+    const row = lookup.row;
 
     await client.queryObject(
       `INSERT INTO agent_memory_audit_events
@@ -242,29 +233,27 @@ export async function performInspect(
 ): Promise<{ ok: boolean; refused?: string; message?: string; memory?: unknown; review_actions?: unknown[]; audit_events?: unknown[] }> {
   const memoryId = typeof input.memory_id === "string" ? input.memory_id.trim() : "";
   if (!memoryId) return { ok: false, refused: "invalid_request", message: "memory_id is required" };
+  const plane = doorPlane(deps);
   const client = await deps.pool.connect();
   try {
-    const m = await client.queryObject(
-      `SELECT id, workspace_id, project_id, summary, content, memory_type, visibility,
+    // NOT_FOUND, not "forbidden", and deliberately: "this id exists but you may not see it"
+    // is itself a disclosure - it confirms the memory to anyone who can guess an id. The
+    // caller cannot tell the two apart, which is exactly why the resolver writes the audit
+    // row rather than leaving it optional.
+    const lookup = await resolveMemoryOnPlane<Record<string, unknown>>(
+      { client, pool: deps.pool },
+      plane,
+      memoryId,
+      {
+      columns: `id, workspace_id, project_id, summary, content, memory_type, visibility,
               review_status, lifecycle_status, provenance_status, confidence,
               can_use_as_evidence, can_use_as_instruction, requires_user_confirmation,
               COALESCE(metadata->>'exposure', 'personal') AS exposure,
-              created_at, updated_at, last_confirmed_at
-         FROM agent_memories
-        WHERE id = $1
-          AND COALESCE(metadata->>'exposure', 'personal') = ANY($2)`,
-      [memoryId, readExposure(deps)],
+              created_at, updated_at, last_confirmed_at`,
+        tool: "agent_memory_inspect",
+      },
     );
-    if (!m.rows[0]) {
-      // NOT_FOUND, not "forbidden", and deliberately: "this id exists but you may not see
-      // it" is itself a disclosure - it confirms the memory to anyone who can guess an id.
-      // The caller cannot tell the two apart, which is exactly why the audit row below is
-      // required rather than optional.
-      const exists = await client.queryObject(
-        `SELECT 1 FROM agent_memories WHERE id = $1`, [memoryId]);
-      if (exists.rows[0]) {
-        await auditRefusal(deps, client, memoryId, "agent_memory_inspect", "off-plane");
-      }
+    if (!lookup.ok) {
       return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
     }
     const actions = await client.queryObject(
@@ -277,7 +266,7 @@ export async function performInspect(
          FROM agent_memory_audit_events WHERE memory_id = $1 ORDER BY created_at ASC`,
       [memoryId],
     );
-    return { ok: true, memory: m.rows[0], review_actions: actions.rows, audit_events: events.rows };
+    return { ok: true, memory: lookup.row, review_actions: actions.rows, audit_events: events.rows };
   } finally {
     client.release();
   }
@@ -295,6 +284,7 @@ export async function performRecallTrace(
 ): Promise<{ ok: boolean; refused?: string; message?: string; trace?: unknown; items?: unknown[] }> {
   const traceId = typeof input.trace_id === "string" ? input.trace_id.trim() : "";
   if (!traceId) return { ok: false, refused: "invalid_request", message: "trace_id is required" };
+  const plane = doorPlane(deps);
   const client = await deps.pool.connect();
   try {
     const t = await client.queryObject(
@@ -304,47 +294,16 @@ export async function performRecallTrace(
       [traceId],
     );
     if (!t.rows[0]) return { ok: false, refused: "not_found", message: `no trace with id ${traceId}` };
-    // THE JOIN IS NOT THE BOUNDARY - IT ONLY BLANKS THE COLUMNS IT SELECTS. Found by the
-    // U5 drill after the exposure plane had already been bound to every read tool: the
-    // LEFT JOIN withheld an off-plane memory's `summary` and `review_status` and then
-    // returned its `memory_id`, `rank`, `similarity` and `use_policy_snapshot` anyway,
-    // because those columns come from `agent_memory_recall_items`, not from the joined
-    // side. An id IS the disclosure that matters here - it is the input
-    // `agent_memory_inspect` takes, so a trace was a working enumerator of the personal
-    // plane feeding the tool that had just been closed against it.
-    //
-    // The LEFT JOIN stays (an INNER JOIN would fold the plane predicate into the row set
-    // silently, and one existing test pins the join kind), but an off-plane row is now
-    // dropped in full and the withholding is audited, exactly as `performInspect` does.
-    // `on_plane` is the flag the join produces and it never reaches the caller.
-    const items = await client.queryObject(
-      `SELECT ri.memory_id, ri.rank, ri.similarity, ri.use_policy_snapshot,
-              am.summary, am.review_status,
-              (am.id IS NOT NULL) AS on_plane
-         FROM agent_memory_recall_items ri
-         LEFT JOIN agent_memories am
-                ON am.id = ri.memory_id
-               AND COALESCE(am.metadata->>'exposure', 'personal') = ANY($2)
-        WHERE ri.trace_id = $1 ORDER BY ri.rank ASC`,
-      [traceId, readExposure(deps)],
+    // THE JOIN IS NOT THE BOUNDARY - IT ONLY BLANKS THE COLUMNS IT SELECTS. That correction
+    // and its audit row now live in the chokepoint (`listTraceItemsOnPlane`), because the
+    // dropping is the part a caller can silently fail to do: this function used to select
+    // the rows itself and decide, per row, whether to keep it.
+    const visible = await listTraceItemsOnPlane(
+      { client, pool: deps.pool },
+      plane,
+      traceId,
+      "agent_memory_recall_trace",
     );
-    const rows = items.rows as Array<Record<string, unknown> & { memory_id: string; on_plane: boolean }>;
-    const visible: Record<string, unknown>[] = [];
-    for (const row of rows) {
-      if (row.on_plane) {
-        const { on_plane: _onPlane, ...rest } = row;
-        visible.push(rest);
-        continue;
-      }
-      // recall_items.memory_id is NOT NULL and cascades on delete, so a row that failed the
-      // join is never "the memory is gone" - it is always "the memory is on another plane".
-      // That makes this unambiguous enough to record, unlike inspect's absent-id case which
-      // deliberately writes nothing.
-      await auditRefusal(deps, client, row.memory_id, "agent_memory_recall_trace", "off-plane");
-    }
-    // The count of what was withheld is NOT returned. Saying "3 items you may not see"
-    // confirms their existence, which is the disclosure `not_found` exists to avoid; the
-    // audit row is where that fact belongs.
     return { ok: true, trace: t.rows[0], items: visible };
   } finally {
     client.release();

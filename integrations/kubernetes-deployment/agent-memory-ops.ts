@@ -22,6 +22,12 @@ import {
   validateActor,
 } from "./agent-memory-review.ts";
 import type { ReviewStatus } from "./agent-memory-policy.ts";
+import {
+  doorPlane,
+  listMemoriesOnPlane,
+  resolveMemoryOnPlane,
+  updateMemoryOnPlane,
+} from "./agent-memory-plane.ts";
 
 export interface AgentMemoryOpsDeps {
   /** §1.1: the exposure plane this DOOR reads on. Forced server-side; a caller cannot widen it. */
@@ -64,6 +70,16 @@ export type ReviewOutcome =
  * concurrent confirm and the audit trail shows both as if each had been applied to the
  * state it saw. That is the same shape as the writeback's partial-commit bug: nothing
  * errors, and the record afterwards is a lie.
+ *
+ * AND THE READ IS BOUNDED BY THE DOOR'S PLANE. It was not, and that was worse than a read
+ * leak. This function SELECTed `exposure` so it could report it and never FILTERED on it,
+ * while `agent_memory_review` sits on the ops door's GATEWAY_WRITE_TOOLS and
+ * `promote_exposure` is the one action in the system that WIDENS exposure
+ * (agent-memory-review.ts: `exposure: "ops"`). An ops-door caller could therefore hand this
+ * function a PERSONAL memory's id, promote it onto the ops plane, and afterwards read it
+ * through every read tool entirely legitimately - the containment proved on those tools
+ * never had to be defeated, only walked around. Both the resolve and the UPDATE now go
+ * through agent-memory-plane.ts, which has no overload that omits the plane.
  */
 export async function performReview(
   deps: AgentMemoryOpsDeps,
@@ -93,28 +109,31 @@ export async function performReview(
   }
   const action = input.action;
 
+  const plane = doorPlane(deps);
   const client = await deps.pool.connect();
   try {
     await client.queryObject("BEGIN");
 
-    const found = await client.queryObject(
-      `SELECT review_status, lifecycle_status, provenance_status,
-              COALESCE(metadata->>'exposure', 'personal') AS exposure
-         FROM agent_memories WHERE id = $1 FOR UPDATE`,
-      [memoryId],
-    );
-    const row = found.rows[0] as
-      | {
-        review_status: ReviewStatus;
-        lifecycle_status: string;
-        provenance_status: string;
-        exposure: string;
-      }
-      | undefined;
-    if (!row) {
+    const lookup = await resolveMemoryOnPlane<{
+      review_status: ReviewStatus;
+      lifecycle_status: string;
+      provenance_status: string;
+      exposure: string;
+    }>({ client, pool: deps.pool }, plane, memoryId, {
+      columns: `review_status, lifecycle_status, provenance_status,
+              COALESCE(metadata->>'exposure', 'personal') AS exposure`,
+      tool: "agent_memory_review",
+      forUpdate: true,
+    });
+    if (!lookup.ok) {
+      // not_found covers both "there is no such memory" and "it is on a plane this door
+      // does not serve" - telling the two apart would confirm the memory to anyone who can
+      // guess an id. The chokepoint has already written the access_refused row for the
+      // second case, so the refusal is not silent.
       await client.queryObject("ROLLBACK");
       return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
     }
+    const row = lookup.row;
 
     const plan = planTransition(row.review_status, action);
     if (!plan.ok) {
@@ -155,20 +174,31 @@ export async function performReview(
     if (plan.clears_confirmation_requirement) {
       sets.push("requires_user_confirmation = false");
     }
-    const updated = await client.queryObject(
-      `UPDATE agent_memories SET ${sets.join(", ")} WHERE id = $1
-       RETURNING review_status, lifecycle_status, provenance_status, workspace_id, project_id,
-                 COALESCE(metadata->>'exposure', 'personal') AS exposure`,
-      args,
-    );
-    const after = updated.rows[0] as {
+    // The UPDATE carries the plane predicate too, from the same chokepoint. Belt AND
+    // braces: the resolve above is what refuses, and this is what keeps the refusal true
+    // if a future edit ever reorders the two or drops one.
+    const after = await updateMemoryOnPlane<{
       review_status: ReviewStatus;
       lifecycle_status: string;
       provenance_status: string;
       workspace_id: string;
       project_id: string | null;
       exposure: string;
-    };
+    }>(
+      client,
+      plane,
+      sets,
+      args,
+      `review_status, lifecycle_status, provenance_status, workspace_id, project_id,
+                 COALESCE(metadata->>'exposure', 'personal') AS exposure`,
+    );
+    if (!after) {
+      // Unreachable through the resolve above, which holds a FOR UPDATE lock on the row.
+      // Kept because "the UPDATE matched nothing" must never fall through to reading
+      // properties off undefined and reporting a change that did not happen.
+      await client.queryObject("ROLLBACK");
+      return { ok: false, refused: "not_found", message: `no memory with id ${memoryId}` };
+    }
 
     // THE REVIEW-ACTION ROW. This table exists to record who changed a memory's standing
     // and what it looked like before, and an earlier version of this file never wrote to
@@ -267,32 +297,30 @@ export async function listForReview(
   // Clamped, like the recall path: one call must not be able to drain the store.
   const limit = Math.max(1, Math.min(200, Math.floor(rawLimit)));
 
-  const args: unknown[] = [wanted, limit];
   // THE EXPOSURE PLANE, forced from the door - the queue ENUMERATED the personal plane
   // without it, which an adversarial verifier demonstrated against merged code. The
   // gateway's forced metadata_filter cannot help here: this tool's schema has no such
   // field, so the SDK strips it before the handler runs.
-  const doorExposure = (deps as { doorExposure?: string }).doorExposure;
-  args.push(doorExposure ? [doorExposure] : ["ops"]);
-  let where = `review_status = ANY($1)
-        AND COALESCE(metadata->>'exposure', 'personal') = ANY($${args.length})`;
-  if (typeof input.workspace_id === "string" && input.workspace_id.trim()) {
-    args.push(input.workspace_id.trim());
-    where += ` AND workspace_id = $${args.length}`;
-  }
-
+  //
+  // It is no longer this function's job to remember that. `listMemoriesOnPlane` starts the
+  // WHERE clause WITH the plane predicate and hands back a builder for everything else, so
+  // there is no arrangement of the code below that produces a query without it.
+  const plane = doorPlane(deps);
   const client = await deps.pool.connect();
   try {
-    const res = await client.queryObject(
-      `SELECT id, workspace_id, project_id, summary, memory_type, visibility,
-              review_status, lifecycle_status, provenance_status, created_at
-         FROM agent_memories
-        WHERE ${where}
-        ORDER BY created_at ASC
-        LIMIT $2`,
-      args,
-    );
-    return { ok: true, items: res.rows };
+    const items = await listMemoriesOnPlane<unknown>(client, plane, {
+      columns: `id, workspace_id, project_id, summary, memory_type, visibility,
+              review_status, lifecycle_status, provenance_status, created_at`,
+      orderBy: "created_at ASC",
+      limit,
+      build: (q) => {
+        q.and(`review_status = ANY(${q.param(wanted)})`);
+        if (typeof input.workspace_id === "string" && input.workspace_id.trim()) {
+          q.and(`workspace_id = ${q.param(input.workspace_id.trim())}`);
+        }
+      },
+    });
+    return { ok: true, items };
   } finally {
     client.release();
   }
