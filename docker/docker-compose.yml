@@ -76,6 +76,13 @@ services:
       - ./init-agent-memory-promote-exposure.sql:/docker-entrypoint-initdb.d/130-init-agent-memory-promote-exposure.sql:ro
       - ./init-agent-memory-check-type.sql:/docker-entrypoint-initdb.d/140-init-agent-memory-check-type.sql:ro
       - ./init-agent-memory-access-refused.sql:/docker-entrypoint-initdb.d/150-init-agent-memory-access-refused.sql:ro
+      # 180/190/200 - THE EXPOSURE BOUNDARY IN THE DATABASE (DFU PLAN.md A2 + C.8.3).
+      # Each is ALSO applied to the LIVE volume per
+      # documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md in
+      # ai-stack - a migration that reaches only one of the two places is not deployed.
+      - ./init-agent-memory-rls.sql:/docker-entrypoint-initdb.d/180-init-agent-memory-rls.sql:ro
+      - ./init-agent-memory-corpus-failclosed.sql:/docker-entrypoint-initdb.d/190-init-agent-memory-corpus-failclosed.sql:ro
+      - ./init-graph-plane-rls.sql:/docker-entrypoint-initdb.d/200-init-graph-plane-rls.sql:ro
     networks:
       - obnet
     restart: unless-stopped
