@@ -372,6 +372,52 @@ $$;
 GRANT EXECUTE ON FUNCTION public.ob_thought_visible(BIGINT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.ob_thought_visible(BIGINT) TO authenticated;
 
+-- ==========================================================================================
+-- 1b. THE OTHER PREDICATE THIS FILE HAS TO FINISH: ABSENCE-AS-EMPTY-SET
+-- ==========================================================================================
+-- 180 defines ob_trace_on_ops_plane as
+--
+--     COALESCE(rp->'enforced_exposure', '["personal"]') <@ '["ops"]'
+--
+-- and the COALESCE was written to make ABSENCE deny. It does. What it does not make deny is
+-- the EMPTY ARRAY: `[] <@ anything` is TRUE for every containment test, because the empty set
+-- is a subset of every set. So a recall trace that recorded `enforced_exposure: []` - a recall
+-- that enforced NOTHING - reads back through the unauthenticated door WITH ITS QUERY TEXT,
+-- which is the one column on that table this boundary exists to hold.
+--
+-- MEASURED on the throwaway, as service_role, against the round 3 file:
+--
+--     enforced_exposure   query
+--     []                  U5G4-TRACE-EMPTY secret query text     <- returned. LEAK.
+--     ["ops"]             U5G4-TRACE-OPS control query           <- returned. CONTROL.
+--     ["personal"]        (not returned)
+--     (key absent)        (not returned)
+--
+-- Round 3 read this arm and called it safe because `ob_trace_on_ops_plane(NULL)` is FALSE.
+-- That is true and it is the wrong question: absence was covered and vacuity was not. This is
+-- the same error as `X IS NULL OR visible(X)` in a different vocabulary - a value that means
+-- "nothing was established" evaluating to PERMIT.
+--
+-- THE FIX IS THE PROPERTY: a trace is on the ops plane when it ENFORCED something and
+-- everything it enforced was `ops`. Absent, non-array and empty all deny. A CASE rather than
+-- an `AND` chain because Postgres does not guarantee short-circuit evaluation and
+-- jsonb_array_length() raises on a non-array.
+--
+-- OPS IMPACT, MEASURED ON THE LIVE DATABASE BEFORE THE CHANGE, not after: all 78 live
+-- recall traces carry NO `enforced_exposure` key at all, so 0 are readable through the door
+-- today and 0 are readable after this change. Nothing that works today is narrowed.
+CREATE OR REPLACE FUNCTION public.ob_trace_on_ops_plane(rp JSONB) RETURNS BOOLEAN
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT COALESCE(
+           CASE
+             WHEN jsonb_typeof(rp->'enforced_exposure') <> 'array' THEN false
+             WHEN jsonb_array_length(rp->'enforced_exposure') = 0  THEN false
+             ELSE rp->'enforced_exposure' <@ '["ops"]'::jsonb
+           END, false)
+$$;
+
+GRANT EXECUTE ON FUNCTION public.ob_trace_on_ops_plane(JSONB) TO service_role;
+
 -- IDEMPOTENCE. Every policy this file creates is dropped by ITS OWN name first, not just
 -- by the name it replaces. Measured on the throwaway: without these lines a SECOND apply
 -- died on `policy "thought_entities_plane" ... already exists` at statement 1 of 15,
@@ -611,6 +657,35 @@ CREATE POLICY agent_memories_personal_plane ON public.agent_memories
 -- The USING halves are UNCHANGED from 180, verbatim. Only WITH CHECK gains the arm: a
 -- caller's ability to READ a memory it already owns must not depend on whether the thought
 -- behind it is on its plane, or a plane change would strand rows their owner cannot see.
+
+-- --- AND THE ARM IS DISPOSITIONED, BECAUSE IT IS THE SHAPE THIS FILE CALLS A HOLE ---------
+-- `thought_id IS NULL OR ob_thought_visible(thought_id)` is, letter for letter, the shape
+-- section 7(h) exists to refuse. It stays, and round 3's defence of it was the WRONG defence:
+-- it said the arm is contained because section 6a withdraws the door's write. That is
+-- CONTAINMENT - true today, undone by one GRANT - and not the property.
+--
+-- THE ACTUAL ARGUMENT, and it turns on what the absent value MEANS on THIS table. Everywhere
+-- else this file touched, the NULL column WAS the plane: `idea_revisions.thought_id` absent
+-- meant "this revision's plane cannot be established", so permitting was permitting the
+-- unknown. On `agent_memories` the plane is established by a DIFFERENT column - `metadata`,
+-- through ob_memory_on_ops_plane, which is fail-closed - and it is checked in the same
+-- conjunction. `thought_id` absent is not an unestablished plane; it is a memory that was
+-- never derived from a thought, which is the ordinary case (all 21 live rows that carry one
+-- point at ops thoughts; the rest carry none).
+--
+-- AND THE ORACLE IS CLOSED INDEPENDENTLY OF THE ARM, which is the half that is checkable:
+-- naming a HIDDEN thought_id and naming a NONEXISTENT one both fail at 42501, because the
+-- visible() half of the OR refuses before the foreign-key trigger is consulted. Omitting the
+-- column succeeds - and tells the caller nothing about any thought, which is the difference
+-- between this arm and the idea_revisions one it looks identical to.
+--
+-- The disposition is written into the DATABASE, where section 7(h2) reads it, for the same
+-- reason as ORACLE-DISPOSITION: a decision a gate can see is a decision, and a decision only
+-- in a comment block is a habit. Removing either COMMENT turns the next apply RED.
+COMMENT ON POLICY agent_memories_ops_plane ON public.agent_memories IS
+  'NULL-ARM-DISPOSITION: WITH CHECK carries `thought_id IS NULL OR ob_thought_visible(thought_id)`. The plane of this row is established by metadata (ob_memory_on_ops_plane, fail-closed) in the same conjunction, NOT by thought_id; an absent thought_id is a memory not derived from a thought, not an unestablished plane. Hidden and nonexistent thought_id both fail 42501, so the arm is not an FK oracle. See init-graph-plane-rls.sql section 2c.';
+COMMENT ON POLICY agent_memories_personal_plane ON public.agent_memories IS
+  'NULL-ARM-DISPOSITION: same arm, same reason - the plane is established by user_id = ob_current_user_id() in the same conjunction, not by thought_id. See init-graph-plane-rls.sql section 2c.';
 
 -- ==========================================================================================
 -- 3. TIER B - the entity-level tables, and an HONEST account of what governs them
@@ -876,6 +951,91 @@ $fn$;
 -- plane-labelled content this is the identical defect one table over and must be fixed with
 -- it - recorded in documentation/notes/u5graph-findings.md rather than left as a comment
 -- nobody reads.
+
+-- ==========================================================================================
+-- 4b. EVERY TRIGGER ON A GOVERNED RELATION IS DISPOSITIONED - AND prosecdef IS NOT THE TEST
+-- ==========================================================================================
+-- A DEFECT REPORT AGAINST ROUND 3'S SECTION 7(k). That assertion enumerated the SECURITY
+-- DEFINER functions in `public` and called the definer-rights mechanism closed. The mechanism
+-- it actually closes is narrower than the mechanism that leaks, and the difference was
+-- measured, not argued:
+--
+--     CREATE FUNCTION u5g4_mirror_fn() RETURNS TRIGGER SECURITY INVOKER ...
+--       INSERT INTO u5g4_mirror (thought_id, body, fp)
+--       VALUES (NEW.id, NEW.content, encode(digest(NEW.content,'sha256'),'hex'));
+--     CREATE TRIGGER trg_u5g4_mirror AFTER INSERT ON public.thoughts ...
+--
+--     -- the real writer of `thoughts` is openbrain-mcp, connecting as `postgres`
+--     INSERT INTO thoughts (content, metadata) VALUES ('...secret', '{"exposure":"personal"}');
+--     SET ROLE service_role;
+--     SELECT body, left(fp,16) FROM u5g4_mirror;
+--       U5G4-PERSONAL trigger-copied secret | 45dbdbebc164c338   <- content AND fingerprint
+--       U5G4-OPS trigger-copied control     | 7b062dcc530803a4   <- the positive control
+--
+-- `prosecdef` is FALSE on that function. Round 3's file re-applied over exactly this state
+-- and printed "post-conditions hold on 9 table(s), and the four mechanism sweeps ... are
+-- clean". Flip that one attribute to TRUE and the same file goes RED - which is the proof
+-- that the attribute is a PROXY and not the property. THE MECHANISM IS THE SESSION: a trigger
+-- function runs with the authority of whoever wrote the row, and the writers of this corpus
+-- are superuser sessions that no policy in this file binds. SECURITY DEFINER only adds a
+-- second way to get there.
+--
+-- So the assertion is moved off the attribute and onto the SET: every non-internal trigger on
+-- a relation in the derived governed population must be DISPOSITIONED, whatever its function's
+-- prosecdef, whatever its timing, whatever its events. Section 7(m) reads these comments; a
+-- trigger created tomorrow has none and turns the migration RED.
+--
+-- WHAT THIS DOES AND DOES NOT ESTABLISH, and the second half is the important one. It
+-- establishes that no trigger is attached to a governed relation without somebody having
+-- written down what it moves. It does NOT read the function body, and it does NOT see a
+-- trigger on an UNGOVERNED relation that reads a governed one. Both are in the verdict's
+-- not-covered census at the end of this file, and both are why that verdict no longer says
+-- "clean".
+DO $$
+DECLARE
+  v_missing TEXT;
+BEGIN
+  -- Each disposition names what the trigger MOVES, because that is the only thing that
+  -- decides whether it can carry a row across the boundary.
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_queue_entity_extraction'
+                                        AND tgrelid='public.thoughts'::regclass) THEN
+    COMMENT ON TRIGGER trg_queue_entity_extraction ON public.thoughts IS
+      'TRIGGER-DISPOSITION: MOVES sha256(thoughts.content) into entity_extraction_queue. SECURITY DEFINER, and GATED by section 4 of init-graph-plane-rls.sql - an off-plane or unlabelled thought produces no queue row and an ops-to-personal transition deletes the existing one. The queue is itself governed (tier A).';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_thoughts_fingerprint'
+                                        AND tgrelid='public.thoughts'::regclass) THEN
+    COMMENT ON TRIGGER trg_thoughts_fingerprint ON public.thoughts IS
+      'TRIGGER-DISPOSITION: MOVES NOTHING out of the row. Sets NEW.content_fingerprint on the same row it fires for; no INSERT, UPDATE or DELETE of any other relation in the body (read 2026-08-31). SECURITY INVOKER.';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_touch_entities_on_thought_delete'
+                                        AND tgrelid='public.thoughts'::regclass) THEN
+    COMMENT ON TRIGGER trg_touch_entities_on_thought_delete ON public.thoughts IS
+      'TRIGGER-DISPOSITION: MOVES a timestamp only. UPDATEs entities.updated_at for the entities the deleted thought cited; carries no content and no fingerprint. Flipped to SECURITY INVOKER by section 4, so as invoker each plane touches exactly what it cites.';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_agent_memories_updated_at'
+                                        AND tgrelid='public.agent_memories'::regclass) THEN
+    COMMENT ON TRIGGER trg_agent_memories_updated_at ON public.agent_memories IS
+      'TRIGGER-DISPOSITION: MOVES NOTHING. Sets NEW.updated_at on the same row. SECURITY INVOKER.';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_thought_edges_updated_at'
+                                        AND tgrelid='public.thought_edges'::regclass) THEN
+    COMMENT ON TRIGGER trg_thought_edges_updated_at ON public.thought_edges IS
+      'TRIGGER-DISPOSITION: MOVES NOTHING. Sets NEW.updated_at on the same row. SECURITY INVOKER.';
+  END IF;
+
+  SELECT string_agg(c.relname || '.' || t.tgname, ', ' ORDER BY c.relname || '.' || t.tgname)
+    INTO v_missing
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+   WHERE NOT t.tgisinternal
+     AND c.relnamespace = 'public'::regnamespace
+     AND c.relkind IN ('r','p')
+     AND c.relrowsecurity AND c.relforcerowsecurity
+     AND COALESCE(obj_description(t.oid, 'pg_trigger'), '') NOT LIKE 'TRIGGER-DISPOSITION:%';
+  IF v_missing IS NOT NULL THEN
+    RAISE NOTICE 'init-graph-plane-rls: trigger(s) % on governed relations carry no '
+                 'TRIGGER-DISPOSITION comment yet; section 7(m) will decide.', v_missing;
+  END IF;
+END $$;
 
 -- ==========================================================================================
 -- 5. FORCE ROW LEVEL SECURITY
@@ -1199,6 +1359,12 @@ DECLARE
   v_absent TEXT[] := ARRAY[]::TEXT[];
   v_permits BOOLEAN;
   v_rec    RECORD;
+  -- THE VERDICT'S CENSUS COUNTERS. Declared here because the verdict at the end of this
+  -- block is not a summary of the sweeps - it is a separate accounting that must BALANCE
+  -- against pg_class, pg_constraint, pg_trigger and pg_proc.
+  v_n_rel     INT; v_n_gov     INT; v_n_tierb  INT; v_n_plain INT; v_n_view INT;
+  v_n_foreign INT; v_n_con_ok  INT; v_n_con_no INT; v_n_trg   INT; v_n_trg_out INT;
+  v_n_fn_def  INT; v_n_fn_inv  INT; v_n_super  INT; v_n_pol   INT; v_n_disp    INT;
 BEGIN
   -- THE POPULATION OF THE MECHANISM SWEEPS, AND WHY IT IS NOT A LIST IN THIS FILE.
   -- It was a list, until the recall seam handed back class 13/16 - "a checker deriving its
@@ -1211,10 +1377,19 @@ BEGIN
   -- filter nobody re-reads. Its remedy for the class is applied too: a FLOOR taken from what
   -- this file and 180 are specified to govern is checked back against the derived population,
   -- so a subject that leaves the population is a FAILURE and not a smaller N.
+  -- RELKIND, AND WHY IT IS A PAIR AND NOT A LETTER. Round 3 wrote `relkind = 'r'` here and
+  -- called the population derived. `'r'` is ORDINARY TABLE; a PARTITIONED table is `'p'`, and
+  -- a partitioned relation carries its own RLS flags and its own policies. Measured: a
+  -- FORCE-RLS partitioned relation with `USING (true)` was live and readable through the door
+  -- (1 personal / 1 ops) while round 3's file re-applied over it, COMMITted, and printed that
+  -- the mechanism sweeps were clean. That is the third catalogue proxy this effort has been
+  -- caught by, after `relkind='r'`'s cousins `indisunique` and `prosecdef`, and it is why the
+  -- verdict at the end of this file now CENSUSES the relkinds it did not look at instead of
+  -- summarising the ones it did.
   SELECT array_agg(c.relname ORDER BY c.relname) INTO v_scope
     FROM pg_class c
    WHERE c.relnamespace = 'public'::regnamespace
-     AND c.relkind = 'r'
+     AND c.relkind IN ('r','p')
      AND c.relrowsecurity AND c.relforcerowsecurity
      AND NOT (c.relname = ANY (v_tier_b));
 
@@ -1347,8 +1522,18 @@ BEGIN
   --     established. Enumerating the columns that must not be NULL would trail the schema
   --     forever, so this asserts the behaviour instead: take a row of the relation's own
   --     type with EVERY column NULL, evaluate each permissive policy expression against it,
-  --     and require that no arm returns TRUE. A policy that denies the all-absent row cannot
-  --     have an arm that permits on absence.
+  --     and require that no arm returns TRUE.
+  --
+  --     ROUND 3 WROTE HERE: "A policy that denies the all-absent row cannot have an arm that
+  --     permits on absence." THAT SENTENCE IS FALSE and one policy in this very file
+  --     disproves it. `agent_memories_ops_plane` WITH CHECK is
+  --         ob_memory_on_ops_plane(metadata) AND (thought_id IS NULL OR visible(thought_id))
+  --     Against the all-NULL probe row the FIRST conjunct is false, so the whole arm is
+  --     false and this sweep passes it - while a real row with `metadata->>'exposure'='ops'`
+  --     and `thought_id` absent is PERMITTED. The all-NULL row tests the CONJUNCTION, and an
+  --     absence hole lives in a DISJUNCT. This probe is a real test that found a real leak
+  --     (section 2c); it is not a decision procedure, and (h2) below exists because it is
+  --     not. Neither of them is complete - see the verdict at the end of this file.
   --     It found agent_memory_recall_traces' `WITH CHECK (true)` - see section 2c - which no
   --     one had read as an absence arm, because it does not look like one.
   --     SCOPE is the relations that carry a row-level predicate: tier A, tier A2, the seven
@@ -1390,41 +1575,121 @@ BEGIN
                     array_to_string(v_absent, ', ');
   END IF;
 
-  -- (i) NO UNIQUENESS ORACLE. A unique index is not RLS-filtered and it is consulted AFTER
-  --     WITH CHECK, so `23505 versus success` answers "does a row you cannot see exist?".
-  --     That is how `idea_revisions_pkey (idea_id, revision)` answered for a hidden revision
-  --     while the table's own read policy correctly returned nothing.
-  --     A constraint is SAFE if any of three things is true, and all three are DERIVED:
+  -- (h2) EVERY LITERAL ABSENCE ARM IS DISPOSITIONED. (h) evaluates the all-NULL row and
+  --     therefore cannot see an absence hole that sits in a DISJUNCT beside a conjunct the
+  --     probe row already falsifies - which is exactly where `agent_memories`' surviving
+  --     `thought_id IS NULL OR visible(thought_id)` sits. So the SHAPE is censused too, and
+  --     every occurrence must carry a `NULL-ARM-DISPOSITION:` COMMENT ON POLICY saying why
+  --     the absent value is not an unestablished plane. Section 2c writes the two that exist.
+  --
+  --     THIS ARM IS SYNTACTIC AND IT IS NOT COMPLETE. It matches the text `X IS NULL OR`
+  --     and `OR X IS NULL` in a policy expression. `COALESCE(x, <permitting value>)`,
+  --     `x IS NOT DISTINCT FROM NULL`, `NOT (x IS NOT NULL)` and a function that returns TRUE
+  --     for its own absent input all mean the same thing and none of them matches. The one
+  --     this round actually found - ob_trace_on_ops_plane permitting the EMPTY ARRAY, section
+  --     1b - would not have matched either. It is a census that forces a decision on the
+  --     instances of a known shape, not a proof that the shape is absent; that distinction is
+  --     the whole content of the verdict at the end of this file.
+  SELECT array_agg(DISTINCT p.tablename || '.' || p.policyname
+                   ORDER BY p.tablename || '.' || p.policyname) INTO v_bad
+    FROM pg_policies p
+    JOIN pg_policy pol ON pol.polname = p.policyname
+                      AND pol.polrelid = ('public.' || quote_ident(p.tablename))::regclass
+   WHERE p.schemaname = 'public'
+     AND p.permissive = 'PERMISSIVE'
+     AND p.tablename = ANY (v_scope)
+     -- THE PATTERN IS MATCHED AGAINST THE DEPARSED EXPRESSION, NOT AGAINST WHAT WAS
+     -- TYPED, and pg_get_expr fully parenthesises: the arm written
+     -- `thought_id IS NULL OR visible(thought_id)` reads back as
+     -- `((thought_id IS NULL) OR visible(thought_id))`. The first version of this scan
+     -- required whitespace between `null` and `or`, matched nothing, and passed the very
+     -- two policies it was written for - caught by adversarial case J, which deleted a
+     -- disposition and expected RED and got COMMIT. A gate that cannot go red for the
+     -- instance it was written for is the effort's own class 1, one file on.
+     AND (COALESCE(p.qual,'')       ~* '\mis\s+null[\s)]*or\M'
+          OR COALESCE(p.qual,'')       ~* '\mor[\s(]*[a-z0-9_."]+\s+is\s+null\M'
+          OR COALESCE(p.with_check,'') ~* '\mis\s+null[\s)]*or\M'
+          OR COALESCE(p.with_check,'') ~* '\mor[\s(]*[a-z0-9_."]+\s+is\s+null\M')
+     AND COALESCE(obj_description(pol.oid, 'pg_policy'), '') NOT LIKE 'NULL-ARM-DISPOSITION:%';
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: policy/policies % carry a literal `X IS NULL OR` '
+                    'arm with no NULL-ARM-DISPOSITION comment. Either the absent value means '
+                    'the row''s plane cannot be established - in which case remove the arm - '
+                    'or it means something else, in which case say what, in a COMMENT ON '
+                    'POLICY this gate can read.', array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (i) NO KEY-CONSTRAINT ORACLE. A key constraint is not RLS-filtered and it is consulted
+  --     AFTER WITH CHECK, so `error versus success` answers "does a row you cannot see
+  --     exist?". That is how `idea_revisions_pkey (idea_id, revision)` answered for a hidden
+  --     revision while the table's own read policy correctly returned nothing.
+  --
+  --     ROUND 3 KEYED THIS SWEEP ON `pg_index.indisunique` AND THAT IS A PROXY, NOT THE
+  --     PROPERTY. An EXCLUSION constraint has `indisunique = false` on its index and refuses
+  --     identically. Measured, on thought_entities carrying
+  --     `EXCLUDE USING btree (entity_id WITH =, mention_role WITH =)` - which does NOT
+  --     contain the plane column `thought_id` - as service_role, with the read control in the
+  --     same session showing the read policy WORKING:
+  --
+  --       read thought_entities                       -> 0 personal / 1 ops   (policy holds)
+  --       INSERT colliding with the HIDDEN row        -> 23P01 exclusion violation
+  --       INSERT into a free slot, same statement     -> INSERT 0 1
+  --
+  --     The `idea_revisions` shape verbatim, one SQLSTATE over. And `x` was already in this
+  --     file's own `contype IN ('p','u','x')` join filter, so the intent was there and the
+  --     population could never deliver it. THE POPULATION IS NOW TAKEN FROM pg_constraint -
+  --     every `p`, `u` and `x` on an in-scope relation - UNION the bare unique indexes that no
+  --     constraint owns, because `CREATE UNIQUE INDEX` with no constraint is the same oracle
+  --     with no catalogue row to hang a comment on.
+  --
+  --     A candidate is SAFE if any of three things is true, and all three are DERIVED:
   --       1. its columns CONTAIN the relation's plane columns (taken from pg_depend, which
   --          records exactly which columns each policy reads) - then a collision can only be
-  --          with a row the caller may already see;
+  --          with a row the caller may already see. FOR AN EXCLUSION CONSTRAINT this escape
+  --          applies only when EVERY operator is `=`: with `&&` or `<>` a collision is not a
+  --          duplicate and containing the plane column proves nothing about visibility.
   --       2. no role behind the door holds INSERT or UPDATE on the table - section 6a makes
   --          this true for the agent-memory corpus and idea_revisions;
   --       3. every column of it is a uuid defaulted to gen_random_uuid(), which cannot be
   --          collided with by guessing.
   --     Anything else must carry an `ORACLE-DISPOSITION:` COMMENT saying why (section 6a2).
-  --     A unique constraint added tomorrow satisfies none of the three and has no comment,
-  --     so it turns this migration RED - which is the point of asserting a property.
-  WITH idx AS (
-    SELECT c.relname AS tbl, c.oid AS reloid, i.oid AS idxoid, i.relname AS idxname,
-           con.oid AS conoid,
+  --
+  --     STILL NOT COMPLETE, and the verdict says so: a CHECK constraint calling a function
+  --     that reads a governed table, a deferred constraint trigger, and a domain constraint
+  --     are all the same mechanism and none of them is in this population.
+  WITH cand AS (
+    SELECT c.relname AS tbl, c.oid AS reloid, con.oid AS objoid,
+           'pg_constraint'::text AS objcat, con.conname AS objname, con.contype AS kind,
+           (SELECT array_agg(a.attname ORDER BY a.attname)
+              FROM unnest(con.conkey) AS k(attnum)
+              JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum) AS cols,
+           (SELECT count(*) FROM unnest(con.conkey) AS k(attnum) WHERE k.attnum = 0) AS expr_cols,
+           (con.contype <> 'x'
+            OR NOT EXISTS (SELECT 1 FROM unnest(con.conexclop) AS ex(opoid)
+                             JOIN pg_operator o ON o.oid = ex.opoid
+                            WHERE o.oprname <> '=')) AS equality_only
+      FROM pg_constraint con
+      JOIN pg_class c ON c.oid = con.conrelid
+     WHERE con.contype IN ('p','u','x')
+       AND c.relnamespace = 'public'::regnamespace
+       AND c.relname = ANY (v_scope)
+    UNION ALL
+    -- a bare unique index: no constraint owns it, so obj_description reads pg_class instead
+    SELECT c.relname, c.oid, i.oid, 'pg_class'::text, i.relname, 'i'::"char",
            (SELECT array_agg(a.attname ORDER BY a.attname)
               FROM unnest(x.indkey::int2[]) AS k(attnum)
-              JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum) AS cols,
-           (SELECT count(*) FROM unnest(x.indkey::int2[]) AS k(attnum)
-             WHERE k.attnum = 0) AS expr_cols
+              JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum),
+           (SELECT count(*) FROM unnest(x.indkey::int2[]) AS k(attnum) WHERE k.attnum = 0),
+           true
       FROM pg_index x
       JOIN pg_class i ON i.oid = x.indexrelid
       JOIN pg_class c ON c.oid = x.indrelid
-      -- conindid is also set on a FOREIGN KEY, pointing at the index it VALIDATES
-      -- against, so an unrestricted join reported thoughts_pkey once per FK into
-      -- thoughts. Only a key constraint ON THIS TABLE owns this index.
-      LEFT JOIN pg_constraint con ON con.conindid = i.oid
-                                 AND con.conrelid = c.oid
-                                 AND con.contype IN ('p','u','x')
      WHERE x.indisunique
        AND c.relnamespace = 'public'::regnamespace
        AND c.relname = ANY (v_scope)
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint con
+                        WHERE con.conindid = i.oid AND con.conrelid = c.oid
+                          AND con.contype IN ('p','u','x'))
   ), planecols AS (
     SELECT pol.polrelid AS reloid, array_agg(DISTINCT a.attname) AS cols
       FROM pg_depend d
@@ -1434,29 +1699,29 @@ BEGIN
        AND d.refobjid = pol.polrelid
      GROUP BY 1
   )
-  SELECT array_agg(idx.tbl || '.' || idx.idxname ORDER BY idx.tbl || '.' || idx.idxname)
+  SELECT array_agg(cand.tbl || '.' || cand.objname ORDER BY cand.tbl || '.' || cand.objname)
     INTO v_bad
-    FROM idx
-    LEFT JOIN planecols pc ON pc.reloid = idx.reloid
+    FROM cand
+    LEFT JOIN planecols pc ON pc.reloid = cand.reloid
    WHERE EXISTS (SELECT 1 FROM information_schema.role_table_grants g
-                  WHERE g.table_schema = 'public' AND g.table_name = idx.tbl
+                  WHERE g.table_schema = 'public' AND g.table_name = cand.tbl
                     AND g.grantee IN ('service_role','authenticated')
                     AND g.privilege_type IN ('INSERT','UPDATE'))
-     AND NOT (idx.expr_cols = 0
+     AND NOT (cand.expr_cols = 0
+              AND cand.equality_only
               AND COALESCE(array_length(pc.cols, 1), 0) > 0
-              AND pc.cols <@ idx.cols)
-     AND NOT (idx.expr_cols = 0
+              AND pc.cols <@ cand.cols)
+     AND NOT (cand.expr_cols = 0
               AND NOT EXISTS (
-                    SELECT 1 FROM unnest(idx.cols) AS cn(attname)
-                      JOIN pg_attribute a ON a.attrelid = idx.reloid AND a.attname = cn.attname
-                      LEFT JOIN pg_attrdef ad ON ad.adrelid = idx.reloid AND ad.adnum = a.attnum
+                    SELECT 1 FROM unnest(cand.cols) AS cn(attname)
+                      JOIN pg_attribute a ON a.attrelid = cand.reloid AND a.attname = cn.attname
+                      LEFT JOIN pg_attrdef ad ON ad.adrelid = cand.reloid AND ad.adnum = a.attnum
                      WHERE NOT (a.atttypid = 'uuid'::regtype
                                 AND COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '')
                                     LIKE '%gen_random_uuid%')))
-     AND COALESCE(obj_description(idx.conoid, 'pg_constraint'),
-                  obj_description(idx.idxoid, 'pg_class'), '') NOT LIKE 'ORACLE-DISPOSITION:%';
+     AND COALESCE(obj_description(cand.objoid, cand.objcat), '') NOT LIKE 'ORACLE-DISPOSITION:%';
   IF v_bad IS NOT NULL THEN
-    RAISE EXCEPTION 'init-graph-plane-rls: unique constraint(s) % are an existence oracle on a '
+    RAISE EXCEPTION 'init-graph-plane-rls: key constraint(s) % are an existence oracle on a '
                     'governed relation: their columns do not contain the plane columns, the '
                     'door can write the table, and they are not unguessable. Contain them, '
                     'withdraw the write, or record an ORACLE-DISPOSITION comment.',
@@ -1502,11 +1767,17 @@ BEGIN
                     'where the policy would not.', array_to_string(v_bad, ', ');
   END IF;
 
-  -- (k) THE SECURITY DEFINER SET IS EXACTLY THE ONE SECTION 4 ACCOUNTS FOR. Definer rights
-  --     are the fourth mechanism that walks around a policy (after unique indexes, FK
-  --     triggers and stored relations), and section 4 dispositioned the four that existed.
-  --     A FIFTH one added later would carry content across the boundary with nothing
-  --     complaining, so the SET is asserted rather than the two flips.
+  -- (k) THE SECURITY DEFINER SET IS EXACTLY THE ONE SECTION 4 ACCOUNTS FOR - AND THIS IS ONE
+  --     MECHANISM, NOT THE MECHANISM. Round 3's comment here said definer rights are "the
+  --     fourth mechanism that walks around a policy" and treated asserting the SET as closing
+  --     it. What actually walks around a policy is CODE RUNNING IN A SESSION THE POLICY DOES
+  --     NOT BIND, and `prosecdef` is one of two ways to get there; the other is simply being
+  --     written by a superuser, which every deployed writer of this corpus is. Section 4b
+  --     records the measurement: an INVOKER trigger copying thought content and its sha256
+  --     into a door-readable table leaked identically, and flipping `prosecdef` to true on
+  --     the very same function is what turned this assertion red. So (k) still asserts the
+  --     definer set - it is worth asserting - and (m) below asserts the set this one is a
+  --     subset of.
   SELECT array_agg(p.proname ORDER BY p.proname) INTO v_bad
     FROM pg_proc p
    WHERE p.pronamespace = 'public'::regnamespace
@@ -1517,6 +1788,65 @@ BEGIN
                     'public: %. A definer function runs as its superuser owner and no policy '
                     'in this file binds it. Classify it in section 4 - or drop the definer '
                     'rights - and re-run.', array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (m) EVERY TRIGGER ON A GOVERNED RELATION IS DISPOSITIONED, WHATEVER ITS ATTRIBUTES. The
+  --     assertion (k) could not make: a trigger fires inside the writer's transaction with
+  --     the writer's authority, so on this database - where the writers are superuser
+  --     sessions - it is not bound by any policy in this file whether its function is DEFINER
+  --     or INVOKER, BEFORE or AFTER, ROW or STATEMENT. There is no attribute that separates a
+  --     safe one from a leaking one, so nothing is inferred from an attribute: the SET is
+  --     censused and each member must carry a `TRIGGER-DISPOSITION:` COMMENT ON TRIGGER
+  --     naming what it MOVES. Section 4b writes the five that exist on this schema.
+  --
+  --     WHAT THIS PROVES: that no trigger is attached to a governed relation without somebody
+  --     having written down what it moves, and that one appearing tomorrow stops the
+  --     migration. WHAT IT DOES NOT PROVE: that any disposition is TRUE - this reads a
+  --     comment, not a function body - and it does not see a trigger on an UNGOVERNED
+  --     relation that READS a governed one. Both are counted in the verdict's not-covered
+  --     census below.
+  SELECT array_agg(c.relname || '.' || t.tgname ORDER BY c.relname || '.' || t.tgname)
+    INTO v_bad
+    FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+   WHERE NOT t.tgisinternal
+     AND c.relnamespace = 'public'::regnamespace
+     AND c.relname = ANY (v_scope)
+     AND COALESCE(obj_description(t.oid, 'pg_trigger'), '') NOT LIKE 'TRIGGER-DISPOSITION:%';
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: trigger(s) % are attached to a governed relation '
+                    'and carry no TRIGGER-DISPOSITION comment. A trigger runs in the writer''s '
+                    'session, and the writers of this corpus are superuser sessions no policy '
+                    'binds - SECURITY INVOKER is not a defence. Say what it moves, in a '
+                    'COMMENT ON TRIGGER this gate can read, or drop it.',
+                    array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (n) A PARTITIONED RELATION IS GOVERNED ONLY WHERE ITS LEAVES ARE. Policies on a
+  --     partitioned parent apply to a query THROUGH THE PARENT; a query naming a leaf
+  --     partition directly is bound by the LEAF's own RLS state, which is a separate set of
+  --     catalogue flags and a separate set of policies. PostgREST addresses relations by
+  --     name, so a leaf is a door of its own. Every leaf of an in-scope partitioned relation
+  --     must therefore be RLS-enabled and FORCED itself, or hold no privilege for either door
+  --     role. No partitioned relation exists in this schema today; this assertion is here
+  --     because `relkind='r'` was believed to be the population until 2026-08-31, and the
+  --     next person to add one should not have to rediscover which half of it is governed.
+  SELECT array_agg(DISTINCT ch.relname ORDER BY ch.relname) INTO v_bad
+    FROM pg_inherits inh
+    JOIN pg_class par ON par.oid = inh.inhparent
+    JOIN pg_class ch  ON ch.oid  = inh.inhrelid
+   WHERE par.relnamespace = 'public'::regnamespace
+     AND par.relname = ANY (v_scope)
+     AND par.relkind = 'p'
+     AND NOT (ch.relrowsecurity AND ch.relforcerowsecurity)
+     AND EXISTS (SELECT 1 FROM information_schema.role_table_grants g
+                  WHERE g.table_schema = 'public' AND g.table_name = ch.relname
+                    AND g.grantee IN ('service_role','authenticated'));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: partition(s) % of a governed partitioned relation '
+                    'are reachable by a door role and are not themselves RLS-enabled and '
+                    'FORCED. A query naming a partition directly is bound by the partition, '
+                    'not by its parent.', array_to_string(v_bad, ', ');
   END IF;
 
   -- (l) NOTHING REACHES A GOVERNED RELATION AROUND THE BOUNDARY, TRANSITIVELY. (f) asserts
@@ -1541,7 +1871,7 @@ BEGIN
     FROM reach r
     JOIN pg_class rl ON rl.oid = r.rel
     JOIN pg_class bs ON bs.oid = r.base
-   WHERE bs.relkind = 'r' AND bs.relrowsecurity AND bs.relforcerowsecurity
+   WHERE bs.relkind IN ('r','p') AND bs.relrowsecurity AND bs.relforcerowsecurity
      AND (rl.relkind = 'm'
           OR (rl.relkind = 'v'
               AND COALESCE((SELECT option_value FROM pg_options_to_table(rl.reloptions)
@@ -1553,9 +1883,131 @@ BEGIN
                     array_to_string(v_bad, ', ');
   END IF;
 
-  RAISE NOTICE 'init-graph-plane-rls: post-conditions hold on % table(s), and the four '
-               'mechanism sweeps (absence, uniqueness, foreign keys, reachability) are clean',
-               array_length(v_all, 1);
+  -- ========================================================================================
+  -- THE VERDICT. WHAT WAS CHECKED, AND WHAT WAS NOT.
+  -- ========================================================================================
+  -- ROUND 3 PRINTED HERE: "post-conditions hold on 9 table(s), and the four mechanism sweeps
+  -- (absence, uniqueness, foreign keys, reachability) are clean". IT PRINTED THAT THREE TIMES
+  -- - once per round - and on 2026-08-31 it printed it, on a COMMITted apply, over a database
+  -- that simultaneously carried an exclusion-constraint existence oracle on `thought_entities`,
+  -- a FORCE-RLS PARTITIONED relation with `USING (true)`, and an INVOKER trigger copying
+  -- thought content and its sha256 into a door-readable table. All three were measured through
+  -- the door in the same session, each with a live ops positive control. THAT SENTENCE WAS THE
+  -- DEFECT: it reported the absence of a finding as the presence of a property.
+  --
+  -- Three rounds, three sweeps, each keyed on a CATALOGUE PROXY rather than on the property -
+  -- `relkind='r'`, `indisunique`, `prosecdef` - and each time widening the alphabet bought one
+  -- round. A gate that enumerates dangerous patterns cannot be complete, because the next
+  -- catalogue attribute is always there. What CAN be complete is the accounting: every
+  -- relation, constraint, trigger and function in this schema lands in exactly one bucket -
+  -- examined by a named sweep, or NOT examined with the reason - and the buckets must BALANCE
+  -- against the catalogue's own totals or this migration fails. A member that falls outside
+  -- every bucket is unaccounted, and unaccounted is a FAILURE, not a smaller N. That is the
+  -- shape scripts/agent-harness/andon.ps1 already uses to make the word `clear` mean something,
+  -- and it is borrowed here on purpose.
+  --
+  -- SO THE POLICIES DENY BY DEFAULT AND THE VERDICT DOES NOT CLAIM THEY ARE PROVEN TO. Those
+  -- are two different deliverables, and conflating them is what produced three false clean
+  -- verdicts.
+  SELECT count(*) INTO v_n_rel FROM pg_class
+   WHERE relnamespace='public'::regnamespace AND relkind IN ('r','p','f','m','v');
+  SELECT count(*) INTO v_n_gov FROM pg_class
+   WHERE relnamespace='public'::regnamespace AND relkind IN ('r','p')
+     AND relname = ANY (v_scope);
+  SELECT count(*) INTO v_n_tierb FROM pg_class
+   WHERE relnamespace='public'::regnamespace AND relname = ANY (v_tier_b);
+  SELECT count(*) INTO v_n_plain FROM pg_class
+   WHERE relnamespace='public'::regnamespace AND relkind IN ('r','p')
+     AND NOT (relname = ANY (v_scope)) AND NOT (relname = ANY (v_tier_b));
+  SELECT count(*) INTO v_n_view FROM pg_class
+   WHERE relnamespace='public'::regnamespace AND relkind IN ('v','m');
+  SELECT count(*) INTO v_n_foreign FROM pg_class
+   WHERE relnamespace='public'::regnamespace AND relkind = 'f';
+  IF v_n_gov + v_n_tierb + v_n_plain + v_n_view <> v_n_rel THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: the relation census does not balance - % relations '
+                    'in public, % governed + % tier B + % ungoverned + % views/matviews = %. '
+                    'A relation outside every bucket is unaccounted, and unaccounted is a '
+                    'failure, not a smaller N.',
+                    v_n_rel, v_n_gov, v_n_tierb, v_n_plain, v_n_view,
+                    v_n_gov + v_n_tierb + v_n_plain + v_n_view;
+  END IF;
+  IF v_n_foreign > 0 THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: % FOREIGN TABLE(s) exist in public. RLS on a '
+                    'foreign table constrains nothing about the remote side, and no sweep in '
+                    'this file looks at one. Classify them before this runs again.',
+                    v_n_foreign;
+  END IF;
+
+  SELECT count(*) INTO v_n_con_ok
+    FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid
+   WHERE c.relnamespace='public'::regnamespace AND c.relname = ANY (v_scope)
+     AND con.contype IN ('p','u','x');
+  SELECT count(*) INTO v_n_con_no
+    FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid
+   WHERE c.relnamespace='public'::regnamespace AND c.relname = ANY (v_scope)
+     AND con.contype NOT IN ('p','u','x','f');
+  SELECT count(*) INTO v_n_trg
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+   WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace
+     AND c.relname = ANY (v_scope);
+  SELECT count(*) INTO v_n_trg_out
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+   WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace
+     AND NOT (c.relname = ANY (v_scope));
+  SELECT count(*) INTO v_n_fn_def FROM pg_proc
+   WHERE pronamespace='public'::regnamespace AND prosecdef;
+  SELECT count(*) INTO v_n_fn_inv FROM pg_proc
+   WHERE pronamespace='public'::regnamespace AND NOT prosecdef;
+  SELECT count(*) INTO v_n_super FROM pg_roles WHERE rolsuper OR rolbypassrls;
+  SELECT count(*) INTO v_n_pol
+    FROM pg_policies WHERE schemaname='public' AND tablename = ANY (v_scope);
+  SELECT count(*) INTO v_n_disp
+    FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid
+   WHERE c.relnamespace='public'::regnamespace
+     AND COALESCE(obj_description(con.oid,'pg_constraint'),'') LIKE 'ORACLE-DISPOSITION:%';
+
+  RAISE NOTICE '=== init-graph-plane-rls VERDICT: what was checked ===';
+  RAISE NOTICE '  relations in public: % total = % governed (relkind r,p; RLS enabled+forced) '
+               '+ % tier B (deliberately wide on read, contained at the write, section 3) '
+               '+ % ungoverned + % views/matviews. Census BALANCES.',
+               v_n_rel, v_n_gov, v_n_tierb, v_n_plain, v_n_view;
+  RAISE NOTICE '  swept: (h) % permissive policy arm(s) EXECUTED against an all-NULL row; '
+               '(h2) the same arms scanned for a literal absence arm; (i) % key constraint(s) '
+               'of contype p,u,x plus bare unique indexes; (j) foreign keys into governed '
+               'parents; (k) % SECURITY DEFINER function(s); (m) % trigger(s) on governed '
+               'relations, all attributes; (n) partitions of governed parents; (l) transitive '
+               'view/matview reachability, any schema.',
+               v_n_pol, v_n_con_ok, v_n_fn_def, v_n_trg;
+  RAISE NOTICE '=== NOT checked, and each one is a way this boundary could still be open ===';
+  RAISE NOTICE '  * SUPERUSER SESSIONS. % role(s) hold rolsuper or rolbypassrls. RLS binds '
+               'none of them, FORCE included, and nine deployed OB1 clients connect as '
+               '`postgres`. Every sweep above is a statement about non-superuser door roles '
+               'only. This is U5 steps 2-3 (SET ROLE, then dedicated credentials), DEFERRED '
+               'by the operator - not closed here.', v_n_super;
+  RAISE NOTICE '  * CONSTRAINT-VIOLATION ORACLES that remain BY DECISION: % ORACLE-DISPOSITION '
+               'comment(s) in this database record a constraint the door can still provoke. '
+               'They leak EXISTENCE, not content. Closing them properly means the door not '
+               'being able to write the table, or the plane column being in the constraint.',
+               v_n_disp;
+  RAISE NOTICE '  * OTHER CONSTRAINT TYPES: % constraint(s) of contype other than p,u,x,f on '
+               'governed relations were NOT examined as oracles - a CHECK calling a function '
+               'that reads a governed table, or a constraint trigger, refuses on exactly the '
+               'same evidence.', v_n_con_no;
+  RAISE NOTICE '  * TRIGGER AND FUNCTION BODIES. (m) reads a COMMENT, not code: a '
+               'TRIGGER-DISPOSITION that is WRONG passes. % trigger(s) on UNGOVERNED '
+               'relations in public were not examined at all, and any of them may READ a '
+               'governed one. % SECURITY INVOKER function(s) in public were not examined.',
+               v_n_trg_out, v_n_fn_inv;
+  RAISE NOTICE '  * OTHER SCHEMAS. Only public is censused, except (l), which walks '
+               'reachability across schemas. Objects elsewhere are outside every other sweep.';
+  RAISE NOTICE '  * ABSENCE ARMS THAT DO NOT LOOK LIKE ONE. (h) tests the all-NULL row and '
+               'therefore cannot see a hole in a disjunct beside a false conjunct; (h2) is a '
+               'TEXT scan for one spelling. COALESCE(x, <permitting value>), an empty-set '
+               'containment - which is what section 1b actually fixed - and a function that '
+               'returns TRUE for its own absent input all evade both.';
+  RAISE NOTICE '=== ABSENCE OF A FINDING ABOVE IS NOT A PROOF OF THE PROPERTY. This file  ===';
+  RAISE NOTICE '=== makes the policies deny by default; the sweeps are evidence that some  ===';
+  RAISE NOTICE '=== named ways around them are closed, over a population that BALANCES.    ===';
 END $$;
 
 NOTIFY pgrst, 'reload schema';

@@ -342,6 +342,44 @@ END $$;
 COMMENT ON CONSTRAINT thoughts_pkey      ON public.thoughts      IS NULL;
 COMMENT ON CONSTRAINT thought_edges_pkey ON public.thought_edges IS NULL;
 
+-- ==========================================================================================
+-- 8. UNDO SECTION 1b - the hardened trace predicate
+-- ==========================================================================================
+-- APPLYING THIS RE-OPENS A THIRD MEASURED DISCLOSURE. 180's definition COALESCEs an absent
+-- `enforced_exposure` to ["personal"], which denies - but `[] <@ anything` is TRUE, so a
+-- recall trace that recorded `enforced_exposure: []`, i.e. a recall that enforced NOTHING,
+-- becomes readable through the unauthenticated door WITH ITS QUERY TEXT. Restored verbatim
+-- from init-agent-memory-rls.sql, because reverting means going back to what was there.
+CREATE OR REPLACE FUNCTION public.ob_trace_on_ops_plane(rp JSONB) RETURNS BOOLEAN
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+  SELECT COALESCE(rp->'enforced_exposure', '["personal"]'::jsonb) <@ '["ops"]'::jsonb
+$$;
+
+-- ==========================================================================================
+-- 9. UNDO SECTIONS 2c AND 4b - the dispositions the post-condition reads
+-- ==========================================================================================
+-- These are COMMENTs, so dropping them changes no behaviour on its own; they are removed so
+-- that a revert leaves no disposition claiming to describe a state that has been rolled back,
+-- and so that re-applying the migration RE-WRITES them rather than inheriting them. Sections
+-- 7(h2) and 7(m) read exactly these, which is what makes a re-apply prove it wrote them.
+COMMENT ON POLICY agent_memories_ops_plane      ON public.agent_memories IS NULL;
+COMMENT ON POLICY agent_memories_personal_plane ON public.agent_memories IS NULL;
+
+DO $$
+DECLARE
+  v_rec RECORD;
+BEGIN
+  FOR v_rec IN
+    SELECT c.relname AS tbl, t.tgname
+      FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+     WHERE NOT t.tgisinternal
+       AND c.relnamespace = 'public'::regnamespace
+       AND COALESCE(obj_description(t.oid, 'pg_trigger'), '') LIKE 'TRIGGER-DISPOSITION:%'
+  LOOP
+    EXECUTE format('COMMENT ON TRIGGER %I ON public.%I IS NULL', v_rec.tgname, v_rec.tbl);
+  END LOOP;
+END $$;
+
 NOTIFY pgrst, 'reload schema';
 
 COMMIT;
