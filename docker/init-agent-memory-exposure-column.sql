@@ -606,7 +606,7 @@ CREATE TRIGGER trg_queue_entity_extraction
 -- assert the PROPERTY the operator asked for: the DATABASE, not application code, rejects an
 -- absent and a malformed exposure. Each attempt runs inside a plpgsql BEGIN...EXCEPTION
 -- block, which is an implicit savepoint, so a rejected statement leaves nothing behind; the
--- migration FAILS if any of them succeeds, and section 8b proves nothing was written.
+-- migration FAILS if any of them succeeds, and section 8e proves nothing was written.
 DO $$
 DECLARE
   v_t  TEXT;
@@ -712,7 +712,7 @@ END $$;
 --     the real `upsert_thought`, not a restatement of its body; each runs inside its own
 --     plpgsql BEGIN...EXCEPTION (an implicit savepoint), so a refusal leaves nothing behind,
 --     and the accepted case is UNWOUND deliberately by raising a private errcode after the
---     assertions have been read into variables. 8b then proves nothing survived.
+--     assertions have been read into variables. 8e then proves nothing survived.
 DO $$
 DECLARE
   v_ok   BOOLEAN;
@@ -896,8 +896,9 @@ BEGIN
                'metadata->>''exposure'' for a trust decision - the mirror has zero readers';
 END $$;
 
--- 8b. Nothing above wrote a row. Asserted rather than assumed, because "it must have rolled
---     back" is exactly the class of belief this effort keeps paying for.
+-- 8e. Nothing above wrote a row - LAST, so it covers 8, 8c and 8d. Asserted rather than
+--     assumed, because "it must have rolled back" is exactly the class of belief this
+--     effort keeps paying for.
 DO $$
 DECLARE v_n INT;
 BEGIN
