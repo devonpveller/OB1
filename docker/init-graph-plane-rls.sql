@@ -92,6 +92,66 @@
 BEGIN;
 
 -- ==========================================================================================
+-- 0a. THE GOVERNED-NESS PREDICATE - ONE definition, and every arm below calls IT
+-- ==========================================================================================
+-- WHY THIS FUNCTION EXISTS, and it is a defect report against the FIRST version of this file.
+-- Section 0 presents its target set as DERIVED and says an unclassified table is a failure.
+-- That was half true. The REFERENCED-BY arm applied a real predicate to the tables it found
+-- (RLS enabled AND forced AND no permissive USING(true) policy), but the CLOSURE arm
+-- classified eight members by membership of a hardcoded name array, `v_governed_180`, and
+-- never tested one of them. A reviewer's formulation is exact: "the gate is derived for
+-- tables OUTSIDE the closure and a spell-checked list for tables INSIDE it."
+--
+-- Apply the referenced-by arm's own predicate to its own closure and it turns RED:
+-- `agent_memory_audit_events` is rls=true, force=true, AND carries a policy whose USING is
+-- literally `true`. FORCE was on and the policy still permitted everything, which is why
+-- reading `relforcerowsecurity` alone did not catch it.
+--
+-- MEASURED on the live database 2026-08-31, in a rolled-back transaction, with an ops
+-- positive control at every step:
+--
+--     SET ROLE service_role;   -- = PGRST_DB_ANON_ROLE, the unauthenticated obnet caller
+--     SELECT summary FROM agent_memories WHERE summary LIKE 'U5GRAPH-R1-%';
+--        -> 1 row, the OPS control only            (the boundary HOLDS on the base table)
+--     SELECT memory_id, event_type, payload, created_at
+--       FROM agent_memory_audit_events WHERE memory_id IN (<personal>, <ops>);
+--        -> BOTH rows                              (the boundary does NOT hold here)
+--
+-- WHAT IS AND IS NOT DISCLOSED, because the difference decides the fix and a claim wider
+-- than its evidence is its own defect class. The audit row hands an unauthenticated caller
+-- the hidden memory's ID, its event history, its timestamps, and whatever free text a writer
+-- put in `payload` - this repo's own scripts/checks/recall-sibling-class.ps1 writes an
+-- operator-authored `note` there. It does NOT hand over `summary` or `content`: those are
+-- columns of `agent_memories`, and the same probe's LEFT JOIN back to them returned NULL for
+-- the personal row while returning both values for the ops control. Existence, identity, and
+-- an operator's note - not the memory's text.
+--
+-- THE MECHANISM, not just the instance. Before writing this, the round asked the memory plane
+-- (scripts/checks/recall-sibling-class.ps1, trace 65f57a92-74a5-4711-b2ba-27c5c87d40f4) and
+-- was handed exactly this class: memory b6af0900-8fb9-43e9-a315-9572949e155a - "a defect is
+-- not fixed when its instance is fixed; it is fixed when the artifact has been SWEPT for its
+-- shape" - whose fifth recorded instance is "a normaliser written for ONE reader, three
+-- readers left raw IN THE SAME FILE". That is this file, precisely. So the predicate is
+-- EXTRACTED here and all three readers call it: the closure arm, the referenced-by arm, and
+-- the section 7 post-condition. A fourth reader that re-implements it is the next instance.
+--
+-- CONSERVATISM IS DELIBERATE. `qual IS NULL` counts as wide, which also flags a FOR INSERT
+-- policy (whose qual is always NULL). No such policy exists on these tables today, and a
+-- predicate that fails CLOSED is the correct error direction for a boundary gate.
+CREATE OR REPLACE FUNCTION public.ob_relation_governed(p_relname TEXT) RETURNS BOOLEAN
+  LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+           SELECT 1 FROM pg_class c
+            WHERE c.oid = to_regclass('public.' || p_relname)
+              AND c.relrowsecurity AND c.relforcerowsecurity)
+     AND NOT EXISTS (
+           SELECT 1 FROM pg_policies p
+            WHERE p.schemaname = 'public' AND p.tablename = p_relname
+              AND p.permissive = 'PERMISSIVE'
+              AND (p.qual IS NULL OR btrim(p.qual) = 'true'))
+$$;
+
+-- ==========================================================================================
 -- 0. DERIVE THE TARGET SET, AND REFUSE TO PROCEED IF ANYTHING IN IT IS UNCLASSIFIED
 -- ==========================================================================================
 -- THE DERIVATION, in two arms, because the graph is reached two different ways:
@@ -122,10 +182,16 @@ DECLARE
   v_declared     TEXT[] := ARRAY['entities','consolidation_log'];
   v_closure      TEXT[];
   v_prev_count   INT := -1;
+  -- GOVERNED BY 180 - and now VERIFIED to be, not assumed. `agent_memory_audit_events` was
+  -- the eighth member of this array and is deliberately NOT here any more: it FAILS
+  -- ob_relation_governed(), so this file governs it itself in section 2b and classifies it
+  -- as v_tier_a2. Being named in a list was never evidence of being governed.
   v_governed_180 TEXT[] := ARRAY[
       'agent_memories','agent_memory_source_refs','agent_memory_artifacts',
       'agent_memory_relations','agent_memory_review_actions','agent_memory_recall_traces',
-      'agent_memory_recall_items','agent_memory_audit_events'];
+      'agent_memory_recall_items'];
+  -- Closure members that 180 left wide and THIS file closes (section 2b).
+  v_tier_a2      TEXT[] := ARRAY['agent_memory_audit_events'];
   v_tier_a       TEXT[] := ARRAY[
       'thought_entities','entity_extraction_queue','thought_edges','idea_revisions'];
   v_tier_b       TEXT[] := ARRAY['entities','edges','source_entities','consolidation_log'];
@@ -169,10 +235,27 @@ BEGIN
       ) s;
   END LOOP;
 
+  -- THE ARM THAT WAS A SPELL-CHECKED LIST, now a measurement. Every table this file
+  -- classifies as "already governed by 180" must satisfy the SAME predicate the
+  -- referenced-by arm applies to tables outside the closure. Until this block existed,
+  -- `agent_memory_audit_events` sat in v_governed_180 carrying a USING(true) policy and was
+  -- waved straight through the gate that exists to catch exactly that.
+  SELECT array_agg(t ORDER BY t) INTO v_unclassified
+    FROM unnest(v_governed_180) AS t
+   WHERE NOT public.ob_relation_governed(t);
+  IF v_unclassified IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: table(s) classified here as ALREADY GOVERNED by '
+                    '180 do not satisfy the governed-ness predicate: %. A name in a list is '
+                    'not a governed table. Either 180 regressed, or this file is classifying '
+                    'a table it should be governing itself - as it was doing for '
+                    'agent_memory_audit_events.', array_to_string(v_unclassified, ', ');
+  END IF;
+
   SELECT array_agg(t ORDER BY t) INTO v_unclassified
     FROM unnest(v_closure) AS t
    WHERE NOT (t = ANY (v_seed))
      AND NOT (t = ANY (v_governed_180))
+     AND NOT (t = ANY (v_tier_a2))
      AND NOT (t = ANY (v_tier_a))
      AND NOT (t = ANY (v_tier_b));
   IF v_unclassified IS NOT NULL THEN
@@ -184,7 +267,7 @@ BEGIN
   END IF;
 
   SELECT array_agg(t ORDER BY t) INTO v_missing
-    FROM unnest(v_tier_a || v_tier_b) AS t
+    FROM unnest(v_tier_a || v_tier_a2 || v_tier_b) AS t
    WHERE NOT (t = ANY (v_closure));
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION 'init-graph-plane-rls: this migration governs %, which the schema-derived '
@@ -216,14 +299,10 @@ BEGIN
          AND NOT (c.confrelid::regclass::text = ANY (v_closure))
     ) q
    WHERE parent NOT IN ('sources','ideas')
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_class cls
-        WHERE cls.oid = ('public.' || q.parent)::regclass
-          AND cls.relrowsecurity AND cls.relforcerowsecurity
-          AND NOT EXISTS (
-            SELECT 1 FROM pg_policies p
-             WHERE p.schemaname = 'public' AND p.tablename = q.parent
-               AND p.permissive = 'PERMISSIVE' AND (p.qual IS NULL OR btrim(p.qual) = 'true')));
+     -- SAME predicate as the closure arm above and the section 7 post-condition. It used to
+     -- be spelled out inline right here, which is how the closure arm was able to drift away
+     -- from it without anyone noticing.
+     AND NOT public.ob_relation_governed(parent);
   IF v_unclassified IS NOT NULL THEN
     RAISE EXCEPTION 'init-graph-plane-rls: % table(s) are REFERENCED BY the derived closure, '
                     'are outside it, and are neither governed nor registered as a separate '
@@ -346,6 +425,89 @@ CREATE POLICY idea_revisions_plane ON public.idea_revisions
 CREATE POLICY idea_revisions_plane_read ON public.idea_revisions
   AS PERMISSIVE FOR SELECT TO authenticated
   USING (thought_id IS NULL OR public.ob_thought_visible(thought_id));
+
+-- ==========================================================================================
+-- 2b. THE 180 TABLE THIS FILE HAS TO FINISH, AND THE FK ORACLE BESIDE IT
+-- ==========================================================================================
+-- `agent_memory_audit_events` is a CLOSURE MEMBER (it carries `memory_id REFERENCES
+-- agent_memories(id)`), it was classified as "already governed", and it was not. See section
+-- 0a for the measurement and for what is and is not disclosed.
+--
+-- WHY PARENT VISIBILITY IS THE RIGHT PREDICATE HERE. An audit row's whole purpose is to name
+-- a memory and say what happened to it, so its existence IS the memory's existence - the same
+-- reasoning tier A applies to `thought_entities`. Both foreign keys get the treatment,
+-- because `trace_id` names a recall trace which carries the caller's QUERY TEXT.
+--
+-- THE NULL ARMS ARE FOREIGN KEYS BEING ABSENT, NOT LABELS BEING ABSENT - the distinction
+-- section 2 draws for `idea_revisions`, and it is load-bearing twice over here. Both FKs are
+-- `ON DELETE SET NULL`, so a row whose parent has been deleted has nothing left to protect;
+-- and 12 of the 67 live audit rows have never had a `memory_id` at all.
+--
+-- THIS DOES NOT BREAK THE REFUSAL RECORD, and that was checked rather than assumed, because
+-- an `access_refused` audit necessarily names a memory the REFUSED caller cannot see. It
+-- survives because the writer is not that caller: openbrain-mcp connects with
+-- `DB_USER=postgres` (verified on the live container), a superuser, and RLS does not bind a
+-- superuser with or without FORCE. What this policy binds is the PostgREST/service_role
+-- surface - the unauthenticated obnet door - which never writes refusal audits and has no
+-- business reading them.
+DROP POLICY IF EXISTS agent_memory_audit_events_service_role_all ON public.agent_memory_audit_events;
+DROP POLICY IF EXISTS agent_memory_audit_events_plane            ON public.agent_memory_audit_events;
+DROP POLICY IF EXISTS agent_memory_audit_events_plane_read       ON public.agent_memory_audit_events;
+
+CREATE POLICY agent_memory_audit_events_plane ON public.agent_memory_audit_events
+  AS PERMISSIVE FOR ALL TO service_role
+  USING      ((memory_id IS NULL OR public.ob_memory_visible(memory_id))
+              AND (trace_id IS NULL OR EXISTS (
+                     SELECT 1 FROM public.agent_memory_recall_traces t WHERE t.id = trace_id)))
+  WITH CHECK ((memory_id IS NULL OR public.ob_memory_visible(memory_id))
+              AND (trace_id IS NULL OR EXISTS (
+                     SELECT 1 FROM public.agent_memory_recall_traces t WHERE t.id = trace_id)));
+
+-- The trace arm is an EXISTS against the table itself rather than a call to
+-- ob_trace_on_ops_plane(), for the same reason ob_thought_visible is SECURITY INVOKER: the
+-- inner SELECT is itself bound by `agent_memory_recall_traces`' own policies, so the corpus
+-- rule has ONE definition and this file does not restate it.
+
+-- --- R3: THE REFERENTIAL-INTEGRITY EXISTENCE ORACLE ON agent_memories.
+-- Postgres checks a FOREIGN KEY with an internal trigger that RLS does not bind, and it runs
+-- AFTER the row has passed WITH CHECK. So on the live database an unauthenticated caller
+-- could separate a HIDDEN thought from a NONEXISTENT one by the error it got back:
+--
+--     POST /agent_memories {thought_id: <hidden>}       -> 201 Created
+--     POST /agent_memories {thought_id: <nonexistent>}  -> 23503 "Key is not present in
+--                                                          table thoughts"
+--
+-- The four tier A tables are immune because their WITH CHECK names `thought_id` and
+-- therefore fires FIRST; `agent_memories` was not, because its WITH CHECK only looked at
+-- `metadata` and `user_id`. Adding the thought_id arm makes both cases fail identically at
+-- 42501 before the FK is ever consulted, which is the whole fix: the two answers become one.
+--
+-- BOTH POLICIES GET THE ARM, not just the ops one. Two policies on one table are two readers
+-- of the same rule - the exact shape of the "fixed one, left the sibling" class this round
+-- was warned about - and permissive policies are OR-ed, so an arm added to one of them and
+-- not the other closes nothing at all.
+--
+-- OPS IMPACT, MEASURED not assumed: all 21 live `agent_memories` rows carrying a
+-- `thought_id` point at thoughts that ARE on the ops plane, so this narrows nothing that
+-- currently works. And the writeback path is superuser, as above.
+DROP POLICY IF EXISTS agent_memories_ops_plane      ON public.agent_memories;
+DROP POLICY IF EXISTS agent_memories_personal_plane ON public.agent_memories;
+
+CREATE POLICY agent_memories_ops_plane ON public.agent_memories
+  AS PERMISSIVE FOR ALL TO service_role
+  USING      (public.ob_memory_on_ops_plane(metadata))
+  WITH CHECK (public.ob_memory_on_ops_plane(metadata)
+              AND (thought_id IS NULL OR public.ob_thought_visible(thought_id)));
+
+CREATE POLICY agent_memories_personal_plane ON public.agent_memories
+  AS PERMISSIVE FOR ALL TO service_role
+  USING      (user_id IS NOT NULL AND user_id = public.ob_current_user_id())
+  WITH CHECK (user_id IS NOT NULL AND user_id = public.ob_current_user_id()
+              AND (thought_id IS NULL OR public.ob_thought_visible(thought_id)));
+
+-- The USING halves are UNCHANGED from 180, verbatim. Only WITH CHECK gains the arm: a
+-- caller's ability to READ a memory it already owns must not depend on whether the thought
+-- behind it is on its plane, or a plane change would strand rows their owner cannot see.
 
 -- ==========================================================================================
 -- 3. TIER B - the entity-level tables, and an HONEST account of what governs them
@@ -663,6 +825,96 @@ REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE
 FROM authenticated;
 
 -- ==========================================================================================
+-- 6b. VIEWS - the same boundary, a different relkind, and the hazard was documented one file
+--     over
+-- ==========================================================================================
+-- A view owned by `postgres` WITHOUT `security_invoker` executes with its OWNER's privileges,
+-- and the owner is a superuser, so RLS on the base tables does not apply to anyone reading
+-- through it. Every policy this file and 180 install is bypassable by any view that projects
+-- the protected columns.
+--
+-- MEASURED on a fresh volume, with ops positive controls at 1 on both arms:
+--     base table `idea_revisions`, personal row, as service_role  -> 0 rows
+--     view `public.ideas_owed_research`, same row, same role      -> 1 row
+-- `ideas_owed_research` JOINs `idea_revisions` - the tier A table section 2 governs - and is
+-- served unauthenticated on open-brain_obnet.
+--
+-- BOUNDED HONESTLY, because this is smaller than the base-table leak and saying otherwise
+-- would be a claim wider than its evidence. The view projects `i.*` only: it returns columns
+-- of `ideas`, so `idea_revisions.summary`, `.thought_id` and `.content_hash` are NOT
+-- returned. What leaks is the EXISTENCE of a governed revision - an idea appears in the
+-- "owed research" list because of a revision the caller may not see - not its content and
+-- not a fingerprint.
+--
+-- THE CLASS WAS KNOWN ONE FILE OVER. init-agent-memory-rls.sql:343 already documents this
+-- exact hazard IN CAPITALS for the two views IT creates ("without it this view would bypass
+-- the exposure boundary"), and sets security_invoker on both. `v_agent_memories` and
+-- `v_thoughts` are correct today for precisely that reason. The four views that predate it
+-- were never revisited. That is the "fixed one, left the sibling" class again, one relkind
+-- across - and section 7's post-condition could not see it, because pg_policies and
+-- `relrowsecurity` describe TABLES and a view has neither.
+--
+-- THE SWEEP IS THE FIX, NOT THE INSTANCE. Only `ideas_owed_research` touches the governed
+-- corpus today; `research_run_metrics`, `reusable_claims` and `ungrounded_claims` read
+-- `research_jobs` and `claims`, which are outside this closure. All four are fixed anyway,
+-- derived from the catalogue rather than named, so that governing `claims` tomorrow is not
+-- silently bypassed by a view written years ago. Setting the flag on the other three is
+-- MEASURED to be inert today, not assumed to be: both `service_role` and `authenticated`
+-- hold SELECT on every base table involved and on `claim_min_depth()`, and every one of
+-- those base tables carries a permissive USING(true) policy for both roles, so the visible
+-- row set through the view is unchanged.
+DO $$
+DECLARE
+  v_rel     RECORD;
+  v_fixed   TEXT[] := ARRAY[]::TEXT[];
+  v_matview TEXT[];
+BEGIN
+  -- A MATERIALIZED view cannot be fixed this way: it has no `security_invoker` option at all
+  -- and its rows were computed and STORED by its owner, so RLS can never apply to them. If
+  -- one ever reads a force-RLS relation, that is a containment failure this file cannot
+  -- repair, and it must stop the migration rather than be silently skipped by a filter.
+  SELECT array_agg(DISTINCT mv.relname ORDER BY mv.relname) INTO v_matview
+    FROM pg_rewrite rw
+    JOIN pg_class mv ON mv.oid = rw.ev_class
+    JOIN pg_depend d ON d.objid = rw.oid AND d.classid = 'pg_rewrite'::regclass
+    JOIN pg_class base ON base.oid = d.refobjid
+   WHERE mv.relkind = 'm'
+     AND mv.relnamespace = 'public'::regnamespace
+     AND base.relkind = 'r'
+     AND base.relrowsecurity AND base.relforcerowsecurity
+     AND base.oid <> mv.oid;
+  IF v_matview IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: materialized view(s) % read a FORCE-RLS relation. '
+                    'A matview stores rows its owner computed; security_invoker does not '
+                    'exist for it and RLS cannot reach them. Classify it - drop it, or move '
+                    'it behind a governed view - and re-run.',
+                    array_to_string(v_matview, ', ');
+  END IF;
+
+  -- THE SWEEP. Derived from pg_class, never hand-listed: any ordinary view in `public` whose
+  -- reloptions do not already say security_invoker=true.
+  FOR v_rel IN
+    SELECT c.relname
+      FROM pg_class c
+     WHERE c.relkind = 'v'
+       AND c.relnamespace = 'public'::regnamespace
+       AND COALESCE((SELECT option_value FROM pg_options_to_table(c.reloptions)
+                      WHERE option_name = 'security_invoker'), 'false') <> 'true'
+     ORDER BY c.relname
+  LOOP
+    EXECUTE format('ALTER VIEW public.%I SET (security_invoker = true)', v_rel.relname);
+    v_fixed := v_fixed || v_rel.relname;
+  END LOOP;
+
+  IF array_length(v_fixed, 1) IS NULL THEN
+    RAISE NOTICE 'init-graph-plane-rls: all public views already run as SECURITY INVOKER';
+  ELSE
+    RAISE NOTICE 'init-graph-plane-rls: security_invoker set on % view(s): %',
+                 array_length(v_fixed, 1), array_to_string(v_fixed, ', ');
+  END IF;
+END $$;
+
+-- ==========================================================================================
 -- 7. POST-CONDITION - measured, not assumed
 -- ==========================================================================================
 -- Everything above can be typed correctly and still not take: a policy DROP naming a policy
@@ -672,10 +924,16 @@ FROM authenticated;
 DO $$
 DECLARE
   v_tier_a TEXT[] := ARRAY['thought_entities','entity_extraction_queue','thought_edges',
-                           'idea_revisions'];
+                           'idea_revisions','agent_memory_audit_events'];
   v_all    TEXT[] := ARRAY['thought_entities','entity_extraction_queue','thought_edges',
                            'idea_revisions','entities','edges','source_entities',
-                           'consolidation_log'];
+                           'consolidation_log','agent_memory_audit_events'];
+  -- the 180 tables section 0 CLASSIFIES rather than governs; asserted here for the same
+  -- reason section 0 now tests them - a classification is not a measurement.
+  v_governed TEXT[] := ARRAY[
+      'agent_memories','agent_memory_source_refs','agent_memory_artifacts',
+      'agent_memory_relations','agent_memory_review_actions','agent_memory_recall_traces',
+      'agent_memory_recall_items'];
   v_bad    TEXT[];
 BEGIN
   -- (a) every governed table has RLS ENABLED and FORCED.
@@ -733,6 +991,59 @@ BEGIN
                     AND p.proconfig @> ARRAY['search_path=public']) THEN
     RAISE EXCEPTION 'init-graph-plane-rls: queue_entity_extraction lost SECURITY DEFINER or '
                     'its pinned search_path';
+  END IF;
+
+  -- (e) THE GOVERNED-NESS PREDICATE, applied to every table this file claims to govern AND
+  --     to the 180 tables it merely classified. Assertions (a) and (b) were written as two
+  --     hand-rolled halves of exactly this predicate, and being hand-rolled is how they came
+  --     to disagree with the arm in section 0. There is now ONE definition, and this is its
+  --     third caller.
+  --     SCOPE, and it is not v_all. TIER B is deliberately wide on the READ side - it is
+  --     contained at the WRITE and section 3 names and COMMENTs that choice - so applying
+  --     the predicate to it asserts the opposite of what this file decided. The predicate
+  --     belongs to tier A (a real row-level USING) and to the 180 tables section 0
+  --     classifies. Tier B's own guarantees are (a) above plus section 3's measured
+  --     containment. This scoping error was caught by this very assertion on its first run.
+  SELECT array_agg(t ORDER BY t) INTO v_bad
+    FROM unnest(v_tier_a || v_governed) AS t
+   WHERE NOT public.ob_relation_governed(t);
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: relation(s) % do not satisfy '
+                    'ob_relation_governed() after this migration ran. RLS enabled+forced '
+                    'with a permissive USING(true) policy still standing is the exact state '
+                    'agent_memory_audit_events was in before this round.',
+                    array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (f) NO VIEW BYPASSES ANY OF IT. Assertions (a) through (e) all read `pg_class` and
+  --     `pg_policies` for TABLES, so every one of them was structurally blind to a view -
+  --     which is how `ideas_owed_research` served a governed row to an unauthenticated
+  --     caller while this section reported that the post-conditions held. A view without
+  --     security_invoker runs as its superuser owner and RLS does not apply to it.
+  SELECT array_agg(c.relname ORDER BY c.relname) INTO v_bad
+    FROM pg_class c
+   WHERE c.relkind = 'v'
+     AND c.relnamespace = 'public'::regnamespace
+     AND COALESCE((SELECT option_value FROM pg_options_to_table(c.reloptions)
+                    WHERE option_name = 'security_invoker'), 'false') <> 'true';
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: view(s) % still run as their owner. A view is a '
+                    'read path around every policy above.', array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (g) THE FK EXISTENCE ORACLE IS CLOSED. Both agent_memories policies must NAME
+  --     thought_id in WITH CHECK, or a referential-integrity trigger - which RLS does not
+  --     bind - answers "does this hidden thought exist?" with 201 versus 23503.
+  SELECT array_agg(p.policyname ORDER BY p.policyname) INTO v_bad
+    FROM pg_policies p
+   WHERE p.schemaname = 'public' AND p.tablename = 'agent_memories'
+     AND p.permissive = 'PERMISSIVE'
+     AND (p.with_check IS NULL OR p.with_check NOT LIKE '%thought_id%');
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: agent_memories policy/policies % do not constrain '
+                    'thought_id in WITH CHECK, so the FK existence oracle is open through '
+                    'them. Permissive policies are OR-ed: one unguarded arm is enough.',
+                    array_to_string(v_bad, ', ');
   END IF;
 
   RAISE NOTICE 'init-graph-plane-rls: post-conditions hold on % table(s)',

@@ -12,7 +12,10 @@
 --      enabled before the migration too);
 --   3. TRUNCATE / REFERENCES / TRIGGER re-granted to service_role and authenticated;
 --   4. the three function bodies restored VERBATIM from init-graph.sql, including
---      SECURITY DEFINER on all three and the ungated queue_entity_extraction.
+--      SECURITY DEFINER on all three and the ungated queue_entity_extraction;
+--   5. the wide USING(true) policy on agent_memory_audit_events, and the agent_memories
+--      policies without their thought_id WITH CHECK arm, both verbatim as 180 left them;
+--   6. `security_invoker` cleared on the four views that lacked it before the migration.
 --
 -- APPLYING THIS RE-OPENS THE MEASURED DISCLOSURE: after it runs, an unauthenticated caller on
 -- open-brain_obnet can once again read entity_extraction_queue.source_fingerprint - sha256 of
@@ -212,6 +215,57 @@ BEGIN
   RETURN v_row;
 END;
 $fn$;
+
+-- ==========================================================================================
+-- 5. UNDO SECTION 2b - agent_memory_audit_events and the agent_memories WITH CHECK arm
+-- ==========================================================================================
+-- APPLYING THIS RE-OPENS A SECOND MEASURED DISCLOSURE: an unauthenticated caller on
+-- open-brain_obnet can once again read the id, event history, timestamps and payload notes of
+-- audit rows belonging to memories it cannot see; and `POST /agent_memories` can once again
+-- distinguish a hidden thought from a nonexistent one by 201 versus 23503.
+DROP POLICY IF EXISTS agent_memory_audit_events_plane      ON public.agent_memory_audit_events;
+DROP POLICY IF EXISTS agent_memory_audit_events_plane_read ON public.agent_memory_audit_events;
+
+CREATE POLICY agent_memory_audit_events_service_role_all ON public.agent_memory_audit_events
+  AS PERMISSIVE FOR ALL TO service_role
+  USING (true) WITH CHECK (true);
+
+-- Restored VERBATIM from init-agent-memory-rls.sql - USING and WITH CHECK identical again,
+-- with no thought_id arm.
+DROP POLICY IF EXISTS agent_memories_ops_plane      ON public.agent_memories;
+DROP POLICY IF EXISTS agent_memories_personal_plane ON public.agent_memories;
+
+CREATE POLICY agent_memories_ops_plane ON public.agent_memories
+  AS PERMISSIVE FOR ALL TO service_role
+  USING      (public.ob_memory_on_ops_plane(metadata))
+  WITH CHECK (public.ob_memory_on_ops_plane(metadata));
+
+CREATE POLICY agent_memories_personal_plane ON public.agent_memories
+  AS PERMISSIVE FOR ALL TO service_role
+  USING      (user_id IS NOT NULL AND user_id = public.ob_current_user_id())
+  WITH CHECK (user_id IS NOT NULL AND user_id = public.ob_current_user_id());
+
+-- ==========================================================================================
+-- 6. UNDO SECTION 6b - the view sweep
+-- ==========================================================================================
+-- These FOUR views, and only these four, lacked `security_invoker` when the migration ran;
+-- the state is named here rather than re-derived because "every view that lacks it" is not
+-- something a revert can compute AFTER the migration set them all. Measured on the live
+-- database 2026-08-31 (pg_class.reloptions).
+--
+-- `v_agent_memories` and `v_thoughts` are deliberately NOT touched: init-agent-memory-rls.sql
+-- created them WITH security_invoker and this migration never changed them, so clearing the
+-- flag here would revert a file this file is not the twin of - and would open the boundary
+-- that file's own comment at line 343 exists to hold shut.
+ALTER VIEW public.ideas_owed_research  RESET (security_invoker);
+ALTER VIEW public.research_run_metrics RESET (security_invoker);
+ALTER VIEW public.reusable_claims      RESET (security_invoker);
+ALTER VIEW public.ungrounded_claims    RESET (security_invoker);
+
+-- ob_relation_governed() is deliberately NOT dropped, for the same reason ob_thought_visible
+-- is not: a function nothing references is inert, and dropping it would make this revert
+-- irreversible if the migration is re-applied.
+
 
 NOTIFY pgrst, 'reload schema';
 
