@@ -402,10 +402,27 @@ CREATE POLICY thoughts_ops_plane ON public.thoughts
 --   'personal'             -> check_violation, with the reason, see below
 -- and 'ops' is the only accepted value.
 --
--- THE PRODUCERS THAT COULD NOT STATE A PLANE NOW STATE ONE, IN THEIR OWN CODE. Every caller
--- of this rpc in the tree was found and given an explicit `exposure: 'ops'` in the metadata it
--- passes, so the choice is visible where the producer lives instead of hidden in a COALESCE
--- here (`grep -rn 'rpc("upsert_thought"' OB1` - ten call sites, 2026-08-31):
+-- THE RPC CALLERS STATE THEIR PLANE, IN THEIR OWN CODE. Every caller OF THIS FUNCTION was
+-- found and given an explicit `exposure: 'ops'` in the metadata it passes, so the choice is
+-- visible where the producer lives instead of hidden in a COALESCE here.
+--
+-- SAY WHAT WAS SWEPT, NOT WHAT WAS HOPED. This paragraph used to open "Every caller of this
+-- rpc in the tree was found", and then the section read as if that were the producer set. It
+-- is not: the sweep was `grep -rn 'rpc("upsert_thought"' OB1`, so it could only ever return
+-- RPC callers, and the DIRECT-table producers were never searched for. There are twelve of
+-- them - they POST at `/rest/v1/thoughts` or call `supabase.from("thoughts").insert()`, and
+-- this door is not in front of any of them. `openbrain-gmail-pull` is one, it runs daily, and
+-- it had been refused `42501 new row violates row-level security policy` by U5's already-live
+-- ops-plane policy since the day that policy landed (measured 2026-08-31). The same alphabet
+-- error as A2's `.ts`-only scan root: THE SEARCH TERM DEFINED THE FINDING.
+--
+-- The direct producers now state their plane at their own call sites, and the set is no
+-- longer kept by hand: `scripts/checks/check-corpus-exposure-producers.ps1` (ai-stack
+-- pre-commit) DERIVES the corpus-insert sites from the tree on every commit and fails on one
+-- that omits `exposure`, so producer thirteen breaks the build rather than production. See
+-- documentation/notes/u5-live-producer-rls-regression.md.
+--
+-- THE RPC CALL SITES (`grep -rn 'rpc("upsert_thought"' OB1` - ten, 2026-08-31):
 --   recipes/entity-wiki/generate-wiki.mjs          - the ONLY scheduled producer (openbrain-wiki)
 --   recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs
 --   recipes/grok-export-import/import-grok.mjs
@@ -892,8 +909,22 @@ BEGIN
                     'column leaves its content fingerprint in entity_extraction_queue.';
   END IF;
 
-  RAISE NOTICE 'init-agent-memory-exposure-column: no policy and no function body reads '
-               'metadata->>''exposure'' for a trust decision - the mirror has zero readers';
+  -- SAY WHAT THE SCAN PROVED, WHICH IS NARROWER THAN "ZERO READERS". The two RETIRED jsonb
+  -- overloads - ob_memory_on_ops_plane(md jsonb) and ob_corpus_on_ops_plane(md jsonb) - read
+  -- the mirror BY CONSTRUCTION (their bodies ARE `md->>''exposure''`), and they are kept on
+  -- purpose because the 190/200 revert paths recreate policies that call them. They are
+  -- invisible to the scan above: its anchors are the literal `metadata->>''exposure''` and
+  -- `on_ops_plane(metadata)`, and `md->>''exposure''` matches neither. So "the mirror has
+  -- zero readers" was a claim the scan could not make, printed as if it had.
+  --
+  -- The SUBSTANCE is covered - init-graph-plane-rls.sql section 9 asserts over pg_depend AND
+  -- over every function body that NOTHING CALLS those two, with a positive control that they
+  -- still exist so the sweep cannot pass vacuously. That is the property that matters; this
+  -- notice now states its own scope instead of borrowing section 9's conclusion.
+  RAISE NOTICE 'init-agent-memory-exposure-column: no POLICY and no function body other than '
+               'the two retired jsonb predicates reads the mirror for a trust decision. Those '
+               'two read it by construction and are kept for the revert paths; that NOTHING '
+               'CALLS them is asserted by init-graph-plane-rls.sql section 9, not here';
 END $$;
 
 -- 8e. Nothing above wrote a row - LAST, so it covers 8, 8c and 8d. Asserted rather than

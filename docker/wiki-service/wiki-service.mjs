@@ -460,7 +460,13 @@ async function ingestNotes(prevCommit) {
       const source = fmSource === "ai_note" || (isAiTree && fmSource !== "user_note")
         ? "ai_note"
         : "user_note";
-      const meta = { source, note_path: rel, notebook, title };
+      // THE PLANE, STATED BY THIS PRODUCER (DFU C.9 H3, operator 2026-08-31). It lives on
+      // `meta` rather than at the POST below because this same object is the body of the
+      // idempotent PATCH above, which REPLACES `metadata` wholesale - without the key
+      // there, every edited note silently loses its mirror. The COLUMN is stated at the
+      // POST itself. 'ops': a note in the wiki vault is published wiki material, which is
+      // the ops surface, and it is the plane U5's backfill already put this corpus on.
+      const meta = { source, note_path: rel, notebook, title, exposure: "ops" };
       if (source === "ai_note" && fmAgent) meta.agent = fmAgent;
       const enc = encodeURIComponent(rel);
       const existing = await obFetch(
@@ -470,7 +476,10 @@ async function ingestNotes(prevCommit) {
       if (Array.isArray(existing) && existing[0]) {
         await obFetch("PATCH", `thoughts?id=eq.${existing[0].id}`, { content, metadata: meta });
       } else {
-        await obFetch("POST", "thoughts", { content, metadata: meta });
+        // `exposure` the COLUMN as well as the mirror inside `meta`: the H3 policies read
+        // the column, the currently deployed U5 policy reads the mirror, and this insert
+        // bypasses `upsert_thought`, which is where the door's own stamp lives.
+        await obFetch("POST", "thoughts", { content, metadata: meta, exposure: "ops" });
       }
       ingested++;
     } catch (e) {

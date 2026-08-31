@@ -562,10 +562,20 @@ def ingest_thought_supabase(content, metadata_dict, embed_text=None):
             "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
             "Prefer": "return=minimal",
         },
+    # THE PLANE, STATED BY THIS PRODUCER (DFU C.9 H3, operator 2026-08-31). This is a
+    # DIRECT insert into `thoughts` - it does not go through `upsert_thought`, so the
+    # corpus door's stamp is not in front of it and it has to carry the plane itself.
+    # Both halves: `exposure` the COLUMN (NOT NULL, no default, what the H3 policies read)
+    # and the `metadata.exposure` mirror (what the CURRENTLY DEPLOYED `thoughts_ops_plane`
+    # policy reads - U5 shipped `ob_corpus_on_ops_plane(metadata)` and a POST without the
+    # key is refused 42501). 'ops' conforms to the plane U5's backfill already put every
+    # pre-existing row of this corpus on; it widens nothing relative to 08-30 and does not
+    # settle where this corpus belongs, which is an open PLAN 1.1 decision for the operator.
         body={
             "content": content,
             "embedding": embedding,
-            "metadata": metadata_dict,
+            "metadata": {**metadata_dict, "exposure": "ops"},
+            "exposure": "ops",
         },
     )
 

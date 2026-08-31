@@ -297,12 +297,21 @@ async function processThought(
   const { data: thoughtData, error: thoughtError } = await supabase
     .from("thoughts")
     .insert({
+      // THE PLANE, STATED BY THIS PRODUCER (DFU C.9 H3, operator 2026-08-31).
+      // `thoughts.exposure` is NOT NULL with no default and the deployed RLS policy refuses
+      // a row that omits it, so a direct insert has to carry it - the corpus door
+      // (`upsert_thought`) is not in front of this path. NOTE `domain` below is the schema
+      // ROUTER's category and is a different axis entirely: `domain: "personal"` here still
+      // writes an OPS-PLANE corpus row, exactly as every one of the 13,001 rows in the live
+      // corpus does today. 'ops' conforms to that and widens nothing; where this corpus
+      // belongs is an open PLAN 1.1 decision and this line does not settle it.
+      exposure: "ops",
       content: text,
       embedding,
       domain,
       status: "active",
       source,
-      metadata: { ...metadata },
+      metadata: { ...metadata, exposure: "ops" },
     })
     .select("id")
     .single();
