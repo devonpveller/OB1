@@ -374,6 +374,37 @@ Deno.test("recall writes a trace EVEN WHEN nothing matched", async () => {
   // Without a trace there is nothing to notice it by.
 });
 
+Deno.test("the recall trace records the ENFORCED exposure, because the RLS policy reads it", async () => {
+  // A REGRESSION TEST FOR A LEAK THAT WAS AN OUTAGE. `agent_memory_recall_traces`' policy is
+  // `ob_trace_on_ops_plane(request_payload)`, which reads `request_payload->'enforced_exposure'`
+  // - a trace whose plane cannot be established is neither readable nor writable. This writer
+  // did not produce that key, so every recall by a NON-superuser connection failed 42501 on
+  // its own trace insert (on the RETURNING clause, which makes Postgres apply the SELECT
+  // policy to the new row too). Nothing noticed because every writer today is a superuser.
+  //
+  // Asserted on the PARAMETER, not on the SQL text: the SQL says `$4::jsonb` either way, so a
+  // test that grepped the statement would have passed throughout the defect.
+  const { deps, params, seen } = recallDeps([]);
+  await performRecall(deps, { workspace_id: "ws1", query: "q" });
+  const idx = seen.findIndex((s) => s.includes("agent_memory_recall_traces"));
+  assertEquals(idx >= 0, true, "no trace insert was issued");
+  const payload = JSON.parse(String(params[idx][3]));
+  assertEquals(Array.isArray(payload.enforced_exposure), true, "enforced_exposure is missing");
+  assertEquals(payload.enforced_exposure.length > 0, true, "an EMPTY array is vacuously contained by every set - init-graph-plane-rls section 1b");
+  assertEquals(payload.enforced_exposure, ["ops"]);
+});
+
+Deno.test("the trace records what was ENFORCED, not what the caller asked for", async () => {
+  const { deps, params, seen } = recallDeps([]);
+  // The caller names the personal plane; the door forces ops. A trace that recorded the
+  // REQUEST would claim a plane the recall did not run on - and would then be readable by
+  // nobody, or by the wrong body.
+  await performRecall(deps, { workspace_id: "ws1", query: "q", exposure: ["personal"] } as never);
+  const idx = seen.findIndex((s) => s.includes("agent_memory_recall_traces"));
+  const payload = JSON.parse(String(params[idx][3]));
+  assertEquals(payload.enforced_exposure, ["ops"]);
+});
+
 Deno.test("recall returns the use-policy explicitly, never left to inference", async () => {
   const { deps } = recallDeps([ROW]);
   const out = await performRecall(deps, { workspace_id: "ws1", query: "q" });

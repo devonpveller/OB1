@@ -466,6 +466,26 @@ export async function performRecall(
         // that" becomes unanswerable after a config change - the trace would hold the query
         // and the rows and omit the thing that ranked them.
         JSON.stringify({
+          // `enforced_exposure` IS LOAD-BEARING AND WAS MISSING, and the miss was invisible
+          // because everything that writes this table today connects as a superuser.
+          //
+          // `agent_memory_recall_traces`' RLS policy is
+          // `ob_trace_on_ops_plane(request_payload)`, which reads exactly this key: a trace
+          // whose plane cannot be established is neither readable NOR writable. The
+          // predicate was written against a payload that has it (init-agent-memory-rls.sql
+          // section 3 says so in as many words, and init-graph-plane-rls.sql section 1b
+          // hardened its empty-array case) - and this writer never produced it. So for any
+          // NON-superuser connection every recall failed 42501 on its own trace insert,
+          // and it failed on the RETURNING clause specifically, because RETURNING makes
+          // PostgreSQL apply the SELECT policy to the new row as well as the WITH CHECK.
+          // Found by running the personal-plane drill against a non-superuser door
+          // (C.9 H1's configuration) rather than as postgres; see
+          // documentation/notes/u8h3-findings.md.
+          //
+          // It is the ENFORCED list, not the requested one. A caller may ask for
+          // ["personal"]; the door forces its own plane, and the trace has to record what
+          // was enforced or the row would claim a plane the recall did not run on.
+          enforced_exposure: [...(scope.exposure ?? DEFAULT_RECALL_EXPOSURES)],
           limit,
           include_unconfirmed: !!scope.includeUnconfirmed,
           candidates,
