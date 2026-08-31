@@ -1236,6 +1236,17 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
     `${sourceCounts.sources ? ` + ${sourceCounts.sources} source documents` : ""}.\n\n` +
     wiki;
   const metadata = {
+    // THE PLANE, STATED BY THIS PRODUCER (DFU C.9 H3, operator 2026-08-31). `thoughts.exposure`
+    // is a NOT NULL column with no default and `upsert_thought` no longer defaults one either
+    // - a payload with no exposure key is REFUSED at the door, which is the point. 'ops': a
+    // dossier is synthesized from ops-plane thoughts and is published to the wiki, which is
+    // the ops surface.
+    //
+    // It lives on THIS object rather than at each call because this same object is also the
+    // body of the idempotent PATCH below, which REPLACES `metadata` wholesale on an existing
+    // dossier. Without the key here that PATCH silently deleted the jsonb mirror on every
+    // compile - the desync C.9 H3 exists to make impossible.
+    exposure: "ops",
     type: "dossier",
     topics: ["entity-wiki", entity.entity_type],
     tags: ["wiki", "dossier", "generated"],

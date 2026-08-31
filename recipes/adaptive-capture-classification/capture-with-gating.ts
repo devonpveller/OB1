@@ -202,6 +202,9 @@ async function writeToOB1(classified: Classified): Promise<void> {
   // Example: direct Supabase insert into the thoughts table.
   // If you use the OB1 MCP tool, call it here instead.
   await db.from("thoughts").insert({
+    // `thoughts.exposure` is NOT NULL with no default (DFU C.9 H3, operator 2026-08-31), so a
+    // direct insert MUST state the plane - including this example, which is copied.
+    exposure: "ops",
     content: classified.title,
     type: classified.type,
     tags: classified.tags,

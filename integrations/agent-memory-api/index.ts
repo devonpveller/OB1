@@ -467,6 +467,8 @@ app.post("/writeback", async (c) => {
       p_content: row.content,
       p_payload: {
         metadata: {
+          // exposure STATED, not defaulted (DFU C.9 H3, operator 2026-08-31).
+          exposure: "ops",
           source: "agent_memory",
           source_type: "agent_memory",
           type: row.memory_type,

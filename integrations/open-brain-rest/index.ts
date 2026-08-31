@@ -404,6 +404,10 @@ async function createThought(body: z.infer<typeof captureSchema>) {
     type,
     source: sourceType,
     source_type: sourceType,
+    // STATED, not defaulted (DFU C.9 H3, operator 2026-08-31): upsert_thought refuses a
+    // payload that does not name a plane. LAST in the literal on purpose, so an `exposure`
+    // key that arrived in `extracted` - i.e. from the caller - cannot override the door's.
+    exposure: "ops",
   };
 
   const [embedding, upsert] = await Promise.all([

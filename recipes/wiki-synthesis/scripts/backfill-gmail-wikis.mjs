@@ -298,6 +298,10 @@ async function synthesizeWiki(threadGroup, env) {
 async function captureWikiThought(sb, threadGroup, wikiText, runId) {
   const memoryId = `gmail-wiki:${threadGroup.thread_id}`;
   const metadata = {
+    // THE PLANE, STATED BY THIS PRODUCER (DFU C.9 H3, operator 2026-08-31):
+    // `thoughts.exposure` is NOT NULL with no default and `upsert_thought` refuses a
+    // payload that does not state one. This corpus is ops-plane content (190's ruling).
+    exposure: "ops",
     type: "reference",
     topics: ["email-wiki", "thread-summary"],
     tags: ["email-wiki", "thread-summary"],
@@ -378,6 +382,10 @@ async function captureWikiThought(sb, threadGroup, wikiText, runId) {
       content: wikiText,
       source_type: "gmail_wiki",
       sensitivity_tier: tier,
+      // The COLUMN, on the path that bypasses upsert_thought. `metadata.exposure` above is
+      // only the mirror; a direct insert has to carry the column itself or it is a
+      // not_null_violation (DFU C.9 H3).
+      exposure: "ops",
       metadata,
       created_at: new Date().toISOString(),
     },

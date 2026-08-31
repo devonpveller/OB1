@@ -37,11 +37,22 @@
 -- `DEFAULT 'ops'` would make the NOT NULL unreachable and would hand a forgetful producer a
 -- silent success on the WIDER plane. `DEFAULT 'personal'` would hand it a silent success on
 -- the narrower one - safer, and still silent, and still a guess about a plane the writer
--- never stated. The operator chose Option A precisely so that the producer states it. A DOOR
--- may stamp its own forced value (section 7 below does exactly that for `upsert_thought`,
--- and `stampExposure()` does it for the agent-memory doors) - that is PLAN section 1.1's
--- "lane stamping happens at doors, not by writers" and it is not a column default: the door
--- KNOWS its plane, the column does not.
+-- never stated. The operator chose Option A precisely so that the producer states it.
+--
+-- AND NEITHER DOES THE DOOR (corrected 2026-08-31). An earlier version of this file said "a
+-- DOOR may stamp its own forced value" and had `upsert_thought` COALESCE an absent, empty or
+-- null exposure to 'ops'. That is a column default wearing a different hat: it hands a
+-- forgetful producer a silent success on the wider plane, one layer up, which is exactly what
+-- section 8(b) below FAILS this migration for when the column carries a DEFAULT - the file
+-- contradicted itself, and C.9 H3 sides with 8(b) ("a writer that does not supply the column
+-- is rejected by the CHECK, which is the point"). Section 7 now REFUSES absent/null/empty and
+-- every non-plane string, and every producer states its plane at its own call site.
+--
+-- PLAN section 1.1's "lane stamping happens at doors, not by writers" still holds and is not
+-- what was wrong here. A stamping door is one that KNOWS its caller's plane and FORCES it
+-- regardless of what the caller asked for - `stampExposure()` on the agent-memory doors, whose
+-- unstated default is 'personal', the NARROW end, and which can only ever demote. A door that
+-- fills in the WIDE plane for a caller that said nothing is not stamping; it is guessing.
 --
 -- ==========================================================================================
 -- WHAT AN ABSENT KEY BACKFILLS TO, AND WHY - the one judgement call in this file
@@ -102,10 +113,16 @@
 --      POLICY the table has RLS ENABLED and NO permissive policy for the role, which is
 --      DEFAULT DENY. The intermediate state of this step is strictly more closed than either
 --      end of it. There is no ordering of these two statements that permits a row.
---   7. Re-point the corpus DOOR (`upsert_thought`) at the column.
+--   7. Re-point the corpus DOOR (`upsert_thought`) at the column, and make it REQUIRE the
+--      plane rather than default one.
+--  7b. Re-point the LAST READER of the jsonb mirror - `queue_entity_extraction()`, the
+--      SECURITY DEFINER trigger that carries a content fingerprint out of the corpus - at the
+--      column too, and widen its trigger's column list to fire on `exposure`. Neither changes
+--      what any caller can SEE; both change what a desynced mirror could do.
 --   8. POST-CONDITIONS, including the migration attacking itself: an absent write and a
---      malformed write are attempted and both must be rejected BY THE DATABASE, or this
---      migration fails.
+--      malformed write are attempted and both must be rejected BY THE DATABASE; the DOOR is
+--      attacked with twelve non-plane payloads; and the database is scanned for any remaining
+--      reader of the mirror. Any of them failing fails this migration.
 --
 -- AND THE WHOLE FILE IS ONE TRANSACTION. DDL in PostgreSQL is transactional, and ALTER TABLE
 -- takes ACCESS EXCLUSIVE, so no other session observes any of the intermediate states above:
@@ -117,9 +134,10 @@
 -- ADDITIVE AND REVERSIBLE
 -- ==========================================================================================
 -- Adds two columns, two indexes, two functions and two constraints; replaces two policies
--- with narrower-or-equal ones of the same shape; redefines one function body
--- (`upsert_thought`). It DROPS NOTHING that holds data - no table, no column, no row, and no
--- function. The jsonb predicates `ob_memory_on_ops_plane(jsonb)` and
+-- with narrower-or-equal ones of the same shape; redefines two function bodies
+-- (`upsert_thought`, `queue_entity_extraction`) and re-creates one trigger with a WIDER column
+-- list (`trg_queue_entity_extraction`, which fires more often, never less). It DROPS NOTHING
+-- that holds data - no table, no column, no row, and no function. The jsonb predicates `ob_memory_on_ops_plane(jsonb)` and
 -- `ob_corpus_on_ops_plane(jsonb)` are DELIBERATELY LEFT IN PLACE and COMMENTed as retired:
 -- `revert-graph-plane-rls.sql` recreates a policy that calls one of them, so dropping them
 -- would break a revert path that already ships. 200's section 9 asserts instead that NOTHING
@@ -352,26 +370,75 @@ CREATE POLICY thoughts_ops_plane ON public.thoughts
 -- ob_plane_personal, which is where they belong.
 
 -- ==========================================================================================
--- 7. THE CORPUS DOOR - upsert_thought stamps the column
+-- 7. THE CORPUS DOOR - upsert_thought REQUIRES the plane and never invents one
 -- ==========================================================================================
 -- `upsert_thought(p_content, p_payload)` is the shared write door for the wiki synthesis,
--- entity-wiki dossiers and every import recipe (grok, instagram, blogger, gmail), all of
--- which reach it over PostgREST rpc as `service_role`. It inserts into `thoughts`, so under
--- NOT NULL it MUST supply the column or every one of those callers breaks - which is the
--- write-contract change C.9 says is the intent, delivered at the door rather than as a
--- column default.
+-- entity-wiki dossiers and every import recipe (grok, instagram, blogger, x/twitter, gmail),
+-- all of which reach it over PostgREST rpc as `service_role`. It inserts into `thoughts`, so
+-- under NOT NULL it MUST supply the column or every one of those callers breaks - which is
+-- the write-contract change C.9 says is the intent.
 --
--- ITS LANE IS 'ops', and that is the same ruling as the backfill: this door writes the
--- general corpus, which 190 already decided is ops-plane content. It is NOT a fallback for
--- a missing value - the door KNOWS its plane. What a caller may do is DEMOTE: an explicit
--- `metadata.exposure = 'personal'` is honoured, because narrowing is always allowed and
--- widening never is (PLAN 1.1, and the same asymmetry as stampExposure()). Anything else is
--- REFUSED here rather than silently coerced, so a typo is a loud failure at the door instead
--- of a row on a plane nobody chose.
+-- IT USED TO COERCE, AND THAT WAS THIS FILE CONTRADICTING ITSELF. The first version of this
+-- section read
 --
--- The UPDATE branch is deliberately left alone on this column: an existing row's plane is
--- not re-decided by a content-fingerprint match. Widening by re-upsert would be a widening
--- path, and PLAN 1.1 puts the only widening path behind human review (`promote_exposure`).
+--     v_exp := COALESCE(NULLIF(v_meta->>'exposure', ''), 'ops');
+--
+-- so `{}`, `{"exposure":""}` and `{"exposure":null}` all silently became 'ops'. Measured on a
+-- throwaway built from this exact initdb chain, 2026-08-31: all three wrote a row, all three
+-- landed on the WIDER plane, and the header's claim that "anything else is REFUSED here
+-- rather than silently coerced, so a typo is a loud failure at the door" was half false -
+-- `' '` and `'PERSONAL'` were refused, absent/empty/null were not.
+--
+-- Section 8(b) below FAILS this migration if the COLUMN carries a DEFAULT, on the stated
+-- grounds that "a writer that omits the column would then succeed silently on a plane it
+-- never stated". The COALESCE implemented that exact semantics one layer up, at the door.
+-- C.9 H3 sides with 8(b): "a writer that does not supply the column is rejected by the CHECK,
+-- which is the point", and the operator's ruling is "forcing every producer to state exposure
+-- explicitly is the intent, not a side effect". So the door no longer defaults.
+--
+-- WHAT IS REFUSED NOW, ALL OF IT LOUDLY AND AT THE DOOR:
+--   absent, JSON null      -> not_null_violation ("state it at the call site")
+--   '', ' ', 'ops ', 'OPS' -> check_violation    (a non-plane string is a typo, not a default)
+--   'personal'             -> check_violation, with the reason, see below
+-- and 'ops' is the only accepted value.
+--
+-- THE PRODUCERS THAT COULD NOT STATE A PLANE NOW STATE ONE, IN THEIR OWN CODE. Every caller
+-- of this rpc in the tree was found and given an explicit `exposure: 'ops'` in the metadata it
+-- passes, so the choice is visible where the producer lives instead of hidden in a COALESCE
+-- here (`grep -rn 'rpc("upsert_thought"' OB1` - ten call sites, 2026-08-31):
+--   recipes/entity-wiki/generate-wiki.mjs          - the ONLY scheduled producer (openbrain-wiki)
+--   recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs
+--   recipes/grok-export-import/import-grok.mjs
+--   recipes/instagram-import/import-instagram.mjs
+--   recipes/journals-blogger-import/import-blogger.mjs
+--   recipes/x-twitter-import/import-x-twitter.mjs
+--   recipes/repo-learning-coach/server/brain.ts
+--   integrations/open-brain-rest/index.ts          - not built by any compose service
+--   integrations/agent-memory-api/index.ts         - not built by any compose service
+--   server/index.ts                                - not built by any compose service
+--
+-- AND IT WRITES ONE PLANE. `'personal'` used to be honoured here as a "demotion", on the
+-- grounds that narrowing is always allowed. Measured on the throwaway, that is not something
+-- this door can deliver: `thoughts_personal_plane` is granted TO `ob_plane_personal` and
+-- requires `user_id = ob_current_user_id()`, and this door has neither. A BOUND connection's
+-- personal insert through it is refused 42501 by the WITH CHECK ("new row violates row-level
+-- security policy for table thoughts"); a SUPERUSER connection's succeeds only by bypassing
+-- the boundary, and writes a row with `user_id IS NULL` that no personal-plane session can
+-- ever read. Both outcomes are worse than a refusal, and the refusal is the one that names
+-- the real path. Narrowing an EXISTING corpus row is not an `upsert_thought` operation at all
+-- and this door no longer implies that it is - see the findings note for that gap.
+--
+-- THE MIRROR CANNOT DISAGREE WITH THE COLUMN, ON EITHER BRANCH. The previous version's
+-- UPDATE branch merged `jsonb_build_object('exposure', v_exp)` into `metadata` while
+-- deliberately NOT touching the column, which desynced them in BOTH directions (measured):
+-- re-upserting a personal row with no exposure key gave column='personal', mirror='ops', and
+-- demoting an ops row gave column='ops', mirror='personal'. Now the INSERT branch writes both
+-- from one value, and the UPDATE branch forces the mirror to the row's ACTUAL column value in
+-- the same statement - which also REPAIRS a row that arrived here already disagreeing.
+--
+-- The UPDATE branch still does not re-decide the plane: an existing row's plane is not
+-- changed by a content-fingerprint match. Widening by re-upsert would be a widening path, and
+-- PLAN 1.1 puts the only widening path behind human review (`promote_exposure`).
 --
 -- The body is otherwise IDENTICAL to init-graph.sql's, which is where this function is
 -- created; see the pointer comment there.
@@ -385,28 +452,50 @@ AS $fn$
 DECLARE
   v_fp   TEXT := encode(digest(p_content, 'sha256'), 'hex');
   v_meta JSONB := COALESCE(p_payload->'metadata', '{}'::jsonb);
-  v_exp  TEXT;
+  v_exp  TEXT  := v_meta->>'exposure';
   v_row  public.thoughts;
 BEGIN
-  v_exp := COALESCE(NULLIF(v_meta->>'exposure', ''), 'ops');
-  IF v_exp NOT IN ('ops','personal') THEN
-    RAISE EXCEPTION 'upsert_thought: metadata.exposure = % is not a plane. Use ''ops'' or '
-                    '''personal'', or omit it to write on this door''s own plane (ops).', v_exp
+  -- STATE YOUR PLANE. An absent key and a JSON null both arrive here as SQL NULL; '' and
+  -- ' ' arrive as themselves. None of them is a plane, and none of them is defaulted.
+  IF v_exp IS NULL THEN
+    RAISE EXCEPTION 'upsert_thought: metadata.exposure is absent (or JSON null). This door '
+                    'does not default it - state "ops" explicitly at the call site. '
+                    '(DFU C.9 H3: the column is NOT NULL with no default, and neither is '
+                    'this door.)'
+      USING ERRCODE = 'not_null_violation';
+  END IF;
+  IF v_exp = 'personal' THEN
+    RAISE EXCEPTION 'upsert_thought: this door writes the OPS-plane corpus and cannot write '
+                    'the personal plane. thoughts_personal_plane is granted TO '
+                    'ob_plane_personal and requires user_id = ob_current_user_id(); this door '
+                    'has neither, so a bound connection would be refused 42501 and a '
+                    'superuser connection would write a row with user_id NULL that no '
+                    'personal-plane session can read. Refused rather than half-written.'
       USING ERRCODE = 'check_violation';
   END IF;
-  -- The mirror is kept in step with the column at the door, so the two never disagree.
-  v_meta := v_meta || jsonb_build_object('exposure', v_exp);
+  IF v_exp <> 'ops' THEN
+    RAISE EXCEPTION 'upsert_thought: metadata.exposure = % is not a plane this door writes. '
+                    'Use "ops". Nothing here is coerced, trimmed or case-folded - a value '
+                    'that is not exactly "ops" is a typo, and a typo is a loud failure at the '
+                    'door instead of a row on a plane nobody chose.', quote_literal(v_exp)
+      USING ERRCODE = 'check_violation';
+  END IF;
 
   SELECT * INTO v_row FROM public.thoughts
     WHERE content_fingerprint = v_fp LIMIT 1;
   IF FOUND THEN
+    -- The caller's own `exposure` key is stripped from the merge and the mirror is written
+    -- from `v_row.exposure` - the COLUMN, the source of truth - so this statement cannot
+    -- leave the two disagreeing whatever the caller sent or whatever the row arrived as.
     UPDATE public.thoughts
-       SET metadata = metadata || v_meta, updated_at = now()
+       SET metadata = (metadata || (v_meta - 'exposure'))
+                      || jsonb_build_object('exposure', v_row.exposure),
+           updated_at = now()
      WHERE id = v_row.id
      RETURNING * INTO v_row;
   ELSE
     INSERT INTO public.thoughts (content, metadata, exposure)
-      VALUES (p_content, v_meta, v_exp)
+      VALUES (p_content, v_meta || jsonb_build_object('exposure', v_exp), v_exp)
       RETURNING * INTO v_row;
   END IF;
   RETURN v_row;
@@ -419,6 +508,96 @@ BEGIN
     GRANT EXECUTE ON FUNCTION public.upsert_thought(TEXT, JSONB) TO service_role;
   END IF;
 END $$;
+
+-- ==========================================================================================
+-- 7b. THE LAST READER OF THE MIRROR, AND THE TRIGGER THAT MISSED THE TRANSITION
+-- ==========================================================================================
+-- THE MIRROR IS NOT A TRUST DECISION, SO NOTHING MAY READ IT. Section 6 moved the two
+-- POLICIES onto the column. It left one reader behind, and it is the one that matters most:
+--
+--   `queue_entity_extraction()` - AFTER INSERT OR UPDATE ON thoughts, SECURITY DEFINER -
+--   gates entity extraction on `ob_corpus_on_ops_plane(NEW.metadata)`. Measured on the LIVE
+--   openbrain-db 2026-08-31, it is the ONLY function body in the database that reads the
+--   mirror (a pg_proc scan over prosrc for 'metadata%exposure' and for 'on_ops_plane': one
+--   hit, this one). PROMOTION-RUNBOOK.md's argument for why 195- does not conflict with the
+--   round-1 200- still on the live volume rested on "the round-1 write gate reads the jsonb
+--   mirror, which every writer keeps in step with the column" - a premise about writer
+--   discipline, falsified by the door this very file was shipping. A gate that reads a mirror
+--   is a gate a desync can fool, and the desync in the direction column='personal' /
+--   mirror='ops' would have QUEUED a personal-plane thought's content fingerprint for entity
+--   extraction, which is a carry across the boundary.
+--
+-- So the argument stops being a premise and becomes a property: the gate reads the COLUMN,
+-- here, in the same transaction that creates it, and section 8(d) asserts that no function
+-- body and no policy in the database reads the mirror for a trust decision afterwards. The
+-- body below is IDENTICAL to 200-init-graph-plane-rls.sql section 4's, so applying 200- after
+-- this is a no-op on this function rather than a second opinion. (COALESCE(..., false) is
+-- load-bearing, and the reasoning is 200's: the predicate is three-valued and `NOT NULL` is
+-- NULL, which an IF treats as not-taken.)
+--
+-- AND THE TRIGGER'S COLUMN LIST WAS WRONG THE MOMENT THE COLUMN EXISTED. init-graph.sql
+-- declares it `AFTER INSERT OR UPDATE OF content, metadata`. 200-'s own TRIGGER-DISPOSITION
+-- comment claims "an ops-to-personal transition deletes the existing one" - but once the
+-- plane lives in a COLUMN, the only way to make that transition is `UPDATE thoughts SET
+-- exposure='personal'`, which touches NEITHER content NOR metadata and therefore does not
+-- fire the trigger at all. RED, measured on the throwaway 2026-08-31: insert an ops thought
+-- (1 queue row), demote it by updating only the column, and the queue row is STILL THERE,
+-- carrying sha256 of a now-personal thought's content. Adding `exposure` to the column list
+-- is what makes 200's claim true; without it, re-pointing the gate at the column would have
+-- made this file's gate weaker than the one it replaced.
+DO $$
+BEGIN
+  IF to_regprocedure('public.queue_entity_extraction()') IS NULL THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: queue_entity_extraction() is missing. '
+                    'It is created by 040-init-graph.sql; this file re-points it and does not '
+                    'invent it.';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                  WHERE tgname = 'trg_queue_entity_extraction'
+                    AND tgrelid = 'public.thoughts'::regclass) THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: trg_queue_entity_extraction is missing '
+                    'from public.thoughts. It is created by 040-init-graph.sql; this file '
+                    'widens its column list and does not invent it.';
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.queue_entity_extraction()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $fn$
+BEGIN
+  IF NEW.metadata->>'generated_by' IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- THE GATE. Off-plane content never enters the graph. Reads the COLUMN (DFU C.9 H3).
+  IF NOT COALESCE(public.ob_corpus_on_ops_plane(NEW.exposure), false) THEN
+    -- ...and if it was ON the plane a moment ago, its fingerprint LEAVES.
+    DELETE FROM public.entity_extraction_queue WHERE thought_id = NEW.id;
+    RETURN NEW;
+  END IF;
+
+  INSERT INTO public.entity_extraction_queue (thought_id, status, source_fingerprint, source_updated_at)
+  VALUES (NEW.id, 'pending', NEW.content_fingerprint, NEW.updated_at)
+  ON CONFLICT (thought_id) DO UPDATE SET
+    status = 'pending',
+    attempt_count = 0,
+    last_error = NULL,
+    queued_at = now(),
+    source_fingerprint = EXCLUDED.source_fingerprint,
+    source_updated_at = EXCLUDED.source_updated_at
+  WHERE entity_extraction_queue.source_fingerprint IS DISTINCT FROM EXCLUDED.source_fingerprint;
+  RETURN NEW;
+END;
+$fn$;
+
+DROP TRIGGER IF EXISTS trg_queue_entity_extraction ON public.thoughts;
+CREATE TRIGGER trg_queue_entity_extraction
+  AFTER INSERT OR UPDATE OF content, metadata, exposure ON public.thoughts
+  FOR EACH ROW
+  EXECUTE FUNCTION public.queue_entity_extraction();
 
 -- ==========================================================================================
 -- 8. POST-CONDITIONS - and the migration ATTACKS ITSELF before it commits
@@ -526,6 +705,195 @@ BEGIN
   RAISE NOTICE 'init-agent-memory-exposure-column: self-test passed - the DATABASE rejects an '
                'absent exposure (not_null_violation) and a malformed one (check_violation) on '
                'BOTH tables';
+END $$;
+
+-- 8c. THE DOOR ATTACKS ITSELF TOO, because section 8 above attacks the TABLE and the door is
+--     a second place the same rule can be missing - and was. Every case below is a call to
+--     the real `upsert_thought`, not a restatement of its body; each runs inside its own
+--     plpgsql BEGIN...EXCEPTION (an implicit savepoint), so a refusal leaves nothing behind,
+--     and the accepted case is UNWOUND deliberately by raising a private errcode after the
+--     assertions have been read into variables. 8b then proves nothing survived.
+DO $$
+DECLARE
+  v_ok   BOOLEAN;
+  v_col  TEXT;
+  v_mir  TEXT;
+  v_id   BIGINT;
+  v_case TEXT;
+BEGIN
+  -- (a) EVERY WAY OF NOT STATING A PLANE IS REFUSED. The first three are the ones the
+  --     COALESCE used to swallow; the rest are the ones it already refused, kept so a future
+  --     edit that re-introduces a default has to break all of them, not just one.
+  FOREACH v_case IN ARRAY ARRAY[
+      '{}',                                   -- absent
+      '{"metadata":{}}',                      -- absent, with a metadata object
+      '{"metadata":{"exposure":null}}',       -- JSON null
+      '{"metadata":{"exposure":""}}',         -- empty string
+      '{"metadata":{"exposure":" "}}',        -- whitespace
+      '{"metadata":{"exposure":"ops "}}',     -- trailing space: NOT trimmed
+      '{"metadata":{"exposure":" ops"}}',     -- leading space
+      '{"metadata":{"exposure":"OPS"}}',      -- case: NOT folded
+      '{"metadata":{"exposure":"Ops"}}',
+      '{"metadata":{"exposure":"opsy"}}',     -- a prefix is not a plane
+      '{"metadata":{"exposure":"\"ops\""}}',  -- quoted: a JSON-encoding mistake, not a plane
+      '{"metadata":{"exposure":"personal"}}'  -- a plane, but NOT this door's
+  ] LOOP
+    BEGIN
+      PERFORM public.upsert_thought('H3-SELFTEST-DOOR (rolled back) ' || v_case, v_case::jsonb);
+      v_ok := TRUE;
+    EXCEPTION WHEN not_null_violation OR check_violation THEN
+      v_ok := FALSE;
+    END;
+    IF v_ok THEN
+      RAISE EXCEPTION 'init-agent-memory-exposure-column: the corpus door ACCEPTED payload %. '
+                      'upsert_thought is defaulting or coercing a plane the caller never '
+                      'stated, which is the failure H3 exists to remove - and the same '
+                      'failure section 8(b) rejects a column DEFAULT for.', v_case;
+    END IF;
+  END LOOP;
+
+  -- (b) AND 'ops' IS ACCEPTED, or the door is not a door. The row's COLUMN and its MIRROR
+  --     must both read 'ops' - one value, written by one statement.
+  BEGIN
+    SELECT r.id, r.exposure, r.metadata->>'exposure'
+      INTO v_id, v_col, v_mir
+      FROM public.upsert_thought('H3-SELFTEST-DOOR-OPS (rolled back)',
+                                 '{"metadata":{"exposure":"ops","probe":"h3"}}'::jsonb) r;
+    RAISE EXCEPTION 'H3-SELFTEST-UNWIND' USING ERRCODE = '22023';
+  EXCEPTION WHEN SQLSTATE '22023' THEN NULL;
+  END;
+  IF v_id IS NULL OR v_col IS DISTINCT FROM 'ops' OR v_mir IS DISTINCT FROM 'ops' THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: the corpus door did not write a clean '
+                    'ops row (id=%, column=%, mirror=%). A door that refuses everything is '
+                    'not containment, it is an outage.', v_id, v_col, v_mir;
+  END IF;
+
+  -- (c) THE TWO DESYNC CASES, RED-PROVEN AND NOW CLOSED. Both were measured against the
+  --     previous body on a throwaway built from this chain:
+  --       re-upsert a PERSONAL row with no exposure key -> column='personal', mirror='ops'
+  --       demote an OPS row through the door             -> column='ops',      mirror='personal'
+  --     The first is the dangerous direction: the round-1 entity-extraction gate reads the
+  --     mirror on the live volume, so a personal row whose mirror says 'ops' gets its content
+  --     fingerprint queued. Section 7b re-points that gate at the column; this asserts the
+  --     door can no longer produce the disagreement in the first place.
+  BEGIN
+    INSERT INTO public.thoughts (content, metadata, exposure)
+      VALUES ('H3-SELFTEST-DESYNC (rolled back)',
+              '{"exposure":"personal"}'::jsonb, 'personal')
+      RETURNING id INTO v_id;
+    -- the ops producer re-upserts the same content, stating its own plane
+    SELECT r.exposure, r.metadata->>'exposure' INTO v_col, v_mir
+      FROM public.upsert_thought('H3-SELFTEST-DESYNC (rolled back)',
+                                 '{"metadata":{"exposure":"ops"}}'::jsonb) r;
+    -- and the demotion attempt, which must be REFUSED rather than half-applied
+    BEGIN
+      PERFORM public.upsert_thought('H3-SELFTEST-DESYNC (rolled back)',
+                                    '{"metadata":{"exposure":"personal"}}'::jsonb);
+      v_ok := TRUE;
+    EXCEPTION WHEN check_violation THEN
+      v_ok := FALSE;
+    END;
+    RAISE EXCEPTION 'H3-SELFTEST-UNWIND' USING ERRCODE = '22023';
+  EXCEPTION WHEN SQLSTATE '22023' THEN NULL;
+  END;
+  IF v_col IS DISTINCT FROM 'personal' OR v_mir IS DISTINCT FROM 'personal' THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: re-upserting a PERSONAL row through '
+                    'the ops door left column=% mirror=%. The plane must not be re-decided by '
+                    'a fingerprint match, and the mirror must follow the COLUMN - not the '
+                    'caller.', v_col, v_mir;
+  END IF;
+  IF v_ok THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: the corpus door ACCEPTED a demotion to '
+                    'the personal plane. It cannot deliver one (no ob_plane_personal role, no '
+                    'user_id), so accepting it means desyncing the mirror or writing an '
+                    'unreadable row - see section 7.';
+  END IF;
+
+  RAISE NOTICE 'init-agent-memory-exposure-column: door self-test passed - upsert_thought '
+               'refuses 12 non-plane payloads including absent/null/empty, accepts only ops, '
+               'and cannot leave the column and the mirror disagreeing';
+END $$;
+
+-- 8d. NOTHING IN THE DATABASE READS THE MIRROR FOR A TRUST DECISION. This is the assertion
+--     that turns "the column is the source of truth" from a sentence in a header into a
+--     property of the database - and it is the assertion whose absence let the runbook argue
+--     from "every writer keeps the mirror in step", which was false.
+--
+--     Both surfaces are checked, because they fail differently: a POLICY's expression is
+--     visible in pg_policies, while a plpgsql body is an opaque STRING to the planner and
+--     records no pg_depend edge on the function it calls (200's section 9 pays for exactly
+--     this). So the function scan is over prosrc TEXT, which is the only thing that sees a
+--     caller inside a body.
+DO $$
+DECLARE
+  v_bad TEXT;
+BEGIN
+  -- WHITESPACE-INSENSITIVE AND ANCHORED ON THE ACTUAL READ, not on the two words appearing
+  -- somewhere in the same expression. A loose `%metadata%exposure%` matched the re-pointed
+  -- gate's own body on the first run of this scan (it reads metadata->>'generated_by' on one
+  -- line and NEW.exposure twenty lines later) - a check that fires on code that is correct is
+  -- a check nobody will keep.
+  SELECT string_agg(tablename || '.' || policyname, ', ')
+    INTO v_bad
+    FROM pg_policies
+   WHERE schemaname = 'public'
+     AND (SELECT replace(COALESCE(qual, '') || COALESCE(with_check, ''), ' ', ''))
+         LIKE ANY (ARRAY['%metadata->>''exposure''%',
+                         '%metadata->''exposure''%',
+                         '%on_ops_plane(metadata)%',
+                         '%on_ops_plane(NEW.metadata)%',
+                         '%on_ops_plane(OLD.metadata)%']);
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: policy/policies still read the jsonb '
+                    'mirror: %. The column is the source of truth; the mirror is not a trust '
+                    'decision.', v_bad;
+  END IF;
+
+  SELECT string_agg(n.nspname || '.' || p.proname || '/' || p.pronargs, ', ')
+    INTO v_bad
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.prokind = 'f'
+     AND p.proname <> 'upsert_thought'
+     AND replace(COALESCE(p.prosrc, ''), ' ', '')
+         LIKE ANY (ARRAY['%metadata->>''exposure''%',
+                         '%metadata->''exposure''%',
+                         '%on_ops_plane(metadata)%',
+                         '%on_ops_plane(NEW.metadata)%',
+                         '%on_ops_plane(OLD.metadata)%']);
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: function body/bodies still read the '
+                    'jsonb mirror: %. Section 7b re-points the one this file knew about '
+                    '(queue_entity_extraction); a new one has to be re-pointed too, not '
+                    'exempted here.', v_bad;
+  END IF;
+
+  -- upsert_thought is the ONE deliberate exception, and only as a WRITER: it writes the
+  -- mirror from the column and reads the caller's key to refuse it. Asserted, so the
+  -- exemption above cannot quietly cover a body that starts making a decision on it.
+  IF (SELECT COALESCE(prosrc, '') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = 'public' AND p.proname = 'upsert_thought' LIMIT 1)
+     LIKE '%on_ops_plane%' THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: upsert_thought now calls a plane '
+                    'predicate. It is exempted from the mirror scan as a WRITER of the '
+                    'mirror; it may not become a reader of it.';
+  END IF;
+
+  -- ...and the trigger that carries content out of the corpus fires on the COLUMN, or the
+  -- ops-to-personal transition leaves its fingerprint behind (RED measured, section 7b).
+  IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+         WHERE t.tgname = 'trg_queue_entity_extraction'
+           AND t.tgrelid = 'public.thoughts'::regclass
+           AND pg_get_triggerdef(t.oid) LIKE '%exposure%') THEN
+    RAISE EXCEPTION 'init-agent-memory-exposure-column: trg_queue_entity_extraction does not '
+                    'fire on UPDATE OF exposure, so demoting a thought by updating only the '
+                    'column leaves its content fingerprint in entity_extraction_queue.';
+  END IF;
+
+  RAISE NOTICE 'init-agent-memory-exposure-column: no policy and no function body reads '
+               'metadata->>''exposure'' for a trust decision - the mirror has zero readers';
 END $$;
 
 -- 8b. Nothing above wrote a row. Asserted rather than assumed, because "it must have rolled

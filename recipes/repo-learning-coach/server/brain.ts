@@ -183,6 +183,9 @@ export const captureLearningArtifact = async ({
   const artifactContent = buildArtifactContent({ kind, content, lesson })
   const embedding = await getEmbedding(artifactContent)
   const metadata = {
+    // THE PLANE, STATED BY THIS PRODUCER (DFU C.9 H3, operator 2026-08-31): the column is
+    // NOT NULL with no default and upsert_thought refuses a payload that does not state one.
+    exposure: 'ops',
     source: REPO_LEARNING_CONFIG.brainIntegration.sourceTag,
     type: 'lesson',
     project_slug: REPO_LEARNING_CONFIG.slug,

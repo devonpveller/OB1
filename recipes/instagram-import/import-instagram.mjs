@@ -104,7 +104,10 @@ async function upsertThought(content, metadata, embedding, createdAt) {
       importance: 2,
       quality_score: 40,
       sensitivity_tier: "personal",
-      metadata: { ...metadata, source: "instagram_import", source_type: "instagram_import" },
+      // exposure STATED, not defaulted (DFU C.9 H3, operator 2026-08-31): the column is
+      // NOT NULL with no default and upsert_thought refuses a payload without it. 'ops':
+      // an import lands in the general corpus, which 190 already ruled is ops-plane.
+      metadata: { ...metadata, exposure: "ops", source: "instagram_import", source_type: "instagram_import" },
       embedding: JSON.stringify(embedding),
       created_at: createdAt,
     },

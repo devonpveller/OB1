@@ -19,14 +19,26 @@
 -- policy reads it, and a writer that keeps supplying it is harmless.
 --
 -- THE VISIBILITY-PRESERVING ORDER, which is the mirror of the migration's:
---   1. Re-point the POLICIES at the jsonb predicate FIRST. The jsonb mirror is complete at
---      this moment - the migration wrote it for every row it touched and the doors keep it in
---      step - so this step changes no row's visibility. Doing it LAST instead would leave a
---      moment where the constraints are gone (an unlabelled row can be written) while the
---      policies still read the column, which is the one ordering that could admit a row whose
---      plane was never established.
---   2. THEN de-constrain the column, which nothing reads any more.
+--  1a. REPAIR THE MIRROR FROM THE COLUMN, then REFUSE if any row still disagrees. This step
+--      is new (2026-08-31) and it exists because the step below used to justify itself with
+--      "the jsonb mirror is complete at this moment - the doors keep it in step", which was a
+--      premise about writer discipline and was FALSE: the migration's own corpus door desynced
+--      the two in both directions until it was fixed. Re-pointing the policies at a mirror
+--      that disagrees with the column is a SILENT WIDENING of every row whose column says
+--      'personal' and whose mirror says 'ops'. The column is the source of truth, so the
+--      revert copies it into the mirror before trusting the mirror, and then asserts. No row's
+--      visibility changes: at this moment the policies still read the column.
+--   1. Re-point the POLICIES at the jsonb predicate. After step 1a the mirror agrees with the
+--      column for every row, so this changes no row's visibility. Doing it LAST instead would
+--      leave a moment where the constraints are gone (an unlabelled row can be written) while
+--      the policies still read the column, which is the one ordering that could admit a row
+--      whose plane was never established.
+--   2. THEN de-constrain the column, which no POLICY reads any more.
 --   3. THEN restore upsert_thought's pre-H3 body.
+--  3b. THEN put the entity-extraction write gate back on the mirror and narrow its trigger's
+--      column list back to (content, metadata) - undoing the migration's section 7b. It goes
+--      AFTER the policies for the same reason they go first: while the gate still reads the
+--      column it is reading a value the constraints still guarantee.
 --   4. THEN unstamp exactly the rows this migration labelled, and only those.
 -- All of it in ONE transaction, so no session observes an intermediate state.
 
@@ -61,6 +73,39 @@ BEGIN
                     'Revert it FIRST with revert-graph-plane-rls.sql: this file restores 180''s '
                     'policies, which do NOT carry that arm, so reverting in this order would '
                     're-open the foreign-key existence oracle without saying so.';
+  END IF;
+END $$;
+
+-- 1a. THE MIRROR IS REPAIRED FROM THE COLUMN BEFORE THE POLICIES TRUST IT AGAIN.
+--     It runs AFTER the two refusals above and BEFORE the policy swap below: a revert that
+--     is going to refuse must not write first.
+--    Only rows whose column is populated are touched; a row with a NULL column (possible only
+--    if this revert has already run once and a writer has since inserted without the column)
+--    is left exactly as it is, because inventing a mirror value for it would be this file
+--    deciding a plane.
+UPDATE public.thoughts
+   SET metadata = metadata || jsonb_build_object('exposure', exposure)
+ WHERE exposure IS NOT NULL
+   AND metadata->>'exposure' IS DISTINCT FROM exposure;
+
+UPDATE public.agent_memories
+   SET metadata = metadata || jsonb_build_object('exposure', exposure)
+ WHERE exposure IS NOT NULL
+   AND metadata->>'exposure' IS DISTINCT FROM exposure;
+
+DO $$
+DECLARE v_n INT;
+BEGIN
+  SELECT (SELECT count(*) FROM public.thoughts
+           WHERE exposure IS NOT NULL AND metadata->>'exposure' IS DISTINCT FROM exposure)
+       + (SELECT count(*) FROM public.agent_memories
+           WHERE exposure IS NOT NULL AND metadata->>'exposure' IS DISTINCT FROM exposure)
+    INTO v_n;
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'revert-agent-memory-exposure-column: % row(s) still have a mirror that '
+                    'disagrees with the column after the repair above. Re-pointing the '
+                    'policies at the mirror would change those rows'' visibility, which a '
+                    'revert must not do. Investigate before reverting.', v_n;
   END IF;
 END $$;
 
@@ -115,6 +160,46 @@ BEGIN
   RETURN v_row;
 END;
 $fn$;
+
+-- 3b. THE ENTITY-EXTRACTION WRITE GATE GOES BACK ON THE MIRROR, and its trigger's column
+--     list goes back to (content, metadata) - undoing the migration's section 7b. The body
+--     below is init-graph.sql's, verbatim.
+CREATE OR REPLACE FUNCTION public.queue_entity_extraction()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $fn$
+BEGIN
+  IF NEW.metadata->>'generated_by' IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- THE GATE. Off-plane content never enters the graph.
+  IF NOT COALESCE(public.ob_corpus_on_ops_plane(NEW.metadata), false) THEN
+    DELETE FROM public.entity_extraction_queue WHERE thought_id = NEW.id;
+    RETURN NEW;
+  END IF;
+
+  INSERT INTO public.entity_extraction_queue (thought_id, status, source_fingerprint, source_updated_at)
+  VALUES (NEW.id, 'pending', NEW.content_fingerprint, NEW.updated_at)
+  ON CONFLICT (thought_id) DO UPDATE SET
+    status = 'pending',
+    attempt_count = 0,
+    last_error = NULL,
+    queued_at = now(),
+    source_fingerprint = EXCLUDED.source_fingerprint,
+    source_updated_at = EXCLUDED.source_updated_at
+  WHERE entity_extraction_queue.source_fingerprint IS DISTINCT FROM EXCLUDED.source_fingerprint;
+  RETURN NEW;
+END;
+$fn$;
+
+DROP TRIGGER IF EXISTS trg_queue_entity_extraction ON public.thoughts;
+CREATE TRIGGER trg_queue_entity_extraction
+  AFTER INSERT OR UPDATE OF content, metadata ON public.thoughts
+  FOR EACH ROW
+  EXECUTE FUNCTION public.queue_entity_extraction();
 
 -- 4. UNSTAMP exactly what this migration stamped - rows that had NO label at all and that it
 --    labelled 'ops'. Rows labelled by a writer, and rows 190 stamped, carry a different

@@ -111,7 +111,10 @@ async function upsertThought(content, metadata, embedding, createdAt) {
       importance: 3,
       quality_score: 50,
       sensitivity_tier: "standard",
-      metadata: { ...metadata, source: "grok_import", source_type: "grok_import" },
+      // exposure STATED, not defaulted (DFU C.9 H3, operator 2026-08-31): the column is
+      // NOT NULL with no default and upsert_thought refuses a payload without it. 'ops':
+      // an import lands in the general corpus, which 190 already ruled is ops-plane.
+      metadata: { ...metadata, exposure: "ops", source: "grok_import", source_type: "grok_import" },
       embedding: JSON.stringify(embedding),
       created_at: createdAt,
     },

@@ -460,7 +460,9 @@ server.registerTool(
 
       const { data: upsertResult, error: upsertError } = await supabase.rpc("upsert_thought", {
         p_content: content,
-        p_payload: { metadata: { ...metadata, source: "mcp" } },
+        // exposure STATED, not defaulted (DFU C.9 H3, operator 2026-08-31): upsert_thought
+        // refuses a payload that does not name a plane.
+        p_payload: { metadata: { ...metadata, exposure: "ops", source: "mcp" } },
       });
 
       if (upsertError) {
