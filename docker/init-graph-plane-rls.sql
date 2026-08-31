@@ -117,9 +117,19 @@
 -- documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md. A migration
 -- that reaches only one place is not deployed.
 --
--- ORDERING: 200, after 190-init-agent-memory-corpus-failclosed.sql, because the policies
--- below call `ob_corpus_on_ops_plane` and the write gate in section 4 is only a gate if that
--- predicate is FAIL-CLOSED. Section 0 refuses to run if it is still fail-open.
+-- ORDERING: 200, after 195-init-agent-memory-exposure-column.sql, because the policies
+-- below call `ob_corpus_on_ops_plane(exposure)` / `ob_memory_on_ops_plane(exposure)` and
+-- the write gate in section 4 is only a gate if that predicate is FAIL-CLOSED. Section 0
+-- refuses to run if the COLUMN is missing, nullable, unconstrained, or if the predicate
+-- permits a plane it cannot establish.
+--
+-- AMENDED 2026-08-31 BY DFU C.9 H3 (operator: option A, typed column). Every site in this
+-- file that used to read `metadata->>'exposure'` through the jsonb predicates now reads
+-- the `exposure` COLUMN: the two agent_memories policies (section 2c), the tier-B
+-- containment sweep (section 3) and the entity-extraction write gate (section 4). The
+-- jsonb predicates still EXIST - revert-graph-plane-rls.sql recreates a policy that calls
+-- one - and section 9 asserts that NOTHING in the database calls them any more, which is
+-- the completeness proof for the swap.
 
 BEGIN;
 
@@ -240,16 +250,46 @@ BEGIN
                     'smaller without saying so.', array_to_string(v_missing, ', ');
   END IF;
 
-  IF to_regprocedure('public.ob_corpus_on_ops_plane(jsonb)') IS NULL THEN
-    RAISE EXCEPTION 'init-graph-plane-rls: public.ob_corpus_on_ops_plane(jsonb) is not '
-                    'defined. Apply 180-init-agent-memory-rls.sql and '
-                    '190-init-agent-memory-corpus-failclosed.sql first.';
+  -- H3 (DFU C.9, operator 2026-08-31): the plane is a TYPED COLUMN now, and this file's
+  -- policies, sweeps and write gate read it. The precondition therefore checks the COLUMN
+  -- and its constraints, not the jsonb key - checking the key would be this file trusting
+  -- the very mirror H3 made non-authoritative.
+  IF to_regprocedure('public.ob_corpus_on_ops_plane(text)') IS NULL
+     OR to_regprocedure('public.ob_memory_on_ops_plane(text)') IS NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: the COLUMN exposure predicates '
+                    '(ob_corpus_on_ops_plane(text) / ob_memory_on_ops_plane(text)) are not '
+                    'defined. Apply 180-init-agent-memory-rls.sql, '
+                    '190-init-agent-memory-corpus-failclosed.sql and '
+                    '195-init-agent-memory-exposure-column.sql first, in that order.';
   END IF;
-  IF public.ob_corpus_on_ops_plane('{}'::jsonb) IS TRUE THEN
-    RAISE EXCEPTION 'init-graph-plane-rls: ob_corpus_on_ops_plane() still returns TRUE for an '
-                    'UNLABELLED row, so it is fail-OPEN. Apply '
-                    '190-init-agent-memory-corpus-failclosed.sql first: the write gate in '
-                    'section 4 would otherwise admit every unlabelled thought by default.';
+  FOREACH v_t IN ARRAY ARRAY['thoughts','agent_memories'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name=v_t
+                      AND column_name='exposure' AND is_nullable='NO') THEN
+      RAISE EXCEPTION 'init-graph-plane-rls: %.exposure is missing or nullable. The write gate '
+                      'in section 4 and the tier-B containment sweep in section 3 both read '
+                      'that column, and a nullable one is a row whose plane cannot be '
+                      'established. Apply 195-init-agent-memory-exposure-column.sql first.', v_t;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = ('public.'||v_t)::regclass AND contype='c'
+                      AND pg_get_constraintdef(oid) LIKE '%exposure%'
+                      AND pg_get_constraintdef(oid) LIKE '%ops%'
+                      AND pg_get_constraintdef(oid) LIKE '%personal%') THEN
+      RAISE EXCEPTION 'init-graph-plane-rls: %.exposure has no CHECK restricting it to '
+                      'ops/personal, so a MALFORMED label is still writable and the gate '
+                      'below would treat it as off-plane rather than refuse it. Apply '
+                      '195-init-agent-memory-exposure-column.sql first.', v_t;
+    END IF;
+  END LOOP;
+  -- The predicate must still DENY a plane it cannot establish. With the column that is a
+  -- NULL argument rather than an absent jsonb key; `NULL = 'ops'` is NULL, which every
+  -- policy coerces to false, and COALESCE(..., false) makes it explicit in plpgsql.
+  IF COALESCE(public.ob_corpus_on_ops_plane(NULL::text), false) IS TRUE
+     OR public.ob_corpus_on_ops_plane('') IS TRUE THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: ob_corpus_on_ops_plane() permits a row whose plane '
+                    'is not established. It is fail-OPEN and the write gate in section 4 '
+                    'would admit off-plane content by default.';
   END IF;
 
   v_closure := v_seed || v_declared;
@@ -644,12 +684,26 @@ DROP POLICY IF EXISTS agent_memories_personal_plane ON public.agent_memories;
 
 CREATE POLICY agent_memories_ops_plane ON public.agent_memories
   AS PERMISSIVE FOR ALL TO service_role
-  USING      (public.ob_memory_on_ops_plane(metadata))
-  WITH CHECK (public.ob_memory_on_ops_plane(metadata)
+  USING      (public.ob_memory_on_ops_plane(exposure))
+  WITH CHECK (public.ob_memory_on_ops_plane(exposure)
               AND (thought_id IS NULL OR public.ob_thought_visible(thought_id)));
 
+-- TO ob_plane_personal, NOT TO service_role, AND THAT IS A DEFECT REPORT AGAINST THE ROUND
+-- THIS FILE SHIPPED IN. 180 created this policy `TO ob_plane_personal`; the round that added
+-- the thought_id arm DROPped both policies and recreated BOTH `TO service_role`. Because
+-- ob_plane_personal is a MEMBER of service_role it kept working, so nothing went red - and
+-- the policy had silently widened from "the personal plane, for its own tenant" to "ANY
+-- service_role connection, for any tenant it can name". `ob.user_id` is an ordinary GUC that
+-- any role may SET, so the only thing between a service_role session and a personal memory
+-- was knowing a user_id - and permissive policies are OR-ed, so this arm needed no help from
+-- the ops one beside it. MEASURED on a throwaway (documentation/notes/u8h3-findings.md): as
+-- plain service_role with SET LOCAL ob.user_id = the fixture's tenant, the personal row came
+-- back. Restored here to the role 180 named. `thoughts_personal_plane` was never touched by
+-- this file and still names ob_plane_personal, which is why the same probe against
+-- `thoughts` returned nothing - one table drifted, its twin did not, and that asymmetry is
+-- what made it findable.
 CREATE POLICY agent_memories_personal_plane ON public.agent_memories
-  AS PERMISSIVE FOR ALL TO service_role
+  AS PERMISSIVE FOR ALL TO ob_plane_personal
   USING      (user_id IS NOT NULL AND user_id = public.ob_current_user_id())
   WITH CHECK (user_id IS NOT NULL AND user_id = public.ob_current_user_id()
               AND (thought_id IS NULL OR public.ob_thought_visible(thought_id)));
@@ -667,9 +721,9 @@ CREATE POLICY agent_memories_personal_plane ON public.agent_memories
 -- THE ACTUAL ARGUMENT, and it turns on what the absent value MEANS on THIS table. Everywhere
 -- else this file touched, the NULL column WAS the plane: `idea_revisions.thought_id` absent
 -- meant "this revision's plane cannot be established", so permitting was permitting the
--- unknown. On `agent_memories` the plane is established by a DIFFERENT column - `metadata`,
--- through ob_memory_on_ops_plane, which is fail-closed - and it is checked in the same
--- conjunction. `thought_id` absent is not an unestablished plane; it is a memory that was
+-- unknown. On `agent_memories` the plane is established by a DIFFERENT column - `exposure`,
+-- through ob_memory_on_ops_plane, which is NOT NULL and CHECKed since H3 and so cannot be
+-- absent at all - and it is checked in the same conjunction. `thought_id` absent is not an unestablished plane; it is a memory that was
 -- never derived from a thought, which is the ordinary case (all 21 live rows that carry one
 -- point at ops thoughts; the rest carry none).
 --
@@ -683,7 +737,7 @@ CREATE POLICY agent_memories_personal_plane ON public.agent_memories
 -- reason as ORACLE-DISPOSITION: a decision a gate can see is a decision, and a decision only
 -- in a comment block is a habit. Removing either COMMENT turns the next apply RED.
 COMMENT ON POLICY agent_memories_ops_plane ON public.agent_memories IS
-  'NULL-ARM-DISPOSITION: WITH CHECK carries `thought_id IS NULL OR ob_thought_visible(thought_id)`. The plane of this row is established by metadata (ob_memory_on_ops_plane, fail-closed) in the same conjunction, NOT by thought_id; an absent thought_id is a memory not derived from a thought, not an unestablished plane. Hidden and nonexistent thought_id both fail 42501, so the arm is not an FK oracle. See init-graph-plane-rls.sql section 2c.';
+  'NULL-ARM-DISPOSITION: WITH CHECK carries `thought_id IS NULL OR ob_thought_visible(thought_id)`. The plane of this row is established by the exposure COLUMN (ob_memory_on_ops_plane, NOT NULL + CHECKed since DFU C.9 H3) in the same conjunction, NOT by thought_id; an absent thought_id is a memory not derived from a thought, not an unestablished plane. Hidden and nonexistent thought_id both fail 42501, so the arm is not an FK oracle. See init-graph-plane-rls.sql section 2c.';
 COMMENT ON POLICY agent_memories_personal_plane ON public.agent_memories IS
   'NULL-ARM-DISPOSITION: same arm, same reason - the plane is established by user_id = ob_current_user_id() in the same conjunction, not by thought_id. See init-graph-plane-rls.sql section 2c.';
 
@@ -719,7 +773,7 @@ BEGIN
   SELECT count(*) INTO v_bad_te
     FROM public.thought_entities te
     JOIN public.thoughts t ON t.id = te.thought_id
-   WHERE NOT COALESCE(public.ob_corpus_on_ops_plane(t.metadata), false);
+   WHERE NOT COALESCE(public.ob_corpus_on_ops_plane(t.exposure), false);
 
   SELECT count(*) INTO v_bad_en
     FROM public.entities e
@@ -728,7 +782,7 @@ BEGIN
            SELECT 1 FROM public.thought_entities te
              JOIN public.thoughts t ON t.id = te.thought_id
             WHERE te.entity_id = e.id
-              AND COALESCE(public.ob_corpus_on_ops_plane(t.metadata), false));
+              AND COALESCE(public.ob_corpus_on_ops_plane(t.exposure), false));
 
   IF v_bad_te > 0 OR v_bad_en > 0 THEN
     RAISE EXCEPTION 'init-graph-plane-rls: tier B containment claim is FALSE on this database '
@@ -815,15 +869,23 @@ COMMENT ON POLICY consolidation_log_shared_vocabulary_all ON public.consolidatio
 -- behaviour change this migration is not for. The definer was not the defect; the defect was
 -- a definer that copied content-derived data ACROSS a boundary, and that is what is fixed.
 --
--- THREE-VALUED LOGIC, AND IT NEARLY SHIPPED. `ob_corpus_on_ops_plane` is
--- `md->>'exposure' = 'ops'`, so for an UNLABELLED row it returns NULL, not FALSE - and
--- `NOT NULL` is NULL, which an IF treats as not-taken. Written as `IF NOT
--- ob_corpus_on_ops_plane(...)` the gate would have let every unlabelled thought straight
--- through to the INSERT, while the fail-closed policy on `thoughts` made that same row
--- INVISIBLE to the ops plane: the exact leak this file closes, reintroduced by an operator
--- precedence nobody looks at. Measured on the throwaway: `ob_corpus_on_ops_plane('{}')` IS
+-- THREE-VALUED LOGIC, AND IT NEARLY SHIPPED. `ob_corpus_on_ops_plane` is `exposure = 'ops'`,
+-- so for a row whose plane is not established it returns NULL, not FALSE - and `NOT NULL`
+-- is NULL, which an IF treats as not-taken. Written as `IF NOT ob_corpus_on_ops_plane(...)`
+-- the gate would have let such a row straight through to the INSERT, while the fail-closed
+-- policy on `thoughts` made that same row INVISIBLE to the ops plane: the exact leak this
+-- file closes, reintroduced by an operator precedence nobody looks at. Measured on the
+-- throwaway (against the jsonb predicate, before H3): `ob_corpus_on_ops_plane('{}')` IS
 -- NULL, `NOT ob_corpus_on_ops_plane('{}')` IS NULL, `COALESCE(..., false)` = f. A policy
 -- coerces NULL to false for you; plpgsql does not.
+--
+-- H3 NARROWS THIS BUT DOES NOT RETIRE IT. `thoughts.exposure` is NOT NULL and CHECKed, so
+-- a COMMITTED row can never reach this gate with a NULL. A BEFORE INSERT trigger, however,
+-- runs BEFORE the constraints do: NEW.exposure is whatever the statement supplied, and for
+-- a writer that omitted the column that is NULL - at which point NOT NULL is NULL and this
+-- IF is not taken. The COALESCE is what makes the gate refuse it; the constraint then
+-- rejects the statement a moment later. Removing the COALESCE would re-open the hole for
+-- exactly one statement's worth of trigger, which is enough.
 CREATE OR REPLACE FUNCTION public.queue_entity_extraction()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -836,7 +898,7 @@ BEGIN
   END IF;
 
   -- THE GATE. Off-plane content never enters the graph.
-  IF NOT COALESCE(public.ob_corpus_on_ops_plane(NEW.metadata), false) THEN
+  IF NOT COALESCE(public.ob_corpus_on_ops_plane(NEW.exposure), false) THEN
     -- ...and if it was ON the plane a moment ago, its fingerprint LEAVES.
     DELETE FROM public.entity_extraction_queue WHERE thought_id = NEW.id;
     RETURN NEW;
@@ -1529,7 +1591,7 @@ BEGIN
   --     disproves it. `agent_memories_ops_plane` WITH CHECK is
   --         ob_memory_on_ops_plane(metadata) AND (thought_id IS NULL OR visible(thought_id))
   --     Against the all-NULL probe row the FIRST conjunct is false, so the whole arm is
-  --     false and this sweep passes it - while a real row with `metadata->>'exposure'='ops'`
+  --     false and this sweep passes it - while a real row with `exposure = 'ops'`
   --     and `thought_id` absent is PERMITTED. The all-NULL row tests the CONJUNCTION, and an
   --     absence hole lives in a DISJUNCT. This probe is a real test that found a real leak
   --     (section 2c); it is not a decision procedure, and (h2) below exists because it is
@@ -2008,6 +2070,84 @@ BEGIN
   RAISE NOTICE '=== ABSENCE OF A FINDING ABOVE IS NOT A PROOF OF THE PROPERTY. This file  ===';
   RAISE NOTICE '=== makes the policies deny by default; the sweeps are evidence that some  ===';
   RAISE NOTICE '=== named ways around them are closed, over a population that BALANCES.    ===';
+END $$;
+
+-- ==========================================================================================
+-- 9. THE RETIRED PREDICATES ARE UNREACHED - the completeness proof for H3's swap
+-- ==========================================================================================
+-- DFU C.9 H3 (operator 2026-08-31) made `exposure` a typed column and the SOURCE OF TRUTH.
+-- `metadata->>'exposure'` survives as a MIRROR, and the jsonb-argument predicates that read
+-- it survive with it, for one reason only: `revert-graph-plane-rls.sql` recreates a policy
+-- that calls `ob_memory_on_ops_plane(metadata)`, so dropping the function would break a
+-- revert path that already ships. A retained function nobody may call is a trap unless
+-- something CHECKS that nobody calls it - so this does.
+--
+-- IT IS TWO SWEEPS, BECAUSE POSTGRES RECORDS TWO KINDS OF CALLER AND ONLY ONE IS DECLARATIVE.
+--   (a) DECLARATIVE. Policy expressions, views, generated columns and constraints record a
+--       real pg_depend edge on the function. That set is enumerated exactly, and `DROP
+--       FUNCTION` would refuse while any of it existed.
+--   (b) OPAQUE. A plpgsql body is a STRING to the planner. `queue_entity_extraction()` in
+--       section 4 called this predicate for the whole of its life and Postgres recorded NO
+--       dependency for it - which is precisely why a `DROP FUNCTION` would NOT have caught
+--       that caller, and why this file sweeps bodies instead of relying on a drop.
+--
+-- The body sweep matches the call site WITH a jsonb-looking argument
+-- (`..._on_ops_plane( <anything containing metadata> )`) rather than the bare name, because
+-- the TEXT overloads share the name and section 4 legitimately calls one. It is still
+-- deliberately crude - a comment on the same line would flag - and that direction is correct
+-- for a boundary gate: a false RED costs a re-reading, a false GREEN costs the boundary.
+DO $$
+DECLARE
+  v_mem  regprocedure := to_regprocedure('public.ob_memory_on_ops_plane(jsonb)');
+  v_cor  regprocedure := to_regprocedure('public.ob_corpus_on_ops_plane(jsonb)');
+  v_bad  TEXT[];
+BEGIN
+  -- THE POSITIVE CONTROL FIRST, because a sweep that cannot fire is this effort's most
+  -- repeated defect: the two functions must actually EXIST, or both sweeps below are
+  -- searching for a needle somebody removed from the haystack and would pass vacuously.
+  IF v_mem IS NULL OR v_cor IS NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls section 9: the jsonb exposure predicate(s) are '
+                    'missing (memory=%, corpus=%). They are RETAINED as a matched pair for '
+                    'the revert path - revert-graph-plane-rls.sql recreates a policy calling '
+                    'one of them - and their absence also makes the sweeps below vacuous.',
+                    COALESCE(v_mem::text,'<absent>'), COALESCE(v_cor::text,'<absent>');
+  END IF;
+
+  -- (a) declarative callers
+  SELECT array_agg(DISTINCT d.classid::regclass::text || '#' || d.objid::text
+                   ORDER BY d.classid::regclass::text || '#' || d.objid::text)
+    INTO v_bad
+    FROM pg_depend d
+   WHERE d.refclassid = 'pg_proc'::regclass
+     AND d.refobjid IN (v_mem::oid, v_cor::oid)
+     AND d.deptype <> 'i'
+     AND NOT (d.classid = 'pg_proc'::regclass AND d.objid IN (v_mem::oid, v_cor::oid));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls section 9: % database object(s) still DEPEND on the '
+                    'RETIRED jsonb exposure predicates: %. The exposure COLUMN is the source '
+                    'of truth (DFU C.9 H3); metadata->>''exposure'' is a mirror and no trust '
+                    'decision may read it. Re-point them at the column.',
+                    array_length(v_bad, 1), array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (b) opaque callers - function bodies, which record no dependency at all
+  SELECT array_agg(pr.oid::regprocedure::text ORDER BY pr.oid::regprocedure::text)
+    INTO v_bad
+    FROM pg_proc pr
+   WHERE pr.pronamespace = 'public'::regnamespace
+     AND pr.oid NOT IN (v_mem::oid, v_cor::oid)
+     AND pr.prosrc ~ 'ob_(memory|corpus)_on_ops_plane\s*\(\s*[^)]*metadata';
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls section 9: function body/bodies % call an exposure '
+                    'predicate with a jsonb (metadata) argument. Postgres records no '
+                    'dependency for a plpgsql body, so a DROP FUNCTION would not have caught '
+                    'this. Re-point them at the exposure COLUMN (DFU C.9 H3).',
+                    array_to_string(v_bad, ', ');
+  END IF;
+
+  RAISE NOTICE 'init-graph-plane-rls section 9: the retired jsonb exposure predicates exist '
+               '(for the revert path) and NOTHING calls them - no pg_depend edge, no function '
+               'body. The exposure COLUMN is the only source of truth.';
 END $$;
 
 NOTIFY pgrst, 'reload schema';

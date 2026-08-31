@@ -126,12 +126,20 @@ Deno.test("the default recall exposure is the OPS plane only", () => {
   assertEquals(f.params.some((x) => Array.isArray(x) && x.length === 1 && x[0] === "ops"), true);
 });
 
-Deno.test("the SQL reads exposure out of metadata, defaulting to the SAFE end", () => {
-  // A row written before exposure shipped has no metadata.exposure. COALESCE makes it
-  // 'personal' - excluded by default - rather than NULL, which would drop out of `= ANY`
-  // for a reason nobody could see.
+Deno.test("the SQL reads exposure from the COLUMN, and not from the jsonb mirror", () => {
+  // BEFORE DFU C.9 H3 this read `COALESCE(am.metadata->>'exposure', 'personal')` - a jsonb
+  // key with a read-time default for the rows that had none. H3 made exposure a NOT NULL
+  // CHECKed COLUMN, so there is no absent value left to default: the filter reads the
+  // column, and reading the mirror instead would be a trust decision on a non-authoritative
+  // copy. BOTH halves are asserted, because a test that only checked the new spelling would
+  // pass on a statement that read both and let the mirror win.
   const f = buildRecallScopeFilter({ workspace_id: "w1" });
-  assertEquals(f.sql.includes("COALESCE(am.metadata->>'exposure', 'personal')"), true);
+  assertEquals(f.sql.includes("am.exposure = ANY("), true);
+  assertEquals(
+    f.sql.includes("metadata->>'exposure'"),
+    false,
+    "the recall filter still reads the retired jsonb mirror",
+  );
 });
 
 Deno.test("a superseded row is never recallable, whatever its review_status", () => {

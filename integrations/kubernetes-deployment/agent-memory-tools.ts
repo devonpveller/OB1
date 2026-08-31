@@ -205,7 +205,7 @@ export async function performReportUsage(
     // nobody can interpret, and the FK would take it silently as NULL on delete.
     const found = await client.queryObject(
       `SELECT workspace_id, project_id FROM agent_memories
-        WHERE id = $1 AND COALESCE(metadata->>'exposure', 'personal') = ANY($2)`,
+        WHERE id = $1 AND exposure = ANY($2)`,
       [memoryId, readExposure(deps)],
     );
     const row = found.rows[0] as { workspace_id: string; project_id: string | null } | undefined;
@@ -248,11 +248,11 @@ export async function performInspect(
       `SELECT id, workspace_id, project_id, summary, content, memory_type, visibility,
               review_status, lifecycle_status, provenance_status, confidence,
               can_use_as_evidence, can_use_as_instruction, requires_user_confirmation,
-              COALESCE(metadata->>'exposure', 'personal') AS exposure,
+              exposure,
               created_at, updated_at, last_confirmed_at
          FROM agent_memories
         WHERE id = $1
-          AND COALESCE(metadata->>'exposure', 'personal') = ANY($2)`,
+          AND exposure = ANY($2)`,
       [memoryId, readExposure(deps)],
     );
     if (!m.rows[0]) {
@@ -310,7 +310,7 @@ export async function performRecallTrace(
          FROM agent_memory_recall_items ri
          LEFT JOIN agent_memories am
                 ON am.id = ri.memory_id
-               AND COALESCE(am.metadata->>'exposure', 'personal') = ANY($2)
+               AND am.exposure = ANY($2)
         WHERE ri.trace_id = $1 ORDER BY ri.rank ASC`,
       [traceId, readExposure(deps)],
     );

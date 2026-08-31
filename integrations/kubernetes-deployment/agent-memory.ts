@@ -142,7 +142,9 @@ export function buildWritebackRow(
     requires_user_confirmation: WRITEBACK_DEFAULTS.requires_user_confirmation,
     idempotency_key: input.idempotency_key ?? null,
     exposure,
-    // metadata.exposure is the column the recall filter reads. Written from the STAMPED
+    // metadata.exposure is now only a MIRROR: the recall filter reads the exposure
+    // COLUMN (DFU C.9 H3). It is still written, in step with the column, so readers that
+    // already parse it keep working. Written from the STAMPED
     // value, never from `input.metadata`, so a caller cannot smuggle one in by supplying
     // its own metadata blob - the spread happens first and is then overwritten.
     metadata: { ...(input.metadata ?? {}), exposure },
@@ -259,8 +261,11 @@ export async function performWriteback(
     // can tell the difference.
     await client.queryObject("BEGIN");
     const thought = await client.queryObject(
-      `INSERT INTO thoughts (content, embedding, metadata)
-       VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
+      // `exposure` is a COLUMN and it is NOT NULL with no default (DFU C.9 H3, operator
+      // 2026-08-31). Omitting it here does not produce an unlabelled row that quietly
+      // vanishes from its plane - it produces a not_null_violation, which is the point.
+      `INSERT INTO thoughts (content, embedding, metadata, exposure)
+       VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id`,
       [
         row.content,
         `[${embedding.join(",")}]`,
@@ -274,25 +279,31 @@ export async function performWriteback(
           workspace_id: row.workspace_id,
           exposure: row.exposure,
         }),
+        row.exposure,
       ],
     );
     const thoughtId = (thought.rows[0] as { id: number }).id;
 
     const inserted = await client.queryObject(
+      // Same as the thought above: `exposure` is a NOT NULL column with no default, and
+      // `row.exposure` is the value stampExposure() forced from the door - not something
+      // the caller supplied. The mirror inside `row.metadata` is written from the same
+      // stamped value (agent-memory-policy.ts), so the two cannot disagree.
       `INSERT INTO agent_memories (
          thought_id, workspace_id, project_id, channel_kind, channel_id,
          summary, content, memory_type, visibility, review_status,
          lifecycle_status, provenance_status, can_use_as_evidence,
-         requires_user_confirmation, idempotency_key, content_hash, metadata
+         requires_user_confirmation, idempotency_key, content_hash, metadata, exposure
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-         agent_memory_hash_text($7), $16::jsonb
+         agent_memory_hash_text($7), $16::jsonb, $17::text
        ) RETURNING id`,
       [
         thoughtId, row.workspace_id, row.project_id, row.channel_kind, row.channel_id,
         row.summary, row.content, row.memory_type, row.visibility, row.review_status,
         row.lifecycle_status, row.provenance_status, row.can_use_as_evidence,
         row.requires_user_confirmation, row.idempotency_key, JSON.stringify(row.metadata),
+        row.exposure,
       ],
     );
     const memoryId = (inserted.rows[0] as { id: string }).id;
@@ -424,7 +435,7 @@ export async function performRecall(
       `SELECT * FROM (
         SELECT am.id, am.summary, am.content, am.memory_type, am.visibility,
               am.review_status, am.can_use_as_evidence, am.can_use_as_instruction,
-              COALESCE(am.metadata->>'exposure', 'personal') AS exposure,
+              am.exposure,
               am.requires_user_confirmation, am.created_at,
               1 - (t.embedding <=> $1::vector) AS similarity
          FROM agent_memories am

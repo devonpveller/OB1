@@ -1310,9 +1310,16 @@ async function writeDossierThought(sb, env, entity, wiki, sourceCounts, provenan
   } catch (rpcErr) {
     // Fallback: direct insert into thoughts. Embedding is required, included
     // in the insert payload so the dossier is immediately searchable.
+    //
+    // `exposure` is stated EXPLICITLY because it is a NOT NULL column with no default
+    // (DFU C.9 H3, operator 2026-08-31) - this path bypasses upsert_thought, which is
+    // where the corpus door's own stamp lives, so it has to carry the same value itself.
+    // 'ops': a wiki dossier is derived from ops-plane thoughts and is published to the
+    // wiki, which is the ops surface. Omitting it here would not produce an unlabelled
+    // dossier - it would produce a not_null_violation, which is the point.
     const inserted = await sb.post(
       "thoughts",
-      { content, metadata, embedding },
+      { content, metadata: { ...metadata, exposure: "ops" }, embedding, exposure: "ops" },
       { prefer: "return=representation" },
     );
     const row = Array.isArray(inserted) ? inserted[0] : inserted;

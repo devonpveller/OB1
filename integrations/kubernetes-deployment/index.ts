@@ -42,6 +42,21 @@ const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "openai/gpt-4o-mini";
 
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
+// THE PLANE THIS SERVER'S CORPUS WRITES LAND ON (PLAN §1.1; DFU C.9 H3, operator
+// 2026-08-31). `thoughts.exposure` is a NOT NULL column with NO DEFAULT, so every INSERT in
+// this file must state it - which is the write contract H3 exists to create. This door
+// writes the GENERAL CORPUS, and the general corpus is ops-plane content: that was decided
+// and executed by 190-init-agent-memory-corpus-failclosed.sql, which stamped all ~13,000
+// pre-boundary rows `ops` so they stayed readable. Stamping the same value here keeps new
+// rows on the same plane as the corpus they join.
+//
+// IT IS A DOOR CONSTANT, NOT A FALLBACK. §1.1 puts lane stamping at doors, not in writers,
+// precisely because a writer is the party that cannot be trusted to report its own plane.
+// The agent-memory lane has its own door value and its own demotion rule (stampExposure);
+// this is the corpus lane's. Changing this one line moves every future capture_thought /
+// capture_idea / update_idea row, and nothing else.
+const CORPUS_EXPOSURE = "ops";
+
 // BigInt JSON safety: the postgres driver returns int8 columns (e.g. thoughts.id)
 // as BigInt, which JSON.stringify cannot serialize ("Do not know how to serialize
 // a BigInt") — this previously broke the `search`/`fetch` tools. All numbers in
@@ -866,9 +881,9 @@ server.registerTool(
       const client = await pool.connect();
       try {
         await client.queryObject(
-          `INSERT INTO thoughts (content, embedding, metadata)
-           VALUES ($1, $2::vector, $3::jsonb)`,
-          [content, embStr, JSON.stringify(meta)]
+          `INSERT INTO thoughts (content, embedding, metadata, exposure)
+           VALUES ($1, $2::vector, $3::jsonb, $4::text)`,
+          [content, embStr, JSON.stringify({ ...meta, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE]
         );
       } finally {
         client.release();
@@ -964,9 +979,9 @@ server.registerTool(
           );
           ideaId = ins.rows[0].id;
           const th = await client.queryObject<{ id: bigint }>(
-            `INSERT INTO thoughts (content, embedding, metadata)
-             VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
-            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id: ideaId })],
+            `INSERT INTO thoughts (content, embedding, metadata, exposure)
+             VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id`,
+            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id: ideaId, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE],
           );
           await client.queryArray(
             `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)
@@ -1034,9 +1049,9 @@ server.registerTool(
         await client.queryArray("BEGIN");
         try {
           const th = await client.queryObject<{ id: bigint }>(
-            `INSERT INTO thoughts (content, embedding, metadata)
-             VALUES ($1, $2::vector, $3::jsonb) RETURNING id`,
-            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id, revision: newRev })],
+            `INSERT INTO thoughts (content, embedding, metadata, exposure)
+             VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id`,
+            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id, revision: newRev, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE],
           );
           await client.queryArray(
             `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)

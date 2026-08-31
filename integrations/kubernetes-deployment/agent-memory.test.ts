@@ -292,12 +292,20 @@ Deno.test("SEAM: performWriteback THREADS THE DOOR - not just buildWritebackRow"
 
   await performWriteback(deps, { ...INPUT, project_id: "p1" });
 
+  // THE COLUMN AND THE MIRROR ARE BOTH ASSERTED, and the column is asserted FIRST because
+  // it is the source of truth since DFU C.9 H3 - the last parameter of both INSERTs is now
+  // the `exposure` column, and the jsonb metadata is the one before it. A test that read
+  // only the mirror would pass on a statement that wrote the mirror and left the column
+  // NULL, which the database would then reject at runtime rather than here.
   const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"))!;
-  const metadata = JSON.parse(String(insert[insert.length - 1]));
-  assertEquals(metadata.exposure, "ops", "the door's plane must reach the inserted row");
+  assertEquals(String(insert[0]).includes("exposure"), true, "the INSERT names the column");
+  assertEquals(insert[insert.length - 1], "ops", "the door's plane must reach the COLUMN");
+  const metadata = JSON.parse(String(insert[insert.length - 2]));
+  assertEquals(metadata.exposure, "ops", "the door's plane must reach the mirror too");
 
-  // And the thought carries the mirror, or another lane could read what this one hides.
+  // And the thought carries both, or another lane could read what this one hides.
   const thought = seen.find((r) => String(r[0]).includes("INSERT INTO thoughts"))!;
+  assertEquals(thought[thought.length - 1], "ops", "the thought's COLUMN carries the plane");
   assertEquals(JSON.parse(String(thought[3])).exposure, "ops");
 });
 
@@ -321,7 +329,8 @@ Deno.test("SEAM: a tainted write is demoted at the call site too", async () => {
 
   await performWriteback(deps, { ...INPUT, project_id: "p1", tainted: true });
   const insert = seen.find((r) => String(r[0]).includes("INSERT INTO agent_memories"))!;
-  assertEquals(JSON.parse(String(insert[insert.length - 1])).exposure, "personal");
+  assertEquals(insert[insert.length - 1], "personal", "the demotion must reach the COLUMN");
+  assertEquals(JSON.parse(String(insert[insert.length - 2])).exposure, "personal");
 });
 
 Deno.test("SEAM: recall USES buildRecallScopeFilter, it does not restate it", async () => {

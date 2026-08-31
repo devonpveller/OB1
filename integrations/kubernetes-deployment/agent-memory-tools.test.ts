@@ -150,7 +150,8 @@ Deno.test("inspect surfaces the exposure plane", async () => {
   const p = pool((sql) => (sql.includes("FROM agent_memories") ? [{ id: "m-1" }] : []));
   await performInspect(p.deps, { memory_id: "m-1" });
   const sel = p.seen.find((s) => s.includes("FROM agent_memories"))!;
-  assertEquals(sel.includes("metadata->>'exposure'"), true);
+  assertEquals(sel.includes("exposure"), true);
+  assertEquals(sel.includes("metadata->>'exposure'"), false, "reads the retired jsonb mirror");
 });
 
 Deno.test("inspect refuses an unknown memory", async () => {
@@ -260,7 +261,8 @@ Deno.test("inspect FILTERS on the door's exposure plane", async () => {
   const p = planePool((sql) => (sql.includes("FROM agent_memories") ? [{ id: "m-1" }] : []));
   await performInspect(p.deps as never, { memory_id: "m-1" });
   const sel = p.seen.find(([s]) => s.includes("FROM agent_memories\n"))!;
-  assertEquals(sel[0].includes("metadata->>'exposure'"), true, "no exposure clause on inspect");
+  assertEquals(sel[0].includes("exposure = ANY"), true, "no exposure clause on inspect");
+  assertEquals(sel[0].includes("metadata->>'exposure'"), false, "reads the retired jsonb mirror");
   assertEquals((sel[1] as unknown[])[1], ["ops"], "the door's plane must be a parameter");
 });
 
@@ -269,7 +271,7 @@ Deno.test("inspect of an OFF-PLANE memory is not_found AND leaves an audit row",
   // confirms the memory to anyone who can guess an id. The caller cannot tell the two
   // apart - which is exactly why the audit row is required rather than optional.
   const p = planePool((sql) => {
-    if (sql.includes("AND COALESCE(metadata->>'exposure'")) return [];   // off-plane
+    if (sql.includes("AND exposure = ANY(")) return [];   // off-plane
     if (sql.includes("SELECT 1 FROM agent_memories")) return [{ "?column?": 1 }]; // exists
     return [];
   });
@@ -294,7 +296,8 @@ Deno.test("recall_trace's items are bounded by the plane too", async () => {
   );
   await performRecallTrace(p.deps as never, { trace_id: "t-1" });
   const items = p.seen.find(([s]) => s.includes("agent_memory_recall_items"))!;
-  assertEquals(items[0].includes("metadata->>'exposure'"), true);
+  assertEquals(items[0].includes("am.exposure = ANY("), true);
+  assertEquals(items[0].includes("metadata->>'exposure'"), false, "reads the retired jsonb mirror");
   assertEquals((items[1] as unknown[])[1], ["ops"]);
 });
 
@@ -303,7 +306,8 @@ Deno.test("report_usage cannot confirm an off-plane memory exists", async () => 
   const out = await performReportUsage(p.deps as never, { memory_id: "m-1", used: true });
   assertEquals(out.ok, false);
   const sel = p.seen.find(([s]) => s.includes("SELECT workspace_id"))!;
-  assertEquals(sel[0].includes("metadata->>'exposure'"), true);
+  assertEquals(sel[0].includes("exposure = ANY("), true);
+  assertEquals(sel[0].includes("metadata->>'exposure'"), false, "reads the retired jsonb mirror");
 });
 
 Deno.test("a door with no configured plane defaults to ops, never to everything", async () => {

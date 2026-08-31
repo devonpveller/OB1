@@ -84,6 +84,13 @@ UPDATE public.thoughts
 --     content_fingerprint without needing a UNIQUE constraint.
 --     Signature matches the script callers: (p_content, p_payload)
 --     where p_payload may carry {"metadata": {...}}.
+--
+--     REDEFINED LATER IN THE CHAIN by 195-init-agent-memory-exposure-column.sql, which
+--     makes it stamp `thoughts.exposure` (DFU C.9 H3). The body below is the pre-H3 one
+--     and is what a database WITHOUT 195 runs; it supplies no exposure, which is correct
+--     there because the column does not exist yet. Do not "fix" it here - 040 runs long
+--     before the column is created, and the two-place invariant is satisfied by 195
+--     owning the H3 body in ONE file rather than by this one guessing.
 -- ============================================================
 CREATE OR REPLACE FUNCTION public.upsert_thought(
   p_content TEXT,

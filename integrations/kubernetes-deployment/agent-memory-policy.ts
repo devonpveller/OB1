@@ -158,7 +158,7 @@ export interface RecallableRow {
   visibility: Visibility;
   review_status: ReviewStatus;
   lifecycle_status: string;
-  /** §1.1. Stored in agent_memories.metadata->>'exposure'. */
+  /** §1.1. The `agent_memories.exposure` COLUMN (NOT NULL, CHECKed) since DFU C.9 H3. */
   exposure: Exposure;
 }
 
@@ -246,15 +246,16 @@ export function buildRecallScopeFilter(scope: RecallScope, startIndex = 1): SqlF
   clauses.push(`am.visibility = ANY($${i++})`);
   params.push(visibility);
 
-  // §1.1 exposure gate. Lives in metadata (JSONB) because the schema is vendored verbatim
-  // from upstream and must stay diffable against it; the plan puts exposure there for the
-  // same reason. COALESCE so a row written before this shipped reads as 'personal' - the
-  // safe end - rather than as SQL NULL, which `= ANY` would silently drop either way but
-  // which would also make the predicate and this filter disagree about why.
+  // §1.1 exposure gate, reading the TYPED COLUMN (DFU C.9 H3, operator 2026-08-31). It
+  // used to read `COALESCE(am.metadata->>'exposure', 'personal')`: a jsonb key with a
+  // read-time default, which is the shape H3 replaced. The column is NOT NULL and
+  // CHECKed IN ('ops','personal'), so there is no absent value to default and no
+  // misspelled one to coalesce - `= ANY` is now total. metadata->>'exposure' survives as a
+  // non-authoritative mirror and nothing here reads it.
   const exposure = scope.exposure && scope.exposure.length
     ? [...scope.exposure]
     : [...DEFAULT_RECALL_EXPOSURES];
-  clauses.push(`COALESCE(am.metadata->>'exposure', 'personal') = ANY($${i++})`);
+  clauses.push(`am.exposure = ANY($${i++})`);
   params.push(exposure);
 
   clauses.push(`am.lifecycle_status = 'active'`);

@@ -98,8 +98,7 @@ export async function performReview(
     await client.queryObject("BEGIN");
 
     const found = await client.queryObject(
-      `SELECT review_status, lifecycle_status, provenance_status,
-              COALESCE(metadata->>'exposure', 'personal') AS exposure
+      `SELECT review_status, lifecycle_status, provenance_status, exposure
          FROM agent_memories WHERE id = $1 FOR UPDATE`,
       [memoryId],
     );
@@ -143,10 +142,17 @@ export async function performReview(
       args.push(plan.provenance_status);
       if (plan.provenance_status === "user_confirmed") sets.push("last_confirmed_at = now()");
     }
-    // §1.1: exposure lives in metadata, so a change is a jsonb merge rather than a column
-    // assignment. jsonb_build_object, never a JSON literal - a literal would also have to
-    // survive whatever quoting the caller's transport applies.
+    // §1.1 + DFU C.9 H3: exposure is a TYPED COLUMN and the source of truth, and
+    // metadata.exposure is a mirror. BOTH move, in ONE statement, off ONE parameter -
+    // note both `sets` entries are built before the single `args.push`, so they share an
+    // index. Writing only the mirror would leave the row on its old plane while every
+    // reader reported the new one; writing only the column would leave a stale mirror that
+    // some later reader parses. The database refuses a malformed value here (the CHECK),
+    // so `promote_exposure` cannot invent a third plane.
+    // jsonb_build_object, never a JSON literal - a literal would also have to survive
+    // whatever quoting the caller's transport applies.
     if (plan.exposure) {
+      sets.push(`exposure = $${args.length + 1}::text`);
       sets.push(
         `metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('exposure', $${args.length + 1}::text)`,
       );
@@ -158,7 +164,7 @@ export async function performReview(
     const updated = await client.queryObject(
       `UPDATE agent_memories SET ${sets.join(", ")} WHERE id = $1
        RETURNING review_status, lifecycle_status, provenance_status, workspace_id, project_id,
-                 COALESCE(metadata->>'exposure', 'personal') AS exposure`,
+                 exposure`,
       args,
     );
     const after = updated.rows[0] as {
@@ -275,7 +281,7 @@ export async function listForReview(
   const doorExposure = (deps as { doorExposure?: string }).doorExposure;
   args.push(doorExposure ? [doorExposure] : ["ops"]);
   let where = `review_status = ANY($1)
-        AND COALESCE(metadata->>'exposure', 'personal') = ANY($${args.length})`;
+        AND exposure = ANY($${args.length})`;
   if (typeof input.workspace_id === "string" && input.workspace_id.trim()) {
     args.push(input.workspace_id.trim());
     where += ` AND workspace_id = $${args.length}`;

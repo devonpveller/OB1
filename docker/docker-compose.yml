@@ -82,6 +82,7 @@ services:
       # ai-stack - a migration that reaches only one of the two places is not deployed.
       - ./init-agent-memory-rls.sql:/docker-entrypoint-initdb.d/180-init-agent-memory-rls.sql:ro
       - ./init-agent-memory-corpus-failclosed.sql:/docker-entrypoint-initdb.d/190-init-agent-memory-corpus-failclosed.sql:ro
+      - ./init-agent-memory-exposure-column.sql:/docker-entrypoint-initdb.d/195-init-agent-memory-exposure-column.sql:ro # DFU C.9 H3
       - ./init-graph-plane-rls.sql:/docker-entrypoint-initdb.d/200-init-graph-plane-rls.sql:ro
     networks:
       - obnet
