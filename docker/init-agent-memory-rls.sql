@@ -68,8 +68,9 @@
 -- ------------------------------------------------------------------------------------------
 -- ADDITIVE AND REVERSIBLE
 -- ------------------------------------------------------------------------------------------
--- Adds two columns, five indexes, six functions, one role, two views; replaces policies with
--- narrower ones of the same shape; sets FORCE ROW LEVEL SECURITY; revokes TRUNCATE. It DROPS
+-- Adds two columns, five indexes, five functions, one role and two views; replaces the seven
+-- wide `USING (true)` policies with ten narrower ones of the same shape; sets FORCE ROW LEVEL
+-- SECURITY on nine tables; revokes TRUNCATE/REFERENCES/TRIGGER from the read path. It DROPS
 -- NOTHING that holds data - no table, no column, no row.
 -- REVERT: revert-agent-memory-rls.sql beside this file restores the previous
 -- USING (true) policies, clears FORCE, disables RLS on thoughts and re-grants TRUNCATE. The
@@ -347,8 +348,8 @@ FROM service_role;
 -- There is a RED proof of exactly this in scripts/checks/prove-agent-memory-rls.ps1.
 --
 -- NAMED `v_` AND NOT `_v`, because the offline harness counts the plane's tables with
--- `information_schema.tables WHERE table_name LIKE 'agent_memor%'` and a VIEW is a row in
--- that view. `agent_memories_v` turned `agent_memory_tables(8)` into 9 and failed the
+-- `information_schema.tables WHERE table_name LIKE 'agent_memor%'` and a VIEW is a row in it.
+-- `agent_memories_v` turned `agent_memory_tables(8)` into 9 and failed the
 -- fresh-volume check - measured, not guessed.
 DROP VIEW IF EXISTS public.v_agent_memories;
 DROP VIEW IF EXISTS public.v_thoughts;

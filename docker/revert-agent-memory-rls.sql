@@ -12,7 +12,7 @@
 -- off, and re-grants what section 8 revoked.
 --
 -- WHAT IT DELIBERATELY DOES NOT UNDO: the two added columns (agent_memories.user_id,
--- thoughts.user_id), their indexes, the six predicate functions, the two views and the
+-- thoughts.user_id), their indexes, the five predicate functions, the two views and the
 -- ob_plane_personal role. Dropping a column is not reversible and this file is the REVERSIBLE
 -- half; with the policies wide again all of it is inert. Drop them by hand only if you have
 -- decided the tenancy axis is going away for good.
