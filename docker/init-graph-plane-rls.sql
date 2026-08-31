@@ -47,6 +47,38 @@
 -- does not say they are.
 --
 -- ==========================================================================================
+-- THE ROOT CLASS THIS FILE IS NOW BUILT AROUND: ABSENCE MUST DENY
+-- ==========================================================================================
+-- Three separate leaks were found in the second version of this file and they were one
+-- defect written three ways. Every one of them was a policy arm that PERMITTED when the
+-- row's plane could not be established:
+--
+--   * `idea_revisions`: `(thought_id IS NULL OR ob_thought_visible(thought_id))`. Omit the
+--     column and the NULL arm passes, so RLS never refuses - and the primary key
+--     `(idea_id, revision)`, which no policy binds, answers instead. Section 2.
+--   * `agent_memory_audit_events`: the same shape twice, armed by `ON DELETE SET NULL`. Fix
+--     the policy and it holds only while the parent is alive; delete the memory and the
+--     audit row orphans to `(NULL, NULL)` and becomes readable, carrying its payload free
+--     text with it. Section 2b.
+--   * `agent_memory_recall_traces`: `WITH CHECK (true)`, which is the same hole written
+--     shorter, and which nobody had read as an absence arm. Section 2c. It was not found by
+--     reading the schema; it was found by asserting the property. Section 7(h).
+--
+-- ROUND 1 SWEPT TABLES. ROUND 2 SWEPT RELKINDS. THE LEAKS CAME FROM MECHANISMS: unique
+-- indexes, foreign-key triggers, `ON DELETE SET NULL`, and transitive dependency. A reviewer
+-- put it exactly: enumerating WHAT to protect will always trail the mechanisms; defaulting to
+-- deny does not. So this version states the rule and asserts it:
+--
+--   A ROW WHOSE PLANE CANNOT BE ESTABLISHED IS NOT VISIBLE AND IS NOT WRITABLE,
+--   AND NO RELATION REACHES A GOVERNED ONE AROUND THE BOUNDARY.
+--
+-- and section 7 stops re-deriving a LIST of the state and asserts the PROPERTIES instead:
+-- (h) no policy arm permits a row whose every column is NULL; (i) no unique constraint on a
+-- governed relation is an existence oracle; (j) no foreign key into a governed parent is
+-- unguarded by WITH CHECK; (k) the SECURITY DEFINER set is exactly the classified one;
+-- (l) nothing reaches a FORCE-RLS table transitively without being bound by it.
+--
+-- ==========================================================================================
 -- THE TARGET SET IS DERIVED FROM THE SCHEMA, AND AN UNCLASSIFIED TABLE IS A FAILURE
 -- ==========================================================================================
 -- A hand-written list is a list with a spell-checker - this effort's own ruling, and it has
@@ -407,66 +439,137 @@ CREATE POLICY thought_edges_plane ON public.thought_edges
   USING      (public.ob_thought_visible(from_thought_id) AND public.ob_thought_visible(to_thought_id))
   WITH CHECK (public.ob_thought_visible(from_thought_id) AND public.ob_thought_visible(to_thought_id));
 
--- --- idea_revisions: ON NOBODY'S LIST. `thought_id BIGINT REFERENCES thoughts(id) ON DELETE
---     SET NULL`, plus `summary TEXT NOT NULL` (real content, not a hash) and `content_hash
---     TEXT` (the same fingerprint shape as the queue's).
---     The NULL arm is a FOREIGN KEY being absent, not a LABEL being absent: a revision with
---     no thought_id is not derived from the corpus and there is nothing to hide. That is a
---     different thing from "unlabelled defaults to fine", and the distinction is why this
---     predicate is allowed a NULL arm and `ob_corpus_on_ops_plane` is not.
+-- --- idea_revisions: ON NOBODY'S LIST, and the NULL arm here was AN UNAUTHENTICATED
+--     EXISTENCE ORACLE. `thought_id BIGINT REFERENCES thoughts(id) ON DELETE SET NULL`, plus
+--     `summary TEXT NOT NULL` (real content, not a hash) and `content_hash TEXT`.
+--
+--     WHAT THE FIRST VERSION SAID, AND WHY IT WAS WRONG. It said: "the NULL arm is a FOREIGN
+--     KEY being absent, not a LABEL being absent - a revision with no thought_id is not
+--     derived from the corpus and there is nothing to hide." Both halves fail.
+--
+--     (1) OMIT the column and the NULL arm passes WITH CHECK, so RLS never refuses - and the
+--         PRIMARY KEY `(idea_id, revision)`, which no policy binds, answers instead.
+--         `ideas` is ungoverned BY DESIGN (section 0 registers it as a separate corpus), so
+--         a caller gets the ids for free from GET /ideas. Measured as `service_role` on a
+--         throwaway built from the 28-file chain, with an ops control on BOTH arms:
+--
+--           INSERT (personal idea, revision 1)  -> 23505 duplicate key   (a revision EXISTS)
+--           INSERT (personal idea, revision 99) -> OK                    (none)
+--           INSERT (ops idea,      revision 1)  -> 23505 duplicate key   [CONTROL]
+--           INSERT (ops idea,      revision 98) -> OK                    [CONTROL]
+--
+--         while the READ side of the same table correctly returned 0 personal / 1 ops. The
+--         policy was doing its job and the unique index was undoing it.
+--
+--     (2) "A revision with no thought_id is not derived from the corpus" is not something
+--         this schema can tell you. The foreign key is `ON DELETE SET NULL`: delete the
+--         thought and a revision that WAS derived from it orphans to `thought_id IS NULL` -
+--         and its `summary`, which is the content, becomes readable. Absence does not mean
+--         "never had one". It means "cannot be established".
+--
+--     THE FIX IS THE PROPERTY, NOT THE INSTANCE: a row whose plane cannot be established is
+--     not visible and not writable. `thought_id IS NOT NULL AND ob_thought_visible(...)` in
+--     BOTH halves of BOTH policies. WITH CHECK now refuses an INSERT that omits the column,
+--     at 42501, BEFORE the primary key is consulted - which is what makes the two answers
+--     one answer. Section 7(h) asserts this as a property over every governed policy rather
+--     than trusting this one line.
+--
+--     OPS IMPACT, MEASURED BEFORE THE CHANGE: all 37 live `idea_revisions` rows carry a
+--     `thought_id` (0 NULL), so no row that is readable today becomes unreadable. The write
+--     path is `openbrain-idea-refinery`, which connects as `postgres` - DB_USER is unset in
+--     its container, and the code defaults to `postgres` (integrations/openbrain-idea-refinery
+--     /index.ts:39) - so it is a superuser and no policy here binds it.
 DROP POLICY IF EXISTS idea_revisions_service_role_all     ON public.idea_revisions;
 DROP POLICY IF EXISTS idea_revisions_authenticated_select ON public.idea_revisions;
 
 CREATE POLICY idea_revisions_plane ON public.idea_revisions
   AS PERMISSIVE FOR ALL TO service_role
-  USING      (thought_id IS NULL OR public.ob_thought_visible(thought_id))
-  WITH CHECK (thought_id IS NULL OR public.ob_thought_visible(thought_id));
+  USING      (thought_id IS NOT NULL AND public.ob_thought_visible(thought_id))
+  WITH CHECK (thought_id IS NOT NULL AND public.ob_thought_visible(thought_id));
 
 CREATE POLICY idea_revisions_plane_read ON public.idea_revisions
   AS PERMISSIVE FOR SELECT TO authenticated
-  USING (thought_id IS NULL OR public.ob_thought_visible(thought_id));
+  USING (thought_id IS NOT NULL AND public.ob_thought_visible(thought_id));
 
 -- ==========================================================================================
--- 2b. THE 180 TABLE THIS FILE HAS TO FINISH, AND THE FK ORACLE BESIDE IT
+-- 2b. THE 180 TABLE THIS FILE HAS TO FINISH - AND IT CLOSES, IT DOES NOT NARROW
 -- ==========================================================================================
 -- `agent_memory_audit_events` is a CLOSURE MEMBER (it carries `memory_id REFERENCES
 -- agent_memories(id)`), it was classified as "already governed", and it was not. See section
--- 0a for the measurement and for what is and is not disclosed.
+-- 0a for the measurement of what it disclosed.
 --
--- WHY PARENT VISIBILITY IS THE RIGHT PREDICATE HERE. An audit row's whole purpose is to name
--- a memory and say what happened to it, so its existence IS the memory's existence - the same
--- reasoning tier A applies to `thought_entities`. Both foreign keys get the treatment,
--- because `trace_id` names a recall trace which carries the caller's QUERY TEXT.
+-- ROUND 2 GAVE IT PARENT VISIBILITY WITH TWO NULL ARMS, AND THAT WAS THE SAME DEFECT AGAIN.
+-- The policy was `(memory_id IS NULL OR ob_memory_visible(memory_id)) AND (trace_id IS NULL
+-- OR EXISTS(...))`, defended on the grounds that "a row whose parent has been deleted has
+-- nothing left to protect" and that "12 of the 67 live audit rows have never had a memory_id
+-- at all". BOTH CLAIMS WERE WRONG, and the second was mis-measured:
 --
--- THE NULL ARMS ARE FOREIGN KEYS BEING ABSENT, NOT LABELS BEING ABSENT - the distinction
--- section 2 draws for `idea_revisions`, and it is load-bearing twice over here. Both FKs are
--- `ON DELETE SET NULL`, so a row whose parent has been deleted has nothing left to protect;
--- and 12 of the 67 live audit rows have never had a `memory_id` at all.
+--   * At the same snapshot 21 of the rows have a NULL `memory_id`, not 12 - and their
+--     `event_type` values are `memory_written` (12), `memory_confirmed` (5) and `memory_used`
+--     (4), every one of which NAMES a memory by definition. They are ORPHANS, not rows that
+--     never had a parent. Both foreign keys are `ON DELETE SET NULL`.
+--   * The orphan still carries `payload`, which is operator free text - one live row reads
+--     `{"note": "synthetic fixture, confirmed to prove the review gate"}` - plus the event
+--     history and the timestamps that section 0a names as the disclosure.
 --
--- THIS DOES NOT BREAK THE REFUSAL RECORD, and that was checked rather than assumed, because
--- an `access_refused` audit necessarily names a memory the REFUSED caller cannot see. It
--- survives because the writer is not that caller: openbrain-mcp connects with
--- `DB_USER=postgres` (verified on the live container), a superuser, and RLS does not bind a
--- superuser with or without FORCE. What this policy binds is the PostgREST/service_role
--- surface - the unauthenticated obnet door - which never writes refusal audits and has no
--- business reading them.
+--   Measured on the throwaway, service_role, with an ops control on both phases:
+--     PHASE 1, live parent:  personal 0 / ops 1     <- the round 2 policy working
+--     RESET ROLE; DELETE FROM agent_memories WHERE summary = 'U5G3-MEM-PERSONAL';
+--     PHASE 2, orphaned:     personal 1 / ops 1     <- LEAK, laundered by ON DELETE SET NULL
+--
+-- SO THIS TABLE IS CLOSED TO THE UNAUTHENTICATED DOOR, not narrowed. `USING (false)` is the
+-- honest predicate here, and it is arrived at rather than assumed:
+--
+--   * NOTHING DEPLOYED READS IT THROUGH THAT DOOR. `authenticated` holds no grant on it at
+--     all (measured). The only code in this repo that reads or writes it over PostgREST is
+--     `integrations/agent-memory-api/index.ts`, a Supabase Edge Function that appears in NO
+--     compose file in either repository - it is not deployed here.
+--   * THE DRILL EVIDENCE SURVIVES. 180 left this table wide to keep the `access_refused`
+--     rows readable as proof that a refusal happened. Both readers of that evidence -
+--     `scripts/checks/smoke-agent-memory.ps1` and `scripts/checks/dfu-done.ps1` - reach it
+--     with `docker exec ... psql`, as `postgres`, a superuser no policy binds. The reason 180
+--     gave for the wide policy is not a reason that involves this door.
+--   * THE WRITER IS A SUPERUSER TOO: `openbrain-mcp` runs `DB_USER=postgres`, verified on the
+--     live container.
+--
+-- A closed policy also ends the whole class here rather than one arm of it: with no row
+-- visible and no write privilege (section 6), the NULL arms, the primary key and both
+-- foreign-key triggers all stop being reachable at once. That is the difference between
+-- fixing an instance and removing a mechanism.
 DROP POLICY IF EXISTS agent_memory_audit_events_service_role_all ON public.agent_memory_audit_events;
 DROP POLICY IF EXISTS agent_memory_audit_events_plane            ON public.agent_memory_audit_events;
 DROP POLICY IF EXISTS agent_memory_audit_events_plane_read       ON public.agent_memory_audit_events;
+DROP POLICY IF EXISTS agent_memory_audit_events_closed           ON public.agent_memory_audit_events;
 
-CREATE POLICY agent_memory_audit_events_plane ON public.agent_memory_audit_events
+CREATE POLICY agent_memory_audit_events_closed ON public.agent_memory_audit_events
   AS PERMISSIVE FOR ALL TO service_role
-  USING      ((memory_id IS NULL OR public.ob_memory_visible(memory_id))
-              AND (trace_id IS NULL OR EXISTS (
-                     SELECT 1 FROM public.agent_memory_recall_traces t WHERE t.id = trace_id)))
-  WITH CHECK ((memory_id IS NULL OR public.ob_memory_visible(memory_id))
-              AND (trace_id IS NULL OR EXISTS (
-                     SELECT 1 FROM public.agent_memory_recall_traces t WHERE t.id = trace_id)));
+  USING (false) WITH CHECK (false);
 
--- The trace arm is an EXISTS against the table itself rather than a call to
--- ob_trace_on_ops_plane(), for the same reason ob_thought_visible is SECURITY INVOKER: the
--- inner SELECT is itself bound by `agent_memory_recall_traces`' own policies, so the corpus
--- rule has ONE definition and this file does not restate it.
+COMMENT ON POLICY agent_memory_audit_events_closed ON public.agent_memory_audit_events IS
+  'DELIBERATELY CLOSED. The audit trail is written and read by superuser connections (openbrain-mcp as postgres; the drill checks via docker exec psql). No deployed component reaches it through PostgREST, so the unauthenticated service_role door gets no row rather than a predicate with NULL arms an ON DELETE SET NULL can launder. See init-graph-plane-rls.sql section 2b.';
+
+-- ==========================================================================================
+-- 2c. THE SAME ABSENCE, ONE TABLE OVER: agent_memory_recall_traces
+-- ==========================================================================================
+-- Found by writing section 7(h) rather than by reading the schema, which is the point of an
+-- assertion that tests a PROPERTY. 180 gives this table
+-- `USING (ob_trace_on_ops_plane(request_payload)) WITH CHECK (true)`, with the comment
+-- "WITH CHECK stays open so that writing a trace never fails". An open WITH CHECK is an arm
+-- that permits unconditionally - absence included - and a trace carries the QUERY TEXT of a
+-- recall. Combined with the unique `request_id`, a caller could write a trace naming any
+-- request_id and read back from 23505 whether a hidden one already had it.
+--
+-- WITH CHECK is narrowed to the USING predicate. `ob_trace_on_ops_plane(NULL)` is FALSE (it
+-- COALESCEs a missing `enforced_exposure` to `["personal"]`), so absence denies here without
+-- a further arm. The write it "must not fail" is not through this door: every deployed writer
+-- of a recall trace is `openbrain-mcp` as `postgres`, and section 6 withdraws the door's write
+-- privilege on the corpus anyway.
+DROP POLICY IF EXISTS agent_memory_recall_traces_plane ON public.agent_memory_recall_traces;
+
+CREATE POLICY agent_memory_recall_traces_plane ON public.agent_memory_recall_traces
+  AS PERMISSIVE FOR ALL TO service_role
+  USING      (public.ob_trace_on_ops_plane(request_payload))
+  WITH CHECK (public.ob_trace_on_ops_plane(request_payload));
 
 -- --- R3: THE REFERENTIAL-INTEGRITY EXISTENCE ORACLE ON agent_memories.
 -- Postgres checks a FOREIGN KEY with an internal trigger that RLS does not bind, and it runs
@@ -825,6 +928,130 @@ REVOKE TRUNCATE, REFERENCES, TRIGGER ON TABLE
 FROM authenticated;
 
 -- ==========================================================================================
+-- 6a. THE WRITE DOOR CLOSES ON WHAT NOTHING WRITES THROUGH IT
+-- ==========================================================================================
+-- A POLICY IS NOT THE ONLY THING A WRITER CONSULTS. Postgres checks unique indexes and
+-- foreign keys with internal machinery that RLS does not bind, and it checks them AFTER
+-- WITH CHECK has passed. Section 7(i) and 7(j) assert that as a property; this section is
+-- what makes it hold, and it holds by DEFAULT-DENY rather than by enumerating oracles:
+-- a caller that cannot write a table cannot provoke any constraint on it.
+--
+-- WHO ACTUALLY WRITES, MEASURED, not assumed:
+--   * The agent-memory corpus is written by `openbrain-mcp`, which connects as `postgres`
+--     (verified on the live container; rolsuper = t). Nothing in either repository writes it
+--     through PostgREST except `integrations/agent-memory-api/index.ts`, which is a Supabase
+--     Edge Function present in no compose file here.
+--   * `idea_revisions` is written by `openbrain-idea-refinery`, also as `postgres` (DB_USER
+--     unset in the container; the code defaults to it).
+--   * The tables that DO need a service_role write - `thought_entities`,
+--     `entity_extraction_queue`, `thought_edges`, `entities` - keep every privilege they had.
+--     The entity-extraction worker reaches them through PostgREST, and
+--     `recipes/typed-edge-classifier/classify-edges.mjs` calls `thought_edges_upsert` (now
+--     SECURITY INVOKER) as service_role.
+--
+-- SELECT IS UNTOUCHED EVERYWHERE. This withdraws INSERT/UPDATE/DELETE only, and only from
+-- `service_role` and `authenticated`; revert-graph-plane-rls.sql re-grants them verbatim.
+DO $$
+DECLARE
+  v_corpus TEXT[];
+  v_t      TEXT;
+BEGIN
+  -- THE CORPUS IS DERIVED, not listed: `agent_memories`, every table with a FOREIGN KEY into
+  -- it, and every GOVERNED parent of one of those children - which is how
+  -- `agent_memory_recall_traces` joins the set, being a parent and never a child, the same
+  -- blind spot section 0's referenced-by arm exists for. Add a sidecar tomorrow and it is
+  -- closed on the next replay without anybody remembering to add it here.
+  SELECT array_agg(DISTINCT t ORDER BY t) INTO v_corpus FROM (
+    SELECT 'agent_memories'::text AS t
+    UNION
+    -- Children of agent_memories - EXCEPT any that is also part of the thought-derived graph.
+    -- That exclusion is load-bearing and it was written after breaking things: while testing,
+    -- a probe added a `uuid REFERENCES agent_memories(id)` column to `thought_entities`, which
+    -- made it a child, and the loop below then stripped INSERT/UPDATE/DELETE from
+    -- `thought_entities` AND from `thoughts` (reached by the parent arm) - the ingestion path
+    -- and the entity worker, silently, on the next apply. A table that carries a foreign key
+    -- into `thoughts` belongs to the corpus sections 2 and 3 govern, which HAS a live
+    -- service_role write path, and this section must not walk into it.
+    SELECT c.conrelid::regclass::text
+      FROM pg_constraint c
+     WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace
+       AND c.confrelid = 'public.agent_memories'::regclass
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint g
+                        WHERE g.contype = 'f' AND g.connamespace = 'public'::regnamespace
+                          AND g.conrelid = c.conrelid
+                          AND g.confrelid = 'public.thoughts'::regclass)
+    UNION
+    SELECT p.confrelid::regclass::text
+      FROM pg_constraint p
+     WHERE p.contype = 'f' AND p.connamespace = 'public'::regnamespace
+       AND p.conrelid IN (SELECT c.conrelid FROM pg_constraint c
+                           WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace
+                             AND c.confrelid = 'public.agent_memories'::regclass
+                             AND NOT EXISTS (SELECT 1 FROM pg_constraint g
+                                              WHERE g.contype = 'f'
+                                                AND g.connamespace = 'public'::regnamespace
+                                                AND g.conrelid = c.conrelid
+                                                AND g.confrelid = 'public.thoughts'::regclass))
+       AND public.ob_relation_governed(p.confrelid::regclass::text)
+  ) s;
+
+  IF v_corpus IS NULL OR NOT ('agent_memories' = ANY (v_corpus)) OR array_length(v_corpus,1) < 3 THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: the agent-memory corpus derivation returned %, '
+                    'which cannot be right - a derivation that finds only its own seed has '
+                    'broken and would silently leave the corpus writable.',
+                    COALESCE(array_to_string(v_corpus, ', '), '<nothing>');
+  END IF;
+
+  -- AND THE GATE ON THE GATE. A derivation that reaches a relation this file has already
+  -- decided keeps its write path is a derivation that has walked out of its corpus, and the
+  -- consequence is a production write path revoked by a migration nobody expected to touch
+  -- it. This raises instead. It is stated as the eight relations sections 2 and 3 govern
+  -- plus the seed, because those are exactly the ones whose write path this file has
+  -- deliberately preserved.
+  IF v_corpus && ARRAY['thoughts','thought_entities','entity_extraction_queue','thought_edges',
+                       'entities','edges','source_entities','consolidation_log'] THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: the agent-memory corpus derivation reached %, which '
+                    'this file governs with its write path INTACT. Revoking there would break '
+                    'the ingestion and entity-extraction paths. Something grew a foreign key '
+                    'into agent_memories; classify it before this runs again.',
+                    array_to_string(v_corpus, ', ');
+  END IF;
+
+  FOREACH v_t IN ARRAY v_corpus || ARRAY['idea_revisions'] LOOP
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON TABLE public.%I FROM service_role', v_t);
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON TABLE public.%I FROM authenticated', v_t);
+  END LOOP;
+
+  RAISE NOTICE 'init-graph-plane-rls: write door closed on % relation(s): %, idea_revisions',
+               array_length(v_corpus,1) + 1, array_to_string(v_corpus, ', ');
+END $$;
+
+-- ==========================================================================================
+-- 6a2. THE TWO ORACLES THIS FILE DOES *NOT* CLOSE, RECORDED WHERE THE GATE READS THEM
+-- ==========================================================================================
+-- `thoughts` and `thought_edges` must stay writable through the door, and both have a
+-- surrogate `id` primary key that no policy predicate mentions. A caller that supplies an
+-- explicit `id` therefore learns from 23505-versus-success whether a row with that id exists,
+-- including a row its policy hides. Section 7(i) FINDS this on every replay; it is
+-- dispositioned here rather than fixed, and the disposition is a database COMMENT this file
+-- writes and its own gate reads. Delete these two statements and the next apply goes RED
+-- naming both constraints - measured, not asserted - which is what makes a unique constraint
+-- that appears TOMORROW, with nobody to write it a comment, stop the migration.
+--
+-- WHY NOT FIXED, stated as a trade rather than a shrug. The fix is to withdraw the caller's
+-- ability to NAME the column - `REVOKE INSERT ON t FROM service_role` followed by
+-- `GRANT INSERT (every other column)` - because a table-level grant subsumes column grants.
+-- That breaks, silently and at runtime, every service_role writer of any column added to the
+-- table LATER; columns are added here (`init-agent-memory-embedding.sql` adds one to
+-- `agent_memories`), so this is a live hazard, not a hypothetical. Bounded honestly: what
+-- leaks is the EXISTENCE of an id, not any column of the row, and on `thoughts` the id space
+-- is a shared sequence a caller can already read the watermark of.
+COMMENT ON CONSTRAINT thoughts_pkey ON public.thoughts IS
+  'ORACLE-DISPOSITION: (id) does not contain this table''s plane columns (metadata, user_id) and service_role can supply it, so 23505-vs-success is an existence oracle over hidden rows. NOT FIXED: the fix (column-level INSERT grants) breaks every writer of any column added later. Discloses existence of an id only. See init-graph-plane-rls.sql section 6a2; deleting that COMMENT statement re-raises section 7(i).';
+COMMENT ON CONSTRAINT thought_edges_pkey ON public.thought_edges IS
+  'ORACLE-DISPOSITION: same shape as thoughts_pkey - a surrogate (id) no policy mentions, on a table service_role must be able to write. NOT FIXED, same trade. See init-graph-plane-rls.sql section 6a2; deleting that COMMENT statement re-raises section 7(i).';
+
+-- ==========================================================================================
 -- 6b. VIEWS - the same boundary, a different relkind, and the hazard was documented one file
 --     over
 -- ==========================================================================================
@@ -873,21 +1100,48 @@ BEGIN
   -- and its rows were computed and STORED by its owner, so RLS can never apply to them. If
   -- one ever reads a force-RLS relation, that is a containment failure this file cannot
   -- repair, and it must stop the migration rather than be silently skipped by a filter.
-  SELECT array_agg(DISTINCT mv.relname ORDER BY mv.relname) INTO v_matview
-    FROM pg_rewrite rw
-    JOIN pg_class mv ON mv.oid = rw.ev_class
-    JOIN pg_depend d ON d.objid = rw.oid AND d.classid = 'pg_rewrite'::regclass
-    JOIN pg_class base ON base.oid = d.refobjid
+  --
+  -- THE WALK IS TRANSITIVE, and the first version was not. It joined pg_rewrite to pg_depend
+  -- ONCE, so it saw a matview sitting directly on a table and nothing else. Put ONE ordinary
+  -- view in between and the migration COMMITted while the matview served the hidden row.
+  -- Measured on the throwaway, at the round 2 file, with an ops control:
+  --
+  --     CREATE MATERIALIZED VIEW u5g3_transitive_mv AS SELECT * FROM ideas_owed_research;
+  --       (ideas_owed_research JOINs idea_revisions, which is force-RLS and governed above)
+  --     re-apply 200                                  -> COMMIT, "post-conditions hold"
+  --     SET ROLE service_role; SELECT ... FROM u5g3_transitive_mv  -> 1 personal / 1 ops
+  --     SET ROLE service_role; SELECT ... FROM ideas_owed_research -> 0 personal / 1 ops
+  --
+  -- One hop was all it took, and "a materialized view over a force-RLS relation is refused
+  -- outright" was true only of a DIRECT pg_depend edge. Dependencies compose; a gate that
+  -- walks one edge measures adjacency, not reachability.
+  WITH RECURSIVE dep_edge AS (
+    -- R depends on B when R's rewrite rule references B. Column-level (refobjsubid > 0) and
+    -- whole-relation (refobjsubid = 0, as `count(*)` produces) deps both count.
+    SELECT DISTINCT rw.ev_class AS rel, d.refobjid AS base
+      FROM pg_rewrite rw
+      JOIN pg_depend d ON d.objid = rw.oid AND d.classid = 'pg_rewrite'::regclass
+                      AND d.refclassid = 'pg_class'::regclass
+     WHERE rw.ev_class <> d.refobjid
+  ), reach AS (
+    SELECT rel, base FROM dep_edge
+    UNION
+    SELECT r.rel, e.base FROM reach r JOIN dep_edge e ON e.rel = r.base
+  )
+  SELECT array_agg(DISTINCT mv.relname || ' -> ' || base.relname ORDER BY mv.relname || ' -> ' || base.relname)
+    INTO v_matview
+    FROM reach r
+    JOIN pg_class mv   ON mv.oid = r.rel
+    JOIN pg_class base ON base.oid = r.base
    WHERE mv.relkind = 'm'
-     AND mv.relnamespace = 'public'::regnamespace
      AND base.relkind = 'r'
-     AND base.relrowsecurity AND base.relforcerowsecurity
-     AND base.oid <> mv.oid;
+     AND base.relrowsecurity AND base.relforcerowsecurity;
   IF v_matview IS NOT NULL THEN
-    RAISE EXCEPTION 'init-graph-plane-rls: materialized view(s) % read a FORCE-RLS relation. '
-                    'A matview stores rows its owner computed; security_invoker does not '
-                    'exist for it and RLS cannot reach them. Classify it - drop it, or move '
-                    'it behind a governed view - and re-run.',
+    RAISE EXCEPTION 'init-graph-plane-rls: materialized view(s) reach a FORCE-RLS relation: '
+                    '%. A matview stores rows its owner computed; security_invoker does not '
+                    'exist for it and RLS cannot reach them. The path may run through any '
+                    'number of ordinary views. Classify it - drop it, or move it behind a '
+                    'governed view - and re-run.',
                     array_to_string(v_matview, ', ');
   END IF;
 
@@ -935,7 +1189,48 @@ DECLARE
       'agent_memory_relations','agent_memory_review_actions','agent_memory_recall_traces',
       'agent_memory_recall_items'];
   v_bad    TEXT[];
+  -- TIER B, named once so the exclusion below has a name rather than a filter.
+  v_tier_b TEXT[] := ARRAY['entities','edges','source_entities','consolidation_log'];
+  -- THE FLOOR: the relations this file and 180 are SPECIFIED to govern with a row-level
+  -- predicate. Not the population - the minimum the population must contain.
+  v_floor  TEXT[];
+  -- THE POPULATION of the mechanism sweeps (h) (i) (j), DERIVED from the catalogue.
+  v_scope  TEXT[];
+  v_absent TEXT[] := ARRAY[]::TEXT[];
+  v_permits BOOLEAN;
+  v_rec    RECORD;
 BEGIN
+  -- THE POPULATION OF THE MECHANISM SWEEPS, AND WHY IT IS NOT A LIST IN THIS FILE.
+  -- It was a list, until the recall seam handed back class 13/16 - "a checker deriving its
+  -- population from the document under test: the artifact decides how much of itself is
+  -- audited, and coverage still reads N of N because N shrank". A hardcoded scope array has
+  -- exactly that shape one step removed: govern a new table in 180 tomorrow, or here, and the
+  -- absence/uniqueness/foreign-key sweeps would report clean while never having looked at it.
+  -- So the population is DERIVED - every FORCE-RLS table in public - and tier B is subtracted
+  -- BY NAME, with its reason, so the exclusion is a decision on the record rather than a
+  -- filter nobody re-reads. Its remedy for the class is applied too: a FLOOR taken from what
+  -- this file and 180 are specified to govern is checked back against the derived population,
+  -- so a subject that leaves the population is a FAILURE and not a smaller N.
+  SELECT array_agg(c.relname ORDER BY c.relname) INTO v_scope
+    FROM pg_class c
+   WHERE c.relnamespace = 'public'::regnamespace
+     AND c.relkind = 'r'
+     AND c.relrowsecurity AND c.relforcerowsecurity
+     AND NOT (c.relname = ANY (v_tier_b));
+
+  SELECT array_agg(DISTINCT t ORDER BY t) INTO v_floor
+    FROM unnest(v_tier_a || v_governed || ARRAY['agent_memories','thoughts']) AS t;
+  SELECT array_agg(t ORDER BY t) INTO v_bad
+    FROM unnest(v_floor) AS t WHERE NOT (t = ANY (COALESCE(v_scope, ARRAY[]::TEXT[])));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: relation(s) % are in the FLOOR this file is '
+                    'specified to govern and are NOT in the derived population of the '
+                    'mechanism sweeps. A subject leaving the population is a failure, not a '
+                    'smaller N.', array_to_string(v_bad, ', ');
+  END IF;
+  RAISE NOTICE 'init-graph-plane-rls: mechanism sweeps run over % derived relation(s), floor '
+               'of % satisfied', array_length(v_scope, 1), array_length(v_floor, 1);
+
   -- (a) every governed table has RLS ENABLED and FORCED.
   SELECT array_agg(c.relname ORDER BY c.relname) INTO v_bad
     FROM pg_class c
@@ -1046,7 +1341,220 @@ BEGIN
                     array_to_string(v_bad, ', ');
   END IF;
 
-  RAISE NOTICE 'init-graph-plane-rls: post-conditions hold on % table(s)',
+  -- (h) ABSENCE DENIES. THE PROPERTY, not a list of the places it was violated.
+  --     Every leak this round closed was one shape: a policy arm of the form
+  --     `X IS NULL OR visible(X)`, which permits exactly when the row's plane cannot be
+  --     established. Enumerating the columns that must not be NULL would trail the schema
+  --     forever, so this asserts the behaviour instead: take a row of the relation's own
+  --     type with EVERY column NULL, evaluate each permissive policy expression against it,
+  --     and require that no arm returns TRUE. A policy that denies the all-absent row cannot
+  --     have an arm that permits on absence.
+  --     It found agent_memory_recall_traces' `WITH CHECK (true)` - see section 2c - which no
+  --     one had read as an absence arm, because it does not look like one.
+  --     SCOPE is the relations that carry a row-level predicate: tier A, tier A2, the seven
+  --     180 tables, `agent_memories` and `thoughts`. TIER B IS EXCLUDED and that is not an
+  --     oversight: section 3 decides, names and COMMENTs that tier B is deliberately wide on
+  --     the read side and contained at the WRITE, so asserting the opposite here would
+  --     assert against this file's own decision.
+  FOR v_rec IN
+    SELECT p.tablename, p.policyname, p.qual, p.with_check
+      FROM pg_policies p
+     WHERE p.schemaname = 'public' AND p.permissive = 'PERMISSIVE'
+       AND p.tablename = ANY (v_scope)
+     ORDER BY p.tablename, p.policyname
+  LOOP
+    IF v_rec.qual IS NOT NULL THEN
+      EXECUTE format('SELECT COALESCE((%s), false) FROM (SELECT (NULL::public.%I).*) AS %I',
+                     v_rec.qual, v_rec.tablename, v_rec.tablename) INTO v_permits;
+      IF v_permits THEN
+        v_absent := v_absent || (v_rec.tablename || '.' || v_rec.policyname || ' USING');
+      END IF;
+    END IF;
+    IF v_rec.with_check IS NOT NULL THEN
+      EXECUTE format('SELECT COALESCE((%s), false) FROM (SELECT (NULL::public.%I).*) AS %I',
+                     v_rec.with_check, v_rec.tablename, v_rec.tablename) INTO v_permits;
+      IF v_permits THEN
+        v_absent := v_absent || (v_rec.tablename || '.' || v_rec.policyname || ' WITH CHECK');
+      END IF;
+    END IF;
+  END LOOP;
+  IF array_length(v_absent, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: policy arm(s) % PERMIT a row whose every column is '
+                    'NULL. A row whose plane cannot be established must not be visible and '
+                    'must not be writable; `X IS NULL OR visible(X)` is a hole, and an '
+                    'unconditional WITH CHECK is the same hole written shorter. If the width '
+                    'is DELIBERATE, subtract the relation into v_tier_b with its reason and a '
+                    'COMMENT ON POLICY, the way sections 3 and 7 already treat tier B - the '
+                    'one thing that must not happen is a wide policy on a FORCE-RLS table '
+                    'that nobody decided.',
+                    array_to_string(v_absent, ', ');
+  END IF;
+
+  -- (i) NO UNIQUENESS ORACLE. A unique index is not RLS-filtered and it is consulted AFTER
+  --     WITH CHECK, so `23505 versus success` answers "does a row you cannot see exist?".
+  --     That is how `idea_revisions_pkey (idea_id, revision)` answered for a hidden revision
+  --     while the table's own read policy correctly returned nothing.
+  --     A constraint is SAFE if any of three things is true, and all three are DERIVED:
+  --       1. its columns CONTAIN the relation's plane columns (taken from pg_depend, which
+  --          records exactly which columns each policy reads) - then a collision can only be
+  --          with a row the caller may already see;
+  --       2. no role behind the door holds INSERT or UPDATE on the table - section 6a makes
+  --          this true for the agent-memory corpus and idea_revisions;
+  --       3. every column of it is a uuid defaulted to gen_random_uuid(), which cannot be
+  --          collided with by guessing.
+  --     Anything else must carry an `ORACLE-DISPOSITION:` COMMENT saying why (section 6a2).
+  --     A unique constraint added tomorrow satisfies none of the three and has no comment,
+  --     so it turns this migration RED - which is the point of asserting a property.
+  WITH idx AS (
+    SELECT c.relname AS tbl, c.oid AS reloid, i.oid AS idxoid, i.relname AS idxname,
+           con.oid AS conoid,
+           (SELECT array_agg(a.attname ORDER BY a.attname)
+              FROM unnest(x.indkey::int2[]) AS k(attnum)
+              JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum) AS cols,
+           (SELECT count(*) FROM unnest(x.indkey::int2[]) AS k(attnum)
+             WHERE k.attnum = 0) AS expr_cols
+      FROM pg_index x
+      JOIN pg_class i ON i.oid = x.indexrelid
+      JOIN pg_class c ON c.oid = x.indrelid
+      -- conindid is also set on a FOREIGN KEY, pointing at the index it VALIDATES
+      -- against, so an unrestricted join reported thoughts_pkey once per FK into
+      -- thoughts. Only a key constraint ON THIS TABLE owns this index.
+      LEFT JOIN pg_constraint con ON con.conindid = i.oid
+                                 AND con.conrelid = c.oid
+                                 AND con.contype IN ('p','u','x')
+     WHERE x.indisunique
+       AND c.relnamespace = 'public'::regnamespace
+       AND c.relname = ANY (v_scope)
+  ), planecols AS (
+    SELECT pol.polrelid AS reloid, array_agg(DISTINCT a.attname) AS cols
+      FROM pg_depend d
+      JOIN pg_policy pol ON pol.oid = d.objid AND d.classid = 'pg_policy'::regclass
+      JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid
+     WHERE d.refclassid = 'pg_class'::regclass AND d.refobjsubid > 0
+       AND d.refobjid = pol.polrelid
+     GROUP BY 1
+  )
+  SELECT array_agg(idx.tbl || '.' || idx.idxname ORDER BY idx.tbl || '.' || idx.idxname)
+    INTO v_bad
+    FROM idx
+    LEFT JOIN planecols pc ON pc.reloid = idx.reloid
+   WHERE EXISTS (SELECT 1 FROM information_schema.role_table_grants g
+                  WHERE g.table_schema = 'public' AND g.table_name = idx.tbl
+                    AND g.grantee IN ('service_role','authenticated')
+                    AND g.privilege_type IN ('INSERT','UPDATE'))
+     AND NOT (idx.expr_cols = 0
+              AND COALESCE(array_length(pc.cols, 1), 0) > 0
+              AND pc.cols <@ idx.cols)
+     AND NOT (idx.expr_cols = 0
+              AND NOT EXISTS (
+                    SELECT 1 FROM unnest(idx.cols) AS cn(attname)
+                      JOIN pg_attribute a ON a.attrelid = idx.reloid AND a.attname = cn.attname
+                      LEFT JOIN pg_attrdef ad ON ad.adrelid = idx.reloid AND ad.adnum = a.attnum
+                     WHERE NOT (a.atttypid = 'uuid'::regtype
+                                AND COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '')
+                                    LIKE '%gen_random_uuid%')))
+     AND COALESCE(obj_description(idx.conoid, 'pg_constraint'),
+                  obj_description(idx.idxoid, 'pg_class'), '') NOT LIKE 'ORACLE-DISPOSITION:%';
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: unique constraint(s) % are an existence oracle on a '
+                    'governed relation: their columns do not contain the plane columns, the '
+                    'door can write the table, and they are not unguessable. Contain them, '
+                    'withdraw the write, or record an ORACLE-DISPOSITION comment.',
+                    array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (j) NO FOREIGN-KEY ORACLE, derived. (g) above closes the one instance round 2 found by
+  --     naming `agent_memories` and `thought_id` in the assertion itself; this is the same
+  --     rule with nothing named. A foreign key is enforced by an internal trigger RLS does
+  --     not bind, firing AFTER WITH CHECK, so `23503 versus success` separates a HIDDEN
+  --     parent from a NONEXISTENT one - unless WITH CHECK already refused the row for naming
+  --     an invisible parent. So: for every FK from an in-scope, door-writable relation into a
+  --     GOVERNED parent, every referencing column must appear in the WITH CHECK of every
+  --     permissive write policy on the child. A parent that is not governed (tier B's
+  --     `entities`, the ungoverned `ideas`) is excluded, because a parent whose rows are all
+  --     visible cannot be a hidden one.
+  SELECT array_agg(DISTINCT con.conrelid::regclass::text || '.' || con.conname
+                   ORDER BY con.conrelid::regclass::text || '.' || con.conname) INTO v_bad
+    FROM pg_constraint con
+   WHERE con.contype = 'f'
+     AND con.connamespace = 'public'::regnamespace
+     AND con.conrelid::regclass::text = ANY (v_scope)
+     AND public.ob_relation_governed(con.confrelid::regclass::text)
+     AND EXISTS (SELECT 1 FROM information_schema.role_table_grants g
+                  WHERE g.table_schema = 'public'
+                    AND g.table_name = con.conrelid::regclass::text
+                    AND g.grantee IN ('service_role','authenticated')
+                    AND g.privilege_type IN ('INSERT','UPDATE'))
+     AND EXISTS (
+           SELECT 1
+             FROM pg_policies p
+             CROSS JOIN LATERAL unnest(con.conkey) AS k(attnum)
+             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+            WHERE p.schemaname = 'public'
+              AND p.tablename = con.conrelid::regclass::text
+              AND p.permissive = 'PERMISSIVE'
+              AND p.cmd IN ('ALL','INSERT','UPDATE')
+              AND (p.with_check IS NULL OR p.with_check !~ ('\m' || a.attname || '\M')));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: foreign key(s) % point into a governed parent from '
+                    'a table the door can write, and a write policy on that table does not '
+                    'constrain the referencing column in WITH CHECK. The FK trigger answers '
+                    'where the policy would not.', array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (k) THE SECURITY DEFINER SET IS EXACTLY THE ONE SECTION 4 ACCOUNTS FOR. Definer rights
+  --     are the fourth mechanism that walks around a policy (after unique indexes, FK
+  --     triggers and stored relations), and section 4 dispositioned the four that existed.
+  --     A FIFTH one added later would carry content across the boundary with nothing
+  --     complaining, so the SET is asserted rather than the two flips.
+  SELECT array_agg(p.proname ORDER BY p.proname) INTO v_bad
+    FROM pg_proc p
+   WHERE p.pronamespace = 'public'::regnamespace
+     AND p.prosecdef
+     AND p.proname NOT IN ('queue_entity_extraction','queue_source_extraction');
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: unclassified SECURITY DEFINER function(s) in '
+                    'public: %. A definer function runs as its superuser owner and no policy '
+                    'in this file binds it. Classify it in section 4 - or drop the definer '
+                    'rights - and re-run.', array_to_string(v_bad, ', ');
+  END IF;
+
+  -- (l) NOTHING REACHES A GOVERNED RELATION AROUND THE BOUNDARY, TRANSITIVELY. (f) asserts
+  --     the flag on views in `public`; this asserts REACHABILITY, over any number of hops
+  --     and in any schema, for the two relkinds that can carry rows past a policy: a
+  --     materialized view (stored rows, no security_invoker option at all) and an ordinary
+  --     view still running as its owner. The one-edge version of this walk COMMITted while
+  --     a matview one hop from `idea_revisions` served the hidden row.
+  WITH RECURSIVE dep_edge AS (
+    SELECT DISTINCT rw.ev_class AS rel, d.refobjid AS base
+      FROM pg_rewrite rw
+      JOIN pg_depend d ON d.objid = rw.oid AND d.classid = 'pg_rewrite'::regclass
+                      AND d.refclassid = 'pg_class'::regclass
+     WHERE rw.ev_class <> d.refobjid
+  ), reach AS (
+    SELECT rel, base FROM dep_edge
+    UNION
+    SELECT r.rel, e.base FROM reach r JOIN dep_edge e ON e.rel = r.base
+  )
+  SELECT array_agg(DISTINCT rl.relname || ' -> ' || bs.relname
+                   ORDER BY rl.relname || ' -> ' || bs.relname) INTO v_bad
+    FROM reach r
+    JOIN pg_class rl ON rl.oid = r.rel
+    JOIN pg_class bs ON bs.oid = r.base
+   WHERE bs.relkind = 'r' AND bs.relrowsecurity AND bs.relforcerowsecurity
+     AND (rl.relkind = 'm'
+          OR (rl.relkind = 'v'
+              AND COALESCE((SELECT option_value FROM pg_options_to_table(rl.reloptions)
+                             WHERE option_name = 'security_invoker'), 'false') <> 'true'));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-graph-plane-rls: relation(s) % reach a FORCE-RLS table without '
+                    'being bound by it. A stored matview or an owner-rights view is a read '
+                    'path around every policy above, however many views it goes through.',
+                    array_to_string(v_bad, ', ');
+  END IF;
+
+  RAISE NOTICE 'init-graph-plane-rls: post-conditions hold on % table(s), and the four '
+               'mechanism sweeps (absence, uniqueness, foreign keys, reachability) are clean',
                array_length(v_all, 1);
 END $$;
 

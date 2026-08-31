@@ -15,7 +15,10 @@
 --      SECURITY DEFINER on all three and the ungated queue_entity_extraction;
 --   5. the wide USING(true) policy on agent_memory_audit_events, and the agent_memories
 --      policies without their thought_id WITH CHECK arm, both verbatim as 180 left them;
---   6. `security_invoker` cleared on the four views that lacked it before the migration.
+--   6. `security_invoker` cleared on the four views that lacked it before the migration;
+--   7. the write privileges section 6a withdrew from the agent-memory corpus and
+--      idea_revisions, re-granted to the roles that held them, and the two
+--      ORACLE-DISPOSITION comments removed.
 --
 -- APPLYING THIS RE-OPENS THE MEASURED DISCLOSURE: after it runs, an unauthenticated caller on
 -- open-brain_obnet can once again read entity_extraction_queue.source_fingerprint - sha256 of
@@ -225,6 +228,7 @@ $fn$;
 -- distinguish a hidden thought from a nonexistent one by 201 versus 23503.
 DROP POLICY IF EXISTS agent_memory_audit_events_plane      ON public.agent_memory_audit_events;
 DROP POLICY IF EXISTS agent_memory_audit_events_plane_read ON public.agent_memory_audit_events;
+DROP POLICY IF EXISTS agent_memory_audit_events_closed     ON public.agent_memory_audit_events;
 
 CREATE POLICY agent_memory_audit_events_service_role_all ON public.agent_memory_audit_events
   AS PERMISSIVE FOR ALL TO service_role
@@ -244,6 +248,16 @@ CREATE POLICY agent_memories_personal_plane ON public.agent_memories
   AS PERMISSIVE FOR ALL TO service_role
   USING      (user_id IS NOT NULL AND user_id = public.ob_current_user_id())
   WITH CHECK (user_id IS NOT NULL AND user_id = public.ob_current_user_id());
+
+-- Restored VERBATIM from init-agent-memory-rls.sql: USING on the ops-plane predicate,
+-- WITH CHECK unconditionally open. THAT OPEN WITH CHECK IS AN ABSENCE ARM - it permits a
+-- trace whose exposure cannot be established - which is why section 2c of the migration
+-- narrowed it. Putting it back is part of what reverting means.
+DROP POLICY IF EXISTS agent_memory_recall_traces_plane ON public.agent_memory_recall_traces;
+
+CREATE POLICY agent_memory_recall_traces_plane ON public.agent_memory_recall_traces
+  AS PERMISSIVE FOR ALL TO service_role
+  USING (public.ob_trace_on_ops_plane(request_payload)) WITH CHECK (true);
 
 -- ==========================================================================================
 -- 6. UNDO SECTION 6b - the view sweep
@@ -266,6 +280,67 @@ ALTER VIEW public.ungrounded_claims    RESET (security_invoker);
 -- is not: a function nothing references is inert, and dropping it would make this revert
 -- irreversible if the migration is re-applied.
 
+
+-- ==========================================================================================
+-- 7. UNDO SECTION 6a - the withdrawn write privileges, and the two disposition comments
+-- ==========================================================================================
+-- APPLYING THIS RE-OPENS A THIRD MEASURED DISCLOSURE: with INSERT back on idea_revisions, an
+-- unauthenticated caller can once again separate an EXISTING hidden revision from an absent
+-- one by 23505 versus success on idea_revisions_pkey, and the agent-memory corpus regains a
+-- write door nothing deployed uses.
+--
+-- The corpus is re-derived the same way section 6a derives it, with ONE deliberate
+-- difference: section 6a screens the parent arm with `ob_relation_governed()`, and this file
+-- screens it with `confrelid <> thoughts` instead. The reason is ordering - section 5 above
+-- has already restored the wide policy on agent_memory_audit_events by the time this runs, so
+-- a governed-ness test here would be measuring a world this very file is in the middle of
+-- changing. The two filters select the same set on this schema (the parent arm yields
+-- agent_memories and agent_memory_recall_traces either way); the revert's is the one that
+-- does not depend on the state it is undoing.
+-- `authenticated` is NOT re-granted: it never held INSERT, UPDATE or DELETE on any of these
+-- tables (measured on the live database 2026-08-31), and a revert that grants a privilege the
+-- world never had is not a revert.
+DO $$
+DECLARE
+  v_corpus TEXT[];
+  v_t      TEXT;
+BEGIN
+  SELECT array_agg(DISTINCT t ORDER BY t) INTO v_corpus FROM (
+    SELECT 'agent_memories'::text AS t
+    UNION
+    SELECT c.conrelid::regclass::text
+      FROM pg_constraint c
+     WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace
+       AND c.confrelid = 'public.agent_memories'::regclass
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint g
+                        WHERE g.contype = 'f' AND g.connamespace = 'public'::regnamespace
+                          AND g.conrelid = c.conrelid
+                          AND g.confrelid = 'public.thoughts'::regclass)
+    UNION
+    SELECT p.confrelid::regclass::text
+      FROM pg_constraint p
+     WHERE p.contype = 'f' AND p.connamespace = 'public'::regnamespace
+       AND p.conrelid IN (SELECT c.conrelid FROM pg_constraint c
+                           WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace
+                             AND c.confrelid = 'public.agent_memories'::regclass
+                             AND NOT EXISTS (SELECT 1 FROM pg_constraint g
+                                              WHERE g.contype = 'f'
+                                                AND g.connamespace = 'public'::regnamespace
+                                                AND g.conrelid = c.conrelid
+                                                AND g.confrelid = 'public.thoughts'::regclass))
+       AND p.confrelid <> 'public.thoughts'::regclass
+  ) s;
+
+  FOREACH v_t IN ARRAY v_corpus || ARRAY['idea_revisions'] LOOP
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON TABLE public.%I TO service_role', v_t);
+  END LOOP;
+
+  RAISE NOTICE 'revert-graph-plane-rls: write door re-opened on % relation(s): %, idea_revisions',
+               array_length(v_corpus,1) + 1, array_to_string(v_corpus, ', ');
+END $$;
+
+COMMENT ON CONSTRAINT thoughts_pkey      ON public.thoughts      IS NULL;
+COMMENT ON CONSTRAINT thought_edges_pkey ON public.thought_edges IS NULL;
 
 NOTIFY pgrst, 'reload schema';
 
