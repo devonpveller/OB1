@@ -345,25 +345,30 @@ FROM service_role;
 -- straight back through PostgREST - a brand-new bypass created by following the advice.
 -- PostgreSQL 15+ only; this stack is pg16 (pgvector/pgvector:pg16).
 -- There is a RED proof of exactly this in scripts/checks/prove-agent-memory-rls.ps1.
-DROP VIEW IF EXISTS public.agent_memories_v;
-DROP VIEW IF EXISTS public.thoughts_v;
+--
+-- NAMED `v_` AND NOT `_v`, because the offline harness counts the plane's tables with
+-- `information_schema.tables WHERE table_name LIKE 'agent_memor%'` and a VIEW is a row in
+-- that view. `agent_memories_v` turned `agent_memory_tables(8)` into 9 and failed the
+-- fresh-volume check - measured, not guessed.
+DROP VIEW IF EXISTS public.v_agent_memories;
+DROP VIEW IF EXISTS public.v_thoughts;
 
-CREATE VIEW public.agent_memories_v WITH (security_invoker = true) AS
+CREATE VIEW public.v_agent_memories WITH (security_invoker = true) AS
   SELECT id, thought_id, workspace_id, project_id, user_id, visibility, memory_type,
          summary, content, lifecycle_status, provenance_status, confidence, created_by,
          review_status, metadata, created_at, updated_at
     FROM public.agent_memories;
 
-CREATE VIEW public.thoughts_v WITH (security_invoker = true) AS
+CREATE VIEW public.v_thoughts WITH (security_invoker = true) AS
   SELECT id, content, metadata, user_id, created_at, updated_at
     FROM public.thoughts;
 
-GRANT SELECT ON public.agent_memories_v TO service_role;
-GRANT SELECT ON public.thoughts_v       TO service_role;
+GRANT SELECT ON public.v_agent_memories TO service_role;
+GRANT SELECT ON public.v_thoughts       TO service_role;
 
-COMMENT ON VIEW public.agent_memories_v IS
+COMMENT ON VIEW public.v_agent_memories IS
   'RLS-invoker view of agent_memories - the intended PostgREST surface. security_invoker=true; without it this view would bypass the exposure boundary.';
-COMMENT ON VIEW public.thoughts_v IS
+COMMENT ON VIEW public.v_thoughts IS
   'RLS-invoker view of thoughts - the intended PostgREST surface. security_invoker=true; without it this view would bypass the exposure boundary.';
 
 NOTIFY pgrst, 'reload schema';
