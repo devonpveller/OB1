@@ -83,6 +83,12 @@ services:
       # reached by callers that touch none of the server code (PostgREST rpc, the edge
       # functions, recipes) - the floor under the application boundary (U5).
       - ./init-agent-memory-corpus-plane.sql:/docker-entrypoint-initdb.d/170-init-agent-memory-corpus-plane.sql:ro
+      # ROW LEVEL SECURITY - the boundary stops being a predicate every reader has to
+      # remember and becomes one the DATABASE applies (U5 / PLAN amendment A2). Tenancy is a
+      # column plus a SET LOCAL session variable; access class is a role. LAST in the chain,
+      # deliberately: it REPLACES the USING (true) policy init-agent-memory.sql creates and
+      # enables RLS on thoughts, so it has to run after every table it governs exists.
+      - ./init-agent-memory-rls.sql:/docker-entrypoint-initdb.d/180-init-agent-memory-rls.sql:ro
     networks:
       - obnet
     restart: unless-stopped
