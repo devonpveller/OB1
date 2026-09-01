@@ -488,8 +488,23 @@ app.post("/writeback", async (c) => {
     const thoughtId = upsertResult?.id;
     if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);
 
+    // THE PLANE, STATED BY THIS STATEMENT (DFU C.9 H3, operator 2026-08-31). This is the
+    // ONLY `agent_memories` INSERT in the tree, and until this line it stated no plane at
+    // all - neither the column nor the metadata mirror. It nonetheless passed
+    // check-corpus-exposure-producers.ps1, cleared by the `exposure: "ops"` key twenty lines
+    // above, which belongs to the `upsert_thought` RPC payload for a DIFFERENT table. A
+    // verifier proved it by renaming that unrelated key and watching the gate go red here;
+    // the gate's evidence is now scoped to the statement, and this key is this statement's.
+    //
+    // THIS DOOR IS NOT BUILT BY ANY COMPOSE SERVICE (see init-agent-memory-exposure-column.sql
+    // section 7's caller table), so the omission was not producing live 42501s the way
+    // openbrain-gmail-pull's was. That is a reason it went unnoticed, NOT an exemption:
+    // `agent_memories.exposure` is NOT NULL with no default and CHECKed, so the first deploy
+    // of this file would have been refused on its first write. A dead-code exemption has to
+    // be written down to be one, and the honest form of it is this key, not a line gap.
     const { data: memory, error: memoryError } = await supabase.from("agent_memories").insert({
       thought_id: thoughtId ?? null,
+      exposure: "ops",
       workspace_id: req.workspace_id,
       project_id: req.project_id ?? null,
       channel_kind: req.channel.kind ?? null,
@@ -517,6 +532,8 @@ app.post("/writeback", async (c) => {
       idempotency_key,
       content_hash,
       metadata: {
+        // the mirror, for the CURRENTLY DEPLOYED U5 policy, which reads metadata->>'exposure'
+        exposure: "ops",
         source_refs: req.source_refs,
         models_used: req.models_used,
         retention: req.retention,

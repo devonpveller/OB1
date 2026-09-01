@@ -419,8 +419,25 @@ CREATE POLICY thoughts_ops_plane ON public.thoughts
 -- The direct producers now state their plane at their own call sites, and the set is no
 -- longer kept by hand: `scripts/checks/check-corpus-exposure-producers.ps1` (ai-stack
 -- pre-commit) DERIVES the corpus-insert sites from the tree on every commit and fails on one
--- that omits `exposure`, so producer thirteen breaks the build rather than production. See
--- documentation/notes/u5-live-producer-rls-regression.md.
+-- that omits `exposure`. See documentation/notes/u5-live-producer-rls-regression.md.
+--
+-- BUT THAT CHECK IS NOT THE ENFORCEMENT, AND THIS PARAGRAPH USED TO SAY IT WAS. It said
+-- "producer thirteen breaks the build rather than production", which is FALSE, and false in
+-- the same shape as the sweep two paragraphs up: it presented what a search could see as
+-- what exists. Two verifiers planted producers the check does not recognise - a table name
+-- held in a variable, a concatenated path, a helper wrapper, a `.tsx` copy, a `curl -X POST`
+-- in a `.sh`, supabase-py `.table().insert()` - and none of them was flagged or even counted.
+-- Producer thirteen, written in a shape that check cannot see, breaks PRODUCTION.
+--
+-- THE ENFORCEMENT IS THIS FILE. Sections 5 and 6 make `exposure` NOT NULL with no default
+-- and CHECKed, and section 7 makes this function refuse a payload that omits it. Those
+-- refuse an unlabelled write in every shape, from every language, forever. The pre-commit
+-- check is authoring-time convenience that moves SOME of those refusals earlier, and it
+-- prints its own blind spots on every run so nobody has to take its coverage on trust.
+--
+-- AND THE REFUSAL IS QUIET, WHICH IS WHY THE CONVENIENCE IS WORTH HAVING. Both producers
+-- that were failing CAUGHT the 42501 and carried on: `openbrain-gmail-pull` logged
+-- `Ingested: 0 email(s)` and exited 0 for a day. Fail-closed is not fail-visibly.
 --
 -- THE RPC CALL SITES (`grep -rn 'rpc("upsert_thought"' OB1` - ten, 2026-08-31):
 --   recipes/entity-wiki/generate-wiki.mjs          - the ONLY scheduled producer (openbrain-wiki)
