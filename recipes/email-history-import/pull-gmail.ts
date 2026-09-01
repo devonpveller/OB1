@@ -993,9 +993,124 @@ function buildEmailContent(
   return `[Email from ${from} | Subject: ${subject} | Date: ${date}]\n\n${emailBody}`;
 }
 
+// ─── Run outcome: what the caller is actually told ─────────────────────
+//
+// A producer that catches its own write failures and then reports a zero-row
+// success is lying to its operator. On 2026-08-30 a fail-closed database policy
+// refused EVERY insert this recipe made. The recipe printed
+//   Ingested: 0 email(s) / 0 chunk row(s)
+//   Errors:   1
+// exited 0, and fired the downstream prune/podcast/digest chain as though it had
+// data. Ingestion was dead for two days; the only thing that ever surfaced it was
+// the operator noticing the morning digest and the podcast had no mail in them.
+//
+// The distinction this type exists to preserve:
+//   a QUIET DAY - nothing new to write - is a SUCCESS (attempted === 0);
+//   EVERY WRITE REFUSED                 - is a FAILURE (attempted > 0, none landed).
+// Both end with zero rows written. They are told apart by what was ATTEMPTED,
+// which is why `attempted` is counted separately from `processed` (an email can
+// be processed and then skipped by the short-term pre-filter without any write
+// ever being tried).
+type RunStatus =
+  | "ok"      // nothing was refused - a quiet day is "ok", never red
+  | "partial" // some writes landed, some were refused - visible, never averaged away
+  | "failed"  // writes were attempted and NOT ONE of them landed
+  | "noop";   // --dry-run / --list-labels: no write was ever going to happen
+
+// Exit codes. 1 stays what it has always been (fatal/uncaught, thrown out of
+// main). 2 is new and specific: main ran to completion and every attempted write
+// was refused. Distinct so a caller can tell "the recipe crashed" from "the
+// recipe ran fine and the database said no to all of it".
+const EXIT_WRITES_REFUSED = 2;
+
+interface EmailFailure {
+  subject: string;
+  gmail_id: string;
+  chunks_inserted: number;
+  chunks_attempted: number;
+  reason: string;
+}
+
+interface RunOutcome {
+  status: RunStatus;
+  ok: boolean;            // false ONLY for "failed" - see classifyRun
+  emailsFound: number;
+  attempted: number;      // emails an ingest was actually tried for
+  ingested: number;       // emails whose every chunk landed
+  chunksInserted: number;
+  chunksAttempted: number;
+  errors: number;
+  failures: EmailFailure[];
+}
+
+// The whole judgement, in one place, so it can be read and argued with.
+//
+// "partial" is deliberately NOT a failure exit: the chunk loop leaves landed
+// chunks in place, and the next run dedups them by content_fingerprint and embeds
+// only the missing tail - so a partial is real progress and the chain has real
+// data to work on. What partial must never be is INVISIBLE, hence its own status,
+// its own summary line, its own report status and its own /health value. If a
+// future operator decides partial should be red too, this is the one function to
+// change.
+function classifyRun(c: {
+  dryRun: boolean;
+  attempted: number;
+  chunksInserted: number;
+  errors: number;
+}): RunStatus {
+  if (c.dryRun) return "noop";
+  if (c.errors === 0) return "ok";       // includes attempted === 0, the quiet day
+  if (c.chunksInserted > 0) return "partial";
+  return c.attempted > 0 ? "failed" : "ok";
+}
+
+function makeOutcome(c: {
+  dryRun: boolean;
+  emailsFound: number;
+  attempted: number;
+  ingested: number;
+  chunksInserted: number;
+  chunksAttempted: number;
+  errors: number;
+  failures: EmailFailure[];
+}): RunOutcome {
+  const status = classifyRun(c);
+  return {
+    status,
+    ok: status !== "failed",
+    emailsFound: c.emailsFound,
+    attempted: c.attempted,
+    ingested: c.ingested,
+    chunksInserted: c.chunksInserted,
+    chunksAttempted: c.chunksAttempted,
+    errors: c.errors,
+    failures: c.failures,
+  };
+}
+
+// One human-readable line, printed by every path that finishes a run, so the tail
+// of the log answers "did this work?" without the reader doing arithmetic.
+function runStatusLine(o: RunOutcome): string {
+  switch (o.status) {
+    case "noop":
+      return "noop (dry-run / list-labels - nothing was going to be written)";
+    case "failed":
+      return "FAILED - every attempted write was refused " +
+        `(0 of ${o.attempted} email(s), 0 of ${o.chunksAttempted} chunk row(s) landed). ` +
+        "Downstream chain SUPPRESSED.";
+    case "partial":
+      return `PARTIAL - ${o.chunksInserted} of ${o.chunksAttempted} chunk row(s) landed; ` +
+        `${o.errors} email(s) failed or partly failed. See Failures above.`;
+    default:
+      return o.attempted === 0
+        ? "ok (nothing new to write - quiet window, not a failure)"
+        : `ok (${o.ingested} email(s) / ${o.chunksInserted} chunk row(s) written)`;
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
-async function main(argsOverride?: Partial<CliArgs>) {
+async function main(argsOverride?: Partial<CliArgs>): Promise<RunOutcome> {
   // CLI mode: just parseArgs(). HTTP mode: parseArgs() supplies env-based
   // defaults; argsOverride (the JSON body posted to /run) wins. Mirror the
   // CLI special case where setting labelsPrefix without labels clears the
@@ -1022,7 +1137,12 @@ async function main(argsOverride?: Partial<CliArgs>) {
       const count = label.messagesTotal !== undefined ? ` (${label.messagesTotal} messages)` : "";
       console.log(`  ${label.id.padEnd(25)} ${label.name}${count}`);
     }
-    return;
+    // Never a write path: "noop", not "ok with zero rows".
+    return makeOutcome({
+      dryRun: true,
+      emailsFound: 0, attempted: 0, ingested: 0,
+      chunksInserted: 0, chunksAttempted: 0, errors: 0, failures: [],
+    });
   }
 
   // Build label ID -> name map for metadata
@@ -1123,7 +1243,18 @@ async function main(argsOverride?: Partial<CliArgs>) {
   const messageRefs = await listMessages(accessToken, args.labels, query, args.limit);
   console.log(`\nFound ${messageRefs.length} messages.\n`);
 
-  if (messageRefs.length === 0) return;
+  if (messageRefs.length === 0) {
+    // THE QUIET DAY. Nothing was found, so nothing was attempted, so nothing was
+    // refused. This is a success and must never be reported as anything else -
+    // making a quiet window red is how a real alarm gets trained away.
+    const quiet = makeOutcome({
+      dryRun: args.dryRun,
+      emailsFound: 0, attempted: 0, ingested: 0,
+      chunksInserted: 0, chunksAttempted: 0, errors: 0, failures: [],
+    });
+    console.log(`RUN STATUS:       ${runStatusLine(quiet)}`);
+    return quiet;
+  }
 
   let processed = 0;
   let skipped = 0;
@@ -1133,14 +1264,13 @@ async function main(argsOverride?: Partial<CliArgs>) {
   let totalWords = 0;
   let shortTermExpired = 0;
   let chunksInserted = 0;
+  // Emails an ingest was actually TRIED for, and the chunk rows that ingest tried
+  // to write. Without these two, "0 rows written" is ambiguous between a quiet day
+  // and a total refusal - the exact ambiguity that hid the 2026-08-30 outage for
+  // two days. (EmailFailure now lives at module scope, next to RunOutcome.)
+  let attempted = 0;
+  let chunksAttempted = 0;
 
-  interface EmailFailure {
-    subject: string;
-    gmail_id: string;
-    chunks_inserted: number;
-    chunks_attempted: number;
-    reason: string;
-  }
   const failures: EmailFailure[] = [];
 
   const shortTermCutoffMs =
@@ -1222,10 +1352,16 @@ async function main(argsOverride?: Partial<CliArgs>) {
 
     const content = buildEmailContent(email.body, email.from, email.subject, email.date);
 
+    // From here on a write WILL be tried for this email. Everything above this
+    // line (noise skip, sync-log skip, short-term pre-filter, dry-run) is a
+    // legitimate reason to write nothing, and must not count as an attempt.
+    attempted++;
+
     try {
       if (useEndpoint) {
         // Endpoint mode: the remote ingester owns chunking + embedding.
         const result = await ingestThoughtEndpoint(content, "gmail", emailMeta);
+        chunksAttempted += 1; // endpoint mode: the remote owns chunking, one row from here
         if (result.ok) {
           ingested++;
           chunksInserted++;
@@ -1249,6 +1385,7 @@ async function main(argsOverride?: Partial<CliArgs>) {
         const llmMeta = await extractMetadata(content);
         const result = await ingestEmailMultiChunk(content, "gmail", emailMeta, llmMeta);
         chunksInserted += result.chunksInserted;
+        chunksAttempted += result.chunksAttempted;
 
         const chunkTag = result.chunksAttempted > 1
           ? ` (${result.chunksInserted}/${result.chunksAttempted} chunks)`
@@ -1293,6 +1430,10 @@ async function main(argsOverride?: Partial<CliArgs>) {
         chunks_attempted: 0,
         reason: `uncaught: ${msg}`,
       });
+      // The email never reached the chunker, so the chunk count is unknown; count
+      // one attempted row so a run that dies here can still be "failed" and not
+      // "0 of 0", which reads like a quiet day.
+      chunksAttempted += 1;
       console.error(`   -> ERROR (uncaught): ${msg}`);
     }
 
@@ -1343,6 +1484,20 @@ async function main(argsOverride?: Partial<CliArgs>) {
   const estimatedCost = (totalWords / 750) * 0.00002 + (processed * 0.00015);
   console.log(`  Est. API cost:    $${estimatedCost.toFixed(4)}`);
 
+  // THE VERDICT. Printed for every finished run, including the good ones, so its
+  // absence is itself a signal.
+  const outcome = makeOutcome({
+    dryRun: args.dryRun,
+    emailsFound: messageRefs.length,
+    attempted,
+    ingested,
+    chunksInserted,
+    chunksAttempted,
+    errors,
+    failures,
+  });
+  console.log(`  RUN STATUS:       ${runStatusLine(outcome)}`);
+
   // Morning report: a structured markdown the user can open after a
   // scheduled run to see exactly what landed, what was skipped, and what
   // failed (so a silent embed-server 500 like the 2026-05-26 incident
@@ -1351,6 +1506,7 @@ async function main(argsOverride?: Partial<CliArgs>) {
   // for ad-hoc runs that don't bother with the volume.
   if (!args.dryRun) {
     await writePullReport({
+      status: outcome.status,
       windowFlag: args.window,
       query,
       labelsResolved: args.labels.length,
@@ -1360,8 +1516,10 @@ async function main(argsOverride?: Partial<CliArgs>) {
       noiseSkipped: skipped,
       shortTermExpired,
       processed,
+      attempted,
       ingested,
       chunksInserted,
+      chunksAttempted,
       errors,
       totalWords,
       failures,
@@ -1369,12 +1527,15 @@ async function main(argsOverride?: Partial<CliArgs>) {
       lastSync: syncLog.last_sync,
     });
   }
+
+  return outcome;
 }
 
 const REPORTS_DIR_PRIMARY = "/reports";
 const REPORTS_DIR_FALLBACK = SCRIPT_DIR; // /app when running in the compose service
 
 interface PullReportInputs {
+  status: RunStatus;
   windowFlag: string;
   query: string;
   labelsResolved: number;
@@ -1384,8 +1545,10 @@ interface PullReportInputs {
   noiseSkipped: number;
   shortTermExpired: number;
   processed: number;
+  attempted: number;
   ingested: number;
   chunksInserted: number;
+  chunksAttempted: number;
   errors: number;
   totalWords: number;
   failures: Array<{ subject: string; gmail_id: string; chunks_inserted: number; chunks_attempted: number; reason: string }>;
@@ -1397,7 +1560,18 @@ async function writePullReport(r: PullReportInputs): Promise<void> {
   const now = new Date();
   const isoDay = now.toISOString().slice(0, 10);
   const isoTs = now.toISOString().replace(/[:.]/g, "-");
-  const status = r.errors > 0 ? "ERRORS" : "ok";
+  // Was `r.errors > 0 ? "ERRORS" : "ok"`, which collapsed "one chunk of forty was
+  // refused" and "the database refused every single row" into one word. The
+  // classification now comes from the run itself.
+  const status = r.status === "failed"
+    ? "FAILED - every attempted write refused"
+    : r.status === "partial"
+    ? "PARTIAL - some writes refused"
+    : r.status === "noop"
+    ? "noop (dry-run)"
+    : r.attempted === 0
+    ? "ok (quiet - nothing new to write)"
+    : "ok";
 
   const lines: string[] = [];
   lines.push(`# Open Brain \u2014 Gmail pull report (${isoDay})`);
@@ -1420,8 +1594,10 @@ async function writePullReport(r: PullReportInputs): Promise<void> {
   lines.push(`| Noise-filtered (auto-gen, receipts, css-heavy, &lt; 10 words) | ${r.noiseSkipped} |`);
   lines.push(`| Short-term expired (pre-filter) | ${r.shortTermExpired} |`);
   lines.push(`| Processed (entered ingest) | ${r.processed} |`);
+  lines.push(`| **Ingest attempted (emails)** | **${r.attempted}** |`);
   lines.push(`| **Ingested (whole emails)** | **${r.ingested}** |`);
   lines.push(`| Chunk rows inserted | ${r.chunksInserted} |`);
+  lines.push(`| Chunk rows attempted | ${r.chunksAttempted} |`);
   lines.push(`| **Errors** | **${r.errors}** |`);
   lines.push(`| Total words processed | ${r.totalWords.toLocaleString()} |`);
   lines.push("");
@@ -1499,6 +1675,18 @@ async function writePullReport(r: PullReportInputs): Promise<void> {
 // On a successful pull, chains to NEXT_TRIGGER_URL if set — that's how
 // pull → prune → digest ordering is enforced. Failure to POST the chain
 // is logged but doesn't fail the run.
+//
+// A run in which EVERY attempted write was refused is not a successful pull. The
+// crontab has always documented the contract - "If any step fails, the chain
+// stops - absence of the morning digest signals an upstream problem" - but the
+// code did not implement it: main() swallowed its own write errors, returned
+// normally, and the chain fired over an empty brain (2026-08-30). Now:
+//
+//   status   CLI exit   /run {"wait":true}   chain
+//   ok         0          200                fires    (a quiet day is "ok")
+//   partial    0          200                fires    (rows landed; tail retries)
+//   failed     2          500                SKIPPED  (nothing landed to digest)
+//   uncaught   1          500                SKIPPED  (as before)
 
 const HAS_CLI_ARGS = Deno.args.some((a) => a.startsWith("--") && a !== "--server");
 const FORCE_SERVER = Deno.args.includes("--server");
@@ -1509,8 +1697,20 @@ const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") || "";
 //   - skip=true (caller explicitly opted out via body {"chain": false},
 //     CLI --no-chain, list-labels mode, or dry-run — none of these
 //     produce new ingest the digest needs to see)
-async function chainTrigger(opts: { skip?: boolean } = {}): Promise<void> {
+async function chainTrigger(
+  opts: { skip?: boolean; outcome?: RunOutcome } = {},
+): Promise<void> {
   if (opts.skip) return;
+  // A failed run has no data for the chain to work on. Firing it anyway is what
+  // let a dead ingest produce a digest and a podcast that looked normal and were
+  // built from nothing.
+  if (opts.outcome && !opts.outcome.ok) {
+    console.error(
+      `Chain trigger SUPPRESSED (${NEXT_TRIGGER_URL || "no NEXT_TRIGGER_URL"}): ` +
+        runStatusLine(opts.outcome),
+    );
+    return;
+  }
   if (!NEXT_TRIGGER_URL) return;
   try {
     const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
@@ -1532,7 +1732,12 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
   // One-shot mode (legacy / ad-hoc). --no-chain disables the chain.
   const noChain = Deno.args.includes("--no-chain");
   main()
-    .then(() => chainTrigger({ skip: noChain || isNoopInvocation() }))
+    .then(async (outcome) => {
+      await chainTrigger({ skip: noChain || isNoopInvocation(), outcome });
+      // The defect this closes: the process used to exit 0 here no matter what
+      // the run had actually done.
+      if (!outcome.ok) Deno.exit(EXIT_WRITES_REFUSED);
+    })
     .catch((err) => {
       console.error("Fatal error:", err);
       Deno.exit(1);
@@ -1544,6 +1749,7 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
   let running = false;
   let lastRunAt: string | null = null;
   let lastError: string | null = null;
+  let lastOutcome: RunOutcome | null = null;
 
   function jsonResponse(body: unknown, status = 200): Response {
     return new Response(JSON.stringify(body, null, 2), {
@@ -1556,11 +1762,17 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/health") {
+      // Always 200: the SERVICE is up, which is what a health probe asks. What
+      // the last RUN did is reported in the body, where a zero-row failure can no
+      // longer hide behind a healthy service.
       return jsonResponse({
         service: "openbrain-gmail-pull",
         running,
         last_run_at: lastRunAt,
+        last_status: lastOutcome ? lastOutcome.status : null,
+        last_run_ok: lastOutcome ? lastOutcome.ok : null,
         last_error: lastError,
+        last_outcome: lastOutcome,
       });
     }
 
@@ -1568,7 +1780,9 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
       if (running) {
         return jsonResponse({ started: false, reason: "run already in progress" }, 409);
       }
-      let bodyOverride: (Partial<CliArgs> & { chain?: boolean }) | undefined;
+      let bodyOverride:
+        | (Partial<CliArgs> & { chain?: boolean; wait?: boolean })
+        | undefined;
       try {
         const text = await req.text();
         if (text.trim().length > 0) bodyOverride = JSON.parse(text);
@@ -1581,27 +1795,75 @@ if (HAS_CLI_ARGS && !FORCE_SERVER) {
       // automatically skip via isNoopInvocation regardless.
       const skipChain =
         bodyOverride?.chain === false || isNoopInvocation(bodyOverride);
-      // Strip 'chain' so it doesn't leak into CliArgs override semantics.
+      // Strip 'chain'/'wait' so they don't leak into CliArgs override semantics.
       const cliOverride = bodyOverride
         ? Object.fromEntries(
-            Object.entries(bodyOverride).filter(([k]) => k !== "chain"),
+            Object.entries(bodyOverride).filter(([k]) => k !== "chain" && k !== "wait"),
           ) as Partial<CliArgs>
         : undefined;
+      // The default is still fire-and-forget with a 202: a full pull can take half
+      // an hour and cron must not hold a connection open for it. {"wait": true}
+      // makes /run synchronous and gives the caller the verdict as a status code -
+      // 200 for ok/partial/noop, 500 for a run whose every write was refused. That
+      // is how the HTTP path can report a failure at all; the 202 only ever meant
+      // "accepted", and it was being read as "worked".
+      const wait = bodyOverride?.wait === true;
       running = true;
       lastError = null;
-      (async () => {
+
+      const doRun = async (): Promise<RunOutcome | null> => {
         try {
-          await main(cliOverride);
-          await chainTrigger({ skip: skipChain });
+          const outcome = await main(cliOverride);
+          lastOutcome = outcome;
+          if (!outcome.ok) {
+            lastError = runStatusLine(outcome);
+            console.error(`Pull run failed: ${lastError}`);
+          }
+          await chainTrigger({ skip: skipChain, outcome });
+          return outcome;
         } catch (err) {
           lastError = err instanceof Error ? err.message : String(err);
+          lastOutcome = null;
           console.error(`Pull run failed: ${lastError}`);
+          return null;
         } finally {
           running = false;
           lastRunAt = new Date().toISOString();
         }
-      })();
-      return jsonResponse({ started: true, chain_will_fire: !skipChain }, 202);
+      };
+
+      if (wait) {
+        const outcome = await doRun();
+        if (!outcome) {
+          return jsonResponse(
+            { started: true, ok: false, status: "error", error: lastError },
+            500,
+          );
+        }
+        return jsonResponse(
+          {
+            started: true,
+            ok: outcome.ok,
+            status: outcome.status,
+            summary: runStatusLine(outcome),
+            chain_fired: !skipChain && outcome.ok,
+            outcome,
+          },
+          outcome.ok ? 200 : 500,
+        );
+      }
+
+      doRun();
+      return jsonResponse(
+        {
+          started: true,
+          // The chain now fires only if the run turns out to have written
+          // something. Poll GET /health (last_status / last_run_ok) for the
+          // verdict, or POST {"wait": true} to receive it directly.
+          chain_will_fire_if_run_succeeds: !skipChain,
+        },
+        202,
+      );
     }
 
     return jsonResponse({ error: "not found", path: url.pathname }, 404);
