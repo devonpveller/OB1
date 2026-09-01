@@ -418,16 +418,32 @@ CREATE POLICY thoughts_ops_plane ON public.thoughts
 --
 -- The direct producers now state their plane at their own call sites, and the set is no
 -- longer kept by hand: `scripts/checks/check-corpus-exposure-producers.ps1` (ai-stack
--- pre-commit) DERIVES the corpus-insert sites from the tree on every commit and fails on one
--- that omits `exposure`. See documentation/notes/u5-live-producer-rls-regression.md.
+-- pre-commit) DERIVES the corpus-insert sites from the tree on every commit - WITHIN THE
+-- SHAPES IT RECOGNISES, which is the whole of its scope - and fails on one that omits
+-- `exposure`. See documentation/notes/u5-live-producer-rls-regression.md.
 --
 -- BUT THAT CHECK IS NOT THE ENFORCEMENT, AND THIS PARAGRAPH USED TO SAY IT WAS. It said
 -- "producer thirteen breaks the build rather than production", which is FALSE, and false in
 -- the same shape as the sweep two paragraphs up: it presented what a search could see as
--- what exists. Two verifiers planted producers the check does not recognise - a table name
+-- what exists. Two verifiers planted producers the check did not recognise - a table name
 -- held in a variable, a concatenated path, a helper wrapper, a `.tsx` copy, a `curl -X POST`
 -- in a `.sh`, supabase-py `.table().insert()` - and none of them was flagged or even counted.
--- Producer thirteen, written in a shape that check cannot see, breaks PRODUCTION.
+--
+-- THE CHECK HAS SINCE BEEN WIDENED AND THAT SENTENCE MUST BE DATED, NOT REPEATED. Those
+-- verdicts were true at ai-stack `819b5fe`; the widening landed in `c192041`. Re-measured
+-- 2026-08-31 at `5c81f97`, one unlabelled fixture per shape: the helper wrapper, both
+-- byte-identical copies, the `curl -X POST` in a `.sh` and supabase-py `.table().insert()`
+-- are all now FLAGGED and COUNTED. What is still missed is the table name held in a VALUE -
+-- a variable or a concatenation - and even that is decided by LAYOUT, not by shape: the check
+-- resolves no values, so it sees the literal only when it lands within two lines of a verb
+-- (flagged adjacent, ZERO SITES at three to five lines apart - measured both ways).
+--
+-- NONE OF WHICH CHANGES THE CONCLUSION, WHICH IS THE POINT. Producer thirteen, written in a
+-- shape that check cannot see, still breaks PRODUCTION. A wider alphabet moves the boundary;
+-- it does not remove one. The check also prints, on every run, the CATEGORY of text that can
+-- clear a site it DID count - any occurrence of the key that is not that statement's own
+-- declaration, of which type annotations, sibling objects, string literals, SQL text and
+-- comment continuations are measured instances and not an exhaustive list.
 --
 -- THE ENFORCEMENT IS THIS FILE. Sections 5 and 6 make `exposure` NOT NULL with no default
 -- and CHECKed, and section 7 makes this function refuse a payload that omits it. Those
