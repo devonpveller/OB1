@@ -46,7 +46,12 @@
 -- section 8(b) below FAILS this migration for when the column carries a DEFAULT - the file
 -- contradicted itself, and C.9 H3 sides with 8(b) ("a writer that does not supply the column
 -- is rejected by the CHECK, which is the point"). Section 7 now REFUSES absent/null/empty and
--- every non-plane string, and every producer states its plane at its own call site.
+-- every non-plane string, and every producer THAT WAS FOUND states its plane at its own call
+-- site. That qualifier is load-bearing and is not decoration: the found set is ten RPC callers
+-- (grep) plus twelve direct-table producers (the pre-commit check, within the shapes it
+-- recognises), and neither method can return a producer it cannot see - which is the whole
+-- lesson of this section. The completeness that matters is section 7's REFUSAL, which does not
+-- depend on anybody having found the caller.
 --
 -- PLAN section 1.1's "lane stamping happens at doors, not by writers" still holds and is not
 -- what was wrong here. A stamping door is one that KNOWS its caller's plane and FORCES it
