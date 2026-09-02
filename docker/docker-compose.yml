@@ -166,8 +166,8 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: postgres
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       DEFAULT_USER_ID: ${DEFAULT_USER_ID}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       PORT: "8000"
@@ -439,8 +439,8 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: postgres
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
       EMBEDDING_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
@@ -482,8 +482,8 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: postgres
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       # Shared brain key — authenticates inbound ingests AND the outbound
       # delegation to openbrain-mcp /research/persist.
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
@@ -541,8 +541,8 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: postgres
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       # Async chat callback: where a finished job announces itself. A research run
       # outlives the OWUI tool call that submitted it, so the report is POSTed into
@@ -808,8 +808,8 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: postgres
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       # PostgREST reads (via the OB1 Caddy /rest/v1 proxy).
       OPEN_BRAIN_URL: http://openbrain-rest
       # Local embeddings (bge-m3, 1024-dim) for chunk/source embedding (P5/P6).
@@ -906,8 +906,8 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: postgres
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
       EMBEDDING_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       EMBEDDING_MODEL: bge-m3
@@ -942,8 +942,8 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: postgres
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       CHAT_API_BASE: http://llama-cpp:8080/v1
       CHAT_API_KEY: ${OB_ENTITY_LLM_KEY:-not-needed}
       CHAT_MODEL: ${BACKFILL_CHAT_MODEL:-qwen36-27b}

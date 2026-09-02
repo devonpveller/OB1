@@ -241,7 +241,8 @@ services:
     environment:
       PORT: "8080"
       DB_HOST: openbrain-db
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ob_app_memory
+      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       RESEARCH_URL: http://openbrain-research:8000
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       IDEA_REFINERY_CHANNEL: "#ideas"
