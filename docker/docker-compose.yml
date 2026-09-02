@@ -84,6 +84,7 @@ services:
       - ./init-agent-memory-corpus-failclosed.sql:/docker-entrypoint-initdb.d/190-init-agent-memory-corpus-failclosed.sql:ro
       - ./init-agent-memory-exposure-column.sql:/docker-entrypoint-initdb.d/195-init-agent-memory-exposure-column.sql:ro # DFU C.9 H3
       - ./init-graph-plane-rls.sql:/docker-entrypoint-initdb.d/200-init-graph-plane-rls.sql:ro
+      - ./init-agent-memory-column-authority.sql:/docker-entrypoint-initdb.d/205-init-agent-memory-column-authority.sql:ro # DFU C.9 H3 item S
     networks:
       - obnet
     restart: unless-stopped
