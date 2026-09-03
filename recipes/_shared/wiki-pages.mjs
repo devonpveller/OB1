@@ -71,8 +71,12 @@ function parseTags(raw) {
 
 // extractLinks moved to links.mjs (2026-08-28) so the Deno workbench can
 // import it without this module's process.env load-time reads. Re-exported
-// here so existing consumers keep working.
-export { extractLinks } from "./links.mjs";
+// here so existing consumers keep working. NB: this must be an import + a
+// separate export — the `export { x } from "./y.mjs"` form creates NO local
+// binding, so parseWikiPage's call threw ReferenceError on every page and the
+// mirror silently took zero compiler writes from 08-28 to 09-02.
+import { extractLinks } from "./links.mjs";
+export { extractLinks };
 
 // PURE: markdown + vault-relative path → the row this page should have.
 export function parseWikiPage(relPath, markdown) {
@@ -172,7 +176,12 @@ export function queueWikiPage(absPath, markdown) {
     if (!rel) return; // outside the vault (scratch out-dir) - not a real page
     const row = parseWikiPage(rel, markdown);
     _queue.set(row.slug, row);
-  } catch { /* never let bookkeeping break a compile */ }
+  } catch (e) {
+    // Never let bookkeeping break a compile — but never swallow it silently
+    // either: a parse-path bug here starved the mirror for days with clean
+    // "compile ok" logs (the 08-28 extractLinks regression).
+    warnOnce("queue", e);
+  }
 }
 
 export function queuedWikiPageCount() {
