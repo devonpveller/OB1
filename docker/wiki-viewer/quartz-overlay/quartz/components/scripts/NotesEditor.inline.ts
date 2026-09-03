@@ -667,6 +667,32 @@ function renderMd(src: string): string {
   return out.join("\n")
 }
 
+// Reload only once the user has PAUSED (operator, 2026-09-03: a refresh must
+// never land mid-keystroke or mid-scroll). Waits for `minIdleMs` with no
+// key/pointer/wheel/scroll/touch activity — a hidden tab counts as paused —
+// and stops waiting after `capMs` so a restless pointer cannot strand the page
+// on stale content. The cap is safe ONLY because every caller invokes this
+// after the save has already resolved: by then a reload can cost a scroll
+// position, never a keystroke. Do not call it with edits still in flight.
+function reloadWhenIdle(minIdleMs = 1500, capMs = 15000) {
+  let last = Date.now()
+  const started = Date.now()
+  const bump = () => {
+    last = Date.now()
+  }
+  const acts = ["keydown", "pointerdown", "pointermove", "wheel", "touchstart", "input", "scroll"]
+  for (const a of acts) window.addEventListener(a, bump, { capture: true, passive: true })
+  const tick = () => {
+    const idle = document.hidden || Date.now() - last >= minIdleMs
+    if (idle || Date.now() - started >= capMs) {
+      location.reload()
+      return
+    }
+    setTimeout(tick, 250)
+  }
+  setTimeout(tick, minIdleMs)
+}
+
 // ── per-page wiring: edit-in-place on note AND source pages; create on hubs ──
 document.addEventListener("nav", () => {
   // Any navigation re-enables the dev hot-reload (the viewer's `quartz build
@@ -674,6 +700,11 @@ document.addEventListener("nav", () => {
   // CM editor is open (the injected reload client checks window.__neEditing —
   // patched in the viewer Dockerfile), so autosave persists without flashing.
   ;(window as any).__neEditing = false
+  // The unsaved-work flags the fallback document's takeover poll reads
+  // (page-document.mjs). A fresh page has nothing unsaved; leaving a stale
+  // `true` behind after an SPA navigation would block that poll forever.
+  ;(window as any).__neDirty = false
+  ;(window as any).__neSaving = false
   hideLinkPopover() // never let an in-editor popover survive a navigation
 
   // Mark trashed notes with a 🗑 + dim wherever they're linked (the Explorer and
@@ -776,11 +807,18 @@ document.addEventListener("nav", () => {
       isSource ? "/workbench/sources/" + encodeURIComponent(sourceId) : api(apiPath)
     const savePayload = (content: string) =>
       isSource ? { content } : (lastHash ? { content, if_match: lastHash } : { content })
-    const save = async (body: string, commitNow?: boolean) => {
+    // Returns whether the file actually took the edit. Callers that navigate or
+    // refresh MUST check it: on a 409 or a network error the text exists only in
+    // this browser buffer, and reloading anyway destroys it.
+    const save = async (body: string, commitNow?: boolean): Promise<boolean> => {
       const content = composeContent(body)
       // Notes: autosave is a working draft (no git commit); Done adds ?commit=1
       // to record an authored revision. Sources PATCH the head (commit at compile).
       const url = isSource ? saveUrl() : api(apiPath) + (commitNow ? "?commit=1" : "")
+      // Published so the fallback document's takeover poll can tell "saved" from
+      // "mid-save" and never reload over an in-flight write (page-document.mjs).
+      ;(window as any).__neSaving = true
+      let ok = false
       try {
         const r = await fetch(url, {
           method: isSource ? "PATCH" : "PUT",
@@ -789,7 +827,12 @@ document.addEventListener("nav", () => {
         })
         const j = await r.json().catch(() => ({}))
         if (r.ok) {
+          ok = true
           if (!isSource) lastHash = j.hash
+          // The buffer is on disk. Only a SUCCESSFUL save clears this: on 409 or
+          // a network error the edits are still only in the browser, and the
+          // poll must keep treating the page as unsafe to refresh.
+          ;(window as any).__neDirty = false
           setStatus(
             isSource
               ? "✓ saved (working draft — a revision commits at the next compile)"
@@ -803,7 +846,10 @@ document.addEventListener("nav", () => {
         }
       } catch (e: any) {
         setStatus("✗ " + (e && e.message ? e.message : e))
+      } finally {
+        ;(window as any).__neSaving = false
       }
+      return ok
     }
     const flush = () => {
       if (!view) return
@@ -826,7 +872,12 @@ document.addEventListener("nav", () => {
       const body = view.state.doc.toString()
       // Done just saves the working draft; committing is DELIBERATE ("Commit
       // now" on the revision card) or caught at the next compile.
-      await save(body)
+      const saved = await save(body)
+      // Only leave the editor once the file actually took the edit. On a 409 or
+      // a network error the text lives ONLY in this buffer: keep the editor open
+      // with the beforeunload flush still armed, and leave save()'s reason on the
+      // status line. (The old code tore down and reloaded unconditionally.)
+      if (!saved) return
       hideLinkPopover()
       window.removeEventListener("beforeunload", flush)
       ;(window as any).__neEditing = false
@@ -852,7 +903,13 @@ document.addEventListener("nav", () => {
       } else {
         // Notes: reload once to render the saved note (hot-reloads were
         // suppressed while editing) — a single refresh, not a per-keystroke flash.
-        location.reload()
+        // `await save(body)` above already resolved, so the PUT is complete and
+        // the reload cannot race it back to pre-save content. It still waits for
+        // the user to PAUSE before navigating (operator, 2026-09-03): clicking
+        // Done is often followed straight away by scrolling to re-read, and a
+        // reload landing in the middle of that is the jolt this avoids.
+        setStatus("✓ saved — refreshing…")
+        reloadWhenIdle()
       }
     }
     const enterEdit = async () => {
@@ -891,6 +948,10 @@ document.addEventListener("nav", () => {
       // current values shown (edit tags etc. in place; nothing is defaulted).
       view = makeEditor(host, raw, (body) => {
         setStatus("editing…")
+        // Unsaved from this keystroke until the autosave PUT comes back OK.
+        // The takeover poll refuses to refresh while this is set, so a pending
+        // debounce can never be reloaded away (page-document.mjs).
+        ;(window as any).__neDirty = true
         if (timer) clearTimeout(timer)
         timer = setTimeout(() => save(body), 1500)
       })

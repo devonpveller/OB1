@@ -40,6 +40,28 @@ export function pageDocument({ title, bodyHtml, slug, updatedAt, editable }) {
   // effectively unstyled - a white screen with a title (operator, 2026-08-26).
   // Sidebars are intentionally omitted: they need the client bundle, which this
   // document must not load (audit A-1).
+  //
+  // GEOMETRY PARITY (operator, 2026-09-03: "when creating a note the notes are
+  // confined within a very narrow window"). index.css makes .page > #quartz-body
+  // a THREE-COLUMN grid: 320px auto 320px, areas grid-sidebar-left /
+  // grid-center / grid-sidebar-right. A built page puts its sidebars in the
+  // outer areas, so its article lands in the middle column. This document has
+  // no sidebars, so .center was the grid's ONLY child and CSS auto-placement
+  // dropped it into the first cell - the 320px left gutter. THAT is the narrow
+  // strip: a 320px column, not a stylesheet that failed to load.
+  // The two rules that used to sit in the style block below,
+  // "#quartz-body{display:block}" and ".center{max-width:750px}", never applied
+  // at all - ".page>#quartz-body ..." out-specifies a bare "#quartz-body" or
+  // ".center". They were dead weight that also described the wrong cause, and
+  // the symptom (narrow, not full-width) is itself the proof they never won.
+  // The fix is to PLACE .center where a built page puts its article. Every
+  // number - column widths, the 1500px page cap, the 800px/1200px breakpoints -
+  // stays in index.css, so the geometry has one source of truth and a Quartz
+  // bump carries over on its own. Do NOT re-introduce a max-width or a display
+  // override here; that is exactly how the two dead rules happened. The outer
+  // columns stay empty (real sidebars need build-time data and the bundle);
+  // empty gutters are the price of a content column that is the same width, in
+  // the same place, as the built page's. Pinned by render-page.test.mjs.
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${safeTitle}</title>
@@ -61,8 +83,8 @@ try {
 ${editor ? `<script src="/prescript.js" type="application/javascript" spa-preserve></script>
 <script src="/postscript.js" type="module"></script>` : ""}
 <style>
-#quartz-body{display:block}
-.center{max-width:750px;margin:0 auto;padding:0 1.5rem}
+/* geometry parity with a built page - see the note in page-document.mjs */
+.center{grid-area:grid-center}
 .live-banner{background:var(--lightgray,#2a2b33);border-bottom:1px solid var(--gray,#44454f);
 padding:.55rem 1.2rem;font-size:.85rem;color:var(--darkgray,#9a9ba6)}
 .live-banner a{color:var(--secondary,#84a9ff)}
@@ -79,17 +101,47 @@ ${bodyHtml || "<p><em>(this page has no content yet)</em></p>"}</article>
 </div></div></div>
 <script>
 (function () {
+  // SAFE TAKEOVER (operator, 2026-09-03: "the note should refresh safely after
+  // the note is saved and the user has been inactive after a short period").
+  // The built page can appear at any moment; swapping this document in the
+  // instant it does is what yanks a page out from under someone mid-sentence.
+  // Reload only when ALL of:
+  //   1. this document is still the fallback. With the bundle loaded the SPA
+  //      router can navigate AWAY (micromorph swaps the body, so
+  //      data-live-page disappears) and the interval must die, or it would
+  //      reload a page the user deliberately navigated to;
+  //   2. nothing is unsaved - no open editor (window.__neEditing), no save in
+  //      flight (__neSaving), no buffer still waiting on the autosave timer
+  //      (__neDirty). A reload over any of those loses keystrokes;
+  //   3. the user has PAUSED - no key/pointer/wheel/scroll/touch for IDLE_MS.
+  //      A hidden tab counts as paused: there is nobody to disturb;
+  //   4. the page really is built now.
+  // 2 and 3 are re-checked AFTER the readiness fetch, not only before it: the
+  // fetch takes time and the user may have started typing during it.
+  var IDLE_MS = 4000;
+  var lastAct = Date.now();
+  var bump = function () { lastAct = Date.now() };
+  var acts = ["keydown", "pointerdown", "pointermove", "wheel", "touchstart", "input", "scroll"];
+  for (var i = 0; i < acts.length; i++) {
+    window.addEventListener(acts[i], bump, { capture: true, passive: true });
+  }
+  // Coming BACK to the tab is activity; going away is not.
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) bump() });
+  var settled = function () {
+    if (window.__neEditing || window.__neSaving || window.__neDirty) return false;
+    if (document.hidden) return true;
+    return (Date.now() - lastAct) >= IDLE_MS;
+  };
   var iv = setInterval(function () {
-    // With the bundle loaded, the SPA router can navigate AWAY from this
-    // document (micromorph swaps the body, so data-live-page disappears).
-    // The interval must then die, or it would reload a page the user
-    // deliberately navigated to.
     if (!document.body || document.body.dataset.livePage !== "1") { clearInterval(iv); return }
-    // Never yank the page out from under an open editor (data loss).
-    if (window.__neEditing) return;
+    if (!settled()) return;
     fetch(location.pathname, { cache: "no-store" })
       .then(function (r) { return r.text() })
-      .then(function (t) { if (t.indexOf("data-live-page") === -1) location.reload() })
+      .then(function (t) {
+        if (t.indexOf("data-live-page") !== -1) return;
+        if (!settled()) return;
+        location.reload();
+      })
       .catch(function () {});
   }, 3000);
 })();

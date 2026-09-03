@@ -99,6 +99,56 @@ test("EDITOR: editable notes emit the BUILT page's editor contract, derived from
   assert.ok(doc.includes('dataset.livePage !== "1"'), "poll self-cancels after SPA nav away");
 });
 
+test("LAYOUT: the fallback places .center in the built page's grid column, never a narrow strip", () => {
+  const doc = pageDocument({ slug: "notes/x", editable: true });
+  // WHY (operator, 2026-09-03: "confined within a very narrow window"):
+  // index.css makes `.page > #quartz-body` a 320px/auto/320px grid. This
+  // document has no sidebars, so .center was the grid's only child and CSS
+  // auto-placement put it in the FIRST cell — the 320px left gutter. Pinning
+  // it to grid-center is what makes a not-yet-built note the same width, in
+  // the same place, as the built one.
+  assert.ok(/\.center\{grid-area:grid-center\}/.test(doc),
+    ".center must be placed in the grid-center area or it auto-places into the 320px gutter");
+  // The two rules this replaced never applied (`.page>#quartz-body …`
+  // out-specifies a bare `#quartz-body`/`.center`), and re-adding either
+  // would re-describe the wrong cause AND could win if index.css changes.
+  assert.ok(!/#quartz-body\{display:\s*block/.test(doc),
+    "must not override Quartz's grid — that was the dead rule that hid the real cause");
+  assert.ok(!/\.center\{[^}]*max-width/.test(doc),
+    "no hard-coded column width: the geometry lives in index.css, one source of truth");
+});
+
+test("REFRESH: the takeover reloads only when the page is built, saved AND the user has paused", () => {
+  const doc = pageDocument({ slug: "notes/x", editable: true });
+  const poll = doc.slice(doc.lastIndexOf("<script>"));
+  // Never over unsaved work: an open editor, an in-flight save, or a buffer
+  // still waiting on the autosave debounce (NotesEditor.inline.ts sets all
+  // three). Dropping any one of these makes a refresh able to eat keystrokes.
+  for (const flag of ["__neEditing", "__neSaving", "__neDirty"]) {
+    assert.ok(poll.includes(flag), "poll must defer to " + flag);
+  }
+  // Never mid-gesture: idle is measured from real user activity.
+  for (const ev of ["keydown", "pointermove", "wheel", "scroll", "touchstart"]) {
+    assert.ok(poll.includes('"' + ev + '"'), "idle tracking must watch " + ev);
+  }
+  assert.ok(poll.includes("document.hidden"), "a hidden tab counts as paused");
+  // The gate must be re-checked AFTER the readiness fetch, not only before it:
+  // the fetch takes time and the user may start typing during it. Two calls to
+  // settled() — one before the fetch, one immediately before the reload.
+  const settledCalls = poll.match(/settled\(\)/g) || [];
+  assert.ok(settledCalls.length >= 2,
+    "re-check the gate immediately before location.reload(), not just before the fetch");
+  const lastGate = poll.lastIndexOf("!settled()");
+  assert.ok(lastGate > poll.indexOf('indexOf("data-live-page")'),
+    "the last gate must come AFTER the readiness fetch resolves");
+  assert.ok(lastGate < poll.indexOf("location.reload()"),
+    "the last gate must come BEFORE the reload");
+  // ...but it must still fire: the readiness check is what ends the fallback.
+  assert.ok(poll.includes('indexOf("data-live-page")'), "still detects the built page");
+  assert.ok(poll.includes("location.reload()"), "the takeover must still happen");
+  assert.ok(poll.includes('dataset.livePage !== "1"'), "poll self-cancels after SPA nav away");
+});
+
 test("EDITOR: everything that is not a user note stays bundle-free and identity-free", () => {
   for (const [label, doc] of [
     ["read-only entity", pageDocument({ slug: "content/place/place-x" })],
