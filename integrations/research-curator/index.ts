@@ -35,7 +35,8 @@
  *      NEW_THREAD_MIN_CONFIDENCE (0.60), MERGE_FLOOR_DISTANCE (0.45), PORT (8000).
  */
 import { Pool } from "postgres";
-import { writeClaims, detectConflicts, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
+import { writeClaims, detectConflicts, parseSynthesisClaims, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
+import { ResilientPool } from "./pool.ts";
 
 // --- Config -----------------------------------------------------------------
 const DB_HOST = Deno.env.get("DB_HOST") || "openbrain-db";
@@ -68,13 +69,22 @@ const MERGE_FLOOR_DISTANCE = parseFloat(Deno.env.get("MERGE_FLOOR_DISTANCE") || 
 const CONFLICT_DISTANCE = parseFloat(Deno.env.get("CONFLICT_DISTANCE") || "0.25");
 const PORT = parseInt(Deno.env.get("PORT") || "8000", 10);
 
-const pool = new Pool({
+// A plain `new Pool(...)` here is what cost 244 research runs their entire
+// output between 2026-06-19 and 2026-08-31: deno-postgres hands out a pooled
+// connection without checking the socket, so the first query after the database
+// restarted died with `Broken pipe (os error 32)` and took the whole package
+// with it. ResilientPool (pool.ts) probes every checkout and rebuilds on a
+// connection-class failure — same contract, so no call site below changes.
+const DB_CONFIG = {
   hostname: DB_HOST,
   port: DB_PORT,
   database: DB_NAME,
   user: DB_USER,
   password: DB_PASSWORD,
-}, 8);
+};
+const POOL_SIZE = 8;
+type PgClient = Awaited<ReturnType<Pool["connect"]>>;
+const pool = new ResilientPool<PgClient>(() => new Pool(DB_CONFIG, POOL_SIZE, true));
 
 // --- Types ------------------------------------------------------------------
 interface Pkg {
@@ -434,9 +444,12 @@ async function writeGroundedClaims(
     }
     return res;
   } catch (e) {
+    // Swallowing this is how a run ends up searchable but never reasoned over,
+    // with the only trace a log line nothing reads. Roll back and RETHROW so the
+    // ingest handler can report it with the run's identity and the claim count
+    // (the ingest still returns 200 — the sources DID land).
     await client.queryArray("ROLLBACK").catch(() => {});
-    console.error("claims: grounded-claim write failed:", (e as Error).message);
-    return null;
+    throw e;
   } finally {
     client.release();
   }
@@ -449,6 +462,52 @@ async function conflictJudge(a: string, b: string): Promise<ConflictVerdict> {
   const out = await chatJson(CONFLICT_JUDGE_SYS, `CLAIM A: ${a}\nCLAIM B: ${b}`);
   const v = out.verdict;
   return v === "contradict" || v === "agree" ? v : "unrelated";
+}
+
+// --- Failure reporting ------------------------------------------------------
+// The single line this replaces was `ingest failed: Broken pipe (os error 32)`.
+// It named the plumbing and nothing else: not the run, not the stage, not the
+// fact that a complete research package had just been destroyed. It is why the
+// same failure ran for two and a half months and 244 runs. Every failure path
+// now states which STAGE died, which research_key died with it, and exactly how
+// much went unwritten, in the log AND in the response body (which the research
+// service stores on the job row as result->'curator').
+type Stage = "embed" | "resolve" | "persist" | "claims";
+
+interface Loss {
+  stage: Stage;
+  research_key: string;
+  query: string;
+  sources_unwritten: number;
+  claims_unwritten: number;
+  detail: string;
+}
+
+/** How many grounded claims this package WOULD have produced (parser is pure). */
+function claimCount(pkg: Pkg): number {
+  try {
+    return parseSynthesisClaims(pkg.synthesis || "").claims.length;
+  } catch {
+    return 0;
+  }
+}
+
+function describeLoss(stage: Stage, pkg: Pkg, e: unknown, sourcesWritten = 0): Loss {
+  const totalSources = Array.isArray(pkg.sources) ? pkg.sources.length : 0;
+  return {
+    stage,
+    research_key: (pkg.research_key || "").trim() || "(none)",
+    query: (pkg.query || "").replace(/\s+/g, " ").slice(0, 200),
+    sources_unwritten: Math.max(0, totalSources - sourcesWritten),
+    claims_unwritten: claimCount(pkg),
+    detail: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+  };
+}
+
+function lossLine(l: Loss): string {
+  return `ingest FAILED stage=${l.stage} research_key=${l.research_key} ` +
+    `LOST ${l.sources_unwritten} source(s) + ${l.claims_unwritten} grounded claim(s) UNWRITTEN ` +
+    `query="${l.query}" cause: ${l.detail}`;
 }
 
 // --- HTTP server ------------------------------------------------------------
@@ -466,7 +525,9 @@ Deno.serve({ port: PORT }, async (req) => {
       const c = await pool.connect();
       try { await c.queryArray("SELECT 1"); db = true; } finally { c.release(); }
     } catch { /* db down */ }
-    return Response.json({ ok: db, db }, { status: db ? 200 : 503 });
+    // pool_rebuilds is the witness for a severed-connection drill: it increments
+    // only when the wrapper threw a dead pool away and built a fresh one.
+    return Response.json({ ok: db, db, pool_rebuilds: pool.rebuilds }, { status: db ? 200 : 503 });
   }
 
   if (req.method === "POST" && url.pathname === "/ingest/research-package") {
@@ -476,20 +537,25 @@ Deno.serve({ port: PORT }, async (req) => {
     const claim = (pkg.claim || "").trim();
     if (!claim) return Response.json({ error: "claim required" }, { status: 400 });
 
+    // Which step we are on, so a failure can say what died rather than just how.
+    let stage: Stage = "embed";
     try {
       const claimEmb = await embed(claim.slice(0, 1600));
+      stage = "resolve";
       const res = await resolve(pkg, claimEmb);
 
       let persist: Record<string, unknown>;
+      stage = "persist";
       // res.name is passed as the notebook label (see delegatePersist).
       try {
         persist = await delegatePersist(pkg, res.thread_id, res.name);
       } catch (e) {
         // Persist failed AFTER we resolved a thread. Surface it so the caller
         // can fall back to its own unthreaded persist (best-effort, never block).
-        console.error("ingest: persist delegation failed:", (e as Error).message);
+        const loss = describeLoss("persist", pkg, e);
+        console.error(lossLine(loss));
         return Response.json(
-          { error: "persist_failed", detail: (e as Error).message, thread_id: res.thread_id, thread_decision: res.decision },
+          { error: "persist_failed", ...loss, detail: loss.detail, thread_id: res.thread_id, thread_decision: res.decision },
           { status: 502 },
         );
       }
@@ -524,15 +590,25 @@ Deno.serve({ port: PORT }, async (req) => {
             );
           } finally { c.release(); }
         } catch (e) {
-          console.error("ingest: synthesis metadata stamp failed:", (e as Error).message);
+          console.error(
+            `ingest: synthesis metadata stamp failed research_key=${pkg.research_key || "(none)"} ` +
+              `(sources kept, readable prose + breadcrumbs lost): ${(e as Error).message}`,
+          );
         }
       }
 
       let claims: WriteClaimsResult | null = null;
+      let claimsError: string | null = null;
       try {
         claims = await writeGroundedClaims(pkg, res.thread_id, synthesisId, sourceIds);
       } catch (e) {
-        console.error("ingest: claim write threw:", (e as Error).message);
+        // The sources DID land (persist succeeded above); the grounded claims did
+        // not, so this run is searchable but not reasoned over. Say so, with the
+        // count, and carry it back to the caller in the body — a claim write that
+        // fails silently is the same class of defect as the broken pipe.
+        const loss = describeLoss("claims", pkg, e, Number(persist.sources_written ?? 0));
+        console.error(lossLine(loss));
+        claimsError = loss.detail;
       }
 
       // Maintain the thread so future matching improves — best-effort.
@@ -551,10 +627,12 @@ Deno.serve({ port: PORT }, async (req) => {
         shortlist: res.shortlist.map((c) => ({ thread_id: c.thread_id, name: c.name, distance: c.distance })),
         persist,
         claims,
+        claims_error: claimsError,
       });
     } catch (e) {
-      console.error("ingest failed:", (e as Error).message);
-      return Response.json({ error: "ingest_failed", detail: (e as Error).message }, { status: 500 });
+      const loss = describeLoss(stage, pkg, e);
+      console.error(lossLine(loss));
+      return Response.json({ error: "ingest_failed", ...loss }, { status: 500 });
     }
   }
 

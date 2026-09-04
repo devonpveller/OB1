@@ -4,6 +4,7 @@ import {
   extractTextFromHtml, extractTitle, domainOf, decodeEntities,
   isStale, revalidateWindow, decideReuse, backstopDecision, reuseMetric,
   citedNumbers, citedSubset, buildCitedAndRenumber, renderResult,
+  classifyCuratorOutcome,
 } from "./lib.ts";
 
 Deno.test("extractTextFromHtml strips scripts/styles/tags, keeps text", () => {
@@ -193,4 +194,42 @@ Deno.test("renderResult: a source without a url is listed, not linked", () => {
   const out = renderResult({ synthesis: "S.", cited_sources: [{ url: null, title: "Untitled paper" }] });
   assertEquals(out.includes("1. Untitled paper"), true);
   assertEquals(out.includes("]("), false);
+});
+
+// ── classifyCuratorOutcome ──────────────────────────────────────────────────
+// The rule these enforce: a run that lost output must NEVER produce
+// status='done' with error=NULL. That combination is exactly what hid 244 lost
+// runs for two and a half months.
+Deno.test("curator failure => status error, and error names the loss", () => {
+  const o = classifyCuratorOutcome({ error: "curator 500: Broken pipe (os error 32)" });
+  assertEquals(o.status, "error");
+  assertEquals(o.state, "FAILED");
+  assertEquals(o.reason, "curator 500: Broken pipe (os error 32)");
+  assertEquals(typeof o.error, "string");
+  assertEquals(o.error!.includes("NOT filed into Open Brain"), true);
+  assertEquals(o.error!.includes("Broken pipe (os error 32)"), true);
+});
+
+Deno.test("claims-only failure stays done but the error column is NOT null", () => {
+  const o = classifyCuratorOutcome({ thread_id: "t1", claims_error: "deadlock detected" });
+  assertEquals(o.status, "done");
+  assertEquals(o.state, "partial");
+  assertEquals(o.error!.includes("grounded claims NOT written"), true);
+  assertEquals(o.error!.includes("deadlock detected"), true);
+});
+
+Deno.test("a curator that filed the package leaves error NULL", () => {
+  const o = classifyCuratorOutcome({ thread_id: "t1", persist: { sources_written: 4 } });
+  assertEquals(o, { status: "done", error: null, reason: null, state: "filed" });
+});
+
+Deno.test("no curator report at all is 'skipped', not 'filed'", () => {
+  assertEquals(classifyCuratorOutcome(null).state, "skipped");
+  assertEquals(classifyCuratorOutcome(undefined).state, "skipped");
+  assertEquals(classifyCuratorOutcome(null).status, "done");
+});
+
+Deno.test("an empty error string is not a failure", () => {
+  assertEquals(classifyCuratorOutcome({ thread_id: "t1", error: "" }).state, "filed");
+  assertEquals(classifyCuratorOutcome({ thread_id: "t1", claims_error: "   " }).error, null);
 });

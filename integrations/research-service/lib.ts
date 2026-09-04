@@ -304,3 +304,56 @@ export function renderResult(result: RenderableResult): string {
 
   return parts.join("\n");
 }
+
+// ── Curator outcome (incident 2026-08-31) ───────────────────────────────────
+// runResearch never throws when the curator dies; it records the failure inside
+// its `curator` result. The job row was then written status='done', error=NULL —
+// indistinguishable from a run that landed — which is how 244 runs lost their
+// entire output unnoticed between 2026-06-19 and 2026-08-31. This is the single
+// decision that turns the curator's report into the two columns a reader of
+// research_jobs actually looks at, kept pure so it is tested rather than
+// inspected.
+export type CuratorState = "filed" | "FAILED" | "partial" | "skipped";
+export interface CuratorOutcome {
+  /** research_jobs.status. 'error' when the output was NOT filed at all. */
+  status: "done" | "error";
+  /** research_jobs.error. NULL ONLY when nothing was lost. */
+  error: string | null;
+  /** The raw cause, for the "Not saved to Open Brain" banner. */
+  reason: string | null;
+  /** Label for progress.message — 'backstop=complete' never meant 'it landed'. */
+  state: CuratorState;
+}
+
+function nonEmpty(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v : null;
+}
+
+export function classifyCuratorOutcome(
+  curator: Record<string, unknown> | null | undefined,
+): CuratorOutcome {
+  const failure = nonEmpty(curator?.error);
+  if (failure) {
+    return {
+      status: "error",
+      error: `curator: the research completed but was NOT filed into Open Brain - ${failure}`,
+      reason: failure,
+      state: "FAILED",
+    };
+  }
+  const partial = nonEmpty(curator?.claims_error);
+  if (partial) {
+    // The sources DID land, so the run is done — but "done, error NULL" would
+    // again hide a real loss: this research is searchable and not reasoned over.
+    return {
+      status: "done",
+      error: `curator PARTIAL: sources filed, grounded claims NOT written - ${partial}`,
+      reason: partial,
+      state: "partial",
+    };
+  }
+  // No curator report at all = there was nothing to promote (dry run, or a run
+  // with no cited sources and no reuse). Honest, but not a success either.
+  if (!curator) return { status: "done", error: null, reason: null, state: "skipped" };
+  return { status: "done", error: null, reason: null, state: "filed" };
+}

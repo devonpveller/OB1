@@ -22,7 +22,7 @@
  *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { extractTextFromHtml, extractTitle, domainOf, selectRepoFiles, renderResult } from "./lib.ts";
+import { classifyCuratorOutcome, domainOf, extractTextFromHtml, extractTitle, renderResult, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -549,6 +549,23 @@ async function notifyChat(
   await send({ type: "notification", data: { type: "info", content: "Deep research finished." } }).catch(() => {});
 }
 
+// The report is real; only its FILING failed. Both readers get the same words:
+// the OWUI tool renders this banner from the job row (owui/tools/deep_research.py)
+// and notifyChat prepends it on the async path. Turning a silent loss into a loud
+// loss that ALSO throws away the user's report would be worse than the defect.
+function notSavedBanner(jobId: string, reason: string): string {
+  return [
+    "> **Not saved to Open Brain.** This research completed and the findings below are real, " +
+    "but filing them failed, so they are NOT searchable and will not appear in the wiki.",
+    ">",
+    "> Reason: " + reason,
+    ">",
+    "> The full result is retained on job `" + jobId + "` and can be replayed.",
+    "",
+    "",
+  ].join("\n");
+}
+
 // A job claimed by the drain loop: it has already been flipped to status='running'
 // (started_at set) by the atomic claim, so executeJob only runs the harness and
 // persists the terminal state — it never re-claims.
@@ -606,25 +623,56 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       backstop: res.backstop,
       reuse_ratio: 1 - res.metrics.gap_ratio,
     });
+    // ── Curator honesty gate (incident 2026-08-31) ──────────────────────────
+    // runResearch NEVER throws when the curator dies — it records the failure as
+    // res.curator = { error } and returns normally (harness.ts, delegateToCurator
+    // call site). This row was then written status='done', error=NULL, progress
+    // "backstop=complete", which is indistinguishable from a run that landed. It
+    // is why 244 runs lost their entire output between 2026-06-19 and 2026-08-31
+    // with nothing in the data the operator actually reads. A run whose output
+    // was not FILED is not done.
+    // classifyCuratorOutcome is pure and unit-tested (lib.test.ts) — the rule
+    // "a run that lost output never reads status='done', error=NULL" lives there
+    // rather than in this un-testable DB path. progress.message now carries the
+    // curator outcome too: the old "backstop=complete" was the INITIAL value of
+    // the backstop variable and meant 'no backstop tripped', never 'it landed'.
+    const outcome = classifyCuratorOutcome(res.curator as Record<string, unknown> | null);
+    const resultJson = JSON.stringify({
+      synthesis: res.synthesis, prose: res.prose, report_type: res.reportType, needs: res.needs,
+      followup_queries: res.followupQueries, gaps: res.gaps,
+      cited_sources: res.citedSources, reuse_claims: res.reuseClaims,
+      thread_id: (res.curator?.thread_id as string) ?? thread_id, reuse_ratio: 1 - res.metrics.gap_ratio,
+      curator: res.curator, backstop: res.backstop, fetch_stats: res.fetchStats,
+      contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
+      skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
+      rendered, // chat-facing markdown; absent on jobs cached before this field
+    });
+    const progressJson = JSON.stringify({
+      phase: outcome.status === "error" ? "error" : "done",
+      message: `backstop=${res.backstop} curator=${outcome.state}`,
+    });
+    if (outcome.error) console.error(`[job ${jobId}] ${outcome.error}`);
+
+    // `result` is written in FULL on both paths, including the failure one: the
+    // report is real, only its filing failed, and the OWUI tool renders it from
+    // this column behind the "Not saved to Open Brain" banner. Dropping it would
+    // turn a silent loss into a loud loss that also destroys the user's answer.
     await client.queryObject(
-      `UPDATE research_jobs SET status='done', finished_at=now(),
+      `UPDATE research_jobs SET status=$6, finished_at=now(), error=$5,
          result=$2::jsonb, metrics=$3::jsonb, progress=$4::jsonb WHERE id=$1`,
-      [jobId, JSON.stringify({
-        synthesis: res.synthesis, prose: res.prose, report_type: res.reportType, needs: res.needs,
-        followup_queries: res.followupQueries, gaps: res.gaps,
-        cited_sources: res.citedSources, reuse_claims: res.reuseClaims,
-        thread_id: (res.curator?.thread_id as string) ?? thread_id, reuse_ratio: 1 - res.metrics.gap_ratio,
-        curator: res.curator, backstop: res.backstop, fetch_stats: res.fetchStats,
-        contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
-        skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
-        rendered, // chat-facing markdown; absent on jobs cached before this field
-      }), JSON.stringify(res.metrics), JSON.stringify({ phase: "done", message: `backstop=${res.backstop}` })],
+      [jobId, resultJson, JSON.stringify(res.metrics), progressJson, outcome.error, outcome.status],
     );
     // Persist first, announce second. If the announce fails the result is still
     // retrievable by poll; the reverse order could show a chat a report the job
     // then failed to record.
     await settleBeforeAnnounce(claimedAt);
-    await notifyChat(options?.callback, rendered, jobId);
+    // Same banner as the blocking path, so the async reader is told the findings
+    // were not filed instead of being handed an ordinary-looking report.
+    await notifyChat(
+      options?.callback,
+      outcome.status === "error" ? notSavedBanner(jobId, outcome.reason ?? "unknown error") + rendered : rendered,
+      jobId,
+    );
   } catch (e) {
     const failure = String((e as Error).message);
     await client.queryObject(
