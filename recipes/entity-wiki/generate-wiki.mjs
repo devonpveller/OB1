@@ -53,7 +53,7 @@ import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-change
 // queries instead of whole-vault walks (wiki-dynamic-index P1). The queue is
 // sync; ONE batched flush before exit (a CLI run cuts off fire-and-forget).
 import { queueWikiPage, flushWikiPages } from "../_shared/wiki-pages.mjs";
-import { rewriteCitations } from "../_shared/citations.mjs";
+import { rewriteCitations, linkSafeLabel } from "../_shared/citations.mjs";
 
 // ---------------------------------------------------------------
 // Config + CLI parsing
@@ -876,13 +876,12 @@ export function buildEvolutionSection(entity, sources, linked) {
   const events = [{ date: firstSeen, text: "First captured as a thought-based mental model (ungrounded belief)." }];
   for (const s of srcs) {
     const date = String(s.linked_at || "").slice(0, 10);
-    const title = clip(
-      scrubSnippetContent(String(s.title || s.url || s.id))
-        .replace(/[\[\]|]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim(),
-      120,
-    );
+    // linkSafeLabel, not an inline copy of it: this used to duplicate the
+    // old [ ] | character class and so missed "#", which breaks Quartz's
+    // wikilink alias match outright ("Daily #NNN" digest sources). Keep
+    // clip() outermost so the 120-char budget is measured on the label
+    // that is actually emitted.
+    const title = clip(linkSafeLabel(scrubSnippetContent(String(s.title || s.url || s.id))), 120);
     const ct = s.content_type ? ` (${s.content_type})` : "";
     events.push({ date, text: `Grounded by [[content/source/${s.id}|${title || s.id}]]${ct}.` });
   }

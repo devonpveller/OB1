@@ -80,3 +80,15 @@ test("linkSafeLabel strips wikilink-breaking characters", () => {
   assert.equal(linkSafeLabel("A | B [draft] C"), "A B draft C");
   assert.equal(linkSafeLabel(null), "");
 });
+
+// Quartz's wikilink alias character class excludes '#' as well as the brackets
+// and the pipe, so a '#' anywhere in an alias makes the WHOLE link fail to
+// match and survive as literal [[...]] text. The daily digest mints
+// "Daily #NNN" source titles every day, so this is the highest-volume break.
+// (Verified against the regex in the built viewer image, quartz v4.5.1,
+// quartz/plugins/transformers/ofm.ts: the alias group is [^\[\]\#]*.)
+test("linkSafeLabel strips '#' (breaks Quartz's alias class, e.g. 'Daily #481')", () => {
+  assert.equal(linkSafeLabel("Daily #481"), "Daily 481");
+  assert.equal(linkSafeLabel("#lead"), "lead");
+  assert.equal(linkSafeLabel("A #1 | B [c] #2"), "A 1 B c 2");
+});
