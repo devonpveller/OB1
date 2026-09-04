@@ -85,6 +85,21 @@ export interface ScriptChatConfig {
    *  classification/triage — temperature 0.5 makes gap triage flaky (can drop to
    *  zero dives on a given input). */
   temperature?: number;
+  /** Is this caller's answer PROSE, or a CLASSIFICATION?
+   *
+   *  This factory serves both, and they want OPPOSITE things from a truncated
+   *  reply. For prose (the episode script) partial text beats nothing: null
+   *  degrades to dumping raw grounded material into TTS. For a classifier, null
+   *  is a DELIBERATE safe default the caller has already reasoned about -
+   *  promo-filter.ts:147 returns "keep" on a null and says so in words - while a
+   *  cut-off reply is actively DANGEROUS, because it parses. Measured 2026-09-04
+   *  against the real isPromoBody with one truncated think-model reply:
+   *  unsalvaged -> KEEP (safe), salvaged+trimmed -> DROP, because the trim cut
+   *  back past the "VERDICT: KEEP" line and promo-filter fell through to its
+   *  bare substring check. That email then contributes NO source at all.
+   *
+   *  Default FALSE - the safe reading. Only `scriptChat` sets it. */
+  salvageTruncated?: boolean;
 }
 /** Transient = worth re-sampling: network/timeout, 429, 5xx, or an empty 200.
  *  A 401/403/400 is a CONFIGURATION fault; retrying it just burns the clock. */
@@ -102,6 +117,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   const label = cfg.label ?? "script chat";
   const baseTokens = cfg.maxTokens ?? 2200;
   const ceiling = Math.max(baseTokens, cfg.maxTokensCeiling ?? baseTokens * 2);
+  const salvage = cfg.salvageTruncated === true;
   // Cut-off text becomes the ON transcript prompt downstream, and an unterminated
   // segment is what aborted the 2026-08-29 episode. Trimming back to the last
   // sentence that actually ends removes that hazard for free; if nothing ends
@@ -140,7 +156,9 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
     // episode to a raw grounded-material dump. Measured with a control: escalate
     // -> null, don't escalate -> usable text. So the text is KEPT.
     const giveUp = (why: string): string | null => {
-      if (bestTruncated) {
+      // Only a PROSE caller wants the salvage; a classifier's null is its own
+      // deliberate safe default and must not be overridden with cut-off text.
+      if (salvage && bestTruncated) {
         console.warn(
           `[${label}] ${why} - returning the earlier TRUNCATED text rather than nothing; ` +
             `this episode is INCOMPLETE`,
@@ -191,9 +209,19 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
               budget = next;
               continue; // not a transient fault; no backoff to serve
             }
-            // Ceiling reached. Returning the cut-off text is the LEAST-BAD option -
-            // null degrades to dumping raw grounded material, which is worse - but
-            // it must never be silent again.
+            // Ceiling reached, and what to do now depends on WHO ASKED.
+            if (!salvage) {
+              // Classifier: its null-path is a reasoned safe default, and a
+              // cut-off reply is worse than no reply because it still PARSES.
+              console.warn(
+                `[${label}] TRUNCATED at max_tokens=${budget} with the ceiling (${ceiling}) reached - ` +
+                  `returning null: this caller classifies, and a cut-off answer parses as a WRONG one`,
+              );
+              return null;
+            }
+            // Prose: partial text is the LEAST-BAD option - null degrades to
+            // dumping raw grounded material into TTS, which is worse - but it
+            // must never be silent again.
             console.warn(
               `[${label}] TRUNCATED at max_tokens=${budget} with the ceiling (${ceiling}) reached - ` +
                 `returning CUT-OFF text: this episode is INCOMPLETE (raise SCRIPT_MAX_TOKENS)`,

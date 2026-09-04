@@ -148,6 +148,9 @@ const scriptChat = makeScriptChat({
   // observed, so 6000 covers a 7-segment day with the sign-off; makeScriptChat
   // still doubles up to the ceiling if a day runs long.
   maxTokens: num("SCRIPT_MAX_TOKENS", 6000),
+  // The ONLY prose caller. Every other ChatFn below classifies, and for those a
+  // null is a reasoned safe default that must not be replaced with cut-off text.
+  salvageTruncated: true,
 });
 // Gap-dive triage — a CLASSIFICATION task, so temperature 0 (deterministic).
 // Reusing the default 0.5 chat made triage flaky: same gaps yielded 7-10 dives

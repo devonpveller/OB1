@@ -139,7 +139,7 @@ Deno.test("truncation at the ceiling returns the cut-off text but SAYS SO (never
   try {
     const chat = makeScriptChat({
       chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
-      maxTokens: 1000, maxTokensCeiling: 2000, attempts: 3,
+      maxTokens: 1000, maxTokensCeiling: 2000, attempts: 3, salvageTruncated: true,
     });
     // Least-bad: returning null degrades to dumping raw grounded material.
     assertEquals(await chat("sys", "user"), "still cut off");
@@ -252,7 +252,7 @@ Deno.test("escalation is never WORSE than not escalating: a late timeout keeps t
   try {
     const chat = makeScriptChat({
       chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
-      maxTokens: 1000, maxTokensCeiling: 2000, attempts: 2, timeoutMs: 60,
+      maxTokens: 1000, maxTokensCeiling: 2000, attempts: 2, timeoutMs: 60, salvageTruncated: true,
     });
     // Trimmed to the last COMPLETE sentence, never null.
     assertEquals(await chat("sys", "user"), "HOST A: first half.");
@@ -296,7 +296,7 @@ Deno.test("cut-off text is trimmed to the last COMPLETE sentence (it becomes the
   try {
     const chat = makeScriptChat({
       chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
-      maxTokens: 1000, maxTokensCeiling: 1000, attempts: 1,
+      maxTokens: 1000, maxTokensCeiling: 1000, attempts: 1, salvageTruncated: true,
     });
     assertEquals(await chat("sys", "user"), "HOST A: one. HOST B: two!");
   } finally {
@@ -312,7 +312,7 @@ Deno.test("text with no complete sentence is returned whole, never emptied", asy
   try {
     const chat = makeScriptChat({
       chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
-      maxTokens: 500, maxTokensCeiling: 500, attempts: 1,
+      maxTokens: 500, maxTokensCeiling: 500, attempts: 1, salvageTruncated: true,
     });
     assertEquals(await chat("sys", "user"), "no terminator anywhere in here");
   } finally {
@@ -338,7 +338,7 @@ Deno.test("a reused ChatFn does not leak one call's truncated text into another 
   try {
     const chat = makeScriptChat({
       chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
-      maxTokens: 100, maxTokensCeiling: 100, attempts: 1,
+      maxTokens: 100, maxTokensCeiling: 100, attempts: 1, salvageTruncated: true,
     });
     assertEquals(await chat("sys", "call one"), "Call ONE text.");
     // A 401 must answer null - NEVER the previous call's content.
@@ -361,6 +361,66 @@ Deno.test("a reused ChatFn resets its token budget to the base on every call", a
     await chat("sys", "call one"); // escalates 100 -> 200
     await chat("sys", "call two"); // must START at 100 again
     assertEquals(s.budgets(), [100, 200, 100]);
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
+
+// ── D4: prose vs classifier (the review's catch) ─────────────────────────────
+// makeScriptChat serves the episode SCRIPT (prose - partial text beats nothing)
+// and four CLASSIFIERS, where null is a deliberate safe default the caller has
+// already reasoned about (promo-filter.ts:147 "conservative: keep on model
+// failure"). A cut-off classifier reply is WORSE than none because it still
+// parses: measured against the real isPromoBody, salvaging a truncated reply
+// flipped KEEP -> DROP and the email lost its source entirely.
+
+Deno.test("a CLASSIFIER caller gets null on truncation, never cut-off text", async () => {
+  const s = stubServer(() => truncated("...reasoning continues and then VERDICT: KEE"));
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    // No salvageTruncated -> the safe default.
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 100, maxTokensCeiling: 100, attempts: 1,
+    });
+    assertEquals(await chat("sys", "classify this"), null);
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
+
+Deno.test("a classifier's null is not overridden by an EARLIER call's truncated text", async () => {
+  const s = stubServer((_r, hit) =>
+    hit === 1 ? truncated("VERDICT: KEEP and then it keeps talking") : new Response("boom", { status: 500 })
+  );
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 100, maxTokensCeiling: 100, attempts: 1,
+    });
+    assertEquals(await chat("sys", "one"), null);
+    assertEquals(await chat("sys", "two"), null);
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
+
+Deno.test("the PROSE caller still salvages - the split is opt-in, not a blanket removal", async () => {
+  const s = stubServer(() => truncated("HOST A: a whole sentence. HOST B: cut off mid-"));
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 100, maxTokensCeiling: 100, attempts: 1, salvageTruncated: true,
+    });
+    assertEquals(await chat("sys", "script"), "HOST A: a whole sentence.");
   } finally {
     console.warn = realWarn;
     await s.stop();
