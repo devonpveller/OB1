@@ -73,6 +73,11 @@ export interface ScriptChatConfig {
   label?: string;
   timeoutMs?: number;
   maxTokens?: number;
+  /** Hard ceiling for the budget escalation that a truncated completion triggers.
+   *  Default 4x maxTokens. This bounds cost and latency, NOT context: the 27b lane
+   *  is 98,304 tokens (LLAMA_SWAP_QWEN36_27B_CTX_SIZE 196,608 / N_PARALLEL 2), so
+   *  even a 22k-token prompt leaves ample room. */
+  maxTokensCeiling?: number;
   /** Sampling temperature. Default 0.5 (dialogue). Use 0 for deterministic
    *  classification/triage — temperature 0.5 makes gap triage flaky (can drop to
    *  zero dives on a given input). */
@@ -92,6 +97,11 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   const apiKey = cfg.apiKey || Deno.env.get("CHAT_API_KEY") || "";
   const attempts = Math.max(1, cfg.attempts ?? 3);
   const label = cfg.label ?? "script chat";
+  // The budget ESCALATES on truncation (see the finish_reason branch below), so
+  // it is per-call state, not a constant.
+  const baseTokens = cfg.maxTokens ?? 2200;
+  const ceiling = Math.max(baseTokens, cfg.maxTokensCeiling ?? baseTokens * 4);
+  let budget = baseTokens;
   return async (system, user) => {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const last = attempt === attempts;
@@ -102,7 +112,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
           body: JSON.stringify({
             model: `${cfg.chatModel}${cfg.nothinkSuffix ?? ""}`,
             temperature: cfg.temperature ?? 0.5, // a touch of warmth for dialogue; 0 for triage
-            max_tokens: cfg.maxTokens ?? 2200,
+            max_tokens: budget,
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
           }),
           signal: AbortSignal.timeout(cfg.timeoutMs ?? 200_000),
@@ -116,7 +126,33 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
           console.warn(`[${label}] HTTP ${res.status} - retrying (${attempt}/${attempts}): ${detail}`);
         } else {
           const d = await res.json();
-          const content = (d.choices?.[0]?.message?.content as string | undefined)?.trim();
+          const choice = d.choices?.[0];
+          const content = (choice?.message?.content as string | undefined)?.trim();
+          // TRUNCATION. finish_reason "length" = the model hit the budget and
+          // stopped mid-sentence. The text READS fine, so nothing downstream can
+          // tell it apart from a finished script - which is how a cut-off episode
+          // shipped: measured 2026-09-04, completion_tokens == max_tokens == 2200
+          // exactly, ending "...It also supports", 4 of 7 segments, no sign-off
+          // (SCRIPT_SYS mandates one). Re-sampling at the SAME budget just
+          // truncates again, so the budget doubles instead.
+          if (content && choice?.finish_reason === "length") {
+            if (budget < ceiling && !last) {
+              const next = Math.min(ceiling, budget * 2);
+              console.warn(
+                `[${label}] TRUNCATED at max_tokens=${budget} - re-running with ${next} (${attempt}/${attempts})`,
+              );
+              budget = next;
+              continue; // not a transient fault; no backoff to serve
+            }
+            // Ceiling reached. Returning the cut-off text is the LEAST-BAD option -
+            // null degrades to dumping raw grounded material, which is worse - but
+            // it must never be silent again.
+            console.warn(
+              `[${label}] TRUNCATED at max_tokens=${budget} with the ceiling (${ceiling}) reached - ` +
+                `returning CUT-OFF text: this episode is INCOMPLETE (raise SCRIPT_MAX_TOKENS)`,
+            );
+            return content;
+          }
           if (content) return content;
           if (last) {
             console.warn(`[${label}] empty completion (giving up after ${attempt})`);
@@ -136,6 +172,41 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
     return null;
   };
 }
+/** One attempt's outcome: `done` ends the loop (even with a null value - the
+ *  step decided), `done:false` means "failed, try again". */
+export type RetryOutcome<T> = { done: true; value: T | null } | { done: false };
+
+/** Run `step` until it reports done or `attempts` is exhausted; a throw counts as
+ *  a failed attempt and is passed to `onError`.
+ *
+ *  WHY THIS IS EXPORTED AND NOT INLINE: the Open Notebook audio retry lives in
+ *  generateAudio() inside link-enrich.ts, which is a top-level script with
+ *  import-time side effects and therefore has NO test harness - so the anchor's
+ *  "a failed ON job is retried once" criterion was UNVERIFIABLE in test
+ *  (2026-09-04). The POLICY lives here where it can be proven; generateAudio
+ *  supplies the ON-specific body. The done/not-done split keeps that body's
+ *  original semantics exactly: a completed job returns its episode even when the
+ *  lookup yields null, and only a NON-completed job or a throw re-submits (a
+ *  blind "retry while null" would re-run a minutes-long audio job whenever ON's
+ *  listing merely lagged). */
+export async function retryUntil<T>(
+  attempts: number,
+  step: (attempt: number, isLast: boolean) => Promise<RetryOutcome<T>>,
+  onError?: (err: unknown, attempt: number, isLast: boolean) => void,
+): Promise<T | null> {
+  const total = Math.max(1, attempts);
+  for (let attempt = 1; attempt <= total; attempt++) {
+    const isLast = attempt === total;
+    try {
+      const outcome = await step(attempt, isLast);
+      if (outcome.done) return outcome.value;
+    } catch (err) {
+      onError?.(err, attempt, isLast);
+    }
+  }
+  return null;
+}
+
 // ── prompts ──────────────────────────────────────────────────────────────────
 /** Special segment label: carried-over dives that resolved overnight. */
 export const FOLLOWUPS_LABEL = "follow-ups from yesterday";

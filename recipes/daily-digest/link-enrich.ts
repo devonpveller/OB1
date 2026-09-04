@@ -141,6 +141,12 @@ const scriptChat = makeScriptChat({
   nothinkSuffix: env("SCRIPT_NOTHINK_SUFFIX", ":nothink"), // nothink = fast + reliable; set "" for think-model dialogue
   apiKey: CHAT_API_KEY,
   label: "script",
+  // A whole two-host episode, not a classification answer. The shared 2200
+  // default cut episode 089 off mid-sentence after 4 of 7 segments (measured
+  // 2026-09-04: completion_tokens == max_tokens exactly). ~550 tokens/segment
+  // observed, so 6000 covers a 7-segment day with the sign-off; makeScriptChat
+  // still doubles up to the ceiling if a day runs long.
+  maxTokens: num("SCRIPT_MAX_TOKENS", 6000),
 });
 // Gap-dive triage — a CLASSIFICATION task, so temperature 0 (deterministic).
 // Reusing the default 0.5 chat made triage flaky: same gaps yielded 7-10 dives
@@ -832,12 +838,18 @@ async function maybeRenderEpisode(): Promise<Episode | null> {
 // before accepting silence.
 const ON_AUDIO_ATTEMPTS = num("ON_AUDIO_ATTEMPTS", 2);
 
+// The loop body is unchanged; the retry POLICY moved to retryUntil() in
+// script-renderer.ts so it can be unit-tested - generateAudio is not exported and
+// this module runs work at import, so the "retried once" criterion had no way to
+// be proven (found in test 2026-09-04). Semantics are identical: a COMPLETED job
+// returns its episode (even if the lookup yields null), and only a non-completed
+// status or a throw re-submits.
 async function generateAudio(ep: Episode): Promise<OnEpisode | null> {
-  for (let attempt = 1; attempt <= Math.max(1, ON_AUDIO_ATTEMPTS); attempt++) {
-    const last = attempt === Math.max(1, ON_AUDIO_ATTEMPTS);
-    const suffix = attempt > 1 ? ` (attempt ${attempt}/${ON_AUDIO_ATTEMPTS})` : "";
-    console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})${suffix}… this takes minutes.`);
-    try {
+  return await retryUntil<OnEpisode>(
+    ON_AUDIO_ATTEMPTS,
+    async (attempt, last) => {
+      const suffix = attempt > 1 ? ` (attempt ${attempt}/${ON_AUDIO_ATTEMPTS})` : "";
+      console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})${suffix}… this takes minutes.`);
       const jobId = await onClient.generate({
         episodeProfile: ON_EPISODE_PROFILE,
         speakerProfile: ON_SPEAKER_PROFILE,
@@ -849,14 +861,15 @@ async function generateAudio(ep: Episode): Promise<OnEpisode | null> {
       if (status === "completed") {
         const episode = await onClient.episodeByName(ep.name);
         console.log(`[link-enrich] 🎧 episode audio ready (id ${episode?.id ?? "?"}).`);
-        return episode;
+        return { done: true, value: episode };
       }
       console.log(`[link-enrich] ON job ended '${status}'${last ? " — no audio." : " — resubmitting."}`);
-    } catch (err) {
+      return { done: false };
+    },
+    (err, _attempt, last) => {
       console.warn(`[link-enrich] audio generation failed${last ? " (best-effort)" : " - resubmitting"}: ${err}`);
-    }
-  }
-  return null;
+    },
+  );
 }
 
 /** User-facing email links — external + Authelia-gated (notebook.<domain>):

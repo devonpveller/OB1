@@ -9,7 +9,7 @@
 //
 // Run: deno test --allow-net --allow-env script-renderer.test.ts
 import { assertEquals } from "jsr:@std/assert@1";
-import { makeScriptChat } from "./script-renderer.ts";
+import { makeScriptChat, retryUntil } from "./script-renderer.ts";
 
 type Handler = (req: Request, hit: number) => Response | Promise<Response>;
 
@@ -17,13 +17,14 @@ type Handler = (req: Request, hit: number) => Response | Promise<Response>;
 function stubServer(handler: Handler) {
   let hits = 0;
   const seenAuth: string[] = [];
+  const seenBodies: string[] = [];
   const ac = new AbortController();
   const server = Deno.serve(
     { port: 0, signal: ac.signal, onListen: () => {} },
     async (req) => {
       hits++;
       seenAuth.push(req.headers.get("authorization") ?? "");
-      await req.text().catch(() => "");
+      seenBodies.push(await req.text().catch(() => ""));
       return await handler(req, hits);
     },
   );
@@ -32,6 +33,9 @@ function stubServer(handler: Handler) {
     base: `http://127.0.0.1:${port}/v1`,
     hits: () => hits,
     auth: () => seenAuth,
+    /** max_tokens actually sent, per request - the truncation tests assert the
+     *  budget ESCALATES rather than re-sampling into the same wall. */
+    budgets: () => seenBodies.map((b) => JSON.parse(b || "{}").max_tokens),
     stop: async () => { ac.abort(); await server.finished.catch(() => {}); },
   };
 }
@@ -99,4 +103,135 @@ Deno.test("with no apiKey it falls back to CHAT_API_KEY, never a placeholder", a
     Deno.env.delete("CHAT_API_KEY");
     await s.stop();
   }
+});
+
+// ── truncation (added 2026-09-04 after test FAILED the delivery item) ─────────
+// The 401 fix made a script get GENERATED; it did not make it COMPLETE. Measured
+// on the artifact itself: completion_tokens == max_tokens == 2200 exactly, text
+// ending "...It also supports" mid-sentence, 4 of 7 segments, no sign-off. A
+// truncated completion reads like a finished one, so nothing downstream could
+// tell - which is precisely the silent-degradation class this item exists to end.
+
+/** A 200 whose finish_reason says the model ran out of budget. */
+function truncated(content: string): Response {
+  return Response.json({ choices: [{ message: { content }, finish_reason: "length" }] });
+}
+function complete(content: string): Response {
+  return Response.json({ choices: [{ message: { content }, finish_reason: "stop" }] });
+}
+
+Deno.test("a truncated completion is re-run with a DOUBLED budget, not re-sampled into the same wall", async () => {
+  const s = stubServer((_r, hit) => hit === 1 ? truncated("cut off mid-") : complete("the whole script"));
+  const chat = makeScriptChat({
+    chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0, maxTokens: 2200,
+  });
+  assertEquals(await chat("sys", "user"), "the whole script");
+  assertEquals(s.hits(), 2);
+  assertEquals(s.budgets(), [2200, 4400]); // escalated, not repeated
+  await s.stop();
+});
+
+Deno.test("truncation at the ceiling returns the cut-off text but SAYS SO (never silently)", async () => {
+  const s = stubServer(() => truncated("still cut off"));
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); };
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 1000, maxTokensCeiling: 2000, attempts: 3,
+    });
+    // Least-bad: returning null degrades to dumping raw grounded material.
+    assertEquals(await chat("sys", "user"), "still cut off");
+    // Doubles once to the ceiling, then STOPS: re-running at a budget already at
+    // the ceiling would truncate identically and only burn the clock. So two
+    // calls, not the full three attempts.
+    assertEquals(s.budgets(), [1000, 2000]);
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+  const loud = warnings.filter((w) => w.includes("TRUNCATED"));
+  assertEquals(loud.length > 0, true, `expected a TRUNCATED warning, got ${JSON.stringify(warnings)}`);
+  assertEquals(
+    loud.some((w) => w.includes("INCOMPLETE")),
+    true,
+    `the ceiling warning must call the episode INCOMPLETE, got ${JSON.stringify(loud)}`,
+  );
+});
+
+Deno.test("a complete completion is returned untouched and costs exactly one call", async () => {
+  const s = stubServer(() => complete("done properly"));
+  const chat = makeScriptChat({ chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0 });
+  assertEquals(await chat("sys", "user"), "done properly");
+  assertEquals(s.hits(), 1);
+  await s.stop();
+});
+
+// ── network error (the plan claimed this was covered; it was not) ─────────────
+Deno.test("a NETWORK error is retried, not just an HTTP status", async () => {
+  // Nothing listens on this port, so fetch REJECTS rather than returning a status.
+  const dead = "http://127.0.0.1:9/v1";
+  const chat = makeScriptChat({
+    chatApiBase: dead, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0, attempts: 3,
+  });
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(" ")); };
+  try {
+    assertEquals(await chat("sys", "user"), null);
+  } finally {
+    console.warn = realWarn;
+  }
+  // Two "retrying" lines then one "giving up" - i.e. it really made 3 attempts.
+  assertEquals(warnings.filter((w) => w.includes("retrying")).length, 2, JSON.stringify(warnings));
+  assertEquals(warnings.filter((w) => w.includes("giving up after 3")).length, 1, JSON.stringify(warnings));
+});
+
+// ── ON audio retry policy (was UNVERIFIABLE: generateAudio is not exported) ───
+Deno.test("retryUntil: a failed first attempt is retried and the second result is taken", async () => {
+  const seen: number[] = [];
+  const out = await retryUntil<string>(2, (attempt) => {
+    seen.push(attempt);
+    return Promise.resolve(attempt === 1 ? { done: false } : { done: true, value: "audio-id" });
+  });
+  assertEquals(out, "audio-id");
+  assertEquals(seen, [1, 2]);
+});
+
+Deno.test("retryUntil: a THROW counts as a failed attempt and reaches onError", async () => {
+  const errs: string[] = [];
+  const out = await retryUntil<string>(
+    2,
+    (attempt) => {
+      if (attempt === 1) throw new Error("ON exploded");
+      return Promise.resolve({ done: true, value: "recovered" });
+    },
+    (err) => errs.push(String(err)),
+  );
+  assertEquals(out, "recovered");
+  assertEquals(errs.length, 1);
+  assertEquals(errs[0].includes("ON exploded"), true);
+});
+
+Deno.test("retryUntil: 'done' ends the loop even when the value is null - a COMPLETED job is not re-submitted", async () => {
+  // Faithful to generateAudio: ON said completed but the episode lookup lagged.
+  // Re-submitting there would re-run a minutes-long audio job for nothing.
+  let calls = 0;
+  const out = await retryUntil<string>(3, () => {
+    calls++;
+    return Promise.resolve({ done: true, value: null });
+  });
+  assertEquals(out, null);
+  assertEquals(calls, 1);
+});
+
+Deno.test("retryUntil: exhausting every attempt yields null", async () => {
+  let calls = 0;
+  const out = await retryUntil<string>(2, () => {
+    calls++;
+    return Promise.resolve({ done: false });
+  });
+  assertEquals(out, null);
+  assertEquals(calls, 2);
 });
