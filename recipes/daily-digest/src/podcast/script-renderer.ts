@@ -74,7 +74,10 @@ export interface ScriptChatConfig {
   timeoutMs?: number;
   maxTokens?: number;
   /** Hard ceiling for the budget escalation that a truncated completion triggers.
-   *  Default 4x maxTokens. This bounds cost and latency, NOT context: the 27b lane
+   *  Default 2x maxTokens - deliberately modest, because the CLOCK is the binding
+   *  constraint, not the context window: measured throughput is 28.9-60.4 tok/s,
+   *  so a 4x ceiling produced requests that could not finish inside any sane
+   *  timeout. This bounds cost and latency, NOT context: the 27b lane
    *  is 98,304 tokens (LLAMA_SWAP_QWEN36_27B_CTX_SIZE 196,608 / N_PARALLEL 2), so
    *  even a 22k-token prompt leaves ample room. */
   maxTokensCeiling?: number;
@@ -100,8 +103,44 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   // The budget ESCALATES on truncation (see the finish_reason branch below), so
   // it is per-call state, not a constant.
   const baseTokens = cfg.maxTokens ?? 2200;
-  const ceiling = Math.max(baseTokens, cfg.maxTokensCeiling ?? baseTokens * 4);
+  const ceiling = Math.max(baseTokens, cfg.maxTokensCeiling ?? baseTokens * 2);
   let budget = baseTokens;
+  // Best truncated text seen so far. Escalation must never be WORSE than not
+  // escalating: a bigger budget takes proportionally longer, so a later attempt
+  // can time out (a throw) after we already had usable-but-cut-off text - and
+  // returning null there degrades the episode to a raw grounded-material dump.
+  // Measured 2026-09-04 with a control: escalate -> null, don't escalate ->
+  // usable text. So the text is KEPT and returned instead of null.
+  let bestTruncated: string | null = null;
+  // Cut-off text becomes the ON transcript prompt downstream, and an unterminated
+  // segment is what aborted the 2026-08-29 episode. Trimming back to the last
+  // sentence that actually ends removes that hazard for free; if nothing ends
+  // cleanly the original is returned rather than emptying the script.
+  // NB: matched with a regex rather than lastIndexOf on an escape sequence - the
+  // escaped form of that literal did not survive the edit that introduced it,
+  // which is the same backslash-in-transit failure this repo keeps paying for.
+  const toLastCompleteSentence = (t: string): string => {
+    const m = t.match(/^[\s\S]*[.!?](?=\s|$)/);
+    const trimmed = m ? m[0].trimEnd() : "";
+    return trimmed.length > 0 ? trimmed : t;
+  };
+  const giveUp = (why: string): string | null => {
+    if (bestTruncated) {
+      console.warn(
+        `[${label}] ${why} - returning the earlier TRUNCATED text rather than nothing; ` +
+          `this episode is INCOMPLETE`,
+      );
+      return toLastCompleteSentence(bestTruncated);
+    }
+    return null;
+  };
+  // A doubled budget needs a doubled clock. The timeout is stated for the BASE
+  // budget and scales with it; leaving it fixed meant escalated attempts could
+  // not physically finish (measured throughput 28.9-60.4 tok/s against a fixed
+  // 200s: 12k tokens overran in every sample), so escalation burned its attempts
+  // on requests that were never going to complete.
+  const baseTimeout = cfg.timeoutMs ?? 200_000;
+  const timeoutFor = (b: number) => Math.round(baseTimeout * (b / baseTokens));
   return async (system, user) => {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const last = attempt === attempts;
@@ -115,13 +154,13 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
             max_tokens: budget,
             messages: [{ role: "system", content: system }, { role: "user", content: user }],
           }),
-          signal: AbortSignal.timeout(cfg.timeoutMs ?? 200_000),
+          signal: AbortSignal.timeout(timeoutFor(budget)),
         });
         if (!res.ok) {
           const detail = (await res.text().catch(() => "")).slice(0, 200);
           if (!isTransientStatus(res.status) || last) {
             console.warn(`[${label}] HTTP ${res.status} (giving up after ${attempt}): ${detail}`);
-            return null;
+            return giveUp(`HTTP ${res.status} after ${attempt} attempt(s)`);
           }
           console.warn(`[${label}] HTTP ${res.status} - retrying (${attempt}/${attempts}): ${detail}`);
         } else {
@@ -136,6 +175,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
           // (SCRIPT_SYS mandates one). Re-sampling at the SAME budget just
           // truncates again, so the budget doubles instead.
           if (content && choice?.finish_reason === "length") {
+            bestTruncated = content; // keep it: a later timeout must not cost us this
             if (budget < ceiling && !last) {
               const next = Math.min(ceiling, budget * 2);
               console.warn(
@@ -151,25 +191,25 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
               `[${label}] TRUNCATED at max_tokens=${budget} with the ceiling (${ceiling}) reached - ` +
                 `returning CUT-OFF text: this episode is INCOMPLETE (raise SCRIPT_MAX_TOKENS)`,
             );
-            return content;
+            return toLastCompleteSentence(content);
           }
           if (content) return content;
           if (last) {
             console.warn(`[${label}] empty completion (giving up after ${attempt})`);
-            return null;
+            return giveUp(`empty completion after ${attempt} attempt(s)`);
           }
           console.warn(`[${label}] empty completion - re-sampling (${attempt}/${attempts})`);
         }
       } catch (err) {
         if (last) {
           console.warn(`[${label}] failed (giving up after ${attempt}): ${err}`);
-          return null;
+          return giveUp(`failed after ${attempt} attempt(s): ${err}`);
         }
         console.warn(`[${label}] failed - retrying (${attempt}/${attempts}): ${err}`);
       }
       await new Promise((r) => setTimeout(r, (cfg.retryDelayMs ?? 2000) * attempt));
     }
-    return null;
+    return giveUp("attempts exhausted");
   };
 }
 /** One attempt's outcome: `done` ends the loop (even with a null value - the

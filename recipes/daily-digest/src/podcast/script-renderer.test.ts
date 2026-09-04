@@ -235,3 +235,88 @@ Deno.test("retryUntil: exhausting every attempt yields null", async () => {
   assertEquals(out, null);
   assertEquals(calls, 2);
 });
+
+// ── attempt-2 regressions (test FAILED the item on all three) ─────────────────
+
+Deno.test("escalation is never WORSE than not escalating: a late timeout keeps the earlier truncated text", async () => {
+  // Attempt 2's control: escalate -> null, don't escalate -> usable text. The
+  // bigger budget takes proportionally longer, so the retry could time out AFTER
+  // usable-but-cut-off text had already been thrown away.
+  const s = stubServer(async (_r, hit) => {
+    if (hit === 1) return truncated("HOST A: first half. HOST B: cut off mid-");
+    await new Promise((r) => setTimeout(r, 300)); // outlast the scaled timeout
+    return complete("never arrives");
+  });
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 1000, maxTokensCeiling: 2000, attempts: 2, timeoutMs: 60,
+    });
+    // Trimmed to the last COMPLETE sentence, never null.
+    assertEquals(await chat("sys", "user"), "HOST A: first half.");
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
+
+Deno.test("the timeout SCALES with the escalated budget (a doubled budget gets a doubled clock)", async () => {
+  // Without scaling, an escalated request cannot physically finish: measured
+  // throughput 28.9-60.4 tok/s against a FIXED 200s meant 12k tokens always
+  // overran. Assert the second attempt is actually given more time by making it
+  // slower than the BASE timeout but faster than the scaled one.
+  const s = stubServer(async (_r, hit) => {
+    if (hit === 1) return truncated("cut off");
+    await new Promise((r) => setTimeout(r, 120));
+    return complete("finished in the longer window");
+  });
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 1000, maxTokensCeiling: 2000, attempts: 2, timeoutMs: 100,
+    });
+    // 120ms > the 100ms base timeout, but < the 200ms the doubled budget earns.
+    assertEquals(await chat("sys", "user"), "finished in the longer window");
+    assertEquals(s.budgets(), [1000, 2000]);
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
+
+Deno.test("cut-off text is trimmed to the last COMPLETE sentence (it becomes the TTS prompt)", async () => {
+  // An unterminated segment is what aborted the 2026-08-29 episode downstream.
+  const s = stubServer(() => truncated("HOST A: one. HOST B: two! HOST A: three and then it stops mid-"));
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 1000, maxTokensCeiling: 1000, attempts: 1,
+    });
+    assertEquals(await chat("sys", "user"), "HOST A: one. HOST B: two!");
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
+
+Deno.test("text with no complete sentence is returned whole, never emptied", async () => {
+  const s = stubServer(() => truncated("no terminator anywhere in here"));
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 500, maxTokensCeiling: 500, attempts: 1,
+    });
+    assertEquals(await chat("sys", "user"), "no terminator anywhere in here");
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
