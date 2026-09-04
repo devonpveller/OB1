@@ -33,10 +33,17 @@ function mapSegments(markdown, fn) {
   return parts.join("");
 }
 
-// Make a string safe as a wikilink alias / label ([, ], | break the link).
+// Make a string safe as a wikilink alias / label. Quartz's wikilink parser
+// excludes "#" from the alias character class just as it excludes the
+// brackets and the pipe -- read out of the built viewer image (quartz
+// v4.5.1, quartz/plugins/transformers/ofm.ts), where wikilinkRegex's alias
+// group is (\\?\|[^\[\]\#]*)?. So a "#" ANYWHERE in an alias makes the
+// whole link fail to match and survive as literal [[...]] text. The
+// digest mints "Daily #NNN" source titles every day, which is why this is
+// the highest-volume break; "#" is stripped here with the rest.
 export function linkSafeLabel(v) {
   return String(v == null ? "" : v)
-    .replace(/[\[\]|]/g, " ")
+    .replace(/[\[\]|#]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
