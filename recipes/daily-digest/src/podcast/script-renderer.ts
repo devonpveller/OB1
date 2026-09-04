@@ -55,6 +55,23 @@ export interface Episode {
 
 // ── LLM chat (system+user) ───────────────────────────────────────────────────
 export type ChatFn = (system: string, user: string) => Promise<string | null>;
+/**
+ * A ChatFn that remembers WHY its last call returned null.
+ *
+ * `null` on its own tells a caller that it has to degrade, but not what to say
+ * about it. Every degrading call site would otherwise have to log "the LLM
+ * returned null", which is exactly the uninformative line that let the podcast
+ * ship a raw material dump for two weeks. `makeScriptChat` fills this in; a
+ * hand-rolled stub simply does not, and `failureReason` stays safe either way.
+ */
+export interface ChatFnWithReason extends ChatFn {
+  lastFailure?: () => string;
+}
+/** The reason a ChatFn last returned null, in a form safe to put in a log line. */
+export function failureReason(chat: ChatFn): string {
+  const r = (chat as ChatFnWithReason).lastFailure?.();
+  return r && r.trim() ? r : "reason not recorded by this chat function";
+}
 export interface ScriptChatConfig {
   chatApiBase: string;
   chatModel: string;
@@ -84,7 +101,7 @@ function isTransientStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
+export function makeScriptChat(cfg: ScriptChatConfig): ChatFnWithReason {
   // The key is resolved ONCE, here, so every call site gets it whether or not it
   // remembered to pass one. link-enrich.ts historically passed nothing, which sent
   // `Bearer not-needed` and 401'd on every call from 2026-08-21 onward - the script
@@ -92,49 +109,76 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   const apiKey = cfg.apiKey || Deno.env.get("CHAT_API_KEY") || "";
   const attempts = Math.max(1, cfg.attempts ?? 3);
   const label = cfg.label ?? "script chat";
-  return async (system, user) => {
+  // The last give-up reason, so a caller that DEGRADES on null can name the
+  // cause in its own log line. Cleared by a success, so a recovered call can
+  // never make a healthy run look broken.
+  let lastFailure = "";
+  /** Log the give-up and remember it. Returns null so call sites read as one line. */
+  const giveUp = (reason: string): null => {
+    lastFailure = reason;
+    console.warn(`[${label}] ${reason}`);
+    return null;
+  };
+  const chat: ChatFnWithReason = async (system, user) => {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const last = attempt === attempts;
       try {
         const res = await fetch(`${cfg.chatApiBase}/chat/completions`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
           body: JSON.stringify({
             model: `${cfg.chatModel}${cfg.nothinkSuffix ?? ""}`,
             temperature: cfg.temperature ?? 0.5, // a touch of warmth for dialogue; 0 for triage
             max_tokens: cfg.maxTokens ?? 2200,
-            messages: [{ role: "system", content: system }, { role: "user", content: user }],
+            messages: [{ role: "system", content: system }, {
+              role: "user",
+              content: user,
+            }],
           }),
           signal: AbortSignal.timeout(cfg.timeoutMs ?? 200_000),
         });
         if (!res.ok) {
           const detail = (await res.text().catch(() => "")).slice(0, 200);
           if (!isTransientStatus(res.status) || last) {
-            console.warn(`[${label}] HTTP ${res.status} (giving up after ${attempt}): ${detail}`);
-            return null;
+            return giveUp(
+              `HTTP ${res.status} (giving up after ${attempt}): ${detail}`,
+            );
           }
-          console.warn(`[${label}] HTTP ${res.status} - retrying (${attempt}/${attempts}): ${detail}`);
+          console.warn(
+            `[${label}] HTTP ${res.status} - retrying (${attempt}/${attempts}): ${detail}`,
+          );
         } else {
           const d = await res.json();
-          const content = (d.choices?.[0]?.message?.content as string | undefined)?.trim();
-          if (content) return content;
-          if (last) {
-            console.warn(`[${label}] empty completion (giving up after ${attempt})`);
-            return null;
+          const content =
+            (d.choices?.[0]?.message?.content as string | undefined)?.trim();
+          if (content) {
+            lastFailure = ""; // a good answer retires the previous complaint
+            return content;
           }
-          console.warn(`[${label}] empty completion - re-sampling (${attempt}/${attempts})`);
+          if (last) {
+            return giveUp(`empty completion (giving up after ${attempt})`);
+          }
+          console.warn(
+            `[${label}] empty completion - re-sampling (${attempt}/${attempts})`,
+          );
         }
       } catch (err) {
-        if (last) {
-          console.warn(`[${label}] failed (giving up after ${attempt}): ${err}`);
-          return null;
-        }
-        console.warn(`[${label}] failed - retrying (${attempt}/${attempts}): ${err}`);
+        if (last) return giveUp(`failed (giving up after ${attempt}): ${err}`);
+        console.warn(
+          `[${label}] failed - retrying (${attempt}/${attempts}): ${err}`,
+        );
       }
-      await new Promise((r) => setTimeout(r, (cfg.retryDelayMs ?? 2000) * attempt));
+      await new Promise((r) =>
+        setTimeout(r, (cfg.retryDelayMs ?? 2000) * attempt)
+      );
     }
-    return null;
+    return giveUp(`exhausted ${attempts} attempt(s) with no answer`);
   };
+  chat.lastFailure = () => lastFailure || "no failure recorded";
+  return chat;
 }
 // ── prompts ──────────────────────────────────────────────────────────────────
 /** Special segment label: carried-over dives that resolved overnight. */
@@ -180,7 +224,9 @@ export function pad3(n: number): string {
 
 /** First [SOURCED] line of an item's synthesis — its headline thesis. */
 function headlineOf(item: SegmentItem): string {
-  const m = item.synthesis.match(/^\[SOURCED\]\s*(.+?)(?:\s*\[Source[^\]]*\])?\s*$/im);
+  const m = item.synthesis.match(
+    /^\[SOURCED\]\s*(.+?)(?:\s*\[Source[^\]]*\])?\s*$/im,
+  );
   return (m?.[1] ?? item.title ?? "").trim();
 }
 
@@ -204,11 +250,17 @@ function renderSegmentForPrompt(seg: Segment): string {
     // An email-only item WITH a dive is no longer just a blurb — mark it so the
     // hosts say "the newsletter only mentioned it, but our own digging filled it in".
     const incomplete = it.emailOnly && !it.dive;
-    lines.push(`### ${it.title || headlineOf(it)}${incomplete ? "  (EMAIL-ONLY / incomplete)" : ""}`);
+    lines.push(
+      `### ${it.title || headlineOf(it)}${
+        incomplete ? "  (EMAIL-ONLY / incomplete)" : ""
+      }`,
+    );
     if (it.threadName) lines.push(`(ongoing thread: ${it.threadName})`);
     if (it.synthesis.trim()) lines.push(it.synthesis.trim());
     if (it.dive && it.dive.trim()) {
-      lines.push(`DEEPER DIVE (our own overnight research — the newsletter only mentioned this):`);
+      lines.push(
+        `DEEPER DIVE (our own overnight research — the newsletter only mentioned this):`,
+      );
       lines.push(trimTagged(it.dive));
     }
   }
@@ -216,7 +268,10 @@ function renderSegmentForPrompt(seg: Segment): string {
 }
 
 // ── primary topic (for the [###]-daily-[topic] name) ─────────────────────────
-export async function primaryTopic(input: EpisodeInput, chat: ChatFn): Promise<string> {
+export async function primaryTopic(
+  input: EpisodeInput,
+  chat: ChatFn,
+): Promise<string> {
   const headlines = input.segments
     .flatMap((s) => s.items.map((it) => `- ${headlineOf(it)}`))
     .slice(0, 12)
@@ -224,6 +279,13 @@ export async function primaryTopic(input: EpisodeInput, chat: ChatFn): Promise<s
   if (headlines) {
     const t = await chat(TOPIC_SYS, `HEADLINES:\n${headlines}`);
     if (t) return slugify(t.split("\n")[0]);
+    // Not fatal - but the heuristic slug is a whole [SOURCED] sentence, which is
+    // what makes a degraded episode's FILENAME read like prose. Say so, or the
+    // only symptom is a filename nobody reads as a symptom.
+    console.warn(
+      `[script] topic naming fell back to the first headline (the slug will read ` +
+        `like a sentence) - ${failureReason(chat)}`,
+    );
   }
   // heuristic fallback: the headline of the first item.
   const first = input.segments[0]?.items[0];
@@ -231,16 +293,38 @@ export async function primaryTopic(input: EpisodeInput, chat: ChatFn): Promise<s
 }
 
 // ── render ───────────────────────────────────────────────────────────────────
-export async function renderEpisode(input: EpisodeInput, chat: ChatFn): Promise<Episode> {
+export async function renderEpisode(
+  input: EpisodeInput,
+  chat: ChatFn,
+): Promise<Episode> {
   const topicSlug = await primaryTopic(input, chat);
   const name = `${pad3(input.episodeNumber)}-daily-${topicSlug}`;
-  const title = `Daily #${pad3(input.episodeNumber)} — ${topicSlug.replace(/-/g, " ")}`;
+  const title = `Daily #${pad3(input.episodeNumber)} — ${
+    topicSlug.replace(/-/g, " ")
+  }`;
 
   const segmentsBlock = input.segments.map(renderSegmentForPrompt).join("\n\n");
   const user =
     `DATE: ${input.date}\nEPISODE: ${title}\n\nSEGMENTS (one per label):\n\n${segmentsBlock}`;
-  const script = (await chat(SCRIPT_SYS, user)) ??
-    `(script generation unavailable — grounded material follows)\n\n${segmentsBlock}`;
+  let script = await chat(SCRIPT_SYS, user);
+  if (!script) {
+    // The degraded episode still ships - that is deliberate, a raw material dump
+    // is better than no episode. What was NOT deliberate is that it shipped in
+    // SILENCE: episodes 076-089 carried this marker and nothing in the log said
+    // an episode had degraded, so it went unnoticed for two weeks. Downstream this
+    // block becomes the transcript prompt, which is how episode 083's 47,296-char
+    // script reached podcast_creator's 5,000-token cap on 2026-08-29.
+    script =
+      `(script generation unavailable — grounded material follows)\n\n${segmentsBlock}`;
+    console.warn(
+      `[script] DEGRADED: episode ${
+        pad3(input.episodeNumber)
+      } "${title}" is shipping ` +
+        `raw grounded material instead of a written script (${segmentsBlock.length} chars, ` +
+        `which becomes the transcript prompt downstream). Stage: script generation ` +
+        `(renderEpisode/S4a). Cause: ${failureReason(chat)}`,
+    );
+  }
 
   return { number: input.episodeNumber, topicSlug, name, title, script };
 }
