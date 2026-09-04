@@ -100,10 +100,16 @@ const OB_URL = (process.env.OPEN_BRAIN_URL || "http://openbrain-rest").replace(/
 const ENABLED = process.env.WIKI_PAGES_SYNC !== "0";
 const TIMEOUT_MS = Math.max(1000, Number(process.env.WIKI_PAGES_SYNC_TIMEOUT_MS || "10000"));
 
-let warned = false;
+// Per KIND, not per process: with a single flag, the first degradation of any
+// kind (upsert outage, parse bug, delete failure) silenced every other kind
+// for the process lifetime — in the long-lived wiki-service daemon, forever.
+// One line per kind keeps the log quiet without letting a second, DIFFERENT
+// failure hide behind the first (the 08-28 outage survived on exactly that
+// kind of stacked silence).
+const warnedKinds = new Set();
 function warnOnce(what, e) {
-  if (warned) return;
-  warned = true;
+  if (warnedKinds.has(what)) return;
+  warnedKinds.add(what);
   console.error(`[wiki-pages] sync degraded (${what}): ${e?.message || e} — ` +
     `indexes may lag until the next write or backfill (non-fatal)`);
 }
