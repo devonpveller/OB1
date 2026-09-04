@@ -100,18 +100,8 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   const apiKey = cfg.apiKey || Deno.env.get("CHAT_API_KEY") || "";
   const attempts = Math.max(1, cfg.attempts ?? 3);
   const label = cfg.label ?? "script chat";
-  // The budget ESCALATES on truncation (see the finish_reason branch below), so
-  // it is per-call state, not a constant.
   const baseTokens = cfg.maxTokens ?? 2200;
   const ceiling = Math.max(baseTokens, cfg.maxTokensCeiling ?? baseTokens * 2);
-  let budget = baseTokens;
-  // Best truncated text seen so far. Escalation must never be WORSE than not
-  // escalating: a bigger budget takes proportionally longer, so a later attempt
-  // can time out (a throw) after we already had usable-but-cut-off text - and
-  // returning null there degrades the episode to a raw grounded-material dump.
-  // Measured 2026-09-04 with a control: escalate -> null, don't escalate ->
-  // usable text. So the text is KEPT and returned instead of null.
-  let bestTruncated: string | null = null;
   // Cut-off text becomes the ON transcript prompt downstream, and an unterminated
   // segment is what aborted the 2026-08-29 episode. Trimming back to the last
   // sentence that actually ends removes that hazard for free; if nothing ends
@@ -124,16 +114,6 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
     const trimmed = m ? m[0].trimEnd() : "";
     return trimmed.length > 0 ? trimmed : t;
   };
-  const giveUp = (why: string): string | null => {
-    if (bestTruncated) {
-      console.warn(
-        `[${label}] ${why} - returning the earlier TRUNCATED text rather than nothing; ` +
-          `this episode is INCOMPLETE`,
-      );
-      return toLastCompleteSentence(bestTruncated);
-    }
-    return null;
-  };
   // A doubled budget needs a doubled clock. The timeout is stated for the BASE
   // budget and scales with it; leaving it fixed meant escalated attempts could
   // not physically finish (measured throughput 28.9-60.4 tok/s against a fixed
@@ -142,6 +122,33 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   const baseTimeout = cfg.timeoutMs ?? 200_000;
   const timeoutFor = (b: number) => Math.round(baseTimeout * (b / baseTokens));
   return async (system, user) => {
+    // PER CALL. These MUST be declared inside the returned function, not beside
+    // apiKey/attempts: makeScriptChat's result is a long-lived ChatFn that
+    // link-enrich calls once PER EMAIL (poiChat, bodyClassifyChat; MAX_EMAILS
+    // defaults to 1000). At closure scope the escalated budget never reset, and
+    // - far worse - one call's truncated text was returned as another call's
+    // ANSWER: a later 401 on a different email answered with the earlier email's
+    // content, silently mis-classifying it. Found in test 2026-09-04; an earlier
+    // revision of this comment claimed "per-call state" while the declarations
+    // sat one scope too high, which is exactly how it survived a 19-test green
+    // suite - every test used a fresh ChatFn for a single call.
+    let budget = baseTokens;
+    let bestTruncated: string | null = null;
+    // Escalation must never be WORSE than not escalating: a bigger budget takes
+    // proportionally longer, so a later attempt can time out (a throw) after we
+    // already had usable-but-cut-off text - and returning null there degrades the
+    // episode to a raw grounded-material dump. Measured with a control: escalate
+    // -> null, don't escalate -> usable text. So the text is KEPT.
+    const giveUp = (why: string): string | null => {
+      if (bestTruncated) {
+        console.warn(
+          `[${label}] ${why} - returning the earlier TRUNCATED text rather than nothing; ` +
+            `this episode is INCOMPLETE`,
+        );
+        return toLastCompleteSentence(bestTruncated);
+      }
+      return null;
+    };
     for (let attempt = 1; attempt <= attempts; attempt++) {
       const last = attempt === attempts;
       try {

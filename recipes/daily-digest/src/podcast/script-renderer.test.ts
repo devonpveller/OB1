@@ -320,3 +320,49 @@ Deno.test("text with no complete sentence is returned whole, never emptied", asy
     await s.stop();
   }
 });
+
+// ── attempt-3 regression: state must be PER CALL, not per ChatFn ─────────────
+// One ChatFn is reused for every email (poiChat/bodyClassifyChat, MAX_EMAILS
+// defaults to 1000). With budget/bestTruncated at closure scope, one call's
+// truncated text was returned as ANOTHER call's answer, and the escalated
+// budget never reset. Every earlier test used a fresh ChatFn for a single
+// call, which is precisely why a 19-test green suite missed it.
+
+Deno.test("a reused ChatFn does not leak one call's truncated text into another call's answer", async () => {
+  const s = stubServer((_r, hit) => {
+    if (hit === 1) return truncated("Call ONE text. It stops mid-");
+    return new Response("Virtual Key expected", { status: 401 }); // config fault: null is correct
+  });
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 100, maxTokensCeiling: 100, attempts: 1,
+    });
+    assertEquals(await chat("sys", "call one"), "Call ONE text.");
+    // A 401 must answer null - NEVER the previous call's content.
+    assertEquals(await chat("sys", "call two"), null);
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
+
+Deno.test("a reused ChatFn resets its token budget to the base on every call", async () => {
+  const s = stubServer((_r, hit) => hit === 1 ? truncated("cut") : complete("fine"));
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const chat = makeScriptChat({
+      chatApiBase: s.base, chatModel: "m", apiKey: "sk-test", retryDelayMs: 0,
+      maxTokens: 100, maxTokensCeiling: 200, attempts: 2,
+    });
+    await chat("sys", "call one"); // escalates 100 -> 200
+    await chat("sys", "call two"); // must START at 100 again
+    assertEquals(s.budgets(), [100, 200, 100]);
+  } finally {
+    console.warn = realWarn;
+    await s.stop();
+  }
+});
