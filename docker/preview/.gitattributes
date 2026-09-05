@@ -1,0 +1,4 @@
+# The preview shell scripts are mounted straight into containers. CRLF here
+# means "/bin/sh: bad interpreter" - OB1 has no repo-wide rule, and the parent
+# checkout runs with core.autocrlf=true, so pin it locally.
+*.sh text eol=lf

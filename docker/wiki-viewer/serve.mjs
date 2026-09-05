@@ -29,8 +29,25 @@ const ROOT = "/srv/current"; // a symlink → /srv/build-N (swapped atomically)
 // out the idle gate (2026-06-17). Serving an individual fresh page from here is
 // safe: render assets (css/js) still come from the complete snapshot.
 const LIVE = "/quartz/public";
-const PUBLISH_FLAG = "/tmp/ne-publish"; // serve.mjs sets it; the entrypoint loop
-// honors it to publish promptly (bypassing the idle gate) so the nav/index catch up.
+// The prompt-publish flag. serve.mjs writes it; entrypoint.sh's snapshot loop
+// reads it and publishes immediately, bypassing its IDLE_SECONDS gate (default
+// 90s of no requests), then deletes it.
+//
+// THIS COUPLING IS LOAD-BEARING, not an optimisation. The idle gate measures
+// requests to THIS server, and a browser sitting on a freshly created note
+// polls it every few seconds — so for as long as someone is actually looking
+// at the page, "idle" never reaches IDLE_SECONDS and the snapshot swap never
+// happens. Without this flag the reader would be pinned on the LIVE-output
+// fallback render indefinitely and the fallback-to-built transition would
+// simply never be observable: the page only becomes the built, sidebar-bearing
+// document because serving it from LIVE (below) asks for a publish.
+//
+// Two consequences worth knowing before you change either side:
+//   * remove/rename it here without removing the entrypoint's check and a new
+//     note is invisible in nav/search until the reader walks away for 90s;
+//   * anything testing the fallback-to-built transition depends on it — that
+//     is why the transition takes seconds in a test rather than minutes.
+const PUBLISH_FLAG = "/tmp/ne-publish";
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const MIME = {
   ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript",

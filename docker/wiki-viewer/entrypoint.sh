@@ -32,6 +32,12 @@ sed -i 's#^\([[:space:]]*\)Plugin.CustomOgImages(),#\1// Plugin.CustomOgImages()
 # (We keep --serve rather than a one-shot `quartz build` because production build
 # minifies the bundled component JS and the workbench overlay inline scripts trip
 # esbuild's minifier; --serve/dev mode skips minify and is the proven path.)
+# NB IDLE_SECONDS is NOT the only path to a swap: serve.mjs writes
+# /tmp/ne-publish whenever it serves a page from the LIVE build output, and the
+# loop below treats that as "publish now" and bypasses this gate. That escape
+# hatch is what makes a just-created note reach the published snapshot at all —
+# a reader watching the page keeps the viewer non-idle forever, so the gate on
+# its own would never open. See the PUBLISH_FLAG comment in serve.mjs.
 IDLE_SECONDS="${WIKI_REBUILD_IDLE_SECONDS:-90}"    # viewer must be quiet this long before a swap
 STABLE_SECONDS="${WIKI_REBUILD_STABLE_SECONDS:-8}" # build output must be unchanged this long (build finished)
 POLL="${WIKI_REBUILD_POLL_SECONDS:-15}"            # how often to check

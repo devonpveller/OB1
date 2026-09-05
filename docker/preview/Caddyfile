@@ -1,13 +1,29 @@
 # Preview front proxy. Routes:
 #   /workbench/*  → the workbench API (X-Brain-Key injected, like prod)
+#   /rest/v1/*    → PostgREST (path stripped), the preview's stand-in for the
+#                   production `openbrain-rest` proxy
 #   /harness      → the bare API test page (/srv/index.html)
 #   everything else → the Quartz viewer (the wiki, at the root — Quartz emits
 #                     root-relative asset URLs, so it must own /)
-# PREVIEW ONLY — no Authelia.
+# PREVIEW ONLY — no Authelia. NB /rest/v1 is therefore reachable from the host
+# on 127.0.0.1:8099 too; acceptable for a loopback-only throwaway stack with a
+# hardcoded password, and it makes the REST surface pokeable by hand.
 :8080 {
 	handle /workbench/* {
 		reverse_proxy preview-workbench:8000 {
 			header_up X-Brain-Key {$WORKBENCH_KEY}
+		}
+	}
+
+	# Mirrors the production ./Caddyfile: the viewer and the recipe scripts
+	# speak the Supabase `${OPEN_BRAIN_URL}/rest/v1/<table>` convention, raw
+	# PostgREST serves `/<table>` at root. Strip the client auth headers for the
+	# same reason prod does — PostgREST runs with no JWT secret (anon role =
+	# service_role), so any inbound Authorization triggers PGRST300.
+	handle_path /rest/v1/* {
+		reverse_proxy preview-postgrest:3000 {
+			header_up -Authorization
+			header_up -apikey
 		}
 	}
 
