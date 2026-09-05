@@ -800,7 +800,7 @@ async function ensurePinnedSlug(sb, entity) {
 // non-URL occurrences in the remaining prose are linked. `related` is the
 // bounded set of THIS page's connected entities, so false positives stay
 // within genuinely-related names.
-function linkifyEntities(markdown, related) {
+export function linkifyEntities(markdown, related) {
   const items = (related || [])
     .filter((r) => r && r.slug && r.name && String(r.name).length >= 2)
     .sort((a, b) => String(b.name).length - String(a.name).length);
@@ -826,7 +826,15 @@ function linkifyEntities(markdown, related) {
     if (i % 2 === 1) continue; // protected span — leave as-is
     parts[i] = parts[i].replace(linkRe, (m, name) => {
       const slug = slugOf.get(name);
-      return slug ? `[[${slug}|${name}]]` : m;
+      if (!slug) return m;
+      // Quartz's alias class excludes '#' (as well as '[', ']' and '|'), so an
+      // entity name carrying one makes the WHOLE [[...]] fail to parse and land
+      // on the page as literal text. Sanitise the ALIAS the same way the
+      // Grounded-by emitter does; the slug is already safe by construction.
+      // A name that sanitises to nothing has no alias left to show, so leave
+      // the prose alone rather than mint an empty-alias `[[slug|]]`.
+      const label = linkSafeLabel(name);
+      return label ? `[[${slug}|${label}]]` : m;
     });
   }
   return parts.join("");
@@ -970,6 +978,41 @@ function resolveOutputPath(outDir, baseSlug, entity) {
   );
 }
 
+// entities.md home page so the viewer (Quartz) has a root. Groups pages by
+// entity type with [[wikilinks]]; regenerated every compile. Pure, and
+// exported, so the wikilink it mints is directly testable - it was neither,
+// and it shipped a break.
+export function buildEntityIndex(nodes, links) {
+  const byType = {};
+  for (const n of nodes) (byType[n.type] ||= []).push(n);
+  const idx = [
+    "---",
+    'title: "Knowledge Wiki"',
+    "tags: [wiki, index]",
+    "---",
+    "",
+    "# Knowledge Wiki",
+    "",
+    `Compiled from OpenBrain — ${nodes.length} entities, ${(links || []).length} relations. ` +
+      "Regenerated each compile; never hand-edit (changes are overwritten).",
+    "",
+    "See [[notebooks|Notebooks]] for research groups (synthesis + sources + notes, one per notebook).",
+    "",
+  ];
+  for (const type of Object.keys(byType).sort()) {
+    idx.push(`## ${type} (${byType[type].length})`, "");
+    for (const n of byType[type].sort((a, b) => String(a.label).localeCompare(String(b.label)))) {
+      // Same alias hazard as the auto-linker above - the daily digest mints
+      // "Daily #NNN" labels every day. Fall back to the bare slug rather than
+      // emit an empty alias when a label sanitises away entirely.
+      const label = linkSafeLabel(n.label);
+      idx.push(label ? `- [[${n.slug}|${label}]]` : `- [[${n.slug}]]`);
+    }
+    idx.push("");
+  }
+  return idx.join("\n") + "\n";
+}
+
 // req 7: emit a graph.json manifest of the whole entity graph alongside
 // the markdown — nodes (entities) + edges (typed relations), with stable
 // slugs/filenames so a viewer (Obsidian graph, Quartz, D3/Cytoscape) can
@@ -1066,34 +1109,9 @@ async function writeGraphManifest(sb, outDir, limit) {
   const p = path.join(outDir, "graph.json");
   writeIfChangedStable(p, JSON.stringify(manifest, null, 2) + "\n");
 
-  // index.md home page so the viewer (Quartz) has a root. Groups pages
-  // by entity type with [[wikilinks]]; regenerated every compile.
-  const byType = {};
-  for (const n of nodes) (byType[n.type] ||= []).push(n);
-  const idx = [
-    "---",
-    'title: "Knowledge Wiki"',
-    "tags: [wiki, index]",
-    "---",
-    "",
-    "# Knowledge Wiki",
-    "",
-    `Compiled from OpenBrain — ${nodes.length} entities, ${links.length} relations. ` +
-      "Regenerated each compile; never hand-edit (changes are overwritten).",
-    "",
-    "See [[notebooks|Notebooks]] for research groups (synthesis + sources + notes, one per notebook).",
-    "",
-  ];
-  for (const type of Object.keys(byType).sort()) {
-    idx.push(`## ${type} (${byType[type].length})`, "");
-    for (const n of byType[type].sort((a, b) => String(a.label).localeCompare(String(b.label)))) {
-      idx.push(`- [[${n.slug}|${n.label}]]`);
-    }
-    idx.push("");
-  }
   // Generated entity index is `entities.md` (the vault-root `index.md`
   // home is owned by wiki-service so Quartz `/` works across both layers).
-  writeIfChanged(path.join(outDir, "entities.md"), idx.join("\n") + "\n");
+  writeIfChanged(path.join(outDir, "entities.md"), buildEntityIndex(nodes, links));
   return { path: p, node_count: nodes.length, edge_count: links.length };
 }
 

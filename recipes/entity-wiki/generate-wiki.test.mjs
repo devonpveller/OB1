@@ -2,7 +2,7 @@
 // copy). Run: `node --test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rewriteCitations, buildEvolutionSection } from "./generate-wiki.mjs";
+import { rewriteCitations, buildEvolutionSection, linkifyEntities, buildEntityIndex } from "./generate-wiki.mjs";
 
 const UUID = "3f8a1c2d-1111-4aaa-9bbb-0123456789ab";
 const newRun = () => ({ citedThoughtIds: new Set(), citedSourceIds: new Set() });
@@ -78,4 +78,67 @@ test("Evolution: source title sanitized of wikilink-breaking chars", () => {
   // the wikilink (no leftover "[title]" or "]] chars" leaking through)
   assert.ok(out.includes("[[content/source/" + UUID + "|"), "link prefix present");
   assert.ok(!out.includes("[title]") && !out.includes("]] chars"), "title sanitized");
+});
+
+// -- '#'-bearing entity names survive each emitter as a WORKING link --------
+// The parser below is Quartz's own wikilinkRegex, copied VERBATIM out of the
+// deployed viewer image (openbrain-wiki-viewer, quartz v4.5.1,
+// quartz/plugins/transformers/ofm.ts:120). Its alias group is [^\[\]\#]*, so a
+// '#' anywhere in an alias makes the WHOLE [[...]] fail to match and survive
+// on the page as literal text. These tests drive the EMITTED markdown through
+// that parser; an assertion on the source of generate-wiki.mjs would prove
+// only that a call was written, never that the page renders a link.
+const WIKILINK_RE = /!?\[\[([^\[\]\|\#\\]+)?(#+[^\[\]\|\#\\]+)?(\\?\|[^\[\]\#]*)?\]\]/g;
+
+// Every [[...]] the parser accepts, with its target and alias.
+function parsedLinks(md) {
+  const re = new RegExp(WIKILINK_RE.source, "g");
+  const out = [];
+  let m;
+  while ((m = re.exec(md)) !== null) out.push({ whole: m[0], target: m[1], alias: m[3] });
+  return out;
+}
+// Any "[[" the parser did NOT consume is a broken link left as literal text --
+// exactly what a reader sees on the page. This is the assertion that matters.
+function unparsedOpeners(md) {
+  return (md.replace(new RegExp(WIKILINK_RE.source, "g"), "").match(/\[\[/g) || []).length;
+}
+
+test("auto-linker: a '#' in an entity name still emits a link Quartz can parse", () => {
+  const out = linkifyEntities("We ship C# services.", [{ name: "C#", slug: "technology/c-sharp" }]);
+  assert.equal(unparsedOpeners(out), 0, `broken wikilink left as literal text: ${out}`);
+  const links = parsedLinks(out);
+  assert.equal(links.length, 1, `expected exactly one parsed wikilink, got ${links.length}: ${out}`);
+  assert.equal(links[0].target, "technology/c-sharp", out);
+});
+
+test("auto-linker: a '#'-free name is linked exactly as before", () => {
+  const out = linkifyEntities("We ship Aurora daily.", [{ name: "Aurora", slug: "project/aurora" }]);
+  assert.equal(out, "We ship [[project/aurora|Aurora]] daily.");
+});
+
+test("auto-linker: a name that sanitises to nothing stays plain text, not an empty alias", () => {
+  const out = linkifyEntities("see ## here", [{ name: "##", slug: "x/y" }]);
+  assert.equal(out, "see ## here");
+  assert.equal(unparsedOpeners(out), 0, out);
+});
+
+test("entity index: a '#' in an entity label still emits a link Quartz can parse", () => {
+  const md = buildEntityIndex([{ slug: "source/daily-481", label: "Daily #481", type: "source" }], []);
+  assert.equal(unparsedOpeners(md), 0, `broken wikilink left as literal text: ${md}`);
+  const links = parsedLinks(md);
+  assert.ok(links.some((l) => l.target === "source/daily-481"), `entity link not parseable: ${md}`);
+});
+
+test("entity index: a '#'-free label is listed exactly as before", () => {
+  const md = buildEntityIndex([{ slug: "project/aurora", label: "Aurora", type: "project" }], []);
+  assert.ok(md.includes("- [[project/aurora|Aurora]]"), md);
+  assert.equal(unparsedOpeners(md), 0, md);
+});
+
+test("entity index: a label that sanitises to nothing falls back to the slug, never an empty alias", () => {
+  const md = buildEntityIndex([{ slug: "source/x", label: "#", type: "source" }], []);
+  assert.equal(unparsedOpeners(md), 0, md);
+  assert.ok(md.includes("- [[source/x]]"), md);
+  assert.ok(!md.includes("|]]"), `empty alias emitted: ${md}`);
 });
