@@ -9,7 +9,17 @@
 //
 // Run: deno test --allow-net --allow-env script-renderer.test.ts
 import { assertEquals } from "jsr:@std/assert@1";
-import { makeScriptChat, retryUntil } from "./script-renderer.ts";
+import {
+  type Episode,
+  type EpisodeInput,
+  failureReason,
+  makeScriptChat,
+  NO_REASON_RECORDED,
+  primaryTopic,
+  renderEpisode,
+  retryUntil,
+  SCRIPT_UNAVAILABLE,
+} from "./script-renderer.ts";
 
 type Handler = (req: Request, hit: number) => Response | Promise<Response>;
 
@@ -425,4 +435,133 @@ Deno.test("the PROSE caller still salvages - the split is opt-in, not a blanket 
     console.warn = realWarn;
     await s.stop();
   }
+});
+
+// ── the DEGRADED episode (2026-09-05) ────────────────────────────────────────
+// WHY: the sibling item made the chat FAILURE loud (every giveUp path warns).
+// It did not make the EPISODE DEGRADATION loud. renderEpisode still swapped a
+// written script for a raw material dump on a bare `??`, and episodes 076-089
+// shipped that way for fourteen consecutive days with nothing in the log saying
+// an episode had degraded - only a `[script] HTTP 401 ...` line a reader has to
+// know to connect to a missing episode. The only visible symptom was that the
+// FILENAMES started reading like sentences, because primaryTopic's heuristic
+// fallback slugifies the first [SOURCED] line. Nobody reads a filename as an alarm.
+
+/** Capture console.warn for the duration of `fn`. */
+async function captureWarn(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  try {
+    await fn();
+  } finally {
+    console.warn = original;
+  }
+  return lines;
+}
+
+const EP: EpisodeInput = {
+  date: "2026-09-05",
+  episodeNumber: 92,
+  segments: [{
+    label: "brain/ai/test",
+    items: [{ title: "", url: "u", synthesis: "[SOURCED] The article is a substack post about model releases." }],
+  }],
+};
+
+Deno.test("renderEpisode DEGRADED: the raw-material fallback names the stage, the episode and the size", async () => {
+  let ep: Episode | undefined;
+  const lines = await captureWarn(async () => {
+    ep = await renderEpisode(EP, () => Promise.resolve(null));
+  });
+  // the fallback still ships - a degraded episode is deliberate, it must not be silent
+  assertEquals(ep!.script.startsWith(SCRIPT_UNAVAILABLE), true);
+  const degraded = lines.filter((l) => l.includes("DEGRADED") && l.includes("renderEpisode/S4a"));
+  assertEquals(degraded.length, 1);
+  assertEquals(degraded[0].includes("episode 092"), true);
+  assertEquals(degraded[0].includes(`${ep!.script.length} chars`), true);
+});
+
+Deno.test("renderEpisode DEGRADED: the cause is the chat()'s OWN failure, not 'the LLM returned null'", async () => {
+  const s = stubServer(() => new Response("LiteLLM Virtual Key expected", { status: 401 }));
+  const chat = makeScriptChat({
+    chatApiBase: s.base, chatModel: "m", apiKey: "bad", retryDelayMs: 0, label: "script", salvageTruncated: true,
+  });
+  const lines = await captureWarn(async () => { await renderEpisode(EP, chat); });
+  await s.stop();
+  const degraded = lines.filter((l) => l.includes("DEGRADED") && l.includes("renderEpisode/S4a"));
+  assertEquals(degraded.length, 1);
+  assertEquals(degraded[0].includes("HTTP 401"), true);
+});
+
+Deno.test("renderEpisode DEGRADED: a hand-rolled ChatFn has no reason channel and degrades to a safe string", async () => {
+  const lines = await captureWarn(async () => { await renderEpisode(EP, () => Promise.resolve(null)); });
+  const degraded = lines.filter((l) => l.includes("renderEpisode/S4a"));
+  assertEquals(degraded[0].includes(NO_REASON_RECORDED), true);
+});
+
+Deno.test("a HEALTHY episode emits NO DEGRADED line (the alarm must not cry wolf)", async () => {
+  const lines = await captureWarn(async () => {
+    await renderEpisode(EP, () => Promise.resolve("HOST A: hello."));
+  });
+  assertEquals(lines.filter((l) => l.includes("DEGRADED")).length, 0);
+});
+
+Deno.test("primaryTopic warns when the filename degrades to a slugified sentence", async () => {
+  let slug = "";
+  const lines = await captureWarn(async () => { slug = await primaryTopic(EP, () => Promise.resolve(null)); });
+  assertEquals(slug, "the-article-is-a-substack-post-about-model-releases");
+  const warned = lines.filter((l) => l.includes("DEGRADED") && l.includes("Stage: primary topic"));
+  assertEquals(warned.length, 1);
+  assertEquals(warned[0].includes(`heuristic slug "${slug}"`), true);
+  // WHY THIS ASSERTS THE CAUSE TEXT: the first cut of this line built the cause as
+  // `... Cause: ${` + expr + `}`, which is not an interpolation - it emitted the
+  // literal SOURCE of the ternary into the log. `deno check` passed and a test that
+  // only looked for the word "primaryTopic" passed with it. Assert what a reader
+  // has to be able to READ.
+  assertEquals(warned[0].endsWith(`Cause: ${NO_REASON_RECORDED}`), true);
+  assertEquals(warned[0].includes("${"), false);
+});
+
+Deno.test("primaryTopic is silent when the LLM names the topic", async () => {
+  const lines = await captureWarn(async () => { await primaryTopic(EP, () => Promise.resolve("ai in education")); });
+  assertEquals(lines.length, 0);
+});
+
+Deno.test("failureReason is CLEARED by a success - a later degrade never quotes a stale cause", async () => {
+  const s = stubServer((_r, hit) => hit === 1 ? new Response("boom", { status: 503 }) : ok("the script"));
+  const chat = makeScriptChat({ chatApiBase: s.base, chatModel: "m", apiKey: "sk-t", retryDelayMs: 0, attempts: 1 });
+  assertEquals(await chat("s", "u"), null); // attempt budget of 1: the 503 gives up
+  assertEquals(failureReason(chat).includes("HTTP 503"), true);
+  assertEquals(await chat("s", "u"), "the script");
+  assertEquals(failureReason(chat), NO_REASON_RECORDED);
+  await s.stop();
+});
+
+Deno.test("recording a reason does NOT change a classifier's return value (the split is untouched)", async () => {
+  const s = stubServer(() => Response.json({ choices: [{ message: { content: "VERDICT: KEEP" }, finish_reason: "length" }] }));
+  const chat = makeScriptChat({
+    chatApiBase: s.base, chatModel: "m", apiKey: "sk-t", retryDelayMs: 0, attempts: 1, maxTokens: 10, maxTokensCeiling: 10,
+  });
+  assertEquals(await chat("s", "u"), null); // classifier: truncation at the ceiling is still null, never cut-off text
+  assertEquals(failureReason(chat).includes("TRUNCATED"), true);
+  await s.stop();
+});
+
+Deno.test("primaryTopic with no segments names the real reason, not a stale chat failure", async () => {
+  let slug = "";
+  const lines = await captureWarn(async () => {
+    slug = await primaryTopic({ date: "2026-09-05", episodeNumber: 93, segments: [] }, () => Promise.resolve(null));
+  });
+  assertEquals(slug, "daily-digest");
+  assertEquals(lines.length, 1);
+  assertEquals(lines[0].endsWith("Cause: no segment headlines to name a topic from"), true);
+});
+
+Deno.test("no DEGRADED line ever leaks unrendered template source", async () => {
+  const lines = await captureWarn(async () => {
+    await renderEpisode(EP, () => Promise.resolve(null));
+  });
+  assertEquals(lines.length, 2); // one for the topic stage, one for the script stage
+  for (const l of lines) assertEquals(l.includes("${"), false);
 });

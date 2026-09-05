@@ -55,6 +55,37 @@ export interface Episode {
 
 // ── LLM chat (system+user) ───────────────────────────────────────────────────
 export type ChatFn = (system: string, user: string) => Promise<string | null>;
+
+/** What a degrading caller reports when its ChatFn keeps no reason.
+ *
+ *  A hand-rolled ChatFn (every test stub, and any caller that passes a plain
+ *  closure) records nothing. Degrading to this string is DELIBERATE: the
+ *  alternative is to widen the ChatFn contract and break every such caller, to
+ *  buy a line that is only ever read on a failure path. */
+export const NO_REASON_RECORDED = "reason not recorded by this chat function";
+
+/** A ChatFn that remembers WHY its last call returned null.
+ *
+ *  WHY THIS EXISTS: without it a degrading caller can only say "the LLM returned
+ *  null", which is precisely the uninformative line that let episodes 076-089
+ *  ship raw grounded material for fourteen days. The cause (a 401, a timeout, an
+ *  exhausted retry budget) is known INSIDE makeScriptChat and nowhere else; the
+ *  ChatFn signature threw it away. `lastFailure` is an OPTIONAL property on the
+ *  function object, so a ChatFnWithReason IS a ChatFn and no existing call site
+ *  changes.
+ *
+ *  Contract: SET when a call returns null, CLEARED whenever a call returns text -
+ *  so a later degrade can never quote a stale cause from an earlier call. */
+export interface ChatFnWithReason extends ChatFn {
+  lastFailure?: string;
+}
+
+/** Why `chat`'s last call returned null, or NO_REASON_RECORDED. */
+export function failureReason(chat: ChatFn): string {
+  const why = (chat as ChatFnWithReason).lastFailure;
+  return why && why.length > 0 ? why : NO_REASON_RECORDED;
+}
+
 export interface ScriptChatConfig {
   chatApiBase: string;
   chatModel: string;
@@ -107,7 +138,7 @@ function isTransientStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
+export function makeScriptChat(cfg: ScriptChatConfig): ChatFnWithReason {
   // The key is resolved ONCE, here, so every call site gets it whether or not it
   // remembered to pass one. link-enrich.ts historically passed nothing, which sent
   // `Bearer not-needed` and 401'd on every call from 2026-08-21 onward - the script
@@ -137,7 +168,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
   // on requests that were never going to complete.
   const baseTimeout = cfg.timeoutMs ?? 200_000;
   const timeoutFor = (b: number) => Math.round(baseTimeout * (b / baseTokens));
-  return async (system, user) => {
+  const fn: ChatFnWithReason = async (system, user) => {
     // PER CALL. These MUST be declared inside the returned function, not beside
     // apiKey/attempts: makeScriptChat's result is a long-lived ChatFn that
     // link-enrich calls once PER EMAIL (poiChat, bodyClassifyChat; MAX_EMAILS
@@ -159,12 +190,16 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
       // Only a PROSE caller wants the salvage; a classifier's null is its own
       // deliberate safe default and must not be overridden with cut-off text.
       if (salvage && bestTruncated) {
+        // Text is being returned, so the CALLER does not degrade: the reason
+        // channel must not report a failure the caller never sees.
+        fn.lastFailure = undefined;
         console.warn(
           `[${label}] ${why} - returning the earlier TRUNCATED text rather than nothing; ` +
             `this episode is INCOMPLETE`,
         );
         return toLastCompleteSentence(bestTruncated);
       }
+      fn.lastFailure = why;
       return null;
     };
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -217,6 +252,11 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
                 `[${label}] TRUNCATED at max_tokens=${budget} with the ceiling (${ceiling}) reached - ` +
                   `returning null: this caller classifies, and a cut-off answer parses as a WRONG one`,
               );
+              // Recording the reason is the ONLY change on this path. The RETURN
+              // VALUE stays null: a truncated classifier reply is worse than none
+              // because it still PARSES (measured against isPromoBody 2026-09-04).
+              fn.lastFailure =
+                `TRUNCATED at max_tokens=${budget} with the ceiling (${ceiling}) reached`;
               return null;
             }
             // Prose: partial text is the LEAST-BAD option - null degrades to
@@ -226,9 +266,13 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
               `[${label}] TRUNCATED at max_tokens=${budget} with the ceiling (${ceiling}) reached - ` +
                 `returning CUT-OFF text: this episode is INCOMPLETE (raise SCRIPT_MAX_TOKENS)`,
             );
+            fn.lastFailure = undefined;
             return toLastCompleteSentence(content);
           }
-          if (content) return content;
+          if (content) {
+            fn.lastFailure = undefined;
+            return content;
+          }
           if (last) {
             console.warn(`[${label}] empty completion (giving up after ${attempt})`);
             return giveUp(`empty completion after ${attempt} attempt(s)`);
@@ -246,6 +290,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFn {
     }
     return giveUp("attempts exhausted");
   };
+  return fn;
 }
 /** One attempt's outcome: `done` ends the loop (even with a null value - the
  *  step decided), `done:false` means "failed, try again". */
@@ -373,8 +418,25 @@ export async function primaryTopic(input: EpisodeInput, chat: ChatFn): Promise<s
   }
   // heuristic fallback: the headline of the first item.
   const first = input.segments[0]?.items[0];
-  return slugify(first ? headlineOf(first) : "daily-digest");
+  const slug = slugify(first ? headlineOf(first) : "daily-digest");
+  // WHY THIS WARNS: during 076-089 this fallback was the ONLY externally visible
+  // symptom of a failed script stage - the filenames turned from `ai-industry-news`
+  // into `the-article-is-a-substack-post-by-nate-published-aug-28-2026`, because the
+  // heuristic slugifies a whole [SOURCED] sentence. Nobody reads a filename as an
+  // alarm. It is a distinct stage from the script call, so it gets its own line.
+  const cause = headlines ? failureReason(chat) : "no segment headlines to name a topic from";
+  console.warn(
+    `[script] DEGRADED: episode ${pad3(input.episodeNumber)} has no LLM-named topic - using the ` +
+      `heuristic slug "${slug}" (a sentence-shaped filename is the visible symptom of this). ` +
+      `Stage: primary topic (primaryTopic). Cause: ${cause}`,
+  );
+  return slug;
 }
+
+/** The marker a degraded episode carries in place of a script. Exported so the
+ *  tests and any `grep` over /reports share ONE definition of the string - it is
+ *  how a degraded episode is identified after the fact, and nothing else writes it. */
+export const SCRIPT_UNAVAILABLE = "(script generation unavailable — grounded material follows)";
 
 // ── render ───────────────────────────────────────────────────────────────────
 export async function renderEpisode(input: EpisodeInput, chat: ChatFn): Promise<Episode> {
@@ -385,8 +447,26 @@ export async function renderEpisode(input: EpisodeInput, chat: ChatFn): Promise<
   const segmentsBlock = input.segments.map(renderSegmentForPrompt).join("\n\n");
   const user =
     `DATE: ${input.date}\nEPISODE: ${title}\n\nSEGMENTS (one per label):\n\n${segmentsBlock}`;
-  const script = (await chat(SCRIPT_SYS, user)) ??
-    `(script generation unavailable — grounded material follows)\n\n${segmentsBlock}`;
+  const written = await chat(SCRIPT_SYS, user);
+  // THE DEGRADE. Shipping the raw grounded material is still deliberate - a degraded
+  // episode is better than no episode - but it must never again be SILENT. Episodes
+  // 076-089 (2026-08-22..2026-09-04) took this branch on fourteen consecutive nights
+  // and the log said only `[script] HTTP 401 ...`, a line a reader has to already
+  // know to connect to a missing episode.
+  //
+  // The dump becomes the Open Notebook transcript prompt downstream, so its SIZE is
+  // the number that matters: episode 083's 47,296 chars reached podcast_creator's
+  // 5,000-token cap and aborted the episode outright.
+  const script = written ?? (() => {
+    const dump = `${SCRIPT_UNAVAILABLE}\n\n${segmentsBlock}`;
+    console.warn(
+      `[script] DEGRADED: episode ${pad3(input.episodeNumber)} "${title}" is shipping RAW ` +
+        `GROUNDED MATERIAL instead of a written script (${dump.length} chars, which becomes ` +
+        `the transcript prompt downstream). Stage: script generation (renderEpisode/S4a). ` +
+        `Cause: ${failureReason(chat)}`,
+    );
+    return dump;
+  })();
 
   return { number: input.episodeNumber, topicSlug, name, title, script };
 }
