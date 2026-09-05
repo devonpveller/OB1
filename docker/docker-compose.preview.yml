@@ -1,14 +1,37 @@
-# Throwaway PREVIEW stack — a browsable, isolated instance to drive the
-# workbench + extract by hand before merging. Fresh volumes (the init-*.sql run
-# automatically → full schema), its own bridge net, no prod contact. Open
-# http://127.0.0.1:8099 after `up`.
+# Throwaway PREVIEW stack — a browsable, isolated instance to drive the wiki
+# viewer + workbench + extract by hand before merging. Fresh volumes (the
+# init-*.sql run automatically → full schema), its own bridge net, NO prod
+# contact of any kind.
 #
+# ── RUN IT ──────────────────────────────────────────────────────────────────
 #   docker compose -f OB1/docker/docker-compose.preview.yml up -d --build
-#   ...try it at http://127.0.0.1:8099 ...
-#   docker compose -f OB1/docker/docker-compose.preview.yml down -v   # wipes it
 #
-# Needs the main stack's embedding model reachable (import embeds via bge-m3 on
-# the external ai-stack_llm-net). Everything else is self-contained.
+#   # (--build is the slow part on a cold machine — three images. After that
+#   #  the vault seeds itself (preview-seed) and the viewer cold-builds it in
+#   #  seconds on the 10-page seed vault.)
+#   # Until that first build lands, :8099 serves the viewer's "Building…"
+#   # splash — that is expected, not a fault. Watch it land:
+#   docker compose -f OB1/docker/docker-compose.preview.yml logs -f preview-viewer
+#   #   ...wait for:  [wiki-viewer] snapshot #N swapped live   (or the initial
+#   #   publish right after "first COMPLETE build emitted")
+#
+#   ...then open http://127.0.0.1:8099
+#
+#   docker compose -f OB1/docker/docker-compose.preview.yml down -v --remove-orphans
+#                                                                    # wipes it
+#
+# ── WHY IT IS SAFE TO RUN NEXT TO PRODUCTION ────────────────────────────────
+# * Every image it BUILDS is tagged `:preview`, never `:local` — `up --build`
+#   here can not overwrite the tags the live stack runs (it used to: the
+#   services carried `openbrain-workbench:local` etc, so the documented
+#   `--build` retagged production images out from under the running stack).
+# * It attaches to NO `ai-stack_*` network. It therefore has NO LLM access:
+#   anything that needs bge-m3 embeddings (source import, chunk embedding) does
+#   not work in the preview. Browsing the wiki, the workbench notes/editor
+#   paths and the graph/nav do — those are what this stack is for. (It used to
+#   join the external `ai-stack_llm-net` for import embeddings; that is exactly
+#   the kind of production contact a throwaway preview must not have.)
+# * Its own compose project (`ob-preview`), its own volume, its own network.
 name: ob-preview
 
 services:
@@ -55,15 +78,68 @@ services:
       - ./init-agent-memory-column-authority.sql:/docker-entrypoint-initdb.d/205-init-agent-memory-column-authority.sql:ro # DFU C.9 H3 item S
     networks: [pnet]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+      # `-h 127.0.0.1` is LOAD-BEARING, not decoration. Without it pg_isready
+      # probes the UNIX SOCKET — and the temporary bootstrap server that the
+      # postgres entrypoint runs while it applies the init-*.sql above is
+      # already serving that socket, with `listen_addresses=''`. So a socket
+      # probe reports "healthy" mid-initdb, `condition: service_healthy`
+      # releases the dependents, and preview-workbench dies with
+      # `ConnectionRefused (os error 111)` on a cold `up`. Probing TCP is the
+      # discriminator: the bootstrap server does not listen on it, the real
+      # one does.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain -h 127.0.0.1"]
       interval: 5s
       timeout: 5s
       retries: 20
 
+  # PostgREST over preview-db, behind the same `/rest/v1/*` path-strip that
+  # `openbrain-rest` gives the real stack (that route lives on preview-caddy).
+  # The preview USED to have no REST tier at all, which quietly broke the
+  # viewer once its graph/nav indexes became DB queries (2026-08-26): with
+  # nothing answering, derive-graph-index.mjs exits non-zero, EVERY snapshot is
+  # discarded, /srv/current is never created and :8099 serves a permanent 503.
+  preview-postgrest:
+    image: postgrest/postgrest:v12.2.3
+    depends_on:
+      preview-db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://postgres:preview@preview-db:5432/openbrain
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: service_role
+      PGRST_DB_POOL: "10"
+      PGRST_SERVER_PORT: "3000"
+    networks: [pnet]
+
+  # One-shot: makes the empty preview-wiki volume into a usable vault BEFORE
+  # anything reads it — copies ./preview/seed in and makes it a REAL git repo
+  # on `main` with the seed committed. Both halves matter:
+  #   * nothing else seeds the volume, so without this the viewer sits in
+  #     "waiting for first compile..." forever and there is no page to open;
+  #   * the workbench's own ensureVaultRepo() only ever runs a bare
+  #     `git init -q` — default branch, no commit — so HEAD stays unborn and
+  #     every history/revert path (`git show HEAD:<file>`) fails until a human
+  #     commits by hand. Quartz also warns "isn't yet tracked by git, dates
+  #     will be inaccurate" for every page.
+  # Idempotent: re-running `up` on an already-seeded volume is a no-op.
+  # Reuses the workbench build (same context ⇒ same image, no extra build) —
+  # it is the image in this stack that ships git.
+  preview-seed:
+    build:
+      context: ./workbench
+    image: openbrain-workbench:preview
+    entrypoint: ["/bin/sh", "/seed-vault.sh"]
+    restart: "no"
+    volumes:
+      - preview-wiki:/wiki
+      - ./preview/seed:/seed:ro
+      - ./preview/seed-vault.sh:/seed-vault.sh:ro
+    networks: [pnet]
+
   preview-extract:
     build:
       context: ./extract
-    image: openbrain-extract:local
+    image: openbrain-extract:preview
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks: [pnet]
@@ -71,10 +147,12 @@ services:
   preview-workbench:
     build:
       context: ./workbench
-    image: openbrain-workbench:local
+    image: openbrain-workbench:preview
     depends_on:
       preview-db:
         condition: service_healthy
+      preview-seed:
+        condition: service_completed_successfully
     environment:
       PORT: "8000"
       WORKBENCH_KEY: preview-key
@@ -83,9 +161,14 @@ services:
       DB_NAME: openbrain
       DB_USER: postgres
       DB_PASSWORD: preview
-      # No PostgREST in the preview (only /health probes it → reports rest:false,
-      # harmless; every write/read path uses the direct pg pool).
-      OPEN_BRAIN_URL: http://preview-db
+      # PostgREST reads, through preview-caddy's /rest/v1 path-strip — the same
+      # shape as prod's openbrain-rest. (This used to point at http://preview-db,
+      # a bare Postgres port that speaks no HTTP, because the preview had no
+      # REST tier; /health reported rest:false and every REST read was dead.)
+      OPEN_BRAIN_URL: http://preview-caddy:8080
+      # INERT here: the preview joins no ai-stack_* network, so this host does
+      # not resolve. Kept so the config matches prod and so an embedding-using
+      # path fails loudly rather than silently taking a different branch.
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
       EMBEDDING_API_KEY: not-needed
       EMBEDDING_MODEL: bge-m3
@@ -99,24 +182,42 @@ services:
       # The shared canonical slug module is imported at runtime via
       # file:///recipes/_shared/slug.mjs — same bind-mount the base stack uses.
       - ../recipes:/recipes:ro
-    networks:
-      - pnet
-      - llm-net
+    networks: [pnet]
 
   # The actual Quartz viewer — builds the overlay (.tsx) components and renders
   # the seeded wiki pages. Shares the preview-wiki volume (read-only).
   preview-viewer:
     build:
       context: ./wiki-viewer
-    image: openbrain-wiki-viewer:local
-    depends_on: [preview-workbench]
+    image: openbrain-wiki-viewer:preview
+    depends_on:
+      preview-seed:
+        condition: service_completed_successfully
+      preview-workbench:
+        condition: service_started
+    environment:
+      # The viewer's graph index, nav index and DB-render fallback are all
+      # QUERIES against wiki_pages over PostgREST. Their built-in default is
+      # `http://openbrain-rest` — a PRODUCTION hostname that does not resolve
+      # here, so every one of them failed and derive-graph-index.mjs exiting
+      # non-zero made the entrypoint discard every snapshot: /srv/current was
+      # never created and :8099 served a permanent 503. Point them at the
+      # preview's own REST tier instead.
+      OPEN_BRAIN_URL: http://preview-caddy:8080
+      # Both indexes refuse to publish a suspiciously small result (default
+      # 100 rows) because on the real 29.6k-page vault that means a truncated
+      # read. The preview's vault is ~10 pages and starts with ZERO rows in
+      # wiki_pages (nothing compiles into it until you create a note), so the
+      # floor has to come off or the guard rejects the whole preview.
+      GRAPH_INDEX_MIN_ROWS: "0"
+      WIKI_NAV_MIN_ROWS: "0"
     volumes:
       - preview-wiki:/wiki:ro
     networks: [pnet]
 
   preview-caddy:
     image: caddy:2-alpine
-    depends_on: [preview-workbench, preview-viewer]
+    depends_on: [preview-workbench, preview-viewer, preview-postgrest]
     environment:
       WORKBENCH_KEY: preview-key
     volumes:
@@ -130,9 +231,8 @@ volumes:
   preview-wiki:
 
 networks:
+  # The ONLY network in this stack. Every service names it explicitly — a
+  # service without a `networks:` key would make compose create an implicit
+  # `ob-preview_default` that survives teardown as a stray.
   pnet:
     driver: bridge
-  # The main stack's embedding network (for bge-m3 during import).
-  llm-net:
-    external: true
-    name: ai-stack_llm-net
