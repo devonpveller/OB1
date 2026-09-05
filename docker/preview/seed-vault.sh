@@ -8,12 +8,40 @@
 #   no page to open at :8099 at all. The seed vault lives in ./preview/seed.
 #
 #   The second half is just as load-bearing. The workbench's ensureVaultRepo()
-#   runs a bare `git init -q` on first boot: default branch name, and NO
-#   commit. HEAD is therefore unborn, so `git show HEAD:<file>` fails and with
-#   it every note history / revert / diff path, and Quartz warns
-#   "isn't yet tracked by git, dates will be inaccurate" for every page. A real
-#   `git init -b main` plus a commit of the seed is what makes the vault a
-#   working git-backed vault instead of a directory with a .git in it.
+#   (workbench/src/util/vault.ts:25-39) runs a bare `git init -q` on first
+#   boot and then only sets user.email/user.name: no branch of its own, and NO
+#   commit. HEAD is therefore unborn, so `git show HEAD:<file>` fails
+#   (vault.ts:71 and :98) and with it every note history / revert / diff path.
+#   A real `git init -b main` plus a commit of the seed is what makes the vault
+#   a working git-backed vault instead of a directory with a .git in it.
+#
+# WHAT THIS DOES NOT FIX - DO NOT GO HUNTING IT (checked 2026-09-05)
+#   Quartz still logs `isn't yet tracked by git, dates will be inaccurate` for
+#   every page after this seeder has run. That was checked with the vault a
+#   genuine repo on `main` (a real commit; `git show HEAD:index.md` works) and
+#   all 10 seed pages still warned. The warning does NOT report the vault's git
+#   state, and no amount of seeding removes it:
+#     * the viewer's entrypoint.sh (lines 7-8) points Quartz at the vault with
+#       `ln -sfn /wiki /quartz/content`, so every page's path lies under
+#       /quartz, not under the vault;
+#     * Quartz's CreatedModifiedDate transformer
+#       (quartz/plugins/transformers/lastmod.ts) discovers a repository from
+#       that `content` path - which follows the symlink and yields workdir
+#       `/wiki/` - and then looks the file up as
+#       `path.relative(workdir, file.data.filePath)`, where filePath is the
+#       cwd-relative `content/content/<page>.md`. That resolves to
+#       `../quartz/content/content/<page>.md`: a path outside the repository,
+#       so the lookup throws and the catch prints the warning. Reproduced
+#       inside openbrain-wiki-viewer:preview against a fully committed vault -
+#       workdir `/wiki/`, computed path `../quartz/content/content/foo.md`,
+#       `Failed to get commit`. It is also why the warnings name paths like
+#       `content/content/...`: the vault's own content/ directory, seen
+#       through /quartz/content.
+#   Effect: page dates come from frontmatter or the file's own mtime instead
+#   (quartz.config.ts sets priority ["frontmatter", "git", "filesystem"]),
+#   which for a throwaway preview is fine. A real fix is
+#   viewer-side - mount the vault at /quartz/content instead of symlinking it,
+#   or patch lastmod.ts - and is nothing this seeder can do.
 #
 # IDEMPOTENT: safe to re-run on every `up`. Only an unseeded vault is filled,
 # only a repo without HEAD is initialised, and the commit is skipped when there

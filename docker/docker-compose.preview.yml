@@ -116,11 +116,17 @@ services:
   # on `main` with the seed committed. Both halves matter:
   #   * nothing else seeds the volume, so without this the viewer sits in
   #     "waiting for first compile..." forever and there is no page to open;
-  #   * the workbench's own ensureVaultRepo() only ever runs a bare
-  #     `git init -q` — default branch, no commit — so HEAD stays unborn and
-  #     every history/revert path (`git show HEAD:<file>`) fails until a human
-  #     commits by hand. Quartz also warns "isn't yet tracked by git, dates
-  #     will be inaccurate" for every page.
+  #   * the workbench's own ensureVaultRepo() never sets a branch and never
+  #     commits: a bare `git init -q`, then only user.email/user.name
+  #     (workbench/src/util/vault.ts:25-39). HEAD therefore stays unborn and
+  #     every history/revert path (`git show HEAD:<file>`, vault.ts:71/98)
+  #     fails until a human commits by hand.
+  # What the seeder does NOT fix, so nobody hunts it: Quartz still logs
+  # "isn't yet tracked by git, dates will be inaccurate" for every page after
+  # this seeder has run — checked 2026-09-05 with the vault a real repo on
+  # `main` whose `git show HEAD:index.md` works. The warning is independent of
+  # the vault's git state; the mechanism is written up at the top of
+  # preview/seed-vault.sh.
   # Idempotent: re-running `up` on an already-seeded volume is a no-op.
   # Reuses the workbench build (same context ⇒ same image, no extra build) —
   # it is the image in this stack that ships git.
@@ -167,8 +173,10 @@ services:
       # REST tier; /health reported rest:false and every REST read was dead.)
       OPEN_BRAIN_URL: http://preview-caddy:8080
       # INERT here: the preview joins no ai-stack_* network, so this host does
-      # not resolve. Kept so the config matches prod and so an embedding-using
-      # path fails loudly rather than silently taking a different branch.
+      # not resolve and no embedding path works in this stack. Spelled out for
+      # legibility only — this block changes nothing: workbench
+      # src/config.ts:30-33 already defaults to these exact four values, so
+      # setting them and omitting them are behaviourally identical.
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
       EMBEDDING_API_KEY: not-needed
       EMBEDDING_MODEL: bge-m3
