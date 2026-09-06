@@ -6,7 +6,7 @@ import {
   citedNumbers, citedSubset, buildCitedAndRenumber, renderResult,
   classifyCuratorOutcome, proxyPolicy,
   shouldRetryCuratorError, curatorBackoffMs, curatorRefusedWorstCaseMs, curatorTimeoutWorstCaseMs, delegateCuratorWithRetry,
-  CuratorHttpError, CuratorTimeoutError, type FetchLike,
+  CuratorHttpError, CuratorTimeoutError, CuratorAfterSendError, CuratorNoVerdictError, curatorTimeoutMsFromEnv, curatorRetriesFromEnv, type FetchLike,
 } from "./lib.ts";
 
 Deno.test("extractTextFromHtml strips scripts/styles/tags, keeps text", () => {
@@ -252,10 +252,12 @@ Deno.test("proxyPolicy: configured+built proxies; configured+unbuildable refuses
 // the per-attempt AbortSignal.timeout itself, so a fake fetch that only resolves
 // via the signal is the mutation detector for "remove the signal".
 //
-// Policy under test (anchor, amended 2026-09-06): connection-level failures are
-// retried up to `retries` TOTAL attempts; a TIMEOUT is NOT retried (the curator
-// may still be working - a resend would double-ingest) and fails once naming
-// the elapsed time; an HTTP answer of any status is never retried.
+// Policy under test (anchor, amended 2026-09-06; tester's refutations 1, 2b, 3
+// folded in): connect-phase failures are retried up to `retries` TOTAL
+// attempts; a TIMEOUT - in the connect, header OR body phase - is NOT retried
+// and fails once naming the elapsed time; a failure after the request was sent
+// is NOT retried and says the package may have been received; a 2xx without a
+// JSON object body is NOT filed; an HTTP answer of any status is never retried.
 
 const CURATOR_URL = "http://curator.test:8000/ingest/research-package";
 const INIT: RequestInit = { method: "POST", body: "{}" };
@@ -265,6 +267,13 @@ function refusedError(): Error {
   return new TypeError(
     "error sending request for url (http://curator.test:8000/ingest/research-package): " +
       "client error (Connect): tcp connect error: Connection refused (os error 111)",
+  );
+}
+/** Deno's real message when the peer closes AFTER the request went out (tester's refutation 1). */
+function closedAfterSendError(): Error {
+  return new TypeError(
+    "error sending request from 172.17.0.8:47846 for http://curator.test:8000/ingest/research-package (172.17.0.4:8000): " +
+      "client error (SendRequest): connection closed before message completed",
   );
 }
 
@@ -279,24 +288,24 @@ function trace(): Trace {
   t.opts.now = () => t.clock;
   return t;
 }
+async function failing(fn: () => Promise<unknown>): Promise<Error> {
+  try { await fn(); } catch (e) { return e as Error; }
+  throw new Error("expected the call to throw");
+}
 
-Deno.test("curator: connection refused is retried CURATOR_RETRIES times, then surfaces with the attempt count and the last cause", async () => {
+Deno.test("curator: connection refused (Connect phase) is retried CURATOR_RETRIES times, then surfaces with the attempt count and the last cause", async () => {
   const t = trace();
   const fetchImpl: FetchLike = async () => { t.calls++; t.clock += 5; throw refusedError(); };
-  let err: Error | null = null;
-  try {
-    await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts });
-  } catch (e) { err = e as Error; }
+  const err = await failing(() => delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }));
   assertEquals(t.calls, 3, "three attempts in total");
   assertEquals(t.sleeps, [2000, 4000], "backoff between attempts, none after the last");
   assertEquals(t.logs.length, 2, "one retry line per failed-and-retried attempt");
   assertEquals(t.logs[0].startsWith("curator attempt 1/3 failed: TypeError: error sending request"), true, t.logs[0]);
-  assertEquals(err !== null, true, "the failure surfaces");
-  assertEquals(/after 3 attempt\(s\) in 6015 ms/.test(err!.message), true, err!.message);
-  assertEquals(err!.message.includes("Connection refused"), true, "the last cause is named");
+  assertEquals(/after 3 attempt\(s\) in 6015 ms/.test(err.message), true, err.message);
+  assertEquals(err.message.includes("Connection refused"), true, "the last cause is named");
 });
 
-Deno.test("curator: a per-attempt timeout (TimeoutError from the AbortSignal) is NOT retried - fails once naming the elapsed time", async () => {
+Deno.test("curator: a per-attempt timeout before any response is NOT retried - fails once naming the elapsed time", async () => {
   const t = trace();
   // Resolves ONLY through the signal: without one, the real call would hang forever
   // and this fake refuses instead of hanging the suite.
@@ -308,43 +317,99 @@ Deno.test("curator: a per-attempt timeout (TimeoutError from the AbortSignal) is
       sig.addEventListener("abort", () => { t.clock += 20; reject(sig.reason ?? new DOMException("signal timed out", "TimeoutError")); });
     });
   };
-  let err: Error | null = null;
-  try {
-    await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 20, ...t.opts });
-  } catch (e) { err = e as Error; }
+  const err = await failing(() => delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 20, ...t.opts }));
   assertEquals(t.calls, 1, "ONE attempt: a timeout is never retried");
   assertEquals(t.sleeps, [], "no backoff was slept");
   assertEquals(t.logs, [], "no retry line was logged");
-  assertEquals(err !== null, true);
-  assertEquals(err!.name, "CuratorTimeoutError");
-  assertEquals(err!.message, "curator timed out after 20 ms (CURATOR_TIMEOUT_MS=20, attempt 1/3, not retried - the curator may still be working on the package)");
+  assertEquals(err.name, "CuratorTimeoutError");
+  assertEquals(err.message, "curator timed out after 20 ms (CURATOR_TIMEOUT_MS=20, attempt 1/3, not retried - the curator may still be working on the package)");
   assertEquals(shouldRetryCuratorError(err), false);
 });
 
-Deno.test("curator: an HTTP 500 JSON answer is a verdict - returned on the first attempt, NOT retried", async () => {
+Deno.test("curator: a 2xx whose BODY stalls past the timeout is a timeout, not `{}` filed (tester's refutation 2b)", async () => {
+  const t = trace();
+  // 200 headers arrive at once; the body stream only errors when the wrapper's signal fires.
+  const fetchImpl: FetchLike = async (_url, init) => {
+    t.calls++;
+    const sig = init.signal!;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"thread_id":'));
+        sig.addEventListener("abort", () => { t.clock += 25; controller.error(sig.reason); });
+      },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const err = await failing(() => delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 25, ...t.opts }));
+  assertEquals(t.calls, 1, "one attempt - the curator may still be working");
+  assertEquals(t.sleeps, []);
+  assertEquals(err.name, "CuratorTimeoutError");
+  assertEquals(err.message, "curator timed out after 25 ms while reading its answer (CURATOR_TIMEOUT_MS=25, attempt 1/3, not retried - the curator may still be working on the package)");
+  assertEquals(classifyCuratorOutcome({ error: err.message }).state, "FAILED", "research_jobs reads it as NOT filed");
+});
+
+Deno.test("curator: a 2xx whose body is empty, truncated or not an object is NOT filed - no JSON verdict", async () => {
+  for (const [body, bytes] of [["", 0], ['{"thread_id":', 13], ["<html>ok</html>", 15], ["[]", 2], ["null", 4]] as Array<[string, number]>) {
+    const t = trace();
+    const fetchImpl: FetchLike = async () => { t.calls++; return new Response(body, { status: 200 }); };
+    const err = await failing(() => delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }));
+    assertEquals(t.calls, 1, body);
+    assertEquals(err.name, "CuratorNoVerdictError", body);
+    assertEquals(err.message, `curator answered 200 with no JSON verdict (${bytes} bytes)`);
+    assertEquals(classifyCuratorOutcome({ error: err.message }).state, "FAILED", body);
+    assertEquals(shouldRetryCuratorError(err), false);
+  }
+});
+
+Deno.test("curator: the peer closing AFTER the request was sent (SendRequest) is NOT retried - one attempt, says the package may have been received", async () => {
+  const t = trace();
+  const fetchImpl: FetchLike = async () => { t.calls++; throw closedAfterSendError(); };
+  const err = await failing(() => delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }));
+  assertEquals(t.calls, 1, "no resend after the package may have been received");
+  assertEquals(t.sleeps, []);
+  assertEquals(t.logs, []);
+  assertEquals(err.name, "CuratorAfterSendError");
+  assertEquals(err.message.startsWith("curator connection failed after the request was sent (attempt 1/3, not retried - the package may have been received): TypeError: error sending request"), true, err.message);
+  assertEquals(err.message.includes("(SendRequest)"), true);
+  assertEquals(shouldRetryCuratorError(err), false);
+  // A body-read failure after headers is the same class.
+  const t2 = trace();
+  const bodyFails: FetchLike = async () => {
+    t2.calls++;
+    const body = new ReadableStream<Uint8Array>({ start(c) { c.error(new TypeError("error reading a body from connection: connection reset")); } });
+    return new Response(body, { status: 200 });
+  };
+  const err2 = await failing(() => delegateCuratorWithRetry(bodyFails, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t2.opts }));
+  assertEquals(t2.calls, 1);
+  assertEquals(err2.name, "CuratorAfterSendError");
+  assertEquals(err2.message.includes("error reading a body"), true, err2.message);
+});
+
+Deno.test("curator: an HTTP 500 JSON answer is a verdict - returned on the first attempt, NOT retried; a non-JSON 5xx keeps the `curator <status>: {}` shape", async () => {
   const t = trace();
   const fetchImpl: FetchLike = async () => {
     t.calls++;
     return Response.json({ error: "persist_failed", stage: "persist" }, { status: 500 });
   };
-  let err: Error | null = null;
-  try {
-    await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts });
-  } catch (e) { err = e as Error; }
+  const err = await failing(() => delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }));
   assertEquals(t.calls, 1, "no retry on an answer");
   assertEquals(t.sleeps, []);
   assertEquals(t.logs, []);
-  assertEquals(err!.message.startsWith("curator 500: "), true, err!.message);
-  assertEquals(err!.message.includes("persist_failed"), true);
+  assertEquals(err.message.startsWith("curator 500: "), true, err.message);
+  assertEquals(err.message.includes("persist_failed"), true);
   assertEquals(shouldRetryCuratorError(err), false);
   // 4xx is the same kind of thing.
   const fetch400: FetchLike = async () => Response.json({ error: "claim required" }, { status: 400 });
-  let e400: Error | null = null;
-  try { await delegateCuratorWithRetry(fetch400, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }); } catch (e) { e400 = e as Error; }
-  assertEquals(e400!.message, 'curator 400: {"error":"claim required"}');
+  const e400 = await failing(() => delegateCuratorWithRetry(fetch400, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }));
+  assertEquals(e400.message, 'curator 400: {"error":"claim required"}');
+  // A plain-text 500 keeps today's shape (body lost, status kept).
+  const fetchText500: FetchLike = async () => new Response("Internal Server Error", { status: 500 });
+  const eText = await failing(() => delegateCuratorWithRetry(fetchText500, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }));
+  assertEquals(eText.message, "curator 500: {}");
+  assertEquals(eText.name, "CuratorHttpError");
 });
 
-Deno.test("curator: HTTP 200 returns the JSON on the first attempt", async () => {
+Deno.test("curator: HTTP 200 with a JSON object returns it on the first attempt", async () => {
   const t = trace();
   const fetchImpl: FetchLike = async (url, init) => {
     t.calls++;
@@ -375,27 +440,58 @@ Deno.test("curator: a refusal that clears on the second attempt succeeds (the tr
 Deno.test("curator: an error that is neither transport nor timeout surfaces unchanged on the first attempt", async () => {
   const t = trace();
   const fetchImpl: FetchLike = async () => { t.calls++; throw new SyntaxError("boom"); };
-  let err: Error | null = null;
-  try { await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }); } catch (e) { err = e as Error; }
+  const err = await failing(() => delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 180_000, ...t.opts }));
   assertEquals(t.calls, 1);
-  assertEquals(err!.message, "boom");
+  assertEquals(err.message, "boom");
 });
 
-Deno.test("shouldRetryCuratorError: connection-level yes; timeouts/aborts, any HTTP answer, unknown errors, null no", () => {
-  for (const m of ["ECONNREFUSED", "read ECONNRESET", "write EPIPE", "connect EHOSTUNREACH 10.0.0.1", "connect ENETUNREACH", "getaddrinfo EAI_AGAIN curator",
-    "error sending request for url (http://x): client error (Connect)", "connection reset by peer"]) {
+Deno.test("shouldRetryCuratorError: connect-phase yes; after-send, timeouts/aborts, any HTTP answer, unknown errors, null no", () => {
+  for (const m of ["ECONNREFUSED", "connect EHOSTUNREACH 10.0.0.1", "connect ENETUNREACH", "getaddrinfo EAI_AGAIN curator",
+    "error sending request for url (http://x): client error (Connect): tcp connect error: Connection refused (os error 111)",
+    "error sending request for url (http://x): client error (Connect): tcp connect error: No route to host (os error 113)",
+    "error sending request for url (http://x): client error (Connect): tcp connect error: Connection reset by peer (os error 104)"]) {
     assertEquals(shouldRetryCuratorError(new Error(m)), true, m);
+  }
+  for (const m of ["error sending request for url (http://x): client error (SendRequest): connection closed before message completed",
+    "read ECONNRESET", "write EPIPE", "connection reset by peer", "request timed out", "error reading a body from connection"]) {
+    assertEquals(shouldRetryCuratorError(new Error(m)), false, `after the send, or time-shaped: ${m}`);
   }
   assertEquals(shouldRetryCuratorError(new DOMException("signal timed out", "TimeoutError")), false, "our deadline: the curator may be working");
   assertEquals(shouldRetryCuratorError(new DOMException("aborted", "AbortError")), false);
-  assertEquals(shouldRetryCuratorError(new CuratorTimeoutError(5000, 5000, 1, 3)), false);
-  assertEquals(shouldRetryCuratorError(new Error("request timed out")), false, "anything time-shaped may have reached the curator");
+  assertEquals(shouldRetryCuratorError(new CuratorTimeoutError(5000, 5000, 1, 3, "request")), false);
+  assertEquals(shouldRetryCuratorError(new CuratorAfterSendError("x", 1, 3)), false);
+  assertEquals(shouldRetryCuratorError(new CuratorNoVerdictError(200, 0)), false);
   assertEquals(shouldRetryCuratorError(new CuratorHttpError(503, '{"error":"db"}')), false, "an HTTP status is an answer");
   assertEquals(shouldRetryCuratorError(new Error("curator 502: persist_failed")), false, "a verdict rendered as a plain Error");
   assertEquals(shouldRetryCuratorError(new Error("boom")), false);
   assertEquals(shouldRetryCuratorError(new SyntaxError("Unexpected token")), false);
   assertEquals(shouldRetryCuratorError(null), false);
   assertEquals(shouldRetryCuratorError(undefined), false);
+});
+
+Deno.test("curator env parsing: CURATOR_TIMEOUT_MS <= 0, non-numeric or unset -> default 180000; CURATOR_RETRIES floors at 1", () => {
+  assertEquals(curatorTimeoutMsFromEnv("-1"), 180_000, "-1 used to reach AbortSignal.timeout and throw on every attempt");
+  assertEquals(curatorTimeoutMsFromEnv("0"), 180_000);
+  assertEquals(curatorTimeoutMsFromEnv("abc"), 180_000);
+  assertEquals(curatorTimeoutMsFromEnv(""), 180_000);
+  assertEquals(curatorTimeoutMsFromEnv(undefined), 180_000);
+  assertEquals(curatorTimeoutMsFromEnv("5000"), 5000);
+  assertEquals(curatorTimeoutMsFromEnv("5000abc"), 5000, "parseInt prefix, as before");
+  assertEquals(curatorRetriesFromEnv("0"), 1);
+  assertEquals(curatorRetriesFromEnv("-2"), 1);
+  assertEquals(curatorRetriesFromEnv("abc"), 3);
+  assertEquals(curatorRetriesFromEnv(undefined), 3);
+  assertEquals(curatorRetriesFromEnv("2.7"), 2);
+  assertEquals(curatorRetriesFromEnv("5"), 5);
+});
+
+Deno.test("curator: a non-positive timeoutMs handed to the wrapper falls back to the default instead of throwing on every attempt", async () => {
+  const t = trace();
+  let seenSignal = false;
+  const fetchImpl: FetchLike = async (_url, init) => { t.calls++; seenSignal = init.signal instanceof AbortSignal; return Response.json({ thread_id: "t1" }); };
+  const out = await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: -1, ...t.opts });
+  assertEquals(out, { thread_id: "t1" });
+  assertEquals(seenSignal, true, "AbortSignal.timeout was built with a valid value");
 });
 
 Deno.test("curator backoff is bounded (2s, 4s, 8s, cap 10s); refused worst case = attempts x connect-fail + backoff; timeout worst case = exactly one CURATOR_TIMEOUT_MS", () => {

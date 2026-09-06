@@ -22,7 +22,7 @@
  *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { classifyCuratorOutcome, delegateCuratorWithRetry, domainOf, extractTextFromHtml, extractTitle, proxyPolicy, renderResult, selectRepoFiles } from "./lib.ts";
+import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, extractTextFromHtml, extractTitle, proxyPolicy, renderResult, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -99,19 +99,21 @@ const SEARCH_K_DEFAULT = parseInt(env("SEARCH_K", "8"), 10);
 const FETCH_TIMEOUT_MS = parseInt(env("FETCH_TIMEOUT_MS", "15000"), 10);
 // Curator call policy (researchretry 2026-09-06; policy + tests in lib.ts). The
 // curator delegation was the one fetch here with no timeout and no retry.
-// CURATOR_TIMEOUT_MS bounds EACH attempt and is deliberately generous (default
-// 180 s, NOT FETCH_TIMEOUT_MS): an ingest awaits an embedding, an LLM thread
-// decision, a persist and a claims pass, and the goal is "cannot hang
-// forever", not "fail fast". A timeout is NEVER retried - the curator may
-// still be working, a resend would double-ingest - it fails once naming the
-// elapsed time. CURATOR_RETRIES is the TOTAL number of attempts on
-// CONNECTION-LEVEL failures only (refused, reset, EPIPE, unreachable, "error
-// sending request" before any response) - never on an HTTP answer. Worst
-// cases with defaults: refused = 3 connect-fails (ms each) + 2 s + 4 s ~ 6 s;
-// timeout = exactly one 180 s. Then the harness records the loss in
-// research_jobs.error instead of hanging the slot.
-const CURATOR_TIMEOUT_MS = parseInt(env("CURATOR_TIMEOUT_MS", "180000"), 10) || 180000;
-const CURATOR_RETRIES = Math.max(1, parseInt(env("CURATOR_RETRIES", "3"), 10) || 1);
+// CURATOR_TIMEOUT_MS bounds EACH attempt - connect, headers AND body - and is
+// deliberately generous (default 180 s, NOT FETCH_TIMEOUT_MS): an ingest
+// awaits an embedding, an LLM thread decision, a persist and a claims pass,
+// and the goal is "cannot hang forever", not "fail fast". A timeout is NEVER
+// retried - the curator may still be working, a resend would double-ingest -
+// it fails once naming the elapsed time. CURATOR_RETRIES is the TOTAL number
+// of attempts on CONNECT-PHASE failures only (refused, unreachable, reset
+// during connect: Deno's "client error (Connect)") - never after the request
+// was sent, never on a timeout, never on an HTTP answer. A 2xx without a JSON
+// object body is NOT filed. Worst cases with defaults: refused = 3
+// connect-fails (ms each) + 2 s + 4 s ~ 6 s; timeout = exactly one 180 s.
+// Then the harness records the loss in research_jobs.error instead of
+// hanging the slot. <= 0 / non-numeric values fall back to the defaults.
+const CURATOR_TIMEOUT_MS = curatorTimeoutMsFromEnv(Deno.env.get("CURATOR_TIMEOUT_MS"));
+const CURATOR_RETRIES = curatorRetriesFromEnv(Deno.env.get("CURATOR_RETRIES"));
 const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "8000"), 10);
 const PORT = parseInt(env("PORT", "8000"), 10);
 // How many research jobs may run at once across the whole stack. Default 1 =
@@ -365,9 +367,9 @@ async function fetchPage(url: string): Promise<FetchResult> {
 }
 
 // Each attempt carries AbortSignal.timeout(CURATOR_TIMEOUT_MS) (added inside
-// the wrapper so the unit tests can see it); a timeout throws once and is not
-// retried; a non-2xx answer still throws `curator <status>: <body>` exactly
-// as before and is never retried.
+// the wrapper so the unit tests can see it) over connect, headers and body; a
+// timeout throws once and is not retried; a non-2xx answer still throws
+// `curator <status>: <body>` exactly as before and is never retried.
 async function delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>> {
   return await delegateCuratorWithRetry(fetch, `${CURATOR_URL}/ingest/research-package`, {
     method: "POST",

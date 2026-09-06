@@ -392,18 +392,32 @@ export function proxyPolicy(url: string, clientBuilt: boolean): ProxyPolicy {
 // already been done. This section is the policy, kept pure so it can be
 // tested with an injected fetch and no network:
 //
-//   shouldRetryCuratorError  - RETRY only CONNECTION-LEVEL failures: refused,
-//                              reset, EPIPE, host/network unreachable, DNS
-//                              EAI_AGAIN, Deno's "error sending request" -
-//                              all of them mean the request never reached a
-//                              curator. NOT our own per-attempt timeout
-//                              (AbortError / TimeoutError): the curator may
-//                              still be working on the package, and a resend
-//                              would double-ingest - a timeout fails ONCE,
-//                              loudly, naming the elapsed time. NOT an HTTP
-//                              answer of any status: that is the curator's
-//                              VERDICT (a 4xx/5xx JSON body is a decision,
-//                              not a transport failure).
+//   shouldRetryCuratorError  - RETRY only CONNECT-PHASE failures: Deno's
+//                              `client error (Connect)` family (refused,
+//                              reset/closed during connect, host/network
+//                              unreachable) and the Node-style codes that can
+//                              only mean "never connected" (ECONNREFUSED,
+//                              EHOSTUNREACH, ENETUNREACH, EAI_AGAIN). Those
+//                              are the only failures where the package
+//                              certainly never reached a curator. NOT a
+//                              failure after the request was sent
+//                              (`(SendRequest)`, "connection closed before
+//                              message completed", a body-read error): the
+//                              curator may have received - and persisted -
+//                              the package, so that fails ONCE, loudly,
+//                              saying so. NOT our own per-attempt timeout
+//                              (AbortError / TimeoutError): same reason.
+//                              NOT an HTTP answer of any status: that is the
+//                              curator's VERDICT (a 4xx/5xx JSON body is a
+//                              decision, not a transport failure).
+//   The body read is INSIDE the same per-attempt budget: a 2xx whose body
+//                              stalls past CURATOR_TIMEOUT_MS is a timeout
+//                              (CuratorTimeoutError), never a success. A
+//                              2xx whose body is not a JSON object (empty,
+//                              truncated, HTML) is NOT filed either: "filed"
+//                              means the curator said so, in JSON. A
+//                              non-JSON 4xx/5xx keeps the old
+//                              `curator <status>: {}` shape.
 //   curatorBackoffMs         - deterministic doubling, base 2 s, cap 10 s. No
 //                              jitter: one caller (MAX_CONCURRENCY=1), and a
 //                              bound you can state beats a bound you can
@@ -423,9 +437,28 @@ export function proxyPolicy(url: string, clientBuilt: boolean): ProxyPolicy {
 //                              backoffs + (attempts-1) connect-fails + one
 //                              CURATOR_TIMEOUT_MS, because a timeout ends
 //                              the loop.
+//   curatorTimeoutMsFromEnv  - CURATOR_TIMEOUT_MS <= 0, non-numeric or unset
+//                              falls back to the default (a `-1` reached
+//                              AbortSignal.timeout once and threw on every
+//                              attempt); curatorRetriesFromEnv floors at 1.
 //   delegateCuratorWithRetry - the wrapper. `retries` is the TOTAL number of
 //                              attempts (3 = one call + two retries).
 // ---------------------------------------------------------------------------
+
+export const CURATOR_DEFAULT_TIMEOUT_MS = 180_000;
+export const CURATOR_DEFAULT_RETRIES = 3;
+
+/** CURATOR_TIMEOUT_MS from the environment: a positive finite integer, else the default. */
+export function curatorTimeoutMsFromEnv(raw: string | undefined | null, dflt = CURATOR_DEFAULT_TIMEOUT_MS): number {
+  const n = parseInt(String(raw ?? "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+
+/** CURATOR_RETRIES from the environment: TOTAL attempts, at least 1, else the default. */
+export function curatorRetriesFromEnv(raw: string | undefined | null, dflt = CURATOR_DEFAULT_RETRIES): number {
+  const n = parseInt(String(raw ?? "").trim(), 10);
+  return Number.isFinite(n) ? Math.max(1, n) : dflt;
+}
 
 /** An HTTP answer from the curator: the curator SPOKE. Carries the status so the retry policy can refuse it. */
 export class CuratorHttpError extends Error {
@@ -437,14 +470,14 @@ export class CuratorHttpError extends Error {
   }
 }
 
-/** Our own per-attempt deadline fired. Never retried: the curator may still be working on the package. */
+/** Our own per-attempt deadline fired - in the connect, header or BODY phase. Never retried: the curator may still be working on the package. */
 export class CuratorTimeoutError extends Error {
   readonly elapsedMs: number;
   readonly timeoutMs: number;
-  constructor(elapsedMs: number, timeoutMs: number, attempt: number, attempts: number) {
+  constructor(elapsedMs: number, timeoutMs: number, attempt: number, attempts: number, phase: "request" | "body") {
     super(
-      `curator timed out after ${elapsedMs} ms (CURATOR_TIMEOUT_MS=${timeoutMs}, attempt ${attempt}/${attempts}, ` +
-        `not retried - the curator may still be working on the package)`,
+      `curator timed out after ${elapsedMs} ms${phase === "body" ? " while reading its answer" : ""} ` +
+        `(CURATOR_TIMEOUT_MS=${timeoutMs}, attempt ${attempt}/${attempts}, not retried - the curator may still be working on the package)`,
     );
     this.name = "CuratorTimeoutError";
     this.elapsedMs = elapsedMs;
@@ -452,24 +485,49 @@ export class CuratorTimeoutError extends Error {
   }
 }
 
-// Deno's fetch surfaces socket failures as TypeError("error sending request for
-// url (...): client error (Connect): tcp connect error: Connection refused (os
-// error 111)"); Node-style code strings are matched for completeness. No
-// "timed out" / ETIMEDOUT here on purpose: anything time-shaped might have
-// reached a working curator.
-const CONNECTION_ERROR_RE =
-  /ECONNREFUSED|ECONNRESET|EPIPE|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|error sending request|connection (refused|reset|closed|aborted)/i;
+/** The connection failed AFTER the request was sent (or while reading the answer). Never retried: the package may have been received. */
+export class CuratorAfterSendError extends Error {
+  constructor(cause: string, attempt: number, attempts: number) {
+    super(
+      `curator connection failed after the request was sent (attempt ${attempt}/${attempts}, not retried - ` +
+        `the package may have been received): ${cause}`,
+    );
+    this.name = "CuratorAfterSendError";
+  }
+}
+
+/** A 2xx whose body is not a JSON object: the curator did not SAY it filed anything. Never retried. */
+export class CuratorNoVerdictError extends Error {
+  readonly status: number;
+  constructor(status: number, bytes: number) {
+    super(`curator answered ${status} with no JSON verdict (${bytes} bytes)`);
+    this.name = "CuratorNoVerdictError";
+    this.status = status;
+  }
+}
+
+// Deno/hyper prefixes EVERY transport failure with "error sending request for
+// url (...)": `client error (Connect): ...` means the socket never connected;
+// `client error (SendRequest): connection closed before message completed`
+// means it connected, the request went out, and the peer closed before any
+// response byte - the package may have been received. Only the first is
+// retried. Node-style codes listed are connect-phase by definition.
+const CONNECT_PHASE_RE =
+  /client error \(Connect\)|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|getaddrinfo/i;
 
 export function shouldRetryCuratorError(err: unknown): boolean {
   if (err === null || err === undefined) return false;
   const e = err as { name?: unknown; message?: unknown; status?: unknown };
   // Anything carrying an HTTP status is an answer, however unhappy. Not ours to retry.
   if (typeof e.status === "number") return false;
-  // Our deadline, or any abort: the request may have reached the curator. Never resend.
-  if (e.name === "AbortError" || e.name === "TimeoutError" || e.name === "CuratorTimeoutError") return false;
+  // Our deadline, any abort, or a failure after the send: the package may have reached the curator. Never resend.
+  if (
+    e.name === "AbortError" || e.name === "TimeoutError" || e.name === "CuratorTimeoutError" ||
+    e.name === "CuratorAfterSendError" || e.name === "CuratorNoVerdictError"
+  ) return false;
   const msg = typeof e.message === "string" ? e.message : String(err);
   if (/^curator \d{3}\b/.test(msg)) return false; // a verdict rendered as a plain Error
-  return CONNECTION_ERROR_RE.test(msg);
+  return CONNECT_PHASE_RE.test(msg);
 }
 
 export const CURATOR_BACKOFF_BASE_MS = 2_000;
@@ -506,9 +564,9 @@ export function curatorTimeoutWorstCaseMs(timeoutMs: number): number {
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface CuratorRetryOptions {
-  /** TOTAL attempts, >= 1 (CURATOR_RETRIES). 3 = one call + two retries. Applies to connection-level failures only. */
+  /** TOTAL attempts, >= 1 (CURATOR_RETRIES). 3 = one call + two retries. Applies to connect-phase failures only. */
   retries: number;
-  /** Per-attempt AbortSignal.timeout (CURATOR_TIMEOUT_MS). A timeout ends the call - no retry. */
+  /** Per-attempt AbortSignal.timeout (CURATOR_TIMEOUT_MS), covering connect, headers AND body. <= 0 falls back to the default. */
   timeoutMs: number;
   /** Injectable for tests; default is a real setTimeout. */
   sleep?: (ms: number) => Promise<void>;
@@ -530,14 +588,22 @@ function isTimeoutLike(e: unknown): boolean {
   return name === "TimeoutError" || name === "AbortError";
 }
 
+function isJsonObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 /**
- * POST the package to the curator with a per-attempt timeout and a bounded
- * retry on connection-level failures only. Resolves with the curator's JSON on
- * a 2xx. Throws CuratorHttpError (unretried) on any non-2xx answer;
- * CuratorTimeoutError (unretried) when the per-attempt deadline fires, naming
- * the elapsed time; the original error (unretried) on anything that is neither
- * a transport failure nor a timeout; and after the last failed connection-level
- * attempt an Error whose message names the attempt count and the last cause.
+ * POST the package to the curator with a per-attempt timeout that covers the
+ * connect, the headers and the body, and a bounded retry on CONNECT-PHASE
+ * failures only. Resolves with the curator's JSON object on a 2xx. Throws,
+ * none of them retried: CuratorHttpError on any non-2xx answer (its body
+ * parsed best-effort, `{}` when it is not JSON - the old shape);
+ * CuratorTimeoutError when the deadline fires in any phase, naming the elapsed
+ * time; CuratorAfterSendError when the connection fails after the request was
+ * sent or while the answer is being read; CuratorNoVerdictError when a 2xx
+ * body is not a JSON object; the original error on anything else. After the
+ * last failed connect-phase attempt: an Error naming the attempt count, the
+ * elapsed time and the last cause.
  */
 export async function delegateCuratorWithRetry(
   fetchImpl: FetchLike,
@@ -546,6 +612,7 @@ export async function delegateCuratorWithRetry(
   opts: CuratorRetryOptions,
 ): Promise<Record<string, unknown>> {
   const attempts = Math.max(1, Math.floor(opts.retries) || 1);
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : CURATOR_DEFAULT_TIMEOUT_MS;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const log = opts.log ?? (() => {});
   const now = opts.now ?? (() => Date.now());
@@ -553,18 +620,38 @@ export async function delegateCuratorWithRetry(
   let last: unknown = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const attemptStarted = now();
+    let phase: "request" | "body" = "request";
     try {
-      const r = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(opts.timeoutMs) });
-      const json = await r.json().catch(() => ({}));
-      if (!r.ok) throw new CuratorHttpError(r.status, JSON.stringify(json).slice(0, 300));
+      const r = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      // The answer is read under the SAME signal: a body that stalls is a timeout, not a success.
+      phase = "body";
+      const text = await r.text();
+      if (!r.ok) {
+        let json: unknown = {};
+        try { json = JSON.parse(text); } catch { json = {}; }
+        throw new CuratorHttpError(r.status, JSON.stringify(json).slice(0, 300));
+      }
+      let json: unknown;
+      try { json = JSON.parse(text); } catch { json = undefined; }
+      if (!isJsonObject(json)) throw new CuratorNoVerdictError(r.status, text.length);
       return json;
     } catch (e) {
       if (isTimeoutLike(e)) {
-        // Fails once, loudly. The curator may still be working: never resend.
-        throw new CuratorTimeoutError(now() - attemptStarted, opts.timeoutMs, attempt, attempts);
+        // Fails once, loudly, in whichever phase. The curator may still be working: never resend.
+        throw new CuratorTimeoutError(now() - attemptStarted, timeoutMs, attempt, attempts, phase);
+      }
+      if (phase === "body" && !(e instanceof CuratorHttpError) && !(e instanceof CuratorNoVerdictError)) {
+        // Headers arrived, then the read failed: the package was received.
+        throw new CuratorAfterSendError(describeError(e), attempt, attempts);
+      }
+      if (!shouldRetryCuratorError(e)) {
+        // A transport failure that is not connect-phase (SendRequest, closed before the response): the request went out.
+        if (/error sending request|connection closed|ECONNRESET|EPIPE/i.test(String((e as Error)?.message ?? e))) {
+          throw new CuratorAfterSendError(describeError(e), attempt, attempts);
+        }
+        throw e;
       }
       last = e;
-      if (!shouldRetryCuratorError(e)) throw e;
       if (attempt >= attempts) break;
       const wait = curatorBackoffMs(attempt, opts.backoffBaseMs, opts.backoffCapMs);
       log(`curator attempt ${attempt}/${attempts} failed: ${describeError(e)}; retrying in ${wait} ms`);
@@ -572,7 +659,7 @@ export async function delegateCuratorWithRetry(
     }
   }
   throw new Error(
-    `curator unreachable after ${attempts} attempt(s) in ${now() - started} ms (connection-level failures only, ` +
-      `timeout ${opts.timeoutMs} ms per attempt): ${describeError(last)}`,
+    `curator unreachable after ${attempts} attempt(s) in ${now() - started} ms (connect-phase failures only, ` +
+      `timeout ${timeoutMs} ms per attempt): ${describeError(last)}`,
   );
 }
