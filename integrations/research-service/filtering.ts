@@ -93,11 +93,23 @@ When genuinely unsure, answer RELEVANT (the synthesis stage judges evidence stre
 
 Answer with ONLY one word: RELEVANT or IRRELEVANT.`;
 
-/** One deterministic check (nothink). Fails OPEN — a model blip never drops a
- *  source; only a confident IRRELEVANT verdict does. */
+/** Below this many chars of extracted text a page is a SHELL: nothing to judge
+ *  AND nothing to cite. The 2026-09-05 measurement
+ *  (documentation/notes/research-source-admission-measurement-2026-09-05.md in
+ *  the parent repo) found a 4-char page ("Qwen") had reached grounded-claim
+ *  citation through the old auto-pass below, while every legitimately-cited
+ *  thin-but-true snippet observed was well above 20 chars ("Your recycling day
+ *  is every Wednesday." = 38). Do NOT raise this into a length floor — short
+ *  real snippets are exactly the long-tail evidence this engine exists for. */
+export const MIN_JUDGEABLE_CHARS = 20;
+
+/** One deterministic check (nothink). Fails OPEN on model error — a model blip
+ *  never drops a source; only a confident IRRELEVANT verdict does. The single
+ *  exception is a sub-MIN_JUDGEABLE_CHARS shell, which fails CLOSED without
+ *  consulting the model: emptiness is not a judgement that can be wrong. */
 export async function isRelevant(deps: Deps, page: Page, anchor: string): Promise<boolean> {
   const content = (page.content || "").slice(0, 3500);
-  if (content.trim().length < 20) return true; // nothing to judge; screening/synthesis handle it
+  if (content.trim().length < MIN_JUDGEABLE_CHARS) return false; // a shell can't ground anything
   let raw: string;
   try {
     raw = await deps.chat(
@@ -114,31 +126,52 @@ export async function isRelevant(deps: Deps, page: Page, anchor: string): Promis
 
 export interface RelevanceResult {
   relevant: Page[];
-  rejected: Array<{ url: string; title: string }>;
+  /** `no_content` = a sub-MIN_JUDGEABLE_CHARS shell, rejected without an LLM
+   *  call; `irrelevant` = a confident model verdict. The distinction matters
+   *  downstream: the fail-safe floor may second-guess a model, never emptiness. */
+  rejected: Array<{ url: string; title: string; reason: "irrelevant" | "no_content" }>;
 }
 
-/** Partition pages by relevance to the anchor (bounded concurrency). */
+function isShell(p: Page): boolean {
+  return (p.content || "").trim().length < MIN_JUDGEABLE_CHARS;
+}
+
+/** Partition pages by relevance to the anchor (bounded concurrency). Shells are
+ *  rejected up front without spending an LLM call on them. */
 export async function partitionRelevant(
   deps: Deps,
   pages: Page[],
   anchor: string,
   concurrency = 4,
 ): Promise<RelevanceResult> {
-  const verdicts = new Array<boolean>(pages.length);
+  const judgeable = pages.filter((p) => !isShell(p));
+  const verdicts = new Array<boolean>(judgeable.length);
   let i = 0;
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, pages.length) }, async () => {
-      while (i < pages.length) {
+    Array.from({ length: Math.min(concurrency, judgeable.length) }, async () => {
+      while (i < judgeable.length) {
         const idx = i++;
-        verdicts[idx] = await isRelevant(deps, pages[idx], anchor);
+        verdicts[idx] = await isRelevant(deps, judgeable[idx], anchor);
       }
     }),
   );
+  const judged = new Map<Page, boolean>();
+  judgeable.forEach((p, idx) => judged.set(p, verdicts[idx]));
   const relevant: Page[] = [];
-  const rejected: Array<{ url: string; title: string }> = [];
-  pages.forEach((p, idx) => {
-    if (verdicts[idx]) relevant.push(p);
-    else rejected.push({ url: p.url, title: p.title });
-  });
+  const rejected: RelevanceResult["rejected"] = [];
+  for (const p of pages) {
+    if (isShell(p)) rejected.push({ url: p.url, title: p.title, reason: "no_content" });
+    else if (judged.get(p)) relevant.push(p);
+    else rejected.push({ url: p.url, title: p.title, reason: "irrelevant" });
+  }
   return { relevant, rejected };
+}
+
+/** What the fail-safe floor may re-admit when the gate would empty a pool:
+ *  every page EXCEPT shells. An LLM's IRRELEVANT can be a blip worth
+ *  second-guessing under the floor; a page with no judgeable content has
+ *  nothing to re-admit. Content-based on purpose (not keyed off the rejected
+ *  list) so the definition of "shell" cannot drift between the two paths. */
+export function floorKeepable(pages: Page[]): Page[] {
+  return pages.filter((p) => !isShell(p));
 }

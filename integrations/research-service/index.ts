@@ -22,7 +22,7 @@
  *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { classifyCuratorOutcome, domainOf, extractTextFromHtml, extractTitle, renderResult, selectRepoFiles } from "./lib.ts";
+import { classifyCuratorOutcome, domainOf, extractTextFromHtml, extractTitle, proxyPolicy, renderResult, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -107,10 +107,17 @@ const PORT = parseInt(env("PORT", "8000"), 10);
 // and a background drain loop dispatches them; see drainLoop() below.
 const MAX_CONCURRENCY = Math.max(1, parseInt(env("RESEARCH_MAX_CONCURRENCY", "1"), 10) || 1);
 
-// Privacy: page fetches egress through Tor (socks5h = DNS resolved through Tor,
-// matching SearXNG's settings.yml). Reaches `tor:9050` via ai-stack_default.
-// Needs `--unstable-net`; if unavailable we warn and fall back to direct rather
-// than break research for all callers. Set FETCH_PROXY_URL="" to force direct.
+// Privacy: page fetches egress through the configured proxy (compose points
+// this at the Mullvad VPN, http://vpn:8888; DNS follows the proxy scheme).
+// Needs `--unstable-net` for Deno.createHttpClient.
+//
+// FAIL-CLOSED (2026-09-05, srcadm): a non-empty FETCH_PROXY_URL whose client
+// cannot be built is a deploy-config bug (the flag missing from the run
+// command), and the old behavior — one warning line, then DIRECT egress for
+// every page fetch — silently un-proxied research traffic. The policy decision
+// is proxyPolicy() in lib.ts (pure, tested); on "refuse" the process EXITS at
+// startup so the failure is a crash loop at deploy time, never a leak at
+// research time. Set FETCH_PROXY_URL="" to deliberately force direct.
 const FETCH_PROXY_URL = env("FETCH_PROXY_URL", "socks5h://tor:9050");
 const FETCH_UA = env(
   "FETCH_UA",
@@ -120,16 +127,39 @@ let _httpClient: Deno.HttpClient | null | undefined; // undefined=uninit, null=d
 function fetchClient(): Deno.HttpClient | null {
   if (_httpClient !== undefined) return _httpClient;
   const url = FETCH_PROXY_URL.trim();
-  if (!url) { _httpClient = null; return _httpClient; }
-  try {
-    _httpClient = Deno.createHttpClient({ proxy: { url } });
-    console.log(`fetchPage egress via ${url}`);
-  } catch (e) {
-    console.warn(`FETCH_PROXY_URL=${url} unavailable (${(e as Error).message}); needs --unstable-net. Falling back to DIRECT.`);
-    _httpClient = null;
+  let built: Deno.HttpClient | null = null;
+  let buildError = "";
+  if (url) {
+    try {
+      built = Deno.createHttpClient({ proxy: { url } });
+    } catch (e) {
+      buildError = (e as Error).message;
+    }
+  }
+  switch (proxyPolicy(url, built !== null)) {
+    case "direct":
+      _httpClient = null; // operator's explicit choice (FETCH_PROXY_URL="")
+      console.log("fetchPage egress DIRECT (FETCH_PROXY_URL is empty by configuration)");
+      break;
+    case "proxy":
+      _httpClient = built;
+      console.log(`fetchPage egress via ${url}`);
+      break;
+    case "refuse":
+      console.error(
+        `FETCH_PROXY_URL=${url} is configured but the proxy client cannot be built ` +
+          `(${buildError}; is --unstable-net on the run command?). Refusing to start: ` +
+          `falling back to direct egress would silently un-proxy every page fetch. ` +
+          `Fix the deploy, or set FETCH_PROXY_URL="" to explicitly choose direct.`,
+      );
+      Deno.exit(78); // EX_CONFIG
   }
   return _httpClient;
 }
+// Probe at startup, not first fetch: a bad proxy config must be a visible
+// crash loop the moment the container starts, not a landmine that detonates
+// mid-research an hour later.
+fetchClient();
 
 // Self-reconnecting pool. deno-postgres v0.19.3 keeps handing back a pooled
 // connection whose socket died after an openbrain-db restart, so every query

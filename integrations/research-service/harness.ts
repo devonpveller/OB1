@@ -9,7 +9,7 @@
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
 import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
-import { rankHits, partitionRelevant } from "./filtering.ts";
+import { rankHits, partitionRelevant, floorKeepable } from "./filtering.ts";
 import { classifyTemplate, renderSys } from "./templates.ts";
 import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
@@ -438,17 +438,31 @@ export async function runResearch(
     const { relevant: relevantPages, rejected } = await partitionRelevant(deps, webPages, query);
     // FAIL-SAFE FLOOR (operator concern 2026-08-22): the gate must never turn
     // a run into a no-sources failure. If it would empty the web pool (and
-    // nothing protected remains to ground from), keep everything and say so -
-    // the synthesizer's grounding rules + the Sources-cited-only report are
-    // the backstop against weak pages, and a thin report beats a dead run.
+    // nothing protected remains to ground from), keep the KEEPABLE pages and
+    // say so - the synthesizer's grounding rules + the Sources-cited-only
+    // report are the backstop against weak pages, and a thin report beats a
+    // dead run. Keepable excludes sub-MIN_JUDGEABLE_CHARS shells (2026-09-05):
+    // the floor exists to second-guess a possibly-wrong model verdict, and
+    // emptiness is not a verdict - a pool of contentless shells stays empty
+    // and the run degrades to honest gaps instead.
     if (relevantPages.length === 0 && protectedPages.length === 0 && webPages.length > 0) {
-      await progress("screen",
-        `relevance gate would empty the source pool - keeping all ${webPages.length} page(s) (fail-safe floor)`,
-        { irrelevant_overridden: webPages.length });
+      const floorPool = floorKeepable(webPages);
+      if (floorPool.length > 0) {
+        await progress("screen",
+          `relevance gate would empty the source pool - keeping ${floorPool.length} of ${webPages.length} page(s) (fail-safe floor; shells stay dropped)`,
+          { irrelevant_overridden: floorPool.length, shells_dropped: webPages.length - floorPool.length });
+        staged.splice(0, staged.length, ...floorPool);
+      } else {
+        await progress("screen",
+          `all ${webPages.length} web page(s) were contentless shells - proceeding with no web sources`,
+          { shells_dropped: webPages.length });
+        staged.splice(0, staged.length);
+      }
     } else if (rejected.length) {
       await progress("screen",
-        `rejected ${rejected.length} irrelevant source(s): ${rejected.map((r) => r.url).slice(0, 4).join(", ")}${rejected.length > 4 ? ", …" : ""}`,
-        { irrelevant: rejected.length });
+        `rejected ${rejected.length} source(s): ${rejected.map((r) => r.url).slice(0, 4).join(", ")}${rejected.length > 4 ? ", …" : ""}`,
+        { irrelevant: rejected.filter((r) => r.reason === "irrelevant").length,
+          shells_dropped: rejected.filter((r) => r.reason === "no_content").length });
       staged.splice(0, staged.length, ...protectedPages, ...relevantPages);
     }
   }
@@ -508,13 +522,15 @@ export async function runResearch(
           }
           const gatePrelim = await partitionRelevant(deps, prelimPages, `${query} — ${gap}`);
           // Same fail-safe floor as the main pool: never let the gate zero
-          // out a preliminary batch that fetched real pages.
-          const keptPrelim = (gatePrelim.relevant.length === 0 && prelimPages.length > 0)
-            ? prelimPages
+          // out a preliminary batch that fetched real pages — but shells are
+          // not real pages, so they stay dropped even under the floor.
+          const prelimPool = floorKeepable(prelimPages);
+          const keptPrelim = (gatePrelim.relevant.length === 0 && prelimPool.length > 0)
+            ? prelimPool
             : gatePrelim.relevant;
-          if (keptPrelim === prelimPages && gatePrelim.rejected.length) {
-            await progress("screen", `relevance gate would empty the preliminary batch - keeping all ${prelimPages.length} (fail-safe floor)`,
-              { irrelevant_overridden: prelimPages.length });
+          if (keptPrelim === prelimPool && gatePrelim.rejected.length) {
+            await progress("screen", `relevance gate would empty the preliminary batch - keeping ${prelimPool.length} of ${prelimPages.length} (fail-safe floor; shells stay dropped)`,
+              { irrelevant_overridden: prelimPool.length, shells_dropped: prelimPages.length - prelimPool.length });
           } else if (gatePrelim.rejected.length) {
             await progress("screen", `rejected ${gatePrelim.rejected.length} irrelevant preliminary source(s)`,
               { irrelevant: gatePrelim.rejected.length });

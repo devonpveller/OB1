@@ -4,7 +4,7 @@ import {
   extractTextFromHtml, extractTitle, domainOf, decodeEntities,
   isStale, revalidateWindow, decideReuse, backstopDecision, reuseMetric,
   citedNumbers, citedSubset, buildCitedAndRenumber, renderResult,
-  classifyCuratorOutcome,
+  classifyCuratorOutcome, proxyPolicy,
 } from "./lib.ts";
 
 Deno.test("extractTextFromHtml strips scripts/styles/tags, keeps text", () => {
@@ -232,4 +232,14 @@ Deno.test("no curator report at all is 'skipped', not 'filed'", () => {
 Deno.test("an empty error string is not a failure", () => {
   assertEquals(classifyCuratorOutcome({ thread_id: "t1", error: "" }).state, "filed");
   assertEquals(classifyCuratorOutcome({ thread_id: "t1", claims_error: "   " }).error, null);
+});
+
+// srcadm 2026-09-05: a configured-but-unbuildable proxy REFUSES (the old code
+// fell back to DIRECT and silently un-proxied every page fetch). Direct is
+// reachable only by the operator explicitly emptying FETCH_PROXY_URL.
+Deno.test("proxyPolicy: configured+built proxies; configured+unbuildable refuses; only explicit empty goes direct", () => {
+  assertEquals(proxyPolicy("http://vpn:8888", true), "proxy");
+  assertEquals(proxyPolicy("http://vpn:8888", false), "refuse");
+  assertEquals(proxyPolicy("", false), "direct");
+  assertEquals(proxyPolicy("   ", false), "direct", "whitespace-only is the same explicit choice as empty");
 });

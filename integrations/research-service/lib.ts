@@ -357,3 +357,25 @@ export function classifyCuratorOutcome(
   if (!curator) return { status: "done", error: null, reason: null, state: "skipped" };
   return { status: "done", error: null, reason: null, state: "filed" };
 }
+
+// ---------------------------------------------------------------------------
+// Fetch-egress policy (pure; wired in index.ts fetchClient).
+//
+// Until 2026-09-05, a configured proxy whose client could not be built (in
+// practice: the --unstable-net flag missing from the run command) logged ONE
+// warning line and silently fell back to DIRECT egress for every page fetch —
+// research traffic left the VPN with nothing but a log line to say so. That is
+// a deploy-config bug wearing a runtime coat, and the fix is to refuse: a
+// non-empty FETCH_PROXY_URL is a privacy promise, and this service degrades to
+// honest gaps rather than break promises. "direct" is reachable ONLY by the
+// operator explicitly setting FETCH_PROXY_URL="".
+// (Per-request proxy downtime is not this: a built client whose upstream is
+// down fails per-fetch and the harness already degrades honestly.)
+// ---------------------------------------------------------------------------
+
+export type ProxyPolicy = "proxy" | "direct" | "refuse";
+
+export function proxyPolicy(url: string, clientBuilt: boolean): ProxyPolicy {
+  if (!url.trim()) return "direct";
+  return clientBuilt ? "proxy" : "refuse";
+}

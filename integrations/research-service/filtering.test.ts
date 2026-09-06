@@ -1,6 +1,6 @@
 /** filtering.test.ts — domain credibility ranking + the relevance gate. */
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { scoreDomain, rankHits, isRelevant, partitionRelevant } from "./filtering.ts";
+import { scoreDomain, rankHits, isRelevant, partitionRelevant, floorKeepable } from "./filtering.ts";
 import type { Deps, Page, SearchHit } from "./harness.ts";
 
 function fakeDeps(chatImpl: (sys: string, user: string) => Promise<string>): Deps {
@@ -47,18 +47,63 @@ Deno.test("isRelevant: confident IRRELEVANT drops; RELEVANT keeps", async () => 
   assert(!no);
 });
 
-Deno.test("isRelevant: fails OPEN on chat error and on tiny content", async () => {
+Deno.test("isRelevant: fails OPEN on chat error", async () => {
   const err = await isRelevant(fakeDeps(() => Promise.reject(new Error("down"))), page("https://a.com"), "q");
   assert(err, "chat failure must not drop a source");
-  const tiny = await isRelevant(fakeDeps(() => Promise.resolve("IRRELEVANT")), page("https://a.com", "hi"), "q");
-  assert(tiny, "near-empty content is not judged here");
 });
 
-Deno.test("partitionRelevant: splits by verdict, preserves order", async () => {
-  const deps = fakeDeps((_sys, user) =>
-    Promise.resolve(user.includes("lowes.com") ? "IRRELEVANT" : "RELEVANT"));
-  const pages = [page("https://arxiv.org/a"), page("https://www.lowes.com/t"), page("https://b.org/c")];
+// FLIPPED 2026-09-05 (srcadm): the old auto-RELEVANT for tiny content is how a
+// 4-char shell ("Qwen") reached grounded-claim citation. A page below
+// MIN_JUDGEABLE_CHARS has nothing to judge AND nothing to cite - it fails
+// CLOSED, and without spending an LLM call.
+Deno.test("isRelevant: a sub-20-char shell is rejected without an LLM call", async () => {
+  let chatCalls = 0;
+  const deps = fakeDeps(() => { chatCalls++; return Promise.resolve("RELEVANT"); });
+  const shell = await isRelevant(deps, page("https://qwen.ai/blog?id=x", "Qwen"), "qwen models");
+  assert(!shell, "a contentless shell must not be admitted as evidence");
+  assertEquals(chatCalls, 0, "emptiness is not a judgement - no model call");
+});
+
+// The measurement's thin-but-TRUE guard: 20 chars is a shell bar, not a length
+// floor. Short real snippets are exactly the long-tail evidence this engine
+// exists for, and they must still get their day in front of the model.
+Deno.test("isRelevant: a thin-but-true snippet (>=20 chars) reaches the LLM verdict", async () => {
+  let chatCalls = 0;
+  const deps = fakeDeps(() => { chatCalls++; return Promise.resolve("RELEVANT"); });
+  const kept = await isRelevant(
+    deps, page("https://oakridge.gov/recycling", "Your recycling day is every Wednesday."), "oak ridge recycling schedule");
+  assert(kept, "a 38-char true snippet must survive");
+  assertEquals(chatCalls, 1, "and it must be the MODEL's verdict, not a bypass");
+});
+
+Deno.test("partitionRelevant: splits by verdict with reasons, preserves order, no LLM spend on shells", async () => {
+  let judgedUrls: string[] = [];
+  const deps = fakeDeps((_sys, user) => {
+    judgedUrls.push(user.match(/URL: (\S+)/)?.[1] ?? "?");
+    return Promise.resolve(user.includes("lowes.com") ? "IRRELEVANT" : "RELEVANT");
+  });
+  const pages = [
+    page("https://arxiv.org/a"),
+    page("https://www.lowes.com/t"),
+    page("https://shell.example/x", "MSN"), // sub-20-char shell
+    page("https://b.org/c"),
+  ];
   const { relevant, rejected } = await partitionRelevant(deps, pages, "SaaS api tools");
   assertEquals(relevant.map((p) => p.url), ["https://arxiv.org/a", "https://b.org/c"]);
-  assertEquals(rejected.map((r) => r.url), ["https://www.lowes.com/t"]);
+  assertEquals(rejected.map((r) => [r.url, r.reason]), [
+    ["https://www.lowes.com/t", "irrelevant"],
+    ["https://shell.example/x", "no_content"],
+  ]);
+  assert(!judgedUrls.includes("https://shell.example/x"), "shells never reach the model");
+});
+
+// The fail-safe floor asymmetry: the floor exists to second-guess a
+// possibly-wrong model verdict, and emptiness is not a verdict. LLM-rejected
+// pages stay floor-keepable; shells never are.
+Deno.test("floorKeepable: keeps LLM-rejected pages, never shells; all-shells pool stays empty", () => {
+  const llmRejected = page("https://maybe-wrong-verdict.org/a"); // 100 chars of content
+  const shell = page("https://shell.example/x", "Qwen");
+  assertEquals(floorKeepable([llmRejected, shell]).map((p) => p.url), ["https://maybe-wrong-verdict.org/a"]);
+  assertEquals(floorKeepable([shell, page("https://s2.example/y", "hi")]), [],
+    "a pool of contentless shells must not survive to staging under the floor");
 });
