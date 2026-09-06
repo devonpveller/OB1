@@ -5,6 +5,7 @@ import {
   isStale, revalidateWindow, decideReuse, backstopDecision, reuseMetric,
   citedNumbers, citedSubset, buildCitedAndRenumber, renderResult,
   classifyCuratorOutcome, proxyPolicy,
+  shouldRetryCuratorError, curatorBackoffMs, curatorWorstCaseMs, delegateCuratorWithRetry, CuratorHttpError, type FetchLike,
 } from "./lib.ts";
 
 Deno.test("extractTextFromHtml strips scripts/styles/tags, keeps text", () => {
@@ -242,4 +243,157 @@ Deno.test("proxyPolicy: configured+built proxies; configured+unbuildable refuses
   assertEquals(proxyPolicy("http://vpn:8888", false), "refuse");
   assertEquals(proxyPolicy("", false), "direct");
   assertEquals(proxyPolicy("   ", false), "direct", "whitespace-only is the same explicit choice as empty");
+});
+
+// ── researchretry 2026-09-06: curator call timeout + bounded retry ───────────
+// Every case drives delegateCuratorWithRetry with an INJECTED fetch and an
+// injected sleep: no network, no real waiting. The wrapper builds the per-attempt
+// AbortSignal.timeout itself, so a fake fetch that only resolves via the signal
+// is the mutation detector for "remove the signal".
+
+const CURATOR_URL = "http://curator.test:8000/ingest/research-package";
+const INIT: RequestInit = { method: "POST", body: "{}" };
+
+/** Deno's real message for a refused TCP connect (verified live, T3(a)). */
+function refusedError(): Error {
+  return new TypeError(
+    "error sending request for url (http://curator.test:8000/ingest/research-package): " +
+      "client error (Connect): tcp connect error: Connection refused (os error 111)",
+  );
+}
+
+interface Trace { calls: number; sleeps: number[]; logs: string[]; opts: { sleep: (ms: number) => Promise<void>; log: (l: string) => void } }
+function trace(): Trace {
+  const t: Trace = { calls: 0, sleeps: [], logs: [], opts: { sleep: async () => {}, log: () => {} } };
+  t.opts.sleep = async (ms) => { t.sleeps.push(ms); };
+  t.opts.log = (l) => { t.logs.push(l); };
+  return t;
+}
+
+Deno.test("curator: connection refused is retried CURATOR_RETRIES times, then surfaces with the attempt count and the last cause", async () => {
+  const t = trace();
+  const fetchImpl: FetchLike = async () => { t.calls++; throw refusedError(); };
+  let err: Error | null = null;
+  try {
+    await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 15_000, ...t.opts });
+  } catch (e) { err = e as Error; }
+  assertEquals(t.calls, 3, "three attempts in total");
+  assertEquals(t.sleeps, [2000, 4000], "backoff between attempts, none after the last");
+  assertEquals(t.logs.length, 2, "one retry line per failed-and-retried attempt");
+  assertEquals(t.logs[0].startsWith("curator attempt 1/3 failed: TypeError: error sending request"), true, t.logs[0]);
+  assertEquals(err !== null, true, "the failure surfaces");
+  assertEquals(/after 3 attempt\(s\)/.test(err!.message), true, err!.message);
+  assertEquals(err!.message.includes("Connection refused"), true, "the last cause is named");
+});
+
+Deno.test("curator: a per-attempt timeout (TimeoutError from the AbortSignal) is retried", async () => {
+  const t = trace();
+  // Resolves ONLY through the signal: without one, the real call would hang forever
+  // and this fake refuses instead of hanging the suite.
+  const fetchImpl: FetchLike = (_url, init) => {
+    t.calls++;
+    const sig = init.signal;
+    if (!sig) return Promise.reject(new Error("fake fetch: no AbortSignal supplied - the real call would hang forever"));
+    return new Promise<Response>((_resolve, reject) => {
+      sig.addEventListener("abort", () => reject(sig.reason ?? new DOMException("signal timed out", "TimeoutError")));
+    });
+  };
+  let err: Error | null = null;
+  try {
+    await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 2, timeoutMs: 20, ...t.opts });
+  } catch (e) { err = e as Error; }
+  assertEquals(t.calls, 2, "the timed-out attempt was retried once (retries=2 total)");
+  assertEquals(t.sleeps, [2000]);
+  assertEquals(err !== null, true);
+  assertEquals(/after 2 attempt\(s\) \(timeout 20 ms each\)/.test(err!.message), true, err!.message);
+  assertEquals(/TimeoutError/.test(err!.message), true, err!.message);
+  assertEquals(t.logs[0].includes("may already have received the package"), true, t.logs[0]);
+});
+
+Deno.test("curator: an HTTP 500 JSON answer is a verdict - returned on the first attempt, NOT retried", async () => {
+  const t = trace();
+  const fetchImpl: FetchLike = async () => {
+    t.calls++;
+    return Response.json({ error: "persist_failed", stage: "persist" }, { status: 500 });
+  };
+  let err: Error | null = null;
+  try {
+    await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 15_000, ...t.opts });
+  } catch (e) { err = e as Error; }
+  assertEquals(t.calls, 1, "no retry on an answer");
+  assertEquals(t.sleeps, []);
+  assertEquals(t.logs, []);
+  assertEquals(err!.message.startsWith("curator 500: "), true, err!.message);
+  assertEquals(err!.message.includes("persist_failed"), true);
+  assertEquals(shouldRetryCuratorError(err), false);
+  // 4xx is the same kind of thing.
+  const fetch400: FetchLike = async () => Response.json({ error: "claim required" }, { status: 400 });
+  let e400: Error | null = null;
+  try { await delegateCuratorWithRetry(fetch400, CURATOR_URL, INIT, { retries: 3, timeoutMs: 15_000, ...t.opts }); } catch (e) { e400 = e as Error; }
+  assertEquals(e400!.message, 'curator 400: {"error":"claim required"}');
+});
+
+Deno.test("curator: HTTP 200 returns the JSON on the first attempt", async () => {
+  const t = trace();
+  const fetchImpl: FetchLike = async (url, init) => {
+    t.calls++;
+    assertEquals(url, CURATOR_URL);
+    assertEquals(init.method, "POST");
+    assertEquals(init.signal instanceof AbortSignal, true, "every attempt carries a signal");
+    return Response.json({ thread_id: "t1", sources_written: 4 });
+  };
+  const out = await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 15_000, ...t.opts });
+  assertEquals(out, { thread_id: "t1", sources_written: 4 });
+  assertEquals(t.calls, 1);
+  assertEquals(t.sleeps, []);
+});
+
+Deno.test("curator: a refusal that clears on the second attempt succeeds (the transient case this exists for)", async () => {
+  const t = trace();
+  const fetchImpl: FetchLike = async () => {
+    t.calls++;
+    if (t.calls === 1) throw refusedError();
+    return Response.json({ thread_id: "t1" });
+  };
+  const out = await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 15_000, ...t.opts });
+  assertEquals(out, { thread_id: "t1" });
+  assertEquals(t.calls, 2);
+  assertEquals(t.sleeps, [2000]);
+});
+
+Deno.test("curator: an error that is neither transport nor timeout surfaces unchanged on the first attempt", async () => {
+  const t = trace();
+  const fetchImpl: FetchLike = async () => { t.calls++; throw new SyntaxError("boom"); };
+  let err: Error | null = null;
+  try { await delegateCuratorWithRetry(fetchImpl, CURATOR_URL, INIT, { retries: 3, timeoutMs: 15_000, ...t.opts }); } catch (e) { err = e as Error; }
+  assertEquals(t.calls, 1);
+  assertEquals(err!.message, "boom");
+});
+
+Deno.test("shouldRetryCuratorError: connection-level and timeouts yes; any HTTP answer, unknown errors, null no", () => {
+  for (const m of ["ECONNREFUSED", "read ECONNRESET", "write EPIPE", "connect EHOSTUNREACH 10.0.0.1", "getaddrinfo EAI_AGAIN curator",
+    "error sending request for url (http://x): client error (Connect)", "connection reset by peer", "request timed out"]) {
+    assertEquals(shouldRetryCuratorError(new Error(m)), true, m);
+  }
+  assertEquals(shouldRetryCuratorError(new DOMException("signal timed out", "TimeoutError")), true);
+  assertEquals(shouldRetryCuratorError(new DOMException("aborted", "AbortError")), true);
+  assertEquals(shouldRetryCuratorError(new CuratorHttpError(503, '{"error":"db"}')), false, "an HTTP status is an answer");
+  assertEquals(shouldRetryCuratorError(new Error("curator 502: persist_failed")), false, "a verdict rendered as a plain Error");
+  assertEquals(shouldRetryCuratorError(new Error("boom")), false);
+  assertEquals(shouldRetryCuratorError(new SyntaxError("Unexpected token")), false);
+  assertEquals(shouldRetryCuratorError(null), false);
+  assertEquals(shouldRetryCuratorError(undefined), false);
+});
+
+Deno.test("curator backoff is bounded: 2s, 4s, 8s, then capped at 10s; worst case with defaults is 51 s", () => {
+  assertEquals(curatorBackoffMs(1), 2000);
+  assertEquals(curatorBackoffMs(2), 4000);
+  assertEquals(curatorBackoffMs(3), 8000);
+  assertEquals(curatorBackoffMs(4), 10_000, "cap");
+  assertEquals(curatorBackoffMs(50), 10_000, "still the cap");
+  assertEquals(curatorBackoffMs(0), 2000, "clamped to the first step");
+  // CURATOR_RETRIES=3, CURATOR_TIMEOUT_MS=FETCH_TIMEOUT_MS=15000: 3 x 15000 + 2000 + 4000.
+  assertEquals(curatorWorstCaseMs(3, 15_000), 51_000);
+  assertEquals(curatorWorstCaseMs(1, 15_000), 15_000, "one attempt = one timeout, no backoff");
+  assertEquals(curatorWorstCaseMs(6, 1_000), 6_000 + 2000 + 4000 + 8000 + 10_000 + 10_000);
 });

@@ -22,7 +22,7 @@
  *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { classifyCuratorOutcome, domainOf, extractTextFromHtml, extractTitle, proxyPolicy, renderResult, selectRepoFiles } from "./lib.ts";
+import { classifyCuratorOutcome, delegateCuratorWithRetry, domainOf, extractTextFromHtml, extractTitle, proxyPolicy, renderResult, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -97,6 +97,15 @@ const CURATOR_URL = env("CURATOR_URL", "http://openbrain-curator:8000").replace(
 const SEARCH_API_BASE = env("SEARCH_API_BASE", "http://gateway:8080").replace(/\/+$/, "");
 const SEARCH_K_DEFAULT = parseInt(env("SEARCH_K", "8"), 10);
 const FETCH_TIMEOUT_MS = parseInt(env("FETCH_TIMEOUT_MS", "15000"), 10);
+// Curator call policy (researchretry 2026-09-06; policy + tests in lib.ts). The
+// curator delegation was the one fetch here with no timeout and no retry.
+// CURATOR_TIMEOUT_MS bounds EACH attempt (default = FETCH_TIMEOUT_MS, like
+// every other fetch in this file); CURATOR_RETRIES is the TOTAL number of
+// attempts on connection-level failures/timeouts only - never on an HTTP
+// answer. Worst case with defaults: 3 x 15 s + 2 s + 4 s = 51 s, then the
+// harness records the loss in research_jobs.error instead of hanging the slot.
+const CURATOR_TIMEOUT_MS = parseInt(env("CURATOR_TIMEOUT_MS", String(FETCH_TIMEOUT_MS)), 10) || FETCH_TIMEOUT_MS;
+const CURATOR_RETRIES = Math.max(1, parseInt(env("CURATOR_RETRIES", "3"), 10) || 1);
 const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "8000"), 10);
 const PORT = parseInt(env("PORT", "8000"), 10);
 // How many research jobs may run at once across the whole stack. Default 1 =
@@ -349,15 +358,19 @@ async function fetchPage(url: string): Promise<FetchResult> {
   }
 }
 
+// Each attempt carries AbortSignal.timeout(CURATOR_TIMEOUT_MS) (added inside
+// the wrapper so the unit tests can see it); a non-2xx answer still throws
+// `curator <status>: <body>` exactly as before and is never retried.
 async function delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const r = await fetch(`${CURATOR_URL}/ingest/research-package`, {
+  return await delegateCuratorWithRetry(fetch, `${CURATOR_URL}/ingest/research-package`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-brain-key": MCP_ACCESS_KEY },
     body: JSON.stringify(pkg),
+  }, {
+    retries: CURATOR_RETRIES,
+    timeoutMs: CURATOR_TIMEOUT_MS,
+    log: (line) => console.warn(line),
   });
-  const json = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(`curator ${r.status}: ${JSON.stringify(json).slice(0, 300)}`);
-  return json;
 }
 
 // ── Repo source sync (REPO-SOURCES-WIRING RS.1) ─────────────────────────────
