@@ -99,12 +99,18 @@ const SEARCH_K_DEFAULT = parseInt(env("SEARCH_K", "8"), 10);
 const FETCH_TIMEOUT_MS = parseInt(env("FETCH_TIMEOUT_MS", "15000"), 10);
 // Curator call policy (researchretry 2026-09-06; policy + tests in lib.ts). The
 // curator delegation was the one fetch here with no timeout and no retry.
-// CURATOR_TIMEOUT_MS bounds EACH attempt (default = FETCH_TIMEOUT_MS, like
-// every other fetch in this file); CURATOR_RETRIES is the TOTAL number of
-// attempts on connection-level failures/timeouts only - never on an HTTP
-// answer. Worst case with defaults: 3 x 15 s + 2 s + 4 s = 51 s, then the
-// harness records the loss in research_jobs.error instead of hanging the slot.
-const CURATOR_TIMEOUT_MS = parseInt(env("CURATOR_TIMEOUT_MS", String(FETCH_TIMEOUT_MS)), 10) || FETCH_TIMEOUT_MS;
+// CURATOR_TIMEOUT_MS bounds EACH attempt and is deliberately generous (default
+// 180 s, NOT FETCH_TIMEOUT_MS): an ingest awaits an embedding, an LLM thread
+// decision, a persist and a claims pass, and the goal is "cannot hang
+// forever", not "fail fast". A timeout is NEVER retried - the curator may
+// still be working, a resend would double-ingest - it fails once naming the
+// elapsed time. CURATOR_RETRIES is the TOTAL number of attempts on
+// CONNECTION-LEVEL failures only (refused, reset, EPIPE, unreachable, "error
+// sending request" before any response) - never on an HTTP answer. Worst
+// cases with defaults: refused = 3 connect-fails (ms each) + 2 s + 4 s ~ 6 s;
+// timeout = exactly one 180 s. Then the harness records the loss in
+// research_jobs.error instead of hanging the slot.
+const CURATOR_TIMEOUT_MS = parseInt(env("CURATOR_TIMEOUT_MS", "180000"), 10) || 180000;
 const CURATOR_RETRIES = Math.max(1, parseInt(env("CURATOR_RETRIES", "3"), 10) || 1);
 const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "8000"), 10);
 const PORT = parseInt(env("PORT", "8000"), 10);
@@ -359,8 +365,9 @@ async function fetchPage(url: string): Promise<FetchResult> {
 }
 
 // Each attempt carries AbortSignal.timeout(CURATOR_TIMEOUT_MS) (added inside
-// the wrapper so the unit tests can see it); a non-2xx answer still throws
-// `curator <status>: <body>` exactly as before and is never retried.
+// the wrapper so the unit tests can see it); a timeout throws once and is not
+// retried; a non-2xx answer still throws `curator <status>: <body>` exactly
+// as before and is never retried.
 async function delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>> {
   return await delegateCuratorWithRetry(fetch, `${CURATOR_URL}/ingest/research-package`, {
     method: "POST",
