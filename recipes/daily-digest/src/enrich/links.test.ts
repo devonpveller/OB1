@@ -268,3 +268,50 @@ Deno.test("interstitialTarget ignores a document with visible content", () => {
     `<body>${"Real readable prose that makes this a document. ".repeat(20)}</body></html>`;
   assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
 });
+
+// ── 9. REGRESSIONS FROM THE FIRST TEST ROUND (2026-09-09) ────────────────────
+// Every case below was found by a TESTER, not by the author, and each one failed
+// on the first version of this change.
+
+Deno.test("a bare HTML attribute is NOT a scripted redirect", () => {
+  // `data-location = "..."` matched: \b sits happily after the hyphen, and the
+  // pattern ran over raw HTML with no script-context awareness at all.
+  const doc = `<html><head></head><body><div data-location = "https://evil.example/steal"></div></body></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+});
+
+Deno.test("an unrelated .location property assignment is NOT a redirect", () => {
+  const doc = `<html><head><script>window.analytics.location = "https://evil.example/steal";</script></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+});
+
+Deno.test("a location.replace OUTSIDE any script element is ignored", () => {
+  const doc = `<html><head></head><body>location.replace("https://evil.example/steal")</body></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+});
+
+Deno.test("a real window.location redirect inside a script IS still followed", () => {
+  const doc = `<html><head><script>window.location.replace("https://good.example/post")</script></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/post");
+});
+
+Deno.test("an UNRESOLVED wrapper is marked but NOT dropped from research", async () => {
+  // THE regression: marking it was right, filtering it out LOST links the
+  // pre-fix code researched. isRedirectWrapper matches bare substrings against
+  // the whole URL, so a genuine article whose path merely contains a tracker
+  // shape goes down the unwrap branch and does not move.
+  const article = stubServer(() =>
+    html("<html><body>" + "A real article with real prose. ".repeat(40) + "</body></html>")
+  );
+  try {
+    const out = await gatherAnchors([{ url: `${article.base}/ss/c/real-article`, text: "A real article" }]);
+    const c = out[0];
+    assert(c, "the candidate must survive gatherAnchors");
+    assertEquals(c.unresolvedWrapper, true, "it is marked, because the unwrap did not move it");
+    // link-enrich.ts's filter, verbatim: the mark must NOT be part of it.
+    const kept = [c].filter((x) => x.domain && !x.domain.endsWith("substack.com"));
+    assertEquals(kept.length, 1, "a marked candidate is still researched");
+  } finally {
+    await article.stop();
+  }
+});

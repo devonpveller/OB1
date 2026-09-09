@@ -178,12 +178,28 @@ function metaRefreshTarget(html: string): string | null {
   return null;
 }
 
-/** `location.replace("…")` / `location.assign("…")` / `location.href = "…"`. */
+/**
+ * `location.replace("…")` / `location.assign("…")` / `location.href = "…"`, but
+ * ONLY inside a <script> element.
+ *
+ * The script-only restriction is not tidiness (found in test 2026-09-09): run
+ * over raw HTML, the pattern matched `<div data-location = "eu-west">` — a plain
+ * attribute, no script anywhere — because `\b` sits happily after the hyphen in
+ * `data-location`. It also matched `window.analytics.location = "…"`, an
+ * unrelated property assignment, and would have steered the researcher to
+ * whatever URL that held. Narrow the haystack to actual script bodies, and
+ * require the reference to be a real global (`location`, `window.location`,
+ * `document.location`) rather than the tail of some longer identifier.
+ */
+const LOCATION_ASSIGN_RE =
+  /(?:^|[;{}\s(])(?:(?:window|document|self|top)\s*\.\s*)?location\s*(?:\.\s*(?:replace|assign)\s*\(\s*|\.\s*href\s*=\s*|\s*=\s*)["']([^"']+)["']/i;
+
 function scriptedLocationTarget(html: string): string | null {
-  const m = html.match(
-    /\blocation\s*(?:\.\s*(?:replace|assign)\s*\(\s*|\.\s*href\s*=\s*|\s*=\s*)["']([^"']+)["']/i,
-  );
-  return m?.[1] ?? null;
+  for (const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+    const hit = m[1].match(LOCATION_ASSIGN_RE);
+    if (hit?.[1]) return hit[1];
+  }
+  return null;
 }
 
 /**

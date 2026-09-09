@@ -375,17 +375,31 @@ async function main() {
       // self-link, and until 2026-09-09 both vanished through the same
       // `endsWith("substack.com")` drop. When Substack swapped its 302 for a
       // JS interstitial, that silence cost three days of external research with
-      // every log line green. Say it out loud instead.
+      // every log line green. Say it out loud.
+      //
+      // SAY, DO NOT DROP (corrected 2026-09-09 after a tester measured it). The
+      // first version of this also filtered the marked candidates out, which
+      // LOST links the old code researched: `isRedirectWrapper` matches bare
+      // substrings ("click.", "links.", "email.", "trk.") against the whole URL,
+      // so a genuine article at e.g. `one-click.example/post` enters the unwrap
+      // branch, does not move because it is a real page, gets marked, and would
+      // then be dropped. A real wrapper whose unwrap merely TIMED OUT would go
+      // the same way, where before the wrapper URL survived and extract.ts
+      // followed the redirect itself at fetch time.
+      //
+      // Measured incidence over 95 historical link reports was zero, and that is
+      // NOT why this is safe: the population moves once wrappers start resolving
+      // again, so a count taken before the fix does not predict behaviour after
+      // it. Keeping is what makes it safe - it restores the old behaviour
+      // exactly, and the log line still ends the silence, which was the point.
       for (const c of gathered) {
         if (c.unresolvedWrapper) {
           console.log(
-            `      ⚠ unresolved redirect wrapper [${c.domain || "?"}] ${c.url.slice(0, 80)} — destination unknown, not researched`,
+            `      ⚠ unresolved redirect wrapper [${c.domain || "?"}] ${c.url.slice(0, 80)} — destination unknown, passing it through unresolved`,
           );
         }
       }
-      external = gathered.filter((c) =>
-        c.domain && !c.unresolvedWrapper && !c.domain.endsWith("substack.com")
-      );
+      external = gathered.filter((c) => c.domain && !c.domain.endsWith("substack.com"));
     }
     // Promo filter (blocklist → nothink): drop ad/sponsor links before POI so
     // they never become sources/claims. Domains judged promo are remembered.
