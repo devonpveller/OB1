@@ -46,7 +46,7 @@ import { BrainClient } from "./src/clients/postgrest.ts";
 import { GoogleOAuth } from "./src/clients/google-oauth.ts";
 import { AiNewsSection } from "./src/sections/ai-news.ts";
 import { reconstructEmailBody } from "./src/enrich/email-body.ts";
-import { extractUrls, gatherAnchors, gatherLinks } from "./src/enrich/links.ts";
+import { extractUrls, gatherAnchors, gatherLinks, isResearchable } from "./src/enrich/links.ts";
 import { extractAnchors, GmailReader } from "./src/enrich/gmail-fetch.ts";
 import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
@@ -399,7 +399,11 @@ async function main() {
           );
         }
       }
-      external = gathered.filter((c) => c.domain && !c.domain.endsWith("substack.com"));
+      // isResearchable lives in links.ts so a test can pin the REAL rule. The
+      // expression used to be inline here, where nothing could import it, and
+      // the test that "guarded" it asserted a hand-typed copy - a tester put the
+      // regression back and the whole suite stayed green.
+      external = gathered.filter(isResearchable);
     }
     // Promo filter (blocklist → nothink): drop ad/sponsor links before POI so
     // they never become sources/claims. Domains judged promo are remembered.

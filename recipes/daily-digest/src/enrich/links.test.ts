@@ -22,7 +22,7 @@
 Deno.env.set("FETCH_PROXY_URL", "");
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { gatherAnchors, interstitialTarget, unwrapRedirect } from "./links.ts";
+import { gatherAnchors, interstitialTarget, isResearchable, unwrapRedirect } from "./links.ts";
 
 type Handler = (req: Request, hit: number) => Response | Promise<Response>;
 
@@ -293,6 +293,78 @@ Deno.test("a location.replace OUTSIDE any script element is ignored", () => {
 Deno.test("a real window.location redirect inside a script IS still followed", () => {
   const doc = `<html><head><script>window.location.replace("https://good.example/post")</script></head></html>`;
   assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/post");
+});
+
+// ── 10. THE SECOND TEST ROUND (2026-09-09) ───────────────────────────────────
+// A tester put the F3 regression back into link-enrich.ts's real filter and the
+// whole suite stayed green: the guard asserted a hand-typed COPY of the
+// expression, and link-enrich.ts is a top-level script no test can import. The
+// rule now lives in isResearchable() and these assert THAT.
+
+Deno.test("isResearchable: a marked wrapper is still researched", () => {
+  const marked = {
+    rawUrl: "https://one-click.example/post",
+    url: "https://one-click.example/post",
+    domain: "one-click.example",
+    unresolvedWrapper: true,
+  };
+  assertEquals(isResearchable(marked), true, "the mark must not decide research");
+});
+
+Deno.test("isResearchable: a newsletter self-link is still dropped", () => {
+  assertEquals(
+    isResearchable({ rawUrl: "x", url: "https://nate.substack.com/p/a", domain: "nate.substack.com" }),
+    false,
+  );
+  assertEquals(isResearchable({ rawUrl: "x", url: "https://blog.google/a", domain: "blog.google" }), true);
+  assertEquals(isResearchable({ rawUrl: "x", url: "not a url", domain: "" }), false);
+});
+
+// Every inert context a tester drove the resolver from. All seven followed
+// before this round; metaRefreshTarget had never been narrowed at all, and it
+// runs FIRST.
+const inertCases: Array<[string, string]> = [
+  ["an HTML comment (meta)", `<!-- <meta http-equiv="refresh" content="0;url=https://evil.example/x"> -->`],
+  ["an HTML comment (script)", `<!-- <script>location.replace("https://evil.example/x")</script> -->`],
+  ["a <template> (meta)", `<template><meta http-equiv="refresh" content="0;url=https://evil.example/x"></template>`],
+  ["a <template> (script)", `<template><script>location.replace("https://evil.example/x")</script></template>`],
+  ["a <textarea> (meta)", `<textarea><meta http-equiv="refresh" content="0;url=https://evil.example/x"></textarea>`],
+  ["a <textarea> (script)", `<textarea><script>location.replace("https://evil.example/x")</script></textarea>`],
+  ["a non-executing script type", `<script type="text/template">location.replace("https://evil.example/x")</script>`],
+  ["a text/plain script", `<script type="text/plain">location.replace("https://evil.example/x")</script>`],
+];
+for (const [label, body] of inertCases) {
+  Deno.test(`an inert context is not a redirect: ${label}`, () => {
+    const doc = `<html><head></head><body>${body}</body></html>`;
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null, label);
+  });
+}
+
+// ...and the shapes a MINIFIED interstitial actually uses, which the first
+// narrowing broke: the old prefix class allowed only [;{}\s(], so a target after
+// `)` or `>` stopped resolving. Attempt 1 followed both of these.
+Deno.test("a redirect after an arrow function IS followed", () => {
+  const doc = `<html><head><script>setTimeout(()=>location.replace("https://good.example/a"),0)</script></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/a");
+});
+
+Deno.test("a redirect after a bare if() IS followed", () => {
+  const doc = `<html><head><script>if(!a)location.href="https://good.example/b"</script></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/b");
+});
+
+Deno.test("a script tag whose attribute contains > is parsed whole", () => {
+  const doc = `<html><head><script data-x="a>b">location.replace("https://good.example/c")</script></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/c");
+});
+
+Deno.test("a mostly-commented document does not look like a shell to one guard and a redirect to the other", () => {
+  // The sharp case: extractTextFromHtml STRIPS comments before counting visible
+  // text, so a document that is almost entirely a comment reads as shell-like.
+  // The matcher must not then read inside that comment.
+  const doc = `<html><head></head><body><!-- ${"filler ".repeat(200)}` +
+    `<meta http-equiv="refresh" content="0;url=https://evil.example/x"> --></body></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
 });
 
 Deno.test("an UNRESOLVED wrapper is marked but NOT dropped from research", async () => {

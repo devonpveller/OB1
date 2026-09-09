@@ -160,6 +160,31 @@ const INTERSTITIAL_MAX_BYTES = 16_384;
 /** Visible text in a shell is a stray "Redirecting…" at most. An article has more. */
 const INTERSTITIAL_MAX_TEXT = 200;
 
+/**
+ * Remove the regions a browser will never execute or treat as markup, so the
+ * matchers below cannot be steered by something inert.
+ *
+ * WHY (found in test 2026-09-09, second round): narrowing the SCRIPTED matcher to
+ * <script> elements was not enough, because `metaRefreshTarget` runs FIRST and
+ * had never been narrowed at all. Seven inert contexts still drove the resolver -
+ * a <meta refresh> or a <script> inside an HTML comment, inside <template>, or
+ * inside <textarea>, and a <script> with a non-executing `type`.
+ *
+ * Comments were the sharp one: the visible-text guard calls extractTextFromHtml,
+ * which STRIPS comments before counting - so a document that is almost entirely
+ * one commented-out block reads as "no visible text" (shell-like) to the guard
+ * while the matcher happily reads inside the comment. The guard and the matcher
+ * disagreed about what the document contained. They now see the same thing.
+ */
+function stripInertRegions(html: string): string {
+  return String(html || "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, " ")
+    .replace(/<textarea\b[^>]*>[\s\S]*?<\/textarea>/gi, " ")
+    .replace(/<xmp\b[^>]*>[\s\S]*?<\/xmp>/gi, " ")
+    .replace(/<plaintext\b[^>]*>[\s\S]*$/gi, " ");
+}
+
 /** `<meta http-equiv="refresh" content="0; url=…">` — the target, if the delay
  *  is an immediate 0. A timed refresh (`content="5;…"`) is a page that means to
  *  be READ first, so it is not a redirect. */
@@ -191,12 +216,35 @@ function metaRefreshTarget(html: string): string | null {
  * require the reference to be a real global (`location`, `window.location`,
  * `document.location`) rather than the tail of some longer identifier.
  */
+// The reference must be a real global, not the tail of a longer identifier. A
+// NEGATIVE LOOKBEHIND says that once, instead of enumerating the characters that
+// may precede it: `data-location` (hyphen), `analytics.location` (dot) and
+// `mylocation` (word char) are all excluded, while `)` and `>` are allowed.
+//
+// Those two matter (found in test 2026-09-09, second round): the previous
+// version listed allowed prefixes as `[;{}\s(]`, which silently stopped
+// following `setTimeout(()=>location.replace("..."),0)` and
+// `if(!a)location.href="..."` - both shapes attempt 1 DID follow, and both are
+// what a minified interstitial actually looks like. Narrowing to kill a false
+// positive had quietly introduced false negatives in the common case.
 const LOCATION_ASSIGN_RE =
-  /(?:^|[;{}\s(])(?:(?:window|document|self|top)\s*\.\s*)?location\s*(?:\.\s*(?:replace|assign)\s*\(\s*|\.\s*href\s*=\s*|\s*=\s*)["']([^"']+)["']/i;
+  /(?<![\w$.\-])(?:(?:window|document|self|top)\s*\.\s*)?location\s*(?:\.\s*(?:replace|assign)\s*\(\s*|\.\s*href\s*=\s*|\s*=\s*)["']([^"']+)["']/i;
+
+/** A <script> the browser actually runs: no `type`, or a JavaScript one. A
+ *  `type="text/template"` / `"text/plain"` block is inert data. */
+function isExecutableScriptTag(tag: string): boolean {
+  const t = tag.match(/\btype\s*=\s*["']?([^"'\s>]+)/i)?.[1]?.toLowerCase();
+  if (!t) return true;
+  return /^(module|text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript|text\/jscript)$/.test(t);
+}
 
 function scriptedLocationTarget(html: string): string | null {
-  for (const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
-    const hit = m[1].match(LOCATION_ASSIGN_RE);
+  // Attribute-aware tag matcher: a bare [^>]* truncates the open tag on
+  // `<script data-x="a>b">` and then reads the wrong body.
+  const scriptRe = /<script\b((?:[^>"']|"[^"]*"|'[^']*')*)>([\s\S]*?)<\/script>/gi;
+  for (const m of html.matchAll(scriptRe)) {
+    if (!isExecutableScriptTag(m[1])) continue;
+    const hit = m[2].match(LOCATION_ASSIGN_RE);
     if (hit?.[1]) return hit[1];
   }
   return null;
@@ -213,7 +261,9 @@ function scriptedLocationTarget(html: string): string | null {
 export function interstitialTarget(html: string, baseUrl: string): string | null {
   if (html.length > INTERSTITIAL_MAX_BYTES) return null;
   if (extractTextFromHtml(html).length > INTERSTITIAL_MAX_TEXT) return null;
-  const raw = metaRefreshTarget(html) ?? scriptedLocationTarget(html);
+  // Both matchers see the SAME document the guards judged - inert regions gone.
+  const live = stripInertRegions(html);
+  const raw = metaRefreshTarget(live) ?? scriptedLocationTarget(live);
   if (!raw) return null;
   let abs: string;
   try {
@@ -335,6 +385,31 @@ function decodeSubstackRedirect(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Should the research stage fetch this candidate?
+ *
+ * THE ONE PLACE that decision is made, exported so a test can pin the REAL
+ * expression. It lived inline in link-enrich.ts until 2026-09-09, where nothing
+ * could reach it: link-enrich.ts is a top-level script that runs work at import,
+ * so no test may import it, and the test that claimed to guard the rule asserted
+ * a hand-typed COPY of the filter. A tester put the regression back into the
+ * real filter and the whole suite stayed green.
+ *
+ * `unresolvedWrapper` is DELIBERATELY not consulted. Marking a wrapper we could
+ * not resolve is right; refusing to research it is not - `isRedirectWrapper`
+ * matches bare substrings against the whole URL, so a genuine article can carry
+ * the mark, and a tracker whose unwrap merely timed out used to survive here and
+ * be followed by extract.ts at fetch time. Keeping it restores that exactly; the
+ * log line is what ends the silence.
+ */
+export function isResearchable(c: LinkCandidate): boolean {
+  if (!c.domain) return false;
+  // The newsletter's own posts: the email body already covers them and the web
+  // posts are often paywalled.
+  if (c.domain.endsWith("substack.com")) return false;
+  return true;
 }
 
 /**
