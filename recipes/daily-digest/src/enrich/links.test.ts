@@ -20,9 +20,21 @@
 // Opt OUT of the Tor/VPN egress before links.ts lazily builds its client: these
 // tests talk to a loopback stub, and the default proxy would fail closed.
 Deno.env.set("FETCH_PROXY_URL", "");
+// A stub server IS loopback, which the production host screen refuses. Rather
+// than weaken the screen so the suite passes - the classic way a security
+// control becomes decorative - open the door here, and let the two cases that
+// ASSERT the screen delete this first so they run against the shipping default.
+// This variable must never be set in production.
+Deno.env.set("RESEARCH_ALLOW_PRIVATE_TARGETS", "1");
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { gatherAnchors, interstitialTarget, isResearchable, unwrapRedirect } from "./links.ts";
+import {
+  gatherAnchors,
+  interstitialTarget,
+  isPubliclyRoutableUrl,
+  isResearchable,
+  unwrapRedirect,
+} from "./links.ts";
 
 type Handler = (req: Request, hit: number) => Response | Promise<Response>;
 
@@ -335,6 +347,103 @@ Deno.test("isResearchable: a newsletter self-link is still dropped", () => {
 // The fix is a scanner that fails closed, not twelve more patterns - so these
 // cases exist to keep the CLASS shut, and the block after them exists to prove
 // failing closed did not close the door on real interstitials.
+// ── 12. WHERE A RESOLVED TARGET MAY POINT, AND THE FALLBACK LEVER ────────────
+// The redirect target is the one value here chosen by the page we just fetched,
+// and we then FETCH it. No JavaScript is ever executed - a string is lifted out
+// of a script body and never evaluated - but where that string points is a real
+// question, so it is screened.
+Deno.test("a resolved target may not point at internal infrastructure", () => {
+  const denied = [
+    "http://openbrain-curator:8000/ingest",   // a docker service name: no dot
+    "http://llama-cpp:8080/v1/chat",
+    "http://surrealdb:8000/sql",
+    "http://localhost:8080/",
+    "http://127.0.0.1:8080/",
+    "http://10.1.2.3/",
+    "http://172.16.0.5/",
+    "http://192.168.1.10/",
+    "http://169.254.169.254/latest/meta-data/", // cloud metadata
+    "http://100.64.1.2/",                       // CGNAT range - the tailnet
+    "http://[::1]/",
+    "http://host.docker.internal:8000/",
+    "http://something.local/",
+    "file:///etc/passwd",
+    "javascript:alert(1)",
+  ];
+  for (const u of denied) {
+    assertEquals(isPubliclyRoutableUrl(u), false, `must be refused: ${u}`);
+  }
+  const allowed = [
+    "https://blog.google/article",
+    "https://aiandeducation.mit.edu/report/",
+    "http://example.com/x?y=1",
+    "https://8.8.8.8/",
+  ];
+  for (const u of allowed) {
+    assertEquals(isPubliclyRoutableUrl(u), true, `must be allowed: ${u}`);
+  }
+});
+
+Deno.test("an interstitial pointing at internal infrastructure is not followed", () => {
+  // Run against the SHIPPING default, not the suite's loopback hatch.
+  Deno.env.delete("RESEARCH_ALLOW_PRIVATE_TARGETS");
+  try {
+    const doc = `<html><head><meta http-equiv="refresh" content="0;url=http://openbrain-curator:8000/ingest"></head></html>`;
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+    const doc2 = `<html><head><script>location.replace("http://169.254.169.254/latest/meta-data/")</script></head></html>`;
+    assertEquals(interstitialTarget(doc2, "https://wrapper.example/r/1"), null);
+    // ...and a PUBLIC target from the same shapes still resolves, so the case
+    // is not passing because everything returns null.
+    const ok = `<html><head><meta http-equiv="refresh" content="0;url=https://blog.google/a"></head></html>`;
+    assertEquals(interstitialTarget(ok, "https://wrapper.example/r/1"), "https://blog.google/a");
+  } finally {
+    Deno.env.set("RESEARCH_ALLOW_PRIVATE_TARGETS", "1");
+  }
+});
+
+Deno.test("a Location header pointing at internal infrastructure is not followed either", async () => {
+  // The 3xx path is OLDER than the interstitial one and had the same unscreened
+  // power all along.
+  Deno.env.delete("RESEARCH_ALLOW_PRIVATE_TARGETS");
+  const wrapper = stubServer(() =>
+    new Response(null, { status: 302, headers: { location: "http://openbrain-db:5432/" } })
+  );
+  try {
+    const url = `${wrapper.base}/click/evil`;
+    assertEquals(await unwrapRedirect(url), url, "the hop is refused; we return the wrapper");
+  } finally {
+    Deno.env.set("RESEARCH_ALLOW_PRIVATE_TARGETS", "1");
+    await wrapper.stop();
+  }
+});
+
+Deno.test("INTERSTITIAL_FOLLOW=0 restores the pre-fix behaviour", async () => {
+  const dest = stubServer(() => html("<html><body>the article</body></html>"));
+  const wrapper = stubServer(() => html(substackInterstitial(`${dest.base}/p/x`)));
+  const prev = Deno.env.get("INTERSTITIAL_FOLLOW");
+  try {
+    Deno.env.set("INTERSTITIAL_FOLLOW", "0");
+    const url = `${wrapper.base}/redirect/abc?j=e`;
+    assertEquals(await unwrapRedirect(url), url, "with the lever pulled, the wrapper is NOT followed");
+    Deno.env.set("INTERSTITIAL_FOLLOW", "1");
+    assertEquals(await unwrapRedirect(url), `${dest.base}/p/x`, "and with it restored, it is");
+  } finally {
+    if (prev === undefined) Deno.env.delete("INTERSTITIAL_FOLLOW");
+    else Deno.env.set("INTERSTITIAL_FOLLOW", prev);
+    await wrapper.stop();
+    await dest.stop();
+  }
+});
+
+Deno.test("the lever OFF still leaves the wrapper researchable", () => {
+  // The fallback must degrade to the OLD behaviour, not to a hole: an
+  // unresolved wrapper is marked, logged, and still passed to research.
+  assertEquals(
+    isResearchable({ rawUrl: "x", url: "https://tracker.example/ss/c/abc", domain: "tracker.example", unresolvedWrapper: true }),
+    true,
+  );
+});
+
 const EVIL = "https://evil.example/steal";
 const bypassCases: Array<[string, string]> = [
   ["a <script> inside <noscript>", `<html><head><noscript><script>location.replace("${EVIL}")</script></noscript></head></html>`],

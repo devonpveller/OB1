@@ -154,6 +154,110 @@ export function classifyLink(url: string): string | undefined {
 // string `location.replace` is never treated as a redirect. Nothing here knows
 // about Substack; the next publisher to do this is handled by the same code.
 
+/**
+ * Is this a destination a RESEARCH fetch may be pointed at?
+ *
+ * WHY THIS EXISTS (operator question, 2026-09-09): a redirect target is the one
+ * value in this pipeline that is chosen by the page we just fetched - i.e. by
+ * whoever controls the tracker - and we then FETCH it. Nothing in the codebase
+ * screened it: `fetchAndExtract` fetches whatever URL it is handed.
+ *
+ * What is NOT a risk here, measured rather than assumed: no JavaScript is ever
+ * executed. `scanDocument` reads the document as text, `LOCATION_ASSIGN_RE`
+ * lifts a STRING out of a script body, and nothing evals it - there is no eval,
+ * no `new Function`, no DOM, no headless browser anywhere in this path.
+ *
+ * What IS a risk is where that string points. Probed live 2026-09-09 through the
+ * real egress (`FETCH_PROXY_URL=http://vpn:8888`): internal targets
+ * (`openbrain-curator:8000`, `llama-cpp:8080`, `openbrain-db:5432`, `127.0.0.1`)
+ * all came back 500 from the proxy while public URLs resolved normally - so the
+ * Mullvad tunnel is ALREADY an SSRF boundary. But that is a property of the
+ * network configuration, not a statement the code makes: `egress.ts` documents
+ * `FETCH_PROXY_URL=""` as a supported opt-out to direct fetching, and on that
+ * setting this container resolves `llm-net` and `app-net` names itself.
+ *
+ * So this is defence in depth, and it makes the property an assertion instead of
+ * an accident. Deny-by-shape, not by list: anything that is not a public,
+ * dotted, non-private host is refused.
+ */
+export function isPubliclyRoutableUrl(url: string): boolean {
+  let host: string;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    host = u.hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!host) return false;
+  // IPv6 literal. `new URL("http://[::1]/").hostname` KEEPS the brackets - an
+  // earlier revision of this comment said it strips them, and the bracketed form
+  // sailed through every check below until a test caught it. Strip them here.
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  if (host.includes(":")) {
+    if (host === "::1" || host === "::") return false;
+    if (/^f[cd][0-9a-f]{2}:/.test(host)) return false; // fc00::/7 unique-local
+    if (/^fe[89ab][0-9a-f]:/.test(host)) return false; // fe80::/10 link-local
+    return true;
+  }
+  // IPv4 literal.
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 0 || a === 127 || a === 10) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 169 && b === 254) return false; // link-local + cloud metadata
+    if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT - and the tailnet
+    if (a >= 224) return false; // multicast / reserved
+    return true;
+  }
+  // A DOCKER SERVICE NAME has no dot. `openbrain-curator`, `llama-cpp`,
+  // `surrealdb` are all reachable from inside this stack and none of them can
+  // appear in a legitimate newsletter link.
+  if (!host.includes(".")) return false;
+  if (host === "localhost" || host.endsWith(".localhost")) return false;
+  if (host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".localdomain")) return false;
+  return true;
+}
+
+/**
+ * The escape hatch for TESTS ONLY, and it is deliberately ugly to type.
+ *
+ * `isPubliclyRoutableUrl` refuses loopback, which is exactly what a test stub
+ * server is: `http://127.0.0.1:<port>`. Rather than weaken the policy so the
+ * tests pass - the classic way a security control becomes decorative - the
+ * policy stays pure and this opens a door at the CALL SITE.
+ *
+ * MUST NOT be set in production. `links.test.ts` sets it at import and the two
+ * cases that assert the policy delete it first, so the shipping default is what
+ * every other case runs against.
+ */
+function privateTargetsAllowed(): boolean {
+  return (Deno.env.get("RESEARCH_ALLOW_PRIVATE_TARGETS") ?? "").trim() === "1";
+}
+
+/** The screen as the fetching code applies it: policy, plus the test hatch. */
+function targetAllowed(url: string): boolean {
+  if (privateTargetsAllowed()) return true;
+  return isPubliclyRoutableUrl(url);
+}
+
+/**
+ * The kill switch. `INTERSTITIAL_FOLLOW=0` restores the pre-2026-09-09
+ * behaviour - follow `Location` headers only - with no code change and no
+ * rebuild, so a bad day in production has a lever that is not a revert.
+ *
+ * Read per call rather than cached at import: a cached value cannot be changed
+ * without a restart, and the whole point of a fallback is that it works when
+ * you reach for it. The read is a hashtable lookup, and this runs at most a few
+ * dozen times per daily run.
+ */
+function interstitialFollowEnabled(): boolean {
+  const v = (Deno.env.get("INTERSTITIAL_FOLLOW") ?? "").trim().toLowerCase();
+  return !(v === "0" || v === "false" || v === "off" || v === "no");
+}
+
 /** A redirect shell is ~1–2KB. Bigger than this is not a shell, and the body is
  *  never buffered past it (see readHtmlPrefix). */
 const INTERSTITIAL_MAX_BYTES = 16_384;
@@ -390,6 +494,9 @@ export function interstitialTarget(html: string, baseUrl: string): string | null
     return null;
   }
   if (!/^https?:\/\//i.test(abs)) return null;
+  // The target is about to be FETCHED. Screen it here, at the point it is
+  // derived from attacker-influenced content - see isPubliclyRoutableUrl.
+  if (!targetAllowed(abs)) return null;
   // A page that refreshes to itself is a loop, not a hop — report "arrived".
   if (abs.split("#")[0] === baseUrl.split("#")[0]) return null;
   return abs;
@@ -467,13 +574,33 @@ export async function unwrapRedirect(
         const loc = res.headers.get("location");
         res.body?.cancel().catch(() => {});
         if (!loc) return current;
-        current = new URL(loc, current).toString();
+        let next: string;
+        try {
+          next = new URL(loc, current).toString();
+        } catch {
+          return current;
+        }
+        // Screen the HEADER hop too. This path is older than the interstitial
+        // one and had the same unscreened power all along: a `Location:
+        // http://openbrain-db:5432/` was followed without question. Stopping
+        // here means we return the wrapper, which is then logged as unresolved
+        // and still researched - the safe direction.
+        if (!targetAllowed(next)) return current;
+        current = next;
         continue;
       }
       // Not a 3xx. The browser/Deno may have already resolved to res.url on a
       // final hop. Before calling it arrived, check whether this 200 is really
       // a redirect shell (meta-refresh / location.replace) and take that hop.
       const landed = res.url && res.url !== "" ? res.url : current;
+      // THE FALLBACK LEVER (operator, 2026-09-09). INTERSTITIAL_FOLLOW=0 turns
+      // this whole path off and restores the pre-2026-09-09 behaviour - 3xx
+      // only - without a code change, a rebuild or a redeploy. Set it in the
+      // gitignored OB1/recipes/daily-digest/.env and recreate the container.
+      // The cost of pulling it is precisely the outage this item fixed: every
+      // Substack wrapper goes back to being logged as unresolved and researched
+      // from the newsletter body. It is not free, and it is not a disaster.
+      if (!interstitialFollowEnabled()) return landed;
       const html = await readHtmlPrefix(res, INTERSTITIAL_MAX_BYTES);
       const target = html === null ? null : interstitialTarget(html, landed);
       if (target) {
