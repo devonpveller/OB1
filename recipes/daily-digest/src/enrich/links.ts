@@ -176,21 +176,138 @@ const INTERSTITIAL_MAX_TEXT = 200;
  * while the matcher happily reads inside the comment. The guard and the matcher
  * disagreed about what the document contained. They now see the same thing.
  */
-function stripInertRegions(html: string): string {
-  return String(html || "")
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<template\b[^>]*>[\s\S]*?<\/template>/gi, " ")
-    .replace(/<textarea\b[^>]*>[\s\S]*?<\/textarea>/gi, " ")
-    .replace(/<xmp\b[^>]*>[\s\S]*?<\/xmp>/gi, " ")
-    .replace(/<plaintext\b[^>]*>[\s\S]*$/gi, " ");
+/**
+ * A single left-to-right scan of the document, replacing the layered regex this
+ * used to be. It returns the `<meta>` tags and `<script>` bodies that are
+ * genuinely LIVE, plus one `ambiguous` flag - and the flag is the point.
+ *
+ * WHY IT IS A SCANNER NOW (found in test 2026-09-09, third round). The regex
+ * version stripped inert regions with closing-tag-anchored, non-greedy patterns,
+ * so a tester drove the resolver from TWELVE contexts a browser would never
+ * navigate from: every UNTERMINATED inert region (`<!--` with no `-->`, an
+ * unclosed `<textarea>`, an unclosed `<template>`), NESTED templates, regions it
+ * had never heard of (`<style>`, `<title>`, `<noscript>`), an `iframe srcdoc`,
+ * and a whole `<script>` living inside an attribute VALUE. Patching twelve
+ * shapes invites a thirteenth; the shape of the tool was the defect.
+ *
+ * AND IT FAILS CLOSED. When the document contains something this scan cannot
+ * confidently place - an unterminated raw-text element, or a nested template -
+ * it reports `ambiguous` and the caller refuses to treat it as a redirect at
+ * all. That direction is deliberate: refusing costs one unresolved wrapper,
+ * which is logged and STILL researched, while guessing costs a wrong URL
+ * silently entering the research corpus.
+ */
+interface DocScan {
+  metaTags: string[];
+  scripts: Array<{ tag: string; body: string }>;
+  ambiguous: boolean;
+}
+
+// Elements whose content is NOT ordinary markup. Anything inside them can never
+// be a live <meta>, and (except for script itself) can never be live JS either.
+const RAW_TEXT_ELEMENTS = ["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes"];
+
+function scanDocument(html: string): DocScan {
+  const out: DocScan = { metaTags: [], scripts: [], ambiguous: false };
+  const s = String(html || "");
+  let i = 0;
+  let noscriptDepth = 0;
+  while (i < s.length) {
+    const lt = s.indexOf("<", i);
+    if (lt < 0) break;
+
+    // Comment. An unterminated one means the rest of the document is inert to a
+    // browser but was fully visible to the old regex - the sharpest bypass.
+    if (s.startsWith("<!--", lt)) {
+      const end = s.indexOf("-->", lt + 4);
+      if (end < 0) { out.ambiguous = true; return out; }
+      i = end + 3;
+      continue;
+    }
+    if (s.startsWith("<!", lt)) { // doctype and friends
+      const end = s.indexOf(">", lt);
+      if (end < 0) { out.ambiguous = true; return out; }
+      i = end + 1;
+      continue;
+    }
+
+    const nameMatch = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)/.exec(s.slice(lt, lt + 40));
+    if (!nameMatch) { i = lt + 1; continue; }
+    const isClose = s[lt + 1] === "/";
+    const name = nameMatch[1].toLowerCase();
+
+    // Find the end of THIS tag, honouring quoted attribute values so that a
+    // `<div title="--><script>...">` cannot smuggle markup out of an attribute.
+    let j = lt + 1 + (isClose ? 1 : 0) + name.length;
+    let quote = "";
+    let tagEnd = -1;
+    while (j < s.length) {
+      const ch = s[j];
+      if (quote) {
+        if (ch === quote) quote = "";
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === ">") {
+        tagEnd = j;
+        break;
+      }
+      j++;
+    }
+    if (tagEnd < 0) { out.ambiguous = true; return out; }
+    const tagText = s.slice(lt, tagEnd + 1);
+
+    if (isClose) {
+      if (name === "noscript" && noscriptDepth > 0) noscriptDepth--;
+      i = tagEnd + 1;
+      continue;
+    }
+
+    // <template> content is inert. Nesting defeats a non-greedy match, so count.
+    if (name === "template") {
+      let depth = 1;
+      let k = tagEnd + 1;
+      const tagRe = /<(\/?)template\b/gi;
+      tagRe.lastIndex = k;
+      let m: RegExpExecArray | null;
+      while ((m = tagRe.exec(s))) {
+        depth += m[1] ? -1 : 1;
+        k = m.index + m[0].length;
+        if (depth === 0) break;
+      }
+      if (depth !== 0) { out.ambiguous = true; return out; }
+      const close = s.indexOf(">", k);
+      i = close < 0 ? s.length : close + 1;
+      continue;
+    }
+
+    if (RAW_TEXT_ELEMENTS.includes(name)) {
+      const closeRe = new RegExp("</" + name + "\\b", "i");
+      const rest = s.slice(tagEnd + 1);
+      const rel = rest.search(closeRe);
+      if (rel < 0) { out.ambiguous = true; return out; }
+      const body = rest.slice(0, rel);
+      // A <script> inside <noscript> is NOT executed by a scripting browser.
+      if (name === "script" && noscriptDepth === 0) out.scripts.push({ tag: tagText, body });
+      i = tagEnd + 1 + rel;
+      continue;
+    }
+
+    // <noscript> is TRANSPARENT for <meta>, not inert: a no-JS client honours a
+    // refresh inside it, and that is exactly where the real Substack
+    // interstitial puts its own. Its scripts, however, never run.
+    if (name === "noscript") { noscriptDepth++; i = tagEnd + 1; continue; }
+
+    if (name === "meta") out.metaTags.push(tagText);
+    i = tagEnd + 1;
+  }
+  return out;
 }
 
 /** `<meta http-equiv="refresh" content="0; url=…">` — the target, if the delay
  *  is an immediate 0. A timed refresh (`content="5;…"`) is a page that means to
  *  be READ first, so it is not a redirect. */
-function metaRefreshTarget(html: string): string | null {
-  for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
-    const tag = m[0];
+function metaRefreshTarget(metaTags: string[]): string | null {
+  for (const tag of metaTags) {
     if (!/http-equiv\s*=\s*["']?refresh["']?/i.test(tag)) continue;
     const content = tag.match(/content\s*=\s*["']([^"']*)["']/i)?.[1] ?? "";
     const [delayPart, ...rest] = content.split(";");
@@ -238,13 +355,10 @@ function isExecutableScriptTag(tag: string): boolean {
   return /^(module|text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript|text\/jscript)$/.test(t);
 }
 
-function scriptedLocationTarget(html: string): string | null {
-  // Attribute-aware tag matcher: a bare [^>]* truncates the open tag on
-  // `<script data-x="a>b">` and then reads the wrong body.
-  const scriptRe = /<script\b((?:[^>"']|"[^"]*"|'[^']*')*)>([\s\S]*?)<\/script>/gi;
-  for (const m of html.matchAll(scriptRe)) {
-    if (!isExecutableScriptTag(m[1])) continue;
-    const hit = m[2].match(LOCATION_ASSIGN_RE);
+function scriptedLocationTarget(scripts: Array<{ tag: string; body: string }>): string | null {
+  for (const sc of scripts) {
+    if (!isExecutableScriptTag(sc.tag)) continue;
+    const hit = sc.body.match(LOCATION_ASSIGN_RE);
     if (hit?.[1]) return hit[1];
   }
   return null;
@@ -261,9 +375,13 @@ function scriptedLocationTarget(html: string): string | null {
 export function interstitialTarget(html: string, baseUrl: string): string | null {
   if (html.length > INTERSTITIAL_MAX_BYTES) return null;
   if (extractTextFromHtml(html).length > INTERSTITIAL_MAX_TEXT) return null;
-  // Both matchers see the SAME document the guards judged - inert regions gone.
-  const live = stripInertRegions(html);
-  const raw = metaRefreshTarget(live) ?? scriptedLocationTarget(live);
+  // One scan, and BOTH matchers read only what it says is live.
+  const scan = scanDocument(html);
+  // Fail closed. If the document contains something the scan cannot place, we do
+  // not guess: refusing costs one wrapper that is logged and still researched,
+  // guessing costs a wrong URL entering the corpus silently.
+  if (scan.ambiguous) return null;
+  const raw = metaRefreshTarget(scan.metaTags) ?? scriptedLocationTarget(scan.scripts);
   if (!raw) return null;
   let abs: string;
   try {

@@ -323,6 +323,54 @@ Deno.test("isResearchable: a newsletter self-link is still dropped", () => {
 // Every inert context a tester drove the resolver from. All seven followed
 // before this round; metaRefreshTarget had never been narrowed at all, and it
 // runs FIRST.
+// ── 11. THE TWELVE BYPASSES (2026-09-09, third round) ────────────────────────
+// A tester drove the resolver from twelve contexts a browser would never
+// navigate the top document from. The regex that stripped inert regions was
+// closing-tag-anchored and non-greedy, so every UNTERMINATED region and every
+// NESTED template survived it, and it had never heard of <style>, <title>,
+// <noscript> or attribute values. Five of the twelve drove the REAL path:
+// unwrapRedirect followed them and gatherAnchors emitted the attacker's URL as a
+// normal candidate with unresolvedWrapper=false.
+//
+// The fix is a scanner that fails closed, not twelve more patterns - so these
+// cases exist to keep the CLASS shut, and the block after them exists to prove
+// failing closed did not close the door on real interstitials.
+const EVIL = "https://evil.example/steal";
+const bypassCases: Array<[string, string]> = [
+  ["a <script> inside <noscript>", `<html><head><noscript><script>location.replace("${EVIL}")</script></noscript></head></html>`],
+  ["an iframe srcdoc carrying a script", `<html><head><iframe srcdoc="&lt;script&gt;location.replace('${EVIL}')&lt;/script&gt;"></iframe></head></html>`],
+  ["an iframe srcdoc carrying a meta", `<html><head><iframe srcdoc="<meta http-equiv='refresh' content='0;url=${EVIL}'>"></iframe></head></html>`],
+  ["a NESTED template (script)", `<html><body><template><template><script>location.replace("${EVIL}")</script></template></template></body></html>`],
+  ["a NESTED template (meta)", `<html><body><template><template><meta http-equiv="refresh" content="0;url=${EVIL}"></template></template></body></html>`],
+  ["an UNCLOSED comment (script)", `<html><body><!-- <script>location.replace("${EVIL}")</script></body></html>`],
+  ["an UNCLOSED comment (meta)", `<html><body><!-- <meta http-equiv="refresh" content="0;url=${EVIL}"></body></html>`],
+  ["an UNCLOSED textarea", `<html><body><textarea><script>location.replace("${EVIL}")</script></body></html>`],
+  ["an UNCLOSED template", `<html><body><template><meta http-equiv="refresh" content="0;url=${EVIL}"></body></html>`],
+  ["a <script> inside <title>", `<html><head><title><script>location.replace("${EVIL}")</script></title></head></html>`],
+  ["a <meta refresh> inside <style>", `<html><head><style><meta http-equiv="refresh" content="0;url=${EVIL}"></style></head></html>`],
+  ["a <script> inside an ATTRIBUTE VALUE", `<html><body><div title="--><script>location.replace('${EVIL}')</script>"></div></body></html>`],
+];
+for (const [label, doc] of bypassCases) {
+  Deno.test(`a browser would not navigate from this: ${label}`, () => {
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null, label);
+  });
+}
+
+// Failing closed must not close the door on the real thing. Every shape here
+// resolved before the scanner and must still resolve after it - the Substack
+// <noscript> meta above all, since that is the document this item exists for.
+const mustStillResolve: Array<[string, string]> = [
+  ["the real substack <noscript> meta", `<head><noscript><META http-equiv="refresh" content="0;URL=https://good.example/post"></noscript><title>t</title></head><script>window.opener = null; location.replace("https://good.example/post")</script>`],
+  ["a plain head meta", `<html><head><meta http-equiv="refresh" content="0;url=https://good.example/post"></head></html>`],
+  ["type=module", `<html><head><script type="module">location.replace("https://good.example/post")</script></head></html>`],
+  ["type=MODULE, upper case", `<html><head><script type="MODULE">location.replace("https://good.example/post")</script></head></html>`],
+];
+for (const [label, doc] of mustStillResolve) {
+  Deno.test(`failing closed did not break: ${label}`, () => {
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/post", label);
+  });
+}
+
 const inertCases: Array<[string, string]> = [
   ["an HTML comment (meta)", `<!-- <meta http-equiv="refresh" content="0;url=https://evil.example/x"> -->`],
   ["an HTML comment (script)", `<!-- <script>location.replace("https://evil.example/x")</script> -->`],
