@@ -24,7 +24,10 @@ const UA =
 /** A fetched page shorter than this (after extraction) is treated as a stub. */
 const MIN_ARTICLE_CHARS = 400;
 
-function decodeEntities(s: string): string {
+/** Decode the HTML entities that show up in text and in attribute-encoded URLs
+ *  (`&#38;` / `&amp;` inside a meta-refresh target, for one). Exported because
+ *  links.ts needs the same decoding for interstitial redirect targets. */
+export function decodeEntities(s: string): string {
   return s
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")

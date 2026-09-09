@@ -13,6 +13,7 @@
 
 import { LinkCandidate } from "./types.ts";
 import { proxiedFetch } from "./egress.ts";
+import { decodeEntities, extractTextFromHtml } from "./extract.ts";
 
 // Bare URLs as they appear inline in plain-text newsletters. Trailing
 // punctuation (".,)]" and quotes) is trimmed off by `tidyUrl`.
@@ -136,11 +137,127 @@ export function classifyLink(url: string): string | undefined {
   return undefined;
 }
 
+// ── 200-that-is-really-a-redirect ────────────────────────────────────────────
+//
+// Publishers increasingly answer a tracker URL with a tiny HTML SHELL that
+// bounces the browser on (a zero-delay <meta http-equiv="refresh"> in a
+// <noscript>, plus a `location.replace(...)`) instead of sending a 302.
+// Substack switched its /redirect/<uuid> endpoint to this shape around
+// 2026-09-06, and because unwrapRedirect() only followed a `Location` header
+// every wrapper "resolved" to substack.com and was then dropped by
+// link-enrich's newsletter-self-link filter: the daily digest researched ZERO
+// external articles for three days while every log line stayed green.
+//
+// Honouring the meta-refresh form is not a heuristic — a zero-delay refresh IS
+// the HTML spec's client-side redirect. The scripted form is honoured only in a
+// document that is a SHELL, so an ordinary article that happens to contain the
+// string `location.replace` is never treated as a redirect. Nothing here knows
+// about Substack; the next publisher to do this is handled by the same code.
+
+/** A redirect shell is ~1–2KB. Bigger than this is not a shell, and the body is
+ *  never buffered past it (see readHtmlPrefix). */
+const INTERSTITIAL_MAX_BYTES = 16_384;
+/** Visible text in a shell is a stray "Redirecting…" at most. An article has more. */
+const INTERSTITIAL_MAX_TEXT = 200;
+
+/** `<meta http-equiv="refresh" content="0; url=…">` — the target, if the delay
+ *  is an immediate 0. A timed refresh (`content="5;…"`) is a page that means to
+ *  be READ first, so it is not a redirect. */
+function metaRefreshTarget(html: string): string | null {
+  for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = m[0];
+    if (!/http-equiv\s*=\s*["']?refresh["']?/i.test(tag)) continue;
+    const content = tag.match(/content\s*=\s*["']([^"']*)["']/i)?.[1] ?? "";
+    const [delayPart, ...rest] = content.split(";");
+    const delay = Number(delayPart.trim());
+    if (!Number.isFinite(delay) || delay !== 0) continue;
+    const target = rest.join(";").replace(/^\s*url\s*=\s*/i, "").trim()
+      .replace(/^["']|["']$/g, "");
+    if (target) return target;
+  }
+  return null;
+}
+
+/** `location.replace("…")` / `location.assign("…")` / `location.href = "…"`. */
+function scriptedLocationTarget(html: string): string | null {
+  const m = html.match(
+    /\blocation\s*(?:\.\s*(?:replace|assign)\s*\(\s*|\.\s*href\s*=\s*|\s*=\s*)["']([^"']+)["']/i,
+  );
+  return m?.[1] ?? null;
+}
+
+/**
+ * The destination a redirect SHELL points at, or null when this document is not
+ * one. Two independent conditions have to hold before any target is honoured —
+ * the document is small AND it has no visible text — so a real article is never
+ * mistaken for a redirect no matter what its scripts contain.
+ *
+ * Exported for tests: the parsing is the part worth pinning down.
+ */
+export function interstitialTarget(html: string, baseUrl: string): string | null {
+  if (html.length > INTERSTITIAL_MAX_BYTES) return null;
+  if (extractTextFromHtml(html).length > INTERSTITIAL_MAX_TEXT) return null;
+  const raw = metaRefreshTarget(html) ?? scriptedLocationTarget(html);
+  if (!raw) return null;
+  let abs: string;
+  try {
+    abs = new URL(decodeEntities(raw).trim(), baseUrl).toString();
+  } catch {
+    return null;
+  }
+  if (!/^https?:\/\//i.test(abs)) return null;
+  // A page that refreshes to itself is a loop, not a hop — report "arrived".
+  if (abs.split("#")[0] === baseUrl.split("#")[0]) return null;
+  return abs;
+}
+
+/**
+ * Read at most `maxBytes` of an HTML response and return it; null when the body
+ * is not HTML or is too big to be a redirect shell. Bounded on purpose: this
+ * runs on every tracker URL, and an article page must never be buffered whole
+ * just to find out it is not a redirect.
+ */
+async function readHtmlPrefix(res: Response, maxBytes: number): Promise<string | null> {
+  const ct = res.headers.get("content-type") ?? "";
+  if (ct && !/text\/html|application\/xhtml\+xml/i.test(ct)) {
+    await res.body?.cancel().catch(() => {});
+    return null;
+  }
+  const body = res.body;
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total <= maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+      }
+    }
+  } catch {
+    return null; // truncated/failed read → treat as "not a shell", never throw
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  if (total > maxBytes) return null; // too big to be a shell; stopped reading
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder().decode(buf);
+}
+
 /**
  * Resolve a tracker/redirect URL to its final destination. Follows redirects
  * with a hop cap and a short timeout; falls back to the input on any failure
- * (never throws). Uses GET (many trackers 405 on HEAD) but we don't read the
- * body — we only want the final URL.
+ * (never throws). Uses GET (many trackers 405 on HEAD). A 3xx is followed by
+ * its `Location`; a 2xx is read (bounded) and followed only when it is a
+ * redirect shell — both count as a hop against `maxHops`.
  */
 export async function unwrapRedirect(
   url: string,
@@ -169,9 +286,17 @@ export async function unwrapRedirect(
         current = new URL(loc, current).toString();
         continue;
       }
-      res.body?.cancel().catch(() => {});
-      // The browser/Deno may have already resolved to res.url on a final hop.
-      return res.url && res.url !== "" ? res.url : current;
+      // Not a 3xx. The browser/Deno may have already resolved to res.url on a
+      // final hop. Before calling it arrived, check whether this 200 is really
+      // a redirect shell (meta-refresh / location.replace) and take that hop.
+      const landed = res.url && res.url !== "" ? res.url : current;
+      const html = await readHtmlPrefix(res, INTERSTITIAL_MAX_BYTES);
+      const target = html === null ? null : interstitialTarget(html, landed);
+      if (target) {
+        current = target;
+        continue;
+      }
+      return landed;
     } catch {
       return current; // network/timeout → use what we have
     }
@@ -219,17 +344,28 @@ export async function gatherAnchors(
     // Resolve to the real destination so POI/hygiene see a real URL. Substack
     // base64 decodes for free; cap the NETWORK unwraps for opaque wrappers.
     let url = decodeSubstackRedirect(raw) ?? raw;
+    let unresolvedWrapper = false;
     if (url === raw && isRedirectWrapper(raw)) {
       if (unwraps >= maxUnwrap) continue; // out of unwrap budget → skip opaque wrapper
       unwraps++;
       url = await unwrapRedirect(raw, { timeoutMs: opts.unwrapTimeoutMs });
+      // The unwrap was ATTEMPTED and the URL did not move: the destination is
+      // unknown. Only a candidate that went through this branch can be marked,
+      // so a real destination that merely LOOKS wrapper-ish is never flagged.
+      unresolvedWrapper = url === raw;
     }
 
     if (classifyLink(url)) continue; // noise on the RESOLVED url (catches substack meta)
     const key = url.split("#")[0];
     if (seen.has(key)) continue;
     seen.add(key);
-    kept.push({ rawUrl: a.url, url, domain: hostOf(url), text: a.text?.replace(/\s+/g, " ").trim().slice(0, 160) });
+    kept.push({
+      rawUrl: a.url,
+      url,
+      domain: hostOf(url),
+      text: a.text?.replace(/\s+/g, " ").trim().slice(0, 160),
+      ...(unresolvedWrapper ? { unresolvedWrapper: true } : {}),
+    });
     if (kept.length >= max) break;
   }
   return kept;

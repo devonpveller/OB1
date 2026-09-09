@@ -370,8 +370,22 @@ async function main() {
         const seen = new Set(anchored.map((a) => a.url));
         raw = [...anchored, ...extractUrls(html).filter((u) => !seen.has(u)).map((u) => ({ url: u, text: "" }))];
       }
-      external = (await gatherAnchors(raw, { maxRaw: 80 }))
-        .filter((c) => c.domain && !c.domain.endsWith("substack.com"));
+      const gathered = await gatherAnchors(raw, { maxRaw: 80 });
+      // A wrapper we could not resolve is NOT the same thing as a newsletter
+      // self-link, and until 2026-09-09 both vanished through the same
+      // `endsWith("substack.com")` drop. When Substack swapped its 302 for a
+      // JS interstitial, that silence cost three days of external research with
+      // every log line green. Say it out loud instead.
+      for (const c of gathered) {
+        if (c.unresolvedWrapper) {
+          console.log(
+            `      ⚠ unresolved redirect wrapper [${c.domain || "?"}] ${c.url.slice(0, 80)} — destination unknown, not researched`,
+          );
+        }
+      }
+      external = gathered.filter((c) =>
+        c.domain && !c.unresolvedWrapper && !c.domain.endsWith("substack.com")
+      );
     }
     // Promo filter (blocklist → nothink): drop ad/sponsor links before POI so
     // they never become sources/claims. Domains judged promo are remembered.

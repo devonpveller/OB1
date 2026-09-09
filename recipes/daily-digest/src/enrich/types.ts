@@ -32,6 +32,12 @@ export interface LinkCandidate {
   text?: string;
   /** Why a candidate was dropped before fetch (kept = undefined). */
   dropped?: string;
+  /** Set when this IS a tracker wrapper whose unwrap was ATTEMPTED and did not
+   *  move the URL — the destination is unknown. Distinguishes "we could not
+   *  resolve this" from "this resolved to the newsletter's own site", which
+   *  looked identical until 2026-09-09 and let a resolver regression hide as a
+   *  self-link drop for three days. */
+  unresolvedWrapper?: boolean;
 }
 
 /** Result of fetching + extracting one article. */
