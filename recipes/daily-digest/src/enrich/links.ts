@@ -190,11 +190,36 @@ export function isPubliclyRoutableUrl(url: string): boolean {
     return false;
   }
   if (!host) return false;
+  // A TRAILING DOT is the fully-qualified form of the SAME name, and it defeated
+  // every check below (found in test 2026-09-09, round 4):
+  // `http://openbrain-curator.:8000/` satisfied `host.includes(".")` and slipped
+  // past the exact/suffix tests, and `http://localhost.:PORT/` was not merely
+  // allowed - it CONNECTED to a live loopback listener. Normalise first, then
+  // decide. Strip every trailing dot, not just one.
+  host = host.replace(/\.+$/, "");
+  if (!host) return false;
   // IPv6 literal. `new URL("http://[::1]/").hostname` KEEPS the brackets - an
   // earlier revision of this comment said it strips them, and the bracketed form
   // sailed through every check below until a test caught it. Strip them here.
   if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
   if (host.includes(":")) {
+    // IPv4-MAPPED IPv6 (`::ffff:127.0.0.1`) carries a v4 address inside a v6
+    // literal, and `::ffff:0:0/96` was absent from the deny set below.
+    // TWO SPELLINGS, and the second is the one that matters: the WHATWG URL
+    // parser NORMALISES `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`, so a
+    // dotted-form check alone never fires on a real URL. Measured 2026-09-09
+    // after a first attempt matched only the dotted form and still leaked.
+    // Re-check the embedded v4 address on its own terms rather than trying to
+    // enumerate v6 spellings.
+    const mappedDotted = /^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(host);
+    if (mappedDotted) return isPubliclyRoutableUrl("http://" + mappedDotted[1] + "/");
+    const mappedHex = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(host);
+    if (mappedHex) {
+      const hi = parseInt(mappedHex[1], 16);
+      const lo = parseInt(mappedHex[2], 16);
+      const v4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+      return isPubliclyRoutableUrl("http://" + v4 + "/");
+    }
     if (host === "::1" || host === "::") return false;
     if (/^f[cd][0-9a-f]{2}:/.test(host)) return false; // fc00::/7 unique-local
     if (/^fe[89ab][0-9a-f]:/.test(host)) return false; // fe80::/10 link-local
@@ -304,6 +329,8 @@ const INTERSTITIAL_MAX_TEXT = 200;
 interface DocScan {
   metaTags: string[];
   scripts: Array<{ tag: string; body: string }>;
+  /** Text the scan considers LIVE - what the shell guard must measure. */
+  liveText: string;
   ambiguous: boolean;
 }
 
@@ -311,14 +338,39 @@ interface DocScan {
 // be a live <meta>, and (except for script itself) can never be live JS either.
 const RAW_TEXT_ELEMENTS = ["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes"];
 
+/** `<plaintext>` is TERMINAL: the tokenizer never leaves that state, so nothing
+ *  after it is markup, ever. The regex version handled this and the scanner that
+ *  replaced it dropped it - a regression found in test 2026-09-09, round 4. */
+const TERMINAL_ELEMENTS = ["plaintext"];
+
+/** Foreign content and content models where a `<meta>` is not a document-level
+ *  meta and a `<script>` does not run as one: `<math>` is not on the HTML
+ *  breakout list, and `<select>` only admits option/optgroup. Both were used to
+ *  steer the resolver. Their whole subtree is skipped. */
+const INERT_SUBTREE_ELEMENTS = ["math", "select", "svg"];
+
 function scanDocument(html: string): DocScan {
-  const out: DocScan = { metaTags: [], scripts: [], ambiguous: false };
+  const out: DocScan = { metaTags: [], scripts: [], liveText: "", ambiguous: false };
   const s = String(html || "");
   let i = 0;
   let noscriptDepth = 0;
+  // Text found in the regions the scan calls LIVE, accumulated as it goes.
+  // THE POINT (found in test 2026-09-09, round 4): the shell guard used to call
+  // extractTextFromHtml on the RAW document, which erases <svg>, <nav>,
+  // <header>, <footer>, <aside> and <form> before counting - so a <nav>-wrapped
+  // meta refresh read as "no visible text" to the guard and as a live redirect
+  // to the matcher. That is the same guard/matcher disagreement this scanner was
+  // written to end for comments, still open for six more elements. Measuring the
+  // text HERE, from the same walk that decides what is live, makes the two
+  // incapable of disagreeing rather than merely agreeing today.
+  const liveChunks: string[] = [];
+  const pushText = (from: number, to: number) => {
+    if (to > from) liveChunks.push(s.slice(from, to));
+  };
   while (i < s.length) {
     const lt = s.indexOf("<", i);
-    if (lt < 0) break;
+    if (lt < 0) { pushText(i, s.length); break; }
+    pushText(i, lt);
 
     // Comment. An unterminated one means the rest of the document is inert to a
     // browser but was fully visible to the old regex - the sharpest bypass.
@@ -336,7 +388,18 @@ function scanDocument(html: string): DocScan {
     }
 
     const nameMatch = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)/.exec(s.slice(lt, lt + 40));
-    if (!nameMatch) { i = lt + 1; continue; }
+    if (!nameMatch) {
+      // A BOGUS COMMENT (found in test 2026-09-09, round 4). `<?foo`, `</3`,
+      // `<%` and friends put the tokenizer in the bogus-comment state, which
+      // runs to the NEXT `>` and is not markup. Skipping only this `<` walked
+      // straight INTO it, so `<?foo <meta http-equiv=refresh ...> ?>` had its
+      // meta read as live - the `>` that ends the bogus comment is the meta's
+      // own. Consume to the first `>`, exactly as a browser does.
+      const bogusEnd = s.indexOf(">", lt);
+      if (bogusEnd < 0) { out.ambiguous = true; return out; }
+      i = bogusEnd + 1;
+      continue;
+    }
     const isClose = s[lt + 1] === "/";
     const name = nameMatch[1].toLowerCase();
 
@@ -363,6 +426,27 @@ function scanDocument(html: string): DocScan {
     if (isClose) {
       if (name === "noscript" && noscriptDepth > 0) noscriptDepth--;
       i = tagEnd + 1;
+      continue;
+    }
+
+    if (TERMINAL_ELEMENTS.includes(name)) return out; // nothing after is markup
+
+    // A subtree whose content cannot be a live meta or an executing script.
+    // Counted like <template> so nesting cannot walk out of it.
+    if (INERT_SUBTREE_ELEMENTS.includes(name)) {
+      let depth = 1;
+      let k = tagEnd + 1;
+      const subRe = new RegExp("<(/?)" + name + "\\b", "gi");
+      subRe.lastIndex = k;
+      let sm: RegExpExecArray | null;
+      while ((sm = subRe.exec(s))) {
+        depth += sm[1] ? -1 : 1;
+        k = sm.index + sm[0].length;
+        if (depth === 0) break;
+      }
+      if (depth !== 0) { out.ambiguous = true; return out; }
+      const subClose = s.indexOf(">", k);
+      i = subClose < 0 ? s.length : subClose + 1;
       continue;
     }
 
@@ -404,6 +488,7 @@ function scanDocument(html: string): DocScan {
     if (name === "meta") out.metaTags.push(tagText);
     i = tagEnd + 1;
   }
+  out.liveText = decodeEntities(liveChunks.join(" ")).replace(/\s+/g, " ").trim();
   return out;
 }
 
@@ -478,9 +563,12 @@ function scriptedLocationTarget(scripts: Array<{ tag: string; body: string }>): 
  */
 export function interstitialTarget(html: string, baseUrl: string): string | null {
   if (html.length > INTERSTITIAL_MAX_BYTES) return null;
-  if (extractTextFromHtml(html).length > INTERSTITIAL_MAX_TEXT) return null;
-  // One scan, and BOTH matchers read only what it says is live.
+  // One scan, and the guard and BOTH matchers read what IT says is live. The
+  // guard used to call extractTextFromHtml on the raw document, which erases a
+  // different set of elements than the scan does - so the two could disagree
+  // about what the document contained, and did, for six of them.
   const scan = scanDocument(html);
+  if (scan.liveText.length > INTERSTITIAL_MAX_TEXT) return null;
   // Fail closed. If the document contains something the scan cannot place, we do
   // not guess: refusing costs one wrapper that is logged and still researched,
   // guessing costs a wrong URL entering the corpus silently.

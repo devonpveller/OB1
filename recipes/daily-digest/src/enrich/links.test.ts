@@ -335,6 +335,75 @@ Deno.test("isResearchable: a newsletter self-link is still dropped", () => {
 // Every inert context a tester drove the resolver from. All seven followed
 // before this round; metaRefreshTarget had never been narrowed at all, and it
 // runs FIRST.
+// ── 13. ROUND 4 (2026-09-09) ─────────────────────────────────────────────────
+// Round 4 closed the twelve, then found four more scanner bypasses, a
+// one-character defeat of the host screen, and the guard/matcher disagreement
+// still open for six elements.
+
+const R4_EVIL = "https://evil.example/pwn";
+const r4Bypasses: Array<[string, string]> = [
+  // <plaintext> is TERMINAL - nothing after it is ever markup. The regex version
+  // handled it; the scanner that replaced it dropped it. A regression, not a gap.
+  ["<plaintext> then a script", `<html><body><plaintext><script>location.replace("${R4_EVIL}")</script></body></html>`],
+  ["<plaintext> then a meta", `<html><body><plaintext><meta http-equiv="refresh" content="0;url=${R4_EVIL}"></body></html>`],
+  // A BOGUS COMMENT runs to the next `>` - which is the meta's OWN `>`, so
+  // skipping one character walked straight into it.
+  ["a bogus comment <?foo swallowing a meta", `<html><body><?foo <meta http-equiv="refresh" content="0;url=${R4_EVIL}"> ?></body></html>`],
+  ["a bogus comment </3 swallowing a meta", `<html><body></3 <meta http-equiv="refresh" content="0;url=${R4_EVIL}"> ></body></html>`],
+  ["<math><script> (not on the foreign-content breakout list)", `<html><body><math><script>location.replace("${R4_EVIL}")</script></math></body></html>`],
+  ["<meta> inside <select>", `<html><body><select><meta http-equiv="refresh" content="0;url=${R4_EVIL}"></select></body></html>`],
+  ["<svg><script>", `<html><body><svg><script>location.replace("${R4_EVIL}")</script></svg></body></html>`],
+];
+for (const [label, doc] of r4Bypasses) {
+  Deno.test(`round 4 bypass stays shut: ${label}`, () => {
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null, label);
+  });
+}
+
+// THE GUARD AND THE MATCHER MUST MEASURE THE SAME DOCUMENT. extractTextFromHtml
+// erases <nav>/<header>/<footer>/<aside>/<form>/<svg> before counting, so a
+// document whose only text lived in one of them read as "no visible text" to the
+// guard while the matcher saw a live redirect - the same disagreement the
+// scanner closed for comments, still open for six elements. liveText now comes
+// from the same walk that decides what is live, so they cannot disagree.
+for (const el of ["nav", "header", "footer", "aside", "form"]) {
+  Deno.test(`text inside <${el}> counts against the shell guard`, () => {
+    const prose = "Real readable prose that makes this a document, not a shell. ".repeat(6);
+    const doc = `<html><body><${el}>${prose}<meta http-equiv="refresh" content="0;url=${R4_EVIL}"></${el}></body></html>`;
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+  });
+}
+
+Deno.test("the same shape with NO text still resolves", () => {
+  // Non-vacuity for the five cases above: they must fail on the TEXT, not
+  // because a <nav>-wrapped meta is refused outright. A meta there IS live.
+  const doc = `<html><body><nav><meta http-equiv="refresh" content="0;url=https://good.example/p"></nav></body></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/p");
+});
+
+Deno.test("a trailing dot does not defeat the host screen", () => {
+  // ONE CHARACTER defeated every check: the root label satisfies
+  // `host.includes(".")` and breaks the exact/suffix tests. `http://localhost.:PORT/`
+  // was not merely allowed - a tester CONNECTED to a live loopback listener.
+  for (const u of ["http://openbrain-curator.:8000/ingest", "http://localhost.:8080/", "http://localhost../", "http://127.0.0.1./"]) {
+    assertEquals(isPubliclyRoutableUrl(u), false, `must be refused: ${u}`);
+  }
+  // A trailing dot on a PUBLIC name is still fine - the fix normalises, it does
+  // not blanket-refuse.
+  assertEquals(isPubliclyRoutableUrl("https://example.com./x"), true);
+});
+
+Deno.test("IPv4-mapped IPv6 is screened in BOTH spellings", () => {
+  // The WHATWG parser normalises `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`, so a
+  // dotted-form check alone never fires on a real URL - a first fix did exactly
+  // that and still leaked.
+  for (const u of ["http://[::ffff:127.0.0.1]/", "http://[::ffff:10.0.0.1]/", "http://[::ffff:192.168.1.1]/", "http://[::ffff:7f00:1]/"]) {
+    assertEquals(isPubliclyRoutableUrl(u), false, `must be refused: ${u}`);
+  }
+  assertEquals(isPubliclyRoutableUrl("http://[::ffff:8.8.8.8]/"), true, "a mapped PUBLIC v4 is still allowed");
+  assertEquals(isPubliclyRoutableUrl("https://[2606:4700::1111]/"), true, "an ordinary public v6 is allowed");
+});
+
 // ── 11. THE TWELVE BYPASSES (2026-09-09, third round) ────────────────────────
 // A tester drove the resolver from twelve contexts a browser would never
 // navigate the top document from. The regex that stripped inert regions was
