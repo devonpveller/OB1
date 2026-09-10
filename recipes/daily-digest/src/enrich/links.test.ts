@@ -223,62 +223,39 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 // before the reader hung up? Bounded, that is the transport's readahead.
 // Unbounded, it is the entire body.
 //
-// THE NUMBERS. Readahead is ABSOLUTE, not proportional to the body - the same
-// figures whether the body is 16 MiB or 64 MiB - so the margin is bought by
-// making the BODY large rather than the threshold generous.
+// THE MARGIN, and only what this case actually executes. Measured under
+// `deno test` at CHUNK = 64 KiB, sampled where the assertion samples:
 //
-// EVERY FIGURE BELOW WAS MEASURED UNDER `deno test`, which is the only harness
-// whose numbers describe this case. That sentence exists because two earlier
-// versions of this table were measured with `deno run` and then used to state
-// what the CASE does; the two differ by exactly 4/3, deterministically, same
-// commit and same machine. It made the 512 KiB row say the opposite of the
-// truth. If you re-measure, measure inside a test.
+//   bounded    2.25 MiB    the transport's readahead
+//   threshold 16.00 MiB    BODY_BYTES / 4
+//   unbounded 64.00 MiB    the whole body
 //
-//   bounded, at this chunk size     2.25 MiB   7.1x below the threshold
-//   threshold (BODY / 4)           16.00 MiB
-//   unbounded                      64.00 MiB   4x above the threshold
+// THE MECHANISM, which is what makes the threshold safe to reason about:
+// readahead is a fixed number of READ CHUNKS - 36 of them here - not a fixed
+// number of bytes. So it scales with CHUNK, and the margin is bought by making
+// BODY large rather than the threshold generous. `assertChunkDiscriminates`
+// below turns that into a check, because the real risk is someone raising CHUNK
+// until a byte count stops telling bounded from unbounded.
 //
-// CHUNK is pinned deliberately rather than left to a default. Under `deno test`,
-// against CORRECT code, three runs each, all deterministic:
-//
-//    64 KiB    2.25 MiB   shipped; passes with 7.1x of room
-//   512 KiB   18.00 MiB   FAILS - already over the threshold
-//     1 MiB   36.00 MiB   FAILS
-//     2 MiB   64.00 MiB   the whole body: at and above this, a byte count
-//                         stops discriminating at all
-//
-// So the usable range is narrower than two earlier versions of this comment
-// claimed - it ends between 64 and 512 KiB, not at 1 MiB - and the failure at
-// 512 KiB is a CORRECT implementation being called wrong. Round 19 caught that;
-// round 18 caught the version before it, which had the whole-body point four
-// chunk sizes too high and denied that a byte count discriminates below it.
-//
-// TWO INDEPENDENT VARIABLES MOVE THESE FIGURES, and collapsing them into one is
-// how the last three explanations went wrong:
-//
-//   HARNESS      `deno run` vs `deno test`, roughly 4/3, wherever the body
-//                ceiling does not bind (at 2 MiB chunks both read 64.00, so
-//                "exactly 4/3" has a counterexample in this table's own row)
-//   SAMPLE POINT before vs after `srv.shutdown()`. Measured under `deno test`:
-//                2.25 -> 2.38 at 64 KiB, 18.00 -> 19.00 at 512 KiB, and
-//                36.00 -> 57-58 at 1 MiB, which is +59% and NOT deterministic.
-//
-// This case reads `written` BEFORE the shutdown, deliberately: that is the
-// figure with the tighter spread, and the one that describes what the read
-// stopped at rather than what drained afterwards.
-//
-// Round 20 established this, correcting round 19's claim - written into the
-// previous version of this comment - that the harness explained the whole
-// spread. It does not: 43.00 vs 27.00 is not 4/3 of anything, it is the same
-// harness sampled at the two different points.
-//
-// The history is left here on purpose. This margin has now been stated wrongly
-// FOUR times, in four different ways, by someone with the measurements open -
-// which is the argument for keeping CHUNK where it is measured and for treating
-// any change to it as requiring the whole table again.
+// This comment used to carry a table of ~20 measurement cells - two harnesses,
+// five chunk sizes, two sample points - while this case executes exactly ONE of
+// them. Five consecutive test rounds found a different uninhabited cell wrong,
+// and each correction added a paragraph, so the claim surface grew every round.
+// The cell the case runs has never been wrong. `git log -- links.test.ts` has
+// the history and, unlike a comment, cannot go stale.
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
   const BODY_BYTES = 64 * 1024 * 1024;
   const CHUNK = 64 * 1024;
+  // Readahead is ~36 chunks (measured). Refuse to run at a CHUNK where that
+  // would reach the threshold, instead of failing later with a byte count that
+  // looks like a code defect and is not.
+  const READAHEAD_CHUNKS = 36;
+  assert(
+    READAHEAD_CHUNKS * CHUNK * 2 < BODY_BYTES / 4,
+    `CHUNK=${CHUNK} is too large for BODY=${BODY_BYTES}: readahead is about ` +
+      `${READAHEAD_CHUNKS} chunks, which leaves no room under the threshold. ` +
+      `Lower CHUNK or raise BODY_BYTES - do not raise the threshold.`,
+  );
   const chunk = new Uint8Array(CHUNK).fill(0x78); // "x"
   let written = 0;
   const srv = Deno.serve({ port: 0, onListen: () => {} }, () => {
