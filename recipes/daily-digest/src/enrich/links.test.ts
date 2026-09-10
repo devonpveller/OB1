@@ -447,7 +447,7 @@ Deno.test("isResearchable: a newsletter self-link is still dropped", () => {
   assertEquals(isResearchable({ rawUrl: "x", url: "not a url", domain: "" }), false);
 });
 
-// Every inert context a tester drove the resolver from. All seven followed
+// Every inert context a tester drove the resolver from. All followed
 // before this round; metaRefreshTarget had never been narrowed at all, and it
 // runs FIRST.
 // ── 15. ROUND 6 (2026-09-10) ─────────────────────────────────────────────────
