@@ -13,7 +13,7 @@
 
 import { LinkCandidate } from "./types.ts";
 import { proxiedFetch } from "./egress.ts";
-import { decodeEntities, extractTextFromHtml } from "./extract.ts";
+import { decodeEntities } from "./extract.ts";
 
 // Bare URLs as they appear inline in plain-text newsletters. Trailing
 // punctuation (".,)]" and quotes) is trimmed off by `tidyUrl`.
@@ -167,18 +167,36 @@ export function classifyLink(url: string): string | undefined {
  * lifts a STRING out of a script body, and nothing evals it - there is no eval,
  * no `new Function`, no DOM, no headless browser anywhere in this path.
  *
- * What IS a risk is where that string points. Probed live 2026-09-09 through the
- * real egress (`FETCH_PROXY_URL=http://vpn:8888`): internal targets
- * (`openbrain-curator:8000`, `llama-cpp:8080`, `openbrain-db:5432`, `127.0.0.1`)
- * all came back 500 from the proxy while public URLs resolved normally - so the
- * Mullvad tunnel is ALREADY an SSRF boundary. But that is a property of the
- * network configuration, not a statement the code makes: `egress.ts` documents
- * `FETCH_PROXY_URL=""` as a supported opt-out to direct fetching, and on that
- * setting this container resolves `llm-net` and `app-net` names itself.
+ * What IS a risk is where that string points. Probed live through the real
+ * egress (`FETCH_PROXY_URL=http://vpn:8888`), re-measured 2026-09-10 and again
+ * by a second tester: `openbrain-curator:8000` and `llama-cpp:8080` come back
+ * 500 from the proxy, i.e. refused - but `127.0.0.1:8000` comes back **404**,
+ * which is NOT a refusal. It is search-vpn's own gluetun control server
+ * answering on `:::8000`: the proxy connected to its own loopback and the
+ * request got through. THE SIGN MATTERS, and an earlier version of this comment
+ * had it backwards (it claimed 500 for all four, and this item failed a test
+ * round on that figure in the findings note while the same figure stayed wrong
+ * here - the note was corrected, the code was not).
+ *
+ * So the tunnel is a PARTIAL boundary, not a complete one, and it is a property
+ * of the network configuration rather than a statement the code makes:
+ * `egress.ts` documents `FETCH_PROXY_URL=""` as a supported opt-out to direct
+ * fetching, and on that setting this container resolves `llm-net` and `app-net`
+ * names itself.
  *
  * So this is defence in depth, and it makes the property an assertion instead of
  * an accident. Deny-by-shape, not by list: anything that is not a public,
  * dotted, non-private host is refused.
+ *
+ * WHAT THIS SCREEN CANNOT DO, stated here because the audience for it reads the
+ * code and not the findings note: it is TEXTUAL. It judges the hostname as
+ * written, so a PUBLIC name that RESOLVES to a private address - `localtest.me`,
+ * `127.0.0.1.nip.io`, or any attacker-controlled DNS record - passes it. Closing
+ * that needs a check at connect time (resolve, then screen the address, and
+ * refuse a rebind between the two), which is a property of the fetch layer, not
+ * of a function that is handed a string. Do not read this screen as "SSRF is
+ * handled"; read it as "the obvious shapes are refused, and the proxy is the
+ * boundary that matters".
  */
 export function isPubliclyRoutableUrl(url: string): boolean {
   let host: string;
@@ -669,6 +687,12 @@ async function readHtmlPrefix(res: Response, maxBytes: number): Promise<string |
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
+    // The bound is a CEILING ON WHAT IS KEPT, and the loop can overshoot it by
+    // at most ONE read chunk before it stops: the length is tested after the
+    // chunk arrives, because a stream does not let you ask for a partial one.
+    // So peak memory is maxBytes + one chunk, and anything over maxBytes is
+    // discarded whole below rather than parsed. Worth stating precisely - the
+    // comment on INTERSTITIAL_MAX_BYTES reads as though the cut is exact.
     while (total <= maxBytes) {
       const { done, value } = await reader.read();
       if (done) break;
