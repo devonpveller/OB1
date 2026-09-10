@@ -223,38 +223,51 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 // before the reader hung up? Bounded, that is the transport's readahead.
 // Unbounded, it is the entire body.
 //
-// THE MARGIN, and only what this case actually executes. Measured under
-// `deno test` at CHUNK = 64 KiB, sampled where the assertion samples:
+// THE MARGIN, measured for the ONE configuration this case runs: `deno test`,
+// CHUNK = 64 KiB, sampled where the assertion samples (before the server's
+// shutdown).
 //
 //   bounded    2.25 MiB    the transport's readahead
 //   threshold 16.00 MiB    BODY_BYTES / 4
 //   unbounded 64.00 MiB    the whole body
 //
-// THE MECHANISM, which is what makes the threshold safe to reason about:
-// readahead is a fixed number of READ CHUNKS - 36 of them here - not a fixed
-// number of bytes. So it scales with CHUNK, and the margin is bought by making
-// BODY large rather than the threshold generous. `assertChunkDiscriminates`
-// below turns that into a check, because the real risk is someone raising CHUNK
-// until a byte count stops telling bounded from unbounded.
+// AND NO RULE FOR OTHER CONFIGURATIONS, because there isn't a simple one and
+// two attempts to state one were both false. Bytes read before the reader stops,
+// by chunk size, deterministic 3/3 each:
 //
-// This comment used to carry a table of ~20 measurement cells - two harnesses,
-// five chunk sizes, two sample points - while this case executes exactly ONE of
-// them. Five consecutive test rounds found a different uninhabited cell wrong,
-// and each correction added a paragraph, so the claim surface grew every round.
-// The cell the case runs has never been wrong. `git log -- links.test.ts` has
-// the history and, unlike a comment, cannot go stale.
+//   4 KiB  340 chunks  1.33 MiB      48 KiB   54 chunks  2.53 MiB
+//   8 KiB  170 chunks  1.33 MiB      64 KiB   36 chunks  2.25 MiB
+//  16 KiB   90 chunks  1.41 MiB     512 KiB   36 chunks 18.00 MiB
+//  32 KiB   54 chunks  1.69 MiB
+//
+// It is neither a fixed byte count (it moves 1.33 -> 18.00) nor a fixed chunk
+// count (340, 170, 90, 54, 54, 36, 36), and 48 KiB breaks the obvious
+// max(36 x CHUNK, ~1.7 MiB) fit that covers every other row. So the case pins
+// CHUNK instead of modelling the transport: the assertion below refuses any
+// other value and says to re-measure. That is the whole of what is claimed here,
+// and all of it is checkable in one run.
+//
+// This comment previously carried a table of ~20 measurement cells across two
+// harnesses, five chunk sizes and two sample points, while the case executes
+// one. Five consecutive rounds found a different uninhabited cell wrong; cutting
+// it to the executed cell was right, but the first cut still kept a "fixed
+// number of read chunks" rule, and round 22 falsified that too. `git log --
+// links.test.ts` has the history; unlike a comment it cannot go stale.
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
   const BODY_BYTES = 64 * 1024 * 1024;
   const CHUNK = 64 * 1024;
-  // Readahead is ~36 chunks (measured). Refuse to run at a CHUNK where that
-  // would reach the threshold, instead of failing later with a byte count that
-  // looks like a code defect and is not.
-  const READAHEAD_CHUNKS = 36;
+  // CALIBRATED, NOT MODELLED. The first version of this guard predicted the
+  // readahead as ~36 chunks and passed configurations where the case then
+  // failed on correct code (BODY 4 MiB / CHUNK 4 KiB: guard green, assertion
+  // red). The transport's readahead does not fit a simple rule - see the table
+  // above - so this refuses to guess. Change either constant and re-measure.
   assert(
-    READAHEAD_CHUNKS * CHUNK * 2 < BODY_BYTES / 4,
-    `CHUNK=${CHUNK} is too large for BODY=${BODY_BYTES}: readahead is about ` +
-      `${READAHEAD_CHUNKS} chunks, which leaves no room under the threshold. ` +
-      `Lower CHUNK or raise BODY_BYTES - do not raise the threshold.`,
+    CHUNK === 64 * 1024 && BODY_BYTES === 64 * 1024 * 1024,
+    `This case is calibrated at BODY=64MiB / CHUNK=64KiB, where the readahead ` +
+      `was measured at 2.25MiB against a 16MiB threshold. It is now ` +
+      `BODY=${BODY_BYTES} / CHUNK=${CHUNK}. Re-measure the readahead at the new ` +
+      `values before changing them: it is neither byte-constant nor ` +
+      `chunk-constant, so it cannot be predicted from these numbers.`,
   );
   const chunk = new Uint8Array(CHUNK).fill(0x78); // "x"
   let written = 0;
