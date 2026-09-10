@@ -243,6 +243,29 @@ export function isPubliclyRoutableUrl(url: string): boolean {
   if (!host.includes(".")) return false;
   if (host === "localhost" || host.endsWith(".localhost")) return false;
   if (host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".localdomain")) return false;
+
+  // ...BUT "has a dot" was not enough, and this is the miss that matters most
+  // (found in test 2026-09-10). Docker's embedded DNS also answers
+  // `<service>.<network>`, which HAS a dot:
+  //     http://openbrain-curator.open-brain_obnet:8000/health  -> live 200
+  //     http://llama-cpp.ai-stack_llm-net:8080/health          -> live 401
+  // A tester reached the exact container `links.test.ts` asserts is refused, by
+  // a spelling the screen accepted. Those network names are this stack's own and
+  // are written down in CLAUDE.md.
+  //
+  // So require the RIGHTMOST label to look like a public TLD: ASCII letters, or
+  // a punycode `xn--` label. Every docker network name here carries a hyphen or
+  // an underscore and fails that, which closes the whole `<service>.<network>`
+  // class rather than the two spellings that were demonstrated.
+  //
+  // KNOWN COST, stated rather than discovered later: a numeric-or-underscored
+  // rightmost label on a genuinely public host would now be refused, and a
+  // single-word alphabetic docker network (`mynet`) would still pass. This is a
+  // shape heuristic on top of a network boundary, not a substitute for one - the
+  // egress proxy remains the enforcement, and it 500s both of the URLs above.
+  const rightmost = host.split(".").pop() ?? "";
+  const looksLikeTld = /^[a-z]{2,63}$/.test(rightmost) || /^xn--[a-z0-9-]{1,59}$/.test(rightmost);
+  if (!looksLikeTld) return false;
   return true;
 }
 
@@ -429,10 +452,23 @@ function scanDocument(html: string): DocScan {
       continue;
     }
 
-    if (TERMINAL_ELEMENTS.includes(name)) return out; // nothing after is markup
+    if (TERMINAL_ELEMENTS.includes(name)) {
+      // Nothing AFTER this is markup - but it is all TEXT, and a browser renders
+      // it. Counting it is what stops `<plaintext>` erasing the shell guard:
+      // appending it to a full article made that article resolve, because the
+      // early return skipped the liveText assignment entirely (found in test
+      // 2026-09-10, and it falsified this commit's own claim that the guard and
+      // the matcher were "incapable of disagreeing").
+      pushText(tagEnd + 1, s.length);
+      break;
+    }
 
-    // A subtree whose content cannot be a live meta or an executing script.
-    // Counted like <template> so nesting cannot walk out of it.
+    // A subtree that cannot hold a live meta or an executing script - but whose
+    // TEXT a browser still renders. Skip it for matching, KEEP it for the guard:
+    // `<select>` options, `<svg><text>`, `<math><mtext>` are all visible, and
+    // dropping them let an article's prose be hidden from the guard while the
+    // document stayed a "shell". Counted like <template> so nesting cannot walk
+    // out of it.
     if (INERT_SUBTREE_ELEMENTS.includes(name)) {
       let depth = 1;
       let k = tagEnd + 1;
@@ -446,7 +482,10 @@ function scanDocument(html: string): DocScan {
       }
       if (depth !== 0) { out.ambiguous = true; return out; }
       const subClose = s.indexOf(">", k);
-      i = subClose < 0 ? s.length : subClose + 1;
+      const subEnd = subClose < 0 ? s.length : subClose + 1;
+      // Its text counts; its tags do not.
+      liveChunks.push(s.slice(tagEnd + 1, subEnd).replace(/<[^>]*>/g, " "));
+      i = subEnd;
       continue;
     }
 
@@ -476,6 +515,15 @@ function scanDocument(html: string): DocScan {
       const body = rest.slice(0, rel);
       // A <script> inside <noscript> is NOT executed by a scripting browser.
       if (name === "script" && noscriptDepth === 0) out.scripts.push({ tag: tagText, body });
+      // <textarea> and <title> content is RENDERED, so it counts toward the
+      // shell guard even though it can never be markup. <script>/<style> are
+      // not rendered and must not count. <iframe> fallback content is only
+      // shown when the frame fails, but a document that is mostly iframe text
+      // is not a redirect shell either - count it, which also closes the fourth
+      // way a tester erased the guard (found in test 2026-09-10).
+      if (name === "textarea" || name === "title" || name === "iframe" || name === "xmp") {
+        liveChunks.push(body.replace(/<[^>]*>/g, " "));
+      }
       i = tagEnd + 1 + rel;
       continue;
     }

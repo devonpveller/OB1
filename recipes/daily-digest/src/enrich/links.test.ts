@@ -335,6 +335,57 @@ Deno.test("isResearchable: a newsletter self-link is still dropped", () => {
 // Every inert context a tester drove the resolver from. All seven followed
 // before this round; metaRefreshTarget had never been narrowed at all, and it
 // runs FIRST.
+// ── 14. ROUND 5 (2026-09-10) ─────────────────────────────────────────────────
+
+Deno.test("a docker <service>.<network> name is refused", () => {
+  // "Has a dot" was not enough. Docker's embedded DNS answers
+  // `<service>.<network>` too, and a tester reached the exact container another
+  // case asserts is refused - live 200 - by that spelling. Those network names
+  // are this stack's own and are written down in CLAUDE.md.
+  for (const u of [
+    "http://openbrain-curator.open-brain_obnet:8000/health",
+    "http://llama-cpp.ai-stack_llm-net:8080/health",
+    "http://surrealdb.ai-stack_app-net:8000/sql",
+    "http://openbrain-db.open-brain_obnet:5432/",
+  ]) {
+    assertEquals(isPubliclyRoutableUrl(u), false, `must be refused: ${u}`);
+  }
+});
+
+Deno.test("...and real public hosts still pass the TLD shape rule", () => {
+  // Non-vacuity: the rule above must not simply refuse everything with a hyphen.
+  for (const u of [
+    "https://blog.google/article",
+    "https://aiandeducation.mit.edu/report/",
+    "https://sub.domain.co.uk/a",
+    "https://example.com./trailing-dot",
+    "https://8.8.8.8/",
+  ]) {
+    assertEquals(isPubliclyRoutableUrl(u), true, `must be allowed: ${u}`);
+  }
+});
+
+// FOUR WAYS TO ERASE THE SHELL GUARD, all found in round 5, all of which made a
+// full ARTICLE resolve. The claim in the previous commit that guard and matcher
+// were "incapable of disagreeing" was not yet true: TERMINAL_ELEMENTS returned
+// before liveText was assigned, and the inert subtrees skipped text a browser
+// renders. Text now counts wherever a browser would show it.
+const r5Prose = "Real readable article prose that makes this a document. ".repeat(8);
+const r5Meta = `<meta http-equiv="refresh" content="0;url=https://evil.example/pwn">`;
+const guardErasures: Array<[string, string]> = [
+  ["<plaintext> appended after an article", `<html><body>${r5Prose}${r5Meta}<plaintext>${r5Prose}</body></html>`],
+  ["prose inside <select>", `<html><body><select>${r5Prose}</select>${r5Meta}</body></html>`],
+  ["prose inside <svg><text>", `<html><body><svg><text>${r5Prose}</text></svg>${r5Meta}</body></html>`],
+  ["prose inside <math><mtext>", `<html><body><math><mtext>${r5Prose}</mtext></math>${r5Meta}</body></html>`],
+  ["prose inside an <iframe> fallback", `<html><body><iframe>${r5Prose}</iframe>${r5Meta}</body></html>`],
+  ["prose inside <textarea>", `<html><body><textarea>${r5Prose}</textarea>${r5Meta}</body></html>`],
+];
+for (const [label, doc] of guardErasures) {
+  Deno.test(`visible prose still counts against the guard: ${label}`, () => {
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null, label);
+  });
+}
+
 // ── 13. ROUND 4 (2026-09-09) ─────────────────────────────────────────────────
 // Round 4 closed the twelve, then found four more scanner bypasses, a
 // one-character defeat of the host screen, and the guard/matcher disagreement
