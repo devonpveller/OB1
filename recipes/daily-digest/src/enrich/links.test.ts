@@ -553,8 +553,7 @@ Deno.test("...and real public hosts still pass the TLD shape rule", () => {
   }
 });
 
-// FOUR WAYS TO ERASE THE SHELL GUARD, all found in round 5, all of which made a
-// full ARTICLE resolve. The claim in the previous commit that guard and matcher
+// WAYS TO ERASE THE SHELL GUARD, each of which made a full ARTICLE resolve. The claim in the previous commit that guard and matcher
 // were "incapable of disagreeing" was not yet true: TERMINAL_ELEMENTS returned
 // before liveText was assigned, and the inert subtrees skipped text a browser
 // renders. Text now counts wherever a browser would show it.
@@ -594,7 +593,7 @@ const r4Bypasses: Array<[string, string]> = [
   ["<svg><script>", `<html><body><svg><script>location.replace("${R4_EVIL}")</script></svg></body></html>`],
 ];
 for (const [label, doc] of r4Bypasses) {
-  Deno.test(`round 4 bypass stays shut: ${label}`, () => {
+  Deno.test(`bypass stays shut: ${label}`, () => {
     assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null, label);
   });
 }
