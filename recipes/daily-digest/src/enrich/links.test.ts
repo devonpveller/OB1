@@ -378,6 +378,36 @@ Deno.test("a self-closing <svg/> opens no suppressed region", () => {
   assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/p");
 });
 
+Deno.test("...but <math/> is the only OTHER element that gets that exemption", () => {
+  const doc = `<html><head><math/><meta http-equiv="refresh" content="0;url=https://good.example/p"></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/p");
+});
+
+// ── 16. ROUND 7 (2026-09-10) ─────────────────────────────────────────────────
+// The self-closing exemption above was applied to `template` and `select` too -
+// and they are HTML elements, where the parser IGNORES a trailing solidus. So
+// `<select/>` DOES open a region, and treating it as self-closed meant inert
+// content after one was read as LIVE and followed on the real path, unmarked.
+// A regression introduced by the previous round's fix; found by checking against
+// parse5 in both scripting modes rather than against a reading of the spec.
+for (const el of ["select", "template"]) {
+  Deno.test(`a trailing solidus on <${el}/> does NOT self-close it (meta)`, () => {
+    const doc = `<html><body><${el}/><meta http-equiv="refresh" content="0;url=https://evil.example/pwn"></body></html>`;
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+  });
+  Deno.test(`a trailing solidus on <${el}/> does NOT self-close it (script)`, () => {
+    const doc = `<html><body><${el}/><script>location.replace("https://evil.example/pwn")</script></body></html>`;
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+  });
+}
+
+for (const el of ["svg", "math"]) {
+  Deno.test(`a NON self-closed <${el}> still suppresses its subtree`, () => {
+    const doc = `<html><body><${el}><script>location.replace("https://evil.example/pwn")</script></${el}></body></html>`;
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null);
+  });
+}
+
 // ── 14. ROUND 5 (2026-09-10) ─────────────────────────────────────────────────
 
 Deno.test("a docker <service>.<network> name is refused", () => {

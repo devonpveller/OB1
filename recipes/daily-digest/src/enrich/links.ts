@@ -366,10 +366,24 @@ const RAW_TEXT_ELEMENTS = ["script", "style", "textarea", "title", "xmp", "ifram
  *  replaced it dropped it - a regression found in test 2026-09-09, round 4. */
 const TERMINAL_ELEMENTS = ["plaintext"];
 
-/** Foreign content and content models where a `<meta>` is not a document-level
- *  meta and a `<script>` does not run as one: `<math>` is not on the HTML
- *  breakout list, and `<select>` only admits option/optgroup. Both were used to
- *  steer the resolver. Their whole subtree is skipped. */
+/**
+ * Subtrees this resolver refuses to take a redirect from. All three were used to
+ * steer it, so their content is skipped for matching (their TEXT still counts -
+ * a browser renders it).
+ *
+ * HONEST ABOUT WHY, corrected 2026-09-10 after a tester checked it against
+ * parse5 rather than against my reading of the spec: an earlier version of this
+ * comment said a `<meta>` here "is not a document-level meta", and that is WRONG
+ * for `<meta>` specifically - it is on the HTML breakout list, so a
+ * `<meta refresh>` inside `<svg>`/`<math>` DOES break out and is live, as is a
+ * `<script>` inside `<select>` and an SVG `<script>`.
+ *
+ * They are skipped anyway, deliberately: this is a fail-closed resolver, and
+ * refusing a redirect a browser would honour costs one wrapper that is logged
+ * and still researched, while honouring one it would not costs a wrong URL in
+ * the corpus. That is a chosen trade, not a claim about the parsing - and saying
+ * so is the difference between a documented limit and a wrong comment.
+ */
 const INERT_SUBTREE_ELEMENTS = ["math", "select", "svg"];
 
 function scanDocument(html: string): DocScan {
@@ -484,8 +498,18 @@ function scanDocument(html: string): DocScan {
     // `select`/`svg`/`math` are. Both are pushed onto the SAME stack that the
     // walk maintains, and closed by the isClose branch above.
     if (name === "template" || INERT_SUBTREE_ELEMENTS.includes(name)) {
-      // A self-closing foreign element (`<svg/>`) opens nothing.
-      if (!/\/\s*>$/.test(tagText)) {
+      // A self-closing FOREIGN element (`<svg/>`, `<math/>`) opens nothing.
+      //
+      // ONLY foreign content (found in test 2026-09-10, round 7, and it was a
+      // regression this exemption introduced the round before): the trailing
+      // solidus is meaningful in SVG/MathML, and the HTML parser IGNORES it on
+      // HTML elements. So `<select/>` and `<template/>` DO open a region, and
+      // treating them as self-closing meant inert content after one was read as
+      // live - followed on the real path, unmarked. The tester checked this
+      // against parse5 in both scripting modes rather than against the prose of
+      // the spec, which is how the divergence was pinned down.
+      const foreign = name === "svg" || name === "math";
+      if (!(foreign && /\/\s*>$/.test(tagText))) {
         suppress.push({ name, rendered: name !== "template" });
       }
       i = tagEnd + 1;
