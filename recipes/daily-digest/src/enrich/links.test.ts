@@ -225,7 +225,7 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 //
 // THE MARGIN, measured for the ONE configuration this case runs: `deno test`,
 // CHUNK = 64 KiB, sampled where the assertion samples (before the server's
-// shutdown). These three numbers are re-proved by the assertion on every run.
+// shutdown). The assertion checks that the first is under the second.
 //
 //   bounded    2.25 MiB    the transport's readahead
 //   threshold 16.00 MiB    BODY_BYTES / 4
@@ -234,11 +234,8 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 // NO RULE IS STATED FOR ANY OTHER CHUNK SIZE, and no figures for one are
 // recorded here. Two attempts at a rule were falsified by measurement - a fixed
 // byte count, then a fixed count of read chunks - and the measurements that
-// falsified them are themselves not stable run to run at some sizes. So any
-// table here would be both unexecuted and eventually wrong, which is exactly
-// what happened: this comment was found wrong in six consecutive test rounds,
-// every time in a cell no test runs, including once in the table added to
-// explain why the previous rule was wrong.
+// falsified them are not stable run to run at some sizes. A table here would be
+// unexecuted, and repeated test rounds found it wrong.
 //
 // The guard below therefore PINS the two constants instead of modelling the
 // transport, and `git log -- links.test.ts` holds the measurements. Unlike a
@@ -246,11 +243,10 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
   const BODY_BYTES = 64 * 1024 * 1024;
   const CHUNK = 64 * 1024;
-  // CALIBRATED, NOT MODELLED. The first version of this guard predicted the
-  // readahead as ~36 chunks and passed configurations where the case then
-  // failed on correct code (BODY 4 MiB / CHUNK 4 KiB: guard green, assertion
-  // red). The transport's readahead does not fit a simple rule - see the table
-  // above - so this refuses to guess. Change either constant and re-measure.
+  // CALIBRATED, NOT MODELLED. An earlier guard predicted the readahead and
+  // passed configurations where the case then failed on correct code. The
+  // transport's readahead does not fit a simple rule, so this refuses to guess.
+  // Change either constant and re-measure.
   assert(
     CHUNK === 64 * 1024 && BODY_BYTES === 64 * 1024 * 1024,
     `This case is calibrated at BODY=64MiB / CHUNK=64KiB, where the readahead ` +
@@ -282,12 +278,8 @@ Deno.test("a large body is NOT streamed whole - the read stops early", async () 
       `the read must stop early: server wrote ${written} of ${BODY_BYTES} bytes`,
     );
     // The byte count is the whole assertion, deliberately. A `cancel()` callback
-    // on the server's stream looked like a stronger second signal: it is false
-    // at this point (10/10 runs) and true one `srv.shutdown()` later (10/10), so
-    // it is DETERMINISTIC - round 17 measured that, correcting this comment,
-    // which had called it a runtime detail and so implied flakiness. The reason
-    // not to assert it stands and is simpler than the one first given: it would
-    // pin Deno's stream teardown ORDERING, not anything links.ts does.
+    // on the server's stream is not asserted: it would pin Deno's stream
+    // teardown ORDERING, not anything links.ts does.
   } finally {
     await srv.shutdown();
   }
