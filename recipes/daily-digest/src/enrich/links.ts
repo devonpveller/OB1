@@ -333,7 +333,9 @@ function interstitialFollowEnabled(): boolean {
 }
 
 /** A redirect shell is ~1–2KB. Bigger than this is not a shell, and the body is
- *  never buffered past it (see readHtmlPrefix). */
+ *  never PARSED past it. Not "never buffered past it", which this said until
+ *  round 20: readHtmlPrefix's own comment records that it retains maxBytes plus
+ *  at most one read chunk, and that the transport reads further ahead still. */
 const INTERSTITIAL_MAX_BYTES = 16_384;
 /** Visible text in a shell is a stray "Redirecting…" at most. An article has more. */
 const INTERSTITIAL_MAX_TEXT = 200;

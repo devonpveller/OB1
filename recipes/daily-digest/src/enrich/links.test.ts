@@ -253,8 +253,27 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 // round 18 caught the version before it, which had the whole-body point four
 // chunk sizes too high and denied that a byte count discriminates below it.
 //
+// TWO INDEPENDENT VARIABLES MOVE THESE FIGURES, and collapsing them into one is
+// how the last three explanations went wrong:
+//
+//   HARNESS      `deno run` vs `deno test`, roughly 4/3, wherever the body
+//                ceiling does not bind (at 2 MiB chunks both read 64.00, so
+//                "exactly 4/3" has a counterexample in this table's own row)
+//   SAMPLE POINT before vs after `srv.shutdown()`. Measured under `deno test`:
+//                2.25 -> 2.38 at 64 KiB, 18.00 -> 19.00 at 512 KiB, and
+//                36.00 -> 57-58 at 1 MiB, which is +59% and NOT deterministic.
+//
+// This case reads `written` BEFORE the shutdown, deliberately: that is the
+// figure with the tighter spread, and the one that describes what the read
+// stopped at rather than what drained afterwards.
+//
+// Round 20 established this, correcting round 19's claim - written into the
+// previous version of this comment - that the harness explained the whole
+// spread. It does not: 43.00 vs 27.00 is not 4/3 of anything, it is the same
+// harness sampled at the two different points.
+//
 // The history is left here on purpose. This margin has now been stated wrongly
-// three times, in three different ways, by someone with the measurements open -
+// FOUR times, in four different ways, by someone with the measurements open -
 // which is the argument for keeping CHUNK where it is measured and for treating
 // any change to it as requiring the whole table again.
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
