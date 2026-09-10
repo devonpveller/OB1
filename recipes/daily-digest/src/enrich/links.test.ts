@@ -225,34 +225,24 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 //
 // THE MARGIN, measured for the ONE configuration this case runs: `deno test`,
 // CHUNK = 64 KiB, sampled where the assertion samples (before the server's
-// shutdown).
+// shutdown). These three numbers are re-proved by the assertion on every run.
 //
 //   bounded    2.25 MiB    the transport's readahead
 //   threshold 16.00 MiB    BODY_BYTES / 4
 //   unbounded 64.00 MiB    the whole body
 //
-// AND NO RULE FOR OTHER CONFIGURATIONS, because there isn't a simple one and
-// two attempts to state one were both false. Bytes read before the reader stops,
-// by chunk size, deterministic 3/3 each:
+// NO RULE IS STATED FOR ANY OTHER CHUNK SIZE, and no figures for one are
+// recorded here. Two attempts at a rule were falsified by measurement - a fixed
+// byte count, then a fixed count of read chunks - and the measurements that
+// falsified them are themselves not stable run to run at some sizes. So any
+// table here would be both unexecuted and eventually wrong, which is exactly
+// what happened: this comment was found wrong in six consecutive test rounds,
+// every time in a cell no test runs, including once in the table added to
+// explain why the previous rule was wrong.
 //
-//   4 KiB  340 chunks  1.33 MiB      48 KiB   54 chunks  2.53 MiB
-//   8 KiB  170 chunks  1.33 MiB      64 KiB   36 chunks  2.25 MiB
-//  16 KiB   90 chunks  1.41 MiB     512 KiB   36 chunks 18.00 MiB
-//  32 KiB   54 chunks  1.69 MiB
-//
-// It is neither a fixed byte count (it moves 1.33 -> 18.00) nor a fixed chunk
-// count (340, 170, 90, 54, 54, 36, 36), and 48 KiB breaks the obvious
-// max(36 x CHUNK, ~1.7 MiB) fit that covers every other row. So the case pins
-// CHUNK instead of modelling the transport: the assertion below refuses any
-// other value and says to re-measure. That is the whole of what is claimed here,
-// and all of it is checkable in one run.
-//
-// This comment previously carried a table of ~20 measurement cells across two
-// harnesses, five chunk sizes and two sample points, while the case executes
-// one. Five consecutive rounds found a different uninhabited cell wrong; cutting
-// it to the executed cell was right, but the first cut still kept a "fixed
-// number of read chunks" rule, and round 22 falsified that too. `git log --
-// links.test.ts` has the history; unlike a comment it cannot go stale.
+// The guard below therefore PINS the two constants instead of modelling the
+// transport, and `git log -- links.test.ts` holds the measurements. Unlike a
+// comment, it cannot go stale.
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
   const BODY_BYTES = 64 * 1024 * 1024;
   const CHUNK = 64 * 1024;
