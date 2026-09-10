@@ -649,6 +649,17 @@ function scriptedLocationTarget(scripts: Array<{ tag: string; body: string }>): 
  * Exported for tests: the parsing is the part worth pinning down.
  */
 export function interstitialTarget(html: string, baseUrl: string): string | null {
+  // DEAD ON THE PRODUCTION PATH, and kept deliberately. The only non-test caller
+  // is unwrapRedirect, which feeds this from readHtmlPrefix(res,
+  // INTERSTITIAL_MAX_BYTES) - already bounded - so this line can never fire
+  // there. Round 16 measured that: deleting it changes no test.
+  //
+  // It stays because this function is EXPORTED, so it is an input guard for a
+  // caller that has not been through readHtmlPrefix. What it is not is a second
+  // enforcement point backing the first up: both read one constant, so a change
+  // to that constant disables both at once. An earlier comment on the test that
+  // pins this called them two guards that back each other up, which is wrong and
+  // was worth being caught on.
   if (html.length > INTERSTITIAL_MAX_BYTES) return null;
   // One scan, and the guard and BOTH matchers read what IT says is live. The
   // guard used to call extractTextFromHtml on the raw document, which erases a

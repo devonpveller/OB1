@@ -180,8 +180,16 @@ Deno.test("a large page with a head meta-refresh is not treated as a shell", asy
 //
 // The padding here is inside an HTML COMMENT, so visible text stays ~0 and the
 // only thing that can refuse the document is its size. The pair is the point:
-// under the cap it resolves, over the cap it does not, so a fix that disables
-// either guard fails one of them.
+// under the cap it resolves, over the cap it does not, so the refusal is the
+// SIZE and not the shape.
+//
+// WHAT THIS CASE DOES NOT PIN, stated because an earlier version of this comment
+// claimed it did ("a fix that disables either guard fails one of them" - false,
+// and round 16 measured it): it pins the REFUSAL of an over-cap document, not
+// the BOUNDED READ. Make the loop `while (true)` and drop the `total > maxBytes`
+// return and the whole suite stayed green at 97/0 while a 64 MiB body was
+// buffered whole. The anchor bullet has two halves and this case is one of them.
+// The next case is the other.
 Deno.test("the BYTE cap refuses a big document whose visible text is tiny", async () => {
   const other = stubServer(() => html("<html><body>should never be reached</body></html>"));
   const padded = (bytes: number) =>
@@ -201,6 +209,57 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
     await over.stop();
     await under.stop();
     await other.stop();
+  }
+});
+
+// THE OTHER HALF OF THE ANCHOR BULLET: "a large non-interstitial page does not
+// get buffered whole". Nothing asserted that until round 16, which proved it by
+// removing the read bound entirely and watching the suite stay green — the
+// server then wrote all 67,108,864 bytes at every chunk size, which is precisely
+// the thing the bullet forbids.
+//
+// This asserts on the SERVER's side of the wire, because that is where "was it
+// buffered whole" is observable: how many bytes did the body actually stream
+// before the reader hung up? Bounded, that is the transport's readahead — round
+// 16 measured 1.58–6.75 MiB depending on chunk size, and it drifts with sample
+// timing too. Unbounded it is the entire body. The threshold below is set at a
+// quarter of the body, which is an order of magnitude above every readahead
+// figure measured and an order of magnitude below the failure, so it does not
+// need re-tuning when either moves.
+Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
+  const BODY_BYTES = 16 * 1024 * 1024;
+  const CHUNK = 64 * 1024;
+  const chunk = new Uint8Array(CHUNK).fill(0x78); // "x"
+  let written = 0;
+  const srv = Deno.serve({ port: 0, onListen: () => {} }, () => {
+    const body = new ReadableStream({
+      async pull(controller) {
+        if (written >= BODY_BYTES) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+        written += CHUNK;
+      },
+    });
+    return new Response(body, { headers: { "content-type": "text/html" } });
+  });
+  try {
+    const url = `http://127.0.0.1:${srv.addr.port}/click/huge`;
+    assertEquals(await unwrapRedirect(url), url, "a 16MB body is not a redirect shell");
+    assert(
+      written < BODY_BYTES / 4,
+      `the read must stop early: server wrote ${written} of ${BODY_BYTES} bytes`,
+    );
+    // The byte count is the whole assertion, deliberately. A `cancel()` callback
+    // on the server's stream looked like a stronger second signal and is not one:
+    // it did not fire here even though the read demonstrably stopped, because
+    // whether a server-side stream is cancelled or simply stops being pulled is
+    // a runtime detail rather than a property of this code. Asserting it would
+    // have been a claim about someone else's implementation, which is how most
+    // of this file's retracted claims started.
+  } finally {
+    await srv.shutdown();
   }
 });
 
