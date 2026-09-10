@@ -702,12 +702,19 @@ async function readHtmlPrefix(res: Response, maxBytes: number): Promise<string |
     // over maxBytes is discarded whole below rather than parsed.
     //
     // NOT the same as peak memory, which this comment used to claim: the
-    // transport reads ahead on its own, and round 14's tester measured ~1.7 MiB
-    // arriving at the server before the reader stopped on a 64 MiB body. The
-    // bound governs what is BUFFERED AND PARSED here, which is the thing a
-    // hostile page could otherwise grow without limit; it does not govern what
-    // the HTTP stack has in flight. Worth stating precisely - the comment on
-    // INTERSTITIAL_MAX_BYTES reads as though the cut is exact.
+    // transport reads ahead on its own. Measured against a 64 MiB body, the
+    // server had WRITTEN ~1.7 MiB before the reader stopped - and that figure is
+    // the server's chunking, not a ceiling: 1.58 MiB at 16 KiB chunks, 1.70 at
+    // 4 and 64 KiB, 6.75 MiB at 256 KiB. (An earlier draft said the bytes were
+    // "arriving at the server", which is backwards, and quoted 1.7 MiB as
+    // though it were fixed.) The bound governs what is BUFFERED AND PARSED
+    // here, which is the thing a hostile page could otherwise grow without
+    // limit; it does not govern what the HTTP stack has in flight.
+    //
+    // One more honesty note about "what this function retains": on the SUCCESS
+    // path it briefly holds ~2x maxBytes, because `chunks` is still alive while
+    // `buf` is filled from it below. 32 KiB rather than 16, immaterial at this
+    // size, but the sentence is about this function so it should say so.
     while (total <= maxBytes) {
       const { done, value } = await reader.read();
       if (done) break;

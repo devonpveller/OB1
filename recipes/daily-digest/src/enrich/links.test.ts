@@ -170,6 +170,40 @@ Deno.test("a large page with a head meta-refresh is not treated as a shell", asy
   }
 });
 
+// THE BYTE CAP ITSELF, which nothing pinned until round 15 proved it: raising
+// INTERSTITIAL_MAX_BYTES from 16_384 to 999_999_999 - removing the cap outright -
+// left all 96 tests green, including the one above. Its 40,000 x's are VISIBLE
+// TEXT, so it trips INTERSTITIAL_MAX_TEXT first and says nothing about bytes.
+// That is the same misattribution round 3 corrected once already for a
+// <pre><code> fixture, and it left an ANCHOR ACCEPTANCE BULLET ("no unbounded
+// body read") asserted by no test at all.
+//
+// The padding here is inside an HTML COMMENT, so visible text stays ~0 and the
+// only thing that can refuse the document is its size. The pair is the point:
+// under the cap it resolves, over the cap it does not, so a fix that disables
+// either guard fails one of them.
+Deno.test("the BYTE cap refuses a big document whose visible text is tiny", async () => {
+  const other = stubServer(() => html("<html><body>should never be reached</body></html>"));
+  const padded = (bytes: number) =>
+    `<html><head><meta http-equiv="refresh" content="0; url=${other.base}/nope"></head>` +
+    `<body><!--${"p".repeat(bytes)}--></body></html>`;
+  const over = stubServer(() => html(padded(20_000)));
+  const under = stubServer(() => html(padded(1_000)));
+  try {
+    const overUrl = `${over.base}/click/over`;
+    assertEquals(await unwrapRedirect(overUrl), overUrl, "over the byte cap: not read, not followed");
+    assertEquals(other.hits(), 0);
+    // The control that makes the assertion above mean something. Same shape,
+    // same invisible padding, under the cap - so the refusal is the SIZE and
+    // not the shape.
+    assertEquals(await unwrapRedirect(`${under.base}/click/under`), `${other.base}/nope`);
+  } finally {
+    await over.stop();
+    await under.stop();
+    await other.stop();
+  }
+});
+
 Deno.test("a non-HTML body is never parsed as a shell", async () => {
   const srv = stubServer(() =>
     new Response("%PDF-1.4 location.replace(\"https://example.com/x\")", {
