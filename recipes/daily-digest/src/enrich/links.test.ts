@@ -238,9 +238,27 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 // up in CHUNK turned CORRECT code red. It claimed an order of magnitude in both
 // directions while having neither.
 //
-// CHUNK is pinned deliberately rather than left to a default: at 1 MiB chunks
-// the whole body arrives before the reader stops, so no server-side byte count
-// discriminates at all up there. Change CHUNK and you must re-measure.
+// CHUNK is pinned deliberately rather than left to a default. Measured against
+// CORRECT code at this 64 MiB body, three runs each, all deterministic:
+//
+//    64 KiB   1.69 MiB   shipped; 9.5x under the threshold
+//   512 KiB  13.50 MiB   still passes, but only 1.19x under it
+//     1 MiB  27.00 MiB   the case goes RED on correct code
+//     2 MiB  54.00 MiB
+//     4 MiB  64.00 MiB   the whole body: only HERE does a byte count stop
+//                        discriminating at all
+//
+// An earlier version of this paragraph put that last line at 1 MiB and claimed
+// no byte count discriminates there. Both wrong: at 1 MiB a correct read writes
+// 27 MiB against an unbounded 64, which discriminates fine - what breaks at
+// 1 MiB is this THRESHOLD, not the method. The sentence had been lifted from the
+// findings note, where it is true, because there it describes a 16 MiB body.
+// Round 18 caught it.
+//
+// Round 17 measured 43.00 MiB at 1 MiB chunks where round 18 and this run both
+// get 27.00, so the figure moves with the environment even when it is stable
+// within a run. That is the argument for the wide margin at 64 KiB rather than
+// tuning close to the line. Change CHUNK and you must re-measure.
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
   const BODY_BYTES = 64 * 1024 * 1024;
   const CHUNK = 64 * 1024;
