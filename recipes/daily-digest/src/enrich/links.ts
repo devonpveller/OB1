@@ -272,9 +272,17 @@ export function isPubliclyRoutableUrl(url: string): boolean {
   // are written down in CLAUDE.md.
   //
   // So require the RIGHTMOST label to look like a public TLD: ASCII letters, or
-  // a punycode `xn--` label. Every docker network name here carries a hyphen or
-  // an underscore and fails that, which closes the whole `<service>.<network>`
-  // class rather than the two spellings that were demonstrated.
+  // a punycode `xn--` label. Every USER-DEFINED docker network here carries a
+  // hyphen or an underscore and fails that, which closes the whole
+  // `<service>.<network>` class rather than the two spellings that were
+  // demonstrated. Measured 2026-09-10: 22 user-defined networks, all of them.
+  // NOT every docker network, though - `bridge`, `host` and `none` are bare
+  // words and DO pass this test. They are the three built-ins, they carry no
+  // embedded DNS for service names, and `openbrain-curator.bridge` does not
+  // resolve - so the gap is real and empty. Said precisely because the sentence
+  // used to read "every docker network name here", which is simply false, and a
+  // reader checking it against `docker network ls` would have found that out
+  // before trusting anything else in this comment.
   //
   // KNOWN COST, stated rather than discovered later: a numeric-or-underscored
   // rightmost label on a genuinely public host would now be refused, and a
