@@ -698,9 +698,16 @@ async function readHtmlPrefix(res: Response, maxBytes: number): Promise<string |
     // The bound is a CEILING ON WHAT IS KEPT, and the loop can overshoot it by
     // at most ONE read chunk before it stops: the length is tested after the
     // chunk arrives, because a stream does not let you ask for a partial one.
-    // So peak memory is maxBytes + one chunk, and anything over maxBytes is
-    // discarded whole below rather than parsed. Worth stating precisely - the
-    // comment on INTERSTITIAL_MAX_BYTES reads as though the cut is exact.
+    // So what this function RETAINS peaks at maxBytes + one chunk, and anything
+    // over maxBytes is discarded whole below rather than parsed.
+    //
+    // NOT the same as peak memory, which this comment used to claim: the
+    // transport reads ahead on its own, and round 14's tester measured ~1.7 MiB
+    // arriving at the server before the reader stopped on a 64 MiB body. The
+    // bound governs what is BUFFERED AND PARSED here, which is the thing a
+    // hostile page could otherwise grow without limit; it does not govern what
+    // the HTTP stack has in flight. Worth stating precisely - the comment on
+    // INTERSTITIAL_MAX_BYTES reads as though the cut is exact.
     while (total <= maxBytes) {
       const { done, value } = await reader.read();
       if (done) break;
