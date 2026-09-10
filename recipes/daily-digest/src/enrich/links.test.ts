@@ -335,6 +335,49 @@ Deno.test("isResearchable: a newsletter self-link is still dropped", () => {
 // Every inert context a tester drove the resolver from. All seven followed
 // before this round; metaRefreshTarget had never been narrowed at all, and it
 // runs FIRST.
+// ── 15. ROUND 6 (2026-09-10) ─────────────────────────────────────────────────
+// The two depth counters that skipped <template> and the inert subtrees were
+// raw-string regex token counts, so they counted `</template>` / `</select>`
+// occurring inside COMMENTS, ATTRIBUTE VALUES, SCRIPT BODIES and <textarea> -
+// the exact contexts the surrounding scanner exists to respect. Ten inert
+// documents produced a target on the REAL path, with unresolvedWrapper=false, so
+// the URL entered research silently and the operator log line never fired.
+// Fixing the nesting in round 3 had reintroduced the context blindness; the walk
+// now owns the depth, so there is only one mechanism deciding what is inside
+// what.
+const R6_EVIL = "https://evil.example/pwn";
+const contextBlind: Array<[string, string]> = [
+  ["</template> inside a comment", `<html><body><template><!-- </template> --><script>location.replace("${R6_EVIL}")</script></template></body></html>`],
+  ["</template> inside an attribute value", `<html><body><template><div title="</template>"></div><meta http-equiv="refresh" content="0;url=${R6_EVIL}"></template></body></html>`],
+  ["</template> inside a script body", `<html><body><template><script>var x="</template>";</script><meta http-equiv="refresh" content="0;url=${R6_EVIL}"></template></body></html>`],
+  ["</template> inside a textarea", `<html><body><template><textarea></template></textarea><meta http-equiv="refresh" content="0;url=${R6_EVIL}"></template></body></html>`],
+  ["</select> inside a comment", `<html><body><select><!-- </select> --><meta http-equiv="refresh" content="0;url=${R6_EVIL}"></select></body></html>`],
+  ["</svg> inside an attribute value", `<html><body><svg><g title="</svg>"></g><script>location.replace("${R6_EVIL}")</script></svg></body></html>`],
+  ["</math> inside a script body", `<html><body><math><script>var y="</math>";</script><meta http-equiv="refresh" content="0;url=${R6_EVIL}"></math></body></html>`],
+  ["a nested template closed inside a comment", `<html><body><template><template><!-- </template> --></template><meta http-equiv="refresh" content="0;url=${R6_EVIL}"></template></body></html>`],
+  ["an unterminated template", `<html><body><template><meta http-equiv="refresh" content="0;url=${R6_EVIL}"></body></html>`],
+  ["an unterminated select", `<html><body><select><script>location.replace("${R6_EVIL}")</script></body></html>`],
+];
+for (const [label, doc] of contextBlind) {
+  Deno.test(`a closing tag in an inert context does not end the region: ${label}`, () => {
+    assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), null, label);
+  });
+}
+
+Deno.test("template text is NOT rendered, so a shell containing one still resolves", () => {
+  // The counterpart to the erasure cases: over-swallowing hides prose from the
+  // guard, but under-swallowing would make a <template> count as visible text
+  // and stop a genuine shell resolving. Both directions, or neither is pinned.
+  const prose = "Boilerplate inside a template that a browser never renders. ".repeat(8);
+  const doc = `<html><head><template>${prose}</template><meta http-equiv="refresh" content="0;url=https://good.example/p"></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/p");
+});
+
+Deno.test("a self-closing <svg/> opens no suppressed region", () => {
+  const doc = `<html><head><svg/><meta http-equiv="refresh" content="0;url=https://good.example/p"></head></html>`;
+  assertEquals(interstitialTarget(doc, "https://wrapper.example/r/1"), "https://good.example/p");
+});
+
 // ── 14. ROUND 5 (2026-09-10) ─────────────────────────────────────────────────
 
 Deno.test("a docker <service>.<network> name is refused", () => {

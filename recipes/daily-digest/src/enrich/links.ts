@@ -387,8 +387,27 @@ function scanDocument(html: string): DocScan {
   // text HERE, from the same walk that decides what is live, makes the two
   // incapable of disagreeing rather than merely agreeing today.
   const liveChunks: string[] = [];
+  // Regions currently suppressing LIVE markup, maintained BY THIS WALK.
+  //
+  // WHY A STACK AND NOT A COUNTER (found in test 2026-09-10, round 6, and it is
+  // the same defect class as round 3's): the previous version jumped over
+  // <template> and the inert subtrees with a raw-string regex that counted
+  // `</template>` / `</select>` tokens. That counter was NOT context-aware, so
+  // it counted closing tags occurring inside comments, attribute values, script
+  // bodies and <textarea> - the exact contexts the surrounding scanner exists to
+  // respect. Ten inert documents produced a target on the real path, unmarked,
+  // and the same counter also over-swallowed, hiding rendered prose from the
+  // guard so an article resolved.
+  //
+  // Fixing the nesting had reintroduced the context blindness. The lesson is
+  // structural: the moment a second mechanism decides what is inside what, the
+  // two disagree. There is now ONE walk, and it owns the depth.
+  const suppress: Array<{ name: string; rendered: boolean }> = [];
+  const inTemplate = () => suppress.some((r) => !r.rendered);
   const pushText = (from: number, to: number) => {
-    if (to > from) liveChunks.push(s.slice(from, to));
+    // Text inside a <template> is never rendered; inside <select>/<svg>/<math>
+    // it is.
+    if (to > from && !inTemplate()) liveChunks.push(s.slice(from, to));
   };
   while (i < s.length) {
     const lt = s.indexOf("<", i);
@@ -448,62 +467,28 @@ function scanDocument(html: string): DocScan {
 
     if (isClose) {
       if (name === "noscript" && noscriptDepth > 0) noscriptDepth--;
+      // Close a suppressed region only from the SAME walk that opened it.
+      if (suppress.length > 0 && suppress[suppress.length - 1].name === name) suppress.pop();
       i = tagEnd + 1;
       continue;
     }
 
     if (TERMINAL_ELEMENTS.includes(name)) {
       // Nothing AFTER this is markup - but it is all TEXT, and a browser renders
-      // it. Counting it is what stops `<plaintext>` erasing the shell guard:
-      // appending it to a full article made that article resolve, because the
-      // early return skipped the liveText assignment entirely (found in test
-      // 2026-09-10, and it falsified this commit's own claim that the guard and
-      // the matcher were "incapable of disagreeing").
-      pushText(tagEnd + 1, s.length);
+      // it, unless we are inside a <template> whose content is never rendered.
+      if (!inTemplate()) pushText(tagEnd + 1, s.length);
       break;
     }
 
-    // A subtree that cannot hold a live meta or an executing script - but whose
-    // TEXT a browser still renders. Skip it for matching, KEEP it for the guard:
-    // `<select>` options, `<svg><text>`, `<math><mtext>` are all visible, and
-    // dropping them let an article's prose be hidden from the guard while the
-    // document stayed a "shell". Counted like <template> so nesting cannot walk
-    // out of it.
-    if (INERT_SUBTREE_ELEMENTS.includes(name)) {
-      let depth = 1;
-      let k = tagEnd + 1;
-      const subRe = new RegExp("<(/?)" + name + "\\b", "gi");
-      subRe.lastIndex = k;
-      let sm: RegExpExecArray | null;
-      while ((sm = subRe.exec(s))) {
-        depth += sm[1] ? -1 : 1;
-        k = sm.index + sm[0].length;
-        if (depth === 0) break;
+    // Regions whose content is not LIVE markup. `template` is also not rendered;
+    // `select`/`svg`/`math` are. Both are pushed onto the SAME stack that the
+    // walk maintains, and closed by the isClose branch above.
+    if (name === "template" || INERT_SUBTREE_ELEMENTS.includes(name)) {
+      // A self-closing foreign element (`<svg/>`) opens nothing.
+      if (!/\/\s*>$/.test(tagText)) {
+        suppress.push({ name, rendered: name !== "template" });
       }
-      if (depth !== 0) { out.ambiguous = true; return out; }
-      const subClose = s.indexOf(">", k);
-      const subEnd = subClose < 0 ? s.length : subClose + 1;
-      // Its text counts; its tags do not.
-      liveChunks.push(s.slice(tagEnd + 1, subEnd).replace(/<[^>]*>/g, " "));
-      i = subEnd;
-      continue;
-    }
-
-    // <template> content is inert. Nesting defeats a non-greedy match, so count.
-    if (name === "template") {
-      let depth = 1;
-      let k = tagEnd + 1;
-      const tagRe = /<(\/?)template\b/gi;
-      tagRe.lastIndex = k;
-      let m: RegExpExecArray | null;
-      while ((m = tagRe.exec(s))) {
-        depth += m[1] ? -1 : 1;
-        k = m.index + m[0].length;
-        if (depth === 0) break;
-      }
-      if (depth !== 0) { out.ambiguous = true; return out; }
-      const close = s.indexOf(">", k);
-      i = close < 0 ? s.length : close + 1;
+      i = tagEnd + 1;
       continue;
     }
 
@@ -513,15 +498,15 @@ function scanDocument(html: string): DocScan {
       const rel = rest.search(closeRe);
       if (rel < 0) { out.ambiguous = true; return out; }
       const body = rest.slice(0, rel);
-      // A <script> inside <noscript> is NOT executed by a scripting browser.
-      if (name === "script" && noscriptDepth === 0) out.scripts.push({ tag: tagText, body });
-      // <textarea> and <title> content is RENDERED, so it counts toward the
-      // shell guard even though it can never be markup. <script>/<style> are
-      // not rendered and must not count. <iframe> fallback content is only
-      // shown when the frame fails, but a document that is mostly iframe text
-      // is not a redirect shell either - count it, which also closes the fourth
-      // way a tester erased the guard (found in test 2026-09-10).
-      if (name === "textarea" || name === "title" || name === "iframe" || name === "xmp") {
+      // A <script> inside <noscript> is NOT executed by a scripting browser, and
+      // one inside a suppressed region is not live markup at all.
+      if (name === "script" && noscriptDepth === 0 && suppress.length === 0) {
+        out.scripts.push({ tag: tagText, body });
+      }
+      // <textarea>/<title>/<iframe>/<xmp> content is RENDERED, so it counts
+      // toward the shell guard even though it can never be markup.
+      // <script>/<style> are not rendered and must not count.
+      if ((name === "textarea" || name === "title" || name === "iframe" || name === "xmp") && !inTemplate()) {
         liveChunks.push(body.replace(/<[^>]*>/g, " "));
       }
       i = tagEnd + 1 + rel;
@@ -533,9 +518,13 @@ function scanDocument(html: string): DocScan {
     // interstitial puts its own. Its scripts, however, never run.
     if (name === "noscript") { noscriptDepth++; i = tagEnd + 1; continue; }
 
-    if (name === "meta") out.metaTags.push(tagText);
+    if (name === "meta" && suppress.length === 0) out.metaTags.push(tagText);
     i = tagEnd + 1;
   }
+  // An unclosed suppressed region means the rest of the document was never live
+  // markup and we cannot say what it contained: fail closed, like every other
+  // thing this scan cannot place.
+  if (suppress.length > 0) { out.ambiguous = true; return out; }
   out.liveText = decodeEntities(liveChunks.join(" ")).replace(/\s+/g, " ").trim();
   return out;
 }
