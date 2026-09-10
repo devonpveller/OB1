@@ -223,42 +223,40 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 // before the reader hung up? Bounded, that is the transport's readahead.
 // Unbounded, it is the entire body.
 //
-// THE NUMBERS, because the first version of this comment got the arithmetic
-// backwards and round 17 caught it. Readahead is ABSOLUTE, not proportional to
-// the body: 1.58 MiB at 16 KiB chunks, 1.69 at 64 KiB, 6.75 at 256 KiB - the
-// same figures whether the body is 16 MiB or 64 MiB. So the margin is bought by
-// making the BODY large, not the threshold generous:
+// THE NUMBERS. Readahead is ABSOLUTE, not proportional to the body - the same
+// figures whether the body is 16 MiB or 64 MiB - so the margin is bought by
+// making the BODY large rather than the threshold generous.
 //
-//   bounded, at this chunk size    1.69 MiB   ~9x below the threshold
-//   threshold (BODY / 4)            16.0 MiB
-//   unbounded                       64.0 MiB   4x above the threshold
+// EVERY FIGURE BELOW WAS MEASURED UNDER `deno test`, which is the only harness
+// whose numbers describe this case. That sentence exists because two earlier
+// versions of this table were measured with `deno run` and then used to state
+// what the CASE does; the two differ by exactly 4/3, deterministically, same
+// commit and same machine. It made the 512 KiB row say the opposite of the
+// truth. If you re-measure, measure inside a test.
 //
-// The first version used a 16 MiB body, putting the threshold at 4 MiB - BELOW
-// the 6.75 MiB readahead its own comment cited two lines earlier - so one step
-// up in CHUNK turned CORRECT code red. It claimed an order of magnitude in both
-// directions while having neither.
+//   bounded, at this chunk size     2.25 MiB   7.1x below the threshold
+//   threshold (BODY / 4)           16.00 MiB
+//   unbounded                      64.00 MiB   4x above the threshold
 //
-// CHUNK is pinned deliberately rather than left to a default. Measured against
-// CORRECT code at this 64 MiB body, three runs each, all deterministic:
+// CHUNK is pinned deliberately rather than left to a default. Under `deno test`,
+// against CORRECT code, three runs each, all deterministic:
 //
-//    64 KiB   1.69 MiB   shipped; 9.5x under the threshold
-//   512 KiB  13.50 MiB   still passes, but only 1.19x under it
-//     1 MiB  27.00 MiB   the case goes RED on correct code
-//     2 MiB  54.00 MiB
-//     4 MiB  64.00 MiB   the whole body: only HERE does a byte count stop
-//                        discriminating at all
+//    64 KiB    2.25 MiB   shipped; passes with 7.1x of room
+//   512 KiB   18.00 MiB   FAILS - already over the threshold
+//     1 MiB   36.00 MiB   FAILS
+//     2 MiB   64.00 MiB   the whole body: at and above this, a byte count
+//                         stops discriminating at all
 //
-// An earlier version of this paragraph put that last line at 1 MiB and claimed
-// no byte count discriminates there. Both wrong: at 1 MiB a correct read writes
-// 27 MiB against an unbounded 64, which discriminates fine - what breaks at
-// 1 MiB is this THRESHOLD, not the method. The sentence had been lifted from the
-// findings note, where it is true, because there it describes a 16 MiB body.
-// Round 18 caught it.
+// So the usable range is narrower than two earlier versions of this comment
+// claimed - it ends between 64 and 512 KiB, not at 1 MiB - and the failure at
+// 512 KiB is a CORRECT implementation being called wrong. Round 19 caught that;
+// round 18 caught the version before it, which had the whole-body point four
+// chunk sizes too high and denied that a byte count discriminates below it.
 //
-// Round 17 measured 43.00 MiB at 1 MiB chunks where round 18 and this run both
-// get 27.00, so the figure moves with the environment even when it is stable
-// within a run. That is the argument for the wide margin at 64 KiB rather than
-// tuning close to the line. Change CHUNK and you must re-measure.
+// The history is left here on purpose. This margin has now been stated wrongly
+// three times, in three different ways, by someone with the measurements open -
+// which is the argument for keeping CHUNK where it is measured and for treating
+// any change to it as requiring the whole table again.
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
   const BODY_BYTES = 64 * 1024 * 1024;
   const CHUNK = 64 * 1024;
