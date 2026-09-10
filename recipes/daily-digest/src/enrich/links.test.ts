@@ -220,20 +220,35 @@ Deno.test("the BYTE cap refuses a big document whose visible text is tiny", asyn
 //
 // This asserts on the SERVER's side of the wire, because that is where "was it
 // buffered whole" is observable: how many bytes did the body actually stream
-// before the reader hung up? Bounded, that is the transport's readahead — round
-// 16 measured 1.58–6.75 MiB depending on chunk size, and it drifts with sample
-// timing too. Unbounded it is the entire body. The threshold below is set at a
-// quarter of the body, which is an order of magnitude above every readahead
-// figure measured and an order of magnitude below the failure, so it does not
-// need re-tuning when either moves.
+// before the reader hung up? Bounded, that is the transport's readahead.
+// Unbounded, it is the entire body.
+//
+// THE NUMBERS, because the first version of this comment got the arithmetic
+// backwards and round 17 caught it. Readahead is ABSOLUTE, not proportional to
+// the body: 1.58 MiB at 16 KiB chunks, 1.69 at 64 KiB, 6.75 at 256 KiB - the
+// same figures whether the body is 16 MiB or 64 MiB. So the margin is bought by
+// making the BODY large, not the threshold generous:
+//
+//   bounded, at this chunk size    1.69 MiB   ~9x below the threshold
+//   threshold (BODY / 4)            16.0 MiB
+//   unbounded                       64.0 MiB   4x above the threshold
+//
+// The first version used a 16 MiB body, putting the threshold at 4 MiB - BELOW
+// the 6.75 MiB readahead its own comment cited two lines earlier - so one step
+// up in CHUNK turned CORRECT code red. It claimed an order of magnitude in both
+// directions while having neither.
+//
+// CHUNK is pinned deliberately rather than left to a default: at 1 MiB chunks
+// the whole body arrives before the reader stops, so no server-side byte count
+// discriminates at all up there. Change CHUNK and you must re-measure.
 Deno.test("a large body is NOT streamed whole - the read stops early", async () => {
-  const BODY_BYTES = 16 * 1024 * 1024;
+  const BODY_BYTES = 64 * 1024 * 1024;
   const CHUNK = 64 * 1024;
   const chunk = new Uint8Array(CHUNK).fill(0x78); // "x"
   let written = 0;
   const srv = Deno.serve({ port: 0, onListen: () => {} }, () => {
     const body = new ReadableStream({
-      async pull(controller) {
+      pull(controller) {
         if (written >= BODY_BYTES) {
           controller.close();
           return;
@@ -246,18 +261,18 @@ Deno.test("a large body is NOT streamed whole - the read stops early", async () 
   });
   try {
     const url = `http://127.0.0.1:${srv.addr.port}/click/huge`;
-    assertEquals(await unwrapRedirect(url), url, "a 16MB body is not a redirect shell");
+    assertEquals(await unwrapRedirect(url), url, "a 64MB body is not a redirect shell");
     assert(
       written < BODY_BYTES / 4,
       `the read must stop early: server wrote ${written} of ${BODY_BYTES} bytes`,
     );
     // The byte count is the whole assertion, deliberately. A `cancel()` callback
-    // on the server's stream looked like a stronger second signal and is not one:
-    // it did not fire here even though the read demonstrably stopped, because
-    // whether a server-side stream is cancelled or simply stops being pulled is
-    // a runtime detail rather than a property of this code. Asserting it would
-    // have been a claim about someone else's implementation, which is how most
-    // of this file's retracted claims started.
+    // on the server's stream looked like a stronger second signal: it is false
+    // at this point (10/10 runs) and true one `srv.shutdown()` later (10/10), so
+    // it is DETERMINISTIC - round 17 measured that, correcting this comment,
+    // which had called it a runtime detail and so implied flakiness. The reason
+    // not to assert it stands and is simpler than the one first given: it would
+    // pin Deno's stream teardown ORDERING, not anything links.ts does.
   } finally {
     await srv.shutdown();
   }
