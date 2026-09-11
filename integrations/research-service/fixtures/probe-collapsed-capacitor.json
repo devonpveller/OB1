@@ -1,0 +1,68 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only) by re-running the four probes the TESTER used to fail T11 on attempt 2. Bing was the only engine answering; every hit is on topic for the query's FIRST salient token and none mentions the subject entity. The shipped classifier called the first two 'ok' at overlap 0.9/0.7.",
+ "_collapsed_on": "capacitor",
+ "query": "capacitor bulging OptiPlex 3050 repair",
+ "entity": "OptiPlex 3050",
+ "hits": [
+  {
+   "url": "https://en.wikipedia.org/wiki/Capacitor",
+   "title": "Capacitor - Wikipedia",
+   "snippet": "Colloquially, a capacitor may be called a cap. [2] The utility of a capacitor depends on its capacitance. While some capacitance exists …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://electronics.howstuffworks.com/capacitor.htm",
+   "title": "How Capacitors Work | HowStuffWorks",
+   "snippet": "In this article, we'll learn exactly what a capacitor is, what it does and how it's used in electronics. We'll also look at the history of the …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.electrical4u.com/what-is-capacitor/",
+   "title": "What is a Capacitor, And What is Capacitance? - Electrical4U",
+   "snippet": "Feb 15, 2014 · In a circuit, a capacitor acts as a charge storage device. It stores electric charge when voltage is applied across it and …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://capacitorjs.com/",
+   "title": "Capacitor by Ionic - Cross-platform apps with web technology",
+   "snippet": "Capacitor is an open source native runtime for building Web Native apps. Create cross-platform iOS, Android, and Progressive Web …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://capacitor.mikeholt.com/",
+   "title": "Capacitor",
+   "snippet": "Welcome to Mike Holt's Capacitor learning experience where you can charge your career with potential!",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.britannica.com/technology/capacitor",
+   "title": "Capacitor | Definition, Function, & Facts | Britannica",
+   "snippet": "Aug 21, 2026 · A capacitor, also called a condenser, is thus essentially a sandwich of two plates of conducting material separated by …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Capacitor_types",
+   "title": "Capacitor types - Wikipedia",
+   "snippet": "Capacitors are widely used as parts of electrical circuits in many common electrical devices. Capacitors, together with resistors and …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.electronics-tutorials.ws/capacitor/cap_1.html",
+   "title": "Introduction to Capacitors, Capacitance and Charge",
+   "snippet": "In basic terms, capacitors are energy storage components. They store this energy in the electric field created between their …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://simple.wikipedia.org/wiki/Capacitor",
+   "title": "Capacitor - Simple English Wikipedia, the free encyclopedia",
+   "snippet": "A capacitor (also called condenser, which is the older term) is an electronic device that stores electric energy. It is similar to a battery, …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.electronicsandyou.com/what-is-capacitor-types-formula-symbol.html",
+   "title": "What is Capacitor - Types, Formula, Symbol, ‎How it Works, Unit",
+   "snippet": "Jul 22, 2025 · A capacitor is a passive electrical component that can store energy in the electric field between a pair of conductors …",
+   "engine": "bing"
+  }
+ ]
+}

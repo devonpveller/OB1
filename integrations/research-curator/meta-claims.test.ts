@@ -130,6 +130,56 @@ Deno.test("B4: absence-of-EVIDENCE statements are meta even without the word 'so
   }
 });
 
+// ── X1 (tester, attempt 2) ─────────────────────────────────────────────────
+// `SOURCE_SUBJECT` is ^-anchored on the head clause, so a LEADING subordinate
+// clause walked straight past it: attempt 1 caught this restatement of the 0.85
+// poison and attempt 2 did not. The head sentence has more than one clause, and
+// the subject of ANY of them can be the evidence set.
+Deno.test("X1: a leading subordinate clause does not hide the subject", () => {
+  for (const t of [
+    "While the provided sources do not address the Dell OptiPlex 3050, they describe " +
+    "the NVIDIA DGX Spark, the Compaq d220 and ASUS motherboards.",
+    "Although the sources contain no information specific to the OptiPlex 3050, all of " +
+    "them reference other platforms.",
+    "Though no source mentions the OptiPlex 3050, several cover other Dell desktops.",
+    "Whereas the retrieved pages cover the DGX Spark, none covers the machine asked about.",
+  ]) {
+    assertEquals(classifyMetaClaim(t), "meta", t.slice(0, 60));
+  }
+});
+
+Deno.test("X1: a REASON clause about the sources is a justification, not a subject", () => {
+  // Live claim `083b830e`, which the first version of the multi-clause rule ate.
+  // "…, since the sources describe these as independent properties" justifies a
+  // world claim; it is the same kind of tail as "…, but no source confirms it".
+  assertEquals(
+    classifyMetaClaim(
+      "EFS's design implies a separation of concerns: the data-residency/privacy layer " +
+      "(customer-controlled cloud infrastructure) is architecturally distinct from the " +
+      "adversarial-prevention layer (safety classifiers and model-level safeguards), since " +
+      "the sources describe these as independent properties of the system rather than one " +
+      "enabling the other.",
+    ),
+    "world",
+  );
+  assertEquals(
+    classifyMetaClaim("The pump is rated to 12 bar, because the sources give its test pressure."),
+    "world",
+  );
+});
+
+Deno.test("X1: a leading subordinate clause about the WORLD is still a world claim", () => {
+  // The rule must read the clause's SUBJECT, not merely notice a subordinator.
+  for (const t of [
+    "While the pump is rated to 12 bar, the housing is rated to 8.",
+    "Although the OptiPlex 3050 uses an LGA 1151 socket, the 3060 does not.",
+    "Though semaglutide is approved for weight loss, it is not approved for gastroparesis.",
+    "While the study enrolled thirty participants, only fourteen completed it.",
+  ]) {
+    assertEquals(classifyMetaClaim(t), "world", t.slice(0, 60));
+  }
+});
+
 Deno.test("B4: absence in the WORLD is not absence of evidence", () => {
   for (const t of [
     "There is no evidence of tampering on the chassis.",

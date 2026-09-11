@@ -116,6 +116,36 @@ export function headClause(text: string): string {
 }
 
 /**
+ * The head sentence's clauses, each stripped of its subordinator so a
+ * `^`-anchored subject pattern can see the subject.
+ *
+ * The `^` anchor is deliberate — it is what makes these patterns test the
+ * SUBJECT rather than fire on any mention of "the sources" — but a LEADING
+ * subordinate clause defeated it: "While the provided sources do not address
+ * the Dell OptiPlex 3050, they describe the NVIDIA DGX Spark…" is a restatement
+ * of the 0.85 poison that attempt 1 caught and attempt 2 did not (tester, X1).
+ * So the head is split at `While|Although|Though|Whereas|If|When|Because|Since`
+ * and at the comma that ends such a clause, and EVERY resulting clause is
+ * judged. A claim is meta if ANY clause's subject is the evidence set.
+ */
+export function headClauses(text: string): string[] {
+  const head = headClause(text);
+  // Only a LEADING contrast subordinator restructures the sentence into
+  // "<subordinate>, <main>" — and only then does the subject of the second
+  // clause need judging separately. A subordinator later in the sentence
+  // introduces a REASON ("…, since the sources describe these as independent
+  // properties"), which is a justification for a world claim and belongs with
+  // the caveat tail. Judging it as a subject cost one live false positive
+  // (`083b830e`, an EFS architecture claim) the first time this was written.
+  const lead = head.match(/^\s*(while|although|though|whereas|even\s+though)\b\s*/i);
+  if (!lead) return [head];
+  const rest = head.slice(lead[0].length);
+  const comma = rest.search(/,(?![^(]*\))/);
+  if (comma < 0) return [rest.trim()];
+  return [rest.slice(0, comma).trim(), rest.slice(comma + 1).trim()].filter(Boolean);
+}
+
+/**
  * Family 1 — HEAD-ONLY. The thing the sentence is ABOUT is the evidence set:
  * its grammatical subject is "the sources", "no source", "the retrieved pages",
  * "this report". Judged on the head clause, so "…, but the sources do not state
@@ -201,9 +231,10 @@ export type MetaVerdict = "meta" | "world";
 export function classifyMetaClaim(text: string): MetaVerdict {
   const t = String(text || "");
   if (!t.trim()) return "world";
-  const head = headClause(t);
-  for (const re of SOURCE_SUBJECT) if (re.test(head)) return "meta";
-  for (const re of EVIDENCE_ABSENCE) if (re.test(head)) return "meta";
+  for (const clause of headClauses(t)) {
+    for (const re of SOURCE_SUBJECT) if (re.test(clause)) return "meta";
+    for (const re of EVIDENCE_ABSENCE) if (re.test(clause)) return "meta";
+  }
   for (const re of TRANSFER_DISCLAIMER) if (re.test(t)) return "meta";
   // The transfer disclaimer spelled out rather than idiomatic: the evidence is
   // attributed to a NAMED other thing AND the sentence contrasts that with the

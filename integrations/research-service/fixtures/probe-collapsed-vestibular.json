@@ -1,0 +1,68 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only) by re-running the four probes the TESTER used to fail T11 on attempt 2. Bing was the only engine answering; every hit is on topic for the query's FIRST salient token and none mentions the subject entity. The shipped classifier called the first two 'ok' at overlap 0.9/0.7.",
+ "_collapsed_on": "vestibular",
+ "query": "vestibular suppression 100 Hz auditory tone",
+ "entity": "100 Hz",
+ "hits": [
+  {
+   "url": "https://my.clevelandclinic.org/health/diseases/vestibular-disorders",
+   "title": "Vestibular Disorders: Symptoms, Causes & Treatment",
+   "snippet": "Jun 19, 2024 · Vestibular disorders involve problems with your vestibular system. This body system includes structures in your inner …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Vestibular_system",
+   "title": "Vestibular system - Wikipedia",
+   "snippet": "The vestibular system, in vertebrates, is a sensory system that creates the sense of balance and spatial orientation for the function of …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.webmd.com/brain/vestibular-disorders-facts",
+   "title": "Vestibular Disorders: Symptoms, Causes and Treatments - WebMD",
+   "snippet": "Oct 21, 2025 · This is called your vestibular system. Dizziness and trouble with your balance are the most common symptoms of …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://my.clevelandclinic.org/health/body/vestibular-system",
+   "title": "Vestibular System: Function & Anatomy - Cleveland Clinic",
+   "snippet": "Jun 19, 2024 · What is the vestibular system? The vestibular system includes sensory organs in your inner ear that help you maintain …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://vestibular.org/",
+   "title": "Discover a Life Rebalanced - Vestibular Disorders Association",
+   "snippet": "Explore vestibular disorders, diagnoses, and treatment resources. Discover coping strategies and a community of support. Better …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://vestibular.org/article/what-is-vestibular/",
+   "title": "WHAT IS - Vestibular Disorders Association",
+   "snippet": "The vestibular system includes the parts of the inner ear and brain that process the sensory information involved with controlling …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Vestibular_nerve",
+   "title": "Vestibular nerve - Wikipedia",
+   "snippet": "In humans the vestibular nerve transmits sensory information from vestibular hair cells located in the two otolith organs (the utricle …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.hopkinsmedicine.org/health/conditions-and-diseases/vestibular-balance-disorder",
+   "title": "Vestibular Balance Disorder - Johns Hopkins Medicine",
+   "snippet": "Dizziness and vertigo are classic symptoms of a vestibular balance disorder. Balance disorders can strike at any age, but are most …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.kenhub.com/en/library/anatomy/the-vestibular-system",
+   "title": "Vestibular system: Anatomy, pathway and function | Kenhub",
+   "snippet": "Nov 3, 2023 · The vestibular system is a somatosensory portion of the nervous system that provides us with the awareness of the …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.nhs.uk/conditions/labyrinthitis/",
+   "title": "Labyrinthitis and vestibular neuritis - NHS",
+   "snippet": "Read about labyrinthitis and vestibular neuritis (also known as vestibular neuronitis), including advice about symptoms, when to get …",
+   "engine": "bing"
+  }
+ ]
+}

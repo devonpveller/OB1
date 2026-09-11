@@ -358,6 +358,29 @@ Deno.test("the run's OWN search record carries the per-verdict counts", async ()
     coverageFooter(r.needsStatus, r.searchRecord, r.backstop), "search: DEGRADED");
 });
 
+// ── T11 wiring (tester, attempt 2) ─────────────────────────────────────────
+Deno.test("T11: the run's subject entity reaches the classifier", async () => {
+  // The live payload for `capacitor bulging OptiPlex 3050 repair`: ten pages
+  // about capacitors, none about the OptiPlex. The shipped detector called this
+  // `ok` at overlap 0.90 and the run fetched all ten. The entity is what makes
+  // it a search failure, so this asserts the WIRING, not just the module.
+  const p = JSON.parse(
+    Deno.readTextFileSync(new URL("./fixtures/probe-collapsed-capacitor.json", import.meta.url)),
+  );
+  const { deps, calls } = mockDeps({
+    entity: "OptiPlex 3050",
+    hitsFor: () => p.hits as SearchHit[],
+    relevance: () => true,     // even a permissive gate must not see these pages
+  });
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  assertEquals(r.fetchStats.search.ok, 0, "a set with no mention of the entity is not a healthy search");
+  assertEquals(r.fetchStats.sources, 0, "and it must never be fetched");
+  assert(r.searchRecord.collapsed + r.searchRecord.offtopic > 0);
+  assertEquals(r.backstop, "search_degraded");
+  assertEquals(r.outcome, "no_relevant_sources");
+  assert(calls.relevanceAsked.length === 0, "no page should have reached the relevance gate");
+});
+
 // ── B3 (tester, 2026-09-11) ────────────────────────────────────────────────
 // The `no_relevant_sources` guarantee was gated on `topicPath`, so on the
 // article / sources-only / disableWebSearch paths an EMPTY pool still reached

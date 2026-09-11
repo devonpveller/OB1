@@ -1,0 +1,57 @@
+{
+ "_provenance": "HAND-BUILT negative controls, 2026-09-11. These are the result sets the TESTER constructed to show the detector condemning good searches (attempt 1: the CrashLoopBackOff set; attempt 2: these two). They cannot be captured live, because the live plane returns only bing and bing does not answer these queries either - which is the point: a detector must not depend on the live plane being healthy to be shown wrong. Titles and snippets are ordinary pages of the kind a working engine returns; the subject ENTITY is present in every one.",
+ "query": "Kubernetes pod evicted OOMKilled",
+ "entity": "OOMKilled",
+ "hits": [
+  {
+   "url": "https://example.org/probe-good-oomkilled/0",
+   "title": "Debugging OOMKilled pods in Kubernetes",
+   "snippet": "A pod shows OOMKilled when the container exceeds its memory limit."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/1",
+   "title": "OOMKilled: diagnosing out-of-memory kills",
+   "snippet": "Why the kubelet reports OOMKilled and how to read the exit code."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/2",
+   "title": "Kubernetes OOMKilled exit code 137 explained",
+   "snippet": "OOMKilled maps to exit code 137 on the container status."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/3",
+   "title": "Fixing repeated OOMKilled restarts",
+   "snippet": "Raise the memory limit or find the leak causing OOMKilled."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/4",
+   "title": "Pod evicted versus OOMKilled",
+   "snippet": "Eviction and OOMKilled are different signals; here is how to tell."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/5",
+   "title": "OOMKilled troubleshooting checklist",
+   "snippet": "Memory requests, limits and the OOMKilled event trail."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/6",
+   "title": "Reading OOMKilled events with kubectl describe",
+   "snippet": "kubectl describe pod surfaces the OOMKilled reason."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/7",
+   "title": "Container OOMKilled after a memory spike",
+   "snippet": "A short spike is enough to trigger OOMKilled."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/8",
+   "title": "OOMKilled in production: a postmortem",
+   "snippet": "The OOMKilled loop that took down an ingest service."
+  },
+  {
+   "url": "https://example.org/probe-good-oomkilled/9",
+   "title": "Preventing OOMKilled with vertical pod autoscaling",
+   "snippet": "VPA sizing that avoids OOMKilled restarts."
+  }
+ ]
+}

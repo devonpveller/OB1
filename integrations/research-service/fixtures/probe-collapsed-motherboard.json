@@ -1,0 +1,68 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only) by re-running the four probes the TESTER used to fail T11 on attempt 2. Bing was the only engine answering; every hit is on topic for the query's FIRST salient token and none mentions the subject entity. The shipped classifier called the first two 'ok' at overlap 0.9/0.7.",
+ "_collapsed_on": "motherboard",
+ "query": "motherboard VRM failure OptiPlex 3050",
+ "entity": "OptiPlex 3050",
+ "hits": [
+  {
+   "url": "https://www.computerhope.com/jargon/m/mothboar.htm",
+   "title": "What Is a Motherboard? - Computer Hope",
+   "snippet": "Feb 22, 2026 · A motherboard is a printed circuit board and foundation of a computer that's the biggest board in a computer chassis. …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Motherboard",
+   "title": "Motherboard - Wikipedia",
+   "snippet": "A motherboard, also known as a mainboard, system board, logic board, and informally mobo (see § Nomenclature), is the main …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.amazon.com/Motherboards-Computer-Add-Ons-Computers/b?node=1048424",
+   "title": "Motherboards | Amazon.com",
+   "snippet": "Shop a wide selection of Motherboards at Amazon.com. Free shipping and free returns on eligible items.",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.newegg.com/Motherboard/Category/ID-20?msockid=11a46b1cb87c6fcb0ad87ccdb99d6ec7",
+   "title": "PC Motherboards for Computers | Newegg",
+   "snippet": "What does a motherboard do in a PC? A motherboard connects your CPU, memory, storage, and expansion components, allowing …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.pcmag.com/picks/the-best-motherboards",
+   "title": "The Best Motherboards We've Tested for 2026 | PCMag",
+   "snippet": "Jun 21, 2026 · Building a desktop PC, or upgrading an aging one? Here's all you need to know about choosing the right …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.gigabyte.com/Motherboard",
+   "title": "Motherboard - GIGABYTE Global",
+   "snippet": "GIGABYTE motherboards deliver reliable performance, advanced features, and long-lasting quality—an ideal foundation for your next …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.spiceworks.com/it-hardware/what-is-motherboard/",
+   "title": "What Is a Motherboard? Definition, Components, and Functions",
+   "snippet": "Feb 10, 2023 · A motherboard is a circuit board inside general-purpose computing systems, including personal computers, smart …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.tomshardware.com/best-picks/best-motherboards",
+   "title": "Best Motherboards 2026 for Gaming, by Socket and Chipset",
+   "snippet": "Access Bench, Roadmaps, deep analysis and other exclusive tools. Explore PREMIUM . Bench Performance Database. Dive into our …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.scientecheasy.com/2023/07/components-of-motherboard.html/",
+   "title": "Components of Motherboard and Their Functions - Scientech Easy",
+   "snippet": "Jul 29, 2026 · A motherboard is the main circuit board in a computer that connects all of the crucial components such as the CPU, …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.amazon.com/motherboard/s?k=motherboard",
+   "title": "Amazon.com: Motherboard",
+   "snippet": "Discover gaming and professional motherboards with PCIe 4.0 and 5.0 support. Find reliable options with excellent connectivity and …",
+   "engine": "bing"
+  }
+ ]
+}

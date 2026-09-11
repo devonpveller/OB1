@@ -1,0 +1,68 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only) by re-running the four probes the TESTER used to fail T11 on attempt 2. Bing was the only engine answering; every hit is on topic for the query's FIRST salient token and none mentions the subject entity. The shipped classifier called the first two 'ok' at overlap 0.9/0.7.",
+ "_collapsed_on": "semaglutide",
+ "query": "semaglutide gastroparesis incidence",
+ "entity": "semaglutide",
+ "hits": [
+  {
+   "url": "https://peptidesguide.com/peptides-for-weight-loss.html",
+   "title": "Peptides for Weight Loss - Semaglutide, Ozempic, Tirzepatide, …",
+   "snippet": "Aug 27, 2026 · Semaglutide binds to GLP-1 receptors in the brain, particularly in areas involved in appetite regulation such as the …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Semaglutide",
+   "title": "Semaglutide - Wikipedia",
+   "snippet": "Semaglutide (as Kayshild) is indicated in conjunction with diet and exercise for the treatment of adults with non-cirrhotic metabolic …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.drugs.com/semaglutide.html",
+   "title": "Semaglutide: Uses, Dosage, Side Effects, Brands - Drugs.com",
+   "snippet": "Aug 26, 2026 · What is semaglutide? Semaglutide (Ozempic, Wegovy, Rybelsus) is a prescription GLP-1 medication used for weight …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.webmd.com/drugs/ozempic-semaglutide",
+   "title": "Ozempic (Semaglutide) - Uses­, Side Effects, and More",
+   "snippet": "Mar 11, 2026 · Find patient medical information for Ozempic (semaglutide) on WebMD including its uses, side effects and safety, …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.wegovy.com/",
+   "title": "Weight Management for Adults with Obesity | Wegovy® (semaglutide)",
+   "snippet": "Learn about Wegovy® (semaglutide) injection 2.4 mg, 7.2 mg or tablets 25 mg for adults with obesity or overweight and see how it …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://bnf.nice.org.uk/drugs/semaglutide/",
+   "title": "Semaglutide | Drugs | BNF | NICE",
+   "snippet": "View semaglutide information, including dose, uses, side-effects, renal impairment, pregnancy, breast feeding, contra-indications and …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://infoantidiabetic.com/drug.php?name=semaglutide",
+   "title": "Semaglutide: Uses, Dosage, Benefits & Patient Reviews",
+   "snippet": "Comprehensive guide to semaglutide - how it works, dosing, benefits, side effects and real patient feedback.",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.mayoclinic.org/drugs-supplements/semaglutide-subcutaneous-route/description/drg-20406730",
+   "title": "Semaglutide (subcutaneous route) - Side effects & dosage",
+   "snippet": "Aug 1, 2026 · Semaglutide injection is used to treat type 2 diabetes. It is used together with diet and exercise to help control your …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.medicalnewstoday.com/articles/drugs-semaglutide",
+   "title": "Semaglutide: Side effects, use for weight loss, cost",
+   "snippet": "Feb 26, 2025 · Get the facts about semaglutide injection (Ozempic, Wegovy) and tablet (Rybelsus), including side effects, online …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.medicinenet.com/semaglutide/article.htm",
+   "title": "Semaglutide: Diabetes Weight Loss Uses, Side Effects, Dosage",
+   "snippet": "Semaglutide is a medication used in the treatment of type 2 diabetes mellitus and for chronic weight management, along with …",
+   "engine": "bing"
+  }
+ ]
+}

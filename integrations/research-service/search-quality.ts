@@ -31,8 +31,14 @@ export interface SearchHit { url: string; title: string; snippet: string; }
 export type SearchVerdict = "ok" | "collapsed" | "offtopic" | "empty";
 export interface SearchQuality {
   verdict: SearchVerdict;
-  /** Fraction of hits whose title+snippet carry >= 2 distinct query terms. */
+  /** Fraction of hits whose title+snippet carry >= 2 distinct query terms.
+   *  SECONDARY EVIDENCE — reported always, decisive only in the no-entity
+   *  fallback. It was the gate through two failed attempts and it is not one:
+   *  a set can score 0.9 while not one page mentions the subject. */
   overlap: number;
+  /** Fraction of hits carrying the SUBJECT ENTITY as a phrase. The gate, when
+   *  an entity is known. `undefined` means the caller supplied none. */
+  entityShare?: number;
   /** The single query token the hit TITLES piled onto, when collapsed. */
   collapsedOn?: string;
 }
@@ -49,14 +55,28 @@ export const COLLAPSE_TITLE_SHARE = 0.6;
  */
 export const OFFTOPIC_MIN_HITS = 5;
 /**
- * A query term this long is DISTINCTIVE enough that a hit containing it alone
- * is on topic ("CrashLoopBackOff", "semaglutide", "vestibular"). Short tokens
- * are not: the audited collapses piled onto "dell", "most" and "100", and if
- * any single token could vouch for a hit the recorded failures would classify
- * `ok` and this whole module would be undone. Seven is above every collapse
- * token measured on 2026-09-11 and below the shortest real anchor seen.
+ * How many hits must carry the SUBJECT ENTITY for the set to be an answer.
+ *
+ * Measured 2026-09-11 over every fixture in this directory (six captured from
+ * the live gateway, one from a throwaway rig, two hand-built controls):
+ *
+ *   good sets      0.75  search-good-optiplex   (9/12 — three are 3060/general Dell)
+ *                  1.00  probe-good-oomkilled
+ *                  1.00  probe-good-iphone
+ *   failed sets    0.00  search-collapsed-dell / -most / -the100
+ *                  0.00  probe-collapsed-capacitor / -motherboard / -vestibular
+ *
+ * The gap is 0.00 against 0.75 — the widest a threshold can sit in — and 0.5 is
+ * its midpoint. This is not a constant fitted to the incident: it separates
+ * "the engine returned pages about the thing you asked about" from "it did not",
+ * and the entity is a STRUCTURAL fact the run already possesses (KEYWORDIZE
+ * extracts it and `keywordQuery` enforces it into every query).
+ *
+ * The two constants that came before this — an 8-string pattern list, then a
+ * 7-character token length — each failed because they encoded the shape of the
+ * recorded incident rather than the shape of the failure.
  */
-export const ANCHOR_MIN_LEN = 7;
+export const ENTITY_SHARE = 0.5;
 
 const STOP = new Set(
   ("a an the and or of for to in on at by with from as is are was were be been being " +
@@ -103,29 +123,45 @@ export function overlapRatio(query: string, hits: SearchHit[]): number {
   const qt = [...new Set(terms(query))];
   if (!qt.length) return 1;                 // nothing to match on — not the engine's fault
   const min = Math.min(2, qt.length);
-  const anchor = anchorTerm(qt);
   let good = 0;
   for (const h of hits) {
     const text = `${h?.title || ""} ${h?.snippet || ""}`.toLowerCase();
     let present = 0;
     for (const t of qt) if (has(text, t)) present++;
-    // A hit carrying the DISTINCTIVE anchor term is on topic even if it is the
-    // only query word in it: "Debug CrashLoopBackOff" answers "Kubernetes
-    // CrashLoopBackOff diagnose". Without this, a query whose subject is one
-    // strong token plus generic words scored 0.00 on a perfect result set.
-    if (present >= min || (anchor && present >= 1 && has(text, anchor))) good++;
+    if (present >= min) good++;
   }
   return good / hits.length;
 }
 
-/** The longest query term, when it is long enough to vouch for a hit alone. */
-export function anchorTerm(queryTerms: string[]): string {
-  let best = "";
-  for (const t of queryTerms) if (t.length > best.length) best = t;
-  return best.length >= ANCHOR_MIN_LEN ? best : "";
+/**
+ * Match the entity as a PHRASE: its tokens adjacent, in order, tolerant of the
+ * separators engines actually write ("OptiPlex 3050", "optiplex-3050",
+ * "OPTIPLEX  3050"). Adjacency is the point — "OptiPlex 7080 and the 3050-era
+ * chipset" contains both tokens and is not about the subject.
+ */
+export function entityPhrase(entity: string | undefined | null): RegExp | null {
+  const toks = String(entity || "").toLowerCase().match(/[a-z0-9]+/g) || [];
+  if (!toks.length) return null;
+  return new RegExp("(?<![a-z0-9])" + toks.join("[^a-z0-9]{0,2}") + "(?![a-z0-9])", "i");
 }
 
-/** The query token that the greatest share of TITLES carries, with that share. */
+/** Fraction of hits whose title+snippet carries the entity phrase. */
+export function entityShare(re: RegExp, hits: SearchHit[]): number {
+  if (!hits.length) return 0;
+  let n = 0;
+  for (const h of hits) if (re.test(`${h?.title || ""} ${h?.snippet || ""}`)) n++;
+  return n / hits.length;
+}
+
+/**
+ * The query token that the greatest share of TITLES carries, with that share.
+ * Entity tokens are NOT excluded: an engine can collapse onto PART of the
+ * entity, which is exactly what `100 Hz sound motion sickness...` does — every
+ * hit carries "100" (The 100, the TV series) and none carries "hz", so the
+ * phrase is absent while one of its tokens dominates. Naming "100" is the
+ * useful diagnosis; an earlier version skipped entity tokens and could only
+ * report the weaker "offtopic".
+ */
 function dominantTitleTerm(query: string, hits: SearchHit[]): { term: string; share: number } {
   const qt = [...new Set(allTerms(query))];
   let best = { term: "", share: 0 };
@@ -143,10 +179,46 @@ function dominantTitleTerm(query: string, hits: SearchHit[]): { term: string; sh
  * the caller must count it as a search failure and must never let it read as
  * evidence that the topic is absent.
  */
-export function classifyHits(query: string, hits: SearchHit[]): SearchQuality {
+export function classifyHits(
+  query: string, hits: SearchHit[], entity?: string | null,
+): SearchQuality {
   const list = Array.isArray(hits) ? hits.filter((h) => h && h.url) : [];
   if (!list.length) return { verdict: "empty", overlap: 0 };
   const overlap = overlapRatio(query, list);
+
+  // ── The ENTITY gate ──────────────────────────────────────────────────────
+  // The question this asks is the one that matters and the one two previous
+  // versions could not ask: are these pages about the thing that was asked
+  // about? Overlap could not answer it — `capacitor bulging OptiPlex 3050
+  // repair` scored 0.90 on ten pages about capacitors in general, because nine
+  // of them carry "capacitor" and "repair". The entity is a structural fact the
+  // run already holds, not a constant chosen to fit an incident.
+  const ent = entityPhrase(entity);
+  if (ent) {
+    const share = entityShare(ent, list);
+    if (share >= ENTITY_SHARE) {
+      // The subject IS in the results. They may still be weak for the specific
+      // NEED — `semaglutide gastroparesis incidence` returned ten real
+      // semaglutide pages that never mention gastroparesis — but that is what
+      // the relevance gate is for. Calling a search broken because the engine
+      // understood the subject and not the question would be the same overreach
+      // as calling junk `ok`, pointed the other way.
+      return { verdict: "ok", overlap, entityShare: share };
+    }
+    const domE = dominantTitleTerm(query, list);
+    if (domE.share >= COLLAPSE_TITLE_SHARE) {
+      return { verdict: "collapsed", overlap, entityShare: share, collapsedOn: domE.term };
+    }
+    return { verdict: "offtopic", overlap, entityShare: share };
+  }
+
+  // ── Fallback: no entity was supplied ─────────────────────────────────────
+  // Article-mode preliminary gap searches and any legacy caller land here. This
+  // is the ORIGINAL two-term overlap rule and it is WEAKER: without knowing the
+  // subject it cannot tell "ten pages about capacitors" from "ten pages about
+  // this capacitor". It is kept because a wrong `collapsed` on a preliminary
+  // gap costs one tentative paragraph, while the topic path — where the audited
+  // failure lives — always has an entity.
   if (overlap >= COLLAPSE_OVERLAP) return { verdict: "ok", overlap };
   const dom = dominantTitleTerm(query, list);
   if (dom.share >= COLLAPSE_TITLE_SHARE) {

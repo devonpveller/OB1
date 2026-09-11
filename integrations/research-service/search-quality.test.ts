@@ -53,7 +53,7 @@ Deno.test("property: every title carrying ALL query terms is never collapsed", (
     title: "Dell OptiPlex 3050 capacitor failure teardown",
     snippet: "dell optiplex 3050 capacitor failure",
   }));
-  const v = classifyHits(q, hits);
+  const v = classifyHits(q, hits, "OptiPlex 3050");
   assertEquals(v.verdict, "ok");
   assertEquals(v.overlap, 1);
 });
@@ -76,6 +76,114 @@ Deno.test("overlapRatio is the scorer the search-engine note used (2 distinct te
   assertEquals(overlapRatio("dell optiplex 3050 failure", hits), 0.5);
 });
 
+// ── T11 (tester, attempt 2, 2026-09-11) ────────────────────────────────────
+// The four probes that failed attempt 2, captured from the live gateway. Two of
+// them were classified `ok` at overlap 0.9 and 0.7 by a detector whose safety
+// argument was a 7-character threshold: `ANCHOR_MIN_LEN` separated SHORT
+// collapse tokens from LONG ones, not collapse tokens from subject entities,
+// and `capacitor` / `motherboard` / `vestibular` / `semaglutide` are the head
+// nouns of exactly the technical and clinical questions this engine is for.
+//
+// The rule is now structural instead of fitted: a result set answers the query
+// only if the SUBJECT ENTITY — the thing KEYWORDIZE already extracts and the
+// harness already enforces into every query — is actually present in the hits.
+type Probe = { query: string; entity: string; hits: SearchHit[] };
+const probe = (n: string): Probe =>
+  JSON.parse(Deno.readTextFileSync(new URL(`./fixtures/${n}.json`, import.meta.url)));
+
+Deno.test("T11: the tester's live probes are search failures, not 'ok'", () => {
+  for (const name of [
+    "probe-collapsed-capacitor",     // was ok @ 0.90
+    "probe-collapsed-motherboard",   // was ok @ 0.70
+    "probe-collapsed-vestibular",
+  ]) {
+    const p = probe(name);
+    const v = classifyHits(p.query, p.hits, p.entity);
+    assert(v.verdict !== "ok", `${name} classified ${v.verdict} (overlap ${v.overlap})`);
+    assertEquals(v.entityShare, 0, `${name}: the entity is absent from every hit`);
+  }
+});
+
+Deno.test("T11: entity PRESENT in every hit is never collapsed, whatever the token lengths", () => {
+  for (const name of ["probe-good-oomkilled", "probe-good-iphone"]) {
+    const p = probe(name);
+    const v = classifyHits(p.query, p.hits, p.entity);
+    assertEquals(v.verdict, "ok", `${name} classified ${v.verdict}`);
+  }
+  // Property: synthesise a set whose only query word is the entity, with the
+  // entity in a dominating position — the exact shape that used to collapse.
+  for (const entity of ["CrashLoopBackOff", "OOMKilled", "semaglutide", "XJ", "e5"]) {
+    const hits: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
+      url: `https://example.org/${i}`,
+      title: `${entity}: what it means`,
+      snippet: `everything about ${entity}`,
+    }));
+    const v = classifyHits(`${entity} diagnose fix guide`, hits, entity);
+    assertEquals(v.verdict, "ok", `${entity} -> ${v.verdict}`);
+  }
+});
+
+Deno.test("T11: the three ORIGINAL collapse fixtures still collapse under the entity rule", () => {
+  for (const [name, entity, token] of [
+    ["search-collapsed-dell", "OptiPlex 3050", "dell"],
+    ["search-collapsed-most", "OptiPlex 3050", "most"],
+    ["search-collapsed-the100", "100 Hz", "100"],
+  ]) {
+    const f = load(name);
+    const v = classifyHits(f.query, f.hits, entity);
+    assertEquals(v.verdict, "collapsed", name);
+    assertEquals((v.collapsedOn || "").toLowerCase(), token, name);
+  }
+});
+
+Deno.test("T11: an entity-present set whose hits miss the NEED is a weak search, not a broken engine", () => {
+  // `semaglutide gastroparesis incidence` returned ten real semaglutide pages
+  // that say nothing about gastroparesis. The engine understood the subject;
+  // the relevance gate is what rejects a page that does not answer the need.
+  // Calling this "the search failed" would be the same overreach that failed
+  // attempts 1 and 2, in the other direction.
+  const p = probe("probe-collapsed-semaglutide");
+  const v = classifyHits(p.query, p.hits, p.entity);
+  assertEquals(v.verdict, "ok");
+  assertEquals(v.entityShare, 1);
+  assert(v.overlap < 0.5, `overlap ${v.overlap} — low, and recorded as secondary evidence`);
+});
+
+Deno.test("T11: the entity phrase is matched as a PHRASE, in the shapes engines write it", () => {
+  const mk = (title: string): SearchHit[] =>
+    Array.from({ length: 10 }, (_, i) => ({ url: `u${i}`, title, snippet: "" }));
+  for (const t of ["OptiPlex 3050 manual", "optiplex 3050 teardown", "Dell OptiPlex-3050 SFF",
+                   "OPTIPLEX  3050 owner's guide"]) {
+    assertEquals(classifyHits("optiplex 3050 repair", mk(t), "OptiPlex 3050").verdict, "ok", t);
+  }
+  // Adjacency matters: the tokens must be the phrase, not scattered.
+  const scattered = mk("OptiPlex 7080 and the 3050-era chipset");
+  assert(classifyHits("optiplex 3050 repair", scattered, "OptiPlex 3050").verdict !== "ok");
+});
+
+Deno.test("T11: with NO entity the classifier falls back, and the fallback is weaker", () => {
+  // Article-mode preliminary gap searches and legacy callers pass no entity.
+  // This is the set that separates the two rules: every hit carries two or more
+  // query terms (capacitor / failure / repair), so the overlap rule scores it
+  // 1.00 and calls it a healthy search — while not one page is about the
+  // OptiPlex 3050. Only the entity gate can tell.
+  const q = "OptiPlex 3050 capacitor failure repair";
+  const hits: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
+    url: `https://example.org/${i}`,
+    title: "Capacitor failure and repair: a general guide",
+    snippet: "how capacitor failure happens and how repair is done",
+  }));
+  const without = classifyHits(q, hits);
+  assertEquals(without.verdict, "ok", "the fallback cannot see what it is not told");
+  assertEquals(without.overlap, 1);
+  assertEquals(without.entityShare, undefined);
+
+  const withEntity = classifyHits(q, hits, "OptiPlex 3050");
+  assert(withEntity.verdict !== "ok", `entity gate said ${withEntity.verdict}`);
+  assertEquals(withEntity.entityShare, 0);
+  assertEquals(withEntity.overlap, 1, "overlap is reported, and is not the gate");
+});
+
 // ── B1 (tester, 2026-09-11) ────────────────────────────────────────────────
 // The mirror image of the failure this detector exists for: a PERFECT result
 // set reported as a broken search. `overlapRatio` demanded two distinct query
@@ -84,7 +192,7 @@ Deno.test("overlapRatio is the scorer the search-engine note used (2 distinct te
 // dominantTitleTerm then found it in 100 % of titles, which is the collapse
 // signature exactly. The run would then tell the user "search failure, not
 // evidence of absence" about a search that worked.
-Deno.test("B1: a hit set carrying only the ANCHOR term is ok, not collapsed", () => {
+Deno.test("B1: a hit set whose only query word is the ENTITY is ok, not collapsed", () => {
   const q = "Kubernetes CrashLoopBackOff diagnose";
   const titles = [
     "Debug CrashLoopBackOff",
@@ -97,21 +205,21 @@ Deno.test("B1: a hit set carrying only the ANCHOR term is ok, not collapsed", ()
     url: `https://k8s.example.org/${i}`, title,
     snippet: "how to debug a pod stuck in CrashLoopBackOff",
   }));
-  const v = classifyHits(q, hits);
+  const v = classifyHits(q, hits, "CrashLoopBackOff");
   assertEquals(v.verdict, "ok");
-  assertEquals(v.overlap, 1);
 });
 
-Deno.test("B1: the anchor term must be DISTINCTIVE — 'dell' cannot rescue the Dell junk", () => {
-  // The collapsed-dell fixture's own collapse token is short and generic. If any
-  // single query token counted as an anchor, the recorded failure would classify
-  // ok and the whole item would be undone.
+Deno.test("B1: a distinctive token in the junk cannot rescue it — only the entity can", () => {
+  // Attempt 2 tried to solve B1 with a token-LENGTH rule. It separated short
+  // collapse tokens from long ones, not collapse tokens from subject entities,
+  // and `capacitor` / `motherboard` / `vestibular` walked straight through it.
+  // These three recorded failures are the floor that rule had to hold.
   const f = load("search-collapsed-dell");
-  assertEquals(classifyHits(f.query, f.hits).verdict, "collapsed");
+  assertEquals(classifyHits(f.query, f.hits, "OptiPlex 3050").verdict, "collapsed");
   const m = load("search-collapsed-most");
-  assertEquals(classifyHits(m.query, m.hits).verdict, "collapsed");
+  assertEquals(classifyHits(m.query, m.hits, "OptiPlex 3050").verdict, "collapsed");
   const t = load("search-collapsed-the100");
-  assertEquals(classifyHits(t.query, t.hits).verdict, "collapsed");
+  assertEquals(classifyHits(t.query, t.hits, "100 Hz").verdict, "collapsed");
 });
 
 // ── B2 (tester, 2026-09-11) ────────────────────────────────────────────────
@@ -124,7 +232,7 @@ Deno.test("B2: zero overlap across a full page of hits is never 'ok'", () => {
     title: `Best Buy Deals ${i}`,
     snippet: "Shop laptops and desktops on sale today.",
   }));
-  const v = classifyHits("OptiPlex 3050 capacitor bulging repair", hits);
+  const v = classifyHits("OptiPlex 3050 capacitor bulging repair", hits, "OptiPlex 3050");
   assertEquals(v.verdict, "offtopic");
   assertEquals(v.overlap, 0);
 });

@@ -1,0 +1,57 @@
+{
+ "_provenance": "HAND-BUILT negative controls, 2026-09-11. These are the result sets the TESTER constructed to show the detector condemning good searches (attempt 1: the CrashLoopBackOff set; attempt 2: these two). They cannot be captured live, because the live plane returns only bing and bing does not answer these queries either - which is the point: a detector must not depend on the live plane being healthy to be shown wrong. Titles and snippets are ordinary pages of the kind a working engine returns; the subject ENTITY is present in every one.",
+ "query": "iPhone 18 Pro camera sensor",
+ "entity": "iPhone 18 Pro",
+ "hits": [
+  {
+   "url": "https://example.org/probe-good-iphone/0",
+   "title": "iPhone 18 Pro camera review",
+   "snippet": "The iPhone 18 Pro sensor is larger than last year's."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/1",
+   "title": "iPhone 18 Pro: sensor size and aperture",
+   "snippet": "Apple lists the iPhone 18 Pro main sensor specifications."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/2",
+   "title": "Hands on with the iPhone 18 Pro camera",
+   "snippet": "Low-light samples from the iPhone 18 Pro."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/3",
+   "title": "iPhone 18 Pro versus iPhone 17 Pro cameras",
+   "snippet": "What changed in the iPhone 18 Pro imaging stack."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/4",
+   "title": "iPhone 18 Pro Max camera teardown",
+   "snippet": "Inside the iPhone 18 Pro camera module."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/5",
+   "title": "iPhone 18 Pro photography guide",
+   "snippet": "Getting the most from the iPhone 18 Pro sensor."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/6",
+   "title": "iPhone 18 Pro camera specifications",
+   "snippet": "Full iPhone 18 Pro lens and sensor table."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/7",
+   "title": "Testing the iPhone 18 Pro telephoto",
+   "snippet": "The iPhone 18 Pro telephoto at 5x."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/8",
+   "title": "iPhone 18 Pro night mode samples",
+   "snippet": "iPhone 18 Pro night mode compared."
+  },
+  {
+   "url": "https://example.org/probe-good-iphone/9",
+   "title": "Is the iPhone 18 Pro camera worth it?",
+   "snippet": "Weighing the iPhone 18 Pro upgrade."
+  }
+ ]
+}

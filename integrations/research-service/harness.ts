@@ -546,7 +546,12 @@ export async function runResearch(
         return [];
       }
       searchRecord.hits += hits.length;
-      const v = classifyHits(q, hits);
+      // The SUBJECT ENTITY is what makes this a judgement rather than a guess:
+      // KEYWORDIZE extracted it, `keywordQuery` enforced it into this very
+      // query, and `classifyHits` now asks whether the results actually contain
+      // it. Empty (no KEYWORDIZE pass, e.g. a single-need run) falls back to the
+      // weaker overlap rule, which search-quality.ts documents.
+      const v = classifyHits(q, hits, subjectEntity);
       searchRecord.queries.push({
         query: q, verdict: v.verdict, hits: hits.length,
         overlap: Math.round(v.overlap * 100) / 100, collapsedOn: v.collapsedOn,
@@ -894,6 +899,18 @@ export async function runResearch(
           if (sourcesFetched >= PRELIM_MAX_FETCH) { backstop = "max_fetch"; break; }
           let hits: SearchHit[] = [];
           try { hits = await deps.searchWeb(gap, SEARCH_K); } catch { hits = []; }
+          // Article mode runs no KEYWORDIZE pass, so there is no subject entity
+          // to gate on here: `classifyHits` falls back to the overlap rule (see
+          // search-quality.ts). A wrong verdict on a PRELIMINARY gap costs one
+          // tentative paragraph, and these findings are already rendered as
+          // "preliminary research suggests…" — it is not the audited path.
+          const gv = classifyHits(gap, hits);
+          if (gv.verdict !== "ok") {
+            await progress("gather",
+              `preliminary gap search returned no usable results (${gv.verdict})`,
+              { prelim_rejected: 1 });
+            continue;
+          }
           hits = rankHits(hits);
           const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url))
             .slice(0, Math.max(0, Math.min(2, PRELIM_MAX_FETCH - sourcesFetched)));
