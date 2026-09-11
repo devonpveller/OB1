@@ -1,0 +1,61 @@
+{
+ "_provenance": "the 8 claim ids named in documentation/notes/research-audit-optiplex-100hz-2026-09-11.md, SELECTed from live openbrain-db on 2026-09-11. Every one was status='active' at export.",
+ "claims": [
+  {
+   "id": "cd1d66fb-b4f5-4496-8090-33568126be7d",
+   "text": "The sources establish that motion sickness in VR is driven by visual-vestibular sensory conflict and that interventions targeting the vestibular or visual channel (GVS, fluid-filled horizon glasses, reduced visual motion) can reduce symptoms; however, none of these sources extend that logic to an auditory-channel intervention such as a 100 Hz tone.",
+   "tag": "inferred",
+   "confidence": 0.6,
+   "status_at_export": "active"
+  },
+  {
+   "id": "eea04dc2-d88c-47bc-b23d-65867813324e",
+   "text": "The EEG finding that VIMS is associated with a shift toward 1–10 Hz power (not 100 Hz) suggests that the neural signature of motion sickness in VR operates at much lower frequencies than 100 Hz, though this does not rule out a 100 Hz auditory intervention acting through a different pathway.",
+   "tag": "inferred",
+   "confidence": 0.51000005,
+   "status_at_export": "active"
+  },
+  {
+   "id": "32061b2c-a641-4ed3-a4d4-869a6c3d6ab2",
+   "text": "The 0.2 Hz and 2 Hz frequency thresholds described for physical motion-induced sickness (Source 3) concern mechanical oscillation frequencies, not auditory frequencies, and cannot be directly extrapolated to predict whether a 100 Hz sound tone would interact with the vestibular system.",
+   "tag": "uncertain",
+   "confidence": 0.6,
+   "status_at_export": "active"
+  },
+  {
+   "id": "0c2b7c4e-2755-42e1-9a10-f854a9d1e34b",
+   "text": "The provided sources contain no information specific to the Dell OptiPlex 3050 model; all sources reference other platforms (NVIDIA DGX Spark, Compaq d220, Gigabyte GB-BSCEA-3955, Looking Glass 32\", ASUS motherboards, XYN Spatial Reality Display).",
+   "tag": "sourced",
+   "confidence": 0.85,
+   "status_at_export": "active"
+  },
+  {
+   "id": "1306bb5a-560c-4d79-a96a-960c35038495",
+   "text": "General BIOS power-restore settings (e.g., \"Restore AC Power Loss\" with Power Off / Power On / Last State options) exist on motherboards and can be found under Advanced or Power Management menus; while the sources describe this for ASUS and Compaq boards, the same category of setting would apply to any BIOS/UEFI, but no source confirms the exact menu path for the OptiPlex 3050.",
+   "tag": "inferred",
+   "confidence": 0.51000005,
+   "status_at_export": "active"
+  },
+  {
+   "id": "7f2ac93b-6680-40b9-84a6-6ce49e52fac1",
+   "text": "Thermal throttling and automatic shutdown at approximately 95°C is documented for the NVIDIA DGX Spark under heavy AI workloads; this is NOT confirmed as a threshold or behavior for the Dell OptiPlex 3050.",
+   "tag": "inferred",
+   "confidence": 0.51000005,
+   "status_at_export": "active"
+  },
+  {
+   "id": "ed40c734-bf3f-444d-99c1-cd11091f6da4",
+   "text": "Out-of-RAM errors and system instability reported alongside thermal issues pertain to the NVIDIA DGX Spark, not the Dell OptiPlex 3050.",
+   "tag": "inferred",
+   "confidence": 0.51000005,
+   "status_at_export": "active"
+  },
+  {
+   "id": "f4c0bd7a-9707-4dd2-aecd-d6ea446b338f",
+   "text": "The general principle that regular software maintenance, proactive health monitoring, and firmware/BIOS updates help maintain system stability is stated for the DGX Spark; it is reasonable to apply the same principle to any x86 desktop, but no source explicitly states this for the OptiPlex 3050.",
+   "tag": "uncertain",
+   "confidence": 0.51000005,
+   "status_at_export": "active"
+  }
+ ]
+}

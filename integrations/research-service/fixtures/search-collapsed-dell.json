@@ -1,0 +1,67 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only). Bing was the only engine answering; every hit is for the query's FIRST salient token.",
+ "_collapsed_on": "Dell",
+ "query": "Dell OptiPlex 3050 common hardware failure modes capacitor CPU socket defects",
+ "hits": [
+  {
+   "url": "https://www.dell.com/en-us?msockid=09fe15316f746a4c243102e06ed26b3e",
+   "title": "Computers, Monitors & Technology Solutions | Dell USA",
+   "snippet": "Dell provides technology solutions, services & support. Buy Laptops, Touch Screen PCs, Desktops, Servers, Storage, Monitors, …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.dell.com/support/home/en-us?msockid=09fe15316f746a4c243102e06ed26b3e",
+   "title": "Support Home | Dell US",
+   "snippet": "Get support for your Dell product with free diagnostic tests, drivers, downloads, how-to articles, videos, FAQs and community forums. …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Dell",
+   "title": "Dell - Wikipedia",
+   "snippet": "While the industry's average selling price to individuals was going down, Dell's was going up, as second- and third-time computer …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://techdirect.dell.com/",
+   "title": "Dell",
+   "snippet": "TechDirect offers tools and resources to manage and support Dell products efficiently, including updates, diagnostics, and technical …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.bestbuy.com/site/brands/dell/pcmcat140500050010.c?id=pcmcat140500050010",
+   "title": "Dell - Best Buy",
+   "snippet": "Shop Best Buy for great prices on Dell computers, including powerful desktops, performance laptops & ultrabooks, premium monitors …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Dell_Technologies",
+   "title": "Dell Technologies - Wikipedia",
+   "snippet": "Dell Technologies Inc. is an American multinational technology company that has been headquartered in Round Rock, Texas, since …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.amazon.com/stores/Dell/page/9B75DD0E-9F42-4B9B-ACAA-F329B23ADE7D",
+   "title": "Dell - amazon.com",
+   "snippet": "Explore Dell's latest computers & technology solutions. Shop Laptops, Desktops, Gaming Laptops and Desktops, and Monitors.",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.pcmag.com/picks/the-best-dell-laptops",
+   "title": "The Best Dell Laptops We've Tested for 2026 - PCMag",
+   "snippet": "Sep 1, 2026 · Need a budget laptop for the kids? Or a powerful one for design work or gaming? Dell sells a huge variety. Let's decode …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.dellrefurbished.com/",
+   "title": "Shop Dell Refurbished | Affordable Refurbished Laptops, PCs, More",
+   "snippet": "Shop quality refurbished laptops, desktops, and more from Dell Refurbished. Great deals, shipping, and warranty options for top …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.bestbuy.com/site/dell/dell-laptops/pcmcat140500050011.c?id%3Dpcmcat140500050011",
+   "title": "Dell Laptop Computers & Notebooks – Best Buy",
+   "snippet": "Shop Best Buy for Dell laptops. Experience versatility in business or learning using an exceptional Dell laptop computer built with high …",
+   "engine": "bing"
+  }
+ ]
+}

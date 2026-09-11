@@ -1,0 +1,78 @@
+{
+ "_provenance": "captured 2026-09-11 from a THROWAWAY SearXNG rig (searxng/searxng:2026.9.11-61d660276, label ai-stack.harness.owner=research-trust, on search_search-net so egress went through the same Mullvad proxy as live) running the engine policy this branch ships. Hand-building was not needed: real engines answered.",
+ "query": "Dell OptiPlex 3050 common hardware failure modes capacitor CPU socket defects",
+ "hits": [
+  {
+   "url": "https://www.dell.com/support/product-details/en-us/product/optiplex-3050-desktop/diagnose",
+   "title": "Support for OptiPlex 3050 Tower | Diagnostics | Dell US",
+   "snippet": "Diagnose an issue or test pc for your Dell OptiPlex 3050 Tower. Identify and fix common problems with online dell diagnostics.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.dell.com/support/product-details/en-us/product/optiplex-3050-sff/resources/manuals",
+   "title": "Support for OptiPlex 3050 Small Form Factor - Dell",
+   "snippet": "Discover manuals and documentation for your OptiPlex 3050 Small Form Factor. Choose a product or enter your Service Tag for customized content.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.manualslib.com/manual/1243956/Dell-Optiplex-3050.html",
+   "title": "DELL OPTIPLEX 3050 OWNER'S MANUAL Pdf Download | ManualsLib",
+   "snippet": "View and Download Dell OptiPlex 3050 owner's manual online. OptiPlex 3050 desktop pdf manual download. Also for: Optiplex 3050 all-in-one, W18b.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.dell.com/support/kbdoc/en-us/000126021/a-reference-guide-to-the-dell-optiplex-diagnostic-indicators",
+   "title": "A Reference Guide to the Dell OptiPlex Diagnostic Indicators",
+   "snippet": "A possible system board resource or hardware failure has occurred. Clear the CMOS. Disconnect ; CPU Cache failure Disconnect all external devices and ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=iW_YXidzgqY",
+   "title": "DELL OPTIPLEX 3060 AMBER LIGHT BLINKING || DELL... - YouTube",
+   "snippet": "Troubleshooting and Fixing a Dell Optiplex I bought for $35 that Doesn't POST! Computer Hardware Tips and Tutorials.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://manualzz.com/doc/o/1tlt0p/dell-optiplex-3050-desktop-owner-s-manual-troubleshooting-your-computer",
+   "title": "Troubleshooting your computer. Dell OptiPlex 3050 | Manualzz",
+   "snippet": "Dell OptiPlex 3050 Dell OptiPlex 3050 is a compact and versatile desktop computer designed for both professional and personal use. With its powerful processing capabilities, it can handle demanding tasks such as video editing, graphic design, and data analysis. Additionally, its sleek and modern design makes it a great fit for any workspace.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.manualslib.com/manual/3132039/Dell-Optiplex-3050-Small-Form-Factor.html",
+   "title": "Dell OptiPlex 3050 Small Form Factor Owner's Manual",
+   "snippet": "View and Download Dell OptiPlex 3050 Small Form Factor owner's manual online. OptiPlex 3050 Small Form Factor desktop pdf manual download. Also for: D11s.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://downloads.dell.com/topicspdf/optiplex-3050-desktop_Owners-Manual3_en-us.pdf",
+   "title": "PDF OptiPlex 3050 Small Form Factor Owner's Manual - downloads.dell.com",
+   "snippet": "The new SuperSpeed mode has a transfer rate of 4.8Gbps. While the specification retains Hi-Speed, and Full-Speed USB mode, commonly known as USB 2.0 and 1.1 respectively, the slower modes still operate at 480Mbps and 12Mbps respectively and are kept to maintain backward compatibility.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.reddit.com/r/todayilearned/comments/1ikgqh4/til_that_from_2003_to_2005_dell_sold_over_11/",
+   "title": "TIL that from 2003 to 2005, Dell sold over 11 million computers ...",
+   "snippet": "Feb 8, 2025 · TIL that from 2003 to 2005, Dell sold over 11 million computers with leaky capacitors, with documents indicating that Dell was aware they ...Dell 3050 micro power supply cpu throttling PSA/guide - RedditDell 3050 motherboard problem : r/ElectronicsRepair - RedditMore results from www.reddit.com",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.tiktok.com/discover/optiplex-3050-how-to-fix-screen-freezeing",
+   "title": "Optiplex 3050 How to Fix Screen Freezeing | TikTok",
+   "snippet": "Discover videos related to Optiplex 3050 How to Fix Screen Freezeing on TikTok.Learn how to stop Valorant from freezing your computer when you alt tab by adjusting your Hardware Accelerated GPU Scheduling settings.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.manua.ls/dell/optiplex-3050/manual",
+   "title": "User manual Dell OptiPlex 3050 (English - 73 pages)",
+   "snippet": "Manual Dell OptiPlex 3050. View the Dell OptiPlex 3050 manual for free or ask your question to other Dell OptiPlex 3050 owners.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.dell.com/support/manuals/en-us/optiplex-3050-desktop/optiplex-3050-desktop-tower-owners-manual/diagnostic-and-power-led-codes?guid=guid-7d615d96-eb00-4be6-b8dc-191949e0f418&lang=en-us",
+   "title": "OptiPlex 3050 Tower Owner's Manual - Dell",
+   "snippet": "Failure System is in Recovery Mode. Bad Processor CPU configuration activity is in progress or a CPU failure was detected.",
+   "engine": "google"
+  }
+ ]
+}

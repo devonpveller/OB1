@@ -1,0 +1,67 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only). Bing was the only engine answering; every hit is for the query's FIRST salient token.",
+ "_collapsed_on": "100 (The 100, TV series)",
+ "query": "100 Hz sound motion sickness vestibular study",
+ "hits": [
+  {
+   "url": "https://en.wikipedia.org/wiki/The_100_(TV_series)",
+   "title": "The 100 (TV series) - Wikipedia",
+   "snippet": "The 100 follows descendants of post-apocalyptic survivors from a space habitat, the Ark, who return to Earth nearly a century after a …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.youtube.com/playlist?list=PLfrisy2KXzkfUMpf-Op9--p0GpNs2dmr2",
+   "title": "The 100 TV Series - YouTube",
+   "snippet": "Set 97 years after a nuclear war has destroyed civilization, when a spaceship housing humanity's lone survivors sends 100 juvenile …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://pluto.tv/us/shows/the-100-ptv3/?msockid=23fdcf1b5218637d11b8d8ca53b3621d",
+   "title": "Watch The 100 for Free Online | Pluto TV",
+   "snippet": "After an exile in space, human survivors return to a wildly transformed Earth…only to discover that the human race never truly left. …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.imdb.com/title/tt2661044/",
+   "title": "The 100 (TV Series 2014–2020) - IMDb",
+   "snippet": "The 100: Created by Jason Rothenberg. With Eliza Taylor, Bob Morley, Marie Avgeropoulos, Lindsey Morgan. Set 97 years after a …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.justwatch.com/us/tv-show/the-100",
+   "title": "The 100 - watch tv show streaming online - JustWatch",
+   "snippet": "Find out how and where to watch \"The 100\" online on Netflix, Prime Video, and Disney+ today – including 4K and free options.",
+   "engine": "bing"
+  },
+  {
+   "url": "https://pluto.tv/us/shows/the-100-ptv3/season/1/?msockid=23fdcf1b5218637d11b8d8ca53b3621d",
+   "title": "Watch The 100 Season 1 Free | Pluto TV",
+   "snippet": "Stream The 100 season 1 for free on Pluto TV. Watch full episodes and other hit TV shows anytime for free.",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=aDrsItJ_HU4",
+   "title": "The 100 - Official Trailer - YouTube",
+   "snippet": "Oct 10, 2013 · The 100 (Season 1) It's been nearly 100 years since Earth was devastated by a nuclear apocalypse, with the only …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/List_of_The_100_episodes",
+   "title": "List of The 100 episodes - Wikipedia",
+   "snippet": "The series follows a group of teens as they become the first people from a space habitat to return to Earth after a devastating nuclear …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://simple.wikipedia.org/wiki/The_100_(TV_series)",
+   "title": "The 100 (TV series) - Simple English Wikipedia, the free encyclopedia",
+   "snippet": "The series ended on September 30, 2020. 100 episodes were made. The series follows post-apocalyptic survivors from a space …",
+   "engine": "bing"
+  },
+  {
+   "url": "https://www.imdb.com/title/tt2661044/episodes/",
+   "title": "The 100 (TV Series 2014–2020) - Episode list - IMDb",
+   "snippet": "97 years after a nuclear war, human kind is living in space. 100 juvenile delinquents are sent down to Earth to see if the planet is …",
+   "engine": "bing"
+  }
+ ]
+}
