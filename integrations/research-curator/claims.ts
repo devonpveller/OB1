@@ -89,9 +89,19 @@ function cleanClaimText(segment: string): string {
 // judge verdict rejects beyond them.
 
 /** Layer A — the claim talks about the source SET rather than about the world. */
+// A REPORTING verb — the verb a sentence uses when its subject is a document
+// rather than the world. "no source STATES x" is meta; "the author found no
+// Sources sheet" is a fact about a spreadsheet and was dropped by the first
+// version of this list, which matched a bare "no sources".
+const REPORTS =
+  "(mention|state|says?|confirm|document|describe|address|explain|discuss|give|list|name|" +
+  "report|indicate|support|cover|contain|provide|specify|specifies|clarif\\w*|enumerat\\w*|" +
+  "break|frame|label|explicitly|available|provided|here\\b)";
+
 const SOURCE_REFERENTIAL: RegExp[] = [
   /^the\s+(provided\s+)?sources?\s+(contain|do(es)?\s+not|lack|make|reference|describe|address|establish|say)/i,
-  /\bno\s+(provided\s+)?sources?\b/i,
+  new RegExp("^no\\s+(provided\\s+)?sources?\\b", "i"),
+  new RegExp("\\bno\\s+(provided\\s+)?sources?\\s+(\\w+\\s+){0,2}" + REPORTS, "i"),
   /\bnone\s+of\s+(these|the|those)\s+sources?\b/i,
   /\b(the\s+)?sources?\s+(provided|given|available|held)\b/i,
   /\b(the\s+)?sources?\s+(do|does)\s+not\b/i,
@@ -109,7 +119,11 @@ const SOURCE_REFERENTIAL: RegExp[] = [
  * Spark, NOT the OptiPlex" is the shape that produced four of the eight.
  */
 const EVIDENTIAL_HEDGE: RegExp[] = [
-  /\b(is|are|was|were)\s+not\s+confirmed\b/i,
+  // A BARE "… is not confirmed" was here and matched ordinary world claims that
+  // end in an honest caveat ("…though the exact UI pattern is not confirmed"),
+  // which the filter would then have deleted. Only the form that names what it
+  // is not confirmed FOR survives: that is the "documented for X, not for the
+  // thing you asked about" shape the audit found.
   /\bnot\s+confirmed\s+(as|for|in)\b/i,
   /\bdoes\s+not\s+rule\s+out\b/i,
   /\bcannot\s+be\s+(directly\s+)?extrapolated\b/i,

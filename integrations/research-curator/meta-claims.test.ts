@@ -54,6 +54,29 @@ Deno.test("classifyMetaClaim: the shapes, not the eight strings", () => {
   assertEquals(classifyMetaClaim("Vestibular rehabilitation therapy uses personalised exercises."), "world");
 });
 
+Deno.test("world claims the FIRST version of these patterns wrongly ate", () => {
+  // Both found by running the shipped classifier over all 7 744 active claims
+  // on 2026-09-11 (findings sink section 3.7). A filter that deletes knowledge
+  // when a sentence ends in an honest caveat is worse than the poison it removes.
+  assertEquals(
+    classifyMetaClaim(
+      'The reference to "advertising controls in account settings" suggests the consent ' +
+      "mechanism is embedded within the ChatGPT application's own settings interface " +
+      "rather than being handled by a separate third-party CMP, though the exact UI " +
+      "pattern (toggle, checkbox, modal) is not confirmed.",
+    ),
+    "world",
+  );
+  assertEquals(
+    classifyMetaClaim(
+      "Upon opening the Low-effort output, the author found no Sources sheet and no " +
+      "Checks sheet, meaning the analysis could be followed but the assumptions' " +
+      "provenance had to be traced manually.",
+    ),
+    "world",
+  );
+});
+
 Deno.test("isOmnibusCitation: one line citing more than four sources is a smell", () => {
   assertEquals(isOmnibusCitation([1, 2, 3, 4]), false);
   assertEquals(isOmnibusCitation([1, 2, 3, 4, 5]), true);
