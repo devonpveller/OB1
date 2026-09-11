@@ -25,6 +25,10 @@ export interface SearchRecordEntry {
   verdict: "ok" | "collapsed" | "offtopic" | "empty" | "error";
   hits: number;
   overlap: number;
+  /** Share of hits carrying the subject entity's core, when it was the gate. */
+  entityShare?: number;
+  /** Whether the entity gate was used, or why it was not. */
+  entityStatus?: "used" | "missing" | "rejected";
   collapsedOn?: string;
 }
 
@@ -45,11 +49,76 @@ export interface SearchRecord {
   offtopic: number;
   empty: number;
   errors: number;
+  /** Searches judged WITHOUT an entity gate, and why. Surfaced in the footer:
+   *  a reader who sees "search: ok" is entitled to know it was decided by the
+   *  weaker overlap rule. */
+  entity_missing?: number;
+  entity_rejected?: number;
 }
 
 export function emptySearchRecord(): SearchRecord {
   return { queries: [], hits: 0, fetched: 0, readable: 0, relevant: 0,
-           ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0 };
+           ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0,
+           entity_missing: 0, entity_rejected: 0 };
+}
+
+// ── Coverage reconciliation (research-trust-entity, 2026-09-11) ────────────
+// Live dry run 1f2ff740 cited 11 sources, grounded 25 lines about the OptiPlex
+// 3050, and printed "needs answered 0 of 6": the COVERAGE_STAGED judge marked
+// every need open. Both halves can be true — sources can support many facts
+// without settling any one sub-question — and what was false was the footer's
+// SILENCE about the second number. So:
+//
+//   * a need the synthesis actually grounded is never left `open`; it becomes
+//     `partial`, which is what it is;
+//   * `answered` is never manufactured here — overruling the judge with a term
+//     overlap would be a worse lie than the one being fixed;
+//   * `search_failed` is never reopened: if the search for that need failed,
+//     a line grounded from the REUSE pool does not mean it succeeded;
+//   * the footer prints the partial count, so body and footer agree.
+
+const GROUND_TAG_RE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]/i;
+const CITE_RE = /\[Sources?\b[^\]]*\]/i;
+const NEED_STOP = new Set(
+  ("a an the and or of for to in on at by with from as is are was were be been " +
+   "what which who how why when where does do did can could should would will " +
+   "this that these those it its their there here about into over under than " +
+   "any some other specific known associated used using have has had more most")
+    .split(" "),
+);
+function needTerms(s: string): string[] {
+  return [...new Set((String(s || "").toLowerCase().match(/[a-z0-9]+/g) || [])
+    .filter((t) => t.length > 2 && !NEED_STOP.has(t)))];
+}
+
+/**
+ * For each need, did the synthesis GROUND something about it? A line counts
+ * only if it is tagged, carries a citation, and shares at least two
+ * distinctive terms with the need — one shared word is the topic, not the need.
+ */
+export function groundedNeeds(needs: string[], synthesis: string): boolean[] {
+  const lines = String(synthesis || "").split(/\r?\n/)
+    .filter((l) => GROUND_TAG_RE.test(l) && CITE_RE.test(l))
+    .map((l) => new Set(needTerms(l)));
+  return (needs || []).map((need) => {
+    const nt = needTerms(need);
+    if (nt.length < 2) return false;
+    return lines.some((lt) => nt.filter((t) => lt.has(t)).length >= 2);
+  });
+}
+
+/** Reconcile the judge's per-need verdicts with what the synthesis grounded. */
+export function reconcileNeedsStatus(needs: NeedState[], synthesis: string): NeedState[] {
+  const list = needs || [];
+  if (!String(synthesis || "").trim()) return list;
+  const grounded = groundedNeeds(list.map((n) => n.need), synthesis);
+  return list.map((n, i) =>
+    n.status === "open" && grounded[i] ? { ...n, status: "partial" as NeedStatus } : n
+  );
+}
+
+export function partialCount(needs: NeedState[]): number {
+  return (needs || []).filter((n) => n.status === "partial").length;
 }
 
 export function answeredCount(needs: NeedState[]): number {
@@ -88,7 +157,11 @@ export function coverageFooter(
   backstop?: string | null,
 ): string {
   const parts: string[] = [];
-  parts.push(`needs answered ${answeredCount(needs)} of ${(needs || []).length}`);
+  const partial = partialCount(needs);
+  parts.push(
+    `needs answered ${answeredCount(needs)} of ${(needs || []).length}` +
+    (partial ? ` (${partial} partly)` : ""),
+  );
   if (record) {
     const hitBits: string[] = [`${record.hits} hits`];
     const junkCalls = (record.collapsed || 0) + (record.offtopic || 0);
@@ -99,6 +172,15 @@ export function coverageFooter(
     const health = searchHealthLabel(record);
     if (health === "DEGRADED") {
       parts.push(`search: DEGRADED (${junkCalls} of ${junkCalls + record.ok + record.empty} searches returned junk)`);
+    }
+  }
+  if (record) {
+    const noGate = (record.entity_missing || 0) + (record.entity_rejected || 0);
+    if (noGate) {
+      const why = record.entity_rejected
+        ? `${record.entity_rejected} rejected the run's subject`
+        : `${record.entity_missing} had no subject to check`;
+      parts.push(`entity gate: ${noGate} search(es) judged without it (${why})`);
     }
   }
   if (backstop && backstop !== "complete") parts.push(`stopped early: ${backstop}`);

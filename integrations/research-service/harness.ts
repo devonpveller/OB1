@@ -16,7 +16,8 @@ import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } 
 import { classifyHits, emptySearchStats, keywordQuery, reformulate, type SearchStats } from "./search-quality.ts";
 import { applyNumericGrounding } from "./grounding.ts";
 import {
-  coverageFooter, emptySearchRecord, failureNotice, shouldClassifyTemplate,
+  coverageFooter, emptySearchRecord, failureNotice, reconcileNeedsStatus,
+  shouldClassifyTemplate,
   type NeedState, type NeedStatus, type SearchRecord,
 } from "./report.ts";
 
@@ -552,9 +553,21 @@ export async function runResearch(
       // it. Empty (no KEYWORDIZE pass, e.g. a single-need run) falls back to the
       // weaker overlap rule, which search-quality.ts documents.
       const v = classifyHits(q, hits, subjectEntity);
+      // Count what the gate could NOT do. A fallback that is never counted is a
+      // gate reporting health it did not measure: the footer would say the
+      // search was fine without saying it was judged by the weaker rule.
+      if (v.entityStatus === "missing") searchStats.entity_missing++;
+      else if (v.entityStatus === "rejected") {
+        searchStats.entity_rejected++;
+        await progress("gather",
+          `the subject entity "${subjectEntity}" is not in this query - judging by overlap alone`,
+          { entity_rejected: searchStats.entity_rejected });
+      }
       searchRecord.queries.push({
         query: q, verdict: v.verdict, hits: hits.length,
-        overlap: Math.round(v.overlap * 100) / 100, collapsedOn: v.collapsedOn,
+        overlap: Math.round(v.overlap * 100) / 100,
+        entityShare: v.entityShare, entityStatus: v.entityStatus,
+        collapsedOn: v.collapsedOn,
       });
       if (v.verdict === "collapsed") {
         searchStats.collapsed++;
@@ -731,6 +744,8 @@ export async function runResearch(
     searchRecord.offtopic = searchStats.offtopic;
     searchRecord.empty = searchStats.empty;
     searchRecord.errors = searchStats.errors;
+    searchRecord.entity_missing = searchStats.entity_missing;
+    searchRecord.entity_rejected = searchStats.entity_rejected;
   } else {
     await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
       { staged: staged.length });
@@ -1073,6 +1088,13 @@ export async function runResearch(
       status: (gapNeeds.includes(need) ? "open" : "answered") as NeedStatus,
     }));
   }
+  // Reconcile the judge's per-need verdicts with what the synthesis actually
+  // grounded (research-trust-entity). Live dry run 1f2ff740 cited 11 sources,
+  // grounded 25 lines, and printed "needs answered 0 of 6" because
+  // COVERAGE_STAGED marked every need open — a footer contradicting its own
+  // report. A need the synthesis grounds becomes `partial`; `answered` is never
+  // manufactured here, and `search_failed` is never reopened.
+  needsStatus = reconcileNeedsStatus(needsStatus, synthesis);
   const answeredNeeds = needsStatus.filter((n) => n.status === "answered").length;
   let prose = "";
   let reportType = "";

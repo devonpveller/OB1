@@ -1,0 +1,129 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway AFTER the research-trust deploy (GET http://127.0.0.1:8085/search?format=json, read-only; 3-4 engines answering). These are the queries the deployed detector called `collapsed` in dry runs b7e701ef (100 Hz) and 1f2ff740 (OptiPlex) - the pages are there, the entity string was matched too literally.",
+ "_dry_run": "b7e701ef",
+ "_expect": "ok",
+ "query": "100Hz audio VR motion sickness physiological mechanism",
+ "entity": "100Hz audio",
+ "hits": [
+  {
+   "url": "https://scitechdaily.com/scientists-discover-unique-100-hz-sound-that-alleviates-motion-sickness/",
+   "title": "Scientists Discover Unique 100 Hz Sound That Alleviates Motion Sickness",
+   "snippet": "Researchers at Nagoya University discovered that stimulating the inner ear with a specific 100 Hz sound, called \"sound spice,\" can significantly reduce motion sickness symptoms like nausea and dizziness. The safe and simple technology activates the vestibular system, improving balance and ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://pubmed.ncbi.nlm.nih.gov/40128952/",
+   "title": "Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound pressure levels may improve motion sickness - PubMed",
+   "snippet": "Conclusion: Since the exacerbated results of posturography and HRV reflect shaking-mediated imbalance and autonomic dysfunction, respectively, the results suggest that the imbalance and autonomic dysregulation in motion sickness could be improved ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://mindfulfrequencieslab.com/blog/this-mysterious-100-hz-sound-could-solve-your-motion-sickness",
+   "title": "Unlock Motion Sickness Relief With This Unique 100Hz Sound Therapy — M i n d f u l F r e q u e n c i e s L a b",
+   "snippet": "Unlike higher-pitched sounds, 100 Hz falls within the range that the human ear can perceive clearly, but it's also deep and soothing. In the study, researchers observed that exposure to this frequency had a direct effect on participants who were engaged in motion sickness-inducing activities such as VR simulations and motion platforms.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://torontostarts.com/2025/05/21/motion-sickness-sound-therapy/",
+   "title": "How 100 Hz Motion Sickness Sound Therapy is Transforming Travel Comfort",
+   "snippet": "The effectiveness of the 100 Hz sound therapy lies in its precise interaction with your vestibular system. This specific frequency creates vibrations that are particularly effective at stimulating the otolithic organs in your inner ear.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11955832/",
+   "title": "Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound ...",
+   "snippet": "Conclusion Since the exacerbated results of posturography and HRV reflect shaking-mediated imbalance and autonomic dysfunction, respectively, the results suggest that the imbalance and autonomic dysregulation in motion sickness could be improved by just 1-min exposure to a pure tone with daily exposable sound pressure levels.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://bigsoundbank.com/blog/relieve-motion-sickness-100hz-sound-b452.html",
+   "title": "Relieve Motion Sickness with a 100 Hz Sound Frequency - BigSoundBank",
+   "snippet": "A groundbreaking study from Nagoya University reveals that a single minute of exposure to a 100 Hz sound can significantly reduce motion sickness symptoms like nausea and dizziness. By stimulating the vestibular system, this non-invasive method offers a promising alternative to medication. Learn how you can try it yourself with a simple online sound generator.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://ridecalm.app/blog/nagoya-university-100hz-research",
+   "title": "How Sound Frequency Therapy Reduces Motion Sickness -- Nagoya ...",
+   "snippet": "Deep dive into the Nagoya University study on 100Hz sound therapy for motion sickness. Learn how 60 seconds of sound can reduce nausea for up to 2 hours by stimulating the vestibular system.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/OculusQuest/comments/1jwab1j/scientists_discover_unique_100_hz_sound_that/",
+   "title": "r/OculusQuest on Reddit: Scientists Discover Unique 100 Hz Sound That Alleviates Motion Sickness",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Motion_sickness",
+   "title": "Motion sickness - Wikipedia",
+   "snippet": "Motion sickness occurs due to a difference between actual and expected motion. Symptoms commonly include nausea, vomiting, cold sweat, headache, dizziness, tiredness, loss of appetite, and increased salivation.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.sciencedaily.com/releases/2025/04/250404122627.htm",
+   "title": "A unique sound alleviates motion sickness | ScienceDaily",
+   "snippet": "A research group has discovered that using a device that stimulates the inner ear with a specific wavelength of sound reduces motion sickness. Even a single minute of stimulation with a unique ...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://hearinghealthmatters.org/hearing-news-watch/2025/sound-therapy-motion-sickness/",
+   "title": "Can Sound Therapy Cure Motion Sickness? New Research Shows Promising ...",
+   "snippet": "The study found that sound stimulation at 100 Hz, a frequency found to activate the vestibular system, could provide a simple yet effective treatment for motion sickness.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://netpsychology.org/understanding-and-preventing-vr-motion-sickness/",
+   "title": "VR Motion Sickness: Causes, Prevention & Treatment (2026)",
+   "snippet": "Up to 80% of VR users experience motion sickness. Learn the psychology behind it, who's at risk, and 7 proven strategies to prevent and treat symptoms.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://virtualspeech.com/blog/motion-sickness-vr",
+   "title": "Motion Sickness in VR: Why it happens and how to minimise it",
+   "snippet": "What VR motion sickness is, what causes it, and how to minimise it so you can enjoy your favourite games, training and simulations.VR motion sickness happens when your brain receives conflicting signals about movement in the environment around you, and your body’s relation to it.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.sciencedirect.com/science/article/pii/S0169260725001312",
+   "title": "A comprehensive exploration of motion sickness process analysis from ...",
+   "snippet": "Therefore, utilizing EEG to comprehensively analyze the VR motion sickness process, and identifying a neuro-markers that characterizes the entire process, is crucial. Such analysis could shed light on the underlying neural mechanisms and provide a theoretical foundation for neurofeedback interventions.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=L-MNVaLD2oE",
+   "title": "Testing \"Storm Breakers\" (ocean simulation plugin with...) - YouTube",
+   "snippet": "О сервисе Прессе Авторские права Связаться с нами Авторам Рекламодателям...",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/OculusQuest/comments/1k823t1/a_follow_up_to_using_a_100hz_tone_to_prevent/",
+   "title": "r/OculusQuest on Reddit: A follow up to using a 100hz tone to prevent motion sickness, my experience.",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://yhysimulator.com/motion-sickness-in-vr/",
+   "title": "Understanding Motion Sickness in VR: Causes and Solutions",
+   "snippet": "Motion sickness in VR is a multifaceted issue that arises from several factors within the virtual environment. To understand why it occurs, it’s essential to break it down into four primary categories: sensory conflict, postural instability, technical limitations, and content design.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.jstage.jst.go.jp/article/ehpm/30/0/30_24-00247/_html/-char/en",
+   "title": "Just 1-min exposure to a pure tone at 100 Hz with daily ... - J-STAGE",
+   "snippet": "Conclusion: Since the exacerbated results of posturography and HRV reflect shaking-mediated imbalance and autonomic dysfunction, respectively, the results suggest that the imbalance and autonomic dysregulation in motion sickness could be improved by just 1-min exposure to a pure tone with daily exposable sound pressure levels.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.tiktok.com/discover/how-to-turn-off-motion-sickness-setting-in-untangled-vr",
+   "title": "How to Turn Off Motion Sickness Setting in Untangled Vr | TikTok",
+   "snippet": "Discover effective tips to combat motion sickness in VR. Learn simple tricks for a better virtual reality experience!",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.techtarget.com/iotagenda/definition/virtual-reality-sickness-VR-motion-sickness",
+   "title": "What is virtual reality sickness (VR motion sickness)?",
+   "snippet": "Who is susceptible to VR motion sickness? VR motion sickness can potentially impact anyone that puts a VR headset over their eyes and ears. The potential risk exists for individuals of any age or gender.",
+   "engine": "yandex"
+  }
+ ]
+}

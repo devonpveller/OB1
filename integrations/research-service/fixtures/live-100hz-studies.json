@@ -1,0 +1,129 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway AFTER the research-trust deploy (GET http://127.0.0.1:8085/search?format=json, read-only; 3-4 engines answering). These are the queries the deployed detector called `collapsed` in dry runs b7e701ef (100 Hz) and 1f2ff740 (OptiPlex) - the pages are there, the entity string was matched too literally.",
+ "_dry_run": "b7e701ef",
+ "_expect": "ok",
+ "query": "100Hz audio VR motion sickness peer-reviewed academic studies",
+ "entity": "100Hz audio",
+ "hits": [
+  {
+   "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11955832/",
+   "title": "Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound ...",
+   "snippet": "Conclusion Since the exacerbated results of posturography and HRV reflect shaking-mediated imbalance and autonomic dysfunction, respectively, the results suggest that the imbalance and autonomic dysregulation in motion sickness could be improved by just 1-min exposure to a pure tone with daily exposable sound pressure levels.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.jstage.jst.go.jp/article/ehpm/30/0/30_24-00247/_article",
+   "title": "Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound pressure levels may improve motion sickness",
+   "snippet": "Conclusion: Since the exacerbated results of posturography and HRV reflect shaking-mediated imbalance and autonomic dysfunction, respectively, the results suggest that the imbalance and autonomic dysregulation in motion sickness could be improved by just 1-min exposure to a pure tone with daily exposable sound pressure levels.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.researchgate.net/publication/342685360_Motion_Sickness_in_Virtual_Reality_An_Empirical_Evaluation",
+   "title": "(PDF) Motion Sickness in Virtual Reality: An Empirical Evaluation",
+   "snippet": "In this paper we present a exploratory study on the physiological responses when experiencing motion sickness in Virtual Reality (VR). To this end, we developed a VR application that can induce ...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.sciencedirect.com/science/article/pii/S1524070325000013",
+   "title": "Strategies for reducing motion sickness in virtual reality through ...",
+   "snippet": "By deeply analyzing and discussing the causes of motion sickness and integrating the core concepts of RDW technology, the paper designs a series of improved strategies for handheld controller movement operations, aimed at reducing motion sickness in VR experiences.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.tandfonline.com/doi/full/10.1080/02639904.2019.1599566",
+   "title": "tandfonline.com/doi/full/10.1080/02639904.2019.1599566",
+   "snippet": "here's the blind peer-reviewed paper.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/OculusQuest/comments/1jwab1j/scientists_discover_unique_100_hz_sound_that/",
+   "title": "r/OculusQuest on Reddit: Scientists Discover Unique 100 Hz Sound That Alleviates Motion Sickness",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://news.ycombinator.com/item?id=43740021",
+   "title": "A unique sound alleviates motion sickness | Hacker News",
+   "snippet": "I'm gonna wait for a much better study reproducing this before I put any stock in it, personally · There are multiple experiments with 82 total participants. One of those experiments does indeed have a sample size of 10",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.nature.com/articles/s41598-022-21307-z.pdf",
+   "title": "PDF EEG-based analysis of various sensory stimulation effects to reduce ...",
+   "snippet": "The present study was conducted to investigate activity changes in cerebral cortex regions and questionnaires that might be related to reductions in motion sickness-induced in a VR environment.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://pure.fujita-hu.ac.jp/en/publications/just-1-min-exposure-to-a-pure-tone-at-100-hz-with-daily-exposable/",
+   "title": "Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound ...",
+   "snippet": "Conclusion: Since the exacerbated results of posturography and HRV reflect shaking-mediated imbalance and autonomic dysfunction, respectively, the results suggest that the imbalance and autonomic dysregulation in motion sickness could be improved by just 1-min exposure to a pure tone with daily exposable sound pressure levels.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://scholar.google.com/",
+   "title": "Google Scholar",
+   "snippet": "Google Scholar provides a simple way to broadly search for scholarly literature. Search across a wide variety of disciplines and sources: articles, theses, books, abstracts and court opinions.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.sciencedirect.com/science/article/pii/S0169260725001312",
+   "title": "A comprehensive exploration of motion sickness process analysis from ...",
+   "snippet": "Most of the existing studies (as discussed in the next section) focus on offline analysis, extracting features from different frequency bands, or using an end-to-end trainable model to achieve a high classification accuracy. However, these studies often neglect a comprehensive examination of the entire VR motion sickness process, making it difficult to pinpoint specific features that reveal VR ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=CtBz-e-rus0",
+   "title": "Fix VR Motion Sickness NOW AND FOREVER! - YouTube",
+   "snippet": "Trying VR Sickness Remedies (so you don't have to)Ink Ribbon16K views • 6 years agoLivePlaylist ()Mix (50+).5 Eye Tips To Prevent VR Motion Sickness (Cybersickness)Dr. EyeGuy127K views • 4 years agoLivePlaylist ()Mix (50+). 9:47.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://link.springer.com/article/10.1186/s43163-025-00898-0",
+   "title": "The role of virtual reality and sound in ındividuals with motion sickness",
+   "snippet": "Considering this, the present study aims to investigate the effects of different auditory conditions on anxiety, heart rate, game performance, and optokinetic responses in individuals with MS symptoms during a VR task. We hypothesise that different sounds have different effects on the feeling of motion and MS.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.tiktok.com/discover/how-to-turn-off-motion-sickness-setting-in-untangled-vr",
+   "title": "How to Turn Off Motion Sickness Setting in Untangled Vr | TikTok",
+   "snippet": "Learn how to build VR legs and avoid motion sickness with these helpful tips.Discover how to eliminate the black circle in VR for a better experience. Learn effective solutions for comfort and motion sickness!",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://virtualspeech.com/blog/motion-sickness-vr",
+   "title": "Motion Sickness in VR: Why it happens and how to minimise it",
+   "snippet": "What VR motion sickness is, what causes it, and how to minimise it so you can enjoy your favourite games, training and simulations.VR motion sickness happens when your brain receives conflicting signals about movement in the environment around you, and your body’s relation to it.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.researchgate.net/publication/390138520_Just_1-min_exposure_to_a_pure_tone_at_100_Hz_with_daily_exposable_sound_pressure_levels_may_improve_motion_sickness",
+   "title": "Just 1-min exposure to a pure tone at 100 Hz with daily ... - ResearchGate",
+   "snippet": "A mouse study showed a long-lasting (≥120 min) alleviative effect on shaking-mediated exacerbated beam test scores by 5-min exposure to a pure tone of 85 dBZ at 100 Hz, which was ex vivo ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://arborxr.com/blog/vr-motion-sickness",
+   "title": "VR Motion Sickness: Common Causes and Prevention... - ArborXR",
+   "snippet": "VR motion sickness (or VR sickness) is a physical discomfort that occurs when there's a conflict between what your eyes and ears are sensing and what they’re telling your brain during VR experiences.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.techtarget.com/iotagenda/definition/virtual-reality-sickness-VR-motion-sickness",
+   "title": "What is virtual reality sickness (VR motion sickness)?",
+   "snippet": "What causes VR motion sickness? VR sickness is generally caused by a mismatch in signals triggered by the VR environment sent to the brain from the users's eyes and inner ear.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://samsung.gadgethacks.com/news/samsung-hearapy-app-and-motion-sickness-the-science-explained/",
+   "title": "Samsung Hearapy App and Motion Sickness: The Science Explained << Samsung :: Gadget Hacks",
+   "snippet": "Hearapy is built on one peer-reviewed study from Nagoya University, published in Environmental Health and Preventive Medicine in 2025 (doi.org/10.1265/ehpm.24-00247), that found a 100Hz tone reduced motion sickness symptoms in controlled scenarios.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://mindfulfrequencieslab.com/blog/this-mysterious-100-hz-sound-could-solve-your-motion-sickness",
+   "title": "Unlock Motion Sickness Relief With This Unique 100Hz Sound Therapy — M i n d f u l F r e q u e n c i e s L a b",
+   "snippet": "In the study, researchers observed that exposure to this frequency had a direct effect on participants who were engaged in motion sickness-inducing activities such as VR simulations and motion platforms.",
+   "engine": "brave"
+  }
+ ]
+}

@@ -36,9 +36,16 @@ export interface SearchQuality {
    *  fallback. It was the gate through two failed attempts and it is not one:
    *  a set can score 0.9 while not one page mentions the subject. */
   overlap: number;
-  /** Fraction of hits carrying the SUBJECT ENTITY as a phrase. The gate, when
-   *  an entity is known. `undefined` means the caller supplied none. */
+  /** Fraction of hits carrying the SUBJECT ENTITY's core. The gate, when an
+   *  entity is known and usable. `undefined` when it is not — a share is not
+   *  computed for an entity that was never applied. */
   entityShare?: number;
+  /** Whether the supplied entity was USED as the gate, MISSING (none given) or
+   *  REJECTED (the query itself does not carry its core, so KEYWORDIZE named a
+   *  subject this query is not about). Both non-`used` cases fall back to the
+   *  overlap rule and are counted, because a silent fallback is a gate that
+   *  reports health it never measured. */
+  entityStatus?: EntityStatus;
   /** The single query token the hit TITLES piled onto, when collapsed. */
   collapsedOn?: string;
 }
@@ -55,28 +62,40 @@ export const COLLAPSE_TITLE_SHARE = 0.6;
  */
 export const OFFTOPIC_MIN_HITS = 5;
 /**
- * How many hits must carry the SUBJECT ENTITY for the set to be an answer.
+ * How many hits must carry the SUBJECT ENTITY's core for the set to be an
+ * answer. RE-MEASURED 2026-09-11 after the research-trust deploy, over every
+ * recorded set — nine captured from the live gateway, one from a throwaway rig,
+ * two hand-built controls:
  *
- * Measured 2026-09-11 over every fixture in this directory (six captured from
- * the live gateway, one from a throwaway rig, two hand-built controls):
+ *   1.00  probe-good-oomkilled            GOOD (control)
+ *   1.00  probe-good-iphone               GOOD (control)
+ *   0.75  search-good-optiplex            GOOD (rig)
+ *   0.65  live-optiplex-health            GOOD (live, dry run 1f2ff740)
+ *   0.55  live-100hz-mechanism            GOOD (live, dry run b7e701ef)
+ *   0.35  live-100hz-studies              GOOD (live, dry run b7e701ef)
+ *   0.30  live-optiplex-thermal           GOOD (live, dry run 1f2ff740)
+ *   ----------------------------------------------------------------- 0.175
+ *   0.05  live-100hz-ssq                  OFF-NEED (live; the query really is
+ *                                         about SSQ scores, not about 100 Hz)
+ *   0.00  search-collapsed-dell / -most / -the100
+ *   0.00  probe-collapsed-capacitor / -motherboard / -vestibular
  *
- *   good sets      0.75  search-good-optiplex   (9/12 — three are 3060/general Dell)
- *                  1.00  probe-good-oomkilled
- *                  1.00  probe-good-iphone
- *   failed sets    0.00  search-collapsed-dell / -most / -the100
- *                  0.00  probe-collapsed-capacitor / -motherboard / -vestibular
+ * The first version of this constant was 0.5, chosen from the fixtures alone
+ * where the gap ran 0.00 -> 0.75. The live sets put four GOOD sets below that
+ * line, and two production dry runs reported working searches as failures.
  *
- * The gap is 0.00 against 0.75 — the widest a threshold can sit in — and 0.5 is
- * its midpoint. This is not a constant fitted to the incident: it separates
- * "the engine returned pages about the thing you asked about" from "it did not",
- * and the entity is a STRUCTURAL fact the run already possesses (KEYWORDIZE
- * extracts it and `keywordQuery` enforces it into every query).
+ * The real gap is 0.05 -> 0.30, and 0.175 is the ONLY region satisfying the
+ * anchor's rule that no recorded set sit within 0.1 of the threshold: it is
+ * 0.125 from the off-need set below and 0.125 from the thinnest good set above.
+ * The margin is thin, and that thinness IS the finding — a threshold picked
+ * from curated fixtures looked like it had 0.75 of headroom and had 0.125.
  *
- * The two constants that came before this — an 8-string pattern list, then a
- * 7-character token length — each failed because they encoded the shape of the
- * recorded incident rather than the shape of the failure.
+ * A set at 0.20 — four of twenty hits about the subject — is a usable search,
+ * not a broken engine: the relevance gate is the next filter and it judges
+ * pages one at a time. This constant only answers "did the engine understand
+ * the subject at all".
  */
-export const ENTITY_SHARE = 0.5;
+export const ENTITY_SHARE = 0.175;
 
 const STOP = new Set(
   ("a an the and or of for to in on at by with from as is are was were be been being " +
@@ -133,24 +152,167 @@ export function overlapRatio(query: string, hits: SearchHit[]): number {
   return good / hits.length;
 }
 
-/**
- * Match the entity as a PHRASE: its tokens adjacent, in order, tolerant of the
- * separators engines actually write ("OptiPlex 3050", "optiplex-3050",
- * "OPTIPLEX  3050"). Adjacency is the point — "OptiPlex 7080 and the 3050-era
- * chipset" contains both tokens and is not about the subject.
- */
-export function entityPhrase(entity: string | undefined | null): RegExp | null {
-  const toks = String(entity || "").toLowerCase().match(/[a-z0-9]+/g) || [];
-  if (!toks.length) return null;
-  return new RegExp("(?<![a-z0-9])" + toks.join("[^a-z0-9]{0,2}") + "(?![a-z0-9])", "i");
+// ── Entity matching (research-trust-entity, 2026-09-11) ────────────────────
+// The deploy of research-trust proved the first version too literal. Dry run
+// b7e701ef asked "100Hz audio VR motion sickness physiological mechanism"; the
+// gateway returned the Nagoya paper at rank 1; the detector reported
+// `collapsed onto "motion"` because "100Hz audio" is not the string the pages
+// write. Dry run 1f2ff740 lost two searches the same way: entity
+// "Dell OptiPlex 3050", hits that say "OptiPlex 3050" without the brand.
+//
+// THE RULE. An entity is matched by its distinctive CORE, not by its literal
+// spelling:
+//   1. TOKENISE splitting digit/letter runs, so 100Hz, 100 Hz and 100-Hz all
+//      become ["100","hz"] and compare equal.
+//   2. The CORE is what is left after dropping leading and trailing tokens that
+//      carry no distinctiveness of their own — a brand ("Dell"), an article
+//      ("the"), a medium or context word ("audio", "VR") — for as long as a
+//      distinctive token remains. A token is never dropped from beside a
+//      digit-bearing token, because a unit belongs to its number: reducing
+//      "100 Hz" to "100" would match The 100, the TV series, which is the
+//      fixture this module exists for.
+//   3. A hit CARRIES the entity if its title+snippet contains the core as a
+//      PHRASE (tokens adjacent, any separators), or — when the core is a single
+//      distinctive token — that token.
+//
+// Worked: "Dell OptiPlex 3050" -> optiplex 3050 · "100Hz audio" -> 100 hz ·
+// "VR motion sickness" -> motion sickness · "OOMKilled" -> oomkilled.
+
+/** Tokens, splitting a run at every digit/letter boundary. */
+export function entityTokens(s: string | undefined | null): string[] {
+  const out: string[] = [];
+  for (const run of String(s || "").toLowerCase().match(/[a-z0-9]+/g) || []) {
+    for (const part of run.match(/\d+|[a-z]+/g) || []) out.push(part);
+  }
+  return out;
 }
 
-/** Fraction of hits whose title+snippet carries the entity phrase. */
-export function entityShare(re: RegExp, hits: SearchHit[]): number {
+/** Words that qualify a subject without identifying one. Closed list, short by
+ *  design: everything else is judged structurally (length, digits). */
+const QUALIFIERS = new Set(
+  ("the a an of for and or in on at to audio video sound acoustic visual vr ar xr " +
+   "software hardware device system app tool platform service online digital " +
+   "wireless portable desktop laptop pc computer machine model brand review guide " +
+   "study research paper data test new best top full")
+    .split(" "),
+);
+
+/** A token that can identify a subject on its own. */
+function distinctive(t: string): boolean {
+  if (/\d/.test(t)) return true;
+  return t.length >= 5 && !QUALIFIERS.has(t);
+}
+
+/**
+ * The distinctive core of an entity. Returns the whole token list when nothing
+ * can be dropped — an entity with no distinctive token at all is still the only
+ * thing the run knows about its subject.
+ */
+export function entityCore(entity: string | undefined | null): string[] {
+  const toks = entityTokens(entity);
+  if (!toks.length) return [];
+  if (!toks.some(distinctive)) return toks;
+
+  // A MODEL NUMBER anchors the identity. Everything before the token that
+  // immediately precedes the first digit-bearing token is a brand or a
+  // qualifier, whatever its length: the identity of "Lenovo ThinkCentre M910q"
+  // is "ThinkCentre M910q" (pages write it without "Lenovo"), and of
+  // "Dell OptiPlex 3050" is "OptiPlex 3050".
+  //
+  // A LENGTH test cannot do this. The first version dropped a leading token
+  // only when it was under five characters, which worked for "Dell" by accident
+  // and left "Lenovo", "NVIDIA" and "Microsoft" in the core — the same defect
+  // this item exists to fix, one brand name later.
+  let core = [...toks];
+  const firstDigit = core.findIndex((t) => /\d/.test(t));
+  if (firstDigit >= 0) {
+    const start = Math.max(0, firstDigit - 1);
+    const tail = core.slice(start);
+    // A one-character number is not a model code: "MacBook Air M2" would reduce
+    // to "m 2", which matches the M.2 SSD form factor on any page. Require the
+    // tail to carry a digit AND something with shape to it.
+    const strongTail = tail.length >= 2 && tail.some((t) => /\d/.test(t)) &&
+      tail.some((t) => (/\d/.test(t) && t.length >= 2) || t.length >= 3);
+    if (strongTail) core = tail;
+    else {
+      let anchor = start;
+      while (anchor > 0 && core[anchor].length < 5) anchor--;
+      core = core.slice(anchor);
+    }
+  }
+
+  // Then trim qualifiers off both ends — "OptiPlex 3050 desktop" is written
+  // "OptiPlex 3050", and "100 Hz audio" is written "100 Hz".
+  const droppable = (i: number): boolean => {
+    const t = core[i];
+    if (distinctive(t)) return false;
+    // A UNIT belongs to its number: never orphan one from the other. Only a
+    // short alphabetic token can be a unit — "desktop" beside "3050" is a
+    // qualifier, not a unit.
+    if (t.length <= 4) {
+      const left = i > 0 ? core[i - 1] : "";
+      const right = i < core.length - 1 ? core[i + 1] : "";
+      if (/\d/.test(left) || /\d/.test(right)) return false;
+    }
+    return true;
+  };
+  const beforeTrim = [...core];
+  let changed = true;
+  while (changed && core.length > 1) {
+    changed = false;
+    if (droppable(0) && core.slice(1).some(distinctive)) { core.shift(); changed = true; continue; }
+    const last = core.length - 1;
+    if (droppable(last) && core.slice(0, last).some(distinctive)) { core.pop(); changed = true; }
+  }
+  // A bare number is not an identity. "Surface Laptop 5" trims to "5", which
+  // matches any page with a 5 in it; keep the untrimmed core instead.
+  if (core.length === 1 && /^\d+$/.test(core[0])) return beforeTrim;
+  return core;
+}
+
+/** The core as a phrase regex: tokens adjacent, any separator between them. */
+export function entityPhrase(entity: string | undefined | null): RegExp | null {
+  const core = entityCore(entity);
+  if (!core.length) return null;
+  return corePhrase(core);
+}
+
+function corePhrase(core: string[]): RegExp {
+  // A model number may carry a form-factor suffix in the wild: the OptiPlex
+  // 3050 is written "3050m", "3050 SFF", "3050MT". Up to two trailing letters
+  // after a NUMERIC final token are the same machine; more digits are not
+  // ("3050" must never match inside "30500", and "3060" is a different model).
+  const last = core[core.length - 1];
+  const tail = /^\d+$/.test(last) ? "[a-z]{0,2}(?![a-z0-9])" : "(?![a-z0-9])";
+  return new RegExp("(?<![a-z0-9])" + core.join("[^a-z0-9]{0,2}") + tail, "i");
+}
+
+/** Does this hit carry the entity's core? */
+export function hitCarriesEntity(hit: SearchHit, core: string[]): boolean {
+  if (!core.length) return false;
+  return corePhrase(core).test(`${hit?.title || ""} ${hit?.snippet || ""}`);
+}
+
+/** Fraction of hits carrying the entity core. Accepts a core or a regex. */
+export function entityShare(coreOrRe: string[] | RegExp, hits: SearchHit[]): number {
   if (!hits.length) return 0;
+  const re = Array.isArray(coreOrRe) ? corePhrase(coreOrRe) : coreOrRe;
   let n = 0;
   for (const h of hits) if (re.test(`${h?.title || ""} ${h?.snippet || ""}`)) n++;
   return n / hits.length;
+}
+
+/**
+ * Is this entity usable as the gate for THIS query? KEYWORDIZE is a model, and
+ * a model can return a subject the query never mentioned — gating on that would
+ * condemn every search for a question it misread. The entity is accepted only
+ * when the query itself carries its core.
+ */
+export type EntityStatus = "used" | "missing" | "rejected";
+export function entityStatusFor(query: string, entity: string | undefined | null): EntityStatus {
+  const core = entityCore(entity);
+  if (!core.length) return "missing";
+  return corePhrase(core).test(String(query || "")) ? "used" : "rejected";
 }
 
 /**
@@ -193,9 +355,10 @@ export function classifyHits(
   // repair` scored 0.90 on ten pages about capacitors in general, because nine
   // of them carry "capacitor" and "repair". The entity is a structural fact the
   // run already holds, not a constant chosen to fit an incident.
-  const ent = entityPhrase(entity);
-  if (ent) {
-    const share = entityShare(ent, list);
+  const status = entityStatusFor(query, entity);
+  if (status === "used") {
+    const core = entityCore(entity);
+    const share = entityShare(core, list);
     if (share >= ENTITY_SHARE) {
       // The subject IS in the results. They may still be weak for the specific
       // NEED — `semaglutide gastroparesis incidence` returned ten real
@@ -203,13 +366,13 @@ export function classifyHits(
       // the relevance gate is for. Calling a search broken because the engine
       // understood the subject and not the question would be the same overreach
       // as calling junk `ok`, pointed the other way.
-      return { verdict: "ok", overlap, entityShare: share };
+      return { verdict: "ok", overlap, entityShare: share, entityStatus: status };
     }
     const domE = dominantTitleTerm(query, list);
     if (domE.share >= COLLAPSE_TITLE_SHARE) {
-      return { verdict: "collapsed", overlap, entityShare: share, collapsedOn: domE.term };
+      return { verdict: "collapsed", overlap, entityShare: share, entityStatus: status, collapsedOn: domE.term };
     }
-    return { verdict: "offtopic", overlap, entityShare: share };
+    return { verdict: "offtopic", overlap, entityShare: share, entityStatus: status };
   }
 
   // ── Fallback: no entity was supplied ─────────────────────────────────────
@@ -219,21 +382,21 @@ export function classifyHits(
   // this capacitor". It is kept because a wrong `collapsed` on a preliminary
   // gap costs one tentative paragraph, while the topic path — where the audited
   // failure lives — always has an entity.
-  if (overlap >= COLLAPSE_OVERLAP) return { verdict: "ok", overlap };
+  if (overlap >= COLLAPSE_OVERLAP) return { verdict: "ok", overlap, entityStatus: status };
   const dom = dominantTitleTerm(query, list);
   if (dom.share >= COLLAPSE_TITLE_SHARE) {
-    return { verdict: "collapsed", overlap, collapsedOn: dom.term };
+    return { verdict: "collapsed", overlap, entityStatus: status, collapsedOn: dom.term };
   }
   // No dominant token, but a full page of results in which NOTHING mentions the
   // query: the engine answered a different question. We cannot name the token,
   // so we do not claim to — but calling this `ok` told the run its search had
   // worked and spent the whole fetch budget on noise.
   if (overlap === 0 && list.length >= OFFTOPIC_MIN_HITS) {
-    return { verdict: "offtopic", overlap };
+    return { verdict: "offtopic", overlap, entityStatus: status };
   }
   // A thin or partially-relevant set: a weak search, not a broken engine.
   // Saying anything stronger here would be a diagnosis we cannot support.
-  return { verdict: "ok", overlap };
+  return { verdict: "ok", overlap, entityStatus: status };
 }
 
 // ── Query shaping (Phase 1.2) ───────────────────────────────────────────────
@@ -292,7 +455,14 @@ export function reformulate(need: string, entity: string, nth: number): string {
 /** Per-run search accounting (RunResult.fetchStats.search). */
 export interface SearchStats {
   calls: number; ok: number; collapsed: number; offtopic: number; empty: number; errors: number;
+  /** Searches classified with NO entity to gate on. */
+  entity_missing: number;
+  /** Searches whose supplied entity was not carried by the query itself. */
+  entity_rejected: number;
 }
 export function emptySearchStats(): SearchStats {
-  return { calls: 0, ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0 };
+  return {
+    calls: 0, ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0,
+    entity_missing: 0, entity_rejected: 0,
+  };
 }

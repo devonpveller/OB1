@@ -1,0 +1,129 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway AFTER the research-trust deploy (GET http://127.0.0.1:8085/search?format=json, read-only; 3-4 engines answering). These are the queries the deployed detector called `collapsed` in dry runs b7e701ef (100 Hz) and 1f2ff740 (OptiPlex) - the pages are there, the entity string was matched too literally.",
+ "_dry_run": "1f2ff740",
+ "_expect": "ok",
+ "query": "Dell OptiPlex 3050 verify hardware health diagnostics",
+ "entity": "Dell OptiPlex 3050",
+ "hits": [
+  {
+   "url": "https://www.dell.com/support/product-details/en-us/product/optiplex-3050-desktop/diagnose",
+   "title": "Support for OptiPlex 3050 Tower | Diagnostics | Dell US",
+   "snippet": "Diagnose an issue or test pc for your Dell OptiPlex 3050 Tower. Identify and fix common problems with online dell diagnostics.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.manualowl.com/m/Dell/OptiPlex-3050-Tower/Manual/705226?page=85",
+   "title": "Dell OptiPlex 3050 Tower Owners Manual - Page 85",
+   "snippet": "Dell SupportAssist Pre-boot System Performance Check diagnostics About this task SupportAssist diagnostics (also known as system diagnostics) performs a complete check of your hardware. The Dell SupportAssist Pre-boot System Performance Check diagnostics is embedded with the BIOS and is launched by the BIOS internally.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.dell.com/support/manuals/en-us/optiplex-3050-desktop/optiplex-3050-desktop-tower-owners-manual/dell-supportassist-pre-boot-system-performance-check-diagnostics?guid=guid-ee9a5d95-88be-4ee7-983e-d97c680bdecd&lang=en-us",
+   "title": "OptiPlex 3050 Tower Owner's Manual | Dell US",
+   "snippet": "SupportAssist diagnostics (also known as system diagnostics) performs a complete check of your hardware. The Dell SupportAssist Pre-boot System Performance Check diagnostics is embedded with the BIOS and is launched by the BIOS internally.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=iW_YXidzgqY",
+   "title": "DELL OPTIPLEX 3060 AMBER LIGHT BLINKING || DELL... - YouTube",
+   "snippet": "Fix Dell Optiplex 7010 turns on but no display.Dell Optiplex 7020 orange light blinking continuouslyTech Fixer38K views • 1 year agoLivePlaylist ()Mix (50+).Troubleshooting and Fixing a Dell Optiplex I bought for $35 that Doesn't POST! Computer Hardware Tips and Tutorials.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://techsoften.com/how-to-run-dell-supportassist-diagnostics-and-decode-the-error-codes/",
+   "title": "How to Run Dell SupportAssist Diagnostics and Decode the Error Codes",
+   "snippet": "Dell SupportAssist is a free tool pre-installed on most Dell consumer and business machines. It does two main things: it monitors your system in the background for known issues, and it lets you run hardware tests on demand.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.manualowl.com/m/Dell/OptiPlex-3050/Manual/589792?page=82",
+   "title": "Dell OptiPlex 3050 Tower Owners Manual - Page",
+   "snippet": "Dell OptiPlex 3050 Tower Owners Manual - Page 82 Troubleshooting your computer, Diagnostic and Power LED codes View all Dell OptiPlex 3050 manuals Add to My Manuals Save this manual to your list of manuals",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://realitypathing.com/run-dell-bios-and-hardware-diagnostics-to-find-the-problem/",
+   "title": "Dell Hardware Diagnostics: Run BIOS Tests to Find the Problem",
+   "snippet": "Dell hardware diagnostics are used to test core hardware components such as memory, storage, battery, display, and fans. The goal is to determine whether a Dell problem is caused by failing hardware instead of Windows, a driver, or an application.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://install.simutechgroup.com/1590083-how-to-run-dell-hardware-diagnostics",
+   "title": "HOW TO - Run Dell Hardware Diagnostics - SimuTech",
+   "snippet": "Source - How to Run a Preboot Diagnostic Test on a Dell Computer Solution Turn Off your computer. Plug in your laptop power adapter if applicable. Turn On your computer. Immediately after pressing the power button, press the F12 key repeatedly until the One Time Boot Menu appears. Select Diagnostics > press Enter. The diagnostic test begins.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.dell.com/support/manuals/en-us/optiplex-3050-micro/optiplex_3050-mff_om/dell-supportassist-pre-boot-system-performance-check-diagnostics?guid=guid-ee9a5d95-88be-4ee7-983e-d97c680bdecd&lang=en-us",
+   "title": "OptiPlex 3050 Micro Owner's Manual | Dell US",
+   "snippet": "SupportAssist diagnostics (also known as system diagnostics) performs a complete check of your hardware. The Dell SupportAssist Pre-boot System Performance Check diagnostics is embedded with the BIOS and is launched by the BIOS internally.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://rutube.ru/video/e4e1e82dae6d620659fa033b79917c89/",
+   "title": "Настройка BIOS на Dell OptiPlex 3050 (3060) для загрузки в PXE",
+   "snippet": "Видео по настройке BIOS для загрузки в PXE на компьютерах Dell OptiPlex 3050 (3060).",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.dell.com/support/product-details/en-ed/product/optiplex-3050-desktop/diagnose",
+   "title": "Support for OptiPlex 3050 Tower | Diagnostics - Dell",
+   "snippet": "Diagnose an issue or test pc for your Dell OptiPlex 3050 Tower. Identify and fix common problems with online dell diagnostics.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.dell.com/support/product-details/en-us/product/optiplex-3050-aio/diagnose",
+   "title": "Support for OptiPlex 3050 All-In-One | Diagnostics | Dell US",
+   "snippet": "Diagnose an issue or test pc for your Dell OptiPlex 3050 All-In-One. Identify and fix common problems with online dell diagnostics.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://hubcomputers.co.uk/running-dell-computer-hardware-diagnostics-step-by-step-guide/",
+   "title": "Running Dell Computer Hardware Diagnostics: Step-by-Step Guide",
+   "snippet": "Learn how to run Dell computer hardware diagnostics with our step-by-step guide. Discover how to troubleshoot and resolve hardware issues effectively.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.hwinfo.com/",
+   "title": "HWiNFO - Free System Information, Monitoring and Diagnostics",
+   "snippet": "Professional System Information and Diagnostics. Comprehensive Hardware Analysis, Monitoring and Reporting for Windows and DOS. Free Download.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.dell.com/support/home/en-us/product-support/product/optiplex-3050-aio/diagnose",
+   "title": "Support for OptiPlex 3050 All-In-One | Diagnostics | Dell US",
+   "snippet": "Diagnose an issue or test pc for your Dell OptiPlex 3050 All-In-One. Identify and fix common problems with online dell diagnostics.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.tiktok.com/discover/optiplex-3050-how-to-fix-screen-freezeing",
+   "title": "Optiplex 3050 How to Fix Screen Freezeing | TikTok",
+   "snippet": "#DellOptiplex3050 #MiniPC. DELL OPTIPLEX 3050, PC compact pour bureau, performance informatique Maroc, ordinateur fixe fiable, PC pour télétravail, matériel professionnel silencieux, meilleur rapport qualité/prix, SSD rapide, installation support technique...",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.dell.com/support/manuals/en-us/optiplex-3050-aio/optiplex-3050-aio-owners-manual/running-the-epsa-diagnostics?guid=guid-5fc0d943-b848-4bdc-9a26-78a5e88fda45&lang=en-us",
+   "title": "Dell OptiPlex 3050 All-in-One Owners Manual | Dell US",
+   "snippet": "In the boot menu screen, use Up/Down arrow key to select the Diagnostics option and then press Enter.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.gumtree.com/p/desktop-workstation-pcs/dell-optiplex-3050-desktop-lg-monitor-complete-setup-send-offers-/1508497683",
+   "title": "Dell OptiPlex 3050 Desktop + LG Monitor – Complete Setup... | Gumtree",
+   "snippet": "Selling a Dell OptiPlex 3050 desktop computer in used, great condition, bundled with an LG monitor, mouse, keyboard, and all necessary cables. This is a plug-and-play setup—everything you need to get started right away.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.dell.com/support/product-details/en-us/product/optiplex-3050-micro/diagnose",
+   "title": "Support for OptiPlex 3050 Micro | Diagnostics | Dell US",
+   "snippet": "Diagnose an issue or test pc for your Dell OptiPlex 3050 Micro. Identify and fix common problems with online dell diagnostics.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.healthians.com/",
+   "title": "healthians.com",
+   "snippet": "health diagnostics based startup.",
+   "engine": "yandex"
+  }
+ ]
+}

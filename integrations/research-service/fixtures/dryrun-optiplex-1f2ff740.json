@@ -1,0 +1,138 @@
+{
+ "_provenance": "research_jobs.result of LIVE dry run 1f2ff740, 2026-09-11, taken after the research-trust deploy. The run cited 11 sources and its synthesis carries 25 grounded lines, and its footer printed 'needs answered 0 of 6' - the COVERAGE_STAGED judge marked every need open. Footer and body contradict.",
+ "job_id": "1f2ff740",
+ "needs": [
+  "What are the most common hardware failure modes reported for the Dell OptiPlex 3050 desktop?",
+  "Are there any known manufacturing defects or widespread issues specific to the OptiPlex 3050 model?",
+  "What specific thermal management problems or overheating issues are associated with the OptiPlex 3050?",
+  "Does the OptiPlex 3050 have known issues with capacitors or the CPU socket that affect longevity?",
+  "What are the primary red flags or warning signs to look for when purchasing a used OptiPlex 3050?",
+  "What specific steps or tools should be used to verify the hardware health of a used OptiPlex 3050 before purchase?"
+ ],
+ "needs_status": [
+  {
+   "need": "What are the most common hardware failure modes reported for the Dell OptiPlex 3050 desktop?",
+   "status": "open"
+  },
+  {
+   "need": "Are there any known manufacturing defects or widespread issues specific to the OptiPlex 3050 model?",
+   "status": "open"
+  },
+  {
+   "need": "What specific thermal management problems or overheating issues are associated with the OptiPlex 3050?",
+   "status": "open"
+  },
+  {
+   "need": "Does the OptiPlex 3050 have known issues with capacitors or the CPU socket that affect longevity?",
+   "status": "open"
+  },
+  {
+   "need": "What are the primary red flags or warning signs to look for when purchasing a used OptiPlex 3050?",
+   "status": "open"
+  },
+  {
+   "need": "What specific steps or tools should be used to verify the hardware health of a used OptiPlex 3050 before purchase?",
+   "status": "open"
+  }
+ ],
+ "synthesis": "[UNCERTAIN] The Dell OptiPlex 3050's M.2 slot supports only PCIe M.2 SSD hard drives; a SATA-based M.2 SSD will not work in this slot, which is a documented Dell limitation (BugID 129720). (unverified figure: 2) [Source 5]\n[SOURCED] Walmart customer reviews for restored/refurbished OptiPlex 3050 units show a 3.3/5 average rating across 21 ratings, with 38% being 1-star reviews, indicating a notable failure or dissatisfaction rate among used units. [Source 11]\n[SOURCED] A buyer reported a refurbished OptiPlex 3050 that \"worked for a short time but is now inoperative, it shut down and will not turn on,\" suggesting a power-delivery or motherboard failure mode in used units. [Source 11]\n[SOURCED] Another buyer reported the unit \"turn it on and nothing happened,\" indicating a dead-on-arrival or immediate power failure. [Source 11]\n[SOURCED] A buyer reported \"boot issues\" with a refurbished OptiPlex 3050, pointing to potential BIOS, storage, or motherboard problems. [Source 11]\n[SOURCED] A buyer noted the system \"will not be able to get updates after October 2025\" and \"does not upgrade to the latest version of Windows,\" flagging the Windows 10 end-of-life as a long-term red flag for 6th/7th-gen OptiPlex 3050 units. [Source 11]\n[SOURCED] One buyer reported receiving a different, less expensive computer than ordered (a fulfillment/scam issue rather than a hardware defect). [Source 11]\n[SOURCED] One buyer reported the keyboard did not work and the mouse was missing from the package, indicating quality-control issues with some refurbishers. [Source 11]\n[SOURCED] The OptiPlex 3050 uses an LGA 1151 (Socket H4) processor socket with Intel 6th-generation (Skylake) and 7th-generation (Kaby Lake) Core processors and the Intel B250 chipset. [Source 7, 8]\n[SOURCED] The OptiPlex 3050 owner's manual lists a heat sink and a system fan (35 W or 65 W variants) as replaceable components, indicating the cooling assembly is a serviceable part that can degrade. [Source 2]\n[SOURCED] The OptiPlex 3050 SFF owner's manual includes sections on \"Diagnostic Power LED Codes\" and \"Diagnostic Error Messages\" as built-in hardware health verification tools. [Source 9]\n[SOURCED] The OptiPlex 3050 supports Enhanced Pre-Boot System Assessment (Epsa) Diagnostics, which can be invoked to test memory, storage, and other hardware components before the OS loads. [Source 2, 9]\n[SOURCED] The OptiPlex 3050 AIO model includes an LCD Built-in Self Test (BIST) for display hardware verification. [Source 2]\n[SOURCED] Dell's support site provides a dedicated Diagnostics page for the OptiPlex 3050 Tower and Micro, allowing users to run automated hardware scans (requires admin sign-in). [Source 1, 3, 4]\n[SOURCED] The owner's manual documents procedures for verifying processor usage in Task Manager and Resource Monitor, and for verifying system memory in Windows and in BIOS Setup. [Source 2, 8, 9]\n[SOURCED] The OptiPlex 3050 AIO has a documented teardown/CRU removal guide (Dell BugID 123073) covering stand, optical drive, back cover, intrusion switch, and other customer-replaceable units. [Source 6]\n[SOURCED] A blog post on used Dell OptiPlexes notes that the OptiPlex 3050 \"runs Linux just fine and costs even less\" than a 3060, positioning it as a budget option for users who do not require Windows 11. [Source 10]\n[SOURCED] The same blog notes that Windows 11 officially supports 8th-generation Intel i-series CPUs and later, meaning 6th/7th-gen OptiPlex 3050 units are not officially supported on Windows 11. [Source 10]\n[SOURCED] One Walmart reviewer stated \"You were able to update to 11 on the computer,\" suggesting at least some 3050 configurations (likely 7th-gen) can run Windows 11 in practice despite the official support boundary. [Source 11]\n[SOURCED] Dell's documentation explicitly states \"Microsoft Windows 7 is not supported with the Intel 7th Generation processors,\" meaning 7th-gen 3050 units cannot officially run Windows 7. [Source 7, 8]\n[INFERRED] The concentration of \"won't power on\" and \"shut down permanently\" complaints in refurbished 3050 reviews (38% 1-star) suggests that power-supply degradation, capacitor aging, or motherboard faults are among the most common failure modes in used units of this age. [Source 11]\n[UNCERTAIN] Because the M.2 slot is PCIe-only, a buyer who installs a SATA M.2 SSD (a common and cheaper upgrade) will find the drive unrecognizable; this is a specific red flag to check before purchasing or upgrading storage. (unverified figure: 2) [Source 5]\n[UNCERTAIN] The presence of both a 35 W and a 65 W system fan option, plus a separate heat sink, means that thermal paste degradation or fan bearing wear over 6–8 years of use is a plausible cause of thermal throttling or shutdowns in used units. (unverified figure: 8) [Source 2]\n[INFERRED] Running Epsa Diagnostics (memory test, storage test, fan/thermal check) and observing the Diagnostic Power LED Codes before completing a used purchase is the most practical hardware-health verification workflow available for this model. [Source 2, 9]\n[UNCERTAIN] A single Walmart reviewer reported a successful Windows 11 update on a 3050, but it is unclear whether this was a 7th-gen (Kaby Lake) unit or a 6th-gen (Skylake) unit, and whether the update was stable long-term. [Source 11]\n[GAP] No source provides specific data on capacitor aging, CPU socket (LGA 1151) pin corrosion, or VRM failure rates for the OptiPlex 3050.\n[GAP] No source documents specific thermal-threshold values, known thermal-paste drying timelines, or fan-failure statistics for the OptiPlex 3050.\n[GAP] No source lists a Dell service bulletin, recall, or field-replacement campaign specific to the OptiPlex 3050 platform.\n[GAP] No source provides guidance on how to visually inspect the OptiPlex 3050 motherboard for bulging/dripping capacitors or socket damage during a used-unit inspection.\n[GAP] No source quantifies the typical lifespan or failure-rate distribution of the OptiPlex 3050 power supply unit (PSU) in used/refurbished units.",
+ "cited_sources": [
+  {
+   "url": "https://www.dell.com/support/product-details/en-us/product/optiplex-3050-desktop/diagnose",
+   "title": "Support for OptiPlex 3050 Tower | Diagnostics | Dell US"
+  },
+  {
+   "url": "https://www.manualslib.com/manual/1243956/Dell-Optiplex-3050.html",
+   "title": "DELL OPTIPLEX 3050 OWNER'S MANUAL Pdf Download | ManualsLib"
+  },
+  {
+   "url": "https://www.dell.com/support/product-details/en-us/product/optiplex-3050-micro/resources/articles",
+   "title": "Support for OptiPlex 3050 Micro | Articles | Dell US"
+  },
+  {
+   "url": "https://www.dell.com/support/home/en-us/product-support/product/optiplex-3050-desktop/diagnose",
+   "title": "Support for OptiPlex 3050 Tower | Diagnostics | Dell US"
+  },
+  {
+   "url": "https://www.findbugzero.com/operational-defect-database/vendors/dell/defects/129720",
+   "title": "BugZero | Dell BugID 129720 - OptiPlex 3050 Support for PCIe M.2 SSD Hard Drives"
+  },
+  {
+   "url": "https://www.findbugzero.com/operational-defect-database/vendors/dell/defects/123073",
+   "title": "BugZero | Dell BugID 123073 - OptiPlex 3050 AIO: Teardown removal guide for cust..."
+  },
+  {
+   "url": "https://www.manua.ls/dell/optiplex-3050/manual",
+   "title": "User manual Dell OptiPlex 3050 (English - 73 pages)"
+  },
+  {
+   "url": "https://www.manuals.co.uk/dell/optiplex-3050/manual?p=43",
+   "title": "Dell OptiPlex 3050 user manual (English - 73 pages)"
+  },
+  {
+   "url": "https://www.manualslib.com/manual/3132039/Dell-Optiplex-3050-Small-Form-Factor.html",
+   "title": "DELL OPTIPLEX 3050 SMALL FORM FACTOR OWNER'S MANUAL Pdf Download | ManualsLib"
+  },
+  {
+   "url": "https://dfarq.homeip.net/is-it-time-to-stop-buying-used-dell-optiplexes/",
+   "title": "Is it time to stop buying used Dell Optiplexes? - The Silicon Underground"
+  },
+  {
+   "url": "https://www.walmart.com/reviews/product/3135967732",
+   "title": "Customer reviews for Restored Dell Optiplex 3050 Desktop Computers, Intel i7 Quad Core Gen 6, 32GB, 1TB SSD, DVD, Black (Refurbished) | Walmart.com"
+  }
+ ],
+ "search_record": {
+  "ok": 4,
+  "hits": 48,
+  "empty": 0,
+  "errors": 0,
+  "fetched": 21,
+  "queries": [
+   {
+    "hits": 8,
+    "query": "Dell OptiPlex 3050 common hardware failure modes",
+    "overlap": 1,
+    "verdict": "ok"
+   },
+   {
+    "hits": 8,
+    "query": "Dell OptiPlex 3050 known manufacturing defects issues",
+    "overlap": 1,
+    "verdict": "ok"
+   },
+   {
+    "hits": 8,
+    "query": "Dell OptiPlex 3050 thermal management overheating problems",
+    "overlap": 1,
+    "verdict": "collapsed",
+    "collapsedOn": "dell"
+   },
+   {
+    "hits": 8,
+    "query": "Dell OptiPlex 3050 capacitor CPU socket issues",
+    "overlap": 1,
+    "verdict": "ok"
+   },
+   {
+    "hits": 8,
+    "query": "Dell OptiPlex 3050 used purchase red flags",
+    "overlap": 1,
+    "verdict": "ok"
+   },
+   {
+    "hits": 8,
+    "query": "Dell OptiPlex 3050 verify hardware health tools steps",
+    "overlap": 1,
+    "verdict": "collapsed",
+    "collapsedOn": "dell"
+   }
+  ],
+  "offtopic": 0,
+  "readable": 13,
+  "relevant": 12,
+  "collapsed": 2
+ },
+ "outcome": "complete",
+ "backstop": "complete"
+}

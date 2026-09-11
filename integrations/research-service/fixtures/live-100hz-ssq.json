@@ -1,0 +1,129 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway AFTER the research-trust deploy (GET http://127.0.0.1:8085/search?format=json, read-only; 3-4 engines answering). These are the queries the deployed detector called `collapsed` in dry runs b7e701ef (100 Hz) and 1f2ff740 (OptiPlex) - the pages are there, the entity string was matched too literally.",
+ "_dry_run": "b7e701ef",
+ "_expect": "off-need",
+ "query": "100Hz audio VR motion sickness Simulator Sickness Questionnaire scores",
+ "entity": "100Hz audio",
+ "hits": [
+  {
+   "url": "https://uxdesign.cc/quantifying-vr-comfort-with-the-simulator-sickness-questionnaire-b1a34849bda8",
+   "title": "Quantifying VR comfort with the Simulator Sickness Questionnaire",
+   "snippet": "The Questionnaire The questionnaire we will be using in this article is called the Simulator Sickness Questionnaire (Kennedy et. al, 1993). It is a questionnaire designed to evaluate different symptoms of simulator sickness and calculate a weighted score. There have been attempts to refine the SSQ for modern devices, but currently, it is still considered the standard measure for simulator ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.sciencedirect.com/science/article/pii/S000368701730282X",
+   "title": "Virtual reality sickness questionnaire (VRSQ): Motion sickness ...",
+   "snippet": "In this study, we used the simulator sickness questionnaire (SSQ), which has been traditionally used for simulator motion sickness measurement. To measure the motion sickness in a VR environment, 24 users performed target selection tasks using a VR device.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.frontiersin.org/journals/virtual-reality/articles/10.3389/frvir.2022.945800/full",
+   "title": "The simulator sickness questionnaire, and the erroneous ... - Frontiers",
+   "snippet": "H2 and H3—Do pre-immersion simulator sickness questionnaire scores differ between healthy and medical sub-populations Our second hypothesis was concerned with how medical and healthy sub-populations may individually differ from the zero baseline assumption.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://conservancy.umn.edu/server/api/core/bitstreams/70c8fe0f-c84a-4d0e-80ba-b97822a5cf95/content",
+   "title": "Microsoft Word - SSQ Scoring.docx",
+   "snippet": "A brief explanation of the Simulator Sickness Questionnaire (SSQ) Each item is rated with the scale from none, slight, moderate to severe. Through some calculations, four representative scores can be found. Nausea-related subscore (N), Oculomotor-related subscore (O), Disorientation-related subscore (D) are the scores for the symptoms for the specific aspects. Total Score (TS) is the score ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.researchgate.net/publication/323426321_Virtual_reality_sickness_questionnaire_VRSQ_Motion_sickness_measurement_index_in_a_virtual_reality_environment",
+   "title": "Virtual reality sickness questionnaire (VRSQ): Motion sickness measurement index in a virtual reality environment | Request PDF",
+   "snippet": "Cybersickness was assessed using the Simulator Sickness Questionnaire (SSQ) and Fast Motion Sickness scale (FMS). Results showed that the mean total score of SSQ was higher in VR (M = 15.6) than MR (M = 12.6) although not statistically significant ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://psycnet.apa.org/record/2018-09101-011",
+   "title": "Virtual reality sickness questionnaire (VRSQ): Motion sickness ...",
+   "snippet": "This study aims to develop a motion sickness measurement index in a virtual reality (VR) environment. The VR market is in an early stage of market formation and technological development, and thus, research on the side effects of VR devices such as simulator motion sickness is lacking. In this study, we used the simulator sickness questionnaire (SSQ), which has been traditionally used for ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://omb.report/icr/202012-0920-016/doc/107354700.pdf",
+   "title": "PDF Pilot Study of Truck Driver Anthropometry in the U",
+   "snippet": "Virtual Reality Sickness Questionnaire (VRSQ) is modified from the Simulator Sickness Questionnaire (SSQ).",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://tim-weissker.de/preprints/2020-ssq.pdf",
+   "title": "PDF On the Usage of the Simulator Sickness Questionnaire for Virtual ...",
+   "snippet": "Designed as a refinement of the Pensacola Motion Sickness Ques-tionnaire (MSQ) for computer-based simulators, the simulator sick-ness questionnaire (SSQ) asks participants to provide subjective severity ratings of 16 symptoms on a scale from 0 (no perception) to 3 (severe perception) after the exposure [16].",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.reddit.com/r/OculusQuest/comments/1jwab1j/scientists_discover_unique_100_hz_sound_that/",
+   "title": "r/OculusQuest on Reddit: Scientists Discover Unique 100 Hz Sound That Alleviates Motion Sickness",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.sciencedirect.com/science/article/pii/S2451958824001386",
+   "title": "Questionnaires for evaluating virtual reality: A systematic scoping ...",
+   "snippet": "Although presented as separate concepts simulator-, motion-, and cyber- sickness questionnaires all seemed to have the same core feature of discomfort driven by real or simulated motion.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.researchgate.net/publication/358089321_The_use_of_the_Simulator_Sickness_Questionnaire_in_high_immersive_Virtual_Reality_-A_validation_study_in_educational_practice",
+   "title": "The use of the Simulator Sickness Questionnaire in high immersive ...",
+   "snippet": "Resting state EEG and the simulator sickness questionnaire (SSQ) were measured before and after the VR experience. Source activity of each frequency band was calculated using the sLORETA program.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://omb.report/icr/202502-0920-005/doc/153052301.pdf",
+   "title": "VIRTUAL REALITY SICKNESS QUESTIONNAIRE",
+   "snippet": "Severe Virtual Reality Sickness Questionnaire (VRSQ) is modified from the Simulator Sickness Questionnaire (SSQ). Kim, H. K., Park, J., Choi, Y., & Choe, M. (2018). Virtual reality sickness questionnaire (VRSQ): Motion sickness measurement index in a virtual reality environment. Applied ergonomics, 69, 66-73.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://iaria.org/conferences2020/filesACHI20/ACHI_20200.pdf",
+   "title": "PowerPoint 프레젠테이션",
+   "snippet": "Measure degree of Motion Sickness of AR. VRSQ. (VR sickness questionnaire).l The study also showed that the physical button, the clipper method, had a low motion sickness score. l The button at a distance of 100 cm caused less motion sickness.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=Hk1ZssOxLN0",
+   "title": "Pavlov VR: Motion Sickness Simulator",
+   "snippet": "",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.researchgate.net/profile/Hilla-Sarig-Bahat/publication/279222316_Simulator_sickness_incidence_and_susceptibility_during_neck_motion-controlled_virtual_reality_tasks/links/55bf902508aed621de1399fb/Simulator-sickness-incidence-and-susceptibility-during-neck-motion-controlled-virtual-reality-tasks.pdf",
+   "title": "Simulator sickness incidence and susceptibility during neck...",
+   "snippet": "Participants completed three questionnaires regarding motion sickness: Simulator sickness visual analogue scale (SS–VAS) was used to document SS intensity on a scale of 0–10, 0 being no symptoms and 10 being the worst possible symptoms.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://gitnux.org/vr-motion-sickness-statistics/",
+   "title": "Vr Motion Sickness Statistics: 2026 Verified Data & Trends",
+   "snippet": "VR Motion Sickness Statistics. Frame rates that drop from 90fps to 60fps raise nausea incidence by ~40% in sensitive users—learn what to tweak to feel better.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://ntrs.nasa.gov/api/citations/20100033371/downloads/20100033371.pdf",
+   "title": "Configural Scoring of Simulator Sickness, Cybersickness ...",
+   "snippet": "Visually induced motion sickness (VIM:S) ... ............... .. ....... .... ........... ............ ..... ....... ....................... .4 · Simulator Sickness .......................................... ... ................... ...........................................",
+   "engine": "brave"
+  },
+  {
+   "url": "https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.882.8810&rep=rep1&type=pdf",
+   "title": "The effect of 0.2 hz and 1.0 hz frequency and 100 ms and 20 - 100 ms...",
+   "snippet": "The Motion Sickness History Questionnaire (MSHQ) is a diagnostic tool used to assess susceptibility to motion sickness based on participants’ self-report of relevant sickening experiences and was used to measure previous experience with motion sickness (Reason & Brand, 1975).",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.mdpi.com/2813-2084/2/1/2",
+   "title": "Cybersickness in Virtual Reality Questionnaire (CSQ-VR): A Validation and Comparison against SSQ and VRSQ",
+   "snippet": "The maximum score for each sub-score is 100. As discussed above (see Section 1.2), while both the SSQ and VRSQ appear to be valid tools, they suffer from certain limitations: The SSQ is not specific to cybersickness, and the frequency and intensity ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.sciencedirect.com/science/article/abs/pii/S000368701730282X",
+   "title": "Virtual reality sickness questionnaire (VRSQ): Motion sickness measurement index in a virtual reality environment - ScienceDirect",
+   "snippet": "The simulator sickness questionnaire (SSQ) (Balk et al., 2013, Kennedy et al., 1993) is used as a specialized method for measuring motion sickness for simulator systems; however, the SSQ may not be an ideal index for measuring VR sickness. There were significant differences between the simulators and VR systems in terms of the SSQ scores and the order of the contributions to total sickness (Drexler, 2006; Kennedy et al., 2010).",
+   "engine": "brave"
+  }
+ ]
+}

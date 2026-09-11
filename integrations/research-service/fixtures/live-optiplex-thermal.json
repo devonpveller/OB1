@@ -1,0 +1,129 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway AFTER the research-trust deploy (GET http://127.0.0.1:8085/search?format=json, read-only; 3-4 engines answering). These are the queries the deployed detector called `collapsed` in dry runs b7e701ef (100 Hz) and 1f2ff740 (OptiPlex) - the pages are there, the entity string was matched too literally.",
+ "_dry_run": "1f2ff740",
+ "_expect": "ok",
+ "query": "Dell OptiPlex 3050 thermal management overheating problems",
+ "entity": "Dell OptiPlex 3050",
+ "hits": [
+  {
+   "url": "https://www.dell.com/support/kbdoc/en-us/000130867/how-to-troubleshoot-a-overheating-shutdown-or-thermal-issue-on-a-dell-pc",
+   "title": "How to Stop Computer and Laptop Overheating and Shut Down Issues - Dell",
+   "snippet": "Is your personal computer overheating or your laptop running hot and shutting down? Learn the causes of laptop overheating, how to prevent an overheating laptop, and steps to fix a computer that overheated and shut down.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.dell.com/support/kbdoc/en-us/000133111/dell-portable-system-heat-issue-or-the-system-is-overheating",
+   "title": "Troubleshoot Dell Laptop Overheating Issues",
+   "snippet": "This article provides basic troubleshooting steps to identify and resolve heat issues with your Dell laptop.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.redditmedia.com/r/Dell/comments/1fe7w23/optiplex_3050m_nvme_overheating/",
+   "title": "Optiplex 3050m - NVMe Overheating : Dell - redditmedia.com",
+   "snippet": "The manual for the 3050 doesn't suggest a thermal pad or a heat sink for the NVMe. With that said, I do need to put something (a thermal pad) underneath the NVMe drive because as it stands now, when inserted and screwed down, the drive is on an awkward angle due to the height of the port vs the baseline of the motherboard.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.dell.com/community/en/conversations/optiplex-desktops/all-my-dell-optiplex-3050-sff-m2-ssd-slots-overheat/647f9cb3f4ccf8a8de0de876",
+   "title": "All My Dell Optiplex 3050 SFF M.2 SSD Slots overheat. | DELL Technologies",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.ifixit.com/Troubleshooting/Dell_Laptop/Overheating/551436",
+   "title": "Dell Laptop Overheating - iFixit Troubleshooting",
+   "snippet": "How to Apply Thermal Paste 5 - 20 minutes Moderate View Guide Dell Laptop Heat Sinks Find compatible replacement parts for your Dell Laptop. All parts and fix kits are backed by the iFixit Quality Guarantee.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=iW_YXidzgqY",
+   "title": "DELL OPTIPLEX 3060 AMBER LIGHT BLINKING || DELL... - YouTube",
+   "snippet": "This video shows Dell optilplex 3060 amber light blinking,Dell PC no display problem solution by Electronic Secret.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=QdOyhf7E5mI",
+   "title": "How to Fix Dell PC Fan Issues & Overheating | Step-by-Step ...",
+   "snippet": "It scans for outdated drivers, including BIOS and thermal management firmware, that can directly affect fan performance and cooling efficiency. Q: Can dust really cause my Dell PC to overheat? A: Yes.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/sysadmin/comments/14y0te9/does_anyone_else_that_deals_with_dell_optiplex/",
+   "title": "Does anyone else that deals with Dell Optiplex mini find that they ...",
+   "snippet": "Does anyone else that deals with Dell Optiplex mini find that they quickly overheat ? So upper management just bought a huge shipment of these machines (on my day off so I don't know the exact model number, I think its the 7000) as we had a number of old machines that need replacement for my location's users.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.scribd.com/document/900423560/How-to-Stop-Computer-and-Laptop-Overheating-and-Shut-Down-Issues-Dell-US",
+   "title": "Dell Laptop Overheating Solutions Guide | PDF | Dell | Laptop",
+   "snippet": "The document provides guidance on preventing and addressing overheating issues in Dell computers and laptops, highlighting common causes such as dust buildup and insufficient airflow. It outlines troubleshooting steps, including cleaning air vents, running hardware diagnostics, and using Dell Power Manager for thermal management. The article emphasizes the importance of maintaining optimal ...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://dl.dell.com/topicspdf/optiplex-3050-desktop_owners-manual3_en-us.pdf",
+   "title": "PDF OptiPlex 3050 Small Form Factor Owner's Manual - Dell",
+   "snippet": "Remove the thermal pad and white adhesive tape from the box. Place the thermal pad on the SSD slot and remove the white adhesive tape. Place the M.2 Intel optane memory module into the slot on the thermal pad. If the system is shipped with screw tighten that secures the M.2 Intel optane memory module on the computer. If the",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/Dell/comments/13av7vs/how_bad_is_dells_heat_cooling_system/",
+   "title": "How bad is Dells heat cooling system? : r/Dell - Reddit",
+   "snippet": "What is your experience with dell Laptops? Do you think overheating is a chronic issue of the brand? So, I'm looking for a laptop to buy and I'm pending towards Dells products. But everywhere I go there is someone complaining about Dell laptops getting to hot just by using doing simple stuff like using chrome. I'm deciding between the Inspiron 13 5320 (13.3\") and the Latitude 5430 (14\") which ...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/Dell/comments/1fe7w23/optiplex_3050m_nvme_overheating/",
+   "title": "r/Dell on Reddit: Optiplex 3050m - NVMe Overheating",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.dell.com/support/home/tr-tr",
+   "title": "Destek Ana Sayfa | Dell Turkey",
+   "snippet": "Ücretsiz tanılama testleri, sürücüler, indirmeler, nasıl yapılır makaleleri, videolar, SSS sayfaları ve topluluk forumlarıyla Dell ürününüz için destek alın.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/SleepingOptiplex/comments/1k1182t/pc_claims_overheating_but_performs_fine/",
+   "title": "r/SleepingOptiplex on Reddit: PC claims overheating but performs fine?",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://rutube.ru/video/e4e1e82dae6d620659fa033b79917c89/",
+   "title": "Настройка BIOS на Dell OptiPlex 3050 (3060) для загрузки в PXE",
+   "snippet": "Видео по настройке BIOS для загрузки в PXE на компьютерах Dell OptiPlex 3050 (3060).",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.dell.com/community/en/conversations/optiplex-desktops/optiplex-micro-3020-over-heat-issue/647f87aaf4ccf8a8de6e9eda",
+   "title": "Optiplex Micro 3020-Over heat issue. | DELL Technologies",
+   "snippet": "If thermal paste and heatsink are applied and installed correctly, then the overheating problem is likely due to poor air venting. test your MFF on hard desktop away from wall or enclosed space that compromises cold air inflow and hot air outflow. ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/Dell/comments/1huzgvp/dell_optiplex_3050_starting_problem/",
+   "title": "Link to reddit.com",
+   "snippet": "The site owner hides the web page description.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www-userbenchmark-com.nproxy.org/UserRun/73801500",
+   "title": "Dell OptiPlex 3050 Performance Results - UserBenchmark",
+   "snippet": "Dell OptiPlex 3050 (all builds). Memory. 10 GB free of 16 GB @ 2.7 GHz.Typical OptiPlex 3050 Builds (Compare 5,998 builds) See popular component choices, score breakdowns and rankings.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=OHycvX-Uo9s",
+   "title": "Fixing My Overheating Modified Dell Optiplex Gaming PC - YouTube",
+   "snippet": "The thermals on OptiFlex are out of control!!! Time to make more improvements to OptiFlex and fix the issue!⏱Timestamps⏱0:00 - Introduction0:29 - Recap of Pr... Published: May 14, 2021 Views: 8K",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/pcmasterrace/comments/1atdeon/do_nvmes_in_dell_optiplex_micros_have_overheating/",
+   "title": "r/pcmasterrace on Reddit: Do nvme's in Dell Optiplex Micro's have overheating issues?",
+   "snippet": "",
+   "engine": "brave"
+  }
+ ]
+}
