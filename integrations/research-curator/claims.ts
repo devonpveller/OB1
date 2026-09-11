@@ -75,7 +75,81 @@ function cleanClaimText(segment: string): string {
     .trim();
 }
 
+// ── Meta-claim filter (research-trust 2026-09-11, PLAN Phase 3.1) ───────────
+// A claim is a statement about the WORLD. A statement about the SOURCES or
+// about this RUN is not a claim, and eight of them are in the claims table
+// because nothing here distinguished the two. The worst is stored at 0.85:
+//   "The provided sources contain no information specific to the Dell OptiPlex
+//    3050 model; all sources reference other platforms…"
+// It carries the query's own vocabulary, so the NEXT OptiPlex query recalls it
+// as known knowledge and the engine argues with itself.
+//
+// Two layers, in this order: these patterns, then (for what they do not
+// recognise) an LLM judge that FAILS OPEN. Patterns reject; only a confident
+// judge verdict rejects beyond them.
+
+/** Layer A — the claim talks about the source SET rather than about the world. */
+const SOURCE_REFERENTIAL: RegExp[] = [
+  /^the\s+(provided\s+)?sources?\s+(contain|do(es)?\s+not|lack|make|reference|describe|address|establish|say)/i,
+  /\bno\s+(provided\s+)?sources?\b/i,
+  /\bnone\s+of\s+(these|the|those)\s+sources?\b/i,
+  /\b(the\s+)?sources?\s+(provided|given|available|held)\b/i,
+  /\b(the\s+)?sources?\s+(do|does)\s+not\b/i,
+  // A claim that cites "Source N" INSIDE its own text is describing the
+  // evidence set, not the world. (The [Source N] markers are stripped before
+  // this runs; a bare "(Source 3)" in prose is not.)
+  /\(\s*sources?\s+\d+\s*\)/i,
+];
+
+/**
+ * Layer B — the claim's assertion is about the STATE OF CONFIRMATION rather
+ * than about a fact: what is not confirmed, not ruled out, not extrapolable,
+ * or true of X "and not" the thing actually being researched. These are
+ * epistemic statements; they describe the evidence, and "documented for the DGX
+ * Spark, NOT the OptiPlex" is the shape that produced four of the eight.
+ */
+const EVIDENTIAL_HEDGE: RegExp[] = [
+  /\b(is|are|was|were)\s+not\s+confirmed\b/i,
+  /\bnot\s+confirmed\s+(as|for|in)\b/i,
+  /\bdoes\s+not\s+rule\s+out\b/i,
+  /\bcannot\s+be\s+(directly\s+)?extrapolated\b/i,
+  /\bpertains?\s+to\s+[^,]+,\s*not\s+(the|a|an)\b/i,
+  /\bdocumented\s+for\s+[^;.]+;\s*(this\s+)?is\s+not\b/i,
+  /\bno\s+source\s+(confirms?|states?|provides?|documents?|describes?|addresses?|explains?|discusses?|gives?)/i,
+  /\bbut\s+no\s+source\b/i,
+];
+
+export type MetaVerdict = "meta" | "world";
+
+/**
+ * Deterministic half of the filter. "world" means ONLY that these patterns did
+ * not recognise it — the caller may still ask the judge.
+ */
+export function classifyMetaClaim(text: string): MetaVerdict {
+  const t = String(text || "");
+  if (!t.trim()) return "world";
+  for (const re of SOURCE_REFERENTIAL) if (re.test(t)) return "meta";
+  for (const re of EVIDENTIAL_HEDGE) if (re.test(t)) return "meta";
+  return "world";
+}
+
+// ── Omnibus citations (PLAN Phase 3.2) ──────────────────────────────────────
+/**
+ * The 0.85 poison claim cited ALL ELEVEN sources from one line. A single
+ * assertion that eleven independent sources directly state is not a finding,
+ * it is a summary of the pool — so past this many citations a line is at most
+ * [UNCERTAIN] and never writes a `states` edge.
+ */
+export const OMNIBUS_CITATION_MAX = 4;
+export function isOmnibusCitation(nums: number[]): boolean {
+  return (nums || []).length > OMNIBUS_CITATION_MAX;
+}
+
 function edgesForTag(tag: EpistemicTag, nums: number[]): ParsedEdge[] {
+  if (isOmnibusCitation(nums)) {
+    // Downgraded in edgesForTag AND in the tag itself (see parseSynthesisClaims).
+    return nums.map((sourceIndex) => ({ sourceIndex, edgeType: "inferred_from" as EdgeType, weight: 0.5 }));
+  }
   if (tag === "sourced") {
     // First citation directly states; the rest independently corroborate.
     return nums.map((sourceIndex, i) => ({
@@ -132,7 +206,10 @@ export function parseSynthesisClaims(synthesis: string): ParseResult {
     const claimText = cleanClaimText(segment);
     if (!claimText) continue;
     const nums = parseSourceNumbers(segment);
-    const edges = edgesForTag(kind, nums);
+    // Phase 3.2 — a line citing more than OMNIBUS_CITATION_MAX sources is
+    // summarising the pool, not asserting a fact eleven sources each state.
+    const effectiveTag: EpistemicTag = isOmnibusCitation(nums) ? "uncertain" : kind;
+    const edges = edgesForTag(effectiveTag, nums);
     // Rule #1 gate: a claim with no grounding edge is not admitted. (It is
     // neither stored nor counted as a gap — it was an untethered assertion.)
     if (edges.length === 0) continue;
@@ -141,7 +218,7 @@ export function parseSynthesisClaims(synthesis: string): ParseResult {
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);
 
-    claims.push({ text: claimText, tag: kind, edges });
+    claims.push({ text: claimText, tag: effectiveTag, edges });
   }
 
   return { claims, gaps };
@@ -165,6 +242,15 @@ export interface WriteClaimsOpts {
   revalidateDays?: number | null;
   /** optional bge-m3 embedder; when present each claim row gets an embedding. */
   embed?: (text: string) => Promise<number[]>;
+  /**
+   * Second layer of the meta-claim filter (Phase 3.1): asked ONLY about claims
+   * the deterministic patterns did not recognise. FAILS OPEN — a judge error or
+   * a non-answer keeps the claim, because a filter that silently eats knowledge
+   * when the model hiccups is worse than the poison it is removing.
+   */
+  metaJudge?: (text: string) => Promise<"META" | "WORLD">;
+  /** Called for every rejected claim so the refusal is visible, never silent. */
+  onMetaSkip?: (text: string, by: "pattern" | "judge") => void;
 }
 
 export interface WriteClaimsResult {
@@ -173,6 +259,8 @@ export interface WriteClaimsResult {
   edgesWritten: number;
   edgesSkipped: number;   // citation pointed at a source not in sourceIds
   ungroundedSkipped: number; // claim whose every edge was unresolvable
+  /** Claims refused as statements about the run rather than about the world. */
+  metaSkipped: number;
   gaps: string[];
   claimIds: string[];     // ids of the claims written/deduped (for conflict detection)
 }
@@ -192,10 +280,27 @@ export async function writeClaims(
   const { claims, gaps } = parseSynthesisClaims(synthesis);
   const res: WriteClaimsResult = {
     claimsWritten: 0, claimsDeduped: 0, edgesWritten: 0,
-    edgesSkipped: 0, ungroundedSkipped: 0, gaps, claimIds: [],
+    edgesSkipped: 0, ungroundedSkipped: 0, metaSkipped: 0, gaps, claimIds: [],
   };
 
   for (const claim of claims) {
+    // Phase 3.1 — a statement ABOUT THE RUN is not a claim about the world and
+    // must not enter the knowledge base. Patterns first (free, deterministic);
+    // the judge only for what they did not recognise, and it fails open.
+    if (classifyMetaClaim(claim.text) === "meta") {
+      res.metaSkipped++;
+      opts.onMetaSkip?.(claim.text, "pattern");
+      continue;
+    }
+    if (opts.metaJudge) {
+      let verdict: "META" | "WORLD" = "WORLD";
+      try { verdict = await opts.metaJudge(claim.text); } catch { verdict = "WORLD"; }
+      if (verdict === "META") {
+        res.metaSkipped++;
+        opts.onMetaSkip?.(claim.text, "judge");
+        continue;
+      }
+    }
     // Resolve citation indices → real source ids first; if none resolve, the
     // claim is ungrounded → do not store it (rule #1).
     const resolved = claim.edges

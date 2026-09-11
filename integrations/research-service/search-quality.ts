@@ -121,6 +121,59 @@ export function classifyHits(query: string, hits: SearchHit[]): SearchQuality {
   return { verdict: "ok", overlap };
 }
 
+// ── Query shaping (Phase 1.2) ───────────────────────────────────────────────
+// Round 1 used to search the DECOMPOSE questions verbatim — long natural
+// language, the worst possible input. Note that on the audited engine this was
+// NOT the cause of the collapse (a two-token query collapsed identically,
+// measured 15/15 in search-engine-alternatives-2026-09-11.md §4); keyword
+// queries are right for the engines that DO answer, not a Bing remedy.
+
+const MAX_QUERY_TOKENS = 10;
+
+/** Trim to at most `max` whitespace-separated tokens. */
+function clampTokens(s: string, max = MAX_QUERY_TOKENS): string {
+  return String(s || "").trim().split(/\s+/).filter(Boolean).slice(0, max).join(" ");
+}
+
+function containsEntity(query: string, entity: string): boolean {
+  if (!entity) return true;
+  return query.toLowerCase().includes(entity.toLowerCase());
+}
+
+/**
+ * One web query for one need. `raw` is the model's proposal and is used only if
+ * it is usable: the SUBJECT ENTITY is enforced here rather than trusted to the
+ * prompt, because a query that has dropped the subject is how "failure modes"
+ * became a search about failure modes in general.
+ */
+export function keywordQuery(entity: string, need: string, raw?: unknown): string {
+  const ent = String(entity || "").trim();
+  let q = typeof raw === "string" ? raw.trim() : "";
+  if (!q) {
+    // Fall back to the need's own content words — never the raw question.
+    q = terms(need).slice(0, 5).join(" ");
+  }
+  if (ent && !containsEntity(q, ent)) q = `${ent} ${q}`;
+  q = clampTokens(q);
+  return q || ent || clampTokens(need, 6);
+}
+
+/** Suffixes that bias a re-query toward pages that discuss a thing rather than sell it. */
+export const REFORMULATION_SUFFIXES = ["problems", "guide", "review", "study", "forum"];
+
+/**
+ * The second attempt at a need whose first search came back collapsed: keep the
+ * entity plus two content nouns, drop everything else, and add one template
+ * suffix. Deterministic in `nth` so a run is reproducible.
+ */
+export function reformulate(need: string, entity: string, nth: number): string {
+  const ent = String(entity || "").trim();
+  const entTokens = new Set(terms(ent));
+  const nouns = terms(need).filter((t) => !entTokens.has(t) && !/^\d+$/.test(t)).slice(0, 2);
+  const suffix = REFORMULATION_SUFFIXES[Math.abs(nth) % REFORMULATION_SUFFIXES.length];
+  return clampTokens([ent, ...nouns, suffix].filter(Boolean).join(" "));
+}
+
 /** Per-run search accounting (RunResult.fetchStats.search). */
 export interface SearchStats {
   calls: number; ok: number; collapsed: number; empty: number; errors: number;

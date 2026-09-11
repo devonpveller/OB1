@@ -248,6 +248,13 @@ export interface RenderableResult {
   gaps?: string[] | null;
   backstop?: string | null;
   reuse_ratio?: number | null;
+  /** research-trust: per-need verdicts, the basis for "needs answered X of N". */
+  needs_status?: Array<{ need: string; status: string }> | null;
+  /** research-trust: the hit/fetch/readable/relevant funnel for the footer. */
+  search_record?: {
+    hits?: number; fetched?: number; readable?: number; relevant?: number;
+    ok?: number; collapsed?: number; empty?: number; errors?: number;
+  } | null;
 }
 
 export function renderResult(result: RenderableResult): string {
@@ -295,12 +302,31 @@ export function renderResult(result: RenderableResult): string {
     );
   }
 
+  // -- Footer (research-trust 2026-09-11) -----------------------------------
+  // `coverage NN%` is GONE. It was `1 - gap_ratio` over synthesis LINES - how
+  // much of the WRITING carried a citation - printed where a reader looks for
+  // how much of their QUESTION was answered. Job ce398d06 printed
+  // "coverage 22%" having answered 0 of 6 needs. A number whose label means
+  // something else is worse than no number, so a run with no per-need verdicts
+  // (every job recorded before this change) now prints none.
   const foot: string[] = [];
-  if (result.reuse_ratio !== null && result.reuse_ratio !== undefined) {
-    foot.push(`coverage ${Math.round(Number(result.reuse_ratio) * 100)}%`);
+  const ns = result.needs_status;
+  if (Array.isArray(ns) && ns.length) {
+    const answered = ns.filter((n) => n?.status === "answered").length;
+    foot.push(`needs answered ${answered} of ${ns.length}`);
+    const rec = result.search_record;
+    if (rec && typeof rec.fetched === "number") {
+      const hitBits = [`${rec.hits ?? 0} hits`];
+      if (rec.collapsed) hitBits.push(`${rec.collapsed} collapsed`);
+      foot.push(`sources ${rec.relevant ?? 0} relevant of ${rec.fetched} fetched (${hitBits.join(", ")})`);
+    }
   }
   if (backstop && backstop !== "complete") foot.push(`stopped early: ${backstop}`);
-  if (foot.length) parts.push(`\n\n_— ${foot.join(" \u00b7 ")}_`);
+  // The harness already stamps this footer onto `prose`, so the curator and the
+  // wiki store the same honest number. Do not print it twice.
+  if (foot.length && !/needs answered \d+ of \d+/.test(body)) {
+    parts.push("\n\n_— " + foot.join(" · ") + "_");
+  }
 
   return parts.join("\n");
 }
@@ -355,6 +381,14 @@ export function classifyCuratorOutcome(
   // No curator report at all = there was nothing to promote (dry run, or a run
   // with no cited sources and no reuse). Honest, but not a success either.
   if (!curator) return { status: "done", error: null, reason: null, state: "skipped" };
+  // research-trust 2026-09-11: a run that DELIBERATELY skipped the curator says
+  // so ({ state: "skipped", reason }). Without this branch the marker object is
+  // truthy and falls through to "filed", which would report a curator that was
+  // never called as having filed the run — the same class of lie this function
+  // was written to stop.
+  if (curator.state === "skipped") {
+    return { status: "done", error: null, reason: nonEmpty(curator.reason), state: "skipped" };
+  }
   return { status: "done", error: null, reason: null, state: "filed" };
 }
 

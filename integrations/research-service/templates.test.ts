@@ -45,3 +45,30 @@ Deno.test("classifyTemplate: garbage / unknown / chat failure all fall back to d
   const thrown = await classifyTemplate(fakeDeps(() => Promise.reject(new Error("down"))), "q", "s");
   assertEquals(thrown.id, DEFAULT_TEMPLATE_ID);
 });
+
+// ── research-trust 2026-09-11 ───────────────────────────────────────────────
+// The audited run (job 8c9b4f1d) was rendered through scientific-paper and
+// titled "Absence of Evidence for 100 Hz Auditory Tones…" over a pool the
+// engine never retrieved. These pin the CONTRACT the prompts must carry; a
+// model can still disobey a prompt, which is why report.ts renders the
+// zero-finding case itself rather than asking a model to.
+Deno.test("every template forbids a title that asserts absence", () => {
+  for (const t of TEMPLATES) {
+    const sys = renderSys(t);
+    assertEquals(sys.includes("TITLE RULE"), true, `${t.id} lost the title rule`);
+    assertEquals(/may never assert that something does not exist/.test(sys), true, t.id);
+  }
+});
+
+Deno.test("the answer-first templates lead with an Answer block", () => {
+  for (const id of ["general-report", "scientific-paper"]) {
+    const sys = renderSys(templateById(id));
+    assertEquals(sys.includes("**Answer.**"), true, `${id} has no Answer block`);
+  }
+});
+
+Deno.test("no template asks for a heading that promises coverage it may not have", () => {
+  for (const t of TEMPLATES) {
+    assertEquals(/what the sources actually cover/i.test(t.structure), false, t.id);
+  }
+});

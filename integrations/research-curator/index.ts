@@ -425,6 +425,12 @@ async function writeGroundedClaims(
       volatility: pkg.volatility ?? null,
       revalidateDays: pkg.revalidate_days ?? null,
       embed,
+      // research-trust 2026-09-11: statements ABOUT the run never become claims.
+      // The judge is the second layer and fails open (claims.ts); the log line
+      // is the point - eight of these were stored with nothing saying so.
+      metaJudge,
+      onMetaSkip: (text, by) =>
+        console.log(`claims: META (${by}) - refused "${text.slice(0, 160)}"`),
     });
     await client.queryArray("COMMIT");
 
@@ -453,6 +459,18 @@ async function writeGroundedClaims(
   } finally {
     client.release();
   }
+}
+
+// LLM judge for the meta-claim filter (research-trust Phase 3.1). Only asked
+// about claims the deterministic patterns did not recognise. Anything other
+// than a confident META keeps the claim: writeClaims fails OPEN around this.
+const META_JUDGE_SYS =
+  `You decide whether a sentence is a claim about the WORLD or a statement about a research run and its sources. WORLD = it asserts something that is true or false independently of who looked it up ("the OptiPlex 3050 uses an LGA 1151 socket", "a study of 14 subjects found X"). META = it describes the evidence set, the search, or the state of confirmation ("the provided sources contain no information about X", "this is not confirmed for Y", "no source documents Z", "these findings pertain to A, not B"). A sentence that merely CITES or NAMES a study is WORLD; a sentence whose subject IS the source set is META.
+
+Return ONLY JSON: {"verdict":"WORLD"} or {"verdict":"META"}.`;
+async function metaJudge(text: string): Promise<"META" | "WORLD"> {
+  const out = await chatJson(META_JUDGE_SYS, `SENTENCE: ${text}`);
+  return out.verdict === "META" ? "META" : "WORLD";
 }
 
 // LLM judge for conflict detection — does claim A contradict claim B?
@@ -617,7 +635,7 @@ Deno.serve({ port: PORT }, async (req) => {
       );
 
       console.log(
-        `ingest: decision=${res.decision} conf=${res.confidence.toFixed(2)} thread="${res.name}" (${res.thread_id}) sources=${persist.sources_written ?? "?"} claims=${claims ? `${claims.claimsWritten}+${claims.claimsDeduped}dup/${claims.gaps.length}gap/${claims.ungroundedSkipped}skip` : "0"}`,
+        `ingest: decision=${res.decision} conf=${res.confidence.toFixed(2)} thread="${res.name}" (${res.thread_id}) sources=${persist.sources_written ?? "?"} claims=${claims ? `${claims.claimsWritten}+${claims.claimsDeduped}dup/${claims.gaps.length}gap/${claims.ungroundedSkipped}skip/${claims.metaSkipped}meta` : "0"}`,
       );
       return Response.json({
         thread_id: res.thread_id,

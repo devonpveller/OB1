@@ -166,13 +166,44 @@ Deno.test("renderResult: complete run renders synthesis + only cited sources", (
     gaps: [],
     backstop: "complete",
     reuse_ratio: 0.75,
+    needs_status: [
+      { need: "a", status: "answered" }, { need: "b", status: "answered" },
+      { need: "c", status: "answered" }, { need: "d", status: "open" },
+    ],
+    search_record: { hits: 40, fetched: 30, readable: 28, relevant: 9, collapsed: 0 },
   });
   assertEquals(out.includes("Answer [1]."), true);
   assertEquals(out.includes("1. [A](https://a.example)"), true);
-  assertEquals(out.includes("coverage 75%"), true);
+  // CHANGED 2026-09-11 (research-trust): was `coverage 75%`, which was
+  // 1 - gap_ratio over synthesis LINES and had nothing to do with how much of
+  // the question was answered. `reuse_ratio` is still accepted and still
+  // ignored here on purpose.
+  assertEquals(out.includes("needs answered 3 of 4"), true);
+  assertEquals(out.includes("sources 9 relevant of 30 fetched"), true);
+  assertEquals(/coverage \d+%/.test(out), false);
   // A complete run must NOT carry the anti-fabrication warning — crying wolf on
   // every result trains the reader to ignore it on the runs that matter.
   assertEquals(out.includes("INCOMPLETE"), false);
+});
+
+Deno.test("renderResult: a job recorded BEFORE needs_status prints no coverage number at all", () => {
+  const out = renderResult({
+    synthesis: "Answer [1].",
+    cited_sources: [{ url: "https://a.example", title: "A" }],
+    gaps: [], backstop: "complete", reuse_ratio: 0.22,
+  });
+  assertEquals(/coverage \d+%/.test(out), false);
+  assertEquals(/needs answered/.test(out), false);
+});
+
+Deno.test("renderResult: the footer is not printed twice when prose already carries it", () => {
+  const out = renderResult({
+    prose: "# Report\nBody.\n\n_— needs answered 1 of 2_",
+    needs_status: [{ need: "a", status: "answered" }, { need: "b", status: "open" }],
+    search_record: { hits: 10, fetched: 8, readable: 8, relevant: 2, collapsed: 0 },
+    backstop: "complete",
+  });
+  assertEquals(out.match(/needs answered/g)?.length, 1);
 });
 
 Deno.test("renderResult: gaps and early stops carry the do-not-fabricate directive", () => {
@@ -229,6 +260,17 @@ Deno.test("no curator report at all is 'skipped', not 'filed'", () => {
   assertEquals(classifyCuratorOutcome(null).state, "skipped");
   assertEquals(classifyCuratorOutcome(undefined).state, "skipped");
   assertEquals(classifyCuratorOutcome(null).status, "done");
+});
+
+Deno.test("a DELIBERATE skip reports 'skipped' with its reason, never 'filed'", () => {
+  // research-trust: runResearch returns { state: "skipped", reason } when it
+  // refuses to hand the curator a run that retrieved nothing. That object is
+  // truthy, so before this branch existed it read as a successful filing.
+  const o = classifyCuratorOutcome({ state: "skipped", reason: "search_degraded" });
+  assertEquals(o.state, "skipped");
+  assertEquals(o.status, "done");
+  assertEquals(o.error, null);
+  assertEquals(o.reason, "search_degraded");
 });
 
 Deno.test("an empty error string is not a failure", () => {

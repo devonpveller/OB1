@@ -1,0 +1,176 @@
+/**
+ * report.ts — what the reader is told about how much of their question was
+ * answered, and what a run with nothing to report looks like.
+ *
+ * PLAN-research-trust-2026-09-11 Phase 4. Pure: no deps, no env, no I/O.
+ *
+ * Two failures this exists for (audit 2026-09-11):
+ *   - "coverage 22%" on a run that answered 0 of 6 needs. The number was
+ *     1 - gap_ratio computed over synthesis LINES: it measured what fraction of
+ *     the writing carried a citation, and was rendered as if it measured the
+ *     question. Coverage is now answered needs over needs, and nothing else.
+ *   - A run that retrieved no relevant page at all was classified as a
+ *     scientific paper and titled "Absence of Evidence for 100 Hz Auditory
+ *     Tones…". That is a literature finding. The literature exists (the audit
+ *     found it with one outside search); what failed was the retrieval. A run
+ *     that found nothing now renders a NOTICE that says so, and never reaches
+ *     a template at all.
+ */
+
+export type NeedStatus = "answered" | "partial" | "open" | "search_failed";
+export interface NeedState { need: string; status: NeedStatus; }
+
+export interface SearchRecordEntry {
+  query: string;
+  verdict: "ok" | "collapsed" | "empty" | "error";
+  hits: number;
+  overlap: number;
+  collapsedOn?: string;
+}
+
+export interface SearchRecord {
+  queries: SearchRecordEntry[];
+  /** Raw hits the engines returned across all calls. */
+  hits: number;
+  /** Pages fetched successfully. */
+  fetched: number;
+  /** …of which had an extract worth reading (>= READABLE_MIN_CHARS). */
+  readable: number;
+  /** …of which survived the relevance gate. */
+  relevant: number;
+  /** Search calls by verdict. */
+  ok: number;
+  collapsed: number;
+  empty: number;
+  errors: number;
+}
+
+export function emptySearchRecord(): SearchRecord {
+  return { queries: [], hits: 0, fetched: 0, readable: 0, relevant: 0,
+           ok: 0, collapsed: 0, empty: 0, errors: 0 };
+}
+
+export function answeredCount(needs: NeedState[]): number {
+  return (needs || []).filter((n) => n.status === "answered").length;
+}
+
+/**
+ * A topic template (scientific paper, product comparison, …) states a shape the
+ * evidence has to fill. Below three answered needs there is no shape to fill,
+ * and the template's own headings become assertions the run cannot support —
+ * which is how a zero-finding run acquired an Abstract and a Discussion.
+ */
+export const TEMPLATE_MIN_ANSWERED = 3;
+export function shouldClassifyTemplate(answered: number): boolean {
+  return answered >= TEMPLATE_MIN_ANSWERED;
+}
+
+/** "ok" | "DEGRADED" — from measurement, not from whether an engine errored. */
+export function searchHealthLabel(r: SearchRecord): "ok" | "DEGRADED" {
+  if (!r) return "ok";
+  if (r.collapsed > 0 && r.collapsed >= r.ok) return "DEGRADED";
+  if (r.ok === 0 && (r.collapsed > 0 || r.empty > 0)) return "DEGRADED";
+  return "ok";
+}
+
+/**
+ * The one-line footer. Replaces `coverage NN%`, which answered a question
+ * nobody asked.
+ */
+export function coverageFooter(
+  needs: NeedState[],
+  record: SearchRecord,
+  backstop?: string | null,
+): string {
+  const parts: string[] = [];
+  parts.push(`needs answered ${answeredCount(needs)} of ${(needs || []).length}`);
+  if (record) {
+    const hitBits: string[] = [`${record.hits} hits`];
+    if (record.collapsed) hitBits.push(`${record.collapsed} collapsed`);
+    parts.push(
+      `sources ${record.relevant} relevant of ${record.fetched} fetched (${hitBits.join(", ")})`,
+    );
+    const health = searchHealthLabel(record);
+    if (health === "DEGRADED") {
+      parts.push(`search: DEGRADED (${record.collapsed} of ${record.collapsed + record.ok + record.empty} searches returned junk)`);
+    }
+  }
+  if (backstop && backstop !== "complete") parts.push(`stopped early: ${backstop}`);
+  return parts.join(" · ");
+}
+
+const BACKSTOP_REASON: Record<string, string> = {
+  search_degraded: "the search engines returned results for a single word of the query instead of the query",
+  fetch_degraded: "almost nothing that was found could be fetched and read",
+  wall_time: "the run hit its time limit before finding a usable source",
+  max_fetch: "the run hit its fetch budget before finding a usable source",
+  max_timeouts: "too many page fetches timed out",
+  no_relevant_sources: "no retrieved page was about the subject",
+};
+
+function needTable(needs: NeedState[]): string {
+  const rows = (needs || []).map((n) => `| ${n.need.replace(/\|/g, "/")} | ${n.status} |`);
+  return ["| Need | Status |", "|---|---|", ...rows].join("\n");
+}
+
+function queryTable(record: SearchRecord, max = 12): string {
+  const rows = (record?.queries || []).slice(0, max).map((q) => {
+    const why = q.verdict === "collapsed" && q.collapsedOn
+      ? `collapsed onto "${q.collapsedOn}"`
+      : q.verdict;
+    return `| ${q.query.replace(/\|/g, "/")} | ${q.hits} | ${why} |`;
+  });
+  if (!rows.length) return "_No web search was run._";
+  return ["| Query tried | Hits | Verdict |", "|---|---|---|", ...rows].join("\n");
+}
+
+/**
+ * The whole report for a run that retrieved nothing relevant. Answer first, in
+ * the first line, so a reader knows within one sentence that nothing was found
+ * and WHY — and cannot mistake it for a finding about the world.
+ */
+export function failureNotice(
+  query: string,
+  subject: string,
+  needs: NeedState[],
+  record: SearchRecord,
+  backstop: string,
+): string {
+  const subj = (subject || "").trim() || "the subject of this question";
+  const reason = BACKSTOP_REASON[backstop] || "the retrieval step failed";
+  const out: string[] = [];
+  out.push(`# No sources about ${subj} were retrieved`);
+  out.push("");
+  out.push(
+    `**Answer.** No source relevant to ${subj} was retrieved, so this run has nothing ` +
+    `to report about it. This is a **search failure, not evidence of absence**: ` +
+    `${reason}. The question is unanswered, not answered in the negative. ` +
+    `Re-run it once the search plane is healthy before concluding anything.`,
+  );
+  out.push("");
+  out.push("## What was asked");
+  out.push("");
+  out.push(needTable(needs));
+  out.push("");
+  out.push("## Search record");
+  out.push("");
+  out.push(queryTable(record));
+  out.push("");
+  out.push(
+    `Hits ${record?.hits ?? 0} · fetched ${record?.fetched ?? 0} · ` +
+    `readable ${record?.readable ?? 0} · relevant **${record?.relevant ?? 0}**.`,
+  );
+  out.push("");
+  out.push(`_— ${coverageFooter(needs, record, backstop)}_`);
+  return out.join("\n");
+}
+
+/**
+ * A title may not assert that something does not exist unless the run actually
+ * covered the ground. "Absence of Evidence for 100 Hz Auditory Tones" was
+ * written over a pool the engine never retrieved.
+ */
+const ABSENCE_TITLE_RE = /^#\s*.*\b(absence of evidence|no evidence (for|of)|lack of evidence)\b/im;
+export function titleAssertsAbsence(markdown: string): boolean {
+  return ABSENCE_TITLE_RE.test(String(markdown || ""));
+}

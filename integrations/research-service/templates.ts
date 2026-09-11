@@ -33,7 +33,11 @@ export const GROUNDING_RULES =
 - Introduce NO fact, number, name, URL, or quote that is not in the GROUNDED ANSWER. If it is not supported there, do not write it.
 - Drop the [SOURCED]/[INFERRED]/[UNCERTAIN] tags; convey that nuance in prose ("directly reports…", "the evidence suggests…", "weakly supported…").
 - The [GAP] items are honest unknowns: render them in the report's open-questions section as questions, without citations, and NEVER fill them from your own knowledge.
-- No preamble ("Here is the report…") — start with the report itself. Output is Markdown.`;
+- No preamble ("Here is the report…") — start with the report itself. Output is Markdown.
+
+TITLE RULE — ABSOLUTE. The title states what the evidence SHOWS. It may never assert that something does not exist, is unsupported, or is absent from the literature ("Absence of Evidence for…", "No Evidence That…", "Lack of Research on…"). A report is written from what was retrieved, and what was retrieved is never proof of what exists: a run that found little found little, which is a fact about the run. If the evidence is too thin to state a finding, title the report by its SUBJECT and say so in the Answer block.
+
+NEVER write a heading that claims to describe what the sources cover and then lists what they do not. If the sources do not address the question, that belongs in the Answer block, in one sentence, not under a heading that promises coverage.`;
 
 export const TEMPLATES: ReportTemplate[] = [
   {
@@ -42,7 +46,8 @@ export const TEMPLATES: ReportTemplate[] = [
     audience: "researchers and technically fluent readers",
     hints: "scientific questions, studies, experiments, biology/physics/chemistry/medicine, 'what does the research say', literature-review style questions",
     structure: `Render as a short scientific-paper-style report:
-# <Title — specific and factual>
+# <Title — specific and factual, and never an assertion of absence>
+**Answer.** 2-4 sentences answering the question directly, before anything else. A reader must be able to stop here and know what the evidence showed.
 ## Abstract — 3-5 sentences: question, what the evidence shows, the headline conclusion.
 ## Background — why the question matters, established context (cited).
 ## Findings — the substantive results, grouped thematically; every finding cited. Use subsections if natural.
@@ -161,11 +166,18 @@ Clear and persuasive but never beyond the evidence — this is grounded analysis
     name: "General research report",
     audience: "any reader",
     hints: "DEFAULT — anything that does not clearly fit another template",
-    structure: `Render as a clear general research report:
-# <Title>
-Open with a direct answer to the question, then supporting detail under ## section headers with short paragraphs or bullet lists where natural.
-## Open questions — end with the [GAP] items (omit the section if there are none).
-Faithful and complete — cover every claim — but readable.`,
+    structure: `Render as a SHORT, answer-first research report. Target 600 words or fewer; never pad.
+
+# <Title that states the ANSWER, not the topic>
+**Answer.** 2-4 sentences answering the question directly, from the evidence. Lead with the answer, not with background. If the evidence does not settle the question, say what it DOES establish and what remains open — in those same 2-4 sentences.
+
+## What the evidence supports
+One cited bullet per claim, at most 12, most decisive first. No bullet without its [Source N].
+
+## What was not found
+The [GAP] items, phrased as open questions, no citations. Omit this section entirely if there are none.
+
+Nothing else. No "Overview", no "Background", no "Conclusion" restating the Answer.`,
   },
 ];
 

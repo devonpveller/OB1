@@ -10,9 +10,15 @@ import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenu
 import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
 import { rankHits, partitionRelevant, floorKeepable } from "./filtering.ts";
-import { classifyTemplate, renderSys } from "./templates.ts";
+import { classifyTemplate, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "./templates.ts";
 import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
+import { classifyHits, emptySearchStats, keywordQuery, reformulate, type SearchStats } from "./search-quality.ts";
+import { applyNumericGrounding } from "./grounding.ts";
+import {
+  coverageFooter, emptySearchRecord, failureNotice, shouldClassifyTemplate,
+  type NeedState, type NeedStatus, type SearchRecord,
+} from "./report.ts";
 
 // Tunables (env-read; reading env does not start a server).
 const env = (k: string, d: string) => Deno.env.get(k) ?? d;
@@ -58,13 +64,46 @@ const ARTICLE_SOURCE_CHARS = parseInt(env("ARTICLE_SOURCE_CHARS", "8000"), 10);
 // mutation + re-synthesis) is deferred to on-site validation and NOT in this
 // build; SKEPTIC_REGATHER_MAX is reserved for it.
 const SKEPTIC_ENABLED = env("SKEPTIC_ENABLED", "0") === "1";
+// ── research-trust (2026-09-11) ─────────────────────────────────────────────
+// RELEVANT_TARGET — the run's YIELD target. Gathering continues while fewer than
+// this many pages have survived the relevance gate and un-searched reformulations
+// remain. MAX_ROUNDS stays as the hard ceiling; it is no longer the stop CONDITION
+// (stopping at round 3 with zero relevant sources is how two runs reported
+// "complete" having retrieved nothing).
+const RELEVANT_TARGET = parseInt(env("RELEVANT_TARGET", "8"), 10);
+// A run whose searches collapse this many times IN A ROW stops gathering with
+// backstop="search_degraded". Three is the plan's number: enough to distinguish
+// one bad query from a broken engine, small enough not to burn the budget.
+const COLLAPSE_STREAK_MAX = parseInt(env("COLLAPSE_STREAK_MAX", "3"), 10);
+// A fetched page with less extracted text than this is not READABLE — it was
+// fetched, but there is nothing in it to ground anything with.
+const READABLE_MIN_CHARS = parseInt(env("READABLE_MIN_CHARS", "400"), 10);
+// Many hits, almost nothing readable, is a FETCH failure, not an empty topic.
+const FETCH_DEGRADED_MIN_HITS = parseInt(env("FETCH_DEGRADED_MIN_HITS", "20"), 10);
+const FETCH_DEGRADED_RATIO = parseFloat(env("FETCH_DEGRADED_RATIO", "0.2"));
+// How much of each freshly-gathered source the synthesizer actually sees. Was a
+// hard-coded 2000; a source cut at 2 000 chars is thin evidence by construction.
+const SOURCE_SLICE_CHARS = parseInt(env("SOURCE_SLICE_CHARS", "4000"), 10);
+// Interactive (owui) topic research may run longer than the shared default: a
+// correct answer is worth minutes. Digest/article/notebook paths are unaffected —
+// this is applied only on the default topic-research path for origin "owui".
+const MAX_WALL_MS_OWUI = parseInt(env("MAX_WALL_MS_OWUI", String(MAX_WALL_MS)), 10);
 
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
 export interface Page { url: string; title: string; content: string; domain: string; }
 // A fetch attempt's outcome — distinguishes a retrieved source from a timeout
 // (flaky Tor) from any other failure. `page` is non-null only when outcome="ok".
-export type FetchOutcome = "ok" | "timeout" | "error";
+/**
+ * Phase 1.5 — "error" used to be one bucket holding a 404, a PDF, an empty
+ * extract and a dead socket. 18 of 50 attempts in one audited run and 31 of 72
+ * in the other landed in it, and nothing downstream could tell "we could not
+ * READ it" from "it is not THERE". The old "error" is still accepted (mocks and
+ * older callers emit it) and counted under `network`.
+ */
+export type FetchOutcome =
+  | "ok" | "timeout" | "error"
+  | "http" | "non_html" | "empty_extract" | "network";
 export interface FetchResult { page: Page | null; outcome: FetchOutcome; }
 export interface Deps {
   embed(text: string): Promise<number[]>;
@@ -94,6 +133,13 @@ const COVERAGE_SYS =
   `You decide which research NEEDS are already covered by KNOWN CLAIMS. A need is "covered" only if a known claim directly answers it. Return ONLY JSON: {"covered": [need_index,...], "gaps": [need_index,...]}. Indices refer to the NEEDS list (0-based). When unsure, mark it a gap (never assume coverage).`;
 const COVERAGE_STAGED_SYS =
   `You judge whether each NEED is now answered by the GATHERED SOURCES (titles + excerpts). A need is "covered" only if a source actually answers it. Return ONLY JSON: {"covered": [need_index,...], "open": [need_index,...]} (0-based indices into the NEEDS list). When unsure, mark it open.`;
+// Phase 1.2 — round 1 searches KEYWORDS, not the decomposed question. The
+// SUBJECT ENTITY is asked for explicitly because it is the one token a query
+// may never lose: a need rewritten without it is a search about the category.
+const KEYWORDIZE_SYS =
+  `You turn research needs into web-search queries. First identify the SUBJECT ENTITY of the QUESTION — the specific thing being researched, as a searcher would type it ("OptiPlex 3050", "Postgres 17 logical replication", "semaglutide"). Then, for EACH need, write ONE web query of 3 to 7 terms that CONTAINS the subject entity and the need's distinguishing words. No questions, no punctuation, no filler words.
+
+Return ONLY JSON: {"entity": "...", "queries": ["...", "..."]} — exactly one query per need, in the same order.`;
 const DEEPEN_SYS =
   `You are a research strategist. Some NEEDS are still unanswered after the searches so far. For each still-open need, propose ONE more specific search query that would find the missing information (use specifics/terms surfaced by what was already found). Return ONLY JSON: {"queries": ["...", ...]} — at most one per open need, concise web-search queries.`;
 
@@ -196,9 +242,29 @@ export interface RunResult {
   metrics: ReturnType<typeof reuseMetric>;
   curator: Record<string, unknown> | null;
   backstop: string;
+  /**
+   * What this run IS, as opposed to why it stopped. "no_relevant_sources" means
+   * nothing about the subject was retrieved — it is a RETRIEVAL result and must
+   * never be read, rendered or stored as a finding about the world.
+   */
+  outcome: "complete" | "no_relevant_sources";
+  /** Per-need verdict, the honest basis for "needs answered X of N". */
+  needsStatus: NeedState[];
+  /** Queries tried with their verdicts, plus the hit/fetch/readable/relevant funnel. */
+  searchRecord: SearchRecord;
+  /** Figures a cited line asserted that no cited source holds (Phase 2.3). */
+  ungroundedNumbers: string[];
   /** Separated fetch accounting — yield (sources) vs waste (timeouts/errors) vs
-   *  free OB cache reuse. `attempts` = sources + timeouts + errors. */
-  fetchStats: { sources: number; timeouts: number; errors: number; reused: number; attempts: number };
+   *  free OB cache reuse. `attempts` = sources + timeouts + errors.
+   *  `readable` = fetched pages with an extract worth grounding from;
+   *  `errorKinds` splits the old single `errors` bucket, which could not tell an
+   *  unreadable page from an unreachable one. */
+  fetchStats: {
+    sources: number; timeouts: number; errors: number; reused: number; attempts: number;
+    readable: number;
+    errorKinds: { http: number; non_html: number; empty_extract: number; network: number };
+    search: SearchStats;
+  };
   /** Phase 2 — the Skeptic's verdict + per-run audit (undefined when SKEPTIC_ENABLED off). */
   skeptic?: SkepticResult;
 }
@@ -246,7 +312,11 @@ export async function runResearch(
   // raise them. Absent contract ⇒ Math.min(X, Infinity) = X (today's behavior).
   const rcBudget = opts.contract?.budget;
   const effMaxFetch = clampCeiling(MAX_FETCH, rcBudget?.maxFetch);
-  const effMaxMs = clampCeiling(MAX_WALL_MS, rcBudget?.wallMs);
+  // The interactive topic path may run longer (MAX_WALL_MS_OWUI); every other
+  // path — digest, article, notebook, sources-only — keeps the shared bound.
+  const topicPath = !articleMode && !skipSearch;
+  const baseMaxMs = topicPath && (opts.origin || "owui") === "owui" ? MAX_WALL_MS_OWUI : MAX_WALL_MS;
+  const effMaxMs = clampCeiling(baseMaxMs, rcBudget?.wallMs);
   const effRounds = clampCeiling(MAX_ROUNDS, rcBudget?.rounds);
 
   // 1. Reuse pass — recall relevant grounded claims (cheap). In article mode the
@@ -290,6 +360,34 @@ export async function runResearch(
   let needs: string[] = [query];
   let gapNeeds: string[] = [];
   const followupQueries: string[] = []; // refined/deepen queries across rounds (breadcrumbs)
+  // research-trust — the run's own record of how retrieval went. `errorKinds`
+  // replaces the single fetchErrors bucket; `searchStats` and `searchRecord`
+  // are what make "the search broke" sayable at all.
+  const errorKinds = { http: 0, non_html: 0, empty_extract: 0, network: 0 };
+  const searchStats: SearchStats = emptySearchStats();
+  const searchRecord: SearchRecord = emptySearchRecord();
+  let readableCount = 0;
+  let ungroundedNumbers: string[] = [];
+  let needsStatus: NeedState[] = [];
+  /** The subject the KEYWORDIZE pass named — the one token a query may not lose. */
+  let subjectEntity = "";
+  const setNeedStatus = (need: string, status: NeedStatus) => {
+    const row = needsStatus.find((n) => n.need === need);
+    if (row) row.status = status;
+  };
+  const countFetch = (outcome: FetchOutcome, page: Page | null) => {
+    if (outcome === "ok") {
+      sourcesFetched++;
+      if ((page?.content || "").length >= READABLE_MIN_CHARS) readableCount++;
+      return;
+    }
+    if (outcome === "timeout") { fetchTimeouts++; return; }
+    fetchErrors++;
+    if (outcome === "http") errorKinds.http++;
+    else if (outcome === "non_html") errorKinds.non_html++;
+    else if (outcome === "empty_extract") errorKinds.empty_extract++;
+    else errorKinds.network++;   // "network" and the legacy "error"
+  };
 
   // KB-SOURCE recall (REPO-SOURCES-WIRING §6): durable primary sources already in OB — e.g.
   // repo docs synced via /sources/repo-sync — can answer repo-specific questions web search
@@ -297,19 +395,34 @@ export async function runResearch(
   // sees them; they were injection-screened at sync time and are re-screened with the pool
   // below anyway (defense in depth). Never in sources-only/article mode (those ground
   // strictly from the caller's seeds/article).
+  //
+  // Phase 2.1 (research-trust 2026-09-11): on the DEFAULT topic-research path
+  // these recalls are now CANDIDATES, not protected pages. Their exemption from
+  // the relevance gate is what turned job ce398d06 into a report: every web page
+  // was correctly rejected, and six months-old pages about a different computer
+  // (DGX Spark, Compaq d220, an ASUS BIOS FAQ) were exempt, so the pool was never
+  // empty, the fail-safe floor never fired, and the run read as complete. Vector
+  // proximity is a retrieval signal, not a relevance verdict.
+  // The digest (disable_web_search), article and sources-only paths are UNCHANGED:
+  // there the recall is often the only pool, and the plan's own rule is to leave
+  // those bounds alone.
+  const kbRecalled: Page[] = [];
   if (!sourcesOnly && !articleMode) {
     try {
       const kbSources = await retrieveRelevantSources(
         client, queryEmb, KB_SOURCES_K, KB_SOURCES_MAX_DISTANCE);
       for (const s of kbSources) {
-        if (s.url && !staged.some((p) => p.url === s.url)) {
-          staged.push({ url: s.url, title: s.title, content: s.content,
-                        domain: s.domain || domainOf(s.url) });
+        if (s.url && !staged.some((p) => p.url === s.url) && !kbRecalled.some((p) => p.url === s.url)) {
+          const page: Page = { url: s.url, title: s.title, content: s.content,
+                               domain: s.domain || domainOf(s.url) };
+          if (topicPath) kbRecalled.push(page);
+          else { staged.push(page); }
           reuseHits++;
         }
       }
       if (kbSources.length) {
-        await progress("reuse", `recalled ${kbSources.length} KB source(s) into the pool`,
+        await progress("reuse",
+          `recalled ${kbSources.length} KB source(s) ${topicPath ? "as gate candidates" : "into the pool"}`,
           { kb_sources: kbSources.length });
       }
     } catch { /* best-effort — store recall must never break research */ }
@@ -338,30 +451,145 @@ export async function runResearch(
       { needs: needs.length, reused: reuseClaims.length, gaps: gapNeeds.length });
     protectedCount = staged.length; // seeds + KB recalls staged so far are exempt from the relevance gate
 
-    // ITERATIVE deepening (#1): gather a round, re-check which needs the gathered
-    // sources actually cover, refine queries for the still-open needs, gather
-    // again — up to MAX_ROUNDS or the backstop.
-    const gatherQueries = async (queries: string[]): Promise<boolean> => {
-      for (const q of queries) {
+    // ── Phase 1.2 — round 1 searches KEYWORDS carrying the subject entity ────
+    const round1 = new Map<string, string>();
+    if (gapNeeds.length) {
+      const kw = await jsonChat(
+        deps, KEYWORDIZE_SYS,
+        `QUESTION: ${query}\n\nNEEDS:\n${gapNeeds.map((n, i) => `${i}. ${n}`).join("\n")}`,
+      );
+      subjectEntity = typeof kw.entity === "string" ? kw.entity.trim() : "";
+      const raw = Array.isArray(kw.queries) ? kw.queries : [];
+      gapNeeds.forEach((need, i) => round1.set(need, keywordQuery(subjectEntity, need, raw[i])));
+      await progress("plan", `subject="${subjectEntity || "(none)"}"; ${round1.size} keyword quer(ies)`,
+        { keyword_queries: round1.size });
+    }
+
+    // ── Gather, one attempt per need per round ───────────────────────────────
+    // A search whose result set COLLAPSES (search-quality.ts) yields no pages and
+    // is recorded as a search failure; the need gets ONE reformulated retry, and a
+    // second collapse marks it search_failed rather than leaving it "open", which
+    // reads as "nobody has written about this".
+    interface Pending { need: string; query: string; attempts: number; }
+    let pending: Pending[] = gapNeeds.map((need) => ({
+      need, query: round1.get(need) || need, attempts: 0,
+    }));
+    needsStatus = needs.map((need) => ({
+      need,
+      status: (gapNeeds.includes(need) ? "open" : "answered") as NeedStatus,
+    }));
+
+    let collapseStreak = 0;
+    let stopGathering = false;
+    // Pages gathered this round, awaiting the injection screen + relevance gate.
+    let fresh: Page[] = [];
+    // Everything that has SURVIVED the gate (KB recalls included — Phase 2.1).
+    const kept: Page[] = [];
+
+    const gateAndKeep = async (candidates: Page[], label: string): Promise<void> => {
+      if (!candidates.length) return;
+      const { clean, quarantined } = await screenSources(deps, candidates);
+      if (quarantined.length) {
+        await progress("screen", `quarantined ${quarantined.length} ${label} source(s) for prompt injection`,
+          { quarantined: quarantined.length });
+      }
+      const { relevant: rel, rejected } = await partitionRelevant(deps, clean, query);
+      // FAIL-SAFE FLOOR (operator concern 2026-08-22), NARROWED. The floor exists
+      // to second-guess a model verdict that might be wrong. It must not
+      // second-guess a MEASUREMENT: when the searches that produced these pages
+      // collapsed, the pages are junk by observation, and re-admitting them is
+      // precisely how the audited run acquired a citable pool.
+      let keepNow = rel;
+      if (rel.length === 0 && searchStats.collapsed === 0 && clean.length > 0) {
+        const floorPool = floorKeepable(clean);
+        if (floorPool.length > 0) {
+          keepNow = floorPool;
+          await progress("screen",
+            `relevance gate would empty the ${label} pool - keeping ${floorPool.length} of ${clean.length} (fail-safe floor; shells stay dropped)`,
+            { irrelevant_overridden: floorPool.length });
+        }
+      }
+      if (rejected.length) {
+        await progress("screen",
+          `rejected ${rejected.length} ${label} source(s): ${rejected.map((r) => r.url).slice(0, 4).join(", ")}${rejected.length > 4 ? ", …" : ""}`,
+          { irrelevant: rejected.filter((r) => r.reason === "irrelevant").length,
+            shells_dropped: rejected.filter((r) => r.reason === "no_content").length });
+      }
+      for (const p of keepNow) if (!kept.some((k) => k.url === p.url)) kept.push(p);
+      searchRecord.relevant = kept.length;
+    };
+
+    // KB recalls face the same gate as anything else, before round 1.
+    await gateAndKeep(kbRecalled, "recalled");
+
+    const runSearch = async (q: string): Promise<SearchHit[]> => {
+      searchStats.calls++;
+      await progress("gather", `searching: ${q}`);
+      let hits: SearchHit[] = [];
+      try {
+        hits = await deps.searchWeb(q, SEARCH_K);
+      } catch {
+        searchStats.errors++;
+        searchRecord.queries.push({ query: q, verdict: "error", hits: 0, overlap: 0 });
+        return [];
+      }
+      searchRecord.hits += hits.length;
+      const v = classifyHits(q, hits);
+      searchRecord.queries.push({
+        query: q, verdict: v.verdict, hits: hits.length,
+        overlap: Math.round(v.overlap * 100) / 100, collapsedOn: v.collapsedOn,
+      });
+      if (v.verdict === "collapsed") {
+        searchStats.collapsed++;
+        collapseStreak++;
+        await progress("gather",
+          `search COLLAPSED onto "${v.collapsedOn}" (overlap ${v.overlap.toFixed(2)}) - no usable results`,
+          { collapsed: searchStats.collapsed });
+        return [];
+      }
+      if (v.verdict === "empty") { searchStats.empty++; return []; }
+      searchStats.ok++;
+      collapseStreak = 0;
+      return hits;
+    };
+
+    for (let round = 1; round <= effRounds && pending.length && !stopGathering; round++) {
+      const nextPending: Pending[] = [];
+      for (const p of pending) {
         const d = backstopDecision({
           elapsedMs: Date.now() - t0, maxMs: effMaxMs,
           sources: sourcesFetched, maxSources: effMaxFetch,
           timeouts: fetchTimeouts, maxTimeouts: MAX_FETCH_TIMEOUTS, openGaps: 1,
         });
-        if (d.stop && d.reason !== "complete") { backstop = d.reason; return false; }
-        await progress("gather", `searching: ${q}`);
-        let hits: SearchHit[] = [];
-        try { hits = await deps.searchWeb(q, SEARCH_K); } catch { hits = []; }
-        // Credibility-ranked: scholarly/reference domains first, retail last
-        // (filtering.ts). The engine's own order breaks ties within a tier.
-        hits = rankHits(hits);
-        const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url));
+        if (d.stop && d.reason !== "complete") { backstop = d.reason; stopGathering = true; break; }
+        if (collapseStreak >= COLLAPSE_STREAK_MAX) {
+          backstop = "search_degraded";
+          stopGathering = true;
+          await progress("gather",
+            `${collapseStreak} searches in a row returned results for one word of the query - the search plane is degraded`,
+            { collapsed: searchStats.collapsed });
+          break;
+        }
+        const hits = rankHits(await runSearch(p.query));
+        if (!hits.length) {
+          if (p.attempts === 0) {
+            const retry = reformulate(p.need, subjectEntity, nextPending.length);
+            nextPending.push({ need: p.need, query: retry, attempts: 1 });
+            followupQueries.push(retry);
+          } else {
+            setNeedStatus(p.need, "search_failed");
+          }
+          continue;
+        }
+        const seen = (u: string) => staged.some((s) => s.url === u) || fresh.some((s) => s.url === u) ||
+                                    kept.some((s) => s.url === u);
+        const candidates = hits.filter((h) => !seen(h.url));
         // Headroom = remaining SOURCE budget plus remaining TIMEOUT budget, so we
         // keep trying URLs while either bound has room (a timeout shouldn't burn
         // the source budget). Cache hits below are free and never charged.
         const sourceRoom = Math.max(0, effMaxFetch - sourcesFetched);
         const timeoutRoom = MAX_FETCH_TIMEOUTS > 0 ? Math.max(0, MAX_FETCH_TIMEOUTS - fetchTimeouts) : SEARCH_K;
-        const toFetch = fresh.slice(0, Math.max(0, Math.min(SEARCH_K, sourceRoom + timeoutRoom)));
+        const toFetch = candidates.slice(0, Math.max(0, Math.min(SEARCH_K, sourceRoom + timeoutRoom)));
         const results = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
           const existing = await existingFreshSource(client, h.url).catch(() => null);
           if (existing) {
@@ -371,43 +599,96 @@ export async function runResearch(
           return { outcome: fr.outcome, page: fr.page };
         });
         for (const r of results) {
-          if (r.outcome === "reuse") { reuseHits++; if (r.page) staged.push(r.page); }
-          else if (r.outcome === "ok") { sourcesFetched++; if (r.page && r.page.content) staged.push(r.page); }
-          else if (r.outcome === "timeout") { fetchTimeouts++; }
-          else { fetchErrors++; }
+          if (r.outcome === "reuse") {
+            reuseHits++;
+            searchRecord.fetched++;
+            if (r.page) {
+              if ((r.page.content || "").length >= READABLE_MIN_CHARS) readableCount++;
+              fresh.push(r.page);
+            }
+            continue;
+          }
+          countFetch(r.outcome as FetchOutcome, r.page);
+          if (r.outcome === "ok") {
+            searchRecord.fetched++;
+            if (r.page && r.page.content) fresh.push(r.page);
+          }
         }
+        // A need whose search worked is no longer a search failure; whether it is
+        // ANSWERED is the coverage judge's call below.
+        nextPending.push({ need: p.need, query: p.query, attempts: p.attempts + 1 });
         await progress(
           "gather",
-          `staged ${staged.length} (ok ${sourcesFetched} · timeout ${fetchTimeouts} · err ${fetchErrors} · reused ${reuseHits})`,
-          { staged: staged.length, sources: sourcesFetched, timeouts: fetchTimeouts, errors: fetchErrors, reused: reuseHits },
+          `fetched ${searchRecord.fetched} (ok ${sourcesFetched} · readable ${readableCount} · timeout ${fetchTimeouts} · err ${fetchErrors} · reused ${reuseHits})`,
+          { fetched: searchRecord.fetched, sources: sourcesFetched, readable: readableCount,
+            timeouts: fetchTimeouts, errors: fetchErrors, reused: reuseHits },
         );
       }
-      return true;
-    };
 
-    let pendingNeeds = [...gapNeeds];
-    for (let round = 1; round <= effRounds && pendingNeeds.length; round++) {
-      const ok = await gatherQueries(pendingNeeds);
-      if (!ok) break;                       // backstop tripped
-      if (round >= effRounds) break;        // no point re-planning on the last round
-      // Which needs are now actually answered by the gathered sources?
+      // Gate this round's haul before deciding whether to keep going: the YIELD
+      // target is relevant pages, not fetches (Phase 1.4).
+      await gateAndKeep(fresh, "web");
+      fresh = [];
+      searchRecord.readable = readableCount;
+
+      if (stopGathering) break;
+      if (kept.length >= RELEVANT_TARGET) {
+        await progress("gather", `reached the yield target: ${kept.length} relevant source(s)`,
+          { relevant: kept.length });
+        break;
+      }
+      if (!nextPending.length) break;
+      if (round >= effRounds) { pending = nextPending; break; }
+
+      // Which needs are now actually answered by what was KEPT?
+      const openNeeds = nextPending.map((p) => p.need);
       const cov = await jsonChat(
         deps, COVERAGE_STAGED_SYS,
-        `NEEDS:\n${pendingNeeds.map((n, i) => `${i}. ${n}`).join("\n")}\n\nGATHERED SOURCES:\n${staged.map((s) => `- ${s.title}: ${s.content.slice(0, 200)}`).join("\n")}`,
+        `NEEDS:\n${openNeeds.map((n, i) => `${i}. ${n}`).join("\n")}\n\nGATHERED SOURCES:\n${kept.map((s) => `- ${s.title}: ${s.content.slice(0, 200)}`).join("\n")}`,
       );
       const openIdx = new Set<number>(Array.isArray(cov.open) ? cov.open.map(Number) : []);
-      const stillOpen = pendingNeeds.filter((_, i) => openIdx.has(i));
+      openNeeds.forEach((need, i) => { if (!openIdx.has(i)) setNeedStatus(need, "answered"); });
+      const stillOpen = nextPending.filter((_, i) => openIdx.has(i));
       if (!stillOpen.length) break;          // everything covered → stop deepening
-      // Refine into more specific queries for the next round.
+      // Refine into more specific queries for the next round (entity enforced).
       const deep = await jsonChat(
         deps, DEEPEN_SYS,
-        `STILL-OPEN NEEDS:\n${stillOpen.map((n, i) => `${i}. ${n}`).join("\n")}\n\nWHAT WAS FOUND:\n${staged.map((s) => `- ${s.title}`).join("\n")}`,
+        `STILL-OPEN NEEDS:\n${stillOpen.map((p, i) => `${i}. ${p.need}`).join("\n")}\n\nWHAT WAS FOUND:\n${kept.map((s) => `- ${s.title}`).join("\n")}`,
       );
-      pendingNeeds = Array.isArray(deep.queries) && deep.queries.length
-        ? deep.queries.map(String).slice(0, stillOpen.length) : stillOpen;
-      followupQueries.push(...pendingNeeds); // record the refined queries as breadcrumbs
+      const deepQ = Array.isArray(deep.queries) ? deep.queries : [];
+      pending = stillOpen.map((p, i) => ({
+        need: p.need,
+        query: keywordQuery(subjectEntity, p.need, deepQ[i]),
+        attempts: p.attempts,
+      }));
+      followupQueries.push(...pending.map((p) => p.query));
       await progress("deepen", `round ${round}: ${stillOpen.length} need(s) still open`, { round, open: stillOpen.length });
     }
+
+    // Anything still "open" after gathering, whose searches all collapsed, was a
+    // SEARCH failure, not an unanswered question.
+    if (searchStats.ok === 0 && (searchStats.collapsed > 0 || searchStats.empty > 0)) {
+      for (const n of needsStatus) if (n.status === "open") n.status = "search_failed";
+    }
+
+    // Phase 1.5 — many hits, almost nothing readable, is a FETCH failure.
+    // It also overrides "max_fetch": exhausting the fetch budget on pages that
+    // could not be read is the degradation, and "max_fetch" describes it as a
+    // budget decision, which tells the reader nothing about why there is no
+    // answer. A time-based or timeout-based stop keeps its own, more specific,
+    // reason.
+    if ((backstop === "complete" || backstop === "max_fetch") &&
+        searchRecord.hits >= FETCH_DEGRADED_MIN_HITS &&
+        readableCount / Math.max(1, searchRecord.hits) < FETCH_DEGRADED_RATIO) {
+      backstop = "fetch_degraded";
+      await progress("gather",
+        `${searchRecord.hits} hits but only ${readableCount} readable page(s) - the fetch path is degraded`,
+        { hits: searchRecord.hits, readable: readableCount });
+    }
+
+    // The gate has already run on everything; `staged` is the citable pool.
+    staged.splice(protectedCount, staged.length - protectedCount, ...kept);
+    searchRecord.relevant = kept.length;
   } else {
     await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
       { staged: staged.length });
@@ -417,7 +698,12 @@ export async function runResearch(
   // the reader (defense-in-depth with INJECTION_GUARD on the synth prompts below).
   // A page attacking the reader isn't a trustworthy source; drop it before it can
   // poison the synthesis or get persisted.
-  if (staged.length) {
+  //
+  // The topic path screens + gates INSIDE the gather loop (it has to: the yield
+  // target counts gate SURVIVORS, so the gate cannot wait until the end). These
+  // two blocks therefore serve the article / seed-only / disable_web_search
+  // paths, whose behaviour is unchanged.
+  if (!topicPath && staged.length) {
     const { clean, quarantined } = await screenSources(deps, staged);
     if (quarantined.length) {
       await progress("screen", `quarantined ${quarantined.length} source(s) for prompt injection`,
@@ -432,7 +718,7 @@ export async function runResearch(
   // relevance already vouched for them. Fail-open per page; a rejection here is
   // a confident IRRELEVANT verdict, logged so the run's record shows what was
   // discarded and why coverage may differ from raw fetch counts.
-  if (staged.length > protectedCount) {
+  if (!topicPath && staged.length > protectedCount) {
     const protectedPages = staged.slice(0, protectedCount);
     const webPages = staged.slice(protectedCount);
     const { relevant: relevantPages, rejected } = await partitionRelevant(deps, webPages, query);
@@ -478,10 +764,53 @@ export async function runResearch(
     });
   }
 
+  // ── Phase 2.2 — "no relevant sources" is a FIRST-CLASS OUTCOME ─────────────
+  // Reached when the gate leaves nothing AND no need was covered by existing
+  // claims. The run then does NOT synthesize (there is nothing to synthesize
+  // from, and asking the model anyway is how "the provided sources contain no
+  // information specific to the Dell OptiPlex 3050" became a stored fact at
+  // 0.85), does NOT call the curator, and renders the search record instead of
+  // a report. Reuse-only synthesis is still allowed when COVERAGE_SYS marked at
+  // least one need covered — that is a real answer from existing knowledge.
+  const coveredByClaims = Math.max(0, needs.length - gapNeeds.length);
+  if (topicPath && staged.length === 0 && coveredByClaims === 0) {
+    if (backstop === "complete") backstop = "no_relevant_sources";
+    const subj = subjectEntity || query.split(/[:,;]/)[0].trim().slice(0, 80);
+    const notice = failureNotice(query, subj, needsStatus, searchRecord, backstop);
+    await progress("synthesize",
+      `no relevant source was retrieved - reporting a search failure (${backstop})`,
+      { relevant: 0, collapsed: searchStats.collapsed });
+    await progress("persist", "curator SKIPPED: nothing was grounded");
+    return {
+      synthesis: "",
+      prose: notice,
+      reportType: "",
+      needs,
+      followupQueries,
+      gaps: needsStatus.filter((n) => n.status !== "answered").map((n) => n.need),
+      reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
+      citedSources: [],
+      metrics: reuseMetric(0, 0, needsStatus.length),
+      // The curator is not called; this is the CuratorOutcome path that keeps
+      // research_jobs truthful about it (lib.ts classifyCuratorOutcome).
+      curator: { state: "skipped", reason: backstop },
+      backstop,
+      outcome: "no_relevant_sources",
+      needsStatus,
+      searchRecord,
+      ungroundedNumbers: [],
+      fetchStats: {
+        sources: sourcesFetched, timeouts: fetchTimeouts, errors: fetchErrors,
+        reused: reuseHits, attempts: sourcesFetched + fetchTimeouts + fetchErrors,
+        readable: readableCount, errorKinds, search: searchStats,
+      },
+    };
+  }
+
   // 4. Synthesize verbatim with claim-level citations (sources 1-indexed).
   await progress("synthesize", "writing the grounded synthesis");
   let claimList = reuseClaims.map((c) => `- ${c.text}`).join("\n") || "(none)";
-  const sourceLine = (p: Page, i: number, max = 2000) => `[Source ${i + 1}] ${p.title} (${p.domain})\n${p.content.slice(0, max)}`;
+  const sourceLine = (p: Page, i: number, max = SOURCE_SLICE_CHARS) => `[Source ${i + 1}] ${p.title} (${p.domain})\n${p.content.slice(0, max)}`;
 
   // The source pool the synthesizer can cite, and the buildCitedAndRenumber input.
   // Defaults to `staged`; the default path extends it with reused-claim sources.
@@ -589,7 +918,7 @@ export async function runResearch(
     // Fresh sources get full content; reuse sources get a shorter slice (the claim
     // text already carries the substance — the source is for citation attribution).
     const sourceList = pool
-      .map((p, i) => sourceLine(p, i, i < staged.length ? 2000 : 900))
+      .map((p, i) => sourceLine(p, i, i < staged.length ? SOURCE_SLICE_CHARS : 900))
       .join("\n\n");
     rawSynthesis = (await deps.chat(
       `${INJECTION_GUARD}\n\n${SYNTH_SYS}`,
@@ -631,6 +960,23 @@ export async function runResearch(
     }
   }
 
+  // 4c. Phase 2.3 — numeric grounding. Every figure in a cited line must be in
+  //     one of the sources THAT LINE cites. A miss downgrades the line to
+  //     [UNCERTAIN] and annotates it; the line is never deleted, because the
+  //     sentence around the figure may still be right. Runs BEFORE
+  //     buildCitedAndRenumber and is index-safe (line count and every [Source N]
+  //     preserved), so the curator's [Source N] → source_ids[N-1] stays aligned.
+  {
+    const g = applyNumericGrounding(rawSynthesis, pool.map((p) => p.content));
+    ungroundedNumbers = g.ungrounded;
+    if (g.ungrounded.length) {
+      rawSynthesis = g.synthesis;
+      await progress("synthesize",
+        `${g.ungrounded.length} line(s) asserted a figure no cited source holds - downgraded to [UNCERTAIN]`,
+        { ungrounded_numbers: g.ungrounded.length });
+    }
+  }
+
   // 5. Cited-only sources (GROUNDING-MODEL §6.3) + renumber citations so the
   //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
   //    compacted cited list. Delegate to curator (verbatim storage + claims, P2).
@@ -644,17 +990,39 @@ export async function runResearch(
   // report keeps the SAME [Source N] numbers, so wiki source-leaf deep-links
   // still resolve. Best-effort: a render failure leaves prose empty and the
   // renderers fall back to the tagged synthesis.
+  //
+  // Phase 4.2 — the topic template is consulted only once the evidence can fill
+  // it. A run that answered fewer than TEMPLATE_MIN_ANSWERED needs gets the
+  // general report: the scientific-paper template's Abstract/Discussion headings
+  // are assertions in themselves, and over an empty pool they produced
+  // "Absence of Evidence for 100 Hz Auditory Tones…", which reads as a finding.
+  if (!needsStatus.length) {
+    needsStatus = needs.map((need) => ({
+      need,
+      status: (gapNeeds.includes(need) ? "open" : "answered") as NeedStatus,
+    }));
+  }
+  const answeredNeeds = needsStatus.filter((n) => n.status === "answered").length;
   let prose = "";
   let reportType = "";
   if (synthesis.trim()) {
     try {
-      const tpl = await classifyTemplate(deps, query, synthesis);
+      const tpl = shouldClassifyTemplate(answeredNeeds)
+        ? await classifyTemplate(deps, query, synthesis)
+        : templateById(DEFAULT_TEMPLATE_ID);
       reportType = tpl.id;
-      await progress("synthesize", `report template: ${tpl.name}`);
+      await progress("synthesize",
+        `report template: ${tpl.name}${shouldClassifyTemplate(answeredNeeds) ? "" : " (evidence too thin to classify)"}`);
       prose = (await deps.chat(renderSys(tpl), `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${synthesis}`)).trim();
     } catch (e) {
       await progress("synthesize", `report rendering skipped: ${(e as Error).message}`);
     }
+  }
+  // Phase 4.1 — the footer states how much of the QUESTION was answered. It is
+  // appended here (not only in renderResult) so the curator's stored `prose` and
+  // the chat rendering carry the same, honest, number.
+  if (prose && topicPath) {
+    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop)}_`;
   }
 
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
@@ -692,6 +1060,10 @@ export async function runResearch(
     reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
     citedSources: cited.map((p) => ({ url: p.url, title: p.title })),
     metrics, curator, backstop,
+    outcome: "complete",
+    needsStatus,
+    searchRecord,
+    ungroundedNumbers,
     // Separated fetch accounting (yield vs waste) — informs the operator/user
     // why a run stopped: sources retrieved vs timeouts vs errors vs cache reuse.
     fetchStats: {
@@ -700,6 +1072,9 @@ export async function runResearch(
       errors: fetchErrors,
       reused: reuseHits,
       attempts: sourcesFetched + fetchTimeouts + fetchErrors,
+      readable: readableCount,
+      errorKinds,
+      search: searchStats,
     },
     skeptic,
   };

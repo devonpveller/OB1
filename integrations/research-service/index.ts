@@ -114,7 +114,10 @@ const FETCH_TIMEOUT_MS = parseInt(env("FETCH_TIMEOUT_MS", "15000"), 10);
 // hanging the slot. <= 0 / non-numeric values fall back to the defaults.
 const CURATOR_TIMEOUT_MS = curatorTimeoutMsFromEnv(Deno.env.get("CURATOR_TIMEOUT_MS"));
 const CURATOR_RETRIES = curatorRetriesFromEnv(Deno.env.get("CURATOR_RETRIES"));
-const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "8000"), 10);
+// Raised 8000 -> 16000 (research-trust 2026-09-11): the synthesizer saw 2 000
+// chars of each source, so "thin evidence" was partly a slicing decision. The
+// harness slice (SOURCE_SLICE_CHARS) moved with it.
+const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "16000"), 10);
 const PORT = parseInt(env("PORT", "8000"), 10);
 // How many research jobs may run at once across the whole stack. Default 1 =
 // strict global serialization: at most one job's ~12-15 LLM calls are ever in
@@ -350,17 +353,20 @@ async function fetchPage(url: string): Promise<FetchResult> {
       headers: { "user-agent": FETCH_UA },
       ...(client ? { client } : {}),
     });
-    if (!r.ok) return { page: null, outcome: "error" };
+    // Phase 1.5 (research-trust) - the three ways a fetch can fail without the
+    // network failing were one bucket, so "we could not READ it" and "it is not
+    // THERE" were indistinguishable in every run record.
+    if (!r.ok) return { page: null, outcome: "http" };
     const ct = r.headers.get("content-type") || "";
-    if (ct && !/text\/html|text\/plain|application\/xhtml/i.test(ct)) return { page: null, outcome: "error" };
+    if (ct && !/text\/html|text\/plain|application\/xhtml/i.test(ct)) return { page: null, outcome: "non_html" };
     const html = await r.text();
     const content = extractTextFromHtml(html).slice(0, FETCH_MAX_CHARS);
-    if (!content) return { page: null, outcome: "error" };
+    if (!content) return { page: null, outcome: "empty_extract" };
     return { page: { url, title: extractTitle(html) || domainOf(url), content, domain: domainOf(url) }, outcome: "ok" };
   } catch (e) {
     // AbortError fired by our timeout vs any other network failure.
     const isTimeout = timedOut || (e as Error)?.name === "AbortError";
-    return { page: null, outcome: isTimeout ? "timeout" : "error" };
+    return { page: null, outcome: isTimeout ? "timeout" : "network" };
   } finally {
     clearTimeout(t);
   }
@@ -674,6 +680,10 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       gaps: res.gaps,
       backstop: res.backstop,
       reuse_ratio: 1 - res.metrics.gap_ratio,
+      // research-trust: the footer now states how much of the QUESTION was
+      // answered. reuse_ratio is still passed and still ignored by the renderer.
+      needs_status: res.needsStatus,
+      search_record: res.searchRecord,
     });
     // ── Curator honesty gate (incident 2026-08-31) ──────────────────────────
     // runResearch NEVER throws when the curator dies — it records the failure as
@@ -695,13 +705,20 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       cited_sources: res.citedSources, reuse_claims: res.reuseClaims,
       thread_id: (res.curator?.thread_id as string) ?? thread_id, reuse_ratio: 1 - res.metrics.gap_ratio,
       curator: res.curator, backstop: res.backstop, fetch_stats: res.fetchStats,
+      // research-trust: what the run IS, per-need verdicts, and the search
+      // funnel. `outcome` is the field that says a search failed rather than a
+      // topic being absent; without it research_jobs cannot tell them apart.
+      outcome: res.outcome,
+      needs_status: res.needsStatus,
+      search_record: res.searchRecord,
+      ungrounded_numbers: res.ungroundedNumbers,
       contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
       skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
       rendered, // chat-facing markdown; absent on jobs cached before this field
     });
     const progressJson = JSON.stringify({
       phase: outcome.status === "error" ? "error" : "done",
-      message: `backstop=${res.backstop} curator=${outcome.state}`,
+      message: `outcome=${res.outcome} backstop=${res.backstop} curator=${outcome.state}`,
     });
     if (outcome.error) console.error(`[job ${jobId}] ${outcome.error}`);
 
