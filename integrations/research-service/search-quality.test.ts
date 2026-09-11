@@ -76,15 +76,78 @@ Deno.test("overlapRatio is the scorer the search-engine note used (2 distinct te
   assertEquals(overlapRatio("dell optiplex 3050 failure", hits), 0.5);
 });
 
-Deno.test("a hit set with no shared title token is 'ok' even at low overlap (not our signature)", () => {
-  // Low relevance WITHOUT the one-token signature is a weak search, not a
-  // collapsed one — the detector must not claim the engine broke.
-  const hits: SearchHit[] = [
-    { url: "a", title: "Knitting patterns", snippet: "wool" },
-    { url: "b", title: "Tax deadlines 2026", snippet: "irs" },
-    { url: "c", title: "Sourdough starter", snippet: "flour" },
-    { url: "d", title: "Violin rosin", snippet: "strings" },
-    { url: "e", title: "Ferry timetable", snippet: "harbour" },
+// ── B1 (tester, 2026-09-11) ────────────────────────────────────────────────
+// The mirror image of the failure this detector exists for: a PERFECT result
+// set reported as a broken search. `overlapRatio` demanded two distinct query
+// terms per hit, so a query whose subject is one strong token plus generic
+// words scored 0.00 on hits that all carry that one token — and
+// dominantTitleTerm then found it in 100 % of titles, which is the collapse
+// signature exactly. The run would then tell the user "search failure, not
+// evidence of absence" about a search that worked.
+Deno.test("B1: a hit set carrying only the ANCHOR term is ok, not collapsed", () => {
+  const q = "Kubernetes CrashLoopBackOff diagnose";
+  const titles = [
+    "Debug CrashLoopBackOff",
+    "CrashLoopBackOff explained",
+    "Fixing CrashLoopBackOff",
+    "CrashLoopBackOff troubleshooting",
+    "CrashLoopBackOff: root causes",
   ];
+  const hits: SearchHit[] = titles.map((title, i) => ({
+    url: `https://k8s.example.org/${i}`, title,
+    snippet: "how to debug a pod stuck in CrashLoopBackOff",
+  }));
+  const v = classifyHits(q, hits);
+  assertEquals(v.verdict, "ok");
+  assertEquals(v.overlap, 1);
+});
+
+Deno.test("B1: the anchor term must be DISTINCTIVE — 'dell' cannot rescue the Dell junk", () => {
+  // The collapsed-dell fixture's own collapse token is short and generic. If any
+  // single query token counted as an anchor, the recorded failure would classify
+  // ok and the whole item would be undone.
+  const f = load("search-collapsed-dell");
+  assertEquals(classifyHits(f.query, f.hits).verdict, "collapsed");
+  const m = load("search-collapsed-most");
+  assertEquals(classifyHits(m.query, m.hits).verdict, "collapsed");
+  const t = load("search-collapsed-the100");
+  assertEquals(classifyHits(t.query, t.hits).verdict, "collapsed");
+});
+
+// ── B2 (tester, 2026-09-11) ────────────────────────────────────────────────
+// Ten pages of pure noise were recorded as a SUCCESSFUL search, because no
+// single QUERY token dominated their titles. They then spent the fetch and
+// relevance-gate budget, and `SearchStats.ok` counted them as engine health.
+Deno.test("B2: zero overlap across a full page of hits is never 'ok'", () => {
+  const hits: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
+    url: `https://shop.example.com/${i}`,
+    title: `Best Buy Deals ${i}`,
+    snippet: "Shop laptops and desktops on sale today.",
+  }));
+  const v = classifyHits("OptiPlex 3050 capacitor bulging repair", hits);
+  assertEquals(v.verdict, "offtopic");
+  assertEquals(v.overlap, 0);
+});
+
+Deno.test("B2: a THIN result set is not condemned — three hits is not a verdict", () => {
+  const hits: SearchHit[] = Array.from({ length: 3 }, (_, i) => ({
+    url: `https://example.org/${i}`, title: `Unrelated ${i}`, snippet: "nothing",
+  }));
   assertEquals(classifyHits("dell optiplex 3050 capacitor failure", hits).verdict, "ok");
+});
+
+Deno.test("B2: a weak-but-not-empty set stays 'ok' (some hits do mention the subject)", () => {
+  const hits: SearchHit[] = [
+    ...Array.from({ length: 3 }, (_, i) => ({
+      url: `https://good.example.org/${i}`,
+      title: "Dell OptiPlex 3050 capacitor replacement",
+      snippet: "optiplex 3050 capacitor",
+    })),
+    ...Array.from({ length: 7 }, (_, i) => ({
+      url: `https://shop.example.com/${i}`, title: `Deals ${i}`, snippet: "sale",
+    })),
+  ];
+  const v = classifyHits("dell optiplex 3050 capacitor failure", hits);
+  assertEquals(v.verdict, "ok");
+  assertEquals(v.overlap, 0.3);
 });

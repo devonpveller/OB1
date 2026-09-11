@@ -14,6 +14,7 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { runResearch, type Deps, type FetchResult, type QueryClient, type SearchHit } from "./harness.ts";
+import { coverageFooter } from "./report.ts";
 
 // ── A DB that answers every read with nothing, and hands out one session id ──
 function stubClient(): QueryClient {
@@ -200,14 +201,75 @@ Deno.test("many hits, almost nothing readable -> fetch_degraded", async () => {
 });
 
 // ── Phase 2.1 + 2.2 — the OptiPlex replay ───────────────────────────────────
-Deno.test("REPLAY ce398d06: recall pages are gated too, so the pool is empty", async () => {
-  // The KB recall is what made the audited run look like it had sources. The
-  // stub client returns none, so this asserts the weaker, load-bearing half:
-  // nothing survives a collapsed search, and no off-topic page is exempt.
-  const { deps, calls } = mockDeps({ entity: REPLAY_ENTITY, hitsFor: () => DELL_HITS, relevance: (t) => /optiplex/i.test(t) });
-  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui" });
-  assertEquals(r.citedSources.length, 0);
+/**
+ * The audited run's ACTUAL mechanism: `retrieveRelevantSources` pulled
+ * semantically-near stored pages about a different computer — the DGX Spark
+ * maintenance guide, a Compaq d220 manual, an ASUS BIOS FAQ — and they were
+ * EXEMPT from the relevance gate, so they became the entire cited pool and the
+ * fail-safe floor never fired. This client serves those recalls so the exemption
+ * is actually exercised. The first version of this test ran against a stub that
+ * returned no rows at all, so it proved nothing (tester's B7).
+ */
+function recallingClient(): QueryClient {
+  const recalls = [
+    { id: "r1", url: "https://docs.nvidia.com/dgx/dgx-spark/maintenance-and-troubleshooting.html",
+      title: "Maintenance and Troubleshooting - DGX Spark User Guide",
+      content: "Thermal management and troubleshooting for the NVIDIA DGX Spark. ".repeat(20),
+      domain: "docs.nvidia.com", distance: "0.41" },
+    { id: "r2", url: "https://www.helpowl.com/p/Compaq/d220-microtower-desktop-pc/65189",
+      title: "Compaq d220 - Microtower Desktop PC Support and Manuals",
+      content: "Support and manuals for the Compaq d220 microtower desktop. ".repeat(20),
+      domain: "helpowl.com", distance: "0.48" },
+    { id: "r3", url: "https://www.asus.com/support/faq/1049855/",
+      title: "[Motherboard]BIOS item-Restore AC Power Loss function",
+      content: "Restore AC Power Loss can be set to Power Off, Power On or Last State. ".repeat(20),
+      domain: "asus.com", distance: "0.52" },
+  ];
+  return {
+    queryObject<T>(sql: string): Promise<{ rows: T[] }> {
+      if (/INSERT INTO public\.sessions/i.test(sql)) {
+        return Promise.resolve({ rows: [{ id: "00000000-0000-0000-0000-000000000001" }] as unknown as T[] });
+      }
+      if (/FROM public\.sources\s+s/i.test(sql)) {
+        return Promise.resolve({ rows: recalls as unknown as T[] });
+      }
+      return Promise.resolve({ rows: [] as T[] });
+    },
+  };
+}
+
+Deno.test("REPLAY ce398d06: KB-recall pages face the gate and none survives", async () => {
+  const { deps, calls } = mockDeps({
+    entity: REPLAY_ENTITY, hitsFor: () => DELL_HITS,
+    // The audited pool's own titles: none is about an OptiPlex.
+    relevance: (t) => /optiplex/i.test(t),
+  });
+  const r = await runResearch(deps, recallingClient(), OPTIPLEX_QUERY, { origin: "owui" });
+
+  // The gate was actually ASKED about the recalled pages — this is what the
+  // previous version of this test could not show.
+  const asked = calls.relevanceAsked.join(" | ");
+  assertStringIncludes(asked, "DGX Spark");
+  assertStringIncludes(asked, "Compaq d220");
+  assertStringIncludes(asked, "Restore AC Power Loss");
+
+  assertEquals(r.citedSources.length, 0, "an off-topic recall must never be cited");
   assertEquals(calls.curator, 0, "the curator must not be called with nothing");
+  assertEquals(r.outcome, "no_relevant_sources");
+  assertEquals(r.fetchStats.reused, 3, "the recalls were retrieved, then rejected");
+});
+
+Deno.test("a recall page that IS on topic survives the gate and is citable", async () => {
+  // The gate must not be a blanket ban on recall: the mechanism is relevance,
+  // not provenance.
+  const { deps } = mockDeps({
+    entity: REPLAY_ENTITY, hitsFor: () => DELL_HITS,
+    relevance: () => true,
+    synthesis: "[SOURCED] The OptiPlex 3050 uses an LGA 1151 socket. [Source 1]",
+  });
+  const r = await runResearch(deps, recallingClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  assertEquals(r.outcome, "complete");
+  assertEquals(r.citedSources.length, 1);
 });
 
 Deno.test("REPLAY ce398d06: outcome is no_relevant_sources and the curator is SKIPPED", async () => {
@@ -266,6 +328,97 @@ Deno.test("a synthesized figure no cited source holds is downgraded in the run's
   assert((r.ungroundedNumbers || []).length > 0);
   const socket = lines.find((l) => l.includes("1151")) || "";
   assert(socket.startsWith("[SOURCED]"), `wrongly downgraded: ${socket}`);
+});
+
+// ── B2 wiring (tester, 2026-09-11) ──────────────────────────────────────────
+Deno.test("B2: an off-topic page of hits yields nothing and feeds the degraded streak", async () => {
+  const noise: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
+    url: `https://shop.example.com/${i}`,
+    title: `Best Buy Deals ${i}`,
+    snippet: "Shop laptops and desktops on sale today.",
+  }));
+  const { deps } = mockDeps({ entity: REPLAY_ENTITY, hitsFor: () => noise });
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  assert(r.fetchStats.search.offtopic > 0, "off-topic sets were not counted");
+  assertEquals(r.fetchStats.search.ok, 0, "a page of noise must not read as a healthy search");
+  assertEquals(r.fetchStats.sources, 0, "an off-topic set must not be fetched");
+  assertEquals(r.backstop, "search_degraded");
+  assertEquals(r.outcome, "no_relevant_sources");
+});
+
+Deno.test("the run's OWN search record carries the per-verdict counts", async () => {
+  // These fields were declared and read (searchHealthLabel, coverageFooter) but
+  // never written by the harness, so no real run could ever report DEGRADED.
+  const { deps } = mockDeps({ entity: REPLAY_ENTITY, hitsFor: () => DELL_HITS });
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  assertEquals(r.searchRecord.collapsed, r.fetchStats.search.collapsed);
+  assertEquals(r.searchRecord.ok, r.fetchStats.search.ok);
+  assert(r.searchRecord.collapsed > 0, "the replay collapsed and the record must say so");
+  assertStringIncludes(
+    coverageFooter(r.needsStatus, r.searchRecord, r.backstop), "search: DEGRADED");
+});
+
+// ── B3 (tester, 2026-09-11) ────────────────────────────────────────────────
+// The `no_relevant_sources` guarantee was gated on `topicPath`, so on the
+// article / sources-only / disableWebSearch paths an EMPTY pool still reached
+// the synthesizer ("write from nothing") and, with one reuse claim, the curator
+// — package `sources: []`, headline claim "The provided sources contain no
+// information...". The anchor states criterion 1 unconditionally.
+const EMPTY_POOL_MODES: Array<[string, Parameters<typeof runResearch>[3]]> = [
+  ["article mode, empty seed content", {
+    origin: "owui", mode: "article",
+    seedSources: [{ url: "https://news.example.org/x", title: "A newsletter item", content: "" }],
+  }],
+  ["sources-only, empty seed content", {
+    origin: "open_notebook", sourcesOnly: true,
+    seedSources: [{ url: "https://example.org/a", title: "The article", content: "" }],
+  }],
+  ["disableWebSearch, no seeds", { origin: "owui", disableWebSearch: true }],
+  ["article mode, no seeds", { origin: "owui", mode: "article" }],
+];
+
+for (const [name, opts] of EMPTY_POOL_MODES) {
+  Deno.test(`B3: ${name} - no synthesis from nothing, no curator`, async () => {
+    const { deps, calls } = mockDeps();
+    const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, opts);
+    assertEquals(r.outcome, "no_relevant_sources", `outcome on ${name}`);
+    assertEquals(calls.synth, 0, "the synthesizer was asked to write from an empty pool");
+    assertEquals(calls.curator, 0, "the curator was handed a zero-source package");
+    assertEquals(r.citedSources.length, 0);
+    assert(r.backstop !== "complete", `backstop=${r.backstop}`);
+    assertStringIncludes(r.prose, "search failure, not evidence of absence");
+  });
+}
+
+Deno.test("B3: an empty pool WITH a reuse claim still refuses the curator", async () => {
+  // The tester's worst case: one recalled claim was enough to reach
+  // delegateToCurator with sources: [] and the poison sentence as the headline.
+  const client: QueryClient = {
+    queryObject<T>(sql: string): Promise<{ rows: T[] }> {
+      if (/INSERT INTO public\.sessions/i.test(sql)) {
+        return Promise.resolve({ rows: [{ id: "00000000-0000-0000-0000-000000000001" }] as unknown as T[] });
+      }
+      if (/FROM public\.claims/i.test(sql)) {
+        return Promise.resolve({
+          rows: [{
+            id: "c1", text: "Cats are mammals.", confidence: 0.9, contradicted: false,
+            grounded: true, has_strong: true,
+            researched_on: new Date().toISOString().slice(0, 10),
+            volatility: "slow", revalidate_days: 1095, distance: "0.1",
+          }] as unknown as T[],
+        });
+      }
+      return Promise.resolve({ rows: [] as T[] });
+    },
+  };
+  const { deps, calls } = mockDeps();
+  const r = await runResearch(deps, client, OPTIPLEX_QUERY, {
+    origin: "owui", disableWebSearch: true,
+  });
+  assertEquals(r.reuseClaims.length, 1, "the reuse claim must actually have been recalled");
+  assertEquals(r.citedSources.length, 0);
+  assertEquals(calls.curator, 0, "a zero-source package must never reach the curator");
+  assertEquals(r.outcome, "no_relevant_sources");
 });
 
 // ── Regression: the paths this must NOT change ──────────────────────────────

@@ -34,7 +34,7 @@ const optiplexRecord: SearchRecord = {
     { query: "OptiPlex 3050 failure modes", verdict: "collapsed", hits: 10, overlap: 0, collapsedOn: "most" },
     { query: "OptiPlex 3050 capacitor problems", verdict: "collapsed", hits: 10, overlap: 0, collapsedOn: "dell" },
   ],
-  hits: 63, fetched: 32, readable: 26, relevant: 0, collapsed: 41, ok: 0, empty: 0, errors: 0,
+  hits: 63, fetched: 32, readable: 26, relevant: 0, collapsed: 41, offtopic: 0, ok: 0, empty: 0, errors: 0,
 };
 
 Deno.test("answeredCount counts only answered needs", () => {
@@ -47,14 +47,14 @@ Deno.test("the footer says how much of the QUESTION was answered, never 'coverag
   assertStringIncludes(foot, "needs answered 0 of 6");
   assertStringIncludes(foot, "0 relevant of 32 fetched");
   assertStringIncludes(foot, "63 hits");
-  assertStringIncludes(foot, "41 collapsed");
+  assertStringIncludes(foot, "41 junk");
   assertStringIncludes(foot, "search: DEGRADED");
   assert(!/coverage \d+%/.test(foot), foot);
 });
 
 Deno.test("a healthy run's footer does NOT claim the search was degraded", () => {
   const ok: SearchRecord = { queries: [], hits: 40, fetched: 30, readable: 28, relevant: 9,
-                             collapsed: 0, ok: 6, empty: 0, errors: 0 };
+                             collapsed: 0, offtopic: 0, ok: 6, empty: 0, errors: 0 };
   const foot = coverageFooter(
     [{ need: "a", status: "answered" }, { need: "b", status: "answered" }], ok, "complete");
   assertStringIncludes(foot, "needs answered 2 of 2");

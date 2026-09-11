@@ -486,7 +486,11 @@ export async function runResearch(
     // Everything that has SURVIVED the gate (KB recalls included — Phase 2.1).
     const kept: Page[] = [];
 
-    const gateAndKeep = async (candidates: Page[], label: string): Promise<void> => {
+    const gateAndKeep = async (
+      candidates: Page[],
+      label: string,
+      floorMayApply = true,
+    ): Promise<void> => {
       if (!candidates.length) return;
       const { clean, quarantined } = await screenSources(deps, candidates);
       if (quarantined.length) {
@@ -494,13 +498,20 @@ export async function runResearch(
           { quarantined: quarantined.length });
       }
       const { relevant: rel, rejected } = await partitionRelevant(deps, clean, query);
-      // FAIL-SAFE FLOOR (operator concern 2026-08-22), NARROWED. The floor exists
-      // to second-guess a model verdict that might be wrong. It must not
-      // second-guess a MEASUREMENT: when the searches that produced these pages
-      // collapsed, the pages are junk by observation, and re-admitting them is
-      // precisely how the audited run acquired a citable pool.
+      // FAIL-SAFE FLOOR (operator concern 2026-08-22), NARROWED TWICE.
+      //  (1) It must not second-guess a MEASUREMENT: when the searches that
+      //      produced these pages collapsed or came back off-topic, the pages
+      //      are junk by observation.
+      //  (2) It must never re-admit KB RECALLS (`floorMayApply` false). Their
+      //      only credential is vector proximity, and re-admitting them when the
+      //      gate empties the pool reproduces the audited failure exactly — a
+      //      DGX Spark maintenance guide, a Compaq d220 manual and an ASUS BIOS
+      //      FAQ becoming the entire cited pool for an OptiPlex question. The
+      //      floor exists to second-guess a possibly-wrong model verdict about a
+      //      page the run went out and FETCHED for this question.
       let keepNow = rel;
-      if (rel.length === 0 && searchStats.collapsed === 0 && clean.length > 0) {
+      const junkSearches = searchStats.collapsed + searchStats.offtopic;
+      if (floorMayApply && rel.length === 0 && junkSearches === 0 && clean.length > 0) {
         const floorPool = floorKeepable(clean);
         if (floorPool.length > 0) {
           keepNow = floorPool;
@@ -519,8 +530,9 @@ export async function runResearch(
       searchRecord.relevant = kept.length;
     };
 
-    // KB recalls face the same gate as anything else, before round 1.
-    await gateAndKeep(kbRecalled, "recalled");
+    // KB recalls face the same gate as anything else, before round 1 - and the
+    // fail-safe floor may NOT re-admit them (see gateAndKeep).
+    await gateAndKeep(kbRecalled, "recalled", false);
 
     const runSearch = async (q: string): Promise<SearchHit[]> => {
       searchStats.calls++;
@@ -547,6 +559,19 @@ export async function runResearch(
           { collapsed: searchStats.collapsed });
         return [];
       }
+      // `offtopic` = a full page of hits, not one of which mentions the query.
+      // It yields nothing and feeds the degraded streak exactly like a collapse:
+      // an engine that drifts semantically fails the run just as completely as
+      // one that collapses onto a token, and counting it `ok` spent the fetch
+      // budget on noise while reporting the search as healthy.
+      if (v.verdict === "offtopic") {
+        searchStats.offtopic++;
+        collapseStreak++;
+        await progress("gather",
+          `search returned ${hits.length} hits, NONE mentioning the query (overlap 0.00) - no usable results`,
+          { offtopic: searchStats.offtopic });
+        return [];
+      }
       if (v.verdict === "empty") { searchStats.empty++; return []; }
       searchStats.ok++;
       collapseStreak = 0;
@@ -566,8 +591,8 @@ export async function runResearch(
           backstop = "search_degraded";
           stopGathering = true;
           await progress("gather",
-            `${collapseStreak} searches in a row returned results for one word of the query - the search plane is degraded`,
-            { collapsed: searchStats.collapsed });
+            `${collapseStreak} searches in a row returned nothing that mentions the query - the search plane is degraded`,
+            { collapsed: searchStats.collapsed, offtopic: searchStats.offtopic });
           break;
         }
         const hits = rankHits(await runSearch(p.query));
@@ -667,7 +692,8 @@ export async function runResearch(
 
     // Anything still "open" after gathering, whose searches all collapsed, was a
     // SEARCH failure, not an unanswered question.
-    if (searchStats.ok === 0 && (searchStats.collapsed > 0 || searchStats.empty > 0)) {
+    if (searchStats.ok === 0 &&
+        (searchStats.collapsed > 0 || searchStats.offtopic > 0 || searchStats.empty > 0)) {
       for (const n of needsStatus) if (n.status === "open") n.status = "search_failed";
     }
 
@@ -689,6 +715,17 @@ export async function runResearch(
     // The gate has already run on everything; `staged` is the citable pool.
     staged.splice(protectedCount, staged.length - protectedCount, ...kept);
     searchRecord.relevant = kept.length;
+    // Carry the per-verdict counts into the RECORD. They were declared on
+    // SearchRecord and read by searchHealthLabel()/coverageFooter() from the
+    // first version of this branch, and never written — so the footer could
+    // not have said DEGRADED on any real run, only on a hand-built fixture in
+    // report.test.ts. A field that is read and never written is a check that
+    // passes while checking nothing.
+    searchRecord.ok = searchStats.ok;
+    searchRecord.collapsed = searchStats.collapsed;
+    searchRecord.offtopic = searchStats.offtopic;
+    searchRecord.empty = searchStats.empty;
+    searchRecord.errors = searchStats.errors;
   } else {
     await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
       { staged: staged.length });
@@ -764,22 +801,40 @@ export async function runResearch(
     });
   }
 
+  // Reuse-claim grounding sources are part of the citable pool on every
+  // non-article path, so they must be resolved BEFORE deciding whether there is
+  // anything to ground from. (This used to happen after the decision, inside
+  // the synthesis branch, which is why the emptiness test could only be made on
+  // the topic path.) Article mode cites its seed article and nothing else.
+  const reuse = (!articleMode && reuseClaims.length)
+    ? await getReuseSources(client, reuseClaims.map((c) => c.id))
+    : { sources: [] as Awaited<ReturnType<typeof getReuseSources>>["sources"], claimToSource: {} as Record<string, string> };
+
   // ── Phase 2.2 — "no relevant sources" is a FIRST-CLASS OUTCOME ─────────────
-  // Reached when the gate leaves nothing AND no need was covered by existing
-  // claims. The run then does NOT synthesize (there is nothing to synthesize
-  // from, and asking the model anyway is how "the provided sources contain no
-  // information specific to the Dell OptiPlex 3050" became a stored fact at
-  // 0.85), does NOT call the curator, and renders the search record instead of
-  // a report. Reuse-only synthesis is still allowed when COVERAGE_SYS marked at
-  // least one need covered — that is a real answer from existing knowledge.
+  // Reached when there is nothing citable: the gate left no page AND no reused
+  // claim brings a grounding source with it. The run then does NOT synthesize
+  // (there is nothing to synthesize from, and asking the model anyway is how
+  // "the provided sources contain no information specific to the Dell OptiPlex
+  // 3050" became a stored fact at 0.85), does NOT call the curator, and renders
+  // the search record instead of a report.
+  //
+  // EVERY PATH, not just the topic path (tester, 2026-09-11). This was gated on
+  // `topicPath`, so an empty pool in article / sources-only / disable_web_search
+  // mode still reached the synthesizer, and with one recalled claim still
+  // reached the curator with `sources: []` and the poison sentence as its
+  // headline claim. The anchor states criterion 1 unconditionally, and an empty
+  // pool means the same thing however the run was configured. A NON-empty pool
+  // is untouched on all four paths — this only fires when there is nothing.
+  const stagedWithContent = staged.filter((p) => (p.content || "").trim().length > 0);
+  const citablePool = stagedWithContent.length + reuse.sources.length;
   const coveredByClaims = Math.max(0, needs.length - gapNeeds.length);
-  if (topicPath && staged.length === 0 && coveredByClaims === 0) {
+  if (citablePool === 0 && !(topicPath && coveredByClaims > 0)) {
     if (backstop === "complete") backstop = "no_relevant_sources";
     const subj = subjectEntity || query.split(/[:,;]/)[0].trim().slice(0, 80);
     const notice = failureNotice(query, subj, needsStatus, searchRecord, backstop);
     await progress("synthesize",
       `no relevant source was retrieved - reporting a search failure (${backstop})`,
-      { relevant: 0, collapsed: searchStats.collapsed });
+      { relevant: 0, collapsed: searchStats.collapsed, offtopic: searchStats.offtopic });
     await progress("persist", "curator SKIPPED: nothing was grounded");
     return {
       synthesis: "",
@@ -893,9 +948,8 @@ export async function runResearch(
     // those sources flow to the curator, re-grounds the synthesis + re-links it
     // to the reused claims (provenance). Closes the reuse-only gap; a reuse-only
     // run (no fresh gather) now still produces a cited, grounded synthesis.
-    const reuse = reuseClaims.length
-      ? await getReuseSources(client, reuseClaims.map((c) => c.id))
-      : { sources: [], claimToSource: {} };
+    // `reuse` is resolved once, above the empty-pool decision — the decision
+    // needs to know whether a reused claim brings a citable source with it.
     const stagedUrls = new Set(staged.map((s) => s.url).filter(Boolean));
     const reuseEntries = reuse.sources.filter((s) => !(s.url && stagedUrls.has(s.url)));
     const reusePages: Page[] = reuseEntries.map((s) => ({

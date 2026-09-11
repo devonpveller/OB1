@@ -87,50 +87,109 @@ function cleanClaimText(segment: string): string {
 // Two layers, in this order: these patterns, then (for what they do not
 // recognise) an LLM judge that FAILS OPEN. Patterns reject; only a confident
 // judge verdict rejects beyond them.
+//
+// ── THE HEAD-CLAUSE RULE (2026-09-11, after the tester's T7 failure) ────────
+// The first version judged the WHOLE claim line, so a real fact carrying an
+// honest caveat was deleted along with the caveat. Five live claims were being
+// eaten — Companies House SR01 form fields, the six-month wait after
+// dissolution, registered-office ordering, Conventional Commits keywords, the
+// WSO2 licence — each of the shape
+//     <a fact about the world>, but/though/; <the sources do not confirm it>.
+// Every honest claim is entitled to that tail; it is the engine doing what it
+// is supposed to do. So the source-referential and absence-of-evidence families
+// are now tested against the HEAD CLAUSE only — the text before the first `;`
+// or `, but` / `, though` / `, although` / `, however`. What survives whole-text
+// testing is the family that cannot be a caveat: a claim whose whole point is
+// that the evidence is about something OTHER than the subject.
+//
+// A filter that eats knowledge is a worse outcome than the poison it removes.
 
-/** Layer A — the claim talks about the source SET rather than about the world. */
-// A REPORTING verb — the verb a sentence uses when its subject is a document
-// rather than the world. "no source STATES x" is meta; "the author found no
-// Sources sheet" is a fact about a spreadsheet and was dropped by the first
-// version of this list, which matched a bare "no sources".
-const REPORTS =
-  "(mention|state|says?|confirm|document|describe|address|explain|discuss|give|list|name|" +
-  "report|indicate|support|cover|contain|provide|specify|specifies|clarif\\w*|enumerat\\w*|" +
-  "break|frame|label|explicitly|available|provided|here\\b)";
+/**
+ * The clause a claim actually asserts. A caveat introduced by `;`, `, but`,
+ * `, though`, `, although` or `, however` comments on the assertion; it is not
+ * the assertion. Returns the whole text when there is no such break.
+ */
+export function headClause(text: string): string {
+  const t = String(text || "");
+  const m = t.match(/;|,\s+(but|though|although|however|whereas|yet)\b/i);
+  return (m && m.index !== undefined ? t.slice(0, m.index) : t).trim();
+}
 
-const SOURCE_REFERENTIAL: RegExp[] = [
-  /^the\s+(provided\s+)?sources?\s+(contain|do(es)?\s+not|lack|make|reference|describe|address|establish|say)/i,
-  new RegExp("^no\\s+(provided\\s+)?sources?\\b", "i"),
-  new RegExp("\\bno\\s+(provided\\s+)?sources?\\s+(\\w+\\s+){0,2}" + REPORTS, "i"),
+/**
+ * Family 1 — HEAD-ONLY. The thing the sentence is ABOUT is the evidence set:
+ * its grammatical subject is "the sources", "no source", "the retrieved pages",
+ * "this report". Judged on the head clause, so "…, but the sources do not state
+ * its licence type" keeps its claim.
+ */
+const SOURCE_SUBJECT: RegExp[] = [
+  // "The (provided) sources <report-verb> …" as the subject of the head clause.
+  /^\W*the\s+(provided\s+|given\s+|available\s+|retrieved\s+|gathered\s+|held\s+)?sources?\b/i,
+  // "No source / no provided sources <report-verb> …"
+  /^\W*no\s+(provided\s+|available\s+|retrieved\s+)?sources?\b/i,
+  /\bno\s+(provided\s+|available\s+|retrieved\s+)?sources?\s+(\w+\s+){0,2}(mention|state|says?|confirm|document|describe|address|explain|discuss|give|list|name|report|indicate|support|cover|contain|provide|specif\w*|clarif\w*|enumerat\w*|frame|label|explicitly)/i,
   /\bnone\s+of\s+(these|the|those)\s+sources?\b/i,
-  /\b(the\s+)?sources?\s+(provided|given|available|held)\b/i,
-  /\b(the\s+)?sources?\s+(do|does)\s+not\b/i,
+  /^\W*(the\s+)?(retrieved|gathered|fetched|provided|available)\s+(pages?|material|documents?|results?|excerpts?)\b/i,
+  /^\W*(this|the)\s+(report|run|search|analysis)\s+(could\s+not|did\s+not|does\s+not|failed\s+to)\b/i,
+  /^\W*nothing\s+in\s+the\s+(reviewed|provided|retrieved|available|gathered|cited)\b/i,
+  /^\W*in\s+the\s+sources\s+provided\b/i,
+];
+
+/**
+ * Family 2 — HEAD-ONLY. Absence OF EVIDENCE, said without the word "source"
+ * (the tester's B4): "No evidence exists that…", "The literature is silent
+ * on…", "No study has tested…". These are claims about the state of the
+ * record, and they poison a knowledge base exactly as the audited ones do.
+ *
+ * Absence in the WORLD is a different thing and must survive: "no evidence OF
+ * tampering on the chassis" asserts a fact about a chassis. The separator is
+ * the complement — an evidence-absence sentence takes a CLAUSE ("that…",
+ * "linking…", "on whether…"), a world-absence sentence takes "of <noun>".
+ */
+const EVIDENCE_ABSENCE: RegExp[] = [
+  /\bno\s+(published\s+|peer-reviewed\s+|available\s+|reviewed\s+|existing\s+)?(evidence|research|literature|documentation|publications?|studies|data)\s+(exists?|was\s+found|were\s+found|has\s+been\s+found|have\s+been\s+found|that\b|linking\b|links\b|addresses\b|addressing\b|supports?\b|indicates?\b|suggests?\b|shows?\b|describ\w+\b|tests?\b|tested\b|examin\w+\b|on\s+whether\b)/i,
+  /\bno\s+(study|studies|paper|papers|publication|article|source|document|report)\s+(has|have)\s+(yet\s+)?(tested|examined|measured|reported|addressed|investigated|established|shown|found|confirmed)\b/i,
+  /\b(the\s+)?(reviewed\s+|available\s+|retrieved\s+|published\s+)?literature\s+(is|remains)\s+silent\b/i,
+  /^\W*no\s+information\s+(specific\s+)?.{0,90}?\b(was|were|is|are)\s+(found|available|retrieved|present)\b/i,
+  // A bare "there is no evidence/research …" pattern lived here and fired on
+  // "There is no research BUDGET allocated to the programme", where the
+  // evidence noun heads a compound and the sentence is about money. Every B4
+  // case is already caught by a sibling above, so the bare form is not needed
+  // and the false positive is not worth it.
+];
+
+/**
+ * Family 3 — WHOLE TEXT. The TRANSFER DISCLAIMER: the sentence's purpose is to
+ * say that the evidence is about something OTHER than the subject researched.
+ * "documented for the DGX Spark … NOT confirmed for the OptiPlex 3050",
+ * "pertain to the DGX Spark, not the Dell OptiPlex 3050". This is never a
+ * caveat on a claim — it IS the claim, and it is a claim about applicability of
+ * evidence. Four of the eight audited poison texts have this shape, and their
+ * head clause is an ordinary world sentence, which is why this family cannot be
+ * head-restricted.
+ */
+const CONTRAST = /\b(not|n't|no\s+source|however|but|while|whereas|rather\s+than)\b/i;
+// Present-tense forms matter: poison `1306bb5a` says "the sources DESCRIBE this
+// for ASUS and Compaq boards", and a past-participle-only list missed it.
+//
+// Only "<verb> (this) FOR <Named thing>" counts. An "in" branch and an optional
+// "that" were here and produced three false positives on the live table, every
+// one of them an ordinary attribution: "The article notes that in August 2026,
+// several AI browsers were demonstrated vulnerable…", "…(as noted in CNN's
+// coverage)…", "OpenAI stated that for Astra specifically, it invested in…".
+// Reporting what a named party said is not a transfer disclaimer; the poison
+// shape is always "the evidence covers X, and X is not what you asked about".
+const TRANSFER_SUBJECT =
+  /\b(documented|documents|document|described|describes|describe|stated|states|state|reported|reports|report|noted|notes|observed|observes|shown|shows|demonstrated|demonstrates|established|establishes|confirmed|confirms)\s+(this\s+|these\s+|it\s+)?for\s+(the\s+|a\s+|an\s+)?[A-Z0-9]/;
+
+const TRANSFER_DISCLAIMER: RegExp[] = [
+  /\bpertains?\s+to\s+[^,;]+,\s*not\s+(the|a|an)\b/i,
+  /\bnot\s+confirmed\s+(as|for|in)\b/i,
+  /\bcannot\s+be\s+(directly\s+)?extrapolated\b/i,
+  /\bdoes\s+not\s+rule\s+out\b/i,
   // A claim that cites "Source N" INSIDE its own text is describing the
   // evidence set, not the world. (The [Source N] markers are stripped before
   // this runs; a bare "(Source 3)" in prose is not.)
   /\(\s*sources?\s+\d+\s*\)/i,
-];
-
-/**
- * Layer B — the claim's assertion is about the STATE OF CONFIRMATION rather
- * than about a fact: what is not confirmed, not ruled out, not extrapolable,
- * or true of X "and not" the thing actually being researched. These are
- * epistemic statements; they describe the evidence, and "documented for the DGX
- * Spark, NOT the OptiPlex" is the shape that produced four of the eight.
- */
-const EVIDENTIAL_HEDGE: RegExp[] = [
-  // A BARE "… is not confirmed" was here and matched ordinary world claims that
-  // end in an honest caveat ("…though the exact UI pattern is not confirmed"),
-  // which the filter would then have deleted. Only the form that names what it
-  // is not confirmed FOR survives: that is the "documented for X, not for the
-  // thing you asked about" shape the audit found.
-  /\bnot\s+confirmed\s+(as|for|in)\b/i,
-  /\bdoes\s+not\s+rule\s+out\b/i,
-  /\bcannot\s+be\s+(directly\s+)?extrapolated\b/i,
-  /\bpertains?\s+to\s+[^,]+,\s*not\s+(the|a|an)\b/i,
-  /\bdocumented\s+for\s+[^;.]+;\s*(this\s+)?is\s+not\b/i,
-  /\bno\s+source\s+(confirms?|states?|provides?|documents?|describes?|addresses?|explains?|discusses?|gives?)/i,
-  /\bbut\s+no\s+source\b/i,
 ];
 
 export type MetaVerdict = "meta" | "world";
@@ -142,8 +201,15 @@ export type MetaVerdict = "meta" | "world";
 export function classifyMetaClaim(text: string): MetaVerdict {
   const t = String(text || "");
   if (!t.trim()) return "world";
-  for (const re of SOURCE_REFERENTIAL) if (re.test(t)) return "meta";
-  for (const re of EVIDENTIAL_HEDGE) if (re.test(t)) return "meta";
+  const head = headClause(t);
+  for (const re of SOURCE_SUBJECT) if (re.test(head)) return "meta";
+  for (const re of EVIDENCE_ABSENCE) if (re.test(head)) return "meta";
+  for (const re of TRANSFER_DISCLAIMER) if (re.test(t)) return "meta";
+  // The transfer disclaimer spelled out rather than idiomatic: the evidence is
+  // attributed to a NAMED other thing AND the sentence contrasts that with the
+  // subject. Both halves are required — "documented for Python 3.12" alone is
+  // an ordinary fact.
+  if (TRANSFER_SUBJECT.test(t) && CONTRAST.test(t)) return "meta";
   return "world";
 }
 

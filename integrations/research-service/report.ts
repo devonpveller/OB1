@@ -22,7 +22,7 @@ export interface NeedState { need: string; status: NeedStatus; }
 
 export interface SearchRecordEntry {
   query: string;
-  verdict: "ok" | "collapsed" | "empty" | "error";
+  verdict: "ok" | "collapsed" | "offtopic" | "empty" | "error";
   hits: number;
   overlap: number;
   collapsedOn?: string;
@@ -38,16 +38,18 @@ export interface SearchRecord {
   readable: number;
   /** …of which survived the relevance gate. */
   relevant: number;
-  /** Search calls by verdict. */
+  /** Search calls by verdict. `offtopic` = a full page of hits, none of which
+   *  mentioned the query. It fails the run exactly as a collapse does. */
   ok: number;
   collapsed: number;
+  offtopic: number;
   empty: number;
   errors: number;
 }
 
 export function emptySearchRecord(): SearchRecord {
   return { queries: [], hits: 0, fetched: 0, readable: 0, relevant: 0,
-           ok: 0, collapsed: 0, empty: 0, errors: 0 };
+           ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0 };
 }
 
 export function answeredCount(needs: NeedState[]): number {
@@ -68,8 +70,11 @@ export function shouldClassifyTemplate(answered: number): boolean {
 /** "ok" | "DEGRADED" — from measurement, not from whether an engine errored. */
 export function searchHealthLabel(r: SearchRecord): "ok" | "DEGRADED" {
   if (!r) return "ok";
-  if (r.collapsed > 0 && r.collapsed >= r.ok) return "DEGRADED";
-  if (r.ok === 0 && (r.collapsed > 0 || r.empty > 0)) return "DEGRADED";
+  // A search that returned junk is a failed search whether or not we could name
+  // the token it piled onto.
+  const junk = (r.collapsed || 0) + (r.offtopic || 0);
+  if (junk > 0 && junk >= r.ok) return "DEGRADED";
+  if (r.ok === 0 && (junk > 0 || r.empty > 0)) return "DEGRADED";
   return "ok";
 }
 
@@ -86,13 +91,14 @@ export function coverageFooter(
   parts.push(`needs answered ${answeredCount(needs)} of ${(needs || []).length}`);
   if (record) {
     const hitBits: string[] = [`${record.hits} hits`];
-    if (record.collapsed) hitBits.push(`${record.collapsed} collapsed`);
+    const junkCalls = (record.collapsed || 0) + (record.offtopic || 0);
+    if (junkCalls) hitBits.push(`${junkCalls} junk`);
     parts.push(
       `sources ${record.relevant} relevant of ${record.fetched} fetched (${hitBits.join(", ")})`,
     );
     const health = searchHealthLabel(record);
     if (health === "DEGRADED") {
-      parts.push(`search: DEGRADED (${record.collapsed} of ${record.collapsed + record.ok + record.empty} searches returned junk)`);
+      parts.push(`search: DEGRADED (${junkCalls} of ${junkCalls + record.ok + record.empty} searches returned junk)`);
     }
   }
   if (backstop && backstop !== "complete") parts.push(`stopped early: ${backstop}`);

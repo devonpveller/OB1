@@ -19,7 +19,16 @@
 
 export interface SearchHit { url: string; title: string; snippet: string; }
 
-export type SearchVerdict = "ok" | "collapsed" | "empty";
+/**
+ * `offtopic` was added 2026-09-11 after the tester showed that ten pages of
+ * pure noise ("Best Buy Deals 1..10" for an OptiPlex query) were classified
+ * `ok`, because the old rule only recognised junk that piled onto a query
+ * TOKEN. An engine that drifts semantically was invisible, and its output spent
+ * the fetch and relevance-gate budget while `SearchStats.ok` counted it as
+ * engine health. `collapsed` and `offtopic` differ only in whether we can NAME
+ * the token; both mean the search did not answer the query.
+ */
+export type SearchVerdict = "ok" | "collapsed" | "offtopic" | "empty";
 export interface SearchQuality {
   verdict: SearchVerdict;
   /** Fraction of hits whose title+snippet carry >= 2 distinct query terms. */
@@ -33,6 +42,21 @@ export const COLLAPSE_OVERLAP = 0.3;
 /** …and this share of TITLES must carry one single query token for it to be
  *  the first-token collapse signature rather than merely a weak search. */
 export const COLLAPSE_TITLE_SHARE = 0.6;
+/**
+ * Below this many hits, a low score is not a verdict about the engine. A
+ * three-hit answer to an obscure question is thin, not broken, and condemning
+ * it would be the same overreach in the other direction.
+ */
+export const OFFTOPIC_MIN_HITS = 5;
+/**
+ * A query term this long is DISTINCTIVE enough that a hit containing it alone
+ * is on topic ("CrashLoopBackOff", "semaglutide", "vestibular"). Short tokens
+ * are not: the audited collapses piled onto "dell", "most" and "100", and if
+ * any single token could vouch for a hit the recorded failures would classify
+ * `ok` and this whole module would be undone. Seven is above every collapse
+ * token measured on 2026-09-11 and below the shortest real anchor seen.
+ */
+export const ANCHOR_MIN_LEN = 7;
 
 const STOP = new Set(
   ("a an the and or of for to in on at by with from as is are was were be been being " +
@@ -79,14 +103,26 @@ export function overlapRatio(query: string, hits: SearchHit[]): number {
   const qt = [...new Set(terms(query))];
   if (!qt.length) return 1;                 // nothing to match on — not the engine's fault
   const min = Math.min(2, qt.length);
+  const anchor = anchorTerm(qt);
   let good = 0;
   for (const h of hits) {
     const text = `${h?.title || ""} ${h?.snippet || ""}`.toLowerCase();
     let present = 0;
     for (const t of qt) if (has(text, t)) present++;
-    if (present >= min) good++;
+    // A hit carrying the DISTINCTIVE anchor term is on topic even if it is the
+    // only query word in it: "Debug CrashLoopBackOff" answers "Kubernetes
+    // CrashLoopBackOff diagnose". Without this, a query whose subject is one
+    // strong token plus generic words scored 0.00 on a perfect result set.
+    if (present >= min || (anchor && present >= 1 && has(text, anchor))) good++;
   }
   return good / hits.length;
+}
+
+/** The longest query term, when it is long enough to vouch for a hit alone. */
+export function anchorTerm(queryTerms: string[]): string {
+  let best = "";
+  for (const t of queryTerms) if (t.length > best.length) best = t;
+  return best.length >= ANCHOR_MIN_LEN ? best : "";
 }
 
 /** The query token that the greatest share of TITLES carries, with that share. */
@@ -116,8 +152,15 @@ export function classifyHits(query: string, hits: SearchHit[]): SearchQuality {
   if (dom.share >= COLLAPSE_TITLE_SHARE) {
     return { verdict: "collapsed", overlap, collapsedOn: dom.term };
   }
-  // Low overlap with no single dominant token: a weak search, not a broken
-  // engine. Saying "collapsed" here would be a diagnosis we cannot support.
+  // No dominant token, but a full page of results in which NOTHING mentions the
+  // query: the engine answered a different question. We cannot name the token,
+  // so we do not claim to — but calling this `ok` told the run its search had
+  // worked and spent the whole fetch budget on noise.
+  if (overlap === 0 && list.length >= OFFTOPIC_MIN_HITS) {
+    return { verdict: "offtopic", overlap };
+  }
+  // A thin or partially-relevant set: a weak search, not a broken engine.
+  // Saying anything stronger here would be a diagnosis we cannot support.
   return { verdict: "ok", overlap };
 }
 
@@ -176,8 +219,8 @@ export function reformulate(need: string, entity: string, nth: number): string {
 
 /** Per-run search accounting (RunResult.fetchStats.search). */
 export interface SearchStats {
-  calls: number; ok: number; collapsed: number; empty: number; errors: number;
+  calls: number; ok: number; collapsed: number; offtopic: number; empty: number; errors: number;
 }
 export function emptySearchStats(): SearchStats {
-  return { calls: 0, ok: 0, collapsed: 0, empty: 0, errors: 0 };
+  return { calls: 0, ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0 };
 }

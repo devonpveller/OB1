@@ -80,6 +80,49 @@ Deno.test("applyNumericGrounding leaves the 100 Hz [SOURCED] lines alone", () =>
   assertEquals(sourcedAfter.join("\n"), sourcedBefore.join("\n"));
 });
 
+// ── B5 (tester, 2026-09-11) ────────────────────────────────────────────────
+// `[Source N]` was stripped from the LINE but never from the SOURCE text, so a
+// fabricated "95 C" was "grounded" by any stray reference index, page number or
+// unrelated measurement in a fetched page — and real web pages are full of
+// them. The audited line was caught only because neither DGX Spark page
+// happened to contain the digits 95 at all.
+Deno.test("B5: a citation index in the SOURCE text does not ground a figure", () => {
+  const line = "[SOURCED] The board throttles at 95 °C. [Source 1]";
+  for (const src of [
+    "See [Source 95] for details on the cooling design.",
+    "Refer to Source 95 of the appendix.",
+    "See page 95 of the manual.",
+    "Described on pp. 95-97 of the service guide.",
+    "[95] Smith et al., Thermal Design, 2021.",
+  ]) {
+    assertEquals(groundNumbers(line, [src]).ok, false, src);
+  }
+});
+
+Deno.test("B5: a figure with a UNIT must match that unit in the source", () => {
+  const line = "[SOURCED] The board throttles at 95 °C. [Source 1]";
+  assertEquals(groundNumbers(line, ["The chassis is 95 mm wide."]).ok, false);
+  assertEquals(groundNumbers(line, ["It throttles at 95 °C under load."]).ok, true);
+  assertEquals(groundNumbers(line, ["It throttles at 95°C under load."]).ok, true);
+  assertEquals(groundNumbers(line, ["Thermal limit: 95 C."]).ok, true);
+  // A unitless figure is unchanged: it only has to occur.
+  assertEquals(groundNumbers("[SOURCED] 14 subjects took part. [Source 1]",
+    ["A total of 14 subjects were enrolled."]).ok, true);
+});
+
+Deno.test("B5: the commonest words in English no longer ground small integers", () => {
+  assertEquals(groundNumbers("[SOURCED] Several hundred took part, about 100. [Source 1]",
+    ["Several hundred subjects took part."]).ok, false);
+  assertEquals(groundNumbers("[SOURCED] Exactly 1 failure occurred. [Source 1]",
+    ["No one reported a failure."]).ok, false);
+  assertEquals(groundNumbers("[SOURCED] 2 engineers signed off. [Source 1]",
+    ["Two engineers reviewed the design."]).ok, false);
+  // …but "thirty" still grounds 30, which is the case that made word forms
+  // necessary (the 100 Hz CAREN line).
+  assertEquals(groundNumbers("[SOURCED] A study of 30 participants. [Source 1]",
+    ["Thirty participants were recruited."]).ok, true);
+});
+
 Deno.test("a [GAP] line is never touched (it carries no citation and asserts nothing)", () => {
   const s = "[GAP] No source gives a figure for the 3050's 95 W PSU.";
   const { synthesis, ungrounded } = applyNumericGrounding(s, ["unrelated text"]);
