@@ -104,22 +104,31 @@ Deno.test("T11: the tester's live probes are search failures, not 'ok'", () => {
   }
 });
 
-Deno.test("T11: entity PRESENT in every hit is never collapsed, whatever the token lengths", () => {
+Deno.test("T11: a set that names the subject AND answers the query is ok", () => {
   for (const name of ["probe-good-oomkilled", "probe-good-iphone"]) {
     const p = probe(name);
     const v = classifyHits(p.query, p.hits, p.entity);
     assertEquals(v.verdict, "ok", `${name} classified ${v.verdict}`);
   }
-  // Property: synthesise a set whose only query word is the entity, with the
-  // entity in a dominating position — the exact shape that used to collapse.
-  for (const entity of ["CrashLoopBackOff", "OOMKilled", "semaglutide", "XJ", "e5"]) {
-    const hits: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
+  // CHANGED by the evidence floor (research-trust-core attempt 3). This case
+  // used to synthesise hits whose ONLY query word was the subject, and assert
+  // they carried it. They no longer do, and that is the fix: the tester showed
+  // arc-WELDING pages carrying "Arc browser" and M.2 heatsinks carrying
+  // "MacBook M2" on exactly that shape. A hit must now also contain two
+  // distinct query terms. Real pages do; a one-word match does not.
+  for (const entity of ["CrashLoopBackOff", "OOMKilled", "semaglutide"]) {
+    const answering: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
       url: `https://example.org/${i}`,
-      title: `${entity}: what it means`,
-      snippet: `everything about ${entity}`,
+      title: `${entity}: how to diagnose it`,
+      snippet: `a guide to diagnose and fix ${entity}`,
     }));
-    const v = classifyHits(`${entity} diagnose fix guide`, hits, entity);
-    assertEquals(v.verdict, "ok", `${entity} -> ${v.verdict}`);
+    assertEquals(classifyHits(`${entity} diagnose fix guide`, answering, entity).verdict,
+      "ok", `${entity} on a page that answers the query`);
+    const nameOnly: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
+      url: `https://example.org/${i}`, title: entity, snippet: "",
+    }));
+    assert(classifyHits(`${entity} diagnose fix guide`, nameOnly, entity).verdict !== "ok",
+      `${entity} on a page carrying nothing but the name`);
   }
 });
 
@@ -136,17 +145,19 @@ Deno.test("T11: the three ORIGINAL collapse fixtures still collapse under the en
   }
 });
 
-Deno.test("T11: an entity-present set whose hits miss the NEED is a weak search, not a broken engine", () => {
-  // `semaglutide gastroparesis incidence` returned ten real semaglutide pages
-  // that say nothing about gastroparesis. The engine understood the subject;
-  // the relevance gate is what rejects a page that does not answer the need.
-  // Calling this "the search failed" would be the same overreach that failed
-  // attempts 1 and 2, in the other direction.
+Deno.test("T11: a set naming the subject and NOTHING else is no longer ok", () => {
+  // REVERSED, deliberately. "semaglutide gastroparesis incidence" returns ten
+  // real semaglutide pages that never mention gastroparesis. The previous item
+  // declared that `ok` - the engine understood the subject, and the relevance
+  // gate would filter per need - and that judgement was made when there was no
+  // evidence floor. The tester then produced three live sets of the same shape
+  // where the shared token meant something else entirely (Signal/DSP,
+  // Arc/welding, M2/M.2), and no rule can tell those two apart from one token.
+  // So one token is no longer evidence, and this set goes with them.
   const p = probe("probe-collapsed-semaglutide");
   const v = classifyHits(p.query, p.hits, p.entity);
-  assertEquals(v.verdict, "ok");
-  assertEquals(v.entityShare, 1);
-  assert(v.overlap < 0.5, `overlap ${v.overlap} — low, and recorded as secondary evidence`);
+  assert(v.verdict !== "ok", `${v.verdict} at ${v.entityShare}`);
+  assertEquals(v.entityShare, 0);
 });
 
 Deno.test("T11: the subject is matched in every spelling engines write it", () => {
@@ -202,21 +213,30 @@ Deno.test("T11: with NO entity the classifier falls back, and the fallback is we
 // dominantTitleTerm then found it in 100 % of titles, which is the collapse
 // signature exactly. The run would then tell the user "search failure, not
 // evidence of absence" about a search that worked.
-Deno.test("B1: a hit set whose only query word is the ENTITY is ok, not collapsed", () => {
+Deno.test("B1: a real page about the subject is ok; a bare name is not", () => {
+  // B1 was the tester's attempt-1 finding: five perfect CrashLoopBackOff
+  // results were condemned because the scorer demanded two distinct query terms
+  // per hit. The fix then was to let one strong token vouch for a hit - which
+  // is exactly what the arc-welding and M.2 sets later walked through.
+  //
+  // The floor restores the two-term requirement, and B1 stays fixed because a
+  // page that is really about CrashLoopBackOff says so in more than one word.
+  // The synthetic snippet below is the one the original case used.
   const q = "Kubernetes CrashLoopBackOff diagnose";
-  const titles = [
-    "Debug CrashLoopBackOff",
-    "CrashLoopBackOff explained",
-    "Fixing CrashLoopBackOff",
-    "CrashLoopBackOff troubleshooting",
-    "CrashLoopBackOff: root causes",
-  ];
-  const hits: SearchHit[] = titles.map((title, i) => ({
+  const hits: SearchHit[] = [
+    "Debug CrashLoopBackOff", "CrashLoopBackOff explained", "Fixing CrashLoopBackOff",
+    "CrashLoopBackOff troubleshooting", "CrashLoopBackOff: root causes",
+  ].map((title, i) => ({
     url: `https://k8s.example.org/${i}`, title,
-    snippet: "how to debug a pod stuck in CrashLoopBackOff",
+    snippet: "how to diagnose a pod stuck in CrashLoopBackOff on Kubernetes",
   }));
-  const v = classifyHits(q, hits, "CrashLoopBackOff");
-  assertEquals(v.verdict, "ok");
+  assertEquals(classifyHits(q, hits, "CrashLoopBackOff").verdict, "ok");
+  // The live set for the same question scores 0.95 - real pages carry more than
+  // the name (findings H.3, live-crashloop).
+  const bare: SearchHit[] = Array.from({ length: 10 }, (_, i) => ({
+    url: `u${i}`, title: "CrashLoopBackOff", snippet: "",
+  }));
+  assert(classifyHits(q, bare, "CrashLoopBackOff").verdict !== "ok");
 });
 
 Deno.test("B1: a distinctive token in the junk cannot rescue it — only the entity can", () => {

@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (read-only). These are the JUNK sets the TESTER used to fail T7 on attempt 2: real pages about a DIFFERENT subject that shares one token with the run's subject. The set rule scored them 1.00 / 0.60 / 1.00 because ceil(k/2) is 1 when k <= 2.",
+ "_expect": "refused",
+ "query": "Arc browser memory usage",
+ "entity": "Arc browser",
+ "hits": [
+  {
+   "url": "https://www.arccaptain.com/blogs/article/how-to-arc-weld",
+   "title": "How to Arc Weld: Step-by-Step Guide for Beginners - Arccaptain",
+   "snippet": "Learn how to arc weld with this step-by-step guide for beginners. Discover welding setup, safety precautions, arc starting, techniques, and common mistakes.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.wikihow.com/Arc-Weld",
+   "title": "How to Arc Weld (with Pictures) - wikiHow",
+   "snippet": "Shielded metal arc welding is the process of joining two metal pieces using a flux covered electrode which is melted in an electric arc and becomes a fused part of the pieces being welded. This article will describe the use of flux-coated...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://garagewelding.com/essential-welding-tips-for-beginners/",
+   "title": "12 Welding Tips for Beginners: Master Arc Welding Basics",
+   "snippet": "These 12 practical welding tips for beginners focus on shielded metal arc welding (SMAW), also called stick welding. They cover electrode choice, machine setup, arc control, joint preparation, heat management, safety, and focused practice. The goal is simple: help you make safer, more consistent beads while learning what the puddle is telling you.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.thefabricator.com/thefabricator/article/arcwelding/stick-welding-basics-how-to-stick-weld",
+   "title": "Stick welding basics: How to stick weld",
+   "snippet": "Then, move forward so that the fully established arc welds over the spot of the arc strike and consumes it. If you are first learning SMAW, you may want to opt for a user-friendly rutile electrode. However, anyone who plans to weld professionally or critical structures (and that includes farm implements) should learn with the electrodes used for these applications, and that means mastering basic and cellulosic electrodes.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.keyence.com/ss/products/measure/welding/arc/mechanism.jsp",
+   "title": "Arc welding types and principles | Arc welding | KEYENCE America",
+   "snippet": "Automated Welding Basics is a site by KEYENCE that explains welding clearly from basic knowledge to the latest information.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://artizono.com/beginners-guide-to-arc-welding-step-by-step-learning/",
+   "title": "Beginner's Guide to Arc Welding: Step-by-Step Learning",
+   "snippet": "How Arc Welding Works In a basic arc welding setup, an electric circuit connects a power source, an electrode, and the workpiece; when the electrode nears the surface, the current forms an electric arc by jumping the small gap between them. Arc initiation: The welder brings the electrode close to the metal until the arc strikes.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/BadWelding/comments/1b5krdt/learning_how_to_stick_weld_pls_help/",
+   "title": "r/BadWelding on Reddit: Learning how to stick weld. Pls help!",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://sensibledigs.com/how-to-arc-weld/",
+   "title": "How to Arc Weld: Stick Welding for Beginners - Sensible Digs",
+   "snippet": "Learn how to arc weld as a beginner: pick the right rod, set your amperage, strike a clean arc, run a solid bead, and weld safely around the fumes.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.ssimder.com/blogs/ssimderwelder/how-to-arc-weld-step-by-step-guide-for-beginners",
+   "title": "How to Arc Weld: Step-by-Step Guide for Beginners",
+   "snippet": "Learn how to arc weld with this easy step-by-step guide for beginners. Discover the tools you need, safety tips, and welding techniques to start your first project today.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://weld-commerce.com/how-to-arc-weld/",
+   "title": "How to Arc Weld Beginner's Guide: Master the Basics",
+   "snippet": "Learn how to arc weld effectively with our beginner's guide. Understand essential tips, tools, and step-by-step techniques for success.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.lincolnelectric.com/en/welding-and-cutting-resource-center/process-and-theory/arc-welding-fundamentals",
+   "title": "Arc Welding Fundamentals | Lincoln Electric",
+   "snippet": "Since the joining is an intermixture of metals, the final weldment potentially has the same strength properties as the metal of the parts. This is in sharp contrast to non-fusion processes of joining (i.e. soldering, brazing etc.) in which the mechanical and physical properties of the base materials cannot be duplicated at the joint. Fig. 1 The basic arc...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.gentronics.com.au/gentronics-arc-welding-basics/",
+   "title": "Arc Welding Basics: How Arc welding works for beginners",
+   "snippet": "The Basics of Arc Welding. Welding is essentially bonding two metals together but arc welding is one of the more common techniques used by welders.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://theweldingmaster.com/what-is-arc-welding-how-arc-welding-works/",
+   "title": "What is Arc Welding? - The Complete Guide",
+   "snippet": "In this article you learn about what is arc welding , its main parts, advantages, disadvantages diagram & working with a very comprehensive video tutorial.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.academia.edu/27246499/Arc_Welding_Basics",
+   "title": "(PDF) Arc Welding Basics",
+   "snippet": "ARC WELDING BASICS In its most basic form, a welder is a device that melts two pieces of metal together using high amperage delivered at the end of an \"electrode\" (rod) into the work.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.longevity-inc.com/resources/resources/improving-your-skills/stick-welding-basics",
+   "title": "STICK Welding Basics | Longevity",
+   "snippet": "Otherwise known as Shielded Metal Arc Welding (SMAW), STICK welding is a two-handed method, like TIG. STICK welding uses a metal filler rod, or stick, coated with flux. As the stick material melts in the heat, the flux coating also melts, creating both a gas and a liquid slag, which act to shield the weld from oxidation.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://yeswelder.com/blogs/yeswelder/arc-welding-vs-laser-welding-pros-cons-applications",
+   "title": "Arc Welding vs. Laser Welding: Pros, Cons & Applications | YesWelder",
+   "snippet": "Basics Of Arc Welding.Know the difference: Many welders use the term Arc welding when talking about Shielded Metal Arc Welding (SMAW) or Stick/Arc welding.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://weldingtoolshub.com/how-to-arc-weld/",
+   "title": "How to Arc Weld: Step-by-Step Guide for Beginners",
+   "snippet": "Learn how to arc weld by understanding the process of joining metals using an electric arc to melt and fuse materials for strong, durable connections.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://ewi.org/gas-metal-arc-welding-basics-welding-current-welding-voltage/",
+   "title": "Gas Metal Arc Welding Basics: Current & Voltage | GMAW",
+   "snippet": "Follow our detailed guide to gas arc metal welding (GMAW) with EWI's Michael Carney. From basics to best practices, this is your GMAW go-to!",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.auto.edu/guide-to-stick-welding/",
+   "title": "Guide to Stick Welding | ATI",
+   "snippet": "n electric current is used to create an arc between the electrode and the metals to be joined. During stick welding, the heat generated by the electric arc melts both the base metal and the electrode.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.hobartbrothers.com/resources/technical-guides/helpful-hints-basic-welding/basic-stick-welding-electrode-technique/",
+   "title": "Basic Stick Welding – Electrode Technique - Hobart Brothers",
+   "snippet": "This will help keep arc blow (interference from magnetic fields) to a minimum when using DC current. Electrode angles are the angles at which you should hold the stick electrode in relation to the workpiece while welding.",
+   "engine": "brave"
+  }
+ ]
+}

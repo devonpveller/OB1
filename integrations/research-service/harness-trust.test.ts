@@ -392,11 +392,11 @@ Deno.test("T11: the run's subject entity reaches the classifier", async () => {
   assert(calls.relevanceAsked.length === 0, "no page should have reached the relevance gate");
 });
 
-// ── research-trust-core: the topic-shaped subject, end to end ──────────────
-Deno.test("a TOPIC-shaped subject is shortened, counted, and the search passes", async () => {
+// ── research-trust-core: a topic-shaped subject still searches ─────────────
+Deno.test("a TOPIC-shaped subject is used whole and the search passes", async () => {
   // Live dry run 6975d982: KEYWORDIZE returned "100Hz audio VR motion sickness"
   // and all three searches were reported as failures with the Nagoya paper at
-  // rank 1 in the results.
+  // rank 1. The subject is now a SET, so its length costs nothing.
   const f = JSON.parse(
     Deno.readTextFileSync(new URL("./fixtures/live-100hz-mechanism.json", import.meta.url)),
   );
@@ -406,21 +406,9 @@ Deno.test("a TOPIC-shaped subject is shortened, counted, and the search passes",
     relevance: () => true,
   });
   const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
-  assertEquals(r.fetchStats.search.entity_shortened, 1, "the correction must be counted");
   assert(r.fetchStats.search.ok > 0, "the search must not be reported as a failure");
   assertEquals(r.fetchStats.search.collapsed, 0);
   assert(r.fetchStats.sources > 0, "and the pages must actually be fetched");
-  assertStringIncludes(
-    coverageFooter(r.needsStatus, r.searchRecord, r.backstop),
-    "subject shortened to its name (1x)",
-  );
-});
-
-Deno.test("a subject that is already a name is not counted as shortened", async () => {
-  const { deps } = mockDeps({ entity: REPLAY_ENTITY, hitsFor: () => DELL_HITS });
-  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
-  assertEquals(r.fetchStats.search.entity_shortened, 0);
-  assert(!coverageFooter(r.needsStatus, r.searchRecord, r.backstop).includes("shortened"));
 });
 
 // ── B3 (tester, 2026-09-11) ────────────────────────────────────────────────

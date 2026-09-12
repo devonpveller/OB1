@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (read-only). These are the JUNK sets the TESTER used to fail T7 on attempt 2: real pages about a DIFFERENT subject that shares one token with the run's subject. The set rule scored them 1.00 / 0.60 / 1.00 because ceil(k/2) is 1 when k <= 2.",
+ "_expect": "refused",
+ "query": "MacBook M2 battery life",
+ "entity": "MacBook M2",
+ "hits": [
+  {
+   "url": "https://www.kingston.com/en/blog/pc-performance/ssd-cooling-m2-nvme-heatsink",
+   "title": "SSD Cooling: Do M.2 NVMe SSDs Need a Heatsink? - Kingston Technology",
+   "snippet": "M.2 NVMe drives tend to run hotter than SATA SSDs, especially under heavy workloads like gaming, 3D rendering, or large file transfers. In many cases, something as simple as a heatsink or better case airflow will keep your SSD cool.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.newegg.com/p/pl?d=m.2+heatsink",
+   "title": "m.2 heatsink | Newegg.com",
+   "snippet": "(1)M.2 2280 SSD Heat Sink, 6mm Copper Heat Pipes, Aluminum Radiator Fin Design for PCIE M2 NVME or SATA NGFF SSD with 14.8 w/k Silicone Thermal Pads ... This product is sold direct from the manufacturer. ... 2-in-1 Magnetic & Clip-On Phone Cooler Semiconductor-Powered Gaming Cell Phone Cooling Fan Radiator for iPhone/Android/iPad/Tablet Ideal for Gaming, Video Calls, Live Broadcasting, and Vlog ... (7)RIITOP M.2 SSD Heatsink Cooler with Thermal Silicone pad for Desktop PC PS5 M.2 PCIE NVME or SATA SSD 2280mm",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.amazon.com/m-2-heatsink/s?k=m.2+heatsink",
+   "title": "Amazon.com: M.2 Heatsink",
+   "snippet": "M.2 Heatsink Cooler 2280 SSD Double-Sided Heat Sink with Thermal Silicone pad for PS5/PC PCIE NVME M2 SSD (Black）) 500+ bought in past month Add to cart",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.propelrc.com/best-m-2-heatsinks/",
+   "title": "Best M.2 Heatsinks 2026: Top 10 Cooling Solutions Tested",
+   "snippet": "Discover the best M.2 heatsinks for NVMe SSD cooling. We tested 10 solutions, finding thermal improvements up to 30°C. From budget to premium, active to passive cooling.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/pcmasterrace/comments/148qm9q/do_i_need_heatsink_on_an_m2_nvme_ssd/",
+   "title": "r/pcmasterrace on Reddit: Do I need heatsink on an M.2 NVME SSD?",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.amazon.com/nvme-heatsink/s?k=nvme+heatsink",
+   "title": "Amazon.com: Nvme Heatsink",
+   "snippet": "Unlock the full potential of your NVME SSD with high-performance heatsinks that deliver up to 30°C cooling for uninterrupted gaming and productivity.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://graphicscardhub.com/best-m-2-heatsink/",
+   "title": "Best M.2 Heatsinks for NVMe SSD [Passive & Active M.2 Coolers]",
+   "snippet": "Buy Thermalright M.2 2280 SSD Heatsink EK-M.2 NVMe Heatsink A low-profile M.2 heatsink from EKWD, which is the leader in CPU and GPU water block custom liquid cooling solutions. It is a very simple passive M.2 cooler that uses an aluminum ribbed heatsink with fins and high-quality thermal pads. It supports almost all single-sided M.2 2280 NVMe SSDs and uses stainless steel clips as a retention ...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.maketecheasier.com/does-nvme-ssd-need-heatsink/",
+   "title": "Tested: Does Your M.2 NVMe SSD Need a Heatsink?",
+   "snippet": "While your NVMe SSD runs faster than the standard 2.5 inch SSD, its temperature also shoots up faster. We investigated the case for NVMe SSD heatsink.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.amazon.com/nvme-ssd-heatsink/s?k=nvme+ssd+heatsink",
+   "title": "Amazon.com: Nvme Ssd Heatsink",
+   "snippet": "Enhance your NVMe SSD's speed and reliability with high-performance heatsinks. Discover options compatible with a wide range of SSD models.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.tomshardware.com/pc-components/storage/id-cooling-zero-m05-and-m15-review",
+   "title": "We tested 30 m.2 SSD heatsinks to find the top performer: ID-Cooling Zero M05 and M15 Review | Tom's Hardware",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://maketecheasier.com/does-nvme-ssd-need-heatsink/",
+   "title": "Tested: Does Your M.2 NVMe SSD Need a Heatsink? - Make Tech Easier",
+   "snippet": "Our test rig is based on the latest Ryzen 2nd Gen (Zen 2 microarchitecture) platform, which shouldn’t cause any performance bottlenecks since the new X570 platform is inherently over-engineered to support the faster PCI-E 4.0 standard. Here are the specifications of the PC used for the tests: ... The master graph above reveals the sole advantage of using your NVMe SSD bare without heatsink.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.bestbuy.com/product/insignia-heatsink-enclosure-for-m-2-nvme-ssds-and-ps5-black/J2FPJK92WY",
+   "title": "Insignia™ - Heatsink Enclosure for M.2 NVMe SSDs and PS5",
+   "snippet": "Work and play hard with a heatsink that won’t let your devices overheat. With the Insignia NS-PM2HS Heatsink Enclosure for M.2 NVMe SSDs and PS5, improve the performance of your PlayStation 5 or desktop computer. Its M.2 B&M key or M key supports both 2280 and 22110, giving it wide compatibility ... Published: October 9, 2024",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.enermax.com/en/products/m.2-nvme-heatsink",
+   "title": "M.2 NVMe Heatsink - Products - ENERMAX Technology Corporation",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.ekwb.com/shop/ek-m-2-nvme-heatsink-black",
+   "title": "EK-M.2 NVMe Heatsink - Black – EK Webshop",
+   "snippet": "EK-M.2 NVMe Heatsink is a passive heatsink for M.2 NVMe Next Generation Form Factor SSDs. The heatsink is ribbed, so it`s not just a flat aesthetical cover, it also acts as a very effective passive cooler.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.kingspec.com/news/do-m2-nvme-ssds-need-a-heatsink.html",
+   "title": "Do M.2 NVMe SSDs Need a Heatsink? A Practical Guide to Better Cooling Performance - Kingspec",
+   "snippet": "While not every M.2 NVMe SSD requires a heatsink, high-performance drives and systems with limited airflow benefit greatly from additional cooling. Simple steps like improving airflow or adding a basic heatsink are often enough for everyday users.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.corsair.com/us/en/explorer/diy-builder/storage/is-cooling-necessary-for-an-m2-nvme-ssd/",
+   "title": "Do I need a heatsink on my NVME SSD? | CORSAIR",
+   "snippet": "At the very minimum you're looking at a simple heatsinks that sit on top of the SSD, with some form of thermal material that helps transfer heat away from the drive. For the vast majority of M.2 NVMe SSDs this kind of cooling is more than sufficient ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.trebleet.com/product-page/NVMe-Heatsinks-for-M2-SSD-Tool-Free",
+   "title": "NVMe Heatsinks for M.2 SSD Tool Free for TREBLEET 2-Slot Enclosure (Also compati | TREBLEET",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.microconnectors.com/m-2-nvme-ssd-5mm-low-profile-heat-sink-compatible-with-ps5-black/",
+   "title": "M.2 NVMe SSD 5mm Low-Profile Heat Sink (Compatible with PS5) Black",
+   "snippet": "Micro Connectors Low-Profile M.2 NVMe SSD Heatsink Kit (Black) Keep your M.2 2280 NVMe SSD cool with this low-profile heatsink kit. At just 5mm tall, it's perfect for tight spaces, including the PS5 M.2 expansion slot and PC builds.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.findingdulcinea.com/best-m-2-heatsinks/",
+   "title": "10 Best M.2 Heatsinks (September 2026) Solutions for NVMe SSDs",
+   "snippet": "The Thermalright HR10 2280 PRO is the best M.2 heatsink for most users in 2026, offering exceptional cooling performance with its active fan design and copper heatpipes at an affordable price point.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=idZ3ctqlpwo",
+   "title": "M 2 NVME SSD Heatsink Installation Guide - YouTube",
+   "snippet": "Arctic M2 Pro NVME Heat Sink Installation.Install and Test MHQJRH M.2 2280 SSD HeatSink, Thermal Silicone pad for PCIE NVMe M.2 SSD. BuildOrBuy. 25K 5y ago.",
+   "engine": "yandex"
+  }
+ ]
+}

@@ -14,8 +14,7 @@ import { classifyTemplate, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "
 import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
 import {
-  classifyHits, emptySearchStats, keywordQuery, reformulate, shortenEntity,
-  type SearchStats,
+  classifyHits, emptySearchStats, keywordQuery, reformulate, type SearchStats,
 } from "./search-quality.ts";
 import { applyNumericGrounding } from "./grounding.ts";
 import {
@@ -477,23 +476,12 @@ export async function runResearch(
         `QUESTION: ${query}\n\nNEEDS:\n${gapNeeds.map((n, i) => `${i}. ${n}`).join("\n")}`,
       );
       const rawEntity = typeof kw.entity === "string" ? kw.entity.trim() : "";
-      // A prompt is a request, not a guarantee: shorten deterministically when
-      // the model returns a topic anyway, and COUNT it. Dry run 6975d982 is what
-      // an uncounted five-word entity costs - three searches reported as
-      // failures with the answer sitting at rank 1 in the results.
-      subjectEntity = shortenEntity(rawEntity);
-      // Count the TOPIC correction only. Dropping a brand ("Dell OptiPlex 3050"
-      // -> "OptiPlex 3050") is ordinary core extraction and happens on most
-      // product runs; reporting it in the footer would be noise that buries the
-      // case that matters. The anchor's bound is the line: more than three
-      // words is a topic.
-      const rawWords = (rawEntity.match(/[A-Za-z0-9]+/g) || []).length;
-      if (rawWords > 3 && subjectEntity !== rawEntity) {
-        searchStats.entity_shortened++;
-        await progress("plan",
-          `subject "${rawEntity}" is a topic, not a name - searching on "${subjectEntity}"`,
-          { entity_shortened: searchStats.entity_shortened });
-      }
+      // The subject is used WHOLE, as a set of distinctive tokens. There is
+      // nothing to shorten and nothing to count: `shortenEntity` and
+      // `entity_shortened` went with the core-phrase rule they served
+      // (findings H.4). KEYWORDIZE is still told to return a NAME, and a
+      // subject the query is not about is still rejected and counted.
+      subjectEntity = rawEntity;
       const raw = Array.isArray(kw.queries) ? kw.queries : [];
       gapNeeds.forEach((need, i) => round1.set(need, keywordQuery(subjectEntity, need, raw[i])));
       await progress("plan", `subject="${subjectEntity || "(none)"}"; ${round1.size} keyword quer(ies)`,
@@ -780,7 +768,6 @@ export async function runResearch(
     searchRecord.errors = searchStats.errors;
     searchRecord.entity_missing = searchStats.entity_missing;
     searchRecord.entity_rejected = searchStats.entity_rejected;
-    searchRecord.entity_shortened = searchStats.entity_shortened;
   } else {
     await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
       { staged: staged.length });

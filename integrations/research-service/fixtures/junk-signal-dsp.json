@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (read-only). These are the JUNK sets the TESTER used to fail T7 on attempt 2: real pages about a DIFFERENT subject that shares one token with the run's subject. The set rule scored them 1.00 / 0.60 / 1.00 because ceil(k/2) is 1 when k <= 2.",
+ "_expect": "refused",
+ "query": "Signal messenger encryption",
+ "entity": "Signal",
+ "hits": [
+  {
+   "url": "https://www.tutorialspoint.com/digital_signal_processing/index.htm",
+   "title": "Digital Signal Processing Tutorial - Online Tutorials Library",
+   "snippet": "Digital Signal Processing (DSP) is an important branch of Electronics and Telecommunication Engineering that deals with the improvisation of reliability and accuracy of the digital communication by employing multiple techniques. This tutorial is meant for explaining the basic concepts of digital signal processing in a simple and easy-to-understand manner. Digital signal processing is a ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.analog.com/en/lp/001/beginners-guide-to-dsp.html",
+   "title": "A Beginner's Guide to Digital Signal Processing (DSP) | Analog Devices",
+   "snippet": "From here, the DSP takes over by capturing the digitized information and processing it. It then feeds the digitized information back for use in the real world. It does this in one of two ways, either digitally or in an analog format by going through a Digital-to-Analog converter. All of this occurs at very high speeds. To illustrate this concept, the diagram below shows how a DSP is used in an MP3 audio player. During the recording phase, analog audio is input through a receiver or other source. This analog signal is then converted to a digital signal by an analog-to-digital converter and pass",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.geeksforgeeks.org/electronics-engineering/what-is-digital-signal-processing/",
+   "title": "Digital Signal Processing (DSP) - GeeksforGeeks",
+   "snippet": "A discrete-time signal is represented as a sequence of numerical values sampled at regular time intervals. A field that uses algorithms, techniques, and mathematical methods to process digital signals to extract useful information or enhance specific features. Involves the processing, analysis, and transformation of digital signals. Uses algorithms and computational techniques to retrieve ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.softwaretestinghelp.com/digital-signal-processing-tutorial/",
+   "title": "Digital Signal Processing – Complete Guide With Examples",
+   "snippet": "Understand the key concepts of Digital Signal Processing including Digital Processing tools and various applications through this tutorial.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.keysight.com/used/us/en/knowledge/guides/digital-signal-processing",
+   "title": "Engineers Guide to Digital Signal Processing - Used Keysight Equipment",
+   "snippet": "For engineers who want to strengthen their theoretical foundation alongside practical work, the IEEE Signal Processing Society lecture notes offer applied DSP tutorials and real-world examples.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.tutorialspoint.com/digital_signal_processing/digital_signal_processing_tutorial.pdf",
+   "title": "PDF Digital Signal Processing - Online Tutorials Library",
+   "snippet": "About the Tutorial Digital Signal Processing is an important branch of Electronics and Telecommunication engineering that deals with the improvisation of reliability and accuracy of the digital communication by employing multiple techniques. This tutorial explains the basic concepts of digital signal processing in a simple and easy-to-understand manner.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.coursera.org/learn/dsp1",
+   "title": "Digital Signal Processing 1: Basic Concepts and Algorithms | Coursera",
+   "snippet": "In this series of four courses, you will learn the fundamentals of Digital Signal Processing from the ground up.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/embedded/comments/11eyd6y/how_can_i_learn_digital_signal_processing_fully/",
+   "title": "r/embedded on Reddit: How can I learn Digital Signal Processing fully ?",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://ocw.mit.edu/courses/res-6-008-digital-signal-processing-spring-2011/",
+   "title": "Digital Signal Processing - MIT OpenCourseWare",
+   "snippet": "This course was developed in 1987 by the MIT Center for Advanced Engineering Studies. It was designed as a distance-education course for engineers and scientists in the workplace. Advances in integrated circuit technology have had a major impact on the technical areas to which digital signal processing techniques and hardware are being applied. A thorough understanding of digital signal ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.allaboutcircuits.com/technical-articles/an-introduction-to-digital-signal-processing/",
+   "title": "An Introduction to Digital Signal Processing - Technical Articles",
+   "snippet": "To appreciate the advantages of DSP, let’s first have a look at the conventional method of signal processing, i.e., analog signal processing. Technical Article June 30, 2021 by Dr. Steve Arar · Digital signal processing (DSP) involves developing algorithms that can be used to enhance a signal ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.youtube.com/playlist?list=PLuh62Q4Sv7BUSzx5Jr8Wrxxn-U10qG1et",
+   "title": "Digital Signal Processing - YouTube",
+   "snippet": "A full course on Digital Signal Processing by Rich Radke at Rensselaer Polytechnic Institute. The lectures generally follow the textbook by Proakis and Manolakis, 4th edition.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://jkperin.github.io/DSP/",
+   "title": "Lecture notes | Digital Signal Processing",
+   "snippet": "Lecture notes on Digital Signal Processing. Digital Signal Processing Lecture notes on Digital Signal Processing. Lecture notes Introduction A short review of signals and systems, convolution, discrete-time Fourier transform, and the z -transform. Discrete-time random signals Theory on random signals and their importance in modeling complicated signals. Linear and time-invariant systems Linear ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=e6rb41xs_fY",
+   "title": "Digital Signal Processing (DSP) Tutorial: Geometric... - YouTube",
+   "snippet": "This is an introduction to digital signal processing. Ww start off with a discussion of the geometric series and then disc...",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/playlist?list=PLJLybGgHYEIdZ6uXe3D_U5tsoSbN22g1Q",
+   "title": "Digital Signal Processing Tutorial - YouTube",
+   "snippet": "Learn the basics of digital signal processing for audio programming. Sampling, Sampling Rate, Quantization: How To Represent Digital Sound?",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.rfmentor.com/content/essential-guide-digital-signal-processing",
+   "title": "The Essential Guide to Digital Signal Processing | rfmentor.com",
+   "snippet": "Using everyday examples and simple diagrams, two leading DSP consultants and instructors completely demystify signal processing. You’ll discover what digital signals are, how they’re generated, and how they’re changing your life.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.practical-music-production.com/dsp-tutorial/",
+   "title": "DSP Tutorial: Learn Digital Signal Processing Basics",
+   "snippet": "Digital audio plugin interface showing processing graphs – DSP tutorial Digital Signal Processing (DSP) is a fascinating and essential field within electronics and telecommunication engineering. It plays a critical role in enhancing the quality and efficiency of digital communication.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=P_JOAbqeQXA",
+   "title": "Practical Digital Signal Processing - Full Tutorial / Workshop",
+   "snippet": "Mar 24, 2023 · https://audio.dev/ -- @audiodevcon Workshop: Dynamic Cast: Practical Digital Signal Processing - Harriet Drury, Rachel Locke and Anna ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://dspeed.readthedocs.io/en/stable/notebooks/IntroToDSP.html",
+   "title": "Introduction to Digital Signal Processing - dspeed 2.0.3",
+   "snippet": "DSP Tutorial. Part I: Processing data in bulk using ufuncs. Part II: Using dspeed to combine multiple processors.This notebook will provide a brief introduction to a few of LEGEND’s bread and butter digital signal processing filters.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://dspguru.com/dsp/tutorials/",
+   "title": "Tutorials - dspGuru",
+   "snippet": "Digital Signal Processing is a difficult and complex subject. Here, we offer tutorials to clear up some of the mysteries of DSP. Quadrature Signals: Complex, But Not Complicated Convolution: A Visual Digital Signal Processing Tutorial Cascaded Integrator-Comb (CIC) Filter Introduction … Continued",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.sciencedirect.com/science/article/pii/B9780080343471500115",
+   "title": "Digital Signal Processors. A Tutorial - ScienceDirect",
+   "snippet": "After presenting some of the available hardware and its processing power, software problems are mentioned and possible solutions are shown. Finally future trends in hardware and software are discussed. ... L.R. Rabiner, B. Gold · Theory and application of digital signal processing, Prentice ...",
+   "engine": "brave"
+  }
+ ]
+}

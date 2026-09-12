@@ -178,28 +178,39 @@ export function overlapRatio(query: string, hits: SearchHit[]): number {
 // their concatenation. So "Z6III" offers {z6iii, z, 6iii, 6, iii} and "Z 6III"
 // offers the same set, and a subject token matches if it is in either.
 
-/** Common English + unit words. A token here is not distinctive ON ITS OWN;
- *  a digit or a capital in the planner's own spelling still promotes it. */
+/**
+ * Common English words. This is the NLTK English stopword list (179 words,
+ * https://www.nltk.org/nltk_data/ — `corpora/stopwords/english`) plus the
+ * closed set of SI and imperial unit names, and nothing else. It is a GENERAL
+ * list from a cited source, not a list tuned to the fixtures in this directory:
+ * the version it replaces had grown case by case as each item's findings landed
+ * ("firmware", "port", "forwarding", "micrograms", "budget"), which is the
+ * fourth way this module has tried to encode particular incidents into a rule.
+ *
+ * A word here is not distinctive ON ITS OWN — a digit or a capital in the
+ * planner's own spelling still promotes it.
+ */
 const COMMON = new Set(
-  ("a an the and or of for to in on at by with from as is are was were be been being " +
-   "what which who how why when where does do did can could should would will shall " +
-   "this that these those it its their there here about into over under than then so " +
-   "not no have has had more most other others some any all both each such very " +
-   "new best top full free good bad big small long short high low fast slow " +
-   "use used using uses make made get got take taken give given find found " +
-   "work works working help helps guide guides review reviews tips list lists " +
-   "problem problems issue issues error errors fix fixes repair repairs failure " +
-   "support supported setup install installing config configuration settings " +
-   "system systems device devices software hardware firmware driver drivers " +
-   "audio video sound visual motion sickness health safety budget price cost " +
-   "port ports forwarding forward router network networking speed performance " +
-   "battery screen display camera photo photos memory storage power " +
-   "study studies research paper papers data test tests result results " +
-   "model models version versions update updates upgrade purchase buying " +
-   "mg kg lb lbs oz ml cl dl litre liter gram grams gramme kilogram microgram " +
-   "micrograms milligram milligrams inch inches foot feet metre meter centimetre " +
-   "second seconds minute minutes hour hours day days week weeks month months year years")
-    .split(" "),
+  // NLTK English stopwords, verbatim.
+  ("i me my myself we our ours ourselves you you're you've you'll you'd your yours " +
+   "yourself yourselves he him his himself she she's her hers herself it it's its " +
+   "itself they them their theirs themselves what which who whom this that that'll " +
+   "these those am is are was were be been being have has had having do does did " +
+   "doing a an the and but if or because as until while of at by for with about " +
+   "against between into through during before after above below to from up down in " +
+   "out on off over under again further then once here there when where why how all " +
+   "any both each few more most other some such no nor not only own same so than too " +
+   "very s t can will just don don't should should've now d ll m o re ve y ain aren " +
+   "aren't couldn couldn't didn didn't doesn doesn't hadn hadn't hasn hasn't haven " +
+   "haven't isn isn't ma mightn mightn't mustn mustn't needn needn't shan shan't " +
+   "shouldn shouldn't wasn wasn't weren weren't won won't wouldn wouldn't " +
+   // Units of measure: a unit names a quantity, not a subject.
+   "mg kg lb lbs oz ml cl dl litre litres liter liters gram grams gramme grammes " +
+   "kilogram kilograms microgram micrograms milligram milligrams inch inches foot " +
+   "feet metre metres meter meters centimetre centimetres millimetre millimetres " +
+   "mile miles second seconds minute minutes hour hours day days week weeks month " +
+   "months year years percent")
+    .split(" ").filter((w) => w.length > 0),
 );
 
 /**
@@ -278,28 +289,58 @@ export function subjectTokens(entity: string | undefined | null): string[] {
 }
 
 /**
- * Does this hit carry at least half of the subject's distinctive tokens?
+ * Does this hit carry the subject? BOTH must hold:
  *
- * A BARE NUMBER never satisfies the test on its own. The subject "100 Hz" is
- * two tokens, half of two is one, and every hit in the recorded `the100`
- * fixture carries "100" — The 100, the TV series, which is the failure this
- * whole module was built for. So at least one matched token must be something
- * other than a bare number, unless the subject is nothing but numbers.
+ *  (a) it contains at least half of the subject's distinctive tokens, rounded
+ *      up — the set rule; and
+ *  (b) it contains at least two distinct non-stopword QUERY terms, which is
+ *      exactly the per-hit test `overlapRatio` already applies. A distinctive
+ *      subject token counts as one of the two.
+ *
+ * (b) is the EVIDENCE FLOOR, and it is here because (a) alone has none: half of
+ * one or two is ONE, and a one-or-two-token subject is exactly what the
+ * tightened KEYWORDIZE produces. The tester's live counter-examples, every one
+ * a real page about a different subject that shares a single token:
+ *   "Signal"       vs digital-signal-processing pages  -> 1.00
+ *   "Arc browser"  vs arc-welding pages                -> 0.60
+ *   "MacBook M2"   vs M.2 NVMe heatsink pages          -> 1.00
+ * The last one also brings back the M.2 collision every previous rule guarded,
+ * because the glue expansion turns "M.2" into the token `m2`.
+ *
+ * The floor uses a signal the run already has and adds no list and no length.
  */
-export function hitCarriesSubject(hit: SearchHit, subject: string[]): boolean {
+export function hitCarriesSubject(
+  hit: SearchHit, subject: string[], query = "",
+): boolean {
   if (!subject.length) return false;
   const set = tokenSet(`${hit?.title || ""} ${hit?.snippet || ""}`);
   const matched = subject.filter((t) => set.has(t));
   if (matched.length < Math.ceil(subject.length / 2)) return false;
+  // A BARE NUMBER never satisfies the test on its own: the subject "100 Hz" is
+  // two tokens and every hit in the recorded `the100` fixture carries "100" —
+  // The 100, the TV series, the failure this module was built for.
   const allNumeric = subject.every((t) => /^\d+$/.test(t));
-  return allNumeric || matched.some((t) => !/^\d+$/.test(t));
+  if (!allNumeric && !matched.some((t) => !/^\d+$/.test(t))) return false;
+  // (b) the evidence floor. With no query to score against there is nothing to
+  // apply, and the subject match stands alone.
+  if (!query) return true;
+  const text = `${hit?.title || ""} ${hit?.snippet || ""}`.toLowerCase();
+  const qt = [...new Set(terms(query))];
+  if (qt.length < 2) return true;              // nothing to ask two of
+  let present = 0;
+  for (const t of qt) if (has(text, t)) present++;
+  if (present >= 2) return true;
+  // A distinctive subject token counts toward the two even when the overlap
+  // scorer cannot see it — "100Hz" is one token to the scorer and two to the
+  // tokeniser, and the subject is what the run is actually about.
+  return present + matched.filter((t) => !has(text, t)).length >= 2;
 }
 
 /** Fraction of hits carrying the subject. */
-export function entityShare(subject: string[], hits: SearchHit[]): number {
+export function entityShare(subject: string[], hits: SearchHit[], query = ""): number {
   if (!hits.length || !subject.length) return 0;
   let n = 0;
-  for (const h of hits) if (hitCarriesSubject(h, subject)) n++;
+  for (const h of hits) if (hitCarriesSubject(h, subject, query)) n++;
   return n / hits.length;
 }
 
@@ -316,12 +357,6 @@ export function entityStatusFor(query: string, entity: string | undefined | null
   let n = 0;
   for (const t of subject) if (qs.has(t)) n++;
   return n >= Math.ceil(subject.length / 2) ? "used" : "rejected";
-}
-
-/** Display form of what the run actually searched on (progress + footer). */
-export function shortenEntity(entity: string | undefined | null): string {
-  const subject = subjectTokens(entity);
-  return subject.length ? subject.join(" ") : String(entity || "").trim();
 }
 
 /**
@@ -367,7 +402,7 @@ export function classifyHits(
   const status = entityStatusFor(query, entity);
   if (status === "used") {
     const subject = subjectTokens(entity);
-    const share = entityShare(subject, list);
+    const share = entityShare(subject, list, query);
     if (share >= ENTITY_SHARE) {
       // The subject IS in the results. They may still be weak for the specific
       // NEED — `semaglutide gastroparesis incidence` returned ten real
@@ -468,12 +503,10 @@ export interface SearchStats {
   entity_missing: number;
   /** Searches whose supplied entity was not carried by the query itself. */
   entity_rejected: number;
-  /** Runs whose extracted subject was a TOPIC and had to be shortened. */
-  entity_shortened: number;
 }
 export function emptySearchStats(): SearchStats {
   return {
     calls: 0, ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0,
-    entity_missing: 0, entity_rejected: 0, entity_shortened: 0,
+    entity_missing: 0, entity_rejected: 0,
   };
 }

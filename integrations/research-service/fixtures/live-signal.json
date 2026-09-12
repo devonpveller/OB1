@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (read-only). The GOOD counterpart of the junk set of the same name: what the same query returns when the engine answers it. Positive control for the evidence floor.",
+ "_expect": "ok",
+ "query": "Signal messenger encryption",
+ "entity": "Signal",
+ "hits": [
+  {
+   "url": "https://en.wikipedia.org/wiki/Signal_Protocol",
+   "title": "Signal Protocol - Wikipedia",
+   "snippet": "The protocol was developed by Open ... became Signal. Several closed-source applications have implemented the protocol, such as WhatsApp, which is said to encrypt the conversations of \"more than a billion people worldwide\" or Google who provides end-to-end encryption by default to all RCS-based conversations between users of their Google Messages app for one-to-one conversations. Facebook Messenger also say they ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://signal.org/",
+   "title": "Signal Messenger: Speak Freely",
+   "snippet": "State-of-the-art end-to-end encryption (powered by the open source Signal Protocol) keeps your conversations secure. We can't read your messages or listen to your calls, and no one else can either.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://en.wikipedia.org/wiki/Signal_(software)",
+   "title": "Signal (software) - Wikipedia",
+   "snippet": "Signal is an open-source, encrypted messaging service for instant messaging, voice calls, and video calls. The instant messaging function includes sending text, voice notes, images, videos, and other files. Communication may be one-to-one between users or may involve group messaging. The application uses a centralized computing architecture and is cross-platform software. It is developed by the nonprofit Signal Foundation and its subsidiary Signal Messenger ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://signal.org/docs/",
+   "title": "Signal >> Documentation",
+   "snippet": "This document describes the Sesame algorithm for managing message encryption sessions in an asynchronous and multi-device setting.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/signal/comments/pzf0ht/newcomer_here_how_secure_is_signal/",
+   "title": "r/signal on Reddit: Newcomer here, how secure is Signal?",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.nytimes.com/wirecutter/reviews/signal-secure-messaging-app/",
+   "title": "Why Signal Is Still Our Favorite Secure Messaging App (And Why No ...",
+   "snippet": "Signal's approach to end-to-end encryption makes it especially safe for sending messages. We have some tips on how to use it, and why no messaging app is perfect.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://signalappsw.com/en/",
+   "title": "Signal - Private Messenger for Encrypted Chats and Calls",
+   "snippet": "Signal is a private messenger for end-to-end encrypted chats, voice and video calls, group conversations, and file sharing, with no ads or tracking.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://boei.help/signal/",
+   "title": "Signal Messenger Button for Website (2026) | Encrypted",
+   "snippet": "Signal Messenger Button for Your Website. Signal is the gold standard for private messaging.Signal's end-to-end encryption means even Signal itself cannot read message content.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://aboutsignal.com/signal-security-privacy-guide/",
+   "title": "Why is Signal so secure? Signal Security & Privacy Guide",
+   "snippet": "Signal is censored in some countries because the messenger enables secure and private communication through its strong end-to-end encryption. Authoritarian governments see this as a threat since they cannot monitor or control the data traffic.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://proton.me/blog/is-signal-safe",
+   "title": "Is Signal safe? What to know about this encrypted messaging app | Proton",
+   "snippet": "Despite these quibbles, Signal remains widely regarded among security professionals as the most secure messenger app that capable of going head-to-head with, and providing a privacy-friendly alternative to, the commercially-owned “big players” in the messenger app space. Short Message Service (SMS) was developed long before security and privacy were core design concerns in modern communication. The result is that SMS messages are an open book, easily read by your mobile service provider, your government, and criminal hackers. Unlike with Signal, SMS messages are not encrypted in any way, so yo",
+   "engine": "brave"
+  },
+  {
+   "url": "https://support.signal.org/hc/en-us/articles/360007320391-Is-it-private-Can-I-trust-it",
+   "title": "Is it private? Can I trust it? – Signal Support",
+   "snippet": "Signal conversations are always end-to-end encrypted, which means that they can only be read or heard by your intended recipients. Privacy isn’t an optional mode — it’s just the way that Signal works.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://cyberinsider.com/secure-encrypted-messaging-apps/signal/",
+   "title": "Signal Review 2026: Secure Messenger (Pros and Cons)",
+   "snippet": "All message contents are end-to-end encrypted, so we don’t have that information either. This is great for your privacy, since no one can get any more information than that without physical access to your device or those of the people you ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://theconversation.com/signal-is-not-the-place-for-top-secret-communications-but-it-might-be-the-right-choice-for-you-a-cybersecurity-expert-on-what-to-look-for-in-a-secure-messaging-app-250906",
+   "title": "Signal is not the place for top secret communications, but it might be the right choice for you – a cybersecurity expert on what to look for in a secure messaging app",
+   "snippet": "The short answer is that it uses end-to-end encryption, meaning no one in position to eavesdrop on the communication – including Signal itself – can read messages they intercept.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.wired.com/story/signal-tips-private-messaging-encryption/",
+   "title": "How to Use Signal Encrypted Messaging | WIRED",
+   "snippet": "All of those people can take advantage of end-to-end encryption, which means that no one—not the government, their phone company, or Signal itself—can read the contents of messages as they pass between devices.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://rietta.com/blog/signal-app-security-is-encryption-enough/",
+   "title": "Understanding Signal Messaging App Security: Is Encryption Enough?",
+   "snippet": "For each of the five security properties above, Signal: Yes, it uses end-to-end encryption, specifically the Signal Protocol, a well-regarded system where messages are encrypted on the sender’s device and can only be decrypted on the recipient’s ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.mozillafoundation.org/en/nothing-personal/signal-privacy-review/",
+   "title": "Signal App Review 2025: Privacy, Pros and Cons, Personal Data - Mozilla Foundation",
+   "snippet": "Signal is widely regarded as the “best in class” private messenger app. Unlike most messaging apps, Signal takes a completely hands-off approach to your data. All of your traffic is end-to-end encrypted without exception.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.pcmag.com/reviews/signal-private-messager",
+   "title": "Signal Review: The Best No-Cost, Ad-Free Secure Messaging App | PCMag",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.consumerreports.org/electronics-computers/privacy/how-to-use-signal-app-secure-messaging-a4159663583/",
+   "title": "How to Use the Signal App for Secure Messaging via @ConsumerReports",
+   "snippet": "The end-to-end encrypted messaging app is one of the best options for keeping your communications safe ... Signal texts are end-to-end encrypted—not even Signal can access their contents. And the platform stores minimal metadata.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.cnn.com/2025/03/25/tech/how-to-use-signal-app-privacy-encryption/",
+   "title": "What is Signal? The private chat app is only private if you use it ...",
+   "snippet": "However, if you use the app as intended, there are a lot of protections built into Signal to help prevent conversations from falling into the wrong hands. What is Signal, and what makes it private?",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.cashify.in/top-6-signal-messenger-privacy-settings-that-you-should-use",
+   "title": "Top 6 Signal Messenger Privacy Settings That You... | Cashify Blog",
+   "snippet": "Signal messenger is quite a lot secure compared to WhatsApp with features such as end-to-end encryption, secure screen, relay calls, etc.",
+   "engine": "yandex"
+  }
+ ]
+}

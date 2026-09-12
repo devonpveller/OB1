@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (read-only). The GOOD counterpart of the junk set of the same name: what the same query returns when the engine answers it. Positive control for the evidence floor.",
+ "_expect": "ok",
+ "query": "MacBook M2 battery life",
+ "entity": "MacBook M2",
+ "hits": [
+  {
+   "url": "https://discussions.apple.com/thread/255042546",
+   "title": "MacBook Pro M2 16 inch battery life - Apple Community",
+   "snippet": "Hello Fellow MacBook Owners recently bought a MacBook Pro M2 Pro 16 inch , and I am a bit surprised on the actual battery life, as this was actually my main decision factor. I see in reviews and tests that everybody is astonished by 16-17+ hours of battery life, but honestly mine with absolutely low profile usage ( safari, outlook, and some chat apps) is barely making 8-9 hours, in addition to ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/macbookair/comments/1549pcj/whats_the_realistic_battery_life_of_a_macbook_air/",
+   "title": "r/macbookair on Reddit: What's the realistic battery life of a Macbook Air M2",
+   "snippet": "Lets have a look: Testing conducted by Apple in April and May 2023 using preproduction 15-inch MacBook Air systems with Apple M2, 8-core CPU, 10-core GPU, 8GB of RAM, and 256GB SSD. The Apple TV app movie playback test measures battery life by playing back HD 1080p content with display brightness set to 8 clicks from bottom.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/macbookair/comments/wt061z/do_yall_really_have_amazing_battery_life_on_the/",
+   "title": "r/macbookair on Reddit: Do y'all really have amazing battery life on the M2 Air?",
+   "snippet": "That said, I bought an open box MacBook Air M2 13.6 inch MacBook air in midnight, and the battery life has been STELLAR. Now, I'm biased seeing as a came from an Asus vivobook flip 14, and it's whopping battery life of like 5 hours. but I haven't charged my laptop in like 3 days, several hours of mixed heavy and light use a day, and it's at 37 ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.tiktok.com/discover/macbook-air-m2-battery-mah",
+   "title": "Macbook Air M2 Battery Mah | TikTok",
+   "snippet": "#macbookairm2 battery life is not a joke MacBook Air M2 Battery Life: A Valuable Ally. Discover the impressive battery life of the MacBook Air M2 and how it supports your productivity. #macbookairm2 #battery.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://thebatterytips.com/battery-specifications/how-long-is-a-macbook-pro-battery-life/",
+   "title": "MacBook Pro Battery Life: How Long It Lasts On A Single Charge (M1, M2 ...",
+   "snippet": "The MacBook Pro models equipped with Apple's M1, M2, or M3 chips generally deliver better efficiency and longer battery life compared to Intel-based models. For example, the M1 chip offers up to 20 hours of battery life on a single charge, as reported by Apple in 2020.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.androidauthority.com/how-long-does-a-macbook-battery-last-3361447/",
+   "title": "How long does a MacBook battery last? - Android Authority",
+   "snippet": "But what about Apple’s laptops? How long does a MacBook battery last? Let’s take a look. ... Apple’s M1, M2, M3, and M4 MacBooks offer up to 18-24 hours of battery life between charges.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://9meters.com/technology/laptop/macbook-air-m2-review",
+   "title": "MacBook Air M2 Review: Sleek Performance Meets Exceptional Battery Life ...",
+   "snippet": "The MacBook Air M2 boasts impressive specs and performance upgrades. It features Apple's new M2 chip, improved memory and storage options, and enhanced battery life.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://9to5mac.com/2023/01/17/m2-macbook-pro-battery/",
+   "title": "M2 MacBook Pro battery life: Here's what to expect - 9to5Mac",
+   "snippet": "Here's what to expect with M2 MacBook Pro battery life for the 14 and 16-inch models when compared to the M1 MacBook Pros.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://dailyhive.com/vancouver/apple-macbook-air-m2-review",
+   "title": "Apple review: I tried the new MacBook... | Daily Hive | Business & Tech",
+   "snippet": "Going from an older, but still not very old, MacBook, to the new version, the difference in speed is remarkable. The speed of clicking between tabs, opening new applications and general response time is lightning fast. Zero buffering. When it comes to battery life...",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.adaminsights.com/how-good-is-the-macbook-air-m2-battery-life/",
+   "title": "How good is the MacBook Air M2 Battery Life? - Adam Insights",
+   "snippet": "There was a time when opening any ... demanding apps, I remember when the realistic battery life of any laptop was at best 2 and half hours....",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.laptopmag.com/news/macbook-pro-14-inch-m2-pro-m2-max-battery-life-comparison",
+   "title": "We tested the battery life of the MacBook Pro 14-inch M2 Pro and M2 Max — which one is better? | Laptop Mag",
+   "snippet": "If battery is the sole deciding factor for an Apple laptop, the 13-inch M2 MacBook Pro is still the clear champion with 18 hours and 20 minutes of worry-free stamina on one charge.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.laptopmag.com/news/macbook-air-m2-battery-life-surprised-us-what-happened-to-the-m2-boost",
+   "title": "MacBook Air M2 battery life is good — but falls short of expectations | Laptop Mag",
+   "snippet": "The most confounding piece of the puzzle is that while the MacBook Pro M2 has an identical battery to the Pro M1 (58.2WHr), the Air M2 has a 52.6WHr battery that is slightly larger than the 49.9WHr battery in the M1 model.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.theverge.com/2022/6/26/23182162/apple-macbook-pro-2022-m2-battery-life-test-drain-diary",
+   "title": "Apple’s MacBook Pro M2 sent me on a journey to kill its battery | The Verge",
+   "snippet": "Apple’s M2 MacBook Pro has a capable processor with monstrous battery life. I was finally able to kill the thing, and I’ve chronicled the process I went through to do it. Published: June 26, 2022",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.tomsguide.com/news/macbook-air-15-inch-battery-life",
+   "title": "MacBook Air 15-inch battery life tested — here's how it stacks up | Tom's Guide",
+   "snippet": "In our battery test, this Apple notebook clocked in at 18 hours and 56 minutes! That’s even longer than the M2-driven 13-inch MacBook Pro, which ran for 18 hours and 20 minutes.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://forums.macrumors.com/threads/m2-macbook-air-13-battery-life.2398183/",
+   "title": "M2 MacBook Air 13\" Battery Life | MacRumors Forums",
+   "snippet": "I was hoping for a massive increase in battery life, considering both M2's efficiency and the fact that it's a new battery, but so far it's been disappointing. I'm getting around 6 hours of Safari browsing (some of it is watching Netflix/Twitch).",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.quora.com/Why-did-my-MacBook-Air-M2-battery-health-drop-97-after-88-cycles-and-5-months-of-use",
+   "title": "Why did my MacBook Air M2 battery health drop 97% after 88 cycles and 5 months of use? - Quora",
+   "snippet": "I have 90% battery life on Macbook 16' 2023, M2 Max in 10 months, with 56 cycles, is it normal or something to check?",
+   "engine": "brave"
+  },
+  {
+   "url": "https://forums.macrumors.com/threads/m2-macbook-air-battery-health.2417213/",
+   "title": "M2 Macbook Air Battery Health | MacRumors Forums",
+   "snippet": "Apple reports it as 100%. ... My M2 MacBook Air also from August 2022 is currently at a cycle count of 226 with Apple's Battery panel reporting 91% maximum capacity and the actual percentage of (current capacity ÷ design capacity) is at 86.1% ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.quora.com/I-have-90-battery-life-on-Macbook-16-2023-M2-Max-in-10-months-with-56-cycles-is-it-normal-or-something-to-check",
+   "title": "I have 90% battery life on Macbook 16' 2023, M2 Max in 10 months, with 56 cycles, is it normal or something to check? - Quora",
+   "snippet": "Answer (1 of 4): I have seen worse and I have seen better, so is it normal is relative. Your battery meter is only an estimate and can be effected by how you charge, how much you charge/drain the battery, and several other factors that can all be changed by user usage and change the battery estim...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://support.apple.com/en-us/111867",
+   "title": "MacBook Air (M2, 2022) - Tech Specs - Apple Support",
+   "snippet": "Testing conducted by Apple in May 2022 using preproduction 13-inch MacBook Air systems with Apple M2, 8-core CPU, 8-core GPU, 8GB of RAM, and 256GB SSD. The wireless web test measures battery life by wirelessly browsing 25 popular websites with display brightness set to 8 clicks from bottom.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://caldexsystems.com/blog/how-long-does-macbook-battery-last",
+   "title": "How Long Does a MacBook Battery Last Per Charge? (Real Numbers)",
+   "snippet": "Real-world MacBook battery life by model — not Apple's marketing numbers. What to expect from the M1 Air, M2 Air, Intel Macs, and what degrades battery faster.",
+   "engine": "duckduckgo web"
+  }
+ ]
+}

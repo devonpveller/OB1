@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (read-only). The GOOD counterpart of the junk set of the same name: what the same query returns when the engine answers it. Positive control for the evidence floor.",
+ "_expect": "ok",
+ "query": "Arc browser memory usage",
+ "entity": "Arc browser",
+ "hits": [
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/14mnh51/arc_uses_too_much_memory_10gb/",
+   "title": "r/ArcBrowser on Reddit: Arc uses too much memory - 10GB!!",
+   "snippet": "It's a great browser, great for personal use, but you should limit the memory usage a bit 😅😅.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/198erdi/people_complaining_about_arcs_ram_usage/",
+   "title": "People complaining about Arc's RAM usage? : r/ArcBrowser - Reddit",
+   "snippet": "ADMIN MOD People complaining about Arc's RAM usage? :Discussion: Discussion While I do agree that the amount of RAM is above average compared to other browsers, its nowhere near an amount to be complained of? I use Arc since a year now (I just realised, todays the anniversary of me signing up to Arc!",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://wpmaintenancemode.com/does-arc-browser-use-less-memory-than-chrome/",
+   "title": "Does Arc Browser Use Less Memory Than Chrome? – WP Maintenance",
+   "snippet": "Now comes Arc’s big advantage—it is built for efficiency. It still uses Chromium, so it performs great on the web. But it also builds smart tricks on top to reduce memory usage.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://reviewslion.com/does-arc-browser-use-less-ram-than-chrome-real-tests-benchmarks-and-performance-insights/",
+   "title": "Does Arc Browser Use Less RAM Than Chrome: Real Tests, Benchmarks, and ...",
+   "snippet": "Does Arc Browser Use Less RAM Than Chrome: Real Tests, Benchmarks, and Performance Insights Modern web browsers are no longer simple portals to the internet—they are full-fledged productivity platforms. As users juggle dozens of tabs, web apps, and extensions, memory usage has become a deciding factor in choosing a browser.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/18592zb/come_on_man_look_at_this_memory_usage/",
+   "title": "r/ArcBrowser on Reddit: Come on man, look at this memory usage 😳",
+   "snippet": "The linked post discusses a solution for high energy/power consumption and CPU usage in the Arc browser on Apple Silicon chips. The issue is related to video codecs, particularly AV1, and the solution involves disabling problematic codecs using an extension and adjusting settings. Users have reported positive results with this fix. ... The post mentioned above is what has enabled Arc to become my default browser for the past couple months. I had constant memory usage and battery drain issues when using Arc prior to finding that post.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.sweepformac.com/guides/browser-eating-ram-mac/",
+   "title": "Why Your Browser Is Eating Your Mac's RAM | Sweep for Mac",
+   "snippet": "Use whichever your browser provides. Memory Saver alone can cut Chrome’s memory use in half on a tab-heavy session. The cache is not the memory. A common confusion: clearing your browser’s cache doesn’t free RAM.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/146ni7t/arc_browsers_memory_management_a_serious_deal/",
+   "title": "r/ArcBrowser on Reddit: ARC Browser's Memory Management: A Serious Deal Breaker",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://news.ycombinator.com/item?id=37878928",
+   "title": "Why Arc Browser send large amount of user data to their server? | Hacker News",
+   "snippet": "I frequently noticed that when the Arc is opened, even without any webpage opened foreground or background, there could be a short period that the RAM usage of the browser bumps to 8GB. At the same time, the Arc is reading a lot of the data from local storage, and sending to their server. It ends up with more than 600MB upload.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.redditmedia.com/r/ArcBrowser/comments/1htzbd6/insane_ram_usage/",
+   "title": "Insane RAM usage : ArcBrowser",
+   "snippet": "Using only an ad blocker, four spaces, and a few bookmarks, I somehow got 11GB of usage (my MBp is only 16GB). ! [img] (ifkp5kvz94be1) How do you...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://pickuma.com/for-dev/arc-browser-review/",
+   "title": "Arc Browser Review: 18 Months In - Pickuma",
+   "snippet": "Arc uses only about 15-20% less memory than Chrome (2.4 GB vs 2.8 GB with 30 tabs and extensions) and still 2-3x more than Safari, so it is a poor choice if low memory use is the main goal. Battery life on Arc is worse than Safari, delivering roughly 8.5 hours of mixed browsing on a 2020 M1 MacBook Air versus about 11 hours with Safari.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.redditmedia.com/r/ArcBrowser/comments/1j078f6/on_memory_battery_usage/",
+   "title": "On memory & battery usage : ArcBrowser - redditmedia.com",
+   "snippet": "I see a lot of complaints about Arc using significant memory. Just wanted to say that I've never experienced any issues with it. It's also gentle on battery. For example, this is Firefox (hardened with Betterfox's user.js), clean install, 1 extension (uBlock Origin) and 5 tabs opened.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/1c9m39d/arc_browsers_memory_management_is_becoming_a/",
+   "title": "r/ArcBrowser on Reddit: ARC Browser's Memory Management is becoming a nightamare",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://sqmagazine.co.uk/web-browser-statistics/",
+   "title": "Web Browser Statistics 2026: Market Share & Usage Data",
+   "snippet": "Arc Browser manages 60 tabs across 3 spaces with AI organization seamlessly. Microsoft Edge Read Aloud supports 40+ languages for accessibility. Search Engine Host Market Share Worldwide.Browser Memory Usage Comparison With 5 Tabs Open (Lower Is Better).",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=tJ6d2oKpVAI",
+   "title": "Let’s find the BEST browser for 2026 | Ultimate browser... - YouTube",
+   "snippet": "3:02 Good browser with the worst VPN ever – Opera 4:14 Brave browser review 5:08 Introducing – Arc browser 5:56 Is Edge browser good?",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=At_8dl6YRMw",
+   "title": "How To Optimize Arc Browser For Low RAM Usage (Quick and Easy)",
+   "snippet": "Stop Arc browser memory issues by adjusting your settings. Learn how to lower RAM usage and keep your browser running fast.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/1dqzsvp/memory_usage/",
+   "title": "r/ArcBrowser on Reddit: Memory usage",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://uploadblogfortech.com/zen-browser-vs-arc-which-browser-is-faster-for-daily-use/",
+   "title": "Zen Browser vs Arc: Which Browser Is Faster for Daily Use?",
+   "snippet": "If you’re wondering Zen Browser vs Arc, this guide compares both browsers in terms of speed, performance, design, features, memory usage, privacy, customization, and everyday usability.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/16jcg7t/how_to_reduce_arcs_memory_consumption_am_i_doing/",
+   "title": "r/ArcBrowser on Reddit: How to reduce Arc's Memory Consumption? (Am I doing something wrong?)",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://resources.arc.net/hc/en-us/articles/25627710905751-How-to-Check-if-Tabs-Are-Using-Too-Many-Resources-on-Arc-for-Desktop",
+   "title": "How to Check if Tabs Are Using Too Many Resources on Arc for Desktop – Arc Help Center",
+   "snippet": "To check the Task Manager and end processes on Arc for desktop: macOS Go to Help > Troubleshooting > Open Task Manager in the Mac Menu Bar. Identify any resource-heavy Arc tasks that you want to stop in the Task Manager. Note that the Task Manager displays any tasks currently running, each task's Memory Footprint, and how much CPU each task ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.reddit.com/r/ArcBrowser/comments/1em937v/i_recently_started_using_arc_and_noticed_that_my/",
+   "title": "r/ArcBrowser on Reddit: I recently started using Arc and noticed that my RAM usage has reached 71% with just a few applications running. Is this normal?",
+   "snippet": "Before Arc I was browsing on Chrome and Edge, they \"eat\" cca 800MB but that not affect my workflow. Two thing why I'm stick to Arc is: ... Fact is, all browsers consume memory and if that not affect your workflow and machine performance you ...",
+   "engine": "brave"
+  }
+ ]
+}
