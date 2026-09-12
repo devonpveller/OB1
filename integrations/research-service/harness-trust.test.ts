@@ -71,6 +71,8 @@ interface MockOpts {
   queries?: string[];
   /** Subject entity the KEYWORDIZE pass returns. */
   entity?: string;
+  /** Needs the DECOMPOSE pass returns. */
+  needs?: string[];
   relevance?: (title: string) => boolean;
   pageContent?: (url: string) => string;
   synthesis?: string;
@@ -82,7 +84,7 @@ function mockDeps(o: MockOpts = {}) {
     embed: () => Promise.resolve(new Array(1024).fill(0)),
     chat: (sys, user) => {
       if (sys.includes("research planner")) {
-        return Promise.resolve(JSON.stringify({ needs: OPTIPLEX_NEEDS }));
+        return Promise.resolve(JSON.stringify({ needs: o.needs ?? OPTIPLEX_NEEDS }));
       }
       if (sys.includes("web-search queries")) {
         // KEYWORDIZE — deliberately returns queries WITHOUT the entity, to prove
@@ -503,4 +505,96 @@ Deno.test("article mode still stages the seed article and is never gated away", 
   assertEquals(calls.search.length, 0);
   assertEquals(r.citedSources.length, 1);
   assertEquals(r.outcome, "complete");
+});
+
+// ── T7 attempt 3: the query side of the evidence floor ──────────────────────
+/**
+ * The tester's reproduction, driven through the SHIPPED `runResearch`.
+ *
+ * A need whose every word is a stopword ("What is it?") made `keywordQuery`
+ * emit the bare subject as the whole query, and `hitCarriesSubject` floored
+ * every hit true when the query had under two content words. Measured on this
+ * branch's own `junk-signal-dsp` fixture, before the fix:
+ *
+ *   queries issued : ["Signal"]
+ *   search stats   : ok=1 collapsed=0 offtopic=0 | fetched=8 | backstop=complete
+ *   entityShare    : 1.00
+ *
+ * versus collapsed twice / no_relevant_sources with a normal three-term query.
+ * Eight digital-signal-processing pages entered a run about the messenger and
+ * the run called its own search healthy — the exact harm this module exists to
+ * prevent, with no model misbehaviour anywhere in it.
+ */
+const DSP = fx("junk-signal-dsp");
+const contentWords = (q: string) =>
+  new Set((q.toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) =>
+    t.length > 1 && !["a","an","the","and","or","of","for","to","in","on","at","by","with",
+      "from","as","is","are","was","were","be","what","which","who","how","why","when",
+      "where","does","do","did","can","could","should","would","will","this","that","it",
+      "its","about"].includes(t))).size;
+
+Deno.test("T7: a stopword-only need cannot produce a query that skips the floor", async () => {
+  const { deps, calls } = mockDeps({
+    entity: "Signal",
+    needs: ["What is it?"],
+    queries: ["Signal"],                       // KEYWORDIZE proposes ONE word
+    hitsFor: () => DSP.hits as SearchHit[],
+    relevance: () => true,                     // would accept every junk page
+  });
+  const r = await runResearch(deps, stubClient(), "Signal", { origin: "owui", dryRun: true });
+
+  // 1. The query went out with two content words, and the padding was counted.
+  assert(calls.search.length > 0, "no search was run");
+  for (const q of calls.search) {
+    assert(contentWords(q) >= 2, `query skipped the floor: "${q}"`);
+    assertStringIncludes(q.toLowerCase(), "signal");
+  }
+  assert(r.fetchStats.search.query_padded >= 1,
+    "the padding was not counted in search.query_padded");
+
+  // 2. The DSP set is refused, not fetched, and not counted as engine health.
+  assert(r.fetchStats.search.collapsed + r.fetchStats.search.offtopic > 0,
+    "the junk set was not counted as a search failure");
+  assertEquals(r.fetchStats.search.ok, 0, "a junk set was counted as a healthy search");
+  assertEquals(r.fetchStats.sources, 0, "junk pages were fetched");
+  assert(r.backstop !== "complete", `backstop=${r.backstop}`);
+
+  // 3. The unfloorable branch is UNREACHABLE from here, because the query
+  //    builder guarantees two content words — that is what makes the counter a
+  //    tripwire rather than a routine stat.
+  assertEquals(r.fetchStats.search.unfloored, 0);
+});
+
+Deno.test("T7: the same subject with a real need still works", async () => {
+  // The floor and the padding must not cost the good case. `live-signal` is the
+  // live set for the same subject and a normal need.
+  const good = fx("live-signal").hits;
+  const { deps } = mockDeps({
+    entity: "Signal",
+    needs: ["What encryption does it use?"],
+    queries: ["Signal messenger encryption"],
+    hitsFor: () => good as SearchHit[],
+    relevance: () => true,
+  });
+  const r = await runResearch(deps, stubClient(), "Signal", { origin: "owui", dryRun: true });
+  assert(r.fetchStats.search.ok > 0, "the good set was not counted ok");
+  assertEquals(r.fetchStats.search.query_padded, 0, "a real need needed no padding");
+  assert(r.fetchStats.sources > 0, "the good set was not fetched");
+});
+
+Deno.test("the footer names a refused search rather than hiding it", () => {
+  const needs = [{ need: "n", status: "open" as const }];
+  const base = {
+    hits: 20, fetched: 0, relevant: 0, ok: 0, collapsed: 0, offtopic: 1, empty: 0, errors: 0,
+    entity_missing: 0, entity_rejected: 0, queries: [],
+  };
+  // Zero is silent — a footer that reports a tripwire that did not trip is noise.
+  assertEquals(
+    coverageFooter(needs, { ...base, unfloored: 0 } as never, "complete").includes("refused"),
+    false,
+  );
+  assertStringIncludes(
+    coverageFooter(needs, { ...base, unfloored: 1 } as never, "complete"),
+    "entity gate refused 1 search(es): the query had fewer than two content words",
+  );
 });

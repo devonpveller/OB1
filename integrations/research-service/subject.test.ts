@@ -24,8 +24,9 @@
  */
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  classifyHits, entityShare, entityStatusFor, hitCarriesSubject,
-  subjectTokens, tokenSet, type SearchHit,
+  classifyHits, entityShare, entityStatusFor, hitCarriesSubject, keywordQuery,
+  QUERY_PAD_SUFFIX, queryCanCarryFloor, reformulate, shapeQuery, subjectTokens,
+  terms, tokenSet, type SearchHit,
 } from "./search-quality.ts";
 
 type Fx = { query: string; entity: string; hits: SearchHit[] };
@@ -298,4 +299,113 @@ Deno.test("entityStatusFor accepts a query carrying half the subject", () => {
   assertEquals(entityStatusFor("OptiPlex 3050 thermal throttling", "Dell OptiPlex 3050"), "used");
   assertEquals(entityStatusFor("100Hz audio VR motion sickness mechanism",
     "100Hz audio VR motion sickness"), "used");
+});
+
+// ── The QUERY side of the floor (attempt 3, T7) ─────────────────────────────
+// The floor asks a hit for two content words of the query. A query with fewer
+// than two has none to ask for, and that branch returned TRUE — the whole floor
+// skipped — until the tester drove the shipped `runResearch` with the query
+// "Signal" against the live DSP set this directory ships as `junk-signal-dsp`:
+// share 1.00, verdict ok, eight junk pages fetched. No adversarial input was
+// involved; `keywordQuery` built that query itself. Both ends are pinned here.
+
+Deno.test("T7 query side: a one-term query never floors a hit true", () => {
+  const subject = subjectTokens("Signal");            // ["signal"]
+  const dsp = hit("Digital Signal Processing Tutorial",
+    "Digital Signal Processing is the study of signals in digital form.");
+  // The old behaviour, stated so a reversal is visible rather than silent.
+  assertEquals(hitCarriesSubject(dsp, subject, "Signal"), false);
+  assertEquals(hitCarriesSubject(dsp, subject, "signal"), false);
+  // …and it is the QUERY that is refused, not the subject: give the same hit a
+  // real two-term query about DSP and it carries its own subject fine.
+  assertEquals(hitCarriesSubject(dsp, subjectTokens("digital signal processing"),
+    "digital signal processing"), true);
+});
+
+Deno.test("T7 query side: the whole live junk set scores 0.00 on a one-term query", () => {
+  const f = fx("junk-signal-dsp");
+  // Attempt 3 measured this set at 1.00 through `runResearch` with the query
+  // "Signal", which is where the eight junk fetches came from.
+  assertEquals(entityShare(subjectTokens("Signal"), f.hits, "Signal"), 0);
+  // The good counterpart is unharmed: a real two-term query still scores it.
+  const g = fx("live-signal");
+  assert(entityShare(subjectTokens("Signal"), g.hits, g.query) >= 0.3);
+});
+
+Deno.test("T7 query side: an unfloorable query is REFUSED, not judged by overlap", () => {
+  const f = fx("junk-signal-dsp");
+  const v = classifyHits("Signal", f.hits, "Signal");
+  assertEquals(v.entityStatus, "unfloored");
+  assert(v.verdict !== "ok", `a one-term query was judged ${v.verdict}`);
+  assertEquals(v.verdict, "offtopic");
+  // The overlap fallback is exactly where this would have leaked next: a
+  // one-term query scores high overlap on any set carrying that one term.
+  assert(v.overlap >= 0.3,
+    `the fallback would have called this ok at overlap ${v.overlap}`);
+});
+
+Deno.test("queryCanCarryFloor: two DISTINCT content words, not two words", () => {
+  assertEquals(queryCanCarryFloor("Signal"), false);
+  assertEquals(queryCanCarryFloor("What is it?"), false);       // all stopwords
+  assertEquals(queryCanCarryFloor("Signal signal"), false);     // one, twice
+  assertEquals(queryCanCarryFloor("Signal messenger"), true);
+});
+
+// ── The query builder's guarantee ──────────────────────────────────────────
+const twoTerms = (q: string) => new Set(terms(q)).size >= 2;
+
+Deno.test("shapeQuery guarantees two content words for a need that has none", () => {
+  // The tester's exact reproduction, and the three needs of the same shape.
+  for (const need of ["What is it?", "Why?", "", "   ...is it?  ", "and then?"]) {
+    const shaped = shapeQuery("Signal", need, undefined);
+    assert(twoTerms(shaped.query), `"${need}" -> "${shaped.query}"`);
+    assertEquals(shaped.padded, true, `"${need}" was not counted as padded`);
+    assert(shaped.query.toLowerCase().includes("signal"),
+      `padding dropped the subject: ${shaped.query}`);
+    assert(shaped.query.toLowerCase().endsWith(QUERY_PAD_SUFFIX), shaped.query);
+  }
+});
+
+Deno.test("shapeQuery takes the second word from the NEED when the need has one", () => {
+  // "How does it work?" already yields one content word, so nothing is invented
+  // and nothing is counted — padding is for the case that has no alternative.
+  for (const [need, word] of [["How does it work?", "work"],
+                              ["How is it done?", "done"]] as Array<[string, string]>) {
+    const shaped = shapeQuery("Signal", need, undefined);
+    assertEquals(shaped.padded, false, `"${need}" -> "${shaped.query}"`);
+    assert(twoTerms(shaped.query), shaped.query);
+    assert(shaped.query.toLowerCase().includes(word), shaped.query);
+  }
+  // A one-word query from the MODEL is padded from the need too: KEYWORDIZE is
+  // asked for 3-7 terms and nothing makes it obey.
+  const fromModel = shapeQuery("Signal", "What are its encryption guarantees?", "Signal");
+  assertEquals(fromModel.padded, false);
+  assert(twoTerms(fromModel.query), fromModel.query);
+});
+
+Deno.test("keywordQuery and reformulate both emit a floorable query", () => {
+  const cases: Array<[string, string]> = [
+    ["Signal", "What is it?"], ["Notion", "What is it?"], ["Kubernetes", "What is it?"],
+    ["Signal", ""], ["Arc browser", "Why?"], ["", "What is it?"],
+  ];
+  for (const [ent, need] of cases) {
+    const q = keywordQuery(ent, need);
+    assert(twoTerms(q), `keywordQuery("${ent}", "${need}") -> "${q}"`);
+    assertEquals(queryCanCarryFloor(q), true);
+    const r = reformulate(need, ent, 0);
+    assert(twoTerms(r), `reformulate("${need}", "${ent}") -> "${r}"`);
+  }
+});
+
+Deno.test("the guarantee does not disturb a query that already has two", () => {
+  // Every recorded fixture query passes through unchanged: the padding is a
+  // floor, not a rewrite.
+  for (const n of ["live-signal", "live-macbookm2", "live-arcbrowser", "live-prius",
+                   "live-semaglutide50", "search-good-optiplex"]) {
+    const f = fx(n);
+    const shaped = shapeQuery(f.entity, f.query, f.query);
+    assertEquals(shaped.padded, false, `${n}: "${shaped.query}"`);
+    // Equal up to the pre-existing 10-token clamp, which is not this rule.
+    assert(f.query.startsWith(shaped.query), `${n}: "${shaped.query}"`);
+  }
 });

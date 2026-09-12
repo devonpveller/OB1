@@ -14,7 +14,7 @@ import { classifyTemplate, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "
 import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
 import {
-  classifyHits, emptySearchStats, keywordQuery, reformulate, type SearchStats,
+  classifyHits, emptySearchStats, reformulate, type SearchStats, shapeQuery,
 } from "./search-quality.ts";
 import { applyNumericGrounding } from "./grounding.ts";
 import {
@@ -483,7 +483,15 @@ export async function runResearch(
       // subject the query is not about is still rejected and counted.
       subjectEntity = rawEntity;
       const raw = Array.isArray(kw.queries) ? kw.queries : [];
-      gapNeeds.forEach((need, i) => round1.set(need, keywordQuery(subjectEntity, need, raw[i])));
+      gapNeeds.forEach((need, i) => {
+        // `shapeQuery` GUARANTEES two content words. It did not before, and a
+        // need whose every word is a stopword ("What is it?") produced the
+        // bare subject as the whole query — which the evidence floor then had
+        // nothing to measure against. Padding is counted, not silent.
+        const shaped = shapeQuery(subjectEntity, need, raw[i]);
+        if (shaped.padded) searchStats.query_padded++;
+        round1.set(need, shaped.query);
+      });
       await progress("plan", `subject="${subjectEntity || "(none)"}"; ${round1.size} keyword quer(ies)`,
         { keyword_queries: round1.size });
     }
@@ -557,6 +565,14 @@ export async function runResearch(
     // fail-safe floor may NOT re-admit them (see gateAndKeep).
     await gateAndKeep(kbRecalled, "recalled", false);
 
+    // Deepened queries go through the SAME guarantee as round 1: a DEEPEN
+    // proposal can be one word just as easily as a KEYWORDIZE one.
+    const shapeDeepQuery = (ent: string, need: string, raw: unknown): string => {
+      const shaped = shapeQuery(ent, need, raw);
+      if (shaped.padded) searchStats.query_padded++;
+      return shaped.query;
+    };
+
     const runSearch = async (q: string): Promise<SearchHit[]> => {
       searchStats.calls++;
       await progress("gather", `searching: ${q}`);
@@ -579,7 +595,15 @@ export async function runResearch(
       // gate reporting health it did not measure: the footer would say the
       // search was fine without saying it was judged by the weaker rule.
       if (v.entityStatus === "missing") searchStats.entity_missing++;
-      else if (v.entityStatus === "rejected") {
+      else if (v.entityStatus === "unfloored") {
+        // Unreachable in a shipped run — `shapeQuery` guarantees two content
+        // words — and counted anyway, because the way the last one of these
+        // was found was a tester driving runResearch, not a silent stat.
+        searchStats.unfloored++;
+        await progress("gather",
+          `the query "${q}" has under two content words - it cannot be checked against the subject, so these results are refused`,
+          { unfloored: searchStats.unfloored });
+      } else if (v.entityStatus === "rejected") {
         searchStats.entity_rejected++;
         await progress("gather",
           `the subject entity "${subjectEntity}" is not in this query - judging by overlap alone`,
@@ -723,7 +747,7 @@ export async function runResearch(
       const deepQ = Array.isArray(deep.queries) ? deep.queries : [];
       pending = stillOpen.map((p, i) => ({
         need: p.need,
-        query: keywordQuery(subjectEntity, p.need, deepQ[i]),
+        query: shapeDeepQuery(subjectEntity, p.need, deepQ[i]),
         attempts: p.attempts,
       }));
       followupQueries.push(...pending.map((p) => p.query));
@@ -768,6 +792,8 @@ export async function runResearch(
     searchRecord.errors = searchStats.errors;
     searchRecord.entity_missing = searchStats.entity_missing;
     searchRecord.entity_rejected = searchStats.entity_rejected;
+    searchRecord.unfloored = searchStats.unfloored;
+    searchRecord.query_padded = searchStats.query_padded;
   } else {
     await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
       { staged: staged.length });

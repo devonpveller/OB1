@@ -40,11 +40,13 @@ export interface SearchQuality {
    *  entity is known and usable. `undefined` when it is not — a share is not
    *  computed for an entity that was never applied. */
   entityShare?: number;
-  /** Whether the supplied entity was USED as the gate, MISSING (none given) or
+  /** Whether the supplied entity was USED as the gate, MISSING (none given),
    *  REJECTED (the query itself does not carry its core, so KEYWORDIZE named a
-   *  subject this query is not about). Both non-`used` cases fall back to the
-   *  overlap rule and are counted, because a silent fallback is a gate that
-   *  reports health it never measured. */
+   *  subject this query is not about) or UNFLOORED (the query has under two
+   *  content words, so the evidence floor has nothing to ask two of). MISSING
+   *  and REJECTED fall back to the overlap rule and are counted, because a
+   *  silent fallback is a gate that reports health it never measured;
+   *  UNFLOORED does not fall back at all — it yields no pages. */
   entityStatus?: EntityStatus;
   /** The single query token the hit TITLES piled onto, when collapsed. */
   collapsedOn?: string;
@@ -326,7 +328,17 @@ export function hitCarriesSubject(
   if (!query) return true;
   const text = `${hit?.title || ""} ${hit?.snippet || ""}`.toLowerCase();
   const qt = [...new Set(terms(query))];
-  if (qt.length < 2) return true;              // nothing to ask two of
+  // A query with fewer than two content words gives the floor nothing to ask
+  // two of. This used to return TRUE, and that is the whole floor skipped: the
+  // tester drove the shipped `runResearch` with the query "Signal" against the
+  // live digital-signal-processing set this directory carries as
+  // `junk-signal-dsp` and got share 1.00, verdict `ok`, eight junk pages
+  // fetched. No model misbehaviour was needed - `keywordQuery` emitted that
+  // query itself for the need "What is it?", whose every word is a stopword.
+  // A one-word query is now refused rather than waved through, and
+  // `queryCanCarryFloor` refuses it one level up so the refusal is named in
+  // the footer instead of showing up as a silent zero share.
+  if (qt.length < 2) return false;
   let present = 0;
   for (const t of qt) if (has(text, t)) present++;
   if (present >= 2) return true;
@@ -349,14 +361,32 @@ export function entityShare(subject: string[], hits: SearchHit[], query = ""): n
  * and the query must carry at least half of what it names — KEYWORDIZE is a
  * model and can return a subject the query is not about.
  */
-export type EntityStatus = "used" | "missing" | "rejected";
+export type EntityStatus = "used" | "missing" | "rejected" | "unfloored";
+
+/**
+ * Can this query carry the evidence floor at all? The floor asks for two
+ * distinct content words and a query can have fewer — `keywordQuery` produced
+ * exactly one for "What is it?" until this item, and KEYWORDIZE asks the model
+ * for 3-7 terms without anything enforcing it. Both ends are now fixed: the
+ * query builder guarantees two, and a query that somehow still has fewer is
+ * refused here rather than floored true.
+ */
+export function queryCanCarryFloor(query: string): boolean {
+  return new Set(terms(query)).size >= 2;
+}
+
 export function entityStatusFor(query: string, entity: string | undefined | null): EntityStatus {
   const subject = subjectTokens(entity);
   if (!subject.length) return String(entity || "").trim() ? "rejected" : "missing";
   const qs = tokenSet(query);
   let n = 0;
   for (const t of subject) if (qs.has(t)) n++;
-  return n >= Math.ceil(subject.length / 2) ? "used" : "rejected";
+  if (n < Math.ceil(subject.length / 2)) return "rejected";
+  // The subject IS this query's subject, and there is still no floor to apply.
+  // `rejected` would be a lie (the query names the right thing) and `used` was
+  // the hole: it let a one-word query gate a whole result set on one shared
+  // token. It gets its own status so the run can refuse the search and SAY so.
+  return queryCanCarryFloor(query) ? "used" : "unfloored";
 }
 
 /**
@@ -419,6 +449,18 @@ export function classifyHits(
     return { verdict: "offtopic", overlap, entityShare: share, entityStatus: status };
   }
 
+  // ── The query cannot carry the floor ──────────────────────────────
+  // The subject is right and the query has under two content words, so nothing
+  // here can be judged: any hit sharing the one word would pass. Falling
+  // through to the overlap rule would be the same hole one door down — a
+  // one-term query scores high overlap on anything carrying that term. The set
+  // yields nothing, is counted, and is named in the footer. In a shipped run
+  // this branch should be UNREACHABLE, because `keywordQuery` guarantees two
+  // content words; it exists so that if it is ever reached it is loud.
+  if (status === "unfloored") {
+    return { verdict: "offtopic", overlap, entityStatus: status };
+  }
+
   // ── Fallback: no entity was supplied ─────────────────────────────────────
   // Article-mode preliminary gap searches and any legacy caller land here. This
   // is the ORIGINAL two-term overlap rule and it is WEAKER: without knowing the
@@ -469,6 +511,16 @@ function containsEntity(query: string, entity: string): boolean {
  * became a search about failure modes in general.
  */
 export function keywordQuery(entity: string, need: string, raw?: unknown): string {
+  return shapeQuery(entity, need, raw).query;
+}
+
+/**
+ * The same query, plus whether it had to be PADDED to reach two content words.
+ * The harness counts the padding (`SearchStats.query_padded`) because a run
+ * that had to invent a word to make its query searchable is a fact about the
+ * run, and the alternative — emitting the one-word query — is the T7 defect.
+ */
+export function shapeQuery(entity: string, need: string, raw?: unknown): ShapedQuery {
   const ent = String(entity || "").trim();
   let q = typeof raw === "string" ? raw.trim() : "";
   if (!q) {
@@ -477,7 +529,54 @@ export function keywordQuery(entity: string, need: string, raw?: unknown): strin
   }
   if (ent && !containsEntity(q, ent)) q = `${ent} ${q}`;
   q = clampTokens(q);
-  return q || ent || clampTokens(need, 6);
+  q = q || ent || clampTokens(need, 6);
+  return ensureTwoTerms(q, need);
+}
+
+export interface ShapedQuery {
+  query: string;
+  /** True when a class word was appended to reach two content words. */
+  padded: boolean;
+}
+
+/**
+ * The word appended when a query would otherwise go out with one content word.
+ * It is the same KIND of term `REFORMULATION_SUFFIXES` uses — a class word that
+ * biases toward pages that discuss a thing — and "overview" is the right one
+ * for a FIRST search, where the retry list's "problems"/"review" would bias the
+ * very first look at a subject toward complaints about it.
+ */
+export const QUERY_PAD_SUFFIX = "overview";
+
+/**
+ * Guarantee two distinct content words. A query with fewer cannot be judged:
+ * the evidence floor has nothing to ask two of, so every hit sharing the single
+ * word carries the subject and a whole junk population scores 1.00. That is not
+ * hypothetical — `keywordQuery("Signal", "What is it?")` returned exactly
+ * "Signal", because every word of that need is a stopword, and it fetched eight
+ * digital-signal-processing pages in a run about the messenger.
+ *
+ * The second word is the NEED's first content word where the need has one, and
+ * a class word where it does not. Nothing here is a list of incidents: the need
+ * and the subject are what the run already holds.
+ */
+function ensureTwoTerms(q: string, need: string): ShapedQuery {
+  const fromNeed = terms(need);
+  // Need words first, then class words. Two class words means the run had
+  // neither a subject nor one content word in the need - a query about
+  // nothing, which the entity gate reports as `missing` anyway; the pad only
+  // makes sure it is not ALSO a query that silently skips the floor.
+  const supply = [...fromNeed, QUERY_PAD_SUFFIX, ...REFORMULATION_SUFFIXES];
+  let out = q;
+  let padded = false;
+  for (const w of supply) {
+    const have = new Set(terms(out));
+    if (have.size >= 2) break;
+    if (have.has(w)) continue;
+    out = clampTokens(`${out} ${w}`);
+    if (!fromNeed.includes(w)) padded = true;
+  }
+  return { query: out, padded };
 }
 
 /** Suffixes that bias a re-query toward pages that discuss a thing rather than sell it. */
@@ -493,7 +592,12 @@ export function reformulate(need: string, entity: string, nth: number): string {
   const entTokens = new Set(terms(ent));
   const nouns = terms(need).filter((t) => !entTokens.has(t) && !/^\d+$/.test(t)).slice(0, 2);
   const suffix = REFORMULATION_SUFFIXES[Math.abs(nth) % REFORMULATION_SUFFIXES.length];
-  return clampTokens([ent, ...nouns, suffix].filter(Boolean).join(" "));
+  // A retry already carries a class suffix, so it normally has two content
+  // words by construction; the guarantee is applied anyway because "normally"
+  // is what the one-term query was before the tester found it.
+  return ensureTwoTerms(
+    clampTokens([ent, ...nouns, suffix].filter(Boolean).join(" ")), need,
+  ).query;
 }
 
 /** Per-run search accounting (RunResult.fetchStats.search). */
@@ -503,10 +607,17 @@ export interface SearchStats {
   entity_missing: number;
   /** Searches whose supplied entity was not carried by the query itself. */
   entity_rejected: number;
+  /** Searches REFUSED because the query had under two content words, so the
+   *  evidence floor could not be applied. Should be 0 in a shipped run —
+   *  `shapeQuery` guarantees two — and is counted so that it is loud, not
+   *  silent, if it is ever not. */
+  unfloored: number;
+  /** Queries that needed a class word appended to reach two content words. */
+  query_padded: number;
 }
 export function emptySearchStats(): SearchStats {
   return {
     calls: 0, ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0,
-    entity_missing: 0, entity_rejected: 0,
+    entity_missing: 0, entity_rejected: 0, unfloored: 0, query_padded: 0,
   };
 }

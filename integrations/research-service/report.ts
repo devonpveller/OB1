@@ -28,7 +28,7 @@ export interface SearchRecordEntry {
   /** Share of hits carrying the subject entity's core, when it was the gate. */
   entityShare?: number;
   /** Whether the entity gate was used, or why it was not. */
-  entityStatus?: "used" | "missing" | "rejected";
+  entityStatus?: "used" | "missing" | "rejected" | "unfloored";
   collapsedOn?: string;
 }
 
@@ -54,12 +54,16 @@ export interface SearchRecord {
    *  weaker overlap rule. */
   entity_missing?: number;
   entity_rejected?: number;
+  /** Searches REFUSED because the query had under two content words. */
+  unfloored?: number;
+  /** Queries padded to reach two content words. */
+  query_padded?: number;
 }
 
 export function emptySearchRecord(): SearchRecord {
   return { queries: [], hits: 0, fetched: 0, readable: 0, relevant: 0,
            ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0,
-           entity_missing: 0, entity_rejected: 0 };
+           entity_missing: 0, entity_rejected: 0, unfloored: 0, query_padded: 0 };
 }
 
 // ── Coverage reconciliation (research-trust-entity, 2026-09-11) ────────────
@@ -181,6 +185,15 @@ export function coverageFooter(
         ? `${record.entity_rejected} rejected the run's subject`
         : `${record.entity_missing} had no subject to check`;
       parts.push(`entity gate: ${noGate} search(es) judged without it (${why})`);
+    }
+    // Not part of `noGate`: these searches were refused BY the gate, not judged
+    // without it. A run should never show this — the query builder guarantees
+    // two content words — so if a reader ever sees it, the thing to know is
+    // that a search was thrown away, not that the topic is absent.
+    if (record.unfloored) {
+      parts.push(
+        `entity gate refused ${record.unfloored} search(es): the query had fewer than two content words`,
+      );
     }
   }
   if (backstop && backstop !== "complete") parts.push(`stopped early: ${backstop}`);
