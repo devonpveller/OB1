@@ -69,7 +69,11 @@ Deno.test("entityCore refuses to reduce an entity to nothing", () => {
 // defect this item exists to fix, one brand name later. The model number
 // anchors the identity instead.
 Deno.test("a brand of ANY length is dropped; the product line and model are kept", () => {
-  assertEquals(entityCore("Lenovo ThinkCentre M910q"), ["m", "910", "q"]);
+  // CHANGED by research-trust-core: the window cap now counts RUNS (words as
+  // typed) rather than split tokens, so the product line survives beside the
+  // model code. More specific, still brand-free, and still matches a page that
+  // writes only "ThinkCentre M910q".
+  assertEquals(entityCore("Lenovo ThinkCentre M910q"), ["thinkcentre", "m", "910", "q"]);
   assertEquals(entityCore("NVIDIA GeForce RTX 3050 Ti"), ["rtx", "3050", "ti"]);
   assertEquals(entityCore("HP EliteDesk 800 G4"), ["elitedesk", "800", "g", "4"]);
   assertEquals(entityCore("Microsoft Surface Laptop 5"), ["laptop", "5"]);
@@ -94,7 +98,11 @@ Deno.test("a NEIGHBOURING model is not the same machine", () => {
 Deno.test("a one-character model code never becomes the whole identity", () => {
   // "MacBook Air M2" must not reduce to "m 2": that matches the M.2 SSD form
   // factor, which appears in the OptiPlex fixture's own hit titles.
-  assertEquals(entityCore("Apple MacBook Air M2"), ["macbook", "air", "m", "2"]);
+  // CHANGED by research-trust-core: the run-based window keeps "Air M2" rather
+  // than "MacBook Air M2". The guard this test exists for is unchanged - the
+  // core is never the bare "m 2" - and it is checked below against the M.2
+  // string that appears in the OptiPlex fixture's own titles.
+  assertEquals(entityCore("Apple MacBook Air M2"), ["air", "m", "2"]);
   assertEquals(
     hitCarriesEntity({ url: "u", title: "All My Dell Optiplex 3050 SFF M.2 SSD Slots overheat", snippet: "" },
       entityCore("Apple MacBook Air M2")),

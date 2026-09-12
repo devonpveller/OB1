@@ -54,12 +54,16 @@ export interface SearchRecord {
    *  weaker overlap rule. */
   entity_missing?: number;
   entity_rejected?: number;
+  /** Runs whose extracted subject was a TOPIC and had to be shortened to the
+   *  name inside it. Shown in the footer: the operator is entitled to know the
+   *  search ran on something other than what the planner named. */
+  entity_shortened?: number;
 }
 
 export function emptySearchRecord(): SearchRecord {
   return { queries: [], hits: 0, fetched: 0, readable: 0, relevant: 0,
            ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0,
-           entity_missing: 0, entity_rejected: 0 };
+           entity_missing: 0, entity_rejected: 0, entity_shortened: 0 };
 }
 
 // ── Coverage reconciliation (research-trust-entity, 2026-09-11) ────────────
@@ -173,6 +177,9 @@ export function coverageFooter(
     if (health === "DEGRADED") {
       parts.push(`search: DEGRADED (${junkCalls} of ${junkCalls + record.ok + record.empty} searches returned junk)`);
     }
+  }
+  if (record && record.entity_shortened) {
+    parts.push(`subject shortened to its name (${record.entity_shortened}x)`);
   }
   if (record) {
     const noGate = (record.entity_missing || 0) + (record.entity_rejected || 0);

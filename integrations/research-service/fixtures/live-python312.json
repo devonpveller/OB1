@@ -1,0 +1,127 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only; 3 engines answering) to decide the digit-first / long-entity core rule from data rather than from intuition. Measured phrase shares are in documentation/notes/research-trust-findings.md section F.",
+ "query": "Python 3.12 asyncio TaskGroup",
+ "entity": "Python 3.12 asyncio",
+ "hits": [
+  {
+   "url": "https://docs.python.org/3/library/asyncio-task.html",
+   "title": "Coroutines and tasks — Python 3.14.7 documentation",
+   "snippet": "TaskGroup provides stronger safety guarantees than gather for scheduling a nesting of subtasks: if a task (or a subtask, a task scheduled by a task) raises an exception, TaskGroup will, while gather will not, cancel the remaining scheduled tasks.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://medium.com/h7w/python-3-11-and-3-12-differ-on-asyncio-and-may-break-your-code-ce4d3007f08c",
+   "title": "Python 3.11 and 3.12 Differ on asyncio (and may break your code) | by Py-Core Python Programming | T3CH | Medium",
+   "snippet": "asyncio.TaskGroup – Introduced in Python 3.11, but improved in 3.12. Exception Handling in TaskGroup – Now clearer and more reliable. Cancellation Behavior Changes — Tweaked to avoid inconsistencies. Event loop behavior, loop policy, loop lifecycle, and task scheduling.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.geeksforgeeks.org/python/python-taskgroups-with-asyncio/",
+   "title": "Python Taskgroups with asyncIO - GeeksforGeeks",
+   "snippet": "# Defining function to calculate square async def square_number(n): for i in range(1, n+1): print(\"Square of \", i, \"is \", i**2) await asyncio.sleep(0.001) The above function takes an input n and returns the square of every number from 1 till n and after every print, it waits/goes to sleep for .001 seconds. Here we are creating a TaskGroup and giving it an alias task_group and using the create_task() method which is also new in Python 3.11.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://github.com/python/cpython/issues/128588",
+   "title": "Cancellation leaks out of asyncio.TaskGroup on 3.12 when using eager tasks · Issue #128588 · python/cpython",
+   "snippet": "import sys import asyncio if sys.platform == \"win32\": EventLoop = asyncio.ProactorEventLoop else: EventLoop = asyncio.SelectorEventLoop async def demo(): class MyError(Exception): pass async def throw_error(): raise MyError try: async with asyncio.TaskGroup() as tg: tg.create_task(throw_error()) except* MyError: pass def loop_factory(): loop = EventLoop() loop.set_task_factory(asyncio.eager_task_factory) return loop asyncio.run(demo(), loop_factory=loop_factory) results in: Traceback (most recent call last): File \"/home/graingert/projects/anyio/demo.py\", line 29, in <module> asyncio.run(demo()",
+   "engine": "brave"
+  },
+  {
+   "url": "https://pypi.org/project/taskgroup/",
+   "title": "taskgroup · PyPI",
+   "snippet": "if sys.python_version >= (3, 11): from asyncio import run, TaskGroup, timeout else: from taskgroup import run, TaskGroup, timeout async def main(): async with TaskGroup() as group: group.create_task(task1()) group.create_task(task2()) run(main())",
+   "engine": "brave"
+  },
+  {
+   "url": "https://github.com/graingert/taskgroup",
+   "title": "GitHub - graingert/taskgroup · GitHub",
+   "snippet": "if sys.python_version >= (3, 11): from asyncio import run, TaskGroup, timeout else: from taskgroup import run, TaskGroup, timeout async def main(): async with TaskGroup() as group: group.create_task(task1()) group.create_task(task2()) run(main())",
+   "engine": "brave"
+  },
+  {
+   "url": "https://github.com/python/cpython/issues/116048",
+   "title": "asyncio.TaskGroup may silently discard request to run a task · Issue #116048 · python/cpython",
+   "snippet": "Perhaps, as a compromise, there could be a new parameter asyncio.create_task(..., run_to_first_await=False), which can be set to True by TaskGroup and other users wanting robust cancellation detection? 3.12 · Windows · Reactions are currently unavailable ·",
+   "engine": "brave"
+  },
+  {
+   "url": "https://iifx.dev/en/articles/460320701/asyncio-evolution-troubleshooting-taskgroup-deadlocks-in-python-3-11-vs-3-12",
+   "title": "python asyncio - Asyncio Evolution: Troubleshooting TaskGroup Deadlocks in Python 3.11 vs 3.12",
+   "snippet": "While TaskGroup was the \"star of the show\" for Python 3.11's asyncio updates, the way it handled the simultaneous arrival of exceptions and cancellations had some edge cases that caused deadlocks (freezes). These were largely polished and fixed in Python 3.12.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://realpython.com/python311-exception-groups/",
+   "title": "Python 3.11 Preview: Task and Exception Groups – Real Python",
+   "snippet": "They were finally implemented by Yury Selivanov and Guido van Rossum and made available in Python 3.11.0a6. In this subsection, you’ll reimplement your counter application to use asyncio.TaskGroup instead of asyncio.gather().",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.technetexperts.com/python-asyncio-taskgroup-deadlock-fix/",
+   "title": "Why Is Python asyncio.TaskGroup Deadlocking? [Solved]",
+   "snippet": "Discover why Python 3.12 asyncio.TaskGroup intermittently deadlocks with asyncio.to_thread and contextvars and how to fix this async cancellation hang.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://docs.python.org/3.12/library/asyncio-dev.html",
+   "title": "Developing with asyncio — Python 3.12.14 documentation",
+   "snippet": "Developing with asyncio ¶ Asynchronous programming is different from classic “sequential” programming. This page lists common mistakes and traps and explains how to avoid them. Debug Mode ¶ By default asyncio runs in production mode. In order to ease the development asyncio has a debug mode. There are several ways to enable asyncio debug mode: Setting the PYTHONASYNCIODEBUG environment ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://github.com/python/cpython/issues/133747",
+   "title": "asyncio.TaskGroup's uncancelation behavior in 3.12 is inconsisted with others (3.1x) implementations · Issue #133747 · python/cpython",
+   "snippet": "import asyncio async def delay(callable): try: await callable() except Exception: await asyncio.sleep(1) raise async def raise_error_in_task_group(): async def fail(): raise Exception() async with asyncio.TaskGroup() as tg: tg.create_task(fail()) try: asyncio.run( asyncio.wait_for( delay(raise_error_in_task_group), timeout=0.1 ) ) except asyncio.TimeoutError: print(\"NO ISSUE\") ... Below is the produced output by various python3.1x versions. Notice that only 3.12 has unique (unexpected) behavior.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://docs.python.org/3.12/library/asyncio-task.html",
+   "title": "Coroutines and Tasks — Python 3.12.13 documentation",
+   "snippet": "TaskGroup provides stronger safety guarantees than gather for scheduling a nesting of subtasks: if a task (or a subtask, a task scheduled by a task) raises an exception, TaskGroup will, while gather will not, cancel the remaining scheduled tasks).",
+   "engine": "brave"
+  },
+  {
+   "url": "https://stackoverflow.com/questions/79986011/why-does-asyncio-taskgroup-intermittently-deadlock-when-combining-asyncio-to-thr",
+   "title": "Why does asyncio.TaskGroup intermittently deadlock when combining ...",
+   "snippet": "Why does asyncio.TaskGroup intermittently deadlock when combining asyncio.to_thread (), nested cancellation, and contextvars in Python 3.12? [closed] Ask Question Asked 1 month ago Modified 30 days ago",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://superfastpython.com/asyncio-taskgroup/",
+   "title": "How to use asyncio.TaskGroup – SuperFastPython",
+   "snippet": "How to Use Asyncio wait() in Python The release of Python version 3.11 introduced a new approach to managing multiple coroutines or tasks as a group, called the asyncio.TaskGroup. How to Use asyncio.TaskGroup Python 3.11 introduce the asyncio.TaskGrouptask for managing a group of associated asyncio task.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://docs.python.org/3.12/library/asyncio-api-index.html",
+   "title": "High-level API Index — Python 3.12.13 documentation",
+   "snippet": "This page lists all high-level async/await enabled asyncio APIs. Tasks: Utilities to run asyncio programs, create Tasks, and await on multiple things with timeouts.,, run(), Create event loop, run ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://discuss.python.org/t/best-practices-for-handling-concurrent-async-calls-to-multiple-llm-apis-asyncio-gather-vs-taskgroup/108966",
+   "title": "Best practices for handling concurrent async calls to multiple LLM APIs ...",
+   "snippet": "I’ve been building an agent-style system that needs to call 3-4 different LLM/tool APIs concurrently as part of a single task step, and I’m trying to figure out the cleanest pattern for it in modern Python (3.11+). Right now I’m using asyncio.gather() with return_exceptions=True so one failing call doesn’t kill the whole batch, then checking each result afterward for exceptions. But I ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://docs.python.org/3/library/asyncio.html",
+   "title": "asyncio — Asynchronous I/O — Python 3.14.7 documentation",
+   "snippet": "asyncio is a library to write concurrent code using the async/await syntax. asyncio is used as a foundation for multiple Python asynchronous frameworks that provide high-performance network and web-servers, database connection libraries, distributed task queues, etc. asyncio is often a perfect fit for IO-bound and high-level structured network code.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://hackanons.com/troubleshoot-asyncio-taskgroup-deadlocks-python-312/",
+   "title": "Troubleshoot asyncio.TaskGroup Deadlocks in Python 3.12",
+   "snippet": "Key TakeawaysUnderstand the role of asyncio.TaskGroup in Python 3.12.Identify how asyncio.to_thread() can cause deadlocks.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.w3schools.in/python/asyncio-taskgroup",
+   "title": "Learn Python asyncio TaskGroup",
+   "snippet": "Python asyncio TaskGroup. Python Programming Tutorials. Overview of Python.TaskGroup.create_task() accepts task-creation options such as name and context. Python 3.14 passes additional keyword arguments to the event loop's task creation method. Example.",
+   "engine": "yandex"
+  }
+ ]
+}

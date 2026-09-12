@@ -193,7 +193,11 @@ const QUALIFIERS = new Set(
   ("the a an of for and or in on at to audio video sound acoustic visual vr ar xr " +
    "software hardware device system app tool platform service online digital " +
    "wireless portable desktop laptop pc computer machine model brand review guide " +
-   "study research paper data test new best top full")
+   "study research paper data test new best top full " +
+   // INTENT words: they say what you want DONE with the subject, not what it is.
+   // "Dell OptiPlex 3050 used purchase" is a subject plus an errand.
+   "used purchase buying buy price cost fix repair problems issues troubleshooting " +
+   "diagnose comparison alternatives tips help")
     .split(" "),
 );
 
@@ -208,47 +212,134 @@ function distinctive(t: string): boolean {
  * can be dropped — an entity with no distinctive token at all is still the only
  * thing the run knows about its subject.
  */
+/** Tokens grouped by the RUN they were typed in: "M910q" -> [["m","910","q"]]. */
+function entityRuns(s: string | undefined | null): string[][] {
+  const runs: string[][] = [];
+  for (const run of String(s || "").toLowerCase().match(/[a-z0-9]+/g) || []) {
+    const parts = run.match(/\d+|[a-z]+/g) || [];
+    if (parts.length) runs.push(parts);
+  }
+  return runs;
+}
+
+/** A bare year: four digits in a plausible calendar range. */
+function isYear(t: string): boolean {
+  if (!/^\d{4}$/.test(t)) return false;
+  const n = parseInt(t, 10);
+  return n >= 1900 && n <= 2100;
+}
+
+/**
+ * THE RULE — one sentence: a subject of more than a couple of tokens is a
+ * TOPIC, not a name, so it is reduced to the shortest window of at most three
+ * tokens around its most distinctive token — the first digit-bearing token that
+ * is not a bare year, else the longest token — keeping whatever is glued to
+ * that token: its own typed run, a version's second number, a preceding model
+ * word, or a following unit.
+ *
+ * Why (live dry run 6975d982, 2026-09-11): KEYWORDIZE returned the subject
+ * "100Hz audio VR motion sickness". The previous rule anchored on the token
+ * BEFORE the first digit-bearing token; here the digit token was first, so
+ * nothing was dropped, the core became all six tokens — a phrase no page
+ * carries — and a hit set with "100 Hz" in 9 of 20 rows and PMC11955832 at rank
+ * 1 scored 0.00 and was reported as a search failure three times over.
+ *
+ * Each choice below was measured against a live hit set, not assumed
+ * (findings section F):
+ *   - the YEAR is dropped: "toyota prius" scores 0.95, "2026 toyota prius"
+ *     0.80, "2026 prius" 0.20 — publishers write the model, sometimes the year;
+ *   - a VERSION keeps its language: "python 3 12" 0.35 against "3 12" 0.55,
+ *     which would match any 3.12 anywhere, and 0.05 for the whole subject;
+ *   - a two-word technical name keeps both words: "kubernetes crashloopbackoff"
+ *     0.40 (against 1.00 for the bare token) — the rule's job is to pass a good
+ *     set, not to maximise the share.
+ */
 export function entityCore(entity: string | undefined | null): string[] {
-  const toks = entityTokens(entity);
+  const runs = entityRuns(entity);
+  const toks = runs.flat();
   if (!toks.length) return [];
   if (!toks.some(distinctive)) return toks;
 
-  // A MODEL NUMBER anchors the identity. Everything before the token that
-  // immediately precedes the first digit-bearing token is a brand or a
-  // qualifier, whatever its length: the identity of "Lenovo ThinkCentre M910q"
-  // is "ThinkCentre M910q" (pages write it without "Lenovo"), and of
-  // "Dell OptiPlex 3050" is "OptiPlex 3050".
-  //
-  // A LENGTH test cannot do this. The first version dropped a leading token
-  // only when it was under five characters, which worked for "Dell" by accident
-  // and left "Lenovo", "NVIDIA" and "Microsoft" in the core — the same defect
-  // this item exists to fix, one brand name later.
-  let core = [...toks];
-  const firstDigit = core.findIndex((t) => /\d/.test(t));
-  if (firstDigit >= 0) {
-    const start = Math.max(0, firstDigit - 1);
-    const tail = core.slice(start);
-    // A one-character number is not a model code: "MacBook Air M2" would reduce
-    // to "m 2", which matches the M.2 SSD form factor on any page. Require the
-    // tail to carry a digit AND something with shape to it.
-    const strongTail = tail.length >= 2 && tail.some((t) => /\d/.test(t)) &&
-      tail.some((t) => (/\d/.test(t) && t.length >= 2) || t.length >= 3);
-    if (strongTail) core = tail;
-    else {
-      let anchor = start;
-      while (anchor > 0 && core[anchor].length < 5) anchor--;
-      core = core.slice(anchor);
-    }
+  // Which run does each token belong to, and where does each run start?
+  const runOf: number[] = [];
+  const runStart: number[] = [];
+  runs.forEach((r, ri) => { runStart.push(runOf.length); r.forEach(() => runOf.push(ri)); });
+
+  // ANCHOR: the first digit-bearing token that is not a bare year; else the
+  // longest token. A year is skipped because it dates a subject rather than
+  // naming one.
+  let anchor = toks.findIndex((t) => /\d/.test(t) && !isYear(t));
+  if (anchor < 0) {
+    let best = -1;
+    toks.forEach((t, i) => { if (!isYear(t) && (best < 0 || t.length > toks[best].length)) best = i; });
+    anchor = Math.max(0, best);
   }
+
+  // The window starts as the anchor's whole typed run: "M910q" and "100Hz" were
+  // one word when they were written, and splitting them for matching must not
+  // split them for naming.
+  const ri = runOf[anchor];
+  let lo = runStart[ri];
+  let hi = lo + runs[ri].length - 1;
+  // The cap counts RUNS - words as they were typed - not the tokens a run is
+  // split into for matching. "EliteDesk 800 G4" is three words and one name;
+  // counting its five tokens would cut the "G4" off the end and let a page
+  // about a different variant satisfy it.
+  const wordish = (i: number) =>
+    i >= 0 && i < toks.length && !/\d/.test(toks[i]) && !isYear(toks[i]) &&
+    toks[i].length >= 3 && !QUALIFIERS.has(toks[i]);
+  const unitish = (i: number) =>
+    i >= 0 && i < toks.length && !/\d/.test(toks[i]) && toks[i].length <= 4 &&
+    !QUALIFIERS.has(toks[i]);
+  /** A model-variant suffix: "Ti", "MT", "SFF", "G4" - short, not a qualifier. */
+  const suffixish = (i: number) =>
+    i >= 0 && i < toks.length && toks[i].length <= 3 && !QUALIFIERS.has(toks[i]) &&
+    /\d/.test(toks[hi]);
+  const runsIn = () => new Set(toks.slice(lo, hi + 1).map((_, k) => runOf[lo + k])).size;
+  /** Extend to include the WHOLE run that token i belongs to. */
+  const absorbLeft = () => { lo = runStart[runOf[lo - 1]]; };
+  const absorbRight = () => {
+    const r = runOf[hi + 1];
+    hi = runStart[r] + runs[r].length - 1;
+  };
+
+  /** A MEASUREMENT is complete at number+unit: "100 Hz tone" is written
+   *  "100 Hz" on the pages that matter, and a further word only narrows it. */
+  const endsInMeasurement = () =>
+    hi > lo && /^\d+$/.test(toks[hi - 1]) && !/\d/.test(toks[hi]) && toks[hi].length <= 4;
+
+  const anchorIsNumber = /\d/.test(toks[anchor]);
+  if (anchorIsNumber) {
+    // A version number's second half ("3.12") belongs to it.
+    if (runsIn() < 3 && hi + 1 < toks.length && /^\d+$/.test(toks[hi + 1])) absorbRight();
+    // A model word before the number ("OptiPlex 3050"), else a unit after it
+    // ("100 Hz").
+    if (runsIn() < 3 && wordish(lo - 1)) absorbLeft();
+    else if (runsIn() < 3 && !endsInMeasurement() && unitish(hi + 1)) absorbRight();
+  } else {
+    // A word anchor takes its modifier ("motion sickness") or its head
+    // ("Toyota Prius").
+    if (runsIn() < 3 && wordish(lo - 1)) absorbLeft();
+    else if (runsIn() < 3 && wordish(hi + 1)) absorbRight();
+  }
+  // One more word or model-variant suffix if there is still room
+  // ("iPhone 18 Pro", "RTX 3050 Ti", "EliteDesk 800 G4") - but never past a
+  // completed measurement.
+  if (!endsInMeasurement() && runsIn() < 3 &&
+      (wordish(hi + 1) || suffixish(hi + 1))) absorbRight();
+
+  let core = toks.slice(lo, hi + 1);
 
   // Then trim qualifiers off both ends — "OptiPlex 3050 desktop" is written
   // "OptiPlex 3050", and "100 Hz audio" is written "100 Hz".
+  // The trim removes a QUALIFIER, never merely a short word. An earlier version
+  // dropped anything under five characters, which undid the window it had just
+  // been given: "MacBook Air M2" became "m 2", and "m 2" matches "M.2", the SSD
+  // form factor that appears in the OptiPlex fixture's own titles.
   const droppable = (i: number): boolean => {
     const t = core[i];
-    if (distinctive(t)) return false;
-    // A UNIT belongs to its number: never orphan one from the other. Only a
-    // short alphabetic token can be a unit — "desktop" beside "3050" is a
-    // qualifier, not a unit.
+    if (!QUALIFIERS.has(t)) return false;
+    // A UNIT belongs to its number: never orphan one from the other.
     if (t.length <= 4) {
       const left = i > 0 ? core[i - 1] : "";
       const right = i < core.length - 1 ? core[i + 1] : "";
@@ -264,10 +355,53 @@ export function entityCore(entity: string | undefined | null): string[] {
     const last = core.length - 1;
     if (droppable(last) && core.slice(0, last).some(distinctive)) { core.pop(); changed = true; }
   }
-  // A bare number is not an identity. "Surface Laptop 5" trims to "5", which
-  // matches any page with a 5 in it; keep the untrimmed core instead.
-  if (core.length === 1 && /^\d+$/.test(core[0])) return beforeTrim;
+  // A bare number is not an identity: "Surface Laptop 5" reducing to "5" matches
+  // any page with a 5 in it. Take the word before it, qualifier or not — a weak
+  // core is a known, measured cost (findings E.10) and a bare number is worse.
+  if (core.length === 1 && /^\d+$/.test(core[0])) {
+    if (beforeTrim.length > 1) return beforeTrim;
+    const at = toks.indexOf(core[0]);
+    if (at > 0) return [toks[at - 1], core[0]];
+  }
   return core;
+}
+
+/**
+ * Shorten an extracted subject to the NAME inside it, in the SPELLING the
+ * caller used. `entityCore` already finds the name; this returns it as a string
+ * so the harness can log what it searched on and count the correction.
+ *
+ * Returns the input unchanged when the subject is already a name, so the caller
+ * can compare and count. Live dry run 6975d982 is what an uncounted topic
+ * costs: KEYWORDIZE returned "100Hz audio VR motion sickness" and three healthy
+ * searches were reported as failures.
+ */
+export function shortenEntity(entity: string | undefined | null): string {
+  const raw = String(entity || "").trim();
+  if (!raw) return "";
+  const core = entityCore(raw);
+  if (!core.length) return raw;
+  // Recover the caller's own spelling of the core: find the shortest substring
+  // of the input whose tokens are exactly the core, so "100Hz audio VR motion
+  // sickness" yields "100Hz" rather than "100 hz".
+  const spans: Array<{ text: string; start: number; end: number }> = [];
+  const re = /[A-Za-z0-9]+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    spans.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  for (let i = 0; i < spans.length; i++) {
+    for (let j = spans.length; j > i; j--) {
+      const window = spans.slice(i, j);
+      const toks = window.map((w) => w.text).join(" ").toLowerCase()
+        .match(/\d+|[a-z]+/g) || [];
+      if (toks.length === core.length && toks.every((t, k) => t === core[k])) {
+        // The caller's own substring, punctuation and all: "Python 3.12".
+        return raw.slice(window[0].start, window[window.length - 1].end);
+      }
+    }
+  }
+  return core.join(" ");
 }
 
 /** The core as a phrase regex: tokens adjacent, any separator between them. */
@@ -459,10 +593,12 @@ export interface SearchStats {
   entity_missing: number;
   /** Searches whose supplied entity was not carried by the query itself. */
   entity_rejected: number;
+  /** Runs whose extracted subject was a TOPIC and had to be shortened. */
+  entity_shortened: number;
 }
 export function emptySearchStats(): SearchStats {
   return {
     calls: 0, ok: 0, collapsed: 0, offtopic: 0, empty: 0, errors: 0,
-    entity_missing: 0, entity_rejected: 0,
+    entity_missing: 0, entity_rejected: 0, entity_shortened: 0,
   };
 }

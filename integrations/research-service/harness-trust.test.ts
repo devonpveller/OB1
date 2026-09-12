@@ -157,9 +157,15 @@ Deno.test("round-1 queries are keywords carrying the subject entity, never the r
 Deno.test("a collapsed result set is counted as a SEARCH failure and yields no pages", async () => {
   const { deps } = mockDeps({ entity: REPLAY_ENTITY, hitsFor: () => DELL_HITS });
   const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
-  assert(r.fetchStats.search.collapsed > 0, "collapse was not counted");
+  // Either junk verdict counts. Which one it is depends on whether a QUERY
+  // token dominates the titles, and since research-trust-core the query carries
+  // the entity's NAME ("OptiPlex 3050") rather than the brand, so the Dell junk
+  // no longer piles onto a word the query contains. Both mean the same thing:
+  // the search did not answer, and nothing is fetched.
+  assert(r.fetchStats.search.collapsed + r.fetchStats.search.offtopic > 0,
+    "the junk set was not counted as a search failure");
   assertEquals(r.fetchStats.search.ok, 0);
-  assertEquals(r.fetchStats.sources, 0, "a collapsed set must not be fetched");
+  assertEquals(r.fetchStats.sources, 0, "a junk set must not be fetched");
 });
 
 Deno.test("a search that returns junk forever ends search_degraded, not complete", async () => {
@@ -307,7 +313,10 @@ Deno.test("every need carries a status; a need whose searches all collapsed is s
     JSON.stringify(r.needsStatus));
   assertEquals(r.searchRecord.relevant, 0);
   assert(r.searchRecord.queries.length > 0);
-  assert(r.searchRecord.queries.every((q) => q.verdict === "collapsed"));
+  // "collapsed" or "offtopic" - both are junk. The label depends on whether a
+  // QUERY token dominates the titles, and since research-trust-core the query
+  // carries the entity's name rather than the brand (findings F.4).
+  assert(r.searchRecord.queries.every((q) => q.verdict === "collapsed" || q.verdict === "offtopic"));
 });
 
 // ── Phase 2.3 wiring ────────────────────────────────────────────────────────
@@ -353,7 +362,9 @@ Deno.test("the run's OWN search record carries the per-verdict counts", async ()
   const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
   assertEquals(r.searchRecord.collapsed, r.fetchStats.search.collapsed);
   assertEquals(r.searchRecord.ok, r.fetchStats.search.ok);
-  assert(r.searchRecord.collapsed > 0, "the replay collapsed and the record must say so");
+  assertEquals(r.searchRecord.offtopic, r.fetchStats.search.offtopic);
+  assert(r.searchRecord.collapsed + r.searchRecord.offtopic > 0,
+    "the replay returned junk and the record must say so");
   assertStringIncludes(
     coverageFooter(r.needsStatus, r.searchRecord, r.backstop), "search: DEGRADED");
 });
@@ -379,6 +390,37 @@ Deno.test("T11: the run's subject entity reaches the classifier", async () => {
   assertEquals(r.backstop, "search_degraded");
   assertEquals(r.outcome, "no_relevant_sources");
   assert(calls.relevanceAsked.length === 0, "no page should have reached the relevance gate");
+});
+
+// ── research-trust-core: the topic-shaped subject, end to end ──────────────
+Deno.test("a TOPIC-shaped subject is shortened, counted, and the search passes", async () => {
+  // Live dry run 6975d982: KEYWORDIZE returned "100Hz audio VR motion sickness"
+  // and all three searches were reported as failures with the Nagoya paper at
+  // rank 1 in the results.
+  const f = JSON.parse(
+    Deno.readTextFileSync(new URL("./fixtures/live-100hz-mechanism.json", import.meta.url)),
+  );
+  const { deps } = mockDeps({
+    entity: "100Hz audio VR motion sickness",
+    hitsFor: () => f.hits as SearchHit[],
+    relevance: () => true,
+  });
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  assertEquals(r.fetchStats.search.entity_shortened, 1, "the correction must be counted");
+  assert(r.fetchStats.search.ok > 0, "the search must not be reported as a failure");
+  assertEquals(r.fetchStats.search.collapsed, 0);
+  assert(r.fetchStats.sources > 0, "and the pages must actually be fetched");
+  assertStringIncludes(
+    coverageFooter(r.needsStatus, r.searchRecord, r.backstop),
+    "subject shortened to its name (1x)",
+  );
+});
+
+Deno.test("a subject that is already a name is not counted as shortened", async () => {
+  const { deps } = mockDeps({ entity: REPLAY_ENTITY, hitsFor: () => DELL_HITS });
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  assertEquals(r.fetchStats.search.entity_shortened, 0);
+  assert(!coverageFooter(r.needsStatus, r.searchRecord, r.backstop).includes("shortened"));
 });
 
 // ── B3 (tester, 2026-09-11) ────────────────────────────────────────────────

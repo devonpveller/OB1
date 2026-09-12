@@ -13,7 +13,10 @@ import { rankHits, partitionRelevant, floorKeepable } from "./filtering.ts";
 import { classifyTemplate, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "./templates.ts";
 import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
-import { classifyHits, emptySearchStats, keywordQuery, reformulate, type SearchStats } from "./search-quality.ts";
+import {
+  classifyHits, emptySearchStats, keywordQuery, reformulate, shortenEntity,
+  type SearchStats,
+} from "./search-quality.ts";
 import { applyNumericGrounding } from "./grounding.ts";
 import {
   coverageFooter, emptySearchRecord, failureNotice, reconcileNeedsStatus,
@@ -137,8 +140,22 @@ const COVERAGE_STAGED_SYS =
 // Phase 1.2 — round 1 searches KEYWORDS, not the decomposed question. The
 // SUBJECT ENTITY is asked for explicitly because it is the one token a query
 // may never lose: a need rewritten without it is a search about the category.
+// The entity is a NAME, and the prompt now says so three ways. Live dry run
+// 6975d982 returned "100Hz audio VR motion sickness" for a question about 100 Hz
+// audio and VR motion sickness: a faithful summary of the TOPIC, and useless as
+// a name — no page carries that phrase, so a healthy search was reported as a
+// failure. The prompt is the cheap half of the fix; harness.ts shortens
+// deterministically when the model does it anyway, because a prompt is a
+// request and not a guarantee.
 const KEYWORDIZE_SYS =
-  `You turn research needs into web-search queries. First identify the SUBJECT ENTITY of the QUESTION — the specific thing being researched, as a searcher would type it ("OptiPlex 3050", "Postgres 17 logical replication", "semaglutide"). Then, for EACH need, write ONE web query of 3 to 7 terms that CONTAINS the subject entity and the need's distinguishing words. No questions, no punctuation, no filler words.
+  `You turn research needs into web-search queries. First identify the SUBJECT ENTITY of the QUESTION — the single specific NAMED thing being researched, as it is PRINTED ON A PAGE ABOUT IT: a product ("OptiPlex 3050"), a drug ("semaglutide"), a version ("Postgres 17"), an error ("CrashLoopBackOff"), a measurement ("100 Hz").
+
+ENTITY RULES — the entity is a NAME, at most 3 words:
+- NEVER the topic or the question. For "how 100Hz audio affects VR motion sickness" the entity is "100 Hz", NOT "100Hz audio VR motion sickness".
+- NEVER an intent ("used purchase", "troubleshooting") and never a year on its own.
+- If the question is about two named things, pick the ONE the answer is about.
+
+Then, for EACH need, write ONE web query of 3 to 7 terms that CONTAINS the subject entity and the need's distinguishing words. No questions, no punctuation, no filler words.
 
 Return ONLY JSON: {"entity": "...", "queries": ["...", "..."]} — exactly one query per need, in the same order.`;
 const DEEPEN_SYS =
@@ -459,7 +476,24 @@ export async function runResearch(
         deps, KEYWORDIZE_SYS,
         `QUESTION: ${query}\n\nNEEDS:\n${gapNeeds.map((n, i) => `${i}. ${n}`).join("\n")}`,
       );
-      subjectEntity = typeof kw.entity === "string" ? kw.entity.trim() : "";
+      const rawEntity = typeof kw.entity === "string" ? kw.entity.trim() : "";
+      // A prompt is a request, not a guarantee: shorten deterministically when
+      // the model returns a topic anyway, and COUNT it. Dry run 6975d982 is what
+      // an uncounted five-word entity costs - three searches reported as
+      // failures with the answer sitting at rank 1 in the results.
+      subjectEntity = shortenEntity(rawEntity);
+      // Count the TOPIC correction only. Dropping a brand ("Dell OptiPlex 3050"
+      // -> "OptiPlex 3050") is ordinary core extraction and happens on most
+      // product runs; reporting it in the footer would be noise that buries the
+      // case that matters. The anchor's bound is the line: more than three
+      // words is a topic.
+      const rawWords = (rawEntity.match(/[A-Za-z0-9]+/g) || []).length;
+      if (rawWords > 3 && subjectEntity !== rawEntity) {
+        searchStats.entity_shortened++;
+        await progress("plan",
+          `subject "${rawEntity}" is a topic, not a name - searching on "${subjectEntity}"`,
+          { entity_shortened: searchStats.entity_shortened });
+      }
       const raw = Array.isArray(kw.queries) ? kw.queries : [];
       gapNeeds.forEach((need, i) => round1.set(need, keywordQuery(subjectEntity, need, raw[i])));
       await progress("plan", `subject="${subjectEntity || "(none)"}"; ${round1.size} keyword quer(ies)`,
@@ -746,6 +780,7 @@ export async function runResearch(
     searchRecord.errors = searchStats.errors;
     searchRecord.entity_missing = searchStats.entity_missing;
     searchRecord.entity_rejected = searchStats.entity_rejected;
+    searchRecord.entity_shortened = searchStats.entity_shortened;
   } else {
     await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
       { staged: staged.length });

@@ -1,0 +1,127 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only; 3 engines answering) to decide the digit-first / long-entity core rule from data rather than from intuition. Measured phrase shares are in documentation/notes/research-trust-findings.md section F.",
+ "query": "Kubernetes CrashLoopBackOff diagnose",
+ "entity": "Kubernetes CrashLoopBackOff",
+ "hits": [
+  {
+   "url": "https://kubedna.com/how-to-fix-crashloopbackoff-in-kubernetes-with-examples/",
+   "title": "How to Fix CrashLoopBackOff in Kubernetes (with Examples) | KubeDNA",
+   "snippet": "CrashLoopBackOff indicates that a container is repeatedly failing to start. When a container crashes, Kubernetes restarts it based on the pod’s restartPolicy (commonly set to Always or OnFailure).",
+   "engine": "brave"
+  },
+  {
+   "url": "https://komodor.com/learn/how-to-fix-crashloopbackoff-kubernetes-error/",
+   "title": "How to Fix CrashLoopBackOff in Kubernetes? - Komodor",
+   "snippet": "This is part of an extensive series of guides about kubernetes troubleshooting. Common Causes of CrashLoopBackOff and How to Fix Them \"CrashLoopBackOff\" can occur when a pod fails to start for some reason, because a container fails to start up properly and repeatedly crashes. Let's review the common causes of repeated container crashes. Quick Diagnosis: Symptom → Likely Cause → Fix ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://oneuptime.com/blog/post/2026-01-25-debug-crashloopbackoff-kubernetes/view",
+   "title": "How to Debug CrashLoopBackOff Errors in Kubernetes Pods",
+   "snippet": "CrashLoopBackOff troubleshooting follows a systematic approach: check events, examine logs (especially from previous containers), verify exit codes, and investigate the specific cause.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.dash0.com/guides/kubernetes-crashloopbackoff",
+   "title": "Kubernetes CrashLoopBackOff Error: Common Causes & Solutions · Dash0",
+   "snippet": "You can use the kubectl execCopy command to access the shell of a running container and inspect the environment variables. This can help you identify any misconfigurations that may be causing the CrashLoopBackOff error.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://oneuptime.com/blog/post/2026-01-19-kubernetes-debug-crashloopbackoff/view",
+   "title": "How to Debug CrashLoopBackOff Pods in Kubernetes",
+   "snippet": "# Get basic pod status # Look for RESTARTS count and STATUS kubectl get pods -n <namespace> # Example output: # NAME READY STATUS RESTARTS AGE # my-app-5f7b9d4c6-x2k8p 0/1 CrashLoopBackOff 5 (45s ago) 3m # Get more details including the exit code kubectl get pod my-app-5f7b9d4c6-x2k8p -o jsonpath='{.status.containerStatuses[*]}' | jq # Key fields to look for: # - lastState.terminated.exitCode - Why the container exited # - lastState.terminated.reason - OOMKilled, Error, etc.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.groundcover.com/kubernetes-troubleshooting/crashloopbackoff",
+   "title": "Understanding Kubernetes CrashLoopBackOff & How to Fix It",
+   "snippet": "In short, basically any condition that could cause containers to crash right after they start has the potential to create a CrashLoopBackOff. If the containers repeatedly try to restart and repeatedly fail, you get this error. No red light starts ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://spot.rackspace.com/blog/crashloopbackoff-in-kubernetes",
+   "title": "CrashLoopBackOff in Kubernetes: Causes, Diagnosis, and How to Fix It",
+   "snippet": "A container that also fails here has an image or entrypoint problem rather than a Kubernetes one. kubectl run debug --rm -it --image=<same-image> --command -- /bin/sh · 8. Inspect the live container during the seconds it is up, or attach a debug container to a pod that never stays up long enough. kubectl debug -it <pod-name> --image=busybox --target=<container-name> ... When you write alerting rules for crash loops, kubectl get pods gives you two columns you could watch. STATUS shows the words CrashLoopBackOff, and RESTARTS shows the count.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.netdata.cloud/academy/kubernetes-crash-loop-backoff/",
+   "title": "Kubernetes CrashLoopBackOff: Causes & Quick Fixes | Netdata",
+   "snippet": "Frustrated by CrashLoopBackOff errors in Kubernetes? This guide provides a step-by-step flowchart and quick fixes to troubleshoot and resolve pod restart loops.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://devtron.ai/blog/troubleshoot_crashloopbackoff_pod/",
+   "title": "Troubleshooting Pod CrashLoopBackOff Errors in K8s",
+   "snippet": "This error can be spotted by a single command. All you have to do is run your standard kubectl get pods -n <namespace> command and you will be able to see if any of your pods are in CrashLoopBackOff in the status section.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://middleware.io/blog/kubernetes-crashloopbackoff-causes-diagnosis-and-fixes/",
+   "title": "Kubernetes CrashLoopBackOff: Causes, Diagnosis, and Fixes",
+   "snippet": "Kubernetes CrashLoopBackOff: Causes, Diagnosis, and Fixes CrashLoopBackOff means your container keeps crashing. Learn every root cause and exact kubectl commands to diagnose and fix it fast.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://dev.to/devopsstart/fix-kubernetes-crashloopbackoff-root-causes-diagnosis-3aem",
+   "title": "Fix Kubernetes CrashLoopBackOff: Root Causes & Diagnosis",
+   "snippet": "Learn how to diagnose and fix Kubernetes CrashLoopBackOff in production. Step-by-step guide to exit. Tagged with kubernetestroubleshooting, crashloopbackoff, kubernetespods, devopsguide.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.golinuxcloud.com/kubernetes-crashloopbackoff/",
+   "title": "Kubernetes CrashLoopBackOff [Causes and Fixes] - GoLinuxCloud",
+   "snippet": "Diagnose Kubernetes CrashLoopBackOff using restart counts, events, previous logs, exit codes, commands, probes, configuration, dependencies, and OOM signals.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/crashloopbackoff-events",
+   "title": "Troubleshoot CrashLoopBackOff events | Google Kubernetes Engine (GKE) | Google Cloud Documentation",
+   "snippet": "Troubleshoot CrashLoopBackOff events in GKE. Diagnose issues like resource exhaustion, app misconfigurations, and liveness probe failures.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://spacelift.io/blog/crashloopbackoff",
+   "title": "Is CrashLoopBackOff always an error with Kubernetes, or with my app?",
+   "snippet": "Name: pod name Namespace: default Priority: 0 … State: Waiting Reason: CrashLoopBackOff Last State: Terminated Reason: Error … Warning BackOff 1m (x5 over 1m) kubelet, ip-10-0-9-132.us-east-2.compute.internal Back-off restarting failed container … · Back-off in Kubernetes is a mechanism that handles failures or issues when starting containers.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://markaicode.com/howto/kubernetes-debugging-real-failures/",
+   "title": "CrashLoopBackOff in Kubernetes: Diagnose and Fix in 5 Steps | Markaicode",
+   "snippet": "If the container then runs successfully for about 10 minutes straight, Kubernetes resets the back-off timer, treating any future crash as a fresh first failure rather than a continuation of the old loop. ... RESTARTS should stop climbing and READY should read 1/1. Re-run safety: read-only, safe. If it fails: still crashing — go back to Step 2; --previous will now show the new crash reason (which may differ from the original one if the first fix only partially worked). flowchart TB A[Pod in CrashLoopBackOff] --> B[kubectl logs --previous] B --> C{Error visible in logs?} C -->|Config or env er",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.sysdig.com/blog/debug-kubernetes-crashloopbackoff",
+   "title": "What is Kubernetes CrashLoopBackOff? And how to fix it | Sysdig",
+   "snippet": "Basically, it’s an exponential delay between restarts (10s, 20s, 40s, …) which is capped at five minutes. When a Pod state is displaying CrashLoopBackOff, it means that it’s currently waiting the indicated time before restarting the pod again.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.techeia.com/blog/troubleshoot-kubernetes-pod-stuck-in-crashloopbackoff",
+   "title": "How to Troubleshoot a Kubernetes Pod Stuck in CrashLoopBackOff",
+   "snippet": "Kubernetes sees the pod terminate and restarts it, assuming it should be running continuously as a daemon. This creates a CrashLoopBackOff loop despite no actual \"errors\" occurring. Fix: Ensure the main process in your container runs in the foreground and blocks execution indefinitely (like a web server or a tail -f command for debugging).",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://adminschoice.com/kubernetes-crashloopbackoff-troubleshooting/",
+   "title": "CrashLoopBackOff in Kubernetes: Causes, Exit Codes, and How to Fix It",
+   "snippet": "Pod stuck in CrashLoopBackOff? Learn what it means, how to read the exit codes (137, 139, 143), and the exact kubectl steps to diagnose and fix the crash loop.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://labhub.hopto.org/blog/kubernetes/2026-07-26-kubernetes-crashloopbackoff-debugging?lang=en",
+   "title": "Diagnosing Kubernetes CrashLoopBackOff by Cause — What to Look At When ...",
+   "snippet": "A start-to-finish walkthrough of the situation where a Pod is stuck in CrashLoopBackOff but kubectl logs prints nothing. It starts with the precise meaning",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://institute.sfeir.com/en/kubernetes-training/debug-pod-crashloopbackoff-causes-solutions-kubernetes/",
+   "title": "Debug a Pod in CrashLoopBackOff: Causes, Diagnosis and Solutions",
+   "snippet": "CrashLoopBackOff troubleshooting guide: common causes, diagnostic commands, and solutions for Kubernetes pods.",
+   "engine": "yandex"
+  }
+ ]
+}
