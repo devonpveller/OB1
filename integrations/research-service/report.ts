@@ -270,6 +270,8 @@ export function searchHealthLabel(r: SearchRecord): "ok" | "DEGRADED" {
 /** What the per-sentence fidelity check did to the rendered report. */
 export interface FidelityFooter {
   checked: number;
+  /** Names the grounding diff flagged that the check removed. */
+  names_blocked?: string[];
   /** Every unit the document has - the denominator. */
   units?: number;
   /** Units the check could not judge. */
@@ -363,6 +365,12 @@ export function coverageFooter(
       parts.push(
         `render checked: ${fidelity.checked} of ${units}, ${corrected} corrected, ${unchecked} unchecked`,
       );
+      // A name the evidence never used, removed from the document before it
+      // reached the reader. Printed only when there were any: a counter that
+      // says "0 blocked" on every report teaches the reader to skip the line,
+      // and this one is worth reading on the runs where it is not zero.
+      const blocked = fidelity.names_blocked?.length ?? 0;
+      if (blocked) parts.push(`names: ${blocked} blocked`);
     } else if (fidelity.error) {
       parts.push("render check: not run");
     }

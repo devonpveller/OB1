@@ -41,9 +41,12 @@ import type { Deps } from "./harness.ts";
 // with a note pointing here.
 const EV = new URL("./fixtures/", import.meta.url);
 const RUN = JSON.parse(Deno.readTextFileSync(new URL("live-owui-33250e9b.result.json", EV)));
-const AFTER = Deno.readTextFileSync(new URL("rendered-AFTER-33250e9b.md", EV));
-const AFTER_V1 = Deno.readTextFileSync(new URL("rendered-AFTER-v1-33250e9b.md", EV));
-const BEFORE = Deno.readTextFileSync(new URL("rendered-BEFORE-33250e9b.md", EV));
+// A Windows checkout hands these back with CRLF; they are the same documents.
+const readDoc = (n: string) =>
+  Deno.readTextFileSync(new URL(n, EV)).replace(/\r\n/g, "\n");
+const AFTER = readDoc("rendered-AFTER-33250e9b.md");
+const AFTER_V1 = readDoc("rendered-AFTER-v1-33250e9b.md");
+const BEFORE = readDoc("rendered-BEFORE-33250e9b.md");
 const QUERY =
   "Dell OptiPlex 3050 used purchase: common failure modes, known defects, red flags, " +
   "thermal issues, capacitor/CPU socket problems, how to verify hardware health";
@@ -314,13 +317,13 @@ Deno.test("ACCEPTANCE 6: the grounding diff over the re-rendered document", () =
   // No figure and no URL in the report that the grounded answer does not hold.
   assertEquals(diff.numbers, []);
   assertEquals(diff.urls, []);
-  // ONE name still leaks, and it is pinned rather than tolerated: the model
-  // abbreviates "Blue Screen of Death", which the synthesis spells out. ATX and
-  // SFX - the standards the model named for a connector the sources only call
-  // proprietary - are GONE: the grounding rules now forbid naming a standard
-  // the answer does not name, and rendered-AFTER-v1 keeps the render that had
-  // them. A SECOND name appearing here fails this test.
-  assertEquals(diff.names, ["BSOD"]);
+  // BSOD used to be pinned here as the one name that still leaked. It is not a
+  // leak: the synthesis writes "Blue Screen of Death" and the report
+  // abbreviates it, which invents nothing - and research-trust-names made that
+  // an EXPANSION MATCH rather than a judgement call, so the diff no longer
+  // reports it. ATX and SFX stay gone; rendered-AFTER-v1 keeps the render that
+  // had them. ANY name appearing here now fails this test.
+  assertEquals(diff.names, []);
 });
 
 Deno.test("the diff sees a planted fact, a planted figure and a planted URL", () => {

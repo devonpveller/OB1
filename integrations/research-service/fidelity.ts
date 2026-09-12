@@ -39,6 +39,7 @@
  * which is the trade this whole workstream keeps making.
  */
 import type { Deps } from "./harness.ts";
+import { renderGroundingDiff } from "./grounding.ts";
 
 export interface FidelityRecord {
   /** Sentences and table cells presented to the judge. */
@@ -58,12 +59,32 @@ export interface FidelityRecord {
   rewritten: number;
   /** …and fixed by falling back to the synthesis line verbatim. */
   replaced: number;
+  /** Names the grounding diff flagged that are GONE from the delivered
+   *  document because this check removed them. Counted only when the recount
+   *  says so - "blocked" is a claim about the artifact, not about intent. */
+  names_blocked: string[];
   /** Set when the check did not run. The document is untouched. */
   error?: string;
 }
 
 export function emptyFidelity(): FidelityRecord {
-  return { checked: 0, units: 0, unchecked: 0, stronger: 0, unsupported: 0, rewritten: 0, replaced: 0 };
+  return { checked: 0, units: 0, unchecked: 0, stronger: 0, unsupported: 0, rewritten: 0,
+           replaced: 0, names_blocked: [] };
+}
+
+/**
+ * Does this text use a name the evidence never earned?
+ *
+ * `renderGroundingDiff` has been REPORTING these since research-trust-report -
+ * ATX and SFX in one item, BSOD in the next, OEM in the one after - into a
+ * field on a job row that the colleague reading the report never sees. This is
+ * the same measurement given teeth: a unit that uses one is UNSUPPORTED before
+ * any judge is asked, because a name no source uses is a fact no source
+ * supports, and no amount of hedging makes it grounded.
+ */
+export function namesIn(text: string, flagged: string[]): string[] {
+  const t = String(text || "");
+  return flagged.filter((n) => new RegExp(`(?<![A-Za-z0-9])${n}(?![A-Za-z0-9])`).test(t));
 }
 
 /** One checkable piece of the rendered document. */
@@ -90,9 +111,13 @@ export interface CitedUnit {
   citations: number[];
   /** The `## heading` this unit sits under, "" before the first one. */
   section: string;
+  /** Flagged names this unit uses (filled by the check, not by extraction). */
+  names?: string[];
 }
 
 const CITE_RE = /\[Sources?\s*[^\]]*\]/gi;
+/** A synthesis line that carries evidence: tagged, and therefore not a [GAP]. */
+const GROUNDED_LINE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]/i;
 const TAG_RE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]\s*/i;
 
 function citationsIn(text: string): number[] {
@@ -183,6 +208,15 @@ export function citedUnits(rendered: string): CitedUnit[] {
     if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; return; }
     if (inFence) return;
 
+    // THE CHECK'S OWN APPARATUS is not a claim. A replaced long cell leaves
+    // "see Note 3 below the table" in the column and the grounded sentence in a
+    // blockquote under it; both are this module's writing, and the note is
+    // verbatim evidence. Judging them made a second pass condemn the marker
+    // (nothing in the sources says "see Note 3"), renumber it, and append a
+    // SECOND copy of every note - the idempotence invariant, breaking on the
+    // module's own output.
+    if (NOTE_LINE.test(line)) return;
+
     const heading = line.match(/^##\s+(.*?)\s*$/);
     if (heading) { section = heading[1]; headerSeen = false; return; }
 
@@ -206,6 +240,7 @@ export function citedUnits(rendered: string): CitedUnit[] {
         if (!text) return;
         if (!codeStripped(text).replace(CITE_RE, "").trim()) return;   // the Source cell itself
         if (seen++ === 0) return;                                      // the row label
+        if (NOTE_MARKER.test(text)) return;                            // this module's own marker
         out.push(unit(text, i, j, rowCites));
       });
       return;
@@ -251,6 +286,9 @@ function codeStripped(text: string): string {
 }
 
 const isBullet = (l: string) => /^\s*([-*+]|\d+\.)\s/.test(l) || /^\s*- \[[ x]\]\s/.test(l);
+/** What `placeNotes` writes under a table, and what `applyUnit` leaves in the cell. */
+const NOTE_LINE = /^\s*>\s*\*\*Note\s+\d+\.\*\*/;
+const NOTE_MARKER = /^see Note\s+\d+\s+below the table$/;
 
 /** Lines that continue a bullet: indented or plain prose, until a blank line,
  *  another bullet, a heading, a table row or a fence. */
@@ -327,6 +365,23 @@ export function splitSentences(line: string): string[] {
  */
 const SENTENCE_BREAK = /(?<=(?:[a-z0-9]{2}|[)\]"'”])[.?!])\s+(?=[A-Z(*_-])/g;
 
+/**
+ * Break a COARSE span into its sentences, keeping each citation with the
+ * sentence it closes.
+ *
+ * A span is coarse exactly because `SENTENCE_BREAK` will not split before a
+ * citation - that rule is what keeps "…to upgrade. [Source 13]" in one piece.
+ * So the cut for a repair goes AFTER such a citation, when more text follows
+ * it: "The PSU fails with a brief green LED. [Source 7]" | "The connector is
+ * proprietary [Source 13]." Each half keeps its own source, which is what makes
+ * a per-sentence verdict meaningful.
+ */
+export function splitCoarseSpan(text: string): string[] {
+  return String(text || "")
+    .split(/(?<=[.?!][ \t]\[Sources?[^\]]*\])\s+(?=[A-Z(*_-])/g)
+    .map((p) => p.trim()).filter(Boolean);
+}
+
 /** The synthesis lines a unit's citations point at. */
 export function referenceLines(synthesis: string, citations: number[]): string[] {
   const want = new Set(citations);
@@ -365,7 +420,12 @@ export function nearestLines(synthesis: string, text: string, max = 2): string[]
   if (!want.size) return [];
   return String(synthesis || "").split(/\r?\n/)
     .map((l) => l.trim())
-    .filter(Boolean)
+    // GROUNDED lines only. A [GAP] line is the synthesizer saying what it could
+    // not find; pasting one into a report as the correction for an overstated
+    // sentence puts "[GAP]" and an ungrounded sentence in front of a reader -
+    // measured on the comparison render, which acquired the literal name "GAP"
+    // that way.
+    .filter((l) => GROUNDED_LINE.test(l))
     .map((l) => ({ line: l, score: overlap(want, contentWords(l)) }))
     .filter((x) => x.score >= NEAREST_MIN_OVERLAP)
     .sort((a, b) => b.score - a.score)
@@ -463,6 +523,10 @@ export const REWRITE_SYS =
 
 Rewrite the sentence so it says exactly what those lines say - no more, no less - keeping its [Source N] citations, its format (a table cell stays a short cell, a checklist item stays an instruction), and its wording wherever the wording was already right. USUALLY ONE CLAUSE IS THE PROBLEM: hedge or delete that clause and leave the rest of the sentence alone. Do not restate the whole line; do not turn a short cell into a paragraph. Never add a name, standard, product, organisation, number or procedure the lines do not contain. Prefer the lines' own hedging words ("makes it difficult", "reported", "may") over absolutes.
 
+If an item is an OPEN QUESTION - it asks what the evidence does not cover, and it appears in a limitations list - keep it a question, keep what it is asking about, and only remove or replace the names listed as unearned. Never answer it, and never delete the question.
+
+If an item lists NAMES THE EVIDENCE NEVER USES, you must return a rewrite for it: describe the thing in the evidence's own words instead ("a replacement part from the manufacturer" rather than an OEM part), or drop the clause that needed the name. Returning nothing for such an item leaves the name standing.
+
 Return ONLY JSON: {"fixed": {"<item number>": "<the rewritten sentence>", ...}} - only the items you changed.`;
 
 /** How many units go into one judge call. */
@@ -483,10 +547,16 @@ function parseVerdicts(raw: string, n: number): Verdict[] | null {
 
 function itemBlock(units: CitedUnit[], synthesis: string): string {
   return units.map((u, i) =>
-    `${i + 1}. SENTENCE: ${u.view}\n   ${u.citations.length ? "CITED LINES" : "NEAREST LINES (the sentence cites nothing)"}:\n` +
+    `${i + 1}. SENTENCE: ${u.view}\n` +
+    (u_names(u).length
+      ? `   NAMES THE EVIDENCE NEVER USES (remove or replace each one; do not substitute another name): ${u_names(u).join(", ")}\n`
+      : "") +
+    `   ${u.citations.length ? "CITED LINES" : "NEAREST LINES (the sentence cites nothing)"}:\n` +
     evidenceFor(synthesis, u).map((l) => `   - ${l}`).join("\n"),
   ).join("\n\n");
 }
+
+const u_names = (u: CitedUnit): string[] => u.names ?? [];
 
 /** Replace one unit's text in the document, in place. */
 export function applyUnit(lines: string[], unit: CitedUnit, next: string): void {
@@ -520,8 +590,9 @@ export function wordCount(text: string): number {
  */
 export function placeNotes(
   lines: string[], notes: Array<{ line: number; label: string; text: string }>,
+  eol = "\n",
 ): string {
-  if (!notes.length) return lines.join("\n");
+  if (!notes.length) return lines.join(eol);
   const out = [...lines];
   // Group by the table each note came from (the last row at or after its line),
   // and insert from the bottom up so earlier indices stay valid.
@@ -537,7 +608,7 @@ export function placeNotes(
     const block = byEnd.get(end)!.map((n) => `> **${n.label}.** ${n.text}`);
     out.splice(end + 1, 0, "", ...block);
   }
-  return out.join("\n");
+  return out.join(eol);
 }
 
 /**
@@ -556,6 +627,15 @@ function countAgainst(record: FidelityRecord, delivered: string, judged: Set<str
   record.unchecked = Math.max(0, record.units - record.checked);
 }
 
+/** Is this line inside the limitations section? */
+function isLimitationsLine(lines: string[], at: number): boolean {
+  for (let k = at; k >= 0; k--) {
+    const h = lines[k].match(/^##\s+(.*?)\s*$/);
+    if (h) return /limitation|open question/i.test(h[1]);
+  }
+  return false;
+}
+
 export interface FidelityResult { rendered: string; record: FidelityRecord; }
 
 /**
@@ -570,11 +650,50 @@ export async function checkRenderFidelity(
   // unit; the unit keeps its ORIGINAL span and every edit is made against that,
   // so a render with nothing to correct is delivered byte for byte.
   const doc = String(rendered || "");
+  // The document's OWN line ending survives a correction. A checked-out file on
+  // Windows is CRLF, and rejoining it with "\n" rewrote every line of a
+  // document one sentence of which was wrong - the byte-identity invariant with
+  // a different mechanism.
+  const eol = doc.includes("\r\n") ? "\r\n" : "\n";
   if (!doc.trim() || !String(synthesis || "").trim()) return { rendered: doc, record };
 
   try {
     const all = citedUnits(doc);
     record.units = all.length;
+
+    // ── The NAMES gate ────────────────────────────────────────────────────
+    // A name the grounded answer never uses is not a claim the evidence can
+    // support, so the unit carrying it is UNSUPPORTED before a judge is asked.
+    // BSOD is exempt because the synthesis writes "Blue Screen of Death" -
+    // decided by an expansion match in grounding.ts, never by a list.
+    //
+    // The LIMITATIONS list is covered too, and this is the arguable half, so it
+    // is stated: a [GAP] line is the SYNTHESIZER's account of what it could not
+    // find, not a source's, so a name that appears only there is as unearned as
+    // one the renderer invented. Live run a205845d put "non-OEM" in front of a
+    // reader that way, and this render puts ESR and HDD there. Those lines are
+    // rewritten and never verbatim-replaced: a grounded line is not an answer
+    // to an open question.
+    const flaggedNames = renderGroundingDiff(doc, synthesis, "").names;
+    const namesBefore = new Set(flaggedNames);
+    const withNames: CitedUnit[] = [];
+    if (flaggedNames.length) {
+      for (const u of all) {
+        u.names = namesIn(u.view, flaggedNames);
+      }
+      // …and the lines no unit covers, which is where a [GAP] question lives.
+      const covered = new Set(all.map((u) => u.line));
+      doc.split(/\r?\n/).forEach((line, i) => {
+        if (covered.has(i)) return;
+        const hit = namesIn(line, flaggedNames);
+        if (!hit.length) return;
+        if (!isClaimLike(line)) return;
+        withNames.push({
+          text: line.trim(), view: normaliseCitations(line.trim()), line: i, cell: -1,
+          citations: citationsIn(codeStripped(line)), section: "", judgeable: true, names: hit,
+        });
+      });
+    }
     // A unit that cannot be edited safely is never judged - it is COUNTED, and
     // it lands in `unchecked` where a reader can see it.
     const editable = all.filter((u) => u.judgeable);
@@ -612,14 +731,23 @@ export async function checkRenderFidelity(
     record.stronger = verdicts.filter((v) => v === "STRONGER").length;
     record.unsupported = verdicts.filter((v) => v === "UNSUPPORTED").length + orphans.length;
 
-    const bad = units.filter((_u, i) => verdicts[i] === "STRONGER" || verdicts[i] === "UNSUPPORTED");
-    if (!bad.length && !orphans.length) {
+    const bad = units.filter((_u, i) =>
+      verdicts[i] === "STRONGER" || verdicts[i] === "UNSUPPORTED" || (u_names(units[i]).length > 0));
+    // A named unit the judge blessed is still counted as unsupported: the judge
+    // was asked about the claim, and the name is a claim it could not see.
+    record.unsupported += units.filter((u, i) =>
+      verdicts[i] === "SAME" || verdicts[i] === "WEAKER" ? u_names(u).length > 0 : false).length;
+    if (!bad.length && !orphans.length && !withNames.length) {
       countAgainst(record, doc, new Set(units.map((u) => u.text)));
       return { rendered: doc, record };
     }
+    if (!bad.length && !orphans.length) {
+      // Names only, and none of them inside a unit: nothing to judge, but the
+      // limitations lines still get their rewrite below.
+    }
 
     const lines = doc.split(/\r?\n/);
-    bad.push(...orphans);
+    bad.push(...orphans, ...withNames);
 
     // One targeted re-render of the offending sentences, and only those.
     let fixed: Record<string, string> = {};
@@ -634,6 +762,66 @@ export async function checkRenderFidelity(
         );
       }
     } catch { /* the verbatim fallback below is the guarantee, not this */ }
+
+    // ── COARSE UNITS ARE CORRECTED PER SENTENCE ───────────────────────────
+    // A citation sitting mid-line between two sentences gives one span holding
+    // both ("The PSU fails with a brief green LED. [Source 7] The connector is
+    // proprietary [Source 13]."). Replacing the whole span because one half is
+    // wrong rewrites a sentence nobody complained about. So a condemned span
+    // with more than one sentence is re-asked per sentence, and only the
+    // failing sentences are corrected - the sibling stays byte-identical.
+    const refined: CitedUnit[] = [];
+    for (const u of bad) {
+      const parts = splitSentences(u.text).flatMap((p) => splitCoarseSpan(p));
+      if (parts.length < 2) { refined.push(u); continue; }
+      const subs: CitedUnit[] = parts.map((p) => ({
+        ...u,
+        text: p,
+        view: normaliseCitations(p),
+        citations: citationsIn(codeStripped(p)).length ? citationsIn(codeStripped(p)) : u.citations,
+        names: namesIn(p, u_names(u)),
+      }));
+      let subVerdicts: Verdict[];
+      try {
+        subVerdicts = await judge(subs);
+      } catch {
+        // If the per-sentence pass cannot run, the span is corrected whole -
+        // the coarse behaviour, which is the safe one.
+        refined.push(u);
+        continue;
+      }
+      const failing = subs.filter((sub, k) =>
+        subVerdicts[k] === "STRONGER" || subVerdicts[k] === "UNSUPPORTED" || u_names(sub).length > 0);
+      // Every sentence failing is the same as the span failing; keep it whole
+      // so the verbatim fallback can replace it with one grounded line.
+      refined.push(...(failing.length === 0 || failing.length === subs.length ? [u] : failing));
+    }
+    bad.length = 0;
+    bad.push(...refined);
+
+    // A named unit the rewriter ignored gets ONE more ask, and only that unit.
+    // Measured across three documents: the model silently declines to rewrite an
+    // open QUESTION in a limitations list, and the alternative to asking again
+    // is either leaving the name or deleting words out of someone's question -
+    // which is the clipping rule K.9 refused.
+    const stubborn = bad.filter((u, i) => u_names(u).length > 0 && !(fixed[String(i + 1)] || "").trim());
+    if (stubborn.length) {
+      try {
+        const raw = await deps.chat(
+          REWRITE_SYS,
+          `You returned no rewrite for these, and each one uses a name the evidence never uses. ` +
+          `A rewrite is required for every item here.\n\nItems:\n\n${itemBlock(stubborn, synthesis)}`,
+          { json: true, nothink: true },
+        );
+        const parsed = JSON.parse(raw) as { fixed?: Record<string, unknown> };
+        if (parsed?.fixed && typeof parsed.fixed === "object") {
+          for (const [k, v] of Object.entries(parsed.fixed)) {
+            const at = bad.indexOf(stubborn[parseInt(k, 10) - 1]);
+            if (at >= 0) fixed[String(at + 1)] = String(v);
+          }
+        }
+      } catch { /* the name stays, and the recount will not call it blocked */ }
+    }
 
     const rewritten: CitedUnit[] = [];
     const changed: boolean[] = [];
@@ -679,6 +867,17 @@ export async function checkRenderFidelity(
     const notes: Array<{ line: number; label: string; text: string }> = [];
     rewritten.forEach((u, i) => {
       if (second[i] === "STRONGER" || second[i] === "UNSUPPORTED") {
+        // An open question is never answered with a grounded line. A [GAP] item
+        // in the limitations list is corrected by rewriting it or not at all;
+        // pasting evidence over a question about what the evidence lacks would
+        // be the worst sentence this module could write.
+        if (isLimitationsLine(lines, u.line) && !u.citations.length) {
+          // A rewrite of an open question still counts as a correction: the
+          // text changed, and a counter that only counts REPLACEMENTS reported
+          // "0 corrected" over a document whose questions had been rewritten.
+          if (u.text !== bad[i].text) { judged.add(u.text); record.rewritten++; }
+          return;
+        }
         const refs = u.citations.length
           ? referenceLines(synthesis, u.citations)
           : nearestLines(synthesis, bad[i].text);
@@ -715,8 +914,16 @@ export async function checkRenderFidelity(
       if (u.text !== bad[i].text) { judged.add(u.text); record.rewritten++; }
     });
 
-    const finalDoc = placeNotes(lines, notes);
+    const finalDoc = placeNotes(lines, notes, eol);
     countAgainst(record, finalDoc, judged);
+    // BLOCKED means gone from the delivered document, and it is measured on
+    // that document rather than asserted from intent: a rewrite that failed to
+    // drop the name is not a block, and the name stays visible in
+    // `prose_ungrounded.names` where the run already reports it.
+    if (namesBefore.size) {
+      const after = new Set(renderGroundingDiff(finalDoc, synthesis, "").names);
+      record.names_blocked = [...namesBefore].filter((n) => !after.has(n)).sort();
+    }
     return { rendered: finalDoc, record };
   } catch (e) {
     // Fail OPEN. The document is the renderer's, unchanged, and the run records

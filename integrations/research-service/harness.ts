@@ -1387,6 +1387,11 @@ export async function runResearch(
           `render check accounting mismatch: recorded ${fid.record.units} unit(s), the document has ${countUnits(prose)}`,
           { fidelity_units: fid.record.units });
       }
+      if (fid.record.names_blocked.length) {
+        await progress("synthesize",
+          `names blocked: ${fid.record.names_blocked.join(", ")} - the grounded answer never uses them`,
+          { names_blocked: fid.record.names_blocked.length });
+      }
       await progress("synthesize",
         `render checked: ${fid.record.checked} of ${fid.record.units} unit(s), ` +
         `${fid.record.stronger} stronger, ${fid.record.unsupported} unsupported, ` +

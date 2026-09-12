@@ -1,23 +1,18 @@
-<!-- Rendered 2026-09-12 through THIS branch's `scientific-paper` template and THIS branch's fidelity
-     check, using the deployed LiteLLM path (qwen36-27b, temperature 0.2) - the same two steps a
-     live run performs, in the same order. The synthesis is the recorded one from dry run a337520c (100 Hz auditory tones and VR motion sickness);
-     nothing in it was edited. The Sources list and the footer are appended by renderResult and
-     are not part of this render.
+<!-- The `scientific-paper` render of dry run a337520c (100 Hz tones and VR motion sickness), as delivered by THIS branch's
+     pipeline: rendered through the template, then through the fidelity check INCLUDING the names
+     gate (research-trust-names). The document is the one committed by research-trust-template with
+     the gate applied to it - not a fresh render - so `git diff` against that commit shows exactly
+     what the gate changed and nothing else.
 
-     REGENERATED after attempt 1: the checker used to normalise the text that SHIPS, which moved
-     citations and ate the space after them in documents it had no correction to make to. It now
-     reads a normalised VIEW of each unit and edits only the unit's original span - so applying
-     the check to THIS file returns it byte for byte, which fidelity.test.ts asserts over every
-     committed render and over the approved document.
-
-     The SAME skeleton over a literature question, with this template's names: Findings, and
-     Findings by theme as the table.
+     HTC - a headset maker the evidence never names - is gone.
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":65,"units":67,"unchecked":2,"stronger":1,"unsupported":9,"rewritten":6,"replaced":3}
-       grounding diff  : numbers [] urls [] names []
+       render fidelity : {"checked":66,"units":67,"unchecked":1,"stronger":1,"unsupported":2,"rewritten":1,"replaced":2,"names_blocked":["HTC"]}
+       grounding diff  : numbers [] urls [] names []  (was: names [HTC])
 
-     N and M are both counted on THIS file by `countUnits`; template-renders.test.ts asserts it. -->
+     Applying the check to THIS file returns it byte for byte - fidelity.test.ts and
+     template-renders.test.ts both assert it, and it is the invariant attempt 1 of the template
+     item failed on. N and M are counted on this file by `countUnits`. -->
 
 # 100 Hz Bone-Conducted Sound Reduces Motion Sickness Through Otolith Resonance: Human and Murine Evidence and Inferred Relevance to VR Cybersickness
 
@@ -80,17 +75,17 @@ The extension of the 100 Hz effect to a full VR headset experience is inferred f
 
 The long-term efficacy in humans is not established. The ≥120-minute duration was demonstrated only in the mouse beam-balance model [Source 10]; the human studies measured symptoms during a single motion exposure session. Whether the effect persists, wanes, or requires re-administration over hours or days in a human VR session is unknown.
 
-The interaction between 100 Hz sound stimulation and other VR-specific countermeasures (high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source [Source 11, 12]. It is unclear whether the effects are additive, redundant, or potentially antagonistic [Source 11, 12].
+The interaction between 100 Hz sound stimulation and other VR-specific countermeasures (high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source [Source 11, 12]. Whether the 100 Hz effect is additive with other VR-specific countermeasures (e.g., high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source. (unverified figure: 100) [Source 11, 12]
 
 One sub-experiment in the study had a sample size of only 10 participants, which was noted as a limitation by community reviewers [Source 9]. When the otoliths were surgically removed from the mouse tissue, the 100 Hz–induced activation disappeared, confirming that the otoliths (not the cochlea) were the target of the sound stimulation. [Source 7]
 
-The neurophysiological pathway by which supplementary otolith vibration resolves or attenuates the visual-vestibular prediction error in the brainstem and cerebellum during VR is not detailed beyond the general statement that the stimulation "broadly activates the vestibular system" [Source 6, 7]. The EEG and GVS data [Source 1, 2] characterize the conflict state but do not trace the resolution pathway.
+The neurophysiological pathway by which supplementary otolith vibration resolves or attenuates the visual-vestibular prediction error in the brainstem and cerebellum during VR is not detailed beyond the general statement that the stimulation "broadly activates the vestibular system" [Source 6, 7]. VR motion sickness (cybersickness / VIMS) is attributed to a sensory conflict or mismatch between visual, vestibular, and proprioceptive signals integrated in the brainstem and cerebellum; in VR, the eyes perceive self-motion while the vestibular system detects stillness. [Source 1, 11, 12, 15]
 
 ## Limitations and open questions
 
 The evidence is thin on the following points, none of which is resolved by the sources provided:
 
-- No source in the provided set reports a controlled experiment that directly applied the 100 Hz tone inside a VR headset environment (e.g., Oculus Quest, HTC Vive) and measured cybersickness outcomes, so the specific quantitative effectiveness of 100 Hz sound for VR-induced motion sickness remains unverified.
+- No source in the provided set reports a controlled experiment that directly applied the 100 Hz tone inside a VR headset environment and measured cybersickness outcomes, so the specific quantitative effectiveness of 100 Hz sound for VR-induced motion sickness remains unverified.
 - No source provides VR-specific developer guidance such as recommended integration APIs, timing relative to scene transitions, interaction with frame-rate or refresh-rate settings, or whether the tone should be continuous or pulsed during the VR session.
 - The precise neurophysiological pathway by which supplementary otolith vibration resolves (or attenuates) the visual-vestibular prediction error in the brainstem/cerebellum during VR is not detailed in any provided source beyond the general statement that it "broadly activates the vestibular system."
 - No source reports a head-to-head comparison of 100 Hz sound stimulation versus pharmacological antiemetics (e.g., scopolamine, dimenhydrinate) or versus other non-pharmacological VR countermeasures (e.g., GVS, fluid-filled glasses) in the same VR context.

@@ -1,24 +1,22 @@
-<!-- Rendered 2026-09-12 through THIS branch's `buyers-guide` template and THIS branch's fidelity
-     check, using the deployed LiteLLM path (qwen36-27b, temperature 0.2) - the same two steps a
-     live run performs, in the same order. The synthesis is the recorded one from live job 64ac38cf (the approved exemplar);
-     nothing in it was edited. The Sources list and the footer are appended by renderResult and
-     are not part of this render.
+<!-- The `buyers-guide` render of live job 64ac38cf (the approved exemplar), as delivered by THIS branch's
+     pipeline: rendered through the template, then through the fidelity check INCLUDING the names
+     gate (research-trust-names). The document is the one committed by research-trust-template with
+     the gate applied to it - not a fresh render - so `git diff` against that commit shows exactly
+     what the gate changed and nothing else.
 
-     REGENERATED after attempt 1: the checker used to normalise the text that SHIPS, which moved
-     citations and ate the space after them in documents it had no correction to make to. It now
-     reads a normalised VIEW of each unit and edits only the unit's original span - so applying
-     the check to THIS file returns it byte for byte, which fidelity.test.ts asserts over every
-     committed render and over the approved document.
-
-     Six headings, in order, and they are the approved document's own: the title states the finding,
-     then Executive summary, What to check in person, Failure modes by subsystem, What the evidence
-     does not settle, Limitations and open questions.
+     OEM was in the body - "the availability of an OEM replacement part is left open" - and no source in
+     that run ever writes OEM. ESR and HDD were in the LIMITATIONS questions, carried there from the
+     synthesis's own [GAP] lines, which are the synthesizer's account of what it could not find and
+     not a source's words. All three are gone; the sentence that carried OEM kept its first half
+     byte-for-byte and had only its second sentence replaced.
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":48,"units":52,"unchecked":4,"stronger":3,"unsupported":2,"rewritten":0,"replaced":5}
-       grounding diff  : numbers [] urls [] names ["OEM"]
+       render fidelity : {"checked":44,"units":44,"unchecked":0,"stronger":0,"unsupported":1,"rewritten":2,"replaced":1,"names_blocked":["ESR","HDD","OEM"]}
+       grounding diff  : numbers [] urls [] names []  (was: names [ESR, HDD, OEM])
 
-     N and M are both counted on THIS file by `countUnits`; template-renders.test.ts asserts it. -->
+     Applying the check to THIS file returns it byte for byte - fidelity.test.ts and
+     template-renders.test.ts both assert it, and it is the invariant attempt 1 of the template
+     item failed on. N and M are counted on this file by `countUnits`. -->
 
 # Dell OptiPlex 3050: A Recurring 180 W PSU Failure, Fragile Socket Pins, and a Proprietary Connector Define the Pre-Purchase Risk
 
@@ -59,7 +57,7 @@ The evidence documents a specific, recurring power-supply failure on the OptiPle
 
 The grounded answer states that the OptiPlex 3050 SFF features the B250 chipset and supports Gen 7 Intel Core processors, but flags the generation number as an unverified figure [Source 13]. The Tower Owner's Manual lists both Skylake (6th Gen) and Kaby Lake (7th Gen) Intel Core processors as supported [Source 3], which is consistent with a 7th-generation ceiling, but the SFF-specific chipset and generation claim carries an explicit uncertainty marker.
 
-Whether Dell sells a direct-replacement 180 W SFF PSU separately is not confirmed by any source. The proprietary connector makes aftermarket substitution difficult [Source 13], but the availability of an OEM replacement part is left open.
+Whether Dell sells a direct-replacement 180 W SFF PSU separately is not confirmed by any source. The OptiPlex 3050 SFF uses a proprietary power supply and a proprietary power connector, which makes it difficult for users to install aftermarket PSUs to support higher-power GPUs. [Source 13]
 
 The "Solved!" tag on the DIMM-slot-2-only forum thread does not indicate what specific fix resolved the issue, if any; no solution text is visible in the provided source content [Source 14]. The user's speculation that the CPU may have been damaged during the thermal-paste service remains unconfirmed.
 
@@ -69,9 +67,9 @@ The sources do not describe a specific method or visual indicator for detecting 
 
 The evidence is thin on the following points, none of which is addressed by any provided source:
 
-- Are there documented capacitor-related failures (bulging, leaking, or ESR-degraded capacitors) on the OptiPlex 3050 motherboard or PSU?
+- Are there documented capacitor-related failures (bulging, leaking, or degraded capacitors) on the OptiPlex 3050 motherboard or PSU?
 - Is there a specific method or visual indicator for detecting prior BIOS tampering (modified ME region, altered checksums, non-stock BIOS version) on a used OptiPlex 3050 before purchase?
-- Are there common storage-drive failure patterns (specific HDD/SSD models that fail, controller issues, or SATA port degradation) unique to the OptiPlex 3050?
+- Are there common storage-drive failure patterns (specific drive models that fail, controller issues, or SATA port degradation) unique to the OptiPlex 3050?
 - Is there a specific list of physical inspection checkpoints (which capacitors to look at, which connectors to check for corrosion, which screws to verify) for a pre-purchase inspection of a used OptiPlex 3050?
 - Does Dell sell a direct-replacement 180 W SFF PSU separately, or is the proprietary connector a dead end for PSU replacement?
 - What, if anything, resolved the DIMM-slot-2-only issue in the forum thread marked "Solved!"?

@@ -253,6 +253,47 @@ export interface RenderGroundingDiff {
 const RENDER_URL_RE = /https?:\/\/[^\s)\]]+/g;
 const RENDER_ACRONYM_RE = /[A-Za-z0-9]+/g;
 
+/**
+ * Is this name earned by the evidence, even though the evidence never writes it?
+ *
+ * "BSOD" is not in the synthesis; "Blue Screen of Death" is, and a report that
+ * abbreviates a phrase its sources spell out has invented nothing. The test is
+ * an EXPANSION MATCH and not a list of known abbreviations:
+ *   - the name appears as a whole word, case-insensitively, anywhere in the
+ *     evidence ("RBAC" in a source that writes "RBAC"), or
+ *   - some run of consecutive words in the evidence has initials that spell it
+ *     (B-lue S-creen o-f D-eath).
+ *
+ * Deliberately generous on the second rule - "of" counts, because the phrases
+ * people abbreviate include their small words - and deliberately silent about
+ * WHICH abbreviations exist, because four items in this workstream have now
+ * failed on a hand-written list of surface strings.
+ */
+export function expansionMatch(name: string, evidence: string): boolean {
+  const n = String(name || "").trim();
+  if (n.length < 2) return false;
+  const text = String(evidence || "");
+  if (new RegExp(`(?<![A-Za-z0-9])${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "i").test(text)) {
+    return true;
+  }
+  const want = n.toLowerCase();
+  // Initials of consecutive words, per LINE: a phrase does not span a newline,
+  // and letting it would make any long document contain every acronym.
+  for (const line of text.split(/\r?\n/)) {
+    const words = line.match(/[A-Za-z][A-Za-z0-9'-]*/g) || [];
+    const initials = words.map((w) => w[0].toLowerCase()).join("");
+    if (initials.includes(want)) return true;
+  }
+  return false;
+}
+
+/** The lines of a synthesis that are GROUNDED - tagged and cited. */
+export function groundedText(synthesis: string): string {
+  return String(synthesis || "").split(/\r?\n/)
+    .filter((l) => /^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]/i.test(l))
+    .join("\n");
+}
+
 function acronymSet(text: string): Set<string> {
   const out = new Set<string>();
   for (const w of String(text || "").match(RENDER_ACRONYM_RE) || []) {
@@ -280,11 +321,25 @@ export function renderGroundingDiff(
   const refNums = new Set(stripPointers(normalise(ref)).match(NUMBER_RE) || []);
   const docUrls = new Set(doc.match(RENDER_URL_RE) || []);
   const refUrls = new Set(ref.match(RENDER_URL_RE) || []);
+  // NAMES are judged against the GROUNDED lines only, and the query. A [GAP]
+  // line is the synthesizer's own words about what it could not find - not a
+  // source's - so a name that appears only there is as unearned as one the
+  // renderer invented. Measured live (run a205845d): "non-OEM" reached the
+  // Limitations list because a [GAP] line said "a non-OEM fan", and no source
+  // in that run ever wrote OEM.
+  //
+  // Numbers and URLs keep the whole synthesis as their reference: a figure
+  // inside a [GAP] QUESTION is a question, not an assertion, and flagging it
+  // would report the report for asking about the thing it was asked about.
+  const refNames = acronymSet(`${groundedText(synthesis || "")}\n${query || ""}`);
   const docNames = acronymSet(doc);
-  const refNames = acronymSet(ref);
+  const grounded = `${groundedText(synthesis || "")}\n${query || ""}`;
   return {
     numbers: [...docNums].filter((n) => !refNums.has(n)).sort(),
     urls: [...docUrls].filter((u) => !refUrls.has(u)).sort(),
-    names: [...docNames].filter((n) => !refNames.has(n)).sort(),
+    names: [...docNames]
+      .filter((n) => !refNames.has(n))
+      .filter((n) => !expansionMatch(n, grounded))
+      .sort(),
   };
 }

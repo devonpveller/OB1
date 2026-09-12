@@ -15,12 +15,14 @@
  * sentence the judge condemns, and - the case that matters most - what happens
  * when the judge itself breaks.
  */
-import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, nearestLines,
+  applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, namesIn, nearestLines,
   normaliseCitations, referenceLines, splitSentences, supersetCitations, verbatimFallback,
 } from "./fidelity.ts";
 import { renderSys, templateById } from "./templates.ts";
+import { expansionMatch, renderGroundingDiff } from "./grounding.ts";
+import { coverageFooter, emptySearchRecord } from "./report.ts";
 import type { Deps } from "./harness.ts";
 
 const SYNTH = [
@@ -441,18 +443,26 @@ Deno.test("ACCEPTANCE 3: N and M are counted on the DELIVERED document", async (
 // to the unit's ORIGINAL span. These two cases are the contract: nothing to
 // correct means nothing changes, and a second pass changes nothing either.
 
-const DOCS = [
-  "rendered-64ac38cf-buyers-guide.md",
-  "rendered-a337520c-scientific-paper.md",
-  "rendered-5ab36fe0-product-comparison.md",
+// Each document WITH ITS OWN synthesis. Pairing them all with one synthesis was
+// harmless while the check only judged claims; the names gate reads the
+// evidence, so the wrong evidence makes every name in the document unearned and
+// the checker "corrects" a document it should never have been shown.
+const DOCS: Array<[string, string]> = [
+  ["rendered-64ac38cf-buyers-guide.md", "live-owui-64ac38cf.result.json"],
+  ["rendered-a337520c-scientific-paper.md", "dryrun-a337520c-100hz.result.json"],
+  ["rendered-5ab36fe0-product-comparison.md", "job-5ab36fe0-git-vs-azuredevops.result.json"],
 ];
+const synthesisOf = (n: string) => {
+  const d = JSON.parse(fixtureDoc(n));
+  return (d.result ?? d).synthesis as string;
+};
 // INSIDE the submodule. Reading the parent repo's copy passed here and died
 // the moment the suite ran with only this directory mounted - the same defect
 // this workstream fixed one item ago, made again by the test that exists to
 // stop documents being edited behind a reader's back.
 const APPROVED = new URL("./fixtures/approved-document-64ac38cf.md", import.meta.url);
 const fixtureDoc = (n: string) =>
-  Deno.readTextFileSync(new URL(`./fixtures/${n}`, import.meta.url));
+  Deno.readTextFileSync(new URL(`./fixtures/${n}`, import.meta.url)).replace(/\r\n/g, "\n");
 
 /** A judge that blesses everything, so the only thing under test is the writing. */
 const blessAll = {
@@ -464,19 +474,58 @@ const blessAll = {
 } as unknown as Deps;
 
 Deno.test("INVARIANT: a document with nothing to correct is returned BYTE-FOR-BYTE", async () => {
-  const docs = [...DOCS.map(fixtureDoc), Deno.readTextFileSync(APPROVED)];
-  const synth = JSON.parse(fixtureDoc("live-owui-64ac38cf.result.json")).synthesis;
-  for (const doc of docs) {
-    const out = await checkRenderFidelity(blessAll, doc, synth);
-    assertEquals(out.rendered, doc, "the checker edited a document it had no correction for");
-    assertEquals(out.record.rewritten + out.record.replaced, 0);
+  for (const [name, src] of DOCS) {
+    const doc = fixtureDoc(name);
+    const out = await checkRenderFidelity(blessAll, doc, synthesisOf(src));
+    assertEquals(out.rendered, doc, `the checker edited ${name}, which it had no correction for`);
+    assertEquals(out.record.rewritten + out.record.replaced, 0, name);
+    assertEquals(out.record.names_blocked, [], name);
+  }
+});
+
+Deno.test("the gate BLOCKS the names in the two documents kept as records", async () => {
+  // The approved document and the attempt-1 ATX/SFX render are historical: they
+  // were delivered before this gate existed and they stay exactly as they were.
+  // What the gate has to say about them is asserted here instead.
+  const cases: Array<[string, string, string[]]> = [
+    ["approved-document-64ac38cf.md", "live-owui-64ac38cf.result.json", ["ESR", "HDD"]],
+    ["rendered-AFTER-v1-33250e9b.md", "live-owui-33250e9b.result.json", ["ATX", "SFX"]],
+  ];
+  for (const [name, src, expected] of cases) {
+    const doc = fixtureDoc(name).replace(/<!--[\s\S]*?-->/g, "").trim();
+    const synthesis = synthesisOf(src);
+    assertEquals(renderGroundingDiff(doc, synthesis, "").names, expected, name);
+    // A rewriter that does its job removes them, and the record says which.
+    const deps = {
+      chat: (sys: string, user: string) => {
+        if (sys.startsWith("You compare SENTENCES")) {
+          const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
+          return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("SAME") }));
+        }
+        // Strip the offending names out of each item, which is what the model is
+        // asked to do; the mock does it mechanically so the TEST is about the
+        // machinery and not about a model's willingness.
+        const items = user.split(/\n(?=\d+\. SENTENCE: )/).filter((b) => /SENTENCE:/.test(b));
+        const fixed: Record<string, string> = {};
+        items.forEach((b, i) => {
+          const line = (b.match(/SENTENCE: (.*)/) || [])[1] ?? "";
+          let out = line;
+          for (const n of expected) out = out.replace(new RegExp(`[^\\s]*${n}[^\\s]*`, "g"), "a part");
+          if (out !== line) fixed[String(i + 1)] = out;
+        });
+        return Promise.resolve(JSON.stringify({ fixed }));
+      },
+    } as unknown as Deps;
+    const out = await checkRenderFidelity(deps, doc, synthesis);
+    assertEquals(out.record.names_blocked, expected, name);
+    assertEquals(renderGroundingDiff(out.rendered, synthesis, "").names, [], name);
   }
 });
 
 Deno.test("INVARIANT: running the check on its own output changes nothing (idempotence)", async () => {
-  const synth = JSON.parse(fixtureDoc("live-owui-64ac38cf.result.json")).synthesis;
-  for (const name of DOCS) {
+  for (const [name, src] of DOCS) {
     const doc = fixtureDoc(name);
+    const synth = synthesisOf(src);
     const once = await checkRenderFidelity(blessAll, doc, synth);
     const twice = await checkRenderFidelity(blessAll, once.rendered, synth);
     assertEquals(twice.rendered, once.rendered, name);
@@ -578,4 +627,168 @@ Deno.test("the wrapped bullet lands in `unchecked`, out loud", async () => {
   assertEquals(out.record.units, 2);
   assertEquals(out.record.checked, 1);
   assertEquals(out.record.unchecked, 1);
+});
+
+// ── The names gate (research-trust-names) ─────────────────────────────────
+//
+// `renderGroundingDiff` has been REPORTING invented names for three items -
+// ATX and SFX, then BSOD, then OEM - into a field on a job row that the reader
+// of the report never sees. The measurement now has teeth: a unit that uses a
+// name the grounded answer never uses is UNSUPPORTED before any judge is asked.
+
+const NAME_SYNTH = [
+  "[SOURCED] The Dell OptiPlex 3050 SFF uses a proprietary power supply and a proprietary power " +
+  "connector, which makes it difficult for users to install aftermarket PSUs. [Source 13]",
+  "[SOURCED] General motherboard-failure guidance notes that a failed POST, unexplained shutdowns " +
+  "and Blue Screen of Death errors can point to a defective motherboard. [Source 3]",
+  "[GAP] Are there capacitor failures (bulging, leaking, or ESR-degraded capacitors) on this board?",
+].join("\n");
+
+Deno.test("ACCEPTANCE: an abbreviation whose EXPANSION is in the evidence is not blocked", () => {
+  // BSOD is not in the synthesis; "Blue Screen of Death" is. A report that
+  // abbreviates a phrase its sources spell out has invented nothing, and this
+  // is decided by an expansion match rather than by a list of abbreviations -
+  // the fifth surface-string list this workstream would have shipped.
+  assertEquals(expansionMatch("BSOD", NAME_SYNTH), true);
+  const doc = "## Findings\n\nA failed POST or a BSOD can indicate a defective motherboard [Source 3].";
+  assertEquals(renderGroundingDiff(doc, NAME_SYNTH, "").names, []);
+
+  // …and an unrelated acronym with no expansion anywhere IS blocked.
+  assertEquals(expansionMatch("HTC", NAME_SYNTH), false);
+  const bad = "## Findings\n\nA failed POST on an HTC headset indicates a defective board [Source 3].";
+  assertEquals(renderGroundingDiff(bad, NAME_SYNTH, "").names, ["HTC"]);
+  // The whole-word half of the match, too: a name the evidence writes out.
+  assertEquals(expansionMatch("PSUs", NAME_SYNTH), true);
+});
+
+Deno.test("ACCEPTANCE: a unit using an unearned name is UNSUPPORTED before any judge", async () => {
+  const doc = "## What the evidence does not settle\n\n" +
+    "The proprietary connector makes substitution difficult [Source 13], but the availability of " +
+    "an OEM replacement part is left open.";
+  let asked = 0;
+  const deps = {
+    chat: (sys: string, user: string) => {
+      if (sys.startsWith("You compare SENTENCES")) {
+        asked++;
+        const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
+        // The judge BLESSES it - and the gate blocks it anyway.
+        return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("SAME") }));
+      }
+      // The rewriter is told which name offends.
+      assert(/NAMES THE EVIDENCE NEVER USES/.test(user), user.slice(0, 200));
+      assert(/OEM/.test(user));
+      return Promise.resolve(JSON.stringify({
+        fixed: { "1": "The proprietary connector makes substitution difficult [Source 13]." },
+      }));
+    },
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, NAME_SYNTH);
+  assert(asked > 0, "the judge was never asked");
+  assertEquals(out.record.names_blocked, ["OEM"]);
+  assert(!/OEM/.test(out.rendered), out.rendered);
+  assertEquals(renderGroundingDiff(out.rendered, NAME_SYNTH, "").names, []);
+});
+
+Deno.test("a [GAP] line is the synthesizer's words, not a source's - the limitations list is gated", () => {
+  // The decision, stated: ESR appears in the synthesis, but only in a [GAP]
+  // line, which is the synthesizer's account of what it could NOT find. A
+  // report that carries that name into its limitations list is using a word no
+  // source used. Live run a205845d did exactly this with "non-OEM".
+  assert(/ESR/.test(NAME_SYNTH), "the fixture lost its [GAP] line");
+  const doc = "## Limitations and open questions\n\n" +
+    "- Are there capacitor failures (bulging, leaking, or ESR-degraded capacitors) on this board?";
+  assertEquals(renderGroundingDiff(doc, NAME_SYNTH, "").names, ["ESR"]);
+  // …and the line is presented to the check even though a [GAP] question is
+  // never judged for its CLAIMS.
+  assertEquals(namesIn(doc, ["ESR"]), ["ESR"]);
+});
+
+Deno.test("an open question is rewritten, never answered with evidence", async () => {
+  const doc = "## Limitations and open questions\n\n" +
+    "- Are there capacitor failures (bulging, leaking, or ESR-degraded capacitors) on this board?";
+  const deps = {
+    chat: (sys: string) =>
+      sys.startsWith("You compare SENTENCES")
+        ? Promise.resolve(JSON.stringify({ verdicts: ["UNSUPPORTED"] }))
+        // The rewriter declines, twice.
+        : Promise.resolve(JSON.stringify({ fixed: {} })),
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, NAME_SYNTH);
+  // The question survives - no grounded line is pasted over it - and the name
+  // is NOT counted as blocked, because it is still there. "Blocked" is a claim
+  // about the delivered document.
+  assert(/Are there capacitor failures/.test(out.rendered), out.rendered);
+  assert(!/\[SOURCED\]|\[Source \d/.test(out.rendered), out.rendered);
+  assertEquals(out.record.names_blocked, []);
+});
+
+// ── Per-sentence correction inside a coarse unit ──────────────────────────
+
+Deno.test("ACCEPTANCE: only the failing sentence of a coarse unit is replaced", async () => {
+  // The tester's sample. One span, two sentences, two citations: a mid-line
+  // citation gives the checker one unit covering both, and replacing the span
+  // would rewrite a sentence nobody complained about.
+  const doc = "## Findings\n\n" +
+    "The PSU fails with a brief green LED. [Source 7] The connector is proprietary [Source 13].";
+  const synth = [
+    "[SOURCED] The PSU fails with a brief green LED on a cold start. [Source 7]",
+    "[SOURCED] The Dell OptiPlex 3050 SFF uses a proprietary power supply and a proprietary power " +
+    "connector, which makes it difficult for users to install aftermarket PSUs. [Source 13]",
+  ].join("\n");
+  assertEquals(citedUnits(doc).length, 1, "the span should be ONE coarse unit");
+
+  const seen: string[][] = [];
+  const deps = {
+    chat: (sys: string, user: string) => {
+      if (sys.startsWith("You compare SENTENCES")) {
+        const items = (user.match(/^\d+\. SENTENCE: (.*)$/gm) || []).map((l) => l.replace(/^\d+\. SENTENCE: /, ""));
+        seen.push(items);
+        // First call: the whole span, condemned. Second: per sentence - only
+        // the SECOND sentence is wrong.
+        if (items.length === 1) return Promise.resolve(JSON.stringify({ verdicts: ["STRONGER"] }));
+        return Promise.resolve(JSON.stringify({
+          verdicts: items.map((t) => /connector/.test(t) ? "STRONGER" : "SAME"),
+        }));
+      }
+      return Promise.resolve(JSON.stringify({ fixed: {} }));   // no rewrite: fall to verbatim
+    },
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, synth);
+  // The judge WAS re-asked per sentence.
+  assert(seen.some((items) => items.length === 2), JSON.stringify(seen));
+  // The first sentence is byte-identical; only the second was replaced.
+  assert(out.rendered.includes("The PSU fails with a brief green LED. [Source 7]"), out.rendered);
+  assert(!out.rendered.includes("The connector is proprietary [Source 13]."), out.rendered);
+  assert(out.rendered.includes("makes it difficult for users to install aftermarket PSUs"), out.rendered);
+  assertEquals(out.record.replaced, 1);
+});
+
+Deno.test("a coarse unit whose every sentence fails is corrected whole", async () => {
+  const doc = "## Findings\n\nThe PSU never fails. [Source 7] The connector is universal [Source 13].";
+  const synth = "[SOURCED] The PSU fails with a brief green LED on a cold start. [Source 7]";
+  const deps = {
+    chat: (sys: string, user: string) => {
+      if (sys.startsWith("You compare SENTENCES")) {
+        const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
+        return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("STRONGER") }));
+      }
+      return Promise.resolve(JSON.stringify({ fixed: {} }));
+    },
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, synth);
+  // One grounded line replaces the span, rather than two copies of it.
+  assertEquals((out.rendered.match(/brief green LED on a cold start/g) || []).length, 1, out.rendered);
+});
+
+Deno.test("the footer says how many names were blocked, and only when there were any", () => {
+  const needs = [{ need: "a", status: "answered" as const }];
+  const rec = { checked: 44, units: 44, unchecked: 0, rewritten: 2, replaced: 1 };
+  assertStringIncludes(
+    coverageFooter(needs as never, emptySearchRecord(), "complete", null,
+      { ...rec, names_blocked: ["ESR", "HDD", "OEM"] }),
+    "render checked: 44 of 44, 3 corrected, 0 unchecked \u00b7 names: 3 blocked",
+  );
+  const quiet = coverageFooter(needs as never, emptySearchRecord(), "complete", null,
+    { ...rec, names_blocked: [] });
+  assertEquals(/names:/.test(quiet), false, quiet);
 });

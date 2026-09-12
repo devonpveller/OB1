@@ -19,7 +19,12 @@ import { SECTION_NAMES } from "./templates.ts";
 import { coverageFooter, type NeedState, emptySearchRecord } from "./report.ts";
 
 const F = new URL("./fixtures/", import.meta.url);
-const read = (n: string) => Deno.readTextFileSync(new URL(n, F));
+// A Windows checkout hands these back with CRLF; the documents are the same
+// documents. Normalising HERE keeps the assertions about content, and the
+// byte-identity invariant below still compares the checker against the exact
+// bytes it was given.
+const read = (n: string) =>
+  Deno.readTextFileSync(new URL(n, F)).replace(/\r\n/g, "\n");
 const body = (n: string) => read(n).replace(/<!--[\s\S]*?-->/g, "").trim();
 const fx = (n: string) => {
   const d = JSON.parse(read(n));
@@ -124,9 +129,9 @@ Deno.test("ACCEPTANCE 2: the comparison synthesis renders the table AS the compa
 Deno.test("ACCEPTANCE 3: the footer's M is countUnits of the delivered document", () => {
   // The three renders carry the record their own run produced, in the header.
   const cases: Array<[string, number, number]> = [
-    ["rendered-64ac38cf-buyers-guide.md", 48, 52],
-    ["rendered-a337520c-scientific-paper.md", 65, 67],
-    ["rendered-5ab36fe0-product-comparison.md", 25, 25],
+    ["rendered-64ac38cf-buyers-guide.md", 44, 44],
+    ["rendered-a337520c-scientific-paper.md", 66, 67],
+    ["rendered-5ab36fe0-product-comparison.md", 23, 24],
   ];
   for (const [name, checked, units] of cases) {
     const doc = body(name);
@@ -152,7 +157,6 @@ Deno.test("INVARIANT: the check leaves every COMMITTED render exactly as it is",
   // check. Attempt 1's did, and the check still changed two of them when run
   // again - it normalised the text that ships. Applying it to each committed
   // file must now return that file.
-  const synth = fx("live-owui-64ac38cf.result.json").synthesis;
   const blessAll = {
     chat: (sys: string, user: string) => {
       if (!sys.startsWith("You compare SENTENCES")) return Promise.resolve("{}");
@@ -160,13 +164,15 @@ Deno.test("INVARIANT: the check leaves every COMMITTED render exactly as it is",
       return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("SAME") }));
     },
   } as unknown as Parameters<typeof checkRenderFidelity>[0];
-  for (const name of [
-    "rendered-64ac38cf-buyers-guide.md",
-    "rendered-a337520c-scientific-paper.md",
-    "rendered-5ab36fe0-product-comparison.md",
-  ]) {
+  for (const [name, src] of [
+    ["rendered-64ac38cf-buyers-guide.md", "live-owui-64ac38cf.result.json"],
+    ["rendered-a337520c-scientific-paper.md", "dryrun-a337520c-100hz.result.json"],
+    ["rendered-5ab36fe0-product-comparison.md", "job-5ab36fe0-git-vs-azuredevops.result.json"],
+  ] as Array<[string, string]>) {
     const doc = read(name);
-    const out = await checkRenderFidelity(blessAll, doc, synth);
+    // Each document against ITS OWN synthesis: the names gate reads the
+    // evidence, so the wrong evidence makes every name unearned.
+    const out = await checkRenderFidelity(blessAll, doc, fx(src).synthesis);
     assertEquals(out.rendered, doc, name);
   }
 });
