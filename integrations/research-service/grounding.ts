@@ -245,6 +245,9 @@ export interface RenderGroundingDiff {
   numbers: string[];
   urls: string[];
   names: string[];
+  /** Citations a unit carries that contribute nothing to it (tester X3).
+   *  Filled by the harness from `supersetCitations`; [] when not computed. */
+  citations?: string[];
 }
 
 const RENDER_URL_RE = /https?:\/\/[^\s)\]]+/g;

@@ -1,0 +1,297 @@
+{
+ "_provenance": "captured 2026-09-12 from dry run a337520c (the 100 Hz auditory-tone / VR motion-sickness question), whole and unedited. It is the run that proves the skeleton is not shaped only for hardware: the same six sections, rendered through scientific-paper, over a literature question.",
+ "_expect": "scientific-paper: the skeleton with that template's section names, every citation kept",
+ "id": "a337520c-44ad-4311-ba38-4d7c8f2cd6ae",
+ "status": "done",
+ "progress": {
+  "phase": "done",
+  "message": "outcome=complete backstop=complete curator=skipped"
+ },
+ "result": {
+  "gaps": [
+   "What are the proposed physiological mechanisms by which 100Hz or specific audio frequencies mitigate motion sickness in VR?",
+   "Which peer-reviewed academic studies have specifically tested 100Hz or similar frequencies for VR motion sickness reduction?",
+   "What quantitative metrics (e.g., Nausea and Discomfort Scale scores, retention rates) demonstrate the effectiveness of these audio interventions?",
+   "How does the effectiveness of 100Hz audio compare to other frequencies or control conditions in existing literature?",
+   "What specific implementation guidelines (e.g., amplitude, duration, timing) do developers need to follow for optimal results?",
+   "Are there known limitations, side effects, or user demographic factors that influence the efficacy of audio-based motion sickness countermeasures?"
+  ],
+  "needs": [
+   "What are the proposed physiological mechanisms by which 100Hz or specific audio frequencies mitigate motion sickness in VR?",
+   "Which peer-reviewed academic studies have specifically tested 100Hz or similar frequencies for VR motion sickness reduction?",
+   "What quantitative metrics (e.g., Nausea and Discomfort Scale scores, retention rates) demonstrate the effectiveness of these audio interventions?",
+   "How does the effectiveness of 100Hz audio compare to other frequencies or control conditions in existing literature?",
+   "What specific implementation guidelines (e.g., amplitude, duration, timing) do developers need to follow for optimal results?",
+   "Are there known limitations, side effects, or user demographic factors that influence the efficacy of audio-based motion sickness countermeasures?"
+  ],
+  "prose": "# 100 Hz Bone-Conducted Tone Reduces Motion Sickness via Otolith Stimulation; VR Relevance Is Inferred from a Driving-Simulator Proxy\n\n**Answer.** A 2025 Nagoya University study (82 participants) demonstrated that a 1-minute, 100 Hz pure tone delivered binaurally at 80–85 dBZ reduces motion-sickness symptoms by physically vibrating the otoconia in the inner ear, with improved posturography and reduced sympathetic activation across three motion scenarios—including a driving simulator explicitly described as modeling the VR cybersickness mechanism [Source 5, 6, 7, 10]. The evidence establishes the mechanism and general anti-vestibular-conflict efficacy, but the retrieved sources do not include a controlled trial applying the tone inside an actual VR headset, so quantitative effectiveness for VR-specific cybersickness remains an inference rather than a measured outcome.\n\n## What the evidence supports\n\n- **Mechanism.** 100 Hz is the resonant frequency of otoconia (calcium-carbonate crystals) in the utricle and saccule; bone-conducted sound at this frequency vibrates the crystals and provides supplementary vestibular input to the brain [Source 5, 6, 7].\n- **Human efficacy.** In 82 participants across a mechanical swing, a 360° driving simulator, and a real vehicle, 1-minute pre-exposure to the 100 Hz tone improved posturography envelope areas (reduced sway) in all three scenarios and reduced driving-simulator sympathetic activation (HRV) and vehicle MSAQ scores [Source 5, 6, 7, 10].\n- **VR proxy.** The driving-simulator condition (visual road motion + stationary body) was described as \"the same mechanism that causes cybersickness in VR,\" making it the closest tested analogue to a headset experience [Source 5].\n- **Frequency and intensity specificity (mouse).** In ex vivo murine utricle explants, only 100 Hz at 75–85 dBZ for 5 min produced a vestibular response; 90, 250, 500, and 1000 Hz, and levels below 75 dBZ, did not. Surgically removing the otoliths eliminated the 100 Hz response, confirming the otoliths—not the cochlea—as the target [Source 7].\n- **Binaural delivery is required.** Exposure to only one ear produced no effect; a verified design used two speakers 10 cm left and right of a headrest [Source 7].\n- **Greater benefit for susceptible users.** The effect was stronger in participants originally prone to motion sickness; no significant difference appeared in less-prone participants [Source 7].\n- **Causal role of vestibular conflict confirmed independently.** A GVS study (10 participants) showed \"beneficial\" GVS reduced motion sickness by 26% and \"detrimental\" GVS increased it by 56% (p = 0.0055), supporting the sensory-conflict model that the 100 Hz tone targets [Source 2].\n- **VR cybersickness mechanism.** Cybersickness arises from a visual–vestibular–proprioceptive mismatch integrated in the brainstem and cerebellum; an EEG study (14 subjects) showed increased slow-wave (1–10 Hz) activity in temporo-occipital regions as mismatch and VIMS severity grew [Source 1, 11, 12, 15].\n- **Practical parameters.** 100 Hz pure tone, 80–85 dBZ (≈61–66 dBA, roughly conversational volume), binaural, 1 minute before the motion stimulus, in a quiet environment [Source 3, 4, 7, 10].\n- **No hearing damage detected.** Distortion-product otoacoustic emissions showed no effect; the exposure level is well below WHO occupational noise limits [Source 6, 7].\n- **Commercial and developer uptake.** Samsung reportedly integrated the findings into its Galaxy Health \"Hearapy\" feature, and independent developers (e.g., RideCalm) built dedicated 100 Hz tone apps [Source 5].\n- **Inferred VR use-case.** Theoretically, a 1-minute binaural 100 Hz tone could be embedded as a pre-session \"calibration\" step in a VR application, delivered via headset speakers or external headphones, to prime the vestibular system before the user enters the virtual environment [Source 3, 4, 5, 7, 10].\n\n## What was not found\n\n- Was the 100 Hz tone ever applied inside an actual VR headset (e.g., Quest, Vive) with cybersickness outcomes measured in a controlled trial?\n- What VR-specific developer guidance exists—integration APIs, timing relative to scene transitions, interaction with frame-rate or refresh-rate settings, continuous versus pulsed delivery during the session?\n- What is the precise neurophysiological pathway by which supplementary otolith vibration attenuates the visual-vestibular prediction error in the brainstem/cerebellum during VR, beyond the general statement that it \"broadly activates the vestibular system\"?\n- Has any source compared 100 Hz sound stimulation head-to-head against pharmacological antiemetics or other non-pharmacological countermeasures (GVS, fluid-filled glasses) within the same VR context?\n\n_— needs answered 0 of 6 (4 partly) · sources 14 relevant of 18 fetched (48 hits, 2 junk)_",
+  "curator": null,
+  "outcome": "complete",
+  "skeptic": null,
+  "backstop": "complete",
+  "contract": null,
+  "rendered": "# 100 Hz Bone-Conducted Tone Reduces Motion Sickness via Otolith Stimulation; VR Relevance Is Inferred from a Driving-Simulator Proxy\n\n**Answer.** A 2025 Nagoya University study (82 participants) demonstrated that a 1-minute, 100 Hz pure tone delivered binaurally at 80–85 dBZ reduces motion-sickness symptoms by physically vibrating the otoconia in the inner ear, with improved posturography and reduced sympathetic activation across three motion scenarios—including a driving simulator explicitly described as modeling the VR cybersickness mechanism [Source 5, 6, 7, 10]. The evidence establishes the mechanism and general anti-vestibular-conflict efficacy, but the retrieved sources do not include a controlled trial applying the tone inside an actual VR headset, so quantitative effectiveness for VR-specific cybersickness remains an inference rather than a measured outcome.\n\n## What the evidence supports\n\n- **Mechanism.** 100 Hz is the resonant frequency of otoconia (calcium-carbonate crystals) in the utricle and saccule; bone-conducted sound at this frequency vibrates the crystals and provides supplementary vestibular input to the brain [Source 5, 6, 7].\n- **Human efficacy.** In 82 participants across a mechanical swing, a 360° driving simulator, and a real vehicle, 1-minute pre-exposure to the 100 Hz tone improved posturography envelope areas (reduced sway) in all three scenarios and reduced driving-simulator sympathetic activation (HRV) and vehicle MSAQ scores [Source 5, 6, 7, 10].\n- **VR proxy.** The driving-simulator condition (visual road motion + stationary body) was described as \"the same mechanism that causes cybersickness in VR,\" making it the closest tested analogue to a headset experience [Source 5].\n- **Frequency and intensity specificity (mouse).** In ex vivo murine utricle explants, only 100 Hz at 75–85 dBZ for 5 min produced a vestibular response; 90, 250, 500, and 1000 Hz, and levels below 75 dBZ, did not. Surgically removing the otoliths eliminated the 100 Hz response, confirming the otoliths—not the cochlea—as the target [Source 7].\n- **Binaural delivery is required.** Exposure to only one ear produced no effect; a verified design used two speakers 10 cm left and right of a headrest [Source 7].\n- **Greater benefit for susceptible users.** The effect was stronger in participants originally prone to motion sickness; no significant difference appeared in less-prone participants [Source 7].\n- **Causal role of vestibular conflict confirmed independently.** A GVS study (10 participants) showed \"beneficial\" GVS reduced motion sickness by 26% and \"detrimental\" GVS increased it by 56% (p = 0.0055), supporting the sensory-conflict model that the 100 Hz tone targets [Source 2].\n- **VR cybersickness mechanism.** Cybersickness arises from a visual–vestibular–proprioceptive mismatch integrated in the brainstem and cerebellum; an EEG study (14 subjects) showed increased slow-wave (1–10 Hz) activity in temporo-occipital regions as mismatch and VIMS severity grew [Source 1, 11, 12, 15].\n- **Practical parameters.** 100 Hz pure tone, 80–85 dBZ (≈61–66 dBA, roughly conversational volume), binaural, 1 minute before the motion stimulus, in a quiet environment [Source 3, 4, 7, 10].\n- **No hearing damage detected.** Distortion-product otoacoustic emissions showed no effect; the exposure level is well below WHO occupational noise limits [Source 6, 7].\n- **Commercial and developer uptake.** Samsung reportedly integrated the findings into its Galaxy Health \"Hearapy\" feature, and independent developers (e.g., RideCalm) built dedicated 100 Hz tone apps [Source 5].\n- **Inferred VR use-case.** Theoretically, a 1-minute binaural 100 Hz tone could be embedded as a pre-session \"calibration\" step in a VR application, delivered via headset speakers or external headphones, to prime the vestibular system before the user enters the virtual environment [Source 3, 4, 5, 7, 10].\n\n## What was not found\n\n- Was the 100 Hz tone ever applied inside an actual VR headset (e.g., Quest, Vive) with cybersickness outcomes measured in a controlled trial?\n- What VR-specific developer guidance exists—integration APIs, timing relative to scene transitions, interaction with frame-rate or refresh-rate settings, continuous versus pulsed delivery during the session?\n- What is the precise neurophysiological pathway by which supplementary otolith vibration attenuates the visual-vestibular prediction error in the brainstem/cerebellum during VR, beyond the general statement that it \"broadly activates the vestibular system\"?\n- Has any source compared 100 Hz sound stimulation head-to-head against pharmacological antiemetics or other non-pharmacological countermeasures (GVS, fluid-filled glasses) within the same VR context?\n\n_— needs answered 0 of 6 (4 partly) · sources 14 relevant of 18 fetched (48 hits, 2 junk)_\n\n\n---\n\n**Sources** (only those the synthesis cited):\n1. [Frontiers | Mismatch of Visual-Vestibular Information in Virtual Reality: Is Motion Sickness Part of the Brains Attempt to Reduce the Prediction Error?](https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2021.757735/full)\n2. [Validating sensory conflict theory and mitigating motion sickness in humans with galvanic vestibular stimulation | Communications Engineering](https://www.nature.com/articles/s44172-025-00417-2)\n3. [Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound pressure levels may improve motion sickness - PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC11955832/)\n4. [Relieve Motion Sickness with a 100 Hz Sound Frequency](https://bigsoundbank.com/blog/relieve-motion-sickness-100hz-sound-b452.html)\n5. [How Sound Frequency Therapy Reduces Motion Sickness -- Nagoya University Research Explained](https://ridecalm.app/blog/nagoya-university-100hz-research)\n6. [A unique sound alleviates motion sickness | ScienceDaily](https://www.sciencedaily.com/releases/2025/04/250404122627.htm)\n7. [100Hz sound alleviates motion sickness｜音といのち｜Sound and Life](https://note.com/sound_and_life/n/n8a18cc3917c6?hl=en)\n8. [Can Sound Therapy Cure Motion Sickness? New Research Shows Promising Results | Hearing Health & Technology Matters](https://hearinghealthmatters.org/hearing-news-watch/2025/sound-therapy-motion-sickness/)\n9. [A unique sound alleviates motion sickness | Hacker News](https://news.ycombinator.com/item?id=43740021)\n10. [Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound pressure levels may improve motion sickness - Fujita Health University](https://pure.fujita-hu.ac.jp/en/publications/just-1-min-exposure-to-a-pure-tone-at-100-hz-with-daily-exposable/)\n11. [Virtual reality sickness - Wikipedia](https://en.wikipedia.org/wiki/Virtual_reality_sickness)\n12. [VR Motion Sickness: Causes, Prevention & Treatment (2026)](https://netpsychology.org/understanding-and-preventing-vr-motion-sickness/)\n13. [Prevention and Treatment of Motion Sickness | AFP](https://www.aafp.org/afp/2014/0701/p41)\n14. [Evaluating fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment (CAREN) | Journal of NeuroEngineering and Rehabilitation | Springer Nature Link](https://link.springer.com/article/10.1186/s12984-025-01858-8)\n15. [Motion Sickness – Introduction to Sensation and Perception](https://pressbooks.umn.edu/sensationandperception/chapter/motion-sickness/)\n16. [Evaluating fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment (CAREN) - PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC12882250/)\n\n\n**Open gaps** (NOT grounded — recorded for a future run):\n- What are the proposed physiological mechanisms by which 100Hz or specific audio frequencies mitigate motion sickness in VR?\n- Which peer-reviewed academic studies have specifically tested 100Hz or similar frequencies for VR motion sickness reduction?\n- What quantitative metrics (e.g., Nausea and Discomfort Scale scores, retention rates) demonstrate the effectiveness of these audio interventions?\n- How does the effectiveness of 100Hz audio compare to other frequencies or control conditions in existing literature?\n- What specific implementation guidelines (e.g., amplitude, duration, timing) do developers need to follow for optimal results?\n- Are there known limitations, side effects, or user demographic factors that influence the efficacy of audio-based motion sickness countermeasures?\n\n\n> ⚠ This research is grounded but INCOMPLETE — it left gaps open. The open gaps above are not answered by any source. Do NOT fill them from your own knowledge or other web/fetch tools (that fabricates). To pursue a gap, call deep_research again with a query targeting it; otherwise present the gaps as open unknowns.",
+  "synthesis": "[UNCERTAIN] A 2025 study by Nagoya University (Gu, Kagawa, Kato, et al.), published in *Environmental Health and Preventive Medicine* (Vol. 30, Article 22, DOI: 10.1265/ehpm.24-00247), demonstrated that a 1-minute exposure to a pure 100 Hz tone at 80–85 dBZ (≈60.9–65.9 dBA) before motion exposure reduced motion sickness symptoms in humans. (unverified figure: 24, 65.9) [Source 3, 10]\n[SOURCED] The mechanism is that 100 Hz is the resonant frequency of the otoconia (calcium carbonate crystals) in the otolith organs (utricle and saccule) of the inner ear; sound at this frequency, delivered via bone conduction through headphones, physically vibrates the otoconia and provides supplementary vestibular input to the brain. [Source 5, 6, 7]\n[UNCERTAIN] In ex vivo murine utricle explant experiments, only 100 Hz at 75–85 dBZ for 5 minutes produced a vestibular response; no reaction was observed at 90 Hz, 250 Hz, 500 Hz, or 1000 Hz, and no reaction occurred below 75 dBZ. (unverified figure: 5) [Source 7]\n[SOURCED] When the otoliths were surgically removed from the mouse tissue, the 100 Hz–induced activation disappeared, confirming that the otoliths (not the cochlea) were the target of the sound stimulation. [Source 7]\n[SOURCED] The 100 Hz stimulation broadly activates the vestibular system, which is responsible for maintaining balance and spatial orientation, and reduces the autonomic dysregulation (excessive sympathetic activation) associated with motion sickness. [Source 6, 7]\n[SOURCED] The human study used 82 participants across three motion scenarios: a mechanical swing (pendulum motion), a 360-degree driving simulator, and a real vehicle driven on a course with curves. [Source 5, 6, 7, 10]\n[SOURCED] The driving simulator scenario specifically created a visual-vestibular conflict (participants saw a moving road while their bodies remained stationary), described as \"the same mechanism that causes cybersickness in VR.\" [Source 5]\n[SOURCED] Outcomes were measured objectively via posturography (center-of-gravity sway / envelope areas) and electrocardiography (heart rate variability, LF/HF ratio), and subjectively via the Motion Sickness Assessment Questionnaire (MSAQ). [Source 6, 7, 10]\n[UNCERTAIN] In the mouse model, a 5-minute exposure to 85 dBZ at 100 Hz before shaking produced a long-lasting (≥120 min) alleviative effect on beam-balance test scores. (unverified figure: 85, 120) [Source 10]\n[SOURCED] In humans, 1-minute pre-exposure to the 100 Hz tone improved posturography envelope areas (reduced sway) across all three motion scenarios (swing, driving simulator, vehicle). [Source 10]\n[SOURCED] Driving-simulator-mediated sympathetic nerve activation (assessed by HRV) and vehicle-mediated MSAQ scores were both improved by the pure-tone exposure. [Source 10]\n[SOURCED] The beneficial effect was stronger in participants who were originally prone to motion sickness; no significant difference was observed in participants less prone to sickness. [Source 7]\n[SOURCED] The sound must be delivered equally to both ears; exposure to only one ear did not produce an effect. A design with two speakers placed 10 cm to the left and right of a car headrest was verified in the study. [Source 7]\n[UNCERTAIN] No effect on hearing was detected via distortion product otoacoustic emissions (DPOAE), and the 1-minute exposure at 80–85 dBZ is well below WHO occupational noise safety limits (100 Hz at 85 dB(A) is acceptable for up to 480 minutes). (unverified figure: 480) [Source 6, 7]\n[SOURCED] The study was registered under UMIN000022413 (2016/05/23–2023/04/19) and UMIN000053735 (2024/02/29–present). [Source 10]\n[SOURCED] One of the sub-experiments in the study had a sample size of only 10 participants, which was noted as a limitation by community reviewers. [Source 9]\n[SOURCED] VR motion sickness (cybersickness / VIMS) is attributed to a sensory conflict or mismatch between visual, vestibular, and proprioceptive signals integrated in the brainstem and cerebellum; in VR, the eyes perceive self-motion while the vestibular system detects stillness. [Source 1, 11, 12, 15]\n[SOURCED] An EEG study of 14 healthy subjects in a VR environment found that with increasing visual-vestibular mismatch and subjective VIMS, the proportion of slow EEG waves (especially 1–10 Hz) increases, particularly in temporo-occipital regions, and information flow decreases in brain areas involved in vestibular signal processing. [Source 1]\n[SOURCED] A GVS (galvanic vestibular stimulation) study in 10 participants showed that \"Beneficial\" GVS produced a 26% motion sickness reduction and \"Detrimental\" GVS produced a 56% increase (p = 0.0055), confirming the causal role of vestibular sensory conflict, and the authors stated the findings \"facilitate new methods and countermeasures for mitigating motion sickness during transportation and in virtual environments.\" [Source 2]\n[SOURCED] Samsung reportedly incorporated the Nagoya University findings into its Galaxy Health ecosystem under a feature called \"Hearapy,\" and independent developers (including RideCalm) built dedicated apps to deliver the 100 Hz tone. [Source 5]\n[SOURCED] The researchers plan to further develop the technology for practical application in a variety of travel situations including air and sea travel, and the sound could be incorporated into existing devices such as hearing aids and other audio devices. [Source 6, 8]\n[UNCERTAIN] Recommended practical parameters from the study: 100 Hz pure tone, 80–85 dBZ (≈60.9–65.9 dBA, roughly conversational volume), delivered binaurally (both ears) for 1 minute before the motion stimulus, in a quiet environment. (unverified figure: 1) [Source 3, 4, 7, 10]\n[SOURCED] Slow, intermittent exposure to motion and reducing physical, mental, or emotional discomfort are recommended general preventive strategies for motion sickness. [Source 13]\n[SOURCED] A clinical study of 30 motion-sickness-susceptible participants evaluated fluid-filled glasses (creating an artificial moving horizon) against a placebo group in a CAREN (computer-assisted rehabilitation) environment, measuring symptoms with the MSAQ before, after, and at 60-second intervals. [Source 14, 16]\n[INFERRED] Because the 100 Hz mechanism targets the vestibular (otolith) component of the sensory conflict, and VR cybersickness is driven by a visual-vestibular mismatch, the 100 Hz pre-exposure could theoretically reduce the vestibular \"error signal\" that contributes to VR-induced motion sickness, even though the visual stimulus in VR is the primary driver of the conflict. [Source 1, 5, 6, 11, 12]\n[INFERRED] The driving-simulator scenario in the Nagoya study (visual motion + stationary body) is the closest proxy to VR cybersickness among the three tested conditions, but it is not identical to a full VR headset experience (which adds stereoscopic depth, head-tracked rendering, and vergence-accommodation conflict). [Source 5, 11, 12]\n[UNCERTAIN] For VR developers, the practical implication is that a 1-minute binaural 100 Hz tone at ~61–66 dBA could be embedded as a pre-session \"calibration\" step in a VR application, delivered through the headset's built-in speakers or external headphones, to prime the vestibular system before the user enters the virtual environment. (unverified figure: 61, 66) [Source 3, 4, 5, 7, 10]\n[UNCERTAIN] The long-term (beyond 120 minutes) efficacy in humans is not established; the ≥120 min duration was demonstrated only in the mouse beam-balance model, and the human studies measured symptoms during a single motion exposure session. (unverified figure: 120) [Source 10]\n[UNCERTAIN] Whether the 100 Hz effect is additive with other VR-specific countermeasures (e.g., high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source. (unverified figure: 100) [Source 11, 12]\n[GAP] No source in the provided set reports a controlled experiment that directly applied the 100 Hz tone inside a VR headset environment (e.g., Oculus Quest, HTC Vive) and measured cybersickness outcomes, so the specific quantitative effectiveness of 100 Hz sound for VR-induced motion sickness remains unverified.\n[GAP] No source provides VR-specific developer guidance such as recommended integration APIs, timing relative to scene transitions, interaction with frame-rate or refresh-rate settings, or whether the tone should be continuous or pulsed during the VR session.\n[GAP] The precise neurophysiological pathway by which supplementary otolith vibration resolves (or attenuates) the visual-vestibular prediction error in the brainstem/cerebellum during VR is not detailed in any provided source beyond the general statement that it \"broadly activates the vestibular system.\"\n[GAP] No source reports a head-to-head comparison of 100 Hz sound stimulation versus pharmacological antiemetics (e.g., scopolamine, dimenhydrinate) or versus other non-pharmacological VR countermeasures (e.g., GVS, fluid-filled glasses) in the same VR context.",
+  "thread_id": null,
+  "fetch_stats": {
+   "errors": 4,
+   "reused": 3,
+   "search": {
+    "ok": 4,
+    "calls": 6,
+    "empty": 0,
+    "errors": 0,
+    "offtopic": 0,
+    "collapsed": 2,
+    "unfloored": 0,
+    "query_padded": 0,
+    "entity_missing": 0,
+    "entity_rejected": 0
+   },
+   "sources": 18,
+   "attempts": 22,
+   "readable": 12,
+   "timeouts": 0,
+   "errorKinds": {
+    "http": 3,
+    "network": 0,
+    "non_html": 1,
+    "empty_extract": 0
+   }
+  },
+  "report_type": "general-report",
+  "reuse_ratio": 0.75,
+  "needs_status": [
+   {
+    "need": "What are the proposed physiological mechanisms by which 100Hz or specific audio frequencies mitigate motion sickness in VR?",
+    "status": "partial"
+   },
+   {
+    "need": "Which peer-reviewed academic studies have specifically tested 100Hz or similar frequencies for VR motion sickness reduction?",
+    "status": "partial"
+   },
+   {
+    "need": "What quantitative metrics (e.g., Nausea and Discomfort Scale scores, retention rates) demonstrate the effectiveness of these audio interventions?",
+    "status": "open"
+   },
+   {
+    "need": "How does the effectiveness of 100Hz audio compare to other frequencies or control conditions in existing literature?",
+    "status": "partial"
+   },
+   {
+    "need": "What specific implementation guidelines (e.g., amplitude, duration, timing) do developers need to follow for optimal results?",
+    "status": "open"
+   },
+   {
+    "need": "Are there known limitations, side effects, or user demographic factors that influence the efficacy of audio-based motion sickness countermeasures?",
+    "status": "partial"
+   }
+  ],
+  "reuse_claims": [
+   {
+    "id": "d61bccbd-fcb8-4d40-9ad5-c140146eba24",
+    "text": "Human studies have found that low-frequency oscillations of 0.2 Hz with large amplitudes are most likely to cause motion sickness, while at frequencies of 2 Hz or above, motion sickness ceases completely."
+   },
+   {
+    "id": "b4d3480e-055b-4a0f-95dc-acbcc7c578e2",
+    "text": "The GVS study explicitly states its findings \"facilitate new methods and countermeasures for mitigating motion sickness during transportation and in virtual environments.\""
+   },
+   {
+    "id": "dcb12eef-06b0-4b67-8cd9-66fab74db42e",
+    "text": "An EEG study of 14 healthy subjects in a VR environment found that with increasing visual-vestibular mismatch and subjective VIMS, the proportion of slow EEG waves (especially 1–10 Hz) increases."
+   },
+   {
+    "id": "6f619ce1-04fc-4ff6-87a1-4986a6914a6a",
+    "text": "Motion sickness in VR (visually induced motion sickness, VIMS) is attributed to a mismatch between visual and vestibular information, causing ambiguity about body position relative to the environment."
+   },
+   {
+    "id": "dfa7fa9d-f8a3-4326-96a9-6b6af1d05fb4",
+    "text": "A clinical study exists that evaluates fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment."
+   },
+   {
+    "id": "09911189-a520-4670-90fe-74c15b9a1572",
+    "text": "A study using galvanic vestibular stimulation (GVS) in 10 participants demonstrated that \"Beneficial\" GVS produced a 26% motion sickness reduction and \"Detrimental\" GVS produced a 56% increase (p = 0.0055), confirming the causal role of vestibular sensory conflict in motion sickness."
+   },
+   {
+    "id": "90a5085c-e709-42d4-a16a-8c5eb248a9f8",
+    "text": "Slow, intermittent exposure to motion can help reduce motion sickness symptoms."
+   },
+   {
+    "id": "4461faa5-bd5c-41c3-a1d7-de7eea205ef1",
+    "text": "A clinical study of 30 motion sickness-susceptible participants evaluated fluid-filled glasses (creating an artificial moving horizon) against a placebo group in a computer-assisted rehabilitation environment (CAREN), measuring symptoms with the Motion Sickness Assessment Questionnaire before, after, and at 60-second intervals."
+   },
+   {
+    "id": "4e8802dc-a9d1-4472-b2fc-ec5b2f26bf8f",
+    "text": "The clinical study measured motion sickness symptoms using the Motion Sickness Assessment Questionnaire before, after, and at 60-second intervals during a simulated motion exposure."
+   },
+   {
+    "id": "40519797-ddfc-4013-a0c5-e38363778169",
+    "text": "Slow, intermittent exposure to motion and reducing physical, mental, or emotional discomfort are recommended preventive strategies for motion sickness."
+   },
+   {
+    "id": "f423539d-322f-4cd6-a67d-3e58ec6611c6",
+    "text": "Motion sickness is primarily caused by a sensory conflict or mismatch between vestibular, visual, and proprioceptive signals integrated in the brain."
+   },
+   {
+    "id": "d43b9544-03c9-4135-92cc-fd91b91d6f06",
+    "text": "Motion sickness is generally evoked from a mismatch in sensory cues between vestibular, visual, and proprioceptive signals integrated in the brainstem and cerebellum."
+   }
+  ],
+  "cited_sources": [
+   {
+    "url": "https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2021.757735/full",
+    "title": "Frontiers | Mismatch of Visual-Vestibular Information in Virtual Reality: Is Motion Sickness Part of the Brains Attempt to Reduce the Prediction Error?"
+   },
+   {
+    "url": "https://www.nature.com/articles/s44172-025-00417-2",
+    "title": "Validating sensory conflict theory and mitigating motion sickness in humans with galvanic vestibular stimulation | Communications Engineering"
+   },
+   {
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11955832/",
+    "title": "Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound pressure levels may improve motion sickness - PMC"
+   },
+   {
+    "url": "https://bigsoundbank.com/blog/relieve-motion-sickness-100hz-sound-b452.html",
+    "title": "Relieve Motion Sickness with a 100 Hz Sound Frequency"
+   },
+   {
+    "url": "https://ridecalm.app/blog/nagoya-university-100hz-research",
+    "title": "How Sound Frequency Therapy Reduces Motion Sickness -- Nagoya University Research Explained"
+   },
+   {
+    "url": "https://www.sciencedaily.com/releases/2025/04/250404122627.htm",
+    "title": "A unique sound alleviates motion sickness | ScienceDaily"
+   },
+   {
+    "url": "https://note.com/sound_and_life/n/n8a18cc3917c6?hl=en",
+    "title": "100Hz sound alleviates motion sickness｜音といのち｜Sound and Life"
+   },
+   {
+    "url": "https://hearinghealthmatters.org/hearing-news-watch/2025/sound-therapy-motion-sickness/",
+    "title": "Can Sound Therapy Cure Motion Sickness? New Research Shows Promising Results | Hearing Health & Technology Matters"
+   },
+   {
+    "url": "https://news.ycombinator.com/item?id=43740021",
+    "title": "A unique sound alleviates motion sickness | Hacker News"
+   },
+   {
+    "url": "https://pure.fujita-hu.ac.jp/en/publications/just-1-min-exposure-to-a-pure-tone-at-100-hz-with-daily-exposable/",
+    "title": "Just 1-min exposure to a pure tone at 100 Hz with daily exposable sound pressure levels may improve motion sickness - Fujita Health University"
+   },
+   {
+    "url": "https://en.wikipedia.org/wiki/Virtual_reality_sickness",
+    "title": "Virtual reality sickness - Wikipedia"
+   },
+   {
+    "url": "https://netpsychology.org/understanding-and-preventing-vr-motion-sickness/",
+    "title": "VR Motion Sickness: Causes, Prevention & Treatment (2026)"
+   },
+   {
+    "url": "https://www.aafp.org/afp/2014/0701/p41",
+    "title": "Prevention and Treatment of Motion Sickness | AFP"
+   },
+   {
+    "url": "https://link.springer.com/article/10.1186/s12984-025-01858-8",
+    "title": "Evaluating fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment (CAREN) | Journal of NeuroEngineering and Rehabilitation | Springer Nature Link"
+   },
+   {
+    "url": "https://pressbooks.umn.edu/sensationandperception/chapter/motion-sickness/",
+    "title": "Motion Sickness – Introduction to Sensation and Perception"
+   },
+   {
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12882250/",
+    "title": "Evaluating fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment (CAREN) - PMC"
+   }
+  ],
+  "search_record": {
+   "ok": 4,
+   "hits": 48,
+   "empty": 0,
+   "errors": 0,
+   "fetched": 18,
+   "queries": [
+    {
+     "hits": 8,
+     "query": "100Hz audio physiological mechanism VR motion sickness",
+     "overlap": 1,
+     "verdict": "ok",
+     "entityShare": 0.625,
+     "entityStatus": "used"
+    },
+    {
+     "hits": 8,
+     "query": "100Hz frequency peer-reviewed study VR motion sickness",
+     "overlap": 1,
+     "verdict": "ok",
+     "entityShare": 0.625,
+     "entityStatus": "used"
+    },
+    {
+     "hits": 8,
+     "query": "100Hz audio quantitative effectiveness NDS VR motion sickness",
+     "overlap": 1,
+     "verdict": "ok",
+     "entityShare": 0.625,
+     "entityStatus": "used"
+    },
+    {
+     "hits": 8,
+     "query": "100Hz vs control frequency comparison VR motion sickness",
+     "overlap": 1,
+     "verdict": "collapsed",
+     "collapsedOn": "motion",
+     "entityShare": 0.125,
+     "entityStatus": "used"
+    },
+    {
+     "hits": 8,
+     "query": "100Hz audio implementation guidelines amplitude VR developers",
+     "overlap": 0.88,
+     "verdict": "collapsed",
+     "collapsedOn": "audio",
+     "entityShare": 0,
+     "entityStatus": "used"
+    },
+    {
+     "hits": 8,
+     "query": "100Hz audio limitations side effects VR motion sickness",
+     "overlap": 1,
+     "verdict": "ok",
+     "entityShare": 0.5,
+     "entityStatus": "used"
+    }
+   ],
+   "offtopic": 0,
+   "readable": 12,
+   "relevant": 14,
+   "collapsed": 2,
+   "unfloored": 0,
+   "query_padded": 0,
+   "entity_missing": 0,
+   "entity_rejected": 0
+  },
+  "followup_queries": [
+   "100Hz effectiveness audio study",
+   "100Hz implementation guidelines forum"
+  ],
+  "ungrounded_numbers": [
+   "24, 65.9",
+   "5",
+   "85, 120",
+   "480",
+   "1",
+   "61, 66",
+   "120",
+   "100"
+  ]
+ },
+ "metrics": {
+  "gap_ratio": 0.25,
+  "claims_reused": 0,
+  "claims_freshly_gathered": 12
+ },
+ "error": null,
+ "queue_position": null,
+ "queue_depth": 0,
+ "eta_seconds": null
+}

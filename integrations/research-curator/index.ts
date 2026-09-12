@@ -35,7 +35,7 @@
  *      NEW_THREAD_MIN_CONFIDENCE (0.60), MERGE_FLOOR_DISTANCE (0.45), PORT (8000).
  */
 import { Pool } from "postgres";
-import { writeClaims, detectConflicts, parseSynthesisClaims, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
+import { writeClaims, detectConflicts, parseSynthesisClaims, META_JUDGE_SYS, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
 import { ResilientPool } from "./pool.ts";
 
 // --- Config -----------------------------------------------------------------
@@ -464,10 +464,8 @@ async function writeGroundedClaims(
 // LLM judge for the meta-claim filter (research-trust Phase 3.1). Only asked
 // about claims the deterministic patterns did not recognise. Anything other
 // than a confident META keeps the claim: writeClaims fails OPEN around this.
-const META_JUDGE_SYS =
-  `You decide whether a sentence is a claim about the WORLD or a statement about a research run and its sources. WORLD = it asserts something that is true or false independently of who looked it up ("the OptiPlex 3050 uses an LGA 1151 socket", "a study of 14 subjects found X"). META = it describes the evidence set, the search, or the state of confirmation ("the provided sources contain no information about X", "this is not confirmed for Y", "no source documents Z", "these findings pertain to A, not B"). A sentence that merely CITES or NAMES a study is WORLD; a sentence whose subject IS the source set is META.
-
-Return ONLY JSON: {"verdict":"WORLD"} or {"verdict":"META"}.`;
+// The prompt lives in claims.ts, beside the deterministic half of the same
+// decision, where meta-claims.test.ts can hold it to its examples.
 async function metaJudge(text: string): Promise<"META" | "WORLD"> {
   const out = await chatJson(META_JUDGE_SYS, `SENTENCE: ${text}`);
   return out.verdict === "META" ? "META" : "WORLD";

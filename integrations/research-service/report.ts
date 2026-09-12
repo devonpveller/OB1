@@ -270,6 +270,10 @@ export function searchHealthLabel(r: SearchRecord): "ok" | "DEGRADED" {
 /** What the per-sentence fidelity check did to the rendered report. */
 export interface FidelityFooter {
   checked: number;
+  /** Every unit the document has - the denominator. */
+  units?: number;
+  /** Units the check could not judge. */
+  unchecked?: number;
   rewritten: number;
   replaced: number;
   error?: string;
@@ -349,7 +353,16 @@ export function coverageFooter(
   if (fidelity) {
     if (fidelity.checked > 0) {
       const corrected = (fidelity.rewritten || 0) + (fidelity.replaced || 0);
-      parts.push(`render checked: ${fidelity.checked} sentences, ${corrected} corrected`);
+      // N OF M, and the units nothing looked at. A coverage number with no
+      // denominator was the tester's X1 and X4 in one line: a confident
+      // "checked: 32" over a document with sentences the checker had skipped,
+      // and a count no committed artifact reproduced. M is now a pure function
+      // of the delivered document (`countUnits`), so a reader can check it.
+      const units = fidelity.units ?? fidelity.checked;
+      const unchecked = fidelity.unchecked ?? 0;
+      parts.push(
+        `render checked: ${fidelity.checked} of ${units}, ${corrected} corrected, ${unchecked} unchecked`,
+      );
     } else if (fidelity.error) {
       parts.push("render check: not run");
     }

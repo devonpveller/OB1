@@ -17,7 +17,8 @@
  */
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  applyUnit, checkRenderFidelity, citedUnits, referenceLines, splitSentences, verbatimFallback,
+  applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, nearestLines,
+  normaliseCitations, referenceLines, splitSentences, supersetCitations, verbatimFallback,
 } from "./fidelity.ts";
 import type { Deps } from "./harness.ts";
 
@@ -231,9 +232,198 @@ Deno.test("the verbatim fallback is ONE line for one sentence, and the closest o
 
 Deno.test("applyUnit edits the cell it was given and nothing else on the line", () => {
   const lines = ["| A | B | C |"];
-  applyUnit(lines, { text: "B", line: 0, cell: 2, citations: [] }, "B rewritten");
+  applyUnit(lines, { text: "B", line: 0, cell: 2, citations: [], section: "" }, "B rewritten");
   assertEquals(lines[0], "| A | B rewritten | C |");
   const prose = ["One. Two. Three."];
-  applyUnit(prose, { text: "Two.", line: 0, cell: -1, citations: [] }, "Second.");
+  applyUnit(prose, { text: "Two.", line: 0, cell: -1, citations: [], section: "" }, "Second.");
   assertEquals(prose[0], "One. Second. Three.");
+});
+
+// ── The coverage the tester found missing (research-trust-template) ─────────
+//
+// rt-tester-evidence-report-2.md, X1 and X2: three shapes that were never
+// presented to the judge at all, while the footer reported a confident count.
+// Each yields exactly ONE unit now.
+
+const PROBE_SYNTH = [
+  "[SOURCED] The Dell OptiPlex 3050 SFF uses a proprietary power supply and a proprietary power " +
+  "connector, which makes it difficult for users to install aftermarket PSUs or higher-wattage " +
+  "units to support more demanding graphics cards, and a replacement therefore has to be sourced " +
+  "from Dell rather than from a generic supplier. [Source 13]",
+  "[SOURCED] The fans and vents on the OptiPlex 3050 accumulate dust, which Dell's guidance " +
+  "identifies as a cause of overheating. [Source 5]",
+].join("\n");
+
+Deno.test("X1: a citation after the full stop is one unit, not zero", () => {
+  // "The PSU makes it difficult to upgrade. [Source 13]" split into a claim with
+  // no citation and a citation with no claim, and yielded NOTHING.
+  const doc = "## Findings\n\nThe PSU makes it difficult to upgrade. [Source 13]";
+  const units = citedUnits(normaliseCitations(doc));
+  assertEquals(units.length, 1, JSON.stringify(units.map((u) => u.text)));
+  assertEquals(units[0].citations, [13]);
+  assertEquals(units[0].text, "The PSU makes it difficult to upgrade [Source 13].");
+  // The trailing-stop variant too.
+  assertEquals(countUnits("## Findings\n\nThe PSU makes it difficult to upgrade. [Source 13]."), 1);
+  // …and the form production already used is unchanged.
+  assertEquals(countUnits("## Findings\n\nThe PSU makes it difficult to upgrade [Source 13]."), 1);
+});
+
+Deno.test("X1: normalising a citation never eats the line it ends", () => {
+  // The first version used `\\s*` after the bracket, which matched the NEWLINE:
+  // nine checklist items and the heading after them became one line. Found by
+  // running the check over the approved document, so the fixture is a checklist.
+  const doc = [
+    "## What to check in person",
+    "",
+    "- [ ] Power the unit on and watch the rear LED. [Source 11]",
+    "- [ ] Inspect the CPU socket for bent pins. [Source 1, Source 15]",
+    "- [ ] Confirm both DIMM slots are recognised. [Source 14]",
+    "",
+    "## Failure modes by subsystem",
+  ].join("\n");
+  const out = normaliseCitations(doc);
+  assertEquals(out.split("\n").length, doc.split("\n").length, out);
+  assert(out.includes("\n## Failure modes by subsystem"), out);
+  assertEquals(countUnits(doc), 3);
+});
+
+Deno.test("X2: an UNCITED claim in an evidence section is one unit, and is judged", async () => {
+  const doc = "## Findings by area\n\nThe unit is impossible to upgrade and always fails within a year.";
+  const units = citedUnits(doc);
+  assertEquals(units.length, 1);
+  assertEquals(units[0].citations, []);
+  // Nothing in the evidence is within reach of it - which IS the verdict, and
+  // needs no model: a sentence resting on nothing is UNSUPPORTED.
+  assertEquals(nearestLines(PROBE_SYNTH, units[0].text), []);
+  const never = { chat: () => Promise.reject(new Error("the judge must not be asked")) } as unknown as Deps;
+  const out = await checkRenderFidelity(never, doc, PROBE_SYNTH);
+  assertEquals(out.record.unsupported, 1);
+  assertEquals(out.record.checked, 1);
+  assert(!out.record.error, "the run must not have failed open here");
+
+  // An uncited sentence that IS about the evidence goes to the judge with the
+  // nearest lines instead.
+  const near = "## Findings by area\n\nThe proprietary power connector makes fitting an aftermarket PSU difficult.";
+  assert(nearestLines(PROBE_SYNTH, citedUnits(near)[0].text).length > 0);
+  const deps = {
+    chat: (sys: string) =>
+      sys.startsWith("You compare SENTENCES")
+        ? Promise.resolve(JSON.stringify({ verdicts: ["SAME"] }))
+        : Promise.resolve("{}"),
+  } as unknown as Deps;
+  const ok = await checkRenderFidelity(deps, near, PROBE_SYNTH);
+  assertEquals([ok.record.checked, ok.record.unsupported], [1, 0]);
+  assertEquals(ok.rendered, near);
+});
+
+Deno.test("X2: a four-word cited table cell is one unit", () => {
+  const doc = [
+    "## Failure modes by subsystem",
+    "| Subsystem | What goes wrong | Source |",
+    "|---|---|---|",
+    "| Fans | Fans are proprietary | [Source 13] |",
+  ].join("\n");
+  const units = citedUnits(doc);
+  assertEquals(units.length, 1, JSON.stringify(units.map((u) => u.text)));
+  assertEquals(units[0].text, "Fans are proprietary");
+  assertEquals(units[0].citations, [13]);
+  // The row LABEL is still not a claim - that rule did the work the word floor
+  // was doing, and the floor is gone from tables entirely.
+  assert(!units.some((u) => u.text === "Fans"));
+});
+
+Deno.test("the [GAP] questions and the executive summary are still left alone", () => {
+  const doc = [
+    "## Executive summary",
+    "",
+    "The evidence says the machine is worth buying if it passes inspection.",
+    "",
+    "## Limitations and open questions",
+    "",
+    "- What are the water-damage failure modes for this unit?",
+    "- What is the capacitor failure rate on this platform?",
+  ].join("\n");
+  assertEquals(citedUnits(doc).length, 0, JSON.stringify(citedUnits(doc)));
+});
+
+// ── The denominator, and the note layout ──────────────────────────────────
+
+Deno.test("ACCEPTANCE 3: a citation the sentence does not use is REPORTED, not deleted", () => {
+  // The tester's X3: citing broadly could only make a verdict look better.
+  const doc = [
+    "## Failure modes by subsystem",
+    "| Subsystem | What goes wrong | Source |",
+    "|---|---|---|",
+    "| PSU | The proprietary connector makes aftermarket PSUs difficult to fit | [Source 13, 5] |",
+  ].join("\n");
+  const superset = supersetCitations(doc, PROBE_SYNTH);
+  assertEquals(superset.length, 1, JSON.stringify(superset));
+  assert(superset[0].startsWith("[Source 5] in "), superset[0]);
+  // …and nothing was removed from the document to make that verdict.
+  assert(doc.includes("[Source 13, 5]"));
+  // A row whose citations all contribute reports nothing.
+  const clean = doc.replace("[Source 13, 5]", "[Source 13]");
+  assertEquals(supersetCitations(clean, PROBE_SYNTH), []);
+});
+
+Deno.test("K.9: a long replaced cell becomes a marker, and the line goes under the table", async () => {
+  const long =
+    "Because the SFF PSU is proprietary and the 180 W unit has a documented recurring failure " +
+    "pattern, a used SFF unit that shows the brief green-LED-then-dead symptom is very likely " +
+    "to need a Dell-specific replacement rather than a generic one, which is harder to source.";
+  assert(long.split(/\s+/).length > CELL_NOTE_WORDS);
+  const doc = [
+    "## Failure modes by subsystem",
+    "| Subsystem | What goes wrong | Source |",
+    "|---|---|---|",
+    `| PSU | ${long} | [Source 13] |`,
+    "| Fans | Dust accumulates in the vents | [Source 5] |",
+    "",
+    "## What the evidence does not settle",
+  ].join("\n");
+  // The judge condemns the long cell; the rewriter cannot mend it.
+  const deps = {
+    chat: (sys: string) =>
+      sys.startsWith("You compare SENTENCES")
+        ? Promise.resolve(JSON.stringify({ verdicts: ["UNSUPPORTED", "SAME"] }))
+        : Promise.resolve(JSON.stringify({ fixed: {} })),
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, PROBE_SYNTH);
+  const lines = out.rendered.split("\n");
+  const psuRow = lines.find((l) => l.startsWith("| PSU"))!;
+  // The cell holds a marker, the row keeps its columns and its Source cell.
+  assert(/see Note 1 below the table/.test(psuRow), psuRow);
+  assertEquals(psuRow.split("|").length, doc.split("\n")[3].split("|").length);
+  assert(/\[Source 13\]/.test(psuRow), psuRow);
+  // The verbatim line is beneath the table, whole, with its citation - and
+  // AFTER the last row, not in the middle of it.
+  const noteAt = lines.findIndex((l) => l.startsWith("> **Note 1.**"));
+  const lastRow = lines.findLastIndex((l) => l.startsWith("|"));
+  assert(noteAt > lastRow, `note at ${noteAt}, last row at ${lastRow}`);
+  assert(lines[noteAt].includes("makes it difficult for users to install aftermarket PSUs"), lines[noteAt]);
+  assert(lines[noteAt].includes("[Source 13]"), lines[noteAt]);
+  // Nothing was clipped to fit a column (K.9: never a word-clipping rule).
+  assertEquals(out.record.replaced, 1);
+  // …and the untouched row is untouched.
+  assert(out.rendered.includes("| Fans | Dust accumulates in the vents | [Source 5] |"));
+});
+
+Deno.test("ACCEPTANCE 3: N and M are counted on the DELIVERED document", async () => {
+  const doc = [
+    "## Findings",
+    "",
+    "The proprietary connector makes fitting an aftermarket PSU difficult [Source 13].",
+    "The vents accumulate dust, which Dell identifies as a cause of overheating [Source 5].",
+  ].join("\n");
+  const deps = {
+    chat: (sys: string) =>
+      sys.startsWith("You compare SENTENCES")
+        ? Promise.resolve(JSON.stringify({ verdicts: ["SAME", "SAME"] }))
+        : Promise.resolve("{}"),
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, PROBE_SYNTH);
+  assertEquals(out.record.units, countUnits(out.rendered));
+  assertEquals(out.record.checked, 2);
+  assertEquals(out.record.unchecked, 0);
+  assert(out.record.checked <= out.record.units, "N exceeded M");
 });

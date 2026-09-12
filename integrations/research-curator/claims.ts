@@ -222,6 +222,50 @@ const TRANSFER_DISCLAIMER: RegExp[] = [
   /\(\s*sources?\s+\d+\s*\)/i,
 ];
 
+/**
+ * The LLM judge's prompt, asked only about claims the deterministic patterns did
+ * not recognise. It lives here, beside `classifyMetaClaim`, because it is the
+ * OTHER half of the same decision and because a prompt with no test is a rule
+ * nobody reads - `index.ts` imports it.
+ *
+ * TWO SHAPES ADDED (research-trust-template). Four real world facts were refused
+ * as META across the two live OWUI runs, all of them attribution or hedging:
+ *
+ *   "The same used-purchase analysis RECOMMENDS the Dell OptiPlex 3060 ... as a
+ *    better secondhand option for Windows 11 compatibility"          (33250e9b)
+ *   "The OptiPlex 3050 SFF's proprietary PSU connector MAY also limit the
+ *    ability to replace the PSU ... IF the original 180 W unit is failing"
+ *   "The user in that thread SPECULATED that the CPU may have been damaged
+ *    during the thermal-paste service"                               (64ac38cf)
+ *
+ * Each names a source or hedges a claim, and the judge read "a sentence whose
+ * subject IS the source set" as covering them. It does not: the subject of
+ * "<source> recommends <thing>" is the thing, and a hedge is a claim about the
+ * world with its confidence stated. The examples are now in the prompt, on both
+ * sides, so the distinction is drawn rather than left to be inferred.
+ */
+export const META_JUDGE_SYS =
+  `You decide whether a sentence is a claim about the WORLD or a statement about a research run and its sources.
+
+WORLD = it asserts something that is true or false independently of who looked it up.
+  - "the OptiPlex 3050 uses an LGA 1151 socket"
+  - "a study of 14 subjects found X"
+  - ATTRIBUTED: "<source or user> reports / notes / recommends / speculates / argues <content>" - the subject is the CONTENT, and who said it is provenance, not the topic. "The analysis recommends the 3060 as a better option for Windows 11" is WORLD.
+  - HEDGED: "<thing> may <effect> if <condition>", "<thing> is likely to <effect>", "one user reported <event>" - a claim about the world with its confidence stated. A hedge is not a statement about the search.
+
+META = its subject IS the evidence set, the search, or the state of confirmation.
+  - "the provided sources contain no information about X"
+  - "this is not confirmed for Y"
+  - "no source documents Z"
+  - "these findings pertain to A, not B"
+  - "whether the thread's Solved tag indicates a fix is unclear from the sources"
+
+A sentence that merely CITES or NAMES a study is WORLD. A sentence that says what the sources DO NOT contain, or how confident the SEARCH is, is META.
+
+Where they meet, read the MAIN CLAUSE. When a sentence states a fact and then qualifies it with a caveat about the evidence ("X may do Y, though no source confirms Z"), judge the FACT - the caveat is how an honest claim is written. When the main clause itself is about the evidence ("the errors reported alongside thermal issues pertain to the DGX Spark, not the OptiPlex"), it is META however many world-sounding words it contains: an attribution verb or a hedge somewhere in the sentence does not make it a claim about the world.
+
+Return ONLY JSON: {"verdict":"WORLD"} or {"verdict":"META"}.`;
+
 export type MetaVerdict = "meta" | "world";
 
 /**

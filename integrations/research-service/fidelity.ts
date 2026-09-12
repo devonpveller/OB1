@@ -41,8 +41,17 @@
 import type { Deps } from "./harness.ts";
 
 export interface FidelityRecord {
-  /** Cited sentences and table cells presented to the judge. */
+  /** Sentences and table cells presented to the judge. */
   checked: number;
+  /** Every unit the document HAS (`countUnits`), checked or not. The footer
+   *  says "N of M" because a coverage number with no denominator is what the
+   *  tester's X1 and X4 were both about: a confident "checked: 32" that no
+   *  committed artifact reproduces, over a document with sentences the checker
+   *  silently skipped. */
+  units: number;
+  /** M - N: units the check could not judge (no reference lines, or a batch
+   *  that failed). Printed, never rounded away. */
+  unchecked: number;
   stronger: number;
   unsupported: number;
   /** …of those, fixed by the targeted re-render. */
@@ -54,7 +63,7 @@ export interface FidelityRecord {
 }
 
 export function emptyFidelity(): FidelityRecord {
-  return { checked: 0, stronger: 0, unsupported: 0, rewritten: 0, replaced: 0 };
+  return { checked: 0, units: 0, unchecked: 0, stronger: 0, unsupported: 0, rewritten: 0, replaced: 0 };
 }
 
 /** One checkable piece of the rendered document. */
@@ -65,8 +74,12 @@ export interface CitedUnit {
   line: number;
   /** For a table row, which cell; -1 for prose. */
   cell: number;
-  /** [Source N] numbers this unit (or its row) carries. */
+  /** [Source N] numbers this unit (or its row) carries. Empty for an UNCITED
+   *  unit in a findings section - which is checked anyway, against the nearest
+   *  synthesis lines, because "drop the citation" was the open bypass. */
   citations: number[];
+  /** The `## heading` this unit sits under, "" before the first one. */
+  section: string;
 }
 
 const CITE_RE = /\[Sources?\s*[^\]]*\]/gi;
@@ -84,6 +97,28 @@ function citationsIn(text: string): number[] {
 function isClaimLike(text: string): boolean {
   const words = text.replace(CITE_RE, " ").trim().split(/\s+/).filter(Boolean);
   return words.length >= 5;
+}
+
+/**
+ * Put a trailing citation back INSIDE its sentence.
+ *
+ * The tester's X1: a sentence written "The PSU makes it difficult to upgrade.
+ * [Source 13]" split into a claim with no citation and a citation with no
+ * claim, and yielded ZERO units - the guard silently skipped it while the
+ * footer still reported a confident count. The production convention puts the
+ * citation before the stop; nothing enforced it. This normalises the other
+ * spelling rather than trusting the convention, and it is deterministic: only
+ * whitespace and the position of the bracket change.
+ */
+export function normaliseCitations(text: string): string {
+  // Every quantifier here is HORIZONTAL whitespace only. `\s*` after the bracket
+  // ate the NEWLINE at the end of a line ending "... replacement. [Source 11]"
+  // and welded nine checklist items and the heading after them into a single
+  // line. Found by running the shipped check over the approved document, not by
+  // a unit test - so the case below plants a whole checklist.
+  return String(text || "")
+    .replace(/([.?!])[ \t]+(\[Sources?[^\]]*\])[ \t]*\.?/g, " $2$1")
+    .replace(/[ \t]+([.?!])/g, "$1");
 }
 
 const isTableRow = (l: string) => /^\s*\|/.test(l);
@@ -106,38 +141,70 @@ export function citedUnits(rendered: string): CitedUnit[] {
   const out: CitedUnit[] = [];
   const lines = String(rendered || "").split(/\r?\n/);
   let headerSeen = false;
+  let section = "";
   lines.forEach((line, i) => {
+    const heading = line.match(/^##\s+(.*?)\s*$/);
+    if (heading) { section = heading[1]; headerSeen = false; return; }
     if (isTableRow(line)) {
       if (isTableRule(line)) { headerSeen = true; return; }
       if (!headerSeen) return;                       // the header row names columns
       const rowCites = citationsIn(line);
-      if (!rowCites.length) return;
       const cells = line.split("|");
       // The row's FIRST populated cell is its label - "Thermal / fans", "Power
       // supply (PSU)" - and a label is not a claim. Judging one against the
       // row's sources got it rewritten into a paragraph, which shifted every
       // column of that row. The claims are in the cells after it.
+      //
+      // Every OTHER populated cell is a unit, however short. There is no word
+      // floor inside a table: the floor existed to keep labels out, the label
+      // rule does that directly, and "Fans are proprietary" is exactly the
+      // four-word claim the tester's X2 showed slipping through.
       let seen = 0;
       cells.forEach((c, j) => {
         const text = c.trim();
         if (!text) return;
         if (!text.replace(CITE_RE, "").trim()) return;   // the Source cell itself
         if (seen++ === 0) return;                        // the row label
-        if (!isClaimLike(text)) return;
-        out.push({ text, line: i, cell: j, citations: rowCites });
+        out.push({ text, line: i, cell: j, citations: rowCites, section });
       });
       return;
     }
     headerSeen = false;
-    if (!citationsIn(line).length) return;
     for (const s of splitSentences(line)) {
-      const cites = citationsIn(s);
-      if (cites.length && isClaimLike(s)) {
-        out.push({ text: s.trim(), line: i, cell: -1, citations: cites });
-      }
+      const text = s.trim();
+      if (!text) continue;
+      const cites = citationsIn(text);
+      // A cited sentence is always checked. An UNCITED one is checked too, but
+      // only where the template asks for evidence: the action/findings section,
+      // the table section, and "what the evidence does not settle". Not the
+      // title, not the executive summary, and never Limitations - those [GAP]
+      // questions are uncited BY DESIGN and must survive untouched.
+      if (!cites.length && !isEvidenceSection(section)) continue;
+      if (!isClaimLike(text)) continue;
+      if (/^[#>|\-*_]+$/.test(text)) continue;
+      out.push({ text, line: i, cell: -1, citations: cites, section });
     }
   });
   return out;
+}
+
+/** Sections whose sentences are expected to rest on evidence. */
+export function isEvidenceSection(heading: string): boolean {
+  const h = String(heading || "").toLowerCase();
+  if (!h) return false;
+  if (/limitation|open question/.test(h)) return false;   // the [GAP] questions
+  if (/executive summary/.test(h)) return false;          // compression, by design
+  return true;
+}
+
+/**
+ * How many units the document HAS. Pure, and the denominator the footer prints:
+ * the tester's X4 found three counts of one document and the reviewer's K.10 a
+ * fourth, none of which a reader could reproduce from a committed file. This
+ * one they can - it is a function of the document alone.
+ */
+export function countUnits(rendered: string): number {
+  return citedUnits(normaliseCitations(String(rendered || ""))).length;
 }
 
 /**
@@ -163,6 +230,77 @@ export function referenceLines(synthesis: string, citations: number[]): string[]
     .filter((l) => citationsIn(l).some((n) => want.has(n)))
     .map((l) => l.trim())
     .filter(Boolean);
+}
+
+const CONTENT_RE = /[a-z0-9]{4,}/g;
+function contentWords(text: string): Set<string> {
+  return new Set((String(text || "").toLowerCase().replace(CITE_RE, " ").match(CONTENT_RE) || []));
+}
+function overlap(a: Set<string>, b: Set<string>): number {
+  let n = 0;
+  for (const w of a) if (b.has(w)) n++;
+  return n;
+}
+
+/** Two shared content words: the same floor the entity gate settled on, for the
+ *  same reason - one is a coincidence. */
+export const NEAREST_MIN_OVERLAP = 2;
+
+/**
+ * The synthesis lines an UNCITED unit is about, by word overlap.
+ *
+ * The tester's X2: "the check constrains sentences that cite; it does not stop
+ * a model from asserting something absolute in a sentence that cites nothing".
+ * Dropping the citation was the bypass, so a sentence in an evidence section is
+ * now judged whether or not it carries one - against the lines it is closest
+ * to. When NOTHING in the synthesis reaches the floor, the sentence is about
+ * nothing in the evidence, and that verdict does not need a model.
+ */
+export function nearestLines(synthesis: string, text: string, max = 2): string[] {
+  const want = contentWords(text);
+  if (!want.size) return [];
+  return String(synthesis || "").split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => ({ line: l, score: overlap(want, contentWords(l)) }))
+    .filter((x) => x.score >= NEAREST_MIN_OVERLAP)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, max)
+    .map((x) => x.line);
+}
+
+/** What a unit is judged against: its citations, or its nearest lines. */
+export function evidenceFor(synthesis: string, unit: CitedUnit): string[] {
+  return unit.citations.length
+    ? referenceLines(synthesis, unit.citations)
+    : nearestLines(synthesis, unit.text);
+}
+
+/**
+ * Citations a unit carries that contribute nothing to it.
+ *
+ * The tester's X3: `referenceLines` returns the UNION of every line matching any
+ * cited number, so citing broadly can only make a verdict look better - there is
+ * no penalty for naming a source a sentence does not use. In the shipped render
+ * a motherboard row cited [1, 2, 3, 4] where two of the four are YouTube repair
+ * videos that evidence none of the symptoms listed. Reported, not corrected: a
+ * citation the row does not use is a provenance defect for a reader to see, and
+ * deleting it would be the engine editing a claim's evidence on a word count.
+ */
+export function supersetCitations(rendered: string, synthesis: string): string[] {
+  const out: string[] = [];
+  for (const u of citedUnits(normaliseCitations(rendered))) {
+    if (u.citations.length < 2) continue;
+    const words = contentWords(u.text);
+    for (const n of u.citations) {
+      const lines = referenceLines(synthesis, [n]);
+      if (!lines.length) { out.push(`[Source ${n}] cites nothing in the synthesis`); continue; }
+      if (!lines.some((l) => overlap(words, contentWords(l)) >= NEAREST_MIN_OVERLAP)) {
+        out.push(`[Source ${n}] in "${u.text.replace(CITE_RE, "").trim().slice(0, 60)}"`);
+      }
+    }
+  }
+  return [...new Set(out)].sort();
 }
 
 /**
@@ -202,7 +340,11 @@ export const FIDELITY_SYS =
 SAME        - the sentence says what the cited lines say, no more.
 WEAKER      - the sentence claims LESS than the cited lines (a hedge added, a figure softened). This is acceptable.
 STRONGER    - the sentence claims MORE: a hedge became an absolute ("makes it difficult" -> "is impossible", "no ... available"), "some"/"reported" became "all"/"always", "may" became "does", a ranking or a count the lines do not make.
-UNSUPPORTED - the sentence asserts something the cited lines do not contain at all: a name, a standard, a product, an organisation, a procedure or a figure that is not there.
+UNSUPPORTED - the sentence asserts something the lines do not contain at all: a name, a standard, a product, an organisation, a procedure or a figure that is not there.
+
+Some items carry NEAREST LINES instead of CITED LINES: the sentence cites nothing, and those are the closest lines in the evidence. Judge it exactly the same way - a claim that rests on nothing in the evidence is UNSUPPORTED whether or not it names a source.
+
+A sentence that states an ABSENCE in the evidence - "not described in the sources", "the sources do not say", "no source documents this" - is SAME. It claims nothing about the world, and an honest report is allowed to say what it could not find.
 
 Judge ONLY against the lines given for that item, and judge the CLAIM, not the style:
 - A sentence that combines, shortens or reorders its cited lines is SAME.
@@ -237,8 +379,8 @@ function parseVerdicts(raw: string, n: number): Verdict[] | null {
 
 function itemBlock(units: CitedUnit[], synthesis: string): string {
   return units.map((u, i) =>
-    `${i + 1}. SENTENCE: ${u.text}\n   CITED LINES:\n` +
-    referenceLines(synthesis, u.citations).map((l) => `   - ${l}`).join("\n"),
+    `${i + 1}. SENTENCE: ${u.text}\n   ${u.citations.length ? "CITED LINES" : "NEAREST LINES (the sentence cites nothing)"}:\n` +
+    evidenceFor(synthesis, u).map((l) => `   - ${l}`).join("\n"),
   ).join("\n\n");
 }
 
@@ -258,6 +400,58 @@ export function applyUnit(lines: string[], unit: CitedUnit, next: string): void 
   lines[unit.line] = line.replace(unit.text, next);
 }
 
+/** A replaced table cell longer than this is moved under the table (K.9). */
+export const CELL_NOTE_WORDS = 25;
+
+export function wordCount(text: string): number {
+  return String(text || "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+/**
+ * Put each note under the table its cell belongs to, whole and cited.
+ *
+ * `applyUnit` already addresses a unit by line and cell, so this is a rendering
+ * choice and not a new judgement: nothing decides where to cut a claim, because
+ * nothing cuts one.
+ */
+export function placeNotes(
+  lines: string[], notes: Array<{ line: number; label: string; text: string }>,
+): string {
+  if (!notes.length) return lines.join("\n");
+  const out = [...lines];
+  // Group by the table each note came from (the last row at or after its line),
+  // and insert from the bottom up so earlier indices stay valid.
+  const byEnd = new Map<number, Array<{ label: string; text: string }>>();
+  for (const n of notes) {
+    let end = n.line;
+    while (end + 1 < out.length && /^\s*\|/.test(out[end + 1])) end++;
+    const list = byEnd.get(end) ?? [];
+    list.push({ label: n.label, text: n.text });
+    byEnd.set(end, list);
+  }
+  for (const end of [...byEnd.keys()].sort((a, b) => b - a)) {
+    const block = byEnd.get(end)!.map((n) => `> **${n.label}.** ${n.text}`);
+    out.splice(end + 1, 0, "", ...block);
+  }
+  return out.join("\n");
+}
+
+/**
+ * Count the DELIVERED document, and how much of it this check actually saw.
+ *
+ * M is `countUnits(delivered)` - a pure function of the artifact the reader
+ * holds. N is the units of that artifact whose text the check judged or wrote;
+ * U is the rest. Taking both numbers on the same document is the whole point:
+ * "checked 34 of 32" was the first thing this produced when the denominator
+ * came from one document and the numerator from another.
+ */
+function countAgainst(record: FidelityRecord, delivered: string, judged: Set<string>): void {
+  const finalUnits = citedUnits(normaliseCitations(delivered));
+  record.units = finalUnits.length;
+  record.checked = finalUnits.filter((u) => judged.has(u.text)).length;
+  record.unchecked = Math.max(0, record.units - record.checked);
+}
+
 export interface FidelityResult { rendered: string; record: FidelityRecord; }
 
 /**
@@ -268,12 +462,30 @@ export async function checkRenderFidelity(
   deps: Deps, rendered: string, synthesis: string,
 ): Promise<FidelityResult> {
   const record = emptyFidelity();
-  const doc = String(rendered || "");
+  // A trailing "[Source N]" goes back inside its sentence BEFORE anything is
+  // split, so the shape that produced zero units (tester X1) produces one. The
+  // normalised document is what ships: the citation's position is a convention,
+  // not content, and a document the checker read is the document to deliver.
+  const doc = normaliseCitations(String(rendered || ""));
   if (!doc.trim() || !String(synthesis || "").trim()) return { rendered: doc, record };
 
   try {
-    const units = citedUnits(doc).filter((u) => referenceLines(synthesis, u.citations).length > 0);
-    if (!units.length) return { rendered: doc, record };
+    const all = citedUnits(doc);
+    record.units = all.length;
+    // A unit with NO evidence to judge against - a citation that matches no
+    // line, or an uncited sentence with nothing near it - splits two ways: an
+    // uncited one in an evidence section is UNSUPPORTED on the spot (a claim
+    // resting on nothing in the evidence needs no model to see), a cited one is
+    // left alone and COUNTED as unchecked, because the citation may simply have
+    // been renumbered out from under it.
+    const units: CitedUnit[] = [];
+    const orphans: CitedUnit[] = [];
+    for (const u of all) {
+      if (evidenceFor(synthesis, u).length) units.push(u);
+      else if (!u.citations.length) orphans.push(u);
+    }
+    record.unchecked = all.length - units.length - orphans.length;
+    if (!units.length && !orphans.length) return { rendered: doc, record };
 
     const judge = async (batch: CitedUnit[]): Promise<Verdict[]> => {
       const raw = await deps.chat(
@@ -290,14 +502,18 @@ export async function checkRenderFidelity(
     for (let i = 0; i < units.length; i += BATCH) {
       verdicts.push(...await judge(units.slice(i, i + BATCH)));
     }
-    record.checked = units.length;
+    record.checked = units.length + orphans.length;
     record.stronger = verdicts.filter((v) => v === "STRONGER").length;
-    record.unsupported = verdicts.filter((v) => v === "UNSUPPORTED").length;
+    record.unsupported = verdicts.filter((v) => v === "UNSUPPORTED").length + orphans.length;
 
     const bad = units.filter((_u, i) => verdicts[i] === "STRONGER" || verdicts[i] === "UNSUPPORTED");
-    if (!bad.length) return { rendered: doc, record };
+    if (!bad.length && !orphans.length) {
+      countAgainst(record, doc, new Set(units.map((u) => u.text)));
+      return { rendered: doc, record };
+    }
 
     const lines = doc.split(/\r?\n/);
+    bad.push(...orphans);
 
     // One targeted re-render of the offending sentences, and only those.
     let fixed: Record<string, string> = {};
@@ -314,46 +530,88 @@ export async function checkRenderFidelity(
     } catch { /* the verbatim fallback below is the guarantee, not this */ }
 
     const rewritten: CitedUnit[] = [];
+    const changed: boolean[] = [];
     bad.forEach((u, i) => {
       const next = (fixed[String(i + 1)] || "").trim();
       if (next && next !== u.text) {
         applyUnit(lines, u, next);
         rewritten.push({ ...u, text: next });
+        changed.push(true);
       } else {
         rewritten.push(u);
+        changed.push(false);
       }
     });
 
-    // Re-judge what was rewritten. Anything still overstating its sources is
-    // REPLACED by those sources, which cannot overstate them.
-    let second: Verdict[] = [];
-    try {
-      second = [];
-      for (let i = 0; i < rewritten.length; i += BATCH) {
-        second.push(...await judge(rewritten.slice(i, i + BATCH)));
+    // Re-judge what was REWRITTEN, and only that. A unit the rewriter did not
+    // touch cannot "come back" better: re-asking the same judge about the same
+    // sentence is a second opinion, not a repair, and on the comparison render
+    // it flip-flopped ten cells from UNSUPPORTED to SAME and left them standing.
+    // The first verdict stands for anything unchanged.
+    const toReJudge = rewritten.filter((_u, i) => changed[i]);
+    let second: Verdict[] = rewritten.map((_u, i) => changed[i] ? "SAME" : "STRONGER");
+    if (toReJudge.length) {
+      try {
+        const verdicts2: Verdict[] = [];
+        for (let i = 0; i < toReJudge.length; i += BATCH) {
+          verdicts2.push(...await judge(toReJudge.slice(i, i + BATCH)));
+        }
+        let k = 0;
+        second = rewritten.map((_u, i) => changed[i] ? verdicts2[k++] : "STRONGER");
+      } catch {
+        // The re-judge is the optional half: if it cannot run, trust nothing and
+        // replace every sentence the FIRST judge condemned.
+        second = rewritten.map(() => "STRONGER" as Verdict);
       }
-    } catch {
-      // The re-judge is the optional half: if it cannot run, trust nothing and
-      // replace every sentence the FIRST judge condemned.
-      second = rewritten.map(() => "STRONGER" as Verdict);
     }
 
+    // Every text this check has seen or written. The footer's N is counted over
+    // the DELIVERED document against this set, so "N of M" is two numbers about
+    // one artifact - the tester's X4 and the reviewer's K.10 were both about a
+    // count taken on a document nobody holds.
+    const judged = new Set<string>([...units, ...orphans].map((u) => u.text));
+    const notes: Array<{ line: number; label: string; text: string }> = [];
     rewritten.forEach((u, i) => {
       if (second[i] === "STRONGER" || second[i] === "UNSUPPORTED") {
-        let verbatim = verbatimFallback(referenceLines(synthesis, u.citations), u.text);
-        // Inside a table the row already has a Source column; repeating the
-        // citation in the cell makes the row read twice.
-        if (u.cell >= 0) verbatim = verbatim.replace(CITE_RE, "").replace(/\s+([.,;])/g, "$1").trim();
+        const refs = u.citations.length
+          ? referenceLines(synthesis, u.citations)
+          : nearestLines(synthesis, bad[i].text);
+        let verbatim = verbatimFallback(refs, u.text);
+        if (verbatim && u.cell >= 0) {
+          // The reviewer's K.9: keep the verbatim line exactly, and fix the
+          // LAYOUT instead. A long grounded sentence in a column whose siblings
+          // are clauses reads badly as a table and is exactly right as
+          // evidence, and any rule that CLIPPED it to fit could land on
+          // "...install aftermarket PSUs" and re-create the overstatement the
+          // replacement was repairing. So the cell gets a marker and the
+          // sentence goes under the table, whole.
+          const cited = verbatim;
+          verbatim = verbatim.replace(CITE_RE, "").replace(/\s+([.,;])/g, "$1").trim();
+          if (wordCount(verbatim) > CELL_NOTE_WORDS) {
+            const n = notes.length + 1;
+            notes.push({ line: u.line, label: `Note ${n}`, text: cited });
+            const marker = `see Note ${n} below the table`;
+            applyUnit(lines, u, marker);
+            judged.add(marker);
+            judged.add(`**Note ${n}.** ${cited}`);
+            judged.add(cited);
+            record.replaced++;
+            return;
+          }
+        }
         if (verbatim) {
           applyUnit(lines, u, verbatim);
+          judged.add(verbatim);
           record.replaced++;
           return;
         }
       }
-      if (u.text !== bad[i].text) record.rewritten++;
+      if (u.text !== bad[i].text) { judged.add(u.text); record.rewritten++; }
     });
 
-    return { rendered: lines.join("\n"), record };
+    const finalDoc = placeNotes(lines, notes);
+    countAgainst(record, finalDoc, judged);
+    return { rendered: finalDoc, record };
   } catch (e) {
     // Fail OPEN. The document is the renderer's, unchanged, and the run records
     // that nothing checked it.

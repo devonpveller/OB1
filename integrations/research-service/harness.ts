@@ -17,7 +17,7 @@ import {
   classifyHits, emptySearchStats, reformulate, type SearchStats, shapeQuery,
 } from "./search-quality.ts";
 import { applyNumericGrounding, renderGroundingDiff, type RenderGroundingDiff } from "./grounding.ts";
-import { checkRenderFidelity, type FidelityRecord } from "./fidelity.ts";
+import { checkRenderFidelity, countUnits, supersetCitations, type FidelityRecord } from "./fidelity.ts";
 import {
   coverageFooter, emptySearchRecord, failureNotice, gapQuestions, reconcileNeedsStatus,
   shouldClassifyTemplate, type GapPassRecord,
@@ -1378,15 +1378,31 @@ export async function runResearch(
       await progress("synthesize", `the render fidelity check did not run: ${fid.record.error}`,
         { fidelity_checked: 0 });
     } else {
+      // The record's N and M were both counted on the DELIVERED document by
+      // the check itself (fidelity.ts `countAgainst`); this only asserts it,
+      // because a denominator the reader cannot reproduce from the artifact in
+      // front of them is the tester's X4 and the reviewer's K.10 in one number.
+      if (fid.record.units !== countUnits(prose)) {
+        await progress("synthesize",
+          `render check accounting mismatch: recorded ${fid.record.units} unit(s), the document has ${countUnits(prose)}`,
+          { fidelity_units: fid.record.units });
+      }
       await progress("synthesize",
-        `render checked: ${fid.record.checked} cited sentence(s), ` +
+        `render checked: ${fid.record.checked} of ${fid.record.units} unit(s), ` +
         `${fid.record.stronger} stronger, ${fid.record.unsupported} unsupported, ` +
-        `${fid.record.rewritten} rewritten, ${fid.record.replaced} replaced verbatim`,
-        { fidelity_checked: fid.record.checked, fidelity_corrected: corrected });
+        `${fid.record.rewritten} rewritten, ${fid.record.replaced} replaced verbatim, ` +
+        `${fid.record.unchecked} unchecked`,
+        { fidelity_checked: fid.record.checked, fidelity_units: fid.record.units,
+          fidelity_corrected: corrected, fidelity_unchecked: fid.record.unchecked });
     }
   }
   if (prose) {
     proseUngrounded = renderGroundingDiff(prose, synthesis, query);
+    // A citation a sentence does not use is a provenance defect a reader can
+    // follow to a source that does not support the row (tester X3). Reported
+    // beside the other leaks, never corrected: deleting a citation would be the
+    // engine editing a claim's evidence on a word count.
+    proseUngrounded.citations = supersetCitations(prose, synthesis);
     const leaks = proseUngrounded.numbers.length + proseUngrounded.urls.length +
                   proseUngrounded.names.length;
     if (leaks) {

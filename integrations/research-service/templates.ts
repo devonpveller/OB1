@@ -65,166 +65,292 @@ One section, once. List every [GAP] item as a plain question, with no citation, 
 - If anything is still open, END this section with ONE sentence recommending a further run aimed at it, in the reader's own terms: "A further run focused on <the open thing> would close this." Name the thing, not the machinery.
 - If nothing is open, END with one sentence saying the question is answered by the evidence above, and write no recommendation.`;
 
-export const TEMPLATES: ReportTemplate[] = [
+/**
+ * The SHARED SKELETON every report is built on (research-trust-template).
+ *
+ * The operator read the OptiPlex buyer's guide job 64ac38cf delivered and said
+ * "this looks good... set this as a template for future use". What made it good
+ * is not the subject: it is that the document answers, then tells the reader
+ * what to DO, then lays the evidence out by area with a citation on every row,
+ * then says what it could not settle, then stops - once. Every template now has
+ * that shape, and each keeps its own audience, tone, hints and section NAMES,
+ * because a checklist for a buyer and a findings table for a scientist are the
+ * same section doing different work.
+ *
+ * None was deleted or merged: the operator's other instruction was that we
+ * should have "about 4-5 now if not more", and there are ten.
+ *
+ * | template | action / findings section | table | area column |
+ * |---|---|---|---|
+ * | buyers-guide          | What to check in person       | Failure modes by subsystem   | Subsystem |
+ * | scientific-paper      | Findings                      | Findings by theme            | Theme |
+ * | technical-proposal    | Recommendation                | Technical factors by area    | Area |
+ * | nontechnical-proposal | Recommendation                | Factors by area              | Area |
+ * | programming-doc       | How to use it                 | Behaviour by area            | Area |
+ * | engineering-doc       | Specifications and constraints| Specifications by subsystem  | Subsystem |
+ * | product-comparison    | Comparison at a glance        | Options by criterion         | Criterion |
+ * | market-analysis       | Key players and trends        | Market factors by area       | Area |
+ * | value-proposition     | The value offered             | Benefits by area             | Area |
+ * | general-report        | What the evidence supports    | Findings by area             | Area |
+ *
+ * A template is one entry in SHAPES. `buildStructure` puts the sections in
+ * order, so a template cannot quietly lose one, and `templates.test.ts` walks
+ * TEMPLATES asserting the order and the count.
+ */
+interface TemplateShape {
+  id: string;
+  name: string;
+  audience: string;
+  hints: string;
+  /** One line of framing at the top of the prompt. */
+  lead: string;
+  /** What the title must state, in this template's terms. */
+  title: string;
+  /** What the executive summary must contain. */
+  summary: string;
+  /** The purpose-specific action/findings section. */
+  action: { heading: string; body: string };
+  /** The findings-by-area table. `columns[0]` is the area column. */
+  table: { heading: string; columns: string[]; body: string };
+  /** Register and any per-template prohibitions, last line of the prompt. */
+  tone: string;
+}
+
+/** The section headings every report carries, in order. */
+export const SKELETON_SECTIONS = [
+  "Executive summary",
+  "<action>",
+  "<table>",
+  "What the evidence does not settle",
+  "Limitations and open questions",
+];
+
+function buildStructure(s: TemplateShape): string {
+  return `${s.lead}
+# <Title stating the FINDING - ${s.title} Never a topic label, never an assertion of absence.>
+## Executive summary
+${s.summary} A reader must be able to stop here.
+## ${s.action.heading}
+${s.action.body}
+## ${s.table.heading}
+${s.table.body}
+| ${s.table.columns.join(" | ")} |
+Every row carries its [Source N] in the Source column. An area with no evidence does not get a row - it goes in Limitations.
+## What the evidence does not settle
+Anything the sources disagree on, leave weakly supported, or answer only in part, in prose, cited.
+${LIMITATIONS_SECTION}
+Write EVERY section above, in this order, with these exact headings - including the table. A section the evidence barely reaches is written thin; it is never dropped, and the reader is never left to wonder whether it was omitted or had nothing in it. Add a sub-heading inside a section only when the evidence genuinely divides.
+${s.tone}`;
+}
+
+const SHAPES: TemplateShape[] = [
   {
     id: "buyers-guide",
     name: "Buyer's guide",
     audience: "someone deciding whether to buy a specific thing, and what to check before they do",
     hints: "should-I-buy questions about a specific product or model, used-purchase questions, what-to-look-for, common faults and red flags, inspection before purchase, reliability of a particular machine",
-    structure: `Render as a buyer's guide the reader could take with them to the inspection:
-# <Title stating the FINDING - what the evidence says about buying this thing. Never a topic label, never an assertion of absence.>
-## Executive summary
-3-5 sentences: what the evidence says about this purchase, the failure modes that matter most, and what the buyer should do about them. A reader must be able to stop here.
-## What to check in person
-A checklist of concrete, physical checks the buyer can perform, most decisive first, each one tied to the failure it detects and cited: "- [ ] <check> - <what it would show> [Source N]". Only checks the evidence supports; never invent a procedure.
-## Failure modes by subsystem
-A Markdown table, one row per subsystem the evidence covers (for example PSU, motherboard/capacitors, CPU socket, RAM, BIOS, thermal/fans - use the subsystems the evidence actually names):
-| Subsystem | What goes wrong | What it looks like | Source |
-Every row carries its [Source N] in the Source column. A subsystem with no evidence does not get a row - it goes in Limitations.
-## What the evidence does not settle
-Anything the sources disagree on or leave weakly supported, in prose, cited.
-${LIMITATIONS_SECTION}
-Practical, specific, no marketing. Prices and part numbers exactly as sourced.`,
+    lead: "Render as a buyer's guide the reader could take with them to the inspection:",
+    title: "what the evidence says about buying this thing.",
+    summary: "3-5 sentences: what the evidence says about this purchase, the failure modes that matter most, and what the buyer should do about them.",
+    action: {
+      heading: "What to check in person",
+      body: `A checklist of concrete, physical checks the buyer can perform, most decisive first, each one tied to the failure it detects and cited: "- [ ] <check> - <what it would show> [Source N]". Only checks the evidence supports; never invent a procedure.`,
+    },
+    table: {
+      heading: "Failure modes by subsystem",
+      columns: ["Subsystem", "What goes wrong", "What it looks like", "Source"],
+      body: "A Markdown table, one row per subsystem the evidence covers (for example PSU, motherboard/capacitors, CPU socket, RAM, BIOS, thermal/fans - use the subsystems the evidence actually names):",
+    },
+    tone: "Practical, specific, no marketing. Prices and part numbers exactly as sourced.",
   },
   {
     id: "scientific-paper",
     name: "Scientific paper",
     audience: "researchers and technically fluent readers",
     hints: "scientific questions, studies, experiments, biology/physics/chemistry/medicine, 'what does the research say', literature-review style questions",
-    structure: `Render as a short scientific-paper-style report:
-# <Title — specific and factual, and never an assertion of absence>
-**Answer.** 2-4 sentences answering the question directly, before anything else. A reader must be able to stop here and know what the evidence showed.
-## Abstract — 3-5 sentences: question, what the evidence shows, the headline conclusion.
-## Background — why the question matters, established context (cited).
-## Findings — the substantive results, grouped thematically; every finding cited. Use subsections if natural.
-## Discussion — what the findings mean together; note confidence levels honestly.
-${LIMITATIONS_SECTION}
-Formal, precise tone; no marketing language; numbers stated exactly as sourced.`,
+    lead: "Render as a short scientific-paper-style report:",
+    title: "what the evidence shows about the question asked.",
+    summary: "3-5 sentences: the question, what the evidence shows, and the headline conclusion with its confidence.",
+    action: {
+      heading: "Findings",
+      body: "The substantive results, grouped thematically, most load-bearing first; every finding cited. State effect sizes, populations and methods exactly as sourced, and say plainly where support is weak.",
+    },
+    table: {
+      heading: "Findings by theme",
+      columns: ["Theme", "What the evidence shows", "Strength of support", "Source"],
+      body: "A Markdown table, one row per theme the evidence covers:",
+    },
+    tone: "Formal, precise tone; no marketing language; numbers stated exactly as sourced.",
   },
   {
     id: "technical-proposal",
     name: "Technical proposal",
     audience: "engineers and technical decision-makers",
     hints: "should-we-build/adopt questions with technical depth, architecture or tooling choices, migration/implementation feasibility",
-    structure: `Render as a technical proposal:
-# <Title>
-## Executive summary — the recommendation in 3-4 sentences.
-## Problem statement — what needs solving and why now (cited).
-## Proposed approach — the approach the evidence best supports, with technical specifics.
-## Technical detail — the load-bearing facts: interfaces, constraints, performance numbers, compatibility (all cited).
-## Risks & mitigations — evidenced risks; honest about unknowns.
-## Alternatives considered — other options the sources surfaced and why they rank lower.
-${LIMITATIONS_SECTION}
-Precise, implementation-ready tone; a competent engineer should be able to act on it.`,
+    lead: "Render as a technical proposal:",
+    title: "what the evidence supports doing, and why.",
+    summary: "3-4 sentences: the recommendation, the evidence behind it, and the main risk.",
+    action: {
+      heading: "Recommendation",
+      body: "The approach the evidence best supports, with the technical specifics a competent engineer could act on - interfaces, constraints, performance numbers, compatibility - each cited. Name the alternatives the sources surfaced and why they rank lower.",
+    },
+    table: {
+      heading: "Technical factors by area",
+      columns: ["Area", "What the evidence shows", "What it means for the build", "Source"],
+      body: "A Markdown table, one row per area the evidence covers (performance, compatibility, operational cost, migration, support):",
+    },
+    tone: "Precise, implementation-ready tone; a competent engineer should be able to act on it.",
   },
   {
     id: "nontechnical-proposal",
     name: "Non-technical proposal",
     audience: "mixed technical and non-technical stakeholders",
     hints: "should-we questions framed around business value, budget, adoption, plain-language decisions",
-    structure: `Render as a proposal for a mixed audience:
-# <Title>
-## Executive summary — plain language, 3-4 sentences, the recommendation up front.
-## Why this matters — the problem and stakes, no jargon (cited).
-## What we propose — the approach in plain terms; technical terms briefly explained in parentheses.
-## What it takes — effort, dependencies, prerequisites as evidenced.
-## Risks, plainly — what could go wrong and how likely, per the sources.
-${LIMITATIONS_SECTION}
-Readable by a non-technical stakeholder, yet specific enough that a technical reader can act on it.`,
+    lead: "Render as a proposal for a mixed audience:",
+    title: "what the evidence supports doing, in plain terms.",
+    summary: "3-4 sentences in plain language: the recommendation, what it takes, and the main risk.",
+    action: {
+      heading: "Recommendation",
+      body: "What to do and what it takes, in plain terms - effort, dependencies, prerequisites, and the evidenced risks - each cited. Technical terms explained in parentheses the first time.",
+    },
+    table: {
+      heading: "Factors by area",
+      columns: ["Area", "What the evidence shows", "What it means in practice", "Source"],
+      body: "A Markdown table, one row per area the evidence covers (cost, effort, risk, adoption, timing):",
+    },
+    tone: "Readable by a non-technical stakeholder, yet specific enough that a technical reader can act on it.",
   },
   {
     id: "programming-doc",
     name: "Programming technical document",
     audience: "software developers",
     hints: "programming languages, frameworks, libraries, APIs, SDKs, code tooling, software how-it-works questions",
-    structure: `Render as a developer-facing technical document:
-# <Title>
-## Overview — what it is and what problem it solves (2-4 sentences).
-## How it works — the mechanics, cited.
-## Usage & integration — how to adopt/use it, as evidenced (setup, key interfaces/APIs, configuration).
-## Pitfalls & caveats — sourced gotchas, limitations, version issues.
-## Compatibility & ecosystem — versions, platforms, related tooling as evidenced.
-${LIMITATIONS_SECTION}
-Concise, exact, code-literate tone. Inline-code formatting for identifiers. Never invent an API name or version.`,
+    lead: "Render as a developer-facing technical document:",
+    title: "what it does and how it behaves.",
+    summary: "3-4 sentences: what it is, what problem it solves, and the one thing a developer most needs to know.",
+    action: {
+      heading: "How to use it",
+      body: "How to adopt or use it as evidenced: setup, the key interfaces or APIs, configuration, and the pitfalls that bite first. Inline-code formatting for identifiers. Never invent an API name or a version.",
+    },
+    table: {
+      heading: "Behaviour by area",
+      columns: ["Area", "How it behaves", "Pitfall or caveat", "Source"],
+      body: "A Markdown table, one row per area the evidence covers (installation, configuration, API surface, performance, versions, ecosystem):",
+    },
+    tone: "Concise, exact, code-literate tone.",
   },
   {
     id: "engineering-doc",
     name: "Engineering technical document",
     audience: "engineers (physical or systems)",
     hints: "physical engineering, mechanical/electrical/civil, hardware, materials, manufacturing, systems engineering, specifications and standards",
-    structure: `Render as an engineering technical document:
-# <Title>
-## Overview — the system/component/process and its purpose.
-## Description — how it is designed/built/operates, cited.
-## Specifications & constraints — the hard numbers: dimensions, tolerances, ratings, capacities, exactly as sourced.
-## Analysis — trade-offs, comparisons, performance implications the evidence supports.
-## Standards & compliance — any codes, standards, certifications the sources mention.
-${LIMITATIONS_SECTION}
-Precise engineering register; units always stated; no rounded or invented figures.`,
+    lead: "Render as an engineering technical document:",
+    title: "what the system is and what it is bounded by.",
+    summary: "3-4 sentences: the system or component, its purpose, and the constraint that matters most.",
+    action: {
+      heading: "Specifications and constraints",
+      body: "The hard numbers as sourced - dimensions, tolerances, ratings, capacities, standards - with the trade-offs they force. Units always stated; no rounded or invented figures.",
+    },
+    table: {
+      heading: "Specifications by subsystem",
+      columns: ["Subsystem", "Specification", "Constraint or tolerance", "Source"],
+      body: "A Markdown table, one row per subsystem the evidence covers:",
+    },
+    tone: "Precise engineering register; units always stated.",
   },
   {
     id: "product-comparison",
     name: "Product comparison",
     audience: "buyers and evaluators",
     hints: "X vs Y, best-tool-for, alternatives-to, feature and pricing comparisons across products or services",
-    structure: `Render as a product comparison:
-# <Title>
-## Verdict — 2-3 sentences: which option leads for whom, per the evidence.
-## Comparison at a glance — a Markdown table of the options against the decisive criteria (cite inside cells where a number/claim needs it).
-## Per-option detail — a short cited section per option: strengths, weaknesses, pricing/terms as evidenced.
-## Decision factors — which criteria should drive the choice, and how the options split on them.
-${LIMITATIONS_SECTION}
-Even-handed; differences stated concretely; never pad a row with an uncited spec.`,
+    lead: "Render as a product comparison:",
+    title: "which option the evidence favours, and for whom.",
+    summary: "3-4 sentences: which option leads, for which reader, and what would change the answer.",
+    action: {
+      heading: "Comparison at a glance",
+      body: "Two to four sentences per option: its strengths, its weaknesses and its pricing or terms as evidenced, each cited. Never pad an option with an uncited spec.",
+    },
+    table: {
+      heading: "Options by criterion",
+      columns: ["Criterion", "<Option A>", "<Option B>", "Source"],
+      body: "A Markdown table that IS the comparison grid: one row per decisive criterion, one column per option, using the options' real names in the header. Cite inside a cell where a number or claim needs it, and put the row's citations in the Source column:",
+    },
+    tone: "Even-handed; differences stated concretely.",
   },
   {
     id: "market-analysis",
     name: "Market analysis",
     audience: "strategy and business readers",
     hints: "market size/landscape, competitors, industry trends, growth, segments, investment context",
-    structure: `Render as a market analysis:
-# <Title>
-## Executive summary — the state of the market in 3-4 sentences.
-## Market overview — size, structure, segments as evidenced.
-## Key players — who matters and why, cited.
-## Trends & drivers — what is changing and what is pushing it.
-## Risks & headwinds — evidenced counter-forces.
-## Outlook — only what the sources support; label projections as the sources' own.
-${LIMITATIONS_SECTION}
-Analytical tone; every figure cited; clearly attribute forecasts to their sources.`,
+    lead: "Render as a market analysis:",
+    title: "what the evidence says the market is doing.",
+    summary: "3-4 sentences: the state of the market, the direction of travel, and the strongest counter-force.",
+    action: {
+      heading: "Key players and trends",
+      body: "Who matters and what is changing, each cited, with the drivers behind it. Attribute every forecast to the source that made it; never state a projection as fact.",
+    },
+    table: {
+      heading: "Market factors by area",
+      columns: ["Area", "What the evidence shows", "Direction of travel", "Source"],
+      body: "A Markdown table, one row per area the evidence covers (size, segments, players, pricing, regulation, headwinds):",
+    },
+    tone: "Analytical tone; every figure cited; forecasts clearly attributed.",
   },
   {
     id: "value-proposition",
     name: "Value proposition",
     audience: "product and business stakeholders",
     hints: "why-would-anyone-buy/use questions, positioning, differentiation, benefit articulation",
-    structure: `Render as a value-proposition document:
-# <Title>
-## Summary — the core value in 2-3 sentences.
-## The problem — the pain being addressed, cited.
-## The value offered — the concrete benefits, each evidenced.
-## Evidence & differentiators — what sets it apart, per the sources; honest where evidence is thin.
-## Target fit — who it serves best, as evidenced.
-${LIMITATIONS_SECTION}
-Clear and persuasive but never beyond the evidence — this is grounded analysis, not marketing copy.`,
+    lead: "Render as a value-proposition document:",
+    title: "what value the evidence actually supports claiming.",
+    summary: "3-4 sentences: the core value, who it serves, and where the evidence is thin.",
+    action: {
+      heading: "The value offered",
+      body: "The concrete benefits, each evidenced and tied to the pain it addresses, with the differentiators the sources support. Be honest where the evidence is thin - this is grounded analysis, not marketing copy.",
+    },
+    table: {
+      heading: "Benefits by area",
+      columns: ["Area", "Benefit", "Strength of evidence", "Source"],
+      body: "A Markdown table, one row per area the evidence covers:",
+    },
+    tone: "Clear and persuasive but never beyond the evidence.",
   },
   {
     id: "general-report",
     name: "General research report",
     audience: "any reader",
-    hints: "DEFAULT — anything that does not clearly fit another template",
-    structure: `Render as a SHORT, answer-first research report. Target 700 words or fewer; never pad.
-
-# <Title that states the ANSWER, not the topic>
-**Answer.** 2-4 sentences answering the question directly, from the evidence. Lead with the answer, not with background. If the evidence does not settle the question, say what it DOES establish and what remains open - in those same 2-4 sentences.
-
-## What the evidence supports
-One cited bullet per claim, at most 12, most decisive first. No bullet without its [Source N]. Group them under bold sub-labels when the findings fall into obvious groups.
-
-${LIMITATIONS_SECTION}
-
-Nothing else. No "Overview", no "Background", no "Conclusion" restating the summary.`,
+    hints: "DEFAULT - anything that does not clearly fit another template",
+    lead: "Render as a short, answer-first research report. Target 900 words or fewer; never pad.",
+    title: "what the evidence establishes about the question asked.",
+    summary: "2-4 sentences answering the question directly. If the evidence does not settle it, say what it DOES establish and what remains open, in those same sentences.",
+    action: {
+      heading: "What the evidence supports",
+      body: "One cited bullet per claim, at most 12, most decisive first. No bullet without its [Source N]. Group them under bold sub-labels when the findings fall into obvious groups.",
+    },
+    table: {
+      heading: "Findings by area",
+      columns: ["Area", "What the evidence shows", "Why it matters", "Source"],
+      body: "A Markdown table, one row per area the evidence covers:",
+    },
+    tone: `Nothing else. No "Overview", no "Background", no "Conclusion" restating the summary.`,
   },
 ];
+
+export const TEMPLATES: ReportTemplate[] = SHAPES.map((s) => ({
+  id: s.id,
+  name: s.name,
+  audience: s.audience,
+  hints: s.hints,
+  structure: buildStructure(s),
+}));
+
+/** The per-template section names, for tests and for the docblock table. */
+export const SECTION_NAMES: Record<string, { action: string; table: string; area: string }> =
+  Object.fromEntries(SHAPES.map((s) => [s.id, {
+    action: s.action.heading,
+    table: s.table.heading,
+    area: s.table.columns[0],
+  }]));
 
 export const DEFAULT_TEMPLATE_ID = "general-report";
 
