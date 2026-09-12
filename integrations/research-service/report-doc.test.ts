@@ -3,7 +3,8 @@
  * a colleague, and is every word of it still grounded?
  *
  * The artefact this exists for is the live OWUI run 33250e9b, kept whole at
- * documentation/evidence/research-trust-report/live-owui-33250e9b.result.json.
+ * ./fixtures/live-owui-33250e9b.result.json (the parent repo keeps a
+ * human-facing copy under documentation/evidence/research-trust-report/).
  * It answered a buyer's question about a used Dell OptiPlex 3050 with 26 cited
  * lines from 17 sources, and delivered them as:
  *   - a bare "facts / sources / gaps" list, because the template classifier is
@@ -15,8 +16,8 @@
  *     (NOT grounded)";
  *   - and a paragraph addressed to the reading MODEL, in the reader's document.
  *
- * The BEFORE and AFTER documents are committed beside the result so the
- * difference is a file, not a claim.
+ * The BEFORE and AFTER documents are committed beside the result, in this same
+ * fixtures directory, so the difference is a file and not a claim.
  */
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
@@ -32,10 +33,13 @@ import {
 } from "./templates.ts";
 import type { Deps } from "./harness.ts";
 
-const EV = new URL(
-  "../../../documentation/evidence/research-trust-report/",
-  import.meta.url,
-);
+// INSIDE the submodule, like every other fixture. This file used to read the
+// parent repo's documentation/evidence/ directory, which works in a full
+// checkout and fails the moment OB1 is tested on its own - which is how OB1 is
+// built and how every attempt of this item is verified. An OB1 test may never
+// read a file outside OB1. The parent keeps human-facing copies of all three,
+// with a note pointing here.
+const EV = new URL("./fixtures/", import.meta.url);
 const RUN = JSON.parse(Deno.readTextFileSync(new URL("live-owui-33250e9b.result.json", EV)));
 const AFTER = Deno.readTextFileSync(new URL("rendered-AFTER-33250e9b.md", EV));
 const BEFORE = Deno.readTextFileSync(new URL("rendered-BEFORE-33250e9b.md", EV));
