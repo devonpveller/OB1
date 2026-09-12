@@ -598,3 +598,140 @@ Deno.test("the footer names a refused search rather than hiding it", () => {
     "entity gate refused 1 search(es): the query had fewer than two content words",
   );
 });
+
+// ── The gap-closing pass (research-trust-report) ────────────────────────────
+/**
+ * The operator asked for the engine to close what it can BEFORE delivering:
+ * "there should be a recommendation to perform an additional run - or better
+ * yet, perform the additional run before sending an incomplete result back to
+ * the end user."
+ *
+ * These mocks hold the search side fixed and vary only what the coverage judge
+ * and the synthesis say, because what the pass has to get right is WHEN it runs
+ * and how many times - not what the engine does with pages, which every other
+ * case here already covers.
+ */
+const GOOD = fx("search-good-optiplex").hits as SearchHit[];
+
+/** A synthesis that grounds ONE need and leaves the rest as [GAP] lines. */
+const THIN_SYNTHESIS = [
+  "[SOURCED] The OptiPlex 3050 uses an LGA 1151 socket and its pins bend easily. [Source 1]",
+  "[SOURCED] A second report describes bent socket pins on the same board. [Source 1]",
+  "[GAP] What thermal issues, fan failures or airflow problems are reported?",
+  "[GAP] How is the BIOS integrity verified and what tampering signs exist?",
+].join("\n");
+
+function gapDeps(o: { synthesis?: string; open?: number[] } = {}) {
+  const m = mockDeps({
+    hitsFor: () => GOOD,
+    relevance: () => true,
+    synthesis: o.synthesis ?? THIN_SYNTHESIS,
+  });
+  const baseChat = m.deps.chat;
+  const calls = m.calls as typeof m.calls & { gapQueries: string[] };
+  calls.gapQueries = [];
+  // The staged-coverage judge decides what is still open after round 1.
+  m.deps.chat = (sys, user, opts) => {
+    if (sys.includes("GATHERED SOURCES")) {
+      return Promise.resolve(JSON.stringify({ covered: [], open: o.open ?? [0, 1, 2] }));
+    }
+    return baseChat(sys, user, opts);
+  };
+  return { deps: m.deps, calls };
+}
+
+Deno.test("ACCEPTANCE 8: one gap-closing pass runs, is counted, and is never run twice", async () => {
+  const { deps } = gapDeps();
+  const seen: string[] = [];
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true },
+    async (phase, message) => { if (phase === "gap_pass") seen.push(message); });
+  assert(r.gapPass, "no gap-closing pass ran");
+  // ONCE. Not "usually once": `gapRound` is nulled before it is awaited, so a
+  // second call cannot be reached even if a later edit adds one.
+  assertEquals(seen.filter((m) => /^First pass complete/.test(m)).length, 1, seen.join(" | "));
+  assertEquals(seen.filter((m) => /^gap-closing pass: \+/.test(m)).length, 1, seen.join(" | "));
+  assertEquals(r.gapPass!.total, r.needsStatus.length);
+  assert(r.gapPass!.answeredAfter >= r.gapPass!.answeredBefore,
+    `the pass lost ground: ${JSON.stringify(r.gapPass)}`);
+  // The footer says what it cost and what it bought, in the prose the curator
+  // stores and the chat renders.
+  assertStringIncludes(r.prose, `gap-closing pass: +${r.gapPass!.added} sources, needs answered `);
+  assertStringIncludes(r.prose,
+    `${r.gapPass!.answeredBefore} of ${r.gapPass!.total} -> ${r.gapPass!.answeredAfter} of ${r.gapPass!.total}`);
+});
+
+Deno.test("ACCEPTANCE 11: the curator is delegated to ONCE, with the final synthesis", async () => {
+  const { deps, calls } = gapDeps();
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui" });
+  assert(r.gapPass, "no gap-closing pass ran");
+  assertEquals(calls.curator, 1, "an intermediate synthesis reached the curator");
+  assert(r.synthesis.trim().length > 0);
+});
+
+/** A synthesis that grounds two cited lines about each of the three needs. */
+const FULL_SYNTHESIS = [
+  "[SOURCED] The most common hardware failure modes reported for this machine are PSU faults. [Source 1]",
+  "[SOURCED] Known defects reported by owners include a common motherboard fault. [Source 1]",
+  "[SOURCED] Thermal issues include capacitor failures close to the CPU socket. [Source 2]",
+  "[SOURCED] Specific CPU socket problems and capacitor failures are associated with this model. [Source 2]",
+  "[SOURCED] A buyer can verify BIOS integrity and check for signs of tampering. [Source 3]",
+  "[SOURCED] Verifying the BIOS signature is how tampering is detected. [Source 3]",
+].join("\n");
+
+Deno.test("ACCEPTANCE 8: no pass at all when every need is answered", async () => {
+  const { deps } = gapDeps({ synthesis: FULL_SYNTHESIS });
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  assertEquals(r.needsStatus.filter((n) => n.status !== "answered").length, 0,
+    JSON.stringify(r.needsStatus));
+  assertEquals(r.gapPass, null, "a pass ran with nothing open");
+  assertEquals(/gap-closing pass/.test(r.prose), false);
+});
+
+Deno.test("ACCEPTANCE 8: no pass when the wall clock is spent", async () => {
+  const { deps } = gapDeps();
+  // A one-millisecond budget: by the time the first synthesis is written the
+  // clock is gone, and a second round would be the run overrunning its contract
+  // to do work nobody asked for.
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, {
+    origin: "owui", dryRun: true, contract: { allowDomains: [], denyDomains: [], redlines: [], budget: { wallMs: 1 } },
+  });
+  assertEquals(r.gapPass, null, "a pass ran on an exhausted clock");
+});
+
+Deno.test("the gap-closing pass never touches the article path", async () => {
+  const { deps } = gapDeps();
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, {
+    origin: "owui", dryRun: true, mode: "article",
+    seedSources: [{ url: "https://seed.example/a", title: "A seed article", content: "z".repeat(1500) }],
+  });
+  assertEquals(r.gapPass, null, "the article path ran a gap-closing pass");
+});
+
+Deno.test("the INTERIM status is emitted once, before the pass, with the numbers in it", async () => {
+  const { deps } = gapDeps();
+  const seen: Array<{ phase: string; message: string; counters: Record<string, number> }> = [];
+  await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true },
+    async (phase, message, counters = {}) => { seen.push({ phase, message, counters }); });
+  const interim = seen.filter((e) => e.phase === "gap_pass" && e.counters.interim);
+  assertEquals(interim.length, 1, JSON.stringify(interim));
+  // index.ts turns exactly this event into the chat write, so its wording is
+  // the wording the reader gets.
+  assert(/^First pass complete: \d+ of \d+ needs answered - running a gap-closing pass to close the rest$/
+    .test(interim[0].message), interim[0].message);
+  // …and it comes BEFORE the pass's own summary line.
+  const idx = seen.findIndex((e) => e.phase === "gap_pass" && e.counters.interim);
+  const done = seen.findIndex((e) => e.phase === "gap_pass" && !e.counters.interim && /gap-closing pass:/.test(e.message));
+  assert(done > idx, `interim at ${idx}, summary at ${done}`);
+});
+
+Deno.test("the report the gap pass leaves behind is still grounded and still measured", async () => {
+  const { deps } = gapDeps();
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, { origin: "owui", dryRun: true });
+  // The numeric gate and the renumbering both ran on the FINAL synthesis: the
+  // pass adds sources, which is exactly when a new figure can arrive uncited.
+  assert(r.proseUngrounded !== null, "the rendered report was never diffed");
+  for (const n of (r.synthesis.match(/\[Source (\d+)\]/g) || [])) {
+    const num = parseInt(n.replace(/\D/g, ""), 10);
+    assert(num >= 1 && num <= r.citedSources.length, `${n} resolves to no source`);
+  }
+});

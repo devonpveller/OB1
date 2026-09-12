@@ -236,8 +236,16 @@ export function selectRepoFiles(paths: string[], maxFiles = 40): RepoFileSelecti
 // this field existed.
 // ---------------------------------------------------------------------------
 
+// The footer, the need verdicts and the search record all belong to report.ts,
+// which is pure and importable from anywhere. See renderResult's footer block.
+import {
+  coverageFooter, emptySearchRecord, type GapPassRecord, type NeedState, type SearchRecord,
+} from "./report.ts";
+
 export interface RenderableResult {
   synthesis?: string | null;
+  /** The gap-closing pass, when one ran (research-trust-report). */
+  gap_pass?: GapPassRecord | null;
   /** Templated human-facing report (templates.ts, 2026-08-22). When present it
    *  is the chat-facing body; the tagged synthesis remains the machine-truth
    *  and the fallback. Same [Source N] numbers as the synthesis. */
@@ -255,6 +263,86 @@ export interface RenderableResult {
     hits?: number; fetched?: number; readable?: number; relevant?: number;
     ok?: number; collapsed?: number; empty?: number; errors?: number;
   } | null;
+}
+
+// ── The chat message the engine writes into (research-trust-report) ─────────
+// The callback used to APPEND. So the final message read: the model's "research
+// is running in the background" line, then a separator, then the report - and on
+// the async path that waiting line is the first thing the reader sees under
+// their own question, permanently. The operator asked for the body to start with
+// the report.
+//
+// Appending is also why the pass could not announce itself: a second write would
+// have stacked a second block instead of replacing the first. The rewrite below
+// is idempotent, so the callback can run twice - interim, then final.
+
+/** Delimits everything the ENGINE wrote. Never shown; HTML comments do not render. */
+export const ENGINE_BLOCK_START = "<!-- deep_research:body -->";
+export const ENGINE_BLOCK_END = "<!-- /deep_research:body -->";
+
+/**
+ * The exact line the OWUI tool tells the model to reply with while it waits.
+ *
+ * It is a CONSTANT and not a pattern on purpose. Stripping "whatever the model
+ * wrote before the report arrived" would mean deleting a person's assistant's
+ * words on a guess; stripping one string the tool asked for byte for byte is a
+ * contract between the two halves of this engine. A model that says something
+ * else keeps what it said, and the report is appended under it - the old
+ * behaviour, which was never wrong, only untidy.
+ */
+export const HANDOFF_WAIT_LINE =
+  "_Researching \u2014 this message will be replaced by the grounded report when the engine finishes._";
+
+const ENGINE_BLOCK_RE = new RegExp(
+  `${ENGINE_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?` +
+  `${ENGINE_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+  "g",
+);
+
+/** Everything the engine has written so far, removed. */
+export function stripEngineBlocks(content: string): string {
+  const withoutBlocks = String(content || "").replace(ENGINE_BLOCK_RE, "");
+  const kept = withoutBlocks.split(/\r?\n/)
+    .filter((l) => l.trim() !== HANDOFF_WAIT_LINE)
+    .join("\n");
+  return kept.replace(/\n{3,}/g, "\n\n").replace(/(\s*\n---\n\s*)+$/g, "").trim();
+}
+
+/** Wrap a body so the next write can find and replace it. */
+export function engineBlock(markdown: string): string {
+  return `${ENGINE_BLOCK_START}\n${markdown}\n${ENGINE_BLOCK_END}`;
+}
+
+/**
+ * The message body after this write. Idempotent in the engine's own block: call
+ * it with the interim status, then again with the report, and the reader sees
+ * one body both times rather than a growing stack.
+ */
+export function rewriteChatBody(existing: string, markdown: string, separator = "\n\n---\n\n"): string {
+  const base = stripEngineBlocks(existing);
+  const block = engineBlock(markdown);
+  return base ? `${base}${separator}${block}` : block;
+}
+
+/**
+ * The one machine-addressed line an incomplete run emits. HTML comment: the
+ * reader never sees it, the model reading the transcript does.
+ *
+ * It is the whole of what the old four-sentence banner was for - do not fill
+ * the gaps from your own weights, call the engine again - compressed to
+ * something that cannot be mistaken for part of the report. deep_research.py
+ * emits this byte for byte (lib.test.ts and the plan's T-parity case).
+ */
+export function incompleteDirective(result: RenderableResult): string {
+  const ns = result.needs_status;
+  const open = Array.isArray(ns)
+    ? ns.filter((n) => n?.status !== "answered").length
+    : (result.gaps ?? []).length;
+  const backstop = result.backstop;
+  const why = backstop && backstop !== "complete" ? backstop : "gaps_open";
+  return `<!-- engine: incomplete (${why}); ${open} need(s) not fully answered; ` +
+    `do not fill them from your own knowledge - call deep_research with a query ` +
+    `targeting the open question -->`;
 }
 
 export function renderResult(result: RenderableResult): string {
@@ -279,28 +367,21 @@ export function renderResult(result: RenderableResult): string {
   const backstop = result.backstop;
   const incomplete = gaps.length > 0 || Boolean(backstop && backstop !== "complete");
 
-  if (gaps.length) {
-    parts.push(
-      "\n\n**Open gaps** (NOT grounded — recorded for a future run):\n" +
-        gaps.map((g) => `- ${g}`).join("\n"),
-    );
-  }
-
-  // Directive to the reading model — keeps it from "finishing" with fabricated
-  // content. On the async path this text is what lands in the chat transcript,
-  // so it is still in context on the user's next turn (it is not addressed to a
-  // model that is mid-turn). The engine is the only grounded path; gaps are
-  // pursued by calling it again, never filled from the model's own knowledge.
-  if (incomplete) {
-    const reason = backstop && backstop !== "complete" ? `stopped early (${backstop})` : "left gaps open";
-    parts.push(
-      `\n\n> \u26a0 This research is grounded but INCOMPLETE — it ${reason}. The open ` +
-        `gaps above are not answered by any source. Do NOT fill them from your own ` +
-        `knowledge or other web/fetch tools (that fabricates). To pursue a gap, call ` +
-        `deep_research again with a query targeting it; otherwise present the gaps as ` +
-        `open unknowns.`,
-    );
-  }
+  // The "Open gaps (NOT grounded)" block that used to sit here is GONE, and so
+  // is the banner under it. Both were written when the body was a tagged claim
+  // list with no structure of its own; with a template that has a Limitations
+  // section, the block printed the same questions a second time and labelled
+  // them "not grounded" even for needs the report had answered in part. The
+  // reader got two lists of unknowns and no way to tell which was real. One
+  // section, written by the template, is the whole answer now - see
+  // templates.ts LIMITATIONS_SECTION.
+  //
+  // The DIRECTIVE the banner carried is still needed: on the async path this
+  // text lands in the chat transcript and is re-read as context on the user's
+  // next turn, and a model that sees an incomplete report is exactly when
+  // fabrication starts. It is now one machine-addressed line, last, in an HTML
+  // comment - invisible to the reader, in context for the model. Byte-identical
+  // in deep_research.py's fallback renderer (tested).
 
   // -- Footer (research-trust 2026-09-11) -----------------------------------
   // `coverage NN%` is GONE. It was `1 - gap_ratio` over synthesis LINES - how
@@ -309,24 +390,32 @@ export function renderResult(result: RenderableResult): string {
   // "coverage 22%" having answered 0 of 6 needs. A number whose label means
   // something else is worse than no number, so a run with no per-need verdicts
   // (every job recorded before this change) now prints none.
+  // ONE implementation of the footer, report.ts `coverageFooter`, for both
+  // renderers. This file used to carry a second, weaker copy - no partly count,
+  // no entity-gate clause, "1 collapsed" where the other said "2 junk" - and it
+  // only ever fired on the fallback path, so nothing compared them. It is the
+  // same defect as the duplicated gaps block one function up: two writers of one
+  // sentence, and the reader cannot tell which is current.
   const foot: string[] = [];
   const ns = result.needs_status;
   if (Array.isArray(ns) && ns.length) {
-    const answered = ns.filter((n) => n?.status === "answered").length;
-    foot.push(`needs answered ${answered} of ${ns.length}`);
-    const rec = result.search_record;
-    if (rec && typeof rec.fetched === "number") {
-      const hitBits = [`${rec.hits ?? 0} hits`];
-      if (rec.collapsed) hitBits.push(`${rec.collapsed} collapsed`);
-      foot.push(`sources ${rec.relevant ?? 0} relevant of ${rec.fetched} fetched (${hitBits.join(", ")})`);
-    }
+    foot.push(coverageFooter(
+      ns as NeedState[],
+      { ...emptySearchRecord(), ...(result.search_record ?? {}) } as SearchRecord,
+      backstop,
+      result.gap_pass ?? null,
+    ));
+  } else if (backstop && backstop !== "complete") {
+    // No per-need verdicts (a job recorded before they existed): the coverage
+    // half is unsayable, and only the stop reason is left.
+    foot.push(`stopped early: ${backstop}`);
   }
-  if (backstop && backstop !== "complete") foot.push(`stopped early: ${backstop}`);
   // The harness already stamps this footer onto `prose`, so the curator and the
   // wiki store the same honest number. Do not print it twice.
   if (foot.length && !/needs answered \d+ of \d+/.test(body)) {
     parts.push("\n\n_— " + foot.join(" · ") + "_");
   }
+  if (incomplete) parts.push("\n\n" + incompleteDirective(result));
 
   return parts.join("\n");
 }

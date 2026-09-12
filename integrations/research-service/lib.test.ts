@@ -206,16 +206,54 @@ Deno.test("renderResult: the footer is not printed twice when prose already carr
   assertEquals(out.match(/needs answered/g)?.length, 1);
 });
 
+// REWRITTEN, research-trust-report. The old case asserted the four-sentence
+// INCOMPLETE banner and the "- what about X?" gap bullets. Both are gone: the
+// gap list was the SECOND copy of the report's own limitations section, and the
+// banner was a paragraph addressed to a model printed where a person reads.
+// What the case protects is unchanged - an incomplete run still tells the model
+// not to fill the gaps from its own weights - so the assertions moved to the
+// line that now carries it.
 Deno.test("renderResult: gaps and early stops carry the do-not-fabricate directive", () => {
-  const gapped = renderResult({ synthesis: "Partial.", gaps: ["what about X?"], backstop: "complete" });
-  assertEquals(gapped.includes("- what about X?"), true);
-  assertEquals(gapped.includes("INCOMPLETE"), true);
-  assertEquals(gapped.includes("left gaps open"), true);
+  const gapped = renderResult({
+    synthesis: "Partial.", gaps: ["what about X?"], backstop: "complete",
+    needs_status: [{ need: "a", status: "answered" }, { need: "X", status: "open" }],
+  });
+  // The directive is present, machine-addressed, and LAST.
+  assertEquals(gapped.trimEnd().endsWith("-->"), true, gapped);
+  assertEquals(gapped.includes("<!-- engine: incomplete (gaps_open); 1 need(s) not fully answered;"), true, gapped);
+  assertEquals(gapped.includes("call deep_research with a query targeting the open question -->"), true);
+  // …and the second gap list it used to sit under is gone.
+  assertEquals(gapped.includes("- what about X?"), false);
+  assertEquals(gapped.includes("Open gaps"), false);
+  assertEquals(gapped.includes("NOT grounded"), false);
 
   const stopped = renderResult({ synthesis: "Partial.", gaps: [], backstop: "wall_time" });
-  assertEquals(stopped.includes("INCOMPLETE"), true);
-  assertEquals(stopped.includes("stopped early (wall_time)"), true);
-  assertEquals(stopped.includes("stopped early: wall_time"), true);
+  assertEquals(stopped.includes("<!-- engine: incomplete (wall_time);"), true, stopped);
+  assertEquals(stopped.includes("stopped early: wall_time"), true);   // the footer still says it
+});
+
+Deno.test("renderResult: a complete run emits no machine line at all", () => {
+  const out = renderResult({
+    prose: "# Report\nBody.",
+    cited_sources: [{ url: "https://a.example", title: "A" }],
+    gaps: [], backstop: "complete",
+    needs_status: [{ need: "a", status: "answered" }],
+    search_record: { hits: 10, fetched: 8, readable: 8, relevant: 2 },
+  });
+  assertEquals(out.includes("<!-- engine:"), false, out);
+});
+
+Deno.test("renderResult: nothing in the body is addressed to the model", () => {
+  // Everything up to the machine line must read as a document. The banner used
+  // to put "Do NOT fill them from your own knowledge" in front of the reader.
+  const out = renderResult({
+    prose: "# Report\nBody.", gaps: ["open thing"], backstop: "complete",
+    needs_status: [{ need: "a", status: "open" }],
+  });
+  const body = out.split("<!-- engine:")[0];
+  assertEquals(/do not fill/i.test(body), false, body);
+  assertEquals(/deep_research again/i.test(body), false, body);
+  assertEquals(/\bDo NOT\b/.test(body), false, body);
 });
 
 Deno.test("renderResult: empty synthesis degrades honestly, never to an empty message", () => {

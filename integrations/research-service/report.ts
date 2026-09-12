@@ -90,35 +90,139 @@ const NEED_STOP = new Set(
    "any some other specific known associated used using have has had more most")
     .split(" "),
 );
+/** Fold a plural onto its singular so `pin` and `pins` are one term. Only the
+ *  trailing -s, and only where a real stem is left: no stemmer, no word list. */
+function fold(t: string): string {
+  return t.length > 4 && t.endsWith("s") && !t.endsWith("ss") ? t.slice(0, -1) : t;
+}
 function needTerms(s: string): string[] {
   return [...new Set((String(s || "").toLowerCase().match(/[a-z0-9]+/g) || [])
-    .filter((t) => t.length > 2 && !NEED_STOP.has(t)))];
+    .filter((t) => t.length > 2 && !NEED_STOP.has(t)).map(fold))];
 }
 
 /**
- * For each need, did the synthesis GROUND something about it? A line counts
- * only if it is tagged, carries a citation, and shares at least two
- * distinctive terms with the need — one shared word is the topic, not the need.
+ * How many grounded lines did the synthesis write about each need? A line counts
+ * only if it is tagged, carries a citation, and shares at least two distinctive
+ * terms with the need — one shared word is the topic, not the need.
+ *
+ * This used to return a BOOLEAN and the count is why it no longer does. The live
+ * OWUI run 33250e9b grounded 26 cited lines across seven needs — the PSU failure
+ * mode, the bent socket pins, the DIMM-slot fault, the BIOS procedure — and the
+ * footer said "needs answered 0 of 7 (7 partly)" beside a report full of
+ * findings, because the judge had marked every need open and one grounded line
+ * could only raise it to `partial`. "Partly" is the right word for a need with
+ * ONE line about it. It is the wrong word for a need with five.
  */
-export function groundedNeeds(needs: string[], synthesis: string): boolean[] {
+export function groundedNeedCounts(needs: string[], synthesis: string): number[] {
   const lines = String(synthesis || "").split(/\r?\n/)
     .filter((l) => GROUND_TAG_RE.test(l) && CITE_RE.test(l))
     .map((l) => new Set(needTerms(l)));
-  return (needs || []).map((need) => {
+  const discriminating = discriminatingTerms(needs || []);
+  return (needs || []).map((need, i) => {
     const nt = needTerms(need);
-    if (nt.length < 2) return false;
-    return lines.some((lt) => nt.filter((t) => lt.has(t)).length >= 2);
+    const own = discriminating[i];
+    if (!own.length || nt.length < 2) return 0;
+    // The same two-part test the entity gate settled on, for the same reason:
+    // ONE distinctive word that separates this need from its siblings, plus a
+    // second word of the need to corroborate it. Either half alone fails - the
+    // corroboration alone counts the subject (17 of 26 lines for every need),
+    // and the distinctive word alone would count a line that merely says
+    // "socket" in passing.
+    return lines.filter((lt) =>
+      own.some((t) => lt.has(t)) && nt.filter((t) => lt.has(t)).length >= 2
+    ).length;
   });
 }
 
-/** Reconcile the judge's per-need verdicts with what the synthesis grounded. */
+/**
+ * Each need's terms MINUS the ones it shares with half the other needs.
+ *
+ * Every need of a run is about the same subject, so the subject's own words are
+ * the worst possible evidence that a line is about a particular need. Measured
+ * on the live run 33250e9b: matching on raw need terms counts 17-19 lines for
+ * EVERY need out of 26, because "dell", "optiplex" and "3050" appear in all
+ * seven needs and in nearly every line. That is a measurement of the subject
+ * wearing a per-need label - the same shape of mistake as an entity rule that
+ * matches on one shared token, and it would have made "answered" free.
+ *
+ * What is left after the subtraction is what makes THIS need different from its
+ * siblings: capacitor, thermal, psu, bios, dimm, socket, water. Nothing here is
+ * a list - the common core is computed from the needs of this run.
+ */
+function discriminatingTerms(needs: string[]): string[][] {
+  const per = needs.map((n) => needTerms(n));
+  const df = new Map<string, number>();
+  for (const ts of per) for (const t of new Set(ts)) df.set(t, (df.get(t) || 0) + 1);
+  const shared = Math.max(2, Math.ceil(needs.length / 2));
+  return per.map((ts) => ts.filter((t) => (df.get(t) || 0) < shared));
+}
+
+/** Kept as the boolean view of the same measurement. */
+export function groundedNeeds(needs: string[], synthesis: string): boolean[] {
+  return groundedNeedCounts(needs, synthesis).map((n) => n > 0);
+}
+
+/** At this many grounded, cited lines about a need, the need is answered. */
+export const ANSWERED_MIN_LINES = 2;
+
+/**
+ * Reconcile the judge's per-need verdicts with what the synthesis grounded.
+ *
+ *   >= 2 grounded lines  -> answered
+ *   exactly 1            -> partial
+ *   0                    -> left exactly as the judge had it
+ *
+ * `search_failed` is never reopened by either rule: if the search for that need
+ * failed, a line grounded from the REUSE pool does not mean it succeeded. And a
+ * need the judge itself called `answered` is never demoted here — this function
+ * only ever moves a verdict UP, toward what the document visibly contains.
+ */
 export function reconcileNeedsStatus(needs: NeedState[], synthesis: string): NeedState[] {
   const list = needs || [];
   if (!String(synthesis || "").trim()) return list;
-  const grounded = groundedNeeds(list.map((n) => n.need), synthesis);
-  return list.map((n, i) =>
-    n.status === "open" && grounded[i] ? { ...n, status: "partial" as NeedStatus } : n
-  );
+  const counts = groundedNeedCounts(list.map((n) => n.need), synthesis);
+  return list.map((n, i) => {
+    if (n.status !== "open" && n.status !== "partial") return n;
+    if (counts[i] >= ANSWERED_MIN_LINES) return { ...n, status: "answered" as NeedStatus };
+    if (counts[i] === 1 && n.status === "open") return { ...n, status: "partial" as NeedStatus };
+    return n;
+  });
+}
+
+/**
+ * What a gap-closing pass should go and look for.
+ *
+ * The synthesis says what it could not answer in its own words - the [GAP]
+ * lines - and those are better queries than the needs they came from, because
+ * they are what is missing rather than what was asked. A need whose gap line
+ * cannot be identified falls back to the need itself, which is never worse than
+ * not searching.
+ *
+ * Pure: the caller shapes these into queries (`shapeQuery`) and decides how many
+ * to run. Returns them in the order the needs were given.
+ */
+export function gapQuestions(
+  needs: string[], synthesis: string,
+): Array<{ need: string; question: string }> {
+  const gapLines = String(synthesis || "").split(/\r?\n/)
+    .filter((l) => /^\s*\[GAP\]/i.test(l))
+    .map((l) => l.replace(/^\s*\[GAP\]\s*/i, "").trim())
+    .filter(Boolean);
+  const gapTerms = gapLines.map((l) => new Set(needTerms(l)));
+  const discriminating = discriminatingTerms(needs || []);
+  return (needs || []).map((need, i) => {
+    const own = discriminating[i];
+    const nt = needTerms(need);
+    // The gap line that best matches THIS need: most shared terms, and at least
+    // one of the need's own discriminating words, or none at all.
+    let best = -1, bestScore = 0;
+    gapTerms.forEach((gt, j) => {
+      if (!own.some((t) => gt.has(t))) return;
+      const score = nt.filter((t) => gt.has(t)).length;
+      if (score > bestScore) { bestScore = score; best = j; }
+    });
+    return { need, question: best >= 0 ? gapLines[best] : need };
+  });
 }
 
 export function partialCount(needs: NeedState[]): number {
@@ -130,14 +234,22 @@ export function answeredCount(needs: NeedState[]): number {
 }
 
 /**
- * A topic template (scientific paper, product comparison, …) states a shape the
- * evidence has to fill. Below three answered needs there is no shape to fill,
- * and the template's own headings become assertions the run cannot support —
- * which is how a zero-finding run acquired an Abstract and a Discussion.
+ * A topic template (buyer's guide, scientific paper, product comparison, …)
+ * states a shape the evidence has to fill. Below three needs with something
+ * grounded about them there is no shape to fill, and the template's own headings
+ * become assertions the run cannot support — which is how a zero-finding run
+ * acquired an Abstract and a Discussion.
+ *
+ * PARTLY-answered needs count toward the three. They did not, and that is how
+ * the live run 33250e9b — seven needs, 26 cited lines, a genuine buyer's
+ * question — fell through to the general report: every need was `partial`, so
+ * `answered` was 0. A need with a grounded finding about it is evidence the
+ * template can stand on whether or not the judge called the sub-question
+ * settled. A need with NOTHING about it still counts for nothing.
  */
-export const TEMPLATE_MIN_ANSWERED = 3;
-export function shouldClassifyTemplate(answered: number): boolean {
-  return answered >= TEMPLATE_MIN_ANSWERED;
+export const TEMPLATE_MIN_EVIDENCED = 3;
+export function shouldClassifyTemplate(answered: number, partial = 0): boolean {
+  return answered + partial >= TEMPLATE_MIN_EVIDENCED;
 }
 
 /** "ok" | "DEGRADED" — from measurement, not from whether an engine errored. */
@@ -155,10 +267,23 @@ export function searchHealthLabel(r: SearchRecord): "ok" | "DEGRADED" {
  * The one-line footer. Replaces `coverage NN%`, which answered a question
  * nobody asked.
  */
+/** What one gap-closing pass did, for the footer. */
+export interface GapPassRecord {
+  /** Sources the pass added to the citable pool. */
+  added: number;
+  /** Needs answered BEFORE the pass ran. */
+  answeredBefore: number;
+  /** Needs answered after re-synthesis. */
+  answeredAfter: number;
+  /** Total needs (unchanged by the pass). */
+  total: number;
+}
+
 export function coverageFooter(
   needs: NeedState[],
   record: SearchRecord,
   backstop?: string | null,
+  gapPass?: GapPassRecord | null,
 ): string {
   const parts: string[] = [];
   const partial = partialCount(needs);
@@ -166,6 +291,17 @@ export function coverageFooter(
     `needs answered ${answeredCount(needs)} of ${(needs || []).length}` +
     (partial ? ` (${partial} partly)` : ""),
   );
+  // The pass is stated in the footer with what it COST and what it bought. A
+  // second round of searching that the reader cannot see is a run doing work on
+  // their behalf without telling them, and a pass that bought nothing is worth
+  // knowing about too - so this line prints whenever the pass ran, including
+  // when the numbers did not move.
+  if (gapPass) {
+    parts.push(
+      `gap-closing pass: +${gapPass.added} sources, needs answered ` +
+      `${gapPass.answeredBefore} of ${gapPass.total} -> ${gapPass.answeredAfter} of ${gapPass.total}`,
+    );
+  }
   if (record) {
     const hitBits: string[] = [`${record.hits} hits`];
     const junkCalls = (record.collapsed || 0) + (record.offtopic || 0);

@@ -216,3 +216,72 @@ export function applyNumericGrounding(
   });
   return { synthesis: out.join("\n"), ungrounded };
 }
+
+
+// ── The RENDERED document against the grounded answer (research-trust-report) ──
+// The template renderer is a model writing prose from the tagged synthesis, and
+// it is the last place a fact can enter the run ungrounded. Measured on the
+// buyer's-guide render of job 33250e9b: with the grounding rules as they were,
+// it invented a duration ("wait 30 seconds"), a count ("repeat three times")
+// and an abbreviation the answer never used. Tightening the rules removed every
+// number; what survives is the occasional STANDARD the answer does not name -
+// "no standard ATX connector present", from a source that only says the
+// connector is proprietary.
+//
+// So the run measures its own report the way it already measures its figures
+// (applyNumericGrounding): nothing is blocked, nothing is rewritten, and
+// nothing is hidden. A leak is recorded on the run and printed in the progress
+// log, where the next person to look at this can see it and decide.
+//
+// Approximate by design, in the direction of FALSE ALARMS, never silence:
+//   numbers - exact, after the citation markers are removed
+//   urls    - exact
+//   names   - ACRONYMS and model codes only (two or more capitals, plural
+//             folded, hyphens split). Sentence-initial capitals are not names,
+//             and a TitleCase check drowns the real signal in "Check", "Verify",
+//             "One".
+
+export interface RenderGroundingDiff {
+  numbers: string[];
+  urls: string[];
+  names: string[];
+}
+
+const RENDER_URL_RE = /https?:\/\/[^\s)\]]+/g;
+const RENDER_ACRONYM_RE = /[A-Za-z0-9]+/g;
+
+function acronymSet(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const w of String(text || "").match(RENDER_ACRONYM_RE) || []) {
+    const core = w.length > 2 && w.endsWith("s") && w.slice(0, -1) === w.slice(0, -1).toUpperCase()
+      ? w.slice(0, -1)
+      : w;
+    if (/^[A-Z]{2,}[0-9]*$/.test(core)) out.add(core);
+  }
+  return out;
+}
+
+/**
+ * What the RENDERED document says that the grounded answer does not. `query` is
+ * included in the reference text because the reader's own words are not a
+ * fabrication when the report repeats them.
+ */
+export function renderGroundingDiff(
+  rendered: string, synthesis: string, query = "",
+): RenderGroundingDiff {
+  // HTML comments are the engine's own machinery (the incomplete directive, an
+  // evidence file's provenance header) and are not part of the document.
+  const doc = String(rendered || "").replace(/<!--[\s\S]*?-->/g, " ");
+  const ref = `${synthesis || ""}\n${query || ""}`;
+  const docNums = new Set(stripPointers(normalise(doc)).match(NUMBER_RE) || []);
+  const refNums = new Set(stripPointers(normalise(ref)).match(NUMBER_RE) || []);
+  const docUrls = new Set(doc.match(RENDER_URL_RE) || []);
+  const refUrls = new Set(ref.match(RENDER_URL_RE) || []);
+  const docNames = acronymSet(doc);
+  const refNames = acronymSet(ref);
+  return {
+    numbers: [...docNums].filter((n) => !refNums.has(n)).sort(),
+    urls: [...docUrls].filter((u) => !refUrls.has(u)).sort(),
+    names: [...docNames].filter((n) => !refNames.has(n)).sort(),
+  };
+}

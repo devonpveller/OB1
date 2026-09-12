@@ -10,16 +10,16 @@ import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenu
 import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
 import { rankHits, partitionRelevant, floorKeepable } from "./filtering.ts";
-import { classifyTemplate, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "./templates.ts";
+import { classifyReport, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "./templates.ts";
 import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
 import {
   classifyHits, emptySearchStats, reformulate, type SearchStats, shapeQuery,
 } from "./search-quality.ts";
-import { applyNumericGrounding } from "./grounding.ts";
+import { applyNumericGrounding, renderGroundingDiff, type RenderGroundingDiff } from "./grounding.ts";
 import {
-  coverageFooter, emptySearchRecord, failureNotice, reconcileNeedsStatus,
-  shouldClassifyTemplate,
+  coverageFooter, emptySearchRecord, failureNotice, gapQuestions, reconcileNeedsStatus,
+  shouldClassifyTemplate, type GapPassRecord,
   type NeedState, type NeedStatus, type SearchRecord,
 } from "./report.ts";
 
@@ -91,6 +91,21 @@ const SOURCE_SLICE_CHARS = parseInt(env("SOURCE_SLICE_CHARS", "4000"), 10);
 // correct answer is worth minutes. Digest/article/notebook paths are unaffected —
 // this is applied only on the default topic-research path for origin "owui".
 const MAX_WALL_MS_OWUI = parseInt(env("MAX_WALL_MS_OWUI", String(MAX_WALL_MS)), 10);
+
+// ── The gap-closing pass (research-trust-report) ─────────────────────────────
+// The operator's complaint was not that the engine stops early - it is that it
+// hands back an incomplete answer and leaves the person to notice. So when the
+// first synthesis leaves needs open and there is clock left, the run closes what
+// it can BEFORE delivering, and says so in the chat while it does.
+//
+// Exactly one pass, and only from this much of the budget: a second gather plus
+// a second synthesis is roughly a third of a run, so the pass may only start
+// while most of the clock is unspent. Past that the honest thing is to deliver
+// what there is and recommend a targeted run, which is what the report's
+// limitations section now does.
+const GAP_PASS_MAX_ELAPSED = parseFloat(env("GAP_PASS_MAX_ELAPSED", "0.6"));
+/** Needs the pass will chase in one round. */
+const GAP_PASS_MAX_QUERIES = parseInt(env("GAP_PASS_MAX_QUERIES", "3"), 10);
 
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
@@ -259,6 +274,10 @@ export interface RunResult {
   metrics: ReturnType<typeof reuseMetric>;
   curator: Record<string, unknown> | null;
   backstop: string;
+  /** The gap-closing pass, when one ran: what it added and what it closed.
+   *  null when nothing was open, the clock was spent, or the path has no
+   *  gather loop to run it (article / sources-only / disable_web_search). */
+  gapPass: GapPassRecord | null;
   /**
    * What this run IS, as opposed to why it stopped. "no_relevant_sources" means
    * nothing about the subject was retrieved — it is a RETRIEVAL result and must
@@ -271,6 +290,9 @@ export interface RunResult {
   searchRecord: SearchRecord;
   /** Figures a cited line asserted that no cited source holds (Phase 2.3). */
   ungroundedNumbers: string[];
+  /** What the RENDERED report says that the grounded answer does not
+   *  (research-trust-report). null when no report was rendered. */
+  proseUngrounded: RenderGroundingDiff | null;
   /** Separated fetch accounting — yield (sources) vs waste (timeouts/errors) vs
    *  free OB cache reuse. `attempts` = sources + timeouts + errors.
    *  `readable` = fetched pages with an extract worth grounding from;
@@ -385,12 +407,33 @@ export async function runResearch(
   const searchRecord: SearchRecord = emptySearchRecord();
   let readableCount = 0;
   let ungroundedNumbers: string[] = [];
+  let proseUngrounded: RenderGroundingDiff | null = null;
   let needsStatus: NeedState[] = [];
+  // Assigned by the topic gather block below, and called once after the first
+  // synthesis. Null on every other path - article, sources-only and
+  // disable_web_search have no gather loop to run a second round of, and the
+  // anchor leaves them untouched.
+  let gapRound: ((targets: Array<{ need: string; query: string }>) => Promise<Page[]>) | null = null;
+  let gapPass: GapPassRecord | null = null;
   /** The subject the KEYWORDIZE pass named — the one token a query may not lose. */
   let subjectEntity = "";
   const setNeedStatus = (need: string, status: NeedStatus) => {
     const row = needsStatus.find((n) => n.need === need);
     if (row) row.status = status;
+  };
+  /** Copy the live counters onto the RECORD the footer reads. Called after the
+   *  gather loop and again after the gap-closing pass - a pass whose searches
+   *  are not in the record is a pass the reader cannot audit. */
+  const syncRecordCounts = () => {
+    searchRecord.ok = searchStats.ok;
+    searchRecord.collapsed = searchStats.collapsed;
+    searchRecord.offtopic = searchStats.offtopic;
+    searchRecord.empty = searchStats.empty;
+    searchRecord.errors = searchStats.errors;
+    searchRecord.entity_missing = searchStats.entity_missing;
+    searchRecord.entity_rejected = searchStats.entity_rejected;
+    searchRecord.unfloored = searchStats.unfloored;
+    searchRecord.query_padded = searchStats.query_padded;
   };
   const countFetch = (outcome: FetchOutcome, page: Page | null) => {
     if (outcome === "ok") {
@@ -642,6 +685,64 @@ export async function runResearch(
       return hits;
     };
 
+    /**
+     * One query, from search to pages waiting for the gate. EXTRACTED so the
+     * gap-closing pass runs the identical path - same classifier, same dedupe,
+     * same budget headroom, same accounting. The anchor asks for the pass's
+     * sources to be "gated and screened like round 1"; sharing the code is the
+     * only way to make that true rather than asserted.
+     *
+     * Returns the number of pages added to `fresh`, or -1 when the SEARCH
+     * itself failed (no usable hits) - which is a different thing from a search
+     * that worked and whose pages all failed to fetch.
+     */
+    const searchAndFetch = async (q: string): Promise<number> => {
+      const hits = rankHits(await runSearch(q));
+      if (!hits.length) return -1;
+      const seen = (u: string) => staged.some((s) => s.url === u) || fresh.some((s) => s.url === u) ||
+                                  kept.some((s) => s.url === u);
+      const candidates = hits.filter((h) => !seen(h.url));
+      // Headroom = remaining SOURCE budget plus remaining TIMEOUT budget, so we
+      // keep trying URLs while either bound has room (a timeout shouldn't burn
+      // the source budget). Cache hits below are free and never charged.
+      const sourceRoom = Math.max(0, effMaxFetch - sourcesFetched);
+      const timeoutRoom = MAX_FETCH_TIMEOUTS > 0 ? Math.max(0, MAX_FETCH_TIMEOUTS - fetchTimeouts) : SEARCH_K;
+      const toFetch = candidates.slice(0, Math.max(0, Math.min(SEARCH_K, sourceRoom + timeoutRoom)));
+      const results = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
+        const existing = await existingFreshSource(client, h.url).catch(() => null);
+        if (existing) {
+          return { outcome: "reuse" as const, page: { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page };
+        }
+        const fr = await deps.fetchPage(h.url);
+        return { outcome: fr.outcome, page: fr.page };
+      });
+      let added = 0;
+      for (const r of results) {
+        if (r.outcome === "reuse") {
+          reuseHits++;
+          searchRecord.fetched++;
+          if (r.page) {
+            if ((r.page.content || "").length >= READABLE_MIN_CHARS) readableCount++;
+            fresh.push(r.page);
+            added++;
+          }
+          continue;
+        }
+        countFetch(r.outcome as FetchOutcome, r.page);
+        if (r.outcome === "ok") {
+          searchRecord.fetched++;
+          if (r.page && r.page.content) { fresh.push(r.page); added++; }
+        }
+      }
+      await progress(
+        "gather",
+        `fetched ${searchRecord.fetched} (ok ${sourcesFetched} · readable ${readableCount} · timeout ${fetchTimeouts} · err ${fetchErrors} · reused ${reuseHits})`,
+        { fetched: searchRecord.fetched, sources: sourcesFetched, readable: readableCount,
+          timeouts: fetchTimeouts, errors: fetchErrors, reused: reuseHits },
+      );
+      return added;
+    };
+
     for (let round = 1; round <= effRounds && pending.length && !stopGathering; round++) {
       const nextPending: Pending[] = [];
       for (const p of pending) {
@@ -659,8 +760,8 @@ export async function runResearch(
             { collapsed: searchStats.collapsed, offtopic: searchStats.offtopic });
           break;
         }
-        const hits = rankHits(await runSearch(p.query));
-        if (!hits.length) {
+        const got = await searchAndFetch(p.query);
+        if (got < 0) {
           if (p.attempts === 0) {
             const retry = reformulate(p.need, subjectEntity, nextPending.length);
             nextPending.push({ need: p.need, query: retry, attempts: 1 });
@@ -670,48 +771,9 @@ export async function runResearch(
           }
           continue;
         }
-        const seen = (u: string) => staged.some((s) => s.url === u) || fresh.some((s) => s.url === u) ||
-                                    kept.some((s) => s.url === u);
-        const candidates = hits.filter((h) => !seen(h.url));
-        // Headroom = remaining SOURCE budget plus remaining TIMEOUT budget, so we
-        // keep trying URLs while either bound has room (a timeout shouldn't burn
-        // the source budget). Cache hits below are free and never charged.
-        const sourceRoom = Math.max(0, effMaxFetch - sourcesFetched);
-        const timeoutRoom = MAX_FETCH_TIMEOUTS > 0 ? Math.max(0, MAX_FETCH_TIMEOUTS - fetchTimeouts) : SEARCH_K;
-        const toFetch = candidates.slice(0, Math.max(0, Math.min(SEARCH_K, sourceRoom + timeoutRoom)));
-        const results = await mapLimit(toFetch, FETCH_CONCURRENCY, async (h) => {
-          const existing = await existingFreshSource(client, h.url).catch(() => null);
-          if (existing) {
-            return { outcome: "reuse" as const, page: { url: h.url, title: existing.title, content: existing.content, domain: domainOf(h.url) } as Page };
-          }
-          const fr = await deps.fetchPage(h.url);
-          return { outcome: fr.outcome, page: fr.page };
-        });
-        for (const r of results) {
-          if (r.outcome === "reuse") {
-            reuseHits++;
-            searchRecord.fetched++;
-            if (r.page) {
-              if ((r.page.content || "").length >= READABLE_MIN_CHARS) readableCount++;
-              fresh.push(r.page);
-            }
-            continue;
-          }
-          countFetch(r.outcome as FetchOutcome, r.page);
-          if (r.outcome === "ok") {
-            searchRecord.fetched++;
-            if (r.page && r.page.content) fresh.push(r.page);
-          }
-        }
         // A need whose search worked is no longer a search failure; whether it is
         // ANSWERED is the coverage judge's call below.
         nextPending.push({ need: p.need, query: p.query, attempts: p.attempts + 1 });
-        await progress(
-          "gather",
-          `fetched ${searchRecord.fetched} (ok ${sourcesFetched} · readable ${readableCount} · timeout ${fetchTimeouts} · err ${fetchErrors} · reused ${reuseHits})`,
-          { fetched: searchRecord.fetched, sources: sourcesFetched, readable: readableCount,
-            timeouts: fetchTimeouts, errors: fetchErrors, reused: reuseHits },
-        );
       }
 
       // Gate this round's haul before deciding whether to keep going: the YIELD
@@ -785,15 +847,43 @@ export async function runResearch(
     // not have said DEGRADED on any real run, only on a hand-built fixture in
     // report.test.ts. A field that is read and never written is a check that
     // passes while checking nothing.
-    searchRecord.ok = searchStats.ok;
-    searchRecord.collapsed = searchStats.collapsed;
-    searchRecord.offtopic = searchStats.offtopic;
-    searchRecord.empty = searchStats.empty;
-    searchRecord.errors = searchStats.errors;
-    searchRecord.entity_missing = searchStats.entity_missing;
-    searchRecord.entity_rejected = searchStats.entity_rejected;
-    searchRecord.unfloored = searchStats.unfloored;
-    searchRecord.query_padded = searchStats.query_padded;
+    syncRecordCounts();
+
+    // The gap-closing pass, wired but not yet run: it needs the first synthesis
+    // to know what is still open. One more round of the SAME search-fetch-gate
+    // path, aimed at the needs the synthesis left open.
+    gapRound = async (targets) => {
+      const before = kept.length;
+      for (const t of targets) {
+        const d = backstopDecision({
+          elapsedMs: Date.now() - t0, maxMs: effMaxMs,
+          sources: sourcesFetched, maxSources: effMaxFetch,
+          timeouts: fetchTimeouts, maxTimeouts: MAX_FETCH_TIMEOUTS, openGaps: 1,
+        });
+        // The pass STOPS on a budget; it never RELABELS the run. The first pass
+        // has already decided what this run is - `fetch_degraded` on a run whose
+        // pages would not read is a diagnosis, and letting a bonus round
+        // overwrite it with "max_fetch" would replace why there is no answer
+        // with a budget note. Caught by the fetch_degraded case in
+        // harness-trust.test.ts, which went max_fetch the moment the pass
+        // existed.
+        if (d.stop && d.reason !== "complete") {
+          await progress("gap_pass", `gap-closing pass stopped early (${d.reason}) - the run's own verdict stands`,
+            { stopped: 1 });
+          break;
+        }
+        followupQueries.push(t.query);
+        await searchAndFetch(t.query);
+      }
+      // Same gate, same screen, same fail-safe floor as every other round.
+      await gateAndKeep(fresh, "gap-closing");
+      fresh = [];
+      searchRecord.readable = readableCount;
+      staged.splice(protectedCount, staged.length - protectedCount, ...kept);
+      searchRecord.relevant = kept.length;
+      syncRecordCounts();
+      return kept.slice(before);
+    };
   } else {
     await progress("seed", `staged ${staged.length} seed source(s); web search disabled`,
       { staged: staged.length });
@@ -918,6 +1008,13 @@ export async function runResearch(
       // research_jobs truthful about it (lib.ts classifyCuratorOutcome).
       curator: { state: "skipped", reason: backstop },
       backstop,
+      // A run with nothing citable never reaches the gap-closing pass: there is
+      // no synthesis to read open needs out of, and a second round of the same
+      // failed searching is not a closing pass.
+      gapPass: null,
+      // The failure notice is built by report.ts from the run's own record, not
+      // written by a model, so there is nothing to diff.
+      proseUngrounded: null,
       outcome: "no_relevant_sources",
       needsStatus,
       searchRecord,
@@ -939,6 +1036,49 @@ export async function runResearch(
   // Defaults to `staged`; the default path extends it with reused-claim sources.
   let pool: Page[] = staged;
   let reuseUrls = new Set<string>();
+
+  /**
+   * The topic-path synthesis, as a closure because the gap-closing pass runs it
+   * a SECOND time over the merged pool. Everything it reads - `staged`, the
+   * reuse sources, the claim list - is recomputed from the current state, so
+   * the second call sees the pages the pass added and nothing else changes.
+   */
+  const synthesizeTopic = async (): Promise<string> => {
+    // Fold the REUSED claims' grounding sources into the citable pool (after the
+    // freshly-staged ones, deduped by url). This lets the synthesizer cite reused
+    // facts [Source N] instead of emitting uncited [SOURCED] lines - and, since
+    // those sources flow to the curator, re-grounds the synthesis + re-links it
+    // to the reused claims (provenance). Closes the reuse-only gap; a reuse-only
+    // run (no fresh gather) now still produces a cited, grounded synthesis.
+    const stagedUrls = new Set(staged.map((s) => s.url).filter(Boolean));
+    const reuseEntries = reuse.sources.filter((s) => !(s.url && stagedUrls.has(s.url)));
+    const reusePages: Page[] = reuseEntries.map((s) => ({
+      url: s.url || "", title: s.title, content: s.content, domain: s.domain || "",
+    }));
+    reuseUrls = new Set(reusePages.map((p) => p.url).filter(Boolean));
+    pool = [...staged, ...reusePages];
+
+    // source id -> its 0-based index in the pool (reuse sources occupy [staged.length..])
+    const idToPoolIdx = new Map<string, number>();
+    reuseEntries.forEach((s, i) => idToPoolIdx.set(s.id, staged.length + i));
+    // Annotate each reused claim with the [Source N] that grounds it, so the
+    // synthesizer cites that number when it uses the fact.
+    claimList = reuseClaims.map((c) => {
+      const sid = reuse.claimToSource[c.id];
+      const idx = sid != null ? idToPoolIdx.get(sid) : undefined;
+      return idx != null ? `- ${c.text} [Source ${idx + 1}]` : `- ${c.text}`;
+    }).join("\n") || "(none)";
+
+    // Fresh sources get full content; reuse sources get a shorter slice (the claim
+    // text already carries the substance - the source is for citation attribution).
+    const sourceList = pool
+      .map((p, i) => sourceLine(p, i, i < staged.length ? SOURCE_SLICE_CHARS : 900))
+      .join("\n\n");
+    return (await deps.chat(
+      `${INJECTION_GUARD}\n\n${SYNTH_SYS}`,
+      `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded - when you assert one, cite the [Source N] shown next to it):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
+    )).trim();
+  };
 
   let rawSynthesis: string;
   if (articleMode) {
@@ -1022,42 +1162,9 @@ export async function runResearch(
     }
     rawSynthesis = prelimSynth ? `${articleSynth}\n${prelimSynth}` : articleSynth;
   } else {
-    // Fold the REUSED claims' grounding sources into the citable pool (after the
-    // freshly-staged ones, deduped by url). This lets the synthesizer cite reused
-    // facts [Source N] instead of emitting uncited [SOURCED] lines — and, since
-    // those sources flow to the curator, re-grounds the synthesis + re-links it
-    // to the reused claims (provenance). Closes the reuse-only gap; a reuse-only
-    // run (no fresh gather) now still produces a cited, grounded synthesis.
-    // `reuse` is resolved once, above the empty-pool decision — the decision
+    // `reuse` is resolved once, above the empty-pool decision - the decision
     // needs to know whether a reused claim brings a citable source with it.
-    const stagedUrls = new Set(staged.map((s) => s.url).filter(Boolean));
-    const reuseEntries = reuse.sources.filter((s) => !(s.url && stagedUrls.has(s.url)));
-    const reusePages: Page[] = reuseEntries.map((s) => ({
-      url: s.url || "", title: s.title, content: s.content, domain: s.domain || "",
-    }));
-    reuseUrls = new Set(reusePages.map((p) => p.url).filter(Boolean));
-    pool = [...staged, ...reusePages];
-
-    // source id → its 0-based index in the pool (reuse sources occupy [staged.length..])
-    const idToPoolIdx = new Map<string, number>();
-    reuseEntries.forEach((s, i) => idToPoolIdx.set(s.id, staged.length + i));
-    // Annotate each reused claim with the [Source N] that grounds it, so the
-    // synthesizer cites that number when it uses the fact.
-    claimList = reuseClaims.map((c) => {
-      const sid = reuse.claimToSource[c.id];
-      const idx = sid != null ? idToPoolIdx.get(sid) : undefined;
-      return idx != null ? `- ${c.text} [Source ${idx + 1}]` : `- ${c.text}`;
-    }).join("\n") || "(none)";
-
-    // Fresh sources get full content; reuse sources get a shorter slice (the claim
-    // text already carries the substance — the source is for citation attribution).
-    const sourceList = pool
-      .map((p, i) => sourceLine(p, i, i < staged.length ? SOURCE_SLICE_CHARS : 900))
-      .join("\n\n");
-    rawSynthesis = (await deps.chat(
-      `${INJECTION_GUARD}\n\n${SYNTH_SYS}`,
-      `QUESTION: ${query}\n\nKNOWN CLAIMS (already grounded — when you assert one, cite the [Source N] shown next to it):\n${claimList}\n\nSOURCES:\n${sourceList || "(none gathered)"}`,
-    )).trim();
+    rawSynthesis = await synthesizeTopic();
   }
 
   // 4b. Skeptic defensive gate (Phase 2, judge-only tier; SKEPTIC_ENABLED, off by
@@ -1100,21 +1207,28 @@ export async function runResearch(
   //     sentence around the figure may still be right. Runs BEFORE
   //     buildCitedAndRenumber and is index-safe (line count and every [Source N]
   //     preserved), so the curator's [Source N] → source_ids[N-1] stays aligned.
-  {
-    const g = applyNumericGrounding(rawSynthesis, pool.map((p) => p.content));
+  //
+  // 5. Cited-only sources (GROUNDING-MODEL §6.3) + renumber citations so the
+  //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
+  //    compacted cited list.
+  //
+  // Both are one closure because the gap-closing pass produces a SECOND raw
+  // synthesis, and a second synthesis that skipped the numeric gate would be a
+  // hole straight through the run's grounding - the pass exists to add sources,
+  // which is exactly when a new figure can arrive uncited.
+  const harden = async (raw: string): Promise<{ synthesis: string; cited: Page[] }> => {
+    const g = applyNumericGrounding(raw, pool.map((p) => p.content));
     ungroundedNumbers = g.ungrounded;
+    let out = raw;
     if (g.ungrounded.length) {
-      rawSynthesis = g.synthesis;
+      out = g.synthesis;
       await progress("synthesize",
         `${g.ungrounded.length} line(s) asserted a figure no cited source holds - downgraded to [UNCERTAIN]`,
         { ungrounded_numbers: g.ungrounded.length });
     }
-  }
-
-  // 5. Cited-only sources (GROUNDING-MODEL §6.3) + renumber citations so the
-  //    curator's [Source N] → source_ids[N-1] resolution stays aligned with the
-  //    compacted cited list. Delegate to curator (verbatim storage + claims, P2).
-  const { synthesis, cited } = buildCitedAndRenumber(rawSynthesis, pool);
+    return buildCitedAndRenumber(out, pool);
+  };
+  let { synthesis, cited } = await harden(rawSynthesis);
 
   // Templated report rendering (templates.ts, 2026-08-22) — the human-facing
   // answer is now a PROFESSIONAL REPORT: the run is classified into a report
@@ -1143,18 +1257,83 @@ export async function runResearch(
   // report. A need the synthesis grounds becomes `partial`; `answered` is never
   // manufactured here, and `search_failed` is never reopened.
   needsStatus = reconcileNeedsStatus(needsStatus, synthesis);
+
+  // ── The gap-closing pass (research-trust-report) ────────────────────────────
+  // The operator: "when the answer isn't complete enough there should be a
+  // recommendation to perform an additional run - or better yet, perform the
+  // additional run before sending an incomplete result back to the end user."
+  // So the run closes what it can before delivering, and the interim progress
+  // event below is what tells the person it is doing so.
+  //
+  // Bounded by construction: ONE pass (`gapRound` is nulled after it runs),
+  // at most GAP_PASS_MAX_QUERIES searches, only while most of the wall clock is
+  // unspent, only on the topic path (nothing else assigns `gapRound`), and only
+  // when something is actually open. The curator has not been called yet - it is
+  // delegated to once, below, with whatever this pass leaves behind.
+  {
+    const stillOpen = needsStatus.filter((n) => n.status === "open" || n.status === "partial");
+    const elapsedRatio = (Date.now() - t0) / Math.max(1, effMaxMs);
+    // `backstop === "complete"` is a precondition, not politeness: a run that
+    // already tripped a backstop has said why it stopped, and a second round of
+    // the same exhausted budget cannot close anything. Those runs get the
+    // recommendation in the report's limitations section instead, which is the
+    // other half of what the operator asked for.
+    if (gapRound && stillOpen.length && synthesis.trim() &&
+        backstop === "complete" && elapsedRatio < GAP_PASS_MAX_ELAPSED) {
+      const answeredBefore = needsStatus.filter((n) => n.status === "answered").length;
+      // The queries come from what the SYNTHESIS said it could not answer, not
+      // from the needs as asked - and through `shapeQuery`, so the pass cannot
+      // emit the one-word query the entity floor exists to refuse.
+      const targets = gapQuestions(stillOpen.map((n) => n.need), synthesis)
+        .slice(0, GAP_PASS_MAX_QUERIES)
+        .map(({ need, question }) => {
+          const shaped = shapeQuery(subjectEntity, question);
+          if (shaped.padded) searchStats.query_padded++;
+          return { need, query: shaped.query };
+        });
+      if (targets.length) {
+        // The INTERIM message. index.ts turns this one event into a chat write,
+        // so the reader is told a second pass is running instead of waiting on
+        // a message that says nothing for another two minutes.
+        await progress("gap_pass",
+          `First pass complete: ${answeredBefore} of ${needsStatus.length} needs answered - running a gap-closing pass to close the rest`,
+          { interim: 1, answered: answeredBefore, total: needsStatus.length, queries: targets.length });
+        const run = gapRound;
+        gapRound = null;                       // never twice, whatever happens below
+        const added = await run(targets);
+        if (added.length) {
+          rawSynthesis = await synthesizeTopic();
+          ({ synthesis, cited } = await harden(rawSynthesis));
+          needsStatus = reconcileNeedsStatus(needsStatus, synthesis);
+        }
+        const answeredAfter = needsStatus.filter((n) => n.status === "answered").length;
+        gapPass = { added: added.length, answeredBefore, answeredAfter, total: needsStatus.length };
+        await progress("gap_pass",
+          `gap-closing pass: +${added.length} source(s), needs answered ${answeredBefore} -> ${answeredAfter} of ${needsStatus.length}`,
+          { added: added.length, answered: answeredAfter, total: needsStatus.length });
+      }
+    }
+  }
+
   const answeredNeeds = needsStatus.filter((n) => n.status === "answered").length;
+  const partialNeeds = needsStatus.filter((n) => n.status === "partial").length;
   let prose = "";
   let reportType = "";
   if (synthesis.trim()) {
     try {
-      const tpl = shouldClassifyTemplate(answeredNeeds)
-        ? await classifyTemplate(deps, query, synthesis)
-        : templateById(DEFAULT_TEMPLATE_ID);
-      reportType = tpl.id;
+      // PARTLY-answered needs count toward the threshold now (report.ts). The
+      // live run 33250e9b had seven needs with 26 cited lines between them, all
+      // marked `partial`, and fell to the general report because `answered` was
+      // 0 - a buyer's question delivered as a bare fact list.
+      const classify = shouldClassifyTemplate(answeredNeeds, partialNeeds);
+      const choice = classify
+        ? await classifyReport(deps, query, synthesis)
+        : { template: templateById(DEFAULT_TEMPLATE_ID), purpose: "" as const };
+      reportType = choice.template.id;
       await progress("synthesize",
-        `report template: ${tpl.name}${shouldClassifyTemplate(answeredNeeds) ? "" : " (evidence too thin to classify)"}`);
-      prose = (await deps.chat(renderSys(tpl), `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${synthesis}`)).trim();
+        `report template: ${choice.template.name}${choice.purpose ? ` (purpose: ${choice.purpose})` : ""}` +
+        `${classify ? "" : " (evidence too thin to classify)"}`);
+      prose = (await deps.chat(renderSys(choice.template), `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${synthesis}`)).trim();
     } catch (e) {
       await progress("synthesize", `report rendering skipped: ${(e as Error).message}`);
     }
@@ -1162,8 +1341,25 @@ export async function runResearch(
   // Phase 4.1 — the footer states how much of the QUESTION was answered. It is
   // appended here (not only in renderResult) so the curator's stored `prose` and
   // the chat rendering carry the same, honest, number.
+  // The last place a fact can enter this run ungrounded is the template render,
+  // which is a model writing prose. Measured, recorded, never hidden - the same
+  // treatment the figures already get (applyNumericGrounding). It does not
+  // block: a report is not thrown away over an acronym, and an operator who can
+  // see the leak can judge it. Run on the BODY, before the footer and without
+  // the Sources list, which legitimately carries URLs the prose does not.
+  if (prose) {
+    proseUngrounded = renderGroundingDiff(prose, synthesis, query);
+    const leaks = proseUngrounded.numbers.length + proseUngrounded.urls.length +
+                  proseUngrounded.names.length;
+    if (leaks) {
+      await progress("synthesize",
+        `the rendered report carries ${leaks} item(s) the grounded answer does not: ` +
+        [...proseUngrounded.numbers, ...proseUngrounded.urls, ...proseUngrounded.names].slice(0, 8).join(", "),
+        { prose_ungrounded: leaks });
+    }
+  }
   if (prose && topicPath) {
-    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop)}_`;
+    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop, gapPass)}_`;
   }
 
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
@@ -1201,6 +1397,7 @@ export async function runResearch(
     reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
     citedSources: cited.map((p) => ({ url: p.url, title: p.title })),
     metrics, curator, backstop,
+    gapPass, proseUngrounded,
     outcome: "complete",
     needsStatus,
     searchRecord,

@@ -22,7 +22,7 @@
  *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, extractTextFromHtml, extractTitle, proxyPolicy, renderResult, selectRepoFiles } from "./lib.ts";
+import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, engineBlock, ENGINE_BLOCK_START, extractTextFromHtml, extractTitle, HANDOFF_WAIT_LINE, proxyPolicy, renderResult, rewriteChatBody, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -526,19 +526,31 @@ async function deliverReport(
   const message = history?.messages?.[messageId];
   if (!message) throw new Error("message not found in chat history");
 
-  const addition = SEPARATOR + markdown;
-  message.content = (message.content ?? "") + addition;
+  // REWRITE, not append (research-trust-report). Two reasons, one mechanism:
+  // the final body must start with the report rather than with the model's
+  // "research is running" line, and the gap-closing pass writes an INTERIM
+  // status that the final write then replaces. `rewriteChatBody` strips the
+  // engine's previous block and the one waiting line the tool asked the model
+  // for, and leaves anything else the model said alone.
+  const addition = rewriteChatBody(String(message.content ?? ""), markdown, SEPARATOR);
+  message.content = addition;
 
   // Append a rendered block only when the message already speaks that dialect.
   // A message with no `output` renders from `content`, and inventing an array
   // for it would hide everything the model actually said.
   if (Array.isArray(message.output) && message.output.length > 0) {
+    // Drop what the engine wrote last time (and the waiting line) the same way,
+    // or a second write would stack a second block beside the first.
+    message.output = message.output.filter((b: unknown) => {
+      const text = JSON.stringify(b ?? "");
+      return !text.includes(ENGINE_BLOCK_START) && !text.includes(HANDOFF_WAIT_LINE.slice(1, 40));
+    });
     message.output.push({
       type: "message",
       id: `msg_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
       status: "completed",
       role: "assistant",
-      content: [{ type: "output_text", text: addition }],
+      content: [{ type: "output_text", text: engineBlock(markdown) }],
     });
   }
 
@@ -554,7 +566,7 @@ async function deliverReport(
   // Trust the read, not the 200. This is the only step that can silently no-op.
   const v = await fetch(chatUrl, { headers: H });
   const stored = (await v.json())?.chat?.history?.messages?.[messageId];
-  const inContent = typeof stored?.content === "string" && stored.content.endsWith(addition);
+  const inContent = typeof stored?.content === "string" && stored.content.trimEnd().endsWith(addition.trimEnd());
   const needsBlock = Array.isArray(message.output) && message.output.length > 0;
   const inOutput = !needsBlock || JSON.stringify(stored?.output ?? []).includes("output_text");
   return inContent && inOutput;
@@ -564,6 +576,7 @@ async function notifyChat(
   callback: unknown,
   markdown: string,
   jobId: string,
+  final = true,
 ): Promise<void> {
   if (!OWUI_BASE_URL || !OWUI_API_KEY) return;
   const cb = callback as { chat_id?: string; message_id?: string } | undefined;
@@ -602,6 +615,14 @@ async function notifyChat(
   // is already open (the frontend handles that name; it does not handle
   // "message"), and it does not persist, so it cannot double up with the write
   // above. `notification` is socket-only by design — a live ping, not a record.
+  // An INTERIM write is not the end of the run, so it sends no "complete"
+  // anything: the delta would render the status line a second time under a body
+  // that already carries it, and "Research complete." while a gap-closing pass
+  // is still searching would be a lie told by the cosmetics.
+  if (!final) {
+    await send({ type: "status", data: { description: "Closing gaps…", done: false } }).catch(() => {});
+    return;
+  }
   await send({ type: "chat:message:delta", data: { content: SEPARATOR + markdown } }).catch(() => {});
   await send({ type: "status", data: { description: "Research complete.", done: true } }).catch(() => {});
   await send({ type: "notification", data: { type: "info", content: "Deep research finished." } }).catch(() => {});
@@ -640,6 +661,15 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       `UPDATE research_jobs SET status='running', progress=$2::jsonb WHERE id=$1`,
       [jobId, JSON.stringify({ phase, message, counters })],
     ).catch(() => {});
+    // The ONE progress event that reaches the person rather than the job row.
+    // The gap-closing pass can add minutes to a run that already looked finished
+    // from the chat's side, so the run says what it is doing and what it has so
+    // far. Nothing canonical is written here: no result, no curator, no job
+    // state - `notifyChat` only rewrites the chat message, and the final write
+    // replaces this body.
+    if (phase === "gap_pass" && counters.interim) {
+      await notifyChat(options?.callback, `_${message}_`, jobId, false).catch(() => {});
+    }
   };
   try {
     // Phase 1 — resolve the per-job contract FIRST (fail-closed: a malformed
@@ -684,6 +714,7 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       // answered. reuse_ratio is still passed and still ignored by the renderer.
       needs_status: res.needsStatus,
       search_record: res.searchRecord,
+      gap_pass: res.gapPass,
     });
     // ── Curator honesty gate (incident 2026-08-31) ──────────────────────────
     // runResearch NEVER throws when the curator dies — it records the failure as
@@ -711,7 +742,12 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       outcome: res.outcome,
       needs_status: res.needsStatus,
       search_record: res.searchRecord,
+      // research-trust-report: what the gap-closing pass added and closed. The
+      // python fallback renderer reads this key for its footer line.
+      gap_pass: res.gapPass,
       ungrounded_numbers: res.ungroundedNumbers,
+      // …and what the RENDERED report says that the grounded answer does not.
+      prose_ungrounded: res.proseUngrounded,
       contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
       skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
       rendered, // chat-facing markdown; absent on jobs cached before this field
