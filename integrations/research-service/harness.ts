@@ -1370,7 +1370,7 @@ export async function runResearch(
   // records is what the reader gets. Fail-open: a broken judge leaves the
   // document alone and says so in the footer.
   if (prose) {
-    const fid = await checkRenderFidelity(deps, prose, synthesis);
+    const fid = await checkRenderFidelity(deps, prose, synthesis, query);
     prose = fid.rendered;
     renderFidelity = fid.record;
     const corrected = fid.record.rewritten + fid.record.replaced;

@@ -1,6 +1,8 @@
 {
  "_provenance": "captured 2026-09-12 from dry run a337520c (the 100 Hz auditory-tone / VR motion-sickness question), whole and unedited. It is the run that proves the skeleton is not shaped only for hardware: the same six sections, rendered through scientific-paper, over a literature question.",
  "_expect": "scientific-paper: the skeleton with that template's section names, every citation kept",
+ "query": "Research on using 100Hz (or specific audio frequencies) sound to reduce or counteract motion sickness in VR / virtual reality: mechanism, academic studies, quantitative effectiveness, developer guidance",
+ "_query_provenance": "the question the run was given, recovered 2026-09-12 by read-only SELECT from research_jobs. The fidelity check reads it: a name the PERSON asked about is not a name the report invented, and the gate and the reporter must read the same reference or their two counts can disagree.",
  "id": "a337520c-44ad-4311-ba38-4d7c8f2cd6ae",
  "status": "done",
  "progress": {

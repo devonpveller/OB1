@@ -59,6 +59,9 @@ export interface FidelityRecord {
   rewritten: number;
   /** …and fixed by falling back to the synthesis line verbatim. */
   replaced: number;
+  /** Units left exactly as they were because no correction could be made
+   *  without flipping what they claim. They are part of `unchecked`. */
+  polarity_skipped: number;
   /** Names the grounding diff flagged that are GONE from the delivered
    *  document because this check removed them. Counted only when the recount
    *  says so - "blocked" is a claim about the artifact, not about intent. */
@@ -69,7 +72,7 @@ export interface FidelityRecord {
 
 export function emptyFidelity(): FidelityRecord {
   return { checked: 0, units: 0, unchecked: 0, stronger: 0, unsupported: 0, rewritten: 0,
-           replaced: 0, names_blocked: [] };
+           replaced: 0, polarity_skipped: 0, names_blocked: [] };
 }
 
 /**
@@ -118,7 +121,7 @@ export interface CitedUnit {
 const CITE_RE = /\[Sources?\s*[^\]]*\]/gi;
 /** A synthesis line that carries evidence: tagged, and therefore not a [GAP]. */
 const GROUNDED_LINE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]/i;
-const TAG_RE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]\s*/i;
+const TAG_RE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN|GAP)\]\s*/i;
 
 function citationsIn(text: string): number[] {
   const out = new Set<number>();
@@ -198,10 +201,18 @@ export function citedUnits(rendered: string): CitedUnit[] {
   let headerSeen = false;
   let section = "";
   let inFence = false;
+  let inComment = false;
   const unit = (text: string, line: number, cell: number, citations: number[], judgeable = true) =>
     ({ text, view: normaliseCitations(text), line, cell, citations, section, judgeable });
 
   lines.forEach((line, i) => {
+    // An HTML COMMENT is not the document: a fixture's provenance header, or
+    // the engine's own machine line, is apparatus. It became load-bearing when
+    // the headers gained a table of attributed hunks and `countUnits` started
+    // counting the table.
+    if (inComment) { if (line.includes("-->")) inComment = false; return; }
+    if (/^\s*<!--/.test(line)) { if (!line.includes("-->")) inComment = true; return; }
+
     // A fenced block is code, not prose. A `programming-doc` render is ASKED for
     // code samples, and a "[Source 3]" inside one was being presented to the
     // judge as a claim and could be rewritten (tester X2).
@@ -482,17 +493,123 @@ export function supersetCitations(rendered: string, synthesis: string): string[]
  * replaced, so the replacement lands on the same subject; ties go to the line
  * that shares the most citations.
  */
-export function verbatimFallback(refs: string[], written = "", max = 1): string {
-  const words = new Set((written.toLowerCase().match(/[a-z0-9]{4,}/g) || []));
+export function verbatimFallback(refs: string[], written = "", max = 1, minShared = 0): string {
+  // Citations come out of BOTH sides before the words are counted: every unit
+  // and every line contains the word "Source", and counting it made any two
+  // sentences look related enough to swap.
+  const bare = (t: string) => t.replace(CITE_RE, " ").toLowerCase();
+  const words = new Set((bare(written).match(/[a-z0-9]{4,}/g) || []));
   const scored = refs.map((l) => {
-    const lw = new Set(l.toLowerCase().match(/[a-z0-9]{4,}/g) || []);
+    const lw = new Set(bare(l).match(/[a-z0-9]{4,}/g) || []);
     let shared = 0;
     for (const w of words) if (lw.has(w)) shared++;
     return { line: l, shared };
   });
   scored.sort((a, b) => b.shared - a.shared);
+  // …and where the candidates are not the unit's OWN citations, it must be
+  // ABOUT the same thing. Ranking alone put a line about the 100 Hz effect in
+  // place of a sentence about Azure DevOps components, because it was the best
+  // of two candidates rather than a good one. A unit that cites its source
+  // needs no such floor - the citation IS the link, and it is a stronger one
+  // than word overlap.
+  const best = scored[0];
+  if (!best || best.shared < minShared) return "";
   return scored.slice(0, Math.max(1, max))
+    .filter((x) => x.shared >= minShared)
     .map((x) => x.line.replace(TAG_RE, "").trim()).join(" ");
+}
+
+// ── POLARITY ────────────────────────────────────────────────────────────────
+//
+// The worst thing this module has done. Under "What the evidence does not
+// settle", sentences saying what the sources do NOT establish were replaced by
+// verbatim grounded lines asserting what they DO:
+//
+//   "the evidence does not describe the specific Azure DevOps components…"
+//     -> "The pattern seen in GitLab … is analogous to what Azure DevOps does…"
+//   "The EEG and GVS data … do not trace the resolution pathway."
+//     -> a grounded claim about what causes the conflict state
+//   "It is unclear whether the effects are additive, redundant, or potentially
+//    antagonistic."  -> "Whether the 100 Hz effect is additive … is not
+//    addressed in any provided source."   (three possibilities flattened to one)
+//
+// The mechanism is the fallback doing exactly what it was built to do: the judge
+// reads an absence sentence, the lines it cites state positives, the verdict is
+// UNSUPPORTED, and the grounded line is pasted in. A polarity inversion under a
+// citation is the worst shape a trust document can carry, and it shipped.
+//
+// So polarity is preserved BY CONSTRUCTION. The classifier below is lexical,
+// which this workstream has learned to distrust - but the failure mode here is
+// asymmetric and that is what makes it acceptable: a missed cue and a false cue
+// both end in "leave the unit alone". It can only ever make the engine more
+// conservative, never wronger.
+
+export type Polarity = "absence" | "assertion";
+
+/** Words for the evidence itself: the subject of a sentence about what is known. */
+const EVIDENCE_NOUN =
+  /(?<![a-z])(sources?|evidence|data|stud(y|ies)|literature|documentation|material|record|provided)(?![a-z])/i;
+/** Denial or doubt. */
+const NEGATION =
+  /(?<![a-z])(not|no|never|none|neither|nor|cannot|can't|doesn't|don't|didn't|isn't|aren't|without|lacks?|lacking|absent|absence|missing|silent|unaddressed|unresolved|unconfirmed|unverified|undetermined|inconclusive)(?![a-z])/i;
+/** Uncertainty about the state of knowledge, with or without an evidence noun. */
+const UNCERTAIN_SHAPE = [
+  /\b(it is|it remains|remains|is|are)\s+(unclear|unknown|uncertain|undetermined|not known|not established)\b/i,
+  /\b(unclear|unknown|uncertain|undetermined)\s+(whether|if|how|what|which|why)\b/i,
+  /\bremains? open\b/i,
+  /\bnot (addressed|described|documented|confirmed|specified|stated|established|reported)\b/i,
+  /\bfails? to (say|state|describe|address|establish|trace)\b/i,
+];
+
+/**
+ * Does this sentence report an ABSENCE IN THE EVIDENCE - deny that the sources
+ * say something, or doubt that it is known - or does it ASSERT?
+ *
+ * The distinction is NOT grammatical negation. "The PSU never fails" is a
+ * negative sentence and an ordinary world claim, and correcting it is exactly
+ * this module's job. What must never be corrected INTO an assertion is a
+ * sentence whose subject is the evidence ("the sources do not describe...", "the
+ * data do not trace...") or the state of knowledge ("it is unclear whether...").
+ * That is the same subject-of-the-sentence test the curator's meta filter makes,
+ * for the same reason.
+ *
+ * A SECTION can decide it on its own: everything under "What the evidence does
+ * not settle" and "Limitations and open questions" is an absence claim by the
+ * section's own definition, whatever a sentence's grammar looks like.
+ *
+ * Only the head clause is read: a caveat tail ("…, though no source confirms…")
+ * does not turn a finding into an absence.
+ */
+export function polarityOf(text: string, section = ""): Polarity {
+  // The citation brackets come out first: "[Source 7]" contains the word
+  // "Source", and with a negation anywhere in the sentence that made every
+  // cited negative claim look like a statement about the evidence.
+  const t = String(text || "").replace(CITE_RE, " ").trim();
+  if (!t) return "assertion";
+  if (/does not settle|limitation|open question/i.test(section)) return "absence";
+  if (/^\s*\[GAP\]/i.test(t)) return "absence";
+  const head = t.split(/;|,\s+(?:but|though|although|however|whereas|yet)\b/i)[0];
+  if (UNCERTAIN_SHAPE.some((re) => re.test(head))) return "absence";
+  if (EVIDENCE_NOUN.test(head) && NEGATION.test(head)) return "absence";
+  return "assertion";
+}
+
+/** A correction may never flip polarity. */
+export function polarityKeeps(before: string, after: string, section = ""): boolean {
+  return polarityOf(before, section) === polarityOf(after, section);
+}
+
+/**
+ * Candidate replacements for an ABSENCE unit: the synthesis's own statements of
+ * what it could not settle. A [GAP] line and an [UNCERTAIN] line are the only
+ * text in a run that can stand in for "the sources do not say"; a [SOURCED]
+ * line never can, whatever it shares with the sentence.
+ */
+export function absenceLines(synthesis: string): string[] {
+  return String(synthesis || "").split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^\s*\[(GAP|UNCERTAIN)\]/i.test(l))
+    .filter((l) => polarityOf(l.replace(/^\s*\[(GAP|UNCERTAIN)\]\s*/i, "")) === "absence");
 }
 
 export type Verdict = "SAME" | "WEAKER" | "STRONGER" | "UNSUPPORTED";
@@ -627,6 +744,14 @@ function countAgainst(record: FidelityRecord, delivered: string, judged: Set<str
   record.unchecked = Math.max(0, record.units - record.checked);
 }
 
+/** Is this text already somewhere else in the document? */
+function alreadyPresent(lines: string[], text: string, exceptLine: number): boolean {
+  const key = (t: string) => t.replace(CITE_RE, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const want = key(text);
+  if (want.length < 20) return false;
+  return lines.some((l, i) => i !== exceptLine && key(l).includes(want));
+}
+
 /** Is this line inside the limitations section? */
 function isLimitationsLine(lines: string[], at: number): boolean {
   for (let k = at; k >= 0; k--) {
@@ -643,7 +768,7 @@ export interface FidelityResult { rendered: string; record: FidelityRecord; }
  * FAIL-OPEN: on any error the document comes back exactly as it went in.
  */
 export async function checkRenderFidelity(
-  deps: Deps, rendered: string, synthesis: string,
+  deps: Deps, rendered: string, synthesis: string, query = "",
 ): Promise<FidelityResult> {
   const record = emptyFidelity();
   // The document is NOT normalised. Detection reads a normalised VIEW of each
@@ -674,7 +799,14 @@ export async function checkRenderFidelity(
     // reader that way, and this render puts ESR and HDD there. Those lines are
     // rewritten and never verbatim-replaced: a grounded line is not an answer
     // to an open question.
-    const flaggedNames = renderGroundingDiff(doc, synthesis, "").names;
+    // ONE reference for the gate and the reporter. They used different ones:
+    // the gate passed query="" and the reporter the real query, so the gate
+    // blocked "UI" and "TFVC" - both words of the USER'S OWN QUESTION - that
+    // the reader-facing report would never have flagged, and the footer's
+    // "names: N blocked" could disagree with `prose_ungrounded.names` by
+    // construction. A name the person asked about is not a name the report
+    // invented.
+    const flaggedNames = renderGroundingDiff(doc, synthesis, query).names;
     const namesBefore = new Set(flaggedNames);
     const withNames: CitedUnit[] = [];
     if (flaggedNames.length) {
@@ -827,6 +959,16 @@ export async function checkRenderFidelity(
     const changed: boolean[] = [];
     bad.forEach((u, i) => {
       const next = (fixed[String(i + 1)] || "").trim();
+      // A REWRITE that flips polarity is refused outright. The rewriter is a
+      // model being asked to repair an overstatement; turning "the sources do
+      // not describe X" into a statement about X is not a repair.
+      if (next && next !== u.text && !polarityKeeps(u.text, next, u.section)) {
+        record.polarity_skipped++;
+        rewritten.push(u);
+        changed.push(false);
+        return;
+      }
+
       if (next && next !== u.text) {
         applyUnit(lines, u, next);
         rewritten.push({ ...u, text: next });
@@ -864,6 +1006,13 @@ export async function checkRenderFidelity(
     // one artifact - the tester's X4 and the reviewer's K.10 were both about a
     // count taken on a document nobody holds.
     const judged = new Set<string>([...units, ...orphans].map((u) => u.text));
+    /** Left exactly as it was, because every correction would have flipped what
+     *  it claims. It comes OUT of `judged`, so the footer counts it unchecked -
+     *  a sentence nothing could safely touch is not a sentence that was checked. */
+    const skipForPolarity = (u: CitedUnit) => {
+      record.polarity_skipped++;
+      judged.delete(u.text);
+    };
     const notes: Array<{ line: number; label: string; text: string }> = [];
     rewritten.forEach((u, i) => {
       if (second[i] === "STRONGER" || second[i] === "UNSUPPORTED") {
@@ -878,10 +1027,38 @@ export async function checkRenderFidelity(
           if (u.text !== bad[i].text) { judged.add(u.text); record.rewritten++; }
           return;
         }
-        const refs = u.citations.length
-          ? referenceLines(synthesis, u.citations)
-          : nearestLines(synthesis, bad[i].text);
-        let verbatim = verbatimFallback(refs, u.text);
+        // ── POLARITY IS PRESERVED BY CONSTRUCTION ──────────────────────────
+        // An ABSENCE sentence - one that denies, doubts, or reports that the
+        // sources do not say - may only be replaced by text that also does. Its
+        // candidates are the synthesis's own [GAP] and [UNCERTAIN] lines, never
+        // a [SOURCED] one, whatever words they share. If none matches, the unit
+        // is left EXACTLY as it is and counted: a sentence the engine cannot
+        // correct without inverting it is a sentence the engine does not touch.
+        const want = polarityOf(u.text, u.section);
+        const refs = want === "absence"
+          ? absenceLines(synthesis)
+          : (u.citations.length
+              ? referenceLines(synthesis, u.citations)
+              : nearestLines(synthesis, bad[i].text));
+        const sameSide = refs.filter((l) =>
+          polarityOf(l.replace(/^\s*\[(SOURCED|INFERRED|UNCERTAIN|GAP)\]\s*/i, "")) === want);
+        // No candidate of the same polarity: left alone, and counted - but only
+        // when there WERE candidates and polarity is what ruled them out. A unit
+        // with no evidence at all (an orphan) was already judged and already
+        // counted; it is not a polarity skip.
+        if (!sameSide.length) { if (refs.length) skipForPolarity(u); return; }
+        // The floor applies when the candidates are NOT this unit's own cited
+        // lines: an absence unit draws from the run's [GAP]/[UNCERTAIN] lines,
+        // and an uncited unit from whatever is nearest, and neither link is as
+        // strong as a citation.
+        const ownCitations = want === "assertion" && u.citations.length > 0;
+        let verbatim = verbatimFallback(sameSide, u.text, 1, ownCitations ? 0 : NEAREST_MIN_OVERLAP);
+        if (verbatim && !polarityKeeps(u.text, verbatim, u.section)) { skipForPolarity(u); return; }
+        // An ABSENCE unit with no candidate close enough to its subject is left
+        // alone and counted. The alternative is the defect this exists for: a
+        // grounded line about something else, pasted over a sentence saying
+        // what the evidence does not settle.
+        if (!verbatim && want === "absence") { skipForPolarity(u); return; }
         if (verbatim && u.cell >= 0) {
           // The reviewer's K.9: keep the verbatim line exactly, and fix the
           // LAYOUT instead. A long grounded sentence in a column whose siblings
@@ -904,6 +1081,11 @@ export async function checkRenderFidelity(
             return;
           }
         }
+        // A replacement that is already IN the document says nothing new and
+        // reads as a stutter: the 100 Hz render ended with two consecutive
+        // sentences making the same point, because the only same-polarity
+        // candidate was the sentence above. Leave the unit; it is counted.
+        if (verbatim && alreadyPresent(lines, verbatim, u.line)) { skipForPolarity(u); return; }
         if (verbatim) {
           applyUnit(lines, u, verbatim);
           judged.add(verbatim);
@@ -921,7 +1103,7 @@ export async function checkRenderFidelity(
     // drop the name is not a block, and the name stays visible in
     // `prose_ungrounded.names` where the run already reports it.
     if (namesBefore.size) {
-      const after = new Set(renderGroundingDiff(finalDoc, synthesis, "").names);
+      const after = new Set(renderGroundingDiff(finalDoc, synthesis, query).names);
       record.names_blocked = [...namesBefore].filter((n) => !after.has(n)).sort();
     }
     return { rendered: finalDoc, record };

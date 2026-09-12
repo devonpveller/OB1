@@ -129,9 +129,9 @@ Deno.test("ACCEPTANCE 2: the comparison synthesis renders the table AS the compa
 Deno.test("ACCEPTANCE 3: the footer's M is countUnits of the delivered document", () => {
   // The three renders carry the record their own run produced, in the header.
   const cases: Array<[string, number, number]> = [
-    ["rendered-64ac38cf-buyers-guide.md", 44, 44],
-    ["rendered-a337520c-scientific-paper.md", 66, 67],
-    ["rendered-5ab36fe0-product-comparison.md", 23, 24],
+    ["rendered-64ac38cf-buyers-guide.md", 43, 44],
+    ["rendered-a337520c-scientific-paper.md", 65, 67],
+    ["rendered-5ab36fe0-product-comparison.md", 25, 25],
   ];
   for (const [name, checked, units] of cases) {
     const doc = body(name);
@@ -172,7 +172,7 @@ Deno.test("INVARIANT: the check leaves every COMMITTED render exactly as it is",
     const doc = read(name);
     // Each document against ITS OWN synthesis: the names gate reads the
     // evidence, so the wrong evidence makes every name unearned.
-    const out = await checkRenderFidelity(blessAll, doc, fx(src).synthesis);
+    const out = await checkRenderFidelity(blessAll, doc, fx(src).synthesis, fx(src).query ?? "");
     assertEquals(out.rendered, doc, name);
   }
 });

@@ -17,8 +17,9 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, namesIn, nearestLines,
-  normaliseCitations, referenceLines, splitSentences, supersetCitations, verbatimFallback,
+  absenceLines, applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, namesIn,
+  nearestLines, normaliseCitations, polarityOf, referenceLines, splitSentences, supersetCitations,
+  verbatimFallback,
 } from "./fidelity.ts";
 import { renderSys, templateById } from "./templates.ts";
 import { expansionMatch, renderGroundingDiff } from "./grounding.ts";
@@ -456,6 +457,13 @@ const synthesisOf = (n: string) => {
   const d = JSON.parse(fixtureDoc(n));
   return (d.result ?? d).synthesis as string;
 };
+// The run's own question. The check reads it, so a test that omits it is
+// testing a different check: with query="" the gate flags the words of the
+// question itself.
+const queryOf = (n: string) => {
+  const d = JSON.parse(fixtureDoc(n));
+  return ((d.result ?? d).query ?? d.query ?? "") as string;
+};
 // INSIDE the submodule. Reading the parent repo's copy passed here and died
 // the moment the suite ran with only this directory mounted - the same defect
 // this workstream fixed one item ago, made again by the test that exists to
@@ -476,7 +484,7 @@ const blessAll = {
 Deno.test("INVARIANT: a document with nothing to correct is returned BYTE-FOR-BYTE", async () => {
   for (const [name, src] of DOCS) {
     const doc = fixtureDoc(name);
-    const out = await checkRenderFidelity(blessAll, doc, synthesisOf(src));
+    const out = await checkRenderFidelity(blessAll, doc, synthesisOf(src), queryOf(src));
     assertEquals(out.rendered, doc, `the checker edited ${name}, which it had no correction for`);
     assertEquals(out.record.rewritten + out.record.replaced, 0, name);
     assertEquals(out.record.names_blocked, [], name);
@@ -526,8 +534,8 @@ Deno.test("INVARIANT: running the check on its own output changes nothing (idemp
   for (const [name, src] of DOCS) {
     const doc = fixtureDoc(name);
     const synth = synthesisOf(src);
-    const once = await checkRenderFidelity(blessAll, doc, synth);
-    const twice = await checkRenderFidelity(blessAll, once.rendered, synth);
+    const once = await checkRenderFidelity(blessAll, doc, synth, queryOf(src));
+    const twice = await checkRenderFidelity(blessAll, once.rendered, synth, queryOf(src));
     assertEquals(twice.rendered, once.rendered, name);
     assertEquals(twice.record.units, once.record.units, name);
   }
@@ -791,4 +799,156 @@ Deno.test("the footer says how many names were blocked, and only when there were
   const quiet = coverageFooter(needs as never, emptySearchRecord(), "complete", null,
     { ...rec, names_blocked: [] });
   assertEquals(/names:/.test(quiet), false, quiet);
+});
+
+// ── POLARITY (research-trust-names attempt 3) ──────────────────────────────
+//
+// What shipped, and what the tester found live: under "What the evidence does
+// not settle", sentences saying what the sources do NOT establish were replaced
+// by verbatim grounded lines asserting what they DO. The judge reads an absence
+// sentence, the lines it cites state positives, the verdict is UNSUPPORTED, and
+// the fallback pastes a positive line in - a polarity inversion under a
+// citation, in the section whose whole purpose is the opposite.
+//
+// The three cases below are the tester's, verbatim.
+
+const POLARITY_SYNTH = [
+  "[SOURCED] GitLab is described as an enterprise-grade DevOps platform that goes beyond Git " +
+  "repository management, integrating issue tracking, CI/CD, code review and security testing. [Source 2]",
+  "[INFERRED] The pattern seen in GitLab is analogous to what Azure DevOps does with its " +
+  "Repos/Boards/Pipelines triad, representing a broader ALM platform rather than a bare git host. [Source 2]",
+  "[SOURCED] VR motion sickness is attributed to a sensory conflict between visual, vestibular " +
+  "and proprioceptive signals integrated in the brainstem and cerebellum, as shown by EEG and " +
+  "GVS studies of the conflict state. [Source 1, 11, 12, 15]",
+  "[UNCERTAIN] Whether the 100 Hz effect is additive with other VR-specific countermeasures is " +
+  "not addressed in any provided source. [Source 11, 12]",
+  "[GAP] No provided source traces the resolution pathway after the conflict state.",
+].join("\n");
+
+/** No synthesis tag may ever reach a reader. */
+const TAGGED_START = new RegExp("^\\[(SOURCED|INFERRED|GAP|UNCERTAIN)\\]");
+
+/** A judge that condemns everything, which is what produced all three defects. */
+const condemnAll = {
+  chat: (sys: string, user: string) => {
+    if (sys.startsWith("You compare SENTENCES")) {
+      const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
+      return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("UNSUPPORTED") }));
+    }
+    return Promise.resolve(JSON.stringify({ fixed: {} }));   // no rewrite: fall to verbatim
+  },
+} as unknown as Deps;
+
+Deno.test("POLARITY: an absence sentence is never replaced by an assertion", async () => {
+  // 1. product-comparison. The delivered document lost this sentence and gained
+  //    an [INFERRED] claim about what Azure DevOps IS - leaving the next
+  //    sentence's "The sources ALSO do not address…" with no antecedent.
+  const doc = [
+    "## What the evidence does not settle",
+    "",
+    "However, the evidence does not describe the specific Azure DevOps components that would " +
+    "differentiate day-to-day use, including the distinction between YAML pipeline-as-code and " +
+    "classic UI-based release pipelines [Source 2].",
+  ].join("\n");
+  const out = await checkRenderFidelity(condemnAll, doc, POLARITY_SYNTH);
+  assertEquals(out.rendered, doc, "an absence sentence was rewritten into something else");
+  assert(!out.rendered.includes("analogous to what Azure DevOps does"), out.rendered);
+  assertEquals(out.record.polarity_skipped >= 1, true, JSON.stringify(out.record));
+});
+
+Deno.test("POLARITY: the two scientific-paper sentences, which carried NO flagged name", async () => {
+  // 2. "…do not trace the resolution pathway" became a background claim about
+  //    what causes the conflict state. 3. "It is unclear whether the effects are
+  //    additive, redundant, or potentially antagonistic" became a near-duplicate
+  //    of the sentence before it, with three possibilities flattened to one.
+  for (const sentence of [
+    "The EEG and GVS data [Source 1, 2] characterize the conflict state but do not trace the resolution pathway.",
+    "It is unclear whether the effects are additive, redundant, or potentially antagonistic [Source 11, 12].",
+  ]) {
+    const doc = `## Findings\n\n${sentence}`;
+    assertEquals(polarityOf(sentence), "absence", sentence);
+    const out = await checkRenderFidelity(condemnAll, doc, POLARITY_SYNTH);
+    const after = out.rendered.split("\n").pop() ?? "";
+    // The rule is "never FLIP", not "never touch": what stands where an absence
+    // stood must still be an absence, and it may never be one of the POSITIVE
+    // lines the old fallback reached for.
+    assertEquals(polarityOf(after), "absence", `${sentence}\n  -> ${after}`);
+    assert(!after.includes("attributed to a sensory conflict"), after);
+    assert(!after.includes("analogous to what Azure DevOps does"), after);
+    assert(!TAGGED_START.test(after), `a tag reached the reader: ${after}`);
+  }
+});
+
+Deno.test("POLARITY: an absence MAY be replaced by an absence - a [GAP] or [UNCERTAIN] line", async () => {
+  // The rule is not "never touch an absence": it is "never flip it". A
+  // same-polarity replacement is allowed, and it is the only one that is.
+  const doc = "## What the evidence does not settle\n\n" +
+    "No source traces the resolution pathway after the conflict state is reached, and none " +
+    "describes what follows [Source 1].";
+  const cands = absenceLines(POLARITY_SYNTH);
+  assertEquals(cands.length, 2, JSON.stringify(cands));
+  assert(cands.every((l) => /^\[(GAP|UNCERTAIN)\]/.test(l)), JSON.stringify(cands));
+  const out = await checkRenderFidelity(condemnAll, doc, POLARITY_SYNTH);
+  // Whatever it did, what stands is still a statement of absence.
+  assertEquals(polarityOf(out.rendered.split("\n").pop() ?? ""), "absence", out.rendered);
+});
+
+Deno.test("POLARITY: an ordinary negative CLAIM is still corrected", () => {
+  // The distinction is the SUBJECT, not the grammar. "The PSU never fails" is a
+  // world claim that happens to be negative, and correcting it is this module's
+  // job; "the sources do not describe X" is a claim about the evidence.
+  assertEquals(polarityOf("The PSU never fails. [Source 7]"), "assertion");
+  assertEquals(polarityOf("The connector is universal [Source 13]."), "assertion");
+  assertEquals(polarityOf("The sources do not describe the build agents [Source 2]."), "absence");
+  assertEquals(polarityOf("It is unclear whether the effects are additive."), "absence");
+  // …and a caveat TAIL does not turn a finding into an absence.
+  assertEquals(
+    polarityOf("The unit uses a proprietary connector, though no source confirms a replacement."),
+    "assertion",
+  );
+  // A SECTION decides it on its own.
+  assertEquals(polarityOf("Anything at all.", "What the evidence does not settle"), "absence");
+  assertEquals(polarityOf("Anything at all.", "Limitations and open questions"), "absence");
+  assertEquals(polarityOf("Anything at all.", "Findings"), "assertion");
+});
+
+// ── ONE reference for the gate and the reporter ───────────────────────────
+
+Deno.test("a name from the USER'S OWN QUESTION is not an invented name", async () => {
+  // The gate passed query="" and the reporter the real query, so the gate
+  // blocked "TFVC" and "UI" - words of the question the person asked - that the
+  // reader-facing report would never have flagged. Two numbers about names,
+  // able to disagree by construction.
+  const synthesis = "[SOURCED] Azure DevOps pipelines are YAML files committed in the repository. [Source 3]";
+  const query = "What is the distinction between Azure Repos Git and TFVC, and the UI-based pipelines?";
+  const doc = "## Findings\n\nThe distinction between Azure Repos Git and TFVC is not described [Source 3].";
+  assertEquals(renderGroundingDiff(doc, synthesis, "").names, ["TFVC"]);
+  assertEquals(renderGroundingDiff(doc, synthesis, query).names, []);
+  const out = await checkRenderFidelity(condemnAll, doc, synthesis, query);
+  assertEquals(out.record.names_blocked, []);
+});
+
+Deno.test("the footer's blocked names and prose_ungrounded cannot disagree", async () => {
+  // Both sides read the same reference now. Whatever the gate blocks must be
+  // absent from what the reporter flags on the delivered document, and whatever
+  // the reporter still flags must not be counted as blocked.
+  const synthesis = "[SOURCED] The unit uses a proprietary power supply. [Source 13]";
+  const query = "what about the PSU";
+  const doc = "## Findings\n\nThe unit ships with an ATX power supply [Source 13].";
+  const deps = {
+    chat: (sys: string, user: string) => {
+      if (sys.startsWith("You compare SENTENCES")) {
+        const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
+        return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("SAME") }));
+      }
+      return Promise.resolve(JSON.stringify({
+        fixed: { "1": "The unit uses a proprietary power supply [Source 13]." },
+      }));
+    },
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, synthesis, query);
+  const stillFlagged = renderGroundingDiff(out.rendered, synthesis, query).names;
+  assertEquals(out.record.names_blocked, ["ATX"]);
+  assertEquals(stillFlagged, []);
+  for (const n of out.record.names_blocked) assert(!stillFlagged.includes(n), n);
 });

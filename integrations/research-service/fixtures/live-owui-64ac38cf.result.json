@@ -1,6 +1,8 @@
 {
  "_provenance": "captured 2026-09-12 12:13 UTC from the LIVE Open WebUI run of job 64ac38cf (the used Dell OptiPlex 3050 buyer's question, second run on the deployed stack), whole and unedited. Its delivered document is the one the operator read and approved - \"this looks good... set this as a template for future use\" - and is committed beside it as approved-document-64ac38cf.md in the parent repo. Re-rendering this synthesis through the buyers-guide template is acceptance 2 of research-trust-template.",
  "_expect": "the approved exemplar: re-rendering its synthesis must reproduce the approved document's six headings, in order, with the same citations",
+ "query": "Dell OptiPlex 3050 known issues, common failure points, red flags when buying used: capacitor problems, power issues, overheating, RAM, storage, BIOS tampering, warranty history, and what to inspect before purchase",
+ "_query_provenance": "the question the run was given, recovered 2026-09-12 by read-only SELECT from research_jobs. The fidelity check reads it: a name the PERSON asked about is not a name the report invented, and the gate and the reporter must read the same reference or their two counts can disagree.",
  "gaps": [
   "What are the most common hardware failure points and known defects for the Dell OptiPlex 3050, specifically regarding capacitors, power supply, and thermal management?",
   "What specific physical and functional inspections should be performed on a used Dell OptiPlex 3050 to identify overheating, power, or component degradation?",
