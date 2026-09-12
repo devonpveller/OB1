@@ -10,8 +10,10 @@
  * GROUNDING_RULES (preserve [Source N] citations verbatim, introduce no new
  * facts, honest gaps section).
  *
- * Adding a template = one entry in TEMPLATES (id + hints for the classifier +
- * the structure prompt). Nothing else to wire.
+ * Adding a template = one entry in SHAPES (id, name, audience, hints, lead,
+ * title, summary, action, table, tone). `buildStructure` assembles the prompt
+ * and TEMPLATES is derived from it, so a template cannot be added with a
+ * section missing or out of order. Nothing else to wire.
  */
 import type { Deps } from "./harness.ts";
 
@@ -96,6 +98,50 @@ One section, once. List every [GAP] item as a plain question, with no citation, 
  * A template is one entry in SHAPES. `buildStructure` puts the sections in
  * order, so a template cannot quietly lose one, and `templates.test.ts` walks
  * TEMPLATES asserting the order and the count.
+ *
+ * WHERE THE OLD HEADINGS WENT. The rewrite renamed and merged sections; nothing
+ * was dropped, and the tester had to reconstruct that by reading twenty shape
+ * bodies against the old file. This is that map, so the claim is checkable by
+ * reading (old heading -> where its instruction now lives):
+ *
+ * | template | old heading | now |
+ * |---|---|---|
+ * | buyers-guide          | (unchanged - it is the exemplar) | - |
+ * | scientific-paper      | Abstract | Executive summary |
+ * |                       | Background | Findings (the cited context that opens it) |
+ * |                       | Discussion | What the evidence does not settle + Findings by theme |
+ * | technical-proposal    | Problem statement | Executive summary |
+ * |                       | Proposed approach / Technical detail | Recommendation |
+ * |                       | Risks & mitigations | Technical factors by area (a row per risk) |
+ * |                       | Alternatives considered | Recommendation ("name the alternatives... and why they rank lower") |
+ * | nontechnical-proposal | Why this matters | Executive summary |
+ * |                       | What we propose / What it takes | Recommendation |
+ * |                       | Risks, plainly | Factors by area (the risk row) + What the evidence does not settle |
+ * | programming-doc       | Overview | Executive summary |
+ * |                       | How it works / Usage & integration | How to use it |
+ * |                       | Pitfalls & caveats | Behaviour by area, "Pitfall or caveat" column |
+ * |                       | Compatibility & ecosystem | Behaviour by area (versions / ecosystem rows) |
+ * | engineering-doc       | Overview / Description | Executive summary |
+ * |                       | Specifications & constraints | Specifications and constraints (kept) |
+ * |                       | Analysis | What the evidence does not settle |
+ * |                       | Standards & compliance | Specifications by subsystem (the standards rows) |
+ * | product-comparison    | Verdict | Executive summary |
+ * |                       | Comparison at a glance | the same name, now the ACTION section (per-option prose) |
+ * |                       | Per-option detail | Comparison at a glance |
+ * |                       | Decision factors | Options by criterion (one row per decisive criterion) |
+ * | market-analysis       | Market overview | Executive summary |
+ * |                       | Key players / Trends & drivers | Key players and trends |
+ * |                       | Risks & headwinds | Market factors by area (the headwind rows) |
+ * |                       | Outlook | Key players and trends ("attribute every forecast") |
+ * | value-proposition     | Summary | Executive summary |
+ * |                       | The problem | The value offered ("tied to the pain it addresses") |
+ * |                       | Evidence & differentiators | The value offered + Benefits by area |
+ * |                       | Target fit | Executive summary ("who it serves") |
+ * | general-report        | Answer | Executive summary |
+ * |                       | What was not found | Limitations and open questions |
+ *
+ * Every template's "Open questions" is the shared LIMITATIONS_SECTION, which is
+ * where the [GAP] items have lived since research-trust-report.
  */
 interface TemplateShape {
   id: string;

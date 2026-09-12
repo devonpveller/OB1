@@ -160,3 +160,23 @@ Deno.test("ACCEPTANCE 1: the classifier can only land on a template that exists"
     assert(ids.has(t.id), `classifier returned ${t.id} for ${reply}`);
   }
 });
+
+Deno.test("the docblock maps every old heading to where its content went", async () => {
+  // The tester had to reconstruct the rewrite by reading twenty shape bodies
+  // against the old file. "Nothing was lost" is only checkable if the map is
+  // written down, so the map is asserted rather than trusted.
+  const src = await Deno.readTextFile(new URL("./templates.ts", import.meta.url));
+  const head = src.slice(0, src.indexOf("interface TemplateShape"));
+  assert(/Adding a template = one entry in SHAPES/.test(head), "the head docblock is stale");
+  for (const heading of ["Verdict", "Per-option detail", "Decision factors",
+                         "Risks & mitigations", "Pitfalls & caveats", "Standards & compliance",
+                         "Abstract", "Background", "Discussion", "Outlook", "Target fit",
+                         "What was not found"]) {
+    assert(head.includes(`| ${heading} |`), `no mapping row for "${heading}"`);
+  }
+  // …and every template with a rename has at least one row.
+  for (const id of TEMPLATES.map((t) => t.id)) {
+    if (id === "buyers-guide") continue;
+    assert(head.includes(`| ${id} `), `no mapping rows for ${id}`);
+  }
+});

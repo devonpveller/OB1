@@ -20,6 +20,7 @@ import {
   applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, nearestLines,
   normaliseCitations, referenceLines, splitSentences, supersetCitations, verbatimFallback,
 } from "./fidelity.ts";
+import { renderSys, templateById } from "./templates.ts";
 import type { Deps } from "./harness.ts";
 
 const SYNTH = [
@@ -232,10 +233,10 @@ Deno.test("the verbatim fallback is ONE line for one sentence, and the closest o
 
 Deno.test("applyUnit edits the cell it was given and nothing else on the line", () => {
   const lines = ["| A | B | C |"];
-  applyUnit(lines, { text: "B", line: 0, cell: 2, citations: [], section: "" }, "B rewritten");
+  applyUnit(lines, { text: "B", view: "B", line: 0, cell: 2, citations: [], section: "", judgeable: true }, "B rewritten");
   assertEquals(lines[0], "| A | B rewritten | C |");
   const prose = ["One. Two. Three."];
-  applyUnit(prose, { text: "Two.", line: 0, cell: -1, citations: [], section: "" }, "Second.");
+  applyUnit(prose, { text: "Two.", view: "Two.", line: 0, cell: -1, citations: [], section: "", judgeable: true }, "Second.");
   assertEquals(prose[0], "One. Second. Three.");
 });
 
@@ -426,4 +427,155 @@ Deno.test("ACCEPTANCE 3: N and M are counted on the DELIVERED document", async (
   assertEquals(out.record.checked, 2);
   assertEquals(out.record.unchecked, 0);
   assert(out.record.checked <= out.record.units, "N exceeded M");
+});
+
+// ── The invariant the tester's T4 failure is about ─────────────────────────
+//
+// `normaliseCitations` used to run on the text that SHIPS. Moving a citation
+// before the stop also ate the space after it, so a delivered document acquired
+// "...services [Source 4, 5].The answer...", "e.g [Source 3].dust" and
+// "approx [Source 2].180 W" - the checker editing the thing it was inspecting,
+// on documents it had no correction to make to.
+//
+// Detection now reads a normalised VIEW of each unit and every edit is applied
+// to the unit's ORIGINAL span. These two cases are the contract: nothing to
+// correct means nothing changes, and a second pass changes nothing either.
+
+const DOCS = [
+  "rendered-64ac38cf-buyers-guide.md",
+  "rendered-a337520c-scientific-paper.md",
+  "rendered-5ab36fe0-product-comparison.md",
+];
+// INSIDE the submodule. Reading the parent repo's copy passed here and died
+// the moment the suite ran with only this directory mounted - the same defect
+// this workstream fixed one item ago, made again by the test that exists to
+// stop documents being edited behind a reader's back.
+const APPROVED = new URL("./fixtures/approved-document-64ac38cf.md", import.meta.url);
+const fixtureDoc = (n: string) =>
+  Deno.readTextFileSync(new URL(`./fixtures/${n}`, import.meta.url));
+
+/** A judge that blesses everything, so the only thing under test is the writing. */
+const blessAll = {
+  chat: (sys: string, user: string) => {
+    if (!sys.startsWith("You compare SENTENCES")) return Promise.resolve("{}");
+    const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
+    return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("SAME") }));
+  },
+} as unknown as Deps;
+
+Deno.test("INVARIANT: a document with nothing to correct is returned BYTE-FOR-BYTE", async () => {
+  const docs = [...DOCS.map(fixtureDoc), Deno.readTextFileSync(APPROVED)];
+  const synth = JSON.parse(fixtureDoc("live-owui-64ac38cf.result.json")).synthesis;
+  for (const doc of docs) {
+    const out = await checkRenderFidelity(blessAll, doc, synth);
+    assertEquals(out.rendered, doc, "the checker edited a document it had no correction for");
+    assertEquals(out.record.rewritten + out.record.replaced, 0);
+  }
+});
+
+Deno.test("INVARIANT: running the check on its own output changes nothing (idempotence)", async () => {
+  const synth = JSON.parse(fixtureDoc("live-owui-64ac38cf.result.json")).synthesis;
+  for (const name of DOCS) {
+    const doc = fixtureDoc(name);
+    const once = await checkRenderFidelity(blessAll, doc, synth);
+    const twice = await checkRenderFidelity(blessAll, once.rendered, synth);
+    assertEquals(twice.rendered, once.rendered, name);
+    assertEquals(twice.record.units, once.record.units, name);
+  }
+});
+
+Deno.test("INVARIANT: the three shapes the normaliser used to break", () => {
+  // The tester's reproduction, as a unit: a VIEW may move the citation, and the
+  // document may not. These are the exact strings from the evidence.
+  const cases: Array<[string, string]> = [
+    ["...offers integrated services. [Source 4, 5] The answer follows.",
+     "...offers integrated services. [Source 4, 5] The answer follows."],
+    ["Check the vents, e.g. [Source 3] dust and lint accumulation.",
+     "Check the vents, e.g. [Source 3] dust and lint accumulation."],
+    ["The unit draws approx. [Source 2] 180 W under load.",
+     "The unit draws approx. [Source 2] 180 W under load."],
+  ];
+  for (const [input, expected] of cases) {
+    // The view leaves them alone: a citation with text after it did not close a
+    // sentence, so there is nothing to move.
+    assertEquals(normaliseCitations(input), expected, input);
+  }
+  // …and the shape it IS for - a citation that ends the span - is moved in the
+  // view only.
+  assertEquals(
+    normaliseCitations("The PSU makes it difficult to upgrade. [Source 13]"),
+    "The PSU makes it difficult to upgrade [Source 13].",
+  );
+  // The five abbreviations, and two ordinary sentences, on ONE line.
+  const line = "Fig. [Source 9] shows it. Acme Inc. [Source 2] ships it. Compare vs. [Source 4] " +
+    "the other unit. The PSU fails on cold start [Source 7]. The fan is loud [Source 8].";
+  const parts = splitSentences(line);
+  assertEquals(parts, [
+    "Fig. [Source 9] shows it.",
+    "Acme Inc. [Source 2] ships it.",
+    "Compare vs. [Source 4] the other unit.",
+    "The PSU fails on cold start [Source 7].",
+    "The fan is loud [Source 8].",
+  ], JSON.stringify(parts));
+  // Each abbreviation stayed INSIDE its sentence, and the two ordinary
+  // sentences separated - no list of abbreviations anywhere.
+});
+
+Deno.test("X2: a bullet that wraps onto the next line is COUNTED, and never edited", () => {
+  const doc = [
+    "## What to check in person",
+    "",
+    "- [ ] Power the unit on and watch the rear LED for a brief flash, which is the",
+    "  documented signature of the failing PSU [Source 11]",
+    "- [ ] Inspect the CPU socket for bent pins before buying [Source 15]",
+  ].join("\n");
+  const units = citedUnits(doc);
+  assertEquals(units.length, 2, JSON.stringify(units.map((u) => u.text)));
+  const wrapped = units[0];
+  assert(wrapped.text.includes("documented signature"), wrapped.text);
+  assertEquals(wrapped.citations, [11]);
+  // Counted in M - it was absent from M entirely before - and never edited,
+  // because an edit addressed by line and cell cannot span two lines.
+  assertEquals(wrapped.judgeable, false);
+  assertEquals(countUnits(doc), 2);
+  assertEquals(units[1].judgeable, true);
+});
+
+Deno.test("X2: a citation inside code is not a citation", () => {
+  const doc = [
+    "## How to use it",
+    "",
+    "Call the helper with the flag set [Source 3].",
+    "",
+    "```ts",
+    'const x = fetch("/api"); // [Source 3] is not a claim',
+    "```",
+    "",
+    "The inline form `run --source [Source 3]` is also not a claim.",
+  ].join("\n");
+  const units = citedUnits(doc);
+  // The prose claim, and the inline-code line - which is a unit only because it
+  // sits in an evidence section, and carries NO citations.
+  assertEquals(units.filter((u) => u.citations.length).length, 1, JSON.stringify(units.map((u) => u.text)));
+  assertEquals(units.filter((u) => u.citations.length)[0].text, "Call the helper with the flag set [Source 3].");
+  assert(!units.some((u) => u.text.includes("const x = fetch")), "a fenced code line became a unit");
+});
+
+Deno.test("the wrapped bullet lands in `unchecked`, out loud", async () => {
+  const doc = [
+    "## What to check in person",
+    "",
+    "- [ ] Power the unit on and watch the rear LED for a brief flash, which is the",
+    "  documented signature of the failing PSU [Source 11]",
+    "- [ ] Inspect the CPU socket for bent pins before buying [Source 15]",
+  ].join("\n");
+  const synth = [
+    "[SOURCED] The green LED on the failing PSU flashes briefly on a cold start. [Source 11]",
+    "[SOURCED] The CPU socket pins are fragile and bend easily on inspection. [Source 15]",
+  ].join("\n");
+  const out = await checkRenderFidelity(blessAll, doc, synth);
+  assertEquals(out.rendered, doc);
+  assertEquals(out.record.units, 2);
+  assertEquals(out.record.checked, 1);
+  assertEquals(out.record.unchecked, 1);
 });

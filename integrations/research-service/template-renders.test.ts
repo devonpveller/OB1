@@ -14,7 +14,7 @@
  * hand-written document would be asserting that I can write markdown.
  */
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { countUnits } from "./fidelity.ts";
+import { checkRenderFidelity, countUnits } from "./fidelity.ts";
 import { SECTION_NAMES } from "./templates.ts";
 import { coverageFooter, type NeedState, emptySearchRecord } from "./report.ts";
 
@@ -124,9 +124,9 @@ Deno.test("ACCEPTANCE 2: the comparison synthesis renders the table AS the compa
 Deno.test("ACCEPTANCE 3: the footer's M is countUnits of the delivered document", () => {
   // The three renders carry the record their own run produced, in the header.
   const cases: Array<[string, number, number]> = [
-    ["rendered-64ac38cf-buyers-guide.md", 33, 33],
-    ["rendered-a337520c-scientific-paper.md", 57, 59],
-    ["rendered-5ab36fe0-product-comparison.md", 25, 26],
+    ["rendered-64ac38cf-buyers-guide.md", 48, 52],
+    ["rendered-a337520c-scientific-paper.md", 65, 67],
+    ["rendered-5ab36fe0-product-comparison.md", 25, 25],
   ];
   for (const [name, checked, units] of cases) {
     const doc = body(name);
@@ -144,5 +144,29 @@ Deno.test("ACCEPTANCE 3: the footer's M is countUnits of the delivered document"
     // …and the header of the fixture records the same numbers the test asserts.
     assert(read(name).includes(`"checked":${checked}`), `${name}: header disagrees with the test`);
     assert(read(name).includes(`"units":${units}`), `${name}: header disagrees with the test`);
+  }
+});
+
+Deno.test("INVARIANT: the check leaves every COMMITTED render exactly as it is", async () => {
+  // The fixtures claim in their headers that they came through this branch's
+  // check. Attempt 1's did, and the check still changed two of them when run
+  // again - it normalised the text that ships. Applying it to each committed
+  // file must now return that file.
+  const synth = fx("live-owui-64ac38cf.result.json").synthesis;
+  const blessAll = {
+    chat: (sys: string, user: string) => {
+      if (!sys.startsWith("You compare SENTENCES")) return Promise.resolve("{}");
+      const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
+      return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("SAME") }));
+    },
+  } as unknown as Parameters<typeof checkRenderFidelity>[0];
+  for (const name of [
+    "rendered-64ac38cf-buyers-guide.md",
+    "rendered-a337520c-scientific-paper.md",
+    "rendered-5ab36fe0-product-comparison.md",
+  ]) {
+    const doc = read(name);
+    const out = await checkRenderFidelity(blessAll, doc, synth);
+    assertEquals(out.rendered, doc, name);
   }
 });

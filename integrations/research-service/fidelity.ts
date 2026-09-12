@@ -68,8 +68,18 @@ export function emptyFidelity(): FidelityRecord {
 
 /** One checkable piece of the rendered document. */
 export interface CitedUnit {
-  /** The text as it stands in the document. */
+  /** The text EXACTLY as it stands in the delivered document. Every edit is
+   *  made against this span, so a document with nothing to correct comes back
+   *  byte-identical. */
   text: string;
+  /** The same span with its citation moved inside the sentence - the VIEW the
+   *  judge reads, and nothing else. It is never written back. */
+  view: string;
+  /** False when the unit cannot be safely edited (a bullet that wraps onto the
+   *  next line). It is still COUNTED, and lands in `unchecked`: the tester's X2
+   *  found such a bullet absent from M entirely, which is the coverage gap this
+   *  module exists to close wearing a different hat. */
+  judgeable: boolean;
   /** 0-based line index in the document. */
   line: number;
   /** For a table row, which cell; -1 for prose. */
@@ -110,15 +120,35 @@ function isClaimLike(text: string): boolean {
  * spelling rather than trusting the convention, and it is deterministic: only
  * whitespace and the position of the bracket change.
  */
+/** stop + space + citation, at the END of a span (see normaliseCitations). */
+const CITE_AFTER_STOP =
+  /((?:[a-z0-9]{2}|[)\]"'”])[.?!])[ \t]+(\[Sources?[^\]]*\])[ \t]*\.?\s*$/;
+
 export function normaliseCitations(text: string): string {
-  // Every quantifier here is HORIZONTAL whitespace only. `\s*` after the bracket
-  // ate the NEWLINE at the end of a line ending "... replacement. [Source 11]"
-  // and welded nine checklist items and the heading after them into a single
-  // line. Found by running the shipped check over the approved document, not by
-  // a unit test - so the case below plants a whole checklist.
-  return String(text || "")
-    .replace(/([.?!])[ \t]+(\[Sources?[^\]]*\])[ \t]*\.?/g, " $2$1")
-    .replace(/[ \t]+([.?!])/g, "$1");
+  // A VIEW, and only a view. This used to run on the text that SHIPS, and the
+  // tester found what that costs: moving the citation before the stop also ate
+  // the space after it, so "...services. [Source 4, 5] The answer..." was
+  // delivered as "...services [Source 4, 5].The answer...", and "e.g. [Source 3]
+  // dust" as "e.g [Source 3].dust". A detector that edits the document it is
+  // inspecting is not a detector.
+  //
+  // So: the sentence is normalised for the JUDGE to read, the unit keeps its
+  // ORIGINAL span, and every correction is applied to that span. A document with
+  // nothing to correct comes back byte for byte - `fidelity.test.ts` pins that
+  // over all four committed documents, and pins that a second pass changes
+  // nothing either.
+  //
+  // TWO guards, and between them "e.g.", "approx.", "Fig.", "Inc." and "vs."
+  // are safe without a list of abbreviations:
+  //   - the SPLITTER's rule, reused: a stop needs two alphanumerics (or a
+  //     closing bracket) before it;
+  //   - and the citation must END the span. A citation with text after it did
+  //     not close a sentence - it is an abbreviation ("approx. [Source 2] 180 W")
+  //     or a mid-sentence reference, and either way there is nothing to move.
+  return String(text || "").replace(
+    CITE_AFTER_STOP,
+    (_m: string, stop: string, cite: string) => `${stop.slice(0, -1)} ${cite}${stop.slice(-1)}`,
+  );
 }
 
 const isTableRow = (l: string) => /^\s*\|/.test(l);
@@ -142,9 +172,20 @@ export function citedUnits(rendered: string): CitedUnit[] {
   const lines = String(rendered || "").split(/\r?\n/);
   let headerSeen = false;
   let section = "";
+  let inFence = false;
+  const unit = (text: string, line: number, cell: number, citations: number[], judgeable = true) =>
+    ({ text, view: normaliseCitations(text), line, cell, citations, section, judgeable });
+
   lines.forEach((line, i) => {
+    // A fenced block is code, not prose. A `programming-doc` render is ASKED for
+    // code samples, and a "[Source 3]" inside one was being presented to the
+    // judge as a claim and could be rewritten (tester X2).
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; return; }
+    if (inFence) return;
+
     const heading = line.match(/^##\s+(.*?)\s*$/);
     if (heading) { section = heading[1]; headerSeen = false; return; }
+
     if (isTableRow(line)) {
       if (isTableRule(line)) { headerSeen = true; return; }
       if (!headerSeen) return;                       // the header row names columns
@@ -163,17 +204,33 @@ export function citedUnits(rendered: string): CitedUnit[] {
       cells.forEach((c, j) => {
         const text = c.trim();
         if (!text) return;
-        if (!text.replace(CITE_RE, "").trim()) return;   // the Source cell itself
-        if (seen++ === 0) return;                        // the row label
-        out.push({ text, line: i, cell: j, citations: rowCites, section });
+        if (!codeStripped(text).replace(CITE_RE, "").trim()) return;   // the Source cell itself
+        if (seen++ === 0) return;                                      // the row label
+        out.push(unit(text, i, j, rowCites));
       });
       return;
     }
     headerSeen = false;
-    for (const s of splitSentences(line)) {
-      const text = s.trim();
+
+    // A BULLET THAT WRAPS. Its claim used to be invisible: neither checked, nor
+    // counted in M, nor reported in U (tester X2). It is counted now and never
+    // edited - an edit addressed by line and cell cannot safely span two lines,
+    // and a unit the check will not touch belongs in `unchecked`, out loud.
+    if (isBullet(line) && continuesOnNextLine(lines, i)) {
+      const joined = [line, ...trailingContinuation(lines, i)].join(" ").trim();
+      const cites = citationsIn(joined);
+      if (cites.length || isEvidenceSection(section)) {
+        if (isClaimLike(joined)) out.push(unit(joined, i, -1, cites, false));
+      }
+      return;
+    }
+    // …and the continuation lines themselves are part of that unit, not units.
+    if (isContinuationOfBullet(lines, i)) return;
+
+    for (const span of splitSentences(line)) {
+      const text = span.trim();
       if (!text) continue;
-      const cites = citationsIn(text);
+      const cites = citationsIn(codeStripped(text));
       // A cited sentence is always checked. An UNCITED one is checked too, but
       // only where the template asks for evidence: the action/findings section,
       // the table section, and "what the evidence does not settle". Not the
@@ -182,10 +239,43 @@ export function citedUnits(rendered: string): CitedUnit[] {
       if (!cites.length && !isEvidenceSection(section)) continue;
       if (!isClaimLike(text)) continue;
       if (/^[#>|\-*_]+$/.test(text)) continue;
-      out.push({ text, line: i, cell: -1, citations: cites, section });
+      out.push(unit(text, i, -1, cites));
     }
   });
   return out;
+}
+
+/** An inline code span is code, not prose: a citation inside one is not a citation. */
+function codeStripped(text: string): string {
+  return String(text || "").replace(/`[^`]*`/g, " ");
+}
+
+const isBullet = (l: string) => /^\s*([-*+]|\d+\.)\s/.test(l) || /^\s*- \[[ x]\]\s/.test(l);
+
+/** Lines that continue a bullet: indented or plain prose, until a blank line,
+ *  another bullet, a heading, a table row or a fence. */
+function isPlainContinuation(l: string | undefined): boolean {
+  if (l === undefined) return false;
+  if (!l.trim()) return false;
+  if (isBullet(l) || isTableRow(l) || /^\s*#/.test(l) || /^\s*(```|~~~)/.test(l)) return false;
+  if (/^\s*>/.test(l)) return false;
+  return true;
+}
+function continuesOnNextLine(lines: string[], i: number): boolean {
+  return isPlainContinuation(lines[i + 1]);
+}
+function trailingContinuation(lines: string[], i: number): string[] {
+  const out: string[] = [];
+  for (let k = i + 1; isPlainContinuation(lines[k]); k++) out.push(lines[k].trim());
+  return out;
+}
+function isContinuationOfBullet(lines: string[], i: number): boolean {
+  if (!isPlainContinuation(lines[i])) return false;
+  for (let k = i - 1; k >= 0; k--) {
+    if (isBullet(lines[k])) return true;
+    if (!isPlainContinuation(lines[k])) return false;
+  }
+  return false;
 }
 
 /** Sections whose sentences are expected to rest on evidence. */
@@ -204,7 +294,7 @@ export function isEvidenceSection(heading: string): boolean {
  * one they can - it is a function of the document alone.
  */
 export function countUnits(rendered: string): number {
-  return citedUnits(normaliseCitations(String(rendered || ""))).length;
+  return citedUnits(String(rendered || "")).length;
 }
 
 /**
@@ -218,10 +308,24 @@ export function countUnits(rendered: string): number {
  * and "[Source 3, 4]." because a bracket closes it.
  */
 export function splitSentences(line: string): string[] {
-  const parts = String(line || "")
-    .split(/(?<=(?:[a-z0-9]{2}|[)\]"'”])[.?!])\s+(?=[A-Z(\[*_-])/g);
-  return parts.map((p) => p.trim()).filter(Boolean);
+  return String(line || "").split(SENTENCE_BREAK).map((p) => p.trim()).filter(Boolean);
 }
+
+/**
+ * A sentence ends at a stop preceded by two ordinary characters (or a closing
+ * bracket) and followed by whitespace and a capital - and NEVER before a
+ * citation bracket. A citation that follows the stop belongs to the sentence it
+ * closes, so "...to upgrade. [Source 13]" is ONE span and stays one: splitting
+ * there was the tester's X1, which produced a claim with no citation and a
+ * citation with no claim, and therefore no unit at all.
+ *
+ * The cost is a coarser unit where a citation sits mid-line between two
+ * sentences ("...services. [Source 4, 5] The answer is X."): the judge gets both
+ * sentences and their sources together. Coarser is the price of never touching
+ * what ships, and it is the right side of that trade - the alternative moved the
+ * citation in the delivered document.
+ */
+const SENTENCE_BREAK = /(?<=(?:[a-z0-9]{2}|[)\]"'”])[.?!])\s+(?=[A-Z(*_-])/g;
 
 /** The synthesis lines a unit's citations point at. */
 export function referenceLines(synthesis: string, citations: number[]): string[] {
@@ -289,7 +393,7 @@ export function evidenceFor(synthesis: string, unit: CitedUnit): string[] {
  */
 export function supersetCitations(rendered: string, synthesis: string): string[] {
   const out: string[] = [];
-  for (const u of citedUnits(normaliseCitations(rendered))) {
+  for (const u of citedUnits(rendered)) {
     if (u.citations.length < 2) continue;
     const words = contentWords(u.text);
     for (const n of u.citations) {
@@ -379,7 +483,7 @@ function parseVerdicts(raw: string, n: number): Verdict[] | null {
 
 function itemBlock(units: CitedUnit[], synthesis: string): string {
   return units.map((u, i) =>
-    `${i + 1}. SENTENCE: ${u.text}\n   ${u.citations.length ? "CITED LINES" : "NEAREST LINES (the sentence cites nothing)"}:\n` +
+    `${i + 1}. SENTENCE: ${u.view}\n   ${u.citations.length ? "CITED LINES" : "NEAREST LINES (the sentence cites nothing)"}:\n` +
     evidenceFor(synthesis, u).map((l) => `   - ${l}`).join("\n"),
   ).join("\n\n");
 }
@@ -446,7 +550,7 @@ export function placeNotes(
  * came from one document and the numerator from another.
  */
 function countAgainst(record: FidelityRecord, delivered: string, judged: Set<string>): void {
-  const finalUnits = citedUnits(normaliseCitations(delivered));
+  const finalUnits = citedUnits(delivered);
   record.units = finalUnits.length;
   record.checked = finalUnits.filter((u) => judged.has(u.text)).length;
   record.unchecked = Math.max(0, record.units - record.checked);
@@ -462,16 +566,18 @@ export async function checkRenderFidelity(
   deps: Deps, rendered: string, synthesis: string,
 ): Promise<FidelityResult> {
   const record = emptyFidelity();
-  // A trailing "[Source N]" goes back inside its sentence BEFORE anything is
-  // split, so the shape that produced zero units (tester X1) produces one. The
-  // normalised document is what ships: the citation's position is a convention,
-  // not content, and a document the checker read is the document to deliver.
-  const doc = normaliseCitations(String(rendered || ""));
+  // The document is NOT normalised. Detection reads a normalised VIEW of each
+  // unit; the unit keeps its ORIGINAL span and every edit is made against that,
+  // so a render with nothing to correct is delivered byte for byte.
+  const doc = String(rendered || "");
   if (!doc.trim() || !String(synthesis || "").trim()) return { rendered: doc, record };
 
   try {
     const all = citedUnits(doc);
     record.units = all.length;
+    // A unit that cannot be edited safely is never judged - it is COUNTED, and
+    // it lands in `unchecked` where a reader can see it.
+    const editable = all.filter((u) => u.judgeable);
     // A unit with NO evidence to judge against - a citation that matches no
     // line, or an uncited sentence with nothing near it - splits two ways: an
     // uncited one in an evidence section is UNSUPPORTED on the spot (a claim
@@ -480,7 +586,7 @@ export async function checkRenderFidelity(
     // been renumbered out from under it.
     const units: CitedUnit[] = [];
     const orphans: CitedUnit[] = [];
-    for (const u of all) {
+    for (const u of editable) {
       if (evidenceFor(synthesis, u).length) units.push(u);
       else if (!u.citations.length) orphans.push(u);
     }
