@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only; 4-5 engines answering). These are the five subjects the TESTER used to fail T7 on attempt 1 of research-trust-core: each returned genuinely on-subject pages that the longest-token core rule scored at or near 0.00.",
+ "_expect": "ok",
+ "query": "Nikon Z 6III autofocus firmware",
+ "entity": "Nikon Z 6III autofocus firmware",
+ "hits": [
+  {
+   "url": "https://downloadcenter.nikonimglib.com/en/download/fw/571.html",
+   "title": "Z6III Firmware - Nikon | Download Center",
+   "snippet": "Caution: Updating the Firmware Do not update the camera firmware with lenses other than Z-mount NIKKOR lenses or mount adapters other than FTZ II/FTZ attached; failure to observe this precaution could result in camera malfunction.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.nikonusa.com/content/z-6iii-firmware-2-point-0",
+   "title": "Z6III Firmware 2.0 | Major Updates For Your Camera",
+   "snippet": "Z6III firmware 2.0 adds bird mode, in-camera focus limiter for NIKKOR Z lenses, pixel shift + focus shift shooting, auto capture and more.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.dpreview.com/news/4494189141/nikon-z6iii-firmware-update-bird-mode-c2pa-content-credentials/",
+   "title": "The Nikon Z6III is getting a feature-packed update (with a big step forward for authenticity) | DPReview",
+   "snippet": "Nikon has announced firmware version 2.0 for the Z6III, adding a dedicated bird mode autofocus mode, in-camera focus limiter, focus shift shooting and more. As part of the firmware update, the camera will also open up the ability to sign photos with C2PA-compliant Content Creditals to everyone, not ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://petapixel.com/2025/08/26/nikon-z6-iiis-first-major-firmware-update-adds-bird-af-auto-capture-and-c2pa/",
+   "title": "Nikon Z6 III's First Major Firmware Update Adds Bird AF, Auto Capture, and C2PA | PetaPixel",
+   "snippet": "With firmware 2.00, Nikon is further expanding the Z6 III’s autofocus features while also providing professional photographers, primarily photojournalists, with the content authenticity tools they demand.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.reddit.com/r/Nikon/comments/1n16wi2/z6iii_major_firmware_20_released/",
+   "title": "Z6III Major Firmware 2.0 Released : r/Nikon - Reddit",
+   "snippet": "Aug 27, 2025 · Excellent autofocus, but chaining … on 3D tracking. they fixed it and added Recall Shooting Functions. Nikon releases major firmware updates ...Nikon releases major firmware updates for the Z8 and Z6IIIZ6 III firmware update to add bird recognition : r/nikon_ZseriesMore results from www.reddit.com",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.nikonusa.com/content/z-6iii-firmware-2-point-0?srsltid=AfmBOoqM0aoIbprPzjxLhm3ZCEHBniYWLDpM5QfWc9q_Uh58bWw0Hjdz",
+   "title": "Z6III Firmware 2.0 | Major Updates For Your Camera - Nikon",
+   "snippet": "Z6III firmware 2.0 adds bird mode, in-camera focus limiter for NIKKOR Z lenses, pixel shift + focus shift shooting, auto capture and more.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.nikon.co.uk/en_GB/help-and-support/firmware/z6iii-z8-z9-latest-firmware",
+   "title": "Latest Z6III Z8 Z9 Firmware | Nikon",
+   "snippet": "‎ Get the latest video improvements for the Z6III, Z 8, and Z9, designed to meet the demands of professional videographers. Download the latest Firmware. Z6III Firmware 1.10.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/Nikon/comments/17u6p95/did_the_nikon_z6iis_autofocus_became_better_after/",
+   "title": "r/Nikon on Reddit: Did the nikon z6ii's autofocus became better after the firmware updates ?",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.diyphotography.net/nikon-z6-iii-firmware-2-0/",
+   "title": "Nikon Z6 III Firmware 2.0: Bird Mode, Auto Capture, And More",
+   "snippet": "Nikon Z6 III Firmware 2.0 adds bird autofocus, auto capture, USB streaming, and over 70 new features for photographers and videographers.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://downloadcenter.nikonimglib.com/en/products/629/Z6III.html",
+   "title": "Nikon | Download center | Z6III",
+   "snippet": "To view descriptions, cautions, and download and installation instructions, click “View download page”.Note that a card reader or other equipment may be required for some firmware updates. Instructions can be found on the download page. Although your device does not support this download service, it can be used to view download information. ... Download software for Nikon products.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://ymcinema.com/2025/09/01/nikon-z6iii-firmware-2-00-flagship-boost/",
+   "title": "Nikon Z6 III Just Got a Flagship-Level Boost With Firmware 2.0 - Y.M.Cinema Magazine",
+   "snippet": "Firmware 2.0 introduces some of Nikon’s most advanced technologies into the Z6 III body. The highlight is the brand-new Birds subject detection mode. Until now, this level of autofocus intelligence was found only in Nikon’s flagship cameras.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://fstoppers.com/gear/best-part-nikons-firmware-20-z6-iii-710202",
+   "title": "The Best Part of Nikon's Firmware 2.0 for the Z6 III | Fstoppers",
+   "snippet": "In addition to new capabilities like a dedicated bird autofocus mode that bring the Z6III’s capabilities in line with cameras like the Z8 and Z9, Nikon’s new firmware 2.0 brings an added, likely overlooked, feature that is worth pointing out.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.nikon.co.uk/en_GB/help-and-support/firmware/z6iii-firmware-2.00",
+   "title": "Z6III Firmware 2.00 - Nikon",
+   "snippet": "Firmware 2.00 lets you transform the Z6III into a high-quality webcam for live streaming. Simply connect to a computer or smart device via the camera's UVC/UAC-compliant USB port.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://nps.nikon.co.uk/blog/z-6-iii-firmware-update",
+   "title": "Z 6 III FIRMWARE 2.00 - nps.nikon.co.uk",
+   "snippet": "Z 6 III FIRMWARE 12.00 Get the most out of your Nikon Z 6 III with the latest firmware. Changes from firmware version 1.11 to 2.00: Note: The changes listed below under \"Still Photography\", \"Video Recording\", \"Playback\", \"Controls\", and \"Network\" are detailed in the Supplementary Firmware Update Manual.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://amateurphotographer.com/review/nikon-z6-iii-review/",
+   "title": "Nikon Z6III review: the best full-frame... | Amateur Photographer",
+   "snippet": "The Nikon Z6III is a 24MP full-frame mirrorless camera designed for serious enthusiasts and semi-professional photographers. It uses a brand-new ‘partially stacked’ sensor, which provides rapid readout speeds that support excellent autofocus and fast shooting.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://onlinemanual.nikonimglib.com/z6III/en/sum_firmware_version_354.html",
+   "title": "Firmware Version - onlinemanual.nikonimglib.com",
+   "snippet": "Highlight [Update (from Nikon Imaging Cloud)] > [On] and press 2 to download the firmware to the camera via the Internet. The update will start automatically after the download is complete.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://nikonites.com/forum/threads/z6iii-firmware-update-v2-0.50249/",
+   "title": "Z6III firmware update V2.0 | Nikonites - Nikon User Community",
+   "snippet": "Z6III firmware update V2.0 has been released today. There is a long list of changes including: Added [Birds] to [AF/MF subject detection options] in the photo shooting menu.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://thenewcamera.com/nikon-z6-iii-firmware-2-0-revolutionizing-bird-photography-with-hands-free-auto-capture-for-flying-birds/",
+   "title": "Nikon Z6 III Firmware 2.0: Revolutionizing Bird Photography with Hands ...",
+   "snippet": "Nikon has done a tremendous job with this update. They have integrated dedicated EHANCED bird mode autofocus, and that was quite obvious since the camera is using the latest generation of partially stacked CMOS sensor and Expeed 7 image processor. But what they have additionally added is an auto capture mode so you have to just set your Nikon Z6 Mark 3 camera on tripod in a bird sanctuary and ...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.tamron.com/global/consumer/support/download/firmware/",
+   "title": "Lens Firmware | Download | Support | TAMRON",
+   "snippet": "The page is TAMRON's Support [Lens Firmware] download. Update information is available for each lens and mount for mirrorless digital SLR cameras, digital SLR cameras, and accessories.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=Au9rKwc2lBY",
+   "title": "Z6III Firmware 2.0 Hands‑On: Bird AF is Here! Auto Capture + ...",
+   "snippet": "Oct 26, 2025 · Thank you for watching my video! Today we are going to look at the new firmware for the NIKON Z6iii The Nikon Z6 iii: ...",
+   "engine": "google"
+  }
+ ]
+}

@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only; 4-5 engines answering). These are the five subjects the TESTER used to fail T7 on attempt 1 of research-trust-core: each returned genuinely on-subject pages that the longest-token core rule scored at or near 0.00.",
+ "_expect": "ok",
+ "query": "Mullvad WireGuard port forwarding",
+ "entity": "Mullvad WireGuard port forwarding",
+ "hits": [
+  {
+   "url": "https://schnerring.net/blog/use-mullvad-port-forwarding-to-connect-to-your-opnsense-home-network-with-wireguard/",
+   "title": "Use Mullvad Port Forwarding to Connect to Your OPNsense Home Network with WireGuard",
+   "snippet": "In this quick guide, I'll show you how to use Mullvad port forwarding and OPNsense to create a WireGuard VPN \"tunnel-inside-a-tunnel\" configuration, to be able to connect to your home network from the outside. It's pretty nifty because you won't have to expose your public IP address.",
+   "engine": "google"
+  },
+  {
+   "url": "https://mullvad.net/en/blog/removing-the-support-for-forwarded-ports",
+   "title": "Removing the support for forwarded ports - Mullvad VPN",
+   "snippet": "The abuse vector of port forwarding has caught up with us, and today we announce the discontinuation of support for port forwarding. This means that if you are a user of forwarded ports, you will not be able to add or modify the ports you have in use. We have removed the ability to add port forwards on all accounts. What will happen now?",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.reddit.com/r/mullvadvpn/comments/1oev0pq/wireguard_port_forwarding_for_torrenting/",
+   "title": "Wireguard port forwarding for torrenting : r/mullvadvpn - Reddit",
+   "snippet": "Oct 24, 2025 · Today we announce that we no longer support port forwarding. New port forwards will no longer be supported, and existing ports will be removed ...Mullvad pls bring back port forwarding!!! : r/mullvadvpn - RedditIs there an argument to be made to bring port fowarding feature ...More results from www.reddit.com",
+   "engine": "google"
+  },
+  {
+   "url": "https://mullvad.net/en/help/running-wireguard-router",
+   "title": "WireGuard on a router - Mullvad VPN",
+   "snippet": "Public Key- use the key that corresponds with the Mullvad WireGuard server of your choosing from Servers Route Allowed IPs- Make sure this is checked Endpoint Host (Peers)- use the IP address that corresponds with the Mullvad WireGuard server of your choosing. Endpoint Port- change to 51820 Allowed IPs - change to 0.0.0.0/0 Then click on Save.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.reddit.com/r/mullvadvpn/comments/q2p5kz/does_one_need_oenvpn_or_wireguard_to_port_forward/",
+   "title": "Link to reddit.com",
+   "snippet": "The site owner hides the web page description.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.acciyo.com/mullvad-vpn-ports-explained-what-you-need-to-know/",
+   "title": "Mullvad VPN: Ports Explained - What You Need to Know",
+   "snippet": "For WireGuard, you can sometimes manually set the endpoint port. Does Mullvad VPN still support port forwarding? No, Mullvad VPN discontinued support for port forwarding as of July 1, 2023. This decision was made due to abuse of the feature, which negatively impacted the service for other users.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.reddit.com/r/selfhosted/comments/11ywa1p/help_with_mullvad_port_forwarding_through_docker/",
+   "title": "Help with mullvad port forwarding through docker gluetun",
+   "snippet": "Logon to mullvad.net and generate a WireGuard key and create a port forward for the same city Take the key and add it to my docker-compose file along with the ports, FIREWALL_VPN-INPUT_Ports and other required settings",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.reddit.com/r/mullvadvpn/comments/zs22v4/which_port_to_forward_in_my_router/",
+   "title": "Which port to forward in my router? : r/mullvadvpn - Reddit",
+   "snippet": "I generated a Wireguard conf file with a specified port from Mullvad website. When I went to the Port Forwarding section of the site , the generated port is different. From my router, which port do I set up port forwarding for?",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://portforward.com/wireguard/",
+   "title": "Port Forwarding for WireGuard",
+   "snippet": "You might need to forward some ports in your router when you use WireGuard. A port forward allows incoming connection requests from the internet to go straight to WireGuard. By default routers do not allow incoming network requests. Forwarding ports can work around this limitation.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://natchecker.com/blog/mullvad-port-forwarding",
+   "title": "Mullvad Port Forwarding: Status & Alternatives (2026)",
+   "snippet": "No. Mullvad stopped issuing new forwarded ports on May 29, 2023 and removed every existing mapping on July 1, 2023. There is no legacy account setting, app option, WireGuard trick, or server country where Mullvad port forwarding still works. If an application needs an incoming VPN port, you must use another provider or a different networking method.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.truenas.com/community/threads/guide-how-to-configure-a-transmission-jail-to-use-wireguard-with-mullvad.90232/page-3",
+   "title": "[Guide] How to configure a Transmission Jail to use WireGuard with Mullvad | Page 3 | TrueNAS Community",
+   "snippet": "Regardless, it appears that wireguard (Mullvad VPN) is working properly in the jail, using the interface name \"wg0\". So if \"wg0\" is generated based on a specific city/server from Mullvad's configs, and in your Mullvad account you likewise had them assign you a port for that city/server (usually starts with a \"5XXXX\"), then in your bittorrent client you force it to use only the \"wg0\" interface and the port assigned to you (for port forwarding.)",
+   "engine": "brave"
+  },
+  {
+   "url": "https://greycoder.com/a-list-of-vpns-with-support-for-port-forwarding/",
+   "title": "A List Of Reliable VPNs With Support For Port-Forwarding - GreyCoder",
+   "snippet": "Port forwarding is configured via UPnP (by the apps themselves). Supports IPv6 and Wireguard.Mullvad allows up to 5 ports in the 5xxxx range, each assigned to the server. Both OpenVPN & Wireguard. Port forwarding is configured on their website.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://help.firewalla.com/hc/en-us/community/posts/9427289233811-Firewalla-with-3rd-party-wireguard-vpn-and-port-forwarding",
+   "title": "Firewalla with 3rd party wireguard vpn and port forwarding – Firewalla",
+   "snippet": "Hi, I am attempting to configure one of my devices on my LAN to use the Mullvad Wireguard VPN connection configured on my Firewalla Purple with an incoming forwarded port. I have successfully: Con...",
+   "engine": "google"
+  },
+  {
+   "url": "https://mullvad.net/en/help/tag/connectivity",
+   "title": "Privacy is a universal right - Mullvad VPN",
+   "snippet": "If you have set it to maximum security, \"which will block most applications except web browsing, email, iTunes and VPN.\" , try reducing it to typical to see if you then can connect. Or use port 53 for WireGuard.",
+   "engine": "google"
+  },
+  {
+   "url": "https://github.com/StevenMcElligott/docs/blob/main/docs/3-truenas/TrueCharts/7-Gluetun-Guide.md",
+   "title": "docs/docs/3-truenas/TrueCharts/7-Gluetun-Guide.md at main...",
+   "snippet": "FIREWALL_VPN_INPUT_PORTS is the port forward port, to forward a port with Mullvad, follow steps 2 and 3 from here: Mullvad Port Forwarding. WIREGUARD_ADDRESSES is the Mullvad endpoint IP address, found in the Mullvad config file above.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://forum.openwrt.org/t/problem-on-getting-a-wireguard-port-forwarded-to-lan/47977",
+   "title": "Problem on getting a Wireguard port forwarded to... - OpenWrt Forum",
+   "snippet": "Mullvad is forwarding two ports now (for testing I opened two) to my specific wireguard public key. Since this worked locally on my laptop (with the mullvad client set to use wireguard), I expect this to also work on OpenWRT. Here you go with certain outputs.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://forum.opnsense.org/index.php?topic=25946.0",
+   "title": "Mullvad via wireguard and port forwarding",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://discuss.freedombox.org/t/configure-wireguard-for-mullvad/3448",
+   "title": "Configure Wireguard for Mullvad - FreedomBox Forum",
+   "snippet": "Dec 15, 2024 · There is also an external interface which is forwarding all traffic to the Mullvad server over the internet. Each of these interfaces supports ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://airvpn.org/forums/topic/56342-solved-wireguard-port-forwarding-doesnt-appear-to-work/",
+   "title": "[SOLVED] Wireguard: port forwarding doesn't appear to... - AirVPN",
+   "snippet": "Remote port forwarding is not a WireGuard or OpenVPN related feature, obviously it is a server side feature, and it is available regardless of your connection mode and both in IPv4 and IPv6.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/openwrt/comments/a28aih/does_anyone_here_have_experience_with_setting_up/",
+   "title": "r/openwrt on Reddit: Does anyone here have experience with setting up port forwarding for a wireguard (Mullvad) setup?",
+   "snippet": "",
+   "engine": "brave"
+  }
+ ]
+}

@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only; 4-5 engines answering). These are the five subjects the TESTER used to fail T7 on attempt 1 of research-trust-core: each returned genuinely on-subject pages that the longest-token core rule scored at or near 0.00.",
+ "_expect": "ok",
+ "query": "50 micrograms semaglutide",
+ "entity": "50 micrograms semaglutide",
+ "hits": [
+  {
+   "url": "https://www.drugs.com/semaglutide.html",
+   "title": "Semaglutide: Uses, Dosage, Side Effects, Brands - Drugs.com",
+   "snippet": "Semaglutide (Ozempic, Wegovy, Rybelsus) is a GLP-1 agonist used for weight loss, type 2 diabetes, and reducing cardiovascular and kidney risks by regulating appetite and blood sugar.",
+   "engine": "google"
+  },
+  {
+   "url": "https://trimrx.com/blog/how-many-mg-is-50-units-of-semaglutide-understanding-dosage-and-conversion-for-effective-weight-loss-treatment/",
+   "title": "How Many mg Is 50 Units of Semaglutide? - trimrx.com",
+   "snippet": "For another plain-English explanation of the math, our article on how many units is 1.5 mg of semaglutide can help connect the numbers. Quick Answer: 50 units of semaglutide typically equals either 1.25 mg or 2.5 mg, depending on the concentration of the medication.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.testing.com/treatments/compounded-semaglutide-dosage-chart/",
+   "title": "Compounded Semaglutide Dosage Chart: Titration Guide",
+   "snippet": "Compounded semaglutide starts at 0.25 mg weekly and increases every four weeks. See the full dosage chart, mg-to-unit conversion formula, and side effects by dose.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.rivasweightloss.com/blog/semaglutide-weight-loss-dosage-chart/",
+   "title": "Semaglutide Weight‑Loss Dosage Chart & Weekly Injection Guide | Rivas Medical Weight Loss",
+   "snippet": "Mar 20, 2026 · It is indicated for adults with obesity who tolerate 2.4mg and require further weight reduction. Is the 7.2 mg dose safe? In clinical trials, ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.vidal.ru/drugs/semaglutide",
+   "title": "Семаглутид инструкция по применению: показания...",
+   "snippet": "Описание активных компонентов препарата Семаглутид (Semaglutide).МРЖЩ (у пациентов с МРЖЩ значения концентрации кальцитонина в плазме крови обычно >50 нг/л).",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://trimrx.com/blog/semaglutide-dosage-chart-complete-conversion/",
+   "title": "Semaglutide Dosage Chart: Complete Conversion Guide (Mg, Units ... - TrimRX",
+   "snippet": "Introduction Semaglutide comes in three forms that each measure dose differently. The branded Wegovy® pen reads “click to a number.” The branded Ozempic® pen turns a dial to milligrams. A compounded vial uses a U-100 insulin syringe and is dosed in units that have to be converted from milligrams. Mixing these systems up is the most common reason patients underdose or overdose themselves ...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://glp1toolkit.io/dosing-charts.html",
+   "title": "GLP-1 Dosing Charts 2026 – Ozempic, Wegovy, Mounjaro, Zepbound Dose ...",
+   "snippet": "Complete GLP-1 dosing charts for Ozempic, Wegovy, Mounjaro, Zepbound, Saxenda, and Trulicity. Visual dose escalation schedules, pen colors, and injection guides in one place.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.doctronic.ai/blog/semaglutide-dosage-guide-how-much-to-take-and-when-with-chart/",
+   "title": "Semaglutide Dosage Guide: How Much to Take and When (With Chart)",
+   "snippet": "Key Takeaways Semaglutide is a medication primarily used to treat type 2 diabetes and support weight management. Dosage varies based on the condition being treated, patient age, and individual response. Starting doses are typically low and gradually increased to minimize side effects. Semaglutide is administered via su...",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.middlewaynutrition.com/glp-1/semaglutide-dosage-chart",
+   "title": "Semaglutide Dosage Chart: mg by Week & Titration Guide",
+   "snippet": "Semaglutide dosage chart with mg-by-week titration, dose escalation steps, Ozempic vs Wegovy differences, and syringe size for compounded vials.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.drugs.com/dosage/semaglutide.html",
+   "title": "Semaglutide Dosage Guide + Max Dose, Adjustments - Drugs.com",
+   "snippet": "Detailed Semaglutide dosage information for adults and children. Includes dosages for Diabetes Type 2, Weight Loss, Cardiovascular Risk Reduction and more; plus renal, liver and dialysis adjustments.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://semaglutidemedics.org/blog/how-many-mg-is-50-units-of-semaglutide/",
+   "title": "How Many Mg Is 50 Units of Semaglutide?",
+   "snippet": "o, how many mg is 50 units of semaglutide? As we’ve shown, it’s typically 1.25 mg for a 2.5 mg/mL concentration, but you must always calculate based on the number on your vial.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.thelancet.com/journals/lancet/article/PIIS0140-6736(23)01185-6/abstract",
+   "title": "Oral semaglutide 50 mg taken once per day in adults with overweight or obesity (OASIS 1): a randomised, double-blind, placebo-controlled, phase 3 trial - The Lancet",
+   "snippet": "In adults with overweight or obesity without type 2 diabetes, oral semaglutide 50 mg once per day led to a superior and clinically meaningful decrease in bodyweight compared with placebo.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://plexusdx.com/blogs/learn/semaglutide-dosing-can-i-take-50-units-and-what-you-need-to-know-for-safe-weight-loss-plexusdx",
+   "title": "Semaglutide 50 Units: Safe Dosing & Biomarker Guidance – PlexusDx",
+   "snippet": "A 50-unit dose is possible at higher maintenance phases, but safety depends on individual tolerance, BMI, and metabolic markers. Biomarker testing can help providers tailor escalation.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.eden.health/post/semaglutide-dosage-in-units-chart",
+   "title": "Semaglutide Dosage Chart, Syringe Dosage & Units to mg",
+   "snippet": "Learn how to calculate semaglutide dosage in units using a semaglutide dosage chart in units. Understand semaglutide syringe dosage and how to convert semaglutide units to mg for safer injections.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.meetaugust.ai/en/medications/how-many-mg-is-50-units-of-semaglutide",
+   "title": "50 Units Semaglutide to mg - August AI",
+   "snippet": "How many mg is 50 units of semaglutide depends on your vial's concentration. At the most common 5 mg/ml concentration, 50 units of semaglutide equals 2.5 mg. If your vial is 2.5 mg/ml, 50 units equals 1.25 mg. At 10 mg/ml, 50 units equals 5 mg. Note that 2.5 mg slightly exceeds the FDA-approved ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.tiktok.com/discover/semagluti-before-and-after-50",
+   "title": "Semagluti Before and After 50 | TikTok",
+   "snippet": "47.5M posts. Discover videos related to Semagluti Before and After 50 on TikTok.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://glptools.net/semaglutide/dosage-calculator/",
+   "title": "Semaglutide Dosage Calculator | Dose & Volume | GLP Tools",
+   "snippet": "Use our Semaglutide Dosage Calculator to estimate concentration and draw volume from your inputs, and double-check mg vs mcg before.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.mountcastlemedicalspa.com/blog/a-comprehensive-guide-to-semaglutide-dosing-and-microdosing/",
+   "title": "A Comprehensive Guide to Semaglutide Dosing and Microdosing - Mountcastle Medical Spa and Laser Center",
+   "snippet": "Semaglutide Semaglutide has become a leading treatment for weight management and glycemic control, particularly for patients with obesity or Type 2 diabetes. Whether you're starting on semaglutide, considering microdosing, or planning a long-term ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.mayoclinic.org/drugs-supplements/semaglutide-subcutaneous-route/description/drg-20406730",
+   "title": "Semaglutide (subcutaneous route) - Side effects & dosage",
+   "snippet": "Aug 1, 2026 · Semaglutide injection is used to treat type 2 diabetes. It is used together with diet and exercise to help control your blood sugar. milligrams ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://healthspanledger.com/tools/semaglutide-reconstitution-calculator",
+   "title": "Semaglutide reconstitution calculator, free",
+   "snippet": "Get the exact Semaglutide draw in units, on a U-100, U-50 or U-40 syringe.Semaglutide reconstitution calculator. Pick the vial, the water you added and the dose.",
+   "engine": "yandex"
+  }
+ ]
+}

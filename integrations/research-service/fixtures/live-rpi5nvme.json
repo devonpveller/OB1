@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only; 4-5 engines answering). These are the five subjects the TESTER used to fail T7 on attempt 1 of research-trust-core: each returned genuinely on-subject pages that the longest-token core rule scored at or near 0.00.",
+ "_expect": "ok",
+ "query": "Raspberry Pi 5 NVMe HAT",
+ "entity": "Raspberry Pi 5 NVMe HAT",
+ "hits": [
+  {
+   "url": "https://www.raspberrypi.com/products/m2-hat-plus/",
+   "title": "Buy a Raspberry Pi M.2 HAT+ – Raspberry Pi",
+   "snippet": "Raspberry Pi M.2 HAT+ The Raspberry Pi M.2 HAT+ enables you to connect M.2 peripherals such as NVMe drives and AI accelerators to Raspberry Pi 5's PCIe 2.0 interface, supporting fast (up to 500 MB/s) data transfer to and from NVMe drives and other PCIe accessories. Available from $12.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.raspberrypi.com/documentation/accessories/m2-hat-plus.html",
+   "title": "M.2 HAT+ - Raspberry Pi Documentation",
+   "snippet": "Start your Raspberry Pi. Boot from NVMe. Enable PCIe Gen 3. Schematics.The M.2 HAT+ is compatible with the Raspberry Pi 5 Active Cooler. If you have an Active Cooler, install it before installing the M.2 HAT+. m2 hat plus installation 01.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.reddit.com/r/selfhosted/comments/1juwenm/4x_nvme_hat_setup_for_my_raspberry_pi_5_replaced/",
+   "title": "r/selfhosted on Reddit: 4x NVMe Hat Setup for My Raspberry Pi 5 – Replaced iCloud/Drive",
+   "snippet": "Apr 9, 2025 · I set up a 4x NVMe hat on my Raspberry Pi 5, and this little beast has completely replaced my iCloud/Drive needs. Currently running 4x 1TB ...Raspberry Pi 5 build complete – NVMe, Compact HAT+, active ...I have mixed feelings towards the new official Raspberry Pi M.2 ...More results from www.reddit.com",
+   "engine": "google"
+  },
+  {
+   "url": "https://geekworm.com/collections/pcie-to-nvme?srsltid=AfmBOop8Vh0G10ccEL2f7P1zg1aC6YcoX94W9I9h9VTnCl2i3AxQ7ZJt",
+   "title": "Raspberry Pi 5 SSD HATs - Geekworm",
+   "snippet": "17–19 day delivery 90-day returnsGeekworm X1001-Max High-Power PCIe3.0 M.2 NVMe HAT Support 120W PD/DC 9-20V Input, AI Accelerator and High-Capacity SSD. Regular price: $32.00.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.pishop.us/product-category/raspberry-pi/raspberry-pi-5/raspberry-pi-5-hats-add-ons/?srsltid=AfmBOopvIXjie6s_Ukh-1vAe_LmiN0gRcCOxfvGduYrNmBZbzdXaRoD3",
+   "title": "Raspberry Pi 5 HATs & Add-Ons | PiShop US - Official Reseller",
+   "snippet": "5.0 15 · 4-day deliveryPCIe To USB 3.2 and M.2 HAT+ for Raspberry Pi 5, NVMe, 4x USB 3.2 Ports. $29.95.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.amazon.com/clp/B0D5CGDJLQ",
+   "title": "Official Pi PCIe to M.2 HAT for Raspberry Pi 5, HAT + Standard",
+   "snippet": "Free delivery 30-day returnsOfficial Pi PCIe to M.2 HAT for Raspberry Pi 5, HAT + Standard | Supports NVMe Protocol M.2 Solid State Drive 2230/2242 High-Speed Reading/Writing.",
+   "engine": "google"
+  },
+  {
+   "url": "https://wiki.seeedstudio.com/raspberry_pi_5_uses_pcie_hat_dual_hat/",
+   "title": "Raspberry Pi 5 uses PCIe hat/dual hat | Seeed Studio Wiki",
+   "snippet": "Dec 24, 2024 · This tutorial primarily introduces the hardware connection configuration of the M.2 Hat/Dual Hat and how to boot the Raspberry Pi from an SSD.",
+   "engine": "google"
+  },
+  {
+   "url": "https://raspberry.tips/en/raspberrypi-tutorials/raspberry-pi-5-nvme-ssd-boot",
+   "title": "Setting up Raspberry Pi 5 NVMe SSD - M.2 HAT+ & Benchmarks (2026)",
+   "snippet": "Set up NVMe SSD on Raspberry Pi 5: install M.2 HAT+, boot from SSD and see real benchmarks - up to 10× faster than microSD. Updated 2026.",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.amazon.com/raspberry-pi-5-nvme-hat/s?k=raspberry+pi+5+nvme+hat",
+   "title": "Amazon.com: Raspberry Pi 5 Nvme Hat",
+   "snippet": "GeeekPi P33 M.2 NVME M-Key PoE+ Hat with Official Pi 5 Active Cooler and Aluminum Case for Raspberry Pi 5, Support M.2 NVMe SSDs 2230/2242/2260/2280 100+ bought in past month",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://the-diy-life.com/which-nvme-hat-is-the-best-for-a-raspberry-pi-5/",
+   "title": "Which NVMe Hat Is The Best For A Raspberry Pi 5 - The DIY Life",
+   "snippet": "If you don’t know already, I’ve been selling these 3D printed cases for Raspberry Pi’s online for a few years now. With the launch of a number of NVMe drive hats for the Pi 5’s PCIe port, I get asked quite a lot which hat is best for it and which case to choose. So today, I set out to find out.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://raspberry.tips/en/raspberrypi-tutorials/nvme-ssd-raspberry-pi-5-buying-guide",
+   "title": "NVMe SSD for the Raspberry Pi 5: Best M.2 HATs & SSDs Compared (2026)",
+   "snippet": "An NVMe SSD is the best upgrade you can give your Raspberry Pi 5: up to ten times faster than any SD card and far more reliable in 24/7 operation. But which M.2 HAT fits your setup - and which SSD is actually worth buying now that memory prices have gone through the roof? I'll compare the most important NVMe adapters, show you compatible SSDs with current prices, and explain why the ...",
+   "engine": "duckduckgo web"
+  },
+  {
+   "url": "https://www.pishop.us/product-category/raspberry-pi/raspberry-pi-5/raspberry-pi-5-hats-add-ons/",
+   "title": "Raspberry Pi 5 HATs & Add-Ons | PiShop US - Official Reseller",
+   "snippet": "Raspberry Pi 5 HATs Pi 5 PoE HAT, M.2 & PCIe adapters for NVMe SSD drives, Audio, SATA HATs, and more. Expand power, storage, and connectivity for all Raspberry Pi 5 projects. Shop Add-Ons & HATs for all Pi boards →",
+   "engine": "brave"
+  },
+  {
+   "url": "https://thepihut.com/collections/raspberry-pi-ssd-hats",
+   "title": "Raspberry Pi SSD HATs - The Pi Hut",
+   "snippet": "This section contains all of our HATs and add-on boards that allow you to add fast SSD storage to your Raspberry Pi. SSD storage comes in a few flavours, so make sure you check which type the add-on is compatible with. The most common types are SATA or NVMe, with NVMe M.2 drives more common with HATs designed for the Raspberry Pi 5, as they can make use of the PCIe interface for lighting fast ...",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://hackergadgets.com/products/nvme-and-poe-hat-for-raspberry-pi-5",
+   "title": "NVME and PoE+ Hat for Raspberry Pi 5 – Hacker Gadgets",
+   "snippet": "Enhance the power and cooling capabilities of your Raspberry Pi 5 with this NVMe and PoE+ HAT! Specifically designed for the Raspberry Pi 5, this expansion module supports the 802.3af/at standard, ensuring your device receives reliable and stable power while also providing efficient cooling. Whether you're running high",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.jeffgeerling.com/blog/2024/3rd-party-poe-hats-pi-5-add-nvme-fit-inside-case/",
+   "title": "3rd Party PoE HATs for Pi 5 add NVMe, fit inside case - Jeff Geerling",
+   "snippet": "This HAT is compatible with all standard NVMe sizes up to 2280, and has holes cut into the PCB to allow airflow through, under the NVMe, into the Raspberry Pi Active Cooler fan—which is included in the box (a nice touch)! It provides 5.1V at 4.5A power output to the Pi, and comes with a ...",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.waveshare.com/pcie-to-m.2-hat-plus.htm",
+   "title": "PCIe To M.2 Adapter for Raspberry Pi 5, Supports NVMe Protocol M.2 Solid State Drive, High-speed Reading/Writing, HAT + Standard | PCIe TO M.2 HAT+",
+   "snippet": "Official Raspberry Pi PCIe To M.2 HAT, Designed for Raspberry Pi 5, HAT + Standard, Supports NVMe Protocol M.2 Solid State Drive, Raspberry Pi 5 HAT.* for reference only, please refer to the Package Content for detailed part list. NVMe Drive Protocol Support.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=sFDn_TFbZpg",
+   "title": "Upgrade Your Raspberry Pi 5 with NVMe Storage... - YouTube",
+   "snippet": "In this comprehensive tutorial, Engineer Ari Mahpour demonstrates how to set up an NVMe HAT with an NVMe drive on your Raspberry Pi 5. You'll learn why NVMe drives outperform microSD cards in both speed and durability, plus get...",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.amazon.com/Official-Raspberry-Standard-Supports-High-Speed/dp/B0D5CGDJLQ",
+   "title": "Official Pi PCIe to M.2 HAT for Raspberry Pi 5 ...",
+   "snippet": "Click the button below to continue shopping · Conditions of Use Privacy Policy · © 1996-2025, Amazon.com, Inc. or its affiliates",
+   "engine": "brave"
+  },
+  {
+   "url": "https://core-electronics.com.au/guides/how-to-add-an-ssd-to-your-raspberry-pi-5-with-the-m.2-hat/",
+   "title": "How to Add an SSD To Your Raspberry Pi 5 with the M.2 HAT...",
+   "snippet": "Raspberry Pi 5 - Any sized GB model will work. Raspberry Pi 5 M.2 HAT+ - We are using the Official Raspberry Pi HAT, but other NVME HATs should follow a similar process. NVME SSD - For the M-key HAT, it will either need to be a 2230 or 2242-sized NVME.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.reddit.com/r/raspberry_pi/comments/1qg022u/raspberry_pi_5_build_complete_nvme_compact_hat/",
+   "title": "r/raspberry_pi on Reddit: Raspberry Pi 5 build complete – NVMe, Compact HAT+, active cooling",
+   "snippet": "",
+   "engine": "brave"
+  }
+ ]
+}

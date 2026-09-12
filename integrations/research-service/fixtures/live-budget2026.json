@@ -1,0 +1,128 @@
+{
+ "_provenance": "captured 2026-09-11 from the LIVE private search gateway (GET http://127.0.0.1:8085/search?format=json, read-only; 4-5 engines answering). These are the five subjects the TESTER used to fail T7 on attempt 1 of research-trust-core: each returned genuinely on-subject pages that the longest-token core rule scored at or near 0.00.",
+ "_expect": "rejected-no-distinctive-tokens",
+ "query": "2026 budget",
+ "entity": "2026 budget",
+ "hits": [
+  {
+   "url": "https://en.wikipedia.org/wiki/2026_United_States_federal_budget",
+   "title": "2026 United States federal budget - Wikipedia",
+   "snippet": "The United States federal budget for fiscal year 2026 runs from October 1, 2025 to September 30, 2026. The 2025 federal government shutdown occurred at the beginning of the fiscal year. It lasted until November 12, when a continuing resolution and three of the twelve full appropriations bills were enacted. In mid-January 2026, three additional bills were enacted. The four-day 2026 federal ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.govinfo.gov/app/collection/budget/2026",
+   "title": "Budget of the United States Government - GovInfo",
+   "snippet": "The Budget Appendix contains various tables and schedules in support of the Budget. It includes explanations of the work to be performed and the money needed. It includes the language proposed for enactment by the Congress on each item that requires congressional action in an appropriations bill. It also contains the language proposed for the general provisions of appropriations Acts that apply to entire agencies or groups of agencies. ... The Mid-Session Review (MSR) is a supplemental update to the President’s FY 2026 Budget.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.whitehouse.gov/omb/information-resources/budget/the-presidents-fy-2026-discretionary-budget-request/",
+   "title": "The President's FY 2026 Discretionary Budget Request – OMB",
+   "snippet": "President’s Budget · Appendix · Analytical Perspectives · historical tables · supplemental materials · FY 2027 Mid-session review · Fiscal Year 2026 Discretionary Budget Request · Overview: President Trump’s Fiscal Year 2026 Discretionary Funding Request ·",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.foxbusiness.com/politics/federal-budget-deficit-reaches-2-trillion-first-11-months-fiscal-year-2026-cbo-reports",
+   "title": "Federal budget deficit hits $2 trillion in first 11 months of FY2026 ...",
+   "snippet": "Federal budget deficit hit $2 trillion after 11 months of fiscal year 2026, the CBO reported. Social Security, Medicare, Medicaid and national debt interest drove spending higher.",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.europarl.europa.eu/RegData/etudes/ATAG/2025/779218/EPRS_ATA(2025)779218_EN.pdf",
+   "title": "Adoption of the European Union's 2026 budget",
+   "snippet": "The agreed 2026 budget reinforces Parliament’s priorities and sets commitment appropriations at €192.77 billion and payments at €190.1 billion, including special instruments.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.whitehouse.gov/omb/information-resources/budget/",
+   "title": "President’s Budget – OMB – The White House",
+   "snippet": "Access the official and previous years’ budgets of the U.S. Government, including the President’s budget proposals and other related publications.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://www.congress.gov/crs_external_products/R/HTML/R48599.web.html",
+   "title": "congress.gov/crs_external_products/R/HTML/R48599.web.html",
+   "snippet": "Selected FY2026 budget justifications for the largest agencies funded by the annual Energy and Water Development appropriations bill can be found through the links below.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://politicsnewsplus.com/guides/federal-budget-2026",
+   "title": "Federal Budget 2026: Complete Breakdown of US Government Spending",
+   "snippet": "Federal Budget 2026 A complete breakdown of US government spending, revenue, and the deficit in 2026 — where the money comes from, where it goes, how the budget process works, and what the political fights are really about.",
+   "engine": "qwant"
+  },
+  {
+   "url": "https://fiscaldata.treasury.gov/americas-finance-guide/federal-spending/",
+   "title": "Federal Spending | U.S. Treasury Fiscal Data",
+   "snippet": "The U.S. government has spent $6.81 trillion in fiscal year 2026 to ensure the well-being of the people of the United States.",
+   "engine": "google"
+  },
+  {
+   "url": "https://home.treasury.gov/about/budget-financial-reporting-planning-and-performance/budget-requestannual-performance-plan-and-reports/budget-in-brief/fy-2026-budget-in-brief",
+   "title": "FY 2026 Budget in Brief | U.S. Department of the Treasury",
+   "snippet": "The Congressional Justification of Appropriations (CJ) reflects the President’s Budget request for the Department of the Treasury, and is prepared in accordance with OMB Circular A-11. The CJ includes agency priorities, requested budget levels and performance plans (in accordance with the Government Performance and Results Act).",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.govinfo.gov/app/details/BUDGET-2026-APP/BUDGET-2026-APP-2-23/context",
+   "title": "Budget FY 2026 - Executive Office of the President - BUDGET-2026-APP-2-23 | Document in Context | GovInfo",
+   "snippet": "Category Budget and Presidential Materials Collection Budget of the United States Government SuDoc Class Number PREX 2.8:2026/APP.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.cbo.gov/publication/61882",
+   "title": "The Budget and Economic Outlook: 2026 to 2036 | Congressional Budget Office",
+   "snippet": "In CBO's projections, the federal budget deficit in fiscal year 2026 is $1.9 trillion, and federal debt rises to 120 percent of GDP in 2036. Economic growth strengthens in 2026 and moderates in later years.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.crfb.org/blogs/appropriations-watch-fy-2026",
+   "title": "Appropriations Watch: FY 2026 | Committee for a Responsible Federal Budget",
+   "snippet": "Both the House and Senate top-line discretionary numbers for FY 2025 adhered to the $1.606 trillion level included in the Fiscal Responsibility Act (FRA). For FY 2026, however, there are no enforceable caps, though the FRA does suggest that ...",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.ed.gov/about/ed-overview/annual-performance-reports/budget/budget-requests/eds-fiscal-year-fy-2026-budget-request",
+   "title": "ED's Fiscal Year (FY) 2026 Budget Request | U.S. Department of Education",
+   "snippet": "The President's FY 2026 Budget for the United States Government",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.naco.org/resource/analysis-fy-2026-presidents-budget",
+   "title": "Analysis of FY 2026 President’s Budget | National Association of Counties",
+   "snippet": "Reduces funding to the Centers for Disease Control and Prevention (CDC) by $3.9 billion—from $8 billion in FY 2025 to $4.1 billion in FY 2026—eliminating or scaling back several programs as part of a broader agency restructuring.",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.cbo.gov/",
+   "title": "Congressional Budget Office",
+   "snippet": "The Long-Term Budget Outlook Data: 2026 to 2056. The Congressional Budget Office's Request for Appropriations for Fiscal Year 2027.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.spokesman.com/stories/2026/sep/11/us-2026-budget-gap-hits-197-trillion-with-month-le/",
+   "title": "U.S. 2026 budget gap hits $1.97 trillion with month left to go",
+   "snippet": "3 hours ago · Spending for fiscal 2026 to date totaled $6.81 trillion, up 3%, while revenues were $4.85 trillion, also 3% higher on an adjusted basis from ...",
+   "engine": "google"
+  },
+  {
+   "url": "https://www.reddit.com/r/singapore/comments/1rdahx7/raising_5_young_kids_in_singapore_how_budget_2026/",
+   "title": "Raising 7 Kids in Singapore: Life in a Big Family | On The Red ...",
+   "snippet": "",
+   "engine": "brave"
+  },
+  {
+   "url": "https://www.nyc.gov/assets/omb/downloads/pdf/exec25/mm5-25.pdf",
+   "title": "FY 2026 Executive Budget - Message of the Mayor",
+   "snippet": "Executive Capital Budget for Fiscal Year 2026 – details the Mayor’s Capital Budget by project within agency. Budget data is presented by community district and by agency within borough.",
+   "engine": "yandex"
+  },
+  {
+   "url": "https://www.budget.com/en/reservation",
+   "title": "Reservations | Budget Car Rental",
+   "snippet": "For reservations made on Budget.com, free day will be applied at the time of rental. Budget reserves the right to alter the terms and conditions and use of coupons.",
+   "engine": "yandex"
+  }
+ ]
+}

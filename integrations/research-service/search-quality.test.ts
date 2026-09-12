@@ -149,16 +149,26 @@ Deno.test("T11: an entity-present set whose hits miss the NEED is a weak search,
   assert(v.overlap < 0.5, `overlap ${v.overlap} — low, and recorded as secondary evidence`);
 });
 
-Deno.test("T11: the entity phrase is matched as a PHRASE, in the shapes engines write it", () => {
+Deno.test("T11: the subject is matched in every spelling engines write it", () => {
   const mk = (title: string): SearchHit[] =>
     Array.from({ length: 10 }, (_, i) => ({ url: `u${i}`, title, snippet: "" }));
   for (const t of ["OptiPlex 3050 manual", "optiplex 3050 teardown", "Dell OptiPlex-3050 SFF",
                    "OPTIPLEX  3050 owner's guide"]) {
     assertEquals(classifyHits("optiplex 3050 repair", mk(t), "OptiPlex 3050").verdict, "ok", t);
   }
-  // Adjacency matters: the tokens must be the phrase, not scattered.
+  // CHANGED by research-trust-core attempt 2, and declared rather than hidden:
+  // the subject is a SET of tokens, not a phrase, so ADJACENCY NO LONGER
+  // MATTERS. "OptiPlex 7080 and the 3050-era chipset" now carries the subject.
+  // Requiring adjacency is what produced four successive false search failures
+  // (subject.test.ts header), and a page mentioning OptiPlex models and 3050 IS
+  // evidence the engine understood the subject - which is the only question
+  // this detector asks. Whether such a page answers the NEED is the relevance
+  // gate's job, one page at a time.
   const scattered = mk("OptiPlex 7080 and the 3050-era chipset");
-  assert(classifyHits("optiplex 3050 repair", scattered, "OptiPlex 3050").verdict !== "ok");
+  assertEquals(classifyHits("optiplex 3050 repair", scattered, "OptiPlex 3050").verdict, "ok");
+  // The line that matters is unmoved: junk carrying ONE token is still refused.
+  const junk = mk("Computers, Monitors & Technology Solutions | Dell USA");
+  assert(classifyHits("optiplex 3050 repair", junk, "Dell OptiPlex 3050").verdict !== "ok");
 });
 
 Deno.test("T11: with NO entity the classifier falls back, and the fallback is weaker", () => {
