@@ -17,9 +17,9 @@
  */
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  absenceLines, applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, namesIn,
-  nearestLines, normaliseCitations, polarityOf, polarityVerdict, referenceLines, splitSentences,
-  supersetCitations, verbatimFallback,
+  absenceLines, applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits,
+  FLIP_JUDGE_SYS, namesIn, nearestLines, normaliseCitations, parseDuplicate, parseFlip, polarityOf,
+  polarityVerdict, referenceLines, splitSentences, supersetCitations, verbatimFallback,
 } from "./fidelity.ts";
 import { renderSys, templateById } from "./templates.ts";
 import { expansionMatch, renderGroundingDiff } from "./grounding.ts";
@@ -35,6 +35,26 @@ const SYNTH = [
   "[SOURCED] A community user reported bent processor pins on an OptiPlex 3050 motherboard. [Source 14]",
   "[GAP] What are the water-damage failure modes?",
 ].join("\n");
+
+/**
+ * THE FLIP JUDGE, mocked. Attempt 5 puts every proposed correction to it before
+ * anything is applied, and an unparseable answer is a refusal - so a mock that
+ * does not answer it refuses everything. Tests about the correction machinery
+ * wrap their deps in `keeps(...)`; tests about polarity wrap in `flips(...)`
+ * and assert the sentence survives.
+ */
+const FLIP_SYS_HEAD = "You are given a sentence from a report";
+function flipping(inner: Deps, verdict: "KEEP" | "FLIP"): Deps {
+  return {
+    ...inner,
+    chat: (sys: string, user: string, opts?: { json?: boolean; nothink?: boolean }) =>
+      sys.startsWith(FLIP_SYS_HEAD)
+        ? Promise.resolve(JSON.stringify({ verdict }))
+        : inner.chat(sys, user, opts),
+  } as unknown as Deps;
+}
+const keeps = (d: Deps) => flipping(d, "KEEP");
+const flips = (d: Deps) => flipping(d, "FLIP");
 
 /** A judge that answers from a script, and counts how often it was asked. */
 function mockJudge(script: string[][], rewrite?: Record<string, string>) {
@@ -124,7 +144,7 @@ Deno.test("X1: a hedge turned into an absolute is rewritten back to its source",
     [["STRONGER"], ["SAME"]],
     { "1": "Proprietary connector makes aftermarket PSU fitting difficult" },
   );
-  const out = await checkRenderFidelity(deps, HEDGE_DOC, SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), HEDGE_DOC, SYNTH);
   assertEquals(out.record.checked, 1);
   assertEquals(out.record.stronger, 1);
   assertEquals(out.record.rewritten, 1);
@@ -141,7 +161,7 @@ Deno.test("X1: a sentence the rewrite does not fix is REPLACED by its source, ve
   // to the grounded line - which reads less smoothly and cannot overstate
   // anything, because it IS the evidence.
   const { deps } = mockJudge([["UNSUPPORTED"], ["STRONGER"]], {});
-  const out = await checkRenderFidelity(deps, HEDGE_DOC, SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), HEDGE_DOC, SYNTH);
   assertEquals(out.record.unsupported, 1);
   assertEquals(out.record.replaced, 1);
   assertEquals(out.record.rewritten, 0);
@@ -158,7 +178,7 @@ Deno.test("a SAME or WEAKER document is returned untouched", async () => {
   const doc = "The proprietary connector makes aftermarket PSU fitting difficult [Source 13]. " +
               "The board takes up to 32 GB of memory across two slots [Source 13].";
   const { deps, calls } = mockJudge([["SAME", "WEAKER"]]);
-  const out = await checkRenderFidelity(deps, doc, SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), doc, SYNTH);
   assertEquals(out.rendered, doc);
   assertEquals(out.record.checked, 2);
   assertEquals([out.record.stronger, out.record.unsupported, out.record.rewritten, out.record.replaced], [0, 0, 0, 0]);
@@ -169,7 +189,7 @@ Deno.test("a SAME or WEAKER document is returned untouched", async () => {
 
 Deno.test("a judge that throws leaves the document EXACTLY as it was, and says so", async () => {
   const deps = { chat: () => Promise.reject(new Error("upstream 503")) } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, HEDGE_DOC, SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), HEDGE_DOC, SYNTH);
   assertEquals(out.rendered, HEDGE_DOC);
   assertEquals(out.record.checked, 0);
   assert(out.record.error, "a failed check must be recorded, not silently passed");
@@ -179,7 +199,7 @@ Deno.test("a judge that throws leaves the document EXACTLY as it was, and says s
 Deno.test("a judge that answers nonsense is a failed check, not a verdict", async () => {
   for (const reply of ["not json", '{"verdicts":["MAYBE"]}', '{"verdicts":[]}', "{}"]) {
     const deps = { chat: () => Promise.resolve(reply) } as unknown as Deps;
-    const out = await checkRenderFidelity(deps, HEDGE_DOC, SYNTH);
+    const out = await checkRenderFidelity(keeps(deps), HEDGE_DOC, SYNTH);
     assertEquals(out.rendered, HEDGE_DOC, reply);
     assertEquals(out.record.checked, 0, reply);
     assert(out.record.error, reply);
@@ -194,7 +214,7 @@ Deno.test("a rewriter that breaks still cannot leave an overstatement standing",
       return Promise.reject(new Error("rewriter down"));
     },
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, HEDGE_DOC, SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), HEDGE_DOC, SYNTH);
   assertEquals(out.record.replaced, 1);
   assert(out.rendered.includes("makes it difficult"), out.rendered);
 });
@@ -214,7 +234,7 @@ Deno.test("a re-judge that breaks replaces everything the first judge condemned"
       return Promise.resolve(JSON.stringify({ fixed: { "1": "Something plausible but unverified" } }));
     },
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, HEDGE_DOC, SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), HEDGE_DOC, SYNTH);
   assertEquals(out.record.replaced, 1);
   assert(!out.rendered.includes("Something plausible"), out.rendered);
 });
@@ -303,8 +323,12 @@ Deno.test("X2: an UNCITED claim in an evidence section is one unit, and is judge
   const never = { chat: () => Promise.reject(new Error("the judge must not be asked")) } as unknown as Deps;
   const out = await checkRenderFidelity(never, doc, PROBE_SYNTH);
   assertEquals(out.record.unsupported, 1);
-  assertEquals(out.record.checked, 1);
   assert(!out.record.error, "the run must not have failed open here");
+  // and because nothing in the evidence could correct it, the sentence is still
+  // in the document. Attempt 4 called that "checked 1 of 1, unchecked 0". A
+  // condemned sentence that survives is counted where it can be SEEN: once, as
+  // no_candidate, and in the footer's U.
+  assertEquals([out.record.checked, out.record.no_candidate, out.record.unchecked], [0, 1, 1]);
 
   // An uncited sentence that IS about the evidence goes to the judge with the
   // nearest lines instead.
@@ -316,7 +340,7 @@ Deno.test("X2: an UNCITED claim in an evidence section is one unit, and is judge
         ? Promise.resolve(JSON.stringify({ verdicts: ["SAME"] }))
         : Promise.resolve("{}"),
   } as unknown as Deps;
-  const ok = await checkRenderFidelity(deps, near, PROBE_SYNTH);
+  const ok = await checkRenderFidelity(keeps(deps), near, PROBE_SYNTH);
   assertEquals([ok.record.checked, ok.record.unsupported], [1, 0]);
   assertEquals(ok.rendered, near);
 });
@@ -393,7 +417,7 @@ Deno.test("K.9: a long replaced cell becomes a marker, and the line goes under t
         ? Promise.resolve(JSON.stringify({ verdicts: ["UNSUPPORTED", "SAME"] }))
         : Promise.resolve(JSON.stringify({ fixed: {} })),
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, doc, PROBE_SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), doc, PROBE_SYNTH);
   const lines = out.rendered.split("\n");
   const psuRow = lines.find((l) => l.startsWith("| PSU"))!;
   // The cell holds a marker, the row keeps its columns and its Source cell.
@@ -426,7 +450,7 @@ Deno.test("ACCEPTANCE 3: N and M are counted on the DELIVERED document", async (
         ? Promise.resolve(JSON.stringify({ verdicts: ["SAME", "SAME"] }))
         : Promise.resolve("{}"),
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, doc, PROBE_SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), doc, PROBE_SYNTH);
   assertEquals(out.record.units, countUnits(out.rendered));
   assertEquals(out.record.checked, 2);
   assertEquals(out.record.unchecked, 0);
@@ -474,13 +498,14 @@ const fixtureDoc = (n: string) =>
   Deno.readTextFileSync(new URL(`./fixtures/${n}`, import.meta.url)).replace(/\r\n/g, "\n");
 
 /** A judge that blesses everything, so the only thing under test is the writing. */
-const blessAll = {
+const blessBase = {
   chat: (sys: string, user: string) => {
     if (!sys.startsWith("You compare SENTENCES")) return Promise.resolve("{}");
     const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
     return Promise.resolve(JSON.stringify({ verdicts: new Array(n).fill("SAME") }));
   },
 } as unknown as Deps;
+const blessAll = keeps(blessBase);
 
 Deno.test("INVARIANT: a document with nothing to correct is returned BYTE-FOR-BYTE", async () => {
   for (const [name, src] of DOCS) {
@@ -525,7 +550,7 @@ Deno.test("the gate BLOCKS the names in the two documents kept as records", asyn
         return Promise.resolve(JSON.stringify({ fixed }));
       },
     } as unknown as Deps;
-    const out = await checkRenderFidelity(deps, doc, synthesis);
+    const out = await checkRenderFidelity(keeps(deps), doc, synthesis);
     assertEquals(out.record.names_blocked, expected, name);
     assertEquals(renderGroundingDiff(out.rendered, synthesis, "").names, [], name);
   }
@@ -691,7 +716,7 @@ Deno.test("ACCEPTANCE: a unit using an unearned name is UNSUPPORTED before any j
       }));
     },
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, doc, NAME_SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), doc, NAME_SYNTH);
   assert(asked > 0, "the judge was never asked");
   assertEquals(out.record.names_blocked, ["OEM"]);
   assert(!/OEM/.test(out.rendered), out.rendered);
@@ -722,7 +747,7 @@ Deno.test("an open question is rewritten, never answered with evidence", async (
         // The rewriter declines, twice.
         : Promise.resolve(JSON.stringify({ fixed: {} })),
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, doc, NAME_SYNTH);
+  const out = await checkRenderFidelity(keeps(deps), doc, NAME_SYNTH);
   // The question survives - no grounded line is pasted over it - and the name
   // is NOT counted as blocked, because it is still there. "Blocked" is a claim
   // about the delivered document.
@@ -762,7 +787,7 @@ Deno.test("ACCEPTANCE: only the failing sentence of a coarse unit is replaced", 
       return Promise.resolve(JSON.stringify({ fixed: {} }));   // no rewrite: fall to verbatim
     },
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, doc, synth);
+  const out = await checkRenderFidelity(keeps(deps), doc, synth);
   // The judge WAS re-asked per sentence.
   assert(seen.some((items) => items.length === 2), JSON.stringify(seen));
   // The first sentence is byte-identical; only the second was replaced.
@@ -784,7 +809,7 @@ Deno.test("a coarse unit whose every sentence fails is corrected whole", async (
       return Promise.resolve(JSON.stringify({ fixed: {} }));
     },
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, doc, synth);
+  const out = await checkRenderFidelity(keeps(deps), doc, synth);
   // One grounded line replaces the span, rather than two copies of it.
   assertEquals((out.rendered.match(/brief green LED on a cold start/g) || []).length, 1, out.rendered);
 });
@@ -830,7 +855,7 @@ const POLARITY_SYNTH = [
 const TAGGED_START = new RegExp("^\\[(SOURCED|INFERRED|GAP|UNCERTAIN)\\]");
 
 /** A judge that condemns everything, which is what produced all three defects. */
-const condemnAll = {
+const condemnBase = {
   chat: (sys: string, user: string) => {
     if (sys.startsWith("You compare SENTENCES")) {
       const n = (user.match(/^\d+\. SENTENCE:/gm) || []).length;
@@ -839,6 +864,12 @@ const condemnAll = {
     return Promise.resolve(JSON.stringify({ fixed: {} }));   // no rewrite: fall to verbatim
   },
 } as unknown as Deps;
+/** …and a flip judge that refuses every correction, which is the verdict every
+ *  one of the landed inversions should have drawn. */
+const condemnAll = flips(condemnBase);
+/** The other side: the same condemning judge with a flip judge that says KEEP,
+ *  so a sentence that SHOULD be corrected is seen to be corrected. */
+const condemnKeeping = keeps(condemnBase);
 
 Deno.test("POLARITY: an absence sentence is never replaced by an assertion", async () => {
   // 1. product-comparison. The delivered document lost this sentence and gained
@@ -951,7 +982,7 @@ Deno.test("the footer's blocked names and prose_ungrounded cannot disagree", asy
       }));
     },
   } as unknown as Deps;
-  const out = await checkRenderFidelity(deps, doc, synthesis, query);
+  const out = await checkRenderFidelity(keeps(deps), doc, synthesis, query);
   const stillFlagged = renderGroundingDiff(out.rendered, synthesis, query).names;
   assertEquals(out.record.names_blocked, ["ATX"]);
   assertEquals(stillFlagged, []);
@@ -1037,7 +1068,7 @@ Deno.test("POLARITY: the narrow world-marker, and how narrow it is", () => {
   assertEquals(polarityVerdict("The PSU never fails.", "Limitations and open questions").source, "heading");
 });
 
-Deno.test("POLARITY: every unit's decision is RECORDED, and the footer can say so", async () => {
+Deno.test("POLARITY: every unit's decision is RECORDED, and every refusal is counted ONCE", async () => {
   const doc = [
     "## Findings",
     "",
@@ -1049,13 +1080,24 @@ Deno.test("POLARITY: every unit's decision is RECORDED, and the footer can say s
     "The capacitor failure rate on this platform is stated nowhere in the material.",
   ].join("\n");
   const out = await checkRenderFidelity(condemnAll, doc, POLARITY_SYNTH);
+  // The census follows the DECIDER. A unit put to the flip judge is recorded as
+  // "judge" and leaves the lexical bucket it was provisionally filed under, so
+  // the lexical keys that remain are exactly the units the fast path settled
+  // without a call - and the total is still one entry per unit.
   const sources = out.record.polarity_sources;
   assertEquals(Object.values(sources).reduce((a, b) => a + b, 0), out.record.units);
-  assert((sources["default-absence"] ?? 0) >= 1, JSON.stringify(sources));
-  assert((sources["heading"] ?? 0) >= 1, JSON.stringify(sources));
-  // …and a unit held back by the DEFAULT is counted separately from one held
-  // back by a heading, which is the number that says how much work the
-  // conservative default is doing.
+  assert((sources["judge"] ?? 0) >= 1, JSON.stringify(sources));
+  // EVERY condemned unit that ends uncorrected is counted exactly once, across
+  // the three reasons - and each one comes OUT of the checked count, so it is
+  // visible in the footer's U. Attempt 4 could refuse a correction and still
+  // report "checked 1 of 1, unchecked 0".
+  const left = out.record.polarity_skipped + out.record.duplicate_skipped + out.record.no_candidate;
+  assertEquals(left, 2, JSON.stringify(out.record));
+  // Three units, two of them judged and both left as written. The third - the
+  // [Source 7] sentence, whose citation matches no grounded line - was never
+  // judged at all and is counted unchecked for that reason, not as a refusal.
+  assertEquals([out.record.units, out.record.checked, out.record.unchecked], [3, 0, 3], JSON.stringify(out.record));
+  assertEquals(out.record.rewritten + out.record.replaced, 0, JSON.stringify(out.record));
   assert(out.record.polarity_default <= out.record.polarity_skipped);
 });
 
@@ -1082,8 +1124,256 @@ Deno.test("a NEAR-duplicate is refused too, not only an exact one", async () => 
   const synth = "[UNCERTAIN] Whether the 100 Hz effect is additive with other VR-specific " +
     "countermeasures (e.g., high frame rates, vignetting) is not addressed in any provided " +
     "source. (unverified figure: 100) [Source 11, 12]";
-  const out = await checkRenderFidelity(condemnAll, doc, synth);
+  // KEEP throughout, so the only thing that can refuse the paste is the
+  // duplicate check - which is what this test is about.
+  const out = await checkRenderFidelity(condemnKeeping, doc, synth);
   const after = out.rendered.split("\n").pop() ?? "";
   assertEquals(after, unit, "a near-duplicate was pasted under the sentence it duplicates");
   assertEquals(out.record.duplicate_skipped, 1, JSON.stringify(out.record));
+});
+
+// -- THE FLIP JUDGE (attempt 5) ---------------------------------------------
+//
+// Three lexicons failed in a row - evidence nouns, a negation list, and an
+// absence-by-default with a narrow world-marker - and each time the tester
+// found sentences the words could not see. The words no longer decide: every
+// correction, rewrite or verbatim, is put to the judge first, and FLIP or an
+// unusable answer leaves the sentence exactly as written.
+//
+// These are the sentences that LANDED in delivered documents, end to end.
+
+/** The judge's answer, scripted, with a note of what it was shown. */
+function flipSpy(verdict: "FLIP" | "KEEP", inner = condemnBase) {
+  const seen: string[] = [];
+  const deps = {
+    ...inner,
+    chat: (sys: string, user: string, opts?: { json?: boolean; nothink?: boolean }) => {
+      if (sys.startsWith(FLIP_SYS_HEAD)) {
+        seen.push(user);
+        return Promise.resolve(JSON.stringify({ verdict }));
+      }
+      return inner.chat(sys, user, opts);
+    },
+  } as unknown as Deps;
+  return { deps, seen };
+}
+
+Deno.test("FLIP: the judge's prompt carries BOTH examples, and an unusable answer is a refusal", () => {
+  // The distinction the prompt has to draw, drawn by example in the prompt
+  // itself: a false claim about the WORLD may be corrected toward the evidence;
+  // a claim about what the EVIDENCE settles may not be inverted.
+  assertStringIncludes(FLIP_JUDGE_SYS, "Scarcely any of the sources quantify the failure rate.");
+  assertStringIncludes(FLIP_JUDGE_SYS, "The PSU is not proprietary.");
+  assertStringIncludes(FLIP_JUDGE_SYS, "The test is the SUBJECT of the sentence, not its grammar.");
+  // Only a clean KEEP is a KEEP. Everything else - a FLIP, an empty answer,
+  // prose, a truncated object, a different word - leaves the sentence alone.
+  assertEquals(parseFlip(JSON.stringify({ verdict: "KEEP" })), "KEEP");
+  assertEquals(parseFlip(JSON.stringify({ verdict: "keep" })), "KEEP");
+  const unusable = ["", "{}", "KEEP", "{\"verdict\":", "I think it is fine",
+    JSON.stringify({ verdict: "FLIP" })];
+  for (const bad of unusable) assertEquals(parseFlip(bad), "FLIP", bad);
+});
+
+Deno.test("FLIP: the five sentences the tester landed, and the plan's own example", async () => {
+  // Every one of these was replaced by a line asserting what it denied, under a
+  // guard that recorded `polarity_skipped: 0` while it happened. None of them
+  // trips any lexicon; all of them are put to the judge.
+  const landed = [
+    "Scarcely any of the sources quantify the failure rate [Source 11].",
+    "Whether 100 Hz helps is far from settled [Source 11].",
+    "The resolution pathway is hardly documented anywhere [Source 1].",
+    "Does any provided source trace the resolution pathway [Source 1]?",
+    "The readings do not capture the resolution pathway [Source 1].",
+    // the plan's own escape-hatch example, aimed at the world-marker
+    "The trace does not include the fault [Source 1].",
+  ];
+  for (const sentence of landed) {
+    const doc = `## Findings\n\n${sentence}`;
+    const { deps, seen } = flipSpy("FLIP");
+    const out = await checkRenderFidelity(deps, doc, POLARITY_SYNTH);
+    assertEquals(out.rendered, doc, `the check edited: ${sentence}`);
+    assertEquals(seen.length >= 1, true, `the judge was never asked about: ${sentence}`);
+    assertStringIncludes(seen[0], "ORIGINAL:");
+    assertStringIncludes(seen[0], "CORRECTION:");
+    // ...and the refusal is COUNTED, and the sentence leaves the checked count.
+    assertEquals(out.record.polarity_skipped, 1, `${sentence} -> ${JSON.stringify(out.record)}`);
+    assertEquals([out.record.checked, out.record.unchecked], [0, 1], sentence);
+  }
+});
+
+Deno.test("FLIP: the over-protection side - a false claim about the WORLD is still corrected", async () => {
+  // The other half of the bidirectional test. A world negative that contradicts
+  // its own cited line is exactly what this module exists to repair; a guard
+  // that protects it has stopped doing its job.
+  const synth = [
+    "[SOURCED] The Dell OptiPlex 3050 SFF supports up to 32 GB of DDR4-2400 RAM across two DIMM slots. [Source 13]",
+    "[SOURCED] The Dell OptiPlex 3050 SFF uses a proprietary power supply and a proprietary power connector. [Source 14]",
+  ].join("\n");
+  const prose = [
+    ["The unit does not support DDR4-3200 [Source 13].", "supports up to 32 GB of DDR4-2400"],
+    ["The PSU is not proprietary [Source 14].", "uses a proprietary power supply"],
+  ];
+  for (const [sentence, want] of prose) {
+    const { deps } = flipSpy("KEEP");
+    const out = await checkRenderFidelity(deps, `## Findings\n\n${sentence}`, synth);
+    assertStringIncludes(out.rendered, want);
+    assertEquals(out.record.polarity_skipped, 0, JSON.stringify(out.record));
+    assertEquals(out.record.replaced, 1, JSON.stringify(out.record));
+  }
+  // ...and the same inside a TABLE cell, which is where a flip is hardest to see.
+  const table = [
+    "## Failure modes by subsystem",
+    "",
+    "| Subsystem | What goes wrong | Source |",
+    "|---|---|---|",
+    "| Power | The PSU is not proprietary | [Source 14] |",
+  ].join("\n");
+  const { deps } = flipSpy("KEEP");
+  const cell = await checkRenderFidelity(deps, table, synth);
+  assert(!/not proprietary/.test(cell.rendered), cell.rendered);
+  assertEquals(cell.record.replaced, 1, JSON.stringify(cell.record));
+});
+
+Deno.test("FLIP: a condemned sentence nothing could correct is COUNTED, and the footer says so", async () => {
+  // "No bent pins were reported" against a synthesis with no [GAP] or
+  // [UNCERTAIN] line at all. Attempt 4 left it standing - correctly - and then
+  // recorded "checked 1 of 1, unchecked 0" and printed no clause: the
+  // disclosure went silent exactly where nothing could be done.
+  const synth = "[SOURCED] A community user reported bent processor pins on an OptiPlex 3050 motherboard. [Source 14]";
+  assertEquals(absenceLines(synth), []);
+  const doc = "## Findings\n\nNo bent pins were reported [Source 14].";
+  const { deps } = flipSpy("FLIP");
+  const out = await checkRenderFidelity(deps, doc, synth);
+  assertEquals(out.rendered, doc);
+  assertEquals([out.record.units, out.record.checked, out.record.unchecked], [1, 0, 1], JSON.stringify(out.record));
+  assertEquals(out.record.polarity_skipped, 1, JSON.stringify(out.record));
+  // ...and the reader is told, in the one line they actually see.
+  const footer = coverageFooter(
+    [{ need: "bent pins", status: "answered" }] as never, emptySearchRecord(), "complete", null,
+    out.record,
+  );
+  assertStringIncludes(footer, "render checked: 0 of 1, 0 corrected, 1 unchecked");
+  assertStringIncludes(footer, "left as written: 1 (1 would invert, 0 already said, 0 nothing to cite)");
+});
+
+Deno.test("FLIP: a judge that ERRORS refuses, and a unit with no candidate at all is counted", async () => {
+  // An error is not a blessing. The engine may not decide a flip by failing to
+  // ask about it.
+  const broken = {
+    ...condemnBase,
+    chat: (sys: string, user: string, opts?: { json?: boolean; nothink?: boolean }) =>
+      sys.startsWith(FLIP_SYS_HEAD)
+        ? Promise.reject(new Error("the judge is down"))
+        : condemnBase.chat(sys, user, opts),
+  } as unknown as Deps;
+  const doc = "## Findings\n\nThe readings do not capture the resolution pathway [Source 1].";
+  const out = await checkRenderFidelity(broken, doc, POLARITY_SYNTH);
+  assertEquals(out.rendered, doc);
+  assertEquals(out.record.polarity_skipped, 1, JSON.stringify(out.record));
+
+  // ...and a sentence with nothing in the evidence to correct it with is counted
+  // under its own reason, not as a polarity refusal.
+  const orphan = "## Findings by area\n\nThe unit is impossible to upgrade and always fails within a year.";
+  const alone = await checkRenderFidelity(condemnAll, orphan, POLARITY_SYNTH);
+  assertEquals(alone.rendered, orphan);
+  assertEquals([alone.record.no_candidate, alone.record.polarity_skipped], [1, 0], JSON.stringify(alone.record));
+  assertEquals(alone.record.unchecked, 1, JSON.stringify(alone.record));
+});
+
+Deno.test("FLIP: the stutter the overlap test cannot see is refused by the JUDGE", async () => {
+  // The real pair, from the 100 Hz render: the replacement and the sentence
+  // beside it share 6 content words of 10, under the 0.7 the near-duplicate
+  // test needs, and the delivered document ended with both. The polarity guard
+  // happened to block it in attempt 4; with the judge deciding polarity it is
+  // KEEP, so the duplication has to be caught as a duplication.
+  const above = "The interaction between 100 Hz sound stimulation and other VR-specific " +
+    "countermeasures (high frame rates, reduced artificial locomotion, vignetting) is not " +
+    "addressed in any provided source [Source 11, 12].";
+  const unit = "It is unclear whether the effects are additive, redundant, or potentially " +
+    "antagonistic [Source 11, 12].";
+  const doc = ["## What the evidence does not settle", "", `${above} ${unit}`].join("\n");
+  const synth = "[UNCERTAIN] Whether the 100 Hz effect is additive with other VR-specific " +
+    "countermeasures (e.g., high frame rates, reduced artificial locomotion, vignetting) is not " +
+    "addressed in any provided source. (unverified figure: 100) [Source 11, 12]";
+  let sawNeighbour = false;
+  const deps = {
+    ...condemnBase,
+    chat: (sys: string, user: string, opts?: { json?: boolean; nothink?: boolean }) => {
+      if (sys.startsWith(FLIP_SYS_HEAD)) {
+        sawNeighbour = /NEIGHBOUR: .*interaction between 100 Hz/.test(user);
+        // Same polarity, so KEEP - and a restatement, so duplicate.
+        return Promise.resolve(JSON.stringify({ verdict: "KEEP", duplicate: true }));
+      }
+      return condemnBase.chat(sys, user, opts);
+    },
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, synth);
+  assert(sawNeighbour, "the judge was not shown the sentence beside the unit");
+  assertEquals(out.rendered, doc, "the same point was pasted under itself");
+  // Both sentences of the span are condemned, and this judge calls both of them
+  // restatements of what stands beside them; neither is booked as polarity.
+  assertEquals(out.record.duplicate_skipped, 2, JSON.stringify(out.record));
+  assertEquals(out.record.polarity_skipped, 0, JSON.stringify(out.record));
+  // …and neither is counted as checked: nothing corrected them.
+  assertEquals([out.record.units, out.record.unchecked], [2, 2], JSON.stringify(out.record));
+  // The prompt asks the question in so many words.
+  assertStringIncludes(FLIP_JUDGE_SYS, "NEIGHBOUR");
+  assertEquals(parseDuplicate(JSON.stringify({ verdict: "KEEP", duplicate: true })), true);
+  assertEquals(parseDuplicate(JSON.stringify({ verdict: "KEEP" })), false);
+  assertEquals(parseDuplicate("not json"), false);
+});
+
+Deno.test("FLIP: a NAME beats a stutter - the duplicate refusal cannot keep an unearned name", async () => {
+  // Found by re-running the three renders through the live judge: on the
+  // buyer's guide it called the OEM sentence's repair a restatement of the
+  // sentence beside it - correctly - and the refusal left "OEM" standing in a
+  // delivered document while the footer named ESR and HDD as blocked. A gate a
+  // readability guard can talk out of firing is not a gate.
+  const doc = [
+    "## What the evidence does not settle",
+    "",
+    "Whether Dell sells a direct-replacement 180 W SFF PSU separately is not confirmed by any " +
+    "source. The proprietary connector makes substitution difficult [Source 13], but the " +
+    "availability of an OEM replacement part is left open.",
+  ].join("\n");
+  const deps = {
+    ...condemnBase,
+    chat: (sys: string, user: string, opts?: { json?: boolean; nothink?: boolean }) => {
+      if (sys.startsWith(FLIP_SYS_HEAD)) {
+        // Same polarity, and a restatement of the neighbour: exactly the answer
+        // that left the name in.
+        return Promise.resolve(JSON.stringify({ verdict: "KEEP", duplicate: true }));
+      }
+      if (sys.startsWith("You repair sentences")) {
+        // The rewriter strips the offending name, mechanically, from whichever
+        // items it is handed - the machinery is what is under test, not a
+        // model's willingness.
+        const items = user.split(/\n(?=\d+\. SENTENCE: )/).filter((b) => /SENTENCE:/.test(b));
+        const fixed: Record<string, string> = {};
+        items.forEach((b, i) => {
+          const line = (b.match(/SENTENCE: (.*)/) || [])[1] ?? "";
+          if (/OEM/.test(line)) fixed[String(i + 1)] = line.replace(/an OEM replacement part/, "a direct-replacement part");
+        });
+        return Promise.resolve(JSON.stringify({ fixed }));
+      }
+      return condemnBase.chat(sys, user, opts);
+    },
+  } as unknown as Deps;
+  const out = await checkRenderFidelity(deps, doc, NAME_SYNTH);
+  assert(!/OEM/.test(out.rendered), out.rendered);
+  assertEquals(out.record.names_blocked, ["OEM"]);
+  assertEquals(renderGroundingDiff(out.rendered, NAME_SYNTH, "").names, []);
+  // …and polarity still refuses even for a named unit: a flip is never worth a
+  // name. The same document, with a judge that calls the repair an inversion.
+  const flipping = {
+    ...condemnBase,
+    chat: (sys: string, user: string, opts?: { json?: boolean; nothink?: boolean }) =>
+      sys.startsWith(FLIP_SYS_HEAD)
+        ? Promise.resolve(JSON.stringify({ verdict: "FLIP", duplicate: true }))
+        : condemnBase.chat(sys, user, opts),
+  } as unknown as Deps;
+  const held = await checkRenderFidelity(flipping, doc, NAME_SYNTH);
+  assertEquals(held.rendered, doc, "a flip was applied to get rid of a name");
+  assertEquals(held.record.names_blocked, [], "a name still in the document was called blocked");
+  assert(held.record.polarity_skipped >= 1, JSON.stringify(held.record));
 });

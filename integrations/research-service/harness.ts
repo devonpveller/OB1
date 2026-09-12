@@ -1387,13 +1387,19 @@ export async function runResearch(
           `render check accounting mismatch: recorded ${fid.record.units} unit(s), the document has ${countUnits(prose)}`,
           { fidelity_units: fid.record.units });
       }
-      if (fid.record.polarity_skipped) {
+      // Every condemned unit that ends uncorrected, by reason, whichever reason
+      // it was. The run that shipped an inversion said nothing here because the
+      // only counter was `polarity_skipped` and it was zero.
+      const left = fid.record.polarity_skipped + fid.record.duplicate_skipped +
+        fid.record.no_candidate;
+      if (left) {
         await progress("synthesize",
-          `polarity: ${fid.record.polarity_skipped} unit(s) left as written (` +
-          `${fid.record.polarity_default} by the conservative default), ` +
-          `${fid.record.duplicate_skipped} left as a duplicate`,
+          `left as written: ${left} unit(s) - ${fid.record.polarity_skipped} the judge ` +
+          `refused as a flip, ${fid.record.duplicate_skipped} already said elsewhere, ` +
+          `${fid.record.no_candidate} with nothing in the evidence to cite`,
           { polarity_skipped: fid.record.polarity_skipped,
-            polarity_default: fid.record.polarity_default });
+            duplicate_skipped: fid.record.duplicate_skipped,
+            no_candidate: fid.record.no_candidate });
       }
       if (fid.record.names_blocked.length) {
         await progress("synthesize",

@@ -70,6 +70,11 @@ export interface FidelityRecord {
    *  document. A duplication is not a polarity refusal and is not counted as
    *  one - the tester's honesty nit from attempt 3. */
   duplicate_skipped: number;
+  /** Units the check condemned and could not correct because there was nothing
+   *  to correct them WITH. Counted like the others, so the footer's U covers
+   *  every condemned unit that survived - the disclosure failed exactly where
+   *  the candidate pool was empty. */
+  no_candidate: number;
   /** How every unit's polarity was decided, so the record can be audited. */
   polarity_sources: Record<string, number>;
   /** Names the grounding diff flagged that are GONE from the delivered
@@ -83,7 +88,7 @@ export interface FidelityRecord {
 export function emptyFidelity(): FidelityRecord {
   return { checked: 0, units: 0, unchecked: 0, stronger: 0, unsupported: 0, rewritten: 0,
            replaced: 0, polarity_skipped: 0, polarity_default: 0, duplicate_skipped: 0,
-           polarity_sources: {}, names_blocked: [] };
+           no_candidate: 0, polarity_sources: {}, names_blocked: [] };
 }
 
 /**
@@ -666,6 +671,141 @@ export function absenceLines(synthesis: string): string[] {
     .filter((l) => polarityOf(l.replace(/^\s*\[(GAP|UNCERTAIN)\]\s*/i, "")) === "absence");
 }
 
+/**
+ * THE FLIP JUDGE. Three attempts have now shown that a lexicon cannot decide
+ * polarity: evidence nouns, then a negation list, then a "narrow" world-marker,
+ * and each time the tester found a sentence the words could not see -
+ * "Scarcely any of the sources quantify the failure rate", "…is far from
+ * settled", "…is hardly documented anywhere", an absence written as a question,
+ * and "The readings do not capture the resolution pathway", which cleared the
+ * denial gate and was then waved through by the marker. Every one was replaced
+ * by a line asserting what it denied, and every one recorded
+ * `polarity_skipped: 0`.
+ *
+ * So the words no longer decide. Before ANY correction is applied - a rewrite or
+ * a verbatim line, in any section - the judge is shown both texts and asked one
+ * question. FLIP, or an error, or an answer that cannot be parsed, leaves the
+ * unit exactly as written.
+ *
+ * The prompt has to draw one distinction, and it draws it with both examples:
+ * correcting a false claim about the WORLD toward the evidence is KEEP even
+ * though it reverses the claim's truth value; turning a statement about what the
+ * EVIDENCE contains or settles into its opposite is FLIP.
+ */
+export const FLIP_JUDGE_SYS =
+  `You are given a sentence from a report (ORIGINAL) and a proposed correction (CORRECTION). Answer with ONE word.
+
+FLIP - the correction asserts something the original DENIED, DOUBTED or LEFT OPEN, or denies something the original ASSERTED, about what the EVIDENCE contains, settles or establishes.
+  ORIGINAL:   "Scarcely any of the sources quantify the failure rate."
+  CORRECTION: "The failure rate is quantified at three percent across the reported fleet."
+  -> FLIP. The original says the evidence is thin; the correction says it is settled.
+
+KEEP - everything else, including a correction that REVERSES a claim about the WORLD to match the evidence. A report that states a fact the sources contradict is exactly what a correction is for.
+  ORIGINAL:   "The PSU is not proprietary."
+  CORRECTION: "The SFF uses a proprietary power supply and a proprietary power connector."
+  -> KEEP. The original makes a claim about the machine; the evidence contradicts it; the correction is the repair.
+
+The test is the SUBJECT of the sentence, not its grammar. A negative sentence about a THING may be corrected. A sentence about what the sources do or do not say may not be turned into a sentence about what is true. SECTION, when given, is the heading the sentence sits under: a heading like "What the evidence does not settle" or "Limitations" is itself a strong sign the sentence is about the evidence.
+
+NEIGHBOUR, when given, is text already in the document beside the sentence. If the CORRECTION would only repeat what NEIGHBOUR already says - the same point, in different words - answer "duplicate": true, whatever the verdict. A reader seeing the same statement twice in a row learns nothing from the second one.
+
+Return ONLY JSON: {"verdict":"FLIP"} or {"verdict":"KEEP"}, with "duplicate": true or false.`;
+
+export type FlipVerdict = "FLIP" | "KEEP";
+
+/** Parse the flip judge's answer. Anything unusable is FLIP: the conservative
+ *  outcome is refusing to change the sentence. */
+export function parseFlip(raw: string): FlipVerdict {
+  try {
+    const v = String((JSON.parse(raw) as { verdict?: unknown })?.verdict ?? "").trim().toUpperCase();
+    return v === "KEEP" ? "KEEP" : "FLIP";
+  } catch {
+    return "FLIP";
+  }
+}
+
+/**
+ * May this correction be applied?
+ *
+ * THERE IS NO LEXICAL FAST PATH. Attempt 5 shipped one - skip the call when
+ * NEITHER text denies anything by the lexical reading - and the first sentence
+ * it was tested on walked straight through it: "Scarcely any of the sources
+ * quantify the failure rate" carries no negation token, and neither does the
+ * [SOURCED] line that would have replaced it, so the pair looked like two
+ * positive statements and the correction was applied without a question. That
+ * is the same failure as attempts 3 and 4, one layer down: the words cannot
+ * tell when there is nothing to ask about either.
+ *
+ * So EVERY correction is asked about. The only answers that do not reach the
+ * judge are the ones that are not corrections at all - an empty string, or text
+ * identical to the sentence it would replace - and those are refused, not
+ * blessed, with `asked: false` so the caller can tell a duplication from a
+ * refusal.
+ *
+ * The same call answers the other question a word list kept getting wrong: does
+ * this correction just repeat the sentence beside it? The 100 Hz render ended
+ * with two consecutive sentences making one point, and the overlap test that
+ * exists to catch that shares 6 content words of 10 with the pair it missed.
+ * `NEIGHBOUR` puts the question to something that can read them.
+ */
+export async function allowsCorrection(
+  deps: Deps, original: string, correction: string, section = "", neighbour = "",
+): Promise<{ ok: boolean; asked: boolean; duplicate: boolean; keep: boolean }> {
+  if (!correction.trim() || correction.trim() === original.trim()) {
+    return { ok: false, asked: false, duplicate: true, keep: false };
+  }
+  try {
+    const raw = await deps.chat(
+      FLIP_JUDGE_SYS,
+      (section ? `SECTION: ${section}\n\n` : "") +
+        (neighbour ? `NEIGHBOUR: ${neighbour}\n\n` : "") +
+        `ORIGINAL: ${original}\n\nCORRECTION: ${correction}`,
+      { json: true, nothink: true },
+    );
+    const duplicate = parseDuplicate(raw);
+    const keep = parseFlip(raw) === "KEEP";
+    // `keep` is reported separately from `ok` because the two refusals are not
+    // equally strong. A flip may never be applied. A duplication normally may
+    // not either - but a unit carrying a name the evidence never uses has to
+    // lose that name, and a reader seeing a point twice is a smaller harm than
+    // an invented name shipping. The caller decides; this only says which
+    // refusal it is.
+    return { ok: keep && !duplicate, asked: true, duplicate, keep };
+  } catch {
+    return { ok: false, asked: true, duplicate: false, keep: false };  // an error is a refusal
+  }
+}
+
+/** Did the judge say the correction only repeats its neighbour? Unparseable is
+ *  false: the polarity verdict already fails closed, and calling every
+ *  unreadable answer a duplication would hide the reason. */
+export function parseDuplicate(raw: string): boolean {
+  try {
+    return (JSON.parse(raw) as { duplicate?: unknown })?.duplicate === true;
+  } catch {
+    return false;
+  }
+}
+
+/** How many candidate corrections the flip judge is asked about, in rank order. */
+export const FLIP_JUDGE_TRIES = 2;
+
+/** Candidate lines, best first, by shared content words with the unit. */
+export function rankCandidates(refs: string[], written: string, minShared = 0): string[] {
+  const bare = (t: string) => t.replace(CITE_RE, " ").toLowerCase();
+  const words = new Set((bare(written).match(/[a-z0-9]{4,}/g) || []));
+  return [...new Set(refs)]
+    .map((l) => {
+      const lw = new Set(bare(l).match(/[a-z0-9]{4,}/g) || []);
+      let shared = 0;
+      for (const w of words) if (lw.has(w)) shared++;
+      return { line: l.replace(TAG_RE, "").trim(), shared };
+    })
+    .filter((x) => x.line && x.shared >= minShared)
+    .sort((a, b) => b.shared - a.shared)
+    .map((x) => x.line);
+}
+
 export type Verdict = "SAME" | "WEAKER" | "STRONGER" | "UNSUPPORTED";
 const VERDICTS = new Set(["SAME", "WEAKER", "STRONGER", "UNSUPPORTED"]);
 
@@ -796,6 +936,25 @@ function countAgainst(record: FidelityRecord, delivered: string, judged: Set<str
   record.units = finalUnits.length;
   record.checked = finalUnits.filter((u) => judged.has(u.text)).length;
   record.unchecked = Math.max(0, record.units - record.checked);
+}
+
+/** The text a reader sees BESIDE this unit: its sibling sentences on the same
+ *  line, and the nearest prose line above it. What the judge needs to answer
+ *  "does this correction say anything the reader has not just read?" */
+function neighbourText(lines: string[], u: CitedUnit): string {
+  const own = lines[u.line] ?? "";
+  const mine = duplicateKey(u.text);
+  const siblings = splitSentences(own).flatMap(splitCoarseSpan)
+    .map((t) => t.trim())
+    .filter((t) => t && duplicateKey(t) !== mine);
+  let prev = "";
+  for (let k = u.line - 1; k >= 0 && k >= u.line - 3; k--) {
+    const l = (lines[k] || "").trim();
+    if (!l || /^#{1,6} /.test(l) || /^\|\s*-+/.test(l)) continue;
+    prev = l;
+    break;
+  }
+  return [...siblings, prev].filter(Boolean).join(" ").slice(0, 600);
 }
 
 /** Is this text already somewhere else in the document? */
@@ -991,6 +1150,63 @@ export async function checkRenderFidelity(
     const lines = doc.split(/\r?\n/);
     bad.push(...orphans, ...withNames);
 
+    // Every text this check has seen or written. The footer's N is counted over
+    // the DELIVERED document against this set, so "N of M" is two numbers about
+    // one artifact - the tester's X4 and the reviewer's K.10 were both about a
+    // count taken on a document nobody holds.
+    const judged = new Set<string>([...units, ...orphans].map((u) => u.text));
+    // EVERY condemned unit that ends uncorrected is counted exactly once, in
+    // one of these three, and comes OUT of `judged` so it lands in the footer's
+    // U. Attempt 4 counted nothing when the candidate pool was empty: the
+    // record said "checked 1 of 1, unchecked 0" over a sentence that
+    // contradicted its own cited source, and the footer printed no clause at
+    // all. Disclosure failed exactly where nothing could be corrected.
+    const skipForPolarity = (u: CitedUnit) => {
+      record.polarity_skipped++;
+      if (u.polarity?.source === "default-absence") record.polarity_default++;
+      judged.delete(u.text);
+    };
+    /** Left alone because the correction was already in the document. A
+     *  different reason from polarity, and counted separately: the attempt-3
+     *  record blamed polarity for refusals that were duplications. */
+    const skipForDuplicate = (u: CitedUnit) => {
+      record.duplicate_skipped++;
+      judged.delete(u.text);
+    };
+    /** Condemned, and nothing existed to correct it with. */
+    const skipNoCandidate = (u: CitedUnit) => {
+      record.no_candidate++;
+      judged.delete(u.text);
+    };
+    /** An edit that LANDED, counted even though the unit is still condemned.
+     *  The two numbers answer different questions - how much of the document
+     *  changed, and how much of it the check can still not vouch for - and a
+     *  unit can honestly be in both. The buyer's guide changed three lines and
+     *  reported "2 corrected" because this was booked on the way OUT of the
+     *  correction path, which a refusal never reaches. */
+    const noteEdit = (u: CitedUnit, i: number) => {
+      if (u.text !== bad[i].text) record.rewritten++;
+    };
+
+
+    // The census in `polarity_sources` follows whatever DECIDED the unit, not
+    // whatever the words looked like: a unit put to the flip judge is recorded
+    // as "judge", moving out of the lexical bucket it was provisionally filed
+    // under. The lexical keys that remain are exactly the units the fast path
+    // settled without a call. The total is still one entry per unit, which is
+    // the property that makes the record auditable.
+    const askedJudge = new WeakSet<CitedUnit>();
+    const noteAsked = (u: CitedUnit, asked: boolean) => {
+      if (!asked || askedJudge.has(u)) return;
+      askedJudge.add(u);
+      const k = u.polarity?.source;
+      if (k && record.polarity_sources[k]) {
+        record.polarity_sources[k]--;
+        if (!record.polarity_sources[k]) delete record.polarity_sources[k];
+      }
+      record.polarity_sources["judge"] = (record.polarity_sources["judge"] ?? 0) + 1;
+    };
+
     // One targeted re-render of the offending sentences, and only those.
     let fixed: Record<string, string> = {};
     try {
@@ -1067,16 +1283,29 @@ export async function checkRenderFidelity(
 
     const rewritten: CitedUnit[] = [];
     const changed: boolean[] = [];
-    bad.forEach((u, i) => {
+    for (const [i, u] of bad.entries()) {
       const next = (fixed[String(i + 1)] || "").trim();
-      // A REWRITE that flips polarity is refused outright. The rewriter is a
-      // model being asked to repair an overstatement; turning "the sources do
-      // not describe X" into a statement about X is not a repair.
-      if (next && next !== u.text && !polarityKeeps(u.text, next, u.section)) {
-        record.polarity_skipped++;
-        rewritten.push(u);
-        changed.push(false);
-        return;
+      // A REWRITE goes to the FLIP JUDGE like any other correction. The
+      // rewriter is a model being asked to repair an overstatement; turning
+      // "the sources do not describe X" into a statement about X is not a
+      // repair, and no word list can be trusted to tell the difference.
+      if (next && next !== u.text) {
+        const allowed = await allowsCorrection(
+          deps, u.text, next, u.section, neighbourText(lines, u),
+        );
+        noteAsked(bad[i], allowed.asked);
+        // The same rule on the rewrite path, where the rewriter was told which
+        // name offends: a named unit's repair is applied even if it repeats
+        // what stands beside it.
+        if (!allowed.ok && !(allowed.keep && u_names(u).length > 0)) {
+          // Refused - but NOT resolved. The unit is still condemned, so the
+          // verbatim pass below still owes it a correction; whatever happens
+          // there books the skip, exactly once. Attempt 4 counted here AND
+          // there, so one sentence could be two refusals in the record.
+          rewritten.push(u);
+          changed.push(false);
+          continue;
+        }
       }
 
       // A REWRITE that duplicates another sentence is refused for the same
@@ -1084,10 +1313,9 @@ export async function checkRenderFidelity(
       // consecutive sentences making the same point, and that one came from the
       // rewriter, not the fallback.
       if (next && next !== u.text && alreadyPresent(lines, next, u.line, u.text)) {
-        record.duplicate_skipped++;
-        rewritten.push(u);
+        rewritten.push(u);          // counted by the verbatim pass, not twice here
         changed.push(false);
-        return;
+        continue;
       }
       if (next && next !== u.text) {
         applyUnit(lines, u, next);
@@ -1097,7 +1325,7 @@ export async function checkRenderFidelity(
         rewritten.push(u);
         changed.push(false);
       }
-    });
+    }
 
     // Re-judge what was REWRITTEN, and only that. A unit the rewriter did not
     // touch cannot "come back" better: re-asking the same judge about the same
@@ -1121,28 +1349,8 @@ export async function checkRenderFidelity(
       }
     }
 
-    // Every text this check has seen or written. The footer's N is counted over
-    // the DELIVERED document against this set, so "N of M" is two numbers about
-    // one artifact - the tester's X4 and the reviewer's K.10 were both about a
-    // count taken on a document nobody holds.
-    const judged = new Set<string>([...units, ...orphans].map((u) => u.text));
-    /** Left exactly as it was, because every correction would have flipped what
-     *  it claims. It comes OUT of `judged`, so the footer counts it unchecked -
-     *  a sentence nothing could safely touch is not a sentence that was checked. */
-    const skipForPolarity = (u: CitedUnit) => {
-      record.polarity_skipped++;
-      if (u.polarity?.source === "default-absence") record.polarity_default++;
-      judged.delete(u.text);
-    };
-    /** Left alone because the correction was already in the document. A
-     *  different reason from polarity, and counted separately: the attempt-3
-     *  record blamed polarity for refusals that were duplications. */
-    const skipForDuplicate = (u: CitedUnit) => {
-      record.duplicate_skipped++;
-      judged.delete(u.text);
-    };
     const notes: Array<{ line: number; label: string; text: string }> = [];
-    rewritten.forEach((u, i) => {
+    for (const [i, u] of rewritten.entries()) {
       if (second[i] === "STRONGER" || second[i] === "UNSUPPORTED") {
         // An open question is never answered with a grounded line. A [GAP] item
         // in the limitations list is corrected by rewriting it or not at all;
@@ -1153,40 +1361,69 @@ export async function checkRenderFidelity(
           // text changed, and a counter that only counts REPLACEMENTS reported
           // "0 corrected" over a document whose questions had been rewritten.
           if (u.text !== bad[i].text) { judged.add(u.text); record.rewritten++; }
-          return;
+          // …and an open question the rewriter did not touch is a condemned
+          // unit that ends uncorrected. It is left standing deliberately, and
+          // for that reason it is counted deliberately too - silence here was
+          // the other half of "checked 1 of 1, unchecked 0".
+          else skipNoCandidate(u);
+          continue;
         }
-        // ── POLARITY IS PRESERVED BY CONSTRUCTION ──────────────────────────
-        // An ABSENCE sentence - one that denies, doubts, or reports that the
-        // sources do not say - may only be replaced by text that also does. Its
-        // candidates are the synthesis's own [GAP] and [UNCERTAIN] lines, never
-        // a [SOURCED] one, whatever words they share. If none matches, the unit
-        // is left EXACTLY as it is and counted: a sentence the engine cannot
-        // correct without inverting it is a sentence the engine does not touch.
-        const want = (u.polarity ?? polarityVerdict(u.text, u.section)).polarity;
-        const refs = want === "absence"
-          ? absenceLines(synthesis)
-          : (u.citations.length
-              ? referenceLines(synthesis, u.citations)
-              : nearestLines(synthesis, bad[i].text));
-        const sameSide = refs.filter((l) =>
-          polarityOf(l.replace(/^\s*\[(SOURCED|INFERRED|UNCERTAIN|GAP)\]\s*/i, "")) === want);
-        // No candidate of the same polarity: left alone, and counted - but only
-        // when there WERE candidates and polarity is what ruled them out. A unit
-        // with no evidence at all (an orphan) was already judged and already
-        // counted; it is not a polarity skip.
-        if (!sameSide.length) { if (refs.length) skipForPolarity(u); return; }
-        // The floor applies when the candidates are NOT this unit's own cited
-        // lines: an absence unit draws from the run's [GAP]/[UNCERTAIN] lines,
-        // and an uncited unit from whatever is nearest, and neither link is as
-        // strong as a citation.
-        const ownCitations = want === "assertion" && u.citations.length > 0;
-        let verbatim = verbatimFallback(sameSide, u.text, 1, ownCitations ? 0 : NEAREST_MIN_OVERLAP);
-        if (verbatim && !polarityKeeps(u.text, verbatim, u.section)) { skipForPolarity(u); return; }
-        // An ABSENCE unit with no candidate close enough to its subject is left
-        // alone and counted. The alternative is the defect this exists for: a
-        // grounded line about something else, pasted over a sentence saying
-        // what the evidence does not settle.
-        if (!verbatim && want === "absence") { skipForPolarity(u); return; }
+        // ── THE JUDGE DECIDES FLIPS ────────────────────────────────────────
+        // Candidates are ranked as they always were - the unit's own cited
+        // lines, or the nearest ones, plus the run's [GAP]/[UNCERTAIN] lines so
+        // a sentence about what the evidence lacks has something it CAN be
+        // corrected to. Nothing lexical filters them any more: each one is put
+        // to the flip judge with the original, and the first KEEP is applied.
+        const pool = [
+          ...(u.citations.length
+            ? referenceLines(synthesis, u.citations)
+            : nearestLines(synthesis, bad[i].text)),
+          ...absenceLines(synthesis),
+        ];
+        const ownCitations = u.citations.length > 0;
+        const ranked = rankCandidates(pool, u.text, ownCitations ? 0 : NEAREST_MIN_OVERLAP)
+          .slice(0, FLIP_JUDGE_TRIES);
+        if (!ranked.length) { noteEdit(u, i); skipNoCandidate(u); continue; }
+
+        // EXACTLY ONCE. The reason is the one the BEST candidate drew - the
+        // correction that would actually have been made - and it is booked
+        // after the loop, never inside it. Counting inside the loop made one
+        // sentence two refusals in the record.
+        let verbatim = "";
+        let refused: "" | "duplicate" | "judge" = "";
+        for (const candidate of ranked) {
+          if (alreadyPresent(lines, candidate, u.line, u.text)) {
+            if (!refused) refused = "duplicate";
+            continue;
+          }
+          const allowed = await allowsCorrection(
+            deps, u.text, candidate, u.section, neighbourText(lines, u),
+          );
+          noteAsked(bad[i], allowed.asked);
+          // THE NAME WINS OVER THE STUTTER. On the buyer's guide the judge
+          // called the OEM sentence's correction a restatement of the sentence
+          // beside it - correctly - and refusing it left "OEM" in a delivered
+          // document while the footer named two other blocked names. A gate
+          // that can be talked out of firing by a readability guard is not a
+          // gate. Polarity still refuses: a flip is never worth a name.
+          if (allowed.ok || (allowed.keep && u_names(u).length > 0)) {
+            verbatim = candidate;
+            break;
+          }
+          // WHICH refusal is booked when both fire: the flip. A correction that
+          // would invert the sentence is the thing this module exists to refuse,
+          // and reporting it as a duplication would hide it. `asked: false`
+          // means the judge was never reached - the candidate was empty or
+          // identical to the sentence it would replace - which is a duplication.
+          if (!refused) refused = !allowed.asked ? "duplicate" : (allowed.keep ? "duplicate" : "judge");
+        }
+        if (!verbatim) {
+          noteEdit(u, i);
+          if (refused === "judge") skipForPolarity(u);
+          else if (refused === "duplicate") skipForDuplicate(u);
+          else skipNoCandidate(u);
+          continue;
+        }
         if (verbatim && u.cell >= 0) {
           // The reviewer's K.9: keep the verbatim line exactly, and fix the
           // LAYOUT instead. A long grounded sentence in a column whose siblings
@@ -1206,23 +1443,27 @@ export async function checkRenderFidelity(
             judged.add(`**Note ${n}.** ${cited}`);
             judged.add(cited);
             record.replaced++;
-            return;
+            continue;
           }
         }
         // A replacement that is already IN the document says nothing new and
         // reads as a stutter: the 100 Hz render ended with two consecutive
         // sentences making the same point, because the only same-polarity
         // candidate was the sentence above. Leave the unit; it is counted.
-        if (verbatim && alreadyPresent(lines, verbatim, u.line, u.text)) { skipForDuplicate(u); return; }
+        if (verbatim && alreadyPresent(lines, verbatim, u.line, u.text)) {
+          noteEdit(u, i);
+          skipForDuplicate(u);
+          continue;
+        }
         if (verbatim) {
           applyUnit(lines, u, verbatim);
           judged.add(verbatim);
           record.replaced++;
-          return;
+          continue;
         }
       }
       if (u.text !== bad[i].text) { judged.add(u.text); record.rewritten++; }
-    });
+    }
 
     const finalDoc = placeNotes(lines, notes, eol);
     countAgainst(record, finalDoc, judged);

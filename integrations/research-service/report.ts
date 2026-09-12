@@ -274,6 +274,10 @@ export interface FidelityFooter {
    *  what they claim, and how many of those the conservative DEFAULT caught. */
   polarity_skipped?: number;
   polarity_default?: number;
+  /** …because the only correction on offer was already in the document. */
+  duplicate_skipped?: number;
+  /** …because there was nothing in the evidence to correct them WITH. */
+  no_candidate?: number;
   /** Names the grounding diff flagged that the check removed. */
   names_blocked?: string[];
   /** Every unit the document has - the denominator. */
@@ -357,7 +361,11 @@ export function coverageFooter(
   // job row (`prose_ungrounded`) is not something the colleague this report is
   // written for will ever see, and neither is a passing test.
   if (fidelity) {
-    if (fidelity.checked > 0) {
+    // The line prints whenever the check RAN, not only when something survived
+    // it. A document whose one condemned sentence could not be corrected has
+    // `checked: 0`, and attempt 4 printed nothing at all about it - the
+    // disclosure went silent exactly where the reader needed it.
+    if (fidelity.checked > 0 || (fidelity.units ?? 0) > 0) {
       const corrected = (fidelity.rewritten || 0) + (fidelity.replaced || 0);
       // N OF M, and the units nothing looked at. A coverage number with no
       // denominator was the tester's X1 and X4 in one line: a confident
@@ -379,9 +387,13 @@ export function coverageFooter(
       // an inversion reported `polarity_skipped: 0`: the guard had not declined,
       // it had never engaged, and nothing in the footer could say so.
       const held = fidelity.polarity_skipped ?? 0;
-      if (held) {
-        const byDefault = fidelity.polarity_default ?? 0;
-        parts.push(`polarity: ${held} left as written (${byDefault} by default)`);
+      const dup = fidelity.duplicate_skipped ?? 0;
+      const none = fidelity.no_candidate ?? 0;
+      if (held + dup + none > 0) {
+        parts.push(
+          `left as written: ${held + dup + none} ` +
+          `(${held} would invert, ${dup} already said, ${none} nothing to cite)`,
+        );
       }
       const blocked = fidelity.names_blocked?.length ?? 0;
       if (blocked) parts.push(`names: ${blocked} blocked`);
