@@ -130,8 +130,8 @@ Deno.test("ACCEPTANCE 3: the footer's M is countUnits of the delivered document"
   // The three renders carry the record their own run produced, in the header.
   const cases: Array<[string, number, number]> = [
     ["rendered-64ac38cf-buyers-guide.md", 43, 44],
-    ["rendered-a337520c-scientific-paper.md", 65, 67],
-    ["rendered-5ab36fe0-product-comparison.md", 25, 25],
+    ["rendered-a337520c-scientific-paper.md", 67, 67],
+    ["rendered-5ab36fe0-product-comparison.md", 24, 25],
   ];
   for (const [name, checked, units] of cases) {
     const doc = body(name);

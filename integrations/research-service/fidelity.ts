@@ -62,6 +62,16 @@ export interface FidelityRecord {
   /** Units left exactly as they were because no correction could be made
    *  without flipping what they claim. They are part of `unchecked`. */
   polarity_skipped: number;
+  /** …of those, how many were protected by the DEFAULT rather than by a
+   *  heading or a named evidence noun. This is the number that says how much
+   *  the conservative default is doing, and it is printed. */
+  polarity_default: number;
+  /** Units left alone because the only correction on offer was already in the
+   *  document. A duplication is not a polarity refusal and is not counted as
+   *  one - the tester's honesty nit from attempt 3. */
+  duplicate_skipped: number;
+  /** How every unit's polarity was decided, so the record can be audited. */
+  polarity_sources: Record<string, number>;
   /** Names the grounding diff flagged that are GONE from the delivered
    *  document because this check removed them. Counted only when the recount
    *  says so - "blocked" is a claim about the artifact, not about intent. */
@@ -72,7 +82,8 @@ export interface FidelityRecord {
 
 export function emptyFidelity(): FidelityRecord {
   return { checked: 0, units: 0, unchecked: 0, stronger: 0, unsupported: 0, rewritten: 0,
-           replaced: 0, polarity_skipped: 0, names_blocked: [] };
+           replaced: 0, polarity_skipped: 0, polarity_default: 0, duplicate_skipped: 0,
+           polarity_sources: {}, names_blocked: [] };
 }
 
 /**
@@ -116,6 +127,8 @@ export interface CitedUnit {
   section: string;
   /** Flagged names this unit uses (filled by the check, not by extraction). */
   names?: string[];
+  /** How this unit's polarity was decided (filled by the check). */
+  polarity?: PolarityVerdict;
 }
 
 const CITE_RE = /\[Sources?\s*[^\]]*\]/gi;
@@ -546,52 +559,93 @@ export function verbatimFallback(refs: string[], written = "", max = 1, minShare
 
 export type Polarity = "absence" | "assertion";
 
-/** Words for the evidence itself: the subject of a sentence about what is known. */
+/** How a unit's polarity was decided - recorded, so a reader can see WHY. */
+export type PolaritySource =
+  | "heading"          // the section (or a [GAP] tag) settles it
+  | "evidence-noun"    // the sentence names the evidence and denies something of it
+  | "default-absence"  // it denies or doubts SOMETHING, and nothing marks it a world claim
+  | "world-marker"     // a negated, non-epistemic predicate about a concrete subject
+  | "no-negation";     // it denies nothing
+
+export interface PolarityVerdict { polarity: Polarity; source: PolaritySource; }
+
+/** Words for the evidence itself. */
 const EVIDENCE_NOUN =
-  /(?<![a-z])(sources?|evidence|data|stud(y|ies)|literature|documentation|material|record|provided)(?![a-z])/i;
-/** Denial or doubt. */
+  /(?<![a-z])(sources?|evidence|data|stud(y|ies)|literature|documentation|document|manual|report|record|material|provided|text|excerpt|transcript|paper|thread|page)(?![a-z])/i;
+/** Verbal denial. */
 const NEGATION =
-  /(?<![a-z])(not|no|never|none|neither|nor|cannot|can't|doesn't|don't|didn't|isn't|aren't|without|lacks?|lacking|absent|absence|missing|silent|unaddressed|unresolved|unconfirmed|unverified|undetermined|inconclusive)(?![a-z])/i;
-/** Uncertainty about the state of knowledge, with or without an evidence noun. */
-const UNCERTAIN_SHAPE = [
-  /\b(it is|it remains|remains|is|are)\s+(unclear|unknown|uncertain|undetermined|not known|not established)\b/i,
-  /\b(unclear|unknown|uncertain|undetermined)\s+(whether|if|how|what|which|why)\b/i,
-  /\bremains? open\b/i,
-  /\bnot (addressed|described|documented|confirmed|specified|stated|established|reported)\b/i,
-  /\bfails? to (say|state|describe|address|establish|trace)\b/i,
-];
+  /(?<![a-z])(not|n't|no|never|nothing|none|neither|nor|cannot|without|lacks?|lacking|absent|missing|silent|fails? to|unable)(?![a-z])/i;
+/** Doubt about the state of knowledge. */
+const UNCERTAINTY =
+  /(?<![a-z])(unclear|unknown|uncertain|undetermined|unconfirmed|unverified|unaddressed|unresolved|inconclusive|whether|if it is known|remains? open|left open|not (addressed|described|documented|confirmed|specified|stated|established|reported))(?![a-z])/i;
+/** Verbs a sentence uses when it is talking about what a SOURCE does. */
+const EPISTEMIC_VERB =
+  /(?<![a-z])(say|says|said|state|states|stated|describe|describes|described|address|addresses|addressed|document|documents|documented|confirm|confirms|confirmed|report|reports|reported|mention|mentions|mentioned|specify|specifies|specified|establish|establishes|established|trace|traces|traced|cover|covers|covered|indicate|indicates|indicated|suggest|suggests|suggested|show|shows|shown|prove|proves|proven|quantify|quantifies|quantified|rule(d)? out)(?![a-z])/i;
+/** A concrete subject: "The PSU…", "A capacitor…", "Dell…" - never a pronoun or a
+ *  negative pronoun, which is how "It does not say…" and "Nothing in the record…" read. */
+const CONCRETE_SUBJECT = /^(the|a|an)\s+[a-z0-9][\w-]*|^[A-Z][\w-]+/i;
+const PRONOUN_SUBJECT = /^(it|this|that|these|those|there|they|he|she|we|you|i|nothing|none|neither|no\s)/i;
 
 /**
- * Does this sentence report an ABSENCE IN THE EVIDENCE - deny that the sources
- * say something, or doubt that it is known - or does it ASSERT?
+ * Does this unit report an ABSENCE - deny something, or doubt that it is known -
+ * or does it ASSERT?
  *
- * The distinction is NOT grammatical negation. "The PSU never fails" is a
- * negative sentence and an ordinary world claim, and correcting it is exactly
- * this module's job. What must never be corrected INTO an assertion is a
- * sentence whose subject is the evidence ("the sources do not describe...", "the
- * data do not trace...") or the state of knowledge ("it is unclear whether...").
- * That is the same subject-of-the-sentence test the curator's meta filter makes,
- * for the same reason.
+ * THE DEFAULT IS ABSENCE, and that is the whole of the fix. The previous version
+ * decided absence only when a fixed list of evidence nouns fired, so a miss sent
+ * the unit down the ordinary path where a [SOURCED] line replaces it - the
+ * inversion this guard exists to stop. The tester reproduced it by changing one
+ * noun: "The EEG and GVS DATA … do not trace the resolution pathway" was
+ * protected and "…RECORDINGS…" was not, and the second was replaced by a
+ * positive claim about something else.
  *
- * A SECTION can decide it on its own: everything under "What the evidence does
- * not settle" and "Limitations and open questions" is an absence claim by the
- * section's own definition, whatever a sentence's grammar looks like.
+ * So: anything that denies or doubts is an absence UNLESS something positively
+ * marks it a world claim. The marker is deliberately narrow - a negated
+ * NON-EPISTEMIC predicate about a concrete subject, in a findings section, with
+ * no evidence noun anywhere in the unit:
  *
- * Only the head clause is read: a caveat tail ("…, though no source confirms…")
- * does not turn a finding into an absence.
+ *   "The PSU never fails."                    -> world-marker (fails is not an
+ *                                                epistemic verb; PSU is concrete)
+ *   "The manual does not document the part."  -> evidence-noun
+ *   "The recordings do not trace the pathway."-> default-absence (trace IS
+ *                                                epistemic: it is what a source does)
+ *   "It does not say whether it was tested."  -> default-absence (pronoun subject)
+ *   "Nothing in the record confirms X."       -> default-absence
+ *
+ * Every way of being wrong now lands on "absence", and an absence can only be
+ * replaced by another absence or left alone. THAT is what makes a miss
+ * conservative - the previous claim to the same effect was false as built.
  */
-export function polarityOf(text: string, section = ""): Polarity {
-  // The citation brackets come out first: "[Source 7]" contains the word
-  // "Source", and with a negation anywhere in the sentence that made every
-  // cited negative claim look like a statement about the evidence.
+export function polarityVerdict(text: string, section = ""): PolarityVerdict {
   const t = String(text || "").replace(CITE_RE, " ").trim();
-  if (!t) return "assertion";
-  if (/does not settle|limitation|open question/i.test(section)) return "absence";
-  if (/^\s*\[GAP\]/i.test(t)) return "absence";
+  if (!t) return { polarity: "assertion", source: "no-negation" };
+  if (/does not settle|limitation|open question/i.test(section)) {
+    return { polarity: "absence", source: "heading" };
+  }
+  if (/^\s*\[GAP\]/i.test(text)) return { polarity: "absence", source: "heading" };
+
   const head = t.split(/;|,\s+(?:but|though|although|however|whereas|yet)\b/i)[0];
-  if (UNCERTAIN_SHAPE.some((re) => re.test(head))) return "absence";
-  if (EVIDENCE_NOUN.test(head) && NEGATION.test(head)) return "absence";
-  return "assertion";
+  const denies = NEGATION.test(head) || UNCERTAINTY.test(head);
+  if (!denies) return { polarity: "assertion", source: "no-negation" };
+
+  // It denies something. From here the answer is ABSENCE unless the narrow
+  // world-claim marker fires.
+  if (EVIDENCE_NOUN.test(t)) return { polarity: "absence", source: "evidence-noun" };
+  if (UNCERTAINTY.test(head)) return { polarity: "absence", source: "default-absence" };
+
+  const findingsSection = section !== "" && !/does not settle|limitation|open question/i.test(section);
+  const subject = head.trim();
+  const worldClaim =
+    findingsSection &&
+    !PRONOUN_SUBJECT.test(subject) &&
+    CONCRETE_SUBJECT.test(subject) &&
+    !EPISTEMIC_VERB.test(head);
+  return worldClaim
+    ? { polarity: "assertion", source: "world-marker" }
+    : { polarity: "absence", source: "default-absence" };
+}
+
+export function polarityOf(text: string, section = ""): Polarity {
+  return polarityVerdict(text, section).polarity;
 }
 
 /** A correction may never flip polarity. */
@@ -745,11 +799,59 @@ function countAgainst(record: FidelityRecord, delivered: string, judged: Set<str
 }
 
 /** Is this text already somewhere else in the document? */
-function alreadyPresent(lines: string[], text: string, exceptLine: number): boolean {
-  const key = (t: string) => t.replace(CITE_RE, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const want = key(text);
+function alreadyPresent(
+  lines: string[], text: string, exceptLine: number, exceptText = "",
+): boolean {
+  const want = duplicateKey(text);
   if (want.length < 20) return false;
-  return lines.some((l, i) => i !== exceptLine && key(l).includes(want));
+  const skip = duplicateKey(exceptText);
+  return lines.some((l, i) => {
+    // On the unit's OWN line, compare against its SIBLING sentences: a coarse
+    // span holds two, and the sentence being duplicated was the one beside it.
+    // Excluding the whole line is what let the 100 Hz stutter survive.
+    const spans = i === exceptLine ? splitSentences(l).flatMap(splitCoarseSpan) : [l];
+    return spans.some((span) => {
+      const have = duplicateKey(span);
+      // A blank line's key is "", and every string contains "".
+      if (have.length < 20) return false;
+      if (skip && have === skip) return false;
+      if (have.includes(want) || want.includes(have)) return true;
+      return nearDuplicate(want, have);
+    });
+  });
+}
+
+/** Citations, figure annotations and punctuation removed; whitespace collapsed. */
+function duplicateKey(text: string): string {
+  return String(text || "")
+    .replace(CITE_RE, " ")
+    .replace(/\(unverified figure:[^)]*\)/gi, " ")
+    .replace(/\([^)]*\)/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/**
+ * NEAR-duplicate, not just exact. The attempt-3 render still ended with two
+ * consecutive sentences making the same point, because the replacement differed
+ * from the sentence above it by a parenthetical and a figure annotation - and an
+ * exact-substring test cannot see that. Nine tenths of one inside the other, by
+ * word set, is the same sentence for a reader.
+ */
+function nearDuplicate(a: string, b: string): boolean {
+  const aw = new Set(a.split(" ").filter((w) => w.length > 3));
+  const bw = new Set(b.split(" ").filter((w) => w.length > 3));
+  if (aw.size < 6 || bw.size < 6) return false;
+  const small = aw.size <= bw.size ? aw : bw;
+  const large = aw.size <= bw.size ? bw : aw;
+  let shared = 0;
+  for (const w of small) if (large.has(w)) shared++;
+  // 0.7, not 0.9: the pair this exists for shares 13 of 17 content words and
+  // differs by a parenthetical and a figure annotation. Leaning permissive is
+  // safe in the same direction as everything else here - a false duplicate
+  // leaves the sentence alone and says so, a missed one leaves a stutter.
+  return shared / small.size >= 0.7;
 }
 
 /** Is this line inside the limitations section? */
@@ -785,6 +887,14 @@ export async function checkRenderFidelity(
   try {
     const all = citedUnits(doc);
     record.units = all.length;
+    // Every unit's polarity is decided ONCE, here, and recorded - so the run can
+    // say how many of its sentences were protected by the default rather than by
+    // a heading or a named evidence noun. Attempt 3 could not see its own blind
+    // spot; this is the number that shows it.
+    for (const u of all) {
+      u.polarity = polarityVerdict(u.text, u.section);
+      record.polarity_sources[u.polarity.source] = (record.polarity_sources[u.polarity.source] ?? 0) + 1;
+    }
 
     // ── The NAMES gate ────────────────────────────────────────────────────
     // A name the grounded answer never uses is not a claim the evidence can
@@ -969,6 +1079,16 @@ export async function checkRenderFidelity(
         return;
       }
 
+      // A REWRITE that duplicates another sentence is refused for the same
+      // reason a verbatim replacement is: the 100 Hz render ended with two
+      // consecutive sentences making the same point, and that one came from the
+      // rewriter, not the fallback.
+      if (next && next !== u.text && alreadyPresent(lines, next, u.line, u.text)) {
+        record.duplicate_skipped++;
+        rewritten.push(u);
+        changed.push(false);
+        return;
+      }
       if (next && next !== u.text) {
         applyUnit(lines, u, next);
         rewritten.push({ ...u, text: next });
@@ -1011,6 +1131,14 @@ export async function checkRenderFidelity(
      *  a sentence nothing could safely touch is not a sentence that was checked. */
     const skipForPolarity = (u: CitedUnit) => {
       record.polarity_skipped++;
+      if (u.polarity?.source === "default-absence") record.polarity_default++;
+      judged.delete(u.text);
+    };
+    /** Left alone because the correction was already in the document. A
+     *  different reason from polarity, and counted separately: the attempt-3
+     *  record blamed polarity for refusals that were duplications. */
+    const skipForDuplicate = (u: CitedUnit) => {
+      record.duplicate_skipped++;
       judged.delete(u.text);
     };
     const notes: Array<{ line: number; label: string; text: string }> = [];
@@ -1034,7 +1162,7 @@ export async function checkRenderFidelity(
         // a [SOURCED] one, whatever words they share. If none matches, the unit
         // is left EXACTLY as it is and counted: a sentence the engine cannot
         // correct without inverting it is a sentence the engine does not touch.
-        const want = polarityOf(u.text, u.section);
+        const want = (u.polarity ?? polarityVerdict(u.text, u.section)).polarity;
         const refs = want === "absence"
           ? absenceLines(synthesis)
           : (u.citations.length
@@ -1085,7 +1213,7 @@ export async function checkRenderFidelity(
         // reads as a stutter: the 100 Hz render ended with two consecutive
         // sentences making the same point, because the only same-polarity
         // candidate was the sentence above. Leave the unit; it is counted.
-        if (verbatim && alreadyPresent(lines, verbatim, u.line)) { skipForPolarity(u); return; }
+        if (verbatim && alreadyPresent(lines, verbatim, u.line, u.text)) { skipForDuplicate(u); return; }
         if (verbatim) {
           applyUnit(lines, u, verbatim);
           judged.add(verbatim);

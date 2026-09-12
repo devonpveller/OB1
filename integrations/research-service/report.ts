@@ -270,6 +270,10 @@ export function searchHealthLabel(r: SearchRecord): "ok" | "DEGRADED" {
 /** What the per-sentence fidelity check did to the rendered report. */
 export interface FidelityFooter {
   checked: number;
+  /** Units left exactly as written because correcting them would have flipped
+   *  what they claim, and how many of those the conservative DEFAULT caught. */
+  polarity_skipped?: number;
+  polarity_default?: number;
   /** Names the grounding diff flagged that the check removed. */
   names_blocked?: string[];
   /** Every unit the document has - the denominator. */
@@ -369,6 +373,16 @@ export function coverageFooter(
       // reached the reader. Printed only when there were any: a counter that
       // says "0 blocked" on every report teaches the reader to skip the line,
       // and this one is worth reading on the runs where it is not zero.
+      // Sentences the check declined to touch because every correction on offer
+      // would have inverted them - and how many were caught by the default
+      // rather than by a heading or a named evidence noun. The run that shipped
+      // an inversion reported `polarity_skipped: 0`: the guard had not declined,
+      // it had never engaged, and nothing in the footer could say so.
+      const held = fidelity.polarity_skipped ?? 0;
+      if (held) {
+        const byDefault = fidelity.polarity_default ?? 0;
+        parts.push(`polarity: ${held} left as written (${byDefault} by default)`);
+      }
       const blocked = fidelity.names_blocked?.length ?? 0;
       if (blocked) parts.push(`names: ${blocked} blocked`);
     } else if (fidelity.error) {

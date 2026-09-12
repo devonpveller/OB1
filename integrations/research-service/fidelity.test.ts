@@ -18,11 +18,12 @@
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   absenceLines, applyUnit, CELL_NOTE_WORDS, checkRenderFidelity, citedUnits, countUnits, namesIn,
-  nearestLines, normaliseCitations, polarityOf, referenceLines, splitSentences, supersetCitations,
-  verbatimFallback,
+  nearestLines, normaliseCitations, polarityOf, polarityVerdict, referenceLines, splitSentences,
+  supersetCitations, verbatimFallback,
 } from "./fidelity.ts";
 import { renderSys, templateById } from "./templates.ts";
 import { expansionMatch, renderGroundingDiff } from "./grounding.ts";
+import type { Polarity } from "./fidelity.ts";
 import { coverageFooter, emptySearchRecord } from "./report.ts";
 import type { Deps } from "./harness.ts";
 
@@ -897,7 +898,11 @@ Deno.test("POLARITY: an ordinary negative CLAIM is still corrected", () => {
   // The distinction is the SUBJECT, not the grammar. "The PSU never fails" is a
   // world claim that happens to be negative, and correcting it is this module's
   // job; "the sources do not describe X" is a claim about the evidence.
-  assertEquals(polarityOf("The PSU never fails. [Source 7]"), "assertion");
+  // A world claim needs a findings SECTION to be recognised as one: with no
+  // section at all the conservative default applies, which is the whole point
+  // of the rule - a document with no headings is judged safely, not loosely.
+  assertEquals(polarityOf("The PSU never fails. [Source 7]", "Findings"), "assertion");
+  assertEquals(polarityOf("The PSU never fails. [Source 7]"), "absence");
   assertEquals(polarityOf("The connector is universal [Source 13]."), "assertion");
   assertEquals(polarityOf("The sources do not describe the build agents [Source 2]."), "absence");
   assertEquals(polarityOf("It is unclear whether the effects are additive."), "absence");
@@ -951,4 +956,134 @@ Deno.test("the footer's blocked names and prose_ungrounded cannot disagree", asy
   assertEquals(out.record.names_blocked, ["ATX"]);
   assertEquals(stillFlagged, []);
   for (const n of out.record.names_blocked) assert(!stillFlagged.includes(n), n);
+});
+
+// ── The default is ABSENCE (attempt 4) ────────────────────────────────────
+//
+// Attempt 3 decided absence only when a fixed list of evidence nouns fired, and
+// a miss was NOT conservative: the unit went down the ordinary path where a
+// [SOURCED] line replaced it. The tester ran 21 probes and six missed that way,
+// two of them from this plan's own attack list; the sharpest was POLARITY test
+// 2 with one noun changed - "data" -> "recordings" - which reproduced the
+// attempt-2 inversion with `polarity_skipped: 0`, the guard never engaging and
+// nothing able to say so.
+//
+// Every one of the tester's probes is pinned here, with the verdict AND the
+// reason it was reached.
+
+Deno.test("POLARITY: the six probes attempt 3 classified as assertions", () => {
+  const probes: Array<[string, string]> = [
+    ["The manual does not document a replacement procedure.", "evidence-noun"],
+    ["The Owner's Manual does not document the SFF PSU part number.", "evidence-noun"],
+    ["Contamination cannot be ruled out.", "default-absence"],
+    ["It does not say whether the unit was tested.", "default-absence"],
+    ["Nothing in the record confirms the 7th-gen ceiling.", "evidence-noun"],
+    ["The report does not state a figure, but the manual does.", "evidence-noun"],
+  ];
+  for (const [text, source] of probes) {
+    const v = polarityVerdict(text, "Findings");
+    assertEquals(v.polarity, "absence", text);
+    assertEquals(v.source, source, `${text} -> ${v.source}`);
+  }
+});
+
+Deno.test("POLARITY: the synonym that reproduced the inversion", async () => {
+  // One noun changed from the pinned sentence. Under attempt 3 this was an
+  // assertion and was replaced by "VR motion sickness is attributed to a
+  // sensory conflict…" - the attempt-2 defect, by synonym.
+  for (const noun of ["data", "recordings", "measurements", "traces", "logs"]) {
+    const sentence =
+      `The EEG and GVS ${noun} [Source 1, 2] characterize the conflict state but do not trace ` +
+      "the resolution pathway.";
+    const v = polarityVerdict(sentence, "Findings");
+    assertEquals(v.polarity, "absence", `${noun}: ${v.source}`);
+    const out = await checkRenderFidelity(condemnAll, `## Findings\n\n${sentence}`, POLARITY_SYNTH);
+    const after = out.rendered.split("\n").pop() ?? "";
+    assertEquals(polarityOf(after, "Findings"), "absence", after);
+    assert(!after.includes("attributed to a sensory conflict"), `${noun}: ${after}`);
+  }
+});
+
+Deno.test("POLARITY: the plan's own attack list lands on the safe side", () => {
+  const cases: Array<[string, string, Polarity]> = [
+    // a double negative
+    ["It is not the case that no source documents the ceiling.", "Findings", "absence"],
+    // an absence whose evidence noun is a pronoun
+    ["It does not say which BIOS version shipped.", "Findings", "absence"],
+    // a positive sentence inside the limitations section
+    ["The chassis is steel and the PSU is 180 W.", "Limitations and open questions", "absence"],
+    // a table cell that is an absence
+    ["Not described in the sources", "Failure modes by subsystem", "absence"],
+    // "is not addressed" -> "is addressed"
+    ["The question is addressed in two sources.", "Findings", "assertion"],
+    // a heading-less document falls to the DEFAULT, not to the loose path
+    ["The recordings do not trace the pathway.", "", "absence"],
+  ];
+  for (const [text, section, want] of cases) {
+    assertEquals(polarityOf(text, section), want, `${section}: ${text}`);
+  }
+});
+
+Deno.test("POLARITY: the narrow world-marker, and how narrow it is", () => {
+  // It fires only for a negated NON-epistemic predicate about a concrete
+  // subject, in a findings section, with no evidence noun anywhere.
+  assertEquals(polarityVerdict("The PSU never fails.", "Findings").source, "world-marker");
+  assertEquals(polarityVerdict("The unit does not support Windows 11.", "Findings").source, "world-marker");
+  // …and every way of falling short lands on absence:
+  assertEquals(polarityVerdict("It never fails.", "Findings").source, "default-absence");          // pronoun
+  assertEquals(polarityVerdict("The manual never fails.", "Findings").source, "evidence-noun");     // evidence noun
+  assertEquals(polarityVerdict("The PSU does not describe the fault.", "Findings").source, "default-absence"); // epistemic verb
+  assertEquals(polarityVerdict("The PSU never fails.", "").source, "default-absence");              // no section
+  assertEquals(polarityVerdict("The PSU never fails.", "Limitations and open questions").source, "heading");
+});
+
+Deno.test("POLARITY: every unit's decision is RECORDED, and the footer can say so", async () => {
+  const doc = [
+    "## Findings",
+    "",
+    "The PSU fails on a cold start [Source 7].",
+    "The recordings do not trace the resolution pathway [Source 1].",
+    "",
+    "## What the evidence does not settle",
+    "",
+    "The capacitor failure rate on this platform is stated nowhere in the material.",
+  ].join("\n");
+  const out = await checkRenderFidelity(condemnAll, doc, POLARITY_SYNTH);
+  const sources = out.record.polarity_sources;
+  assertEquals(Object.values(sources).reduce((a, b) => a + b, 0), out.record.units);
+  assert((sources["default-absence"] ?? 0) >= 1, JSON.stringify(sources));
+  assert((sources["heading"] ?? 0) >= 1, JSON.stringify(sources));
+  // …and a unit held back by the DEFAULT is counted separately from one held
+  // back by a heading, which is the number that says how much work the
+  // conservative default is doing.
+  assert(out.record.polarity_default <= out.record.polarity_skipped);
+});
+
+Deno.test("a duplication is not a polarity refusal", async () => {
+  // The tester's honesty nit: attempt 3 booked a duplicate skip to
+  // `polarity_skipped`, so that counter over-reported polarity as the cause.
+  const line = "The Dell OptiPlex 3050 SFF uses a proprietary power supply and a proprietary " +
+    "power connector, which makes it difficult for users to install aftermarket PSUs.";
+  const doc = ["## Findings", "", line + " [Source 13]", "", "The connector is standard [Source 13]."].join("\n");
+  const synth = `[SOURCED] ${line} [Source 13]`;
+  const out = await checkRenderFidelity(condemnAll, doc, synth);
+  assertEquals(out.record.duplicate_skipped >= 1, true, JSON.stringify(out.record));
+  assertEquals(out.record.polarity_skipped, 0, JSON.stringify(out.record));
+});
+
+Deno.test("a NEAR-duplicate is refused too, not only an exact one", async () => {
+  // The third row of T3b's own defect table survived attempt 3: the replacement
+  // differed from the sentence above it by a parenthetical and a figure
+  // annotation, and an exact-substring test cannot see that.
+  const above = "The interaction between 100 Hz sound and other VR countermeasures is not " +
+    "addressed in any provided source [Source 11, 12].";
+  const unit = "It is unclear whether the effects are additive, redundant, or antagonistic [Source 11].";
+  const doc = ["## Findings", "", above, unit].join("\n");
+  const synth = "[UNCERTAIN] Whether the 100 Hz effect is additive with other VR-specific " +
+    "countermeasures (e.g., high frame rates, vignetting) is not addressed in any provided " +
+    "source. (unverified figure: 100) [Source 11, 12]";
+  const out = await checkRenderFidelity(condemnAll, doc, synth);
+  const after = out.rendered.split("\n").pop() ?? "";
+  assertEquals(after, unit, "a near-duplicate was pasted under the sentence it duplicates");
+  assertEquals(out.record.duplicate_skipped, 1, JSON.stringify(out.record));
 });

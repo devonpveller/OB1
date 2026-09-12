@@ -1387,6 +1387,14 @@ export async function runResearch(
           `render check accounting mismatch: recorded ${fid.record.units} unit(s), the document has ${countUnits(prose)}`,
           { fidelity_units: fid.record.units });
       }
+      if (fid.record.polarity_skipped) {
+        await progress("synthesize",
+          `polarity: ${fid.record.polarity_skipped} unit(s) left as written (` +
+          `${fid.record.polarity_default} by the conservative default), ` +
+          `${fid.record.duplicate_skipped} left as a duplicate`,
+          { polarity_skipped: fid.record.polarity_skipped,
+            polarity_default: fid.record.polarity_default });
+      }
       if (fid.record.names_blocked.length) {
         await progress("synthesize",
           `names blocked: ${fid.record.names_blocked.join(", ")} - the grounded answer never uses them`,
