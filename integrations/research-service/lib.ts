@@ -239,13 +239,16 @@ export function selectRepoFiles(paths: string[], maxFiles = 40): RepoFileSelecti
 // The footer, the need verdicts and the search record all belong to report.ts,
 // which is pure and importable from anywhere. See renderResult's footer block.
 import {
-  coverageFooter, emptySearchRecord, type GapPassRecord, type NeedState, type SearchRecord,
+  coverageFooter, emptySearchRecord, type FidelityFooter, type GapPassRecord, type NeedState,
+  type SearchRecord,
 } from "./report.ts";
 
 export interface RenderableResult {
   synthesis?: string | null;
   /** The gap-closing pass, when one ran (research-trust-report). */
   gap_pass?: GapPassRecord | null;
+  /** The per-sentence fidelity check of the rendered report. */
+  render_fidelity?: FidelityFooter | null;
   /** Templated human-facing report (templates.ts, 2026-08-22). When present it
    *  is the chat-facing body; the tagged synthesis remains the machine-truth
    *  and the fallback. Same [Source N] numbers as the synthesis. */
@@ -404,6 +407,7 @@ export function renderResult(result: RenderableResult): string {
       { ...emptySearchRecord(), ...(result.search_record ?? {}) } as SearchRecord,
       backstop,
       result.gap_pass ?? null,
+      result.render_fidelity ?? null,
     ));
   } else if (backstop && backstop !== "complete") {
     // No per-need verdicts (a job recorded before they existed): the coverage

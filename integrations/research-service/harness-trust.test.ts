@@ -698,6 +698,29 @@ Deno.test("ACCEPTANCE 8: no pass when the wall clock is spent", async () => {
   assertEquals(r.gapPass, null, "a pass ran on an exhausted clock");
 });
 
+Deno.test("X3: contract.budget.rounds bounds the gap-closing pass too", async () => {
+  // The tester's X3: a caller who sets `rounds: 1` to cap the work a job may do
+  // still got up to three more searches and a second synthesis, because the
+  // pass's own bounds are not the contract's. A round is what the pass spends,
+  // so it runs only when the job was allowed more than one.
+  const { deps, calls } = gapDeps();
+  const before = calls.search.length;
+  const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, {
+    origin: "owui", dryRun: true,
+    contract: { allowDomains: [], denyDomains: [], redlines: [], budget: { rounds: 1 } },
+  });
+  assertEquals(r.gapPass, null, "the pass ran inside a one-round contract");
+  assertEquals(/gap-closing pass/.test(r.prose), false);
+  assert(calls.search.length - before <= 3, `${calls.search.length - before} searches under rounds:1`);
+  // …and a contract that allows two rounds does not block it.
+  const { deps: d2 } = gapDeps();
+  const r2 = await runResearch(d2, stubClient(), OPTIPLEX_QUERY, {
+    origin: "owui", dryRun: true,
+    contract: { allowDomains: [], denyDomains: [], redlines: [], budget: { rounds: 2 } },
+  });
+  assert(r2.gapPass, "a two-round contract blocked the pass");
+});
+
 Deno.test("the gap-closing pass never touches the article path", async () => {
   const { deps } = gapDeps();
   const r = await runResearch(deps, stubClient(), OPTIPLEX_QUERY, {

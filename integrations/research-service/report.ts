@@ -267,6 +267,14 @@ export function searchHealthLabel(r: SearchRecord): "ok" | "DEGRADED" {
  * The one-line footer. Replaces `coverage NN%`, which answered a question
  * nobody asked.
  */
+/** What the per-sentence fidelity check did to the rendered report. */
+export interface FidelityFooter {
+  checked: number;
+  rewritten: number;
+  replaced: number;
+  error?: string;
+}
+
 /** What one gap-closing pass did, for the footer. */
 export interface GapPassRecord {
   /** Sources the pass added to the citable pool. */
@@ -284,6 +292,7 @@ export function coverageFooter(
   record: SearchRecord,
   backstop?: string | null,
   gapPass?: GapPassRecord | null,
+  fidelity?: FidelityFooter | null,
 ): string {
   const parts: string[] = [];
   const partial = partialCount(needs);
@@ -330,6 +339,19 @@ export function coverageFooter(
       parts.push(
         `entity gate refused ${record.unfloored} search(es): the query had fewer than two content words`,
       );
+    }
+  }
+  // The reader is told that the document was checked sentence by sentence
+  // against the evidence, and how much of it had to be corrected. The tester
+  // found a hedge turned into an absolute by READING the report; a field in the
+  // job row (`prose_ungrounded`) is not something the colleague this report is
+  // written for will ever see, and neither is a passing test.
+  if (fidelity) {
+    if (fidelity.checked > 0) {
+      const corrected = (fidelity.rewritten || 0) + (fidelity.replaced || 0);
+      parts.push(`render checked: ${fidelity.checked} sentences, ${corrected} corrected`);
+    } else if (fidelity.error) {
+      parts.push("render check: not run");
     }
   }
   if (backstop && backstop !== "complete") parts.push(`stopped early: ${backstop}`);

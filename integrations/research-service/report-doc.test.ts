@@ -42,6 +42,7 @@ import type { Deps } from "./harness.ts";
 const EV = new URL("./fixtures/", import.meta.url);
 const RUN = JSON.parse(Deno.readTextFileSync(new URL("live-owui-33250e9b.result.json", EV)));
 const AFTER = Deno.readTextFileSync(new URL("rendered-AFTER-33250e9b.md", EV));
+const AFTER_V1 = Deno.readTextFileSync(new URL("rendered-AFTER-v1-33250e9b.md", EV));
 const BEFORE = Deno.readTextFileSync(new URL("rendered-BEFORE-33250e9b.md", EV));
 const QUERY =
   "Dell OptiPlex 3050 used purchase: common failure modes, known defects, red flags, " +
@@ -313,13 +314,13 @@ Deno.test("ACCEPTANCE 6: the grounding diff over the re-rendered document", () =
   // No figure and no URL in the report that the grounded answer does not hold.
   assertEquals(diff.numbers, []);
   assertEquals(diff.urls, []);
-  // Two names DO leak, and they are pinned rather than tolerated: the model
-  // named the standards the proprietary connector is not ("no standard ATX or
-  // SFX connector"), from a source that says only "proprietary". Tightening the
-  // grounding rules removed every invented number and duration; this is what
-  // survived, it is recorded on every run as `proseUngrounded`, and a THIRD
-  // name appearing here fails this test.
-  assertEquals(diff.names, ["ATX", "SFX"]);
+  // ONE name still leaks, and it is pinned rather than tolerated: the model
+  // abbreviates "Blue Screen of Death", which the synthesis spells out. ATX and
+  // SFX - the standards the model named for a connector the sources only call
+  // proprietary - are GONE: the grounding rules now forbid naming a standard
+  // the answer does not name, and rendered-AFTER-v1 keeps the render that had
+  // them. A SECOND name appearing here fails this test.
+  assertEquals(diff.names, ["BSOD"]);
 });
 
 Deno.test("the diff sees a planted fact, a planted figure and a planted URL", () => {
@@ -335,4 +336,31 @@ Deno.test("the diff sees a planted fact, a planted figure and a planted URL", ()
   // …and says nothing about a document that only repeats what it was given.
   const clean = renderGroundingDiff("The unit uses a proprietary connector [Source 1].", synth, "");
   assertEquals([clean.numbers.length, clean.urls.length, clean.names.length], [0, 0, 0]);
+});
+
+// ── The defect the tester read, and its fix ────────────────────────────────
+
+Deno.test("X1: the hedge that became an absolute is in v1 and gone from the shipped render", () => {
+  // What the tester found by reading: a table cell citing [Source 13] that said
+  // "no off-the-shelf ATX or SFX drop-in available", where the line it cites
+  // says the proprietary connector "makes it difficult" to fit aftermarket
+  // PSUs. Two moves in one cell - names the answer does not have, and a hedge
+  // turned into an absolute - and only the first was detectable.
+  const v1Body = AFTER_V1.replace(/<!--[\s\S]*?-->/g, "");
+  assert(/no off-the-shelf ATX or SFX drop-in available/.test(v1Body), "v1 lost the defect it exists to show");
+
+  const body = AFTER.replace(/<!--[\s\S]*?-->/g, "");
+  assertEquals(/ATX|SFX/.test(body), false, "the shipped render still names the standards");
+  assertEquals(/no off-the-shelf/.test(body), false, "the absolute survived");
+  // …and the same row now says what its source says.
+  const row = body.split("\n").find((l) => /^\|/.test(l) && /Power supply|connector/i.test(l)) || "";
+  assert(/difficult|limit/i.test(row), `the connector row lost its hedge: ${row}`);
+});
+
+Deno.test("the shipped render records what the fidelity check did to it", () => {
+  // The header is the run's own record, not a claim in prose: a reader of the
+  // fixture can see how much of it was corrected and why.
+  assert(/"checked":32/.test(AFTER), "the fidelity record is missing from the fixture header");
+  assert(/"replaced":2/.test(AFTER));
+  assert(/names \[BSOD\]/.test(AFTER));
 });

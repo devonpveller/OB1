@@ -17,6 +17,7 @@ import {
   classifyHits, emptySearchStats, reformulate, type SearchStats, shapeQuery,
 } from "./search-quality.ts";
 import { applyNumericGrounding, renderGroundingDiff, type RenderGroundingDiff } from "./grounding.ts";
+import { checkRenderFidelity, type FidelityRecord } from "./fidelity.ts";
 import {
   coverageFooter, emptySearchRecord, failureNotice, gapQuestions, reconcileNeedsStatus,
   shouldClassifyTemplate, type GapPassRecord,
@@ -293,6 +294,10 @@ export interface RunResult {
   /** What the RENDERED report says that the grounded answer does not
    *  (research-trust-report). null when no report was rendered. */
   proseUngrounded: RenderGroundingDiff | null;
+  /** The per-sentence fidelity check of the rendered report: how much was
+   *  checked, how much overstated its sources, and how it was corrected.
+   *  `error` set means the check did not run and the document is untouched. */
+  renderFidelity: FidelityRecord | null;
   /** Separated fetch accounting — yield (sources) vs waste (timeouts/errors) vs
    *  free OB cache reuse. `attempts` = sources + timeouts + errors.
    *  `readable` = fetched pages with an extract worth grounding from;
@@ -408,6 +413,7 @@ export async function runResearch(
   let readableCount = 0;
   let ungroundedNumbers: string[] = [];
   let proseUngrounded: RenderGroundingDiff | null = null;
+  let renderFidelity: FidelityRecord | null = null;
   let needsStatus: NeedState[] = [];
   // Assigned by the topic gather block below, and called once after the first
   // synthesis. Null on every other path - article, sources-only and
@@ -1013,8 +1019,9 @@ export async function runResearch(
       // failed searching is not a closing pass.
       gapPass: null,
       // The failure notice is built by report.ts from the run's own record, not
-      // written by a model, so there is nothing to diff.
+      // written by a model, so there is nothing to diff and nothing to judge.
       proseUngrounded: null,
+      renderFidelity: null,
       outcome: "no_relevant_sources",
       needsStatus,
       searchRecord,
@@ -1278,7 +1285,15 @@ export async function runResearch(
     // the same exhausted budget cannot close anything. Those runs get the
     // recommendation in the report's limitations section instead, which is the
     // other half of what the operator asked for.
-    if (gapRound && stillOpen.length && synthesis.trim() &&
+    // `contract.budget.rounds: 1` bounds the PASS as well as the gather loop
+    // (tester, X3). A caller who caps a job at one round is capping the work it
+    // may do, and a second round of searching plus a second synthesis is
+    // exactly that work - the pass's own bounds (one-shot, three queries, the
+    // clock) are not the contract's, and the contract is the one the caller
+    // wrote. The pass needs a round to spend, so it runs only when the job was
+    // allowed more than one.
+    const roundsAllowed = effRounds > 1;
+    if (gapRound && stillOpen.length && synthesis.trim() && roundsAllowed &&
         backstop === "complete" && elapsedRatio < GAP_PASS_MAX_ELAPSED) {
       const answeredBefore = needsStatus.filter((n) => n.status === "answered").length;
       // The queries come from what the SYNTHESIS said it could not answer, not
@@ -1347,6 +1362,29 @@ export async function runResearch(
   // block: a report is not thrown away over an acronym, and an operator who can
   // see the leak can judge it. Run on the BODY, before the footer and without
   // the Sources list, which legitimately carries URLs the prose does not.
+  // Every rendered sentence that cites something is checked against what it
+  // cites, and anything claiming MORE is rewritten once and then, if it still
+  // does, replaced by the cited line verbatim (fidelity.ts). This runs on the
+  // report that SHIPS - after the gap-closing pass, which is the only render
+  // this path performs - and before the grounding diff, so what the diff
+  // records is what the reader gets. Fail-open: a broken judge leaves the
+  // document alone and says so in the footer.
+  if (prose) {
+    const fid = await checkRenderFidelity(deps, prose, synthesis);
+    prose = fid.rendered;
+    renderFidelity = fid.record;
+    const corrected = fid.record.rewritten + fid.record.replaced;
+    if (fid.record.error) {
+      await progress("synthesize", `the render fidelity check did not run: ${fid.record.error}`,
+        { fidelity_checked: 0 });
+    } else {
+      await progress("synthesize",
+        `render checked: ${fid.record.checked} cited sentence(s), ` +
+        `${fid.record.stronger} stronger, ${fid.record.unsupported} unsupported, ` +
+        `${fid.record.rewritten} rewritten, ${fid.record.replaced} replaced verbatim`,
+        { fidelity_checked: fid.record.checked, fidelity_corrected: corrected });
+    }
+  }
   if (prose) {
     proseUngrounded = renderGroundingDiff(prose, synthesis, query);
     const leaks = proseUngrounded.numbers.length + proseUngrounded.urls.length +
@@ -1359,7 +1397,7 @@ export async function runResearch(
     }
   }
   if (prose && topicPath) {
-    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop, gapPass)}_`;
+    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop, gapPass, renderFidelity)}_`;
   }
 
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
@@ -1397,7 +1435,7 @@ export async function runResearch(
     reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
     citedSources: cited.map((p) => ({ url: p.url, title: p.title })),
     metrics, curator, backstop,
-    gapPass, proseUngrounded,
+    gapPass, proseUngrounded, renderFidelity,
     outcome: "complete",
     needsStatus,
     searchRecord,

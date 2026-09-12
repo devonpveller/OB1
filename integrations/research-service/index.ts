@@ -715,6 +715,7 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       needs_status: res.needsStatus,
       search_record: res.searchRecord,
       gap_pass: res.gapPass,
+      render_fidelity: res.renderFidelity,
     });
     // ── Curator honesty gate (incident 2026-08-31) ──────────────────────────
     // runResearch NEVER throws when the curator dies — it records the failure as
@@ -748,6 +749,8 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       ungrounded_numbers: res.ungroundedNumbers,
       // …and what the RENDERED report says that the grounded answer does not.
       prose_ungrounded: res.proseUngrounded,
+      // …and what the per-sentence fidelity check corrected in it.
+      render_fidelity: res.renderFidelity,
       contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
       skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
       rendered, // chat-facing markdown; absent on jobs cached before this field
