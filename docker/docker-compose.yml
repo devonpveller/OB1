@@ -15,6 +15,47 @@ name: open-brain
 include:
   - docker-compose.scheduled.yml
 
+# ── COMPOSE PROFILES (sl-ob1-profiles, 2026-09-19) ─────────────────────
+# A bare `docker compose up` starts the CORE fleet only: the knowledge
+# store, its doors, the workers that keep it coherent, and its backup.
+# Three groups are gated behind profiles so a product turns on the engines
+# and surfaces it actually needs, without editing this file:
+#
+#   --profile research   openbrain-curator, openbrain-research
+#   --profile wiki       openbrain-wiki, -wiki-viewer, -workbench, -wiki-backup
+#   --profile notebook   surrealdb, open_notebook, open-notebook-backup
+#   --profile idea-refinery   openbrain-idea-refinery (scheduled slice; pre-existing)
+#
+# Per-service reasons: README.md, "Compose profiles".
+#
+# THE RULE THAT KEEPS THIS SAFE: no CORE service may `depends_on` a profiled
+# one - compose would then refuse to render, or silently drag the profiled
+# service in. As of this commit no such edge exists; every depends_on either
+# stays inside a group or points from a profiled service down into core.
+#
+# SIX cross-group references survive at RUNTIME (environment URLs, not
+# depends_on, so the render is unaffected and every caller still starts). Each
+# is flagged at its own line; the full table with consequences is in README.md.
+#   openbrain-ext          WIKI_RECOMPILE_URL -> openbrain-wiki            [wiki]
+#   openbrain-gmail-pull   WIKI_RECOMPILE_URL -> openbrain-wiki            [wiki]
+#   openbrain-gmail-prune  WIKI_RECOMPILE_URL -> openbrain-wiki            [wiki]
+#   openbrain-podcast      RESEARCH_URL       -> openbrain-research    [research]
+#   openbrain-podcast      ON_BASE            -> open_notebook         [notebook]
+#   openbrain-idea-refinery RESEARCH_URL      -> openbrain-research    [research]
+# (the last four are in docker-compose.scheduled.yml)
+#
+# HOW THAT LIST WAS BUILT, AND WHY IT MUST BE REBUILT THE SAME WAY: match every
+# RENDERED environment value against the profiled service names -
+#   docker compose -f docker-compose.yml --env-file .env \
+#     --profile research --profile wiki --profile notebook --profile idea-refinery \
+#     config --format json
+# then look for a profiled service's name in any `environment` value.
+# A GREP OVER THESE FILES IS NOT ENOUGH and will under-report: the two gmail
+# services get WIKI_RECOMPILE_URL from `env_file: ../recipes/email-history-import/.env`,
+# so the reference exists only in the render. The first attempt at this change
+# grepped, found two, and shipped a compose header, a README and an ai-stack
+# doc all stating "two" - the tester rendered and found six.
+
 services:
   openbrain-db:
     image: pgvector/pgvector:pg16
@@ -173,6 +214,12 @@ services:
       PORT: "8000"
       # Compiled wiki (read-only) for the wiki_* tools (req 13).
       WIKI_DIR: /wiki/content
+      # CORE -> `wiki` PROFILE, at runtime only (sl-ob1-profiles). Deliberately
+      # NOT a depends_on: openbrain-ext must start and serve its 39 tools with
+      # the wiki profile off. What degrades is the single wiki_trigger_recompile
+      # tool (connection refused) and the wiki_* readers, which see whatever the
+      # openbrain-wiki-data volume last held. The volume is declared top-level,
+      # so the mount below resolves either way.
       WIKI_RECOMPILE_URL: http://openbrain-wiki:8000/recompile
     volumes:
       - openbrain-wiki-data:/wiki:ro
@@ -468,6 +515,10 @@ services:
   # db) + llm-net (reach the models). HTTP-invoked (loopback 8816):
   # POST /ingest/research-package.
   openbrain-curator:
+    # research group (sl-ob1-profiles). Exists ONLY to place research output:
+    # its single inbound route is POST /ingest/research-package and its only
+    # caller is openbrain-research (CURATOR_URL below). Nothing core calls it.
+    profiles: ["research"]
     build:
       context: ../integrations/research-curator
       dockerfile: Dockerfile
@@ -533,6 +584,8 @@ services:
   # (the gateway lives in the MAIN stack); if search is unreachable the harness
   # degrades to honest gaps (rule #1), it never fabricates.
   openbrain-research:
+    # research group (sl-ob1-profiles). THE research engine itself.
+    profiles: ["research"]
     build:
       context: ../integrations/research-service
       dockerfile: Dockerfile
@@ -656,6 +709,9 @@ services:
   # POST /recompile (the wiki_trigger_recompile MCP tool).
   # obnet (openbrain-rest) + llm-net (qwen36-27b:nothink / bge-m3).
   openbrain-wiki:
+    # wiki group (sl-ob1-profiles). The vault compiler - it PRODUCES the
+    # surface; the knowledge core stores and serves without it.
+    profiles: ["wiki"]
     build:
       context: ./wiki-service
       dockerfile: Dockerfile
@@ -757,6 +813,9 @@ services:
   # [[wikilinks]] + graph into a static site, rebuilding on change.
   # Content is the shared wiki volume (read-only); fully regenerable.
   openbrain-wiki-viewer:
+    # wiki group (sl-ob1-profiles). The Quartz renderer of the vault the
+    # compiler writes; depends_on openbrain-wiki, same profile.
+    profiles: ["wiki"]
     build:
       context: ./wiki-viewer
       dockerfile: Dockerfile
@@ -820,6 +879,10 @@ services:
   # loopback debug port. Networks: obnet + llm-net + app-net (app-net is
   # REQUIRED so the portal Caddy can resolve this name by DNS — §2.3).
   openbrain-workbench:
+    # wiki group (sl-ob1-profiles). The read/write half of the wiki surface,
+    # reached same-origin behind the viewer via the portal Caddy /workbench/*.
+    # Its only in-project caller is openbrain-wiki (WORKBENCH_URL) - also wiki.
+    profiles: ["wiki"]
     build:
       context: ./workbench
       dockerfile: Dockerfile
@@ -1048,6 +1111,9 @@ services:
   # root (wiki files are root-owned); sleep-loop scheduler (crond misses
   # fire-windows on Docker Desktop VM clock jumps).
   openbrain-wiki-backup:
+    # wiki group (sl-ob1-profiles). Backs up the two volumes only the wiki
+    # group writes (openbrain-wiki-data, wiki-assets); no wiki, nothing to back up.
+    profiles: ["wiki"]
     image: alpine:3.21
     container_name: openbrain-wiki-backup
     volumes:
@@ -1086,6 +1152,9 @@ services:
   #    host ports (:8003, :8503, :5055) and tailnet serves unchanged. ──
 
   surrealdb:
+    # notebook group (sl-ob1-profiles). Open Notebook's local store and
+    # nothing else's - no other service in this project speaks to it.
+    profiles: ["notebook"]
     # Pinned by digest 2026-08-20 (was floating :v2 + pull_policy:always with
     # NO watchtower opt-out — an unflagged auto-update path on the datastore
     # behind open_notebook).
@@ -1110,6 +1179,9 @@ services:
     pull_policy: always
 
   open_notebook:
+    # notebook group (sl-ob1-profiles). The Open Notebook UI/API - a SURFACE
+    # onto openbrain-db, not an engine: the knowledge core is complete without it.
+    profiles: ["notebook"]
     # IKS fork (open-notebook repo, Dockerfile.single) — OB1 Postgres is the
     # canonical source-of-truth. Locally built + tagged; never pulled.
     # Build/tag at promotion: docker build -t open_notebook:iks ...; see
@@ -1190,6 +1262,9 @@ services:
     pull_policy: never
 
   open-notebook-backup:
+    # notebook group (sl-ob1-profiles). Exports surrealdb + notebook_data;
+    # both belong to the notebook surface.
+    profiles: ["notebook"]
     build:
       context: ./backup
       dockerfile: Dockerfile.surreal

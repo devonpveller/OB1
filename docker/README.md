@@ -57,6 +57,121 @@ The stack expects an external Docker network `ai-stack_llm-net` with
 Point the `*_API_BASE` env vars at any OpenAI-compatible endpoint if your
 setup differs.
 
+## Compose profiles
+
+A bare `docker compose up -d` in this directory starts the **core** fleet
+only — the knowledge store, the doors onto it, the workers that keep it
+coherent, and its backup. Three groups sit behind compose profiles so a
+caller turns on the engines and surfaces it actually needs without editing
+`docker-compose.yml` (added 2026-09-19, ai-stack item `sl-ob1-profiles`):
+
+```bash
+docker compose up -d                                     # core only
+docker compose --profile research up -d                  # + the research engine
+docker compose --profile research --profile wiki \
+               --profile notebook --profile idea-refinery up -d   # everything
+```
+
+Core is everything NOT listed below: `openbrain-db`, `-mcp`, `-ext`,
+`-gateway`, `-ops-gateway`, `-mcpo`, `-mcpo-ext`, `-postgrest`, `-rest`,
+`-entity-worker`, `-suggestion-worker`, `-extract`, `-chunk-worker`,
+`-grounding-backfiller`, `-db-backup`, plus the always-on scheduled slice
+(`-cron`, `-gmail-pull`, `-gmail-prune`, `-digest`, `-podcast`).
+
+### What each profile turns on, and why it is not core
+
+| Service | Profile | Why it is not core |
+|---------|---------|--------------------|
+| `openbrain-curator` | `research` | Exists only to place research output. Its one inbound route is `POST /ingest/research-package`; its only caller in this project is `openbrain-research` (`CURATOR_URL`). No core service reaches it, and with no research running there is nothing to curate. |
+| `openbrain-research` | `research` | The research harness itself — search, fetch, synthesis, grounding. An engine, not part of the store: the brain captures, embeds, chunks and serves without it. |
+| `openbrain-wiki` | `wiki` | The vault compiler. It *produces* the wiki surface from the store; the store is complete and queryable with no vault compiled. |
+| `openbrain-wiki-viewer` | `wiki` | The Quartz renderer of the vault the compiler writes. `depends_on: openbrain-wiki`, so it belongs to the same group by construction — it has nothing to render otherwise. |
+| `openbrain-workbench` | `wiki` | The read/write half of the wiki surface, reached same-origin behind the viewer through the portal Caddy `handle /workbench/*`. Its only in-project caller is `openbrain-wiki` (`WORKBENCH_URL`, revision commits). Nothing core calls it. |
+| `openbrain-wiki-backup` | `wiki` | Tars `openbrain-wiki-data` + `wiki-assets` — the two volumes only the wiki group writes. With the group off there is no new vault state to protect. |
+| `surrealdb` | `notebook` | Open Notebook's local UI/queue/chat store and nothing else's; no other service in this project speaks to it. |
+| `open_notebook` | `notebook` | A surface onto `openbrain-db` (the canonical store since IKS), not an engine. `depends_on: surrealdb`, same group. |
+| `open-notebook-backup` | `notebook` | Exports the SurrealDB datastore and `notebook_data` — both belong to the notebook surface. |
+| `openbrain-idea-refinery` | `idea-refinery` | Pre-existing profile in `docker-compose.scheduled.yml`; the owed-idea drain. It is gated because it needs a Mattermost bot token to deliver dossiers — but it is **running today**, not waiting: the token is set on this host and both ai-stack drivers pass the profile on every invocation. Its only engine is `openbrain-research`, so see the cross-group table below. |
+
+### The invariant a change here must not break
+
+**No core service may `depends_on` a profiled one.** Compose would then
+either refuse to render or quietly drag the profiled service in, and the
+"core only" promise above would be false. As of this commit no such edge
+exists: every `depends_on` either stays inside a group
+(`openbrain-research` → `openbrain-curator`, `openbrain-wiki-viewer` →
+`openbrain-wiki`, `open_notebook` → `surrealdb`) or points from a profiled
+service **down** into core, which is always safe.
+
+### The six cross-group references that survive at runtime
+
+`depends_on` is not the only way one service reaches another. **Six**
+references cross a group boundary as environment URLs. None affects the
+render and none stops a container starting — every one of them is a `fetch`
+that fails at call time, usually inside a `try/catch`. That makes them the
+dangerous kind: the stack comes up green and a scheduled job quietly stops
+producing output.
+
+| Caller | Caller group | Key | Target | Target profile | What goes dead when the target's profile is off |
+|---|---|---|---|---|---|
+| `openbrain-ext` | core | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | The `wiki_trigger_recompile` tool gets connection refused; the `wiki_*` readers see whatever the vault last held. The `openbrain-wiki-data` volume is declared top-level, so the read-only mount still resolves and the 39 tools still serve. |
+| `openbrain-gmail-prune` | **core** | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | The **nightly prune completes and never recompiles the vault** — `prune-short-term.ts:153` POSTs inside a `try/catch`, so it logs a connection error and exits 0. Nothing alerts. |
+| `openbrain-gmail-pull` | **core** | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | Nothing: the key is inherited from the shared `env_file` and `openbrain-gmail-pull`'s code never reads it. Listed because it is in the render and the next reader deserves to know it is inert rather than rediscover it. |
+| `openbrain-podcast` | core | `RESEARCH_URL` | `openbrain-research` | `research` | The podcast's link-enrichment research step dies; the episode degrades to email-only. |
+| `openbrain-podcast` | core | `ON_BASE` | `open_notebook` | `notebook` | **No audio is rendered** — the chain runs to the end and produces no episode. |
+| `openbrain-idea-refinery` | `idea-refinery` | `RESEARCH_URL` | `openbrain-research` | `research` | The drain starts, walks the owed-idea queue and **can never research anything** (`index.ts:268` submits, `:295` polls). Its only engine. |
+
+Two of those are the same shape the digest chain already taught us: run the
+scheduled slice with `--profile wiki --profile research --profile notebook`,
+or accept that parts of it run nightly and produce nothing.
+
+**`idea-refinery` needs `research`.** Compose has no "this profile implies that
+one", so passing `--profile idea-refinery` by hand still requires
+`--profile research` beside it. The ai-stack manifest expresses the dependency
+instead (`requires = ["research"]` on the profile, expanded by
+`scripts/stack/stack.py`), so its drivers pull research in automatically.
+
+### How this list was built — and how to rebuild it
+
+**A grep over these compose files is not enough.** `openbrain-gmail-pull` and
+`openbrain-gmail-prune` receive `WIKI_RECOMPILE_URL` from
+`env_file: ../recipes/email-history-import/.env`, which never appears in the
+compose text; `prune-short-term.ts:32` also hard-codes the same URL as its
+default, so unsetting the variable would not remove the reference. The first
+attempt at this change grepped, found two, and wrote "two" into three
+documents. Match the **render** instead:
+
+```bash
+docker compose -f docker-compose.yml --env-file .env \
+  --profile research --profile wiki --profile notebook --profile idea-refinery \
+  config --format json
+```
+
+then match every `environment` **value** against every profiled service name,
+and check `depends_on`, `network_mode`, `links`, network aliases and shared
+named volumes the same way. (There are no `network_mode`, `links` or aliases
+anywhere in this project; `openbrain-wiki-data` is the only cross-group volume
+and every core mount of it is read-only.)
+
+Verified by rendering every combination against this file:
+
+| Profiles passed | Services rendered |
+|-----------------|-------------------|
+| (none) | 20 — core 15 + the 5 always-on scheduled |
+| `research` | 22 |
+| `wiki` | 24 |
+| `notebook` | 23 |
+| `idea-refinery` | 21 |
+| `research` + `wiki` | 26 |
+| `research` + `notebook` | 25 |
+| `wiki` + `notebook` | 27 |
+| `research` + `wiki` + `notebook` | 29 |
+| all four | 30 — the full fleet |
+
+`docker compose config` with all three new profiles is byte-identical to the
+render before this change apart from the nine `profiles:` keys.
+
+
 ## Usage
 
 ```bash

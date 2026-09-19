@@ -91,6 +91,14 @@ services:
     container_name: openbrain-gmail-pull
     restart: unless-stopped
     working_dir: /app
+    # CORE -> `wiki` PROFILE, at runtime only, DELIVERED BY THIS env_file
+    # (sl-ob1-profiles attempt 2). The shared recipe env file sets
+    # WIKI_RECOMPILE_URL, so this service inherits a reference to a profiled
+    # service that appears NOWHERE in this compose text - only in the render
+    # (`config --format json`). openbrain-gmail-pull's own code never reads the
+    # key (only prune-short-term.ts does), so the reference here is inert; it is
+    # named anyway because the NEXT person to grep this file for cross-profile
+    # references will miss it exactly as attempt 1 did.
     env_file:
       - ../recipes/email-history-import/.env
     environment:
@@ -118,6 +126,16 @@ services:
     container_name: openbrain-gmail-prune
     restart: unless-stopped
     working_dir: /app
+    # CORE -> `wiki` PROFILE, at runtime only, DELIVERED BY THIS env_file
+    # (sl-ob1-profiles attempt 2). WIKI_RECOMPILE_URL arrives from the shared
+    # recipe env file and is ALSO hard-coded as the default at
+    # ../recipes/email-history-import/prune-short-term.ts:32, so unsetting the
+    # variable does not remove the reference. Line 153 POSTs to it at the end of
+    # every prune run, inside a try/catch - so with `--profile wiki` off the
+    # nightly prune completes, logs a connection error and the vault is never
+    # recompiled. Nothing fails to start; the output just stops. Run the digest
+    # chain with --profile wiki, or accept a vault that only recompiles on its
+    # own daily timer (which is itself part of the wiki profile).
     env_file:
       - ../recipes/email-history-import/.env
     environment:
@@ -243,6 +261,16 @@ services:
       DB_HOST: openbrain-db
       DB_USER: ob_app_memory
       DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
+      # `idea-refinery` PROFILE -> `research` PROFILE (sl-ob1-profiles attempt 2).
+      # This is this service's ONLY engine: index.ts:268 submits the job and :295
+      # polls it. With --profile research off the drain starts, walks the owed-idea
+      # queue and can never research anything - the silent-no-output shape again,
+      # and worse here because this profile is `default = true` in ai-stack's
+      # stack.manifest.toml while `research` is not. ai-stack resolves that: the
+      # manifest now declares `requires = ["research"]` on the idea-refinery
+      # profile and the driver expands it, so enabling this one pulls research in.
+      # Compose itself has no such mechanism - passing --profile idea-refinery by
+      # hand still needs --profile research beside it.
       RESEARCH_URL: http://openbrain-research:8000
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       IDEA_REFINERY_CHANNEL: "#ideas"
