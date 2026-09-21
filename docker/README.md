@@ -204,14 +204,12 @@ COMPOSE_PROFILES=research,wiki,notebook,idea-refinery
 
 Compose loads `OB1/docker/.env` natively because that is the project
 directory, so no `--env-file` is needed and the working directory is
-irrelevant. **Do not pass `--env-file` here.** It replaces `.env` for THIS
-file's substitutions but not for `docker-compose.scheduled.yml`, which arrives
-through `include:` and keeps resolving against the project directory's `.env` —
-so any variable the two files disagree on renders one way in the core services
-and the other way in the scheduled ones, silently. Measured on
-`OB_APP_MEMORY_PASSWORD`: nine substitution sites, nine "variable is not set"
-warnings with no `--env-file`, and eight with one — the missing ninth is the
-site in the included file. With that line present, a bare `docker compose config --services`
+irrelevant. **Do not pass `--env-file` here.** Passing one changes how the
+`include:`d `docker-compose.scheduled.yml` resolves variables, and it changes
+what a render reports: `OB_APP_MEMORY_PASSWORD` has nine substitution sites and
+produces **nine** "variable is not set" warnings with no `--env-file`, and
+**eight** with one. Counts taken that way are not comparable with counts taken
+without it. Put the values in `.env` and let compose find them. With that line present, a bare `docker compose config --services`
 renders 30 — service-for-service identical to the four-flag render (`diff`
 clean). This is the declaration that makes a bare `docker compose up -d`, and
 every ai-stack recovery script that drives this project without flags, start
