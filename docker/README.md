@@ -235,21 +235,79 @@ mean anything for this plane, do not put the surface profiles in `.env`.
 
 Turning `wiki`, `notebook` or `research` off breaks callers in OTHER compose
 projects. None of them fails at start; all of them fail at request time, which
-is the same quiet shape as the cross-group table above. The paths in the second
-column are relative to the **ai-stack** repo that carries this submodule, not
-to this checkout.
+is the same quiet shape as the cross-group table above. The paths are relative
+to the **ai-stack** repo that carries this submodule, not to this checkout.
 
-| Consumer | Lives in (ai-stack) | Reaches | Profile | What the user sees |
-|---|---|---|---|---|
-| portal Caddy | `portal/config/caddy/Caddyfile` | `openbrain-workbench:8000` | `wiki` | the `/workbench/*` route 502s |
-| portal Caddy | `portal/config/caddy/Caddyfile` | `openbrain-wiki-viewer:8080` | `wiki` | the published wiki 502s |
-| portal Caddy | `portal/config/caddy/Caddyfile` | `open_notebook:5055` and `:8502` | `notebook` | the Open Notebook routes 502 |
-| OWUI Server Status pipe | `status-pipe/modules/system-health/` | `open_notebook:5055/api/config` | `notebook` | probe reports the service down (`critical: False`, so the panel degrades rather than alarming) |
-| OWUI Server Status pipe | `status-pipe/modules/system-health/` | `openbrain-research:8000/health` | `research` | same, for the research engine |
+**Scope of this table: a runtime reach by CONTAINER NAME**, i.e. a network call
+to one of the ten profiled services over a shared `ai-stack_*` network. **Seven
+surfaces at thirteen call sites**, living in three compose projects — `portal`,
+`frontend` (its `tailscale` companion, plus the OWUI-hosted tool and pipes that
+run inside `openwebui`) and `agent-org` — with one further operator script noted
+under the table. Host-side probes that address a published `127.0.0.1` port, and
+scripts that drive the `docker` CLI, are a different class and are listed
+separately below.
 
-Both consumers reach these services by container name across the shared
-`ai-stack_*` networks, so there is nothing in THIS project that records the
-dependency — which is exactly why it is written here.
+| # | Consumer | File:line (ai-stack) | Reaches | Profile | What the user sees |
+|---|---|---|---|---|---|
+| 1 | portal Caddy | `portal/config/caddy/Caddyfile:136` | `openbrain-workbench:8000` | `wiki` | the `/workbench/*` route 502s |
+| 2 | portal Caddy | `portal/config/caddy/Caddyfile:143` | `openbrain-wiki-viewer:8080` | `wiki` | the published wiki 502s |
+| 3 | portal Caddy | `portal/config/caddy/Caddyfile:242`, `:250` | `open_notebook:5055`, `:8502` | `notebook` | the Open Notebook routes 502 |
+| 4 | the `frontend` plane's `tailscale` companion | `frontend/entrypoint.sh:60`, route table `:97`, `:99` | `open_notebook:8502` and `:5055/api/config` | `notebook` | the tailnet Open Notebook UI (`:8443`) and API (`:5055`) serve routes fail their probes |
+| 5 | `agent-org`'s `agent-bridge` | `agent-org/docker/docker-compose.yml:208` → `agent-bridge/app/config.py:373`, `app/modules/grounding.py:12` | `openbrain-research:8000` | `research` | effort grounding (P4.0a) and the Tier-2 advisor stop producing, in a third compose project |
+| 6 | the deployed OWUI **Deep Research** tool | `owui/tools/deep_research.py:47` (deployed per `owui/manifest.csv:10`) | `openbrain-research:8000` | `research` | the tool errors at call time; its own message asks whether `openbrain-research` is reachable |
+| 7 | OWUI **Server Status** pipe — two separate modules | `status-pipe/modules/system-health/service/system_health.py:58`, `:66`; `status-pipe/serve/tailscale_serve_pipe.py:119`, `:135`, `:652` | `open_notebook:5055/api/config`, `openbrain-research:8000/health` | `notebook`, `research` | both probes report down (`critical: False`, so the panel degrades rather than alarming) |
+
+Plus one **operator path** whose reach originates inside a profiled container:
+`scripts/backup/restore-from-snapshot.ps1:432` `docker exec`s into
+`open-notebook-backup` and has it run `surreal import --endpoint
+http://surrealdb:8000`. Both ends are `notebook`, so with that profile off the
+Open Notebook restore path has neither the container it execs into nor the
+datastore it imports to.
+
+**Two of these are easy to get wrong, so they are stated exactly:**
+
+- Row 4 reaches Open Notebook **directly** but reaches the wiki **through portal
+  Caddy**: `frontend/docker-compose.yml:366` sets `QUARTZ_HOST=${QUARTZ_HOST:-caddy}`
+  and the deployed value is `caddy:8446`. `entrypoint.sh:66`'s own fallback is
+  `openbrain-wiki-viewer`, but the compose always supplies a value, so that
+  fallback does not apply on this stack — the comment at
+  `frontend/docker-compose.yml:361-364` records why it was moved behind Caddy.
+  So turning `wiki` off breaks the tailnet wiki route *via* row 2, not as a
+  seventh direct edge.
+- Row 7 is **two files, not one**. An earlier version of this table named only
+  `status-pipe/modules/system-health/`, which does not cover the serve pipe.
+
+**Not in the table, deliberately — the host-side class.** These address a
+published `127.0.0.1` port or drive `docker exec` / `docker compose`, so they are
+not container-name reaches, but they do go red when a profile is off:
+`scripts/checks/check-openbrain-health.ps1` (`127.0.0.1:8818`, `:8816` —
+research and curator), `scripts/checks/stack-watchdog.ps1` (`docker exec
+open_notebook`, and it *repairs* rather than consumes),
+`scripts/checks/wiki-latency-probe.ps1` (`docker exec openbrain-wiki-viewer`).
+Also excluded: inventories that merely name the services
+(`scripts/lib/stack-services.json`, `stack.manifest.toml`,
+`status-pipe/orchestrator.py`'s docstring) and `.env`/`.env.example` lines that
+deliver a URL to one of the seven above.
+
+### How to rebuild this list
+
+Nothing in THIS project records these edges — they are another project's
+configuration — so the list has to be re-derived, not maintained. From the
+ai-stack repo root:
+
+```bash
+grep -rnE "(https?://|\"host\"[: ]+\"|target_host[\"'=: ]+|_HOST[=:] *|reverse_proxy +)(openbrain-research|openbrain-wiki|openbrain-wiki-viewer|openbrain-workbench|openbrain-curator|openbrain-idea-refinery|open_notebook|surrealdb)" . \
+  --exclude-dir=OB1 --exclude-dir=.git --exclude-dir=node_modules \
+  --exclude-dir=archive --exclude-dir=documentation --exclude-dir=backups
+```
+
+then read every hit at its line and keep only the runtime reaches. A bare
+name-only grep returns ~60 files and is mostly inventories and prose; the
+URL/host-field shape above returns 23 lines in 15 files (21 in configuration or
+code, two prose mentions in Markdown), which is a list a person can actually
+check. **Do not stop at the first project you find** — the first
+version of this table had portal and one status-pipe module and missed four
+surfaces in three other projects.
 
 
 ## Usage
