@@ -142,7 +142,7 @@ attempt at this change grepped, found two, and wrote "two" into three
 documents. Match the **render** instead:
 
 ```bash
-docker compose -f docker-compose.yml --env-file .env \
+docker compose -f docker-compose.yml \
   --profile research --profile wiki --profile notebook --profile idea-refinery \
   config --format json
 ```
@@ -204,16 +204,11 @@ COMPOSE_PROFILES=research,wiki,notebook,idea-refinery
 
 Compose loads `OB1/docker/.env` natively because that is the project
 directory, so no `--env-file` is needed and the working directory is
-irrelevant. **Do not pass `--env-file` here.** Passing one changes how the
-`include:`d `docker-compose.scheduled.yml` resolves variables, and it changes
-what a render reports: `OB_APP_MEMORY_PASSWORD` has nine substitution sites and
-produces **nine** "variable is not set" warnings with no `--env-file`, and
-**eight** with one. Counts taken that way are not comparable with counts taken
-without it. Put the values in `.env` and let compose find them. With that line present, a bare `docker compose config --services`
-renders 30 — service-for-service identical to the four-flag render (`diff`
-clean). This is the declaration that makes a bare `docker compose up -d`, and
-every ai-stack recovery script that drives this project without flags, start
-the whole fleet.
+irrelevant. Put the values in `.env` and let compose find them. With that line
+present, a bare `docker compose config --services` renders 30 —
+service-for-service identical to the four-flag render (`diff` clean). This is
+the declaration that makes a bare `docker compose up -d`, and every ai-stack
+recovery script that drives this project without flags, start the whole fleet.
 
 **3. The ai-stack driver.** `python scripts/stack/stack.py enable research`
 resolves this plane's profiles from `stack.manifest.toml` and writes them to
