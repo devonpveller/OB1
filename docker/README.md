@@ -162,14 +162,94 @@ Verified by rendering every combination against this file:
 | `wiki` | 24 |
 | `notebook` | 23 |
 | `idea-refinery` | 21 |
+| `idea-refinery` + `research` | 23 — the ai-stack driver's default pair for this plane |
 | `research` + `wiki` | 26 |
 | `research` + `notebook` | 25 |
 | `wiki` + `notebook` | 27 |
 | `research` + `wiki` + `notebook` | 29 |
 | all four | 30 — the full fleet |
 
+Every number above is the output of
+`docker compose -f docker-compose.yml <flags> config --services | wc -l`, not
+20 plus the deltas. The `idea-refinery` + `research` row is the one that has
+been written down wrong before: it is **23**, and the number that gets put
+there by mistake is 22 — the count for `research` ALONE.
+
+These renders assume `COMPOSE_PROFILES` is **unset**. If it is set in `.env`
+(see below) a bare `docker compose config` renders whatever that line names —
+on a host with all four declared, the `(none)` row reads 30, not 20.
+
 `docker compose config` with all three new profiles is byte-identical to the
 render before this change apart from the nine `profiles:` keys.
+
+### How to turn these on
+
+There are three ways, and they do not all behave the same.
+
+**1. `--profile` flags on the command line.** Shown at the top of this section.
+A CLI `--profile` **REPLACES** `COMPOSE_PROFILES`; it does not union with it.
+Measured against this file with all four profiles in `.env`:
+`--profile research` alone renders **22**, not 30 — the other three were
+silently dropped. So any script that passes one flag cannot be rescued by an
+operator's env file, and a script that passes flags at all must pass every
+profile it wants.
+
+**2. `COMPOSE_PROFILES` in this directory's `.env`.** This is a plane's own
+declaration site, the same as every other ai-stack plane since the per-plane
+env split (D17):
+
+```dotenv
+COMPOSE_PROFILES=research,wiki,notebook,idea-refinery
+```
+
+Compose loads `OB1/docker/.env` natively because that is the project
+directory, so no `--env-file` is needed and the working directory is
+irrelevant. With that line present, a bare `docker compose config --services`
+renders 30 — service-for-service identical to the four-flag render (`diff`
+clean). This is the declaration that makes a bare `docker compose up -d`, and
+every ai-stack recovery script that drives this project without flags, start
+the whole fleet.
+
+**3. The ai-stack driver.** `python scripts/stack/stack.py enable research`
+resolves this plane's profiles from `stack.manifest.toml` and writes them to
+its state file:
+
+```
+  ob1  profiles: idea-refinery, research, wiki, notebook
+```
+
+`up ob1` then emits all four `--profile` flags — 30 services. (`idea-refinery`
+is the plane's one `default` profile and `requires` `research`, so it pulls the
+engine in; `wiki` and `notebook` come from the research product's `surfaces`.)
+
+**The two declaration sites compose, and the union has a consequence worth
+knowing.** The driver unions this plane's `COMPOSE_PROFILES` into whatever it
+resolves, deliberately — a `--profile` flag must never start FEWER containers
+than a bare invocation would. The effect is that
+`stack.py enable research --headless`, which exists to drop the `wiki` and
+`notebook` *surfaces*, prints that it dropped them and then drives all four
+anyway when `.env` declares all four. Measured. If you want `--headless` to
+mean anything for this plane, do not put the surface profiles in `.env`.
+
+### Consumers outside this project
+
+Turning `wiki`, `notebook` or `research` off breaks callers in OTHER compose
+projects. None of them fails at start; all of them fail at request time, which
+is the same quiet shape as the cross-group table above. The paths in the second
+column are relative to the **ai-stack** repo that carries this submodule, not
+to this checkout.
+
+| Consumer | Lives in (ai-stack) | Reaches | Profile | What the user sees |
+|---|---|---|---|---|
+| portal Caddy | `portal/config/caddy/Caddyfile` | `openbrain-workbench:8000` | `wiki` | the `/workbench/*` route 502s |
+| portal Caddy | `portal/config/caddy/Caddyfile` | `openbrain-wiki-viewer:8080` | `wiki` | the published wiki 502s |
+| portal Caddy | `portal/config/caddy/Caddyfile` | `open_notebook:5055` and `:8502` | `notebook` | the Open Notebook routes 502 |
+| OWUI Server Status pipe | `status-pipe/modules/system-health/` | `open_notebook:5055/api/config` | `notebook` | probe reports the service down (`critical: False`, so the panel degrades rather than alarming) |
+| OWUI Server Status pipe | `status-pipe/modules/system-health/` | `openbrain-research:8000/health` | `research` | same, for the research engine |
+
+Both consumers reach these services by container name across the shared
+`ai-stack_*` networks, so there is nothing in THIS project that records the
+dependency — which is exactly why it is written here.
 
 
 ## Usage
