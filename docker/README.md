@@ -204,7 +204,14 @@ COMPOSE_PROFILES=research,wiki,notebook,idea-refinery
 
 Compose loads `OB1/docker/.env` natively because that is the project
 directory, so no `--env-file` is needed and the working directory is
-irrelevant. With that line present, a bare `docker compose config --services`
+irrelevant. **Do not pass `--env-file` here.** It replaces `.env` for THIS
+file's substitutions but not for `docker-compose.scheduled.yml`, which arrives
+through `include:` and keeps resolving against the project directory's `.env` —
+so any variable the two files disagree on renders one way in the core services
+and the other way in the scheduled ones, silently. Measured on
+`OB_APP_MEMORY_PASSWORD`: nine substitution sites, nine "variable is not set"
+warnings with no `--env-file`, and eight with one — the missing ninth is the
+site in the included file. With that line present, a bare `docker compose config --services`
 renders 30 — service-for-service identical to the four-flag render (`diff`
 clean). This is the declaration that makes a bare `docker compose up -d`, and
 every ai-stack recovery script that drives this project without flags, start
@@ -303,9 +310,18 @@ grep -rnE "(https?://|\"host\"[: ]+\"|target_host[\"'=: ]+|_HOST[=:] *|reverse_p
 
 then read every hit at its line and keep only the runtime reaches. A bare
 name-only grep returns ~60 files and is mostly inventories and prose; the
-URL/host-field shape above returns 23 lines in 15 files (21 in configuration or
-code, two prose mentions in Markdown), which is a list a person can actually
-check. **Do not stop at the first project you find** — the first
+URL/host-field shape above returns **21 lines in 13 files in a fresh clone**, or
+23 in 15 on a deployed host — the two extra are `agent-org/docker/.env:58` and
+`frontend/.env:127`, which are gitignored, so quote the clone number when
+comparing. Two of the 21 are prose mentions in Markdown. That is a list a person
+can actually check.
+
+**One known blind spot in this pattern**, stated so nobody concludes the list is
+derivable from the grep alone: it requires the service name to follow the
+URL/host token directly, so it does NOT surface
+`frontend/entrypoint.sh:60`, `OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}`,
+where the name sits behind a `:-` default. Row 4 was found by reading the file,
+not by this grep. Treat the grep as the fast sweep and the read as the audit. **Do not stop at the first project you find** — the first
 version of this table had portal and one status-pipe module and missed four
 surfaces in three other projects.
 
