@@ -200,7 +200,10 @@ services:
       ON_JOB_WAIT_MS: ${ON_JOB_WAIT_MS:-7200000}       # 2h
       ON_BASE: http://open_notebook:5055
       # User-facing base for the EMAIL episode links — external + Authelia-gated.
-      ON_PUBLIC_BASE: ${ON_PUBLIC_BASE:-https://notebook.devinveller.ai}
+      # e.g. https://notebook.<your domain>, set in OB1/docker/.env. No default:
+      # blank means no public episode links, only the internal audio URL
+      # (buildEpisodeUrls in recipes/daily-digest/link-enrich.ts).
+      ON_PUBLIC_BASE: ${ON_PUBLIC_BASE:-}
       CHAT_API_BASE: http://llama-cpp:8080/v1
       # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
       CHAT_API_KEY: ${OB_PODCAST_LLM_KEY:-not-needed}

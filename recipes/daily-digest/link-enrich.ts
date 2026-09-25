@@ -36,7 +36,7 @@
  *
  *   docker create --rm --network open-brain_obnet \
  *     -e MCP_ACCESS_KEY=$KEY \
- *     -v "D:\Open WebUI\ai-stack\OB1\recipes\daily-digest:/app:ro" \
+ *     -v "<ai-stack checkout>/OB1/recipes/daily-digest:/app:ro" \
  *     denoland/deno:2.3.3 deno run --unstable-net -A /app/link-enrich.ts --window=168 --limit=2
  *   # then: docker network connect ai-stack_search-net <id>
  *   #       docker network connect ai-stack_llm-net <id>
@@ -173,7 +173,8 @@ const ON_BASE = env("ON_BASE", "http://open_notebook:5055"); // internal — use
 // NOT the internal docker host). On notebook.<domain>: everything → Next.js UI,
 // /api/* → FastAPI. So /podcasts opens the episode in ON; /api/podcasts/episodes/
 // {id}/audio downloads it. Both behind Authelia (user signs in once).
-const ON_PUBLIC_BASE = env("ON_PUBLIC_BASE", "https://notebook.devinveller.ai").replace(/\/$/, "");
+// No default: a shipped domain would be someone else's. Blank = no public links, internal audio URL only (buildEpisodeUrls).
+const ON_PUBLIC_BASE = env("ON_PUBLIC_BASE", "").replace(/\/$/, "");
 const onClient = new OnClient({ baseUrl: ON_BASE });
 // ON TTS terminal-wait deadline. Generous (default 2h) so a slow-but-working
 // render is never cut off as an "early timeout" — the email waits for ON's
