@@ -292,7 +292,9 @@ services:
       # :nothink — brainstorm wants a direct reply; the thinking variant's reasoning tokens can eat
       # the budget and leave content empty (a silent non-reply). See index.ts CHAT_MODEL note.
       CHAT_MODEL: qwen36-27b:nothink
-      IDEA_BRAINSTORM_OPERATORS: ${IDEA_BRAINSTORM_OPERATORS:-profnovice}
+      # Mattermost usernames whose dossier replies get a brainstorm, from OB1/docker/.env.
+      # No default; BLANK = every human reply qualifies (index.ts OPERATORS).
+      IDEA_BRAINSTORM_OPERATORS: ${IDEA_BRAINSTORM_OPERATORS:-}
     volumes:
       - ../integrations/openbrain-idea-refinery:/app
     extra_hosts:

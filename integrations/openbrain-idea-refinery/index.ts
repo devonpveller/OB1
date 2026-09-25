@@ -481,8 +481,11 @@ const CHAT_API_KEY = env("CHAT_API_KEY", "not-needed");
 const BRAINSTORM_ON = env("IDEA_BRAINSTORM", "1") !== "0" && !!MM_TOKEN;
 const BRAINSTORM_POLL_MS = num("IDEA_BRAINSTORM_POLL_MS", 4000);
 const BRAINSTORM_MAX_TOKENS = num("IDEA_BRAINSTORM_MAX_TOKENS", 1200);
+// Mattermost usernames whose replies get a brainstorm. No shipped default (it named one
+// operator). BLANK = every human reply under a dossier qualifies - see the
+// `OPERATORS.size &&` guard in the poll loop; bots and our own posts are excluded there.
 const OPERATORS = new Set(
-  env("IDEA_BRAINSTORM_OPERATORS", "profnovice").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
+  env("IDEA_BRAINSTORM_OPERATORS", "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
 );
 
 // MCP client to openbrain-mcp (OWUI parity: the same core tools OWUI reaches). search_claims is
