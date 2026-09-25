@@ -482,11 +482,17 @@ const BRAINSTORM_ON = env("IDEA_BRAINSTORM", "1") !== "0" && !!MM_TOKEN;
 const BRAINSTORM_POLL_MS = num("IDEA_BRAINSTORM_POLL_MS", 4000);
 const BRAINSTORM_MAX_TOKENS = num("IDEA_BRAINSTORM_MAX_TOKENS", 1200);
 // Mattermost usernames whose replies get a brainstorm. No shipped default (it named one
-// operator). BLANK = every human reply under a dossier qualifies - see the
-// `OPERATORS.size &&` guard in the poll loop; bots and our own posts are excluded there.
+// operator). BLANK = NOBODY: a brainstorm reads private Open Brain thoughts back into the
+// channel and can start internet research, so the list is an authorisation list and an
+// empty one authorises no one (mayBrainstorm; the startup line at the bottom says so).
 const OPERATORS = new Set(
   env("IDEA_BRAINSTORM_OPERATORS", "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
 );
+// The poll loop's authorisation guard. Membership ONLY - an empty set denies everyone.
+// test-operators-guard.ts reads this function and the loop's call out of this file.
+function mayBrainstorm(ops: Set<string>, uname: string): boolean {
+  return ops.has(uname);
+}
 
 // MCP client to openbrain-mcp (OWUI parity: the same core tools OWUI reaches). search_claims is
 // always forced (Gate A). TOOL_MODE: "read" = grounding/read set (default, no writes), "all" = every
@@ -800,7 +806,7 @@ async function brainstormLoop(): Promise<void> {
         if (props.from_bridge || props.from_claude || props.from_webhook) continue;
         if (!p.root_id) continue;                    // only an operator REPLY under a dossier
         const uname = await userName(p.user_id);
-        if (OPERATORS.size && !OPERATORS.has(uname)) continue;
+        if (!mayBrainstorm(OPERATORS, uname)) continue;
         try { await brainstormReply(channelId, p.root_id, bid); }
         catch (e) { console.error(`brainstorm reply failed (${String(p.root_id).slice(0, 8)}): ${(e as Error).message}`); }
       }
@@ -833,5 +839,10 @@ Deno.serve({ port: PORT }, async (req) => {
 console.log(`openbrain-idea-refinery listening on :${PORT} (research=${RESEARCH_URL}, mm=${MM_URL})`);
 
 // IR.4/IR.6 — the LOCAL brainstorm loop (fire-and-forget; retries its own startup).
-if (BRAINSTORM_ON) brainstormLoop();
+if (BRAINSTORM_ON) {
+  if (OPERATORS.size === 0) {
+    console.log("brainstorm loop: IDEA_BRAINSTORM_OPERATORS is empty - brainstorms are DISABLED (replying to nobody) until it is set");
+  }
+  brainstormLoop();
+}
 else console.log("brainstorm loop OFF (no Mattermost token or IDEA_BRAINSTORM=0)");

@@ -293,7 +293,7 @@ services:
       # the budget and leave content empty (a silent non-reply). See index.ts CHAT_MODEL note.
       CHAT_MODEL: qwen36-27b:nothink
       # Mattermost usernames whose dossier replies get a brainstorm, from OB1/docker/.env.
-      # No default; BLANK = every human reply qualifies (index.ts OPERATORS).
+      # No default; BLANK = NOBODY (index.ts mayBrainstorm) - brainstorms stay off until set.
       IDEA_BRAINSTORM_OPERATORS: ${IDEA_BRAINSTORM_OPERATORS:-}
     volumes:
       - ../integrations/openbrain-idea-refinery:/app
