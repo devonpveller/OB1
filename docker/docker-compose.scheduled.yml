@@ -53,8 +53,14 @@ services:
     container_name: openbrain-digest
     restart: unless-stopped
     working_dir: /app
+    # OPTIONAL (cf-ob1-fresh): the recipe .env is gitignored and a fresh clone
+    # has none, so `required: false` lets the plane RENDER without it (compose
+    # >= 2.24). Rendering is all it buys: the chain still needs that file's
+    # keys (see the recipe's .env.example) and the OAuth files mounted below
+    # before it does any work.
     env_file:
-      - ../recipes/daily-digest/.env
+      - path: ../recipes/daily-digest/.env
+        required: false
     environment:
       # The digest is now the END of the chain (prune → podcast → digest). The
       # podcast triggers this digest when its research + episode are ready, so the
@@ -99,8 +105,14 @@ services:
     # key (only prune-short-term.ts does), so the reference here is inert; it is
     # named anyway because the NEXT person to grep this file for cross-profile
     # references will miss it exactly as attempt 1 did.
+    # OPTIONAL (cf-ob1-fresh): the recipe .env is gitignored and a fresh clone
+    # has none, so `required: false` lets the plane RENDER without it (compose
+    # >= 2.24). Rendering is all it buys: the chain still needs that file's
+    # keys (see the recipe's .env.example) and the OAuth files mounted below
+    # before it does any work.
     env_file:
-      - ../recipes/email-history-import/.env
+      - path: ../recipes/email-history-import/.env
+        required: false
     environment:
       # On a successful pull, chain to prune (locked decision 13). Prune
       # then chains to digest. End-to-end: cron fires pull at 01:00, the
@@ -136,8 +148,14 @@ services:
     # recompiled. Nothing fails to start; the output just stops. Run the digest
     # chain with --profile wiki, or accept a vault that only recompiles on its
     # own daily timer (which is itself part of the wiki profile).
+    # OPTIONAL (cf-ob1-fresh): the recipe .env is gitignored and a fresh clone
+    # has none, so `required: false` lets the plane RENDER without it (compose
+    # >= 2.24). Rendering is all it buys: the chain still needs that file's
+    # keys (see the recipe's .env.example) and the OAuth files mounted below
+    # before it does any work.
     env_file:
-      - ../recipes/email-history-import/.env
+      - path: ../recipes/email-history-import/.env
+        required: false
     environment:
       # Chain to the PODCAST pipeline (reordered 2026-06-08). The podcast
       # researches the day's links and produces the episode, then triggers the
@@ -177,8 +195,14 @@ services:
     container_name: openbrain-podcast
     restart: unless-stopped
     working_dir: /app
+    # OPTIONAL (cf-ob1-fresh): the recipe .env is gitignored and a fresh clone
+    # has none, so `required: false` lets the plane RENDER without it (compose
+    # >= 2.24). Rendering is all it buys: the chain still needs that file's
+    # keys (see the recipe's .env.example) and the OAuth files mounted below
+    # before it does any work.
     env_file:
-      - ../recipes/daily-digest/.env
+      - path: ../recipes/daily-digest/.env
+        required: false
     environment:
       PORT: "8080"
       PODCAST_RUN_ARGS: "--commit --audio"
