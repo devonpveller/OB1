@@ -37,11 +37,13 @@ export const NAME_RULES = [
 ];
 
 // Google credential VALUE shapes, searched in the raw text of every tracked,
-// non-binary blob up to 1 MiB, of ANY file type: an access token (ya29.), a
-// refresh token (1//0) and an OAuth client secret (GOCSPX-). The 20-character
-// floor keeps prose, and these patterns as written here, from matching.
+// non-binary blob up to 1 MiB, of ANY file type, and in every tracked PATH
+// (attempt 3: a token pasted as a file name): an access token (ya29., including
+// the dotted ya29.c. service-account form), a refresh token (1//0) and an OAuth
+// client secret (GOCSPX-). The 20-character floor keeps prose, and these
+// patterns as written here, from matching.
 export const TOKEN_SHAPES = [
-  { re: /ya29\.[0-9A-Za-z_-]{20,}/, why: "Google access token shape (ya29.)" },
+  { re: /ya29\.[0-9A-Za-z_.-]{20,}/, why: "Google access token shape (ya29.)" },
   { re: /1\/\/0[0-9A-Za-z_-]{20,}/, why: "Google refresh token shape (1//0)" },
   { re: /GOCSPX-[0-9A-Za-z_-]{20,}/, why: "Google OAuth client secret shape (GOCSPX-)" },
 ];
@@ -88,7 +90,10 @@ export function contentReason(buf, isJson) {
   // Strip a UTF-8 BOM: PowerShell 5.1's Out-File and `>` write one by default,
   // and JSON.parse throws on it (attempt 1's bypass).
   const text = buf.toString("utf8").replace(/^﻿/, "");
-  for (const t of TOKEN_SHAPES) if (t.re.test(text)) return t.why;
+  // JSON-escaped slashes ("1\/\/0...", PHP json_encode's default) hide the
+  // refresh-token shape from a raw search: also search a copy with \/ read as /.
+  const unescaped = text.replace(/\\\//g, "/");
+  for (const t of TOKEN_SHAPES) if (t.re.test(text) || t.re.test(unescaped)) return t.why;
   if (!isJson) return null;
   let obj;
   try {
@@ -154,7 +159,9 @@ export function findOAuthSecrets(repoDir, { env } = {}) {
   const toRead = [];
   for (const e of entries) {
     const rule = NAME_RULES.find((r) => r.re.test(path.posix.basename(e.path)));
+    const shape = TOKEN_SHAPES.find((t) => t.re.test(e.path));
     if (rule) hits.push({ path: e.path, why: rule.why });
+    else if (shape) hits.push({ path: e.path, why: `${shape.why} in the file NAME` });
     else toRead.push(e);
   }
 
@@ -166,6 +173,14 @@ export function findOAuthSecrets(repoDir, { env } = {}) {
   return hits.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+// A path can itself carry a token (a file NAMED after one). Printing it would
+// put the value in the hook's output, so the token-shaped part is masked.
+export function redactPath(p) {
+  let out = p;
+  for (const t of TOKEN_SHAPES) out = out.replace(new RegExp(t.re.source, "g"), "<token-shaped>");
+  return out;
+}
+
 function main() {
   const repoDir = process.argv[2] ?? process.cwd();
   const hits = findOAuthSecrets(repoDir);
@@ -174,7 +189,7 @@ function main() {
     return 0;
   }
   console.error(`oauth-secret-guard: REFUSED - ${hits.length} OAuth-shaped file(s) in the index:`);
-  for (const h of hits) console.error(`  ${h.path}  [${h.why}]`);
+  for (const h of hits) console.error(`  ${redactPath(h.path)}  [${h.why}]`);
   console.error("Unstage them (git rm --cached <path>); real OAuth files live in the gitignored secrets/ tree.");
   return 1;
 }

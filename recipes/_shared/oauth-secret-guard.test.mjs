@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findOAuthSecrets, oauthShape } from "./oauth-secret-guard.mjs";
+import { findOAuthSecrets, oauthShape, redactPath } from "./oauth-secret-guard.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GUARD = path.join(HERE, "oauth-secret-guard.mjs");
@@ -49,7 +49,7 @@ const ignored = (root, p) => spawnSync("git", ["-C", root, "check-ignore", "-q",
 test("this repo: no OAuth token/client-secret file is tracked", () => {
   const root = g(HERE, "rev-parse", "--show-toplevel");
   const hits = findOAuthSecrets(root, { env: ENV });
-  assert.deepEqual(hits, [], `tracked OAuth-shaped files: ${JSON.stringify(hits)}`);
+  assert.deepEqual(hits, [], `tracked OAuth-shaped files: ${JSON.stringify(hits.map((h) => [redactPath(h.path), h.why]))}`);
 });
 
 test("this repo: the mount points Docker creates for the Gmail binds are gitignored", () => {
@@ -82,6 +82,7 @@ test("refuses a staged file by NAME, even when it is empty", () => {
       "recipes/daily-digest/gmail-read-credentials.json": "",
       "recipes/x/client_secret_1-abc.apps.googleusercontent.com.json": "{}",
       "recipes/x/calendar-token.json": "{}",
+      "recipes/x/gmail-sync-log.json": "{}", // runtime state; gmail-*.json stays broad on purpose
       "recipes/x/oauth_token.json": "{}",
       "recipes/x/token.json": "{}",
       "tools/credentials.json": "{}",
@@ -91,6 +92,7 @@ test("refuses a staged file by NAME, even when it is empty", () => {
       "recipes/daily-digest/gmail-read-token.json",
       "recipes/x/calendar-token.json",
       "recipes/x/client_secret_1-abc.apps.googleusercontent.com.json",
+      "recipes/x/gmail-sync-log.json",
       "recipes/x/oauth_token.json",
       "recipes/x/token.json",
       "tools/credentials.json",
@@ -154,6 +156,33 @@ test("Google token VALUE shapes are refused in any file type", () => {
     }),
     ["docs/setup.md", "notes/g.txt", "recipes/x/access.json", "recipes/x/bom.json", "recipes/x/client.ts"],
   );
+});
+
+test("attempt-3 forms: dotted ya29.c., a token as a FILE NAME, JSON-escaped slashes", () => {
+  const dottedAccess = "ya" + "29.c." + FILL + "." + FILL; // GCE / service-account access token
+  const escapedRefresh = "1\\/" + "\\/0" + FILL; // PHP json_encode writes "1\/\/0..."
+  const files = {
+    "notes/sa.txt": `token ${dottedAccess}\n`,
+    "recipes/x/sa.json": JSON.stringify({ access_token: dottedAccess }),
+    [`recipes/x/${CLIENT_SECRET}.txt`]: "harmless body",
+    [`recipes/x/${ACCESS}.json`]: "{}",
+    [`recipes/${ACCESS}/a.md`]: "token in a DIRECTORY name",
+    "recipes/x/php.json": `{"token":"${escapedRefresh}"}`,
+    "recipes/x/php.txt": `"${escapedRefresh}"`,
+  };
+  assert.deepEqual(hitsFor(files), Object.keys(files).sort((a, b) => a.localeCompare(b)));
+});
+
+test("CLI: a token-shaped file NAME is masked in the output", () => {
+  const dir = scratchRepo({ [`recipes/x/${CLIENT_SECRET}.txt`]: "harmless body" });
+  try {
+    const r = spawnSync(process.execPath, [GUARD, dir], { env: ENV, encoding: "utf8" });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /recipes\/x\/<token-shaped>/);
+    assert.doesNotMatch(r.stdout + r.stderr, new RegExp(FILL));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("passes ordinary files (no false positives on this repo's usual shapes)", () => {
