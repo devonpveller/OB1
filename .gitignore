@@ -40,7 +40,11 @@ calendar-token.json
 # real files live in the ignored /secrets tree and are bind-mounted over these
 # names inside the recipe dir (docker/docker-compose.scheduled.yml); Docker
 # creates a 0-byte mount point at each such path on the host. Never track one:
-# recipes/_shared/oauth-secret-guard.mjs refuses them by name and by shape.
-recipes/**/gmail-read-*.json
-recipes/**/*token*.json
+# recipes/_shared/oauth-secret-guard.mjs refuses them by name and by content.
+# Names match the guard's NAME_RULES (token.json/credentials.json are above);
+# tokenizer.json or design-tokens.json stay trackable.
+recipes/**/gmail-*.json
+recipes/**/*-token.json
+recipes/**/*_token.json
+recipes/**/*oauth*token*.json
 recipes/**/client_secret*.json
