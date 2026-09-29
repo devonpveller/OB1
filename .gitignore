@@ -35,3 +35,12 @@ open-brain-wiki-data.ssh
 /recipes/brain-backup
 /secrets
 calendar-token.json
+
+# Google OAuth tokens and client secrets (cf-gmail-untrack, 2026-09-29). The
+# real files live in the ignored /secrets tree and are bind-mounted over these
+# names inside the recipe dir (docker/docker-compose.scheduled.yml); Docker
+# creates a 0-byte mount point at each such path on the host. Never track one:
+# recipes/_shared/oauth-secret-guard.mjs refuses them by name and by shape.
+recipes/**/gmail-read-*.json
+recipes/**/*token*.json
+recipes/**/client_secret*.json
