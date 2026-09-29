@@ -5,11 +5,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { findOAuthSecrets, oauthShape, redactPath } from "./oauth-secret-guard.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { assertNoOAuthSecrets, findOAuthSecrets, oauthShape } from "./oauth-secret-guard.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GUARD = path.join(HERE, "oauth-secret-guard.mjs");
@@ -22,8 +22,11 @@ const CLIENT_SECRET = "GOC" + "SPX-" + FILL;
 // A parent repo's hook exports GIT_DIR / GIT_INDEX_FILE, which override `-C`
 // and would point every query below at the PARENT repo. Strip them.
 const ENV = Object.fromEntries(
-  Object.entries(process.env).filter(([k]) => !/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|PREFIX|COMMON_DIR)$/.test(k)),
+  Object.entries(process.env).filter(([k]) => !/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|PREFIX|COMMON_DIR|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_[0-9]+|CONFIG_VALUE_[0-9]+)$/.test(k)),
 );
+// A nested `node --test` inherits NODE_TEST_CONTEXT from this runner and then
+// reports to it instead of exiting non-zero; the child must run standalone.
+const CHILD_ENV = Object.fromEntries(Object.entries(ENV).filter(([k]) => k !== "NODE_TEST_CONTEXT"));
 const g = (dir, ...args) => execFileSync("git", ["-C", dir, ...args], { env: ENV, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
 
 function scratchRepo(files) {
@@ -48,8 +51,36 @@ const ignored = (root, p) => spawnSync("git", ["-C", root, "check-ignore", "-q",
 
 test("this repo: no OAuth token/client-secret file is tracked", () => {
   const root = g(HERE, "rev-parse", "--show-toplevel");
-  const hits = findOAuthSecrets(root, { env: ENV });
-  assert.deepEqual(hits, [], `tracked OAuth-shaped files: ${JSON.stringify(hits.map((h) => [redactPath(h.path), h.why]))}`);
+  // Not assert.deepEqual(hits, []): its failure diff would print the RAW paths.
+  assertNoOAuthSecrets(root, { env: ENV });
+});
+
+// The runner, not only the CLI, must not print a token-shaped path: this is the
+// path gate 5b takes. Run a child `node --test` whose test is test 1's call
+// against a scratch repo holding a token-NAMED dummy, under both reporters.
+test("node --test output masks a token-shaped path (tap and spec reporters)", () => {
+  const dir = scratchRepo({
+    [`recipes/x/${CLIENT_SECRET}.txt`]: "harmless body",
+    [`recipes/${ACCESS}/a.md`]: "harmless body",
+  });
+  const child = path.join(dir, "child.test.mjs");
+  writeFileSync(
+    child,
+    `import { test } from "node:test";\n` +
+      `import { assertNoOAuthSecrets } from ${JSON.stringify(pathToFileURL(GUARD).href)};\n` +
+      `test("child", () => assertNoOAuthSecrets(${JSON.stringify(dir)}));\n`,
+  );
+  try {
+    for (const reporter of ["tap", "spec"]) {
+      const r = spawnSync(process.execPath, ["--test", `--test-reporter=${reporter}`, child], { env: CHILD_ENV, encoding: "utf8" });
+      const out = r.stdout + r.stderr;
+      assert.notEqual(r.status, 0, `${reporter}: the child test should fail`);
+      assert.match(out, /<token-shaped>/, `${reporter}: masked path missing`);
+      assert.equal(out.split(FILL).length - 1, 0, `${reporter}: raw token fragment printed`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("this repo: the mount points Docker creates for the Gmail binds are gitignored", () => {
@@ -180,6 +211,50 @@ test("CLI: a token-shaped file NAME is masked in the output", () => {
     assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /recipes\/x\/<token-shaped>/);
     assert.doesNotMatch(r.stdout + r.stderr, new RegExp(FILL));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The OB1-side hook (.githooks/pre-commit) in a scratch repo wired like a clone
+// that ran `git config core.hooksPath .githooks`: a commit carrying a dummy
+// secret is refused (masked, no raw value), a clean one goes through.
+test("OB1 .githooks/pre-commit refuses a commit that carries a secret", () => {
+  const root = g(HERE, "rev-parse", "--show-toplevel");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "oauth-hook-"));
+  const put = (rel, body, mode) => {
+    mkdirSync(path.join(dir, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(dir, rel), body);
+    if (mode) chmodSync(path.join(dir, rel), mode);
+  };
+  const commit = (...args) =>
+    spawnSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", ...args], { env: ENV, encoding: "utf8" });
+  try {
+    g(dir, "init", "-q");
+    g(dir, "config", "core.hooksPath", ".githooks");
+    put(".githooks/pre-commit", readFileSync(path.join(root, ".githooks", "pre-commit")), 0o755);
+    put("recipes/_shared/oauth-secret-guard.mjs", readFileSync(GUARD));
+    g(dir, "add", "-A");
+    let r = commit("-m", "guard + hook");
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+
+    put(`recipes/x/${CLIENT_SECRET}.txt`, "harmless body");
+    put("recipes/x/config.json", JSON.stringify({ refresh_token: "DUMMY-VALUE-MUST-NOT-PRINT" }));
+    g(dir, "add", "-A");
+    r = commit("-m", "leak");
+    const out = r.stdout + r.stderr;
+    assert.notEqual(r.status, 0, "the hook let a secret through");
+    assert.match(out, /REFUSED/);
+    assert.match(out, /<token-shaped>/);
+    assert.doesNotMatch(out, new RegExp(FILL));
+    assert.doesNotMatch(out, /DUMMY-VALUE-MUST-NOT-PRINT/);
+    assert.equal(g(dir, "rev-list", "--count", "HEAD"), "1", "a commit was created");
+
+    g(dir, "rm", "-q", "--cached", "--", `recipes/x/${CLIENT_SECRET}.txt`, "recipes/x/config.json");
+    put("recipes/x/readme.md", "fine");
+    g(dir, "add", "recipes/x/readme.md");
+    r = commit("-m", "clean");
+    assert.equal(r.status, 0, r.stdout + r.stderr);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

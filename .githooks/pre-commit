@@ -1,0 +1,14 @@
+#!/bin/sh
+# OB1 pre-commit: refuse Google OAuth tokens / client secrets in the index
+# (cf-gmail-untrack). The ai-stack parent runs the same guard's test on every
+# OB1 gitlink bump, but that bump comes AFTER the OB1 push, when a leaked token
+# is already public. This hook stops it before the commit exists.
+#
+# Activate once per clone (the ai-stack landing does it for its OB1 checkout):
+#   git config core.hooksPath .githooks
+root=$(git rev-parse --show-toplevel) || exit 1
+if ! command -v node >/dev/null 2>&1; then
+  echo "OB1 pre-commit: node is not on PATH, so oauth-secret-guard cannot run - refusing." >&2
+  exit 1
+fi
+exec node "$root/recipes/_shared/oauth-secret-guard.mjs" "$root"

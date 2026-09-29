@@ -181,6 +181,17 @@ export function redactPath(p) {
   return out;
 }
 
+// Throw a plain Error naming the MASKED paths when the index holds a secret.
+// For tests: node's assert.deepEqual(hits, [], msg) appends an actual/expected
+// diff and the TAP reporter an `actual:` block, both with the RAW paths
+// (attempt-3 finding) - a plain Error carries only this message.
+export function assertNoOAuthSecrets(repoDir, opts = {}) {
+  const hits = findOAuthSecrets(repoDir, opts);
+  if (hits.length === 0) return;
+  const lines = hits.map((h) => `  ${redactPath(h.path)}  [${h.why}]`);
+  throw new Error(`${hits.length} OAuth-shaped file(s) in the index:\n${lines.join("\n")}`);
+}
+
 function main() {
   const repoDir = process.argv[2] ?? process.cwd();
   const hits = findOAuthSecrets(repoDir);
