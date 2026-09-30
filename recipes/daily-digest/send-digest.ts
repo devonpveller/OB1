@@ -57,9 +57,9 @@ const brain = new BrainClient({
 
 const llm = new LlmClient({
   chatBase: env("LOCAL_LLM_BASE", "http://llama-cpp:8080/v1"),
-  chatModel: env("LOCAL_LLM_MODEL", "qwen36-27b:nothink"),
+  chatModel: env("LOCAL_LLM_MODEL", "local-small"),
   embedBase: env("LOCAL_EMBED_BASE", "http://llama-cpp-embed:8080/v1"),
-  embedModel: env("LOCAL_EMBED_MODEL", "bge-m3"),
+  embedModel: env("LOCAL_EMBED_MODEL", "local-embed"),
   bearer: env("LOCAL_LLM_BEARER", "no-key"),
 });
 

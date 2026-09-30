@@ -315,7 +315,7 @@ services:
       CHAT_API_KEY: ${OB_PODCAST_LLM_KEY:-not-needed}
       # :nothink — brainstorm wants a direct reply; the thinking variant's reasoning tokens can eat
       # the budget and leave content empty (a silent non-reply). See index.ts CHAT_MODEL note.
-      CHAT_MODEL: qwen36-27b:nothink
+      CHAT_MODEL: local-small
       # Mattermost usernames whose dossier replies get a brainstorm, from OB1/docker/.env.
       # No default; BLANK = NOBODY (index.ts mayBrainstorm) - brainstorms stay off until set.
       IDEA_BRAINSTORM_OPERATORS: ${IDEA_BRAINSTORM_OPERATORS:-}

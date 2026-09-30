@@ -38,11 +38,11 @@ const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 
 // Local OpenAI-compatible chat endpoint (ai-stack llama-cpp /
-// qwen36-27b:nothink). When CHAT_API_BASE is set it takes priority over
+// local-small). When CHAT_API_BASE is set it takes priority over
 // the cloud providers; unset = upstream behaviour unchanged.
 const CHAT_API_BASE = (Deno.env.get("CHAT_API_BASE") ?? "").replace(/\/+$/, "");
 const CHAT_API_KEY = Deno.env.get("CHAT_API_KEY") ?? "not-needed";
-const CHAT_MODEL = Deno.env.get("CHAT_MODEL") ?? "qwen36-27b:nothink";
+const CHAT_MODEL = Deno.env.get("CHAT_MODEL") ?? "local-small";
 
 const WORKER_VERSION = "entity-extraction-worker-v1";
 const MAX_ATTEMPTS = 5;

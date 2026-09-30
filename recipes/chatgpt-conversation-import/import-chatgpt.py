@@ -67,13 +67,16 @@ from chatgpt_parser import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 SYNC_LOG_PATH = SCRIPT_DIR / "chatgpt-sync-log.json"
 
-# Local-repoint (self-hosted fork): never OpenRouter. Extraction -> llama-swap
-# (qwen36-27b:nothink) at :8081; embeddings -> llama-cpp-embed (bge-m3, 1024-dim)
-# at :8082. Both are OpenAI-compatible; the bearer is a non-secret placeholder
-# (llama.cpp ignores it). Override via env if the host ports differ.
+# Local-repoint (self-hosted fork): never OpenRouter. Extraction -> role
+# local-small, embeddings -> role local-embed (bge-m3, 1024-dim). Role names are
+# known only to the LiteLLM gateway: point LOCAL_LLM_BASE / LOCAL_EMBED_BASE at its
+# aliases (http://llama-cpp:8080/v1, http://llama-cpp-embed:8080/v1), as this
+# recipe's .env does. The :8081/:8082 defaults below are the llama.cpp upstreams'
+# host ports, which do not know role names (a request there fails naming the model).
+# The bearer is a non-secret placeholder.
 OPENROUTER_BASE = os.environ.get("LOCAL_LLM_BASE", "http://127.0.0.1:8081/v1")
 EMBEDDING_BASE = os.environ.get("LOCAL_EMBED_BASE", "http://127.0.0.1:8082/v1")
-EMBEDDING_MODEL = os.environ.get("LOCAL_EMBED_MODEL", "bge-m3")
+EMBEDDING_MODEL = os.environ.get("LOCAL_EMBED_MODEL", "local-embed")
 OLLAMA_BASE = "http://localhost:11434"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -755,7 +758,7 @@ Examples:
     parser.add_argument("--min-messages", type=int, default=0, help="Override minimum message count for filtering")
     parser.add_argument("--min-words", type=int, default=0, help="Override minimum word count for borderline filtering (default: 50)")
     parser.add_argument("--max-words", type=int, default=50000, help="Skip conversations exceeding this word count (default: 50000, ~$1+ per conversation with gpt-4o)")
-    parser.add_argument("--openrouter-model", default=os.environ.get("LOCAL_LLM_MODEL", "qwen36-27b:nothink"), help="Extraction model on the local OpenAI-compatible endpoint (default: qwen36-27b:nothink)")
+    parser.add_argument("--openrouter-model", default=os.environ.get("LOCAL_LLM_MODEL", "local-small"), help="Extraction model on the local OpenAI-compatible endpoint (default: local-small)")
     parser.add_argument("--focus", type=str, default=None, metavar="TOPICS", help="""\
 Focus extraction on specific topics. Accepts a preset name or custom description.
 

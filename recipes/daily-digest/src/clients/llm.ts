@@ -9,11 +9,11 @@
 export interface LlmClientOptions {
   /** Chat completions base URL, e.g. http://llama-cpp:8080/v1 */
   chatBase: string;
-  /** Model identifier for chat completions, e.g. qwen36-27b:nothink */
+  /** Model identifier for chat completions, e.g. local-small */
   chatModel: string;
   /** Embeddings base URL, e.g. http://llama-cpp-embed:8080/v1 */
   embedBase: string;
-  /** Model identifier for embeddings, e.g. bge-m3 */
+  /** Model identifier for embeddings, e.g. local-embed */
   embedModel: string;
   /** Non-secret bearer placeholder — llama-cpp ignores when no API key set. */
   bearer?: string;

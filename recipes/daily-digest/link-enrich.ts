@@ -138,7 +138,7 @@ const CHAT_API_KEY = env("CHAT_API_KEY");
 // better dialogue). Requires the runner to also join `ai-stack_llm-net`.
 const scriptChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
-  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  chatModel: env("CHAT_MODEL", "local-large"),
   nothinkSuffix: env("SCRIPT_NOTHINK_SUFFIX", ":nothink"), // nothink = fast + reliable; set "" for think-model dialogue
   apiKey: CHAT_API_KEY,
   label: "script",
@@ -157,7 +157,7 @@ const scriptChat = makeScriptChat({
 // one call and 0 the next. Verified temp 0 → stable ([6,6,6,6] across runs).
 const gapTriageChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
-  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  chatModel: env("CHAT_MODEL", "local-large"),
   nothinkSuffix: ":nothink",
   temperature: 0,
   apiKey: CHAT_API_KEY,
@@ -188,7 +188,7 @@ const gmailReader = new GmailReader(new GoogleOAuth({
 }));
 const poiChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
-  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  chatModel: env("CHAT_MODEL", "local-large"),
   nothinkSuffix: ":nothink",
   apiKey: CHAT_API_KEY,
   label: "poi-select",
@@ -199,7 +199,7 @@ const poiChat = makeScriptChat({
 // Set BODY_CLASSIFY_NOTHINK=:nothink to trade precision for speed.
 const bodyClassifyChat = makeScriptChat({
   chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
-  chatModel: env("CHAT_MODEL", "qwen36-27b"),
+  chatModel: env("CHAT_MODEL", "local-large"),
   nothinkSuffix: env("BODY_CLASSIFY_NOTHINK", ""),
   apiKey: CHAT_API_KEY,
   label: "body-classify",

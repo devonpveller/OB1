@@ -35,7 +35,7 @@ const DB_PASSWORD = Deno.env.get("DB_PASSWORD") || "";
 
 const EMBEDDING_API_BASE = Deno.env.get("EMBEDDING_API_BASE") || "http://llama-cpp-embed:8080/v1";
 const EMBEDDING_API_KEY = Deno.env.get("EMBEDDING_API_KEY") || "not-needed";
-const EMBEDDING_MODEL = Deno.env.get("EMBEDDING_MODEL") || "bge-m3";
+const EMBEDDING_MODEL = Deno.env.get("EMBEDDING_MODEL") || "local-embed";
 const EMBEDDING_MAX_CHARS = parseInt(Deno.env.get("EMBEDDING_MAX_CHARS") || "4000", 10);
 
 const CHUNK_BATCH = parseInt(Deno.env.get("CHUNK_BATCH") || "25", 10);

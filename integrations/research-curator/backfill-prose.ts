@@ -20,7 +20,7 @@ const DB_USER = Deno.env.get("DB_USER") || "postgres";
 const DB_PASSWORD = Deno.env.get("DB_PASSWORD") || "";
 const CHAT_BASE = (Deno.env.get("CHAT_API_BASE") || "http://llama-cpp:8080/v1").replace(/\/+$/, "");
 const CHAT_KEY = Deno.env.get("CHAT_API_KEY") || "not-needed";
-const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "qwen36-27b:nothink";
+const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "local-small";
 
 const PROSE_SYS =
   `You are Open Brain's research writer. You are given a QUESTION and a GROUNDED ANSWER — a list of verified assertions, each tagged [SOURCED]/[INFERRED]/[UNCERTAIN] and ending with its citation [Source N], plus [GAP] lines for points no source covered.

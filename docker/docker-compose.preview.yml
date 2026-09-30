@@ -179,7 +179,7 @@ services:
       # setting them and omitting them are behaviourally identical.
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
       EMBEDDING_API_KEY: not-needed
-      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_MODEL: local-embed
       EMBEDDING_DIMENSION: "1024"
       EXTRACT_URL: http://preview-extract:8000
       WIKI_GIT_DIR: /wiki

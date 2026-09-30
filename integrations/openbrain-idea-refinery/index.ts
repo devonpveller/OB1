@@ -476,7 +476,7 @@ async function handleRun(wait: boolean): Promise<Record<string, unknown>> {
 const CHAT_API_BASE = env("CHAT_API_BASE", "http://llama-cpp:8080/v1").replace(/\/+$/, "");
 // :nothink — a direct reply. The thinking variant emits ~700 reasoning tokens first, which risk
 // eating max_tokens and leaving `content` empty → a silent non-reply. :nothink is fast + robust.
-const CHAT_MODEL = env("CHAT_MODEL", "qwen36-27b:nothink");
+const CHAT_MODEL = env("CHAT_MODEL", "local-small");
 const CHAT_API_KEY = env("CHAT_API_KEY", "not-needed");
 const BRAINSTORM_ON = env("IDEA_BRAINSTORM", "1") !== "0" && !!MM_TOKEN;
 const BRAINSTORM_POLL_MS = num("IDEA_BRAINSTORM_POLL_MS", 4000);

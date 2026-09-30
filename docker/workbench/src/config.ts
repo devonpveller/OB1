@@ -29,7 +29,7 @@ export const config = {
   embedding: {
     base: (Deno.env.get("EMBEDDING_API_BASE") || "http://llama-cpp-embed:8080/v1").replace(/\/+$/, ""),
     key: Deno.env.get("EMBEDDING_API_KEY") || "not-needed",
-    model: Deno.env.get("EMBEDDING_MODEL") || "bge-m3",
+    model: Deno.env.get("EMBEDDING_MODEL") || "local-embed",
     dimension: parseInt(Deno.env.get("EMBEDDING_DIMENSION") || "1024", 10),
     // Starting char budget per embedding call; embed() halves on a
     // physical-batch overflow until it fits (see util/embed.ts).

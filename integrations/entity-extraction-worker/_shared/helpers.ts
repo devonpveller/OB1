@@ -102,7 +102,7 @@ export async function embedText(text: string): Promise<number[]> {
   const embedBase = (Deno.env.get("EMBEDDING_API_BASE") ?? "").replace(/\/+$/, "");
   if (embedBase) {
     const embedKey = Deno.env.get("EMBEDDING_API_KEY") ?? "not-needed";
-    const embedModel = Deno.env.get("EMBEDDING_MODEL") ?? "bge-m3";
+    const embedModel = Deno.env.get("EMBEDDING_MODEL") ?? "local-embed";
     const response = await fetch(`${embedBase}/embeddings`, {
       method: "POST",
       headers: {
@@ -184,7 +184,7 @@ type MetadataProvider = "local" | "openrouter" | "openai" | "anthropic";
 
 /** Read env and return configured providers in OB1 priority order.
  * `local` (OpenAI-compatible CHAT_API_BASE, e.g. ai-stack llama-cpp /
- * qwen36-27b:nothink) wins when set; otherwise the upstream cloud order
+ * local-small) wins when set; otherwise the upstream cloud order
  * (openrouter > openai > anthropic) is unchanged. */
 function getConfiguredMetadataProviders(): MetadataProvider[] {
   const providers: MetadataProvider[] = [];
@@ -201,7 +201,7 @@ async function fetchLocalMetadata(text: string): Promise<string> {
   if (!base) throw new Error("CHAT_API_BASE is not configured");
 
   const apiKey = Deno.env.get("CHAT_API_KEY") ?? "not-needed";
-  const model = Deno.env.get("CHAT_MODEL") ?? "qwen36-27b:nothink";
+  const model = Deno.env.get("CHAT_MODEL") ?? "local-small";
   const response = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: {

@@ -22,7 +22,7 @@
  * Requires: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
  *
  * Local-repoint (self-hosted fork): never OpenRouter. Metadata extraction ->
- * llama-swap (qwen36-27b:nothink). Defaults are internal Docker service names;
+ * role local-small via the gateway. Defaults are internal Docker service names;
  * the bearer is a non-secret placeholder. Override with LOCAL_LLM_BASE /
  * LOCAL_LLM_MODEL to swap providers — the OpenAI-compatible request shape
  * stays the same.
@@ -37,7 +37,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const LLM_BASE = Deno.env.get("LOCAL_LLM_BASE") || "http://llama-cpp:8080/v1";
-const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "qwen36-27b:nothink";
+const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "local-small";
 const LLM_BEARER = Deno.env.get("LOCAL_LLM_BEARER") || "no-key";
 
 // ─── Args ────────────────────────────────────────────────────────────────────

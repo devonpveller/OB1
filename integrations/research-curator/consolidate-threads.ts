@@ -46,11 +46,11 @@ const DB_PASSWORD = Deno.env.get("DB_PASSWORD") || "";
 
 const EMBEDDING_API_BASE = (Deno.env.get("EMBEDDING_API_BASE") || "http://llama-cpp-embed:8080/v1").replace(/\/+$/, "");
 const EMBEDDING_API_KEY = Deno.env.get("EMBEDDING_API_KEY") || "not-needed";
-const EMBEDDING_MODEL = Deno.env.get("EMBEDDING_MODEL") || "bge-m3";
+const EMBEDDING_MODEL = Deno.env.get("EMBEDDING_MODEL") || "local-embed";
 
 const CHAT_API_BASE = (Deno.env.get("CHAT_API_BASE") || "http://llama-cpp:8080/v1").replace(/\/+$/, "");
 const CHAT_API_KEY = Deno.env.get("CHAT_API_KEY") || "not-needed";
-const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "qwen36-27b:nothink";
+const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "local-small";
 
 const APPLY = Deno.args.includes("--apply");
 const SHORTLIST_K = 6;

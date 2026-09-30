@@ -243,7 +243,7 @@ function loadEnv() {
   const localChat = !!env.CHAT_API_BASE;
   // ANTHROPIC_API_KEY is only required for the cloud path. When
   // CHAT_API_BASE is set we run against a local OpenAI-compatible
-  // endpoint (ai-stack llama-cpp / qwen36-27b:nothink) and need no key.
+  // endpoint (ai-stack llama-cpp / local-small) and need no key.
   const required = localChat
     ? ["OPEN_BRAIN_URL", "OPEN_BRAIN_SERVICE_KEY"]
     : ["OPEN_BRAIN_URL", "OPEN_BRAIN_SERVICE_KEY", "ANTHROPIC_API_KEY"];
@@ -264,7 +264,7 @@ function loadEnv() {
     ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
     CHAT_API_BASE: localChat ? String(env.CHAT_API_BASE).replace(/\/+$/, "") : "",
     CHAT_API_KEY: env.CHAT_API_KEY || "not-needed",
-    CHAT_MODEL: env.CHAT_MODEL || "qwen36-27b:nothink",
+    CHAT_MODEL: env.CHAT_MODEL || "local-small",
   };
 }
 
@@ -278,7 +278,7 @@ function loadEnv() {
 function applyLocalChatOverride(args) {
   const base = process.env.CHAT_API_BASE;
   if (!base) return;
-  const model = process.env.CHAT_MODEL || "qwen36-27b:nothink";
+  const model = process.env.CHAT_MODEL || "local-small";
   args.hybrid = false;
   args.singleModel = model;
   args.filterModel = model;

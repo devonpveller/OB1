@@ -27,13 +27,13 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
 
 // Local-repoint (self-hosted fork): never OpenRouter. Summarization ->
-// llama-swap (qwen36-27b:nothink); embeddings -> llama-cpp-embed (bge-m3,
+// role local-small via the gateway; embeddings -> local-embed (bge-m3,
 // 1024-dim, matches thoughts.embedding vector(1024)). Runs inside Docker, so
 // defaults are internal service names; the bearer is a non-secret placeholder.
 const LLM_BASE = process.env.LOCAL_LLM_BASE || "http://llama-cpp:8080/v1";
-const LLM_MODEL = process.env.LOCAL_LLM_MODEL || "qwen36-27b:nothink";
+const LLM_MODEL = process.env.LOCAL_LLM_MODEL || "local-small";
 const EMBED_BASE = process.env.LOCAL_EMBED_BASE || "http://llama-cpp-embed:8080/v1";
-const EMBED_MODEL = process.env.LOCAL_EMBED_MODEL || "bge-m3";
+const EMBED_MODEL = process.env.LOCAL_EMBED_MODEL || "local-embed";
 const SYNC_LOG_PATH = "google-activity-sync-log.json";
 
 // Categories worth importing (skip low-signal ones like Ads, Assistant, etc.)

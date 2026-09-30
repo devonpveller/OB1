@@ -62,13 +62,13 @@ const INGEST_URL = Deno.env.get("INGEST_URL") || "";
 const INGEST_KEY = Deno.env.get("INGEST_KEY") || "";
 
 // Local-repoint (self-hosted fork): never OpenRouter. Metadata extraction ->
-// llama-swap (qwen36-27b:nothink); embeddings -> llama-cpp-embed (bge-m3,
+// role local-small via the gateway; embeddings -> local-embed (bge-m3,
 // 1024-dim, matches thoughts.embedding vector(1024)). Defaults are internal
 // Docker service names; the bearer is a non-secret placeholder.
 const LLM_BASE = Deno.env.get("LOCAL_LLM_BASE") || "http://llama-cpp:8080/v1";
-const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "qwen36-27b:nothink";
+const LLM_MODEL = Deno.env.get("LOCAL_LLM_MODEL") || "local-small";
 const EMBED_BASE = Deno.env.get("LOCAL_EMBED_BASE") || "http://llama-cpp-embed:8080/v1";
-const EMBED_MODEL = Deno.env.get("LOCAL_EMBED_MODEL") || "bge-m3";
+const EMBED_MODEL = Deno.env.get("LOCAL_EMBED_MODEL") || "local-embed";
 
 // ─── Sync Log (deduplication) ────────────────────────────────────────────────
 

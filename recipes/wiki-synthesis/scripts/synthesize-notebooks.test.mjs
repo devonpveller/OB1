@@ -21,8 +21,8 @@ const SRC = {
 
 test("hash is deterministic for identical inputs", () => {
   assert.equal(
-    synthesisInputHash(THREAD, [SRC], "qwen36-27b"),
-    synthesisInputHash(THREAD, [{ ...SRC }], "qwen36-27b"),
+    synthesisInputHash(THREAD, [SRC], "local-small"),
+    synthesisInputHash(THREAD, [{ ...SRC }], "local-small"),
   );
 });
 

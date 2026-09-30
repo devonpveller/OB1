@@ -16,9 +16,9 @@ own GPUs.
 
 The MCP server joins the external `ai-stack_llm-net` network and calls:
 
-- **Embeddings:** `http://llama-cpp-embed:8080/v1` — `bge-m3`, **1024-dim**
+- **Embeddings:** `http://llama-cpp-embed:8080/v1` — role `local-embed` (bge-m3), **1024-dim**
   (the schema uses `vector(1024)`; upstream OB1 defaults to 1536 for OpenAI)
-- **Chat (metadata):** `http://llama-cpp:8080/v1` — `qwen36-27b:nothink`
+- **Chat (metadata):** `http://llama-cpp:8080/v1` — role `local-small` (no thinking)
 
 Secrets live in `.env` (gitignored). Committable templates with the same
 keys are provided as `*.example` files.

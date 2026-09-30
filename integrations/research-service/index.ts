@@ -37,12 +37,12 @@ const DB_PASSWORD = env("DB_PASSWORD");
 
 const EMBEDDING_API_BASE = env("EMBEDDING_API_BASE", "http://llama-cpp-embed:8080/v1").replace(/\/+$/, "");
 const EMBEDDING_API_KEY = env("EMBEDDING_API_KEY", "not-needed");
-const EMBEDDING_MODEL = env("EMBEDDING_MODEL", "bge-m3");
+const EMBEDDING_MODEL = env("EMBEDDING_MODEL", "local-embed");
 const EMBEDDING_MAX_CHARS = parseInt(env("EMBEDDING_MAX_CHARS", "4000"), 10);
 
 const CHAT_API_BASE = env("CHAT_API_BASE", "http://llama-cpp:8080/v1").replace(/\/+$/, "");
 const CHAT_API_KEY = env("CHAT_API_KEY", "not-needed");
-const CHAT_MODEL = env("CHAT_MODEL", "qwen36-27b");
+const CHAT_MODEL = env("CHAT_MODEL", "local-large");
 const NOTHINK_SUFFIX = env("NOTHINK_SUFFIX", ":nothink");
 // llm-queue admission attribution. The B2 admission controller reads the OpenAI
 // `user` body field (LiteLLM forwards it — see config/litellm.config.yaml §B2)
