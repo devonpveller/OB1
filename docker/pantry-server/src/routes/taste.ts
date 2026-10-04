@@ -300,7 +300,7 @@ export function registerTaste(app: Hono, d: Deps) {
     const b = await readBody(c);
     if (typeof b.supports !== "boolean") throw invalid("supports (boolean) is required");
     if (!isUuid(b.evaluation_id)) throw invalid("evaluation_id (UUID) is required");
-    const row = await d.db.tx(async (t) => {
+    const out = await d.db.tx(async (t) => {
       const h = (await t.q(`SELECT id FROM pantry_taste_hypotheses WHERE id = $1 AND user_id = $2 FOR UPDATE`, [id, d.userId]))[0];
       if (!h) throw notFound("hypothesis");
       const ev = (await t.q(
@@ -313,14 +313,21 @@ export function registerTaste(app: Hono, d: Deps) {
       if (ev.guest_context !== null && ev.guest_context !== undefined) {
         throw invalid("that evaluation is of a guest meal; guest meals are never learned", { reason: "guest_meal" });
       }
-      return (await t.q(
+      const upd = (await t.q(
         `UPDATE pantry_taste_hypotheses
-            SET support = support + $3::int, against = against + $4::int, last_tested = now()
-          WHERE id = $1 AND user_id = $2 RETURNING ${HYP_COLS}`,
-        [id, d.userId, b.supports ? 1 : 0, b.supports ? 0 : 1],
+            SET support = support + $3::int, against = against + $4::int, last_tested = now(),
+                evidence = array_append(evidence, $5::uuid)
+          WHERE id = $1 AND user_id = $2 AND NOT ($5::uuid = ANY(evidence)) RETURNING ${HYP_COLS}`,
+        [id, d.userId, b.supports ? 1 : 0, b.supports ? 0 : 1, b.evaluation_id],
       ))[0];
+      if (upd) return { row: upd, duplicate: false };
+      // already counted for this hypothesis: change nothing
+      return {
+        row: (await t.q(`SELECT ${HYP_COLS} FROM pantry_taste_hypotheses WHERE id = $1 AND user_id = $2`, [id, d.userId]))[0],
+        duplicate: true,
+      };
     });
-    return c.json(hypOut(row));
+    return c.json({ ...hypOut(out.row), duplicate: out.duplicate });
   });
 
   app.get("/hypotheses", async (c) => {

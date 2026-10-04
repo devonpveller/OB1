@@ -474,7 +474,7 @@ test("exposures from an undone cook stop counting", async () => {
 
 // ------------------------------------------------------------------ hypotheses
 
-test("hypotheses: support/against counted once per evidence call (+1, never +2), last_tested set, refused calls change nothing", async () => {
+test("hypotheses: support/against counted once per evidence call (+1, never +2), a repeated evaluation is duplicate:true and counted once, last_tested set, refused calls change nothing", async () => {
   const { stirfry } = await kitchen();
   const h = await post("/hypotheses", { statement: "likes bright, acidic dishes" });
   assertEquals(h.status, 201);
@@ -495,6 +495,13 @@ test("hypotheses: support/against counted once per evidence call (+1, never +2),
   assertEquals([r2.json.support, r2.json.against], [1, 1]);
   const r3 = await post(`/hypotheses/${h.json.id}/evidence`, { supports: true, evaluation_id: evs[2] });
   assertEquals([r3.json.support, r3.json.against], [2, 1]);
+  // the same evaluation again, either polarity: 200 duplicate:true, nothing counted; a different one counts once
+  assertEquals([r1.json.duplicate, r3.json.duplicate], [false, false]);
+  for (const supports of [true, false]) {
+    const dup = await post(`/hypotheses/${h.json.id}/evidence`, { supports, evaluation_id: evs[0] });
+    assertEquals(dup.status, 200);
+    assertEquals([dup.json.duplicate, dup.json.support, dup.json.against], [true, 2, 1]);
+  }
   // exactly ONE increment per call: a refused call (bad body, unknown evaluation) changes nothing
   assertEquals((await post(`/hypotheses/${h.json.id}/evidence`, { supports: true })).status, 400);
   assertEquals((await post(`/hypotheses/${h.json.id}/evidence`, { supports: true, evaluation_id: "44444444-4444-4444-4444-444444444444" })).status, 404);

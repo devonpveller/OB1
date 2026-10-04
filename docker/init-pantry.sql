@@ -241,6 +241,7 @@ CREATE TABLE IF NOT EXISTS pantry_taste_hypotheses (
     support INTEGER NOT NULL DEFAULT 0,
     against INTEGER NOT NULL DEFAULT 0,
     last_tested TIMESTAMPTZ,
+    evidence UUID[] NOT NULL DEFAULT '{}',          -- evaluation ids already counted (no double count)
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
