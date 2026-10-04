@@ -5,6 +5,11 @@
 ARG DENO_IMAGE=denoland/deno:2.3.3
 FROM ${DENO_IMAGE}
 
+# Provenance label (lifecycle row 11). The ai-stack deploy door (scripts/stack/ob1-deploy.ps1)
+# builds with --build-arg OB1_SHA=<the parent's OB1 gitlink>; a hand `docker build` leaves it empty.
+ARG OB1_SHA=
+LABEL org.opencontainers.image.revision="$OB1_SHA"
+
 WORKDIR /app
 
 COPY deno.json ./
