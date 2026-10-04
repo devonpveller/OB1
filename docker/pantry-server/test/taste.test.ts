@@ -223,7 +223,7 @@ test("evaluation: stored with its fields, theme from the recipe; validation; unk
   const before = await tasteRows();
   // an adult is not a valid exposure subject: nothing written (the evaluation row is rolled back too)
   const bo = (await get("/people")).json.people.find((p: J) => p.label === "Bo");
-  assertEquals((await post("/evaluations", { cook_event_id: c, who: "all", exposures: [{ person_id: bo.id, subject: "x", reaction: "refused" }] })).status, 400);
+  assertEquals((await post("/evaluations", { cook_event_id: c, who: "adult", exposures: [{ person_id: bo.id, subject: "x", reaction: "refused" }] })).status, 400);
   assertEquals(await tasteRows(), before);
   await post(`/cook/${c}/correct`, { undo: true });
   const u = await post("/evaluations", { cook_event_id: c, who: "all" });
@@ -431,9 +431,9 @@ test("child cooldown: refused at T lists the subject until T + child_cooldown_da
   await api("PUT", "/settings", { child_cooldown_days: 7 });
 
   // a later 'tolerated' (re-exposure) ends the cooldown early; a later 'refused' restarts it
-  await post("/evaluations", { cook_event_id: c, who: "child", exposures: [{ person_id: cy.id, subject: "mushrooms", reaction: "tolerated", at: "2026-03-05T12:00:00Z" }] });
+  await post("/evaluations", { cook_event_id: await cook(stirfry), who: "child", exposures: [{ person_id: cy.id, subject: "mushrooms", reaction: "tolerated", at: "2026-03-05T12:00:00Z" }] });
   assertEquals(await at("2026-03-06T00:00:00.000Z"), []);
-  await post("/evaluations", { cook_event_id: c, who: "child", exposures: [{ person_id: cy.id, subject: "MUSHROOMS", reaction: "refused", at: "2026-03-20T00:00:00Z" }] });
+  await post("/evaluations", { cook_event_id: await cook(stirfry), who: "child", exposures: [{ person_id: cy.id, subject: "MUSHROOMS", reaction: "refused", at: "2026-03-20T00:00:00Z" }] });
   assertEquals((await at("2026-03-26T23:59:59.000Z")).length, 1);
   assertEquals((await at("2026-03-27T00:00:00.000Z")).length, 0);
 });
@@ -533,6 +533,56 @@ test("guidance never writes: calling it repeatedly (with and without a guest) le
   for (const body of [{}, { theme: "x" }, { guest_context: { adults: 3, allergies: ["egg"], avoid: ["rice"] } }]) await guidance(body);
   assertEquals(await tasteRows(), before);
   assertNotEquals(before.explored, 0);
+});
+
+test("exposure order is deterministic: same-call ties resolve by submission order (refused-then-liked = free, liked-then-refused = cooldown)", async () => {
+  const { stirfry, cy } = await kitchen();
+  const subjects = Array.from({ length: 12 }, (_, i) => `food${i}`);
+  const a = await cook(stirfry);
+  const ex1 = subjects.flatMap((s) => [{ person_id: cy.id, subject: s, reaction: "refused" }, { person_id: cy.id, subject: s, reaction: "liked" }]);
+  assertEquals((await post("/evaluations", { cook_event_id: a, who: "child", exposures: ex1 })).status, 201);
+  assertEquals((await guidance()).child_cooldowns, [], "refused then liked in one call: the like is the latest");
+  const b = await cook(stirfry);
+  const ex2 = subjects.flatMap((s) => [{ person_id: cy.id, subject: s, reaction: "liked" }, { person_id: cy.id, subject: s, reaction: "refused" }]);
+  assertEquals((await post("/evaluations", { cook_event_id: b, who: "child", exposures: ex2 })).status, 201);
+  assertEquals((await guidance()).child_cooldowns.map((x: J) => x.subject).sort(), [...subjects].sort(), "liked then refused: all in cooldown");
+  // explicit equal timestamps in one call: submission order still wins
+  const c3 = await cook(stirfry);
+  const T = "2026-05-01T00:00:00Z";
+  await post("/evaluations", { cook_event_id: c3, who: "child", exposures: [
+    { person_id: cy.id, subject: "tie", reaction: "refused", at: T }, { person_id: cy.id, subject: "tie", reaction: "tolerated", at: T }] });
+  assertEquals((await guidance({ now: "2026-05-01T00:00:10Z" })).child_cooldowns.filter((x: J) => x.subject === "tie"), []);
+});
+
+test("hypothesis evidence from an evaluation whose cook was undone is refused (cook_undone) and counts nothing", async () => {
+  const { stirfry } = await kitchen();
+  const h = (await post("/hypotheses", { statement: "likes wok dishes" })).json;
+  const c = await cook(stirfry);
+  const ev = (await post("/evaluations", { cook_event_id: c, who: "all", liked: true })).json.evaluation;
+  await post(`/cook/${c}/correct`, { undo: true });
+  const r = await post(`/hypotheses/${h.id}/evidence`, { supports: true, evaluation_id: ev.id });
+  assertEquals(r.status, 400);
+  assertEquals(r.json.reason, "cook_undone");
+  const g = (await get("/hypotheses")).json.hypotheses[0];
+  assertEquals([g.support, g.against, g.last_tested], [0, 0, null]);
+});
+
+test("one evaluation per (cook, who): a second for the same who is 409 already_evaluated and writes nothing; another who is allowed", async () => {
+  const { stirfry, cy } = await kitchen();
+  const c = await cook(stirfry);
+  const first = await post("/evaluations", { cook_event_id: c, who: "adult", liked: true, why: "good" });
+  assertEquals(first.status, 201);
+  const before = await tasteRows();
+  const dup = await post("/evaluations", { cook_event_id: c, who: "adult", liked: false, exposures: [{ person_id: cy.id, subject: "x", reaction: "refused" }] });
+  assertEquals(dup.status, 409);
+  assertEquals(dup.json.error, "already_evaluated");
+  assertEquals(dup.json.evaluation_id, first.json.evaluation.id);
+  assertEquals(await tasteRows(), before, "nothing written, exposures included");
+  const child = await post("/evaluations", { cook_event_id: c, who: "child", exposures: [{ person_id: cy.id, subject: "x", reaction: "refused" }] });
+  assertEquals(child.status, 201);
+  assertEquals((await post("/evaluations", { cook_event_id: c, who: "all" })).status, 201, "'all' is its own who");
+  assertEquals((await post("/evaluations", { cook_event_id: c, who: "child" })).status, 409);
+  assertEquals((await tasteRows()).evals, 3);
 });
 
 Deno.test({ name: "zz close pools", sanitizeOps: false, sanitizeResources: false, fn: close });

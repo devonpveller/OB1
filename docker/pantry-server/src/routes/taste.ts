@@ -105,11 +105,18 @@ export function registerTaste(app: Hono, d: Deps) {
 
     const out = await d.db.tx(async (t) => {
       const ev = (await t.q(
-        `SELECT id, recipe_id, guest_context, undone_at FROM pantry_cook_events WHERE id = $1 AND user_id = $2 FOR SHARE`,
+        `SELECT id, recipe_id, guest_context, undone_at FROM pantry_cook_events WHERE id = $1 AND user_id = $2 FOR UPDATE`,
         [b.cook_event_id, d.userId],
       ))[0];
       if (!ev) throw notFound("cook event");
       if (ev.undone_at) throw new HttpError(409, "already_undone", "that cook was undone; there is nothing to evaluate");
+      const dupe = (await t.q(
+        `SELECT id FROM pantry_evaluations WHERE cook_event_id = $1 AND who = $2 AND user_id = $3 LIMIT 1`,
+        [ev.id, who, d.userId],
+      ))[0];
+      if (dupe) {
+        throw new HttpError(409, "already_evaluated", `that cook already has an evaluation for who="${who}"; nothing was written`, { evaluation_id: dupe.id });
+      }
       const guestMeal = ev.guest_context !== null && ev.guest_context !== undefined;
 
       // exposures are the CHILD's reactions; validate before writing anything
@@ -132,12 +139,23 @@ export function registerTaste(app: Hono, d: Deps) {
       ))[0];
 
       const exposures: Row[] = [];
+      // Deterministic order (D15 cooldown = LATEST exposure): within one call each subject's exposures get
+      // strictly increasing timestamps in submission order; ties across calls fall back to insertion order.
+      const lastAt = new Map<string, number>();
+      for (const x of exps) {
+        const k = lc(x.subject);
+        let ms = x.at ? Date.parse(x.at) : Date.now();
+        const prev = lastAt.get(k);
+        if (prev !== undefined && ms <= prev) ms = prev + 1;
+        lastAt.set(k, ms);
+        x.at = new Date(ms).toISOString();
+      }
       // D18: what a guest meal teaches about the child is mixed with the guests' meal, so nothing is learned.
       if (!guestMeal) {
         for (const x of exps) {
           exposures.push((await t.q(
             `INSERT INTO pantry_exposures (user_id, who, subject, cook_event_id, reaction, at)
-             VALUES ($1,$2,$3,$4,$5, COALESCE($6::timestamptz, now())) RETURNING id, who, subject, cook_event_id, reaction, at`,
+             VALUES ($1,$2,$3,$4,$5, $6::timestamptz) RETURNING id, who, subject, cook_event_id, reaction, at`,
             [d.userId, x.person_id, x.subject, ev.id, x.reaction, x.at],
           ))[0]);
         }
@@ -304,12 +322,13 @@ export function registerTaste(app: Hono, d: Deps) {
       const h = (await t.q(`SELECT id FROM pantry_taste_hypotheses WHERE id = $1 AND user_id = $2 FOR UPDATE`, [id, d.userId]))[0];
       if (!h) throw notFound("hypothesis");
       const ev = (await t.q(
-        `SELECT e.id, ce.guest_context FROM pantry_evaluations e
+        `SELECT e.id, ce.guest_context, ce.undone_at FROM pantry_evaluations e
            JOIN pantry_cook_events ce ON ce.id = e.cook_event_id
           WHERE e.id = $1 AND e.user_id = $2`,
         [b.evaluation_id, d.userId],
       ))[0];
       if (!ev) throw notFound("evaluation");
+      if (ev.undone_at) throw invalid("that evaluation belongs to an undone cook; it is not evidence", { reason: "cook_undone" });
       if (ev.guest_context !== null && ev.guest_context !== undefined) {
         throw invalid("that evaluation is of a guest meal; guest meals are never learned", { reason: "guest_meal" });
       }
@@ -391,7 +410,7 @@ export function registerTaste(app: Hono, d: Deps) {
         WHERE x.user_id = $1
           AND (x.cook_event_id IS NULL OR (ce.undone_at IS NULL AND ce.guest_context IS NULL))
           AND (x.who IS NULL OR p.role = 'child')
-        ORDER BY x.at, x.id`,
+        ORDER BY x.at, x.ctid`,
       [uid],
     );
     const bySubject = new Map<string, Row[]>();
