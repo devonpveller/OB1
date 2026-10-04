@@ -11,6 +11,7 @@ import { registerCook } from "./routes/cook.ts";
 import { registerPlan } from "./routes/plan.ts";
 import { registerShopping } from "./routes/shopping.ts";
 import { registerAudit } from "./routes/audit.ts";
+import { registerTaste } from "./routes/taste.ts";
 
 export interface Deps {
   db: Db;
@@ -62,6 +63,7 @@ export function createApp(d: Deps): Hono {
   registerPlan(app, d);
   registerShopping(app, d);
   registerAudit(app, d);
+  registerTaste(app, d);
 
   app.notFound((c) => c.json({ error: "not_found", detail: "no such route" }, 404));
 

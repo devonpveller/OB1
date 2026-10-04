@@ -8,6 +8,7 @@ import {
 } from "../core.ts";
 import { convert, round4 } from "../units.ts";
 import type { Qx } from "../db.ts";
+import { recordExplored, unrecordExplored } from "../taste.ts";
 
 async function itemInfo(t: Qx, uid: string, ids: string[]): Promise<Map<string, Row>> {
   if (!ids.length) return new Map();
@@ -32,7 +33,7 @@ export function registerCook(app: Hono, d: Deps) {
 
     const out = await d.db.tx(async (t) => {
       const recipe = (await t.q(
-        `SELECT id, name, servings, ingredients, current_revision FROM recipes WHERE id = $1 AND user_id = $2`,
+        `SELECT id, name, servings, ingredients, current_revision, cuisine, tags FROM recipes WHERE id = $1 AND user_id = $2`,
         [b.recipe_id, d.userId],
       ))[0];
       if (!recipe) throw notFound("recipe");
@@ -67,7 +68,7 @@ export function registerCook(app: Hono, d: Deps) {
       const ev = (await t.q(
         `INSERT INTO pantry_cook_events (user_id, recipe_id, recipe_revision, meal_plan_id, servings, guest_context,
             logged_after, cooked_at)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7, COALESCE($8::timestamptz, now())) RETURNING id`,
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7, COALESCE($8::timestamptz, now())) RETURNING id, cooked_at`,
         [d.userId, recipe.id, recipe.current_revision, plan?.id ?? null, servings,
           guest ? JSON.stringify(guest) : null, loggedAfter, cookedAt],
       ))[0];
@@ -87,11 +88,15 @@ export function registerCook(app: Hono, d: Deps) {
       }
       // Lines naming something not in the pantry: reported, never written, never blocking.
       await t.q(`UPDATE pantry_cook_events SET shortfalls = $2::jsonb WHERE id = $1`, [ev.id, JSON.stringify(shortfalls)]);
+      // pantry-taste: trying a dish is a fact, so the explored map is updated for every cook,
+      // guest or not, in this same transaction (it rolls back with the cook).
+      const explored_new = await recordExplored(t, d.userId, ev.id, ev.cooked_at, recipe);
       if (plan) {
         await t.q(`UPDATE meal_plans SET status = 'cooked', cook_event_id = $2 WHERE id = $1`, [plan.id, ev.id]);
       }
       return {
         cook_event_id: ev.id, deductions, shortfalls, unconvertible: res.unconvertible, unmatched: res.unmatched,
+        explored_new,
       };
     });
     return c.json(out, 201);
@@ -143,6 +148,7 @@ export function registerCook(app: Hono, d: Deps) {
           deductions.push({ item_id: itemId, name: info.get(itemId)?.name, before: r.before, after: r.after, delta: r.delta, unit: info.get(itemId)?.unit });
         }
         await t.q(`UPDATE pantry_cook_events SET undone_at = now() WHERE id = $1`, [id]);
+        await unrecordExplored(t, d.userId, id); // pantry-taste: the cook's explored contribution goes back out
         if (ev.meal_plan_id) {
           await t.q(`UPDATE meal_plans SET status = 'planned', cook_event_id = NULL WHERE id = $1 AND user_id = $2`, [ev.meal_plan_id, d.userId]);
         }
