@@ -25,6 +25,7 @@ include:
 #   --profile wiki       openbrain-wiki, -wiki-viewer, -workbench, -wiki-backup
 #   --profile notebook   surrealdb, open_notebook, open-notebook-backup
 #   --profile idea-refinery   openbrain-idea-refinery (scheduled slice; pre-existing)
+#   --profile pantry     openbrain-pantry (household pantry / meal-planner HTTP service)
 #
 # Per-service reasons: README.md, "Compose profiles".
 #
@@ -126,6 +127,12 @@ services:
       - ./init-agent-memory-exposure-column.sql:/docker-entrypoint-initdb.d/195-init-agent-memory-exposure-column.sql:ro # DFU C.9 H3
       - ./init-graph-plane-rls.sql:/docker-entrypoint-initdb.d/200-init-graph-plane-rls.sql:ro
       - ./init-agent-memory-column-authority.sql:/docker-entrypoint-initdb.d/205-init-agent-memory-column-authority.sql:ro # DFU C.9 H3 item S
+      # pantry / meal planner (pantry-meal-planner, item pantry-core): pantry_* tables, the
+      # pantry_available view, new columns on recipes + meal_plans, and the least-privilege
+      # ob_pantry role. Fresh-volume only; the live DB gets it by hand (psql -f, operator's
+      # gated deploy). 210 = the next free slot after 205. The role has NO password here:
+      # set it with `psql -v pantry_db_password=...` on the manual path, or ALTER ROLE.
+      - ./init-pantry.sql:/docker-entrypoint-initdb.d/210-init-pantry.sql:ro                     # pantry-core
     networks:
       - obnet
     restart: unless-stopped
@@ -230,6 +237,47 @@ services:
     networks:
       - obnet
     restart: unless-stopped
+
+  # ── Household pantry / meal planner (pantry-meal-planner, item pantry-core) ──
+  # Plain HTTP/JSON + x-pantry-key service (PLAN D13), called by the OWUI "pantry" tool
+  # over ai-stack_llm-net. It does the pantry arithmetic (cook, reserve, shopping list,
+  # restock, audit) itself and makes NO LLM call, so it is not an inference consumer and
+  # needs no LiteLLM key. PROFILE-GATED (`pantry`): inert until the operator enables it.
+  #   docker build -t openbrain-pantry:local ./pantry-server      (a deliberate deploy)
+  #   docker compose -f docker-compose.yml --profile pantry up -d openbrain-pantry
+  # Connects as the least-privilege ob_pantry role (pantry_* + recipes, meal_plans,
+  # shopping_lists only; cannot read thoughts), never as postgres. No host port: reachable
+  # only by name on obnet / llm-net.
+  openbrain-pantry:
+    profiles: ["pantry"]
+    build:
+      context: ./pantry-server
+      dockerfile: Dockerfile
+    image: openbrain-pantry:local
+    container_name: openbrain-pantry
+    depends_on:
+      openbrain-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: openbrain-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: ob_pantry
+      DB_PASSWORD: ${PANTRY_DB_PASSWORD}
+      DEFAULT_USER_ID: ${DEFAULT_USER_ID}
+      PANTRY_API_KEY: ${PANTRY_API_KEY}
+      TZ: ${PANTRY_TZ:-America/New_York}
+      PORT: "8000"
+    networks:
+      - obnet
+      - llm-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "deno", "eval", "const r = await fetch('http://127.0.0.1:8000/health'); Deno.exit(r.ok ? 0 : 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # Privacy-enforcing MCP proxy for CLOUD services (Claude Code, ChatGPT,
   # etc). Only host-published openbrain door. Holds the real x-brain-key;
