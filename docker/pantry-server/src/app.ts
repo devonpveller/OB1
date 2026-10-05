@@ -3,7 +3,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Db } from "./db.ts";
-import { HttpError, invalid, isObj, type Row } from "./core.ts";
+import { HttpError, invalid, isObj, pgCode, type Row } from "./core.ts";
 import { registerHousehold } from "./routes/household.ts";
 import { registerPantry } from "./routes/pantry.ts";
 import { registerRecipes } from "./routes/recipes.ts";
@@ -71,8 +71,7 @@ export function createApp(d: Deps): Hono {
     if (e instanceof HttpError) {
       return c.json({ error: e.code, detail: e.detail, ...e.extra }, e.status as 400);
     }
-    // deno-lint-ignore no-explicit-any
-    const code = (e as any)?.fields?.code ?? (e as any)?.code;
+    const code = pgCode(e);
     if (code === "23505") return c.json({ error: "conflict", detail: "a row with that identity already exists" }, 409);
     if (code === "22P02" || code === "22007" || code === "22008") {
       return c.json({ error: "invalid", detail: "a value has the wrong format" }, 400);

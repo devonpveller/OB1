@@ -116,4 +116,19 @@ test("pantry_exposures.seq: identity column, ob_pantry inserts without a sequenc
   assertEquals([col[0].is_identity, col[0].identity_generation], ["YES", "ALWAYS"]);
 });
 
+test("a unique violation raised INSIDE a transaction is the generic 409 conflict, not a 500 (pgCode reads e.cause)", async () => {
+  await adminExec(`CREATE OR REPLACE FUNCTION t_dupe() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'forced duplicate' USING ERRCODE = '23505'; END $$;
+    DROP TRIGGER IF EXISTS t_force_unique ON pantry_items;
+    CREATE TRIGGER t_force_unique BEFORE INSERT ON pantry_items FOR EACH ROW EXECUTE FUNCTION t_dupe();`);
+  try {
+    const r = await post("/pantry/adjust", { reason: "manual", items: [{ create: true, name: "Rice", quantity: 5, unit: "g" }] });
+    assertEquals(r.status, 409, JSON.stringify(r.json));
+    assertEquals(r.json.error, "conflict");
+    assertEquals((await admin(`SELECT count(*)::int AS n FROM pantry_items`))[0].n, 0, "nothing written");
+  } finally {
+    await adminExec(`DROP TRIGGER IF EXISTS t_force_unique ON pantry_items`);
+  }
+});
+
 Deno.test({ name: "zz close pools (hardening)", sanitizeOps: false, sanitizeResources: false, fn: close });

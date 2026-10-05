@@ -4,6 +4,13 @@ import type { Qx, Row } from "./db.ts";
 import { convert, ingredientUnit, round4 } from "./units.ts";
 export type { Row };
 
+/** SQLSTATE of a database error. deno-postgres raises a PostgresError (code in .fields.code) but, inside a
+ *  transaction, wraps it in a TransactionError whose .cause is the PostgresError - read both. */
+// deno-lint-ignore no-explicit-any
+export function pgCode(e: any): string | undefined {
+  return e?.fields?.code ?? e?.code ?? e?.cause?.fields?.code ?? e?.cause?.code;
+}
+
 export class HttpError extends Error {
   constructor(
     public status: number,

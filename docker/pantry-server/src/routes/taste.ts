@@ -11,7 +11,7 @@ import type { Deps } from "../app.ts";
 import { readBody } from "../app.ts";
 import {
   activePeople, addDays, getSettings, HttpError, invalid, isObj, isUuid, lc, notFound, optBool, optNum, optStr,
-  reqStr, todayStr, validateGuest, type Row,
+  pgCode, reqStr, todayStr, validateGuest, type Row,
 } from "../core.ts";
 import type { Qx } from "../db.ts";
 import { CUISINE_CANDIDATES, TECHNIQUE_CANDIDATES } from "../taste.ts";
@@ -174,11 +174,7 @@ export function registerTaste(app: Hono, d: Deps) {
       // The unique index (cook_event_id, who) is the real guard; FOR UPDATE + the SELECT above only make
       // the common case cheap. A racing twin lands here: the whole transaction rolled back, so look the
       // winner up on its own and answer exactly as the sequential duplicate does.
-      // deno-postgres wraps a statement error in a TransactionError whose cause is the PostgresError.
-      // deno-lint-ignore no-explicit-any
-      const x = e as any;
-      const code = x?.fields?.code ?? x?.code ?? x?.cause?.fields?.code;
-      if (code !== "23505") throw e;
+      if (pgCode(e) !== "23505") throw e;
       const w = (await d.db.q(
         `SELECT id FROM pantry_evaluations WHERE cook_event_id = $1 AND who = $2 AND user_id = $3 LIMIT 1`,
         [b.cook_event_id, who, d.userId],
