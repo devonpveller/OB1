@@ -293,20 +293,11 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_pantry_evaluations_cook_who ON pantry_evaluations (cook_event_id, who);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_pantry_hypotheses_user_stmt ON pantry_taste_hypotheses (user_id, lower(statement));
 
--- ---- pantry-cook-confirm: optional package size on a counted item (additive, idempotent)
--- A count item measured in packages (Milk: count 1 = one jug) may carry the size of ONE package,
--- e.g. 1 gal; a cook then converts a recipe's mass/volume quantity through it (1 cup -> 1/16 jug).
--- NULL = no pack = the old behaviour. Validated in the service (known mass/volume unit, size > 0).
-ALTER TABLE pantry_items ADD COLUMN IF NOT EXISTS pack_size NUMERIC;
-ALTER TABLE pantry_items ADD COLUMN IF NOT EXISTS pack_unit TEXT;
--- ---- end pantry-cook-confirm columns
-
 -- ============================================================
 -- View: on hand - reserved by planned, uncooked dinners (D4)
 -- ============================================================
 -- reserved = sum over meal_plans.status='planned' (recipe plans, not leftovers) of
---   ingredient quantity (converted to the item's unit, same dimension only; a count item with a
---   pack size also takes mass/volume lines in the pack's dimension, via the pack)
+--   ingredient quantity (converted to the item's unit, same dimension only)
 --   x servings_exact / recipe.servings.   Staples and unconvertible lines reserve nothing.
 CREATE OR REPLACE VIEW pantry_available AS
 SELECT i.id AS item_id,
@@ -320,10 +311,7 @@ SELECT i.id AS item_id,
   FROM pantry_items i
   LEFT JOIN (
         SELECT pi2.id AS item_id, pi2.user_id,
-               SUM(b.need_base / CASE
-                     WHEN pantry_unit_dim(pi2.unit) IS NOT DISTINCT FROM pantry_unit_dim(b.ing_unit)
-                       THEN pantry_unit_factor(pi2.unit)
-                     ELSE pi2.pack_size * pantry_unit_factor(pi2.pack_unit) END) AS reserved
+               SUM(b.need_base / pantry_unit_factor(pi2.unit)) AS reserved
           FROM (
             SELECT mp.user_id,
                    CASE WHEN e.j->>'pantry_item_id' ~ '^[0-9a-fA-F-]{36}$'
@@ -348,11 +336,8 @@ SELECT i.id AS item_id,
           JOIN pantry_items pi2 ON pi2.id = b.item_id AND pi2.user_id = b.user_id
          WHERE pi2.kind = 'counted'
            AND b.need_base IS NOT NULL
+           AND pantry_unit_dim(b.ing_unit) IS NOT DISTINCT FROM pantry_unit_dim(pi2.unit)
            AND pantry_unit_dim(pi2.unit) IS NOT NULL
-           AND (pantry_unit_dim(b.ing_unit) IS NOT DISTINCT FROM pantry_unit_dim(pi2.unit)
-                OR (pi2.unit = 'count' AND pi2.pack_size > 0
-                    AND pantry_unit_dim(pi2.pack_unit) IN ('mass', 'volume')
-                    AND pantry_unit_dim(b.ing_unit) = pantry_unit_dim(pi2.pack_unit)))
          GROUP BY pi2.id, pi2.user_id
   ) r ON r.item_id = i.id AND r.user_id = i.user_id
  WHERE i.removed_at IS NULL;

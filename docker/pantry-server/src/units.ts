@@ -44,5 +44,17 @@ export function convert(qty: number, from: unknown, to: unknown): number | null 
   return round4((qty * a.f) / b.f);
 }
 
+/** What fraction of ONE package a recipe quantity is: qty (any mass/volume unit) against a pack of
+ *  packSize packUnit. null = not computable (unknown unit, a count unit, or a different dimension from the
+ *  pack) - never guessed. Done in base units, rounded once (so 1 tsp of a gallon is not lost to an
+ *  intermediate rounding). */
+export function packFraction(qty: number, from: unknown, packSize: unknown, packUnit: unknown): number | null {
+  const a = TABLE[norm(from)];
+  const p = TABLE[norm(packUnit)];
+  const size = Number(packSize);
+  if (!a || !p || a.dim !== p.dim || a.dim === "count" || !(size > 0)) return null;
+  return round4((qty * a.f) / (size * p.f));
+}
+
 /** An ingredient with no unit means "count" (e.g. "2 onions"). */
 export const ingredientUnit = (u: unknown) => (norm(u) === "" ? "count" : norm(u));

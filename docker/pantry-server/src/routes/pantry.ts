@@ -4,7 +4,7 @@ import type { Deps } from "../app.ts";
 import { readBody } from "../app.ts";
 import {
   addDays, applyDelta, getSettings, invalid, isObj, isUuid, ITEM_COLS, lc, loadItems, matchRef, optBool,
-  optDate, optNum, optStr, optStrArr, setLevel, todayStr, ledger, type Item, type Row,
+  optDate, optNum, optStr, optStrArr, readPack, setLevel, todayStr, ledger, type Item, type Pack, type Row,
 } from "../core.ts";
 import { CANON, convert, round4, unitDim } from "../units.ts";
 import type { Qx } from "../db.ts";
@@ -21,6 +21,8 @@ export function itemOut(i: Row, useSoonDays: number, today: string) {
     kind: i.kind,
     quantity: i.kind === "counted" ? round4(Number(i.quantity)) : null,
     unit: i.unit,
+    pack_size: i.pack_size === null || i.pack_size === undefined ? null : round4(Number(i.pack_size)),
+    pack_unit: i.pack_unit ?? null,
     level: i.level,
     location: i.location,
     expires_on: i.expires_on,
@@ -42,6 +44,7 @@ export function registerPantry(app: Hono, d: Deps) {
     const rows = await d.db.q(
       `SELECT i.id, i.name, i.aliases, i.category, i.kind, i.quantity::float8 AS quantity, i.unit, i.level,
               i.location, i.expires_on::text AS expires_on, i.allergens, i.may_contain,
+              i.pack_size::float8 AS pack_size, i.pack_unit,
               COALESCE(v.reserved, 0)::float8 AS reserved, v.available::float8 AS available
          FROM pantry_items i
          LEFT JOIN pantry_available v ON v.item_id = i.id AND v.user_id = i.user_id
@@ -66,7 +69,7 @@ export function registerPantry(app: Hono, d: Deps) {
     interface Line {
       raw: Row; id?: string; name?: string; create: boolean; kind?: string; quantity?: number; delta?: number;
       unit?: string; level?: string; category?: string; location?: string; expires_on?: string | null;
-      has_expires: boolean; allergens?: string[]; may_contain?: string[]; aliases?: string[];
+      has_expires: boolean; allergens?: string[]; may_contain?: string[]; aliases?: string[]; pack: Pack;
     }
     const lines: Line[] = b.items.map((raw: unknown, n: number): Line => {
       const w = `items[${n}]`;
@@ -91,7 +94,7 @@ export function registerPantry(app: Hono, d: Deps) {
         quantity, delta, unit: unit || undefined, level, category: optStr(raw.category, `${w}.category`),
         location: optStr(raw.location, `${w}.location`), expires_on: expires, has_expires: "expires_on" in raw,
         allergens: optStrArr(raw.allergens, `${w}.allergens`), may_contain: optStrArr(raw.may_contain, `${w}.may_contain`),
-        aliases: optStrArr(raw.aliases, `${w}.aliases`),
+        aliases: optStrArr(raw.aliases, `${w}.aliases`), pack: readPack(raw, w),
       };
     });
 
@@ -115,6 +118,9 @@ export function registerPantry(app: Hono, d: Deps) {
           let qty = 0;
           let unit: string | null = null;
           let level: string | null = null;
+          if (ln.pack.value && (kind !== "counted" || !ln.unit || unitDim(ln.unit) !== "count")) {
+            throw invalid(`new item "${ln.name}": a package size only applies to an item counted in 'count' (e.g. 1 jug)`);
+          }
           if (kind === "counted") {
             if (ln.level) throw invalid(`new item "${ln.name}": level is for staples`);
             if (!ln.unit) throw invalid(`new counted item "${ln.name}" needs a unit`);
@@ -127,11 +133,12 @@ export function registerPantry(app: Hono, d: Deps) {
           }
           const row = (await t.q(
             `INSERT INTO pantry_items (user_id, name, aliases, category, kind, quantity, unit, level, location,
-                expires_on, allergens, may_contain)
-             VALUES ($1,$2,$3::text[],$4,$5,$6,$7,$8,$9,$10::date,$11::text[],$12::text[])
+                expires_on, allergens, may_contain, pack_size, pack_unit)
+             VALUES ($1,$2,$3::text[],$4,$5,$6,$7,$8,$9,$10::date,$11::text[],$12::text[],$13,$14)
              RETURNING ${ITEM_COLS}`,
             [d.userId, ln.name, ln.aliases ?? [], ln.category ?? null, kind, qty, unit, level, ln.location ?? null,
-              ln.has_expires ? ln.expires_on ?? null : null, ln.allergens ?? [], ln.may_contain ?? []],
+              ln.has_expires ? ln.expires_on ?? null : null, ln.allergens ?? [], ln.may_contain ?? [],
+              ln.pack.value?.size ?? null, ln.pack.value?.unit ?? null],
           ))[0] as Item;
           items.push(row);
           if (kind === "counted" && qty > 0) {
@@ -139,7 +146,7 @@ export function registerPantry(app: Hono, d: Deps) {
           } else if (kind === "staple") {
             await ledger(t, d.userId, { item_id: row.id, delta: 0, before: null, after: null, level_before: null, level_after: level, reason: reason as string });
           }
-          created.push({ id: row.id, name: row.name, kind, quantity: kind === "counted" ? qty : null, unit, level });
+          created.push({ id: row.id, name: row.name, kind, quantity: kind === "counted" ? qty : null, unit, level, pack_size: row.pack_size, pack_unit: row.pack_unit });
           continue;
         }
 
@@ -150,6 +157,9 @@ export function registerPantry(app: Hono, d: Deps) {
         }
         if (item.kind === "counted" && ln.level !== undefined) {
           throw invalid(`"${item.name}" is counted: set quantity, not level`);
+        }
+        if (ln.pack.value && (item.kind !== "counted" || item.unit !== "count")) {
+          throw invalid(`"${item.name}" is not counted in 'count': a package size only applies to count items (e.g. 1 jug of 1 gal)`);
         }
 
         // Quantity first, so an unconvertible line writes NOTHING about that line.
@@ -182,6 +192,10 @@ export function registerPantry(app: Hono, d: Deps) {
         if (ln.allergens !== undefined) push("allergens", ln.allergens, "::text[]");
         if (ln.may_contain !== undefined) push("may_contain", ln.may_contain, "::text[]");
         if (ln.aliases !== undefined) push("aliases", ln.aliases, "::text[]");
+        if (ln.pack.value !== undefined) {
+          push("pack_size", ln.pack.value?.size ?? null);
+          push("pack_unit", ln.pack.value?.unit ?? null);
+        }
         if (sets.length) {
           await t.q(`UPDATE pantry_items SET ${sets.join(", ")}, updated_at = now() WHERE id = $1 AND user_id = $2`, params);
         }
@@ -196,7 +210,8 @@ export function registerPantry(app: Hono, d: Deps) {
             after = r.after;
             item.quantity = after;
           }
-          applied.push({ id: item.id, name: item.name, before, after, unit: item.unit });
+          const pk = ln.pack.value === undefined ? { size: item.pack_size, unit: item.pack_unit } : ln.pack.value === null ? { size: null, unit: null } : ln.pack.value;
+          applied.push({ id: item.id, name: item.name, before, after, unit: item.unit, pack_size: pk.size, pack_unit: pk.unit });
         } else {
           const before = item.level;
           if (ln.level !== undefined && ln.level !== item.level) {

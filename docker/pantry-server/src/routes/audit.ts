@@ -4,7 +4,7 @@ import type { Deps } from "../app.ts";
 import { readBody } from "../app.ts";
 import {
   applyDelta, HttpError, invalid, isObj, isUuid, ITEM_COLS, lc, ledger, loadItems, matchRef, notFound, optDate,
-  optNum, optStr, optStrArr, setLevel, type Item, type Match, type Row,
+  optNum, optStr, optStrArr, readPack, setLevel, type Item, type Match, type Row,
 } from "../core.ts";
 import { CANON, convert, round4, unitDim } from "../units.ts";
 import type { Qx } from "../db.ts";
@@ -45,6 +45,7 @@ export function registerAudit(app: Hono, d: Deps) {
       const allergens = optStrArr(raw.allergens, `${w}.allergens`);
       const mayContain = optStrArr(raw.may_contain, `${w}.may_contain`);
       const forceNew = raw.new === true;
+      const pack = readPack(raw, w).value;
 
       const m: Match = forceNew ? { candidates: [] } : matchRef(items, { id: raw.id, name });
       if (raw.id && !m.item && !forceNew) {
@@ -65,6 +66,7 @@ export function registerAudit(app: Hono, d: Deps) {
         const line: Row = {
           name, kind, category: category ?? null, location: location ?? null, expires_on: expires ?? null,
           allergens: allergens ?? [], may_contain: mayContain ?? [], aliases: [], quantity: null, unit: null, level: null,
+          pack_size: null, pack_unit: null,
         };
         if (kind === "counted") {
           const dim = unit ? unitDim(unit) : null;
@@ -74,7 +76,19 @@ export function registerAudit(app: Hono, d: Deps) {
           }
           line.unit = CANON[dim];
           line.quantity = convert(quantity, unit, CANON[dim]);
+          if (pack) {
+            if (dim !== "count") {
+              unconvertible.push({ row: n, name, reason: "pack_on_non_count_item" });
+              return;
+            }
+            line.pack_size = pack.size;
+            line.pack_unit = pack.unit;
+          }
         } else {
+          if (pack) {
+            unconvertible.push({ row: n, name, reason: "pack_on_non_count_item" });
+            return;
+          }
           line.level = level || "plenty";
         }
         neu.push(line);
@@ -112,6 +126,18 @@ export function registerAudit(app: Hono, d: Deps) {
           return;
         }
         if (level) entry.actual_level = level;
+      }
+      if (pack !== undefined) {
+        if (pack !== null && (item.kind !== "counted" || item.unit !== "count")) {
+          unconvertible.push({ row: n, id: item.id, name: item.name, reason: "pack_on_non_count_item" });
+          return;
+        }
+        const curSize = item.pack_size === null ? null : Number(item.pack_size);
+        if ((pack?.size ?? null) !== curSize || (pack?.unit ?? null) !== (item.pack_unit ?? null)) {
+          entry.meta.pack_size = pack?.size ?? null;
+          entry.meta.pack_unit = pack?.unit ?? null;
+          entry.fields.push("pack");
+        }
       }
       if (category !== undefined && category !== (item.category ?? "")) { entry.meta.category = category; entry.fields.push("category"); }
       if (location !== undefined && location !== (item.location ?? "")) { entry.meta.location = location; entry.fields.push("location"); }
@@ -212,6 +238,7 @@ export function registerAudit(app: Hono, d: Deps) {
         if ("expires_on" in meta) push("expires_on", meta.expires_on || null, "::date");
         if ("allergens" in meta) push("allergens", meta.allergens, "::text[]");
         if ("may_contain" in meta) push("may_contain", meta.may_contain, "::text[]");
+        if ("pack_size" in meta) { push("pack_size", meta.pack_size ?? null); push("pack_unit", meta.pack_unit ?? null); }
         if (sets.length) {
           await t.q(`UPDATE pantry_items SET ${sets.join(", ")}, updated_at = now() WHERE id = $1 AND user_id = $2`, params);
           did = true;
@@ -223,10 +250,10 @@ export function registerAudit(app: Hono, d: Deps) {
         if (exclude.includes(lc(n.name))) continue;
         checked++;
         const row = (await t.q(
-          `INSERT INTO pantry_items (user_id, name, aliases, category, kind, quantity, unit, level, location, expires_on, allergens, may_contain)
-           VALUES ($1,$2,$3::text[],$4,$5,$6,$7,$8,$9,$10::date,$11::text[],$12::text[]) RETURNING id`,
+          `INSERT INTO pantry_items (user_id, name, aliases, category, kind, quantity, unit, level, location, expires_on, allergens, may_contain, pack_size, pack_unit)
+           VALUES ($1,$2,$3::text[],$4,$5,$6,$7,$8,$9,$10::date,$11::text[],$12::text[],$13,$14) RETURNING id`,
           [d.userId, n.name, n.aliases ?? [], n.category, n.kind, n.kind === "counted" ? n.quantity : 0, n.unit,
-            n.level, n.location, n.expires_on, n.allergens ?? [], n.may_contain ?? []],
+            n.level, n.location, n.expires_on, n.allergens ?? [], n.may_contain ?? [], n.pack_size ?? null, n.pack_unit ?? null],
         ))[0];
         if (n.kind === "counted") {
           await ledger(t, d.userId, { item_id: row.id, delta: n.quantity, before: 0, after: n.quantity, reason: "audit", audit_id: aid });

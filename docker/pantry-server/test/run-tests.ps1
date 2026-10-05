@@ -58,13 +58,17 @@ try {
   $sql = Get-Content -Raw (Join-Path $dockerDir 'init-pantry.sql')
   $alters = [regex]::Matches($sql, '(?im)^\s*ALTER\s+TABLE\s+(\S+)([^;]*);')
   # pantry-hardening: ONE deliberate addition - pantry_exposures.seq (the insertion-order identity column).
+  # pantry-cook-confirm: TWO more - pantry_items.pack_size / pack_unit (nullable, no default: existing rows stay NULL).
   $badAlter = @($alters | Where-Object {
       $_.Groups[2].Value -notmatch '(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS' -or
       -not ($_.Groups[1].Value -in @('recipes', 'meal_plans') -or
-            ($_.Groups[1].Value -eq 'pantry_exposures' -and $_.Groups[2].Value -match '(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+seq\s+bigint\s+GENERATED\s+ALWAYS\s+AS\s+IDENTITY\s*$'))
+            ($_.Groups[1].Value -eq 'pantry_exposures' -and $_.Groups[2].Value -match '(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+seq\s+bigint\s+GENERATED\s+ALWAYS\s+AS\s+IDENTITY\s*$') -or
+            # pantry-cook-confirm: exactly the two optional package-size columns, nothing else on pantry_items.
+            ($_.Groups[1].Value -eq 'pantry_items' -and $_.Groups[2].Value -match '(?i)^\s*ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(pack_size\s+NUMERIC|pack_unit\s+TEXT)\s*$'))
     })
-  Check ($alters.Count -ge 5 -and $badAlter.Count -eq 0) "ALTER TABLE appears only as ADD COLUMN IF NOT EXISTS on recipes/meal_plans, plus pantry_exposures.seq ($($alters.Count) statements)"
+  Check ($alters.Count -ge 5 -and $badAlter.Count -eq 0) "ALTER TABLE appears only as ADD COLUMN IF NOT EXISTS on recipes/meal_plans, plus pantry_exposures.seq and pantry_items.pack_size/pack_unit ($($alters.Count) statements)"
   Check ((@($alters | Where-Object { $_.Groups[1].Value -eq 'pantry_exposures' }).Count) -eq 1) 'exactly one ALTER on pantry_exposures'
+  Check ((@($alters | Where-Object { $_.Groups[1].Value -eq 'pantry_items' }).Count) -eq 2) 'exactly two ALTERs on pantry_items (pack_size, pack_unit)'
   Check (($sql -match '(?im)^\s*CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+ux_pantry_evaluations_cook_who') -and ($sql -match '(?im)^\s*CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+ux_pantry_hypotheses_user_stmt')) 'both hardening unique indexes are idempotent CREATE UNIQUE INDEX IF NOT EXISTS'
   $badCreate = [regex]::Matches($sql, '(?im)^\s*CREATE\s+(TABLE|INDEX|UNIQUE\s+INDEX)\s+(?!IF\s+NOT\s+EXISTS)')
   Check ($badCreate.Count -eq 0) 'every CREATE TABLE/INDEX is IF NOT EXISTS'
@@ -122,15 +126,16 @@ try {
   # A DB built at 0c9976a's init-pantry.sql WITH data, then the new init-pantry.sql applied twice.
   Write-Host '[2b] upgrade from the 0c9976a schema with data; seeded duplicates fail loudly'
   $null = Dk cp (Join-Path $server 'test/fixtures/init-pantry.0c9976a.sql') "${dbName}:/tmp/init-pantry.old.sql"
+  $null = Dk cp (Join-Path $server 'test/fixtures/init-pantry.fc23cb3.sql') "${dbName}:/tmp/init-pantry.fc23.sql"
   function PsqlDb([string]$db, [string[]]$more) { Dk exec $dbName psql -U postgres -d $db -X -q -v ON_ERROR_STOP=1 @more }
   function Counts([string]$db) {
     (PsqlDb $db @('-tA', '-c', "SELECT (SELECT count(*) FROM pantry_items)||'/'||(SELECT count(*) FROM recipes)||'/'||(SELECT count(*) FROM pantry_cook_events)||'/'||(SELECT count(*) FROM pantry_evaluations)||'/'||(SELECT count(*) FROM pantry_taste_hypotheses)||'/'||(SELECT count(*) FROM pantry_exposures)")).Trim()
   }
-  function OldDb([string]$db) {
+  function OldDb([string]$db, [string]$fixture = '/tmp/init-pantry.old.sql') {
     $o = PsqlDb 'postgres' @('-c', "CREATE DATABASE $db")
     $ok = ($script:rc -eq 0)
     foreach ($f in 'init.sql', 'init-extensions.sql') { $o = PsqlDb $db @('-f', "/tmp/$f"); if ($script:rc -ne 0) { $ok = $false } }
-    $o = PsqlDb $db @('-v', "pantry_db_password=$pantryPw", '-f', '/tmp/init-pantry.old.sql'); if ($script:rc -ne 0) { $ok = $false }
+    $o = PsqlDb $db @('-v', "pantry_db_password=$pantryPw", '-f', $fixture); if ($script:rc -ne 0) { $ok = $false }
     $u = "'11111111-1111-1111-1111-111111111111'"
     $cook = "'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'"
     $rec = "'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'"
@@ -164,6 +169,47 @@ try {
     Check ($sq -eq '3/3/3') "existing exposures were numbered by the new seq column (rows/distinct/non-null $sq)"
     $gr = (PsqlDb 'hard_old' @('-tA', '-c', "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee='ob_pantry' AND table_name !~ '^pantry_' AND table_name NOT IN ('recipes','meal_plans','shopping_lists')")).Trim()
     Check ($gr -eq '0') 'ob_pantry still holds nothing beyond pantry_* + recipes/meal_plans/shopping_lists after the upgrade'
+  }
+  # pantry-cook-confirm: the same upgrade from the fc23cb3 schema (the pin the item branched from), with data.
+  Write-Host '[2b-pack] upgrade from the fc23cb3 schema with data: pack columns added, every row unchanged, twice'
+  function ItemHash([string]$db) { (PsqlDb $db @('-tA', '-c', "SELECT md5(string_agg(name||'|'||kind||'|'||quantity::text||'|'||coalesce(unit,'')||'|'||coalesce(level,''), ';' ORDER BY name)) FROM pantry_items")).Trim() }
+  $okFc = OldDb 'pack_old' '/tmp/init-pantry.fc23.sql'
+  Check $okFc 'database pack_old built at the fc23cb3 schema and seeded'
+  if ($okFc) {
+    $pre = (PsqlDb 'pack_old' @('-tA', '-c', "SELECT count(*) FROM information_schema.columns WHERE table_name='pantry_items' AND column_name IN ('pack_size','pack_unit')")).Trim()
+    Check ($pre -eq '0') 'the fc23cb3 schema has no pack columns (so the fixture really is the old one)'
+    $cF = Counts 'pack_old'; $hF = ItemHash 'pack_old'
+    Check ($cF -eq '3/1/1/2/2/3') "seeded counts as expected ($cF)"
+    for ($n = 1; $n -le 2; $n++) {
+      $a3 = @('-f', '/tmp/init-pantry.sql'); if ($n -eq 1) { $a3 = @('-v', "pantry_db_password=$pantryPw") + $a3 }
+      $o = PsqlDb 'pack_old' $a3
+      Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "new init-pantry.sql applied to the data-bearing fc23cb3 DB, run $n of 2, clean"
+      if ($script:rc -ne 0) { Write-Host ($o -replace $pantryPw, '***') }
+      Check ((Counts 'pack_old') -eq $cF) "row counts unchanged after fc23cb3 upgrade run $n ($cF)"
+      Check ((ItemHash 'pack_old') -eq $hF) "pantry_items rows byte-identical after fc23cb3 upgrade run $n"
+    }
+    $pc = (PsqlDb 'pack_old' @('-tA', '-c', "SELECT string_agg(column_name||':'||data_type, ',' ORDER BY column_name) FROM information_schema.columns WHERE table_name='pantry_items' AND column_name IN ('pack_size','pack_unit')")).Trim()
+    Check ($pc -eq 'pack_size:numeric,pack_unit:text') "pack_size numeric + pack_unit text exist after the upgrade ($pc)"
+    $nn = (PsqlDb 'pack_old' @('-tA', '-c', "SELECT count(*) FROM pantry_items WHERE pack_size IS NOT NULL OR pack_unit IS NOT NULL")).Trim()
+    Check ($nn -eq '0') 'every existing row has NULL pack columns (old behaviour)'
+    $vw = (PsqlDb 'pack_old' @('-tA', '-c', "SELECT count(*) FROM pantry_available")).Trim()
+    Check ($vw -eq '3') 'pantry_available (re-created view) still reads all 3 items'
+    # the apply-ONLY-the-new-block recipe used by the LANDING: the marked block alone, as ONE transaction, on a second fc23cb3 DB
+    $okB = OldDb 'pack_blk' '/tmp/init-pantry.fc23.sql'
+    $lines = (Get-Content (Join-Path $dockerDir 'init-pantry.sql'))
+    $bs = ($lines | Select-String -SimpleMatch '-- ---- pantry-cook-confirm' | Select-Object -First 1).LineNumber - 1
+    $be = ($lines | Select-String -SimpleMatch 'WHERE i.removed_at IS NULL;' | Select-Object -Last 1).LineNumber - 1
+    $blk = Join-Path ([IO.Path]::GetTempPath()) "pack-block-$rand.sql"
+    [IO.File]::WriteAllText($blk, (($lines[$bs..$be]) -join "`n") + "`n")
+    $null = Dk cp $blk "${dbName}:/tmp/pack-block.sql"
+    Remove-Item $blk -ErrorAction SilentlyContinue
+    $cB = Counts 'pack_blk'
+    foreach ($n in 1, 2) {
+      $o = PsqlDb 'pack_blk' @('-1', '-f', '/tmp/pack-block.sql')
+      Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "the marked pantry-cook-confirm block alone applies to an fc23cb3 DB in one transaction, run $n of 2"
+    }
+    $pc2 = (PsqlDb 'pack_blk' @('-tA', '-c', "SELECT count(*) FROM information_schema.columns WHERE table_name='pantry_items' AND column_name IN ('pack_size','pack_unit')")).Trim()
+    Check ($okB -and $pc2 -eq '2' -and (Counts 'pack_blk') -eq $cB) 'block-only apply: both columns present, row counts unchanged'
   }
   $u0 = "'11111111-1111-1111-1111-111111111111'"
   foreach ($case in @(

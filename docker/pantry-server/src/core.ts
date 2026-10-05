@@ -1,7 +1,7 @@
 // Shared building blocks: errors, validation, the household, item matching, ingredient
 // resolution and the reservation walk. No HTTP here, no LLM anywhere.
 import type { Qx, Row } from "./db.ts";
-import { convert, ingredientUnit, round4 } from "./units.ts";
+import { convert, ingredientUnit, packFraction, round4, unitDim } from "./units.ts";
 export type { Row };
 
 /** SQLSTATE of a database error. deno-postgres raises a PostgresError (code in .fields.code) but, inside a
@@ -84,7 +84,7 @@ export function todayStr(): string {
 
 // ---------- items ----------
 export const ITEM_COLS = `id, name, aliases, category, kind, quantity::float8 AS quantity, unit, level,
-  location, expires_on::text AS expires_on, allergens, may_contain`;
+  location, expires_on::text AS expires_on, allergens, may_contain, pack_size::float8 AS pack_size, pack_unit`;
 
 export interface Item {
   id: string;
@@ -99,6 +99,33 @@ export interface Item {
   expires_on: string | null;
   allergens: string[];
   may_contain: string[];
+  pack_size: number | null;
+  pack_unit: string | null;
+}
+
+// ---------- package size ----------
+export interface Pack {
+  /** undefined = the line said nothing about a pack; null = clear it; else set it. */
+  value: { size: number; unit: string } | null | undefined;
+}
+
+/** Read pack_size / pack_unit off a request line. Both or neither; both null clears. The unit must be a
+ *  known mass or volume unit (the pack is "1 gal", "500 g"; a count is not a size) and the size > 0. */
+export function readPack(raw: Row, w: string): Pack {
+  const hasS = "pack_size" in raw;
+  const hasU = "pack_unit" in raw;
+  if (!hasS && !hasU) return { value: undefined };
+  const size = raw.pack_size ?? null;
+  const unit = raw.pack_unit === null || raw.pack_unit === undefined ? null : String(raw.pack_unit).trim();
+  if (size === null && (unit === null || unit === "")) return { value: null };
+  if (typeof size !== "number" || !Number.isFinite(size) || !(size > 0)) {
+    throw invalid(`${w}.pack_size must be a number > 0 (give pack_size and pack_unit together, or both null to clear)`);
+  }
+  const dim = unit ? unitDim(unit) : null;
+  if (dim !== "mass" && dim !== "volume") {
+    throw invalid(`${w}.pack_unit must be a mass or volume unit (g, kg, mg, oz, lb, ml, l, tsp, tbsp, cup, fl_oz)`);
+  }
+  return { value: { size, unit: unit!.toLowerCase() } };
 }
 
 export async function loadItems(t: Qx, uid: string, lock = false): Promise<Item[]> {
@@ -149,18 +176,19 @@ export interface Settings {
   default_servings: { adults: number; children: number };
 }
 
-export async function getSettings(t: Qx, uid: string): Promise<Settings> {
-  await t.q(`INSERT INTO pantry_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [uid]);
+/** `write:false` is for a read-only transaction (a cook preview): no row is created, the table defaults apply. */
+export async function getSettings(t: Qx, uid: string, write = true): Promise<Settings> {
+  if (write) await t.q(`INSERT INTO pantry_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [uid]);
   const r = (await t.q(
     `SELECT portions, child_cooldown_days, week_start_day, use_soon_days, default_servings
        FROM pantry_settings WHERE user_id = $1`,
     [uid],
-  ))[0];
+  ))[0] ?? {}; // no row (only possible with write:false): the column defaults
   return {
     portions: { adult: Number(r.portions?.adult ?? 1), child: Number(r.portions?.child ?? 0.5) },
-    child_cooldown_days: Number(r.child_cooldown_days),
-    week_start_day: r.week_start_day,
-    use_soon_days: Number(r.use_soon_days),
+    child_cooldown_days: Number(r.child_cooldown_days ?? 7),
+    week_start_day: r.week_start_day ?? "monday",
+    use_soon_days: Number(r.use_soon_days ?? 5),
     default_servings: r.default_servings ?? { adults: 2, children: 1 },
   };
 }
@@ -246,12 +274,13 @@ export interface Ingredient {
 export interface Resolution {
   resolved: { ingredient: string; item: Item; staple: boolean }[];
   needs: Map<string, number>; // item id -> amount in the item's unit
+  packed: Map<string, { ingredient: string; quantity: number; unit: string }[]>; // lines converted through a pack size
   unmatched: Row[];
   unconvertible: Row[];
 }
 
 export function resolveIngredients(ings: Ingredient[], items: Item[], scale: number): Resolution {
-  const out: Resolution = { resolved: [], needs: new Map(), unmatched: [], unconvertible: [] };
+  const out: Resolution = { resolved: [], needs: new Map(), packed: new Map(), unmatched: [], unconvertible: [] };
   for (const ing of ings) {
     const m = matchRef(items, { id: ing.pantry_item_id, name: ing.name });
     if (!m.item) {
@@ -275,15 +304,36 @@ export function resolveIngredients(ings: Ingredient[], items: Item[], scale: num
       });
       continue;
     }
-    const c = convert(ing.quantity * scale, ingredientUnit(ing.unit), item.unit);
+    const ingUnit = ingredientUnit(ing.unit);
+    let c = convert(ing.quantity * scale, ingUnit, item.unit);
+    let viaPack = false;
+    if (c === null && item.unit === "count" && item.pack_size) {
+      // a count item with a package size: a mass/volume line of the pack's dimension is a fraction of one package
+      c = packFraction(ing.quantity * scale, ingUnit, item.pack_size, item.pack_unit);
+      viaPack = c !== null;
+    }
     if (c === null) {
+      const d = unitDim(ingUnit);
+      const needsPack = item.unit === "count" && (d === "mass" || d === "volume");
       out.unconvertible.push({
         name: ing.name, item_id: item.id, quantity: ing.quantity, unit: ing.unit ?? "count",
         item_unit: item.unit, reason: "cross_dimension_or_unknown_unit",
+        ...(needsPack
+          ? {
+            hint: item.pack_size
+              ? `its package size is ${item.pack_size} ${item.pack_unit}, a different kind of unit from ${ingUnit}; never guess - ask the household`
+              : `no package size on file: ask how big one ${item.name} package is, then record it (pack_size + pack_unit) with update_pantry`,
+          }
+          : {}),
       });
       continue;
     }
     out.needs.set(item.id, round4((out.needs.get(item.id) ?? 0) + c));
+    if (viaPack) {
+      const l = out.packed.get(item.id) ?? [];
+      l.push({ ingredient: ing.name, quantity: round4(ing.quantity * scale), unit: ingUnit });
+      out.packed.set(item.id, l);
+    }
   }
   return out;
 }

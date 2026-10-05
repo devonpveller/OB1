@@ -10,7 +10,7 @@ export interface Qx {
 
 export interface Db extends Qx {
   /** Run fn inside ONE transaction; any throw rolls everything back. */
-  tx<T>(fn: (t: Qx) => Promise<T>): Promise<T>;
+  tx<T>(fn: (t: Qx) => Promise<T>, opts?: { readOnly?: boolean }): Promise<T>;
   ping(): Promise<boolean>;
   end(): Promise<void>;
 }
@@ -46,10 +46,10 @@ export function makeDb(opts: {
         c.release();
       }
     },
-    async tx<T>(fn: (t: Qx) => Promise<T>) {
+    async tx<T>(fn: (t: Qx) => Promise<T>, opts?: { readOnly?: boolean }) {
       const c = await pool.connect();
       try {
-        const t = c.createTransaction("pantry_tx");
+        const t = c.createTransaction("pantry_tx", opts?.readOnly ? { read_only: true } : undefined);
         await t.begin();
         try {
           const r = await fn({
