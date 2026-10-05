@@ -57,10 +57,15 @@ try {
   Write-Host '[1] static checks'
   $sql = Get-Content -Raw (Join-Path $dockerDir 'init-pantry.sql')
   $alters = [regex]::Matches($sql, '(?im)^\s*ALTER\s+TABLE\s+(\S+)([^;]*);')
+  # pantry-hardening: ONE deliberate addition - pantry_exposures.seq (the insertion-order identity column).
   $badAlter = @($alters | Where-Object {
-      $_.Groups[1].Value -notin @('recipes', 'meal_plans') -or $_.Groups[2].Value -notmatch '(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS'
+      $_.Groups[2].Value -notmatch '(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS' -or
+      -not ($_.Groups[1].Value -in @('recipes', 'meal_plans') -or
+            ($_.Groups[1].Value -eq 'pantry_exposures' -and $_.Groups[2].Value -match '(?i)ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+seq\s+bigint\s+GENERATED\s+ALWAYS\s+AS\s+IDENTITY\s*$'))
     })
-  Check ($alters.Count -ge 5 -and $badAlter.Count -eq 0) "ALTER TABLE appears only as ADD COLUMN IF NOT EXISTS on recipes/meal_plans ($($alters.Count) statements)"
+  Check ($alters.Count -ge 5 -and $badAlter.Count -eq 0) "ALTER TABLE appears only as ADD COLUMN IF NOT EXISTS on recipes/meal_plans, plus pantry_exposures.seq ($($alters.Count) statements)"
+  Check ((@($alters | Where-Object { $_.Groups[1].Value -eq 'pantry_exposures' }).Count) -eq 1) 'exactly one ALTER on pantry_exposures'
+  Check (($sql -match '(?im)^\s*CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+ux_pantry_evaluations_cook_who') -and ($sql -match '(?im)^\s*CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+ux_pantry_hypotheses_user_stmt')) 'both hardening unique indexes are idempotent CREATE UNIQUE INDEX IF NOT EXISTS'
   $badCreate = [regex]::Matches($sql, '(?im)^\s*CREATE\s+(TABLE|INDEX|UNIQUE\s+INDEX)\s+(?!IF\s+NOT\s+EXISTS)')
   Check ($badCreate.Count -eq 0) 'every CREATE TABLE/INDEX is IF NOT EXISTS'
   Check ($sql -notmatch '(?im)^\s*(DROP|TRUNCATE|DELETE)\s') 'init-pantry.sql has no DROP/TRUNCATE/DELETE'
@@ -111,6 +116,69 @@ try {
     if (($script:rc -ne 0) -or ($o -cmatch 'ERROR:')) { Write-Host ($o -replace $pantryPw, '***') }
     $snap = (Psql @('-tA', '-c', "SELECT (SELECT count(*) FROM pg_policies) || '/' || (SELECT count(*) FROM information_schema.columns WHERE table_schema='public') || '/' || (SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace)")).Trim()
     if ($n -eq 0) { $polBefore = $snap } else { Check ($snap -eq $polBefore) "catalogue unchanged after run $($n + 1) (policies/columns/relations $snap)" }
+  }
+
+  # ---------------------------------------------------------------- 2b. upgrade path (pantry-hardening)
+  # A DB built at 0c9976a's init-pantry.sql WITH data, then the new init-pantry.sql applied twice.
+  Write-Host '[2b] upgrade from the 0c9976a schema with data; seeded duplicates fail loudly'
+  $null = Dk cp (Join-Path $server 'test/fixtures/init-pantry.0c9976a.sql') "${dbName}:/tmp/init-pantry.old.sql"
+  function PsqlDb([string]$db, [string[]]$more) { Dk exec $dbName psql -U postgres -d $db -X -q -v ON_ERROR_STOP=1 @more }
+  function Counts([string]$db) {
+    (PsqlDb $db @('-tA', '-c', "SELECT (SELECT count(*) FROM pantry_items)||'/'||(SELECT count(*) FROM recipes)||'/'||(SELECT count(*) FROM pantry_cook_events)||'/'||(SELECT count(*) FROM pantry_evaluations)||'/'||(SELECT count(*) FROM pantry_taste_hypotheses)||'/'||(SELECT count(*) FROM pantry_exposures)")).Trim()
+  }
+  function OldDb([string]$db) {
+    $o = PsqlDb 'postgres' @('-c', "CREATE DATABASE $db")
+    $ok = ($script:rc -eq 0)
+    foreach ($f in 'init.sql', 'init-extensions.sql') { $o = PsqlDb $db @('-f', "/tmp/$f"); if ($script:rc -ne 0) { $ok = $false } }
+    $o = PsqlDb $db @('-v', "pantry_db_password=$pantryPw", '-f', '/tmp/init-pantry.old.sql'); if ($script:rc -ne 0) { $ok = $false }
+    $u = "'11111111-1111-1111-1111-111111111111'"
+    $cook = "'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'"
+    $rec = "'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'"
+    $seed = @(
+      "INSERT INTO pantry_items (user_id, name, quantity, unit) VALUES ($u,'Rice',500,'g'),($u,'Beans',300,'g'),($u,'Salt',0,NULL)",
+      "INSERT INTO recipes (id, user_id, name) VALUES ($rec,$u,'Rice')",
+      "INSERT INTO pantry_cook_events (id, user_id, recipe_id, servings) VALUES ($cook,$u,$rec,4)",
+      "INSERT INTO pantry_evaluations (user_id, cook_event_id, who) VALUES ($u,$cook,'adult'),($u,$cook,'child')",
+      "INSERT INTO pantry_taste_hypotheses (user_id, statement) VALUES ($u,'likes wok'),($u,'likes soup')",
+      "INSERT INTO pantry_exposures (user_id, subject, reaction) VALUES ($u,'a','liked'),($u,'b','refused'),($u,'c','tolerated')"
+    ) -join '; '
+    $o = PsqlDb $db @('-c', $seed); if ($script:rc -ne 0) { $ok = $false; Write-Host $o }
+    return $ok
+  }
+  $okOld = OldDb 'hard_old'
+  Check $okOld 'database hard_old built at the 0c9976a schema and seeded (3 items, 1 recipe, 2 evals, 2 hypotheses, 3 exposures)'
+  if ($okOld) {
+    $c0 = Counts 'hard_old'
+    Check ($c0 -eq '3/1/1/2/2/3') "seeded counts as expected ($c0)"
+    for ($n = 1; $n -le 2; $n++) {
+      $args2 = @('-f', '/tmp/init-pantry.sql')
+      if ($n -eq 1) { $args2 = @('-v', "pantry_db_password=$pantryPw") + $args2 }
+      $o = PsqlDb 'hard_old' $args2
+      Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "new init-pantry.sql applied to the data-bearing 0c9976a DB, run $n of 2, clean"
+      if ($script:rc -ne 0) { Write-Host ($o -replace $pantryPw, '***') }
+      Check ((Counts 'hard_old') -eq $c0) "row counts unchanged after upgrade run $n ($c0)"
+    }
+    $idx = (PsqlDb 'hard_old' @('-tA', '-c', "SELECT count(*) FROM pg_indexes WHERE indexname IN ('ux_pantry_evaluations_cook_who','ux_pantry_hypotheses_user_stmt')")).Trim()
+    Check ($idx -eq '2') 'both unique indexes exist after the upgrade'
+    $sq = (PsqlDb 'hard_old' @('-tA', '-c', "SELECT count(*)||'/'||count(DISTINCT seq)||'/'||count(seq) FROM pantry_exposures")).Trim()
+    Check ($sq -eq '3/3/3') "existing exposures were numbered by the new seq column (rows/distinct/non-null $sq)"
+    $gr = (PsqlDb 'hard_old' @('-tA', '-c', "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee='ob_pantry' AND table_name !~ '^pantry_' AND table_name NOT IN ('recipes','meal_plans','shopping_lists')")).Trim()
+    Check ($gr -eq '0') 'ob_pantry still holds nothing beyond pantry_* + recipes/meal_plans/shopping_lists after the upgrade'
+  }
+  $u0 = "'11111111-1111-1111-1111-111111111111'"
+  foreach ($case in @(
+      @{ db = 'hard_dupe'; table = 'pantry_evaluations'; sql = "INSERT INTO pantry_evaluations (user_id, cook_event_id, who) VALUES ($u0,'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb','adult')"; idx = 'ux_pantry_evaluations_cook_who' },
+      @{ db = 'hard_duph'; table = 'pantry_taste_hypotheses'; sql = "INSERT INTO pantry_taste_hypotheses (user_id, statement) VALUES ($u0,'LIKES WOK')"; idx = 'ux_pantry_hypotheses_user_stmt' })) {
+    $okD = OldDb $case.db
+    $o = PsqlDb $case.db @('-c', $case.sql)
+    Check ($okD -and ($script:rc -eq 0)) "database $($case.db): 0c9976a schema with a seeded duplicate in $($case.table)"
+    $cb = Counts $case.db
+    $o = PsqlDb $case.db @('-v', "pantry_db_password=$pantryPw", '-f', '/tmp/init-pantry.sql')
+    Check (($script:rc -ne 0) -and ($o -match $case.table) -and ($o -match 'duplicate')) "init-pantry.sql FAILS LOUDLY on the seeded duplicate, naming $($case.table)"
+    if (($script:rc -eq 0) -or ($o -notmatch $case.table)) { Write-Host ($o -replace $pantryPw, '***') }
+    Check ((Counts $case.db) -eq $cb) "no row was deleted or changed in $($case.db) ($cb)"
+    $ix = (PsqlDb $case.db @('-tA', '-c', "SELECT count(*) FROM pg_indexes WHERE indexname = '$($case.idx)'")).Trim()
+    Check ($ix -eq '0') "the blocked unique index was not created ($($case.idx))"
   }
 
   # ---------------------------------------------------------------- 3. image

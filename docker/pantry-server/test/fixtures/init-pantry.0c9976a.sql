@@ -265,34 +265,6 @@ CREATE TABLE IF NOT EXISTS pantry_exposures (
 );
 CREATE INDEX IF NOT EXISTS idx_pantry_exposures_user_subject ON pantry_exposures (user_id, subject, at);
 
--- ---- pantry-hardening: the database, not the service, keeps taste data single-valued ----
--- All idempotent; safe on a fresh volume and on a live DB that already holds data. Nothing here
--- deletes a row: if a unique index would be blocked by existing duplicates the DO block RAISEs
--- (naming the table) and the household resolves them by hand.
-
--- (c) insertion order of exposures: a monotonic identity column (existing rows are numbered when
--- it is added). Reads order by (at, seq); ctid is physical position and is NOT insertion order.
--- The ob_pantry role needs no extra grant: INSERT on a table implies use of its identity sequence.
-ALTER TABLE pantry_exposures ADD COLUMN IF NOT EXISTS seq bigint GENERATED ALWAYS AS IDENTITY;
-
--- (a) one evaluation per cooked meal per eater;  (b) one hypothesis per statement (case-insensitive).
-DO $$
-DECLARE n bigint;
-BEGIN
-    SELECT count(*) INTO n FROM (
-        SELECT 1 FROM pantry_evaluations GROUP BY cook_event_id, who HAVING count(*) > 1) d;
-    IF n > 0 THEN
-        RAISE EXCEPTION 'pantry-hardening: pantry_evaluations has % duplicate (cook_event_id, who) group(s); resolve them by hand, nothing was changed', n;
-    END IF;
-    SELECT count(*) INTO n FROM (
-        SELECT 1 FROM pantry_taste_hypotheses GROUP BY user_id, lower(statement) HAVING count(*) > 1) d;
-    IF n > 0 THEN
-        RAISE EXCEPTION 'pantry-hardening: pantry_taste_hypotheses has % duplicate (user_id, lower(statement)) group(s); resolve them by hand, nothing was changed', n;
-    END IF;
-END $$;
-CREATE UNIQUE INDEX IF NOT EXISTS ux_pantry_evaluations_cook_who ON pantry_evaluations (cook_event_id, who);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_pantry_hypotheses_user_stmt ON pantry_taste_hypotheses (user_id, lower(statement));
-
 -- ============================================================
 -- View: on hand - reserved by planned, uncooked dinners (D4)
 -- ============================================================

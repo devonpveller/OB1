@@ -103,7 +103,11 @@ export function registerTaste(app: Hono, d: Deps) {
       });
     }
 
-    const out = await d.db.tx(async (t) => {
+    const alreadyEvaluated = (who: string, id: unknown) =>
+      new HttpError(409, "already_evaluated", `that cook already has an evaluation for who="${who}"; nothing was written`, { evaluation_id: id });
+    let out;
+    try {
+     out = await d.db.tx(async (t) => {
       const ev = (await t.q(
         `SELECT id, recipe_id, guest_context, undone_at FROM pantry_cook_events WHERE id = $1 AND user_id = $2 FOR UPDATE`,
         [b.cook_event_id, d.userId],
@@ -115,7 +119,7 @@ export function registerTaste(app: Hono, d: Deps) {
         [ev.id, who, d.userId],
       ))[0];
       if (dupe) {
-        throw new HttpError(409, "already_evaluated", `that cook already has an evaluation for who="${who}"; nothing was written`, { evaluation_id: dupe.id });
+        throw alreadyEvaluated(who, dupe.id);
       }
       const guestMeal = ev.guest_context !== null && ev.guest_context !== undefined;
 
@@ -165,7 +169,23 @@ export function registerTaste(app: Hono, d: Deps) {
         exposures: exposures.map(exposureOut),
         ...(guestMeal && exps.length ? { exposures_skipped: { count: exps.length, reason: "guest_meal" } } : {}),
       };
-    });
+     });
+    } catch (e) {
+      // The unique index (cook_event_id, who) is the real guard; FOR UPDATE + the SELECT above only make
+      // the common case cheap. A racing twin lands here: the whole transaction rolled back, so look the
+      // winner up on its own and answer exactly as the sequential duplicate does.
+      // deno-postgres wraps a statement error in a TransactionError whose cause is the PostgresError.
+      // deno-lint-ignore no-explicit-any
+      const x = e as any;
+      const code = x?.fields?.code ?? x?.code ?? x?.cause?.fields?.code;
+      if (code !== "23505") throw e;
+      const w = (await d.db.q(
+        `SELECT id FROM pantry_evaluations WHERE cook_event_id = $1 AND who = $2 AND user_id = $3 LIMIT 1`,
+        [b.cook_event_id, who, d.userId],
+      ))[0];
+      if (!w) throw e;
+      throw alreadyEvaluated(who, w.id);
+    }
     return c.json(out, 201);
   });
 
@@ -296,20 +316,23 @@ export function registerTaste(app: Hono, d: Deps) {
     const b = await readBody(c);
     const statement = reqStr(b.statement, "statement");
     const out = await d.db.tx(async (t) => {
-      const ex = (await t.q(
-        `SELECT ${HYP_COLS} FROM pantry_taste_hypotheses WHERE user_id = $1 AND lower(statement) = lower($2)`,
+      // ux_pantry_hypotheses_user_stmt (user_id, lower(statement)) makes this race-free: a parallel twin
+      // waits for the first insert, then takes DO NOTHING and reads the winner (READ COMMITTED sees it).
+      const ins = (await t.q(
+        `INSERT INTO pantry_taste_hypotheses (user_id, statement) VALUES ($1,$2)
+         ON CONFLICT (user_id, lower(statement)) DO NOTHING RETURNING ${HYP_COLS}`,
         [d.userId, statement],
       ))[0];
-      if (ex) return { row: ex, created: false };
+      if (ins) return { row: ins, created: true };
       return {
         row: (await t.q(
-          `INSERT INTO pantry_taste_hypotheses (user_id, statement) VALUES ($1,$2) RETURNING ${HYP_COLS}`,
+          `SELECT ${HYP_COLS} FROM pantry_taste_hypotheses WHERE user_id = $1 AND lower(statement) = lower($2)`,
           [d.userId, statement],
         ))[0],
-        created: true,
+        created: false,
       };
     });
-    return c.json(hypOut(out.row), out.created ? 201 : 200);
+    return c.json({ ...hypOut(out.row), duplicate: !out.created }, out.created ? 201 : 200);
   });
 
   app.post("/hypotheses/:id/evidence", async (c) => {
@@ -410,7 +433,7 @@ export function registerTaste(app: Hono, d: Deps) {
         WHERE x.user_id = $1
           AND (x.cook_event_id IS NULL OR (ce.undone_at IS NULL AND ce.guest_context IS NULL))
           AND (x.who IS NULL OR p.role = 'child')
-        ORDER BY x.at, x.ctid`,
+        ORDER BY x.at, x.seq`,
       [uid],
     );
     const bySubject = new Map<string, Row[]>();
