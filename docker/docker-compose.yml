@@ -429,8 +429,11 @@ services:
       start_period: 20s
 
   openbrain-mcpo-ext:
-    # Same pinned digest as openbrain-mcpo (see the note above it).
-    image: ghcr.io/open-webui/mcpo@sha256:1e82c9555c19e50b80745705f32b47a2647589f35279527b5118ecd3a71bd467
+    # Same derived image as openbrain-mcpo (see the note above it).
+    build:
+      context: ./mcpo
+      dockerfile: Dockerfile
+    image: openbrain-mcpo:local
     container_name: openbrain-mcpo-ext
     depends_on:
       - openbrain-ext
