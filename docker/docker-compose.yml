@@ -383,17 +383,26 @@ services:
   # streamable-http servers, so core and extensions get separate
   # instances. Reachable from openwebui over the shared ai-stack_llm-net.
   #
-  # Image PINNED by digest (2026-10-05, ai-stack item ef-mcpo-spin) for both
-  # mcpo services: the exact image that was running, which is also what
-  # :latest and :main resolve to on ghcr.io that day (mcpo v0.0.20, revision
-  # 788ff92e, built 2026-02-27; anyio 4.12.1 inside). Pinning changes nothing
-  # at runtime; it makes the version reproducible. That build carries the
-  # anyio cancel-scope busy-spin (agronholm/anyio#1111, fixed in anyio 4.14.x;
-  # open-webui/mcpo#302 open): ai-stack's scripts/checks/check-openbrain-health.ps1
-  # guards it with a sustained-CPU restart. Move the pin deliberately, never
-  # back to a floating tag.
+  # Image: openbrain-mcpo:local, built from ./mcpo/Dockerfile (2026-10-05,
+  # ai-stack item ef-mcpo-anyio). It is mcpo v0.0.20 at the PINNED digest
+  # ghcr.io/open-webui/mcpo@sha256:1e82c955... (ef-mcpo-spin; the newest
+  # release, and what :latest/:main resolved to that day) with ONE change:
+  # anyio 4.12.1 -> 4.14.2, hash-pinned. The stock build busy-spins one core
+  # for good after an upstream fault on a streamable-http session (a 502, a
+  # SIGKILLed upstream, an upstream down when mcpo starts): anyio's
+  # CancelScope._deliver_cancellation reschedules itself for a task that is
+  # already done (agronholm/anyio#1111, fixed in 4.14.x; open-webui/mcpo#302
+  # open). ./mcpo/repro reproduces it on the stock digest and shows the
+  # derived image idle. Both services share the one image: build it once,
+  # recreate only these two. ai-stack's scripts/checks/check-openbrain-health.ps1
+  # keeps its sustained-CPU restart as a safety net. Drop the layer when an
+  # mcpo release ships anyio >= 4.14.2 (see ./mcpo/Dockerfile); never go back
+  # to a floating tag.
   openbrain-mcpo:
-    image: ghcr.io/open-webui/mcpo@sha256:1e82c9555c19e50b80745705f32b47a2647589f35279527b5118ecd3a71bd467
+    build:
+      context: ./mcpo
+      dockerfile: Dockerfile
+    image: openbrain-mcpo:local
     container_name: openbrain-mcpo
     depends_on:
       - openbrain-mcp

@@ -1,0 +1,10 @@
+# The ONE package the derived mcpo image changes (see ./Dockerfile).
+# anyio 4.14.2 (PyPI, 2026-07-12): carries the fix for agronholm/anyio#1111,
+# the CancelScope._deliver_cancellation busy-spin behind open-webui/mcpo#302.
+# Hash = PyPI's sha256 for the py3-none-any wheel; uv refuses anything else.
+# anyio 4.14.2's own requirements on Python 3.12 are idna>=2.8 and
+# typing_extensions>=4.5, both already in the base at idna 3.11 and
+# typing_extensions 4.15.0, so it is installed with --no-deps and checked
+# with `uv pip check`.
+anyio==4.14.2 \
+    --hash=sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494
