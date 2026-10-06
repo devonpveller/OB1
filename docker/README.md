@@ -35,12 +35,16 @@ cp mcpo-ext.config.json.example   mcpo-ext.config.json
 
 # 2. Generate secrets and put them in .env
 openssl rand -hex 32   # -> MCP_ACCESS_KEY
+openssl rand -hex 32   # -> MCP_PERSONAL_ACCESS_KEY (a DIFFERENT value)
 openssl rand -hex 16   # -> POSTGRES_PASSWORD
 openssl rand -hex 24   # -> MCPO_API_KEY
 uuidgen                # -> DEFAULT_USER_ID  (any UUID)
 
-# 3. Put the SAME MCP_ACCESS_KEY value into the x-brain-key field of
-#    mcpo.config.json AND mcpo-ext.config.json (replace the placeholder)
+# 3. Put MCP_PERSONAL_ACCESS_KEY into the x-brain-key field of
+#    mcpo.config.json (Open WebUI's open-brain bridge: the PERSONAL lane,
+#    every tool except agent_memory_* - a chat surface can read personal
+#    data, so it must not write ops-visible agent memory; PLAN 1.1), and
+#    MCP_ACCESS_KEY into mcpo-ext.config.json (replace the placeholders)
 
 # 4. (host MCP clients, e.g. Claude Code) copy mcp.json.example to your
 #    client project's .mcp.json, set the same MCP_ACCESS_KEY, gitignore it

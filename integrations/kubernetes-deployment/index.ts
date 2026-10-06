@@ -13,7 +13,9 @@
  *   CHAT_API_BASE - Base URL for OpenAI-compatible chat API (defaults to EMBEDDING_API_BASE)
  *   CHAT_API_KEY - API key for chat service (defaults to EMBEDDING_API_KEY)
  *   CHAT_MODEL - Model name for metadata extraction (default: gpt-4o-mini)
- *   MCP_ACCESS_KEY - Authentication key for MCP endpoint
+ *   MCP_ACCESS_KEY - Authentication key for MCP endpoint (the FULL lane)
+ *   MCP_PERSONAL_ACCESS_KEY - Optional key for the PERSONAL lane (Open WebUI via
+ *     openbrain-mcpo): every tool EXCEPT agent_memory_*. See mcp-lanes.ts.
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
  */
 
@@ -23,6 +25,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
 import { registerAgentMemory } from "./agent-memory.ts";
+import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
 
 // --- Configuration ---
 
@@ -41,6 +44,13 @@ const CHAT_API_KEY = Deno.env.get("CHAT_API_KEY") || EMBEDDING_API_KEY;
 const CHAT_MODEL = Deno.env.get("CHAT_MODEL") || "openai/gpt-4o-mini";
 
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
+
+// THE PERSONAL LANE (PLAN §1.1; amp-owui-deny, operator D1 2026-10-06). Held by Open WebUI's
+// openbrain-mcpo instead of MCP_ACCESS_KEY. Same tools, minus agent memory - see mcp-lanes.ts.
+// Unset = no personal lane: only MCP_ACCESS_KEY authenticates, exactly as before.
+const _personal = resolvePersonalKey(MCP_ACCESS_KEY, Deno.env.get("MCP_PERSONAL_ACCESS_KEY"));
+if (_personal.warning) console.error(`[open-brain] ${_personal.warning}`);
+const MCP_PERSONAL_ACCESS_KEY = _personal.key;
 
 // THE PLANE THIS SERVER'S CORPUS WRITES LAND ON (PLAN §1.1; DFU C.9 H3, operator
 // 2026-08-31). `thoughts.exposure` is a NOT NULL column with NO DEFAULT, so every INSERT in
@@ -260,6 +270,15 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// The personal lane's server. It receives every tool registered through server.registerTool
+// below (the wrapper registers on both) EXCEPT the agent-memory tools, which are registered
+// on `server` alone (see registerAgentMemory near the end). Absent, not disabled: a tool that
+// was never registered cannot be listed or dispatched, whatever the request says.
+const personalServer = new McpServer({
+  name: "open-brain",
+  version: "1.0.0",
+});
+
 // --- Tool result size caps (adjustable via env) -----------------------------
 // Large tool payloads (research dumps from list_threads / search_claims /
 // search_thoughts, etc.) accumulate across a multi-tool turn and can exceed the
@@ -341,9 +360,25 @@ function capResultText(tool: string, text: string): string {
 // inherits the cap with no per-handler changes.
 type ToolResponse = { content?: Array<Record<string, unknown>>; [k: string]: unknown };
 const _origRegisterTool = server.registerTool.bind(server);
-(server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = ((...args: unknown[]) => {
+const _origRegisterToolPersonal = personalServer.registerTool.bind(personalServer);
+// Register one capped tool on the given server(s). `server.registerTool` (every tool in this
+// file) goes to BOTH lanes; `fullLaneOnly.registerTool` (agent memory) goes to the full lane.
+function registerCapped(targets: Array<(...a: never[]) => unknown>, args: unknown[]): unknown {
+  let first: unknown;
+  for (const t of targets) {
+    const r = registerCappedOn(t, args);
+    if (first === undefined) first = r;
+  }
+  return first;
+}
+(server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = ((...args: unknown[]) =>
+  registerCapped([_origRegisterTool, _origRegisterToolPersonal], args)) as (...a: unknown[]) => unknown;
+const fullLaneOnly = {
+  registerTool: (...args: unknown[]) => registerCapped([_origRegisterTool], args),
+};
+function registerCappedOn(register: (...a: never[]) => unknown, args: unknown[]): unknown {
   const [name, config, handler] = args as [string, unknown, (...a: unknown[]) => unknown];
-  return _origRegisterTool(
+  return register(
     name as never,
     config as never,
     (async (...a: unknown[]): Promise<ToolResponse> => {
@@ -358,7 +393,7 @@ const _origRegisterTool = server.registerTool.bind(server);
       return res;
     }) as never,
   );
-}) as (...a: unknown[]) => unknown;
+}
 
 // Optional caller-supplied JSONB metadata predicate. Used by the cloud
 // gateway (../../../../openbrain-gateway/app.py) to scope reads to
@@ -2068,7 +2103,11 @@ app.post("/research/persist", async (c) => {
 // gains no agent-memory logic. That is the start of the modular split this 2000-line file
 // needs, taken as new surface rather than as a risky refactor of what already works.
 // Registered BEFORE the catch-all, or the MCP transport would swallow the REST route.
-registerAgentMemory(server, app, {
+//
+// Registered on the FULL lane only (fullLaneOnly), never on personalServer: the personal lane
+// (Open WebUI via openbrain-mcpo) can read personal-plane data, so it must not write memories
+// this door stamps 'ops' (amp-owui-deny, operator D1 2026-10-06; mcp-lanes.ts).
+registerAgentMemory(fullLaneOnly, app, {
   pool,
   getEmbedding,
   authed: (c) => researchAuthed(c as Parameters<typeof researchAuthed>[0]),
@@ -2087,12 +2126,21 @@ registerAgentMemory(server, app, {
 
 app.all("*", async (c) => {
   const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
+  const lane = laneForKey(provided, MCP_ACCESS_KEY, MCP_PERSONAL_ACCESS_KEY);
+  if (!lane) {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
 
+  if (lane === "personal" && c.req.method === "POST") {
+    // A clear refusal before dispatch. The tools are not on personalServer at all, so this
+    // is the message, not the boundary: if the peek ever misses, the call still finds no tool.
+    const body = await c.req.raw.clone().json().catch(() => null);
+    const refusal = body ? personalLaneRefusal(body) : null;
+    if (refusal) return c.json(refusal, 200);
+  }
+
   const transport = new StreamableHTTPTransport();
-  await server.connect(transport);
+  await (lane === "full" ? server : personalServer).connect(transport);
   return transport.handleRequest(c);
 });
 

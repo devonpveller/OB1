@@ -159,6 +159,11 @@ services:
       DB_USER: ob_app_memory
       DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # The PERSONAL lane (PLAN 1.1; amp-owui-deny): the key openbrain-mcpo holds. It gets
+      # every tool except agent_memory_* (mcp-lanes.ts). Optional here so an unrelated
+      # `compose up` never fails on it; unset, the mcpo's placeholder key is a 401 (OWUI's
+      # open-brain tools go dark - loud, and never a fallback to the full lane).
+      MCP_PERSONAL_ACCESS_KEY: ${MCP_PERSONAL_ACCESS_KEY:-}
       PORT: "8000"
       # Embeddings -> local bge-m3 (1024-dim) on the ai-stack llm-net
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
@@ -190,7 +195,9 @@ services:
       AGENT_MEMORY_RECALL_HALF_LIFE_DAYS: ${AGENT_MEMORY_RECALL_HALF_LIFE_DAYS:-}
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
-    # obnet) talk to it directly. Cloud services (Claude Code, etc.)
+    # obnet) talk to it directly. Two lanes by key: MCP_ACCESS_KEY = full
+    # (agent-bridge, the two gateways, OB1 services); MCP_PERSONAL_ACCESS_KEY
+    # = personal (openbrain-mcpo for OWUI), which has no agent_memory_* tools. Cloud services (Claude Code, etc.)
     # must go through openbrain-gateway, which is the only host-published
     # door and enforces the privacy policy (mirrors the mnemory lockdown).
     networks:
