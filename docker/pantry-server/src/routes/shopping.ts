@@ -6,7 +6,7 @@ import {
   addDays, allocatePlans, applyDelta, invalid, isObj, isUuid, lc, loadItems, matchRef, notFound, reqDate,
   setLevel, shortfallSignature, type Item, type Row,
 } from "../core.ts";
-import { convert, round4 } from "../units.ts";
+import { convert, packFraction, round4 } from "../units.ts";
 
 const keyOf = (l: Row) => (l.pantry_item_id ? `i:${l.pantry_item_id}` : `n:${lc(l.name)}|${lc(l.unit)}`);
 
@@ -75,6 +75,19 @@ export function registerShopping(app: Hono, d: Deps) {
           }
         }
         if (touched) consumed.push({ listId: pl.id, items: pl.items });
+      }
+
+      // A count item with a package size is BOUGHT in whole packages: the (fractional) shortfall rounds UP
+      // ("1/16 jug" -> 1 jug, 9/16 -> 1, 17/16 -> 2). Reservations / available stay fractional; items
+      // without a pack are untouched.
+      const byId = new Map(items.map((i) => [i.id, i]));
+      for (const l of lines.values()) {
+        const it = l.pantry_item_id ? byId.get(l.pantry_item_id) : undefined;
+        if (!it || it.kind !== "counted" || it.unit !== "count" || !it.pack_size || l.unit !== "count") continue;
+        const packs = Math.max(1, Math.ceil(round4(Number(l.quantity)) - 1e-9));
+        l.quantity = packs;
+        l.pack = { size: it.pack_size, unit: it.pack_unit };
+        l.package = `${packs} x ${it.pack_size} ${it.pack_unit}`;
       }
 
       const list = [...lines.values()];
@@ -225,7 +238,9 @@ export function registerShopping(app: Hono, d: Deps) {
         const ov = override.get(l);
         const qty = ov?.quantity ?? Number(l.quantity);
         const unit = ov?.unit ?? l.unit;
-        const conv = convert(qty, unit ?? "count", item.unit);
+        // an `actual` in the pack's own units ("got 128 fl_oz") is a fraction of one package
+        const conv = convert(qty, unit ?? "count", item.unit) ??
+          (item.unit === "count" && item.pack_size ? packFraction(qty, unit, item.pack_size, item.pack_unit) : null);
         if (conv === null) {
           unconvertible.push({ name: l.name, quantity: qty, unit: unit ?? null, item_unit: item.unit, reason: "cross_dimension_or_unknown_unit" });
           continue;

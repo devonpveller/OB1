@@ -1,6 +1,6 @@
 // pantry-cook-confirm: cook PREVIEW (writes nothing) and the optional package size on a counted item.
 import { assert, assertEquals } from "@std/assert";
-import { admin, close, db, get, near, post, qty, seedItems, seedRecipe, test } from "./helpers.ts";
+import { admin, close, db, get, near, post, qty, reset, seedItems, seedRecipe, test } from "./helpers.ts";
 
 /** Every table a cook could touch, hashed. A preview must leave this byte-identical (and not advance a sequence). */
 async function fingerprint(): Promise<string> {
@@ -235,6 +235,53 @@ test("pack: planned dinners reserve through the pack, and the SQL view agrees wi
   near(view.a, 0.9375);
   const it = (await get("/pantry")).json.items.find((i: { name: string }) => i.name === "Milk");
   assertEquals([it.reserved, it.available], [0.0625, 0.9375]);
+});
+
+test("pack: the shopping list rounds a pack item UP to whole packages, restock adds whole packages; items without a pack are unchanged", async () => {
+  const ids = await seedItems([
+    { name: "Milk", quantity: 0, unit: "count", pack_size: 128, pack_unit: "fl_oz" },
+    { name: "Rice", quantity: 100, unit: "g" },
+  ]);
+  const rec = await seedRecipe({ name: "Mac", servings: 4, ingredients: [
+    { pantry_item_id: ids["Milk"], name: "Milk", quantity: 1, unit: "cup" },
+    { pantry_item_id: ids["Rice"], name: "Rice", quantity: 150, unit: "g" },
+  ] });
+  await post("/plan", { date: "2026-10-06", recipe_id: rec, servings: 4 });
+  const l = await post("/shopping-list", { week_start: "2026-10-05" });
+  assertEquals(l.status, 201);
+  const milk = by(l.json.items, "Milk");
+  assertEquals([milk.quantity, milk.unit, milk.package], [1, "count", "1 x 128 fl_oz"]);
+  assertEquals(milk.pack, { size: 128, unit: "fl_oz" });
+  const rice = by(l.json.items, "Rice");
+  assertEquals([rice.quantity, rice.unit, rice.package], [50, "g", undefined]); // no pack: unchanged
+  const r = await post("/restock", { list_id: l.json.list_id, bought: "all" });
+  assertEquals(r.status, 200);
+  assertEquals(by(r.json.restocked, "Milk").delta, 1);
+  assertEquals(await qty("Milk"), 1); // a whole jug, not 0.0625
+  assertEquals(await qty("Rice"), 150);
+  // prior stock is kept: 1/32 jug on hand, shortfall 1/32 -> still 1 jug bought
+  await admin(`UPDATE pantry_items SET quantity = 0.03125 WHERE name='Milk'`);
+  await admin(`DELETE FROM pantry_adjustments WHERE reason='restock'`);
+  await admin(`DELETE FROM shopping_lists`);
+  await admin(`DELETE FROM meal_plans`);
+  await post("/plan", { date: "2026-10-06", recipe_id: rec, servings: 4 });
+  const l2 = await post("/shopping-list", { week_start: "2026-10-05" });
+  assertEquals(by(l2.json.items, "Milk").quantity, 1);
+  await post("/restock", { list_id: l2.json.list_id, bought: "all" });
+  near(await qty("Milk"), 1.03125, 1e-4); // stock is kept to 4 places
+});
+
+test("pack: 9 cups of milk need 1 jug, 17 cups need 2 jugs (rounded up from 9/16 and 17/16)", async () => {
+  for (const [cups, jugs] of [[9, 1], [17, 2], [16, 1]]) {
+    await reset();
+    const ids = await seedItems([{ name: "Milk", quantity: 0, unit: "count", pack_size: 128, pack_unit: "fl_oz" }]);
+    const rec = await seedRecipe({ name: `R${cups}`, servings: 4, ingredients: [{ pantry_item_id: ids["Milk"], name: "Milk", quantity: cups, unit: "cup" }] });
+    await post("/plan", { date: "2026-10-06", recipe_id: rec, servings: 4 });
+    const l = await post("/shopping-list", { week_start: "2026-10-05" });
+    assertEquals(by(l.json.items, "Milk").quantity, jugs, `${cups} cups`);
+    await post("/restock", { list_id: l.json.list_id, bought: "all" });
+    assertEquals(await qty("Milk"), jugs, `${cups} cups restocked`);
+  }
 });
 
 Deno.test({ name: "zz close pools", sanitizeOps: false, sanitizeResources: false, fn: close });
