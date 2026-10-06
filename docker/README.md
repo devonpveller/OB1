@@ -12,7 +12,7 @@ own GPUs.
 | `openbrain-db`  | `pgvector/pgvector:pg16`       | `thoughts` + 18 extension tables, auto-initialised from `init.sql` + `init-extensions.sql` |
 | `openbrain-mcp` | built from `../integrations/kubernetes-deployment` | Core Deno MCP server (4 tools + ChatGPT-compat `search`/`fetch`) — port `8808` |
 | `openbrain-ext` | built from `./extensions-server` | Combined extensions MCP server — all 6 OB1 extensions, **39 tools** — port `8809` |
-| `openbrain-mcpo` / `openbrain-mcpo-ext` | `ghcr.io/open-webui/mcpo:latest` | Two MCP→OpenAPI bridges for Open WebUI (core / extensions) |
+| `openbrain-mcpo` / `openbrain-mcpo-ext` | `ghcr.io/open-webui/mcpo@sha256:1e82c955...` (v0.0.20, pinned 2026-10-05; see the compose note) | Two MCP→OpenAPI bridges for Open WebUI (core / extensions) |
 
 The MCP server joins the external `ai-stack_llm-net` network and calls:
 
