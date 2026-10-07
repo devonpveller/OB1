@@ -1811,7 +1811,7 @@ registerSuggestionList(
 // separate so the live ingest path is untouched).
 async function fetchExtract(
   url: string,
-): Promise<{ title: string; body: string; contentType: string; domain: string }> {
+): Promise<{ title: string; body: string; contentType: string; domain: string; screen: string | null }> {
   const { response: resp } = await ingestFetch(url);
   if (!resp.ok) {
     resp.body?.cancel().catch(() => {});
@@ -1838,8 +1838,9 @@ async function fetchExtract(
     domain = new URL(url).hostname;
   } catch { /* ignore */ }
   if (!title) title = domain || url.slice(0, 120);
-  if (body) await screenFetched(url, title, body); // throws Quarantined on an attack
-  return { title, body, contentType, domain };
+  // throws Quarantined on an attack; else the verdict to stamp (clean / too-short / detect-error)
+  const screen = body ? await screenFetched(url, title, body) : null;
+  return { title, body, contentType, domain, screen };
 }
 
 // capture_with_thread — one-transaction capture: find-or-create the source
@@ -1871,6 +1872,7 @@ server.registerTool(
       let ttl = (title ?? "").trim();
       let ctype: string | undefined = content_type;
       let domain: string | undefined;
+      let screen: string | null = null; // set only when the body came from a url fetch
 
       if (!body && url) {
         const ex = await fetchExtract(url);
@@ -1878,6 +1880,7 @@ server.registerTool(
         if (!ttl) ttl = ex.title;
         if (!ctype) ctype = ex.contentType;
         domain = ex.domain;
+        screen = ex.screen;
       }
       if (!body) {
         return {
@@ -1894,7 +1897,13 @@ server.registerTool(
       const embInput = `${ttl}\n\n${body}`.slice(0, 1600);
       const embedding = await getEmbedding(embInput);
       const embStr = `[${embedding.join(",")}]`;
-      const meta = { source: "capture_with_thread", ...(metadata_extra ?? {}) };
+      // A fetched body carries the screen's verdict, as ingest_url's rows do - after the
+      // spread, so a caller cannot forge it. Caller-supplied content was never fetched.
+      const meta = {
+        source: "capture_with_thread",
+        ...(metadata_extra ?? {}),
+        ...(screen ? { injection_screen: screen } : {}),
+      };
 
       const client = await pool.connect();
       try {

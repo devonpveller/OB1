@@ -146,6 +146,15 @@ function v6Reason(g: number[]): string | null {
   if (zeroUpTo(5) && g[5] === 0xffff) {
     return v4Reason(embedded(g[6], g[7])) ?? null; // IPv4-mapped: judge the IPv4
   }
+  // IPv4-compatible ::a.b.c.d (deprecated, RFC 4291 2.5.5.1): never a legitimate target.
+  if (zeroUpTo(6)) return "IPv4-compatible address (::a.b.c.d, deprecated)";
+  // 6to4 2002:AABB:CCDD::/16 carries an IPv4 in groups 1-2: judge it.
+  if (g[0] === 0x2002) {
+    const r = v4Reason(embedded(g[1], g[2]));
+    return r ? `6to4 address embedding a ${r}` : null;
+  }
+  // Teredo 2001:0000::/32 tunnels to an obfuscated IPv4: refuse outright.
+  if (g[0] === 0x2001 && g[1] === 0) return "Teredo address (2001::/32)";
   if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) {
     return v4Reason(embedded(g[6], g[7])) ?? null; // NAT64: judge the IPv4
   }
@@ -181,7 +190,8 @@ export function urlBlockReason(raw: string | URL): string | null {
   if (u.protocol !== "http:" && u.protocol !== "https:") return `scheme ${u.protocol} is not http(s)`;
   if (u.username || u.password) return "URL carries credentials (userinfo)";
   // WHATWG URL has already canonicalised numeric hosts (2130706433, 0x7f.1 -> 127.0.0.1).
-  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  // Strip EVERY trailing dot (localhost.. is still localhost to a resolver).
+  const host = u.hostname.toLowerCase().replace(/\.+$/, "");
   if (!host) return "URL has no host";
   if (host.startsWith("[")) {
     const r = ipBlockReason(host);
