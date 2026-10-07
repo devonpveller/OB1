@@ -19,6 +19,10 @@ RUN deno install
 COPY *.ts ./
 RUN rm -f *.test.ts
 
+# Fail the BUILD on a missing or mistyped module instead of discovering it as a
+# restart loop in production (the research-curator model).
+RUN deno check index.ts
+
 # Run as non-root
 USER deno
 
