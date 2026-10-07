@@ -26,7 +26,14 @@ import { z } from "zod";
 import { Pool } from "postgres";
 import { registerAgentMemory } from "./agent-memory.ts";
 import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
-import { buildEgress, detectInjection, guardedFetch } from "./ingest-egress.ts";
+import {
+  buildEgress,
+  dedupShareScope,
+  detectInjection,
+  guardedFetch,
+  SCOPED_FIND_SQL,
+  SCOPED_INSERT_SQL,
+} from "./ingest-egress.ts";
 
 // --- Configuration ---
 
@@ -1261,6 +1268,34 @@ async function screenChat(system: string, user: string): Promise<string> {
   return String(d?.choices?.[0]?.message?.content ?? "");
 }
 
+/** find_or_create_source, SCOPED to what the caller may read (eh-ingest round 3, R1;
+ *  see ingest-egress.ts dedupShareScope). scope null = a local call: the global function,
+ *  unchanged. scope set (the cloud door's forced share stamp) = dedup only among rows with
+ *  that share value, else a NEW row - never a private row's id, never a merge into it. */
+async function findOrCreateSourceScoped(
+  client: PgClient,
+  a: {
+    url: string | null; content: string; title: string; contentType: string;
+    notebook: string | null; domain: string | null; embStr: string; meta: Record<string, unknown>;
+  },
+  scope: string | null,
+): Promise<{ id: string; was_duplicate: boolean }> {
+  if (scope === null) {
+    const r = await client.queryObject<{ id: string; was_duplicate: boolean }>(
+      `SELECT * FROM find_or_create_source($1, $2, NULL, $3, $4, $5, $6, $7::vector, $8::jsonb)`,
+      [a.url, a.content, a.title, a.contentType, a.notebook, a.domain, a.embStr, JSON.stringify(a.meta)],
+    );
+    return { id: r.rows[0].id, was_duplicate: r.rows[0].was_duplicate === true };
+  }
+  const found = await client.queryObject<{ id: string }>(SCOPED_FIND_SQL, [a.url, a.content, scope]);
+  if (found.rows.length > 0) return { id: found.rows[0].id, was_duplicate: true };
+  const ins = await client.queryObject<{ id: string }>(
+    SCOPED_INSERT_SQL,
+    [a.url ?? "", a.content, a.title, a.contentType, a.notebook, a.domain, a.embStr, JSON.stringify(a.meta)],
+  );
+  return { id: ins.rows[0].id, was_duplicate: false };
+}
+
 class Quarantined extends Error {
   constructor(public reason: string) {
     super(`quarantined: the fetched page was classified as a prompt-injection attack (${reason}); it was NOT stored`);
@@ -1379,19 +1414,20 @@ async function ingestOne(
         // after the spread: the screen's verdict is the server's, not the caller's
         injection_screen: screen,
       };
-      // Dedup through find_or_create_source (url OR content hash), like
-      // capture_with_thread: re-ingesting a URL returns the existing row's id
-      // instead of inserting a second copy. The function takes no tags /
-      // fetched_at, so a NEW row gets them in the same transaction; an existing
-      // row is never mutated here.
+      // Dedup (url OR content hash) through find_or_create_source - SCOPED to the
+      // caller's share stamp when it carries one (findOrCreateSourceScoped): a cloud
+      // ingest never sees or merges into a private row. Re-ingesting a URL the caller
+      // can read returns that row's id instead of inserting a second copy. Tags /
+      // fetched_at go on a NEW row in the same transaction; an existing row is never
+      // mutated here.
       await client.queryArray("BEGIN");
       try {
-        const res = await client.queryObject<{ id: string; was_duplicate: boolean }>(
-          `SELECT * FROM find_or_create_source($1, $2, NULL, $3, $4, $5, $6, $7::vector, $8::jsonb)`,
-          [url, body, title, contentType, notebook ?? null, domain || null, embStr, JSON.stringify(meta)],
-        );
-        const id = res.rows[0]?.id;
-        const dup = res.rows[0]?.was_duplicate === true;
+        const res = await findOrCreateSourceScoped(client, {
+          url, content: body, title, contentType, notebook: notebook ?? null,
+          domain: domain || null, embStr, meta,
+        }, dedupShareScope(metadata_extra));
+        const id = res.id;
+        const dup = res.was_duplicate;
         if (!dup) {
           await client.queryObject(
             `UPDATE sources SET tags = $2, fetched_at = now() WHERE id = $1`,
@@ -1908,12 +1944,14 @@ server.registerTool(
       const client = await pool.connect();
       try {
         await client.queryArray("BEGIN");
-        const src = await client.queryObject<{ id: string; was_duplicate: boolean }>(
-          `SELECT * FROM find_or_create_source($1, $2, NULL, $3, $4, $5, $6, $7::vector, $8::jsonb)`,
-          [url ?? null, body, ttl, ctype, notebook ?? null, domain ?? null, embStr, JSON.stringify(meta)],
-        );
-        const sourceId = src.rows[0].id;
-        const wasDup = src.rows[0].was_duplicate;
+        // Same scoping as ingest_url (R1): a share-stamped call dedups only among rows
+        // with that share value.
+        const src = await findOrCreateSourceScoped(client, {
+          url: url ?? null, content: body, title: ttl, contentType: ctype, notebook: notebook ?? null,
+          domain: domain ?? null, embStr, meta,
+        }, dedupShareScope(metadata_extra));
+        const sourceId = src.id;
+        const wasDup = src.was_duplicate;
         await client.queryObject(
           `SELECT link_source_to_thread($1, $2, 'automatic', NULL, 'confirmed')`,
           [thread_id, sourceId],

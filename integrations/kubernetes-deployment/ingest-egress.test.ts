@@ -258,3 +258,22 @@ Deno.test("public 6to4 and ordinary 2001: addresses still pass", () => {
   assertEquals(urlBlockReason("http://[2001:4860:4860::8888]/"), null); // 2001:4860 is not Teredo
   assertEquals(urlBlockReason("https://example.com../"), null);
 });
+
+// ── round 3 (reviewer R1): dedup is scoped to what the caller may read ───────
+import { DEDUP_SCOPE_FIELD, dedupShareScope, SCOPED_FIND_SQL, SCOPED_INSERT_SQL } from "./ingest-egress.ts";
+
+Deno.test("dedupShareScope: the cloud door's forced share stamp scopes the dedup; local calls are unscoped", () => {
+  assertEquals(DEDUP_SCOPE_FIELD, "share");
+  assertEquals(dedupShareScope({ origin: "cloud", share: "cloud" }), "cloud");
+  assertEquals(dedupShareScope({}), null);
+  assertEquals(dedupShareScope(undefined), null);
+  assertEquals(dedupShareScope({ share: "" }), null);
+  assertEquals(dedupShareScope({ share: ["cloud"] }), null);
+});
+
+Deno.test("the scoped lookup filters on the share value and matches like find_or_create_source", () => {
+  assert(SCOPED_FIND_SQL.includes("s.metadata->>'share' = $3"));
+  assert(SCOPED_FIND_SQL.includes("s.url = $1") && SCOPED_FIND_SQL.includes("md5($2)"));
+  assert(SCOPED_FIND_SQL.includes("ORDER BY s.created_at ASC"));
+  assert(SCOPED_INSERT_SQL.includes("md5($2)") && SCOPED_INSERT_SQL.includes("RETURNING id"));
+});

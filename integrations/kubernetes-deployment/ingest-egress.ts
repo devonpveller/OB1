@@ -347,3 +347,46 @@ export async function detectInjection(
   if (inj && !clean) return { injected: true, reason: "classified" };
   return { injected: false, reason: "clean" };
 }
+
+// ── Dedup scope (round 3, reviewer R1) ───────────────────────────────────────
+//
+// find_or_create_source dedups across EVERY row. Through the cloud door that is a
+// membership oracle: a cloud ingest of a URL the operator holds privately answered
+// "Already ingested: source <private id>", and the cloud's ingest folded into a row the
+// cloud can never read. Operator rule ("local all, cloud specific"): the cloud must not
+// learn what local put in.
+//
+// So a call whose metadata carries a `share` value - the cloud door FORCES
+// metadata_extra.share (openbrain-gateway/app.py _force_write_extra; a cloud client cannot
+// remove or change it) - dedups ONLY against rows with that same share value. A URL that
+// exists only privately is ingested as a NEW row carrying the stamp, and the reply is an
+// ordinary fresh ingest. Unstamped (local) callers keep the full dedup. A local caller that
+// sends share itself only narrows its own dedup - it can never widen anyone's.
+//
+// The field is `share` because that is what the cloud door's READ filter scopes on
+// (GATEWAY_READ_FILTER_FIELD default): the rows a stamped caller may dedup against are
+// exactly the rows it may read.
+export const DEDUP_SCOPE_FIELD = "share";
+
+/** The share value a call is confined to, or null for an unscoped (local) call. */
+export function dedupShareScope(meta: Record<string, unknown> | undefined | null): string | null {
+  const v = meta?.[DEDUP_SCOPE_FIELD];
+  return typeof v === "string" && v !== "" ? v : null;
+}
+
+/** The scoped lookup: find_or_create_source's match (url OR content md5, oldest first),
+ *  restricted to rows carrying the caller's share value. $1 url, $2 content, $3 share. */
+export const SCOPED_FIND_SQL =
+  `SELECT s.id FROM public.sources s
+    WHERE s.metadata->>'${DEDUP_SCOPE_FIELD}' = $3
+      AND ((COALESCE($1, '') <> '' AND s.url = $1) OR s.content_hash = md5($2))
+    ORDER BY s.created_at ASC
+    LIMIT 1`;
+
+/** The scoped insert: the same columns find_or_create_source writes (content_hash =
+ *  md5(content), as it computes it). $1 url .. $8 metadata. */
+export const SCOPED_INSERT_SQL =
+  `INSERT INTO public.sources
+     (url, title, content, content_type, notebook, domain, content_hash, embedding, metadata)
+   VALUES (NULLIF($1, ''), COALESCE($3, ''), $2, $4, $5, $6, md5($2), $7::vector, COALESCE($8::jsonb, '{}'::jsonb))
+   RETURNING id`;
