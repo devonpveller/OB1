@@ -26,6 +26,7 @@ import { z } from "zod";
 import { Pool } from "postgres";
 import { registerAgentMemory } from "./agent-memory.ts";
 import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
+import { buildEgress, detectInjection, guardedFetch } from "./ingest-egress.ts";
 
 // --- Configuration ---
 
@@ -1200,6 +1201,85 @@ server.registerTool(
 // Local, dependency-free fetch + extraction. NOT smolcrawl (that is a
 // separate whole-domain tool). End users feed URLs here for wiki use;
 // deep_research writes its gathered sources through the same table.
+//
+// EGRESS (eh-ingest, 2026-10-07). Every URL these tools fetch goes through
+// ingest-egress.ts guardedFetch: out through FETCH_PROXY_URL (compose: the
+// search plane's Mullvad proxy, http://vpn:8888; unset = that default) and
+// FAIL-CLOSED - a configured proxy whose client cannot be built refuses the
+// fetch, it never falls back to direct; direct only when FETCH_PROXY_URL="".
+// Internal / loopback / private targets are refused, redirects are followed by
+// hand and every hop re-checked, and the whole fetch has one timeout. The
+// fetched text is screened for prompt injection (a port of research-service's
+// detector) and a page classified as an attack is QUARANTINED - not stored, and
+// the tool says so - rather than written into the corpus or dropped silently.
+// Needs --unstable-net on the run command (Dockerfile) for createHttpClient.
+const INGEST_EGRESS = buildEgress(Deno.env.get("FETCH_PROXY_URL"));
+const INGEST_FETCH_TIMEOUT_MS = parseInt(Deno.env.get("INGEST_FETCH_TIMEOUT_MS") || "20000", 10);
+const INGEST_MAX_REDIRECTS = parseInt(Deno.env.get("INGEST_MAX_REDIRECTS") || "5", 10);
+const INGEST_UA = "open-brain-ingest/1.0";
+switch (INGEST_EGRESS.mode) {
+  case "proxy":
+    console.log(`ingest egress via ${INGEST_EGRESS.proxyUrl}`);
+    break;
+  case "direct":
+    console.log("ingest egress DIRECT (FETCH_PROXY_URL is empty by configuration)");
+    break;
+  case "refuse":
+    console.error(
+      `ingest egress REFUSED: FETCH_PROXY_URL=${INGEST_EGRESS.proxyUrl} is configured but the proxy ` +
+        `client cannot be built (${INGEST_EGRESS.error}; is --unstable-net on the run command?). ` +
+        `Every URL fetch (ingest_url, ingest_urls, capture_with_thread url) will be refused until the ` +
+        `deploy is fixed or FETCH_PROXY_URL="" is set to choose direct. Other tools are unaffected.`,
+    );
+}
+
+function ingestFetch(url: string) {
+  return guardedFetch(url, {
+    egress: INGEST_EGRESS,
+    timeoutMs: INGEST_FETCH_TIMEOUT_MS,
+    maxRedirects: INGEST_MAX_REDIRECTS,
+    headers: { "User-Agent": INGEST_UA },
+  });
+}
+
+// The injection screen's one classify call - local chat through the LiteLLM
+// alias (CHAT_API_BASE), never an upstream.
+async function screenChat(system: string, user: string): Promise<string> {
+  const r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${CHAT_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: CHAT_MODEL,
+      temperature: 0,
+      max_tokens: 8,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+    }),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!r.ok) throw new Error(`screen chat ${r.status}`);
+  const d = await r.json();
+  return String(d?.choices?.[0]?.message?.content ?? "");
+}
+
+class Quarantined extends Error {
+  constructor(public reason: string) {
+    super(`quarantined: the fetched page was classified as a prompt-injection attack (${reason}); it was NOT stored`);
+    this.name = "Quarantined";
+  }
+}
+
+/** Screen fetched text; throw Quarantined on an attack, else return the verdict
+ *  reason to stamp on the stored row (clean / too-short / detect-error). */
+async function screenFetched(url: string, title: string, body: string): Promise<string> {
+  const v = await detectInjection(screenChat, { url, title, content: body });
+  if (v.injected) {
+    let host = "";
+    try { host = new URL(url).hostname; } catch { /* ignore */ }
+    console.warn(`[ingest] QUARANTINED ${host} (prompt-injection screen: ${v.reason})`);
+    throw new Quarantined(v.reason);
+  }
+  return v.reason;
+}
 
 function detectContentType(url: string, ctHeader: string): string {
   const u = url.toLowerCase();
@@ -1238,6 +1318,8 @@ type IngestOutcome = {
   content_type?: string;
   chars?: number;
   error?: string;
+  duplicate?: boolean;
+  quarantined?: boolean;
 };
 
 async function ingestOne(
@@ -1247,11 +1329,9 @@ async function ingestOne(
   metadata_extra?: Record<string, unknown>,
 ): Promise<IngestOutcome> {
   try {
-    const resp = await fetch(url, {
-      headers: { "User-Agent": "open-brain-ingest/1.0" },
-      redirect: "follow",
-    });
+    const { response: resp } = await ingestFetch(url);
     if (!resp.ok) {
+      resp.body?.cancel().catch(() => {});
       return { url, ok: false, error: `fetch ${resp.status}` };
     }
     const ctHeader = (resp.headers.get("content-type") || "").toLowerCase();
@@ -1281,6 +1361,8 @@ async function ingestOne(
     } catch { /* ignore */ }
     if (!title) title = domain || url.slice(0, 120);
 
+    const screen = await screenFetched(url, title, body);
+
     // llama-cpp-embed (bge-m3) rejects inputs over its physical batch
     // (512 tokens). Cap the embed input well under that (~1600 chars);
     // the FULL body is still stored. Richer embeddings require raising
@@ -1294,27 +1376,42 @@ async function ingestOne(
       const meta: Record<string, unknown> = {
         source: "ingest_url",
         ...(metadata_extra ?? {}),
+        // after the spread: the screen's verdict is the server's, not the caller's
+        injection_screen: screen,
       };
-      const res = await client.queryObject<{ id: string }>(
-        `INSERT INTO sources
-           (url, title, content, content_type, tags, notebook, domain,
-            fetched_at, embedding, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7, now(), $8::vector, $9::jsonb)
-         RETURNING id`,
-        [
-          url, title, body, contentType, tags, notebook ?? null, domain,
-          embStr, JSON.stringify(meta),
-        ],
-      );
-      return {
-        url, ok: true, id: res.rows[0]?.id, title,
-        content_type: contentType, chars: body.length,
-      };
+      // Dedup through find_or_create_source (url OR content hash), like
+      // capture_with_thread: re-ingesting a URL returns the existing row's id
+      // instead of inserting a second copy. The function takes no tags /
+      // fetched_at, so a NEW row gets them in the same transaction; an existing
+      // row is never mutated here.
+      await client.queryArray("BEGIN");
+      try {
+        const res = await client.queryObject<{ id: string; was_duplicate: boolean }>(
+          `SELECT * FROM find_or_create_source($1, $2, NULL, $3, $4, $5, $6, $7::vector, $8::jsonb)`,
+          [url, body, title, contentType, notebook ?? null, domain || null, embStr, JSON.stringify(meta)],
+        );
+        const id = res.rows[0]?.id;
+        const dup = res.rows[0]?.was_duplicate === true;
+        if (!dup) {
+          await client.queryObject(
+            `UPDATE sources SET tags = $2, fetched_at = now() WHERE id = $1`,
+            [id, tags],
+          );
+        }
+        await client.queryArray("COMMIT");
+        return {
+          url, ok: true, id, title, duplicate: dup,
+          content_type: contentType, chars: body.length,
+        };
+      } catch (e) {
+        await client.queryArray("ROLLBACK").catch(() => {});
+        throw e;
+      }
     } finally {
       client.release();
     }
   } catch (err: unknown) {
-    return { url, ok: false, error: (err as Error).message };
+    return { url, ok: false, quarantined: err instanceof Quarantined, error: (err as Error).message };
   }
 }
 
@@ -1335,7 +1432,9 @@ server.registerTool(
   async ({ url, notebook, tags, metadata_extra }) => {
     const r = await ingestOne(url, notebook, tags ?? [], metadata_extra);
     const text = r.ok
-      ? `Ingested source ${r.id} — "${r.title}" (${r.content_type}, ${r.chars} chars)`
+      ? r.duplicate
+        ? `Already ingested: source ${r.id} — "${r.title}" (duplicate url/content; existing row kept)`
+        : `Ingested source ${r.id} — "${r.title}" (${r.content_type}, ${r.chars} chars)`
       : `Failed to ingest ${url}: ${r.error}`;
     return { content: [{ type: "text" as const, text }], isError: !r.ok };
   },
@@ -1363,7 +1462,7 @@ server.registerTool(
     const failed = results.filter((r) => !r.ok);
     const lines = [
       `Ingested ${ok.length}/${results.length} source(s).`,
-      ...ok.map((r) => `  ✓ ${r.id} — "${r.title}" (${r.content_type})`),
+      ...ok.map((r) => `  ✓ ${r.id} — "${r.title}" (${r.content_type})${r.duplicate ? " [duplicate: existing row kept]" : ""}`),
       ...failed.map((r) => `  ✗ ${r.url}: ${r.error}`),
     ];
     return {
@@ -1713,11 +1812,11 @@ registerSuggestionList(
 async function fetchExtract(
   url: string,
 ): Promise<{ title: string; body: string; contentType: string; domain: string }> {
-  const resp = await fetch(url, {
-    headers: { "User-Agent": "open-brain-ingest/1.0" },
-    redirect: "follow",
-  });
-  if (!resp.ok) throw new Error(`fetch ${resp.status}`);
+  const { response: resp } = await ingestFetch(url);
+  if (!resp.ok) {
+    resp.body?.cancel().catch(() => {});
+    throw new Error(`fetch ${resp.status}`);
+  }
   const ctHeader = (resp.headers.get("content-type") || "").toLowerCase();
   const contentType = detectContentType(url, ctHeader);
   let title = "";
@@ -1739,6 +1838,7 @@ async function fetchExtract(
     domain = new URL(url).hostname;
   } catch { /* ignore */ }
   if (!title) title = domain || url.slice(0, 120);
+  if (body) await screenFetched(url, title, body); // throws Quarantined on an attack
   return { title, body, contentType, domain };
 }
 

@@ -31,4 +31,7 @@ EXPOSE 8000
 # The default entrypoint is the agent-facing MCP server. The ops door runs from the SAME
 # image with a different command (see the openbrain-memory-ops service) - one image, two
 # processes, so they can never drift to different versions of the review policy.
-CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read", "index.ts"]
+# --unstable-net: Deno.createHttpClient({ proxy }) for the ingest tools' fetch egress (eh-ingest).
+# Without it the client cannot be built and ingest-egress.ts REFUSES every URL fetch (fail-closed)
+# rather than fetching direct; every other tool keeps working.
+CMD ["deno", "run", "--unstable-net", "--allow-net", "--allow-env", "--allow-read", "index.ts"]
