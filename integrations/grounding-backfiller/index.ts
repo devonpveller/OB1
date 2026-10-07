@@ -31,7 +31,8 @@
  *
  * No-entity / no-Wikipedia-match → stamp `metadata.backfill_skip=true` + log, so
  * an un-groundable claim is never re-attempted every sweep (no retry storm; clear
- * the flag to retry). External fetches Tor-routed (D10, socks5h, fail-soft).
+ * the flag to retry). External fetches go through FETCH_PROXY_URL, FAIL-CLOSED: a configured
+ * proxy whose client cannot be built refuses every fetch (refetch-policy.ts).
  *
  * Env: DB_HOST/PORT/NAME/USER/PASSWORD; CHAT_API_BASE/CHAT_MODEL/CHAT_NOTHINK_SUFFIX;
  *      FETCH_PROXY_URL (socks5h://tor:9050; "" = direct); WIKI_BASE;
@@ -39,7 +40,7 @@
  *      BACKFILL_EDGE_WEIGHT (0.7), BACKFILL_FETCH_TIMEOUT_MS (15000), PORT (8000).
  */
 import { Pool } from "postgres";
-import { refetchAllowDirect, wantsDirectFallback } from "./refetch-policy.ts";
+import { buildEgress, refetchAllowDirect, routeFor, wantsDirectFallback } from "./refetch-policy.ts";
 
 const env = (k: string, d: string) => Deno.env.get(k) ?? d;
 const DB = {
@@ -72,27 +73,29 @@ const REFETCH_MAX_ATTEMPTS = parseInt(env("REFETCH_MAX_ATTEMPTS", "3"), 10); // 
 const pool = new Pool(DB, 6);
 
 // ── Tor egress (privacy-by-default; D10) — socks5h = DNS through Tor ──────────
+// FAIL-CLOSED (eh-ingest round 2): research-service's proxyPolicy via refetch-policy.ts.
+// A configured FETCH_PROXY_URL whose client cannot be built REFUSES every fetch (it used
+// to null the client, which meant DIRECT). Direct only when FETCH_PROXY_URL="".
 const DEFAULT_PROXY = "socks5h://tor:9050";
-let httpClient: Deno.HttpClient | null | undefined; // undefined=uninit, null=direct
-function getClient(): Deno.HttpClient | null {
-  if (httpClient !== undefined) return httpClient;
-  const url = (Deno.env.get("FETCH_PROXY_URL") ?? DEFAULT_PROXY).trim();
-  try {
-    httpClient = url ? Deno.createHttpClient({ proxy: { url } }) : null;
-  } catch (e) {
-    console.warn(`[backfill] Tor client init failed (${e}); using direct fetch`);
-    httpClient = null;
-  }
-  return httpClient;
-}
+const EGRESS = buildEgress(Deno.env.get("FETCH_PROXY_URL"), DEFAULT_PROXY);
+const EGRESS_REFUSAL =
+  `egress REFUSED: FETCH_PROXY_URL=${EGRESS.proxyUrl} is configured but the proxy client cannot be built ` +
+  `(${EGRESS.error}). Every fetch is refused until the deploy is fixed, or FETCH_PROXY_URL="" is set to choose direct.`;
+if (EGRESS.mode === "refuse") console.error(`[backfill] ${EGRESS_REFUSAL}`);
 function egressMode(): string {
-  return getClient() ? (Deno.env.get("FETCH_PROXY_URL") ?? DEFAULT_PROXY) : "direct";
+  return EGRESS.mode === "proxy" ? EGRESS.proxyUrl : EGRESS.mode === "direct" ? "direct" : "REFUSED";
+}
+/** Runs refuse up front in refuse mode, so no claim is stamped backfill_skip and no source
+ *  counted toward refetch_failed because the egress was misconfigured. */
+function assertEgress(): void {
+  if (EGRESS.mode === "refuse") throw new Error(EGRESS_REFUSAL);
 }
 function torFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  const c = getClient();
+  const route = routeFor(EGRESS.mode, true);
+  if (route === "refuse") return Promise.reject(new Error(EGRESS_REFUSAL));
   // Wikipedia API etiquette requires a descriptive User-Agent.
   const headers = { "user-agent": "open-brain-grounding-backfiller/1.0 (private brain-health)", ...(init.headers ?? {}) };
-  return c ? fetch(url, { ...init, headers, client: c }) : fetch(url, { ...init, headers });
+  return route === "proxy" ? fetch(url, { ...init, headers, client: EGRESS.client! }) : fetch(url, { ...init, headers });
 }
 
 // ── Entity extraction (one local nothink call) ───────────────────────────────
@@ -252,6 +255,7 @@ interface RunResult {
 
 let running = false;
 async function runBackfill(limit: number, threadIds: string[] | null): Promise<RunResult> {
+  assertEgress();
   const res: RunResult = { scanned: 0, grounded: 0, noEntity: 0, noPage: 0, errors: 0 };
   const scan = await pool.connect();
   let claims: Claim[];
@@ -305,7 +309,9 @@ async function fetchExtract(targetUrl: string, useTor: boolean): Promise<string 
       headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0" },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     };
-    if (useTor) { const c = getClient(); if (c) init.client = c; }
+    const route = routeFor(EGRESS.mode, useTor);
+    if (route === "refuse") return null;
+    if (route === "proxy") init.client = EGRESS.client!;
     const r = await fetch(targetUrl, init);
     if (!r.ok) { r.body?.cancel().catch(() => {}); return null; }
     const ct = r.headers.get("content-type") || "";
@@ -352,6 +358,7 @@ async function refetchOne(client: any, src: { id: string; url: string; oldlen: n
 }
 
 async function runRefetch(limit: number): Promise<{ scanned: number; recovered: number; stillThin: number }> {
+  assertEgress();
   const res = { scanned: 0, recovered: 0, stillThin: 0 };
   const scan = await pool.connect();
   let rows: Array<{ id: string; url: string; oldlen: number }>;

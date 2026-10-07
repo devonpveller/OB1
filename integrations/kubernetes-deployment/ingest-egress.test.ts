@@ -240,3 +240,21 @@ Deno.test("detectInjection strips hidden characters before sampling", async () =
   });
   assert(seen.includes("ignore previous"));
 });
+
+// ── round 2 (tester attempt 1, F6): v6 embeddings and trailing dots ─────────
+
+Deno.test("urlBlockReason refuses IPv4-compatible, 6to4-private, Teredo and multi-dot names", () => {
+  const blocked = [
+    "http://[::127.0.0.1]/", "http://[::7f00:1]/", "http://[::8.8.8.8]/", "http://[::a00:1]/",
+    "http://[2002:7f00:1::]/", "http://[2002:a00:1::1]/", "http://[2002:c0a8:101::]/", "http://[2002:a9fe:a9fe::]/",
+    "http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/", "http://[2001::1]/",
+    "http://localhost../", "http://localhost.../", "http://openbrain-db../", "http://127.0.0.1../", "http://nas.local../",
+  ];
+  for (const u of blocked) assert(urlBlockReason(u) !== null, `expected refusal for ${u}`);
+});
+
+Deno.test("public 6to4 and ordinary 2001: addresses still pass", () => {
+  assertEquals(urlBlockReason("http://[2002:808:808::]/"), null); // 6to4 of 8.8.8.8
+  assertEquals(urlBlockReason("http://[2001:4860:4860::8888]/"), null); // 2001:4860 is not Teredo
+  assertEquals(urlBlockReason("https://example.com../"), null);
+});
