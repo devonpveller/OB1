@@ -6,8 +6,9 @@ WORKDIR /app
 COPY deno.json ./
 RUN deno install
 
-# Server source
-COPY index.ts ./
+# Server source (globbed so refetch-policy.ts ships; tests removed)
+COPY *.ts ./
+RUN rm -f *.test.ts
 
 USER deno
 

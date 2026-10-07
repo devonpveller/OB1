@@ -188,6 +188,15 @@ services:
       AGENT_MEMORY_RECALL_MIN_SIMILARITY: ${AGENT_MEMORY_RECALL_MIN_SIMILARITY:-}
       AGENT_MEMORY_RECALL_RECENCY_WEIGHT: ${AGENT_MEMORY_RECALL_RECENCY_WEIGHT:-}
       AGENT_MEMORY_RECALL_HALF_LIFE_DAYS: ${AGENT_MEMORY_RECALL_HALF_LIFE_DAYS:-}
+      # URL FETCH EGRESS (eh-ingest, 2026-10-07): ingest_url / ingest_urls and
+      # capture_with_thread's url fetch go out through the search plane's Mullvad
+      # proxy, FAIL-CLOSED (ingest-egress.ts): a proxy client that cannot be built
+      # refuses the fetch instead of going direct. `-` not `:-`, so setting
+      # OB_MCP_FETCH_PROXY_URL= (empty) in .env is the ONE way to choose direct.
+      # Internal/private targets and redirects to them are refused either way.
+      FETCH_PROXY_URL: ${OB_MCP_FETCH_PROXY_URL-http://vpn:8888}
+      INGEST_FETCH_TIMEOUT_MS: ${OB_MCP_INGEST_FETCH_TIMEOUT_MS:-20000}
+      INGEST_MAX_REDIRECTS: ${OB_MCP_INGEST_MAX_REDIRECTS:-5}
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
     # obnet) talk to it directly. Cloud services (Claude Code, etc.)
@@ -196,6 +205,7 @@ services:
     networks:
       - obnet
       - llm-net
+      - search-gw-net   # reach the `vpn` proxy (ai-stack_default) for URL fetches (eh-ingest)
     restart: unless-stopped
 
   # Combined extensions MCP server: all 6 OB1 extensions (39 tools),
@@ -302,6 +312,14 @@ services:
       OPENBRAIN_KEY: ${MCP_ACCESS_KEY}
       GATEWAY_KEY: ${OPENBRAIN_GATEWAY_KEY}
       SHARE_LABEL_VALUE: cloud
+      # AUDIT LOG (eh-ingest): one JSONL line per request - key id, tool names,
+      # allowed/refused, status, byte counts; never arguments or payloads.
+      # Rotated at 5 MiB x 4 backups (app.py). The directory is under the backups
+      # tree, which backup-to-nas.ps1 mirrors; a path it cannot append to stops
+      # the gateway at start.
+      GATEWAY_AUDIT_LOG: /audit/cloud.jsonl
+    volumes:
+      - ${BACKUPS_DIR:-../../backups}/openbrain-gateway-audit:/audit
     ports:
       - "127.0.0.1:8061:8061"
     # obnet is a normal bridge (not internal), so host port publishing
@@ -358,6 +376,10 @@ services:
       GATEWAY_WRITE_ORIGIN: ops
       GATEWAY_WRITE_STAMP_FIELD: exposure
       GATEWAY_WRITE_STAMP_VALUE: ops
+      # Same audit record as the cloud door, its own file (eh-ingest).
+      GATEWAY_AUDIT_LOG: /audit/ops.jsonl
+    volumes:
+      - ${BACKUPS_DIR:-../../backups}/openbrain-gateway-audit:/audit
     ports:
       - "127.0.0.1:8062:8061"
     networks:
@@ -1114,6 +1136,9 @@ services:
       # Tor egress for Wikipedia (privacy-by-default). Set "" for direct if
       # Wikipedia-over-Tor proves unreliable on this exit set.
       FETCH_PROXY_URL: ${BACKFILL_FETCH_PROXY_URL:-http://vpn:8888}
+      # POST /refetch's DIRECT fallback (eh-ingest): OFF unless this is literally
+      # "true". A source that stays thin through the proxy stays thin.
+      REFETCH_ALLOW_DIRECT: ${BACKFILL_REFETCH_ALLOW_DIRECT:-false}
       BACKFILL_BATCH: ${BACKFILL_BATCH:-20}
       BACKFILL_CONCURRENCY: ${BACKFILL_CONCURRENCY:-2}
       BACKFILL_INTERVAL_MS: ${BACKFILL_INTERVAL_MS:-0}

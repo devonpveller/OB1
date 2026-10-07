@@ -15,8 +15,10 @@
  * not just the podcast.
  *
  * Also re-fetches thin/failed web SOURCES (POST /refetch) whose original ingestion
- * truncated them (~150-char stubs) — a plain re-fetch (Tor first, direct fallback)
- * recovers the real body for ~80% of them. Same brain-health worker, same Tor+DB.
+ * truncated them (~150-char stubs) — a plain re-fetch through the proxy recovers the
+ * real body for most of them. A direct fallback exists but is OFF unless
+ * REFETCH_ALLOW_DIRECT=true (refetch-policy.ts); a source that stays thin through
+ * the proxy stays thin. Same brain-health worker, same Tor+DB.
  *
  * Routes (obnet loopback):
  *   GET  /health   -> { ok, running, egress }
@@ -37,6 +39,7 @@
  *      BACKFILL_EDGE_WEIGHT (0.7), BACKFILL_FETCH_TIMEOUT_MS (15000), PORT (8000).
  */
 import { Pool } from "postgres";
+import { refetchAllowDirect, wantsDirectFallback } from "./refetch-policy.ts";
 
 const env = (k: string, d: string) => Deno.env.get(k) ?? d;
 const DB = {
@@ -61,7 +64,8 @@ const FETCH_TIMEOUT_MS = parseInt(env("BACKFILL_FETCH_TIMEOUT_MS", "15000"), 10)
 const REFETCH_THIN_MAX = parseInt(env("REFETCH_THIN_MAX", "300"), 10); // shorter than this = candidate
 const REFETCH_MIN_RECOVERED = parseInt(env("REFETCH_MIN_RECOVERED", "500"), 10); // accept only a real body
 const REFETCH_MAX_CHARS = parseInt(env("REFETCH_MAX_CHARS", "8000"), 10); // match the ingestion cap
-const REFETCH_ALLOW_DIRECT = env("REFETCH_ALLOW_DIRECT", "true") !== "false"; // direct fallback when Tor is blocked
+// Direct fallback is OFF unless REFETCH_ALLOW_DIRECT is literally "true" (eh-ingest: direct fallback = leak).
+const REFETCH_ALLOW_DIRECT = refetchAllowDirect(Deno.env.get("REFETCH_ALLOW_DIRECT"));
 const REFETCH_CONCURRENCY = parseInt(env("REFETCH_CONCURRENCY", "6"), 10); // network-bound → wider than the GPU-bound backfill
 const REFETCH_MAX_ATTEMPTS = parseInt(env("REFETCH_MAX_ATTEMPTS", "3"), 10); // give up (mark failed) only after this many tries
 
@@ -315,8 +319,8 @@ async function fetchExtract(targetUrl: string, useTor: boolean): Promise<string 
 // deno-lint-ignore no-explicit-any
 async function refetchOne(client: any, src: { id: string; url: string; oldlen: number }): Promise<"recovered" | "still-thin"> {
   let text = await fetchExtract(src.url, true); // Tor first (privacy)
-  if ((!text || text.length < REFETCH_MIN_RECOVERED) && REFETCH_ALLOW_DIRECT) {
-    const d = await fetchExtract(src.url, false); // direct fallback when Tor is blocked/thin
+  if (wantsDirectFallback(text, REFETCH_MIN_RECOVERED, REFETCH_ALLOW_DIRECT)) {
+    const d = await fetchExtract(src.url, false); // direct fallback - only when the operator opted in
     if (d && (!text || d.length > text.length)) text = d;
   }
   if (text && text.length >= REFETCH_MIN_RECOVERED && text.length > src.oldlen) {
