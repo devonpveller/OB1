@@ -51,7 +51,7 @@ import { extractAnchors, GmailReader } from "./src/enrich/gmail-fetch.ts";
 import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
-import { JobRecord, ResearchClient, waitForAll } from "./src/enrich/research-client.ts";
+import { JobRecord, ResearchClient, ResearchDeadlineError, waitForAll } from "./src/enrich/research-client.ts";
 import { filterCandidates, isPromoBody, loadBlocklist, saveBlocklist } from "./src/enrich/promo-filter.ts";
 import { DayReport, DayReportEntry, LinkCandidate } from "./src/enrich/types.ts";
 import {
@@ -527,13 +527,19 @@ async function processLink(item: WorkItem) {
       query: buildQuery(title, subject, content),
       seedSources: [{ url: link.url, title, content }],
       mode: "article", gapResearch: "preliminary", dryRun: !COMMIT, origin: "notebook",
+      // The engine never starts this job after we stop waiting for it.
+      deadlineAt: Date.now() + RESEARCH_WAIT_MS,
     });
   } catch (err) { return fallback(`research-submit: ${err}`); }
   console.log(`      → ${item.preContent ? "newsletter-body" : link.domain} researching (job ${jobId.slice(0, 8)})…`);
 
   let job: JobRecord;
+  // At the deadline waitForDone CANCELS the job (it would otherwise keep its
+  // queue place and run for nobody); the note says when the model was down.
   try { job = await research.waitForDone(jobId, { timeoutMs: RESEARCH_WAIT_MS, intervalMs: RESEARCH_POLL_MS }); }
-  catch (err) { return fallback(`research: ${err}`); }
+  catch (err) {
+    return fallback(err instanceof ResearchDeadlineError && err.modelDown ? `research: model_down: ${err.message}` : `research: ${err}`);
+  }
   if (job.status !== "done") return fallback(`research: ${job.status}: ${job.error ?? ""}`);
 
   await recordDoneJob({ base, jobId, email, title, subject }, job);
@@ -732,7 +738,7 @@ async function runGapDives(ledgerRes: LedgerResolution) {
 
   // (6) Bounded same-night wait — never cancels; unfinished jobs keep draining.
   const results = subs.length
-    ? await waitForAll(research, subs.map((s) => s.jobId), { timeoutMs: GAP_DIVE_WAIT_MS, intervalMs: RESEARCH_POLL_MS })
+    ? await waitForAll(research, subs.map((s) => s.jobId), { timeoutMs: GAP_DIVE_WAIT_MS, intervalMs: RESEARCH_POLL_MS, cancelOnTimeout: false })
     : new Map();
 
   // (7) Classify + persist.

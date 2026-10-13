@@ -15,7 +15,16 @@
  * Contract (OB1/integrations/research-service/index.ts):
  *   POST /research                -> { job_id, status }      (x-brain-key)
  *   GET  /research/jobs/:id        -> { id, status, result } (x-brain-key)
+ *   POST /research/jobs/:id/cancel -> { status }             (x-brain-key)
  *   terminal status ∈ { done, error, cancelled }
+ *
+ * Model-down signal (mr-research-failfast): when the engine's model is
+ * unreachable a job is PAUSED, not failed - it stays `queued` with
+ * `progress.code === "model_down"`, and every job read carries
+ * `model: { state: "down", since, reason }`. A job that ended because of it reads
+ * `status: "error"` with `progress.code === "model_down"` (error starts
+ * `model_down:`), or `status: "cancelled"` with `progress.model_down === true`
+ * when its deadline passed while paused. Use `isModelDown(job)`.
  */
 
 export interface ResearchSeed { url: string; title: string; content: string }
@@ -37,6 +46,12 @@ export interface SubmitArgs {
   gapResearch?: "none" | "preliminary";
   /** run synthesis but write NOTHING canonical (preview). */
   dryRun?: boolean;
+  /**
+   * The caller's deadline. The engine never STARTS a job still queued past it
+   * (the job ends `cancelled`) and aborts one still running at it. Set it to
+   * the moment this caller stops waiting.
+   */
+  deadlineAt?: Date | string | number;
   origin?: string; // "owui" | "agent" | "notebook" | "manual"
   threadId?: string;
 }
@@ -62,16 +77,59 @@ export interface ResearchResult {
   curator?: CuratorEcho | null;
 }
 
+export interface ModelState {
+  state: "up" | "down";
+  since?: string | null;
+  reason?: string | null;
+  last_check?: string | null;
+}
+
 export interface JobRecord {
   id: string;
   status: "queued" | "running" | "done" | "error" | "cancelled";
-  progress?: { phase?: string; message?: string };
+  /** code: "model_down" (paused, or failed because of it) | "deadline" |
+   *  "cancel_requested". model_down: true on a cancel that happened while paused. */
+  progress?: { phase?: string; message?: string; code?: string; model_down?: boolean; model_down_since?: string };
+  /** The engine's process-wide model latch at the time of this read. */
+  model?: ModelState;
   result?: ResearchResult | null;
   metrics?: { claims_reused?: number; claims_freshly_gathered?: number; gap_ratio?: number } | null;
   error?: string | null;
 }
 
 const TERMINAL = new Set(["done", "error", "cancelled"]);
+
+/**
+ * THE model-down predicate for callers (mr-routine-outage builds on this): true
+ * when the job is paused or ended because the engine's model is unreachable, or
+ * the engine reports its model down right now.
+ */
+export function isModelDown(job: Pick<JobRecord, "progress" | "model" | "error"> | null | undefined): boolean {
+  if (!job) return false;
+  return job.progress?.code === "model_down" || job.progress?.model_down === true ||
+    job.model?.state === "down" || /^model_down:/.test(job.error ?? "");
+}
+
+/**
+ * Thrown by waitForDone when the caller's own deadline passes. `cancelled` says
+ * whether the engine confirmed the job will not run (or is being stopped);
+ * `modelDown` whether the last read showed the model-down signal - so the caller
+ * can say "the model was down" instead of "research timed out".
+ */
+export class ResearchDeadlineError extends Error {
+  constructor(
+    readonly jobId: string,
+    readonly lastStatus: string,
+    readonly modelDown: boolean,
+    readonly cancelled: boolean,
+  ) {
+    super(
+      `research job ${jobId} did not complete within deadline (last status: ${lastStatus}` +
+        `${modelDown ? ", model_down" : ""}; ${cancelled ? "cancelled" : "NOT cancelled - it may still run"})`,
+    );
+    this.name = "ResearchDeadlineError";
+  }
+}
 
 export interface ResearchClientOptions {
   baseUrl: string; // e.g. http://openbrain-research:8000
@@ -99,6 +157,7 @@ export class ResearchClient {
         dry_run: args.dryRun,
         origin: args.origin ?? "notebook",
         thread_id: args.threadId,
+        deadline_at: args.deadlineAt === undefined ? undefined : new Date(args.deadlineAt).toISOString(),
       }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
     });
@@ -108,6 +167,23 @@ export class ResearchClient {
     const d = await res.json() as { job_id?: string };
     if (!d.job_id) throw new Error("research submit: no job_id in response");
     return d.job_id;
+  }
+
+  /**
+   * Cancel a job. A queued job ends `cancelled` at once; a running one is
+   * aborted. Returns the engine's answer ("cancelled" | "cancelling" | the
+   * terminal status it already had). Bounded by timeoutMs; throws on failure.
+   */
+  async cancel(jobId: string, reason = "caller gave up"): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/research/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      headers: { "x-brain-key": this.opts.brainKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
+    });
+    if (!res.ok) throw new Error(`research cancel failed: ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+    const d = await res.json() as { status?: string };
+    return d.status ?? "unknown";
   }
 
   /** One poll. */
@@ -123,12 +199,17 @@ export class ResearchClient {
   /**
    * THE WAIT-GATE. Poll until the job reaches a terminal state (done/error/
    * cancelled) or the bounded deadline elapses. The job's result is NEVER read
-   * before `done`. A timeout throws (caller marks the link email-only) — we do
-   * not let a half-finished research feed the podcast.
+   * before `done`. A timeout throws ResearchDeadlineError (caller marks the link
+   * email-only) — we do not let a half-finished research feed the podcast.
+   *
+   * cancelOnTimeout (default true): at the deadline the job is CANCELLED, so it
+   * never runs for a caller that is no longer waiting (2026-10-13: abandoned
+   * jobs kept their FIFO place and ran ~77 min each). Pass false only for a
+   * job someone will come back for (gap dives carry their job ids over).
    */
   async waitForDone(
     jobId: string,
-    opts: { timeoutMs?: number; intervalMs?: number } = {},
+    opts: { timeoutMs?: number; intervalMs?: number; cancelOnTimeout?: boolean } = {},
   ): Promise<JobRecord> {
     const deadline = Date.now() + (opts.timeoutMs ?? 240_000); // > harness 180s wall
     const interval = opts.intervalMs ?? 3_000;
@@ -136,9 +217,25 @@ export class ResearchClient {
     while (Date.now() < deadline) {
       last = await this.poll(jobId);
       if (TERMINAL.has(last.status)) return last;
-      await new Promise((r) => setTimeout(r, interval));
+      // Never sleep past the deadline: the wait is bounded by timeoutMs, not by
+      // timeoutMs + one interval.
+      await new Promise((r) => setTimeout(r, Math.max(0, Math.min(interval, deadline - Date.now()))));
     }
-    throw new Error(`research job ${jobId} did not complete within deadline (last status: ${last?.status ?? "unknown"})`);
+    let cancelled = false;
+    if (opts.cancelOnTimeout !== false) {
+      try {
+        const st = await this.cancel(jobId, "caller deadline passed (waitForDone)");
+        cancelled = st === "cancelled" || st === "cancelling";
+        // It may have finished in the gap between the last poll and the cancel.
+        if (!cancelled && TERMINAL.has(st)) {
+          const fin = await this.poll(jobId).catch(() => null);
+          if (fin && TERMINAL.has(fin.status)) return fin;
+        }
+      } catch (err) {
+        console.warn(`[research] cancel of ${jobId} at deadline failed: ${err}`);
+      }
+    }
+    throw new ResearchDeadlineError(jobId, last?.status ?? "unknown", isModelDown(last), cancelled);
   }
 }
 
@@ -151,7 +248,7 @@ export class ResearchClient {
 export async function waitForAll(
   client: ResearchClient,
   jobIds: string[],
-  opts: { timeoutMs?: number; intervalMs?: number } = {},
+  opts: { timeoutMs?: number; intervalMs?: number; cancelOnTimeout?: boolean } = {},
 ): Promise<Map<string, { ok: true; job: JobRecord } | { ok: false; error: string }>> {
   const out = new Map<string, { ok: true; job: JobRecord } | { ok: false; error: string }>();
   await Promise.all(jobIds.map(async (id) => {

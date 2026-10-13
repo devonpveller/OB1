@@ -57,8 +57,10 @@ export async function detectInjection(deps: Deps, page: Page): Promise<Injection
   const tail = sample.length > 5200 ? `\n…\n${sample.slice(-1200)}` : "";
   let raw: string;
   try {
-    raw = await deps.chat(DETECT_SYS, `URL: ${page.url}\nTITLE: ${page.title}\n\nCONTENT:\n${head}${tail}`, { nothink: true });
+    raw = await deps.chat(DETECT_SYS, `URL: ${page.url}\nTITLE: ${page.title}\n\nCONTENT:\n${head}${tail}`, { nothink: true, failFast: true });
   } catch {
+    // A down model fails fast here (failFast) instead of after a 25-min retry
+    // budget; the job layer pauses the job if the model is down.
     return { injected: false, reason: "detect-error" }; // fail-open (guard still applies)
   }
   const v = (raw || "").toUpperCase();

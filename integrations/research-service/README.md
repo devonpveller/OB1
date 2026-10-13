@@ -24,6 +24,8 @@ Full design: [`../../../documentation/implementation-guide/research-engine-for-O
 |------|------|
 | `index.ts` | config + real seams (llama-cpp, SearXNG, fetch, curator) + HTTP/job layer |
 | `harness.ts` | `runResearch` — the testable orchestration (no server); injected seams |
+| `llm.ts` | the chat seam: overload vs upstream-DOWN retry budgets, the process-wide model-down latch, the probe (`llm.test.ts`) |
+| `jobs.ts` | job queue: caller deadlines, cancel, model-down pause, the Dispatcher (`jobs.test.ts`; real SQL in `failfast.e2e.test.ts`) |
 | `kb.ts` | DB-backed claim retrieval + source staging (integration-tested) |
 | `lib.ts` | pure helpers: HTML→text, OD-5 reuse decision, OD-6 backstop, citations |
 | `lib.test.ts` | 9 pure-logic unit tests (`deno test --allow-net lib.test.ts`) |
@@ -36,16 +38,49 @@ Async job + poll (OD-3). All endpoints except `/health` require `x-brain-key`.
 ```
 POST /research
   body:  { "query": "...", "origin": "owui|agent|notebook", "thread_id"?: "<uuid>",
+           "deadline_at"?: "<ISO-8601 | epoch ms>",
            "options"?: { "confidence_floor"?: 0.5 } }
-  -> 202 { "job_id": "<uuid>", "status": "queued" }
+  -> 202 { "job_id": "<uuid>", "status": "queued", "deadline_at"?: "<ISO>" }
+  -> 400 on an unparseable deadline_at
 
 GET  /research/jobs/:id
-  -> { id, status: queued|running|done|error, progress:{phase,message}, result, metrics, error }
+  -> { id, status: queued|running|done|error|cancelled, progress:{phase,message,code?}, result, metrics, error,
+       model: { state: up|down, since, reason, last_check } }
      result: { synthesis, needs[], gaps[], cited_sources[], reuse_claims[], thread_id, reuse_ratio, backstop }
 
+POST /research/jobs/:id/cancel   body? { "reason": "..." }
+  -> 200 { status: "cancelled" }   (was queued: it will never run)
+  -> 202 { status: "cancelling" }  (was running: aborted at once, ends `cancelled`)
+  -> 200 { status: <terminal>, note: "already terminal" } | 404
+
 GET  /research/jobs/:id/stream   -> SSE: one `data:` event per poll until terminal
-GET  /health                     -> { ok, db }
+GET  /health                     -> { ok, db, model }   (`ok` is DB-only)
 ```
+
+### Deadlines, cancel, and the model-down signal (2026-10-13)
+
+- **Caller deadline.** A job still `queued` past `deadline_at` is never started: it
+  ends `cancelled`, `progress.code = "deadline"`. A job still `running` at it is
+  aborted (in-flight model request included) and ends the same way.
+- **Upstream down is not backpressure.** A 500/502/503 whose body says the model
+  upstream is unreachable (name resolution, connection refused, `upstream_error`), or
+  an unreachable gateway, gets `CHAT_DOWN_BUDGET_MS` (3 min), not the 25-minute
+  `CHAT_RETRY_BUDGET_MS` that 429/503/504 keep. Fail-open classifiers
+  (`detectInjection`, `isRelevant`) do not retry it at all. Every attempt is bounded
+  by `CHAT_FETCH_TIMEOUT_MS` (45 min).
+- **Model down = PAUSE.** After that budget a process-wide latch is set: every later
+  call fails at once, the job is requeued (`status: "queued"`,
+  `progress.code = "model_down"`), and nothing is claimed while it holds. One probe
+  (`RESEARCH_MODEL_PROBE_MS`, 60 s; bounded by `RESEARCH_MODEL_PROBE_TIMEOUT_MS`)
+  re-checks the model; on success the queue resumes FIFO at the normal concurrency.
+  A job paused more than `RESEARCH_MAX_MODEL_DOWN_REQUEUES` (6) times ends `error`,
+  `error` starting `model_down:`. A paused job whose deadline passes ends `cancelled`
+  with `progress.model_down = true`. A job is never filed from a run the model went
+  down under.
+- **How a caller reads it:** `isModelDown(job)` in
+  `recipes/daily-digest/src/enrich/research-client.ts` (any of: `progress.code ===
+  "model_down"`, `progress.model_down === true`, `model.state === "down"`, `error`
+  starting `model_down:`).
 
 ## Inlets
 

@@ -7,6 +7,7 @@
  *   POST /research                -> {job_id}            (x-brain-key)
  *   GET  /research/jobs/:id        -> job status+result   (x-brain-key)
  *   GET  /research/jobs/:id/stream -> SSE progress        (x-brain-key)
+ *   POST /research/jobs/:id/cancel -> cancel a queued/running job (x-brain-key)
  *   GET  /health                   -> {ok, db}            (unauthenticated)
  *
  * See harness.ts / GROUNDING-MODEL.md for the grounding guarantees.
@@ -27,6 +28,8 @@ import { runResearch, type Deps, type SearchHit, type Page, type Progress, type 
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
 import { resolveContract, permitsUrl, permitsQuery, type ResolvedContract } from "./contract.ts";
+import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
+import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, type ClaimedJob } from "./jobs.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const DB_HOST = env("DB_HOST", "openbrain-db");
@@ -61,6 +64,22 @@ const QUEUE_USER_BY_ORIGIN: Record<string, string> = { notebook: RESEARCH_QUEUE_
 // the whole research job. The research fan-out is allowed to take hours, so ride
 // out saturation with capped exponential backoff for up to this budget per call.
 const CHAT_RETRY_BUDGET_MS = parseInt(env("CHAT_RETRY_BUDGET_MS", "1500000"), 10); // 25 min
+// ...but an upstream that is DOWN (a 502 naming name resolution / connection
+// refused / upstream_error, or the gateway unreachable) is not backpressure:
+// 2026-10-13 spent 25 min per call x 3 calls per job x every job on it. A down
+// upstream gets this short budget, then the process-wide latch (llm.ts) fails
+// every later call at once and PAUSES jobs until a probe sees the model back.
+const CHAT_DOWN_BUDGET_MS = parseInt(env("CHAT_DOWN_BUDGET_MS", "180000"), 10); // 3 min
+// Per-attempt bound on a chat request (a stalled connection must not hang a job
+// forever). Above LiteLLM's worst case (request_timeout 600 s x 4 tries) so it
+// never cuts a request the gateway is still honouring.
+const CHAT_FETCH_TIMEOUT_MS = parseInt(env("CHAT_FETCH_TIMEOUT_MS", "2700000"), 10); // 45 min
+// While the model is down: one probe at most this often, each bounded (a cold
+// model load after a restart can take minutes).
+const MODEL_PROBE_INTERVAL_MS = parseInt(env("RESEARCH_MODEL_PROBE_MS", "60000"), 10);
+const MODEL_PROBE_TIMEOUT_MS = parseInt(env("RESEARCH_MODEL_PROBE_TIMEOUT_MS", "600000"), 10);
+// A job paused for model_down more than this many times ends `error`.
+const MAX_MODEL_DOWN_REQUEUES = parseInt(env("RESEARCH_MAX_MODEL_DOWN_REQUEUES", "6"), 10);
 
 const MCP_ACCESS_KEY = env("MCP_ACCESS_KEY");
 // Open WebUI async completion callback. A research job outlives the tool call
@@ -124,7 +143,7 @@ const PORT = parseInt(env("PORT", "8000"), 10);
 // flight, so a burst of research requests can't flood LiteLLM / the llm-queue
 // admission controller and delay all chat traffic. Raise only if the inference
 // plane can absorb concurrent research fan-out. Jobs queue (FIFO by created_at)
-// and a background drain loop dispatches them; see drainLoop() below.
+// and the background Dispatcher (jobs.ts) dispatches them; see below.
 const MAX_CONCURRENCY = Math.max(1, parseInt(env("RESEARCH_MAX_CONCURRENCY", "1"), 10) || 1);
 
 // Privacy: page fetches egress through the configured proxy (compose points
@@ -269,59 +288,17 @@ async function embed(text: string): Promise<number[]> {
   throw new Error("embedding failed after shrinking");
 }
 
-async function chat(
-  system: string,
-  user: string,
-  opts: { json?: boolean; nothink?: boolean } = {},
-  queueUser = "",
-): Promise<string> {
-  const model = opts.nothink ? `${CHAT_MODEL}${NOTHINK_SUFFIX}` : CHAT_MODEL;
-  const body = JSON.stringify({
-    model, temperature: 0.2,
-    ...(queueUser ? { user: queueUser } : {}),
-    ...(opts.json ? { response_format: { type: "json_object" } } : {}),
-    messages: [{ role: "system", content: system }, { role: "user", content: user }],
-  });
-  const deadline = Date.now() + CHAT_RETRY_BUDGET_MS;
-  for (let attempt = 0; ; attempt++) {
-    let r: Response;
-    try {
-      r = await fetch(`${CHAT_API_BASE}/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${CHAT_API_KEY}`, "Content-Type": "application/json" },
-        body,
-      });
-    } catch (e) {
-      // Connection reset / network blip — transient. Ride it out within budget.
-      if (Date.now() >= deadline) throw e;
-      await sleep(backoffMs(attempt));
-      continue;
-    }
-    if (r.ok) {
-      const d = await r.json();
-      return d?.choices?.[0]?.message?.content ?? "";
-    }
-    const text = (await r.text()).slice(0, 300);
-    // 429 = llm-queue backpressure; 502/503/504 = upstream swap/restart blips.
-    // All are "come back later", not genuine errors — retry within budget. A
-    // real 4xx (400/401/422) or 500 surfaces immediately.
-    const retryable = r.status === 429 || r.status === 502 || r.status === 503 || r.status === 504;
-    if (retryable && Date.now() < deadline) {
-      console.log(`chat ${r.status} (backpressure); retry in ${Math.round(backoffMs(attempt) / 1000)}s [attempt ${attempt + 1}]`);
-      await sleep(backoffMs(attempt));
-      continue;
-    }
-    throw new Error(`chat ${r.status}: ${text}`);
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-// Capped exponential backoff with jitter: ~10s, 15s, 22s … cap 90s.
-function backoffMs(attempt: number): number {
-  const base = Math.min(90_000, 10_000 * Math.pow(1.5, attempt));
-  return Math.floor(base * (0.75 + Math.random() * 0.5));
+// The chat seam + model-down latch live in llm.ts (tested there against a stub
+// gateway). One ModelHealth per process: it is what pauses the queue.
+const modelHealth = new ModelHealth();
+const llm = createChat({
+  base: CHAT_API_BASE, apiKey: CHAT_API_KEY, model: CHAT_MODEL, nothinkSuffix: NOTHINK_SUFFIX,
+  retryBudgetMs: CHAT_RETRY_BUDGET_MS, downBudgetMs: CHAT_DOWN_BUDGET_MS,
+  fetchTimeoutMs: CHAT_FETCH_TIMEOUT_MS, probeTimeoutMs: MODEL_PROBE_TIMEOUT_MS,
+  health: modelHealth,
+});
+function chat(system: string, user: string, opts: ChatOpts = {}, queueUser = ""): Promise<string> {
+  return llm.chat(system, user, opts, queueUser);
 }
 
 async function searchWeb(query: string, k: number): Promise<SearchHit[]> {
@@ -645,13 +622,40 @@ function notSavedBanner(jobId: string, reason: string): string {
   ].join("\n");
 }
 
-// A job claimed by the drain loop: it has already been flipped to status='running'
-// (started_at set) by the atomic claim, so executeJob only runs the harness and
-// persists the terminal state — it never re-claims.
-type ClaimedJob = { jobId: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown> };
+// Per-job seams: every call honours the job's abort signal (cancel / caller
+// deadline), and a call that hit the model-down latch is remembered so the job is
+// PAUSED instead of finishing on fail-open / skipped-step output. Filing to the
+// curator is refused once either happened: nothing degraded is ever stored.
+function jobSeams(base: Deps, signal: AbortSignal, state: { modelDown: ModelDownError | null }): Deps {
+  const guard = () => {
+    if (signal.aborted) throw signal.reason ?? new JobCancelled("aborted", "cancel_requested");
+    if (state.modelDown) throw state.modelDown;
+  };
+  return {
+    embed: (t) => { guard(); return base.embed(t); },
+    chat: async (s, u, o) => {
+      if (signal.aborted) throw signal.reason ?? new JobCancelled("aborted", "cancel_requested");
+      try {
+        return await (base.chat as (s: string, u: string, o?: ChatOpts) => Promise<string>)(s, u, { ...(o ?? {}), signal });
+      } catch (e) {
+        // A failFast classifier seeing ONE down answer is not a confirmed outage
+        // (it fails open, as designed); a latched/budget-exhausted one is.
+        if (isModelDownError(e) && (e as ModelDownError).latched) state.modelDown ??= e as ModelDownError;
+        throw e;
+      }
+    },
+    searchWeb: (q, k) => { guard(); return base.searchWeb(q, k); },
+    fetchPage: (u) => { guard(); return base.fetchPage(u); },
+    delegateToCurator: (pkg) => { guard(); return base.delegateToCurator(pkg); },
+  };
+}
 
-async function executeJob(job: ClaimedJob): Promise<void> {
+// A job claimed by the dispatcher: it has already been flipped to status='running'
+// (started_at set) by the atomic claim, so executeJob only runs the harness and
+// persists the terminal (or paused) state — it never re-claims.
+async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
   const { jobId, query, thread_id, origin, options } = job;
+  const seamState: { modelDown: ModelDownError | null } = { modelDown: null };
   // Conservative: measured from CLAIM, not submit, so a job that queued first
   // only ever waits longer than it needs to. See CALLBACK_MIN_AGE_MS.
   const claimedAt = Date.now();
@@ -683,9 +687,9 @@ async function executeJob(job: ClaimedJob): Promise<void> {
     // generous `ob-research` budget; OWUI/agent/manual keep the default lane (their
     // own tuning). All origins still get chat()'s 429 backpressure retry.
     const queueUser = QUEUE_USER_BY_ORIGIN[origin] ?? "";
-    const baseDeps: Deps = queueUser
+    const baseDeps: Deps = jobSeams(queueUser
       ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
-      : realDeps;
+      : realDeps, signal, seamState);
     // Contract enforcement wraps searchWeb/fetchPage (no gather-loop change).
     const jobDeps: Deps = contract ? withContract(baseDeps, contract) : baseDeps;
     const res = await runResearch(jobDeps, client, query, {
@@ -699,6 +703,11 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       dryRun: options?.dry_run === true,
       contract: contract ?? undefined,
     }, progress);
+    // The harness swallows some step failures (fail-open classifiers, skeptic,
+    // prose render). If the job was cancelled or the model went down under it,
+    // what came back is degraded: pause / cancel it instead of recording it done.
+    if (signal.aborted) throw signal.reason ?? new JobCancelled("aborted", "cancel_requested");
+    if (seamState.modelDown) throw seamState.modelDown;
     // Render the chat-facing markdown ONCE, here, and persist it on the job. Both
     // readers (the async callback below, and the tool's synchronous path) return
     // this same string — see lib.ts renderResult for why it moved server-side.
@@ -781,7 +790,33 @@ async function executeJob(job: ClaimedJob): Promise<void> {
       outcome.status === "error" ? notSavedBanner(jobId, outcome.reason ?? "unknown error") + rendered : rendered,
       jobId,
     );
-  } catch (e) {
+  } catch (e0) {
+    let e = e0;
+    // Cancelled (caller request or deadline): a terminal status the caller reads.
+    if (signal.aborted || e instanceof JobCancelled) {
+      const c = signal.reason instanceof JobCancelled ? signal.reason : e instanceof JobCancelled ? e : null;
+      const reason = c?.reason ?? "aborted";
+      await markCancelled(client, jobId, reason, c?.code ?? "cancel_requested").catch(() => {});
+      console.log(`[job ${jobId}] cancelled: ${reason}`);
+      await notifyChat(options?.callback, `\n\n> Deep research job \`${jobId}\` was CANCELLED: ${reason}. Nothing was stored.`, jobId).catch(() => {});
+      return;
+    }
+    // Model down: PAUSE (requeue) — the dispatcher re-checks the model and
+    // re-runs it from the top; nothing was filed (jobSeams refuses filing).
+    if (isModelDownError(e) || seamState.modelDown) {
+      const md = seamState.modelDown ?? (e as ModelDownError);
+      if (!modelHealth.isDown) modelHealth.markDown(md.reason, Date.now());
+      const since = modelHealth.downSince === null ? null : new Date(modelHealth.downSince).toISOString();
+      const outcome = await pauseForModelDown(client, job, md.reason, since, MAX_MODEL_DOWN_REQUEUES, Date.now())
+        .catch((pe) => { console.error(`[job ${jobId}] pause failed: ${(pe as Error).message}`); return "failed" as const; });
+      console.log(`[job ${jobId}] model down -> ${outcome}`);
+      if (outcome === "paused") return;
+      if (outcome !== "failed") {
+        await notifyChat(options?.callback, `\n\n> \u26a0 Deep research job \`${jobId}\` stopped: the model is unreachable (${md.reason}). Nothing was stored.`, jobId).catch(() => {});
+        return;
+      }
+      e = new Error(`model_down: ${md.reason}`);
+    }
     const failure = String((e as Error).message);
     await client.queryObject(
       `UPDATE research_jobs SET status='error', finished_at=now(), error=$2 WHERE id=$1`,
@@ -810,58 +845,30 @@ async function executeJob(job: ClaimedJob): Promise<void> {
   }
 }
 
-// ── Drain loop: serialize queued jobs, bounded by MAX_CONCURRENCY ────────────
-// POST /research only enqueues (status='queued'); this single background loop is
-// the sole dispatcher. It claims the oldest queued job FIFO with FOR UPDATE SKIP
-// LOCKED (atomic even if MAX_CONCURRENCY>1 claims overlap), runs it, and on
-// completion frees the slot. With the default MAX_CONCURRENCY=1 this is strict
-// global serialization — exactly one research fan-out hits the inference plane at
-// a time. wake() nudges the loop the instant a job arrives or finishes; a 2s
-// safety poll backstops any missed wake.
-let _wake: (() => void) | null = null;
-function wake(): void { _wake?.(); }
-function waitForWake(timeoutMs: number): Promise<void> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => { if (settled) return; settled = true; _wake = null; clearTimeout(t); resolve(); };
-    const t = setTimeout(finish, timeoutMs);
-    _wake = finish;
-  });
-}
-
-async function claimNext(): Promise<ClaimedJob | null> {
-  const c = await pool.connect();
-  try {
-    const r = await c.queryObject<{ id: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown> }>(
-      `UPDATE research_jobs SET status='running', started_at=now()
-       WHERE id = (SELECT id FROM research_jobs WHERE status='queued'
-                   ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-       RETURNING id, query, thread_id, origin, options`,
-    );
-    if (!r.rows.length) return null;
-    const row = r.rows[0];
-    return { jobId: row.id, query: row.query, thread_id: row.thread_id, origin: row.origin, options: row.options };
-  } finally { c.release(); }
-}
-
-async function drainLoop(): Promise<void> {
-  let inFlight = 0;
-  while (true) {
-    // Fill every free slot with the next queued job.
-    while (inFlight < MAX_CONCURRENCY) {
-      let job: ClaimedJob | null = null;
-      try { job = await claimNext(); }
-      catch (e) { console.error("claimNext failed:", (e as Error).message); break; }
-      if (!job) break; // queue empty
-      inFlight++;
-      executeJob(job)
-        .catch((e) => console.error("executeJob failed:", (e as Error).message))
-        .finally(() => { inFlight--; wake(); });
+// ── Dispatcher: serialize queued jobs, bounded by MAX_CONCURRENCY ───────────
+// POST /research only enqueues (status='queued'); the Dispatcher (jobs.ts) is the
+// sole dispatcher. Each tick it cancels queued jobs past their caller deadline,
+// claims nothing while the model is down (one bounded probe per interval
+// instead), and otherwise claims the oldest queued job FIFO with FOR UPDATE SKIP
+// LOCKED. With the default MAX_CONCURRENCY=1 this is strict global serialization
+// — exactly one research fan-out hits the inference plane at a time. wake()
+// nudges it the instant a job arrives or finishes; a 2s safety poll backstops.
+const dispatcher = new Dispatcher({
+  connect: () => pool.connect(),
+  execute: executeJob,
+  health: modelHealth,
+  probe: () => llm.probe(RESEARCH_QUEUE_USER),
+  maxConcurrency: MAX_CONCURRENCY,
+  probeIntervalMs: MODEL_PROBE_INTERVAL_MS,
+  onExpired: (rows) => {
+    for (const r of rows) {
+      void notifyChat(r.options?.callback,
+        `\n\n> Deep research job \`${r.id}\` was CANCELLED: its deadline passed before it ran. Nothing was stored.`,
+        r.id).catch(() => {});
     }
-    // Slots full or queue drained — sleep until a job arrives/finishes (or poll).
-    await waitForWake(2000);
-  }
-}
+  },
+});
+function wake(): void { dispatcher.wake(); }
 
 // On boot, any row still 'running' was orphaned by a restart/crash (its in-process
 // task is gone) and would hang 'running' forever — fixing a latent bug in the old
@@ -888,7 +895,9 @@ Deno.serve({ port: PORT }, async (req) => {
   if (req.method === "GET" && url.pathname === "/health") {
     let db = false;
     try { const c = await pool.connect(); try { await c.queryArray("SELECT 1"); db = true; } finally { c.release(); } } catch { /* */ }
-    return Response.json({ ok: db, db, service: "openbrain-research" }, { status: db ? 200 : 503 });
+    // `model` is informational (the model-down latch); `ok` stays DB-only so a
+    // model outage does not make the container look unhealthy and get restarted.
+    return Response.json({ ok: db, db, service: "openbrain-research", model: modelHealth.snapshot() }, { status: db ? 200 : 503 });
   }
 
   // REPO-SOURCES-WIRING RS.1: ingest an onboarded repo's docs + structural manifests as
@@ -901,6 +910,13 @@ Deno.serve({ port: PORT }, async (req) => {
     const parsed = parseOwnerRepo(body.repo_url || "");
     if (!parsed) return Response.json({ error: "repo_url required (github.com/<owner>/<repo>)" }, { status: 400 });
     const { owner, repo } = parsed;
+    // Every synced file is injection-screened by the model. With the model down
+    // the screen would fail OPEN on every file (and now does so at once), so
+    // refuse instead of staging third-party text unscreened.
+    if (modelHealth.isDown) {
+      return Response.json({ ok: false, error: `model_down: ${modelHealth.reason}`.slice(0, 200), model: modelHealth.snapshot() },
+                           { status: 503 });
+    }
     try {
       const sha = await resolveRepoSha(owner, repo, (body.ref || "").trim());
       const explicit = Array.isArray(body.files) ? body.files.map(String).filter(Boolean) : [];
@@ -970,10 +986,21 @@ Deno.serve({ port: PORT }, async (req) => {
       seed_sources?: Array<{ url?: string; title?: string; content?: string }>;
       disable_web_search?: boolean; sources_only?: boolean; mode?: string; dry_run?: boolean; gap_research?: string;
       callback?: { chat_id?: string; message_id?: string };
+      deadline_at?: string | number;
     };
     try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const query = (body.query || "").trim();
     if (!query) return Response.json({ error: "query required" }, { status: 400 });
+    // Caller deadline (top-level or options.deadline_at; ISO or epoch ms). A
+    // queued job past it is never started and ends `cancelled`; a running one is
+    // aborted. Normalised to one ISO shape; garbage is refused, never stored.
+    let deadlineAt: string | undefined;
+    try {
+      deadlineAt = parseDeadline(body.deadline_at ?? (body.options as Record<string, unknown> | undefined)?.deadline_at);
+    } catch (e) {
+      if (e instanceof DeadlineError) return Response.json({ error: e.message }, { status: 400 });
+      throw e;
+    }
     // Seed sources + flags ride in the options jsonb (no schema change). Normalize
     // seeds to {url,title,content}; drop empties.
     const seeds = Array.isArray(body.seed_sources)
@@ -987,8 +1014,12 @@ Deno.serve({ port: PORT }, async (req) => {
     const cbChat = String(body.callback?.chat_id || "").trim();
     const cbMessage = String(body.callback?.message_id || "").trim();
     const callback = cbChat && cbMessage ? { chat_id: cbChat, message_id: cbMessage } : null;
+    // deadline_at is re-added normalised; model_down_requeues is engine-owned.
+    const { deadline_at: _dl, model_down_requeues: _mdr, ...callerOptions } = (body.options || {}) as Record<string, unknown>;
+    void _dl; void _mdr;
     const options = {
-      ...(body.options || {}),
+      ...callerOptions,
+      ...(deadlineAt ? { deadline_at: deadlineAt } : {}),
       ...(callback ? { callback } : {}),
       ...(seeds.length ? { seed_sources: seeds } : {}),
       ...(body.disable_web_search === true ? { disable_web_search: true } : {}),
@@ -1017,6 +1048,7 @@ Deno.serve({ port: PORT }, async (req) => {
     return Response.json({
       job_id: jobId,
       status: "queued",
+      ...(deadlineAt ? { deadline_at: deadlineAt } : {}),
       callback_armed: Boolean(callback && OWUI_BASE_URL && OWUI_API_KEY),
     }, { status: 202 });
   }
@@ -1042,6 +1074,34 @@ Deno.serve({ port: PORT }, async (req) => {
         [limit, statusFilter],
       );
       return Response.json({ jobs: r.rows });
+    } finally { c.release(); }
+  }
+
+  // Cancel: a queued job ends `cancelled` at once; a running one is aborted (its
+  // in-flight LLM request too) and ends `cancelled` within moments. A terminal
+  // job is left as it is. The caller reads the outcome from GET /research/jobs/:id.
+  const cancelMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})\/cancel$/i);
+  if (req.method === "POST" && cancelMatch) {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const id = cancelMatch[1];
+    let reason = "cancel requested by the caller";
+    try {
+      const b = await req.json() as { reason?: unknown };
+      if (typeof b?.reason === "string" && b.reason.trim()) reason = b.reason.trim().slice(0, 200);
+    } catch { /* no body is fine */ }
+    const c = await pool.connect();
+    try {
+      if (await cancelQueued(c, id, reason)) {
+        console.log(`[job ${id}] cancelled while queued: ${reason}`);
+        return Response.json({ job_id: id, status: "cancelled" });
+      }
+      const st = await jobStatus(c, id);
+      if (st === null) return Response.json({ error: "not found" }, { status: 404 });
+      if (st === "running") {
+        dispatcher.cancelRunning(id, reason);
+        return Response.json({ job_id: id, status: "cancelling" }, { status: 202 });
+      }
+      return Response.json({ job_id: id, status: st, note: "already terminal" });
     } finally { c.release(); }
   }
 
@@ -1087,7 +1147,9 @@ Deno.serve({ port: PORT }, async (req) => {
     };
     if (!stream) {
       const job = await getJob();
-      return job ? Response.json(job) : Response.json({ error: "not found" }, { status: 404 });
+      // `model` = the process-wide model-down latch, so a caller can tell "queued
+      // behind other work" from "paused because the model is unreachable".
+      return job ? Response.json({ ...job, model: modelHealth.snapshot() }) : Response.json({ error: "not found" }, { status: 404 });
     }
     const body = new ReadableStream({
       async start(ctrl) {
@@ -1112,4 +1174,4 @@ console.log(`openbrain-research listening on :${PORT} (curator=${CURATOR_URL}, s
 
 // Requeue any jobs orphaned by a restart, then start the single background
 // dispatcher. This is the ONLY thing that runs queued jobs.
-void recoverOrphanedJobs().then(() => { void drainLoop(); });
+void recoverOrphanedJobs().then(() => { void dispatcher.run(); });
