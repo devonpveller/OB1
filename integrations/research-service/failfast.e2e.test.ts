@@ -21,6 +21,7 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { Pool } from "postgres";
 import { REAL_DOWN_502 } from "./fixtures/upstream-down.ts";
+import { GATEWAY_BODIES } from "./fixtures/gateway-bodies.ts";
 
 const DB_HOST = Deno.env.get("RESEARCH_E2E_DB_HOST") ?? "";
 const DB_PORT = Deno.env.get("RESEARCH_E2E_DB_PORT") ?? "5432";
@@ -38,11 +39,16 @@ async function sql<T>(q: string, args: unknown[] = []): Promise<T[]> {
   try { return (await c.queryObject<T>(q, args)).rows; } finally { c.release(); }
 }
 
-type GwMode = "down" | "up" | "429" | "block" | "down-after-synthesis";
+type GwMode = "down" | "up" | "429" | "block" | "down-after-synthesis" | "body";
 
-function stubGateway(initial: GwMode) {
+/** blockAt: block only the n-th model request (1-based) until release.
+ *  downFirst: answer the first n model requests with the real down 502.
+ *  body: in mode "body", answer every model request with {status, body}. */
+function stubGateway(initial: GwMode, o: { blockAt?: number; downFirst?: number; body?: { status: number; body: string } } = {}) {
   let mode: GwMode = initial;
   let chats = 0, inFlight = 0, maxInFlight = 0, blocked = 0, synthServed = false;
+  let downFirst = o.downFirst ?? 0;
+  const kinds: string[] = [];
   let release: () => void = () => {};
   let gate = new Promise<void>((r) => { release = r; });
   const ac = new AbortController();
@@ -54,22 +60,29 @@ function stubGateway(initial: GwMode) {
       return Response.json({ data: [{ embedding: v }] });
     }
     chats++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    const sys = String(body?.messages?.[0]?.content ?? "");
+    const kind = body?.max_tokens === 1 ? "probe" : sys.includes("INJECTION or CLEAN") ? "inj" : sys.includes("RELEVANT or IRRELEVANT") ? "rel" : sys.includes("grounded synthesizer") ? "synth" : "other";
+    const n = chats;
+    let status = 200;
     try {
-      if (mode === "block") { blocked++; await gate; }
+      if (mode === "block" || o.blockAt === n) { blocked++; await gate; }
+      if (downFirst > 0 && kind !== "probe") { downFirst--; status = 502; return new Response(REAL_DOWN_502, { status: 502, headers: { "content-type": "application/json" } }); }
       if (mode === "down-after-synthesis" && synthServed) mode = "down";
-      if (mode === "down") return new Response(REAL_DOWN_502, { status: 502, headers: { "content-type": "application/json" } });
-      if (mode === "429") return new Response(`{"error":{"message":"llm-queue: projected wait exceeds budget"}}`, { status: 429 });
-      const sys = String(body?.messages?.[0]?.content ?? "");
+      if (mode === "down") { status = 502; return new Response(REAL_DOWN_502, { status: 502, headers: { "content-type": "application/json" } }); }
+      if (mode === "body" && o.body) { status = o.body.status; return new Response(o.body.body, { status: o.body.status, headers: { "content-type": "application/json" } }); }
+      if (mode === "429") { status = 429; return new Response(`{"error":{"message":"llm-queue: projected wait exceeds budget"}}`, { status: 429 }); }
       if (sys.includes("grounded synthesizer")) synthServed = true;
       let content = "[SOURCED] The article explains how to prepare garden soil. [Source 1]";
       if (sys.includes("INJECTION or CLEAN")) content = "CLEAN";
       else if (sys.includes("RELEVANT or IRRELEVANT")) content = "RELEVANT";
       else if (body?.response_format) content = "{}";
       return Response.json({ choices: [{ message: { content } }] });
-    } finally { inFlight--; }
+    } finally { inFlight--; kinds.push(`${kind}:${status}`); }
   });
   return {
     base: `http://127.0.0.1:${server.addr.port}/v1`,
+    kinds,
+    release() { release(); gate = new Promise<void>((r) => { release = r; }); },
     get chats() { return chats; },
     get maxInFlight() { return maxInFlight; },
     get blocked() { return blocked; },
@@ -82,15 +95,22 @@ function stubGateway(initial: GwMode) {
   };
 }
 
-function stubCurator() {
+/** block: hold every filing until release() - the window a cancel must not lie about. */
+function stubCurator(o: { block?: boolean } = {}) {
   let calls = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
   const ac = new AbortController();
   const server = Deno.serve({ port: 0, hostname: "127.0.0.1", signal: ac.signal, onListen: () => {} }, async (req) => {
     calls++;
     await req.text();
-    return Response.json({ thread_id: null, persist: { sources_written: 0 }, claims: { claimsWritten: 0 } });
+    if (o.block) await gate;
+    return Response.json({ thread_id: null, persist: { sources_written: 1 }, claims: { claimsWritten: 1 } });
   });
-  return { url: `http://127.0.0.1:${server.addr.port}`, get calls() { return calls; }, async close() { ac.abort(); await server.finished; } };
+  return {
+    url: `http://127.0.0.1:${server.addr.port}`, get calls() { return calls; }, release: () => release(),
+    async close() { release(); ac.abort(); await server.finished; },
+  };
 }
 
 function freePort(): number {
@@ -100,7 +120,7 @@ function freePort(): number {
   return p;
 }
 
-async function startService(gw: { base: string }, curatorUrl: string) {
+async function startService(gw: { base: string }, curatorUrl: string, extraEnv: Record<string, string> = {}) {
   // Nothing a previous test left behind may be drained by this one.
   await sql(`UPDATE research_jobs SET status='cancelled', finished_at=now(), error='e2e cleanup' WHERE status IN ('queued','running')`);
   const port = freePort();
@@ -115,6 +135,7 @@ async function startService(gw: { base: string }, curatorUrl: string) {
       // production defaults (25-min retry budget), which is the point of RED.
       CHAT_DOWN_BUDGET_MS: "4000", RESEARCH_MODEL_PROBE_MS: "1000", RESEARCH_MODEL_PROBE_TIMEOUT_MS: "3000",
       NO_COLOR: "1",
+      ...extraEnv,
     },
     stdout: "piped", stderr: "piped",
   }).spawn();
@@ -171,10 +192,14 @@ async function until<T>(what: string, fn: () => Promise<T | null | undefined | f
   throw new Error(`timed out after ${ms}ms waiting for: ${what}${svc ? `\n--- service log (tail) ---\n${svc.log.slice(-2500)}` : ""}`);
 }
 
-async function withStack(mode: GwMode, fn: (s: { gw: ReturnType<typeof stubGateway>; svc: Awaited<ReturnType<typeof startService>>; cur: ReturnType<typeof stubCurator> }) => Promise<void>) {
-  const gw = stubGateway(mode);
-  const cur = stubCurator();
-  const svc = await startService(gw, cur.url);
+type Stack = { gw: ReturnType<typeof stubGateway>; svc: Awaited<ReturnType<typeof startService>>; cur: ReturnType<typeof stubCurator> };
+async function withStack(
+  mode: GwMode, fn: (s: Stack) => Promise<void>,
+  o: { gw?: Parameters<typeof stubGateway>[1]; curator?: Parameters<typeof stubCurator>[0]; env?: Record<string, string> } = {},
+) {
+  const gw = stubGateway(mode, o.gw);
+  const cur = stubCurator(o.curator);
+  const svc = await startService(gw, cur.url, o.env);
   try { await fn({ gw, svc, cur }); }
   finally { await svc.stop(); await gw.close(); await cur.close(); }
 }
@@ -287,7 +312,14 @@ Deno.test({ name: "E6 a garbage deadline_at is refused (400), never stored where
     assertEquals(r1.status, 400);
     const r2 = await submit(svc.base, { options: { deadline_at: "2026-99-99" } });
     assertEquals(r2.status, 400);
-    const ok = await submit(svc.base, { deadline_at: Date.now() + 3_600_000 });
+    // Numbers are refused: epoch SECONDS read as ms would be a silent 1970 deadline.
+    const r3 = await submit(svc.base, { deadline_at: Math.floor(Date.now() / 1000) + 3600 });
+    assertEquals(r3.status, 400);
+    const r4 = await submit(svc.base, { deadline_at: Date.now() + 3_600_000 });
+    assertEquals(r4.status, 400);
+    const r5 = await submit(svc.base, { deadline_at: "2099-01-01T00:00:00" }); // no zone
+    assertEquals(r5.status, 400);
+    const ok = await submit(svc.base, { deadline_at: new Date(Date.now() + 3_600_000).toISOString() });
     assertEquals(ok.status, 202);
     await until("the valid job runs to done", async () => (await row(ok.job_id!)).status === "done", 60_000, svc);
   });
@@ -303,4 +335,156 @@ Deno.test({ name: "E7 model goes down AFTER the synthesis (prose render fails op
     assertEquals([r.status, r.progress?.code], ["queued", "model_down"], `degraded run must pause, got ${r.status}`);
     assertEquals(cur.calls, 0, "the degraded run was not filed to the curator");
   });
+}});
+
+// ── Round 2 ──────────────────────────────────────────────────────────────────
+
+const TERMINAL = ["done", "error", "cancelled"];
+const terminal = (id: string, svc: { log: string }, ms = 60_000) =>
+  until("terminal", async () => { const x = await row(id); return TERMINAL.includes(x.status) ? x : null; }, ms, svc);
+async function cancel(base: string, id: string) {
+  const r = await fetch(`${base}/research/jobs/${id}/cancel`, { method: "POST", headers: { "x-brain-key": KEY } });
+  return { status: r.status, body: await r.json() };
+}
+async function resultOf(id: string) {
+  return (await sql<{ result: Record<string, unknown> | null }>(`SELECT result FROM research_jobs WHERE id=$1`, [id]))[0].result;
+}
+
+/** How many model calls a filed (non-dry) article job makes, measured, not assumed. */
+async function modelCallsPerJob(): Promise<string[]> {
+  let kinds: string[] = [];
+  await withStack("up", async ({ gw, svc }) => {
+    const { job_id } = await submit(svc.base, { dry_run: false });
+    const r = await terminal(job_id!, svc);
+    assertEquals(r.status, "done");
+    kinds = gw.kinds.filter((k) => !k.startsWith("probe"));
+  });
+  return kinds;
+}
+
+Deno.test({ name: "E8 every real down body (captured through llm-queue + LiteLLM) pauses the job; ambiguous bodies keep riding it out", ...opts, fn: async () => {
+  for (const g of GATEWAY_BODIES.filter((x) => x.expect !== "fatal")) {
+    await withStack("body", async ({ svc }) => {
+      const { job_id } = await submit(svc.base);
+      if (g.expect === "down") {
+        const j = await until(`${g.mode}: paused`, async () => {
+          const x = await getJob(svc.base, job_id!);
+          return x.progress?.code === "model_down" ? x : null;
+        }, 45_000, svc);
+        assertEquals(j.model?.state, "down", g.mode);
+        assert(/^[a-z_]+$/.test(String(j.model?.reason)), `model.reason is a fixed code: ${j.model?.reason}`);
+      } else {
+        await sleep(15_000);
+        const x = await getJob(svc.base, job_id!);
+        assertEquals(x.status, "running", `${g.mode}: still riding it out`);
+        assert(x.progress?.code !== "model_down" && x.model?.state !== "down", g.mode);
+      }
+    }, { gw: { body: { status: g.status, body: g.body } } });
+  }
+}});
+
+Deno.test({ name: "E9 cancel at EVERY model call of a filed article job: ends cancelled, nothing filed, no result", ...opts, fn: async () => {
+  const calls = await modelCallsPerJob();
+  console.log(`model calls per filed article job: ${calls.join(", ")}`);
+  assert(calls.length >= 3, "inj + rel + synthesis at least");
+  for (let k = 1; k <= calls.length; k++) {
+    await withStack("up", async ({ gw, svc, cur }) => {
+      const { job_id } = await submit(svc.base, { dry_run: false });
+      await until(`blocked in model call ${k}`, () => Promise.resolve(gw.blocked > 0), 30_000, svc);
+      const c = await cancel(svc.base, job_id!);
+      assertEquals([c.status, c.body.status], [202, "cancelling"], `call ${k}`);
+      gw.release();
+      const r = await terminal(job_id!, svc, 30_000);
+      assertEquals(r.status, "cancelled", `call ${k} (${calls[k - 1]})`);
+      assertEquals(cur.calls, 0, `call ${k}: nothing filed`);
+      assertEquals(await resultOf(job_id!), null);
+    }, { gw: { blockAt: k } });
+  }
+}});
+
+Deno.test({ name: "E10 caller DEADLINE during the first and the last model call: cancelled, nothing filed", ...opts, fn: async () => {
+  const n = (await modelCallsPerJob()).length;
+  for (const k of [1, n]) {
+    await withStack("up", async ({ gw, svc, cur }) => {
+      const { job_id } = await submit(svc.base, { dry_run: false, deadline_at: new Date(Date.now() + 4000).toISOString() });
+      await until(`blocked in model call ${k}`, () => Promise.resolve(gw.blocked > 0), 30_000, svc);
+      const r = await terminal(job_id!, svc, 30_000);
+      gw.release();
+      assertEquals([r.status, r.progress?.code], ["cancelled", "deadline"], `call ${k}`);
+      assertEquals(cur.calls, 0);
+    }, { gw: { blockAt: k } });
+  }
+}});
+
+Deno.test({ name: "E11 cancel DURING the curator call: refused (409 filing), the job ends done WITH its result - never 'cancelled, nothing stored'", ...opts, fn: async () => {
+  await withStack("up", async ({ svc, cur }) => {
+    const { job_id } = await submit(svc.base, { dry_run: false });
+    await until("curator filing", () => Promise.resolve(cur.calls > 0), 30_000, svc);
+    const c = await cancel(svc.base, job_id!);
+    assertEquals(c.status, 409);
+    assertEquals([c.body.status, c.body.filing], ["running", true]);
+    cur.release();
+    const r = await terminal(job_id!, svc);
+    assertEquals(r.status, "done");
+    assert(await resultOf(job_id!), "result kept");
+    assertEquals(cur.calls, 1);
+    // after: cancelling a done job changes nothing
+    const after = await cancel(svc.base, job_id!);
+    assertEquals([after.status, after.body.status], [200, "done"]);
+    assertEquals((await row(job_id!)).status, "done");
+  }, { curator: { block: true } });
+}});
+
+Deno.test({ name: "E12 caller DEADLINE passes during the curator call: the job ends done with its result", ...opts, fn: async () => {
+  await withStack("up", async ({ svc, cur }) => {
+    const { job_id } = await submit(svc.base, { dry_run: false, deadline_at: new Date(Date.now() + 15_000).toISOString() });
+    await until("curator filing", () => Promise.resolve(cur.calls > 0), 30_000, svc);
+    await until("deadline passed", async () => Date.now() > Date.parse(String((await sql<{ d: string }>(`SELECT options->>'deadline_at' AS d FROM research_jobs WHERE id=$1`, [job_id]))[0].d)) + 500 ? true : null, 30_000, svc);
+    cur.release();
+    const r = await terminal(job_id!, svc);
+    assertEquals(r.status, "done", `error=${r.error}`);
+    assert(await resultOf(job_id!), "result kept");
+  }, { curator: { block: true } });
+}});
+
+Deno.test({ name: "E13 waitForDone (real client) hits its deadline while the curator files: returns the real done record", ...opts, fn: async () => {
+  const { ResearchClient } = await import(CLIENT_PATH);
+  await withStack("up", async ({ svc, cur }) => {
+    const client = new ResearchClient({ baseUrl: svc.base, brainKey: KEY });
+    const { job_id } = await submit(svc.base, { dry_run: false });
+    await until("curator filing", () => Promise.resolve(cur.calls > 0), 30_000, svc);
+    setTimeout(() => cur.release(), 2500);
+    const job = await client.waitForDone(job_id!, { timeoutMs: 500, intervalMs: 200 });
+    assertEquals(job.status, "done");
+    assertEquals(cur.calls, 1);
+  }, { curator: { block: true } });
+}});
+
+Deno.test({ name: "E14 a BLIP (shorter than the down budget) during the screens is waited out INSIDE the call: both screens answer, then it is filed (same as base)", ...opts, fn: async () => {
+  await withStack("up", async ({ gw, svc, cur }) => {
+    const { job_id } = await submit(svc.base, { dry_run: false });
+    const r = await terminal(job_id!, svc, 120_000);
+    console.log(`E14 gateway: ${gw.kinds.join(",")}`);
+    assertEquals(r.status, "done");
+    assertEquals(gw.kinds.slice(0, 3), ["inj:502", "inj:502", "inj:200"], "the injection screen retried through the blip and ANSWERED");
+    assert(gw.kinds.includes("rel:200"), "the relevance screen ANSWERED");
+    assert(!gw.kinds.some((k) => k.startsWith("probe")), "no latch, no probe: a blip is not an outage");
+    assertEquals((await getJob(svc.base, job_id!)).model?.state, "up");
+    assert(gw.kinds.indexOf("inj:200") < gw.kinds.indexOf("synth:200"), "screened before synthesis");
+    assertEquals(cur.calls, 1);
+  }, { gw: { downFirst: 2 }, env: { CHAT_DOWN_BUDGET_MS: "60000" } });
+}});
+
+Deno.test({ name: "E15 a down spell LONGER than the budget during the screens: the job pauses and re-runs; it is filed only after both screens answered", ...opts, fn: async () => {
+  await withStack("up", async ({ gw, svc, cur }) => {
+    const { job_id } = await submit(svc.base, { dry_run: false });
+    const r = await terminal(job_id!, svc, 120_000);
+    const log = gw.kinds;
+    console.log(`E15 gateway: ${log.join(",")}`);
+    assertEquals(r.status, "done");
+    assert(log.includes("probe:200"), "the latch was set and a probe saw the model back");
+    const firstSynth = log.indexOf("synth:200");
+    assert(log.lastIndexOf("inj:200", firstSynth) >= 0 && log.lastIndexOf("rel:200", firstSynth) >= 0, "both screens answered before the synthesis that was filed");
+    assertEquals(cur.calls, 1, "filed once, by the re-run");
+  }, { gw: { downFirst: 3 } }); // 3 down answers at ~0/10/25 s > the 4 s test budget
 }});

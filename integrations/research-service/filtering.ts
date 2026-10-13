@@ -115,7 +115,7 @@ export async function isRelevant(deps: Deps, page: Page, anchor: string): Promis
     raw = await deps.chat(
       RELEVANCE_SYS,
       `RESEARCH QUESTION: ${anchor}\n\nURL: ${page.url}\nTITLE: ${page.title}\n\nPAGE CONTENT (excerpt):\n${content}`,
-      { nothink: true, failFast: true }, // a down model answers at once, not after 25 min
+      { nothink: true }, // a blip is retried in chat(); only a LATCHED outage fails open here
     );
   } catch {
     return true; // fail-open

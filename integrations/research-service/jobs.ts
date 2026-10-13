@@ -44,14 +44,21 @@ const EXPIRED_SQL = `coalesce(${DEADLINE_SQL} <= now(), false)`;
 
 export class DeadlineError extends Error {}
 
-/** Parse a caller deadline: ISO string or epoch milliseconds. undefined/null/""
- *  = no deadline. Anything else unparseable throws DeadlineError (-> HTTP 400). */
+/** ISO-8601 date-time WITH an explicit zone (Z or +hh:mm). Numbers are refused
+ *  (epoch seconds vs milliseconds is a silent 1000x error), and so is a zone-less
+ *  time (whose local time?) and a bare date. */
+const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/i;
+
+/** Parse a caller deadline. undefined/null/"" = no deadline. Anything but an
+ *  ISO-8601 date-time with a zone throws DeadlineError (-> HTTP 400). */
 export function parseDeadline(v: unknown): string | undefined {
   if (v === undefined || v === null || v === "") return undefined;
-  let d: Date;
-  if (typeof v === "number") d = new Date(v);
-  else if (typeof v === "string") d = /^\d+$/.test(v.trim()) ? new Date(Number(v.trim())) : new Date(v);
-  else throw new DeadlineError("deadline_at must be an ISO-8601 timestamp or epoch milliseconds");
+  if (typeof v !== "string" || !ISO_WITH_ZONE.test(v.trim())) {
+    throw new DeadlineError(
+      `deadline_at must be an ISO-8601 date-time with a zone, e.g. 2026-10-13T12:00:00Z (got ${JSON.stringify(v).slice(0, 60)}); numbers are refused`,
+    );
+  }
+  const d = new Date(v.trim());
   if (!Number.isFinite(d.getTime())) throw new DeadlineError(`deadline_at is not a valid time: ${String(v).slice(0, 60)}`);
   return d.toISOString();
 }

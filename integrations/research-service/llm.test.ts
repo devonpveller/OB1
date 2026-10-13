@@ -8,7 +8,8 @@
  * Run: deno test --allow-net llm.test.ts
  */
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { classifyChatFailure, createChat, isModelDownError, ModelDownError, ModelHealth } from "./llm.ts";
+import { classifyChatFailure, createChat, downCode, isModelDownError, ModelDownError, ModelHealth } from "./llm.ts";
+import { GATEWAY_BODIES } from "./fixtures/gateway-bodies.ts";
 import { detectInjection } from "./injection.ts";
 import { isRelevant } from "./filtering.ts";
 import type { Deps, Page } from "./harness.ts";
@@ -20,23 +21,28 @@ type Mode = "down" | "up" | "429" | "503" | "bare502" | "hang";
 function stubGateway(initial: Mode) {
   let mode: Mode = initial;
   let requests = 0;
+  let answer = "CLEAN";
+  let downFirst = 0; // serve this many real down 502s first, then `mode`
   const ac = new AbortController();
   const server = Deno.serve({ port: 0, hostname: "127.0.0.1", signal: ac.signal, onListen: () => {} }, async (req) => {
     requests++;
     await req.text();
+    if (downFirst > 0) { downFirst--; return new Response(REAL_DOWN_502, { status: 502, headers: { "content-type": "application/json" } }); }
     switch (mode) {
       case "down": return new Response(REAL_DOWN_502, { status: 502, headers: { "content-type": "application/json" } });
       case "429": return new Response(`{"error":{"message":"llm-queue: projected wait exceeds budget"}}`, { status: 429 });
       case "503": return new Response(`{"error":{"message":"model is loading"}}`, { status: 503 });
       case "bare502": return new Response(`{"error":{"message":"Bad Gateway"}}`, { status: 502 });
       case "hang": await new Promise((r) => setTimeout(r, 2000)); return new Response("late", { status: 200 });
-      default: return Response.json({ choices: [{ message: { content: "CLEAN" } }] });
+      default: return Response.json({ choices: [{ message: { content: answer } }] });
     }
   });
   return {
     base: `http://127.0.0.1:${server.addr.port}/v1`,
     get requests() { return requests; },
     set mode(m: Mode) { mode = m; },
+    set answer(a: string) { answer = a; },
+    set downFirst(n: number) { downFirst = n; },
     async close() { ac.abort(); await server.finished; },
   };
 }
@@ -64,10 +70,32 @@ function make(gw: { base: string }, clock = virtualClock(), over: Partial<Parame
 
 const page: Page = { url: "https://x.example/a", title: "A", content: "An ordinary article about gardening tools and soil.", domain: "x.example" };
 
-Deno.test("classify: the real 2026-10-13 502 body is DOWN; 429/503/bare 502/504 are OVERLOAD; 400 is fatal", () => {
+Deno.test("classify: every body CAPTURED through the real llm-queue + LiteLLM chain lands in its class", () => {
+  // fixtures/gateway-bodies.ts: one row per failure mode, captured offline from the
+  // llm-queue:local image + the gateway's LiteLLM image (see its header).
+  assert(GATEWAY_BODIES.length >= 10);
+  for (const g of GATEWAY_BODIES) {
+    assertEquals(classifyChatFailure(g.status, g.body), g.expect, `${g.mode} (${g.status})`);
+  }
+  // The engine's real 2026-10-13 stored body (job 37b3e59f), byte for byte.
   assertEquals(classifyChatFailure(502, REAL_DOWN_502), "down");
-  assertEquals(classifyChatFailure(502, `{"error":{"type":"upstream_error","message":"llm-queue: boom"}}`), "down");
-  assertEquals(classifyChatFailure(500, "litellm.APIConnectionError: Connection error."), "down");
+});
+
+Deno.test("downCode: a fixed text-free code per down mode (what /health exposes)", () => {
+  const code = (mode: string) => {
+    const g = GATEWAY_BODIES.find((x) => x.mode === mode)!;
+    return downCode(g.status, g.body);
+  };
+  assertEquals(code("upstream container stopped"), "upstream_unresolvable");
+  assertEquals(code("upstream refusing connections"), "upstream_refused");
+  assertEquals(code("llm-queue down"), "queue_unreachable");
+  assertEquals(downCode(0, "network: error sending request: Connection refused"), "gateway_unreachable");
+});
+
+Deno.test("classify: hand-written edge shapes (not from the chain) keep their meaning", () => {
+  // llm-queue's own envelope if hit DIRECTLY: it says upstream_error for EVERY
+  // upstream exception (resets and timeouts too), so the word alone is not "down".
+  assertEquals(classifyChatFailure(502, `{"error":{"type":"upstream_error","message":"llm-queue: "}}`), "overload");
   assertEquals(classifyChatFailure(429, "projected wait exceeds budget"), "overload");
   assertEquals(classifyChatFailure(503, "model is loading"), "overload");
   assertEquals(classifyChatFailure(502, "Bad Gateway"), "overload");
@@ -97,21 +125,40 @@ Deno.test("DOWN 502: chat() gives up within the short budget (not 25 min) and la
   } finally { await gw.close(); }
 });
 
-Deno.test("fail-open classifiers return at once when the model is down (one request, no retry, no latch)", async () => {
-  const gw = stubGateway("down");
+Deno.test("a BLIP during the screens is waited out: both screens return the model's real verdict (as at base)", async () => {
+  const gw = stubGateway("up");
   try {
-    const { llm, health, clock } = make(gw);
+    const { llm, health } = make(gw);
     const deps = { chat: (s: string, u: string, o?: Record<string, unknown>) => llm.chat(s, u, o) } as unknown as Deps;
-    const t0 = clock.now();
-    assertEquals(await detectInjection(deps, page), { injected: false, reason: "detect-error" });
-    assertEquals(await isRelevant(deps, page, "gardening"), true);
-    assertEquals(clock.elapsed(t0), 0, "no backoff spent");
-    assertEquals(gw.requests, 2, "exactly one request per classifier");
-    assertEquals(health.isDown, false, "one classifier answer is not a confirmed outage");
+    // Verdicts that DIFFER from the fail-open ones, so "answered" is provable.
+    gw.answer = "INJECTION";
+    gw.downFirst = 2;
+    assertEquals(await detectInjection(deps, page), { injected: true, reason: "classified" }, "injection screen answered");
+    gw.answer = "IRRELEVANT";
+    gw.downFirst = 2;
+    assertEquals(await isRelevant(deps, page, "gardening"), false, "relevance screen answered");
+    assertEquals(gw.requests, 6, "2 down answers + 1 real answer per screen");
+    assertEquals(health.isDown, false, "a blip never latches");
   } finally { await gw.close(); }
 });
 
-Deno.test("an article job's three calls (2 classifiers + synthesis) cost ~3 min of model-down, not ~77", async () => {
+Deno.test("once the model is LATCHED down, the fail-open screens return at once (zero requests)", async () => {
+  const gw = stubGateway("down");
+  try {
+    const { llm, health, clock } = make(gw);
+    await assertRejects(() => llm.chat("sys", "user"), ModelDownError);
+    assert(health.isDown);
+    const deps = { chat: (s: string, u: string, o?: Record<string, unknown>) => llm.chat(s, u, o) } as unknown as Deps;
+    const n = gw.requests, t0 = clock.now();
+    assertEquals(await detectInjection(deps, page), { injected: false, reason: "detect-error" });
+    assertEquals(await isRelevant(deps, page, "gardening"), true);
+    assertEquals(gw.requests, n, "no request while latched");
+    assertEquals(clock.elapsed(t0), 0);
+    assertEquals(health.snapshot().reason, "upstream_unresolvable", "the snapshot carries a fixed code, not gateway text");
+  } finally { await gw.close(); }
+});
+
+Deno.test("an article job's three calls (2 classifiers + synthesis) cost ~3 min of model-down, not ~77 (the first spends the short budget, the rest hit the latch)", async () => {
   const gw = stubGateway("down");
   try {
     const { llm, clock } = make(gw);

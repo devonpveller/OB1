@@ -25,7 +25,10 @@ function stubEngine(job: (n: number, cancelSeen: boolean) => Partial<JobRecord>,
     const body = req.method === "POST" ? await req.json().catch(() => null) : null;
     seen.push({ method: req.method, path, body });
     if (req.method === "POST" && path === "/research") return Response.json({ job_id: ID, status: "queued" }, { status: 202 });
-    if (req.method === "POST" && path.endsWith("/cancel")) return Response.json({ job_id: ID, status: cancelAnswer });
+    if (req.method === "POST" && path.endsWith("/cancel")) {
+      if (cancelAnswer === "filing") return Response.json({ job_id: ID, status: "running", filing: true }, { status: 409 });
+      return Response.json({ job_id: ID, status: cancelAnswer });
+    }
     const cancelSeen = seen.some((s) => s.path.endsWith("/cancel"));
     return Response.json({ id: ID, status: "queued", ...job(++polls, cancelSeen) });
   });
@@ -104,4 +107,42 @@ Deno.test("isModelDown: the one predicate over every shape of the signal", () =>
   assertEquals(isModelDown({ error: "model_down: chat 502: ..." }), true); // gave up
   assertEquals(isModelDown({ progress: { code: "deadline", model_down: true } }), true); // cancelled while paused
   assertEquals(isModelDown({ progress: { code: "deadline", model_down: false } }), false);
+});
+
+Deno.test("a RUNNING job: 'cancelling' is confirmed by polling - cancelled only when the engine says cancelled", async () => {
+  const e = stubEngine((_n, cancelSeen) => (cancelSeen ? { status: "cancelled", error: "cancelled: caller deadline passed" } : { status: "running" }), "cancelling");
+  try {
+    const err = await assertRejects(() => e.client.waitForDone(ID, { timeoutMs: 150, intervalMs: 50 }), ResearchDeadlineError);
+    assert(err.cancelled, "confirmed cancelled");
+  } finally { await e.close(); }
+});
+
+Deno.test("'cancelling' that is never confirmed is NOT reported as cancelled", async () => {
+  const e = stubEngine(() => ({ status: "running" }), "cancelling");
+  try {
+    const err = await assertRejects(() => e.client.waitForDone(ID, { timeoutMs: 100, intervalMs: 40, cancelSettleMs: 200 }), ResearchDeadlineError);
+    assertEquals(err.cancelled, false);
+    assert(/NOT cancelled/.test(err.message));
+  } finally { await e.close(); }
+});
+
+Deno.test("a job already FILING (engine answers 409) is awaited and its real 'done' record returned, not thrown away", async () => {
+  let polls = 0;
+  const e = stubEngine((_n, cancelSeen) => {
+    if (!cancelSeen) return { status: "running" };
+    return ++polls < 3 ? { status: "running" } : { status: "done", result: { synthesis: "[SOURCED] x [Source 1]" } };
+  }, "filing");
+  try {
+    const job = await e.client.waitForDone(ID, { timeoutMs: 120, intervalMs: 40 });
+    assertEquals(job.status, "done");
+    assertEquals(e.cancels().length, 1);
+  } finally { await e.close(); }
+});
+
+Deno.test("deadlineAt that looks like epoch SECONDS is refused before anything is sent", async () => {
+  const e = stubEngine(() => ({ status: "done" }));
+  try {
+    await assertRejects(() => e.client.submit({ query: "q", deadlineAt: Math.floor(Date.now() / 1000) + 3600 }), Error, "SECONDS");
+    assertEquals(e.seen.filter((s) => s.path === "/research").length, 0);
+  } finally { await e.close(); }
 });

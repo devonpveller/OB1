@@ -38,19 +38,21 @@ Async job + poll (OD-3). All endpoints except `/health` require `x-brain-key`.
 ```
 POST /research
   body:  { "query": "...", "origin": "owui|agent|notebook", "thread_id"?: "<uuid>",
-           "deadline_at"?: "<ISO-8601 | epoch ms>",
+           "deadline_at"?: "<ISO-8601 date-time WITH a zone, e.g. 2026-10-13T12:00:00Z>",
            "options"?: { "confidence_floor"?: 0.5 } }
   -> 202 { "job_id": "<uuid>", "status": "queued", "deadline_at"?: "<ISO>" }
-  -> 400 on an unparseable deadline_at
+  -> 400 on any other deadline_at (numbers, zone-less times and bare dates are refused)
 
 GET  /research/jobs/:id
   -> { id, status: queued|running|done|error|cancelled, progress:{phase,message,code?}, result, metrics, error,
-       model: { state: up|down, since, reason, last_check } }
+       model: { state: up|down, since, reason: <fixed code>|null, last_check } }
      result: { synthesis, needs[], gaps[], cited_sources[], reuse_claims[], thread_id, reuse_ratio, backstop }
 
 POST /research/jobs/:id/cancel   body? { "reason": "..." }
   -> 200 { status: "cancelled" }   (was queued: it will never run)
   -> 202 { status: "cancelling" }  (was running: aborted at once, ends `cancelled`)
+  -> 409 { status: "running", filing: true }  (the curator is already filing it: the job
+         ends with its REAL outcome - done, or the curator's error - never "cancelled")
   -> 200 { status: <terminal>, note: "already terminal" } | 404
 
 GET  /research/jobs/:id/stream   -> SSE: one `data:` event per poll until terminal
@@ -61,13 +63,18 @@ GET  /health                     -> { ok, db, model }   (`ok` is DB-only)
 
 - **Caller deadline.** A job still `queued` past `deadline_at` is never started: it
   ends `cancelled`, `progress.code = "deadline"`. A job still `running` at it is
-  aborted (in-flight model request included) and ends the same way.
+  aborted (in-flight model request included) and ends the same way - unless filing to
+  the curator has started: that is the point of no return, and the job records what
+  really happened.
 - **Upstream down is not backpressure.** A 500/502/503 whose body says the model
-  upstream is unreachable (name resolution, connection refused, `upstream_error`), or
-  an unreachable gateway, gets `CHAT_DOWN_BUDGET_MS` (3 min), not the 25-minute
-  `CHAT_RETRY_BUDGET_MS` that 429/503/504 keep. Fail-open classifiers
-  (`detectInjection`, `isRelevant`) do not retry it at all. Every attempt is bounded
-  by `CHAT_FETCH_TIMEOUT_MS` (45 min).
+  cannot be reached - matched against bodies captured through the real llm-queue +
+  LiteLLM chain (`fixtures/gateway-bodies.ts`: name resolution, "All connection attempts
+  failed", LiteLLM's "Connection error." when llm-queue is gone) - or an unreachable
+  gateway, gets `CHAT_DOWN_BUDGET_MS` (3 min), not the 25-minute `CHAT_RETRY_BUDGET_MS`
+  that 429s and ambiguous 502s (reset / timeout: "llm-queue: .") keep. The fail-open
+  screens (`detectInjection`, `isRelevant`) get no shortcut: they fail open only once
+  the model is LATCHED down (and the job is then paused, never filed). Every attempt
+  is bounded by `CHAT_FETCH_TIMEOUT_MS` (45 min).
 - **Model down = PAUSE.** After that budget a process-wide latch is set: every later
   call fails at once, the job is requeued (`status: "queued"`,
   `progress.code = "model_down"`), and nothing is claimed while it holds. One probe
@@ -80,7 +87,9 @@ GET  /health                     -> { ok, db, model }   (`ok` is DB-only)
 - **How a caller reads it:** `isModelDown(job)` in
   `recipes/daily-digest/src/enrich/research-client.ts` (any of: `progress.code ===
   "model_down"`, `progress.model_down === true`, `model.state === "down"`, `error`
-  starting `model_down:`).
+  starting `model_down:`). `model.reason` is a fixed code (`upstream_unresolvable`,
+  `upstream_refused`, `queue_unreachable`, `gateway_unreachable`,
+  `model_unreachable`), never gateway text.
 
 ## Inlets
 

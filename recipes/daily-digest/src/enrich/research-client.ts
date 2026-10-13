@@ -99,6 +99,18 @@ export interface JobRecord {
 
 const TERMINAL = new Set(["done", "error", "cancelled"]);
 
+/** The engine accepts ISO-8601 with a zone only. A number is read as epoch
+ *  MILLISECONDS; one that only makes sense as SECONDS (before 2001-09-09 as ms)
+ *  is refused rather than silently becoming a 1970 deadline. */
+function deadlineIso(v: Date | string | number): string {
+  if (typeof v === "number" && v < 1e12) {
+    throw new Error(`deadlineAt ${v} looks like epoch SECONDS; pass milliseconds, a Date, or an ISO string`);
+  }
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) throw new Error(`deadlineAt is not a valid time: ${String(v).slice(0, 60)}`);
+  return d.toISOString();
+}
+
 /**
  * THE model-down predicate for callers (mr-routine-outage builds on this): true
  * when the job is paused or ended because the engine's model is unreachable, or
@@ -157,7 +169,7 @@ export class ResearchClient {
         dry_run: args.dryRun,
         origin: args.origin ?? "notebook",
         thread_id: args.threadId,
-        deadline_at: args.deadlineAt === undefined ? undefined : new Date(args.deadlineAt).toISOString(),
+        deadline_at: args.deadlineAt === undefined ? undefined : deadlineIso(args.deadlineAt),
       }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
     });
@@ -171,8 +183,9 @@ export class ResearchClient {
 
   /**
    * Cancel a job. A queued job ends `cancelled` at once; a running one is
-   * aborted. Returns the engine's answer ("cancelled" | "cancelling" | the
-   * terminal status it already had). Bounded by timeoutMs; throws on failure.
+   * aborted. Returns the engine's answer: "cancelled" | "cancelling" | "filing"
+   * (the curator is already filing it - it will end with its real outcome) | the
+   * terminal status it already had. Bounded by timeoutMs; throws on failure.
    */
   async cancel(jobId: string, reason = "caller gave up"): Promise<string> {
     const res = await fetch(`${this.baseUrl}/research/jobs/${encodeURIComponent(jobId)}/cancel`, {
@@ -181,6 +194,10 @@ export class ResearchClient {
       body: JSON.stringify({ reason }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
     });
+    if (res.status === 409) {
+      const d = await res.json().catch(() => ({})) as { filing?: boolean };
+      if (d.filing) return "filing";
+    }
     if (!res.ok) throw new Error(`research cancel failed: ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
     const d = await res.json() as { status?: string };
     return d.status ?? "unknown";
@@ -206,10 +223,16 @@ export class ResearchClient {
    * never runs for a caller that is no longer waiting (2026-10-13: abandoned
    * jobs kept their FIFO place and ran ~77 min each). Pass false only for a
    * job someone will come back for (gap dives carry their job ids over).
+   *
+   * Truthful outcome (round 2): the error's `cancelled` is true ONLY when the
+   * engine confirms the job ended `cancelled`. A running job being aborted is
+   * awaited for cancelSettleMs; a job already FILING (the engine refuses to
+   * cancel it) is awaited for filingGraceMs, and its real terminal record is
+   * RETURNED - a filed result is never thrown away as "timed out".
    */
   async waitForDone(
     jobId: string,
-    opts: { timeoutMs?: number; intervalMs?: number; cancelOnTimeout?: boolean } = {},
+    opts: { timeoutMs?: number; intervalMs?: number; cancelOnTimeout?: boolean; cancelSettleMs?: number; filingGraceMs?: number } = {},
   ): Promise<JobRecord> {
     const deadline = Date.now() + (opts.timeoutMs ?? 240_000); // > harness 180s wall
     const interval = opts.intervalMs ?? 3_000;
@@ -225,11 +248,24 @@ export class ResearchClient {
     if (opts.cancelOnTimeout !== false) {
       try {
         const st = await this.cancel(jobId, "caller deadline passed (waitForDone)");
-        cancelled = st === "cancelled" || st === "cancelling";
-        // It may have finished in the gap between the last poll and the cancel.
-        if (!cancelled && TERMINAL.has(st)) {
-          const fin = await this.poll(jobId).catch(() => null);
-          if (fin && TERMINAL.has(fin.status)) return fin;
+        if (st === "cancelled") {
+          cancelled = true;
+        } else {
+          // "cancelling": the abort is prompt, confirm it. "filing": the curator
+          // is storing it, wait for the real outcome (curator timeout is 180 s).
+          // A terminal answer: it finished in the gap - read it.
+          const settle = st === "filing" ? (opts.filingGraceMs ?? 240_000) : st === "cancelling" ? (opts.cancelSettleMs ?? 30_000) : 0;
+          const until = Date.now() + settle;
+          for (;;) {
+            const fin = await this.poll(jobId).catch(() => null);
+            if (fin) last = fin;
+            if (fin && TERMINAL.has(fin.status)) {
+              if (fin.status === "cancelled") { cancelled = true; break; }
+              return fin; // done or error: the real record, never discarded
+            }
+            if (Date.now() >= until) break;
+            await new Promise((r) => setTimeout(r, Math.max(0, Math.min(interval, until - Date.now()))));
+          }
         }
       } catch (err) {
         console.warn(`[research] cancel of ${jobId} at deadline failed: ${err}`);

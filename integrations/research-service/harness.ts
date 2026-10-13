@@ -126,9 +126,7 @@ export type FetchOutcome =
 export interface FetchResult { page: Page | null; outcome: FetchOutcome; }
 export interface Deps {
   embed(text: string): Promise<number[]>;
-  // failFast: a fail-open caller (classifier) - on an upstream-DOWN answer throw at
-  // once instead of retrying (llm.ts). Mocks may ignore it.
-  chat(system: string, user: string, opts?: { json?: boolean; nothink?: boolean; failFast?: boolean }): Promise<string>;
+  chat(system: string, user: string, opts?: { json?: boolean; nothink?: boolean }): Promise<string>;
   searchWeb(query: string, k: number): Promise<SearchHit[]>;
   fetchPage(url: string): Promise<FetchResult>;
   delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>>;

@@ -10,14 +10,18 @@ import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.
 import { CANCEL_EXPIRED_SQL, CLAIM_SQL, DeadlineError, deadlineMs, Dispatcher, JobCancelled, parseDeadline, type ClaimedJob, type SqlClient } from "./jobs.ts";
 import { ModelHealth } from "./llm.ts";
 
-Deno.test("parseDeadline: ISO and epoch-ms normalise to one ISO shape; empty = none; garbage throws", () => {
+Deno.test("parseDeadline: ISO-8601 with a zone only; numbers (seconds vs ms), zone-less and bare dates refused", () => {
   assertEquals(parseDeadline(undefined), undefined);
   assertEquals(parseDeadline(""), undefined);
   assertEquals(parseDeadline(null), undefined);
   assertEquals(parseDeadline("2026-10-13T12:00:00Z"), "2026-10-13T12:00:00.000Z");
   assertEquals(parseDeadline("2026-10-13T08:00:00-04:00"), "2026-10-13T12:00:00.000Z");
-  assertEquals(parseDeadline(Date.UTC(2026, 9, 13, 12)), "2026-10-13T12:00:00.000Z");
-  assertEquals(parseDeadline(String(Date.UTC(2026, 9, 13, 12))), "2026-10-13T12:00:00.000Z");
+  assertEquals(parseDeadline("2026-10-13T12:00:00.123456Z"), "2026-10-13T12:00:00.123Z");
+  assertThrows(() => parseDeadline(Date.UTC(2026, 9, 13, 12)), DeadlineError); // ms
+  assertThrows(() => parseDeadline(Math.floor(Date.now() / 1000) + 3600), DeadlineError); // seconds: the 1970 trap
+  assertThrows(() => parseDeadline(String(Date.UTC(2026, 9, 13, 12))), DeadlineError);
+  assertThrows(() => parseDeadline("2026-10-13T12:00:00"), DeadlineError); // whose local time?
+  assertThrows(() => parseDeadline("2030-01-01"), DeadlineError);
   assertThrows(() => parseDeadline("tomorrow-ish"), DeadlineError);
   assertThrows(() => parseDeadline("2026-99-99"), DeadlineError);
   assertThrows(() => parseDeadline({}), DeadlineError);
@@ -28,7 +32,7 @@ Deno.test("parseDeadline: ISO and epoch-ms normalise to one ISO shape; empty = n
 
 Deno.test("the stored deadline shape always passes the SQL guard regex", () => {
   const re = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
-  for (const v of ["2026-10-13T12:00:00Z", Date.now(), "2030-01-01"]) assert(re.test(parseDeadline(v)!), String(v));
+  for (const v of ["2026-10-13T12:00:00Z", "2030-01-01T00:00+05:30", new Date().toISOString()]) assert(re.test(parseDeadline(v)!), String(v));
   assert(CLAIM_SQL.includes("NOT coalesce("), "claim excludes expired jobs atomically");
 });
 

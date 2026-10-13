@@ -626,7 +626,15 @@ function notSavedBanner(jobId: string, reason: string): string {
 // deadline), and a call that hit the model-down latch is remembered so the job is
 // PAUSED instead of finishing on fail-open / skipped-step output. Filing to the
 // curator is refused once either happened: nothing degraded is ever stored.
-function jobSeams(base: Deps, signal: AbortSignal, state: { modelDown: ModelDownError | null }): Deps {
+//
+// FILING IS THE POINT OF NO RETURN (round 2). The curator call carries no abort
+// and its effect is real, so once it has STARTED a cancel or deadline no longer
+// changes the outcome: the job finishes with what really happened (done, or the
+// curator's error) instead of reading "cancelled, nothing stored" over a filing
+// that exists. `filingJobs` lets the cancel endpoint say so to the caller.
+type SeamState = { modelDown: ModelDownError | null; filing: boolean };
+const filingJobs = new Set<string>();
+function jobSeams(base: Deps, signal: AbortSignal, state: SeamState, jobId: string): Deps {
   const guard = () => {
     if (signal.aborted) throw signal.reason ?? new JobCancelled("aborted", "cancel_requested");
     if (state.modelDown) throw state.modelDown;
@@ -638,15 +646,20 @@ function jobSeams(base: Deps, signal: AbortSignal, state: { modelDown: ModelDown
       try {
         return await (base.chat as (s: string, u: string, o?: ChatOpts) => Promise<string>)(s, u, { ...(o ?? {}), signal });
       } catch (e) {
-        // A failFast classifier seeing ONE down answer is not a confirmed outage
-        // (it fails open, as designed); a latched/budget-exhausted one is.
+        // Only a LATCHED outage (the short budget spent, or the flag already set) is
+        // recorded; chat() itself rides out a blip, so this never fires on one.
         if (isModelDownError(e) && (e as ModelDownError).latched) state.modelDown ??= e as ModelDownError;
         throw e;
       }
     },
     searchWeb: (q, k) => { guard(); return base.searchWeb(q, k); },
     fetchPage: (u) => { guard(); return base.fetchPage(u); },
-    delegateToCurator: (pkg) => { guard(); return base.delegateToCurator(pkg); },
+    delegateToCurator: (pkg) => {
+      guard(); // synchronous with the flag below: a cancel lands wholly before or after
+      state.filing = true;
+      filingJobs.add(jobId);
+      return base.delegateToCurator(pkg);
+    },
   };
 }
 
@@ -655,7 +668,7 @@ function jobSeams(base: Deps, signal: AbortSignal, state: { modelDown: ModelDown
 // persists the terminal (or paused) state — it never re-claims.
 async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
   const { jobId, query, thread_id, origin, options } = job;
-  const seamState: { modelDown: ModelDownError | null } = { modelDown: null };
+  const seamState: SeamState = { modelDown: null, filing: false };
   // Conservative: measured from CLAIM, not submit, so a job that queued first
   // only ever waits longer than it needs to. See CALLBACK_MIN_AGE_MS.
   const claimedAt = Date.now();
@@ -689,7 +702,7 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     const queueUser = QUEUE_USER_BY_ORIGIN[origin] ?? "";
     const baseDeps: Deps = jobSeams(queueUser
       ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
-      : realDeps, signal, seamState);
+      : realDeps, signal, seamState, jobId);
     // Contract enforcement wraps searchWeb/fetchPage (no gather-loop change).
     const jobDeps: Deps = contract ? withContract(baseDeps, contract) : baseDeps;
     const res = await runResearch(jobDeps, client, query, {
@@ -706,8 +719,13 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     // The harness swallows some step failures (fail-open classifiers, skeptic,
     // prose render). If the job was cancelled or the model went down under it,
     // what came back is degraded: pause / cancel it instead of recording it done.
-    if (signal.aborted) throw signal.reason ?? new JobCancelled("aborted", "cancel_requested");
-    if (seamState.modelDown) throw seamState.modelDown;
+    // Once filing started, the real outcome is recorded whatever came after.
+    if (!seamState.filing) {
+      if (signal.aborted) throw signal.reason ?? new JobCancelled("aborted", "cancel_requested");
+      if (seamState.modelDown) throw seamState.modelDown;
+    } else if (signal.aborted) {
+      console.log(`[job ${jobId}] cancel/deadline arrived after filing started - recording the real outcome`);
+    }
     // Render the chat-facing markdown ONCE, here, and persist it on the job. Both
     // readers (the async callback below, and the tool's synchronous path) return
     // this same string — see lib.ts renderResult for why it moved server-side.
@@ -793,7 +811,7 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
   } catch (e0) {
     let e = e0;
     // Cancelled (caller request or deadline): a terminal status the caller reads.
-    if (signal.aborted || e instanceof JobCancelled) {
+    if ((signal.aborted && !seamState.filing) || e instanceof JobCancelled) {
       const c = signal.reason instanceof JobCancelled ? signal.reason : e instanceof JobCancelled ? e : null;
       const reason = c?.reason ?? "aborted";
       await markCancelled(client, jobId, reason, c?.code ?? "cancel_requested").catch(() => {});
@@ -803,9 +821,9 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     }
     // Model down: PAUSE (requeue) — the dispatcher re-checks the model and
     // re-runs it from the top; nothing was filed (jobSeams refuses filing).
-    if (isModelDownError(e) || seamState.modelDown) {
+    if (!seamState.filing && (isModelDownError(e) || seamState.modelDown)) {
       const md = seamState.modelDown ?? (e as ModelDownError);
-      if (!modelHealth.isDown) modelHealth.markDown(md.reason, Date.now());
+      if (!modelHealth.isDown) modelHealth.markDown(md.reason, Date.now(), md.downCode);
       const since = modelHealth.downSince === null ? null : new Date(modelHealth.downSince).toISOString();
       const outcome = await pauseForModelDown(client, job, md.reason, since, MAX_MODEL_DOWN_REQUEUES, Date.now())
         .catch((pe) => { console.error(`[job ${jobId}] pause failed: ${(pe as Error).message}`); return "failed" as const; });
@@ -841,6 +859,7 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
       jobId,
     ).catch(() => {});
   } finally {
+    filingJobs.delete(jobId);
     client.release();
   }
 }
@@ -914,7 +933,7 @@ Deno.serve({ port: PORT }, async (req) => {
     // the screen would fail OPEN on every file (and now does so at once), so
     // refuse instead of staging third-party text unscreened.
     if (modelHealth.isDown) {
-      return Response.json({ ok: false, error: `model_down: ${modelHealth.reason}`.slice(0, 200), model: modelHealth.snapshot() },
+      return Response.json({ ok: false, error: `model_down: ${modelHealth.code ?? "model_unreachable"}`, model: modelHealth.snapshot() },
                            { status: 503 });
     }
     try {
@@ -1097,6 +1116,14 @@ Deno.serve({ port: PORT }, async (req) => {
       }
       const st = await jobStatus(c, id);
       if (st === null) return Response.json({ error: "not found" }, { status: 404 });
+      if (st === "running" && filingJobs.has(id)) {
+        // Past the point of no return: the curator is filing this run. The job will
+        // end with its real outcome; say so instead of promising a cancel.
+        return Response.json({
+          job_id: id, status: "running", filing: true,
+          note: "filing to the curator has started; the job will finish with its real outcome",
+        }, { status: 409 });
+      }
       if (st === "running") {
         dispatcher.cancelRunning(id, reason);
         return Response.json({ job_id: id, status: "cancelling" }, { status: 202 });

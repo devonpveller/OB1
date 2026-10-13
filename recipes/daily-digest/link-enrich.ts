@@ -51,7 +51,7 @@ import { extractAnchors, GmailReader } from "./src/enrich/gmail-fetch.ts";
 import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
-import { JobRecord, ResearchClient, ResearchDeadlineError, waitForAll } from "./src/enrich/research-client.ts";
+import { isModelDown, JobRecord, ResearchClient, ResearchDeadlineError, waitForAll } from "./src/enrich/research-client.ts";
 import { filterCandidates, isPromoBody, loadBlocklist, saveBlocklist } from "./src/enrich/promo-filter.ts";
 import { DayReport, DayReportEntry, LinkCandidate } from "./src/enrich/types.ts";
 import {
@@ -540,7 +540,10 @@ async function processLink(item: WorkItem) {
   catch (err) {
     return fallback(err instanceof ResearchDeadlineError && err.modelDown ? `research: model_down: ${err.message}` : `research: ${err}`);
   }
-  if (job.status !== "done") return fallback(`research: ${job.status}: ${job.error ?? ""}`);
+  // isModelDown(job) is the contract; the note prefix mirrors it for the report.
+  if (job.status !== "done") {
+    return fallback(`research: ${isModelDown(job) ? "model_down: " : ""}${job.status}: ${job.error ?? ""}`);
+  }
 
   await recordDoneJob({ base, jobId, email, title, subject }, job);
 }

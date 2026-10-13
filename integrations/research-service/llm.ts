@@ -14,7 +14,8 @@
  *             the queue is saturated or the model is swapping. The request WILL
  *             be served if we come back - keep riding it out for the long budget.
  *   DOWN      the gateway answered, but says the model upstream cannot be reached
- *             (name resolution, connection refused, upstream_error), or the
+ *             (name resolution, all connection attempts failed, LiteLLM's
+ *             "Connection error." when llm-queue is gone), or the
  *             gateway itself cannot be reached. Waiting 25 minutes per call does
  *             not make it come back - a short budget (CHAT_DOWN_BUDGET_MS), then
  *             a process-wide DOWN latch so every later call fails at once.
@@ -29,13 +30,32 @@
 
 export type FailureClass = "down" | "overload" | "fatal";
 
-/** Bodies that mean "the model upstream is unreachable", not "busy". Matched on
- *  500/502/503 only. The first alternative is the exact 2026-10-13 body:
- *  `litellm.BadGatewayError: ... OpenAIException - llm-queue: [Errno -3]
- *  Temporary failure in name resolution`. llm-queue's own envelope says
- *  `"type": "upstream_error"`. */
+/** Bodies that mean "the model cannot be reached", matched on 500/502/503 only.
+ *  Derived from bodies CAPTURED through the real chain (llm-queue:local + the
+ *  gateway's LiteLLM image, offline; table + provenance in
+ *  fixtures/gateway-bodies.ts, every row asserted in llm.test.ts):
+ *    502 "llm-queue: [Errno -3] Temporary failure in name resolution"  upstream container gone
+ *    502 "llm-queue: All connection attempts failed"                   upstream not listening
+ *    500 "OpenAIException - Connection error."                         llm-queue gone / refusing
+ *  NOT down (deliberately): an EMPTY "llm-queue: ." (upstream reset or read timeout -
+ *  ambiguous, the next attempt tells), "Server disconnected without sending a
+ *  response" (one dropped request), llama-swap's 500 "health check timed out" (a
+ *  cold load, still fatal as at base), and 429s. LiteLLM strips llm-queue's
+ *  `upstream_error` envelope, so that word never reaches this engine. */
 const DOWN_BODY =
-  /name resolution|name or service not known|nodename nor servname|connection refused|connecterror|connect error|connection error|apiconnectionerror|cannot connect to host|no route to host|host is unreachable|network is unreachable|upstream_error|\[errno -[23]\]|\[errno 111\]/i;
+  /name resolution|name or service not known|nodename nor servname|all connection attempts failed|connection refused|connection error\.|apiconnectionerror|cannot connect to host|no route to host|host is unreachable|network is unreachable|\[errno -[23]\]|\[errno 111\]/i;
+
+/** A FIXED, text-free reason code for a down condition - what /health and the
+ *  job read expose (never the raw gateway text). */
+export type DownCode = "upstream_unresolvable" | "upstream_refused" | "queue_unreachable" | "gateway_unreachable" | "model_unreachable";
+
+export function downCode(status: number, detail: string): DownCode {
+  if (status === 0) return "gateway_unreachable";
+  if (/name resolution|name or service not known|nodename nor servname|\[errno -[23]\]/i.test(detail)) return "upstream_unresolvable";
+  if (/all connection attempts failed|connection refused|\[errno 111\]/i.test(detail)) return "upstream_refused";
+  if (/connection error\.|apiconnectionerror/i.test(detail)) return "queue_unreachable";
+  return "model_unreachable";
+}
 
 export function classifyChatFailure(status: number, body: string): FailureClass {
   if ((status === 500 || status === 502 || status === 503) && DOWN_BODY.test(body)) return "down";
@@ -44,10 +64,11 @@ export function classifyChatFailure(status: number, body: string): FailureClass 
 }
 
 /** Thrown when the model is DOWN (short budget exhausted, latch already set, or
- *  a failFast caller saw a down answer). `code` is the machine-readable signal. */
+ *  the latch was already set). `code` is the machine-readable signal; `reason` is
+ *  the raw detail for logs and authenticated job reads; `downCode` is text-free. */
 export class ModelDownError extends Error {
   readonly code = "model_down";
-  constructor(readonly reason: string, readonly latched: boolean) {
+  constructor(readonly reason: string, readonly latched: boolean, readonly downCode: DownCode = "model_unreachable") {
     super(`model_down: ${reason}`);
     this.name = "ModelDownError";
   }
@@ -60,7 +81,7 @@ export function isModelDownError(e: unknown): e is ModelDownError {
 export interface ModelHealthSnapshot {
   state: "up" | "down";
   since: string | null;
-  reason: string | null;
+  reason: DownCode | null;
   last_check: string | null;
 }
 
@@ -68,19 +89,22 @@ export interface ModelHealthSnapshot {
 export class ModelHealth {
   #downSince: number | null = null;
   #reason = "";
+  #code: DownCode | null = null;
   #lastCheck: number | null = null;
   constructor(private readonly log: (line: string) => void = console.log) {}
 
   get isDown(): boolean { return this.#downSince !== null; }
   get downSince(): number | null { return this.#downSince; }
   get reason(): string { return this.#reason; }
+  get code(): DownCode | null { return this.#code; }
 
-  markDown(reason: string, now: number): void {
+  markDown(reason: string, now: number, code: DownCode = "model_unreachable"): void {
     if (this.#downSince === null) {
       this.#downSince = now;
       this.log(`[model] DOWN: ${reason} - pausing research until a probe succeeds`);
     }
     this.#reason = reason;
+    this.#code = code;
     this.#lastCheck = now;
   }
 
@@ -90,6 +114,7 @@ export class ModelHealth {
     }
     this.#downSince = null;
     this.#reason = "";
+    this.#code = null;
     this.#lastCheck = now;
   }
 
@@ -99,7 +124,8 @@ export class ModelHealth {
     return {
       state: this.isDown ? "down" : "up",
       since: this.#downSince === null ? null : new Date(this.#downSince).toISOString(),
-      reason: this.isDown ? this.#reason : null,
+      // A fixed code, never the gateway's text: /health is unauthenticated.
+      reason: this.isDown ? this.#code : null,
       last_check: this.#lastCheck === null ? null : new Date(this.#lastCheck).toISOString(),
     };
   }
@@ -108,9 +134,6 @@ export class ModelHealth {
 export interface ChatOpts {
   json?: boolean;
   nothink?: boolean;
-  /** Fail-open classifiers: on a DOWN answer throw ModelDownError at once instead
-   *  of retrying (they would fail open anyway; waiting buys nothing). */
-  failFast?: boolean;
   /** Job cancellation: aborts the in-flight request and the retry loop. */
   signal?: AbortSignal;
 }
@@ -202,7 +225,9 @@ export function createChat(cfg: ChatConfig) {
     for (let i = 0; ; i++) {
       if (opts.signal?.aborted) throw abortError(opts.signal);
       // The latch: once the model is confirmed down, nobody spends a budget on it.
-      if (cfg.health.isDown) throw new ModelDownError(cfg.health.reason, true);
+      // Fail-open callers (the injection / relevance screens) get NO shortcut before
+      // the latch: a blip is waited out exactly like any other call (round 2).
+      if (cfg.health.isDown) throw new ModelDownError(cfg.health.reason, true, cfg.health.code ?? "model_unreachable");
       const a = await attempt(body, cfg.fetchTimeoutMs, opts.signal);
       if (a.ok) {
         cfg.health.markUp(now());
@@ -212,11 +237,11 @@ export function createChat(cfg: ChatConfig) {
       if (a.cls === "fatal") throw new Error(`chat ${a.status}: ${a.detail}`);
       if (a.cls === "down") {
         const reason = `${label}: ${a.detail}`;
-        if (opts.failFast) throw new ModelDownError(reason, false);
+        const code = downCode(a.status, a.detail);
         downStartedAt ??= now();
         if (now() - downStartedAt >= cfg.downBudgetMs || now() >= deadline) {
-          cfg.health.markDown(reason, now());
-          throw new ModelDownError(reason, true);
+          cfg.health.markDown(reason, now(), code);
+          throw new ModelDownError(reason, true, code);
         }
         log(`${label} (upstream down); retry in ${Math.round(backoff(i) / 1000)}s [attempt ${i + 1}]`);
       } else {
@@ -249,7 +274,7 @@ export function createChat(cfg: ChatConfig) {
       cfg.health.markUp(now());
       return true;
     }
-    if (a.cls === "down") cfg.health.markDown(`${a.status ? `chat ${a.status}` : "chat"}: ${a.detail}`, now());
+    if (a.cls === "down") cfg.health.markDown(`${a.status ? `chat ${a.status}` : "chat"}: ${a.detail}`, now(), downCode(a.status, a.detail));
     else cfg.health.noteCheck(now());
     return false;
   }
