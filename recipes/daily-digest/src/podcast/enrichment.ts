@@ -33,6 +33,9 @@ export interface ResolvedFollowUp {
 export interface EmailEnrichment {
   generatedAt: string;
   date: string;
+  /** The LOCAL routine date this run belongs to (ROUTINE_DATE, mr-routine-outage).
+   *  `date` is the UTC date of generatedAt and differs in the local evening. */
+  routineDate?: string;
   episode: {
     name: string;
     title: string;
@@ -81,10 +84,11 @@ export function parseSynthesisForEmail(
 export async function loadEnrichment(
   path: string,
   maxAgeMs = 12 * 3600 * 1000,
+  now: () => number = Date.now,
 ): Promise<EmailEnrichment | null> {
   try {
     const data = JSON.parse(await Deno.readTextFile(path)) as EmailEnrichment;
-    const age = Date.now() - new Date(data.generatedAt).getTime();
+    const age = now() - new Date(data.generatedAt).getTime();
     if (!(age >= 0 && age < maxAgeMs)) return null; // stale → ignore
     return data;
   } catch {

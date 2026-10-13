@@ -171,3 +171,35 @@ The compose service `openbrain-digest` is defined under profile `scheduled` next
 
    The digest arrives in your Gmail inbox; a copy lands in `D:\_data\openbrain-digest-latest.md` regardless.
 6. Add a Windows Task Scheduler trigger that fires daily at your preferred time (mirrors the wrappers for `openbrain-gmail-pull` / `openbrain-gmail-prune`).
+
+### Morning routine: model outages, send-by deadline, send-once (mr-routine-outage)
+
+The chain is `openbrain-cron` (05:00 UTC = 01:00 EDT) -> `openbrain-digest /routine/start` ->
+model gate -> `openbrain-gmail-pull` -> prune -> `openbrain-podcast` (link-enrich) ->
+`openbrain-digest /run`. All routine times are LOCAL in `ROUTINE_TZ`
+(default `America/New_York`); the containers run UTC.
+
+- **Model gate.** Before model work, the chain head, link-enrich (before each model stage)
+  and the digest check the model through the gateway: `GET /health/liveliness` plus one
+  `max_tokens: 1` chat probe (never LiteLLM `/health`). While it is down they WAIT
+  (backoff 30 s doubling to 5 min) instead of running degraded. A research job the engine
+  reports `model_down` is resubmitted after the model is back (max 3).
+- **Send-by deadline** `ROUTINE_SEND_BY` (07:00): an in-process timer in openbrain-digest
+  sends the digest with whatever is ready; a section that is not ready is shown as
+  WAITING FOR THE MODEL / STILL RUNNING / FAILED, never left out silently. When it later
+  completes, ONE short follow-up email delivers it (until `ROUTINE_FOLLOWUP_CUTOFF`, 20:00,
+  the chain stops waiting for the model).
+- **Send-once marker.** `D:\_data\routine\<local date>.digest.claim` /
+  `.followup.claim` / `.alert.claim`, created exclusively before the send. A re-run of the
+  chain the same day sends nothing new. **Force a re-send** explicitly:
+  `docker exec openbrain-cron sh -c "curl -fsS -X POST -d '{\"force\":true}' http://openbrain-digest:8080/run"`
+  (or delete the claim file). A send that failed DEFINITELY (Gmail answered an error) is
+  retried twice and releases the marker; one that MAY have gone out keeps it (no duplicate).
+- **Alert.** At deadline + `ROUTINE_ALERT_GRACE_MIN` (15 min), if the digest was not sent or
+  the podcast not produced: ONE Telegram message through the sysadmin out-of-band bot
+  (`SYSADMIN_TELEGRAM_BOT_TOKEN` / `_CHAT_ID` in `OB1/docker/.env`; blank = logged only).
+  Step names, counts and times only.
+- **Podcast restart.** The run lock is in memory plus a run record
+  (`<date>.podcast.json`); after a restart mid-run the run is closed as interrupted and
+  resumed ONCE. Runs are killed after `PODCAST_RUN_MAX_MS` (16 h).
+- State for today: `GET http://openbrain-digest:8080/health` -> `routine`.

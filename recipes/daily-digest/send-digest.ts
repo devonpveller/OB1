@@ -3,144 +3,32 @@
 /**
  * openbrain-digest entrypoint.
  *
- * Composition root only. Reads env, constructs clients + sections +
- * renderers, hands them to the orchestrator, and starts the HTTP server.
- * No business logic in this file — all of it lives under src/.
+ * Composition root only: builds the service from the environment
+ * (src/app.ts), starts the morning-routine scheduler (send-by deadline +
+ * alert check, src/routine/routine.ts) and the HTTP server (src/server.ts).
+ * No business logic in this file.
  *
- * Container is long-running. POST /run triggers a digest; openbrain-cron
- * fires it on the daily schedule in docker/cron/crontab.
- *
- * The legacy CLI one-shot mode is gone; for ad-hoc runs, use:
- *   docker exec openbrain-cron sh -c "curl -fsS -X POST http://openbrain-digest:8080/run"
+ * Container is long-running. openbrain-cron POSTs /routine/start at 01:00
+ * local (the chain head: model gate -> gmail pull -> prune -> podcast ->
+ * POST /run here). The digest goes out at most once per local day; by the
+ * send-by deadline (ROUTINE_SEND_BY, default 07:00 America/New_York) at the
+ * latest. Ad-hoc / forced runs:
+ *   docker exec openbrain-cron sh -c "curl -fsS -X POST http://openbrain-digest:8080/run"                 # once-per-day rules apply
+ *   docker exec openbrain-cron sh -c "curl -fsS -X POST -d '{\"force\":true}' http://openbrain-digest:8080/run"  # explicit re-send
  */
 
-import { BrainClient } from "./src/clients/postgrest.ts";
-import { LlmClient } from "./src/clients/llm.ts";
-import { WttrClient } from "./src/clients/wttr.ts";
-import { GoogleOAuth } from "./src/clients/google-oauth.ts";
-import { GmailClient } from "./src/clients/gmail.ts";
-import { GoogleCalendarClient } from "./src/clients/google-calendar.ts";
-import { SemanticSearch } from "./src/considerations/semantic-search.ts";
-import { ConsiderationsSynthesizer } from "./src/considerations/synthesizer.ts";
-import { WeatherSection } from "./src/sections/weather.ts";
-import { CalendarSection } from "./src/sections/calendar.ts";
-import { AiNewsSection } from "./src/sections/ai-news.ts";
-import { PodcastBriefSection } from "./src/sections/podcast-brief.ts";
-import { HtmlRenderer } from "./src/renderers/html.ts";
-import { MarkdownRenderer } from "./src/renderers/markdown.ts";
-import { DigestOrchestrator } from "./src/digest.ts";
+import { buildDigestApp } from "./src/app.ts";
 import { startServer } from "./src/server.ts";
-import type { Section } from "./src/sections/section.ts";
-
-// ─── Env ────────────────────────────────────────────────────────────────────
-
-const env = (k: string, fallback = "") => Deno.env.get(k) ?? fallback;
-const envInt = (k: string, fallback: number) => {
-  const v = parseInt(Deno.env.get(k) ?? "", 10);
-  return Number.isFinite(v) ? v : fallback;
-};
 
 const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
 
-const TO_EMAIL = env("DIGEST_TO");
-const FROM_EMAIL = env("DIGEST_FROM", TO_EMAIL);
-if (!TO_EMAIL) {
-  console.error("DIGEST_TO is required (your own Gmail address).");
+let app;
+try {
+  app = buildDigestApp({ env: (k) => Deno.env.get(k), scriptDir: SCRIPT_DIR });
+} catch (err) {
+  console.error(`${(err as Error).message}`);
   Deno.exit(1);
 }
 
-// ─── Clients ────────────────────────────────────────────────────────────────
-
-const brain = new BrainClient({
-  baseUrl: env("OPEN_BRAIN_URL", "http://openbrain-rest"),
-});
-
-const llm = new LlmClient({
-  chatBase: env("LOCAL_LLM_BASE", "http://llama-cpp:8080/v1"),
-  chatModel: env("LOCAL_LLM_MODEL", "local-small"),
-  embedBase: env("LOCAL_EMBED_BASE", "http://llama-cpp-embed:8080/v1"),
-  embedModel: env("LOCAL_EMBED_MODEL", "local-embed"),
-  bearer: env("LOCAL_LLM_BEARER", "no-key"),
-});
-
-const wttr = new WttrClient();
-
-const gmail = new GmailClient({
-  oauth: new GoogleOAuth({
-    credentialsPath: `${SCRIPT_DIR}credentials.json`,
-    tokenPath: `${SCRIPT_DIR}token.json`,
-  }),
-});
-
-// Separate OAuth instance for calendar (read-only scope; different token
-// file). Same underlying OAuth client. Token is bootstrapped via
-// setup-calendar-token.ts. If the calendar token isn't present, the
-// CalendarSection's first API call throws and the orchestrator omits
-// the section gracefully — digest still goes out.
-const gcal = new GoogleCalendarClient({
-  oauth: new GoogleOAuth({
-    credentialsPath: `${SCRIPT_DIR}credentials.json`,
-    tokenPath: `${SCRIPT_DIR}calendar-token.json`,
-  }),
-});
-
-// ─── Sections ───────────────────────────────────────────────────────────────
-// Order here is the order they appear in the email. Adding a new
-// section: import it above, instantiate, append to this list. No edits
-// to clients, renderers, orchestrator, or server.
-
-// Brain similarity lookup, reused by the synthesizer to seed candidates.
-const semanticSearch = new SemanticSearch(brain, llm);
-
-// Event-aware synthesizer: takes a calendar item, runs targeted brain
-// queries (birthday → gift/personality angle; generic → event-topic
-// angle), and asks the LLM to produce a 1–3 sentence brief grounded in
-// what it finds. Returns null when nothing useful exists — the digest
-// then renders no "Related from your brain" block for that event.
-//
-// Disable by setting CONSIDERATIONS_SYNTH=false.
-const synthesizer = env("CONSIDERATIONS_SYNTH", "true").toLowerCase() === "true"
-  ? new ConsiderationsSynthesizer(semanticSearch, llm, {
-    candidatePoolSize: envInt("CONSIDERATIONS_POOL", 8),
-    similarityThreshold: Number(env("CONSIDERATIONS_THRESHOLD", "0.5")),
-  })
-  : null;
-
-const excludeCalendarIds = env("DIGEST_EXCLUDE_CALENDAR_IDS", "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const sections: Section[] = [
-  new WeatherSection(brain, wttr, llm),
-  new CalendarSection(brain, gcal, synthesizer, {
-    prepWindowDays: envInt("DIGEST_PREP_WINDOW_DAYS", 30),
-    excludeCalendarIds,
-  }),
-  // Researched "deep dive" + episode link, from the podcast pipeline that ran
-  // just before this digest (chain: prune → podcast → digest). Reads the shared
-  // enrichment artifact; omitted (no-op) if the podcast didn't produce one, so
-  // the email still goes out.
-  new PodcastBriefSection({
-    path: env("PODCAST_BRIEF_PATH", "/reports/podcast-brief-latest.json"),
-    maxAgeMs: envInt("PODCAST_BRIEF_MAX_AGE_MS", 12 * 3600 * 1000),
-  }),
-  new AiNewsSection(brain, {
-    windowHours: envInt("DIGEST_WINDOW_HOURS", 24),
-    limit: envInt("DIGEST_LIMIT", 200),
-  }),
-];
-
-// ─── Orchestrator + server ──────────────────────────────────────────────────
-
-const orchestrator = new DigestOrchestrator({
-  sections,
-  htmlRenderer: new HtmlRenderer(),
-  markdownRenderer: new MarkdownRenderer(),
-  gmail,
-  reportDir: "/reports",
-  fromEmail: FROM_EMAIL,
-  toEmail: TO_EMAIL,
-});
-
-startServer({ orchestrator, port: envInt("DIGEST_PORT", 8080) });
+app.routine.start();
+startServer({ routine: app.routine, port: parseInt(Deno.env.get("DIGEST_PORT") ?? "8080", 10) || 8080 });

@@ -70,6 +70,24 @@ services:
       NEXT_TRIGGER_URL: ""
       # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
       LOCAL_LLM_BEARER: ${OB_DIGEST_LLM_KEY:-no-key}
+      # ── Morning routine (mr-routine-outage) ─────────────────────────────
+      # This service is also the chain HEAD (cron -> /routine/start -> model
+      # gate -> CHAIN_HEAD_URL) and owns the send-by deadline, the send-once
+      # markers (ROUTINE_STATE_DIR) and the failure alert. Times are LOCAL in
+      # ROUTINE_TZ; the container itself runs UTC.
+      ROUTINE_TZ: ${ROUTINE_TZ:-America/New_York}
+      ROUTINE_SEND_BY: ${ROUTINE_SEND_BY:-07:00}
+      ROUTINE_ALERT_GRACE_MIN: ${ROUTINE_ALERT_GRACE_MIN:-15}
+      ROUTINE_FOLLOWUP_CUTOFF: ${ROUTINE_FOLLOWUP_CUTOFF:-20:00}
+      ROUTINE_STATE_DIR: /reports/routine
+      CHAIN_HEAD_URL: http://openbrain-gmail-pull:8080/run
+      PODCAST_HEALTH_URL: http://openbrain-podcast:8080/health
+      # Failure alert = the sysadmin out-of-band Telegram channel (same bot +
+      # chat as scripts/sysadmin-mcp/telegram_notify.py). Put the two values in
+      # OB1/docker/.env; unset = inert (the alert is logged, not sent). Alert
+      # text is content-free (step names, counts, times).
+      SYSADMIN_TELEGRAM_BOT_TOKEN: ${SYSADMIN_TELEGRAM_BOT_TOKEN:-}
+      SYSADMIN_TELEGRAM_CHAT_ID: ${SYSADMIN_TELEGRAM_CHAT_ID:-}
     volumes:
       - ../recipes/daily-digest:/app
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
@@ -206,6 +224,12 @@ services:
     environment:
       PORT: "8080"
       PODCAST_RUN_ARGS: "--commit --audio"
+      # mr-routine-outage: same routine clock as openbrain-digest (run record +
+      # restart recovery in ROUTINE_STATE_DIR; link-enrich waits for a down
+      # model until the follow-up cutoff instead of running degraded).
+      ROUTINE_TZ: ${ROUTINE_TZ:-America/New_York}
+      ROUTINE_FOLLOWUP_CUTOFF: ${ROUTINE_FOLLOWUP_CUTOFF:-20:00}
+      ROUTINE_STATE_DIR: /reports/routine
       # When the pipeline finishes (success OR failure), trigger the digest so
       # the email goes out — enriched if the run produced a brief, plain if not.
       # This is what makes "email waits while healthy, sends when done/failed".

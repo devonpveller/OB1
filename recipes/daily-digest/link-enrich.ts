@@ -52,6 +52,9 @@ import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
 import { isModelDown, JobRecord, ResearchClient, ResearchDeadlineError, waitForAll } from "./src/enrich/research-client.ts";
+import { realClock } from "./src/routine/clock.ts";
+import { probeModel, waitForModel } from "./src/routine/model-gate.ts";
+import { RoutineStore } from "./src/routine/store.ts";
 import { filterCandidates, isPromoBody, loadBlocklist, saveBlocklist } from "./src/enrich/promo-filter.ts";
 import { DayReport, DayReportEntry, LinkCandidate } from "./src/enrich/types.ts";
 import {
@@ -211,6 +214,56 @@ const ON_BRIEFING = env(
   "Base the discussion STRICTLY on the provided grounded material. Do NOT introduce any fact, number, company, name, or claim that is not present in it. Keep anything marked 'preliminary' explicitly tentative, and present any open question as unresolved. Cover one segment per labeled topic.",
 );
 
+// ── model gate (mr-routine-outage) ───────────────────────────────────────────
+// Before each stage that does model work, check the model is reachable through
+// the gateway (/health/liveliness + one max_tokens:1 probe; never LiteLLM
+// /health). While it is down: WAIT with bounded backoff - no degraded run (on
+// 2026-10-13 every stage ran against a dead model and fell back). The bound is
+// MODEL_WAIT_UNTIL_MS (podcast-server passes the routine's follow-up cutoff);
+// past it the run stops with exit 3 and writes no brief. Without the routine
+// (a manual run) the bound is now + MODEL_WAIT_MAX_MS (2 h).
+const ROUTINE_DATE = env("ROUTINE_DATE"); // local date of the routine day; "" = manual run
+const ROUTINE_STATE_DIR = env("ROUTINE_STATE_DIR", `${REPORTS_DIR}/routine`);
+const MODEL_WAIT_UNTIL_MS = Number(env("MODEL_WAIT_UNTIL_MS")) || Date.now() + num("MODEL_WAIT_MAX_MS", 7_200_000);
+const MODEL_GATE_INITIAL_MS = num("MODEL_GATE_INITIAL_MS", 30_000);
+const MODEL_GATE_MAX_MS = num("MODEL_GATE_MAX_MS", 300_000);
+// A research job the model went down under is resubmitted after the model is
+// back, at most this many times, instead of becoming email-only.
+const RESEARCH_MODEL_DOWN_RESUBMITS = num("RESEARCH_MODEL_DOWN_RESUBMITS", 3);
+const EXIT_MODEL_DOWN = 3;
+
+class ModelDownExit extends Error {
+  constructor(readonly stage: string, readonly reason: string) {
+    super(`model down at stage "${stage}" until the wait bound (${reason})`);
+  }
+}
+
+async function gateModel(stage: string): Promise<void> {
+  const w = await waitForModel({
+    probe: () =>
+      probeModel({
+        chatBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
+        model: `${env("CHAT_MODEL", "local-large")}:nothink`,
+        apiKey: CHAT_API_KEY,
+      }),
+    clock: realClock,
+    until: MODEL_WAIT_UNTIL_MS,
+    initialMs: MODEL_GATE_INITIAL_MS,
+    maxMs: MODEL_GATE_MAX_MS,
+    label: `link-enrich ${stage}`,
+  });
+  if (!w.up) throw new ModelDownExit(stage, w.lastReason);
+}
+
+async function writeResult(outcome: "produced" | "nothing-to-do" | "model-down" | "error", detail?: string) {
+  if (!ROUTINE_DATE) return;
+  try {
+    await new RoutineStore(ROUTINE_STATE_DIR).saveResult({ date: ROUTINE_DATE, at: new Date().toISOString(), outcome, detail });
+  } catch (err) {
+    console.warn(`[link-enrich] routine result write failed (non-fatal): ${err}`);
+  }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 function pickTopicHint(labels: string[]): string | undefined {
   return labels.find((l) => l.startsWith(LABEL_PREFIX)) ?? labels[0];
@@ -338,6 +391,9 @@ async function main() {
     : [];
   console.log(`[link-enrich] ${emails.length} target email(s) of ${payload?.emails.length ?? 0} in window.`);
 
+  // First model work (promo filter / POI / body classifier) is in this loop.
+  if (emails.length) await gateModel("links");
+
   // ── Gather work items: the EMAIL BODY (the newsletter's curated content — news,
   //    tools, summaries) is the primary source; PLUS genuinely-external content
   //    links for depth. The newsletter's own substack posts are dropped (the body
@@ -459,6 +515,7 @@ async function main() {
   //    Awaiting mapLimit IS the wait-gate: every job reaches a terminal state
   //    before the podcast is built. A job that times out → email-only. ────────
   if (items.length) {
+    await gateModel("research");
     console.log(`[link-enrich] researching ${items.length} link(s) — concurrency=${RESEARCH_CONCURRENCY}, ≤${Math.round(RESEARCH_WAIT_MS / 1000)}s/job…`);
     await mapLimit(items, RESEARCH_CONCURRENCY, processLink);
   }
@@ -466,17 +523,20 @@ async function main() {
   // ── Gap dives: turn the day's "source lacked context" signals + yesterday's
   //    carryover into full research sessions. Best-effort; never blocks the chain.
   if (GAP_DIVE_ENABLED) {
+    await gateModel("gap-dives");
     try { await runGapDives(ledgerRes); }
     catch (err) { console.warn(`[gap-dive] stage failed (non-fatal): ${err}`); }
   }
 
   await writeReport();
+  if (segments.size) await gateModel("script");
   const ep = await maybeRenderEpisode();
   let onEp: OnEpisode | null = null;
   if (ep && AUDIO) onEp = await generateAudio(ep);
   const urls = buildEpisodeUrls(onEp);
   if (COMMIT && ep && threadIds.size) await closeLoop(ep, urls.downloadUrl);
   if (ep) await writeEnrichment(ep, urls);
+  await writeResult(ep ? "produced" : "nothing-to-do", ep ? undefined : "no segments");
   const t = report.totals;
   console.log(
     `[link-enrich] done. emails=${t.emailsScanned} no-links=${t.emailsWithNoLinks} ` +
@@ -521,31 +581,42 @@ async function processLink(item: WorkItem) {
     content = ex.text;
   }
 
-  let jobId: string;
-  try {
-    jobId = await research.submit({
-      query: buildQuery(title, subject, content),
-      seedSources: [{ url: link.url, title, content }],
-      mode: "article", gapResearch: "preliminary", dryRun: !COMMIT, origin: "notebook",
-      // The engine never starts this job after we stop waiting for it.
-      deadlineAt: Date.now() + RESEARCH_WAIT_MS,
-    });
-  } catch (err) { return fallback(`research-submit: ${err}`); }
-  console.log(`      → ${item.preContent ? "newsletter-body" : link.domain} researching (job ${jobId.slice(0, 8)})…`);
+  let jobId = "";
+  let job: JobRecord | null = null;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      jobId = await research.submit({
+        query: buildQuery(title, subject, content),
+        seedSources: [{ url: link.url, title, content }],
+        mode: "article", gapResearch: "preliminary", dryRun: !COMMIT, origin: "notebook",
+        // The engine never starts this job after we stop waiting for it.
+        deadlineAt: Date.now() + RESEARCH_WAIT_MS,
+      });
+    } catch (err) { return fallback(`research-submit: ${err}`); }
+    console.log(`      → ${item.preContent ? "newsletter-body" : link.domain} researching (job ${jobId.slice(0, 8)})${attempt > 1 ? ` [attempt ${attempt}]` : ""}…`);
 
-  let job: JobRecord;
-  // At the deadline waitForDone CANCELS the job (it would otherwise keep its
-  // queue place and run for nobody); the note says when the model was down.
-  try { job = await research.waitForDone(jobId, { timeoutMs: RESEARCH_WAIT_MS, intervalMs: RESEARCH_POLL_MS }); }
-  catch (err) {
-    return fallback(err instanceof ResearchDeadlineError && err.modelDown ? `research: model_down: ${err.message}` : `research: ${err}`);
-  }
-  // isModelDown(job) is the contract; the note prefix mirrors it for the report.
-  if (job.status !== "done") {
-    return fallback(`research: ${isModelDown(job) ? "model_down: " : ""}${job.status}: ${job.error ?? ""}`);
+    // At the deadline waitForDone CANCELS the job (it would otherwise keep its
+    // queue place and run for nobody); the note says when the model was down.
+    let modelDown = false;
+    let note = "";
+    try {
+      job = await research.waitForDone(jobId, { timeoutMs: RESEARCH_WAIT_MS, intervalMs: RESEARCH_POLL_MS });
+      if (job.status === "done") break;
+      // isModelDown(job) is the contract; the note prefix mirrors it for the report.
+      modelDown = isModelDown(job);
+      note = `research: ${modelDown ? "model_down: " : ""}${job.status}: ${job.error ?? ""}`;
+    } catch (err) {
+      modelDown = err instanceof ResearchDeadlineError && err.modelDown;
+      note = modelDown ? `research: model_down: ${(err as Error).message}` : `research: ${err}`;
+    }
+    // mr-routine-outage: a job the MODEL failed is not an email-only verdict on
+    // the article - wait for the model and run it again (bounded).
+    if (!modelDown || attempt > RESEARCH_MODEL_DOWN_RESUBMITS) return fallback(note);
+    console.log(`      ⏸ ${link.domain} — the model went down under job ${jobId.slice(0, 8)}; waiting for it, then resubmitting.`);
+    await gateModel(`research ${link.domain}`); // throws ModelDownExit past the wait bound
   }
 
-  await recordDoneJob({ base, jobId, email, title, subject }, job);
+  await recordDoneJob({ base, jobId, email, title, subject }, job!);
 }
 
 async function recordDoneJob(p: Pending, job: JobRecord) {
@@ -818,6 +889,7 @@ async function writeEnrichment(ep: Episode, urls: { viewUrl: string | null; down
   const enrichment: EmailEnrichment = {
     generatedAt: report.generatedAt,
     date: report.generatedAt.slice(0, 10),
+    ...(ROUTINE_DATE ? { routineDate: ROUTINE_DATE } : {}),
     episode: { name: ep.name, title: ep.title, viewUrl: urls.viewUrl, downloadUrl: urls.downloadUrl },
     segments: segs,
     followUps: [...new Set(followUps.map((g) => g.trim()).filter(Boolean))].slice(0, 6),
@@ -1012,4 +1084,17 @@ function renderMarkdown(r: DayReport): string {
   return lines.join("\n") + "\n";
 }
 
-try { await main(); } finally { closeEgress(); }
+try {
+  await main();
+} catch (err) {
+  if (err instanceof ModelDownExit) {
+    console.error(`[link-enrich] STOPPED: ${err.message} - no degraded run, no brief written.`);
+    await writeResult("model-down", err.stage);
+    closeEgress();
+    Deno.exit(EXIT_MODEL_DOWN);
+  }
+  await writeResult("error", (err as Error)?.name ?? "error");
+  throw err;
+} finally {
+  closeEgress();
+}

@@ -13,6 +13,7 @@ import { WeatherPayload } from "../sections/weather.ts";
 import { AiNewsPayload, EmailGroup } from "../sections/ai-news.ts";
 import { CalendarItem, CalendarPayload, PrepItem } from "../sections/calendar.ts";
 import { PodcastBriefPayload } from "../sections/podcast-brief.ts";
+import { RoutineNoticePayload } from "../sections/routine-notice.ts";
 
 export class HtmlRenderer {
   render(sections: SectionData[], opts: { generatedAt: string }): string {
@@ -32,10 +33,24 @@ ${body}
       case "calendar": return renderCalendar(s.payload as CalendarPayload);
       case "ai_news":  return renderAiNews(s.payload as AiNewsPayload);
       case "podcast_brief": return renderPodcastBrief(s.payload as PodcastBriefPayload);
+      case "routine_notice": return renderRoutineNotice(s.payload as RoutineNoticePayload);
       case "todos":    return ""; // wired in Phase 4
       default:         return "";
     }
   }
+}
+
+// ─── Routine notice (mr-routine-outage) ─────────────────────────────────────
+// A section that did not finish is SAID, never left out as if it were done.
+
+function renderRoutineNotice(n: RoutineNoticePayload): string {
+  const color = n.tone === "failed" ? "#c62828" : n.tone === "pending" ? "#ef6c00" : "#1565c0";
+  const items = n.lines.map((l) => `<li style="margin:2px 0;">${escHtml(l)}</li>`).join("");
+  return `
+<div style="border-left:4px solid ${color};background:#fafafa;padding:10px 14px;margin-bottom:20px;border-radius:4px;">
+  <div style="font-weight:600;color:${color};font-size:14px;">${escHtml(n.title)}</div>
+  <ul style="margin:6px 0 0 18px;padding:0;font-size:13px;color:#333;">${items}</ul>
+</div>`;
 }
 
 // ─── Weather ─────────────────────────────────────────────────────────────────

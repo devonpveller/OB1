@@ -20,6 +20,8 @@ export interface PodcastBriefOptions {
   path: string;
   /** Reject artifacts older than this (the podcast runs minutes before). */
   maxAgeMs?: number;
+  /** Clock for the age check (the routine's clock; default Date.now). */
+  now?: () => number;
 }
 
 export class PodcastBriefSection implements Section {
@@ -28,7 +30,7 @@ export class PodcastBriefSection implements Section {
   constructor(private readonly opts: PodcastBriefOptions) {}
 
   async produce(): Promise<SectionData<PodcastBriefPayload> | null> {
-    const data = await loadEnrichment(this.opts.path, this.opts.maxAgeMs);
+    const data = await loadEnrichment(this.opts.path, this.opts.maxAgeMs, this.opts.now);
     if (!data) return null;
     const hasContent = !!data.episode ||
       data.segments.some((s) => s.items.length > 0) ||

@@ -21,15 +21,24 @@
 # ────────────────────────────────────────────────────────────────────────
 #
 # Trigger model is **event-chained**, not multi-cron. Cron only fires the
-# start of the chain (pull). On success:
-#   pull   → POSTs http://openbrain-gmail-prune:8080/run  (NEXT_TRIGGER_URL on pull)
-#   prune  → POSTs http://openbrain-digest:8080/run        (NEXT_TRIGGER_URL on prune)
+# start of the chain (the routine head in openbrain-digest). Then:
+#   digest /routine/start → waits until the model answers through the gateway
+#                           (bounded backoff; never LiteLLM /health), then
+#                           POSTs http://openbrain-gmail-pull:8080/run with this body
+#   pull   → POSTs http://openbrain-gmail-prune:8080/run   (NEXT_TRIGGER_URL on pull)
+#   prune  → POSTs http://openbrain-podcast:8080/run       (NEXT_TRIGGER_URL on prune)
 #   prune  → also triggers wiki recompile (separate, inside the script)
-#   digest → end of chain
+#   podcast → POSTs http://openbrain-digest:8080/run       (any exit)
+#   digest → sends the digest ONCE per local day (send-once marker in
+#            D:\_data\routine\), or the one follow-up for a late section.
 #
-# This guarantees digest sees the latest pull's output. If any step
-# fails, the chain stops — absence of the morning digest signals an
-# upstream problem.
+# The SEND-BY DEADLINE is NOT a cron line: openbrain-digest keeps an in-process
+# timer at ROUTINE_SEND_BY (default 07:00) in ROUTINE_TZ (default
+# America/New_York), so it follows DST. At the deadline the digest goes out with
+# whatever is ready (unfinished sections marked); at deadline + 15 min a missing
+# digest or podcast raises ONE Telegram alert (sysadmin out-of-band channel).
+# A re-fire of this line the same day after delivery is refused (nothing new).
+# mr-routine-outage, 2026-10-13.
 #
 # To schedule a new top-of-chain job: add a line below pointing at the
 # service's /run endpoint. To insert a step into an existing chain:
@@ -51,7 +60,7 @@
 #   0 5 * * *   → 05:00 UTC = 01:00 EDT / 00:00 EST
 #   30 11 * * * → 11:30 UTC = 07:30 EDT / 06:30 EST
 #   0 12 * * 1  → noon UTC every Monday only
-0 5 * * *   curl -fsS -X POST -H 'content-type: application/json' -d '{"labelsPrefix":"brain/","window":"90d","limit":500}' http://openbrain-gmail-pull:8080/run
+0 5 * * *   curl -fsS -X POST -H 'content-type: application/json' -d '{"labelsPrefix":"brain/","window":"90d","limit":500}' http://openbrain-digest:8080/routine/start
 
 # Grounding backfiller (S2) — bounded off-peak GLOBAL sweep, 07:00 UTC (= 03:00
 # EDT), after the daily chain has settled the day's new claims. Drains the

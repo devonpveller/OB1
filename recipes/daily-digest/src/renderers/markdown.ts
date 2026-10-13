@@ -10,6 +10,7 @@ import { WeatherPayload } from "../sections/weather.ts";
 import { AiNewsPayload, EmailGroup } from "../sections/ai-news.ts";
 import { CalendarItem, CalendarPayload, PrepItem } from "../sections/calendar.ts";
 import { PodcastBriefPayload } from "../sections/podcast-brief.ts";
+import { RoutineNoticePayload } from "../sections/routine-notice.ts";
 
 export class MarkdownRenderer {
   render(sections: SectionData[], opts: { subject: string }): string {
@@ -24,10 +25,15 @@ export class MarkdownRenderer {
       case "calendar": return renderCalendar(s.payload as CalendarPayload);
       case "ai_news":  return renderAiNews(s.payload as AiNewsPayload);
       case "podcast_brief": return renderPodcastBrief(s.payload as PodcastBriefPayload);
+      case "routine_notice": return renderRoutineNotice(s.payload as RoutineNoticePayload);
       case "todos":    return ""; // Phase 4
       default:         return "";
     }
   }
+}
+
+function renderRoutineNotice(n: RoutineNoticePayload): string {
+  return [`> **${n.title}**`, ...n.lines.map((l) => `> - ${l}`), ""].join("\n");
 }
 
 function renderPodcastBrief(d: PodcastBriefPayload): string {

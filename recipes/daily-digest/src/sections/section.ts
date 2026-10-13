@@ -21,7 +21,8 @@ export type SectionKind =
   | "ai_news"
   | "calendar"
   | "todos"
-  | "podcast_brief";
+  | "podcast_brief"
+  | "routine_notice";
 
 /** What a section returns to the renderers. Payload is section-typed. */
 export interface SectionData<P = unknown> {

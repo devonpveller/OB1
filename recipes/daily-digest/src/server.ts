@@ -1,41 +1,42 @@
 /**
- * HTTP server. Listens on /run (POST) and /health (GET).
+ * HTTP server. Listens on:
+ *   POST /routine/start  the morning chain head (openbrain-cron, 01:00 local).
+ *                        Body = the gmail-pull body, passed through. Waits for
+ *                        the model, then triggers the pull. {"force":true} in
+ *                        the query (?force=1) restarts a finished day.
+ *   POST /run            the chain tail (openbrain-podcast when it finishes;
+ *                        gmail-prune's fallback). Sends the digest at most once
+ *                        per local day, or the one follow-up. Body
+ *                        {"force":true} = an explicit re-send.
+ *   GET  /health         last result + today's routine state.
  *
- * The server owns:
- *   - concurrency gating (a single in-flight run; 409 on overlap)
- *   - last-result snapshot for /health observability
- *
- * It does NOT own:
- *   - what a digest is (DigestOrchestrator)
- *   - where data comes from (clients)
- *   - how it's rendered (renderers)
- *
- * Adding a new endpoint or auth check happens here; adding a new
- * section happens in src/sections/ without touching this file.
+ * The server owns HTTP only. WHEN and WHETHER to send is the MorningRoutine
+ * (src/routine/routine.ts); what a digest is, is the DigestOrchestrator.
  */
 
-import { DigestOrchestrator, DigestResult } from "./digest.ts";
+import { MorningRoutine, RunOutcome } from "./routine/routine.ts";
 
 export interface ServerOptions {
-  orchestrator: DigestOrchestrator;
+  routine: MorningRoutine;
   port: number;
+  hostname?: string;
+  signal?: AbortSignal;
+  onListen?: (addr: Deno.NetAddr) => void;
 }
 
-export function startServer(opts: ServerOptions): void {
-  let running = false;
+export function startServer(opts: ServerOptions): Deno.HttpServer<Deno.NetAddr> {
+  let inFlight = 0;
   let lastRunAt: string | null = null;
-  let lastResult: DigestResult | null = null;
+  let lastOutcome: RunOutcome | null = null;
   let lastError: string | null = null;
 
-  // Chain tail: after the email is sent, optionally trigger the next step
-  // (openbrain-podcast). Best-effort and fired AFTER the run — it can never
-  // delay or fail the email. Inert until NEXT_TRIGGER_URL is set (same env
-  // convention as pull/prune). The digest stays the end of the chain otherwise.
+  // Chain tail: optionally trigger a next step after a run. Inert while
+  // NEXT_TRIGGER_URL is empty (the digest is the end of the chain today).
   const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") ?? "";
   const chainTrigger = async () => {
     if (!NEXT_TRIGGER_URL) return;
     try {
-      const res = await fetch(NEXT_TRIGGER_URL, { method: "POST" });
+      const res = await fetch(NEXT_TRIGGER_URL, { method: "POST", signal: AbortSignal.timeout(30_000) });
       console.log(`digest chain → ${NEXT_TRIGGER_URL} ${res.status}`);
     } catch (err) {
       console.warn(`digest chain trigger failed (non-fatal): ${err}`);
@@ -48,48 +49,71 @@ export function startServer(opts: ServerOptions): void {
       headers: { "Content-Type": "application/json" },
     });
 
-  Deno.serve({ port: opts.port, hostname: "0.0.0.0" }, (req) => {
+  const readBody = async (req: Request): Promise<Record<string, unknown> | null> => {
+    const text = await req.text();
+    if (!text.trim()) return {};
+    try {
+      const v = JSON.parse(text);
+      return v && typeof v === "object" ? v as Record<string, unknown> : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const server = Deno.serve({
+    port: opts.port,
+    hostname: opts.hostname ?? "0.0.0.0",
+    signal: opts.signal,
+    onListen: (addr) => {
+      console.log(`openbrain-digest listening on :${addr.port}`);
+      opts.onListen?.(addr);
+    },
+  }, async (req) => {
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/health") {
       return jsonResponse({
         service: "openbrain-digest",
-        running,
+        running: inFlight > 0,
         last_run_at: lastRunAt,
-        last_result: lastResult,
+        last_result: lastOutcome,
         last_error: lastError,
+        routine: await opts.routine.status().catch((e) => ({ error: String(e) })),
       });
     }
 
+    if (req.method === "POST" && url.pathname === "/routine/start") {
+      const body = await readBody(req);
+      if (body === null) return jsonResponse({ started: false, reason: "bad JSON body" }, 400);
+      const force = url.searchParams.get("force") === "1";
+      const r = await opts.routine.startChain(body, { force });
+      return jsonResponse(r.body, r.status);
+    }
+
     if (req.method === "POST" && url.pathname === "/run") {
-      if (running) {
-        return jsonResponse(
-          { started: false, reason: "run already in progress" },
-          409,
-        );
-      }
-      running = true;
+      const body = await readBody(req);
+      if (body === null) return jsonResponse({ started: false, reason: "bad JSON body" }, 400);
+      const force = body.force === true;
+      inFlight++;
       lastError = null;
-      // Fire-and-forget; cron should not hold a connection for the
-      // duration of a digest run (LLM call + Gmail send = seconds).
+      // Fire-and-forget: the caller (podcast / prune) must not hold a
+      // connection while the digest waits for the model or sends.
       (async () => {
         try {
-          lastResult = await opts.orchestrator.run();
+          lastOutcome = await opts.routine.onRun({ force });
         } catch (err) {
           lastError = err instanceof Error ? err.message : String(err);
-          lastResult = null;
-          console.error(`Digest orchestrator failed: ${lastError}`);
+          console.error(`Digest run failed: ${lastError}`);
         } finally {
-          running = false;
+          inFlight--;
           lastRunAt = new Date().toISOString();
         }
-        await chainTrigger(); // email already sent; trigger the podcast step
+        await chainTrigger();
       })();
-      return jsonResponse({ started: true }, 202);
+      return jsonResponse({ started: true, force }, 202);
     }
 
     return jsonResponse({ error: "not found", path: url.pathname }, 404);
   });
-
-  console.log(`openbrain-digest listening on :${opts.port}`);
+  return server;
 }
