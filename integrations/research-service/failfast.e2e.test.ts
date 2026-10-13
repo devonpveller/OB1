@@ -38,11 +38,11 @@ async function sql<T>(q: string, args: unknown[] = []): Promise<T[]> {
   try { return (await c.queryObject<T>(q, args)).rows; } finally { c.release(); }
 }
 
-type GwMode = "down" | "up" | "429" | "block";
+type GwMode = "down" | "up" | "429" | "block" | "down-after-synthesis";
 
 function stubGateway(initial: GwMode) {
   let mode: GwMode = initial;
-  let chats = 0, inFlight = 0, maxInFlight = 0, blocked = 0;
+  let chats = 0, inFlight = 0, maxInFlight = 0, blocked = 0, synthServed = false;
   let release: () => void = () => {};
   let gate = new Promise<void>((r) => { release = r; });
   const ac = new AbortController();
@@ -56,9 +56,11 @@ function stubGateway(initial: GwMode) {
     chats++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
     try {
       if (mode === "block") { blocked++; await gate; }
+      if (mode === "down-after-synthesis" && synthServed) mode = "down";
       if (mode === "down") return new Response(REAL_DOWN_502, { status: 502, headers: { "content-type": "application/json" } });
       if (mode === "429") return new Response(`{"error":{"message":"llm-queue: projected wait exceeds budget"}}`, { status: 429 });
       const sys = String(body?.messages?.[0]?.content ?? "");
+      if (sys.includes("grounded synthesizer")) synthServed = true;
       let content = "[SOURCED] The article explains how to prepare garden soil. [Source 1]";
       if (sys.includes("INJECTION or CLEAN")) content = "CLEAN";
       else if (sys.includes("RELEVANT or IRRELEVANT")) content = "RELEVANT";
@@ -81,12 +83,14 @@ function stubGateway(initial: GwMode) {
 }
 
 function stubCurator() {
+  let calls = 0;
   const ac = new AbortController();
   const server = Deno.serve({ port: 0, hostname: "127.0.0.1", signal: ac.signal, onListen: () => {} }, async (req) => {
+    calls++;
     await req.text();
     return Response.json({ thread_id: null, persist: { sources_written: 0 }, claims: { claimsWritten: 0 } });
   });
-  return { url: `http://127.0.0.1:${server.addr.port}`, async close() { ac.abort(); await server.finished; } };
+  return { url: `http://127.0.0.1:${server.addr.port}`, get calls() { return calls; }, async close() { ac.abort(); await server.finished; } };
 }
 
 function freePort(): number {
@@ -167,19 +171,19 @@ async function until<T>(what: string, fn: () => Promise<T | null | undefined | f
   throw new Error(`timed out after ${ms}ms waiting for: ${what}${svc ? `\n--- service log (tail) ---\n${svc.log.slice(-2500)}` : ""}`);
 }
 
-async function withStack(mode: GwMode, fn: (s: { gw: ReturnType<typeof stubGateway>; svc: Awaited<ReturnType<typeof startService>> }) => Promise<void>) {
+async function withStack(mode: GwMode, fn: (s: { gw: ReturnType<typeof stubGateway>; svc: Awaited<ReturnType<typeof startService>>; cur: ReturnType<typeof stubCurator> }) => Promise<void>) {
   const gw = stubGateway(mode);
   const cur = stubCurator();
   const svc = await startService(gw, cur.url);
-  try { await fn({ gw, svc }); }
+  try { await fn({ gw, svc, cur }); }
   finally { await svc.stop(); await gw.close(); await cur.close(); }
 }
 
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
 
 Deno.test({ name: "E1 model DOWN (real 502 body): the job PAUSES as model_down within seconds - not 77 min of retries", ...opts, fn: async () => {
-  await withStack("down", async ({ gw, svc }) => {
-    const { job_id } = await submit(svc.base);
+  await withStack("down", async ({ gw, svc, cur }) => {
+    const { job_id } = await submit(svc.base, { dry_run: false });
     const t0 = Date.now();
     const paused = await until("job paused with progress.code=model_down", async () => {
       const j = await getJob(svc.base, job_id!);
@@ -194,6 +198,7 @@ Deno.test({ name: "E1 model DOWN (real 502 body): the job PAUSES as model_down w
     const n = gw.chats - n0;
     assert(n <= 6, `while paused the gateway saw ${n} requests in 6 s (probes only)`);
     assertEquals((await row(job_id!)).status, "queued");
+    assertEquals(cur.calls, 0, "nothing from the degraded run was filed");
   });
 }});
 
@@ -285,5 +290,17 @@ Deno.test({ name: "E6 a garbage deadline_at is refused (400), never stored where
     const ok = await submit(svc.base, { deadline_at: Date.now() + 3_600_000 });
     assertEquals(ok.status, 202);
     await until("the valid job runs to done", async () => (await row(ok.job_id!)).status === "done", 60_000, svc);
+  });
+}});
+
+Deno.test({ name: "E7 model goes down AFTER the synthesis (prose render fails open inside the harness): paused, nothing filed, never 'done'", ...opts, fn: async () => {
+  await withStack("down-after-synthesis", async ({ svc, cur }) => {
+    const { job_id } = await submit(svc.base, { dry_run: false });
+    const r = await until("job paused or terminal", async () => {
+      const x = await row(job_id!);
+      return x.progress?.code === "model_down" || ["done", "error", "cancelled"].includes(x.status) ? x : null;
+    }, 45_000, svc);
+    assertEquals([r.status, r.progress?.code], ["queued", "model_down"], `degraded run must pause, got ${r.status}`);
+    assertEquals(cur.calls, 0, "the degraded run was not filed to the curator");
   });
 }});
