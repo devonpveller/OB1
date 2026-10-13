@@ -19,11 +19,16 @@ export interface SendArgs {
   to: string;
   subject: string;
   htmlBody: string;
+  /** X-OpenBrain-Digest header value ("<date>;<kind>") - what the Sent-folder
+   *  check looks for (src/routine/sent-check.ts). */
+  marker?: string;
 }
 
 /** What the digest needs from a mail transport (tests inject a recorder). */
 export interface MailTransport {
   sendHtml(args: SendArgs): Promise<void>;
+  /** Dependency check: can we get a token at all? (throws if not) */
+  checkAuth?(): Promise<void>;
 }
 
 /**
@@ -42,6 +47,10 @@ export class MailSendError extends Error {
 
 export class GmailClient implements MailTransport {
   constructor(private readonly opts: GmailClientOptions) {}
+
+  async checkAuth(): Promise<void> {
+    await this.opts.oauth.getAccessToken();
+  }
 
   async sendHtml(args: SendArgs): Promise<void> {
     let accessToken: string;
@@ -81,7 +90,7 @@ export class GmailClient implements MailTransport {
     }
   }
 
-  private buildRawMessage({ from, to, subject, htmlBody }: SendArgs): string {
+  private buildRawMessage({ from, to, subject, htmlBody, marker }: SendArgs): string {
     // RFC 2822 with UTF-8 subject via encoded-word + 8bit HTML body.
     const encodedSubject = `=?UTF-8?B?${
       base64UrlEncode(subject).replace(/-/g, "+").replace(/_/g, "/")
@@ -90,6 +99,7 @@ export class GmailClient implements MailTransport {
       `From: ${from}`,
       `To: ${to}`,
       `Subject: ${encodedSubject}`,
+      ...(marker ? [`X-OpenBrain-Digest: ${marker.replace(/[^A-Za-z0-9;:._-]/g, "")}`] : []),
       `MIME-Version: 1.0`,
       `Content-Type: text/html; charset=utf-8`,
       `Content-Transfer-Encoding: 8bit`,

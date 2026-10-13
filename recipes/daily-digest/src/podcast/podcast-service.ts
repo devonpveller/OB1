@@ -24,9 +24,7 @@
  */
 
 import { Clock, localDate, zonedEpoch } from "../routine/clock.ts";
-import { PodcastRecord, readJson, RoutineStore } from "../routine/store.ts";
-import { dayComplete } from "../routine/routine.ts";
-import type { DayState } from "../routine/store.ts";
+import { DayRecord, PodcastRecord, readJson, RoutineStore } from "../routine/store.ts";
 
 export interface PodcastServiceDeps {
   clock: Clock;
@@ -86,13 +84,13 @@ export class PodcastService {
     await this.#d.store.savePodcast(rec);
     this.#log(`[podcast] boot: the run started ${last.startedAt} was interrupted (service restart); lock is free.`);
     const resumes = rec.runs.filter((r) => r.resume).length;
-    const day = await readJson<DayState>(this.#d.store.dayPath(date));
+    const day = await readJson<DayRecord>(this.#d.store.dayPath(date));
     const cutoff = zonedEpoch(date, this.#d.followUpCutoff, this.#d.tz);
     if (resumes >= this.#d.maxResumes) {
       this.#log(`[podcast] not resuming: ${resumes} resume(s) already today (max ${this.#d.maxResumes}).`);
       return { interrupted: true, resumed: false };
     }
-    if (day && dayComplete(day)) return { interrupted: true, resumed: false };
+    if (day?.state === "done") return { interrupted: true, resumed: false };
     if (this.#d.clock.now() >= cutoff) return { interrupted: true, resumed: false };
     this.#log(`[podcast] resuming today's run once.`);
     await this.#start(date, true);
@@ -161,6 +159,13 @@ export class PodcastService {
         } catch { /* already gone */ }
       }, Math.max(1, d.maxRunMs));
       kill.signal.addEventListener("abort", () => clearTimeout(timer));
+      // Round 3: the heartbeat the routine's IN PROGRESS check reads (a run
+      // whose heartbeat goes stale with no live process is FAILED, not "running").
+      const beat = setInterval(() => {
+        this.#heartbeat(date).catch(() => {});
+      }, 60_000);
+      kill.signal.addEventListener("abort", () => clearInterval(beat));
+      await this.#heartbeat(date).catch(() => {});
       code = (await child.status).code;
       kill.abort();
       this.#log(`[podcast] run finished (exit ${code}${timedOut ? ", killed at the run limit" : ""}).`);
@@ -172,16 +177,36 @@ export class PodcastService {
       this.lastCode = code;
       this.lastFinishedAt = this.#iso();
       try {
-        const rec = (await d.store.loadPodcast(date)) ?? { date, runs: [{ startedAt: this.lastStartedAt! }] };
-        const last = rec.runs.at(-1)!;
-        Object.assign(last, { finishedAt: this.lastFinishedAt, code, ...(timedOut ? { timedOut: true } : {}) });
-        await d.store.savePodcast(rec);
+        await this.#serial(async () => {
+          const rec = (await d.store.loadPodcast(date)) ?? { date, runs: [{ startedAt: this.lastStartedAt! }] };
+          const last = rec.runs.at(-1)!;
+          Object.assign(last, { finishedAt: this.lastFinishedAt, code, ...(timedOut ? { timedOut: true } : {}) });
+          await d.store.savePodcast(rec);
+        });
       } catch (e) {
         console.error(`[podcast] run record write failed: ${e}`);
       }
       this.running = false;
       await this.#chainTrigger();
     }
+  }
+
+  // One writer, serialized: a heartbeat can never overwrite the finish record.
+  #recTail: Promise<unknown> = Promise.resolve();
+  #serial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#recTail.then(fn, fn);
+    this.#recTail = run.catch(() => {});
+    return run;
+  }
+
+  #heartbeat(date: string): Promise<void> {
+    return this.#serial(async () => {
+      const rec = await this.#d.store.loadPodcast(date);
+      const last = rec?.runs.at(-1);
+      if (!rec || !last || last.finishedAt) return;
+      last.heartbeatAt = this.#iso();
+      await this.#d.store.savePodcast(rec);
+    });
   }
 
   async #chainTrigger(): Promise<void> {

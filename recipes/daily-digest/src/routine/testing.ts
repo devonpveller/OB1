@@ -199,11 +199,17 @@ export interface SentMail {
   to: string;
   html: string;
   at: number;
+  /** X-OpenBrain-Digest header, if any. */
+  marker: string;
 }
 export interface GmailStub extends Stub {
   mode: "ok" | "fail500";
   sent: SentMail[];
   attempts: number;
+  /** Sent-folder reads (messages.list / messages.get) - what the Sent check asked. */
+  reads: number;
+  /** Sent-folder answers 403 (a gmail.send-only token). */
+  readForbidden: boolean;
 }
 
 function b64urlDecode(s: string): string {
@@ -212,8 +218,22 @@ function b64urlDecode(s: string): string {
 }
 
 export function gmailStub(clock: { now(): number }): GmailStub {
-  const g = { mode: "ok", sent: [] as SentMail[], attempts: 0 } as GmailStub;
+  const g = { mode: "ok", sent: [] as SentMail[], attempts: 0, reads: 0, readForbidden: false } as GmailStub;
   const s = stubServer(async (req, path) => {
+    // Sent folder (read-only check): list SENT newest first, get headers.
+    if (req.method === "GET" && path.startsWith("/gmail/v1/users/me/messages")) {
+      g.reads++;
+      if (g.readForbidden) return Response.json({ error: { code: 403, message: "Request had insufficient authentication scopes." } }, { status: 403 });
+      const id = path.split("/").pop()!;
+      if (id === "messages") {
+        const u = new URL(req.url);
+        if (u.searchParams.get("labelIds") !== "SENT") return Response.json({ messages: [] });
+        return Response.json({ messages: g.sent.map((_, i) => ({ id: `m${i + 1}` })).reverse() });
+      }
+      const m = g.sent[Number(id.slice(1)) - 1];
+      if (!m) return Response.json({ error: { code: 404 } }, { status: 404 });
+      return Response.json({ id, payload: { headers: m.marker ? [{ name: "X-OpenBrain-Digest", value: m.marker }] : [] } });
+    }
     if (req.method !== "POST" || path !== "/gmail/v1/users/me/messages/send") return new Response("nf", { status: 404 });
     g.attempts++;
     const { raw } = await req.json() as { raw: string };
@@ -224,7 +244,8 @@ export function gmailStub(clock: { now(): number }): GmailStub {
     const enc = /=\?UTF-8\?B\?(.*)\?=/.exec(subjLine)?.[1] ?? "";
     const subject = new TextDecoder().decode(Uint8Array.from(atob(enc), (c) => c.charCodeAt(0)));
     const to = (head.split("\r\n").find((l) => l.startsWith("To: ")) ?? "").slice(4);
-    g.sent.push({ subject, to, html: rest.join("\r\n\r\n"), at: clock.now() });
+    const marker = (head.split("\r\n").find((l) => l.startsWith("X-OpenBrain-Digest: ")) ?? "").slice(20);
+    g.sent.push({ subject, to, html: rest.join("\r\n\r\n"), at: clock.now(), marker });
     return Response.json({ id: `m${g.sent.length}` });
   });
   return Object.assign(g, s);
@@ -246,16 +267,41 @@ export async function fakeOAuthFiles(dir: string): Promise<{ credentialsPath: st
 // ── Telegram Bot API stub ────────────────────────────────────────────────────
 export interface TelegramStub extends Stub {
   messages: Array<{ chatId: string; text: string; at: number }>;
+  /** Real-time answer delay (an alert in flight). */
+  delayMs: number;
 }
 export function telegramStub(clock: { now(): number }): TelegramStub {
-  const t = { messages: [] as TelegramStub["messages"] } as TelegramStub;
+  const t = { messages: [] as TelegramStub["messages"], delayMs: 0 } as TelegramStub;
   const s = stubServer(async (req, path) => {
     if (req.method !== "POST" || !/^\/bot[^/]+\/sendMessage$/.test(path)) return new Response("nf", { status: 404 });
+    if (t.delayMs) await new Promise((r) => setTimeout(r, t.delayMs));
     const form = new URLSearchParams(await req.text());
     t.messages.push({ chatId: form.get("chat_id") ?? "", text: form.get("text") ?? "", at: clock.now() });
     return Response.json({ ok: true, result: { message_id: t.messages.length } });
   });
   return Object.assign(t, s);
+}
+
+// ── owner channel (Mattermost #sysadmin) stub ────────────────────────────────
+export interface OwnerStub extends Stub {
+  posts: Array<{ channel: string; message: string; at: number }>;
+}
+export function ownerStub(clock: { now(): number }): OwnerStub {
+  const o = { posts: [] as OwnerStub["posts"] } as OwnerStub;
+  const s = stubServer(async (req, path) => {
+    if (req.method !== "POST" || path !== "/api/v4/posts") return new Response("nf", { status: 404 });
+    const b = await req.json() as { channel_id: string; message: string };
+    o.posts.push({ channel: b.channel_id, message: b.message, at: clock.now() });
+    return Response.json({ id: `p${o.posts.length}` }, { status: 201 });
+  });
+  return Object.assign(o, s);
+}
+
+/** research-engine /health stub: {ok, model:{state}} as mr-research-failfast serves it. */
+export function researchHealthStub(): Stub & { state: "up" | "down" } {
+  const r = { state: "up" as "up" | "down" };
+  const s = stubServer(() => Response.json({ ok: true, model: { state: r.state, reason: r.state === "down" ? "model_unreachable" : null } }));
+  return Object.assign(r, s);
 }
 
 // ── brain (PostgREST) stub ───────────────────────────────────────────────────

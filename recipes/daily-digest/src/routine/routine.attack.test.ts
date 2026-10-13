@@ -1,6 +1,16 @@
 // Tester attack suite from mr-routine-outage attempt 1 (tester-mr-routine-outage-1),
-// kept VERBATIM below this header as a regression guard for round 2 (T3/T4/T5 were
-// the failing cases). Source: plan store test-evidence/mr-routine-outage.attempt1.attack.test.ts.
+// the round-3 REGRESSION SUITE. Source: plan store
+// test-evidence/mr-routine-outage.attempt1.attack.test.ts. Kept as written EXCEPT
+// where it reached into the round-1/2 machinery the round-3 redesign removed
+// (send-once claim files, 202 answers, alert.delivered). Each port is marked
+// "ROUND-3 PORT:" with what changed and why; scenarios and intent are unchanged.
+//  - harness: an `env` passthrough (T2, T7 set ROUTINE_CHAIN_START so the
+//    in-process timer does not start the chain itself - round 3's timer starts a
+//    chain cron missed, which these tests did not model).
+//  - T3: the crashed send is a record in status "sending" by a dead process
+//    (there are no claim files); same assertions.
+//  - T6: alert.delivered -> alert.status / lastOutcome.
+//  - T7: /routine/start answers 200 (idempotent ensureToday), not 202.
 // Run: deno test --allow-all src/routine/routine.attack.test.ts
 // TESTER attack suite (mr-routine-outage, tester-mr-routine-outage-1). Not part of the deliverable.
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert@1";
@@ -44,6 +54,7 @@ async function harness(o: {
   alerts?: (tgUrl: string) => AlertSender;
   tgMode?: () => number; // status for the telegram stub (200 = ok)
   pre?: (store: RoutineStore) => Promise<void>;
+  env?: Record<string, string>; // ROUND-3 PORT: passthrough
 }) {
   const dir = await Deno.makeTempDir({ prefix: "routine-tester-" });
   const reports = `${dir}/reports`;
@@ -102,6 +113,12 @@ async function harness(o: {
     PODCAST_HEALTH_URL: `${podcastUrl}/health`,
     ROUTINE_TZ: TZ,
     ROUTINE_STATE_DIR: stateDir,
+    // ROUND-3 PORT: this suite was written when only cron started the chain. Round 3's
+    // timer also starts a chain cron missed (from ROUTINE_CHAIN_START). Pinning it after
+    // the cutoff makes every scenario start exactly as written (no chain unless the test
+    // calls /routine/start itself). Tests that call cron are unaffected.
+    ROUTINE_CHAIN_START: "23:00",
+    ...(o.env ?? {}),
   };
   const logs: string[] = [];
   const app = buildDigestApp({
@@ -153,7 +170,8 @@ Deno.test({
   name: "T2 multi-day scheduler across the fall-back change: one deadline digest per day at 07:00 LOCAL, one alert per day, yesterday's claims never block today",
   ...opts,
   async fn() {
-    const h = await harness({ start: Z("10:00", "2026-10-31"), gateway: "up" });
+    // ROUND-3 PORT: no chain on these days (timer chain start after the cutoff)
+    const h = await harness({ start: Z("10:00", "2026-10-31"), gateway: "up", env: { ROUTINE_CHAIN_START: "23:00" } });
     try {
       await h.clock.advanceTo(Z("13:00", "2026-11-02"));
       const at = h.gmail.sent.map((m) => iso(m.at));
@@ -175,7 +193,10 @@ Deno.test({
       start: Z("10:50"),
       gateway: "up",
       pre: async (s) => {
-        await Deno.writeTextFile(s.claimPath(DATE, "digest"), JSON.stringify({ at: iso(Z("10:59")), mode: "full" }));
+        // ROUND-3 PORT: the crashed send = a record left "sending" by a dead process
+        await s.update(DATE, (r) => {
+          Object.assign(r.digest, { status: "sending", sendingAt: iso(Z("10:59")), sendingBy: "dead", attempts: 1, lastAttemptAt: iso(Z("10:59")) });
+        });
       },
     });
     try {
@@ -260,12 +281,14 @@ Deno.test({
   name: "T6 Telegram unconfigured: nothing sent, recorded delivered=false",
   ...opts,
   async fn() {
-    const h = await harness({ start: Z("10:50"), gateway: "up", alerts: (u) => new TelegramNotifier({ token: "", chatId: "", apiBase: u }) });
+    // ROUND-3 PORT: no chain this morning (the timer would start a chain cron missed)
+    const h = await harness({ start: Z("10:50"), gateway: "up", alerts: (u) => new TelegramNotifier({ token: "", chatId: "", apiBase: u }), env: { ROUTINE_CHAIN_START: "23:00" } });
     try {
       await h.clock.advanceTo(Z("11:20"));
       assertEquals(h.tgMsgs.length, 0);
       const st = await h.store.load(DATE);
-      assertEquals(st.alert?.delivered, false);
+      assertEquals(st.alert?.status !== "delivered", true); // ROUND-3 PORT
+      assertEquals(st.alert?.lastOutcome, "unconfigured");
       assertEquals(st.alert?.problems, ["podcast"]);
     } finally {
       await h.close();
@@ -277,14 +300,15 @@ Deno.test({
   name: "T7 digest boots at 08:00 local with no chain (cron missed): sends at boot once, alerts once; a late chain then yields one follow-up",
   ...opts,
   async fn() {
-    const h = await harness({ start: Z("12:00"), gateway: "up" });
+    // ROUND-3 PORT: cron missed and the timer's own chain start is moved out of the way
+    const h = await harness({ start: Z("12:00"), gateway: "up", env: { ROUTINE_CHAIN_START: "23:00" } });
     try {
       await h.clock.advanceTo(Z("12:01"));
       assertEquals(h.gmail.sent.length, 1, "sent at boot");
       assertMatch(h.gmail.sent[0].html, /NOT STARTED/);
       assertEquals(h.tgMsgs.length, 1);
       const r = await postJson(`${h.digestUrl}/routine/start`, {});
-      assertEquals(r.status, 202);
+      assertEquals(r.status, 200); // ROUND-3 PORT: idempotent ensureToday answers 200
       await h.clock.advanceTo(Z("12:10"));
       await until(() => h.gmail.sent.length === 2, 30_000);
       assertMatch(h.gmail.sent[1].subject, /follow-up: research/);
@@ -309,7 +333,8 @@ Deno.test({
       assertEquals(h.tgMsgs.length, 1);
       assertMatch(h.tgMsgs[0].text, /digest: NOT sent \(0 attempt\(s\); not attempted\)/);
       const r = await postJson(`${h.digestUrl}/routine/start`, {});
-      assertEquals(r.body.reason, "past the follow-up cutoff");
+      assertEquals(r.body.chain, "not-started"); // ROUND-3 PORT: refused after the cutoff (state, not a reason string)
+      assertEquals(h.pullCalls.length, 0);
     } finally {
       await h.close();
     }

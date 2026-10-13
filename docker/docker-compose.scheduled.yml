@@ -71,10 +71,13 @@ services:
       # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
       LOCAL_LLM_BEARER: ${OB_DIGEST_LLM_KEY:-no-key}
       # ── Morning routine (mr-routine-outage) ─────────────────────────────
-      # This service is also the chain HEAD (cron -> /routine/start -> model
-      # gate -> CHAIN_HEAD_URL) and owns the send-by deadline, the send-once
-      # markers (ROUTINE_STATE_DIR) and the failure alert. Times are LOCAL in
-      # ROUTINE_TZ; the container itself runs UTC.
+      # This service owns today's routine record (ROUTINE_STATE_DIR) and the
+      # ONE idempotent action ensureToday(): cron (/routine/start), the L14
+      # trigger (/routine/ensure), the podcast (/run) and its own timer (07:00,
+      # 07:15, every ROUTINE_RECHECK_MIN) all call it. It checks dependencies
+      # (model, research engine, Gmail auth) before starting/retrying the chain,
+      # hands a down one to its owner (#sysadmin), sends the digest / follow-up,
+      # and raises ONE alert. Times are LOCAL in ROUTINE_TZ; the container runs UTC.
       ROUTINE_TZ: ${ROUTINE_TZ:-America/New_York}
       ROUTINE_SEND_BY: ${ROUTINE_SEND_BY:-07:00}
       ROUTINE_ALERT_GRACE_MIN: ${ROUTINE_ALERT_GRACE_MIN:-15}
@@ -84,6 +87,19 @@ services:
       PODCAST_HEALTH_URL: http://openbrain-podcast:8080/health
       PULL_HEALTH_URL: http://openbrain-gmail-pull:8080/health
       PRUNE_HEALTH_URL: http://openbrain-gmail-prune:8080/health
+      RESEARCH_HEALTH_URL: http://openbrain-research:8000/health
+      # Optional tuning (defaults shown): ROUTINE_CHAIN_START 01:00,
+      # ROUTINE_RECHECK_MIN 10, ROUTINE_DEP_WAIT_MIN 60, ROUTINE_STALE_MIN 15,
+      # ROUTINE_MAX_CHAIN_ATTEMPTS 3.
+      # Dependency hand-off: one post per down dependency per day into #sysadmin
+      # (same Mattermost path as openbrain-idea-refinery). Unset = inert (logged).
+      ROUTINE_OWNER_MM_URL: ${ROUTINE_OWNER_MM_URL:-http://host.docker.internal:8065}
+      ROUTINE_OWNER_MM_TOKEN: ${ROUTINE_OWNER_MM_TOKEN:-}
+      ROUTINE_OWNER_MM_CHANNEL_ID: ${ROUTINE_OWNER_MM_CHANNEL_ID:-}
+      # Sent-folder check for an UNKNOWN send outcome: a token with gmail.metadata
+      # (setup-token.ts --with-sent-check), mounted read-write like token.json.
+      # Unset = OFF: an unknown outcome stays unknown (no resend, the alert says so).
+      SENT_CHECK_TOKEN_PATH: ${SENT_CHECK_TOKEN_PATH:-}
       # Failure alert = the sysadmin out-of-band Telegram channel (same bot +
       # chat as scripts/sysadmin-mcp/telegram_notify.py). Put the two values in
       # OB1/docker/.env; unset = inert (the alert is logged, not sent). Alert

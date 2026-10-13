@@ -7,7 +7,6 @@
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert@1";
 import { localDate, nextDate, zonedEpoch } from "./clock.ts";
 import { isDownAnswer, probeModel, waitForModel } from "./model-gate.ts";
-import { RoutineStore } from "./store.ts";
 import { buildAlertText, TelegramNotifier } from "./telegram.ts";
 import { gatewayStub, guardNetwork, telegramStub, UPSTREAM_DOWN_502, VirtualClock } from "./testing.ts";
 
@@ -96,21 +95,7 @@ Deno.test("waitForModel: waits with capped backoff while down, resumes on the fi
   assertEquals(probes.at(-1), until, "last probe exactly at the bound");
 });
 
-Deno.test("store: the send-once claim has exactly one winner under concurrency, and survives a new store instance", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "routine-claim-" });
-  try {
-    const a = new RoutineStore(dir), b = new RoutineStore(dir);
-    const wins = await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).claim("2026-10-13", "digest")));
-    assertEquals(wins.filter(Boolean).length, 1);
-    assert(!(await new RoutineStore(dir).claim("2026-10-13", "digest")), "a restarted process sees the marker");
-    assert(await a.claim("2026-10-13", "followup"), "kinds are independent");
-    assert(await a.claim("2026-10-14", "digest"), "days are independent");
-    await a.release("2026-10-13", "digest");
-    assert(await b.claim("2026-10-13", "digest"), "a released (definitely-not-sent) claim can be retaken");
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
+// (round 3: the send-once claim files are gone; the record lock is tested by S19 in routine.e2e.test.ts)
 
 Deno.test("alert text is content-free: step names, counts, states, times only", async () => {
   const text = buildAlertText({

@@ -1,20 +1,19 @@
 /**
- * HTTP server. Listens on:
- *   POST /routine/start  the morning chain head (openbrain-cron, 01:00 local).
- *                        Body = the gmail-pull body, passed through. Waits for
- *                        the model, then triggers the pull. {"force":true} in
- *                        the query (?force=1) restarts a finished day.
- *   POST /run            the chain tail (openbrain-podcast when it finishes;
- *                        gmail-prune's fallback). Sends the digest at most once
- *                        per local day, or the one follow-up. Body
- *                        {"force":true} = an explicit re-send.
- *   GET  /health         last result + today's routine state.
- *
- * The server owns HTTP only. WHEN and WHETHER to send is the MorningRoutine
- * (src/routine/routine.ts); what a digest is, is the DigestOrchestrator.
+ * HTTP server. Every route that does anything calls the ONE action,
+ * MorningRoutine.ensureToday() (round 3):
+ *   POST /routine/start   openbrain-cron, 01:00 local. Body = the gmail-pull
+ *                         body, passed through to the chain head.
+ *   POST /routine/ensure  the L14 whole-chain trigger (and any on-demand
+ *                         button). Same body. Idempotent: it starts, resumes,
+ *                         retries or does nothing, by today's state.
+ *   POST /run             the chain tail (openbrain-podcast when it ends;
+ *                         gmail-prune's fallback): "the content pipeline ended".
+ *   GET  /health          today's record (state, chain, digest, follow-up, alert).
+ * There is no force / re-send switch: the record decides (see the recipe README
+ * to re-open a day by hand).
  */
 
-import { MorningRoutine, RunOutcome } from "./routine/routine.ts";
+import { MorningRoutine, Trigger } from "./routine/routine.ts";
 
 export interface ServerOptions {
   routine: MorningRoutine;
@@ -25,29 +24,8 @@ export interface ServerOptions {
 }
 
 export function startServer(opts: ServerOptions): Deno.HttpServer<Deno.NetAddr> {
-  let inFlight = 0;
-  let lastRunAt: string | null = null;
-  let lastOutcome: RunOutcome | null = null;
-  let lastError: string | null = null;
-
-  // Chain tail: optionally trigger a next step after a run. Inert while
-  // NEXT_TRIGGER_URL is empty (the digest is the end of the chain today).
-  const NEXT_TRIGGER_URL = Deno.env.get("NEXT_TRIGGER_URL") ?? "";
-  const chainTrigger = async () => {
-    if (!NEXT_TRIGGER_URL) return;
-    try {
-      const res = await fetch(NEXT_TRIGGER_URL, { method: "POST", signal: AbortSignal.timeout(30_000) });
-      console.log(`digest chain → ${NEXT_TRIGGER_URL} ${res.status}`);
-    } catch (err) {
-      console.warn(`digest chain trigger failed (non-fatal): ${err}`);
-    }
-  };
-
   const jsonResponse = (body: unknown, status = 200) =>
-    new Response(JSON.stringify(body, null, 2), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
+    new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
 
   const readBody = async (req: Request): Promise<Record<string, unknown> | null> => {
     const text = await req.text();
@@ -60,7 +38,19 @@ export function startServer(opts: ServerOptions): Deno.HttpServer<Deno.NetAddr> 
     }
   };
 
-  const server = Deno.serve({
+  const ensure = async (trigger: Trigger, body: unknown) => {
+    const r = await opts.routine.ensureToday(trigger, { body });
+    return jsonResponse({
+      date: r.date,
+      state: r.state,
+      chain: r.chain.status,
+      digest: r.digest.status,
+      follow_up: r.followUp.status,
+      alert: r.alert.status,
+    });
+  };
+
+  return Deno.serve({
     port: opts.port,
     hostname: opts.hostname ?? "0.0.0.0",
     signal: opts.signal,
@@ -70,50 +60,19 @@ export function startServer(opts: ServerOptions): Deno.HttpServer<Deno.NetAddr> 
     },
   }, async (req) => {
     const url = new URL(req.url);
-
     if (req.method === "GET" && url.pathname === "/health") {
-      return jsonResponse({
-        service: "openbrain-digest",
-        running: inFlight > 0,
-        last_run_at: lastRunAt,
-        last_result: lastOutcome,
-        last_error: lastError,
-        routine: await opts.routine.status().catch((e) => ({ error: String(e) })),
-      });
+      return jsonResponse({ service: "openbrain-digest", routine: await opts.routine.status().catch((e) => ({ error: String(e) })) });
     }
-
-    if (req.method === "POST" && url.pathname === "/routine/start") {
+    if (req.method === "POST" && (url.pathname === "/routine/start" || url.pathname === "/routine/ensure" || url.pathname === "/run")) {
       const body = await readBody(req);
-      if (body === null) return jsonResponse({ started: false, reason: "bad JSON body" }, 400);
-      const force = url.searchParams.get("force") === "1";
-      const r = await opts.routine.startChain(body, { force });
-      return jsonResponse(r.body, r.status);
+      if (body === null) return jsonResponse({ error: "bad JSON body" }, 400);
+      const trigger: Trigger = url.pathname === "/routine/start" ? "cron" : url.pathname === "/routine/ensure" ? "l14" : "run";
+      try {
+        return await ensure(trigger, url.pathname === "/run" ? undefined : body);
+      } catch (e) {
+        return jsonResponse({ error: (e as Error)?.message ?? String(e) }, 500);
+      }
     }
-
-    if (req.method === "POST" && url.pathname === "/run") {
-      const body = await readBody(req);
-      if (body === null) return jsonResponse({ started: false, reason: "bad JSON body" }, 400);
-      const force = body.force === true;
-      inFlight++;
-      lastError = null;
-      // Fire-and-forget: the caller (podcast / prune) must not hold a
-      // connection while the digest waits for the model or sends.
-      (async () => {
-        try {
-          lastOutcome = await opts.routine.onRun({ force });
-        } catch (err) {
-          lastError = err instanceof Error ? err.message : String(err);
-          console.error(`Digest run failed: ${lastError}`);
-        } finally {
-          inFlight--;
-          lastRunAt = new Date().toISOString();
-        }
-        await chainTrigger();
-      })();
-      return jsonResponse({ started: true, force }, 202);
-    }
-
     return jsonResponse({ error: "not found", path: url.pathname }, 404);
   });
-  return server;
 }

@@ -28,7 +28,13 @@
 const SCRIPT_DIR = decodeURIComponent(new URL(".", import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, "$1");
 const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
 const TOKEN_PATH = `${SCRIPT_DIR}token.json`;
-const SCOPES = ["https://www.googleapis.com/auth/gmail.send"];
+// --with-sent-check also grants gmail.metadata (read message HEADERS only), so the
+// morning routine can verify an unknown send outcome in the Sent folder
+// (src/routine/sent-check.ts). Without it the token is gmail.send only.
+const SCOPES = [
+  "https://www.googleapis.com/auth/gmail.send",
+  ...(Deno.args.includes("--with-sent-check") ? ["https://www.googleapis.com/auth/gmail.metadata"] : []),
+];
 const REDIRECT_PORT = 8765;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}`;
 const FLOW_TIMEOUT_MS = 5 * 60 * 1000;
@@ -58,7 +64,7 @@ async function main() {
   authUrl.searchParams.set("prompt", "consent");
 
   console.log(
-    `\nOpen this URL in your browser to grant gmail.send:\n  ${authUrl}\n` +
+    `\nOpen this URL in your browser to grant ${SCOPES.map((s) => s.split("/").pop()).join(" + ")}:\n  ${authUrl}\n` +
       `\nWaiting for the redirect on ${REDIRECT_URI} (5 min timeout)...\n`,
   );
 

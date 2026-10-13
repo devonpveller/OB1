@@ -172,34 +172,45 @@ The compose service `openbrain-digest` is defined under profile `scheduled` next
    The digest arrives in your Gmail inbox; a copy lands in `D:\_data\openbrain-digest-latest.md` regardless.
 6. Add a Windows Task Scheduler trigger that fires daily at your preferred time (mirrors the wrappers for `openbrain-gmail-pull` / `openbrain-gmail-prune`).
 
-### Morning routine: model outages, send-by deadline, send-once (mr-routine-outage)
+### Morning routine: one idempotent action (mr-routine-outage, round 3)
 
-The chain is `openbrain-cron` (05:00 UTC = 01:00 EDT) -> `openbrain-digest /routine/start` ->
-model gate -> `openbrain-gmail-pull` -> prune -> `openbrain-podcast` (link-enrich) ->
-`openbrain-digest /run`. All routine times are LOCAL in `ROUTINE_TZ`
-(default `America/New_York`); the containers run UTC.
+Every caller uses ONE action, `ensureToday()` in `src/routine/routine.ts`:
+`openbrain-cron` (05:00 UTC = 01:00 EDT) POSTs `openbrain-digest /routine/start`, the L14
+whole-chain trigger (and any on-demand button) POSTs `/routine/ensure`, the podcast POSTs
+`/run` when it ends, and the digest's own timer calls it at the send-by deadline
+(`ROUTINE_SEND_BY`, 07:00), 15 min later, and every `ROUTINE_RECHECK_MIN` (10). All times are
+LOCAL in `ROUTINE_TZ` (America/New_York); the containers run UTC.
 
-- **Model gate.** Before model work, the chain head, link-enrich (before each model stage)
-  and the digest check the model through the gateway: `GET /health/liveliness` plus one
-  `max_tokens: 1` chat probe (never LiteLLM `/health`). While it is down they WAIT
-  (backoff 30 s doubling to 5 min) instead of running degraded. A research job the engine
-  reports `model_down` is resubmitted after the model is back (max 3).
-- **Send-by deadline** `ROUTINE_SEND_BY` (07:00): an in-process timer in openbrain-digest
-  sends the digest with whatever is ready; a section that is not ready is shown as
-  WAITING FOR THE MODEL / STILL RUNNING / FAILED, never left out silently. When it later
-  completes, ONE short follow-up email delivers it (until `ROUTINE_FOLLOWUP_CUTOFF`, 20:00,
-  the chain stops waiting for the model).
-- **Send-once marker.** `D:\_data\routine\<local date>.digest.claim` /
-  `.followup.claim` / `.alert.claim`, created exclusively before the send. A re-run of the
-  chain the same day sends nothing new. **Force a re-send** explicitly:
-  `docker exec openbrain-cron sh -c "curl -fsS -X POST -d '{\"force\":true}' http://openbrain-digest:8080/run"`
-  (or delete the claim file). A send that failed DEFINITELY (Gmail answered an error) is
-  retried twice and releases the marker; one that MAY have gone out keeps it (no duplicate).
-- **Alert.** At deadline + `ROUTINE_ALERT_GRACE_MIN` (15 min), if the digest was not sent or
-  the podcast not produced: ONE Telegram message through the sysadmin out-of-band bot
-  (`SYSADMIN_TELEGRAM_BOT_TOKEN` / `_CHAT_ID` in `OB1/docker/.env`; blank = logged only).
-  Step names, counts and times only.
-- **Podcast restart.** The run lock is in memory plus a run record
-  (`<date>.podcast.json`); after a restart mid-run the run is closed as interrupted and
-  resumed ONCE. Runs are killed after `PODCAST_RUN_MAX_MS` (16 h).
-- State for today: `GET http://openbrain-digest:8080/health` -> `routine`.
+Today is ONE record, `D:\_data\routine\<date>.day.json`, in one of four states:
+
+| State | What `ensureToday()` does |
+|---|---|
+| NOT STARTED | checks dependencies - the model (gateway `/health/liveliness` + one 1-token probe, never LiteLLM `/health`), the research engine (`/health` model state), Gmail auth - then starts the chain (gmail-pull -> prune -> podcast -> `/run`). A down dependency is handed to its owner (one post per dependency per day in #sysadmin, `src/routine/owner.ts`) and re-checked with backoff for `ROUTINE_DEP_WAIT_MIN` (60); still down -> FAILED with the reason. |
+| IN PROGRESS | verifies activity: the record's heartbeat, the podcast run's heartbeat, gmail-pull / prune / podcast `/health`. Nothing running and no heartbeat for `ROUTINE_STALE_MIN` (15) -> FAILED with the reason. An unreadable `/health` is UNKNOWN, never FAILED by itself. |
+| DONE | the digest is out and nothing is owed; with the Sent-folder check enabled it is confirmed in Gmail's Sent folder. Nothing else. |
+| FAILED | checks dependencies; all up -> retries the chain (at most `ROUTINE_MAX_CHAIN_ATTEMPTS`, 3, at least 10 min apart, never after `ROUTINE_FOLLOWUP_CUTOFF`, 20:00). A check that finds something down uses no attempt. |
+
+Delivery is part of the same action:
+- **Digest** when the chain has ended, or at 07:00 with whatever is ready - never waiting on a
+  model probe. Unfinished sections are shown as WAITING FOR THE MODEL / STILL RUNNING / FAILED /
+  STATUS UNKNOWN, with whether a follow-up can still come. A definite failure (connect refused,
+  Gmail error answer) is retried every 10 min until the cutoff.
+- **Unknown outcome** (the request may have reached Gmail, no answer): every mail carries
+  `X-OpenBrain-Digest: <date>;<kind>`; the routine reads Gmail's Sent folder - found = sent, not
+  found = send again, check unavailable = stays unknown (no resend; the alert says so).
+  **The check is OFF by default**: the deployed digest token has `gmail.send` only. To enable it,
+  re-consent with `deno run -A setup-token.ts --with-sent-check` (adds `gmail.metadata`, headers
+  only) and set `SENT_CHECK_TOKEN_PATH` to that token in the container.
+- **Follow-up**: ONE short email when a section that was pending at send time is ready.
+- **Alert**: ONE Telegram message (sysadmin out-of-band bot, `SYSADMIN_TELEGRAM_BOT_TOKEN` /
+  `_CHAT_ID` in `OB1/docker/.env`; blank = logged only) from 07:15 if the digest is not out or the
+  podcast not produced; re-sent at later passes until the cutoff only if Telegram did not confirm
+  it. Step names, counts, states and times only.
+
+There are no claim files and no force switch. To re-open a day by hand, stop openbrain-digest,
+edit (or delete) `D:\_data\routine\<date>.day.json`, start it again. State for today:
+`GET http://openbrain-digest:8080/health` -> `routine`.
+
+**Podcast restart.** The run lock is in memory plus a run record with a heartbeat
+(`<date>.podcast.json`); after a restart mid-run the run is closed as interrupted and resumed ONCE.
+Runs are killed after `PODCAST_RUN_MAX_MS` (16 h).

@@ -76,8 +76,13 @@ export class DigestOrchestrator {
   }
 
   /** Transport only. */
-  async send(b: BuiltDigest): Promise<void> {
-    await this.opts.gmail.sendHtml({ from: this.opts.fromEmail, to: this.opts.toEmail, subject: b.subject, htmlBody: b.html });
+  async send(b: BuiltDigest, marker?: string): Promise<void> {
+    await this.opts.gmail.sendHtml({ from: this.opts.fromEmail, to: this.opts.toEmail, subject: b.subject, htmlBody: b.html, marker });
+  }
+
+  /** Dependency check for the routine (Gmail auth). */
+  async checkMailAuth(): Promise<void> {
+    await this.opts.gmail.checkAuth?.();
   }
 
   /** Sections + render + audit copy; nothing is sent. */

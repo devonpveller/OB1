@@ -95,8 +95,9 @@ The digest is the END of the email pipeline chain. Schedule lives in
 openbrain-cron  (05:00 UTC = 01:00 EDT)
    │  POST /routine/start   (body = the gmail-pull body)
    ▼
-openbrain-digest (routine head): waits until the model answers through the
-   │  gateway (/health/liveliness + 1-token probe), then POST CHAIN_HEAD_URL
+openbrain-digest ensureToday(): dependency check (model via /health/liveliness
+   │  + 1-token probe; research engine; Gmail auth), a down one handed to its
+   │  owner (#sysadmin) and re-checked; then POST CHAIN_HEAD_URL
    ▼
 openbrain-gmail-pull
    │  on success, POST $NEXT_TRIGGER_URL
@@ -108,7 +109,7 @@ openbrain-gmail-prune
 openbrain-podcast (link-enrich: research + episode)
    │  on ANY exit, POST $NEXT_TRIGGER_URL
    ▼
-openbrain-digest /run  - sends the digest at most once per local day
+openbrain-digest /run  - ensureToday() again: today's record decides
 ```
 
 `NEXT_TRIGGER_URL` for each service is declared in
@@ -118,17 +119,18 @@ openbrain-digest /run  - sends the digest at most once per local day
 - podcast: `http://openbrain-digest:8080/run`
 - digest: (unset)
 
-The digest does NOT depend on the chain finishing: openbrain-digest keeps a
-send-by deadline (`ROUTINE_SEND_BY`, default 07:00 `ROUTINE_TZ`
-America/New_York) and sends what is ready then, marking unfinished sections;
-one follow-up email delivers them later. If the digest or the podcast is
-missing at deadline + 15 min, ONE Telegram alert goes out (sysadmin
-out-of-band channel). Details: `recipes/daily-digest/README.md`, "Morning
-routine".
+Every trigger (cron, the L14 `/routine/ensure`, the podcast's `/run`, and
+openbrain-digest's own timer at the send-by deadline `ROUTINE_SEND_BY`, default
+07:00 `ROUTINE_TZ` America/New_York, 15 min later and every 10 min) calls the
+same idempotent `ensureToday()` over one per-day record (NOT STARTED / IN
+PROGRESS / DONE / FAILED). The digest does NOT depend on the chain finishing:
+at the deadline it goes out with what is ready, unfinished sections marked;
+one follow-up email delivers them later; ONE Telegram alert if the digest or
+the podcast is missing at deadline + 15 min. Details:
+`recipes/daily-digest/README.md`, "Morning routine".
 
 A second cron line pointing at `openbrain-digest:8080/run` does NOT give a
-second digest any more: the send-once marker makes it a no-op the same day.
-For an explicit re-send use `POST /run {"force":true}`.
+second digest: today's record makes it a no-op once the day is delivered.
 
 Log capture: the canonical artifact is `D:\_data\openbrain-digest-latest.md`
 plus a dated archive, written inside the container regardless of email

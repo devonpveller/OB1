@@ -1,81 +1,125 @@
 /**
- * Durable morning-routine state (mr-routine-outage).
+ * The durable per-day routine record (mr-routine-outage, round 3).
  *
- * Lives on the shared /reports volume (ROUTINE_STATE_DIR, default
- * /reports/routine = D:\_data\routine on the host), so it survives a container
- * restart and both openbrain-digest and openbrain-podcast can read it.
+ * One record per LOCAL routine date (ROUTINE_TZ) in ROUTINE_STATE_DIR
+ * (default /reports/routine = host D:\_data\routine), shared by
+ * openbrain-digest and openbrain-podcast:
  *
- * Files, per LOCAL routine date (YYYY-MM-DD in ROUTINE_TZ):
- *   <date>.day.json            digest-side state (chain, digest, follow-up, alert).
- *                              Written ONLY by openbrain-digest.
- *   <date>.<kind>.claim        THE send-once marker. Created with createNew
- *                              (O_EXCL): exactly one caller wins, across
- *                              processes and restarts. kind = digest | followup | alert.
- *   <date>.podcast.json        podcast-run record. Written ONLY by openbrain-podcast.
+ *   <date>.day.json            THE record: state (NOT STARTED / IN PROGRESS /
+ *                              DONE / FAILED), chain, digest, follow-up, alert.
+ *                              Written ONLY by openbrain-digest, always under
+ *                              <date>.lock.
+ *   <date>.lock                cross-process mutex for a read-modify-write of
+ *                              the record (O_EXCL create; a lock older than
+ *                              LOCK_STALE_MS is broken - its holder died).
+ *   <date>.podcast.json        podcast run record + heartbeat. Written ONLY by
+ *                              openbrain-podcast.
  *   <date>.podcast-result.json what the link-enrich run concluded. Written ONLY
  *                              by the link-enrich subprocess.
- * One writer per file, so no cross-process read-modify-write race.
  *
- * A claim is taken BEFORE the transport is called. A definite failure (the
- * transport answered "not sent") releases it so a later attempt may retry; an
- * ambiguous one (the request may have gone out) keeps it - at most once wins
- * over at least once. Forcing a re-send is explicit: POST /run {"force":true}
- * (or delete the claim file by hand).
+ * There are no send-once claim files any more (round 1/2): "was it sent?" is the
+ * record's send status, and an UNKNOWN outcome is resolved by looking in Gmail's
+ * Sent folder (src/routine/sent-check.ts).
  */
 
-export type PendingState = "waiting for the model" | "still running" | "interrupted" | "failed" | "not started";
+export type RoutineState = "not-started" | "in-progress" | "done" | "failed";
+
+export type PendingState =
+  | "waiting for the model"
+  | "waiting for a dependency"
+  | "still running"
+  | "status unknown"
+  | "interrupted"
+  | "failed"
+  | "not started";
 
 export interface PendingNote {
   section: string;
   state: PendingState;
   detail: string;
+  /** The routine may still deliver it later today (a follow-up). */
+  mayFollow: boolean;
 }
 
-export interface DayState {
+export type SendStatus = "not-sent" | "sending" | "sent" | "failed" | "unknown";
+
+export interface SendRecord {
+  status: SendStatus;
+  attempts: number;
+  lastAttemptAt?: string;
+  /** In flight: when, and which process (another process waits SEND_STALE before calling it unknown). */
+  sendingAt?: string;
+  sendingBy?: string;
+  sentAt?: string;
+  /** Sent-folder verification: true found, false not found, null check unavailable. */
+  verified?: boolean | null;
+  verifyNote?: string;
+  lastError?: string;
+  mode?: "full" | "deadline";
+  included?: string[];
+  pending?: PendingNote[];
+}
+
+export type ChainStatus = "not-started" | "waiting-deps" | "running" | "done" | "failed";
+
+export interface DepFailure {
+  dep: "model" | "research" | "gmail-auth";
+  reason: string;
+}
+
+export interface DayRecord {
   date: string;
-  chain?: {
-    startedAt: string;
-    modelDownSince?: string;
-    modelUpAt?: string;
-    gaveUpAt?: string;
+  state: RoutineState;
+  chain: {
+    status: ChainStatus;
+    attempts: number;
+    startedAt?: string;
+    heartbeatAt?: string;
+    waitUntil?: string;
     headTriggeredAt?: string;
     headStatus?: number;
-    finishedAt?: string;
-    probes?: number;
+    doneAt?: string;
+    failedAt?: string;
+    /** FAILED: when the dependencies were last checked for a retry. */
+    lastCheckAt?: string;
+    reason?: string;
+    /** produced | nothing-to-do (done) */
+    outcome?: string;
+    modelDownSince?: string;
   };
-  digest?: {
-    attempts: number;
-    /** round 2: where the send got to. building = sections being built, no
-     *  claim yet (a restart may rebuild); sending = claim held, transport
-     *  called; sent / failed (definite, claim released) / unconfirmed (maybe sent). */
-    phase?: "building" | "sending" | "sent" | "failed" | "unconfirmed";
-    buildStartedAt?: string;
-    claimedAt?: string;
-    sentAt?: string;
-    mode?: "full" | "deadline";
-    included?: string[];
-    pending?: PendingNote[];
-    modelDownAtSend?: boolean;
-    lastError?: string;
-    unconfirmed?: boolean;
+  deps?: { checkedAt: string; ok: boolean; failing: DepFailure[] };
+  /** A down dependency handed to the system that owns it (once per dependency per day). */
+  handoffs?: Array<{ dep: string; owner: string; at: string; outcome: string }>;
+  digest: SendRecord;
+  followUp: SendRecord;
+  alert: {
+    status: "none" | "pending" | "delivered" | "resolved";
+    tries: number;
+    firstAt?: string;
+    lastAt?: string;
+    lastOutcome?: string;
+    problems?: string[];
   };
-  followUp?: { attempts: number; sentAt?: string; lastError?: string; unconfirmed?: boolean };
-  /** outcome: delivered | not-delivered (retried by later passes until the
-   *  cutoff) | unknown (may have arrived: never retried) | unconfigured. */
-  alert?: {
-    at: string;
-    delivered: boolean;
-    problems: string[];
-    outcome?: "delivered" | "not-delivered" | "unknown" | "unconfigured";
-    tries?: number;
-    lastTryAt?: string;
+  /** Transitions, newest last, capped. */
+  history: Array<{ at: string; trigger: string; note: string }>;
+}
+
+export function emptyDay(date: string): DayRecord {
+  return {
+    date,
+    state: "not-started",
+    chain: { status: "not-started", attempts: 0 },
+    digest: { status: "not-sent", attempts: 0 },
+    followUp: { status: "not-sent", attempts: 0 },
+    alert: { status: "none", tries: 0 },
+    history: [],
   };
-  forced?: Array<{ at: string; kind: string; ok: boolean }>;
 }
 
 export interface PodcastRun {
   startedAt: string;
   finishedAt?: string;
+  heartbeatAt?: string;
   code?: number;
   interrupted?: boolean;
   timedOut?: boolean;
@@ -96,7 +140,7 @@ export interface PodcastResult {
   detail?: string;
 }
 
-export type ClaimKind = "digest" | "followup" | "alert";
+const LOCK_STALE_MS = 120_000;
 
 export class RoutineStore {
   constructor(readonly dir: string) {}
@@ -104,8 +148,8 @@ export class RoutineStore {
   dayPath(date: string) {
     return `${this.dir}/${date}.day.json`;
   }
-  claimPath(date: string, kind: ClaimKind) {
-    return `${this.dir}/${date}.${kind}.claim`;
+  lockPath(date: string) {
+    return `${this.dir}/${date}.lock`;
   }
   podcastPath(date: string) {
     return `${this.dir}/${date}.podcast.json`;
@@ -114,44 +158,52 @@ export class RoutineStore {
     return `${this.dir}/${date}.podcast-result.json`;
   }
 
-  async load(date: string): Promise<DayState> {
-    return (await readJson<DayState>(this.dayPath(date))) ?? { date };
+  async load(date: string): Promise<DayRecord> {
+    const r = await readJson<Partial<DayRecord>>(this.dayPath(date));
+    const e = emptyDay(date);
+    if (!r) return e;
+    return {
+      ...e,
+      ...r,
+      chain: { ...e.chain, ...r.chain },
+      digest: { ...e.digest, ...r.digest },
+      followUp: { ...e.followUp, ...r.followUp },
+      alert: { ...e.alert, ...r.alert },
+      history: r.history ?? [],
+    };
   }
 
-  /** Read-modify-write the day file (single writer: openbrain-digest; callers serialize). */
-  async update(date: string, fn: (s: DayState) => void): Promise<DayState> {
-    const s = await this.load(date);
-    fn(s);
-    await writeJsonAtomic(this.dayPath(date), s);
-    return s;
-  }
-
-  /** Take the send-once marker. true = this caller won and may send. */
-  async claim(date: string, kind: ClaimKind, note: Record<string, unknown> = {}): Promise<boolean> {
+  /**
+   * Read-modify-write under the cross-process lock. `fn` must not do slow I/O:
+   * the lock is held for its duration. Bounded: waits at most ~LOCK_STALE_MS,
+   * then breaks a lock whose holder must have died.
+   */
+  async update<T>(date: string, fn: (r: DayRecord) => T | Promise<T>): Promise<T> {
     await Deno.mkdir(this.dir, { recursive: true });
-    try {
-      await Deno.writeTextFile(this.claimPath(date, kind), JSON.stringify({ at: new Date().toISOString(), ...note }), {
-        createNew: true,
-      });
-      return true;
-    } catch (e) {
-      if (e instanceof Deno.errors.AlreadyExists) return false;
-      throw e;
+    const lp = this.lockPath(date);
+    const start = Date.now();
+    for (;;) {
+      try {
+        await Deno.writeTextFile(lp, String(Date.now()), { createNew: true });
+        break;
+      } catch (e) {
+        if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
+        const age = await Deno.stat(lp).then((s) => Date.now() - (s.mtime?.getTime() ?? 0), () => 0);
+        if (age > LOCK_STALE_MS || Date.now() - start > LOCK_STALE_MS + 5_000) {
+          await Deno.remove(lp).catch(() => {});
+          continue;
+        }
+        await new Promise((r) => setTimeout(r, 15));
+      }
     }
-  }
-
-  async hasClaim(date: string, kind: ClaimKind): Promise<boolean> {
     try {
-      await Deno.stat(this.claimPath(date, kind));
-      return true;
-    } catch {
-      return false;
+      const r = await this.load(date);
+      const out = await fn(r);
+      await writeJsonAtomic(this.dayPath(date), r);
+      return out;
+    } finally {
+      await Deno.remove(lp).catch(() => {});
     }
-  }
-
-  /** Give a claim back after a DEFINITE "not sent". */
-  async release(date: string, kind: ClaimKind): Promise<void> {
-    await Deno.remove(this.claimPath(date, kind)).catch(() => {});
   }
 
   loadPodcast(date: string): Promise<PodcastRecord | null> {

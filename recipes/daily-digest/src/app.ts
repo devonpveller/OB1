@@ -26,6 +26,8 @@ import { probeModel } from "./routine/model-gate.ts";
 import { MorningRoutine, routineConfigFromEnv } from "./routine/routine.ts";
 import { RoutineStore } from "./routine/store.ts";
 import { AlertSender, TelegramNotifier } from "./routine/telegram.ts";
+import { MattermostOwnerChannel, OwnerChannel } from "./routine/owner.ts";
+import { GmailSentChecker, SentChecker, sentCheckDisabled } from "./routine/sent-check.ts";
 
 export interface DigestAppDeps {
   env: (k: string) => string | undefined;
@@ -34,6 +36,8 @@ export interface DigestAppDeps {
   clock?: Clock;
   mail?: MailTransport;
   alerts?: AlertSender;
+  owners?: OwnerChannel;
+  sentCheck?: SentChecker;
   fetchFn?: typeof fetch;
 }
 
@@ -151,6 +155,19 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
         }
       }
       : undefined,
+    // research engine GET /health -> model latch (mr-research-failfast).
+    researchHealth: env("RESEARCH_HEALTH_URL")
+      ? async () => {
+        try {
+          const r = await fetchFn(env("RESEARCH_HEALTH_URL"), { signal: AbortSignal.timeout(5_000) });
+          if (!r.ok) return null;
+          const j = await r.json() as { model?: { state?: string; reason?: string | null } };
+          return { state: j.model?.state === "down" ? "down" as const : "up" as const, reason: j.model?.reason ?? undefined };
+        } catch {
+          return null;
+        }
+      }
+      : undefined,
     pullHealth: stepHealth(env("PULL_HEALTH_URL")),
     pruneHealth: stepHealth(env("PRUNE_HEALTH_URL")),
     briefPath,
@@ -159,6 +176,20 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
       chatId: env("SYSADMIN_TELEGRAM_CHAT_ID"),
       fetchFn,
     }),
+    // A down dependency is handed to its owner: a post in #sysadmin (owner.ts).
+    owners: d.owners ?? new MattermostOwnerChannel({
+      url: env("ROUTINE_OWNER_MM_URL"),
+      token: env("ROUTINE_OWNER_MM_TOKEN"),
+      channelId: env("ROUTINE_OWNER_MM_CHANNEL_ID"),
+      fetchFn,
+    }),
+    // Sent-folder check: OFF until a read-capable token exists (sent-check.ts).
+    sentCheck: d.sentCheck ?? (env("SENT_CHECK_TOKEN_PATH")
+      ? new GmailSentChecker({
+        oauth: new GoogleOAuth({ credentialsPath: `${d.scriptDir}credentials.json`, tokenPath: env("SENT_CHECK_TOKEN_PATH") }),
+        fetchFn,
+      })
+      : sentCheckDisabled),
     chainHeadUrl: env("CHAIN_HEAD_URL") || undefined,
     fetchFn,
   });

@@ -21,23 +21,25 @@
 # ────────────────────────────────────────────────────────────────────────
 #
 # Trigger model is **event-chained**, not multi-cron. Cron only fires the
-# start of the chain (the routine head in openbrain-digest). Then:
-#   digest /routine/start → waits until the model answers through the gateway
-#                           (bounded backoff; never LiteLLM /health), then
-#                           POSTs http://openbrain-gmail-pull:8080/run with this body
+# start of the chain: openbrain-digest's ONE idempotent action, ensureToday().
+#   digest /routine/start → checks dependencies (model via the gateway's
+#                           /health/liveliness + a 1-token probe, never LiteLLM
+#                           /health; research engine; Gmail auth); a down one is
+#                           handed to its owner (#sysadmin) and re-checked on a
+#                           bounded timer; then POSTs gmail-pull /run with this body
 #   pull   → POSTs http://openbrain-gmail-prune:8080/run   (NEXT_TRIGGER_URL on pull)
 #   prune  → POSTs http://openbrain-podcast:8080/run       (NEXT_TRIGGER_URL on prune)
 #   prune  → also triggers wiki recompile (separate, inside the script)
 #   podcast → POSTs http://openbrain-digest:8080/run       (any exit)
-#   digest → sends the digest ONCE per local day (send-once marker in
-#            D:\_data\routine\), or the one follow-up for a late section.
+#   digest → today's record (D:\_data\routine\<date>.day.json) decides: the
+#            digest once, the one follow-up for a late section, or nothing.
 #
-# The SEND-BY DEADLINE is NOT a cron line: openbrain-digest keeps an in-process
-# timer at ROUTINE_SEND_BY (default 07:00) in ROUTINE_TZ (default
-# America/New_York), so it follows DST. At the deadline the digest goes out with
-# whatever is ready (unfinished sections marked); at deadline + 15 min a missing
-# digest or podcast raises ONE Telegram alert (sysadmin out-of-band channel).
-# A re-fire of this line the same day after delivery is refused (nothing new).
+# The SEND-BY DEADLINE is NOT a cron line: openbrain-digest's own timer calls the
+# same ensureToday() at ROUTINE_SEND_BY (default 07:00) in ROUTINE_TZ (default
+# America/New_York, so it follows DST), 15 min later, and every 10 min. At the
+# deadline the digest goes out with whatever is ready (unfinished sections
+# marked); a missing digest or podcast at 07:15 raises ONE Telegram alert. A
+# re-fire of this line the same day is harmless: today's state decides.
 # mr-routine-outage, 2026-10-13.
 #
 # To schedule a new top-of-chain job: add a line below pointing at the

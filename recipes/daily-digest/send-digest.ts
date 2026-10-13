@@ -8,13 +8,13 @@
  * alert check, src/routine/routine.ts) and the HTTP server (src/server.ts).
  * No business logic in this file.
  *
- * Container is long-running. openbrain-cron POSTs /routine/start at 01:00
- * local (the chain head: model gate -> gmail pull -> prune -> podcast ->
- * POST /run here). The digest goes out at most once per local day; by the
- * send-by deadline (ROUTINE_SEND_BY, default 07:00 America/New_York) at the
- * latest. Ad-hoc / forced runs:
- *   docker exec openbrain-cron sh -c "curl -fsS -X POST http://openbrain-digest:8080/run"                 # once-per-day rules apply
- *   docker exec openbrain-cron sh -c "curl -fsS -X POST -d '{\"force\":true}' http://openbrain-digest:8080/run"  # explicit re-send
+ * Container is long-running. Every trigger calls the ONE idempotent action,
+ * ensureToday() (src/routine/routine.ts): openbrain-cron POSTs /routine/start
+ * at 01:00 local, the L14 whole-chain trigger POSTs /routine/ensure, the
+ * podcast POSTs /run, and an in-process timer fires at the send-by deadline
+ * (ROUTINE_SEND_BY, default 07:00 America/New_York), 15 min after it, and every
+ * ROUTINE_RECHECK_MIN. Ad-hoc:
+ *   docker exec openbrain-cron sh -c "curl -fsS -X POST -d '{}' http://openbrain-digest:8080/routine/ensure"
  */
 
 import { buildDigestApp } from "./src/app.ts";
