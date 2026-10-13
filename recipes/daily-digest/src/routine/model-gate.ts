@@ -17,9 +17,10 @@
  *      10-13 LiteLLM and llm-queue were up and llama-cpp-upstream was stopped.
  * Classification mirrors research-service/llm.ts `classifyChatFailure`: a
  * 500/502/503 whose body says the upstream is unreachable is DOWN; any other
- * HTTP answer (200, 429 busy, 503 swap, a llama-swap 500 load timeout, even
- * 401) means the model path is REACHABLE - waiting would not fix those, so
- * the step proceeds and its own error handling applies.
+ * HTTP answer (200, 429 busy, 503 swap, a llama-swap 500 load timeout)
+ * means the model path is REACHABLE - waiting would not fix those, so
+ * the step proceeds and its own error handling applies. A probe the gateway
+ * REJECTS (400/401/403/404) is NOT reachable-proof: it reads down.
  */
 
 import type { Clock } from "./clock.ts";
@@ -77,6 +78,12 @@ export async function probeModel(o: ProbeOptions): Promise<ModelProbeResult> {
     const body = await r.text().catch(() => "");
     if (r.ok) return { state: "up", reason: `chat ${r.status}` };
     if (isDownAnswer(r.status, body)) return { state: "down", reason: `chat ${r.status} upstream unreachable` };
+    // Round 2: a probe the gateway REJECTS (400 unknown model, 401/403 key, 404)
+    // proves nothing about the model - never "up". It reads down (with the
+    // reason), so the step waits and the deadline digest + alert surface it.
+    if (r.status >= 400 && r.status < 500 && r.status !== 429) {
+      return { state: "down", reason: `chat ${r.status} probe rejected by the gateway (model name / key?)` };
+    }
     return { state: "up", reason: `chat ${r.status} (reachable)` };
   } catch (e) {
     return { state: "down", reason: `chat probe failed (${errClass(e)})` };

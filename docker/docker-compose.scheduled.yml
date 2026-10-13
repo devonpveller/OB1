@@ -82,6 +82,8 @@ services:
       ROUTINE_STATE_DIR: /reports/routine
       CHAIN_HEAD_URL: http://openbrain-gmail-pull:8080/run
       PODCAST_HEALTH_URL: http://openbrain-podcast:8080/health
+      PULL_HEALTH_URL: http://openbrain-gmail-pull:8080/health
+      PRUNE_HEALTH_URL: http://openbrain-gmail-prune:8080/health
       # Failure alert = the sysadmin out-of-band Telegram channel (same bot +
       # chat as scripts/sysadmin-mcp/telegram_notify.py). Put the two values in
       # OB1/docker/.env; unset = inert (the alert is logged, not sent). Alert

@@ -243,7 +243,8 @@ async function gateModel(stage: string): Promise<void> {
     probe: () =>
       probeModel({
         chatBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
-        model: `${env("CHAT_MODEL", "local-large")}:nothink`,
+        // never "<model>:nothink:nothink" (an unknown model the gateway rejects)
+        model: env("CHAT_MODEL", "local-large").replace(/:nothink$/, "") + ":nothink",
         apiKey: CHAT_API_KEY,
       }),
     clock: realClock,

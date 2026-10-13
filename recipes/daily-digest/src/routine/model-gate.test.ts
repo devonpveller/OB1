@@ -128,11 +128,65 @@ Deno.test("alert text is content-free: step names, counts, states, times only", 
   const tg = telegramStub(clock);
   try {
     const n = new TelegramNotifier({ token: "123:fake", chatId: "42", apiBase: tg.url });
-    assert(await n.send(text));
+    assertEquals(await n.send(text), "delivered");
     assertEquals(tg.messages, [{ chatId: "42", text, at: 0 }]);
-    assert(!(await new TelegramNotifier({ token: "", chatId: "42", apiBase: tg.url }).send(text)), "unconfigured = inert");
+    assertEquals(await new TelegramNotifier({ token: "", chatId: "42", apiBase: tg.url }).send(text), "not-delivered", "unconfigured = inert");
     assertEquals(tg.messages.length, 1);
   } finally {
     await tg.close();
+  }
+});
+
+// ── round 2 ──────────────────────────────────────────────────────────────────
+import { failedBeforeSend } from "./net-errors.ts";
+import { GmailClient, MailSendError } from "../clients/gmail.ts";
+import { GoogleOAuth } from "../clients/google-oauth.ts";
+import { fakeOAuthFiles, stubServer } from "./testing.ts";
+
+Deno.test("probe REJECTED by the gateway (400 unknown model / 401 key) reads DOWN, never up", async () => {
+  const s = stubServer((_req, path) => {
+    if (path === "/health/liveliness") return new Response("ok");
+    return new Response(`{"error":{"message":"Invalid model name passed in model=local-large:nothink:nothink"}}`, { status: 400 });
+  });
+  try {
+    const r = await probeModel({ chatBase: `${s.url}/v1`, model: "local-large:nothink:nothink" });
+    assertEquals(r.state, "down");
+    assertMatch(r.reason, /400 probe rejected/);
+  } finally {
+    await s.close();
+  }
+});
+
+Deno.test("failedBeforeSend: a REAL connect-refused fetch is 'never sent'; a timeout / reset is 'maybe sent'", async () => {
+  const err = await fetch("http://127.0.0.1:9/x").then(() => null, (e) => e);
+  assert(err, "port 9 must refuse");
+  assert(failedBeforeSend(err), `real connect error not recognised: ${err}`);
+  assert(!failedBeforeSend(new DOMException("t", "TimeoutError")));
+  assert(!failedBeforeSend(new TypeError("error reading a body from connection: connection reset")));
+  assert(!failedBeforeSend(new TypeError("something unknown")), "unknown stays maybe-sent (at most once)");
+});
+
+Deno.test("GmailClient: connect refused -> DEFINITE (retryable); Telegram: 502 / refused -> not-delivered, timeout -> unknown", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "transport-" });
+  try {
+    const g = new GmailClient({ oauth: new GoogleOAuth(await fakeOAuthFiles(dir)), apiBase: "http://127.0.0.1:9" });
+    const e = await g.sendHtml({ from: "a@example.test", to: "a@example.test", subject: "s", htmlBody: "b" }).then(() => null, (x) => x);
+    assert(e instanceof MailSendError && e.definite, `connect refused must be definite: ${e}`);
+
+    assertEquals(await new TelegramNotifier({ token: "1:x", chatId: "1", apiBase: "http://127.0.0.1:9" }).send("t"), "not-delivered");
+    const bad = stubServer(() => Response.json({ ok: false }, { status: 502 }));
+    const slow = stubServer(async () => {
+      await new Promise((r) => setTimeout(r, 1_000));
+      return Response.json({ ok: true });
+    });
+    try {
+      assertEquals(await new TelegramNotifier({ token: "1:x", chatId: "1", apiBase: bad.url }).send("t"), "not-delivered");
+      assertEquals(await new TelegramNotifier({ token: "1:x", chatId: "1", apiBase: slow.url, timeoutMs: 200 }).send("t"), "unknown");
+    } finally {
+      await bad.close();
+      await slow.close();
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

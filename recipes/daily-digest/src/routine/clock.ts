@@ -96,16 +96,20 @@ export function parseHHMM(s: string): { h: number; m: number } {
 
 /**
  * The UTC instant of local wall time `hhmm` on local date `date` in `tz`.
- * Two passes settle the offset across a DST edge (a wall time inside the
- * spring-forward gap resolves to the instant after the gap).
+ * A wall time inside the spring-forward gap (02:00-03:00 on the March change)
+ * does not exist; it resolves to the instant AFTER the gap (02:30 -> 07:30Z =
+ * 03:30 EDT), never before it. A repeated wall time on the fall-back day takes
+ * the first candidate that reads back as that wall time.
  */
 export function zonedEpoch(date: string, hhmm: string, tz: string): number {
   const [y, mo, d] = date.split("-").map(Number);
   const { h, m } = parseHHMM(hhmm);
   const wall = Date.UTC(y, mo - 1, d, h, m, 0);
-  let t = wall - tzOffsetMs(wall, tz);
-  t = wall - tzOffsetMs(t, tz);
-  return t;
+  const a = wall - tzOffsetMs(wall, tz);
+  const b = wall - tzOffsetMs(a, tz);
+  const want = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  for (const c of [b, a]) if (localHHMM(c, tz) === want && localDate(c, tz) === date) return c;
+  return Math.max(a, b); // inside the spring-forward gap: the instant after it
 }
 
 /** The calendar date after `date` (YYYY-MM-DD), DST-free (pure date math). */

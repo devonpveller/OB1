@@ -13,9 +13,14 @@
  * link, no error body. Never throws.
  */
 
+/** delivered: Telegram said ok. not-delivered: it certainly did not arrive
+ *  (connect-phase failure, or the Bot API answered not-ok) - retry. unknown:
+ *  the request left and no answer came - do not retry (no duplicate alert). */
+export type AlertOutcome = "delivered" | "not-delivered" | "unknown";
+
 export interface AlertSender {
   readonly configured: boolean;
-  send(text: string): Promise<boolean>;
+  send(text: string): Promise<AlertOutcome>;
 }
 
 export class TelegramNotifier implements AlertSender {
@@ -33,24 +38,28 @@ export class TelegramNotifier implements AlertSender {
     return !!(this.opts.token && this.opts.chatId);
   }
 
-  async send(text: string): Promise<boolean> {
-    if (!this.configured) return false;
+  async send(text: string): Promise<AlertOutcome> {
+    if (!this.configured) return "not-delivered";
     const f = this.opts.fetchFn ?? fetch;
     const base = (this.opts.apiBase ?? "https://api.telegram.org").replace(/\/$/, "");
+    let res: Response;
     try {
-      const res = await f(`${base}/bot${this.opts.token}/sendMessage`, {
+      res = await f(`${base}/bot${this.opts.token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ chat_id: this.opts.chatId!, text, disable_web_page_preview: "true" }),
         signal: AbortSignal.timeout(this.opts.timeoutMs ?? 12_000),
       });
-      const body = await res.json().catch(() => ({})) as { ok?: boolean };
-      return res.ok && body.ok === true;
-    } catch {
-      return false; // never echo the error: it can carry the token-bearing URL
+    } catch (e) {
+      // never echo the error: it can carry the token-bearing URL
+      return failedBeforeSend(e) ? "not-delivered" : "unknown";
     }
+    const body = await res.json().catch(() => ({})) as { ok?: boolean };
+    return res.ok && body.ok === true ? "delivered" : "not-delivered";
   }
 }
+
+import { failedBeforeSend } from "./net-errors.ts";
 
 export interface AlertFacts {
   date: string;

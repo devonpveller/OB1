@@ -89,34 +89,46 @@ grants. Adding the send scope does not affect the existing pull token.
 ## Trigger wiring (cron-based, event-chained)
 
 The digest is the END of the email pipeline chain. Schedule lives in
-`OB1/docker/cron/crontab` (single line: pull at 01:00). The cascade is:
+`OB1/docker/cron/crontab` (single line: the routine head at 01:00 local). The cascade is:
 
 ```
-openbrain-cron  (01:00)
-   │  POST /run
+openbrain-cron  (05:00 UTC = 01:00 EDT)
+   │  POST /routine/start   (body = the gmail-pull body)
+   ▼
+openbrain-digest (routine head): waits until the model answers through the
+   │  gateway (/health/liveliness + 1-token probe), then POST CHAIN_HEAD_URL
    ▼
 openbrain-gmail-pull
    │  on success, POST $NEXT_TRIGGER_URL
    ▼
 openbrain-gmail-prune
    │  on success, POST $NEXT_TRIGGER_URL  (+ separately, wiki recompile)
+   │  (podcast unreachable -> CHAIN_FALLBACK_URL = digest /run)
    ▼
-openbrain-digest
-   │  end of chain
+openbrain-podcast (link-enrich: research + episode)
+   │  on ANY exit, POST $NEXT_TRIGGER_URL
+   ▼
+openbrain-digest /run  - sends the digest at most once per local day
 ```
 
 `NEXT_TRIGGER_URL` for each service is declared in
 `OB1/docker/docker-compose.scheduled.yml`:
 - pull: `http://openbrain-gmail-prune:8080/run`
-- prune: `http://openbrain-digest:8080/run`
+- prune: `http://openbrain-podcast:8080/run`
+- podcast: `http://openbrain-digest:8080/run`
 - digest: (unset)
 
-If any step fails, the chain stops; the absence of the morning digest
-signals an upstream problem.
+The digest does NOT depend on the chain finishing: openbrain-digest keeps a
+send-by deadline (`ROUTINE_SEND_BY`, default 07:00 `ROUTINE_TZ`
+America/New_York) and sends what is ready then, marking unfinished sections;
+one follow-up email delivers them later. If the digest or the podcast is
+missing at deadline + 15 min, ONE Telegram alert goes out (sysadmin
+out-of-band channel). Details: `recipes/daily-digest/README.md`, "Morning
+routine".
 
-To change digest timing relative to the pull (e.g. run digest twice
-daily): add a second cron line pointing at `openbrain-digest:8080/run`
-directly. Concurrent-run protection (HTTP 409) prevents overlap.
+A second cron line pointing at `openbrain-digest:8080/run` does NOT give a
+second digest any more: the send-once marker makes it a no-op the same day.
+For an explicit re-send use `POST /run {"force":true}`.
 
 Log capture: the canonical artifact is `D:\_data\openbrain-digest-latest.md`
 plus a dated archive, written inside the container regardless of email

@@ -23,7 +23,7 @@ import { GoogleOAuth } from "../clients/google-oauth.ts";
 import { startServer } from "../server.ts";
 import { dirOf, PodcastService, servePodcast } from "../podcast/podcast-service.ts";
 import { RoutineStore } from "./store.ts";
-import { TelegramNotifier } from "./telegram.ts";
+import { AlertSender, TelegramNotifier } from "./telegram.ts";
 import {
   activity,
   brainStub,
@@ -67,6 +67,11 @@ async function harness(o: {
   gateway: GatewayMode;
   runnerMode?: "produce" | "fail" | "hang-once";
   mail?: (gmailClient: MailTransport) => MailTransport;
+  /** Telegram transport override (receives the stub's URL). */
+  alerts?: (tgUrl: string) => AlertSender;
+  /** gmail-pull "fails": its /health reports last_error and nothing chains on. */
+  pullFails?: boolean;
+  pre?: (store: RoutineStore) => Promise<void>;
 }): Promise<Harness> {
   const dir = await Deno.makeTempDir({ prefix: "routine-e2e-" });
   const reports = `${dir}/reports`;
@@ -100,13 +105,29 @@ async function harness(o: {
   const podcastUrl = `http://127.0.0.1:${podcastSrv.addr.port}`;
   activity.busy.push(() => svc.running);
 
-  // gmail-pull + prune stand-in: record, then trigger the podcast as prune does
+  // gmail-pull + prune stand-in: record, then trigger the podcast as prune does.
+  // GET /health answers like pull-gmail.ts / prune-short-term.ts do.
   const pullCalls: number[] = [];
-  const pull = stubServer((_req) => {
+  const health = {
+    pull: { running: false, last_run_at: null as string | null, last_error: null as string | null },
+    prune: { running: false, last_run_at: null as string | null, last_error: null as string | null },
+  };
+  const pull = stubServer((req, path) => {
+    if (req.method === "GET" && path === "/health") return Response.json(health.pull);
+    if (req.method === "GET" && path === "/prune/health") return Response.json(health.prune);
     pullCalls.push(clock.now());
-    setTimeout(() => postJson(`${podcastUrl}/run`).catch(() => {}), 0);
+    const t = new Date(clock.now()).toISOString();
+    if (o.pullFails) {
+      health.pull = { running: false, last_run_at: t, last_error: "Gmail API error 500" };
+    } else {
+      health.pull = { running: false, last_run_at: t, last_error: null };
+      health.prune = { running: false, last_run_at: t, last_error: null };
+      setTimeout(() => postJson(`${podcastUrl}/run`).catch(() => {}), 0);
+    }
     return Response.json({ started: true }, { status: 202 });
   });
+  await Deno.mkdir(stateDir, { recursive: true });
+  if (o.pre) await o.pre(store);
 
   const oauth = await fakeOAuthFiles(`${dir}/oauth`);
   const realGmail = new GmailClient({ oauth: new GoogleOAuth(oauth), apiBase: gmail.url });
@@ -120,6 +141,8 @@ async function harness(o: {
     CONSIDERATIONS_SYNTH: "false",
     CHAIN_HEAD_URL: `${pull.url}/run`,
     PODCAST_HEALTH_URL: `${podcastUrl}/health`,
+    PULL_HEALTH_URL: `${pull.url}/health`,
+    PRUNE_HEALTH_URL: `${pull.url}/prune/health`,
     ROUTINE_TZ: TZ,
     ROUTINE_SEND_BY: "07:00",
     ROUTINE_ALERT_GRACE_MIN: "15",
@@ -133,7 +156,7 @@ async function harness(o: {
     scriptDir: `${dir}/oauth/`,
     clock,
     mail: o.mail ? o.mail(realGmail) : realGmail,
-    alerts: new TelegramNotifier({ token: "1:fake", chatId: "42", apiBase: tg.url }),
+    alerts: o.alerts ? o.alerts(tg.url) : new TelegramNotifier({ token: "1:fake", chatId: "42", apiBase: tg.url }),
   });
   const digestSrv = startServer({ routine: app.routine, port: 0, hostname: "127.0.0.1", signal: ac.signal });
   digestUrl = `http://127.0.0.1:${digestSrv.addr.port}`;
@@ -294,7 +317,8 @@ Deno.test({
       // later triggers may retry the send (the claim was released: nothing went out) but never re-alert
       await postJson(`${h.digestUrl}/run`);
       await h.clock.advanceTo(Z("12:00")); // (the chain task still waits for the model: no settled() here)
-      assertEquals(h.gmail.attempts, 6, "the later /run retried (nothing had gone out), bounded again");
+      // 3 at the deadline + 3 for the /run + one per 10-min retry pass (07:25, 07:35, 07:45, 07:55)
+      assertEquals(h.gmail.attempts, 10, "definite failures are retried (nothing had gone out), bounded");
       assertEquals(h.gmail.sent.length, 0);
       assertEquals(h.tg.messages.length, 1, "still exactly one alert");
       const st = await h.store.load(DATE);
@@ -339,7 +363,7 @@ Deno.test({
       await h.routine.settled();
       assertEquals(calls, 1, "a later /run does not resend over an unconfirmed send");
       assertEquals(h.tg.messages.length, 1);
-      assertMatch(h.tg.messages[0].text, /digest: NOT sent \(1 attempt\(s\); send unconfirmed\)/);
+      assertMatch(h.tg.messages[0].text, /digest: NOT sent \(1 attempt\(s\); send unconfirmed \(may have gone out\)\)/);
     } finally {
       await h.close();
     }
@@ -456,6 +480,164 @@ Deno.test({
     } finally {
       await Promise.all([gw.close(), gmail.close(), tg.close(), brain.close()]);
       await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// ── round 2 (tester attempt 1: T3 / T4 / T5, pull dies) ─────────────────────
+
+/** A real fetch that goes to a CLOSED loopback port while `down()` - the real
+ *  connect-refused error, i.e. the request never left - and to the stub otherwise. */
+function blipFetch(down: () => boolean): typeof fetch {
+  return ((input: string | URL | Request, init?: RequestInit) => {
+    if (!down()) return fetch(input, init);
+    const u = new URL(input instanceof Request ? input.url : String(input));
+    u.port = "9";
+    // real I/O the virtual clock must wait for (Windows takes ~2 s to refuse)
+    activity.inFlight++;
+    return fetch(u.toString(), init).finally(() => {
+      activity.inFlight--;
+      activity.ticks++;
+    });
+  }) as typeof fetch;
+}
+
+Deno.test({
+  name: "A8 (T4) internet blip 07:00-07:20 (Gmail + Telegram connect refused): a later pass sends the digest ONCE and delivers the alert ONCE",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    let netDown = true;
+    const oauthDir = await Deno.makeTempDir({ prefix: "blip-oauth-" });
+    const oauth = await fakeOAuthFiles(oauthDir);
+    let gmailUrl = "";
+    const h = await harness({
+      start: Z("10:50"),
+      gateway: "up",
+      mail: () =>
+        new GmailClient({
+          oauth: new GoogleOAuth(oauth),
+          get apiBase() {
+            return gmailUrl;
+          },
+          fetchFn: blipFetch(() => netDown),
+        } as ConstructorParameters<typeof GmailClient>[0]),
+      alerts: (tgUrl) => new TelegramNotifier({ token: "1:fake", chatId: "42", apiBase: tgUrl, fetchFn: blipFetch(() => netDown) }),
+    });
+    gmailUrl = h.gmail.url;
+    try {
+      await h.clock.advanceTo(Z("11:20"));
+      assertEquals(h.gmail.sent.length, 0);
+      assertEquals(h.tg.messages.length, 0, "Telegram could not take it either");
+      let st = await h.store.load(DATE);
+      assertEquals(st.digest?.phase, "failed", "connect refused = definitely NOT sent (marker released)");
+      assertEquals(st.digest?.unconfirmed, false);
+      assertEquals(st.alert?.outcome, "not-delivered");
+      netDown = false; // 07:20
+      await h.clock.advanceTo(Z("11:30"));
+      assertEquals(h.gmail.sent.length, 1, "the 07:25 pass sent the digest");
+      assertEquals(h.tg.messages.length, 1, "the 07:25 pass delivered the alert");
+      assertMatch(h.tg.messages[0].text, /digest: sent/, "fresh facts at delivery time");
+      assertMatch(h.tg.messages[0].text, /podcast: NOT produced/);
+      await postJson(`${h.digestUrl}/run`); // a late podcast completion
+      await h.clock.advanceTo(Z("03:00", "2026-10-14"));
+      assertEquals(h.gmail.sent.length, 1, "exactly once");
+      assertEquals(h.tg.messages.length, 1, "exactly once");
+      st = await h.store.load(DATE);
+      assertEquals(st.alert?.delivered, true);
+    } finally {
+      await h.close();
+      await Deno.remove(oauthDir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name: "A9 (T3) a restart mid-BUILD still sends that day's digest; a crash after the CLAIM is never resent and the alert says 'outcome unknown', not 'not attempted'",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    // (a) died mid-build at 06:59 local: building phase, no claim -> boot at 07:05 sends
+    const a = await harness({
+      start: Z("11:05"),
+      gateway: "up",
+      pre: async (s) => {
+        await s.update(DATE, (d) => {
+          d.digest = { attempts: 0, phase: "building", buildStartedAt: iso(Z("10:59")) };
+        });
+      },
+    });
+    try {
+      await a.clock.advanceTo(Z("11:06"));
+      assertEquals(a.gmail.sent.length, 1, "nothing went out, so the day is still sendable");
+    } finally {
+      await a.close();
+    }
+    // (b) died between claim and send: at most once -> no resend; the alert tells the truth
+    const b = await harness({
+      start: Z("10:50"),
+      gateway: "up",
+      pre: async (s) => {
+        await Deno.writeTextFile(s.claimPath(DATE, "digest"), JSON.stringify({ at: iso(Z("10:59")) }));
+        await s.update(DATE, (d) => {
+          d.digest = { attempts: 0, phase: "sending", claimedAt: iso(Z("10:59")) };
+        });
+      },
+    });
+    try {
+      await b.clock.advanceTo(Z("12:00"));
+      assertEquals(b.gmail.sent.length, 0);
+      assertEquals(b.tg.messages.length, 1);
+      const t = b.tg.messages[0].text;
+      assertMatch(t, /digest: NOT sent \(0 attempt\(s\); claimed 06:59 local send outcome unknown/);
+      assert(!/not attempted/.test(t), t);
+    } finally {
+      await b.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "A10 (T5) the 07:00 send does not wait on a model probe: a 5 s-slow gateway does not delay the email",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const h = await harness({ start: Z("10:50"), gateway: "up" });
+    try {
+      h.gw.mode = "slow";
+      h.gw.slowMs = 5000;
+      const t0 = Date.now();
+      const p = h.clock.advanceTo(Z("11:00"));
+      await until(() => h.gmail.sent.length === 1, 60_000);
+      const realWait = Date.now() - t0;
+      await p;
+      assert(realWait < 4000, `the 07:00 email was held ${realWait} ms`);
+      assertEquals(h.gw.log.filter((l) => l.probe).length, 0, "no probe at the deadline");
+    } finally {
+      await h.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "A11 gmail-pull dies: the 07:00 digest says FAILED (the chain stopped), promises no follow-up, one alert",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const h = await harness({ start: Z("04:59"), gateway: "up", pullFails: true });
+    try {
+      await h.clock.advanceTo(Z("05:00"));
+      await cron(h);
+      await h.clock.advanceTo(Z("11:20"));
+      assertEquals(h.gmail.sent.length, 1);
+      const d = h.gmail.sent[0].html;
+      assertMatch(d, /Researched feeds &amp; podcast: FAILED - gmail pull failed/);
+      assertMatch(d, /No follow-up will come/);
+      assert(!/follow-up email will deliver/.test(d), "no promise that cannot be kept");
+      assertEquals(h.tg.messages.length, 1);
+      assertMatch(h.tg.messages[0].text, /podcast: NOT produced \(failed: gmail pull failed/);
+    } finally {
+      await h.close();
     }
   },
 });

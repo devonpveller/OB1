@@ -109,6 +109,22 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
   // ─── Morning routine (mr-routine-outage) ──────────────────────────────────
   const fetchFn = d.fetchFn ?? fetch;
   const podcastHealthUrl = env("PODCAST_HEALTH_URL");
+  // gmail-pull / gmail-prune GET /health ({running, last_run_at, last_error}):
+  // lets the deadline digest say "the chain stopped after pull" instead of
+  // promising a follow-up that cannot come.
+  const stepHealth = (url: string) =>
+    url
+      ? async () => {
+        try {
+          const r = await fetchFn(url, { signal: AbortSignal.timeout(5_000) });
+          if (!r.ok) return null;
+          const j = await r.json() as { running?: boolean; last_run_at?: string | null; last_error?: string | null };
+          return { running: !!j.running, last_run_at: j.last_run_at ?? null, last_error: j.last_error ?? null };
+        } catch {
+          return null;
+        }
+      }
+      : undefined;
   const routine = new MorningRoutine({
     cfg: routineConfigFromEnv(d.env),
     clock,
@@ -135,6 +151,8 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
         }
       }
       : undefined,
+    pullHealth: stepHealth(env("PULL_HEALTH_URL")),
+    pruneHealth: stepHealth(env("PRUNE_HEALTH_URL")),
     briefPath,
     alerts: d.alerts ?? new TelegramNotifier({
       token: env("SYSADMIN_TELEGRAM_BOT_TOKEN"),

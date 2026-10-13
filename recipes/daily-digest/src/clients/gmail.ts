@@ -5,6 +5,7 @@
  */
 
 import { GoogleOAuth } from "./google-oauth.ts";
+import { failedBeforeSend } from "../routine/net-errors.ts";
 
 export interface GmailClientOptions {
   oauth: GoogleOAuth;
@@ -66,6 +67,11 @@ export class GmailClient implements MailTransport {
         },
       );
     } catch (e) {
+      // Round 2: a connect-phase failure (DNS, refused, TLS) never sent a byte -
+      // DEFINITE, retryable. Only a failure after the request left is ambiguous.
+      if (failedBeforeSend(e)) {
+        throw new MailSendError(`Gmail send failed before the request left (${(e as Error).name}: connect phase)`, true);
+      }
       throw new MailSendError(`Gmail send: no answer (${(e as Error).name}) - may or may not have been sent`, false);
     }
 

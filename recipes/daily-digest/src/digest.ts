@@ -42,6 +42,17 @@ export interface DigestRunOptions {
   generatedAt?: string;
 }
 
+/** A digest rendered and audit-copied but NOT sent (round 2: build first,
+ *  claim the send-once marker only right before the transport). */
+export interface BuiltDigest {
+  subject: string;
+  html: string;
+  sectionsRun: string[];
+  sectionsOmitted: string[];
+  sectionErrors: Record<string, string>;
+  reportPath: string;
+}
+
 export interface DigestResult {
   subject: string;
   sectionsRun: string[];
@@ -59,6 +70,18 @@ export class DigestOrchestrator {
   }
 
   async run(o: DigestRunOptions = {}): Promise<DigestResult> {
+    const b = await this.build(o);
+    await this.send(b);
+    return { ...b, sent: true };
+  }
+
+  /** Transport only. */
+  async send(b: BuiltDigest): Promise<void> {
+    await this.opts.gmail.sendHtml({ from: this.opts.fromEmail, to: this.opts.toEmail, subject: b.subject, htmlBody: b.html });
+  }
+
+  /** Sections + render + audit copy; nothing is sent. */
+  async build(o: DigestRunOptions = {}): Promise<BuiltDigest> {
     const generatedAt = o.generatedAt ?? new Date().toISOString();
     const subject = o.subject ?? `Open Brain Daily Digest — ${generatedAt.slice(0, 10)}`;
 
@@ -77,21 +100,7 @@ export class DigestOrchestrator {
     // Render HTML and send. A throw here surfaces in DigestResult so
     // the HTTP layer can return a meaningful status to the caller.
     const html = this.opts.htmlRenderer.render(all, { generatedAt });
-    await this.opts.gmail.sendHtml({
-      from: this.opts.fromEmail,
-      to: this.opts.toEmail,
-      subject,
-      htmlBody: html,
-    });
-
-    return {
-      subject,
-      sectionsRun: ran,
-      sectionsOmitted: omitted,
-      sectionErrors: errors,
-      sent: true,
-      reportPath,
-    };
+    return { subject, html, sectionsRun: ran, sectionsOmitted: omitted, sectionErrors: errors, reportPath };
   }
 
   private async runSections(sections: Section[]): Promise<{

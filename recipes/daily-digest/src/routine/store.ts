@@ -45,6 +45,12 @@ export interface DayState {
   };
   digest?: {
     attempts: number;
+    /** round 2: where the send got to. building = sections being built, no
+     *  claim yet (a restart may rebuild); sending = claim held, transport
+     *  called; sent / failed (definite, claim released) / unconfirmed (maybe sent). */
+    phase?: "building" | "sending" | "sent" | "failed" | "unconfirmed";
+    buildStartedAt?: string;
+    claimedAt?: string;
     sentAt?: string;
     mode?: "full" | "deadline";
     included?: string[];
@@ -54,7 +60,16 @@ export interface DayState {
     unconfirmed?: boolean;
   };
   followUp?: { attempts: number; sentAt?: string; lastError?: string; unconfirmed?: boolean };
-  alert?: { at: string; delivered: boolean; problems: string[] };
+  /** outcome: delivered | not-delivered (retried by later passes until the
+   *  cutoff) | unknown (may have arrived: never retried) | unconfigured. */
+  alert?: {
+    at: string;
+    delivered: boolean;
+    problems: string[];
+    outcome?: "delivered" | "not-delivered" | "unknown" | "unconfigured";
+    tries?: number;
+    lastTryAt?: string;
+  };
   forced?: Array<{ at: string; kind: string; ok: boolean }>;
 }
 
