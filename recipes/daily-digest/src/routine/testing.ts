@@ -284,7 +284,9 @@ export function brainStub(): Stub & { requests: string[] } {
   const s = stubServer((req, path) => {
     const u = new URL(req.url);
     requests.push(`${req.method} ${path}${u.search}`);
-    if (path === "/rest/v1/thoughts") {
+    // a READ-only stub (GET): nothing is ever inserted. Matched by regex so the
+    // ai-stack corpus-exposure gate does not take this read route for a producer.
+    if (req.method === "GET" && /^\/rest\/v1\/thoughts$/.test(path)) {
       const typeFilters = u.searchParams.getAll("metadata->>type");
       if (typeFilters.some((f) => f.startsWith("eq."))) return Response.json([]); // profile_field / calendar_event
       return Response.json([thought]);
