@@ -23,7 +23,7 @@ import { DigestOrchestrator } from "./digest.ts";
 import type { Section } from "./sections/section.ts";
 import { Clock, realClock } from "./routine/clock.ts";
 import { probeModel } from "./routine/model-gate.ts";
-import { MorningRoutine, routineConfigFromEnv } from "./routine/routine.ts";
+import { CANONICAL_CHAIN_HEAD_BODY, MorningRoutine, routineConfigFromEnv } from "./routine/routine.ts";
 import { RoutineStore } from "./routine/store.ts";
 import { AlertSender, TelegramNotifier } from "./routine/telegram.ts";
 import { MattermostOwnerChannel, OwnerChannel } from "./routine/owner.ts";
@@ -112,6 +112,15 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
 
   // ─── Morning routine (mr-routine-outage) ──────────────────────────────────
   const fetchFn = d.fetchFn ?? fetch;
+  // Round 5 (B1): the gmail-pull body of every chain start that has none of its
+  // own. Blank = the canonical cron body; a bad value fails at boot, not at 01:00.
+  const headBodyRaw = env("CHAIN_HEAD_BODY").trim();
+  let chainHeadBody: Record<string, unknown> = { ...CANONICAL_CHAIN_HEAD_BODY };
+  if (headBodyRaw) {
+    const v = JSON.parse(headBodyRaw);
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("CHAIN_HEAD_BODY must be a JSON object.");
+    chainHeadBody = v as Record<string, unknown>;
+  }
   const podcastHealthUrl = env("PODCAST_HEALTH_URL");
   // gmail-pull / gmail-prune GET /health ({running, last_run_at, last_error}):
   // lets the deadline digest say "the chain stopped after pull" instead of
@@ -191,6 +200,8 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
       })
       : sentCheckDisabled),
     chainHeadUrl: env("CHAIN_HEAD_URL") || undefined,
+    chainHeadBody,
+    reportDir: REPORT_DIR,
     fetchFn,
   });
   return { routine, orchestrator };

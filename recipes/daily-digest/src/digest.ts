@@ -18,6 +18,12 @@ import { MarkdownRenderer } from "./renderers/markdown.ts";
 import { Section, SectionData } from "./sections/section.ts";
 import { RoutineNoticePayload } from "./sections/routine-notice.ts";
 
+/** Round 5 (F1, C5): the ONE allow-listed line for a section that timed out or
+ *  threw. No error detail reaches the email; the error stays in sectionErrors. */
+export const NOT_READY_LINE = "not ready at send time";
+/** Section names are code constants; anything else is not echoed. */
+const notReadyLine = (name: string) => `${/^[a-z][a-z0-9_-]{0,40}$/.test(name) ? name : "a section"}: ${NOT_READY_LINE}`;
+
 export interface DigestOrchestratorOptions {
   sections: Section[];
   htmlRenderer: HtmlRenderer;
@@ -97,12 +103,17 @@ export class DigestOrchestrator {
     );
     const { sectionData, ran, omitted, errors } = await this.runSections(selected);
     const notices: SectionData[] = (o.notices ?? []).map((n) => ({ kind: "routine_notice", payload: n }));
-    const all = [...notices, ...sectionData];
+    // F1: a section cut by the bound or that threw is SAID, not silently absent.
+    const failed = omitted.filter((n) => n in errors);
+    const notReady: SectionData[] = failed.length
+      ? [{ kind: "routine_notice", payload: { tone: "pending", title: "Not ready at send time", lines: failed.map(notReadyLine) } }]
+      : [];
+    const all = [...notices, ...sectionData, ...notReady];
 
     // Always write the markdown audit copy first. If Gmail send fails
     // afterward, the report is still on disk for diagnosis.
     const markdown = this.opts.markdownRenderer.render(all, { subject });
-    const reportPath = await this.writeReport(subject, markdown, o.reportStem ?? "openbrain-digest");
+    const reportPath = await this.writeReport(subject, markdown, o.reportStem ?? "openbrain-digest", generatedAt);
 
     // Render HTML and send. A throw here surfaces in DigestResult so
     // the HTTP layer can return a meaningful status to the caller.
@@ -157,12 +168,15 @@ export class DigestOrchestrator {
     return { sectionData, ran, omitted, errors };
   }
 
-  private async writeReport(subject: string, markdown: string, stem: string): Promise<string> {
+  /** The timestamped copy is named by generatedAt (the routine's clock): the
+   *  first-boot gate reads "today's digest was produced" from these names. */
+  private async writeReport(subject: string, markdown: string, stem: string, generatedAt: string): Promise<string> {
     try {
       await Deno.mkdir(this.opts.reportDir, { recursive: true });
       const latest = `${this.opts.reportDir}/${stem}-latest.md`;
       await Deno.writeTextFile(latest, markdown);
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const at = Date.parse(generatedAt);
+      const ts = (Number.isFinite(at) ? new Date(at) : new Date()).toISOString().replace(/[:.]/g, "-");
       await Deno.writeTextFile(`${this.opts.reportDir}/${stem}-${ts}.md`, markdown);
       return latest;
     } catch (err) {

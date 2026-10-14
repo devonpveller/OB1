@@ -10,6 +10,10 @@
  *                                  ROUTINE_RECHECK_MIN (10)  ensureToday("deadline"|"tick")
  *   boot                                                     ensureToday("boot")
  *
+ * Round 5: a start without a body of its own sends CANONICAL_CHAIN_HEAD_BODY
+ * (B1); an unreadable record fails closed; a first boot after the pre-routine
+ * code already produced today's digest seeds DONE (F3).
+ *
  * Today (LOCAL date in ROUTINE_TZ; containers run UTC) is ONE durable record
  * (store.ts) in one of four states:
  *   NOT STARTED -> check dependencies (model, research engine, Gmail auth); a
@@ -42,6 +46,7 @@ import { bothClocks, Clock, localDate, localHHMM, nextDate, parseHHMM, zonedEpoc
 import { ModelProbeResult } from "./model-gate.ts";
 import {
   DayRecord,
+  DayRecordUnreadableError,
   DepFailure,
   PendingNote,
   PendingState,
@@ -57,6 +62,27 @@ import { BuiltDigest, DigestOrchestrator } from "../digest.ts";
 import { MailSendError } from "../clients/gmail.ts";
 import type { EmailEnrichment } from "../podcast/enrichment.ts";
 import type { RoutineNoticePayload } from "../sections/routine-notice.ts";
+
+/**
+ * Round 5 (B1): THE gmail-pull body of the morning chain - the same JSON the
+ * openbrain-cron line posts. Every chain start that carries no body of its own
+ * (the ROUTINE_CHAIN_START timer, boot, a FAILED -> retry tick, a resumed
+ * dependency wait, an ad-hoc POST with an empty body) sends this, never `{}`
+ * (gmail-pull treats `{}` as "use my CLI defaults": SENT mail, 24h, 50).
+ * Override with CHAIN_HEAD_BODY (JSON); `{}` there is the explicit opt-in.
+ */
+export const CANONICAL_CHAIN_HEAD_BODY: Readonly<Record<string, unknown>> = Object.freeze({
+  labelsPrefix: "brain/",
+  window: "90d",
+  limit: 500,
+});
+
+/** A caller's body counts only when it is a non-empty JSON object. */
+function givenBody(body: unknown): Record<string, unknown> | undefined {
+  return body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).length > 0
+    ? structuredClone(body as Record<string, unknown>)
+    : undefined;
+}
 
 export interface RoutineConfig {
   tz: string;
@@ -133,6 +159,10 @@ export interface MorningRoutineDeps {
   sentCheck?: SentChecker;
   /** The chain head (openbrain-gmail-pull /run). */
   chainHeadUrl?: string;
+  /** The body a chain start without one sends (default CANONICAL_CHAIN_HEAD_BODY). */
+  chainHeadBody?: Record<string, unknown>;
+  /** Where openbrain-digest writes its audit copies (first-boot evidence, F3). */
+  reportDir?: string;
   fetchFn?: typeof fetch;
   log?: (m: string) => void;
 }
@@ -167,6 +197,8 @@ export class MorningRoutine {
   #stop: AbortController | null = null;
   #scheduler: Promise<void> | null = null;
   #lastProbe: { state: "up" | "down"; at: number } | null = null;
+  /** "<date>:<why>" already logged as unreadable (one line per cause, not per pass). */
+  readonly #unreadableLogged = new Set<string>();
 
   constructor(deps: MorningRoutineDeps) {
     this.#d = deps;
@@ -248,7 +280,7 @@ export class MorningRoutine {
   async #schedule(signal: AbortSignal): Promise<void> {
     const { clock, cfg } = this.#d;
     this.#log(`[routine] scheduler up: chain ${cfg.chainStart}, send-by ${cfg.sendBy} ${cfg.tz}, alert +${cfg.alertGraceMs / 60_000} min, re-check every ${cfg.recheckMs / 60_000} min, cutoff ${cfg.followUpCutoff}.`);
-    await this.ensureToday("boot");
+    await this.#pass("boot");
     while (!signal.aborted) {
       const now = clock.now();
       const date = this.dayOf(now);
@@ -257,7 +289,16 @@ export class MorningRoutine {
       const next = Math.min(tick, ...marks.filter((m) => m > now));
       await clock.sleep(next - now, signal);
       const isDeadline = next === this.deadlineOf(this.dayOf(next));
-      await this.ensureToday(isDeadline ? "deadline" : "tick");
+      await this.#pass(isDeadline ? "deadline" : "tick");
+    }
+  }
+
+  /** A timer pass: a failure (e.g. an unreadable record) is logged, never kills the scheduler. */
+  async #pass(trigger: Trigger): Promise<void> {
+    try {
+      await this.ensureToday(trigger);
+    } catch (e) {
+      if (!(e instanceof DayRecordUnreadableError)) console.error(`[routine] ${trigger} pass failed: ${(e as Error)?.name ?? "error"}`);
     }
   }
 
@@ -269,6 +310,7 @@ export class MorningRoutine {
    */
   async ensureToday(trigger: Trigger, o: { body?: unknown } = {}): Promise<DayRecord> {
     const date = this.dayOf(this.#now());
+    await this.#firstLook(date, trigger);
     // Health reads happen BEFORE the locks (bounded 5 s each), never inside.
     const activity = await this.#readActivity(date);
     const view = await this.#chainView(date, activity);
@@ -280,6 +322,74 @@ export class MorningRoutine {
     });
     for (const a of actions) this.#track(a()).catch((e) => console.error(`[routine] ${date}: action failed: ${e}`));
     return rec;
+  }
+
+  /**
+   * Round 5 (F3). Before anything else, today's record must be readable:
+   *  - unreadable -> fail closed: throw (no chain start, no send), logged once
+   *    per cause; the file is left untouched for the operator.
+   *  - missing, and the pre-routine code ALREADY produced today's digest (its
+   *    audit copy openbrain-digest-<ISO>.md is dated today, local) -> seed the
+   *    record DONE / sent and do nothing: never a second digest at first boot.
+   */
+  async #firstLook(date: string, trigger: Trigger): Promise<void> {
+    const got = await this.#d.store.inspect(date);
+    if (got.kind === "unreadable") this.#failClosed(new DayRecordUnreadableError(date, got.why), trigger);
+    if (got.kind !== "missing") return;
+    let evidence: { file: string; at: string } | null;
+    try {
+      evidence = await this.#legacyDigestOf(date);
+    } catch (e) {
+      this.#failClosed(e as DayRecordUnreadableError, trigger);
+    }
+    if (!evidence) return;
+    const ev = evidence;
+    await this.#mutate(date, (r) => {
+      // Under the lock: seed only a record nobody has touched yet.
+      if (r.history.length || r.chain.status !== "not-started" || r.digest.status !== "not-sent") return;
+      r.chain = { status: "done", attempts: 1, outcome: "produced", doneAt: ev.at };
+      r.digest = { status: "sent", attempts: 1, sentAt: ev.at };
+      this.#note(r, trigger, `seeded DONE at first boot: today's digest was already produced at ${this.#hhmm(ev.at)} by the pre-routine code (${ev.file}) - nothing to send`);
+      r.state = deriveState(r);
+    });
+  }
+
+  #failClosed(err: DayRecordUnreadableError, trigger: Trigger): never {
+    const key = `${err.date}:${err.why}`;
+    if (!this.#unreadableLogged.has(key)) {
+      this.#unreadableLogged.add(key);
+      console.error(`[routine] ${err.message} (trigger ${trigger}; the operator fixes or removes ${this.#d.store.dayPath(err.date)})`);
+    }
+    throw err;
+  }
+
+  /** The latest openbrain-digest audit copy dated today (local), if any. */
+  async #legacyDigestOf(date: string): Promise<{ file: string; at: string } | null> {
+    const dir = this.#d.reportDir;
+    if (!dir) return null;
+    const re = /^openbrain-digest-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.md$/;
+    let best: { file: string; ms: number } | null = null;
+    try {
+      for await (const e of Deno.readDir(dir)) {
+        const m = e.isFile ? re.exec(e.name) : null;
+        if (!m) continue;
+        const ms = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`);
+        if (!Number.isFinite(ms) || this.dayOf(ms) !== date) continue;
+        if (!best || ms > best.ms) best = { file: e.name, ms };
+      }
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) return null;
+      // Cannot tell whether today's digest already went out: fail closed.
+      throw new DayRecordUnreadableError(date, `reports dir unreadable (${(e as Error)?.name ?? "error"})`);
+    }
+    return best ? { file: best.file, at: this.#iso(best.ms) } : null;
+  }
+
+  /** B1: the body a start sends - the caller's, else the one this day's chain started with, else the canonical one. */
+  #headBodyFor(c: DayRecord["chain"], body: unknown): Record<string, unknown> {
+    const hb = givenBody(body) ?? c.headBody ?? structuredClone({ ...(this.#d.chainHeadBody ?? CANONICAL_CHAIN_HEAD_BODY) });
+    c.headBody = hb;
+    return hb;
   }
 
   #decide(
@@ -317,7 +427,8 @@ export class MorningRoutine {
       this.#note(r, trigger, `chain attempt ${c.attempts} (${why}): checking dependencies`);
       this.#inflight.add(`${date}:chain`);
       const attempt = c.attempts;
-      actions.push(() => this.#runChain(date, attempt, body).finally(() => this.#inflight.delete(`${date}:chain`)));
+      const hb = this.#headBodyFor(c, body);
+      actions.push(() => this.#runChain(date, attempt, hb).finally(() => this.#inflight.delete(`${date}:chain`)));
     };
     const fail = (reason: string) => {
       c.status = "failed";
@@ -354,7 +465,8 @@ export class MorningRoutine {
             this.#note(r, trigger, "resuming the dependency wait (no process owned it)");
             this.#inflight.add(`${date}:chain`);
             const attempt = c.attempts;
-            actions.push(() => this.#runChain(date, attempt, body).finally(() => this.#inflight.delete(`${date}:chain`)));
+            const hb = this.#headBodyFor(c, body);
+            actions.push(() => this.#runChain(date, attempt, hb).finally(() => this.#inflight.delete(`${date}:chain`)));
           }
         }
         break;
@@ -386,7 +498,8 @@ export class MorningRoutine {
           c.lastCheckAt = this.#iso();
           this.#inflight.add(`${date}:chain`);
           const seen = c.attempts;
-          actions.push(() => this.#retryChain(date, seen, body).finally(() => this.#inflight.delete(`${date}:chain`)));
+          const hb = this.#headBodyFor(c, body);
+          actions.push(() => this.#retryChain(date, seen, hb).finally(() => this.#inflight.delete(`${date}:chain`)));
         }
         break;
       }
@@ -483,7 +596,7 @@ export class MorningRoutine {
   }
 
   // ── chain start: dependency check -> hand-off -> bounded wait -> trigger ──
-  async #runChain(date: string, attempt: number, body: unknown): Promise<void> {
+  async #runChain(date: string, attempt: number, body: Record<string, unknown>): Promise<void> {
     const { clock } = this.#d;
     const rec0 = await this.#d.store.load(date);
     const until = Date.parse(rec0.chain.waitUntil ?? this.#iso());
@@ -531,7 +644,7 @@ export class MorningRoutine {
   }
 
   /** FAILED: check dependencies; all up -> a new attempt starts at once; else stay FAILED. */
-  async #retryChain(date: string, seenAttempts: number, body: unknown): Promise<void> {
+  async #retryChain(date: string, seenAttempts: number, body: Record<string, unknown>): Promise<void> {
     const failing = await this.#checkDeps();
     const attempt = await this.#mutate(date, (r) => {
       r.deps = { checkedAt: this.#iso(), ok: failing.length === 0, failing };
@@ -556,14 +669,14 @@ export class MorningRoutine {
     if (attempt) await this.#triggerHead(date, attempt, body);
   }
 
-  async #triggerHead(date: string, attempt: number, body: unknown): Promise<void> {
+  async #triggerHead(date: string, attempt: number, body: Record<string, unknown>): Promise<void> {
     let status = 0;
     if (this.#d.chainHeadUrl) {
       try {
         const res = await (this.#d.fetchFn ?? fetch)(this.#d.chainHeadUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(body ?? {}),
+          body: JSON.stringify(body),
           signal: AbortSignal.timeout(30_000),
         });
         status = res.status;

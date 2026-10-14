@@ -129,14 +129,22 @@ export async function harness(o: HarnessOptions) {
   activity.busy.push(() => svc.running);
 
   const pullCalls: number[] = [];
+  /** Round 5 (B1): what each chain trigger POSTed to gmail-pull /run (parsed JSON; a non-JSON body as its text). */
+  const pullBodies: Array<{ at: number; body: unknown }> = [];
   const health = {
     pull: { running: false, last_run_at: null as string | null, last_error: null as string | null },
     prune: { running: false, last_run_at: null as string | null, last_error: null as string | null },
   };
-  const pull = stubServer((req, path) => {
+  const pull = stubServer(async (req, path) => {
     if (req.method === "GET" && path === "/health") return o.pullHealth ? o.pullHealth() : Response.json(health.pull);
     if (req.method === "GET" && path === "/prune/health") return o.pruneHealth ? o.pruneHealth() : Response.json(health.prune);
     pullCalls.push(clock.now());
+    const text = await req.text();
+    let body: unknown = text;
+    try {
+      body = JSON.parse(text);
+    } catch { /* kept as text */ }
+    pullBodies.push({ at: clock.now(), body });
     const t = new Date(clock.now()).toISOString();
     if (o.pullFails) {
       health.pull = { running: false, last_run_at: t, last_error: "Gmail API error 500" };
@@ -193,6 +201,8 @@ export async function harness(o: HarnessOptions) {
     research,
     health,
     pullCalls,
+    pullBodies,
+    reports,
     digestUrl,
     podcastUrl,
     svc,

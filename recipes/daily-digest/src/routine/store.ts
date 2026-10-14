@@ -86,6 +86,10 @@ export interface DayRecord {
     /** produced | nothing-to-do (done) */
     outcome?: string;
     modelDownSince?: string;
+    /** Round 5 (B1): the gmail-pull body this day's chain was started with
+     *  (a cron/L14 body, else the canonical CHAIN_HEAD_BODY); a retry or a
+     *  resumed wait reuses it. */
+    headBody?: Record<string, unknown>;
   };
   deps?: { checkedAt: string; ok: boolean; failing: DepFailure[] };
   /** A down dependency handed to the system that owns it (once per dependency per day). */
@@ -142,6 +146,16 @@ export interface PodcastResult {
 
 const LOCK_STALE_MS = 120_000;
 
+/** Round 5 (F3): today's record exists but cannot be read. The routine fails
+ *  closed on it: no chain start, no send, a logged reason. The file is left as
+ *  it is (update() throws before writing). */
+export class DayRecordUnreadableError extends Error {
+  override name = "DayRecordUnreadableError";
+  constructor(readonly date: string, readonly why: string) {
+    super(`day record ${date} is unreadable (${why}) - failing closed: no chain start, no send`);
+  }
+}
+
 export class RoutineStore {
   constructor(readonly dir: string) {}
 
@@ -158,10 +172,43 @@ export class RoutineStore {
     return `${this.dir}/${date}.podcast-result.json`;
   }
 
+  /**
+   * Round 5 (F3): does today's record exist, and can it be read? "unreadable"
+   * = the file is there but is not a JSON object (after a few short retries,
+   * so a reader racing an atomic rename is not mistaken for corruption).
+   */
+  async inspect(date: string): Promise<{ kind: "missing" } | { kind: "ok"; r: Partial<DayRecord> } | { kind: "unreadable"; why: string }> {
+    const p = this.dayPath(date);
+    let why = "";
+    for (let i = 0; i < 3; i++) {
+      if (i) await new Promise((res) => setTimeout(res, 25));
+      let text: string;
+      try {
+        text = await Deno.readTextFile(p);
+      } catch (e) {
+        if (e instanceof Deno.errors.NotFound) return { kind: "missing" };
+        why = `read failed (${(e as Error)?.name ?? "error"})`;
+        continue;
+      }
+      try {
+        const v = JSON.parse(text);
+        if (v && typeof v === "object" && !Array.isArray(v)) return { kind: "ok", r: v as Partial<DayRecord> };
+        why = "not a JSON object";
+      } catch {
+        why = "invalid JSON";
+      }
+    }
+    return { kind: "unreadable", why };
+  }
+
+  /** Today's record; a missing one is NOT STARTED. An unreadable one THROWS
+   *  (fail closed: never mistaken for "nothing happened today"). */
   async load(date: string): Promise<DayRecord> {
-    const r = await readJson<Partial<DayRecord>>(this.dayPath(date));
+    const got = await this.inspect(date);
     const e = emptyDay(date);
-    if (!r) return e;
+    if (got.kind === "missing") return e;
+    if (got.kind === "unreadable") throw new DayRecordUnreadableError(date, got.why);
+    const r = got.r;
     return {
       ...e,
       ...r,

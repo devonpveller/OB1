@@ -13,8 +13,9 @@
  * at 01:00 local, the L14 whole-chain trigger POSTs /routine/ensure, the
  * podcast POSTs /run, and an in-process timer fires at the send-by deadline
  * (ROUTINE_SEND_BY, default 07:00 America/New_York), 15 min after it, and every
- * ROUTINE_RECHECK_MIN. Ad-hoc:
- *   docker exec openbrain-cron sh -c "curl -fsS -X POST -d '{}' http://openbrain-digest:8080/routine/ensure"
+ * ROUTINE_RECHECK_MIN. Ad-hoc (no body = the canonical gmail-pull body,
+ * CHAIN_HEAD_BODY: brain/ labels, 90d, 500; post a JSON body only to override it):
+ *   docker exec openbrain-cron sh -c "curl -fsS -X POST http://openbrain-digest:8080/routine/ensure"
  */
 
 import { buildDigestApp } from "./src/app.ts";

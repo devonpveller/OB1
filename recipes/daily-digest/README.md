@@ -207,8 +207,22 @@ Delivery is part of the same action:
   podcast not produced; re-sent at later passes until the cutoff only if Telegram did not confirm
   it. Step names, counts, states and times only.
 
+**The chain's gmail-pull body (round 5).** A start that carries a JSON body (the cron line,
+an L14 call with a body) sends that body, and the day's retries and resumed waits reuse it.
+Every other start - the `ROUTINE_CHAIN_START` timer, boot, a FAILED retry, an ad-hoc POST with
+no or an empty body - sends `CHAIN_HEAD_BODY` (default the cron body:
+`{"labelsPrefix":"brain/","window":"90d","limit":500}`), never `{}` (which gmail-pull reads as
+"its CLI defaults": SENT mail, 24 h, 50). `CHAIN_HEAD_BODY={}` is the explicit opt-in to that.
+
+**First boot / unreadable record (round 5).** With no record for today and an
+`openbrain-digest-<ISO>.md` audit copy dated today (local) under the reports dir - today's digest
+was already produced, e.g. by the pre-routine code - the record is seeded DONE / sent and nothing
+is sent. A `<date>.day.json` that exists but cannot be read fails closed: no chain start, no
+send, one logged line, `/routine/*` answer 503; the file is left as it is.
+
 There are no claim files and no force switch. To re-open a day by hand, stop openbrain-digest,
-edit (or delete) `D:\_data\routine\<date>.day.json`, start it again. State for today:
+edit `D:\_data\routine\<date>.day.json` (deleting it re-opens the day only when no digest audit
+copy is dated today - see first boot), start it again. State for today:
 `GET http://openbrain-digest:8080/health` -> `routine`.
 
 **Podcast restart.** The run lock is in memory plus a run record with a heartbeat

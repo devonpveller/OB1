@@ -84,6 +84,9 @@ services:
       ROUTINE_FOLLOWUP_CUTOFF: ${ROUTINE_FOLLOWUP_CUTOFF:-20:00}
       ROUTINE_STATE_DIR: /reports/routine
       CHAIN_HEAD_URL: http://openbrain-gmail-pull:8080/run
+      # gmail-pull body for a chain start with no body of its own (timer, boot,
+      # retry, resumed wait, ad-hoc). Blank = the cron body (brain/, 90d, 500).
+      CHAIN_HEAD_BODY: ${CHAIN_HEAD_BODY:-}
       PODCAST_HEALTH_URL: http://openbrain-podcast:8080/health
       PULL_HEALTH_URL: http://openbrain-gmail-pull:8080/health
       PRUNE_HEALTH_URL: http://openbrain-gmail-prune:8080/health

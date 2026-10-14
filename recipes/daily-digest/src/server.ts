@@ -2,7 +2,8 @@
  * HTTP server. Every route that does anything calls the ONE action,
  * MorningRoutine.ensureToday() (round 3):
  *   POST /routine/start   openbrain-cron, 01:00 local. Body = the gmail-pull
- *                         body, passed through to the chain head.
+ *                         body, passed through to the chain head (an empty
+ *                         body = the canonical CHAIN_HEAD_BODY, never `{}`).
  *   POST /routine/ensure  the L14 whole-chain trigger (and any on-demand
  *                         button). Same body. Idempotent: it starts, resumes,
  *                         retries or does nothing, by today's state.
@@ -14,6 +15,7 @@
  */
 
 import { MorningRoutine, Trigger } from "./routine/routine.ts";
+import { DayRecordUnreadableError } from "./routine/store.ts";
 
 export interface ServerOptions {
   routine: MorningRoutine;
@@ -70,6 +72,8 @@ export function startServer(opts: ServerOptions): Deno.HttpServer<Deno.NetAddr> 
       try {
         return await ensure(trigger, url.pathname === "/run" ? undefined : body);
       } catch (e) {
+        // Round 5 (F3): an unreadable day record fails closed - nothing started, nothing sent.
+        if (e instanceof DayRecordUnreadableError) return jsonResponse({ error: e.message }, 503);
         return jsonResponse({ error: (e as Error)?.message ?? String(e) }, 500);
       }
     }
