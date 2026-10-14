@@ -601,3 +601,65 @@ Deno.test({
     }
   },
 });
+
+// ── round 4 ────────────────────────────────────────────────────────────────────
+Deno.test({
+  name: "S20 NO send path calls the model probe: a pre-deadline /run send, the 07:00 send and a follow-up make ZERO 1-token probes",
+  ...opts,
+  async fn() {
+    // No chain is started by the timer (pin), so no dependency check runs: every
+    // probe the gateway sees would have come from a send path.
+    let probes = 0;
+    const h = await harness({
+      start: Z("10:30"),
+      gateway: "up",
+      env: { ROUTINE_CHAIN_START: "23:00" },
+      fetchWrap: (_clock, f) =>
+        ((input: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === "POST" && /\/chat\/completions$/.test(String(input)) && JSON.parse(String(init.body)).max_tokens === 1) probes++;
+          return f(input, init);
+        }) as typeof fetch,
+    });
+    try {
+      // 06:35: a stray /run (pre-deadline FULL send path)
+      await h.clock.advanceTo(Z("10:35"));
+      await postJson(`${h.digestUrl}/run`, {});
+      await until(() => h.gmail.sent.length === 1);
+      assertEquals(probes, 0, "the pre-deadline send probed the model");
+      // the research arrives later (podcast run by hand) -> the follow-up send path
+      await postJson(`${h.podcastUrl}/run`, {});
+      await h.clock.advanceTo(Z("11:20"));
+      await until(() => h.gmail.sent.length === 2);
+      assertMatch(h.gmail.sent[1].subject, /follow-up/);
+      assertEquals(probes, 0, "a send path probed the model");
+    } finally {
+      await h.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "S21 X1 shape, own copy: the chain ends at 06:55 and the model probe would take 10 VIRTUAL min - the digest still leaves before 07:00",
+  ...opts,
+  async fn() {
+    let n = 0;
+    const h = await harness({
+      start: Z("10:55"),
+      gateway: "up",
+      fetchWrap: (clock, f) =>
+        (async (input: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === "POST" && /\/chat\/completions$/.test(String(input)) && JSON.parse(String(init.body)).max_tokens === 1) {
+            if (++n >= 2) await clock.sleep(10 * 60_000); // every probe after the chain-start check spans 07:00
+          }
+          return f(input, init);
+        }) as typeof fetch,
+    });
+    try {
+      await h.clock.advanceTo(Z("11:30"));
+      assertEquals(h.gmail.sent.length, 1);
+      assert(h.gmail.sent[0].at < Z("11:00"), `digest at ${iso(h.gmail.sent[0].at)}`);
+    } finally {
+      await h.close();
+    }
+  },
+});

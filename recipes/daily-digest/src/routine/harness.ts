@@ -84,6 +84,8 @@ export interface HarnessOptions {
   pre?: (store: RoutineStore) => Promise<void>;
   /** Do not start the scheduler (drive ensureToday by hand). */
   noScheduler?: boolean;
+  /** Wrap the digest service's fetch (e.g. a 1-token probe that takes VIRTUAL minutes). */
+  fetchWrap?: (clock: VirtualClock, f: typeof fetch) => typeof fetch;
 }
 
 export type Harness = Awaited<ReturnType<typeof harness>>;
@@ -175,6 +177,7 @@ export async function harness(o: HarnessOptions) {
     alerts: o.alerts ? o.alerts(tg.url) : new TelegramNotifier({ token: "1:fake", chatId: "42", apiBase: tg.url }),
     owners: new MattermostOwnerChannel({ url: owner.url, token: "mm-fake", channelId: "sysadmin" }),
     sentCheck: o.sentCheck ? new GmailSentChecker({ oauth: new GoogleOAuth(oauth), apiBase: gmail.url }) : sentCheckDisabled,
+    fetchFn: o.fetchWrap ? o.fetchWrap(clock, fetch) : undefined,
   });
   const digestSrv = startServer({ routine: app.routine, port: 0, hostname: "127.0.0.1", signal: ac.signal, onListen: () => {} });
   digestUrl = `http://127.0.0.1:${digestSrv.addr.port}`;

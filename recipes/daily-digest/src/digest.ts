@@ -26,6 +26,8 @@ export interface DigestOrchestratorOptions {
   reportDir: string;       // where to drop the markdown audit copy (e.g. /reports)
   fromEmail: string;
   toEmail: string;
+  /** Bound on each section's produce() (round 4): a slow model can never hold a send. Default 60 s. */
+  sectionTimeoutMs?: number;
 }
 
 export interface DigestRunOptions {
@@ -119,11 +121,20 @@ export class DigestOrchestrator {
     const errors: Record<string, string> = {};
     const sectionData: SectionData[] = [];
 
+    const bound = this.opts.sectionTimeoutMs ?? 60_000;
     const results = await Promise.allSettled(
-      sections.map(async (section) => ({
-        section,
-        data: await section.produce(),
-      })),
+      sections.map(async (section) => {
+        let t: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const data = await Promise.race([
+            section.produce(),
+            new Promise<never>((_, rej) => (t = setTimeout(() => rej(new Error(`section timed out after ${bound} ms`)), bound))),
+          ]);
+          return { section, data };
+        } finally {
+          clearTimeout(t);
+        }
+      }),
     );
 
     for (let i = 0; i < results.length; i++) {

@@ -622,21 +622,12 @@ export class MorningRoutine {
     const view = await this.#chainView(date, await this.#readActivity(date));
     const briefReady = view.briefReady;
     const pending: PendingNote[] = view.note && !briefReady ? [view.note] : [];
-    // Before the deadline the digest's own sections do model work: no degraded
-    // run - one probe; down -> not now (the deadline covers it). AT the deadline
-    // nothing waits on a probe.
-    if (mode === "full" && trigger !== "deadline") {
-      const p = await this.#probe();
-      if (p.state === "down") {
-        await this.#mutate(date, (r) => {
-          r.digest.status = r.digest.attempts > 1 ? "failed" : "not-sent";
-          r.digest.attempts -= 1;
-          this.#note(r, trigger, "digest held: the model is down before the deadline (the deadline send covers it)");
-          r.state = deriveState(r);
-        });
-        return;
-      }
-    }
+    // Round 4: NO send path probes the model. A send that waited on a probe while
+    // holding "sending" missed 07:00 (attempt-3 X1). The model is gated where the
+    // CONTENT is made (chain start, link-enrich); the digest's own LLM lines
+    // (weather brief, calendar notes) are bounded by the orchestrator's
+    // per-section timeout and simply left out when the model does not answer.
+    void trigger;
     const lp = this.#lastProbe;
     const modelDown = mode === "deadline" && !!lp && lp.state === "down" && this.#now() - lp.at <= PROBE_FRESH_MS;
     const notices: RoutineNoticePayload[] = [];
