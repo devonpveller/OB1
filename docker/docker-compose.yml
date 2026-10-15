@@ -133,6 +133,11 @@ services:
       # gated deploy). 210 = the next free slot after 205. The role has NO password here:
       # set it with `psql -v pantry_db_password=...` on the manual path, or ALTER ROLE.
       - ./init-pantry.sql:/docker-entrypoint-initdb.d/210-init-pantry.sql:ro                     # pantry-core
+      # intake I1 (security-hardening-2026-10): schema `intake` (bronze/silver), sources/thoughts
+      # screen_verdict + intake_item_id, the intake role and its authority trigger. Fork-owned
+      # (../integrations/intake/FORK-OWNED.md). Fresh-volume only; the live DB gets it by hand
+      # (psql -f, the operator's gated deploy). Revert: integrations/intake/sql/revert-intake.sql.
+      - ../integrations/intake/sql/init-intake.sql:/docker-entrypoint-initdb.d/220-init-intake.sql:ro # intake I1
     networks:
       - obnet
     restart: unless-stopped

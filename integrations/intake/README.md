@@ -1,0 +1,68 @@
+# intake - the screened way in for external content (fork-owned)
+
+Every piece of external content (web pages, email, API data, crawls) is meant to pass intake
+before it is stored in Open Brain or shown to a model. This directory is fork-owned:
+[FORK-OWNED.md](FORK-OWNED.md) lists every path, schema object and column, and a check fails
+any upstream change that touches them.
+
+Status: **I1, the schema.** The screening stages, the service and its container arrive in the
+later build items I2 to I9.
+
+## What I1 ships
+
+| File | Role |
+|---|---|
+| `sql/init-intake.sql` | the migration: schema `intake` (bronze `raw_items`; silver `items`, `discards`), `screen_verdict` + `intake_item_id` on `sources`/`thoughts`, the `intake` role, the authority trigger |
+| `sql/revert-intake.sql` | undoes it exactly; refuses while intake holds state unless `-v intake_revert_drop_data=1` |
+| `intake/config.py` | retention values (30 d bronze, 365 d discards, 24 h second-opinion cap), env-overridable; nothing purges yet (I4) |
+| `tools/check_fork_owned.py` | the FORK-OWNED guard (`--diff`, `--upstream`, `--range`) |
+| `tests/` | unit tests (config, guard) and `tests/db/run_db_tests.py`, which runs the migration against a throwaway postgres |
+
+### The trust label
+
+`sources.screen_verdict` / `thoughts.screen_verdict` is one of:
+
+- `clean` or `suspicious`: only the `intake` role may set these.
+- `unscreened`: the default; the content is external and has not been screened.
+- `internal`: the row is stack-generated.
+
+`injected` is never stored. Trigger `zzz_intake_screen_verdict_authority` refuses any other
+role, including a plain write by the postgres superuser, that tries to:
+
+- set `clean` or `suspicious`;
+- change a verdict intake decided;
+- raise `unscreened` to `internal`;
+- touch `intake_item_id`.
+
+The backfill rule for existing rows is documented in `sql/init-intake.sql` section 3.
+
+## Prerequisites
+
+- An Open Brain database with `sources` and `thoughts` (`docker/init.sql`, `docker/init-sources.sql`).
+- psql run as `postgres`, Python 3.8+ for the tools, and Docker for the DB tests.
+
+## Steps
+
+1. Fresh volume: nothing to do. `docker/docker-compose.yml` mounts the migration as
+   `220-init-intake.sql`.
+2. Live database: this is the operator's gated deploy, never a side effect.
+   `psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -v intake_db_password="$INTAKE_DB_PASSWORD" -f sql/init-intake.sql`
+3. Unit tests, run from this directory: `python -m unittest discover -s tests -t .`
+4. DB tests (a throwaway container: `--network none`, labelled; the runner refuses anything
+   else): `python tests/db/run_db_tests.py --start --image pgvector/pgvector:pg16 --roles roles.sql --schema schema.sql`
+   The two inputs are `pg_dumpall --roles-only --no-role-passwords` and
+   `pg_dump --schema-only` of the target database.
+5. Before merging upstream OB1: `python tools/check_fork_owned.py --upstream upstream/main`
+
+## Expected outcome
+
+- The DB tests end with `ALL PASS`.
+- The guard prints `ok - nothing fork-owned is touched` (exit 0). A hit prints the path or
+  line (exit 1).
+
+## Not yet (later items)
+
+- I4: purge jobs.
+- I5: the service and its container.
+- I6: read filters and fences.
+- I8: retiring `metadata.injection_screen` and moving the writers.
