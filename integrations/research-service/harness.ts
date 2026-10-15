@@ -11,7 +11,10 @@ import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, 
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
 import { rankHits, partitionRelevant, floorKeepable } from "./filtering.ts";
 import { classifyReport, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "./templates.ts";
-import { deniedUrl, clampCeiling, type ResolvedContract } from "./contract.ts";
+import {
+  deniedUrl, clampCeiling, hasSourceRules, newContractDrops, permitsQuery, permitsUrl, recordDrop,
+  type ContractDrops, type ResolvedContract,
+} from "./contract.ts";
 import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
 import {
   classifyHits, emptySearchStats, reformulate, type SearchStats, shapeQuery,
@@ -123,7 +126,9 @@ export interface Page { url: string; title: string; content: string; domain: str
 export type FetchOutcome =
   | "ok" | "timeout" | "error"
   | "http" | "non_html" | "empty_extract" | "network";
-export interface FetchResult { page: Page | null; outcome: FetchOutcome; }
+/** `finalUrl` (kp-contract): the url the page was actually served from after
+ *  redirects, when the fetcher knows it - a contract judges THAT url. */
+export interface FetchResult { page: Page | null; outcome: FetchOutcome; finalUrl?: string; }
 export interface Deps {
   embed(text: string): Promise<number[]>;
   chat(system: string, user: string, opts?: { json?: boolean; nothink?: boolean }): Promise<string>;
@@ -133,6 +138,42 @@ export interface Deps {
 }
 
 export interface QueryClient { queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }>; }
+
+/**
+ * Phase 1 / kp-contract — enforce a resolved contract at the deps boundary (the
+ * gather loop is untouched): drop red-line queries and non-permitted search hits,
+ * hard-block a fetch of a non-permitted url, and refuse a page whose FINAL url
+ * (after redirects) is not permitted. Every dropped url is recorded in `drops`.
+ * runResearch applies it whenever a contract is set (moved here from index.ts so
+ * the one enforcement point is the one the tests drive).
+ */
+export function withContract(deps: Deps, rc: ResolvedContract, drops: ContractDrops): Deps {
+  const refused: FetchResult = { page: null, outcome: "error" };
+  return {
+    ...deps,
+    searchWeb: async (q: string, k: number): Promise<SearchHit[]> => {
+      if (!permitsQuery(rc, q)) return [];
+      const hits = await deps.searchWeb(q, k);
+      return hits.filter((h) => {
+        if (permitsUrl(rc, h.url)) return true;
+        recordDrop(drops, "search", h.url);
+        return false;
+      });
+    },
+    fetchPage: async (url: string): Promise<FetchResult> => {
+      if (!permitsUrl(rc, url)) {
+        recordDrop(drops, "fetch", url);
+        return { ...refused };
+      }
+      const fr = await deps.fetchPage(url);
+      if (fr.page && fr.finalUrl && fr.finalUrl !== url && !permitsUrl(rc, fr.finalUrl)) {
+        recordDrop(drops, "redirect", fr.finalUrl);
+        return { ...refused };
+      }
+      return fr;
+    },
+  };
+}
 
 // ── Bounded-parallel map ─────────────────────────────────────────────────────
 async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -255,8 +296,10 @@ export interface RunOptions {
    *  staging, no curator delegate. Returns the synthesis for preview. */
   dryRun?: boolean;
   /** Phase 1 — resolved per-job contract (narrowing-only). When present, clamps
-   *  the gather budget and drops denied seed sources; source allow/deny + red-line
-   *  query enforcement is applied by index.ts at the deps boundary. */
+   *  the gather budget, drops denied seed sources, wraps the deps (`withContract`:
+   *  search hits, fetches, final urls, red-line queries) and filters KB-recalled
+   *  sources and reused claims (kp-contract). Every drop lands in
+   *  RunResult.contractDrops. */
   contract?: ResolvedContract;
 }
 export interface RunResult {
@@ -311,6 +354,8 @@ export interface RunResult {
   };
   /** Phase 2 — the Skeptic's verdict + per-run audit (undefined when SKEPTIC_ENABLED off). */
   skeptic?: SkepticResult;
+  /** kp-contract — what the job's contract dropped, per stage (absent without a contract). */
+  contractDrops?: ContractDrops;
 }
 export type Progress = (phase: string, message: string, counters?: Record<string, number>) => Promise<void>;
 
@@ -362,32 +407,66 @@ export async function runResearch(
   const baseMaxMs = topicPath && (opts.origin || "owui") === "owui" ? MAX_WALL_MS_OWUI : MAX_WALL_MS;
   const effMaxMs = clampCeiling(baseMaxMs, rcBudget?.wallMs);
   const effRounds = clampCeiling(MAX_ROUNDS, rcBudget?.rounds);
+  // kp-contract — one enforcement point for every input a contract scopes: the
+  // deps wrapper (search hits / fetches / final urls / red-line queries) plus the
+  // seed, KB-recall and reuse filters below. No contract ⇒ none of it runs.
+  const contract = opts.contract;
+  const contractDrops: ContractDrops | null = contract ? newContractDrops() : null;
+  if (contract) deps = withContract(deps, contract, contractDrops!);
+  /** Spread into every RunResult: the key exists only when a contract was set. */
+  const dropsField = () => (contractDrops ? { contractDrops } : {});
+  // Seeds are exempt from the contract's allow-list (in article mode the seed IS
+  // the subject) but are dropped - before anything reads them, the recall
+  // embedding included - if they hit a deny entry / red-line host.
+  const keptSeeds = contract && contractDrops
+    ? seeds.filter((s) => {
+      if (!deniedUrl(contract, s.url)) return true;
+      recordDrop(contractDrops, "seed", s.url);
+      return false;
+    })
+    : seeds;
 
   // 1. Reuse pass — recall relevant grounded claims (cheap). In article mode the
   //    recall is against the ARTICLE itself (its points are what we want to
   //    corroborate from existing OB knowledge), not a short query string.
   await progress("reuse", sourcesOnly ? "sources-only: skipping KB claim reuse" : "recalling grounded claims from the KB");
-  const recallText = articleMode && seeds.length
-    ? `${seeds[0].title}\n\n${seeds[0].content}`
+  const recallText = articleMode && keptSeeds.length
+    ? `${keptSeeds[0].title}\n\n${keptSeeds[0].content}`
     : query;
   const queryEmb = await deps.embed(recallText);
   // sources-only ⇒ no brain-wide reuse; ground strictly from the seed_sources.
   const relevant = sourcesOnly
     ? []
     : await retrieveRelevantClaims(client, queryEmb, threadId, CLAIM_SHORTLIST_K, REUSE_MAX_DISTANCE);
-  const reuseClaims = relevant.filter((c) => decideReuse(c, floor, now) === "reuse");
+  let reuseClaims = relevant.filter((c) => decideReuse(c, floor, now) === "reuse");
+  // kp-contract (PLAN-v2 EXTEND a; audit B11) — a reused claim is only as
+  // in-scope as the source it was grounded on. With a source-scoping contract,
+  // resolve each claim's grounding source NOW, before the claim text reaches the
+  // coverage judge or a synthesis prompt, and drop the claim (and its source)
+  // when that source is outside the contract. A claim with no grounding source
+  // cannot be shown to be inside an allow-list. Budget-only contracts skip this
+  // (no extra read: today's behaviour).
+  if (contract && contractDrops && hasSourceRules(contract) && reuseClaims.length) {
+    const pre = await getReuseSources(client, reuseClaims.map((c) => c.id));
+    const srcById = new Map(pre.sources.map((s) => [s.id, s]));
+    reuseClaims = reuseClaims.filter((c) => {
+      const sid = pre.claimToSource[c.id];
+      const url = (sid ? srcById.get(sid)?.url : null) ?? "";
+      if (permitsUrl(contract, url)) return true;
+      recordDrop(contractDrops, "reuse", url, c.id);
+      return false;
+    });
+  }
 
   // Seed sources (e.g. a newsletter article the caller already fetched through
   // Tor) are staged directly — never re-fetched. In article mode they are THE
   // subject of the episode.
   const sessionId = dryRun ? null : await createStagingSession(client, query, threadId, opts.origin || "owui");
-  // Seeds are exempt from the contract's allow-list (in article mode the seed IS
-  // the subject) but are still dropped if they hit a deny domain / red-line host.
+  // Seeds the contract denied were dropped above (`keptSeeds`).
   // Pages staged before web gathering (seeds + KB recalls) are exempt from the
   // relevance gate below; everything after this index came from the open web.
   let protectedCount = 0;
-  const staged: Page[] = seeds
-    .filter((s) => !opts.contract || !deniedUrl(opts.contract, s.url))
+  const staged: Page[] = keptSeeds
     .map((s) => ({
       url: s.url, title: s.title, content: s.content, domain: domainOf(s.url),
     }));
@@ -475,8 +554,17 @@ export async function runResearch(
   const kbRecalled: Page[] = [];
   if (!sourcesOnly && !articleMode) {
     try {
-      const kbSources = await retrieveRelevantSources(
+      const kbRecall = await retrieveRelevantSources(
         client, queryEmb, KB_SOURCES_K, KB_SOURCES_MAX_DISTANCE);
+      // kp-contract (audit B11): a stored source is held to the job's contract
+      // like a fetched one - dropped (and recorded) before anything reads it.
+      const kbSources = contract && contractDrops
+        ? kbRecall.filter((s) => {
+          if (permitsUrl(contract, s.url ?? "")) return true;
+          recordDrop(contractDrops, "kb_recall", s.url);
+          return false;
+        })
+        : kbRecall;
       for (const s of kbSources) {
         if (s.url && !staged.some((p) => p.url === s.url) && !kbRecalled.some((p) => p.url === s.url)) {
           const page: Page = { url: s.url, title: s.title, content: s.content,
@@ -973,6 +1061,22 @@ export async function runResearch(
   const reuse = (!articleMode && reuseClaims.length)
     ? await getReuseSources(client, reuseClaims.map((c) => c.id))
     : { sources: [] as Awaited<ReturnType<typeof getReuseSources>>["sources"], claimToSource: {} as Record<string, string> };
+  // kp-contract — the claims were already filtered on these same sources (reuse
+  // pass, above); this re-check is the backstop on the rows the pool really uses.
+  if (contract && contractDrops && reuse.sources.length) {
+    const dropped = new Set<string>();
+    reuse.sources = reuse.sources.filter((s) => {
+      if (permitsUrl(contract, s.url ?? "")) return true;
+      recordDrop(contractDrops, "reuse", s.url);
+      dropped.add(s.id);
+      return false;
+    });
+    const droppedClaims = new Set<string>();
+    for (const [cid, sid] of Object.entries(reuse.claimToSource)) {
+      if (dropped.has(sid)) { delete reuse.claimToSource[cid]; droppedClaims.add(cid); }
+    }
+    if (droppedClaims.size) reuseClaims = reuseClaims.filter((c) => !droppedClaims.has(c.id));
+  }
 
   // ── Phase 2.2 — "no relevant sources" is a FIRST-CLASS OUTCOME ─────────────
   // Reached when there is nothing citable: the gate left no page AND no reused
@@ -1031,6 +1135,7 @@ export async function runResearch(
         reused: reuseHits, attempts: sourcesFetched + fetchTimeouts + fetchErrors,
         readable: readableCount, errorKinds, search: searchStats,
       },
+      ...dropsField(),
     };
   }
 
@@ -1488,5 +1593,6 @@ export async function runResearch(
       search: searchStats,
     },
     skeptic,
+    ...dropsField(),
   };
 }

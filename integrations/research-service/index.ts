@@ -27,7 +27,7 @@ import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv,
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
-import { resolveContract, permitsUrl, permitsQuery, type ResolvedContract } from "./contract.ts";
+import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, type ClaimedJob } from "./jobs.ts";
 
@@ -339,7 +339,12 @@ async function fetchPage(url: string): Promise<FetchResult> {
     const html = await r.text();
     const content = extractTextFromHtml(html).slice(0, FETCH_MAX_CHARS);
     if (!content) return { page: null, outcome: "empty_extract" };
-    return { page: { url, title: extractTitle(html) || domainOf(url), content, domain: domainOf(url) }, outcome: "ok" };
+    // finalUrl (kp-contract): where the page was really served from after
+    // redirects; a job's contract judges that url (harness.ts withContract).
+    return {
+      page: { url, title: extractTitle(html) || domainOf(url), content, domain: domainOf(url) },
+      outcome: "ok", finalUrl: r.url || url,
+    };
   } catch (e) {
     // AbortError fired by our timeout vs any other network failure.
     const isTimeout = timedOut || (e as Error)?.name === "AbortError";
@@ -447,22 +452,6 @@ async function fetchRawFile(owner: string, repo: string, sha: string, path: stri
 
 const realDeps: Deps = { embed, chat, searchWeb, fetchPage, delegateToCurator };
 void SEARCH_K_DEFAULT; // tunable also read inside harness.ts; surfaced here for ops visibility
-
-// Phase 1 — enforce a resolved contract at the deps boundary (the gather loop is
-// untouched): drop red-line queries + non-permitted search hits, and hard-block a
-// fetch of a non-permitted URL. Budget/seed enforcement lives in the harness.
-function withContract(deps: Deps, rc: ResolvedContract): Deps {
-  return {
-    ...deps,
-    searchWeb: async (q: string, k: number): Promise<SearchHit[]> => {
-      if (!permitsQuery(rc, q)) return [];
-      const hits = await deps.searchWeb(q, k);
-      return hits.filter((h) => permitsUrl(rc, h.url));
-    },
-    fetchPage: (url: string): Promise<FetchResult> =>
-      permitsUrl(rc, url) ? deps.fetchPage(url) : Promise.resolve({ page: null, outcome: "error" }),
-  };
-}
 
 // ── Job runner (OD-3 async job+poll) ─────────────────────────────────────────
 /** Hold a too-fast job back until the chat turn that launched it has settled. */
@@ -703,9 +692,9 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     const baseDeps: Deps = jobSeams(queueUser
       ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
       : realDeps, signal, seamState, jobId);
-    // Contract enforcement wraps searchWeb/fetchPage (no gather-loop change).
-    const jobDeps: Deps = contract ? withContract(baseDeps, contract) : baseDeps;
-    const res = await runResearch(jobDeps, client, query, {
+    // Contract enforcement (search hits, fetches, final urls, seeds, KB recall,
+    // reused claims) lives in runResearch (harness.ts withContract) - one point.
+    const res = await runResearch(baseDeps, client, query, {
       threadId: thread_id, origin,
       confidenceFloor: typeof options?.confidence_floor === "number" ? options.confidence_floor : undefined,
       seedSources,
@@ -779,6 +768,8 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
       // …and what the per-sentence fidelity check corrected in it.
       render_fidelity: res.renderFidelity,
       contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
+      // kp-contract — what it dropped, per stage (key absent on a job without a contract)
+      ...(contract ? { contract_drops: res.contractDrops ?? null } : {}),
       skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
       rendered, // chat-facing markdown; absent on jobs cached before this field
     });

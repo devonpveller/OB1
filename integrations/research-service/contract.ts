@@ -12,15 +12,30 @@
  *     into `result.contract` ("no traces, no trust", applied to scope).
  *
  * This module has NO I/O and NO dependency on the harness/deps, so it is fully
- * unit-testable (see contract.test.ts). Enforcement lives at two call sites:
- *   - index.ts wraps searchWeb/fetchPage with permitsUrl/permitsQuery (source +
- *     red-line query enforcement) — the gather loop is untouched;
- *   - harness.ts clamps the backstop budget and drops denied seeds.
+ * unit-testable (see contract.test.ts). Enforcement lives in harness.ts:
+ *   - `withContract` wraps searchWeb/fetchPage with permitsUrl/permitsQuery
+ *     (search hits, fetches and the FINAL url after redirects; red-line queries)
+ *     — the gather loop is untouched;
+ *   - runResearch clamps the backstop budget, drops denied seeds, and filters
+ *     KB-recalled sources and reused claims (with their grounding sources).
+ *   Every drop is recorded (`ContractDrops`, echoed as result.contract_drops).
+ *
+ * Source entries (kp-contract, operator D11 2026-10-15) are `host` / `*.suffix`
+ * (host-or-subdomain, as before) or `host/path/prefix` (EXACT host, and the path
+ * at or under the prefix on WHOLE segments). Both are matched on the url as
+ * urlnorm.ts normalises it — the one normaliser, ported from the agent-bridge
+ * rules. A url it cannot name is refused whenever the contract has a source rule
+ * (fail-closed); a budget / red-line-only contract keeps today's behaviour. A
+ * GitHub ALLOW entry must be `github.com/<org>/<repo>/blob|tree/<release-tag>`
+ * (anyone can post issues and PRs under any repo, and GitHub serves fork commits
+ * under the parent's URL); hosts where anyone publishes (gists, *.github.io,
+ * *.githubusercontent.com) are never an allow entry. A malformed entry is a
+ * ContractError.
  *
  * Governing plan: documentation/implementation-guide/supervised-research-pipeline/
- *   TASKS-phase1-contract.md.
+ *   TASKS-phase1-contract.md; kp-contract: agent-knowledge-package/PLAN-v2.md.
  */
-import { domainOf } from "./lib.ts";
+import { normaliseUrl, type NormalisedUrl } from "./urlnorm.ts";
 
 /** Raw contract as a caller writes it under options.contract (all fields optional). */
 export interface ResearchContract {
@@ -31,6 +46,7 @@ export interface ResearchContract {
 
 /** Compiled, validated, JSON-serializable contract (echoed into result.contract). */
 export interface ResolvedContract {
+  // Entries: `host`, `*.suffix` or `host/path/prefix`, canonical spelling (see the header).
   allowDomains: string[]; // non-empty ⇒ default-deny outside the set (discovered sources only)
   denyDomains: string[];  // deny always wins over allow; red-line hosts merged in
   budget: { maxFetch?: number; wallMs?: number; rounds?: number };
@@ -55,6 +71,20 @@ export const CLASS_REGISTRY: Record<string, string[]> = {
   "vendor-psirt": [
     "msrc.microsoft.com", "security.apple.com", "security.paloaltonetworks.com",
     "tools.cisco.com", "psirt.global.sonicwall.com",
+  ],
+  // kp-contract (PLAN-v2 EXTEND b): the knowledge package's documentation sources,
+  // moved here from agent-bridge app/config.py DEFAULT_KNOWLEDGE_SOURCE_HOSTS
+  // (development c1bc20a0). No GitHub entry: a caller that needs a repo adds it
+  // per job as github.com/<org>/<repo>/blob|tree/<release-tag>.
+  "software-docs": [
+    "docs.python.org", "peps.python.org", "docs.pytest.org", "www.python-httpx.org",
+    "docs.pydantic.dev", "fastapi.tiangolo.com", "www.starlette.io", "docs.sqlalchemy.org",
+    "docs.aiohttp.org", "docs.djangoproject.com", "flask.palletsprojects.com", "numpy.org/doc",
+    "pandas.pydata.org/docs", "developer.mozilla.org/en-US/docs", "nodejs.org/api", "docs.deno.com",
+    "www.typescriptlang.org/docs", "doc.rust-lang.org", "go.dev/doc", "go.dev/ref",
+    "learn.microsoft.com/en-us/dotnet/api", "learn.microsoft.com/en-us/dotnet/csharp",
+    "learn.microsoft.com/en-us/dotnet/standard", "learn.microsoft.com/en-us/dotnet/core",
+    "docs.docker.com", "git-scm.com/docs", "www.postgresql.org/docs",
   ],
 };
 
@@ -122,6 +152,9 @@ export function resolveContract(options: Record<string, unknown> | null | undefi
     if (!KNOWN_REDLINES.has(r)) throw new ContractError(`unknown red line: ${r}`);
   }
   if (redlines.includes("no_exploit_fetch")) deny.push(...EXPLOIT_HOSTS);
+  // Validate every source entry NOW (fail-closed), kept in its canonical spelling.
+  for (let i = 0; i < allow.length; i++) allow[i] = canonicalEntry(allow[i], "allow");
+  for (let i = 0; i < deny.length; i++) deny[i] = canonicalEntry(deny[i], "deny");
 
   const budgetRaw = c.budget ?? {};
   if (typeof budgetRaw !== "object" || Array.isArray(budgetRaw)) {
@@ -150,25 +183,139 @@ export function matchDomain(host: string, glob: string): boolean {
   return h === base || h.endsWith("." + base);
 }
 
-/** True if the URL's host matches any deny-domain (red-line hosts included). */
-export function deniedUrl(rc: ResolvedContract, url: string): boolean {
-  const host = domainOf(url);
-  if (!host) return false; // a non-URL host can't match a domain rule
-  return rc.denyDomains.some((g) => matchDomain(host, g));
+// ── Source entries (kp-contract) ─────────────────────────────────────────────
+const HOST_ENTRY_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
+const WILDCARD_ENTRY_RE = /^\*\.[a-z0-9-]+(?:\.[a-z0-9-]+)*$/;
+const SEGMENT_RE = /^[A-Za-z0-9._~-]+$/;
+const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
+const GITHUB_ORG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+const GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+/** A release tag (`4.4.0`, `v1.2.3`, `1.0.0-rc1`): never a sha, a bare number or a branch. */
+const RELEASE_TAG_RE = /^v?\d+(?:\.\d+)+(?:[.-][A-Za-z0-9]+)*$/;
+const USER_CONTENT_SUFFIXES = [".github.com", ".githubusercontent.com", ".github.io"];
+const USER_CONTENT_HOSTS = new Set(["githubusercontent.com", "github.io"]);
+
+type SourceRule =
+  | { kind: "host"; base: string; spelled: string }   // host-or-subdomain of base
+  | { kind: "prefix"; host: string; segs: string[] }; // exact host, whole-segment path prefix
+
+/** Parse one entry into a rule, or throw ContractError. */
+function parseEntry(raw: string, side: "allow" | "deny"): SourceRule {
+  const e = typeof raw === "string" ? raw.trim() : "";
+  const slash = e.indexOf("/");
+  let host = (slash === -1 ? e : e.slice(0, slash)).toLowerCase();
+  if (host.endsWith(".")) host = host.slice(0, -1);
+  const bad = (why: string) =>
+    new ContractError(`contract.sources.${side} entry ${JSON.stringify(raw)}: ${why}`);
+  const wildcard = host.startsWith("*.");
+  if (wildcard ? !WILDCARD_ENTRY_RE.test(host) : !HOST_ENTRY_RE.test(host)) {
+    throw bad("not a host, *.suffix or host/path/prefix");
+  }
+  const segs = slash === -1 ? [] : e.slice(slash + 1).split("/");
+  if (slash !== -1) {
+    if (wildcard) throw bad("a *.suffix entry takes no path");
+    if (segs.some((sg) => !SEGMENT_RE.test(sg) || /^\.+$/.test(sg))) {
+      throw bad("a path prefix is plain segments (no empty, dot or escaped segment)");
+    }
+  }
+  const bare = wildcard ? host.slice(2) : host;
+  if (side === "allow") {
+    if (GITHUB_HOSTS.has(bare)) {
+      if (wildcard) throw bad("*.github.com covers user content");
+      const [org, repo, kind, tag] = segs;
+      if (segs.length !== 4 || !GITHUB_ORG_RE.test(org) || !GITHUB_REPO_RE.test(repo) ||
+          (kind !== "blob" && kind !== "tree") || !RELEASE_TAG_RE.test(tag)) {
+        throw bad("GitHub only as github.com/<org>/<repo>/blob|tree/<release-tag>");
+      }
+    } else if (USER_CONTENT_HOSTS.has(bare) || USER_CONTENT_SUFFIXES.some((sfx) => bare.endsWith(sfx))) {
+      throw bad("a host where anyone can publish is never an allow entry");
+    }
+  }
+  if (slash === -1) return { kind: "host", base: bare, spelled: host };
+  return { kind: "prefix", host, segs };
+}
+
+/** The entry in its canonical spelling (host lower-cased, root dot stripped). */
+function canonicalEntry(raw: string, side: "allow" | "deny"): string {
+  const r = parseEntry(raw, side);
+  return r.kind === "prefix" ? `${r.host}/${r.segs.join("/")}` : r.spelled;
+}
+
+function ruleMatches(r: SourceRule, n: NormalisedUrl): boolean {
+  if (r.kind === "host") return n.host === r.base || n.host.endsWith("." + r.base);
+  return n.host === r.host && r.segs.length <= n.segs.length && r.segs.every((sg, i) => n.segs[i] === sg);
+}
+
+const rulesOf = (entries: string[], side: "allow" | "deny"): SourceRule[] =>
+  entries.map((e) => parseEntry(e, side));
+
+/** Does the contract constrain SOURCES at all (vs budget / red-line queries only)? */
+export function hasSourceRules(rc: ResolvedContract): boolean {
+  return rc.allowDomains.length > 0 || rc.denyDomains.length > 0;
 }
 
 /**
- * Contract decision for a DISCOVERED source (search hit / fetch URL). deny wins;
- * a non-empty allow-list is default-deny outside the set. NB: caller seeds are
- * exempt from the allow-list (they are the subject in article mode) — use
- * deniedUrl for seeds, which enforces deny + red lines only.
+ * True if the url hits a deny entry (red-line hosts included). Seeds use this:
+ * they are exempt from the allow-list, never from deny. A url that cannot be
+ * normalised is denied when there is any deny entry (it could hide one); an
+ * empty url (a seed without one) names no host and is not denied.
+ */
+export function deniedUrl(rc: ResolvedContract, url: string): boolean {
+  if (rc.denyDomains.length === 0 || !url) return false;
+  const n = normaliseUrl(url);
+  if (!n) return true;
+  return rulesOf(rc.denyDomains, "deny").some((r) => ruleMatches(r, n));
+}
+
+/**
+ * Contract decision for a source: a search hit, a fetch (and its final url after
+ * redirects), a KB-recalled source, a reused claim's grounding source. deny wins;
+ * a non-empty allow-list is default-deny outside the set. Matching is on the
+ * NORMALISED url (urlnorm.ts); a url that cannot be normalised is refused when
+ * the contract has any source rule. An empty url (a stored source without one)
+ * is on no allow-list and matches no deny entry. NB: caller seeds are exempt
+ * from the allow-list (they are the subject in article mode) — use deniedUrl
+ * for seeds, which enforces deny + red lines only.
  */
 export function permitsUrl(rc: ResolvedContract, url: string): boolean {
-  const host = domainOf(url);
-  if (rc.denyDomains.some((g) => matchDomain(host, g))) return false;
+  if (!hasSourceRules(rc)) return true;
+  if (!url) return rc.allowDomains.length === 0;
+  const n = normaliseUrl(url);
+  if (!n) return false;
+  if (rulesOf(rc.denyDomains, "deny").some((r) => ruleMatches(r, n))) return false;
   if (rc.allowDomains.length === 0) return true;
-  if (!host) return false; // can't be on the allow-list without a resolvable host
-  return rc.allowDomains.some((g) => matchDomain(host, g));
+  return rulesOf(rc.allowDomains, "allow").some((r) => ruleMatches(r, n));
+}
+
+// ── What a contract dropped (echoed into result.contract_drops) ──────────────
+export type ContractDropStage = "search" | "fetch" | "redirect" | "seed" | "kb_recall" | "reuse";
+export interface ContractDrop { stage: ContractDropStage; url: string; claim_id?: string }
+export interface ContractDrops {
+  /** Every drop, per stage (never capped). */
+  counts: Record<ContractDropStage, number>;
+  /** The first MAX_RECORDED_DROPS drops; `truncated` counts the rest. */
+  items: ContractDrop[];
+  truncated: number;
+}
+export const MAX_RECORDED_DROPS = 200;
+const DROP_URL_MAX = 500;
+
+export function newContractDrops(): ContractDrops {
+  return {
+    counts: { search: 0, fetch: 0, redirect: 0, seed: 0, kb_recall: 0, reuse: 0 },
+    items: [],
+    truncated: 0,
+  };
+}
+
+export function recordDrop(
+  d: ContractDrops, stage: ContractDropStage, url: string | null | undefined, claimId?: string,
+): void {
+  d.counts[stage]++;
+  if (d.items.length >= MAX_RECORDED_DROPS) { d.truncated++; return; }
+  const item: ContractDrop = { stage, url: String(url ?? "").slice(0, DROP_URL_MAX) };
+  if (claimId !== undefined) item.claim_id = claimId;
+  d.items.push(item);
 }
 
 /** Contract decision for a generated search/deepen query (red-line query guard). */
