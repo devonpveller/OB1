@@ -28,6 +28,8 @@ Full design: [`../../../documentation/implementation-guide/research-engine-for-O
 | `jobs.ts` | job queue: caller deadlines, cancel, model-down pause, the Dispatcher (`jobs.test.ts`; real SQL in `failfast.e2e.test.ts`) |
 | `kb.ts` | DB-backed claim retrieval + source staging (integration-tested) |
 | `lib.ts` | pure helpers: HTML→text, OD-5 reuse decision, OD-6 backstop, citations |
+| `contract.ts` | the per-job contract (`options.contract`): source classes (`advisories`, `academic`, `vendor-psirt`, `software-docs`), allow/deny entries as `host`, `*.suffix` or `host/path/prefix`, budget, red lines; `harness.ts` `withContract` + `runResearch` enforce it on search hits, fetches (final url after redirects), seeds (deny), KB recall and reused claims, recording every drop in `result.contract_drops` (`contract.test.ts`, `harness-contract.test.ts`) |
+| `urlnorm.ts` | the one URL normaliser for source-trust checks (ported from agent-bridge; parity corpus `fixtures/url-normalise-corpus.json`, `urlnorm.test.ts`) |
 | `lib.test.ts` | 9 pure-logic unit tests (`deno test --allow-net lib.test.ts`) |
 | `orchestrator.test.ts` | end-to-end vs the real schema with mocked seams (`deno run --allow-net --allow-env orchestrator.test.ts`, DB on a docker network) |
 
