@@ -85,6 +85,32 @@ class DiffCheck(unittest.TestCase):
         self.assertFails(diff("docker/init-grants.sql", "+CREATE ROLE intake LOGIN;"))
         self.assertFails(diff("docker/init-grants.sql", "+GRANT SELECT ON sources TO intake;"))
 
+    def test_unquoted_identifier_in_any_case_fails(self):
+        # Round 2 (tester F3): unquoted SQL identifiers fold to lower case, so SCREEN_VERDICT IS
+        # screen_verdict to postgres.
+        self.assertFails(diff("docker/init-x.sql", "+ALTER TABLE thoughts ADD COLUMN SCREEN_VERDICT text;"))
+        self.assertFails(diff("docker/init-x.sql", "+ALTER TABLE sources ADD COLUMN Intake_Item_Id uuid;"))
+
+    def test_role_membership_and_grant_option_fail(self):
+        # Round 2 (tester F4): membership in intake is the most dangerous upstream collision.
+        self.assertFails(diff("docker/init-grants.sql", "+GRANT intake TO service_role;"))
+        self.assertFails(diff("docker/init-grants.sql", '+GRANT "intake" TO authenticated, anon;'))
+        self.assertFails(diff("docker/init-grants.sql", "+REVOKE intake FROM service_role;"))
+        self.assertFails(diff("docker/init-grants.sql",
+                              "+GRANT SELECT ON public.sources TO intake WITH GRANT OPTION;"))
+        self.assertFails(diff("docker/init-grants.sql", "+ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO intake"))
+
+    def test_initdb_slot_220_fails(self):
+        # Round 2 (tester F4): an upstream file or mount in the 220 initdb slot collides with ours.
+        self.assertFails(diff("docker/220-init-upstream.sql", "+SELECT 1;", old="dev/null"))
+        self.assertFails(diff("docker/docker-compose.yml",
+                              "+      - ./init-up.sql:/docker-entrypoint-initdb.d/220-init-up.sql:ro"))
+
+    def test_other_initdb_slots_pass(self):
+        self.assertPasses(diff("docker/docker-compose.yml",
+                               "+      - ./init-up.sql:/docker-entrypoint-initdb.d/230-init-up.sql:ro"))
+        self.assertPasses(diff("docker/2200-notes.md", "+x"))
+
     def test_migration_file_name_in_compose_fails(self):
         self.assertFails(diff("docker/docker-compose.yml",
                               "-      - ../integrations/intake/sql/init-intake.sql:/docker-entrypoint-initdb.d/220-init-intake.sql:ro"))

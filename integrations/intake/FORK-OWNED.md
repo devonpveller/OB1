@@ -9,17 +9,20 @@ Everything intake adds is namespaced:
 | What | Name |
 |---|---|
 | code | `integrations/intake/` (this directory) |
-| migration | `integrations/intake/sql/init-intake.sql`, revert `sql/revert-intake.sql`, mounted as `220-init-intake.sql` by `docker/docker-compose.yml` and `docker/docker-compose.preview.yml` |
-| SQL schema | `intake` (`intake.raw_items`, `intake.items`, `intake.discards`, `intake.enforce_screen_verdict_authority()`) |
-| DB role | `intake` |
+| migration | `integrations/intake/sql/init-intake.sql`, revert `sql/revert-intake.sql`, mounted as `220-init-intake.sql` by `docker/docker-compose.yml` and `docker/docker-compose.preview.yml` (the whole `220-` initdb slot is ours) |
+| SQL schema | `intake` (`intake.raw_items`, `intake.items`, `intake.discards`, `intake.migration_ledger`, `intake.enforce_screen_verdict_authority()`) |
+| DB role | `intake` (no members, a member of nothing) |
+| database setting | `intake.backfill_done_at` (the one-shot backfill record; survives a revert on purpose) |
 | columns on upstream tables | `public.sources.screen_verdict`, `public.sources.intake_item_id`, `public.thoughts.screen_verdict`, `public.thoughts.intake_item_id` (added `IF NOT EXISTS` by the migration) |
-| constraints, triggers, policies, indexes | `sources_screen_verdict_check`, `thoughts_screen_verdict_check`, `sources_intake_item_id_fkey`, `thoughts_intake_item_id_fkey`, `zzz_intake_screen_verdict_authority` (both tables), `thoughts_intake_label_select`, `thoughts_intake_label_update`, `idx_sources_intake_item_id`, `idx_thoughts_intake_item_id` |
+| constraints, triggers, policies, indexes | `sources_screen_verdict_check`, `thoughts_screen_verdict_check`, `sources_intake_item_id_fkey`, `thoughts_intake_item_id_fkey`, `zzz_intake_screen_verdict_authority` (AFTER ROW, both tables), `thoughts_intake_label_select`, `thoughts_intake_label_update`, `idx_sources_intake_item_id`, `idx_thoughts_intake_item_id` |
+| privileges on upstream tables | TRIGGER and REFERENCES on `sources`/`thoughts` are revoked from every non-owner (recorded in `intake.migration_ledger`, restored by the revert) |
 
 ## The check
 
 `tools/check_fork_owned.py` reads the block below and FAILS (exit 1) when an upstream change
-touches a listed path, or adds or removes a line naming a listed identifier or matching a
-listed pattern, in any file. Exit 2 means it could not check, and is a failure too.
+touches a listed path, or adds or removes a line naming a listed identifier (in any letter
+case: unquoted SQL identifiers fold) or matching a listed pattern, in any file. Exit 2 means
+it could not check, and is a failure too.
 
 - Before merging upstream into the fork:
   `python integrations/intake/tools/check_fork_owned.py --upstream upstream/main`
@@ -34,10 +37,13 @@ commit it; that merge is then accepted. There is no flag that skips the check.
 Adding to what intake owns? Add it to the table AND the block in the same commit.
 
 ```fork-owned
-# paths (a directory ends in "/")
+# paths (a directory ends in "/"); path-glob is an fnmatch over the repo path
 path: integrations/intake/
+# the initdb slot our migration is mounted at - an upstream file or mount there collides
+path-glob: docker/220-*
+pattern: docker-entrypoint-initdb\.d/220-
 
-# columns intake adds to upstream tables - any added/removed line naming one, in any file
+# names intake adds - any added/removed line naming one, in any file, in any letter case
 identifier: screen_verdict
 identifier: intake_item_id
 identifier: init-intake.sql
@@ -45,13 +51,16 @@ identifier: revert-intake.sql
 identifier: zzz_intake_screen_verdict_authority
 identifier: thoughts_intake_label_select
 identifier: thoughts_intake_label_update
+identifier: backfill_done_at
 
 # the schema and the role: the bare word "intake" is ordinary English, so only SQL forms count
 pattern: \bintake\."?[a-z_]
 pattern: "intake"\.
 pattern: \bSCHEMA\s+(IF\s+(NOT\s+)?EXISTS\s+)?"?intake"?\b
 pattern: \bROLE\s+(IF\s+(NOT\s+)?EXISTS\s+)?"?intake"?\b
-pattern: \b(TO|FROM)\s+"?intake"?\s*(;|,|$)
+pattern: \b(TO|FROM)\s+"?intake"?(\s*(;|,|$)|\s+WITH\b)
+pattern: \bGRANT\s+"?intake"?\s*(,|\bTO\b)
+pattern: \bREVOKE\s+"?intake"?\s*(,|\bFROM\b)
 pattern: \bOWNED\s+BY\s+"?intake"?\b
 pattern: \bAUTHORIZATION\s+"?intake"?\b
 ```

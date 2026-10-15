@@ -64,6 +64,34 @@ BEGIN
   END IF;
 END $$;
 
+-- Put back the privileges init-intake.sql section 5b revoked (TRIGGER / REFERENCES on
+-- sources/thoughts - live: service_role's TRIGGER on sources), exactly as the ledger recorded
+-- them. Only tables outside schema intake are re-granted (the intake tables are dropped below).
+DO $$
+DECLARE
+  r RECORD;
+BEGIN
+  IF to_regclass('intake.migration_ledger') IS NULL THEN
+    RETURN;
+  END IF;
+  FOR r IN SELECT detail FROM intake.migration_ledger WHERE kind = 'revoked-privilege' LOOP
+    IF r.detail->>'privilege' NOT IN ('TRIGGER','REFERENCES')
+       OR r.detail->>'table' NOT IN ('sources','thoughts','public.sources','public.thoughts') THEN
+      CONTINUE;
+    END IF;
+    EXECUTE format('GRANT %s ON %s TO %s%s', r.detail->>'privilege',
+                   ('public.' || regexp_replace(r.detail->>'table', '^public\.', ''))::regclass,
+                   r.detail->>'grantee',
+                   CASE WHEN (r.detail->>'grantable')::boolean THEN ' WITH GRANT OPTION' ELSE '' END);
+    RAISE NOTICE 'revert-intake: restored % on % to %', r.detail->>'privilege', r.detail->>'table', r.detail->>'grantee';
+  END LOOP;
+END $$;
+
+-- The one-shot backfill record (intake.backfill_done_at, a DATABASE setting) is deliberately
+-- NOT removed: a re-apply after this revert must not re-derive 'internal' from markers on rows
+-- written in between (tester F2). Forget it only on purpose:
+--   ALTER DATABASE openbrain RESET intake.backfill_done_at;
+
 DROP TRIGGER IF EXISTS zzz_intake_screen_verdict_authority ON public.sources;
 DROP TRIGGER IF EXISTS zzz_intake_screen_verdict_authority ON public.thoughts;
 DROP POLICY IF EXISTS thoughts_intake_label_select ON public.thoughts;
@@ -83,6 +111,7 @@ ALTER TABLE public.thoughts DROP COLUMN IF EXISTS intake_item_id;
 -- Not CASCADE: anything outside this file that came to depend on intake.* makes the revert
 -- fail loudly instead of being dropped with it.
 DROP FUNCTION IF EXISTS intake.enforce_screen_verdict_authority();
+DROP TABLE IF EXISTS intake.migration_ledger;
 DROP TABLE IF EXISTS intake.discards;
 DROP TABLE IF EXISTS intake.items;
 DROP TABLE IF EXISTS intake.raw_items;

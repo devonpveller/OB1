@@ -6,8 +6,9 @@ can never overwrite or collide with it. Everything intake adds is namespaced, an
 integrations/intake/FORK-OWNED.md lists it in a machine-read ```fork-owned``` block:
 
   path:        a repo path prefix (a directory ends in "/") - any change to a file under it
-  identifier:  a whole-word token (a column name) - any ADDED or REMOVED line naming it,
-               in any file
+  path-glob:   an fnmatch pattern over the repo path (e.g. the docker/220-* initdb slot)
+  identifier:  a whole-word token (a column name), matched case-insensitively - any ADDED or
+               REMOVED line naming it, in any file
   pattern:     a case-insensitive regex (the `intake` schema and role, whose bare word is
                ordinary English) - any added or removed line matching it
   reviewed-upstream: <sha>  an upstream commit a human has reviewed against this list;
@@ -29,6 +30,7 @@ Only stdlib; Python 3.8+.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import re
 import subprocess
 import sys
@@ -44,12 +46,15 @@ _SHA = re.compile(r"[0-9a-f]{7,40}")
 @dataclass
 class Manifest:
     paths: List[str] = field(default_factory=list)
+    globs: List[str] = field(default_factory=list)
     identifiers: List[str] = field(default_factory=list)
     patterns: List[str] = field(default_factory=list)
     reviewed: List[str] = field(default_factory=list)
 
     def compiled(self):
-        rx = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(i) + r"(?![A-Za-z0-9_])")
+        # Case-INSENSITIVE: unquoted SQL identifiers fold to lower case, so SCREEN_VERDICT is
+        # screen_verdict to postgres (round 2, tester F3).
+        rx = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(i) + r"(?![A-Za-z0-9_])", re.I)
               for i in self.identifiers]
         rx += [re.compile(p, re.I) for p in self.patterns]
         return rx
@@ -71,6 +76,8 @@ def load_manifest(path) -> Manifest:
             key = key.strip()
             if key == "path":
                 m.paths.append(value)
+            elif key == "path-glob":
+                m.globs.append(value)
             elif key == "identifier":
                 m.identifiers.append(value)
             elif key == "pattern":
@@ -105,9 +112,12 @@ def _strip_side(p: str) -> Optional[str]:
     return p
 
 
-def _owned(path: Optional[str], prefixes: List[str]) -> Optional[str]:
+def _owned(path: Optional[str], prefixes: List[str], globs: List[str] = ()) -> Optional[str]:
     if not path:
         return None
+    for g in globs:
+        if fnmatch.fnmatchcase(path, g):
+            return g
     for pre in prefixes:
         if pre.endswith("/"):
             if path.startswith(pre):
@@ -129,7 +139,7 @@ def check_diff(text: str, m: Manifest) -> List[str]:
     seen_paths = set()
 
     def flag_path(p):
-        hit = _owned(p, m.paths)
+        hit = _owned(p, m.paths, m.globs)
         if hit and p not in seen_paths:
             seen_paths.add(p)
             out.append(f"path {p} is fork-owned ({hit})")

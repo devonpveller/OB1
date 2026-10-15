@@ -68,14 +68,14 @@ class DB:
     def __init__(self, container):
         self.c = container
 
-    def run(self, sql, role=None, user_id=None, file=None):
+    def run(self, sql, role=None, user_id=None, file=None, login="postgres"):
         pre = "\\set VERBOSITY verbose\n"
         if user_id:
             pre += f"SELECT set_config('ob.user_id', '{user_id}', false);\n"
         if role:
             pre += f"SET ROLE {role};\n"
         body = pre + (Path(file).read_text(encoding="utf-8") if file else sql)
-        r = subprocess.run(["docker", "exec", "-i", self.c, "psql", "-U", "postgres", "-d", "openbrain",
+        r = subprocess.run(["docker", "exec", "-i", self.c, "psql", "-U", login, "-d", "openbrain",
                             "-X", "-q", "-At", "-v", "ON_ERROR_STOP=1"],
                            input=body, capture_output=True, text=True, encoding="utf-8", errors="replace")
         return r.returncode, r.stdout, r.stderr
@@ -256,29 +256,29 @@ def section_roles(db):
     raw = ("INSERT INTO intake.raw_items (source, connector, external_id, raw_sha256, content_type, raw, envelope) "
            "VALUES ('web', 'web', 'https://example.test/a', repeat('a', 64), 'text/html', 'x'::bytea, '{}') "
            "RETURNING id;")
-    out = expect_ok(db, "C1 intake writes bronze (raw_items INSERT)", raw, role="intake")
+    out = expect_ok(db, "C1 intake writes bronze (raw_items INSERT)", raw, login="intake")
     raw_id = (out.strip().splitlines() or [""])[-1]
-    expect_ok(db, "C2 intake reads bronze", "SELECT count(*) FROM intake.raw_items;", role="intake")
+    expect_ok(db, "C2 intake reads bronze", "SELECT count(*) FROM intake.raw_items;", login="intake")
     expect_ok(db, "C3 intake updates/deletes bronze",
               f"UPDATE intake.raw_items SET envelope = '{{\"k\":1}}' WHERE id = '{raw_id}'; "
-              "DELETE FROM intake.raw_items WHERE external_id = 'nothing';", role="intake")
+              "DELETE FROM intake.raw_items WHERE external_id = 'nothing';", login="intake")
     out = expect_ok(db, "C4 intake writes silver (items) and discards",
                     "INSERT INTO intake.items (raw_item_id, source, connector, external_id, raw_sha256, status, "
                     f"verdict, classifier_version) VALUES ('{raw_id}', 'web', 'web', 'https://example.test/a', "
                     "repeat('a', 64), 'done', 'clean', 'test') RETURNING id; "
                     "INSERT INTO intake.discards (source, connector, external_id, raw_sha256, reason) "
-                    "VALUES ('web','web','x', repeat('b',64), 'test');", role="intake")
+                    "VALUES ('web','web','x', repeat('b',64), 'test');", login="intake")
     item_id = [line for line in out.split() if re.fullmatch(r"[0-9a-f-]{36}", line)]
     item_id = item_id[-1] if item_id else str(uuid.uuid4())
     expect_ok(db, "C5 intake sets clean + intake_item_id on sources",
               f"UPDATE public.sources SET screen_verdict='clean', intake_item_id='{item_id}' "
-              f"WHERE id='{sid}' RETURNING id;", role="intake")
+              f"WHERE id='{sid}' RETURNING id;", login="intake")
     rc, out, _ = db.run(f"UPDATE public.thoughts SET screen_verdict='suspicious', intake_item_id='{item_id}' "
-                        f"WHERE id={tid_ops} RETURNING id;", role="intake")
+                        f"WHERE id={tid_ops} RETURNING id;", login="intake")
     (ok if rc == 0 and str(tid_ops) in out else lambda n: bad(n, out))(
         "C6 intake sets suspicious + intake_item_id on thoughts (RLS lets it reach the row)")
     expect_err(db, "C7 intake cannot read thought/source CONTENT (column-level grant)",
-               "SELECT content FROM public.sources LIMIT 1;", {"42501"}, role="intake")
+               "SELECT content FROM public.sources LIMIT 1;", {"42501"}, login="intake")
 
     # ---- every other role -----------------------------------------------------------------
     for r in roles:
@@ -329,9 +329,27 @@ def section_roles(db):
         "C18 an ordinary UPDATE of a screened row that leaves the label alone still works")
 
     # Superuser is not 'intake' either: the trigger keys on the role, not on privilege.
-    expect_err(db, "C19 even postgres (superuser) cannot set clean without SET ROLE intake",
+    expect_err(db, "C19 even postgres (superuser) cannot set clean on a plain write",
                "UPDATE public.sources SET screen_verdict='clean' WHERE metadata->>'fixture'='ext-gmail';",
                {"42501"}, must_contain="intake authority")
+    # F5: intake is not assumable. Only a connection that LOGGED IN as intake decides; SET ROLE
+    # (an operator, or PostgREST honouring a JWT with role=intake: it authenticates as postgres
+    # and runs SET LOCAL ROLE) is refused.
+    gid = db.val("SELECT id FROM public.sources WHERE metadata->>'fixture' = 'ext-gmail'")
+    for t, where in (("sources", f"id='{gid}'"), ("thoughts", f"id={tid_plain}")):
+        expect_err(db, f"C22 SET ROLE intake (not a login) cannot set clean on {t}",
+                   f"UPDATE public.{t} SET screen_verdict='clean' WHERE {where};",
+                   {"42501"}, must_contain="intake authority", role="intake")
+        expect_err(db, f"C23 a PostgREST-style JWT role switch to intake cannot set suspicious on {t}",
+                   "BEGIN; SET LOCAL ROLE intake; "
+                   "SELECT set_config('request.jwt.claims', '{\"role\":\"intake\"}', true); "
+                   f"UPDATE public.{t} SET screen_verdict='suspicious' WHERE {where}; COMMIT;",
+                   {"42501"}, must_contain="intake authority")
+    who = db.val("SELECT coalesce(string_agg(m.rolname, ','), '') FROM pg_auth_members a "
+                 "JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles m ON m.oid = a.member "
+                 "WHERE g.rolname = 'intake' OR m.rolname = 'intake'")
+    (ok if who == "" else lambda n: bad(n, who))(
+        "C24 catalogue: intake has no members and is a member of nothing (no membership path to assume it)")
 
     # Catalogue-level: no non-superuser role but intake holds ANY privilege on intake.*
     leak = db.val("SELECT coalesce(string_agg(r.rolname || ' ' || c.relname || ' ' || p, ', '), '') "
@@ -349,6 +367,94 @@ def section_roles(db):
         "C21 catalogue: nobody is a member of intake / pg_read_all_data / pg_write_all_data")
 
 
+ATTACKERS = (("ob_app_memory", "login"), ("service_role", "role"))
+
+
+def as_(who, how):
+    return {"login": who} if how == "login" else {"role": who}
+
+
+def section_attacks(db):
+    """Round 2: the tester's T5.1 laundering trigger and the T5.2 list, as ob_app_memory (a real
+    login: openbrain-mcp, -ext, -research, ...) and as service_role, on sources AND thoughts."""
+    # rows still 'unscreened' at this point (ext-web was set clean by intake in C5)
+    sid = db.val("SELECT id FROM public.sources WHERE metadata->>'fixture' = 'ext-gmail'")
+    tid = db.val("SELECT id FROM public.thoughts WHERE metadata->>'fixture' = 'th-chatgpt'")
+    launder = ("CREATE FUNCTION pg_temp.launder() RETURNS trigger LANGUAGE plpgsql AS "
+               "$f$ BEGIN NEW.screen_verdict := 'clean'; RETURN NEW; END $f$; ")
+    for who, how in ATTACKERS:
+        kw = as_(who, how)
+        for t in ("sources", "thoughts"):
+            # E1 the exact T5.1 repro: attach a pg_temp BEFORE trigger that rewrites NEW.
+            expect_err(db, f"E1 {who} cannot attach a laundering trigger to {t} (TRIGGER revoked)",
+                       launder + f"CREATE TRIGGER zzzz_launder BEFORE INSERT OR UPDATE ON public.{t} "
+                       "FOR EACH ROW EXECUTE FUNCTION pg_temp.launder();", {"42501"}, **kw)
+        # E3 defence in depth: even if a rewriting BEFORE trigger exists (planted by the owner,
+        # i.e. the TRIGGER revoke is assumed lost), the AFTER ROW check judges the stored row.
+        for t, where in (("sources", f"id='{sid}'"), ("thoughts", f"id={tid}")):
+            db.run(f"CREATE FUNCTION public.zz_test_launder() RETURNS trigger LANGUAGE plpgsql AS "
+                   f"$f$ BEGIN NEW.screen_verdict := 'clean'; RETURN NEW; END $f$; "
+                   f"GRANT EXECUTE ON FUNCTION public.zz_test_launder() TO PUBLIC; "
+                   f"CREATE TRIGGER zzzz_planted BEFORE INSERT OR UPDATE ON public.{t} "
+                   f"FOR EACH ROW EXECUTE FUNCTION public.zz_test_launder();")
+            expect_err(db, f"E3 {who}: a later BEFORE trigger rewriting NEW to clean on {t} is caught AFTER",
+                       f"UPDATE public.{t} SET content = content WHERE {where};",
+                       {"42501"}, must_contain="intake authority", **kw)
+            db.run(f"DROP TRIGGER zzzz_planted ON public.{t}; DROP FUNCTION public.zz_test_launder();")
+        # E4 the T5.2 list (all must stay refused)
+        cases = [
+            ("read bronze with COPY", "COPY intake.raw_items TO STDOUT;"),
+            ("read bronze via COPY (SELECT)", "COPY (SELECT raw FROM intake.raw_items) TO STDOUT;"),
+            ("temp view over bronze", "CREATE TEMP VIEW v AS SELECT * FROM intake.raw_items;"),
+            ("SET ROLE intake", "SET ROLE intake;"),
+            ("SET SESSION AUTHORIZATION intake", "SET SESSION AUTHORIZATION intake;"),
+            ("session_replication_role=replica", "SET session_replication_role = replica;"),
+            ("DISABLE the authority trigger",
+             "ALTER TABLE public.sources DISABLE TRIGGER zzz_intake_screen_verdict_authority;"),
+            ("DISABLE TRIGGER USER", "ALTER TABLE public.thoughts DISABLE TRIGGER USER;"),
+            ("DROP the authority trigger", "DROP TRIGGER zzz_intake_screen_verdict_authority ON public.sources;"),
+            ("default the column to clean", "ALTER TABLE public.sources ALTER COLUMN screen_verdict SET DEFAULT 'clean';"),
+            ("drop the CHECK", "ALTER TABLE public.thoughts DROP CONSTRAINT thoughts_screen_verdict_check;"),
+            ("disable RLS", "ALTER TABLE public.thoughts DISABLE ROW LEVEL SECURITY;"),
+            ("CREATE RULE", "CREATE RULE r AS ON UPDATE TO public.sources DO INSTEAD NOTHING;"),
+            ("replace the trigger function",
+             "CREATE OR REPLACE FUNCTION intake.enforce_screen_verdict_authority() RETURNS trigger "
+             "LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$;"),
+            ("COPY sources FROM STDIN with clean",
+             "COPY public.sources (url, title, content, screen_verdict) FROM STDIN;\n"
+             "https://example.test/copy\tt\tc\tclean\n\\.\n"),
+            ("INSERT .. ON CONFLICT DO UPDATE SET clean (sources)",
+             "INSERT INTO public.sources (url, title, content, content_type, research_key) "
+             "VALUES (NULL, 't', 'c', 'research_synthesis', 'rk-1') "
+             "ON CONFLICT (research_key) WHERE content_type = 'research_synthesis' "
+             "DO UPDATE SET screen_verdict = 'clean';"),
+            ("INSERT .. ON CONFLICT DO UPDATE SET suspicious (thoughts)",
+             f"INSERT INTO public.thoughts (id, content, exposure, metadata) "
+             f"VALUES ({tid}, 'x', 'ops', '{{\"exposure\":\"ops\"}}') "
+             "ON CONFLICT (id) DO UPDATE SET screen_verdict = 'suspicious';"),
+            ("ALTER the intake role", "ALTER ROLE intake NOLOGIN;"),
+            ("GRANT intake membership to self", f"GRANT intake TO {who};"),
+        ]
+        for name, sql in cases:
+            if how == "role" and name.startswith(("SET ROLE", "SET SESSION")):
+                continue  # SET ROLE from a superuser session: the escalation case is the real login above
+            expect_err(db, f"E4 {who}: {name}", sql, {"42501"}, **kw)
+    # E5 the property, over every role: nobody but a superuser can attach code.
+    leak = db.val("SELECT coalesce(string_agg(r.rolname || ' ' || c.oid::regclass::text || ' ' || p, ', '), '') "
+                  "FROM pg_roles r CROSS JOIN pg_class c CROSS JOIN unnest(ARRAY['TRIGGER','REFERENCES']) p "
+                  "WHERE (c.oid IN ('public.sources'::regclass,'public.thoughts'::regclass) "
+                  "OR c.relnamespace = 'intake'::regnamespace) AND c.relkind IN ('r','p') "
+                  "AND NOT r.rolsuper AND has_table_privilege(r.oid, c.oid, p)")
+    (ok if leak == "" else lambda n: bad(n, leak))(
+        "E5 catalogue: no non-superuser holds TRIGGER/REFERENCES on sources, thoughts or intake.* "
+        "(REFERENCES is checked here only: a non-owner has no schema to create a referencing table in, "
+        "and a temp table cannot reference a permanent one)")
+    led = db.val("SELECT coalesce(string_agg((detail->>'grantee') || ' ' || (detail->>'privilege') || ' ' || "
+                 "(detail->>'table'), ', ' ORDER BY 1), '') FROM intake.migration_ledger")
+    (ok if "service_role TRIGGER" in led else lambda n: bad(n, led))(
+        f"E6 the revoked live grants are recorded for the revert: {led}")
+
+
 def section_check(db):
     # By id: intake has no SELECT on metadata (column grants), so a metadata WHERE is refused 42501.
     sid = db.val("SELECT id FROM public.sources WHERE metadata->>'fixture' = 'ext-gmail'")
@@ -356,9 +462,9 @@ def section_check(db):
     for t, where in (("sources", f"id='{sid}'"), ("thoughts", f"id={tid}")):
         for v in ("injected", "bogus", "CLEAN", "", "clean "):
             expect_err(db, f"D1 CHECK refuses {t}.screen_verdict={v!r} (even as intake)",
-                       f"UPDATE public.{t} SET screen_verdict='{v}' WHERE {where};", {"23514"}, role="intake")
+                       f"UPDATE public.{t} SET screen_verdict='{v}' WHERE {where};", {"23514"}, login="intake")
         expect_err(db, f"D2 NOT NULL refuses {t}.screen_verdict=NULL",
-                   f"UPDATE public.{t} SET screen_verdict=NULL WHERE {where};", {"23502"}, role="intake")
+                   f"UPDATE public.{t} SET screen_verdict=NULL WHERE {where};", {"23502"}, login="intake")
     expect_err(db, "D3 'injected' cannot be INSERTed into sources even by intake (no INSERT grant; CHECK as owner)",
                "INSERT INTO public.sources (url, title, content, screen_verdict) VALUES ('u','t','c','injected');",
                {"23514"})
@@ -403,6 +509,12 @@ def main():
         section_backfill(db, before)
         section_check(db)
         section_roles(db)
+        section_attacks(db)
+        # F2: a row a model-facing writer adds AFTER the first apply, with forged synthesis markers.
+        rc, _, err = db.run("INSERT INTO public.sources (url, title, content, content_type, research_key, metadata) "
+                            "VALUES (NULL, 'forged', 'x', 'research_synthesis', 'rk-forged', "
+                            "'{\"forged\":\"after-apply\",\"source\":\"deep-research\"}');", login="ob_app_memory")
+        (ok if rc == 0 else lambda n: bad(n, err))("F2a a writer adds a row with forged internal markers after the apply")
         # The role tests left intake data behind (bronze, silver, clean/suspicious labels).
         # Revert must REFUSE to drop that silently...
         rc, _, err = db.run("", file=REVERT)
@@ -427,14 +539,28 @@ def main():
                 bad("A7 migration applies again after revert", err)
             else:
                 ok("A7 migration applies again after revert")
+                lab = db.val("SELECT string_agg(v, ',' ORDER BY v) FROM (SELECT coalesce(metadata->>'fixture', "
+                             "metadata->>'forged') || '=' || screen_verdict AS v FROM public.sources "
+                             "WHERE metadata->>'forged' = 'after-apply' OR metadata->>'fixture' = 'src-synthesis') q")
+                (ok if lab == "after-apply=unscreened,src-synthesis=unscreened" else lambda n: bad(n, lab))(
+                    "F2b revert + re-apply does NOT re-run the marker backfill: the forged row (and every "
+                    "row) stays unscreened")
+                rec = db.val("SELECT count(*) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase "
+                             "AND d.datname = current_database() CROSS JOIN unnest(s.setconfig) c "
+                             "WHERE c LIKE 'intake.backfill_done_at=%'")
+                (ok if rec == "1" else lambda n: bad(n, rec))(
+                    "F2c the one-shot record (database setting intake.backfill_done_at) survives the revert")
                 s4 = db.snapshot()
                 (ok if s4 == s1 else lambda n: bad(n, _first_diff(s1, s4)))(
                     "A8 apply after revert yields the same catalogue as the first apply")
                 rc, _, err = db.run("", file=REVERT)
                 (ok if rc == 0 else lambda n: bad(n, err))(
                     "A10 revert of an apply with no intake data needs no flag (backfilled labels are re-derivable)")
-                rc, _, err = db.run("", file=INIT)
-                (ok if rc == 0 else lambda n: bad(n, err))("A11 final re-apply")
+                rc, _, err = db.run("\\set intake_rerun_backfill 1\n" + INIT.read_text(encoding="utf-8"))
+                (ok if rc == 0 else lambda n: bad(n, err))("A11 re-apply with -v intake_rerun_backfill=1")
+                lab = db.val("SELECT screen_verdict FROM public.sources WHERE metadata->>'fixture' = 'src-synthesis'")
+                (ok if lab == "internal" else lambda n: bad(n, lab))(
+                    "F2d the marker rule re-runs only when asked for explicitly")
     finally:
         if a.start and not a.keep:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True)

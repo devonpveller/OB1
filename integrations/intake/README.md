@@ -22,19 +22,27 @@ later build items I2 to I9.
 
 `sources.screen_verdict` / `thoughts.screen_verdict` is one of:
 
-- `clean` or `suspicious`: only the `intake` role may set these.
+- `clean` or `suspicious`: only a connection that logged in as the `intake` role may set these
+  (`SET ROLE intake`, including a PostgREST JWT role switch, does not count).
 - `unscreened`: the default; the content is external and has not been screened.
 - `internal`: the row is stack-generated.
 
-`injected` is never stored. Trigger `zzz_intake_screen_verdict_authority` refuses any other
-role, including a plain write by the postgres superuser, that tries to:
+`injected` is never stored. The AFTER ROW trigger `zzz_intake_screen_verdict_authority` judges
+the row as stored (no later BEFORE trigger can rewrite it) and refuses any other role, including
+a plain write by the postgres superuser, that tries to:
 
 - set `clean` or `suspicious`;
 - change a verdict intake decided;
 - raise `unscreened` to `internal`;
 - touch `intake_item_id`.
 
-The backfill rule for existing rows is documented in `sql/init-intake.sql` section 3.
+No role but the table owner may attach code to `sources`/`thoughts`: the migration revokes
+TRIGGER and REFERENCES from every other grantee (recorded in `intake.migration_ledger`, restored
+by the revert) and checks the property before it commits.
+
+The backfill rule for existing rows is documented in `sql/init-intake.sql` section 3. It runs
+once per database: a re-apply after a revert leaves every row `unscreened` unless
+`-v intake_rerun_backfill=1` asks for the marker rule again.
 
 ## Prerequisites
 
