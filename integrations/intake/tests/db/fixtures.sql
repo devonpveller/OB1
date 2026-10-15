@@ -1,4 +1,4 @@
--- D29/D30 (2026-10-15): only operator-written notes under notes/ and ai_note (D29) are internal.
+-- D30/D32 (2026-10-15): only operator-written notes under notes/ are internal (ai_note: D32).
 -- Synthetic fixture rows for run_db_tests.py, loaded BEFORE init-intake.sql on a THROWAWAY
 -- database. Nothing here is live data: every row is invented to stand for one origin marker
 -- a real writer stamps today (writer inventory: init-intake.sql section 3).
@@ -51,7 +51,7 @@ UPDATE public.sources SET updated_at = '2026-01-01T00:00:00Z' WHERE metadata ? '
 -- expect th-agent-memory unscreened
 -- expect th-agent-org unscreened
 -- expect th-user-note internal
--- expect th-ai-note internal
+-- expect th-ai-note unscreened
 -- expect th-dossier unscreened
 -- expect th-gmail-wiki unscreened
 -- expect th-agent-memory-no-workspace unscreened

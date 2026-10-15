@@ -183,7 +183,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA intake TO intake;
 -- 3. THE COLUMNS - WITH A DEFAULT FIRST (rollout step 1), backfilled once
 -- ==========================================================================================
 -- THE ORIGIN RULE for rows that exist before this file (DESIGN section 4; operator decisions
--- D29 + D30, 2026-10-15). D30: a row derived from unscreened input is unscreened, and so is
+-- D29 + D30 + D32, 2026-10-15). D30: a row derived from unscreened input is unscreened, and so is
 -- everything derived from it in turn. 'internal' means the stack wrote it AND every input was
 -- internal or clean. No legacy input was ever screened, so a legacy row is 'internal' only
 -- when its content was not derived from external input at all. Neither table has an origin
@@ -200,11 +200,12 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA intake TO intake;
 --                                                       notes (wiki-service.mjs: notes/ is the
 --                                                       user tree; pinned to the path because
 --                                                       frontmatter can relabel an ai-tree file)
---     source='ai_note' with note_path                  operator decision D29 (internal), taken
---                                                       knowing wiki-service.mjs describes the
---                                                       content/ tree as "AI-generated from
---                                                       external inlets" - see the findings
 --   and unscreened (D30, each re-checked 2026-10-15):
+--     source='ai_note'                                  D32 (reverses D29): wiki-service.mjs
+--                                                       describes the content/ tree as
+--                                                       "AI-generated from external inlets";
+--                                                       before the gate, local models also
+--                                                       reached the web unscreened
 --     source='mcp' (capture_thought / capture_idea)    any MCP client writes it - the operator,
 --                                                       but also agents and OWUI models working
 --                                                       over web/research text; inputs unknown.
@@ -223,7 +224,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA intake TO intake;
 -- an unknown or missing marker, or with metadata NULL, is 'unscreened'. The error direction is
 -- always "external content shown with its label", never "external content trusted".
 -- KNOWN LIMIT: metadata.source is writer-stamped jsonb, and a local caller can set it through
--- metadata_extra; a forged user_note/ai_note marker on an EXISTING row is labelled internal by
+-- metadata_extra; a forged user_note marker on an EXISTING row is labelled internal by
 -- this backfill (wiki-service is the only real writer of note_path).
 -- That is the reason the column now exists - from here on trust is the typed column, which
 -- the trigger in section 5 guards. P6 re-screens legacy rows.
@@ -280,8 +281,7 @@ BEGIN
   -- sources: no internal branch (D30) - every existing row keeps the DEFAULT 'unscreened'.
   IF v_new_t AND v_run THEN
     UPDATE public.thoughts t SET screen_verdict = 'internal'
-     WHERE (t.metadata->>'source' = 'user_note' AND t.metadata->>'note_path' LIKE 'notes/%')
-        OR (t.metadata->>'source' = 'ai_note'   AND t.metadata ? 'note_path');      -- D29
+     WHERE t.metadata->>'source' = 'user_note' AND t.metadata->>'note_path' LIKE 'notes/%';
     GET DIAGNOSTICS v_n = ROW_COUNT;
     RAISE NOTICE 'init-intake: thoughts labelled internal: % (every other row, and every source: unscreened)', v_n;
   END IF;

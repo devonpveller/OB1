@@ -44,8 +44,8 @@ owned by a non-superuser, or touches the label); terminate non-postgres sessions
 live apply.
 
 The backfill rule for existing rows is documented in `sql/init-intake.sql` section 3
-(operator D29/D30: anything derived from unscreened input is unscreened, so only the
-operator's own notes under `notes/` and `ai_note` rows backfill as `internal`). It runs
+(operator D29/D30/D32: anything derived from unscreened input is unscreened, so only the
+operator's own notes under `notes/` backfill as `internal`). It runs
 once per database: a re-apply after a revert leaves every row `unscreened` unless
 `-v intake_rerun_backfill=1` asks for the marker rule again.
 
