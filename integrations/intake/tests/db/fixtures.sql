@@ -1,3 +1,4 @@
+-- D29/D30 (2026-10-15): only operator-written notes under notes/ and ai_note (D29) are internal.
 -- Synthetic fixture rows for run_db_tests.py, loaded BEFORE init-intake.sql on a THROWAWAY
 -- database. Nothing here is live data: every row is invented to stand for one origin marker
 -- a real writer stamps today (writer inventory: init-intake.sql section 3).
@@ -13,8 +14,8 @@ INSERT INTO public.content_types (value, label, category) VALUES
 ON CONFLICT DO NOTHING;
 
 -- ---- sources ------------------------------------------------------------------------------
--- expect src-synthesis internal
--- expect src-podcast internal
+-- expect src-synthesis unscreened
+-- expect src-podcast unscreened
 -- expect ext-web unscreened
 -- expect ext-gmail unscreened
 -- expect src-research-stage unscreened
@@ -44,15 +45,15 @@ INSERT INTO public.sources (url, title, content, content_type, research_key, met
 UPDATE public.sources SET updated_at = '2026-01-01T00:00:00Z' WHERE metadata ? 'fixture';
 
 -- ---- thoughts -----------------------------------------------------------------------------
--- expect th-capture-ops internal
--- expect th-personal internal
--- expect th-idea internal
--- expect th-agent-memory internal
--- expect th-agent-org internal
+-- expect th-capture-ops unscreened
+-- expect th-personal unscreened
+-- expect th-idea unscreened
+-- expect th-agent-memory unscreened
+-- expect th-agent-org unscreened
 -- expect th-user-note internal
 -- expect th-ai-note internal
--- expect th-dossier internal
--- expect th-gmail-wiki internal
+-- expect th-dossier unscreened
+-- expect th-gmail-wiki unscreened
 -- expect th-agent-memory-no-workspace unscreened
 -- expect th-agent_memory-underscore unscreened
 -- expect th-gmail unscreened
@@ -63,6 +64,9 @@ UPDATE public.sources SET updated_at = '2026-01-01T00:00:00Z' WHERE metadata ? '
 -- expect th-nomarker unscreened
 -- expect th-type-reference-only unscreened
 -- expect th-dossier-other-generator unscreened
+-- expect th-user-note-in-ai-tree unscreened
+-- expect th-mcp-cloud unscreened
+-- expect th-ai-note-no-path unscreened
 INSERT INTO public.thoughts (content, exposure, user_id, metadata) VALUES
  ('t1', 'ops', NULL, '{"fixture":"th-capture-ops","source":"mcp","type":"observation","exposure":"ops"}'),
  ('t2', 'personal', 'u-test', '{"fixture":"th-personal","source":"mcp","exposure":"personal"}'),
@@ -82,6 +86,9 @@ INSERT INTO public.thoughts (content, exposure, user_id, metadata) VALUES
  ('t16', 'ops', NULL, '{"fixture":"th-obsidian","source":"obsidian","exposure":"ops"}'),
  ('t17', 'ops', NULL, '{"fixture":"th-nomarker","exposure":"ops"}'),
  ('t18', 'ops', NULL, '{"fixture":"th-type-reference-only","type":"reference","exposure":"ops"}'),
- ('t19', 'ops', NULL, '{"fixture":"th-dossier-other-generator","type":"dossier","generated_by":"elsewhere","exposure":"ops"}');
+ ('t19', 'ops', NULL, '{"fixture":"th-dossier-other-generator","type":"dossier","generated_by":"elsewhere","exposure":"ops"}'),
+ ('t20', 'ops', NULL, '{"fixture":"th-user-note-in-ai-tree","source":"user_note","note_path":"content/notebooks/x/y.md","exposure":"ops"}'),
+ ('t21', 'ops', NULL, '{"fixture":"th-mcp-cloud","source":"mcp","origin":"cloud","share":"cloud","exposure":"ops"}'),
+ ('t22', 'ops', NULL, '{"fixture":"th-ai-note-no-path","source":"ai_note","exposure":"ops"}');
 UPDATE public.thoughts SET updated_at = '2026-01-01T00:00:00Z' WHERE metadata ? 'fixture';
 COMMIT;

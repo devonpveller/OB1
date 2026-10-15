@@ -38,9 +38,14 @@ a plain write by the postgres superuser, that tries to:
 
 No role but the table owner may attach code to `sources`/`thoughts`: the migration revokes
 TRIGGER and REFERENCES from every other grantee (recorded in `intake.migration_ledger`, restored
-by the revert) and checks the property before it commits.
+by the revert) and checks the property before it commits. It also REFUSES to apply while
+foreign code is already attached to those tables (a trigger whose function is temporary,
+owned by a non-superuser, or touches the label); terminate non-postgres sessions before a
+live apply.
 
-The backfill rule for existing rows is documented in `sql/init-intake.sql` section 3. It runs
+The backfill rule for existing rows is documented in `sql/init-intake.sql` section 3
+(operator D29/D30: anything derived from unscreened input is unscreened, so only the
+operator's own notes under `notes/` and `ai_note` rows backfill as `internal`). It runs
 once per database: a re-apply after a revert leaves every row `unscreened` unless
 `-v intake_rerun_backfill=1` asks for the marker rule again.
 

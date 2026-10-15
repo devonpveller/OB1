@@ -47,6 +47,11 @@
 --   Without -v the role exists with NO password and cannot log in until
 --   `ALTER ROLE intake PASSWORD '...'` is run - the same out-of-band step as ob_app_memory
 --   and ob_pantry.
+--   BEFORE the live apply, terminate every session that is not postgres's own (operator D31):
+--     SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+--      WHERE datname = 'openbrain' AND usename <> 'postgres' AND pid <> pg_backend_pid();
+--   A session open across the apply could hold a trigger it attached earlier on a pg_temp
+--   function; section 7(g) refuses the apply while one exists, which is loud but an outage.
 --
 -- IDEMPOTENT: re-running changes nothing (the backfill runs only in the run that ADDS the
 -- column, and only ONCE per database - section 3 - so rows written since keep the label their
@@ -177,40 +182,49 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA intake TO intake;
 -- ==========================================================================================
 -- 3. THE COLUMNS - WITH A DEFAULT FIRST (rollout step 1), backfilled once
 -- ==========================================================================================
--- THE ORIGIN RULE for rows that exist before this file (DESIGN section 4: stack-generated =
--- 'internal', external = 'unscreened'). Neither table has an origin column; origin is recorded
--- today only in content_type (sources) and in writer-stamped metadata keys. Derived from the
--- writers, 2026-10-15 (OB1 43d35fb, ai-stack 979567a2; file:line inventory in the I1 findings):
+-- THE ORIGIN RULE for rows that exist before this file (DESIGN section 4; operator decisions
+-- D29 + D30, 2026-10-15). D30: a row derived from unscreened input is unscreened, and so is
+-- everything derived from it in turn. 'internal' means the stack wrote it AND every input was
+-- internal or clean. No legacy input was ever screened, so a legacy row is 'internal' only
+-- when its content was not derived from external input at all. Neither table has an origin
+-- column; origin is recorded only in content_type and in writer-stamped metadata keys
+-- (writer inventory 2026-10-15, OB1 43d35fb / ai-stack 979567a2, file:line in the findings).
 --
---   sources - 13 writer shapes, 2 of them stack-generated:
---     INTERNAL  content_type='research_synthesis' AND url IS NULL AND research_key IS NOT NULL
---               AND metadata.source='deep-research'      (/research/persist synthesis row,
---                                                         kubernetes-deployment/index.ts)
---     INTERNAL  content_type='podcast_transcript' AND metadata.source='daily-digest-podcast'
---               AND metadata has 'episode'               (digest podcast loop-close, our script)
---     everything else: ingest_url(s), capture_with_thread (caller- or fetch-supplied text),
---     research staging + repo-sync, grounding-backfiller (Wikipedia), research gathered
---     sources, workbench uploads / URL ingest, Open Notebook (incl. 'manual' pasted text).
+--   sources - NOTHING backfills as internal:
+--     research_synthesis (/research/persist)  a model synthesis OF fetched web pages      (D30)
+--     podcast_transcript (digest loop-close)  a script written FROM email/web digest input (D30)
+--     every other writer fetches or receives external content.
 --
---   thoughts - stack-generated when metadata says one of:
---     source='mcp' with no gmail_id/url/source_url key  (capture_thought, capture_idea - the
---                                                         operator's or an agent's own words)
---     source='agent-memory' with workspace_id           (agent-memory writeback)
---     source='agent-org' with event_id                  (agent-org audit mirror)
---     source IN ('user_note','ai_note') with note_path  (wiki note sync)
---     type='dossier' AND generated_by='recipes/entity-wiki/generate-wiki.mjs'
---     source_type='gmail_wiki' with gmail               (model-written summaries; operator
---                                                         clarification: summaries are internal)
---     everything else: gmail pull ('gmail'), the import recipes (chatgpt, perplexity, obsidian,
---     x_twitter_import, blogger_import, instagram_import, grok_import, google_activity, ...),
---     upstream-only sources ('agent_memory' with an underscore, 'dashboard'), no marker at all.
+--   thoughts - internal ONLY for:
+--     source='user_note' with note_path under notes/   the operator's own hand-written vault
+--                                                       notes (wiki-service.mjs: notes/ is the
+--                                                       user tree; pinned to the path because
+--                                                       frontmatter can relabel an ai-tree file)
+--     source='ai_note' with note_path                  operator decision D29 (internal), taken
+--                                                       knowing wiki-service.mjs describes the
+--                                                       content/ tree as "AI-generated from
+--                                                       external inlets" - see the findings
+--   and unscreened (D30, each re-checked 2026-10-15):
+--     source='mcp' (capture_thought / capture_idea)    any MCP client writes it - the operator,
+--                                                       but also agents and OWUI models working
+--                                                       over web/research text; inputs unknown.
+--                                                       Cloud-origin captures: D29 unscreened.
+--     source='agent-memory'                            agent-org worker memories, distilled from
+--                                                       work over repos, research and the web
+--     source='agent-org' (audit mirror)                the event payload carries worker/PM
+--                                                       output, which can quote external text
+--     type='dossier' (entity-wiki)                     built from entities extracted out of
+--                                                       external sources (D30)
+--     source_type='gmail_wiki'                         model summaries of email (D29, D30)
+--     gmail pull, the import recipes, upstream-only sources, no marker at all.
 --
 -- FAIL-SAFE BY CONSTRUCTION: 'internal' is an ALLOW-LIST of positive markers, each pinned by a
 -- second key where one value alone is shared or forgeable; a row matching none of them, with
 -- an unknown or missing marker, or with metadata NULL, is 'unscreened'. The error direction is
 -- always "external content shown with its label", never "external content trusted".
 -- KNOWN LIMIT: metadata.source is writer-stamped jsonb, and a local caller can set it through
--- metadata_extra; a forged marker on an EXISTING row is labelled internal by this backfill.
+-- metadata_extra; a forged user_note/ai_note marker on an EXISTING row is labelled internal by
+-- this backfill (wiki-service is the only real writer of note_path).
 -- That is the reason the column now exists - from here on trust is the typed column, which
 -- the trigger in section 5 guards. P6 re-screens legacy rows.
 --
@@ -263,28 +277,13 @@ BEGIN
   END IF;
 
   PERFORM set_config('session_replication_role', 'replica', true);
-  IF v_new_s AND v_run THEN
-    UPDATE public.sources s SET screen_verdict = 'internal'
-     WHERE (s.content_type = 'research_synthesis' AND s.url IS NULL AND s.research_key IS NOT NULL
-            AND s.metadata->>'source' = 'deep-research')
-        OR (s.content_type = 'podcast_transcript'
-            AND s.metadata->>'source' = 'daily-digest-podcast' AND s.metadata ? 'episode');
-    GET DIAGNOSTICS v_n = ROW_COUNT;
-    RAISE NOTICE 'init-intake: sources labelled internal: % (every other row: unscreened)', v_n;
-  END IF;
+  -- sources: no internal branch (D30) - every existing row keeps the DEFAULT 'unscreened'.
   IF v_new_t AND v_run THEN
     UPDATE public.thoughts t SET screen_verdict = 'internal'
-     WHERE (t.metadata->>'source' = 'mcp'                      -- capture_thought / capture_idea
-            AND NOT (t.metadata ?| ARRAY['gmail_id','url','source_url']))  -- (D29 pending: cloud-origin mcp)
-        OR (t.metadata->>'source' = 'agent-memory' AND t.metadata ? 'workspace_id')
-        OR (t.metadata->>'source' = 'agent-org'    AND t.metadata ? 'event_id')
-        OR (t.metadata->>'source' = 'user_note' AND t.metadata ? 'note_path')
-        OR (t.metadata->>'source' = 'ai_note'   AND t.metadata ? 'note_path')     -- (D29 pending)
-        OR (t.metadata->>'type' = 'dossier'
-            AND t.metadata->>'generated_by' = 'recipes/entity-wiki/generate-wiki.mjs')
-        OR (t.metadata->>'source_type' = 'gmail_wiki' AND t.metadata ? 'gmail'); -- (D29 pending)
+     WHERE (t.metadata->>'source' = 'user_note' AND t.metadata->>'note_path' LIKE 'notes/%')
+        OR (t.metadata->>'source' = 'ai_note'   AND t.metadata ? 'note_path');      -- D29
     GET DIAGNOSTICS v_n = ROW_COUNT;
-    RAISE NOTICE 'init-intake: thoughts labelled internal: % (every other row: unscreened)', v_n;
+    RAISE NOTICE 'init-intake: thoughts labelled internal: % (every other row, and every source: unscreened)', v_n;
   END IF;
   PERFORM set_config('session_replication_role', 'origin', true);
   IF v_run THEN
@@ -461,13 +460,19 @@ BEGIN
        AND a.privilege_type IN ('TRIGGER','REFERENCES')
        AND a.grantee <> c.relowner
   LOOP
-    v_grantee := CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE r.grantee::regrole::text END;
+    -- The ledger keeps the BARE role name; every statement quotes it with %I (round 2, D31).
+    v_grantee := CASE WHEN r.grantee = 0 THEN 'PUBLIC'
+                      ELSE (SELECT rolname FROM pg_roles WHERE oid = r.grantee) END;
     INSERT INTO intake.migration_ledger (kind, detail)
     VALUES ('revoked-privilege', jsonb_build_object('table', r.tbl, 'grantee', v_grantee,
                                                     'privilege', r.privilege_type,
                                                     'grantable', r.is_grantable))
     ON CONFLICT DO NOTHING;
-    EXECUTE format('REVOKE %s ON %s FROM %s', r.privilege_type, r.tbl, v_grantee);
+    IF r.grantee = 0 THEN
+      EXECUTE format('REVOKE %s ON %s FROM PUBLIC', r.privilege_type, r.tbl);
+    ELSE
+      EXECUTE format('REVOKE %s ON %s FROM %I', r.privilege_type, r.tbl, v_grantee);
+    END IF;
     RAISE NOTICE 'init-intake: revoked % on % from %', r.privilege_type, r.tbl, v_grantee;
   END LOOP;
 END $$;
@@ -572,6 +577,43 @@ BEGIN
     HAVING count(*) = 2;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'init-intake: zzz_intake_screen_verdict_authority is not an enabled AFTER ROW trigger on both tables.';
+  END IF;
+  -- (g) NO FOREIGN CODE ALREADY ATTACHED (round 2, operator D31; attempt-2 tester). Revoking
+  --     TRIGGER stops NEW triggers; a trigger a non-owner attached BEFORE this apply - e.g. from
+  --     a session still open across it, on a pg_temp function - would stay and act on every
+  --     later write, intake's own label writes included. So the apply REFUSES (rather than
+  --     dropping it: a foreign trigger on these tables is an incident to look at, not litter to
+  --     sweep, and a silent drop would also destroy the evidence) when any user trigger on
+  --     sources, thoughts or intake.* runs a function that
+  --       * lives in a temporary schema, or
+  --       * is owned by a role that is neither a superuser nor the table's owner, or
+  --       * names screen_verdict / intake_item_id and is not this file's authority function.
+  --     pg_trigger records no creator, so the function is what can be judged: a function owned
+  --     by a superuser in a permanent schema is code a superuser wrote. The check runs inside
+  --     this transaction after section 3's ALTER TABLE took ACCESS EXCLUSIVE on both tables, so
+  --     no trigger can be attached between the check and COMMIT; after COMMIT, TRIGGER is gone.
+  --     Live apply: terminate every non-postgres session first (findings, preconditions).
+  SELECT string_agg(format('%s on %s -> %s (owner %s%s)', t.tgname, t.tgrelid::regclass,
+                           p.oid::regprocedure, o.rolname,
+                           CASE WHEN n.nspname LIKE 'pg\_temp\_%' OR n.nspname LIKE 'pg\_toast\_temp\_%'
+                                THEN ', TEMPORARY schema' ELSE '' END), '; ')
+    INTO v_bad
+    FROM pg_trigger t
+    JOIN pg_class c     ON c.oid = t.tgrelid
+    JOIN pg_proc p      ON p.oid = t.tgfoid
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_roles o     ON o.oid = p.proowner
+   WHERE NOT t.tgisinternal
+     AND (c.oid IN ('public.sources'::regclass, 'public.thoughts'::regclass)
+          OR c.relnamespace = 'intake'::regnamespace)
+     AND (   n.nspname LIKE 'pg\_temp\_%' OR n.nspname LIKE 'pg\_toast\_temp\_%'
+          OR (NOT o.rolsuper AND p.proowner <> c.relowner)
+          OR (p.oid <> 'intake.enforce_screen_verdict_authority()'::regprocedure
+              AND (p.prosrc ~* 'screen_verdict' OR p.prosrc ~* 'intake_item_id')));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION 'init-intake: REFUSING - foreign code is attached to a labelled table: %. '
+                    'Find who attached it (pg_stat_activity), terminate that session, drop the '
+                    'trigger if it outlives the session, and apply again.', v_bad;
   END IF;
   -- (f) intake is not assumable through a membership and holds none itself (tester F5):
   --     no role is a member of intake (checked in (a)), intake is a member of nothing, and it

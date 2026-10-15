@@ -79,9 +79,17 @@ BEGIN
        OR r.detail->>'table' NOT IN ('sources','thoughts','public.sources','public.thoughts') THEN
       CONTINUE;
     END IF;
-    EXECUTE format('GRANT %s ON %s TO %s%s', r.detail->>'privilege',
+    -- The grantee is DATA from the ledger: quoted with %I (never spliced as SQL), and it must
+    -- name an existing role (round 2, D31; attempt-2 tester). PUBLIC is the one keyword.
+    IF r.detail->>'grantee' <> 'PUBLIC'
+       AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r.detail->>'grantee') THEN
+      RAISE EXCEPTION 'revert-intake: ledger names a role that does not exist: %', r.detail->>'grantee';
+    END IF;
+    EXECUTE format('GRANT %s ON %s TO %s%s',
+                   CASE r.detail->>'privilege' WHEN 'TRIGGER' THEN 'TRIGGER' ELSE 'REFERENCES' END,
                    ('public.' || regexp_replace(r.detail->>'table', '^public\.', ''))::regclass,
-                   r.detail->>'grantee',
+                   CASE WHEN r.detail->>'grantee' = 'PUBLIC' THEN 'PUBLIC'
+                        ELSE format('%I', r.detail->>'grantee') END,
                    CASE WHEN (r.detail->>'grantable')::boolean THEN ' WITH GRANT OPTION' ELSE '' END);
     RAISE NOTICE 'revert-intake: restored % on % to %', r.detail->>'privilege', r.detail->>'table', r.detail->>'grantee';
   END LOOP;

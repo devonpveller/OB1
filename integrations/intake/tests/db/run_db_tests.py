@@ -455,6 +455,105 @@ def section_attacks(db):
         f"E6 the revoked live grants are recorded for the revert: {led}")
 
 
+def _wait(db, sql, want, seconds=30):
+    import time
+    for _ in range(seconds * 4):
+        if db.val(sql) == want:
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def section_guard(db):
+    """D31: foreign code attached BEFORE the apply must make the apply refuse."""
+    trig_q = "SELECT count(*) FROM pg_trigger WHERE tgname = 'zzzz_preattached'"
+    # Start from the pre-migration state, where the live grants still give service_role TRIGGER.
+    rc, _, err = db.run("", file=REVERT)
+    if rc != 0:
+        bad("G0 revert to the pre-migration state", err)
+        return
+    has = db.val("SELECT has_table_privilege('ob_app_memory', 'public.sources', 'TRIGGER')")
+    (ok if has == "t" else lambda n: bad(n, has))(
+        "G0 pre-migration: ob_app_memory (via service_role) holds TRIGGER on sources (the live grant)")
+    # G1: a model-facing session attaches a pg_temp trigger and STAYS OPEN across the apply.
+    sess = subprocess.Popen(["docker", "exec", "-i", db.c, "psql", "-U", "ob_app_memory", "-d", "openbrain",
+                             "-X", "-q", "-v", "ON_ERROR_STOP=1"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        sess.stdin.write("CREATE FUNCTION pg_temp.launder() RETURNS trigger LANGUAGE plpgsql AS "
+                         "$f$ BEGIN NEW.screen_verdict := 'clean'; RETURN NEW; END $f$;\n"
+                         "CREATE TRIGGER zzzz_preattached BEFORE INSERT OR UPDATE ON public.sources "
+                         "FOR EACH ROW EXECUTE FUNCTION pg_temp.launder();\n")
+        sess.stdin.flush()
+        if not _wait(db, trig_q, "1"):
+            bad("G1 an open ob_app_memory session attached a pg_temp trigger before the apply")
+            return
+        ok("G1 an open ob_app_memory session attached a pg_temp trigger before the apply")
+        rc, _, err = db.run("", file=INIT)
+        if rc == 0:
+            bad("G2 the apply REFUSES while that foreign trigger is attached")
+        elif "foreign code is attached" in err:
+            ok("G2 the apply REFUSES while that foreign trigger is attached  "
+               + (re.search(r"foreign code is attached[^.]*", err) or [""])[0][:150])
+        else:
+            bad("G2 the apply REFUSES while that foreign trigger is attached", err)
+        still = db.val("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
+                       "AND table_name='sources' AND column_name='screen_verdict'")
+        (ok if still == "0" else lambda n: bad(n, still))("G3 the refused apply left nothing behind (atomic)")
+    finally:
+        try:
+            sess.stdin.close()
+            sess.wait(timeout=30)
+        except Exception:
+            sess.kill()
+    gone = _wait(db, trig_q, "0")
+    (ok if gone else bad)("G4 the trigger dies with its session (pg_temp function dropped)")
+    rc, _, err = db.run("", file=INIT)
+    (ok if rc == 0 else lambda n: bad(n, err))("G5 with the session gone the apply succeeds")
+    # G6/G7: on an applied database a re-apply refuses foreign code that a session could not
+    # have attached itself but that would still act: a trigger function owned by a non-superuser,
+    # and a superuser-owned one that names the label.
+    for name, setup, cleanup in (
+        ("a trigger function owned by a non-superuser (ob_pantry)",
+         "CREATE FUNCTION public.zz_g6() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$; "
+         "ALTER FUNCTION public.zz_g6() OWNER TO ob_pantry; "
+         "CREATE TRIGGER zzzz_g6 BEFORE UPDATE ON public.thoughts FOR EACH ROW EXECUTE FUNCTION public.zz_g6();",
+         "DROP TRIGGER zzzz_g6 ON public.thoughts; DROP FUNCTION public.zz_g6();"),
+        ("a superuser-owned trigger function that writes screen_verdict",
+         "CREATE FUNCTION public.zz_g7() RETURNS trigger LANGUAGE plpgsql AS "
+         "$f$ BEGIN NEW.screen_verdict := 'clean'; RETURN NEW; END $f$; "
+         "CREATE TRIGGER zzzz_g7 BEFORE UPDATE ON public.sources FOR EACH ROW EXECUTE FUNCTION public.zz_g7();",
+         "DROP TRIGGER zzzz_g7 ON public.sources; DROP FUNCTION public.zz_g7();")):
+        rc, _, err = db.run(setup)
+        if rc != 0:
+            bad(f"G6 setup: {name}", err)
+            continue
+        rc, _, err = db.run("", file=INIT)
+        (ok if rc != 0 and "foreign code is attached" in err else lambda n: bad(n, err or "apply succeeded"))(
+            f"G6 a re-apply REFUSES with {name} attached")
+        db.run(cleanup)
+    rc, _, err = db.run("", file=INIT)
+    (ok if rc == 0 else lambda n: bad(n, err))("G7 clean re-apply after the foreign triggers are removed")
+    # G8: the ledger grantee is DATA - a role name needing quotes round-trips through apply + revert.
+    odd = 'odd "role"; x'
+    q = odd.replace('"', '""')
+    rc, _, err = db.run("", file=REVERT)
+    rc2, _, err2 = db.run(f'CREATE ROLE "{q}" NOLOGIN; GRANT TRIGGER ON public.sources TO "{q}";')
+    rc3, _, err3 = db.run("", file=INIT)
+    lit = odd.replace("'", "''")
+    held = db.val(f"SELECT has_table_privilege((SELECT oid FROM pg_roles WHERE rolname = '{lit}'), "
+                  "'public.sources', 'TRIGGER')")
+    rc4, _, err4 = db.run("", file=REVERT)
+    back = db.val(f"SELECT has_table_privilege((SELECT oid FROM pg_roles WHERE rolname = '{lit}'), "
+                  "'public.sources', 'TRIGGER')")
+    (ok if (rc, rc2, rc3, rc4, held, back) == (0, 0, 0, 0, "f", "t")
+     else lambda n: bad(n, f"rc={rc,rc2,rc3,rc4} held={held} back={back} {err}{err2}{err3}{err4}"))(
+        "G8 a role whose name needs quoting loses TRIGGER on apply and gets it back on revert (%I)")
+    db.run(f'REVOKE ALL ON public.sources FROM "{q}"; DROP ROLE "{q}";')
+    rc, _, err = db.run("", file=INIT)
+    (ok if rc == 0 else lambda n: bad(n, err))("G9 final apply")
+
+
 def section_check(db):
     # By id: intake has no SELECT on metadata (column grants), so a metadata WHERE is refused 42501.
     sid = db.val("SELECT id FROM public.sources WHERE metadata->>'fixture' = 'ext-gmail'")
@@ -511,9 +610,9 @@ def main():
         section_roles(db)
         section_attacks(db)
         # F2: a row a model-facing writer adds AFTER the first apply, with forged synthesis markers.
-        rc, _, err = db.run("INSERT INTO public.sources (url, title, content, content_type, research_key, metadata) "
-                            "VALUES (NULL, 'forged', 'x', 'research_synthesis', 'rk-forged', "
-                            "'{\"forged\":\"after-apply\",\"source\":\"deep-research\"}');", login="ob_app_memory")
+        rc, _, err = db.run("INSERT INTO public.thoughts (content, exposure, metadata) VALUES ('forged', 'ops', "
+                            "'{\"forged\":\"after-apply\",\"source\":\"user_note\",\"note_path\":\"notes/forged.md\","
+                            "\"exposure\":\"ops\"}');", login="ob_app_memory")
         (ok if rc == 0 else lambda n: bad(n, err))("F2a a writer adds a row with forged internal markers after the apply")
         # The role tests left intake data behind (bronze, silver, clean/suspicious labels).
         # Revert must REFUSE to drop that silently...
@@ -540,9 +639,9 @@ def main():
             else:
                 ok("A7 migration applies again after revert")
                 lab = db.val("SELECT string_agg(v, ',' ORDER BY v) FROM (SELECT coalesce(metadata->>'fixture', "
-                             "metadata->>'forged') || '=' || screen_verdict AS v FROM public.sources "
-                             "WHERE metadata->>'forged' = 'after-apply' OR metadata->>'fixture' = 'src-synthesis') q")
-                (ok if lab == "after-apply=unscreened,src-synthesis=unscreened" else lambda n: bad(n, lab))(
+                             "metadata->>'forged') || '=' || screen_verdict AS v FROM public.thoughts "
+                             "WHERE metadata->>'forged' = 'after-apply' OR metadata->>'fixture' = 'th-user-note') q")
+                (ok if lab == "after-apply=unscreened,th-user-note=unscreened" else lambda n: bad(n, lab))(
                     "F2b revert + re-apply does NOT re-run the marker backfill: the forged row (and every "
                     "row) stays unscreened")
                 rec = db.val("SELECT count(*) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase "
@@ -558,9 +657,10 @@ def main():
                     "A10 revert of an apply with no intake data needs no flag (backfilled labels are re-derivable)")
                 rc, _, err = db.run("\\set intake_rerun_backfill 1\n" + INIT.read_text(encoding="utf-8"))
                 (ok if rc == 0 else lambda n: bad(n, err))("A11 re-apply with -v intake_rerun_backfill=1")
-                lab = db.val("SELECT screen_verdict FROM public.sources WHERE metadata->>'fixture' = 'src-synthesis'")
+                lab = db.val("SELECT screen_verdict FROM public.thoughts WHERE metadata->>'fixture' = 'th-user-note'")
                 (ok if lab == "internal" else lambda n: bad(n, lab))(
                     "F2d the marker rule re-runs only when asked for explicitly")
+                section_guard(db)
     finally:
         if a.start and not a.keep:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True)
