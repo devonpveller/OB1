@@ -9,6 +9,7 @@ Everything intake adds is namespaced:
 | What | Name |
 |---|---|
 | code | `integrations/intake/` (this directory) |
+| I2 screening library | `intake/{pipeline,envelope,revisions,cdr,htmlscan,invisible,rules,result,limits}.py`, the rules file `intake/rules.toml`, `requirements.txt` / `requirements-dev.txt` (hash-pinned), `tests/fixtures/` (corpus snapshots) - all inside the path below |
 | migration | `integrations/intake/sql/init-intake.sql`, revert `sql/revert-intake.sql`, mounted as `220-init-intake.sql` by `docker/docker-compose.yml` and `docker/docker-compose.preview.yml` (the whole `220-` initdb slot is ours) |
 | SQL schema | `intake` (`intake.raw_items`, `intake.items`, `intake.discards`, `intake.migration_ledger`, `intake.enforce_screen_verdict_authority()`) |
 | DB role | `intake` (no members, a member of nothing) |
