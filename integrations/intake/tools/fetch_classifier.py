@@ -8,8 +8,9 @@ hash again before it loads them.
   * Source: https://huggingface.co/<MODEL_REPO>/resolve/<MODEL_REVISION>/<file> for each file in
     intake.classifier.MODEL_FILES (the repo revision is a full commit sha, so the URL names
     exactly one version of each file).
-  * Each file is streamed to <file>.part, its size and sha256 are checked against the pin,
-    and only then is it renamed into place. A mismatch deletes the part file and exits 1.
+  * Each file is streamed to <file>.part, at most its pinned size + 1 bytes (I3 review R-3),
+    its size and sha256 are checked against the pin, and only then is it renamed into place.
+    A mismatch deletes the part file and exits 1.
   * A file already present with the pinned hash is not fetched again.
   * --dest defaults to INTAKE_CLASSIFIER_DIR, else models/<repo>-<revision[:8]> beside the
     package (gitignored: the weights are never committed).
@@ -71,14 +72,21 @@ def fetch(dest: Path) -> list[str]:
         h = hashlib.sha256()
         n = 0
         print(f"fetch   {url}")
+        # I3 review R-3: read at most size + 1 bytes - one more than the pin is enough to know
+        # the file is wrong - so a hostile or broken server cannot fill the disk first
+        limit = size + 1
         with urllib.request.urlopen(url, timeout=60) as resp, part.open("wb") as out:
-            for block in iter(lambda: resp.read(1 << 20), b""):
+            while n < limit:
+                block = resp.read(min(1 << 20, limit - n))
+                if not block:
+                    break
                 h.update(block)
                 out.write(block)
                 n += len(block)
         if n != size or h.hexdigest() != sha:
             part.unlink()
-            bad.append(f"{name}: got {n} bytes sha256 {h.hexdigest()}, pinned {size} bytes {sha}")
+            got = f"more than {size}" if n > size else str(n)
+            bad.append(f"{name}: got {got} bytes sha256 {h.hexdigest()}, pinned {size} bytes {sha}")
             continue
         os.replace(part, final)
         print(f"ok      {name} {size} bytes sha256 {sha}")

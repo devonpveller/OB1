@@ -6,8 +6,9 @@ before it is stored in Open Brain or shown to a model. This directory is fork-ow
 any upstream change that touches them.
 
 Status: **I1, the schema; I2, the deterministic stages as a library; I3, the classifier
-stage.** The second opinion, the service and its container arrive in the later build items I4
-to I9.
+stage; I4, the second opinion, the D2 table, the purge jobs and the stats query (all library
+code, proved against fakes and a throwaway postgres).** The service and its container arrive
+in I5; I6 to I9 follow.
 
 **Callers run `screen()` in a killable worker process with a hard wall-clock limit** (operator
 D38; built in I5). The stages check their own deadline, but a single library call - a stdlib
@@ -66,13 +67,37 @@ yet hash-pinned, see the file). The eval set of DESIGN section 9 is frozen in
 the I2 corpus scores in `tests/fixtures/classifier_corpus_scores.json`; the classifier tests
 need the fetched model and load it with sockets disabled.
 
+## What I4 ships: stage 7, D2, purge, stats
+
+| What | Module | How |
+|---|---|---|
+| D2 table | `d2.py` | `decide(Evidence) -> Decision`: one pure function over (rule, classifier, second opinion, judge saw everything, error kind, expired); the table and its row ids are in the module docstring. A disagreement goes to the less-trusted label; missing evidence never resolves to `clean`. `evidence_from(result, ...)` reads an `IntakeResult` |
+| second opinion | `second_opinion.py` | `Judge(transport).ask(JudgeInput) -> Opinion`: POST `http://llama-cpp:8080/v1/chat/completions` (the LiteLLM alias; a constant, not config) with intake's own virtual key from `INTAKE_SECOND_OPINION_KEY` and the OpenAI `user` field `ob-intake` (the llm-queue class). The flagged chunks sit in ONE per-prompt nonce fence; the reply must be exactly `{"verdict": "injection" or "clean" or "uncertain"}`; every other outcome (documented in the module) is `pending` + retry. `advance()` is the scheduler step: capped exponential backoff, and after the attempt budget or 24 h (D27) the item expires, which D2 makes `suspicious` |
+| judge input | `pipeline.py` | an item waiting for the judge carries `judge_chunks` (flagged classifier chunks and the context of each WEAK rule hit, from the stage-4 copies; caps in `limits.py`) and `judge_complete` |
+| fence | `fence.py` | `<<UNTRUSTED-{12 hex} src=... verdict=...>> ... <<END-{same}>>`; a fresh CSPRNG nonce per call, never one that occurs in the text; runs of angle brackets (and lookalikes) in the text are broken |
+| HTTP | `transport/http_gateway.py` | the only module that opens a socket; it refuses every URL but the alias, follows no redirect, uses no proxy, reads at most 16 KB + 1 |
+| purge | `purge.py` | `purge_clean_bronze` (30 d), `purge_suspicious_bronze` (30 d), `purge_discards` (365 d), `run_all`: pure functions over a DB interface, run as the `intake` role, bounded batches, idempotent; they delete only the rows named in the module docstring |
+| stats | `stats.py` | `collect(db, now, since=None) -> Stats` for `/v1/stats` (shape in the module docstring); `item_scores(result, wait_state)` is the `intake.items.scores` JSON it reads |
+| carry-ins | | the classifier checks the logit count (fails closed); the fetch tool stops at the pinned size + 1; a classifier budget overrun is `error_kind="permanent"` (D2: `suspicious`, no retry); a repeat whose stored result came from another classifier version carries `rescreen=True` |
+
+Configuration: `INTAKE_SECOND_OPINION_KEY` (secret), `_MODEL` (`local-large:nothink`),
+`_QUEUE_USER` (`ob-intake`), `_TIMEOUT_SECONDS` (120), `_MAX_ATTEMPTS` (12),
+`_BACKOFF_BASE_SECONDS` (60), `_BACKOFF_CAP_SECONDS` (3600), `_MAX_TOKENS` (32);
+`INTAKE_SUSPICIOUS_RETENTION_DAYS` (30) beside the I1 retention values. Before I5 goes live
+the gated steps are: create intake's LiteLLM virtual key (metadata.lane `ob-intake`), and give
+llm-queue an `ob-intake` batch class (rank 3, a long acceptable wait, max concurrency 1);
+until then llm-queue files it under its default class.
+
+DB tests for I4 (throwaway container, as for I1):
+`python tests/db/run_i4_db_tests.py --start --image pgvector/pgvector:pg16 --label intake-i4 --roles roles.sql --schema schema.sql`
+
 ## What I1 ships
 
 | File | Role |
 |---|---|
 | `sql/init-intake.sql` | the migration: schema `intake` (bronze `raw_items`; silver `items`, `discards`), `screen_verdict` + `intake_item_id` on `sources`/`thoughts`, the `intake` role, the authority trigger |
 | `sql/revert-intake.sql` | undoes it exactly; refuses while intake holds state unless `-v intake_revert_drop_data=1` |
-| `intake/config.py` | retention values (30 d bronze, 365 d discards, 24 h second-opinion cap), env-overridable; nothing purges yet (I4) |
+| `intake/config.py` | retention values (30 d bronze, 365 d discards, 24 h second-opinion cap), env-overridable; the purge jobs that read them are I4's `purge.py` |
 | `tools/check_fork_owned.py` | the FORK-OWNED guard (`--diff`, `--upstream`, `--range`) |
 | `tests/` | unit tests (config, guard) and `tests/db/run_db_tests.py`, which runs the migration against a throwaway postgres |
 
@@ -138,7 +163,6 @@ once per database: a re-apply after a revert leaves every row `unscreened` unles
 
 ## Not yet (later items)
 
-- I4: the second opinion, purge jobs.
 - I5: the service and its container.
 - I6: read filters and fences.
 - I8: retiring `metadata.injection_screen` and moving the writers.

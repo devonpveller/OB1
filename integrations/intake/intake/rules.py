@@ -142,6 +142,22 @@ def rules() -> tuple[Rule, ...]:
     return load_rules()
 
 
+def locate(rule_id: str, text: str) -> tuple[int, int] | None:
+    """Character offsets (start, end) of the first match of regex rule `rule_id` in `text`, or
+    None (no such regex rule, or no match). One RE2 search: linear. Used by I4 to give the
+    second opinion the context of each WEAK rule hit."""
+    rule = next((r for r in rules() if r.id == rule_id and r.kind == "regex"), None)
+    if rule is None:
+        return None
+    b = text.encode("utf-8", "surrogatepass")
+    m = rule.regex.search(b)
+    if m is None:
+        return None
+    start = len(b[:m.start()].decode("utf-8", "ignore"))
+    end = start + len(b[m.start():m.end()].decode("utf-8", "ignore"))
+    return start, end
+
+
 def _snippet(b: bytes, start: int, end: int) -> str:
     s = b[max(0, start - 30): min(end, start + 120) + 30].decode("utf-8", "replace")
     return " ".join(s.split())[:200]

@@ -15,6 +15,19 @@ opinion) reads it and may only make it stricter:
 The only code path that produces `clean` is pipeline.screen() after stage 6 finishes; the
 constructor below refuses `clean` when the trace holds an error, and refuses `clean` with
 reasons (belt and braces for stage 8: missing evidence never resolves to clean).
+
+I4 adds:
+  error_kind      with an error only: `permanent` when retrying cannot help (the classifier's
+                  time or chunk budget, I3 F-2: D2 sends it to `suspicious`), else `transient`
+                  (retried, then `suspicious` at the 24 h cap).
+  rescreen        a repeat whose stored result was scored by another classifier version (or by
+                  none, before I3) and whose verdict depended on it (I3 F-3, DESIGN section 7
+                  "classifier upgrade"): the stored record stands, the caller re-screens.
+  judge_chunks    for an item waiting for the second opinion: the text the judge reads (the
+                  flagged classifier chunks and the context of each WEAK rule hit, from the
+                  stage-4 copy the classifier and the rules read), capped.
+  judge_complete  whether judge_chunks hold ALL of that evidence; a `clean` from a judge that
+                  saw only part of it never resolves to `clean` (d2.py).
 """
 from __future__ import annotations
 
@@ -23,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 VERDICTS = ("clean", "pending", "injected", "rejected")
+ERROR_KINDS = ("transient", "permanent")
 STRENGTHS = ("strong", "weak", "stage")
 TRACE_STATUSES = ("ok", "stop", "error", "skipped")
 
@@ -107,6 +121,11 @@ class IntakeResult:
     # flagged chunks with offsets); None when the classifier did not run
     classifier_version: str | None = None
     classifier: Mapping[str, object] | None = None
+    # I4
+    error_kind: str | None = None
+    rescreen: bool = False
+    judge_chunks: tuple[Mapping[str, object], ...] = ()
+    judge_complete: bool = False
 
     def __post_init__(self):
         if self.verdict not in VERDICTS:
@@ -128,6 +147,16 @@ class IntakeResult:
                 raise ValueError("a result with reasons cannot be clean")
         if self.verdict in ("injected", "rejected") and (self.text is not None or self.links):
             raise ValueError(f"an {self.verdict} result carries no text and no links")
+        if self.error_kind is not None:
+            if self.error_kind not in ERROR_KINDS:
+                raise ValueError(f"unknown error kind {self.error_kind!r}")
+            if self.error is None:
+                raise ValueError("an error kind needs an error")
+        object.__setattr__(self, "judge_chunks",
+                           tuple(types.MappingProxyType(dict(x)) for x in self.judge_chunks))
+        if (self.judge_chunks or self.judge_complete) and not (
+                self.verdict == "pending" and self.needs_second_opinion):
+            raise ValueError("judge chunks belong to an item waiting for the second opinion")
 
     def to_dict(self) -> dict:
         return {
@@ -148,4 +177,8 @@ class IntakeResult:
             "classifier_version": self.classifier_version,
             "classifier": (None if self.classifier is None else
                            {**self.classifier, "flagged": [dict(x) for x in self.classifier["flagged"]]}),
+            "error_kind": self.error_kind,
+            "rescreen": self.rescreen,
+            "judge_chunks": [dict(x) for x in self.judge_chunks],
+            "judge_complete": self.judge_complete,
         }
