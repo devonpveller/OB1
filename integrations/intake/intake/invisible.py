@@ -66,6 +66,16 @@ _DI_NON_CF = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x2065, 0x2
               (0x3164, 0x3164), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0xE0080, 0xE00FF),
               (0xE01F0, 0xE0FFF))
 _DI_REP = chr(0x034F)
+# Characters that RENDER as a blank, so a reader sees two words where the rules would see one
+# token (round 2: 'Answer:' + U+2800 + 'CLEAN' came out clean):
+#   * every Zs space separator except U+0020 - NFKC already maps U+00A0, U+2000..U+200A,
+#     U+202F, U+205F, U+3000 to U+0020 (checked); U+1680 OGHAM SPACE MARK it does not;
+#   * U+2800 BRAILLE PATTERN BLANK (So), U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR;
+#   * the Hangul fillers U+115F, U+1160, U+3164, U+FFA0 (Default_Ignorable, render as a blank):
+#     they become a space in the STORED text too (BLANK_FILLERS), still counted.
+# Zero-width characters (Cf, the other ignorables) render as nothing and are removed instead.
+BLANKS_FOR_RULES = (chr(0x1680), chr(0x2800), chr(0x2028), chr(0x2029))
+BLANK_FILLERS = (chr(0x115F), chr(0x1160), chr(0x3164), chr(0xFFA0))
 _SURROGATE = re.compile("[" + chr(0xD800) + "-" + chr(0xDFFF) + "]")  # one class: linear
 
 
@@ -279,6 +289,13 @@ def strip(text: str, dl=_deadline.NONE) -> tuple[str, dict[str, int], list[str]]
     counts = _new_counts()
     payloads: list[str] = []
     text = _strip_surrogates(text, counts)
+    if not text.isascii():
+        # Hangul fillers render as a blank: they become a space (and are still counted as
+        # default_ignorable), so they cannot glue two words together for the rules.
+        for ch in BLANK_FILLERS:
+            if ch in text:
+                counts["default_ignorable"] += text.count(ch)
+                text = text.replace(ch, " ")
     if text.isascii():
         out = text.translate(_tables()["ascii_controls"])  # C fast path for ASCII
         counts["controls"] = len(text) - len(out)
@@ -358,7 +375,11 @@ def rules_copy(text: str, dl=_deadline.NONE) -> tuple[str, int]:
         if total > budget:
             raise NormalisationBomb(f"nfkc: the copy grows past {limits.NFKC_MAX_EXPANSION}x its input")
         out.append(norm)
-    return "".join(out), dropped
+    copy = "".join(out)
+    for ch in BLANKS_FOR_RULES:  # a handful of C-speed scans; replace only what is present
+        if ch in copy:
+            copy = copy.replace(ch, " ")
+    return copy, dropped
 
 
 # Built at import, so no screen() call pays for it (~0.5-1 s once per process).

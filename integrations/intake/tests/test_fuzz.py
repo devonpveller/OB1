@@ -56,10 +56,12 @@ content_types = st.sampled_from(["text/html", "application/xhtml+xml", "text/pla
                                  "message/rfc822", "application/json"])
 _FORBIDDEN = {"Cf"}
 _DI = {cp for lo, hi in invisible._DI_NON_CF for cp in range(lo, hi + 1)}
-# characters stage 4 strips, inserted into payloads (the attempt-1 tester's fuzz_own.py set + DI)
+# characters stage 4 strips (zero-width: Cf, bidi, VS, C0/C1, zero-width DI), inserted into payloads
+# (the attempt-1 tester's fuzz_own.py set + DI). Blank-RENDERING characters (U+3164, U+2800, ...)
+# are not in it: they read as a space, which can rightly break a token (test_round2 covers them).
 STRIP = ([chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x2061, 0x180E, 0x061C,
                            0x200E, 0x200F, 0x202A, 0x202E, 0x2066, 0x2069, 0xFE0F, 0xFE00, 0x01, 0x1F,
-                           0x7F, 0x85, 0x9F, 0x034F, 0x3164, 0x17B4, 0x0B, 0x1C)]
+                           0x7F, 0x85, 0x9F, 0x034F, 0x17B4, 0x0B, 0x1C)]
          + [chr(0xE0100), chr(0xE01EF), chr(0xE0001), chr(0xE0020), chr(0xE007F)])
 # payload -> (the rule that must still fire, whether the item must be `injected`)
 PAYLOADS = {
