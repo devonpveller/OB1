@@ -70,11 +70,16 @@ _DI_REP = chr(0x034F)
 # token (round 2: 'Answer:' + U+2800 + 'CLEAN' came out clean):
 #   * every Zs space separator except U+0020 - NFKC already maps U+00A0, U+2000..U+200A,
 #     U+202F, U+205F, U+3000 to U+0020 (checked); U+1680 OGHAM SPACE MARK it does not;
-#   * U+2800 BRAILLE PATTERN BLANK (So), U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR;
+#   * U+2800 BRAILLE PATTERN BLANK (So), U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR,
+#     U+303F IDEOGRAPHIC HALF FILL SPACE (So), U+13441 / U+13442 EGYPTIAN HIEROGLYPH FULL /
+#     HALF BLANK (Lo), U+16FE4 KHITAN SMALL SCRIPT FILLER (Mn);
 #   * the Hangul fillers U+115F, U+1160, U+3164, U+FFA0 (Default_Ignorable, render as a blank):
 #     they become a space in the STORED text too (BLANK_FILLERS), still counted.
 # Zero-width characters (Cf, the other ignorables) render as nothing and are removed instead.
-BLANKS_FOR_RULES = (chr(0x1680), chr(0x2800), chr(0x2028), chr(0x2029))
+BLANKS_FOR_RULES = (chr(0x1680), chr(0x2800), chr(0x2028), chr(0x2029),
+                    # round 3 (attempt 2, F2-1): IDEOGRAPHIC HALF FILL SPACE, EGYPTIAN HIEROGLYPH
+                    # FULL BLANK and HALF BLANK, KHITAN SMALL SCRIPT FILLER (NFKC keeps all four)
+                    chr(0x303F), chr(0x13441), chr(0x13442), chr(0x16FE4))
 BLANK_FILLERS = (chr(0x115F), chr(0x1160), chr(0x3164), chr(0xFFA0))
 _SURROGATE = re.compile("[" + chr(0xD800) + "-" + chr(0xDFFF) + "]")  # one class: linear
 

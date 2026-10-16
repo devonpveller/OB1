@@ -45,9 +45,11 @@ TITLE_MAX_CHARS = 300
 MIME_MAX_MULTIPART = 32  # multipart containers per message (bounds the parser's boundary stack)
 MIME_MAX_PARTS = 256
 MIME_MAX_HEADER_CHARS = 2000  # subject / filename read at most this long
-# The stdlib parser costs ~0.5 us per line; a 5 MB message of ordinary (<= 78 char) lines has
-# ~70,000. More than this is a parser bomb (attempt 1: 5 MB of QP soft breaks took 1 s).
-MIME_MAX_LINES = 300_000
+# Lines as the stdlib parser splits them (CR, LF or CRLF; round 3). The parser and the header
+# pass cost ~4 us per header line under load; a 5 MB message of ordinary (<= 78 char) lines has
+# ~70,000. More than this is a parser bomb (attempt 1: 5 MB of QP soft breaks took 1 s;
+# attempt 2: 1.75 M CR-only lines took 2.4 s; round 3: 300,000 header lines took 1.25 s).
+MIME_MAX_LINES = 150_000
 
 # Stage 4: runs of non-starters (combining class != 0) longer than this are trimmed in the
 # copy the rules read (Unicode UAX #15 stream-safe format), so NFKC reordering stays linear.

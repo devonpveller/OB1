@@ -24,6 +24,7 @@ import time
 import unittest
 
 from tests import adversarial as adv
+from tests import adversarial_r3
 from tests import support
 from tests.support import envelope, tag
 
@@ -293,6 +294,28 @@ class TimeBounds(unittest.TestCase):
                     dt = time.perf_counter() - t0
                     self.assertLess(dt, 0.25, f"{rule.id} on {rid}'s input: {dt:.3f}s")
         self.assertFalse([ln for ln in log if "DFA out of memory" in ln])
+
+    def test_round3_json_escape_floods(self):
+        # attempt 2 FAIL-A (1): every JSON escape kind as a 5 MB flood, alone and in keys/values
+        for name, raw in adversarial_r3.json_escape_floods():
+            with self.subTest(case=name):
+                self._check(name, raw, "application/json")
+
+    def test_round3_email_line_endings(self):
+        # attempt 2 FAIL-A (2): CR-only, LF-only, CRLF and mixed line endings, at the line cap
+        # and as 5 MB floods
+        for name, raw in adversarial_r3.email_line_shapes():
+            with self.subTest(case=name):
+                self._check(name, raw, "message/rfc822")
+
+    def test_round3_json_and_email_sweep(self):
+        # round 3 (3): every other single JSON / email step the sweep looked at
+        for name, raw in adversarial_r3.json_other():
+            with self.subTest(case=name):
+                self._check(name, raw, "application/json")
+        for name, raw in adversarial_r3.email_other():
+            with self.subTest(case=name):
+                self._check(name, raw, "message/rfc822")
 
     def test_huge_single_tags(self):
         for name, raw in adv.huge_tags().items():

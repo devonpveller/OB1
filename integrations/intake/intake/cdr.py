@@ -84,35 +84,29 @@ def _json(data: bytes, charset: str | None) -> Extract:
     string (key or value) appears with its JSON escapes decoded (so an escape sequence cannot
     hide a letter from the rules), in one C-speed pass (operator D34: no truncation; the
     attempt-1 Python walk needed a node cap to stay fast). The encoder still escapes control
-    characters and quotes; the control escapes are turned back into the characters, so stage 4
-    strips and counts them like any other (round 2: '!\\u0001[' would otherwise hide a rule
-    match behind six visible characters)."""
+    characters, quotes and backslashes; those escapes are decoded too, so stage 4 strips and
+    counts the controls like any other (round 2: '!' + an escaped U+0001 + '[' would otherwise
+    hide a rule match behind six visible characters). Round 3: that decoding is NATIVE - the
+    text is re-encoded with every non-ASCII character as a backslash escape and decoded once
+    with the C 'unicode_escape' codec - not a Python callback per escape (attempt 2: 5 MB of
+    escapes was 1.3-2.6 M callbacks, 2.3 s in one call)."""
     raw = decode_bytes(data, charset)
     try:
         doc = json.loads(raw)
         # with no backslash in the source, every string already reads as written: keep it
-        text = raw if "\\" not in raw else json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
+        if "\\" not in raw:
+            return Extract(text=raw)
+        text = json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
     except RecursionError:
         raise ParserBomb("json: nesting too deep") from None
     except ValueError as e:
         raise ContentInvalid(f"json: {e}") from None
     if "\\" in text:
-        text = _JSON_ESCAPE.sub(_json_unescape, text)
+        # dumps leaves only valid escapes (backslash, quote, b f n r t, u00XX for controls);
+        # 'backslashreplace' turns every other non-ASCII character into an escape the codec
+        # decodes back, so the round trip is exact. Two C passes, linear in the text.
+        text = text.encode("ascii", "backslashreplace").decode("unicode_escape")
     return Extract(text=text)
-
-
-# Python `re`, linear by form: a literal backslash, then alternatives decided by the next
-# character; an escaped backslash is consumed whole, so '\\\\u0001' stays text.
-_JSON_ESCAPE = re.compile(r"\\(?:u00([0-1][0-9a-fA-F]|7[fF])|([bfnrt])|(\\))")
-_JSON_SIMPLE = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
-
-
-def _json_unescape(m) -> str:
-    if m.group(1) is not None:
-        return chr(int(m.group(1), 16))
-    if m.group(2) is not None:
-        return _JSON_SIMPLE[m.group(2)]
-    return m.group(0)
 
 
 def _header_params(value: str) -> tuple[str, dict[str, str]]:
@@ -128,18 +122,35 @@ def _header_params(value: str) -> tuple[str, dict[str, str]]:
     return main, params
 
 
-def _raw_header(part, name: str) -> str | None:
-    """The first header `name`, as the bytes the sender wrote, read as UTF-8 (RFC 6532).
-    compat32's get() would turn 8-bit header bytes into U+FFFD."""
+_WANTED_HEADERS = ("subject", "content-type", "content-disposition", "content-transfer-encoding")
+# Transfer encodings decoded by C code in the stdlib (binascii base64 / quoted-printable) or not
+# encoded at all. Anything else (x-uuencode decodes in a Python loop per line: ~9 us a line)
+# is not decoded: the part's text is not read, and it is listed like an attachment.
+_DECODED_CTE = ("", "7bit", "8bit", "binary", "base64", "quoted-printable")
+
+
+def _raw_headers(part) -> dict[str, str]:
+    """The first of each wanted header, as the bytes the sender wrote, read as UTF-8 (RFC
+    6532), in ONE pass over the part's headers (round 3 sweep: one pass per header name was a
+    pass per name over up to MIME_MAX_LINES headers). compat32's get() would turn 8-bit header
+    bytes into U+FFFD."""
+    found: dict[str, str] = {}
     for k, v in part.raw_items():
-        if k.lower() == name:
+        k = k.lower()
+        if k in _WANTED_HEADERS and k not in found:
             v = v[: limits.MIME_MAX_HEADER_CHARS]
-            return v.encode("ascii", "surrogateescape").decode("utf-8", "replace")
-    return None
+            found[k] = v.encode("ascii", "surrogateescape").decode("utf-8", "replace")
+            if len(found) == len(_WANTED_HEADERS):
+                break
+    return found
 
 
-def _subject(msg) -> str | None:
-    raw = _raw_header(msg, "subject")
+def _raw_header(part, name: str) -> str | None:
+    return _raw_headers(part).get(name)
+
+
+def _subject(headers: dict[str, str]) -> str | None:
+    raw = headers.get("subject")
     if raw is None:
         return None
     raw = str(raw)[: limits.MIME_MAX_HEADER_CHARS]
@@ -150,7 +161,10 @@ def _subject(msg) -> str | None:
 
 
 def _email(data: bytes, dl=_deadline.NONE) -> Extract:
-    if data.count(b"\n") > limits.MIME_MAX_LINES:
+    # The stdlib parser splits lines on CR, LF and CRLF alike (attempt 2: 1.75 M CR-only lines
+    # passed an LF-only count and took 2.4 s in one call). Count every break it splits on.
+    lines = data.count(b"\n") + data.count(b"\r") - data.count(b"\r\n")
+    if lines > limits.MIME_MAX_LINES:
         raise ParserBomb(f"email: more than {limits.MIME_MAX_LINES} lines")
     if data.lower().count(b"boundary") > limits.MIME_MAX_MULTIPART:
         raise ParserBomb(f"email: more than {limits.MIME_MAX_MULTIPART} multipart containers")
@@ -163,6 +177,7 @@ def _email(data: bytes, dl=_deadline.NONE) -> Extract:
             raise ParserBomb(f"email: more than {limits.MIME_MAX_PARTS} MIME parts")
     msg = email.message_from_bytes(data, policy=email.policy.compat32)
     plain = html = None
+    top_headers: dict[str, str] = {}
     attachments: list[dict] = []
     stack = [msg]
     parts = 0
@@ -171,8 +186,12 @@ def _email(data: bytes, dl=_deadline.NONE) -> Extract:
         parts += 1
         if parts > limits.MIME_MAX_PARTS:
             raise ParserBomb(f"email: more than {limits.MIME_MAX_PARTS} MIME parts")
-        ctype, cparams = _header_params(_raw_header(part, "content-type") or "text/plain")
-        disp, dparams = _header_params(_raw_header(part, "content-disposition") or "")
+        hdrs = _raw_headers(part)
+        if part is msg:
+            top_headers = hdrs
+        ctype, cparams = _header_params(hdrs.get("content-type") or "text/plain")
+        disp, dparams = _header_params(hdrs.get("content-disposition") or "")
+        cte = (hdrs.get("content-transfer-encoding") or "").strip().lower()
         filename = dparams.get("filename") or cparams.get("name")
         if ctype.startswith("multipart/") and part.is_multipart():
             stack.extend(reversed(part.get_payload()))
@@ -180,9 +199,11 @@ def _email(data: bytes, dl=_deadline.NONE) -> Extract:
         payload = part.get_payload()
         size = len(payload) if isinstance(payload, (str, bytes)) else 0
         if disp == "attachment" or filename or ctype == "message/rfc822" \
-                or not ctype.startswith("text/"):
-            attachments.append({"filename": (filename or "")[:255], "content_type": ctype[:100],
-                                "size_bytes": size})
+                or not ctype.startswith("text/") or cte not in _DECODED_CTE:
+            att = {"filename": (filename or "")[:255], "content_type": ctype[:100], "size_bytes": size}
+            if cte not in _DECODED_CTE:
+                att["transfer_encoding"] = cte[:40]  # not decoded, not read
+            attachments.append(att)
             continue
         if ctype == "text/plain" and plain is None:
             plain = (part, cparams.get("charset"))
@@ -190,7 +211,7 @@ def _email(data: bytes, dl=_deadline.NONE) -> Extract:
             html = (part, cparams.get("charset"))
         else:
             attachments.append({"filename": "", "content_type": ctype[:100], "size_bytes": size})
-    out = Extract(text="", title=_subject(msg), attachments=attachments)
+    out = Extract(text="", title=_subject(top_headers), attachments=attachments)
     chosen = plain
     if plain is not None:
         body = plain[0].get_payload(decode=True) or b""
