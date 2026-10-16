@@ -230,11 +230,19 @@ def _email(data: bytes, dl=_deadline.NONE) -> Extract:
 
 def extract(kind: str, data: bytes, charset: str | None, dl=_deadline.NONE) -> Extract:
     if kind == "html":
-        return _html(data, charset, dl)
-    if kind == "rfc822":
-        return _email(data, dl)
-    if kind == "json":
-        return _json(data, charset)
-    if kind in ("plain", "markdown"):
-        return Extract(text=decode_bytes(data, charset))
-    raise ValueError(f"no extractor for {kind!r}")
+        ex = _html(data, charset, dl)
+    elif kind == "rfc822":
+        ex = _email(data, dl)
+    elif kind == "json":
+        ex = _json(data, charset)
+    elif kind in ("plain", "markdown"):
+        ex = Extract(text=decode_bytes(data, charset))
+    else:
+        raise ValueError(f"no extractor for {kind!r}")
+    # A single-byte charset (latin-1, cp125x, koi8 ...) turns each byte >= 0x80 into a 2-byte
+    # UTF-8 character, so 5 MB of raw can become ~10 MB of text (round 3 sweep). The extracted
+    # text keeps the raw cap; past it the item is a parser bomb, not truncated.
+    if len(ex.text) * 4 > limits.RAW_MAX_BYTES and \
+            len(ex.text.encode("utf-8", "surrogatepass")) > limits.RAW_MAX_BYTES:
+        raise ParserBomb(f"{kind}: the decoded text is over {limits.RAW_MAX_BYTES} bytes")
+    return ex

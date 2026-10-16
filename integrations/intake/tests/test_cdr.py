@@ -205,6 +205,16 @@ class Email(unittest.TestCase):
                 self.assertEqual((r.verdict, r.title), ("clean", "hi"))
                 self.assertIn("line one", r.text)
 
+    def test_decoded_text_keeps_the_raw_cap(self):
+        # round 3 sweep: a single-byte charset doubles high bytes in UTF-8
+        body = base64.b64encode(b"\xe9" * (limits.RAW_MAX_BYTES - 200)).decode()
+        r = pipeline.screen(envelope(body, "text/plain; charset=latin-1", raw_encoding="base64"))
+        self.assertEqual(r.verdict, "rejected")
+        self.assertIn("decoded text", r.reasons[-1].detail)
+        r = pipeline.screen(envelope(base64.b64encode(b"caf\xe9").decode(), "text/plain; charset=latin-1",
+                                     raw_encoding="base64"))
+        self.assertEqual(r.text, "caf\u00e9")
+
     def test_uuencoded_parts_are_listed_not_decoded(self):
         raw = ("Content-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\n"
                "visible\r\n--B\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n"
