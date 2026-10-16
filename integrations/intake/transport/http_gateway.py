@@ -9,11 +9,15 @@ proxy is consulted (http.client, not urllib), redirects are not followed (a 3xx 
 status), and the reply is read to at most MAX_REPLY_BYTES + 1 bytes. Standard library only.
 It logs nothing; the caller (second_opinion.Judge) logs outcomes, never headers.
 
-THE WHOLE REQUEST HAS ONE DEADLINE (attempt 1 T-F4): req.timeout seconds from the start, not
-per socket operation. The body is read in pieces with the socket timeout set to what is left
-of the deadline, and a watchdog timer shuts the socket down at the deadline, which also ends a
-stall inside the connect, the request or the header read. A gateway that drips bytes gets
-`timeout` at the deadline. I5's killable worker remains the outer bound (operator D38).
+THE RESPONSE HAS ONE DEADLINE (attempt 1 T-F4): req.timeout seconds from the start, not per
+socket operation. Once the socket is connected, a watchdog timer shuts it down at the deadline
+(ending a stall while sending the request or reading the headers), and the body is read in
+pieces with the socket timeout set to what is left. A gateway that drips bytes gets `timeout`
+at the deadline. THE CONNECT IS NOT COVERED by the watchdog (attempt 2 T2-F1): until
+create_connection returns there is no socket to shut down, so a slow name lookup or connect is
+bounded only by the per-attempt socket timeout (req.timeout for EACH resolved address) and by
+I5's killable worker, which remains the outer bound (operator D38). The outcome is still
+`timeout`, never a verdict.
 """
 from __future__ import annotations
 

@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import d2, fence, limits
-from .config import Retention, SecondOpinionConfig, second_opinion_config
+from .config import Retention, SecondOpinionConfig, d2_policy, second_opinion_config
 from .result import IntakeResult
 
 log = logging.getLogger(__name__)
@@ -392,8 +392,13 @@ def advance(judge: Judge, ji: JudgeInput, state: WaitState, *, now: float, max_w
 
 
 def decision(result: IntakeResult, step: Step | None, ji: JudgeInput | None = None,
-             policy: d2.Policy = d2.DEFAULT_POLICY) -> d2.Decision:
-    """D2 for an item and its latest second-opinion step (None: not asked yet)."""
+             policy: d2.Policy | None = None, env=None) -> d2.Decision:
+    """D2 for an item and its latest second-opinion step (None: not asked yet). The D40 policy
+    comes from config (INTAKE_D2_WEAK_RULE_JUDGE_CLEAN via config.d2_policy, read from `env` or
+    the process environment) unless one is passed (attempt 2 T2-F2: the switch must not be
+    inert). A bad config value raises (refused, never defaulted)."""
+    if policy is None:
+        policy = d2_policy(env)
     if step is None or step.kind in ("wait", "retry"):
         return d2.decide(d2.evidence_from(result, opinion="awaiting" if step else "not_asked"), policy)
     if step.kind == "expired":

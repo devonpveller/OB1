@@ -22,7 +22,9 @@ What each rule deletes - and NOTHING else (the policy names exactly these rows):
 unscreened or rejected item, or a mix of verdicts, is not named and stays. Age is the raw row's
 created_at; the cutoff is strict (exactly 30 days old stays).
 
-THE CUTOFF IS ABSOLUTE TIME (intake-i4 attempt 1, D-1). It is the DATABASE's now() minus
+THE CUTOFF IS ABSOLUTE TIME (intake-i4 attempt 1, D-1), AND NEVER LATER THAN THE DATABASE CLOCK
+ALLOWS (attempt 2 T2-F4): the SQL takes LEAST(caller cutoff, now() - N x 24 h), so a caller `now`
+in the future cannot delete young rows; it is clamped to the database clock. It is the DATABASE's now() minus
 N x 24 HOURS - make_interval(hours => ...), never "N days", because both Python's aware-datetime
 subtraction and postgres's timestamptz - 'N days' count calendar days in a zone, and across a
 DST change that is N days +- 1 hour (a row 29 d 23 h old was deleted in the tester's repro).
@@ -75,7 +77,7 @@ def _bronze_sql(verdict: str) -> str:
     return f"""DELETE FROM intake.raw_items AS r
  WHERE r.id IN (
    SELECT b.id FROM intake.raw_items AS b
-    WHERE b.created_at < COALESCE(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))
+    WHERE b.created_at < LEAST(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))
       AND EXISTS (SELECT 1 FROM intake.items AS i
                    WHERE (i.raw_item_id = b.id
                           OR (i.source, i.external_id, i.raw_sha256) = (b.source, b.external_id, b.raw_sha256))
@@ -95,7 +97,7 @@ SQL_SUSPICIOUS_BRONZE = _bronze_sql("suspicious")
 SQL_DISCARDS = """DELETE FROM intake.discards AS d
  WHERE d.id IN (
    SELECT x.id FROM intake.discards AS x
-    WHERE x.created_at < COALESCE(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))
+    WHERE x.created_at < LEAST(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))
     ORDER BY x.created_at, x.id
     LIMIT %(batch)s
     FOR UPDATE OF x SKIP LOCKED)

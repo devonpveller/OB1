@@ -260,13 +260,20 @@ def _time_fixture(db, tag: str, created: dict) -> None:
         raise RuntimeError(err)
 
 
+DST_ZONES = ("Australia/Sydney", "Pacific/Auckland", "Australia/Lord_Howe", "America/New_York", "Europe/Berlin",
+             "America/Santiago", "America/Asuncion", "Pacific/Chatham")
+
+
 def time_sections(db, r) -> None:
-    """D-1 (attempt 1): the cutoff is absolute time. TZ: a DST-zone `now` (spring and autumn);
-    N: no `now` at all - the database's now() - with the session in a DST zone."""
-    for label, now in (("spring", dt.datetime(2027, 4, 5, 12, 0, tzinfo=Eastern())),
-                       ("autumn", dt.datetime(2027, 11, 20, 12, 0, tzinfo=Eastern())),
+    """D-1 (attempt 1): the cutoff is absolute time. TZ: a DST-zone caller `now` (spring,
+    autumn, a 365-day window crossing a change; all in the past, see F); N: no `now` - the
+    database's now() - with the session in a zone whose DST changed inside the 30-day window AT
+    THE DATABASE CLOCK (attempt 2 T2-F3: picked at run time and checked non-vacuous); F: a caller
+    `now` in the future is clamped to the database clock (attempt 2 T2-F4)."""
+    for label, now in (("spring", dt.datetime(2026, 4, 5, 12, 0, tzinfo=Eastern())),
+                       ("autumn", dt.datetime(2025, 11, 20, 12, 0, tzinfo=Eastern())),
                        # EST now, EDT one year earlier: the 365-day window crosses a change too
-                       ("yearly", dt.datetime(2027, 3, 10, 12, 0, tzinfo=Eastern()))):
+                       ("yearly", dt.datetime(2026, 3, 10, 12, 0, tzinfo=Eastern()))):
         u = now.astimezone(dt.timezone.utc)
         ages = {}
         for days, prefix in ((30, "b"), (365, "x")):
@@ -281,22 +288,44 @@ def time_sections(db, r) -> None:
               "goes (clean and suspicious)", sorted(raw))
         check(disc == {f"{label}-d-xyoung", f"{label}-d-byoung", f"{label}-d-bold"},
               f"TZ {label} DST now: discards 364 d 23 h 30 min old stay, 365 d 0 h 30 min old go", sorted(disc))
-    # N: the database's now(), the session in a DST zone
-    ages = {"byoung": "now() - make_interval(hours => 30 * 24 - 1)",
-            "bold": "now() - make_interval(hours => 30 * 24 + 1)",
-            "xyoung": "now() - make_interval(hours => 365 * 24 - 1)",
-            "xold": "now() - make_interval(hours => 365 * 24 + 1)"}
+    # N: the database clock, the session in a zone where calendar days != 24 h in the window
+    zone, diff = None, 0
+    for z in DST_ZONES:
+        rc, out, err = db.run(f"SET TimeZone = {lit(z)}; SELECT extract(epoch FROM (now() - interval '30 days') - "
+                              "(now() - make_interval(hours => 720)))::int;")
+        vals = [x for x in out.splitlines() if x.strip()]
+        if rc == 0 and vals and int(vals[-1]) != 0:
+            zone, diff = z, int(vals[-1])
+            break
+    check(zone is not None, f"N non-vacuous: zone {zone} has a DST change in the last 30 days at the database "
+          f"clock (calendar days - 720 h = {diff} s)", "no candidate zone changed DST in the window")
+    zone = zone or "Australia/Sydney"
+    ages = {"byoung": "now() - make_interval(mins => 30 * 24 * 60 - 10)",
+            "bold": "now() - make_interval(mins => 30 * 24 * 60 + 10)",
+            "xyoung": "now() - make_interval(mins => 365 * 24 * 60 - 10)",
+            "xold": "now() - make_interval(mins => 365 * 24 * 60 + 10)"}
     _time_fixture(db, "dbnow", ages)
-    ad = PsqlAdapter(db, pre="SET TimeZone = 'America/New_York';\n")
+    ad = PsqlAdapter(db, pre=f"SET TimeZone = {lit(zone)};\n")
     reps = purge.run_all(ad, retention=r)
     raw = names(db, "intake.raw_items")
     disc = names(db, "intake.discards")
     check(raw == {"dbnow-c-byoung", "dbnow-s-byoung"}
           and disc == {"dbnow-d-xyoung", "dbnow-d-byoung", "dbnow-d-bold"},
-          "N no `now` given: the database's now() minus N x 24 h decides, session TimeZone America/New_York",
+          f"N no `now` given: the database's now() minus N x 24 h decides to 10 min, session TimeZone {zone}",
           f"{sorted(raw)} {sorted(disc)} {[x.to_dict() for x in reps]}")
     check(all(x.cutoff.startswith("database now() - ") for x in reps), "N the report names the database clock",
           [x.cutoff for x in reps])
+    # F: a future caller `now` is clamped to the database clock
+    ages = {"young": "now() - interval '1 day'", "bold": "now() - make_interval(hours => 31 * 24)",
+            "xold": "now() - make_interval(hours => 366 * 24)"}
+    _time_fixture(db, "future", ages)
+    future = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
+    purge.run_all(PsqlAdapter(db), future, retention=r)
+    raw = names(db, "intake.raw_items")
+    disc = names(db, "intake.discards")
+    check(raw == {"future-c-young", "future-s-young"} and disc == {"future-d-young", "future-d-bold"},
+          "F a caller `now` in the future (2030-01-01) is clamped to the database clock: 1-day-old rows stay, "
+          "31 d / 366 d old rows go", f"{sorted(raw)} {sorted(disc)}")
 
 
 def main():

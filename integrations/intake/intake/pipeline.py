@@ -349,9 +349,12 @@ def _decide(st: dict) -> IntakeResult:
 
 def _judge_chunks(st: dict, scored, reasons) -> tuple[tuple[dict, ...], bool]:
     """Stage 7's input (I4): the flagged classifier chunks (highest score first) and the
-    context of each WEAK rule hit, cut from the texts the classifier and the rules read (the
-    stage-4 NFKC copies). Returns (chunks, complete); complete is False when anything was cut,
-    left out or could not be located."""
+    context of EVERY match of each WEAK rule in every field (attempt 2 D-2: a decoy first match
+    must not hide the payload), cut from the texts the classifier and the rules read (the
+    stage-4 NFKC copies), fields searched in rules.FIELD_ORDER. Match windows in one field that
+    overlap are merged while the result fits one piece. Returns (chunks, complete); complete is
+    False when anything was cut, left out, more matches existed than fit, or a rule hit could
+    not be located - and D2 never ends `clean` on an incomplete input."""
     fields = {"body": st["copy"], "side": st["side_copy"], "payload": "\n".join(st["payloads"])}
     pieces: list[dict] = []
     complete = scored.flagged_count == len(scored.flagged)
@@ -363,24 +366,36 @@ def _judge_chunks(st: dict, scored, reasons) -> tuple[tuple[dict, ...], bool]:
         pieces.append({"why": "classifier", "field": c.field, "start": c.start, "end": c.end,
                        "text": text})
     seen: set[str] = set()
+    windows: dict[str, list[tuple[int, int, str]]] = {name: [] for name in rules.FIELD_ORDER}
+    cap = limits.JUDGE_MAX_CHUNKS
     for r in reasons:
         if r.strength != "weak" or r.rule in seen:
             continue
         seen.add(r.rule)
-        hit = None
-        for name in ("body", "side", "payload"):
-            span = rules.locate(r.rule, fields[name])
-            if span is not None:
-                hit = (name, span)
-                break
-        if hit is None:  # e.g. tag-chars: nothing in the text to show the judge
+        found = False
+        for name in rules.FIELD_ORDER:
+            hits = rules.spans(r.rule, fields[name], cap)
+            if len(hits) > cap:  # more matches than could ever be shown
+                complete = False
+                hits = hits[:cap]
+            for a, b in hits:
+                found = True
+                windows[name].append((max(0, a - limits.JUDGE_CONTEXT_CHARS),
+                                      min(len(fields[name]), b + limits.JUDGE_CONTEXT_CHARS), r.rule))
+        if not found:  # e.g. tag-chars: nothing in the text to show the judge
             complete = False
-            continue
-        name, (a, b) = hit
-        a = max(0, a - limits.JUDGE_CONTEXT_CHARS)
-        b = min(len(fields[name]), b + limits.JUDGE_CONTEXT_CHARS)
-        pieces.append({"why": "rule:" + r.rule, "field": name, "start": a, "end": b,
-                       "text": fields[name][a:b]})
+    for name in rules.FIELD_ORDER:
+        merged: list[list] = []
+        for a, b, rule in sorted(windows[name]):
+            if merged and a <= merged[-1][1] and max(b, merged[-1][1]) - merged[-1][0] <= limits.JUDGE_CHUNK_MAX_CHARS:
+                merged[-1][1] = max(b, merged[-1][1])
+                if rule not in merged[-1][2]:
+                    merged[-1][2].append(rule)
+            else:
+                merged.append([a, b, [rule]])
+        for a, b, rule_ids in merged:
+            pieces.append({"why": "rule:" + "+".join(rule_ids), "field": name, "start": a, "end": b,
+                           "text": fields[name][a:b]})
     out: list[dict] = []
     total = 0
     for p in pieces:

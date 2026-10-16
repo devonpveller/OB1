@@ -102,7 +102,7 @@ class Purge(unittest.TestCase):
                 self.assertNotRegex(sql, r"(?i)\bUPDATE\s+[a-z_.]+\s+SET\b|\b(INSERT|TRUNCATE|DROP|ALTER)\b")
                 self.assertNotRegex(sql, r"(?i)\bpublic\.")
                 self.assertRegex(sql, r"LIMIT %\(batch\)s")
-                self.assertIn("< COALESCE(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))", sql)
+                self.assertIn("< LEAST(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))", sql)
                 self.assertNotRegex(sql, r"(?i)interval\s*'[0-9]+\s*days?'")
         self.assertIn("'clean'", purge.SQL_CLEAN_BRONZE)
         self.assertNotIn("'suspicious'", purge.SQL_CLEAN_BRONZE)
