@@ -83,14 +83,15 @@ _ATTR = re.compile(
     rb"([^\t\n\f\r />=]+|=[^\t\n\f\r />=]*)"
     rb"(?:[\t\n\f\r ]*=[\t\n\f\r ]*(\"[^\"]*\"?|'[^']*'?|[^\t\n\f\r >]*))?")
 # A numeric character reference small enough to be a control character (decided by length).
-_SMALL_NUMREF = re.compile(rb"&#(?:[xX]0*([0-9a-fA-F]{1,2})|0*([0-9]{1,3}));?")
+# The lookahead ends the digits there: without it '&#x1F600;' matched as '&#x1F' (a control)
+# followed by '600;' (I2 attempt-3 finding F3-2). A one-character lookahead; still linear.
+_SMALL_NUMREF = re.compile(rb"&#(?:[xX]0*([0-9a-fA-F]{1,2})(?![0-9a-fA-F])|0*([0-9]{1,3})(?![0-9]));?")
 
 # RE2, no capture groups (DFA only): the body of a tag that contains a quote, up to (not
 # including) its closing '>'. HTML5: a quote opens a value only after '='; an unterminated
 # value runs to the end of input.
 _TAG_BODY = _re2_latin1(
     rb"(?:[^>\"'=]|=[\t\n\f\r ]*(?:\"[^\"]*(?:\"|\z)|'[^']*(?:'|\z))?|[\"'])*")
-_SCRIPT_SCAN = _re2_latin1(rb"(?i)(<!--)|(-->)|(<script[\t\n\f\r />])|(</script[\t\n\f\r />])")
 
 _VOID = frozenset(
     "area base basefont bgsound br col embed frame hr img input keygen link meta param source "
@@ -149,14 +150,6 @@ _SPECIAL = (_VOID | _RAWTEXT | _P_CLOSERS | _HEADINGS | _DROP
                "applet"})
 
 
-class _Plain:
-    """Membership test: an element name with no special tree-building rule here."""
-
-    def __contains__(self, name: str) -> bool:
-        return name not in _SPECIAL
-
-
-_PLAIN = _Plain()
 # Block containers whose only special rule is closing an open <p>: the fast path treats them
 # like plain elements (an open <p> then stays open: the safe direction).
 _P_ONLY = frozenset("div section article main address blockquote center figure figcaption "
@@ -340,6 +333,9 @@ class _Scanner:
         if hit is None:
             if len(self.styles) >= limits.HTML_MAX_STYLE_EVALS:
                 raise ParserBomb(f"html: more than {limits.HTML_MAX_STYLE_EVALS} distinct inline styles")
+            # every evaluated style is a deadline check (I2 review R-1 / D39): run() checks only
+            # every 1024 tags, and one style can hold up to HTML_MAX_ATTR_BYTES of CSS
+            self.dl.check()
             hit = self.styles[style] = css_hides(style)
         return hit
 
@@ -792,30 +788,50 @@ def _calc(expr: str) -> float | None:
 
 
 def _lengths_px(val: str) -> list[float]:
-    """Every length in a value, in px; calc() expressions are evaluated."""
+    """Every length in a value, in px: the calc() expressions first (evaluated, in order),
+    then the plain lengths around them.
+
+    One left-to-right walk with a moving offset, so every character is read a bounded number
+    of times (I2 review R-1 / D39: searching again from the start and rebuilding the string
+    after each calc() was quadratic in the calc() count; 31 styles of 64 KB took 2.4 s). A
+    value with more than CSS_MAX_CALC_PER_VALUE calc() is not presentation: it counts as
+    off-screen (hidden), like a style built of escapes, and the walk stops there."""
     out: list[float] = []
-    low = val
-    while "calc(" in low:
-        i = low.find("calc(")
+    rest: list[str] = []
+    pos = 0
+    n = len(val)
+    calcs = 0
+    while True:
+        i = val.find("calc(", pos)
+        if i < 0:
+            break
+        calcs += 1
+        if calcs > limits.CSS_MAX_CALC_PER_VALUE:
+            out.append(float("-inf"))
+            pos = n
+            break
         depth = 0
         j = i + 4
-        while j < len(low):
-            if low[j] == "(":
+        while j < n:
+            c = val[j]
+            if c == "(":
                 depth += 1
-            elif low[j] == ")":
+            elif c == ")":
                 depth -= 1
                 if depth == 0:
                     break
             j += 1
-        body = low[i + 5:j]
+        body = val[i + 5:j]
         if len(body) > limits.CSS_MAX_CALC_CHARS:
             out.append(float("-inf"))  # an expression this long is treated as off-screen
         else:
             v = _calc(body)
             if v is not None:
                 out.append(v)
-        low = low[:i] + " " + low[j + 1:]
-    for v, unit in _nums(low):
+        rest.append(val[pos:i])
+        pos = j + 1
+    rest.append(val[pos:])
+    for v, unit in _nums(" ".join(rest)):
         p = _px(v, unit)
         if p is not None:
             out.append(p)
@@ -936,17 +952,6 @@ def css_hides(style: str) -> bool:
         if bg and bg == color:
             return True
     return False
-
-
-def attrs_hide(attrs: dict[str, str]) -> bool:
-    if not attrs:
-        return False
-    if "hidden" in attrs or "popover" in attrs:
-        return True
-    if attrs.get("aria-hidden", "").strip().lower() == "true":
-        return True
-    style = attrs.get("style")
-    return bool(style) and css_hides(style)
 
 
 def cut_utf8(data: bytes, cap: int) -> bytes:

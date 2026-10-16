@@ -1,5 +1,5 @@
 {
- "about": "Legitimate security writing that QUOTES prompt-injection phrases. Each excerpt is the result snippet the stack's own search gateway (SearXNG-compatible GET /search on 127.0.0.1:8085, search plane) returned for the listed query on 2026-10-15; the snippet text is the source page's own text as the upstream engine extracted it. Pages were not fetched. Used by tests/test_corpus.py: none may hit a STRONG rule (intake-i2 acceptance).",
+ "about": "Legitimate security writing that QUOTES prompt-injection phrases. Each excerpt is the result snippet the stack's own private search gateway (SearXNG-compatible /search) returned for the listed query on 2026-10-15; the snippet text is the source page's own text as the upstream engine extracted it. Pages were not fetched. Used by tests/test_corpus_failclosed.py (none may hit a STRONG rule; intake-i2 acceptance) and tests/test_classifier_eval.py (the classifier's false-positive rate on it is recorded and frozen; intake-i3).",
  "retrieved": "2026-10-15",
  "via": "search gateway /search?format=json (snippets only, no page fetch)",
  "items": [

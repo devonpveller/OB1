@@ -1,17 +1,18 @@
 """The one result type every stage writes into (DESIGN-intake.md sections 2, 3, 5).
 
-`verdict` is the verdict SO FAR, after the deterministic stages (I2). I3 (classifier) and I4
-(second opinion) read it and may only make it stricter:
+`verdict` is the verdict after stages 1-6 (I2 deterministic stages, I3 classifier). I4 (second
+opinion) reads it and may only make it stricter:
 
   rejected  stage 1 refused the envelope, or the content is a parser/normalisation bomb.
             Nothing is stored.
   injected  a STRONG rule fired. No text and no links are returned (DESIGN section 2).
-  pending   undecided: a stage raised, the deadline passed, or a WEAK rule fired and the item
-            needs the second opinion (needs_second_opinion=True). Never readable as clean.
-  clean     every deterministic stage ran to the end without an error and no rule fired:
-            "clean so far". I3 still scores it.
+  pending   undecided: a stage raised (the classifier included), the deadline passed, or a
+            WEAK rule fired or the classifier's max chunk score reached the threshold and the
+            item needs the second opinion (needs_second_opinion=True). Never readable as clean.
+  clean     every stage ran to the end without an error, no rule fired and the classifier
+            scored below the threshold: "clean so far" (I4 decides only uncertain items).
 
-The only code path that produces `clean` is pipeline.screen() after stage 5 finishes; the
+The only code path that produces `clean` is pipeline.screen() after stage 6 finishes; the
 constructor below refuses `clean` when the trace holds an error, and refuses `clean` with
 reasons (belt and braces for stage 8: missing evidence never resolves to clean).
 """
@@ -102,6 +103,10 @@ class IntakeResult:
     repeat: bool = False
     needs_second_opinion: bool = False
     error: str | None = None
+    # stage 6 (I3): the model version that scored the item, and its scores (max, chunks, the
+    # flagged chunks with offsets); None when the classifier did not run
+    classifier_version: str | None = None
+    classifier: Mapping[str, object] | None = None
 
     def __post_init__(self):
         if self.verdict not in VERDICTS:
@@ -112,6 +117,10 @@ class IntakeResult:
         object.__setattr__(self, "attachments",
                            tuple(types.MappingProxyType(dict(x)) for x in self.attachments))
         object.__setattr__(self, "trace", tuple(self.trace))
+        if self.classifier is not None:
+            c = dict(self.classifier)
+            c["flagged"] = tuple(types.MappingProxyType(dict(x)) for x in c.get("flagged", ()))
+            object.__setattr__(self, "classifier", types.MappingProxyType(c))
         if self.verdict == "clean":
             if self.error is not None or any(t.status == "error" for t in self.trace):
                 raise ValueError("a result with a stage error cannot be clean")
@@ -136,4 +145,7 @@ class IntakeResult:
             "repeat": self.repeat,
             "needs_second_opinion": self.needs_second_opinion,
             "error": self.error,
+            "classifier_version": self.classifier_version,
+            "classifier": (None if self.classifier is None else
+                           {**self.classifier, "flagged": [dict(x) for x in self.classifier["flagged"]]}),
         }

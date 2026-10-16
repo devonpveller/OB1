@@ -1,5 +1,5 @@
 {
- "about": "The attempt-1 tester's search-gateway snippets (4 queries through the stack's search gateway GET /search on 127.0.0.1:8085, 2026-10-15; raw responses in journal/evidence/intake-i2/tester-attempt1/sg_*.json). Legitimate writing about judge injection, markdown-image exfiltration, ChatML special tokens and LLM-as-a-judge attacks. None may hit a STRONG rule.",
+ "about": "The attempt-1 tester's search-gateway snippets (4 queries through the stack's private search gateway /search, 2026-10-15; the raw responses are kept with the intake-i2 test evidence in the plan store). Legitimate writing about judge injection, markdown-image exfiltration, ChatML special tokens and LLM-as-a-judge attacks. None may hit a STRONG rule.",
  "retrieved": "2026-10-15",
  "items": [
   {

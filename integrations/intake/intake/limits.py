@@ -7,11 +7,18 @@ reaches, and input that passes one is structurally hostile (a parser bomb) and i
 (DESIGN section 7), never truncated. The only truncation left is the 2 MB HTML byte cap that
 DESIGN itself sets.
 
-The bound (I2 acceptance, D34): every input inside the caps finishes in < 2 s on the
-reference host (i7-7820X). DEADLINE_SECONDS is enforced INSIDE the stages (deadline.py): the
-loops check it, and no step between two checks is longer than ~0.2 s on 5 MB, so a run that
-has not finished by the deadline stops there and fails closed (`pending`). tests/test_bounds.py
-measures every case; the findings note for intake-i2 lists the numbers.
+The bound (I2 acceptance, D34): every input inside the caps finishes the deterministic stages
+in < 2 s on the reference host (i7-7820X). DEADLINE_SECONDS is enforced INSIDE the stages
+(deadline.py): the loops check it, and no step between two checks is longer than ~0.3 s on
+5 MB (measured under load), so a run that has not finished by the deadline stops there and
+fails closed (`pending`). tests/test_bounds.py measures every case; the findings notes for
+intake-i2 and intake-i3 list the numbers.
+
+Not bounded in-process (operator D38): a single uninterruptible library call - the stdlib
+email parser (MIME_MAX_HEADER_SEMICOLONS below is only a cheap early reject for its known
+quadratic shape), json, a C codec, the classifier's tokenizer and forward pass. Callers run
+screen() in a killable worker with a hard wall-clock limit (I5). The classifier (stage 6) has
+its own time budget (classifier.py, INTAKE_CLASSIFIER_MAX_SECONDS), checked between chunks.
 """
 from __future__ import annotations
 
@@ -34,6 +41,8 @@ HTML_MAX_DEPTH = 512
 HTML_MAX_ATTR_BYTES = 64 * 1024
 # Characters inside one CSS calc() expression we evaluate; longer counts as hiding.
 CSS_MAX_CALC_CHARS = 512
+# calc() expressions evaluated in one CSS value; more counts as hiding (I2 review R-1, D39).
+CSS_MAX_CALC_PER_VALUE = 64
 
 # Links and images handed back in links[] (more are counted, not listed).
 MAX_LINKS = 2000
@@ -50,6 +59,11 @@ MIME_MAX_HEADER_CHARS = 2000  # subject / filename read at most this long
 # ~70,000. More than this is a parser bomb (attempt 1: 5 MB of QP soft breaks took 1 s;
 # attempt 2: 1.75 M CR-only lines took 2.4 s; round 3: 300,000 header lines took 1.25 s).
 MIME_MAX_LINES = 150_000
+# ';' in one header, its continuation lines included. The stdlib MIME parameter parser is
+# quadratic in them inside one uninterruptible call (I2 attempt 3: 1 MB of ';' in a
+# Content-Type took 28 s); a real header has a few dozen at most (DKIM-Signature ~12).
+# Checked before the parser runs; more is a parser bomb (operator D38).
+MIME_MAX_HEADER_SEMICOLONS = 128
 
 # Stage 4: runs of non-starters (combining class != 0) longer than this are trimmed in the
 # copy the rules read (Unicode UAX #15 stream-safe format), so NFKC reordering stays linear.

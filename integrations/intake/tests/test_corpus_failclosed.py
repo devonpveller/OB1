@@ -79,7 +79,8 @@ class FailClosed(unittest.TestCase):
         self.assertEqual([t.stage for t in r.trace], STAGE_NAMES)
         self.assertTrue(all(t.status == "ok" and t.ms >= 0 for t in r.trace))
         self.assertIn("text/plain", r.trace[0].detail)
-        self.assertEqual(r.trace[-1].detail, "no rule hit")
+        # I3 appended stage 6 after the rules: look the rules stage up by name
+        self.assertEqual(next(t for t in r.trace if t.stage == "rules").detail, "no rule hit")
 
     def test_an_error_in_each_stage_gives_pending(self):
         for name, attr in pipeline.STAGES:

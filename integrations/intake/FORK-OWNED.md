@@ -10,6 +10,7 @@ Everything intake adds is namespaced:
 |---|---|
 | code | `integrations/intake/` (this directory) |
 | I2 screening library | `intake/{pipeline,envelope,revisions,cdr,htmlscan,invisible,rules,result,limits,deadline}.py`, the rules file `intake/rules.toml`, `requirements.txt` / `requirements-dev.txt` (hash-pinned), `tests/fixtures/` (corpus snapshots), `tests/adversarial.py` (bound-test generators) - all inside the path below |
+| I3 classifier stage | `intake/classifier.py`, the classifier settings in `intake/config.py`, `tools/fetch_classifier.py`, `requirements-classifier.txt`, `tests/fixtures/classifier_eval.json` and `classifier_corpus_scores.json` (the frozen eval fixtures), `tests/test_classifier*.py`, `tests/classifier_support.py`, `tests/adversarial_i3.py`, `tests/adversarial_r3.py`, `.gitignore` (the fetched model under `models/` is never committed) - all inside the path below |
 | migration | `integrations/intake/sql/init-intake.sql`, revert `sql/revert-intake.sql`, mounted as `220-init-intake.sql` by `docker/docker-compose.yml` and `docker/docker-compose.preview.yml` (the whole `220-` initdb slot is ours) |
 | SQL schema | `intake` (`intake.raw_items`, `intake.items`, `intake.discards`, `intake.migration_ledger`, `intake.enforce_screen_verdict_authority()`) |
 | DB role | `intake` (no members, a member of nothing) |

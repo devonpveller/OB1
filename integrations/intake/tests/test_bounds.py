@@ -24,7 +24,7 @@ import time
 import unittest
 
 from tests import adversarial as adv
-from tests import adversarial_r3
+from tests import adversarial_i3, adversarial_r3
 from tests import support
 from tests.support import envelope, tag
 
@@ -86,6 +86,11 @@ def _html_cases():
     yield "hidden x many", "<div style='display:none'>x</div>" * (MB2 // 34)
     yield "closed details x many", "<details><summary>s</summary>x</details>" * (MB2 // 41)
     yield "misnested formatting", "<b><p>x</b>y</p>" * (MB2 // 16)
+    # I2 review R-1 (D39): 31 distinct ~64 KB styles of calc() chains, 2.4 s on e04ff3a
+    yield "calc() chains 31 x 64KB", adversarial_i3.calc_chain_page()
+    yield "calc() at the cap x 20k styles", "".join(
+        f'<p style="left:{"calc(1px)" * limits.CSS_MAX_CALC_PER_VALUE};top:{i}px">x</p>'
+        for i in range(20_000))[:MB2]
 
 
 def _text_cases():
@@ -314,6 +319,16 @@ class TimeBounds(unittest.TestCase):
             with self.subTest(case=name):
                 self._check(name, raw, "application/json")
         for name, raw in adversarial_r3.email_other():
+            with self.subTest(case=name):
+                self._check(name, raw, "message/rfc822")
+
+    def test_i3_header_semicolons(self):
+        # attempt 3 FAIL-B (D38, carried into I3): floods are rejected before the stdlib parser;
+        # headers at the cap are parsed inside the bound
+        for name, raw in adversarial_i3.header_semicolon_floods():
+            with self.subTest(case=name):
+                self.assertEqual(self._check(name, raw, "message/rfc822").verdict, "rejected")
+        for name, raw in adversarial_i3.header_at_cap_shapes():
             with self.subTest(case=name):
                 self._check(name, raw, "message/rfc822")
 

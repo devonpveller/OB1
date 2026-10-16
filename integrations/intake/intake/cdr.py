@@ -41,6 +41,9 @@ REPLACEMENT = chr(0xFFFD)
 _REPLACEMENT_RUN = re.compile(REPLACEMENT + "+")
 # A literal, optional blanks and quote, one bounded class (RFC 2046: boundary is 1-70 chars).
 _BOUNDARY_PARAM = re.compile(rb'(?i)boundary[ \t]*=[ \t]*"?([^";\r\n]{1,70})')
+# The stdlib's header line test (email.feedparser.headerRE, the field-name part): one class,
+# then a literal; linear.
+_HEADER_LINE = re.compile(rb"[\041-\071\073-\176]*:")
 
 
 class ContentInvalid(Exception):
@@ -145,10 +148,6 @@ def _raw_headers(part) -> dict[str, str]:
     return found
 
 
-def _raw_header(part, name: str) -> str | None:
-    return _raw_headers(part).get(name)
-
-
 def _subject(headers: dict[str, str]) -> str | None:
     raw = headers.get("subject")
     if raw is None:
@@ -160,14 +159,68 @@ def _subject(headers: dict[str, str]) -> str | None:
         return raw
 
 
+def _check_header_semicolons(data: bytes, low: bytes) -> None:
+    """Reject (parser bomb) a message with a header holding more than MIME_MAX_HEADER_SEMICOLONS
+    ';', before the stdlib parser runs (operator D38; I2 attempt-3 FAIL-B). The stdlib MIME
+    parameter parser (email.message._parseparam, reached from the feedparser's get_boundary()
+    and from get_payload() / get_content_charset()) is quadratic in the ';' of one header
+    value, inside one call that cannot be interrupted: 1 MB of ';' took 28 s.
+
+    Only header lines count, per header (a folded header's continuation lines count with it):
+    the top block, every block after a declared boundary delimiter, and the block of an
+    attached message (a part of type message/*, or a part with no type inside a
+    multipart/digest). ';' in a body (CSS, code, prose) is never counted. One pass over the
+    lines (at most MIME_MAX_LINES, checked before), so linear. This is a cheap early reject;
+    the structural bound for anything the stdlib does that it does not foresee is the
+    killable worker every caller runs screen() in (I5)."""
+    cap = limits.MIME_MAX_HEADER_SEMICOLONS
+    if data.count(b";") <= cap:
+        return
+    delimiters = {b"--" + m.group(1) for m in _BOUNDARY_PARAM.finditer(data)}
+    digest = b"multipart/digest" in low
+    in_headers = True
+    top = True
+    count = 0
+    is_ctype = False
+    ctype = b""
+    for line in data.splitlines():
+        if not in_headers:
+            if line.rstrip(b" \t") in delimiters:
+                in_headers, count, is_ctype, ctype = True, 0, False, b""
+            continue
+        if not line:
+            # the end of this header block; an attached message's own headers follow it
+            in_headers = ctype.startswith(b"message/") or (digest and not top and not ctype)
+            top, count, is_ctype, ctype = False, 0, False, b""
+            continue
+        if line[:1] in (b" ", b"\t"):
+            count += line.count(b";")
+            if is_ctype and len(ctype) < 64:
+                ctype = (ctype + line.strip().lower())[:64]
+        elif _HEADER_LINE.match(line) or line.startswith(b"From "):
+            count = line.count(b";")
+            name, _, value = line.partition(b":")
+            is_ctype = name.strip().lower() == b"content-type"
+            if is_ctype:
+                ctype = value.strip().lower()[:64]
+        else:
+            # not a header line: the stdlib starts the body here (no blank line)
+            in_headers, top, count = False, False, 0
+            continue
+        if count > cap:
+            raise ParserBomb(f"email: a header with more than {cap} ';'")
+
+
 def _email(data: bytes, dl=_deadline.NONE) -> Extract:
     # The stdlib parser splits lines on CR, LF and CRLF alike (attempt 2: 1.75 M CR-only lines
     # passed an LF-only count and took 2.4 s in one call). Count every break it splits on.
     lines = data.count(b"\n") + data.count(b"\r") - data.count(b"\r\n")
     if lines > limits.MIME_MAX_LINES:
         raise ParserBomb(f"email: more than {limits.MIME_MAX_LINES} lines")
-    if data.lower().count(b"boundary") > limits.MIME_MAX_MULTIPART:
+    low = data.lower()
+    if low.count(b"boundary") > limits.MIME_MAX_MULTIPART:
         raise ParserBomb(f"email: more than {limits.MIME_MAX_MULTIPART} multipart containers")
+    _check_header_semicolons(data, low)
     # Count the parts before parsing (the stdlib parser costs ~30 us per part): each part
     # starts with '--' + a declared boundary, and at most MIME_MAX_MULTIPART are declared.
     delimiters = 0

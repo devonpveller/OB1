@@ -1,7 +1,7 @@
-"""The deterministic intake stages as one pure function (DESIGN-intake.md section 3, stages
-1-5 and 8). No service, no DB, no model, no network.
+"""The intake stages as one function (DESIGN-intake.md section 3, stages 1-6 and 8). No
+service, no DB, no network; stage 6 reads a local, hash-verified model (classifier.py).
 
-    screen(envelope, history=None) -> IntakeResult
+    screen(envelope, history=None, *, classifier=None) -> IntakeResult
 
   1 validate      envelope.validate            -> `rejected` on a bad envelope
   2 idempotency   revisions.decide (history)   -> a repeat returns the stored result
@@ -10,9 +10,21 @@
   5 rules         rules.evaluate + neutralise  -> STRONG (or two cues together): `injected`;
                                                   WEAK: `pending` for the second opinion;
                                                   none: `clean` (so far)
+  6 classifier    classifier.Classifier.score  -> skipped after a STRONG rule; a max chunk score
+                                                  >= threshold: `pending` + needs_second_opinion
+                                                  with the score and chunk offsets (D24: never
+                                                  `injected` on the score alone); below it the
+                                                  stage-5 verdict stands. Its own time budget
+                                                  (config), not the stage 1-5 deadline.
   8 fail closed   any exception in any stage, or the deadline passing INSIDE a stage
                   (deadline.py: the stages check it in their loops), gives `pending` with the
-                  error, never `clean`.
+                  error, never `clean`. That includes every classifier failure: missing or
+                  corrupt model files, a hash mismatch, a tokenizer or model exception, the
+                  classifier's time or chunk budget.
+
+Callers run screen() in a killable worker process with a hard wall-clock limit (operator D38,
+I5): single library calls (stdlib parsers, the tokenizer, a model forward pass) cannot be
+interrupted in-process.
 
 screen() never raises: anything that escapes the stage loop (building the result, an
 exception whose __str__ raises, a BaseException other than KeyboardInterrupt / SystemExit)
@@ -27,6 +39,7 @@ import time
 from typing import Callable
 
 from . import cdr, envelope, invisible, limits, revisions, rules
+from . import classifier as _classifier
 from .deadline import Deadline
 from .htmlscan import ParserBomb
 from .result import IntakeResult, Reason, StageRecord
@@ -42,9 +55,6 @@ def escape_markdown(text: str | None, cap: int = limits.TITLE_MAX_CHARS) -> str 
         return None
     t = " ".join(text.split())[:cap]
     return t.translate(_MD_ESCAPE) or None
-
-
-escape_title = escape_markdown
 
 
 def _describe(e: BaseException) -> str:
@@ -167,13 +177,30 @@ def stage_rules(st: dict) -> str:
     return ("WEAK: " + ", ".join(r.rule for r in reasons)) if reasons else "no rule hit"
 
 
+def stage_classifier(st: dict) -> str:
+    if any(r.strength == "strong" for r in st["reasons"]):
+        st["skipped"] = True
+        return "skipped: a STRONG rule decided"
+    clf = st["classifier"] if st["classifier"] is not None else _classifier.default()
+    fields = [("body", st["copy"]), ("side", st["side_copy"])]
+    if st["payloads"]:
+        fields.append(("payload", "\n".join(st["payloads"])))
+    scored = clf.score(fields)
+    st["scored"] = scored
+    return (f"max {scored.max_score:.4f} over {scored.chunks} chunks, {scored.flagged_count} >= "
+            f"{scored.threshold} ({scored.precision}, {scored.threads} threads, {scored.ms:.0f} ms)")
+
+
 STAGES: list[tuple[str, str]] = [
     ("validate", "stage_validate"),
     ("idempotency", "stage_idempotency"),
     ("cdr", "stage_cdr"),
     ("invisible", "stage_invisible"),
     ("rules", "stage_rules"),
+    ("classifier", "stage_classifier"),
 ]
+# Stages that keep their own time budget instead of the stage 1-5 deadline.
+OWN_BUDGET = frozenset({"classifier"})
 
 
 def _escaped_links(links) -> tuple[dict, ...]:
@@ -201,17 +228,23 @@ def _result(st: dict, verdict: str, **kw) -> IntakeResult:
                           for a in attachments),
         title=escape_markdown(st.get("title")) if verdict in ("clean", "pending") else None,
     )
+    scored = st.get("scored")
+    if scored is not None:
+        base["classifier_version"] = scored.version
+        base["classifier"] = scored.to_dict()
     base.update(kw)
     return IntakeResult(verdict=verdict, **base)
 
 
 def screen(env_input: object, history: revisions.History | None = None, *,
            deadline_s: float = limits.DEADLINE_SECONDS,
-           clock: Callable[[], float] = time.perf_counter) -> IntakeResult:
-    """Run stages 1-5 on one envelope. Never raises (but KeyboardInterrupt / SystemExit);
-    never returns `clean` after an error."""
+           clock: Callable[[], float] = time.perf_counter,
+           classifier: _classifier.Classifier | None = None) -> IntakeResult:
+    """Run stages 1-6 on one envelope. Never raises (but KeyboardInterrupt / SystemExit);
+    never returns `clean` after an error. `classifier` defaults to the process-wide one
+    configured from the environment (classifier.default())."""
     try:
-        return _screen(env_input, history, deadline_s, clock)
+        return _screen(env_input, history, deadline_s, clock, classifier)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:  # noqa: BLE001 - stage 8: nothing escapes as a crash
@@ -222,15 +255,16 @@ def _minimal_pending(error: str) -> IntakeResult:
     return IntakeResult(verdict="pending", error=error[:300])
 
 
-def _screen(env_input, history, deadline_s, clock) -> IntakeResult:
+def _screen(env_input, history, deadline_s, clock, clf=None) -> IntakeResult:
     dl = Deadline(deadline_s, clock)
     st: dict = {"input": env_input, "history": history or revisions.NoHistory(),
-                "counts": {}, "trace": [], "reasons": [], "dl": dl}
+                "counts": {}, "trace": [], "reasons": [], "dl": dl, "classifier": clf}
     for name, attr in STAGES:
         t0 = clock()
         try:
             detail = globals()[attr](st)
-            dl.check()
+            if name not in OWN_BUDGET:
+                dl.check()
         except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException as e:  # noqa: BLE001 - stage 8: any error fails closed
@@ -248,7 +282,8 @@ def _screen(env_input, history, deadline_s, clock) -> IntakeResult:
             stored: IntakeResult = st["repeat"]
             return IntakeResult(**{**_fields(stored), "repeat": True,
                                    "trace": tuple(st["trace"])})
-        st["trace"].append(StageRecord(name, "ok", (elapsed - t0) * 1000, detail))
+        status = "skipped" if st.pop("skipped", False) else "ok"
+        st["trace"].append(StageRecord(name, status, (elapsed - t0) * 1000, detail))
     return _decide(st)
 
 
@@ -269,7 +304,11 @@ def _decide(st: dict) -> IntakeResult:
     reasons = st["reasons"]
     if any(r.strength == "strong" for r in reasons):
         return _result(st, "injected")
-    if reasons:
+    scored = st.get("scored")
+    if scored is None:  # cannot happen past stage 6; never resolve missing evidence to clean
+        return _fail_closed(st, "classifier: no score")
+    if reasons or scored.over_threshold:
+        # D24: a confident score alone goes to the second opinion, never to a discard
         return _result(st, "pending", text=st["text"], links=_escaped_links(st["links"]),
                        needs_second_opinion=True)
     return _result(st, "clean", text=st["text"], links=_escaped_links(st["links"]))
