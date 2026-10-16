@@ -272,8 +272,9 @@ def time_sections(db, r) -> None:
     `now` in the future is clamped to the database clock (attempt 2 T2-F4)."""
     for label, now in (("spring", dt.datetime(2026, 4, 5, 12, 0, tzinfo=Eastern())),
                        ("autumn", dt.datetime(2025, 11, 20, 12, 0, tzinfo=Eastern())),
-                       # EST now, EDT one year earlier: the 365-day window crosses a change too
-                       ("yearly", dt.datetime(2026, 3, 10, 12, 0, tzinfo=Eastern()))):
+                       # EDT now (DST began 2026-03-08), EST one year earlier (it began 2025-03-09):
+                       # the 365-day window crosses a change too
+                       ("yearly", dt.datetime(2026, 3, 8, 12, 0, tzinfo=Eastern()))):
         u = now.astimezone(dt.timezone.utc)
         ages = {}
         for days, prefix in ((30, "b"), (365, "x")):
