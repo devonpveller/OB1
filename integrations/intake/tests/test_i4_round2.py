@@ -213,21 +213,24 @@ class D40PolicySwitch(unittest.TestCase):
     @classmethod
     def setUpClass(cls):  # built here, not at import, so the other classes run (RED) on 88fd91d
         cls.CLEAN = d2.Policy(weak_rule_judge_clean="clean")
+        cls.SUSP = d2.Policy(weak_rule_judge_clean="suspicious")
 
     def _space(self):
         for r, c, o, comp, e, x in itertools.product(RULES, CLASSIFIERS, OPINIONS, BOOLS, ERRORS, BOOLS):
             yield ev(r, c, o, comp, e, x)
 
-    def test_the_default_is_the_design_row(self):
-        self.assertEqual(d2.DEFAULT_POLICY.weak_rule_judge_clean, "suspicious")
+    def test_the_default_is_d40_a(self):
+        self.assertEqual(d2.DEFAULT_POLICY.weak_rule_judge_clean, "clean")
+        self.assertEqual(config.D2_WEAK_RULE_JUDGE_CLEAN, "clean")
         self.assertEqual(config.d2_policy({}), d2.DEFAULT_POLICY)
+        self.assertEqual(config.d2_policy({}), self.CLEAN)
         for e in self._space():
             self.assertEqual(d2.decide(e), d2.decide(e, d2.DEFAULT_POLICY))
 
     def test_clean_changes_exactly_one_row(self):
         changed = 0
         for e in self._space():
-            a, b = d2.decide(e), d2.decide(e, self.CLEAN)
+            a, b = d2.decide(e, self.SUSP), d2.decide(e)  # the first DESIGN row vs D40 (default)
             # (a WEAK item with partial or missing evidence is suspicious either way; under
             # "clean" it is named by the more specific row, clean-partial / clean-evidence-missing)
             if a.label != b.label:
@@ -245,10 +248,12 @@ class D40PolicySwitch(unittest.TestCase):
         for e in self._space():
             if (e.rule in ("strong", "missing") or e.classifier == "missing" or e.error != "none" or e.expired
                     or e.opinion in ("injection", "uncertain") or (e.opinion == "clean" and not e.opinion_complete)):
-                self.assertNotEqual(d2.decide(e, self.CLEAN).label, "clean", e)
+                self.assertNotEqual(d2.decide(e).label, "clean", e)
+                self.assertNotEqual(d2.decide(e, self.SUSP).label, "clean", e)
 
     def test_config_switch(self):
         self.assertEqual(config.d2_policy({"INTAKE_D2_WEAK_RULE_JUDGE_CLEAN": "clean"}), self.CLEAN)
+        self.assertEqual(config.d2_policy({"INTAKE_D2_WEAK_RULE_JUDGE_CLEAN": "suspicious"}), self.SUSP)
         for bad in ("", "Clean", "yes", "1"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 config.d2_policy({"INTAKE_D2_WEAK_RULE_JUDGE_CLEAN": bad})
@@ -262,8 +267,8 @@ class D40PolicySwitch(unittest.TestCase):
         ji = second_opinion.judge_input(r)
         self.assertTrue(ji.complete)
         step = second_opinion.Step("decided", WaitState(0.0, 1), second_opinion.Opinion("clean", "verdict"))
-        self.assertEqual(second_opinion.decision(r, step, ji).label, "suspicious")
-        self.assertEqual(second_opinion.decision(r, step, ji, self.CLEAN).label, "clean")
+        self.assertEqual(second_opinion.decision(r, step, ji).label, "clean")  # D40 = (a)
+        self.assertEqual(second_opinion.decision(r, step, ji, self.SUSP).label, "suspicious")
 
 
 class D41PolicyPoint(unittest.TestCase):
@@ -271,7 +276,8 @@ class D41PolicyPoint(unittest.TestCase):
         from intake import purge
         self.assertEqual(purge.RULES, (purge.purge_clean_bronze, purge.purge_suspicious_bronze,
                                        purge.purge_discards))
-        self.assertIn("POLICY POINT D41", purge.__doc__)
+        self.assertIn("POLICY POINT D41 = (a)", purge.__doc__)
+        self.assertIn("must not feed research", purge.__doc__)
 
 
 assert support

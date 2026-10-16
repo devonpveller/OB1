@@ -253,10 +253,10 @@ def second_opinion_config(env: Mapping[str, str] | None = None) -> SecondOpinion
     )
 
 
-# -- the D2 table's open policy points (I4 round 2; operator decision D40 pending) --------------
-#   INTAKE_D2_WEAK_RULE_JUDGE_CLEAN   suspicious (default; DESIGN section 5) | clean: the label
-#                                     of d2 row clean-with-rule-hit. Anything else is refused.
-D2_WEAK_RULE_JUDGE_CLEAN = "suspicious"
+# -- the D2 table's policy point (I4 round 2; operator decision D40 = (a), 2026-10-16) ----------
+#   INTAKE_D2_WEAK_RULE_JUDGE_CLEAN   clean (default, D40) | suspicious: the label of d2 row
+#                                     clean-with-rule-hit. Anything else is refused.
+D2_WEAK_RULE_JUDGE_CLEAN = "clean"
 
 
 def d2_policy(env: Mapping[str, str] | None = None):

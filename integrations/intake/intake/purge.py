@@ -29,14 +29,15 @@ DST change that is N days +- 1 hour (a row 29 d 23 h old was deleted in the test
 Production passes no `now`. A test may pass a timezone-aware `now`; it is converted to UTC
 before the subtraction, so the same instant gives the same cutoff in every zone.
 
-POLICY POINT D41 (operator decision pending): whether "held items are purged after 30 days"
-also covers the `suspicious` CONTENT rows in public.sources / public.thoughts, or only the raw
-copy in bronze (what suspicious-bronze does). The intake role cannot delete those rows, and
-deleting a source cascades into gold (claim_sources, source_chunks, ...). If D41 says "the rows
-too", the change is local: a postgres-owned SECURITY DEFINER function in the migration that
-deletes only screen_verdict = 'suspicious' rows with an intake_item_id older than
-SUSPICIOUS_RETENTION_DAYS, granted EXECUTE to intake, plus one more entry in RULES below that
-calls it. If D41 says "the raw copy only", nothing changes.
+POLICY POINT D41 = (a) (operator 2026-10-16, DESIGN section 11): "held items are purged after
+30 days" means intake's RAW COPY (suspicious-bronze). The `suspicious` CONTENT rows in
+public.sources / public.thoughts are NOT purged and no content-row rule exists: the intake role
+cannot delete them, and deleting a source would cascade into gold (claim_sources, source_chunks,
+...). Instead, from now on `suspicious` content must not feed research or any generated outcome
+(research recall/reuse, synthesis, wiki, digest, podcast, agent knowledge): a READ-policy point
+for I6, not a purge. Should a content-row purge ever be wanted, the change stays local: a
+postgres-owned SECURITY DEFINER function in the migration, EXECUTE to intake, and one more entry
+in RULES below.
 
 The ONE side effect on silver is the schema's own: intake.items.raw_item_id is
 `ON DELETE SET NULL` (init-intake.sql: "bronze is purged, silver stays"), so the items linked

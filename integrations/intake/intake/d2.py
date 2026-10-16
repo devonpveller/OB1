@@ -22,17 +22,20 @@ The table, first matching row wins (`row` names it):
   second-opinion-uncertain   opinion uncertain                             suspicious
   expired                    expired                                       suspicious
   transient-error            error transient                               pending (retry the screen)
-  clean-with-rule-hit        opinion clean, rule weak                      suspicious (Policy, D40)
   clean-evidence-missing     opinion clean, rule or classifier missing     suspicious
   clean-partial              opinion clean, judge saw only part            suspicious
+  clean-with-rule-hit        opinion clean (complete), rule weak           clean (D40; Policy)
   second-opinion-clean       opinion clean, nothing else against           clean
   awaiting-second-opinion    rule weak/missing or classifier over/missing  pending (ask the judge)
   no-signal                  rule none, classifier below                   clean
 
 The fixed tie-break: a disagreement goes to the less-trusted label (injected < pending <
 suspicious < clean), and missing evidence never resolves to `clean`. `clean` is reached only
-by "no-signal" (nothing fired, nothing missing) and "second-opinion-clean" (the classifier
-alone was over the threshold and a judge that read every flagged chunk said clean; D24).
+by "no-signal" (nothing fired, nothing missing), "second-opinion-clean" (the classifier alone
+was over the threshold and a judge that read every flagged chunk said clean; D24) and
+"clean-with-rule-hit" (a WEAK rule hit that such a judge said clean: operator D40 = (a),
+2026-10-16, DESIGN section 11). A STRONG rule, an `injection` or `uncertain` answer, a missing
+stage, a partial judge input, an error or expiry never end `clean`.
 `pending` is unreadable; `suspicious` is served to tool-less reads only and purged at 30 days
 (purge.py); `injected` keeps only a discard record.
 """
@@ -93,13 +96,13 @@ class Decision:
 class Policy:
     """The policy points of the table that the operator may still set.
 
-    weak_rule_judge_clean (D40, pending): the label of row `clean-with-rule-hit` - a WEAK rule
-    hit that a judge who saw ALL the flagged evidence called clean. "suspicious" (the DESIGN
-    section 5 row, the default) or "clean". Either way the row applies only with no missing
-    stage, a complete judge input, no error and no expiry; nothing else in the table moves.
-    Config: INTAKE_D2_WEAK_RULE_JUDGE_CLEAN (config.d2_policy)."""
+    weak_rule_judge_clean: the label of row `clean-with-rule-hit` - a WEAK rule hit that a
+    judge who saw ALL the flagged evidence called clean. "clean" is the default (operator D40 =
+    (a), 2026-10-16); "suspicious" was the first DESIGN section 5 row. Either way the row applies
+    only with no missing stage, a complete judge input, no error and no expiry; nothing else in
+    the table moves. Config: INTAKE_D2_WEAK_RULE_JUDGE_CLEAN (config.d2_policy)."""
 
-    weak_rule_judge_clean: str = "suspicious"
+    weak_rule_judge_clean: str = "clean"
 
     def __post_init__(self):
         if self.weak_rule_judge_clean not in ("suspicious", "clean"):

@@ -84,11 +84,12 @@ Configuration: `INTAKE_SECOND_OPINION_KEY` (secret), `_MODEL` (`local-large:noth
 `_QUEUE_USER` (`ob-intake`), `_TIMEOUT_SECONDS` (120), `_MAX_ATTEMPTS` (12),
 `_BACKOFF_BASE_SECONDS` (60), `_BACKOFF_CAP_SECONDS` (3600), `_MAX_TOKENS` (32);
 `INTAKE_SUSPICIOUS_RETENTION_DAYS` (30) beside the I1 retention values;
-`INTAKE_D2_WEAK_RULE_JUDGE_CLEAN` (`suspicious`, or `clean`: the label of D2 row
-`clean-with-rule-hit`, operator decision D40). The purge cutoff is the database's `now()`
-minus N x 24 hours (absolute time, so DST never shortens it; a test may pass a `now`, used in
-UTC). Whether suspicious content rows in `sources`/`thoughts` are purged too is policy point
-D41 in `purge.py`'s docstring. The transport gives each request one wall-clock deadline
+`INTAKE_D2_WEAK_RULE_JUDGE_CLEAN` (`clean` by operator decision D40: a WEAK rule hit that a
+judge who saw all the flagged evidence called clean ends `clean`; `suspicious` restores the
+first DESIGN row). The purge cutoff is the database's `now()` minus N x 24 hours (absolute
+time, so DST never shortens it; a test may pass a `now`, used in UTC). D41: the purge deletes
+only intake's raw copy; `suspicious` content rows in `sources`/`thoughts` stay, and must not
+feed research or any generated outcome (a read policy for I6; `purge.py` docstring). The transport gives each request one wall-clock deadline
 (`_TIMEOUT_SECONDS`), not a per-socket-operation timeout. Before I5 goes live
 the gated steps are: create intake's LiteLLM virtual key (metadata.lane `ob-intake`), and give
 llm-queue an `ob-intake` batch class (rank 3, a long acceptable wait, max concurrency 1);

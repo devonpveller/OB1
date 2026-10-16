@@ -37,14 +37,16 @@ def every_evidence():
 
 
 def nothing_against(e: Evidence) -> bool:
-    """The only evidence combinations that may end `clean` (DESIGN section 5 rows 4 and 6)."""
+    """The only evidence combinations that may end `clean` (DESIGN section 5 rows 4 and 6, and
+    operator D40 = (a): a WEAK rule hit that a judge who saw all the flagged evidence called
+    clean)."""
     if e.error != "none" or e.expired:
         return False
-    if e.rule != "none" or e.classifier == "missing":
+    if e.rule not in ("none", "weak") or e.classifier == "missing":
         return False
     if e.opinion == "clean":
         return e.opinion_complete
-    return e.opinion in ("not_asked", "awaiting") and e.classifier == "below"
+    return e.rule == "none" and e.opinion in ("not_asked", "awaiting") and e.classifier == "below"
 
 
 class DesignTableRows(unittest.TestCase):
@@ -64,10 +66,16 @@ class DesignTableRows(unittest.TestCase):
          "injected", "second-opinion-injection"),
         ("second opinion clean, no rule hit -> clean", ev(classifier="over", opinion="clean"), "clean",
          "second-opinion-clean"),
-        ("clean + a rule hit -> suspicious", ev(rule="weak", opinion="clean"), "suspicious",
+        ("D40: clean + a WEAK rule hit, judge saw everything -> clean", ev(rule="weak", opinion="clean"), "clean",
          "clean-with-rule-hit"),
-        ("clean + a rule hit + classifier over -> suspicious", ev(rule="weak", classifier="over", opinion="clean"),
-         "suspicious", "clean-with-rule-hit"),
+        ("D40: clean + a WEAK rule hit + classifier over -> clean", ev(rule="weak", classifier="over", opinion="clean"),
+         "clean", "clean-with-rule-hit"),
+        ("D40 keeps: clean + a WEAK rule hit on partial judge input -> suspicious",
+         ev(rule="weak", opinion="clean", complete=False), "suspicious", "clean-partial"),
+        ("D40 keeps: clean + a WEAK rule hit, classifier missing -> suspicious",
+         ev(rule="weak", classifier="missing", opinion="clean"), "suspicious", "clean-evidence-missing"),
+        ("D40 keeps: uncertain on a WEAK rule hit -> suspicious", ev(rule="weak", opinion="uncertain"),
+         "suspicious", "second-opinion-uncertain"),
         ("no answer within 24 h -> suspicious", ev(classifier="over", opinion="awaiting", expired=True),
          "suspicious", "expired"),
         ("budget exhausted (expired) on a WEAK item -> suspicious", ev(rule="weak", expired=True),
@@ -121,7 +129,9 @@ class TieBreakPairs(unittest.TestCase):
     # What each source alone permits, at most (independent of d2's code).
     @staticmethod
     def bound_rule(e):
-        return {"none": "clean", "weak": "suspicious", "strong": "injected", "missing": "suspicious"}[e.rule]
+        # D40 = (a): a WEAK hit is cleared only by a complete judge clean
+        weak = "clean" if (e.opinion == "clean" and e.opinion_complete) else "suspicious"
+        return {"none": "clean", "weak": weak, "strong": "injected", "missing": "suspicious"}[e.rule]
 
     @staticmethod
     def bound_opinion(e):
@@ -202,7 +212,8 @@ class Fuzz(unittest.TestCase):
         evd = ev(r, c, o, comp, e, x)
         label = d2.decide(evd).label
         self.assertIn(label, ("clean", "suspicious", "pending", "injected"))
-        if (r != "none" or c == "missing" or o in ("injection", "uncertain") or e != "none" or x
+        if (r in ("strong", "missing") or (r == "weak" and o != "clean") or c == "missing"
+                or o in ("injection", "uncertain") or e != "none" or x
                 or (o == "clean" and not comp) or (c == "over" and o != "clean")):
             self.assertNotEqual(label, "clean", evd)
 
@@ -238,7 +249,11 @@ class FromResult(unittest.TestCase):
         e = d2.evidence_from(r)
         self.assertEqual(e.rule, "weak")
         self.assertEqual(d2.decide(e).row, "awaiting-second-opinion")
-        self.assertEqual(d2.decide(d2.evidence_from(r, opinion="clean")).label, "suspicious")
+        self.assertTrue(r.judge_complete)
+        # D40 = (a): a judge clean on the whole flagged evidence clears a WEAK hit...
+        self.assertEqual(d2.decide(d2.evidence_from(r, opinion="clean")).label, "clean")
+        # ...and on part of it does not
+        self.assertEqual(d2.decide(d2.evidence_from(r, opinion="clean", complete=False)).label, "suspicious")
 
     def test_strong_result_is_injected(self):
         from intake import pipeline
