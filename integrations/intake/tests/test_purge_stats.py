@@ -102,11 +102,73 @@ class Purge(unittest.TestCase):
                 self.assertNotRegex(sql, r"(?i)\bUPDATE\s+[a-z_.]+\s+SET\b|\b(INSERT|TRUNCATE|DROP|ALTER)\b")
                 self.assertNotRegex(sql, r"(?i)\bpublic\.")
                 self.assertRegex(sql, r"LIMIT %\(batch\)s")
-                self.assertRegex(sql, r"< %\(cutoff\)s")
+                self.assertIn("< COALESCE(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))", sql)
+                self.assertNotRegex(sql, r"(?i)interval\s*'[0-9]+\s*days?'")
         self.assertIn("'clean'", purge.SQL_CLEAN_BRONZE)
         self.assertNotIn("'suspicious'", purge.SQL_CLEAN_BRONZE)
         self.assertIn("'suspicious'", purge.SQL_SUSPICIOUS_BRONZE)
         self.assertNotIn("'clean'", purge.SQL_SUSPICIOUS_BRONZE)
+
+
+class Eastern(dt.tzinfo):
+    """US Eastern with the 2007+ DST rules (no tzdata on the reference host)."""
+
+    @staticmethod
+    def _window(y):
+        m, n = dt.datetime(y, 3, 8), dt.datetime(y, 11, 1)
+        return ((m + dt.timedelta(days=(6 - m.weekday()) % 7)).replace(hour=2),
+                (n + dt.timedelta(days=(6 - n.weekday()) % 7)).replace(hour=2))
+
+    def dst(self, d):
+        a, b = self._window(d.year)
+        return dt.timedelta(hours=1) if a <= d.replace(tzinfo=None) < b else dt.timedelta(0)
+
+    def utcoffset(self, d):
+        return dt.timedelta(hours=-5) + self.dst(d)
+
+    def tzname(self, d):
+        return "EDT" if self.dst(d) else "EST"
+
+
+class DstAndDatabaseNow(unittest.TestCase):
+    """attempt 1 D-1: a DST-zone `now` deleted rows 29 d 23 h old. The cutoff is absolute time."""
+
+    RULES = ((purge.purge_clean_bronze, 30), (purge.purge_suspicious_bronze, 30), (purge.purge_discards, 365))
+
+    def test_a_dst_zone_now_gives_exactly_n_x_24_hours_for_every_rule(self):
+        for now in (dt.datetime(2027, 4, 5, 12, 0, tzinfo=Eastern()),     # spring: EST -> EDT inside the window
+                    dt.datetime(2027, 11, 20, 12, 0, tzinfo=Eastern()),    # autumn: EDT -> EST inside it
+                    dt.datetime(2027, 3, 14, 3, 30, tzinfo=Eastern()),     # just after the spring change
+                    dt.datetime(2027, 4, 5, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=14)))):
+            for fn, days in self.RULES:
+                with self.subTest(now=now.isoformat(), rule=fn.__name__):
+                    db = FakeDB()
+                    rep = fn(db, now)
+                    cutoff = db.calls[0][1]["cutoff"]
+                    self.assertEqual(cutoff.utcoffset(), dt.timedelta(0))
+                    self.assertEqual(now.astimezone(dt.timezone.utc) - cutoff, dt.timedelta(hours=24 * days))
+                    self.assertEqual(db.calls[0][1]["hours"], 24 * days)
+                    self.assertEqual(rep.cutoff, cutoff.isoformat())
+
+    def test_the_same_instant_in_any_zone_gives_the_same_cutoff(self):
+        instant = dt.datetime(2027, 4, 5, 16, 0, tzinfo=dt.timezone.utc)
+        cutoffs = set()
+        for tz in (dt.timezone.utc, Eastern(), dt.timezone(dt.timedelta(hours=-12)),
+                   dt.timezone(dt.timedelta(hours=5, minutes=30))):
+            db = FakeDB()
+            purge.purge_clean_bronze(db, instant.astimezone(tz))
+            cutoffs.add(db.calls[0][1]["cutoff"])
+        self.assertEqual(len(cutoffs), 1)
+
+    def test_production_uses_the_database_now(self):
+        for fn, days in self.RULES:
+            db = FakeDB()
+            rep = fn(db)
+            self.assertIsNone(db.calls[0][1]["cutoff"])
+            self.assertEqual(db.calls[0][1]["hours"], 24 * days)
+            self.assertEqual(rep.cutoff, f"database now() - {24 * days} hours")
+        self.assertEqual([r.rule for r in purge.run_all(FakeDB())],
+                         ["clean-bronze", "suspicious-bronze", "discards"])
 
 
 class Stats(unittest.TestCase):

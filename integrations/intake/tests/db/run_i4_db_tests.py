@@ -74,9 +74,10 @@ class PsqlAdapter:
     """purge.DB / stats DB over `docker exec psql`, as a given role. Parameters are rendered as
     SQL literals (ints, aware datetimes, strings, NULL only)."""
 
-    def __init__(self, db: base.DB, role: str = "intake"):
+    def __init__(self, db: base.DB, role: str = "intake", pre: str = ""):
         self.db = db
         self.role = role
+        self.pre = pre
         self.calls = 0
 
     def execute(self, sql, params):
@@ -85,7 +86,7 @@ class PsqlAdapter:
         if "%(" in sql:
             raise ValueError("unbound parameter in " + sql[:80])
         self.calls += 1
-        rc, out, err = self.db.run("\\pset null '<NULL>'\n" + sql + ";", role=self.role)
+        rc, out, err = self.db.run("\\pset null '<NULL>'\n" + self.pre + sql + ";", role=self.role)
         if rc != 0:
             raise RuntimeError(err)
         rows = []
@@ -219,6 +220,85 @@ def expected_stats() -> dict:
     }
 
 
+class Eastern(dt.tzinfo):
+    """US Eastern, 2007+ DST rules (the Windows host has no tzdata)."""
+
+    @staticmethod
+    def _window(y):
+        m, n = dt.datetime(y, 3, 8), dt.datetime(y, 11, 1)
+        return ((m + dt.timedelta(days=(6 - m.weekday()) % 7)).replace(hour=2),
+                (n + dt.timedelta(days=(6 - n.weekday()) % 7)).replace(hour=2))
+
+    def dst(self, d):
+        a, b = self._window(d.year)
+        return dt.timedelta(hours=1) if a <= d.replace(tzinfo=None) < b else dt.timedelta(0)
+
+    def utcoffset(self, d):
+        return dt.timedelta(hours=-5) + self.dst(d)
+
+
+def _time_fixture(db, tag: str, created: dict) -> None:
+    """Empty bronze and the discard records (as postgres), then add one clean raw row, one
+    suspicious raw row and one discard per entry of `created` (name -> SQL timestamptz expr)."""
+    rc, _, err = db.run("DELETE FROM intake.raw_items; DELETE FROM intake.discards;")
+    if rc != 0:
+        raise RuntimeError(err)
+    out = []
+    for name, when in created.items():
+        for kind, verdict in (("c", "clean"), ("s", "suspicious")):
+            ext = f"{tag}-{kind}-{name}"
+            out.append("INSERT INTO intake.raw_items (source, connector, external_id, raw_sha256, content_type, raw, "
+                       f"created_at) VALUES ('web', 'web', {lit(ext)}, {lit(sha(ext))}, 'text/plain', 'x', {when});")
+            out.append("INSERT INTO intake.items (raw_item_id, source, connector, external_id, raw_sha256, status, "
+                       f"verdict, created_at) VALUES ((SELECT id FROM intake.raw_items WHERE external_id = {lit(ext)}), "
+                       f"'web', 'web', {lit(ext)}, {lit(sha(ext))}, 'done', {lit(verdict)}, {when});")
+        ext = f"{tag}-d-{name}"
+        out.append("INSERT INTO intake.discards (source, connector, external_id, raw_sha256, reason, created_at) "
+                   f"VALUES ('web', 'web', {lit(ext)}, {lit(sha(ext))}, 'strong-rule', {when});")
+    rc, _, err = db.run("\n".join(out))
+    if rc != 0:
+        raise RuntimeError(err)
+
+
+def time_sections(db, r) -> None:
+    """D-1 (attempt 1): the cutoff is absolute time. TZ: a DST-zone `now` (spring and autumn);
+    N: no `now` at all - the database's now() - with the session in a DST zone."""
+    for label, now in (("spring", dt.datetime(2027, 4, 5, 12, 0, tzinfo=Eastern())),
+                       ("autumn", dt.datetime(2027, 11, 20, 12, 0, tzinfo=Eastern())),
+                       # EST now, EDT one year earlier: the 365-day window crosses a change too
+                       ("yearly", dt.datetime(2027, 3, 10, 12, 0, tzinfo=Eastern()))):
+        u = now.astimezone(dt.timezone.utc)
+        ages = {}
+        for days, prefix in ((30, "b"), (365, "x")):
+            ages[f"{prefix}young"] = u - dt.timedelta(days=days) + dt.timedelta(minutes=30)
+            ages[f"{prefix}old"] = u - dt.timedelta(days=days) - dt.timedelta(minutes=30)
+        _time_fixture(db, label, {k: lit(v) for k, v in ages.items()})
+        purge.run_all(PsqlAdapter(db), now, retention=r)
+        raw = names(db, "intake.raw_items")
+        disc = names(db, "intake.discards")
+        check(raw == {f"{label}-c-byoung", f"{label}-s-byoung"},
+              f"TZ {label} DST now ({now.isoformat()}): bronze 29 d 23 h 30 min old stays, 30 d 0 h 30 min old "
+              "goes (clean and suspicious)", sorted(raw))
+        check(disc == {f"{label}-d-xyoung", f"{label}-d-byoung", f"{label}-d-bold"},
+              f"TZ {label} DST now: discards 364 d 23 h 30 min old stay, 365 d 0 h 30 min old go", sorted(disc))
+    # N: the database's now(), the session in a DST zone
+    ages = {"byoung": "now() - make_interval(hours => 30 * 24 - 1)",
+            "bold": "now() - make_interval(hours => 30 * 24 + 1)",
+            "xyoung": "now() - make_interval(hours => 365 * 24 - 1)",
+            "xold": "now() - make_interval(hours => 365 * 24 + 1)"}
+    _time_fixture(db, "dbnow", ages)
+    ad = PsqlAdapter(db, pre="SET TimeZone = 'America/New_York';\n")
+    reps = purge.run_all(ad, retention=r)
+    raw = names(db, "intake.raw_items")
+    disc = names(db, "intake.discards")
+    check(raw == {"dbnow-c-byoung", "dbnow-s-byoung"}
+          and disc == {"dbnow-d-xyoung", "dbnow-d-byoung", "dbnow-d-bold"},
+          "N no `now` given: the database's now() minus N x 24 h decides, session TimeZone America/New_York",
+          f"{sorted(raw)} {sorted(disc)} {[x.to_dict() for x in reps]}")
+    check(all(x.cutoff.startswith("database now() - ") for x in reps), "N the report names the database clock",
+          [x.cutoff for x in reps])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--container")
@@ -310,6 +390,7 @@ def main():
         left = names(db, "intake.raw_items")
         check(left == {n for n, *_x in RAW} - EXPECT_CLEAN - EXPECT_SUSPICIOUS,
               "P1 what remains in bronze is exactly what no rule names", sorted(left))
+        time_sections(db, r)
         # refused as a role without privileges: a model-facing role cannot purge
         try:
             purge.purge_discards(PsqlAdapter(db, role="service_role"), NOW, retention=r)

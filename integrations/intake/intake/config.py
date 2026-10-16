@@ -251,3 +251,18 @@ def second_opinion_config(env: Mapping[str, str] | None = None) -> SecondOpinion
         backoff_cap_seconds=cap,
         max_tokens=_so_int(env, "MAX_TOKENS", SECOND_OPINION_MAX_TOKENS, 8, 64),
     )
+
+
+# -- the D2 table's open policy points (I4 round 2; operator decision D40 pending) --------------
+#   INTAKE_D2_WEAK_RULE_JUDGE_CLEAN   suspicious (default; DESIGN section 5) | clean: the label
+#                                     of d2 row clean-with-rule-hit. Anything else is refused.
+D2_WEAK_RULE_JUDGE_CLEAN = "suspicious"
+
+
+def d2_policy(env: Mapping[str, str] | None = None):
+    from .d2 import Policy
+    env = os.environ if env is None else env
+    raw = env.get("INTAKE_D2_WEAK_RULE_JUDGE_CLEAN", D2_WEAK_RULE_JUDGE_CLEAN)
+    if raw not in ("suspicious", "clean"):
+        raise ValueError(f"INTAKE_D2_WEAK_RULE_JUDGE_CLEAN={raw!r} is not 'suspicious' or 'clean'")
+    return Policy(weak_rule_judge_clean=raw)

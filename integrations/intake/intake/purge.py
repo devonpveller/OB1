@@ -22,6 +22,22 @@ What each rule deletes - and NOTHING else (the policy names exactly these rows):
 unscreened or rejected item, or a mix of verdicts, is not named and stays. Age is the raw row's
 created_at; the cutoff is strict (exactly 30 days old stays).
 
+THE CUTOFF IS ABSOLUTE TIME (intake-i4 attempt 1, D-1). It is the DATABASE's now() minus
+N x 24 HOURS - make_interval(hours => ...), never "N days", because both Python's aware-datetime
+subtraction and postgres's timestamptz - 'N days' count calendar days in a zone, and across a
+DST change that is N days +- 1 hour (a row 29 d 23 h old was deleted in the tester's repro).
+Production passes no `now`. A test may pass a timezone-aware `now`; it is converted to UTC
+before the subtraction, so the same instant gives the same cutoff in every zone.
+
+POLICY POINT D41 (operator decision pending): whether "held items are purged after 30 days"
+also covers the `suspicious` CONTENT rows in public.sources / public.thoughts, or only the raw
+copy in bronze (what suspicious-bronze does). The intake role cannot delete those rows, and
+deleting a source cascades into gold (claim_sources, source_chunks, ...). If D41 says "the rows
+too", the change is local: a postgres-owned SECURITY DEFINER function in the migration that
+deletes only screen_verdict = 'suspicious' rows with an intake_item_id older than
+SUSPICIOUS_RETENTION_DAYS, granted EXECUTE to intake, plus one more entry in RULES below that
+calls it. If D41 says "the raw copy only", nothing changes.
+
 The ONE side effect on silver is the schema's own: intake.items.raw_item_id is
 `ON DELETE SET NULL` (init-intake.sql: "bronze is purged, silver stays"), so the items linked
 to a purged raw row keep everything but that pointer. intake.items rows are never deleted (they
@@ -58,7 +74,7 @@ def _bronze_sql(verdict: str) -> str:
     return f"""DELETE FROM intake.raw_items AS r
  WHERE r.id IN (
    SELECT b.id FROM intake.raw_items AS b
-    WHERE b.created_at < %(cutoff)s
+    WHERE b.created_at < COALESCE(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))
       AND EXISTS (SELECT 1 FROM intake.items AS i
                    WHERE (i.raw_item_id = b.id
                           OR (i.source, i.external_id, i.raw_sha256) = (b.source, b.external_id, b.raw_sha256))
@@ -78,7 +94,7 @@ SQL_SUSPICIOUS_BRONZE = _bronze_sql("suspicious")
 SQL_DISCARDS = """DELETE FROM intake.discards AS d
  WHERE d.id IN (
    SELECT x.id FROM intake.discards AS x
-    WHERE x.created_at < %(cutoff)s
+    WHERE x.created_at < COALESCE(CAST(%(cutoff)s AS timestamptz), now() - make_interval(hours => %(hours)s))
     ORDER BY x.created_at, x.id
     LIMIT %(batch)s
     FOR UPDATE OF x SKIP LOCKED)
@@ -88,7 +104,7 @@ RETURNING d.id"""
 @dataclass(frozen=True)
 class PurgeReport:
     rule: str
-    cutoff: str        # ISO 8601, UTC offset included
+    cutoff: str        # ISO 8601 in UTC, or "database now() - N hours" when no now was given
     deleted: int
     batches: int
     more: bool         # max_batches was reached with full batches: run again
@@ -104,17 +120,20 @@ def _whole(name: str, v, hi: int) -> int:
     return v
 
 
-def _run(db: DB, rule: str, sql: str, now: dt.datetime, days: int, batch_size: int,
+def _run(db: DB, rule: str, sql: str, now: dt.datetime | None, days: int, batch_size: int,
          max_batches: int) -> PurgeReport:
-    if not isinstance(now, dt.datetime) or now.tzinfo is None or now.utcoffset() is None:
-        raise ValueError("now must be a timezone-aware datetime")
+    if now is not None and (not isinstance(now, dt.datetime) or now.tzinfo is None
+                            or now.utcoffset() is None):
+        raise ValueError("now must be a timezone-aware datetime (or None: the database's now())")
     batch_size = _whole("batch_size", batch_size, _MAX_BATCH_SIZE)
     max_batches = _whole("max_batches", max_batches, _MAX_MAX_BATCHES)
-    cutoff = now - dt.timedelta(days=_whole("retention days", days, 10**6))
+    hours = _whole("retention days", days, 10**6) * 24
+    # D-1: absolute hours from a UTC instant, never calendar days in the caller's zone
+    cutoff = None if now is None else now.astimezone(dt.timezone.utc) - dt.timedelta(hours=hours)
     deleted = batches = 0
     more = False
     while batches < max_batches:
-        rows = db.execute(sql, {"cutoff": cutoff, "batch": batch_size})
+        rows = db.execute(sql, {"cutoff": cutoff, "hours": hours, "batch": batch_size})
         batches += 1
         n = len(rows)
         if n > batch_size:
@@ -124,31 +143,35 @@ def _run(db: DB, rule: str, sql: str, now: dt.datetime, days: int, batch_size: i
             break
     else:
         more = True
-    return PurgeReport(rule, cutoff.isoformat(), deleted, batches, more)
+    shown = cutoff.isoformat() if cutoff is not None else f"database now() - {hours} hours"
+    return PurgeReport(rule, shown, deleted, batches, more)
 
 
-def purge_clean_bronze(db: DB, now: dt.datetime, *, retention: Retention | None = None,
+def purge_clean_bronze(db: DB, now: dt.datetime | None = None, *, retention: Retention | None = None,
                        batch_size: int = BATCH_SIZE, max_batches: int = MAX_BATCHES) -> PurgeReport:
     r = retention or _retention()
     return _run(db, "clean-bronze", SQL_CLEAN_BRONZE, now, r.bronze_days, batch_size, max_batches)
 
 
-def purge_suspicious_bronze(db: DB, now: dt.datetime, *, retention: Retention | None = None,
+def purge_suspicious_bronze(db: DB, now: dt.datetime | None = None, *, retention: Retention | None = None,
                             batch_size: int = BATCH_SIZE, max_batches: int = MAX_BATCHES) -> PurgeReport:
     r = retention or _retention()
     return _run(db, "suspicious-bronze", SQL_SUSPICIOUS_BRONZE, now, r.suspicious_days, batch_size,
                 max_batches)
 
 
-def purge_discards(db: DB, now: dt.datetime, *, retention: Retention | None = None,
+def purge_discards(db: DB, now: dt.datetime | None = None, *, retention: Retention | None = None,
                    batch_size: int = BATCH_SIZE, max_batches: int = MAX_BATCHES) -> PurgeReport:
     r = retention or _retention()
     return _run(db, "discards", SQL_DISCARDS, now, r.discard_days, batch_size, max_batches)
 
 
-def run_all(db: DB, now: dt.datetime, *, retention: Retention | None = None,
+def run_all(db: DB, now: dt.datetime | None = None, *, retention: Retention | None = None,
             batch_size: int = BATCH_SIZE, max_batches: int = MAX_BATCHES) -> tuple[PurgeReport, ...]:
     r = retention or _retention()
     kw = dict(retention=r, batch_size=batch_size, max_batches=max_batches)
-    return (purge_clean_bronze(db, now, **kw), purge_suspicious_bronze(db, now, **kw),
-            purge_discards(db, now, **kw))
+    return tuple(fn(db, now, **kw) for fn in RULES)
+
+
+# The rules run_all runs, in order. D41 (above) would add one entry here.
+RULES = (purge_clean_bronze, purge_suspicious_bronze, purge_discards)

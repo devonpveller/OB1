@@ -48,7 +48,16 @@ def _quotes(ch: str, run: str) -> str:
     return ch * sum(1 for c in run if c in (_LT + _GT))
 
 
+# attempt 1 T-F6: one-character double angle brackets (much-less-than, guillemets, the
+# mathematical and CJK double angle brackets) are not `<<`, so they cannot form a marker; they are
+# still mapped to single angle quotation marks so a fence-shaped run reads the same to a model
+# whichever character spells it (I6's read side uses the same set).
+_DOUBLE = str.maketrans({"\u226a": "\u2039", "\u00ab": "\u2039", "\u27ea": "\u2039", "\u300a": "\u2039",
+                         "\u226b": "\u203a", "\u00bb": "\u203a", "\u27eb": "\u203a", "\u300b": "\u203a"})
+
+
 def neutralise(text: str) -> str:
+    text = text.translate(_DOUBLE)
     text = _LT_RUN.sub(lambda m: _quotes("\u2039", m.group(0)), text)
     return _GT_RUN.sub(lambda m: _quotes("\u203a", m.group(0)), text)
 

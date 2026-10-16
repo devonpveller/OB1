@@ -185,7 +185,19 @@ def _no_duplicates(pairs):
 
 
 def parse_reply(status: int, body: bytes) -> Opinion:
-    """The gateway's reply -> an Opinion. Pure; never raises."""
+    """The gateway's reply -> an Opinion. Pure; never raises (attempt 1 T-F2: whatever the
+    types of `status` and `body`)."""
+    try:
+        return _parse_reply(status, body)
+    except Exception:  # noqa: BLE001 - total by contract
+        return Opinion(None, "malformed", "unreadable reply")
+
+
+def _parse_reply(status, body) -> Opinion:
+    if isinstance(status, bool) or not isinstance(status, int):
+        return Opinion(None, "client_error", "the status is not an integer")
+    if not isinstance(body, (bytes, bytearray)):
+        return Opinion(None, "malformed", "the body is not bytes")
     if status == 429:
         return Opinion(None, "rate_limited", "http 429")
     if 500 <= status <= 599:
@@ -234,6 +246,18 @@ def parse_verdict(content: str) -> str | None:
     return v if isinstance(v, str) and v in VERDICTS else None
 
 
+def _seal(key: str):
+    """The Authorization header value, behind a closure; None without a usable key. A key with
+    anything but printable ASCII (a CR/LF would split the header) is not a key."""
+    if not key or not all("!" <= c <= "~" for c in key):
+        return None
+
+    def authorization() -> str:
+        return "Bearer " + key
+
+    return authorization
+
+
 class Judge:
     """One client of the GPU model through LiteLLM. `transport` performs the HTTP call."""
 
@@ -243,15 +267,17 @@ class Judge:
         self.cfg = cfg or second_opinion_config(env)
         self._transport = transport
         key = env.get(KEY_ENV, "")
-        self.__key = key.strip() if isinstance(key, str) else ""
+        # attempt 1 T-F5: the key is never an attribute (vars(judge) shows a function, not
+        # the key); it lives only in this closure and in the header of a request being built
+        self._authorization = _seal(key.strip() if isinstance(key, str) else "")
 
     def __repr__(self) -> str:
         return (f"Judge(model={self.cfg.model!r}, endpoint={ENDPOINT!r}, "
-                f"key={'set' if self.__key else 'unset'})")
+                f"key={'set' if self.has_key else 'unset'})")
 
     @property
     def has_key(self) -> bool:
-        return bool(self.__key)
+        return self._authorization is not None
 
     def build_request(self, ji: JudgeInput) -> tuple[HttpRequest, str]:
         excerpts = "\n-----\n".join(ji.chunks)
@@ -268,7 +294,7 @@ class Judge:
                          {"role": "user", "content": user}],
         }
         req = HttpRequest(url=ENDPOINT,
-                          headers=(("Authorization", "Bearer " + self.__key),
+                          headers=(("Authorization", self._authorization()),
                                    ("Content-Type", "application/json")),
                           body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                           timeout=self.cfg.timeout_seconds)
@@ -278,13 +304,13 @@ class Judge:
         """One request. Never raises; never puts the key in what it returns or logs."""
         if not ji.chunks:
             return Opinion(None, "empty", "no judge input")
-        if not self.__key:
-            log.warning("second opinion: %s is not set; nothing sent", KEY_ENV)
-            return Opinion(None, "no_key", f"{KEY_ENV} is not set")
+        if self._authorization is None:
+            log.warning("second opinion: %s is not set or not a valid key; nothing sent", KEY_ENV)
+            return Opinion(None, "no_key", f"{KEY_ENV} is not set or not a valid key")
         req, _nonce = self.build_request(ji)
         try:
             resp = self._transport(req)
-            op = parse_reply(int(resp.status), bytes(resp.body))
+            op = parse_reply(resp.status, resp.body)
         except TransportError as e:
             kind = e.kind if e.kind in ("timeout", "oversize") else "network"
             op = Opinion(None, kind, f"transport {kind}")
@@ -346,6 +372,10 @@ def advance(judge: Judge, ji: JudgeInput, state: WaitState, *, now: float, max_w
             rng: random.Random | None = None) -> Step:
     """One scheduler step for one waiting item."""
     rng = rng or random.Random()
+    if state.first_pending_at > now:
+        # attempt 1 T-F7: a start in the future (clock skew, a bad row) would move the 24 h cap
+        # later; the wait is measured from now at the latest
+        state = WaitState(now, state.attempts, state.next_attempt_at, state.last_outcome)
     if now - state.first_pending_at >= max_wait_s or state.attempts >= judge.cfg.max_attempts:
         return Step("expired", state)
     if now < state.next_attempt_at:
@@ -361,11 +391,12 @@ def advance(judge: Judge, ji: JudgeInput, state: WaitState, *, now: float, max_w
     return Step("retry", new, op)
 
 
-def decision(result: IntakeResult, step: Step | None, ji: JudgeInput | None = None) -> d2.Decision:
+def decision(result: IntakeResult, step: Step | None, ji: JudgeInput | None = None,
+             policy: d2.Policy = d2.DEFAULT_POLICY) -> d2.Decision:
     """D2 for an item and its latest second-opinion step (None: not asked yet)."""
     if step is None or step.kind in ("wait", "retry"):
-        return d2.decide(d2.evidence_from(result, opinion="awaiting" if step else "not_asked"))
+        return d2.decide(d2.evidence_from(result, opinion="awaiting" if step else "not_asked"), policy)
     if step.kind == "expired":
-        return d2.decide(d2.evidence_from(result, opinion="awaiting", expired=True))
+        return d2.decide(d2.evidence_from(result, opinion="awaiting", expired=True), policy)
     complete = ji.complete if ji is not None else result.judge_complete
-    return d2.decide(d2.evidence_from(result, opinion=step.opinion.verdict, complete=complete))
+    return d2.decide(d2.evidence_from(result, opinion=step.opinion.verdict, complete=complete), policy)

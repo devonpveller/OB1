@@ -22,7 +22,7 @@ The table, first matching row wins (`row` names it):
   second-opinion-uncertain   opinion uncertain                             suspicious
   expired                    expired                                       suspicious
   transient-error            error transient                               pending (retry the screen)
-  clean-with-rule-hit        opinion clean, rule weak                      suspicious
+  clean-with-rule-hit        opinion clean, rule weak                      suspicious (Policy, D40)
   clean-evidence-missing     opinion clean, rule or classifier missing     suspicious
   clean-partial              opinion clean, judge saw only part            suspicious
   second-opinion-clean       opinion clean, nothing else against           clean
@@ -38,6 +38,7 @@ alone was over the threshold and a judge that read every flagged chunk said clea
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .result import IntakeResult
@@ -88,9 +89,31 @@ class Decision:
                 "second_opinion": self.second_opinion}
 
 
-def decide(ev: Evidence) -> Decision:
+@dataclass(frozen=True)
+class Policy:
+    """The policy points of the table that the operator may still set.
+
+    weak_rule_judge_clean (D40, pending): the label of row `clean-with-rule-hit` - a WEAK rule
+    hit that a judge who saw ALL the flagged evidence called clean. "suspicious" (the DESIGN
+    section 5 row, the default) or "clean". Either way the row applies only with no missing
+    stage, a complete judge input, no error and no expiry; nothing else in the table moves.
+    Config: INTAKE_D2_WEAK_RULE_JUDGE_CLEAN (config.d2_policy)."""
+
+    weak_rule_judge_clean: str = "suspicious"
+
+    def __post_init__(self):
+        if self.weak_rule_judge_clean not in ("suspicious", "clean"):
+            raise ValueError("weak_rule_judge_clean is 'suspicious' or 'clean'")
+
+
+DEFAULT_POLICY = Policy()
+
+
+def decide(ev: Evidence, policy: Policy = DEFAULT_POLICY) -> Decision:
     if not isinstance(ev, Evidence):
         raise ValueError("decide() takes an Evidence")
+    if not isinstance(policy, Policy):
+        raise ValueError("decide() takes a d2.Policy")
     if ev.rule == "strong":
         return Decision("injected", "strong-rule")
     if ev.opinion == "injection":
@@ -104,16 +127,26 @@ def decide(ev: Evidence) -> Decision:
     if ev.error == "transient":
         return Decision("pending", "transient-error", retry=True)
     if ev.opinion == "clean":
-        if ev.rule == "weak":
+        if ev.rule == "weak" and policy.weak_rule_judge_clean == "suspicious":
             return Decision("suspicious", "clean-with-rule-hit")
         if ev.rule == "missing" or ev.classifier == "missing":
             return Decision("suspicious", "clean-evidence-missing")
         if not ev.opinion_complete:
             return Decision("suspicious", "clean-partial")
+        if ev.rule == "weak":  # D40 = clean: a complete judge clean clears a WEAK hit
+            return Decision("clean", "clean-with-rule-hit")
         return Decision("clean", "second-opinion-clean")
     if ev.rule in ("weak", "missing") or ev.classifier in ("over", "missing"):
         return Decision("pending", "awaiting-second-opinion", second_opinion=True)
     return Decision("clean", "no-signal")
+
+
+def _unit(v) -> float | None:
+    """v as a float in [0, 1], or None (bool, non-number, NaN, inf, out of range)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) and 0.0 <= f <= 1.0 else None
 
 
 def evidence_from(result: IntakeResult, *, opinion: str = "not_asked", complete: bool | None = None,
@@ -131,13 +164,16 @@ def evidence_from(result: IntakeResult, *, opinion: str = "not_asked", complete:
     else:
         rule = "missing"
     clf = result.classifier
+    classifier = "missing"
     if stages.get("classifier") == "ok" and clf is not None:
-        try:
-            over = float(clf["max_score"]) >= float(clf["threshold"])
-            classifier = "over" if over else "below"
-        except (KeyError, TypeError, ValueError):
-            classifier = "missing"
-    else:
+        score, threshold = _unit(clf.get("max_score")), _unit(clf.get("threshold"))
+        # attempt 1 T-F1: a score or threshold that is not a real number in [0, 1] (NaN, inf,
+        # a string, a bool) is no evidence: `missing`, never `below`
+        if score is not None and threshold is not None and threshold > 0.0:
+            classifier = "over" if score >= threshold else "below"
+    if result.needs_second_opinion and rule == "none" and classifier == "below":
+        # T-F1: the result itself says the judge is needed, but no evidence here says why;
+        # inconsistent evidence is missing evidence (never `no-signal`)
         classifier = "missing"
     if result.error is None:
         error = "none"
