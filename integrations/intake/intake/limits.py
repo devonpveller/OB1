@@ -1,12 +1,17 @@
 """Size and work caps for the deterministic stages (DESIGN-intake.md sections 3 and 7).
 
-Every stage is bounded twice: by input size (these byte caps, checked before any parsing) and
-by work (the caps below, checked while parsing). A volume cap truncates, like the byte caps:
-what is not extracted is never stored or shown. Structurally hostile input (element nesting,
-MIME containers, JSON depth, a normalisation bomb) is a "parser bomb" and gets a `rejected`
-result (DESIGN section 7). The values keep the worst case under each cap well inside the 1 s
-bound the I2 acceptance sets (tests/test_bounds.py); the findings note for intake-i2 lists
-the measurements.
+Every stage is bounded twice: by input size (the byte caps, checked before any parsing) and by
+work (the caps below, checked while parsing). Operator D34 (2026-10-15): a legitimate page up
+to the 2 MB HTML cap is extracted WHOLE - the work caps are set above anything a real page
+reaches, and input that passes one is structurally hostile (a parser bomb) and is `rejected`
+(DESIGN section 7), never truncated. The only truncation left is the 2 MB HTML byte cap that
+DESIGN itself sets.
+
+The bound (I2 acceptance, D34): every input inside the caps finishes in < 2 s on the
+reference host (i7-7820X). DEADLINE_SECONDS is enforced INSIDE the stages (deadline.py): the
+loops check it, and no step between two checks is longer than ~0.2 s on 5 MB, so a run that
+has not finished by the deadline stops there and fails closed (`pending`). tests/test_bounds.py
+measures every case; the findings note for intake-i2 lists the numbers.
 """
 from __future__ import annotations
 
@@ -15,19 +20,20 @@ RAW_MAX_BYTES = 5 * 1024 * 1024
 
 # Stage 3, HTML: input is cut to this many bytes (on a UTF-8 boundary) before parsing.
 HTML_MAX_BYTES = 2 * 1024 * 1024
-# Volume caps: past one, extraction stops and the rest of the document is truncated (like the
-# byte cap; what is not extracted is never stored or shown).
-# Tags (start, end, comment, doctype, script markers) per document.
-HTML_MAX_TAGS = 60_000
+# Work caps (a page past one is a parser bomb, `rejected`). A real 2 MB page has well under
+# 150,000 tags (about 14 bytes of markup per tag); 250,000 needs tags averaging < 9 bytes.
+HTML_MAX_TAGS = 150_000
 # Character references decoded per document (text and the attributes we read).
-HTML_MAX_ENTITIES = 150_000
+HTML_MAX_ENTITIES = 400_000
 # Distinct inline style attributes evaluated per document (identical ones are cached).
-HTML_MAX_STYLE_EVALS = 3000
-# Structural cap: more open elements than this is a parser bomb (`rejected`). Blink caps DOM
-# depth at 512 too.
+HTML_MAX_STYLE_EVALS = 20_000
+# More open elements than this is a parser bomb. Blink caps DOM depth at 512 too.
 HTML_MAX_DEPTH = 512
-# Attribute bytes we parse per element (style, hidden, href, src ...). Longer = not parsed.
+# Attribute bytes we parse per element (style, hidden, href, src ...). A longer attribute
+# list on an element is not parsed; if it mentions style/hidden the element counts as hidden.
 HTML_MAX_ATTR_BYTES = 64 * 1024
+# Characters inside one CSS calc() expression we evaluate; longer counts as hiding.
+CSS_MAX_CALC_CHARS = 512
 
 # Links and images handed back in links[] (more are counted, not listed).
 MAX_LINKS = 2000
@@ -39,11 +45,9 @@ TITLE_MAX_CHARS = 300
 MIME_MAX_MULTIPART = 32  # multipart containers per message (bounds the parser's boundary stack)
 MIME_MAX_PARTS = 256
 MIME_MAX_HEADER_CHARS = 2000  # subject / filename read at most this long
-
-# Stage 3, JSON: nesting deeper than this is a parser bomb.
-JSON_MAX_DEPTH = 200
-# Past this many JSON values the rest is not extracted (a volume cap).
-JSON_MAX_NODES = 100_000
+# The stdlib parser costs ~0.5 us per line; a 5 MB message of ordinary (<= 78 char) lines has
+# ~70,000. More than this is a parser bomb (attempt 1: 5 MB of QP soft breaks took 1 s).
+MIME_MAX_LINES = 300_000
 
 # Stage 4: runs of non-starters (combining class != 0) longer than this are trimmed in the
 # copy the rules read (Unicode UAX #15 stream-safe format), so NFKC reordering stays linear.
@@ -54,6 +58,7 @@ NFKC_CHUNK_CHARS = 4096
 # The NFKC copy may be at most this many times longer than its input (plus slack); more is a
 # normalisation bomb (one U+FDFA expands to 18 characters).
 NFKC_MAX_EXPANSION = 3
+NFKC_EXPANSION_SLACK = 65536
 # Characters that are slow to normalise (an NFKC form of 4+ characters such as U+FDFA or the
 # squared CJK words, ~2.4 us each; halfwidth katakana, ~0.3 us each; CPython 3.13) allowed in
 # one text; more is a normalisation bomb.
@@ -61,7 +66,14 @@ NFKC_MAX_EXPENSIVE = 20_000
 # Runs of 4+ combining marks allowed in one text (canonical reordering is quadratic in the run
 # length); more is a normalisation bomb.
 NFKC_MAX_LONG_MARK_RUNS = 2000
-NFKC_EXPANSION_SLACK = 65536
+# str.translate over the whole text runs in slices of this many characters, so the deadline
+# is checked between them.
+TRANSLATE_SLICE_CHARS = 262_144
 
-# Stage 8: the stages together get this long; a stage that finishes past it fails closed.
-DEADLINE_SECONDS = 10.0
+# Stage 5: matches collected per cue rule for the co-occurrence (combo) rule; and the most
+# forged lines / [Source N] tokens neutralised before the item is a bomb.
+CUE_MAX_MATCHES = 1000
+MAX_NEUTRALISED = 10_000
+
+# Stage 8: the run's time limit, checked inside the stages (deadline.py).
+DEADLINE_SECONDS = 1.6

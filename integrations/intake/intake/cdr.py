@@ -24,6 +24,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from . import deadline as _deadline
 from . import limits
 from .htmlscan import ParserBomb, extract_html
 
@@ -72,40 +73,46 @@ def decode_bytes(data: bytes, charset: str | None) -> str:
     return text
 
 
-def _html(data: bytes, charset: str | None) -> Extract:
+def _html(data: bytes, charset: str | None, dl=_deadline.NONE) -> Extract:
     # one pass that also replaces invalid input, so the scanner sees valid UTF-8
-    h = extract_html(decode_bytes(data, charset).encode("utf-8"))
+    h = extract_html(decode_bytes(data, charset).encode("utf-8"), dl)
     return Extract(text=h.text, title=h.title, links=h.links, counts=h.counts)
 
 
 def _json(data: bytes, charset: str | None) -> Extract:
+    """The document re-serialised compactly by the C encoder with ensure_ascii=False: every
+    string (key or value) appears with its JSON escapes decoded (so an escape sequence cannot
+    hide a letter from the rules), in one C-speed pass (operator D34: no truncation; the
+    attempt-1 Python walk needed a node cap to stay fast). The encoder still escapes control
+    characters and quotes; the control escapes are turned back into the characters, so stage 4
+    strips and counts them like any other (round 2: '!\\u0001[' would otherwise hide a rule
+    match behind six visible characters)."""
+    raw = decode_bytes(data, charset)
     try:
-        doc = json.loads(decode_bytes(data, charset))
+        doc = json.loads(raw)
+        # with no backslash in the source, every string already reads as written: keep it
+        text = raw if "\\" not in raw else json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
     except RecursionError:
         raise ParserBomb("json: nesting too deep") from None
     except ValueError as e:
         raise ContentInvalid(f"json: {e}") from None
-    lines: list[str] = []
-    stack = [(doc, 0)]
-    nodes = truncated = 0
-    while stack:
-        node, depth = stack.pop()
-        nodes += 1
-        if nodes > limits.JSON_MAX_NODES:  # a volume cap: the rest is not extracted
-            truncated = 1
-            break
-        if depth > limits.JSON_MAX_DEPTH:
-            raise ParserBomb(f"json: nesting deeper than {limits.JSON_MAX_DEPTH}")
-        if isinstance(node, str):
-            lines.append(node)
-        elif isinstance(node, dict):
-            for k, v in reversed(list(node.items())):
-                stack.append((v, depth + 1))
-                stack.append((k, depth + 1))
-        elif isinstance(node, list):
-            for v in reversed(node):
-                stack.append((v, depth + 1))
-    return Extract(text="\n".join(lines), counts={"truncated_at_cap": truncated})
+    if "\\" in text:
+        text = _JSON_ESCAPE.sub(_json_unescape, text)
+    return Extract(text=text)
+
+
+# Python `re`, linear by form: a literal backslash, then alternatives decided by the next
+# character; an escaped backslash is consumed whole, so '\\\\u0001' stays text.
+_JSON_ESCAPE = re.compile(r"\\(?:u00([0-1][0-9a-fA-F]|7[fF])|([bfnrt])|(\\))")
+_JSON_SIMPLE = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _json_unescape(m) -> str:
+    if m.group(1) is not None:
+        return chr(int(m.group(1), 16))
+    if m.group(2) is not None:
+        return _JSON_SIMPLE[m.group(2)]
+    return m.group(0)
 
 
 def _header_params(value: str) -> tuple[str, dict[str, str]]:
@@ -142,7 +149,9 @@ def _subject(msg) -> str | None:
         return raw
 
 
-def _email(data: bytes) -> Extract:
+def _email(data: bytes, dl=_deadline.NONE) -> Extract:
+    if data.count(b"\n") > limits.MIME_MAX_LINES:
+        raise ParserBomb(f"email: more than {limits.MIME_MAX_LINES} lines")
     if data.lower().count(b"boundary") > limits.MIME_MAX_MULTIPART:
         raise ParserBomb(f"email: more than {limits.MIME_MAX_MULTIPART} multipart containers")
     # Count the parts before parsing (the stdlib parser costs ~30 us per part): each part
@@ -192,17 +201,17 @@ def _email(data: bytes) -> Extract:
             out.text = text
     if chosen is None and html is not None:
         body = html[0].get_payload(decode=True) or b""
-        h = _html(body, html[1])
+        h = _html(body, html[1], dl)
         out.text, out.links, out.counts = h.text, h.links, h.counts
     out.counts["attachments"] = len(attachments)
     return out
 
 
-def extract(kind: str, data: bytes, charset: str | None) -> Extract:
+def extract(kind: str, data: bytes, charset: str | None, dl=_deadline.NONE) -> Extract:
     if kind == "html":
-        return _html(data, charset)
+        return _html(data, charset, dl)
     if kind == "rfc822":
-        return _email(data)
+        return _email(data, dl)
     if kind == "json":
         return _json(data, charset)
     if kind in ("plain", "markdown"):

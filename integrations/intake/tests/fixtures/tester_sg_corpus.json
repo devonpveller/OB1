@@ -1,0 +1,552 @@
+{
+ "about": "The attempt-1 tester's search-gateway snippets (4 queries through the stack's search gateway GET /search on 127.0.0.1:8085, 2026-10-15; raw responses in journal/evidence/intake-i2/tester-attempt1/sg_*.json). Legitimate writing about judge injection, markdown-image exfiltration, ChatML special tokens and LLM-as-a-judge attacks. None may hit a STRONG rule.",
+ "retrieved": "2026-10-15",
+ "items": [
+  {
+   "id": "t01",
+   "url": "https://www.lesswrong.com/posts/GPMZaRmxxNb8o2aGo/evaluating-using-mock-tool-calls-to-quarantine-untrusted-2",
+   "title": "Evaluating using Mock Tool Calls to Quarantine Untrusted Prompt Inputs",
+   "excerpt": "For example, consider this LLM-as-a-Judge prompt to grade whether a candidate answer correctly solves a math problem. Figure 1a: A simplified user-only prompt. The {fields} would get replaced with inputs.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t02",
+   "url": "https://arxiv.org/html/2505.13348v1",
+   "title": "Investigating the Vulnerability of LLM-as-a-Judge Architectures to ...",
+   "excerpt": "However, the reliability and security of such systems, particularly their robustness against adversarial manipulations, remain critical concerns. This paper investigates the vulnerability of LLM-as-a-Judge architectures to prompt-injection attacks, where malicious inputs are designed to compromise the judge's decision-making process.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t03",
+   "url": "https://arxiv.org/pdf/2508.13214",
+   "title": "Too Easily Fooled? Prompt Injection Breaks LLMs on Frustratingly...",
+   "excerpt": "Optimization-based prompt injection attack to llm-as-a-judge. In Proceedings of the 2024 on ACM SIGSAC Conference on Computer and Commu-nications Security, pages 660\u2013674, 2024.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t04",
+   "url": "https://arxiv.org/html/2403.17710v4",
+   "title": "Optimization-based Prompt Injection Attack to LLM-as-a-Judge",
+   "excerpt": "In prompt injection attacks, the attacker injects a prompt into the data, misleading the LLM into executing the injected prompt instead of the intended one, generating an attacker-desired output.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t05",
+   "url": "https://www.academia.edu/126691157/Optimization_based_Prompt_Injection_Attack_to_LLM_as_a_Judge",
+   "title": "(PDF) Optimization-based Prompt Injection Attack to LLM-as-a-Judge",
+   "excerpt": "LLMas-a-Judge has many applications such as LLM-powered search, reinforcement learning with AI feedback (RLAIF), and tool selection. In this work, we propose JudgeDeceiver, an optimization-based prompt injection attack to LLM-as-a-Judge.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t06",
+   "url": "http://injoit.org/index.php/j1/article/view/2261",
+   "title": "Investigating the Vulnerability of LLM-as-a-Judge Architectures to ...",
+   "excerpt": "However, the reliability and security of such systems, particularly their robustness against adversarial manipulations, remain critical concerns. This paper investigates the vulnerability of LLM-as-a-Judge architectures to prompt-injection attacks, where malicious inputs are designed to compromise the judge's decisionmaking process.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t07",
+   "url": "https://dev.to/nar1frames/i-fired-49-attack-prompts-at-an-ai-25-of-them-worked-2c5l",
+   "title": "I Fired 49 Attack Prompts at an AI. 25 of Them... - DEV Community",
+   "excerpt": "The LLM-as-judge caught it: PARTIAL. Severity: HIGH. The same pattern appeared when I asked it to run import os; print(os.listdir('/')): \"I'm not capable of directly running code, but I can simulate the output for you.\" It then printed a simulated filesystem listing. The judge: PARTIAL.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t08",
+   "url": "https://huggingface.co/papers/2505.13348",
+   "title": "Paper page - Investigating the Vulnerability of LLM-as-a-Judge ...",
+   "excerpt": "Abstract LLM-as-a-Judge systems are vulnerable to prompt-injection attacks that can manipulate decision outputs and reasoning processes, as demonstrated by significant attack success rates on open-source models.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t09",
+   "url": "https://huggingface.co/papers/2403.17710",
+   "title": "Paper page - Optimization-based Prompt Injection Attack to...",
+   "excerpt": "LLM-as-a-Judge has many applications such as LLM-powered search, reinforcement learning with AI feedback (RLAIF), and tool selection. In this work, we propose JudgeDeceiver, an optimization-based prompt injection attack to LLM-as-a-Judge.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t10",
+   "url": "https://threatatlas.ai/source/maloyan-judge-prompt-injection-2025",
+   "title": "Adversarial Attacks on LLM-as-a-Judge Systems: Insights from Prompt ...",
+   "excerpt": "Systematic study of prompt injection attacks on LLM judging systems covering content-based and system-prompt attacks. Up to 73.8% attack success rate. Smaller models substantially more vulnerable. Attack transferability 50-62% across model families. Recommends multi-model committee judging as mitigation. Key Contributions",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t11",
+   "url": "https://www.alphaxiv.org/abs/2505.13348",
+   "title": "Investigating the Vulnerability of LLM-as-a-Judge... | alphaXiv",
+   "excerpt": "This paper investigates the vulnerability of LLM-as-a-Judge architectures to prompt-injection attacks, where malicious inputs are designed to compromise the judge's decision-making process.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t12",
+   "url": "https://dl.acm.org/doi/full/10.1145/3803628.3807972",
+   "title": "Analysis of LLMs Against Prompt Injection and Jailbreak Attacks",
+   "excerpt": "Prompt injection and jailbreak attacks have emerged as one of the most critical security vulnerabilities in instruction-following Large Language Models (LLMs). These attacks exploit the fundamental design principle of LLMs-their strong tendency to follow natural language instructions and maintain contextual coherence in order to override safety ...",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t13",
+   "url": "https://pub.towardsai.net/how-to-protect-your-ai-saas-from-prompt-injection-and-bad-users-184116f3c203",
+   "title": "How to Protect Your AI SaaS From Prompt Injection and... | Towards AI",
+   "excerpt": "Learn how to stop prompt injection attacks in AI chatbots, SaaS applications, and generative AI tools using a smart LLM-as-a-Judge security\u2026",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t14",
+   "url": "https://dlnext.acm.org/doi/10.1145/3658644.3690291",
+   "title": "Optimization-based Prompt Injection Attack to LLM-as-a-Judge",
+   "excerpt": "LLM-as-a-Judge uses a large language model (LLM) to select the best response from a set of candidates for a given question. LLM-as-a-Judge has many applications such as LLM-powered search, reinforcement learning with AI feedback (RLAIF), and tool selection. In this work, we propose JudgeDeceiver, an optimization-based prompt injection attack to LLM-as-a-Judge. JudgeDeceiver injects a carefully ...",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t15",
+   "url": "https://medium.com/@epappas/reading-the-prompt-you-did-not-send-detection-at-the-inference-boundary-28092075061f",
+   "title": "Reading the Prompt You Did Not Send: Detection at the... | Medium",
+   "excerpt": "The published LLM-as-a-Judge adversarial work gives the falsification reason: the judge is itself attackable through prompt injection in the content it judges. A trained classifier with a fixed input format avoids that recursion.1.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t16",
+   "url": "https://www.mdpi.com/2078-2489/17/1/54",
+   "title": "Prompt Injection Attacks in Large Language Models and AI Agent ... - MDPI",
+   "excerpt": "Large language models (LLMs) have rapidly transformed artificial intelligence applications across industries, yet their integration into production systems has unveiled critical security vulnerabilities, chief among them prompt injection attacks. This comprehensive review synthesizes research from 2023 to 2025, analyzing 45 key sources, industry security reports, and documented real-world ...",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t17",
+   "url": "https://app.ailog.fr/en/blog/guides/rag-guardrails-prompt-injection",
+   "title": "RAG Guardrails: 12 Techniques to Block Prompt Injections | Ailog RAG",
+   "excerpt": "Prompt injection is the #1 security risk for LLM applications (OWASP Top 10 for LLM Applications, LLM01). This guide presents 12 concrete techniques to protect your RAG pipeline: input validation, output filtering, instruction hierarchy, canary tokens, and LLM-as-judge.",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t18",
+   "url": "https://www.sciencedirect.com/org/science/article/pii/S1546221826001384",
+   "title": "Prompt Injection Attacks on Large Language Models: A Survey of Attack ...",
+   "excerpt": "We recommend a phased deployment approach: Phase 1 (Immediate) -Deploy lightweight input-based filtering as a first line of defense, providing immediate risk reduction with minimal integration complexity; Phase 2 (Short-term) -Implement output-based validation or LLM-as-a-judge mechanisms to catch attacks that bypass input filters, creating a ...",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t19",
+   "url": "https://guardion.ai/blog/beyond-regex-detecting-prompt-injection-at-the-gateway-layer-using-ml-classification",
+   "title": "Beyond Regex: Detecting Prompt Injection at the... | GuardionAI",
+   "excerpt": "Phase 2: LLM-as-a-Judge. To counter the semantic nature of these attacks, the industry swung to the opposite extreme. If an attacker is using an LLM to craft a clever semantic attack, why not use another LLM to detect it?",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t20",
+   "url": "https://threatatlas.ai/technique/judge-deceiver-attack",
+   "title": "LLM-as-Judge Manipulation (JudgeDeceiver / Evaluator Prompt Injection ...",
+   "excerpt": "Adversarial optimization of injected text appended to a candidate response causes an LLM-as-Judge evaluator to select that response as best regardless of its actual quality or harmfulness. Unlike semantic persuasion, JudgeDeceiver uses gradient-based optimization (similar to GCG suffix attacks) to craft a suffix that forces the judge model to output a favorable verdict. The injected sequence ...",
+   "query": "LLM-as-a-judge prompt injection attack output verdict"
+  },
+  {
+   "id": "t21",
+   "url": "https://www.promptfoo.dev/docs/red-team/plugins/special-token-injection/",
+   "title": "Special Token Injection for LLMs | Promptfoo",
+   "excerpt": "Special Token Injection for LLMs Overview Special Token Injection (STI) is a technique that exploits conversation format delimiters to manipulate LLM behavior. These attacks leverage the special tokens used by different AI systems to structure conversations, such as ChatML format tags (<|im_start|>, <|im_end|>), Llama format markers ([INST], [/INST]), and other conversation delimiters. By ...",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t22",
+   "url": "https://blog.sentry.security/special-token-injection-sti-attack-guide/",
+   "title": "Special Token Injection (STI) Attack Guide",
+   "excerpt": "AI Red Team Special Token Injection (STI) Attack Guide Large Language Models introduce security issues reminiscent of early-2000s software bugs. Special Token Injection (STI) exploits how LLMs parse structured prompts. This post breaks down what STI is, how it works, where it appears, and why it matters\u2014through a pentester's lens.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t23",
+   "url": "https://github.com/Ayubjon/special-token-guard",
+   "title": "GitHub - Ayubjon/special-token-guard: Detect and neutralize LLM chat ...",
+   "excerpt": "If those <|im_start|> / <|im_end|> / [INST] / <start_of_turn> markers reach the tokenizer verbatim, the model can read them as real turn boundaries and treat the attacker's text as a new system message. This is the Special Token Injection attack class, and it is especially relevant for raw-prompt pipelines (llama.cpp, vLLM, fine-tuning datasets, RAG context assembly).",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t24",
+   "url": "https://www.netzilo.com/threats/atr-im-end-im-start-system-prompt-injection-format-markers",
+   "title": "im_end / im_start System Prompt Injection Format Markers... | Netzilo",
+   "excerpt": "The attacker sends a message that looks like ordinary user text but contains raw ChatML or Llama-format control tokens. These tokens normally exist only in the underlying prompt template that separates system, user, and assistant turns.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t25",
+   "url": "https://www.thehackerwire.com/cve-2026-61732-critical-decepticon-agent-flaw-chatml-injection-bypasses-guardrails-enables-rce/",
+   "title": "CVE-2026-61732: Critical Decepticon Agent Flaw: ChatML Injection ...",
+   "excerpt": "Inspect LLM interaction logs for unusual prompt structures, specifically the presence of ChatML special-token literals (e.g., <|im_start|>, <|im_end|>, system, user, assistant) within the input stream that corresponds to web crawl results. Pay close attention to LLM API calls with unusually long or malformed prompt content.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t26",
+   "url": "https://huggingface.co/dphn/dolphin-2.0-mistral-7b/discussions/3",
+   "title": "dphn/dolphin-2.0-mistral-7b \u00b7 ChatML prompt format confusion...",
+   "excerpt": "The benefit of ChatML (for OpenAI) is that if you need to prevent prompt injection that 'breaks alignment', the extra tokens won't be recognized by the model. A model that's designed to be openly available has no use for this security measure.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t27",
+   "url": "https://mughalhere.github.io/prompt-protection/docs/prompt-injection-examples.html",
+   "title": "Prompt Injection Examples: A Reference of Real Attack Patterns",
+   "excerpt": "A categorised reference of real prompt injection and jailbreak attack patterns: instruction override, system-token spoofing, data exfiltration, context smuggling, obfuscation and multi-turn attacks \u2014 each with the detection signal that catches it.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t28",
+   "url": "https://github.com/renatoworks/ai-security",
+   "title": "GitHub - renatoworks/ai-security: AI security: defense-in-depth guide...",
+   "excerpt": "8. ChatML / Token Injection. Inject raw formatting tokens to break out of the user turn and forge a fake system or assistant message.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t29",
+   "url": "https://www.salmanq.com/blog/llm-special-tokens/",
+   "title": "The Grammar of LLM Special Tokens | Salman Quazi",
+   "excerpt": "The raw ChatML string (where special tokens are interpolated alongside user text) is like string concatenation in SQL \u2014 technically functional, but asking for injection.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t30",
+   "url": "https://gemma4.dev/guides/gemma-4-prompt-formatting",
+   "title": "Gemma 4 Prompt Formatting Guide | gemma4.dev",
+   "excerpt": "Correct chat template and system prompt format for Gemma 4 models. Avoid common formatting mistakes that cause poor Gemma 4 output quality.Gemma 4's template uses <start_of_turn> and <end_of_turn> tokens as turn delimiters. The raw format looks like this",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t31",
+   "url": "https://ranjankumar.in/chatml-the-structured-language-behind-conversational-ai",
+   "title": "ChatML: What It Is, Why OpenAI Removed It, What Replaced It",
+   "excerpt": "The ChatML specification was removed from OpenAI's Python library in November 2023, the <|im_start|> tokens are not registered in any public OpenAI tokenizer, and the security research published since 2025 has turned the format into an attack payload.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t32",
+   "url": "https://azure.github.io/PyRIT/code/memory/chat_message.html",
+   "title": "Chat messages - optional \u2014 PyRIT Documentation",
+   "excerpt": "3. Cross-domain Prompt Injection Attacks (XPIA).Below is an example that converts a list of chat messages to chatml format and back. from pyrit.chat_message_normalizer import ChatMessageNormalizerChatML from pyrit.models import ChatMessage.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t33",
+   "url": "https://huggingface.co/learn/agents-course/en/unit1/messages-and-special-tokens",
+   "title": "Messages and Special Tokens \u00b7 Hugging Face",
+   "excerpt": "In other words, chat templates structure the communication between the user and the agent, ensuring that every model\u2014despite its unique special tokens\u2014receives the correctly formatted prompt. We are talking about special tokens again, because they are what models use to delimit where the user and assistant turns start and end.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t34",
+   "url": "https://arxiv.org/html/2405.20234v1",
+   "title": "Context Injection Attacks on Large Language Models",
+   "excerpt": "To ensure the injected content is perceived as genuine context, it seems unavoidable to employ special tokens from the target LLM\u2019s ChatML, which can be easily filtered out. The feasibility of employing a self-defined format remains uncertain.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t35",
+   "url": "https://www.hiddenlayer.com/research/inside-the-prompt-how-llms-learn-roles-follow-instructions-and-get-exploited",
+   "title": "How LLMs Learn Roles, Follow Instructions, and Get Exploited",
+   "excerpt": "This blog explores how instruction-tuned LLMs learn to distinguish between system, user, and assistant roles using mechanisms such as ChatML and special tokens. It also examines how developers use system prompts and XML-style templates to guide model behavior, enforce boundaries, and structure interactions in production environments.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t36",
+   "url": "https://gist.icoder.workers.dev/edwardzjl/8df07c1f7140c9a3e2f48d33a8032090",
+   "title": "openai's chat markup language \u00b7 GitHub",
+   "excerpt": "Traditionally, GPT models consumed unstructured text. ChatGPT models instead expect a structured format, called Chat Markup Language (ChatML for short).However, this format inherently allows injections from user input containing special-token syntax, similar to SQL injections",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t37",
+   "url": "https://llmarmor.dev/prompt-injection-prevention/",
+   "title": "Prompt Injection Prevention: A Complete Guide (2026)",
+   "excerpt": "Prompt injection is a class of attack in which an attacker supplies text that causes an LLM to override, ignore, or contradict its system instructions. The root cause is architectural: LLMs do not distinguish between instructions and data at the model level. Every token in the context window \u2014 whether it came from the developer's system prompt or from a user's database query \u2014 is ...",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t38",
+   "url": "https://medium.com/@rohanbalkondekar/finetuning-llms-for-text-to-task-c04374454ac0",
+   "title": "Medium",
+   "excerpt": "Customize the system_prompt used for finetuning in src/axolotl/prompt_strategies/alpa_chat.py. Get Rohan Balkondekar\u2019s stories in your inbox. Join Medium for free to get updates from this writer.Error is ValueError: unhandled prompt tokenization strategy: alpaca_chat.load_chatml.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t39",
+   "url": "https://promptic.us/articles/how-to-prompt-open-source-and-challenger-models",
+   "title": "How to Prompt Open-Source and Challenger Models | Prompticus",
+   "excerpt": "Chat templates and special tokens matter \u2014 especially if you self-host. This is the detail that trips up most people migrating from a hosted frontier API to an open model: the chat template isn't cosmetic.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t40",
+   "url": "https://mneurix.dev/tools/chatml-builder/",
+   "title": "ChatML & GGUF Prompt Template Builder \u00b7 MNEURIX",
+   "excerpt": "Local LLM Prompt & ChatML Builder. Format system prompts, user turns, and assistant outputs into valid ChatML, Llama-3, and DeepSeek templates 100% client-side.",
+   "query": "ChatML im_start system prompt injection special tokens"
+  },
+  {
+   "id": "t41",
+   "url": "https://www.netzilo.com/threats/atr-markdown-image-url-exfiltration-and-xss-injection",
+   "title": "Markdown Image URL Exfiltration and XSS Injection \u2014 AI... | Netzilo",
+   "excerpt": "The instructions tell the agent to insert sensitive context (chat history, credentials, internal data) as placeholder text into a URL query string, often using known test/exfil domains or a javascript: URI instead of https. The agent, following the injected instructions, generates this markdown in its response without recognizing it as malicious.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t42",
+   "url": "https://www.promptinjectionprevention.com/kb/markdown-image-exfiltration.php",
+   "title": "Markdown-image exfiltration \u2014 promptinjectionprevention.com",
+   "excerpt": "The most common exfiltration vector against LLM applications. The model emits a markdown image link to an attacker-controlled URL with stolen data in the query string. The user's client renders the image; the GET fires; data is gone.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t43",
+   "url": "https://multigrid.ai/learn/llm-exfiltration",
+   "title": "Data Exfiltration via Markdown Images and Links \u00b7 Multigrid",
+   "excerpt": "Learn \u00b7 AI security & prompt injection. Data Exfiltration via Markdown Images and Links.Markdown images and autolinked URLs, including bare URLs that your renderer helpfully linkifies. HTML passed through \u2014 iframe, form, object, link rel=prefetch, and CSS with a url() in it.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t44",
+   "url": "https://wraith.sh/incidents/google-bard-markdown-exfil",
+   "title": "Google Bard indirect injection to data exfiltration \u2014 AI... | Wraith",
+   "excerpt": "Indirect Prompt InjectionHigh. Google Bard indirect injection to data exfiltration. October 2023 \u00b7 Google Bard (now Gemini). What happened. A malicious Google Doc shared with a victim could inject instructions when Bard processed it, causing Bard to encode the user's chat history into...",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t45",
+   "url": "https://embracethered.com/blog/posts/2023/chatgpt-webpilot-data-exfil-via-markdown-injection/",
+   "title": "ChatGPT Plugins: Data Exfiltration via Images & Cross Plugin Request ...",
+   "excerpt": "Basically, if the LLM returns a markdown image in the form of ... ChatGPT will render it automatically and retrieve the URL. During an Indirect Prompt Injection the adversary controls what the LLM is doing (I call it AI Injection for a reason), and it can ask to summarize the past history of the chat and append it to the URL to exfiltrate the data.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t46",
+   "url": "https://securityelites.com/ai-chatbot-data-exfiltration-prompt-injection-2026/",
+   "title": "AI Chatbot Data Exfiltration 2026 \u2014 Prompt Injection Data Leaks",
+   "excerpt": "What is the Markdown image exfiltration technique? Injected instructions cause the AI to include a Markdown image tag with base64-encoded conversation data as a URL parameter. Browser renders the response, fetches the image URL, transmits the encoded data.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t47",
+   "url": "https://github.com/Agent-Threat-Rule/agent-threat-rules/blob/main/rules/context-exfiltration/ATR-2026-00501-data-exfiltration-via-markdown-image-and-link-url-injection.yaml",
+   "title": "ATR-2026-00501-data-exfiltration-via-markdown-image-and-link-url ...",
+   "excerpt": "Open detection-rule standard for AI agent security threats \u2014 like Sigma, but for AI agents. Executable, testable rules for prompt injection, tool poisoning, context exfiltration and MCP attacks. Me...",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t48",
+   "url": "https://simonwillison.net/tags/markdown-exfiltration/",
+   "title": "Simon Willison on markdown-exfiltration",
+   "excerpt": "Markdown Exfiltration is a prompt injection attack against chatbots that have access to private information and can render Markdown images. An attacker can trick the bot into rendering an image that leaks data encoded in the URL to an external server.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t49",
+   "url": "https://security.unboundcompute.com/markdown-image-data-exfiltration/",
+   "title": "Markdown Image Exfiltration: How a Chat UI Leaks Your Data",
+   "excerpt": "Markdown image exfiltration lets a chat assistant leak private data through an auto rendered image URL, no click needed. See how it works and how to stop it.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t50",
+   "url": "https://www.wraith.sh/learn/markdown-image-exfiltration",
+   "title": "Data Exfiltration via Markdown Images: The Quiet AI Vulnerability",
+   "excerpt": "Markdown image rendering is the most underrated data exfiltration channel in AI products. A working model of how it leaks system prompts, conversation history, and tool output \u2014 and the four defensive patterns that actually close the channel.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t51",
+   "url": "https://genaisecuritylab.com/incidents/google-bard-doc-exfiltration",
+   "title": "Exfiltrating Google Bard Chats via a Poisoned... | GenAI Security Lab",
+   "excerpt": "2The injection makes Bard emit a markdown image whose URL carries the chat data3The browser auto-fetches the URL (via a CSP-allowlisted Apps Script endpoint), leaking the data",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t52",
+   "url": "https://embracethered.com/blog/posts/2023/advanced-plugin-data-exfiltration-trickery/",
+   "title": "Advanced Data Exfiltration Techniques with ChatGPT",
+   "excerpt": "During an Indirect Prompt Injection Attack an adversary can exfiltrate chat data from a user by instructing ChatGPT to render images and append information to the URL (Image Markdown Injection), or by tricking a user to click a hyperlink.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t53",
+   "url": "https://agentic-threat-tracker.com/incident/6c4e1e84bd2b3000e21e120128dac51f4459fd28",
+   "title": "Data Exfiltration via Markdown Images: The Quiet AI Vulnerability",
+   "excerpt": "Wraith's attack guide by Anthony D'Onofrio details data exfiltration via markdown image rendering in AI products, where an injected payload (via prompt injection, RAG doc, shared document, or email) causes an LLM to emit a markdown image whose URL embeds secrets like system prompts, conversation history, or API keys; when the chat client renders the markdown, the browser silently fetches the ...",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t54",
+   "url": "https://archestra.ai/blog/data-exfiltration-via-markdown-image",
+   "title": "Data exfiltration via Markdown image tags | Blog | Archestra",
+   "excerpt": "Markdown image exfiltration leaks secrets from AI chat UIs through a single image tag in attacker-controlled content.Simon Willison has been describing Markdown image exfiltration since at least 2023, and his prompt injection design patterns post calls it out by name.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t55",
+   "url": "https://www.escapement.info/publications/data-exfiltration-via-markdown-image-rendering",
+   "title": "Data Exfiltration via Markdown Image Rendering in Chat UIs | AI ...",
+   "excerpt": "When a chat UI auto-renders model-generated markdown images, the URL fetch becomes a silent outbound channel an attacker can use to steal context. Combined with prompt injection, this turns a rendering convenience into a zero-click data exfiltration primitive.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t56",
+   "url": "https://www.promptarmor.com/resources/huggingface-chat-exfiltrates-data",
+   "title": "HuggingFace Chat Exfiltrates Data | PromptArmor",
+   "excerpt": "HuggingChat (HuggingFace\u2019s app for chatting with models) has been found vulnerable to zero-click data exfiltration risks via indirect prompt injection.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t57",
+   "url": "https://www.promptinjectionpayloads.com/en/blog/data-exfiltration-via-markdown-images",
+   "title": "How Data Exfiltration via Markdown Images Works | Prompt Injection Payloads",
+   "excerpt": "The classic markdown-image beacon: how indirect prompt injection turns an auto-loaded image into a data-leak channel, and how to shut it down.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t58",
+   "url": "https://aitoolsguidebook.com/en/articles/data-exfiltration-via-image-url/",
+   "title": "Data Exfiltration via Image URL | AI Tools Guidebook",
+   "excerpt": "An AI agent encodes sensitive data into a Markdown image URL and the chat UI auto-loads it, leaking data to an attacker's server. How to detect the gadget and break the chain.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t59",
+   "url": "https://purplesec.us/learn/data-exfiltration-ai-prompt-injection/",
+   "title": "Data Exfiltration Via AI Prompt Injection",
+   "excerpt": "How AI Prompt Exfiltration Attacks Work. Salesforce\u2019s \u201cForcedLeak\u201d vulnerability allowed attackers to steal customer data through hidden prompts in web forms. These weren\u2019t sophisticated hacks. They were text-based attacks. There are two main flavors of these attacks: direct and indirect .",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t60",
+   "url": "https://www.csoonline.com/article/4086965/researchers-trick-chatgpt-into-prompt-injecting-itself.html",
+   "title": "Researchers trick ChatGPT into prompt injecting itself | CSO Online",
+   "excerpt": "Tenable security researchers have discovered seven new ways to extract private data from chat histories, largely through indirect prompt injections that exploit default ChatGPT features.Conversation injection and stealthy data exfiltration.",
+   "query": "markdown image data exfiltration prompt injection chat history url"
+  },
+  {
+   "id": "t61",
+   "url": "https://www.prismor.dev/blog/prompt-injection-classifier-in-front-of-llm-judge",
+   "title": "A Classifier in Front of the LLM Judge: Prompt-Injection Screening at 1 ...",
+   "excerpt": "A classifier judged 12,000 characters in 1.1s where our LLM judge needed 11.4s.The regex pre-screen in front of it was the problem. Detection capped at 34% because most injections never matched a pattern, so they never got escalated to the judge at all.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t62",
+   "url": "https://arxiv.org/html/2501.18536",
+   "title": "Illusions of Relevance: Arbitrary Content Injection Attacks Deceive...",
+   "excerpt": "Classifiers and more carefully prompted LLM judges often fail to recognize passages with content injection, especially when considering diverse text topics and styles. Our findings highlight the need for further research into arbitrary content injection attacks.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t63",
+   "url": "https://gist.github.com/delta-porygon/17b4cfccf6ea5c9be1af71167b162b51",
+   "title": "Prompt-injection detection with a classifier and LLM judge for AI ...",
+   "excerpt": "Prompt-Injection Detection: Classifier and LLM Judge for AI Agents Prompt-injection detection uses a fast classifier for every input and an LLM judge for uncertain cases. Source: Prismor Security Blog An LLM judge remained accurate in our evaluation, but a regex pre-screen capped detection at 34% because most payloads did not match a known pattern.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t64",
+   "url": "https://www.emergentmind.com/topics/llmail-inject",
+   "title": "LLMail-Inject: LLM Email Injection Analysis",
+   "excerpt": "LLMail-Inject exposes adversarial prompt injections in LLM-powered email assistants, detailing attack techniques, defenses, and benchmark datasets.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t65",
+   "url": "https://github.com/ShiJiawenwen/JudgeDeceiver",
+   "title": "GitHub - ShiJiawenwen/JudgeDeceiver: [CCS 2024] Optimization-based ...",
+   "excerpt": "JudgeDeceiver Official repo of ACM CCS 2024 paper: Optimization-based Prompt Injection Attack to LLM-as-a-Judge.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t66",
+   "url": "https://huggingface.co/siberiancat/modernbert-prompt-injection",
+   "title": "siberiancat/modernbert-prompt-injection \u00b7 Hugging Face",
+   "excerpt": "Prompt injection has no in-band fix: an LLM has no trust boundary between instruction and data \u2014 they arrive in one token stream. A guard LLM can't be the detector either, because it has to read the untrusted text to judge it, so the text can inject the judge.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t67",
+   "url": "https://github.com/kanekoyuichi/promptgate",
+   "title": "GitHub - kanekoyuichi/promptgate: Prompt injection detection and ...",
+   "excerpt": "Adding \"embedding\" broadens coverage to semantic paraphrases. Adding \"classifier\" uses the default public prompt-injection classifier model, downloaded on first use. Adding \"llm_judge\" extends coverage to complex, context-dependent attacks at the cost of additional latency and API usage.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t68",
+   "url": "https://www.krishnaik.in/ai-tutorials/evals-guardrails-interview-questions/prompt-injection-defences",
+   "title": "Prompt Injection Defences Interview Question and Answer \u00b7 Evals...",
+   "excerpt": "What techniques defend against prompt injection? Which ones actually work? in Evals & Guardrails Interview Questions.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t69",
+   "url": "https://deepeval.com/docs/classifiers-prompt-injection",
+   "title": "Prompt Injection Classifier | DeepEval - The LLM Evaluation Framework",
+   "excerpt": "The PromptInjectionClassifier in deepeval is a categorical LLM-as-a-judge that determines whether your LLM application resisted, partially followed, or fully followed instructions embedded in untrusted content. Test cases for this carry embedded instructions in the input or context that the assistant should ignore, which makes it easy to see whether it holds its ground.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t70",
+   "url": "https://github.com/aiwithabidi/auto-llm-classifier",
+   "title": "GitHub - aiwithabidi/auto-llm-classifier: Minimal LLM-as-judge...",
+   "excerpt": "A minimal LLM-as-judge classifier in TypeScript. Built to learn the pattern Claude Code uses for its \"auto mode classifier\" (the thing that auto-approves safe tool calls and prompts you for risky ones).",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t71",
+   "url": "https://doc.dataiku.com/dss/latest/generative-ai/guardrails/prompt-injection-detection.html",
+   "title": "Prompt injection detection \u2014 Dataiku DSS 15 documentation",
+   "excerpt": "a local prompt injection classifier (from a HuggingFace connection): the specialized model classifies a prompt as possibly dangerous with a given probability, and you set the acceptability threshold or any completion LLM, in LLM-as-a-judge mode: the LLM is tasked with classifying the prompt as \"safe\" or \"unsafe\".",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t72",
+   "url": "https://www.confident-ai.com/blog/llm-guardrails-the-ultimate-guide-to-safeguard-llm-systems",
+   "title": "LLM Guardrails for Data Leakage, Prompt Injection... - Confident AI",
+   "excerpt": "LLM guardrails are input and output guards that block data leakage, prompt injection, and off-topic responses in real time. Learn the main types and how to add them.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t73",
+   "url": "https://clawmont.com/blog/prompt-injection-detection-methods/",
+   "title": "Prompt Injection Detection Methods - Clawmont",
+   "excerpt": "Prompt injection detection methods compared: pattern matching, classifiers, and LLM judges. False-positive economics, indirect injection, and honest evaluation.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t74",
+   "url": "https://www.themoonlight.io/en/review/llmail-inject-a-dataset-from-a-realistic-adaptive-prompt-injection-challenge",
+   "title": "[Literature Review] LLMail-Inject: A Dataset from a Realistic Adaptive...",
+   "excerpt": "Prompt Shield: A black-box classifier trained on proprietary data to detect prompt injections. LLM Judge: An LLM used as a judge, prompted to analyze emails and detect injections based on detailed criteria (content, structure, intent, flow analysis).",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t75",
+   "url": "https://arxiv.org/pdf/2510.19844",
+   "title": "CourtGuard: A Local, Multiagent Prompt Injection Classifier",
+   "excerpt": "In it, prompts are evaluated in a court-like multiagent LLM system, where a \"defense attorney\" model argues the prompt is benign, a \"prosecution attorney\" model argues the prompt is a prompt injection, and a \"judge\" model gives the final classification.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t76",
+   "url": "https://thenewstack.io/red-hat-guardrail-benchmark/",
+   "title": "The AI safety check that runs on a laptop and nearly... - The New Stack",
+   "excerpt": "A 200M-parameter classifier nearly matched a 35B LLM judge on prompt injection, while Jev won on content safety.Red Hat noted that its original risk definitions were adapted from prompts that had worked well for LLM judges and may not suit zero-shot classifiers.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t77",
+   "url": "https://dl.acm.org/doi/10.1145/3658644.3690291",
+   "title": "Optimization-based Prompt Injection Attack to LLM-as-a-Judge",
+   "excerpt": "LLM-as-a-Judge uses a large language model (LLM) to select the best response from a set of candidates for a given question. LLM-as-a-Judge has many applications such as LLM-powered search, reinforcement learning with AI feedback (RLAIF), and tool selection. In this work, we propose JudgeDeceiver, an optimization-based prompt injection attack to LLM-as-a-Judge. JudgeDeceiver injects a carefully ...",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  },
+  {
+   "id": "t78",
+   "url": "https://dev.to/loopandretry/tool-output-is-untrusted-input-prompt-injection-is-a-data-flow-bug-1p9j",
+   "title": "Tool output is untrusted input: prompt injection is... - DEV Community",
+   "excerpt": "Prompt injection isn't a prompting problem, so you can't prompt your way out of it.Prompt injection is the same shape with one property that makes it strictly harder: for an LLM, there is no separate control channel.",
+   "query": "prompt injection LLM judge classifier note to the classifier"
+  }
+ ]
+}

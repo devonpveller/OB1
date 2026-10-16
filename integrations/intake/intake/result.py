@@ -27,10 +27,11 @@ TRACE_STATUSES = ("ok", "stop", "error", "skipped")
 
 COUNT_KEYS = (
     # stage 3
-    "hidden_elements", "dropped_elements", "links_dropped", "truncated_bytes", "truncated_at_cap",
+    "hidden_elements", "dropped_elements", "links_dropped", "truncated_bytes", "controls_refs",
     "attachments",
     # stage 4
-    "tag", "bidi", "variation_selectors", "controls", "surrogates", "cf", "flag_tags_kept",
+    "tag", "bidi", "variation_selectors", "controls", "surrogates", "cf", "default_ignorable",
+    "flag_tags_kept",
     "nonstarters_trimmed",
     # stage 5
     "neutralised_lines", "neutralised_refs",

@@ -31,7 +31,12 @@ class LegitimateCorpus(unittest.TestCase):
         self.assertEqual(len({it["url"] for it in items}), len(items))
 
     def test_no_strong_hit(self):
-        for it in _corpus("legit_security_corpus.json")["items"]:
+        # the developer's 44 snippets and the attempt-1 tester's 78 (the tester's 10 written
+        # articles are in test_round2.F9StrongOnlyOnPayloadShapes)
+        items = (_corpus("legit_security_corpus.json")["items"]
+                 + _corpus("tester_sg_corpus.json")["items"])
+        self.assertEqual(len(items), 44 + 78)
+        for it in items:
             bodies = {
                 "text/plain": it["title"] + "\n\n" + it["excerpt"],
                 "text/html": (f"<html><head><title>{it['title']}</title></head><body><article>"

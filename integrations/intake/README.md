@@ -19,8 +19,12 @@ section 3 stages 1-5 and 8:
 | 2 idempotency | `revisions.py` | key `(source, external_id, sha256(raw))` over a caller-supplied read-only `History`; a repeat returns the stored result, a new hash is revision n+1 (`supersedes` names the old hash), never a rewrite |
 | 3 CDR | `cdr.py`, `htmlscan.py` | HTML capped at 2 MB and read by a linear-time scanner (hidden and non-content elements dropped, links/images to `links`, title kept for escaping); email: text/plain preferred, attachments listed not read; JSON strings; plain/markdown as is |
 | 4 invisible | `invisible.py` | TAG block (decoded as a payload; subdivision flags exempt), bidi, variation selectors, C0/C1 controls, lone surrogates and every other Cf character stripped and counted per class; the rules read an NFKC copy, the stored text is not normalised |
-| 5 rules | `rules.py`, `rules.toml` | RE2 patterns; a STRONG rule gives `injected`, a WEAK rule a reason and `pending` for the second opinion; forged `[Source N]` lines and prompt section labels neutralised in the stored text |
-| 8 fail closed | `pipeline.py` | any exception in a stage, or a stage that ends past the deadline, gives `pending` (never `clean`) |
+| 5 rules | `rules.py`, `rules.toml` | RE2 patterns kept on RE2's DFA (no counted repetition, no captures); a STRONG rule, or two different cue rules side by side, gives `injected`; a WEAK rule a reason and `pending` for the second opinion; forged `[Source N]` lines and prompt section labels neutralised in the stored text |
+| 8 fail closed | `pipeline.py`, `deadline.py` | any exception in a stage, or the deadline (1.6 s, checked inside the stages' loops) passing, gives `pending` (never `clean`); `screen()` never raises |
+
+Bound (operator D34): every input inside the caps finishes in < 2 s on the reference host; a
+legitimate page up to the 2 MB HTML cap is extracted whole, and input past a work cap is a
+parser bomb (`rejected`). Importing the package builds the Unicode tables once (~1 s).
 
 `IntakeResult` (`result.py`) carries the verdict so far (`clean` / `pending` / `injected` /
 `rejected`), reasons, per-class counts, links, attachments, the text, the escaped title, the
