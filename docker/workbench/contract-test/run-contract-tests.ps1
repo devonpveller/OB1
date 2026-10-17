@@ -246,10 +246,12 @@ try {
     # The pre-change capture: the same requests against a workbench built from $BaseSha,
     # on the same database. A changed response FAILS.
     $baseSrc = Join-Path $env:TEMP "rwp0-base-$rand"
-    $baseTar = Join-Path $env:TEMP "rwp0-base-$rand.tar"
+    $baseTar = Join-Path $env:TEMP "rwp0-base-$rand.zip"
     New-Item -ItemType Directory -Force $baseSrc | Out-Null
-    & git -C $ob1 archive -o $baseTar $BaseSha docker/workbench
-    & tar -xf $baseTar -C $baseSrc
+    # zip + Expand-Archive: no dependence on which tar is first on PATH (Git's GNU tar reads
+    # 'C:' as a remote host)
+    & git -C $ob1 archive --format=zip -o $baseTar $BaseSha docker/workbench
+    Expand-Archive -Path $baseTar -DestinationPath $baseSrc -Force
     $baseTag = "openbrain-workbench:wt-$short-base"
     $baseName = "rwp0-wbbase-$rand"
     $o = Dk build --label $label -t $baseTag (Join-Path $baseSrc 'docker\workbench')
