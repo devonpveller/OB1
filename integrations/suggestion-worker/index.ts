@@ -108,6 +108,7 @@ async function generateSuggestions(threshold: number): Promise<
          FROM sources s
          JOIN thread_sources ts ON ts.source_id = s.id AND ts.status = 'confirmed'
          WHERE s.embedding IS NOT NULL
+           AND s.retraction_committed_at IS NULL  -- D5 stage 1 (research-workbench P0): never suggested
        ),
        pairs AS (
          SELECT src.id AS source_id, t.id AS thread_id, src.embedding
@@ -124,7 +125,8 @@ async function generateSuggestions(threshold: number): Promise<
                    JOIN sources s2 ON s2.id = ts2.source_id
                   WHERE ts2.thread_id = p.thread_id
                     AND ts2.status = 'confirmed'
-                    AND s2.embedding IS NOT NULL) AS sim
+                    AND s2.embedding IS NOT NULL
+                    AND s2.retraction_committed_at IS NULL) AS sim  -- nor part of a cluster
          FROM pairs p
        )
        INSERT INTO thread_sources (thread_id, source_id, link_type, status, suggestion_reason)

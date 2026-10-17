@@ -1069,7 +1069,9 @@ async function writeGraphManifest(sb, outDir, limit) {
       file: `notebooks/${t.slug}/${t.slug}.md`,
     }));
     const tsRows =
-      (await sb.get("thread_sources", `select=thread_id,source_id&status=eq.confirmed&order=thread_id.asc,source_id.asc&limit=${cap * 4}`)) || [];
+      (await sb.get("thread_sources", `select=thread_id,source_id,sources!inner(retraction_committed_at)` +
+        // D5 stage 1 (research-workbench P0): a suppressed source is no compile input.
+        `&sources.retraction_committed_at=is.null&status=eq.confirmed&order=thread_id.asc,source_id.asc&limit=${cap * 4}`)) || [];
     const srcIds = [...new Set(tsRows.map((r) => r.source_id))];
     const srcToEntities = new Map();
     for (let i = 0; i < srcIds.length; i += 100) {

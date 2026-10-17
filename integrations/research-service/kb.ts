@@ -54,8 +54,10 @@ export async function retrieveRelevantClaims(
     `SELECT c.id, c.text, c.confidence, c.contradicted,
             public.claim_is_grounded(c.id) AS grounded,
             EXISTS(SELECT 1 FROM public.claim_sources cs
+                    JOIN public.sources s ON s.id = cs.source_id
                     WHERE cs.claim_id = c.id
-                      AND cs.edge_type IN ('states','corroborates')) AS has_strong,
+                      AND cs.edge_type IN ('states','corroborates')
+                      AND s.retraction_committed_at IS NULL) AS has_strong, -- D5 stage 1 (research-workbench P0)
             c.researched_on::text AS researched_on, c.volatility, c.revalidate_days,
             (c.embedding <=> $1::vector) AS distance
        FROM public.claims c
@@ -155,6 +157,13 @@ export async function stageSource(
     [url, src.content, title, src.domain ?? null, vec, meta],
   );
   const id = fc.rows[0].id;
+  // D5 stage 1 (research-workbench P0): dedup can land on a SUPPRESSED row. It is never
+  // rewritten or pooled - a suppressed source feeds no generation. The caller's staging is
+  // best-effort, so this refusal drops the one candidate.
+  const supp = await client.queryObject<{ suppressed: boolean }>(
+    `SELECT retraction_committed_at IS NOT NULL AS suppressed FROM public.sources WHERE id = $1`, [id],
+  );
+  if (supp.rows[0]?.suppressed) throw new Error(`source ${id} is suppressed; not staged`);
   await client.queryObject(
     `UPDATE public.sources SET
         content = $2, title = COALESCE(NULLIF($3,''), title), domain = COALESCE($4, domain),
@@ -167,6 +176,31 @@ export async function stageSource(
     [sessionId, id],
   );
   return { id, url, wasDuplicate: fc.rows[0].was_duplicate };
+}
+
+/**
+ * D5 item 4 / item 6 (research-workbench P0): a query hit whose URL resolves to an erased
+ * source's tombstone is dropped, and the attempt recorded on the tombstone by
+ * public.contract_record_query_hit (the deliberate path appends a reopen note; debunked and
+ * credibility need the D15 pre-ingestion score, P3a, so they are refused until then). Pages
+ * without a URL, or with no tombstone, pass through unchanged.
+ */
+export async function dropTombstoned<P extends { url?: string | null }>(
+  client: QueryClient,
+  pages: P[],
+  sessionId: string | null,
+): Promise<P[]> {
+  const kept: P[] = [];
+  for (const p of pages) {
+    const url = (p.url || "").trim();
+    const t = url
+      ? await client.queryObject<{ id: string | null }>(
+        `SELECT public.contract_record_query_hit($1, $2, 'returned as a research query hit') AS id`, [url, sessionId],
+      )
+      : { rows: [] as { id: string | null }[] };
+    if (!t.rows[0]?.id) kept.push(p);
+  }
+  return kept;
 }
 
 export interface ReuseSourceRow { id: string; url: string | null; title: string; content: string; domain: string | null; }

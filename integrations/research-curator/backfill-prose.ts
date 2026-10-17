@@ -62,6 +62,7 @@ try {
       WHERE content_type='research_synthesis'
         AND COALESCE(metadata->>'prose_synthesis','')=''
         AND COALESCE(content,'')<>''
+        AND retraction_committed_at IS NULL  -- D5 stage 1 (research-workbench P0)
       ORDER BY researched_on DESC NULLS LAST` + (LIMIT > 0 ? ` LIMIT ${LIMIT}` : ""),
   );
   console.log(`[backfill] ${rows.length} synthesis row(s) need prose`);

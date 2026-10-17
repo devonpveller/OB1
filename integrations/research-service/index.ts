@@ -30,6 +30,7 @@ import { screenSources } from "./injection.ts";
 import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, type ClaimedJob } from "./jobs.ts";
+import { type Caller, callerFor, inletRef, MismatchLog, parseCallers, resolveOrigin } from "./origin.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const DB_HOST = env("DB_HOST", "openbrain-db");
@@ -82,6 +83,20 @@ const MODEL_PROBE_TIMEOUT_MS = parseInt(env("RESEARCH_MODEL_PROBE_TIMEOUT_MS", "
 const MAX_MODEL_DOWN_REQUEUES = parseInt(env("RESEARCH_MAX_MODEL_DOWN_REQUEUES", "6"), 10);
 
 const MCP_ACCESS_KEY = env("MCP_ACCESS_KEY");
+// Origin is bound to the caller's key (research-workbench P0, D17 item 1; origin.ts).
+// RESEARCH_CALLERS declares one key per caller (name=origin:key;...). MCP_ACCESS_KEY keeps
+// authenticating every existing caller and records RESEARCH_SHARED_KEY_ORIGIN. A malformed
+// RESEARCH_CALLERS is reported loudly and ignored (only the shared key then authenticates),
+// never half-applied.
+const SHARED_KEY_ORIGIN = env("RESEARCH_SHARED_KEY_ORIGIN", "manual");
+let CALLERS: Caller[];
+try {
+  CALLERS = parseCallers(env("RESEARCH_CALLERS"), MCP_ACCESS_KEY, SHARED_KEY_ORIGIN);
+} catch (e) {
+  console.error(`[research] RESEARCH_CALLERS ignored: ${(e as Error).message}`);
+  CALLERS = parseCallers("", MCP_ACCESS_KEY, SHARED_KEY_ORIGIN);
+}
+const originMismatch = new MismatchLog();
 // Open WebUI async completion callback. A research job outlives the tool call
 // that submitted it, so the finished report is POSTed back into the originating
 // chat message instead of the caller blocking on a poll loop.
@@ -688,7 +703,8 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     // Per-origin queue attribution: only the overnight digest/podcast lane gets the
     // generous `ob-research` budget; OWUI/agent/manual keep the default lane (their
     // own tuning). All origins still get chat()'s 429 backpressure retry.
-    const queueUser = QUEUE_USER_BY_ORIGIN[origin] ?? "";
+    // queue_origin is engine-owned (set at submit from the caller's key; origin.ts).
+    const queueUser = QUEUE_USER_BY_ORIGIN[String(options?.queue_origin ?? origin)] ?? "";
     const baseDeps: Deps = jobSeams(queueUser
       ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
       : realDeps, signal, seamState, jobId);
@@ -894,9 +910,11 @@ async function recoverOrphanedJobs(): Promise<void> {
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
+function callerOf(req: Request, url: URL): Caller | null {
+  return callerFor(req.headers.get("x-brain-key") || url.searchParams.get("key"), CALLERS);
+}
 function authed(req: Request, url: URL): boolean {
-  const k = req.headers.get("x-brain-key") || url.searchParams.get("key");
-  return !!k && !!MCP_ACCESS_KEY && k === MCP_ACCESS_KEY;
+  return callerOf(req, url) !== null;
 }
 
 Deno.serve({ port: PORT }, async (req) => {
@@ -997,6 +1015,7 @@ Deno.serve({ port: PORT }, async (req) => {
       disable_web_search?: boolean; sources_only?: boolean; mode?: string; dry_run?: boolean; gap_research?: string;
       callback?: { chat_id?: string; message_id?: string };
       deadline_at?: string | number;
+      inlet_ref?: { kind?: string; id?: string };
     };
     try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const query = (body.query || "").trim();
@@ -1024,9 +1043,14 @@ Deno.serve({ port: PORT }, async (req) => {
     const cbChat = String(body.callback?.chat_id || "").trim();
     const cbMessage = String(body.callback?.message_id || "").trim();
     const callback = cbChat && cbMessage ? { chat_id: cbChat, message_id: cbMessage } : null;
-    // deadline_at is re-added normalised; model_down_requeues is engine-owned.
-    const { deadline_at: _dl, model_down_requeues: _mdr, ...callerOptions } = (body.options || {}) as Record<string, unknown>;
-    void _dl; void _mdr;
+    // deadline_at is re-added normalised; model_down_requeues and queue_origin are engine-owned.
+    const { deadline_at: _dl, model_down_requeues: _mdr, queue_origin: _qo, ...callerOptions } = (body.options || {}) as Record<string, unknown>;
+    void _dl; void _mdr; void _qo;
+    // D17 item 1: the key decides the origin; a disagreeing body value is kept and logged once.
+    const caller = callerOf(req, url)!;
+    const resolved = resolveOrigin(caller, body.origin, QUEUE_USER_BY_ORIGIN);
+    originMismatch.note(caller, resolved.claimed, resolved.origin);
+    const inlet = inletRef(body as Record<string, unknown>);
     const options = {
       ...callerOptions,
       ...(deadlineAt ? { deadline_at: deadlineAt } : {}),
@@ -1037,15 +1061,16 @@ Deno.serve({ port: PORT }, async (req) => {
       ...(body.mode === "article" ? { mode: "article" } : {}),
       ...(body.dry_run === true ? { dry_run: true } : {}),
       ...(body.gap_research === "preliminary" ? { gap_research: "preliminary" } : {}),
+      queue_origin: resolved.queueOrigin,
     };
     const c = await pool.connect();
     let jobId: string;
     try {
       const r = await c.queryObject<{ id: string }>(
-        `INSERT INTO research_jobs (status, origin, query, thread_id, options)
-         VALUES ('queued', $1, $2, $3, $4::jsonb) RETURNING id`,
-        [["owui", "agent", "notebook", "manual"].includes(body.origin || "") ? body.origin : "owui",
-         query, body.thread_id || null, JSON.stringify(options)],
+        `INSERT INTO research_jobs (status, origin, query, thread_id, options, caller, origin_claimed, inlet_ref)
+         VALUES ('queued', $1, $2, $3, $4::jsonb, $5, $6, $7::jsonb) RETURNING id`,
+        [resolved.origin, query, body.thread_id || null, JSON.stringify(options), caller.name, resolved.claimed,
+         inlet ? JSON.stringify(inlet) : null],
       );
       jobId = r.rows[0].id;
     } finally { c.release(); }
