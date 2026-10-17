@@ -60,4 +60,38 @@ resolution — required, §2.3).
 
 `PORT`, `WORKBENCH_KEY` (= the `MCP_ACCESS_KEY` value), `DB_*`,
 `OPEN_BRAIN_URL`, `EMBEDDING_*`, `EXTRACT_URL`, `WIKI_GIT_DIR`, `WIKI_OUT_DIR`,
-`WIKI_ASSETS_DIR`.
+`WIKI_ASSETS_DIR`, `CONTRACT_MOUNTS_ROOT` (default `/mounts`: where named mounts such as
+`podcast-archive` live), `CONTRACT_STREAM_POLL_MS` (default `1000`).
+
+## The retrieval contract (research-workbench P0)
+
+`src/contracts/` is the typed retrieval contract every panel and MCP client reads the
+knowledge base through. Zod 4 schemas registered as `@hono/zod-openapi` routes, so the routes
+ARE the document: `GET /openapi.json` (bare path, internal) and `GET /workbench/openapi.json`
+(behind the key gate) serve it; `src/contracts/generated/` holds the committed copy, the
+generated TypeScript types and the MCP tool manifest. Routes live under
+`/workbench/contract/*`; the eleven pre-contract routers are untouched.
+
+- **The API owns record states.** Every record carries `state` (a key of the `record_states`
+  registry) and `state_detail`. Sources carry their D5 lifecycle (`held | active | suppressed
+  | unlinked | erased`); `evidence_only=true` omits everything that is not evidence.
+- **Expansion by registration (D18).** Every enumerated kind is a registry row
+  (`contract_registries` / `contract_registry_entries`, plus `content_types`); schemas type them
+  as strings annotated `x-registry`. The conformance test fails on any `enum`, `const`,
+  `anyOf`, `allOf` or `oneOf` in the document.
+- **Reads only over MCP (D14).** openbrain-mcp registers every operation marked `x-mcp-tool`
+  from `../../integrations/kubernetes-deployment/contract-tools.json` and calls these routes.
+  Writes (suppress, sever, erase, admission, held sources, hidden set, settings) are HTTP only.
+- **Storage** is `../init-research-contract.sql` (initdb slot 230; revert:
+  `../revert-research-contract.sql`).
+- **Notices**: `THIRD-PARTY-NOTICES.md` (D9 rule 5), checked at every image build.
+
+```
+deno task contract:gen      # regenerate openapi.json, types.ts, mcp-tools.json (+ the MCP copy)
+deno task contract:check    # fail when any generated artifact is stale
+deno test --allow-net --allow-env --allow-read src/     # unit + document tests (DB tests skip)
+powershell -NoProfile -File contract-test/run-contract-tests.ps1   # disposable DB + Dredd
+```
+
+The integration test (`src/contracts/integration_test.ts`) runs only against the disposable
+database `contract-test/run-contract-tests.ps1` creates; it suppresses, severs and erases rows.

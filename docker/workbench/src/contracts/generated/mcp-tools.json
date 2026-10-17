@@ -1,0 +1,803 @@
+[
+  {
+    "tool": "contract_chunk_context",
+    "operationId": "chunkContext",
+    "method": "GET",
+    "path": "/workbench/contract/chunks/{chunkId}/context",
+    "description": "chunkContext(chunkId, window) - the chunk and its neighbours, in the source's state [retrieval contract GET /workbench/contract/chunks/{chunkId}/context]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "chunkId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "<source uuid>:<chunk idx>"
+        },
+        "window": {
+          "type": "string",
+          "pattern": "^[0-9]{1,2}$",
+          "description": ""
+        },
+        "evidence_only": {
+          "type": "string",
+          "pattern": "^(true|false)$",
+          "description": "true = an evidence-only caller: suppressed, unlinked, erased and held records are omitted (a single fetch answers state 'omitted'). Default false: they are returned, typed."
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": [
+        "chunkId"
+      ]
+    },
+    "path_params": [
+      "chunkId"
+    ],
+    "query_params": [
+      "window",
+      "evidence_only"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_claims",
+    "operationId": "claims",
+    "method": "GET",
+    "path": "/workbench/contract/claims",
+    "description": "claims(scope, filter) - claims with tag, status, confidence and typed grounding edges [retrieval contract GET /workbench/contract/claims]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "description": ""
+        },
+        "source_id": {
+          "type": "string",
+          "description": ""
+        },
+        "synthesis_id": {
+          "type": "string",
+          "description": ""
+        },
+        "status": {
+          "type": "string",
+          "description": ""
+        },
+        "q": {
+          "type": "string",
+          "description": ""
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-200, default 50"
+        },
+        "evidence_only": {
+          "type": "string",
+          "pattern": "^(true|false)$",
+          "description": "true = an evidence-only caller: suppressed, unlinked, erased and held records are omitted (a single fetch answers state 'omitted'). Default false: they are returned, typed."
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [
+      "thread_id",
+      "source_id",
+      "synthesis_id",
+      "status",
+      "q",
+      "limit",
+      "evidence_only"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_dependence",
+    "operationId": "dependence",
+    "method": "GET",
+    "path": "/workbench/contract/sources/{id}/dependence",
+    "description": "dependence(id) - every connection of a source, counted and listed [retrieval contract GET /workbench/contract/sources/{id}/dependence]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "source id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [
+      "id"
+    ],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_diff_check",
+    "operationId": "diffCheck",
+    "method": "POST",
+    "path": "/workbench/contract/diff-check",
+    "description": "diffCheck(referenceIds[]) - is each pin out of date, and which current chunk stands for it [retrieval contract POST /workbench/contract/diff-check]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "description": "uuid"
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "chunk_idx": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "source_id",
+              "revision"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 200
+        }
+      },
+      "required": [
+        "references"
+      ]
+    },
+    "path_params": [],
+    "query_params": [],
+    "json_params": [],
+    "body_params": [
+      "references"
+    ]
+  },
+  {
+    "tool": "contract_documents",
+    "operationId": "documents",
+    "method": "GET",
+    "path": "/workbench/contract/documents",
+    "description": "the user document listing: title, path, updated, outbound links - never a body [retrieval contract GET /workbench/contract/documents]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-500, default 100"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [
+      "limit"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_idea",
+    "operationId": "idea",
+    "method": "GET",
+    "path": "/workbench/contract/ideas/{id}",
+    "description": "idea(id) - the aggregate and its refinery: members, context graph, hidden set, origin, user source list [retrieval contract GET /workbench/contract/ideas/{id}]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "idea (refinery) id"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [
+      "id"
+    ],
+    "query_params": [],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_ideas",
+    "operationId": "ideas",
+    "method": "GET",
+    "path": "/workbench/contract/ideas",
+    "description": "ideas() - every idea, newest first [retrieval contract GET /workbench/contract/ideas]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-200, default 50"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [
+      "limit"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_jobs",
+    "operationId": "jobs",
+    "method": "GET",
+    "path": "/workbench/contract/jobs",
+    "description": "jobs(state) - the import and research queues in one shape [retrieval contract GET /workbench/contract/jobs]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "a job_states key"
+        },
+        "kinds": {
+          "type": "string",
+          "description": "job_kinds"
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-200, default 50"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [
+      "state",
+      "kinds",
+      "limit"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_neighbours",
+    "operationId": "neighbours",
+    "method": "GET",
+    "path": "/workbench/contract/neighbours",
+    "description": "neighbours(id, kinds[], depth, limit) - the page graph around a page [retrieval contract GET /workbench/contract/neighbours]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "page slug"
+        },
+        "kinds": {
+          "type": "string",
+          "description": "comma-separated page_classes to keep (default: all)"
+        },
+        "depth": {
+          "type": "string",
+          "pattern": "^[0-9]$",
+          "description": ""
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-800, default 400"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [],
+    "query_params": [
+      "id",
+      "kinds",
+      "depth",
+      "limit"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_podcasts",
+    "operationId": "podcasts",
+    "method": "GET",
+    "path": "/workbench/contract/podcasts",
+    "description": "podcasts() - backing lands in P7a/P7b [retrieval contract GET /workbench/contract/podcasts]",
+    "input": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_presenters",
+    "operationId": "presenters",
+    "method": "GET",
+    "path": "/workbench/contract/presenters",
+    "description": "presenters() - backing lands in P7a [retrieval contract GET /workbench/contract/presenters]",
+    "input": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_proposals",
+    "operationId": "proposals",
+    "method": "GET",
+    "path": "/workbench/contract/watches/{watchId}/proposals",
+    "description": "proposals() - backing lands in P5b [retrieval contract GET /workbench/contract/watches/{watchId}/proposals]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "watchId": {
+          "type": "string",
+          "minLength": 1,
+          "description": ""
+        }
+      },
+      "required": [
+        "watchId"
+      ]
+    },
+    "path_params": [
+      "watchId"
+    ],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_quality",
+    "operationId": "quality",
+    "method": "GET",
+    "path": "/workbench/contract/sources/{id}/quality",
+    "description": "quality(id) - why this source is rated as it is [retrieval contract GET /workbench/contract/sources/{id}/quality]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "source id"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [
+      "id"
+    ],
+    "query_params": [],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_reference",
+    "operationId": "reference",
+    "method": "GET",
+    "path": "/workbench/contract/references/{id}",
+    "description": "reference(id, version?) - a source in any lifecycle state, typed [retrieval contract GET /workbench/contract/references/{id}]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "source id"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]{1,6}$",
+          "description": ""
+        },
+        "evidence_only": {
+          "type": "string",
+          "pattern": "^(true|false)$",
+          "description": "true = an evidence-only caller: suppressed, unlinked, erased and held records are omitted (a single fetch answers state 'omitted'). Default false: they are returned, typed."
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [
+      "id"
+    ],
+    "query_params": [
+      "version",
+      "evidence_only"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_registries",
+    "operationId": "registries",
+    "method": "GET",
+    "path": "/workbench/contract/registries",
+    "description": "every registry: the enumerated kinds the contract exposes [retrieval contract GET /workbench/contract/registries]",
+    "input": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_registry",
+    "operationId": "registry",
+    "method": "GET",
+    "path": "/workbench/contract/registries/{name}",
+    "description": "one registry and its declared, versioned entries [retrieval contract GET /workbench/contract/registries/{name}]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": ""
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "path_params": [
+      "name"
+    ],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_search",
+    "operationId": "search",
+    "method": "GET",
+    "path": "/workbench/contract/search",
+    "description": "search(query, kinds[], scope) - pages, claims and sources with typed states (never user documents) [retrieval contract GET /workbench/contract/search]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "q": {
+          "type": "string",
+          "minLength": 2,
+          "description": ""
+        },
+        "kinds": {
+          "type": "string",
+          "description": "comma-separated node_kinds (default: all)"
+        },
+        "refinery_id": {
+          "type": "string",
+          "description": "scope: also search this refinery's held sources"
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-50, default 25"
+        },
+        "evidence_only": {
+          "type": "string",
+          "pattern": "^(true|false)$",
+          "description": "true = an evidence-only caller: suppressed, unlinked, erased and held records are omitted (a single fetch answers state 'omitted'). Default false: they are returned, typed."
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": [
+        "q"
+      ]
+    },
+    "path_params": [],
+    "query_params": [
+      "q",
+      "kinds",
+      "refinery_id",
+      "limit",
+      "evidence_only"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_session",
+    "operationId": "session",
+    "method": "GET",
+    "path": "/workbench/contract/sessions/{id}",
+    "description": "session(id) - a research session with its origin, inlet reference and refinery [retrieval contract GET /workbench/contract/sessions/{id}]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "research job id"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [
+      "id"
+    ],
+    "query_params": [],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_stance_map",
+    "operationId": "stanceMap",
+    "method": "GET",
+    "path": "/workbench/contract/stance-maps/{id}",
+    "description": "stanceMap() - backing lands in P7b [retrieval contract GET /workbench/contract/stance-maps/{id}]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": ""
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [
+      "id"
+    ],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_teams",
+    "operationId": "teams",
+    "method": "GET",
+    "path": "/workbench/contract/teams",
+    "description": "teams() - backing lands in P7a [retrieval contract GET /workbench/contract/teams]",
+    "input": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_timeline",
+    "operationId": "timeline",
+    "method": "GET",
+    "path": "/workbench/contract/timeline",
+    "description": "timeline(scope, range) - revisions, sessions, claims and trail events in order [retrieval contract GET /workbench/contract/timeline]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": ""
+        },
+        "to": {
+          "type": "string",
+          "description": ""
+        },
+        "source_id": {
+          "type": "string",
+          "description": ""
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-500, default 100"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [
+      "from",
+      "to",
+      "source_id",
+      "limit"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_tombstone",
+    "operationId": "tombstone",
+    "method": "GET",
+    "path": "/workbench/contract/tombstones/{id}",
+    "description": "a tombstone with every reopen attempt [retrieval contract GET /workbench/contract/tombstones/{id}]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "tombstone id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "path_params": [
+      "id"
+    ],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  },
+  {
+    "tool": "contract_trail",
+    "operationId": "trail",
+    "method": "GET",
+    "path": "/workbench/contract/trail",
+    "description": "trail(scope) - suppressions, redactions, tombstones and severances with reason and context [retrieval contract GET /workbench/contract/trail]",
+    "input": {
+      "type": "object",
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "description": ""
+        },
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-500, default 100"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        }
+      },
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [
+      "source_id",
+      "limit"
+    ],
+    "json_params": [
+      "metadata_filter"
+    ],
+    "body_params": []
+  },
+  {
+    "tool": "contract_watches",
+    "operationId": "watches",
+    "method": "GET",
+    "path": "/workbench/contract/watches",
+    "description": "watches() - backing lands in P5b [retrieval contract GET /workbench/contract/watches]",
+    "input": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "path_params": [],
+    "query_params": [],
+    "json_params": [],
+    "body_params": []
+  }
+]

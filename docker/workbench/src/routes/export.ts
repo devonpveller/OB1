@@ -59,7 +59,9 @@ async function applyCitations(md: string): Promise<string> {
   // 5) numbered References list matching the [N] markers
   if (order.length) {
     const rows = await query<{ id: string; title: string; url: string }>(
-      `SELECT id::text AS id, title, url FROM public.sources WHERE id = ANY($1::uuid[])`,
+      // D5 stage 1 (research-workbench P0): a suppressed source is absent from export.
+      `SELECT id::text AS id, title, url FROM public.sources
+        WHERE id = ANY($1::uuid[]) AND retraction_committed_at IS NULL`,
       [order],
     ).catch(() => []);
     const byId = new Map(rows.map((r) => [r.id, r]));
