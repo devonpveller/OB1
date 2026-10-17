@@ -59,7 +59,10 @@ include:
 
 services:
   openbrain-db:
-    image: pgvector/pgvector:pg16
+    # Pinned to the digest the live openbrain-db runs (research-workbench P0; probed 2026-09-18 as
+    # PostgreSQL 16.15 / pgvector 0.8.2 - 0.8.2 is the extension version in the live catalog, the
+    # image ships the 0.8.6 library). A floating tag here was one `pull` away from a silent upgrade.
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     container_name: openbrain-db
     environment:
       POSTGRES_DB: openbrain
@@ -138,6 +141,11 @@ services:
       # (../integrations/intake/FORK-OWNED.md). Fresh-volume only; the live DB gets it by hand
       # (psql -f, the operator's gated deploy). Revert: integrations/intake/sql/revert-intake.sql.
       - ../integrations/intake/sql/init-intake.sql:/docker-entrypoint-initdb.d/220-init-intake.sql:ro # intake I1
+      # research-workbench P0 (rw-p0-contract): the retrieval contract's registries, D5 lifecycle
+      # (tombstones, dependence, the re-intake gate), held sources, the refinery, notifications,
+      # origin binding and the settings store. Fresh-volume only; the live DB gets it by hand
+      # (psql -f, the operator's gated deploy). Revert: revert-research-contract.sql.
+      - ./init-research-contract.sql:/docker-entrypoint-initdb.d/230-init-research-contract.sql:ro # research-workbench P0
     networks:
       - obnet
     restart: unless-stopped
@@ -207,6 +215,10 @@ services:
       FETCH_PROXY_URL: ${OB_MCP_FETCH_PROXY_URL-http://vpn:8888}
       INGEST_FETCH_TIMEOUT_MS: ${OB_MCP_INGEST_FETCH_TIMEOUT_MS:-20000}
       INGEST_MAX_REDIRECTS: ${OB_MCP_INGEST_MAX_REDIRECTS:-5}
+      # research-workbench P0 (D14): the retrieval contract's MCP tools call the workbench's
+      # contract routes here, with MCP_ACCESS_KEY (= the workbench's WORKBENCH_KEY). The workbench
+      # runs under the wiki profile; with it off, every contract tool answers an error, no crash.
+      CONTRACT_WORKBENCH_URL: http://openbrain-workbench:8000
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
     # obnet) talk to it directly. Two lanes by key: MCP_ACCESS_KEY = full
@@ -380,6 +392,9 @@ services:
       # no capture_thought - this door is not a second cloud door.
       GATEWAY_READ_TOOLS: agent_memory_recall,agent_memory_inspect,agent_memory_recall_trace,agent_memory_list_review_queue
       GATEWAY_WRITE_TOOLS: agent_memory_writeback,agent_memory_review,agent_memory_report_usage
+      # The retrieval contract's read tools stay OFF this door (research-workbench P0): they are
+      # the cloud door's addition; empty = none, never the gateway's default set.
+      GATEWAY_CONTRACT_TOOLS: ""
       # Reads: belt-and-braces. The exposure plane is forced SERVER-SIDE by performRecall
       # from its own door value and a caller cannot widen it, so this filter is a second
       # statement of the same boundary rather than the boundary itself.
@@ -708,6 +723,13 @@ services:
       DB_USER: ob_app_memory
       DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # research-workbench P0 (D17 item 1): origin is bound to the CALLER'S KEY. One key per
+      # caller, name=origin:key;... (origins are keys of the `origins` registry), e.g.
+      #   owui-tool=owui:<key>;agent-org=mattermost:<key>;digest=notebook:<key>
+      # The shared MCP_ACCESS_KEY keeps working and records RESEARCH_SHARED_KEY_ORIGIN; a body
+      # `origin` is never what is recorded. Empty = only the shared key (every job manual).
+      RESEARCH_CALLERS: ${RESEARCH_CALLERS:-}
+      RESEARCH_SHARED_KEY_ORIGIN: ${RESEARCH_SHARED_KEY_ORIGIN:-manual}
       # Async chat callback: where a finished job announces itself. A research run
       # outlives the OWUI tool call that submitted it, so the report is POSTed into
       # the originating chat message instead of the caller blocking on a poll.
@@ -1035,6 +1057,12 @@ services:
       - wiki-assets:/wiki/assets
       # Shared canonical slug module (G5), same mount the wiki container uses.
       - ../recipes:/recipes:ro
+      # research-workbench P0 (D6 item 5): the podcast archive's DEFAULT destination is this
+      # mount, named podcast-archive (the settings registry declares {"mount": "podcast-archive"};
+      # the workbench resolves named mounts under CONTRACT_MOUNTS_ROOT=/mounts). This line is the
+      # only place the archive path appears; the destination itself is a front-end setting.
+      # Read-only: the workbench reports the destination, the P7a renderer writes it.
+      - ${BACKUPS_DIR:-../../backups}/podcasts:/mounts/podcast-archive:ro
     # Optional loopback debug publish ONLY (same-origin path is via Caddy).
     ports:
       - "127.0.0.1:8814:8000"
