@@ -3,9 +3,10 @@
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-contract-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner id>] [-Evidence <dir>]
 #
-# -Subnet is REQUIRED (rw-p0b-purge-door): the disposable network gets this subnet, never one from
-# Docker's default pools (a pool handed out 192.168.0.0/20 and cut the host off its LAN). Refused
-# inside 192.168.0.0/16. -Evidence must be absent or empty; it is written only at the end.
+# -Subnet is REQUIRED (rw-p0b-purge-door): exactly a /24, never one from Docker's default pools (a
+# pool handed out 192.168.0.0/20 and cut the host off its LAN); refused inside 172.16.0.0/12 and
+# 192.168.0.0/16 (harness-subnet.ps1). The run's network gets its lower /25, the smoke script's own
+# fetch network its upper /25. -Evidence must be absent or empty; it is written only at the end.
 #
 # What it does, and ONLY this:
 #   1. stages the REAL initdb chain from docker-compose.yml (every mounted init*.sql, intake's
@@ -31,7 +32,8 @@
 #      be identical to the post-change one. Both workbenches answer from the same seeded
 #      fixture vault (fixture-vault.ts), so notes-list / notes-folders are populated. Every
 #      capture names its disposable container (the smoke script refuses its live target
-#      without -Live), every compare runs IN-PROCESS with one array argument and must print
+#      without -Live; attempt 3: the script fetches the verified -Target by its address on a network
+#      of its own, from a fetch container of its own - no caller container takes part), every compare runs IN-PROCESS with one array argument and must print
 #      its 13 PASS rows, and a deliberately altered pair must FAIL (the compare can fail).
 #      Captures land in a directory the run owns; the LIVE-DATA GUARD (size cap, fixture-only
 #      uuids, fixture-marked notes and notebooks, the recorded target) must pass before any
@@ -77,8 +79,11 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
-if ($Subnet -notmatch '^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}/(\d{1,2})$') { Write-Host "REFUSED: -Subnet <a.b.c.d/nn> is required (got '$Subnet')"; exit 2 }
-if (([int]$Matches[1] -eq 192 -and [int]$Matches[2] -eq 168) -or [int]$Matches[3] -lt 16) { Write-Host "REFUSED: -Subnet $Subnet overlaps 192.168.0.0/16 or is wider than /16"; exit 2 }
+. (Join-Path $PSScriptRoot 'harness-subnet.ps1')
+if (-not (Get-Command Test-HarnessSubnet -ErrorAction SilentlyContinue) -or -not (Get-Command Split-HarnessSubnet -ErrorAction SilentlyContinue)) { Write-Host 'REFUSED: harness-subnet.ps1 did not load (the -Subnet rule is not checked; fail closed)'; exit 2 }
+$w = Test-HarnessSubnet $Subnet
+if ($w) { Write-Host "REFUSED: $w"; exit 2 }
+$subnets = Split-HarnessSubnet $Subnet          # .run = this run's network, .smoke = the smoke script's fetch network
 if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty (the run publishes into an empty or absent directory)"; exit 2 }
 $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot                                  # .../workbench/contract-test
@@ -217,8 +222,8 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --subnet $Subnet --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $Subnet)"
+  $null = Dk network create --driver bridge --internal --subnet $subnets.run --label $label $net
+  Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $($subnets.run); the smoke's fetch network gets $($subnets.smoke))"
   if ($script:rc -ne 0) { throw 'network' }
   $made.net = $true
 
@@ -381,53 +386,71 @@ try {
     if (Test-Path $own) { throw "smoke directory $own already exists" }
     New-Item -ItemType Directory -Force $own | Out-Null
     $made.smokeDir = $own
+    # Every smoke call is in-process and can never abort the run: a throw is caught and counted
+    # as rc -1 (attempt 2's reverted-copy run aborted at the first refusal and never reached the
+    # second; each refusal shape is its own check).
+    function Smoke-Run([scriptblock]$call) {
+      $global:LASTEXITCODE = 0
+      try { $o = (& $call *>&1 | Out-String -Width 4096); $rc = $global:LASTEXITCODE } catch { $o = "THREW: $_"; $rc = -1 }
+      return @{ out = $o; rc = $rc }
+    }
     function Smoke-Capture([string]$dir, [string]$container) {
-      # In-process; every capture names its disposable target explicitly (never the defaults).
-      # Recorded BEFORE it runs: a capture that fails half-way still has to pass the guard (T2-6).
+      # Every capture names its disposable -Target (never the defaults); the smoke script verifies
+      # it, connects it to a network of its own on $subnets.smoke and fetches it by that address
+      # from a fetch container of its own (attempt 3). Recorded BEFORE it runs: a capture that
+      # fails half-way still has to pass the guard (T2-6).
       $script:captures += , @($dir, $container)
-      $o = (& $smoke -Capture $dir -ExecContainer $container -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY *>&1 | Out-String)
-      return @{ out = $o; rc = $LASTEXITCODE }
+      return (Smoke-Run { & $smoke -Capture $dir -Target $container -Subnet $subnets.smoke -KeyEnv WORKBENCH_KEY })
     }
     function Smoke-Compare([string]$x, [string]$y) {
       # In-process with ONE array argument: attempt 1's '-File ... -Compare $a $b' bound $b to
       # -Capture and captured the LIVE workbench instead of comparing (tester finding F1).
-      $o = (& $smoke -Compare @($x, $y) *>&1 | Out-String)
-      return @{ out = $o; rc = $LASTEXITCODE; pass = ([regex]::Matches($o, '(?m)^\s*PASS\s')).Count; fail = ([regex]::Matches($o, '(?m)^\s*FAIL\s')).Count }
+      $r = Smoke-Run { & $smoke -Compare @($x, $y) }
+      return @{ out = $r.out; rc = $r.rc; pass = ([regex]::Matches($r.out, '(?m)^\s*PASS\s')).Count; fail = ([regex]::Matches($r.out, '(?m)^\s*FAIL\s')).Count }
     }
-    # The refusals first: attempt 1's call shape, and a capture with no target, must be refused
-    # (exit 2) and capture nothing.
+    function Smoke-Refused([string]$what, [hashtable]$r, [string]$rx) {
+      Check (($r.rc -eq 2) -and ($r.out -match 'REFUSED') -and ($r.out -match $rx) -and -not (Test-Path $probe)) "$what is refused, nothing captured (rc $($r.rc))"
+      $script:refusalLog += $r.out
+    }
+    # The refusals first, each its own check: attempt 1's call shape, a capture with no target, the
+    # live workbench named as -Target (read-only docker inspect, refusal expected), the removed
+    # -ExecContainer with attempt 2's bypass URL, and a base URL naming another host.
     $probe = Join-Path $own 'refusal-probe'
+    $script:refusalLog = @()
     $o0 = (& powershell -NoProfile -File $smoke -Compare (Join-Path $own 'x') $probe 2>&1 | Out-String); $r0 = $LASTEXITCODE
     Check (($r0 -eq 2) -and ($o0 -match 'REFUSED') -and -not (Test-Path $probe)) "attempt 1's call shape '-File ... -Compare a b' is refused, nothing captured (rc $r0)"
-    $o0b = (& $smoke -Capture $probe *>&1 | Out-String); $r0b = $LASTEXITCODE
-    Check (($r0b -eq 2) -and ($o0b -match 'REFUSED') -and -not (Test-Path $probe)) "a capture with no target and no -Live is refused (rc $r0b)"
-    $o0c = (& $smoke -Capture $probe -ExecContainer openbrain-workbench -BaseUrl http://caddy:8446 *>&1 | Out-String); $r0c = $LASTEXITCODE
-    Check (($r0c -eq 2) -and ($o0c -match 'not a disposable target without -Live') -and -not (Test-Path $probe)) "the live target named without -Live is refused (rc $r0c)"
-    # rw-p0b-purge-door, T2-2: the tester's bypass (another exec container name, the live service URL)
-    $o0d = (& $smoke -Capture $probe -ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000 *>&1 | Out-String); $r0d = $LASTEXITCODE
-    Check (($r0d -eq 2) -and ($o0d -match "base URL host 'openbrain-workbench'") -and -not (Test-Path $probe)) "the tester's bypass (-ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000) is refused by host, nothing captured (rc $r0d)"
-    # rw-p0b-purge-door attempt 2: the label / compose / network-namespace half of the check, by
-    # test - the Docker-free unit test (synthetic docker inspect JSON for every refusal shape, the
-    # accepted shapes, a real docker.exe against a silent endpoint, and its own revert check: each
-    # half of the check reduced to "return ''" must make it FAIL).
+    $script:refusalLog += $o0
+    Smoke-Refused 'a capture with no target and no -Live' (Smoke-Run { & $smoke -Capture $probe }) 'needs -Target'
+    Smoke-Refused 'the live workbench named as -Target without -Live' (Smoke-Run { & $smoke -Capture $probe -Target openbrain-workbench -Subnet $subnets.smoke }) "container 'openbrain-workbench' belongs to compose project"
+    Smoke-Refused "attempt 2's bypass (-ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000; -ExecContainer is gone)" (Smoke-Run { & $smoke -Capture $probe -ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000 }) 'unknown argument.*-ExecContainer'
+    Smoke-Refused "a base URL naming another host (-Target $wbName -BaseUrl http://openbrain-workbench:8000)" (Smoke-Run { & $smoke -Capture $probe -Target $wbName -Subnet $subnets.smoke -BaseUrl http://openbrain-workbench:8000 }) "base URL host 'openbrain-workbench' is not the target"
+    Smoke-Refused "a base URL naming loopback (-Target $wbName -BaseUrl http://localhost:8000)" (Smoke-Run { & $smoke -Capture $probe -Target $wbName -Subnet $subnets.smoke -BaseUrl http://localhost:8000 }) "base URL host 'localhost' is not the target"
+    Smoke-Refused 'a -Subnet in Docker''s default pools (172.17.0.0/24)' (Smoke-Run { & $smoke -Capture $probe -Target $wbName -Subnet 172.17.0.0/24 }) "inside 172.16.0.0/12"
+    # The Docker-free unit test (synthetic docker world: every refusal shape, the owned fetch
+    # path's tampering refusals, the accepted shapes, a silent docker endpoint, and its own revert
+    # check: each check function reduced to "return ''" must make it FAIL).
     $unit = Join-Path $repo 'scripts\checks\smoke-workbench-routers.test.ps1'
     $ou = (& powershell -NoProfile -File $unit 2>&1 | Out-String -Width 4096); $ru = $LASTEXITCODE
     Save 'smoke-check-unit.log' $ou
     $uPass = ([regex]::Matches($ou, '(?m)^\s*PASS\s')).Count; $uFail = ([regex]::Matches($ou, '(?m)^\s*FAIL\s')).Count
-    Check (($ru -eq 0) -and ($uFail -eq 0) -and ($ou -match 'all checks passed') -and ($ou -match "Test-DisposableContainer reduced to return '': this test FAILS") -and ($ou -match "Test-DisposableTarget reduced to return '': this test FAILS")) "smoke check unit test (synthetic docker, every refusal shape, revert check): $uPass PASS, $uFail FAIL, rc $ru"
-    # ... and the same shapes against REAL docker, on this run's own containers: a never-started
-    # owner-labelled container sharing the :wt workbench's network namespace, and one on the host
-    # network. Both must be refused (exit 2, no directory) - the attempt-1 bypass.
+    $reverts = @('Test-DisposableContainer', 'Test-TargetComponent', 'Test-DisposableTarget', 'Test-FetchContainer' | Where-Object { $ou -match "$_ reduced to return '': this test FAILS" })
+    Check (($ru -eq 0) -and ($uFail -eq 0) -and ($ou -match 'all checks passed') -and $reverts.Count -eq 4) "smoke check unit test (synthetic docker, every refusal shape, the owned fetch path, revert check x$($reverts.Count)): $uPass PASS, $uFail FAIL, rc $ru"
+    # ... and the namespace shapes against REAL docker, on this run's own containers, each its own
+    # check: a never-started owner-labelled container sharing the :wt workbench's network namespace,
+    # one on the host network - both refused as -Target; and while the first exists, the workbench
+    # ITSELF is refused (a container shares its namespace: its listeners would answer on the
+    # workbench's address). Both are removed before the captures.
     $nsSide = "rwp0-nsside-$rand"; $nsHost = "rwp0-nshost-$rand"
     $null = Dk create --name $nsSide --label $label --network "container:$wbName" --entrypoint true $tag
     if ($script:rc -eq 0) { $made.containers += $nsSide }
     $null = Dk create --name $nsHost --label $label --network host --entrypoint true $tag
     if ($script:rc -eq 0) { $made.containers += $nsHost }
-    $o0e = (& $smoke -Capture $probe -ExecContainer $nsSide -BaseUrl http://localhost:8000 *>&1 | Out-String -Width 4096); $r0e = $LASTEXITCODE
-    Check (($r0e -eq 2) -and ($o0e -match 'shares the network namespace of container') -and -not (Test-Path $probe)) "a container sharing the workbench's network namespace (--network container:$wbName) is refused, nothing captured (rc $r0e)"
-    $o0f = (& $smoke -Capture $probe -ExecContainer $nsHost -BaseUrl http://localhost:8000 *>&1 | Out-String -Width 4096); $r0f = $LASTEXITCODE
-    Check (($r0f -eq 2) -and ($o0f -match "NetworkMode 'host'") -and -not (Test-Path $probe)) "a container on the host network (--network host) is refused, nothing captured (rc $r0f)"
-    Save 'smoke-refusals.log' ($o0 + $o0b + $o0c + $o0d + $o0e + $o0f)
+    Smoke-Refused "a container sharing the workbench's network namespace (--network container:$wbName) as -Target" (Smoke-Run { & $smoke -Capture $probe -Target $nsSide -Subnet $subnets.smoke }) 'shares the network namespace of container'
+    Smoke-Refused 'a container on the host network (--network host) as -Target' (Smoke-Run { & $smoke -Capture $probe -Target $nsHost -Subnet $subnets.smoke }) "NetworkMode 'host'"
+    Smoke-Refused "the workbench while $nsSide shares its namespace" (Smoke-Run { & $smoke -Capture $probe -Target $wbName -Subnet $subnets.smoke }) 'shares the network namespace of'
+    foreach ($x in @($nsSide, $nsHost)) { $null = Dk rm -f -v $x }
+    $made.containers = @($made.containers | Where-Object { $_ -ne $nsSide -and $_ -ne $nsHost })
+    Save 'smoke-refusals.log' ($script:refusalLog -join "`n")
     $a = Join-Path $own 'smoke-a'; $b = Join-Path $own 'smoke-b'
     $c1 = Smoke-Capture $a $wbName; $c2 = Smoke-Capture $b $wbName
     $cmp = Smoke-Compare $a $b

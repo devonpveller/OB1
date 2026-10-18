@@ -20,8 +20,15 @@ const doc: J = JSON.parse(await Deno.readTextFile(
   new URL("../../docker/workbench/src/contracts/generated/openapi.json", import.meta.url),
 ));
 
+// An OpenAPI $ref is resolved in the document's components; one that does not resolve THROWS
+// (rw-p0b-purge-door attempt 3: a missing target used to compare as {} silently).
 function resolve(s: J): J {
-  if (s?.$ref) return resolve(doc.components.schemas[s.$ref.split("/").pop()]);
+  if (s?.$ref) {
+    const m = /^#\/components\/schemas\/([^/]+)$/.exec(String(s.$ref));
+    const target = m ? doc.components?.schemas?.[m[1]] : undefined;
+    if (target === undefined) throw new Error(`unresolvable OpenAPI $ref '${s.$ref}'`);
+    return resolve(target);
+  }
   return s ?? {};
 }
 
@@ -105,13 +112,38 @@ const COMPARED_SCALARS = ["pattern", "format", "minLength", "maxLength", "minimu
 // annotations that change no accepted value ($ref is resolved; type/nullable/required/properties/
 // items/additionalProperties/not/enum/const/anyOf/oneOf/allOf/propertyNames/patternProperties/
 // prefixItems are compared structurally below)
-const IGNORED = new Set(["description", "title", "example", "examples", "$schema", "x-registry", "$ref", "deprecated", "readOnly", "writeOnly"]);
+// $ref is RESOLVED on both sides (deref below; attempt 3 - the manifest side used to ignore it, so a
+// generator that starts emitting $ref would have compared {} silently); $defs / definitions are
+// only read through a $ref.
+const IGNORED = new Set(["description", "title", "example", "examples", "$schema", "x-registry", "deprecated", "readOnly", "writeOnly", "$defs", "definitions"]);
 const STRUCTURAL = new Set(["type", "nullable", "required", "properties", "items", "additionalProperties", "not", "enum", "const",
   "anyOf", "oneOf", "allOf", "propertyNames", "patternProperties", "prefixItems"]);
-const sortedBranches = (xs: J[], fromOpenApi: boolean) =>
-  xs.map((x) => shape(x, fromOpenApi)).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
-function shape(s: J | undefined, fromOpenApi: boolean): J {
-  s = fromOpenApi ? resolve(s ?? {}) : (s ?? {});
+const sortedBranches = (xs: J[], fromOpenApi: boolean, root: J) =>
+  xs.map((x) => shape(x, fromOpenApi, root)).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+// Follows $ref: the OpenAPI side into components/schemas, a JSON schema (tools/list, the manifest)
+// into its root's $defs / definitions. A $ref that does not resolve, points anywhere else, carries
+// a sibling keyword this diff would compare, or loops, THROWS - never compared as {}.
+function deref(s: J, fromOpenApi: boolean, root: J): J {
+  for (let hops = 0; s && typeof s === "object" && "$ref" in s; hops++) {
+    if (hops >= 32) throw new Error(`shape(): $ref chain longer than 32 (a loop?) at '${s.$ref}'`);
+    const extra = Object.keys(s).filter((k) => k !== "$ref" && !IGNORED.has(k));
+    if (extra.length) throw new Error(`shape(): $ref '${s.$ref}' with sibling keyword(s) ${extra.join(", ")} is not compared (refused)`);
+    let target: J | undefined;
+    if (fromOpenApi) {
+      const m = /^#\/components\/schemas\/([^/]+)$/.exec(String(s.$ref));
+      target = m ? doc.components?.schemas?.[m[1]] : undefined;
+    } else {
+      const m = /^#\/(\$defs|definitions)\/([^/]+)$/.exec(String(s.$ref));
+      target = m ? root?.[m[1]]?.[m[2]] : undefined;
+    }
+    if (target === undefined) throw new Error(`shape(): unresolvable $ref '${s.$ref}'`);
+    s = target;
+  }
+  return s;
+}
+function shape(s: J | undefined, fromOpenApi: boolean, root?: J): J {
+  root = root ?? s ?? {};
+  s = deref(s ?? {}, fromOpenApi, root!);
   for (const k of Object.keys(s)) {
     if (!IGNORED.has(k) && !STRUCTURAL.has(k) && !COMPARED_SCALARS.includes(k)) {
       throw new Error(`shape(): schema keyword '${k}' is neither compared nor deliberately ignored (${JSON.stringify(s).slice(0, 200)})`);
@@ -129,7 +161,7 @@ function shape(s: J | undefined, fromOpenApi: boolean): J {
   const any = (s.anyOf ?? []) as J[];
   const nonNull = any.filter((alt) => alt.type !== "null");
   if (any.length && nonNull.length === 1 && any.length === 2 && Object.keys(s).every((k) => k === "anyOf" || IGNORED.has(k))) {
-    return { ...shape(nonNull[0], fromOpenApi), nullable: true };
+    return { ...shape(nonNull[0], fromOpenApi, root), nullable: true };
   }
   const out: J = { type: type ?? null, nullable };
   for (const k of COMPARED_SCALARS) {
@@ -139,27 +171,31 @@ function shape(s: J | undefined, fromOpenApi: boolean): J {
   }
   if (s.properties) {
     out.required = [...(s.required ?? [])].sort();
-    out.properties = Object.fromEntries(Object.keys(s.properties).sort().map((k) => [k, shape(s!.properties[k], fromOpenApi)]));
+    out.properties = Object.fromEntries(Object.keys(s.properties).sort().map((k) => [k, shape(s!.properties[k], fromOpenApi, root)]));
   } else if (s.required) out.required = [...s.required].sort();
-  if (s.items) out.items = Array.isArray(s.items) ? s.items.map((x: J) => shape(x, fromOpenApi)) : shape(s.items, fromOpenApi);
-  if (s.prefixItems) out.prefixItems = (s.prefixItems as J[]).map((x) => shape(x, fromOpenApi));
+  // items: false (no item allowed) is kept as false, never read as "absent" (attempt 3)
+  if ("items" in s) {
+    out.items = typeof s.items === "boolean" ? s.items
+      : Array.isArray(s.items) ? s.items.map((x: J) => shape(x, fromOpenApi, root)) : shape(s.items, fromOpenApi, root);
+  }
+  if (s.prefixItems) out.prefixItems = (s.prefixItems as J[]).map((x) => shape(x, fromOpenApi, root));
   // additionalProperties (rw-p0b-purge-door, tester finding T2-4: `{}` -> `false` passed): a
   // boolean is kept as it is, a schema is compared as one; absent stays absent.
   if ("additionalProperties" in s) {
     const ap = s.additionalProperties;
-    out.additionalProperties = typeof ap === "boolean" ? ap : shape(ap as J, fromOpenApi);
+    out.additionalProperties = typeof ap === "boolean" ? ap : shape(ap as J, fromOpenApi, root);
   }
   if (s.patternProperties) {
-    out.patternProperties = Object.fromEntries(Object.keys(s.patternProperties).sort().map((k) => [k, shape(s!.patternProperties[k], fromOpenApi)]));
+    out.patternProperties = Object.fromEntries(Object.keys(s.patternProperties).sort().map((k) => [k, shape(s!.patternProperties[k], fromOpenApi, root)]));
   }
-  if ("propertyNames" in s) out.propertyNames = typeof s.propertyNames === "boolean" ? s.propertyNames : shape(s.propertyNames, fromOpenApi);
+  if ("propertyNames" in s) out.propertyNames = typeof s.propertyNames === "boolean" ? s.propertyNames : shape(s.propertyNames, fromOpenApi, root);
   // the value-restricting keywords (attempt 2, N4): compared, never skipped
-  if ("not" in s) out.not = typeof s.not === "boolean" ? s.not : shape(s.not, fromOpenApi);
+  if ("not" in s) out.not = typeof s.not === "boolean" ? s.not : shape(s.not, fromOpenApi, root);
   if ("enum" in s) out.enum = (s.enum as unknown[]).map((v) => JSON.stringify(v)).sort();
   if ("const" in s) out.const = JSON.stringify(s.const);
-  if (any.length) out.anyOf = sortedBranches(any, fromOpenApi);
-  if (s.oneOf) out.oneOf = sortedBranches(s.oneOf, fromOpenApi);
-  if (s.allOf) out.allOf = sortedBranches(s.allOf, fromOpenApi);
+  if (any.length) out.anyOf = sortedBranches(any, fromOpenApi, root);
+  if (s.oneOf) out.oneOf = sortedBranches(s.oneOf, fromOpenApi, root);
+  if (s.allOf) out.allOf = sortedBranches(s.allOf, fromOpenApi, root);
   return out;
 }
 
@@ -214,6 +250,48 @@ Deno.test("the tool manifest matches the OpenAPI document AT EVERY LEVEL, additi
   for (const t of CONTRACT_TOOLS) {
     assertEquals(shape(t.input as J, false), want.get(t.tool), `${t.tool}: the manifest's input schema drifted from the OpenAPI document`);
   }
+});
+
+// rw-p0b-purge-door attempt 3 (attempt-2 tester near-miss): shape() resolves $ref on BOTH sides
+// (or refuses it) and keeps items:false. Each assertion is one shape; a revert of either makes it fail.
+function shapeThrows(s: J, fromOpenApi: boolean, rx: RegExp): void {
+  let msg = "(no throw)";
+  try {
+    shape(s, fromOpenApi);
+  } catch (e) {
+    msg = String(e);
+  }
+  assert(rx.test(msg), `expected a throw matching ${rx}, got '${msg}' for ${JSON.stringify(s)}`);
+}
+Deno.test("shape(): a $ref resolves to its definition (manifest side: $defs and definitions)", () => {
+  const inline = { type: "object", properties: { a: { type: "string", pattern: "^a" } }, required: ["a"] };
+  const viaDefs = { type: "object", properties: { a: { $ref: "#/$defs/A" } }, required: ["a"], $defs: { A: { type: "string", pattern: "^a" } } };
+  const viaDefinitions = { type: "object", properties: { a: { $ref: "#/definitions/A" } }, required: ["a"], definitions: { A: { type: "string", pattern: "^a" } } };
+  assertEquals(shape(viaDefs, false), shape(inline, false));
+  assertEquals(shape(viaDefinitions, false), shape(inline, false));
+  const drift = { ...viaDefs, $defs: { A: { type: "string", pattern: "^b" } } };
+  assert(JSON.stringify(shape(drift, false)) !== JSON.stringify(shape(inline, false)), "a drift behind a $ref must show");
+});
+Deno.test("shape(): an unresolvable $ref throws (manifest side)", () => {
+  shapeThrows({ type: "object", properties: { a: { $ref: "#/$defs/Nope" } } }, false, /unresolvable \$ref '#\/\$defs\/Nope'/);
+});
+Deno.test("shape(): a $ref outside the schema throws", () => {
+  shapeThrows({ type: "object", properties: { a: { $ref: "https://example.invalid/s.json" } } }, false, /unresolvable \$ref/);
+});
+Deno.test("shape(): an unresolvable OpenAPI $ref throws", () => {
+  shapeThrows({ $ref: "#/components/schemas/NoSuchSchema" }, true, /unresolvable \$ref/);
+});
+Deno.test("shape(): a looping $ref throws", () => {
+  shapeThrows({ $ref: "#/$defs/A", $defs: { A: { $ref: "#/$defs/A" } } }, false, /longer than 32/);
+});
+Deno.test("shape(): a $ref with a sibling keyword it would drop throws", () => {
+  shapeThrows({ type: "object", properties: { a: { $ref: "#/$defs/A", type: "integer" } }, $defs: { A: { type: "string" } } }, false, /sibling keyword\(s\) type/);
+});
+Deno.test("shape(): items:false is compared as false, not as absent", () => {
+  const none = shape({ type: "array", items: false }, false);
+  assertEquals(none.items, false);
+  assert(JSON.stringify(none) !== JSON.stringify(shape({ type: "array" }, false)), "items:false must differ from no items keyword");
+  assert(JSON.stringify(none) !== JSON.stringify(shape({ type: "array", items: {} }, false)), "items:false must differ from items:{}");
 });
 
 Deno.test("no contract tool is a write (D14: reads only)", () => {

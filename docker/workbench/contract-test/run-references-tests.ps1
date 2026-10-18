@@ -5,8 +5,9 @@
 #
 # -Subnet is REQUIRED and -Evidence must be absent or empty (rw-p0b-purge-door attempt 2, tester
 # finding F1: this is the same disposable harness as run-contract-tests.ps1, so it gets the same two
-# guards): the network gets this subnet, never one from Docker's default pools (refused inside
-# 192.168.0.0/16), and nothing is written under -Evidence until the live-data guard has passed for
+# guards): exactly a /24, never one from Docker's default pools (refused inside 172.16.0.0/12 and
+# 192.168.0.0/16; harness-subnet.ps1 - the run's network gets the lower /25, the smoke script's own
+# fetch network the upper /25), and nothing is written under -Evidence until the live-data guard has passed for
 # every capture - logs and client outputs are staged, then published through the shared evidence
 # gate (evidence-gate.ps1: every log redacted, regular files of at most 16 KB only, links not
 # followed, a drop list).
@@ -40,7 +41,8 @@
 #        f. a vault whose one note the legacy reader listed differently (a duplicated frontmatter
 #           id) is refused by the migration: exit 1, the note named, nothing written for it
 #   7. the eleven-router smoke (scripts/checks/smoke-workbench-routers.ps1) against the
-#      pre-change and the :wt workbench on database C: captured with an explicit -ExecContainer,
+#      pre-change and the :wt workbench on database C: captured with an explicit -Target (the
+#      smoke script fetches it by its address on a network of its own; attempt 3),
 #      compared IN-PROCESS (-Compare @(a, b)), 13 PASS / 'all 13 router responses identical',
 #      plus the built-in RED (an altered copy: 12 PASS, 1 FAIL, rc 1). The LIVE-DATA GUARD
 #      (size cap, fixture-only ids and notes, _target.txt 'live: False') runs over every capture
@@ -68,8 +70,11 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
-if ($Subnet -notmatch '^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}/(\d{1,2})$') { Write-Host "REFUSED: -Subnet <a.b.c.d/nn> is required (got '$Subnet')"; exit 2 }
-if (([int]$Matches[1] -eq 192 -and [int]$Matches[2] -eq 168) -or [int]$Matches[3] -lt 16) { Write-Host "REFUSED: -Subnet $Subnet overlaps 192.168.0.0/16 or is wider than /16"; exit 2 }
+. (Join-Path $PSScriptRoot 'harness-subnet.ps1')
+if (-not (Get-Command Test-HarnessSubnet -ErrorAction SilentlyContinue) -or -not (Get-Command Split-HarnessSubnet -ErrorAction SilentlyContinue)) { Write-Host 'REFUSED: harness-subnet.ps1 did not load (the -Subnet rule is not checked; fail closed)'; exit 2 }
+$w = Test-HarnessSubnet $Subnet
+if ($w) { Write-Host "REFUSED: $w"; exit 2 }
+$subnets = Split-HarnessSubnet $Subnet          # .run = this run's network, .smoke = the smoke script's fetch network
 if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty (the run publishes into an empty or absent directory)"; exit 2 }
 $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot                                  # .../workbench/contract-test
@@ -250,8 +255,8 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --subnet $Subnet --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $Subnet)"
+  $null = Dk network create --driver bridge --internal --subnet $subnets.run --label $label $net
+  Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $($subnets.run); the smoke's fetch network gets $($subnets.smoke))"
   if ($script:rc -ne 0) { throw 'network' }
   $made.net = $true
 
@@ -445,8 +450,11 @@ SELECT count(*),
       # In-process; every capture names its disposable target explicitly (never the defaults).
       # Recorded BEFORE it runs: a capture that fails half-way still has to pass the guard.
       $script:captures += , @($dir, $container)
-      $o = (& $smoke -Capture $dir -ExecContainer $container -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY *>&1 | Out-String)
-      return @{ out = $o; rc = $LASTEXITCODE }
+      # (attempt 3: -Target, verified and fetched by its address on the smoke script's own network;
+      # a throw never aborts the run)
+      $global:LASTEXITCODE = 0
+      try { $o = (& $smoke -Capture $dir -Target $container -Subnet $subnets.smoke -KeyEnv WORKBENCH_KEY *>&1 | Out-String); $rc = $LASTEXITCODE } catch { $o = "THREW: $_"; $rc = -1 }
+      return @{ out = $o; rc = $rc }
     }
     function Smoke-Compare([string]$x, [string]$y) {
       # In-process with ONE array argument: '-File ... -Compare $a $b' binds $b to -Capture and the
