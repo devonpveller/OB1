@@ -264,18 +264,51 @@ RUN set -e; \
   sed -i 's#Component.ContentMeta()]#Component.ContentMeta(), Component.NotesEditor()]#' "$L"; \
   grep -q 'Component.ContentMeta(), Component.NotesEditor()]' "$L"
 
+# Quartz's runtime config, set at BUILD time as entrypoint.sh also sets it at
+# start (idempotent): vault ignore patterns, and CustomOgImages off (ZWJ-emoji
+# codepoints crash its emit). Needed here because the chrome extraction below
+# runs a real Quartz build of the fixture vault.
+RUN set -e; C=/quartz/quartz.config.ts; \
+  sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", ".git", ".git/**", "**/.git/**", ".quartz-cache", "public", "node_modules", ".wikistate.json", "**/.failed-entity-ids.json", "planned.json"]#' "$C"; \
+  sed -i 's#^\([[:space:]]*\)Plugin.CustomOgImages(),#\1// Plugin.CustomOgImages(), // DISABLED: ZWJ-emoji codepoint crashes emit#' "$C"; \
+  grep -q '// Plugin.CustomOgImages()' "$C"
+
 # serve.mjs lives INSIDE /quartz (with lib/ beside it) so its unified/remark
 # imports resolve against /quartz/node_modules — ESM ignores NODE_PATH, and a
 # server at /serve.mjs would fail at the first lib import (Phase B).
 COPY serve.mjs /quartz/serve.mjs
 COPY lib /quartz/lib
+# The compile half of the page-class registry and the files-vs-rows
+# reconciler are SHARED with the compiler (research-workbench P1a, D13 item 4:
+# one reconciler for the post-compile check, the health probe and the repair
+# pass). They come from OB1/recipes/_shared through the named build context
+# `recipes` (compose: build.additional_contexts; by hand:
+# docker build --build-context recipes=OB1/recipes ...).
+COPY --from=recipes _shared/page-classes.mjs _shared/wiki-pages.mjs _shared/links.mjs _shared/reconcile-wiki-pages.mjs /quartz/lib/shared/
 
-# Build gates for the DB-render fallback (Phase B):
-# 1. every transitive dependency the renderer leans on must resolve — they are
-#    QUARTZ'S deps, not ours, and a QUARTZ_REF bump may drop one silently;
-# 2. the renderer + live-document unit tests, including the audit A-1
-#    invariants (no identity attributes, no client bundle) as regex asserts.
-RUN set -e; cd /quartz;   node -e "await Promise.all(['unified','remark-parse','remark-gfm','remark-frontmatter','remark-rehype','hast-util-to-html'].map(m=>import(m)))" ;   node --test lib/*.test.mjs
+# The STATIC chrome (left sidebar, graph shell, head resources, after-body
+# scripts, ...) is cut from a page this image's own Quartz builds from the
+# committed SYNTHETIC fixture vault (kept in the image: the live-render unit
+# test renders its rows), so the live renderer's chrome is the
+# chrome this Quartz emits - a QUARTZ_REF bump regenerates it, and an anchor
+# the extractor cannot find fails the build. No live content is involved.
+COPY test/fixtures/vault /quartz/test/fixtures/vault
+COPY test/extract-chrome-static.mjs /tmp/extract-chrome-static.mjs
+RUN set -e; cd /quartz; \
+  npx quartz build -d /quartz/test/fixtures/vault -o /tmp/fixture-out > /tmp/fixture-build.log 2>&1 || { cat /tmp/fixture-build.log; exit 1; }; \
+  node /tmp/extract-chrome-static.mjs /tmp/fixture-out/content/person/person-ada-fixture.html /tmp/fixture-out/content/person/index.html > /quartz/lib/chrome-static.mjs; \
+  rm -rf /tmp/fixture-out /tmp/fixture-build.log /quartz/.quartz-cache; \
+  test -s /quartz/lib/chrome-static.mjs
+
+# Build gates for the live renderer:
+# 1. every transitive dependency the renderer leans on must resolve - they are
+#    QUARTZ'S deps (MIT/ISC, THIRD-PARTY-NOTICES.md), not ours, and a
+#    QUARTZ_REF bump may drop one silently;
+# 2. the renderer, chrome, registry, DB-state and nav unit tests (incl. the
+#    raw-HTML security property and the ONE-editor identity invariants).
+RUN set -e; cd /quartz; \
+  node -e "await Promise.all(['unified','remark-parse','remark-gfm','remark-frontmatter','remark-rehype','remark-smartypants','remark-math','rehype-raw','rehype-pretty-code','rehype-slug','rehype-autolink-headings','rehype-katex','mdast-util-find-and-replace','mdast-util-to-hast','mdast-util-to-string','hast-util-to-html','hast-util-to-string','hast-util-to-jsx-runtime','preact','preact-render-to-string','unist-util-visit','github-slugger','is-absolute-url','reading-time'].map(m=>import(m)))"; \
+  node --test lib/*.test.mjs
 
 COPY derive-graph-index.mjs /derive-graph-index.mjs
 COPY entrypoint.sh /entrypoint.sh
@@ -286,6 +319,15 @@ COPY entrypoint.sh /entrypoint.sh
 # rather than the LF worktree). Doing it here means the build is correct
 # regardless of how the tree was checked out.
 RUN sed -i 's/$//' /entrypoint.sh && chmod +x /entrypoint.sh
+
+# Provenance label (lifecycle row 11; research-workbench P1a acceptance 11).
+# The deploy door (scripts/stack/ob1-deploy.ps1) builds with
+# --build-arg OB1_SHA=<the parent's OB1 gitlink> and refuses a dirty build
+# context; test/p1a-env.sh build passes `git -C OB1 rev-parse HEAD`. A hand
+# `docker build` without it leaves the label EMPTY (and the door says so).
+# Last, so a new commit does not invalidate the cached layers above.
+ARG OB1_SHA=
+LABEL org.opencontainers.image.revision="$OB1_SHA"
 
 EXPOSE 8080
 ENTRYPOINT ["/entrypoint.sh"]

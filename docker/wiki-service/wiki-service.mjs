@@ -44,7 +44,9 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // The sweeps are the DELETE half of the wiki_pages contract: a page removed
 // from disk must lose its row, or search/nav would keep serving a dead link
 // (wiki-dynamic-index P1). Best-effort: never fails a compile.
-import { deleteWikiPages, countWikiPages } from "file:///recipes/_shared/wiki-pages.mjs";
+import { deleteWikiPages } from "file:///recipes/_shared/wiki-pages.mjs";
+// D13 item 4: the files-vs-rows check runs after every compile.
+import { reconcile, formatReport } from "file:///recipes/_shared/reconcile-wiki-pages.mjs";
 
 const pexec = promisify(execFile);
 
@@ -195,12 +197,13 @@ async function ensureRepo() {
   // git so the workbench's note commits never stage images.
   const wantIgnore =
     ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n" +
-    ".failed-entity-ids.json\nplanned.json\n";
+    ".failed-entity-ids.json\nplanned.json\n.compile-notifications.jsonl\n";
   let curIgnore = "";
   try { curIgnore = await readFile(`${WIKI_GIT_DIR}/.gitignore`, "utf8"); } catch { /* */ }
   if (
     !curIgnore.includes(".wikistate.json") || !curIgnore.includes("assets/") ||
-    !curIgnore.includes(".failed-entity-ids.json") || !curIgnore.includes("planned.json")
+    !curIgnore.includes(".failed-entity-ids.json") || !curIgnore.includes("planned.json") ||
+    !curIgnore.includes(".compile-notifications.jsonl")
   ) {
     await writeFile(`${WIKI_GIT_DIR}/.gitignore`, wantIgnore);
   }
@@ -956,8 +959,10 @@ async function compile(reason) {
       console.error(`[wiki-service] recipe stderr tail: ${errLines.join(" | ").slice(0, 600)}`);
     }
 
-    // Notebook → topic synthesis (research lives here, not on entity
-    // pages). Non-fatal: entity pages already written above.
+    // Notebook hub synthesis. Its failure no longer reads as a clean compile
+    // (D13 item 1: the same for notebook synthesis): the rest of the compile
+    // still runs and commits what landed, then the compile reports FAILED.
+    let synthFailed = null;
     try {
       const { stdout: so } = await pexec("node", [SYNTH_PATH], {
         env: childEnv,
@@ -966,8 +971,8 @@ async function compile(reason) {
       });
       tail += " | " + so.trim().split("\n").slice(-1)[0];
     } catch (e) {
-      console.error("[wiki-service] notebook synthesis failed (non-fatal):",
-        (e?.stderr || e?.message || String(e)).toString().slice(0, 300));
+      synthFailed = (e?.stderr || e?.message || String(e)).toString().slice(-600);
+      console.error("[wiki-service] notebook synthesis FAILED:", synthFailed);
     }
 
     // Vault-root home (Quartz `/`). Compiler-owned, distinct basename
@@ -1032,25 +1037,20 @@ async function compile(reason) {
     // AFTER pages + sweeps, so the on-disk diff is accurate.
     const plannedRemaining = await writePlannedManifest(linkData);
 
-    // wiki_pages reconciliation (wiki-dynamic-index P1): the table is DERIVED
-    // from disk, so a drift between rows and pages means a sync outage - log
-    // it so it is visible before search/nav start serving stale entries.
-    // Tolerance absorbs the normal in-flight window (pages written after the
-    // count, notes not yet compiled). Fix with backfill-wiki-pages.mjs.
+    // Files-vs-rows reconciliation after the compile (D13 item 4): per
+    // page_class, no file without a row, no row older than its file. Non-zero
+    // drift is red and names the slugs; the viewer repairs it on (re)connect.
+    let drift = null;
     try {
-      // ENTITY rows vs ENTITY files: listEntityFiles() skips leaf/notebook
-      // dirs, so an unfiltered row count can never match it.
-      const rows = await countWikiPages("entity");
-      if (rows !== null) {
-        const onDisk = (await listEntityFiles(WIKI_OUT_DIR)).length;
-        if (onDisk > 0 && Math.abs(rows - onDisk) / onDisk > 0.25) {
-          console.error(
-            `[wiki-pages] DRIFT: ${rows} row(s) vs ${onDisk} entity page(s) on disk - ` +
-              `run backfill-wiki-pages.mjs`,
-          );
-        }
-      }
-    } catch { /* reconciliation is diagnostics only */ }
+      const report = await reconcile({ vault: WIKI_GIT_DIR });
+      drift = { drift: report.drift, missing: report.missing.slice(0, 20), stale: report.stale.slice(0, 20), orphan: report.orphan.slice(0, 20) };
+      const text = formatReport(report);
+      if (report.drift > 0) console.error(text);
+      else console.log(text.split("\n")[0]);
+    } catch (e) {
+      drift = { error: String(e?.message || e) };
+      console.error(`[reconcile] CANNOT CHECK after compile: ${e?.message || e}`);
+    }
     // Keep the drain converging: this compile consumed a slice (or deferred
     // one for user activity) and more remains → schedule the next attempt
     // (single timer; any compile that runs in the meantime re-schedules
@@ -1099,11 +1099,20 @@ async function compile(reason) {
     }).catch(() => {});
 
     lastStatus = {
-      state: "idle", at: new Date().toISOString(), ok: true,
+      state: "idle", at: new Date().toISOString(), ok: !synthFailed,
       summary: tail, committed, push,
       mode: fullRebuild ? "full" : "incremental",
       pull_ok: pull.ok !== false,
+      reconcile: drift,
+      ...(synthFailed ? { error: `notebook synthesis failed: ${synthFailed.slice(-300)}` } : {}),
     };
+    if (synthFailed) {
+      console.error(
+        `[wiki-service] compile FAILED (notebook synthesis; committed=${committed}, ` +
+          `pushed=${push.pushed}): ${tail}`,
+      );
+      return { ok: false, committed, summary: tail, error: lastStatus.error };
+    }
     console.log(
       `[wiki-service] compile ok (committed=${committed}, ` +
         `pushed=${push.pushed}): ${tail}`,

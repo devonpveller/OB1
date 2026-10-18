@@ -1,0 +1,193 @@
+#!/usr/bin/env node
+/**
+ * parity-diff - rw-p1a-render acceptance 1 + 2: fetch the fixed URL list from
+ * the LIVE renderer and byte-diff each rendered <body> against the page the
+ * image's own Quartz builder emitted for the same synthetic fixture vault.
+ *
+ * Every difference must be explained by a rule ENUMERATED IN ADVANCE in the
+ * test plan (test-plans/rw-p1a-render.md, "Allowed differences"); the rules
+ * live in RULES below with the same ids. A difference no rule explains is
+ * printed as UNLISTED and fails the run (exit 1). Acceptance 1's elements
+ * (explorer root, graph container, backlinks list, TOC, popover anchors) and
+ * `x-wiki-render: db` are checked on every URL too (exit 1 on a miss).
+ *
+ * Usage (inside wt-rw-p1a-render-net, the built snapshot mounted read-only):
+ *   node parity-diff.mjs --base http://wt-rw-p1a-render-viewer:8080 --built /srv/current [--show]
+ * --show prints every hunk, explained or not.
+ */
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+const arg = (k, d) => { const i = process.argv.indexOf(k); return i >= 0 ? process.argv[i + 1] : d; };
+const BASE = arg("--base", "http://wt-rw-p1a-render-viewer:8080").replace(/\/+$/, "");
+const BUILT = arg("--built", "/srv/current");
+const SHOW = process.argv.includes("--show");
+
+import { URLS } from "./parity-diff-urls.mjs";
+export { URLS };
+
+function builtFile(url) {
+  const p = url.replace(/^\/+/, "");
+  if (p === "") return join(BUILT, "index.html");
+  if (p.endsWith("/")) return join(BUILT, p, "index.html");
+  return join(BUILT, `${p}.html`);
+}
+
+const bodyOf = (html) => {
+  const m = /<body[^>]*>[\s\S]*<\/body>/.exec(html);
+  return m ? m[0] : "";
+};
+// One element boundary per line, so a diff names elements, not bytes.
+const lines = (s) => s.replace(/></g, ">\n<").split("\n");
+
+// LCS line diff -> hunks [{ del:[...], ins:[...] }].
+function diff(a, b) {
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const hunks = [];
+  let i = 0, j = 0, cur = null;
+  const flush = () => { if (cur) { hunks.push(cur); cur = null; } };
+  while (i < n || j < m) {
+    if (i < n && j < m && a[i] === b[j]) { flush(); i++; j++; continue; }
+    cur ??= { del: [], ins: [], at: i };
+    if (j < m && (i >= n || dp[i][j + 1] >= dp[i + 1][j])) cur.ins.push(b[j++]);
+    else cur.del.push(a[i++]);
+  }
+  flush();
+  return hunks;
+}
+
+const joined = (h) => h.del.join("\n") + "\n" + h.ins.join("\n");
+const only = (arr, re) => arr.length > 0 && arr.every((l) => re.test(l));
+const TIME = /^<time datetime="[^"]+">[A-Z][a-z]{2} \d{2}, \d{4}<\/time>$/;
+
+// The ENUMERATED allowed differences (ids match the test plan).
+export const RULES = [
+  {
+    id: "D1-raw-html",
+    why: "raw HTML in a row body is dropped (render-page.mjs security property); the built page rendered it. " +
+      "Allowed only when the built side carries a raw-HTML element (script/iframe/embed/object, or any element with an on* handler) " +
+      "and the live TEXT equals the built text with those tags removed (an inline raw tag: its inner text stays as text) " +
+      "or with those elements removed whole (a raw HTML block)",
+    test: (h) => {
+      const built = h.del.join("");
+      if (!/<(script|iframe|embed|object)\b|<[a-z]+\b[^>]*\son[a-z]+=/i.test(built)) return false;
+      const text = (s) => s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+      const whole = built.replace(/<(script|iframe|embed|object)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+      const live = text(h.ins.join(""));
+      return live === text(built) || live === text(whole);
+    },
+  },
+  {
+    id: "D2-date",
+    why: "the presented date is the row's (frontmatter modified-keys, else updated_at); the built page used the file mtime",
+    test: (h) => h.del.length === h.ins.length && h.del.every((l) => TIME.test(l)) && h.ins.every((l) => TIME.test(l)),
+  },
+  {
+    id: "D3-toc-always",
+    why: "a TOC is emitted on every page (acceptance 1); Quartz omits it below two headings",
+    test: (h) => h.del.length === 0 && h.ins[0]?.startsWith('<div class="toc desktop-only">') && h.ins.at(-1) === "</div>",
+  },
+  {
+    id: "D4-backlinks-always",
+    why: "the backlinks list is emitted on every page (acceptance 1); Quartz hides it when empty",
+    test: (h) => h.del.length === 0 && h.ins[0] === '<div class="backlinks">' && h.ins.includes("<li>No backlinks found</li>") && h.ins.at(-1) === "</div>",
+  },
+  {
+    id: "D7-retired",
+    why: "a retired slug has no built page (the builder emitted nothing; served the generic 404); the live page is the retired-class explanation",
+    test: (h, ctx) => ctx.cls === "retired slug",
+  },
+];
+
+// D5 is a NORMALISATION applied before the diff (one block, not a hunk
+// pattern): on list-layout pages (folder index, notebooks index, tag page) the
+// live right sidebar's content is set aside - it must be exactly graph + TOC +
+// backlinks (acceptance 1), and the built list layout's right sidebar must be
+// empty. Anything else in either sidebar stays in the diff.
+const LIST_CLASSES = new Set(["folder index", "notebooks index", "tag page"]);
+const SIDEBAR_RE = /<div class="right sidebar">([\s\S]*?)<\/div><footer/;
+function normalizeListSidebar(live, built, ctx) {
+  if (!LIST_CLASSES.has(ctx.cls)) return { live, fired: false };
+  const m = SIDEBAR_RE.exec(live);
+  const b = SIDEBAR_RE.exec(built);
+  if (!m || !b || b[1] !== "") return { live, fired: false };
+  const inner = m[1];
+  const shape = /^<div class="graph">[\s\S]*<\/div><div class="toc desktop-only">[\s\S]*<\/div><div class="backlinks">[\s\S]*<\/div>$/.test(inner);
+  if (!shape) return { live, fired: false };
+  return { live: live.replace(SIDEBAR_RE, '<div class="right sidebar"></div><footer'), fired: true };
+}
+// D6 is a NORMALISATION too: in a listing (<ul class="section-ul">), entries
+// are sorted by date then title; the dates differ (D2: row date vs file
+// mtime), so the ORDER can differ. Both bodies' entries are put in href order
+// before the diff; every entry (href, title, tags, date line) is still
+// compared, so a missing, extra or altered entry stays an unlisted hunk.
+const SECTION_UL = /<ul class="section-ul">([\s\S]*?)<\/ul><\/div><\/div>/g;
+function sortListing(body) {
+  let fired = false;
+  const out = body.replace(SECTION_UL, (all, inner) => {
+    const items = inner.split(/(?=<li class="section-li">)/).filter(Boolean);
+    const key = (it) => (/<h3><a href="([^"]+)"/.exec(it) || [])[1] || it;
+    const sorted = [...items].sort((a, b) => key(a).localeCompare(key(b)));
+    if (sorted.join("") !== items.join("")) fired = true;
+    return `<ul class="section-ul">${sorted.join("")}</ul></div></div>`;
+  });
+  return { body: out, fired };
+}
+RULES.push({ id: "D6-listing-order", why: "listing entries are compared in href order: the live order follows the row dates, the built order the file mtimes (pre-diff normalisation; entries themselves still diffed)", test: () => false });
+RULES.push({ id: "D5-list-sidebar", why: "list pages carry graph + TOC + backlinks in the right sidebar (acceptance 1); Quartz's list layout leaves it empty (pre-diff normalisation)", test: () => false });
+
+function explain(h, ctx) {
+  for (const r of RULES) if (r.test(h, ctx)) return r.id;
+  return null;
+}
+
+
+const ELEMENTS = {
+  "explorer root": (b) => /<div class="explorer"[^>]*>/.test(b) && b.includes('class="explorer-ul overflow"'),
+  "graph container": (b) => b.includes('<div class="graph-container"'),
+  "backlinks list": (b) => /<div class="backlinks"><h3>Backlinks<\/h3><ul id="list-\d+" class="overflow">/.test(b),
+  TOC: (b) => b.includes('<div class="toc desktop-only">') && b.includes('class="toc-content overflow"'),
+  "popover anchors": (b) => b.includes('class="popover-hint"') && /<a [^>]*class="internal[^"]*"[^>]*>/.test(b),
+};
+
+let failed = false;
+const summary = [];
+for (const [cls, url] of URLS) {
+  const r = await fetch(BASE + url, { redirect: "manual" });
+  const html = await r.text();
+  const render = r.headers.get("x-wiki-render");
+  const live = bodyOf(html);
+  const missing = Object.entries(ELEMENTS).filter(([, f]) => !f(live)).map(([k]) => k);
+  if (render !== "db") failed = true;
+  if (missing.length) failed = true;
+  const bf = builtFile(url);
+  const built = existsSync(bf) ? bodyOf(readFileSync(bf, "utf8")) : "";
+  const ctx = { cls, url };
+  const fired = {};
+  const norm = normalizeListSidebar(live, built, ctx);
+  if (norm.fired) fired["D5-list-sidebar"] = 1;
+  const sb = sortListing(built), sl = sortListing(norm.live);
+  if (sb.fired || sl.fired) fired["D6-listing-order"] = 1;
+  const hunks = cls === "retired slug" && !built ? [{ del: [], ins: lines(live) }] : diff(lines(sb.body), lines(sl.body));
+  const unlisted = [];
+  for (const h of hunks) {
+    const id = explain(h, ctx);
+    if (id) fired[id] = (fired[id] || 0) + 1;
+    else unlisted.push(h);
+    if (SHOW || !id) {
+      console.log(`--- ${url} ${id ? `[${id}]` : "[UNLISTED]"}`);
+      for (const l of h.del) console.log(`  - ${l.slice(0, 220)}`);
+      for (const l of h.ins) console.log(`  + ${l.slice(0, 220)}`);
+    }
+  }
+  if (unlisted.length) failed = true;
+  summary.push(`${String(r.status)} x-wiki-render=${render} ${cls.padEnd(16)} ${url.padEnd(56)} ` +
+    `built=${built ? "yes" : "NO"} hunks=${hunks.length} unlisted=${unlisted.length} ` +
+    `rules=${JSON.stringify(fired)} missing=${missing.length ? missing.join(",") : "none"}`);
+}
+console.log("\n== parity summary ==");
+for (const l of summary) console.log(l);
+console.log(failed ? "PARITY: FAIL" : "PARITY: PASS (every difference enumerated; every element present; every URL x-wiki-render: db)");
+process.exitCode = failed ? 1 : 0;

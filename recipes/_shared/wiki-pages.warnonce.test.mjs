@@ -1,37 +1,60 @@
 // node --test recipes/_shared/wiki-pages.warnonce.test.mjs
-// warnOnce must be once-per-KIND, not once-per-process: with a single flag,
-// an upsert outage warning silenced a later parse/delete failure for the
-// process lifetime (daemon = forever). The 08-28 mirror outage survived on
-// stacked silence, so this file pins the degradation-visibility contract.
+// D13 (research-workbench P1a): a row write that does not land is a FAILED
+// compile, never a silent `false` - upsertWikiPages throws, the run's flush
+// records the page as UNSYNCED, and finishWikiPages() returns a non-zero exit
+// code after naming the count and the first slugs. The advisory kinds that
+// remain (delete, count) still warn once PER KIND, so a second, different
+// failure never hides behind the first (the 08-28 outage survived on stacked
+// silence).
 //
-// Lives in its OWN file because the module reads OPEN_BRAIN_URL at load time:
-// the env must be poisoned BEFORE import, and the sibling test file's static
-// imports would already have cached the module. node --test runs each file in
-// its own process, so a dynamic import here gets a fresh module instance.
+// Own file: the env must point at a dead endpoint BEFORE the module loads.
 import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.OPEN_BRAIN_URL = "http://127.0.0.1:9"; // nothing listens: fetch rejects fast
-process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "1000";   // module floor; keeps a stall bounded
+process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "1000";
+process.env.WIKI_GIT_DIR = "/wiki";
 
 const m = await import("./wiki-pages.mjs");
 
-test("warnOnce fires once PER KIND, and repeats of a kind stay silent", async () => {
+test("upsertWikiPages throws when the row does not land (no silent false)", async () => {
+  await assert.rejects(() => m.upsertWikiPages({ slug: "content/x", page_class: "root" }));
+});
+
+test("a failed flush leaves the pages UNSYNCED and the run's exit code non-zero, naming count + first slugs", async () => {
+  m._resetWikiPagesForTests();
+  m.queueWikiPage("/wiki/content/person/person-a.md", "---\ntitle: A\n---\n# A\n");
+  m.queueWikiPage("/wiki/content/person/person-b.md", "---\ntitle: B\n---\n# B\n");
+  const lines = [];
+  const orig = console.error;
+  console.error = (msg) => lines.push(String(msg));
+  let code;
+  try {
+    const r = await m.flushWikiPages();
+    assert.deepEqual(r, { sent: 0, failed: 2 });
+    code = await m.finishWikiPages("test");
+  } finally {
+    console.error = orig;
+  }
+  assert.equal(code, 1);
+  assert.deepEqual(m.unsyncedWikiPages().map((u) => u.slug).sort(), ["content/person/person-a", "content/person/person-b"]);
+  const fail = lines.find((l) => l.includes("UNSYNCED"));
+  assert.ok(fail && fail.includes("2 page(s) UNSYNCED") && fail.includes("content/person/person-a"), JSON.stringify(lines));
+});
+
+test("advisory kinds warn once PER KIND", async () => {
+  m._resetWikiPagesForTests();
   const lines = [];
   const orig = console.error;
   console.error = (msg) => lines.push(String(msg));
   try {
-    // Two DIFFERENT kinds must both surface...
-    assert.equal(await m.upsertWikiPages({ slug: "content/x", page_class: "root" }), false);
     assert.equal(await m.deleteWikiPages(["content/x"]), false);
-    // ...and a REPEAT of an already-warned kind must not add a line.
-    assert.equal(await m.upsertWikiPages({ slug: "content/y", page_class: "root" }), false);
+    assert.equal(await m.countWikiPages("entity"), null);
+    assert.equal(await m.deleteWikiPages(["content/y"]), false);
   } finally {
     console.error = orig;
   }
-  const degraded = lines.filter((l) => l.includes("sync degraded"));
-  assert.equal(degraded.length, 2,
-    `expected one warning per kind (upsert, delete), got ${degraded.length}: ${JSON.stringify(degraded)}`);
-  assert.ok(degraded[0].includes("(upsert)"), `first warning should name upsert: ${degraded[0]}`);
-  assert.ok(degraded[1].includes("(delete)"), `second warning should name delete: ${degraded[1]}`);
+  const warned = lines.filter((l) => l.startsWith("[wiki-pages] ") && l.includes(" failed: "));
+  assert.equal(warned.length, 2, JSON.stringify(warned));
+  assert.ok(warned[0].includes("delete failed") && warned[1].includes("count failed"));
 });
