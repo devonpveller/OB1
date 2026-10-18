@@ -25,6 +25,8 @@ import type { ModelHealth } from "./llm.ts";
 
 export type ClaimedJob = {
   jobId: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown>;
+  /** research-workbench P0 column; P3a's fold runs on a job that carries one. */
+  refinery_id?: string | null;
 };
 
 /** The minimal pg client surface used here (deno-postgres PoolClient fits). */
@@ -76,7 +78,7 @@ export const CLAIM_SQL =
   `UPDATE research_jobs SET status='running', started_at=now()
    WHERE id = (SELECT id FROM research_jobs WHERE status='queued' AND NOT ${EXPIRED_SQL}
                ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-   RETURNING id, query, thread_id, origin, options`;
+   RETURNING id, query, thread_id, origin, options, refinery_id`;
 
 /** Cancel every QUEUED job whose caller deadline has passed. A job that was
  *  paused for model_down says so in its reason - the caller can tell "the model
@@ -92,10 +94,10 @@ export const CANCEL_EXPIRED_SQL =
    RETURNING id, options`;
 
 export async function claimNext(c: SqlClient): Promise<ClaimedJob | null> {
-  const r = await c.queryObject<{ id: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown> }>(CLAIM_SQL);
+  const r = await c.queryObject<{ id: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown>; refinery_id?: string | null }>(CLAIM_SQL);
   if (!r.rows.length) return null;
   const row = r.rows[0];
-  return { jobId: row.id, query: row.query, thread_id: row.thread_id, origin: row.origin, options: row.options ?? {} };
+  return { jobId: row.id, query: row.query, thread_id: row.thread_id, origin: row.origin, options: row.options ?? {}, refinery_id: row.refinery_id ?? null };
 }
 
 export async function cancelExpired(c: SqlClient): Promise<Array<{ id: string; options: Record<string, unknown> }>> {

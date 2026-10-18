@@ -1,0 +1,214 @@
+{
+ "_provenance": "rw-p3a-entail 2026-10-17. cited_text = the windows entailment.ts citedWindows() cuts from the job fixture's cited_texts (recorded, deterministic). judge_response = AUTHORED by the developer from reading exactly those windows, in the judge's output shape - not a recording of a model call (the item forbids a live model). Replace by recording through LiteLLM with record-entailment.ts when a recording is wanted; the replay test is indifferent to who wrote the response.",
+ "job_fixture": "job-optiplex",
+ "job_id": "ce398d06-32cd-47ad-92f0-a12cbf5ed114",
+ "prompt_version": "entail-v1",
+ "question": "Dell OptiPlex 3050 used purchase: common failure modes, known defects, red flags, thermal issues, capacitor/CPU socket problems, how to verify hardware health and check for tampering or misuse (POST, Dell Diagnostics ePSA, SMART drive, CPU temp, BIOS tamper, service tag)",
+ "lines": [
+  {
+   "line": 0,
+   "tag": "SOURCED",
+   "text": "The provided sources contain no information specific to the Dell OptiPlex 3050 model; all sources reference other platforms (NVIDIA DGX Spark, Compaq d220, Gigabyte GB-BSCEA-3955, Looking Glass 32\", ASUS motherboards, XYN Spatial Reality Display).",
+   "cites": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "cited_text": [
+    {
+     "source": 1,
+     "title": "Maintenance and Troubleshooting — DGX Spark User Guide",
+     "windows": [
+      "Maintenance and Troubleshooting &#8212; DGX Spark User Guide Skip to main content Back to top DGX Spark User Guide Is this page helpful? Maintenance and Troubleshooting # The DGX Spark benefits from regular software maintenance and proactive monitoring to ensure reliability, security, and peak performance. This section introduces recommended update workflows, health verification practices, and performance tuning guidance, and links to procedures that help keep your environment stable and efficient. Maintenance and Troubleshooting System Updates Overview Preparation Update Procedures Validation Troubleshooting Health Check Overview Preflight GPU Health System Metrics Reporting Performance Tuning Overview CPU and Memory GPU Optimization Storage and I/O Spark/RAPIDS Tuning Validation and Profiling Known Issues Use the supplied power adapter for optimal performance nvidia-smi reports “Memory",
+      "-Usage: Not Supported” CUDA Support on DGX Spark Guidance for reporting memory resources with unified memory architecture Attached HDMI display goes into deep sleep mode after an extended period of inactivity and does not wake Getting Support # If you encounter issues that are not covered in the troubleshooting sections above, or if you need additional assistance with your DGX Spark system, see Get the Right Support for Your DGX Spark for how to choose consumer or enterprise support, access the community forums, and understand entitlement requirements. Before contacting support, please ensure you have: Reviewed the relevant troubleshooting sections in this guide Checked the Known Issues for any known issues that may apply to your situation Collected relevant system information and error messages Attempted the recommended troubleshooting steps for your specific issue On this page"
+     ]
+    },
+    {
+     "source": 2,
+     "title": "Compaq d220 - Microtower Desktop PC Support and Manuals",
+     "windows": [
+      "where is to get this medel drivers (Posted by Anonymous-58132 14 years ago)\nAnswers\nSound & Enternet Is Not Working\ni have load xp with cd my sound & enternet is not working (Posted by sushmabawra 14 years ago)\nAnswers\nView More d220 Questions and Answers\nPopular Compaq d220 Manual Pages\nComputer Setup (F10) Utility Guide - Page 7\n... drive.\n✎ Support for Computer Setup options may vary depending on your specific hardware configuration. Computer Setup (F10) Utility\nComputer Setup\nHeading\nOption\nDescription\nSystem... BIOS Version • BIOS Release Date • Processor Type • Processor Speed • CPU ID • L1 and L2 Cache Size • Memory Information\nStandard CMOS Setup System Time (hh/mm/ss) Sets ...\nComputer Setup (F10) Utility Guide - Page 9\n... RAM (Default)\nRestore on AC/Power Loss\nSets the system status after AC power loss.\n• Power Off: System always Powers Off (Default)",
+      "If a problem persists and you feel uncomfortable about performing the operation, contact your HP authorized reseller or service provider. Cables to an external power source. is not connected Connect to an external power source. Computer is not switched to correct line voltage (115V or 230V) (some models ).\n2-8\nQuick Setup & Getting Started Guide to the external power source...\nHP Compaq Business Desktop d200 Series Personal Computers Service Reference Guide, 4th Edition - Page 14\n... Computer Setup options may vary depending on your specific hardware configuration.\n2-4\n336493-004\nService Reference Guide , d200\nTry Other Boot Devices\nSet this option to YES to instruct the BIOS to boot from other bootable devices not specified under \" Boot Device Priority.\" Heading\nOption\nDescription\nSystem Information\nNone\nLists product name, chassis serial number ( d220 ..."
+     ]
+    },
+    {
+     "source": 3,
+     "title": "Gigabyte GB-BSCEA-3955 Support and Manuals",
+     "windows": [
+      "Gigabyte GB-BSCEA-3955 Support and Manuals\nHome &raquo;\nGigabyte &raquo;\nProducts &raquo;\nGigabyte GB-BSCEA-3955 &raquo;\nOverview\nGigabyte GB-BSCEA-3955 Support and Manuals\nGet Help and Manuals for this Gigabyte item\n+ Add to My products\n?\nThis item is in your list !\nView All Support Options Below\nFree Gigabyte GB-BSCEA-3955 manuals!\nProblems with Gigabyte GB-BSCEA-3955?\nAsk a Question\nGigabyte\nOverview\nQuestions\nManuals\nReviews\nVideos\nResearch\nPopular Gigabyte GB-BSCEA-3955 Manual Pages\nBIOS Quick guide - Page 1\n... as the CPU name, DRAM capacity, and the BIOS version.\nA user password only allows you to setup and configure your mouse and keyboard, users can also carry out this task.) Abandon all changes and the previous settings remain in the BIOS Setup program to select the screen\nor Execute command or enter the submenu...\nBIOS Quick guide - Page 3\n....",
+      "GB-BSCE-3955\nGB-BSi5HA-6300\nGB-BSi7A-6500\nGB-BSi7H-6500\nGB-BXi7H-5500\nBSi5-1135G7\nGB-EACE-3450\nGB-BACE-3010\nGB-BKi7HT-7500\nPoints & Prizes\nYou can earn points for nearly everything you do on HelpOwl.com\nYou can trade in those points for gift cards at leading retailers such as Amazon.com and Walmart\nIt's that simple!\nSee How it Works\nCreate a Free Account\nGigabyte Manuals\nFind free Gigabyte GB-BSCEA-3955 manuals and user guides available at ManualOwl.com . Try out our unique manual viewer allowing you to interact with manuals from directly within your browser!\nGigabyte Reviews\nView thousands of Gigabyte GB-BSCEA-3955 user reviews and customer ratings available at ReviewOwl.com .\nContact Information\nComplete Gigabyte customer service contact information including steps to reach representatives, hours of operation, customer support links and more from ContactHelp.com .\nScoreboard Ratings"
+     ]
+    },
+    {
+     "source": 4,
+     "title": "Looking Glass 32\" | Looking Glass | Light Field Displays",
+     "windows": [
+      "If successful, you display should show a test image of the Looking Glass logo on your portrait. To close this image, move your mouse over and click anywhere on the image. The image should appear 3D.\nIf the image doesn't appear, or you get an error, ensure that the latest version of Looking Glass Bridge is installed and that your HDMI cable and USB-C cables are properly plugged in.\nLooking Glass Studio\nLooking Glass Studio is the hologram companion app for your Looking Glass 32\". With it, you can import holograms from a variety of sources, make minor edits to any hologram you create.\nImporting hologram data from a variety of sources (iPhone Portrait mode photos, light field photosets, RGB-D photos & videos, etc)\nEditing and framing your holographic content\nExporting and sharing holograms with others\nMore information about Looking Glass Studio can be found here .",
+      "Jet Engine is a CAD presentation of complex 3D models, gesture control/explode to show complex structures to show internally and to clients.\nGesture Controls:\nLeft Hand - X-ray through model\nRight-Hand - Rotate the model\nBoth-Hands Together - Explode View\nDemo Holograms\nThe following holograms can be loaded into Looking Glass Studio .\nHyperdunk\nDownload\nTrex\nDownload\nScar Jo\nDownload 1\nDownload 2\nJames Bond\nDownload 1\nDownload 2\nGolden Ticket\nDownload 1\nDownload 2\nSkulls\nDownload\nCommon Troubleshooting Issues\nIssue\nSolution\nIf your PC is not switching on when connected to the Looking Glass 32\" Display\nNote that when you setup + switch on the PC, avoid having all peripherals connected at once. Only have the secondary screen connected. Then, after setup, you can connect all the other accessories. This is to prevent the PC from drawing too much power at once."
+     ]
+    },
+    {
+     "source": 5,
+     "title": "DGX Spark Review: 4 Months Later (2026) | Data Science Collective",
+     "windows": [
+      "DGX Spark Review: 4 Months Later (2026) | Data Science Collective Sitemap Open in app Sign up Sign in Get app Write Search Sign up Sign in Data Science Collective · Advice, insights, and ideas from the Medium data science community Member-only story Featured I Was Ready to Return My DGX Spark. Then NVIDIA’s January Update Changed Everything. The $4,000 “AI supercomputer” that John Carmack called half-baked just got a second chance. Here’s what actually happened. Paolo Perrone 9 min read · Feb 24, 2026 -- 22 Listen Share Three weeks after unboxing my DGX Spark, I genuinely considered returning it. Not because the hardware was ugly. NVIDIA nailed the industrial design. The champagne-gold Founder’s Edition chassis with metal foam panels echoes the design of NVIDIA’s DGX A100 and H100 server line. It looked incredible on my desk. Like owning a piece of AI history. My first real workload, a 3",
+      "0B parameter model for a client prototype, thermal throttled within 20 minutes. The fan screamed. The chassis got hot enough to make me nervous about the wood underneath it. And the inference speed? Let’s just say my M3 Pro was keeping up for the exact same task. A $2,000 laptop matching a $4,000 “supercomputer.” I wasn’t alone. The October Massacre John Carmack (yes, that John Carmack, the guy who built Doom) went public with his DGX Spark experience on X. His findings were brutal: Power draw maxing out at 100W instead of the rated 240W Published in Data Science Collective 928K followers · Last published 8 hours ago Advice, insights, and ideas from the Medium data science community Written by Paolo Perrone 13K followers · 168 following Shipping Production AI: Agents, Inference, GPU. Read by 1M+ AI engineers. Founding Editor Data Science Collective https://medium.com/data-science-collect"
+     ]
+    },
+    {
+     "source": 6,
+     "title": "DGXSPARK temperature too high, automatic shutdown。 - DGX",
+     "windows": [
+      "every time on that model. Same firmware, same kernel. Disconnecting the brick from mains or swapping bricks with the other unit doesn’t help. Limited clocks to 2300 - testing now. If it works, will raise to 2400 and retest. Both units are Founders Edition. One bought at release, another one in a month after. chunkai721 March 14, 2026, 7:20am 18 My NVIDIA DGX Spark and ASUS Ascent GX10 have both been experiencing sudden automatic shutdowns during frequent inference tasks, whether running standalone or in a cluster. A major issue with the DGX Spark specifically is the lack of any status indicator lights; I only realize the system has crashed when the API stops responding. While I’m not entirely certain if overheating is the primary cause, I’ve observed that the risk of shutdown becomes critical whenever temperatures exceed 80°C. aolsucks42 March 14, 2026, 7:29am 19 Wasn’t that the fw to re",
+      "duce power usage? Maybe they were too aggressive in power savings. The HP which has been very spotty for me as far as freezing even before the latest updates has a much smaller volume power adapter than the Asus one. I’m wondering if this is all down the power adapter. I’m close to ordering some Dell power adapters. eugr March 14, 2026, 7:32am 20 There is something fishy going on with power. Tried to limit the GPU clocks on both spark1 and spark2 to 2500 and now spark1 shut down and spark2 stayed alive. next page → Related topics Topic Replies Views Activity DGX Spark. low fan speed, high temps, device very hot DGX Spark / GB10 kernel , gpu , fan-facts , debugging-and-troubleshooting 60 4814 May 26, 2026 Dgx spark shut down without rebooting DGX Spark / GB10 22 630 May 20, 2026 To NVIDIA S"
+     ]
+    },
+    {
+     "source": 7,
+     "title": "DGX Spark stability / out of RAM / overheating - DGX Spark / GB10 - NVIDIA Developer Forums",
+     "windows": [
+      "DGX Spark stability / out of RAM / overheating - DGX Spark / GB10 - NVIDIA Developer Forums\n= 40rem)\" rel=\"stylesheet\" data-target=\"desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"discourse-ai_desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"discourse-calendar_desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"poll_desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"desktop_theme\" data-theme-id=\"13\" data-theme-name=\"discourse-nvidia-theme\"/>"
+     ]
+    },
+    {
+     "source": 8,
+     "title": "CanIRun.ai — Can your machine run AI models?",
+     "windows": [
+      "CanIRun.ai — Can your machine run AI models?\nCanIRun.ai\n[playground]\n[compare]\n[tier list]\n[docs]\n[why]\nGPU detecting... | VRAM — | BW | RAM | CORES\nEstimates based on browser APIs. Actual specs may vary.\n0 Runs great 0 Runs well 0 Decent 0 Tight fit 0 Barely runs 0 Too heavy\n/\nAll grades Popular Can run (S/A/B) Tight fit (C/D) Too heavy (F) All tasks Chat Code Reasoning Vision All providers Alibaba Allen AI Cohere Community DeepReinforce DeepSeek Google HuggingFace LG AI Liquid AI Meta Microsoft Mistral AI Moonshot AI NVIDIA OpenAI Zhipu AI All licenses Commercial use Non-commercial Apache 2.0 CC BY-NC 4.0 EXAONE AI GLM-4 Gemma Kimi Liquid AI Llama 3.1 Community Llama 3.2 Community Llama 3.3 Community Llama 4 Community MIT MRL NVIDIA Open Qwen Sort: Score Sort: Params ↑ Sort: Params ↓ Sort: Newest Sort: Context Sort: Speed Sort: VRAM ↑ Sort: Popularity List\nLlama 3.1 8B",
+      "4.6\nGB\n·\n32K\nctx\n·\nQ2_K Q3_K_M Q4_K_M Q5_K_M Q6_K Q8_0 F16\nReleased 2024-10\nArchitecture Dense\nMemory\n—\nchat\nGemma 2 9B\nGemma\n2y ago\nGoogle · 9B · Gemma\nGoogle's best mid-size open model\n5.1\nGB\n·\n8K\nctx\n·\nQ2_K Q3_K_M Q4_K_M Q5_K_M Q6_K Q8_0 F16\nReleased 2024-06\nArchitecture Dense\nMemory\n—\nchat reasoning\nGLM-4 9B\nGLM-4\n2y ago\nZhipu AI · 9B · GLM-4\nMultilingual model supporting 26 languages with 128K context\n5.1\nGB\n·\n128K\nctx\n·\nQ2_K Q3_K_M Q4_K_M Q5_K_M Q6_K Q8_0 F16\nReleased 2024-06\nArchitecture Dense\nMemory\n—\nchat multilingual code\nNemotron Nano 9B v2\nNVIDIA Open\n1 year ago\nNVIDIA · 9B · NVIDIA Open\nHybrid Mamba2 architecture for reasoning\n5.1\nGB\n·\n128K\nctx\n·\nQ2_K Q3_K_M Q4_K_M Q5_K_M Q6_K Q8_0 F16\nReleased 2025-06\nArchitecture Dense\nMemory\n—\nreasoning\nLlama 3.2 11B Vision\nLlama 3.2 Community\n1 year ago\nMeta · 11B · Llama 3.2 Community\nMultimodal vision and text model\n6.1\nGB\n·\n128K\nctx\n·"
+     ]
+    },
+    {
+     "source": 9,
+     "title": "[Motherboard]BIOS item-Restore AC Power Loss function | Official Support | ASUS Global",
+     "windows": [
+      "A1: Restore AC Power Loss function only work form AC off state (G3), so please confirm the power supply switch is turned off（recommend keep power supply switch off state for 30 seconds）\nWas this information helpful?\nYes\nNo\nWhat we can do to improve the article?\nSubmit\nSkip\nClose\nContact Support\nPlease contact with us if the above information cannot resolve your problem\nGet the support\nAbove information might be partly or entirely quoted from exterior websites or sources. please refer to the information based on the source that we noted. Please directly contact or inquire the sources if there is any further question and note that ASUS is neither relevant nor responsible for its content/service\nThis information may not suitable for all the products from the same category/series. Some of the screen shots and operations could be different from the software versions.",
+      "ASUS provides the above information for reference only. If you have any questions about the content, please contact the above product vendor directly. Please note that ASUS is not responsible for the content or service provided by the above product vendor.\nBrand and product names mentioned are trademarks of their respective companies.\nASUS\nSupport\nFAQ\nBack to Top"
+     ]
+    },
+    {
+     "source": 10,
+     "title": "PSA: NVIDIA DGX Spark has terrible CUDA & software compatibility ...",
+     "windows": [
+      "In addition, in the same post the rep posted what appears to be LLM hallucinations, mentioning issues have been fixed in version numbers and ..."
+     ]
+    },
+    {
+     "source": 11,
+     "title": "Trouble Shooting｜SetUp｜XYN Web Portal Site",
+     "windows": [
+      "Trouble Shooting｜SetUp｜XYN Web Portal Site\nOPEN MENU\nTable of Contents\nSpatial Reality Display\nTop\nCLOSE MENU\nTrouble Shooting\nTrouble Shooting\nPublication　 Dec. 12, 2025 　｜　 Last Updated　 Dec. 15, 2025\nTrouble Shooting(Unity/Unreal Engine General)\nNo content is displayed when launching the app or playing in editor\nCheck if Display Settings in Windows is set correctly (See for the details: Setup Spatial Reality Display )\nThe Spatial Reality Display transitions to standby mode if no signal is received from the display cable. The app doesn't work whilst in standby mode.\nCheck if the folder where SDK is installed has been changed\nDo NOT change the folder path from the first installation\nConfirm your PC's USB port is 3.0 or 3.1 (often blue or red) when connecting ELF-SR1.\nThe SDK comunicates with the Spatial Reality Display via USB\nEither update your driver/bios or contact PC support staff",
+      "Content is displayed, but the stereoscopic effect does not work\nCheck if the Spatial Reality Display system recognizes your face via SRDisplay Settings application\nSpatial Reality Display Setting provide the camera view window(see the following image) to check if the system recognizes you. If the room is too bright or too dark, the camera may not perform facial recognition correctly and the Spatial Reality Display may not display the image correctly. Adjust the sensor gain in the Spatial Reality Display Settings. See the Spatial Reality Display Settings page for details.\nIf recognized, you can see the rectangle on your face in the window, like the following image.\nIf not recognized, plese check below.\nMake sure Spatial Reality Display is connected to your computer via a USB cable as well as the display cable. (See for the details: Setup Spatial Reality Display )"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"unsupported\",\"rationale\":\"The line describes the source set ('the provided sources contain no information'), not the world; no cited text states it.\"}",
+   "verdict": "unsupported"
+  },
+  {
+   "line": 13,
+   "tag": "INFERRED",
+   "text": "General BIOS power-restore settings (e.g., \"Restore AC Power Loss\" with Power Off / Power On / Last State options) exist on motherboards and can be found under Advanced or Power Management menus; while the sources describe this for ASUS and Compaq boards, the same category of setting would apply to any BIOS/UEFI, but no source confirms the exact menu path for the OptiPlex 3050.",
+   "cites": [
+    2,
+    9
+   ],
+   "cited_text": [
+    {
+     "source": 2,
+     "title": "Compaq d220 - Microtower Desktop PC Support and Manuals",
+     "windows": [
+      "where is to get this medel drivers (Posted by Anonymous-58132 14 years ago)\nAnswers\nSound & Enternet Is Not Working\ni have load xp with cd my sound & enternet is not working (Posted by sushmabawra 14 years ago)\nAnswers\nView More d220 Questions and Answers\nPopular Compaq d220 Manual Pages\nComputer Setup (F10) Utility Guide - Page 7\n... drive.\n✎ Support for Computer Setup options may vary depending on your specific hardware configuration. Computer Setup (F10) Utility\nComputer Setup\nHeading\nOption\nDescription\nSystem... BIOS Version • BIOS Release Date • Processor Type • Processor Speed • CPU ID • L1 and L2 Cache Size • Memory Information\nStandard CMOS Setup System Time (hh/mm/ss) Sets ...\nComputer Setup (F10) Utility Guide - Page 9\n... RAM (Default)\nRestore on AC/Power Loss\nSets the system status after AC power loss.\n• Power Off: System always Powers Off (Default)",
+      "• Power On: System always Powers On\n• Last State: System returns to the last state before AC power loss\n✎ Support for Computer Setup options may vary depending on your specific ...\nComputer Setup (F10) Utility Guide - Page 10\n...: OnBoard LAN disabled\n• Enable: OnBoard LAN enabled (Default)\nOnBoard LAN Chip Boot Enables or disables the OnBoard LAN\nROM\nChip Boot ROM.\n• Disable: OnBoard LAN Chip Boot ROM disabled\n• Enable: OnBoard LAN Chip Boot ROM enabled (Default)\n✎ Support for Computer Setup options may vary depending on your specific hardware configuration.\n6\nComputer Setup Utility Guide\nComputer Setup (F10) Utility Guide - Page 11\n... 1.1 Device Legacy Support\nSets the USB 1.1 Device Legacy Support under DOS Mode.\n• Disable: USB 1.1 Device Legacy Support disabled\n• No Mice: A mouse is not supported\n• All Device: All devices are supported"
+     ]
+    },
+    {
+     "source": 9,
+     "title": "[Motherboard]BIOS item-Restore AC Power Loss function | Official Support | ASUS Global",
+     "windows": [
+      "1. Power on the system and press <delete> key to enter BIOS [Advanced Mode] as below\n2. Click [Advanced] page as below\n3. Click [APM Configuration] option as below\n4. Click [Restore AC Power Loss] option，Default is [Power Off]\n[Power Off]： The motherboard will remain powered off and will not boot up automatically when power is restored\n[Power On]： The motherboard will boot up automatically when power is restored\n[Last State]： The motherboard will restore to the last state when power is restored.\na. If system state is S0(Power on )，or S3(Sleep)/ S4(Hibernate) before shutdown ,system will be S0 state when power is restored ；\nb. If system state is S5(Power off )，,system will be S5 state when power is restored\n5. Press <F10> key and click <OK>, system will auto reboot\nQ&A\nQ1: Why Restore AC Power Loss function not work when system suddently loss of power and then power back immediately?",
+      "A1: Restore AC Power Loss function only work form AC off state (G3), so please confirm the power supply switch is turned off（recommend keep power supply switch off state for 30 seconds）\nWas this information helpful?\nYes\nNo\nWhat we can do to improve the article?\nSubmit\nSkip\nClose\nContact Support\nPlease contact with us if the above information cannot resolve your problem\nGet the support\nAbove information might be partly or entirely quoted from exterior websites or sources. please refer to the information based on the source that we noted. Please directly contact or inquire the sources if there is any further question and note that ASUS is neither relevant nor responsible for its content/service\nThis information may not suitable for all the products from the same category/series. Some of the screen shots and operations could be different from the software versions."
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"partial\",\"rationale\":\"Sources 2 and 9 document Restore on AC Power Loss with Power Off / Power On / Last State for Compaq and ASUS; 'would apply to any BIOS/UEFI' is not in the cited text.\"}",
+   "verdict": "partial"
+  },
+  {
+   "line": 14,
+   "tag": "INFERRED",
+   "text": "Thermal throttling and automatic shutdown at approximately 95°C is documented for the NVIDIA DGX Spark under heavy AI workloads; this is NOT confirmed as a threshold or behavior for the Dell OptiPlex 3050.",
+   "cites": [
+    5,
+    6
+   ],
+   "cited_text": [
+    {
+     "source": 5,
+     "title": "DGX Spark Review: 4 Months Later (2026) | Data Science Collective",
+     "windows": [
+      "DGX Spark Review: 4 Months Later (2026) | Data Science Collective Sitemap Open in app Sign up Sign in Get app Write Search Sign up Sign in Data Science Collective · Advice, insights, and ideas from the Medium data science community Member-only story Featured I Was Ready to Return My DGX Spark. Then NVIDIA’s January Update Changed Everything. The $4,000 “AI supercomputer” that John Carmack called half-baked just got a second chance. Here’s what actually happened. Paolo Perrone 9 min read · Feb 24, 2026 -- 22 Listen Share Three weeks after unboxing my DGX Spark, I genuinely considered returning it. Not because the hardware was ugly. NVIDIA nailed the industrial design. The champagne-gold Founder’s Edition chassis with metal foam panels echoes the design of NVIDIA’s DGX A100 and H100 server line. It looked incredible on my desk. Like owning a piece of AI history. My first real workload, a 3",
+      "0B parameter model for a client prototype, thermal throttled within 20 minutes. The fan screamed. The chassis got hot enough to make me nervous about the wood underneath it. And the inference speed? Let’s just say my M3 Pro was keeping up for the exact same task. A $2,000 laptop matching a $4,000 “supercomputer.” I wasn’t alone. The October Massacre John Carmack (yes, that John Carmack, the guy who built Doom) went public with his DGX Spark experience on X. His findings were brutal: Power draw maxing out at 100W instead of the rated 240W Published in Data Science Collective 928K followers · Last published 8 hours ago Advice, insights, and ideas from the Medium data science community Written by Paolo Perrone 13K followers · 168 following Shipping Production AI: Agents, Inference, GPU. Read by 1M+ AI engineers. Founding Editor Data Science Collective https://medium.com/data-science-collect"
+     ]
+    },
+    {
+     "source": 6,
+     "title": "DGXSPARK temperature too high, automatic shutdown。 - DGX",
+     "windows": [
+      "DGXSPARK temperature too high, automatic shutdown。 - DGX Spark / GB10 - NVIDIA Developer Forums = 40rem)\" rel=\"stylesheet\" data-target=\"desktop\" /> = 40rem)\" rel=\"stylesheet\" data-target=\"discourse-ai_desktop\" /> = 40rem)\" rel=\"stylesheet\" data-target=\"discourse-calendar_desktop\" /> = 40rem)\" rel=\"stylesheet\" data-target=\"poll_desktop\" /> = 40rem)\" rel=\"stylesheet\" data-target=\"desktop_theme\" data-theme-id=\"13\" data-theme-name=\"discourse-nvidia-theme\"/> DGXSPARK temperature too high, automatic shutdown。 Accelerated Computing DGX Spark / GB10 User Forum DGX Spark / GB10 hongde March 13, 2026, 9:37am 1 Room temperature is 18 degrees, DGXSPARK running COMFYUI to generate video (about 10 minutes), often turns off automatically due to overheating. Now I dare not use COMFYUI, how to set the cooling fan. ASUS Ascent GX10 (GB10) hard shutdown under heavy vLLM load | of_root node is NULL and EM: ",
+      "every time on that model. Same firmware, same kernel. Disconnecting the brick from mains or swapping bricks with the other unit doesn’t help. Limited clocks to 2300 - testing now. If it works, will raise to 2400 and retest. Both units are Founders Edition. One bought at release, another one in a month after. chunkai721 March 14, 2026, 7:20am 18 My NVIDIA DGX Spark and ASUS Ascent GX10 have both been experiencing sudden automatic shutdowns during frequent inference tasks, whether running standalone or in a cluster. A major issue with the DGX Spark specifically is the lack of any status indicator lights; I only realize the system has crashed when the API stops responding. While I’m not entirely certain if overheating is the primary cause, I’ve observed that the risk of shutdown becomes critical whenever temperatures exceed 80°C. aolsucks42 March 14, 2026, 7:29am 19 Wasn’t that the fw to re"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"unsupported\",\"rationale\":\"Neither cited text contains 95 C; Source 6 mentions shutdowns above 80 C.\"}",
+   "verdict": "unsupported"
+  },
+  {
+   "line": 15,
+   "tag": "INFERRED",
+   "text": "Out-of-RAM errors and system instability reported alongside thermal issues pertain to the NVIDIA DGX Spark, not the Dell OptiPlex 3050.",
+   "cites": [
+    7
+   ],
+   "cited_text": [
+    {
+     "source": 7,
+     "title": "DGX Spark stability / out of RAM / overheating - DGX Spark / GB10 - NVIDIA Developer Forums",
+     "windows": [
+      "DGX Spark stability / out of RAM / overheating - DGX Spark / GB10 - NVIDIA Developer Forums\n= 40rem)\" rel=\"stylesheet\" data-target=\"desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"discourse-ai_desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"discourse-calendar_desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"poll_desktop\" />\n= 40rem)\" rel=\"stylesheet\" data-target=\"desktop_theme\" data-theme-id=\"13\" data-theme-name=\"discourse-nvidia-theme\"/>"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"unsupported\",\"rationale\":\"Source 7's text is a page title and stylesheet markup; it reports nothing about out-of-RAM errors, and the line is a statement about which device the evidence concerns.\"}",
+   "verdict": "unsupported"
+  },
+  {
+   "line": 16,
+   "tag": "UNCERTAIN",
+   "text": "The general principle that regular software maintenance, proactive health monitoring, and firmware/BIOS updates help maintain system stability is stated for the DGX Spark; it is reasonable to apply the same principle to any x86 desktop, but no source explicitly states this for the OptiPlex 3050.",
+   "cites": [
+    1
+   ],
+   "cited_text": [
+    {
+     "source": 1,
+     "title": "Maintenance and Troubleshooting — DGX Spark User Guide",
+     "windows": [
+      "Maintenance and Troubleshooting &#8212; DGX Spark User Guide Skip to main content Back to top DGX Spark User Guide Is this page helpful? Maintenance and Troubleshooting # The DGX Spark benefits from regular software maintenance and proactive monitoring to ensure reliability, security, and peak performance. This section introduces recommended update workflows, health verification practices, and performance tuning guidance, and links to procedures that help keep your environment stable and efficient. Maintenance and Troubleshooting System Updates Overview Preparation Update Procedures Validation Troubleshooting Health Check Overview Preflight GPU Health System Metrics Reporting Performance Tuning Overview CPU and Memory GPU Optimization Storage and I/O Spark/RAPIDS Tuning Validation and Profiling Known Issues Use the supplied power adapter for optimal performance nvidia-smi reports “Memory",
+      "-Usage: Not Supported” CUDA Support on DGX Spark Guidance for reporting memory resources with unified memory architecture Attached HDMI display goes into deep sleep mode after an extended period of inactivity and does not wake Getting Support # If you encounter issues that are not covered in the troubleshooting sections above, or if you need additional assistance with your DGX Spark system, see Get the Right Support for Your DGX Spark for how to choose consumer or enterprise support, access the community forums, and understand entitlement requirements. Before contacting support, please ensure you have: Reviewed the relevant troubleshooting sections in this guide Checked the Known Issues for any known issues that may apply to your situation Collected relevant system information and error messages Attempted the recommended troubleshooting steps for your specific issue On this page"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"partial\",\"rationale\":\"Source 1 states regular software maintenance and proactive monitoring for the DGX Spark; firmware/BIOS updates and the extension to any x86 desktop are not in the cited text.\"}",
+   "verdict": "partial"
+  }
+ ]
+}

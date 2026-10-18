@@ -1,0 +1,323 @@
+{
+ "_provenance": "rw-p3a-entail 2026-10-17. cited_text = the windows entailment.ts citedWindows() cuts from the job fixture's cited_texts (recorded, deterministic). judge_response = AUTHORED by the developer from reading exactly those windows, in the judge's output shape - not a recording of a model call (the item forbids a live model). Replace by recording through LiteLLM with record-entailment.ts when a recording is wanted; the replay test is indifferent to who wrote the response.",
+ "job_fixture": "job-100hz",
+ "job_id": "8c9b4f1d-f9a8-43a8-8d18-3af46f93bbe9",
+ "prompt_version": "entail-v1",
+ "question": "Research on using 100Hz (or specific audio frequencies) sound to reduce or counteract motion sickness in VR / virtual reality. Include: the underlying mechanism (auditory/vestibular interaction, sound masking, 100 Hz tones, binaural or in-headset audio), any academic studies or experiments, quantitative effectiveness, and practical implementations or developer guidance for using a 100Hz tone to mitigate VR motion sickness.",
+ "lines": [
+  {
+   "line": 0,
+   "tag": "SOURCED",
+   "text": "Motion sickness in VR (visually induced motion sickness, VIMS) is attributed to a mismatch between visual and vestibular information, causing ambiguity about body position relative to the environment.",
+   "cites": [
+    1
+   ],
+   "cited_text": [
+    {
+     "source": 1,
+     "title": "Frontiers | Mismatch of Visual-Vestibular Information in Virtual Reality: Is Motion Sickness Part of the Brains Attempt to Reduce the Prediction Error?",
+     "windows": [
+      "Visually induced motion sickness (VIMS) is a relevant limiting factor in the use of virtual reality (VR) devices. Understanding the origin of this problem might help to develop strategies to circumvent this limitation. Previous studies have attributed VIMS to a mismatch between visual, and vestibular information, causing ambiguity of the position of the body in relation to its surrounding. Studies using EEG have shown a shift of the power spectrum to lower frequencies while VIMS is experienced. However, little is known about the relationship between the intensity of the VIMS and the changes in these power spectra. Moreover, the effect of different varieties of VIMS on the causal relationship between brain areas is largely unknown. Here, we used EEG to study 14 healthy subjects in a VR environment who were exposed to increasing levels of mismatch between vestibular and visual information.",
+      "Modern neuroimaging methods are in principle well suited to study changes in brain function. However, since VIMS involves body movements in a virtual simulation environment and potential risks include vomiting and drowsiness, EEG studies are preferred for this topic ( Kim et al., 2005 ; Lin et al., 2007 , 2013 ; Li et al., 2020 ; Lim et al., 2021 ).\nWe therefore designed a combined EEG / VR experimental setting that exposes a subject to increasing levels of VR intensity. While monitoring the subjects’ level of motion sickness, we recorded basic differences in the EEG spectrum. Assuming an increasing mismatch in sensory integration in the vestibular, visual, and somatosensory systems, we also studied the information-theoretic measure of transfer entropy (TE) ( Schreiber, 2000 ; Vicente et al., 2011 ).\nMaterials and Methods\nSubjects"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Source 1 states that previous studies attributed VIMS to a visual-vestibular mismatch causing ambiguity of body position.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 1,
+   "tag": "SOURCED",
+   "text": "An EEG study of 14 healthy subjects in a VR environment found that with increasing visual-vestibular mismatch and subjective VIMS, the proportion of slow EEG waves (especially 1–10 Hz) increases.",
+   "cites": [
+    1
+   ],
+   "cited_text": [
+    {
+     "source": 1,
+     "title": "Frontiers | Mismatch of Visual-Vestibular Information in Virtual Reality: Is Motion Sickness Part of the Brains Attempt to Reduce the Prediction Error?",
+     "windows": [
+      "Visually induced motion sickness (VIMS) is a relevant limiting factor in the use of virtual reality (VR) devices. Understanding the origin of this problem might help to develop strategies to circumvent this limitation. Previous studies have attributed VIMS to a mismatch between visual, and vestibular information, causing ambiguity of the position of the body in relation to its surrounding. Studies using EEG have shown a shift of the power spectrum to lower frequencies while VIMS is experienced. However, little is known about the relationship between the intensity of the VIMS and the changes in these power spectra. Moreover, the effect of different varieties of VIMS on the causal relationship between brain areas is largely unknown. Here, we used EEG to study 14 healthy subjects in a VR environment who were exposed to increasing levels of mismatch between vestibular and visual information.",
+      " The frequency power and the bivariate transfer entropy as a measure for the information transfer were calculated. We found a direct association between increasing mismatch levels and subjective VIMS. With increasing VIMS, the proportion of slow EEG waves (especially 1–10 Hz) increases, especially in temporo-occipital regions. Furthermore, we found a general decrease in the information flow in most brain areas but especially in brain areas involved in the processing of vestibular signals and the detection of self-motion. We hypothesize that the general shift of frequency power and the decrease in information flow while experiencing high intensity VIMS represent a brain state of a reduced ability to receive, transmit and process information. We further hypothesize that the mechanism of reduced information flow is a general reaction of the brain to an unresolvable mismatch of information. "
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Source 1 reports 14 healthy subjects and that slow EEG waves (especially 1-10 Hz) increase with VIMS.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 2,
+   "tag": "SOURCED",
+   "text": "Motion sickness is generally evoked from a mismatch in sensory cues between vestibular, visual, and proprioceptive signals integrated in the brainstem and cerebellum.",
+   "cites": [
+    3,
+    4
+   ],
+   "cited_text": [
+    {
+     "source": 3,
+     "title": "Motion Sickness – Introduction to Sensation and Perception",
+     "windows": [
+      "Motion Sickness – Introduction to Sensation and Perception\nSkip to content\nProprioception: Balance and Phantom Limbs\nUnderstand what sensory cues are in conflict when people get motion sick.\nBe able to explain how postural instability is related to motion sickness.\nAlthough a number of conditions can produce motion sickness, it is generally thought that it is evoked from a mismatch in sensory cues between vestibular, visual, and proprioceptive signals ( Yates, Miller, & Lucot, 1998 ). For example, reading a book in a car on a winding road can produce motion sickness, whereby the accelerations experienced by the vestibular system do not match the visual input. However, if one looks out the window at the scenery going by during the same travel, no sickness occurs because the visual and vestibular cues are in alignment.",
+      "The sensory cues in conflict when someone experiences motion sickness are vestibular, visual, and _______.\nA. Proprioceptive\nB. Haptic\nC. Auditory\nD. Environmental\nWhat frequency are you more likely to get sea sick while experiencing?\nA. A low frequency and small amplitudes\nB. A high frequency and small amplitudes\nC. A low frequency and large amplitudes\nD. A high frequency and large amplitudes\nThe muscles in our legs and core automatically _________, because of the sensory cues from __________.\nA. Stay relaxed; proprioceptors\nB. Contract and relax; proprioceptors\nC. Stiffen up; visual cues\nD. Strain themselves; auditory cues\nTrue or False: The amount a person sways in response to unpredictable movements on the floor will determine if they experience any motion sickness.\nAnswer Key:\nA\nC\nB\nTrue\nAuthored by: Cheryl Olman\nProvided by: University of Minnesota\nLicense: CC-BY-4.0"
+     ]
+    },
+    {
+     "source": 4,
+     "title": "Motion sickness | MedLink Neurology",
+     "windows": [
+      "In this article, the author explains the clinical presentation, pathophysiology, and management of motion sickness. Motion sickness is a normal response to complex motion stimuli of sufficient intensity and duration that is thought to be due to a mismatch of signals from vestibular, visual, and proprioceptive receptors as integrated in the brainstem and cerebellum. Relevant vestibular physiology is reviewed, particularly concerning space sickness (space adaptation syndrome) and the vestibular experiments conducted in Skylab, Spacelab, Earth-orbiting Space Shuttle missions, and the International Space Station.\nKey points\n• Motion sickness is a normal response to complex motion stimuli of sufficient intensity and duration.\n• Motion sickness typically occurs with unfamiliar motion to which an individual has not adapted.",
+      "• Susceptibility to motion sickness varies with age (with peak prevalence between ages 4 and 12 years), gender (women are more often affected, especially during menstruation, in most studies). Other risk factors include a history of motion sickness, a history of migraine headaches, a family history of motion sickness, and Asian heritage.\n• Motion sickness is thought to be due to a mismatch of signals from vestibular, visual, and proprioceptive receptors as integrated in the brainstem and cerebellum."
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Sources 3 and 4 state the vestibular/visual/proprioceptive mismatch; Source 4 adds integration in the brainstem and cerebellum.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 3,
+   "tag": "SOURCED",
+   "text": "A study using galvanic vestibular stimulation (GVS) in 10 participants demonstrated that \"Beneficial\" GVS produced a 26% motion sickness reduction and \"Detrimental\" GVS produced a 56% increase (p = 0.0055), confirming the causal role of vestibular sensory conflict in motion sickness.",
+   "cites": [
+    2
+   ],
+   "cited_text": [
+    {
+     "source": 2,
+     "title": "Validating sensory conflict theory and mitigating motion sickness in humans with galvanic vestibular stimulation | Communications Engineering",
+     "windows": [
+      "Per sensory conflict theory, vestibular sensory information has been proposed to drive motion sickness given deviations from central expectations. However, the consistency of motion sickness with quantitative predictions of manipulated vestibular sensory conflict remains untested. Here, we evaluated motion sickness symptoms within 10 participants exposed to galvanic vestibular stimulation (GVS) designed to manipulate vestibular sensory conflict during passive physical translations. Using a computational methodology, equal and opposite GVS waveforms were designed to reduce (Beneficial) or increase (Detrimental) motion sickness while controlling all other sources of sensory information and central confounds. Beneficial GVS produced a 26% motion sickness reduction, and Detrimental GVS produced a 56% increase ( p  = 0.0055), demonstrating the causal role of vestibular information in human mo",
+      "l processing between groups following a reduction in vestibular function 15 . Neuronally, while VO and rFN neurons fire analogously to the proposed vestibular sensory conflict construct, it remains unknown whether (or how) these neurons project to pathways that drive motion sickness 17 , and they have yet to be examined in humans. Consequently, the causal role of vestibular sensory information in humans has not been deduced as no study to date has yet isolated the role of the vestibular system in producing motion sickness, controlling for alterations to other sensory information or central compensation following altered vestibular information."
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Source 2 gives 10 participants, a 26% reduction, a 56% increase and p = 0.0055, and the causal role of vestibular information.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 4,
+   "tag": "SOURCED",
+   "text": "Human studies have found that low-frequency oscillations of 0.2 Hz with large amplitudes are most likely to cause motion sickness, while at frequencies of 2 Hz or above, motion sickness ceases completely.",
+   "cites": [
+    3
+   ],
+   "cited_text": [
+    {
+     "source": 3,
+     "title": "Motion Sickness – Introduction to Sensation and Perception",
+     "windows": [
+      "Sea sickness, a form of motion sickness, appears to be a special case and arises from unusual vertical oscillatory and roll motion. Human studies have found that low frequency oscillations of 0.2 Hz and large amplitudes (such as found in large seas during a storm) are most likely to cause motion sickness, with higher frequencies offering little problems. At frequency oscillations of 2 Hz or above, motion sickness ceases completely, although discomfort and injury can still occur. It’s possible that high frequency oscillations happen so quickly that the vestibular system doesn’t have time to properly function to send the proper signals to the brain, so no motion sickness occurs as the visual and vestibular cues are not clashing, but much more research is needed to determine a proper explanation to this phenomena.",
+      "The sensory cues in conflict when someone experiences motion sickness are vestibular, visual, and _______.\nA. Proprioceptive\nB. Haptic\nC. Auditory\nD. Environmental\nWhat frequency are you more likely to get sea sick while experiencing?\nA. A low frequency and small amplitudes\nB. A high frequency and small amplitudes\nC. A low frequency and large amplitudes\nD. A high frequency and large amplitudes\nThe muscles in our legs and core automatically _________, because of the sensory cues from __________.\nA. Stay relaxed; proprioceptors\nB. Contract and relax; proprioceptors\nC. Stiffen up; visual cues\nD. Strain themselves; auditory cues\nTrue or False: The amount a person sways in response to unpredictable movements on the floor will determine if they experience any motion sickness.\nAnswer Key:\nA\nC\nB\nTrue\nAuthored by: Cheryl Olman\nProvided by: University of Minnesota\nLicense: CC-BY-4.0"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Source 3 states 0.2 Hz with large amplitudes and that motion sickness ceases at 2 Hz or above.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 5,
+   "tag": "SOURCED",
+   "text": "Vestibular rehabilitation therapy uses personalized exercises targeting eye movements, head movements, and balance retraining to compensate for vestibular dysfunction and reduce motion sickness discomfort.",
+   "cites": [
+    8
+   ],
+   "cited_text": [
+    {
+     "source": 8,
+     "title": "Unlocking Relief: The Benefits of Vestibular Rehabilitation for Motion Sickness - Synergy Health Centre",
+     "windows": [
+      "Unlocking Relief: The Benefits of Vestibular Rehabilitation for Motion Sickness - Synergy Health Centre\nSkip to content\nUnderstanding Vestibular Rehabilitation\nWhat is Vestibular Rehabilitation?\nVestibular rehabilitation is a specialized form of therapy designed to alleviate symptoms associated with vestibular disorders, such as dizziness, vertigo, and balance issues. This therapeutic approach focuses on exercises and techniques that help retrain your brain and body to compensate for vestibular dysfunction. By engaging in these exercises, you can improve your overall stability and reduce the discomfort caused by motion sickness.",
+      "Vestibular rehabilitation therapy (VRT) involves a personalized program tailored to your specific needs. A trained vestibular therapist conducts a thorough assessment to determine the best course of action. The therapy typically includes exercises that target eye movements, head movements, and balance retraining. For more information on specific exercises, you can refer to our article on vestibular rehabilitation exercises .\nGoals and Benefits of Vestibular Rehabilitation\nThe primary goal of vestibular rehabilitation is to enhance your vestibular system’s function, thereby reducing symptoms and improving your quality of life. Here are some of the key goals and benefits:\nGoals:\nAlleviate symptoms of dizziness and vertigo\nImprove balance and coordination\nEnhance your ability to perform daily activities\nReduce the risk of falls\nIncrease your overall confidence and independence\nBenefits:"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Source 8 describes a personalised programme with eye, head and balance exercises to compensate for vestibular dysfunction.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 6,
+   "tag": "SOURCED",
+   "text": "A clinical study of 30 motion sickness-susceptible participants evaluated fluid-filled glasses (creating an artificial moving horizon) against a placebo group in a computer-assisted rehabilitation environment (CAREN), measuring symptoms with the Motion Sickness Assessment Questionnaire before, after, and at 60-second intervals.",
+   "cites": [
+    5,
+    9
+   ],
+   "cited_text": [
+    {
+     "source": 5,
+     "title": "Evaluating fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment (CAREN) | Journal of NeuroEngineering and Rehabilitation | Springer Nature Link",
+     "windows": [
+      "Motion sickness arises from sensory conflict between visual, vestibular, and somatosensory inputs, causing nausea, dizziness, and vomiting. Non-pharmacological interventions are underexplored despite their potential for accessibility and safety. This study evaluated (1) Computer-Assisted Rehabilitation Environment (CAREN) as a novel tool to induce motion sickness and (2) the efficacy of fluid-filled motion sickness glasses which create an artificial horizon to counteract peripheral visual-vestibular mismatch and reduce symptoms.\nMethods",
+      "A randomized controlled trial was conducted with thirty motion sickness–susceptible participants (23 females, 7 males; median age 34.2 years). Participants were exposed to a standardized “scrambler” ride simulation via CAREN, which combined vestibular and visual motion stimuli. The intervention group ( n  = 15) wore fluid-filled frames, while the placebo group ( n  = 14) wore identical glasses with drained fluid. Symptoms were assessed pre/post using the Motion Sickness Assessment Questionnaire (MSAQ) and every 60 s during exposure using the Motion Illness Symptoms Classification (MISC) scale. Wilcoxon signed-rank and Mann-Whitney U tests compared outcomes.\nResults"
+     ]
+    },
+    {
+     "source": 9,
+     "title": "Evaluating fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment (CAREN) - PMC",
+     "windows": [
+      "PMC Copyright notice\nPMCID: PMC12882250  PMID: 41508048\nAbstract\nBackground\nMotion sickness arises from sensory conflict between visual, vestibular, and somatosensory inputs, causing nausea, dizziness, and vomiting. Non-pharmacological interventions are underexplored despite their potential for accessibility and safety. This study evaluated (1) Computer-Assisted Rehabilitation Environment (CAREN) as a novel tool to induce motion sickness and (2) the efficacy of fluid-filled motion sickness glasses which create an artificial horizon to counteract peripheral visual-vestibular mismatch and reduce symptoms.\nMethods",
+      "A randomized controlled trial was conducted with thirty motion sickness–susceptible participants (23 females, 7 males; median age 34.2 years). Participants were exposed to a standardized “scrambler” ride simulation via CAREN, which combined vestibular and visual motion stimuli. The intervention group ( n  = 15) wore fluid-filled frames, while the placebo group ( n  = 14) wore identical glasses with drained fluid. Symptoms were assessed pre/post using the Motion Sickness Assessment Questionnaire (MSAQ) and every 60 s during exposure using the Motion Illness Symptoms Classification (MISC) scale. Wilcoxon signed-rank and Mann-Whitney U tests compared outcomes.\nResults"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"partial\",\"rationale\":\"Sources 5 and 9 give 30 participants, CAREN and a placebo group, but the 60 s interval measure was the MISC scale; the MSAQ was pre/post only.\"}",
+   "verdict": "partial"
+  },
+  {
+   "line": 7,
+   "tag": "SOURCED",
+   "text": "Slow, intermittent exposure to motion and reducing physical, mental, or emotional discomfort are recommended preventive strategies for motion sickness.",
+   "cites": [
+    6
+   ],
+   "cited_text": [
+    {
+     "source": 6,
+     "title": "Prevention and Treatment of Motion Sickness | AFP",
+     "windows": [
+      "Motion sickness is a common syndrome that occurs upon exposure to certain types of motion. It is thought to be caused by conflict between the vestibular, visual, and other proprioceptive systems. Although nausea is the hallmark symptom, it is often preceded by stomach awareness, malaise, drowsiness, and irritability. Early self-diagnosis should be emphasized, and patients should be counseled about behavioral and pharmacologic strategies to prevent motion sickness before traveling. Patients should learn to identify situations that will lead to motion sickness and minimize the amount of unpleasant motion they are exposed to by avoiding difficult conditions while traveling or by positioning themselves in the most stable part of the vehicle. Slow, intermittent exposure to the motion can reduce symptoms. Other behavioral strategies include watching the true visual horizon, steering the vehicl",
+      "e, tilting their head into turns, or lying down with their eyes closed. Patients should also attempt to reduce other sources of physical, mental, and emotional discomfort. Scopolamine is a first-line medication for prevention of motion sickness and should be administered transdermally several hours before the anticipated motion exposure. First-generation antihistamines, although sedating, are also effective. Nonsedating antihistamines, ondansetron, and ginger root are not effective in the prevention and treatment of motion sickness."
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Source 6 recommends slow, intermittent exposure and reducing physical, mental and emotional discomfort.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 8,
+   "tag": "SOURCED",
+   "text": "Digital environments can accommodate motion sensitivity by limiting parallax scrolling and excessive animations to prevent cybersickness.",
+   "cites": [
+    7
+   ],
+   "cited_text": [
+    {
+     "source": 7,
+     "title": "What is Motion Sensitivity? How to Design Accessible Web Animations",
+     "windows": [
+      "Maybe you've taken a long road trip and experienced motion sickness. Or you've visited the cinema to see a 3D movie and, instead of enjoying the experience, you end up with headaches, migraine, dizziness, or nausea. Then you understand how serious motion sensitivity can be.\nHow Motion Sensitivity Impacts People\nFor some people, motion effects like parallax scrolling can be annoying, but the effects of motion sensitivity go beyond a mere inconvenience. It can disrupt the digital experience and, more importantly, affect the well-being of those navigating the space.\nSome people might feel dizzy, nauseous, or experience headaches or migraines when faced with certain animations or transitions. For them, accessing digital content becomes more than just a click – it's a consideration of their comfort and health.\nInsights into Related Disorders",
+      "To truly understand motion sensitivity, I believe we need to explore the conditions linked to it, mainly vestibular disorders and visual motion sensitivity.\nVestibular Disorders impact the inner ear and how the brain processes spatial information. For someone with vestibular disorders, simple tasks like maintaining balance or handling motion stimuli can become challenging.\nVisual Motion Sensitivity is about heightened sensitivity to visual stimuli, leading to discomfort or adverse reactions to certain types of motion. For someone with visual motion sensitivity, navigating websites with specific animations or scrolling behaviors can be a struggle.\nBy diving into these facets of motion sensitivity, we lay the groundwork for creating digital spaces that acknowledge and respect diverse user experiences.\nSo, Why Does this Matter?"
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"partial\",\"rationale\":\"Source 7 says parallax scrolling and animations affect motion-sensitive users; the cited text does not state the limiting recommendation or cybersickness prevention.\"}",
+   "verdict": "partial"
+  },
+  {
+   "line": 9,
+   "tag": "SOURCED",
+   "text": "The GVS study explicitly states its findings \"facilitate new methods and countermeasures for mitigating motion sickness during transportation and in virtual environments.\"",
+   "cites": [
+    2
+   ],
+   "cited_text": [
+    {
+     "source": 2,
+     "title": "Validating sensory conflict theory and mitigating motion sickness in humans with galvanic vestibular stimulation | Communications Engineering",
+     "windows": [
+      "tion sickness. Validating our predictions, this finding supports the theory that vestibular sensory conflict mediates motion sickness and facilitates new methods and countermeasures for mitigating motion sickness during transportation and in virtual environments.",
+      "Motion sickness, most universally characterized by nausea and vomiting, is prevalent among passengers in all forms of human transportation. With the emergence of autonomous vehicles, commercial space travel, and deep space exploration, this condition has once again become a central focus of scientific investigation 1 , 2 . Beyond physical transportation, motion sickness is also induced by widely adopted virtual environments 3 , 4 , 5 , 6 , manifesting as simulator sickness and cybersickness. Motion sickness symptoms, ranging from mild discomfort to prolonged incapacitation 7 , have motivated millennia of theoretical explanations 8 and decades of empirical studies and modeling efforts."
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"supports\",\"rationale\":\"Source 2 contains the quoted sentence.\"}",
+   "verdict": "supports"
+  },
+  {
+   "line": 15,
+   "tag": "INFERRED",
+   "text": "The sources establish that motion sickness in VR is driven by visual-vestibular sensory conflict and that interventions targeting the vestibular or visual channel (GVS, fluid-filled horizon glasses, reduced visual motion) can reduce symptoms; however, none of these sources extend that logic to an auditory-channel intervention such as a 100 Hz tone.",
+   "cites": [
+    1,
+    2,
+    3,
+    5,
+    7
+   ],
+   "cited_text": [
+    {
+     "source": 1,
+     "title": "Frontiers | Mismatch of Visual-Vestibular Information in Virtual Reality: Is Motion Sickness Part of the Brains Attempt to Reduce the Prediction Error?",
+     "windows": [
+      "From a neurophysiological point of view this is quite to be expected. The visually presented illusion of movement of the self (vection) remains without appropriate correspondence in the vestibular and somatosensory systems (sensory conflict theory) ( Reason and Brand, 1975 ). The resulting motion sickness is therefore primarily labeled “visually induced motion sickness” (VIMS) ( Hettinger and Riccio, 1992 ; Howard and Howard, 1994 ; Stanney et al., 1997 ). The main symptom of motion sickness is nausea accompanied by vomiting. Usually there are also oculomotor symptoms, signs of fatigue, and disorientation ( Golding, 2016 ). Little known for example is the Sopite syndrome: depression-like symptoms after prolonged episodes of motion sickness ( Graybiel and Knepton, 1976 ). An excellent overview of the mechanisms and reason for motion sickness is provided by Golding ( Golding and Gresty, 20",
+      "Modern neuroimaging methods are in principle well suited to study changes in brain function. However, since VIMS involves body movements in a virtual simulation environment and potential risks include vomiting and drowsiness, EEG studies are preferred for this topic ( Kim et al., 2005 ; Lin et al., 2007 , 2013 ; Li et al., 2020 ; Lim et al., 2021 ).\nWe therefore designed a combined EEG / VR experimental setting that exposes a subject to increasing levels of VR intensity. While monitoring the subjects’ level of motion sickness, we recorded basic differences in the EEG spectrum. Assuming an increasing mismatch in sensory integration in the vestibular, visual, and somatosensory systems, we also studied the information-theoretic measure of transfer entropy (TE) ( Schreiber, 2000 ; Vicente et al., 2011 ).\nMaterials and Methods\nSubjects"
+     ]
+    },
+    {
+     "source": 2,
+     "title": "Validating sensory conflict theory and mitigating motion sickness in humans with galvanic vestibular stimulation | Communications Engineering",
+     "windows": [
+      "Per sensory conflict theory, vestibular sensory information has been proposed to drive motion sickness given deviations from central expectations. However, the consistency of motion sickness with quantitative predictions of manipulated vestibular sensory conflict remains untested. Here, we evaluated motion sickness symptoms within 10 participants exposed to galvanic vestibular stimulation (GVS) designed to manipulate vestibular sensory conflict during passive physical translations. Using a computational methodology, equal and opposite GVS waveforms were designed to reduce (Beneficial) or increase (Detrimental) motion sickness while controlling all other sources of sensory information and central confounds. Beneficial GVS produced a 26% motion sickness reduction, and Detrimental GVS produced a 56% increase ( p  = 0.0055), demonstrating the causal role of vestibular information in human mo",
+      " latter, GVS current was coupled to virtual, visual rotations (i.e., GVS current was proportional to the angular velocity of the visual scene’s motion) to reduce sickness symptoms. Crucially, neither of these GVS studies assessed reducing motion sickness during provocative physical motions, but they demonstrated the promising utility of GVS. However, without a quantitative means of manipulating vestibular sensory information with GVS in a manner predicted to reduce vestibular sensory conflict thus motion sickness, sensory conflict theory has not been directly assessed or leveraged to develop GVS-based countermeasures."
+     ]
+    },
+    {
+     "source": 3,
+     "title": "Motion Sickness – Introduction to Sensation and Perception",
+     "windows": [
+      "Motion Sickness – Introduction to Sensation and Perception\nSkip to content\nProprioception: Balance and Phantom Limbs\nUnderstand what sensory cues are in conflict when people get motion sick.\nBe able to explain how postural instability is related to motion sickness.\nAlthough a number of conditions can produce motion sickness, it is generally thought that it is evoked from a mismatch in sensory cues between vestibular, visual, and proprioceptive signals ( Yates, Miller, & Lucot, 1998 ). For example, reading a book in a car on a winding road can produce motion sickness, whereby the accelerations experienced by the vestibular system do not match the visual input. However, if one looks out the window at the scenery going by during the same travel, no sickness occurs because the visual and vestibular cues are in alignment.",
+      "The sensory cues in conflict when someone experiences motion sickness are vestibular, visual, and _______.\nA. Proprioceptive\nB. Haptic\nC. Auditory\nD. Environmental\nWhat frequency are you more likely to get sea sick while experiencing?\nA. A low frequency and small amplitudes\nB. A high frequency and small amplitudes\nC. A low frequency and large amplitudes\nD. A high frequency and large amplitudes\nThe muscles in our legs and core automatically _________, because of the sensory cues from __________.\nA. Stay relaxed; proprioceptors\nB. Contract and relax; proprioceptors\nC. Stiffen up; visual cues\nD. Strain themselves; auditory cues\nTrue or False: The amount a person sways in response to unpredictable movements on the floor will determine if they experience any motion sickness.\nAnswer Key:\nA\nC\nB\nTrue\nAuthored by: Cheryl Olman\nProvided by: University of Minnesota\nLicense: CC-BY-4.0"
+     ]
+    },
+    {
+     "source": 5,
+     "title": "Evaluating fluid-filled glasses for motion sickness symptom mitigation in a computer-assisted rehabilitation environment (CAREN) | Journal of NeuroEngineering and Rehabilitation | Springer Nature Link",
+     "windows": [
+      "Motion sickness arises from sensory conflict between visual, vestibular, and somatosensory inputs, causing nausea, dizziness, and vomiting. Non-pharmacological interventions are underexplored despite their potential for accessibility and safety. This study evaluated (1) Computer-Assisted Rehabilitation Environment (CAREN) as a novel tool to induce motion sickness and (2) the efficacy of fluid-filled motion sickness glasses which create an artificial horizon to counteract peripheral visual-vestibular mismatch and reduce symptoms.\nMethods",
+      "CAREN significantly induced motion sickness, with median MSAQ scores increasing from 17.0 (IQR: 16.0–19.0) pre-exposure to 40.5 (IQR: 27.0–57.0) post-exposure ( p  < 0.001). No significant difference was observed between intervention and placebo groups in symptom reduction (median MSAQ increase: 31.0 vs. 16.0, p  = 0.15) or glasses-wearing duration ( p  = 0.89).\nConclusions\nCAREN reliably induced motion sickness, supporting its utility for controlled research. However, the motion sickness glasses did not significantly alleviate symptoms compared to placebo in this pilot study. It is possible that peripheral visual cues from fluid-filled glasses may be insufficient to counteract sensory mismatch. Further research should explore larger sample sizes and alternative non-pharmacological interventions using CAREN’s controlled environment."
+     ]
+    },
+    {
+     "source": 7,
+     "title": "What is Motion Sensitivity? How to Design Accessible Web Animations",
+     "windows": [
+      "To truly understand motion sensitivity, I believe we need to explore the conditions linked to it, mainly vestibular disorders and visual motion sensitivity.\nVestibular Disorders impact the inner ear and how the brain processes spatial information. For someone with vestibular disorders, simple tasks like maintaining balance or handling motion stimuli can become challenging.\nVisual Motion Sensitivity is about heightened sensitivity to visual stimuli, leading to discomfort or adverse reactions to certain types of motion. For someone with visual motion sensitivity, navigating websites with specific animations or scrolling behaviors can be a struggle.\nBy diving into these facets of motion sensitivity, we lay the groundwork for creating digital spaces that acknowledge and respect diverse user experiences.\nSo, Why Does this Matter?",
+      "Nearly all people are affected with sufficient motion and most people will experience motion sickness at least once in their lifetime. Susceptibility, however, is variable, with about one-third of the population being highly susceptible while most other people are affected under extreme conditions. Women are more easily affected than men.\nThese statistics underscore the need for web designers and developers to consider motion sensitivity in our creations. They highlight that what might be a visually engaging animation for one user could be an obstacle for another.\nHow to Identify Motion-Sensitive Triggers in Animations\nAnimation can enhance engagement and help guide users through the app. But it is vital that we scrutinize the types of animations we incorporate into our designs, particularly when aiming for motion-friendly experiences."
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"unsupported\",\"rationale\":\"Source 5 reports the fluid-filled glasses did NOT significantly reduce symptoms, so the cited text contradicts 'can reduce symptoms'; the rest describes the sources.\"}",
+   "verdict": "unsupported"
+  },
+  {
+   "line": 16,
+   "tag": "INFERRED",
+   "text": "The EEG finding that VIMS is associated with a shift toward 1–10 Hz power (not 100 Hz) suggests that the neural signature of motion sickness in VR operates at much lower frequencies than 100 Hz, though this does not rule out a 100 Hz auditory intervention acting through a different pathway.",
+   "cites": [
+    1
+   ],
+   "cited_text": [
+    {
+     "source": 1,
+     "title": "Frontiers | Mismatch of Visual-Vestibular Information in Virtual Reality: Is Motion Sickness Part of the Brains Attempt to Reduce the Prediction Error?",
+     "windows": [
+      "Visually induced motion sickness (VIMS) is a relevant limiting factor in the use of virtual reality (VR) devices. Understanding the origin of this problem might help to develop strategies to circumvent this limitation. Previous studies have attributed VIMS to a mismatch between visual, and vestibular information, causing ambiguity of the position of the body in relation to its surrounding. Studies using EEG have shown a shift of the power spectrum to lower frequencies while VIMS is experienced. However, little is known about the relationship between the intensity of the VIMS and the changes in these power spectra. Moreover, the effect of different varieties of VIMS on the causal relationship between brain areas is largely unknown. Here, we used EEG to study 14 healthy subjects in a VR environment who were exposed to increasing levels of mismatch between vestibular and visual information.",
+      " The frequency power and the bivariate transfer entropy as a measure for the information transfer were calculated. We found a direct association between increasing mismatch levels and subjective VIMS. With increasing VIMS, the proportion of slow EEG waves (especially 1–10 Hz) increases, especially in temporo-occipital regions. Furthermore, we found a general decrease in the information flow in most brain areas but especially in brain areas involved in the processing of vestibular signals and the detection of self-motion. We hypothesize that the general shift of frequency power and the decrease in information flow while experiencing high intensity VIMS represent a brain state of a reduced ability to receive, transmit and process information. We further hypothesize that the mechanism of reduced information flow is a general reaction of the brain to an unresolvable mismatch of information. "
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"partial\",\"rationale\":\"Source 1 supports the 1-10 Hz shift; the comparison with 100 Hz and the pathway caveat are not in the cited text.\"}",
+   "verdict": "partial"
+  },
+  {
+   "line": 17,
+   "tag": "UNCERTAIN",
+   "text": "The 0.2 Hz and 2 Hz frequency thresholds described for physical motion-induced sickness (Source 3) concern mechanical oscillation frequencies, not auditory frequencies, and cannot be directly extrapolated to predict whether a 100 Hz sound tone would interact with the vestibular system.",
+   "cites": [
+    3
+   ],
+   "cited_text": [
+    {
+     "source": 3,
+     "title": "Motion Sickness – Introduction to Sensation and Perception",
+     "windows": [
+      "Sea sickness, a form of motion sickness, appears to be a special case and arises from unusual vertical oscillatory and roll motion. Human studies have found that low frequency oscillations of 0.2 Hz and large amplitudes (such as found in large seas during a storm) are most likely to cause motion sickness, with higher frequencies offering little problems. At frequency oscillations of 2 Hz or above, motion sickness ceases completely, although discomfort and injury can still occur. It’s possible that high frequency oscillations happen so quickly that the vestibular system doesn’t have time to properly function to send the proper signals to the brain, so no motion sickness occurs as the visual and vestibular cues are not clashing, but much more research is needed to determine a proper explanation to this phenomena.",
+      "CC LICENSED CONTENT, SHARED PREVIOUSLY\nNOBA, The Vestibular System.\nProvided by: Baylor College of Medicine\nAdapted by: Bailey Balzer\nURL: https://nobaproject.com/textbooks/psychology-as-a-biological-science/modules/the-vestibular-system\nLicense: CC BY-NC-SA 4.0\nReferences:\nBonnet, C. T., Faugloire, E., Riley, M. A., Bardy, B. G., & Stoffregen, T. A. (2006). Motion sickness preceded by unstable displacements of the center of pressure. Human movement science, 25(6), 800-820.\nDobie, T. G. (2019). Motion Sickness. In Motion Sickness (pp. 1–32). Springer International Publishing. https://doi.org/10.1007/978-3-319-97493-4_1\nVillard, S. J., Flanagan, M. B., Albanese, G. M., & Stoffregen, T. A. (2008). Postural instability and motion sickness in a virtual moving room. Human factors, 50(2), 332-345."
+     ]
+    }
+   ],
+   "judge_response": "{\"verdict\":\"partial\",\"rationale\":\"Source 3 describes mechanical oscillation frequencies; the claim about auditory extrapolation is not in the cited text.\"}",
+   "verdict": "partial"
+  }
+ ]
+}

@@ -267,3 +267,156 @@ export async function existingFreshSource(
   if (!row || row.stale) return null;
   return { id: row.id, title: row.title, content: row.content, domain: row.domain };
 }
+
+// ── D15 credibility records (research-workbench P3a) ────────────────────────
+// The research service still never writes CLAIMS (the curator does). What it writes here is
+// the credibility record of the sources it admitted: the family, the signals and the score on
+// sources.metadata.credibility (+ the resolved scholarly record), the rolling-total history,
+// the entailment-gated corroborations, found_via on a source reached through a lead, and the
+// admission trail - where a below-floor lead lives, never as a sources row.
+
+/** A scholarly record already cached on a stored source with this URL (D15 item 1: cached). */
+export async function cachedScholarly(client: QueryClient, url: string): Promise<Record<string, unknown> | null> {
+  const r = await client.queryObject<{ scholarly: Record<string, unknown> | null }>(
+    `SELECT metadata -> 'scholarly' AS scholarly FROM public.sources
+      WHERE url = $1 AND metadata ? 'scholarly' AND retraction_committed_at IS NULL
+      ORDER BY updated_at DESC LIMIT 1`,
+    [url],
+  );
+  return r.rows[0]?.scholarly ?? null;
+}
+
+export interface CredibilityStamp {
+  family: string;
+  claim_kind: string;
+  signals: unknown;
+  score: number;
+  total: number;
+  reasons: string[];
+  model_version: string;
+  admission: { path: string; floor: number | null; total: number | null; trail_id: string | null };
+  found_via?: string | null;
+  found_via_kind?: "lead" | "held" | null;
+}
+
+/** Stamp one source's credibility record and append its history row. */
+export async function stampSourceCredibility(
+  client: QueryClient,
+  sourceId: string,
+  stamp: CredibilityStamp,
+  scholarly: Record<string, unknown> | null,
+  jobId: string | null,
+): Promise<void> {
+  const patch: Record<string, unknown> = { credibility: stamp };
+  if (scholarly) patch.scholarly = scholarly;
+  if (stamp.found_via) { patch.found_via = stamp.found_via; patch.found_via_kind = stamp.found_via_kind ?? "lead"; }
+  await client.queryObject(
+    `UPDATE public.sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1::uuid`,
+    [sourceId, JSON.stringify(patch)],
+  );
+  await client.queryObject(
+    `INSERT INTO public.source_credibility_history
+        (source_id, family, claim_kind, score, total, model_version, signals, reasons, job_id)
+     VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::uuid)`,
+    [sourceId, stamp.family, stamp.claim_kind, stamp.score, stamp.total, stamp.model_version,
+      JSON.stringify(stamp.signals), JSON.stringify(stamp.reasons), jobId],
+  );
+  if (stamp.found_via) {
+    await client.queryObject(
+      `INSERT INTO public.source_trail_events (source_id, kind, detail) VALUES ($1::uuid, 'found_via', $2::jsonb)`,
+      [sourceId, JSON.stringify({ found_via: stamp.found_via, kind: stamp.found_via_kind ?? "lead", job_id: jobId })],
+    );
+  }
+}
+
+/** One entailment-gated corroboration (the DB refuses a non-transferring verdict, OBC02). */
+export async function recordCorroboration(
+  client: QueryClient,
+  e: { from: string; to: string; strength: "strong" | "weak"; amount: number; claim: string; kind: string; verdict: string; model: string },
+  jobId: string | null,
+): Promise<void> {
+  await client.queryObject(
+    `INSERT INTO public.source_corroborations
+        (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version, job_id)
+     VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9::uuid)
+     ON CONFLICT (from_source_id, to_source_id, claim_text, model_version) DO NOTHING`,
+    [e.from, e.to, e.strength, e.amount, e.claim.slice(0, 2000), e.kind, e.verdict, e.model, jobId],
+  );
+}
+
+export interface TrailRow {
+  id: string; url: string; kind: string; claim_kind: string; family: string | null; score: number | null;
+  total: number | null; floor: number | null; model_version: string; signals: unknown; reasons: string[];
+  found_via: string | null; path: unknown[]; source_id: string | null;
+}
+
+/** Persist the run's admission trail (every judged hit, every lead, every path). */
+export async function recordAdmissionTrail(
+  client: QueryClient, rows: TrailRow[], jobId: string | null, sessionId: string | null,
+): Promise<void> {
+  for (const t of rows) {
+    await client.queryObject(
+      `INSERT INTO public.research_admission_trail
+          (id, job_id, session_id, url, url_key, kind, claim_kind, family, score, total, floor, model_version,
+           signals, reasons, found_via, path, source_id)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4, public.contract_url_key($4), $5, $6, $7, $8, $9, $10, $11,
+               $12::jsonb, $13::jsonb, $14::uuid, $15::jsonb, $16::uuid)
+       ON CONFLICT (id) DO NOTHING`,
+      [t.id, jobId, sessionId, t.url, t.kind, t.claim_kind, t.family, t.score, t.total, t.floor, t.model_version,
+        JSON.stringify(t.signals ?? {}), JSON.stringify(t.reasons ?? []), t.found_via, JSON.stringify(t.path ?? []), t.source_id],
+    );
+  }
+}
+
+export interface HeldRow { id: string; url: string | null; title: string; content: string; content_type: string; metadata: Record<string, unknown> }
+
+/** A refinery's held sources, minus the ones its hidden set narrows out of this session. */
+export async function loadHeldSources(client: QueryClient, refineryId: string): Promise<HeldRow[]> {
+  const r = await client.queryObject<HeldRow>(
+    `SELECT h.id, h.url, h.title, h.content, h.content_type, h.metadata
+       FROM public.held_sources h
+      WHERE h.refinery_id = $1::uuid
+        AND NOT EXISTS (SELECT 1 FROM public.refinery_hidden x
+                         WHERE x.refinery_id = h.refinery_id AND x.node_kind = 'source' AND x.node_ref = h.id::text)
+      ORDER BY h.created_at`,
+    [refineryId],
+  );
+  return r.rows;
+}
+
+/** The refinery's unhidden ACTIVE context sources (its folded user sources), for the scoped pass. */
+export async function loadRefineryContext(client: QueryClient, refineryId: string): Promise<Array<{ id: string; url: string | null; title: string }>> {
+  const r = await client.queryObject<{ id: string; url: string | null; title: string }>(
+    `SELECT s.id, s.url, s.title
+       FROM public.refinery_user_sources u JOIN public.sources s ON s.id = u.source_id
+      WHERE u.refinery_id = $1::uuid AND s.retraction_committed_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM public.refinery_hidden x
+                         WHERE x.refinery_id = u.refinery_id AND x.node_kind = 'source' AND x.node_ref = s.id::text)`,
+    [refineryId],
+  );
+  return r.rows;
+}
+
+export class TombstonedError extends Error {
+  constructor(readonly url: string, message: string) { super(message); this.name = "TombstonedError"; }
+}
+
+/**
+ * The fold's move (public.fold_held_source). A tombstoned URL makes the sources gate raise
+ * OBT01; that is surfaced as TombstonedError so the caller routes the D5 reopening path.
+ */
+export async function foldHeld(client: QueryClient, heldId: string, credibility: unknown, jobId: string | null): Promise<string> {
+  try {
+    const r = await client.queryObject<{ id: string }>(
+      `SELECT public.fold_held_source($1::uuid, $2::jsonb, $3::uuid) AS id`,
+      [heldId, JSON.stringify(credibility), jobId],
+    );
+    return r.rows[0].id;
+  } catch (e) {
+    const m = String((e as Error)?.message ?? e);
+    if (/tombstoned url refused|OBT01/i.test(m) || (e as { fields?: { code?: string } })?.fields?.code === "OBT01") {
+      throw new TombstonedError("", m);
+    }
+    throw e;
+  }
+}

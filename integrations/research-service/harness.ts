@@ -15,14 +15,25 @@ import {
   deniedUrl, clampCeiling, hasSourceRules, newContractDrops, permitsQuery, permitsUrl, recordDrop,
   type ContractDrops, type ResolvedContract,
 } from "./contract.ts";
-import { SKEPTIC_SYS, parseSkepticResult, applyDowngrades, type SkepticResult } from "./skeptic.ts";
+import { applyVerdicts, type EntailmentRecord, judgeLines, type LineVerdict, type VerdictEffect } from "./entailment.ts";
+import {
+  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, lineCredibility,
+  type LineCredibility, loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord,
+  weightFor,
+} from "./credibility.ts";
+import { assess, type AdmissionContext, type Assessment, finalScore, subjectTokens, type TrailEntry, trailEntry } from "./admission.ts";
+import { linkedDois, type ScholarlyResolver } from "./scholarly.ts";
+import {
+  cachedScholarly, foldHeld, loadHeldSources, loadRefineryContext, recordAdmissionTrail, recordCorroboration,
+  stampSourceCredibility, TombstonedError,
+} from "./kb.ts";
 import {
   classifyHits, emptySearchStats, reformulate, type SearchStats, shapeQuery,
 } from "./search-quality.ts";
 import { applyNumericGrounding, renderGroundingDiff, type RenderGroundingDiff } from "./grounding.ts";
 import { checkRenderFidelity, countUnits, supersetCitations, type FidelityRecord } from "./fidelity.ts";
 import {
-  coverageFooter, emptySearchRecord, failureNotice, gapQuestions, reconcileNeedsStatus,
+  coverageFooter, emptySearchRecord, entailmentFooterLine, failureNotice, gapQuestions, reconcileNeedsStatus,
   shouldClassifyTemplate, type GapPassRecord,
   type NeedState, type NeedStatus, type SearchRecord,
 } from "./report.ts";
@@ -65,12 +76,12 @@ const PRELIM_GAP_LIMIT = parseInt(env("PRELIM_GAP_LIMIT", "3"), 10);
 // newsletter-body roundup (many news items + tools) exceeds the default
 // gather-source slice, so the primary article gets a larger window.
 const ARTICLE_SOURCE_CHARS = parseInt(env("ARTICLE_SOURCE_CHARS", "8000"), 10);
-// Phase 2 — Skeptic defensive gate. Ships DARK: default off, so the OFF path is
-// byte-identical to today. When on, the judge-only tier runs (downgrade weak/
-// refuted claims + record the audit). The drop-and-replace re-gather tier (pool
-// mutation + re-synthesis) is deferred to on-site validation and NOT in this
-// build; SKEPTIC_REGATHER_MAX is reserved for it.
-const SKEPTIC_ENABLED = env("SKEPTIC_ENABLED", "0") === "1";
+// research-workbench P3a (D15 item 8) - a below-floor hit is a LEAD: fetched only to read its
+// outbound links, never staged. Bounded per run and per lead.
+const LEAD_MAX = parseInt(env("LEAD_MAX", "4"), 10);
+const LEAD_LINKS_MAX = parseInt(env("LEAD_LINKS_MAX", "5"), 10);
+// The entailment stage (D10) judges every cited line; this bounds how many judge calls run at once.
+const ENTAIL_CONCURRENCY = parseInt(env("ENTAIL_CONCURRENCY", "4"), 10);
 // ── research-trust (2026-09-11) ─────────────────────────────────────────────
 // RELEVANT_TARGET — the run's YIELD target. Gathering continues while fewer than
 // this many pages have survived the relevance gate and un-searched reformulations
@@ -113,7 +124,11 @@ const GAP_PASS_MAX_QUERIES = parseInt(env("GAP_PASS_MAX_QUERIES", "3"), 10);
 
 // ── Seams (injectable for tests) ────────────────────────────────────────────
 export interface SearchHit { url: string; title: string; snippet: string; }
-export interface Page { url: string; title: string; content: string; domain: string; }
+export interface Page {
+  url: string; title: string; content: string; domain: string;
+  /** Outbound links the fetcher saw (P3a: a lead's links are what it is followed for). */
+  links?: string[];
+}
 // A fetch attempt's outcome — distinguishes a retrieved source from a timeout
 // (flaky Tor) from any other failure. `page` is non-null only when outcome="ok".
 /**
@@ -129,12 +144,23 @@ export type FetchOutcome =
 /** `finalUrl` (kp-contract): the url the page was actually served from after
  *  redirects, when the fetcher knows it - a contract judges THAT url. */
 export interface FetchResult { page: Page | null; outcome: FetchOutcome; finalUrl?: string; }
+/** The D5 admission gate (the workbench's /workbench/contract/admission), for a held source whose
+ *  URL is tombstoned: the fold routes the reopening path through it and never around it. */
+export type AdmissionClient = (req: {
+  url: string; path: string; session_id?: string; note?: string;
+  candidate: { title: string; content: string; content_type: string };
+}) => Promise<{ outcome: string; admits: boolean; reason: string; source_id: string | null }>;
 export interface Deps {
   embed(text: string): Promise<number[]>;
   chat(system: string, user: string, opts?: { json?: boolean; nothink?: boolean }): Promise<string>;
   searchWeb(query: string, k: number): Promise<SearchHit[]>;
   fetchPage(url: string): Promise<FetchResult>;
   delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** P3a - the keyed OpenAlex/Crossref resolver behind the egress proxy; absent = every
+   *  identifier is recorded `unresolved` with that reason (never a silent zero). */
+  scholarly?: ScholarlyResolver | null;
+  /** P3a - the D5 reopening path for a tombstoned held source (absent = the fold refuses). */
+  admission?: AdmissionClient | null;
 }
 
 export interface QueryClient { queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }>; }
@@ -301,6 +327,24 @@ export interface RunOptions {
    *  sources and reused claims (kp-contract). Every drop lands in
    *  RunResult.contractDrops. */
   contract?: ResolvedContract;
+  /** P3a - the research_jobs id, so the admission trail and credibility history name the job. */
+  jobId?: string | null;
+  /** P3a - a refinery session: its held sources are scored by the fold (ingestion model item 2). */
+  refineryId?: string | null;
+}
+export interface RunMetrics extends ReturnType<typeof reuseMetric> {
+  /** P3a - the entailment stage's counts (D10). */
+  entailment?: Omit<EntailmentRecord, "audit">;
+  /** P3a - the report credibility roll-up (D15 item 5). */
+  credibility?: ReportCredibility | null;
+  /** P3a - what the pre-ingestion stage did (D15 items 7-8). */
+  admission?: { claim_kind: string; kind_basis: string; judged: number; admitted: number; leads: number; lead_paths: number; held_folded: number; held_kept: number };
+}
+export interface FoldRecord {
+  refinery_id: string;
+  held: Array<{ id: string; url: string | null; outcome: string; reason: string; total: number; floor: number; supports: number; source_id: string | null }>;
+  /** The scoped corroboration pass over the refinery's unhidden context graph - refinery-only, writes nothing. */
+  scoped: Array<{ held_id: string; context_id: string; context_title: string; relation: string; lines: number[] }>;
 }
 export interface RunResult {
   synthesis: string;
@@ -315,7 +359,7 @@ export interface RunResult {
   gaps: string[];
   reuseClaims: { id: string; text: string }[];
   citedSources: { url: string | null; title: string }[];
-  metrics: ReturnType<typeof reuseMetric>;
+  metrics: RunMetrics;
   curator: Record<string, unknown> | null;
   backstop: string;
   /** The gap-closing pass, when one ran: what it added and what it closed.
@@ -352,8 +396,16 @@ export interface RunResult {
     errorKinds: { http: number; non_html: number; empty_extract: number; network: number };
     search: SearchStats;
   };
-  /** Phase 2 — the Skeptic's verdict + per-run audit (undefined when SKEPTIC_ENABLED off). */
-  skeptic?: SkepticResult;
+  /** P3a (D10) - one verdict per cited line, and the stage's record (demoted count, audit list).
+   *  null on a run that synthesised nothing. */
+  entailment: EntailmentRecord | null;
+  verdicts: LineVerdict[];
+  /** P3a (D15) - every hit the pre-ingestion stage judged, every lead and path. */
+  admissionTrail: TrailEntry[];
+  /** P3a (D15 item 5) - per-line credibility of the delivered synthesis. */
+  lineCredibility: LineCredibility[];
+  /** P3a - the fold, on a refinery session. */
+  fold: FoldRecord | null;
   /** kp-contract — what the job's contract dropped, per stage (absent without a contract). */
   contractDrops?: ContractDrops;
 }
@@ -396,6 +448,37 @@ export async function runResearch(
   const skipSearch = opts.disableWebSearch === true || sourcesOnly; // sources-only ⇒ no web
   const gapResearch = opts.gapResearch ?? "none";
   const dryRun = opts.dryRun === true;
+  const jobId = opts.jobId ?? null;
+
+  // ── P3a: the D15 credibility model for this run ────────────────────────────
+  // Read from the registries every run (the table is the operator's tuning surface). An
+  // inconsistent table, or a claim kind with no weight row, throws here: the gate stops, loudly,
+  // naming what is missing (D15 item 9) - it never runs on a default weight.
+  const model: CredibilityModel = await loadCredibilityModel(client);
+  const claimKind = classifyClaimKind(model, query);
+  for (const f of model.families.keys()) weightFor(model, claimKind.kind, f);   // a missing row stops here
+  const admissionCtx: AdmissionContext = {
+    model, kind: claimKind.kind, resolver: deps.scholarly ?? null,
+    cached: async (url) => (await cachedScholarly(client, url).catch(() => null)) as ScholarlyRecord | null,
+    subjectTokens: [], now,
+  };
+  const verdictEffects: VerdictEffect[] = [...model.verdicts.values()].map((v) => ({ key: v.key, tagEffect: v.tagEffect }));
+  /** Every hit the stage judged, by url, and the trail. */
+  const assessed = new Map<string, Assessment>();
+  const trail: TrailEntry[] = [];
+  /** url of a source reached through a lead -> the lead's trail entry id. */
+  const viaLead = new Map<string, string>();
+  const admissionStats = { judged: 0, admitted: 0, leads: 0, lead_paths: 0, held_folded: 0, held_kept: 0 };
+  let leadsFollowed = 0;
+  /** Judge one hit before fetch (or a page, with its content). Records the trail entry. */
+  const admit = async (hit: { url: string; title?: string; content?: string }, via: string | null = null): Promise<Assessment> => {
+    const a = await assess(admissionCtx, hit);
+    assessed.set(hit.url, a);
+    admissionStats.judged++;
+    if (a.admitted) admissionStats.admitted++; else admissionStats.leads++;
+    trail.push(trailEntry(a, a.admitted ? "admitted" : "lead", admissionCtx, { found_via: via }));
+    return a;
+  };
 
   // Phase 1 — a per-job contract can only NARROW the service ceilings, never
   // raise them. Absent contract ⇒ Math.min(X, Infinity) = X (today's behavior).
@@ -470,6 +553,30 @@ export async function runResearch(
     .map((s) => ({
       url: s.url, title: s.title, content: s.content, domain: domainOf(s.url),
     }));
+  // P3a - the fold (ingestion model item 2). On a refinery session the refinery's held sources
+  // (minus its hidden set) join the citable pool as context. They are NEVER staged (staging
+  // writes a sources row): only the fold, after entailment, can move one into `sources`.
+  const heldByUrl = new Map<string, { id: string; url: string | null; content_type: string }>();
+  if (opts.refineryId) {
+    const heldPages: Page[] = [];
+    const heldRows = new Map<string, { id: string; url: string | null; content_type: string }>();
+    for (const h of await loadHeldSources(client, opts.refineryId)) {
+      const url = h.url || `urn:openbrain:held:${h.id}`;
+      heldRows.set(url, { id: h.id, url: h.url, content_type: h.content_type });
+      heldPages.push({ url, title: h.title, content: h.content, domain: h.url ? domainOf(h.url) : "held" });
+    }
+    // The chokepoint's injection screen applies to a user's source like to any page; a held
+    // source that attacks the reader does not join the session (it stays held, untouched).
+    const { clean, quarantined } = heldPages.length ? await screenSources(deps, heldPages) : { clean: [], quarantined: [] };
+    if (quarantined.length) {
+      await progress("screen", `quarantined ${quarantined.length} held source(s) for prompt injection`, { quarantined: quarantined.length });
+    }
+    for (const p of clean) { heldByUrl.set(p.url, heldRows.get(p.url)!); staged.push(p); }
+    if (heldByUrl.size) {
+      await progress("fold", `refinery ${opts.refineryId}: ${heldByUrl.size} held source(s) join this session as context`,
+        { held: heldByUrl.size });
+    }
+  }
   // Separate fetch accounting (was a single conflated `fetches`):
   //   sourcesFetched — pages successfully RETRIEVED over the network (the yield)
   //   fetchTimeouts  — attempts that timed out (flaky Tor) — wasted, not yield
@@ -619,6 +726,7 @@ export async function runResearch(
       // (findings H.4). KEYWORDIZE is still told to return a NAME, and a
       // subject the query is not about is still rejected and counted.
       subjectEntity = rawEntity;
+      admissionCtx.subjectTokens = subjectTokens(rawEntity);
       const raw = Array.isArray(kw.queries) ? kw.queries : [];
       gapNeeds.forEach((need, i) => {
         // `shapeQuery` GUARANTEES two content words. It did not before, and a
@@ -790,12 +898,64 @@ export async function runResearch(
      * itself failed (no usable hits) - which is a different thing from a search
      * that worked and whose pages all failed to fetch.
      */
+    /**
+     * D15 item 8 - a lead is fetched ONLY to read where it points. Each outbound link (the
+     * fetcher's links, plus the DOIs its text cites) is judged like a hit; one that clears the
+     * floor is fetched into this round's haul and remembered as reached via the lead. The lead
+     * itself is never pushed to `fresh`, so it can never be staged.
+     */
+    const followLeads = async (leads: Assessment[], seen: (u: string) => boolean): Promise<number> => {
+      let added = 0;
+      for (const lead of leads) {
+        if (leadsFollowed >= LEAD_MAX) break;
+        const d = backstopDecision({
+          elapsedMs: Date.now() - t0, maxMs: effMaxMs, sources: sourcesFetched, maxSources: effMaxFetch,
+          timeouts: fetchTimeouts, maxTimeouts: MAX_FETCH_TIMEOUTS, openGaps: 1,
+        });
+        if (d.stop && d.reason !== "complete") break;
+        leadsFollowed++;
+        const leadTrail = [...trail].reverse().find((t) => t.url === lead.url && t.kind === "lead");
+        const fr = await deps.fetchPage(lead.url).catch(() => ({ page: null, outcome: "network" as FetchOutcome }));
+        if (!fr.page) continue;
+        const links = [...new Set([
+          ...(fr.page.links ?? []),
+          ...linkedDois(fr.page.content, null).map((doi) => `https://doi.org/${doi}`),
+        ])].filter((u) => /^https?:\/\//i.test(u) && u !== lead.url && !seen(u)).slice(0, LEAD_LINKS_MAX * 3);
+        if (leadTrail) leadTrail.path = [{ url: lead.url, role: "lead", links: links.length }];
+        let taken = 0;
+        for (const link of links) {
+          if (taken >= LEAD_LINKS_MAX) break;
+          const a = assessed.get(link) ?? await admit({ url: link }, leadTrail?.id ?? null);
+          if (!a.admitted) continue;
+          taken++;
+          const got = await deps.fetchPage(link);
+          countFetch(got.outcome, got.page);
+          if (got.outcome === "ok" && got.page?.content) {
+            searchRecord.fetched++;
+            fresh.push(got.page);
+            viaLead.set(link, leadTrail?.id ?? "");
+            if (leadTrail) leadTrail.path.push({ url: link, role: "target", total: a.total, floor: a.floor });
+            added++;
+          }
+        }
+      }
+      return added;
+    };
+
     const searchAndFetch = async (q: string): Promise<number> => {
       const hits = rankHits(await runSearch(q));
       if (!hits.length) return -1;
       const seen = (u: string) => staged.some((s) => s.url === u) || fresh.some((s) => s.url === u) ||
                                   kept.some((s) => s.url === u);
-      const candidates = hits.filter((h) => !seen(h.url));
+      const unseen = hits.filter((h) => !seen(h.url));
+      // P3a (D15 item 7): credibility is evaluated BEFORE ingestion. A hit below its claim kind's
+      // floor is a LEAD - never fetched into the pool, never staged, never a sources row.
+      const candidates: SearchHit[] = [];
+      const leadsHere: Assessment[] = [];
+      for (const h of unseen) {
+        const a = assessed.get(h.url) ?? await admit(h);
+        if (a.admitted) candidates.push(h); else leadsHere.push(a);
+      }
       // Headroom = remaining SOURCE budget plus remaining TIMEOUT budget, so we
       // keep trying URLs while either bound has room (a timeout shouldn't burn
       // the source budget). Cache hits below are free and never charged.
@@ -828,6 +988,7 @@ export async function runResearch(
           if (r.page && r.page.content) { fresh.push(r.page); added++; }
         }
       }
+      added += await followLeads(leadsHere, seen);
       await progress(
         "gather",
         `fetched ${searchRecord.fetched} (ok ${sourcesFetched} · readable ${readableCount} · timeout ${fetchTimeouts} · err ${fetchErrors} · reused ${reuseHits})`,
@@ -1045,14 +1206,15 @@ export async function runResearch(
   // D5 item 4 (research-workbench P0): a hit whose URL is an erased source's tombstone is
   // refused before it can be cited or staged (dry-run included: it must not feed generation).
   {
-    const kept = await dropTombstoned(client, staged, sessionId || null);
-    if (kept.length !== staged.length) staged.splice(0, staged.length, ...kept);
+    const held = staged.filter((p) => heldByUrl.has(p.url));
+    const kept = await dropTombstoned(client, staged.filter((p) => !heldByUrl.has(p.url)), sessionId || null);
+    if (kept.length + held.length !== staged.length) staged.splice(0, staged.length, ...held, ...kept);
   }
 
   // Persist staged candidates into the session pool (dedup vs OB). Skipped on
   // dry-run (no canonical write).
   if (!dryRun && sessionId) {
-    await mapLimit(staged, FETCH_CONCURRENCY, async (p) => {
+    await mapLimit(staged.filter((p) => !heldByUrl.has(p.url)), FETCH_CONCURRENCY, async (p) => {
       try {
         const emb = await deps.embed(`${p.title}\n\n${p.content}`.slice(0, EMBEDDING_MAX_CHARS));
         await stageSource(client, sessionId, p, emb);
@@ -1111,6 +1273,13 @@ export async function runResearch(
       `no relevant source was retrieved - reporting a search failure (${backstop})`,
       { relevant: 0, collapsed: searchStats.collapsed, offtopic: searchStats.offtopic });
     await progress("persist", "curator SKIPPED: nothing was grounded");
+    // The leads and every judged hit stay on the trail even when nothing was citable: the trail
+    // is the only record a below-floor page ever gets (D15 item 8).
+    for (const t of trail) if (t.kind === "lead" && viaLead.size === 0 && t.path.length) t.kind = "lead_dropped";
+    if (!dryRun && trail.length) {
+      await recordAdmissionTrail(client, trail.map((t) => ({ ...t, source_id: null })), jobId, sessionId)
+        .catch((e) => progress("persist", `admission trail not recorded: ${(e as Error).message}`));
+    }
     return {
       synthesis: "",
       prose: notice,
@@ -1120,7 +1289,11 @@ export async function runResearch(
       gaps: needsStatus.filter((n) => n.status !== "answered").map((n) => n.need),
       reuseClaims: reuseClaims.map((c) => ({ id: c.id, text: c.text })),
       citedSources: [],
-      metrics: reuseMetric(0, 0, needsStatus.length),
+      metrics: {
+        ...reuseMetric(0, 0, needsStatus.length),
+        admission: { claim_kind: claimKind.kind, kind_basis: claimKind.basis, ...admissionStats },
+      },
+      entailment: null, verdicts: [], admissionTrail: trail, lineCredibility: [], fold: null,
       // The curator is not called; this is the CuratorOutcome path that keeps
       // research_jobs truthful about it (lib.ts classifyCuratorOutcome).
       curator: { state: "skipped", reason: backstop },
@@ -1234,7 +1407,12 @@ export async function runResearch(
             continue;
           }
           hits = rankHits(hits);
-          const fresh = hits.filter((h) => !staged.some((s) => s.url === h.url))
+          // P3a (D15 item 7): the same pre-ingestion stage as the topic path.
+          const admittedHits: SearchHit[] = [];
+          for (const h of hits.filter((x) => !staged.some((s) => s.url === x.url))) {
+            if ((assessed.get(h.url) ?? await admit(h)).admitted) admittedHits.push(h);
+          }
+          const fresh = admittedHits
             .slice(0, Math.max(0, Math.min(2, PRELIM_MAX_FETCH - sourcesFetched)));
           const results = await mapLimit(fresh, FETCH_CONCURRENCY, (h) => deps.fetchPage(h.url));
           const prelimPages: Page[] = [];
@@ -1286,39 +1464,9 @@ export async function runResearch(
     rawSynthesis = await synthesizeTopic();
   }
 
-  // 4b. Skeptic defensive gate (Phase 2, judge-only tier; SKEPTIC_ENABLED, off by
-  //     default). Adversarially reviews the synthesis and DOWNGRADES weak/refuted
-  //     claims in place ([SOURCED]→[UNCERTAIN]/[GAP]) so they land below the reuse
-  //     floor instead of compounding as fact — index-safe (line count + [Source N]
-  //     numbers preserved), so buildCitedAndRenumber below stays aligned. Records a
-  //     per-run audit (result.skeptic). FAIL-OPEN: the skeptic never breaks a run.
-  //     The drop-and-replace re-gather tier (pool mutation + re-synthesis) is
-  //     deferred to on-site validation.
-  let skeptic: SkepticResult | undefined;
-  if (SKEPTIC_ENABLED && rawSynthesis.trim() && (Date.now() - t0) < effMaxMs) {
-    try {
-      await progress("skeptic", "adversarially reviewing the synthesis");
-      const judgeSources = pool
-        .map((p, i) => sourceLine(p, i, i < staged.length ? 1200 : 700))
-        .join("\n\n");
-      const raw = await deps.chat(
-        `${INJECTION_GUARD}\n\n${SKEPTIC_SYS}`,
-        `QUESTION: ${query}\n\nGROUNDED ANSWER:\n${rawSynthesis}\n\nSOURCES:\n${judgeSources || "(none)"}`,
-        { json: true, nothink: true },
-      );
-      const verdict = parseSkepticResult(raw);
-      const { synthesis: downgraded, applied } = applyDowngrades(rawSynthesis, verdict.downgrades);
-      rawSynthesis = downgraded;
-      skeptic = verdict;
-      await progress(
-        "skeptic",
-        `challenges=${verdict.challenges.length} downgrades=${applied} refuted=${verdict.refuted.length} dropped_sources=${verdict.droppedSources.length}`,
-        { challenges: verdict.challenges.length, downgrades: applied, refuted: verdict.refuted.length, dropped_sources: verdict.droppedSources.length },
-      );
-    } catch (e) {
-      await progress("skeptic", `skeptic review skipped: ${(e as Error).message}`); // fail-open
-    }
-  }
+  // 4b. The Skeptic tier (Phase 2, never enabled in prod) is gone: the per-claim entailment stage
+  //     below (D10, research-workbench P3a) replaces it, and reproduces its recorded downgrades
+  //     (fixtures/skeptic-regression.json). Its code is archived at archive/skeptic/.
 
   // 4c. Phase 2.3 — numeric grounding. Every figure in a cited line must be in
   //     one of the sources THAT LINE cites. A miss downgrades the line to
@@ -1335,7 +1483,42 @@ export async function runResearch(
   // synthesis, and a second synthesis that skipped the numeric gate would be a
   // hole straight through the run's grounding - the pass exists to add sources,
   // which is exactly when a new figure can arrive uncited.
-  const harden = async (raw: string): Promise<{ synthesis: string; cited: Page[] }> => {
+  // 4b'. P3a (D10) - the ENTAILMENT STAGE. Every cited line is judged against the text of the
+  //     sources it cites and gets one verdict; the registry says what each verdict does to the
+  //     line (keep / [UNCERTAIN] / [GAP]). It runs first in `harden`, so the gap-closing pass's
+  //     second synthesis is judged too; identical lines are not re-asked (memo).
+  let entailment: EntailmentRecord | null = null;
+  let verdicts: LineVerdict[] = [];
+  let lastHardened = "";
+  const judgeMemo = new Map<string, string>();
+  const judgeDeps = {
+    chat: async (sys: string, user: string, o?: { json?: boolean; nothink?: boolean }) => {
+      const hit = judgeMemo.get(user);
+      if (hit !== undefined) return hit;
+      const raw = await deps.chat(sys, user, o);
+      try { if (JSON.parse(raw)?.verdict) judgeMemo.set(user, raw); } catch { /* not cached: the retry asks again */ }
+      return raw;
+    },
+  };
+  const entail = async (raw: string): Promise<string> => {
+    if (!raw.trim()) { verdicts = []; return raw; }
+    await progress("entail", "judging every cited line against the text it cites");
+    verdicts = await judgeLines(judgeDeps, raw, {
+      question: query, pool: pool.map((p) => ({ title: p.title, content: p.content })),
+      verdicts: verdictEffects, concurrency: ENTAIL_CONCURRENCY,
+    });
+    const applied = applyVerdicts(raw, verdicts, verdictEffects);
+    entailment = applied.record;
+    await progress("entail",
+      `entailment: ${applied.record.demoted} of ${applied.record.lines} cited line(s) demoted ` +
+      `(${Object.entries(applied.record.by_verdict).map(([k, n]) => `${n} ${k}`).join(", ")})` +
+      (applied.record.no_verdict ? `; ${applied.record.no_verdict} without a judge verdict, failed closed` : ""),
+      { entail_lines: applied.record.lines, entail_demoted: applied.record.demoted, entail_no_verdict: applied.record.no_verdict });
+    return applied.synthesis;
+  };
+
+  const harden = async (raw0: string): Promise<{ synthesis: string; cited: Page[] }> => {
+    const raw = await entail(raw0);
     const g = applyNumericGrounding(raw, pool.map((p) => p.content));
     ungroundedNumbers = g.ungrounded;
     let out = raw;
@@ -1345,6 +1528,7 @@ export async function runResearch(
         `${g.ungrounded.length} line(s) asserted a figure no cited source holds - downgraded to [UNCERTAIN]`,
         { ungrounded_numbers: g.ungrounded.length });
     }
+    lastHardened = out;
     return buildCitedAndRenumber(out, pool);
   };
   let { synthesis, cited } = await harden(rawSynthesis);
@@ -1438,6 +1622,154 @@ export async function runResearch(
         await progress("gap_pass",
           `gap-closing pass: +${added.length} source(s), needs answered ${answeredBefore} -> ${answeredAfter} of ${needsStatus.length}`,
           { added: added.length, answered: answeredAfter, total: needsStatus.length });
+      }
+    }
+  }
+
+  // ── P3a: credibility of what the run is about to deliver (D15) ──────────────
+  // Per pool source: its admission assessment (or, for a page that met no search - a seed, a KB
+  // recall, a reused claim's source, a held source - an assessment made now, not gating), the
+  // verdicts on the lines that cite it, the entailment-gated corroborations it receives, found_via
+  // when it was reached through a lead and a line it is cited on SUPPORTS.
+  const tally = pool.map(() => Object.fromEntries([...model.verdicts.keys()].map((k) => [k, 0])) as Record<string, number>);
+  for (const v of verdicts) for (const n of v.cites) if (tally[n - 1]) tally[n - 1][v.verdict]++;
+  const poolAssess: Assessment[] = [];
+  for (const p of pool) {
+    poolAssess.push(assessed.get(p.url) ?? await assess(admissionCtx, { url: p.url, title: p.title, content: p.content }));
+  }
+  const supportsKey = [...model.verdicts.values()].filter((v) => v.transfers).map((v) => v.key);
+  const countOf = (i: number, effect: string) =>
+    Object.entries(tally[i] ?? {}).filter(([k]) => model.verdicts.get(k)?.tagEffect === effect).reduce((a, [, n]) => a + n, 0);
+  const supportsOf = (i: number) => supportsKey.reduce((a, k) => a + (tally[i]?.[k] ?? 0), 0);
+  // Corroboration: a general source that links a paper, on a line citing both with a
+  // transferring verdict (D15 item 3). Edges by pool index.
+  type PoolEdge = CorroborationEdge & { fromIdx: number; toIdx: number };
+  const corrEdges: PoolEdge[] = [];
+  for (const v of verdicts) {
+    const idx = v.cites.map((n) => n - 1).filter((i) => pool[i]);
+    for (const gi of idx) {
+      for (const pi of idx) {
+        if (gi === pi || poolAssess[gi].score.family !== "general" || poolAssess[pi].score.family !== "scholarly") continue;
+        const links = [...(pool[gi].links ?? []), ...linkedDois(pool[gi].content, null).map((d) => `https://doi.org/${d}`)];
+        const edges = corroborate(model, claimKind.kind, v.text, v.verdict,
+          { url: pool[gi].url, score: poolAssess[gi].score, links },
+          { url: pool[pi].url, doi: poolAssess[pi].scholarly?.doi ?? null, score: poolAssess[pi].score });
+        for (const e of edges) {
+          corrEdges.push({ ...e, fromIdx: e.from_url === pool[gi].url ? gi : pi, toIdx: e.to_url === pool[gi].url ? gi : pi });
+        }
+      }
+    }
+  }
+  const leadOf = (i: number) => viaLead.get(pool[i].url) || null;
+  const finals = pool.map((_, i) => {
+    const f = finalScore(admissionCtx, poolAssess[i], {
+      supports: supportsOf(i), partial: countOf(i, "uncertain"), unsupported: countOf(i, "gap"),
+      inbound: corrEdges.filter((e) => e.toIdx === i).length, foundVia: 0,
+    });
+    const received = corrEdges.filter((e) => e.toIdx === i).reduce((a, e) => a + e.amount, 0);
+    return { ...f, rolling: Math.min(1, Math.round((f.total + received) * 1000) / 1000) };
+  });
+  // found_via (D15 item 8) - and what each lead finally was.
+  const foundVia = pool.map((_, i) => (leadOf(i) && supportsOf(i) > 0 ? leadOf(i) : null));
+  for (const t of trail) {
+    if (t.kind !== "lead") continue;
+    const reached = pool.map((p, i) => ({ p, i })).filter(({ i }) => foundVia[i] === t.id);
+    if (reached.length) {
+      t.kind = "lead_path";
+      admissionStats.lead_paths++;
+      t.path.push(...reached.map(({ p }) => ({ url: p.url, role: "credible source", verdict: "supports" })));
+    } else if (t.path.length) {
+      t.kind = "lead_dropped";
+    }
+  }
+  const lineCred: LineCredibility[] = verdicts.map((v) =>
+    lineCredibility(model, claimKind.kind, v.line, v.verdict,
+      v.cites.filter((n) => pool[n - 1]).map((n) => ({ total: finals[n - 1].rolling }))));
+  const reportCred: ReportCredibility = reportCredibility(model, claimKind.kind, lineCred);
+
+  // The fold: a held source becomes active only when it clears its floor AND a line it is cited
+  // on is SUPPORTED; corroboration is then computed both ways with the sources it was co-cited
+  // with on those lines. Otherwise it stays held. A tombstoned URL routes the D5 reopening path.
+  let fold: FoldRecord | null = null;
+  const foldedIdx = new Set<number>();
+  if (opts.refineryId && heldByUrl.size) {
+    fold = { refinery_id: opts.refineryId, held: [], scoped: [] };
+    for (let i = 0; i < pool.length; i++) {
+      const h = heldByUrl.get(pool[i].url);
+      if (!h) continue;
+      const a = poolAssess[i];
+      const supports = supportsOf(i);
+      const row = { id: h.id, url: h.url, outcome: "held_kept", reason: "", total: a.total, floor: a.floor, supports, source_id: null as string | null };
+      if (!a.admitted) row.reason = `below the ${claimKind.kind} floor (${a.total} < ${a.floor}); its links are leads`;
+      else if (!supports) row.reason = "clears its floor, but no line citing it is supported (entailment)";
+      else if (dryRun) row.reason = "would fold (dry run: nothing moved)";
+      else {
+        const cred = {
+          family: a.score.family, claim_kind: claimKind.kind, signals: finals[i].score.signals, score: finals[i].score.score,
+          total: finals[i].rolling, reasons: [...a.reasons, ...finals[i].score.reasons], model_version: model.modelVersion,
+          admission: { path: "fold", floor: a.floor, total: a.total, trail_id: null },
+        };
+        try {
+          row.source_id = await foldHeld(client, h.id, cred, jobId);
+          row.outcome = "held_folded";
+          row.reason = `cleared ${a.floor} and ${supports} supporting line(s): moved into sources with its uuid`;
+        } catch (e) {
+          if (!(e instanceof TombstonedError)) throw e;
+          if (!deps.admission || !h.url) {
+            row.reason = "its URL is tombstoned and the D5 reopening path is not reachable from here (WORKBENCH_URL unset): stays held";
+          } else {
+            try {
+              const d = await deps.admission({
+                url: h.url, path: "intake", session_id: sessionId ?? undefined,
+                note: `fold of held source ${h.id} (refinery ${opts.refineryId})`,
+                candidate: { title: pool[i].title, content: pool[i].content, content_type: h.content_type },
+              });
+              row.reason = `tombstoned: the reopening path said ${d.outcome} (${d.reason})`;
+              if (d.admits && d.source_id) { row.outcome = "held_folded"; row.source_id = d.source_id; }
+            } catch (err) {
+              row.reason = `tombstoned, and the reopening path failed (${(err as Error).message}): stays held`;
+            }
+          }
+        }
+      }
+      if (row.outcome === "held_folded") { foldedIdx.add(i); admissionStats.held_folded++; } else admissionStats.held_kept++;
+      trail.push({
+        ...trailEntry(a, row.outcome, admissionCtx),
+        source_url: row.outcome === "held_folded" ? pool[i].url : null, reasons: [...a.reasons, row.reason],
+      });
+      fold.held.push(row);
+    }
+    // Fold-time corroboration, both ways, with the sources a folded one was co-supported with.
+    for (const i of foldedIdx) {
+      for (const v of verdicts.filter((x) => supportsKey.includes(x.verdict) && x.cites.includes(i + 1))) {
+        for (const n of v.cites) {
+          const j = n - 1;
+          if (j === i || !pool[j] || (heldByUrl.has(pool[j].url) && !foldedIdx.has(j))) continue;
+          for (const [from, to] of [[j, i], [i, j]]) {
+            const strong = poolAssess[from].score.family === "scholarly" && poolAssess[to].score.family === "general";
+            const amt = (strong ? model.corroboration.strongFactor : model.corroboration.weakFactor) * finals[from].total;
+            corrEdges.push({
+              from_url: pool[from].url, to_url: pool[to].url, strength: strong ? "strong" : "weak",
+              amount: Math.round(amt * 1000) / 1000, claim: v.text, verdict: v.verdict, fromIdx: from, toIdx: to,
+            });
+          }
+        }
+      }
+    }
+    // The scoped corroboration pass (ingestion model item 3): the refinery's own unhidden context
+    // graph, refinery-only. It READS and reports; it writes no score anywhere.
+    const context = await loadRefineryContext(client, opts.refineryId).catch(() => []);
+    for (let i = 0; i < pool.length; i++) {
+      if (!heldByUrl.has(pool[i].url)) continue;
+      const hid = heldByUrl.get(pool[i].url)!.id;
+      for (const c of context) {
+        const j = pool.findIndex((p) => c.url !== null && p.url === c.url);
+        const lines = j < 0 ? [] : verdicts.filter((v) => v.cites.includes(i + 1) && v.cites.includes(j + 1));
+        const rel = !lines.length ? "not co-cited in this session"
+          : lines.some((v) => supportsKey.includes(v.verdict)) ? "support each other"
+          : lines.some((v) => model.verdicts.get(v.verdict)?.tagEffect === "uncertain") ? "partly support each other"
+          : "do not support each other";
+        fold.scoped.push({ held_id: hid, context_id: c.id, context_title: c.title, relation: rel, lines: lines.map((v) => v.line) });
       }
     }
   }
@@ -1543,8 +1875,13 @@ export async function runResearch(
         { prose_ungrounded: leaks });
     }
   }
+  const entailRec = entailment as EntailmentRecord | null;
+  const entailFooter = entailRec ? { lines: entailRec.lines, demoted: entailRec.demoted } : null;
+  const credFooter = { value: reportCred.value, model_version: model.modelVersion, kind: claimKind.kind };
   if (prose && topicPath) {
-    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop, gapPass, renderFidelity)}_`;
+    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop, gapPass, renderFidelity, entailFooter, credFooter)}_`;
+  } else if (prose) {
+    prose = `${prose}\n\n_— ${entailmentFooterLine(entailFooter, credFooter)}_`;
   }
 
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
@@ -1554,16 +1891,46 @@ export async function runResearch(
   // gathered counts only NEWLY-gathered cited sources (reuse sources excluded).
   const coveredNeeds = Math.max(0, needs.length - gapNeeds.length);
   const freshCited = cited.filter((p) => !(p.url && reuseUrls.has(p.url)));
-  const metrics = reuseMetric(coveredNeeds, freshCited.length, gapMatches.length);
+  const metrics: RunMetrics = {
+    ...reuseMetric(coveredNeeds, freshCited.length, gapMatches.length),
+    credibility: reportCred,
+    admission: { claim_kind: claimKind.kind, kind_basis: claimKind.basis, ...admissionStats },
+  };
+  if (entailRec) {
+    const { audit: _audit, ...counts } = entailRec;
+    metrics.entailment = counts;
+  }
+
+  // The curator files DATABASE knowledge. A held source that did not fold is refinery-only
+  // (ingestion model item 1): its citations leave the curator's copy, and a line grounded only
+  // in such sources does not reach the curator at all. The delivered report keeps them.
+  const unfolded = new Set(pool.map((p, i) => (heldByUrl.has(p.url) && !foldedIdx.has(i) ? i + 1 : 0)).filter(Boolean));
+  let curatorSynthesis = synthesis;
+  let curatorCited = cited;
+  if (unfolded.size) {
+    const keptLines: string[] = [];
+    for (const line of lastHardened.split("\n")) {
+      if (!/^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]/i.test(line) || !/\[Sources?\b/i.test(line)) { keptLines.push(line); continue; }
+      const stripped = line.replace(/\[Sources?\b[^\]]*\]/gi, (b) => {
+        const left = (b.match(/\d+/g) || []).map(Number).filter((n) => !unfolded.has(n));
+        return left.length ? `[Source ${left.join(", ")}]` : "";
+      }).trimEnd();
+      if (/\[Sources?\b/i.test(stripped)) keptLines.push(stripped);
+    }
+    ({ synthesis: curatorSynthesis, cited: curatorCited } = buildCitedAndRenumber(keptLines.join("\n"), pool));
+  }
 
   await progress("persist", dryRun ? "dry-run: skipping curator write" : "delegating placement + grounding to the curator");
   let curator: Record<string, unknown> | null = null;
-  if (!dryRun && (cited.length || reuseClaims.length)) {
+  if (!dryRun && (curatorCited.length || reuseClaims.length)) {
     const pkg = {
       research_key: `rs-${await sha1(query + (threadId || ""))}`,
       query,
-      claim: firstParagraph(synthesis).slice(0, 600),
-      synthesis,
+      claim: firstParagraph(curatorSynthesis).slice(0, 600),
+      synthesis: curatorSynthesis,
+      // P3a - the claim kind the weight table read for this run, stamped on every claim it files.
+      claim_kind: claimKind.kind,
+      credibility_model: model.modelVersion,
       prose,                              // human-readable rendering (curator → sources.metadata)
       report_type: reportType || undefined, // template id (curator → sources.metadata → wiki)
       needs,                             // the decomposed sub-questions (breadcrumbs)
@@ -1571,9 +1938,54 @@ export async function runResearch(
       kind: "deep_research",
       topic_hint: opts.origin || "research",
       thread_id: threadId || undefined,
-      sources: cited.map((p) => ({ url: p.url, title: p.title, content: p.content, domain: p.domain })),
+      sources: curatorCited.map((p) => ({ url: p.url, title: p.title, content: p.content, domain: p.domain })),
     };
     try { curator = await deps.delegateToCurator(pkg); } catch (e) { curator = { error: String((e as Error).message) }; }
+  }
+
+  // P3a - the credibility records of what the curator filed: family, signals, score and rolling
+  // total with reasons (+ history), found_via, the corroborations, and the admission trail. The
+  // sources are already filed when this runs, so a failure here is reported, never fatal.
+  if (!dryRun) {
+    const idByUrl = new Map<string, string>();
+    const persisted = (curator?.persist ?? null) as Record<string, unknown> | null;
+    const ids = Array.isArray(persisted?.source_ids) ? persisted!.source_ids as Array<string | null> : [];
+    curatorCited.forEach((p, k) => { if (ids[k] && p.url) idByUrl.set(p.url, ids[k]!); });
+    for (const r of fold?.held ?? []) if (r.source_id) idByUrl.set(r.url ?? `urn:openbrain:held:${r.id}`, r.source_id);
+    try {
+      for (let i = 0; i < pool.length; i++) {
+        const sid = idByUrl.get(pool[i].url);
+        if (!sid || (heldByUrl.has(pool[i].url) && !foldedIdx.has(i))) continue;
+        const a = poolAssess[i];
+        const viaTrail = trail.find((t) => t.url === pool[i].url && t.kind === "admitted");
+        const screened = assessed.has(pool[i].url);
+        await stampSourceCredibility(client, sid, {
+          family: finals[i].score.family, claim_kind: claimKind.kind, signals: finals[i].score.signals,
+          score: finals[i].score.score, total: finals[i].rolling,
+          reasons: [...a.reasons, ...finals[i].score.reasons], model_version: model.modelVersion,
+          admission: {
+            path: heldByUrl.has(pool[i].url) ? "fold" : leadOf(i) ? "found_via" : screened ? "search" : "unscreened (seed, KB recall or reuse)",
+            floor: screened ? a.floor : null, total: screened ? a.total : null, trail_id: viaTrail?.id ?? null,
+          },
+          found_via: foundVia[i], found_via_kind: foundVia[i] ? "lead" : null,
+        }, (a.scholarly as unknown as Record<string, unknown>) ?? null, jobId);
+        if (viaTrail) viaTrail.source_url = pool[i].url;
+      }
+      for (const e of corrEdges) {
+        const from = idByUrl.get(pool[e.fromIdx].url);
+        const to = idByUrl.get(pool[e.toIdx].url);
+        if (from && to) {
+          await recordCorroboration(client, {
+            from, to, strength: e.strength, amount: e.amount, claim: e.claim,
+            kind: claimKind.kind, verdict: e.verdict, model: model.modelVersion,
+          }, jobId);
+        }
+      }
+      await recordAdmissionTrail(client,
+        trail.map((t) => ({ ...t, source_id: (t.source_url && idByUrl.get(t.source_url)) || null })), jobId, sessionId);
+    } catch (e) {
+      await progress("persist", `credibility records incomplete: ${(e as Error).message}`, { credibility_write_failed: 1 });
+    }
   }
 
   return {
@@ -1599,7 +2011,7 @@ export async function runResearch(
       errorKinds,
       search: searchStats,
     },
-    skeptic,
+    entailment: entailRec, verdicts, admissionTrail: trail, lineCredibility: lineCred, fold,
     ...dropsField(),
   };
 }

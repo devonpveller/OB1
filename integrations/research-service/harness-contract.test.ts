@@ -13,6 +13,7 @@ import {
   runResearch, type Deps, type FetchResult, type QueryClient, type RunOptions, type SearchHit,
 } from "./harness.ts";
 import { resolveContract, type ResolvedContract } from "./contract.ts";
+import { credibilityRows } from "./fixtures/credibility-seeds.ts";
 
 const ON = "https://docs.python.org/3/library/asyncio-task.html";
 const OFF = "https://evil.example.org/asyncio-howto";
@@ -30,6 +31,9 @@ function stubClient(w: World, sqlLog: string[] = []): QueryClient {
     queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }> {
       sqlLog.push(sql.replace(/\s+/g, " ").trim().slice(0, 60));
       const rows = (r: unknown[]) => Promise.resolve({ rows: r as T[] });
+      // P3a: the run reads the credibility registries; answer with the migrations' seeds.
+      const cred = credibilityRows(sql);
+      if (cred) return rows(cred);
       if (/INSERT INTO public\.sessions/i.test(sql)) return rows([{ id: "00000000-0000-0000-0000-0000000000s1" }]);
       if (/FROM public\.claims c/i.test(sql)) {
         return rows((w.claims ?? []).map((c) => ({
@@ -63,6 +67,8 @@ function stubDeps(o: {
   const deps: Deps = {
     embed: () => Promise.resolve(new Array(1024).fill(0)),
     chat: (sys, user) => {
+      // P3a: the entailment judge (D10) - these tests are about the contract, so every line holds.
+      if (sys.includes("ENTAILMENT JUDGE")) return Promise.resolve(JSON.stringify({ verdict: "supports" }));
       seen.prompts.push(`${sys}\n${user}`);
       if (sys.includes("research planner")) return Promise.resolve(JSON.stringify({ needs: ["How does asyncio.TaskGroup cancel?"] }));
       if (sys.includes("web-search queries")) {

@@ -23,7 +23,7 @@
  *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
-import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, engineBlock, ENGINE_BLOCK_START, extractTextFromHtml, extractTitle, HANDOFF_WAIT_LINE, proxyPolicy, renderResult, rewriteChatBody, selectRepoFiles } from "./lib.ts";
+import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, engineBlock, ENGINE_BLOCK_START, extractLinks, extractTextFromHtml, extractTitle, HANDOFF_WAIT_LINE, proxyPolicy, renderResult, rewriteChatBody, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -31,6 +31,9 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, parseCallers, resolveOrigin } from "./origin.ts";
+import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
+import { assess } from "./admission.ts";
+import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const DB_HOST = env("DB_HOST", "openbrain-db");
@@ -215,6 +218,28 @@ function fetchClient(): Deno.HttpClient | null {
 // mid-research an hour later.
 fetchClient();
 
+// research-workbench P3a (D15 item 1): the keyed OpenAlex client with Crossref's polite pool as
+// fallback, built ONLY on the fetch above's egress (proxiedFetch refuses a missing proxy client
+// unless FETCH_PROXY_URL was deliberately emptied). No key or no mailto = no resolver: every
+// identifier is then recorded `unresolved` with that reason, never a silent zero.
+const OPENALEX_API_KEY = env("OPENALEX_API_KEY", "");
+const SCHOLARLY_MAILTO = env("SCHOLARLY_MAILTO", "");
+let scholarlyResolver: ScholarlyResolver | null = null;
+if (SCHOLARLY_MAILTO) {
+  const client = fetchClient();
+  scholarlyResolver = createScholarlyResolver({
+    fetch: proxiedFetch((u, i) => fetch(u, i as RequestInit), client, { direct: client === null && FETCH_PROXY_URL.trim() === "" }),
+    openalexKey: OPENALEX_API_KEY, mailto: SCHOLARLY_MAILTO,
+    timeoutMs: parseInt(env("SCHOLARLY_TIMEOUT_MS", "10000"), 10),
+  });
+  console.log(`scholarly resolver: OpenAlex ${OPENALEX_API_KEY ? "keyed" : "NOT configured (Crossref only)"}, egress ${scholarlyResolver.egress}`);
+} else {
+  console.log("scholarly resolver OFF: SCHOLARLY_MAILTO is unset (identifiers are recorded unresolved)");
+}
+// The D5 admission gate lives in the workbench; the fold calls it for a tombstoned held source.
+const WORKBENCH_URL = env("WORKBENCH_URL", "").replace(/\/+$/, "");
+const WORKBENCH_KEY = env("WORKBENCH_KEY", "");
+
 // Self-reconnecting pool. deno-postgres v0.19.3 keeps handing back a pooled
 // connection whose socket died after an openbrain-db restart, so every query
 // throws `BrokenPipe (os error 32)` until the process restarts — surfacing to
@@ -356,8 +381,9 @@ async function fetchPage(url: string): Promise<FetchResult> {
     if (!content) return { page: null, outcome: "empty_extract" };
     // finalUrl (kp-contract): where the page was really served from after
     // redirects; a job's contract judges that url (harness.ts withContract).
+    // links (P3a): a lead is followed through these (D15 item 8).
     return {
-      page: { url, title: extractTitle(html) || domainOf(url), content, domain: domainOf(url) },
+      page: { url, title: extractTitle(html) || domainOf(url), content, domain: domainOf(url), links: extractLinks(html, r.url || url) },
       outcome: "ok", finalUrl: r.url || url,
     };
   } catch (e) {
@@ -465,7 +491,21 @@ async function fetchRawFile(owner: string, repo: string, sha: string, path: stri
   }
 }
 
-const realDeps: Deps = { embed, chat, searchWeb, fetchPage, delegateToCurator };
+// The fold's D5 reopening path (a tombstoned held source) - the workbench's admission gate.
+async function admissionGate(req: Parameters<NonNullable<Deps["admission"]>>[0]) {
+  const r = await fetch(`${WORKBENCH_URL}/workbench/contract/admission`, {
+    method: "POST", headers: { "content-type": "application/json", "x-brain-key": WORKBENCH_KEY },
+    body: JSON.stringify(req), signal: AbortSignal.timeout(30_000),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`admission gate ${r.status}: ${JSON.stringify(d).slice(0, 200)}`);
+  return { outcome: String(d.outcome), admits: d.admits === true, reason: String(d.reason ?? ""), source_id: d.source_id ?? null };
+}
+const realDeps: Deps = {
+  embed, chat, searchWeb, fetchPage, delegateToCurator,
+  scholarly: scholarlyResolver,
+  admission: WORKBENCH_URL && WORKBENCH_KEY ? admissionGate : null,
+};
 void SEARCH_K_DEFAULT; // tunable also read inside harness.ts; surfaced here for ops visibility
 
 // ── Job runner (OD-3 async job+poll) ─────────────────────────────────────────
@@ -671,7 +711,7 @@ function jobSeams(base: Deps, signal: AbortSignal, state: SeamState, jobId: stri
 // (started_at set) by the atomic claim, so executeJob only runs the harness and
 // persists the terminal (or paused) state — it never re-claims.
 async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
-  const { jobId, query, thread_id, origin, options } = job;
+  const { jobId, query, thread_id, origin, options, refinery_id } = job;
   const seamState: SeamState = { modelDown: null, filing: false };
   // Conservative: measured from CLAIM, not submit, so a job that queued first
   // only ever waits longer than it needs to. See CALLBACK_MIN_AGE_MS.
@@ -720,8 +760,9 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
       gapResearch: options?.gap_research === "preliminary" ? "preliminary" : undefined,
       dryRun: options?.dry_run === true,
       contract: contract ?? undefined,
+      jobId, refineryId: refinery_id ?? null,
     }, progress);
-    // The harness swallows some step failures (fail-open classifiers, skeptic,
+    // The harness swallows some step failures (fail-open classifiers,
     // prose render). If the job was cancelled or the model went down under it,
     // what came back is degraded: pause / cancel it instead of recording it done.
     // Once filing started, the real outcome is recorded whatever came after.
@@ -786,7 +827,10 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
       contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
       // kp-contract — what it dropped, per stage (key absent on a job without a contract)
       ...(contract ? { contract_drops: res.contractDrops ?? null } : {}),
-      skeptic: res.skeptic ?? null, // Phase 2 — per-run audit (challenges/downgrades/refuted/dropped)
+      // research-workbench P3a: one verdict per cited line + the audit list (D10), the admission
+      // trail and per-line credibility (D15), the fold on a refinery session.
+      entailment: res.entailment, verdicts: res.verdicts, admission_trail: res.admissionTrail,
+      line_credibility: res.lineCredibility, fold: res.fold,
       rendered, // chat-facing markdown; absent on jobs cached before this field
     });
     const progressJson = JSON.stringify({
@@ -919,6 +963,33 @@ function authed(req: Request, url: URL): boolean {
 
 Deno.serve({ port: PORT }, async (req) => {
   const url = new URL(req.url);
+
+  // research-workbench P3a: the D15 score of one URL, for the workbench's D5 admission gate
+  // (debunked / credibility reopen paths). The SAME model and pre-ingestion stage a research run
+  // uses - one implementation. A claim kind with no weight row answers 422 naming it.
+  if (req.method === "POST" && url.pathname === "/research/credibility/score") {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    let body: { url?: string; title?: string; content?: string; content_type?: string; claim_kind?: string };
+    try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    if (!body.url) return Response.json({ error: "url required" }, { status: 400 });
+    const c = await pool.connect();
+    try {
+      const model = await loadCredibilityModel(c);
+      const kind = body.claim_kind
+        ? { kind: body.claim_kind, basis: "given by the caller" }
+        : classifyClaimKind(model, `${body.title ?? ""}\n${(body.content ?? "").slice(0, 2000)}`);
+      const a = await assess({ model, kind: kind.kind, resolver: scholarlyResolver, subjectTokens: [], now: new Date() },
+        { url: body.url, title: body.title, content: body.content });
+      return Response.json({
+        available: true, value: a.total, floor: a.floor, version: model.modelVersion,
+        reason: `${kind.kind} (${kind.basis}); ${a.reasons.join("; ")}`,
+        family: a.score.family, signals: a.score.signals, scholarly: a.scholarly,
+      });
+    } catch (e) {
+      if (e instanceof CredibilityGateError) return Response.json({ error: "credibility_gate", detail: e.message }, { status: 422 });
+      return Response.json({ error: "score_failed", detail: (e as Error).message }, { status: 500 });
+    } finally { c.release(); }
+  }
 
   if (req.method === "GET" && url.pathname === "/health") {
     let db = false;
