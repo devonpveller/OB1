@@ -50,11 +50,25 @@ export const CONTRACT_TOOLS = manifest as unknown as ContractToolSpec[];
 // than guessing.
 export function jsonToZod(s: JsonSchema): z.ZodType {
   let t: z.ZodType;
-  if (s.type === "string") t = s.pattern ? z.string().regex(new RegExp(s.pattern)) : z.string();
-  else if (s.type === "integer") t = z.number().int();
-  else if (s.type === "number") t = z.number();
-  else if (s.type === "boolean") t = z.boolean();
-  else if (s.type === "array") t = z.array(jsonToZod(s.items ?? {}));
+  // Bounds are carried, not dropped (attempt 2, tester F5): the diff test compares them.
+  const n = (k: string) => (typeof s[k] === "number" ? (s[k] as number) : undefined);
+  if (s.type === "string") {
+    let x = s.pattern ? z.string().regex(new RegExp(s.pattern)) : z.string();
+    if (n("minLength") !== undefined) x = x.min(n("minLength")!);
+    if (n("maxLength") !== undefined) x = x.max(n("maxLength")!);
+    t = x;
+  } else if (s.type === "integer" || s.type === "number") {
+    let x = s.type === "integer" ? z.number().int() : z.number();
+    if (n("minimum") !== undefined) x = x.min(n("minimum")!);
+    if (n("maximum") !== undefined) x = x.max(n("maximum")!);
+    t = x;
+  } else if (s.type === "boolean") t = z.boolean();
+  else if (s.type === "array") {
+    let x = z.array(jsonToZod(s.items ?? {}));
+    if (n("minItems") !== undefined) x = x.min(n("minItems")!);
+    if (n("maxItems") !== undefined) x = x.max(n("maxItems")!);
+    t = x;
+  }
   else if (s.type === "object" && s.properties) {
     const req = new Set(s.required ?? []);
     t = z.object(Object.fromEntries(Object.entries(s.properties).map(([k, v]) => {

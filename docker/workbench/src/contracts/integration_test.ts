@@ -556,6 +556,22 @@ t("a new registry entry lands with every existing entry and every existing call 
   await sql(`DELETE FROM public.research_jobs WHERE origin = 'test-origin'`);
 });
 
+t("ideas.status is the idea_states registry: a new state is one registry INSERT, no DDL (attempt 2, tester F4)", async () => {
+  await sql(`INSERT INTO public.contract_registry_entries (registry, key, label) VALUES ('idea_states', 'test-idea-state', 'added by a test')`);
+  const id = uuid();
+  await sql(`INSERT INTO public.ideas (id, title, status) VALUES ($1, 'idea in a newly registered state', 'test-idea-state')`, [id]);
+  assertEquals((await sql<{ status: string }>(`SELECT status FROM public.ideas WHERE id = $1`, [id]))[0].status, "test-idea-state");
+  let refused = false;
+  try {
+    await sql(`INSERT INTO public.ideas (id, title, status) VALUES ($1, 'idea in an unregistered state', 'unregistered-state')`, [uuid()]);
+  } catch {
+    refused = true;
+  }
+  assert(refused, "an unregistered idea state must be refused");
+  await sql(`DELETE FROM public.ideas WHERE id = $1`, [id]);
+  await sql(`DELETE FROM public.contract_registry_entries WHERE registry = 'idea_states' AND key = 'test-idea-state'`);
+});
+
 // ── stream / session / jobs ───────────────────────────────────────────────────────────────
 t("stream(sessionId) emits a typed snapshot and ends for a finished session", async () => {
   const r = await call("GET", `/sessions/${FX.job}/stream`);
@@ -590,4 +606,101 @@ t("every read the fixture answers validates against its schema (live conformance
   assertNotEquals((await call("GET", `/references/${uuid()}`)).status, 200);
 });
 
-Deno.test({ name: "close the pool", ignore, fn: async () => await pool!.end(), sanitizeOps: false, sanitizeResources: false });
+// ── the pre-contract doors honour the D5 lifecycle (attempt 2, tester findings F2) ──────────────
+// The workbench's own /workbench/sources router (routes/sources.ts), driven in-process on the same
+// disposable database: its pool reads DB_* at import, so they are set from CONTRACT_TEST_* first.
+const legacy = HOST
+  ? await (async () => {
+    Deno.env.set("DB_HOST", HOST);
+    Deno.env.set("DB_PORT", Deno.env.get("CONTRACT_TEST_DB_PORT") ?? "5432");
+    Deno.env.set("DB_USER", Deno.env.get("CONTRACT_TEST_DB_USER") ?? "postgres");
+    Deno.env.set("DB_PASSWORD", Deno.env.get("CONTRACT_TEST_DB_PASSWORD") ?? "");
+    Deno.env.set("DB_POOL_SIZE", "2");
+    Deno.env.set("WIKI_GIT_DIR", "/tmp/rwp0-legacy-vault"); // the Changes log is best-effort
+    return { routes: await import("../routes/sources.ts"), pool: (await import("../db/pool.ts")).pool };
+  })()
+  : null;
+async function legacyPost(path: string, body: unknown = {}) {
+  const r = await legacy!.routes.sources.request(path, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  return { status: r.status, json: await r.json().catch(() => ({})) as Record<string, any> };
+}
+async function lifeOf(id: string) {
+  return (await sql<{ life: string; committed: boolean; unlinked: boolean; reason: string | null }>(
+    `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS life,
+            retraction_committed_at IS NOT NULL AS committed, unlinked_at IS NOT NULL AS unlinked, suppression_reason AS reason
+       FROM public.sources WHERE id = $1`, [id]))[0];
+}
+const trailKinds = async (id: string) =>
+  (await sql<{ kind: string; detail: Record<string, unknown> }>(
+    `SELECT kind, detail FROM public.source_trail_events WHERE source_id = $1 ORDER BY created_at, id`, [id]));
+// a suppressed source WITH dependence (one claim edge), so it stays 'suppressed', not 'unlinked'
+async function suppressedWithDependence() {
+  const s = await newSource();
+  const c = uuid();
+  await sql(`INSERT INTO public.claims (id, text) VALUES ($1, 'claim on a source the legacy doors meet')`, [c]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $2, 'states')`, [c, s]);
+  assertEquals((await call("POST", `/sources/${s}/suppress`, { reason: "legacy door test", by: "tester" })).json.lifecycle, "suppressed");
+  return { s, c };
+}
+
+t("a staged retract on a suppressed or unlinked source is refused: it never un-commits the suppression", async () => {
+  const { s } = await suppressedWithDependence();
+  const u = await newSource();
+  assertEquals((await call("POST", `/sources/${u}/suppress`, { reason: "legacy door test", by: "tester" })).json.lifecycle, "unlinked");
+  for (const [id, life] of [[s, "suppressed"], [u, "unlinked"]]) {
+    const before = await trailKinds(id);
+    const r = await legacyPost(`/${id}/retract`, { scope: "global", by: "tester" });
+    assertEquals(r.status, 409, `staged retract on a ${life} source`);
+    assertEquals(r.json.lifecycle, life);
+    assertEquals(await lifeOf(id), { life, committed: true, unlinked: life === "unlinked", reason: "legacy door test" });
+    assertEquals(await trailKinds(id), before, "a refused retract writes nothing");
+    // retraction_committed_at stays set (committed: true above): every consumer that filters
+    // it (match_sources, match_source_chunks, ...) still excludes the source
+  }
+});
+
+t("a staged retract and a restore on an ACTIVE source work as before, with no lifecycle trail event", async () => {
+  const s = await newSource();
+  const r = await legacyPost(`/${s}/retract`, { scope: "global", by: "tester" });
+  assertEquals([r.status, r.json.staged], [200, true]);
+  assertEquals((await lifeOf(s)).life, "active"); // staged = still active until the compile commits it
+  const back = await legacyPost(`/${s}/restore`);
+  assertEquals(back.status, 200);
+  assertEquals(await lifeOf(s), { life: "active", committed: false, unlinked: false, reason: null });
+  assertEquals((await trailKinds(s)).length, 0);
+});
+
+t("a restore of a suppressed or unlinked source is a recorded transition: trail event, state cleared, claims re-scored", async () => {
+  const { s, c } = await suppressedWithDependence();
+  assertEquals(Number((await sql<{ c: number }>(`SELECT confidence AS c FROM public.claims WHERE id = $1`, [c]))[0].c), 0);
+  const u = await newSource();
+  await call("POST", `/sources/${u}/suppress`, { reason: "legacy door test", by: "tester" });
+  for (const [id, from] of [[s, "suppressed"], [u, "unlinked"]]) {
+    const r = await legacyPost(`/${id}/restore`, {});
+    assertEquals(r.status, 200, `restore of a ${from} source`);
+    assertEquals(r.json.transition, { from, to: "active" });
+    assertEquals(await lifeOf(id), { life: "active", committed: false, unlinked: false, reason: null });
+    const ev = (await trailKinds(id)).filter((e) => e.kind === "restored");
+    assertEquals(ev.length, 1, "exactly one 'restored' trail event");
+    assertEquals([ev[0].detail.from, ev[0].detail.to, ev[0].detail.reason], [from, "active", "legacy door test"]);
+    const ref = await call("GET", `/references/${id}`);
+    assertEquals([ref.json.state, ref.json.lifecycle], ["active", "active"]);
+  }
+  assert(Number((await sql<{ c: number }>(`SELECT confidence AS c FROM public.claims WHERE id = $1`, [c]))[0].c) > 0,
+    "the restored source grounds its claim again (re-scored)");
+});
+
+t("restore still refuses a purged source", async () => {
+  const s = await newSource();
+  await sql(`UPDATE public.sources SET metadata = metadata || '{"purged": true}', retracted_at = now(), retraction_committed_at = now() WHERE id = $1`, [s]);
+  const r = await legacyPost(`/${s}/restore`);
+  assertEquals(r.status, 404);
+  assertEquals((await lifeOf(s)).committed, true);
+});
+
+Deno.test({ name: "close the pool", ignore, fn: async () => {
+  await pool!.end();
+  await legacy?.pool.end();
+}, sanitizeOps: false, sanitizeResources: false });

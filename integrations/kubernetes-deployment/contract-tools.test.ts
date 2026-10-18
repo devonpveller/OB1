@@ -89,6 +89,74 @@ Deno.test("every tool's input schema matches its OpenAPI operation: properties, 
   }
 });
 
+// The comparable shape of a schema, recursively (attempt 2, tester F5: the top-level-only diff
+// let a nested item type, a nested required set and a pattern drift unnoticed). Both sides
+// reduce to: type, nullable, pattern, length/range/size bounds, required set, properties and
+// items - each nested level the same way. Descriptions and examples are not compared. Zod's
+// integer adds the safe-integer range when no bound is set; that default is not a bound.
+const SAFE = 9007199254740991;
+function shape(s: J | undefined, fromOpenApi: boolean): J {
+  s = fromOpenApi ? resolve(s ?? {}) : (s ?? {});
+  let type = s.type;
+  let nullable = !!s.nullable;
+  if (Array.isArray(type)) {
+    nullable = nullable || type.includes("null");
+    type = type.filter((x: string) => x !== "null")[0];
+  }
+  for (const alt of (s.anyOf ?? []) as J[]) {
+    if (alt.type === "null") nullable = true;
+    else return { ...shape(alt, fromOpenApi), nullable: true };
+  }
+  const out: J = { type: type ?? null, nullable };
+  for (const k of ["pattern", "minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"]) {
+    const v = s[k];
+    if (v === undefined || ((k === "minimum" || k === "maximum") && Math.abs(v) === SAFE)) continue;
+    out[k] = v;
+  }
+  if (s.properties) {
+    out.required = [...(s.required ?? [])].sort();
+    out.properties = Object.fromEntries(Object.keys(s.properties).sort().map((k) => [k, shape(s!.properties[k], fromOpenApi)]));
+  }
+  if (s.items) out.items = shape(s.items, fromOpenApi);
+  return out;
+}
+
+// What the OpenAPI document says each MCP tool's input is, nested.
+function expectedShapes(): Map<string, J> {
+  const out = new Map<string, J>();
+  for (const item of Object.values(doc.paths as J)) {
+    for (const op of Object.values(item as J) as J[]) {
+      if (!op["x-mcp-tool"]) continue;
+      const props: J = {};
+      const required: string[] = [];
+      for (const p of op.parameters ?? []) {
+        // metadata_filter: a JSON string on the HTTP route, an object over MCP (the adapter
+        // serialises it) - the one deliberate difference.
+        props[p.name] = p.name === "metadata_filter" ? { type: "object", nullable: false } : shape(p.schema, true);
+        if (p.required) required.push(p.name);
+      }
+      const body = op.requestBody?.content?.["application/json"]?.schema;
+      if (body) {
+        const b = resolve(body);
+        for (const [k, v] of Object.entries(b.properties ?? {})) props[k] = shape(v as J, true);
+        required.push(...(b.required ?? []));
+      }
+      out.set(op["x-mcp-tool"], { type: "object", nullable: false, required: required.sort(), properties: Object.fromEntries(Object.keys(props).sort().map((k) => [k, props[k]])) });
+    }
+  }
+  return out;
+}
+
+Deno.test("every tool's input schema matches its OpenAPI operation AT EVERY LEVEL: nested items, required, types, patterns, bounds", async () => {
+  const want = expectedShapes();
+  for (const t of await listed()) {
+    const got = shape(t.inputSchema, false);
+    // the MCP side's metadata_filter is a record: compare it as the bare object it is
+    if (got.properties?.metadata_filter) got.properties.metadata_filter = { type: got.properties.metadata_filter.type, nullable: false };
+    assertEquals(got, want.get(t.name), `${t.name}: the nested input schema drifted from the OpenAPI document`);
+  }
+});
+
 Deno.test("no contract tool is a write (D14: reads only)", () => {
   for (const s of CONTRACT_TOOLS) {
     const op = (doc.paths[s.path] ?? {})[s.method.toLowerCase()];

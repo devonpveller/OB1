@@ -274,6 +274,8 @@ INSERT INTO public.contract_registry_entries (registry, key, label, definition) 
     ('trail_event_kinds', 'reopen_attempt', 'reopen attempt', '{}'),
     ('trail_event_kinds', 'lifted',         'tombstone lifted', '{}'),
     ('trail_event_kinds', 'readmitted',     'readmitted',     '{}'),
+    -- the pre-contract restore door returning a suppressed/unlinked source to active (attempt 2, F2)
+    ('trail_event_kinds', 'restored',       'restored to active', '{}'),
     -- timeline
     ('timeline_event_kinds', 'source_revision', 'source revision committed', '{}'),
     ('timeline_event_kinds', 'session_started', 'research session started', '{}'),
@@ -853,6 +855,22 @@ BEGIN
         ALTER TABLE public.research_jobs
             ADD CONSTRAINT research_jobs_origin_registry_fkey
             FOREIGN KEY (origin_registry, origin)
+            REFERENCES public.contract_registry_entries(registry, key);
+    END IF;
+END $$;
+
+-- ideas.status: the closed CHECK list becomes the idea_states registry the same way (rw-p0-contract
+-- attempt 2, tester F4) - a new idea state is one registry INSERT, no DDL. The seeded entries are
+-- exactly the old CHECK list, so every existing row satisfies the FK.
+ALTER TABLE public.ideas DROP CONSTRAINT IF EXISTS ideas_status_check;
+ALTER TABLE public.ideas ADD COLUMN IF NOT EXISTS status_registry TEXT
+    GENERATED ALWAYS AS ('idea_states') STORED;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ideas_status_registry_fkey') THEN
+        ALTER TABLE public.ideas
+            ADD CONSTRAINT ideas_status_registry_fkey
+            FOREIGN KEY (status_registry, status)
             REFERENCES public.contract_registry_entries(registry, key);
     END IF;
 END $$;

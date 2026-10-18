@@ -218,29 +218,83 @@ export async function discardToLatest(id: string, author = "operator"): Promise<
   return await updateSource(id, latest.content, latest.title, author);
 }
 
-// Reversible STAGED retract (global). retraction_committed_at stays NULL =
-// staged; the compile tick commits it. Restore clears all three.
-export async function retractStaged(id: string, by = "operator"): Promise<Source | null> {
-  const rows = await query<Source>(
-    `UPDATE public.sources
-        SET retracted_at = now(), retracted_by = $2, retraction_committed_at = NULL
-      WHERE id = $1 RETURNING ${COLS}`,
-    [id, by],
-  );
-  return rows[0] ?? null;
+// The D5 lifecycle these pre-contract doors must honour (research-workbench P0, rw-p0-contract
+// attempt 2, tester finding F2): a committed retraction IS the suppressed state
+// (source_lifecycle_state, 230-init-research-contract.sql), so neither door may flip one back
+// to active silently.
+export class LifecycleConflict extends Error {
+  constructor(message: string, public lifecycle: string) {
+    super(message);
+  }
 }
 
-export async function restore(id: string): Promise<Source | null> {
+// Reversible STAGED retract (global). retraction_committed_at stays NULL =
+// staged; the compile tick commits it. Restore clears all three.
+// REFUSED on a suppressed / unlinked source: re-staging would null retraction_committed_at and
+// return it to generation until the next compile - the source is already retracted, harder.
+export async function retractStaged(id: string, by = "operator"): Promise<Source | null> {
+  return await withTransaction(async (c) => {
+    const cur = (await c.queryObject<{ lifecycle: string }>(
+      `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS lifecycle
+         FROM public.sources WHERE id = $1 FOR UPDATE`,
+      [id],
+    )).rows[0];
+    if (!cur) return null;
+    if (cur.lifecycle !== "active") {
+      throw new LifecycleConflict(
+        `source is ${cur.lifecycle}: a staged retract would return it to generation; it is already retracted (D5)`,
+        cur.lifecycle,
+      );
+    }
+    const rows = await c.queryObject<Source>(
+      `UPDATE public.sources
+          SET retracted_at = now(), retracted_by = $2, retraction_committed_at = NULL
+        WHERE id = $1 RETURNING ${COLS}`,
+      [id, by],
+    );
+    return rows.rows[0] ?? null;
+  });
+}
+
+// Restore. On an ACTIVE source (a staged retract, or none) it clears the stage as before. On a
+// suppressed / unlinked source it is the D5 un-suppress, made a RECORDED transition like the
+// contract's own suppress / sever / erase: the suppression state (reason, context, unlinked_at)
+// is cleared, a 'restored' trail event carries from -> to and the old reason, and the claims the
+// source grounds are re-scored (claim_confidence counts it again).
+export async function restore(
+  id: string,
+  by = "operator",
+): Promise<{ source: Source; transition: { from: string; to: string } | null } | null> {
   // A PURGED source is a permanent suppression (OD-1) — restore must refuse it.
   // The data is kept, but it never returns to generation via the UI.
-  const rows = await query<Source>(
-    `UPDATE public.sources
-        SET retracted_at = NULL, retracted_by = NULL, retraction_committed_at = NULL
-      WHERE id = $1 AND COALESCE((metadata->>'purged')::boolean, false) = false
-      RETURNING ${COLS}`,
-    [id],
-  );
-  return rows[0] ?? null;
+  return await withTransaction(async (c) => {
+    const cur = (await c.queryObject<{ lifecycle: string; reason: string | null }>(
+      `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS lifecycle,
+              suppression_reason AS reason
+         FROM public.sources
+        WHERE id = $1 AND COALESCE((metadata->>'purged')::boolean, false) = false
+        FOR UPDATE`,
+      [id],
+    )).rows[0];
+    if (!cur) return null;
+    const rows = await c.queryObject<Source>(
+      `UPDATE public.sources
+          SET retracted_at = NULL, retracted_by = NULL, retraction_committed_at = NULL,
+              suppression_reason = NULL, suppression_context = NULL, unlinked_at = NULL
+        WHERE id = $1
+        RETURNING ${COLS}`,
+      [id],
+    );
+    if (cur.lifecycle === "active") return { source: rows.rows[0], transition: null };
+    const transition = { from: cur.lifecycle, to: "active" };
+    await c.queryObject(
+      `INSERT INTO public.source_trail_events (source_id, kind, detail, actor)
+       VALUES ($1, 'restored', $2::jsonb, $3)`,
+      [id, JSON.stringify({ ...transition, reason: cur.reason, door: "POST /workbench/sources/:id/restore" }), by],
+    );
+    await c.queryObject(`SELECT public.recompute_claims_for_source($1)`, [id]);
+    return { source: rows.rows[0], transition };
+  });
 }
 
 // Per-notebook unlink (soft status flip; source stays elsewhere + in generation).

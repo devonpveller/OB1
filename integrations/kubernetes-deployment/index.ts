@@ -1818,6 +1818,7 @@ function registerSuggestionList(
              FROM thread_sources ts
              JOIN sources s ON s.id = ts.source_id
              WHERE ts.status = $1
+               AND s.retraction_committed_at IS NULL  -- D5 stage 1: a suppressed source is not triaged (as notebooks.ts listSuggestions)
                AND ($2::uuid IS NULL OR ts.thread_id = $2)
              ORDER BY ts.created_at DESC`,
             [whereStatus, thread_id ?? null],

@@ -165,7 +165,14 @@ sources.post("/:id/retract", async (c) => {
     const row = await repo.unlinkFromNotebook(threadId, id);
     return c.json({ scope, link: row });
   }
-  const src = await repo.retractStaged(id, body?.by ?? "operator");
+  let src;
+  try {
+    src = await repo.retractStaged(id, body?.by ?? "operator");
+  } catch (e) {
+    // D5 (rw-p0-contract attempt 2): never un-commit a suppression
+    if (e instanceof repo.LifecycleConflict) return c.json({ error: e.message, lifecycle: e.lifecycle }, 409);
+    throw e;
+  }
   if (!src) return c.json({ error: "not found" }, 404);
   const g = await repo.gravity(id);
   await logChange({
@@ -176,12 +183,17 @@ sources.post("/:id/retract", async (c) => {
   return c.json({ scope: "global", staged: true, source: src, gravity: g });
 });
 
-// POST /workbench/sources/:id/restore — clear a (staged or committed) retract.
+// POST /workbench/sources/:id/restore — clear a (staged or committed) retract. Restoring a
+// suppressed / unlinked source is a recorded D5 transition (a 'restored' trail event; the
+// response carries `transition`); restoring an active one is unchanged (`transition: null`).
 sources.post("/:id/restore", async (c) => {
-  const src = await repo.restore(c.req.param("id"));
-  if (!src) return c.json({ error: "not found" }, 404);
-  await logChange({ action: "restore", detail: `source ${src.id}` });
-  return c.json({ source: src });
+  const res = await repo.restore(c.req.param("id"), authorOf(c));
+  if (!res) return c.json({ error: "not found" }, 404);
+  await logChange({
+    action: "restore",
+    detail: `source ${res.source.id}` + (res.transition ? ` (${res.transition.from} -> ${res.transition.to})` : ""),
+  });
+  return c.json({ source: res.source, transition: res.transition });
 });
 
 // DELETE /workbench/sources/:id { confirm: true } — irreversible purge.
