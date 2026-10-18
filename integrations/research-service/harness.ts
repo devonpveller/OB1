@@ -7,7 +7,7 @@
  * Governing specs: GROUNDING-MODEL.md + PLAN-research-engine.md §6 + OD-5/OD-6.
  */
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
-import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources } from "./kb.ts";
+import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources, dropTombstoned } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
 import { rankHits, partitionRelevant, floorKeepable } from "./filtering.ts";
 import { classifyReport, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "./templates.ts";
@@ -1040,6 +1040,13 @@ export async function runResearch(
           shells_dropped: rejected.filter((r) => r.reason === "no_content").length });
       staged.splice(0, staged.length, ...protectedPages, ...relevantPages);
     }
+  }
+
+  // D5 item 4 (research-workbench P0): a hit whose URL is an erased source's tombstone is
+  // refused before it can be cited or staged (dry-run included: it must not feed generation).
+  {
+    const kept = await dropTombstoned(client, staged, sessionId || null);
+    if (kept.length !== staged.length) staged.splice(0, staged.length, ...kept);
   }
 
   // Persist staged candidates into the session pool (dedup vs OB). Skipped on

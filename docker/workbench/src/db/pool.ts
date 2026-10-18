@@ -6,7 +6,8 @@
 import { Pool, type PoolClient } from "postgres";
 import { config } from "../config.ts";
 
-const pool = new Pool(
+// Exported for the retrieval contract (src/contracts/wiring.ts), which shares this pool.
+export const pool = new Pool(
   {
     hostname: config.db.host,
     port: config.db.port,

@@ -13,9 +13,10 @@ TOPOLOGY (mirrors docker/docker-compose.yml, profile intake; every network INTER
               + a PEER standing in for the ~30 other callers on ai-stack_llm-net (alias
               llm-gateway-db, answering "PEER-REACHED" on 5432): the service must NOT reach it
               (intake-i5 attempt 1, the line-3 FAIL)
-The postgres is pgvector/pgvector:pg16 initialised by the SAME initdb chain the compose file
-mounts (every `docker-entrypoint-initdb.d` line of docker/docker-compose.yml, in order, ending
-with 220-init-intake.sql); then the intake role gets a password.
+The postgres is openbrain-db's own image (the `image:` line of docker/docker-compose.yml, pinned
+by digest) initialised by the SAME initdb chain the compose file mounts (every
+`docker-entrypoint-initdb.d` line, in order, 220-init-intake.sql among them; slots after it, e.g.
+research-workbench's 230/240, run too, as on a fresh volume); then the intake role gets a password.
 
 WHAT IT CHECKS (acceptance lines 1-3; the verdict file is <out>/e2e-results.json):
   A  container: uid 10030, read-only root FS, cap_drop ALL, no-new-privileges (docker inspect);
@@ -57,7 +58,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 INTAKE_DIR = HERE.parent.parent
 OB1_DOCKER = INTAKE_DIR.parent.parent / "docker"
-PG_IMAGE = "pgvector/pgvector:pg16"
+
+
+def _pg_image():
+    """openbrain-db's image as docker/docker-compose.yml pins it (intake-int: development pinned it by
+    digest; the e2e runs the image the compose file runs)."""
+    text = (OB1_DOCKER / "docker-compose.yml").read_text(encoding="utf-8")
+    m = re.search(r"^  openbrain-db:\r?\n(?:(?!  \S).*\n)*?    image:\s*(\S+)", text, re.M)
+    assert m, "openbrain-db has no image: line in docker/docker-compose.yml"
+    return m.group(1)
+
+
+PG_IMAGE = _pg_image()
 SUBNETS = {"ob": "10.243.201.0/24", "intake": "10.243.202.0/24", "llm": "10.243.203.0/24"}
 
 
@@ -140,7 +152,11 @@ class Run:
         for m in re.finditer(r"-\s+(\S+?):/docker-entrypoint-initdb\.d/(\S+?):ro", text):
             src = (OB1_DOCKER / m.group(1)).resolve()
             out.append((src, m.group(2)))
-        assert out and out[-1][1] == "220-init-intake.sql", out[-3:]
+        # intake-int: the chain no longer ENDS at 220 (research-workbench mounts 230 and 240 after
+        # it); what matters is that intake's slot is in it once and the slots run in order.
+        slots = [s for _, s in out]
+        assert slots.count("220-init-intake.sql") == 1, slots[-4:]
+        assert slots == sorted(slots) and len(set(slots)) == len(slots), slots
         return out
 
     def exec_py(self, cname, code, timeout=60):

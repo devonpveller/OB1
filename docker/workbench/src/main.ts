@@ -18,6 +18,8 @@
 //   /workbench/sources     — P4
 //   /workbench/import      — P5  (+ /workbench/jobs)
 //   /workbench/grounding   — P6
+//   /workbench/contract/*  — research-workbench P0: the typed retrieval contract
+//                            (src/contracts/; GET /openapi.json is its document)
 import { Hono } from "hono";
 import { config } from "./config.ts";
 import { requireBrainKey } from "./middleware/auth.ts";
@@ -34,6 +36,8 @@ import { search } from "./routes/search.ts";
 import { graph } from "./routes/graph.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
 import { emptyTrash } from "./repositories/notes.ts";
+import { createContractApp, openApiDocument } from "./contracts/app.ts";
+import { contractDeps } from "./contracts/wiring.ts";
 
 // deno-postgres returns BIGINT columns (e.g. entities.id, thoughts.id) as JS
 // BigInt, which JSON.stringify cannot serialize → every response carrying one
@@ -50,6 +54,13 @@ const app = new Hono();
 // path (what the browser reaches through Caddy).
 app.route("/health", health);
 app.route("/workbench/health", health);
+
+// The retrieval contract's OpenAPI document. Bare path unauthenticated like /health (internal
+// only: the service is never host-published except the loopback debug port); the
+// prefix-inclusive path is what Caddy forwards, behind the key gate below.
+const contract = createContractApp(contractDeps());
+const contractDoc = openApiDocument(contract);
+app.get("/openapi.json", (c) => c.json(contractDoc));
 
 // Everything else requires the Caddy-injected secret (G7). The gate is
 // registered before the resource routers so it runs first in the chain.
@@ -69,6 +80,8 @@ app.route("/workbench/note-history", noteHistory); // P4.7 — note git revision
 app.route("/workbench/note-commit", noteCommit); // P4.7 — commit-now / compile-catch
 app.route("/workbench/search", search); // wiki-dynamic-index P3 — DB-backed wiki search
 app.route("/workbench/graph", graph); // wiki-dynamic-index — page-scoped graph neighbourhood
+app.get("/workbench/openapi.json", (c) => c.json(contractDoc)); // research-workbench P0
+app.route("/", contract); // research-workbench P0 — /workbench/contract/* (paths are absolute)
 
 app.notFound((c) => c.json({ error: "not found" }, 404));
 app.onError((err, c) => {
