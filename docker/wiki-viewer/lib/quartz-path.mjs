@@ -10,48 +10,15 @@
  */
 import { slug as slugAnchor } from "github-slugger";
 
-function sluggify(s) {
-  return s
-    .split("/")
-    .map((segment) =>
-      segment
-        .replace(/\s/g, "-")
-        .replace(/&/g, "-and-")
-        .replace(/%/g, "-percent")
-        .replace(/\?/g, "")
-        .replace(/#/g, ""),
-    )
-    .join("/")
-    .replace(/\/$/, "");
-}
-
-export function getFileExtension(s) {
-  return s.match(/\.[A-Za-z0-9]+$/)?.[0];
-}
-
-export function stripSlashes(s, onlyStripPrefix) {
-  if (s.startsWith("/")) s = s.substring(1);
-  if (!onlyStripPrefix && s.endsWith("/")) s = s.slice(0, -1);
-  return s;
-}
-
-export function endsWith(s, suffix) {
-  return s === suffix || s.endsWith("/" + suffix);
-}
+// The slug rule itself (sluggify, slugifyFilePath and their helpers) is the
+// ONE shared copy in recipes/_shared/quartz-slug.mjs (rw-p1a-deploy-prep,
+// NA4-1: compile, reconciliation and renderer use the same function).
+import { sluggify, getFileExtension, stripSlashes, endsWith, slugifyFilePath, urlSlugOf } from "./shared/quartz-slug.mjs";
+export { getFileExtension, stripSlashes, endsWith, slugifyFilePath, urlSlugOf };
 
 export function trimSuffix(s, suffix) {
   if (endsWith(s, suffix)) s = s.slice(0, -suffix.length);
   return s;
-}
-
-export function slugifyFilePath(fp, excludeExt) {
-  fp = stripSlashes(fp);
-  let ext = getFileExtension(fp);
-  const withoutFileExt = fp.replace(new RegExp(ext + "$"), "");
-  if (excludeExt || [".md", ".html", undefined].includes(ext)) ext = "";
-  let slug = sluggify(withoutFileExt);
-  if (endsWith(slug, "_index")) slug = slug.replace(/_index$/, "index");
-  return slug + ext;
 }
 
 export function simplifySlug(fp) {

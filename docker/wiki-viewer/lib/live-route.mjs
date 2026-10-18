@@ -21,13 +21,23 @@
  *   4. otherwise -> not-available (x-wiki-render: not-available)
  * The fresh-file interim render (Phase B's compensation for the builder's
  * lag) is gone: a page with no row is pending, never rendered from its file.
+ *
+ * URLs are Quartz's (rw-p1a-deploy-prep, NA4-1): a page is served at the
+ * slugified path of its file ("notes/sp ace.md" -> /notes/sp-ace); the
+ * request's key is looked up through the site index's URL -> row map. The
+ * raw vault path still answers (the explorer's links come from row slugs):
+ * a 302 to the page's Quartz URL. A row whose path Quartz does not build
+ * (private/, templates/, a dot-directory) is never presented, and a row
+ * whose FILE is gone (an orphan) is not presentable: pending, named by the
+ * reconcile (NA4-2).
  */
-import { stat, readFile } from "node:fs/promises";
+import { stat, readFile, readdir } from "node:fs/promises";
 import { join, normalize } from "node:path";
 import { fetchRow, fetchRowByBasename, dbState, probe } from "./wiki-db.mjs";
 import { resolvePage, renderTemplate, makeUnavailable } from "./page-classes.mjs";
 import { renderDocument, pendingDocument, databaseDocument, notAvailableDocument, errorDocument } from "./chrome.mjs";
 import { rowState, isEmptyBody } from "./shared/reconcile-wiki-pages.mjs";
+import { urlSlugOf, isPagePath, isContentDir, sluggifySegment } from "./shared/quartz-slug.mjs";
 import { getNavIndex } from "./nav-index.mjs";
 import { siteIndexFor } from "./site-index.mjs";
 
@@ -45,13 +55,41 @@ export function keyOf(urlPath) {
   return { key: key === "" ? "index" : key, isDir };
 }
 
+// Is there a page FILE for this row slug (vault path without .md)? Only a
+// path Quartz builds counts (isPagePath).
 async function fileExists(rel) {
   const base = normalize(join(WIKI(), rel));
   if (!base.startsWith(WIKI())) return false;
-  for (const c of [`${base}.md`, join(base, "index.md")]) {
+  for (const [c, r] of [[`${base}.md`, `${rel}.md`], [join(base, "index.md"), `${rel}/index.md`]]) {
+    if (!isPagePath(r)) continue;
     try { if ((await stat(c)).isFile()) return true; } catch { /* next */ }
   }
   return false;
+}
+
+// The page file Quartz serves at this URL key, when the key is not the file's
+// own path ("notes/sp-ace" for "notes/sp ace.md"): each segment is matched
+// against the directory's entries through Quartz's slug rule. Read only on
+// the "nobody claimed it" path (is the page known?), never to render.
+async function fileForUrl(key) {
+  const segs = String(key || "").split("/");
+  let dirs = [""];
+  for (let i = 0; i < segs.length; i++) {
+    const last = i === segs.length - 1;
+    const next = [];
+    for (const d of dirs) {
+      let entries;
+      try { entries = await readdir(d ? join(WIKI(), d) : WIKI(), { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        const rel = d ? `${d}/${e.name}` : e.name;
+        if (e.isDirectory() && isContentDir(rel) && sluggifySegment(e.name) === segs[i]) next.push(rel);
+        if (last && e.isFile() && isPagePath(rel) && urlSlugOf(rel.replace(/\.md$/, "")) === key) return rel;
+      }
+    }
+    if (!next.length) return null;
+    dirs = next.slice(0, 32);
+  }
+  return null;
 }
 
 let _planned = { at: 0, mtimeMs: -1, map: {}, byBase: {} };
@@ -89,6 +127,7 @@ const PENDING_WHY = {
   stale: "its row is older than its file (stale: the reconcile names it, the repair pass rewrites it)",
   future: "its row is dated in the future, so it cannot be shown to be newer than its file",
   empty: "its row has an empty body",
+  orphan: "its row has no file (an orphan: the reconcile names it; the sweeps delete it)",
 };
 
 // The file text of a row's page, or null. Read ONLY to tell a faithfully
@@ -104,9 +143,13 @@ async function fileTextOf(slug) {
 }
 
 // Is this row presentable as-is? null, or the reason it is pending. One rule
-// with the reconciliation (rowState + isEmptyBody, shared).
+// with the reconciliation (rowState + isEmptyBody, shared), plus: a row whose
+// file is gone is an ORPHAN and never presented (rw-p1a-deploy-prep, NA4-2:
+// the retire step deleted the file and left the row, and the renderer
+// presented it) - the reconcile names it, a sweep or the operator deletes it.
 export async function presentable(row, opts = {}) {
   const mtime = await fileMtimeOf(row.slug);
+  if (mtime == null) return PENDING_WHY.orphan;
   let st = rowState(row, mtime, opts);
   if (st === "empty" && mtime != null) {
     const text = await fileTextOf(row.slug);
@@ -125,6 +168,16 @@ const once = (fn) => { let p; return () => (p ??= fn()); };
 
 function respond(status, headers, body) {
   return { status, headers: { "content-type": "text/html; charset=utf-8", ...headers }, body };
+}
+
+// Does the site index know a page at this URL (its Quartz URL or its row's
+// vault path)? For a URL whose extension is an asset type and no published
+// file has (serve.mjs): a page named "x.png.md" is still a page.
+export async function isKnownPageUrl(urlPath) {
+  const req = keyOf(urlPath);
+  if (!req) return false;
+  const site = siteIndexFor(await getNavIndex());
+  return !!site && (site.bySlug.has(req.key) || site.bySlug.has(urlSlugOf(req.key)));
 }
 
 /** Render one page URL. Returns { status, headers, body }. Never throws. */
@@ -153,18 +206,24 @@ async function renderLiveInner(req) {
   const nav = await getNavIndex();
   const site = siteIndexFor(nav);
   const rowCache = new Map();
+  // A URL slug -> its row (the site index's map; a key it does not know is
+  // tried as a row slug itself). A row for a path Quartz does not build is
+  // no row.
+  const visible = (r) => (r && r.ok && r.row && !isPagePath(`${r.row.slug}.md`) ? { ...r, row: null } : r);
   const rowAt = (slug) => {
-    if (!rowCache.has(slug)) rowCache.set(slug, fetchRow(slug));
-    return rowCache.get(slug);
+    const target = site?.rowSlugOf?.get(slug) ?? slug;
+    if (!rowCache.has(target)) rowCache.set(target, fetchRow(target).then(visible));
+    return rowCache.get(target);
   };
+  let looked = null; // the result of deps.row(): the row the request itself found
   const deps = {
     key: req.key,
     site,
     rowAt,
     row: once(async () => {
       const exact = await rowAt(req.key);
-      if (!exact.ok || exact.row || req.key.includes("/")) return exact;
-      return fetchRowByBasename(req.key);
+      looked = (!exact.ok || exact.row || req.key.includes("/")) ? exact : visible(await fetchRowByBasename(req.key));
+      return looked;
     }),
     fileExists,
     presentable,
@@ -188,7 +247,7 @@ async function renderLiveInner(req) {
         const why = await presentable(r.row);
         return why ? { state: "pending", reason: why } : { state: "page", row: r.row };
       }
-      return (await fileExists(slug)) ? { state: "pending", reason: "its file is written" } : { state: "none" };
+      return (await fileExists(slug)) || (await fileForUrl(slug)) ? { state: "pending", reason: "its file is written" } : { state: "none" };
     },
   };
   // Resolve; an entry whose resolve() or template() throws is isolated by the
@@ -202,10 +261,12 @@ async function renderLiveInner(req) {
     }
     if (!resolved) break;
     const { entry, ctx } = resolved;
-    // A basename URL that found its row: send the reader to the canonical
-    // URL (relative hrefs on the page are computed for that depth).
-    if (ctx.row && ctx.row.slug !== req.key && !req.key.includes("/")) {
-      return respond(302, { location: "/" + ctx.row.slug.split("/").map(encodeURIComponent).join("/"), "cache-control": "no-store" }, "");
+    // The request found its row under another URL - a basename URL, or the
+    // raw vault path of a file Quartz slugifies ("notes/sp ace"): send the
+    // reader to the page's Quartz URL (relative hrefs on the page are
+    // computed for it).
+    if (ctx.row && ctx.row === looked?.row && urlSlugOf(ctx.row.slug) !== req.key) {
+      return respond(302, { location: "/" + urlSlugOf(ctx.row.slug).split("/").map(encodeURIComponent).join("/"), "cache-control": "no-store" }, "");
     }
     if (ctx.pending) {
       return respond(200, {
@@ -233,7 +294,7 @@ async function renderLiveInner(req) {
   // Nobody claimed it. Known (file or planned) -> pending-compile; else not available.
   const planned = await plannedFor(req.key);
   const known = planned ? (planned.unlinked ? "registered, not yet cited by anything" : "queued for synthesis")
-    : (await fileExists(req.key)) ? "its file is written" : null;
+    : (await fileExists(req.key)) || (await fileForUrl(req.key)) ? "its file is written" : null;
   if (known) {
     return respond(200, { "cache-control": "no-store", "x-wiki-render": "pending" }, pendingDocument({ slug: req.key, reason: known }));
   }

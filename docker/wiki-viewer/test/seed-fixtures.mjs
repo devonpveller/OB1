@@ -12,23 +12,19 @@
  * Fails loudly (non-zero) if any row does not land. Never points anywhere but
  * OPEN_BRAIN_URL (the disposable rest on wt-rw-p1a-render-net).
  */
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseWikiPage } from "/ob1/recipes/_shared/wiki-pages.mjs";
+// The vault walk the reconciliation and the backfill use (rw-p1a-deploy-prep,
+// RV-1): Quartz's page set - the fixture's private/, templates/ and
+// dot-directory files get no row, as compile never writes one.
+import { walkVault as walk } from "/ob1/recipes/_shared/reconcile-wiki-pages.mjs";
 
 const VAULT = process.env.WIKI_GIT_DIR || "/wiki";
 const OB = (process.env.OPEN_BRAIN_URL || "").replace(/\/+$/, "");
 if (!/^wt-/.test(process.env.P1A_DISPOSABLE || "") || !OB) {
   console.error(`[seed] refusing: OPEN_BRAIN_URL=${OB || "(unset)"} is not the disposable rest`);
   process.exit(2);
-}
-
-async function* walk(abs, rel = "") {
-  for (const e of await readdir(abs, { withFileTypes: true })) {
-    const r = rel ? `${rel}/${e.name}` : e.name;
-    if (e.isDirectory()) { if (!e.name.startsWith(".")) yield* walk(join(abs, e.name), r); }
-    else if (e.isFile() && e.name.endsWith(".md")) yield r;
-  }
 }
 
 const rows = [];

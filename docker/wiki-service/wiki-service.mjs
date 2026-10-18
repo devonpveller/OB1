@@ -48,9 +48,11 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // get their rows through the same queue + flush as every compiled page (D13:
 // compiled means the row landed).
 import {
-  deleteWikiPages, queueWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
+  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
   isDatabaseUnavailableError,
 } from "file:///recipes/_shared/wiki-pages.mjs";
+// rw-p1a-deploy-prep (RV-5): the vault .gitignore is MERGED, never rewritten.
+import { mergeGitignore } from "./lib/vault-gitignore.mjs";
 // rw-p1a-render attempt 4 (tester NA3-3): a compile the database outage
 // stopped sends one transient notification per outage (lib/outage-notify.mjs).
 import { notify, forgetNotification } from "file:///recipes/_shared/compile-notify.mjs";
@@ -209,18 +211,19 @@ async function ensureRepo() {
   await git(["config", "pull.rebase", "true"]).catch(() => {});
   // assets/ is the wiki-assets volume (binaries, D-I) — keep it OUT of vault
   // git so the workbench's note commits never stage images.
-  const wantIgnore =
-    ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n" +
-    ".failed-entity-ids.json\nplanned.json\n.compile-notifications.jsonl\n";
+  // Every operator line is kept; only the missing service entries (state
+  // files, the P1a ledgers and their locks) are appended (RV-5: this used to
+  // rewrite the file wholesale and drop the operator's lines).
   let curIgnore = "";
   try { curIgnore = await readFile(`${WIKI_GIT_DIR}/.gitignore`, "utf8"); } catch { /* */ }
-  if (
-    !curIgnore.includes(".wikistate.json") || !curIgnore.includes("assets/") ||
-    !curIgnore.includes(".failed-entity-ids.json") || !curIgnore.includes("planned.json") ||
-    !curIgnore.includes(".compile-notifications.jsonl")
-  ) {
-    await writeFile(`${WIKI_GIT_DIR}/.gitignore`, wantIgnore);
+  const ignore = mergeGitignore(curIgnore);
+  if (ignore.changed) {
+    await writeFile(`${WIKI_GIT_DIR}/.gitignore`, ignore.text);
+    console.log(`[wiki-service] vault .gitignore: added ${ignore.added.join(" ")} (existing lines kept)`);
   }
+  // A ledger committed by an earlier image is untracked (the file stays on disk).
+  await git(["rm", "--cached", "-q", "--ignore-unmatch", "--",
+    "content/.structural-failures.json", "content/.unsynced-rows.json"]).catch(() => {});
   // If a prior (pre-fix) run already tracked the state file, untrack it.
   await git(["rm", "--cached", "-q", "--ignore-unmatch", ".wikistate.json"]).catch(() => {});
   if (!existsSync(`${NOTES_DIR}/README.md`)) {
@@ -670,6 +673,13 @@ async function sweepOrphanNotebookPages() {
   }
   await rm(`${WIKI_OUT_DIR}/topic.md`, { force: true }).catch(() => {});
   await rm(`${WIKI_OUT_DIR}/notebook.md`, { force: true }).catch(() => {});
+  // ...and their ROWS, every cycle (rw-p1a-deploy-prep, NA4-2): the layers are
+  // retired wholesale, so every row under them goes too - with or without a
+  // file, including one a writer racing this sweep (a backfill) left. Same
+  // DELETE half as the other sweeps; a failed delete is logged, the
+  // reconciliation names the orphans, and the renderer never presents one.
+  const retiredRows = await deleteWikiPagesUnder(["content/topic", "content/notebook"]);
+  if (retiredRows) console.log(`[wiki-service] orphan-sweep: deleted ${retiredRows} row(s) of the retired topic/+notebook/ layers`);
 
   // 2. Sweep notebook HUB pages (content/notebooks/<slug>/<slug>.md) whose
   //    thread is gone/archived. The folder also holds author-owned AI notes —

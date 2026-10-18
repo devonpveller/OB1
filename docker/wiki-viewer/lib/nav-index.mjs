@@ -36,6 +36,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { isPagePath } from "./shared/quartz-slug.mjs";
 
 const OB_URL = (process.env.OPEN_BRAIN_URL || "http://openbrain-rest").replace(/\/+$/, "");
 const ENABLED = process.env.WIKI_NAV_API !== "0";
@@ -52,10 +53,12 @@ export function navIndexEnabled() {
 
 // Same projection derive-graph-index.mjs emits. `slug` MUST be inside the
 // value: the Explorer's FileTrieNode.add does file.slug.split("/").
+// A row for a path Quartz does not build (private/, templates/, a
+// dot-directory: quartz-slug.mjs isPagePath) is not offered (rw-p1a-deploy-prep, RV-1).
 export function rowsToIndex(rows) {
   const out = {};
   for (const r of rows || []) {
-    if (!r || !r.slug) continue;
+    if (!r || !r.slug || !isPagePath(`${r.slug}.md`)) continue;
     out[r.slug] = {
       slug: r.slug,
       title: r.title || r.slug.split("/").pop(),

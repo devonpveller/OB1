@@ -11,6 +11,8 @@ Ported (rewritten as plain ESM, behaviour kept) into the live renderer
 | this repo | ported from (jackyzha0/quartz v4.5.1) |
 |---|---|
 | `lib/quartz-path.mjs` | `quartz/util/path.ts` (slug + link algebra) |
+| `../../recipes/_shared/quartz-slug.mjs` (rw-p1a-deploy-prep: the ONE copy of the slug rule, shared by the compile side, the reconciliation/backfill walk and this renderer; the image copies it to `lib/shared/`) | `quartz/util/path.ts` (`sluggify`, `slugifyFilePath`, `getFileExtension`, `stripSlashes`, `endsWith`, verbatim); the page set from `quartz/util/glob.ts` and `quartz.config.ts` `ignorePatterns` |
+| `lib/site-index.mjs` (folder names), `lib/page-templates.mjs` + `lib/page-classes/folder.mjs` (a note and a folder of one name) | `quartz/util/fileTrie.ts` (`insert`, `fileSegmentHint`, `displayName`), `quartz/plugins/emitters/folderPage.tsx` (`computeFolderInfo`) |
 | `lib/render-page.mjs` | `quartz/plugins/transformers/ofm.ts`, `gfm.ts`, `toc.ts`, `links.ts`, `syntax.ts`, `latex.ts`, `description.ts`; `quartz/util/jsx.tsx`; `quartz/components/renderPage.tsx` (`renderTranscludes`) and `quartz/util/path.ts` (`normalizeHastElement`, `isRelativeURL`) |
 | `lib/page-classes/alias.mjs`, `lib/site-index.mjs` (`aliasRedirects`) | `quartz/plugins/emitters/aliases.ts` (the redirect document), `quartz/plugins/transformers/frontmatter.ts` (`getAliasSlugs`, the aliases/alias coalesce) |
 | `lib/components.mjs` | `quartz/components/Breadcrumbs.tsx`, `ArticleTitle.tsx`, `ContentMeta.tsx`, `Date.tsx`, `TagList.tsx`, `TableOfContents.tsx`, `Backlinks.tsx`, `OverflowList.tsx`, `PageList.tsx`, `Footer.tsx`, `pages/FolderContent.tsx`, `pages/TagContent.tsx` |

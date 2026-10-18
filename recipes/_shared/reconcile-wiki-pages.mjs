@@ -45,11 +45,11 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseWikiPage, upsertWikiPages } from "./wiki-pages.mjs";
 import { listOpen, STRUCTURAL_FILE } from "./structural-ledger.mjs";
+import { isContentDir, isPagePath } from "./quartz-slug.mjs";
 
 const OB_URL = () => (process.env.OPEN_BRAIN_URL || "http://openbrain-rest").replace(/\/+$/, "");
 const SKEW_MS = () => Math.max(0, Number(process.env.RECONCILE_SKEW_MS || "2000"));
 const FUTURE_MS = () => Math.max(0, Number(process.env.RECONCILE_FUTURE_MS || "60000"));
-const SKIP_DIRS = new Set([".git", ".quartz-cache", "public", "node_modules", "assets", ".obsidian", "private", "templates"]);
 
 // A folder or tag index may legitimately have no body (Quartz then shows the
 // listing alone); every other page with an empty body is an empty leaf.
@@ -101,7 +101,17 @@ export function rowState(row, fileMtimeMs, { now = Date.now(), allowEmpty = empt
   return null;
 }
 
-async function* walk(absDir, relDir = "") {
+/**
+ * The vault walk: every page Quartz builds (quartz-slug.mjs isPagePath - its
+ * ignorePatterns at the vault root, no dot-directory or dot-file, no
+ * non-content directory, .md only). ONE walk for the reconciliation, the
+ * repair pass and the one-time backfill (rw-p1a-deploy-prep, RV-1: the
+ * backfill had its own walk that wrote rows for private/, templates/ and
+ * dot-directories). Yields vault-relative paths ("notes/x.md"). The vault
+ * root itself unreadable throws (the caller cannot check); a sub-directory
+ * that vanishes mid-walk is skipped (a sweep).
+ */
+export async function* walkVault(absDir, relDir = "") {
   let entries;
   try {
     entries = await readdir(absDir, { withFileTypes: true });
@@ -112,13 +122,14 @@ async function* walk(absDir, relDir = "") {
   for (const e of entries) {
     const rel = relDir ? `${relDir}/${e.name}` : e.name;
     if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
-      yield* walk(join(absDir, e.name), rel);
-    } else if (e.isFile() && e.name.endsWith(".md")) {
+      if (!isContentDir(rel)) continue;
+      yield* walkVault(join(absDir, e.name), rel);
+    } else if (e.isFile() && isPagePath(rel)) {
       yield rel;
     }
   }
 }
+const walk = walkVault;
 
 export async function listFiles(vault) {
   const files = new Map(); // slug -> { rel, mtimeMs }
@@ -244,6 +255,20 @@ export function resolveNoteLinks(links, slugs) {
   });
 }
 
+/**
+ * The row a page FILE gets when the repair pass (or the one-time backfill)
+ * writes it: the compile rule (parseWikiPage), and for a NOTE its links
+ * resolved the way the workbench resolves them at save (resolveNoteLinks)
+ * against `slugs` - every row slug and every file slug the caller knows. ONE
+ * function for both writers, so a backfilled note row and a repaired one are
+ * the same row (rw-p1a-deploy-prep, RV-1).
+ */
+export function rowFromFile(rel, markdown, slugs) {
+  const row = parseWikiPage(rel, markdown);
+  if (row.page_class === "note") row.links = resolveNoteLinks(row.links, slugs);
+  return row;
+}
+
 // The open structural failures of the vault's compile (its out-dir is
 // <vault>/content; WIKI_STRUCTURAL_FILE overrides, as it does for the compile).
 export function structuralFileFor(vault) {
@@ -276,9 +301,7 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
     const f = files.get(slug);
     let md;
     try { md = await readFile(join(vault, f.rel), "utf8"); } catch { continue; }
-    const row = parseWikiPage(f.rel, md);
-    if (row.page_class === "note") row.links = resolveNoteLinks(row.links, slugs);
-    batch.push(row);
+    batch.push(rowFromFile(f.rel, md, slugs));
   }
   for (let i = 0; i < batch.length; i += 200) {
     const part = batch.slice(i, i + 200);

@@ -17,7 +17,11 @@ export default {
     if (!p) return null;
     const r = await deps.row();
     if (!r.ok) return deps.unavailable(r);
-    if (r.row) return null; // a row exists after all: present it as what it is
+    // A row WITH its file: present it as what it is. A row without one (an
+    // orphan, e.g. left by a writer racing the retire step) is not a page
+    // (rw-p1a-deploy-prep, NA4-2/NA4-3): the URL stays the retired class, as
+    // Quartz builds nothing there.
+    if (r.row && (await deps.fileExists(r.row.slug))) return null;
     // A page declares this slug as its alias: Quartz writes its AliasRedirects
     // page here, so the alias class serves that redirect (rw-p1a-render
     // attempt 4, tester AT3-3: built = the redirect, live was the retired page).
