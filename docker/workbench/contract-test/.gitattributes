@@ -3,3 +3,5 @@
 references-vault/** text eol=lf
 references-vault-refused/** text eol=lf
 export-vault/** text eol=lf
+# attempt 4: the vault's images are bytes (a PNG signature holds CR LF): never converted
+export-vault/**/*.png -text
