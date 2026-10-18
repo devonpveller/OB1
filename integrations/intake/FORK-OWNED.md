@@ -12,6 +12,7 @@ Everything intake adds is namespaced:
 | I2 screening library | `intake/{pipeline,envelope,revisions,cdr,htmlscan,invisible,rules,result,limits,deadline}.py`, the rules file `intake/rules.toml`, `requirements.txt` / `requirements-dev.txt` (hash-pinned), `tests/fixtures/` (corpus snapshots), `tests/adversarial.py` (bound-test generators) - all inside the path below |
 | I3 classifier stage | `intake/classifier.py`, the classifier settings in `intake/config.py`, `tools/fetch_classifier.py`, `requirements-classifier.txt`, `tests/fixtures/classifier_eval.json` and `classifier_corpus_scores.json` (the frozen eval fixtures), `tests/test_classifier*.py`, `tests/classifier_support.py`, `tests/adversarial_i3.py`, `tests/adversarial_r3.py`, `.gitignore` (the fetched model under `models/` is never committed) - all inside the path below |
 | I4 second opinion, D2, purge, stats | `intake/{d2,second_opinion,fence,purge,stats}.py`, the second-opinion settings in `intake/config.py`, `transport/` (the one HTTP module), `tests/test_{d2,second_opinion,purge_stats,i4_carryins,i4_round2,i4_round3}.py`, `tests/db/run_i4_db_tests.py` - all inside the path below |
+| I5 service and container | `intake_service/` (the HTTP service, worker pool, store, loops, relay), `Dockerfile`, `.dockerignore`, `requirements-container.txt` (hash-pinned Linux wheel set), `tests/test_service_*.py`, `tests/service_support.py`, `tests/service_memory.py`, `tests/e2e/` - all inside the path below; and in `docker/docker-compose.yml` the services `openbrain-intake` and `openbrain-intake-dbrelay` (profile `intake`) and the network `intake-net` (identifiers below) |
 | migration | `integrations/intake/sql/init-intake.sql`, revert `sql/revert-intake.sql`, mounted as `220-init-intake.sql` by `docker/docker-compose.yml` and `docker/docker-compose.preview.yml` (the whole `220-` initdb slot is ours) |
 | SQL schema | `intake` (`intake.raw_items`, `intake.items`, `intake.discards`, `intake.migration_ledger`, `intake.enforce_screen_verdict_authority()`) |
 | DB role | `intake` (no members, a member of nothing) |
@@ -55,6 +56,9 @@ identifier: zzz_intake_screen_verdict_authority
 identifier: thoughts_intake_label_select
 identifier: thoughts_intake_label_update
 identifier: backfill_done_at
+# intake I5: the compose services and network (docker/docker-compose.yml)
+identifier: openbrain-intake
+identifier: intake-net
 
 # the schema and the role: the bare word "intake" is ordinary English, so only SQL forms count
 pattern: \bintake\."?[a-z_]

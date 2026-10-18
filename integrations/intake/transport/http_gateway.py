@@ -80,6 +80,14 @@ class _Watchdog:
         self._timer.cancel()
 
 
+def _closed(resp) -> bool:
+    """http.client's HTTPResponse.isclosed(); False for anything without one."""
+    try:
+        return bool(resp.isclosed())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def send(req: HttpRequest) -> HttpResponse:
     _check(req.url)
     if req.method != "POST":
@@ -98,8 +106,19 @@ def send(req: HttpRequest) -> HttpResponse:
             left = deadline - time.monotonic()
             if left <= 0 or dog.fired:
                 raise TransportError("timeout", "the request passed its deadline")
+            # intake-i5 e2e T-1: http.client closes the response AND its socket once a body of
+            # known length has been read whole (HTTP/1.0, `Connection: close`); the body is then
+            # complete - stop here instead of calling settimeout() on the closed socket (EBADF,
+            # which turned every such reply into `network`).
+            if _closed(resp):
+                break
             if sock is not None:
-                sock.settimeout(left)
+                try:
+                    sock.settimeout(left)
+                except OSError:
+                    if _closed(resp):
+                        break
+                    raise
             piece = resp.read1(min(_PIECE, MAX_REPLY_BYTES + 1 - len(body)))
             if not piece:
                 break

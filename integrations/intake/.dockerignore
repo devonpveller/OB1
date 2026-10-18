@@ -1,0 +1,7 @@
+# The image takes only what the Dockerfile COPYs; never the fetched model, tests or caches.
+models/
+tests/
+tools/
+sql/
+**/__pycache__/
+*.pyc
