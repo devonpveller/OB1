@@ -29,6 +29,17 @@ for (const u of RUNNERS) {
   } });
   Deno.test({ name: `${name}: the network's subnet is pinned and never inside 192.168.0.0/16`, ignore: !present, fn() {
     const text = Deno.readTextFileSync(u);
+    if (name === "run-contract-tests.ps1") {
+      // rw-p0b-purge-door (merged into this branch): -Subnet is REQUIRED - exactly a /24 outside Docker's
+      // pools and 192.168.0.0/16 (harness-subnet.ps1), refused before docker is asked; no default range
+      const creates = [...text.matchAll(/^.*\bnetwork create\b.*$/gm)].map((m) => m[0].trim());
+      assertEquals(creates.length, 1, `network creations: ${creates.join(" | ")}`);
+      assert(/--driver bridge --internal --subnet \$subnets\.run /.test(creates[0]), `not pinned: ${creates[0]}`);
+      assert(/\. \(Join-Path \$PSScriptRoot 'harness-subnet\.ps1'\)/.test(text), "the shared -Subnet rule is loaded");
+      assert(/\$w = Test-HarnessSubnet \$Subnet\s*\r?\nif \(\$w\) \{ Write-Host "REFUSED: \$w"; exit 2 \}/.test(text), "a missing or disallowed -Subnet is refused, exit 2");
+      assert(!/\$SubnetBase/.test(text), "no default range: -Subnet is required");
+      return;
+    }
     const creates = [...text.matchAll(/^.*\bnetwork create\b.*$/gm)].map((m) => m[0].trim());
     assertEquals(creates.length, 1, `network creations: ${creates.join(" | ")}`);
     assert(/--internal --subnet \$s /.test(creates[0]), `not pinned: ${creates[0]}`);
@@ -39,7 +50,10 @@ for (const u of RUNNERS) {
   } });
 }
 
-Deno.test({ name: "the two runners pin DIFFERENT default ranges (a concurrent pair cannot collide on the default)", ignore: !present, fn() {
-  const bases = RUNNERS.map((u) => Deno.readTextFileSync(u).match(/\[string\]\$SubnetBase = '([0-9.]+)'/)?.[1]);
-  assert(bases[0] && bases[1] && bases[0] !== bases[1], JSON.stringify(bases));
+// rw-p0b merge: the contract runner has no default range any more (-Subnet is required), so a concurrent
+// pair cannot collide on a default; the credibility runner keeps its own default (-SubnetBase 10.24x)
+Deno.test({ name: "a concurrent pair cannot collide on a default range (the contract runner requires -Subnet; the credibility runner's default is its own)", ignore: !present, fn() {
+  const [cred, contract] = RUNNERS.map((u) => Deno.readTextFileSync(u));
+  assert(/\[string\]\$SubnetBase = '10\.24[0-9]'/.test(cred), "the credibility runner's default range");
+  assert(!/\$SubnetBase/.test(contract) && /Test-HarnessSubnet \$Subnet/.test(contract), "the contract runner requires -Subnet");
 } });

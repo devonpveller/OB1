@@ -1,6 +1,7 @@
 // Source lifecycle repository (P4). Update-with-history (never replace),
-// reversible STAGED retract, restore, and the rare irreversible purge. Multi-row
-// writes go through withTransaction (G8).
+// reversible STAGED retract and restore. Multi-row writes go through withTransaction (G8).
+// The purge is no longer here: DELETE /workbench/sources/:id calls the contract's D5 suppress
+// (src/contracts/repo/lifecycle.ts; rw-p0b-purge-door).
 import { query, withTransaction } from "../db/pool.ts";
 import type { Source, SourceRevision } from "../types.ts";
 
@@ -265,8 +266,9 @@ export async function restore(
   id: string,
   by = "operator",
 ): Promise<{ source: Source; transition: { from: string; to: string } | null } | null> {
-  // A PURGED source is a permanent suppression (OD-1) — restore must refuse it.
-  // The data is kept, but it never returns to generation via the UI.
+  // A source purged BEFORE rw-p0b-purge-door (metadata.purged, stamped by the removed direct
+  // purge) stays a permanent suppression (OD-1) — restore refuses it. A purge made since is the
+  // contract's D5 suppress, which stamps nothing, so restore takes it back like any suppression.
   return await withTransaction(async (c) => {
     const cur = (await c.queryObject<{ lifecycle: string; reason: string | null }>(
       `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS lifecycle,
@@ -304,26 +306,6 @@ export async function unlinkFromNotebook(threadId: string, sourceId: string): Pr
     [threadId, sourceId],
   );
   return rows[0];
-}
-
-// Irreversible purge — OD-1 decision: SUPPRESSION, not erasure. The row, its
-// content, and its embeddings are KEPT (admin-recoverable, auditable, and visible
-// to a future read-only wiki-history MCP); purge just hides it from ALL wiki
-// generation/search by committing a retraction, and stamps metadata.purged so the
-// UI shows it as purged (no Restore) — distinct from a reversible retract. Was a
-// hard `DELETE FROM sources`. Operator-confirmed only.
-export async function purge(id: string): Promise<boolean> {
-  const rows = await query<{ id: string }>(
-    `UPDATE public.sources
-        SET retracted_at = COALESCE(retracted_at, now()),
-            retraction_committed_at = COALESCE(retraction_committed_at, now()),
-            metadata = COALESCE(metadata, '{}'::jsonb)
-                       || jsonb_build_object('purged', true, 'purged_at', $2::text)
-      WHERE id = $1
-      RETURNING id`,
-    [id, new Date().toISOString()],
-  );
-  return rows.length > 0;
 }
 
 // URL re-fetch → NEW revision (never head overwrite, never a duplicate). A

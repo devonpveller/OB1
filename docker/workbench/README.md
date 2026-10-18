@@ -90,8 +90,18 @@ generated TypeScript types and the MCP tool manifest. Routes live under
 deno task contract:gen      # regenerate openapi.json, types.ts, mcp-tools.json (+ the MCP copy)
 deno task contract:check    # fail when any generated artifact is stale
 deno test --allow-net --allow-env --allow-read src/     # unit + document tests (DB tests skip)
-powershell -NoProfile -File contract-test/run-contract-tests.ps1   # disposable DB + Dredd
+powershell -NoProfile -File contract-test/run-contract-tests.ps1 -Subnet <x.y.z.0/24>   # disposable DB + Dredd
+powershell -NoProfile -File contract-test/evidence-gate.test.ps1   # the run's evidence gate, no Docker
 ```
+
+`-Subnet` is required (a subnet outside 192.168.0.0/16 for the run's internal network). The run
+stages its logs and publishes them into `-Evidence` only after the live-data guard passed for
+every capture, redacted (`contract-test/evidence-gate.ps1`).
+
+The legacy purge (`DELETE /workbench/sources/:id { confirm: true, reason_type, note? }`) is the
+contract's D5 suppress: `reason_type` (a key of the `erasure_reasons` registry) is required, it
+records a `suppressed` trail event, re-scores the source's claims, and `POST
+/workbench/sources/:id/restore` reverses it until a gated erase.
 
 The integration test (`src/contracts/integration_test.ts`) runs only against the disposable
 database `contract-test/run-contract-tests.ps1` creates; it suppresses, severs and erases rows.
@@ -118,5 +128,5 @@ A database trigger refuses any reference without a quote, so the rule holds for 
   frontmatter `sources:` list is no longer read; added references live in the record.
 
 ```
-powershell -NoProfile -File contract-test/run-references-tests.ps1   # disposable P2a run
+powershell -NoProfile -File contract-test/run-references-tests.ps1 -Subnet <x.y.z.0/24>   # disposable P2a run (same -Subnet / evidence gate as P0)
 ```
