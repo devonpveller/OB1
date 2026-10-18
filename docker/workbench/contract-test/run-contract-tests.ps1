@@ -516,7 +516,7 @@ try {
           ('error: AssertionError: Values are not equal: { name: "' + $script:plantedName + '" }'),
           ("the notebook '$($script:plantedName)' was listed"),
           ("compact $($script:plantedForms[2]) encoded $($script:plantedForms[3]) upper {$($script:plantedForms[4])}"),
-          "at $own on 172.27.1.4") -join "`n"))
+          "at $own on 198.51.100.7") -join "`n"))
     Save 'planted-oversized.log' ('z' * ($EvidenceMaxBytes + 1))
     Remove-Item -Recurse -Force $planted
     Remove-Item $baseSrc, $baseTar -Recurse -Force -ErrorAction SilentlyContinue
@@ -566,7 +566,7 @@ try {
       $pl = Join-Path $Evidence 'smoke-planted-red.log'
       Check ((Test-Path $pl) -and ([System.IO.File]::ReadAllText($pl) -match 'after: \[response excerpt redacted to its fixture ids: none\]')) 'evidence gate: the planted excerpt is published redacted to its fixture ids (none)'
       $pn = Join-Path $Evidence 'planted-nonsmoke.log'
-      Check ((Test-Path $pn) -and ([System.IO.File]::ReadAllText($pn) -match '"<non-fixture-text>"') -and ([System.IO.File]::ReadAllText($pn) -notmatch '172\.27\.1\.4')) 'evidence gate: the non-smoke log with the planted excerpt is published redacted (name, uuids, IP, host path)'
+      Check ((Test-Path $pn) -and ([System.IO.File]::ReadAllText($pn) -match '"<non-fixture-text>"') -and ([System.IO.File]::ReadAllText($pn) -notmatch '198\.51\.100\.7')) 'evidence gate: the non-smoke log with the planted excerpt is published redacted (name, uuids, IP, host path)'
       $big = @($evFiles | Where-Object { $_.Length -gt $EvidenceMaxBytes })
       Check ((-not (Test-Path (Join-Path $Evidence 'planted-oversized.log'))) -and (@($pub.dropped) -match '^planted-oversized\.log: ').Count -eq 1 -and $big.Count -eq 0) "evidence gate: no published file is over $EvidenceMaxBytes bytes; the planted oversized log is dropped and named ($($big.Count) over the cap)"
     }

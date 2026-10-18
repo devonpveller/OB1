@@ -90,14 +90,14 @@ try {
   $liveEnc = $live.Replace('-', '%2D')
   $liveU = $live.Replace('-', '\u002d')
   $liveUpper = '{' + $live.ToUpper() + '}'
-  $cid = '3f5edce33b4b'; $cidFull = '3f5edce33b4b13b735d38c8651154f1435780a6fc95cfb8105a0838f46ab0783'
+  $cid = '0a1b2c3d4e5f'; $cidFull = '0a1b2c3d4e5f' + ('9e8d7c6b5a40' * 4) + '0f1e'   # 64 hex
   $nonSmoke = @(
     'running 3 tests from ./src/contracts/integration_test.ts',
     ('PROBE {"notebooks":[{"id":"' + $live + '","name":"' + $marker + '"},{"id":"' + $fixture + '","name":"Fixture notebook"}]}'),
     ('error: AssertionError: Values are not equal: { id: "' + $live + '", name: "' + $marker + '" }'),
     "the notebook '$marker' was listed",
     "compact $liveCompact | encoded $liveEnc | escaped $liveU | braced-upper $liveUpper | fixture-compact $($fixture.Replace('-', ''))",
-    "container $cid image sha256:$cidFull at 172.27.1.4 and 10.222.72.5 (loopback 127.0.0.1 stays)",
+    "container $cid image sha256:$cidFull at 198.51.100.7 and 203.0.113.9 (loopback 127.0.0.1 stays)",
     "paths: $hostPath | D:/Open WebUI/ai-stack/x.ts | \\fileserver\share\x | /c/Users/someone/AppData/x | file:///D:/Open%20WebUI/x",
     'ok | 3 passed | 0 failed (2s)'
   ) -join "`n"
@@ -108,7 +108,7 @@ try {
   Check ($r3.published -and $p3.Length -gt 0) 'the non-smoke log is published'
   foreach ($x in @(@('the notebook name', $marker), @('the dashed uuid', $live), @('the compact uuid', $liveCompact), @('the %2D uuid', $liveEnc),
       @('the \u002d uuid', $liveU), @('the braced upper-case uuid', $live.ToUpper()), @('the 12-hex container id', $cid), @('the 64-hex image id', $cidFull),
-      @('the IP', '172.27.1.4'), @('the run-subnet IP', '10.222.72.5'), @('a profile path', 'C:\Users\someone'), @('a drive path', 'D:/Open WebUI'),
+      @('an IP', '198.51.100.7'), @('another IP', '203.0.113.9'), @('a profile path', 'C:\Users\someone'), @('a drive path', 'D:/Open WebUI'),
       @('a UNC path', '\\fileserver'), @('a git-bash path', '/c/Users/someone'), @('a file URL path', 'Open%20WebUI'))) {
     Check ($p3.Length -gt 0 -and -not $p3.Contains($x[1])) "non-smoke log: $($x[0]) is not published"
   }
