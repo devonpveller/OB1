@@ -25,7 +25,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { linkSafeLabel, rewriteCitations } from "../../_shared/citations.mjs";
 import { slugifyNotebook } from "../../_shared/slug.mjs";
 import { clip } from "../../_shared/clip.mjs"; // surrogate-safe truncation for LLM payloads
@@ -33,7 +33,13 @@ import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../../_shared/write-if-changed.mjs";
 // Compile writes file AND row, flushed per batch; unsynced rows fail the run
 // (research-workbench D13 item 1). LLM failures are classified (item 6).
-import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel } from "../../_shared/wiki-pages.mjs";
+import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, EXIT_COMPLETED_WITH_FAILURES } from "../../_shared/wiki-pages.mjs";
+// D13 item 6: an open structural failure is not retried until its inputs
+// (the hub's synthesis input hash, or the code) change; one notification per
+// distinct failure.
+import {
+  readLedger, writeLedger, recordFailure, openFailure, clearFailure, inputsKey, codeFingerprint,
+} from "../../_shared/structural-ledger.mjs";
 import { chatComplete, parseNotebookReply, CompileError } from "../../_shared/llm-call.mjs";
 import { notify } from "../../_shared/compile-notify.mjs";
 
@@ -303,8 +309,21 @@ async function main() {
   const active = threads.filter((t) => (t.status ?? "active") === "active");
   if (active.length === 0) {
     console.log("[notebook-synth] no active notebooks; nothing to do");
-    return finishWikiPages("notebook-synth");
+    return finishWikiPages("notebook-synth", { outDir });
   }
+  const ledger = readLedger(outDir);
+  const code = codeFingerprint([fileURLToPath(import.meta.url)]);
+  const hubInputs = (h) => inputsKey({ input: h, code });
+  const skippedOpen = [];
+  // The MOC line of a hub that is not rewritten this run (skipped or failed):
+  // it keeps its place when its page already exists.
+  const keepMocLine = (t, slug) => {
+    try {
+      const prev = fs.readFileSync(path.join(nbDir, slug, `${slug}.md`), "utf8").slice(0, 4096);
+      const n = prev.match(/^source_count: (\d+)$/m)?.[1] ?? "0";
+      moc.push(`- [[${slug}|${linkSafeLabel(t.name) || slug}]] — ${n} sources`);
+    } catch { /* no page yet: it stays pending, and off the MOC */ }
+  };
 
   fs.mkdirSync(nbDir, { recursive: true });
   const moc = [
@@ -324,16 +343,29 @@ async function main() {
   let transient = 0;
   for (const t of active.sort((a, b) => String(a.name).localeCompare(String(b.name)))) {
     const slug = t.slug || slugifyNotebook(t.name);
+    let inputHash = null;
     try {
       const srcs = (await confirmedSources(sb, t.id)).slice(0, 25);
       const hubDir = path.join(nbDir, slug);
       const hubPath = path.join(hubDir, `${slug}.md`);
-      const inputHash = synthesisInputHash(t, srcs, model);
+      inputHash = synthesisInputHash(t, srcs, model);
+      const open = openFailure(ledger, `notebook:${t.id}`, hubInputs(inputHash));
+      if (open) {
+        // An OPEN structural failure with unchanged inputs: not retried (no
+        // LLM call, no second notification); the hub stays as it was.
+        skippedOpen.push(open);
+        keepMocLine(t, slug);
+        continue;
+      }
       if (existingHubHash(hubPath) === inputHash) {
         // Inputs unchanged since the hub was written → skip the LLM synthesis
         // and the hub rewrite. Leaves are still ensured (write-if-changed, so
         // an unchanged leaf costs a read, not a write).
         writeSourceLeaves(srcs, outDir);
+        // The unchanged hub's ROW is still this compile's: re-queued from its
+        // file, so a hub whose row was lost (a failed flush, a restored
+        // vault) converges here instead of waiting for the viewer's repair.
+        try { queueWikiPage(hubPath, fs.readFileSync(hubPath, "utf8")); } catch { /* read raced a sweep */ }
         await maybeFlushWikiPages();
         moc.push(`- [[${slug}|${linkSafeLabel(t.name) || slug}]] — ${srcs.length} sources`);
         skipped++;
@@ -432,6 +464,7 @@ async function main() {
       await maybeFlushWikiPages();
       moc.push(`- [[${slug}|${linkSafeLabel(t.name) || slug}]] — ${srcs.length} sources`);
       ok++;
+      if (clearFailure(ledger, `notebook:${t.id}`)) console.log(`[notebook-synth] ${slug}: compiled cleanly; its open structural failure is cleared`);
       console.log(`[notebook-synth] wrote notebooks/${slug}/${slug}.md (${srcs.length} sources, ${leaves} leaf page(s))`);
     } catch (e) {
       const hubSlug = (vaultRel(path.resolve(nbDir, slug, `${slug}.md`)) || `notebooks/${slug}/${slug}.md`).replace(/\.md$/, "");
@@ -441,16 +474,20 @@ async function main() {
         transient++;
         console.error(`[notebook-synth] FAILED (transient) notebook "${t.name}": ${e.message}`);
       } else {
-        structural.push({ slug: hubSlug, error: e?.message || String(e) });
-        console.error(`[notebook-synth] STRUCTURAL FAILURE ${hubSlug}: ${e?.message || e}`);
-        await notify({ cls: "structural", subject: `compile structural failure: ${hubSlug}`, slug: hubSlug, entity: t.id, error: e?.message || String(e), outDir });
+        const error = e?.message || String(e);
+        structural.push({ slug: hubSlug, error });
+        console.error(`[notebook-synth] STRUCTURAL FAILURE ${hubSlug}: ${error}`);
+        const { distinct } = recordFailure(ledger, {
+          key: `notebook:${t.id}`, slug: hubSlug, entity: t.id, error, replySha256: e?.replySha256 ?? null, inputs: hubInputs(inputHash),
+        });
+        if (distinct) {
+          await notify({ cls: "structural", subject: `compile structural failure: ${hubSlug}`, slug: hubSlug, entity: t.id, error, outDir });
+        } else {
+          console.error(`[notebook-synth] ${hubSlug}: the same structural failure as recorded before; not notified again`);
+        }
       }
       // A failed hub keeps its place in the MOC when its page already exists.
-      try {
-        const prev = fs.readFileSync(path.join(nbDir, slug, `${slug}.md`), "utf8").slice(0, 4096);
-        const n = prev.match(/^source_count: (\d+)$/m)?.[1] ?? "0";
-        moc.push(`- [[${slug}|${linkSafeLabel(t.name) || slug}]] — ${n} sources`);
-      } catch { /* no page yet: it stays pending, and off the MOC */ }
+      keepMocLine(t, slug);
     }
   }
   moc.push("");
@@ -471,12 +508,17 @@ async function main() {
       `of ${active.length} notebook hubs + notebooks/index.md MOC; ` +
       `${transient} transient failure(s), ${structural.length} structural failure(s)`,
   );
-  const rowsCode = await finishWikiPages("notebook-synth");
+  if (skippedOpen.length) {
+    console.error(`[notebook-synth] skipped ${skippedOpen.length} hub(s) with an OPEN structural failure (inputs unchanged): ` +
+      skippedOpen.slice(0, 10).map((x) => `${x.slug} (since ${x.first_seen})`).join("; "));
+  }
+  try { writeLedger(outDir, ledger); } catch (e) { console.error(`[notebook-synth] structural ledger write FAILED: ${e.message}`); }
+  const rowsCode = await finishWikiPages("notebook-synth", { outDir });
   if (structural.length) {
     console.error(`[notebook-synth] run FAILED: ${structural.length} structural failure(s); first: ` +
       structural.slice(0, 5).map((x) => `${x.slug} (${x.error.slice(0, 120)})`).join("; "));
   }
-  return structural.length || rowsCode ? 1 : 0;
+  return structural.length || rowsCode ? EXIT_COMPLETED_WITH_FAILURES : 0;
 }
 
 // Only run when executed directly (same guard as generate-wiki.mjs) — the

@@ -87,3 +87,95 @@ test("ofmTextTransform: comments stripped, callout title gets its own line", () 
   assert.equal(ofmTextTransform("a %%x%% b"), "a  b");
   assert.ok(ofmTextTransform("> [!note] T\n> body").startsWith("> [!note] T\n> \n"));
 });
+
+// rw-p1a-render attempt 2, finding F-T1: the tester's injection probe (A4),
+// verbatim. No script-capable URL scheme may survive into any URL attribute,
+// and no raw element or on* handler either (the first property, re-checked
+// through every transform).
+const PROBE = [
+  "# Injection probe",
+  "",
+  "Plain link [jl](javascript:alert(101)) and image ![ji](javascript:alert(102)) and data [dl](data:text/html,<script>alert(103)</script>).",
+  "",
+  "Raw: <img src=x onerror=alert(104)> <svg onload=alert(105)></svg> <script>alert(106)</script>",
+  "",
+  "<div onclick=\"alert(107)\">block</div>",
+  "",
+  "Wikilink [[javascript:alert(108)|wl]] and [[foo\" onmouseover=\"alert(109)]] and [[x<img src=y onerror=alert(110)>]].",
+  "",
+  "Embed ![[javascript:alert(111).png]] and ![[evil\" onerror=\"alert(112).pdf]] and ![[q\" onload=\"alert(113)]].",
+  "",
+  "Highlight ==<img src=x onerror=alert(114)>== and tag #<img",
+  "",
+  "Autolink <https://ex.invalid/\" onmouseover=\"alert(115)> and titled [t](https://ex.invalid \"a\\\" onmouseover=\\\"alert(116)\").",
+  "",
+  "> [!note] Title <img src=x onerror=alert(117)> `<script>alert(118)</script>`",
+  "> body",
+  "",
+  "> [!warning|<script>alert(119)</script>\" onmouseover=\"alert(120)]- meta",
+  "> folded",
+  "",
+  "Math $\\href{javascript:alert(121)}{m}$ and $\\htmlClass{x\" onmouseover=\"alert(122)}{y}$ and $$\\url{javascript:alert(123)}$$",
+  "",
+  "```mermaid",
+  "%%{init: {\"securityLevel\": \"loose\"}}%%",
+  "graph TD",
+  "  A[<img src=x onerror=alert(124)>] --> B",
+  "  click A callback \"alert(125)\"",
+  "  click B \"javascript:alert(126)\"",
+  "```",
+  "",
+  "Footnote[^<img src=x onerror=alert(127)>] and [^ok].",
+  "",
+  "[^<img src=x onerror=alert(127)>]: fn <script>alert(128)</script>",
+  "[^ok]: fine",
+  "",
+  "## Second heading <img src=x onerror=alert(129)>",
+  "",
+  "Block ref ^\"onmouseover=alert(130)",
+  "",
+  "![yt](https://www.youtube.com/watch?v=aaaaaaaaaaa\"onload=\"alert(131))",
+  "",
+  "Obfuscated [o1](JaVaScRiPt:alert(132)) [o2](java&#x09;script:alert(133)) [o3](vbscript:msgbox(134)) [o4](%20javascript:alert(135)).",
+].join("\n");
+
+test("SECURITY (F-T1): no javascript:/vbscript:/data: URL survives in any attribute - the tester's probe", async () => {
+  const html = await renderMarkdown(PROBE, ctx("content/source/00000000-0000-4000-8000-000000000003", ["content/person/foo"]));
+  // Parsed, as a browser would (a regex over the markup also matches inside
+  // escaped attribute VALUES, e.g. a title or the mermaid data-clipboard).
+  const { fromHtml } = await import("hast-util-from-html");
+  const { visit } = await import("unist-util-visit");
+  const bad = [];
+  const handlers = [];
+  const scripts = [];
+  visit(fromHtml(html, { fragment: true }), "element", (n) => {
+    if (n.tagName === "script") scripts.push(n);
+    for (const [k, v] of Object.entries(n.properties || {})) {
+      if (/^on/i.test(k)) handlers.push(`${n.tagName}.${k}`);
+      if (["href", "src", "poster", "cite", "action", "formAction", "xLinkHref", "data", "background"].includes(k) &&
+          /^(?:javascript|vbscript|data):/i.test(String(v).replace(/[\x00-\x20]/g, ""))) bad.push(`${n.tagName}.${k}=${v}`);
+    }
+  });
+  assert.deepEqual(bad, [], `unsafe URL attributes: ${bad.join(" | ")}`);
+  assert.equal(scripts.length, 0, "no script element");
+  assert.deepEqual(handlers, [], "no on* handler attribute");
+  // the refused links keep their text, unlinked
+  for (const t of ["jl", "dl", "wl", "o1", "o3"]) assert.ok(new RegExp(`>${t}<|\\b${t}\\b`).test(html), `text of ${t} kept`);
+  assert.ok(!/<a [^>]*>jl<\/a>/.test(html), "the javascript: link is not an anchor");
+});
+
+test("SECURITY (F-T1): safe links are untouched; a raster data: image is allowed, an svg data: image and a data: link are not", async () => {
+  const { isUnsafeUrl } = await import("./render-page.mjs");
+  assert.equal(isUnsafeUrl("java\tscript:alert(1)"), true);
+  assert.equal(isUnsafeUrl(" JAVASCRIPT:alert(1)"), true);
+  assert.equal(isUnsafeUrl("vbscript:x"), true);
+  assert.equal(isUnsafeUrl("data:text/html,x"), true);
+  assert.equal(isUnsafeUrl("data:image/png;base64,AAAA", { image: true }), false);
+  assert.equal(isUnsafeUrl("data:image/svg+xml,<svg onload=x>", { image: true }), true);
+  assert.equal(isUnsafeUrl("data:image/png;base64,AAAA"), true, "a data: href is refused even for a raster type");
+  assert.equal(isUnsafeUrl("https://example.invalid/a"), false);
+  assert.equal(isUnsafeUrl("../../content/x"), false);
+  const html = await renderMarkdown("[ok](https://example.invalid/a) and [rel](../x) and ![img](data:image/png;base64,AAAA)", ctx());
+  assert.ok(html.includes('href="https://example.invalid/a"'), html);
+  assert.ok(html.includes('src="data:image/png;base64,AAAA"'), html);
+});

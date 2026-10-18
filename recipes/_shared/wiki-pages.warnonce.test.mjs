@@ -10,10 +10,15 @@
 // Own file: the env must point at a dead endpoint BEFORE the module loads.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 process.env.OPEN_BRAIN_URL = "http://127.0.0.1:9"; // nothing listens: fetch rejects fast
 process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "1000";
 process.env.WIKI_GIT_DIR = "/wiki";
+const NOTES = join(mkdtempSync(join(tmpdir(), "wp-notify-")), "notifications.jsonl");
+process.env.WIKI_NOTIFY_FILE = NOTES;
 
 const m = await import("./wiki-pages.mjs");
 
@@ -40,6 +45,17 @@ test("a failed flush leaves the pages UNSYNCED and the run's exit code non-zero,
   assert.deepEqual(m.unsyncedWikiPages().map((u) => u.slug).sort(), ["content/person/person-a", "content/person/person-b"]);
   const fail = lines.find((l) => l.includes("UNSYNCED"));
   assert.ok(fail && fail.includes("2 page(s) UNSYNCED") && fail.includes("content/person/person-a"), JSON.stringify(lines));
+});
+
+test("F-T4: rejected row writes raise exactly ONE 'compile structural failure' notification for the run", async () => {
+  // (follows the test above: two pages are unsynced; the run was finished once)
+  assert.ok(existsSync(NOTES), "a notification was written");
+  const n = readFileSync(NOTES, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l));
+  assert.equal(n.length, 1, JSON.stringify(n));
+  assert.equal(n[0].class, "structural");
+  assert.equal(n[0].subject, "compile structural failure: row write rejected (test)");
+  assert.equal(n[0].slug, "content/person/person-a");
+  assert.match(n[0].error, /2 page\(s\) unsynced/);
 });
 
 test("advisory kinds warn once PER KIND", async () => {

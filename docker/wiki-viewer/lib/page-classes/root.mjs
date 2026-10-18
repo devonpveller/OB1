@@ -5,7 +5,7 @@ import { rowBacked, contentTemplate } from "../page-templates.mjs";
 export default {
   name: "root",
   version: 1,
-  priority: 50,
+  priority: 52,
   resolve: rowBacked((row) => row.page_class === "root"),
   template: contentTemplate,
 };

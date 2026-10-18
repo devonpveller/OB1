@@ -37,11 +37,12 @@ test("registering a class: its files get its page_class, reconciliation counts i
     const files = new Map([["content/glossary/term-x", { rel: "content/glossary/term-x.md", mtimeMs: 0 }]]);
     const rows = new Map([["content/glossary/term-x", { slug: "content/glossary/term-x", page_class: "glossary", updated_at: "2026-10-18T00:00:00Z" }]]);
     const r = diffFilesRows(files, rows, (rel) => classify(rel).page_class);
-    assert.deepEqual(r.byClass.glossary, { files: 1, rows: 1, missing: [], stale: [], orphan: [] });
+    assert.deepEqual(r.byClass.glossary, { files: 1, rows: 1, missing: [], stale: [], empty: [], orphan: [], failed: [] });
     const after = compileClasses().filter((e) => e.name !== "glossary").map((e) => [e.name, e.version, e.pageClass, e.priority, e.match]);
     assert.deepEqual(after, before);
     assert.ok(compileClasses().every(Object.isFrozen));
     assert.throws(() => registerCompileClass({ name: "glossary", version: 1, pageClass: "x", priority: 1, match: () => false }), /already registered/);
+    assert.throws(() => registerCompileClass({ name: "tied", version: 1, pageClass: "x", priority: 50, match: () => false }), /priority 50 is already glossary's/);
   } finally {
     unregisterCompileClass("glossary");
   }

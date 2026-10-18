@@ -21,8 +21,8 @@ import { createReadStream } from "node:fs";
 import { stat, writeFile } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
 import { getNavIndex, navIndexEnabled } from "./lib/nav-index.mjs";
-import { renderLive } from "./lib/live-route.mjs";
-import { loadPageClassDir, pageClasses } from "./lib/page-classes.mjs";
+import { renderLive, routeErrors } from "./lib/live-route.mjs";
+import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-classes.mjs";
 import { dbState, onConnect, startProbe } from "./lib/wiki-db.mjs";
 import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
 
@@ -154,16 +154,27 @@ function health() {
   if (db.state !== "up") reasons.push(`database ${db.state}`);
   if (_reconcile.error) reasons.push(`reconciliation cannot check: ${_reconcile.error}`);
   else if (!rep) reasons.push("reconciliation not yet run");
-  else if (rep.drift > 0) reasons.push(`drift ${rep.drift} (${rep.missing.length} missing, ${rep.stale.length} stale, ${rep.orphan.length} orphan)`);
+  else if (rep.drift > 0) {
+    reasons.push(`drift ${rep.drift} (${rep.missing.length} missing, ${rep.stale.length} stale, ${rep.empty.length} empty, ` +
+      `${rep.orphan.length} orphan, ${rep.failed.length} failed)`);
+  }
+  // A page-class entry that threw, or the route itself: a renderer bug, named.
+  const broken = brokenPageClasses();
+  for (const b of broken) reasons.push(`page class ${b.name}@${b.version} ${b.phase}() threw ${b.count}x: ${b.error}`);
+  const re = routeErrors();
+  if (re.count) reasons.push(`render errors ${re.count} (last ${re.last.key}: ${re.last.error})`);
   return {
     status: reasons.length ? "degraded" : "ok",
     reasons,
     db: { state: db.state, since: new Date(db.since).toISOString(), lastOkAt: db.lastOkAt ? new Date(db.lastOkAt).toISOString() : null, lastError: db.lastError },
     reconcile: rep ? {
       checkedAt: _reconcile.at, drift: rep.drift, files: rep.files, rows: rep.rows,
-      missing: rep.missing.slice(0, 50), stale: rep.stale.slice(0, 50), orphan: rep.orphan.slice(0, 50),
+      missing: rep.missing.slice(0, 50), stale: rep.stale.slice(0, 50), future: (rep.future || []).slice(0, 50),
+      empty: rep.empty.slice(0, 50), orphan: rep.orphan.slice(0, 50), failed: rep.failed.slice(0, 50),
     } : { checkedAt: _reconcile.at, error: _reconcile.error },
     pageClasses: pageClasses().map((e) => `${e.name}@${e.version}`),
+    brokenPageClasses: broken,
+    renderErrors: re,
     builder: process.env.WIKI_BUILDER !== "0",
   };
 }

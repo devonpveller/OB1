@@ -11,7 +11,8 @@
  *
  * Adding a class = registerCompileClass({...}) (or one more built-in entry
  * below) - no existing entry changes. classify() asks the entries, highest
- * priority first; the first whose match() accepts the path wins.
+ * priority first; the first whose match() accepts the path wins. Names and
+ * priorities are unique (a duplicate or a tie throws at registration).
  *
  * The built-in entries reproduce, value for value, the mapping
  * classifySlug() hard-coded before (pinned by wiki-pages.test.mjs), so no
@@ -33,6 +34,9 @@ export function registerCompileClass(entry) {
   if (typeof e.priority !== "number") throw new Error(`compile class ${e.name}: priority must be a number`);
   if (typeof e.match !== "function") throw new Error(`compile class ${e.name}: match() required`);
   if (_entries.has(e.name)) throw new Error(`compile class ${e.name}: already registered`);
+  // A tie would decide by name, i.e. silently by spelling: refuse it.
+  const tie = [..._entries.values()].find((x) => x.priority === e.priority);
+  if (tie) throw new Error(`compile class ${e.name}: priority ${e.priority} is already ${tie.name}'s (priorities are unique)`);
   _entries.set(e.name, Object.freeze(e));
   return e;
 }
@@ -68,13 +72,13 @@ registerCompileClass({ name: "root", version: 1, pageClass: "root", priority: 90
   match: (_s, p) => p[0] !== "content" || p.length < 3 });
 // content/notebooks/<nb>/... - notebook hubs, the notebooks MOC and AI notes
 // inside a notebook (stored as "note", as before the registry).
-registerCompileClass({ name: "notebook-tree", version: 1, pageClass: "note", priority: 80,
+registerCompileClass({ name: "notebook-tree", version: 1, pageClass: "note", priority: 84,
   match: (_s, p) => p[1] === "notebooks" });
-registerCompileClass({ name: "source", version: 1, pageClass: "source", priority: 80,
+registerCompileClass({ name: "source", version: 1, pageClass: "source", priority: 83,
   match: (_s, p) => p[1] === "source" });
-registerCompileClass({ name: "thought", version: 1, pageClass: "thought", priority: 80,
+registerCompileClass({ name: "thought", version: 1, pageClass: "thought", priority: 82,
   match: (_s, p) => p[1] === "thought" });
-registerCompileClass({ name: "notebook", version: 1, pageClass: "notebook", priority: 80,
+registerCompileClass({ name: "notebook", version: 1, pageClass: "notebook", priority: 81,
   match: (_s, p) => p[1] === "notebook" });
 // content/<entity_type>/<slug> - every other generated page is an entity page
 // whose directory IS its entity_type.

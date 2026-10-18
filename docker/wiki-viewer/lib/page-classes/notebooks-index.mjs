@@ -2,7 +2,7 @@
 // written by synthesize-notebooks), presented as Quartz presents a folder
 // index that has content: the index row as the article over the folder
 // listing. Resolved before the generic folder listing.
-import { folderTemplate } from "../page-templates.mjs";
+import { folderTemplate, indexRowPending } from "../page-templates.mjs";
 
 const FOLDER = "content/notebooks";
 
@@ -15,7 +15,8 @@ export default {
     const r = await deps.rowAt(`${FOLDER}/index`);
     if (!r.ok) return { unreachable: r.state };
     if (!r.row) return null; // no index row yet: the generic folder listing (or pending) answers
-    return { folder: FOLDER, indexRow: r.row };
+    const pending = await indexRowPending(r.row, deps);
+    return pending ? { pending, row: r.row } : { folder: FOLDER, indexRow: r.row };
   },
   template: folderTemplate,
 };

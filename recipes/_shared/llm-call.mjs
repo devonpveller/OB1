@@ -28,7 +28,12 @@
  * All inference goes through the LiteLLM gateway (repo rule); this module only
  * ever calls the base URL it is given.
  */
+import { createHash } from "node:crypto";
 import { notify } from "./compile-notify.mjs";
+
+// The hash of a reply that failed structurally: with the slug and the error it
+// identifies a DISTINCT failure (structural-ledger.mjs: one notification each).
+const replyHash = (t) => createHash("sha256").update(String(t ?? "")).digest("hex");
 
 export class CompileError extends Error {
   constructor(kind, message, extra = {}) {
@@ -107,7 +112,7 @@ export async function chatComplete(opts) {
         console.error(`[llm] ${task}: attempt ${i + 1}/${attempts} transient (${last.slice(0, 160)})`);
         continue;
       }
-      throw new CompileError("structural", `LLM request refused: HTTP ${res.status} ${t}`);
+      throw new CompileError("structural", `LLM request refused: HTTP ${res.status} ${t}`, { replySha256: replyHash(t) });
     }
     let text;
     try {
@@ -128,7 +133,7 @@ export async function chatComplete(opts) {
     try {
       return opts.parse(text);
     } catch (e) {
-      throw new CompileError("structural", `reply failed the page parser: ${e?.message || e}`);
+      throw new CompileError("structural", `reply failed the page parser: ${e?.message || e}`, { replySha256: replyHash(text) });
     }
   }
   // Exhausted: the cheap endpoint check decides which notification fires.

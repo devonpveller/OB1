@@ -52,7 +52,7 @@ RUN set -e; \
   grep -q 'onExplorerWheel' "$E"
 
 # Disable the dev hot-reload client injection entirely (2026-08-23; supersedes
-# the old `window.__neEditing` gate). The builder runs `--serve` purely as an
+# the old "editor open" reload gate). The builder runs `--serve` purely as an
 # internal watcher — no reader ever browses it directly, and serve.mjs had to
 # regex-strip the injected ws://localhost reload script out of EVERY page on
 # EVERY request (a tempered-greedy scan over up-to-2MB HTML). Not injecting it
@@ -125,6 +125,24 @@ RUN set -e; \
   grep -q 'const fetchData = fetch(' "$R"; \
   sed -i 's#fetch("${contentIndexPath}").then(data => data.json())#{ _p: null, then(f, r) { return (this._p ??= fetch("${contentIndexPath}").then(d => d.json())).then(f, r) } }#' "$R"; \
   grep -q '_p ??= fetch' "$R"
+
+# -- Mermaid runs STRICT (rw-p1a-render attempt 2, finding F-T1) -----------
+# Quartz initialises mermaid with securityLevel "loose", so a diagram in a
+# page body could carry a `click X "javascript:..."` that runs on click (and
+# loose also lets labels carry HTML). "strict" disables click handlers and
+# sanitises labels. The same bundle serves the built and the live page, so the
+# rendered HTML of both is unchanged (only the client-side diagram behaviour
+# is). mermaid documents securityLevel as one of its `secure` config keys,
+# which a diagram's own %%{init}%% directive cannot override (mermaid is
+# loaded from its CDN at runtime, not from this image, and no browser runs
+# in the item's tests: recorded as not verified, rw-p1a-render findings).
+# grep-asserted so a QUARTZ_REF bump fails the build loudly.
+RUN set -e; \
+  M=/quartz/quartz/components/scripts/mermaid.inline.ts; \
+  grep -q 'securityLevel: "loose"' "$M"; \
+  sed -i 's#securityLevel: "loose"#securityLevel: "strict"#' "$M"; \
+  grep -q 'securityLevel: "strict"' "$M"; \
+  ! grep -q 'securityLevel: "loose"' "$M"
 
 # -- Watcher must POLL, or new files are never seen --------------------------
 # Root cause of 'my note never appears' (2026-08-26). Full story in the
@@ -284,7 +302,7 @@ COPY lib /quartz/lib
 # pass). They come from OB1/recipes/_shared through the named build context
 # `recipes` (compose: build.additional_contexts; by hand:
 # docker build --build-context recipes=OB1/recipes ...).
-COPY --from=recipes _shared/page-classes.mjs _shared/wiki-pages.mjs _shared/links.mjs _shared/reconcile-wiki-pages.mjs /quartz/lib/shared/
+COPY --from=recipes _shared/page-classes.mjs _shared/wiki-pages.mjs _shared/links.mjs _shared/reconcile-wiki-pages.mjs _shared/structural-ledger.mjs /quartz/lib/shared/
 
 # The STATIC chrome (left sidebar, graph shell, head resources, after-body
 # scripts, ...) is cut from a page this image's own Quartz builds from the

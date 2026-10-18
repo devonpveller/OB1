@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # rw-p1a-render disposable test environment (research-workbench P1a).
 #
-# Everything here is DISPOSABLE and ISOLATED:
-#   - one private network  wt-rw-p1a-render-net (10.231.47.0/24 - outside
-#     192.168.0.0/16, never an ai-stack_* network);
-#   - containers named     wt-rw-p1a-render-*  (removed with docker rm -f -v);
-#   - two named volumes    wt-rw-p1a-render-vault (a COPY of the fixture vault)
-#                          and wt-rw-p1a-render-srv (the viewer's /srv snapshots);
+# Everything here is DISPOSABLE and ISOLATED, and PARAMETERISED so a tester
+# runs it under their own names (attempt 2, plan finding P1):
+#   P1A_PREFIX   container/volume/network prefix   (default wt-rw-p1a-render; must start "wt-")
+#   P1A_TAG      image tag for both test images    (default = P1A_PREFIX; must start "wt-")
+#   P1A_SUBNET   the private network's subnet      (default 10.231.47.0/24; never 192.168.0.0/16)
+#   P1A_PORT     the viewer's 127.0.0.1 port       (default 18899)
+# What it creates:
+#   - one private network  $P1A_PREFIX-net (never an ai-stack_* network);
+#   - containers named     $P1A_PREFIX-*  (removed with docker rm -f -v);
+#   - two named volumes    $P1A_PREFIX-vault (a COPY of the fixture vault)
+#                          and $P1A_PREFIX-srv (the viewer's /srv snapshots);
 #   - the database is a fresh postgres seeded ONLY with the fixtures in
 #     test/fixtures/ (synthetic rows; never the live openbrain-db).
 # Network aliases (openbrain-db / openbrain-postgrest / openbrain-rest) exist
@@ -14,27 +19,38 @@
 # default OPEN_BRAIN_URL work unchanged.
 #
 # Usage (Git Bash on Windows or any POSIX shell, from anywhere):
-#   bash OB1/docker/wiki-viewer/test/p1a-env.sh build        # :wt-rw-p1a-render image (label = OB1 HEAD)
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh vars         # print the resolved names (eval-able)
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh build        # viewer image (label = OB1 HEAD)
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh up           # db + rest + llm stub + seed + viewer
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh node <args>  # run node in the viewer image with OB1 at /ob1, vault at /wiki
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh psql "<sql>" # run SQL in the disposable db
-#   bash OB1/docker/wiki-viewer/test/p1a-env.sh down         # remove everything this script created
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh wsbuild      # the wiki-service image (openbrain-wiki:$P1A_TAG)
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh ws           # start the wiki-service on the env's vault (boot compile)
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh ws_cycle     # POST /recompile and wait (bounded) for it to finish
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh down         # remove everything this script created (not the images)
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
-P=wt-rw-p1a-render
-NET="$P-net"
+P="${P1A_PREFIX:-wt-rw-p1a-render}"
+TAG="${P1A_TAG:-$P}"
 SUBNET="${P1A_SUBNET:-10.231.47.0/24}"
+PORT="${P1A_PORT:-18899}"
+case "$P" in wt-*) ;; *) echo "[p1a-env] refusing: P1A_PREFIX must start with wt- (got $P)" >&2; exit 2 ;; esac
+case "$TAG" in wt-*) ;; *) echo "[p1a-env] refusing: P1A_TAG must start with wt- (got $TAG; never :local)" >&2; exit 2 ;; esac
+case "$SUBNET" in 192.168.*) echo "[p1a-env] refusing: P1A_SUBNET $SUBNET is inside 192.168.0.0/16 (the home LAN)" >&2; exit 2 ;; esac
+NET="$P-net"
 VOL="$P-vault"
 SRV="$P-srv"
-IMG="openbrain-wiki-viewer:$P"
-PORT="${P1A_PORT:-18899}"
+IMG="openbrain-wiki-viewer:$TAG"
+WSIMG="openbrain-wiki:$TAG"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && (pwd -W 2>/dev/null || pwd))"
 VIEWER="$(cd "$HERE/.." && (pwd -W 2>/dev/null || pwd))"
 OB1="$(cd "$HERE/../../.." && (pwd -W 2>/dev/null || pwd))"
 
 log() { printf '[p1a-env] %s\n' "$*"; }
 
+# Every one-off container runs with --entrypoint (the image's own entrypoint
+# starts a Quartz builder that never exits) and a bounded wait.
 wait_http() { # url, seconds
   local url="$1" n="${2:-60}" i=0
   while [ "$i" -lt "$n" ]; do
@@ -46,12 +62,22 @@ wait_http() { # url, seconds
   log "TIMEOUT waiting for $url"; return 1
 }
 
+cmd_vars() {
+  printf 'P=%q\nTAG=%q\nSUBNET=%q\nPORT=%q\nNET=%q\nVOL=%q\nSRV=%q\nIMG=%q\nWSIMG=%q\nOB1=%q\n' \
+    "$P" "$TAG" "$SUBNET" "$PORT" "$NET" "$VOL" "$SRV" "$IMG" "$WSIMG" "$OB1"
+}
+
 cmd_build() {
   local sha
   sha="$(git -C "$OB1" rev-parse HEAD)"
   log "building $IMG from $VIEWER (OB1_SHA=$sha)"
   docker build --build-context "recipes=$OB1/recipes" --build-arg "OB1_SHA=$sha" -t "$IMG" "$VIEWER"
   docker image inspect "$IMG" --format 'label org.opencontainers.image.revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
+}
+
+cmd_wsbuild() {
+  log "building $WSIMG from $OB1/docker/wiki-service"
+  docker build -t "$WSIMG" "$OB1/docker/wiki-service"
 }
 
 cmd_net() {
@@ -107,7 +133,8 @@ cmd_vault() {
 cmd_node() { # run node inside the viewer image: OB1 tree at /ob1 (ro), vault at /wiki (rw)
   docker run --rm -i --network "$NET" -v "$OB1:/ob1:ro" -v "$VOL:/wiki" \
     -e OPEN_BRAIN_URL=http://openbrain-rest -e OPEN_BRAIN_SERVICE_KEY=local-trust \
-    -e WIKI_GIT_DIR=/wiki -e WIKI_PAGES_SYNC_TIMEOUT_MS=3000 -e P1A_DISPOSABLE=wt-rw-p1a-render \
+    -e WIKI_GIT_DIR=/wiki -e WIKI_PAGES_SYNC_TIMEOUT_MS=3000 -e P1A_DISPOSABLE="$P" \
+    -e P1A_BASE="http://$P-viewer:8080" \
     ${P1A_NODE_ENV:-} --entrypoint node "$IMG" "$@"
 }
 
@@ -119,8 +146,12 @@ cmd_viewer() {
   docker rm -f -v "$P-viewer" >/dev/null 2>&1 || true
   # P1A_EXTRA_CLASS=1 (acceptance 10): bind-mount ONE extra page-class entry
   # file into lib/page-classes/ - nothing in the image or the repo changes.
+  # P1A_EXTRA_ENTRY=<file in test/fixtures/extra-class>: bind-mount that file
+  # instead (the registry's adversarial cases: duplicate, tie, no default
+  # export, a throwing resolve()).
   local extra=()
   [ -n "${P1A_EXTRA_CLASS:-}" ] && extra=(-v "$HERE/fixtures/extra-class/glossary.mjs:/quartz/lib/page-classes/glossary.mjs:ro")
+  [ -n "${P1A_EXTRA_ENTRY:-}" ] && extra=(-v "$HERE/fixtures/extra-class/${P1A_EXTRA_ENTRY}:/quartz/lib/page-classes/${P1A_EXTRA_ENTRY}:ro")
   docker run -d --name "$P-viewer" --network "$NET" -p "127.0.0.1:$PORT:8080" \
     -v "$VOL:/wiki:ro" -v "$SRV:/srv" \
     -e OPEN_BRAIN_URL=http://openbrain-rest -e GRAPH_INDEX_MIN_ROWS=0 -e WIKI_NAV_MIN_ROWS=0 \
@@ -143,6 +174,15 @@ cmd_wait_built() { # wait until THIS viewer published its snapshot (the parity d
   log "built snapshot published and pages served after ~${i}s"
 }
 
+cmd_wait_serving() { # WIKI_BUILDER=0 restarts: wait until the viewer answers a page (bounded), or report that it exited
+  local i=0
+  until docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('http://$P-viewer:8080/').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; do
+    if [ "$(docker inspect -f '{{.State.Running}}' "$P-viewer" 2>/dev/null)" != "true" ]; then log "viewer EXITED (code $(docker inspect -f '{{.State.ExitCode}}' "$P-viewer"))"; return 3; fi
+    i=$((i + 1)); [ "$i" -gt "${1:-120}" ] && { log "viewer not serving after ${1:-120}s"; return 1; }; sleep 1
+  done
+  log "viewer serving after ~${i}s"
+}
+
 cmd_parity() { # acceptance 1+2: live body vs built body, enumerated differences only
   docker run --rm -i --network "$NET" -v "$OB1:/ob1:ro" -v "$SRV:/srv:ro" \
     --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/parity-diff.mjs \
@@ -159,6 +199,10 @@ cmd_curl() { # GET a viewer URL from inside the network: status, x-wiki-* header
   " "$@"
 }
 
+cmd_health() { # the viewer's /__health
+  docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('http://$P-viewer:8080/__health').then(async r=>console.log(r.status, await r.text())).catch(e=>console.log('ERR', e.message))"
+}
+
 cmd_compile() { # generate|synth [recipe args...]: run a compile recipe against the disposable rest + the STUB llm
   local script
   case "$1" in
@@ -170,7 +214,8 @@ cmd_compile() { # generate|synth [recipe args...]: run a compile recipe against 
   docker run --rm --network "$NET" -v "$OB1:/ob1:ro" -v "$VOL:/wiki" -w /tmp \
     -e OPEN_BRAIN_URL=http://openbrain-rest -e OPEN_BRAIN_SERVICE_KEY=local-trust \
     -e LLM_API_KEY=stub -e LLM_BASE_URL=http://llm-stub:8080/v1 -e LLM_MODEL=stub-model \
-    -e LLM_RETRY_BACKOFF_MS="${LLM_RETRY_BACKOFF_MS:-200}" -e WIKI_GIT_DIR=/wiki -e OB_WIKI_OUT_DIR=/wiki/content \
+    -e LLM_RETRY_BACKOFF_MS="${LLM_RETRY_BACKOFF_MS:-200}" -e LLM_TIMEOUT_MS="${LLM_TIMEOUT_MS:-600000}" \
+    -e WIKI_GIT_DIR=/wiki -e OB_WIKI_OUT_DIR=/wiki/content \
     -e WIKI_PAGES_SYNC_TIMEOUT_MS=3000 --entrypoint node "$IMG" "$script" "$@"
 }
 
@@ -186,21 +231,65 @@ cmd_notes() { # the compile notification ledger (front-end sink while P0's contr
   docker run --rm -v "$VOL:/wiki:ro" --entrypoint sh "$IMG" -c 'cat /wiki/content/.compile-notifications.jsonl 2>/dev/null || echo "(no notifications)"'
 }
 
+cmd_cat() { # cat a file of the vault (read-only), or "(absent)"
+  docker run --rm -v "$VOL:/wiki:ro" --entrypoint sh "$IMG" -c "cat '/wiki/$1' 2>/dev/null || echo '(absent)'"
+}
+
 cmd_psql() { docker exec -i "$P-db" psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -c "$1"; }
+
+# The wiki-service (the orchestrator), disposable: the env's vault, the
+# fixture database, /recipes read-only from THIS worktree, the stub LLM; the
+# worker, workbench and viewer-idle URLs point at a dead port (non-fatal
+# there), no git remote, no watcher, no scheduled drains.
+cmd_ws() {
+  docker rm -f -v "$P-ws" >/dev/null 2>&1 || true
+  docker run -d --name "$P-ws" --network "$NET" -v "$VOL:/wiki" -v "$OB1/recipes:/recipes:ro" \
+    -e OPEN_BRAIN_URL=http://openbrain-rest -e OPEN_BRAIN_SERVICE_KEY=local-trust -e MCP_ACCESS_KEY=fixture-key \
+    -e LLM_API_KEY=stub -e LLM_BASE_URL=http://llm-stub:8080/v1 -e LLM_MODEL=stub-model -e LLM_RETRY_BACKOFF_MS=200 \
+    -e WIKI_GIT_DIR=/wiki -e WIKI_OUT_DIR=/wiki/content -e COMPILE_ON_BOOT=true -e WIKI_WATCH_ENABLED=false \
+    -e DRAIN_BEFORE_COMPILE=false -e WORKER_URL=http://127.0.0.1:9 -e WORKBENCH_URL=http://127.0.0.1:9 \
+    -e VIEWER_URL=http://127.0.0.1:9 -e WIKI_BACKFILL_SUPERVISOR_MIN=0 -e WIKI_BACKFILL_CONTINUE_MIN=0 \
+    -e WIKI_BATCH_MIN_LINKED=1 -e WIKI_PAGES_SYNC_TIMEOUT_MS=3000 -e P1A_DISPOSABLE="$P" \
+    "$WSIMG" >/dev/null
+  log "wiki-service started ($WSIMG); boot compile running"
+}
+
+cmd_ws_wait() { # wait (bounded) until the wiki-service finished a compile newer than $1 (an ISO time, default: any)
+  docker run --rm --network "$NET" --entrypoint node "$IMG" --input-type=module -e "
+    const since = process.argv[1] || '';
+    const until = Date.now() + ${P1A_WS_WAIT_S:-240} * 1000;
+    for (;;) {
+      try {
+        const r = await fetch('http://$P-ws:8000/status', { headers: { 'x-brain-key': 'fixture-key' } });
+        const j = await r.json();
+        if (!j.running && j.last && j.last.at && j.last.state === 'idle' && j.last.at > since) { console.log(JSON.stringify(j.last)); break; }
+      } catch {}
+      if (Date.now() > until) { console.log('TIMEOUT waiting for the wiki-service compile'); process.exit(1); }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  " "${1:-}"
+}
+
+cmd_ws_cycle() { # POST /recompile and wait for that compile to finish; prints its /status
+  local t0
+  t0="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('http://$P-ws:8000/recompile', { method: 'POST', headers: { 'x-brain-key': 'fixture-key' } }).then(async r=>console.log('recompile', r.status, await r.text()))"
+  cmd_ws_wait "$t0"
+}
 
 cmd_up() {
   cmd_db; cmd_rest; cmd_vault; cmd_seed; cmd_llm; cmd_viewer
 }
 
 cmd_down() {
-  docker rm -f -v "$P-viewer" "$P-llm" "$P-rest" "$P-postgrest" "$P-db" >/dev/null 2>&1 || true
+  docker rm -f -v "$P-viewer" "$P-ws" "$P-llm" "$P-rest" "$P-postgrest" "$P-db" "$P-watch" >/dev/null 2>&1 || true
   docker volume rm "$VOL" "$SRV" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  log "removed containers, volumes $VOL $SRV and network $NET"
+  log "removed containers $P-*, volumes $VOL $SRV and network $NET (images $IMG / $WSIMG kept)"
 }
 
 c="${1:-}"; shift || true
 case "$c" in
-  build|net|db|rest|llm|vault|node|seed|viewer|wait_built|parity|curl|compile|stub|notes|psql|up|down) "cmd_$c" "$@" ;;
-  *) sed -n '2,22p' "$0"; exit 2 ;;
+  vars|build|wsbuild|net|db|rest|llm|vault|node|seed|viewer|wait_built|wait_serving|parity|curl|health|compile|stub|notes|cat|psql|ws|ws_wait|ws_cycle|up|down) "cmd_$c" "$@" ;;
+  *) sed -n '2,32p' "$0"; exit 2 ;;
 esac

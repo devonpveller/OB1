@@ -7,13 +7,20 @@
  *   GET  /v1/models             {data:[{id}]} when models are healthy, else 503
  *   GET  /health/liveliness     200 when models are healthy, else 503
  * Control (test only):
- *   POST /__stub/mode  {"mode": "ok"|"flaky503"|"fail"|"badparse", "n": 3, "modelsOk": true, "model": "stub-model"}
- *   GET  /__stub/state -> {mode, n, modelsOk, chatCalls, modelsCalls, livelinessCalls}
+ *   POST /__stub/mode  {"mode": <mode>, "n": 3, "modelsOk": true, "model": "stub-model"}
+ *   GET  /__stub/state -> {mode, n, modelsOk, chatCalls, modelsCalls, livelinessCalls, perTask}
+ * Modes: ok | flaky503 (503 for the first n calls) | fail (503 always) |
+ *   badparse (a reply with no page heading) - and, from the attempt-1
+ *   tester's stub (attempt 2: their failure-class matrix is a plan case):
+ *   empty200 (200, empty body) | emptycontent (200, blank content) | 429 |
+ *   timeout (never answers) | 400 | 503x2-badparse (per task: 503 twice,
+ *   then a bad reply) | mixed (Dave: bad reply; everyone else: 503) |
+ *   davebad (Dave: bad reply; everyone else: a good page).
  * Mode changes reset the counters.
  */
 import http from "node:http";
 
-const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", chatCalls: 0, modelsCalls: 0, livelinessCalls: 0 };
+const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} };
 
 function reply(res, code, obj) {
   res.writeHead(code, { "content-type": "application/json" });
@@ -37,7 +44,7 @@ http.createServer((req, res) => {
   req.on("end", () => {
     if (u.pathname === "/__stub/mode" && req.method === "POST") {
       const b = JSON.parse(raw || "{}");
-      Object.assign(st, { mode: b.mode ?? "ok", n: b.n ?? 3, modelsOk: b.modelsOk ?? true, model: b.model ?? st.model, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0 });
+      Object.assign(st, { mode: b.mode ?? "ok", n: b.n ?? 3, modelsOk: b.modelsOk ?? true, model: b.model ?? st.model, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} });
       return reply(res, 200, st);
     }
     if (u.pathname === "/__stub/state") return reply(res, 200, st);
@@ -53,10 +60,25 @@ http.createServer((req, res) => {
       st.chatCalls++;
       const body = JSON.parse(raw || "{}");
       const ok = (content) => reply(res, 200, { id: "stub", object: "chat.completion", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content } }] });
-      if (st.mode === "fail") return reply(res, 503, { error: { message: "stub: upstream unavailable" } });
-      if (st.mode === "flaky503" && st.chatCalls <= st.n) return reply(res, 503, { error: { message: `stub: 503 #${st.chatCalls}` } });
-      if (st.mode === "badparse") return ok("Sure! I cannot write that page, but here is a JSON blob: {\"nope\": true}");
-      return ok(pageFor(body));
+      const user = String(body?.messages?.[1]?.content || "");
+      const dave = /Dave Fixture/.test(user);
+      const task = dave ? "Dave Fixture" : ((/"canonical_name":"([^"]+)"/.exec(user) || [])[1] || "other");
+      const k = (st.perTask[task] = (st.perTask[task] || 0) + 1);
+      const bad = () => ok("Sure! I cannot write that page, but here is a JSON blob: {\"nope\": true}");
+      switch (st.mode) {
+        case "fail": return reply(res, 503, { error: { message: "stub: upstream unavailable" } });
+        case "flaky503": return st.chatCalls <= st.n ? reply(res, 503, { error: { message: `stub: 503 #${st.chatCalls}` } }) : ok(pageFor(body));
+        case "badparse": return bad();
+        case "empty200": res.writeHead(200, { "content-type": "application/json" }); return res.end();
+        case "emptycontent": return ok("   ");
+        case "429": return reply(res, 429, { error: { message: "stub: queue full" } });
+        case "timeout": return undefined; // never answers (the caller's LLM_TIMEOUT_MS decides)
+        case "400": return reply(res, 400, { error: { message: "stub: bad request" } });
+        case "503x2-badparse": return k <= 2 ? reply(res, 503, { error: { message: `stub: 503 #${k}` } }) : bad();
+        case "mixed": return dave ? bad() : reply(res, 503, { error: { message: "stub: down" } });
+        case "davebad": return dave ? bad() : ok(pageFor(body));
+        default: return ok(pageFor(body));
+      }
     }
     reply(res, 404, { error: "stub: no route" });
   });

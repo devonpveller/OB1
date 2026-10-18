@@ -14,7 +14,7 @@
 import { URLS } from "./parity-diff-urls.mjs";
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i >= 0 ? process.argv[i + 1] : d; };
-const BASE = arg("--base", "http://wt-rw-p1a-render-viewer:8080").replace(/\/+$/, "");
+const BASE = arg("--base", `http://${process.env.P1A_PREFIX || "wt-rw-p1a-render"}-viewer:8080`).replace(/\/+$/, "");
 const mode = process.argv[2];
 
 async function get(path) {
@@ -54,7 +54,7 @@ if (mode === "sweep") {
       last = k;
     }
     if (r.render === "db" && seen.includes("connecting")) break;
-    await new Promise((res) => setTimeout(res, 200));
+    await new Promise((res) => setTimeout(res, 100));
   }
   console.log(`WATCH: sequence ${seen.join(" -> ")}`);
 } else {

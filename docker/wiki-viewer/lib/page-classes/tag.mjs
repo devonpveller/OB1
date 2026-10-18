@@ -1,6 +1,6 @@
 // Page class "tag": a tag page (Quartz TagPage) or the tag index, generated
 // from the rows' tags (frontmatter tags + inline #tags the compile extracts).
-import { tagTemplate } from "../page-templates.mjs";
+import { tagTemplate, indexRowPending } from "../page-templates.mjs";
 import { simplifySlug } from "../quartz-path.mjs";
 
 export default {
@@ -14,7 +14,8 @@ export default {
     // A tags/<tag>.md page (Quartz: the tag page's description) is its article.
     const r = await deps.rowAt(tag === "/" ? "tags/index" : `tags/${tag}`);
     if (!r.ok) return { unreachable: r.state };
-    return { tag, indexRow: r.row };
+    const pending = await indexRowPending(r.row, deps);
+    return pending ? { pending, row: r.row } : { tag, indexRow: r.row };
   },
   template: tagTemplate,
 };

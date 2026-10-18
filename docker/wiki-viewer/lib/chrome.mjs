@@ -115,12 +115,13 @@ a{color:#84a9ff;text-decoration:none}</style>
 </head><body ${attr}><div class="box"><div class="badge">${escText(badge)}</div><h1>${heading}</h1>
 ${bodyHtml}<p><a href="/">← Knowledge Vault home</a></p></div></body></html>`;
 
-// D13 item 3: no row = the typed pending-compile state, never an empty leaf and
-// never a render of the file.
+// D13 items 3 + 5: no row - or a row that is not presentable as-is (stale,
+// future-dated, empty) - is the typed pending-compile state, never an empty
+// leaf and never a render of the file.
 export function pendingDocument({ slug, reason }) {
   const name = escText(String(slug || "").split("/").pop() || "This page");
   return mini("Pending compile", `${name} is waiting for its compile`,
-    `<p>This page is known (${escText(reason)}) but its compiled row has not landed yet, so there is nothing to present.</p>
+    `<p>This page is known (${escText(reason)}) but has no presentable compiled row, so there is nothing to present.</p>
 <p>It appears here as soon as the compile that owns it writes its row. If a compile failed on it, the failure is in the research notifications.</p>`,
     15, `data-render-state="pending" data-slug="${escAttr(slug)}"`);
 }
@@ -134,6 +135,15 @@ export function databaseDocument(state) {
       ? "<p>The wiki is reconnecting to Open Brain. This screen refreshes on its own and the page you asked for appears once the connection is up.</p>"
       : "<p>The wiki cannot reach Open Brain's database, so no page can be presented. This screen refreshes on its own; the operator's health checks report the outage.</p>",
     connecting ? 3 : 10, `data-render-state="${connecting ? "connecting" : "unreachable"}"`);
+}
+
+// A renderer bug (a page-class entry or the route itself threw). Its own
+// state, never shown as a database condition; the health probe names it.
+export function errorDocument({ slug }) {
+  const name = escText(String(slug || "").split("/").pop() || "This page");
+  return mini("render error", `${name} could not be rendered`,
+    "<p>The wiki renderer failed on this page. This is a bug in the viewer, not a database or compile condition; the viewer's health probe reports it.</p>",
+    30, `data-render-state="error" data-slug="${escAttr(slug)}"`);
 }
 
 export function notAvailableDocument({ slug }) {

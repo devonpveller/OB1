@@ -44,9 +44,17 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // The sweeps are the DELETE half of the wiki_pages contract: a page removed
 // from disk must lose its row, or search/nav would keep serving a dead link
 // (wiki-dynamic-index P1). Best-effort: never fails a compile.
-import { deleteWikiPages } from "file:///recipes/_shared/wiki-pages.mjs";
+// The pages this service writes itself (the vault-root index, notes/README)
+// get their rows through the same queue + flush as every compiled page (D13:
+// compiled means the row landed).
+import {
+  deleteWikiPages, queueWikiPage, finishWikiPages, EXIT_COMPLETED_WITH_FAILURES,
+} from "file:///recipes/_shared/wiki-pages.mjs";
 // D13 item 4: the files-vs-rows check runs after every compile.
 import { reconcile, formatReport } from "file:///recipes/_shared/reconcile-wiki-pages.mjs";
+// D13 item 6: the compile's open structural failures (skipped until their
+// inputs change; listed in /status and by the reconciliation).
+import { listOpen } from "file:///recipes/_shared/structural-ledger.mjs";
 
 const pexec = promisify(execFile);
 
@@ -676,16 +684,24 @@ async function sweepOrphanNotebookPages() {
   let entries;
   try { entries = await readdir(nbDir, { withFileTypes: true }); } catch { return { kept: active.size, deleted: retired }; }
   let deleted = 0;
+  const droppedHubSlugs = [];
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const slug = e.name;
     if (active.has(slug)) continue;
     const hub = `${nbDir}/${slug}/${slug}.md`;
     if (existsSync(hub)) {
-      try { await rm(hub, { force: true }); deleted++; }
-      catch (err) { console.error(`[wiki-service] notebook hub delete failed for ${slug}:`, err?.message || err); }
+      try {
+        await rm(hub, { force: true });
+        deleted++;
+        droppedHubSlugs.push(`content/notebooks/${slug}/${slug}`); // the slug form the entity sweep uses
+      } catch (err) { console.error(`[wiki-service] notebook hub delete failed for ${slug}:`, err?.message || err); }
     }
   }
+  // The DELETE half, as the entity and leaf sweeps do: a swept hub must lose
+  // its row too, or the live renderer keeps presenting it (rw-p1a-render
+  // attempt 2: the hub sweep removed the file and left an orphan row).
+  if (droppedHubSlugs.length) await deleteWikiPages(droppedHubSlugs);
   if (deleted > 0 || retired > 0) {
     console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale notebook hub(s)${retired ? " + retired topic/+notebook/ layers" : ""}`);
   }
@@ -944,11 +960,29 @@ async function compile(reason) {
       `[wiki-service] ${fullRebuild ? "FULL" : "incremental"} compile` +
         `${fullRebuild ? "" : ` (${dirty.length} dirty entities)`}`,
     );
-    const { stdout, stderr } = await pexec("node", args, {
-      env: childEnv,
-      maxBuffer: 32 * 1024 * 1024,
-      timeout: COMPILE_TIMEOUT_MS,
-    });
+    // A run that COMPLETED with structural failures or unsynced rows exits
+    // EXIT_COMPLETED_WITH_FAILURES: the pages that compiled landed, the
+    // failures are recorded (structural ledger, notifications), so the rest
+    // of this cycle runs and the watermark advances - a structural failure is
+    // never retried by the next cycle (D13 item 6; it would fail identically).
+    // Any other non-zero exit is a crashed run: the recovery path below.
+    let stdout = "";
+    let stderr = "";
+    let recipeFailed = null;
+    try {
+      ({ stdout, stderr } = await pexec("node", args, {
+        env: childEnv,
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: COMPILE_TIMEOUT_MS,
+      }));
+    } catch (e) {
+      if (e?.code !== EXIT_COMPLETED_WITH_FAILURES) throw e;
+      stdout = String(e.stdout || "");
+      stderr = String(e.stderr || "");
+      const why = stderr.split("\n").filter((l) => /run FAILED|UNSYNCED/.test(l)).slice(-2).join(" | ");
+      recipeFailed = (why || "generate-wiki completed with failures").slice(0, 600);
+      console.error(`[wiki-service] generate-wiki completed WITH FAILURES (exit ${e.code}); the cycle continues: ${recipeFailed}`);
+    }
     let tail = stdout.trim().split("\n").slice(-3).join(" | ");
     // Surface the recipe's per-entity failures: they exit 0 (the rest of the
     // batch still lands) and only ever reached the child's stderr, which this
@@ -976,9 +1010,10 @@ async function compile(reason) {
     }
 
     // Vault-root home (Quartz `/`). Compiler-owned, distinct basename
-    // from content/entities.md and notes/. Links across both layers.
-    writeIfChanged(
-      `${WIKI_GIT_DIR}/index.md`,
+    // from content/entities.md and notes/. Links across both layers. Its row
+    // (and notes/README's, written by ensureRepo) is queued every compile,
+    // changed or not (F-T3: both used to be written with no row).
+    const homeMd =
       [
         "---",
         'title: "Knowledge Vault"',
@@ -996,8 +1031,12 @@ async function compile(reason) {
         "Generated pages regenerate from OpenBrain; never hand-edit them — " +
           "edit the source/thought (or your note) and the next compile reflects it.",
         "",
-      ].join("\n"),
-    );
+      ].join("\n");
+    writeIfChanged(`${WIKI_GIT_DIR}/index.md`, homeMd);
+    queueWikiPage(`${WIKI_GIT_DIR}/index.md`, homeMd);
+    try {
+      queueWikiPage(`${NOTES_DIR}/README.md`, await readFile(`${NOTES_DIR}/README.md`, "utf8"));
+    } catch { /* removed by hand: nothing to publish */ }
 
     // Brain → wiki delete-propagation. Run AFTER the recipe writes
     // dirty entity pages and BEFORE we git-commit, so deletions land in
@@ -1037,13 +1076,19 @@ async function compile(reason) {
     // AFTER pages + sweeps, so the on-disk diff is accurate.
     const plannedRemaining = await writePlannedManifest(linkData);
 
+    // This service's own page rows land before the reconciliation measures.
+    const rowsFailed = (await finishWikiPages("wiki-service", { outDir: WIKI_OUT_DIR })) !== 0;
+
     // Files-vs-rows reconciliation after the compile (D13 item 4): per
     // page_class, no file without a row, no row older than its file. Non-zero
     // drift is red and names the slugs; the viewer repairs it on (re)connect.
     let drift = null;
     try {
       const report = await reconcile({ vault: WIKI_GIT_DIR });
-      drift = { drift: report.drift, missing: report.missing.slice(0, 20), stale: report.stale.slice(0, 20), orphan: report.orphan.slice(0, 20) };
+      drift = {
+        drift: report.drift, missing: report.missing.slice(0, 20), stale: report.stale.slice(0, 20),
+        empty: report.empty.slice(0, 20), orphan: report.orphan.slice(0, 20), failed: report.failed.slice(0, 20),
+      };
       const text = formatReport(report);
       if (report.drift > 0) console.error(text);
       else console.log(text.split("\n")[0]);
@@ -1098,18 +1143,35 @@ async function compile(reason) {
       mode: fullRebuild ? "full" : "incremental",
     }).catch(() => {});
 
+    // The compile's failures, each already loud where it happened: a run
+    // that completed with structural failures / unsynced rows, notebook
+    // synthesis, this service's own rows. Open structural failures are
+    // listed (they are skipped until their inputs change).
+    const structuralOpen = (() => {
+      try { return listOpen(WIKI_OUT_DIR).map((e) => ({ slug: e.slug, error: String(e.error).slice(0, 200), first_seen: e.first_seen })); } catch { return []; }
+    })();
+    if (structuralOpen.length) {
+      console.error(`[wiki-service] ${structuralOpen.length} open structural failure(s), not retried until their inputs change: ` +
+        structuralOpen.slice(0, 10).map((e) => e.slug).join(", "));
+    }
+    const failures = [
+      recipeFailed && `generate-wiki: ${recipeFailed}`,
+      synthFailed && `notebook synthesis failed: ${synthFailed.slice(-300)}`,
+      rowsFailed && "wiki-service page rows did not land (see [wiki-pages] above)",
+    ].filter(Boolean);
     lastStatus = {
-      state: "idle", at: new Date().toISOString(), ok: !synthFailed,
+      state: "idle", at: new Date().toISOString(), ok: failures.length === 0,
       summary: tail, committed, push,
       mode: fullRebuild ? "full" : "incremental",
       pull_ok: pull.ok !== false,
       reconcile: drift,
-      ...(synthFailed ? { error: `notebook synthesis failed: ${synthFailed.slice(-300)}` } : {}),
+      structural_open: structuralOpen,
+      ...(failures.length ? { error: failures.join(" ; ") } : {}),
     };
-    if (synthFailed) {
+    if (failures.length) {
       console.error(
-        `[wiki-service] compile FAILED (notebook synthesis; committed=${committed}, ` +
-          `pushed=${push.pushed}): ${tail}`,
+        `[wiki-service] compile FAILED (${failures.length} failure(s); committed=${committed}, ` +
+          `pushed=${push.pushed}, watermark advanced): ${failures.join(" ; ").slice(0, 800)}`,
       );
       return { ok: false, committed, summary: tail, error: lastStatus.error };
     }

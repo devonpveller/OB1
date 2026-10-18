@@ -7,7 +7,7 @@ import { registerCompileClass } from "/ob1/recipes/_shared/page-classes.mjs";
 import { queueWikiPage, finishWikiPages } from "/ob1/recipes/_shared/wiki-pages.mjs";
 import { reconcile, formatReport } from "/ob1/recipes/_shared/reconcile-wiki-pages.mjs";
 
-if (process.env.P1A_DISPOSABLE !== "wt-rw-p1a-render") { console.error("refusing: not the disposable env"); process.exit(2); }
+if (!/^wt-/.test(process.env.P1A_DISPOSABLE || "")) { console.error("refusing: not the disposable env"); process.exit(2); }
 registerCompileClass({ name: "glossary", version: 1, pageClass: "glossary", priority: 50, match: (_s, p) => p[0] === "content" && p[1] === "glossary" });
 const md = "---\ntitle: \"Fixture Term\"\ntags: [glossary]\n---\n# Fixture Term\n\nA term that links [[content/person/person-ada-fixture|Ada Fixture]].\n";
 mkdirSync("/wiki/content/glossary", { recursive: true });

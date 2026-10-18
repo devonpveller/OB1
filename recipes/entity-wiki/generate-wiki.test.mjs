@@ -2,7 +2,7 @@
 // copy). Run: `node --test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rewriteCitations, buildEvolutionSection, linkifyEntities, buildEntityIndex } from "./generate-wiki.mjs";
+import { rewriteCitations, buildEvolutionSection, linkifyEntities, buildEntityIndex, mergeFailedEntityIds } from "./generate-wiki.mjs";
 
 const UUID = "3f8a1c2d-1111-4aaa-9bbb-0123456789ab";
 const newRun = () => ({ citedThoughtIds: new Set(), citedSourceIds: new Set() });
@@ -141,4 +141,15 @@ test("entity index: a label that sanitises to nothing falls back to the slug, ne
   assert.equal(unparsedOpeners(md), 0, md);
   assert.ok(md.includes("- [[source/x]]"), md);
   assert.ok(!md.includes("|]]"), `empty alias emitted: ${md}`);
+});
+
+// rw-p1a-render attempt 2 (tester near-miss N6): the transient ledger is
+// STABLE - a run without transient failures never wipes other runs' entries,
+// so "905 is not in the ledger" is a real check, not an empty file.
+test("N6: the failed-ids ledger keeps untouched ids, drops resolved ones, adds new transient ones", () => {
+  assert.deepEqual(mergeFailedEntityIds([902, 901], { failed: [], resolved: [905] }), [901, 902], "a structural-only run keeps the ledger");
+  assert.deepEqual(mergeFailedEntityIds([902, 901], { failed: [], resolved: [901] }), [902], "a clean recompile resolves its id");
+  assert.deepEqual(mergeFailedEntityIds([902], { failed: [904], resolved: [905] }), [902, 904]);
+  assert.deepEqual(mergeFailedEntityIds(null, { failed: [], resolved: [] }), []);
+  assert.deepEqual(mergeFailedEntityIds(["x", 3], { failed: [], resolved: [] }), [3], "junk entries are dropped");
 });

@@ -19,7 +19,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i >= 0 ? process.argv[i + 1] : d; };
-const BASE = arg("--base", "http://wt-rw-p1a-render-viewer:8080").replace(/\/+$/, "");
+const BASE = arg("--base", `http://${process.env.P1A_PREFIX || "wt-rw-p1a-render"}-viewer:8080`).replace(/\/+$/, "");
 const BUILT = arg("--built", "/srv/current");
 const SHOW = process.argv.includes("--show");
 
@@ -69,13 +69,21 @@ export const RULES = [
     why: "raw HTML in a row body is dropped (render-page.mjs security property); the built page rendered it. " +
       "Allowed only when the built side carries a raw-HTML element (script/iframe/embed/object, or any element with an on* handler) " +
       "and the live TEXT equals the built text with those tags removed (an inline raw tag: its inner text stays as text) " +
-      "or with those elements removed whole (a raw HTML block)",
+      "or with those elements removed whole (a raw HTML block); AND the live side adds no markup of its own: it carries no " +
+      "raw-HTML element or handler, and every live tag also appears on the built side (attempt 2, near-miss N5: a text-only " +
+      "comparison would also explain a hunk whose live side KEPT the markup)",
     test: (h) => {
       const built = h.del.join("");
-      if (!/<(script|iframe|embed|object)\b|<[a-z]+\b[^>]*\son[a-z]+=/i.test(built)) return false;
+      const RAW = /<(script|iframe|embed|object)\b|<[a-z]+\b[^>]*\son[a-z]+=/i;
+      if (!RAW.test(built)) return false;
+      const liveHtml = h.ins.join("");
+      if (RAW.test(liveHtml)) return false;
+      const tags = (s) => s.match(/<\/?[a-z][a-z0-9-]*\b[^>]*>/gi) || [];
+      const builtTags = new Set(tags(built));
+      if (!tags(liveHtml).every((t) => builtTags.has(t))) return false;
       const text = (s) => s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
       const whole = built.replace(/<(script|iframe|embed|object)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
-      const live = text(h.ins.join(""));
+      const live = text(liveHtml);
       return live === text(built) || live === text(whole);
     },
   },
@@ -135,6 +143,25 @@ function sortListing(body) {
   });
   return { body: out, fired };
 }
+// D8 is a NORMALISATION of the BUILT body (attempt 2, finding F-T1): the live
+// renderer refuses javascript:/vbscript:/data: URLs (a data:image/<raster>
+// src excepted) - an unsafe link is its text, an unsafe image its alt text.
+// The built page still carries them, so the built body has exactly that
+// transformation applied before the diff; anything else stays in the diff. A
+// LIVE body that carries an unsafe URL fails outright (unsafeLive below).
+const UNSAFE = String.raw`\s*(?:javascript|vbscript|data):`;
+const UNSAFE_A = new RegExp(String.raw`<a href="${UNSAFE}[^"]*"[^>]*>([\s\S]*?)<\/a>`, "gi");
+const UNSAFE_IMG = new RegExp(String.raw`<img [^>]*?src="(?!data:image\/(?:png|gif|jpe?g|webp|avif)[;,])${UNSAFE}[^"]*"[^>]*>`, "gi");
+const EXT_ICON = /<svg [^>]*class="external-icon"[^>]*>[\s\S]*?<\/svg>/gi;
+function refuseUnsafeBuilt(body) {
+  let fired = 0;
+  const out = body
+    .replace(UNSAFE_A, (_all, inner) => { fired++; return inner.replace(EXT_ICON, ""); })
+    .replace(UNSAFE_IMG, (all) => { fired++; return (/\salt="([^"]*)"/.exec(all) || [])[1] || ""; });
+  return { body: out, fired };
+}
+const unsafeLive = (body) => new RegExp(String.raw`\s(?:href|src|poster|cite|action|formaction|data)="${UNSAFE}`, "i").test(body);
+RULES.push({ id: "D8-unsafe-url", why: "the live page refuses javascript:/vbscript:/data: URLs (a link becomes its text, an image its alt text); the built page kept them (pre-diff normalisation of the built body; a live unsafe URL fails)", test: () => false });
 RULES.push({ id: "D6-listing-order", why: "listing entries are compared in href order: the live order follows the row dates, the built order the file mtimes (pre-diff normalisation; entries themselves still diffed)", test: () => false });
 RULES.push({ id: "D5-list-sidebar", why: "list pages carry graph + TOC + backlinks in the right sidebar (acceptance 1); Quartz's list layout leaves it empty (pre-diff normalisation)", test: () => false });
 
@@ -168,7 +195,10 @@ for (const [cls, url] of URLS) {
   const fired = {};
   const norm = normalizeListSidebar(live, built, ctx);
   if (norm.fired) fired["D5-list-sidebar"] = 1;
-  const sb = sortListing(built), sl = sortListing(norm.live);
+  const safeBuilt = refuseUnsafeBuilt(built);
+  if (safeBuilt.fired) fired["D8-unsafe-url"] = safeBuilt.fired;
+  if (unsafeLive(live)) { failed = true; missing.push("NO unsafe URL (live carries one)"); }
+  const sb = sortListing(safeBuilt.body), sl = sortListing(norm.live);
   if (sb.fired || sl.fired) fired["D6-listing-order"] = 1;
   const hunks = cls === "retired slug" && !built ? [{ del: [], ins: lines(live) }] : diff(lines(sb.body), lines(sl.body));
   const unlisted = [];

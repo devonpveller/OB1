@@ -38,6 +38,14 @@
  * html nodes this module itself generates (callout titles, highlights,
  * embeds - each interpolated value escaped) reach rehype-raw. Do not "fix"
  * this - it is the security property, pinned by render-page.test.mjs.
+ * Second property (rw-p1a-render attempt 2, finding F-T1): no URL attribute
+ * in the article may carry a javascript:, vbscript: or data: scheme (a
+ * data:image/<raster> src excepted). Markdown links, wikilinks, autolinks
+ * and images can all produce one, and Quartz's CrawlLinks passes any
+ * "scheme:" through as external. refuseUnsafeUrls() runs LAST: an unsafe
+ * link is rendered as its text (no anchor), an unsafe image as its alt text,
+ * any other unsafe URL attribute is removed. The built page still carries
+ * them; the parity diff enumerates that difference (D8-unsafe-url).
  *
  * PURE apart from shiki's lazily-loaded grammar cache: string in, object out.
  */
@@ -497,6 +505,40 @@ function crawlLinks() {
   };
 }
 
+// SECURITY: refuse script-capable URL schemes (see the module header).
+// Browsers ignore ASCII whitespace and control characters inside a scheme
+// ("java\tscript:"), so they are removed before the scheme is read.
+const UNSAFE_SCHEME = /^(?:javascript|vbscript|data):/i;
+const SAFE_DATA_IMAGE = /^data:image\/(?:png|gif|jpe?g|webp|avif)[;,]/i;
+const URL_PROPS = ["href", "src", "poster", "cite", "action", "formAction", "xLinkHref", "background", "longDesc", "codeBase", "data", "ping"];
+export function isUnsafeUrl(value, { image = false } = {}) {
+  const v = String(value ?? "").replace(/[\u0000-\u0020\u007f-\u009f]/g, "");
+  if (!UNSAFE_SCHEME.test(v)) return false;
+  return !(image && SAFE_DATA_IMAGE.test(v));
+}
+const isExternalIcon = (n) => n?.type === "element" && n.tagName === "svg" &&
+  String(n.properties?.class ?? n.properties?.className ?? "").includes("external-icon");
+function refuseUnsafeUrls() {
+  return (tree) => {
+    visit(tree, "element", (node, index, parent) => {
+      const p = node.properties || {};
+      if (node.tagName === "a" && typeof p.href === "string" && isUnsafeUrl(p.href) && parent && index != null) {
+        parent.children.splice(index, 1, ...node.children.filter((c) => !isExternalIcon(c)));
+        return [SKIP, index];
+      }
+      if (["img", "video", "audio", "iframe", "source", "embed"].includes(node.tagName) && typeof p.src === "string" &&
+          isUnsafeUrl(p.src, { image: node.tagName === "img" }) && parent && index != null) {
+        const alt = typeof p.alt === "string" ? p.alt : "";
+        parent.children.splice(index, 1, ...(alt ? [{ type: "text", value: alt }] : []));
+        return [SKIP, index];
+      }
+      for (const k of URL_PROPS) {
+        if (typeof p[k] === "string" && isUnsafeUrl(p[k], { image: k === "src" && node.tagName === "img" })) delete p[k];
+      }
+    });
+  };
+}
+
 function description() {
   return (tree, file) => {
     // Quartz Description: fileData.text = escapeHTML(toString(tree)) with
@@ -541,7 +583,8 @@ const processor = unified()
   .use([AUTOLINK])
   .use(crawlLinks)
   .use(description)
-  .use(rehypeKatex, { output: "html", macros: {} });
+  .use(rehypeKatex, { output: "html", macros: {} })
+  .use(refuseUnsafeUrls);
 
 // Content's htmlToJsx + preact render: the serialisation a built page has.
 export function hastToArticleHtml(tree) {

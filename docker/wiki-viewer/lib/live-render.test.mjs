@@ -8,10 +8,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 let mode = "up"; // up | down | starting
@@ -187,5 +187,153 @@ test("no closed list: nothing outside lib/page-classes/ decides on a page_class"
   for (const f of ["live-route.mjs", "chrome.mjs", "components.mjs", "page-templates.mjs", "page-classes.mjs", "../serve.mjs"]) {
     const src = readFileSync(join(HERE, f), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
     assert.ok(!/page_class/.test(src), `${f} must not switch on page_class`);
+  }
+});
+
+// ── rw-p1a-render attempt 2: the tester's findings as tests ────────────────
+
+test("A1 parity: a folder listing gives a subfolder entry its index page's tags (Quartz FolderContent)", async () => {
+  mode = "up";
+  const r = await renderLive("/content/");
+  assert.equal(r.headers["x-wiki-render"], "db");
+  const items = r.body.split('<li class="section-li">').slice(1);
+  const nb = items.find((it) => /<h3><a [^>]*>Notebooks<\/a><\/h3>/.test(it));
+  assert.ok(nb, `the Notebooks subfolder entry is listed: ${items.map((it) => it.slice(0, 160)).join(" || ")}`);
+  for (const t of ["wiki", "notebooks"]) assert.ok(nb.includes(`>${t}</a>`), `subfolder entry carries tag ${t}: ${nb.slice(0, 600)}`);
+});
+
+function withRow(slug, patch) {
+  const i = rows.findIndex((x) => x.slug === slug);
+  const saved = { ...rows[i] };
+  Object.assign(rows[i], patch);
+  nav._resetForTests();
+  return () => { rows[i] = saved; nav._resetForTests(); };
+}
+
+test("A5/N1: a row with an empty body is the pending-compile state, never an empty leaf", async () => {
+  mode = "up";
+  const undo = withRow("content/thought/9002", { body: "  \n" });
+  try {
+    const r = await renderLive("/content/thought/9002");
+    assert.equal(r.headers["x-wiki-render"], "pending");
+    assert.equal(r.headers["cache-control"], "no-store");
+    assert.ok(r.body.includes('data-render-state="pending"') && r.body.includes("empty body"));
+  } finally { undo(); }
+});
+
+test("A5/F-T2 (D13 item 5, stale is a miss): a row older than its file is pending, not presented", async () => {
+  mode = "up";
+  mkdirSync(join(vaultTmp, "content", "person"), { recursive: true });
+  writeFileSync(join(vaultTmp, "content/person/person-bob-fixture.md"), "---\ntitle: Bob\n---\n# FILE BODY MARKER\n");
+  const undo = withRow("content/person/person-bob-fixture", { updated_at: "2020-01-01T00:00:00.000Z" });
+  try {
+    const r = await renderLive("/content/person/person-bob-fixture");
+    assert.equal(r.headers["x-wiki-render"], "pending");
+    assert.ok(r.body.includes("older than its file"));
+    assert.ok(!r.body.includes("FILE BODY MARKER"), "the file is never rendered");
+  } finally { undo(); }
+  // the same row, newer than its file: presented
+  const undo2 = withRow("content/person/person-bob-fixture", { updated_at: new Date(Date.now() + 1000).toISOString() });
+  try {
+    assert.equal((await renderLive("/content/person/person-bob-fixture")).headers["x-wiki-render"], "db");
+  } finally { undo2(); rmSync(join(vaultTmp, "content/person/person-bob-fixture.md")); }
+});
+
+test("A5/N2: a row dated in the future cannot hide a newer file - pending", async () => {
+  mode = "up";
+  const undo = withRow("content/tool/tool-fixture-db", { updated_at: "2099-01-01T00:00:00.000Z" });
+  try {
+    const r = await renderLive("/content/tool/tool-fixture-db");
+    assert.equal(r.headers["x-wiki-render"], "pending");
+    assert.ok(r.body.includes("dated in the future"));
+  } finally { undo(); }
+});
+
+test("A5: a folder index row may be empty (the listing is the page); a stale one is pending", async () => {
+  mode = "up";
+  const undo = withRow("content/notebooks/index", { body: "" });
+  try {
+    assert.equal((await renderLive("/content/notebooks/")).headers["x-wiki-render"], "db");
+  } finally { undo(); }
+  mkdirSync(join(vaultTmp, "content", "notebooks"), { recursive: true });
+  writeFileSync(join(vaultTmp, "content/notebooks/index.md"), "---\ntitle: N\n---\n# N\n");
+  const undo2 = withRow("content/notebooks/index", { updated_at: "2020-01-01T00:00:00.000Z" });
+  try {
+    assert.equal((await renderLive("/content/notebooks/")).headers["x-wiki-render"], "pending");
+  } finally { undo2(); rmSync(join(vaultTmp, "content/notebooks/index.md")); }
+});
+
+// A7: loading entry files fails LOUD on every bad shape; nothing is replaced.
+async function loadDirWith(files) {
+  const d = mkdtempSync(join(tmpdir(), "p1a-classes-"));
+  for (const [name, src] of Object.entries(files)) writeFileSync(join(d, name), src);
+  return loadPageClassDir(d);
+}
+const TPL = 'import { rowBacked, contentTemplate } from "' + pathToFileURL(join(HERE, "page-templates.mjs")).href + '";';
+
+test("A7: an entry file that reuses a built-in's name fails the load (never replaces the built-in)", async () => {
+  const before = pageClasses().map((e) => `${e.name}@${e.version}/p${e.priority}`);
+  await assert.rejects(() => loadDirWith({ "a-dup-entity.mjs": `${TPL}\nexport default { name: "entity", version: 2, priority: 57, resolve: rowBacked((r) => r.page_class === "entity"), template: contentTemplate };` }),
+    /a-dup-entity\.mjs: name "entity" is already declared/);
+  assert.deepEqual(pageClasses().map((e) => `${e.name}@${e.version}/p${e.priority}`), before, "registry unchanged");
+  const r = await renderLive(URLS.entity);
+  assert.equal(r.headers["x-wiki-page-class"], "entity@1");
+});
+
+test("A7: duplicate names inside one directory, a priority tie, no default export, an invalid shape - all fail loud", async () => {
+  const before = pageClasses().length;
+  await assert.rejects(() => loadDirWith({
+    "x1.mjs": `${TPL}\nexport default { name: "dupx", version: 1, priority: 31, resolve: rowBacked(() => false), template: contentTemplate };`,
+    "x2.mjs": `${TPL}\nexport default { name: "dupx", version: 1, priority: 32, resolve: rowBacked(() => false), template: contentTemplate };`,
+  }), /x2\.mjs: name "dupx" is already declared by x1\.mjs/);
+  await assert.rejects(() => loadDirWith({ "tie.mjs": `${TPL}\nexport default { name: "tied", version: 1, priority: 54, resolve: rowBacked(() => false), template: contentTemplate };` }),
+    /tie\.mjs: tied priority 54 ties with entity/);
+  await assert.rejects(() => loadDirWith({ "nodefault.mjs": "export const entry = { name: 'nodef' };" }), /nodefault\.mjs: no default export/);
+  await assert.rejects(() => loadDirWith({ "bad.mjs": "export default { name: 'Bad Shape', version: 0 };" }), /bad\.mjs: page class: invalid name "Bad Shape"/);
+  await assert.rejects(() => loadDirWith({ "noprio.mjs": `${TPL}\nexport default { name: "noprio", version: 1, resolve: rowBacked(() => false), template: contentTemplate };` }), /noprio\.mjs: page class noprio: priority must be a finite number/);
+  assert.throws(() => registerPageClass({ name: "tie2", version: 1, priority: 0, resolve: async () => null, template: async () => ({}) }), /priority 0 is already row's/);
+  assert.equal(pageClasses().length, before, "nothing was registered by a failed load");
+});
+
+test("A7/N4: an entry whose resolve() throws is isolated - pages render db, health names it, never 'connecting'", async () => {
+  mode = "up";
+  const { brokenPageClasses } = await import("./page-classes.mjs");
+  registerPageClass({ name: "aaa-throws", version: 1, priority: 95, resolve: async () => { throw new Error("boom in resolve"); }, template: async () => ({}) });
+  const errs = [];
+  const orig = console.error;
+  console.error = (m) => errs.push(String(m));
+  try {
+    for (const url of [URLS.entity, URLS.note, URLS.source]) {
+      const r = await renderLive(url);
+      assert.equal(r.headers["x-wiki-render"], "db", `${url} falls through to its real class`);
+      assert.ok(!r.body.includes("connecting"), url);
+    }
+    const b = brokenPageClasses().find((x) => x.name === "aaa-throws");
+    assert.ok(b && b.phase === "resolve" && b.count === 3 && /boom in resolve/.test(b.error), JSON.stringify(b));
+    assert.equal(errs.filter((l) => /aaa-throws@1 resolve\(\) THREW/.test(l)).length, 1, "logged once, then counted");
+  } finally {
+    console.error = orig;
+    unregisterPageClass("aaa-throws");
+  }
+});
+
+test("A7/N4: an entry whose template() throws is isolated the same way (the next entry renders)", async () => {
+  mode = "up";
+  const { brokenPageClasses } = await import("./page-classes.mjs");
+  registerPageClass({
+    name: "tpl-throws", version: 1, priority: 96,
+    async resolve(req) { return req.key === "content/person/person-ada-fixture" ? { row: { slug: req.key } } : null; },
+    async template() { throw new Error("boom in template"); },
+  });
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    const r = await renderLive(URLS.entity);
+    assert.equal(r.headers["x-wiki-render"], "db");
+    assert.equal(r.headers["x-wiki-page-class"], "entity@1");
+    assert.equal(brokenPageClasses().find((x) => x.name === "tpl-throws")?.phase, "template");
+  } finally {
+    console.error = orig;
+    unregisterPageClass("tpl-throws");
   }
 });

@@ -15,6 +15,9 @@
  *   - A run ends with `wikiPagesExitCode()`: non-zero when any page is
  *     unsynced, after logging the count and the first slugs. A compile with
  *     unsynced rows is never "ok".
+ *   - A run with unsynced rows raises ONE "compile structural failure"
+ *     notification (D13 item 6: "a row write rejected by PostgREST" is
+ *     structural) and ends with EXIT_COMPLETED_WITH_FAILURES.
  *   - The markdown on disk is the durable copy the same compile writes (git
  *     vault, backups); `reconcile-wiki-pages.mjs` measures files vs rows and
  *     repairs drift on (re)connect.
@@ -161,6 +164,12 @@ export async function upsertWikiPages(rows) {
   return list.length;
 }
 
+// A compile run that COMPLETED but with structural failures or unsynced rows
+// exits with this code (a crash exits 1). The wiki-service tells the two
+// apart: a completed run still advances the watermark and the rest of the
+// cycle (synthesis, sweeps, planned manifest, reconcile, commit) runs.
+export const EXIT_COMPLETED_WITH_FAILURES = 3;
+
 // ── the run's write queue and its unsynced ledger ──────────────────────────
 const _queue = new Map();     // slug -> row (last write wins)
 const _unsynced = new Map();  // slug -> error (the page's file exists; its row did not land)
@@ -250,7 +259,7 @@ export function unsyncedWikiPages() {
  * the run must end with: 0 when every written page's row landed, 1 otherwise
  * (after logging the unsynced count and the first slugs).
  */
-export async function finishWikiPages(tag = "compile") {
+export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   await flushWikiPages();
   const u = unsyncedWikiPages();
   if (!u.length) {
@@ -259,6 +268,18 @@ export async function finishWikiPages(tag = "compile") {
   }
   const first = u.slice(0, 10).map((x) => x.slug).join(", ");
   console.error(`[wiki-pages] ${tag} FAILED: ${u.length} page(s) UNSYNCED (file written, row did not land); first: ${first}; error: ${u[0].error}`);
+  // One notification for the run (not one per page): the reconciliation names
+  // every unsynced slug. Loaded lazily - the viewer image carries this module
+  // for parseWikiPage and never finishes a compile run.
+  try {
+    const { notify } = await import("./compile-notify.mjs");
+    await notify({
+      cls: "structural", subject: `compile structural failure: row write rejected (${tag})`, slug: u[0].slug,
+      error: `${u.length} page(s) unsynced; first: ${first}; error: ${u[0].error}`, outDir,
+    });
+  } catch (e) {
+    console.error(`[wiki-pages] ${tag}: notification for the unsynced rows FAILED: ${e?.message || e}`);
+  }
   return 1;
 }
 

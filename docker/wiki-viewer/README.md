@@ -24,9 +24,11 @@ compile pipeline (node, openbrain-wiki)      workbench (Deno, openbrain-workbenc
 viewer (openbrain-wiki-viewer, node:22 + Quartz 4.5.1 fork)
   serve.mjs: every PAGE URL -> lib/live-route.mjs -> page-class registry
     -> the row rendered with the Quartz chrome          x-wiki-render: db
-    -> known page, no row: typed pending-compile state  x-wiki-render: pending
+    -> known page, no row - or a row not presentable as-is
+       (stale, future-dated, empty body): pending-compile x-wiki-render: pending
     -> database not answering: ONE screen, every URL    x-wiki-render: connecting|unreachable
     -> nothing known: themed not-available              x-wiki-render: not-available
+    -> a renderer bug outside an isolated entry         x-wiki-render: error (500)
   internal builder (WIKI_BUILDER=1, default): quartz build --serve -> idle-gated
   snapshot /srv/current: ONLY the client bundle + static assets are served from it
   (P1c freezes the bundle and removes the builder). Never a bare 404 for a page URL.
@@ -45,9 +47,16 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
    do not land FAILS (non-zero exit, the unsynced count and first slugs in the
    log) - never "compile ok" with unsynced rows. No row = the typed
    `pending-compile` state, never an empty leaf and never a render of the
-   file. Drift (file without row, row older than its file, row without file)
-   is measured per page_class by `recipes/_shared/reconcile-wiki-pages.mjs`
-   and repaired on (re)connect, never on read.
+   file. **Stale is a miss** (D13 item 5): a row older than its file, a row
+   dated in the future (its time cannot show a newer file replaced it) or a
+   row with an empty body (folder/tag indexes excepted) is pending too - the
+   same `rowState()` rule the reconciliation applies. Drift (file without
+   row, stale / future / empty row, row without file, an open structural
+   compile failure) is measured per page_class by
+   `recipes/_shared/reconcile-wiki-pages.mjs` and repaired on (re)connect,
+   never on read. A structural compile failure is not retried until its
+   inputs change (`recipes/_shared/structural-ledger.mjs`; manual clear:
+   `generate-wiki.mjs --clear-structural <ids|all>`).
 2. **Every notes mutation syncs its row — through the chokepoint.** write,
    move, trash, restore, recover, empty-trash ALL call
    `syncNoteRow`/`deleteNoteRow` in `repositories/notes.ts`. The 2026-08-28
@@ -89,13 +98,21 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
    their compile halves are `recipes/_shared/page-classes.mjs` (one compile
    rule each, the `page_class` the row carries). Adding a class = one entry on
    each side; no existing entry changes (`live-render.test.mjs` proves it).
+   Names AND priorities are unique: an entry file that reuses a name, ties a
+   priority, has no default export or an invalid shape FAILS the load and
+   the container exits (a duplicate never silently replaces a built-in). An
+   entry whose `resolve()`/`template()` throws is isolated: logged, counted,
+   named by `/__health`, and resolution falls through to the next entry.
 9. **The database being unreachable is a front-end condition, not a page
    state**: one screen (`connecting to database` / `database unreachable`)
    for every URL and a degraded `/__health`, never a pending page, never a
    file render.
 10. **Raw HTML in a body is dropped** (`lib/render-page.mjs`): only the HTML
    the transform set itself generates (escaped) reaches the page. The Quartz
-   builder renders raw HTML; the live renderer never does.
+   builder renders raw HTML; the live renderer never does. **No
+   `javascript:`/`vbscript:`/`data:` URL** survives into an article attribute
+   (a link becomes its text, an image its alt; a `data:image/<raster>` src
+   is allowed), and mermaid runs with `securityLevel: "strict"` (Dockerfile).
 
 ## Testing discipline
 
@@ -117,7 +134,9 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   a fresh Postgres seeded only with the committed synthetic fixtures
   (`test/fixtures/`), the real Caddyfile + PostgREST, a stub LLM
   (`test/stub-llm.mjs`), and the `:wt-<id>` image; `test/parity-diff.mjs`
-  diffs every rendered body against the built page for the 20-URL list.
+  diffs every rendered body against the built page for the 27-URL list;
+  `test/run-acceptance.sh` runs every case (names, subnet and port are
+  parameters: `P1A_PREFIX`, `P1A_TAG`, `P1A_SUBNET`, `P1A_PORT`).
 
 ## Dev workflow
 

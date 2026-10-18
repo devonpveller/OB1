@@ -23,14 +23,27 @@ export function presentedDate(fm, updatedAt) {
   return d && !Number.isNaN(d.getTime()) ? d : null;
 }
 
-// resolve helper: an entry backed by the row at the requested slug.
+// resolve helper: an entry backed by the row at the requested slug. A row
+// that is not presentable as-is (stale: older than its file or dated in the
+// future; or an empty body) is this entry's page in the pending-compile state
+// (D13 item 5: "stale is a miss"; never an empty leaf) - ctx.pending.
 export function rowBacked(match) {
   return async (_req, deps) => {
     const r = await deps.row();
     if (!r.ok) return { unreachable: r.state };
-    if (r.row && match(r.row)) return { row: r.row };
-    return null;
+    if (!r.row || !match(r.row)) return null;
+    const why = deps.presentable ? await deps.presentable(r.row) : null;
+    return why ? { pending: why, row: r.row } : { row: r.row };
   };
+}
+
+// resolve helper for a listing's own index row (folder / tag / notebooks
+// index): an empty body is allowed there (Quartz shows the listing alone), a
+// stale or future-dated one is not. Returns null (presentable or no row) or
+// the pending reason.
+export async function indexRowPending(row, deps) {
+  if (!row || !deps.presentable) return null;
+  return deps.presentable(row, { allowEmpty: true });
 }
 
 // Template: a content page from its row (entity, source, report, thought,
@@ -80,6 +93,14 @@ export async function folderTemplate(ctx, deps) {
   const node = site.folders.get(folder) || { files: new Set(), folders: new Set() };
   const items = [...node.files].map((s) => listItem(site, s));
   for (const sub of node.folders) {
+    // Quartz FolderContent: a subfolder whose index page exists IS that page's
+    // data (its title, tags and date); only a subfolder without one gets the
+    // synthetic entry (display name, no tags, the newest child's date).
+    const idx = site.bySlug.get(`${sub}/index`);
+    if (idx) {
+      items.push({ ...listItem(site, `${sub}/index`), title: folderDisplayName(site, sub), isFolder: true });
+      continue;
+    }
     let newest = null;
     for (const s of site.folders.get(sub)?.files || []) {
       const d = presentedDate({}, site.bySlug.get(s)?.updated_at);

@@ -143,6 +143,17 @@ echo 0 > /tmp/last-access
 node /quartz/serve.mjs &
 SERVE_PID=$!
 trap 'kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
+# The live renderer IS the viewer: if serve.mjs exits (e.g. the page-class
+# registry refused an entry file at start - it fails loud on a duplicate name,
+# a priority tie, a missing default export), the container exits with its
+# code instead of running a builder that serves nothing (rw-p1a-render).
+serve_or_die() {
+  kill -0 "$SERVE_PID" 2>/dev/null && return 0
+  code=0; wait "$SERVE_PID" || code=$?   # (set -e: a bare failing wait would exit before the message)
+  echo "[wiki-viewer] serve.mjs EXITED (code $code) - stopping the container"
+  kill -TERM "-$BUILD_PID" 2>/dev/null || true
+  exit "$([ "$code" = 0 ] && echo 1 || echo "$code")"
+}
 
 # Wait (bounded) for the first COMPLETE build (index.html + css + js, not just
 # index.html — the old check published build-0 too early, before ComponentResources
@@ -150,6 +161,7 @@ trap 'kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 
 # vault's first build can take several minutes.
 i=0
 while [ "$i" -lt 240 ]; do
+  serve_or_die
   is_complete /quartz/public && index_ok /quartz/public && { echo "[wiki-viewer] first COMPLETE build emitted"; break; }
   sleep 2; i=$((i + 1))
 done
@@ -177,6 +189,7 @@ marker=/tmp/last-snap; touch "$marker"
 N=0
 while true; do
   sleep "$POLL"
+  serve_or_die
   now=$(date +%s)
   la=$(cat /tmp/last-access 2>/dev/null || echo 0)
   idle=$((now - la))

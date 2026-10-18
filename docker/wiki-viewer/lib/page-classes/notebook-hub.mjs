@@ -9,7 +9,7 @@ const HUB = /^content\/notebooks\/([^/]+)\/\1$/;
 export default {
   name: "notebook-hub",
   version: 1,
-  priority: 60,
+  priority: 62,
   resolve: rowBacked((row) => HUB.test(row.slug)),
   template: contentTemplate,
 };

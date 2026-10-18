@@ -18,7 +18,7 @@ import { parseWikiPage } from "/ob1/recipes/_shared/wiki-pages.mjs";
 
 const VAULT = process.env.WIKI_GIT_DIR || "/wiki";
 const OB = (process.env.OPEN_BRAIN_URL || "").replace(/\/+$/, "");
-if (process.env.P1A_DISPOSABLE !== "wt-rw-p1a-render" || !OB) {
+if (!/^wt-/.test(process.env.P1A_DISPOSABLE || "") || !OB) {
   console.error(`[seed] refusing: OPEN_BRAIN_URL=${OB || "(unset)"} is not the disposable rest`);
   process.exit(2);
 }
