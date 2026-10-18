@@ -25,6 +25,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
 import { registerAgentMemory } from "./agent-memory.ts";
+import { registerContractTools } from "./contract-tools.ts";
 import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
 import {
   buildEgress,
@@ -672,11 +673,18 @@ server.registerTool(
                     SELECT json_agg(json_build_object('title', s.title, 'url', s.url))
                     FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
                     WHERE cs.claim_id = c.id AND cs.edge_type <> 'contradicts'
+                      AND s.retraction_committed_at IS NULL   -- D5 stage 1: a suppressed source is never cited
                   ), '[]'::json) AS sources
              FROM public.claims c
             WHERE c.status = 'active' AND c.embedding IS NOT NULL
               AND 1 - (c.embedding <=> $1::vector) >= $2
               AND c.confidence >= $4
+              -- D5 stage 1 (research-workbench P0): a claim that touches a suppressed source is
+              -- served only if it is still grounded without it (claim_is_grounded ignores
+              -- suppressed edges since 230-init-research-contract.sql).
+              AND (NOT EXISTS (SELECT 1 FROM public.claim_sources x JOIN public.sources y ON y.id = x.source_id
+                                WHERE x.claim_id = c.id AND y.retraction_committed_at IS NOT NULL)
+                   OR public.claim_is_grounded(c.id))
               ${threadClause}
             ORDER BY c.embedding <=> $1::vector
             LIMIT $3`,
@@ -1644,6 +1652,7 @@ server.registerTool(
            FROM thread_sources ts
            JOIN sources s ON s.id = ts.source_id
            WHERE ts.thread_id = $1 AND ts.status = 'confirmed'
+             AND s.retraction_committed_at IS NULL  -- D5 stage 1: suppressed sources feed no generation
            ORDER BY ts.confirmed_at DESC NULLS LAST, ts.created_at DESC`,
           [thread_id],
         );
@@ -1809,6 +1818,7 @@ function registerSuggestionList(
              FROM thread_sources ts
              JOIN sources s ON s.id = ts.source_id
              WHERE ts.status = $1
+               AND s.retraction_committed_at IS NULL  -- D5 stage 1: a suppressed source is not triaged (as notebooks.ts listSuggestions)
                AND ($2::uuid IS NULL OR ts.thread_id = $2)
              ORDER BY ts.created_at DESC`,
             [whereStatus, thread_id ?? null],
@@ -1992,6 +2002,16 @@ server.registerTool(
   },
 );
 
+// --- The retrieval contract (research-workbench P0, D14: reads only) --------------------
+// One tool per read operation of the workbench's typed retrieval contract, registered through
+// server.registerTool so both lanes get them and every result is size-capped like any tool.
+// The schemas come from the workbench (contract-tools.json, generated); each call goes to the
+// workbench over HTTP with the same shared key Caddy injects (WORKBENCH_KEY = MCP_ACCESS_KEY).
+registerContractTools(server, {
+  workbenchUrl: Deno.env.get("CONTRACT_WORKBENCH_URL") || "http://openbrain-workbench:8000",
+  key: MCP_ACCESS_KEY,
+});
+
 // --- Research persistence REST API (deep_research -> open-brain) ---
 //
 // deep_research_tool.py (running in Open WebUI) calls these instead of
@@ -2022,6 +2042,7 @@ app.get("/research/lookup", async (c) => {
       `SELECT id, content, researched_on, volatility, revalidate_days, run_kind
          FROM sources
         WHERE content_type='research_synthesis' AND research_key=$1
+          AND retraction_committed_at IS NULL  -- D5 stage 1: a suppressed synthesis is never reused
         LIMIT 1`,
       [key],
     );
@@ -2181,6 +2202,16 @@ app.post("/research/persist", async (c) => {
       const content = (s.content || s.summary || "").trim();
       if (!url && !content) { sourceIds.push(null); continue; }
       const title = (s.title || s.domain || url || "source").slice(0, 300);
+      // D5 item 4 (research-workbench P0): a tombstoned URL is refused at every door. The
+      // sources gate would raise and roll back the whole persist; skip the one source instead,
+      // record the attempt on its tombstone, and keep [Source N] alignment with a null.
+      if (url) {
+        const tomb = await client.queryObject<{ id: string | null }>(
+          `SELECT public.contract_record_query_hit($1, $2, 'returned by a research run; persist skipped it') AS id`,
+          [url, sessionId],
+        );
+        if (tomb.rows[0]?.id) { sourceIds.push(null); continue; }
+      }
       const emb = `[${(await getEmbedding(`${title}\n\n${content}`.slice(0, 1600))).join(",")}]`;
       const provMeta = {
         source: "deep-research-source",
@@ -2195,6 +2226,11 @@ app.post("/research/persist", async (c) => {
         [url || null, content, title, body.notebook ?? null, s.domain ?? null, emb, JSON.stringify(provMeta)],
       );
       const sid = fc.rows[0].id;
+      // D5 stage 1: dedup can land on a SUPPRESSED row; it is never rewritten, linked or cited.
+      const supp = await client.queryObject<{ s: boolean }>(
+        `SELECT retraction_committed_at IS NOT NULL AS s FROM sources WHERE id = $1`, [sid],
+      );
+      if (supp.rows[0]?.s) { sourceIds.push(null); continue; }
       // Update content in place + (re)stamp research linkage & provenance.
       // (Nothing reads per-source rows by research_key except this writer,
       // so re-stamping a deduped row is safe — see /research/lookup.)

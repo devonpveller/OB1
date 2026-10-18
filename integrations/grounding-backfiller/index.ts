@@ -369,6 +369,7 @@ async function runRefetch(limit: number): Promise<{ scanned: number; recovered: 
        WHERE url ~* '^https?://' AND content_type = 'web_article'
          AND length(coalesce(content,'')) < $2
          AND COALESCE((metadata->>'refetch_failed')::boolean, false) = false
+         AND retraction_committed_at IS NULL  -- D5 stage 1: a suppressed source is never refetched
        ORDER BY created_at DESC LIMIT $1`,
       [limit, REFETCH_THIN_MAX],
     );

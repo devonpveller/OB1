@@ -233,7 +233,9 @@ async function backfillNotebooks(sb, threads) {
   const takenSlugs = new Set(threads.filter((t) => t.slug).map((t) => t.slug));
   const strings = new Set();
   for (const tbl of ["sources", "thoughts"]) {
-    const rows = await sb.get(`${tbl}?select=metadata,notebook&limit=20000`).catch(() => null)
+    // D5 stage 1 (research-workbench P0): a suppressed source names no notebook.
+    const live = tbl === "sources" ? "&retraction_committed_at=is.null" : "";
+    const rows = await sb.get(`${tbl}?select=metadata,notebook${live}&limit=20000`).catch(() => null)
       // sources has a real `notebook` column; thoughts store it under metadata.
       || [];
     for (const r of rows) {

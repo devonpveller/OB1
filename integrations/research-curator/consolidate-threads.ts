@@ -127,6 +127,7 @@ try {
                FROM thread_sources ts JOIN sources s ON s.id = ts.source_id
               WHERE ts.thread_id = t.id AND ts.status = 'confirmed'
                 AND s.content_type = 'research_synthesis'
+                AND s.retraction_committed_at IS NULL  -- D5 stage 1 (research-workbench P0)
               ORDER BY s.updated_at DESC LIMIT 1) AS synthesis
        FROM threads t
       WHERE t.status = 'active'

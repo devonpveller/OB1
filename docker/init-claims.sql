@@ -130,6 +130,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_claim_sources_parent
 -- ============================================================
 -- §5 — confidence is a computed property of grounding.
 -- ============================================================
+-- NOTE (research-workbench P0): claim_min_depth, claim_confidence and
+-- recompute_claim_confidence are REDEFINED by 230-init-research-contract.sql so a
+-- SUPPRESSED source (retraction_committed_at set) lends no grounding, corroboration,
+-- authority or contradiction (D5 stage 1). Re-running THIS file alone on a database that
+-- has the contract migration silently undoes that; re-run init-research-contract.sql after it.
 
 -- claim_min_depth: shortest grounding distance to a PRIMARY SOURCE following
 -- non-contradicts edges. 0 = the claim has a direct source edge. N = grounds
