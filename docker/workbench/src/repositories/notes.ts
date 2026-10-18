@@ -8,6 +8,9 @@ import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 import { slugifyNotebook } from "@shared/slug";
 import { parseNoteRow } from "../util/notes-parse.ts";
 export { parseNoteRow };
+import { pool } from "../db/pool.ts";
+import { poolDb } from "../contracts/db.ts";
+import { markHolderRemoved, moveHolder, syncLegacyNote } from "../contracts/repo/references.ts";
 import {
   gitMv,
   gitRm,
@@ -77,6 +80,22 @@ async function syncNoteRow(rel: string, content: string): Promise<void> {
     );
   } catch (e) {
     console.error("[wiki-pages] note row sync failed (non-fatal):", (e as Error).message);
+  }
+  await syncNoteReferences(rel, content);
+}
+
+// research-workbench P2a: a legacy note's references are reference records the note holds by id.
+// Every write that changes a note reconciles them with the file (cited links; the added ones live
+// in the record). Best-effort like the row sync: a failure is logged once here, and the next
+// note-refs or export read reconciles again (it sees the file hash changed) - the file stays the
+// truth for what the body cites. Only the legacy notes/ tree holds references.
+const refDb = poolDb(pool);
+async function syncNoteReferences(rel: string, content: string): Promise<void> {
+  if (!rel.startsWith("notes/")) return;
+  try {
+    await syncLegacyNote(refDb, rel, content);
+  } catch (e) {
+    console.error(`[references] note reference sync failed for ${rel} (non-fatal; the next read reconciles):`, (e as Error).message);
   }
 }
 
@@ -266,6 +285,12 @@ export async function moveNote(
     return { conflict: true, current: await sha256(content) };
   }
   await gitMv(fromRel, toRel, `notes: move ${fromRel} -> ${toRel}`, author);
+  // P2a: the note's references (and their pins) move with it, before the row sync reconciles.
+  try {
+    await moveHolder(refDb, fromRel, toRel);
+  } catch (e) {
+    console.error(`[references] moving references ${fromRel} -> ${toRel} failed:`, (e as Error).message);
+  }
   // The row follows the file: without this, the live nav kept showing the note
   // at its OLD folder and never at the new one (2026-08-28 audit).
   await deleteNoteRow(fromRel);
@@ -416,6 +441,10 @@ export async function emptyTrash(author?: string): Promise<{ removed: string[] }
       // Without this the row outlived the file: the live nav listed a note
       // whose page said "not in the knowledge base" (2026-08-28 audit).
       await deleteNoteRow(rel);
+      // P2a: a hard-removed note stops counting as a dependence; a recover finds its pins.
+      await markHolderRemoved(refDb, rel).catch((e) =>
+        console.error(`[references] marking ${rel} removed failed:`, (e as Error).message)
+      );
       removed.push(rel.replace(/^notes\//, ""));
     }
   }

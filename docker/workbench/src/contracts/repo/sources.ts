@@ -1,4 +1,5 @@
-// Source reads for the contract: reference, chunk context, diffCheck, quality.
+// Source reads for the contract: reference, chunk context, quality. (diffCheck moved to
+// references.ts in P2a, where the pinned revision lives.)
 // Lifecycle WRITES (suppress / sever / erase / admission) live in lifecycle.ts.
 import type { Db } from "../db.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
@@ -169,7 +170,7 @@ export async function reference(
   id: string,
   opts: { version: number | null; evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter },
 ) {
-  const base = { id, kind: "source", requested_version: opts.version, source: null, tombstone: null, held: null };
+  const base = { id, kind: "source", requested_version: opts.version, source: null, tombstone: null, held: null, record: null };
   const s = await getSource(db, id, opts.filter);
   if (s) {
     if (opts.evidenceOnly && !opts.visible.has(s.lifecycle)) return omitted(base);
@@ -195,11 +196,11 @@ export async function reference(
   };
 }
 
-function omitted(base: Record<string, unknown>) {
+export function omitted(base: Record<string, unknown>) {
   return { ...base, state: "omitted", lifecycle: null, version: null, state_detail: { reason: "evidence_only" } };
 }
 
-async function sourceReference(db: Db, s: SourceRow, version: number | null, base: Record<string, unknown>, f: MetadataFilter) {
+export async function sourceReference(db: Db, s: SourceRow, version: number | null, base: Record<string, unknown>, f: MetadataFilter) {
   const current = s.max_revision ?? 1;
   let excerpt = s.excerpt;
   let versionState = "current";
@@ -277,34 +278,8 @@ export async function chunkContext(
   };
 }
 
-// diffCheck(referenceIds[]): schema-level in P0 (the behavioural check over a real pinned
-// revision is P2a's). out_of_date = a newer revision than the pin exists; the equivalent current
-// chunk is the same idx in the current chunk set when it exists.
-export async function diffCheck(db: Db, refs: { source_id: string; revision: number; chunk_idx?: number }[]) {
-  const out = [];
-  for (const r of refs) {
-    const s = await getSource(db, r.source_id, null);
-    const h = s ? null : await getHeld(db, r.source_id, null);
-    const current = s ? (s.max_revision ?? 1) : h ? h.revision : null;
-    const lifecycle = s ? s.lifecycle : h ? "held" : null;
-    const idx = r.chunk_idx ?? null;
-    let equivalent: string | null = null;
-    if (idx !== null && current !== null) {
-      const table = s ? "public.source_chunks" : "public.held_source_chunks";
-      const key = s ? "source_id" : "held_source_id";
-      const hit = await db.query<{ idx: number }>(`SELECT idx FROM ${table} WHERE ${key} = $1 AND idx = $2`, [r.source_id, idx]);
-      if (hit[0]) equivalent = `${r.source_id}:${idx}`;
-    }
-    const outOfDate = current !== null && r.revision < current;
-    out.push({
-      source_id: r.source_id, pinned_revision: r.revision, current_revision: current,
-      out_of_date: outOfDate, chunk_idx: idx, equivalent_current_chunk_id: equivalent,
-      state: lifecycle === null ? "erased" : outOfDate ? "updated" : "current",
-      lifecycle: lifecycle ?? ((await tombstoneBySource(db, r.source_id)) ? "erased" : null),
-    });
-  }
-  return { results: out };
-}
+// diffCheck(referenceIds[]) lives in repo/references.ts since research-workbench P2a (it reads
+// the reference_records pin); P3a's quality() below is unchanged by it.
 
 // quality(id) - why this source is rated as it is (research-workbench P3a, D15). Never a bare
 // number: the D15 rolling total for the claim kind it was admitted under, the family and the

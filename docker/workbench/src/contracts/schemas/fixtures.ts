@@ -30,4 +30,10 @@ export const FX = {
   pageLeafActive: "content/source/11111111-1111-4111-8111-111111111111",
   notification: "f0000000-0000-4000-8000-0000000000f1",
   watch: "f0000000-0000-4000-8000-0000000000f2",
+  // research-workbench P2a (fixtures.sql, "P2a" block)
+  refSource: "f1000000-0000-4000-8000-000000000001", // active, revision 2; revision 1 is pinned below
+  refPdf: "f1000000-0000-4000-8000-000000000002", // content_type pdf
+  referenceSpan: "f2000000-0000-4000-8000-000000000001", // span on refSource, pinned at 1 (out of date)
+  referenceCurrent: "f2000000-0000-4000-8000-000000000002", // span on refSource, pinned at 2 (current)
+  refNotePath: "notes/p2a/fixture-note.md", // a legacy note holding referenceSpan (the user document holds referenceCurrent)
 } as const;

@@ -10,72 +10,35 @@
 // a file that vanishes (ENOENT unlink). Keep all conversion scratch out of /wiki.
 import { Hono } from "hono";
 import { config } from "../config.ts";
-import { query } from "../db/pool.ts";
+import { pool } from "../db/pool.ts";
+import { poolDb } from "../contracts/db.ts";
+import {
+  bodyExportReferences, ensureLegacyNote, MigrationRefused, noteExportReferences,
+} from "../contracts/repo/references.ts";
+import { renderCitations } from "../contracts/logic/citations.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 import { safeJoin, safeRelPath } from "../util/paths.ts";
 
 export const exporter = new Hono();
+const db = poolDb(pool);
 
 // Academic numbered-citation rewrite for export. Turns each `[[…source/<uuid>…|
-// alias]]` in the body into an inline marker `alias [N]` (or just `[N]`), numbered
-// by first appearance, and emits a matching numbered "## References" list — so the
-// export reads like a modern paper (Vancouver/IEEE-style). Frontmatter `sources:`
-// that aren't cited inline are appended to References after the cited ones. Origin
-// is dropped — the References list is just the citations. Non-source wikilinks
-// degrade to their alias text. Returns the citation-rewritten markdown.
-const UUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
-const SOURCE_LINK_RE = /\[\[([^\]|]*?source\/([0-9a-fA-F-]{36}))(?:\|([^\]]+))?\]\]/g;
-async function applyCitations(md: string): Promise<string> {
-  const order: string[] = [];
-  const numFor = new Map<string, number>();
-  const enrol = (u: string) => {
-    if (UUID_RE.test(u) && !numFor.has(u)) {
-      order.push(u);
-      numFor.set(u, order.length);
-    }
-  };
-  // 1) number cited source links by first appearance
-  let m: RegExpExecArray | null;
-  SOURCE_LINK_RE.lastIndex = 0;
-  while ((m = SOURCE_LINK_RE.exec(md))) enrol(m[2]);
-  // 2) then deliberately-added (frontmatter) sources, appended
-  const fmMatch = md.match(/^---\n([\s\S]*?)\n---/);
-  if (fmMatch) {
-    const sm = fmMatch[1].match(/^sources:\s*\[([^\]]*)\]\s*$/m);
-    if (sm) sm[1].split(",").forEach((s) => enrol(s.trim().replace(/^["']|["']$/g, "")));
+// alias]]` in the body into an inline marker `alias [N]` (or just `[N]`), and emits a matching
+// numbered "## References" list — so the export reads like a modern paper (Vancouver/IEEE-style).
+// Non-source wikilinks degrade to their alias text.
+// research-workbench P2a: a legacy note's numbers and list are READ FROM ITS REFERENCE RECORDS
+// (reference_holders.number, cited by first appearance then the added references - the rule the
+// migration materialised, so a migrated note exports the same References section as before).
+// Any other exported page holds no references; its body links are numbered by first appearance.
+async function applyCitations(rel: string, md: string): Promise<string> {
+  let refs;
+  if (rel.startsWith("notes/")) {
+    await ensureLegacyNote(db, rel, md);
+    refs = await noteExportReferences(db, rel);
+  } else {
+    refs = await bodyExportReferences(db, md);
   }
-
-  // 3) replace cited links inline with `alias [N]` / `[N]`
-  let out = md.replace(SOURCE_LINK_RE, (_full, _target, uuid, alias) => {
-    const n = numFor.get(uuid);
-    const label = (alias || "").trim();
-    return label ? `${label} [${n}]` : `[${n}]`;
-  });
-  // 4) non-source wikilinks → alias text / basename
-  out = out
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
-
-  // 5) numbered References list matching the [N] markers
-  if (order.length) {
-    const rows = await query<{ id: string; title: string; url: string }>(
-      // D5 stage 1 (research-workbench P0): a suppressed source is absent from export.
-      `SELECT id::text AS id, title, url FROM public.sources
-        WHERE id = ANY($1::uuid[]) AND retraction_committed_at IS NULL`,
-      [order],
-    ).catch(() => []);
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const lines = order
-      .map((u) => {
-        const r = byId.get(u);
-        if (!r) return null;
-        const title = (r.title || "Untitled source").replace(/\n/g, " ");
-        return `[${numFor.get(u)}] ${title}${r.url ? `. <${r.url}>` : "."}`;
-      })
-      .filter(Boolean);
-    if (lines.length) out += "\n\n## References\n\n" + lines.join("\n\n");
-  }
-  return out;
+  return renderCitations(md, refs.numberOf, refs.lines);
 }
 
 interface Fmt {
@@ -132,7 +95,13 @@ exporter.get("/", async (c) => {
   const spec = FORMATS[fmt];
   // Rewrite citations to numbered [N] markers + a matching ## References list,
   // and degrade non-source wikilinks to plain text (pandoc can't read [[…]]).
-  const pandocMd = await applyCitations(md);
+  let pandocMd: string;
+  try {
+    pandocMd = await applyCitations(rel, md);
+  } catch (e) {
+    if (e instanceof MigrationRefused) return c.json({ error: e.message, detail: e.detail }, 409);
+    throw e;
+  }
   const noteDir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
   // Resolve relative images from both the vault root and the note's folder
   // (absolute paths — pandoc's cwd is the scratch tmp dir, not the vault).

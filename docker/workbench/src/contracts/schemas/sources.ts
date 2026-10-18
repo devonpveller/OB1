@@ -4,6 +4,7 @@ import { z } from "../deps.ts";
 import { REGISTRY, registryValue } from "../registry.ts";
 import { Iso, Json, recordState, StateDetail, uuid } from "./common.ts";
 import { FX } from "./fixtures.ts";
+import { ReferenceRecordShape } from "./references.ts";
 
 const lifecycle = (example = "active") => registryValue(REGISTRY.sourceStates, example);
 
@@ -60,7 +61,9 @@ export const HeldBody = HeldBodyShape.openapi("HeldBody");
 
 // reference(id, version?) - one shape for every lifecycle state. `source` is present for
 // active / suppressed / unlinked, `tombstone` for erased, `held` for held; state 'omitted'
-// (evidence-only callers) carries none of them.
+// (evidence-only callers) carries none of them. P2a: when the id is a REFERENCE RECORD (kind
+// 'reference'), `record` carries it and the target part is read at the pinned revision
+// (requested_version = the pin; state 'updated' when the source has moved on).
 export const Reference = z.object({
   id: uuid(),
   kind: registryValue(REGISTRY.nodeKinds, "source"),
@@ -72,6 +75,7 @@ export const Reference = z.object({
   source: SourceBodyShape.nullable(),
   tombstone: TombstoneShape.nullable(),
   held: HeldBodyShape.nullable(),
+  record: ReferenceRecordShape.nullable(),
 }).openapi("Reference");
 
 export const ChunkLine = z.object({
@@ -91,27 +95,45 @@ export const ChunkContext = z.object({
   chunks: z.array(ChunkLine),
 }).openapi("ChunkContext");
 
+// P2a: a reference is either a reference record id (its pin, chunk and quote are read from the
+// record) or, as in P0, a bare pin (source_id + revision [+ chunk_idx]). One shape, no union:
+// exactly one of the two forms must be given.
 export const DiffCheckRef = z.object({
-  source_id: uuid(),
-  revision: z.number().int().min(1),
+  reference_id: uuid(FX.referenceSpan, "a reference record id").optional(),
+  source_id: uuid().optional(),
+  revision: z.number().int().min(1).optional(),
   chunk_idx: z.number().int().min(0).optional(),
+}).refine((r) => (r.reference_id !== undefined) !== (r.source_id !== undefined && r.revision !== undefined) &&
+  (r.reference_id === undefined || (r.source_id === undefined && r.revision === undefined && r.chunk_idx === undefined)), {
+  message: "give reference_id, or source_id + revision (+ chunk_idx) - not both",
 }).openapi("DiffCheckRef");
 
+// Either a list of references (at most 200) or a holder whose every reference is checked.
 export const DiffCheckRequest = z.object({
-  references: z.array(DiffCheckRef).min(1).max(200),
+  references: z.array(DiffCheckRef).min(1).max(200).optional(),
+  holder: z.object({
+    kind: registryValue(REGISTRY.referenceHolderKinds, "legacy_note"),
+    ref: z.string().min(1).openapi({ example: FX.refNotePath }),
+  }).optional().openapi({ description: "check every reference a note or user document holds" }),
+}).refine((b) => (b.references !== undefined) !== (b.holder !== undefined), {
+  message: "give references or holder, not both",
 }).openapi("DiffCheckRequest");
 
+// No chunk TEXT crosses the wire here: ids, revisions and states only (P2a acceptance 4).
 export const DiffCheckResult = z.object({
+  reference_id: uuid(FX.referenceSpan).nullable().openapi({ description: "null for a bare pin" }),
   source_id: uuid(),
   pinned_revision: z.number().int(),
   current_revision: z.number().int().nullable(),
   out_of_date: z.boolean(),
   chunk_idx: z.number().int().nullable(),
   equivalent_current_chunk_id: z.string().nullable().openapi({
-    example: `${FX.sourceActive}:1`,
-    description: "the chunk of the current revision that stands for the pinned one (P0: the same idx " +
-      "when it exists; P2a replaces the rule over a real pinned revision)",
+    example: `${FX.refSource}:1`,
+    description: "the chunk of the current revision that stands for the pinned one: the pinned chunk " +
+      "while the pin is current; once out of date, the chunk the reference scope's reanchor rule finds " +
+      "(span: the chunk containing the quote; source: the first chunk); null when none does",
   }),
+  anchor: registryValue(REGISTRY.referenceAnchorOutcomes, "requoted"),
   state: recordState("updated"),
   lifecycle: lifecycle().nullable(),
 }).openapi("DiffCheckResult");

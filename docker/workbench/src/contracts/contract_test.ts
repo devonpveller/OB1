@@ -66,16 +66,18 @@ Deno.test("every x-registry annotation names a declared registry", () => {
   for (const r of seen) assert(declared.has(r as never), `x-registry '${r}' is not declared in registry.ts`);
 });
 
-Deno.test("every registry in registry.ts is seeded by the migration (when the migration is reachable)", async () => {
+Deno.test("every registry in registry.ts is seeded by the migrations (when the migrations are reachable)", async () => {
   let sql: string;
   try {
-    // P0's registries, plus the ones research-workbench P3a declares (rw-p3a-entail).
+    // P0's contract registries, P2a's reference registries (init-references.sql) and the ones
+    // research-workbench P3a declares (init-research-credibility.sql, rw-p3a-entail).
     sql = await Deno.readTextFile(new URL("../../../init-research-contract.sql", import.meta.url)) +
+      await Deno.readTextFile(new URL("../../../init-references.sql", import.meta.url)) +
       await Deno.readTextFile(new URL("../../../init-research-credibility.sql", import.meta.url));
   } catch {
-    return; // inside the image the migration is not in the build context
+    return; // inside the image the migrations are not in the build context
   }
-  for (const r of Object.values(REGISTRY)) assert(sql.includes(`('${r}',`), `registry ${r} is not declared in init-research-contract.sql`);
+  for (const r of Object.values(REGISTRY)) assert(sql.includes(`('${r}',`), `registry ${r} is not declared in a contract migration`);
 });
 
 Deno.test("every request and response example validates against its zod schema", () => {
@@ -180,7 +182,7 @@ Deno.test("the notification event is described: class, subject, slug, entity, or
 
 Deno.test("MCP exposes reads only (D14): every x-mcp-tool is a non-mutating operation", () => {
   const MUTATING = new Set(["suppress", "sever", "erase", "liftTombstone", "admission", "setHidden", "addUserSource",
-    "removeUserSource", "writeSetting", "steer"]);
+    "removeUserSource", "writeSetting", "steer", "createReference"]);
   for (const { op } of ops()) {
     if (op["x-mcp-tool"]) assert(!MUTATING.has(op.operationId as string), `${op.operationId} is a write on MCP`);
   }

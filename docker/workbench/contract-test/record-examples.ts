@@ -17,12 +17,18 @@ const F = {
   a: "11111111-1111-4111-8111-111111111111", s: "22222222-2222-4222-8222-222222222222",
   idea: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1", job: "99999999-9999-4999-8999-999999999999",
   tb: "66666666-6666-4666-8666-666666666666",
+  // P2a
+  refSrc: "f1000000-0000-4000-8000-000000000001", refSpan: "f2000000-0000-4000-8000-000000000001",
+  note: "notes/p2a/fixture-note.md",
 };
 type Req = [string, string, string, unknown?];
 const reads: Req[] = [
   ["reference", "GET", `/references/${F.a}?version=2`], ["referenceSuppressed", "GET", `/references/${F.s}`],
   ["chunkContext", "GET", `/chunks/${F.a}:1/context?window=1`],
-  ["diffCheck", "POST", `/diff-check`, { references: [{ source_id: F.a, revision: 1, chunk_idx: 1 }] }],
+  // P2a: one reference record (out of date, its quote found again) and one bare pin (P0's form)
+  ["diffCheck", "POST", `/diff-check`, { references: [{ reference_id: F.refSpan }, { source_id: F.a, revision: 1, chunk_idx: 1 }] }],
+  ["referenceRecord", "GET", `/references/${F.refSpan}`],
+  ["holderReferences", "GET", `/holders/legacy_note/references?ref=${encodeURIComponent(F.note)}`],
   ["quality", "GET", `/sources/${F.a}/quality`], ["neighbours", "GET", `/neighbours?id=content/tool/tool-fixture&depth=1`],
   ["claims", "GET", `/claims?source_id=${F.a}`],
   ["search", "GET", `/search?q=contract&kinds=page,claim,source&refinery_id=${F.idea}`],
@@ -46,6 +52,12 @@ const writes: Req[] = [
   ["userSourceRemoved", "DELETE", `/ideas/${F.idea}/user-sources/cccccccc-cccc-4ccc-8ccc-ccccccccccc2`],
   ["settingWritten", "PUT", `/settings/podcast.archive_destination`, { value: { path: "/mounts/podcast-archive-alt" }, by: "dredd" }],
   ["steer", "POST", `/sessions/${F.job}/steer`, { step_id: "s1", text: "narrow to erasure" }],
+  // P2a: place a reference held by the fixture user document
+  ["referenceCreated", "POST", `/references`, {
+    source_id: F.refSrc, provenance: "user", scope: "span",
+    selectors: { quote: { exact: "Opening line of the reference fixture.", prefix: "", suffix: " The quoted span about pinned an" }, position: { start: 0, end: 38 } },
+    holder: { kind: "user_document", ref: "documents/fixture-refinery.md", origin: "cited" }, by: "dredd",
+  }],
 ];
 const TS = /^\d{4}-\d{2}-\d{2}T[0-9:.]+(Z|[+-]\d{2}:\d{2})$/;
 function norm(v: unknown): unknown {
@@ -70,6 +82,8 @@ const stream = (await (await fetch(`${B}/sessions/${F.job}/stream`, { headers: {
   .replace(/\d{4}-\d{2}-\d{2}T[0-9:.]+Z/g, "2026-10-17T12:00:00.000Z");
 ex.erase.tombstone.id = "66666666-6666-4666-8666-666666666668";
 ex.userSourceAdded.source.source_id = "cccccccc-cccc-4ccc-8ccc-ccccccccccc3";
+ex.referenceCreated.record.id = "f2000000-0000-4000-8000-0000000000c1";
+if (ex.referenceCreated.held) ex.referenceCreated.held.reference_id = "f2000000-0000-4000-8000-0000000000c1";
 for (const [k, f] of [["timeline", "events"], ["trail", "entries"], ["jobs", "jobs"], ["notifications", "notifications"], ["registries", "registries"], ["ideas", "ideas"]]) {
   ex[k][f] = ex[k][f].slice(0, 3);
 }
@@ -95,6 +109,7 @@ const lines = [
   `  settingWrite: ${JSON.stringify(reqs.settingWritten)},`,
   `  steerRequest: ${JSON.stringify(reqs.steer)},`,
   `  diffCheckRequest: ${JSON.stringify(reqs.diffCheck)},`,
+  `  referenceCreateRequest: ${JSON.stringify(reqs.referenceCreated)},`,
   "  notImplemented: (operation: string, landsIn: string) => ({",
   "    status: \"not_implemented\", operation, lands_in: landsIn,",
   "    message: `${operation} is part of the contract; its backing lands in ${landsIn}`,",

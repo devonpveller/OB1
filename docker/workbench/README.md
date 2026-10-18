@@ -95,3 +95,28 @@ powershell -NoProfile -File contract-test/run-contract-tests.ps1   # disposable 
 
 The integration test (`src/contracts/integration_test.ts`) runs only against the disposable
 database `contract-test/run-contract-tests.ps1` creates; it suppresses, severs and erases rows.
+
+## References as first-class records (research-workbench P2a)
+
+A reference is held once, in `reference_records` (`../init-references.sql`, initdb slot 240;
+revert: `../revert-references.sql`, before P0's revert): the source pointer, anchor selectors
+(text quote with prefix/suffix, text position, and page+quad for the content types the
+`reference_selector_kinds` registry names), provenance (`user | assistant`), the pinned revision
+and chunk, and a state. Notes and user documents hold its id (`reference_holders`), never a copy.
+A database trigger refuses any reference without a quote, so the rule holds for every writer.
+
+- `GET /workbench/contract/references/{id}` answers a reference record (kind `reference`, read at
+  its pin) as well as a source; `POST .../references` places one, pinned at the source's current
+  revision; `GET .../holders/{kind}/references?ref=` lists a holder's references by id, body-less.
+- `POST .../diff-check` takes reference ids, a holder, or P0's bare pins; it returns ids,
+  revisions and states only - the re-anchoring (`strpos` over the current chunks) runs inside the
+  database and no chunk text crosses the wire.
+- Legacy notes (`notes/`): `note-refs` and `export` read the records. The migration is
+  `deno run --allow-net --allow-env --allow-read src/contracts/migrate-references.ts [--dry-run]`
+  inside the container after the SQL; a note whose references the legacy reader listed
+  differently is refused (exit 1) and nothing is written for it. After the migration the
+  frontmatter `sources:` list is no longer read; added references live in the record.
+
+```
+powershell -NoProfile -File contract-test/run-references-tests.ps1   # disposable P2a run
+```

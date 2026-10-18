@@ -10,6 +10,10 @@ export const DocumentLink = z.strictObject({
   kind: registryValue(REGISTRY.nodeKinds, "source"),
   id: z.string(),
   pin: z.number().int().nullable().openapi({ description: "the pinned revision; only the document defines pins" }),
+  reference_id: uuid().nullable().openapi({
+    description: "P2a: the reference record the link points at; when set, pin IS that record's pinned revision " +
+      "(D12: pins live in the reference record, the listing points at it)",
+  }),
 }).openapi("DocumentLink");
 
 // D12: the listing call returns title, path, updated and outbound links - nothing else, and

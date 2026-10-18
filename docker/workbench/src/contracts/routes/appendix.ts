@@ -5,6 +5,7 @@
 import { createRoute, z } from "../deps.ts";
 import { streamSSE } from "hono/streaming";
 import * as src from "../repo/sources.ts";
+import * as refs from "../repo/references.ts";
 import * as kn from "../repo/knowledge.ts";
 import * as ses from "../repo/sessions.ts";
 import { evidenceVisibleStates } from "../logic/state.ts";
@@ -35,10 +36,10 @@ export function registerAppendix(app: ContractApp, deps: ContractDeps) {
 function registerSourceReads(app: ContractApp, deps: ContractDeps) {
   op(app, createRoute({
     method: "get", path: `${PREFIX}/references/{id}`, operationId: "reference", tags: T,
-    summary: "reference(id, version?) - a source in any lifecycle state, typed", "x-appendix-call": "reference",
-    "x-mcp-tool": "contract_reference",
+    summary: "reference(id, version?) - a reference record read at its pin (P2a), or a source in any lifecycle state, typed",
+    "x-appendix-call": "reference", "x-mcp-tool": "contract_reference",
     request: {
-      params: z.object({ id: pathParam("id", FX.sourceActive, "source id") }),
+      params: z.object({ id: pathParam("id", FX.sourceActive, "a reference record id, or a source id") }),
       query: z.object({
         version: z.string().regex(/^[0-9]{1,6}$/).optional().openapi({ param: { name: "version", in: "query", example: "2" } }),
         evidence_only: evidenceOnly, metadata_filter: metadataFilter,
@@ -48,11 +49,11 @@ function registerSourceReads(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const q = c.req.valid("query");
-      const r = await src.reference(deps.db, c.req.valid("param").id, {
+      const r = await refs.referenceById(deps.db, c.req.valid("param").id, {
         version: q.version ? Number(q.version) : null, evidenceOnly: parseFlag(q.evidence_only),
         visible: await visible(deps), filter: parseMetadataFilter(q.metadata_filter),
       });
-      if (!r) return c.json({ error: "no source, held source or tombstone with this id" }, 404);
+      if (!r) return c.json({ error: "no reference record, source, held source or tombstone with this id" }, 404);
       return send(c, Reference, r);
     } catch (e) {
       return fail(c, e);
@@ -88,13 +89,14 @@ function registerSourceReads(app: ContractApp, deps: ContractDeps) {
 
   op(app, createRoute({
     method: "post", path: `${PREFIX}/diff-check`, operationId: "diffCheck", tags: T,
-    summary: "diffCheck(referenceIds[]) - is each pin out of date, and which current chunk stands for it",
+    summary: "diffCheck(referenceIds[]) - is each pin out of date, and which current chunk stands for it; " +
+      "ids, revisions and states only, never chunk text",
     "x-appendix-call": "diffCheck", "x-mcp-tool": "contract_diff_check",
-    request: { body: body(DiffCheckRequest, EX.diffCheckRequest) },
+    request: { body: body(DiffCheckRequest, EX.diffCheckRequest), query: z.object({ metadata_filter: metadataFilter }) },
     responses: { 200: json(DiffCheck, EX.diffCheck, "one result per reference"), ...errors },
   }), async (c) => {
     try {
-      return send(c, DiffCheck, await src.diffCheck(deps.db, c.req.valid("json").references));
+      return send(c, DiffCheck, await refs.diffCheck(deps.db, c.req.valid("json"), parseMetadataFilter(c.req.valid("query").metadata_filter)));
     } catch (e) {
       return fail(c, e);
     }

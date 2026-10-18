@@ -239,7 +239,11 @@ Deno.test({
       { tool: string; variant: string; forwarded: Record<string, unknown> }[];
     const manifest = JSON.parse(await Deno.readTextFile(new URL("./contract-tools.json", import.meta.url))) as
       { tool: string; input: { properties: Record<string, unknown> } }[];
-    const cloudTools = manifest.filter((m) => "metadata_filter" in m.input.properties).map((m) => m.tool).sort();
+    // contract_diff_check carries metadata_filter (P2a) but is not on the cloud door (P0): the same
+    // named exception contract-scope-calls.py checks the gateway refuses
+    const LOCAL_ONLY_FILTERED = new Set(["contract_diff_check"]);
+    const cloudTools = manifest.filter((m) => "metadata_filter" in m.input.properties && !LOCAL_ONLY_FILTERED.has(m.tool))
+      .map((m) => m.tool).sort();
     assertEquals(cloudTools.length, 15, `cloud tools: ${cloudTools}`);
     assertEquals([...new Set(calls.map((c) => c.tool))].sort(), cloudTools, "the calls must cover every cloud tool");
     for (const v of ["absent", "empty", "override_local", "override_null", "extra_key", "string_empty", "string_override"]) {

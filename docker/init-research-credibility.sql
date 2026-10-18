@@ -59,7 +59,8 @@
 --
 -- Conventions mirror init-research-contract.sql: idempotent, additive, RLS on with a
 -- service_role FOR ALL policy, no DROP TABLE / TRUNCATE / unqualified DELETE. Mounted in
--- compose as 240-init-research-credibility.sql. Fresh-volume only; the live DB gets it by hand
+-- compose as 245-init-research-credibility.sql (after P2a's 240-init-references.sql; the two are
+-- independent). Fresh-volume only; the live DB gets it by hand
 -- (psql -f, the operator's gated deploy). Applying it changes no claim's confidence.
 -- Revert: revert-research-credibility.sql.
 -- ============================================================

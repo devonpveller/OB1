@@ -12,7 +12,7 @@
 # out-of-scope strings. "$name" placeholders are resolved by the e2e test from its seed.
 #
 # Exit 0 only when: the gateway's cloud contract set is exactly the manifest tools that carry
-# metadata_filter; the argument sets cover every one of them; every refused call is the list
+# metadata_filter, minus the named local-only exception (which the gateway must refuse); the argument sets cover every one of them; every refused call is the list
 # shape (-32602); every forwarded call carries a metadata_filter containing share=cloud.
 # Reads two files, writes two; no network, no database, no container.
 import copy
@@ -38,11 +38,26 @@ gw = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gw)
 
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-filtered = sorted(t["tool"] for t in manifest if "metadata_filter" in ((t.get("input") or {}).get("properties") or {}))
+# Tools that carry metadata_filter but are deliberately NOT on the cloud door (local MCP only).
+# contract_diff_check gained the parameter in P2a (rw-p2a-refs: it fails closed under it - records
+# and holders answer nothing, a bare pin only for an in-scope source); P0 (rw-p0-contract2) took it
+# off the door while it had none. Putting it on the door is a posture decision, not a merge's
+# (integration of rw-p2a-refs onto rw-p0-contract2, 2026-10-18). The exception is exact: a name
+# here that carries no filter, or that the gateway exposes after all, is a PROBLEM.
+LOCAL_ONLY_FILTERED = {"contract_diff_check"}
+all_filtered = {t["tool"] for t in manifest if "metadata_filter" in ((t.get("input") or {}).get("properties") or {})}
+filtered = sorted(all_filtered - LOCAL_ONLY_FILTERED)
 cloud = sorted(gw.CONTRACT_TOOLS)
 problems = []
 if cloud != filtered:
     problems.append(f"gateway CONTRACT_TOOLS {cloud} != manifest tools with metadata_filter {filtered}")
+if not LOCAL_ONLY_FILTERED <= all_filtered:
+    problems.append(f"local-only exception names a tool without metadata_filter: {sorted(LOCAL_ONLY_FILTERED - all_filtered)}")
+for name in sorted(LOCAL_ONLY_FILTERED):
+    _fwd, _err = gw._apply_policy({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                   "params": {"name": name, "arguments": {"references": []}}})
+    if not _err:
+        problems.append(f"{name} is local-only but the gateway forwards it")
 
 VARIANTS = {
     "absent": None,

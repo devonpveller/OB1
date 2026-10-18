@@ -31,7 +31,7 @@ COPY src ./src
 RUN deno cache src/main.ts || true
 # The retrieval contract and its tests import nothing from the runtime mount, so they cache
 # FROZEN: a dependency that drifted from deno.lock fails the build.
-RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/contracts/migrate-references.ts
 
 # Build gate (wiki-dynamic-index P3): pure-logic tests run at image build so a
 # regression cannot ship silently - mirrors the wiki-service image, which runs

@@ -4,7 +4,7 @@
 #
 # What it does, and ONLY this:
 #   1. stages the REAL initdb chain from OB1/docker/docker-compose.yml (every mounted init*.sql,
-#      the contract's 230 slot and the credibility 240 slot), in compose order
+#      the contract's 230 slot and the credibility 245 slot, after P2a's 240), in compose order
 #   2. creates ONE internal docker network; every container and the network are labelled
 #      ai-stack.harness.owner=<Id>
 #   3. builds openbrain-research:wt-<id> (NEVER :local) - the build RUNS the offline test suite -
@@ -115,7 +115,7 @@ function Start-Db([string]$name, [bool]$fixtures) {
   Check ($logs -match 'PostgreSQL init process complete') "$name ran the initdb chain to completion"
   $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
   Check ($errs.Count -eq 0) "$name initdb logged no ERROR ($($errs.Count))"
-  Check ($logs -match '240-init-research-credibility\.sql') "$name ran 240-init-research-credibility.sql"
+  Check ($logs -match '245-init-research-credibility\.sql') "$name ran 245-init-research-credibility.sql"
   for ($i = 0; $i -lt 60; $i++) {
     $null = Dk exec $name pg_isready -h 127.0.0.1 -U postgres -d openbrain
     if ($script:rc -eq 0) { break }
@@ -140,7 +140,11 @@ try {
   $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
   foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
   Check ($chain.Count -ge 30) "staged $($chain.Count) migrations"
-  Check (@($chain | Where-Object { $_[1] -eq '240-init-research-credibility.sql' }).Count -eq 1) 'the chain mounts 240-init-research-credibility.sql'
+  Check (@($chain | Where-Object { $_[1] -eq '245-init-research-credibility.sql' }).Count -eq 1) 'the chain mounts 245-init-research-credibility.sql'
+  # integration 2026-10-18: P2a's references (240) run before the credibility migration (245)
+  $iRef = [array]::IndexOf(@($chain | ForEach-Object { $_[1] }), '240-init-references.sql')
+  $iCred = [array]::IndexOf(@($chain | ForEach-Object { $_[1] }), '245-init-research-credibility.sql')
+  Check (($iRef -ge 0) -and ($iCred -gt $iRef)) 'the chain mounts 240-init-references.sql before 245-init-research-credibility.sql'
   $null = Dk image inspect $PgImage
   if ($script:rc -ne 0) { Fail "$PgImage is not on the host"; throw 'pg image' }
 

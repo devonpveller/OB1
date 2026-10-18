@@ -6,7 +6,8 @@
 -- What it does, in order:
 --   1. puts the claim-confidence trigger back on P0's model: the trigger-state table is
 --      dropped and recompute_claim_confidence() is restored by re-running P0's migration
---      (idempotent; its CREATE OR REPLACE bodies are P0's). If the D15 trigger had been APPLIED
+--      (idempotent; its CREATE OR REPLACE bodies are P0's), then P2a's when P2a is applied (its
+--      source_dependence carries the reference_record branch P0's lacks). If the D15 trigger had been APPLIED
 --      (credibility_apply_d15_trigger), claims keep their D15 confidence until each is next
 --      recomputed - re-score them with P0's model by hand if that matters:
 --        SELECT count(public.recompute_claim_confidence(id)) FROM public.claims WHERE status = 'active';
@@ -42,6 +43,15 @@ ALTER TABLE public.sources DROP CONSTRAINT IF EXISTS sources_credibility_stamp_o
 
 DROP TABLE IF EXISTS public.credibility_trigger_state;
 \ir init-research-contract.sql
+-- Integration with P2a (rw-p3a-entail, 2026-10-18): re-running P0's migration above also puts back
+-- P0's source_dependence, WITHOUT P2a's reference_record branch (init-references.sql redefines it).
+-- When P2a is applied (reference_records exists) its migration is re-run too - idempotent, insert-
+-- only but for the selector kinds, which converge on its own definitions - so a note's references
+-- still block an erase after this revert. When P2a is not applied nothing of it is installed.
+SELECT to_regclass('public.reference_records') IS NOT NULL AS p2a_applied \gset
+\if :p2a_applied
+\ir init-references.sql
+\endif
 
 DROP VIEW IF EXISTS public.credibility_before_after;
 DROP FUNCTION IF EXISTS public.credibility_apply_d15_trigger(TEXT);
