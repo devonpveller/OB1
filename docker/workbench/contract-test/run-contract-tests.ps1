@@ -406,9 +406,13 @@ try {
   # sessions' disposable runs on the same host create and orphan volumes concurrently.
   $ourVolumes = @()
   foreach ($c in $made.containers) {
-    $mounts = Dk inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' $c
+    # No double quotes in the template: Windows PowerShell 5.1 strips them from a native argument
+    # (a '{{if eq .Type "volume"}}' template fails to parse). Type=Name pairs, filtered here.
+    $mounts = Dk inspect -f '{{range .Mounts}}{{.Type}}={{.Name}} {{end}}' $c
     # an already-removed container (the research service) answers an error text, not names
-    if ($script:rc -eq 0) { $ourVolumes += @(($mounts -split '\s+') | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9_.-]+$' }) }
+    if ($script:rc -eq 0) {
+      $ourVolumes += @(($mounts -split '\s+') | Where-Object { $_ -match '^volume=[A-Za-z0-9][A-Za-z0-9_.-]+$' } | ForEach-Object { $_.Substring(7) })
+    }
     $null = Dk rm -f -v $c
   }
   if ($made.net) { $null = Dk network rm $net }
