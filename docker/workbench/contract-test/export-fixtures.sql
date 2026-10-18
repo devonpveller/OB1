@@ -59,4 +59,13 @@ INSERT INTO public.sources (id, url, title, content, content_type, domain, metad
   ('f6a00000-0000-4000-8000-000000000118', 'https://doi.org/10.5555/p6a.s02', 'Fixture split-key record s02',
    'Fixture split-key record s02: an authored fixture text.', 'paper', 'doi.org', '{}');
 
+-- rw-p6a-resolve attempt 4: 119-127, the stub answers p6a.w01..w09 (the key / mailto between < and >,
+-- transformed; w09 clean, cached and then rewritten as attempt 3 would have stored a wrapped key)
+INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata)
+SELECT ('f6a00000-0000-4000-8000-' || lpad((118 + n)::text, 12, '0'))::uuid,
+       'https://doi.org/10.5555/p6a.w0' || n,
+       'Fixture wrapped-key record w0' || n,
+       'Fixture wrapped-key record w0' || n || ': an authored fixture text.', 'paper', 'doi.org', '{}'
+  FROM generate_series(1, 9) AS n;
+
 NOTIFY pgrst, 'reload schema';

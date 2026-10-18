@@ -7,6 +7,7 @@
 // here are BUILT from an allow-list of CSL variables, so nothing outside the schema is emitted.
 
 import { defang, noColonRuns } from "./schemes.ts";
+import { REAL_TAG } from "./credentials.ts";
 
 export type CslItem = Record<string, unknown> & { type: string; title: string };
 
@@ -56,10 +57,17 @@ export function dateToDateParts(date: string | null | undefined): number[] | nul
 // an element with nothing in it is removed (repeatedly, so `<i><b></b></i>` goes too); every other
 // field is plain text, every tag stripped. An unsafe-scheme string in any field is defanged
 // (markdown.ts defang), so no output carries `javascript:` even as text.
+//
+// rw-p6a-resolve attempt 4 (tester ADV-4: `Angle < KEY > title` and `<1 KEY>` were kept and printed,
+// while the credential check had deleted them as tags): a TAG is only what the strict grammar
+// (credentials.ts REAL_TAG) calls one - `<` + a letter or `/` + a name + attributes + `>`. Anything
+// else between `<` and `>` is TEXT here and in the credential check alike, so the check sees exactly
+// what the outputs print, and refuses the record.
 const CITEPROC_TAG = /^<\/?(?:i|b|sup|sub|sc)>$|^<span (?:class="nocase"|style="font-variant:\s*small-caps;?")>$|^<\/span>$/i;
 const EMPTY_ELEMENT = /<(i|b|sup|sub|sc)>(\s*)<\/\1>|<span [^>]*>(\s*)<\/span>/gi;
+const COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
 export function cleanMarkup(s: string): string {
-  let t = s.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<\/?[A-Za-z][^>]*>?/g, (m) => CITEPROC_TAG.test(m) ? m : "");
+  let t = s.replace(COMMENT, "").replace(REAL_TAG, (m) => CITEPROC_TAG.test(m) ? m : "");
   for (let k = 0; k < 8; k++) {
     const n = t.replace(EMPTY_ELEMENT, (_m, _a, w1, w2) => w1 ?? w2 ?? "");
     if (n === t) break;
@@ -67,7 +75,7 @@ export function cleanMarkup(s: string): string {
   }
   return noColonRuns(defang(t));
 }
-export const plainText = (s: string) => noColonRuns(defang(s.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<\/?[A-Za-z][^>]*>?/g, "")));
+export const plainText = (s: string) => noColonRuns(defang(s.replace(COMMENT, "").replace(REAL_TAG, "")));
 
 // The CSL variables citeproc renders as rich text; every other string is plain.
 export const MARKUP_FIELDS = new Set(["title", "container-title", "collection-title", "original-title", "title-short", "container-title-short"]);

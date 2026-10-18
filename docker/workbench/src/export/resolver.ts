@@ -172,9 +172,17 @@ export function createResolver(
   // undone, invisible characters removed, whitespace collapsed and removed - so a key split by an
   // empty `<i></i>`, `<b></b>`, `<sc></sc>` or `<span class="nocase"></span>` is the key; and on the
   // strings of one record joined, so a key split across two fields is too.
+  // attempt 4 (tester ADV-4): secretIn searches the raw text and its forms (credentials.ts), never
+  // only a normalised one; and the record is also judged on the UPSTREAM strings as they came
+  // (carries, below), before the CSL conversion removed anything - `<KEY>` is a tag to the CSL
+  // clean-up, but it is the key.
   const unsafe = (csl: unknown) => {
     const all = strings(csl);
     return all.some((s) => credentialShaped(s) || secretIn(s, secrets) !== null) || secretIn(all.join(""), secrets) !== null;
+  };
+  const carries = (body: unknown) => {
+    const all = strings(body);
+    return all.some((s) => secretIn(s, secrets) !== null) || secretIn(all.join(""), secrets) !== null;
   };
 
   async function getJson(service: Service, url: string): Promise<{ status: number; body: unknown }> {
@@ -196,7 +204,7 @@ export function createResolver(
       const r = await getJson(service, url);
       const csl = r.status === 200 ? toCsl(r.body) : null;
       if (csl) {
-        if (unsafe(csl)) {
+        if (unsafe(csl) || carries(r.body)) {
           said.push(`${NAME[service]} returned a record carrying credential-shaped text (refused)`);
           return null;
         }

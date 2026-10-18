@@ -150,14 +150,26 @@ export const coverage = () => (cache ??= installedCoverage());
 // never a box, so never a reason to refuse.
 const IGNORABLE = /[\u0000-\u0020\u007f-\u00a0\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8]|[\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/u;
 
-// The distinct characters of `text` no installed face covers, in order of first appearance.
+// A control character (C0 but tab, line feed and carriage return; DEL; C1): no face draws one, and
+// Typst draws a .notdef box for it (attempt 3, tester N7: U+0001, U+0007, U+001B, U+0085 were caught
+// only by the PDF's .notdef scan, 503). attempt 4: refused here, 422 `glyphs`, named.
+const CONTROL = (c: number) => (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) || (c >= 0x7f && c <= 0x9f);
+
+// The distinct characters of `text` no installed face covers (and every control character), in
+// order of first appearance.
 export async function uncovered(text: string, bits?: Uint8Array): Promise<number[]> {
   const b = bits ?? (await coverage()).bits;
   const out: number[] = [];
   const seen = new Set<number>();
   for (const ch of text) {
     const c = ch.codePointAt(0)!;
-    if (c < 0x80 || seen.has(c) || IGNORABLE.test(ch)) continue;
+    if (seen.has(c)) continue;
+    if (CONTROL(c)) {
+      seen.add(c);
+      out.push(c);
+      continue;
+    }
+    if (c < 0x80 || IGNORABLE.test(ch)) continue;
     seen.add(c);
     if (!covered(b, c)) out.push(c);
   }

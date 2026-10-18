@@ -13,10 +13,13 @@
 //   TXT   (and Copy page) the text itself.
 // In EVERY format the text (the MD and TXT as written, the DOCX's text and XML, the PDF's text layer
 // and dictionary strings) carries no unsafe-scheme string and not the configured OpenAlex key or
-// Crossref mailto (normalised: tags stripped, entities and escapes undone, invisible characters
-// removed, whitespace collapsed AND removed). A failure is a RenderFailed: `output-verification`
-// naming the format and the first offending target, or `credential` - 503, never a 200.
-import { decodeEntities, INVISIBLE, secretIn } from "./credentials.ts";
+// Crossref mailto - credentials.ts secretIn: the RAW text, the text with only real tags removed, the
+// normalised text, and their transformed forms (NFKC, percent-decoded, at/dot spelled out, letters
+// and digits only, base64). attempt 4: attempt 3 searched only a normalised text whose normaliser
+// deleted `< KEY >` as if it were a tag, so the MD, TXT, PDF and Copy page printed the key with 200.
+// A failure is a RenderFailed: `output-verification` naming the format and the first offending
+// target, or `credential` - 503, never a 200.
+import { base64Forms, decodeEntities, INVISIBLE, secretIn } from "./credentials.ts";
 import { markdownOffence, UNSAFE_SCHEME_TEXT } from "./markdown.ts";
 import { PdfDocument } from "./pdf_read.ts";
 import { zipEntries } from "./zip_read.ts";
@@ -142,12 +145,16 @@ export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pd
   }
 }
 
-// A secret in binary bytes: as written (case-insensitive), and through the text normalisation.
+// A secret in binary bytes: as written (case-insensitive) and as base64, always; and, for a part
+// up to 4 MB, every form secretIn reads, decoded as Latin-1 and as UTF-8 (a fullwidth key is UTF-8).
+const FULL_FORMS_MAX = 4 * 1024 * 1024;
 function secretInBytes(b: Uint8Array, secrets: string[]): string | null {
   if (!secrets.length) return null;
   const s = new TextDecoder("latin1").decode(b);
   const low = s.toLowerCase();
-  return secrets.find((x) => x.length >= 4 && low.includes(x.toLowerCase())) ?? secretIn(s, secrets);
+  const raw = secrets.find((x) => x.length >= 4 && (low.includes(x.toLowerCase()) || base64Forms(x).some((f) => s.includes(f))));
+  if (raw || b.byteLength > FULL_FORMS_MAX) return raw ?? null;
+  return secretIn(s, secrets) ?? secretIn(new TextDecoder("utf-8", { fatal: false }).decode(b), secrets);
 }
 
 // PNG, JPEG, GIF, WebP, by their signatures (pandoc embeds a note's images as they are).

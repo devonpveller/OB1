@@ -13,9 +13,10 @@
 // (acceptance 5): no filter, no JSON AST.
 //
 // What the cleaning guarantees about the markdown pandoc reads:
-//   - every link, image, autolink and reference target is http(s), mailto, a fragment or a plain
-//     relative path (images also an inline raster `data:image/...`); any other target is dropped and
-//     the link keeps its text (an image its alt text, an autolink "(link removed)"); reference
+//   - every link, autolink and reference target is http(s) or mailto (attempt 4: a fragment or a
+//     relative path link is rendered as its text), an image's a relative path inside the vault or
+//     an inline raster `data:image/...`; any other target is dropped and the link keeps its text
+//     (an image its alt text, an autolink "(link removed)"); reference
 //     definitions are resolved here and removed, so pandoc sees no definition at all;
 //   - no raw HTML node (dropped, its text kept where it was text), no attribute block: a `{...}` right
 //     after a link, an image or a code span, a heading's trailing `{...}` and a fenced code block's
@@ -120,6 +121,9 @@ export function imageSource(dest: string): "data" | "local" | "remote" | null {
   if (parts.some((p) => p === "" || p.startsWith("."))) return null;
   return /\.(png|jpe?g|gif|webp)$/.test(d) ? "local" : null;
 }
+
+// A link target that stays a link in the export: http(s) or mailto (safeTarget also passes it).
+export const absoluteLink = (dest: string) => /^(https?:\/\/|mailto:)/.test(normaliseTarget(dest));
 
 export { defang, UNSAFE_SCHEME_TEXT };
 
@@ -390,7 +394,13 @@ export function cleanTree(tree: MdNode, src: string, links: Wikilink[], token: R
       case "linkReference": {
         const def = n.type === "linkReference" ? defs.get(n.identifier) : { url: restore(n.url ?? ""), title: n.title ? restore(n.title) : null };
         const kids = cleanChildren(n);
-        if (!def || !safeTarget(def.url)) {
+        // attempt 4 (tester N4): a relative path (`notes/other.md`) or an in-note anchor (`#part`)
+        // has no target in an exported file - the DOCX would carry it as an external relationship
+        // the verification refuses (503) and Typst refuses a label it cannot find (422) - so such a
+        // link is rendered as its TEXT in every format, never refused; only an http(s) or mailto
+        // target stays a link (and a mailto carrying the configured mailto is refused 503
+        // `credential` by the output verification, as any text carrying it).
+        if (!def || !safeTarget(def.url) || !absoluteLink(def.url)) {
           if (def) dropped.links++;
           const shown = toText(n);
           const autolink = def && (shown === def.url || `mailto:${shown}` === def.url);

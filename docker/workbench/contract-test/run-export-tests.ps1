@@ -38,6 +38,13 @@
 #           refused export's retry asks only for the dead DOI (decision B); a one-byte-modified style
 #           and a row-only style refused at use (503); a non-proxy egress names a code, no address.
 #           A DIRECT CATCHER holding the service names as aliases must see 0 requests.
+#        h. attempt 3: link shapes, glyphs in code and math, a key split by an empty tag, image paths,
+#           limits
+#        i. attempt 4 (bounded round; tester ADV-4 / bar c, near-misses N3, N4, N7): the key or the
+#           mailto between `<` and `>` and transformed (fresh: 422 named in every format, nothing
+#           cached, the Copy page clean; a row cached by attempt 3: 422 'unsafe cached record', no
+#           request); an image behind `..` / a hidden segment (a real PNG there) never embedded;
+#           relative links and anchors rendered as text (200); a control character 422 glyphs
 #   6. tears down exactly what it created (containers with -v, their volumes recorded first);
 #      verifies nothing labelled <Id> is left, no volume of ours is left, no :local image changed
 # It never touches the live stack: no compose up/down, no ai-stack_* / open-brain_* network, no
@@ -279,10 +286,13 @@ try {
   # the vault: the authored notes, LF
   New-Item -ItemType Directory -Force $vault | Out-Null
   $src = Join-Path $ct 'export-vault'
-  Get-ChildItem -Recurse -File $src | ForEach-Object {
+  # (attempt 4: -Force, so a dot-directory is copied too; an image is copied byte for byte)
+  Get-ChildItem -Recurse -File -Force $src | ForEach-Object {
     $dest = Join-Path $vault $_.FullName.Substring($src.Length).TrimStart('\', '/')
     New-Item -ItemType Directory -Force (Split-Path -Parent $dest) | Out-Null
-    [System.IO.File]::WriteAllText($dest, ([System.IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
+    if ($_.Extension -eq '.md') {
+      [System.IO.File]::WriteAllText($dest, ([System.IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
+    } else { Copy-Item -LiteralPath $_.FullName -Destination $dest -Force }
   }
   $o = Dk run -d --name $stubName --label $label --network $net -v "${ct}:/ct:ro" --entrypoint deno $testTag run --allow-net /ct/stub-scholarly.ts
   if ($script:rc -eq 0) { $made.containers += $stubName }
@@ -583,6 +593,71 @@ try {
   } catch { $media = -1 }
   Save 'image-paths.log' "$s1`n$s2`nmedia parts in the DOCX: $media"
   Check ($ok -and ($s1 -match '^PASS') -and ($s2 -match '^PASS') -and ($media -eq 0)) "A3-13: /proc/self/environ, ../etc/passwd, .git/config and http://evil.stub as images export 200 (DOCX, PDF), embed nothing ($media media parts) and carry neither secret"
+  # i. attempt 4 (bounded round): the key or the mailto between < and >, and transformed (tester ADV-4,
+  # bar c, N2) - fresh, then a row cached by attempt 3; an image behind '..' / a hidden segment (N3);
+  # relative links (N4); a control character (N7)
+  Write-Host '  [5i] attempt 4: a key between < and >, transformed, fresh and cached; image traversal; relative links; a control character'
+  $null = StubPost '/_reset'
+  $ok = $true
+  foreach ($f in @('md', 'txt', 'docx', 'pdf')) {
+    $o = Export $wbName 'notes/p6a/wrapped-key.md' $f "wrapped-key.$f.json"
+    $j = [System.IO.File]::ReadAllText((Join-Path $out "wrapped-key.$f.json"))
+    if (($o -notmatch '^status 422 ') -or ($j -match [regex]::Escape($oaKey)) -or ($j -match [regex]::Escape($mailto))) { $ok = $false; Fail "wrapped-key $f export: $o" }
+  }
+  $r = Client @('refused', '/ev/exports/wrapped-key.pdf.json', '8', 'OpenAlex returned a record carrying credential-shaped text (refused)')
+  $o2 = Psql "SELECT count(*) FROM public.reference_resolutions rr JOIN public.reference_records r ON r.id = rr.reference_id WHERE r.source_id::text BETWEEN 'f6a00000-0000-4000-8000-000000000119' AND 'f6a00000-0000-4000-8000-000000000126'"
+  $o3 = Export $wbName 'notes/p6a/wrapped-key.md' 'txt' 'wrapped-key.copy.txt' '&mode=copy'
+  $s3 = Client @('secret', '/ev/exports/wrapped-key.copy.txt', $oaKey, $mailto)
+  Save 'wrapped-key.log' "$r`ncached rows: $($o2.Trim())`n$o3`n$s3"
+  Write-Host ($r -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
+  Check ($ok -and ($r -match '^PASS')) 'A4 / A3-4: the eight wrapped or transformed records (< K >, <K>, <1 K>, < K and later >, <<K>>, author < M >, %-encoded K, M with (at)) are refused fresh in MD, TXT, DOCX and PDF: 422, each named credential-shaped, no body carries either secret'
+  Check ($o2.Trim() -eq '0') "A4 / A3-4: none of the eight is cached ($($o2.Trim()) rows)"
+  Check (($o3 -match '^status 200 ') -and ($s3 -match '^PASS')) "A4 / A3-4: the Copy page of the note answers 200 and carries neither secret: $o3 | $s3"
+  # cached: resolved clean, then the row rewritten as attempt 3 stored `Angle < KEY > title` / `< MAILTO >`
+  $o = Export $wbName 'notes/p6a/wrapped-cached.md' 'txt' 'wrapped-cached.first.txt'
+  $u = Psql "UPDATE public.reference_resolutions rr SET csl = jsonb_set(jsonb_set(rr.csl, '{title}', to_jsonb(('Angle < ' || '$oaKey' || ' > title')::text)), '{author}', jsonb_build_array(jsonb_build_object('literal', ('< ' || '$mailto' || ' >')::text))) FROM public.reference_records r WHERE r.id = rr.reference_id AND r.source_id = 'f6a00000-0000-4000-8000-000000000127' RETURNING rr.via"
+  $null = StubPost '/_reset'
+  $ok = ($o -match '^status 200 ') -and ($u.Trim() -eq 'openalex')
+  if (-not $ok) { Fail "wrapped-cached: the clean first export or the rewrite: $o | rewritten: $u" }
+  foreach ($f in @('md', 'txt', 'docx', 'pdf')) {
+    $o = Export $wbName 'notes/p6a/wrapped-cached.md' $f "wrapped-cached.$f.json"
+    $j = [System.IO.File]::ReadAllText((Join-Path $out "wrapped-cached.$f.json"))
+    if (($o -notmatch '^status 422 ') -or ($j -notmatch 'cached record carries credential-shaped text') -or ($j -match [regex]::Escape($oaKey)) -or ($j -match [regex]::Escape($mailto))) { $ok = $false; Fail "wrapped-cached $f export: $o $j" }
+  }
+  $o3 = Export $wbName 'notes/p6a/wrapped-cached.md' 'txt' 'wrapped-cached.copy.txt' '&mode=copy'
+  $s3 = Client @('secret', '/ev/exports/wrapped-cached.copy.txt', $oaKey, $mailto)
+  $logW = @(StubLog 'stub-log-wrapped-cached.json' | ForEach-Object { $_ })
+  Save 'wrapped-cached.log' "rewritten: $($u.Trim())`n$o3`n$s3`nrequests after the rewrite: $($logW.Count)"
+  Check $ok 'A4 / A3-4: a row cached by attempt 3 holding the title `Angle < KEY > title` and the author `< MAILTO >` is refused in MD, TXT, DOCX and PDF: 422 naming the cached record, no body carries either secret'
+  Check (($o3 -match '^status 200 ') -and ($s3 -match '^PASS') -and ($logW.Count -eq 0)) "A4 / A3-4: its Copy page answers 200 and carries neither secret; no request was made ($($logW.Count)): $o3 | $s3"
+  # N3: a real PNG at ../x.png (the vault's notes/x.png) and at .hidden/x.png: only the guard keeps them out
+  $o = Export $wbName 'notes/p6a/image-traversal.md' 'docx' 'image-traversal.docx'
+  $o2 = Export $wbName 'notes/p6a/image-traversal.md' 'pdf' 'image-traversal.pdf'
+  $media = -1
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $out 'image-traversal.docx'))
+    $media = @($zip.Entries | Where-Object { $_.FullName -like 'word/media/*' }).Count
+    $zip.Dispose()
+  } catch { $media = -1 }
+  Save 'image-traversal.log' "$o`n$o2`nmedia parts in the DOCX: $media"
+  Check (($o -match '^status 200 ') -and ($o2 -match '^status 200 ') -and ($media -eq 1)) "A4-N3: ![up](../x.png) and ![hid](.hidden/x.png), real PNGs, are not embedded; img/ok.png is (DOCX: $media media part(s); PDF: $o2)"
+  # N4: relative links and anchors are rendered as their text, 200 in every format
+  $ok = $true
+  foreach ($f in @('md', 'txt', 'docx', 'pdf')) {
+    $o = Export $wbName 'notes/p6a/relative-links.md' $f "relative-links.$f"
+    if ($o -notmatch '^status 200 ') { $ok = $false; Fail "relative-links $f export: $o" }
+  }
+  $md = [System.IO.File]::ReadAllText((Join-Path $out 'relative-links.md'))
+  $o = Client @('structure', '/ev/exports/relative-links.md', '/ev/exports/relative-links.docx', '/ev/exports/relative-links.pdf', '/ev/exports/relative-links.txt')
+  $structRc = $script:rc
+  Save 'relative-links.log' $o
+  Check ($ok -and ($structRc -eq 0) -and ($md -notmatch '\]\((notes/other\.md|#part|\.\./up\.md)\)') -and ($md -match 'the other note') -and ($md -match '\]\(https://example\.org/s\)')) 'A4-N4: a relative link and an anchor are rendered as their text in MD, TXT, DOCX and PDF (200; the http link stays a link)'
+  # N7: a control character is refused before typesetting, 422 glyphs, named
+  $o = Export $wbName 'notes/p6a/control-char.md' 'pdf' 'control-char.json'
+  $j = [System.IO.File]::ReadAllText((Join-Path $out 'control-char.json'))
+  Save 'control-char.log' "$o`n$j"
+  Check (($o -match '^status 422 ') -and ($j -match '"code":"glyphs"') -and ($j -match 'U\+0007')) "A4-N7: a control character (U+0007) is refused 422 glyphs before typesetting, named: $o"
   # near-miss 1: pathological nesting refused before pandoc, fast
   foreach ($c in @(@('brackets', 'bracket nesting depth'), @('deep-list', 'list nesting depth'), @('stars', 'delimiter|parser'))) {
     $t0 = Get-Date

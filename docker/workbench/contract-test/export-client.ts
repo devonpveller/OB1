@@ -189,7 +189,7 @@ if (mode === "get") {
   const [file, ...secrets] = args;
   const b = await Deno.readFile(file);
   const views = file.endsWith(".pdf") ? [await pdfText(b), new TextDecoder("latin1").decode(b)] : file.endsWith(".docx") ? [await docxXml(b)] : [new TextDecoder().decode(b)];
-  const hits = secrets.filter((s) => views.some((v) => v.includes(s) || v.replace(/<[^>]*>/g, "").replace(/\s+/g, "").includes(s)));
+  const hits = secrets.filter((s) => views.some((v) => v.includes(s) || v.replace(/\s+/g, "").includes(s) || v.replace(/<[^>]*>/g, "").replace(/\s+/g, "").includes(s)));
   console.log(`${hits.length ? "FAIL" : "PASS"} secret: ${file.split("/").pop()} ${hits.length ? `carries ${hits.length} configured secret(s)` : "carries neither secret"}`);
   if (hits.length) rc = 1;
 } else {

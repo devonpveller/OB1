@@ -22,6 +22,10 @@
 //   10.5555/p6a.s01              OpenAlex 200 whose title holds the request's key split by <i></i> and
 //                                its mailto split by <b></b>; Crossref 404
 //   10.5555/p6a.s02              the same split by <sc></sc> and <span class="nocase"></span>
+//   10.5555/p6a.w01..w08         attempt 4: OpenAlex 200 whose title (or author) holds the key / mailto
+//                                between `<` and `>` (`< K >`, `<K>`, `<1 K>`, `< K and later >`, `<<K>>`,
+//                                author `< M >`), the key %-encoded, the mailto with (at); Crossref 404
+//   10.5555/p6a.w09              attempt 4: a clean 200 (cached, then rewritten by the runner)
 // Any other .stub host (evil.stub) is logged and answered 200, so a followed redirect is SEEN.
 // Run with --network-alias api.openalex.stub/api.crossref.stub/evil.stub as the DIRECT CATCHER, it
 // logs a request that skipped the proxy (the run expects none).
@@ -48,6 +52,21 @@ function openalexWork(key: string, query: URLSearchParams): [number, unknown, st
     const [k, m] = [query.get("api_key") ?? "", query.get("mailto") ?? ""];
     const [a, b] = key.endsWith("s01") ? ["<i></i>", "<b></b>"] : ["<sc></sc>", '<span class="nocase"></span>'];
     return [200, { id: "https://openalex.org/W6AS0" + key.slice(-1), title: `Split ${k.slice(0, 6)}${a}${k.slice(6)} and ${m.slice(0, 5)}${b}${m.slice(5)}`, type: "article" }];
+  }
+  // rw-p6a-resolve attempt 4 (tester ADV-4, N2): the key / mailto between `<` and `>`, and transformed
+  if (/^doi:10\.5555\/p6a\.w0[1-9]$/.test(key)) {
+    const [k, m] = [query.get("api_key") ?? "", query.get("mailto") ?? ""];
+    const pct = (s: string) => [...new TextEncoder().encode(s)].map((b) => "%" + b.toString(16).padStart(2, "0")).join("");
+    const shape: Record<string, [string, string]> = {
+      w01: [`Angle < ${k} > title`, "W4 Author w01"], w02: ["Angle mail in author", `< ${m} >`],
+      w03: [`Tight <${k}> title`, "W4 Author w03"], w04: [`Digit <1 ${k}> title`, "W4 Author w04"],
+      w05: [`Unclosed < ${k} and later > end`, "W4 Author w05"], w06: [`Double <<${k}>> title`, "W4 Author w06"],
+      w07: [`Encoded ${pct(k)} title`, "W4 Author w07"], w08: ["Mail at in author", m.replace("@", " (at) ")],
+      w09: ["Clean w09 title", "W4 Author w09"], // clean: cached, then rewritten as attempt 3 stored it
+    };
+    const [title, author] = shape[key.slice(-3)];
+    return [200, { id: "https://openalex.org/W6AW" + key.slice(-2), doi: `https://doi.org/${key.slice(4)}`, title, type: "article",
+      publication_date: "2021-02-01", authorships: [{ author: { display_name: author } }], primary_location: { source: { display_name: "W4 Journal" } }, biblio: { volume: "1" } }];
   }
   if (key === "doi:10.48550/arxiv.2101.00001") {
     return [200, { id: "https://openalex.org/W6A0000001", doi: "https://doi.org/10.48550/arxiv.2101.00001", title: "Resolved arXiv work (OpenAlex)",
