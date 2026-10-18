@@ -26,7 +26,8 @@
 //                                          relationships and HYPERLINK fields, the PDF's /URI actions and
 //                                          JavaScript/Launch/OpenAction/AA - all http(s)/mailto or absent
 //   secret   <file> <secret>...            the file (PDF text + objects, DOCX XML, text) carries no secret,
-//                                          as written or with tags and whitespace removed
+//                                          as written or with tags and whitespace removed; attempt 5: nor to
+//                                          a reader (NFKD, marks and invisibles stripped, letters and digits)
 // The key is read from $WB_KEY and sent as X-Brain-Key, as Caddy does.
 import { pdfFonts, pdfText } from "/app/src/export/pdf_tools.ts";
 import { docxXml } from "/app/src/export/zip_read.ts";
@@ -189,7 +190,9 @@ if (mode === "get") {
   const [file, ...secrets] = args;
   const b = await Deno.readFile(file);
   const views = file.endsWith(".pdf") ? [await pdfText(b), new TextDecoder("latin1").decode(b)] : file.endsWith(".docx") ? [await docxXml(b)] : [new TextDecoder().decode(b)];
-  const hits = secrets.filter((s) => views.some((v) => v.includes(s) || v.replace(/\s+/g, "").includes(s) || v.replace(/<[^>]*>/g, "").replace(/\s+/g, "").includes(s)));
+  // attempt 5: and to a READER - marks and invisible characters stripped after NFKD, letters and digits only
+  const rd = (v: string) => v.normalize("NFKD").replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  const hits = secrets.filter((s) => views.some((v) => v.includes(s) || v.replace(/\s+/g, "").includes(s) || v.replace(/<[^>]*>/g, "").replace(/\s+/g, "").includes(s) || rd(v).includes(rd(s))));
   console.log(`${hits.length ? "FAIL" : "PASS"} secret: ${file.split("/").pop()} ${hits.length ? `carries ${hits.length} configured secret(s)` : "carries neither secret"}`);
   if (hits.length) rc = 1;
 } else {

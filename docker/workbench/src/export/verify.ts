@@ -17,6 +17,10 @@
 // normalised text, and their transformed forms (NFKC, percent-decoded, at/dot spelled out, letters
 // and digits only, base64). attempt 4: attempt 3 searched only a normalised text whose normaliser
 // deleted `< KEY >` as if it were a tag, so the MD, TXT, PDF and Copy page printed the key with 200.
+// attempt 5: secretIn IS the credential invariant (credentials.ts canon: NFD, every combining mark and
+// invisible removed BEFORE NFKC, casefold, the declared look-alikes, letters and digits; over every
+// view the declared encodings reach) - the same function and list as the input and cached-row checks
+// and the exporter's error bodies. Attempt 4 composed `Z` + U+0301 into `Ź` first and served the key.
 // A failure is a RenderFailed: `output-verification` naming the format and the first offending
 // target, or `credential` - 503, never a 200.
 import { base64Forms, decodeEntities, INVISIBLE, secretIn } from "./credentials.ts";
@@ -145,8 +149,9 @@ export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pd
   }
 }
 
-// A secret in binary bytes: as written (case-insensitive) and as base64, always; and, for a part
-// up to 4 MB, every form secretIn reads, decoded as Latin-1 and as UTF-8 (a fullwidth key is UTF-8).
+// A secret in binary bytes: as written (case-insensitive) and as base64 (depth 2), always; and, for a
+// part up to 4 MB, the whole invariant (secretIn), decoded as Latin-1 and as UTF-8 (a fullwidth key
+// is UTF-8). Over 4 MB: raw and base64 only (a declared residual, bounded cost).
 const FULL_FORMS_MAX = 4 * 1024 * 1024;
 function secretInBytes(b: Uint8Array, secrets: string[]): string | null {
   if (!secrets.length) return null;

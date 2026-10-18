@@ -68,4 +68,14 @@ SELECT ('f6a00000-0000-4000-8000-' || lpad((118 + n)::text, 12, '0'))::uuid,
        'Fixture wrapped-key record w0' || n || ': an authored fixture text.', 'paper', 'doi.org', '{}'
   FROM generate_series(1, 9) AS n;
 
+-- rw-p6a-resolve attempt 5: 128-134, the stub answers p6a.m01..m05 (the key / mailto with a combining
+-- mark; m05 clean, cached and then rewritten); m06 and m07 are dead, and the runner gives their source
+-- records a title holding the mailto (the 422 body must withhold it)
+INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata)
+SELECT ('f6a00000-0000-4000-8000-' || lpad((127 + n)::text, 12, '0'))::uuid,
+       'https://doi.org/10.5555/p6a.m0' || n,
+       'Fixture combining-mark record m0' || n,
+       'Fixture combining-mark record m0' || n || ': an authored fixture text.', 'paper', 'doi.org', '{}'
+  FROM generate_series(1, 7) AS n;
+
 NOTIFY pgrst, 'reload schema';

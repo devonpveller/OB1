@@ -26,6 +26,11 @@
 //                                between `<` and `>` (`< K >`, `<K>`, `<1 K>`, `< K and later >`, `<<K>>`,
 //                                author `< M >`), the key %-encoded, the mailto with (at); Crossref 404
 //   10.5555/p6a.w09              attempt 4: a clean 200 (cached, then rewritten by the runner)
+//   10.5555/p6a.m01..m04         attempt 5: OpenAlex 200 whose title (or author) holds the key / mailto with
+//                                a combining mark (U+0301 once, after every character, in the mailto; U+0332)
+//   10.5555/p6a.m05              attempt 5: a clean 200 (cached, then rewritten with a combining mark)
+//   10.5555/p6a.m06, m07         attempt 5: not answered by either service (dead; the runner gives their
+//                                SOURCE RECORDS a title holding the mailto)
 // Any other .stub host (evil.stub) is logged and answered 200, so a followed redirect is SEEN.
 // Run with --network-alias api.openalex.stub/api.crossref.stub/evil.stub as the DIRECT CATCHER, it
 // logs a request that skipped the proxy (the run expects none).
@@ -67,6 +72,22 @@ function openalexWork(key: string, query: URLSearchParams): [number, unknown, st
     const [title, author] = shape[key.slice(-3)];
     return [200, { id: "https://openalex.org/W6AW" + key.slice(-2), doi: `https://doi.org/${key.slice(4)}`, title, type: "article",
       publication_date: "2021-02-01", authorships: [{ author: { display_name: author } }], primary_location: { source: { display_name: "W4 Journal" } }, biblio: { volume: "1" } }];
+  }
+  // rw-p6a-resolve attempt 5 (tester t-rw-p6a-4, A3-4 / bar c): ONE combining mark that composes under
+  // NFKC (U+0301 after a letter), after every character, in the mailto, and one with no merged form
+  // (U+0332); m05 clean (cached, then rewritten by the runner). m06/m07 are not answered (dead).
+  if (/^doi:10\.5555\/p6a\.m0[1-5]$/.test(key)) {
+    const [k, m] = [query.get("api_key") ?? "", query.get("mailto") ?? ""];
+    const shape: Record<string, [string, string]> = {
+      m01: [`Accent ${k.slice(0, 6)}́${k.slice(6)} title`, "M5 Author m01"],
+      m02: [`Accent ${[...k].map((c) => c + "́").join("")} title`, "M5 Author m02"],
+      m03: ["Accent mail in author", m.replace("@e", "@é")],
+      m04: [`Line ${k.slice(0, 6)}̲${k.slice(6)} title`, "M5 Author m04"],
+      m05: ["Clean m05 title", "M5 Author m05"],
+    };
+    const [title, author] = shape[key.slice(-3)];
+    return [200, { id: "https://openalex.org/W6AM" + key.slice(-2), doi: `https://doi.org/${key.slice(4)}`, title, type: "article",
+      publication_date: "2021-03-01", authorships: [{ author: { display_name: author } }], primary_location: { source: { display_name: "M5 Journal" } }, biblio: { volume: "1" } }];
   }
   if (key === "doi:10.48550/arxiv.2101.00001") {
     return [200, { id: "https://openalex.org/W6A0000001", doi: "https://doi.org/10.48550/arxiv.2101.00001", title: "Resolved arXiv work (OpenAlex)",

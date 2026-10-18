@@ -37,6 +37,7 @@ import type { ExportRef } from "./repo.ts";
 import { citeKey, type FormatDef, type RefItem, render as realRender, RenderFailed, type StyleDef, UnnumberedCitation } from "./render.ts";
 import { aboutExport } from "./about.ts";
 import type { Limits } from "./markdown.ts";
+import { secretIn } from "./credentials.ts";
 
 export interface ExporterDeps {
   reg: { entries(registry: string): Promise<RegistryEntry[]> };
@@ -153,6 +154,24 @@ const STATUS_OF: Record<string, 422 | 503> = {
   font: 503, "style-integrity": 503, "output-verification": 503, credential: 503, format: 503,
 };
 
+// rw-p6a-resolve attempt 5 (the tester's attempt-4 near-miss 1): an ERROR body is an output too. A
+// 422's reference whose text (a source record's title, an identifier) carries the configured key or
+// mailto under the credential invariant (credentials.ts secretIn) is answered with that text withheld;
+// any body that would still carry it is not served (503 credential).
+const WITHHELD = "withheld: it carries the configured service credential";
+function withheldRefs<T extends Record<string, unknown>>(refs: T[], secrets: string[]): T[] {
+  return refs.map((u) => {
+    const out: Record<string, unknown> = { ...u };
+    const held = Object.keys(out).filter((k) => typeof out[k] === "string" && secretIn(out[k] as string, secrets) !== null);
+    for (const k of held) out[k] = null;
+    return (held.length ? { ...out, withheld: `${held.join(", ")} ${WITHHELD}` } : out) as T;
+  });
+}
+export function guardBody(body: Record<string, unknown>, status: number, secrets: string[]): { body: Record<string, unknown>; status: number } {
+  if (secretIn(JSON.stringify(body), secrets) === null) return { body, status };
+  return { body: { error: "the response was not served: it would carry the configured service credential", code: "credential" }, status: 503 };
+}
+
 export function createExporter(deps: ExporterDeps): Hono {
   const app = new Hono();
   const render = deps.render ?? realRender;
@@ -162,49 +181,53 @@ export function createExporter(deps: ExporterDeps): Hono {
   app.get("/about", async (c) => c.json(aboutExport(await live("citation_styles"), await live("export_formats"))));
 
   app.get("/", async (c) => {
+    const json = (body: Record<string, unknown>, status: number) => {
+      const g = guardBody(body, status, deps.resolver.secrets);
+      return c.json(g.body, g.status as 400);
+    };
     const path = c.req.query("path") || "";
     const mode = (c.req.query("mode") || "").toLowerCase();
-    if (mode && mode !== "copy") return c.json({ error: `unsupported mode: ${mode}` }, 400);
+    if (mode && mode !== "copy") return json({ error: `unsupported mode: ${mode}` }, 400);
     const copy = mode === "copy";
     const fmtKey = c.req.query("format")?.toLowerCase();
     const noWrap = copy || (c.req.query("wrap") || "").toLowerCase() === "none"; // "Copy page": no hard wrap
     const formats = await live("export_formats");
     const fmtEntry = fmtKey ? formats.find((e) => e.key === fmtKey) : formats.find((e) => (copy ? e.definition.copy : e.definition.default) === true);
-    if (!fmtEntry) return c.json({ error: fmtKey ? `unsupported format: ${fmtKey}` : `no default ${copy ? "copy" : "export"} format is registered` }, 400);
-    if (copy && fmtEntry.definition.copy !== true) return c.json({ error: `format ${fmtEntry.key} is not a copy format` }, 400);
+    if (!fmtEntry) return json({ error: fmtKey ? `unsupported format: ${fmtKey}` : `no default ${copy ? "copy" : "export"} format is registered` }, 400);
+    if (copy && fmtEntry.definition.copy !== true) return json({ error: `format ${fmtEntry.key} is not a copy format` }, 400);
     const styles = await live("citation_styles");
     const styleKey = c.req.query("style");
     const styleEntry = styleKey ? styles.find((e) => e.key === styleKey) : styles.find((e) => e.definition.default === true);
-    if (!styleEntry) return c.json({ error: styleKey ? `unsupported citation style: ${styleKey}` : "no default citation style is registered" }, 400);
+    if (!styleEntry) return json({ error: styleKey ? `unsupported citation style: ${styleKey}` : "no default citation style is registered" }, 400);
 
     let rel: string;
     try {
       rel = safeRelPath(path);
     } catch (e) {
-      return c.json({ error: String((e as Error).message) }, 400);
+      return json({ error: String((e as Error).message) }, 400);
     }
-    if (!rel.endsWith(".md")) return c.json({ error: "only .md notes can be exported" }, 400);
+    if (!rel.endsWith(".md")) return json({ error: "only .md notes can be exported" }, 400);
     const md = await deps.readNote(rel);
-    if (md === null) return c.json({ error: "note not found" }, 404);
+    if (md === null) return json({ error: "note not found" }, 404);
     const base = (rel.split("/").pop() || "note").replace(/\.md$/, "");
 
     let refs: ExportRef[];
     try {
       refs = await deps.loadRefs(rel, md);
     } catch (e) {
-      if (e instanceof MigrationRefused) return c.json({ error: e.message, detail: e.detail }, 409);
+      if (e instanceof MigrationRefused) return json({ error: e.message, detail: e.detail }, 409);
       throw e;
     }
     const { items, unresolved } = await referenceItems(deps, refs, kindsOf(await live("reference_identifier_kinds")), copy);
     if (unresolved.length && !copy) {
-      return c.json({
+      return json({
         error: `export refused: ${unresolved.length} of ${refs.length} references could not be resolved`,
         resolver: deps.resolver.status,
         // attempt 3 (the tester's near-miss 2): a suppressed source is named by its number and
         // "suppressed" only - never its title or its id
-        references: unresolved.map(({ marker: _m, ...u }) => refs.find((r) => r.number === u.number)?.suppressed
+        references: withheldRefs(unresolved.map(({ marker: _m, ...u }) => refs.find((r) => r.number === u.number)?.suppressed
           ? { number: u.number, cited_ref: null, source_id: null, title: null, identifier: null, reason: "suppressed" }
-          : u),
+          : u), deps.resolver.secrets),
       }, 422);
     }
     const refItems = copy ? [...items, ...unresolved.map((u) => markedItem(u, refs))].sort((a, b) => a.number - b.number) : items;
@@ -229,10 +252,10 @@ export function createExporter(deps: ExporterDeps): Hono {
         },
       });
     } catch (e) {
-      if (e instanceof UnnumberedCitation) return c.json({ error: e.message, references: [] }, 422);
+      if (e instanceof UnnumberedCitation) return json({ error: e.message, references: [] }, 422);
       if (e instanceof RenderFailed) {
         if (e.detail) log(`[export] ${rel} (${format.key}, ${styleEntry.key}): ${e.code}: ${e.detail}`);
-        return c.json({ error: e.message, code: e.code, ...e.extra }, STATUS_OF[e.code] ?? 422);
+        return json({ error: e.message, code: e.code, ...e.extra }, STATUS_OF[e.code] ?? 422);
       }
       throw e;
     }

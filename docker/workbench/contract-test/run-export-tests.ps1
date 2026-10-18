@@ -630,6 +630,57 @@ try {
   Save 'wrapped-cached.log' "rewritten: $($u.Trim())`n$o3`n$s3`nrequests after the rewrite: $($logW.Count)"
   Check $ok 'A4 / A3-4: a row cached by attempt 3 holding the title `Angle < KEY > title` and the author `< MAILTO >` is refused in MD, TXT, DOCX and PDF: 422 naming the cached record, no body carries either secret'
   Check (($o3 -match '^status 200 ') -and ($s3 -match '^PASS') -and ($logW.Count -eq 0)) "A4 / A3-4: its Copy page answers 200 and carries neither secret; no request was made ($($logW.Count)): $o3 | $s3"
+  # j. attempt 5 (structural; tester t-rw-p6a-4, A3-4 / bar c): ONE combining mark in the key or the
+  # mailto - U+0301, which NFKC composes into a letter (attempt 4 kept it), after every character, in the
+  # mailto, and U+0332 (no merged form) - fresh, then a row rewritten with one; and a dead reference
+  # whose SOURCE RECORD title holds the mailto (the 422 body withholds it)
+  Write-Host '  [5j] attempt 5: a combining mark in the key or the mailto, fresh and cached; the 422 body of a dead reference'
+  $null = StubPost '/_reset'
+  $ok = $true
+  foreach ($f in @('md', 'txt', 'docx', 'pdf')) {
+    $o = Export $wbName 'notes/p6a/combining-key.md' $f "combining-key.$f.json"
+    $sj = Client @('secret', "/ev/exports/combining-key.$f.json", $oaKey, $mailto)
+    if (($o -notmatch '^status 422 ') -or ($sj -notmatch '^PASS')) { $ok = $false; Fail "combining-key $f export: $o | $sj" }
+  }
+  $r = Client @('refused', '/ev/exports/combining-key.pdf.json', '4', 'OpenAlex returned a record carrying credential-shaped text (refused)')
+  $o2 = Psql "SELECT count(*) FROM public.reference_resolutions rr JOIN public.reference_records r ON r.id = rr.reference_id WHERE r.source_id::text BETWEEN 'f6a00000-0000-4000-8000-000000000128' AND 'f6a00000-0000-4000-8000-000000000131'"
+  $o3 = Export $wbName 'notes/p6a/combining-key.md' 'txt' 'combining-key.copy.txt' '&mode=copy'
+  $s3 = Client @('secret', '/ev/exports/combining-key.copy.txt', $oaKey, $mailto)
+  Save 'combining-key.log' "$r`ncached rows: $($o2.Trim())`n$o3`n$s3"
+  Write-Host ($r -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
+  Check ($ok -and ($r -match '^PASS')) 'A5 / A3-4: the four combining-mark records (K with U+0301 once, after every character, M with U+0301, K with U+0332) are refused fresh in MD, TXT, DOCX and PDF: 422, each named credential-shaped, no body carries either secret (as written or to a reader)'
+  Check ($o2.Trim() -eq '0') "A5 / A3-4: none of the four is cached ($($o2.Trim()) rows)"
+  Check (($o3 -match '^status 200 ') -and ($s3 -match '^PASS')) "A5 / A3-4: the Copy page of the note answers 200 and carries neither secret: $o3 | $s3"
+  # cached: resolved clean, then the row rewritten as attempt 4 would have stored it (U+0301 inside)
+  $o = Export $wbName 'notes/p6a/combining-cached.md' 'txt' 'combining-cached.first.txt'
+  $u = Psql "UPDATE public.reference_resolutions rr SET csl = jsonb_set(jsonb_set(rr.csl, '{title}', to_jsonb(('Cached ' || left('$oaKey', 6) || chr(769) || substr('$oaKey', 7) || ' title')::text)), '{author}', jsonb_build_array(jsonb_build_object('literal', replace('$mailto', '@e', '@e' || chr(769))))) FROM public.reference_records r WHERE r.id = rr.reference_id AND r.source_id = 'f6a00000-0000-4000-8000-000000000132' RETURNING rr.via"
+  $null = StubPost '/_reset'
+  $ok = ($o -match '^status 200 ') -and ($u.Trim() -eq 'openalex')
+  if (-not $ok) { Fail "combining-cached: the clean first export or the rewrite: $o | rewritten: $u" }
+  foreach ($f in @('md', 'txt', 'docx', 'pdf')) {
+    $o = Export $wbName 'notes/p6a/combining-cached.md' $f "combining-cached.$f.json"
+    $j = [System.IO.File]::ReadAllText((Join-Path $out "combining-cached.$f.json"))
+    $sj = Client @('secret', "/ev/exports/combining-cached.$f.json", $oaKey, $mailto)
+    if (($o -notmatch '^status 422 ') -or ($j -notmatch 'cached record carries credential-shaped text') -or ($sj -notmatch '^PASS')) { $ok = $false; Fail "combining-cached $f export: $o $j" }
+  }
+  $o3 = Export $wbName 'notes/p6a/combining-cached.md' 'txt' 'combining-cached.copy.txt' '&mode=copy'
+  $s3 = Client @('secret', '/ev/exports/combining-cached.copy.txt', $oaKey, $mailto)
+  $logC = @(StubLog 'stub-log-combining-cached.json' | ForEach-Object { $_ })
+  Save 'combining-cached.log' "rewritten: $($u.Trim())`n$o3`n$s3`nrequests after the rewrite: $($logC.Count)"
+  Check $ok 'A5 / A3-4: a cached row holding the key with U+0301 inside it and the mailto with U+0301 is refused in MD, TXT, DOCX and PDF: 422 naming the cached record, no body carries either secret'
+  Check (($o3 -match '^status 200 ') -and ($s3 -match '^PASS') -and ($logC.Count -eq 0)) "A5 / A3-4: its Copy page answers 200 and carries neither secret; no request was made ($($logC.Count)): $o3 | $s3"
+  # the 422 body: two dead references whose source records hold the mailto (as written; with U+0301)
+  $u = Psql "UPDATE public.sources SET title = CASE id::text WHEN 'f6a00000-0000-4000-8000-000000000133' THEN 'Contact ' || '$mailto' || ' for the data' ELSE 'Contact ' || replace('$mailto', '@e', '@e' || chr(769)) || ' for the data' END WHERE id::text IN ('f6a00000-0000-4000-8000-000000000133', 'f6a00000-0000-4000-8000-000000000134') RETURNING id"
+  $ok = (@($u -split "`n" | Where-Object { $_.Trim() }).Count -eq 2)
+  if (-not $ok) { Fail "dead-secret: the source titles were not set: $u" }
+  foreach ($f in @('md', 'txt', 'docx', 'pdf')) {
+    $o = Export $wbName 'notes/p6a/dead-secret.md' $f "dead-secret.$f.json"
+    $j = [System.IO.File]::ReadAllText((Join-Path $out "dead-secret.$f.json"))
+    $sj = Client @('secret', "/ev/exports/dead-secret.$f.json", $oaKey, $mailto)
+    if (($o -notmatch '^status 422 ') -or ($j -notmatch 'withheld') -or ($sj -notmatch '^PASS')) { $ok = $false; Fail "dead-secret $f export: $o | $sj" }
+  }
+  Save 'dead-secret.log' "sources: $($u -replace "`n", ' ')`n$([System.IO.File]::ReadAllText((Join-Path $out 'dead-secret.txt.json')))"
+  Check $ok 'A5 (near-miss 1): a dead reference whose source record title holds the mailto (as written, or with U+0301) is refused 422 in MD, TXT, DOCX and PDF with that title withheld; no body carries either secret'
   # N3: a real PNG at ../x.png (the vault's notes/x.png) and at .hidden/x.png: only the guard keeps them out
   $o = Export $wbName 'notes/p6a/image-traversal.md' 'docx' 'image-traversal.docx'
   $o2 = Export $wbName 'notes/p6a/image-traversal.md' 'pdf' 'image-traversal.pdf'
