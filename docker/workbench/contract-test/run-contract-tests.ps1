@@ -406,7 +406,9 @@ try {
   # sessions' disposable runs on the same host create and orphan volumes concurrently.
   $ourVolumes = @()
   foreach ($c in $made.containers) {
-    $ourVolumes += @(((Dk inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' $c) -split '\s+') | Where-Object { $_ })
+    $mounts = Dk inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' $c
+    # an already-removed container (the research service) answers an error text, not names
+    if ($script:rc -eq 0) { $ourVolumes += @(($mounts -split '\s+') | Where-Object { $_ -match '^[A-Za-z0-9][A-Za-z0-9_.-]+$' }) }
     $null = Dk rm -f -v $c
   }
   if ($made.net) { $null = Dk network rm $net }
