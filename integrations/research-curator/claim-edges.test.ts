@@ -22,6 +22,20 @@ Deno.test({
   },
 });
 
+// attempt 6 (the structural round): the claim list - the parse, its drop rules and the meta-claim
+// patterns - has ONE source too (research-curator/claim-list.ts); the research service scores the
+// report from its byte-identical copy, so the scored claims are the filed claims by construction.
+const LIST_MINE = new URL("./claim-list.ts", import.meta.url);
+const LIST_THEIRS = new URL("../research-service/claim-list.ts", import.meta.url);
+const listReadable = (() => { try { Deno.statSync(LIST_THEIRS); return true; } catch { return false; } })();
+Deno.test({
+  name: "attempt 6: claim-list.ts is byte-identical to the research service's (one claim-list derivation)",
+  ignore: !listReadable,
+  fn() {
+    assertEquals(norm(Deno.readTextFileSync(LIST_MINE)), norm(Deno.readTextFileSync(LIST_THEIRS)));
+  },
+});
+
 Deno.test("attempt 4: parseSynthesisClaims files each line with claimEdges' tag and edges", () => {
   const lines: Array<[string, number[]]> = [
     ["SOURCED", [1]], ["SOURCED", [1, 2, 3]], ["INFERRED", [2]], ["UNCERTAIN", [1, 3]], ["SOURCED", [1, 2, 3, 4, 5]], ["INFERRED", [1, 2, 3, 4, 5, 6]],

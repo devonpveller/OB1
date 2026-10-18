@@ -35,11 +35,11 @@ type M = C.CredibilityModel;
 // deno-lint-ignore no-explicit-any
 const X = C as any;
 
-// ── attempt 3 fallbacks (RED runs only): what the pipeline did there ────────────────────────────────
-const filedLine: (m: M, kind: string, v: { line: number; tag: string; cites: number[]; verdict: string }, st: (n: number) => number | null) => C.LineCredibility =
-  X.filedLineCredibility ??
-  ((m: M, kind: string, v: { line: number; cites: number[]; verdict: string }, st: (n: number) => number | null) =>
-    C.lineCredibility(m, kind, v.line, v.verdict, v.cites.filter((n) => st(n) !== null).map((n) => ({ total: st(n)! }))));
+// attempt 6: a judged line is scored as the claim the curator's claim list (claim-list.ts) files from it -
+// its tag after the verdict (tagAfterEffect, as applyVerdicts writes it) and its citations; null = no claim
+const filedLine = (m: M, kind: string, v: { line: number; tag: string; cites: number[]; verdict: string }, st: (n: number) => number | null): C.ScoredClaim | null =>
+  C.filedClaimsCredibility(m, kind, `[${C.tagAfterEffect(v.tag, m.verdicts.get(v.verdict)!.tagEffect)}] The scored line. [Source ${v.cites.join(", ")}]`,
+    () => ({ line: v.line, verdict: v.verdict }), (n) => st(n))[0] ?? null;
 const storeView: (total: number, floor: number | null) => number = X.storeConfidence ?? ((x: number) => Math.fround(x));
 
 async function curator() {
@@ -288,9 +288,9 @@ t("attempt 4 F2 (case 24 extended): every line the curator files - SOURCED / INF
           const ts = tsLines[i];
           const row = await one<{ id: string; tag: string }>(c, `SELECT id::text AS id, epistemic_tag AS tag FROM public.claims WHERE text = $1`, [v.text]);
           const label = `${kind} run ${run} line ${i} ${v.tag}/${v.verdict} cites ${v.cites.length}`;
-          if (!row) {
-            if (ts.total !== 0) bad.push(`${label}: no claim was filed, TS line total ${ts.total}`);
-            storedTotals.push(0); storedBelow++;
+          // attempt 6: a line the curator does not file is no scored claim (and not in the report figure)
+          if (!row || !ts) {
+            if (row || ts) bad.push(`${label}: filed ${!!row}, scored ${!!ts}`);
             continue;
           }
           filedN++;
@@ -304,7 +304,7 @@ t("attempt 4 F2 (case 24 extended): every line the curator files - SOURCED / INF
           storedTotals.push(sql);
           if (sql < floor) storedBelow++;
         }
-        const tsReport = C.reportCredibility(m, kind, tsLines);
+        const tsReport = C.reportCredibility(m, kind, tsLines.filter((x): x is C.ScoredClaim => x !== null));
         const storedMean = storedTotals.length ? Math.round(storedTotals.reduce((a, x) => a + x, 0) / storedTotals.length * 1000) / 1000 : null;
         reports.push({ kind, ts: tsReport, storedBelow, storedMean });
         if (tsReport.below_floor !== storedBelow) bad.push(`${kind} run ${run}: metrics.credibility.below_floor ${tsReport.below_floor}, stored ${storedBelow}`);
@@ -347,7 +347,7 @@ t("attempt 4 F2: the tester's P1 shapes through the curator's own filing - INFER
       await writeClaims(c, synthesis, { threadId: null, synthesisId: null, sourceIds: ids, volatility: "slow", claimMetadata: { claim_kind: "practical" } });
       const cl = await one<{ id: string }>(c, `SELECT id::text AS id FROM public.claims WHERE text = $1`, [text]);
       const sql = await one<{ v: number; b: boolean }>(c, `SELECT after_confidence AS v, below_floor_after AS b FROM public.credibility_before_after WHERE claim_id = $1`, [cl.id]);
-      out.push({ tag, scores: scores.length, sql: Number(sql.v), sql_below: sql.b, ts: ts.total, ts_below: ts.below_floor });
+      out.push({ tag, scores: scores.length, sql: Number(sql.v), sql_below: sql.b, ts: ts!.total, ts_below: ts!.below_floor });
     }
     return out;
   });

@@ -14,6 +14,7 @@ Full design: [`../../../documentation/implementation-guide/expand-OB1-research-i
 | `index.ts` | the service: `GET /health`, `POST /ingest/research-package` |
 | `claims.ts` | Research Engine **P1.3** — `parseSynthesisClaims` (pure) + `writeClaims`: turn a synthesis's `[SOURCED]/[INFERRED]/[Source N]` tags into grounded claims + typed edges via `init-claims.sql` helpers. Not yet wired into `index.ts` (P2). |
 | `claims.test.ts` | 9 deno unit tests for the parser (`deno test --allow-net claims.test.ts`) |
+| `claim-list.ts` | THE claim list a synthesis files (rw-p3a-entail attempt 6): the tag segments, the claim text, the citations, the tag -> edge rule (`claim-edges.ts`) and every drop rule (empty text, no edge, a repeated text in the same synthesis, the meta-claim patterns). `writeClaims` files exactly `claimList().claims`; the research service scores its report from a byte-identical copy (`claim-edges.test.ts` in both services holds the identity; `claim-list.test.ts`) |
 | `backfill-thread-embeddings.ts` | one-time: embed existing threads (P0.2) |
 | `consolidate-threads.ts` | one-time: fold the existing fragmented threads (P5) |
 

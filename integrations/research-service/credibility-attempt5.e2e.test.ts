@@ -5,15 +5,19 @@
  * transaction per run that is rolled back.
  *
  * A4-1: harness.ts harden() runs numeric grounding AFTER the entailment verdicts, and attempt 4 scored a
- * line from its verdict-time tag; the curator filed the re-tagged line. Attempt 4's tests modelled the
- * pipeline as applyVerdicts -> the curator, so they could not see it. Here:
+ * line from its verdict-time tag; the curator filed the re-tagged line. Attempt 6 (the structural round)
+ * restated every case here on THE INVARIANT (fixtures/credibility-invariant.ts compareInvariant): the
+ * claims the run scores ARE the claims the curator files - count, order, text, tag, edges - each total
+ * == claim_confidence_d15 == the view bit for bit, footer == research_jobs.metrics.credibility == the
+ * filed claims (a judged line that yields no filed claim contributes nothing). Here:
  *   Case 41 drives the REAL runResearch (every model / network seam stubbed, the DATABASE real: staging,
  *           the registries, the stamps, the corroborations, the fold) -> the curator's own writeClaims on
- *           the package -> claim_confidence_d15 / the view / the stored REAL, and asserts per judged line
- *           run total == d15 == view (bit for bit), the floor verdict, storeConfidence(total) == stored
- *           REAL, and footer == research_jobs.metrics.credibility == the stored claims' roll-up.
+ *           the package, with lines re-tagged by numeric grounding, by a verdict, partial, gap, omnibus.
  *   Case 42 is the twins sweep in harden()'s REAL order (the tester's "mode B"): it calls the functions
- *           harden() calls (hardenJudged, curatorCopyLines, finalLineCredibility), never a model of them.
+ *           runResearch calls (hardenJudged, curatorCopyLines, buildCitedAndRenumber, scoreCuratorPackage),
+ *           never a model of them; attempt 6 adds every drop rule to its lines (the same text twice, a
+ *           case-only duplicate, empty claim texts, meta-claims, two tags on one line, a citation on a
+ *           continuation line).
  *   Case 43 is the refinery path (N2): lines grounded only in unfolded held sources, partly-stripped
  *           lines and a folded source, through the real fold.
  *   Case 44 is N1: the writer's edge statement (LINK_EDGE_SQL) and edgeWeightOk agree on every float32
@@ -26,9 +30,11 @@ import * as C from "./credibility.ts";
 import { citedLines, type LineVerdict } from "./entailment.ts";
 import { buildCitedAndRenumber } from "./lib.ts";
 import { edgeWeightOk } from "./claim-edges.ts";
-import { fixtureResolver } from "./fixtures/scholarly-network.ts";
 import * as H from "./harness.ts";
-import type { Deps, FetchResult, SearchHit } from "./harness.ts";
+import type { FetchResult, SearchHit } from "./harness.ts";
+import {
+  compareInvariant, curator, ENTITY, host, type LineSpec, page, QUERY, realDeps,
+} from "./fixtures/credibility-invariant.ts";
 
 const HOST = Deno.env.get("CRED_E2E_DB_HOST");
 const pool = HOST
@@ -40,18 +46,7 @@ const errOf = (e: unknown) => String((e as Error)?.message ?? e);
 const id = () => crypto.randomUUID();
 // deno-lint-ignore no-explicit-any
 const HX = H as any;
-// deno-lint-ignore no-explicit-any
-const CX = C as any;
 
-type Curator = {
-  writeClaims: (c: unknown, s: string, o: Record<string, unknown>) => Promise<{ claimIds: string[]; metaSkipped: number }>;
-  LINK_EDGE_SQL?: string;
-};
-async function curator(): Promise<Curator> {
-  const dir = Deno.env.get("CURATOR_DIR");
-  const url = dir ? `file://${dir.replace(/\\/g, "/").replace(/^([A-Za-z]):/, "/$1:")}/claims.ts` : new URL("../research-curator/claims.ts", import.meta.url).href;
-  return await import(url) as Curator;
-}
 async function inTx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
   const c = await pool!.connect();
   try {
@@ -75,7 +70,6 @@ async function attempt<T>(c: PoolClient, fn: () => Promise<T>): Promise<{ ok: T 
   }
 }
 const one = async <T>(c: PoolClient, sql: string, args: unknown[] = []) => (await c.queryObject<T>(sql, args)).rows[0];
-const r3 = (x: number) => Math.round(x * 1000) / 1000;
 async function ensureAppRole(): Promise<void> {
   const c = await pool!.connect();
   try {
@@ -85,8 +79,6 @@ async function ensureAppRole(): Promise<void> {
 }
 
 // ── the real run: every model / network seam stubbed, the database REAL ─────────────────────────────
-const ENTITY = "vestibular motion sickness";
-const QUERY = "Research on the mechanism of vestibular motion sickness: what do studies show?";
 const PAPER = "https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2021.757735/full";
 const VIA = "https://www.nature.com/articles/s44172-025-00417-2";
 const NEWS = "https://www.reuters.com/health/vestibular-motion-sickness-2026";
@@ -96,136 +88,22 @@ const EXTRA = [
   "https://apnews.com/article/vestibular-motion-sickness-travel",
   "https://www.theguardian.com/science/vestibular-motion-sickness",
 ];
-const host = (u: string) => new URL(u).hostname;
-const page = (url: string, content: string, links: string[] = []): FetchResult => ({
-  page: { url, title: `${ENTITY} - ${host(url)}`, content, domain: host(url), links }, outcome: "ok",
-});
-interface LineSpec { tok: string; tag: string; text: string; cites: string[]; verdict: string; split?: boolean; dup?: boolean }
 
-/** The synthesizer: each spec line cites the pool pages it names by the [Source N] the prompt gave them. */
-function synthFrom(specs: LineSpec[]) {
-  return (block: string): string => {
-    const n = (url: string) => {
-      for (const l of block.split("\n")) {
-        const i = l.indexOf("[Source ");
-        if (i >= 0 && l.includes(`(${host(url)})`)) return Number(l.slice(i + 8, l.indexOf("]", i)));
-      }
-      return 0;
-    };
-    return specs.map((s) => {
-      if (s.tag === "GAP") return `[GAP] ${s.text} ${s.tok}.`;
-      const nums = s.cites.map(n).filter((x) => x > 0);
-      if (s.dup && nums.length) nums.push(nums[0]);
-      const cite = s.split && nums.length > 1 ? `[Source ${nums[0]}][Source ${nums.slice(1).join(", ")}]` : `[Source ${nums.join(", ")}]`;
-      return `[${s.tag}] ${s.text} ${s.tok}. ${cite}`;
-    }).join("\n");
+/** The shapes a run's judged lines had (non-vacuity counts), from its verdicts. */
+function shapes(r: H.RunResult) {
+  return {
+    partial: r.verdicts.filter((v) => v.verdict === "partial").length,
+    gap: r.verdicts.filter((v) => v.verdict === "unsupported").length,
+    omnibus: r.verdicts.filter((v) => v.cites.length > 4).length,
   };
 }
-
-function realDeps(c: PoolClient, cur: Curator, specs: LineSpec[], pages: Record<string, FetchResult>, hits: SearchHit[]) {
-  const seen = { pkgs: [] as Record<string, unknown>[], filed: [] as string[] };
-  const d: Deps = {
-    embed: () => Promise.resolve(new Array(1024).fill(0)),
-    chat: (sys, user) => {
-      if (sys.includes("ENTAILMENT JUDGE")) {
-        const claim = (user.match(/^CLAIM \(tagged \[[A-Z]+\]\): (.*)$/m) ?? [])[1] ?? "";
-        const s = specs.find((x) => claim.includes(x.tok));
-        return Promise.resolve(JSON.stringify({ verdict: s?.verdict ?? "supports", rationale: "stub" }));
-      }
-      if (sys.includes("research planner")) return Promise.resolve(JSON.stringify({ needs: ["What mechanism causes vestibular motion sickness?"] }));
-      if (sys.includes("web-search queries")) return Promise.resolve(JSON.stringify({ entity: ENTITY, queries: ["mechanism studies"] }));
-      if (sys.includes("already covered by KNOWN CLAIMS")) return Promise.resolve(JSON.stringify({ gaps: [0] }));
-      if (sys.includes("GATHERED SOURCES")) return Promise.resolve(JSON.stringify({ open: [] }));
-      if (sys.includes("research strategist")) return Promise.resolve(JSON.stringify({ queries: [] }));
-      if (sys.includes("You screen a fetched web page")) return Promise.resolve("RELEVANT");
-      if (sys.includes("You screen fetched web content")) return Promise.resolve("CLEAN");
-      if (sys.includes("grounded synthesizer")) return Promise.resolve(synthFrom(specs)(user.slice(user.indexOf("SOURCES:"))));
-      return Promise.resolve("{}");
-    },
-    searchWeb: () => Promise.resolve(hits),
-    fetchPage: (url) => Promise.resolve(pages[url] ?? page(url, `${ENTITY} misc `.repeat(40))),
-    // the curator, for real: the package's sources are deduped into OB as the curator does
-    // (find_or_create_source) and ITS writeClaims files the package's synthesis
-    delegateToCurator: async (pkg) => {
-      seen.pkgs.push(pkg);
-      const ids: string[] = [];
-      for (const s of pkg.sources as Array<{ url: string; title: string; content: string; domain: string }>) {
-        const r = await one<{ id: string }>(c, `SELECT id::text AS id FROM public.find_or_create_source($1, $2, NULL, $3, 'web_article', NULL, $4, NULL::vector, '{}'::jsonb)`,
-          [s.url, s.content, s.title, s.domain]);
-        ids.push(r.id);
-      }
-      await cur.writeClaims(c, String(pkg.synthesis), { threadId: null, synthesisId: null, sourceIds: ids, volatility: "slow",
-        claimMetadata: { claim_kind: pkg.claim_kind } });
-      seen.filed.push(String(pkg.synthesis));
-      return { thread_id: null, persist: { source_ids: ids }, claims: {} };
-    },
-    scholarly: fixtureResolver(),
-    admission: null,
-  };
-  return { d, seen };
-}
-
-interface Compared { lines: number; filed: number; bit: number; bad: string[]; retagged: number; partial: number; gap: number; omnibus: number; unfiled: number }
-
-/** Run total vs the stored claim, per judged line; the roll-ups; the stored REAL after the flip. */
-async function compareRun(c: PoolClient, r: H.RunResult, specs: LineSpec[]): Promise<Compared> {
-  // deno-lint-ignore no-explicit-any
-  const rr = r as any;
-  const kind = r.metrics.credibility!.kind;
-  const floor = Number((await one<{ f: number }>(c, `SELECT public.credibility_claim_floor($1) AS f`, [kind])).f);
-  const out: Compared = { lines: 0, filed: 0, bit: 0, bad: [], retagged: 0, partial: 0, gap: 0, omnibus: 0, unfiled: 0 };
-  const stored: number[] = [];
-  let storedBelow = 0;
-  const ids: Array<{ id: string; total: number; label: string }> = [];
-  for (const [i, lc] of (rr.lineCredibility as C.FiledLine[]).entries()) {
-    out.lines++;
-    const v = rr.verdicts[i] as LineVerdict;
-    const spec = specs.find((s) => v.text.includes(s.tok));
-    const label = `line ${lc.line} [${v.tag}] ${v.verdict} ${spec?.tok ?? "?"}`;
-    if (v.verdict === "partial") out.partial++;
-    if (v.verdict === "unsupported") out.gap++;
-    if (v.cites.length > 4) out.omnibus++;
-    const row = spec ? await one<{ id: string; tag: string }>(c,
-      `SELECT id::text AS id, epistemic_tag AS tag FROM public.claims WHERE status = 'active' AND text LIKE '%' || $1 || '%'`, [spec.tok]) : undefined;
-    if (lc.filed_tag && lc.filed_tag.toUpperCase() !== v.tag && v.verdict === "supports" && v.cites.length <= 4) out.retagged++;
-    if (!row) {
-      out.unfiled++;
-      if (lc.total !== 0 || !lc.below_floor) out.bad.push(`${label}: not filed, run total ${lc.total} below ${lc.below_floor}`);
-      stored.push(0); storedBelow++;
-      continue;
-    }
-    out.filed++;
-    const d15 = Number((await one<{ v: number }>(c, `SELECT public.claim_confidence_d15($1) AS v`, [row.id])).v);
-    const view = await one<{ v: number; b: boolean }>(c,
-      `SELECT after_confidence AS v, below_floor_after AS b FROM public.credibility_before_after WHERE claim_id = $1`, [row.id]);
-    if (lc.total === d15 && Number(view.v) === d15 && lc.filed_tag === row.tag) out.bit++;
-    else out.bad.push(`${label}: filed ${row.tag} d15 ${d15} view ${view.v} | run ${lc.total} (run tag ${lc.filed_tag})`);
-    if ((d15 < floor) !== lc.below_floor || view.b !== (d15 < floor)) out.bad.push(`${label}: FLOOR d15 ${d15 < floor} view ${view.b} run ${lc.below_floor}`);
-    stored.push(d15);
-    if (d15 < floor) storedBelow++;
-    ids.push({ id: row.id, total: lc.total, label });
-  }
-  const mc = r.metrics.credibility!;
-  const storedMean = stored.length ? r3(stored.reduce((a, x) => a + x, 0) / stored.length) : null;
-  if (mc.value !== storedMean) out.bad.push(`METRICS value ${mc.value} stored ${storedMean}`);
-  if (mc.below_floor !== storedBelow) out.bad.push(`METRICS below_floor ${mc.below_floor} stored ${storedBelow}`);
-  if (mc.lines !== out.lines) out.bad.push(`METRICS lines ${mc.lines} judged ${out.lines}`);
-  const footer = (r.prose.match(/report credibility [^ ]+/) ?? [""])[0];
-  if (storedMean !== null && footer !== `report credibility ${storedMean.toFixed(2)}`) out.bad.push(`FOOTER '${footer}' stored ${storedMean}`);
-  // the stored REAL, after the operator's flip: storeConfidence(run total) bit for bit
-  await c.queryArray(`UPDATE public.credibility_trigger_state SET model = 'd15'`);
-  for (const x of ids) {
-    const v = Number((await one<{ v: number }>(c, `SELECT public.recompute_claim_confidence($1::uuid)::float8 AS v`, [x.id])).v);
-    if (v !== C.storeConfidence(x.total, floor)) out.bad.push(`${x.label}: STORED ${v} storeConfidence(run) ${C.storeConfidence(x.total, floor)}`);
-  }
-  await c.queryArray(`UPDATE public.credibility_trigger_state SET model = 'legacy'`);
-  return out;
-}
-
 const tok = () => `zq${id().replace(/[^a-f]/g, "").slice(0, 10)}`;
+const footerOf = (r: H.RunResult) => (r.prose.match(/report credibility(?::)? [^ ]+/) ?? [""])[0];
+// deno-lint-ignore no-explicit-any
+const metricsOf = (r: H.RunResult) => { const m = r.metrics.credibility! as any; return { v: m.value, below: m.below_floor, claims: m.claims, judged: m.judged_lines, not_filed: m.judged_not_filed }; };
 
 // ── Case 41: the REAL harden() order, end to end ─────────────────────────────────────────────────────
-t("attempt 5 A4-1 (Case 41): through the REAL runResearch -> the curator's writeClaims, every judged line's run total == claim_confidence_d15 == the view, the floor verdict and the stored REAL agree, and footer == metrics == the stored roll-up - with lines re-tagged by numeric grounding, by a verdict, partial, gap and omnibus lines", async () => {
+t("attempt 5 A4-1 (Case 41): through the REAL runResearch -> the curator's writeClaims, the scored claims ARE the filed claims and each total == claim_confidence_d15 == the view, the floor verdict and the stored REAL agree, and footer == metrics == the filed claims - with lines re-tagged by numeric grounding, by a verdict, partial, gap and omnibus lines", async () => {
   const cur = await curator();
   const specs: LineSpec[] = [
     { tok: tok(), tag: "SOURCED", text: `Visually induced ${ENTITY} follows a visual-vestibular mismatch`, cites: [PAPER], verdict: "supports" },
@@ -257,20 +135,20 @@ t("attempt 5 A4-1 (Case 41): through the REAL runResearch -> the curator's write
   await inTx(async (c) => {
     const { d, seen } = realDeps(c, cur, specs, pages, hits);
     const r = await H.runResearch(d, c, QUERY, { origin: "owui" });
-    assertEquals(seen.pkgs.length, 1, "the curator was handed one package");
-    const cmp = await compareRun(c, r, specs);
+    assertEquals(seen.filed.length, 1, "the curator was handed one package");
+    const inv = await compareInvariant(c, r, seen.filed[0]);
+    const sh = shapes(r);
     console.log(`CASE 41: kind ${r.metrics.credibility!.kind}; ungrounded figures ${JSON.stringify(r.ungroundedNumbers)}; ` +
-      `lines ${cmp.lines}, filed ${cmp.filed}, bit-identical ${cmp.bit}/${cmp.filed}, unfiled ${cmp.unfiled}, re-tagged after the verdict ${cmp.retagged}, ` +
-      `partial ${cmp.partial}, gap ${cmp.gap}, omnibus ${cmp.omnibus}; metrics ${JSON.stringify({ v: r.metrics.credibility!.value, below: r.metrics.credibility!.below_floor, lines: r.metrics.credibility!.lines })}; ` +
-      `footer '${(r.prose.match(/report credibility [^ ]+/) ?? [""])[0]}'`);
-    console.log("CASE 41 filed synthesis:\n" + seen.filed[0]);
-    for (const b of cmp.bad) console.log(`  DISAGREE ${b}`);
+      `judged ${inv.judged}, scored ${inv.scored}, filed ${inv.filed}, bit-identical ${inv.bit}/${inv.filed}, judged-not-filed ${inv.notFiled}, re-tagged after the verdict ${inv.retagged}, ` +
+      `partial ${sh.partial}, gap ${sh.gap}, omnibus ${sh.omnibus}; metrics ${JSON.stringify(metricsOf(r))}; footer '${footerOf(r)}'`);
+    console.log("CASE 41 filed synthesis:\n" + seen.filed[0].synthesis);
+    for (const b of inv.bad) console.log(`  DISAGREE ${b}`);
     // the case is not vacuous: every shape the finding named is in it
-    assert(cmp.retagged >= 2, `re-tagged by numeric grounding after a supports verdict: ${cmp.retagged}`);
-    assert(cmp.partial >= 2 && cmp.gap >= 1 && cmp.omnibus >= 2 && cmp.filed >= 7, JSON.stringify(cmp));
+    assert(inv.retagged >= 2, `re-tagged by numeric grounding after a supports verdict: ${inv.retagged}`);
+    assert(sh.partial >= 2 && sh.gap >= 1 && sh.omnibus >= 2 && inv.filed >= 7, JSON.stringify({ ...sh, filed: inv.filed }));
     assert((r.ungroundedNumbers ?? []).length >= 3, `numeric grounding re-tagged ${JSON.stringify(r.ungroundedNumbers)}`);
-    assertEquals(cmp.bad, [], "run vs stored disagreements");
-    assertEquals(cmp.bit, cmp.filed);
+    assertEquals(inv.bad, [], "scored vs filed disagreements");
+    assertEquals(inv.bit, inv.filed);
   });
 });
 
@@ -285,10 +163,10 @@ function rng(seed: number) {
     return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
   };
 }
-t("attempt 5 A4-1 (Case 42): the twins sweep in harden()'s REAL order - hardenJudged (verdicts, then numeric grounding), curatorCopyLines, finalLineCredibility - through the curator's writeClaims: every filed claim bit-identical, every floor verdict, footer and metrics agree, under owner edge-factor changes", async () => {
-  assert(typeof HX.hardenJudged === "function" && typeof CX.finalLineCredibility === "function",
-    "harness.ts exports hardenJudged and credibility.ts exports finalLineCredibility (the functions harden() and the scoring call)");
-  const { writeClaims } = await curator();
+t("attempt 5 A4-1 (Case 42, attempt 6: with every drop rule): the twins sweep in harden()'s REAL order - hardenJudged (verdicts, then numeric grounding), curatorCopyLines, buildCitedAndRenumber, scoreCuratorPackage - through the curator's writeClaims: the scored claims ARE the filed claims, every one bit-identical, every floor verdict, footer and metrics agree, under owner edge-factor changes", async () => {
+  assert(typeof HX.hardenJudged === "function" && typeof HX.scoreCuratorPackage === "function",
+    "harness.ts exports hardenJudged and scoreCuratorPackage (the functions runResearch calls)");
+  const { writeClaims, claimList } = await curator();
   const r = rng(Number(Deno.env.get("SWEEP5_SEED") ?? 20261018));
   const pick = <T>(xs: T[]) => xs[Math.floor(r() * xs.length)];
   const letters = (k: number) => Array.from({ length: k }, () => "abcdefghijklmnopqrstuvwxyz"[Math.floor(r() * 26)]).join("");
@@ -300,7 +178,8 @@ t("attempt 5 A4-1 (Case 42): the twins sweep in harden()'s REAL order - hardenJu
   ];
   const general = (primary: boolean) => ({ author_identity: null, domain_class: "general", primary,
     link_structure: { inbound_corroborations: 0, found_via: 0 }, entailment_agreement: { supports: 0, partial: 0, unsupported: 0 } });
-  const s = { runs: 0, lines: 0, filed: 0, bit: 0, retagged: 0, bad: [] as string[], footers: 0 };
+  const s = { runs: 0, lines: 0, judged: 0, scored: 0, filed: 0, bit: 0, retagged: 0, notFiled: 0, unjudged: 0, bad: [] as string[], footers: 0,
+    dropped: {} as Record<string, number> };
   await inTx(async (c) => {
     const kinds = (await c.queryObject<{ key: string }>(`SELECT key FROM public.contract_registry_entries WHERE registry = 'claim_kinds' AND retired_at IS NULL ORDER BY key`)).rows.map((x) => x.key);
     for (const kind of kinds) {
@@ -335,79 +214,71 @@ t("attempt 5 A4-1 (Case 42): the twins sweep in harden()'s REAL order - hardenJu
           }
         }
         const synthLines: string[] = [];
-        for (let li = 0; li < 12; li++) {
-          const tk = `zq${letters(10)}`;
-          if (r() < 0.06) { synthLines.push(`[GAP] Nothing on ${tk}.`); continue; }
-          const tag = pick(["SOURCED", "SOURCED", "INFERRED", "UNCERTAIN", "Sourced", "inferred"]);
-          const k = pick([1, 1, 2, 3, 4, 5, 6, 7]);
+        const bodies: string[] = [];
+        const cite = (k: number) => {
           const cites = Array.from({ length: k }, () => 1 + Math.floor(r() * n));
           if (r() < 0.1) cites.push(n + 1 + Math.floor(r() * 3));
           if (r() < 0.1) cites.push(cites[0]);
+          return r() < 0.2 && cites.length > 1 ? `[Source ${cites[0]}][Source ${cites.slice(1).join(", ")}]` : `[Source ${cites.join(", ")}]`;
+        };
+        for (let li = 0; li < 12; li++) {
+          const tk = `zq${letters(10)}`;
+          const tag = pick(["SOURCED", "SOURCED", "INFERRED", "UNCERTAIN", "Sourced", "inferred"]);
+          const k = pick([1, 1, 2, 3, 4, 5, 6, 7]);
+          const shape = r();
+          // attempt 6: every drop rule, mixed in
+          if (shape < 0.06) { synthLines.push(`[GAP] Nothing on ${tk}.`); continue; }
+          if (shape < 0.13 && bodies.length) { const b = pick(bodies); synthLines.push(`[${tag}] ${r() < 0.5 ? b : b.toUpperCase()} ${cite(k)}`); continue; }
+          if (shape < 0.18) { synthLines.push(`[${tag}] ${pick(["", "--", "* "])} ${cite(k)}`); continue; }
+          if (shape < 0.23) { synthLines.push(`[${tag}] The provided sources contain no information about the widget ${tk}. ${cite(k)}`); continue; }
+          if (shape < 0.28) { synthLines.push(`[${tag}] The widget ${tk} ships in size ${figures[li]} cm. ${cite(k)} [INFERRED] The widget ${tk}b is boxed. ${cite(1)}`); continue; }
+          if (shape < 0.32) { synthLines.push(`[${tag}] The widget ${tk} ships in size ${figures[li]} cm.`); synthLines.push(`as noted ${cite(k)}`); continue; }
           const body = `The widget ${tk} ships in size ${figures[li]} cm.`;
-          const cite = r() < 0.2 && cites.length > 1 ? `[Source ${cites[0]}][Source ${cites.slice(1).join(", ")}]` : `[Source ${cites.join(", ")}]`;
-          synthLines.push(`[${tag}] ${body} ${cite}`);
+          bodies.push(body);
+          synthLines.push(`[${tag}] ${body} ${cite(k)}`);
         }
         const synthesis = synthLines.join("\n");
+        s.lines += synthLines.length;
         const verdicts: LineVerdict[] = citedLines(synthesis).map((l) => ({ line: l.index, text: l.text, tag: l.tag, cites: l.cites,
           verdict: pick(["supports", "supports", "partial", "unsupported"]), basis: "judge", rationale: "", cited_text: [] } as LineVerdict));
         const effects = [...m.verdicts.values()].map((v) => ({ key: v.key, tagEffect: v.tagEffect }));
-        // harden()'s order, through the functions harden() calls
+        // runResearch's order, through the functions it calls
         const hardened = HX.hardenJudged(synthesis, verdicts, effects, rows.map((p) => p.content)).synthesis as string;
         const lines = HX.curatorCopyLines(hardened, new Set<number>()) as Array<string | null>;
         const { synthesis: curatorSyn, cited } = buildCitedAndRenumber(lines.filter((l) => l !== null).join("\n"), rows);
-        const tsLines = CX.finalLineCredibility(m, kind, verdicts, lines, (x: number, grounders: number[]) => {
-          const p = rows[x - 1];
-          if (!p) return null;
-          const coCited = new Set(grounders.filter((g) => rows[g - 1]).map((g) => rows[g - 1].id));
+        const scoredPkg = HX.scoreCuratorPackage(m, kind, curatorSyn, cited, lines, verdicts, (p: typeof rows[number], grounders: typeof rows) => {
+          const coCited = new Set(grounders.map((g) => g.id));
           const score = { family: p.family, score: p.score, reasons: [], model_version: "s",
             signals: p.family === "general" ? general(p.primary) : { cited_by: null, author_works_count: null, age_years: null } } as unknown as C.SourceScore;
           return C.foldReceived(C.weightedTotal(m, kind, score).total, received.get(p.id) ?? [], coCited);
-        }) as C.FiledLine[];
-        await writeClaims(c, curatorSyn, { threadId: null, synthesisId: null, sourceIds: cited.map((p) => p.id), volatility: "slow", claimMetadata: { claim_kind: kind } });
-        const floor = Number((await one<{ f: number }>(c, `SELECT public.credibility_claim_floor($1) AS f`, [kind])).f);
-        let storedBelow = 0;
-        const storedTotals: number[] = [];
-        for (const [i, v] of verdicts.entries()) {
-          s.lines++;
-          const ts = tsLines[i];
-          const tk = (v.text.match(/zq[a-z]{10}/) ?? [""])[0];
-          const row = await one<{ id: string; tag: string }>(c, `SELECT id::text AS id, epistemic_tag AS tag FROM public.claims WHERE status = 'active' AND text LIKE '%' || $1 || '%'`, [tk]);
-          const label = `${kind} run ${run} line ${v.line} [${v.tag}] ${v.verdict} cites ${JSON.stringify(v.cites)} ef ${JSON.stringify(ef)}`;
-          if (!row) {
-            if (ts.total !== 0) s.bad.push(`${label}: not filed, TS line total ${ts.total}`);
-            storedTotals.push(0); storedBelow++;
-            continue;
-          }
-          s.filed++;
-          if (row.tag !== String(v.tag).toLowerCase() && v.verdict === "supports" && v.cites.length <= 4) s.retagged++;
-          const sql = Number((await one<{ v: number }>(c, `SELECT public.claim_confidence_d15($1) AS v`, [row.id])).v);
-          const view = await one<{ v: number; b: boolean }>(c, `SELECT after_confidence AS v, below_floor_after AS b FROM public.credibility_before_after WHERE claim_id = $1`, [row.id]);
-          if (sql === ts.total && Number(view.v) === sql && ts.filed_tag === row.tag) s.bit++;
-          else s.bad.push(`${label}: filed ${row.tag} SQL ${sql} view ${view.v} | TS ${ts.total} (TS tag ${ts.filed_tag})`);
-          if ((sql < floor) !== ts.below_floor || view.b !== (sql < floor)) s.bad.push(`${label}: FLOOR SQL ${sql < floor} view ${view.b} TS ${ts.below_floor}`);
-          storedTotals.push(sql);
-          if (sql < floor) storedBelow++;
-        }
-        const rep = C.reportCredibility(m, kind, tsLines);
-        const storedMean = storedTotals.length ? r3(storedTotals.reduce((a, x) => a + x, 0) / storedTotals.length) : null;
+        }) as { claims: C.ScoredClaim[]; report: C.ReportCredibility };
+        const res = await writeClaims(c, curatorSyn.trim(), { threadId: null, synthesisId: null, sourceIds: cited.map((p) => p.id), volatility: "slow", claimMetadata: { claim_kind: kind } });
+        for (const x of claimList ? claimList(curatorSyn).dropped : []) s.dropped[x.reason] = (s.dropped[x.reason] ?? 0) + 1;
+        const pseudo = { metrics: { credibility: scoredPkg.report }, lineCredibility: scoredPkg.claims, verdicts, prose: "" } as unknown as H.RunResult;
+        const inv = await compareInvariant(c, pseudo, { pkg: {}, synthesis: curatorSyn, sourceIds: cited.map((p) => p.id), claimIds: res.claimIds },
+          `${kind} run ${run} ef ${JSON.stringify(ef)}`);
         s.footers++;
-        if (rep.below_floor !== storedBelow) s.bad.push(`${kind} run ${run}: METRICS below_floor ${rep.below_floor} stored ${storedBelow}`);
-        if (rep.value !== storedMean) s.bad.push(`${kind} run ${run}: FOOTER ${rep.value} stored ${storedMean}`);
-        await c.queryArray(`DELETE FROM public.claim_sources WHERE claim_id IN (SELECT id FROM public.claims WHERE text LIKE '%zq%')`);
-        await c.queryArray(`DELETE FROM public.claims WHERE text LIKE '%zq%'`);
+        s.judged += inv.judged; s.scored += inv.scored; s.filed += inv.filed; s.bit += inv.bit; s.retagged += inv.retagged;
+        s.notFiled += inv.notFiled; s.unjudged += inv.unjudgedFiled;
+        s.bad.push(...inv.bad);
+        await c.queryArray(`DELETE FROM public.claim_sources WHERE claim_id IN (SELECT id FROM public.claims WHERE text ILIKE '%zq%')`);
+        await c.queryArray(`DELETE FROM public.claims WHERE text ILIKE '%zq%'`);
       }
     }
   });
-  console.log(`CASE 42 (mode B, harden()'s order): runs ${s.runs}, lines ${s.lines}, filed ${s.filed}, re-tagged by numeric grounding after a supports verdict ${s.retagged}, ` +
-    `bit-identical ${s.bit}/${s.filed}, footers/metrics compared ${s.footers}, disagreements ${s.bad.length}`);
+  console.log(`CASE 42 (mode B, runResearch's order, with the drop rules): runs ${s.runs}, synthesis lines ${s.lines}, judged ${s.judged}, scored ${s.scored}, filed ${s.filed}, ` +
+    `re-tagged by numeric grounding after a supports verdict ${s.retagged}, judged-not-filed ${s.notFiled}, filed-off-a-judged-line ${s.unjudged}, ` +
+    `dropped ${JSON.stringify(s.dropped)}, bit-identical ${s.bit}/${s.filed}, footers/metrics compared ${s.footers}, disagreements ${s.bad.length}`);
   for (const b of s.bad.slice(0, 8)) console.log(`  ${b}`);
   assert(s.retagged >= 10, `the sweep re-tags lines after the verdict (${s.retagged})`);
+  for (const k of ["duplicate_text", "empty_text", "meta_pattern"]) assert((s.dropped[k] ?? 0) >= 5, `${k}: ${s.dropped[k] ?? 0}`);
   assertEquals(s.bad, []);
+  assertEquals(s.scored, s.filed);
   assertEquals(s.bit, s.filed);
 });
 
 // ── Case 43: the refinery path (N2) through the REAL fold ────────────────────────────────────────────
-t("attempt 5 N2 (Case 43): the refinery path - a line grounded only in an unfolded held source is not filed and totals 0 (below the floor), a partly-stripped line is scored with its remaining citations, a folded source's corroboration is in the total; footer == metrics == the stored roll-up", async () => {
+t("attempt 5 N2 (Case 43): the refinery path - a line grounded only in an unfolded held source is not filed and not scored, a partly-stripped line is scored with its remaining citations, a folded source's corroboration is in the total; the scored claims ARE the filed claims, footer == metrics == the filed claims", async () => {
   const cur = await curator();
   const HELD_OK = "https://held.example.gov/report";
   const HELD_LOW = "https://held-blog.example.com/post";
@@ -436,15 +307,16 @@ t("attempt 5 N2 (Case 43): the refinery path - a line grounded only in an unfold
     const { d, seen } = realDeps(c, cur, specs, pages, hits);
     const r = await H.runResearch(d, c, QUERY, { origin: "owui", refineryId: refinery });
     const fold = (r.fold?.held ?? []).map((h) => `${host(h.url ?? "x")}:${h.outcome}`);
-    const cmp = await compareRun(c, r, specs);
-    console.log(`CASE 43: fold ${JSON.stringify(fold)}; lines ${cmp.lines}, filed ${cmp.filed}, unfiled ${cmp.unfiled}, bit-identical ${cmp.bit}/${cmp.filed}; ` +
-      `metrics ${JSON.stringify({ v: r.metrics.credibility!.value, below: r.metrics.credibility!.below_floor, lines: r.metrics.credibility!.lines })}; footer '${(r.prose.match(/report credibility [^ ]+/) ?? [""])[0]}'`);
-    console.log("CASE 43 filed synthesis:\n" + (seen.filed[0] ?? "(none)"));
-    for (const b of cmp.bad) console.log(`  DISAGREE ${b}`);
+    const inv = await compareInvariant(c, r, seen.filed[0] ?? null);
+    console.log(`CASE 43: fold ${JSON.stringify(fold)}; judged ${inv.judged}, scored ${inv.scored}, filed ${inv.filed}, judged-not-filed ${inv.notFiled}, bit-identical ${inv.bit}/${inv.filed}; ` +
+      `metrics ${JSON.stringify(metricsOf(r))}; footer '${footerOf(r)}'`);
+    console.log("CASE 43 filed synthesis:\n" + (seen.filed[0]?.synthesis ?? "(none)"));
+    for (const b of inv.bad) console.log(`  DISAGREE ${b}`);
     assert(fold.includes("held.example.gov:held_folded") && fold.includes("held-blog.example.com:held_kept"), JSON.stringify(fold));
-    assert(cmp.unfiled >= 1, "a line grounded only in the unfolded held source is not filed");
-    assert(!String(seen.filed[0]).includes(specs[2].tok), "the held-only line never reaches the curator");
-    assertEquals(cmp.bad, [], "run vs stored disagreements");
+    assert(inv.notFiled >= 1, "a line grounded only in the unfolded held source is not filed");
+    assert(!String(seen.filed[0]?.synthesis).includes(specs[2].tok), "the held-only line never reaches the curator");
+    assertEquals(inv.bad, [], "scored vs filed disagreements");
+    assertEquals(inv.bit, inv.filed);
   });
 });
 

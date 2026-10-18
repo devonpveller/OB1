@@ -26,7 +26,8 @@
  * parsed out of the migration file, so the tested model IS the shipped table.
  */
 
-import { claimEdges, edgeWeightOk } from "./claim-edges.ts";
+import { edgeWeightOk, type ParsedEdge } from "./claim-edges.ts";
+import { claimList } from "./claim-list.ts";
 
 export class CredibilityGateError extends Error {
   constructor(message: string) {
@@ -771,24 +772,41 @@ export function lineCredibility(
 ): LineCredibility {
   const v = m.verdicts.get(verdict);
   if (!v) throw new CredibilityGateError(`entailment verdict '${verdict}' is not registered`);
-  const floor = Math.max(...m.scoredFamilies.map((f) => weightFor(m, kind, f).claimFloor));
+  const floor = claimFloor(m, kind);
   // attempt 4 (F2): a line carries the total of the claim the curator files from it. A verdict whose
   // tag effect is `gap` turns the line into a [GAP] - nothing is filed, so it carries nothing; any
   // other verdict (`partial` lowers the tag to [UNCERTAIN], which is still filed) carries the filed
-  // claim's total - the edge factors and weights of that tag are in `cited` (filedLineCredibility).
-  // Corroboration BETWEEN sources still moves only on a transferring verdict (corroborate).
+  // claim's total - the edge factors and weights of that tag are in `cited`. Corroboration BETWEEN
+  // sources still moves only on a transferring verdict (corroborate). Attempt 6: the report no longer
+  // scores per judged line - it scores the curator's filed claims (filedClaimsCredibility), through
+  // the same arithmetic (claimTotal); this per-line form is the twins tests' entry point.
   if (v.tagEffect === "gap" || !cited.length) {
     return { line, verdict, lead: 0, corroborators: 0, total: 0, below_floor: true,
       reasons: [`verdict ${verdict}: the line carries no credibility`] };
   }
-  const totals = cited.map((c) => c.total).sort((a, b) => b - a);
+  return { line, verdict, ...claimTotal(m, floor, cited.map((c) => c.total)) };
+}
+
+/**
+ * The D15 claim total over the per-source totals of one claim (claim_confidence_d15 in SQL is the
+ * stored twin): the best leads, each further source adds claim_per x its total, capped; in the SQL
+ * twin's order (totals descending, the extra summed from 0 in that order). Shared by lineCredibility
+ * and the filed-claim scorer (filedClaimsCredibility), so there is one arithmetic.
+ */
+function claimTotal(m: CredibilityModel, floor: number, sourceTotals: number[]) {
+  const totals = [...sourceTotals].sort((a, b) => b - a);
   const lead = totals[0];
   const extra = Math.min(m.corroboration.claimCap, totals.slice(1).reduce((a, t) => a + m.corroboration.claimPer * t, 0));
   const total = Math.min(1, lead + extra);
   return {
-    line, verdict, lead, corroborators: totals.length - 1, total, below_floor: total < floor,
+    lead, corroborators: totals.length - 1, total, below_floor: total < floor,
     reasons: [`lead ${r3(lead)}`, `${totals.length - 1} corroborating source(s): +${r3(extra)}`, `claim floor ${floor}`],
   };
+}
+
+/** The claim floor of a kind: the highest claim_floor among its family rows (credibility_claim_floor in SQL). */
+export function claimFloor(m: CredibilityModel, kind: string): number {
+  return Math.max(...m.scoredFamilies.map((f) => weightFor(m, kind, f).claimFloor));
 }
 
 /** The line tags by rank: the entailment stage only ever LOWERS a tag (never an upgrade). */
@@ -825,121 +843,119 @@ export function edgeTotal(m: CredibilityModel, total: number, edgeType: string, 
   return totalUnit(total, "source total") * Math.fround(weight) * factor;
 }
 
-export interface FiledLine extends LineCredibility {
-  /** The tag the curator files the line under (after the verdict and the omnibus rule), null = not filed. */
-  filed_tag: string | null;
+/**
+ * One claim the curator files, scored (attempt 6, the structural round). `claim` is its position in
+ * the curator's own claim list of the package (claim-list.ts claimList(pkg.synthesis).claims), so
+ * the scored claims ARE the filed claims, in the order they are filed.
+ */
+export interface ScoredClaim {
+  claim: number;
+  /** the claim text as the curator files it */
+  text: string;
+  /** the tag the curator files it under (after the verdict, numeric grounding and the omnibus rule) */
+  filed_tag: string;
+  /** its grounding edges as the curator files them; `cite` is the PACKAGE's [Source N] */
   edges: Array<{ cite: number; edge_type: string; weight: number }>;
+  /** the judged line its tag stands on (the entailment verdicts' line numbering), null = on no judged line */
+  line: number | null;
+  /** that line's entailment verdict, null = on no judged line */
+  verdict: string | null;
+  lead: number;
+  corroborators: number;
+  total: number;
+  below_floor: boolean;
+  reasons: string[];
 }
 
 /**
- * THE LINE TOTAL IS THE CLAIM TOTAL (attempt 4, tester finding F2). Attempt 3 scored every cited
- * line as if each source grounded it through a weight-1 `states` edge; the curator files an
- * [INFERRED] line as `inferred_from` 1.0, an [UNCERTAIN] line (or any line citing more than four
- * sources) as `inferred_from` 0.5, and claim_confidence_d15 multiplies each by the weight and the
- * inferred_from factor - so the report footer and research_jobs.metrics said 0.6 / 0.75 / 0.95 for
- * claims stored at 0.402 / 0.251 / 0.551. Here the line is scored through exactly the edges the
- * curator will file: the tag after the verdict (tagAfterEffect), the ONE tag -> edge rule
- * (claim-edges.ts claimEdges, the curator's own call), each edge through edgeTotal, a source's best
- * edge counting for it (the SQL twin groups edges by source and takes the max), then lineCredibility.
- * `sourceTotal(n)` is the rolling total [Source n] brings to this line (foldReceived), or null when
- * the line's citation names no source in the pool (renumbering drops it, the curator never sees it).
+ * THE SCORED CLAIMS ARE THE FILED CLAIMS (attempt 6, the structural round). Attempts 4-5 derived "the
+ * lines the report scores" in this service (per judged line: the line's own tag and citations, the
+ * tag -> edge rule, the held-source strip) while the curator derived "the claims it files" with its
+ * own parser (tag segments, empty-text skip, same-synthesis text dedup, the meta-claim patterns) -
+ * two derivations of one list, and every round the tester found the next place they differed. Here
+ * there is ONE derivation: `claimList` (claim-list.ts, the curator's own file, byte-identical copy)
+ * run on the synthesis of the package the curator is handed. Each claim of that list is scored
+ * through exactly the edges it is filed with: each edge through edgeTotal (the edge type's registry
+ * factor x the stored REAL weight), a source's best edge counting for it (the SQL twin groups edges
+ * by source and takes the max), then the D15 claim total (claimTotal). A judged line that yields no
+ * filed claim (GAP, unsupported, empty text, a repeated text, a meta-claim, a line grounded only in
+ * unfolded held sources) is in no claim of the list, so it contributes NOTHING to the report figure
+ * (see reportCredibility). `sourceTotal(n, grounders)` is the rolling total the package's [Source n]
+ * brings to the claim, `grounders` being the claim's own cited sources (each other's corroboration
+ * counts once, through claim_per - claim_confidence_d15's p_exclude); null = [Source n] is not a
+ * source the curator persists, so the curator skips the edge (claims.ts writeClaims: edgesSkipped)
+ * and a claim left with no edge is not filed (ungroundedSkipped) - mirrored here.
+ * `lineOf(start)` maps a claim's offset in the package synthesis to its judged line (null = none).
  */
-export function filedLineCredibility(
+export function filedClaimsCredibility(
   m: CredibilityModel,
   kind: string,
-  v: { line: number; tag: string; cites: number[]; verdict: string },
-  sourceTotal: (n: number) => number | null,
-): FiledLine {
-  const def = m.verdicts.get(v.verdict);
-  if (!def) throw new CredibilityGateError(`entailment verdict '${v.verdict}' is not registered`);
-  const nums = v.cites.filter((n) => sourceTotal(n) !== null);
-  const filed = claimEdges(tagAfterEffect(v.tag, def.tagEffect), nums);
-  if (!filed || !filed.edges.length) {
-    return { ...lineCredibility(m, kind, v.line, v.verdict, []), filed_tag: null, edges: [] };
-  }
-  const best = new Map<number, number>();
-  for (const e of filed.edges) {
-    const t = edgeTotal(m, sourceTotal(e.sourceIndex)!, e.edgeType, e.weight);
-    best.set(e.sourceIndex, Math.max(best.get(e.sourceIndex) ?? 0, t));
-  }
-  return {
-    ...lineCredibility(m, kind, v.line, v.verdict, [...best.values()].map((total) => ({ total }))),
-    filed_tag: filed.tag,
-    edges: filed.edges.map((e) => ({ cite: e.sourceIndex, edge_type: e.edgeType, weight: e.weight })),
-  };
-}
-
-// attempt 5 (tester finding A4-1): the tag and the citations of ONE line of the synthesis the
-// curator is handed - the tag at the line's start, and every number in every [Source ...] bracket,
-// in order, de-duplicated (the curator's parseSourceNumbers rule; `parseInt` as it does).
-const FILED_LINE_TAG_RE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN|GAP)\]/i;
-const FILED_LINE_CITE_RE = /\[Sources?\b[^\]]*\]/gi;
-export function filedLineOf(line: string | null | undefined): { tag: string; cites: number[] } {
-  const s = String(line ?? "");
-  const m = s.match(FILED_LINE_TAG_RE);
-  const cites: number[] = [];
-  for (const b of s.match(FILED_LINE_CITE_RE) || []) {
-    for (const d of b.match(/\d+/g) || []) {
-      const n = parseInt(d, 10);
-      if (n > 0 && !cites.includes(n)) cites.push(n);
-    }
-  }
-  return { tag: m ? m[1].toUpperCase() : "", cites };
-}
-
-/**
- * THE LINE IS SCORED AS IT IS FILED (attempt 5, tester finding A4-1). Attempt 4 scored each line
- * from its entailment verdict - the tag the line had when it was JUDGED. harness.ts harden() then
- * runs numeric grounding, which re-tags a [SOURCED] / [INFERRED] line whose figure its cited text
- * does not hold as [UNCERTAIN], and the refinery path strips unfolded held sources from the
- * curator's copy (dropping a line grounded only in them). So the footer and
- * research_jobs.metrics.credibility scored a line the curator never filed.
- *
- * Here every judged line is scored from `finalLines[v.line]` - the line of the synthesis the
- * curator is handed, AFTER every step that changes a tag or a citation set (null = the line does
- * not reach the curator) - with its own tag and citations (filedLineOf), through
- * filedLineCredibility. The verdict's tag effect is already in that tag (applyVerdicts wrote it,
- * and tagAfterEffect never raises a tag, so applying it again changes nothing). A line that is not
- * filed - [GAP], no citation left, dropped from the curator's copy - totals 0 and is below the
- * floor, so the footer mean and the below-floor count are over every judged line, each scored as
- * the claim filed from it (0 for none). `sourceTotal(n, grounders)` is the rolling total [Source n]
- * brings to the line, `grounders` being the line's final citations (the sources whose corroboration
- * counts once, through claim_per - claim_confidence_d15's p_exclude), or null when n names no
- * source in the pool.
- */
-export function finalLineCredibility(
-  m: CredibilityModel,
-  kind: string,
-  verdicts: ReadonlyArray<{ line: number; verdict: string }>,
-  finalLines: ReadonlyArray<string | null | undefined>,
+  packageSynthesis: string,
+  lineOf: (start: number) => { line: number; verdict: string } | null,
   sourceTotal: (n: number, grounders: number[]) => number | null,
-): FiledLine[] {
-  return verdicts.map((v) => {
-    const f = filedLineOf(finalLines[v.line]);
-    return filedLineCredibility(m, kind, { line: v.line, tag: f.tag, cites: f.cites, verdict: v.verdict },
-      (n) => sourceTotal(n, f.cites));
-  });
+): ScoredClaim[] {
+  const floor = claimFloor(m, kind);
+  const out: ScoredClaim[] = [];
+  for (const c of claimList(packageSynthesis).claims) {
+    const edges: ParsedEdge[] = c.edges.filter((e) => sourceTotal(e.sourceIndex, []) !== null);
+    if (!edges.length) continue;
+    const grounders = [...new Set(edges.map((e) => e.sourceIndex))];
+    const best = new Map<number, number>();
+    for (const e of edges) {
+      const t = edgeTotal(m, sourceTotal(e.sourceIndex, grounders)!, e.edgeType, e.weight);
+      best.set(e.sourceIndex, Math.max(best.get(e.sourceIndex) ?? 0, t));
+    }
+    const at = lineOf(c.start);
+    out.push({
+      claim: out.length, text: c.text, filed_tag: c.tag,
+      edges: edges.map((e) => ({ cite: e.sourceIndex, edge_type: e.edgeType, weight: e.weight })),
+      line: at ? at.line : null, verdict: at ? at.verdict : null,
+      ...claimTotal(m, floor, [...best.values()]),
+    });
+  }
+  return out;
 }
 
 export interface ReportCredibility {
+  /** the mean of the FILED claims' totals (3 decimals), null when the run files no claim */
   value: number | null;
-  lines: number;
+  /** how many claims the mean is over - the claims the curator files from the package */
+  claims: number;
+  /** how many of those claims are below the claim floor */
   below_floor: number;
+  /** how many lines the entailment stage judged */
+  judged_lines: number;
+  /** how many judged lines yield no filed claim (they are NOT in the mean or the below-floor count) */
+  judged_not_filed: number;
   kind: string;
   model_version: string;
   weights: Record<string, number>;
 }
 
 /**
- * Mean of the per-line totals over the lines that carry a verdict; null when there are none. The
- * mean is a REPORT figure (display, 3 decimals); the below-floor count is each line's unrounded
- * verdict.
+ * THE REPORT RULE (attempt 6): the report credibility is the mean of the totals of the claims the
+ * curator files from the run's package, and the below-floor count is over those claims - a judged
+ * line the curator does not file contributes NOTHING to either (attempt 5 counted it as a 0 below the
+ * floor, a number no stored claim holds). How many judged lines were not filed is stated beside it
+ * (`judged_not_filed`, from the same claim list). The mean is a REPORT figure (display, 3 decimals);
+ * the below-floor count is each claim's unrounded verdict.
  */
-export function reportCredibility(m: CredibilityModel, kind: string, lines: LineCredibility[]): ReportCredibility {
+export function reportCredibility(
+  m: CredibilityModel,
+  kind: string,
+  claims: ReadonlyArray<{ total: number; below_floor: boolean; line?: number | null }>,
+  judgedLines: ReadonlyArray<number> = [],
+): ReportCredibility {
   const weights: Record<string, number> = {};
   for (const f of m.scoredFamilies) weights[f] = weightFor(m, kind, f).weight;
-  const value = lines.length ? r3(lines.reduce((a, l) => a + l.total, 0) / lines.length) : null;
-  return { value, lines: lines.length, below_floor: lines.filter((l) => l.below_floor).length, kind, model_version: m.modelVersion, weights };
+  const value = claims.length ? r3(claims.reduce((a, l) => a + l.total, 0) / claims.length) : null;
+  const filedOn = new Set(claims.map((c) => c.line).filter((l): l is number => typeof l === "number"));
+  const judged = [...new Set(judgedLines)];
+  return {
+    value, claims: claims.length, below_floor: claims.filter((l) => l.below_floor).length,
+    judged_lines: judged.length, judged_not_filed: judged.filter((l) => !filedOn.has(l)).length,
+    kind, model_version: m.modelVersion, weights,
+  };
 }
 
 // ── loading ───────────────────────────────────────────────────────────────

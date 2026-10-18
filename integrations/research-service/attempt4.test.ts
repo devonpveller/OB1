@@ -10,7 +10,7 @@
  */
 import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  amountUnit, buildModel, corroborate, CredibilityGateError, edgeTotal, filedLineCredibility, flushUnit,
+  amountUnit, buildModel, corroborate, type CredibilityModel, CredibilityGateError, edgeTotal, filedClaimsCredibility, flushUnit,
   FLOAT4_MIN_NORMAL, foldReceived, lineCredibility, type RegistryRow, type SourceScore, storeConfidence, tagAfterEffect,
   weightedTotal,
 } from "./credibility.ts";
@@ -22,6 +22,9 @@ const seeds = seedSet();
 const model = () => buildModel(seeds.rows, seeds.versions);
 const withDef = (registry: string, key: string, patch: Record<string, unknown>): RegistryRow[] =>
   seeds.rows.map((r) => r.registry === registry && r.key === key ? { ...r, definition: { ...r.definition, ...patch } } : r);
+// attempt 6: a line is scored as the claim the curator's claim list (claim-list.ts) files from it
+const filedLine = (m: CredibilityModel, kind: string, tag: string, cites: number[], total: (n: number) => number) =>
+  filedClaimsCredibility(m, kind, `[${tag}] The widget ships in size 3. [Source ${cites.join(", ")}]`, () => null, total)[0] ?? null;
 const general = (score: number, primary: unknown = false): SourceScore => ({
   family: "general", score, reasons: [], model_version: "t",
   signals: { author_identity: null, domain_class: "general", primary: primary as boolean,
@@ -87,8 +90,7 @@ Deno.test("attempt 4 F1 / near-miss P4: an edge weight NaN / Infinity / 5 / -1 /
 Deno.test("attempt 4 F2 RED shapes: the line total is the stored claim total - INFERRED 0.402, UNCERTAIN 0.25125, 5-cite SOURCED 0.551 (attempt 3: 0.6 / 0.75 / 0.95)", () => {
   const m = model();
   const line = (tag: string, scores: number[]) =>
-    filedLineCredibility(m, "practical", { line: 0, tag, cites: scores.map((_, i) => i + 1), verdict: "supports" },
-      (n) => weightedTotal(m, "practical", general(scores[n - 1])).total);
+    filedLine(m, "practical", tag, scores.map((_, i) => i + 1), (n) => weightedTotal(m, "practical", general(scores[n - 1])).total)!;
   // the SQL twin's values on the same stamped rows, from the tester's record (adv-probes-p1-p6.out)
   assertEquals(line("SOURCED", [0.6]).total, 0.6);
   assertEquals(line("INFERRED", [0.6]).total, 0.402);
@@ -104,7 +106,7 @@ Deno.test("attempt 4 F2 RED shapes: the line total is the stored claim total - I
 
 Deno.test("attempt 4 F2: the factor is the registry's (edge_factors), not a literal - an owner change moves the TS twin", () => {
   const m = buildModel(withDef("credibility_terms", "edge_factors", { inferred_from: 0.5 }), seeds.versions);
-  const l = filedLineCredibility(m, "practical", { line: 0, tag: "INFERRED", cites: [1], verdict: "supports" }, () => 0.6);
+  const l = filedLine(m, "practical", "INFERRED", [1], () => 0.6)!;
   assertEquals(l.total, 0.3);
   assertThrows(() => buildModel(withDef("credibility_terms", "edge_factors", { inferred_from: "0.67" }), seeds.versions), CredibilityGateError);
   assertThrows(() => buildModel(seeds.rows.filter((r) => r.key !== "edge_factors"), seeds.versions), CredibilityGateError, "edge_factors");
@@ -112,12 +114,12 @@ Deno.test("attempt 4 F2: the factor is the registry's (edge_factors), not a lite
 
 Deno.test("attempt 4 F2: a partial verdict lowers the tag to UNCERTAIN, which IS filed - the line carries that claim's total; unsupported (gap) carries 0", () => {
   const m = model();
+  // the verdict's tag effect is written into the line (applyVerdicts / tagAfterEffect); the claim list files the result
   const at = (tag: string, verdict: string) =>
-    filedLineCredibility(m, "practical", { line: 0, tag, cites: [1], verdict }, () => 0.8);
-  assertEquals(at("SOURCED", "partial").filed_tag, "uncertain");
-  assertEquals(at("SOURCED", "partial").total, 0.8 * 0.5 * 0.67);
-  assertEquals(at("SOURCED", "unsupported").total, 0);
-  assertEquals(at("SOURCED", "unsupported").filed_tag, null);
+    filedLine(m, "practical", tagAfterEffect(tag, m.verdicts.get(verdict)!.tagEffect), [1], () => 0.8);
+  assertEquals(at("SOURCED", "partial")!.filed_tag, "uncertain");
+  assertEquals(at("SOURCED", "partial")!.total, 0.8 * 0.5 * 0.67);
+  assertEquals(at("SOURCED", "unsupported"), null, "a [GAP] line is no claim: nothing is filed, nothing is scored");
   assertEquals(lineCredibility(m, "practical", 0, "unsupported", [{ total: 0.8 }]).total, 0);
 });
 

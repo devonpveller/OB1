@@ -13,7 +13,8 @@
 #   5. database A (chain only): runs credibility.e2e.test.ts, (attempt 3) credibility-twins.e2e.test.ts and
 #      (attempt 4) credibility-attempt4.e2e.test.ts - the last files claims through the research curator's
 #      own writeClaims, so the curator directory is bind-mounted read-only at /curator; (attempt 5)
-#      credibility-attempt5.e2e.test.ts - the REAL runResearch / harden() order -> writeClaims (Cases 41-44)
+#      credibility-attempt5.e2e.test.ts - the REAL runResearch / harden() order -> writeClaims (Cases 41-44);
+#      (attempt 6) credibility-attempt6.e2e.test.ts - scored claims == filed claims (Cases 47-48)
 #      - the SQL twin vs the TS model on the same rows - in the test image (the SQL twin of
 #      the model, the before/after view, the re-score gate, the fold's move)
 #   6. builds openbrain-workbench:wt-<id>; database B (chain + the P0 contract fixtures, the
@@ -96,9 +97,12 @@ function New-PinnedNetwork([string]$name) {
   return ''
 }
 # Step [1]'s chain: every `<file>.sql:/docker-entrypoint-initdb.d/<NNN-name>.sql` mount of the compose file.
+# attempt 6 (tester near-miss NM1): a YAML comment is not a mount - a `# - ./init-...` line (or `#- ...`,
+# or a mount spelled after a ` #` on a line) is stripped before the mounts are read, so the runner
+# never stages a migration the real compose does not mount.
 function Get-Chain {
   $cf = if ($ComposeFile) { $ComposeFile } else { Join-Path $dockerDir 'docker-compose.yml' }
-  $compose = Get-Content -Raw $cf
+  $compose = (@(Get-Content $cf) | ForEach-Object { $_ -replace '(^|\s)#.*$', '' }) -join "`n"
   $rx = [regex]'(\.{1,2}/[A-Za-z0-9_./-]+\.sql):/docker-entrypoint-initdb\.d/([0-9]{3}-[a-z0-9.-]+\.sql)'
   return , @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
 }
@@ -214,16 +218,19 @@ try {
   Check ($negRc -ne 0 -and $o -match 'gate negative control') "a failing test fails the image build (rc=$negRc)"
   if ($negRc -eq 0) { $made.images += $negTag }
 
-  Write-Host '[5] database A + credibility.e2e.test.ts + credibility-twins.e2e.test.ts + credibility-attempt4.e2e.test.ts + credibility-attempt5.e2e.test.ts (SQL twin, twins on one table, the filed-line sweep, before/after, gate, fold)'
+  Write-Host '[5] database A + credibility.e2e.test.ts + credibility-twins.e2e.test.ts + credibility-attempt4.e2e.test.ts + credibility-attempt5.e2e.test.ts + credibility-attempt6.e2e.test.ts (SQL twin, twins on one table, the filed-line sweep, before/after, gate, fold, the scored == filed invariant)'
   # attempt 4: the line-tag -> edge rule has one source (research-curator/claim-edges.ts); this service's copy must be identical
+  # attempt 6: so has the claim list (research-curator/claim-list.ts) the report is scored from
   $curatorDir = Join-Path (Split-Path -Parent $rs) 'research-curator'
-  $edgesA = ([System.IO.File]::ReadAllText((Join-Path $curatorDir 'claim-edges.ts'))) -replace "`r`n", "`n"
-  $edgesB = ([System.IO.File]::ReadAllText((Join-Path $rs 'claim-edges.ts'))) -replace "`r`n", "`n"
-  Check ($edgesA -ceq $edgesB) 'claim-edges.ts is identical in research-curator and research-service (one tag -> edge rule)'
+  foreach ($shared in @('claim-edges.ts', 'claim-list.ts')) {
+    $sharedA = ([System.IO.File]::ReadAllText((Join-Path $curatorDir $shared))) -replace "`r`n", "`n"
+    $sharedB = ([System.IO.File]::ReadAllText((Join-Path $rs $shared))) -replace "`r`n", "`n"
+    Check ($sharedA -ceq $sharedB) "$shared is identical in research-curator and research-service (one derivation)"
+  }
   if (-not (Start-Db $dbA $false)) { throw 'db A' }
   $o = Dk run --rm --label $label --network $net -e "CRED_E2E_DB_HOST=$dbA" -e "CRED_E2E_DB_PASSWORD=$pw" `
     --mount "type=bind,src=$curatorDir,dst=/curator,readonly" -e CURATOR_DIR=/curator `
-    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts credibility-attempt5.e2e.test.ts
+    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts credibility-attempt5.e2e.test.ts credibility-attempt6.e2e.test.ts
   Save 'credibility-e2e.log' $o
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "credibility e2e: $($sum.Value)"

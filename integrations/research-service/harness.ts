@@ -17,8 +17,8 @@ import {
 } from "./contract.ts";
 import { applyVerdicts, type EntailmentRecord, judgeLines, type LineVerdict, type VerdictEffect } from "./entailment.ts";
 import {
-  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, finalLineCredibility, flushUnit, foldReceived,
-  type LineCredibility, loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord,
+  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, filedClaimsCredibility, flushUnit, foldReceived,
+  loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord, type ScoredClaim,
   weightFor,
 } from "./credibility.ts";
 import { assess, type AdmissionContext, type Assessment, finalScore, subjectTokens, type TrailEntry, trailEntry } from "./admission.ts";
@@ -187,10 +187,10 @@ export function hardenJudged(
  * The curator's copy of a hardened synthesis, LINE-ALIGNED (attempt 5, tester near-miss N2): a held
  * source that did not fold is refinery-only (ingestion model item 1), so its citations leave the
  * curator's copy, and a cited line grounded only in such sources does not reach the curator (null).
- * Every other line is kept as it is. The curator is handed the non-null lines; the credibility of
- * each judged line is computed from the same array (finalLineCredibility), so the footer and
- * research_jobs.metrics.credibility score exactly what the curator files. `unfolded` = the pool's
- * 1-based indices of the held sources that did not fold (empty = the lines unchanged).
+ * Every other line is kept as it is. The curator is handed the non-null lines (renumbered); the
+ * report scores the curator's own claim list of exactly that package (attempt 6,
+ * filedClaimsCredibility), and the line alignment maps each filed claim back to its judged line.
+ * `unfolded` = the pool's 1-based indices of the held sources that did not fold (empty = unchanged).
  */
 export function curatorCopyLines(hardened: string, unfolded: ReadonlySet<number>): Array<string | null> {
   return String(hardened || "").split("\n").map((line) => {
@@ -202,6 +202,41 @@ export function curatorCopyLines(hardened: string, unfolded: ReadonlySet<number>
     }).trimEnd();
     return /\[Sources?\b/i.test(stripped) ? stripped : null;
   });
+}
+
+/**
+ * THE REPORT'S CLAIMS ARE THE CURATOR'S CLAIMS (attempt 6, the structural round). Scores the claim
+ * list the curator derives from the package it is handed - claim-list.ts claimList(curatorSynthesis),
+ * the curator's own file (byte-identical copy) - through filedClaimsCredibility, and rolls it up
+ * (reportCredibility: the filed claims only; a judged line that yields no filed claim contributes
+ * nothing and is counted in judged_not_filed). `curatorCited[k - 1]` is the package's [Source k];
+ * `curatorLines` is curatorCopyLines' line-aligned copy (null = the line did not reach the curator), so
+ * the package's line j is the judged line of its j-th non-null entry. `sourceTotal(page, grounders)`
+ * is the rolling total the page brings to a claim whose cited pages are `grounders` (null = the page
+ * is not a source the curator persists). runResearch calls this; so does the credibility sweep.
+ */
+export function scoreCuratorPackage<T>(
+  m: CredibilityModel,
+  kind: string,
+  curatorSynthesis: string,
+  curatorCited: ReadonlyArray<T>,
+  curatorLines: ReadonlyArray<string | null>,
+  verdicts: ReadonlyArray<{ line: number; verdict: string }>,
+  sourceTotal: (page: T, grounders: T[]) => number | null,
+): { claims: ScoredClaim[]; report: ReportCredibility } {
+  const pkgLineToJudged = curatorLines.flatMap((l, i) => (l === null ? [] : [i]));
+  const verdictOnLine = new Map(verdicts.map((v) => [v.line, v.verdict] as const));
+  const claims = filedClaimsCredibility(m, kind, curatorSynthesis,
+    (start) => {
+      const judged = pkgLineToJudged[curatorSynthesis.slice(0, start).split("\n").length - 1];
+      return judged !== undefined && verdictOnLine.has(judged) ? { line: judged, verdict: verdictOnLine.get(judged)! } : null;
+    },
+    (k, grounders) => {
+      const page = curatorCited[k - 1];
+      if (page === undefined) return null;
+      return sourceTotal(page, grounders.map((g) => curatorCited[g - 1]).filter((g): g is T => g !== undefined));
+    });
+  return { claims, report: reportCredibility(m, kind, claims, verdicts.map((v) => v.line)) };
 }
 
 /**
@@ -441,8 +476,9 @@ export interface RunResult {
   verdicts: LineVerdict[];
   /** P3a (D15) - every hit the pre-ingestion stage judged, every lead and path. */
   admissionTrail: TrailEntry[];
-  /** P3a (D15 item 5) - per-line credibility of the delivered synthesis. */
-  lineCredibility: LineCredibility[];
+  /** P3a (D15 item 5) - attempt 6: one entry per claim the curator files from the package (the
+   *  curator's own claim list, claim-list.ts), in filing order, each with the judged line it is on. */
+  lineCredibility: ScoredClaim[];
   /** P3a - the fold, on a refinery session. */
   fold: FoldRecord | null;
   /** kp-contract — what the job's contract dropped, per stage (absent without a contract). */
@@ -1825,27 +1861,31 @@ export async function runResearch(
       buildCitedAndRenumber(curatorLines.filter((l): l is string => l !== null).join("\n"), pool));
   }
 
-  // THE FOLD RULE (attempt 2): on a line, a cited source's total leaves out the corroboration it
-  // received from the line's other cited sources - each of those counts once, through claim_per
+  // THE FOLD RULE (attempt 2): on a claim, a cited source's total leaves out the corroboration it
+  // received from the claim's other cited sources - each of those counts once, through claim_per
   // (claim_confidence_d15's p_exclude is the stored twin).
-  // Attempt 4 (tester finding F2): each line is scored through the edges the curator WILL file for
-  // it - the one tag -> edge rule (claim-edges.ts), the registry's edge factors and the edge weights.
-  // Attempt 5 (tester finding A4-1, near-miss N2): from the line the curator is HANDED - after the
-  // verdicts, numeric grounding and the held-source strip (curatorLines), with its own final tag and
-  // citations (finalLineCredibility) - and after the fold, so the corroboration a folded source
-  // exchanges is in its total as recordCorroboration files it. A line the curator does not file
-  // totals 0, below the floor. So a line's total, the footer and research_jobs.metrics.credibility
-  // equal claim_confidence_d15 of the claim filed from the line.
-  const lineCred: LineCredibility[] = finalLineCredibility(model, claimKind.kind, verdicts, curatorLines,
-    (n, grounders) => {
-      if (!pool[n - 1]) return null;
-      const coCited = new Set(grounders.filter((k) => pool[k - 1]).map((k) => pool[k - 1].url));
+  // THE SCORED CLAIMS ARE THE FILED CLAIMS (attempt 6, the structural round). The report scores the
+  // claim list the curator derives from the package it is about to be handed - claim-list.ts
+  // claimList(curatorSynthesis), the curator's own file (byte-identical copy) - so the claims in the
+  // footer and research_jobs.metrics.credibility are, by construction, the claims writeClaims files:
+  // same texts, tags, edges and citations, in the same order. Each is scored through its filed edges
+  // (claim-edges.ts, the registry's edge factors, the stored REAL weight), after the fold, with only
+  // FILED corroboration (an unfolded held source is never a stored source). A judged line that
+  // yields no filed claim contributes nothing (reportCredibility states how many there were).
+  const poolIndexOf = (page: Page) => {
+    const i = pool.indexOf(page);
+    return i >= 0 ? i : pool.findIndex((p) => p.url === page.url);
+  };
+  const { claims: lineCred, report: reportCred } = scoreCuratorPackage(model, claimKind.kind,
+    curatorSynthesis, curatorCited, curatorLines, verdicts, (page, grounders) => {
+      const i = poolIndexOf(page);
+      if (i < 0) return null;
+      const coCited = new Set(grounders.map((g) => g.url));
       // only the corroboration that is FILED: an unfolded held source is never a stored source, so
       // recordCorroboration files nothing from it and claim_confidence_d15 never sees its amount
-      const filedIn = receivedBy(n - 1).filter((r) => { const j = pool.findIndex((p) => p.url === r.from); return !unfolded.has(j + 1); });
-      return foldReceived(finals[n - 1].total, filedIn, coCited);
+      const filedIn = receivedBy(i).filter((r) => { const j = pool.findIndex((p) => p.url === r.from); return !unfolded.has(j + 1); });
+      return foldReceived(finals[i].total, filedIn, coCited);
     });
-  const reportCred: ReportCredibility = reportCredibility(model, claimKind.kind, lineCred);
 
   const answeredNeeds = needsStatus.filter((n) => n.status === "answered").length;
   const partialNeeds = needsStatus.filter((n) => n.status === "partial").length;
