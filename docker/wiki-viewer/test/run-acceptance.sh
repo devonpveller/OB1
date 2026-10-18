@@ -12,7 +12,7 @@ set -uo pipefail
 export MSYS_NO_PATHCONV=1
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E="$HERE/p1a-env.sh"
-OB1="$(cd "$HERE/../../.." && pwd)"
+OB1="$(cd "$HERE/../../.." && (pwd -W 2>/dev/null || pwd))"  # a path git.exe and docker accept (MSYS_NO_PATHCONV=1 is set)
 IMG=openbrain-wiki-viewer:wt-rw-p1a-render
 results=()
 pass() { results+=("PASS $1"); echo "==> PASS $1"; }
@@ -50,7 +50,7 @@ docker stop wt-rw-p1a-render-db >/dev/null; sleep 8
 o="$(bash "$E" node /ob1/docker/wiki-viewer/test/outage-probe.mjs sweep --expect unreachable 2>&1)"; rc=$?; echo "$o" | cut -c1-260
 h="$(health)"; echo "health(stopped): $h" | cut -c1-300
 docker rm -f -v wt-rw-p1a-render-watch >/dev/null 2>&1
-docker run -d --name wt-rw-p1a-render-watch --network wt-rw-p1a-render-net -v "$(cd "$OB1" && (pwd -W 2>/dev/null || pwd)):/ob1:ro" --entrypoint node "$IMG" \
+docker run -d --name wt-rw-p1a-render-watch --network wt-rw-p1a-render-net -v "$OB1:/ob1:ro" --entrypoint node "$IMG" \
   /ob1/docker/wiki-viewer/test/outage-probe.mjs watch --seconds 90 >/dev/null
 sleep 1; docker start wt-rw-p1a-render-db >/dev/null
 for _ in $(seq 1 60); do docker logs wt-rw-p1a-render-watch 2>&1 | grep -q "WATCH:" && break; sleep 2; done
@@ -116,13 +116,13 @@ o="$(bash "$E" node /ob1/docker/wiki-viewer/test/fixtures/extra-class/compile-gl
 d="$(curl_ /content/glossary/term-fixture)"; echo "without the entry file: $d"
 P1A_EXTRA_CLASS=1 bash "$E" viewer; bash "$E" wait_built 200
 g="$(curl_ /content/glossary/term-fixture body)"; echo "with the entry file: $(echo "$g" | head -1)"; echo "marker: $(echo "$g" | grep -o 'data-glossary-template="1"' | head -1)"
-st="$(git -C "$OB1" status --porcelain -- docker/wiki-viewer/lib/page-classes recipes/_shared/page-classes.mjs)"; echo "tracked entry files changed by this case: [${st}]"
+st="$(git -C "$OB1" status --porcelain -- docker/wiki-viewer/lib/page-classes recipes/_shared/page-classes.mjs 2>&1)" || st="GIT-ERROR: $st"; echo "tracked entry files changed by this case: [${st}]"
 if [ "$rc" = 0 ] && echo "$o" | grep -q "glossary: files=1 rows=1" && echo "$d" | grep -q "x-wiki-page-class=row@1" \
    && echo "$g" | head -1 | grep -q "x-wiki-page-class=glossary@1" && echo "$g" | grep -q 'data-glossary-template="1"' && [ -z "$st" ]; then pass C10; else fail C10 "see output"; fi
 
 hdr "C11 (acceptance 11): image revision label = the OB1 commit it was built from (= the gitlink at deploy)"
 label="$(docker image inspect "$IMG" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
-head_="$(git -C "$OB1" rev-parse HEAD)"; dirty="$(git -C "$OB1" status --porcelain -- docker/wiki-viewer recipes/_shared | grep -v '^??' | head -3)"
+head_="$(git -C "$OB1" rev-parse HEAD 2>&1)" || head_="GIT-ERROR"; dirty="$(git -C "$OB1" status --porcelain -- docker/wiki-viewer recipes/_shared 2>&1 | grep -v '^??' | head -3)"
 echo "label=$label OB1 HEAD=$head_ tracked-dirty=[${dirty}]"
 if [ -n "$label" ] && [ "$label" = "$head_" ] && [ -z "$dirty" ]; then pass C11; else fail C11 "label empty or not HEAD (or the tree is dirty)"; fi
 
