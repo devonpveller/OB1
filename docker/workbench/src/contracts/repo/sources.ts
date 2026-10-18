@@ -102,8 +102,14 @@ export async function tombstoneBySource(db: Db, sourceId: string): Promise<Tombs
   return (await db.query<TombstoneRow>(`${TOMBSTONE_SELECT} WHERE t.source_id = $1`, [sourceId]))[0] ?? null;
 }
 
-export async function tombstoneById(db: Db, id: string): Promise<TombstoneRow | null> {
-  return (await db.query<TombstoneRow>(`${TOMBSTONE_SELECT} WHERE t.id = $1`, [id]))[0] ?? null;
+// `f` scopes by the erased source's metadata, snapshotted onto the tombstone at erase time
+// (rw-p0-contract2): under the cloud door's filter only a tombstone of a share=cloud source
+// resolves; a tombstone with no snapshot ('{}', e.g. one written before the column) does not.
+export async function tombstoneById(db: Db, id: string, f: MetadataFilter = null): Promise<TombstoneRow | null> {
+  return (await db.query<TombstoneRow>(
+    `${TOMBSTONE_SELECT} WHERE t.id = $1 AND ($2::jsonb IS NULL OR t.metadata @> $2::jsonb)`,
+    [id, f ? JSON.stringify(f) : null],
+  ))[0] ?? null;
 }
 
 export async function tombstoneForUrl(db: Db, url: string): Promise<TombstoneRow | null> {

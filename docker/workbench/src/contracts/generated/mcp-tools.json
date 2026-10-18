@@ -120,6 +120,11 @@
           "type": "string",
           "minLength": 1,
           "description": "source id"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
         }
       },
       "required": [
@@ -130,7 +135,9 @@
       "id"
     ],
     "query_params": [],
-    "json_params": [],
+    "json_params": [
+      "metadata_filter"
+    ],
     "body_params": []
   },
   {
@@ -735,6 +742,11 @@
           "type": "string",
           "minLength": 1,
           "description": "tombstone id"
+        },
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
         }
       },
       "required": [
@@ -745,7 +757,9 @@
       "id"
     ],
     "query_params": [],
-    "json_params": [],
+    "json_params": [
+      "metadata_filter"
+    ],
     "body_params": []
   },
   {

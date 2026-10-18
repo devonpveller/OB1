@@ -5502,6 +5502,7 @@
         ],
         "summary": "dependence(id) - every connection of a source, counted and listed",
         "x-mcp-tool": "contract_dependence",
+        "description": "Under metadata_filter (the cloud door forces {\"share\":\"cloud\"}) a source outside the filter is not found, and only in-scope connections are listed: the source's own chunks and trail events, claims and citing or lead sources whose metadata contains the filter; pages, entities, sessions and user documents carry no metadata and are left out, and erase_allowed is false (rw-p0-contract2).",
         "parameters": [
           {
             "schema": {
@@ -5514,6 +5515,17 @@
             "name": "id",
             "in": "path",
             "example": "22222222-2222-4222-8222-222222222222"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
           }
         ],
         "responses": {
@@ -6035,6 +6047,7 @@
         ],
         "summary": "a tombstone with every reopen attempt",
         "x-mcp-tool": "contract_tombstone",
+        "description": "Under metadata_filter only a tombstone whose erased source's metadata (snapshotted at erase time) contains the filter resolves; any other is not found (rw-p0-contract2).",
         "parameters": [
           {
             "schema": {
@@ -6047,6 +6060,17 @@
             "name": "id",
             "in": "path",
             "example": "66666666-6666-4666-8666-666666666666"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
           }
         ],
         "responses": {

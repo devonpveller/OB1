@@ -181,3 +181,65 @@ Deno.test("the adapter never uses the one-argument z.record (the Zod 4 trap)", a
   assertEquals(/z\.record\(\s*z\.unknown\(\)\s*\)/.test(code), false);
   assert(/z\.record\(z\.string\(\), z\.unknown\(\)\)/.test(code));
 });
+
+// rw-p0-contract2 (reviewer reject of rw-p0-contract): the cloud door forces {"share":"cloud"}
+// into metadata_filter, but the SDK hands a tool only the arguments its input schema names - a
+// tool without metadata_filter silently loses the filter. The cloud-scoped set is every tool
+// whose manifest entry carries metadata_filter (the gateway's default set must be a subset:
+// openbrain-gateway/test_openbrain_gateway_contract_tools.py). For each: toRequest puts the
+// filter on the workbench URL, AND a real MCP client call delivers it to the workbench fetch.
+const FILTER = { share: "cloud" };
+const cloudScoped = () => CONTRACT_TOOLS.filter((t) => "metadata_filter" in t.input.properties);
+function requiredArgs(t: (typeof CONTRACT_TOOLS)[number]): Record<string, unknown> {
+  return Object.fromEntries(t.input.required.map((k) => [k, t.input.properties[k].type === "integer" ? 1 : "fixture-arg"]));
+}
+function filterOf(url: string): unknown {
+  const raw = new URL(url).searchParams.get("metadata_filter");
+  return raw === null ? null : JSON.parse(raw);
+}
+
+Deno.test("dependence and tombstone are cloud-scoped tools: they carry metadata_filter", () => {
+  const names = cloudScoped().map((t) => t.tool);
+  for (const must of ["contract_dependence", "contract_tombstone"]) {
+    assert(names.includes(must), `${must} carries no metadata_filter: the forced cloud filter would be dropped`);
+  }
+});
+
+Deno.test("toRequest forwards the forced filter for every cloud-scoped tool", () => {
+  for (const t of cloudScoped()) {
+    assert(t.json_params.includes("metadata_filter"), `${t.tool}: metadata_filter is not a JSON query parameter`);
+    const r = toRequest(t, { ...requiredArgs(t), metadata_filter: FILTER }, "http://wb:8000");
+    assertEquals(filterOf(r.url), FILTER, `${t.tool}: toRequest dropped the filter (${r.url})`);
+  }
+});
+
+Deno.test("a real MCP client call delivers the forced filter to the workbench for every cloud-scoped tool", async () => {
+  const server = new McpServer({ name: "contract-scope", version: "1.0.0" });
+  const calls: string[] = [];
+  registerContractTools(server, {
+    workbenchUrl: "http://workbench.invalid:8000", key: "k",
+    fetchImpl: ((url: string) => {
+      calls.push(String(url));
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }) as typeof fetch,
+  });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a);
+  const client = new Client({ name: "t", version: "1.0.0" });
+  await client.connect(b);
+  try {
+    for (const t of cloudScoped()) {
+      calls.length = 0;
+      await client.callTool({ name: t.tool, arguments: { ...requiredArgs(t), metadata_filter: FILTER } });
+      assertEquals(calls.length, 1, `${t.tool}: no workbench call`);
+      assertEquals(filterOf(calls[0]), FILTER, `${t.tool}: the filter did not reach the workbench (${calls[0]})`);
+    }
+    // the mechanism the reviewer found, pinned: a tool whose schema lacks the parameter drops it
+    const bare = CONTRACT_TOOLS.find((t) => !("metadata_filter" in t.input.properties) && t.input.required.length === 0)!;
+    calls.length = 0;
+    await client.callTool({ name: bare.tool, arguments: { metadata_filter: FILTER } });
+    assertEquals(filterOf(calls[0]), null, `${bare.tool}: expected the SDK to drop an undeclared argument`);
+  } finally {
+    await client.close();
+  }
+});

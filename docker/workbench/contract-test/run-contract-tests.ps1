@@ -15,7 +15,10 @@
 #   4b. builds openbrain-research:wt-<id>, runs it on database A with two caller keys, and runs
 #      integrations/research-service/origin.e2e.test.ts against it (D17 origin binding)
 #   5. database B: a fresh chain + fixtures; starts the :wt workbench and a stub embedder; runs
-#      Dredd (rw-dredd:wt-<id>) against every example in generated/openapi.json
+#      (5a) integrations/kubernetes-deployment/contract-scope.e2e.test.ts - the openbrain-mcp
+#      adapter calling the workbench under the cloud door's forced {"share":"cloud"} filter
+#      (rw-p0-contract2) - then Dredd (rw-dredd:wt-<id>) against every example in
+#      generated/openapi.json
 #   6. runs the eleven-router smoke (scripts/checks/smoke-workbench-routers.ps1) against the
 #      :wt workbench twice and compares (the script works; the routers answer), then against a
 #      workbench built from -BaseSha on the same database: the pre-change capture, which must
@@ -271,6 +274,21 @@ try {
     Write-Host '  next: deno task contract:gen, then run again without -RecordExamples'
     throw 'recorded'
   }
+  # 5a. the cloud door's forced filter through the adapter (rw-p0-contract2): the openbrain-mcp
+  # adapter (integrations/kubernetes-deployment/contract-tools.ts, mounted read-only) calls this
+  # :wt workbench with {"share":"cloud"}; contract_dependence and contract_tombstone must return
+  # nothing outside the scope. Runs in the :wt image with ITS import map (cached deps, offline);
+  # the test seeds its own run-unique rows on database B and removes them before Dredd.
+  Write-Host '[5a] contract_dependence / contract_tombstone through the adapter under the forced cloud filter'
+  $k8s = Join-Path $ob1 'integrations\kubernetes-deployment'
+  $o = Dk run --rm --label $label --network $net -v "${k8s}:/k8s:ro" `
+    -e "CONTRACT_SCOPE_E2E_URL=http://${wbName}:8000" -e "CONTRACT_SCOPE_E2E_KEY=$key" `
+    -e "CONTRACT_SCOPE_E2E_DB_HOST=$dbB" -e "CONTRACT_SCOPE_E2E_DB_PASSWORD=$pw" `
+    $tag deno test --config /app/deno.json --no-lock --cached-only --allow-net --allow-env --allow-read /k8s/contract-scope.e2e.test.ts
+  Save 'contract-scope-e2e.log' ($o -replace $key, '***')
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed( \(\d+ steps?\))? \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[2].Value -eq '1' -and $sum.Groups[4].Value -eq '0') "cloud scoping e2e: $($sum.Value)"
+
   $null = Dk image inspect $dreddTag
   if ($script:rc -ne 0) {
     $o = Dk build --label $label -t $dreddTag -f (Join-Path $ct 'dredd.Dockerfile') $ct
