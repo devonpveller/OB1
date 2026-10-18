@@ -95,7 +95,9 @@ async function settleUnlinked(db: Db, id: string, actor: string | null): Promise
 // Stage 1. The committed retraction IS the suppressed state, so every consumer that already
 // filters retraction_committed_at excludes it from that moment; claims it grounded are
 // re-scored now (claim_confidence ignores suppressed edges since 230-init-research-contract).
-export async function suppress(db: Db, id: string, reason: string, by: string | null) {
+// The trail event carries from -> to, the reason and the actor; a door that calls this (the legacy
+// purge, rw-p0b-purge-door) adds its own detail (door, reason type, note) through `extra`.
+export async function suppress(db: Db, id: string, reason: string, by: string | null, extra: Record<string, unknown> = {}) {
   return await db.tx(async (t) => {
     const s = await lockSource(t, id);
     if (!s) throw new NotFound("source not found");
@@ -121,7 +123,7 @@ export async function suppress(db: Db, id: string, reason: string, by: string | 
       [id, by, reason, JSON.stringify(ctx)],
     );
     const rescored = (await t.query<{ n: number }>(`SELECT public.recompute_claims_for_source($1) AS n`, [id]))[0].n;
-    await trail(t, id, "suppressed", { reason }, by);
+    await trail(t, id, "suppressed", { ...extra, from: s.lifecycle, to: "suppressed", reason }, by);
     const settled = await settleUnlinked(t, id, by);
     return { source_id: id, lifecycle: settled.lifecycle, reason, context: ctx, rescored_claims: rescored, blocking: settled.blocking };
   });

@@ -780,6 +780,83 @@ t("restore still refuses a purged source", async () => {
   assertEquals((await lifeOf(s)).committed, true);
 });
 
+// ── the legacy purge door (DELETE /workbench/sources/:id) through the D5 lifecycle ──────────────
+// rw-p0b-purge-door, tester finding T2-1: the purge moved an ACTIVE source to suppressed with no
+// trail event, no reason, a stale cached claims.confidence, and no way back (restore refused it).
+async function legacyDelete(path: string, body: unknown, actor = "purge-tester") {
+  const r = await legacy!.routes.sources.request(path, {
+    method: "DELETE", headers: { "content-type": "application/json", "Remote-User": actor }, body: JSON.stringify(body),
+  });
+  return { status: r.status, json: await r.json().catch(() => ({})) as Record<string, any> };
+}
+const confidences = async (claim: string) =>
+  (await sql<{ cached: number; live: number }>(
+    `SELECT confidence AS cached, public.claim_confidence(id) AS live FROM public.claims WHERE id = $1`, [claim]))[0];
+// an ACTIVE source grounding one claim, its cached confidence current and above 0
+async function activeWithClaim() {
+  const s = await newSource();
+  const c = uuid();
+  await sql(`INSERT INTO public.claims (id, text) VALUES ($1, 'claim on a source the legacy purge meets')`, [c]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $2, 'states')`, [c, s]);
+  await sql(`SELECT public.recompute_claim_confidence($1)`, [c]);
+  const k = await confidences(c);
+  assert(Number(k.cached) > 0 && Number(k.cached) === Number(k.live), "fixture: the claim's cached confidence is current and above 0");
+  return { s, c };
+}
+
+t("the legacy purge of an ACTIVE source without a registered reason type is refused, naming the missing reason", async () => {
+  const { s, c } = await activeWithClaim();
+  const before = await confidences(c);
+  for (const body of [{ confirm: true }, { confirm: true, reason_type: "" }, { confirm: true, reason_type: "not-a-registered-reason" }]) {
+    const r = await legacyDelete(`/${s}`, body);
+    assertEquals(r.status, 400, `purge with ${JSON.stringify(body)}`);
+    assert(/reason_type/.test(String(r.json.error)), `the refusal names the reason type: ${r.json.error}`);
+    assertEquals(r.json.missing, "reason_type");
+    assertEquals(await lifeOf(s), { life: "active", committed: false, unlinked: false, reason: null }, "a refused purge changes nothing");
+    assertEquals((await trailKinds(s)).length, 0, "a refused purge writes no trail event");
+  }
+  assertEquals(await confidences(c), before);
+});
+
+t("the legacy purge with a reason type is a recorded D5 suppression: one trail event (from, to, actor, reason), claims re-scored", async () => {
+  const { s, c } = await activeWithClaim();
+  const r = await legacyDelete(`/${s}`, { confirm: true, reason_type: "deliberate", note: "operator purge in a test" });
+  assertEquals(r.status, 200, JSON.stringify(r.json));
+  assertEquals([r.json.purged, r.json.lifecycle, r.json.transition], [true, "suppressed", { from: "active", to: "suppressed" }]);
+  assertEquals(await lifeOf(s), { life: "suppressed", committed: true, unlinked: false, reason: "deliberate" });
+  const ev = await sql<{ kind: string; detail: Record<string, unknown>; actor: string | null }>(
+    `SELECT kind, detail, actor FROM public.source_trail_events WHERE source_id = $1 ORDER BY created_at, id`, [s]);
+  assertEquals(ev.length, 1, "exactly one trail event");
+  assertEquals([ev[0].kind, ev[0].detail.from, ev[0].detail.to, ev[0].detail.reason, ev[0].actor],
+    ["suppressed", "active", "suppressed", "deliberate", "purge-tester"]);
+  assertEquals(ev[0].detail.door, "DELETE /workbench/sources/:id");
+  const k = await confidences(c);
+  assertEquals(Number(k.cached), Number(k.live), "claims.confidence equals the live claim_confidence after the purge");
+  assertEquals(Number(k.live), 0, "the suppressed source lends no credit");
+  // the contract reads it as a suppression with its recorded reason, not a synthesized legacy one
+  const ref = await call("GET", `/references/${s}`);
+  assertEquals([ref.json.state, ref.json.state_detail?.reason], ["suppressed", "deliberate"]);
+  // a second purge of the now-suppressed source is refused by the lifecycle, nothing written
+  const again = await legacyDelete(`/${s}`, { confirm: true, reason_type: "deliberate" });
+  assertEquals([again.status, again.json.lifecycle], [409, "suppressed"]);
+  assertEquals((await trailKinds(s)).length, 1);
+});
+
+t("a purged source stays reversible through the restore door until a gated erase", async () => {
+  const { s, c } = await activeWithClaim();
+  assertEquals((await legacyDelete(`/${s}`, { confirm: true, reason_type: "credibility" })).status, 200);
+  // erase is gated: refused while the source is suppressed (not unlinked)
+  const er = await call("POST", `/sources/${s}/erase`, { reason_type: "credibility", eraser: { kind: "user", user: "purge-tester" } });
+  assertEquals(er.status, 409, `erase before unlinked: ${er.text}`);
+  const back = await legacyPost(`/${s}/restore`);
+  assertEquals(back.status, 200, "restore of a purged source");
+  assertEquals(back.json.transition, { from: "suppressed", to: "active" });
+  assertEquals(await lifeOf(s), { life: "active", committed: false, unlinked: false, reason: null });
+  assertEquals((await trailKinds(s)).map((e) => e.kind), ["suppressed", "restored"], "the purge and the restore are both recorded");
+  const k = await confidences(c);
+  assert(Number(k.cached) > 0 && Number(k.cached) === Number(k.live), "the restored source grounds its claim again");
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();

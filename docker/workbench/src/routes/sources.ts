@@ -1,11 +1,20 @@
 // /workbench/sources sub-router (P4). Update-with-history, staged retract /
 // restore, per-notebook unlink, and operator-confirmed purge. Retract +
-// (P6) grounding write a Changes-log entry (G11).
+// (P6) grounding write a Changes-log entry (G11). The purge is the contract's D5 suppress
+// (rw-p0b-purge-door): reason type required, trail event, claims re-scored, restorable.
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import * as repo from "../repositories/sources.ts";
 import { config } from "../config.ts";
 import { logChange } from "../util/changeslog.ts";
+import { pool } from "../db/pool.ts";
+import { poolDb } from "../contracts/db.ts";
+import { RegistryReader } from "../contracts/registry.ts";
+import * as lifecycle from "../contracts/repo/lifecycle.ts";
+
+// The contract's lifecycle over this router's pool (the same pool src/contracts/wiring.ts uses).
+const contractDb = poolDb(pool);
+const registry = new RegistryReader(contractDb);
 
 export const sources = new Hono();
 
@@ -196,16 +205,59 @@ sources.post("/:id/restore", async (c) => {
   return c.json({ source: res.source, transition: res.transition });
 });
 
-// DELETE /workbench/sources/:id { confirm: true } — irreversible purge.
+// DELETE /workbench/sources/:id { confirm: true, reason_type, note? } — purge = the D5 SUPPRESS
+// (rw-p0b-purge-door, tester finding T2-1). The reason type is a key of the erasure_reasons
+// registry (the reason the source is on its way out; erase later names its own). The contract's
+// lifecycle.suppress does the move: active -> suppressed, one 'suppressed' trail event (from, to,
+// actor, reason, this door), the claims the source grounds re-scored. It stays reversible
+// through POST /:id/restore until a gated erase (POST /workbench/contract/sources/:id/erase,
+// refused unless unlinked). A source that is not active is refused (409), nothing written.
+const ERASURE_REASONS = "erasure_reasons";
 sources.delete("/:id", async (c) => {
+  const id = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
   if (body?.confirm !== true) {
-    return c.json({ error: "purge requires { confirm: true } (irreversible)" }, 400);
+    return c.json({ error: "purge requires { confirm: true }" }, 400);
   }
-  const ok = await repo.purge(c.req.param("id"));
-  if (!ok) return c.json({ error: "not found" }, 404);
-  await logChange({ action: "purge (irreversible)", detail: `source ${c.req.param("id")}` });
-  return c.json({ purged: true });
+  const reasonType = typeof body?.reason_type === "string" ? body.reason_type.trim() : "";
+  if (!reasonType) {
+    return c.json({
+      error: `purge requires a reason_type: a key of the ${ERASURE_REASONS} registry (GET /workbench/contract/registries/${ERASURE_REASONS})`,
+      missing: "reason_type",
+    }, 400);
+  }
+  if (!(await registry.has(ERASURE_REASONS, reasonType))) {
+    return c.json({
+      error: `purge requires a reason_type registered in ${ERASURE_REASONS}; '${reasonType}' is not`,
+      missing: "reason_type",
+    }, 400);
+  }
+  const note = typeof body?.note === "string" && body.note.trim() ? body.note.trim() : null;
+  const by = (typeof body?.by === "string" && body.by) || authorOf(c);
+  let res;
+  try {
+    res = await lifecycle.suppress(contractDb, id, reasonType, by, {
+      door: "DELETE /workbench/sources/:id", reason_type: reasonType, note,
+    });
+  } catch (e) {
+    if (e instanceof lifecycle.NotFound) return c.json({ error: "not found" }, 404);
+    if (e instanceof lifecycle.Conflict) {
+      return c.json({ error: `purge refused: ${e.message} (D5)`, lifecycle: e.detail.lifecycle ?? null }, 409);
+    }
+    throw e;
+  }
+  await logChange({
+    action: `purge (suppressed, reason ${reasonType}; reversible by restore until erased)`,
+    detail: `source ${id}`,
+  });
+  return c.json({
+    purged: true,
+    lifecycle: res.lifecycle,
+    transition: { from: "active", to: res.lifecycle },
+    reason_type: reasonType,
+    rescored_claims: res.rescored_claims,
+    blocking: res.blocking,
+  });
 });
 
 // Separate router (no :id UUID guard) — the wiki-service POSTs this at compile

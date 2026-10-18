@@ -1,7 +1,11 @@
 # run-contract-tests.ps1 - the retrieval contract's disposable test run (research-workbench P0,
 # rw-p0-contract).
 #
-#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-contract-tests.ps1 [-Id <owner id>] [-Evidence <dir>]
+#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-contract-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner id>] [-Evidence <dir>]
+#
+# -Subnet is REQUIRED (rw-p0b-purge-door): the disposable network gets this subnet, never one from
+# Docker's default pools (a pool handed out 192.168.0.0/20 and cut the host off its LAN). Refused
+# inside 192.168.0.0/16. -Evidence must be absent or empty; it is written only at the end.
 #
 # What it does, and ONLY this:
 #   1. stages the REAL initdb chain from docker-compose.yml (every mounted init*.sql, intake's
@@ -32,6 +36,12 @@
 #      Captures land in a directory the run owns; the LIVE-DATA GUARD (size cap, fixture-only
 #      uuids, fixture-marked notes and notebooks, the recorded target) must pass before any
 #      capture is copied into -Evidence - a capture that fails it is deleted, never kept.
+#      THE EVIDENCE GATE (rw-p0b-purge-door, tester finding T2-6; evidence-gate.ps1): every log
+#      is written to a staging directory the run owns, and NOTHING - no log, no capture, not the
+#      directory - is written under -Evidence until the guard has passed for EVERY capture the
+#      run made; then the logs are published through Protect-EvidenceText (a FAIL compare's
+#      response excerpts redacted to their fixture ids, non-fixture uuids and host paths
+#      replaced). A planted live-shaped excerpt proves it in every run (smoke-planted-red.log).
 #   7. tears down exactly what it created (containers with -v, so no anonymous volume is
 #      left); verifies nothing labelled <Id> is left, no NEW dangling volume exists, and no
 #      :local image changed
@@ -42,10 +52,13 @@ param(
   [string]$Id = 'wt-rw-p0-contract',
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$Evidence = '',
+  # The disposable network's subnet (required; see the header).
+  [string]$Subnet = '',
   [switch]$KeepImages,
   # The OB1 commit the item branched from: the eleven-router smoke runs against a workbench
   # built from it too, and the two captures must be identical (the pre-change capture).
-  [string]$BaseSha = 'ce731ff',
+  # rw-p0b-purge-door branched from 0741b36 (P0 + P2a landed).
+  [string]$BaseSha = '0741b36',
   # Re-record src/contracts/schemas/examples.ts from the fixture (then: deno task contract:gen,
   # and run again without the switch). Skips Dredd and the smoke.
   [switch]$RecordExamples,
@@ -55,6 +68,9 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
+if ($Subnet -notmatch '^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}/(\d{1,2})$') { Write-Host "REFUSED: -Subnet <a.b.c.d/nn> is required (got '$Subnet')"; exit 2 }
+if (([int]$Matches[1] -eq 192 -and [int]$Matches[2] -eq 168) -or [int]$Matches[3] -lt 16) { Write-Host "REFUSED: -Subnet $Subnet overlaps 192.168.0.0/16 or is wider than /16"; exit 2 }
+if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty (the run publishes into an empty or absent directory)"; exit 2 }
 $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot                                  # .../workbench/contract-test
 $wb = Split-Path -Parent $ct                         # .../OB1/docker/workbench
@@ -71,7 +87,10 @@ $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwp0-evidence-$rand" }
-New-Item -ItemType Directory -Force $Evidence | Out-Null
+# The evidence gate (T2-6): logs are staged HERE; -Evidence is not touched until the end.
+$evStage = Join-Path $env:TEMP "rwp0-evstage-$rand"
+New-Item -ItemType Directory -Force $evStage | Out-Null
+. (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 $stage = Join-Path $env:TEMP "rwp0-initdb-$rand"
 $callsDir = Join-Path $env:TEMP "rwp0-calls-$rand"
 
@@ -81,7 +100,8 @@ function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 function Dk { $o = (& docker @args 2>&1 | ForEach-Object { "$_" }) -join "`n"; $script:rc = $LASTEXITCODE; return $o }
 function Save([string]$name, [string]$text) {
-  [System.IO.File]::WriteAllText((Join-Path $Evidence $name), $text, (New-Object System.Text.UTF8Encoding $false))
+  # into the STAGING directory; Publish-Evidence copies it to -Evidence after the guard (T2-6)
+  [System.IO.File]::WriteAllText((Join-Path $evStage $name), $text, (New-Object System.Text.UTF8Encoding $false))
 }
 if ($tag -match ':local$' -or $dreddTag -match ':local$') { throw 'refusing to build a :local tag' }
 
@@ -137,9 +157,9 @@ function Seed-Vault([string]$name) {
 
 # The LIVE-DATA GUARD (attempt 2): a capture is kept only if it provably came from this run's
 # disposable database and fixture vault. Returns the violations (none = clean).
-$FixtureUuids = @{}
-foreach ($m in [regex]::Matches((Get-Content -Raw (Join-Path $ct 'fixtures.sql')), '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')) { $FixtureUuids[$m.Value] = $true }
-$FixtureUuids['00000000-0000-4000-8000-000000000000'] = $true   # the smoke's own unknown-job probe
+$FixtureUuids = Get-FixtureUuids (Get-Content -Raw (Join-Path $ct 'fixtures.sql'))   # + the smoke's unknown-job probe
+# Every capture the run makes, @(dir, container): ALL must pass Test-Capture before anything is published.
+$script:captures = @()
 $MaxCaptureBytes = 16384                                          # the live notebooks-list was 156177
 function Get-CaptureBody([string]$file) { return (([System.IO.File]::ReadAllText($file)) -split "`n`n", 2)[1] | ConvertFrom-Json }
 function Test-Capture([string]$dir, [string]$container) {
@@ -188,8 +208,8 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, labelled)"
+  $null = Dk network create --internal --subnet $Subnet --label $label $net
+  Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $Subnet)"
   if ($script:rc -ne 0) { throw 'network' }
   $made.net = $true
 
@@ -213,6 +233,14 @@ try {
   Save 'integration-test.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "integration tests: $($sum.Value)"
+  # The triage listing's SQL (openbrain-mcp suggestion-list.ts) over database A (rw-p0b-purge-door,
+  # T2-3): one active and one suppressed source; the :wt image's cached deps, offline.
+  $k8sDir = Join-Path $ob1 'integrations\kubernetes-deployment'
+  $o = Dk run --rm --label $label --network $net -v "${k8sDir}:/k8s:ro" -e "D5_TEST_DB_HOST=$dbA" -e "D5_TEST_DB_PASSWORD=$pw" `
+    $tag deno test --config /app/deno.json --no-lock --cached-only --allow-read --allow-env --allow-net /k8s/d5-consumers.test.ts
+  Save 'd5-consumers.log' $o
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[2].Value -eq '2' -and $sum.Groups[3].Value -eq '0') "triage listing SQL over database A (d5-consumers.test.ts): $($sum.Value)"
 
   # ---------------------------------------------------------------- 4b. origin binding e2e
   Write-Host '[4b] research-service origin binding end to end (the :wt research image on database A)'
@@ -346,6 +374,8 @@ try {
     $made.smokeDir = $own
     function Smoke-Capture([string]$dir, [string]$container) {
       # In-process; every capture names its disposable target explicitly (never the defaults).
+      # Recorded BEFORE it runs: a capture that fails half-way still has to pass the guard (T2-6).
+      $script:captures += , @($dir, $container)
       $o = (& $smoke -Capture $dir -ExecContainer $container -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY *>&1 | Out-String)
       return @{ out = $o; rc = $LASTEXITCODE }
     }
@@ -363,8 +393,11 @@ try {
     $o0b = (& $smoke -Capture $probe *>&1 | Out-String); $r0b = $LASTEXITCODE
     Check (($r0b -eq 2) -and ($o0b -match 'REFUSED') -and -not (Test-Path $probe)) "a capture with no target and no -Live is refused (rc $r0b)"
     $o0c = (& $smoke -Capture $probe -ExecContainer openbrain-workbench -BaseUrl http://caddy:8446 *>&1 | Out-String); $r0c = $LASTEXITCODE
-    Check (($r0c -eq 2) -and ($o0c -match 'needs -Live') -and -not (Test-Path $probe)) "the live target named without -Live is refused (rc $r0c)"
-    Save 'smoke-refusals.log' ($o0 + $o0b + $o0c)
+    Check (($r0c -eq 2) -and ($o0c -match 'not a disposable target without -Live') -and -not (Test-Path $probe)) "the live target named without -Live is refused (rc $r0c)"
+    # rw-p0b-purge-door, T2-2: the tester's bypass (another exec container name, the live service URL)
+    $o0d = (& $smoke -Capture $probe -ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000 *>&1 | Out-String); $r0d = $LASTEXITCODE
+    Check (($r0d -eq 2) -and ($o0d -match "base URL host 'openbrain-workbench'") -and -not (Test-Path $probe)) "the tester's bypass (-ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000) is refused by host, nothing captured (rc $r0d)"
+    Save 'smoke-refusals.log' ($o0 + $o0b + $o0c + $o0d)
     $a = Join-Path $own 'smoke-a'; $b = Join-Path $own 'smoke-b'
     $c1 = Smoke-Capture $a $wbName; $c2 = Smoke-Capture $b $wbName
     $cmp = Smoke-Compare $a $b
@@ -429,14 +462,23 @@ try {
     Save 'smoke-guard-red.log' ($redBad -join "`n")
     Check ($redBad.Count -ge 5) "live-data guard RED: a live-shaped capture is caught ($($redBad.Count) violation(s): target, live, size, uuid, notebook)"
     Remove-Item -Recurse -Force $fake
-    if ($guardBad.Count -eq 0) {
-      foreach ($d in @($a, $b, $pre)) { Copy-Item -Recurse $d (Join-Path $Evidence (Split-Path -Leaf $d)) }
-      $diff = @(Get-ChildItem -File $pre | Where-Object { $_.Name -ne '_target.txt' } | Where-Object {
-          [System.IO.File]::ReadAllText($_.FullName) -cne [System.IO.File]::ReadAllText((Join-Path $a $_.Name)) })
-      Save 'smoke-diff.txt' ($(if ($diff.Count) { ($diff | ForEach-Object { $_.Name }) -join "`n" } else { '(empty: no response file differs between smoke-pre-change and smoke-a)' }))
-    } else {
-      foreach ($x in $guardBad) { Write-Host "    guard: $x" }
-    }
+    if ($guardBad.Count) { foreach ($x in $guardBad) { Write-Host "    guard: $x" } }
+    $diff = @(Get-ChildItem -File $pre | Where-Object { $_.Name -ne '_target.txt' } | Where-Object {
+        [System.IO.File]::ReadAllText($_.FullName) -cne [System.IO.File]::ReadAllText((Join-Path $a $_.Name)) })
+    Save 'smoke-diff.txt' ($(if ($diff.Count) { ($diff | ForEach-Object { $_.Name }) -join "`n" } else { '(empty: no response file differs between smoke-pre-change and smoke-a)' }))
+    # RED for the evidence gate (T2-6): a FAIL compare against a capture carrying a LIVE-SHAPED
+    # response (a uuid that is no fixture's, a notebook name that is not 'Fixture notebook')
+    # prints that excerpt; the staged log keeps it, and the published one must not.
+    $planted = Join-Path $own 'smoke-planted'
+    Copy-Item -Recurse $a $planted
+    $script:plantedUuid = [guid]::NewGuid().ToString()
+    $script:plantedName = 'Live notebook ' + $rand
+    [System.IO.File]::WriteAllText((Join-Path $planted 'notebooks-list.txt'), "status: 200`ntype: application/json`n`n" +
+      '{"notebooks":[{"id":"' + $script:plantedUuid + '","name":"' + $script:plantedName + '"}]}' + "`n")
+    $cp = Smoke-Compare $a $planted
+    Save 'smoke-planted-red.log' $cp.out
+    Check (($cp.rc -eq 1) -and ($cp.out -match [regex]::Escape($script:plantedName)) -and ($cp.out -match [regex]::Escape($script:plantedUuid))) "evidence gate RED: a FAIL compare prints the planted live-shaped excerpt into the STAGED log (rc $($cp.rc))"
+    Remove-Item -Recurse -Force $planted
     Remove-Item $baseSrc, $baseTar -Recurse -Force -ErrorAction SilentlyContinue
   } else {
     Write-Host "  SKIP  $smoke not found (OB1 checked out alone)"
@@ -463,6 +505,28 @@ try {
   if (-not $KeepImages) { foreach ($i in $made.images) { $null = Dk rmi $i } }
   Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item $callsDir -Recurse -Force -ErrorAction SilentlyContinue
+  # THE EVIDENCE GATE (T2-6): -Evidence has not been touched so far; now the guard runs over EVERY
+  # capture the run made, and only if all pass are the staged logs (redacted) and the captures
+  # published. A failing guard publishes nothing.
+  Write-Host '[8] evidence gate'
+  $untouched = -not (Test-Path $Evidence) -or @(Get-ChildItem -Force $Evidence).Count -eq 0
+  Check $untouched "nothing was written under -Evidence before the guard passed for every capture ($($script:captures.Count) capture(s))"
+  $pub = Publish-Evidence $evStage $Evidence $script:captures ${function:Test-Capture} $FixtureUuids
+  if ($pub.published) {
+    Pass "evidence published after the guard passed for all $($script:captures.Count) capture(s): $($pub.files) item(s)"
+    if ($script:plantedUuid) {
+      $evAll = @(Get-ChildItem -Recurse -File $Evidence | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join "`n"
+      $leak = @(@($script:plantedUuid, $script:plantedName) | Where-Object { $evAll.Contains($_) })
+      $foreign = @([regex]::Matches($evAll, $UuidRx) | Where-Object { -not $FixtureUuids.ContainsKey($_.Value.ToLower()) })
+      Check (($leak.Count -eq 0) -and ($foreign.Count -eq 0)) "evidence gate: the planted live-shaped excerpt reached no evidence file (planted strings found: $($leak.Count); non-fixture uuids: $($foreign.Count))"
+      $pl = Join-Path $Evidence 'smoke-planted-red.log'
+      Check ((Test-Path $pl) -and ([System.IO.File]::ReadAllText($pl) -match 'after: \[response excerpt redacted to its fixture ids: none\]')) 'evidence gate: the planted excerpt is published redacted to its fixture ids (none)'
+    }
+  } else {
+    Fail "evidence WITHHELD: the guard failed for $($pub.violations.Count) capture item(s); nothing was written under -Evidence"
+    foreach ($x in $pub.violations) { Write-Host "    guard: $x" }
+  }
+  Remove-Item $evStage -Recurse -Force -ErrorAction SilentlyContinue
   if ($made.smokeDir) { Remove-Item $made.smokeDir -Recurse -Force -ErrorAction SilentlyContinue }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   $leftNet = (Dk network ls --filter "label=$label" --format '{{.Name}}' | Out-String).Trim()

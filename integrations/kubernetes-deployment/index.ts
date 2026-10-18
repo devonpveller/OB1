@@ -26,6 +26,7 @@ import { z } from "zod";
 import { Pool } from "postgres";
 import { registerAgentMemory } from "./agent-memory.ts";
 import { registerContractTools } from "./contract-tools.ts";
+import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
 import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
 import {
   buildEgress,
@@ -1812,17 +1813,8 @@ function registerSuggestionList(
       try {
         const client = await pool.connect();
         try {
-          const r = await client.queryObject<SuggestionView>(
-            `SELECT ts.thread_id, ts.source_id, s.url, s.title,
-                    ts.link_type, ts.suggestion_reason, ts.created_at
-             FROM thread_sources ts
-             JOIN sources s ON s.id = ts.source_id
-             WHERE ts.status = $1
-               AND s.retraction_committed_at IS NULL  -- D5 stage 1: a suppressed source is not triaged (as notebooks.ts listSuggestions)
-               AND ($2::uuid IS NULL OR ts.thread_id = $2)
-             ORDER BY ts.created_at DESC`,
-            [whereStatus, thread_id ?? null],
-          );
+          // suggestion-list.ts: the query d5-consumers.test.ts runs against a disposable database
+          const r = await client.queryObject<SuggestionView>(SUGGESTION_LIST_SQL, [whereStatus, thread_id ?? null]);
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ status: whereStatus, items: r.rows }) }],
           };

@@ -118,8 +118,19 @@ function shape(s: J | undefined, fromOpenApi: boolean): J {
     out.properties = Object.fromEntries(Object.keys(s.properties).sort().map((k) => [k, shape(s!.properties[k], fromOpenApi)]));
   }
   if (s.items) out.items = shape(s.items, fromOpenApi);
+  // additionalProperties (rw-p0b-purge-door, tester finding T2-4: `{}` -> `false` passed): a
+  // boolean is kept as it is, a schema is compared as one; absent stays absent.
+  if ("additionalProperties" in s) {
+    const ap = s.additionalProperties;
+    out.additionalProperties = typeof ap === "boolean" ? ap : shape(ap as J, fromOpenApi);
+  }
   return out;
 }
+
+// metadata_filter: a JSON string on the HTTP route, an object over MCP (the adapter serialises
+// it) - the one deliberate difference. The OpenAPI string carries "an optional JSON object" of
+// any keys, so the MCP side is an object whose additional properties are any value: `{}`.
+const METADATA_FILTER_SHAPE: J = { type: "object", nullable: false, additionalProperties: shape({}, false) };
 
 // What the OpenAPI document says each MCP tool's input is, nested.
 function expectedShapes(): Map<string, J> {
@@ -130,9 +141,7 @@ function expectedShapes(): Map<string, J> {
       const props: J = {};
       const required: string[] = [];
       for (const p of op.parameters ?? []) {
-        // metadata_filter: a JSON string on the HTTP route, an object over MCP (the adapter
-        // serialises it) - the one deliberate difference.
-        props[p.name] = p.name === "metadata_filter" ? { type: "object", nullable: false } : shape(p.schema, true);
+        props[p.name] = p.name === "metadata_filter" ? METADATA_FILTER_SHAPE : shape(p.schema, true);
         if (p.required) required.push(p.name);
       }
       const body = op.requestBody?.content?.["application/json"]?.schema;
@@ -151,9 +160,23 @@ Deno.test("every tool's input schema matches its OpenAPI operation AT EVERY LEVE
   const want = expectedShapes();
   for (const t of await listed()) {
     const got = shape(t.inputSchema, false);
-    // the MCP side's metadata_filter is a record: compare it as the bare object it is
-    if (got.properties?.metadata_filter) got.properties.metadata_filter = { type: got.properties.metadata_filter.type, nullable: false };
+    // the MCP side's metadata_filter is a record: compare it as the bare object it is, with its
+    // additionalProperties (z.record emits propertyNames too; that is the record's key type)
+    const mf = got.properties?.metadata_filter;
+    if (mf) got.properties.metadata_filter = { type: mf.type, nullable: false, additionalProperties: mf.additionalProperties };
     assertEquals(got, want.get(t.name), `${t.name}: the nested input schema drifted from the OpenAPI document`);
+  }
+});
+
+// The tool MANIFEST (contract-tools.json, what the adapter is built from) against the OpenAPI
+// document at every level, additionalProperties included (rw-p0b-purge-door, T2-4): the adapter
+// maps every bare object to a record and never reads additionalProperties, so tools/list alone
+// cannot see a manifest that says `false` where the document allows any key.
+Deno.test("the tool manifest matches the OpenAPI document AT EVERY LEVEL, additionalProperties included", () => {
+  const want = expectedShapes();
+  assertEquals(CONTRACT_TOOLS.map((t) => t.tool).sort(), [...want.keys()].sort(), "the manifest's tool set drifted");
+  for (const t of CONTRACT_TOOLS) {
+    assertEquals(shape(t.input as J, false), want.get(t.tool), `${t.tool}: the manifest's input schema drifted from the OpenAPI document`);
   }
 });
 
