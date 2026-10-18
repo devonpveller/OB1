@@ -86,9 +86,12 @@ export function TableOfContents(page, listId) {
 
 // ── Backlinks (Quartz Backlinks.tsx) ────────────────────────────────────────
 // ALWAYS emitted (acceptance 1); Quartz hides it when empty (hideWhenEmpty).
+// Every page whose links include this one - the page ITSELF too when it links
+// to its own heading, as Quartz lists it (Backlinks.tsx: allFiles.filter(
+// (file) => file.links?.includes(slug)); rw-p1a-render attempt 3, AT2-1b).
 export function Backlinks(page, listId) {
   const simple = simplifySlug(page.slug);
-  const from = (page.site?.backlinks.get(simple) || []).filter((s) => s !== page.slug);
+  const from = page.site?.backlinks.get(simple) || [];
   return html(h("div", { class: "backlinks" },
     h("h3", null, "Backlinks"),
     h("ul", { id: listId, class: "overflow" },

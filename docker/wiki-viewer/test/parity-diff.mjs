@@ -12,8 +12,11 @@
  * `x-wiki-render: db` are checked on every URL too (exit 1 on a miss).
  *
  * Usage (inside wt-rw-p1a-render-net, the built snapshot mounted read-only):
- *   node parity-diff.mjs --base http://wt-rw-p1a-render-viewer:8080 --built /srv/current [--show]
- * --show prints every hunk, explained or not.
+ *   node parity-diff.mjs --base http://wt-rw-p1a-render-viewer:8080 --built /srv/current [--show] [--urls /a,/b]
+ * --show prints every hunk, explained or not; --urls diffs only those URLs of
+ * the list (a runner case that changes one page's state).
+ * "alias redirect" URLs (attempt 3) are Quartz's AliasRedirects documents: the
+ * WHOLE live response is compared with the whole built file, byte for byte.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -22,6 +25,7 @@ const arg = (k, d) => { const i = process.argv.indexOf(k); return i >= 0 ? proce
 const BASE = arg("--base", `http://${process.env.P1A_PREFIX || "wt-rw-p1a-render"}-viewer:8080`).replace(/\/+$/, "");
 const BUILT = arg("--built", "/srv/current");
 const SHOW = process.argv.includes("--show");
+const ONLY_URLS = arg("--urls", "") ? new Set(arg("--urls", "").split(",").map((x) => x.trim()).filter(Boolean)) : null;
 
 import { URLS } from "./parity-diff-urls.mjs";
 export { URLS };
@@ -50,7 +54,7 @@ function diff(a, b) {
   const flush = () => { if (cur) { hunks.push(cur); cur = null; } };
   while (i < n || j < m) {
     if (i < n && j < m && a[i] === b[j]) { flush(); i++; j++; continue; }
-    cur ??= { del: [], ins: [], at: i };
+    cur ??= { del: [], ins: [], at: i, bj: j };
     if (j < m && (i >= n || dp[i][j + 1] >= dp[i + 1][j])) cur.ins.push(b[j++]);
     else cur.del.push(a[i++]);
   }
@@ -61,6 +65,27 @@ function diff(a, b) {
 const joined = (h) => h.del.join("\n") + "\n" + h.ins.join("\n");
 const only = (arr, re) => arr.length > 0 && arr.every((l) => re.test(l));
 const TIME = /^<time datetime="[^"]+">[A-Z][a-z]{2} \d{2}, \d{4}<\/time>$/;
+
+// The exact shapes D3 and D4 allow (attempt 3: whole blocks, nothing more).
+// `\d+` in a line stands for a list id; everything else is literal.
+const reLine = (l) => l.split("\\d+").map((x) => x.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("\\d+");
+const TOC_HEAD = [
+  '<div class="toc desktop-only">',
+  '<button type="button" class="toc-header" aria-controls="toc-content" aria-expanded="true">',
+  "<h3>Table of Contents</h3>",
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="fold">',
+  '<polyline points="6 9 12 15 18 9">', "</polyline>", "</svg>", "</button>",
+  '<ul class="toc-content overflow" id="list-\\d+">',
+];
+const TOC_ENTRY = ['<li class="depth-\\d+">', '<a href="#[^"]*" data-for="[^"]*">[^<]*</a>', "</li>"];
+const TOC_TAIL = ['<li class="overflow-end">', "</li>", "</ul>", "</div>"];
+const TOC_BLOCK = new RegExp(
+  "^" + TOC_HEAD.map(reLine).join("\n") +
+  "(?:\n" + TOC_ENTRY.map((l, i) => (i === 1 ? l : reLine(l))).join("\n") + ")*" +
+  "\n" + TOC_TAIL.map(reLine).join("\n") + "$");
+const isTocBlock = (t) => TOC_BLOCK.test(t);
+const EMPTY_BACKLINKS = new RegExp("^" + ['<div class="backlinks">', "<h3>Backlinks</h3>", '<ul id="list-\\d+" class="overflow">',
+  "<li>No backlinks found</li>", '<li class="overflow-end">', "</li>", "</ul>", "</div>"].map(reLine).join("\n") + "$");
 
 // The ENUMERATED allowed differences (ids match the test plan).
 export const RULES = [
@@ -94,13 +119,39 @@ export const RULES = [
   },
   {
     id: "D3-toc-always",
-    why: "a TOC is emitted on every page (acceptance 1); Quartz omits it below two headings",
-    test: (h) => h.del.length === 0 && h.ins[0]?.startsWith('<div class="toc desktop-only">') && h.ins.at(-1) === "</div>",
+    why: "a TOC is emitted on every page (acceptance 1); Quartz omits it below two headings. Attempt 3: EXACTLY the TOC block " +
+      "(its header button, then a toc-content list of the page's own TOC entries) - the attempt-2 test accepted anything " +
+      "after an opening TOC line, so a hunk that also carried the backlinks block passed as D3 alone",
+    test: (h) => h.del.length === 0 && isTocBlock(h.ins.join("\n")),
   },
   {
     id: "D4-backlinks-always",
-    why: "the backlinks list is emitted on every page (acceptance 1); Quartz hides it when empty",
-    test: (h) => h.del.length === 0 && h.ins[0] === '<div class="backlinks">' && h.ins.includes("<li>No backlinks found</li>") && h.ins.at(-1) === "</div>",
+    why: "the backlinks list is emitted on every page (acceptance 1); Quartz hides it when empty. Attempt 3: EXACTLY the empty " +
+      "backlinks block (a heading, one 'No backlinks found' item, the overflow end)",
+    test: (h) => h.del.length === 0 && EMPTY_BACKLINKS.test(h.ins.join("\n")),
+  },
+  {
+    id: "D3+D4",
+    why: "attempt 3: a page with fewer than two headings and no backlinks gets both blocks next to each other, so the line diff " +
+      "joins them into one hunk: exactly a D3 TOC block followed by exactly a D4 empty backlinks block",
+    test: (h) => {
+      if (h.del.length !== 0) return false;
+      const t = h.ins.join("\n");
+      const i = t.indexOf('\n<div class="backlinks">');
+      return i > 0 && isTocBlock(t.slice(0, i)) && EMPTY_BACKLINKS.test(t.slice(i + 1));
+    },
+  },
+  {
+    id: "D9-transclude-pending",
+    why: "attempt 3: a transcluded page that has no presentable row (missing, stale, empty) is the pending-compile marker inside " +
+      "the transclude block, where the built page inlined the embedded file. Allowed only when the live side is exactly ONE " +
+      "<p class=\"transclude-pending\" data-render-state=\"pending\">Pending compile: ...</p> line, the built side is non-empty, the " +
+      "live line before the hunk opens a <blockquote class=\"transclude\"> and the live line after it is that block's " +
+      "\"Link to original\" anchor",
+    test: (h, ctx) => h.ins.length === 1 && h.del.length > 0 &&
+      /^<p class="transclude-pending" data-render-state="pending">Pending compile: [^<]+<\/p>$/.test(h.ins[0]) &&
+      String(ctx.live?.[h.bj - 1] ?? "").startsWith('<blockquote class="transclude"') &&
+      /^<a href="[^"]*" class="internal transclude-src">Link to original<\/a>$/.test(String(ctx.live?.[h.bj + 1] ?? "")),
   },
   {
     id: "D7-retired",
@@ -171,6 +222,13 @@ function explain(h, ctx) {
 }
 
 
+// D10 (attempt 3; whole-document comparison of an alias redirect page): the
+// live page escapes & < > " inside the three slug interpolations, Quartz does
+// not. Allowed only when un-escaping the live document gives the built one
+// exactly (no fixture slug carries those characters, so it does not fire).
+RULES.push({ id: "D10-alias-escape", why: "an alias redirect page escapes & < > \" in its slug values (Quartz interpolates them raw); un-escaped, the two documents are identical", test: () => false });
+const unescapeHtml = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+
 const ELEMENTS = {
   "explorer root": (b) => /<div class="explorer"[^>]*>/.test(b) && b.includes('class="explorer-ul overflow"'),
   "graph container": (b) => b.includes('<div class="graph-container"'),
@@ -182,9 +240,31 @@ const ELEMENTS = {
 let failed = false;
 const summary = [];
 for (const [cls, url] of URLS) {
+  if (ONLY_URLS && !ONLY_URLS.has(url)) continue;
   const r = await fetch(BASE + url, { redirect: "manual" });
   const html = await r.text();
   const render = r.headers.get("x-wiki-render");
+  if (cls === "alias redirect") {
+    // the whole document, byte for byte (no chrome: it is a redirect page)
+    const bf = builtFile(url);
+    const built = existsSync(bf) ? readFileSync(bf, "utf8") : "";
+    const fired = {};
+    let unlisted = 0;
+    if (r.status !== 200 || render !== "db") failed = true;
+    if (!built || html !== built) {
+      if (built && unescapeHtml(html) === built) fired["D10-alias-escape"] = 1;
+      else {
+        unlisted = 1;
+        failed = true;
+        console.log(`--- ${url} [UNLISTED] (whole document)`);
+        for (const l of lines(built)) console.log(`  - ${l.slice(0, 220)}`);
+        for (const l of lines(html)) console.log(`  + ${l.slice(0, 220)}`);
+      }
+    }
+    summary.push(`${String(r.status)} x-wiki-render=${render} ${cls.padEnd(16)} ${url.padEnd(56)} ` +
+      `built=${built ? "yes" : "NO"} hunks=${html === built ? 0 : 1} unlisted=${unlisted} rules=${JSON.stringify(fired)} missing=none (whole document ${html === built ? "identical" : "differs"})`);
+    continue;
+  }
   const live = bodyOf(html);
   const missing = Object.entries(ELEMENTS).filter(([, f]) => !f(live)).map(([k]) => k);
   if (render !== "db") failed = true;
@@ -200,7 +280,9 @@ for (const [cls, url] of URLS) {
   if (unsafeLive(live)) { failed = true; missing.push("NO unsafe URL (live carries one)"); }
   const sb = sortListing(safeBuilt.body), sl = sortListing(norm.live);
   if (sb.fired || sl.fired) fired["D6-listing-order"] = 1;
-  const hunks = cls === "retired slug" && !built ? [{ del: [], ins: lines(live) }] : diff(lines(sb.body), lines(sl.body));
+  const liveLines = lines(sl.body);
+  ctx.live = liveLines;
+  const hunks = cls === "retired slug" && !built ? [{ del: [], ins: lines(live) }] : diff(lines(sb.body), liveLines);
   const unlisted = [];
   for (const h of hunks) {
     const id = explain(h, ctx);

@@ -160,7 +160,9 @@ function health() {
   }
   // A page-class entry that threw, or the route itself: a renderer bug, named.
   const broken = brokenPageClasses();
-  for (const b of broken) reasons.push(`page class ${b.name}@${b.version} ${b.phase}() threw ${b.count}x: ${b.error}`);
+  for (const b of broken) {
+    reasons.push(`page class ${b.name}@${b.version} ${b.phase}() ${b.kind === "invalid" ? "returned an invalid result" : "threw"} ${b.count}x: ${b.error}`);
+  }
   const re = routeErrors();
   if (re.count) reasons.push(`render errors ${re.count} (last ${re.last.key}: ${re.last.error})`);
   return {

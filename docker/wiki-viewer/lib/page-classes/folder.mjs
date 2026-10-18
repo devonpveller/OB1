@@ -13,7 +13,7 @@ export default {
     if (!deps.site) return deps.siteUnavailable();
     if (!isFolder(deps.site, folder) && !(req.isDir && deps.site.folders.has(folder))) return null;
     const r = await deps.rowAt(folder ? `${folder}/index` : "index");
-    if (!r.ok) return { unreachable: r.state };
+    if (!r.ok) return deps.unavailable(r);
     const pending = await indexRowPending(r.row, deps);
     return pending ? { pending, row: r.row } : { folder, indexRow: r.row };
   },

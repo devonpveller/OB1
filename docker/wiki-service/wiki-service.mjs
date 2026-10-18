@@ -48,7 +48,7 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // get their rows through the same queue + flush as every compiled page (D13:
 // compiled means the row landed).
 import {
-  deleteWikiPages, queueWikiPage, finishWikiPages, EXIT_COMPLETED_WITH_FAILURES,
+  deleteWikiPages, queueWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
 } from "file:///recipes/_shared/wiki-pages.mjs";
 // D13 item 4: the files-vs-rows check runs after every compile.
 import { reconcile, formatReport } from "file:///recipes/_shared/reconcile-wiki-pages.mjs";
@@ -898,6 +898,14 @@ async function compile(reason) {
     await ingestNotes(prevCommit);
     // Extract from the freshly-ingested notes + any pending sources.
     await drainWorkerQueues();
+    // Rows an earlier cycle left unsynced because the DATABASE was down
+    // (transient infrastructure, notified as such) are written from their
+    // files now, before this cycle's compile (rw-p1a-render attempt 3).
+    try {
+      await retryUnsyncedRows({ outDir: WIKI_OUT_DIR, vaultDir: WIKI_GIT_DIR, log: (m) => console.log(m) });
+    } catch (e) {
+      console.error(`[wiki-service] unsynced-row retry FAILED (kept for the next cycle): ${e?.message || e}`);
+    }
 
     const childEnv = {
       ...ENV,

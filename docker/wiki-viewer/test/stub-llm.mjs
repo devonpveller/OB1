@@ -16,11 +16,13 @@
  *   timeout (never answers) | 400 | 503x2-badparse (per task: 503 twice,
  *   then a bad reply) | mixed (Dave: bad reply; everyone else: 503) |
  *   davebad (Dave: bad reply; everyone else: a good page).
+ * "delayMs" (attempt 3): every chat reply waits that long first - two compiles
+ * started inside that window overlap for certain (the ledger race cases).
  * Mode changes reset the counters.
  */
 import http from "node:http";
 
-const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} };
+const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", delayMs: 0, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} };
 
 function reply(res, code, obj) {
   res.writeHead(code, { "content-type": "application/json" });
@@ -44,7 +46,7 @@ http.createServer((req, res) => {
   req.on("end", () => {
     if (u.pathname === "/__stub/mode" && req.method === "POST") {
       const b = JSON.parse(raw || "{}");
-      Object.assign(st, { mode: b.mode ?? "ok", n: b.n ?? 3, modelsOk: b.modelsOk ?? true, model: b.model ?? st.model, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} });
+      Object.assign(st, { mode: b.mode ?? "ok", n: b.n ?? 3, modelsOk: b.modelsOk ?? true, model: b.model ?? st.model, delayMs: Number(b.delayMs || 0), chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} });
       return reply(res, 200, st);
     }
     if (u.pathname === "/__stub/state") return reply(res, 200, st);
@@ -55,6 +57,11 @@ http.createServer((req, res) => {
     if (u.pathname === "/health/liveliness") {
       st.livelinessCalls++;
       return st.modelsOk ? reply(res, 200, "I'm alive!") : reply(res, 503, { error: "stub: down" });
+    }
+    if (u.pathname === "/v1/chat/completions" && req.method === "POST" && st.delayMs > 0 && !req.__delayed) {
+      req.__delayed = true;
+      setTimeout(() => req.emit("end"), st.delayMs);
+      return;
     }
     if (u.pathname === "/v1/chat/completions" && req.method === "POST") {
       st.chatCalls++;

@@ -52,11 +52,11 @@ import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-change
 // Compile writes the page's file AND its wiki_pages row; the row is what the
 // viewer presents (research-workbench D13). Rows are flushed PER BATCH during
 // the run and the run exits non-zero when any written page's row did not land.
-import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, EXIT_COMPLETED_WITH_FAILURES } from "../_shared/wiki-pages.mjs";
+import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../_shared/wiki-pages.mjs";
 // D13 item 6: an open structural failure is not retried until its inputs
 // change, and is notified once per distinct failure (not once per cycle).
 import {
-  readLedger, writeLedger, recordFailure, openFailure, clearFailure, inputsKey, codeFingerprint,
+  readLedger, updateLedger, withLedgerLock, clearStructuralKeys, recordFailure, openFailure, clearFailure, inputsKey, codeFingerprint,
 } from "../_shared/structural-ledger.mjs";
 // D13 item 6: transient (LLM did not perform: retry N=3, endpoint check,
 // notification, ledger) vs structural (no retry, notification, run fails).
@@ -885,17 +885,31 @@ async function recordEntityFailure(entity, err, outDir, failedIds, structural, s
     console.error(`[wiki] FAILED (transient) #${entity.id} ${slug}: ${err.message}`);
     return;
   }
+  // The DATABASE was unavailable during this page's compile (attempt 3,
+  // tester AT2-7): transient infrastructure, not a structural failure of the
+  // page - ledgered for the next compile's retry, notified once per run.
+  if (!(err instanceof CompileError) && isDatabaseUnavailableError(err?.message || String(err))) {
+    failedIds.push(entity.id);
+    console.error(`[wiki] FAILED (transient: database unavailable) #${entity.id} ${slug}: ${err?.message || err}`);
+    await notify({ cls: "transient", subject: "compile failed: database unavailable (generate-wiki)", error: `first: #${entity.id} ${slug}: ${err?.message || err}`, outDir });
+    return;
+  }
   const error = err?.message || String(err);
   structural.push({ id: entity.id, slug, error });
   console.error(`[wiki] STRUCTURAL FAILURE #${entity.id} ${slug}: ${error}`);
   let distinct = true;
   if (sctx) {
-    const r = recordFailure(sctx.ledger, {
-      key: `entity:${entity.id}`, slug, entity: entity.id, error, replySha256: err?.replySha256 ?? null,
-      inputs: entityInputs(entity, sctx),
-    });
-    distinct = r.distinct;
-    sctx.dirty = true;
+    // One locked transaction against the ledger as it is NOW (another run may
+    // have recorded this very failure meanwhile: then it is not distinct).
+    try {
+      const r = updateLedger(sctx.outDir, (l) => recordFailure(l, {
+        key: `entity:${entity.id}`, slug, entity: entity.id, error, replySha256: err?.replySha256 ?? null,
+        inputs: entityInputs(entity, sctx),
+      }));
+      distinct = r.distinct;
+    } catch (lerr) {
+      console.error(`[wiki] structural ledger write FAILED for #${entity.id} (notifying anyway): ${lerr.message}`);
+    }
   }
   if (!distinct) {
     console.error(`[wiki] #${entity.id} ${slug}: the same structural failure as recorded before (same error and reply); not notified again`);
@@ -907,37 +921,44 @@ async function recordEntityFailure(entity, err, outDir, failedIds, structural, s
 // What an entity page is compiled FROM, for the structural ledger: the entity
 // row's updated_at (every extraction - a new source revision - bumps it), the
 // model, and the compile code (a patch retries every open failure once).
-function entityInputs(entity, sctx) {
+export function entityInputs(entity, sctx) {
   return inputsKey({ updated_at: entity.updated_at ?? null, model: sctx.model, code: sctx.code });
 }
 
-// The structural-ledger context of one run (file mode only).
-function structuralContext(args, env, outDir) {
+// The structural-ledger context of one run (file mode only). It holds no
+// copy of the ledger: every check reads the file as it is then, and every
+// change is one locked transaction (structural-ledger.mjs updateLedger), so a
+// run never writes back a start-of-run copy (rw-p1a-render attempt 3, AT2-4).
+export function structuralContext(args, env, outDir) {
   if (args.outputMode !== "file" || args.dryRun) return null;
   return {
     outDir,
-    ledger: readLedger(outDir),
     model: args.model || env.LLM_MODEL || "anthropic/claude-haiku-4-5",
     code: codeFingerprint([fileURLToPath(import.meta.url)]),
-    dirty: false,
     skipped: [],
   };
 }
 
 // Before an entity is compiled: an open structural failure whose inputs are
 // unchanged is SKIPPED (no LLM call, no notification). Returns the entry.
-function skipOpenStructural(entity, sctx) {
+export function skipOpenStructural(entity, sctx) {
   if (!sctx) return null;
-  const open = openFailure(sctx.ledger, `entity:${entity.id}`, entityInputs(entity, sctx));
+  const open = openFailure(readLedger(sctx.outDir), `entity:${entity.id}`, entityInputs(entity, sctx));
   if (open) sctx.skipped.push(open);
   return open;
 }
 
 // After an entity compiled cleanly: it leaves the structural ledger.
 function clearStructural(entity, sctx) {
-  if (sctx && clearFailure(sctx.ledger, `entity:${entity.id}`)) {
-    sctx.dirty = true;
-    console.log(`[wiki] #${entity.id}: compiled cleanly; its open structural failure is cleared`);
+  if (!sctx) return;
+  const key = `entity:${entity.id}`;
+  if (!(key in readLedger(sctx.outDir).failures)) return;
+  try {
+    if (updateLedger(sctx.outDir, (l) => clearFailure(l, key))) {
+      console.log(`[wiki] #${entity.id}: compiled cleanly; its open structural failure is cleared`);
+    }
+  } catch (err) {
+    console.error(`[wiki] structural ledger write FAILED (clearing #${entity.id}): ${err.message}`);
   }
 }
 
@@ -947,11 +968,6 @@ function finishStructural(sctx) {
     console.error(`[wiki] skipped ${sctx.skipped.length} entity page(s) with an OPEN structural failure (inputs unchanged; ` +
       `not retried until they change, or --clear-structural <id>): ` +
       sctx.skipped.slice(0, 10).map((e) => `${e.slug} (since ${e.first_seen}: ${String(e.error).slice(0, 100)})`).join("; "));
-  }
-  try {
-    writeLedger(sctx.outDir, sctx.ledger);
-  } catch (err) {
-    console.error(`[wiki] structural ledger write FAILED: ${err.message}`);
   }
 }
 
@@ -972,10 +988,15 @@ export function mergeFailedEntityIds(previous, { failed = [], resolved = [] }) {
 function recordFailedEntityIds(outDir, failedIds, resolvedIds) {
   const p = path.join(outDir, FAILED_IDS_FILE);
   try {
-    let prev = [];
-    try { prev = JSON.parse(fs.readFileSync(p, "utf8")); } catch { /* none yet */ }
-    const next = mergeFailedEntityIds(prev, { failed: failedIds, resolved: resolvedIds });
-    writeIfChanged(p, JSON.stringify(next) + "\n");
+    // The same lock as the structural ledger (attempt 3, AT2-4's class): the
+    // merge reads the file as it is NOW, so a racing run's ids are not lost.
+    const next = withLedgerLock(p, () => {
+      let prev = [];
+      try { prev = JSON.parse(fs.readFileSync(p, "utf8")); } catch { /* none yet */ }
+      const merged = mergeFailedEntityIds(prev, { failed: failedIds, resolved: resolvedIds });
+      writeIfChanged(p, JSON.stringify(merged) + "\n");
+      return merged;
+    });
     if (failedIds.length) console.log(`[wiki] recorded ${failedIds.length} failed entity id(s) for retry next compile (ledger: ${next.length})`);
   } catch (err) {
     console.error(`[wiki] failed-id ledger write failed: ${err.message}`);
@@ -1736,7 +1757,7 @@ async function main() {
 // One run over a list of entities (incremental ids, a batch, or one entity):
 // compile each, classify each failure, keep both ledgers, emit the leaves and
 // the graph. Returns { ok, failedIds, structural, skipped }.
-async function runEntities(sb, env, args, loaders, requestedIds, { manual = false } = {}) {
+export async function runEntities(sb, env, args, loaders, requestedIds, { manual = false } = {}) {
   const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
   const sctx = structuralContext(args, env, outDir);
   const run = { citedThoughtIds: new Set(), citedSourceIds: new Set() };
@@ -1786,17 +1807,19 @@ async function runEntities(sb, env, args, loaders, requestedIds, { manual = fals
   return { ok, failedIds, structural, skipped: sctx ? sctx.skipped.length : 0 };
 }
 
-// --clear-structural <ids|all>: a manual clear of open structural failures.
-function clearStructuralCli(args, env) {
+// --clear-structural <ids|all>: a manual clear of open structural failures,
+// one locked transaction (a compile running meanwhile never writes it back).
+// A requested id that is not open is named and the exit is 1 (a typo is not
+// a silent no-op; tester N2-2); the open ones requested are still cleared.
+export function clearStructuralCli(args, env) {
   const outDir = args.outDir || env.OB_WIKI_OUT_DIR || "./wikis";
-  const ledger = readLedger(outDir);
-  const want = String(args.clearStructural).trim();
-  const keys = want === "all" ? Object.keys(ledger.failures)
-    : want.split(",").map((s) => s.trim()).filter(Boolean).map((s) => (s.includes(":") ? s : `entity:${s}`));
-  const cleared = keys.filter((k) => clearFailure(ledger, k));
-  writeLedger(outDir, ledger);
+  const { cleared, unknown, open } = clearStructuralKeys(outDir, args.clearStructural);
   console.log(`[wiki] cleared ${cleared.length} open structural failure(s)${cleared.length ? `: ${cleared.join(", ")}` : ""}; ` +
-    `${Object.keys(ledger.failures).length} still open`);
+    `${open} still open`);
+  if (unknown.length) {
+    console.error(`[wiki] --clear-structural: not an open structural failure: ${unknown.join(", ")} (nothing cleared for ${unknown.length === 1 ? "it" : "them"})`);
+    return 1;
+  }
   return 0;
 }
 

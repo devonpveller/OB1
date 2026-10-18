@@ -13,7 +13,7 @@ export default {
     const tag = req.key === "tags" ? "/" : simplifySlug(req.key.slice("tags/".length));
     // A tags/<tag>.md page (Quartz: the tag page's description) is its article.
     const r = await deps.rowAt(tag === "/" ? "tags/index" : `tags/${tag}`);
-    if (!r.ok) return { unreachable: r.state };
+    if (!r.ok) return deps.unavailable(r);
     const pending = await indexRowPending(r.row, deps);
     return pending ? { pending, row: r.row } : { tag, indexRow: r.row };
   },

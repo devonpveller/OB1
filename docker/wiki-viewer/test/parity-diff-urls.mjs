@@ -1,6 +1,6 @@
 /**
  * The fixed URL list of rw-p1a-render acceptance 1/2/6 (every page class at
- * least once): the anchor's 20, plus 7 added in attempt 2. Shared by
+ * least once): the anchor's 20, 7 added in attempt 2, 7 in attempt 3. Shared by
  * parity-diff.mjs and outage-probe.mjs.
  */
 export const URLS = [
@@ -35,4 +35,18 @@ export const URLS = [
   ["folder index", "/notes/"],
   ["folder index", "/content/notebooks/fixture-notebook/"],
   ["folder index", "/content/thought/"],
+  // rw-p1a-render attempt 3: the attempt-2 tester's parity hunt (AT2-1) - a
+  // kitchen-sink note (footnotes, callouts, math, mermaid, a table, task
+  // lists, a ![[note]] transclusion, a link to its own heading -> the page is
+  // its own backlink), the tester's frontmatter-only note, a page with every
+  // transclusion shape (heading section with a nested transclusion inside it,
+  // block, list-item block, unknown page), the page those blocks come from,
+  // and three Quartz alias redirect pages (whole document compared).
+  ["legacy user note", "/notes/kitchen-sink"],
+  ["legacy user note", "/notes/empty-body-note"],
+  ["legacy user note", "/notes/transclude-fixture"],
+  ["legacy user note", "/notes/block-source"],
+  ["alias redirect", "/old-kitchen-sink"],
+  ["alias redirect", "/Ada-Fixture"],
+  ["alias redirect", "/Second-Notebook"],
 ];

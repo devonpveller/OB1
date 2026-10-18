@@ -50,13 +50,21 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
    file. **Stale is a miss** (D13 item 5): a row older than its file, a row
    dated in the future (its time cannot show a newer file replaced it) or a
    row with an empty body (folder/tag indexes excepted) is pending too - the
-   same `rowState()` rule the reconciliation applies. Drift (file without
+   same `rowState()` + `isEmptyBody()` rules the reconciliation applies. A row
+   whose body is empty while its FILE is empty too (a note that is frontmatter
+   only) is a faithfully empty page and is presented as Quartz presents it (an
+   empty article), not pending and not drift. A transcluded page (`![[page]]`)
+   is its row too; a known page without a presentable row is the
+   pending-compile marker inside the transclude block. Drift (file without
    row, stale / future / empty row, row without file, an open structural
    compile failure) is measured per page_class by
    `recipes/_shared/reconcile-wiki-pages.mjs` and repaired on (re)connect,
    never on read. A structural compile failure is not retried until its
    inputs change (`recipes/_shared/structural-ledger.mjs`; manual clear:
-   `generate-wiki.mjs --clear-structural <ids|all>`).
+   `generate-wiki.mjs --clear-structural <ids|all>` - an id that is not open
+   exits 1). Every ledger change is one locked read-modify-write (a lockfile
+   beside it), so racing compiles lose nothing and a clear is never written
+   back.
 2. **Every notes mutation syncs its row — through the chokepoint.** write,
    move, trash, restore, recover, empty-trash ALL call
    `syncNoteRow`/`deleteNoteRow` in `repositories/notes.ts`. The 2026-08-28

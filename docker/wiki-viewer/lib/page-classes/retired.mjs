@@ -16,7 +16,7 @@ export default {
     const p = prefixes().find((x) => req.key.startsWith(x));
     if (!p) return null;
     const r = await deps.row();
-    if (!r.ok) return { unreachable: r.state };
+    if (!r.ok) return deps.unavailable(r);
     if (r.row) return null; // a row exists after all: present it as what it is
     return { key: req.key, reason: `${p}* is a retired page class` };
   },

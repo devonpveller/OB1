@@ -77,7 +77,7 @@ export function rowsToIndex(rows) {
 // the same walk, so it also carries page_class and the two frontmatter keys
 // the chrome needs. A database without the frontmatter column (before
 // init-wiki-pages.sql is applied) answers the narrow projection instead.
-const SELECT_SITE = "select=slug,title,links,tags,updated_at,page_class,aliases:frontmatter->aliases,fm_date:frontmatter->>date";
+const SELECT_SITE = "select=slug,title,links,tags,updated_at,page_class,aliases:frontmatter->aliases,alias:frontmatter->alias,permalink:frontmatter->>permalink,fm_date:frontmatter->>date";
 const SELECT_NAV = "select=slug,title,links,tags,updated_at,page_class";
 let _projection = SELECT_SITE;
 

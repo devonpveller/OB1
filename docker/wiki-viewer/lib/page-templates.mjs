@@ -5,7 +5,8 @@
  * reference (several classes present as a content page); a class with a
  * different presentation brings its own template in its own entry file.
  */
-import { renderPage } from "./render-page.mjs";
+import { renderPage, EmbedUnavailable } from "./render-page.mjs";
+import { unavailableState } from "./page-classes.mjs";
 import { normalizeTags, folderDisplayName } from "./site-index.mjs";
 import { ListingBody, PageList, html } from "./components.mjs";
 import { simplifySlug, resolveRelative } from "./quartz-path.mjs";
@@ -30,7 +31,7 @@ export function presentedDate(fm, updatedAt) {
 export function rowBacked(match) {
   return async (_req, deps) => {
     const r = await deps.row();
-    if (!r.ok) return { unreachable: r.state };
+    if (!r.ok) return deps.unavailable(r);
     if (!r.row || !match(r.row)) return null;
     const why = deps.presentable ? await deps.presentable(r.row) : null;
     return why ? { pending: why, row: r.row } : { row: r.row };
@@ -52,7 +53,15 @@ export async function contentTemplate(ctx, deps) {
   const row = ctx.row;
   const fm = { ...(row.frontmatter || {}) };
   fm.title = row.title || fm.title || row.slug.split("/").pop();
-  const r = await renderPage(row.body, { slug: row.slug, frontmatter: fm, byBase: deps.site?.byBase });
+  let r;
+  try {
+    // deps.embed: a transcluded page is its row (live-route.mjs); without it
+    // (a caller with no database) the placeholder stays.
+    r = await renderPage(row.body, { slug: row.slug, frontmatter: fm, byBase: deps.site?.byBase, embed: deps.embed });
+  } catch (e) {
+    if (e instanceof EmbedUnavailable) return e.value; // the database screen, never half a page
+    throw e;
+  }
   return {
     slug: row.slug,
     layout: "content",
@@ -88,6 +97,7 @@ export async function folderTemplate(ctx, deps) {
   };
   if (ctx.indexRow) {
     const c = await contentTemplate({ row: ctx.indexRow }, deps);
+    if (unavailableState(c)) return c;
     model = { ...c, slug, layout: "list", tags: [] };
   }
   const node = site.folders.get(folder) || { files: new Set(), folders: new Set() };
@@ -127,6 +137,7 @@ export async function tagTemplate(ctx, deps) {
   if (tag !== "/") {
     if (ctx.indexRow) {
       const c = await contentTemplate({ row: ctx.indexRow }, deps);
+      if (unavailableState(c)) return c;
       model.articleHtml = c.articleHtml;
     }
     const items = (site.byTag.get(tag) || []).filter((s) => s !== slug).map((s) => listItem(site, s));

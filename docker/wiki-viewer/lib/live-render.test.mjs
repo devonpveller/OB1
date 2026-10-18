@@ -16,6 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 let mode = "up"; // up | down | starting
 let rows = [];
+let failSlug = null; // attempt 3: one row's read fails (503) while the rest answer
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, "http://x");
@@ -27,6 +28,11 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (!u.pathname.endsWith("/wiki_pages")) { res.writeHead(404); res.end("[]"); return; }
+  if (failSlug && u.searchParams.get("slug") === `eq.${failSlug}`) {
+    res.writeHead(503, { "content-type": "application/json" });
+    res.end(JSON.stringify({ code: "PGRST001", message: "Database client error. Retrying the connection.", details: "connection refused" }));
+    return;
+  }
   let out = [...rows].sort((a, b) => a.slug.localeCompare(b.slug));
   for (const [k, v] of u.searchParams) {
     if (k !== "slug") continue;
@@ -335,5 +341,177 @@ test("A7/N4: an entry whose template() throws is isolated the same way (the next
   } finally {
     console.error = orig;
     unregisterPageClass("tpl-throws");
+  }
+});
+
+// ── attempt 3 ───────────────────────────────────────────────────────────────
+const article = (b) => (/<article class="popover-hint">([\s\S]*?)<\/article>/.exec(b) || [])[1];
+
+test("AT2-1a transclusion PORTED: ![[note]] is the embedded page's compiled body (h1 title, rebased links, Link to original), as Quartz", async () => {
+  mode = "up";
+  const r = await renderLive("/notes/kitchen-sink");
+  assert.equal(r.headers["x-wiki-render"], "db");
+  const a = article(r.body);
+  const bq = (/<blockquote class="transclude" data-url="fixture-note"[\s\S]*?<\/blockquote>/.exec(a) || [])[0];
+  assert.ok(bq, "the transclude block");
+  assert.ok(bq.startsWith('<blockquote class="transclude" data-url="fixture-note" data-block data-embed-alias="undefined"><h1>Fixture Note</h1><h1 id="fixture-note">Fixture Note'), bq.slice(0, 200));
+  assert.ok(bq.includes('href="../notes/fixture-note/../../content/person/person-ada-fixture"'), "relative links rebased like normalizeHastElement");
+  assert.ok(bq.includes("<li>one thought</li>"), "the embedded body");
+  assert.ok(bq.endsWith('<a href="../notes/fixture-note" class="internal transclude-src">Link to original</a></blockquote>'), bq.slice(-200));
+  assert.ok(!a.includes("Transclude of fixture-note"), "not the placeholder");
+});
+
+test("AT2-1a transclusion: a heading section (and the transclusion inside it, nested), a block, a list-item block; an unknown page keeps the placeholder", async () => {
+  mode = "up";
+  const a = article((await renderLive("/notes/transclude-fixture")).body);
+  const blocks = a.match(/<blockquote class="transclude"[\s\S]*?Link to original<\/a><\/blockquote>|<blockquote class="transclude" data-url="no-such-page"[\s\S]*?<\/blockquote>/g) || [];
+  const sec = a.slice(a.indexOf('data-url="kitchen-sink"'));
+  assert.ok(sec.includes('<h2 id="second-heading">Second heading'), "the section starts at its heading");
+  assert.ok(!sec.slice(0, sec.indexOf("Link to original")).includes('<h1 id="kitchen-sink-fixture">'), "and not before it");
+  assert.ok(/data-url="fixture-note"[^>]*><h1>Fixture Note<\/h1>/.test(sec), "the section's own ![[fixture-note]] is filled too (nested, as Quartz's visit does)");
+  assert.ok(a.includes('<p id="key-point">The key point of this note is that a block can be embedded on its own.</p><a href="../notes/block-source#^key-point" class="internal transclude-src">Link to original</a>')
+    || /<p id="key-point">[^<]*<\/p><a [^>]*class="internal transclude-src">Link to original<\/a>/.test(a), "the block");
+  assert.ok(/<ul><li id="li-point">a list item another page embeds\s*<\/li><\/ul><a [^>]*class="internal transclude-src">/.test(a), "a list item is wrapped in a ul");
+  assert.ok(/<blockquote class="transclude" data-url="no-such-page"[^>]*><a [^>]*class="transclude-inner[^"]*"[^>]*>Transclude of no-such-page<\/a><\/blockquote>/.test(a), "unknown page: Quartz's placeholder");
+  assert.ok(blocks.length >= 4, String(blocks.length));
+});
+
+test("AT2-1a transclusion: an embedded page with no presentable row is the pending-compile marker INSIDE the block (D9); the host stays db", async () => {
+  mode = "up";
+  mkdirSync(join(vaultTmp, "notes"), { recursive: true });
+  writeFileSync(join(vaultTmp, "notes/block-source.md"), "---\ntitle: B\n---\n# FILE BODY MARKER\n");
+  const undo = withRow("notes/block-source", { updated_at: "2020-01-01T00:00:00.000Z" }); // older than its file: not presentable
+  try {
+    const r = await renderLive("/notes/transclude-fixture");
+    assert.equal(r.headers["x-wiki-render"], "db");
+    const a = article(r.body);
+    assert.ok(a.includes('<p class="transclude-pending" data-render-state="pending">Pending compile: notes/block-source is not presented yet (its row is older than its file'), a.slice(0, 400));
+    assert.ok(!a.includes("FILE BODY MARKER"), "never the file");
+  } finally { undo(); rmSync(join(vaultTmp, "notes/block-source.md")); }
+});
+
+test("AT2-1a transclusion: a cycle (a page transcluding itself, or A -> B -> A) is left as the placeholder at the repeat - it terminates", async () => {
+  mode = "up";
+  rows.push(
+    { slug: "notes/cyc-self", page_class: "note", title: "Cyc Self", body: "# Self\n\n![[cyc-self]]\n", tags: [], links: ["cyc-self"], frontmatter: {}, updated_at: "2026-10-18T00:00:00.000Z" },
+    { slug: "notes/cyc-a", page_class: "note", title: "Cyc A", body: "# A\n\n![[cyc-b]]\n", tags: [], links: ["cyc-b"], frontmatter: {}, updated_at: "2026-10-18T00:00:00.000Z" },
+    { slug: "notes/cyc-b", page_class: "note", title: "Cyc B", body: "# B\n\n![[cyc-a]]\n", tags: [], links: ["cyc-a"], frontmatter: {}, updated_at: "2026-10-18T00:00:00.000Z" },
+  );
+  nav._resetForTests();
+  try {
+    const s = article((await renderLive("/notes/cyc-self")).body);
+    assert.ok(s.includes("Transclude of cyc-self"), "self: placeholder");
+    const a = article((await renderLive("/notes/cyc-a")).body);
+    assert.ok(a.includes("<h1>Cyc B</h1>"), "B is filled");
+    assert.ok(a.includes("Transclude of cyc-a"), "A inside B is the placeholder");
+  } finally { seed(); }
+});
+
+test("AT2-1a transclusion: the database not answering for an embedded page's row is the database screen for the request, never half a page", async () => {
+  mode = "up";
+  failSlug = "notes/block-source";
+  try {
+    const r = await renderLive("/notes/transclude-fixture");
+    assert.notEqual(r.headers["x-wiki-render"], "db");
+    assert.ok(["connecting", "unreachable"].includes(r.headers["x-wiki-render"]), r.headers["x-wiki-render"]);
+    assert.equal(r.headers["cache-control"], "no-store");
+  } finally {
+    failSlug = null;
+    db._resetForTests();
+    await db.probe();
+  }
+});
+
+test("AT2-1b self-backlink: a page that links to its own heading lists itself under Backlinks, as Quartz", async () => {
+  mode = "up";
+  const b = (await renderLive("/notes/kitchen-sink")).body;
+  const bl = (/<div class="backlinks">[\s\S]*?<\/div>/.exec(b) || [])[0];
+  assert.ok(bl.includes('<a href="../notes/kitchen-sink" class="internal">Kitchen Sink Fixture</a>'), bl);
+  assert.ok(!bl.includes("No backlinks found"));
+});
+
+test("F7 alias redirects: an alias URL is Quartz's AliasRedirects page byte for byte; a real page at a slug is never shadowed", async () => {
+  mode = "up";
+  const { aliasDocument } = await import("./page-classes/alias.mjs");
+  const quartz = (og, url) => `
+        <!DOCTYPE html>
+        <html lang="en-us">
+        <head>
+        <title>${og}</title>
+        <link rel="canonical" href="${url}">
+        <meta name="robots" content="noindex">
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=${url}">
+        </head>
+        </html>
+        `;
+  for (const [u, og, url] of [
+    ["/old-kitchen-sink", "notes/kitchen-sink", "./notes/kitchen-sink"],
+    ["/Ada-Fixture", "content/person/person-ada-fixture", "./content/person/person-ada-fixture"],
+    ["/Second-Notebook", "content/notebooks/second-notebook/second-notebook", "./content/notebooks/second-notebook/second-notebook"],
+  ]) {
+    const r = await renderLive(u);
+    assert.equal(r.status, 200, u);
+    assert.equal(r.headers["x-wiki-render"], "db", u);
+    assert.equal(r.headers["x-wiki-page-class"], "alias@1", u);
+    assert.equal(r.body, quartz(og, url), u);
+  }
+  assert.equal(aliasDocument("a<b", "./x\"y"), quartz("a&lt;b", "./x&quot;y"), "D10: escaped only where a slug carries & < > \"");
+  assert.equal((await renderLive("/notes/kitchen-sink")).headers["x-wiki-page-class"], "note@1");
+  assert.equal((await renderLive("/not-an-alias-at-all")).headers["x-wiki-render"], "not-available");
+});
+
+test("N2-4/N2-5: a note whose source is frontmatter only is presented as Quartz presents it (an empty article, db) - not pending forever", async () => {
+  mode = "up";
+  mkdirSync(join(vaultTmp, "notes"), { recursive: true });
+  writeFileSync(join(vaultTmp, "notes/empty-body-note.md"), "---\ntitle: \"Empty Body Note\"\ntags: [fixture-tag]\n---\n");
+  const undo = withRow("notes/empty-body-note", { updated_at: new Date(Date.now() + 1000).toISOString() });
+  try {
+    const r = await renderLive("/notes/empty-body-note");
+    assert.equal(r.headers["x-wiki-render"], "db");
+    assert.equal(article(r.body), "");
+  } finally { undo(); rmSync(join(vaultTmp, "notes/empty-body-note.md")); }
+  // the same empty row WITHOUT a file showing it is meant to be empty: pending (never an empty leaf standing in)
+  assert.equal((await renderLive("/notes/empty-body-note")).headers["x-wiki-render"], "pending");
+});
+
+test("N2-3: an NBSP / ideographic-space body over a file with content is pending (the reconcile's rule, shared)", async () => {
+  mode = "up";
+  mkdirSync(join(vaultTmp, "content", "thought"), { recursive: true });
+  writeFileSync(join(vaultTmp, "content/thought/9002.md"), "---\ntitle: T\n---\n# Real thought\n");
+  for (const body of [" 　", "%% only a comment %%", "<div onclick=\"x()\"></div>", "---\nfm: only\n---\n"]) {
+    const undo = withRow("content/thought/9002", { body, updated_at: new Date(Date.now() + 1000).toISOString() });
+    try {
+      const r = await renderLive("/content/thought/9002");
+      assert.equal(r.headers["x-wiki-render"], "pending", JSON.stringify(body));
+      assert.ok(r.body.includes("empty body"));
+    } finally { undo(); }
+  }
+  rmSync(join(vaultTmp, "content/thought/9002.md"));
+});
+
+test("N2-1: a resolve() returning a hand-built { unreachable } (or a non-object) is a registry fault named in health - never the database screen", async () => {
+  mode = "up";
+  const { brokenPageClasses } = await import("./page-classes.mjs");
+  registerPageClass({ name: "shape-unreach", version: 1, priority: 98, async resolve(req) { return req.key.includes("fixture-note") ? { unreachable: true } : null; }, async template() { return {}; } });
+  registerPageClass({ name: "shape-string", version: 1, priority: 97, async resolve(req) { return req.key.includes("nested-note") ? "a string" : null; }, async template() { return {}; } });
+  registerPageClass({ name: "tpl-shape", version: 1, priority: 94, async resolve(req) { return req.key === "content/thought/9001" ? { row: { slug: req.key } } : null; }, async template() { return { unreachable: "connecting" }; } });
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    const r = await renderLive("/notes/fixture-note");
+    assert.equal(r.headers["x-wiki-render"], "db", "not a fake database screen");
+    assert.equal(r.headers["x-wiki-page-class"], "note@1");
+    assert.equal((await renderLive("/notes/fixture-folder/nested-note")).headers["x-wiki-page-class"], "note@1");
+    const t = await renderLive("/content/thought/9001");
+    assert.equal(t.headers["x-wiki-render"], "db");
+    assert.equal(t.headers["x-wiki-page-class"], "thought@1");
+    const b = brokenPageClasses();
+    assert.match(b.find((x) => x.name === "shape-unreach")?.error || "", /hand-built/);
+    assert.match(b.find((x) => x.name === "shape-string")?.error || "", /returned string/);
+    assert.equal(b.find((x) => x.name === "tpl-shape")?.phase, "template");
+  } finally {
+    console.error = orig;
+    for (const n of ["shape-unreach", "shape-string", "tpl-shape"]) unregisterPageClass(n);
   }
 });

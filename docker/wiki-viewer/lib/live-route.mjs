@@ -25,9 +25,9 @@
 import { stat, readFile } from "node:fs/promises";
 import { join, normalize } from "node:path";
 import { fetchRow, fetchRowByBasename, dbState, probe } from "./wiki-db.mjs";
-import { resolvePage, renderTemplate } from "./page-classes.mjs";
+import { resolvePage, renderTemplate, makeUnavailable } from "./page-classes.mjs";
 import { renderDocument, pendingDocument, databaseDocument, notAvailableDocument, errorDocument } from "./chrome.mjs";
-import { rowState } from "./shared/reconcile-wiki-pages.mjs";
+import { rowState, isEmptyBody } from "./shared/reconcile-wiki-pages.mjs";
 import { getNavIndex } from "./nav-index.mjs";
 import { siteIndexFor } from "./site-index.mjs";
 
@@ -90,9 +90,28 @@ const PENDING_WHY = {
   future: "its row is dated in the future, so it cannot be shown to be newer than its file",
   empty: "its row has an empty body",
 };
-// Is this row presentable as-is? null, or the reason it is pending.
+
+// The file text of a row's page, or null. Read ONLY to tell a faithfully
+// empty page (its source is empty too: a note that is frontmatter only) from
+// an empty row standing in for content - never rendered.
+async function fileTextOf(slug) {
+  const base = normalize(join(WIKI(), slug));
+  if (!base.startsWith(WIKI())) return null;
+  for (const c of [`${base}.md`, join(base, "index.md")]) {
+    try { return await readFile(c, "utf8"); } catch { /* next */ }
+  }
+  return null;
+}
+
+// Is this row presentable as-is? null, or the reason it is pending. One rule
+// with the reconciliation (rowState + isEmptyBody, shared).
 export async function presentable(row, opts = {}) {
-  const st = rowState(row, await fileMtimeOf(row.slug), opts);
+  const mtime = await fileMtimeOf(row.slug);
+  let st = rowState(row, mtime, opts);
+  if (st === "empty" && mtime != null) {
+    const text = await fileTextOf(row.slug);
+    if (text != null && isEmptyBody(text)) st = rowState(row, mtime, { ...opts, fileEmpty: true });
+  }
   return st ? PENDING_WHY[st] : null;
 }
 
@@ -139,6 +158,7 @@ async function renderLiveInner(req) {
     return rowCache.get(slug);
   };
   const deps = {
+    key: req.key,
     site,
     rowAt,
     row: once(async () => {
@@ -148,9 +168,27 @@ async function renderLiveInner(req) {
     }),
     fileExists,
     presentable,
+    // The database did not answer (r = a failed row()/rowAt() result).
+    unavailable: (r) => makeUnavailable(r?.state === "unreachable" ? "unreachable" : "connecting"),
     siteUnavailable: () => {
       const s = dbState().state;
-      return { unreachable: s === "up" ? "connecting" : s };
+      return makeUnavailable(s === "unreachable" ? "unreachable" : "connecting");
+    },
+    // A transcluded page (![[page]], ![[page#heading]], ![[page#^block]]):
+    // its ROW, as Quartz uses the embedded file. { state: "page", row } |
+    // { state: "pending", reason } (known - a file - but no presentable row:
+    // the pending-compile marker inside the transclude block) | { state:
+    // "none" } (no such page: Quartz's placeholder stays, as Quartz leaves it)
+    // | { state: "unavailable", value } (the database did not answer: the
+    // whole request is the database screen).
+    embed: async (slug) => {
+      const r = await rowAt(slug);
+      if (!r.ok) return { state: "unavailable", value: deps.unavailable(r) };
+      if (r.row) {
+        const why = await presentable(r.row);
+        return why ? { state: "pending", reason: why } : { state: "page", row: r.row };
+      }
+      return (await fileExists(slug)) ? { state: "pending", reason: "its file is written" } : { state: "none" };
     },
   };
   // Resolve; an entry whose resolve() or template() throws is isolated by the
@@ -176,6 +214,16 @@ async function renderLiveInner(req) {
     }
     const model = await renderTemplate(entry, ctx, deps, req.key);
     if (!model) { skip.add(entry.name); continue; }
+    if (model.unreachable) {
+      return respond(200, { "cache-control": "no-store", "x-wiki-render": model.unreachable }, databaseDocument(model.unreachable));
+    }
+    // A class whose page is a whole document of its own (an alias redirect:
+    // Quartz's AliasRedirects page, byte for byte).
+    if (typeof model.rawDocument === "string") {
+      return respond(200, {
+        "cache-control": "no-cache, must-revalidate", "x-wiki-render": "db", "x-wiki-page-class": `${entry.name}@${entry.version}`,
+      }, model.rawDocument);
+    }
     return respond(200, {
       "cache-control": "no-cache, must-revalidate",
       "x-wiki-render": "db",

@@ -15,13 +15,24 @@
  *   - A run ends with `wikiPagesExitCode()`: non-zero when any page is
  *     unsynced, after logging the count and the first slugs. A compile with
  *     unsynced rows is never "ok".
- *   - A run with unsynced rows raises ONE "compile structural failure"
- *     notification (D13 item 6: "a row write rejected by PostgREST" is
- *     structural) and ends with EXIT_COMPLETED_WITH_FAILURES.
+ *   - A run with unsynced rows raises ONE notification per class and ends
+ *     with EXIT_COMPLETED_WITH_FAILURES: a row write REJECTED by PostgREST
+ *     (a 4xx: permission, constraint, payload) is "compile structural
+ *     failure: row write rejected" (D13 item 6); a write that failed because
+ *     the DATABASE was unavailable (no connection, a timeout, 502/503/504,
+ *     PGRST000-003) is TRANSIENT infrastructure ("row write failed: database
+ *     unavailable") - its slugs go to <out-dir>/.unsynced-rows.json and the
+ *     next cycle's retryUnsyncedRows() writes them from their files
+ *     (rw-p1a-render attempt 3; the tester's AT2-7 outage was notified as
+ *     "structural").
+ *   - The "all N written page row(s) landed" count is per RUN (a long-lived
+ *     caller - the wiki-service - reports each cycle's own count).
  *   - The markdown on disk is the durable copy the same compile writes (git
  *     vault, backups); `reconcile-wiki-pages.mjs` measures files vs rows and
  *     repairs drift on (re)connect.
  */
+import fs from "node:fs";
+import nodePath from "node:path";
 import { extractLinks } from "./links.mjs";
 import { classify } from "./page-classes.mjs";
 export { extractLinks };
@@ -262,25 +273,130 @@ export function unsyncedWikiPages() {
 export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   await flushWikiPages();
   const u = unsyncedWikiPages();
+  const synced = _synced;
+  _synced = 0; // per run: the next run (or wiki-service cycle) counts its own
   if (!u.length) {
-    console.log(`[wiki-pages] ${tag}: all ${_synced} written page row(s) landed`);
+    console.log(`[wiki-pages] ${tag}: all ${synced} written page row(s) landed`);
     return 0;
   }
   const first = u.slice(0, 10).map((x) => x.slug).join(", ");
   console.error(`[wiki-pages] ${tag} FAILED: ${u.length} page(s) UNSYNCED (file written, row did not land); first: ${first}; error: ${u[0].error}`);
-  // One notification for the run (not one per page): the reconciliation names
-  // every unsynced slug. Loaded lazily - the viewer image carries this module
-  // for parseWikiPage and never finishes a compile run.
+  const transient = u.filter((x) => isDatabaseUnavailableError(x.error));
+  const rejected = u.filter((x) => !isDatabaseUnavailableError(x.error));
+  if (transient.length) {
+    try {
+      const n = rememberUnsyncedRows(outDir, transient, tag);
+      console.error(`[wiki-pages] ${tag}: ${transient.length} row(s) failed because the database was unavailable; ` +
+        `recorded for the next cycle's retry (${n} pending in ${UNSYNCED_FILE})`);
+    } catch (e) {
+      console.error(`[wiki-pages] ${tag}: recording the unsynced rows for retry FAILED: ${e?.message || e}`);
+    }
+  }
+  // One notification per class for the run (not one per page): the
+  // reconciliation names every unsynced slug. Loaded lazily - the viewer
+  // image carries this module for parseWikiPage and never finishes a run.
   try {
     const { notify } = await import("./compile-notify.mjs");
-    await notify({
-      cls: "structural", subject: `compile structural failure: row write rejected (${tag})`, slug: u[0].slug,
-      error: `${u.length} page(s) unsynced; first: ${first}; error: ${u[0].error}`, outDir,
-    });
+    if (rejected.length) {
+      const f = rejected.slice(0, 10).map((x) => x.slug).join(", ");
+      await notify({
+        cls: "structural", subject: `compile structural failure: row write rejected (${tag})`, slug: rejected[0].slug,
+        error: `${rejected.length} page(s) unsynced; first: ${f}; error: ${rejected[0].error}`, outDir,
+      });
+    }
+    if (transient.length) {
+      const f = transient.slice(0, 10).map((x) => x.slug).join(", ");
+      await notify({
+        cls: "transient", subject: `row write failed: database unavailable (${tag})`, slug: transient[0].slug,
+        error: `${transient.length} page(s) unsynced, retried next cycle; first: ${f}; error: ${transient[0].error}`, outDir,
+      });
+    }
   } catch (e) {
     console.error(`[wiki-pages] ${tag}: notification for the unsynced rows FAILED: ${e?.message || e}`);
   }
   return 1;
+}
+
+// A database read or write that failed because the DATABASE was not there
+// (transient infrastructure), as opposed to one PostgREST answered and
+// REFUSED (structural: any 4xx other than 408/429). Status codes are read in
+// both error shapes the recipes produce: "POST wiki_pages: 503 ..." and
+// "GET <url> -> 503: ...".
+export function isDatabaseUnavailableError(msg) {
+  const m = String(msg ?? "");
+  if (/(?::|->) 4\d\d\b/.test(m) && !/(?::|->) (?:408|429)\b/.test(m)) return false;
+  return /fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ETIMEDOUT|socket hang up|other side closed|aborted|timed? ?out|(?::|->) (?:408|429|502|503|504)\b|PGRST00[0-3]/i.test(m);
+}
+
+// The next cycle's retry of rows that failed transiently:
+// <out-dir>/.unsynced-rows.json (WIKI_UNSYNCED_FILE overrides).
+export const UNSYNCED_FILE = ".unsynced-rows.json";
+const unsyncedFile = (outDir) => process.env.WIKI_UNSYNCED_FILE ||
+  nodePath.join(outDir || process.env.OB_WIKI_OUT_DIR || "./wikis", UNSYNCED_FILE);
+function readUnsynced(file) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, "utf8"));
+    return j && j.rows && typeof j.rows === "object" ? j.rows : {};
+  } catch {
+    return {};
+  }
+}
+function writeUnsynced(file, rows) {
+  fs.mkdirSync(nodePath.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const sorted = Object.fromEntries(Object.entries(rows).sort(([a], [b]) => a.localeCompare(b)));
+  fs.writeFileSync(tmp, JSON.stringify({ rows: sorted }, null, 2) + "\n");
+  fs.renameSync(tmp, file);
+}
+export function rememberUnsyncedRows(outDir, list, tag) {
+  const file = unsyncedFile(outDir);
+  const rows = readUnsynced(file);
+  const at = new Date().toISOString();
+  for (const x of list) rows[x.slug] = { error: String(x.error).slice(0, 300), tag, at };
+  writeUnsynced(file, rows);
+  return Object.keys(rows).length;
+}
+
+/**
+ * The next cycle: retry the rows an earlier run left unsynced because the
+ * database was unavailable. Each slug's row is written from its file (the
+ * compile wrote the file; the row is what did not land); a slug whose file is
+ * gone is dropped. Returns { retried, landed, failed, dropped }; what fails
+ * again stays recorded for the cycle after.
+ */
+export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GIT_DIR || "/wiki", log = console.log } = {}) {
+  const file = unsyncedFile(outDir);
+  const rows = readUnsynced(file);
+  const slugs = Object.keys(rows);
+  if (!slugs.length) return { retried: 0, landed: 0, failed: 0, dropped: 0 };
+  const batch = [];
+  let dropped = 0;
+  for (const slug of slugs) {
+    let md = null;
+    let rel = null;
+    for (const r of [`${slug}.md`, `${slug}/index.md`]) {
+      try { md = fs.readFileSync(nodePath.join(vaultDir, r), "utf8"); rel = r; break; } catch { /* next */ }
+    }
+    if (md == null) { delete rows[slug]; dropped++; continue; }
+    batch.push(parseWikiPage(rel, md));
+  }
+  let landed = 0;
+  let failed = 0;
+  for (let i = 0; i < batch.length; i += 200) {
+    const part = batch.slice(i, i + 200);
+    try {
+      await upsertWikiPages(part);
+      for (const r of part) delete rows[r.slug];
+      landed += part.length;
+    } catch (e) {
+      failed += part.length;
+      for (const r of part) rows[r.slug] = { ...rows[r.slug], error: String(e?.message || e).slice(0, 300), at: new Date().toISOString() };
+    }
+  }
+  writeUnsynced(file, rows);
+  log(`[wiki-pages] retried ${slugs.length} row(s) left unsynced by a database outage: ${landed} landed, ` +
+    `${failed} failed again, ${dropped} dropped (file gone)`);
+  return { retried: slugs.length, landed, failed, dropped };
 }
 
 // Test seam.

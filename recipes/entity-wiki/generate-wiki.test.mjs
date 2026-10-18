@@ -2,7 +2,14 @@
 // copy). Run: `node --test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rewriteCitations, buildEvolutionSection, linkifyEntities, buildEntityIndex, mergeFailedEntityIds } from "./generate-wiki.mjs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  rewriteCitations, buildEvolutionSection, linkifyEntities, buildEntityIndex, mergeFailedEntityIds,
+  structuralContext, skipOpenStructural, entityInputs, runEntities, clearStructuralCli,
+} from "./generate-wiki.mjs";
+import { updateLedger, recordFailure, readLedger } from "../_shared/structural-ledger.mjs";
 
 const UUID = "3f8a1c2d-1111-4aaa-9bbb-0123456789ab";
 const newRun = () => ({ citedThoughtIds: new Set(), citedSourceIds: new Set() });
@@ -152,4 +159,65 @@ test("N6: the failed-ids ledger keeps untouched ids, drops resolved ones, adds n
   assert.deepEqual(mergeFailedEntityIds([902], { failed: [904], resolved: [905] }), [902, 904]);
   assert.deepEqual(mergeFailedEntityIds(null, { failed: [], resolved: [] }), []);
   assert.deepEqual(mergeFailedEntityIds(["x", 3], { failed: [], resolved: [] }), [3], "junk entries are dropped");
+});
+
+// ── attempt 3 (tester N2-6): the structural SKIP has its own unit test (a
+// revert of skipOpenStructural used to be caught only by the runner's C8b) ──
+const ARGS = (outDir) => ({ outputMode: "file", dryRun: false, outDir, model: "stub-model", graph: false });
+const DAVE = { id: 905, entity_type: "person", canonical_name: "Dave Fixture", updated_at: "2026-10-18T00:00:00.000Z" };
+function ledgerWithDave(outDir, entity = DAVE) {
+  const sctx = structuralContext(ARGS(outDir), {}, outDir);
+  updateLedger(outDir, (l) => recordFailure(l, {
+    key: `entity:${entity.id}`, slug: "content/person/person-dave-fixture", entity: entity.id,
+    error: "reply failed the page parser", replySha256: "aa", inputs: entityInputs(entity, sctx),
+  }));
+  return sctx;
+}
+
+test("N2-6: an open structural failure with unchanged inputs is SKIPPED; changed inputs are retried", () => {
+  const outDir = mkdtempSync(join(tmpdir(), "gw-skip-"));
+  const sctx = ledgerWithDave(outDir);
+  const open = skipOpenStructural(DAVE, sctx);
+  assert.ok(open, "unchanged inputs: skipped");
+  assert.equal(open.key, "entity:905");
+  assert.equal(sctx.skipped.length, 1);
+  assert.equal(skipOpenStructural({ ...DAVE, updated_at: "2026-10-19T00:00:00.000Z" }, sctx), null, "a new source revision: retried");
+  assert.equal(skipOpenStructural({ ...DAVE, id: 902 }, sctx), null, "another entity: not skipped");
+});
+
+test("N2-6: runEntities makes NO compile call for a skipped entity (the database and the LLM are never reached)", async () => {
+  const outDir = mkdtempSync(join(tmpdir(), "gw-skip-run-"));
+  ledgerWithDave(outDir);
+  let touched = 0;
+  const sb = new Proxy({}, { get() { touched++; throw new Error("compile reached the database for a skipped entity"); } });
+  const orig = console.error;
+  console.error = () => {};
+  let res;
+  try {
+    res = await runEntities(sb, {}, ARGS(outDir), [async () => DAVE], [DAVE.id]);
+  } finally { console.error = orig; }
+  assert.equal(res.skipped, 1);
+  assert.equal(res.ok, 0);
+  assert.deepEqual(res.structural, [], "not compiled, so not failed");
+  assert.equal(touched, 0, "no compile ran");
+  assert.ok(readLedger(outDir).failures["entity:905"], "the open failure stays");
+});
+
+test("N2-2: --clear-structural of an id that is not open exits 1 naming it", () => {
+  const outDir = mkdtempSync(join(tmpdir(), "gw-clear-"));
+  ledgerWithDave(outDir);
+  const lines = [];
+  const oe = console.error;
+  const ol = console.log;
+  console.error = (m) => lines.push(String(m));
+  console.log = (m) => lines.push(String(m));
+  let a; let b;
+  try {
+    a = clearStructuralCli({ outDir, clearStructural: "123456" }, {});
+    b = clearStructuralCli({ outDir, clearStructural: "905" }, {});
+  } finally { console.error = oe; console.log = ol; }
+  assert.equal(a, 1);
+  assert.ok(lines.some((l) => l.includes("not an open structural failure: entity:123456")), JSON.stringify(lines));
+  assert.equal(b, 0);
+  assert.ok(lines.some((l) => l.includes("cleared 1 open structural failure(s): entity:905; 0 still open")));
 });

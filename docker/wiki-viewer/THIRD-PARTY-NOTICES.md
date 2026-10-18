@@ -11,7 +11,8 @@ Ported (rewritten as plain ESM, behaviour kept) into the live renderer
 | this repo | ported from (jackyzha0/quartz v4.5.1) |
 |---|---|
 | `lib/quartz-path.mjs` | `quartz/util/path.ts` (slug + link algebra) |
-| `lib/render-page.mjs` | `quartz/plugins/transformers/ofm.ts`, `gfm.ts`, `toc.ts`, `links.ts`, `syntax.ts`, `latex.ts`, `description.ts`; `quartz/util/jsx.tsx` |
+| `lib/render-page.mjs` | `quartz/plugins/transformers/ofm.ts`, `gfm.ts`, `toc.ts`, `links.ts`, `syntax.ts`, `latex.ts`, `description.ts`; `quartz/util/jsx.tsx`; `quartz/components/renderPage.tsx` (`renderTranscludes`) and `quartz/util/path.ts` (`normalizeHastElement`, `isRelativeURL`) |
+| `lib/page-classes/alias.mjs`, `lib/site-index.mjs` (`aliasRedirects`) | `quartz/plugins/emitters/aliases.ts` (the redirect document), `quartz/plugins/transformers/frontmatter.ts` (`getAliasSlugs`, the aliases/alias coalesce) |
 | `lib/components.mjs` | `quartz/components/Breadcrumbs.tsx`, `ArticleTitle.tsx`, `ContentMeta.tsx`, `Date.tsx`, `TagList.tsx`, `TableOfContents.tsx`, `Backlinks.tsx`, `OverflowList.tsx`, `PageList.tsx`, `Footer.tsx`, `pages/FolderContent.tsx`, `pages/TagContent.tsx` |
 | `lib/chrome.mjs` | `quartz/components/renderPage.tsx`, `Head.tsx` |
 | `lib/chrome-static.mjs` (generated at image build by `test/extract-chrome-static.mjs`) | the HTML Quartz's `PageTitle`, `Search`, `Darkmode`, `ReaderMode`, `Explorer`, `Graph`, `Flex`, `Spacer`, `MobileOnly`, `DesktopOnly` components emit |

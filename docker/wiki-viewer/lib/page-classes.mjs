@@ -26,10 +26,17 @@
  *                deps: { row(), rowByBase(), site, fileExists(rel) }
  *              row()/rowByBase() return { ok, row } | { ok:false, state } and
  *              are memoised per request, so asking twice costs one query.
- *              Return null to pass; return { unreachable: state } when the
- *              database did not answer.
+ *              Returns a PAGE (a plain ctx object) or null (pass), and
+ *              nothing else. When the database did not answer it returns
+ *              deps.unavailable(r) - a value only the route can make (the
+ *              DB_UNAVAILABLE symbol), never a hand-built { unreachable }
+ *              (rw-p1a-render attempt 3, near-miss N2-1: a wrong-shape
+ *              { unreachable: true } used to fake the database screen).
  *   template   async (ctx, deps) => page model for chrome.renderDocument
- * A resolve() or template() that THROWS is isolated: the error is logged
+ *              (or deps.unavailable(r) when a row it needs - a transcluded
+ *              page's - did not answer)
+ * A resolve() or template() that THROWS, or that returns anything other than
+ * a page / null / deps.unavailable(r), is isolated: the error is logged
  * (first time per entry, then counted), the entry is reported broken by
  * brokenPageClasses() (the health probe lists it), and resolution falls
  * through to the next entry in the same fixed order - a code bug is never
@@ -40,6 +47,27 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const _entries = new Map();
+
+// The database did not answer. Only the route makes these (deps.unavailable),
+// so a resolve()/template() cannot fake the database screen by shape.
+export const DB_UNAVAILABLE = Symbol("wiki-db-unavailable");
+const DB_STATES = new Set(["connecting", "unreachable"]);
+export function makeUnavailable(state) {
+  if (!DB_STATES.has(state)) throw new Error(`page classes: not a database state: ${JSON.stringify(state)}`);
+  return Object.freeze({ [DB_UNAVAILABLE]: state });
+}
+export const unavailableState = (v) => (v && typeof v === "object" && DB_STATES.has(v[DB_UNAVAILABLE]) ? v[DB_UNAVAILABLE] : null);
+
+// What a resolve() returned: "page" | "pass" | "unavailable" | an error text.
+function resultKind(ctx) {
+  if (ctx == null) return "pass";
+  if (unavailableState(ctx)) return "unavailable";
+  if (typeof ctx !== "object" || Array.isArray(ctx)) return `returned ${Array.isArray(ctx) ? "an array" : typeof ctx} (an entry returns a page object, null, or deps.unavailable(r))`;
+  if (Object.prototype.hasOwnProperty.call(ctx, "unreachable")) {
+    return `returned ${JSON.stringify({ unreachable: ctx.unreachable })} - a database state is deps.unavailable(r), never a hand-built object`;
+  }
+  return "page";
+}
 
 // The entry's own shape (throws).
 function validateEntry(entry) {
@@ -77,7 +105,7 @@ export function unregisterPageClass(name) {
 // Entries whose resolve()/template() threw: name -> { name, version, phase,
 // error, count, firstAt, lastAt }.
 const _broken = new Map();
-function noteBroken(entry, phase, key, e) {
+function noteBroken(entry, phase, key, e, kind = "threw") {
   const now = new Date().toISOString();
   const b = _broken.get(entry.name);
   if (b) {
@@ -85,10 +113,11 @@ function noteBroken(entry, phase, key, e) {
     b.lastAt = now;
     b.error = String(e?.message || e).slice(0, 300);
     b.phase = phase;
+    b.kind = kind;
     return;
   }
-  _broken.set(entry.name, { name: entry.name, version: entry.version, phase, error: String(e?.message || e).slice(0, 300), count: 1, firstAt: now, lastAt: now, key });
-  console.error(`[wiki-viewer] page class ${entry.name}@${entry.version} ${phase}() THREW for ${key} - isolated, falling through: ${e?.stack || e}`);
+  _broken.set(entry.name, { name: entry.name, version: entry.version, phase, kind, error: String(e?.message || e).slice(0, 300), count: 1, firstAt: now, lastAt: now, key });
+  console.error(`[wiki-viewer] page class ${entry.name}@${entry.version} ${phase}() ${kind === "threw" ? "THREW" : "RETURNED AN INVALID RESULT"} for ${key} - isolated, falling through: ${kind === "threw" ? e?.stack || e : e?.message || e}`);
 }
 export function brokenPageClasses() {
   return [..._broken.values()].map((b) => ({ ...b }));
@@ -161,20 +190,35 @@ export async function resolvePage(req, deps, skip = new Set()) {
       noteBroken(entry, "resolve", req.key, e);
       continue;
     }
-    if (!ctx) continue;
-    if (ctx.unreachable) return { unreachable: ctx.unreachable };
+    const kind = resultKind(ctx);
+    if (kind === "pass") continue;
+    if (kind === "unavailable") return { unreachable: unavailableState(ctx) };
+    if (kind !== "page") {
+      noteBroken(entry, "resolve", req.key, new Error(kind), "invalid");
+      continue;
+    }
     return { entry, ctx };
   }
   return null;
 }
 
-// Run an entry's template, isolated like resolve(): null when it threw (the
-// caller resolves again without that entry).
+// Run an entry's template, isolated like resolve(): null when it threw or
+// returned something that is not a page model (the caller resolves again
+// without that entry); { unreachable: state } when it returned
+// deps.unavailable(r).
 export async function renderTemplate(entry, ctx, deps, key) {
+  let model;
   try {
-    return await entry.template(ctx, deps);
+    model = await entry.template(ctx, deps);
   } catch (e) {
     noteBroken(entry, "template", key, e);
     return null;
   }
+  const st = unavailableState(model);
+  if (st) return { unreachable: st };
+  if (!model || typeof model !== "object" || Array.isArray(model) || Object.prototype.hasOwnProperty.call(model, "unreachable")) {
+    noteBroken(entry, "template", key, new Error(`returned ${model === null ? "null" : Array.isArray(model) ? "an array" : typeof model === "object" ? "an object with an 'unreachable' key" : typeof model} (a template returns a page model)`), "invalid");
+    return null;
+  }
+  return model;
 }

@@ -10,8 +10,12 @@
  *            row dated in the FUTURE (beyond RECONCILE_FUTURE_MS): its time
  *            cannot show that a newer file replaced it, so it is not trusted
  *            (these are also listed under `future`)
- *   empty    a row with an empty body that is not a folder/tag index (an
- *            empty leaf is never a presentable page)
+ *   empty    a row whose body is EMPTY (isEmptyBody) while its file's body
+ *            is not, other than a folder/tag index (an empty row standing in
+ *            for content is never presented). A row and a file that are BOTH
+ *            empty (a note that is frontmatter only) are a faithfully empty
+ *            page: presented as Quartz presents it (an empty article) and not
+ *            drift (rw-p1a-render attempt 3, decision on N2-4/N2-5)
  *   orphan   a row with no file          (a sweep whose delete did not land)
  *   failed   an OPEN structural compile failure (structural-ledger.mjs): the
  *            page stays pending and is listed here until it is fixed (D13
@@ -50,19 +54,46 @@ const SKIP_DIRS = new Set([".git", ".quartz-cache", "public", "node_modules", "a
 // A folder or tag index may legitimately have no body (Quartz then shows the
 // listing alone); every other page with an empty body is an empty leaf.
 export const emptyAllowed = (slug) => slug === "index" || slug.endsWith("/index") || slug.startsWith("tags/");
-const isBlank = (body) => !String(body ?? "").trim();
+
+/**
+ * PURE: does this markdown present NOTHING? The ONE emptiness rule of the
+ * renderer and the reconciliation (rw-p1a-render attempt 3, near-miss N2-3:
+ * they used to disagree on U+00A0 / U+3000). Empty after removing, in order:
+ * a BOM, a leading frontmatter block (--- yaml --- or +++ toml +++), every
+ * Obsidian comment (%% ... %%), every HTML comment, every raw-HTML element
+ * whose content the renderer drops whole (script, style, iframe, object,
+ * embed, template, noscript), every remaining HTML tag (the renderer drops raw
+ * HTML from a body), and then any whitespace JavaScript knows (\s: incl.
+ * U+00A0, U+3000, U+FEFF, the U+2000 range) plus the zero-width characters.
+ * Applied to a row's body AND to its file: a row is "empty" drift only when
+ * it is empty and its file is not (rowState).
+ */
+const FRONTMATTER_RE = /^(?:---[^\S\n]*\n[\s\S]*?\n---|\+\+\+[^\S\n]*\n[\s\S]*?\n\+\+\+)[^\S\n]*(?:\n|$)/;
+const DROPPED_WHOLE_RE = /<(script|style|iframe|object|embed|template|noscript)\b[\s\S]*?<\/\1\s*>/gi;
+export function isEmptyBody(text) {
+  let s = String(text ?? "").replace(/\r\n?/g, "\n").replace(/^﻿/, "").replace(/^\s+/, "");
+  s = s.replace(FRONTMATTER_RE, "")
+    .replace(/%%[\s\S]*?%%/g, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(DROPPED_WHOLE_RE, "")
+    .replace(/<\/?[A-Za-z][^>]*>/g, "");
+  return /^[\s​‌‍⁠]*$/u.test(s);
+}
 
 /**
  * PURE: is this row presentable as-is? Returns null when it is, else why it is
  * a miss: "stale" (older than its file, or no valid date), "future" (dated
  * beyond now + RECONCILE_FUTURE_MS: its time cannot be compared with the
- * file's), "empty" (an empty body where one is required). `fileMtimeMs` is
- * null when the row has no file (an orphan, reported separately). `row.empty`
- * (set by listRows from a body filter) stands in for row.body.
+ * file's), "empty" (an empty body - isEmptyBody - where one is required,
+ * unless its file's body is empty too: `fileEmpty`, which the caller reads
+ * for an empty row only; a page whose source is empty is faithfully empty and
+ * presented as Quartz presents it). `fileMtimeMs` is null when the row has no
+ * file (an orphan, reported separately; an empty orphan stays "empty").
+ * `row.empty` (set by listRows) stands in for row.body.
  */
-export function rowState(row, fileMtimeMs, { now = Date.now(), allowEmpty = emptyAllowed(String(row.slug || "")) } = {}) {
-  const blank = row.empty === true || (row.empty === undefined && "body" in row && isBlank(row.body));
-  if (!allowEmpty && blank) return "empty";
+export function rowState(row, fileMtimeMs, { now = Date.now(), allowEmpty = emptyAllowed(String(row.slug || "")), fileEmpty = false } = {}) {
+  const blank = row.empty === true || (row.empty === undefined && "body" in row && isEmptyBody(row.body));
+  if (!allowEmpty && blank && !(fileEmpty === true && fileMtimeMs != null)) return "empty";
   const rowMs = Date.parse(row.updated_at);
   if (!Number.isFinite(rowMs)) return "stale";
   if (rowMs > now + FUTURE_MS()) return "future";
@@ -117,19 +148,44 @@ async function keysetWalk(fetchImpl, select, extra, onPage) {
   }
 }
 
+// The database-side PREFILTER for empty bodies (`match` is PostgREST's ~): a
+// SUPERSET of the bodies isEmptyBody() calls empty, so only those bodies are
+// read and the ONE rule decides. An empty body either has no alphanumeric
+// character at all, or its first one sits inside markup the rule removes -
+// and every such construct opens with ---, +++, %% or <, preceded only by
+// non-alphanumerics. (In any locale a character the database does not count
+// as alnum only widens the superset.)
+export const EMPTY_BODY_PREFILTER = "^[^[:alnum:]]*($|---|[+][+][+]|%%|<)";
+
 // Keyset walk of every row's (slug, page_class, updated_at), plus which rows
-// have an empty body (a regex filter - `match` is PostgREST's ~ - instead of
-// reading every body). Throws when the database does not answer: the caller
-// must never read that as "no rows".
+// have an empty body (the prefilter, then isEmptyBody on those bodies only).
+// Throws when the database does not answer: the caller must never read that
+// as "no rows".
 export async function listRows(fetchImpl = fetch) {
   const rows = new Map();
   await keysetWalk(fetchImpl, "slug,page_class,updated_at,links", [], (page) => {
     for (const x of page) rows.set(x.slug, { ...x, empty: false });
   });
-  await keysetWalk(fetchImpl, "slug", [`body=match.${encodeURIComponent("^[[:space:]]*$")}`], (page) => {
-    for (const x of page) if (rows.has(x.slug)) rows.get(x.slug).empty = true;
+  await keysetWalk(fetchImpl, "slug,body", [`body=match.${encodeURIComponent(EMPTY_BODY_PREFILTER)}`], (page) => {
+    for (const x of page) if (rows.has(x.slug) && isEmptyBody(x.body)) rows.get(x.slug).empty = true;
   });
   return rows;
+}
+
+// For every EMPTY row whose file exists: is the file's body empty too? Read
+// only for empty rows (a handful), never the whole vault. Sets
+// files.get(slug).emptyBody.
+export async function markEmptyFiles(vault, files, rows) {
+  for (const [slug, row] of rows) {
+    if (!row.empty) continue;
+    const f = files.get(slug);
+    if (!f) continue;
+    try {
+      f.emptyBody = isEmptyBody(await readFile(join(vault, f.rel), "utf8"));
+    } catch {
+      f.emptyBody = false; // vanished or unreadable: not shown to be empty
+    }
+  }
 }
 
 /**
@@ -145,7 +201,7 @@ export function diffFilesRows(files, rows, classOf, { failed = [], now = Date.no
     b.files++;
     const row = rows.get(slug);
     if (!row) { b.missing.push(slug); continue; }
-    const st = rowState(row, f.mtimeMs, { now });
+    const st = rowState(row, f.mtimeMs, { now, fileEmpty: f.emptyBody === true });
     if (st === "stale" || st === "future") b.stale.push(slug);
     if (st === "future") future.push(slug);
     if (st === "empty") b.empty.push(slug);
@@ -204,6 +260,7 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
   const cls = classOf || ((rel) => classify(rel).page_class);
   const files = await listFiles(vault);
   const rows = await listRows();
+  await markEmptyFiles(vault, files, rows);
   const failed = listOpen(null, structuralFile || structuralFileFor(vault));
   const report = diffFilesRows(files, rows, cls, { failed });
   report.checkedAt = new Date().toISOString();
@@ -235,7 +292,9 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
   log(`[reconcile] repair pass: ${repaired.length} row(s) written (${report.missing.length} missing, ${report.stale.length} stale, ${report.empty.length} empty)` +
     (failedWrites.length ? `, ${failedWrites.length} FAILED (first ${failedWrites[0].slug}: ${failedWrites[0].error})` : "") +
     (repaired.length ? `; first: ${repaired.slice(0, 5).join(", ")}` : ""));
-  const after = diffFilesRows(files, await listRows(), cls, { failed });
+  const rowsAfter = await listRows();
+  await markEmptyFiles(vault, files, rowsAfter);
+  const after = diffFilesRows(files, rowsAfter, cls, { failed });
   return { ...report, repaired, repairFailed: failedWrites, after };
 }
 

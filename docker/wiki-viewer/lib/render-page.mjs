@@ -23,11 +23,12 @@
  *   ported  Latex (remark-math + rehype-katex, html output)
  *   ported  Content's htmlToJsx (preact serialisation; tables wrapped in
  *           div.table-container)
+ *   ported  Transclusion (Quartz renderPage's renderTranscludes; attempt 3 -
+ *           it was dropped before): ![[page]], ![[page#heading]] and
+ *           ![[page#^block]] are filled from the embedded page's ROW
+ *           (renderTranscludes below); a known page without a presentable
+ *           row is the pending-compile marker inside the block
  *   DROPPED raw HTML from the body (see SAFETY) - by design;
- *   DROPPED transclusion CONTENT: ![[page]] keeps Quartz's transclude
- *           blockquote + "Transclude of" link but is not filled with the
- *           other page's body (that needs a second row per embed; recorded
- *           in the rw-p1a-render findings);
  *   DROPPED CreatedModifiedDate's git/filesystem dates (the row's date is
  *           presented; see page-classes), RemoveDrafts (compile's job).
  *
@@ -77,6 +78,7 @@ import readingTime from "reading-time";
 import path from "node:path";
 import {
   slugifyFilePath, splitAnchor, slugTag, pathToRoot, transformLink, canonicalDest, simplifySlug,
+  getFileExtension, endsWith, joinSegments, resolveRelative,
 } from "./quartz-path.mjs";
 
 const esc = (s) =>
@@ -183,11 +185,13 @@ function ofmReplacements() {
         } else if ([".pdf"].includes(ext)) {
           return { type: "html", value: `<iframe src="${esc(url)}" class="pdf"></iframe>` };
         }
-        // Transclusion: Quartz's placeholder shape, content not filled (DROPPED, see header).
+        // Transclusion: Quartz's placeholder shape (filled after the transforms
+        // by renderTranscludes, as Quartz's renderPage fills it). Quartz
+        // interpolates the alias unescaped, so a missing one reads "undefined".
         return {
           type: "html",
           data: { hProperties: { transclude: true } },
-          value: `<blockquote class="transclude" data-url="${esc(url)}" data-block="${esc(anchor)}" data-embed-alias="${esc(alias)}"><a href="${esc(url + anchor)}" class="transclude-inner">Transclude of ${esc(url)}${esc(anchor)}</a></blockquote>`,
+          value: `<blockquote class="transclude" data-url="${esc(url)}" data-block="${esc(anchor)}" data-embed-alias="${esc(String(alias))}"><a href="${esc(url + anchor)}" class="transclude-inner">Transclude of ${esc(url)}${esc(anchor)}</a></blockquote>`,
         };
       }
       return { type: "link", url: fp + anchor, children: [{ type: "text", value: alias ?? fp }] };
@@ -334,8 +338,9 @@ function tableOfContents() {
 function ofmBlockReferences() {
   const inlineTagTypes = new Set(["p", "li"]);
   const blockTagTypes = new Set(["blockquote"]);
-  return (tree) => {
+  return (tree, file) => {
     const blocks = {};
+    file.data.ctx.blocks = blocks; // Quartz file.data.blocks (block transclusion)
     visit(tree, "element", (node, index, parent) => {
       if (blockTagTypes.has(node.tagName)) {
         const nextChild = parent?.children.at(index + 2);
@@ -595,22 +600,162 @@ export function hastToArticleHtml(tree) {
   return renderToString(vnode);
 }
 
-/**
- * Render one page body. ctx: { slug, frontmatter?, byBase? (basename->slugs) }.
- * Returns { html, toc, text, description, links, inlineTags, hasMermaid, readingMinutes }.
- */
-export async function renderPage(body, ctx = {}) {
+// ── Transclusion (Quartz components/renderPage.tsx renderTranscludes) ───────
+// Ported (MIT, (c) jackyzha0): after a page's own transforms, every
+// blockquote.transclude is filled with the embedded page's compiled tree -
+// the whole page (an h1 with its title, then its body), a heading section
+// (![[page#heading]]: from that heading to the next one of the same or a
+// higher level) or a block (![[page#^id]]; a list item is wrapped in a ul) -
+// with relative URLs rebased (normalizeHastElement) and a "Link to original".
+// The embedded page is its ROW (deps.embed in live-route.mjs), never its file:
+//   no row and no file      -> Quartz's placeholder stays (Quartz has no page)
+//   known, row not presentable (missing, stale, empty) -> the pending-compile
+//                              marker inside the block (parity rule
+//                              D9-transclude-pending)
+//   database did not answer -> EmbedUnavailable (the whole request is the
+//                              database screen; never half a page)
+// Like Quartz's visit, the inserted content is walked too, so a page the
+// embedded page transcludes is filled as well. Unlike Quartz, a CYCLE (a page
+// already being transcluded on this path, the host included) is left as the
+// placeholder: Quartz recurses without end there and emits no page at all.
+export class EmbedUnavailable extends Error {
+  constructor(value) { super("a transcluded page's row did not answer (database)"); this.value = value; }
+}
+const headerRegex = /h[1-6]/;
+const classList = (n) => [].concat(n?.properties?.className ?? []).map(String);
+function isRelativeURL(s) {
+  const validStart = /^\.{1,2}/.test(s);
+  const validEnding = !endsWith(s, "index");
+  return validStart && validEnding && ![".md", ".html"].includes(getFileExtension(s) ?? "");
+}
+function rebaseHastElement(el, attr, curBase, newBase) {
+  if (el.properties?.[attr]) {
+    if (!isRelativeURL(String(el.properties[attr]))) return;
+    el.properties[attr] = joinSegments(resolveRelative(curBase, newBase), "..", el.properties[attr]);
+  }
+}
+export function normalizeHastElement(rawEl, curBase, newBase) {
+  const el = structuredClone(rawEl);
+  const walk = (n) => {
+    rebaseHastElement(n, "src", curBase, newBase);
+    rebaseHastElement(n, "href", curBase, newBase);
+    if (n.children) n.children.forEach(walk);
+  };
+  walk(el);
+  return el;
+}
+const linkToOriginal = (inner) => ({
+  type: "element", tagName: "a",
+  properties: { href: inner.properties?.href, class: ["internal", "transclude-src"] },
+  children: [{ type: "text", value: "Link to original" }],
+});
+const pendingMarker = (target, reason) => ({
+  type: "element", tagName: "p",
+  properties: { className: ["transclude-pending"], dataRenderState: "pending" },
+  children: [{ type: "text", value: `Pending compile: ${target} is not presented yet (${reason}).` }],
+});
+
+async function fillTransclude(node, hostSlug, look, chain) {
+  const inner = node.children?.[0];
+  if (!inner || inner.type !== "element") return null;
+  const target = String(inner.properties?.["data-slug"] ?? hostSlug);
+  if (chain.includes(target)) return null; // a cycle: the placeholder stays (see above)
+  const page = await look(target);
+  if (page.state === "unavailable") throw new EmbedUnavailable(page.value);
+  if (page.state === "none") return null;
+  if (page.state === "pending") {
+    node.children = [pendingMarker(target, page.reason), linkToOriginal(inner)];
+    return null; // nothing inside to walk
+  }
+  let blockRef = node.properties?.dataBlock;
+  if (typeof blockRef === "string" && blockRef.startsWith("#^")) {
+    blockRef = blockRef.slice(2);
+    let blockNode = page.blocks?.[blockRef];
+    if (!blockNode) return null;
+    if (blockNode.tagName === "li") blockNode = { type: "element", tagName: "ul", properties: {}, children: [blockNode] };
+    node.children = [normalizeHastElement(blockNode, hostSlug, target), linkToOriginal(inner)];
+  } else if (typeof blockRef === "string" && blockRef.startsWith("#")) {
+    blockRef = blockRef.slice(1);
+    let startIdx, startDepth, endIdx;
+    for (const [i, el] of page.tree.children.entries()) {
+      if (!(el.type === "element" && headerRegex.test(el.tagName))) continue;
+      const depth = Number(el.tagName.substring(1));
+      if (startIdx === undefined || startDepth === undefined) {
+        if (el.properties?.id === blockRef) { startIdx = i; startDepth = depth; }
+      } else if (depth <= startDepth) { endIdx = i; break; }
+    }
+    if (startIdx === undefined) return null;
+    node.children = [
+      ...page.tree.children.slice(startIdx, endIdx).map((ch) => normalizeHastElement(ch, hostSlug, target)),
+      linkToOriginal(inner),
+    ];
+  } else {
+    node.children = [
+      { type: "element", tagName: "h1", properties: {}, children: [{ type: "text", value: page.title ?? `Transclude of ${page.slug}` }] },
+      ...page.tree.children.map((ch) => normalizeHastElement(ch, hostSlug, target)),
+      linkToOriginal(inner),
+    ];
+  }
+  return [...chain, target];
+}
+
+async function renderTranscludes(node, hostSlug, look, chain) {
+  for (const child of node.children || []) {
+    if (child.type !== "element") continue;
+    if (child.tagName === "blockquote" && classList(child).includes("transclude")) {
+      const next = await fillTransclude(child, hostSlug, look, chain);
+      if (next) await renderTranscludes(child, hostSlug, look, next);
+      continue;
+    }
+    await renderTranscludes(child, hostSlug, look, chain);
+  }
+}
+
+// One page body -> its compiled tree and what the chrome needs (no
+// transclusion, no serialisation).
+async function renderTree(body, ctx) {
   const c = {
     slug: ctx.slug || "index",
     frontmatter: ctx.frontmatter || {},
     byBase: ctx.byBase || new Map(),
     inlineTags: new Set(),
-    toc: null, text: "", description: "", links: [], hasMermaid: false,
+    toc: null, text: "", description: "", links: [], hasMermaid: false, blocks: {},
   };
   const src = ofmTextTransform(String(body ?? "").replace(/\r\n?/g, "\n"));
   const file = { value: src, data: { ctx: c } };
   const mdast = processor.parse(file.value);
   const hast = await processor.run(mdast, file);
+  return { hast, c };
+}
+
+/**
+ * Render one page body. ctx: { slug, frontmatter?, byBase? (basename->slugs),
+ * embed? (async slug -> { state: "page", row } | { state: "pending", reason }
+ * | { state: "none" } | { state: "unavailable", value }) }. Without `embed`
+ * a transclusion keeps Quartz's placeholder. Throws EmbedUnavailable when an
+ * embedded page's row did not answer.
+ * Returns { html, toc, text, description, links, inlineTags, hasMermaid, readingMinutes }.
+ */
+export async function renderPage(body, ctx = {}) {
+  const { hast, c } = await renderTree(body, ctx);
+  if (typeof ctx.embed === "function") {
+    const cache = new Map();
+    const look = async (slug) => {
+      if (!cache.has(slug)) {
+        cache.set(slug, (async () => {
+          const e = await ctx.embed(slug);
+          if (e?.state !== "page") return e || { state: "none" };
+          const row = e.row;
+          const fm = { ...(row.frontmatter || {}) };
+          const title = row.title || fm.title || row.slug.split("/").pop();
+          const t = await renderTree(row.body, { slug: row.slug, frontmatter: { ...fm, title }, byBase: c.byBase });
+          return { state: "page", slug: row.slug, title, tree: t.hast, blocks: t.c.blocks };
+        })());
+      }
+      return cache.get(slug);
+    };
+    await renderTranscludes(hast, c.slug, look, [c.slug]);
+  }
   const html = hastToArticleHtml(hast);
   return {
     html,

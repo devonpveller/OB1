@@ -8,8 +8,10 @@
  * explorer, the graph and the page chrome all see the same snapshot). Built
  * once per nav refresh and memoised by its ETag.
  */
+import path from "node:path";
 import {
-  basenameIndex, canonicalDest, simplifySlug, slugTag, slugifyFilePath, transformLink,
+  basenameIndex, canonicalDest, simplifySlug, slugTag, slugifyFilePath, transformLink, resolveRelative,
+  getFileExtension, endsWith,
 } from "./quartz-path.mjs";
 
 function asArray(v) {
@@ -36,6 +38,34 @@ export function aliasSlugs(aliases) {
   return asArray(aliases).map((a) => slugifyFilePath(/\.md$/i.test(a) ? a : a + ".md"));
 }
 
+const permalinkOf = (p) => (p != null && String(p) !== "" ? String(p) : null);
+
+// Quartz isRelativeURL (util/path.ts).
+function isRelativeURL(s) {
+  return /^\.{1,2}/.test(s) && !endsWith(s, "index") && ![".md", ".html"].includes(getFileExtension(s) ?? "");
+}
+
+/**
+ * Quartz AliasRedirects (plugins/emitters/aliases.ts): every alias of a page
+ * (frontmatter aliases, else alias - FrontMatter's coalesce - slugged by
+ * getAliasSlugs; plus the raw permalink) is a redirect page at the alias's
+ * slug pointing at the page. Returns alias slug -> { target: the page's simple
+ * slug, redirUrl }. The FIRST page (slug order) to claim an alias keeps it.
+ */
+export function aliasRedirects(entries) {
+  const out = new Map();
+  for (const e of entries) {
+    const ogSlug = simplifySlug(e.slug);
+    const targets = [...aliasSlugs(e.aliases), ...(e.permalink ? [String(e.permalink)] : [])];
+    for (const aliasTarget of targets) {
+      const aliasTargetSlug = isRelativeURL(aliasTarget) ? path.posix.normalize(path.posix.join(ogSlug, "..", aliasTarget)) : aliasTarget;
+      if (!aliasTargetSlug || out.has(aliasTargetSlug)) continue;
+      out.set(aliasTargetSlug, { target: ogSlug, redirUrl: resolveRelative(aliasTargetSlug, ogSlug) });
+    }
+  }
+  return out;
+}
+
 export function buildSiteIndex(rows, etag = "") {
   const bySlug = new Map();
   for (const r of rows || []) {
@@ -48,7 +78,10 @@ export function buildSiteIndex(rows, etag = "") {
       updated_at: r.updated_at || null,
       date: r.fm_date || null,
       page_class: r.page_class || null,
-      aliases: asArray(r.aliases),
+      // the nav projection's aliases/alias/permalink (frontmatter->...), or
+      // those keys of a row that carries its whole frontmatter
+      aliases: asArray(r.aliases ?? r.alias ?? r.frontmatter?.aliases ?? r.frontmatter?.alias),
+      permalink: permalinkOf(r.permalink ?? r.frontmatter?.permalink),
     });
   }
   const slugs = [...bySlug.keys()].sort();
@@ -103,7 +136,8 @@ export function buildSiteIndex(rows, etag = "") {
       }
     }
   }
-  return { etag, bySlug, slugs, allSlugs, byBase, backlinks, folders, byTag };
+  const aliases = aliasRedirects(slugs.map((s) => bySlug.get(s)));
+  return { etag, bySlug, slugs, allSlugs, byBase, backlinks, folders, byTag, aliases };
 }
 
 // Breadcrumb / listing display name of a folder: its index page's title, else

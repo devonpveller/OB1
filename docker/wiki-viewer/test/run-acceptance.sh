@@ -29,6 +29,8 @@ notes_count() { bash "$E" notes | grep -c '"class"' || true; }
 newnotes() { bash "$E" notes | tail -n +$(( $1 + 1 )) | grep '"class"' || true; }
 T() { timeout "${1}" "${@:2}"; } # every long wait is bounded
 echo "names: prefix=$P tag=$TAG subnet=$SUBNET port=$PORT net=$NET viewer image=$IMG wiki-service image=$WSIMG"
+NURL="$(grep -cE '^ *\["' "$HERE/parity-diff-urls.mjs")"   # the fixed URL list (attempt 3: 34)
+echo "fixed URL list: $NURL URLs"
 
 hdr "C0 build + environment"
 bash "$E" down >/dev/null 2>&1
@@ -38,11 +40,15 @@ T 300 bash "$E" up 2>&1 | tail -6
 bash "$E" wait_built 300 && pass C0 || fail C0 "viewer never served"
 
 if want C1; then
-hdr "C1+C2 (acceptance 1, 2): 27 URLs x-wiki-render: db, chrome elements, body diff vs built page"
-out="$(T 300 bash "$E" parity 2>&1)"; echo "$out" | tail -30
-if echo "$out" | grep -q "PARITY: PASS" && [ "$(echo "$out" | grep -c '^200 x-wiki-render=db ')" = 27 ] \
+hdr "C1+C2 (acceptance 1, 2): $NURL URLs x-wiki-render: db, chrome elements, body diff vs built page (attempt 3: + kitchen sink, transclusions, frontmatter-only note, alias redirects)"
+out="$(T 300 bash "$E" parity 2>&1)"; echo "$out" | tail -42
+if echo "$out" | grep -q "PARITY: PASS" && [ "$(echo "$out" | grep -c '^200 x-wiki-render=db ')" = "$NURL" ] \
    && echo "$out" | grep -q '/content/source/00000000-0000-4000-8000-000000000002 .*"D8-unsafe-url":3' \
-   && echo "$out" | grep -E '/content/ +built=yes .* unlisted=0' >/dev/null; then pass "C1+C2 parity"; else fail "C1+C2 parity" "see output"; fi
+   && echo "$out" | grep -E '/content/ +built=yes .* unlisted=0' >/dev/null \
+   && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/kitchen-sink +built=yes .* unlisted=0' >/dev/null \
+   && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/transclude-fixture +built=yes .* unlisted=0' >/dev/null \
+   && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/empty-body-note +built=yes .* unlisted=0' >/dev/null \
+   && [ "$(echo "$out" | grep -c '^200 x-wiki-render=db alias redirect .*whole document identical')" = 3 ]; then pass "C1+C2 parity"; else fail "C1+C2 parity" "see output"; fi
 fi
 
 if want C2b; then
@@ -95,6 +101,35 @@ if echo "$e1" | head -1 | grep -q "x-wiki-render=pending .*cache-control=no-stor
    && echo "$f2" | head -1 | grep -q "x-wiki-render=db" && echo "$f2" | grep -q "Edited after its row"; then pass C3b; else fail C3b "see output"; fi
 fi
 
+if want C3c; then
+hdr "C3c (attempt 3, N2-3/N2-4/N2-5): ONE emptiness rule - an NBSP body over a real file is pending, named empty and repaired; the frontmatter-only note is presented (db) and is not drift"
+bash "$E" psql "update wiki_pages set body=U&'\00A0\3000', updated_at=now() + interval '2 seconds' where slug='content/thought/9001' returning slug"
+n1="$(curl_ /content/thought/9001 body)"; echo "$n1" | head -1; echo "$n1" | grep -o '<p>This page is known ([^)]*)' | head -1
+eb="$(curl_ /notes/empty-body-note body)"; echo "frontmatter-only note: $(echo "$eb" | head -1) article=[$(echo "$eb" | tr -d '\n' | grep -o '<article class="popover-hint">[^<]*</article>')]"
+o="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki 2>&1)"; rc=$?; echo "$o"; echo "exit=$rc"
+r="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki --repair 2>&1)"; rr=$?; echo "$r" | grep -E "repair pass|after-repair\] (clean|DRIFT)"; echo "exit(repair)=$rr"
+n2="$(curl_ /content/thought/9001)"; echo "after repair: $n2"
+if echo "$n1" | head -1 | grep -q "x-wiki-render=pending" && echo "$n1" | grep -q "empty body" \
+   && echo "$eb" | head -1 | grep -q "x-wiki-render=db" && echo "$eb" | tr -d '\n' | grep -q '<article class="popover-hint"></article>' \
+   && [ "$rc" = 1 ] && echo "$o" | grep -q "empty: content/thought/9001$" && ! echo "$o" | grep -q "empty-body-note" \
+   && echo "$r" | grep -q "repair pass: 1 row(s) written (0 missing, 0 stale, 1 empty)" && echo "$r" | grep -q "after-repair\] clean" \
+   && [ "$rr" = 0 ] && echo "$n2" | grep -q "x-wiki-render=db"; then pass C3c; else fail C3c "see output"; fi
+fi
+
+if want C3d; then
+hdr "C3d (attempt 3, AT2-1a): a transcluded page without a presentable row is the pending-compile marker inside the block (D9); the host page stays db"
+bash "$E" psql "update wiki_pages set updated_at='2020-01-01T00:00:00Z' where slug='notes/block-source' returning slug"
+b="$(curl_ /notes/block-source)"; echo "embedded page: $b"
+h="$(curl_ /notes/transclude-fixture body)"; echo "host: $(echo "$h" | head -1)"; echo "markers: $(echo "$h" | grep -o 'class="transclude-pending" data-render-state="pending">Pending compile: notes/block-source' | wc -l)"
+out="$(T 120 bash "$E" parity --urls /notes/transclude-fixture --show 2>&1)"; echo "$out" | grep -E "D9-transclude-pending|UNLISTED|^200 |PARITY" | cut -c1-260
+T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki --repair 2>&1 | grep -E "repair pass|after-repair\]" | head -2
+a="$(curl_ /notes/block-source)"; echo "after repair: $a"
+if echo "$b" | grep -q "x-wiki-render=pending" && echo "$h" | head -1 | grep -q "x-wiki-render=db" \
+   && [ "$(echo "$h" | grep -o 'Pending compile: notes/block-source' | wc -l)" = 2 ] \
+   && echo "$out" | grep -q "PARITY: PASS" && echo "$out" | grep -E '/notes/transclude-fixture .*unlisted=0 .*"D9-transclude-pending":2' >/dev/null \
+   && echo "$a" | grep -q "x-wiki-render=db"; then pass C3d; else fail C3d "see output"; fi
+fi
+
 if want C3; then
 hdr "C3 (acceptance 3): deleted row -> pending-compile, no-store, never the file"
 bash "$E" psql "delete from wiki_pages where slug='content/person/person-ada-fixture' returning slug"
@@ -128,7 +163,7 @@ for _ in $(seq 1 60); do docker logs "$P-watch" 2>&1 | grep -q "WATCH:" && break
 w="$(docker logs "$P-watch" 2>&1)"; echo "$w"; docker rm -f -v "$P-watch" >/dev/null
 sleep 3; vlog="$(docker logs "$P-viewer" 2>&1 | grep -E "database (unreachable|connecting|up)|reconcile pass \(reconnect|repair pass" | tail -6)"; echo "$vlog" | cut -c1-300
 h2="$(health)"; echo "health(after): $h2" | cut -c1-200
-if [ "$rc" = 0 ] && echo "$o" | grep -q "SWEEP: all 27 URLs show unreachable" && echo "$h" | grep -q '^503 .*"database unreachable"' \
+if [ "$rc" = 0 ] && echo "$o" | grep -q "SWEEP: all $NURL URLs show unreachable" && echo "$h" | grep -q '^503 .*"database unreachable"' \
    && echo "$w" | grep -q "WATCH: sequence .*unreachable.*connecting.*db" \
    && echo "$vlog" | grep -q "reconcile pass (reconnect" && echo "$h2" | grep -q '^200 '; then pass C6; else fail C6 "see output"; fi
 fi
@@ -221,6 +256,69 @@ T 120 bash "$E" compile generate --clear-structural all --out-dir /wiki/content 
 if [ "$c7d_ok" = 1 ] && echo "$ledger" | grep -q "904" && ! echo "$ledger" | grep -q "905"; then pass C7d; else fail C7d "see output"; fi
 fi
 
+if want C14; then
+hdr "C14 (attempt 3, tester AT2-4): two compiles RACING on the structural ledger - no lost entry, one notification per distinct failure, a racing first occurrence of one page notified once"
+T 120 bash "$E" compile generate --clear-structural all --out-dir /wiki/content >/dev/null 2>&1
+c14_ok=1
+sl() { bash "$E" cat content/.structural-failures.json | tr -d '\n ' ; }
+race() { # ids-a ids-b: start both inside the stub's reply delay; print both outputs and exit codes
+  local fa fb
+  fa="$(mktemp)"; fb="$(mktemp)"
+  ( T 300 bash "$E" compile generate --ids "$1" --out-dir /wiki/content --no-graph >"$fa" 2>&1; echo "exit=$?" >>"$fa" ) &
+  local pa=$!
+  sleep 2
+  ( T 300 bash "$E" compile generate --ids "$2" --out-dir /wiki/content --no-graph >"$fb" 2>&1; echo "exit=$?" >>"$fb" ) &
+  local pb=$!
+  wait "$pa" "$pb"
+  echo "-- a (--ids $1): $(grep -E 'STRUCTURAL|skipped|not notified|exit=' "$fa" | cut -c1-200 | tr '\n' ' ')"
+  echo "-- b (--ids $2): $(grep -E 'STRUCTURAL|skipped|not notified|exit=' "$fb" | cut -c1-200 | tr '\n' ' ')"
+  RA="$(grep -o 'exit=[0-9]*' "$fa" | tail -1)"; RB="$(grep -o 'exit=[0-9]*' "$fb" | tail -1)"
+  rm -f "$fa" "$fb"
+}
+echo "== round 1: 905 and 902 fail structurally at the same time (stub badparse, every reply 6 s late)"
+n0="$(notes_count)"; bash "$E" stub '{"mode":"badparse","delayMs":6000}' >/dev/null
+race 905 902
+nl="$(newnotes "$n0")"; echo "new notifications: $(echo "$nl" | grep -o '"subject":"[^"]*"' | tr '\n' ' ')"; L1="$(sl)"; echo "ledger keys: $(echo "$L1" | grep -o '"entity:[0-9]*":' | tr '\n' ' ')"
+[ "$RA" = exit=3 ] && [ "$RB" = exit=3 ] || { echo "x round 1 exits $RA $RB"; c14_ok=0; }
+echo "$L1" | grep -q '"entity:905":' && echo "$L1" | grep -q '"entity:902":' || { echo "x round 1: an entry was lost"; c14_ok=0; }
+[ "$(echo "$nl" | grep -c '"class"')" = 2 ] && echo "$nl" | grep -q 'person-dave-fixture' && echo "$nl" | grep -q 'person-bob-fixture' || { echo "x round 1: not exactly one notification each"; c14_ok=0; }
+echo "== round 2: the same two again, inputs unchanged -> both SKIPPED: no LLM call, no notification"
+n0="$(notes_count)"; bash "$E" stub '{"mode":"badparse","delayMs":6000}' >/dev/null
+race 905 902
+s="$(bash "$E" stub)"; echo "stub: $(echo "$s" | grep -o '"chatCalls":[0-9]*')"; n1="$(notes_count)"
+echo "$s" | grep -q '"chatCalls":0' && [ "$n0" = "$n1" ] && [ "$RA" = exit=0 ] && [ "$RB" = exit=0 ] || { echo "x round 2"; c14_ok=0; }
+echo "== round 3: 905 cleared, then compiled by TWO racing runs -> its first occurrence is notified ONCE"
+T 120 bash "$E" compile generate --clear-structural 905 --out-dir /wiki/content 2>&1 | tail -1
+n0="$(notes_count)"; bash "$E" stub '{"mode":"badparse","delayMs":6000}' >/dev/null
+race 905 905
+s="$(bash "$E" stub)"; echo "stub: $(echo "$s" | grep -o '"chatCalls":[0-9]*')"; nl="$(newnotes "$n0")"; echo "new notifications: $(echo "$nl" | grep -o '"subject":"[^"]*"' | tr '\n' ' ')"
+echo "occurrences: $(bash "$E" cat content/.structural-failures.json | tr -d '\n ' | grep -o '"entity:905":{[^}]*' | grep -o '"occurrences":[0-9]*')"
+echo "$s" | grep -q '"chatCalls":2' && [ "$(echo "$nl" | grep -c '"class"')" = 1 ] && echo "$nl" | grep -q 'person-dave-fixture' || { echo "x round 3"; c14_ok=0; }
+bash "$E" stub '{"mode":"ok"}' >/dev/null
+[ "$c14_ok" = 1 ] && pass C14 || fail C14 "see output"
+
+hdr "C15 (attempt 3, tester AT2-4 + N2-2): a --clear-structural made DURING a compile is never written back; an unknown id exits non-zero naming it"
+c15_ok=1
+echo "before: $(sl | grep -o '"entity:[0-9]*":' | tr '\n' ' ')"
+bash "$E" stub '{"mode":"ok","delayMs":10000}' >/dev/null
+fc="$(mktemp)"
+( T 300 bash "$E" compile generate --ids 904 --out-dir /wiki/content --no-graph >"$fc" 2>&1; echo "compile exit=$?" >>"$fc" ) &
+pc=$!
+sleep 4
+o="$(T 120 bash "$E" compile generate --clear-structural 905 --out-dir /wiki/content 2>&1)"; rc=$?; echo "$o"; echo "clear exit=$rc"
+echo "right after the clear: $(sl | grep -o '"entity:[0-9]*":' | tr '\n' ' ')"
+wait "$pc"; tail -1 "$fc"; rm -f "$fc"
+after="$(sl)"; echo "after the compile ended: $(echo "$after" | grep -o '"entity:[0-9]*":' | tr '\n' ' ')"
+[ "$rc" = 0 ] && echo "$o" | grep -q "cleared 1 open structural failure(s): entity:905" || c15_ok=0
+echo "$after" | grep -q '"entity:905":' && { echo "x the clear was written back"; c15_ok=0; }
+echo "$after" | grep -q '"entity:902":' || { echo "x 902 lost"; c15_ok=0; }
+o="$(T 120 bash "$E" compile generate --clear-structural 123456,notebook:nope --out-dir /wiki/content 2>&1)"; rc=$?; echo "$o"; echo "unknown-id exit=$rc"
+[ "$rc" = 1 ] && echo "$o" | grep -q "not an open structural failure: entity:123456, notebook:nope" || c15_ok=0
+T 120 bash "$E" compile generate --clear-structural all --out-dir /wiki/content 2>&1 | tail -1
+bash "$E" stub '{"mode":"ok"}' >/dev/null
+[ "$c15_ok" = 1 ] && pass C15 || fail C15 "see output"
+fi
+
 if want C4; then
 hdr "C4 (acceptance 4 + F-T4): row flush made to fail -> exit 3, unsynced count + first slugs, ONE structural notification per run"
 bash "$E" stub '{"mode":"ok"}' >/dev/null
@@ -263,6 +361,12 @@ for u in /content/person/person-bob-fixture /notes/fixture-note /tags/fixture-ta
 sleep 6; h="$(health)"; echo "health: $(echo "$h" | grep -o '"reasons":\[[^]]*\]')"
 echo "$h" | grep -q 'page class aaa-throws@1 resolve() threw' || c10b_ok=0
 echo "$h" | grep -q '"brokenPageClasses":\[{"name":"aaa-throws"' || c10b_ok=0
+# attempt 3 (tester N2-1): a resolve() returning a hand-built { unreachable: true } is a registry fault, never the database screen
+WIKI_BUILDER=0 P1A_EXTRA_ENTRY=shape-unreach.mjs bash "$E" viewer >/dev/null; bash "$E" wait_serving 60
+r="$(curl_ /notes/fixture-note)"; echo "$r /notes/fixture-note (shape-unreach.mjs claims it with { unreachable: true })"
+echo "$r" | grep -q "x-wiki-render=db x-wiki-page-class=note@1" || c10b_ok=0
+sleep 6; h="$(health)"; echo "health: $(echo "$h" | grep -o '"reasons":\[[^]]*\]')"
+echo "$h" | grep -q 'page class shape-unreach@1 resolve() returned an invalid result [0-9]*x: returned {\\"unreachable\\":true}' || c10b_ok=0
 bash "$E" viewer >/dev/null; bash "$E" wait_built 200 >/dev/null
 [ "$c10b_ok" = 1 ] && pass C10b || fail C10b "see output"
 fi
@@ -328,6 +432,38 @@ t4="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; s4="$(bash "$E" ws_cycle)"; cyc "$t4" "$s4"
 sleep 6; dv="$(curl_ /content/person/person-dave-fixture)"; echo "dave URL: $dv"
 echo "$L4" | grep -q "compile ok" && echo "$dv" | grep -q "x-wiki-render=db" && echo "$s4" | grep -q '"structural_open":\[\]' \
   && echo "$L4" | grep -q "\[reconcile\] clean: " || { echo "x cycle 4"; c12_ok=0; }
+echo "== attempt 3: the 'landed' count is PER CYCLE (it used to count up across cycles: 2, 4, 6, ...)"
+lc="$(docker logs --since "$t0" "$P-ws" 2>&1 | grep -o 'wiki-pages\] wiki-service: all [0-9]* written' | grep -o '[0-9]*' | tr '\n' ' ')"; echo "per-cycle landed counts: $lc"
+[ "$(echo "$lc" | wc -w)" -ge 5 ] && [ "$(echo "$lc" | tr ' ' '\n' | grep -v '^$' | sort -u | wc -l)" = 1 ] || { echo "x the landed count is not per cycle"; c12_ok=0; }
+
+if want C16; then
+echo "== C16 (attempt 3, tester AT2-7): the DATABASE goes down while a compile's rows are written -> TRANSIENT notification (not structural), the rows are retried next cycle"
+c16_ok=1
+bash "$E" stub '{"mode":"ok","delayMs":8000}' >/dev/null
+bash "$E" psql "update entities set updated_at=now() where id in (901, 906) returning id" >/dev/null
+n0="$(notes_count)"
+t5="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('http://$P-ws:8000/recompile', { method: 'POST', headers: { 'x-brain-key': 'fixture-key' } }).then(async r=>console.log('recompile', r.status))"
+for _ in $(seq 1 60); do docker logs --since "$t5" "$P-ws" 2>&1 | grep -q "incremental compile" && break; sleep 1; done
+sleep 3; docker stop "$P-db" >/dev/null; echo "db stopped (the stub is still holding the compile's LLM replies)"
+sleep 14; docker start "$P-db" >/dev/null; echo "db started"
+s5="$(P1A_WS_WAIT_S=300 bash "$E" ws_wait "$t5")"; L5="$(docker logs --since "$t5" "$P-ws" 2>&1)"
+echo "$L5" | grep -E "UNSYNCED|database was unavailable|notify\]|compile (ok|FAILED)|FAILED" | cut -c1-260 | head -12
+nl="$(newnotes "$n0")"; echo "new notifications: $(echo "$nl" | grep -o '"class":"[a-z]*","subject":"[^"]*"' | tr '\n' ' ')"
+echo "$nl" | grep -q '"class":"transient","subject":"row write failed: database unavailable (' || { echo "x no transient row-write notification"; c16_ok=0; }
+echo "$nl" | grep -q 'row write rejected' && { echo "x an outage was notified as a structural rejection"; c16_ok=0; }
+pend="$(bash "$E" cat content/.unsynced-rows.json | grep -c '"error"')"; echo "rows recorded for retry: $pend"
+[ "$pend" -ge 1 ] || { echo "x nothing recorded for the next cycle"; c16_ok=0; }
+for _ in $(seq 1 60); do curl_ /content/person/person-ada-fixture | grep -q "x-wiki-render=" && break; sleep 1; done
+bash "$E" stub '{"mode":"ok"}' >/dev/null
+t6="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; s6="$(bash "$E" ws_cycle)"; L6="$(docker logs --since "$t6" "$P-ws" 2>&1)"
+echo "$L6" | grep -E "retried [0-9]+ row\(s\) left unsynced|\[reconcile\]|compile (ok|FAILED)" | cut -c1-260 | head -6
+echo "$L6" | grep -qE "retried [0-9]+ row\(s\) left unsynced by a database outage: [1-9][0-9]* landed, 0 failed again" || { echo "x the next cycle did not retry the rows"; c16_ok=0; }
+left="$(bash "$E" cat content/.unsynced-rows.json | grep -c '"error"')"; echo "left for retry after the next cycle: $left"
+[ "$left" = 0 ] || c16_ok=0
+echo "$L6" | grep -q "\[reconcile\] clean: " || { echo "x not clean after the retry"; c16_ok=0; }
+[ "$c16_ok" = 1 ] && pass C16 || fail C16 "see output"
+fi
 docker rm -f -v "$P-ws" >/dev/null 2>&1
 [ "$c12_ok" = 1 ] && pass C12 || fail C12 "see output"
 fi

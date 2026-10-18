@@ -33,12 +33,12 @@ import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
 import { writeIfChanged, writeIfChangedStable } from "../../_shared/write-if-changed.mjs";
 // Compile writes file AND row, flushed per batch; unsynced rows fail the run
 // (research-workbench D13 item 1). LLM failures are classified (item 6).
-import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, EXIT_COMPLETED_WITH_FAILURES } from "../../_shared/wiki-pages.mjs";
+import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../../_shared/wiki-pages.mjs";
 // D13 item 6: an open structural failure is not retried until its inputs
 // (the hub's synthesis input hash, or the code) change; one notification per
 // distinct failure.
 import {
-  readLedger, writeLedger, recordFailure, openFailure, clearFailure, inputsKey, codeFingerprint,
+  readLedger, updateLedger, recordFailure, openFailure, clearFailure, inputsKey, codeFingerprint,
 } from "../../_shared/structural-ledger.mjs";
 import { chatComplete, parseNotebookReply, CompileError } from "../../_shared/llm-call.mjs";
 import { notify } from "../../_shared/compile-notify.mjs";
@@ -311,7 +311,9 @@ async function main() {
     console.log("[notebook-synth] no active notebooks; nothing to do");
     return finishWikiPages("notebook-synth", { outDir });
   }
-  const ledger = readLedger(outDir);
+  // No start-of-run copy of the structural ledger: every check reads the
+  // file as it is then, every change is one locked transaction
+  // (updateLedger; rw-p1a-render attempt 3, AT2-4).
   const code = codeFingerprint([fileURLToPath(import.meta.url)]);
   const hubInputs = (h) => inputsKey({ input: h, code });
   const skippedOpen = [];
@@ -349,7 +351,7 @@ async function main() {
       const hubDir = path.join(nbDir, slug);
       const hubPath = path.join(hubDir, `${slug}.md`);
       inputHash = synthesisInputHash(t, srcs, model);
-      const open = openFailure(ledger, `notebook:${t.id}`, hubInputs(inputHash));
+      const open = openFailure(readLedger(outDir), `notebook:${t.id}`, hubInputs(inputHash));
       if (open) {
         // An OPEN structural failure with unchanged inputs: not retried (no
         // LLM call, no second notification); the hub stays as it was.
@@ -464,22 +466,36 @@ async function main() {
       await maybeFlushWikiPages();
       moc.push(`- [[${slug}|${linkSafeLabel(t.name) || slug}]] — ${srcs.length} sources`);
       ok++;
-      if (clearFailure(ledger, `notebook:${t.id}`)) console.log(`[notebook-synth] ${slug}: compiled cleanly; its open structural failure is cleared`);
+      if (`notebook:${t.id}` in readLedger(outDir).failures) {
+        try {
+          if (updateLedger(outDir, (l) => clearFailure(l, `notebook:${t.id}`))) {
+            console.log(`[notebook-synth] ${slug}: compiled cleanly; its open structural failure is cleared`);
+          }
+        } catch (le) { console.error(`[notebook-synth] structural ledger write FAILED (clearing ${slug}): ${le.message}`); }
+      }
       console.log(`[notebook-synth] wrote notebooks/${slug}/${slug}.md (${srcs.length} sources, ${leaves} leaf page(s))`);
     } catch (e) {
       const hubSlug = (vaultRel(path.resolve(nbDir, slug, `${slug}.md`)) || `notebooks/${slug}/${slug}.md`).replace(/\.md$/, "");
-      if (e instanceof CompileError && e.kind === "transient") {
+      if ((e instanceof CompileError && e.kind === "transient") || (!(e instanceof CompileError) && isDatabaseUnavailableError(e?.message || String(e)))) {
         // Its notification fired in llm-call; the hub is not rewritten, so its
         // input_hash still differs and the next compile retries it.
+        // A database outage (attempt 3, AT2-7) is transient too: notified once
+        // per run here (llm-call never saw it).
         transient++;
         console.error(`[notebook-synth] FAILED (transient) notebook "${t.name}": ${e.message}`);
+        if (!(e instanceof CompileError)) {
+          await notify({ cls: "transient", subject: "compile failed: database unavailable (notebook-synth)", error: `first: ${hubSlug}: ${e?.message || e}`, outDir });
+        }
       } else {
         const error = e?.message || String(e);
         structural.push({ slug: hubSlug, error });
         console.error(`[notebook-synth] STRUCTURAL FAILURE ${hubSlug}: ${error}`);
-        const { distinct } = recordFailure(ledger, {
-          key: `notebook:${t.id}`, slug: hubSlug, entity: t.id, error, replySha256: e?.replySha256 ?? null, inputs: hubInputs(inputHash),
-        });
+        let distinct = true;
+        try {
+          ({ distinct } = updateLedger(outDir, (l) => recordFailure(l, {
+            key: `notebook:${t.id}`, slug: hubSlug, entity: t.id, error, replySha256: e?.replySha256 ?? null, inputs: hubInputs(inputHash),
+          })));
+        } catch (le) { console.error(`[notebook-synth] structural ledger write FAILED for ${hubSlug} (notifying anyway): ${le.message}`); }
         if (distinct) {
           await notify({ cls: "structural", subject: `compile structural failure: ${hubSlug}`, slug: hubSlug, entity: t.id, error, outDir });
         } else {
@@ -512,7 +528,6 @@ async function main() {
     console.error(`[notebook-synth] skipped ${skippedOpen.length} hub(s) with an OPEN structural failure (inputs unchanged): ` +
       skippedOpen.slice(0, 10).map((x) => `${x.slug} (since ${x.first_seen})`).join("; "));
   }
-  try { writeLedger(outDir, ledger); } catch (e) { console.error(`[notebook-synth] structural ledger write FAILED: ${e.message}`); }
   const rowsCode = await finishWikiPages("notebook-synth", { outDir });
   if (structural.length) {
     console.error(`[notebook-synth] run FAILED: ${structural.length} structural failure(s); first: ` +

@@ -13,7 +13,7 @@ export default {
   async resolve(req, deps) {
     if (req.key !== FOLDER && req.key !== `${FOLDER}/index`) return null;
     const r = await deps.rowAt(`${FOLDER}/index`);
-    if (!r.ok) return { unreachable: r.state };
+    if (!r.ok) return deps.unavailable(r);
     if (!r.row) return null; // no index row yet: the generic folder listing (or pending) answers
     const pending = await indexRowPending(r.row, deps);
     return pending ? { pending, row: r.row } : { folder: FOLDER, indexRow: r.row };
