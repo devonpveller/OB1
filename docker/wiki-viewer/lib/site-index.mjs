@@ -45,21 +45,42 @@ function isRelativeURL(s) {
   return /^\.{1,2}/.test(s) && !endsWith(s, "index") && ![".md", ".html"].includes(getFileExtension(s) ?? "");
 }
 
+// Quartz's page order (build.ts: `allFiles.filter((fp) => fp.endsWith(".md"))
+// .sort()`): the DEFAULT sort - UTF-16 code units - of the vault-relative
+// markdown PATHS. parse, filter and emit keep that order. A row's slug is its
+// path without ".md" (page-classes.mjs classify), so the path is slug + ".md";
+// it is NOT the slug order where they disagree ("notes/a-b.md" sorts before
+// "notes/a.md": '-' 0x2D < '.' 0x2E; by slug "notes/a" is a prefix and first).
+export function quartzPathOrder(a, b) {
+  const pa = `${a}.md`;
+  const pb = `${b}.md`;
+  return pa < pb ? -1 : pa > pb ? 1 : 0;
+}
+
 /**
  * Quartz AliasRedirects (plugins/emitters/aliases.ts): every alias of a page
  * (frontmatter aliases, else alias - FrontMatter's coalesce - slugged by
  * getAliasSlugs; plus the raw permalink) is a redirect page at the alias's
  * slug pointing at the page. Returns alias slug -> { target: the page's simple
- * slug, redirUrl }. The FIRST page (slug order) to claim an alias keeps it.
+ * slug, redirUrl }. A SHARED alias belongs to the LAST claimant in Quartz's
+ * page order (quartzPathOrder): AliasRedirects writes one file per alias in
+ * that order, so the last write is the page Quartz serves (rw-p1a-render
+ * attempt 4, tester AT3-3: two entities with one canonical name - every
+ * entity page carries `aliases: [<canonical_name>]`). Whatever order the rows
+ * arrive in. A real page at the alias's slug still wins (the alias class is
+ * below every row-backed class); a retired slug yields to an alias, as Quartz
+ * writes the redirect there (retired.mjs).
  */
 export function aliasRedirects(entries) {
   const out = new Map();
-  for (const e of entries) {
+  const ordered = [...entries].filter((e) => e && e.slug).sort((x, y) => quartzPathOrder(x.slug, y.slug));
+  for (const e of ordered) {
     const ogSlug = simplifySlug(e.slug);
     const targets = [...aliasSlugs(e.aliases), ...(e.permalink ? [String(e.permalink)] : [])];
     for (const aliasTarget of targets) {
       const aliasTargetSlug = isRelativeURL(aliasTarget) ? path.posix.normalize(path.posix.join(ogSlug, "..", aliasTarget)) : aliasTarget;
-      if (!aliasTargetSlug || out.has(aliasTargetSlug)) continue;
+      if (!aliasTargetSlug) continue;
+      // a later claimant overwrites: the last write wins, as in Quartz
       out.set(aliasTargetSlug, { target: ogSlug, redirUrl: resolveRelative(aliasTargetSlug, ogSlug) });
     }
   }

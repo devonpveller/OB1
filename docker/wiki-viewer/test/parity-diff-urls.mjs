@@ -1,6 +1,6 @@
 /**
  * The fixed URL list of rw-p1a-render acceptance 1/2/6 (every page class at
- * least once): the anchor's 20, 7 added in attempt 2, 7 in attempt 3. Shared by
+ * least once): the anchor's 20, 7 added in attempt 2, 7 in attempt 3, 3 in attempt 4. Shared by
  * parity-diff.mjs and outage-probe.mjs.
  */
 export const URLS = [
@@ -49,4 +49,14 @@ export const URLS = [
   ["alias redirect", "/old-kitchen-sink"],
   ["alias redirect", "/Ada-Fixture"],
   ["alias redirect", "/Second-Notebook"],
+  // rw-p1a-render attempt 4: the attempt-3 tester's alias class (AT3-3). A
+  // SHARED alias is the LAST claimant's in Quartz's markdown-path order:
+  // /Ada-Fixture above (person + tool entity pages), /shared-alias (notes
+  // alias-dup-a/-b, path order = slug order), /path-order-alias (notes
+  // alias-x/-x-y, path order != slug order). An alias equal to a real slug
+  // (notes/alias-collide -> notes/fixture-note) is URL 13 above. An alias on a
+  // retired slug is Quartz's redirect there.
+  ["alias redirect", "/shared-alias"],
+  ["alias redirect", "/path-order-alias"],
+  ["alias redirect", "/content/topic/aliased-retired-topic"],
 ];

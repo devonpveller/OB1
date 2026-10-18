@@ -18,6 +18,10 @@ export default {
     const r = await deps.row();
     if (!r.ok) return deps.unavailable(r);
     if (r.row) return null; // a row exists after all: present it as what it is
+    // A page declares this slug as its alias: Quartz writes its AliasRedirects
+    // page here, so the alias class serves that redirect (rw-p1a-render
+    // attempt 4, tester AT3-3: built = the redirect, live was the retired page).
+    if (deps.site?.aliases?.has(req.key)) return null;
     return { key: req.key, reason: `${p}* is a retired page class` };
   },
   template: retiredTemplate,

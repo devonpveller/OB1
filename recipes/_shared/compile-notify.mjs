@@ -66,6 +66,13 @@ export async function notify({ cls, subject, slug = null, entity = null, error =
   }
 }
 
+// A long-lived caller (the wiki-service) releases the per-process dedupe of
+// one notification when the condition it reported is over, so the NEXT
+// occurrence is notified (rw-p1a-render attempt 4: one per database outage).
+export function forgetNotification({ cls, subject, slug = null, entity = null }) {
+  return _posted.delete([cls, subject, slug ?? "", entity ?? ""].join("\u001f"));
+}
+
 export function _resetNotifyForTests() {
   _posted.clear();
   _rpcMissing = false;

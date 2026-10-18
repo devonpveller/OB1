@@ -29,8 +29,9 @@ notes_count() { bash "$E" notes | grep -c '"class"' || true; }
 newnotes() { bash "$E" notes | tail -n +$(( $1 + 1 )) | grep '"class"' || true; }
 T() { timeout "${1}" "${@:2}"; } # every long wait is bounded
 echo "names: prefix=$P tag=$TAG subnet=$SUBNET port=$PORT net=$NET viewer image=$IMG wiki-service image=$WSIMG"
-NURL="$(grep -cE '^ *\["' "$HERE/parity-diff-urls.mjs")"   # the fixed URL list (attempt 3: 34)
-echo "fixed URL list: $NURL URLs"
+NURL="$(grep -cE '^ *\["' "$HERE/parity-diff-urls.mjs")"   # the fixed URL list (attempt 4: 37)
+NALIAS="$(grep -cE '^ *\["alias redirect"' "$HERE/parity-diff-urls.mjs")"   # of which alias redirect documents (attempt 4: 6)
+echo "fixed URL list: $NURL URLs ($NALIAS alias redirect documents)"
 
 hdr "C0 build + environment"
 bash "$E" down >/dev/null 2>&1
@@ -48,7 +49,17 @@ if echo "$out" | grep -q "PARITY: PASS" && [ "$(echo "$out" | grep -c '^200 x-wi
    && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/kitchen-sink +built=yes .* unlisted=0' >/dev/null \
    && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/transclude-fixture +built=yes .* unlisted=0' >/dev/null \
    && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/empty-body-note +built=yes .* unlisted=0' >/dev/null \
-   && [ "$(echo "$out" | grep -c '^200 x-wiki-render=db alias redirect .*whole document identical')" = 3 ]; then pass "C1+C2 parity"; else fail "C1+C2 parity" "see output"; fi
+   && [ "$(echo "$out" | grep -c '^200 x-wiki-render=db alias redirect .*whole document identical')" = "$NALIAS" ]    && echo "$out" | grep -E '^200 x-wiki-render=db retired slug +/content/topic/fixture-retired-topic +built=NO .*"D7-retired"' >/dev/null; then pass "C1+C2 parity"; else fail "C1+C2 parity" "see output"; fi
+# attempt 4 (tester AT3-3): who owns each shared alias, on BOTH sides (the built file and the live document)
+if want C1; then
+for a in "/Ada-Fixture content/tool/tool-ada-dup" "/shared-alias notes/alias-dup-b" "/path-order-alias notes/alias-x" "/content/topic/aliased-retired-topic notes/alias-retired"; do
+  set -- $a
+  bt="$(docker exec "$P-viewer" sh -c "grep -o '<title>[^<]*</title>' '/srv/current${1}.html'" 2>&1)"; lt="$(curl_ "$1" body | grep -o '<title>[^<]*</title>')"
+  echo "alias owner $1: built=$bt live=$lt want=<title>$2</title>"
+  [ "$bt" = "<title>$2</title>" ] && [ "$lt" = "<title>$2</title>" ] || { fail "C1+C2 alias owners" "$1"; }
+done
+echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/fixture-note +built=yes .* unlisted=0' >/dev/null || fail "C1+C2 alias owners" "an alias equal to a real slug (notes/fixture-note)"
+fi
 fi
 
 if want C2b; then
@@ -463,6 +474,28 @@ left="$(bash "$E" cat content/.unsynced-rows.json | grep -c '"error"')"; echo "l
 [ "$left" = 0 ] || c16_ok=0
 echo "$L6" | grep -q "\[reconcile\] clean: " || { echo "x not clean after the retry"; c16_ok=0; }
 [ "$c16_ok" = 1 ] && pass C16 || fail C16 "see output"
+fi
+if want C17; then
+echo "== C17 (attempt 4, tester NA3-3): a compile that cannot run because the DATABASE is down -> ONE transient notification per outage, the watermark held; back up -> the next compile runs and ends the outage"
+c17_ok=1
+bash "$E" stub '{"mode":"ok"}' >/dev/null
+w0="$(state)"; n0="$(notes_count)"
+docker stop "$P-db" >/dev/null; echo "db stopped"; sleep 3
+for i in 1 2; do
+  t7="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"; s7="$(P1A_WS_WAIT_S=300 bash "$E" ws_cycle)"
+  echo "compile $i while down: $(echo "$s7" | grep -o '"ok":[a-z]*') $(docker logs --since "$t7" "$P-ws" 2>&1 | grep -E "compile FAILED|database outage" | cut -c1-200 | tr '\n' ' ')"
+  echo "$s7" | grep -q '"ok":false' || { echo "x compile $i did not fail"; c17_ok=0; }
+  echo "watermark: $(state)"; [ "$(state)" = "$w0" ] || { echo "x the watermark moved"; c17_ok=0; }
+done
+nl="$(newnotes "$n0")"; echo "new notifications: $(echo "$nl" | grep -o '"class":"[a-z]*","subject":"[^"]*"' | tr '\n' ' ')"
+[ "$(echo "$nl" | grep -c '"class"')" = 1 ] && echo "$nl" | grep -q '"class":"transient","subject":"compile failed: database unavailable (wiki-service)"' || { echo "x not exactly one transient outage notification for the two compiles"; c17_ok=0; }
+docker start "$P-db" >/dev/null; echo "db started"
+for _ in $(seq 1 60); do curl_ /content/person/person-ada-fixture | grep -q "x-wiki-render=db" && break; sleep 2; done
+n1="$(notes_count)"; t8="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"; s8="$(bash "$E" ws_cycle)"; L8="$(docker logs --since "$t8" "$P-ws" 2>&1)"
+echo "$L8" | grep -E "\[reconcile\]|compile (ok|FAILED)" | cut -c1-200 | head -3
+echo "$s8" | grep -q '"ok":true' && echo "$L8" | grep -q "\[reconcile\] clean: " && [ "$(state)" != "$w0" ] || { echo "x the compile after the outage"; c17_ok=0; }
+[ "$(notes_count)" = "$n1" ] || { echo "x a notification after the outage ended"; c17_ok=0; }
+[ "$c17_ok" = 1 ] && pass C17 || fail C17 "see output"
 fi
 docker rm -f -v "$P-ws" >/dev/null 2>&1
 [ "$c12_ok" = 1 ] && pass C12 || fail C12 "see output"

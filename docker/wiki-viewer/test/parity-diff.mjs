@@ -156,7 +156,10 @@ export const RULES = [
   {
     id: "D7-retired",
     why: "a retired slug has no built page (the builder emitted nothing; served the generic 404); the live page is the retired-class explanation",
-    test: (h, ctx) => ctx.cls === "retired slug",
+    // attempt 4 (tester AT3-3): only when the builder wrote NO file at all - a
+    // built redirect document (an alias claiming the slug) has no <body>, and
+    // it used to read as "no built page" here
+    test: (h, ctx) => ctx.cls === "retired slug" && ctx.builtFileExists === false,
   },
 ];
 
@@ -271,7 +274,7 @@ for (const [cls, url] of URLS) {
   if (missing.length) failed = true;
   const bf = builtFile(url);
   const built = existsSync(bf) ? bodyOf(readFileSync(bf, "utf8")) : "";
-  const ctx = { cls, url };
+  const ctx = { cls, url, builtFileExists: existsSync(bf) };
   const fired = {};
   const norm = normalizeListSidebar(live, built, ctx);
   if (norm.fired) fired["D5-list-sidebar"] = 1;
@@ -282,7 +285,7 @@ for (const [cls, url] of URLS) {
   if (sb.fired || sl.fired) fired["D6-listing-order"] = 1;
   const liveLines = lines(sl.body);
   ctx.live = liveLines;
-  const hunks = cls === "retired slug" && !built ? [{ del: [], ins: lines(live) }] : diff(lines(sb.body), liveLines);
+  const hunks = cls === "retired slug" && !ctx.builtFileExists ? [{ del: [], ins: lines(live) }] : diff(lines(sb.body), liveLines);
   const unlisted = [];
   for (const h of hunks) {
     const id = explain(h, ctx);

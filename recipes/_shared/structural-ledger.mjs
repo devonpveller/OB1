@@ -92,19 +92,53 @@ export function writeLedger(outDir, ledger, file = ledgerPath(outDir)) {
 // never lost; and "distinct" (notify or not) is decided against the file as
 // it is at that moment, so two racing failures of one page notify once.
 // The lock is a lockfile <ledger>.lock created O_EXCL holding
-// { owner, host, pid, acquired, expires }; a lock past its expiry (a crashed
-// holder) is taken over; waiting is bounded (WIKI_LEDGER_LOCK_WAIT_MS,
-// default 20 s) and then throws naming the holder. Hold times are
-// milliseconds (no LLM call is ever made under the lock).
-const LOCK_STALE_MS = () => Math.max(1000, Number(process.env.WIKI_LEDGER_LOCK_STALE_MS || "30000"));
-const LOCK_WAIT_MS = () => Math.max(0, Number(process.env.WIKI_LEDGER_LOCK_WAIT_MS || "20000"));
+// { owner, host, pid, acquired, expires }. A lock is STALE (a crashed holder)
+// once past its expiry - or when its expiry lies beyond a sane ceiling
+// (more than 2 x the stale time from now: a clock jump or a hand-made lock is
+// never trusted; tester NA3-2) - or, unreadable, when its mtime is older than
+// the stale time; a stale lock is taken over. Waiting is bounded and
+// ALWAYS sleeps between attempts: a takeover that fails (a read-only
+// directory, a lock path that is a directory - tester NA3-1: the old loop
+// `continue`d past the deadline and the sleep and spun at 100 % CPU) is
+// retried until the deadline and then throws naming the holder and the
+// error. The wait (WIKI_LEDGER_LOCK_WAIT_MS, default 45 s) must exceed the
+// stale time (WIKI_LEDGER_LOCK_STALE_MS, default 30 s), so a run starting
+// right after a holder crashed takes over instead of failing (NA3-2: it was
+// 20 s < 30 s); lockTimes() refuses a configuration that breaks it. Hold
+// times are milliseconds (no LLM call is ever made under the lock).
+export function lockTimes(env = process.env) {
+  const staleMs = Math.max(1000, Number(env.WIKI_LEDGER_LOCK_STALE_MS || "30000"));
+  const waitMs = Math.max(0, Number(env.WIKI_LEDGER_LOCK_WAIT_MS || "45000"));
+  if (!(waitMs > staleMs)) {
+    throw new Error(`structural ledger lock: WIKI_LEDGER_LOCK_WAIT_MS (${waitMs}) must exceed WIKI_LEDGER_LOCK_STALE_MS (${staleMs}) ` +
+      "- a run starting right after a crashed holder must outwait its lock and take it over, not fail");
+  }
+  return { staleMs, waitMs };
+}
+const LOCK_SLEEP_MS = 25;
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-export function withLedgerLock(file, fn, { log = console.error } = {}) {
+// Why a held lock (parsed content `held`, mtime `mtimeMs`) is stale, or null
+// while it is live.
+function staleReason(held, mtimeMs, staleMs, now = Date.now()) {
+  const exp = held && typeof held === "object" ? Date.parse(held.expires) : NaN;
+  if (Number.isFinite(exp)) {
+    if (exp < now) return `expired ${held.expires}`;
+    if (exp > now + 2 * staleMs) return `expires ${held.expires} is beyond the ceiling of 2 x ${staleMs} ms from now`;
+    return null;
+  }
+  return mtimeMs + staleMs < now ? `unreadable, last written ${new Date(mtimeMs).toISOString()}` : null;
+}
+
+// `unlink` is a test seam (a read-only directory: EROFS).
+export function withLedgerLock(file, fn, { log = console.error, unlink = fs.unlinkSync } = {}) {
+  const { staleMs, waitMs } = lockTimes();
   const lock = `${file}.lock`;
   const owner = `${os.hostname()}:${process.pid}:${crypto.randomBytes(6).toString("hex")}`;
-  const deadline = Date.now() + LOCK_WAIT_MS();
+  const deadline = Date.now() + waitMs;
   fs.mkdirSync(path.dirname(lock), { recursive: true });
+  let lastHeld = null;
+  let takeoverError = null;
   for (;;) {
     let fd = null;
     try {
@@ -117,32 +151,48 @@ export function withLedgerLock(file, fn, { log = console.error } = {}) {
       try {
         fs.writeSync(fd, JSON.stringify({
           owner, host: os.hostname(), pid: process.pid,
-          acquired: new Date(now).toISOString(), expires: new Date(now + LOCK_STALE_MS()).toISOString(),
+          acquired: new Date(now).toISOString(), expires: new Date(now + staleMs).toISOString(),
         }));
       } finally {
         fs.closeSync(fd);
       }
       break;
     }
-    // Held. Past its expiry (or unreadable and old): a crashed holder - take it over.
+    // Held. Stale (a crashed holder): take it over - unlinked only while its
+    // content is still what was read. A takeover that removed the lock retries
+    // the open at once (progress: ours, or a live holder's); anything else
+    // checks the deadline and SLEEPS before the next attempt - never a spin.
     let raw = null;
     let held = null;
-    let mtime = 0;
-    try { raw = fs.readFileSync(lock, "utf8"); held = JSON.parse(raw); } catch { /* being written, or gone */ }
-    try { mtime = fs.statSync(lock).mtimeMs; } catch { continue; } // released meanwhile: retry at once
-    const expired = held && Date.parse(held.expires) ? Date.parse(held.expires) < Date.now() : mtime + LOCK_STALE_MS() < Date.now();
-    if (expired) {
-      try {
-        if (fs.readFileSync(lock, "utf8") === raw) fs.unlinkSync(lock);
-        log(`[structural] ledger lock ${lock} was stale (holder ${held?.owner || "unknown"}, expired ${held?.expires || "?"}); taken over`);
-      } catch { /* someone else took it over first */ }
-      continue;
+    let mtimeMs = null;
+    try { raw = fs.readFileSync(lock, "utf8"); held = JSON.parse(raw); } catch { /* being written, a directory, or gone */ }
+    try { mtimeMs = fs.statSync(lock).mtimeMs; } catch { /* released meanwhile */ }
+    if (held) lastHeld = held;
+    if (mtimeMs != null) {
+      const why = staleReason(held, mtimeMs, staleMs);
+      if (why) {
+        let removed = false;
+        try {
+          let same = true;
+          try { same = fs.readFileSync(lock, "utf8") === raw; } catch (e) { if (e?.code === "ENOENT") same = false; }
+          if (same) { unlink(lock); removed = true; }
+        } catch (e) {
+          if (e?.code !== "ENOENT") takeoverError = e;
+        }
+        if (removed) {
+          takeoverError = null;
+          log(`[structural] ledger lock ${lock} was stale (holder ${held?.owner || "unknown"}, ${why}); taken over`);
+          continue;
+        }
+      }
     }
     if (Date.now() > deadline) {
-      throw new Error(`structural ledger lock ${lock} is held by ${held?.owner || "an unknown holder"} since ${held?.acquired || "?"} ` +
-        `(waited ${LOCK_WAIT_MS()} ms; a lock past ${held?.expires || "its expiry"} is taken over)`);
+      const h = held || lastHeld;
+      const te = takeoverError ? ` - the stale lock could not be taken over (${takeoverError.code ? `${takeoverError.code}: ` : ""}${takeoverError.message || takeoverError})` : "";
+      throw new Error(`structural ledger lock ${lock} is held by ${h?.owner || "an unknown holder"} since ${h?.acquired || "?"} ` +
+        `(waited ${waitMs} ms; a lock past ${h?.expires || "its expiry"} is taken over)${te}`);
     }
-    sleepSync(25);
+    sleepSync(LOCK_SLEEP_MS);
   }
   try {
     return fn();

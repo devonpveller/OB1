@@ -447,7 +447,8 @@ test("F7 alias redirects: an alias URL is Quartz's AliasRedirects page byte for 
         `;
   for (const [u, og, url] of [
     ["/old-kitchen-sink", "notes/kitchen-sink", "./notes/kitchen-sink"],
-    ["/Ada-Fixture", "content/person/person-ada-fixture", "./content/person/person-ada-fixture"],
+    // attempt 4: two entity pages declare "Ada Fixture" (person, tool); the LAST in Quartz's path order owns it
+    ["/Ada-Fixture", "content/tool/tool-ada-dup", "./content/tool/tool-ada-dup"],
     ["/Second-Notebook", "content/notebooks/second-notebook/second-notebook", "./content/notebooks/second-notebook/second-notebook"],
   ]) {
     const r = await renderLive(u);
@@ -459,6 +460,81 @@ test("F7 alias redirects: an alias URL is Quartz's AliasRedirects page byte for 
   assert.equal(aliasDocument("a<b", "./x\"y"), quartz("a&lt;b", "./x&quot;y"), "D10: escaped only where a slug carries & < > \"");
   assert.equal((await renderLive("/notes/kitchen-sink")).headers["x-wiki-page-class"], "note@1");
   assert.equal((await renderLive("/not-an-alias-at-all")).headers["x-wiki-render"], "not-available");
+});
+
+// ── attempt 4 (tester AT3-3): a SHARED alias is owned by the LAST claimant in
+// Quartz's order - build.ts sorts the vault-relative markdown PATHS with the
+// default sort (UTF-16 code units) and AliasRedirects writes one file per
+// alias in that order, so the last write wins. A row's slug is its path
+// without ".md" (page-classes.mjs classify), so the path is slug + ".md".
+test("AT3-3 comparator: Quartz's markdown-path order is the default sort of slug + \".md\" - not the slug order", async () => {
+  const { quartzPathOrder } = await import("./site-index.mjs");
+  assert.equal(typeof quartzPathOrder, "function");
+  const paths = (slugs) => [...slugs].sort(quartzPathOrder).map((s) => s + ".md");
+  // the comparator equals Array.prototype.sort() on the paths Quartz globbed
+  for (const set of [
+    ["notes/alias-x", "notes/alias-x-y"],
+    ["content/tool/tool-ada-dup", "content/person/person-ada-fixture"],
+    ["notes/b", "notes/B", "notes/a b", "notes/a-b", "notes/a/b", "notes/a.b", "notes/é", "notes/z"],
+    ["content/person", "content/person-a", "content/person/x"],
+  ]) {
+    assert.deepEqual(paths(set), set.map((s) => s + ".md").sort(), JSON.stringify(set));
+  }
+  // where path order and slug order DISAGREE ('.' 0x2E > '-' 0x2D, a prefix sorts first)
+  assert.deepEqual(["notes/alias-x", "notes/alias-x-y"].sort(quartzPathOrder), ["notes/alias-x-y", "notes/alias-x"]);
+  assert.deepEqual(["notes/alias-x", "notes/alias-x-y"].sort(), ["notes/alias-x", "notes/alias-x-y"], "(slug order, for contrast)");
+});
+
+test("AT3-3: two pages sharing an alias - the LAST in Quartz's path order owns it, in both orders and whatever order the rows arrive in", async () => {
+  const { aliasRedirects } = await import("./site-index.mjs");
+  const e = (slug, aliases) => ({ slug, aliases, permalink: null });
+  for (const [entries, alias, owner] of [
+    [[e("notes/alias-dup-a", ["shared-alias"]), e("notes/alias-dup-b", ["shared-alias"])], "shared-alias", "notes/alias-dup-b"],
+    [[e("notes/alias-x", ["path-order-alias"]), e("notes/alias-x-y", ["path-order-alias"])], "path-order-alias", "notes/alias-x"],
+    [[e("content/person/person-ada-fixture", ["Ada Fixture"]), e("content/tool/tool-ada-dup", ["Ada Fixture"])], "Ada-Fixture", "content/tool/tool-ada-dup"],
+  ]) {
+    for (const order of [entries, [...entries].reverse()]) {
+      const m = aliasRedirects(order);
+      assert.equal(m.get(alias)?.target, owner, `${alias}: ${order.map((x) => x.slug).join(", ")}`);
+    }
+  }
+  const quartz = (og, url) => `
+        <!DOCTYPE html>
+        <html lang="en-us">
+        <head>
+        <title>${og}</title>
+        <link rel="canonical" href="${url}">
+        <meta name="robots" content="noindex">
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="0; url=${url}">
+        </head>
+        </html>
+        `;
+  mode = "up";
+  for (const [u, og, url] of [
+    ["/shared-alias", "notes/alias-dup-b", "./notes/alias-dup-b"],
+    ["/path-order-alias", "notes/alias-x", "./notes/alias-x"],
+  ]) {
+    const r = await renderLive(u);
+    assert.equal(r.headers["x-wiki-page-class"], "alias@1", u);
+    assert.equal(r.body, quartz(og, url), u);
+  }
+});
+
+test("AT3-3: an alias equal to a real page's slug - the real page is served (Quartz's built page there is the real page too)", async () => {
+  mode = "up";
+  const r = await renderLive("/notes/fixture-note");
+  assert.equal(r.headers["x-wiki-render"], "db");
+  assert.equal(r.headers["x-wiki-page-class"], "note@1", "notes/alias-collide declares aliases: [notes/fixture-note]; the page wins");
+});
+
+test("AT3-3: an alias that claims a RETIRED slug is Quartz's redirect there (the retired class yields to an alias); an unclaimed retired slug is still the retired page", async () => {
+  mode = "up";
+  const r = await renderLive("/content/topic/aliased-retired-topic");
+  assert.equal(r.headers["x-wiki-render"], "db");
+  assert.equal(r.headers["x-wiki-page-class"], "alias@1");
+  assert.match(r.body, /<title>notes\/alias-retired<\/title>\n {8}<link rel="canonical" href="\.\.\/\.\.\/notes\/alias-retired">/);
+  assert.equal((await renderLive("/content/topic/fixture-retired-topic")).headers["x-wiki-page-class"], "retired@1");
 });
 
 test("N2-4/N2-5: a note whose source is frontmatter only is presented as Quartz presents it (an empty article, db) - not pending forever", async () => {

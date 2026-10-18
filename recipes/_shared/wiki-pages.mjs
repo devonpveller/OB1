@@ -32,7 +32,10 @@
  *     repairs drift on (re)connect.
  */
 import fs from "node:fs";
+import os from "node:os";
+import crypto from "node:crypto";
 import nodePath from "node:path";
+import { withLedgerLock } from "./structural-ledger.mjs";
 import { extractLinks } from "./links.mjs";
 import { classify } from "./page-classes.mjs";
 export { extractLinks };
@@ -330,73 +333,118 @@ export function isDatabaseUnavailableError(msg) {
 
 // The next cycle's retry of rows that failed transiently:
 // <out-dir>/.unsynced-rows.json (WIKI_UNSYNCED_FILE overrides).
+// rw-p1a-render attempt 4 (tester NA3-4): every change to the record is one
+// LOCKED read-modify-write (the structural ledger's lock, on this file), so
+// two racing runs never drop each other's entries; the retry applies its
+// outcome as deltas under the lock (a slug recorded while its upsert was in
+// flight stays); a recorded slug must be a vault slug (no "..", no absolute
+// path, no backslash, no NUL - it is joined to the vault and read) or it is
+// rejected, never read; an unreadable record is logged loudly and read as
+// empty (a row it named is still named by the reconciliation as drift).
 export const UNSYNCED_FILE = ".unsynced-rows.json";
 const unsyncedFile = (outDir) => process.env.WIKI_UNSYNCED_FILE ||
   nodePath.join(outDir || process.env.OB_WIKI_OUT_DIR || "./wikis", UNSYNCED_FILE);
 function readUnsynced(file) {
+  let raw;
   try {
-    const j = JSON.parse(fs.readFileSync(file, "utf8"));
-    return j && j.rows && typeof j.rows === "object" ? j.rows : {};
-  } catch {
+    raw = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    if (e?.code !== "ENOENT") console.error(`[wiki-pages] unsynced-row record ${file} is unreadable (${e?.code || e?.message || e}); treated as empty`);
     return {};
   }
+  try {
+    const j = JSON.parse(raw);
+    if (j && j.rows && typeof j.rows === "object" && !Array.isArray(j.rows)) return j.rows;
+  } catch { /* below */ }
+  console.error(`[wiki-pages] unsynced-row record ${file} is unreadable (not {"rows":{...}} JSON); treated as empty - ` +
+    "the rows it named are still listed by the reconciliation as drift");
+  return {};
 }
 function writeUnsynced(file, rows) {
   fs.mkdirSync(nodePath.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const tmp = `${file}.tmp-${os.hostname()}-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
   const sorted = Object.fromEntries(Object.entries(rows).sort(([a], [b]) => a.localeCompare(b)));
   fs.writeFileSync(tmp, JSON.stringify({ rows: sorted }, null, 2) + "\n");
   fs.renameSync(tmp, file);
 }
+// One locked transaction on the record: fn(rows) changes it in place.
+function updateUnsynced(file, fn) {
+  return withLedgerLock(file, () => {
+    const rows = readUnsynced(file);
+    const out = fn(rows);
+    writeUnsynced(file, rows);
+    return out;
+  });
+}
+// A vault slug: relative, forward slashes, no "." / ".." segment, no NUL.
+export function isVaultSlug(slug) {
+  const s = String(slug ?? "");
+  if (!s || s.includes("\\") || s.includes("\0") || s.startsWith("/") || /^[A-Za-z]:/.test(s)) return false;
+  return s.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
 export function rememberUnsyncedRows(outDir, list, tag) {
-  const file = unsyncedFile(outDir);
-  const rows = readUnsynced(file);
   const at = new Date().toISOString();
-  for (const x of list) rows[x.slug] = { error: String(x.error).slice(0, 300), tag, at };
-  writeUnsynced(file, rows);
-  return Object.keys(rows).length;
+  return updateUnsynced(unsyncedFile(outDir), (rows) => {
+    for (const x of list) rows[x.slug] = { error: String(x.error).slice(0, 300), tag, at };
+    return Object.keys(rows).length;
+  });
 }
 
 /**
  * The next cycle: retry the rows an earlier run left unsynced because the
  * database was unavailable. Each slug's row is written from its file (the
  * compile wrote the file; the row is what did not land); a slug whose file is
- * gone is dropped. Returns { retried, landed, failed, dropped }; what fails
- * again stays recorded for the cycle after.
+ * gone is dropped; a slug that is not a vault slug is rejected (never read).
+ * Returns { retried, landed, failed, dropped, rejected }; what fails again
+ * stays recorded for the cycle after.
  */
 export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GIT_DIR || "/wiki", log = console.log } = {}) {
   const file = unsyncedFile(outDir);
-  const rows = readUnsynced(file);
-  const slugs = Object.keys(rows);
-  if (!slugs.length) return { retried: 0, landed: 0, failed: 0, dropped: 0 };
+  const seen = readUnsynced(file); // a snapshot; the outcome is applied under the lock below
+  const slugs = Object.keys(seen);
+  if (!slugs.length) return { retried: 0, landed: 0, failed: 0, dropped: 0, rejected: 0 };
+  const root = nodePath.resolve(vaultDir);
   const batch = [];
-  let dropped = 0;
+  const gone = [];
+  const rejected = [];
   for (const slug of slugs) {
+    if (!isVaultSlug(slug)) { rejected.push(slug); continue; }
     let md = null;
     let rel = null;
     for (const r of [`${slug}.md`, `${slug}/index.md`]) {
-      try { md = fs.readFileSync(nodePath.join(vaultDir, r), "utf8"); rel = r; break; } catch { /* next */ }
+      const abs = nodePath.resolve(root, r);
+      if (!abs.startsWith(root + nodePath.sep)) continue; // belt and braces: never outside the vault
+      try { md = fs.readFileSync(abs, "utf8"); rel = r; break; } catch { /* next */ }
     }
-    if (md == null) { delete rows[slug]; dropped++; continue; }
+    if (md == null) { gone.push(slug); continue; }
     batch.push(parseWikiPage(rel, md));
   }
-  let landed = 0;
-  let failed = 0;
+  if (rejected.length) {
+    console.error(`[wiki-pages] unsynced-row record ${file}: ${rejected.length} slug(s) rejected (not a vault slug; never read): ` +
+      rejected.slice(0, 5).map((x) => JSON.stringify(x)).join(", "));
+  }
+  const landedSlugs = [];
+  const failedAgain = new Map();
   for (let i = 0; i < batch.length; i += 200) {
     const part = batch.slice(i, i + 200);
     try {
       await upsertWikiPages(part);
-      for (const r of part) delete rows[r.slug];
-      landed += part.length;
+      for (const r of part) landedSlugs.push(r.slug);
     } catch (e) {
-      failed += part.length;
-      for (const r of part) rows[r.slug] = { ...rows[r.slug], error: String(e?.message || e).slice(0, 300), at: new Date().toISOString() };
+      for (const r of part) failedAgain.set(r.slug, String(e?.message || e).slice(0, 300));
     }
   }
-  writeUnsynced(file, rows);
-  log(`[wiki-pages] retried ${slugs.length} row(s) left unsynced by a database outage: ${landed} landed, ` +
-    `${failed} failed again, ${dropped} dropped (file gone)`);
-  return { retried: slugs.length, landed, failed, dropped };
+  // Apply the outcome to the record AS IT IS NOW: an entry is removed only if
+  // it is still the one this retry read (a run that re-recorded the slug
+  // meanwhile keeps its newer entry); entries recorded meanwhile stay.
+  updateUnsynced(file, (rows) => {
+    const same = (slug) => rows[slug] && seen[slug] && rows[slug].at === seen[slug].at;
+    for (const slug of [...landedSlugs, ...gone, ...rejected]) if (same(slug)) delete rows[slug];
+    for (const [slug, error] of failedAgain) if (rows[slug]) rows[slug] = { ...rows[slug], error, at: new Date().toISOString() };
+  });
+  log(`[wiki-pages] retried ${slugs.length} row(s) left unsynced by a database outage: ${landedSlugs.length} landed, ` +
+    `${failedAgain.size} failed again, ${gone.length} dropped (file gone), ${rejected.length} rejected (not a vault slug)`);
+  return { retried: slugs.length, landed: landedSlugs.length, failed: failedAgain.size, dropped: gone.length, rejected: rejected.length };
 }
 
 // Test seam.

@@ -49,7 +49,12 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // compiled means the row landed).
 import {
   deleteWikiPages, queueWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
+  isDatabaseUnavailableError,
 } from "file:///recipes/_shared/wiki-pages.mjs";
+// rw-p1a-render attempt 4 (tester NA3-3): a compile the database outage
+// stopped sends one transient notification per outage (lib/outage-notify.mjs).
+import { notify, forgetNotification } from "file:///recipes/_shared/compile-notify.mjs";
+import { createOutageNotifier } from "./lib/outage-notify.mjs";
 // D13 item 4: the files-vs-rows check runs after every compile.
 import { reconcile, formatReport } from "file:///recipes/_shared/reconcile-wiki-pages.mjs";
 // D13 item 6: the compile's open structural failures (skipped until their
@@ -161,6 +166,7 @@ const GIT_SSH_COMMAND =
   `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts`;
 
 let running = false;
+let outage = null; // createOutageNotifier(...), made once WIKI_OUT_DIR is known (below)
 // When the last compile FINISHED, whatever its outcome. The supervisor uses
 // this rather than "last success" on purpose: a compile that fails but keeps
 // cycling is a different problem from a chain that has stopped cycling.
@@ -877,6 +883,15 @@ async function commitNoteEdits() {
   }
 }
 
+function outageNotifier() {
+  if (!outage) {
+    outage = createOutageNotifier({
+      isUnavailable: isDatabaseUnavailableError, notify, forget: forgetNotification, outDir: WIKI_OUT_DIR,
+    });
+  }
+  return outage;
+}
+
 async function compile(reason) {
   if (running) return { skipped: true, reason: "compile already in progress" };
   running = true;
@@ -1150,6 +1165,7 @@ async function compile(reason) {
       last_commit: head || prevCommit || null,
       mode: fullRebuild ? "full" : "incremental",
     }).catch(() => {});
+    outageNotifier().onCompleted(); // the compile got through the database: a database outage is over
 
     // The compile's failures, each already loud where it happened: a run
     // that completed with structural failures / unsynced rows, notebook
@@ -1214,6 +1230,13 @@ async function compile(reason) {
       `[wiki-service] compile FAILED (recovery_committed=${recoveryCommitted}):`,
       msg,
     );
+    // A database outage stopped the compile: ONE transient notification per
+    // outage (NA3-3); the watermark is held - this path never writes state.
+    try {
+      await outageNotifier().onFailed(`${e?.message || ""}\n${msg}`, String(e?.stderr || ""));
+    } catch (ne) {
+      console.error(`[wiki-service] outage notification FAILED: ${ne?.message || ne}`);
+    }
     return { ok: false, error: msg, recovery_committed: recoveryCommitted };
   } finally {
     running = false;

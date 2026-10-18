@@ -4,8 +4,8 @@
 // inputs change, and notified once per DISTINCT failure, not once per cycle.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, utimesSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -141,7 +141,7 @@ test("N2-2: --clear-structural of an id that is not open is reported (the CLI ex
   assert.deepEqual(clearStructuralKeys(d, "all"), { cleared: [], unknown: [], open: 0 }, "all on an empty ledger is not an error");
 });
 
-test("the lock: a STALE lock (a crashed holder, past its expiry) is taken over; a live one is waited for, bounded, then names its holder", () => {
+test("the lock: a STALE lock (a crashed holder, past its expiry) is taken over", () => {
   const d = dir();
   const file = join(d, ".structural-failures.json");
   writeFileSync(`${file}.lock`, JSON.stringify({ owner: "ghost:1:dead", acquired: "2026-01-01T00:00:00Z", expires: "2026-01-01T00:00:30Z" }));
@@ -149,18 +149,88 @@ test("the lock: a STALE lock (a crashed holder, past its expiry) is taken over; 
   assert.equal(withLedgerLock(file, () => 42, { log: (m) => lines.push(m) }), 42);
   assert.ok(lines.some((l) => /was stale \(holder ghost:1:dead/.test(l)), JSON.stringify(lines));
   assert.ok(!existsSync(`${file}.lock`));
-  const far = new Date(Date.now() + 3600_000).toISOString();
-  writeFileSync(`${file}.lock`, JSON.stringify({ owner: "alive:7:beef", acquired: new Date().toISOString(), expires: far }));
-  const saved = process.env.WIKI_LEDGER_LOCK_WAIT_MS;
-  process.env.WIKI_LEDGER_LOCK_WAIT_MS = "200";
-  const t0 = Date.now();
-  try {
-    assert.throws(() => withLedgerLock(file, () => 1), /held by alive:7:beef/);
-  } finally {
-    if (saved === undefined) delete process.env.WIKI_LEDGER_LOCK_WAIT_MS; else process.env.WIKI_LEDGER_LOCK_WAIT_MS = saved;
-  }
-  assert.ok(Date.now() - t0 >= 180, "it waited");
-  assert.ok(existsSync(`${file}.lock`), "someone else's live lock is never removed");
+  // (a live lock is waited for: the AT2-4 race above; a lock that cannot be
+  // taken over names its holder after the bounded wait: NA3-1 below)
+});
+
+// ── attempt 4 (tester NA3-1, NA3-2): the lock never spins, never trusts a far
+// expiry, and outwaits the stale time. Each case runs in a CHILD process with
+// a hard timeout: a spinning takeover blocks its own event loop, so only a
+// parent can stop it (the RED run on ad11598 is "killed by the timeout").
+function lockChild(file, { env = {}, opts = "{}", timeoutMs = 15000 } = {}) {
+  const code = `
+    import { withLedgerLock } from ${JSON.stringify(LEDGER_URL)};
+    const t0 = Date.now(), c0 = process.cpuUsage();
+    let out;
+    try { const v = withLedgerLock(${JSON.stringify(file)}, () => 42, ${opts}); out = "OK " + v; }
+    catch (e) { out = "THREW " + String(e?.message || e); }
+    const ms = Date.now() - t0, c = process.cpuUsage(c0);
+    console.log(JSON.stringify({ out, ms, cpuMs: Math.round((c.user + c.system) / 1000) }));
+  `;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, ...env }, encoding: "utf8", timeout: timeoutMs });
+  const line = (r.stdout || "").trim().split("\n").filter(Boolean).at(-1) || "";
+  let j = null;
+  try { j = JSON.parse(line); } catch { /* killed, or no output */ }
+  return { ...r, j };
+}
+const OLD = new Date("2020-01-01T00:00:00Z");
+
+test("NA3-1: a stale lock that CANNOT be removed (the lock path is a directory) - the waiter sleeps, honours the deadline and throws naming it; it never spins", () => {
+  const d = dir();
+  const file = join(d, ".structural-failures.json");
+  mkdirSync(`${file}.lock`);
+  writeFileSync(join(`${file}.lock`, "x"), "not a lock file");
+  utimesSync(`${file}.lock`, OLD, OLD);
+  const r = lockChild(file, { env: { WIKI_LEDGER_LOCK_STALE_MS: "1000", WIKI_LEDGER_LOCK_WAIT_MS: "1500" } });
+  assert.ok(r.j, `the child was killed by the timeout or printed nothing (a spin): signal=${r.signal} status=${r.status} ${r.stderr}`);
+  assert.match(r.j.out, /^THREW structural ledger lock .* could not be taken over/, r.j.out);
+  assert.ok(r.j.ms >= 1400 && r.j.ms < 8000, `bounded by the wait (${r.j.ms} ms)`);
+  assert.ok(r.j.cpuMs < r.j.ms / 2, `it slept between attempts (cpu ${r.j.cpuMs} ms of ${r.j.ms} ms)`);
+});
+
+test("NA3-1: a stale lock whose removal FAILS (a read-only directory: unlink throws EROFS) - bounded wait, then a loud throw naming the error; never spins", () => {
+  const d = dir();
+  const file = join(d, ".structural-failures.json");
+  writeFileSync(`${file}.lock`, JSON.stringify({ owner: "ghost:1:dead", acquired: "2026-01-01T00:00:00Z", expires: "2026-01-01T00:00:30Z" }));
+  const r = lockChild(file, {
+    env: { WIKI_LEDGER_LOCK_STALE_MS: "1000", WIKI_LEDGER_LOCK_WAIT_MS: "1500" },
+    opts: `{ unlink: () => { const e = new Error("EROFS: read-only file system, unlink"); e.code = "EROFS"; throw e; } }`,
+  });
+  assert.ok(r.j, `the child was killed by the timeout (a spin): signal=${r.signal}`);
+  assert.match(r.j.out, /^THREW structural ledger lock .*held by ghost:1:dead.* could not be taken over \(EROFS/, r.j.out);
+  assert.ok(r.j.ms >= 1400 && r.j.ms < 8000, `bounded by the wait (${r.j.ms} ms)`);
+  assert.ok(r.j.cpuMs < r.j.ms / 2, `it slept between attempts (cpu ${r.j.cpuMs} ms of ${r.j.ms} ms)`);
+  assert.ok(existsSync(`${file}.lock`));
+});
+
+test("NA3-2: a lock whose expiry lies beyond a sane ceiling (more than 2 x the stale time from now) is stale - taken over at once, never trusted", () => {
+  const d = dir();
+  const file = join(d, ".structural-failures.json");
+  writeFileSync(`${file}.lock`, JSON.stringify({ owner: "h:1:x", acquired: new Date().toISOString(), expires: "2099-01-01T00:00:00Z" }));
+  const r = lockChild(file, { timeoutMs: 10000 }); // the defaults (stale 30 s): the old code waited 20 s and threw
+  assert.ok(r.j, `killed by the timeout: signal=${r.signal}`);
+  assert.equal(r.j.out, "OK 42");
+  assert.ok(r.j.ms < 2000, `taken over at once (${r.j.ms} ms)`);
+  assert.match(r.stderr, /ledger lock .* was stale \(holder h:1:x, expires 2099-01-01T00:00:00Z is beyond the ceiling/);
+  assert.ok(!existsSync(`${file}.lock`), "released");
+});
+
+test("NA3-2: the wait outlasts the stale time - a run starting right after a crashed holder TAKES OVER instead of failing; a configuration that breaks the invariant is refused", async () => {
+  const L = await import("./structural-ledger.mjs");
+  assert.equal(typeof L.lockTimes, "function", "lockTimes() states the two bounds");
+  const t = L.lockTimes({});
+  assert.ok(t.waitMs > t.staleMs, `default wait ${t.waitMs} ms > stale ${t.staleMs} ms`);
+  assert.deepEqual(L.lockTimes({ WIKI_LEDGER_LOCK_STALE_MS: "1000", WIKI_LEDGER_LOCK_WAIT_MS: "1500" }), { staleMs: 1000, waitMs: 1500 });
+  assert.throws(() => L.lockTimes({ WIKI_LEDGER_LOCK_STALE_MS: "30000", WIKI_LEDGER_LOCK_WAIT_MS: "20000" }), /WIKI_LEDGER_LOCK_WAIT_MS \(20000\) must exceed WIKI_LEDGER_LOCK_STALE_MS \(30000\)/);
+  // a holder that crashed a moment ago: its lock is fresh, nobody will release it
+  const d = dir();
+  const file = join(d, ".structural-failures.json");
+  const now = Date.now();
+  writeFileSync(`${file}.lock`, JSON.stringify({ owner: "crashed:9:x", acquired: new Date(now).toISOString(), expires: new Date(now + 1000).toISOString() }));
+  const r = lockChild(file, { env: { WIKI_LEDGER_LOCK_STALE_MS: "1000", WIKI_LEDGER_LOCK_WAIT_MS: "1500" } });
+  assert.ok(r.j, `signal=${r.signal}`);
+  assert.equal(r.j.out, "OK 42", "taken over once stale, inside the wait");
+  assert.ok(r.j.ms >= 700 && r.j.ms < 1500, `${r.j.ms} ms`);
 });
 
 test("the temp file of a write is unique per writer (pid 1 in every one-off container is not unique)", () => {
