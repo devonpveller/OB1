@@ -22,6 +22,60 @@
  */
 import type { ScholarlyAuthor, ScholarlyRecord } from "./credibility.ts";
 
+// â”€â”€ reasons: codes, never error text (attempt 2, tester finding 3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Attempt 1 formed an unresolved record's reason from the fetch error's message, which carries
+// the full request URL - `?api_key=<OPENALEX_API_KEY>&mailto=<SCHOLARLY_MAILTO>` - and that
+// reason was stored (sources.metadata.scholarly, the credibility reasons, the history) and
+// served (POST /research/credibility/score, quality(id) signals.scholarly.reason, the cloud door
+// included). A reason is now formed HERE from a closed vocabulary: the service, a status code or
+// an error class, and the service's fixed host - no URL, no query, no key, no mailto, no
+// identifier text. Every token matches SCHOLARLY_REASON_PATTERN; the workbench's quality(id)
+// serves signals.scholarly.reason only when it does (docker/workbench/src/contracts/logic/
+// scholarly_reason.ts holds the same pattern; scholarly.test.ts proves the two are equal).
+const OPENALEX_HOST = "api.openalex.org";
+const CROSSREF_HOST = "api.crossref.org";
+export const SCHOLARLY_REASON_PATTERN =
+  "^(?:(?:OpenAlex|OpenAlex authors|Crossref) (?:\\d{3}|network error|timeout|unreadable answer) \\((?:api\\.openalex\\.org|api\\.crossref\\.org)\\)" +
+  "|OpenAlex not keyed|Crossref fallback: author works_count unresolved|no DOI to try Crossref with|no scholarly resolver configured)$";
+const REASON_TOKEN = new RegExp(SCHOLARLY_REASON_PATTERN);
+
+/** Every "; "-separated token of a reason is one of the codes above. */
+export function scholarlyReasonAllowed(reason: unknown): boolean {
+  return typeof reason === "string" && reason.length > 0 && reason.length <= 400 &&
+    reason.split("; ").every((t) => REASON_TOKEN.test(t));
+}
+
+/** An error's CLASS, never its message (the message holds the request URL). */
+function errorClass(e: unknown): "timeout" | "network error" {
+  const n = (e as { name?: string })?.name ?? "";
+  return n === "TimeoutError" || n === "AbortError" ? "timeout" : "network error";
+}
+
+/** Credential-shaped text: a key/token/mailto assignment, or a URL with a query string. */
+const SECRET_SHAPED = /(?:api[_-]?key|apikey|mailto|token|secret|password|authorization)\s*[=:]|https?:\/\/[^\s)]*\?/i;
+export const REDACTED_REASON = "reason redacted (it carried a URL or credential-shaped text)";
+
+/** A free-text reason (a credibility reason line) with nothing credential-shaped in it. */
+export function safeReasonText(text: string): string {
+  return SECRET_SHAPED.test(String(text)) ? REDACTED_REASON : String(text);
+}
+
+/**
+ * The scholarly record as it may be STORED: the allow-listed fields only, and a reason only when
+ * it is made of the codes above (a cached record written by attempt 1 code, or any other writer,
+ * cannot carry error text forward).
+ */
+export function safeScholarlyRecord(rec: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of ["state", "identifier", "doi", "cited_by", "published", "authors", "resolved_at", "via"]) {
+    if (k in rec) out[k] = rec[k];
+  }
+  if (rec.reason !== undefined && rec.reason !== null) {
+    out.reason = scholarlyReasonAllowed(rec.reason) ? rec.reason : "reason redacted (not an allow-listed reason code)";
+  }
+  return out;
+}
+
 export interface Identifier { kind: "doi" | "pmid" | "pmcid" | "arxiv"; value: string }
 
 const DOI_RE = /\b(10\.\d{4,9}\/[^\s"'<>]+)/i;
@@ -155,11 +209,12 @@ export function createScholarlyResolver(cfg: ResolverConfig): ScholarlyResolver 
   });
 
   async function viaOpenAlex(id: Identifier): Promise<ScholarlyRecord | string> {
-    if (!cfg.openalexKey) return "OpenAlex not tried: OPENALEX_API_KEY is not configured (the client is keyed)";
+    if (!cfg.openalexKey) return "OpenAlex not keyed";
     const key = id.kind === "arxiv" ? `doi:10.48550/arxiv.${id.value}` : `${id.kind}:${id.value}`;
     let w: { status: number; body: unknown };
-    try { w = await get(oa(`works/${encodeURIComponent(key)}`)); } catch (e) { return `OpenAlex error: ${(e as Error).message}`; }
-    if (w.status !== 200 || !w.body || typeof w.body !== "object") return `OpenAlex ${w.status} for ${key}`;
+    try { w = await get(oa(`works/${encodeURIComponent(key)}`)); } catch (e) { return `OpenAlex ${errorClass(e)} (${OPENALEX_HOST})`; }
+    if (w.status !== 200) return `OpenAlex ${String(w.status).padStart(3, "0").slice(0, 3)} (${OPENALEX_HOST})`;
+    if (!w.body || typeof w.body !== "object") return `OpenAlex unreadable answer (${OPENALEX_HOST})`;
     const work = w.body as Record<string, unknown>;
     const auths = (Array.isArray(work.authorships) ? work.authorships : []).slice(0, maxAuthors) as Array<Record<string, unknown>>;
     const ids = auths.map((a) => String((a.author as Record<string, unknown>)?.id ?? "")).filter(Boolean);
@@ -174,8 +229,8 @@ export function createScholarlyResolver(cfg: ResolverConfig): ScholarlyResolver 
           for (const r of results as Array<Record<string, unknown>>) {
             if (typeof r.works_count === "number") counts.set(String(r.id), r.works_count);
           }
-        } else authorNote = `author records: OpenAlex ${a.status}`;
-      } catch (e) { authorNote = `author records: ${(e as Error).message}`; }
+        } else authorNote = `OpenAlex authors ${a.status === 200 ? "unreadable answer" : String(a.status).slice(0, 3)} (${OPENALEX_HOST})`;
+      } catch (e) { authorNote = `OpenAlex authors ${errorClass(e)} (${OPENALEX_HOST})`; }
     }
     const authors: ScholarlyAuthor[] = auths.map((a) => {
       const au = (a.author ?? {}) as Record<string, unknown>;
@@ -194,10 +249,11 @@ export function createScholarlyResolver(cfg: ResolverConfig): ScholarlyResolver 
 
   async function viaCrossref(id: Identifier, doi: string): Promise<ScholarlyRecord | string> {
     let r: { status: number; body: unknown };
-    try { r = await get(`https://api.crossref.org/works/${encodeURIComponent(doi)}?mailto=${encodeURIComponent(cfg.mailto)}`); }
-    catch (e) { return `Crossref error: ${(e as Error).message}`; }
+    try { r = await get(`https://${CROSSREF_HOST}/works/${encodeURIComponent(doi)}?mailto=${encodeURIComponent(cfg.mailto)}`); }
+    catch (e) { return `Crossref ${errorClass(e)} (${CROSSREF_HOST})`; }
     const msg = (r.body as Record<string, unknown>)?.message as Record<string, unknown> | undefined;
-    if (r.status !== 200 || !msg) return `Crossref ${r.status} for ${doi}`;
+    if (r.status !== 200) return `Crossref ${String(r.status).slice(0, 3)} (${CROSSREF_HOST})`;
+    if (!msg) return `Crossref unreadable answer (${CROSSREF_HOST})`;
     const parts = ((msg.published ?? msg["published-print"] ?? msg["published-online"] ?? msg.issued) as Record<string, unknown> | undefined)?.["date-parts"];
     const dp = Array.isArray(parts) && Array.isArray(parts[0]) ? parts[0] as number[] : [];
     const published = dp.length ? [dp[0], dp[1] ?? 1, dp[2] ?? 1].map((n, i) => String(n).padStart(i ? 2 : 4, "0")).join("-") : null;
@@ -211,7 +267,7 @@ export function createScholarlyResolver(cfg: ResolverConfig): ScholarlyResolver 
       state: "resolved", identifier: id, doi: cleanDoi(String(msg.DOI ?? doi)),
       cited_by: typeof msg["is-referenced-by-count"] === "number" ? msg["is-referenced-by-count"] as number : null,
       published, authors, resolved_at: now().toISOString(), via: "crossref",
-      reason: "Crossref fallback: author works_count unresolved (Crossref holds no author records)",
+      reason: "Crossref fallback: author works_count unresolved",
     };
   }
 
@@ -222,6 +278,7 @@ export function createScholarlyResolver(cfg: ResolverConfig): ScholarlyResolver 
       if (typeof first !== "string") return first;
       const doi = id.kind === "doi" ? id.value : (id.kind === "arxiv" ? `10.48550/arxiv.${id.value}` : fallbackDoi);
       if (!doi) return unresolved(id, `${first}; no DOI to try Crossref with`);
+      // (every branch below joins codes only: `first` and `second` are reason codes)
       const second = await viaCrossref(id, doi);
       if (typeof second !== "string") return { ...second, reason: `${first}; ${second.reason}` };
       return unresolved(id, `${first}; ${second}`, doi);

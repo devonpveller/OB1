@@ -15,15 +15,20 @@
 #   6. builds openbrain-workbench:wt-<id>; database B (chain + the P0 contract fixtures, the
 #      production non-superuser role): runs the workbench integration_test.ts (P0's cases plus
 #      P3a's quality(id))
-#   7. tears down exactly what it created; verifies nothing labelled <Id> is left and no :local
-#      image changed
+#   7. tears down exactly what it created (containers with -v, so no anonymous volume is left);
+#      verifies nothing labelled <Id> is left, no volume of ours is left and no :local image
+#      changed
+# The network's subnet is pinned outside 192.168.0.0/16 (-Subnet, or a /24 from -SubnetBase).
 # It never touches the live stack: no compose up/down, no ai-stack_* / open-brain_* network, no
 # host port, no live database, no model, no OpenAlex/Crossref call.
 # Exit code 0 = every check passed.
 param(
   [string]$Id = 'wt-rw-p3a-entail',
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
-  [string]$Evidence = ''
+  [string]$Evidence = '',
+  # attempt 2: the disposable network's subnet (empty = a /24 drawn from -SubnetBase)
+  [string]$Subnet = '',
+  [string]$SubnetBase = '10.241'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -57,6 +62,30 @@ function Save([string]$name, [string]$text) {
 }
 function Summary([string]$text) {
   return ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed(?: \| (\d+) ignored)?').Match(($text -replace '\x1b\[[0-9;]*m', ''))
+}
+# The network's subnet is PINNED (attempt 2, tester t-rw-p3a near-miss): the daemon's default pool
+# runs into 192.168.0.0/20, and a Docker network there once cut the host off its home LAN
+# (192.168.1.x). -Subnet names one; otherwise a /24 is drawn from -SubnetBase (default below)
+# and retried on an overlap. Anything inside 192.168.0.0/16, any prefix shorter than /16 and the
+# tester's lab range 10.234.77.0/24 are refused before docker is asked.
+function Test-SubnetAllowed([string]$s) {
+  if ($s -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$') { return $false }
+  $o = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]); $len = [int]$Matches[5]
+  if (@($o | Where-Object { $_ -gt 255 }).Count -gt 0) { return $false }
+  if ($len -lt 16 -or $len -gt 28) { return $false }
+  if ($o[0] -eq 192 -and $o[1] -eq 168) { return $false }
+  if ($o[0] -eq 10 -and $o[1] -eq 234 -and $o[2] -eq 77) { return $false }
+  return $true
+}
+function New-PinnedNetwork([string]$name) {
+  if ($SubnetBase -notmatch '^(\d{1,3})\.(\d{1,3})$' -or $SubnetBase -match '^192\.168$') { Fail "refusing -SubnetBase '$SubnetBase'"; return '' }
+  $cands = if ($Subnet) { @($Subnet) } else { @(1..8 | ForEach-Object { "$SubnetBase.$(Get-Random -Minimum 1 -Maximum 255).0/24" }) }
+  foreach ($s in $cands) {
+    if (-not (Test-SubnetAllowed $s)) { Fail "refusing subnet '$s' (inside 192.168.0.0/16, the lab range, or malformed)"; return '' }
+    $null = Dk network create --internal --subnet $s --label $label $name
+    if ($script:rc -eq 0) { return $s }
+  }
+  return ''
 }
 foreach ($t in @($rsTag, $rsTestTag, $wbTag, $negTag)) { if ($t -match ':local$') { throw 'refusing to build a :local tag' } }
 
@@ -113,10 +142,12 @@ try {
   if ($script:rc -ne 0) { Fail "$PgImage is not on the host"; throw 'pg image' }
 
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, labelled)"
-  if ($script:rc -ne 0) { throw 'network' }
+  $sub = New-PinnedNetwork $net
+  Check ($sub -ne '') "network $net created (internal, labelled, --subnet $sub)"
+  if ($sub -eq '') { throw 'network' }
   $made.net = $true
+  $got = (Dk network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $net).Trim()
+  Check (($got -eq $sub) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
 
   Write-Host "[3] build $rsTag (the build runs the test suite) and its test stage"
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
@@ -176,7 +207,18 @@ try {
 }
 finally {
   Write-Host '[7] teardown'
-  foreach ($c in $made.containers) { $null = Dk rm -f $c }
+  # -v (attempt 2, tester near-miss): a container's ANONYMOUS volumes go with it - attempt 1 left
+  # both Postgres data volumes behind. Each container's volumes are recorded first, so the check
+  # below is about OURS (other sessions' runs on this host create and orphan volumes concurrently).
+  $ourVolumes = @()
+  foreach ($c in $made.containers) {
+    # no double quotes in the template (Windows PowerShell 5.1 strips them from a native argument)
+    $mounts = Dk inspect -f '{{range .Mounts}}{{.Type}}={{.Name}} {{end}}' $c
+    if ($script:rc -eq 0) {
+      $ourVolumes += @(($mounts -split '\s+') | Where-Object { $_ -match '^volume=[A-Za-z0-9][A-Za-z0-9_.-]+$' } | ForEach-Object { $_.Substring(7) })
+    }
+    $null = Dk rm -f -v $c
+  }
   if ($made.net) { $null = Dk network rm $net }
   foreach ($i in $made.images) { $null = Dk rmi -f $i }
   Remove-Item -Recurse -Force $stage, $negCtx -ErrorAction SilentlyContinue
@@ -184,6 +226,8 @@ finally {
   Check ($left.Count -eq 0) "no container labelled $label is left ($($left.Count))"
   $leftNet = @((Dk network ls --filter "label=$label" --format '{{.Name}}') -split "`n" | Where-Object { $_ })
   Check ($leftNet.Count -eq 0) "no network labelled $label is left ($($leftNet.Count))"
+  $volLeft = @($ourVolumes | Where-Object { $null = Dk volume inspect $_; $script:rc -eq 0 })
+  Check (($made.containers.Count -eq 0 -or $ourVolumes.Count -gt 0) -and ($volLeft.Count -eq 0)) "no volume of ours is left ($($ourVolumes.Count) recorded, $($volLeft.Count) left: '$($volLeft -join ' ')')"
   $localAfter = LocalSnapshot
   Check ((Compare-Object $localBefore $localAfter) -eq $null) 'no :local image changed'
   Write-Host "== $(if ($script:fail) { "FAILED ($script:fail)" } else { 'ALL PASSED' })  evidence: $Evidence"

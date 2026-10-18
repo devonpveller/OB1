@@ -99,7 +99,7 @@ async function scholarlyFor(ctx: AdmissionContext, url: string, id: Identifier, 
       : {
         state: "unresolved", identifier: id, doi: id.kind === "doi" ? id.value : null, cited_by: null, published: null,
         authors: [], resolved_at: ctx.now.toISOString(), via: null,
-        reason: "no scholarly resolver configured (OPENALEX_API_KEY / SCHOLARLY_MAILTO unset or egress refused)",
+        reason: "no scholarly resolver configured",   // a reason CODE (scholarly.ts SCHOLARLY_REASON_PATTERN)
       };
   }
   memo.set(url, rec);

@@ -17,7 +17,7 @@ import {
 } from "./contract.ts";
 import { applyVerdicts, type EntailmentRecord, judgeLines, type LineVerdict, type VerdictEffect } from "./entailment.ts";
 import {
-  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, lineCredibility,
+  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, foldReceived, lineCredibility,
   type LineCredibility, loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord,
   weightFor,
 } from "./credibility.ts";
@@ -1661,13 +1661,15 @@ export async function runResearch(
     }
   }
   const leadOf = (i: number) => viaLead.get(pool[i].url) || null;
+  const receivedBy = (i: number) =>
+    corrEdges.filter((e) => e.toIdx === i).map((e) => ({ from: pool[e.fromIdx].url, claim: e.claim, amount: e.amount }));
   const finals = pool.map((_, i) => {
     const f = finalScore(admissionCtx, poolAssess[i], {
       supports: supportsOf(i), partial: countOf(i, "uncertain"), unsupported: countOf(i, "gap"),
       inbound: corrEdges.filter((e) => e.toIdx === i).length, foundVia: 0,
     });
-    const received = corrEdges.filter((e) => e.toIdx === i).reduce((a, e) => a + e.amount, 0);
-    return { ...f, rolling: Math.min(1, Math.round((f.total + received) * 1000) / 1000) };
+    // the source's own rolling total: every pair counted once per line (foldReceived)
+    return { ...f, rolling: foldReceived(f.total, receivedBy(i), new Set()) };
   });
   // found_via (D15 item 8) - and what each lead finally was.
   const foundVia = pool.map((_, i) => (leadOf(i) && supportsOf(i) > 0 ? leadOf(i) : null));
@@ -1682,9 +1684,15 @@ export async function runResearch(
       t.kind = "lead_dropped";
     }
   }
-  const lineCred: LineCredibility[] = verdicts.map((v) =>
-    lineCredibility(model, claimKind.kind, v.line, v.verdict,
-      v.cites.filter((n) => pool[n - 1]).map((n) => ({ total: finals[n - 1].rolling }))));
+  // THE FOLD RULE (attempt 2): on a line, a cited source's total leaves out the corroboration it
+  // received from the line's other cited sources - each of those counts once, through claim_per
+  // (claim_confidence_d15's p_exclude is the stored twin).
+  const lineCred: LineCredibility[] = verdicts.map((v) => {
+    const cited = v.cites.filter((n) => pool[n - 1]);
+    const coCited = new Set(cited.map((n) => pool[n - 1].url));
+    return lineCredibility(model, claimKind.kind, v.line, v.verdict,
+      cited.map((n) => ({ total: foldReceived(finals[n - 1].total, receivedBy(n - 1), coCited) })));
+  });
   const reportCred: ReportCredibility = reportCredibility(model, claimKind.kind, lineCred);
 
   // The fold: a held source becomes active only when it clears its floor AND a line it is cited
@@ -1974,7 +1982,8 @@ export async function runResearch(
       for (const e of corrEdges) {
         const from = idByUrl.get(pool[e.fromIdx].url);
         const to = idByUrl.get(pool[e.toIdx].url);
-        if (from && to) {
+        // two pool entries can resolve to ONE stored source: never a self-corroboration
+        if (from && to && from !== to) {
           await recordCorroboration(client, {
             from, to, strength: e.strength, amount: e.amount, claim: e.claim,
             kind: claimKind.kind, verdict: e.verdict, model: model.modelVersion,

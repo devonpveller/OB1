@@ -673,6 +673,22 @@ t("under the metadata filter nested collections are scoped: claims' sources, qua
   assertEquals(received(qu), 1);
   assert(qu.score.value < 1, `precondition: the unscoped total is not capped (${qu.score.value})`);
   assert(Math.abs(qu.score.value - qf.score.value - 0.1) < 1e-4, `scoped ${qf.score.value} vs unscoped ${qu.score.value}`);
+  // rw-p3a-entail attempt 2 (tester t-rw-p3a finding 1): an IN-SCOPE giver whose corroboration LINE is
+  // an OUT-OF-SCOPE claim's text ('nested out' = cOut). Under the filter the giver and its amount stay
+  // (the number is the accepted residual), the line's text never does; a line that IS an in-scope
+  // claim's text ('nested in' = cIn) is served. Unfiltered, both texts are served.
+  const sGiver = await newSource();
+  await sql(`UPDATE public.sources SET metadata = '{"share":"cloud"}' WHERE id = $1`, [sGiver]);
+  await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+             VALUES ($1, $2, 'weak', 0.03, 'nested out', 'general_theory', 'supports', 'd15 weights v1 paper p1'),
+                    ($1, $2, 'weak', 0.02, 'nested in', 'general_theory', 'supports', 'd15 weights v1 paper p1')`, [sGiver, sIn]);
+  const qf2 = (await call("GET", `/sources/${sIn}/quality?metadata_filter=${f}`)).json;
+  const qu2 = (await call("GET", `/sources/${sIn}/quality`)).json;
+  assert(S.Quality.safeParse(qf2).success, JSON.stringify(qf2));
+  const giverRows = (q: any) => q.corroborated_by.filter((x: any) => x.source_id === sGiver).map((x: any) => `${x.amount} ${x.claim}`).sort();
+  assertEquals(giverRows(qf2), ["0.02 nested in", "0.03 null"], JSON.stringify(qf2.corroborated_by));
+  assertEquals(giverRows(qu2), ["0.02 nested in", "0.03 nested out"], JSON.stringify(qu2.corroborated_by));
+  assert(!JSON.stringify(qf2).includes("nested out"), `the scoped answer names an out-of-scope claim's text: ${JSON.stringify(qf2)}`);
   await sql(`DELETE FROM public.source_corroborations WHERE to_source_id = $1`, [sIn]);
   for (const p of [`/sources/not-a-uuid/dependence`, `/references/not-a-uuid`, `/tombstones/not-a-uuid?metadata_filter=${f}`]) {
     const r = await call("GET", p);
@@ -838,6 +854,36 @@ t("P3a: quality(id) names the corroborating and contradicting sources behind the
   assertEquals(q.json.history.length, 1);
   assert(q.json.factors.some((f: Record<string, unknown>) => f.name === "corroboration_received"), "the received corroboration is a factor");
 });
+// rw-p3a-entail attempt 2 (tester t-rw-p3a finding 3): a scholarly reason or a credibility reason line
+// that carries the OpenAlex key, the mailto or a request URL (attempt 1 stored the fetch error's
+// message) is never served - not through the local door, not through the cloud door.
+t("P3a attempt 2: quality(id) never serves a stored credential-shaped reason (signals.scholarly.reason is an allow-listed code)", async () => {
+  const secret = `SECRETKEY-${uuid().slice(0, 8)}`;
+  const leaky = `OpenAlex error: error sending request for url (https://api.openalex.org/works/doi%3A10.1%2Fx?api_key=${secret}&mailto=tester%40example.invalid)`;
+  const s1 = await newSource({ url: "https://blog.example.com/p3a-secret" });
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s1, JSON.stringify({
+    share: "cloud", scholarly: { state: "unresolved", identifier: { kind: "doi", value: "10.1/x" }, doi: "10.1/x", cited_by: null, reason: leaky } })]);
+  const s2 = await newSource({ url: "https://blog.example.com/p3a-secret-2" });
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s2, JSON.stringify({
+    share: "cloud", credibility: { family: "general", claim_kind: "practical", score: 0.22, total: 0.22, model_version: "d15 weights v1 paper p1",
+      signals: { domain_class: "general", primary: false, author_identity: null }, reasons: [`doi 10.1/x UNRESOLVED (${leaky}): scored as general`, "domain class general: 0.22"] },
+    scholarly: { state: "unresolved", reason: "OpenAlex 404 (api.openalex.org); Crossref 503 (api.crossref.org)" } })]);
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  for (const path of [`/sources/${s1}/quality`, `/sources/${s1}/quality?metadata_filter=${f}`, `/sources/${s2}/quality`, `/sources/${s2}/quality?metadata_filter=${f}`]) {
+    const r = await call("GET", path);
+    assertEquals(r.status, 200, path);
+    assert(S.Quality.safeParse(r.json).success, JSON.stringify(r.json));
+    const text = JSON.stringify(r.json);
+    for (const bad of [secret, "api_key", "mailto", "tester%40example.invalid"]) assert(!text.includes(bad), `${path} serves '${bad}': ${text}`);
+  }
+  const q1 = (await call("GET", `/sources/${s1}/quality`)).json;
+  assertEquals(q1.signals.scholarly.state, "unresolved");
+  assertEquals(q1.signals.scholarly.reason, "reason redacted (not an allow-listed reason code)");
+  const q2 = (await call("GET", `/sources/${s2}/quality`)).json;
+  assert(q2.factors.some((x: any) => x.name === "reason" && /redacted/.test(x.reason)), JSON.stringify(q2.factors));
+  assert(q2.factors.some((x: any) => x.name === "reason" && x.reason === "domain class general: 0.22"), "a clean reason line is served as is");
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();

@@ -4,6 +4,7 @@ import type { Db } from "../db.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 import { sourceRecordState } from "../logic/state.ts";
 import { refineryScopedScore, termDef } from "../logic/credibility.ts";
+import { safeReasonText, safeSignals } from "../logic/scholarly_reason.ts";
 import type { RegistryReader } from "../registry.ts";
 
 export interface SourceRow {
@@ -318,6 +319,15 @@ export async function diffCheck(db: Db, refs: { source_id: string; revision: num
 // in scope; the rolling total counts only corroborations received from in-scope givers
 // (source_rolling_total's scoped form); a history row's stored total (a snapshot over every giver,
 // in and out of scope) is null - its family score is the source's own and stays.
+// Attempt 2 (tester t-rw-p3a finding 1): a giver row's `claim` is the corroboration LINE - the
+// synthesis line, i.e. the text of the claim filed from it - and a line has no metadata of its own.
+// Under a filter the line's text is served only when an ACTIVE IN-SCOPE claim has exactly that
+// text; otherwise it is null (fail closed: an in-scope giver on an out-of-scope claim's line, or a
+// line no in-scope claim was filed as). The giver itself (in scope) and its amount stay: the number
+// is the accepted residual class, the text is not. The rule for a cloud answer: every text, id,
+// title or URL it carries belongs to an in-scope row. signals.scholarly.reason is served only as an
+// allow-listed reason code and every reason line is scrubbed of credential-shaped text, on both
+// doors (logic/scholarly_reason.ts).
 interface CredRow { family: string | null; score: number | null; is_primary: boolean | null; basis: string | null; kind: string | null; total: number | null; model: string }
 interface QSourceRow { source_id: string; title: string; url: string | null; family: string | null; relation: string; amount: number | null; claim: string | null }
 
@@ -342,7 +352,12 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
     `SELECT g.id AS source_id, g.title, g.url, gc.family,
             CASE sc.strength WHEN 'strong' THEN 'strong corroboration (entailment ' || sc.verdict || ')'
                              ELSE 'weak corroboration (entailment ' || sc.verdict || ')' END AS relation,
-            sc.amount::float AS amount, sc.claim_text AS claim
+            sc.amount::float AS amount,
+            CASE WHEN $2::jsonb IS NULL THEN sc.claim_text
+                 WHEN EXISTS (SELECT 1 FROM public.claims lc
+                               WHERE btrim(lc.text) = btrim(sc.claim_text) AND lc.status = 'active'
+                                 AND lc.metadata @> $2::jsonb) THEN sc.claim_text
+                 ELSE NULL END AS claim
        FROM public.source_corroborations sc
        JOIN public.sources g ON g.id = sc.from_source_id AND g.retraction_committed_at IS NULL
             AND ($2::jsonb IS NULL OR g.metadata @> $2::jsonb)
@@ -394,7 +409,7 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
     [id],
   );
   const family = c?.family ?? sourceFamily(s.content_type, s.metadata);
-  const reasons = Array.isArray(cred?.reasons) ? (cred!.reasons as unknown[]).map(String) : [];
+  const reasons = Array.isArray(cred?.reasons) ? (cred!.reasons as unknown[]).map(safeReasonText) : [];
   const received = corroborated.filter((r) => r.amount !== null);
   const total = c?.total === null || c?.total === undefined ? null : r4(c.total);
   return {
@@ -409,7 +424,7 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
         `${received.length ? `, plus ${received.length} entailment-gated corroboration(s) received` : ""}`,
     },
     claim_kind: c?.kind ?? null,
-    signals: ((cred?.signals ?? (s.metadata?.scholarly ? { scholarly: s.metadata.scholarly } : {})) as Record<string, unknown>),
+    signals: safeSignals(cred?.signals ?? (s.metadata?.scholarly ? { scholarly: s.metadata.scholarly } : {})),
     corroborated_by: corroborated.map(qSource),
     contradicted_by: contradicted.map(qSource),
     history: history.map((h) => ({ score: r4(h.score), total: h.total === null || mf ? null : r4(h.total), claim_kind: h.claim_kind, model_version: h.model_version, computed_at: new Date(h.computed_at).toISOString() })),

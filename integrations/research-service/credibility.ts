@@ -123,6 +123,26 @@ const num = (v: unknown, field: string): number => {
   if (!Number.isFinite(n)) throw new CredibilityGateError(`credibility registry: ${field} is not a number`);
   return n;
 };
+/**
+ * A credibility number (attempt 2, tester finding 2): a JSON number in [0, 1] - never a string
+ * cast ("0.5", "NaN"), never null or missing, never negative, never above 1. The SQL twin's
+ * credibility_is_unit / credibility_unit apply the same rule (OBC04), so the two refuse the same
+ * rows. The message keeps attempt 1's "is not a number" for a non-number.
+ */
+export function unit(v: unknown, field: string): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new CredibilityGateError(`credibility registry: ${field} is not a number (${v === undefined ? "missing" : JSON.stringify(v)})`);
+  }
+  if (v < 0 || v > 1) throw new CredibilityGateError(`credibility registry: ${field} = ${v} is outside [0, 1]`);
+  return v;
+}
+/** A strictly positive finite number (a saturation half-point) or >= 0 (a grace period). */
+const positive = (v: unknown, field: string, allowZero = false): number => {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || (!allowZero && v === 0)) {
+    throw new CredibilityGateError(`credibility registry: ${field} is not a ${allowZero ? "non-negative" : "positive"} number (${JSON.stringify(v ?? null)})`);
+  }
+  return v;
+};
 const regexes = (v: unknown): RegExp[] =>
   (Array.isArray(v) ? v : []).map((s) => new RegExp(String(s), "i"));
 
@@ -161,19 +181,25 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
     if (!families.has(family)) {
       throw new CredibilityGateError(`credibility_weights.${r.key}: source family '${family}' is not registered`);
     }
+    // attempt 2: one active row per kind x family (the SQL twin's unique index); attempt 1 let
+    // the last of two rows win here while SQL took either
+    if (weights.has(`${kind}.${family}`)) {
+      throw new CredibilityGateError(`credibility_weights: two active rows for claim kind '${kind}' and family '${family}' (${r.key})`);
+    }
     weights.set(`${kind}.${family}`, {
       kind, family,
-      weight: num(d.weight, `${r.key}.weight`),
-      admissionFloor: num(d.admission_floor, `${r.key}.admission_floor`),
-      claimFloor: num(d.claim_floor, `${r.key}.claim_floor`),
-      primaryBonus: num(d.primary_bonus ?? 0, `${r.key}.primary_bonus`),
+      weight: unit(d.weight, `${r.key}.weight`),
+      admissionFloor: unit(d.admission_floor, `${r.key}.admission_floor`),
+      claimFloor: unit(d.claim_floor, `${r.key}.claim_floor`),
+      // the one optional field, absent = 0 in both twins; present, it is a credibility number
+      primaryBonus: d.primary_bonus === undefined ? 0 : unit(d.primary_bonus, `${r.key}.primary_bonus`),
     });
   }
 
   const domainClasses: DomainClass[] = of("domain_classes").map((r) => ({
     key: r.key,
     order: num(r.definition.order ?? 100, `domain_classes.${r.key}.order`),
-    score: num(r.definition.score, `domain_classes.${r.key}.score`),
+    score: unit(r.definition.score, `domain_classes.${r.key}.score`),
     patterns: regexes(r.definition.host_patterns),
     fallback: r.definition.fallback === true,
   })).sort((a, b) => a.order - b.order);
@@ -188,23 +214,24 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
   const p = activePaper[0];
   const paper: PaperScoreVersion = {
     key: p.key,
-    base: num(p.definition.base, "paper.base"),
-    citeWeight: num(p.definition.cite_weight, "paper.cite_weight"),
-    citeRateHalf: num(p.definition.cite_rate_half, "paper.cite_rate_half"),
-    graceYears: num(p.definition.grace_years, "paper.grace_years"),
-    graceCredit: num(p.definition.grace_credit, "paper.grace_credit"),
-    authorWeight: num(p.definition.author_weight, "paper.author_weight"),
-    authorHalf: num(p.definition.author_half, "paper.author_half"),
+    base: unit(p.definition.base, "paper.base"),
+    citeWeight: unit(p.definition.cite_weight, "paper.cite_weight"),
+    citeRateHalf: positive(p.definition.cite_rate_half, "paper.cite_rate_half"),
+    graceYears: positive(p.definition.grace_years, "paper.grace_years", true),
+    graceCredit: unit(p.definition.grace_credit, "paper.grace_credit"),
+    authorWeight: unit(p.definition.author_weight, "paper.author_weight"),
+    authorHalf: positive(p.definition.author_half, "paper.author_half"),
   };
 
   const gen = families.get("general") ? of("source_families").find((r) => r.key === "general")!.definition : {};
   const terms = (gen.terms ?? {}) as Record<string, unknown>;
+  // attempt 2: required, no `?? 0` - a missing term is a defect the gate names, not a zero
   const general: GeneralTerms = {
-    authorIdentity: num(terms.author_identity ?? 0, "general.terms.author_identity"),
-    linkPer: num(terms.link_per ?? 0, "general.terms.link_per"),
-    linkCap: num(terms.link_cap ?? 0, "general.terms.link_cap"),
-    agreementPer: num(terms.agreement_per ?? 0, "general.terms.agreement_per"),
-    agreementCap: num(terms.agreement_cap ?? 0, "general.terms.agreement_cap"),
+    authorIdentity: unit(terms.author_identity, "general.terms.author_identity"),
+    linkPer: unit(terms.link_per, "general.terms.link_per"),
+    linkCap: unit(terms.link_cap, "general.terms.link_cap"),
+    agreementPer: unit(terms.agreement_per, "general.terms.agreement_per"),
+    agreementCap: unit(terms.agreement_cap, "general.terms.agreement_cap"),
   };
 
   const verdicts = new Map<string, VerdictDef>(of("entailment_verdicts").map((r) => {
@@ -217,10 +244,10 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
 
   const corr = of("credibility_terms").find((r) => r.key === "corroboration")?.definition ?? {};
   const corroboration: CorroborationTerms = {
-    strongFactor: num(corr.strong_factor ?? 0, "corroboration.strong_factor"),
-    weakFactor: num(corr.weak_factor ?? 0, "corroboration.weak_factor"),
-    claimPer: num(corr.claim_per ?? 0, "corroboration.claim_per"),
-    claimCap: num(corr.claim_cap ?? 0, "corroboration.claim_cap"),
+    strongFactor: unit(corr.strong_factor, "corroboration.strong_factor"),
+    weakFactor: unit(corr.weak_factor, "corroboration.weak_factor"),
+    claimPer: unit(corr.claim_per, "corroboration.claim_per"),
+    claimCap: unit(corr.claim_cap, "corroboration.claim_cap"),
   };
 
   const weightsVersion = `weights v${registryVersions["credibility_weights"] ?? 1}`;
@@ -504,6 +531,34 @@ function sameTarget(link: string, url: string, doi: string | null): boolean {
 }
 
 // ── the claim total and the report roll-up (D15 items 5-6) ────────────────
+
+/**
+ * The rolling total a source brings to ONE line (the claim it will be filed as): its own
+ * weighted total plus the corroboration it received - with the FOLD RULE (attempt 2, tester
+ * adversarial (3)): corroboration from a source that is itself cited on this line does not
+ * count here, because that source already counts in the line once, through claim_per x its own
+ * total (lineCredibility). The same giver -> receiver pair on the same line counts once whatever
+ * the model version (one row per pair and line, as source_corroborations' key). Capped at 1;
+ * every amount must be a credibility number. claim_confidence_d15 / source_rolling_total
+ * (p_exclude) are the SQL twin.
+ */
+export function foldReceived(
+  base: number,
+  received: Array<{ from: string; claim: string; amount: number }>,
+  coCited: Set<string>,
+): number {
+  const seen = new Set<string>();
+  let sum = 0;
+  for (const e of received) {
+    unit(e.amount, `corroboration amount from ${e.from}`);
+    if (coCited.has(e.from)) continue;
+    const k = `${e.from}\u0000${e.claim}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    sum += e.amount;
+  }
+  return r3(Math.min(1, unit(base, "source total") + sum));
+}
 
 export interface LineCredibility {
   line: number;

@@ -20,7 +20,11 @@
  * The confirmation line (one line, in the findings sink, written by or for the operator):
  *   D15-RESCORE-CONFIRMED digest=<32 hex> model="d15 weights vN paper pK" by=<who> date=<YYYY-MM-DD>
  *
- * DB_* env as for the service (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD).
+ * DB_* env, ALL REQUIRED (attempt 2, tester near-miss: attempt 1 defaulted DB_HOST to the live
+ * `openbrain-db` and DB_USER to `postgres`, so a mis-scoped run reached the live database):
+ * DB_HOST, DB_NAME, DB_USER and DB_PASSWORD must each be set explicitly (DB_PORT defaults to
+ * 5432, a port is not a target). Without them the script refuses before it opens a connection
+ * (exit 64). `dbConfig` is that rule, tested in rescore-gate.test.ts.
  */
 
 export interface Confirmation { digest: string; model: string; by: string; date: string; line: string }
@@ -47,16 +51,30 @@ export function confirmationFor(findings: string, digest: string, model: string)
   return { ok: true, c };
 }
 
+export interface DbConfig { hostname: string; port: number; database: string; user: string; password: string }
+
+/** The connection the operator named - every target field explicit, or why it is refused. */
+export function dbConfig(env: (k: string) => string | undefined): { ok: true; cfg: DbConfig } | { ok: false; reason: string } {
+  const need = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
+  const missing = need.filter((k) => !(env(k) ?? "").trim());
+  if (missing.length) {
+    return { ok: false, reason: `refused: ${missing.join(", ")} not set - the re-score gate never picks a database by default (name the one you mean)` };
+  }
+  const port = Number(env("DB_PORT") ?? "5432");
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return { ok: false, reason: `refused: DB_PORT '${env("DB_PORT")}' is not a port` };
+  return { ok: true, cfg: { hostname: env("DB_HOST")!.trim(), port, database: env("DB_NAME")!.trim(), user: env("DB_USER")!.trim(), password: env("DB_PASSWORD")! } };
+}
+
 if (import.meta.main) {
   const args = Deno.args;
   const at = args.indexOf("--findings");
   const findingsPath = at >= 0 ? args[at + 1] : "";
   const apply = args.includes("--apply");
   if (!findingsPath) { console.error("usage: rescore-gate.ts --findings <findings-sink.md> [--apply]"); Deno.exit(64); }
+  const db = dbConfig((k) => Deno.env.get(k));
+  if (!db.ok) { console.error(`REFUSED: ${db.reason}`); Deno.exit(64); }
   const { Client } = await import("postgres");
-  const env = (k: string, d = "") => Deno.env.get(k) ?? d;
-  const client = new Client({ hostname: env("DB_HOST", "openbrain-db"), port: Number(env("DB_PORT", "5432")),
-    database: env("DB_NAME", "openbrain"), user: env("DB_USER", "postgres"), password: env("DB_PASSWORD") });
+  const client = new Client(db.cfg);
   await client.connect();
   try {
     const cur = (await client.queryObject<{ digest: string; model: string }>(

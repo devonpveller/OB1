@@ -7,6 +7,7 @@
 import { assert, assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   cleanDoi, createScholarlyResolver, headDoi, linkedDois, ownIdentifier, proxiedFetch, type ProxiedFetch,
+  safeReasonText, safeScholarlyRecord, SCHOLARLY_REASON_PATTERN, scholarlyReasonAllowed,
 } from "./scholarly.ts";
 import { fixtureNetwork, fixtureResolver, PROXY_CLIENT } from "./fixtures/scholarly-network.ts";
 
@@ -91,4 +92,86 @@ Deno.test("EGRESS: a resolver whose fetch bypasses FETCH_PROXY_URL cannot be bui
   assertThrows(() => proxiedFetch(fetch, null), Error, "no egress proxy client");
   // the explicit, configured direct choice is allowed and labelled as such
   assertEquals(proxiedFetch(fetch, null, { direct: true }).egress, "direct (FETCH_PROXY_URL is empty by configuration)");
+});
+
+// ── attempt 2: secret hygiene (tester t-rw-p3a finding 3) ──────────────────────────────────────
+// Attempt 1 stored the fetch error's message as the reason; Deno's message carries the request URL
+// - `?api_key=<key>&mailto=<mailto>` - and that reason was persisted and served (adv5/adv6). A
+// reason must never carry the key, the mailto, a query string or the words that introduce them.
+const SECRET = `SECRETKEY-${crypto.randomUUID().slice(0, 8)}`;
+const MAILTO = "tester-guard@example.invalid";
+function assertNoSecret(where: string, text: unknown) {
+  const s = JSON.stringify(text ?? "");
+  for (const bad of [SECRET, MAILTO, encodeURIComponent(MAILTO), "api_key", "mailto", "?"]) {
+    assert(!s.includes(bad), `${where} carries '${bad}': ${s}`);
+  }
+}
+/** A network that fails the way Deno's fetch does: the error MESSAGE names the full URL. */
+function failingNetwork(kind: "error" | "timeout" | "status" | "garbage") {
+  const raw = (url: string, init: RequestInit & { client?: unknown } = {}): Promise<Response> => {
+    if (init.client !== PROXY_CLIENT) return Promise.reject(new Error("EGRESS BYPASS"));
+    if (kind === "error") return Promise.reject(new TypeError(`error sending request for url (${url}): client error (Connect): unsuccessful tunnel`));
+    if (kind === "timeout") { const e = new Error(`request to ${url} timed out`); e.name = "TimeoutError"; return Promise.reject(e); }
+    if (kind === "status") return Promise.resolve(new Response(`upstream said no to ${url}`, { status: 502 }));
+    return Promise.resolve(new Response(`<html>${url}</html>`, { status: 200 }));
+  };
+  return createScholarlyResolver({ fetch: proxiedFetch(raw, PROXY_CLIENT), openalexKey: SECRET, mailto: MAILTO });
+}
+
+Deno.test("SECRETS: a failed resolver call's reason never carries the OpenAlex key, the mailto or the request URL", async () => {
+  for (const kind of ["error", "timeout", "status", "garbage"] as const) {
+    for (const id of [{ kind: "doi", value: "10.5555/tester.p3a.0001" }, { kind: "arxiv", value: "2401.00001" }, { kind: "pmid", value: "41508048" }] as const) {
+      const rec = await failingNetwork(kind).resolve(id, null);
+      assertEquals(rec.state, "unresolved", `${kind} ${id.kind}`);
+      assert(rec.reason, "an unresolved record says why");
+      assertNoSecret(`${kind} ${id.kind} reason`, rec.reason);
+      assertNoSecret(`${kind} ${id.kind} record`, rec);
+    }
+  }
+});
+
+Deno.test("SECRETS: every reason the resolver forms is an allow-listed reason code (no free text)", async () => {
+  const reasons: string[] = [];
+  for (const kind of ["error", "timeout", "status", "garbage"] as const) {
+    reasons.push((await failingNetwork(kind).resolve({ kind: "doi", value: "10.5555/x" })).reason!);
+    reasons.push((await failingNetwork(kind).resolve({ kind: "pmid", value: "1234567" }, null)).reason!);
+  }
+  const net = fixtureNetwork();
+  const ok = fixtureResolver(net);
+  for (const id of [{ kind: "doi", value: "10.1038/s44172-025-00417-2" }, { kind: "arxiv", value: "2401.00001" }, { kind: "doi", value: "10.3389/fnhum.2021.757735" }] as const) {
+    const r = (await ok.resolve(id)).reason;
+    if (r) reasons.push(r);
+  }
+  reasons.push((await createScholarlyResolver({ fetch: net.fetch, openalexKey: "", mailto: MAILTO }).resolve({ kind: "doi", value: "10.1038/s44172-025-00417-2" })).reason!);
+  assert(reasons.length >= 10, `reasons: ${reasons.length}`);
+  for (const r of reasons) assert(scholarlyReasonAllowed(r), `not an allow-listed reason: ${r}`);
+  // and the guard catches the attempt 1 shape
+  assert(!scholarlyReasonAllowed(`OpenAlex error: error sending request for url (https://api.openalex.org/works/x?api_key=${SECRET}&mailto=x)`));
+  assert(!scholarlyReasonAllowed("OpenAlex 404 (evil.example)"));
+});
+
+Deno.test("SECRETS: what is STORED goes through the allow-list - a legacy reason and a credential-shaped reason line are redacted", () => {
+  const legacy = { state: "unresolved", identifier: { kind: "doi", value: "10.1/x" }, doi: "10.1/x", cited_by: null, published: null,
+    authors: [], resolved_at: "2026-10-18T00:00:00Z", via: null, extra: "dropped",
+    reason: `OpenAlex error: error sending request for url (https://api.openalex.org/works/x?api_key=${SECRET}&mailto=${MAILTO})` };
+  const stored = safeScholarlyRecord(legacy);
+  assertNoSecret("stored record", stored);
+  assertEquals(Object.keys(stored).sort(), ["authors", "cited_by", "doi", "identifier", "published", "reason", "resolved_at", "state", "via"]);
+  assert(/redacted/.test(String(stored.reason)));
+  assertEquals(safeScholarlyRecord({ ...legacy, reason: "OpenAlex 404 (api.openalex.org); Crossref 503 (api.crossref.org)" }).reason,
+    "OpenAlex 404 (api.openalex.org); Crossref 503 (api.crossref.org)");
+  assert(/redacted/.test(safeReasonText(`doi 10.1/x UNRESOLVED (see https://api.openalex.org/works/x?api_key=${SECRET}): scored as general`)));
+  assertEquals(safeReasonText("domain class general: 0.22"), "domain class general: 0.22");
+});
+
+Deno.test({
+  name: "SECRETS: the workbench serves signals.scholarly.reason with the SAME allow-list (no drift by convention)",
+  ignore: (() => { try { Deno.statSync(new URL("../../docker/workbench/src/contracts/logic/scholarly_reason.ts", import.meta.url)); return false; } catch { return true; } })(),
+  async fn() {
+    const wb = await import(new URL("../../docker/workbench/src/contracts/logic/scholarly_reason.ts", import.meta.url).href);
+    assertEquals(wb.SCHOLARLY_REASON_PATTERN, SCHOLARLY_REASON_PATTERN);
+    const leaky = { state: "unresolved", reason: `OpenAlex error: https://api.openalex.org/works/x?api_key=${SECRET}&mailto=t@x` };
+    assertNoSecret("workbench safeScholarly", wb.safeScholarly(leaky));
+    assertNoSecret("workbench safeSignals", wb.safeSignals({ scholarly: leaky, domain_class: "general" }));
+  },
 });

@@ -414,6 +414,34 @@ export interface WriteClaimsOpts {
   claimMetadata?: Record<string, unknown>;
 }
 
+/**
+ * research-workbench P3a attempt 2 (tester near-miss: "a claim filed after P3a without a kind
+ * gets the basis 'filed before P3a'"). D15 item 9: an unknown kind FAILS LOUD. Every research
+ * package this curator receives since P3a carries the run's claim kind (the research service's
+ * harness stamps `claim_kind` on every package), so a package without one is a defect, not a
+ * pre-P3a claim: its claims are NOT filed (the caller logs the loss and returns it in the body,
+ * index.ts describeLoss), rather than filed under the fallback kind with a false basis. The
+ * database's twin is the P3a cutover marker (credibility_trigger_state.kind_required_from): a
+ * kindless claim created after it stops claim_confidence_d15 (OBC01).
+ */
+export class ClaimKindMissingError extends Error {
+  constructor(message: string) { super(message); this.name = "ClaimKindMissingError"; }
+}
+
+/** The claim metadata a package's claims are filed with - or a loud refusal. */
+export function claimMetadataFor(pkg: { claim_kind?: unknown; credibility_model?: unknown }): Record<string, unknown> {
+  if (typeof pkg.claim_kind !== "string" || !/^[a-z0-9][a-z0-9_.-]*$/.test(pkg.claim_kind)) {
+    throw new ClaimKindMissingError(
+      `research package carries no valid claim_kind (${JSON.stringify(pkg.claim_kind ?? null)}): claims are not filed ` +
+        "- D15 item 9, an unknown kind fails loud; only claims filed before P3a take the fallback kind",
+    );
+  }
+  return {
+    claim_kind: pkg.claim_kind,
+    ...(typeof pkg.credibility_model === "string" && pkg.credibility_model ? { credibility_model: pkg.credibility_model } : {}),
+  };
+}
+
 export interface WriteClaimsResult {
   claimsWritten: number;
   claimsDeduped: number;

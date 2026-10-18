@@ -5,7 +5,7 @@
  * Run: deno test --allow-read rescore-gate.test.ts
  */
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { confirmationFor, confirmations } from "./rescore-gate.ts";
+import { confirmationFor, confirmations, dbConfig } from "./rescore-gate.ts";
 
 const D = "0123456789abcdef0123456789abcdef";
 const M = "d15 weights v1 paper p1";
@@ -36,4 +36,37 @@ Deno.test("the exact confirmation is found, verbatim, in a list item or code spa
 Deno.test("a near-miss line is not a confirmation (no fuzzy match)", () => {
   assertEquals(confirmations(`D15 rescore confirmed digest=${D}`).length, 0);
   assertEquals(confirmations(line.replace("date=2026-10-20", "")).length, 0);
+});
+
+// attempt 2 (tester near-miss): attempt 1 defaulted DB_HOST to the live `openbrain-db` and DB_USER
+// to `postgres`, so a run without its env reached the live database.
+Deno.test("the gate never picks a database by default: DB_HOST, DB_NAME, DB_USER and DB_PASSWORD are each required", () => {
+  const full: Record<string, string> = { DB_HOST: "rwp3a-dba-x", DB_NAME: "openbrain", DB_USER: "postgres", DB_PASSWORD: "pw" };
+  const ok = dbConfig((k) => full[k]);
+  assert(ok.ok);
+  if (ok.ok) assertEquals(ok.cfg, { hostname: "rwp3a-dba-x", port: 5432, database: "openbrain", user: "postgres", password: "pw" });
+  const none = dbConfig(() => undefined);
+  assert(!none.ok && /DB_HOST, DB_NAME, DB_USER, DB_PASSWORD not set/.test(none.reason), JSON.stringify(none));
+  for (const k of Object.keys(full)) {
+    const r = dbConfig((x) => (x === k ? "  " : full[x]));
+    assert(!r.ok && r.reason.includes(k), `${k} blank was accepted`);
+  }
+  assert(!dbConfig((k) => ({ ...full, DB_PORT: "54x" } as Record<string, string>)[k]).ok, "a bad port");
+});
+
+Deno.test({
+  name: "the script REFUSES before connecting when its DB env is missing (exit 64, no connection attempt)",
+  ignore: (await Deno.permissions.query({ name: "run" })).state !== "granted",
+  async fn() {
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "--allow-read", "--allow-net", "--allow-env", new URL("./rescore-gate.ts", import.meta.url).href, "--findings", "nothing.md"],
+      clearEnv: true, env: { DENO_DIR: Deno.env.get("DENO_DIR") ?? "", PATH: Deno.env.get("PATH") ?? "", SystemRoot: Deno.env.get("SystemRoot") ?? "",
+        USERPROFILE: Deno.env.get("USERPROFILE") ?? "", HOME: Deno.env.get("HOME") ?? "", LOCALAPPDATA: Deno.env.get("LOCALAPPDATA") ?? "" },
+      stdout: "piped", stderr: "piped",
+    }).output();
+    const err = new TextDecoder().decode(out.stderr);
+    assertEquals(out.code, 64, err);
+    assert(/REFUSED: refused: DB_HOST/.test(err), err);
+    assert(!/openbrain-db|failed to lookup|Connection refused|ConnectionRefused/i.test(err), `it tried to connect: ${err}`);
+  },
 });

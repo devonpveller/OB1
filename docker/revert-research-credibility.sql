@@ -19,6 +19,13 @@
 \set ON_ERROR_STOP on
 BEGIN;
 
+-- attempt 2's integrity objects first (the guard would otherwise see the DELETEs below; it lets
+-- the owner through, but nothing of P3a should outlive the revert)
+DROP TRIGGER IF EXISTS trg_credibility_registry_guard ON public.contract_registry_entries;
+DROP FUNCTION IF EXISTS public.trg_credibility_registry_guard();
+DROP INDEX IF EXISTS public.uq_credibility_weights_kind_family;
+ALTER TABLE public.contract_registry_entries DROP CONSTRAINT IF EXISTS contract_registry_entries_credibility_weight_ok;
+
 DROP TABLE IF EXISTS public.credibility_trigger_state;
 \ir init-research-contract.sql
 
@@ -31,11 +38,15 @@ DROP FUNCTION IF EXISTS public.claim_confidence_d15(UUID);
 DROP FUNCTION IF EXISTS public.claim_kind_of(UUID);
 DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT);
 DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT, JSONB);
+DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT, JSONB, UUID[]);
 DROP FUNCTION IF EXISTS public.source_credibility(UUID);
 DROP FUNCTION IF EXISTS public.credibility_domain_class(TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.credibility_fallback_kind();
 DROP FUNCTION IF EXISTS public.credibility_weight(TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.credibility_model_version();
+DROP FUNCTION IF EXISTS public.credibility_weight_row_ok(JSONB);
+DROP FUNCTION IF EXISTS public.credibility_unit(JSONB, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.credibility_is_unit(JSONB);
 DROP FUNCTION IF EXISTS public.fold_held_source(UUID, JSONB, UUID);
 DROP TRIGGER IF EXISTS trg_source_corroborations_supports_only ON public.source_corroborations;
 DROP FUNCTION IF EXISTS public.trg_source_corroborations_supports_only();

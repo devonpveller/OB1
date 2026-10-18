@@ -12,6 +12,9 @@
  * claims and STAGES candidate sources.
  */
 
+import { CredibilityGateError, unit } from "./credibility.ts";
+import { safeReasonText, safeScholarlyRecord } from "./scholarly.ts";
+
 interface QueryClient {
   queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }>;
 }
@@ -283,7 +286,9 @@ export async function cachedScholarly(client: QueryClient, url: string): Promise
       ORDER BY updated_at DESC LIMIT 1`,
     [url],
   );
-  return r.rows[0]?.scholarly ?? null;
+  // attempt 2: a cached record is re-read through the allow-list (no stored error text travels on)
+  const rec = r.rows[0]?.scholarly ?? null;
+  return rec ? safeScholarlyRecord(rec) : null;
 }
 
 export interface CredibilityStamp {
@@ -307,8 +312,13 @@ export async function stampSourceCredibility(
   scholarly: Record<string, unknown> | null,
   jobId: string | null,
 ): Promise<void> {
-  const patch: Record<string, unknown> = { credibility: stamp };
-  if (scholarly) patch.scholarly = scholarly;
+  // attempt 2: a stamp the SQL twin would refuse (OBC04) is refused here, before it is stored;
+  // and a scholarly record is stored only with an allow-listed reason (no URL, no key, no mailto)
+  unit(stamp.score, `credibility stamp of ${sourceId}: score`);
+  unit(stamp.total, `credibility stamp of ${sourceId}: total`);
+  if (!stamp.family) throw new CredibilityGateError(`credibility stamp of ${sourceId}: no family`);
+  const patch: Record<string, unknown> = { credibility: { ...stamp, reasons: stamp.reasons.map(safeReasonText) } };
+  if (scholarly) patch.scholarly = safeScholarlyRecord(scholarly);
   if (stamp.found_via) { patch.found_via = stamp.found_via; patch.found_via_kind = stamp.found_via_kind ?? "lead"; }
   await client.queryObject(
     `UPDATE public.sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1::uuid`,
@@ -319,7 +329,7 @@ export async function stampSourceCredibility(
         (source_id, family, claim_kind, score, total, model_version, signals, reasons, job_id)
      VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::uuid)`,
     [sourceId, stamp.family, stamp.claim_kind, stamp.score, stamp.total, stamp.model_version,
-      JSON.stringify(stamp.signals), JSON.stringify(stamp.reasons), jobId],
+      JSON.stringify(stamp.signals), JSON.stringify(stamp.reasons.map(safeReasonText)), jobId],
   );
   if (stamp.found_via) {
     await client.queryObject(
@@ -329,17 +339,28 @@ export async function stampSourceCredibility(
   }
 }
 
-/** One entailment-gated corroboration (the DB refuses a non-transferring verdict, OBC02). */
+/**
+ * One entailment-gated corroboration (the DB refuses a non-transferring verdict, OBC02).
+ * Attempt 2: ONE row per giver -> receiver -> line. A re-run of the same line (after the weights
+ * were tuned, say) REPLACES the pair's row with the current amount and model version, so the
+ * rolling total never sums the same pair twice; an amount outside [0, 1] or a self-corroboration
+ * is refused here as well as by the table's CHECKs.
+ */
 export async function recordCorroboration(
   client: QueryClient,
   e: { from: string; to: string; strength: "strong" | "weak"; amount: number; claim: string; kind: string; verdict: string; model: string },
   jobId: string | null,
 ): Promise<void> {
+  unit(e.amount, `corroboration ${e.from} -> ${e.to}: amount`);
+  if (e.from === e.to) throw new CredibilityGateError(`corroboration refused: source ${e.from} cannot corroborate itself`);
   await client.queryObject(
     `INSERT INTO public.source_corroborations
         (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version, job_id)
      VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9::uuid)
-     ON CONFLICT (from_source_id, to_source_id, claim_text, model_version) DO NOTHING`,
+     ON CONFLICT (from_source_id, to_source_id, claim_text) DO UPDATE
+        SET strength = EXCLUDED.strength, amount = EXCLUDED.amount, claim_kind = EXCLUDED.claim_kind,
+            verdict = EXCLUDED.verdict, model_version = EXCLUDED.model_version, job_id = EXCLUDED.job_id,
+            created_at = now()`,
     [e.from, e.to, e.strength, e.amount, e.claim.slice(0, 2000), e.kind, e.verdict, e.model, jobId],
   );
 }

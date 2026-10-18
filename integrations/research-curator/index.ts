@@ -35,7 +35,7 @@
  *      NEW_THREAD_MIN_CONFIDENCE (0.60), MERGE_FLOOR_DISTANCE (0.45), PORT (8000).
  */
 import { Pool } from "postgres";
-import { writeClaims, detectConflicts, parseSynthesisClaims, META_JUDGE_SYS, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
+import { claimMetadataFor, writeClaims, detectConflicts, parseSynthesisClaims, META_JUDGE_SYS, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
 import { ResilientPool } from "./pool.ts";
 
 // --- Config -----------------------------------------------------------------
@@ -417,6 +417,8 @@ async function writeGroundedClaims(
 ): Promise<WriteClaimsResult | null> {
   const synthesis = (pkg.synthesis || "").trim();
   if (!synthesis || !synthesisId) return null; // nothing to parse / nowhere to anchor
+  // P3a: a package without its claim kind files NO claim (loud; the caller reports the loss)
+  const claimMetadata = claimMetadataFor(pkg);
   const client = await pool.connect();
   try {
     await client.queryArray("BEGIN");
@@ -427,9 +429,7 @@ async function writeGroundedClaims(
       volatility: pkg.volatility ?? null,
       revalidateDays: pkg.revalidate_days ?? null,
       embed,
-      claimMetadata: pkg.claim_kind
-        ? { claim_kind: pkg.claim_kind, ...(pkg.credibility_model ? { credibility_model: pkg.credibility_model } : {}) }
-        : undefined,
+      claimMetadata,
       // research-trust 2026-09-11: statements ABOUT the run never become claims.
       // The judge is the second layer and fails open (claims.ts); the log line
       // is the point - eight of these were stored with nothing saying so.
