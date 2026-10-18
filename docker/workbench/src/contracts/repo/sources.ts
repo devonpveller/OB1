@@ -112,7 +112,9 @@ export async function tombstoneBySource(db: Db, sourceId: string): Promise<Tombs
 // What an in-scope tombstone carries that names ANOTHER row is redacted to in-scope ids
 // (attempt 2, tester finding N4): attempts[].session_id and .note (a session carries no metadata;
 // the note is the door's free text about it), batch_run_id and eraser_run_id (runs are jobs,
-// which carry no metadata), and readmitted_source_id unless that source is itself in scope.
+// which carry no metadata), readmitted_source_id unless that source is itself in scope, and
+// confidence (the score_at_removal snapshot: a mean over every claim the source grounded, in and
+// out of scope - the same value the scoped suppression context drops).
 export async function tombstoneById(db: Db, id: string, f: MetadataFilter = null): Promise<TombstoneRow | null> {
   const mf = f ? JSON.stringify(f) : null;
   const t = (await db.query<TombstoneRow & { readmitted_in_scope: boolean }>(
@@ -128,6 +130,7 @@ export async function tombstoneById(db: Db, id: string, f: MetadataFilter = null
     ...row,
     batch_run_id: null,
     eraser_run_id: null,
+    confidence: null,
     readmitted_source_id: readmitted_in_scope ? row.readmitted_source_id : null,
     attempts: (Array.isArray(row.attempts) ? row.attempts : []).map((a) => ({
       ...(a as Record<string, unknown>), session_id: null, note: null,

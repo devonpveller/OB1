@@ -342,7 +342,8 @@ Deno.test({
         await sql(`INSERT INTO public.source_tombstone_attempts (tombstone_id, path, outcome, session_id, note)
                    VALUES ($1, 'intake', 'refused', $2, $3)`, [tb, X.session, `${LOCAL} attempt ${tb}`]);
       }
-      await sql(`UPDATE public.source_tombstones SET readmitted_source_id = $2 WHERE id = $1`, [tomb.cloud, X.srcLocal]);
+      // its removal score (normally the suppression snapshot's mean over every claim it grounded)
+      await sql(`UPDATE public.source_tombstones SET readmitted_source_id = $2, confidence = 0.42 WHERE id = $1`, [tomb.cloud, X.srcLocal]);
     }
 
     async function cleanup() {
@@ -496,7 +497,7 @@ Deno.test({
         assertEquals(u.state_detail.context.citing_pages, 1);
       });
 
-      await t.step("tombstone of an in-scope erased source: attempts, run id and readmission redacted to in-scope (N4)", () => {
+      await t.step("tombstone of an in-scope erased source: attempts, run ids, readmission and removal score redacted (N4)", () => {
         const f = get("contract_tombstone", { id: "$tombCloud" }).json;
         assertEquals(f.id, tomb.cloud, JSON.stringify(f));
         assertEquals(f.attempts.length, 1);
@@ -505,7 +506,9 @@ Deno.test({
         assertEquals(f.attempts[0].path, "intake");
         assertEquals(f.batch_run_id, null);
         assertEquals(f.readmitted_source_id, null);
+        assertEquals(f.confidence, null);
         const u = get("contract_tombstone", { id: "$tombCloud" }, true).json;
+        assert(Math.abs(u.confidence - 0.42) < 1e-6, `unscoped confidence ${u.confidence}`);
         assertEquals(u.attempts[0].session_id, X.session);
         assertEquals(u.batch_run_id, FX_JOB);
         assertEquals(u.readmitted_source_id, X.srcLocal);
