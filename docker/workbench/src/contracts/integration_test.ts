@@ -914,6 +914,29 @@ t("P3a attempt 3: quality(id) serves no bare key, no percent-encoded query and n
   }
 });
 
+t("P3a attempt 4: quality(id) history serves a claim_kind / model_version label only when it names a registry row (else null) - on either door", async () => {
+  const s = await newSource({ url: "https://blog.example.com/p3a-history-4" });
+  const junk = `LABELKIND-${uuid().slice(0, 8)}`;
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s, JSON.stringify({
+    share: "cloud", credibility: { family: "general", claim_kind: "practical", score: 0.22, total: 0.22, model_version: "d15 weights v1 paper p1", signals: {}, reasons: [] },
+  })]);
+  // oldest first: a good row, a junk kind, a junk model label (out-of-scope text), an unregistered paper key
+  for (const [kind, mv, at] of [["practical", "d15 weights v1 paper p1", "2026-10-01"], [junk, "d15 weights v1 paper p1", "2026-10-02"],
+    ["release", `LABELMV out-of-scope claim ${junk}`, "2026-10-03"], ["price", "d15 weights v1 paper p9", "2026-10-04"]]) {
+    await sql(`INSERT INTO public.source_credibility_history (source_id, family, claim_kind, score, total, model_version, computed_at)
+               VALUES ($1, 'general', $2, 0.22, 0.22, $3, $4::timestamptz)`, [s, kind, mv, at]);
+  }
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  for (const path of [`/sources/${s}/quality`, `/sources/${s}/quality?metadata_filter=${f}`]) {
+    const r = await call("GET", path);
+    assertEquals(r.status, 200, path);
+    assert(S.Quality.safeParse(r.json).success, JSON.stringify(r.json));
+    const h = r.json.history.map((x: any) => [x.claim_kind, x.model_version]);
+    assertEquals(h, [["price", null], ["release", null], [null, "d15 weights v1 paper p1"], ["practical", "d15 weights v1 paper p1"]], path);
+    assert(!JSON.stringify(r.json).includes(junk), `${path} serves the junk label`);
+  }
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();

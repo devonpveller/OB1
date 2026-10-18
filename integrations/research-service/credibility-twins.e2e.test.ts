@@ -20,7 +20,7 @@ import {
 
 const HOST = Deno.env.get("CRED_E2E_DB_HOST");
 const pool = HOST
-  ? new Pool({ hostname: HOST, port: 5432, database: "openbrain", user: Deno.env.get("CRED_E2E_DB_USER") ?? "postgres",
+  ? new Pool({ hostname: HOST, port: Number(Deno.env.get("CRED_E2E_DB_PORT") ?? 5432), database: "openbrain", user: Deno.env.get("CRED_E2E_DB_USER") ?? "postgres",
     password: Deno.env.get("CRED_E2E_DB_PASSWORD") ?? "" }, 2, true)
   : null;
 const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore: !HOST, fn, sanitizeOps: false, sanitizeResources: false });
@@ -178,8 +178,9 @@ t("attempt 3: the SQL claim total == the TS line total on the same stamped rows 
 t("attempt 3: received amounts sum in one order (descending) in both twins - three insertion orders, one total", async () => {
   const r = await inTx(async (c) => {
     const m = await loadCredibilityModel(c);
-    const amounts = [0.1, 0.2, 0.3, 0.07, 0.013, 1e-12];
-    const orders = [amounts, [...amounts].reverse(), [0.2, 1e-12, 0.013, 0.3, 0.1, 0.07]];
+    // attempt 4: 2e-9, not 1e-12 - an amount is 0 or in [1e-9, 1] (the representable range)
+    const amounts = [0.1, 0.2, 0.3, 0.07, 0.013, 2e-9];
+    const orders = [amounts, [...amounts].reverse(), [0.2, 2e-9, 0.013, 0.3, 0.1, 0.07]];
     const out: Array<{ sql: number; ts: number }> = [];
     for (const order of orders) {
       const [recv] = await stampedSources(c, [{ family: "general", score: 0.05, tag: "recv" }]);
@@ -265,13 +266,17 @@ t("attempt 3: a credibility number is 0 or in [1e-9, 1] in BOTH twins - 1e-50 / 
       const r = await probe(c, [setWeight(raw)]);
       if (r.sql.startsWith("REFUSED") || r.ts.startsWith("REFUSED") || Number(r.sql) !== Number(r.ts)) problems.push(`${raw}: SQL ${r.sql} TS ${r.ts}`);
     }
-    // an AMOUNT is a computed double: 1e-50 and 1.00000001 are stored as they are (REAL stored 1 / raised 22003)
+    // an AMOUNT is a DOUBLE in the representable range (attempt 4: 0 or [1e-9, 1] - attempt 3 stored
+    // 1e-50, which the stored twin's REAL could not hold): 1e-50 is refused, 1.0000000001e-9 is stored as it is
     const [recv] = await stampedSources(c, [{ family: "general", score: 0.05, tag: "amt" }]);
     const [giver] = await stampedSources(c, [{ family: "general", score: 0.3, tag: "amtg" }]);
+    const tiny = await attempt(c, () => c.queryObject(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+                         VALUES ($1, $2, 'weak', $3, 'l0', 'practical', 'supports', 't3')`, [giver, recv, 1e-50]));
+    if (!/source_corroborations_amount_unit/.test(tiny.err)) problems.push(`amount 1e-50: ${tiny.err || "STORED"}`);
     await c.queryObject(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
-                         VALUES ($1, $2, 'weak', $3, 'l', 'practical', 'supports', 't3')`, [giver, recv, 1e-50]);
+                         VALUES ($1, $2, 'weak', $3, 'l', 'practical', 'supports', 't3')`, [giver, recv, 1.0000000001e-9]);
     const back = await one<{ a: number }>(c, `SELECT amount AS a FROM public.source_corroborations WHERE to_source_id = $1`, [recv]);
-    if (Number(back.a) !== 1e-50) problems.push(`amount 1e-50 read back as ${back.a}`);
+    if (Number(back.a) !== 1.0000000001e-9) problems.push(`amount 1.0000000001e-9 read back as ${back.a}`);
     const over = await attempt(c, () => c.queryObject(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
                          VALUES ($1, $2, 'weak', 1.00000001, 'l2', 'practical', 'supports', 't3')`, [giver, recv]));
     if (!/source_corroborations_amount_unit/.test(over.err)) problems.push(`amount 1.00000001: ${over.err || "STORED"}`);

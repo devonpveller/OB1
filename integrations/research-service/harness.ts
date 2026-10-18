@@ -17,7 +17,7 @@ import {
 } from "./contract.ts";
 import { applyVerdicts, type EntailmentRecord, judgeLines, type LineVerdict, type VerdictEffect } from "./entailment.ts";
 import {
-  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, foldReceived, lineCredibility,
+  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, filedLineCredibility, flushUnit, foldReceived,
   type LineCredibility, loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord,
   weightFor,
 } from "./credibility.ts";
@@ -1687,11 +1687,15 @@ export async function runResearch(
   // THE FOLD RULE (attempt 2): on a line, a cited source's total leaves out the corroboration it
   // received from the line's other cited sources - each of those counts once, through claim_per
   // (claim_confidence_d15's p_exclude is the stored twin).
+  // Attempt 4 (tester finding F2): each line is scored through the edges the curator WILL file for
+  // it - its tag after the verdict, the one tag -> edge rule (claim-edges.ts), the registry's edge
+  // factors and the edge weights (filedLineCredibility) - so a line's total, the footer and
+  // research_jobs.metrics.credibility equal claim_confidence_d15 of the claim filed from the line.
   const lineCred: LineCredibility[] = verdicts.map((v) => {
     const cited = v.cites.filter((n) => pool[n - 1]);
     const coCited = new Set(cited.map((n) => pool[n - 1].url));
-    return lineCredibility(model, claimKind.kind, v.line, v.verdict,
-      cited.map((n) => ({ total: foldReceived(finals[n - 1].total, receivedBy(n - 1), coCited) })));
+    return filedLineCredibility(model, claimKind.kind, v,
+      (n) => (pool[n - 1] ? foldReceived(finals[n - 1].total, receivedBy(n - 1), coCited) : null));
   });
   const reportCred: ReportCredibility = reportCredibility(model, claimKind.kind, lineCred);
 
@@ -1755,7 +1759,8 @@ export async function runResearch(
           if (j === i || !pool[j] || (heldByUrl.has(pool[j].url) && !foldedIdx.has(j))) continue;
           for (const [from, to] of [[j, i], [i, j]]) {
             const strong = poolAssess[from].score.family === "scholarly" && poolAssess[to].score.family === "general";
-            const amt = (strong ? model.corroboration.strongFactor : model.corroboration.weakFactor) * finals[from].total;
+            // attempt 4: an amount is in the representable range where it is formed (below 1e-9 is 0)
+            const amt = flushUnit((strong ? model.corroboration.strongFactor : model.corroboration.weakFactor) * finals[from].total);
             corrEdges.push({
               from_url: pool[from].url, to_url: pool[to].url, strength: strong ? "strong" : "weak",
               amount: amt, claim: v.text, verdict: v.verdict, fromIdx: from, toIdx: to,   // unrounded (attempt 3)

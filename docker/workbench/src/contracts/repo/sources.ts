@@ -403,9 +403,20 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
       WHERE mine.source_id = $1::uuid AND mine.edge_type <> 'contradicts'`,
     [id, mf],
   );
-  const history = await db.query<{ score: number; total: number | null; claim_kind: string | null; model_version: string; computed_at: string }>(
-    `SELECT score::float AS score, total::float AS total, claim_kind, model_version, computed_at
-       FROM public.source_credibility_history WHERE source_id = $1::uuid ORDER BY computed_at DESC, id DESC LIMIT 50`,
+  // attempt 4 (tester near-miss: a history row's labels were served verbatim, so a writer could put any
+  // text there): claim_kind is served only when it is a claim_kinds registry key, model_version only
+  // when it is a D15 model label ("d15 weights v<N> paper <key>") naming a paper_score_versions row;
+  // anything else is null. Retired rows count (the history is historical).
+  const history = await db.query<{ score: number; total: number | null; claim_kind: string | null; model_version: string | null; computed_at: string }>(
+    `SELECT h.score::float AS score, h.total::float AS total,
+            CASE WHEN EXISTS (SELECT 1 FROM public.contract_registry_entries e
+                               WHERE e.registry = 'claim_kinds' AND e.key = h.claim_kind) THEN h.claim_kind END AS claim_kind,
+            CASE WHEN h.model_version ~ '^d15 weights v[0-9]{1,9} paper [a-z0-9][a-z0-9._-]*$'
+                  AND EXISTS (SELECT 1 FROM public.contract_registry_entries e WHERE e.registry = 'paper_score_versions'
+                                 AND e.key = substring(h.model_version from ' paper ([a-z0-9][a-z0-9._-]*)$'))
+                 THEN h.model_version END AS model_version,
+            h.computed_at
+       FROM public.source_credibility_history h WHERE h.source_id = $1::uuid ORDER BY h.computed_at DESC, h.id DESC LIMIT 50`,
     [id],
   );
   const family = c?.family ?? sourceFamily(s.content_type, s.metadata);

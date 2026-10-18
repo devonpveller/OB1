@@ -26,6 +26,8 @@
  * parsed out of the migration file, so the tested model IS the shipped table.
  */
 
+import { claimEdges, edgeWeightOk } from "./claim-edges.ts";
+
 export class CredibilityGateError extends Error {
   constructor(message: string) {
     super(message);
@@ -101,6 +103,13 @@ export interface VerdictDef {
 
 export interface CorroborationTerms { strongFactor: number; weakFactor: number; claimPer: number; claimCap: number }
 
+/**
+ * What a grounding edge's TYPE multiplies a source's total by in a claim (attempt 4, tester finding
+ * F2): the registry row credibility_terms.edge_factors, read by both twins (claim_confidence_d15 in
+ * SQL). Seeded states 1, corroborates 1, inferred_from 0.67 (init-claims.sql's 0.60/0.90 ratio).
+ */
+export interface EdgeFactors { states: number; corroborates: number; inferred_from: number }
+
 export interface CredibilityModel {
   kinds: ClaimKind[];
   families: Map<string, FamilyDef>;
@@ -117,6 +126,7 @@ export interface CredibilityModel {
   general: GeneralTerms;
   verdicts: Map<string, VerdictDef>;
   corroboration: CorroborationTerms;
+  edgeFactors: EdgeFactors;
   /** "weights v<N>" - the registry version of the weight table (bumped on every change). */
   weightsVersion: string;
   /** "paper <key>" - the active paper score version. */
@@ -188,16 +198,65 @@ export function unit(v: unknown, field: string): number {
 }
 
 /**
- * An AMOUNT or a TOTAL the pipeline computed (attempt 3): a finite double in [0, 1]. Unlike a
- * registry number it never passes through decimal text that can underflow (it goes to a DOUBLE
- * PRECISION column as its shortest round-trip text and reads back as the same double), so no lower
- * bound applies - a product of two credibility numbers may be below 1e-9.
+ * THE REPRESENTABLE RANGE (attempt 4, tester finding F1). Every credibility number the twins READ
+ * as an input - a registry number, a source's stamped score, a corroboration AMOUNT, a claim edge's
+ * weight - is 0 or in [UNIT_MIN_NONZERO, 1] = [1e-9, 1], in both twins, refused at write by a CHECK
+ * (source_corroborations_amount_unit, sources_credibility_stamp_ok, claim_sources_weight_credibility,
+ * the weight table's) and by the TS writers, and refused at read by both. Attempt 3 let an amount
+ * be any double in [0, 1]: 5e-324 was stored, both twins computed a 5e-324 claim total, and the
+ * stored twin's REAL cast raised 22003 (aborting the operator's whole re-score). A number the
+ * pipeline FORMS below 1e-9 (a product of small numbers: strong_factor x weight x score) is flushed
+ * to 0 by `flushUnit` where it is formed, so the amount the run reasons with is the amount it stores.
+ * Flushing never moves a number across a floor: every floor is itself 0 or >= 1e-9.
+ * An amount is checked with this rule; the message says "amount".
  */
 export function amountUnit(v: unknown, field: string): number {
   if (typeof v !== "number" || !Number.isFinite(v)) {
     throw new CredibilityGateError(`credibility: ${field} is not a number (${v === undefined ? "missing" : JSON.stringify(v)})`);
   }
   if (v < 0 || v > 1) throw new CredibilityGateError(`credibility: ${field} = ${v} is outside [0, 1]`);
+  if (v !== 0 && v < UNIT_MIN_NONZERO) {
+    throw new CredibilityGateError(`credibility: ${field} = ${v} is a non-zero number below 1e-9 (the representable range is 0 or [1e-9, 1])`);
+  }
+  return v;
+}
+
+/** A number the pipeline formed, into the representable range: below 1e-9 is 0 (attempt 4). */
+export function flushUnit(x: number): number {
+  return x < UNIT_MIN_NONZERO ? 0 : x;
+}
+
+/**
+ * A TOTAL the pipeline computed and stores only as a RECORD (a stamp's `total`, a history or trail
+ * total) - no twin reads it back as an input, so any finite double in [0, 1] (attempt 3's rule).
+ */
+export function totalUnit(v: unknown, field: string): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new CredibilityGateError(`credibility: ${field} is not a number (${v === undefined ? "missing" : JSON.stringify(v)})`);
+  }
+  if (v < 0 || v > 1) throw new CredibilityGateError(`credibility: ${field} = ${v} is outside [0, 1]`);
+  return v;
+}
+
+/** The smallest normal float4 (2^-126): claims.confidence is REAL (attempt 4, see storeConfidence). */
+export const FLOAT4_MIN_NORMAL = 2 ** -126;
+
+/**
+ * The stored twin's view of a claim total (attempt 4): what credibility_store_confidence writes to
+ * claims.confidence (REAL) for a DOUBLE total and the kind's claim floor, op for op. A total below
+ * the smallest normal float4 is stored as 0 - always on the total's side of the floor, because a
+ * floor is 0 or >= 1e-9 (a total under 2^-126 is below any non-zero floor, and at or above a 0
+ * floor, as 0 is). Otherwise the nearest float4, stepped back towards the total (at most 4 ulps)
+ * when it lands on the other side of the floor (attempt 3: 0.49999999 stores as 0.49999997, not 0.5).
+ */
+export function storeConfidence(total: number, floor: number | null): number {
+  if (total < FLOAT4_MIN_NORMAL) return 0;
+  let v = Math.fround(total);
+  if (floor === null) return v;
+  for (let i = 0; i < 4 && ((total < floor && v >= floor) || (total >= floor && v < floor)); i++) {
+    v = Math.fround(total < floor ? v - Math.abs(v) * 2 ** -23 : v + Math.abs(v) * 2 ** -23);
+  }
+  if ((total < floor) !== (v < floor)) throw new CredibilityGateError(`credibility: no float4 on the floor side of ${total} (floor ${floor})`);
   return v;
 }
 
@@ -330,7 +389,10 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
   };
 
   const verdicts = new Map<string, VerdictDef>(of("entailment_verdicts").map((r) => {
-    const effect = String(r.definition.tag_effect ?? "");
+    // attempt 4 (tester near-miss: ["keep"] was String()-ed to "keep" here, refused by SQL): a JSON
+    // string, exactly as credibility_model_check reads it (jsonb_typeof = 'string')
+    const raw = r.definition.tag_effect;
+    const effect = typeof raw === "string" ? raw : "";
     if (!["keep", "uncertain", "gap"].includes(effect)) {
       throw new CredibilityGateError(`entailment_verdicts.${r.key}: tag_effect '${effect}' is not keep|uncertain|gap`);
     }
@@ -345,11 +407,18 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
     claimCap: unit(corr.claim_cap, "corroboration.claim_cap"),
   };
 
+  const ef = of("credibility_terms").find((r) => r.key === "edge_factors")?.definition ?? {};
+  const edgeFactors: EdgeFactors = {
+    states: unit(ef.states, "edge_factors.states"),
+    corroborates: unit(ef.corroborates, "edge_factors.corroborates"),
+    inferred_from: unit(ef.inferred_from, "edge_factors.inferred_from"),
+  };
+
   const weightsVersion = `weights v${registryVersions["credibility_weights"] ?? 1}`;
   const paperVersion = `paper ${paper.key}`;
   const scoredFamilies = [...families.keys()].filter((f) => [...weights.values()].some((w) => w.family === f));
   const model: CredibilityModel = {
-    kinds, families, scoredFamilies, weights, domainClasses, paper, general, verdicts, corroboration,
+    kinds, families, scoredFamilies, weights, domainClasses, paper, general, verdicts, corroboration, edgeFactors,
     weightsVersion, paperVersion, modelVersion: `d15 ${weightsVersion} ${paperVersion}`,
   };
   validateTable(model);
@@ -512,7 +581,8 @@ export function paperScore(m: CredibilityModel, s: ScholarlySignals): { score: n
     authorTerm = sat(s.author_works_count, p.authorHalf);
     reasons.push(`best author works_count ${s.author_works_count}: author term ${r3(authorTerm)}`);
   }
-  const score = Math.min(1, p.base + p.citeWeight * citeTerm + p.authorWeight * authorTerm);
+  // attempt 4: a stamped score is in the representable range (flushUnit: below 1e-9 is 0)
+  const score = flushUnit(Math.min(1, p.base + p.citeWeight * citeTerm + p.authorWeight * authorTerm));
   return { score, reasons };
 }
 
@@ -531,7 +601,7 @@ export function generalScore(m: CredibilityModel, s: GeneralSignals): { score: n
   const agree = Math.min(g.agreementCap, g.agreementPer * s.entailment_agreement.supports);
   if (s.entailment_agreement.supports) reasons.push(`entailment agreement (${s.entailment_agreement.supports} supports): +${r3(agree)}`);
   score += agree;
-  return { score: Math.min(1, score), reasons };
+  return { score: flushUnit(Math.min(1, score)), reasons };
 }
 
 /**
@@ -580,7 +650,9 @@ export function scoreSource(
 /** The weighted total for one claim kind: family score x weight (+ primary bonus for general). */
 export function weightedTotal(m: CredibilityModel, kind: string, s: SourceScore): { total: number; row: WeightRow; reason: string } {
   const row = weightFor(m, kind, s.family);
-  const primary = s.family === "general" && (s.signals as GeneralSignals).primary ? row.primaryBonus : 0;
+  // attempt 4 (tester near-miss P3: "true" / 1 counted here, not in SQL's `= 'true'::jsonb`): the
+  // JSON value true only, in both twins; anything else is ignored by both and refused at write
+  const primary = s.family === "general" && (s.signals as GeneralSignals).primary === true ? row.primaryBonus : 0;
   // the SQL twin's v_base, op for op: weight x min(1, score + bonus) (a product of two numbers in
   // [0, 1] needs no cap); unrounded (attempt 3)
   const total = row.weight * Math.min(1, s.score + primary);
@@ -624,8 +696,8 @@ export function corroborate(
   const pt = weightedTotal(m, kind, paper.score).total;
   const gt = weightedTotal(m, kind, general.score).total;
   return [
-    { from_url: paper.url, to_url: general.url, strength: "strong", amount: m.corroboration.strongFactor * pt, claim, verdict },
-    { from_url: general.url, to_url: paper.url, strength: "weak", amount: m.corroboration.weakFactor * gt, claim, verdict },
+    { from_url: paper.url, to_url: general.url, strength: "strong", amount: flushUnit(m.corroboration.strongFactor * pt), claim, verdict },
+    { from_url: general.url, to_url: paper.url, strength: "weak", amount: flushUnit(m.corroboration.weakFactor * gt), claim, verdict },
   ];
 }
 
@@ -666,7 +738,7 @@ export function foldReceived(
     amounts.push(e.amount);
   }
   const sum = amounts.sort((a, b) => b - a).reduce((a, x) => a + x, 0);
-  return Math.min(1, amountUnit(base, "source total") + sum);
+  return Math.min(1, totalUnit(base, "source total") + sum);
 }
 
 export interface LineCredibility {
@@ -700,7 +772,12 @@ export function lineCredibility(
   const v = m.verdicts.get(verdict);
   if (!v) throw new CredibilityGateError(`entailment verdict '${verdict}' is not registered`);
   const floor = Math.max(...m.scoredFamilies.map((f) => weightFor(m, kind, f).claimFloor));
-  if (!v.transfers || !cited.length) {
+  // attempt 4 (F2): a line carries the total of the claim the curator files from it. A verdict whose
+  // tag effect is `gap` turns the line into a [GAP] - nothing is filed, so it carries nothing; any
+  // other verdict (`partial` lowers the tag to [UNCERTAIN], which is still filed) carries the filed
+  // claim's total - the edge factors and weights of that tag are in `cited` (filedLineCredibility).
+  // Corroboration BETWEEN sources still moves only on a transferring verdict (corroborate).
+  if (v.tagEffect === "gap" || !cited.length) {
     return { line, verdict, lead: 0, corroborators: 0, total: 0, below_floor: true,
       reasons: [`verdict ${verdict}: the line carries no credibility`] };
   }
@@ -711,6 +788,84 @@ export function lineCredibility(
   return {
     line, verdict, lead, corroborators: totals.length - 1, total, below_floor: total < floor,
     reasons: [`lead ${r3(lead)}`, `${totals.length - 1} corroborating source(s): +${r3(extra)}`, `claim floor ${floor}`],
+  };
+}
+
+/** The line tags by rank: the entailment stage only ever LOWERS a tag (never an upgrade). */
+export const TAG_RANK: Record<string, number> = { SOURCED: 3, INFERRED: 2, UNCERTAIN: 1, GAP: 0 };
+
+/**
+ * The tag a cited line carries after its verdict (attempt 4): `keep` leaves it, `uncertain` lowers
+ * it to UNCERTAIN, `gap` to GAP - never raising it. entailment.ts applyVerdicts rewrites the
+ * synthesis with this same function, so the tag the pipeline scores a line under is the tag the
+ * curator parses from the synthesis it files.
+ */
+export function tagAfterEffect(tag: string, effect: VerdictDef["tagEffect"]): string {
+  const from = String(tag || "").toUpperCase();
+  if (effect === "keep") return from;
+  const to = effect === "gap" ? "GAP" : "UNCERTAIN";
+  return TAG_RANK[to] >= TAG_RANK[from] ? from : to;
+}
+
+/**
+ * One source's contribution through ONE grounding edge (attempt 4, tester finding F2) - the SQL
+ * twin's per-edge term in claim_confidence_d15, op for op: (source total x the edge's stored weight)
+ * x the registry's factor for the edge type. The weight is read as the REAL claim_sources stores
+ * (Math.fround) and must be 0 or in [1e-9, 1] (edgeWeightOk, the CHECK's rule): NaN, Infinity and 5
+ * are refused here, as the table refuses them.
+ */
+export function edgeTotal(m: CredibilityModel, total: number, edgeType: string, weight: number): number {
+  if (!edgeWeightOk(weight)) {
+    throw new CredibilityGateError(`credibility: a claim edge weight of ${String(weight)} is not 0 or in [1e-9, 1] - the gate stops`);
+  }
+  const factor = (m.edgeFactors as unknown as Record<string, number | undefined>)[edgeType];
+  if (factor === undefined) {
+    throw new CredibilityGateError(`credibility: edge type '${edgeType}' has no factor in credibility_terms.edge_factors - the gate stops`);
+  }
+  return totalUnit(total, "source total") * Math.fround(weight) * factor;
+}
+
+export interface FiledLine extends LineCredibility {
+  /** The tag the curator files the line under (after the verdict and the omnibus rule), null = not filed. */
+  filed_tag: string | null;
+  edges: Array<{ cite: number; edge_type: string; weight: number }>;
+}
+
+/**
+ * THE LINE TOTAL IS THE CLAIM TOTAL (attempt 4, tester finding F2). Attempt 3 scored every cited
+ * line as if each source grounded it through a weight-1 `states` edge; the curator files an
+ * [INFERRED] line as `inferred_from` 1.0, an [UNCERTAIN] line (or any line citing more than four
+ * sources) as `inferred_from` 0.5, and claim_confidence_d15 multiplies each by the weight and the
+ * inferred_from factor - so the report footer and research_jobs.metrics said 0.6 / 0.75 / 0.95 for
+ * claims stored at 0.402 / 0.251 / 0.551. Here the line is scored through exactly the edges the
+ * curator will file: the tag after the verdict (tagAfterEffect), the ONE tag -> edge rule
+ * (claim-edges.ts claimEdges, the curator's own call), each edge through edgeTotal, a source's best
+ * edge counting for it (the SQL twin groups edges by source and takes the max), then lineCredibility.
+ * `sourceTotal(n)` is the rolling total [Source n] brings to this line (foldReceived), or null when
+ * the line's citation names no source in the pool (renumbering drops it, the curator never sees it).
+ */
+export function filedLineCredibility(
+  m: CredibilityModel,
+  kind: string,
+  v: { line: number; tag: string; cites: number[]; verdict: string },
+  sourceTotal: (n: number) => number | null,
+): FiledLine {
+  const def = m.verdicts.get(v.verdict);
+  if (!def) throw new CredibilityGateError(`entailment verdict '${v.verdict}' is not registered`);
+  const nums = v.cites.filter((n) => sourceTotal(n) !== null);
+  const filed = claimEdges(tagAfterEffect(v.tag, def.tagEffect), nums);
+  if (!filed || !filed.edges.length) {
+    return { ...lineCredibility(m, kind, v.line, v.verdict, []), filed_tag: null, edges: [] };
+  }
+  const best = new Map<number, number>();
+  for (const e of filed.edges) {
+    const t = edgeTotal(m, sourceTotal(e.sourceIndex)!, e.edgeType, e.weight);
+    best.set(e.sourceIndex, Math.max(best.get(e.sourceIndex) ?? 0, t));
+  }
+  return {
+    ...lineCredibility(m, kind, v.line, v.verdict, [...best.values()].map((total) => ({ total }))),
+    filed_tag: filed.tag,
+    edges: filed.edges.map((e) => ({ cite: e.sourceIndex, edge_type: e.edgeType, weight: e.weight })),
   };
 }
 

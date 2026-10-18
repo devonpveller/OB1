@@ -13,7 +13,7 @@ import { foldHeld, recordCorroboration, TombstonedError } from "./kb.ts";
 
 const HOST = Deno.env.get("CRED_E2E_DB_HOST");
 const pool = HOST
-  ? new Pool({ hostname: HOST, port: 5432, database: "openbrain", user: Deno.env.get("CRED_E2E_DB_USER") ?? "postgres",
+  ? new Pool({ hostname: HOST, port: Number(Deno.env.get("CRED_E2E_DB_PORT") ?? 5432), database: "openbrain", user: Deno.env.get("CRED_E2E_DB_USER") ?? "postgres",
     password: Deno.env.get("CRED_E2E_DB_PASSWORD") ?? "" }, 2, true)
   : null;
 const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore: !HOST, fn, sanitizeOps: false, sanitizeResources: false });
@@ -232,6 +232,16 @@ t("attempt 2: a stamped score outside [0, 1], not a number, or without a family 
       { family: "general", score: "0.5" }, { family: "general", score: null }, { score: 0.3 }]) {
       await c.queryArray("BEGIN");
       try {
+        // attempt 4: a stamp with a score outside the representable range is refused at WRITE
+        // (sources_credibility_stamp_ok); the read-time half is checked past a dropped CHECK
+        const refused = !(typeof stamp.score === "number" && stamp.score >= 0 && stamp.score <= 1);   // { score: 0.3 } (no family) passes the CHECK
+        await c.queryArray("SAVEPOINT w");
+        try {
+          await c.queryArray(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1::uuid`, [s, JSON.stringify({ credibility: stamp })]);
+          if (refused) problems.push(`${JSON.stringify(stamp)}: the stamp CHECK let it in`);
+        } catch (e) { if (!refused || !/sources_credibility_stamp_ok/.test(errOf(e))) problems.push(`${JSON.stringify(stamp)}: write ${errOf(e)}`); }
+        await c.queryArray("ROLLBACK TO SAVEPOINT w");
+        await c.queryArray(`ALTER TABLE public.sources DROP CONSTRAINT sources_credibility_stamp_ok`);
         await c.queryArray(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1::uuid`, [s, JSON.stringify({ credibility: stamp })]);
         for (const sql of [`SELECT public.source_rolling_total($1::uuid, 'practical') AS v`, `SELECT public.claim_confidence_d15($1::uuid) AS v`]) {
           await c.queryArray("SAVEPOINT r");

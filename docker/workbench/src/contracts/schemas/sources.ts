@@ -142,7 +142,7 @@ export const QualityHistory = z.object({
   score: z.number(),
   total: z.number().nullable(),
   claim_kind: registryValue(REGISTRY.claimKinds, "general_theory").nullable(),
-  model_version: z.string(),
+  model_version: z.string().nullable().openapi({ description: "the D15 model label the row was computed under; null when the stored label names no registered paper score version (attempt 4)" }),
   computed_at: Iso,
 }).openapi("QualityHistory");
 

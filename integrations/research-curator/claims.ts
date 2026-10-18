@@ -27,15 +27,14 @@
  * the confidence recompute stay in the database (init-claims.sql).
  */
 
-export type EdgeType = "states" | "inferred_from" | "corroborates" | "contradicts";
-export type EpistemicTag = "sourced" | "inferred" | "uncertain";
-
-export interface ParsedEdge {
-  /** 1-based [Source N] index as written in the synthesis. */
-  sourceIndex: number;
-  edgeType: EdgeType;
-  weight: number;
-}
+// attempt 4 (rw-p3a-entail, tester finding F2): the tag -> edge rule lives in claim-edges.ts, the ONE
+// source the research service's credibility model reads too (its byte-identical copy), so the run's
+// line total is the total of the claim filed here. Re-exported for this module's callers and tests.
+import {
+  claimEdges, edgeWeightOk, type EdgeType, type EpistemicTag, isOmnibusCitation, OMNIBUS_CITATION_MAX, type ParsedEdge,
+} from "./claim-edges.ts";
+export { claimEdges, edgeWeightOk, isOmnibusCitation, OMNIBUS_CITATION_MAX };
+export type { EdgeType, EpistemicTag, ParsedEdge };
 
 export interface ParsedClaim {
   text: string;
@@ -289,36 +288,7 @@ export function classifyMetaClaim(text: string): MetaVerdict {
 }
 
 // ── Omnibus citations (PLAN Phase 3.2) ──────────────────────────────────────
-/**
- * The 0.85 poison claim cited ALL ELEVEN sources from one line. A single
- * assertion that eleven independent sources directly state is not a finding,
- * it is a summary of the pool — so past this many citations a line is at most
- * [UNCERTAIN] and never writes a `states` edge.
- */
-export const OMNIBUS_CITATION_MAX = 4;
-export function isOmnibusCitation(nums: number[]): boolean {
-  return (nums || []).length > OMNIBUS_CITATION_MAX;
-}
-
-function edgesForTag(tag: EpistemicTag, nums: number[]): ParsedEdge[] {
-  if (isOmnibusCitation(nums)) {
-    // Downgraded in edgesForTag AND in the tag itself (see parseSynthesisClaims).
-    return nums.map((sourceIndex) => ({ sourceIndex, edgeType: "inferred_from" as EdgeType, weight: 0.5 }));
-  }
-  if (tag === "sourced") {
-    // First citation directly states; the rest independently corroborate.
-    return nums.map((sourceIndex, i) => ({
-      sourceIndex,
-      edgeType: i === 0 ? "states" : "corroborates",
-      weight: 1.0,
-    }));
-  }
-  if (tag === "inferred") {
-    return nums.map((sourceIndex) => ({ sourceIndex, edgeType: "inferred_from", weight: 1.0 }));
-  }
-  // uncertain — derived but low-trust.
-  return nums.map((sourceIndex) => ({ sourceIndex, edgeType: "inferred_from", weight: 0.5 }));
-}
+// OMNIBUS_CITATION_MAX, isOmnibusCitation and the tag -> edge rule: claim-edges.ts (attempt 4).
 
 const TAG_MAP: Record<string, EpistemicTag | "gap"> = {
   SOURCED: "sourced",
@@ -363,8 +333,10 @@ export function parseSynthesisClaims(synthesis: string): ParseResult {
     const nums = parseSourceNumbers(segment);
     // Phase 3.2 — a line citing more than OMNIBUS_CITATION_MAX sources is
     // summarising the pool, not asserting a fact eleven sources each state.
-    const effectiveTag: EpistemicTag = isOmnibusCitation(nums) ? "uncertain" : kind;
-    const edges = edgesForTag(effectiveTag, nums);
+    // attempt 4: the ONE rule (claim-edges.ts), the same call the research service scores the line with
+    const filed = claimEdges(kind, nums)!;
+    const effectiveTag: EpistemicTag = filed.tag;
+    const edges = filed.edges;
     // Rule #1 gate: a claim with no grounding edge is not admitted. (It is
     // neither stored nor counted as a gap — it was an untethered assertion.)
     if (edges.length === 0) continue;
@@ -518,6 +490,12 @@ export async function writeClaims(
     if (fc.rows[0].was_duplicate) res.claimsDeduped++; else res.claimsWritten++;
 
     for (const e of resolved) {
+      // attempt 4 (tester near-miss: NaN / Infinity / 5 edge weights were stored and scored 1.0): an
+      // edge weight is 0 or in [1e-9, 1] as the REAL it is stored as - refused here as the table's
+      // CHECK (claim_sources_weight_credibility) refuses it
+      if (!edgeWeightOk(e.weight)) {
+        throw new Error(`claim edge refused: weight ${String(e.weight)} is not 0 or in [1e-9, 1] (claim_sources.weight)`);
+      }
       await client.queryObject(
         `SELECT link_claim_to_source($1, $2, $3, $4)`,
         [claimId, e.sourceId, e.edgeType, e.weight],

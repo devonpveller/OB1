@@ -468,6 +468,18 @@
     "claim_cap": 0.35
    },
    "retired_at": null
+  },
+  {
+   "registry": "credibility_terms",
+   "key": "edge_factors",
+   "version": 1,
+   "definition": {
+    "term_version": 1,
+    "states": 1,
+    "corroborates": 1,
+    "inferred_from": 0.67
+   },
+   "retired_at": null
   }
  ],
  "versions": {

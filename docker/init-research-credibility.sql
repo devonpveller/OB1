@@ -46,6 +46,16 @@
 --      refuses. The model's registry versions, the registries' TRUNCATE and a claim's filing time
 --      (filed_at, server-set) are out of the app roles' reach. The re-score gate records one
 --      confirmation per view digest and applies it once.
+--   8. THE REPRESENTABLE RANGE AND ONE LINE FORMULA (attempt 4, tester t-rw-p3a-3 findings F1/F2).
+--      Every credibility number either twin reads as an input - registry numbers, a source's stamped
+--      score, a corroboration amount, a claim edge's weight - is 0 or in [1e-9, 1] (CHECKs on all
+--      four; credibility.ts refuses the same and flushes a number it forms below 1e-9 to 0), and
+--      credibility_store_confidence stores a total below the smallest normal float4 as 0 (always on
+--      the total's side of a floor, which is 0 or >= 1e-9) instead of raising 22003. A grounding
+--      edge's type factor (inferred_from 0.67) is the registry row credibility_terms.edge_factors,
+--      read here and by credibility.ts, and the pipeline scores each line through the edges the
+--      curator files for it (claim-edges.ts), so a line's total IS the filed claim's total. The
+--      gate's digest binds the view exactly (the bits of every after-score and its verdict).
 --
 -- Conventions mirror init-research-contract.sql: idempotent, additive, RLS on with a
 -- service_role FOR ALL policy, no DROP TABLE / TRUNCATE / unqualified DELETE. Mounted in
@@ -126,6 +136,38 @@ AS $$
         WHEN (p #>> '{}')::numeric = 0 THEN TRUE
         WHEN (p #>> '{}')::numeric < 1e-300 OR (p #>> '{}')::numeric > 2 THEN FALSE
         ELSE (p #>> '{}')::float8 >= 1e-9::float8 AND (p #>> '{}')::float8 <= 1::float8
+    END, FALSE);
+$$;
+
+-- THE REPRESENTABLE RANGE for a stored number (attempt 4, tester finding F1): a corroboration amount
+-- (DOUBLE), a claim edge's weight (REAL, judged as the float8 it reads as) and a stamped score are 0
+-- or in [1e-9, 1] - the rule credibility_is_unit applies to registry text, applied to a column value.
+-- NaN, Infinity and -1 are refused (NaN sorts above every number in Postgres, so `<= 1` refuses it).
+-- Attempt 3 let an amount be any double in [0, 1]: 5e-324 was stored, both twins computed a 5e-324
+-- claim total, and credibility_store_confidence's REAL cast raised 22003. credibility.ts amountUnit /
+-- edgeWeightOk / unit are the TS side; the pipeline flushes a number it forms below 1e-9 to 0.
+CREATE OR REPLACE FUNCTION public.credibility_is_unit_value(p DOUBLE PRECISION)
+RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT COALESCE(p = 0::float8 OR (p >= 1e-9::float8 AND p <= 1::float8), FALSE);
+$$;
+
+-- A stored credibility stamp (sources.metadata.credibility) is well formed (attempt 4): when it has a
+-- score, the score is a credibility number (0 or in [1e-9, 1]); when its signals carry `primary`, it
+-- is the JSON boolean (tester near-miss: "true" / 1 were read as true by credibility.ts and as not
+-- true here). The CHECK sources_credibility_stamp_ok holds the table to it; the read path
+-- (source_credibility) still refuses a bad score (OBC04) and reads only `primary = true`.
+CREATE OR REPLACE FUNCTION public.credibility_stamp_ok(p_meta JSONB)
+RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT COALESCE(CASE
+        WHEN p_meta IS NULL OR NOT (p_meta ? 'credibility') THEN TRUE
+        WHEN jsonb_typeof(p_meta -> 'credibility') IS DISTINCT FROM 'object' THEN TRUE
+        ELSE (NOT ((p_meta -> 'credibility') ? 'score') OR public.credibility_is_unit(p_meta #> '{credibility,score}'))
+         AND (p_meta #> '{credibility,signals,primary}' IS NULL
+              OR jsonb_typeof(p_meta #> '{credibility,signals,primary}') = 'boolean')
     END, FALSE);
 $$;
 
@@ -274,7 +316,12 @@ UPDATE public.contract_registry_entries
  WHERE registry = 'source_families' AND key = 'scholarly' AND NOT (definition ? 'scorer');
 INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES
     ('credibility_terms', 'corroboration', 'corroboration',
-        '{"term_version":1,"strong_factor":0.5,"weak_factor":0.1,"claim_per":0.5,"claim_cap":0.35}')
+        '{"term_version":1,"strong_factor":0.5,"weak_factor":0.1,"claim_per":0.5,"claim_cap":0.35}'),
+    -- attempt 4 (tester finding F2): what a grounding edge's TYPE multiplies a source's total by in a
+    -- claim - attempt 3 wrote the 0.67 as a literal here and credibility.ts had none. One row, read by
+    -- claim_confidence_d15 and by credibility.ts buildModel (edgeFactors); contradicts edges never count.
+    ('credibility_terms', 'edge_factors', 'claim edge factors',
+        '{"term_version":1,"states":1.0,"corroborates":1.0,"inferred_from":0.67}')
 ON CONFLICT (registry, key) DO NOTHING;
 
 INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES
@@ -495,10 +542,17 @@ BEGIN
         ALTER TABLE public.source_corroborations ADD CONSTRAINT source_corroborations_one_per_line
             UNIQUE (from_source_id, to_source_id, claim_text);
     END IF;
+    -- attempt 4 (tester finding F1): the representable range, 0 or [1e-9, 1] (attempt 3: [0, 1],
+    -- which let 5e-324 in); an earlier definition of the constraint is replaced
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.source_corroborations'::regclass
+                 AND conname = 'source_corroborations_amount_unit'
+                 AND pg_get_constraintdef(oid) NOT LIKE '%credibility_is_unit_value%') THEN
+        ALTER TABLE public.source_corroborations DROP CONSTRAINT source_corroborations_amount_unit;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.source_corroborations'::regclass
                      AND conname = 'source_corroborations_amount_unit') THEN
         ALTER TABLE public.source_corroborations ADD CONSTRAINT source_corroborations_amount_unit
-            CHECK (amount >= 0 AND amount <= 1);
+            CHECK (public.credibility_is_unit_value(amount));
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.source_corroborations'::regclass
                      AND conname = 'source_corroborations_not_self') THEN
@@ -519,6 +573,32 @@ BEGIN
         EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I TYPE DOUBLE PRECISION', c.table_name, c.column_name);
     END LOOP;
 END $$;
+-- Attempt 4 (tester finding F1 and near-miss P4): claim_sources.weight (init-claims.sql's REAL, written
+-- by the app roles through link_claim_to_source) had no CHECK - NaN, Infinity and 5 scored a claim 1.0
+-- under D15, and 1e-45 gave a total the stored twin could not hold. Now 0 or in [1e-9, 1]
+-- (credibility_is_unit_value of the stored value; research-curator claim-edges.ts edgeWeightOk is the
+-- writer's twin). And a stamp (sources.metadata.credibility) is well formed (credibility_stamp_ok).
+-- Both are added NOT VALID and then validated: on a database whose existing rows already satisfy
+-- them (every pre-P3a row: weights 1.0 / 0.5, no stamps) they end validated; if an existing row does
+-- not, the constraint still holds every new write and a NOTICE names the table (the read path refuses
+-- such a row loudly, OBC04).
+DO $$
+DECLARE c RECORD;
+BEGIN
+    FOR c IN SELECT * FROM (VALUES
+        ('claim_sources', 'claim_sources_weight_credibility', 'public.credibility_is_unit_value(weight::double precision)'),
+        ('sources', 'sources_credibility_stamp_ok', 'public.credibility_stamp_ok(metadata)')) AS v(tb, con, expr) LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = c.con AND conrelid = ('public.' || c.tb)::regclass) THEN
+            EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (%s) NOT VALID', c.tb, c.con, c.expr);
+        END IF;
+        BEGIN
+            EXECUTE format('ALTER TABLE public.%I VALIDATE CONSTRAINT %I', c.tb, c.con);
+        EXCEPTION WHEN check_violation THEN
+            RAISE NOTICE 'rw-p3a-entail: existing rows of public.% do not satisfy % - it holds new writes; the read path refuses those rows (OBC04)', c.tb, c.con;
+        END;
+    END LOOP;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_source_corroborations_to   ON public.source_corroborations (to_source_id);
 CREATE INDEX IF NOT EXISTS idx_source_corroborations_from ON public.source_corroborations (from_source_id);
 
@@ -800,6 +880,13 @@ BEGIN
             AND public.credibility_is_unit(v_corr -> 'claim_per') AND public.credibility_is_unit(v_corr -> 'claim_cap'), FALSE) THEN
         RAISE EXCEPTION 'credibility_terms.corroboration: the terms are missing or malformed (%) - the gate stops', v_corr USING ERRCODE = 'OBC04';
     END IF;
+    -- the edge factors (attempt 4; TS buildModel edgeFactors): states, corroborates, inferred_from
+    SELECT definition INTO v_corr FROM public.contract_registry_entries
+     WHERE registry = 'credibility_terms' AND key = 'edge_factors' AND retired_at IS NULL;
+    IF NOT COALESCE(public.credibility_is_unit(v_corr -> 'states') AND public.credibility_is_unit(v_corr -> 'corroborates')
+            AND public.credibility_is_unit(v_corr -> 'inferred_from'), FALSE) THEN
+        RAISE EXCEPTION 'credibility_terms.edge_factors: the factors are missing or malformed (%) - the gate stops', v_corr USING ERRCODE = 'OBC04';
+    END IF;
     -- every kind has a row for every SCORED family (TS validateTable over scoredFamilies): a family
     -- registered without any weight row (P0's expansion by registration) is not in the model yet and
     -- stops nothing until a source of it is scored (credibility_weight then stops the gate, naming it)
@@ -907,7 +994,7 @@ BEGIN
         v_bonus := public.credibility_unit(w, 'primary_bonus', 'weight row ' || p_kind || '.' || c.family);
     END IF;
     v_base := public.credibility_unit(w, 'weight', 'weight row ' || p_kind || '.' || c.family) * LEAST(1::float8, c.score + v_bonus);
-    SELECT COALESCE(sum(sc.amount ORDER BY sc.amount DESC), 0::float8), COALESCE(bool_or(NOT (sc.amount >= 0 AND sc.amount <= 1)), FALSE) INTO v_in, v_bad
+    SELECT COALESCE(sum(sc.amount ORDER BY sc.amount DESC), 0::float8), COALESCE(bool_or(NOT public.credibility_is_unit_value(sc.amount)), FALSE) INTO v_in, v_bad
       FROM public.source_corroborations sc
       JOIN public.sources g ON g.id = sc.from_source_id AND g.retraction_committed_at IS NULL
            AND (p_scope IS NULL OR g.metadata @> p_scope)
@@ -915,7 +1002,7 @@ BEGIN
        AND sc.from_source_id <> p_source_id
        AND (p_exclude IS NULL OR NOT (sc.from_source_id = ANY (p_exclude)));
     IF v_bad THEN
-        RAISE EXCEPTION 'credibility: a corroboration into source % has an amount outside [0, 1] - the gate stops', p_source_id
+        RAISE EXCEPTION 'credibility: a corroboration into source % has an amount that is not 0 or in [1e-9, 1] - the gate stops', p_source_id
             USING ERRCODE = 'OBC04';
     END IF;
     RETURN LEAST(1::float8, v_base + v_in);
@@ -962,9 +1049,11 @@ AS $$
      WHERE c.id = p_claim_id;
 $$;
 
--- The D15 claim total (the stored twin of credibility.ts lineCredibility). Per non-suppressed,
--- non-contradicting source edge: the source's rolling total x the edge's weight x the tag factor
--- (inferred_from 0.67 = the 0.60/0.90 ratio init-claims.sql uses). The best source leads; each
+-- The D15 claim total (the stored twin of credibility.ts filedLineCredibility / lineCredibility). Per
+-- non-suppressed, non-contradicting source edge: the source's rolling total x the edge's weight x the
+-- edge type's factor - attempt 4: the registry row credibility_terms.edge_factors (inferred_from 0.67
+-- = the 0.60/0.90 ratio init-claims.sql uses), which credibility.ts reads too; a weight that is not 0
+-- or in [1e-9, 1] stops the gate (OBC04; the CHECK refuses it at write). The best source leads; each
 -- further distinct source adds claim_per x its total up to claim_cap. Then the legacy rules that
 -- are not about source credibility: ungrounded 0, depth 0.85^d, stale x0.5, contradicted <=0.30.
 -- THE FOLD RULE (attempt 2, tester adversarial (3) "mutual corroboration counts B twice"): each
@@ -983,7 +1072,7 @@ AS $$
 DECLARE
     v_kind TEXT; v_basis TEXT; v_depth INT; v_terms JSONB; v_lead DOUBLE PRECISION := 0; v_extra DOUBLE PRECISION := 0;
     v_stale BOOLEAN; v_contra BOOLEAN; v_score DOUBLE PRECISION; r RECORD; i INT := 0; v_grounders UUID[];
-    v_per DOUBLE PRECISION; v_cap DOUBLE PRECISION;
+    v_per DOUBLE PRECISION; v_cap DOUBLE PRECISION; v_factors JSONB; v_badw BOOLEAN;
 BEGIN
     PERFORM public.credibility_model_check();
     SELECT k.kind, k.basis INTO v_kind, v_basis FROM public.claim_kind_of(p_claim_id) k;
@@ -1002,13 +1091,22 @@ BEGIN
      WHERE registry = 'credibility_terms' AND key = 'corroboration';
     v_per := public.credibility_unit(v_terms, 'claim_per', 'corroboration terms');
     v_cap := public.credibility_unit(v_terms, 'claim_cap', 'corroboration terms');
+    SELECT definition INTO v_factors FROM public.contract_registry_entries
+     WHERE registry = 'credibility_terms' AND key = 'edge_factors' AND retired_at IS NULL;
+    SELECT bool_or(NOT public.credibility_is_unit_value(cs.weight::float8)) INTO v_badw
+      FROM public.claim_edge_counts(p_claim_id) e JOIN public.claim_sources cs ON cs.id = e.edge_id
+     WHERE e.source_id IS NOT NULL AND e.edge_type <> 'contradicts';
+    IF COALESCE(v_badw, FALSE) THEN
+        RAISE EXCEPTION 'credibility: claim % has an edge weight that is not 0 or in [1e-9, 1] - the gate stops', p_claim_id
+            USING ERRCODE = 'OBC04';
+    END IF;
     SELECT array_agg(DISTINCT e.source_id) INTO v_grounders
       FROM public.claim_edge_counts(p_claim_id) e
      WHERE e.source_id IS NOT NULL AND e.edge_type <> 'contradicts';
     FOR r IN
         SELECT e.source_id, max(public.source_rolling_total_core(e.source_id, v_kind, NULL::jsonb, v_grounders)
-                   * COALESCE(cs.weight::float8, 1::float8)
-                   * CASE e.edge_type WHEN 'inferred_from' THEN 0.67::float8 ELSE 1::float8 END) AS t
+                   * cs.weight::float8
+                   * public.credibility_unit(v_factors, e.edge_type, 'credibility_terms.edge_factors')) AS t
           FROM public.claim_edge_counts(p_claim_id) e
           JOIN public.claim_sources cs ON cs.id = e.edge_id
          WHERE e.source_id IS NOT NULL AND e.edge_type <> 'contradicts'
@@ -1062,15 +1160,24 @@ CREATE OR REPLACE VIEW public.credibility_before_after AS
       CROSS JOIN LATERAL (SELECT CASE WHEN c.kind IS NULL THEN NULL
                                       ELSE public.credibility_claim_floor(c.kind) END AS claim_floor) f;
 
--- The digest the operator confirms: the model version plus every claim's after-score. Any
+-- The digest the operator confirms: the model version plus every claim's row of the view. Any
 -- change to the table, the paper score, a source's record or the claim set changes it, so a
 -- confirmation can only ever apply to the view that was read.
+-- Attempt 4 (tester near-miss: each after-score was rounded to 4 decimals, so a stamp change moving
+-- a claim from 0.50003 to 0.49997 flipped below_floor_after and left the digest unchanged): each
+-- row binds its kind, the exact bits of the after-score (float8send), its floor verdict and the
+-- source counts - independent of extra_float_digits. NULLs are spelled, so no row drops out of
+-- string_agg. The BEFORE side is not bound: applying the view re-scores every claim, which changes
+-- before_confidence, and the digest must still name the applied view (the gate's idempotency).
 CREATE OR REPLACE FUNCTION public.credibility_before_after_digest()
 RETURNS TEXT
 LANGUAGE sql STABLE
 AS $$
     SELECT md5(public.credibility_model_version() || '|' ||
-               COALESCE(string_agg(b.claim_id::text || ':' || round(b.after_confidence::numeric, 4)::text, ',' ORDER BY b.claim_id), ''))
+               COALESCE(string_agg(concat_ws(':', b.claim_id::text, COALESCE(b.kind, '~'),
+                            COALESCE(encode(float8send(b.after_confidence), 'hex'), '~'),
+                            COALESCE(b.below_floor_after::text, '~'),
+                            b.sources::text, b.paper_sources::text), ',' ORDER BY b.claim_id), ''))
       FROM public.credibility_before_after b;
 $$;
 
@@ -1148,12 +1255,21 @@ $$;
 -- within half a float4 step of a floor would round onto the other side of it (0.49999999 stores
 -- as 0.5). This returns the float4 nearest the total that is on the SAME side of the kind's claim
 -- floor - the nearest float4 unless that one crosses the floor, then one step back.
+-- Attempt 4 (tester finding F1: `p_total::real` raised 22003 underflow for a total below ~7e-46,
+-- aborting recompute_claim_confidence, the operator's whole credibility_apply_d15_trigger and, after
+-- the flip, the app's link_claim_to_source): a total below the smallest NORMAL float4 (2^-126) is
+-- stored as 0. 0 is always on the total's side of the floor: a floor is 0 or >= 1e-9, so such a
+-- total is below any non-zero floor (as 0 is) and at or above a 0 floor (as 0 is).
+-- credibility.ts storeConfidence is the TS twin, op for op.
 CREATE OR REPLACE FUNCTION public.credibility_store_confidence(p_total DOUBLE PRECISION, p_floor DOUBLE PRECISION)
 RETURNS REAL
 LANGUAGE plpgsql IMMUTABLE
 AS $$
-DECLARE v REAL := p_total::real; i INT := 0;
+DECLARE v REAL; i INT := 0;
 BEGIN
+    IF p_total IS NULL THEN RETURN NULL; END IF;
+    IF p_total < power(2::float8, -126) THEN RETURN 0::real; END IF;
+    v := p_total::real;
     IF p_floor IS NULL THEN RETURN v; END IF;
     WHILE i < 4 AND ((p_total < p_floor AND v::float8 >= p_floor) OR (p_total >= p_floor AND v::float8 < p_floor)) LOOP
         v := CASE WHEN p_total < p_floor THEN (v::float8 - abs(v::float8) * power(2::float8, -23))::real

@@ -368,7 +368,7 @@ export type QualityHistory = {
   score: number;
   total: number | null;
   claim_kind: string | null; /** registry: claim_kinds */
-  model_version: string;
+  model_version: string | null;
   computed_at: string;
 };
 

@@ -723,7 +723,9 @@
             "description": "A key of the `claim_kinds` registry (GET /workbench/contract/registries/claim_kinds)."
           },
           "model_version": {
-            "type": "string"
+            "type": "string",
+            "nullable": true,
+            "description": "the D15 model label the row was computed under; null when the stored label names no registered paper score version (attempt 4)"
           },
           "computed_at": {
             "type": "string",

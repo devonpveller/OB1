@@ -36,6 +36,9 @@ DROP FUNCTION IF EXISTS public.credibility_patterns_ok(TEXT, JSONB);
 DROP TRIGGER IF EXISTS trg_claims_filed_at ON public.claims;
 DROP FUNCTION IF EXISTS public.trg_claims_filed_at();
 ALTER TABLE public.claims DROP COLUMN IF EXISTS filed_at;
+-- attempt 4's objects: the representable-range CHECKs on P0 / init-claims tables (their columns stay)
+ALTER TABLE public.claim_sources DROP CONSTRAINT IF EXISTS claim_sources_weight_credibility;
+ALTER TABLE public.sources DROP CONSTRAINT IF EXISTS sources_credibility_stamp_ok;
 
 DROP TABLE IF EXISTS public.credibility_trigger_state;
 \ir init-research-contract.sql
@@ -63,6 +66,7 @@ DROP FUNCTION IF EXISTS public.credibility_weight(TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.credibility_model_version();
 DROP FUNCTION IF EXISTS public.credibility_weight_row_ok(JSONB);
 DROP FUNCTION IF EXISTS public.credibility_unit(JSONB, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.credibility_stamp_ok(JSONB);
 DROP FUNCTION IF EXISTS public.credibility_is_unit(JSONB);
 DROP FUNCTION IF EXISTS public.fold_held_source(UUID, JSONB, UUID);
 DROP TRIGGER IF EXISTS trg_source_corroborations_supports_only ON public.source_corroborations;
@@ -76,11 +80,12 @@ DROP TABLE IF EXISTS public.source_corroborations;
 DROP TABLE IF EXISTS public.source_credibility_history;
 DROP TABLE IF EXISTS public.research_admission_trail;
 DROP FUNCTION IF EXISTS public.trg_credibility_owner_only();   -- after the tables whose TRUNCATE triggers use it
+DROP FUNCTION IF EXISTS public.credibility_is_unit_value(DOUBLE PRECISION);   -- after the CHECKs that call it
 
 DELETE FROM public.contract_registry_entries
  WHERE registry IN ('claim_kinds', 'credibility_weights', 'domain_classes', 'paper_score_versions',
                     'entailment_verdicts', 'admission_trail_kinds')
-    OR (registry = 'credibility_terms' AND key = 'corroboration')
+    OR (registry = 'credibility_terms' AND key IN ('corroboration', 'edge_factors'))
     OR (registry = 'trail_event_kinds' AND key IN ('folded', 'found_via'));
 DELETE FROM public.contract_registries
  WHERE name IN ('claim_kinds', 'credibility_weights', 'domain_classes', 'paper_score_versions',

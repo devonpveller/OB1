@@ -12,7 +12,7 @@
  * claims and STAGES candidate sources.
  */
 
-import { amountUnit, CredibilityGateError, unit } from "./credibility.ts";
+import { amountUnit, CredibilityGateError, totalUnit, unit } from "./credibility.ts";
 import { safeReasonText, safeScholarlyRecord } from "./scholarly.ts";
 
 interface QueryClient {
@@ -315,8 +315,14 @@ export async function stampSourceCredibility(
   // attempt 2: a stamp the SQL twin would refuse (OBC04) is refused here, before it is stored;
   // and a scholarly record is stored only with an allow-listed reason (no URL, no key, no mailto)
   unit(stamp.score, `credibility stamp of ${sourceId}: score`);
-  amountUnit(stamp.total, `credibility stamp of ${sourceId}: total`);   // a computed total (attempt 3)
+  totalUnit(stamp.total, `credibility stamp of ${sourceId}: total`);   // a record, never read as an input (attempt 4)
   if (!stamp.family) throw new CredibilityGateError(`credibility stamp of ${sourceId}: no family`);
+  // attempt 4 (tester near-miss P3): `primary` is the JSON boolean or absent - the SQL twin reads only
+  // `= 'true'::jsonb` and the CHECK sources_credibility_stamp_ok refuses any other shape
+  const primary = (stamp.signals as Record<string, unknown> | null | undefined)?.primary;
+  if (primary !== undefined && typeof primary !== "boolean") {
+    throw new CredibilityGateError(`credibility stamp of ${sourceId}: signals.primary is ${JSON.stringify(primary)}, not a boolean`);
+  }
   const patch: Record<string, unknown> = { credibility: { ...stamp, reasons: stamp.reasons.map(safeReasonText) } };
   if (scholarly) patch.scholarly = safeScholarlyRecord(scholarly);
   if (stamp.found_via) { patch.found_via = stamp.found_via; patch.found_via_kind = stamp.found_via_kind ?? "lead"; }
@@ -351,7 +357,9 @@ export async function recordCorroboration(
   e: { from: string; to: string; strength: "strong" | "weak"; amount: number; claim: string; kind: string; verdict: string; model: string },
   jobId: string | null,
 ): Promise<void> {
-  amountUnit(e.amount, `corroboration ${e.from} -> ${e.to}: amount`);   // a computed amount, stored as DOUBLE (attempt 3)
+  // attempt 4 (tester finding F1): 0 or in [1e-9, 1] - attempt 3 SENT 5e-324, which the stored twin's
+  // REAL cast could not hold; the table's CHECK (source_corroborations_amount_unit) applies the same rule
+  amountUnit(e.amount, `corroboration ${e.from} -> ${e.to}: amount`);
   if (e.from === e.to) throw new CredibilityGateError(`corroboration refused: source ${e.from} cannot corroborate itself`);
   await client.queryObject(
     `INSERT INTO public.source_corroborations

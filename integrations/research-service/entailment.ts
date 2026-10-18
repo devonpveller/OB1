@@ -27,6 +27,7 @@
  */
 
 import { isModelDownError } from "./llm.ts";
+import { tagAfterEffect } from "./credibility.ts";
 
 /** Subset of harness Deps this stage needs (kept structural so tests can pass a stub). */
 export interface JudgeDeps {
@@ -229,7 +230,6 @@ export interface EntailmentRecord {
   audit: Array<{ line: number; from: string; to: string; verdict: string; basis: string; rationale: string; text: string }>;
 }
 
-const RANK: Record<string, number> = { SOURCED: 3, INFERRED: 2, UNCERTAIN: 1, GAP: 0 };
 
 /**
  * Apply the verdicts to the synthesis, index-safe. Returns the new synthesis and the record the
@@ -256,8 +256,9 @@ export function applyVerdicts(
     const m = line?.match(TAG_RE);
     if (!m || effect === "keep") continue;
     const from = m[2].toUpperCase();
-    const to = effect === "gap" ? "GAP" : "UNCERTAIN";
-    if (RANK[to] >= RANK[from]) continue;            // never an upgrade, never a no-op count
+    // attempt 4: the ONE tag rule (credibility.ts tagAfterEffect), the one the line is scored under
+    const to = tagAfterEffect(from, effect);
+    if (to === from) continue;                       // never an upgrade, never a no-op count
     let next = line.replace(TAG_RE, `$1[${to}]`);
     if (to === "GAP") next = next.replace(CITE_STRIP_RE, "").trimEnd();
     lines[v.line] = next;
