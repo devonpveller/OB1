@@ -20,6 +20,11 @@
  *   notes/slug-names/deep folder/sub dir/leaf note.md   a deep folder with spaces
  *   notes/private/kept.md            [/notes/private/kept] - Quartz's ignore
  *                                    patterns are root-anchored: this IS a page
+ *   notes/adv/back\slash.md          [/notes/adv/back%5Cslash]  a backslash (attempt 2)
+ *   notes/adv/back\.dot.md           [/notes/adv/back%5C.dot]   not a dot-file
+ *   notes/adv/private\x.md           [/notes/adv/private%5Cx]   not under private/
+ *   notes/adv/lt<gt>.md              [/notes/adv/lt%3Cgt%3E]    < and > (escaping)
+ * (a Windows checkout cannot hold "\" or "<" in a name either)
  * Hand-written wikilinks (RV-1): sp ace links [[tool-fixture-db]] and
  * [[nested-note]] by BASENAME - the repair pass (and the backfill) resolve
  * them to content/tool/tool-fixture-db and notes/fixture-folder/nested-note.
@@ -44,6 +49,15 @@ export const SLUG_FILES = {
   "notes/slug-names/up/inner.md": "# Inner\n\nInside the folder that shares a name with [[up]].\n",
   "notes/slug-names/deep folder/sub dir/leaf note.md": "# Leaf note\n\nDeep inside folders with spaces. Up: [[sp ace]].\n",
   "notes/private/kept.md": "# Nested private folder\n\nQuartz builds this page: its ignore patterns match at the vault root only.\n",
+  // rw-p1a-deploy-prep attempt 2 (tester, clause 2): on Linux Quartz reads "\"
+  // as a CHARACTER of the name (glob.ts toPosixPath splits on path.sep = "/"):
+  // each is ONE page at notes/adv/<name with the backslash>, listed in
+  // notes/adv/ - no back/ or private/ folder; back\.dot.md is not a dot-file.
+  // lt<gt>.md (tester N1): Quartz's escaping of "<" and ">" in data-slug.
+  "notes/adv/back\\slash.md": "# Backslash in the name\n\nA Linux-made file whose name holds a backslash.\n",
+  "notes/adv/back\\.dot.md": "# Backslash then a dot\n\nNot a dot-file: the name starts with b.\n",
+  "notes/adv/private\\x.md": "# Backslash after private\n\nNot under private/: the backslash is part of the name.\n",
+  "notes/adv/lt<gt>.md": "# Less and greater\n\nA name with a less-than and a greater-than sign.\n",
   // not pages
   "private/secret.md": "# SECRET-FIXTURE-MARKER\n",
   "templates/tpl.md": "# TEMPLATE-FIXTURE-MARKER {{title}}\n",

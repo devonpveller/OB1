@@ -78,4 +78,13 @@ export const URLS = [
   ["folder index", "/notes/slug-names/"],
   ["folder index", "/notes/slug-names/deep-folder/"],
   ["folder index", "/notes/slug-names/deep-folder/sub-dir/"],
+  // rw-p1a-deploy-prep attempt 2 (tester, clause 2 + N1): names with a
+  // backslash (a character on Linux, as Quartz reads it: one page each, no
+  // phantom back/ or private/ folder), and < > (data-slug escaped as preact
+  // does). The URL is percent-encoded; parity-diff decodes it to the file.
+  ["legacy user note", "/notes/adv/back%5Cslash"],
+  ["legacy user note", "/notes/adv/back%5C.dot"],
+  ["legacy user note", "/notes/adv/private%5Cx"],
+  ["legacy user note", "/notes/adv/lt%3Cgt%3E"],
+  ["folder index", "/notes/adv/"],
 ];

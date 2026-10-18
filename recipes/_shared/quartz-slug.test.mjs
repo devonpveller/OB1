@@ -51,3 +51,30 @@ test("RV-1: isPagePath is Quartz's page set (root-anchored ignore patterns, no d
   assert.equal(isContentDir("private"), false);
   assert.equal(isContentDir("notes/private"), true);
 });
+
+// rw-p1a-deploy-prep attempt 2 (tester, clause 2): on Linux Quartz treats "\"
+// as an ORDINARY character - glob.ts toPosixPath splits on path.sep, which is
+// "/" there. Expected values: the image's own path.ts slugifyFilePath and
+// glob.ts glob() over these files, measured 2026-10-18 (findings, Attempt 2).
+const BS = "\\";
+test("attempt 2: a backslash is a character, never a separator - Quartz's slug and page set for back\\slash, back\\.dot, private\\x", () => {
+  const slugs = {
+    [`notes/adv/back${BS}slash.md`]: `notes/adv/back${BS}slash`,
+    [`notes/adv/back${BS}.dot.md`]: `notes/adv/back${BS}.dot`,
+    [`notes/adv/private${BS}x.md`]: `notes/adv/private${BS}x`,
+    [`private${BS}x.md`]: `private${BS}x`,
+    [`notes/adv/${BS}.lead.md`]: `notes/adv/${BS}.lead`,
+    "notes/adv/lt<gt>.md": "notes/adv/lt<gt>",
+  };
+  for (const [fp, want] of Object.entries(slugs)) {
+    assert.equal(slugifyFilePath(fp), want, fp);
+    assert.equal(urlSlugOf(fp.replace(/\.md$/, "")), want, fp);
+  }
+  // glob() returned every one of these as a page ...
+  for (const p of [`notes/adv/back${BS}slash.md`, `notes/adv/back${BS}.dot.md`, `notes/adv/private${BS}x.md`, `private${BS}x.md`,
+    `templates${BS}t.md`, `notes/adv/${BS}.lead.md`, "notes/adv/lt<gt>.md"]) assert.equal(isPagePath(p), true, p);
+  // ... and skipped a dot-file whose name merely contains a backslash
+  assert.equal(isPagePath(`notes/adv/.x${BS}y.md`), false);
+  assert.equal(isContentDir(`notes/back${BS}dir`), true);
+  assert.equal(isContentDir(`private${BS}x`), true, "a directory named private\\x is not private/");
+});

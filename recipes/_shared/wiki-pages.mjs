@@ -38,7 +38,7 @@ import nodePath from "node:path";
 import { withLedgerLock } from "./structural-ledger.mjs";
 import { extractLinks } from "./links.mjs";
 import { classify } from "./page-classes.mjs";
-import { sluggifySegment } from "./quartz-slug.mjs";
+import { sluggifySegment, toPosixPath } from "./quartz-slug.mjs";
 export { extractLinks };
 
 // Back-compat name for the class lookup (now registry-driven).
@@ -192,10 +192,12 @@ const _unsynced = new Map();  // slug -> error (the page's file exists; its row 
 let _synced = 0;
 
 // Vault-relative path from an absolute one; null OUTSIDE the vault root (a
-// scratch --out-dir must never write junk slugs, observed 2026-08-26).
-export function vaultRel(absPath, vaultDir = process.env.WIKI_GIT_DIR || "/wiki") {
-  const abs = String(absPath || "").replace(/\\/g, "/");
-  const root = String(vaultDir).replace(/\\/g, "/").replace(/\/+$/, "");
+// scratch --out-dir must never write junk slugs, observed 2026-08-26). The
+// OS's separator becomes "/" (Quartz's toPosixPath); on Linux a "\" stays a
+// character of the name (rw-p1a-deploy-prep attempt 2). `sep`: a test seam.
+export function vaultRel(absPath, vaultDir = process.env.WIKI_GIT_DIR || "/wiki", sep = nodePath.sep) {
+  const abs = toPosixPath(String(absPath || ""), sep);
+  const root = toPosixPath(String(vaultDir), sep).replace(/\/+$/, "");
   if (!root || !abs.startsWith(root + "/")) return null;
   return abs.slice(root.length + 1);
 }

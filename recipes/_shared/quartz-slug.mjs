@@ -12,7 +12,8 @@
  * one to the other; nothing here changes what a row is keyed by.
  *
  * sluggify / slugifyFilePath / getFileExtension / stripSlashes / endsWith are
- * ported verbatim from Quartz 4.5.1 quartz/util/path.ts (MIT, (c) jackyzha0;
+ * ported verbatim from Quartz 4.5.1 quartz/util/path.ts, toPosixPath from
+ * quartz/util/glob.ts (MIT, (c) jackyzha0;
  * notice in docker/wiki-viewer/THIRD-PARTY-NOTICES.md) - the exact rule, not
  * an approximation. isPagePath() is Quartz's page set as its build globs it
  * (quartz/util/glob.ts: globby("**\/*.md", { ignore: ignorePatterns,
@@ -90,9 +91,20 @@ export function isContentDir(relDir) {
   return parts.every((p) => !p.startsWith(".") && !NON_CONTENT_DIRS.has(p));
 }
 
-// Is this vault-relative FILE path ("notes/x.md") a page Quartz builds?
+// Quartz glob.ts toPosixPath(): an OS path -> "/"-separated, split on the
+// OS's separator `sep` (node:path sep; a parameter so this module stays pure).
+// On Linux sep is "/" and a "\" is a CHARACTER of a file name - Quartz builds
+// "back\slash.md" at notes/back\slash (rw-p1a-deploy-prep attempt 2). The one
+// place an OS path becomes a vault path (wiki-pages.mjs vaultRel) uses this;
+// every vault path below is "/"-separated and never re-split on "\".
+export function toPosixPath(fp, sep) {
+  return String(fp).split(sep).join("/");
+}
+
+// Is this vault-relative FILE path ("notes/x.md", "/"-separated) a page
+// Quartz builds? A "\" is part of a name: "back\.dot.md" is not a dot-file.
 export function isPagePath(rel) {
-  const s = String(rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const s = String(rel || "").replace(/^\/+/, "");
   const parts = s.split("/");
   const name = parts.at(-1);
   if (!name || !name.endsWith(".md") || name.startsWith(".")) return false;

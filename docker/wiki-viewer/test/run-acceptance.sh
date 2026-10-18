@@ -79,7 +79,16 @@ for u in sp-ace pv.1 a-and-b qx ht 50-percent up up/inner deep-folder/sub-dir/le
   l="$(echo "$out" | grep -F " /notes/slug-names/$u " | grep '^200 ')"; echo "${l:-(no line) /notes/slug-names/$u}" | cut -c1-230
   echo "$l" | grep -E "^200 x-wiki-render=db legacy user note .* built=yes .* unlisted=0 .*missing=none class=note@1$" >/dev/null || { echo "x /notes/slug-names/$u"; c19_ok=0; }
 done
-for u in /notes/slug-names/ /notes/slug-names/deep-folder/ /notes/slug-names/deep-folder/sub-dir/; do
+# (b2) attempt 2 (tester, clause 2 + N1): a backslash is a character of the name (one page each at Quartz's URL,
+# no phantom back/ or private/ folder in the listing); < > escaped as Quartz escapes them
+for u in /notes/adv/back%5Cslash /notes/adv/back%5C.dot /notes/adv/private%5Cx /notes/adv/lt%3Cgt%3E; do
+  l="$(echo "$out" | grep -F " $u " | grep '^200 ')"; echo "${l:-(no line) $u}" | cut -c1-230
+  echo "$l" | grep -E "^200 x-wiki-render=db legacy user note .* built=yes .* unlisted=0 .*missing=none class=note@1$" >/dev/null || { echo "x $u"; c19_ok=0; }
+done
+la="$(curl_ /notes/adv/ body)"
+echo "notes/adv/ live: back-folder=$(printf '%s' "$la" | grep -c 'href="../../notes/adv/back/"') private-folder=$(printf '%s' "$la" | grep -c 'href="../../notes/adv/private/"') count=[$(printf '%s' "$la" | grep -o '<p>[0-9]* items\? under this folder.</p>')]"
+printf '%s' "$la" | grep -q 'href="../../notes/adv/back/"\|href="../../notes/adv/private/"' && { echo "x a phantom folder in notes/adv/"; c19_ok=0; }
+for u in /notes/slug-names/ /notes/slug-names/deep-folder/ /notes/slug-names/deep-folder/sub-dir/ /notes/adv/; do
   echo "$out" | grep -F " $u " | grep -E "^200 x-wiki-render=db folder index .* built=yes .* unlisted=0 .*missing=none class=folder@1$" >/dev/null || { echo "x $u"; c19_ok=0; }
 done
 # (c) the folder index lists "up" ONCE (the page), no separate "up/" entry, the same count as the built page; no raw-name href
@@ -211,18 +220,36 @@ docker stop "$P-db" >/dev/null; sleep 8
 o="$(T 300 bash "$E" node /ob1/docker/wiki-viewer/test/outage-probe.mjs sweep --expect unreachable --base "http://$P-viewer:8080" 2>&1)"; rc=$?; echo "$o" | cut -c1-260
 h="$(health)"; echo "health(stopped): $h" | cut -c1-300
 docker rm -f -v "$P-watch" >/dev/null 2>&1
+# rw-p1a-deploy-prep attempt 2 (tester N7): the "connecting" window is HELD
+# OPEN, not raced. Attempt 1 started the database with PostgREST running; the
+# API answered within one viewer read of the TCP port opening, so the viewer
+# went "unreachable -> up" with no connecting state at all (its own log), and
+# the watcher could not see one. Now PostgREST is stopped as well: once the
+# database host accepts TCP again the API still does not answer, which is
+# connecting by the viewer's definition (lib/wiki-db.mjs), and it stays so
+# until PostgREST is started - only after BOTH the viewer's log and the
+# watcher have shown it. Every wait is bounded.
+tc6="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker stop "$P-postgrest" >/dev/null
 docker run -d --name "$P-watch" --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" \
-  /ob1/docker/wiki-viewer/test/outage-probe.mjs watch --seconds 90 --base "http://$P-viewer:8080" >/dev/null
-# start the database only once the watcher is sampling (its first line is the
-# "unreachable" state), so the connecting window cannot fall before its first sample
+  /ob1/docker/wiki-viewer/test/outage-probe.mjs watch --seconds 150 --base "http://$P-viewer:8080" >/dev/null
 for _ in $(seq 1 30); do docker logs "$P-watch" 2>&1 | grep -q " unreachable" && break; sleep 1; done
 docker start "$P-db" >/dev/null
+for _ in $(seq 1 60); do docker exec "$P-db" pg_isready -U postgres -d openbrain -q 2>/dev/null && break; sleep 1; done
+held=0
+for _ in $(seq 1 60); do
+  docker logs --since "$tc6" "$P-viewer" 2>&1 | grep -q "database unreachable -> connecting" && docker logs "$P-watch" 2>&1 | grep -q " connecting" && { held=1; break; }
+  sleep 1
+done
+echo "connecting window held open (viewer log + watcher): $([ "$held" = 1 ] && echo yes || echo NO)"
+docker start "$P-postgrest" >/dev/null
 for _ in $(seq 1 60); do docker logs "$P-watch" 2>&1 | grep -q "WATCH:" && break; sleep 2; done
 w="$(docker logs "$P-watch" 2>&1)"; echo "$w"; docker rm -f -v "$P-watch" >/dev/null
-sleep 3; vlog="$(docker logs "$P-viewer" 2>&1 | grep -E "database (unreachable|connecting|up)|reconcile pass \(reconnect|repair pass" | tail -6)"; echo "$vlog" | cut -c1-300
+sleep 3; vlog="$(docker logs --since "$tc6" "$P-viewer" 2>&1 | grep -E "database (unreachable|connecting|up)|reconcile pass \(reconnect|repair pass" | tail -10)"; echo "$vlog" | cut -c1-300
 h2="$(health)"; echo "health(after): $h2" | cut -c1-200
 if [ "$rc" = 0 ] && echo "$o" | grep -q "SWEEP: all $NURL URLs show unreachable" && echo "$h" | grep -q '^503 .*"database unreachable"' \
-   && echo "$w" | grep -q "WATCH: sequence .*unreachable.*connecting.*db" \
+   && [ "$held" = 1 ] && echo "$w" | grep -q "WATCH: sequence .*unreachable.*connecting.*db" \
+   && echo "$vlog" | grep -q "database unreachable -> connecting" && echo "$vlog" | grep -q "database connecting -> up" \
    && echo "$vlog" | grep -q "reconcile pass (reconnect" && echo "$h2" | grep -q '^200 '; then pass C6; else fail C6 "see output"; fi
 fi
 
@@ -578,6 +605,11 @@ bash "$E" psql "insert into wiki_pages(slug,page_class,title,body) values ('priv
 o="$(T 300 bash "$E" node /ob1/recipes/_shared/backfill-wiki-pages.mjs 2>&1)"; rc=$?; echo "$o" | grep -E "done:|EXCLUDES|FAILED|CANNOT"; echo "exit=$rc"
 ex="$(bash "$E" psql "select slug from wiki_pages where slug ~ '^(private|templates)/' or slug ~ '(^|/)[.]' order by 1" | tr '\n' ' ')"; echo "rows for excluded paths: [$ex] (want only the planted private/secret)"
 ln="$(bash "$E" psql "select links::text from wiki_pages where slug='notes/slug-names/sp ace'")"; echo "sp ace links: $ln"
+# attempt 2 (tester, clause 2): each backslash file has ONE row keyed by its own name; no row at a phantom folder
+adv="$(bash "$E" psql "select string_agg(slug, ' ' order by slug) from wiki_pages where slug like 'notes/adv/%'")"; echo "notes/adv rows: [$adv]"
+ph="$(bash "$E" psql "select count(*) from wiki_pages where slug in ('notes/adv/back/slash','notes/adv/back/.dot','notes/adv/private/x')")"; echo "phantom-folder rows: $ph"
+for s in 'notes/adv/back\slash' 'notes/adv/back\.dot' 'notes/adv/private\x' 'notes/adv/lt<gt>'; do printf '%s\n' "$adv" | tr ' ' '\n' | grep -qxF "$s" || { echo "x no row $s"; c20_ok=0; }; done
+[ "$ph" = 0 ] || { echo "x a row at a phantom folder slug"; c20_ok=0; }
 # basename links to pages that exist are resolved (fixture-note, nested-note); [[tool-fixture-db]] resolves only while
 # its entity page exists - the wiki-service's boot compile may have swept it, and then the repair pass leaves it raw too
 tf="$(bash "$E" cat content/tool/tool-fixture-db.md | head -1)"; [ "$tf" = "(absent)" ] && want_tool='"tool-fixture-db"' || want_tool='"content/tool/tool-fixture-db"'
@@ -628,7 +660,16 @@ c="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault 
 sleep 7; h="$(health)"; echo "health: $(echo "$h" | cut -c1-200)"
 echo "$o1" | head -1 | grep -q "x-wiki-render=pending .*cache-control=no-store" && ! echo "$o1" | grep -q "ORPHAN-NOTE-MARKER" \
   && [ "$crc" = 1 ] && echo "$c" | grep -q "orphan: notes/orphan-fixture" && echo "$h" | grep -q '^503 .*1 orphan' || { echo "x the orphan row"; c21_ok=0; }
-bash "$E" psql "delete from wiki_pages where slug='notes/orphan-fixture'" >/dev/null; sleep 7; h="$(health)"; echo "health after delete: $(echo "$h" | cut -c1-80)"
+bash "$E" psql "delete from wiki_pages where slug='notes/orphan-fixture'" >/dev/null
+# attempt 2 (tester N5): an orphan row at a name Quartz slugifies answers pending at its Quartz URL as every other
+# orphan does. Its URL is found through the nav index, so a row inserted after the last nav refresh answers
+# not-available until the next one (<= WIKI_NAV_TTL_MS, the named freshness residual) - the bounded poll waits it out.
+bash "$E" psql "insert into wiki_pages(slug,page_class,title,body) values ('notes/adv/or phan','note','Orphan','ORPHAN-SPECIAL-MARKER') returning slug"
+for _ in $(seq 1 30); do os="$(curl_ /notes/adv/or-phan body)"; echo "$os" | head -1 | grep -q "x-wiki-render=not-available" || break; sleep 2; done
+echo "special-name orphan: $(echo "$os" | head -1) why=[$(echo "$os" | grep -o 'its row has no file[^)]*' | head -1)]"
+echo "$os" | head -1 | grep -q "x-wiki-render=pending .*cache-control=no-store" && echo "$os" | grep -q "its row has no file" && ! echo "$os" | grep -q "ORPHAN-SPECIAL-MARKER" \
+  || { echo "x the special-name orphan is not pending"; c21_ok=0; }
+bash "$E" psql "delete from wiki_pages where slug='notes/adv/or phan'" >/dev/null; sleep 7; h="$(health)"; echo "health after delete: $(echo "$h" | cut -c1-80)"
 echo "$h" | grep -q '^200 ' || { echo "x not healthy after the orphan was deleted"; c21_ok=0; }
 [ "$c21_ok" = 1 ] && pass C21 || fail C21 "see output"
 fi

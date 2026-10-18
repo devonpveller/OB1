@@ -30,8 +30,11 @@ const ONLY_URLS = arg("--urls", "") ? new Set(arg("--urls", "").split(",").map((
 import { URLS } from "./parity-diff-urls.mjs";
 export { URLS };
 
+// The built FILE for a URL: Quartz writes the file under the decoded name
+// (notes/adv/back\slash.html for /notes/adv/back%5Cslash; rw-p1a-deploy-prep
+// attempt 2 - the attempt-1 tester's copy decoded it the same way).
 function builtFile(url) {
-  const p = url.replace(/^\/+/, "");
+  const p = decodeURIComponent(url).replace(/^\/+/, "");
   if (p === "") return join(BUILT, "index.html");
   if (p.endsWith("/")) return join(BUILT, p, "index.html");
   return join(BUILT, `${p}.html`);

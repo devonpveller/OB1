@@ -694,6 +694,49 @@ test("NA4-1: the folder index lists each slugified note once with Quartz's href;
   } finally { undo(); }
 });
 
+// rw-p1a-deploy-prep attempt 2 (tester, clause 2 + near-miss N1): on Linux
+// Quartz treats "\" as a CHARACTER - it builds notes/bs/back\slash.html and
+// lists back\slash, back\.dot and private\x as pages of notes/bs/ (no back/ or
+// private/ folder). Its chrome escapes attribute and text values as preact
+// does (& < " - not >): data-slug="notes/bs/lt&lt;gt>".
+test("attempt 2: back\\slash.md, back\\.dot.md, private\\x.md and lt<gt>.md are pages at Quartz's URL; their folder lists 4 pages, no phantom folder", { skip: process.platform === "win32" && "a Windows filesystem cannot hold a backslash in a name" }, async () => {
+  mode = "up";
+  const B = "\\";
+  const files = { [`notes/bs/back${B}slash.md`]: "# One\n", [`notes/bs/back${B}.dot.md`]: "# Two\n", [`notes/bs/private${B}x.md`]: "# Three\n", "notes/bs/lt<gt>.md": "# Four\n" };
+  const added = [];
+  for (const [rel, md] of Object.entries(files)) {
+    mkdirSync(dirname(join(vaultTmp, rel)), { recursive: true });
+    writeFileSync(join(vaultTmp, rel), md);
+    utimesSync(join(vaultTmp, rel), PAST, PAST);
+    const row = { ...parseWikiPage(rel, md), updated_at: "2026-10-18T00:00:00.000Z" };
+    rows.push(row);
+    added.push(row.slug);
+  }
+  nav._resetForTests();
+  try {
+    assert.deepEqual(added, [`notes/bs/back${B}slash`, `notes/bs/back${B}.dot`, `notes/bs/private${B}x`, "notes/bs/lt<gt>"], "the compile rule keys each row by its own name");
+    for (const [url, slugAttr] of [["/notes/bs/back%5Cslash", `notes/bs/back${B}slash`], ["/notes/bs/back%5C.dot", `notes/bs/back${B}.dot`],
+      ["/notes/bs/private%5Cx", `notes/bs/private${B}x`], ["/notes/bs/lt%3Cgt%3E", "notes/bs/lt&lt;gt>"]]) {
+      const r = await renderLive(url);
+      assert.equal(r.status, 200, url);
+      assert.equal(r.headers["x-wiki-render"], "db", url);
+      assert.equal(r.headers["x-wiki-page-class"], "note@1", url);
+      assert.ok(r.body.includes(`<body data-slug="${slugAttr}">`), `${url}: data-slug as Quartz writes it`);
+    }
+    const f = await renderLive("/notes/bs/");
+    assert.equal(f.headers["x-wiki-render"], "db");
+    assert.match(f.body, /<p>4 items under this folder\.<\/p>/);
+    for (const h of [`back${B}slash`, `back${B}.dot`, `private${B}x`, "lt&lt;gt>"]) {
+      assert.equal(f.body.split(`<a href="../../notes/bs/${h}" class="internal">`).length - 1, 1, `one entry for ${h}`);
+    }
+    assert.ok(!f.body.includes('href="../../notes/bs/back/"') && !f.body.includes('href="../../notes/bs/private/"'), "no phantom folder");
+  } finally {
+    rows = rows.filter((r) => !added.includes(r.slug));
+    rmSync(join(vaultTmp, "notes/bs"), { recursive: true, force: true });
+    nav._resetForTests();
+  }
+});
+
 test("NA4-2: an ORPHAN row (no file) is pending, never presented; under a retired prefix it is the retired page", async () => {
   mode = "up";
   rows.push({ ...parseWikiPage("notes/orphan-x.md", "# Orphan body MARKER\n"), updated_at: "2026-10-18T00:00:00.000Z" });

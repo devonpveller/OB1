@@ -637,7 +637,9 @@ async function sweepOrphanEntityPages(linkData) {
   let deleted = 0;
   const droppedSlugs = [];
   for (const abs of files) {
-    const rel = abs.slice(WIKI_OUT_DIR.length + 1).replace(/\\/g, "/");
+    // listEntityFiles joins with "/": a "\" here is part of a file name (Linux),
+    // never a separator - the dropped row is the file's own (rw-p1a-deploy-prep attempt 2)
+    const rel = abs.slice(WIKI_OUT_DIR.length + 1);
     if (kept.has(rel)) continue;
     try {
       await rm(abs, { force: true });

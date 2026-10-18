@@ -23,8 +23,18 @@ test("classifySlug maps every page class the compiler emits", () => {
   assert.equal(classifySlug("content/entities.md").page_class, "root");
 });
 
-test("classifySlug normalises separators and leading slashes", () => {
-  assert.equal(classifySlug("\\content\\person\\person-ada.md").slug, "content/person/person-ada");
+// rw-p1a-deploy-prep attempt 2 (tester, clause 2): classify takes a VAULT path
+// ("/"-separated, what the walk and vaultRel give it). A backslash in it is a
+// character of the file name, as Quartz on Linux reads it - never a separator
+// (the old rule keyed back\slash.md's row as notes/adv/back/slash, a phantom
+// folder and a reconcile that could never be clean). OS separators are turned
+// into "/" where an OS path becomes a vault path: vaultRel (below).
+test("classifySlug strips leading slashes; a backslash is a character of the name, never a separator", () => {
+  assert.equal(classifySlug("notes/adv/back\\slash.md").slug, "notes/adv/back\\slash");
+  assert.equal(classifySlug("notes/adv/back\\slash.md").page_class, "note");
+  assert.equal(classifySlug("notes/adv/back\\.dot.md").slug, "notes/adv/back\\.dot");
+  assert.equal(classifySlug("content\\person\\person-ada.md").slug, "content\\person\\person-ada");
+  assert.equal(classifySlug("content\\person\\person-ada.md").page_class, "root", "one segment: not content/<type>/<slug>");
   assert.equal(classifySlug("/notes/x.md").slug, "notes/x");
   // Extension-stripping is case-insensitive but only touches a trailing .md
   assert.equal(classifySlug("content/tool/a.md.md").slug, "content/tool/a.md");
@@ -93,8 +103,13 @@ test("frontmatter entity_type overrides the directory-derived one", () => {
 test("vaultRel strips the vault root and normalises separators", () => {
   assert.equal(vaultRel("/wiki/content/person/x.md", "/wiki"), "content/person/x.md");
   assert.equal(vaultRel("/wiki/notes/n.md", "/wiki/"), "notes/n.md");
-  // Windows-style separators (bind mount) normalise to forward slashes.
-  assert.equal(vaultRel("\\wiki\\notes\\n.md", "/wiki"), "notes/n.md");
+  // The OS's separator (Windows: "\") becomes "/" - Quartz's toPosixPath,
+  // split on path.sep; on Linux "\" is a character of the name and is kept
+  // (rw-p1a-deploy-prep attempt 2).
+  assert.equal(vaultRel("\\wiki\\notes\\n.md", "/wiki", "\\"), "notes/n.md");
+  assert.equal(vaultRel("C:\\v\\notes\\n.md", "C:\\v", "\\"), "notes/n.md");
+  assert.equal(vaultRel("/wiki/notes/adv/back\\slash.md", "/wiki", "/"), "notes/adv/back\\slash.md");
+  assert.equal(vaultRel("\\wiki\\notes\\n.md", "/wiki", "/"), null, "on Linux a name with backslashes is not under /wiki/");
   // OUTSIDE the vault (scratch --out-dir) must be null, so probe runs never
   // pollute the table with junk slugs.
   assert.equal(vaultRel("/tmp/greenout/place/x.md", "/wiki"), null);
