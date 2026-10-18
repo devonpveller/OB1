@@ -26,7 +26,7 @@ include:
 #   --profile notebook   surrealdb, open_notebook, open-notebook-backup
 #   --profile idea-refinery   openbrain-idea-refinery (scheduled slice; pre-existing)
 #   --profile pantry     openbrain-pantry (household pantry / meal-planner HTTP service)
-#   --profile intake     openbrain-intake + openbrain-intake-dbrelay (the content screen, I5;
+#   --profile intake     openbrain-intake + its dbrelay and llmrelay (the content screen, I5;
 #                        OFF until the operator's gated deploy)
 #
 # Per-service reasons: README.md, "Compose profiles".
@@ -315,20 +315,26 @@ services:
   # I6-I8 cut-over, and a bare `up` never starts it.
   #   docker build -t openbrain-intake:local ../integrations/intake    (a deliberate deploy)
   #   docker compose -f docker-compose.yml --profile intake up -d openbrain-intake
-  # NETWORK - NO ROUTE OUT: `intake-net` is INTERNAL (no gateway; its own subnet, outside
-  # 192.168.0.0/16 and outside the daemon's default pools - incident 2026-10-17) and
-  # ai-stack_llm-net is internal too, so the service reaches exactly: the DB relay below and
-  # the `llama-cpp` alias on llm-gateway (the second opinion; never an *-upstream). It does
-  # NOT join obnet: obnet is an ordinary bridge with internet egress.
+  # NETWORK - NO ROUTE OUT: the service is on `intake-net` ONLY - INTERNAL (no gateway; its
+  # own subnet, outside 192.168.0.0/16 and outside the daemon's default pools - incident
+  # 2026-10-17). Its only peers there are the two fixed-target relays below, so it reaches
+  # exactly: openbrain-db:5432 (through openbrain-intake-dbrelay) and the LiteLLM gateway's
+  # :8080 (through openbrain-intake-llmrelay, aliased `llama-cpp` on intake-net; the second
+  # opinion, never an *-upstream). It joins neither obnet (an ordinary bridge with internet
+  # egress) nor ai-stack_llm-net (intake-i5 attempt 1: ~30 caller containers with ICC on -
+  # llm-gateway-db, openwebui, open-terminal, agent-bridge, ... - all reachable from there).
   # HARDENED: non-root (uid 10030), read-only root FS + a small tmpfs, cap_drop ALL,
   # no-new-privileges, pids/memory/cpu limits. The classifier files are NOT in the image: they
   # are mounted READ-ONLY from INTAKE_MODEL_DIR (default: where tools/fetch_classifier.py
   # puts them) and checked against their sha256 pins at start - a missing or altered file
   # refuses the start (exit 3). Every screen runs in a killable worker process under a hard
   # wall clock (operator D38): an overrun is killed and the item stays `pending`.
-  # NO ${VAR:?} GUARDS on purpose: compose interpolates a profiled-off service too, so a guard
-  # would break every OB1 command on a host that never enabled intake (measured, compose
-  # v5). The service itself refuses to start on a blank key or password (exit 2).
+  # SECRETS: in docker/intake.env (from intake.env.example; gitignored), loaded by THIS service
+  # only - never docker/.env, which open_notebook loads whole (`env_file: ./.env`; intake-i5
+  # attempt 1 F-T5). No INTAKE_* value is interpolated in this file for the same reason. The
+  # env file is `required: false` so a host without intake still renders; the service itself
+  # refuses to start on a blank key or password (exit 2). No compose `:?` guards: compose
+  # interpolates a profiled-off service too (measured, compose v5).
   openbrain-intake:
     profiles: ["intake"]
     build:
@@ -339,27 +345,26 @@ services:
     depends_on:
       openbrain-intake-dbrelay:
         condition: service_healthy
+      openbrain-intake-llmrelay:
+        condition: service_healthy
+    # INTAKE_DB_PASSWORD, INTAKE_CALLER_KEYS (connector=key,...), INTAKE_SECOND_OPINION_KEY and
+    # any INTAKE_* tuning (workers, threads, the D40 policy): see intake.env.example
+    env_file:
+      - path: intake.env
+        required: false
     environment:
       INTAKE_DB_HOST: openbrain-intake-dbrelay
       INTAKE_DB_PORT: "5432"
       INTAKE_DB_NAME: openbrain
       INTAKE_DB_USER: intake
-      INTAKE_DB_PASSWORD: ${INTAKE_DB_PASSWORD:-}
-      # connector=key[,connector=key...]: one key per calling connector (I6-I8 issue them)
-      INTAKE_CALLER_KEYS: ${INTAKE_CALLER_KEYS:-}
-      # intake's own LiteLLM virtual key (metadata.lane ob-intake) - a gated live step
-      INTAKE_SECOND_OPINION_KEY: ${INTAKE_SECOND_OPINION_KEY:-}
       INTAKE_CLASSIFIER_DIR: /models
-      INTAKE_CLASSIFIER_WORKERS: ${INTAKE_CLASSIFIER_WORKERS:-1}
-      INTAKE_CLASSIFIER_THREADS: ${INTAKE_CLASSIFIER_THREADS:-8}
-      # operator D40 = (a): a WEAK hit a judge who saw everything called clean ends clean
-      INTAKE_D2_WEAK_RULE_JUDGE_CLEAN: ${INTAKE_D2_WEAK_RULE_JUDGE_CLEAN:-clean}
       HOME: /tmp
     volumes:
-      - ${INTAKE_MODEL_DIR:-../integrations/intake/models/protectai-deberta-v3-base-prompt-injection-v2-90c9989b}:/models:ro
+      # the verified classifier files, where tools/fetch_classifier.py puts them (a fixed
+      # path: a variable here would be read from .env, see SECRETS above)
+      - ../integrations/intake/models/protectai-deberta-v3-base-prompt-injection-v2-90c9989b:/models:ro
     networks:
       - intake-net
-      - llm-net
     user: "10030:10030"
     read_only: true
     tmpfs:
@@ -425,6 +430,49 @@ services:
           pids: 32
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5432), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # The intake service's ONLY route to the LiteLLM gateway (intake-i5 attempt 1: the service
+  # must not sit on ai-stack_llm-net itself, where ~30 callers are reachable). A byte relay
+  # (python -m intake_service relay) on intake-net - where it carries the alias `llama-cpp`,
+  # so the service's constant http://llama-cpp:8080 lands here - and on ai-stack_llm-net, where
+  # it forwards :8080 to `llm-gateway:8080` (the gateway's container name; NOT `llama-cpp`,
+  # which on intake-net is this relay itself) and nothing else. Same image and hardening as the
+  # DB relay; no secret (LiteLLM checks intake's own virtual key). Profile `intake`, OFF by
+  # default. Joining llm-net changes no live service (only this new container attaches).
+  openbrain-intake-llmrelay:
+    profiles: ["intake"]
+    image: openbrain-intake:local
+    container_name: openbrain-intake-llmrelay
+    command: ["relay"]
+    environment:
+      INTAKE_RELAY_TARGET_HOST: llm-gateway
+      INTAKE_RELAY_TARGET_PORT: "8080"
+      INTAKE_RELAY_LISTEN_PORT: "8080"
+      INTAKE_RELAY_MAX_CONNECTIONS: "8"
+    networks:
+      intake-net:
+        aliases:
+          - llama-cpp
+      llm-net: {}
+    user: "10030:10030"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+          pids: 32
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 3).close()"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1590,8 +1638,9 @@ networks:
   # intake I5: the intake service's own network - INTERNAL (no gateway, no route out) with an
   # explicit subnet outside 192.168.0.0/16 and outside the daemon's default address pools
   # (172.16.0.0/12, 10.240.0.0/16; incident 2026-10-17, the home LAN is 192.168.1.x). Its only
-  # members are openbrain-intake and openbrain-intake-dbrelay, both profile `intake`, so a
-  # host that never enables intake never creates it.
+  # members are openbrain-intake and its two relays (openbrain-intake-dbrelay,
+  # openbrain-intake-llmrelay), all profile `intake`, so a host that never enables intake
+  # never creates it.
   intake-net:
     driver: bridge
     internal: true

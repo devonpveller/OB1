@@ -6,10 +6,13 @@ and a fake LiteLLM, on internal networks this script creates and removes.
 
 TOPOLOGY (mirrors docker/docker-compose.yml, profile intake; every network INTERNAL, subnets in
 10.243.200-209.0/24, labelled ai-stack.test=<label>; never an ai-stack_* network):
-  <p>-ob      postgres (alias openbrain-db) + the relay
-  <p>-intake  the relay (alias openbrain-intake-dbrelay) + the service (alias openbrain-intake)
-              + the client
-  <p>-llm     the service + the fake LiteLLM (alias llama-cpp)
+  <p>-ob      postgres (alias openbrain-db) + the DB relay
+  <p>-intake  the service (alias openbrain-intake) ONLY with its two relays - the DB relay (alias
+              openbrain-intake-dbrelay) and the LLM relay (alias llama-cpp) - + the client
+  <p>-llm     the LLM relay + the fake LiteLLM (alias llm-gateway, the gateway's container name)
+              + a PEER standing in for the ~30 other callers on ai-stack_llm-net (alias
+              llm-gateway-db, answering "PEER-REACHED" on 5432): the service must NOT reach it
+              (intake-i5 attempt 1, the line-3 FAIL)
 The postgres is pgvector/pgvector:pg16 initialised by the SAME initdb chain the compose file
 mounts (every `docker-entrypoint-initdb.d` line of docker/docker-compose.yml, in order, ending
 with 220-init-intake.sql); then the intake role gets a password.
@@ -100,12 +103,14 @@ class Run:
         return name
 
     def container(self, name, image, *args, nets=(), aliases=(), env=None, cmd=(), entrypoint=None, start=True):
+        """aliases: a list (on every network) or {network: [aliases]}."""
         cname = f"{self.p}-{name}"
         argv = ["create", "--name", cname, "--label", self.label]
         first = nets[0] if nets else "none"
         argv += ["--network", first]
+        per = aliases if isinstance(aliases, dict) else {n: list(aliases) for n in nets}
         if nets:
-            for al in aliases:
+            for al in per.get(first, ()):
                 argv += ["--network-alias", al]
         for k, v in (env or {}).items():
             argv += ["-e", f"{k}={v}"]
@@ -116,7 +121,7 @@ class Run:
         self.containers.append(cname)
         for n in nets[1:]:
             extra = []
-            for al in aliases:
+            for al in per.get(n, ()):
                 extra += ["--alias", al]
             sh("network", "connect", *extra, n, cname)
         if start:
@@ -164,11 +169,11 @@ class Run:
                "INTAKE_SECOND_OPINION_MAX_ATTEMPTS": "2", "INTAKE_CLASSIFIER_THREADS": "4", "HOME": "/tmp",
                # long, so a killed row stays as the kill left it for part G's row check (the
                # re-screen loop itself is unit-tested: tests/test_service_core.Rescreen)
-               "INTAKE_RESCREEN_BACKOFF_SECONDS": "86400"}
+               "INTAKE_RESCREEN_BACKOFF_SECONDS": "86400", "INTAKE_BODY_READ_SECONDS": "5"}
         env.update(extra_env or {})
         return self.container(name, self.a.image, *self.hardening(), "--tmpfs", "/tmp:noexec,nosuid,size=64m",
                               "-v", f"{self.a.model_dir}:/models:ro", "--memory", "4g", "--pids-limit", "256",
-                              nets=(f"{self.p}-intake", f"{self.p}-llm"), aliases=(alias,), env=env, cmd=("serve",))
+                              nets=(f"{self.p}-intake",), aliases=(alias,), env=env, cmd=("serve",))
 
     @staticmethod
     def hardening():
@@ -186,7 +191,12 @@ class Run:
         self.container("pg", PG_IMAGE, *mounts, nets=(f"{self.p}-ob",), aliases=("openbrain-db",),
                        env={"POSTGRES_DB": "openbrain", "POSTGRES_USER": "postgres", "POSTGRES_PASSWORD": self.pg_pw})
         self.container("llm", "python:3.13-slim", "-v", f"{HERE / 'fake_litellm.py'}:/fake.py:ro",
-                       nets=(f"{self.p}-llm",), aliases=("llama-cpp",), cmd=("python", "/fake.py"))
+                       nets=(f"{self.p}-llm",), aliases=("llm-gateway",), cmd=("python", "/fake.py"))
+        peer = ("import socket; s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
+                "s.bind(('0.0.0.0', 5432)); s.listen(8)\n"
+                "while True:\n c, _ = s.accept(); c.sendall(b'PEER-REACHED'); c.close()")
+        self.container("peer", "python:3.13-slim", nets=(f"{self.p}-llm",), aliases=("llm-gateway-db",),
+                       cmd=("python", "-c", peer))
         end = time.time() + 300
         while time.time() < end:
             r = sh("exec", f"{self.p}-pg", "pg_isready", "-U", "postgres", "-d", "openbrain", check=False)
@@ -199,6 +209,10 @@ class Run:
         self.container("relay", a.image, *self.hardening(), nets=(f"{self.p}-ob", f"{self.p}-intake"),
                        aliases=("openbrain-intake-dbrelay",), env={"INTAKE_RELAY_TARGET_HOST": "openbrain-db"},
                        cmd=("relay",))
+        self.container("llmrelay", a.image, *self.hardening(), nets=(f"{self.p}-intake", f"{self.p}-llm"),
+                       aliases={f"{self.p}-intake": ["llama-cpp"], f"{self.p}-llm": []},
+                       env={"INTAKE_RELAY_TARGET_HOST": "llm-gateway", "INTAKE_RELAY_TARGET_PORT": "8080",
+                            "INTAKE_RELAY_LISTEN_PORT": "8080"}, cmd=("relay",))
         svc = self.service("svc", "openbrain-intake")
         r = self.client([{"name": "healthz", "wait_healthz": 300}], "boot")
         self.check("the service starts and /healthz is 200 (worker loaded, db through the relay)",
@@ -210,6 +224,7 @@ class Run:
         self.part_d_e()
         self.part_f()
         self.part_g()
+        self.part_i(svc)
         self.part_h()
 
     def part_a(self, svc):
@@ -228,6 +243,15 @@ class Run:
             "dns example.com": "import socket; socket.getaddrinfo('example.com', 80)",
             "http://example.com": "import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)",
             "the postgres container directly": f"import socket; socket.create_connection(('{self.p}-pg', 5432), 5)",
+            # the line-3 FAIL of attempt 1: a peer on the LLM caller network
+            "a peer on the llm network (llm-gateway-db:5432)":
+                "import socket; c = socket.create_connection(('llm-gateway-db', 5432), 5); print(c.recv(64))",
+            "the peer by its container name": f"import socket; socket.create_connection(('{self.p}-peer', 5432), 5)",
+            "the fake gateway by name, not through the relay (llm-gateway:8080)":
+                "import socket; socket.create_connection(('llm-gateway', 8080), 5)",
+            "the LLM relay on another port (llama-cpp:5432)": "import socket; socket.create_connection(('llama-cpp', 5432), 5)",
+            "the DB relay on another port (openbrain-intake-dbrelay:8080)":
+                "import socket; socket.create_connection(('openbrain-intake-dbrelay', 8080), 5)",
         }
         egress = {}
         for name, code in probes.items():
@@ -241,7 +265,42 @@ class Run:
             r = self.exec_py(svc, code, timeout=40)
             egress[name] = {"exit": r.returncode}
             self.check(f"A allowed host reachable: {name}", r.returncode == 0, r.stderr[-300:])
+        nets = sorted(json.loads(sh("inspect", svc).stdout)[0]["NetworkSettings"]["Networks"])
+        self.check("A the service is on the intake network ONLY", nets == [f"{self.p}-intake"], nets)
+        peer_ip = json.loads(sh("inspect", f"{self.p}-peer").stdout)[0]["NetworkSettings"]["Networks"][f"{self.p}-llm"]["IPAddress"]
+        r = self.exec_py(svc, f"import socket; socket.create_connection(('{peer_ip}', 5432), 5)", timeout=40)
+        egress["the peer by its IP"] = {"exit": r.returncode, "error": r.stderr.strip().splitlines()[-1:] or ""}
+        self.check("A outbound blocked: the peer by its IP fails", r.returncode != 0, egress["the peer by its IP"])
         self.results["egress"] = egress
+        # F-T1: no worker-credentialed process can read the parent's environ or memory. A
+        # `docker exec` process here has exactly a worker's credentials (uid 10030, no
+        # capability, same container); it also runs the read from inside a real worker's view
+        # by reading the worker's OWN environ (a worker is dumpable, holds no secret).
+        secrets_ = [*self.keys.values(), self.db_pw, self.so_key]
+        code = ("import os, sys\n"
+                "out = {}\n"
+                "for f in ('/proc/1/environ', '/proc/1/mem', '/proc/1/maps'):\n"
+                "    try:\n"
+                "        open(f, 'rb').read(64); out[f] = 'READ'\n"
+                "    except Exception as e:\n"
+                "        out[f] = type(e).__name__\n"
+                "kids = [p for p in os.listdir('/proc') if p.isdigit() and p != '1' and open(f'/proc/{p}/stat').read().split()[3] == '1']\n"
+                "envs = b''\n"
+                "for k in kids:\n"
+                "    try:\n"
+                "        envs += open(f'/proc/{k}/environ', 'rb').read()\n"
+                "    except Exception as e:\n"
+                "        out['child ' + k] = type(e).__name__\n"
+                "sys.stdout.write(repr(out) + '\\n')\n"
+                "sys.stdout.buffer.write(envs)\n")
+        r = sh("exec", svc, "python", "-c", code, check=False, timeout=60)
+        first = r.stdout.splitlines()[0] if r.stdout else ""
+        self.results["proc_environ_probe"] = first
+        self.check("A F-T1: /proc/1/environ, /proc/1/mem, /proc/1/maps are NOT readable with a worker's credentials",
+                   "READ" not in first and "/proc/1/environ" in first, first)
+        leaked = [i for i, sec in enumerate(secrets_) if sec in r.stdout]
+        self.check("A F-T1: no secret in any worker process's own environ (and none readable at all)",
+                   not leaked and r.returncode == 0, {"leaked_index": leaked, "exit": r.returncode})
 
     def refusal(self, name, env, expect, model_dir=None):
         cname = f"{self.p}-refuse-" + re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40]
@@ -480,6 +539,42 @@ class Run:
             self.check(f"G[A] {n}: answered, and never clean with an error",
                        r[n].get("status") in (200, 422) and not (body.get("label") == "clean" and err), prod[n])
         self.results["production_limit_shapes"] = prod
+
+    def part_i(self, svc):
+        """F-T2: a large body to a FROZEN worker is cut at the transfer clock; F-T3: a drip is
+        cut at the body-read deadline (this run: INTAKE_BODY_READ_SECONDS=5)."""
+        bearer = {"Authorization": "Bearer " + self.keys["research"]}
+        self.client([{"name": "healthz", "wait_healthz": 300}], "ipre")
+        kids = sh("exec", svc, "python", "-c",
+                  "import os; print(' '.join(p for p in os.listdir('/proc') if p.isdigit() and p != '1' and "
+                  "open(f'/proc/{p}/stat').read().split()[3] == '1' and b'spawn_main' in open(f'/proc/{p}/cmdline', 'rb').read()))",
+                  check=False).stdout.split()
+        self.check("I one worker process under the parent", len(kids) >= 1, kids)
+        for k in kids:
+            sh("exec", svc, "python", "-c", f"import os, signal; os.kill({k}, signal.SIGSTOP)", check=False)
+        res = self.client([{"name": "big", "build": {"kind": "shape", "id": "calc-page-31x64k", "external_id": "i-frozen"},
+                            "headers": bearer, "timeout": 120},
+                           {"name": "healthz-right-after", "method": "GET", "path": "/healthz", "timeout": 10},
+                           {"name": "healthz", "wait_healthz": 300},
+                           {"name": "next", "build": {"kind": "fixture", "id": "clean-plain", "external_id": "i-next"},
+                            "headers": bearer, "timeout": 120}], "ifrozen")
+        big = res["big"]
+        body = big.get("body") if isinstance(big.get("body"), dict) else {}
+        detail = ((body.get("error") or {}).get("detail") if isinstance(body.get("error"), dict) else "") or ""
+        self.results["frozen_worker_large_body"] = {k: res[k] for k in res}
+        self.check("I F-T2: a 2.6 MB body to a frozen worker is cut at the 10 s transfer clock (503, killed, no label)",
+                   big.get("status") == 503 and "killed at the transfer wall clock" in detail
+                   and big.get("seconds", 99) < 10 + 5, {"status": big.get("status"), "seconds": big.get("seconds"), "detail": detail})
+        self.check("I F-T2: /healthz is 503 right after (the only worker is being replaced)",
+                   res["healthz-right-after"].get("status") == 503, res["healthz-right-after"].get("status"))
+        self.check("I F-T2: the pool recovers and serves the next request",
+                   res["healthz"].get("status") == 200 and res["next"].get("status") == 200
+                   and (res["next"].get("body") or {}).get("label") == "clean", (res["healthz"].get("status"), res["next"].get("status")))
+        d = self.client([{"name": "drip", "drip": {"length": 100, "gap": 1.0, "bytes": 30}, "headers": bearer, "timeout": 60}],
+                        "idrip")["drip"]
+        self.results["drip"] = d
+        self.check("I F-T3: a 1-byte-per-second drip is cut with 408 at the 5 s body deadline",
+                   d.get("status") == 408 and d.get("seconds", 99) < 5 + 3, d)
 
     def part_h(self):
         secrets_ = [*self.keys.values(), self.db_pw, self.so_key, self.pg_pw]

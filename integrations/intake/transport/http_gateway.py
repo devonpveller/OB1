@@ -88,6 +88,17 @@ def _closed(resp) -> bool:
         return False
 
 
+def _content_length(resp) -> int | None:
+    """The reply's Content-Length as a number; None when absent, unreadable or chunked."""
+    try:
+        v = resp.getheader("Content-Length")
+    except Exception:  # noqa: BLE001
+        return None
+    if v is None or not str(v).strip().isdigit():
+        return None
+    return int(str(v).strip())
+
+
 def send(req: HttpRequest) -> HttpResponse:
     _check(req.url)
     if req.method != "POST":
@@ -127,6 +138,11 @@ def send(req: HttpRequest) -> HttpResponse:
                 raise TransportError("oversize", f"reply over {MAX_REPLY_BYTES} bytes")
         if dog.fired or time.monotonic() > deadline:
             raise TransportError("timeout", "the request passed its deadline")
+        # intake-i5 attempt 1 F-T6: a reply shorter than its Content-Length was cut off (read1
+        # returns b"" at a close without IncompleteRead): not an answer
+        declared = _content_length(resp)
+        if declared is not None and declared != len(body):
+            raise TransportError("network", f"reply body {len(body)} bytes, Content-Length {declared}")
         return HttpResponse(resp.status, bytes(body))
     except TransportError:
         raise

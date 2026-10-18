@@ -1,6 +1,6 @@
 """The classifier files checked against their pins at service start (I5).
 
-The model is mounted READ-ONLY from a host path (compose: ${INTAKE_MODEL_DIR}:/models:ro), not
+The model is mounted READ-ONLY from a host path (compose: ../integrations/intake/models/<pinned dir>:/models:ro, where tools/fetch_classifier.py puts them), not
 baked into the image. Before any worker starts, the service streams each pinned file
 (classifier.MODEL_FILES: config.json, tokenizer.json, model.safetensors) through sha256 and
 compares size and digest; a missing, short, long or altered file REFUSES THE START (exit 3).

@@ -22,6 +22,48 @@ import time
 HOST = os.environ.get("INTAKE_E2E_HOST", "openbrain-intake")
 
 
+CRLF = "\r\n"
+
+
+def drip(step):
+    """Headers, then the body one byte every `gap` seconds; the status the server answers."""
+    import socket
+    d = step["drip"]
+    s = socket.create_connection((HOST, 8000), timeout=float(step.get("timeout", 60)))
+    lines = ["POST /v1/intake HTTP/1.1", f"Host: {HOST}", f"Content-Length: {d['length']}"]
+    lines += [f"{k}: {v}" for k, v in (step.get("headers") or {}).items()]
+    t0 = time.monotonic()
+    s.sendall((CRLF.join(lines) + CRLF + CRLF).encode())
+    s.settimeout(float(d["gap"]))
+    got = b""
+    for _ in range(int(d["bytes"])):
+        try:
+            s.sendall(b"x")
+        except OSError:
+            break
+        try:
+            got += s.recv(4096)
+            if got:
+                break
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+    s.settimeout(10)
+    try:
+        while CRLF.encode() not in got:
+            more = s.recv(4096)
+            if not more:
+                break
+            got += more
+    except OSError:
+        pass
+    s.close()
+    line = got.split(CRLF.encode(), 1)[0].decode("latin-1")
+    status = int(line.split()[1]) if line.startswith("HTTP/") else None
+    return {"status": status, "seconds": round(time.monotonic() - t0, 3), "status_line": line}
+
+
 def request(step):
     conn = http.client.HTTPConnection(HOST, 8000, timeout=float(step.get("timeout", 300)))
     body = base64.b64decode(step["body_b64"]) if step.get("body_b64") else b""
@@ -78,6 +120,8 @@ def main():
         if "sleep" in step:
             time.sleep(step["sleep"])
             out.append({"name": step["name"], "slept": step["sleep"]})
+        elif "drip" in step:
+            out.append({"name": step["name"], **drip(step)})
         elif "wait_healthz" in step:
             end = time.monotonic() + step["wait_healthz"]
             r = None

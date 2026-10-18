@@ -1,13 +1,18 @@
-"""The TCP relay to openbrain-db: the intake service's ONLY route to the database (I5).
+"""The fixed-target TCP relay: the intake service's ONLY routes out of its network (I5).
 
-Why a relay: the service must have no outbound network except the database and the LiteLLM
-alias. openbrain-db lives on `obnet`, an ordinary bridge with a route to the internet, so the
-service cannot join it; and adding a network to openbrain-db would recreate the live database
-container on the next `up` even with the intake profile off. So the service sits on its own
-INTERNAL network (`intake-net`, no gateway) plus `ai-stack_llm-net` (internal), and this relay -
-the same image, a different command, on `obnet` and `intake-net` - forwards one port to one
-fixed target. It forwards bytes and nothing else: no parsing, no other destination; the
-database still authenticates the intake role itself.
+The service must have no outbound network except the database and the LiteLLM gateway. It sits
+on its own INTERNAL network (`intake-net`, no gateway) and NOTHING else; two instances of this
+relay - the same image, `relay` command - each forward one port to one fixed target:
+  openbrain-intake-dbrelay   obnet + intake-net      :5432 -> openbrain-db:5432
+      (openbrain-db lives on `obnet`, an ordinary bridge with a route to the internet, so the
+      service cannot join it; adding a network to openbrain-db would recreate the live database
+      container on the next `up` even with the intake profile off)
+  openbrain-intake-llmrelay  llm-net + intake-net    :8080 -> llm-gateway:8080, aliased
+      `llama-cpp` on intake-net (the service must not join ai-stack_llm-net itself: ~30 callers
+      are reachable there, intake-i5 attempt 1; the target is the gateway's container name, not
+      `llama-cpp`, which on intake-net is this relay)
+A relay forwards bytes and nothing else: no parsing, no other destination; the database and
+LiteLLM still authenticate intake themselves (the role's password, the virtual key).
 
   INTAKE_RELAY_LISTEN_PORT      5432
   INTAKE_RELAY_TARGET_HOST      openbrain-db

@@ -22,9 +22,13 @@ FLOW OF POST /v1/intake (DESIGN-intake.md sections 2-5 and 7):
      clean and suspicious (DESIGN 2: `injected` returns no text; `pending` is unreadable).
 
 A repeat re-screens the body anyway (the worker computes the key; the text is never stored in
-silver), so a connector that lost the first answer gets the text again for a stored clean /
-suspicious item - only when this screen produced text without an error. The stored label stands
-(`rescreen` says when the classifier version moved; re-screening stored items is I9).
+silver). THE STORED DECISION IS SERVED, consistently (intake-i5 attempt 1 F-T10): the label is the
+stored one, and the text of this screen is returned only when the stored label is clean or
+suspicious AND this screen produced, without an error, the SAME stage 1-6 evidence the stored
+decision was made on (scores.service.evidence: rule, classifier, error). When the evidence
+differs - a rules or classifier change since, a screen that errored - no text is returned,
+`text_withheld` says why and `rescreen` is true: the stored label stands until the item is
+re-screened (I9), and no text is ever served under a decision that this text did not get.
 
 THE `scores` JSON of an item is stats.item_scores(result, wait_state) - exactly the keys stats.py
 reads (I4 F-8) - plus one namespaced object, scores.service:
@@ -272,6 +276,7 @@ class Intake:
             "reasons": [r.to_dict() for r in result.reasons],
             "stripped": dict(result.counts),
             "text": result.text if readable else None,
+            "text_withheld": None,
             "title": result.title if readable else None,
             "links": [dict(x) for x in result.links] if readable else [],
             "attachments": [dict(x) for x in result.attachments] if label != "injected" else [],
@@ -283,9 +288,19 @@ class Intake:
     def _repeat_response(self, row: ItemRow, fresh: IntakeResult) -> dict:
         label = row.verdict if row.status == "done" else row.status
         svc = row.scores.get("service") or {}
-        readable = label in _TEXT_LABELS and fresh.text is not None and fresh.error is None
+        stored_ev = {k: (svc.get("evidence") or {}).get(k) for k in ("rule", "classifier", "error")}
+        try:
+            fresh_ev = {k: v for k, v in base_evidence(fresh).items() if k in stored_ev}                 if fresh.verdict != "rejected" else None
+        except ValueError:
+            fresh_ev = None
+        same = fresh_ev is not None and fresh_ev == stored_ev and fresh.error is None
+        withheld = None
+        if label in _TEXT_LABELS and not same:
+            withheld = ("this screen's evidence differs from the stored decision's "
+                        f"(stored {stored_ev}, now {fresh_ev}); the stored label stands until a re-screen")
+        readable = label in _TEXT_LABELS and same and fresh.text is not None
         rescreen = row.status != "rejected" and label != "injected" and (
-            fresh.classifier_version is None or fresh.classifier_version != row.classifier_version)
+            not same or fresh.classifier_version is None or fresh.classifier_version != row.classifier_version)
         return {
             "intake_id": row.id,
             "status": row.status,
@@ -300,6 +315,7 @@ class Intake:
             "reasons": _reasons_from_stored(row.reasons),
             "stripped": dict(row.counts),
             "text": fresh.text if readable else None,
+            "text_withheld": withheld,
             "title": fresh.title if readable else None,
             "links": [dict(x) for x in fresh.links] if readable else [],
             "attachments": [],

@@ -31,6 +31,8 @@ integrations/openclaw-agent-memory/dist/
 # mcpo config files embed the x-brain-key secret — never commit them
 docker/mcpo*.config.json
 docker/.env
+# intake I5: the intake service's own env file (secrets; from docker/intake.env.example)
+docker/intake.env
 open-brain-wiki-data.ssh
 /recipes/brain-backup
 /secrets

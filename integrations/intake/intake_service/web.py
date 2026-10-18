@@ -14,7 +14,11 @@ THE ORDER OF THE CHECKS, each before any work the next one needs:
                    -> 400; over INTAKE_MAX_REQUEST_BYTES -> 413. The body is NOT read in any of
                    these cases, and the connection is closed.
   in flight        more than INTAKE_MAX_INFLIGHT requests at once -> 503
-  body             read exactly Content-Length bytes under the socket timeout (30 s); short -> 400
+  body             read exactly Content-Length bytes within INTAKE_BODY_READ_SECONDS in TOTAL
+                   (BodyReader: the socket timeout is what is left of that deadline before every
+                   piece) -> 408 when it does not arrive in time; short -> 400 (F-T3)
+  connections      at most INTAKE_MAX_CONNECTIONS open at once, counted at accept, before any
+                   header is read; more are closed (ConnectionGate; F-T3)
 Then core.Intake.handle: 200 (a result, including `pending` and content `rejected`), 400 (not a
 JSON object), 403 (connector), 422 (an invalid envelope: stage 1 `rejected`), 503 (busy, no
 worker, the store down, or no key announced). 500 only for a bug, with no detail.
@@ -42,6 +46,65 @@ _LEN = re.compile(r"[0-9]{1,9}")
 _JSON = "application/json; charset=utf-8"
 
 
+class BodyTimeout(Exception):
+    """The request body did not arrive within its total deadline."""
+
+
+class BodyReader:
+    """Read exactly n bytes from `rfile` within total_s seconds IN ALL: before every piece the
+    socket's timeout is set to what is left, so a client that drips one byte per recv timeout
+    is cut at the deadline (a per-recv timeout alone never ends a drip)."""
+
+    def __init__(self, rfile, sock, total_s: float):
+        self.rfile, self.sock, self.total_s = rfile, sock, total_s
+
+    def read(self, n: int) -> bytes:
+        end = time.monotonic() + self.total_s
+        out = bytearray()
+        read1 = getattr(self.rfile, "read1", None) or self.rfile.read
+        while len(out) < n:
+            left = end - time.monotonic()
+            if left <= 0:
+                raise BodyTimeout(f"the body did not arrive within {self.total_s:g}s")
+            if self.sock is not None:
+                try:
+                    self.sock.settimeout(left)
+                except OSError:
+                    break
+            try:
+                piece = read1(min(65536, n - len(out)))
+            except (TimeoutError, OSError) as e:
+                if time.monotonic() >= end or isinstance(e, TimeoutError):
+                    raise BodyTimeout(f"the body did not arrive within {self.total_s:g}s") from None
+                raise
+            if not piece:
+                break
+            out += piece
+        if time.monotonic() > end:
+            raise BodyTimeout(f"the body did not arrive within {self.total_s:g}s")
+        return bytes(out)
+
+
+class ConnectionGate:
+    """At most `cap` connections at once."""
+
+    def __init__(self, cap: int):
+        self.cap = cap
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def enter(self) -> bool:
+        with self._lock:
+            if self._n >= self.cap:
+                return False
+            self._n += 1
+            return True
+
+    def leave(self) -> None:
+        with self._lock:
+            self._n = max(0, self._n - 1)
+
+
 @dataclass
 class Response:
     status: int
@@ -65,6 +128,18 @@ def _header(headers, name: str) -> str | None:
         if str(k).lower() == low:
             return v
     return None
+
+
+def _judge_route() -> bool:
+    """Whether the second opinion's route answers a TCP connect: llama-cpp:8080 is, on
+    intake-net, openbrain-intake-llmrelay. Reported in /healthz, not part of `ok` (the judge
+    being down fails closed: items expire `suspicious`)."""
+    import socket
+    try:
+        socket.create_connection(("llama-cpp", 8080), 2).close()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class Router:
@@ -133,7 +208,10 @@ class Router:
         if not self.inflight.acquire(blocking=False):
             return _json(503, {"error": "too many requests in flight; retry later"}, ("Retry-After", "5"))
         try:
-            data = read(n)
+            try:
+                data = read(n)
+            except BodyTimeout as e:
+                return _json(408, {"error": str(e)})
             if data is None or len(data) != n:
                 return _json(400, {"error": "the body is shorter than its Content-Length"})
             status, doc = self.svc.handle(caller, data)
@@ -160,9 +238,10 @@ class Router:
     def _health(self) -> Response:
         st = self.svc.pool.status()
         db = bool(self.svc.store.ping())
-        ok = st.get("ready", 0) >= 1 and db
+        # F-T2: a busy worker past every wall clock is stuck, not serving
+        ok = st.get("serving", st.get("ready", 0)) >= 1 and db
         return _json(200 if ok else 503, {
-            "ok": ok, "workers": st, "db": db,
+            "ok": ok, "workers": st, "db": db, "judge_route": _judge_route(),
             "classifier": getattr(self.svc.pool, "version", None),
             "second_opinion_key": self.settings.second_opinion_key_set,
         })
@@ -175,7 +254,8 @@ class _Handler(BaseHTTPRequestHandler):
     timeout = 30
 
     def _do(self):
-        resp = self.server.router.dispatch(self.command, self.path, self.headers, self.rfile.read)
+        reader = BodyReader(self.rfile, self.connection, self.server.body_read_s)
+        resp = self.server.router.dispatch(self.command, self.path, self.headers, reader.read)
         self.send_response(resp.status)
         for k, v in resp.headers:
             self.send_header(k, v)
@@ -198,4 +278,19 @@ class Server(ThreadingHTTPServer):
 
     def __init__(self, router: Router, host: str, port: int):
         self.router = router
+        self.body_read_s = router.settings.body_read_s
+        self.gate = ConnectionGate(router.settings.max_connections)
         super().__init__((host, port), _Handler)
+
+    def process_request(self, request, client_address):
+        # F-T3: count the connection at accept, before a single header byte is read
+        if not self.gate.enter():
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.gate.leave()

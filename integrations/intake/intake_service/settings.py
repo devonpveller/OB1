@@ -15,6 +15,10 @@ is caught at start, not on the first item that needs it. Nothing is ever replace
   INTAKE_MAX_REQUEST_BYTES            8 MiB: a body over it is 413, never read (a 5 MB raw fits as
                                       base64; heavily escaped JSON text may not - send base64)
   INTAKE_MAX_INFLIGHT                 16 requests at once, then 503
+  INTAKE_MAX_CONNECTIONS              64 open connections at once (before auth too); more are
+                                      closed at accept (intake-i5 attempt 1 F-T3)
+  INTAKE_BODY_READ_SECONDS            30: the WHOLE body must arrive within this, or 408 (a drip
+                                      cannot hold a slot; F-T3)
   INTAKE_QUEUE_WAIT_SECONDS           30: how long a request waits for a free worker, then 503
   INTAKE_WALL_STAGES_SECONDS          5: hard wall clock for stages 1-5 in the worker (D38); the
                                       library's own deadline is 1.6 s (< 2 s bound, D34)
@@ -119,6 +123,8 @@ class Settings:
     listen_port: int
     max_request_bytes: int
     max_inflight: int
+    max_connections: int
+    body_read_s: float
     queue_wait_s: float
     wall_stages_s: float
     wall_transfer_s: float
@@ -234,6 +240,8 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
         listen_port=_int(env, "INTAKE_LISTEN_PORT", 8000, 1, 65535),
         max_request_bytes=_int(env, "INTAKE_MAX_REQUEST_BYTES", 8 * 1024 * 1024, 1024, 16 * 1024 * 1024),
         max_inflight=_int(env, "INTAKE_MAX_INFLIGHT", 16, 1, 1024),
+        max_connections=_int(env, "INTAKE_MAX_CONNECTIONS", 64, 1, 4096),
+        body_read_s=_num(env, "INTAKE_BODY_READ_SECONDS", 30.0, 0.1, 3600.0),
         queue_wait_s=_num(env, "INTAKE_QUEUE_WAIT_SECONDS", 30.0, 0.01, 3600.0),
         wall_stages_s=_num(env, "INTAKE_WALL_STAGES_SECONDS", 5.0, 0.001, 600.0),
         wall_transfer_s=_num(env, "INTAKE_WALL_TRANSFER_SECONDS", 10.0, 0.1, 600.0),

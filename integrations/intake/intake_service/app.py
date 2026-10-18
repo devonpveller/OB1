@@ -4,7 +4,11 @@ loads, until everything that can be checked has been.
   1. configuration (settings.load): any invalid value -> exit 2 (EXIT_CONFIG), naming the
      variable, never a secret value (I4 R3-T3: the D40 policy point is validated here)
   2. the classifier files (weights.verify_model_dir): missing or not the pinned bytes -> exit 3
-  3. the secrets leave the process environment: the second-opinion key goes into the Judge's
+  3. the process makes itself NON-DUMPABLE (prctl PR_SET_DUMPABLE 0; exit 5 if that fails):
+     the kernel keeps the start-up environment in /proc/<pid>/environ whatever os.environ says,
+     and a worker runs with the same uid - non-dumpable is what stops a worker (no capability)
+     reading /proc/1/environ or /proc/1/mem (intake-i5 attempt 1 F-T1). Then the secrets leave
+     the process environment: the second-opinion key goes into the Judge's
      closure (the library's), the DB password and caller keys stay in Settings' masked objects,
      and os.environ no longer carries any of them - the worker processes are spawned without
      them (and child_env_drop names them again, belt and braces)
@@ -26,6 +30,7 @@ from .weights import WeightsRefused, verify_model_dir
 EXIT_CONFIG = 2
 EXIT_WEIGHTS = 3
 EXIT_WORKERS = 4
+EXIT_HARDEN = 5
 EXIT_USAGE = 64
 log = logging.getLogger("intake_service")
 
@@ -38,6 +43,22 @@ def _logging(level: str = "INFO") -> None:
         h._intake = True  # type: ignore[attr-defined]
         root.addHandler(h)
     root.setLevel(level)
+
+
+def harden_process() -> None:
+    """PR_SET_DUMPABLE 0 for this process (Linux). Children started by exec become dumpable
+    again (their own environ holds no secret); this process's environ and memory are then
+    readable only with CAP_SYS_PTRACE, which no process in the container has. Raises OSError
+    when the kernel refuses; a no-op (logged) where there is no prctl - the service runs only in
+    its Linux container."""
+    if not sys.platform.startswith("linux"):
+        log.warning("not Linux: the process is NOT made non-dumpable")
+        return
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    PR_SET_DUMPABLE, PR_GET_DUMPABLE = 4, 3
+    if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 or libc.prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE, 0) refused")
 
 
 def main(argv=None, env=None, *, start: bool = True, files=None) -> int:
@@ -76,6 +97,11 @@ def _serve(s, env) -> int:
     from .pool import PoolError, WorkerPool
     from .store import PgStore
 
+    try:
+        harden_process()
+    except OSError as e:
+        log.error("could not make the process non-dumpable, not starting: %s", e)
+        return EXIT_HARDEN
     source = os.environ if env is None else env
     judge = Judge(http_gateway.send, cfg=s.second_opinion, env={KEY_ENV: source.get(KEY_ENV, "")})
     for name in settings.SECRET_ENV:

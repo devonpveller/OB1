@@ -23,11 +23,16 @@ THE JOB PROTOCOL (one duplex pipe per worker; the parent never parses untrusted 
   worker -> parent   ("done", id, {kind, result, detail})
 
 THE WALL CLOCKS (the parent's, measured with time.monotonic):
-  transfer    from sending the job to "started": wall_transfer_s (the body is up to 16 MiB)
+  transfer    from BEFORE the job is sent to "started": wall_transfer_s (the body is up to
+              16 MiB). The send itself runs in a helper thread and is bounded by this clock: a
+              body bigger than the pipe buffer, handed to a frozen worker, blocks the send, and
+              the worker is killed at the deadline (intake-i5 attempt 1 F-T2)
   stages      from "go" to "stage6" or "done": wall_stages_s (stages 1-5; the library's own
               deadline is 1.6 s, the D34 bound < 2 s)
   classifier  from "stage6" to "done": wall_classifier_s (the classifier's own budget plus slack;
               its budget is checked between chunks, so one forward pass can overshoot it)
+A busy worker whose job has outlived every wall clock (max_job_seconds) counts as STUCK, and
+status()["serving"] (what /healthz reads) leaves it out.
 A deadline passing -> proc.kill() -> join -> the worker is discarded and replaced -> the request
 gets killed_result(): `pending`, error "worker: killed at the <phase> wall clock", error_kind
 transient, with the idempotency key when "started" had arrived (so the item can be stored and
@@ -241,6 +246,8 @@ class WorkerPool:
         self.kills = 0
         self.deaths = 0
         self.version: str | None = None
+        self._job_started: dict = {}
+        self.max_job_seconds = wall_transfer_s + wall_stages_s + wall_classifier_s + 5.0
 
     # -- lifecycle ------------------------------------------------------------------------------
     def _spawn(self) -> _Worker:
@@ -340,9 +347,17 @@ class WorkerPool:
             self._reap(w)
 
     def status(self) -> dict:
+        now = time.monotonic()
         with self._cv:
-            return {"ready": len(self._idle) + len(self._busy), "total": self.size, "busy": len(self._busy),
-                    "replacing": self._replacing, "kills": self.kills, "deaths": self.deaths}
+            stuck = sum(1 for w in self._busy if now - self._job_started.get(w, now) > self.max_job_seconds)
+            ready = len(self._idle) + len(self._busy)
+            return {"ready": ready, "serving": ready - stuck, "stuck": stuck, "total": self.size,
+                    "busy": len(self._busy), "replacing": self._replacing, "kills": self.kills,
+                    "deaths": self.deaths}
+
+    def status_pids(self) -> list[int]:
+        with self._cv:
+            return [w.pid for w in list(self._idle) + list(self._busy)]
 
     # -- one job --------------------------------------------------------------------------------
     def _acquire(self, wait: float) -> _Worker:
@@ -359,11 +374,13 @@ class WorkerPool:
                 self._cv.wait(left)
             w = self._idle.pop()
             self._busy.add(w)
+            self._job_started[w] = time.monotonic()
             return w
 
     def _release(self, w: _Worker) -> None:
         with self._cv:
             self._busy.discard(w)
+            self._job_started.pop(w, None)
             if not self._closed:
                 self._idle.append(w)
                 self._cv.notify_all()
@@ -373,6 +390,7 @@ class WorkerPool:
         self._reap(w)
         with self._cv:
             self._busy.discard(w)
+            self._job_started.pop(w, None)
             if killed:
                 self.kills += 1
             else:
@@ -397,9 +415,26 @@ class WorkerPool:
         phase = "transfer"
         deadline = t0 + self.wall_transfer_s
         started = None
-        try:
-            w.conn.send(("job", jid, body))
-        except (OSError, ValueError):
+        # F-T2: the send is bounded by the transfer clock (a frozen worker never drains the pipe)
+        sent = threading.Event()
+        failed: list = []
+
+        def _send():
+            try:
+                w.conn.send(("job", jid, body))
+            except Exception as e:  # noqa: BLE001
+                failed.append(e)
+            finally:
+                sent.set()
+
+        threading.Thread(target=_send, name="intake-job-send", daemon=True).start()
+        if not sent.wait(max(0.0, deadline - time.monotonic())):
+            elapsed = time.monotonic() - t0
+            kill_s = self._drop_worker(w, killed=True)
+            log.warning("worker %s killed at the transfer wall clock after %.3fs (the send did not finish)",
+                        w.pid, elapsed)
+            return Outcome("killed", None, None, phase, elapsed, "wall clock (the send)", w.pid, kill_s)
+        if failed:
             self._drop_worker(w, killed=False)
             return Outcome("died", None, None, phase, time.monotonic() - t0, "the pipe to the worker broke", w.pid)
         while True:
