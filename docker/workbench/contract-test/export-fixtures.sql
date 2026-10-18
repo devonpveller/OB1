@@ -51,4 +51,12 @@ INSERT INTO public.sources (id, url, title, content, content_type, domain, metad
   ('f6a00000-0000-4000-8000-000000000116', 'https://doi.org/10.5555/p6a.e01', 'Fixture egress record',
    'Fixture egress record: an authored fixture text.', 'paper', 'doi.org', '{}');
 
+-- rw-p6a-resolve attempt 3: 117-118, the stub answers a 200 whose title holds the key / mailto split by
+-- an empty citeproc tag (s01: <i></i> and <b></b>; s02: <sc></sc> and <span class="nocase"></span>)
+INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata) VALUES
+  ('f6a00000-0000-4000-8000-000000000117', 'https://doi.org/10.5555/p6a.s01', 'Fixture split-key record s01',
+   'Fixture split-key record s01: an authored fixture text.', 'paper', 'doi.org', '{}'),
+  ('f6a00000-0000-4000-8000-000000000118', 'https://doi.org/10.5555/p6a.s02', 'Fixture split-key record s02',
+   'Fixture split-key record s02: an authored fixture text.', 'paper', 'doi.org', '{}');
+
 NOTIFY pgrst, 'reload schema';

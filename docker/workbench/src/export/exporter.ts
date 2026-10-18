@@ -36,6 +36,7 @@ import { RequestRefused, ResolutionFailed, type Resolver } from "./resolver.ts";
 import type { ExportRef } from "./repo.ts";
 import { citeKey, type FormatDef, type RefItem, render as realRender, RenderFailed, type StyleDef, UnnumberedCitation } from "./render.ts";
 import { aboutExport } from "./about.ts";
+import type { Limits } from "./markdown.ts";
 
 export interface ExporterDeps {
   reg: { entries(registry: string): Promise<RegistryEntry[]> };
@@ -47,6 +48,7 @@ export interface ExporterDeps {
   cache(referenceId: string, identifier: string, csl: CslItem, via: string): Promise<void>;
   render?: typeof realRender;
   log?: (m: string) => void;
+  limits?: Limits; // the document limits before pandoc (markdown.ts; default from the environment)
 }
 
 export interface Unresolved {
@@ -143,7 +145,13 @@ function markedItem(u: Unresolved, refs: ExportRef[]): RefItem {
 const formatOf = (e: RegistryEntry): FormatDef => ({ key: e.key, ...(e.definition as Omit<FormatDef, "key">) });
 const styleOf = (e: RegistryEntry): StyleDef => ({ key: e.key, ...(e.definition as Omit<StyleDef, "key">) });
 
-const STATUS_OF: Record<string, 422 | 503> = { glyphs: 422, citation: 422, pandoc: 422, font: 503, "style-integrity": 503 };
+// attempt 3: `too-complex` (a limit before pandoc, or pandoc's time) is the document's, 422; an output
+// that fails its verification (`output-verification`, `credential`) or a format row whose writer the
+// export cannot verify (`format`) is the server's, 503 - never a 200.
+const STATUS_OF: Record<string, 422 | 503> = {
+  glyphs: 422, citation: 422, pandoc: 422, "too-complex": 422,
+  font: 503, "style-integrity": 503, "output-verification": 503, credential: 503, format: 503,
+};
 
 export function createExporter(deps: ExporterDeps): Hono {
   const app = new Hono();
@@ -192,7 +200,11 @@ export function createExporter(deps: ExporterDeps): Hono {
       return c.json({
         error: `export refused: ${unresolved.length} of ${refs.length} references could not be resolved`,
         resolver: deps.resolver.status,
-        references: unresolved.map(({ marker: _m, ...u }) => u),
+        // attempt 3 (the tester's near-miss 2): a suppressed source is named by its number and
+        // "suppressed" only - never its title or its id
+        references: unresolved.map(({ marker: _m, ...u }) => refs.find((r) => r.number === u.number)?.suppressed
+          ? { number: u.number, cited_ref: null, source_id: null, title: null, identifier: null, reason: "suppressed" }
+          : u),
       }, 422);
     }
     const refItems = copy ? [...items, ...unresolved.map((u) => markedItem(u, refs))].sort((a, b) => a.number - b.number) : items;
@@ -203,7 +215,10 @@ export function createExporter(deps: ExporterDeps): Hono {
     const resourcePath = [deps.vaultDir, noteDir ? safeJoin(deps.vaultDir, noteDir) : deps.vaultDir].join(":");
     const format = formatOf(fmtEntry);
     try {
-      const out = await render({ md, refs: refItems, format, style: styleOf(styleEntry), cslDir: deps.cslDir, wrapNone: noWrap, resourcePath });
+      const out = await render({
+        md, refs: refItems, format, style: styleOf(styleEntry), cslDir: deps.cslDir, wrapNone: noWrap, resourcePath,
+        secrets: deps.resolver.secrets, limits: deps.limits,
+      });
       return new Response(out.bytes as unknown as BodyInit, {
         headers: {
           "content-type": format.mime,

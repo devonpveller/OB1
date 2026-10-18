@@ -47,9 +47,12 @@ export class IdentifierError extends Error {}
 export const MAX_ACCESSION = 256;
 
 // The grammar check every identifier passes before it is cached, rendered or requested: the kind's
-// pattern in full, at most 256 characters, no whitespace and no control character.
+// pattern in full, at most 256 characters, no whitespace, no control character, and (attempt 3,
+// the tester's near-miss 3: `10.5555/adv.id<script>alert(1);</script>` was sent upstream) none of
+// `<`, `>`, `"`, `'` or a backtick - for every kind, whatever its registry pattern admits. The DOI
+// row's own class lost `<>` too, so a SICI-style DOI with angle brackets is refused, named.
 export function accessionOk(kind: IdentifierKind, acc: string): boolean {
-  return acc.length > 0 && acc.length <= MAX_ACCESSION && !/[\s\x00-\x1f\x7f]/.test(acc) &&
+  return acc.length > 0 && acc.length <= MAX_ACCESSION && !/[\s\x00-\x1f\x7f<>"'`]/.test(acc) &&
     new RegExp(`^(?:${kind.pattern})$`).test(acc);
 }
 

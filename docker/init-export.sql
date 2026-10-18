@@ -49,10 +49,15 @@ INSERT INTO public.contract_registry_entries (registry, key, label, definition) 
     -- md: pandoc Markdown with the references rendered as text (citations, divs, spans, header
     -- attributes, raw HTML, raw attributes and raw TeX off), so the file reads as plain Markdown and
     -- carries no raw HTML (rw-p6a-resolve attempt 2: with raw_attribute on, raw HTML was written
-    -- back as {=html} fences). glyph_check (pdf): text no installed face covers is refused before
-    -- Typst runs. copy (txt): the format "Copy page" (mode=copy) asks for.
+    -- back as {=html} fences). rw-p6a-resolve attempt 3: link, inline-code, header and fenced-code
+    -- attributes off too (a `{onclick=...}` after a link reached the MD). This writer does not
+    -- escape a line of colons (a reader's fenced div), so the cleaned text never holds three colons
+    -- in a row (markdown.ts) and the output verification refuses a fenced-div line.
+    -- glyph_check (pdf): text no installed face covers is refused before Typst runs. copy (txt):
+    -- the format "Copy page" (mode=copy) asks for. Only the writers the output verification reads
+    -- (pdf through Typst, docx, markdown, plain) are rendered; another row is refused 503 `format`.
     ('export_formats', 'md', 'Markdown (references rendered)',
-        '{"pandoc_to":"markdown-citations-native_divs-native_spans-fenced_divs-bracketed_spans-header_attributes-raw_html-raw_attribute-raw_tex","ext":"md","mime":"text/markdown; charset=utf-8"}'),
+        '{"pandoc_to":"markdown-citations-native_divs-native_spans-fenced_divs-bracketed_spans-header_attributes-link_attributes-inline_code_attributes-fenced_code_attributes-raw_html-raw_attribute-raw_tex","ext":"md","mime":"text/markdown; charset=utf-8"}'),
     ('export_formats', 'txt', 'Plain text',
         '{"pandoc_to":"plain","ext":"txt","mime":"text/plain; charset=utf-8","copy":true}'),
 
@@ -77,9 +82,10 @@ INSERT INTO public.contract_registry_entries (registry, key, label, definition) 
     -- the source metadata fields (dotted paths) that declare the kind. rw-p6a-resolve attempt 2:
     -- the DOI pattern is the character class Crossref recommends plus the <> of SICI DOIs, with no
     -- `..`, no `//` and no second 10.NNNN/ (the \S+ of manubot let `@`, a query, a second DOI and
-    -- non-ASCII through).
+    -- non-ASCII through). Attempt 3: the class lost SICI's <> (the tester's near-miss 3: a
+    -- `<script>`-shaped DOI was sent upstream), and no kind admits < > " ' or a backtick.
     ('reference_identifier_kinds', 'doi', 'DOI',
-        '{"prefixes":["doi"],"pattern":"(?!.*\\.\\.)(?!.*//)(?!.+10\\.[0-9]{4,9}/)10\\.[0-9]{4,9}/[-._;()/:<>A-Za-z0-9]+","lower":true,"metadata_keys":["doi","scholarly.doi"],
+        '{"prefixes":["doi"],"pattern":"(?!.*\\.\\.)(?!.*//)(?!.+10\\.[0-9]{4,9}/)10\\.[0-9]{4,9}/[-._;()/:A-Za-z0-9]+","lower":true,"metadata_keys":["doi","scholarly.doi"],
           "url_rules":[{"host":"doi.org","path":"^/(10\\..+)$"},{"host":"dx.doi.org","path":"^/(10\\..+)$"}],
           "openalex_work":"doi:{accession}","crossref_doi":"{accession}"}'),
     ('reference_identifier_kinds', 'arxiv', 'arXiv identifier',

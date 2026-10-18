@@ -27,6 +27,76 @@ pinned version's own metadata on 2026-10-17 (registry entry, LICENSE at the tag,
 | @std/internal (tests only) | 1.0.14 | MIT | 2018-2022 the Deno authors | https://jsr.io/@std/internal |
 | Deno standard library, deno.land/std (via deno-postgres) | 0.214.0 | MIT | the Deno authors | https://github.com/denoland/std |
 
+The export's markdown parser and writer (rw-p6a-resolve attempt 3, src/export/markdown.ts): micromark
+with its GFM footnote, strikethrough, table and task-list extensions and its math extension, read into
+and written from an mdast syntax tree by mdast-util-from-markdown / mdast-util-to-markdown and the
+matching mdast-util-* extensions - all MIT, by Titus Wormer and the unified collective, each LICENSE
+file read in the package tarball at the locked version on 2026-10-18. The rows marked "(dependency)"
+and "(type declarations)" are what those twelve packages pull in at their locked versions (katex and
+commander come with micromark-extension-math, whose HTML output is not used; debug and ms with
+micromark).
+
+| Name | Version | Licence | Copyright | URL |
+|---|---|---|---|---|
+| @types/debug (type declarations) | 4.1.13 | MIT | Microsoft Corporation. | https://www.npmjs.com/package/@types/debug |
+| @types/hast (type declarations) | 3.0.5 | MIT | Microsoft Corporation. | https://www.npmjs.com/package/@types/hast |
+| @types/katex (type declarations) | 0.16.8 | MIT | Microsoft Corporation. | https://www.npmjs.com/package/@types/katex |
+| @types/mdast (type declarations) | 4.0.4 | MIT | Microsoft Corporation. | https://www.npmjs.com/package/@types/mdast |
+| @types/ms (type declarations) | 2.1.0 | MIT | Microsoft Corporation. | https://www.npmjs.com/package/@types/ms |
+| @types/unist (type declarations) | 3.0.3 | MIT | Microsoft Corporation. | https://www.npmjs.com/package/@types/unist |
+| character-entities (dependency) | 2.0.2 | MIT | 2015 Titus Wormer | https://www.npmjs.com/package/character-entities |
+| commander (dependency) | 8.3.0 | MIT | 2011 TJ Holowaychuk | https://www.npmjs.com/package/commander |
+| debug (dependency) | 4.4.3 | MIT | 2014-2017 TJ Holowaychuk | https://www.npmjs.com/package/debug |
+| decode-named-character-reference (dependency) | 1.3.0 | MIT | Titus Wormer | https://www.npmjs.com/package/decode-named-character-reference |
+| dequal (dependency) | 2.0.3 | MIT | Luke Edwards (lukeed.com) | https://www.npmjs.com/package/dequal |
+| devlop (dependency) | 1.1.0 | MIT | 2023 Titus Wormer | https://www.npmjs.com/package/devlop |
+| katex (dependency) | 0.16.47 | MIT | 2013-2020 Khan Academy and other contributors | https://www.npmjs.com/package/katex |
+| longest-streak (dependency) | 3.1.0 | MIT | 2015 Titus Wormer | https://www.npmjs.com/package/longest-streak |
+| markdown-table (dependency) | 3.0.4 | MIT | Titus Wormer | https://www.npmjs.com/package/markdown-table |
+| mdast-util-from-markdown | 2.1.0 | MIT | Titus Wormer | https://www.npmjs.com/package/mdast-util-from-markdown |
+| mdast-util-gfm-footnote | 2.1.0 | MIT | Titus Wormer | https://www.npmjs.com/package/mdast-util-gfm-footnote |
+| mdast-util-gfm-strikethrough | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/mdast-util-gfm-strikethrough |
+| mdast-util-gfm-table | 2.0.0 | MIT | 2020 Titus Wormer | https://www.npmjs.com/package/mdast-util-gfm-table |
+| mdast-util-gfm-task-list-item | 2.0.0 | MIT | 2020 Titus Wormer | https://www.npmjs.com/package/mdast-util-gfm-task-list-item |
+| mdast-util-math | 3.0.0 | MIT | 2020 Titus Wormer | https://www.npmjs.com/package/mdast-util-math |
+| mdast-util-phrasing (dependency) | 4.1.0 | MIT | 2017 Titus Wormer | https://www.npmjs.com/package/mdast-util-phrasing |
+| mdast-util-to-markdown | 2.2.0 | MIT | Titus Wormer | https://www.npmjs.com/package/mdast-util-to-markdown |
+| mdast-util-to-string (dependency) | 4.0.0 | MIT | 2015 Titus Wormer | https://www.npmjs.com/package/mdast-util-to-string |
+| micromark-core-commonmark (dependency) | 2.0.4 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-core-commonmark |
+| micromark-extension-gfm-footnote | 2.1.0 | MIT | 2021 Titus Wormer | https://www.npmjs.com/package/micromark-extension-gfm-footnote |
+| micromark-extension-gfm-strikethrough | 2.1.0 | MIT | 2020 Titus Wormer | https://www.npmjs.com/package/micromark-extension-gfm-strikethrough |
+| micromark-extension-gfm-table | 2.1.2 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-extension-gfm-table |
+| micromark-extension-gfm-task-list-item | 2.1.0 | MIT | 2020 Titus Wormer | https://www.npmjs.com/package/micromark-extension-gfm-task-list-item |
+| micromark-extension-math | 3.1.0 | MIT | 2020 Titus Wormer | https://www.npmjs.com/package/micromark-extension-math |
+| micromark-factory-destination (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-factory-destination |
+| micromark-factory-label (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-factory-label |
+| micromark-factory-space (dependency) | 2.1.0 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-factory-space |
+| micromark-factory-title (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-factory-title |
+| micromark-factory-whitespace (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-factory-whitespace |
+| micromark-util-character (dependency) | 2.1.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-character |
+| micromark-util-chunked (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-chunked |
+| micromark-util-classify-character (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-classify-character |
+| micromark-util-combine-extensions (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-combine-extensions |
+| micromark-util-decode-numeric-character-reference (dependency) | 2.0.2 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-decode-numeric-character-reference |
+| micromark-util-decode-string (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-decode-string |
+| micromark-util-edit-map (dependency) | 1.0.0 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-edit-map |
+| micromark-util-encode (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-encode |
+| micromark-util-html-tag-name (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-html-tag-name |
+| micromark-util-normalize-identifier (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-normalize-identifier |
+| micromark-util-resolve-all (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-resolve-all |
+| micromark-util-sanitize-uri (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-sanitize-uri |
+| micromark-util-subtokenize (dependency) | 2.1.0 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-subtokenize |
+| micromark-util-symbol (dependency) | 2.0.1 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-symbol |
+| micromark-util-types (dependency) | 2.0.3 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark-util-types |
+| micromark (dependency) | 4.0.3 | MIT | Titus Wormer | https://www.npmjs.com/package/micromark |
+| ms (dependency) | 2.1.3 | MIT | 2020 Vercel, Inc. | https://www.npmjs.com/package/ms |
+| unist-util-is (dependency) | 6.0.1 | MIT | 2015 Titus Wormer | https://www.npmjs.com/package/unist-util-is |
+| unist-util-remove-position (dependency) | 5.0.0 | MIT | 2016 Titus Wormer | https://www.npmjs.com/package/unist-util-remove-position |
+| unist-util-stringify-position (dependency) | 4.0.0 | MIT | 2016 Titus Wormer | https://www.npmjs.com/package/unist-util-stringify-position |
+| unist-util-visit-parents (dependency) | 6.0.2 | MIT | 2016 Titus Wormer | https://www.npmjs.com/package/unist-util-visit-parents |
+| unist-util-visit (dependency) | 5.1.0 | MIT | 2015 Titus Wormer | https://www.npmjs.com/package/unist-util-visit |
+| zwitch (dependency) | 2.0.4 | MIT | 2016 Titus Wormer | https://www.npmjs.com/package/zwitch |
+
 ## Code linked into openbrain-mcp (the MCP host of the contract, D14)
 
 | Name | Version | Licence | Copyright | URL |

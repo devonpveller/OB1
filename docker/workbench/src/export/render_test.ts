@@ -79,7 +79,14 @@ Deno.test("acceptance 4: the Typst path renders CJK with real glyphs; the same p
   // registered main face dropped so Typst falls back to its embedded Latin faces): CJK as tofu.
   const pdfFmt = fmt("pdf");
   const { mainfont: _drop, ...noCjk } = pdfFmt.metadata as Record<string, unknown>;
-  const tofu = (await render({ ...input(md, refs, "pdf", "ieee", { engineOpts: ["--ignore-system-fonts"] }), format: { ...pdfFmt, metadata: noCjk } })).bytes;
+  const control = { ...input(md, refs, "pdf", "ieee", { engineOpts: ["--ignore-system-fonts"] }), format: { ...pdfFmt, metadata: noCjk } };
+  // attempt 3: the glyph check before Typst passes here (the faces ARE installed; Typst is told to
+  // ignore them), so it is the OUTPUT verification that refuses the boxes - the RED of the .notdef scan
+  const e = await assertRejects(() => render(control), RenderFailed);
+  assertEquals([e.code, (e.extra as { format?: string }).format], ["output-verification", "pdf"], e.message);
+  assertMatch(e.message, /\.notdef glyph/);
+  console.log(`cjk notdef RED: ${e.message}`);
+  const tofu = (await render({ ...control, verify: false })).bytes;
   const green = await cjkGlyphCheck(pdf, tofu, CJK_TEXT);
   assert(green.ok, `GREEN failed: ${green.reasons.join("; ")}`);
   assert((await pdfFonts(pdf)).some((f) => /Noto-?Serif-?CJK/i.test(f)), "the registered main face is the one embedded");

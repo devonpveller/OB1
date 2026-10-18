@@ -157,9 +157,28 @@ GPL source offer.
 - **What a note cannot do**: its title prints literally (`@`, `#set`, `$x$`, a backslash are text),
   a stray `@` never becomes a citation, raw HTML / raw TeX / `{=format}` blocks are not passed
   through (dropped from the MD, DOCX and PDF), a `javascript:` or `data:` link keeps only its text.
-  A style is hashed when it is USED (a modified or missing file answers 503 `style-integrity`); a
-  character no installed face covers refuses the PDF before Typst runs (422 `glyphs`; emoji render
-  with Noto Color Emoji).
+  A style is hashed when it is USED (a modified or missing file, or one that is a symlink or lies
+  outside the style directory, answers 503 `style-integrity`); a character no installed face covers
+  refuses the PDF before Typst runs (422 `glyphs`; emoji render with Noto Color Emoji).
+- **The note is parsed, not pattern-matched** (rw-p6a-resolve attempt 3, `src/export/markdown.ts`):
+  micromark (MIT) parses the body into a syntax tree; links, images and references with a target
+  other than http(s)/mailto/relative lose the target, raw HTML and every attribute block go, text is
+  written back escaped, an unsafe-scheme string in text reads `javascript[:]`. The glyph check reads
+  the parsed text (code, fences, math, alt text, titles, references). The parse runs in a worker pool
+  (`src/export/prepare_worker.ts`, `EXPORT_PARSE_WORKERS`, `EXPORT_PARSE_TIMEOUT_MS` 15 s).
+- **Limits before pandoc** (422 `too-complex`, naming the limit): the note's size
+  (`EXPORT_MAX_NOTE_BYTES`, 1 MB), bracket nesting (32), tree depth (64), list depth (16),
+  emphasis delimiters and brackets per paragraph (1000 each), the parser's time; pandoc runs with
+  `+RTS -N1 -M2g`, a CPU limit (prlimit) and a wall clock (`EXPORT_PANDOC_TIMEOUT_MS`, 60 s) after
+  which it is killed with its children.
+- **Every output is verified before it is served** (`src/export/verify.ts`, `pdf_read.ts`): the MD
+  re-parsed (no unsafe target, raw node, attribute block, fenced div with attributes, raw TeX), the
+  DOCX unzipped (external relationships and HYPERLINK fields http(s)/mailto, no fetching field), the
+  PDF parsed (URI actions http(s)/mailto, no other action, no .notdef box drawn), and every format's
+  text searched for unsafe-scheme strings and the configured key or mailto (tags stripped,
+  invisible characters removed): 503 `output-verification` or `credential`, never a 200. Only the
+  writers this verifies (pdf through Typst, docx, markdown, plain) can be registered formats
+  (503 `format` otherwise).
 - **D9**: pandoc runs as a separate process over files (markdown, a JSON metadata file, a CSL-JSON
   bibliography file and the verified style in, the document out), Typst as its child; no Lua/JSON filter, no AST round trip. The citekey grammar and
   CSL clean-up are ported from manubot 859dd15 (BSD-2-Clause-Patent), not run. WeasyPrint, the

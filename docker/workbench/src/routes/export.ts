@@ -16,6 +16,7 @@ import { vaultExists, vaultRead } from "../util/vault.ts";
 import { createResolver, resolverConfigFromEnv } from "../export/resolver.ts";
 import { cacheResolution, noteExportRefs, pageExportRefs } from "../export/repo.ts";
 import { createExporter } from "../export/exporter.ts";
+import { limitsFromEnv } from "../export/markdown.ts";
 
 const db = poolDb(pool);
 export const exporter = createExporter({
@@ -30,4 +31,5 @@ export const exporter = createExporter({
     return await noteExportRefs(db, rel);
   },
   cache: (referenceId, identifier, csl, via) => cacheResolution(db, referenceId, identifier, csl, via),
+  limits: limitsFromEnv(), // EXPORT_MAX_NOTE_BYTES, EXPORT_MAX_BRACKET_DEPTH, EXPORT_MAX_DEPTH, EXPORT_MAX_LIST_DEPTH
 });

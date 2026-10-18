@@ -22,7 +22,9 @@ Deno.test("acceptance 6: the parity fixture renders the same through Typst and t
   try {
     await Deno.writeTextFile(`${dir}/fallback.css`, weasyprintFallbackCss(pdf));
     const typst = (await render({ md, refs, format: pdf, style, cslDir })).bytes;
-    const weasy = (await render({ md, refs, format: weasyprintFormat(pdf, `${dir}/fallback.css`), style, cslDir })).bytes;
+    // verify: false - WeasyPrint is the RETIRED engine (parity stage only); the output verification
+    // and its writer allow-list cover what the export ships (Typst)
+    const weasy = (await render({ md, refs, format: weasyprintFormat(pdf, `${dir}/fallback.css`), style, cslDir, verify: false })).bytes;
     const [a, b] = [await parityProperties(typst, PARITY_HEADINGS), await parityProperties(weasy, PARITY_HEADINGS)];
     const verdict = compareParity(a, b, PARITY_HEADINGS);
     const summary = {
@@ -51,7 +53,7 @@ Deno.test("acceptance 6 RED: the checker catches a real difference - the pre-P6a
   const typst = await parityProperties((await render({ md, refs, format: pdf, style, cslDir })).bytes, PARITY_HEADINGS);
   // the deployed path before P6a: pandoc --pdf-engine=weasyprint with pandoc's default HTML page
   const legacy = { ...pdf, key: "pdf-legacy", engine: "weasyprint", metadata: {} };
-  const old = await parityProperties((await render({ md, refs, format: legacy, style, cslDir })).bytes, PARITY_HEADINGS);
+  const old = await parityProperties((await render({ md, refs, format: legacy, style, cslDir, verify: false })).bytes, PARITY_HEADINGS);
   const v1 = compareParity(typst, old, PARITY_HEADINGS);
   console.log(`RED legacy WeasyPrint call: ${v1.ok ? "PASS (unexpected)" : "FAIL"}: ${v1.diffs.join(" / ").slice(0, 300)}`);
   assert(!v1.ok, "the pre-P6a WeasyPrint call must not pass the parity check");

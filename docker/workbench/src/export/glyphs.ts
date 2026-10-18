@@ -9,8 +9,14 @@
 // embedded faces (Libertinus Serif, New Computer Modern, DejaVu Sans Mono) cannot be read here; the
 // image installs fonts-dejavu-core so their widest coverage (DejaVu: Hebrew, Arabic, ...) is also on
 // disk (attempt 2's runner found Hebrew refused while Typst could draw it). A character only an
-// embedded face covers is therefore refused - loud (422, named), never a box. Math spans are not
-// checked here (Typst sets them in its embedded New Computer Modern Math).
+// embedded face covers is therefore refused - loud (422, named), never a box.
+// rw-p6a-resolve attempt 3: the text checked is the PARSED document's (render.ts prepareDocument:
+// every text node, code span, code block, math, image alt and link title, the title and the
+// reference strings), not the raw markdown with `$..$` stripped - attempt 2 hid a character inside a
+// code span, a fence, math or an image alt from this check and the PDF drew a box with 200. Math IS
+// checked: a character no installed face has is refused even in math. What Typst then actually
+// draws is verified on the PDF (verify.ts: no .notdef glyph), because Typst's embedded math face does
+// not fall back to the system faces this scan reads.
 // cmap subtables read: format 4 (BMP) and format 12 (full range); format 13 (many-to-one "last
 // resort" maps) is deliberately not read - it claims every character and draws boxes.
 
@@ -143,9 +149,6 @@ export const coverage = () => (cache ??= installedCoverage());
 // Characters that draw nothing on their own (joiners, variation selectors, tags, the BOM, controls):
 // never a box, so never a reason to refuse.
 const IGNORABLE = /[\u0000-\u0020\u007f-\u00a0\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8]|[\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}]/u;
-
-// Math spans ($..$, $$..$$) are typeset by Typst's embedded math face, not checked here.
-export const withoutMath = (md: string) => md.replace(/\$\$[\s\S]*?\$\$/g, " ").replace(/(^|[^\\$])\$(?=\S)([^$\n]*?\S)\$(?![0-9])/g, "$1 ");
 
 // The distinct characters of `text` no installed face covers, in order of first appearance.
 export async function uncovered(text: string, bits?: Uint8Array): Promise<number[]> {

@@ -6,6 +6,8 @@
 // (remove_jsonschema_errors) fetches the CSL schema from GitHub at run time; instead the items
 // here are BUILT from an allow-list of CSL variables, so nothing outside the schema is emitted.
 
+import { defang, noColonRuns } from "./schemes.ts";
+
 export type CslItem = Record<string, unknown> & { type: string; title: string };
 
 // manubot CSL_Item.type_mapping
@@ -48,19 +50,51 @@ export function dateToDateParts(date: string | null | undefined): number[] | nul
 // small caps, nocase). Any other tag - <script>, <a href>, <img onerror> from an upstream record - is
 // removed with its brackets (the text between stays text), and so is an HTML comment (attempt 2,
 // ADV-1c: nothing from a record may carry raw HTML into an output).
+//
+// rw-p6a-resolve attempt 3 (tester ADV-3: a key split by an EMPTY `<i></i>` was cached, and citeproc
+// dropped the empty tag, printing the key): only the title fields keep citeproc's markup, and there
+// an element with nothing in it is removed (repeatedly, so `<i><b></b></i>` goes too); every other
+// field is plain text, every tag stripped. An unsafe-scheme string in any field is defanged
+// (markdown.ts defang), so no output carries `javascript:` even as text.
 const CITEPROC_TAG = /^<\/?(?:i|b|sup|sub|sc)>$|^<span (?:class="nocase"|style="font-variant:\s*small-caps;?")>$|^<\/span>$/i;
+const EMPTY_ELEMENT = /<(i|b|sup|sub|sc)>(\s*)<\/\1>|<span [^>]*>(\s*)<\/span>/gi;
 export function cleanMarkup(s: string): string {
-  return s.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<\/?[A-Za-z][^>]*>?/g, (m) => CITEPROC_TAG.test(m) ? m : "");
+  let t = s.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<\/?[A-Za-z][^>]*>?/g, (m) => CITEPROC_TAG.test(m) ? m : "");
+  for (let k = 0; k < 8; k++) {
+    const n = t.replace(EMPTY_ELEMENT, (_m, _a, w1, w2) => w1 ?? w2 ?? "");
+    if (n === t) break;
+    t = n;
+  }
+  return noColonRuns(defang(t));
 }
+export const plainText = (s: string) => noColonRuns(defang(s.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<\/?[A-Za-z][^>]*>?/g, "")));
 
-function str(v: unknown): string | undefined {
-  if (typeof v === "string" && v.trim()) return cleanMarkup(v).replace(/\s+/g, " ").trim() || undefined;
+// The CSL variables citeproc renders as rich text; every other string is plain.
+export const MARKUP_FIELDS = new Set(["title", "container-title", "collection-title", "original-title", "title-short", "container-title-short"]);
+
+function str(v: unknown, markup = false): string | undefined {
+  if (typeof v === "string" && v.trim()) return (markup ? cleanMarkup(v) : plainText(v)).replace(/\s+/g, " ").trim() || undefined;
   if (typeof v === "number") return String(v);
   return undefined;
 }
 
-function first(v: unknown): string | undefined {
-  return Array.isArray(v) ? str(v[0]) : str(v);
+// A CSL item as the renderer hands it to citeproc - also an item cached BEFORE attempt 3: every
+// string field cleaned as above, a URL kept only when it is http(s).
+export function renderSafeCsl(item: Record<string, unknown>): Record<string, unknown> {
+  const walk = (v: unknown, key: string): unknown => {
+    if (typeof v === "string") {
+      if (key === "URL") return httpUrl(v);
+      return (MARKUP_FIELDS.has(key) ? cleanMarkup(v) : plainText(v)).replace(/\s+/g, " ");
+    }
+    if (Array.isArray(v)) return v.map((x) => walk(x, key));
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x, k)]).filter(([, x]) => x !== undefined));
+    return v;
+  };
+  return walk(item, "") as Record<string, unknown>;
+}
+
+function first(v: unknown, markup = false): string | undefined {
+  return Array.isArray(v) ? str(v[0], markup) : str(v, markup);
 }
 
 function compact(o: Record<string, unknown>): Record<string, unknown> {
@@ -96,9 +130,9 @@ export function crossrefToCsl(msg: Record<string, unknown>): CslItem {
   ).filter((a) => Object.keys(a).length);
   return finish({
     type: t ? (CROSSREF_TYPE_MAPPING[t] ?? t) : undefined,
-    title: first(msg.title),
+    title: first(msg.title, true),
     author: authors.length ? authors : undefined,
-    "container-title": first(msg["container-title"]),
+    "container-title": first(msg["container-title"], true),
     volume: str(msg.volume),
     issue: str(msg.issue),
     page: str(msg.page),
@@ -128,9 +162,9 @@ export function openalexToCsl(work: Record<string, unknown>): CslItem {
   const doi = cleanDoi(work.doi);
   return finish({
     type: t ? (OPENALEX_TYPE_MAPPING[t] ?? "entry") : undefined,
-    title: str(work.title) ?? str(work.display_name),
+    title: str(work.title, true) ?? str(work.display_name, true),
     author: authors.length ? authors : undefined,
-    "container-title": str(source.display_name),
+    "container-title": str(source.display_name, true),
     volume: str(biblio.volume),
     issue: str(biblio.issue),
     page: fp ? (lp && lp !== fp ? `${fp}-${lp}` : fp) : undefined,
@@ -147,7 +181,7 @@ export function recordToCsl(r: { title: string | null; url: string | null; acces
   const dp = dateToDateParts(r.accessed ?? undefined);
   return finish({
     type: httpUrl(r.url) ? "webpage" : "document",
-    title: cleanMarkup(r.title || "").replace(/\s+/g, " ").trim() || httpUrl(r.url) || "Untitled source",
+    title: plainText(r.title || "").replace(/\s+/g, " ").trim() || httpUrl(r.url) || "Untitled source",
     URL: httpUrl(r.url),
     accessed: dp ? { "date-parts": [dp] } : undefined,
   }, "the source record");

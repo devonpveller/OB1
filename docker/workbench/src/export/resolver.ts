@@ -30,6 +30,7 @@
 // identifiers for credibility counts; the consolidation is recorded in the item's findings.
 import { type CslItem, crossrefToCsl, MetadataIncomplete, openalexToCsl } from "./csl.ts";
 import { accessionOk, fill, type Identifier, type IdentifierKind } from "./identifiers.ts";
+import { credentialShaped, secretForms, secretIn } from "./credentials.ts";
 
 export interface ResolverConfig {
   openalexKey: string;
@@ -77,12 +78,10 @@ export interface Resolver {
   send(service: Service, url: string): Promise<Response>;
   // Whether a CSL item (fresh or cached) carries credential-shaped text under this configuration.
   unsafe(csl: unknown): boolean;
+  // The configured key and mailto (and their URL-encoded forms): no output may carry them.
+  readonly secrets: string[];
   close(): void; // the proxy client (a test closes it; the workbench keeps one for its lifetime)
 }
-
-// Credential-shaped text (P3a scholarly.ts SECRET_SHAPED, narrowed to what a request carries): a
-// key/mailto assignment, or a URL with a query string.
-const SHAPED = /(?:api[_-]?key|mailto)\s*=|https?:\/\/[^\s]*\?/i;
 
 function strings(v: unknown, out: string[] = []): string[] {
   if (typeof v === "string") out.push(v);
@@ -106,7 +105,7 @@ export function createResolver(
 ): Resolver {
   const raw: RawFetch = deps.fetch ?? ((u, i) => fetch(u, i));
   const log = deps.log ?? ((m: string) => console.error(m));
-  const secrets = [cfg.openalexKey, encodeURIComponent(cfg.openalexKey), cfg.mailto, encodeURIComponent(cfg.mailto)].filter((s) => s.length >= 4);
+  const secrets = secretForms([cfg.openalexKey, cfg.mailto]);
   // A message for the server log: query strings cut, user info cut, both secrets masked.
   const redact = (msg: string) => {
     let out = msg.replace(/(https?:\/\/[^\s?)'"]+)\?[^\s)'"]*/g, "$1?[query removed]").replace(/(\w+:\/\/)[^/\s@]+@/g, "$1[userinfo removed]@");
@@ -169,7 +168,14 @@ export function createResolver(
     return r;
   }
 
-  const unsafe = (csl: unknown) => strings(csl).some((s) => SHAPED.test(s) || secrets.some((x) => s.includes(x)));
+  // attempt 3: judged on the NORMALISED text (credentials.ts) - tags stripped, entities and escapes
+  // undone, invisible characters removed, whitespace collapsed and removed - so a key split by an
+  // empty `<i></i>`, `<b></b>`, `<sc></sc>` or `<span class="nocase"></span>` is the key; and on the
+  // strings of one record joined, so a key split across two fields is too.
+  const unsafe = (csl: unknown) => {
+    const all = strings(csl);
+    return all.some((s) => credentialShaped(s) || secretIn(s, secrets) !== null) || secretIn(all.join(""), secrets) !== null;
+  };
 
   async function getJson(service: Service, url: string): Promise<{ status: number; body: unknown }> {
     const r = await send(service, url);
@@ -250,5 +256,5 @@ export function createResolver(
       client?.close();
     } catch { /* already closed */ }
   };
-  return { get status() { return status; }, resolve, send, unsafe, close };
+  return { get status() { return status; }, resolve, send, unsafe, secrets, close };
 }

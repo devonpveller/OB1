@@ -18,6 +18,10 @@
 //   10.5555/p6a.r04              OpenAlex 302 -> http://evil.stub/leak?<the request's query: key + mailto>
 //   10.5555/p6a.t01              OpenAlex 200 whose title echoes the request's query (key + mailto);
 //                                Crossref 404 (so the reference fails: no clean record anywhere)
+// attempt 3 (the tester's attempt-2 ADV-3: a key split by an EMPTY citeproc tag was cached and printed):
+//   10.5555/p6a.s01              OpenAlex 200 whose title holds the request's key split by <i></i> and
+//                                its mailto split by <b></b>; Crossref 404
+//   10.5555/p6a.s02              the same split by <sc></sc> and <span class="nocase"></span>
 // Any other .stub host (evil.stub) is logged and answered 200, so a followed redirect is SEEN.
 // Run with --network-alias api.openalex.stub/api.crossref.stub/evil.stub as the DIRECT CATCHER, it
 // logs a request that skipped the proxy (the run expects none).
@@ -39,6 +43,11 @@ function openalexWork(key: string, query: URLSearchParams): [number, unknown, st
   if (key === "doi:10.5555/p6a.r04") return redirect(`http://evil.stub/leak?${query}`);
   if (key === "doi:10.5555/p6a.t01") {
     return [200, { id: "https://openalex.org/W6AT01", title: `Echo title ${[...query].map(([k, v]) => `${k}=${v}`).join(" ")}`, type: "article" }];
+  }
+  if (key === "doi:10.5555/p6a.s01" || key === "doi:10.5555/p6a.s02") {
+    const [k, m] = [query.get("api_key") ?? "", query.get("mailto") ?? ""];
+    const [a, b] = key.endsWith("s01") ? ["<i></i>", "<b></b>"] : ["<sc></sc>", '<span class="nocase"></span>'];
+    return [200, { id: "https://openalex.org/W6AS0" + key.slice(-1), title: `Split ${k.slice(0, 6)}${a}${k.slice(6)} and ${m.slice(0, 5)}${b}${m.slice(5)}`, type: "article" }];
   }
   if (key === "doi:10.48550/arxiv.2101.00001") {
     return [200, { id: "https://openalex.org/W6A0000001", doi: "https://doi.org/10.48550/arxiv.2101.00001", title: "Resolved arXiv work (OpenAlex)",

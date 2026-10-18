@@ -18,7 +18,7 @@ export const FX_ENTRIES: RegistryEntry[] = [
   e("export_formats", "docx", "Word (DOCX)", {
     pandoc_to: "docx", ext: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", binary: true,
   }),
-  e("export_formats", "md", "Markdown (references rendered)", { pandoc_to: "markdown-citations-native_divs-native_spans-fenced_divs-bracketed_spans-header_attributes-raw_html-raw_attribute-raw_tex", ext: "md", mime: "text/markdown; charset=utf-8" }),
+  e("export_formats", "md", "Markdown (references rendered)", { pandoc_to: "markdown-citations-native_divs-native_spans-fenced_divs-bracketed_spans-header_attributes-link_attributes-inline_code_attributes-fenced_code_attributes-raw_html-raw_attribute-raw_tex", ext: "md", mime: "text/markdown; charset=utf-8" }),
   e("export_formats", "txt", "Plain text", { pandoc_to: "plain", ext: "txt", mime: "text/plain; charset=utf-8", copy: true }),
   e("citation_styles", "ieee", "IEEE Reference Guide version 11.29.2023", {
     file: "ieee.csl", sha256: "b4c7619fc16c45a31e4cc3271eab94ffe83192d3b4c7fc729470a3b459448de3", citation_format: "numeric", default: true,
@@ -37,7 +37,7 @@ export const FX_ENTRIES: RegistryEntry[] = [
     authors: ["Brenton M. Wiernik", "Andrew Dunning"], contributors: ["Jay Pfaffman"],
   }),
   e("reference_identifier_kinds", "doi", "DOI", {
-    prefixes: ["doi"], pattern: "(?!.*\\.\\.)(?!.*//)(?!.+10\\.[0-9]{4,9}/)10\\.[0-9]{4,9}/[-._;()/:<>A-Za-z0-9]+", lower: true, metadata_keys: ["doi", "scholarly.doi"],
+    prefixes: ["doi"], pattern: "(?!.*\\.\\.)(?!.*//)(?!.+10\\.[0-9]{4,9}/)10\\.[0-9]{4,9}/[-._;()/:A-Za-z0-9]+", lower: true, metadata_keys: ["doi", "scholarly.doi"],
     url_rules: [{ host: "doi.org", path: "^/(10\\..+)$" }, { host: "dx.doi.org", path: "^/(10\\..+)$" }],
     openalex_work: "doi:{accession}", crossref_doi: "{accession}",
   }),

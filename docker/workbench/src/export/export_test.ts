@@ -6,7 +6,7 @@ import { assert, assertEquals, assertMatch, assertRejects, assertThrows } from "
 import { crossrefToCsl, dateToDateParts, MetadataIncomplete, openalexToCsl, recordToCsl } from "./csl.ts";
 import { identifierFromUrl, IdentifierError, type IdentifierKind, parseCitekey, sourceIdentifier } from "./identifiers.ts";
 import { createResolver, RequestRefused, ResolutionFailed, type ResolverConfig } from "./resolver.ts";
-import { citeKey, escapeStrayCitations, fatalWarnings, type FormatDef, pandocArgs, prepareDocument, UnnumberedCitation } from "./render.ts";
+import { citeKey, fatalWarnings, type FormatDef, INPUT_FORMAT, pandocArgs, prepareDocument, UnnumberedCitation } from "./render.ts";
 import { FX_ENTRIES, fxEntries } from "./registry_fixtures.ts";
 import { aboutExport } from "./about.ts";
 import { fixtureId } from "./test_fixtures.ts";
@@ -118,8 +118,18 @@ Deno.test("ADV-2c: identifiers outside their kind's grammar are refused - @, ..,
   assertThrows(() => sourceIdentifier(KINDS, { url: "https://doi.org/10.5555/adv.inj@evil.stub", metadata: {} }), IdentifierError);
   assertThrows(() => parseCitekey(KINDS, `pmid:1 2`), IdentifierError);
   assertThrows(() => parseCitekey(KINDS, `arxiv:2101.00001/../x`), IdentifierError);
-  // what real DOIs look like still passes: SICI (<>;:()), dots, dashes, underscores, slashes
-  for (const ok of ["10.1002/(SICI)1097-4679(199711)53:7<657::AID-JCLP3>3.0.CO;2-F", "10.1000/xyz.abc-1_2/3", "10.48550/arxiv.2101.00001"]) {
+  // attempt 3 (the tester's near-miss 3): no kind admits `<`, `>`, `"`, `'` or a backtick, so a
+  // SICI-style DOI with angle brackets is refused, named - and so is a `<script>`-shaped one
+  for (const bad of ["10.1002/(SICI)1097-4679(199711)53:7<657::AID-JCLP3>3.0.CO;2-F", "10.5555/adv.id<script>alert(1);</script>", '10.5555/a"b', "10.5555/a'b", "10.5555/a`b"]) {
+    assertThrows(() => parseCitekey(KINDS, `doi:${bad}`), IdentifierError, "is not a valid doi identifier", bad);
+  }
+  assertThrows(() => parseCitekey(KINDS, "pmid:1<2"), IdentifierError);
+  // ... whatever a kind's registry pattern admits: the guard is in accessionOk, not in each row
+  const loose = { key: "loose", prefixes: ["loose"], pattern: ".+" } as IdentifierKind;
+  for (const bad of ["a<b", "a>b", 'a"b', "a'b", "a`b"]) assertThrows(() => parseCitekey([loose], `loose:${bad}`), IdentifierError, undefined, `loose ${bad}`);
+  assertEquals(parseCitekey([loose], "loose:a-b").accession, "a-b");
+  // what real DOIs look like still passes: SICI without angle brackets (;:()), dots, dashes, underscores, slashes
+  for (const ok of ["10.1002/(SICI)1097-4679(199711)53:7;2-F", "10.1000/xyz.abc-1_2/3", "10.48550/arxiv.2101.00001"]) {
     assertEquals(parseCitekey(KINDS, `doi:${ok}`).accession, ok.toLowerCase());
   }
 });
@@ -289,7 +299,9 @@ Deno.test("the pandoc input: source wikilinks cite their reference keys, other w
     "Mail me@example.org or @handle, [@cite], -@x.\n\n`code @inline` and <https://x.org/@u> and [l](https://m.org/@u).\n\n```\n@fenced\n```\n\n[[tool-x]] [[a/b|Y]]\n";
   const p = prepareDocument(md, refs, MD);
   assert(p.markdown.includes(`See S1 [@src-${a}], [@src-${b}] and again [@src-${a}].`));
-  assert(p.markdown.includes("Mail me@example.org or \\@handle, [\\@cite], -\\@x."), p.markdown);
+  // attempt 3: the text is written back from the parsed tree with every `@` escaped (no user text can
+  // become a citation) and every `[` (no user text can become a link)
+  assert(p.markdown.includes("Mail me\\@example.org or \\@handle, \\[\\@cite], -\\@x."), p.markdown);
   assert(p.markdown.includes("`code @inline` and <https://x.org/@u> and [l](https://m.org/@u)."));
   assert(p.markdown.includes("```\n@fenced\n```"));
   assert(p.markdown.includes("tool-x Y"));
@@ -301,7 +313,6 @@ Deno.test("the pandoc input: source wikilinks cite their reference keys, other w
   assertEquals(p.references.map((r) => r.id), refs.map((r) => r.key), "the references are the CSL-JSON bibliography, in number order");
   assert(!("references" in p.metadata), "not in the metadata (pandoc would read their strings as markdown)");
   assert(!("bibliography" in p.metadata) && !("csl" in p.metadata));
-  assertEquals(escapeStrayCitations("    @indented code"), "    @indented code");
   // a link the numbering does not know (not a uuid) is refused, never rendered as text
   assertThrows(() => prepareDocument("x [[source/1111111111111111111111111111111111-1|bad]]", [], MD), UnnumberedCitation, "not a citable source id");
 });
@@ -315,7 +326,10 @@ Deno.test("acceptance 5: pandoc is called with files (markdown + metadata in, do
     assert(args.includes(want), `missing ${want}`);
   }
   const joined = args.join(" ").replaceAll("meta.json", "META").replaceAll("references.json", "BIB");
-  assertEquals(args[args.indexOf("--from") + 1], "markdown-yaml_metadata_block-raw_attribute-raw_tex", "no YAML block, no raw-attribute blocks, no raw TeX");
+  assertEquals(args[args.indexOf("--from") + 1], INPUT_FORMAT);
+  for (const off of ["yaml_metadata_block", "pandoc_title_block", "raw_html", "raw_attribute", "raw_tex", "link_attributes", "header_attributes", "inline_code_attributes", "fenced_code_attributes", "bracketed_spans", "fenced_divs"]) {
+    assert(INPUT_FORMAT.split("-").includes(off), `the input reads ${off} as text (off)`);
+  }
   assert(!/--(lua-)?filter|(^| )-[FL]\b|\bjson\b|native/.test(joined), joined);
 });
 

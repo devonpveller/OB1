@@ -534,6 +534,46 @@ try {
     Check (($logs -match '\[export resolver\]') -and ($logs -notmatch [regex]::Escape($oaKey)) -and ($logs -notmatch [regex]::Escape($mailto))) 'near-miss 4: the detail is in the workbench log, the key and the mailto masked'
     $null = Dk rm -f -v $eg
   } else { Fail 'the egress workbench did not start' }
+  # h. attempt 3: the tester's attempt-2 bypasses through HTTP (test-attempt2 ADV-3, ADV-4, ADV-5, near-miss 1)
+  Write-Host '  [5h] attempt 3: link shapes, glyphs in code and math, a key split by an empty tag, limits'
+  # ADV-4: the five link shapes + attribute blocks: every format 200, nothing a reader could follow
+  $ok = $true
+  foreach ($f in @('md', 'docx', 'pdf', 'txt')) {
+    $o = Export $wbName 'notes/p6a/links.md' $f "links.$f"
+    if ($o -notmatch '^status 200 ') { $ok = $false; Fail "links $f export: $o" }
+  }
+  $o = Client @('structure', '/ev/exports/links.md', '/ev/exports/links.docx', '/ev/exports/links.pdf', '/ev/exports/links.txt')
+  Save 'links-structure.log' $o
+  Write-Host ($o -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
+  Check ($ok -and ($script:rc -eq 0)) 'A3 / ADV-4: the link shapes export 200 in MD, DOCX, PDF and TXT; the MD rendered by pandoc to HTML, the DOCX relationships and the PDF actions carry no javascript: target and no on* attribute'
+  # ADV-5: a character no face covers inside a code span, math and a fence: 422 glyphs, not a 200 with boxes
+  $o = Export $wbName 'notes/p6a/glyph-code.md' 'pdf' 'glyph-code.json'
+  $j = [System.IO.File]::ReadAllText((Join-Path $out 'glyph-code.json'))
+  $o2 = Export $wbName 'notes/p6a/glyph-code.md' 'md' 'glyph-code.md'
+  Save 'glyph-code.log' "$o`n$j`n$o2"
+  Check (($o -match '^status 422 ') -and ($j -match '"code":"glyphs"') -and ($j -match 'U\+10600') -and ($o2 -match '^status 200 ')) "A3 / ADV-5: U+10600 in a code span, math and a fence is refused 422 glyphs before typesetting (the MD still answers 200): $o"
+  # ADV-3: a 200 record whose title holds the key / mailto split by <i></i>, <b></b>, <sc></sc>, <span class="nocase"></span>
+  $null = StubPost '/_reset'
+  $o = Export $wbName 'notes/p6a/split-key.md' 'pdf' 'split-key.json'
+  $r = Client @('refused', '/ev/exports/split-key.json', '2', 'OpenAlex returned a record carrying credential-shaped text (refused)')
+  $j = [System.IO.File]::ReadAllText((Join-Path $out 'split-key.json'))
+  $o2 = Psql "SELECT count(*) FROM public.reference_resolutions rr JOIN public.reference_records r ON r.id = rr.reference_id WHERE r.source_id::text IN ('f6a00000-0000-4000-8000-000000000117', 'f6a00000-0000-4000-8000-000000000118')"
+  $o3 = Export $wbName 'notes/p6a/split-key.md' 'txt' 'split-key.copy.txt' '&mode=copy'
+  $s3 = Client @('secret', '/ev/exports/split-key.copy.txt', $oaKey, $mailto)
+  Save 'split-key.log' "$o`n$r`ncached rows: $($o2.Trim())`n$o3`n$s3"
+  Write-Host ($r -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
+  Check (($o -match '^status 422 ') -and ($r -match '^PASS') -and ($j -notmatch [regex]::Escape($oaKey)) -and ($j -notmatch [regex]::Escape($mailto))) 'A3 / ADV-3: both split-key records are refused as credential-shaped (422, named), the body carries neither secret'
+  Check ($o2.Trim() -eq '0') "A3 / ADV-3: neither split-key record is cached ($($o2.Trim()) rows)"
+  Check (($o3 -match '^status 200 ') -and ($s3 -match '^PASS')) "A3 / ADV-3: the Copy page of the note answers 200 and carries neither secret: $o3 | $s3"
+  # near-miss 1: pathological nesting refused before pandoc, fast
+  foreach ($c in @(@('brackets', 'bracket nesting depth'), @('deep-list', 'list nesting depth'), @('stars', 'delimiter|parser'))) {
+    $t0 = Get-Date
+    $o = Export $wbName "notes/p6a/$($c[0]).md" 'pdf' "$($c[0]).json"
+    $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+    $j = [System.IO.File]::ReadAllText((Join-Path $out "$($c[0]).json"))
+    Save "$($c[0]).log" "$o`n$j`n$secs s"
+    Check (($o -match '^status 422 ') -and ($j -match '"code":"too-complex"') -and ($j -match $c[1]) -and ($secs -lt 30)) "A3 / near-miss 1: $($c[0]).md is refused 422 too-complex ($($c[1])) in $secs s (attempt 2 held pandoc 180 s)"
+  }
   # nothing went direct, and no workbench log carries a secret
   $null = Client @('get', "http://${catchName}:8080/_log", '/ev/catcher-log.json')
   # (PS 5.1: ConvertFrom-Json emits a JSON array as ONE object; unroll it, or '[]' counts as 1)

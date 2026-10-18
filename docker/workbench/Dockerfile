@@ -70,14 +70,16 @@ COPY THIRD-PARTY-NOTICES.md ./
 COPY csl ./csl
 COPY src ./src
 
-# Pre-cache the deps actually imported by the entrypoint (hono, postgres).
+# Pre-cache the deps actually imported by the entrypoint (hono, postgres; rw-p6a-resolve attempt 3 adds
+# the export's markdown parser - micromark and the mdast utilities, MIT, pinned in deno.lock and noticed
+# in THIRD-PARTY-NOTICES.md - which the frozen step below caches through src/routes/export.ts).
 # The "@shared/slug" map points at a RUNTIME bind-mount (/recipes/_shared) and
 # is only imported by later phases, so it is not resolvable at build time —
 # `|| true` keeps the build green; runtime resolves it from the mount.
 RUN deno cache src/main.ts || true
 # The retrieval contract and its tests import nothing from the runtime mount, so they cache
 # FROZEN: a dependency that drifted from deno.lock fails the build.
-RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/render_test.ts
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/render_test.ts src/export/prepare_worker.ts
 
 FROM base AS test
 # poppler-utils (GPL): pdftoppm, pdftotext, pdffonts and pdfinfo, run as SEPARATE PROCESSES by the

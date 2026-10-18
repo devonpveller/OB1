@@ -169,3 +169,73 @@ Deno.test("ADV-5a + ADV-4b through the real renderer: the @me title note exports
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+// ── rw-p6a-resolve attempt 3 at the route ──────────────────────────────────────────────────────────
+const splitTitle = (tag: string) => `Split ${KEY.slice(0, 6)}${tag}${KEY.slice(6)} and ${MAILTO.slice(0, 5)}${tag}${MAILTO.slice(5)}`;
+const EMPTY_TAGS = ["<i></i>", "<b></b>", "<sc></sc>", '<span class="nocase"></span>'];
+
+Deno.test("A3 / ADV-3 at the route: a 200 record whose title holds the key and the mailto split by each empty citeproc tag is refused 422, named, and never cached", async () => {
+  for (const tag of EMPTY_TAGS) {
+    const w = world([{ n: 1 }], (url) => Promise.resolve(url.includes("openalex")
+      ? Response.json({ title: splitTitle(tag), type: "article", doi: "https://doi.org/10.5555/p6a.001" })
+      : Response.json({ error: "no" }, { status: 404 })));
+    const r = await get(w.deps({ render: spyRender(w.renders) as never }), "path=notes/t/n.md&format=pdf");
+    assertEquals(r.status, 422, tag);
+    const body = await r.text();
+    assertMatch(body, /OpenAlex returned a record carrying credential-shaped text \(refused\)/, tag);
+    assert(!body.includes(KEY) && !body.includes(MAILTO), `${tag}: the body carries neither secret`);
+    assertEquals(w.cache.size, 0, `${tag}: nothing cached`);
+    assertEquals(w.renders.length, 0, `${tag}: nothing rendered`);
+  }
+});
+
+Deno.test("A3 / ADV-3 at the route: a CACHED row holding a split key (cached before attempt 3) is refused for the export and marked for the Copy page - no secret in either", async () => {
+  for (const tag of EMPTY_TAGS) {
+    const w = world([{ n: 1 }]);
+    w.cache.set("ref-1", [{ identifier: "doi:10.5555/p6a.001", csl: { type: "article", title: splitTitle(tag) } as CslItem, via: "openalex" }]);
+    const r = await get(w.deps(), "path=notes/t/n.md&format=md");
+    assertEquals(r.status, 422, tag);
+    const b = await r.text();
+    assertMatch(b, /the cached record carries credential-shaped text/);
+    assert(!b.includes(KEY) && !b.includes(MAILTO), tag);
+    const c = await get(w.deps(), "path=notes/t/n.md&mode=copy");
+    assertEquals(c.status, 200, tag);
+    const t = await c.text();
+    assertMatch(t, /UNRESOLVED \(unsafe cached record\)/);
+    assert(!t.includes(KEY) && !t.includes(MAILTO) && !t.replace(/\s+/g, "").includes(KEY), `${tag}: the Copy page carries neither secret`);
+  }
+});
+
+Deno.test("A3 (near-miss 2): the download 422 names a suppressed source by its number and 'suppressed' only - no title, no id", async () => {
+  const w = world([{ n: 1 }, { n: 103, suppressed: true, title: "SUPPRESSED-TITLE-LEAK secret record" }]);
+  const r = await get(w.deps({ render: spyRender(w.renders) as never }), "path=notes/t/n.md&format=pdf");
+  assertEquals(r.status, 422);
+  const b = await r.json();
+  const text = JSON.stringify(b);
+  assert(!text.includes("SUPPRESSED-TITLE-LEAK") && !text.includes(fixtureId(103)), text);
+  assertEquals(b.references, [{ number: 2, cited_ref: null, source_id: null, title: null, identifier: null, reason: "suppressed" }]);
+});
+
+Deno.test("A3 at the route: a failed output verification, a credential in the output and a format the export cannot verify are 503, a limit 422 - never a 200 or a 500", async () => {
+  const cases: [RenderFailed, number][] = [
+    [new RenderFailed("the pdf export was not served: its output verification found a URI action to 'javascript:x'", "javascript:x", "output-verification", { format: "pdf", offence: "a URI action" }), 503],
+    [new RenderFailed("the md export was not served: it would carry the configured service credential (the text holds ex...16 characters)", "", "credential", { format: "md" }), 503],
+    [new RenderFailed("the export format 'html' uses a writer the export cannot verify ('html5')", "", "format", { format: "html" }), 503],
+    [new RenderFailed("the document is too complex to export: the bracket nesting depth is 33, the limit is 32", "", "too-complex", { limit: "the bracket nesting depth", value: 33, max: 32 }), 422],
+  ];
+  for (const [err, status] of cases) {
+    const w = world([{ n: 1 }]);
+    const r = await get(w.deps({ render: () => Promise.reject(err) }), "path=notes/t/n.md&format=pdf");
+    assertEquals(r.status, status, err.code);
+    assertEquals((await r.json()).code, err.code);
+  }
+  // and through the real renderer: the route passes the resolver's secrets to the output check - a note
+  // whose own text holds the configured key answers 503 credential
+  const w = world([]);
+  const deps = w.deps({ readNote: (rel: string) => Promise.resolve(rel === "notes/t/k.md" ? `# K\n\nMy key ${KEY.slice(0, 4)}<b></b>${KEY.slice(4)} here.\n` : null) });
+  const r = await get(deps, "path=notes/t/k.md&format=txt");
+  assertEquals(r.status, 503);
+  const b = await r.json();
+  assertEquals(b.code, "credential");
+  assert(!JSON.stringify(b).includes(KEY));
+});

@@ -20,6 +20,13 @@
 //                                          (raw HTML + raw attributes ON) has no raw node
 //   title    <pdf|docx> <note.md>          the output carries the note's frontmatter title LITERALLY
 //   fonts    <pdf> <regex>                 a face matching <regex> is embedded
+// rw-p6a-resolve attempt 3:
+//   structure <file>...                    what a reader could follow: the MD as pandoc renders it to HTML (no
+//                                          unsafe href/src, no on* attribute, no script), the DOCX's external
+//                                          relationships and HYPERLINK fields, the PDF's /URI actions and
+//                                          JavaScript/Launch/OpenAction/AA - all http(s)/mailto or absent
+//   secret   <file> <secret>...            the file (PDF text + objects, DOCX XML, text) carries no secret,
+//                                          as written or with tags and whitespace removed
 // The key is read from $WB_KEY and sent as X-Brain-Key, as Caddy does.
 import { pdfFonts, pdfText } from "/app/src/export/pdf_tools.ts";
 import { docxXml } from "/app/src/export/zip_read.ts";
@@ -146,8 +153,47 @@ if (mode === "get") {
   const ok = fonts.some((x) => new RegExp(args[1], "i").test(x));
   console.log(`${ok ? "PASS" : "FAIL"} fonts: ${fonts.join(", ")}`);
   if (!ok) rc = 1;
+} else if (mode === "structure") {
+  // attempt 3: what a READER of each output could follow or execute, checked WITHOUT the workbench's
+  // own verifier (verify.ts): the MD rendered by pandoc to HTML (raw HTML and every attribute syntax
+  // ON, pandoc's defaults), the DOCX's relationships and field codes, the PDF's link and other actions.
+  const SAFE = /^(https?:\/\/|mailto:)/i;
+  for (const file of args) {
+    const b = await Deno.readFile(file);
+    const name = file.split("/").pop();
+    const bad: string[] = [];
+    if (file.endsWith(".md")) {
+      const p = new Deno.Command("pandoc", { args: ["-f", "markdown", "-t", "html", file], stdout: "piped" });
+      const html = new TextDecoder().decode((await p.output()).stdout);
+      for (const m of html.matchAll(/\s(href|src)="([^"]*)"/g)) if (!SAFE.test(m[2]) && !/^#/.test(m[2]) && !/^[\w./-]+$/.test(m[2])) bad.push(`${m[1]}=${m[2]}`);
+      for (const m of html.matchAll(/<[^>]*\s(on[a-z]+)=/gi)) bad.push(`attribute ${m[1]}`);
+      if (/<script|<iframe/i.test(html)) bad.push("a script or iframe element");
+    } else if (file.endsWith(".docx")) {
+      const xml = await docxXml(b);
+      for (const m of xml.matchAll(/<Relationship\b[^>]*Target="([^"]*)"[^>]*TargetMode="External"/g)) if (!SAFE.test(m[1])) bad.push(`relationship ${m[1]}`);
+      for (const m of xml.matchAll(/HYPERLINK\s+"([^"]*)"/g)) if (!SAFE.test(m[1])) bad.push(`field ${m[1]}`);
+    } else if (file.endsWith(".pdf")) {
+      const raw = new TextDecoder("latin1").decode(b);
+      for (const m of raw.matchAll(/\/URI\s*\(((?:\\.|[^\\)])*)\)/g)) if (!SAFE.test(m[1])) bad.push(`URI ${m[1]}`);
+      if (/\/URI\s*</.test(raw)) bad.push("a hex-encoded URI");
+      for (const k of ["/JavaScript", "/JS", "/Launch", "/OpenAction", "/AA", "/SubmitForm", "/EmbeddedFile"]) if (new RegExp(`${k}[\\s/<(\\[]`).test(raw)) bad.push(k);
+    } else {
+      const t = new TextDecoder().decode(b);
+      if (/javascript:|vbscript:|data:text\/html|file:\/\//i.test(t)) bad.push("an unsafe-scheme string");
+    }
+    console.log(`${bad.length ? "FAIL" : "PASS"} structure: ${name}${bad.length ? `: ${bad.slice(0, 5).join(" | ")}` : ": no unsafe target, attribute, raw node or action"}`);
+    if (bad.length) rc = 1;
+  }
+} else if (mode === "secret") {
+  // attempt 3: no output carries the key or the mailto, as written, tags stripped, whitespace removed
+  const [file, ...secrets] = args;
+  const b = await Deno.readFile(file);
+  const views = file.endsWith(".pdf") ? [await pdfText(b), new TextDecoder("latin1").decode(b)] : file.endsWith(".docx") ? [await docxXml(b)] : [new TextDecoder().decode(b)];
+  const hits = secrets.filter((s) => views.some((v) => v.includes(s) || v.replace(/<[^>]*>/g, "").replace(/\s+/g, "").includes(s)));
+  console.log(`${hits.length ? "FAIL" : "PASS"} secret: ${file.split("/").pop()} ${hits.length ? `carries ${hits.length} configured secret(s)` : "carries neither secret"}`);
+  if (hits.length) rc = 1;
 } else {
-  console.error("usage: export-client.ts get|hundred|refused|headers|cjk|forbidden|title|fonts ...");
+  console.error("usage: export-client.ts get|hundred|refused|headers|cjk|forbidden|title|fonts|structure|secret ...");
   rc = 2;
 }
 Deno.exit(rc);
