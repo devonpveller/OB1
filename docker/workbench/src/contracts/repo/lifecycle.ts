@@ -43,6 +43,10 @@ async function trail(db: Db, sourceId: string, kind: string, detail: Record<stri
 //   report_citation, found_via_lead  when that source row's metadata contains the filter
 // citing_page, entity_grounding, report_session and document_link carry no metadata and are
 // dropped. A scoped view cannot prove zero dependence, so erase_allowed is false under a filter.
+// Each kept row's detail names only itself or the in-scope row it points at (source_dependence:
+// claim_edge -> claim id, edge type, claim text; chunk -> idx; trail_event -> kind, at;
+// report_citation / found_via_lead -> that source's id and title), and counts / claims_by_edge_type
+// are aggregated from the kept rows only (rw-p0-contract2 attempt 2 audit).
 const SCOPED_DEPENDENCE = `
   SELECT d.kind, d.ref, d.detail FROM public.source_dependence($1) d
    WHERE $2::jsonb IS NULL
@@ -59,9 +63,11 @@ export async function dependence(db: Db, reg: RegistryReader, id: string, f: Met
       WHERE id = $1 AND ($2::jsonb IS NULL OR metadata @> $2::jsonb)`,
     [id, mf],
   );
-  const held = life[0] ? null : await db.query<{ id: string }>(
-    `SELECT id FROM public.held_sources WHERE id = $1 AND ($2::jsonb IS NULL OR metadata @> $2::jsonb)`,
-    [id, mf],
+  // a held source belongs to a refinery, which carries no metadata: never in scope under a filter
+  // (rw-p0-contract2 attempt 2; the same rule as sources.ts getHeld)
+  const held = life[0] || mf !== null ? null : await db.query<{ id: string }>(
+    `SELECT id FROM public.held_sources WHERE id = $1`,
+    [id],
   );
   const lifecycle = life[0]?.lifecycle ?? (held && held[0] ? "held" : null);
   const defs = kindDefs(await reg.entries("dependence_kinds"));

@@ -71,8 +71,16 @@ export function fail(c: Context, err: unknown) {
   }
   const pg = (err as { fields?: { code?: string; message?: string } })?.fields;
   if (pg?.code === "OBT01") return c.json({ error: "tombstoned", detail: { message: pg.message } }, 409);
+  // A value the database cannot cast (a non-uuid id on a path or in a query parameter: 22P02
+  // invalid_text_representation, 22007/22008 bad datetimes, 22003 out of range) is the caller's
+  // error: 400, and the body carries no database text (rw-p0-contract2 attempt 2, tester finding N3).
+  if (pg?.code && ["22P02", "22007", "22008", "22003"].includes(pg.code)) {
+    return c.json({ error: "invalid request: a parameter is not a valid value for its type" }, 400);
+  }
+  // Anything else is logged here and answered without its text: the database's or the runtime's
+  // message never reaches a caller (the cloud door included).
   console.error("[contract] error:", (err as Error)?.message ?? err);
-  return c.json({ error: "internal", detail: { message: String((err as Error)?.message ?? err) } }, 500);
+  return c.json({ error: "internal" }, 500);
 }
 
 const errorContent = (description: string) => ({ content: { "application/json": { schema: ErrorBody } }, description });

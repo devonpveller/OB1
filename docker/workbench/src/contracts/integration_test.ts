@@ -642,6 +642,35 @@ t("dependence and tombstone fail closed under the metadata filter; erase snapsho
   assertEquals((await call("GET", `/tombstones/${FX.tombstoneAutomation}?metadata_filter=${f}`)).status, 404);
 });
 
+// rw-p0-contract2 attempt 2 (tester t-rw-p0 finding N1-N4): what an in-scope row CARRIES is scoped too
+t("under the metadata filter nested collections are scoped: claims' sources, quality's aggregates, malformed ids", async () => {
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  const [sIn, sOut] = [await newSource(), await newSource()];
+  await sql(`UPDATE public.sources SET metadata = '{"share":"cloud"}' WHERE id = $1`, [sIn]);
+  const [cIn, cOut] = [uuid(), uuid()];
+  await sql(`INSERT INTO public.claims (id, text, metadata) VALUES ($1, 'nested in', '{"share":"cloud"}'), ($2, 'nested out', '{}')`, [cIn, cOut]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $3, 'states'), ($1, $4, 'states'), ($2, $3, 'states')`,
+    [cIn, cOut, sIn, sOut]);
+  const scoped = await call("GET", `/claims?q=nested&metadata_filter=${f}`);
+  assertEquals(scoped.status, 200);
+  assertEquals(scoped.json.claims.map((c: any) => c.id), [cIn]);
+  assertEquals(scoped.json.claims[0].sources.map((x: any) => x.source_id), [sIn]);
+  assertEquals((await call("GET", `/claims?source_id=${sOut}&metadata_filter=${f}`)).json.count, 0);
+  const all = await call("GET", `/claims?q=nested`);
+  assertEquals(all.json.claims.find((c: any) => c.id === cIn).sources.length, 2);
+  const grounded = async (q: string) =>
+    (await call("GET", `/sources/${sIn}/quality${q}`)).json.factors.find((x: any) => x.name === "grounded_claims").value;
+  assertEquals(await grounded(`?metadata_filter=${f}`), 1);
+  assertEquals(await grounded(""), 2);
+  for (const p of [`/sources/not-a-uuid/dependence`, `/references/not-a-uuid`, `/tombstones/not-a-uuid?metadata_filter=${f}`]) {
+    const r = await call("GET", p);
+    assertEquals(r.status, 400, p);
+    assert(!JSON.stringify(r.json).includes("invalid input syntax"), p);
+  }
+  await sql(`DELETE FROM public.claim_sources WHERE claim_id = ANY($1::uuid[])`, [[cIn, cOut]]);
+  await sql(`DELETE FROM public.claims WHERE id = ANY($1::uuid[])`, [[cIn, cOut]]);
+});
+
 t("every read the fixture answers validates against its schema (live conformance)", async () => {
   const reads: [string, { safeParse: (x: unknown) => { success: boolean } }][] = [
     [`/references/${FX.sourceActive}`, S.Reference], [`/chunks/${FX.sourceActive}:1/context`, S.ChunkContext],
