@@ -25,6 +25,17 @@ DROP TRIGGER IF EXISTS trg_credibility_registry_guard ON public.contract_registr
 DROP FUNCTION IF EXISTS public.trg_credibility_registry_guard();
 DROP INDEX IF EXISTS public.uq_credibility_weights_kind_family;
 ALTER TABLE public.contract_registry_entries DROP CONSTRAINT IF EXISTS contract_registry_entries_credibility_weight_ok;
+-- attempt 3's objects: the registries' owner-only triggers, the one-active-paper index, the
+-- pattern CHECK, claims.filed_at (its trigger and the column - nothing outside P3a reads it)
+DROP TRIGGER IF EXISTS trg_credibility_registries_guard ON public.contract_registries;
+DROP TRIGGER IF EXISTS trg_credibility_registries_truncate ON public.contract_registries;
+DROP TRIGGER IF EXISTS trg_credibility_registry_entries_truncate ON public.contract_registry_entries;
+DROP INDEX IF EXISTS public.uq_paper_score_versions_one_active;
+ALTER TABLE public.contract_registry_entries DROP CONSTRAINT IF EXISTS contract_registry_entries_credibility_patterns_ok;
+DROP FUNCTION IF EXISTS public.credibility_patterns_ok(TEXT, JSONB);
+DROP TRIGGER IF EXISTS trg_claims_filed_at ON public.claims;
+DROP FUNCTION IF EXISTS public.trg_claims_filed_at();
+ALTER TABLE public.claims DROP COLUMN IF EXISTS filed_at;
 
 DROP TABLE IF EXISTS public.credibility_trigger_state;
 \ir init-research-contract.sql
@@ -39,6 +50,12 @@ DROP FUNCTION IF EXISTS public.claim_kind_of(UUID);
 DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT);
 DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT, JSONB);
 DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT, JSONB, UUID[]);
+DROP FUNCTION IF EXISTS public.source_rolling_total_core(UUID, TEXT, JSONB, UUID[]);
+DROP FUNCTION IF EXISTS public.credibility_model_check();
+DROP FUNCTION IF EXISTS public.credibility_claim_floor(TEXT);
+DROP FUNCTION IF EXISTS public.credibility_store_confidence(DOUBLE PRECISION, DOUBLE PRECISION);
+DROP FUNCTION IF EXISTS public.credibility_is_positive(JSONB, BOOLEAN);
+DROP FUNCTION IF EXISTS public.credibility_is_order(JSONB);
 DROP FUNCTION IF EXISTS public.source_credibility(UUID);
 DROP FUNCTION IF EXISTS public.credibility_domain_class(TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.credibility_fallback_kind();
@@ -58,6 +75,7 @@ DROP TABLE IF EXISTS public.credibility_rescore_confirmations;
 DROP TABLE IF EXISTS public.source_corroborations;
 DROP TABLE IF EXISTS public.source_credibility_history;
 DROP TABLE IF EXISTS public.research_admission_trail;
+DROP FUNCTION IF EXISTS public.trg_credibility_owner_only();   -- after the tables whose TRUNCATE triggers use it
 
 DELETE FROM public.contract_registry_entries
  WHERE registry IN ('claim_kinds', 'credibility_weights', 'domain_classes', 'paper_score_versions',

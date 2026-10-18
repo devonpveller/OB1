@@ -65,6 +65,43 @@ export function dbConfig(env: (k: string) => string | undefined): { ok: true; cf
   return { ok: true, cfg: { hostname: env("DB_HOST")!.trim(), port, database: env("DB_NAME")!.trim(), user: env("DB_USER")!.trim(), password: env("DB_PASSWORD")! } };
 }
 
+interface GateClient { queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }> }
+export interface GateResult { code: 0 | 3; out: string[]; err: string[] }
+
+/**
+ * One run of the gate against an open connection (attempt 3: factored out of the script body so
+ * the database test drives the real code). IDEMPOTENT in rows too (tester (7): a second --apply
+ * recorded a second confirmation row from the same line): when the trigger already runs D15
+ * under a confirmation of exactly the current view, --apply records nothing and re-scores
+ * nothing, and says so. The database half is idempotent as well
+ * (credibility_record_confirmation returns the digest's existing row; credibility_apply_d15_trigger
+ * returns 0 when this view is already applied).
+ */
+export async function runGate(client: GateClient, findingsText: string, findingsPath: string, apply: boolean): Promise<GateResult> {
+  const out: string[] = [], err: string[] = [];
+  const cur = (await client.queryObject<{ digest: string; model: string }>(
+    `SELECT public.credibility_before_after_digest() AS digest, public.credibility_model_version() AS model`)).rows[0];
+  out.push(`current before/after view: digest=${cur.digest} model="${cur.model}"`);
+  const found = confirmationFor(findingsText, cur.digest, cur.model);
+  if (!found.ok) { err.push(`REFUSED: ${found.reason}`); return { code: 3, out, err }; }
+  out.push(`confirmation found: by=${found.c.by} date=${found.c.date}`);
+  const done = (await client.queryObject<{ id: string; applied_at: string; applied_claims: number }>(
+    `SELECT c.id::text AS id, c.applied_at::text AS applied_at, c.applied_claims
+       FROM public.credibility_trigger_state t
+       JOIN public.credibility_rescore_confirmations c ON c.id = t.confirmation_id
+      WHERE t.singleton AND t.model = 'd15' AND c.view_digest = $1 AND c.applied_at IS NOT NULL`, [cur.digest])).rows[0];
+  if (done) {
+    out.push(`already applied: confirmation ${done.id} at ${done.applied_at} (${done.applied_claims} claim(s)); nothing recorded, nothing re-scored`);
+    return { code: 0, out, err };
+  }
+  if (!apply) { out.push("dry run: nothing recorded, nothing re-scored (pass --apply)"); return { code: 0, out, err }; }
+  await client.queryObject(`SELECT public.credibility_record_confirmation($1, $2, $3, $4)`,
+    [cur.digest, found.c.by, findingsPath, found.c.line]);
+  const n = (await client.queryObject<{ n: number }>(`SELECT public.credibility_apply_d15_trigger($1) AS n`, [cur.digest])).rows[0].n;
+  out.push(`applied: the trigger now uses ${cur.model}; ${n} active claim(s) re-scored`);
+  return { code: 0, out, err };
+}
+
 if (import.meta.main) {
   const args = Deno.args;
   const at = args.indexOf("--findings");
@@ -76,19 +113,14 @@ if (import.meta.main) {
   const { Client } = await import("postgres");
   const client = new Client(db.cfg);
   await client.connect();
+  let code = 0;
   try {
-    const cur = (await client.queryObject<{ digest: string; model: string }>(
-      `SELECT public.credibility_before_after_digest() AS digest, public.credibility_model_version() AS model`)).rows[0];
-    console.log(`current before/after view: digest=${cur.digest} model="${cur.model}"`);
-    const found = confirmationFor(await Deno.readTextFile(findingsPath), cur.digest, cur.model);
-    if (!found.ok) { console.error(`REFUSED: ${found.reason}`); Deno.exit(3); }
-    console.log(`confirmation found: by=${found.c.by} date=${found.c.date}`);
-    if (!apply) { console.log("dry run: nothing recorded, nothing re-scored (pass --apply)"); Deno.exit(0); }
-    await client.queryObject(`SELECT public.credibility_record_confirmation($1, $2, $3, $4)`,
-      [cur.digest, found.c.by, findingsPath, found.c.line]);
-    const n = (await client.queryObject<{ n: number }>(`SELECT public.credibility_apply_d15_trigger($1) AS n`, [cur.digest])).rows[0].n;
-    console.log(`applied: the trigger now uses ${cur.model}; ${n} active claim(s) re-scored`);
+    const r = await runGate(client, await Deno.readTextFile(findingsPath), findingsPath, apply);
+    r.out.forEach((l) => console.log(l));
+    r.err.forEach((l) => console.error(l));
+    code = r.code;
   } finally {
     await client.end();
   }
+  Deno.exit(code);
 }

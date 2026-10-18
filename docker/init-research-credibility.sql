@@ -33,6 +33,19 @@
 --      receiver -> line whatever the model version; within one claim total a co-grounding
 --      source counts once (the fold rule, claim_confidence_d15); a claim filed after the P3a
 --      cutover without a claim kind stops the gate (OBC01) instead of taking the fallback.
+--   7. ONE SCORING RULE (attempt 3, tester t-rw-p3a-2 finding: credibility.ts rounded each source
+--      total and the line total to 3 decimals and this file did not, so a claim at 0.49955 was
+--      below the 0.50 floor here and at it in the pipeline). No number that feeds a total, an
+--      amount or a floor comparison is rounded in either twin; both compute in IEEE-754 double
+--      precision (DOUBLE PRECISION here, never REAL) with the same operations in the same order
+--      (received amounts summed in descending order; claim totals in descending order), and the
+--      floor is the highest claim_floor of the kind's family rows in both. Rounding is display
+--      only. A credibility number is 0 or in [1e-9, 1] in both twins; registry keys inside a weight
+--      row follow P0's key pattern; flags are JSON true; orders are JSON integers; one active paper
+--      score version; credibility_model_check() refuses every table credibility.ts buildModel
+--      refuses. The model's registry versions, the registries' TRUNCATE and a claim's filing time
+--      (filed_at, server-set) are out of the app roles' reach. The re-score gate records one
+--      confirmation per view digest and applies it once.
 --
 -- Conventions mirror init-research-contract.sql: idempotent, additive, RLS on with a
 -- service_role FOR ALL policy, no DROP TABLE / TRUNCATE / unqualified DELETE. Mounted in
@@ -40,6 +53,24 @@
 -- (psql -f, the operator's gated deploy). Applying it changes no claim's confidence.
 -- Revert: revert-research-credibility.sql.
 -- ============================================================
+
+-- Attempt 3: these functions' result types moved from REAL to DOUBLE PRECISION, which CREATE OR
+-- REPLACE cannot do; on a database that ran an earlier version of this file they are dropped
+-- first (the view that calls them is re-created below; plpgsql callers resolve by name at call
+-- time). On a fresh volume every statement here is a no-op.
+DROP VIEW IF EXISTS public.credibility_before_after;
+DROP FUNCTION IF EXISTS public.claim_confidence_d15(UUID);
+DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT);
+DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT, JSONB);
+DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT, JSONB, UUID[]);
+DROP FUNCTION IF EXISTS public.source_credibility(UUID);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('public.credibility_unit(jsonb,text,text)')
+                 AND prorettype = 'real'::regtype) THEN
+        DROP FUNCTION public.credibility_unit(JSONB, TEXT, TEXT);
+    END IF;
+END $$;
 
 -- ── 1. registries ───────────────────────────────────────────────────────
 -- Seeded at version 0 so the seeding statement itself lands them at version 1.
@@ -77,20 +108,59 @@ CREATE TRIGGER trg_credibility_registry_bump_upd
     FOR EACH STATEMENT EXECUTE FUNCTION public.trg_credibility_registry_bump();
 
 -- â”€â”€ 1b. integrity: what a credibility number is (attempt 2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
--- A credibility number is a JSON number in [0, 1]. JSON has no NaN or Infinity, so a jsonb
--- `number` is finite; a string ("NaN", "abc", "-Infinity"), a null or a missing key is NOT a
--- number and is never cast. This is the one definition the SQL twin reads every registry
+-- A credibility number is a JSON number that is 0 or in [1e-9, 1]. JSON has no NaN or Infinity,
+-- so a jsonb `number` is finite; a string ("NaN", "abc", "-Infinity"), a null or a missing key is
+-- NOT a number and is never cast. This is the one definition the SQL twin reads every registry
 -- number and every stamped score through; credibility.ts `unit()` is its TS side (same rule).
+-- Attempt 3: the range is judged on the float8 value - the same IEEE double JSON.parse gives the
+-- TS twin for the same text (1.0000000000000000001 is 1 in both) - and a non-zero number below
+-- 1e-9 is refused in both (the tester's 1e-50 raised 22003 in REAL here and read 0 in TS; 1e-400
+-- is a non-zero numeric here and 0 in JSON.parse, so "below 1e-9" is the rule both can apply).
+-- The numeric guards keep the float8 cast from underflowing or overflowing.
 CREATE OR REPLACE FUNCTION public.credibility_is_unit(p JSONB)
 RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE
 AS $$
-    SELECT CASE WHEN jsonb_typeof(p) = 'number' THEN (p #>> '{}')::numeric BETWEEN 0 AND 1 ELSE FALSE END;
+    SELECT COALESCE(CASE
+        WHEN jsonb_typeof(p) IS DISTINCT FROM 'number' THEN FALSE
+        WHEN (p #>> '{}')::numeric = 0 THEN TRUE
+        WHEN (p #>> '{}')::numeric < 1e-300 OR (p #>> '{}')::numeric > 2 THEN FALSE
+        ELSE (p #>> '{}')::float8 >= 1e-9::float8 AND (p #>> '{}')::float8 <= 1::float8
+    END, FALSE);
+$$;
+
+-- A saturation half-point (> 0) or a grace period (>= 0, p_allow_zero): 0 or in [1e-9, 1e9]
+-- (credibility.ts `positive`, the same bounds for the same reason).
+CREATE OR REPLACE FUNCTION public.credibility_is_positive(p JSONB, p_allow_zero BOOLEAN)
+RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT COALESCE(CASE
+        WHEN jsonb_typeof(p) IS DISTINCT FROM 'number' THEN FALSE
+        WHEN (p #>> '{}')::numeric = 0 THEN p_allow_zero
+        WHEN (p #>> '{}')::numeric < 1e-300 OR (p #>> '{}')::numeric > 1e300 THEN FALSE
+        ELSE (p #>> '{}')::float8 >= 1e-9::float8 AND (p #>> '{}')::float8 <= 1e9::float8
+    END, FALSE);
+$$;
+
+-- An ORDER (claim kinds, domain classes): absent (SQL NULL) = 100; present, a JSON integer of at
+-- most 1e9 in magnitude, judged on the float8 value (credibility.ts `order`).
+CREATE OR REPLACE FUNCTION public.credibility_is_order(p JSONB)
+RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT COALESCE(CASE
+        WHEN p IS NULL THEN TRUE
+        WHEN jsonb_typeof(p) <> 'number' THEN FALSE
+        WHEN (p #>> '{}')::numeric = 0 THEN TRUE
+        WHEN abs((p #>> '{}')::numeric) < 1e-300 OR abs((p #>> '{}')::numeric) > 1e10 THEN FALSE
+        ELSE (p #>> '{}')::float8 = trunc((p #>> '{}')::float8) AND abs((p #>> '{}')::float8) <= 1e9::float8
+    END, FALSE);
 $$;
 
 -- Read one number or stop the gate, naming where and what (OBC04). Never a default.
 CREATE OR REPLACE FUNCTION public.credibility_unit(p_def JSONB, p_field TEXT, p_where TEXT)
-RETURNS REAL
+RETURNS DOUBLE PRECISION
 LANGUAGE plpgsql IMMUTABLE
 AS $$
 BEGIN
@@ -99,19 +169,21 @@ BEGIN
             p_where, p_field, COALESCE((p_def -> p_field)::text, 'missing')
             USING ERRCODE = 'OBC04';
     END IF;
-    RETURN (p_def ->> p_field)::real;
+    RETURN (p_def ->> p_field)::double precision;
 END;
 $$;
 
--- A weight row is well formed: kind and family are non-empty strings; weight, admission_floor
--- and claim_floor are credibility numbers; primary_bonus, the one optional field, is one when
--- present (absent = 0 in both twins). The CHECK below holds the table to it.
+-- A weight row is well formed: kind and family are registry keys (attempt 3: P0's key pattern,
+-- the one contract_registry_entries.key CHECKs and credibility.ts REGISTRY_KEY_PATTERN - so
+-- 'practical ' and 'Practical' are refused, not stored beside 'practical'); weight,
+-- admission_floor and claim_floor are credibility numbers; primary_bonus, the one optional
+-- field, is one when present (absent = 0 in both twins). The CHECK below holds the table to it.
 CREATE OR REPLACE FUNCTION public.credibility_weight_row_ok(p_def JSONB)
 RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE
 AS $$
-    SELECT COALESCE(jsonb_typeof(p_def -> 'kind') = 'string' AND btrim(p_def ->> 'kind') <> ''
-       AND jsonb_typeof(p_def -> 'family') = 'string' AND btrim(p_def ->> 'family') <> ''
+    SELECT COALESCE(jsonb_typeof(p_def -> 'kind') = 'string' AND (p_def ->> 'kind') ~ '^[a-z0-9][a-z0-9._-]*$'
+       AND jsonb_typeof(p_def -> 'family') = 'string' AND (p_def ->> 'family') ~ '^[a-z0-9][a-z0-9._-]*$'
        AND public.credibility_is_unit(p_def -> 'weight')
        AND public.credibility_is_unit(p_def -> 'admission_floor')
        AND public.credibility_is_unit(p_def -> 'claim_floor')
@@ -222,9 +294,41 @@ BEGIN
             CHECK (registry <> 'credibility_weights' OR public.credibility_weight_row_ok(definition));
     END IF;
 END $$;
+-- Attempt 3: a claim kind's cues and a domain class's host patterns are arrays of patterns that
+-- compile (credibility.ts builds each with `new RegExp(.., "i")`, this file matches with `~*`). An
+-- invalid pattern raises here, so the write is refused; the seeded patterns are in the subset both
+-- dialects read the same way.
+CREATE OR REPLACE FUNCTION public.credibility_patterns_ok(p_registry TEXT, p_def JSONB)
+RETURNS BOOLEAN
+LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE v JSONB := p_def -> CASE p_registry WHEN 'claim_kinds' THEN 'cues' ELSE 'host_patterns' END; p TEXT;
+BEGIN
+    IF v IS NULL THEN RETURN TRUE; END IF;
+    IF jsonb_typeof(v) <> 'array' THEN RETURN FALSE; END IF;
+    FOR p IN SELECT jsonb_array_elements_text(v) LOOP
+        PERFORM '' ~* p;    -- raises invalid_regular_expression for a pattern that does not compile
+    END LOOP;
+    RETURN TRUE;
+END;
+$$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contract_registry_entries_credibility_patterns_ok'
+                     AND conrelid = 'public.contract_registry_entries'::regclass) THEN
+        ALTER TABLE public.contract_registry_entries ADD CONSTRAINT contract_registry_entries_credibility_patterns_ok
+            CHECK (registry NOT IN ('claim_kinds', 'domain_classes') OR public.credibility_patterns_ok(registry, definition));
+    END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_credibility_weights_kind_family
     ON public.contract_registry_entries ((definition ->> 'kind'), (definition ->> 'family'))
  WHERE registry = 'credibility_weights' AND retired_at IS NULL;
+-- Attempt 3 (tester near-miss: two ACTIVE paper score versions were accepted; this file labelled
+-- one with LIMIT 1, TS refused): exactly one active version is the rule in both twins, and a
+-- second one is refused at write time. `active` is the JSON value true (TS: `=== true`).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_score_versions_one_active
+    ON public.contract_registry_entries ((registry))
+ WHERE registry = 'paper_score_versions' AND retired_at IS NULL AND definition -> 'active' = 'true'::jsonb;
 
 -- Who may change the model (attempt 2, tester finding 2 / 4f). The credibility registries are
 -- rows in P0's shared contract_registry_entries, which service_role may write (FOR ALL policy) -
@@ -265,6 +369,54 @@ CREATE TRIGGER trg_credibility_registry_guard
     BEFORE INSERT OR UPDATE OR DELETE ON public.contract_registry_entries
     FOR EACH ROW EXECUTE FUNCTION public.trg_credibility_registry_guard();
 
+-- Attempt 3 (tester (2b)): an app role could `UPDATE contract_registries SET version = 77 WHERE
+-- name = 'credibility_weights'` and relabel the model ("d15 weights v77"), or move a version to
+-- stale a confirmation's digest. The D15 registries' rows in P0's contract_registries (the
+-- version counter the label reads) are changed only by their owner - the bump trigger above
+-- runs as the caller, and only the owner can change an entry of these registries, so only the
+-- owner's writes bump them. source_families stays P0's (an app role's family INSERT bumps it).
+-- TRUNCATE (statement level; row triggers never see it) of the registries and of every
+-- credibility table is refused for any role but the owner; the grants below also REVOKE it, so
+-- an app role is refused by privilege first and by this trigger if a later GRANT ALL
+-- (init-grants.sql re-run) hands TRUNCATE back.
+CREATE OR REPLACE FUNCTION public.trg_credibility_owner_only()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_guarded TEXT[] := ARRAY['claim_kinds', 'credibility_weights', 'domain_classes', 'paper_score_versions',
+                              'entailment_verdicts', 'admission_trail_kinds', 'credibility_terms'];
+    v_owner OID;
+    v_hit BOOLEAN;
+BEGIN
+    v_hit := CASE WHEN TG_OP = 'TRUNCATE' THEN TRUE
+                  WHEN TG_OP = 'INSERT' THEN NEW.name = ANY (v_guarded)
+                  WHEN TG_OP = 'DELETE' THEN OLD.name = ANY (v_guarded)
+                  ELSE OLD.name = ANY (v_guarded) OR NEW.name = ANY (v_guarded) END;
+    IF v_hit THEN
+        SELECT c.relowner INTO v_owner FROM pg_class c WHERE c.oid = TG_RELID;
+        IF NOT pg_has_role(current_user, v_owner, 'USAGE') THEN
+            RAISE EXCEPTION 'permission denied: % of %.% by role % - the D15 model is changed only by its owner (D15 items 9-10)',
+                TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME, current_user
+                USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    RETURN CASE WHEN TG_OP = 'TRUNCATE' THEN NULL WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_credibility_registries_guard ON public.contract_registries;
+CREATE TRIGGER trg_credibility_registries_guard
+    BEFORE INSERT OR UPDATE OR DELETE ON public.contract_registries
+    FOR EACH ROW EXECUTE FUNCTION public.trg_credibility_owner_only();
+DROP TRIGGER IF EXISTS trg_credibility_registries_truncate ON public.contract_registries;
+CREATE TRIGGER trg_credibility_registries_truncate
+    BEFORE TRUNCATE ON public.contract_registries
+    FOR EACH STATEMENT EXECUTE FUNCTION public.trg_credibility_owner_only();
+DROP TRIGGER IF EXISTS trg_credibility_registry_entries_truncate ON public.contract_registry_entries;
+CREATE TRIGGER trg_credibility_registry_entries_truncate
+    BEFORE TRUNCATE ON public.contract_registry_entries
+    FOR EACH STATEMENT EXECUTE FUNCTION public.trg_credibility_owner_only();
+
 -- ── 2. records ──────────────────────────────────────────────────────────
 -- Every hit the pre-ingestion stage judged. A below-floor hit is a lead and lives ONLY here
 -- (never a sources row, D15 item 8); source_id is set only for a hit that became a source.
@@ -277,9 +429,9 @@ CREATE TABLE IF NOT EXISTS public.research_admission_trail (
     kind          TEXT NOT NULL,            -- registry admission_trail_kinds
     claim_kind    TEXT,                     -- registry claim_kinds
     family        TEXT,                     -- registry source_families
-    score         REAL,
-    total         REAL,
-    floor         REAL,
+    score         DOUBLE PRECISION,         -- attempt 3: the TS twin's doubles, stored as they are
+    total         DOUBLE PRECISION,
+    floor         DOUBLE PRECISION,
     model_version TEXT,
     signals       JSONB NOT NULL DEFAULT '{}'::jsonb,
     reasons       JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -298,8 +450,8 @@ CREATE TABLE IF NOT EXISTS public.source_credibility_history (
     source_id     UUID NOT NULL,
     family        TEXT NOT NULL,
     claim_kind    TEXT,
-    score         REAL NOT NULL,
-    total         REAL,
+    score         DOUBLE PRECISION NOT NULL,
+    total         DOUBLE PRECISION,
     model_version TEXT NOT NULL,
     signals       JSONB NOT NULL DEFAULT '{}'::jsonb,
     reasons       JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -321,7 +473,7 @@ CREATE TABLE IF NOT EXISTS public.source_corroborations (
     from_source_id UUID NOT NULL,
     to_source_id   UUID NOT NULL,
     strength       TEXT NOT NULL CHECK (strength IN ('strong', 'weak')),
-    amount         REAL NOT NULL,
+    amount         DOUBLE PRECISION NOT NULL,   -- attempt 3: REAL stored 1.00000001 as 1 and refused 1e-50
     claim_text     TEXT NOT NULL,
     claim_kind     TEXT NOT NULL,
     verdict        TEXT NOT NULL,
@@ -354,6 +506,19 @@ BEGIN
             CHECK (from_source_id <> to_source_id);
     END IF;
 END $$;
+-- attempt 3: a database that ran an earlier version of this file has these columns as REAL
+DO $$
+DECLARE c RECORD;
+BEGIN
+    FOR c IN SELECT table_name, column_name FROM information_schema.columns
+              WHERE table_schema = 'public' AND data_type = 'real'
+                AND (table_name, column_name) IN (('source_corroborations', 'amount'),
+                     ('source_credibility_history', 'score'), ('source_credibility_history', 'total'),
+                     ('research_admission_trail', 'score'), ('research_admission_trail', 'total'),
+                     ('research_admission_trail', 'floor')) LOOP
+        EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I TYPE DOUBLE PRECISION', c.table_name, c.column_name);
+    END LOOP;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_source_corroborations_to   ON public.source_corroborations (to_source_id);
 CREATE INDEX IF NOT EXISTS idx_source_corroborations_from ON public.source_corroborations (from_source_id);
 
@@ -362,9 +527,10 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF NOT COALESCE((SELECT (e.definition ->> 'transfers')::boolean
+    -- attempt 3: the JSON value true, as credibility.ts reads it (`=== true`), never "true"
+    IF NOT COALESCE((SELECT e.definition -> 'transfers' = 'true'::jsonb
                        FROM public.contract_registry_entries e
-                      WHERE e.registry = 'entailment_verdicts' AND e.key = NEW.verdict), FALSE) THEN
+                      WHERE e.registry = 'entailment_verdicts' AND e.key = NEW.verdict AND e.retired_at IS NULL), FALSE) THEN
         RAISE EXCEPTION 'corroboration refused: verdict % does not transfer (D15 item 3)', NEW.verdict
             USING ERRCODE = 'OBC02';
     END IF;
@@ -406,6 +572,40 @@ CREATE TABLE IF NOT EXISTS public.credibility_rescore_confirmations (
     applied_at        TIMESTAMPTZ,
     applied_claims    INT
 );
+-- Attempt 3 (tester (7): a second `rescore-gate.ts --apply` re-minted the spent confirmation): one
+-- confirmation per view digest. credibility_record_confirmation returns the existing row's id.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_credibility_rescore_confirmations_digest
+    ON public.credibility_rescore_confirmations (view_digest);
+
+-- ── the claim's filing time (attempt 3, tester near-miss: a writer that set created_at to 2020
+-- made a kindless claim filed now take the pre-P3a fallback). claims.filed_at is SET BY THE SERVER
+-- on INSERT (now(), whatever the writer sends - the owner included) and changed afterwards only by
+-- the table's owner (the operator's deploy remedy, the tests' "this claim predates P3a"). A claim
+-- that existed when this column was added has filed_at NULL: it predates P3a. claim_kind_of reads
+-- filed_at, never created_at (a column every writer may set).
+ALTER TABLE public.claims ADD COLUMN IF NOT EXISTS filed_at TIMESTAMPTZ;
+CREATE OR REPLACE FUNCTION public.trg_claims_filed_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE v_owner OID;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        NEW.filed_at := now();
+    ELSIF NEW.filed_at IS DISTINCT FROM OLD.filed_at THEN
+        SELECT c.relowner INTO v_owner FROM pg_class c WHERE c.oid = TG_RELID;
+        IF NOT pg_has_role(current_user, v_owner, 'USAGE') THEN
+            RAISE EXCEPTION 'permission denied: claims.filed_at is set by the server when a claim is filed (role %)', current_user
+                USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_claims_filed_at ON public.claims;
+CREATE TRIGGER trg_claims_filed_at
+    BEFORE INSERT OR UPDATE ON public.claims
+    FOR EACH ROW EXECUTE FUNCTION public.trg_claims_filed_at();
 
 -- ── 3. the model's claim total ──────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.credibility_model_version()
@@ -415,7 +615,7 @@ AS $$
     SELECT 'd15 weights v' || COALESCE((SELECT version FROM public.contract_registries WHERE name = 'credibility_weights'), 0)
         || ' paper ' || COALESCE((SELECT key FROM public.contract_registry_entries
                                    WHERE registry = 'paper_score_versions' AND retired_at IS NULL
-                                     AND (definition ->> 'active')::boolean IS TRUE LIMIT 1), '?');
+                                     AND definition -> 'active' = 'true'::jsonb ORDER BY key LIMIT 1), '?');
 $$;
 
 CREATE OR REPLACE FUNCTION public.credibility_weight(p_kind TEXT, p_family TEXT)
@@ -448,13 +648,32 @@ BEGIN
 END;
 $$;
 
+-- The claim floor of a kind (attempt 3): the HIGHEST claim_floor among the kind's family rows -
+-- credibility.ts lineCredibility's floor. Attempt 2's view read the general row's alone.
+CREATE OR REPLACE FUNCTION public.credibility_claim_floor(p_kind TEXT)
+RETURNS DOUBLE PRECISION
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE f RECORD; v DOUBLE PRECISION;
+BEGIN
+    -- the SCORED families (attempt 3): those with at least one active weight row
+    FOR f IN SELECT e.key FROM public.contract_registry_entries e WHERE e.registry = 'source_families' AND e.retired_at IS NULL
+                AND EXISTS (SELECT 1 FROM public.contract_registry_entries w WHERE w.registry = 'credibility_weights'
+                           AND w.retired_at IS NULL AND w.definition ->> 'family' = e.key) LOOP
+        v := GREATEST(v, public.credibility_unit(public.credibility_weight(p_kind, f.key), 'claim_floor',
+                                                 'weight row ' || p_kind || '.' || f.key));
+    END LOOP;
+    RETURN v;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.credibility_fallback_kind()
 RETURNS TEXT
 LANGUAGE sql STABLE
 AS $$
     SELECT key FROM public.contract_registry_entries
-     WHERE registry = 'claim_kinds' AND retired_at IS NULL AND (definition ->> 'fallback')::boolean IS TRUE
-     LIMIT 1;
+     WHERE registry = 'claim_kinds' AND retired_at IS NULL AND definition -> 'fallback' = 'true'::jsonb
+     ORDER BY key LIMIT 1;
 $$;
 
 -- The domain class of a URL, from the registry's host patterns (first match by order).
@@ -469,12 +688,149 @@ AS $$
     SELECT COALESCE(
         (SELECT e.key FROM public.contract_registry_entries e, h
           WHERE e.registry = 'domain_classes' AND e.retired_at IS NULL
-            AND NOT COALESCE((e.definition ->> 'fallback')::boolean, FALSE)
+            AND e.definition -> 'fallback' IS DISTINCT FROM 'true'::jsonb
             AND h.host IS NOT NULL
+            AND jsonb_typeof(e.definition -> 'host_patterns') = 'array'
             AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(e.definition -> 'host_patterns') p WHERE h.host ~* p)
-          ORDER BY (e.definition ->> 'order')::int LIMIT 1),
+          ORDER BY COALESCE((e.definition ->> 'order')::float8, 100) LIMIT 1),
         (SELECT key FROM public.contract_registry_entries
-          WHERE registry = 'domain_classes' AND retired_at IS NULL AND (definition ->> 'fallback')::boolean IS TRUE LIMIT 1));
+          WHERE registry = 'domain_classes' AND retired_at IS NULL AND definition -> 'fallback' = 'true'::jsonb ORDER BY key LIMIT 1));
+$$;
+
+-- THE WHOLE-MODEL CHECK (attempt 3): the SQL twin refuses every registry table credibility.ts
+-- buildModel / validateTable refuses, so the two never compute from a table one of them rejects
+-- (tester: 'practical ' rows and two active paper versions were computed here and refused there).
+-- The write-time CHECK / unique indexes make most of these impossible; this is the read-time half
+-- for a constraint the owner dropped. Raised: OBC01 for a missing kind x family row (as
+-- credibility_weight), OBC04 for everything malformed. Each check's TS line is named.
+CREATE OR REPLACE FUNCTION public.credibility_model_check()
+RETURNS VOID
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    r RECORD; n INT; v_bad TEXT; v_def JSONB; v_gen JSONB; v_corr JSONB; v_best DOUBLE PRECISION;
+    v_maxgen DOUBLE PRECISION; v_paper DOUBLE PRECISION; v_general DOUBLE PRECISION; v_g JSONB; v_s JSONB;
+BEGIN
+    -- claim kinds: orders are integers (TS `order`), cues compile, exactly one fallback
+    SELECT string_agg(key, ', ' ORDER BY key) INTO v_bad FROM public.contract_registry_entries
+     WHERE registry = 'claim_kinds' AND retired_at IS NULL AND NOT public.credibility_is_order(definition -> 'order');
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'credibility registry: claim_kinds % order is not an integer - the gate stops', v_bad USING ERRCODE = 'OBC04';
+    END IF;
+    SELECT count(*) INTO n FROM public.contract_registry_entries
+     WHERE registry = 'claim_kinds' AND retired_at IS NULL AND definition -> 'fallback' = 'true'::jsonb;
+    IF n <> 1 THEN
+        RAISE EXCEPTION 'claim_kinds: exactly one entry must be declared fallback (% are) - the gate stops', n USING ERRCODE = 'OBC04';
+    END IF;
+    -- weight rows (TS buildModel's loop): well formed, naming a registered kind and family, one per pair
+    FOR r IN SELECT key, definition FROM public.contract_registry_entries
+              WHERE registry = 'credibility_weights' AND retired_at IS NULL ORDER BY key LOOP
+        IF NOT public.credibility_weight_row_ok(r.definition) THEN
+            RAISE EXCEPTION 'credibility_weights.%: the row is malformed (%) - the gate stops', r.key, r.definition USING ERRCODE = 'OBC04';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM public.contract_registry_entries k WHERE k.registry = 'claim_kinds'
+                         AND k.retired_at IS NULL AND k.key = r.definition ->> 'kind') THEN
+            RAISE EXCEPTION 'credibility_weights.%: claim kind ''%'' is not registered - the gate stops', r.key, r.definition ->> 'kind'
+                USING ERRCODE = 'OBC04';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM public.contract_registry_entries f WHERE f.registry = 'source_families'
+                         AND f.retired_at IS NULL AND f.key = r.definition ->> 'family') THEN
+            RAISE EXCEPTION 'credibility_weights.%: source family ''%'' is not registered - the gate stops', r.key, r.definition ->> 'family'
+                USING ERRCODE = 'OBC04';
+        END IF;
+    END LOOP;
+    SELECT definition ->> 'kind' AS kind, definition ->> 'family' AS family, count(*) AS n INTO r
+      FROM public.contract_registry_entries WHERE registry = 'credibility_weights' AND retired_at IS NULL
+     GROUP BY 1, 2 HAVING count(*) > 1 ORDER BY 1, 2 LIMIT 1;
+    IF r.kind IS NOT NULL THEN
+        RAISE EXCEPTION 'credibility_weights: two active rows for claim kind ''%'' and family ''%'' - the gate stops', r.kind, r.family
+            USING ERRCODE = 'OBC04';
+    END IF;
+    -- domain classes: integer orders, distinct, scores are credibility numbers, exactly one fallback
+    SELECT string_agg(key, ', ' ORDER BY key) INTO v_bad FROM public.contract_registry_entries
+     WHERE registry = 'domain_classes' AND retired_at IS NULL
+       AND (NOT public.credibility_is_order(definition -> 'order') OR NOT public.credibility_is_unit(definition -> 'score'));
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'credibility registry: domain_classes % has a malformed order or score - the gate stops', v_bad USING ERRCODE = 'OBC04';
+    END IF;
+    SELECT COALESCE((definition ->> 'order')::float8, 100) AS o, count(*) AS n INTO r FROM public.contract_registry_entries
+     WHERE registry = 'domain_classes' AND retired_at IS NULL GROUP BY 1 HAVING count(*) > 1 LIMIT 1;
+    IF r.n IS NOT NULL THEN
+        RAISE EXCEPTION 'domain_classes: % classes share order % - the gate stops', r.n, r.o USING ERRCODE = 'OBC04';
+    END IF;
+    SELECT count(*) INTO n FROM public.contract_registry_entries
+     WHERE registry = 'domain_classes' AND retired_at IS NULL AND definition -> 'fallback' = 'true'::jsonb;
+    IF n <> 1 THEN
+        RAISE EXCEPTION 'domain_classes: exactly one entry must be declared fallback (% are) - the gate stops', n USING ERRCODE = 'OBC04';
+    END IF;
+    -- (regex patterns: compiled at WRITE time by contract_registry_entries_credibility_patterns_ok,
+    -- below - a pattern that does not compile is refused when it is written, as `new RegExp` refuses
+    -- it when the TS model is built; a pattern valid in one regex dialect only is a named residual)
+    -- the paper score: exactly one active version, every number in range
+    SELECT count(*), min(definition::text)::jsonb INTO n, v_def FROM public.contract_registry_entries
+     WHERE registry = 'paper_score_versions' AND retired_at IS NULL AND definition -> 'active' = 'true'::jsonb;
+    IF n <> 1 THEN
+        RAISE EXCEPTION 'paper_score_versions: % active versions (exactly one required) - the gate stops', n USING ERRCODE = 'OBC04';
+    END IF;
+    IF NOT (public.credibility_is_unit(v_def -> 'base') AND public.credibility_is_unit(v_def -> 'cite_weight')
+            AND public.credibility_is_positive(v_def -> 'cite_rate_half', FALSE) AND public.credibility_is_positive(v_def -> 'grace_years', TRUE)
+            AND public.credibility_is_unit(v_def -> 'grace_credit') AND public.credibility_is_unit(v_def -> 'author_weight')
+            AND public.credibility_is_positive(v_def -> 'author_half', FALSE)) THEN
+        RAISE EXCEPTION 'paper_score_versions: the active version is malformed (%) - the gate stops', v_def USING ERRCODE = 'OBC04';
+    END IF;
+    -- the general family's terms (TS: required, no `?? 0`)
+    SELECT definition -> 'terms' INTO v_gen FROM public.contract_registry_entries
+     WHERE registry = 'source_families' AND key = 'general' AND retired_at IS NULL;
+    IF NOT COALESCE(public.credibility_is_unit(v_gen -> 'author_identity') AND public.credibility_is_unit(v_gen -> 'link_per')
+            AND public.credibility_is_unit(v_gen -> 'link_cap') AND public.credibility_is_unit(v_gen -> 'agreement_per')
+            AND public.credibility_is_unit(v_gen -> 'agreement_cap'), FALSE) THEN
+        RAISE EXCEPTION 'source_families.general: the terms are missing or malformed (%) - the gate stops', v_gen USING ERRCODE = 'OBC04';
+    END IF;
+    -- entailment verdicts: tag_effect keep|uncertain|gap
+    SELECT string_agg(key, ', ' ORDER BY key) INTO v_bad FROM public.contract_registry_entries
+     WHERE registry = 'entailment_verdicts' AND retired_at IS NULL
+       AND (jsonb_typeof(definition -> 'tag_effect') IS DISTINCT FROM 'string' OR definition ->> 'tag_effect' NOT IN ('keep', 'uncertain', 'gap'));
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'entailment_verdicts.%: tag_effect is not keep|uncertain|gap - the gate stops', v_bad USING ERRCODE = 'OBC04';
+    END IF;
+    -- the corroboration terms
+    SELECT definition INTO v_corr FROM public.contract_registry_entries
+     WHERE registry = 'credibility_terms' AND key = 'corroboration' AND retired_at IS NULL;
+    IF NOT COALESCE(public.credibility_is_unit(v_corr -> 'strong_factor') AND public.credibility_is_unit(v_corr -> 'weak_factor')
+            AND public.credibility_is_unit(v_corr -> 'claim_per') AND public.credibility_is_unit(v_corr -> 'claim_cap'), FALSE) THEN
+        RAISE EXCEPTION 'credibility_terms.corroboration: the terms are missing or malformed (%) - the gate stops', v_corr USING ERRCODE = 'OBC04';
+    END IF;
+    -- every kind has a row for every SCORED family (TS validateTable over scoredFamilies): a family
+    -- registered without any weight row (P0's expansion by registration) is not in the model yet and
+    -- stops nothing until a source of it is scored (credibility_weight then stops the gate, naming it)
+    SELECT k.key AS kind, f.key AS family INTO r
+      FROM public.contract_registry_entries k CROSS JOIN public.contract_registry_entries f
+     WHERE k.registry = 'claim_kinds' AND k.retired_at IS NULL AND f.registry = 'source_families' AND f.retired_at IS NULL
+       AND EXISTS (SELECT 1 FROM public.contract_registry_entries w WHERE w.registry = 'credibility_weights'
+                           AND w.retired_at IS NULL AND w.definition ->> 'family' = f.key)
+       AND NOT EXISTS (SELECT 1 FROM public.contract_registry_entries w WHERE w.registry = 'credibility_weights' AND w.retired_at IS NULL
+                         AND w.definition ->> 'kind' = k.key AND w.definition ->> 'family' = f.key)
+     ORDER BY 1, 2 LIMIT 1;
+    IF r.kind IS NOT NULL THEN
+        RAISE EXCEPTION 'the weight table (%) has no row for claim kind ''%'' and family ''%'' - the gate stops (D15 item 9)',
+            public.credibility_model_version(), r.kind, r.family USING ERRCODE = 'OBC01';
+    END IF;
+    -- papers_outrank (TS validateTable): the weakest paper above the strongest general source
+    SELECT max((definition ->> 'score')::float8) INTO v_best FROM public.contract_registry_entries
+     WHERE registry = 'domain_classes' AND retired_at IS NULL;
+    v_maxgen := LEAST(1::float8, v_best + (v_gen ->> 'author_identity')::float8 + (v_gen ->> 'link_cap')::float8 + (v_gen ->> 'agreement_cap')::float8);
+    FOR r IN SELECT key FROM public.contract_registry_entries
+              WHERE registry = 'claim_kinds' AND retired_at IS NULL AND definition -> 'papers_outrank' = 'true'::jsonb ORDER BY key LOOP
+        v_s := public.credibility_weight(r.key, 'scholarly');
+        v_g := public.credibility_weight(r.key, 'general');
+        v_paper := (v_s ->> 'weight')::float8 * (v_def ->> 'base')::float8;
+        v_general := (v_g ->> 'weight')::float8 * LEAST(1::float8, v_maxgen + COALESCE((v_g ->> 'primary_bonus')::float8, 0));
+        IF NOT (v_paper > v_general) THEN
+            RAISE EXCEPTION 'claim kind ''%'' declares papers_outrank but the weakest paper scores % and the strongest general source % - the gate stops',
+                r.key, round(v_paper::numeric, 3), round(v_general::numeric, 3) USING ERRCODE = 'OBC04';
+        END IF;
+    END LOOP;
+END;
 $$;
 
 -- A source's family score and how it was obtained. The research service stamps
@@ -482,10 +838,10 @@ $$;
 -- that record (every source stored before P3a) is DERIVED here from what the row holds - the
 -- general family's domain class and nothing else - and says so in `basis`.
 CREATE OR REPLACE FUNCTION public.source_credibility(p_source_id UUID)
-RETURNS TABLE (family TEXT, score REAL, is_primary BOOLEAN, basis TEXT)
+RETURNS TABLE (family TEXT, score DOUBLE PRECISION, is_primary BOOLEAN, basis TEXT)
 LANGUAGE plpgsql STABLE
 AS $$
-DECLARE s RECORD; v_class TEXT; v_score REAL; v_def JSONB;
+DECLARE s RECORD; v_class TEXT; v_score DOUBLE PRECISION; v_def JSONB;
 BEGIN
     SELECT id, url, domain, metadata INTO s FROM public.sources WHERE id = p_source_id;
     IF s.id IS NULL THEN RETURN; END IF;
@@ -499,7 +855,7 @@ BEGIN
         END IF;
         RETURN QUERY SELECT s.metadata #>> '{credibility,family}',
                             v_score,
-                            COALESCE((s.metadata #>> '{credibility,signals,primary}')::boolean, FALSE),
+                            (s.metadata #> '{credibility,signals,primary}') = 'true'::jsonb,
                             'admission record ' || COALESCE(s.metadata #>> '{credibility,model_version}', '?');
         RETURN;
     END IF;
@@ -507,7 +863,7 @@ BEGIN
         -- Resolved but never scored (not written by any path today): the weakest paper score,
         -- stated, rather than a guess at the citation curve in a second implementation.
         SELECT definition INTO v_def FROM public.contract_registry_entries
-         WHERE registry = 'paper_score_versions' AND retired_at IS NULL AND (definition ->> 'active')::boolean IS TRUE LIMIT 1;
+         WHERE registry = 'paper_score_versions' AND retired_at IS NULL AND definition -> 'active' = 'true'::jsonb ORDER BY key LIMIT 1;
         v_score := public.credibility_unit(v_def, 'base', 'the active paper score');
         RETURN QUERY SELECT 'scholarly'::text, v_score, FALSE, 'derived: resolved but unscored - the paper base'::text;
         RETURN;
@@ -534,11 +890,15 @@ $$;
 -- is one implementation. Every number it reads is validated (credibility_unit, OBC04) and the
 -- result is in [0, 1] by construction: base = weight x min(1, score + bonus), each in [0, 1];
 -- each received amount in [0, 1] (CHECKed, and re-checked here); capped at 1.
-CREATE OR REPLACE FUNCTION public.source_rolling_total(p_source_id UUID, p_kind TEXT, p_scope JSONB, p_exclude UUID[])
-RETURNS REAL
+-- Attempt 3: DOUBLE PRECISION throughout and the received amounts summed in DESCENDING order
+-- (sum(... ORDER BY amount DESC), credibility.ts foldReceived's order), so this and the TS twin
+-- give the same double for the same rows. `_core` is the one implementation; the public forms
+-- run credibility_model_check() first (claim_confidence_d15 runs it once per claim instead).
+CREATE OR REPLACE FUNCTION public.source_rolling_total_core(p_source_id UUID, p_kind TEXT, p_scope JSONB, p_exclude UUID[])
+RETURNS DOUBLE PRECISION
 LANGUAGE plpgsql STABLE
 AS $$
-DECLARE c RECORD; w JSONB; v_base REAL; v_in REAL; v_bad BOOLEAN; v_bonus REAL := 0;
+DECLARE c RECORD; w JSONB; v_base DOUBLE PRECISION; v_in DOUBLE PRECISION; v_bad BOOLEAN; v_bonus DOUBLE PRECISION := 0;
 BEGIN
     SELECT * INTO c FROM public.source_credibility(p_source_id);
     IF c.family IS NULL THEN RETURN 0; END IF;
@@ -546,8 +906,8 @@ BEGIN
     IF c.is_primary AND w ? 'primary_bonus' THEN
         v_bonus := public.credibility_unit(w, 'primary_bonus', 'weight row ' || p_kind || '.' || c.family);
     END IF;
-    v_base := public.credibility_unit(w, 'weight', 'weight row ' || p_kind || '.' || c.family) * LEAST(1.0, c.score + v_bonus);
-    SELECT COALESCE(sum(sc.amount), 0), COALESCE(bool_or(NOT (sc.amount >= 0 AND sc.amount <= 1)), FALSE) INTO v_in, v_bad
+    v_base := public.credibility_unit(w, 'weight', 'weight row ' || p_kind || '.' || c.family) * LEAST(1::float8, c.score + v_bonus);
+    SELECT COALESCE(sum(sc.amount ORDER BY sc.amount DESC), 0::float8), COALESCE(bool_or(NOT (sc.amount >= 0 AND sc.amount <= 1)), FALSE) INTO v_in, v_bad
       FROM public.source_corroborations sc
       JOIN public.sources g ON g.id = sc.from_source_id AND g.retraction_committed_at IS NULL
            AND (p_scope IS NULL OR g.metadata @> p_scope)
@@ -558,17 +918,27 @@ BEGIN
         RAISE EXCEPTION 'credibility: a corroboration into source % has an amount outside [0, 1] - the gate stops', p_source_id
             USING ERRCODE = 'OBC04';
     END IF;
-    RETURN LEAST(1.0, v_base + v_in);
+    RETURN LEAST(1::float8, v_base + v_in);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.source_rolling_total(p_source_id UUID, p_kind TEXT, p_scope JSONB, p_exclude UUID[])
+RETURNS DOUBLE PRECISION
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    PERFORM public.credibility_model_check();
+    RETURN public.source_rolling_total_core(p_source_id, p_kind, p_scope, p_exclude);
 END;
 $$;
 
 CREATE OR REPLACE FUNCTION public.source_rolling_total(p_source_id UUID, p_kind TEXT, p_scope JSONB)
-RETURNS REAL
+RETURNS DOUBLE PRECISION
 LANGUAGE sql STABLE
 AS $$ SELECT public.source_rolling_total(p_source_id, p_kind, p_scope, NULL::uuid[]) $$;
 
 CREATE OR REPLACE FUNCTION public.source_rolling_total(p_source_id UUID, p_kind TEXT)
-RETURNS REAL
+RETURNS DOUBLE PRECISION
 LANGUAGE sql STABLE
 AS $$ SELECT public.source_rolling_total(p_source_id, p_kind, NULL::jsonb, NULL::uuid[]) $$;
 
@@ -579,11 +949,12 @@ AS $$
     -- attempt 2: the fallback is for claims filed BEFORE the cutover (nothing recorded a kind
     -- then); a kindless claim filed at or after it gets kind NULL, and claim_confidence_d15 stops
     -- the gate naming it (D15 item 9: fail loud on an unknown kind)
+    -- attempt 3: filed_at (server-set, NULL for a claim that predates the column), never created_at
     SELECT CASE WHEN c.metadata ? 'claim_kind' THEN c.metadata ->> 'claim_kind'
-                WHEN c.created_at < cut.at THEN public.credibility_fallback_kind()
+                WHEN c.filed_at IS NULL OR c.filed_at < cut.at THEN public.credibility_fallback_kind()
                 ELSE NULL END,
            CASE WHEN c.metadata ? 'claim_kind' THEN 'recorded at filing'
-                WHEN c.created_at < cut.at THEN 'not recorded (filed before P3a): the registry''s declared fallback kind'
+                WHEN c.filed_at IS NULL OR c.filed_at < cut.at THEN 'not recorded (filed before P3a): the registry''s declared fallback kind'
                 ELSE 'MISSING: filed after the P3a cutover (' || cut.at || ') without a claim kind' END
       FROM public.claims c
       CROSS JOIN (SELECT COALESCE((SELECT kind_required_from FROM public.credibility_trigger_state WHERE singleton),
@@ -602,15 +973,19 @@ $$;
 -- total; its corroboration of the lead would count it a second time (A<->B on a claim both state
 -- read 0.83 against 0.63 one way). Corroboration from a source that does NOT ground the claim
 -- still counts in full. credibility.ts foldReceived applies the same rule to the run's lines.
+-- Attempt 3: DOUBLE PRECISION throughout, unrounded, in credibility.ts lineCredibility's order
+-- (source totals descending; the extra summed from 0 in that order; capped; added to the lead);
+-- the whole-model check runs first, once.
 CREATE OR REPLACE FUNCTION public.claim_confidence_d15(p_claim_id UUID)
-RETURNS REAL
+RETURNS DOUBLE PRECISION
 LANGUAGE plpgsql STABLE
 AS $$
 DECLARE
-    v_kind TEXT; v_basis TEXT; v_depth INT; v_terms JSONB; v_lead REAL := 0; v_extra REAL := 0;
-    v_stale BOOLEAN; v_contra BOOLEAN; v_score REAL; r RECORD; i INT := 0; v_grounders UUID[];
-    v_per REAL; v_cap REAL;
+    v_kind TEXT; v_basis TEXT; v_depth INT; v_terms JSONB; v_lead DOUBLE PRECISION := 0; v_extra DOUBLE PRECISION := 0;
+    v_stale BOOLEAN; v_contra BOOLEAN; v_score DOUBLE PRECISION; r RECORD; i INT := 0; v_grounders UUID[];
+    v_per DOUBLE PRECISION; v_cap DOUBLE PRECISION;
 BEGIN
+    PERFORM public.credibility_model_check();
     SELECT k.kind, k.basis INTO v_kind, v_basis FROM public.claim_kind_of(p_claim_id) k;
     IF v_kind IS NULL THEN
         RAISE EXCEPTION 'claim % has no claim kind (%) - the gate stops (D15 item 9: no default kind for a claim filed after P3a)',
@@ -618,9 +993,11 @@ BEGIN
             USING ERRCODE = 'OBC01';
     END IF;
     PERFORM public.credibility_weight(v_kind, f.key)
-       FROM public.contract_registry_entries f WHERE f.registry = 'source_families' AND f.retired_at IS NULL;
+       FROM public.contract_registry_entries f WHERE f.registry = 'source_families' AND f.retired_at IS NULL
+        AND EXISTS (SELECT 1 FROM public.contract_registry_entries w WHERE w.registry = 'credibility_weights'
+                           AND w.retired_at IS NULL AND w.definition ->> 'family' = f.key);
     v_depth := public.claim_min_depth(p_claim_id);
-    IF v_depth IS NULL THEN RETURN 0.0; END IF;
+    IF v_depth IS NULL THEN RETURN 0::float8; END IF;
     SELECT definition INTO v_terms FROM public.contract_registry_entries
      WHERE registry = 'credibility_terms' AND key = 'corroboration';
     v_per := public.credibility_unit(v_terms, 'claim_per', 'corroboration terms');
@@ -629,9 +1006,9 @@ BEGIN
       FROM public.claim_edge_counts(p_claim_id) e
      WHERE e.source_id IS NOT NULL AND e.edge_type <> 'contradicts';
     FOR r IN
-        SELECT e.source_id, max(public.source_rolling_total(e.source_id, v_kind, NULL::jsonb, v_grounders)
-                   * COALESCE(cs.weight, 1.0)
-                   * CASE e.edge_type WHEN 'inferred_from' THEN 0.67 ELSE 1.0 END) AS t
+        SELECT e.source_id, max(public.source_rolling_total_core(e.source_id, v_kind, NULL::jsonb, v_grounders)
+                   * COALESCE(cs.weight::float8, 1::float8)
+                   * CASE e.edge_type WHEN 'inferred_from' THEN 0.67::float8 ELSE 1::float8 END) AS t
           FROM public.claim_edge_counts(p_claim_id) e
           JOIN public.claim_sources cs ON cs.id = e.edge_id
          WHERE e.source_id IS NOT NULL AND e.edge_type <> 'contradicts'
@@ -641,14 +1018,14 @@ BEGIN
         IF i = 0 THEN v_lead := r.t; ELSE v_extra := v_extra + v_per * r.t; END IF;
         i := i + 1;
     END LOOP;
-    v_score := (v_lead + LEAST(v_extra, v_cap)) * power(0.85, v_depth);
+    v_score := (v_lead + LEAST(v_extra, v_cap)) * power(0.85::float8, v_depth::float8);
     SELECT (researched_on + COALESCE(revalidate_days,
               CASE volatility WHEN 'fast' THEN 7 WHEN 'medium' THEN 180 WHEN 'slow' THEN 1095 ELSE 180 END) < CURRENT_DATE)
       INTO v_stale FROM public.claims WHERE id = p_claim_id;
-    IF COALESCE(v_stale, FALSE) THEN v_score := v_score * 0.5; END IF;
+    IF COALESCE(v_stale, FALSE) THEN v_score := v_score * 0.5::float8; END IF;
     SELECT bool_or(e.edge_type = 'contradicts') INTO v_contra FROM public.claim_edge_counts(p_claim_id) e;
-    IF COALESCE(v_contra, FALSE) THEN v_score := LEAST(v_score, 0.30); END IF;
-    RETURN GREATEST(LEAST(v_score, 1.0), 0.0);
+    IF COALESCE(v_contra, FALSE) THEN v_score := LEAST(v_score, 0.30::float8); END IF;
+    RETURN GREATEST(LEAST(v_score, 1::float8), 0::float8);
 END;
 $$;
 
@@ -681,8 +1058,9 @@ CREATE OR REPLACE VIEW public.credibility_before_after AS
       FROM c
       LEFT JOIN s ON s.claim_id = c.id
       CROSS JOIN LATERAL (SELECT public.claim_confidence_d15(c.id) AS after_confidence) d
-      CROSS JOIN LATERAL (SELECT public.credibility_unit(public.credibility_weight(c.kind, 'general'), 'claim_floor',
-                                 'weight row ' || c.kind || '.general') AS claim_floor) f;
+      -- a kindless claim's row raises in claim_confidence_d15 (naming the claim), not here
+      CROSS JOIN LATERAL (SELECT CASE WHEN c.kind IS NULL THEN NULL
+                                      ELSE public.credibility_claim_floor(c.kind) END AS claim_floor) f;
 
 -- The digest the operator confirms: the model version plus every claim's after-score. Any
 -- change to the table, the paper score, a source's record or the claim set changes it, so a
@@ -711,6 +1089,10 @@ BEGIN
         RAISE EXCEPTION 'confirmation refused: who confirmed, the findings file and the line are all required'
             USING ERRCODE = 'OBC03';
     END IF;
+    -- attempt 3: one confirmation per view digest - a second call returns the first row, it never
+    -- mints another (tester (7): a second --apply recorded confirmations=2 from the same line)
+    SELECT id INTO v_id FROM public.credibility_rescore_confirmations WHERE view_digest = p_digest;
+    IF v_id IS NOT NULL THEN RETURN v_id; END IF;
     INSERT INTO public.credibility_rescore_confirmations (view_digest, model_version, confirmed_by, findings_ref, confirmation_line)
     VALUES (p_digest, public.credibility_model_version(), p_confirmed_by, p_findings_ref, p_line)
     RETURNING id INTO v_id;
@@ -737,8 +1119,14 @@ BEGIN
         RAISE EXCEPTION 're-score refused: digest % is not the current before/after view', p_digest
             USING ERRCODE = 'OBC03';
     END IF;
-    SELECT id INTO v_conf FROM public.credibility_rescore_confirmations
-     WHERE view_digest = p_digest AND applied_at IS NULL ORDER BY recorded_at DESC LIMIT 1;
+    -- attempt 3: already applied for exactly this view -> nothing to do, nothing recorded
+    IF EXISTS (SELECT 1 FROM public.credibility_trigger_state t
+                 JOIN public.credibility_rescore_confirmations c ON c.id = t.confirmation_id
+                WHERE t.singleton AND t.model = 'd15' AND c.view_digest = p_digest AND c.applied_at IS NOT NULL) THEN
+        RETURN 0;
+    END IF;
+    -- the view's one confirmation (attempt 3: one per digest, unique), applied or not
+    SELECT id INTO v_conf FROM public.credibility_rescore_confirmations WHERE view_digest = p_digest;
     IF v_conf IS NULL THEN
         RAISE EXCEPTION 're-score refused: no operator confirmation is recorded for view digest % (D15 item 6)', p_digest
             USING ERRCODE = 'OBC03';
@@ -755,16 +1143,42 @@ BEGIN
 END;
 $$;
 
+-- The stored confidence keeps the D15 verdict (attempt 3). claims.confidence is init-claims.sql's
+-- REAL (float4) column, which the reuse gate (reusable_claims, >= 0.50) reads; a DOUBLE total
+-- within half a float4 step of a floor would round onto the other side of it (0.49999999 stores
+-- as 0.5). This returns the float4 nearest the total that is on the SAME side of the kind's claim
+-- floor - the nearest float4 unless that one crosses the floor, then one step back.
+CREATE OR REPLACE FUNCTION public.credibility_store_confidence(p_total DOUBLE PRECISION, p_floor DOUBLE PRECISION)
+RETURNS REAL
+LANGUAGE plpgsql IMMUTABLE
+AS $$
+DECLARE v REAL := p_total::real; i INT := 0;
+BEGIN
+    IF p_floor IS NULL THEN RETURN v; END IF;
+    WHILE i < 4 AND ((p_total < p_floor AND v::float8 >= p_floor) OR (p_total >= p_floor AND v::float8 < p_floor)) LOOP
+        v := CASE WHEN p_total < p_floor THEN (v::float8 - abs(v::float8) * power(2::float8, -23))::real
+                  ELSE (v::float8 + abs(v::float8) * power(2::float8, -23))::real END;
+        i := i + 1;
+    END LOOP;
+    IF (p_total < p_floor) <> (v::float8 < p_floor) THEN
+        RAISE EXCEPTION 'credibility: no float4 on the floor side of % (floor %)', p_total, p_floor USING ERRCODE = 'OBC04';
+    END IF;
+    RETURN v;
+END;
+$$;
+
 -- The trigger's writer, redefined (supersedes 230-init-research-contract.sql's body, which it
 -- keeps verbatim for the legacy model). It changes model only through the function above.
 CREATE OR REPLACE FUNCTION public.recompute_claim_confidence(p_claim_id UUID)
 RETURNS REAL
 LANGUAGE plpgsql
 AS $$
-DECLARE v_conf REAL; v_contra BOOLEAN;
+DECLARE v_conf REAL; v_contra BOOLEAN; v_kind TEXT; v_total DOUBLE PRECISION;
 BEGIN
     IF public.credibility_trigger_model() = 'd15' THEN
-        v_conf := public.claim_confidence_d15(p_claim_id);
+        v_total := public.claim_confidence_d15(p_claim_id);   -- raises first for a kindless claim
+        SELECT k.kind INTO v_kind FROM public.claim_kind_of(p_claim_id) k;
+        v_conf := public.credibility_store_confidence(v_total, public.credibility_claim_floor(v_kind));
     ELSE
         v_conf := public.claim_confidence(p_claim_id);
     END IF;
@@ -834,7 +1248,27 @@ BEGIN
         EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', t || '_service_role_all', t);
         EXECUTE format('CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',
                        t || '_service_role_all', t);
-        EXECUTE format('GRANT ALL ON public.%I TO service_role', t);
+        -- attempt 3: the rows, not TRUNCATE (not RLS-filterable; empties a record table at once)
+        EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO service_role', t);
+    END LOOP;
+    -- attempt 3 (tester (2b): an app role's TRUNCATE of the registries was stopped only by P0's
+    -- foreign keys; has_table_privilege(..., 'TRUNCATE') was true): TRUNCATE, REFERENCES and
+    -- TRIGGER are revoked from the app roles on the registries and every credibility table. The
+    -- statement triggers (trg_credibility_owner_only) refuse a non-owner TRUNCATE as well, should
+    -- a later GRANT ALL hand the privilege back.
+    FOREACH t IN ARRAY ARRAY[
+        'contract_registries', 'contract_registry_entries', 'research_admission_trail', 'source_credibility_history',
+        'source_corroborations', 'credibility_rescore_confirmations', 'credibility_trigger_state'
+    ] LOOP
+        EXECUTE format('REVOKE TRUNCATE, REFERENCES, TRIGGER ON public.%I FROM PUBLIC, service_role', t);
+    END LOOP;
+    FOREACH t IN ARRAY ARRAY[
+        'research_admission_trail', 'source_credibility_history', 'source_corroborations',
+        'credibility_rescore_confirmations', 'credibility_trigger_state'
+    ] LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON public.%I', 'trg_' || t || '_truncate', t);
+        EXECUTE format('CREATE TRIGGER %I BEFORE TRUNCATE ON public.%I FOR EACH STATEMENT EXECUTE FUNCTION public.trg_credibility_owner_only()',
+                       'trg_' || t || '_truncate', t);
     END LOOP;
 END $$;
 GRANT SELECT ON public.credibility_before_after TO service_role;

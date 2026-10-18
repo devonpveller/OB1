@@ -12,7 +12,7 @@
  * claims and STAGES candidate sources.
  */
 
-import { CredibilityGateError, unit } from "./credibility.ts";
+import { amountUnit, CredibilityGateError, unit } from "./credibility.ts";
 import { safeReasonText, safeScholarlyRecord } from "./scholarly.ts";
 
 interface QueryClient {
@@ -315,7 +315,7 @@ export async function stampSourceCredibility(
   // attempt 2: a stamp the SQL twin would refuse (OBC04) is refused here, before it is stored;
   // and a scholarly record is stored only with an allow-listed reason (no URL, no key, no mailto)
   unit(stamp.score, `credibility stamp of ${sourceId}: score`);
-  unit(stamp.total, `credibility stamp of ${sourceId}: total`);
+  amountUnit(stamp.total, `credibility stamp of ${sourceId}: total`);   // a computed total (attempt 3)
   if (!stamp.family) throw new CredibilityGateError(`credibility stamp of ${sourceId}: no family`);
   const patch: Record<string, unknown> = { credibility: { ...stamp, reasons: stamp.reasons.map(safeReasonText) } };
   if (scholarly) patch.scholarly = safeScholarlyRecord(scholarly);
@@ -351,7 +351,7 @@ export async function recordCorroboration(
   e: { from: string; to: string; strength: "strong" | "weak"; amount: number; claim: string; kind: string; verdict: string; model: string },
   jobId: string | null,
 ): Promise<void> {
-  unit(e.amount, `corroboration ${e.from} -> ${e.to}: amount`);
+  amountUnit(e.amount, `corroboration ${e.from} -> ${e.to}: amount`);   // a computed amount, stored as DOUBLE (attempt 3)
   if (e.from === e.to) throw new CredibilityGateError(`corroboration refused: source ${e.from} cannot corroborate itself`);
   await client.queryObject(
     `INSERT INTO public.source_corroborations
@@ -426,11 +426,25 @@ export class TombstonedError extends Error {
  * The fold's move (public.fold_held_source). A tombstoned URL makes the sources gate raise
  * OBT01; that is surfaced as TombstonedError so the caller routes the D5 reopening path.
  */
+/**
+ * The fold's credibility record as it may be STORED (attempt 3, tester near-miss: the stamp path
+ * scrubbed its reasons and the fold path did not). fold_held_source writes it to the source's
+ * metadata.credibility and to the folded trail event, so every reason line goes through
+ * safeReasonText and a scholarly record through safeScholarlyRecord, as in stampSourceCredibility.
+ */
+export function safeFoldCredibility(credibility: unknown): unknown {
+  if (!credibility || typeof credibility !== "object" || Array.isArray(credibility)) return credibility;
+  const c = { ...(credibility as Record<string, unknown>) };
+  if (Array.isArray(c.reasons)) c.reasons = c.reasons.map((r) => safeReasonText(String(r)));
+  if (c.scholarly && typeof c.scholarly === "object") c.scholarly = safeScholarlyRecord(c.scholarly as Record<string, unknown>);
+  return c;
+}
+
 export async function foldHeld(client: QueryClient, heldId: string, credibility: unknown, jobId: string | null): Promise<string> {
   try {
     const r = await client.queryObject<{ id: string }>(
       `SELECT public.fold_held_source($1::uuid, $2::jsonb, $3::uuid) AS id`,
-      [heldId, JSON.stringify(credibility), jobId],
+      [heldId, JSON.stringify(safeFoldCredibility(credibility)), jobId],
     );
     return r.rows[0].id;
   } catch (e) {

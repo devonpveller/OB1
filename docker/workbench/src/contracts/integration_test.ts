@@ -884,6 +884,36 @@ t("P3a attempt 2: quality(id) never serves a stored credential-shaped reason (si
   assert(q2.factors.some((x: any) => x.name === "reason" && x.reason === "domain class general: 0.22"), "a clean reason line is served as is");
 });
 
+// attempt 3 (tester t-rw-p3a-2 (4)): a bare key and a fully percent-encoded query passed the serving
+// side's credential test on both doors, and the scholarly record's data fields (doi, identifier,
+// authors) were served unscanned. Planted directly in the DB (no writer forms them).
+t("P3a attempt 3: quality(id) serves no bare key, no percent-encoded query and no tainted scholarly field - on either door", async () => {
+  const secret = `SECRETKEY-${uuid().slice(0, 8)}`;
+  const s = await newSource({ url: "https://blog.example.com/p3a-secret-3" });
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s, JSON.stringify({
+    share: "cloud",
+    credibility: { family: "general", claim_kind: "practical", score: 0.22, total: 0.22, model_version: "d15 weights v1 paper p1",
+      signals: { domain_class: "general", primary: false, author_identity: `Jane ${secret}`,
+        scholarly: { state: "resolved", identifier: { kind: "doi", value: `10.1/x?api_key=${secret}` }, doi: `https://api.openalex.org/w?mailto=t%40x.invalid`,
+          authors: [{ id: secret, name: `https%3A%2F%2Fapi.openalex.org%2Fw%3Fapi_key%3D${secret}`, works_count: 3 }], via: "openalex", cited_by: 2 } },
+      reasons: [`OpenAlex 401 bare ${secret} rejected`, `see https%3A%2F%2Fapi.openalex.org%2Fworks%2Fx%3Fapi_key%3D${secret}`, "domain class general: 0.22"] },
+  })]);
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  for (const path of [`/sources/${s}/quality`, `/sources/${s}/quality?metadata_filter=${f}`]) {
+    const r = await call("GET", path);
+    assertEquals(r.status, 200, path);
+    assert(S.Quality.safeParse(r.json).success, JSON.stringify(r.json));
+    const text = JSON.stringify(r.json);
+    for (const bad of [secret, "api_key", "mailto", "x.invalid", "api.openalex.org%2F", "%3Fapi_key"]) assert(!text.includes(bad), `${path} serves '${bad}': ${text}`);
+    const q = r.json;
+    assertEquals(q.signals.scholarly.identifier, null, path);
+    assertEquals(q.signals.scholarly.doi, null, path);
+    assertEquals(q.signals.scholarly.authors, [{ id: null, name: null, works_count: 3 }], path);
+    assertEquals(q.factors.filter((x: any) => x.name === "reason" && /redacted/.test(x.reason)).length, 2, JSON.stringify(q.factors));
+    assert(q.factors.some((x: any) => x.name === "reason" && x.reason === "domain class general: 0.22"), "a clean reason line is served as is");
+  }
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();

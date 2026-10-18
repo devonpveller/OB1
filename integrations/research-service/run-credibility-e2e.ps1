@@ -10,7 +10,8 @@
 #   3. builds openbrain-research:wt-<id> (NEVER :local) - the build RUNS the offline test suite -
 #      and its test stage as openbrain-research-test:wt-<id>
 #   4. proves the image gate is real: the same context plus one failing test must NOT build
-#   5. database A (chain only): runs credibility.e2e.test.ts in the test image (the SQL twin of
+#   5. database A (chain only): runs credibility.e2e.test.ts and (attempt 3) credibility-twins.e2e.test.ts
+#      - the SQL twin vs the TS model on the same rows - in the test image (the SQL twin of
 #      the model, the before/after view, the re-score gate, the fold's move)
 #   6. builds openbrain-workbench:wt-<id>; database B (chain + the P0 contract fixtures, the
 #      production non-superuser role): runs the workbench integration_test.ts (P0's cases plus
@@ -182,10 +183,10 @@ try {
   Check ($negRc -ne 0 -and $o -match 'gate negative control') "a failing test fails the image build (rc=$negRc)"
   if ($negRc -eq 0) { $made.images += $negTag }
 
-  Write-Host '[5] database A + credibility.e2e.test.ts (SQL twin, before/after, gate, fold)'
+  Write-Host '[5] database A + credibility.e2e.test.ts + credibility-twins.e2e.test.ts (SQL twin, twins on one table, before/after, gate, fold)'
   if (-not (Start-Db $dbA $false)) { throw 'db A' }
   $o = Dk run --rm --label $label --network $net -e "CRED_E2E_DB_HOST=$dbA" -e "CRED_E2E_DB_PASSWORD=$pw" `
-    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts
+    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts
   Save 'credibility-e2e.log' $o
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "credibility e2e: $($sum.Value)"

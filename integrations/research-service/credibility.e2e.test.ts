@@ -31,12 +31,16 @@ async function source(url: string, meta: Record<string, unknown> = {}) {
     [s, url, url, new URL(url).hostname, JSON.stringify(meta)]);
   return s;
 }
-// A claim without a kind is a PRE-P3a claim (attempt 2): it is created before the cutover marker,
-// as every kindless claim in the live store was; a kindless claim filed after it stops the gate.
+// A claim without a kind is a PRE-P3a claim (attempt 2): it predates the cutover marker, as every
+// kindless claim in the live store does; a kindless claim filed after it stops the gate. Attempt 3:
+// a claim's filing time is claims.filed_at, set by the server on INSERT (a writer's created_at no
+// longer counts); "this claim predates P3a" is the OWNER marking filed_at NULL, as every claim that
+// existed when the column was added has it - this suite connects as the owner.
 async function claim(text: string, sources: string[], kind?: string) {
   const c = id();
-  await q(`INSERT INTO public.claims (id, text, metadata, volatility, created_at) VALUES ($1, $2, $3::jsonb, 'slow', $4::timestamptz)`,
-    [c, text, JSON.stringify(kind ? { claim_kind: kind } : {}), kind ? new Date().toISOString() : "2020-01-01T00:00:00Z"]);
+  await q(`INSERT INTO public.claims (id, text, metadata, volatility) VALUES ($1, $2, $3::jsonb, 'slow')`,
+    [c, text, JSON.stringify(kind ? { claim_kind: kind } : {})]);
+  if (!kind) await q(`UPDATE public.claims SET filed_at = NULL WHERE id = $1`, [c]);
   for (const [i, s] of sources.entries()) {
     await q(`SELECT public.link_claim_to_source($1, $2, $3, 1.0)`, [c, s, i === 0 ? "states" : "corroborates"]);
   }
@@ -152,7 +156,8 @@ t("attempt 2: a malformed weight row is refused by BOTH twins at read time and b
       await c.queryArray("ROLLBACK TO SAVEPOINT r");
       let tsOut = "";
       try { await loadCredibilityModel(c); tsOut = "BUILT"; } catch (e) { tsOut = `REFUSED ${errOf(e)}`; }
-      if (!/2 active rows/.test(sqlOut)) problems.push(`duplicate row: SQL ${sqlOut}`);
+      // attempt 3: credibility_model_check (the whole-model twin of buildModel) now refuses it first
+      if (!/2 active rows|two active rows/.test(sqlOut)) problems.push(`duplicate row: SQL ${sqlOut}`);
       if (!/two active rows/.test(tsOut)) problems.push(`duplicate row: TS ${tsOut}`);
     } finally { await c.queryArray("ROLLBACK"); }
     await c.queryArray("BEGIN");
@@ -309,6 +314,7 @@ t("attempt 2: a kindless claim filed after the P3a cutover stops the gate (OBC01
     const [late, early] = [id(), id()];
     await c.queryArray(`INSERT INTO public.claims (id, text, volatility) VALUES ($1, 'kindless, filed now', 'slow')`, [late]);
     await c.queryArray(`INSERT INTO public.claims (id, text, volatility, created_at) VALUES ($1, 'kindless, filed long ago', 'slow', '2020-01-01')`, [early]);
+    await c.queryArray(`UPDATE public.claims SET filed_at = NULL WHERE id = $1`, [early]);   // attempt 3: the owner marks it pre-P3a
     await c.queryArray(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $3, 'states'), ($2, $3, 'states')`, [late, early, s]);
     const k = (await c.queryObject<{ id: string; kind: string | null; basis: string }>(
       `SELECT x.id, k.kind, k.basis FROM unnest($1::uuid[]) AS x(id), LATERAL public.claim_kind_of(x.id) k`, [[late, early]])).rows;

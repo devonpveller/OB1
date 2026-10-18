@@ -456,7 +456,7 @@ export async function runResearch(
   // naming what is missing (D15 item 9) - it never runs on a default weight.
   const model: CredibilityModel = await loadCredibilityModel(client);
   const claimKind = classifyClaimKind(model, query);
-  for (const f of model.families.keys()) weightFor(model, claimKind.kind, f);   // a missing row stops here
+  for (const f of model.scoredFamilies) weightFor(model, claimKind.kind, f);   // a missing row stops here
   const admissionCtx: AdmissionContext = {
     model, kind: claimKind.kind, resolver: deps.scholarly ?? null,
     cached: async (url) => (await cachedScholarly(client, url).catch(() => null)) as ScholarlyRecord | null,
@@ -1758,7 +1758,7 @@ export async function runResearch(
             const amt = (strong ? model.corroboration.strongFactor : model.corroboration.weakFactor) * finals[from].total;
             corrEdges.push({
               from_url: pool[from].url, to_url: pool[to].url, strength: strong ? "strong" : "weak",
-              amount: Math.round(amt * 1000) / 1000, claim: v.text, verdict: v.verdict, fromIdx: from, toIdx: to,
+              amount: amt, claim: v.text, verdict: v.verdict, fromIdx: from, toIdx: to,   // unrounded (attempt 3)
             });
           }
         }

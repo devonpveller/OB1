@@ -138,3 +138,20 @@ Deno.test("stampSourceCredibility refuses a score the SQL twin would refuse, and
   const all = JSON.stringify(r.sent.map((x) => x.args));
   assert(!all.includes(key) && !all.includes("api_key") && !all.includes("mailto"), all);
 });
+
+// attempt 3 (tester near-miss): the fold path stored p_credibility.reasons without safeReasonText
+Deno.test("attempt 3: the fold stores its credibility record scrubbed - reasons through safeReasonText, a scholarly record through the allow-list", async () => {
+  const { foldHeld, safeFoldCredibility } = await import("./kb.ts");
+  const key = "SECRETKEY-fold0003a";
+  const cred = { family: "general", score: 0.4, total: 0.4, reasons: [`OpenAlex 401 bare ${key} rejected`, "domain class general: 0.22"],
+    scholarly: { state: "unresolved", reason: `https://api.openalex.org/works/x?api_key=${key}` } };
+  const sent: unknown[][] = [];
+  const stub = { queryObject: (_sql: string, args: unknown[] = []) => { sent.push(args); return Promise.resolve({ rows: [{ id: "h1" }] }); } };
+  assertEquals(await foldHeld(stub as never, "h1", cred, null), "h1");
+  const stored = String(sent[0][1]);
+  assert(!stored.includes(key), `the fold stored the key: ${stored}`);
+  const parsed = JSON.parse(stored);
+  assertEquals(parsed.reasons, ["reason redacted (it carried a URL or credential-shaped text)", "domain class general: 0.22"]);
+  assertEquals(parsed.scholarly.reason, "reason redacted (not an allow-listed reason code)");
+  assertEquals(safeFoldCredibility(null), null);
+});

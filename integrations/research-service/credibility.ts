@@ -104,6 +104,13 @@ export interface CorroborationTerms { strongFactor: number; weakFactor: number; 
 export interface CredibilityModel {
   kinds: ClaimKind[];
   families: Map<string, FamilyDef>;
+  /**
+   * The families the weight table SCORES: those with at least one active weight row (attempt 3).
+   * A family registered without any row (P0's expansion by registration) is not in the model yet:
+   * it stops nothing until a source of it is scored - then weightFor stops the gate, naming it. A
+   * family with SOME rows must have one for every kind. credibility_model_check is the SQL twin.
+   */
+  scoredFamilies: string[];
   weights: Map<string, WeightRow>;
   domainClasses: DomainClass[];
   paper: PaperScoreVersion;
@@ -118,31 +125,105 @@ export interface CredibilityModel {
   modelVersion: string;
 }
 
-const num = (v: unknown, field: string): number => {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) throw new CredibilityGateError(`credibility registry: ${field} is not a number`);
-  return n;
-};
 /**
- * A credibility number (attempt 2, tester finding 2): a JSON number in [0, 1] - never a string
- * cast ("0.5", "NaN"), never null or missing, never negative, never above 1. The SQL twin's
- * credibility_is_unit / credibility_unit apply the same rule (OBC04), so the two refuse the same
- * rows. The message keeps attempt 1's "is not a number" for a non-number.
+ * An ORDER (claim kinds, domain classes): absent = 100 in both twins; present, a JSON integer
+ * (attempt 3: attempt 2 read "2" as 2 here while the SQL twin's ::int cast refused 1.5 - one rule
+ * now, credibility_model_check applies it too).
+ */
+const order = (v: unknown, field: string): number => {
+  if (v === undefined) return 100;
+  if (typeof v !== "number" || !Number.isInteger(v) || Math.abs(v) > 1e9) {
+    throw new CredibilityGateError(`credibility registry: ${field} is not an integer (${JSON.stringify(v ?? null)})`);
+  }
+  return v;
+};
+
+/** The smallest non-zero credibility number (attempt 3; see `unit`). */
+export const UNIT_MIN_NONZERO = 1e-9;
+
+/**
+ * A number that JSON.parse read as 0 although its text has a non-zero digit (1e-400): it
+ * underflowed. `parseRegistryJson` puts this marker in its place so `unit()` refuses it the way
+ * the SQL twin refuses the same text (its numeric is non-zero and below 1e-9), instead of reading 0.
+ */
+export class UnderflowedNumber {
+  constructor(readonly source: string) {}
+  toJSON() { return this.source; }
+}
+
+/**
+ * Parse a registry definition's JSON text (attempt 3). The same as JSON.parse except that a
+ * number whose text is non-zero but which parses to 0 becomes an UnderflowedNumber. Every other
+ * number is the same IEEE double the SQL twin's float8 cast gives for the same text (both round
+ * the decimal correctly), so the two twins read one value.
+ */
+export function parseRegistryJson(text: string): Record<string, unknown> {
+  const reviver = (_k: string, v: unknown, ctx?: { source?: string }) =>
+    typeof v === "number" && v === 0 && typeof ctx?.source === "string" && /[1-9]/.test(ctx.source.split(/[eE]/)[0])
+      ? new UnderflowedNumber(ctx.source)
+      : v;
+  return JSON.parse(text, reviver as (k: string, v: unknown) => unknown);
+}
+
+/**
+ * A credibility number (attempt 2, tester finding 2; attempt 3): a JSON number that is 0 or in
+ * [1e-9, 1] - never a string cast ("0.5", "NaN"), never null or missing, never negative, never
+ * above 1, and never a non-zero number below 1e-9. Attempt 3 (tester near-miss): 1e-50 raised
+ * 22003 in the SQL twin's REAL and read 0 here; 1e-400 underflows to 0 in JSON.parse while the
+ * database holds it as a non-zero numeric. Refusing every non-zero number below 1e-9 is the one
+ * rule both twins can apply to the same text. The SQL twin's credibility_is_unit /
+ * credibility_unit apply exactly this rule (OBC04) and the weight table's CHECK calls the same
+ * function, so the two refuse the same rows. The message keeps "is not a number" for a non-number.
  */
 export function unit(v: unknown, field: string): number {
+  if (v instanceof UnderflowedNumber) {
+    throw new CredibilityGateError(`credibility registry: ${field} = ${v.source} is a non-zero number below 1e-9`);
+  }
   if (typeof v !== "number" || !Number.isFinite(v)) {
     throw new CredibilityGateError(`credibility registry: ${field} is not a number (${v === undefined ? "missing" : JSON.stringify(v)})`);
   }
   if (v < 0 || v > 1) throw new CredibilityGateError(`credibility registry: ${field} = ${v} is outside [0, 1]`);
+  if (v !== 0 && v < UNIT_MIN_NONZERO) throw new CredibilityGateError(`credibility registry: ${field} = ${v} is a non-zero number below 1e-9`);
   return v;
 }
-/** A strictly positive finite number (a saturation half-point) or >= 0 (a grace period). */
-const positive = (v: unknown, field: string, allowZero = false): number => {
-  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || (!allowZero && v === 0)) {
-    throw new CredibilityGateError(`credibility registry: ${field} is not a ${allowZero ? "non-negative" : "positive"} number (${JSON.stringify(v ?? null)})`);
+
+/**
+ * An AMOUNT or a TOTAL the pipeline computed (attempt 3): a finite double in [0, 1]. Unlike a
+ * registry number it never passes through decimal text that can underflow (it goes to a DOUBLE
+ * PRECISION column as its shortest round-trip text and reads back as the same double), so no lower
+ * bound applies - a product of two credibility numbers may be below 1e-9.
+ */
+export function amountUnit(v: unknown, field: string): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new CredibilityGateError(`credibility: ${field} is not a number (${v === undefined ? "missing" : JSON.stringify(v)})`);
   }
+  if (v < 0 || v > 1) throw new CredibilityGateError(`credibility: ${field} = ${v} is outside [0, 1]`);
   return v;
+}
+
+/**
+ * A saturation half-point (> 0) or a grace period (>= 0): 0 (grace only) or in [1e-9, 1e9]
+ * (attempt 3: bounded both ways for the reason `unit` is - the SQL twin's credibility_is_positive
+ * reads the same text through float8, which a number outside that range can underflow or overflow).
+ */
+const positive = (v: unknown, field: string, allowZero = false): number => {
+  const ok = typeof v === "number" && Number.isFinite(v) &&
+    ((allowZero && v === 0) || (v >= UNIT_MIN_NONZERO && v <= 1e9));
+  if (!ok) {
+    const shown = v instanceof UnderflowedNumber ? v.source : JSON.stringify(v ?? null);
+    throw new CredibilityGateError(`credibility registry: ${field} is not a ${allowZero ? "non-negative" : "positive"} number in range (${shown})`);
+  }
+  return v as number;
 };
+
+/**
+ * A registry key named inside a definition (a weight row's kind and family): exactly the pattern
+ * P0's contract_registry_entries.key CHECK enforces on every key (attempt 3, tester near-miss: a
+ * weight row for 'practical ' or 'Practical' got past the SQL CHECK and the unique index; SQL used
+ * the other rows, TS refused the model). The weight table's CHECK applies the same pattern.
+ */
+export const REGISTRY_KEY_PATTERN = "^[a-z0-9][a-z0-9._-]*$";
+const KEY_RE = new RegExp(REGISTRY_KEY_PATTERN);
 const regexes = (v: unknown): RegExp[] =>
   (Array.isArray(v) ? v : []).map((s) => new RegExp(String(s), "i"));
 
@@ -157,7 +238,7 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
 
   const kinds: ClaimKind[] = of("claim_kinds").map((r) => ({
     key: r.key,
-    order: num(r.definition.order ?? 100, `claim_kinds.${r.key}.order`),
+    order: order(r.definition.order, `claim_kinds.${r.key}.order`),
     cues: regexes(r.definition.cues),
     fallback: r.definition.fallback === true,
     papersOutrank: r.definition.papers_outrank === true,
@@ -173,8 +254,15 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
   const weights = new Map<string, WeightRow>();
   for (const r of of("credibility_weights")) {
     const d = r.definition;
-    const kind = String(d.kind ?? "");
-    const family = String(d.family ?? "");
+    // attempt 3: kind and family are registry keys as P0's key CHECK defines them - 'practical '
+    // or 'Practical' is refused here and by the weight table's CHECK (the same pattern)
+    if (typeof d.kind !== "string" || !KEY_RE.test(d.kind) || typeof d.family !== "string" || !KEY_RE.test(d.family)) {
+      throw new CredibilityGateError(
+        `credibility_weights.${r.key}: kind ${JSON.stringify(d.kind ?? null)} / family ${JSON.stringify(d.family ?? null)} is not a registry key (${REGISTRY_KEY_PATTERN})`,
+      );
+    }
+    const kind = d.kind;
+    const family = d.family;
     if (!kinds.some((k) => k.key === kind)) {
       throw new CredibilityGateError(`credibility_weights.${r.key}: claim kind '${kind}' is not registered`);
     }
@@ -198,13 +286,20 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
 
   const domainClasses: DomainClass[] = of("domain_classes").map((r) => ({
     key: r.key,
-    order: num(r.definition.order ?? 100, `domain_classes.${r.key}.order`),
+    order: order(r.definition.order, `domain_classes.${r.key}.order`),
     score: unit(r.definition.score, `domain_classes.${r.key}.score`),
     patterns: regexes(r.definition.host_patterns),
     fallback: r.definition.fallback === true,
   })).sort((a, b) => a.order - b.order);
   if (domainClasses.filter((c) => c.fallback).length !== 1) {
     throw new CredibilityGateError("domain_classes: exactly one entry must be declared fallback");
+  }
+  // attempt 3: the first matching class by order decides a host; two classes on one order would
+  // be decided by row order here and by the planner in SQL - refused in both twins
+  for (let i = 1; i < domainClasses.length; i++) {
+    if (domainClasses[i].order === domainClasses[i - 1].order) {
+      throw new CredibilityGateError(`domain_classes: ${domainClasses[i - 1].key} and ${domainClasses[i].key} share order ${domainClasses[i].order}`);
+    }
   }
 
   const activePaper = of("paper_score_versions").filter((r) => r.definition.active === true);
@@ -252,8 +347,9 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
 
   const weightsVersion = `weights v${registryVersions["credibility_weights"] ?? 1}`;
   const paperVersion = `paper ${paper.key}`;
+  const scoredFamilies = [...families.keys()].filter((f) => [...weights.values()].some((w) => w.family === f));
   const model: CredibilityModel = {
-    kinds, families, weights, domainClasses, paper, general, verdicts, corroboration,
+    kinds, families, scoredFamilies, weights, domainClasses, paper, general, verdicts, corroboration,
     weightsVersion, paperVersion, modelVersion: `d15 ${weightsVersion} ${paperVersion}`,
   };
   validateTable(model);
@@ -279,7 +375,7 @@ export function minPaperScore(m: CredibilityModel): number {
  */
 export function validateTable(m: CredibilityModel): void {
   for (const k of m.kinds) {
-    for (const f of m.families.keys()) weightFor(m, k.key, f);
+    for (const f of m.scoredFamilies) weightFor(m, k.key, f);
     if (k.papersOutrank) {
       const paper = weightFor(m, k.key, "scholarly").weight * minPaperScore(m);
       const g = weightFor(m, k.key, "general");
@@ -374,6 +470,11 @@ export interface SourceScore {
 }
 
 const sat = (x: number, half: number) => (half > 0 ? x / (x + half) : 0);
+/**
+ * DISPLAY ONLY (attempt 3, tester finding: attempt 2 rounded totals with this and the SQL twin did
+ * not, so a claim's floor verdict flipped between the twins). It shapes reason TEXT; no number that
+ * feeds a total, an amount, a stamp or a floor comparison goes through it (twins.test.ts checks).
+ */
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 
 export function ageYears(published: string | null, now: Date): number | null {
@@ -412,7 +513,7 @@ export function paperScore(m: CredibilityModel, s: ScholarlySignals): { score: n
     reasons.push(`best author works_count ${s.author_works_count}: author term ${r3(authorTerm)}`);
   }
   const score = Math.min(1, p.base + p.citeWeight * citeTerm + p.authorWeight * authorTerm);
-  return { score: r3(score), reasons };
+  return { score, reasons };
 }
 
 export function generalScore(m: CredibilityModel, s: GeneralSignals): { score: number; reasons: string[] } {
@@ -430,7 +531,7 @@ export function generalScore(m: CredibilityModel, s: GeneralSignals): { score: n
   const agree = Math.min(g.agreementCap, g.agreementPer * s.entailment_agreement.supports);
   if (s.entailment_agreement.supports) reasons.push(`entailment agreement (${s.entailment_agreement.supports} supports): +${r3(agree)}`);
   score += agree;
-  return { score: r3(Math.min(1, score)), reasons };
+  return { score: Math.min(1, score), reasons };
 }
 
 /**
@@ -446,6 +547,9 @@ export function scholarlySignals(rec: ScholarlyRecord, now: Date): ScholarlySign
   return {
     cited_by: rec.cited_by,
     author_works_count: counts.length ? Math.max(...counts) : null,
+    // a SIGNAL's recorded precision, not a total's rounding (attempt 3): the age is stored with the
+    // signals at 3 decimals of a year and the paper score is computed FROM the stored value, so the
+    // stamped signals reproduce the stamped score exactly
     age_years: ageYears(rec.published, now) === null ? null : r3(ageYears(rec.published, now)!),
   };
 }
@@ -477,10 +581,12 @@ export function scoreSource(
 export function weightedTotal(m: CredibilityModel, kind: string, s: SourceScore): { total: number; row: WeightRow; reason: string } {
   const row = weightFor(m, kind, s.family);
   const primary = s.family === "general" && (s.signals as GeneralSignals).primary ? row.primaryBonus : 0;
-  const total = r3(Math.min(1, row.weight * Math.min(1, s.score + primary)));
+  // the SQL twin's v_base, op for op: weight x min(1, score + bonus) (a product of two numbers in
+  // [0, 1] needs no cap); unrounded (attempt 3)
+  const total = row.weight * Math.min(1, s.score + primary);
   return {
     total, row,
-    reason: `${kind}/${s.family}: ${s.score}${primary ? ` + primary ${primary}` : ""} x weight ${row.weight} = ${total} (${m.weightsVersion})`,
+    reason: `${kind}/${s.family}: ${r3(s.score)}${primary ? ` + primary ${primary}` : ""} x weight ${row.weight} = ${r3(total)} (${m.weightsVersion})`,
   };
 }
 
@@ -518,8 +624,8 @@ export function corroborate(
   const pt = weightedTotal(m, kind, paper.score).total;
   const gt = weightedTotal(m, kind, general.score).total;
   return [
-    { from_url: paper.url, to_url: general.url, strength: "strong", amount: r3(m.corroboration.strongFactor * pt), claim, verdict },
-    { from_url: general.url, to_url: paper.url, strength: "weak", amount: r3(m.corroboration.weakFactor * gt), claim, verdict },
+    { from_url: paper.url, to_url: general.url, strength: "strong", amount: m.corroboration.strongFactor * pt, claim, verdict },
+    { from_url: general.url, to_url: paper.url, strength: "weak", amount: m.corroboration.weakFactor * gt, claim, verdict },
   ];
 }
 
@@ -539,8 +645,10 @@ function sameTarget(link: string, url: string, doi: string | null): boolean {
  * count here, because that source already counts in the line once, through claim_per x its own
  * total (lineCredibility). The same giver -> receiver pair on the same line counts once whatever
  * the model version (one row per pair and line, as source_corroborations' key). Capped at 1;
- * every amount must be a credibility number. claim_confidence_d15 / source_rolling_total
- * (p_exclude) are the SQL twin.
+ * every amount must be a finite number in [0, 1]. claim_confidence_d15 / source_rolling_total
+ * (p_exclude) are the SQL twin. Attempt 3: unrounded, and the amounts are summed in ONE order -
+ * descending, from 0, the SQL twin's sum(amount ORDER BY amount DESC) - so both give the same
+ * double whatever order the rows were inserted in (float addition is not associative).
  */
 export function foldReceived(
   base: number,
@@ -548,16 +656,17 @@ export function foldReceived(
   coCited: Set<string>,
 ): number {
   const seen = new Set<string>();
-  let sum = 0;
+  const amounts: number[] = [];
   for (const e of received) {
-    unit(e.amount, `corroboration amount from ${e.from}`);
+    amountUnit(e.amount, `corroboration amount from ${e.from}`);
     if (coCited.has(e.from)) continue;
     const k = `${e.from}\u0000${e.claim}`;
     if (seen.has(k)) continue;
     seen.add(k);
-    sum += e.amount;
+    amounts.push(e.amount);
   }
-  return r3(Math.min(1, unit(base, "source total") + sum));
+  const sum = amounts.sort((a, b) => b - a).reduce((a, x) => a + x, 0);
+  return Math.min(1, amountUnit(base, "source total") + sum);
 }
 
 export interface LineCredibility {
@@ -577,6 +686,9 @@ export interface LineCredibility {
  * leads, each further independent cited source adds claim_per x its total, capped; only a
  * transferring verdict earns any of it. A single uncorroborated general source therefore starts
  * at its own weighted total, which the table keeps under the claim floor (D15 item 6).
+ * Attempt 3: unrounded, in the SQL twin's order - totals descending, the extra summed from 0 in
+ * that order, capped, added to the lead, capped at 1; below the floor iff the total is under the
+ * highest claim_floor among the kind's family rows (credibility_claim_floor in SQL).
  */
 export function lineCredibility(
   m: CredibilityModel,
@@ -587,7 +699,7 @@ export function lineCredibility(
 ): LineCredibility {
   const v = m.verdicts.get(verdict);
   if (!v) throw new CredibilityGateError(`entailment verdict '${verdict}' is not registered`);
-  const floor = Math.max(...[...m.families.keys()].map((f) => weightFor(m, kind, f).claimFloor));
+  const floor = Math.max(...m.scoredFamilies.map((f) => weightFor(m, kind, f).claimFloor));
   if (!v.transfers || !cited.length) {
     return { line, verdict, lead: 0, corroborators: 0, total: 0, below_floor: true,
       reasons: [`verdict ${verdict}: the line carries no credibility`] };
@@ -595,10 +707,10 @@ export function lineCredibility(
   const totals = cited.map((c) => c.total).sort((a, b) => b - a);
   const lead = totals[0];
   const extra = Math.min(m.corroboration.claimCap, totals.slice(1).reduce((a, t) => a + m.corroboration.claimPer * t, 0));
-  const total = r3(Math.min(1, lead + extra));
+  const total = Math.min(1, lead + extra);
   return {
     line, verdict, lead, corroborators: totals.length - 1, total, below_floor: total < floor,
-    reasons: [`lead ${lead}`, `${totals.length - 1} corroborating source(s): +${r3(extra)}`, `claim floor ${floor}`],
+    reasons: [`lead ${r3(lead)}`, `${totals.length - 1} corroborating source(s): +${r3(extra)}`, `claim floor ${floor}`],
   };
 }
 
@@ -611,10 +723,14 @@ export interface ReportCredibility {
   weights: Record<string, number>;
 }
 
-/** Mean of the per-line totals over the lines that carry a verdict; null when there are none. */
+/**
+ * Mean of the per-line totals over the lines that carry a verdict; null when there are none. The
+ * mean is a REPORT figure (display, 3 decimals); the below-floor count is each line's unrounded
+ * verdict.
+ */
 export function reportCredibility(m: CredibilityModel, kind: string, lines: LineCredibility[]): ReportCredibility {
   const weights: Record<string, number> = {};
-  for (const f of m.families.keys()) weights[f] = weightFor(m, kind, f).weight;
+  for (const f of m.scoredFamilies) weights[f] = weightFor(m, kind, f).weight;
   const value = lines.length ? r3(lines.reduce((a, l) => a + l.total, 0) / lines.length) : null;
   return { value, lines: lines.length, below_floor: lines.filter((l) => l.below_floor).length, kind, model_version: m.modelVersion, weights };
 }
@@ -630,11 +746,18 @@ interface QueryClient { queryObject<T>(sql: string, args?: unknown[]): Promise<{
 
 /** Read the registries and build the model. Throws (the gate stops) on any inconsistency. */
 export async function loadCredibilityModel(client: QueryClient): Promise<CredibilityModel> {
-  const rows = await client.queryObject<RegistryRow>(
-    `SELECT registry, key, version, definition, retired_at::text AS retired_at
+  // attempt 3: the definition is read as TEXT and parsed by parseRegistryJson, so a number the
+  // database holds as non-zero and JSON.parse would read as 0 is refused (unit), as in SQL
+  const raw = await client.queryObject<Omit<RegistryRow, "definition"> & { definition: string | Record<string, unknown> }>(
+    `SELECT registry, key, version, definition::text AS definition, retired_at::text AS retired_at
        FROM public.contract_registry_entries WHERE registry = ANY($1::text[])`,
     [CREDIBILITY_REGISTRIES],
   );
+  const rows = {
+    rows: raw.rows.map((r): RegistryRow => ({
+      ...r, definition: typeof r.definition === "string" ? parseRegistryJson(r.definition) : r.definition,
+    })),
+  };
   const versions = await client.queryObject<{ name: string; version: number }>(
     `SELECT name, version FROM public.contract_registries WHERE name = ANY($1::text[])`,
     [CREDIBILITY_REGISTRIES],

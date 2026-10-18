@@ -70,3 +70,37 @@ Deno.test({
     assert(!/openbrain-db|failed to lookup|Connection refused|ConnectionRefused/i.test(err), `it tried to connect: ${err}`);
   },
 });
+
+// attempt 3 (tester (7)): a second --apply with no change re-minted the spent confirmation
+// (confirmations=2 applied=2). runGate is the script's body; the stub is a database that applies
+// this view on the first run.
+Deno.test("attempt 3: a second --apply for an already-applied view records NOTHING and re-scores nothing", async () => {
+  const { runGate } = await import("./rescore-gate.ts");
+  const calls: string[] = [];
+  let applied = false;
+  const stub = {
+    queryObject: (sql: string) => {
+      calls.push(sql.replace(/\s+/g, " ").trim().slice(0, 80));
+      // deno-lint-ignore no-explicit-any
+      const rows = (r: unknown[]) => Promise.resolve({ rows: r as any[] });
+      if (/credibility_before_after_digest\(\) AS digest/.test(sql)) return rows([{ digest: D, model: M }]);
+      if (/FROM public\.credibility_trigger_state t/.test(sql)) {
+        return rows(applied ? [{ id: "c1", applied_at: "2026-10-18 10:00:00+00", applied_claims: 4 }] : []);
+      }
+      if (/credibility_record_confirmation/.test(sql)) return rows([{}]);
+      if (/credibility_apply_d15_trigger/.test(sql)) { applied = true; return rows([{ n: 4 }]); }
+      return Promise.reject(new Error(`unexpected SQL: ${sql}`));
+    },
+  };
+  const first = await runGate(stub, line, "findings.md", true);
+  assertEquals(first.code, 0);
+  assert(first.out.some((l) => /applied: the trigger now uses/.test(l)), first.out.join("\n"));
+  const n = calls.length;
+  const second = await runGate(stub, line, "findings.md", true);
+  assertEquals(second.code, 0);
+  assert(second.out.some((l) => /already applied: confirmation c1 .*nothing recorded, nothing re-scored/.test(l)), second.out.join("\n"));
+  const after = calls.slice(n);
+  assert(!after.some((c) => /credibility_record_confirmation|credibility_apply_d15_trigger/.test(c)), `the second run wrote: ${after.join(" | ")}`);
+  const stale = await runGate(stub, line.replace(D, "f".repeat(32)), "findings.md", true);
+  assertEquals(stale.code, 3);
+});
