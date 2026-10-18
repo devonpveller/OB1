@@ -4,9 +4,13 @@
 //   capture   <base-url> <out.json>        note-refs + export (txt, wrap=none) for every note in
 //                                         $NOTES (comma-separated vault paths), raw bodies
 //   compare   <pre.json> <post.json>      the post-change capture against the pre-change one:
-//                                         note-refs bodies byte-equal, export bodies byte-equal,
-//                                         and the References sections byte-equal; exit 1 on any
-//                                         difference (the per-note verdicts are printed)
+//                                         note-refs bodies byte-equal; exit 1 on any difference
+//                                         (the per-note verdicts are printed). The export is
+//                                         captured but no longer compared: research-workbench P6a
+//                                         (rw-p6a-resolve) replaced its rendering with citeproc
+//                                         over the same holder numbers, so the text differs by
+//                                         design; references_test.ts / references_integration_test.ts
+//                                         compare the NUMBERS, run-export-tests.ps1 the export.
 //   diffcheck <base-url> <holder-ref> <out.json>
 //                                         POST diff-check {holder} $RUNS times (after one warm-up)
 //                                         and record every request and response byte: the network
@@ -64,9 +68,6 @@ if (mode === "capture") {
     const checks: [string, boolean][] = [
       ["note-refs status", p.note_refs.status === q.note_refs.status],
       ["note-refs body", p.note_refs.body === q.note_refs.body],
-      ["export status", p.export_txt.status === q.export_txt.status],
-      ["References section", referencesSection(p.export_txt.body) === referencesSection(q.export_txt.body)],
-      ["export body", p.export_txt.body === q.export_txt.body],
     ];
     const failed = checks.filter(([, ok]) => !ok).map(([n]) => n);
     const sec = referencesSection(p.export_txt.body);

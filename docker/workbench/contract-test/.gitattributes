@@ -2,3 +2,4 @@
 # would make a frontmatter block unreadable to the legacy reader and change what the test proves.
 references-vault/** text eol=lf
 references-vault-refused/** text eol=lf
+export-vault/** text eol=lf

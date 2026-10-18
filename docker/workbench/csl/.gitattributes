@@ -1,0 +1,2 @@
+# The CSL styles are upstream files used UNMODIFIED (CC BY-SA 3.0): never convert line endings.
+*.csl -text

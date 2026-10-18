@@ -10,7 +10,8 @@
 // a28e9db), because P2a's acceptance is that a migrated note lists the same references and
 // exports the same numbered References section as before. The migration materialises both
 // readings into reference_holders (seq = the note-refs order, number = the export number); the
-// routes then read the table, and these grammars only reconcile it with the file.
+// routes then read the table, and these grammars only reconcile it with the file. The export's
+// rendering moved to src/export/ (P6a): citeproc over the holder numbers, a CSL style chosen.
 
 // Unanchored, as both legacy readers used it.
 export const UUID_LOOSE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
@@ -112,27 +113,6 @@ export function planLegacyHolders(content: string, added: string[]): HolderPlan 
   for (const u of cited) push(u, "cited");
   for (const u of numbered) push(u, "cited");
   return { holders: out, unstorable };
-}
-
-// ── export rendering (verbatim from routes/export.ts applyCitations, steps 3-5) ────────────
-// `numberOf` maps the id as written to its citation number; `lines` is the References list,
-// already numbered. Non-source wikilinks degrade to their alias text / basename.
-export function renderCitations(md: string, numberOf: Map<string, number>, lines: string[]): string {
-  let out = md.replace(new RegExp(EXPORT_LINK_RE.source, "g"), (_full, _target, uuid, alias) => {
-    const n = numberOf.get(uuid);
-    const label = (alias || "").trim();
-    return label ? `${label} [${n}]` : `[${n}]`;
-  });
-  out = out
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
-  if (lines.length) out += "\n\n## References\n\n" + lines.join("\n\n");
-  return out;
-}
-
-export function referenceLine(n: number, title: string | null, url: string | null): string {
-  const t = (title || "Untitled source").replace(/\n/g, " ");
-  return `[${n}] ${t}${url ? `. <${url}>` : "."}`;
 }
 
 // ── whole-source anchors ─────────────────────────────────────────────────────────────────

@@ -151,6 +151,10 @@ services:
       # the live DB gets it by hand (psql -f), then the workbench's migrate-references.ts migrates
       # the legacy notes. Revert: revert-references.sql (before P0's revert).
       - ./init-references.sql:/docker-entrypoint-initdb.d/240-init-references.sql:ro # research-workbench P2a
+      # research-workbench P6a (rw-p6a-resolve): the export's registries (formats, CSL styles,
+      # identifier kinds) and the resolution cache on the reference record. Fresh-volume only; the
+      # live DB gets it by hand (psql -f). Revert: revert-export.sql (before P2a's revert).
+      - ./init-export.sql:/docker-entrypoint-initdb.d/250-init-export.sql:ro # research-workbench P6a
     networks:
       - obnet
     restart: unless-stopped
@@ -1056,6 +1060,18 @@ services:
       WIKI_GIT_DIR: /wiki
       WIKI_OUT_DIR: /wiki/content
       WIKI_ASSETS_DIR: /wiki/assets
+      # research-workbench P6a: the export's reference resolver (src/export/resolver.ts) - canonical
+      # metadata by persistent identifier from the KEYED OpenAlex API, Crossref's polite pool as the
+      # fallback. SHIPPED INERT: with both values blank there is no resolver, and exporting a
+      # document whose references carry an identifier with no cached metadata FAILS, naming them
+      # (it never renders them as text). The same two .env names as openbrain-research's P3a
+      # resolver: one key and one mailto for the stack. A request without the key (OpenAlex) or
+      # the mailto (Crossref) is refused before it leaves.
+      OPENALEX_API_KEY: ${RESEARCH_OPENALEX_API_KEY:-}
+      CROSSREF_MAILTO: ${RESEARCH_SCHOLARLY_MAILTO:-}
+      # Every resolver request goes out through the search plane's Mullvad proxy, FAIL-CLOSED:
+      # blank, or a client that cannot be built, refuses the request - there is no direct mode.
+      FETCH_PROXY_URL: ${WORKBENCH_FETCH_PROXY_URL:-http://vpn:8888}
     volumes:
       # rw: the workbench is the asset writer and the notes/Changes-log writer.
       - openbrain-wiki-data:/wiki
@@ -1075,6 +1091,7 @@ services:
       - obnet
       - llm-net
       - app-net
+      - search-gw-net   # reach the `vpn` proxy (ai-stack_default) for the export's resolver (P6a)
     healthcheck:
       test: ["CMD", "deno", "eval", "const r=await fetch('http://localhost:8000/health');Deno.exit(r.ok?0:1)"]
       interval: 30s

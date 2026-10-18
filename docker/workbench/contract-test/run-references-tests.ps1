@@ -24,8 +24,8 @@
 #        c. SQL: every legacy-note reference has provenance user and its pinned revision equal to
 #           its source's current revision; none lacks a quote selector
 #        d. the :wt workbench answers the same requests: the post-change capture; compared with
-#           the pre-change one byte for byte (note-refs bodies, the References sections, the whole
-#           export) - a difference FAILS
+#           the pre-change one byte for byte (note-refs bodies) - a difference FAILS; the export is
+#           captured only (P6a replaced its rendering: run-export-tests.ps1 tests it)
 #        e. every one of the 200 sources gets a new revision; diffCheck over the 200-reference
 #           note, over HTTP, 5 runs: each under 200 ms, all out of date, and the recorded network
 #           log carries no chunk text
@@ -389,7 +389,9 @@ SELECT count(*),
   $o = Client @('compare', '/ev/capture-pre-change.json', '/ev/capture-post-change.json')
   Save 'compare-pre-post.log' $o
   Write-Host ($o -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
-  Check ($script:rc -eq 0) 'note-refs, References sections and whole exports: pre-change == post-change for every note'
+  # (P6a, rw-p6a-resolve: the export is captured, not compared - its rendering is citeproc now;
+  # the numbers are compared by the unit and integration tests, the export by run-export-tests.ps1)
+  Check ($script:rc -eq 0) 'note-refs: pre-change == post-change for every note'
 
   # e. diffCheck over the 200-reference note, after every one of its sources moved to revision 3
   $o = Psql $dbC "INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by) SELECT id, 3, content, title, 'fixture' FROM public.sources WHERE id::text LIKE 'f3000000-%'; SELECT count(*) FROM public.source_revisions WHERE revision = 3 AND source_id::text LIKE 'f3000000-%';"
