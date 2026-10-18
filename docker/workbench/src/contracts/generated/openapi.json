@@ -5172,9 +5172,9 @@
                     },
                     {
                       "at": "2026-10-17T12:00:00.000Z",
-                      "kind": "trail",
-                      "ref": "55555555-5555-4555-8555-555555555555",
-                      "summary": "erased"
+                      "kind": "source_revision",
+                      "ref": "f1000000-0000-4000-8000-000000000001@1",
+                      "summary": "revision 1 by original"
                     }
                   ]
                 },
@@ -8452,7 +8452,7 @@
                 "example": {
                   "notifications": [
                     {
-                      "id": "987c0018-2a8e-48da-8d71-01efeb0248fc",
+                      "id": "c88197be-b024-4aed-9841-d2a3a7bad610",
                       "class": "informational",
                       "subject": "a new idea has been added",
                       "slug": null,
@@ -8464,7 +8464,7 @@
                       "count": 1
                     },
                     {
-                      "id": "2d43f615-4b53-4352-92f4-a2df859ed6c2",
+                      "id": "f417be09-9691-4307-a0b1-3666bdfa090d",
                       "class": "informational",
                       "subject": "dossier delivered",
                       "slug": null,
@@ -8882,11 +8882,11 @@
                       "entries": 4
                     },
                     {
-                      "name": "claim_edge_types",
-                      "version": 1,
-                      "owner": "P0",
-                      "description": "claim_sources.edge_type (grounding chain, unchanged)",
-                      "entries": 4
+                      "name": "admission_trail_kinds",
+                      "version": 0,
+                      "owner": "P3a",
+                      "description": "D15 items 7-8: what the pre-ingestion stage recorded about a hit",
+                      "entries": 7
                     }
                   ]
                 },
