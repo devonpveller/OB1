@@ -578,8 +578,12 @@ bash "$E" psql "insert into wiki_pages(slug,page_class,title,body) values ('priv
 o="$(T 300 bash "$E" node /ob1/recipes/_shared/backfill-wiki-pages.mjs 2>&1)"; rc=$?; echo "$o" | grep -E "done:|EXCLUDES|FAILED|CANNOT"; echo "exit=$rc"
 ex="$(bash "$E" psql "select slug from wiki_pages where slug ~ '^(private|templates)/' or slug ~ '(^|/)[.]' order by 1" | tr '\n' ' ')"; echo "rows for excluded paths: [$ex] (want only the planted private/secret)"
 ln="$(bash "$E" psql "select links::text from wiki_pages where slug='notes/slug-names/sp ace'")"; echo "sp ace links: $ln"
-[ "$rc" = 0 ] && [ "$ex" = "private/secret " ] && echo "$ln" | grep -q '"content/tool/tool-fixture-db"' && echo "$ln" | grep -q '"notes/fixture-folder/nested-note"' \
-  && ! echo "$ln" | grep -qE '"(tool-fixture-db|nested-note)"' || { echo "x a raw link target, an excluded row, or a failed run"; c20_ok=0; }
+# basename links to pages that exist are resolved (fixture-note, nested-note); [[tool-fixture-db]] resolves only while
+# its entity page exists - the wiki-service's boot compile may have swept it, and then the repair pass leaves it raw too
+tf="$(bash "$E" cat content/tool/tool-fixture-db.md | head -1)"; [ "$tf" = "(absent)" ] && want_tool='"tool-fixture-db"' || want_tool='"content/tool/tool-fixture-db"'
+echo "content/tool/tool-fixture-db.md: $([ "$tf" = "(absent)" ] && echo absent || echo present) -> want $want_tool"
+[ "$rc" = 0 ] && [ "$ex" = "private/secret " ] && echo "$ln" | grep -q '"notes/fixture-note"' && echo "$ln" | grep -q '"notes/fixture-folder/nested-note"' \
+  && echo "$ln" | grep -qF "$want_tool" && ! echo "$ln" | grep -qE '"(fixture-note|nested-note)"' || { echo "x a raw link target, an excluded row, or a failed run"; c20_ok=0; }
 b1="$(bash "$E" psql "select slug||' '||links::text from wiki_pages where page_class='note' order by slug")"
 bash "$E" psql "delete from wiki_pages where page_class='note'" >/dev/null
 r="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki --repair 2>&1)"; echo "$r" | grep -E "repair pass" | cut -c1-200
