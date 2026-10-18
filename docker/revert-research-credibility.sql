@@ -30,6 +30,7 @@ DROP FUNCTION IF EXISTS public.credibility_trigger_model();
 DROP FUNCTION IF EXISTS public.claim_confidence_d15(UUID);
 DROP FUNCTION IF EXISTS public.claim_kind_of(UUID);
 DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT);
+DROP FUNCTION IF EXISTS public.source_rolling_total(UUID, TEXT, JSONB);
 DROP FUNCTION IF EXISTS public.source_credibility(UUID);
 DROP FUNCTION IF EXISTS public.credibility_domain_class(TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.credibility_fallback_kind();

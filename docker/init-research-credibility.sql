@@ -359,7 +359,11 @@ $$;
 -- The per-reference rolling total for one claim kind: family score (+ primary bonus) x the
 -- weight row, plus every corroboration this source RECEIVED (strong from papers it links,
 -- weak from posts that link it), capped at 1. Suppressed givers lend nothing (D5 stage 1).
-CREATE OR REPLACE FUNCTION public.source_rolling_total(p_source_id UUID, p_kind TEXT)
+-- p_scope is a metadata filter (NULL = unconstrained): under it only givers whose metadata
+-- contains it lend, so a scoped caller's total says nothing about out-of-scope sources
+-- (the cloud door's forced filter, rw-p0-contract2 attempt 2 N2, applied to D15). The two-argument
+-- form is the unscoped one; there is one implementation.
+CREATE OR REPLACE FUNCTION public.source_rolling_total(p_source_id UUID, p_kind TEXT, p_scope JSONB)
 RETURNS REAL
 LANGUAGE plpgsql STABLE
 AS $$
@@ -372,10 +376,16 @@ BEGIN
     SELECT COALESCE(sum(sc.amount), 0) INTO v_in
       FROM public.source_corroborations sc
       JOIN public.sources g ON g.id = sc.from_source_id AND g.retraction_committed_at IS NULL
+           AND (p_scope IS NULL OR g.metadata @> p_scope)
      WHERE sc.to_source_id = p_source_id;
     RETURN LEAST(1.0, v_base + v_in);
 END;
 $$;
+
+CREATE OR REPLACE FUNCTION public.source_rolling_total(p_source_id UUID, p_kind TEXT)
+RETURNS REAL
+LANGUAGE sql STABLE
+AS $$ SELECT public.source_rolling_total(p_source_id, p_kind, NULL::jsonb) $$;
 
 CREATE OR REPLACE FUNCTION public.claim_kind_of(p_claim_id UUID)
 RETURNS TABLE (kind TEXT, basis TEXT)

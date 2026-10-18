@@ -658,10 +658,22 @@ t("under the metadata filter nested collections are scoped: claims' sources, qua
   assertEquals((await call("GET", `/claims?source_id=${sOut}&metadata_filter=${f}`)).json.count, 0);
   const all = await call("GET", `/claims?q=nested`);
   assertEquals(all.json.claims.find((c: any) => c.id === cIn).sources.length, 2);
-  const grounded = async (q: string) =>
-    (await call("GET", `/sources/${sIn}/quality${q}`)).json.factors.find((x: any) => x.name === "grounded_claims").value;
-  assertEquals(await grounded(`?metadata_filter=${f}`), 1);
-  assertEquals(await grounded(""), 2);
+  // quality (the D15 record since P3a): under the filter an out-of-scope source is neither named
+  // (co-grounding, corroboration) nor counted in the rolling total; unfiltered it is both.
+  await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+             VALUES ($1, $2, 'weak', 0.1, 'nested corroboration', 'general_theory', 'supports', 'd15 weights v1 paper p1')`, [sOut, sIn]);
+  const qf = (await call("GET", `/sources/${sIn}/quality?metadata_filter=${f}`)).json;
+  const qu = (await call("GET", `/sources/${sIn}/quality`)).json;
+  assert(S.Quality.safeParse(qf).success, JSON.stringify(qf));
+  const named = (q: any) => [...q.corroborated_by, ...q.contradicted_by].map((x: any) => x.source_id);
+  assert(!named(qf).includes(sOut), `scoped quality names the out-of-scope source: ${JSON.stringify(qf)}`);
+  assert(named(qu).includes(sOut), "the control: unfiltered quality names it");
+  const received = (q: any) => q.factors.filter((x: any) => x.name === "corroboration_received").length;
+  assertEquals(received(qf), 0);
+  assertEquals(received(qu), 1);
+  assert(qu.score.value < 1, `precondition: the unscoped total is not capped (${qu.score.value})`);
+  assert(Math.abs(qu.score.value - qf.score.value - 0.1) < 1e-4, `scoped ${qf.score.value} vs unscoped ${qu.score.value}`);
+  await sql(`DELETE FROM public.source_corroborations WHERE to_source_id = $1`, [sIn]);
   for (const p of [`/sources/not-a-uuid/dependence`, `/references/not-a-uuid`, `/tombstones/not-a-uuid?metadata_filter=${f}`]) {
     const r = await call("GET", p);
     assertEquals(r.status, 400, p);

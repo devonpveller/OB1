@@ -303,8 +303,18 @@ Deno.test({
       await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES
                    ($1, $3, 'states'), ($1, $4, 'states'), ($2, $4, 'states'), ($5, $3, 'states'), ($5, $4, 'states')`,
         [X.claimCloud, X.claimCloud2, X.srcCloud, X.srcLocal, X.claimLocal]);
+      // the D15 record quality(srcCloud) reads (P3a, rw-p3a-entail integration): the out-of-scope
+      // source also CONTRADICTS the in-scope claim and corroborates srcCloud (0.1), an in-scope lead
+      // corroborates it (0.05), and one history row stores a total over both givers
+      await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $2, 'contradicts')`, [X.claimCloud, X.srcLocal]);
+      await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+                 VALUES ($1, $3, 'weak', 0.1, $4, 'general_theory', 'supports', 'd15 weights v1 paper p1'),
+                        ($2, $3, 'weak', 0.05, $5, 'general_theory', 'supports', 'd15 weights v1 paper p1')`,
+        [X.srcLocal, X.leadCloud, X.srcCloud, `${LOCAL} corroborated line`, `cloud corroborated line ${r8}`]);
+      await sql(`INSERT INTO public.source_credibility_history (source_id, family, claim_kind, score, total, model_version)
+                 VALUES ($1, 'general', 'general_theory', 0.33, 0.77, 'd15 weights v1 paper p1')`, [X.srcCloud]);
       // fixed confidences AFTER the edges (the claim_sources trigger re-scores on insert), so the
-      // quality means are known: in scope 0.9, unscoped (0.9 + 0.1) / 2
+      // stored confidences are known (P0 asserted a quality mean from them; D15 quality no longer reads them)
       await sql(`UPDATE public.claims SET confidence = CASE id WHEN $1 THEN 0.9 WHEN $2 THEN 0.5 ELSE 0.1 END
                   WHERE id = ANY($3::uuid[])`, [X.claimCloud, X.claimCloud2, [X.claimCloud, X.claimCloud2, X.claimLocal]]);
       // record kinds that carry no metadata
@@ -357,6 +367,8 @@ Deno.test({
       await sql(`DELETE FROM public.wiki_pages WHERE slug = $1`, [X.page]);
       await sql(`DELETE FROM public.claim_sources WHERE claim_id = ANY($1::uuid[])`, [[X.claimCloud, X.claimCloud2, X.claimLocal]]);
       await sql(`DELETE FROM public.claims WHERE id = ANY($1::uuid[])`, [[X.claimCloud, X.claimCloud2, X.claimLocal]]);
+      await sql(`DELETE FROM public.source_corroborations WHERE to_source_id = ANY($1::uuid[]) OR from_source_id = ANY($1::uuid[])`, [ids]);
+      await sql(`DELETE FROM public.source_credibility_history WHERE source_id = ANY($1::uuid[])`, [ids]);
       await sql(`DELETE FROM public.source_trail_events WHERE source_id = ANY($1::uuid[])`, [ids]);
       await sql(`DELETE FROM public.source_tombstones WHERE source_id = ANY($1::uuid[])`, [ids]);
       await sql(`DELETE FROM public.sources WHERE id = ANY($1::uuid[])`, [ids]);
@@ -377,6 +389,10 @@ Deno.test({
       }
       for (const r of await sql(`SELECT id::text, text FROM public.claims WHERE ${NOTC}`)) {
         addF(r.id, "claim id"); addF((r.text as string)?.slice(0, 40), "claim text");
+      }
+      for (const r of await sql(`SELECT sc.claim_text FROM public.source_corroborations sc JOIN public.sources g ON g.id = sc.from_source_id
+                                  WHERE NOT g.metadata @> '{"share":"cloud"}'::jsonb`)) {
+        addF((r.claim_text as string)?.slice(0, 40), "corroboration line of an out-of-scope giver");
       }
       for (const r of await sql(`SELECT id::text, title, url FROM public.held_sources`)) {
         addF(r.id, "held id"); addF(r.title, "held title"); addF(r.url, "held url");
@@ -442,8 +458,8 @@ Deno.test({
         assertEquals(leaks.length, 0, `leaking tools ${JSON.stringify(leakingTools)}\n${leaks.slice(0, 12).join("\n")}\n(${leaks.length} leaking calls)`);
       });
 
-      await t.step("the control: unfiltered, the detector sees out-of-scope rows through every tool but quality", () => {
-        for (const tn of cloudTools.filter((x) => x !== "contract_quality")) {
+      await t.step("the control: unfiltered, the detector sees out-of-scope rows through every tool (quality too, since D15 names sources)", () => {
+        for (const tn of cloudTools) {
           assert((controlByTool.get(tn) ?? 0) > 0, `${tn}: no unfiltered call hit a forbidden string, so the detector proves nothing`);
         }
       });
@@ -472,18 +488,40 @@ Deno.test({
         // the control sees the out-of-scope grounding
         const u = get("contract_claims", {}, true).json;
         const uOne = (u.claims as any[]).find((c) => c.id === X.claimCloud);
-        assertEquals(uOne.sources.map((s: any) => s.source_id).sort(), [X.srcCloud, X.srcLocal].sort());
+        // (srcLocal also contradicts it since the P3a integration seeds the D15 quality case)
+        assertEquals(uOne.sources.map((s: any) => `${s.source_id} ${s.edge_type}`).sort(),
+          [`${X.srcCloud} states`, `${X.srcLocal} states`, `${X.srcLocal} contradicts`].sort());
         assertEquals(uOne.thread_id, X.thread);
       });
 
-      await t.step("quality aggregates only in-scope claims (N2)", () => {
+      await t.step("quality (D15) names and totals only in-scope sources over in-scope claims (N2 applied to P3a)", async () => {
         const f = get("contract_quality", { id: "$srcCloud" }).json;
         const u = get("contract_quality", { id: "$srcCloud" }, true).json;
-        const factor = (q: any, n: string) => q.factors.find((x: any) => x.name === n).value;
-        assertEquals(factor(f, "grounded_claims"), 1, JSON.stringify(f));
-        assertEquals(factor(u, "grounded_claims"), 2, JSON.stringify(u));
-        assert(Math.abs(f.score.value - 0.9) < 1e-6, `scoped mean ${f.score.value}`);
-        assert(Math.abs(u.score.value - 0.5) < 1e-6, `unscoped mean ${u.score.value}`);
+        const ids = (l: any[]) => l.map((x) => x.source_id);
+        // named sources: in scope only, and only through in-scope claims
+        for (const s of [...ids(f.corroborated_by), ...ids(f.contradicted_by)]) {
+          assert(CLOUD_SOURCES.has(s), `scoped quality names ${s}: ${JSON.stringify(f)}`);
+        }
+        assertEquals(f.contradicted_by, [], JSON.stringify(f));
+        assertEquals(f.corroborated_by.map((x: any) => [x.source_id, x.amount]), [[X.leadCloud, 0.05]], JSON.stringify(f));
+        assert(ids(u.contradicted_by).includes(X.srcLocal), `the control names the contradicting source: ${JSON.stringify(u)}`);
+        assert(ids(u.corroborated_by).filter((s: string) => s === X.srcLocal).length === 2,
+          `the control names the out-of-scope giver and co-grounder: ${JSON.stringify(u.corroborated_by)}`);
+        assertEquals(f.factors.filter((x: any) => x.name === "corroboration_received").length, 1);
+        assertEquals(u.factors.filter((x: any) => x.name === "corroboration_received").length, 2);
+        assertEquals(f.factors.find((x: any) => x.name === "contradicting_sources").value, 0);
+        // the rolling total counts only in-scope givers (the SQL's scoped form)
+        const kind = f.claim_kind;
+        const [r] = await sql(`SELECT public.source_rolling_total($1::uuid, $2) AS u, public.source_rolling_total($1::uuid, $2, $3::jsonb) AS f`,
+          [X.srcCloud, kind, JSON.stringify(CLOUD)]);
+        const r4 = (x: unknown) => Math.round(Number(x) * 10_000) / 10_000;
+        assertEquals(f.score.value, r4(r.f));
+        assertEquals(u.score.value, r4(r.u));
+        assert(u.score.value < 1, `precondition: the unscoped total is not capped (${u.score.value})`);
+        assert(Math.abs(u.score.value - f.score.value - 0.1) < 1e-4, `scoped ${f.score.value} vs unscoped ${u.score.value}`);
+        // a stored total is a snapshot over every giver: null under the filter; the family score stays
+        assertEquals(f.history.map((h: any) => [h.score, h.total]), [[0.33, null]]);
+        assertEquals(u.history.map((h: any) => [h.score, h.total]), [[0.33, 0.77]]);
       });
 
       await t.step("reference of an in-scope suppressed source carries no metadata-less counts (N4)", () => {

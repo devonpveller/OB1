@@ -312,10 +312,12 @@ export async function diffCheck(db: Db, refs: { source_id: string; revision: num
 // model (init-research-credibility.sql: source_credibility / source_rolling_total), which reads
 // the research service's admission record (metadata.credibility) or, for a source stored before
 // P3a, derives the general family's domain-class score and says so.
-// Under a filter (the cloud door) every named row is scoped the way P0 scoped
+// Under a filter (the cloud door) every aggregate and every named row is scoped the way P0 scoped
 // the pre-D15 score (rw-p0-contract2 attempt 2, tester finding N2/N4): a source is named in
 // corroborated_by / contradicted_by only when it is itself in scope AND the claim that links it is
-// in scope.
+// in scope; the rolling total counts only corroborations received from in-scope givers
+// (source_rolling_total's scoped form); a history row's stored total (a snapshot over every giver,
+// in and out of scope) is null - its family score is the source's own and stays.
 interface CredRow { family: string | null; score: number | null; is_primary: boolean | null; basis: string | null; kind: string | null; total: number | null; model: string }
 interface QSourceRow { source_id: string; title: string; url: string | null; family: string | null; relation: string; amount: number | null; claim: string | null }
 
@@ -332,9 +334,9 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
   const [c] = await db.query<CredRow>(
     `WITH k AS (SELECT COALESCE($2::text, public.credibility_fallback_kind()) AS kind)
      SELECT sc.family, sc.score, sc.is_primary, sc.basis, k.kind,
-            public.source_rolling_total($1::uuid, k.kind) AS total, public.credibility_model_version() AS model
+            public.source_rolling_total($1::uuid, k.kind, $3::jsonb) AS total, public.credibility_model_version() AS model
        FROM k LEFT JOIN LATERAL public.source_credibility($1::uuid) sc ON TRUE`,
-    [id, typeof cred?.claim_kind === "string" ? cred.claim_kind : null],
+    [id, typeof cred?.claim_kind === "string" ? cred.claim_kind : null, mf],
   );
   const corroborated = await db.query<QSourceRow>(
     `SELECT g.id AS source_id, g.title, g.url, gc.family,
@@ -410,7 +412,7 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
     signals: ((cred?.signals ?? (s.metadata?.scholarly ? { scholarly: s.metadata.scholarly } : {})) as Record<string, unknown>),
     corroborated_by: corroborated.map(qSource),
     contradicted_by: contradicted.map(qSource),
-    history: history.map((h) => ({ score: r4(h.score), total: h.total === null ? null : r4(h.total), claim_kind: h.claim_kind, model_version: h.model_version, computed_at: new Date(h.computed_at).toISOString() })),
+    history: history.map((h) => ({ score: r4(h.score), total: h.total === null || mf ? null : r4(h.total), claim_kind: h.claim_kind, model_version: h.model_version, computed_at: new Date(h.computed_at).toISOString() })),
     factors: [
       { name: `${family}_family_score`, value: r4(c?.score ?? 0), reason: c?.basis ?? "no credibility record and no derivable signal" },
       ...reasons.map((r) => ({ name: "reason", value: 0, reason: r })),
