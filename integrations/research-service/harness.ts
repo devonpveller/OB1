@@ -17,7 +17,7 @@ import {
 } from "./contract.ts";
 import { applyVerdicts, type EntailmentRecord, judgeLines, type LineVerdict, type VerdictEffect } from "./entailment.ts";
 import {
-  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, filedLineCredibility, flushUnit, foldReceived,
+  classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, finalLineCredibility, flushUnit, foldReceived,
   type LineCredibility, loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord,
   weightFor,
 } from "./credibility.ts";
@@ -164,6 +164,45 @@ export interface Deps {
 }
 
 export interface QueryClient { queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }>; }
+
+/**
+ * THE STEPS AFTER THE JUDGE, in harden()'s order (attempt 5, tester finding A4-1): the verdicts
+ * rewrite the line tags (applyVerdicts), then numeric grounding re-tags a cited line whose figure
+ * its cited text does not hold as [UNCERTAIN] (applyNumericGrounding). runResearch's harden() calls
+ * this, and the credibility sweep calls the same function, so the order a test models is the order
+ * the pipeline runs. Index-safe: the line count and every [Source N] are preserved.
+ */
+export function hardenJudged(
+  raw: string,
+  verdicts: LineVerdict[],
+  effects: VerdictEffect[],
+  poolTexts: Array<string | null | undefined>,
+): { synthesis: string; record: EntailmentRecord; ungrounded: string[] } {
+  const applied = applyVerdicts(raw, verdicts, effects);
+  const g = applyNumericGrounding(applied.synthesis, poolTexts);
+  return { synthesis: g.ungrounded.length ? g.synthesis : applied.synthesis, record: applied.record, ungrounded: g.ungrounded };
+}
+
+/**
+ * The curator's copy of a hardened synthesis, LINE-ALIGNED (attempt 5, tester near-miss N2): a held
+ * source that did not fold is refinery-only (ingestion model item 1), so its citations leave the
+ * curator's copy, and a cited line grounded only in such sources does not reach the curator (null).
+ * Every other line is kept as it is. The curator is handed the non-null lines; the credibility of
+ * each judged line is computed from the same array (finalLineCredibility), so the footer and
+ * research_jobs.metrics.credibility score exactly what the curator files. `unfolded` = the pool's
+ * 1-based indices of the held sources that did not fold (empty = the lines unchanged).
+ */
+export function curatorCopyLines(hardened: string, unfolded: ReadonlySet<number>): Array<string | null> {
+  return String(hardened || "").split("\n").map((line) => {
+    if (!unfolded.size) return line;
+    if (!/^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]/i.test(line) || !/\[Sources?\b/i.test(line)) return line;
+    const stripped = line.replace(/\[Sources?\b[^\]]*\]/gi, (b) => {
+      const left = (b.match(/\d+/g) || []).map(Number).filter((n) => !unfolded.has(n));
+      return left.length ? `[Source ${left.join(", ")}]` : "";
+    }).trimEnd();
+    return /\[Sources?\b/i.test(stripped) ? stripped : null;
+  });
+}
 
 /**
  * Phase 1 / kp-contract — enforce a resolved contract at the deps boundary (the
@@ -1500,36 +1539,37 @@ export async function runResearch(
       return raw;
     },
   };
-  const entail = async (raw: string): Promise<string> => {
-    if (!raw.trim()) { verdicts = []; return raw; }
+  // attempt 5 (A4-1): entail() only JUDGES; harden() applies the verdicts and numeric grounding through
+  // hardenJudged (one function, the order the credibility sweep runs too) and keeps the result in
+  // lastHardened - the lines every judged line is scored from.
+  const entail = async (raw: string): Promise<void> => {
+    if (!raw.trim()) { verdicts = []; return; }
     await progress("entail", "judging every cited line against the text it cites");
     verdicts = await judgeLines(judgeDeps, raw, {
       question: query, pool: pool.map((p) => ({ title: p.title, content: p.content })),
       verdicts: verdictEffects, concurrency: ENTAIL_CONCURRENCY,
     });
-    const applied = applyVerdicts(raw, verdicts, verdictEffects);
-    entailment = applied.record;
-    await progress("entail",
-      `entailment: ${applied.record.demoted} of ${applied.record.lines} cited line(s) demoted ` +
-      `(${Object.entries(applied.record.by_verdict).map(([k, n]) => `${n} ${k}`).join(", ")})` +
-      (applied.record.no_verdict ? `; ${applied.record.no_verdict} without a judge verdict, failed closed` : ""),
-      { entail_lines: applied.record.lines, entail_demoted: applied.record.demoted, entail_no_verdict: applied.record.no_verdict });
-    return applied.synthesis;
   };
 
   const harden = async (raw0: string): Promise<{ synthesis: string; cited: Page[] }> => {
-    const raw = await entail(raw0);
-    const g = applyNumericGrounding(raw, pool.map((p) => p.content));
-    ungroundedNumbers = g.ungrounded;
-    let out = raw;
-    if (g.ungrounded.length) {
-      out = g.synthesis;
-      await progress("synthesize",
-        `${g.ungrounded.length} line(s) asserted a figure no cited source holds - downgraded to [UNCERTAIN]`,
-        { ungrounded_numbers: g.ungrounded.length });
+    await entail(raw0);
+    const h = hardenJudged(raw0, verdicts, verdictEffects, pool.map((p) => p.content));
+    if (raw0.trim()) {
+      entailment = h.record;
+      await progress("entail",
+        `entailment: ${h.record.demoted} of ${h.record.lines} cited line(s) demoted ` +
+        `(${Object.entries(h.record.by_verdict).map(([k, n]) => `${n} ${k}`).join(", ")})` +
+        (h.record.no_verdict ? `; ${h.record.no_verdict} without a judge verdict, failed closed` : ""),
+        { entail_lines: h.record.lines, entail_demoted: h.record.demoted, entail_no_verdict: h.record.no_verdict });
     }
-    lastHardened = out;
-    return buildCitedAndRenumber(out, pool);
+    ungroundedNumbers = h.ungrounded;
+    if (h.ungrounded.length) {
+      await progress("synthesize",
+        `${h.ungrounded.length} line(s) asserted a figure no cited source holds - downgraded to [UNCERTAIN]`,
+        { ungrounded_numbers: h.ungrounded.length });
+    }
+    lastHardened = h.synthesis;
+    return buildCitedAndRenumber(h.synthesis, pool);
   };
   let { synthesis, cited } = await harden(rawSynthesis);
 
@@ -1684,20 +1724,6 @@ export async function runResearch(
       t.kind = "lead_dropped";
     }
   }
-  // THE FOLD RULE (attempt 2): on a line, a cited source's total leaves out the corroboration it
-  // received from the line's other cited sources - each of those counts once, through claim_per
-  // (claim_confidence_d15's p_exclude is the stored twin).
-  // Attempt 4 (tester finding F2): each line is scored through the edges the curator WILL file for
-  // it - its tag after the verdict, the one tag -> edge rule (claim-edges.ts), the registry's edge
-  // factors and the edge weights (filedLineCredibility) - so a line's total, the footer and
-  // research_jobs.metrics.credibility equal claim_confidence_d15 of the claim filed from the line.
-  const lineCred: LineCredibility[] = verdicts.map((v) => {
-    const cited = v.cites.filter((n) => pool[n - 1]);
-    const coCited = new Set(cited.map((n) => pool[n - 1].url));
-    return filedLineCredibility(model, claimKind.kind, v,
-      (n) => (pool[n - 1] ? foldReceived(finals[n - 1].total, receivedBy(n - 1), coCited) : null));
-  });
-  const reportCred: ReportCredibility = reportCredibility(model, claimKind.kind, lineCred);
 
   // The fold: a held source becomes active only when it clears its floor AND a line it is cited
   // on is SUPPORTED; corroboration is then computed both ways with the sources it was co-cited
@@ -1786,6 +1812,40 @@ export async function runResearch(
       }
     }
   }
+
+  // The curator files DATABASE knowledge. A held source that did not fold is refinery-only
+  // (ingestion model item 1): its citations leave the curator's copy, and a line grounded only
+  // in such sources does not reach the curator at all. The delivered report keeps them.
+  const unfolded = new Set(pool.map((p, i) => (heldByUrl.has(p.url) && !foldedIdx.has(i) ? i + 1 : 0)).filter(Boolean));
+  const curatorLines = curatorCopyLines(lastHardened, unfolded);
+  let curatorSynthesis = synthesis;
+  let curatorCited = cited;
+  if (unfolded.size) {
+    ({ synthesis: curatorSynthesis, cited: curatorCited } =
+      buildCitedAndRenumber(curatorLines.filter((l): l is string => l !== null).join("\n"), pool));
+  }
+
+  // THE FOLD RULE (attempt 2): on a line, a cited source's total leaves out the corroboration it
+  // received from the line's other cited sources - each of those counts once, through claim_per
+  // (claim_confidence_d15's p_exclude is the stored twin).
+  // Attempt 4 (tester finding F2): each line is scored through the edges the curator WILL file for
+  // it - the one tag -> edge rule (claim-edges.ts), the registry's edge factors and the edge weights.
+  // Attempt 5 (tester finding A4-1, near-miss N2): from the line the curator is HANDED - after the
+  // verdicts, numeric grounding and the held-source strip (curatorLines), with its own final tag and
+  // citations (finalLineCredibility) - and after the fold, so the corroboration a folded source
+  // exchanges is in its total as recordCorroboration files it. A line the curator does not file
+  // totals 0, below the floor. So a line's total, the footer and research_jobs.metrics.credibility
+  // equal claim_confidence_d15 of the claim filed from the line.
+  const lineCred: LineCredibility[] = finalLineCredibility(model, claimKind.kind, verdicts, curatorLines,
+    (n, grounders) => {
+      if (!pool[n - 1]) return null;
+      const coCited = new Set(grounders.filter((k) => pool[k - 1]).map((k) => pool[k - 1].url));
+      // only the corroboration that is FILED: an unfolded held source is never a stored source, so
+      // recordCorroboration files nothing from it and claim_confidence_d15 never sees its amount
+      const filedIn = receivedBy(n - 1).filter((r) => { const j = pool.findIndex((p) => p.url === r.from); return !unfolded.has(j + 1); });
+      return foldReceived(finals[n - 1].total, filedIn, coCited);
+    });
+  const reportCred: ReportCredibility = reportCredibility(model, claimKind.kind, lineCred);
 
   const answeredNeeds = needsStatus.filter((n) => n.status === "answered").length;
   const partialNeeds = needsStatus.filter((n) => n.status === "partial").length;
@@ -1912,25 +1972,6 @@ export async function runResearch(
   if (entailRec) {
     const { audit: _audit, ...counts } = entailRec;
     metrics.entailment = counts;
-  }
-
-  // The curator files DATABASE knowledge. A held source that did not fold is refinery-only
-  // (ingestion model item 1): its citations leave the curator's copy, and a line grounded only
-  // in such sources does not reach the curator at all. The delivered report keeps them.
-  const unfolded = new Set(pool.map((p, i) => (heldByUrl.has(p.url) && !foldedIdx.has(i) ? i + 1 : 0)).filter(Boolean));
-  let curatorSynthesis = synthesis;
-  let curatorCited = cited;
-  if (unfolded.size) {
-    const keptLines: string[] = [];
-    for (const line of lastHardened.split("\n")) {
-      if (!/^\s*\[(SOURCED|INFERRED|UNCERTAIN)\]/i.test(line) || !/\[Sources?\b/i.test(line)) { keptLines.push(line); continue; }
-      const stripped = line.replace(/\[Sources?\b[^\]]*\]/gi, (b) => {
-        const left = (b.match(/\d+/g) || []).map(Number).filter((n) => !unfolded.has(n));
-        return left.length ? `[Source ${left.join(", ")}]` : "";
-      }).trimEnd();
-      if (/\[Sources?\b/i.test(stripped)) keptLines.push(stripped);
-    }
-    ({ synthesis: curatorSynthesis, cited: curatorCited } = buildCitedAndRenumber(keptLines.join("\n"), pool));
   }
 
   await progress("persist", dryRun ? "dry-run: skipping curator write" : "delegating placement + grounding to the curator");

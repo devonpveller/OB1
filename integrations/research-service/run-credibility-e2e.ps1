@@ -12,7 +12,8 @@
 #   4. proves the image gate is real: the same context plus one failing test must NOT build
 #   5. database A (chain only): runs credibility.e2e.test.ts, (attempt 3) credibility-twins.e2e.test.ts and
 #      (attempt 4) credibility-attempt4.e2e.test.ts - the last files claims through the research curator's
-#      own writeClaims, so the curator directory is bind-mounted read-only at /curator
+#      own writeClaims, so the curator directory is bind-mounted read-only at /curator; (attempt 5)
+#      credibility-attempt5.e2e.test.ts - the REAL runResearch / harden() order -> writeClaims (Cases 41-44)
 #      - the SQL twin vs the TS model on the same rows - in the test image (the SQL twin of
 #      the model, the before/after view, the re-score gate, the fold's move)
 #   6. builds openbrain-workbench:wt-<id>; database B (chain + the P0 contract fixtures, the
@@ -31,7 +32,11 @@ param(
   [string]$Evidence = '',
   # attempt 2: the disposable network's subnet (empty = a /24 drawn from -SubnetBase)
   [string]$Subnet = '',
-  [string]$SubnetBase = '10.241'
+  [string]$SubnetBase = '10.241',
+  # attempt 5: the compose file the chain is derived from (empty = OB1/docker/docker-compose.yml), and
+  # -ChainOnly = run step [1]'s chain checks alone (no docker), exit 0 when they pass
+  [string]$ComposeFile = '',
+  [switch]$ChainOnly
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -90,6 +95,33 @@ function New-PinnedNetwork([string]$name) {
   }
   return ''
 }
+# Step [1]'s chain: every `<file>.sql:/docker-entrypoint-initdb.d/<NNN-name>.sql` mount of the compose file.
+function Get-Chain {
+  $cf = if ($ComposeFile) { $ComposeFile } else { Join-Path $dockerDir 'docker-compose.yml' }
+  $compose = Get-Content -Raw $cf
+  $rx = [regex]'(\.{1,2}/[A-Za-z0-9_./-]+\.sql):/docker-entrypoint-initdb\.d/([0-9]{3}-[a-z0-9.-]+\.sql)'
+  return , @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
+}
+# attempt 5 (tester observation): initdb runs the mounted files in the order of their NAMES (the slot
+# number first), not in the order the compose file lists them - so the order check compares SLOTS: the
+# file initdb runs as 240-init-references.sql must sort before 245-init-research-credibility.sql
+# (ordinal, as initdb's sort), whichever compose line comes first. A compose that mounts the
+# credibility migration in another slot (235) fails the 'mounts 245' check, loudly.
+function Test-Chain($chain) {
+  Check ($chain.Count -ge 30) "staged $($chain.Count) migrations"
+  Check (@($chain | Where-Object { $_[1] -eq '245-init-research-credibility.sql' }).Count -eq 1) 'the chain mounts 245-init-research-credibility.sql'
+  $names = @($chain | ForEach-Object { $_[1] })
+  [Array]::Sort($names, [StringComparer]::Ordinal)
+  $iRef = [array]::IndexOf($names, '240-init-references.sql')
+  $iCred = [array]::IndexOf($names, '245-init-research-credibility.sql')
+  Check (($iRef -ge 0) -and ($iCred -gt $iRef)) "initdb runs 240-init-references.sql before 245-init-research-credibility.sql (by slot: run order $iRef < $iCred)"
+}
+if ($ChainOnly) {
+  Write-Host '[1] the initdb chain only (-ChainOnly)'
+  Test-Chain (Get-Chain)
+  Write-Host "== $(if ($script:fail) { "FAILED ($script:fail)" } else { 'ALL PASSED' })"
+  exit $script:fail
+}
 foreach ($t in @($rsTag, $rsTestTag, $wbTag, $negTag)) { if ($t -match ':local$') { throw 'refusing to build a :local tag' } }
 
 Write-Host "== rw-p3a-entail disposable run  owner=$Id  net=$net  evidence=$Evidence"
@@ -134,17 +166,10 @@ function Start-Db([string]$name, [bool]$fixtures) {
 
 try {
   Write-Host '[1] the initdb chain, derived from docker-compose.yml'
-  $compose = Get-Content -Raw (Join-Path $dockerDir 'docker-compose.yml')
-  $rx = [regex]'(\.{1,2}/[A-Za-z0-9_./-]+\.sql):/docker-entrypoint-initdb\.d/([0-9]{3}-[a-z0-9.-]+\.sql)'
   New-Item -ItemType Directory -Force $stage | Out-Null
-  $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
+  $chain = Get-Chain
   foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
-  Check ($chain.Count -ge 30) "staged $($chain.Count) migrations"
-  Check (@($chain | Where-Object { $_[1] -eq '245-init-research-credibility.sql' }).Count -eq 1) 'the chain mounts 245-init-research-credibility.sql'
-  # integration 2026-10-18: P2a's references (240) run before the credibility migration (245)
-  $iRef = [array]::IndexOf(@($chain | ForEach-Object { $_[1] }), '240-init-references.sql')
-  $iCred = [array]::IndexOf(@($chain | ForEach-Object { $_[1] }), '245-init-research-credibility.sql')
-  Check (($iRef -ge 0) -and ($iCred -gt $iRef)) 'the chain mounts 240-init-references.sql before 245-init-research-credibility.sql'
+  Test-Chain $chain
   $null = Dk image inspect $PgImage
   if ($script:rc -ne 0) { Fail "$PgImage is not on the host"; throw 'pg image' }
 
@@ -189,7 +214,7 @@ try {
   Check ($negRc -ne 0 -and $o -match 'gate negative control') "a failing test fails the image build (rc=$negRc)"
   if ($negRc -eq 0) { $made.images += $negTag }
 
-  Write-Host '[5] database A + credibility.e2e.test.ts + credibility-twins.e2e.test.ts + credibility-attempt4.e2e.test.ts (SQL twin, twins on one table, the filed-line sweep, before/after, gate, fold)'
+  Write-Host '[5] database A + credibility.e2e.test.ts + credibility-twins.e2e.test.ts + credibility-attempt4.e2e.test.ts + credibility-attempt5.e2e.test.ts (SQL twin, twins on one table, the filed-line sweep, before/after, gate, fold)'
   # attempt 4: the line-tag -> edge rule has one source (research-curator/claim-edges.ts); this service's copy must be identical
   $curatorDir = Join-Path (Split-Path -Parent $rs) 'research-curator'
   $edgesA = ([System.IO.File]::ReadAllText((Join-Path $curatorDir 'claim-edges.ts'))) -replace "`r`n", "`n"
@@ -198,7 +223,7 @@ try {
   if (-not (Start-Db $dbA $false)) { throw 'db A' }
   $o = Dk run --rm --label $label --network $net -e "CRED_E2E_DB_HOST=$dbA" -e "CRED_E2E_DB_PASSWORD=$pw" `
     --mount "type=bind,src=$curatorDir,dst=/curator,readonly" -e CURATOR_DIR=/curator `
-    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts
+    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts credibility-attempt5.e2e.test.ts
   Save 'credibility-e2e.log' $o
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "credibility e2e: $($sum.Value)"

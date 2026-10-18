@@ -869,6 +869,58 @@ export function filedLineCredibility(
   };
 }
 
+// attempt 5 (tester finding A4-1): the tag and the citations of ONE line of the synthesis the
+// curator is handed - the tag at the line's start, and every number in every [Source ...] bracket,
+// in order, de-duplicated (the curator's parseSourceNumbers rule; `parseInt` as it does).
+const FILED_LINE_TAG_RE = /^\s*\[(SOURCED|INFERRED|UNCERTAIN|GAP)\]/i;
+const FILED_LINE_CITE_RE = /\[Sources?\b[^\]]*\]/gi;
+export function filedLineOf(line: string | null | undefined): { tag: string; cites: number[] } {
+  const s = String(line ?? "");
+  const m = s.match(FILED_LINE_TAG_RE);
+  const cites: number[] = [];
+  for (const b of s.match(FILED_LINE_CITE_RE) || []) {
+    for (const d of b.match(/\d+/g) || []) {
+      const n = parseInt(d, 10);
+      if (n > 0 && !cites.includes(n)) cites.push(n);
+    }
+  }
+  return { tag: m ? m[1].toUpperCase() : "", cites };
+}
+
+/**
+ * THE LINE IS SCORED AS IT IS FILED (attempt 5, tester finding A4-1). Attempt 4 scored each line
+ * from its entailment verdict - the tag the line had when it was JUDGED. harness.ts harden() then
+ * runs numeric grounding, which re-tags a [SOURCED] / [INFERRED] line whose figure its cited text
+ * does not hold as [UNCERTAIN], and the refinery path strips unfolded held sources from the
+ * curator's copy (dropping a line grounded only in them). So the footer and
+ * research_jobs.metrics.credibility scored a line the curator never filed.
+ *
+ * Here every judged line is scored from `finalLines[v.line]` - the line of the synthesis the
+ * curator is handed, AFTER every step that changes a tag or a citation set (null = the line does
+ * not reach the curator) - with its own tag and citations (filedLineOf), through
+ * filedLineCredibility. The verdict's tag effect is already in that tag (applyVerdicts wrote it,
+ * and tagAfterEffect never raises a tag, so applying it again changes nothing). A line that is not
+ * filed - [GAP], no citation left, dropped from the curator's copy - totals 0 and is below the
+ * floor, so the footer mean and the below-floor count are over every judged line, each scored as
+ * the claim filed from it (0 for none). `sourceTotal(n, grounders)` is the rolling total [Source n]
+ * brings to the line, `grounders` being the line's final citations (the sources whose corroboration
+ * counts once, through claim_per - claim_confidence_d15's p_exclude), or null when n names no
+ * source in the pool.
+ */
+export function finalLineCredibility(
+  m: CredibilityModel,
+  kind: string,
+  verdicts: ReadonlyArray<{ line: number; verdict: string }>,
+  finalLines: ReadonlyArray<string | null | undefined>,
+  sourceTotal: (n: number, grounders: number[]) => number | null,
+): FiledLine[] {
+  return verdicts.map((v) => {
+    const f = filedLineOf(finalLines[v.line]);
+    return filedLineCredibility(m, kind, { line: v.line, tag: f.tag, cites: f.cites, verdict: v.verdict },
+      (n) => sourceTotal(n, f.cites));
+  });
+}
+
 export interface ReportCredibility {
   value: number | null;
   lines: number;

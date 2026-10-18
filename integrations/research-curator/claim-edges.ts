@@ -57,13 +57,27 @@ export function effectiveTag(tag: EpistemicTag, nums: number[]): EpistemicTag {
  * [1e-9, 1], judged on the REAL (float4) the database stores it as - claim_sources.weight is REAL, so
  * Math.fround(weight) is the number both credibility twins read. NaN, Infinity, 5 and -1 are refused.
  * The SQL twin's CHECK claim_sources_weight_credibility applies the same rule to the stored value.
+ * The double -> REAL step is the database's own cast of the double the writer sends (LINK_EDGE_SQL),
+ * never a parse of decimal text straight to REAL, so Math.fround IS the stored value (attempt 5, N1).
  */
 export const EDGE_WEIGHT_MIN_NONZERO = 1e-9;
 export function edgeWeightOk(weight: unknown): boolean {
   if (typeof weight !== "number" || !Number.isFinite(weight)) return false;
   const w = Math.fround(weight);
+  // attempt 5 (tester near-miss N1): the writer sends the weight as a DOUBLE and the database casts it
+  // to REAL (LINK_EDGE_SQL: $4::float8::real), which is Math.fround op for op - except that Postgres
+  // refuses a non-zero double that rounds to a zero REAL (float8 -> float4 underflow), so this does too
+  if (w === 0 && weight !== 0) return false;
   return w === 0 || (w >= EDGE_WEIGHT_MIN_NONZERO && w <= 1);
 }
+
+/**
+ * The ONE statement an edge is filed with (attempt 5, tester near-miss N1): the weight is bound as a
+ * double and cast to REAL by the database. Bound straight to the REAL parameter, Postgres parsed the
+ * client's decimal text into float4 directly, which differs from Math.fround(double) where the double
+ * is a float32 tie (0.30000002682209015, 1 + 2^-24) and refuses what fround flushes (5e-324).
+ */
+export const LINK_EDGE_SQL = "SELECT link_claim_to_source($1, $2, $3, $4::float8::real)";
 
 /** The edges a line with this (effective) tag and these citations is filed with. */
 export function edgesForTag(tag: EpistemicTag, nums: number[]): ParsedEdge[] {

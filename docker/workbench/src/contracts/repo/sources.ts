@@ -382,11 +382,14 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
   // text there): claim_kind is served only when it is a claim_kinds registry key, model_version only
   // when it is a D15 model label ("d15 weights v<N> paper <key>") naming a paper_score_versions row;
   // anything else is null. Retired rows count (the history is historical).
+  // attempt 5 (tester near-miss): the match is EXACT TEXT, never a numeric reading - the version is the
+  // canonical decimal credibility_model_version() prints (0, or no leading zero: "v0001" is not "v1"),
+  // and the paper key is compared as text.
   const history = await db.query<{ score: number; total: number | null; claim_kind: string | null; model_version: string | null; computed_at: string }>(
     `SELECT h.score::float AS score, h.total::float AS total,
             CASE WHEN EXISTS (SELECT 1 FROM public.contract_registry_entries e
                                WHERE e.registry = 'claim_kinds' AND e.key = h.claim_kind) THEN h.claim_kind END AS claim_kind,
-            CASE WHEN h.model_version ~ '^d15 weights v[0-9]{1,9} paper [a-z0-9][a-z0-9._-]*$'
+            CASE WHEN h.model_version ~ '^d15 weights v(0|[1-9][0-9]{0,8}) paper [a-z0-9][a-z0-9._-]*$'
                   AND EXISTS (SELECT 1 FROM public.contract_registry_entries e WHERE e.registry = 'paper_score_versions'
                                  AND e.key = substring(h.model_version from ' paper ([a-z0-9][a-z0-9._-]*)$'))
                  THEN h.model_version END AS model_version,

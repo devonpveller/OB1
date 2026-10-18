@@ -31,9 +31,9 @@
 // source the research service's credibility model reads too (its byte-identical copy), so the run's
 // line total is the total of the claim filed here. Re-exported for this module's callers and tests.
 import {
-  claimEdges, edgeWeightOk, type EdgeType, type EpistemicTag, isOmnibusCitation, OMNIBUS_CITATION_MAX, type ParsedEdge,
+  claimEdges, edgeWeightOk, type EdgeType, type EpistemicTag, isOmnibusCitation, LINK_EDGE_SQL, OMNIBUS_CITATION_MAX, type ParsedEdge,
 } from "./claim-edges.ts";
-export { claimEdges, edgeWeightOk, isOmnibusCitation, OMNIBUS_CITATION_MAX };
+export { claimEdges, edgeWeightOk, isOmnibusCitation, LINK_EDGE_SQL, OMNIBUS_CITATION_MAX };
 export type { EdgeType, EpistemicTag, ParsedEdge };
 
 export interface ParsedClaim {
@@ -496,10 +496,8 @@ export async function writeClaims(
       if (!edgeWeightOk(e.weight)) {
         throw new Error(`claim edge refused: weight ${String(e.weight)} is not 0 or in [1e-9, 1] (claim_sources.weight)`);
       }
-      await client.queryObject(
-        `SELECT link_claim_to_source($1, $2, $3, $4)`,
-        [claimId, e.sourceId, e.edgeType, e.weight],
-      );
+      // attempt 5 (N1): the shared statement - the weight bound as a double, cast to REAL by the database
+      await client.queryObject(LINK_EDGE_SQL, [claimId, e.sourceId, e.edgeType, e.weight]);
       res.edgesWritten++;
     }
   }
