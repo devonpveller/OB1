@@ -2,8 +2,9 @@
 // STATE-AWARE card. The card colour + description reflect the source's current
 // lifecycle state (active vs retracted), and the verbs enable/disable so the
 // available action is unambiguous: unlink-from-notebook (soft) · retract
-// (global, reversible, the default — a STAGED mutation) · purge (irreversible,
-// gated behind an explicit checkbox + confirm). Gravity counter (G11) at request
+// (global, reversible, the default — a STAGED mutation) · purge (the D5 suppress with a
+// required reason type, gated behind an explicit checkbox + prompt; reversible by Restore
+// until an erase - rw-p0b-purge-door). Gravity counter (G11) at request
 // time. Hydrates from the leaf frontmatter id (type=source).
 import { QuartzComponent, QuartzComponentConstructor, QuartzComponentProps } from "./types"
 
@@ -23,8 +24,8 @@ const SourceRetractor: QuartzComponent = ({ fileData, displayClass }: QuartzComp
         <button data-sr="restore" class="sr-alt">Restore</button>
       </div>
       <div class="sr-purge-row">
-        <label class="sr-purge-toggle"><input type="checkbox" data-sr-show-purge /> show purge — permanent suppression (record kept)</label>
-        <button data-sr="purge" class="sr-danger" hidden>Purge (irreversible)</button>
+        <label class="sr-purge-toggle"><input type="checkbox" data-sr-show-purge /> show purge — suppression with a reason (record kept)</label>
+        <button data-sr="purge" class="sr-danger" hidden>Purge</button>
       </div>
       <div class="sr-status" data-sr-status></div>
     </div>
@@ -46,12 +47,12 @@ document.addEventListener("nav", () => {
     const purgeBtn = el.querySelector('[data-sr="purge"]')
     let gravity = { notebooks: 0, pages: 0 }
 
-    const ACTIVE_HELP = "Sources are kept, never destroyed. <strong>Retract</strong> (the default) hides this source from all wiki generation but keeps the record — reversible until the next compile. <strong>Restore</strong> reverses it. <strong>Purge</strong> permanently hides it from all generation + search and can't be restored from here — but the record + embeddings are still KEPT (operator-recoverable, auditable). Rare; revealed behind the checkbox."
+    const ACTIVE_HELP = "Sources are kept, never destroyed. <strong>Retract</strong> (the default) hides this source from all wiki generation but keeps the record — reversible until the next compile. <strong>Restore</strong> reverses it. <strong>Purge</strong> suppresses it with a recorded reason type: hidden from all generation + search, its claims re-scored, the record + embeddings KEPT, and reversible with <strong>Restore</strong> until it is erased. Rare; revealed behind the checkbox."
     const STATES = {
       active:    { pill: "Active",              cls: "",                 help: ACTIVE_HELP, retract: true,  restore: false },
       staged:    { pill: "Retracted (staged)",  cls: "sr-state-retracted", help: "<strong>⚠ This source is retracted (staged).</strong> It's hidden from wiki generation but still <strong>reversible</strong> — click <strong>Restore</strong> to bring it back before the next compile commits the retraction. The record is always kept.", retract: false, restore: true },
       committed: { pill: "Retracted",           cls: "sr-state-retracted", help: "<strong>⚠ This source is retracted.</strong> It's hidden from all wiki generation; the record is kept. Click <strong>Restore</strong> to bring it back.", retract: false, restore: true },
-      purged:    { pill: "Purged",               cls: "sr-state-retracted", help: "<strong>⛔ This source is purged.</strong> It's permanently hidden from all wiki generation + search. The record + embeddings are KEPT (operator-recoverable from the database, and auditable) — but it cannot be restored from here.", retract: false, restore: false },
+      purged:    { pill: "Purged",               cls: "sr-state-retracted", help: "<strong>⛔ This source was purged before purges became restorable.</strong> It's permanently hidden from all wiki generation + search. The record + embeddings are KEPT (operator-recoverable from the database, and auditable) — but it cannot be restored from here.", retract: false, restore: false },
     }
     const setState = (key) => {
       const s = STATES[key] || STATES.active
@@ -97,13 +98,21 @@ document.addEventListener("nav", () => {
       } catch (e) { status.textContent = "✗ restore error: " + (e && e.message ? e.message : e) }
     })
     purgeBtn.addEventListener("click", async () => {
-      if (!confirm("Purge permanently hides this source from ALL wiki generation + search and cannot be restored from here.\\n\\nThe record + embeddings are KEPT (operator-recoverable from the database, auditable). Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s). Proceed?")) return
+      // The reason type is required (a key of the erasure_reasons registry, read from the contract).
+      let keys = []
+      try {
+        const rr = await fetch("/workbench/contract/registries/erasure_reasons")
+        keys = ((await rr.json()).entries || []).filter((e) => !e.retired_at).map((e) => e.key)
+      } catch (e) { status.textContent = "✗ could not read the reason types: " + (e && e.message ? e.message : e); return }
+      const reason = (prompt("Purge suppresses this source from ALL wiki generation + search (reversible with Restore until it is erased; the record + embeddings are KEPT). Linked to " + gravity.notebooks + " notebook(s), cited on " + gravity.pages + " page(s).\\n\\nReason type (" + keys.join(" / ") + "):") || "").trim()
+      if (!reason) return
       try {
         const r = await fetch("/workbench/sources/" + encodeURIComponent(id), {
-          method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: true }),
+          method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: true, reason_type: reason }),
         })
-        if (r.ok) { setState("purged"); status.textContent = "Purged — permanently suppressed (record kept)." }
-        else status.textContent = "✗ purge failed (" + r.status + ")"
+        const j = await r.json().catch(() => ({}))
+        if (r.ok) { setState("committed"); status.textContent = "Purged — suppressed (" + reason + "); Restore reverses it until it is erased." }
+        else status.textContent = "✗ purge failed (" + r.status + (j.error ? ": " + j.error : "") + ")"
       } catch (e) { status.textContent = "✗ purge error: " + (e && e.message ? e.message : e) }
     })
   })
