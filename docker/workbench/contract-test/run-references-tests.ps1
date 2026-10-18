@@ -32,8 +32,13 @@
 #        f. a vault whose one note the legacy reader listed differently (a duplicated frontmatter
 #           id) is refused by the migration: exit 1, the note named, nothing written for it
 #   7. the eleven-router smoke (scripts/checks/smoke-workbench-routers.ps1) against the
-#      pre-change and the :wt workbench on database C: identical
-#   8. tears down exactly what it created; verifies nothing labelled <Id> is left and no :local
+#      pre-change and the :wt workbench on database C: captured with an explicit -ExecContainer,
+#      compared IN-PROCESS (-Compare @(a, b)), 13 PASS / 'all 13 router responses identical',
+#      plus the built-in RED (an altered copy: 12 PASS, 1 FAIL, rc 1). The LIVE-DATA GUARD
+#      (size cap, fixture-only ids and notes, _target.txt 'live: False') runs over every capture
+#      BEFORE anything is copied into -Evidence.
+#   8. tears down exactly what it created (containers removed with -v, their volumes recorded
+#      first); verifies nothing labelled <Id> is left, no volume of ours is left, and no :local
 #      image changed
 # It never touches the live stack: no compose up/down, no ai-stack_* / open-brain_* network, no
 # host port, no live database, no rm/rmi of anything it did not create.
@@ -132,7 +137,9 @@ $null = Dk version --format '{{.Server.Version}}'
 if ($script:rc -ne 0) { Write-Host 'docker is not reachable'; exit 2 }
 function LocalSnapshot { (Dk images --filter 'reference=*:local' --format '{{.Repository}}:{{.Tag}} {{.ID}}' | Out-String).Trim() -split "`r?`n" | Sort-Object }
 $localBefore = LocalSnapshot
-$made = @{ net = $false; containers = @(); images = @() }
+function DanglingVolumes { @((Dk volume ls -q --filter dangling=true | Out-String).Trim() -split "`r?`n" | Where-Object { $_ }) }
+$volBefore = DanglingVolumes
+$made = @{ net = $false; containers = @(); images = @(); smokeDir = $null }
 
 function Start-Db([string]$name) {
   $o = Dk run -d --name $name --label $label --network $net -e "POSTGRES_PASSWORD=$pw" -e POSTGRES_DB=openbrain `
@@ -167,6 +174,44 @@ function TestSummary([string]$o) {
   return ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
 }
 
+# The LIVE-DATA GUARD (same as run-contract-tests.ps1): a capture is kept only if it provably came
+# from this run's disposable database and fixture vault. Returns the violations (none = clean).
+# The ids a capture may carry: fixtures.sql's, the smoke's own unknown-job probe, and the 200
+# generated sources (f3000000-...); the notes it may list: this run's p2a-vault.
+$FixtureUuids = @{}
+foreach ($m in [regex]::Matches((Get-Content -Raw (Join-Path $ct 'fixtures.sql')), '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')) { $FixtureUuids[$m.Value] = $true }
+$FixtureUuids['00000000-0000-4000-8000-000000000000'] = $true   # the smoke's own unknown-job probe
+for ($n = 1; $n -le 200; $n++) { $FixtureUuids['f3000000-0000-4000-8000-' + $n.ToString('000000000000')] = $true }
+$MaxCaptureBytes = 16384                                          # the live notebooks-list was 156177
+function Get-CaptureBody([string]$file) { return (([System.IO.File]::ReadAllText($file)) -split "`n`n", 2)[1] | ConvertFrom-Json }
+function Test-Capture([string]$dir, [string]$container) {
+  $bad = @()
+  $tgt = Join-Path $dir '_target.txt'
+  if (-not (Test-Path $tgt)) { return 'no _target.txt (not written by the guarded smoke script)' }
+  $t = [System.IO.File]::ReadAllText($tgt)
+  if ($t -notmatch "(?m)^container: $([regex]::Escape($container))\s*$") { $bad += "target is not $container`: $t" }
+  if ($t -notmatch '(?m)^live: False\s*$') { $bad += 'the capture says live' }
+  foreach ($f in Get-ChildItem -File $dir) {
+    if ($f.Length -gt $MaxCaptureBytes) { $bad += "$($f.Name) is $($f.Length) bytes (cap $MaxCaptureBytes)" }
+    $txt = [System.IO.File]::ReadAllText($f.FullName)
+    foreach ($m in [regex]::Matches($txt, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')) {
+      if (-not $FixtureUuids.ContainsKey($m.Value.ToLower())) { $bad += "$($f.Name) carries a non-fixture uuid $($m.Value)" }
+    }
+  }
+  try {
+    $nl = Get-CaptureBody (Join-Path $dir 'notes-list.txt')
+    $notes = @(@($nl.user) + @($nl.ai) | Where-Object { $_ })
+    # (unlike P0's runner this one does not require a non-empty listing: the p2a vault is a plain
+    # directory, not a git repo, so the notes listing is empty by design; what matters is that
+    # nothing listed is anything but this run's p2a-vault)
+    foreach ($n in $notes) { if ($n -notmatch 'p2a-vault') { $bad += "notes-list carries a non-fixture note '$n'" } }
+    foreach ($nb in @((Get-CaptureBody (Join-Path $dir 'notebooks-list.txt')).notebooks)) {
+      if ($nb.name -cne 'Fixture notebook') { $bad += "notebooks-list carries a non-fixture notebook '$($nb.name)'" }
+    }
+  } catch { $bad += "a listing capture is missing or unreadable: $_" }
+  return $bad
+}
+
 try {
   # ---------------------------------------------------------------- 1. the initdb chain
   Write-Host '[1] the initdb chain, derived from docker-compose.yml'
@@ -198,8 +243,19 @@ try {
   Check ($script:rc -eq 0) "image $tag built at OB1 $($sha.Substring(0, 7)) (test gate passed)"
   if ($script:rc -ne 0) { throw 'build' }
   $made.images += $tag
+  # The gate line must always be there: a cached gate layer prints no test output, so when the
+  # build log carries no count the gate command is re-run in the built image (the same command as
+  # the Dockerfile's gate RUN). Attempt 1's tester saw no line at all on a cached build.
+  # (default bridge network, as a build step has: search_test/graph_test resolve a DB host name and fail with none).
   $gate = TestSummary $o
-  if ($gate.Success) { Pass "image test gate: $($gate.Value)" }
+  $gateHow = 'from the build log'
+  if (-not $gate.Success) {
+    $o2 = Dk run --rm --label $label $tag deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/routes/graph_test.ts src/util/ src/contracts/
+    Save 'image-gate.log' $o2
+    $gate = TestSummary $o2
+    $gateHow = 'build layer cached; gate command re-run in the built image'
+  }
+  Check ($gate.Success -and $gate.Groups[3].Value -eq '0') "image test gate: $($gate.Value) ($gateHow)"
 
   # ---------------------------------------------------------------- 4. integration tests
   Write-Host '[4] database A + integration_test.ts (P0) + references_integration_test.ts (P2a), as ob_app_memory'
@@ -355,15 +411,67 @@ SELECT count(*),
   Check ($o -eq '0') "nothing was written for the refused note ($o rows)"
 
   # ---------------------------------------------------------------- 7. eleven-router smoke
-  Write-Host '[7] the eleven-router smoke: pre-change vs :wt workbench on database C'
+  Write-Host '[7] the eleven-router smoke: pre-change vs :wt workbench on database C (capture, compare in-process, RED, live-data guard)'
   $smoke = Join-Path $repo 'scripts\checks\smoke-workbench-routers.ps1'
   if (Test-Path $smoke) {
-    $sa = Join-Path $Evidence 'smoke-pre-change'; $sb = Join-Path $Evidence 'smoke-post-change'
-    $o1 = (& powershell -NoProfile -File $smoke -Capture $sa -ExecContainer $baseName -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY 2>&1 | Out-String); $r1 = $LASTEXITCODE
-    $o2 = (& powershell -NoProfile -File $smoke -Capture $sb -ExecContainer $postName -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY 2>&1 | Out-String); $r2 = $LASTEXITCODE
-    $o3 = (& powershell -NoProfile -File $smoke -Compare $sa $sb 2>&1 | Out-String); $r3 = $LASTEXITCODE
-    Save 'smoke.log' ($o1 + $o2 + $o3)
-    Check (($r1 -eq 0) -and ($r2 -eq 0) -and ($r3 -eq 0)) "eleven-router smoke: pre-change ($BaseSha) and post-change captures are identical"
+    # Captures land HERE (owned by this run, fresh) and reach -Evidence only through the guard.
+    $own = Join-Path $env:TEMP "rwp2a-smoke-$rand"
+    if (Test-Path $own) { throw "smoke directory $own already exists" }
+    New-Item -ItemType Directory -Force $own | Out-Null
+    $made.smokeDir = $own
+    function Smoke-Capture([string]$dir, [string]$container) {
+      # In-process; every capture names its disposable target explicitly (never the defaults).
+      $o = (& $smoke -Capture $dir -ExecContainer $container -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY *>&1 | Out-String)
+      return @{ out = $o; rc = $LASTEXITCODE }
+    }
+    function Smoke-Compare([string]$x, [string]$y) {
+      # In-process with ONE array argument: '-File ... -Compare $a $b' binds $b to -Capture and the
+      # script refuses it (exit 2) - attempt 1 of this item used that shape (tester finding F1).
+      $o = (& $smoke -Compare @($x, $y) *>&1 | Out-String)
+      return @{ out = $o; rc = $LASTEXITCODE; pass = ([regex]::Matches($o, '(?m)^\s*PASS\s')).Count; fail = ([regex]::Matches($o, '(?m)^\s*FAIL\s')).Count }
+    }
+    $pre = Join-Path $own 'smoke-pre-change'; $post = Join-Path $own 'smoke-post-change'
+    $c1 = Smoke-Capture $pre $baseName
+    $c2 = Smoke-Capture $post $postName
+    $cmp = Smoke-Compare $pre $post
+    Save 'smoke.log' ($c1.out + $c2.out + $cmp.out)
+    Check (($c1.rc -eq 0) -and ($c2.rc -eq 0)) "eleven-router smoke: captured from $baseName (pre-change) and $postName (post-change)"
+    Check (($cmp.rc -eq 0) -and ($cmp.pass -eq 13) -and ($cmp.fail -eq 0) -and ($cmp.out -match 'all 13 router responses identical')) "eleven-router smoke: pre-change ($BaseSha) vs post-change, compared in-process: $($cmp.pass) PASS, $($cmp.fail) FAIL, rc $($cmp.rc)"
+    # RED: a deliberately altered pair must FAIL, so a green compare means something.
+    $red = Join-Path $own 'smoke-post-altered'
+    Copy-Item -Recurse $post $red
+    [System.IO.File]::AppendAllText((Join-Path $red 'notes-list.txt'), 'altered by the run')
+    $cr = Smoke-Compare $post $red
+    Save 'smoke-red.log' $cr.out
+    Check (($cr.rc -eq 1) -and ($cr.fail -eq 1) -and ($cr.pass -eq 12) -and ($cr.out -match 'notes-list: the response changed')) "eleven-router smoke RED: an altered capture FAILS ($($cr.pass) PASS, $($cr.fail) FAIL, rc $($cr.rc))"
+    Remove-Item -Recurse -Force $red
+    # The LIVE-DATA GUARD, then - and only then - the copy into -Evidence.
+    $guardBad = @()
+    foreach ($pair in @(@($pre, $baseName), @($post, $postName))) {
+      foreach ($x in @(Test-Capture $pair[0] $pair[1])) { $guardBad += "$(Split-Path -Leaf $pair[0]): $x" }
+    }
+    Save 'smoke-guard.log' ($(if ($guardBad.Count) { $guardBad -join "`n" } else { 'clean: smoke-pre-change, smoke-post-change' }))
+    Check ($guardBad.Count -eq 0) "live-data guard: every capture came from this run's fixtures ($($guardBad.Count) violation(s))"
+    # RED for the guard: a capture shaped like a live one (a notebook that is not a fixture, a
+    # random uuid, oversized, captured from the live target) must be caught.
+    $fake = Join-Path $own 'smoke-guard-red'
+    Copy-Item -Recurse $post $fake
+    $big = 'x' * ($MaxCaptureBytes + 1)
+    [System.IO.File]::WriteAllText((Join-Path $fake 'notebooks-list.txt'), "status: 200`ntype: application/json`n`n" +
+      '{"notebooks":[{"id":"' + [guid]::NewGuid() + '","name":"Not a fixture","pad":"' + $big + '"}]}' + "`n")
+    [System.IO.File]::WriteAllText((Join-Path $fake '_target.txt'), "container: openbrain-workbench`nbase: http://caddy:8446`nlive: True`n")
+    $redBad = @(Test-Capture $fake $postName)
+    Save 'smoke-guard-red.log' ($redBad -join "`n")
+    Check ($redBad.Count -ge 5) "live-data guard RED: a live-shaped capture is caught ($($redBad.Count) violation(s): target, live, size, uuid, notebook)"
+    Remove-Item -Recurse -Force $fake
+    if ($guardBad.Count -eq 0) {
+      foreach ($d in @($pre, $post)) { Copy-Item -Recurse $d (Join-Path $Evidence (Split-Path -Leaf $d)) }
+      $diff = @(Get-ChildItem -File $pre | Where-Object { $_.Name -ne '_target.txt' } | Where-Object {
+          [System.IO.File]::ReadAllText($_.FullName) -cne [System.IO.File]::ReadAllText((Join-Path $post $_.Name)) })
+      Save 'smoke-diff.txt' ($(if ($diff.Count) { ($diff | ForEach-Object { $_.Name }) -join "`n" } else { '(empty: no response file differs between smoke-pre-change and smoke-post-change)' }))
+    } else {
+      foreach ($x in $guardBad) { Write-Host "    guard: $x" }
+    }
   } else {
     Write-Host "  SKIP  $smoke not found (OB1 checked out alone)"
   }
@@ -372,13 +480,33 @@ SELECT count(*),
   Fail "aborted: $_"
 } finally {
   Write-Host '[8] teardown'
-  foreach ($c in $made.containers) { $null = Dk rm -f $c }
+  # -v: a container's ANONYMOUS volumes go with it (attempt 1 left one Postgres data volume per
+  # database). Each container's volumes are recorded first, so the check below is about OURS:
+  # other sessions' disposable runs on the same host create and orphan volumes concurrently.
+  $ourVolumes = @()
+  foreach ($c in $made.containers) {
+    # No double quotes in the template: Windows PowerShell 5.1 strips them from a native argument.
+    # Type=Name pairs, filtered here.
+    $mounts = Dk inspect -f '{{range .Mounts}}{{.Type}}={{.Name}} {{end}}' $c
+    # an already-removed container answers an error text, not names
+    if ($script:rc -eq 0) {
+      $ourVolumes += @(($mounts -split '\s+') | Where-Object { $_ -match '^volume=[A-Za-z0-9][A-Za-z0-9_.-]+$' } | ForEach-Object { $_.Substring(7) })
+    }
+    $null = Dk rm -f -v $c
+  }
   if ($made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $made.images) { $null = Dk rmi $i } }
   Remove-Item $stage, $vaultPre, $vaultPost, $vaultBad -Recurse -Force -ErrorAction SilentlyContinue
+  if ($made.smokeDir) { Remove-Item $made.smokeDir -Recurse -Force -ErrorAction SilentlyContinue }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   $leftNet = (Dk network ls --filter "label=$label" --format '{{.Name}}' | Out-String).Trim()
   Check (($left -eq '') -and ($leftNet -eq '')) "nothing labelled $Id is left (containers: '$left', networks: '$leftNet')"
+  $volLeft = @($ourVolumes | Where-Object { $null = Dk volume inspect $_; $script:rc -eq 0 })
+  Check (($ourVolumes.Count -gt 0) -and ($volLeft.Count -eq 0)) "no volume of ours is left ($($ourVolumes.Count) recorded, $($volLeft.Count) left: '$($volLeft -join ' ')')"
+  # The host-wide view, for the record only (concurrent sessions make it noisy): a new dangling
+  # volume that is not one of ours is named, not failed, and never removed by this run.
+  $volNew = @(DanglingVolumes | Where-Object { $volBefore -notcontains $_ })
+  Write-Host "  INFO  dangling volumes on the host: $($volBefore.Count) before, $(@(DanglingVolumes).Count) after; new during the run: $($volNew.Count) (ours among them: $(@($volNew | Where-Object { $ourVolumes -contains $_ }).Count))"
   $localAfter = LocalSnapshot
   Check ((Compare-Object $localBefore $localAfter) -eq $null) 'no :local image changed'
 }

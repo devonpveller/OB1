@@ -23,7 +23,8 @@
 -- pins are per document, so two holders of one source keep two rows).
 --
 -- Every enumerated kind is a registry (D18): scopes, provenances, states, selector kinds (whose
--- definitions say which fields each needs and for which content types it is required), holder
+-- definitions say which fields each needs, for which content types it is required and what makes it
+-- well-formed: start < end, offsets >= 0, a non-blank quote, a PDF page >= 1 with quads), holder
 -- kinds, origins and diffCheck anchor outcomes. The selector rule is enforced HERE, by trigger,
 -- so no writer (the API, the migration, a hand INSERT) can store a reference without a quote.
 --
@@ -55,12 +56,6 @@ INSERT INTO public.contract_registry_entries (registry, key, label, definition) 
     ('reference_provenances', 'user',      'placed by the user',      '{}'),
     ('reference_provenances', 'assistant', 'placed by an assistant',  '{}'),
     ('reference_states', 'pinned', 'pinned', '{"meaning":"anchored to its pinned revision; out of date is computed by diffCheck"}'),
-    ('reference_selector_kinds', 'quote', 'text quote (W3C TextQuoteSelector)',
-        '{"required":"always","fields":{"exact":"string","prefix":"string","suffix":"string"},"non_empty":["exact"]}'),
-    ('reference_selector_kinds', 'position', 'text position (W3C TextPositionSelector, offsets into the pinned revision)',
-        '{"required":"always","fields":{"start":"integer","end":"integer"}}'),
-    ('reference_selector_kinds', 'pdf', 'PDF page and quads',
-        '{"required_for_content_types":["pdf"],"fields":{"page":"integer","quads":"array"},"units":"page-normalized 0..1, 8 numbers per quad (x1,y1..x4,y4)"}'),
     ('reference_holder_kinds', 'legacy_note', 'legacy Quartz note (vault notes/ tree)',
         '{"path_prefix":"notes/","one_per_source":true,"dependence":true,"term":"notes = the legacy Quartz note class (D12)"}'),
     ('reference_holder_kinds', 'user_document', 'user document (P2b documents tree)',
@@ -78,6 +73,19 @@ INSERT INTO public.contract_registry_entries (registry, key, label, definition) 
     ('node_kinds', 'reference', 'reference record', '{}'),
     ('dependence_kinds', 'reference_record', 'references held by notes', '{"blocks_erase":true,"severable":false,"resolve":"by the user, in the note: remove the citation or the added reference"}')
 ON CONFLICT (registry, key) DO NOTHING;
+
+-- The selector kinds are written apart so a re-run converges on the CURRENT definitions (the
+-- other entries above are insert-only). Well-formedness is declared here and enforced by
+-- reference_selectors_problem(): non_empty = not empty and not blank; min = a floor per integer
+-- field; increasing = [a, b] needs a < b; non_empty_array = the array has an element.
+INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES
+    ('reference_selector_kinds', 'quote', 'text quote (W3C TextQuoteSelector)',
+        '{"required":"always","fields":{"exact":"string","prefix":"string","suffix":"string"},"non_empty":["exact"]}'),
+    ('reference_selector_kinds', 'position', 'text position (W3C TextPositionSelector, offsets into the pinned revision)',
+        '{"required":"always","fields":{"start":"integer","end":"integer"},"min":{"start":0,"end":0},"increasing":["start","end"]}'),
+    ('reference_selector_kinds', 'pdf', 'PDF page and quads',
+        '{"required_for_content_types":["pdf"],"fields":{"page":"integer","quads":"array"},"min":{"page":1},"non_empty_array":["quads"],"units":"page-normalized 0..1, 8 numbers per quad (x1,y1..x4,y4)"}')
+ON CONFLICT (registry, key) DO UPDATE SET label = EXCLUDED.label, definition = EXCLUDED.definition;
 
 -- ── 2. the records ──────────────────────────────────────────────────────
 -- `references` is an SQL reserved word; the table is reference_records.
@@ -152,8 +160,25 @@ BEGIN
             END IF;
         END LOOP;
         FOR fname IN SELECT jsonb_array_elements_text(COALESCE(k.definition -> 'non_empty', '[]'::jsonb)) LOOP
-            IF length(COALESCE(part ->> fname, '')) = 0 THEN
-                RETURN format('the %s selector''s %s must not be empty', k.key, fname);
+            IF COALESCE(part ->> fname, '') ~ '^\s*$' THEN
+                RETURN format('the %s selector''s %s must not be empty or blank', k.key, fname);
+            END IF;
+        END LOOP;
+        -- well-formed numbers (the field types were checked above, so these are numbers)
+        FOR f IN SELECT key, value FROM jsonb_each_text(COALESCE(k.definition -> 'min', '{}'::jsonb)) LOOP
+            IF (part ->> f.key)::numeric < f.value::numeric THEN
+                RETURN format('the %s selector''s %s must be at least %s', k.key, f.key, f.value);
+            END IF;
+        END LOOP;
+        IF k.definition ? 'increasing' THEN
+            IF (part ->> (k.definition -> 'increasing' ->> 0))::numeric >= (part ->> (k.definition -> 'increasing' ->> 1))::numeric THEN
+                RETURN format('the %s selector''s %s must be less than its %s', k.key,
+                              k.definition -> 'increasing' ->> 0, k.definition -> 'increasing' ->> 1);
+            END IF;
+        END IF;
+        FOR fname IN SELECT jsonb_array_elements_text(COALESCE(k.definition -> 'non_empty_array', '[]'::jsonb)) LOOP
+            IF jsonb_array_length(part -> fname) = 0 THEN
+                RETURN format('the %s selector''s %s must have at least one element', k.key, fname);
             END IF;
         END LOOP;
     END LOOP;

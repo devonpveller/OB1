@@ -132,6 +132,54 @@ t("the database refuses a reference without a quote, without position, or a PDF 
   assertEquals(e.fields?.code, "OBR01", "an unregistered provenance");
 });
 
+// Tester finding F3 (attempt 1): the trigger checked that a selector was PRESENT, not that it was
+// well-formed. Each shape the tester stored is refused by the database now (the API's zod schema
+// refused them all already; a non-API writer did not meet that).
+// Four tests, one per shape the tester stored, so a missing rule shows as its own failure.
+const wellFormedSetup = async () => {
+  const s = await newSource(["Plain text for the well-formed rule."]);
+  const pdf = await newSource(["PDF page text for the rule."], { content_type: "pdf" });
+  const good = sel("Plain text for the well-formed rule.", "Plain text");
+  const goodPdf = { ...sel("PDF page text for the rule.", "PDF page"), pdf: { page: 1, quads: [[0.1, 0.1, 0.5, 0.1, 0.5, 0.2, 0.1, 0.2]] } };
+  const ins = (source: string, selectors: unknown) => sql(
+    `INSERT INTO public.reference_records (source_id, selectors, provenance, pinned_revision) VALUES ($1, $2::jsonb, 'user', 1)`,
+    [source, JSON.stringify(selectors)]);
+  await ins(s, good); // the well-formed shapes are still accepted
+  await ins(pdf, goodPdf);
+  const refused = async (source: string, selectors: unknown, text: string) => {
+    const e = await assertRejects(() => ins(source, selectors)) as { fields?: { code?: string; message?: string } };
+    assertEquals(e.fields?.code, "OBR01", text);
+    assert((e.fields?.message ?? "").includes(text), `${text} <- ${e.fields?.message}`);
+  };
+  return { s, pdf, good, goodPdf, refused };
+};
+t("the database refuses an inverted or empty position (start >= end)", async () => {
+  const { s, good, refused } = await wellFormedSetup();
+  await refused(s, { ...good, position: { start: 10, end: 2 } }, "start must be less than its end");
+  await refused(s, { ...good, position: { start: 4, end: 4 } }, "start must be less than its end");
+  // an UPDATE is held to the same rule
+  const id = (await sql<{ id: string }>(`SELECT id FROM public.reference_records WHERE source_id = $1`, [s]))[0].id;
+  await assertRejects(() => sql(`UPDATE public.reference_records SET selectors = $2::jsonb WHERE id = $1`,
+    [id, JSON.stringify({ ...good, position: { start: 10, end: 2 } })]));
+});
+t("the database refuses negative position offsets", async () => {
+  const { s, good, refused } = await wellFormedSetup();
+  await refused(s, { ...good, position: { start: -5, end: -1 } }, "must be at least 0");
+  await refused(s, { ...good, position: { start: -5, end: 3 } }, "start must be at least 0");
+  await refused(s, { ...good, position: { start: 0, end: -1 } }, "end must be at least 0");
+});
+t("the database refuses a PDF selector with page 0 or no quads", async () => {
+  const { s, pdf, goodPdf, good, refused } = await wellFormedSetup();
+  await refused(pdf, { ...goodPdf, pdf: { page: 0, quads: [] } }, "page must be at least 1");
+  await refused(pdf, { ...goodPdf, pdf: { page: 1, quads: [] } }, "quads must have at least one element");
+  await refused(s, { ...good, pdf: { page: 2, quads: [] } }, "quads must have at least one element");
+});
+t("the database refuses a whitespace-only quote", async () => {
+  const { s, good, refused } = await wellFormedSetup();
+  await refused(s, { ...good, quote: { ...good.quote, exact: "   " } }, "exact must not be empty or blank");
+  await refused(s, { ...good, quote: { ...good.quote, exact: "\t\n " } }, "exact must not be empty or blank");
+});
+
 t("POST /references pins the current revision, locates the quote's chunk, and refuses a reference without a quote", async () => {
   const texts = ["Alpha one. Beta two.", "Alpha one. Beta two. Gamma three."];
   const s = await newSource(texts);
