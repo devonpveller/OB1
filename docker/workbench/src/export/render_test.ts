@@ -150,7 +150,7 @@ Deno.test("the programs in the image are the versions the notices list (pandoc 3
   const notices = await Deno.readTextFile(new URL("../../THIRD-PARTY-NOTICES.md", import.meta.url));
   for (const s of ["| pandoc | 3.11 ", "| Typst | 0.15.1 ", "| poppler-utils (pdftoppm, pdftotext, pdffonts, pdfinfo) | 25.03.0 "]) assert(notices.includes(s), s);
   // the font packages, at the versions the notices list (attempt 2 adds the emoji face)
-  const pkgs = await v("dpkg-query", ["-W", "-f", "${Package} ${Version}\\n", "fonts-noto-cjk", "fonts-noto-color-emoji"]);
+  const pkgs = await v("dpkg-query", ["-W", "-f", "${Package} ${Version}\\n", "fonts-noto-cjk", "fonts-noto-color-emoji", "fonts-dejavu-core"]);
   for (const [pkg, ver] of pkgs.trim().split("\n").map((l) => l.split(" "))) {
     assert(notices.includes(`(${pkg}) | Debian ${ver} |`), `${pkg} ${ver} is the version the notices list`);
   }

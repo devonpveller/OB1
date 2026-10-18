@@ -5,10 +5,12 @@
 // installed faces; a character no face covers refuses the export (422, naming the characters) and
 // nothing is drawn. PURE file reading: no fontconfig, no program run, nothing linked.
 //
-// The faces are the ones Typst sees: the system font directories (and TYPST_FONT_PATHS). Typst's own
-// embedded faces (Libertinus Serif, New Computer Modern, DejaVu Sans Mono) cover Latin, Greek,
-// Cyrillic and math, all of which the installed Noto Serif CJK / DejaVu faces cover too; math spans
-// are not checked here (Typst sets them in its embedded New Computer Modern Math).
+// The faces are the ones Typst sees in the system font directories (and TYPST_FONT_PATHS). Typst's own
+// embedded faces (Libertinus Serif, New Computer Modern, DejaVu Sans Mono) cannot be read here; the
+// image installs fonts-dejavu-core so their widest coverage (DejaVu: Hebrew, Arabic, ...) is also on
+// disk (attempt 2's runner found Hebrew refused while Typst could draw it). A character only an
+// embedded face covers is therefore refused - loud (422, named), never a box. Math spans are not
+// checked here (Typst sets them in its embedded New Computer Modern Math).
 // cmap subtables read: format 4 (BMP) and format 12 (full range); format 13 (many-to-one "last
 // resort" maps) is deliberately not read - it claims every character and draws boxes.
 

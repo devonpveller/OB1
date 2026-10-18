@@ -143,7 +143,9 @@ Deno.test("ADV-5: a character no installed face covers is refused before Typst r
   assertMatch(e.message, /U\+E000/);
   // the same text exports to formats that do not typeset glyphs (the reader's fonts render them)
   await render(input(`# G\n\n${lost} ${cite1}.\n`, "md"));
-  const emoji = (await render(input(`# E\n\nEmoji 😀 and 🎉 with CJK 中文 ${cite1}.\n`, "pdf"))).bytes;
+  // the runner's mixed-script note: emoji, CJK, Hebrew and Arabic (Typst's own embedded DejaVu Sans
+  // Mono covers Hebrew; the scan sees the same coverage only because fonts-dejavu-core is installed)
+  const emoji = (await render(input(`# E\n\nEmoji 😀 and 🎉 with CJK 中文, Hebrew שלום and Arabic سلام ${cite1}.\n`, "pdf"))).bytes;
   const fonts = await pdfFonts(emoji);
   assert(fonts.some((f) => /Emoji/i.test(f)), `an emoji face is embedded: ${fonts.join(", ")}`);
 });

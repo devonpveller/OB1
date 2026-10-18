@@ -236,6 +236,13 @@ try {
   $o = Dk run --rm --label $label --network none --entrypoint sh $tag -c 'dpkg -s weasyprint >/dev/null 2>&1 && echo weasyprint-present; command -v weasyprint pdftoppm pdftotext || true; dpkg -s poppler-utils >/dev/null 2>&1 && echo poppler-present; pandoc --version | head -1; typst --version; ls /usr/local/share/doc/typst; test -f /app/.test-gate-passed && echo gate-marker'
   Save 'runtime-image.txt' $o
   Check (($o -notmatch 'weasyprint') -and ($o -notmatch 'pdftoppm|pdftotext|poppler-present')) "the runtime image carries no WeasyPrint and no poppler"
+  # attempt 2: the glyph-coverage verdicts the build gate reaches in the TEST stage hold for the
+  # RUNTIME image only if both carry the same font files (poppler once pulled DejaVu into test only)
+  $fontsCmd = 'find /usr/share/fonts /usr/local/share/fonts -type f 2>/dev/null | sort | xargs md5sum | md5sum; find /usr/share/fonts -type f | wc -l'
+  $fr = (Dk run --rm --label $label --network none --entrypoint sh $tag -c $fontsCmd).Trim()
+  $ft = (Dk run --rm --label $label --network none --entrypoint sh $testTag -c $fontsCmd).Trim()
+  Save 'font-sets.txt' "runtime:`n$fr`ntest:`n$ft"
+  Check (($fr -ne '') -and ($fr -eq $ft)) "the runtime and test images carry the same font files ($(($fr -split "`n")[-1]) files)"
   Check (($o -match '(?m)^pandoc 3\.11\s*$') -and ($o -match '(?m)^typst 0\.15\.1 ') -and ($o -match 'NOTICE') -and ($o -match 'gate-marker')) 'the runtime image runs pandoc 3.11 and Typst 0.15.1 (NOTICE carried), and holds the test-gate marker'
 
   # ---------------------------------------------------------------- 4. parity
@@ -529,7 +536,8 @@ try {
   } else { Fail 'the egress workbench did not start' }
   # nothing went direct, and no workbench log carries a secret
   $null = Client @('get', "http://${catchName}:8080/_log", '/ev/catcher-log.json')
-  $caught = @(Get-Content -Raw (Join-Path $Evidence 'catcher-log.json') | ConvertFrom-Json)
+  # (PS 5.1: ConvertFrom-Json emits a JSON array as ONE object; unroll it, or '[]' counts as 1)
+  $caught = @((Get-Content -Raw (Join-Path $Evidence 'catcher-log.json') | ConvertFrom-Json) | ForEach-Object { $_ })
   Check ($caught.Count -eq 0) "the direct catcher received $($caught.Count) requests over the whole run (nothing skipped the proxy, nothing followed a redirect)"
   $logs = Dk logs $wbName
   Check (($logs -notmatch [regex]::Escape($oaKey)) -and ($logs -notmatch [regex]::Escape($mailto))) 'the main workbench log carries neither the key nor the mailto'

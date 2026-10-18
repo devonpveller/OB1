@@ -42,11 +42,15 @@ LABEL org.opencontainers.image.revision="$OB1_SHA"
 # fonts-noto-color-emoji (OFL-1.1): an emoji face Typst falls back to (rw-p6a-resolve attempt 2: an
 # emoji rendered as a tofu box with status 200). A character no installed face covers is refused
 # before Typst runs (src/export/glyphs.ts), so a PDF never carries a box.
+# fonts-dejavu-core (DejaVu fonts licence, Bitstream Vera based, permissive): Hebrew, Arabic and other
+# scripts Typst draws from its own embedded DejaVu Sans Mono - installed so the coverage scan sees
+# them too. It came into the TEST stage only through poppler's fontconfig dependency; named here, the
+# runtime and test stages carry the same font files (run-export-tests.ps1 checks it).
 # The export (P6a) converts markdown to PDF/DOCX/MD/TXT with pandoc --citeproc, locally (no
 # network); Typst is pandoc's PDF engine. WeasyPrint, the PDF engine before P6a, is removed: the
 # parity fixture passed (see the parity stage).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates fonts-noto-cjk fonts-noto-color-emoji \
+  && apt-get install -y --no-install-recommends git ca-certificates fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu-core \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /out/bin/pandoc /out/bin/typst /usr/local/bin/
 # Typst's LICENSE and NOTICE carried through (Apache-2.0 section 4).
