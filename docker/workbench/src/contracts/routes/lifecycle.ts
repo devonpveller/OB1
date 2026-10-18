@@ -6,7 +6,8 @@ import {
   AdmissionDecision, AdmissionRequest, Dependence, EraseRequest, EraseResult, LiftRequest, SeverRequest, SeverResult,
   SuppressRequest, SuppressResult, Tombstone,
 } from "../schemas/sources.ts";
-import { pathParam } from "../schemas/common.ts";
+import { metadataFilter, pathParam } from "../schemas/common.ts";
+import { parseMetadataFilter } from "../logic/scope.ts";
 import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
@@ -18,12 +19,19 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
   op(app, createRoute({
     method: "get", path: `${PREFIX}/sources/{id}/dependence`, operationId: "dependence", tags: T,
     summary: "dependence(id) - every connection of a source, counted and listed", "x-mcp-tool": "contract_dependence",
-    request: { params: idParam(FX.sourceSuppressed) },
+    description: "Under metadata_filter (the cloud door forces {\"share\":\"cloud\"}) a source outside the filter " +
+      "is not found, and only in-scope connections are listed: the source's own chunks and trail events, claims " +
+      "and citing or lead sources whose metadata contains the filter; pages, entities, sessions and user documents " +
+      "carry no metadata and are left out, and erase_allowed is false (rw-p0-contract2).",
+    request: { params: idParam(FX.sourceSuppressed), query: z.object({ metadata_filter: metadataFilter }) },
     responses: { 200: json(Dependence, EX.dependence, "connections by kind; blocking ones gate erasure"), ...errors },
   }), async (c) => {
     try {
-      const d = await lc.dependence(deps.db, deps.registry, c.req.valid("param").id);
-      if (d.lifecycle === null) return c.json({ error: "no source or held source with this id" }, 404);
+      const f = parseMetadataFilter(c.req.valid("query").metadata_filter);
+      const d = await lc.dependence(deps.db, deps.registry, c.req.valid("param").id, f);
+      if (d.lifecycle === null) {
+        return c.json({ error: f ? "not found in scope" : "no source or held source with this id" }, 404);
+      }
       return send(c, Dependence, d);
     } catch (e) {
       return fail(c, e);
@@ -75,12 +83,18 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
   op(app, createRoute({
     method: "get", path: `${PREFIX}/tombstones/{id}`, operationId: "tombstone", tags: T,
     summary: "a tombstone with every reopen attempt", "x-mcp-tool": "contract_tombstone",
-    request: { params: z.object({ id: pathParam("id", FX.tombstoneAutomation, "tombstone id") }) },
+    description: "Under metadata_filter only a tombstone whose erased source's metadata (snapshotted at erase " +
+      "time) contains the filter resolves; any other is not found (rw-p0-contract2).",
+    request: {
+      params: z.object({ id: pathParam("id", FX.tombstoneAutomation, "tombstone id") }),
+      query: z.object({ metadata_filter: metadataFilter }),
+    },
     responses: { 200: json(Tombstone, EX.tombstone, "the tombstone"), ...errors },
   }), async (c) => {
     try {
-      const t = await src.tombstoneById(deps.db, c.req.valid("param").id);
-      if (!t) return c.json({ error: "no tombstone with this id" }, 404);
+      const f = parseMetadataFilter(c.req.valid("query").metadata_filter);
+      const t = await src.tombstoneById(deps.db, c.req.valid("param").id, f);
+      if (!t) return c.json({ error: f ? "not found in scope" : "no tombstone with this id" }, 404);
       return send(c, Tombstone, src.tombstoneOut(t));
     } catch (e) {
       return fail(c, e);

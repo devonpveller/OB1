@@ -6,6 +6,7 @@
 import type { Db } from "../db.ts";
 import { aggregateDependence, type DependenceRow, kindDefs } from "../logic/dependence.ts";
 import { type AdmissionScorer, decideReopen } from "../logic/reopen.ts";
+import type { MetadataFilter } from "../logic/scope.ts";
 import type { RegistryReader } from "../registry.ts";
 import { tombstoneById, tombstoneForUrl, tombstoneOut } from "./sources.ts";
 
@@ -33,16 +34,50 @@ async function trail(db: Db, sourceId: string, kind: string, detail: Record<stri
   );
 }
 
-export async function dependence(db: Db, reg: RegistryReader, id: string) {
-  const rows = await db.query<DependenceRow>(`SELECT kind, ref, detail FROM public.source_dependence($1)`, [id]);
-  const agg = aggregateDependence(rows, kindDefs(await reg.entries("dependence_kinds")));
+// Under a metadata filter (the cloud door forces {"share":"cloud"}; rw-p0-contract2) the answer
+// FAILS CLOSED: a source (or held source) outside the filter is unknown (lifecycle null -> 404),
+// and of an in-scope source's connections only these come back - an ALLOW-LIST, so a kind
+// source_dependence() gains later is dropped under a filter until it is listed here:
+//   chunk, trail_event          the source's own rows (it is in scope)
+//   claim_edge                  when the claim's metadata contains the filter
+//   report_citation, found_via_lead  when that source row's metadata contains the filter
+// citing_page, entity_grounding, report_session and document_link carry no metadata and are
+// dropped. A scoped view cannot prove zero dependence, so erase_allowed is false under a filter.
+// Each kept row's detail names only itself or the in-scope row it points at (source_dependence:
+// claim_edge -> claim id, edge type, claim text; chunk -> idx; trail_event -> kind, at;
+// report_citation / found_via_lead -> that source's id and title), and counts / claims_by_edge_type
+// are aggregated from the kept rows only (rw-p0-contract2 attempt 2 audit).
+const SCOPED_DEPENDENCE = `
+  SELECT d.kind, d.ref, d.detail FROM public.source_dependence($1) d
+   WHERE $2::jsonb IS NULL
+      OR d.kind IN ('chunk', 'trail_event')
+      OR (d.kind = 'claim_edge' AND EXISTS (
+            SELECT 1 FROM public.claims c WHERE c.id = (d.detail ->> 'claim_id')::uuid AND c.metadata @> $2::jsonb))
+      OR (d.kind IN ('report_citation', 'found_via_lead') AND EXISTS (
+            SELECT 1 FROM public.sources x WHERE x.id::text = d.ref AND x.metadata @> $2::jsonb))`;
+
+export async function dependence(db: Db, reg: RegistryReader, id: string, f: MetadataFilter = null) {
+  const mf = f ? JSON.stringify(f) : null;
   const life = await db.query<{ lifecycle: string }>(
-    `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS lifecycle FROM public.sources WHERE id = $1`,
+    `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS lifecycle FROM public.sources
+      WHERE id = $1 AND ($2::jsonb IS NULL OR metadata @> $2::jsonb)`,
+    [id, mf],
+  );
+  // a held source belongs to a refinery, which carries no metadata: never in scope under a filter
+  // (rw-p0-contract2 attempt 2; the same rule as sources.ts getHeld)
+  const held = life[0] || mf !== null ? null : await db.query<{ id: string }>(
+    `SELECT id FROM public.held_sources WHERE id = $1`,
     [id],
   );
-  const held = life[0] ? null : await db.query<{ id: string }>(`SELECT id FROM public.held_sources WHERE id = $1`, [id]);
   const lifecycle = life[0]?.lifecycle ?? (held && held[0] ? "held" : null);
-  return { source_id: id, lifecycle, ...agg, erase_allowed: lifecycle === "unlinked" && agg.blocking === 0 };
+  const defs = kindDefs(await reg.entries("dependence_kinds"));
+  if (lifecycle === null && mf !== null) {
+    // out of scope: nothing about it, not even its connection count
+    return { source_id: id, lifecycle, ...aggregateDependence([], defs), erase_allowed: false };
+  }
+  const rows = await db.query<DependenceRow>(SCOPED_DEPENDENCE, [id, mf]);
+  const agg = aggregateDependence(rows, defs);
+  return { source_id: id, lifecycle, ...agg, erase_allowed: mf === null && lifecycle === "unlinked" && agg.blocking === 0 };
 }
 
 // When the last blocking connection goes, a suppressed source becomes unlinked (D5 stage 3).
@@ -222,7 +257,7 @@ export async function erase(db: Db, reg: RegistryReader, id: string, req: EraseI
     const tomb = await t.query<{ id: string }>(
       `INSERT INTO public.source_tombstones
          (source_id, url, url_key, title, reason_type, note, batch_run_id, eraser_kind, eraser_run_id, eraser_user,
-          confidence, score_version, fingerprint, original_context)
+          confidence, score_version, fingerprint, original_context, metadata)
        SELECT s.id, COALESCE(s.url, 'urn:openbrain:source:' || s.id::text),
               COALESCE(public.contract_url_key(s.url), 'urn:openbrain:source:' || s.id::text), s.title,
               $2, $3, $4, $5, $6, $7,
@@ -230,7 +265,8 @@ export async function erase(db: Db, reg: RegistryReader, id: string, req: EraseI
               s.suppression_context #>> '{score_at_removal,version}',
               encode(sha256(convert_to(s.content, 'UTF8')), 'hex'),
               jsonb_build_object('suppression_reason', s.suppression_reason, 'suppression_context', s.suppression_context,
-                                 'content_type', s.content_type, 'domain', s.domain)
+                                 'content_type', s.content_type, 'domain', s.domain),
+              s.metadata
          FROM public.sources s WHERE s.id = $1
        RETURNING id`,
       [id, req.reason_type, req.note ?? null, req.batch_run_id ?? null, req.eraser.kind,

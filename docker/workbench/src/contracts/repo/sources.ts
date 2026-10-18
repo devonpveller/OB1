@@ -55,7 +55,11 @@ export interface HeldRow {
   metadata: Record<string, unknown>;
 }
 
+// A held source belongs to exactly one refinery, and a refinery (an idea) carries no metadata, so
+// under a filter a held source is out of scope whatever its own metadata says: answering it would
+// name the refinery (rw-p0-contract2 attempt 2). Unfiltered callers read it as before.
 export async function getHeld(db: Db, id: string, f: MetadataFilter): Promise<HeldRow | null> {
+  if (f) return null;
   const rows = await db.query<HeldRow>(
     `SELECT h.id, h.refinery_id, h.url, h.title, h.content_type, h.revision,
             left(h.content, 500) AS excerpt, rus.status, h.metadata
@@ -102,8 +106,36 @@ export async function tombstoneBySource(db: Db, sourceId: string): Promise<Tombs
   return (await db.query<TombstoneRow>(`${TOMBSTONE_SELECT} WHERE t.source_id = $1`, [sourceId]))[0] ?? null;
 }
 
-export async function tombstoneById(db: Db, id: string): Promise<TombstoneRow | null> {
-  return (await db.query<TombstoneRow>(`${TOMBSTONE_SELECT} WHERE t.id = $1`, [id]))[0] ?? null;
+// `f` scopes by the erased source's metadata, snapshotted onto the tombstone at erase time
+// (rw-p0-contract2): under the cloud door's filter only a tombstone of a share=cloud source
+// resolves; a tombstone with no snapshot ('{}', e.g. one written before the column) does not.
+// What an in-scope tombstone carries that names ANOTHER row is redacted to in-scope ids
+// (attempt 2, tester finding N4): attempts[].session_id and .note (a session carries no metadata;
+// the note is the door's free text about it), batch_run_id and eraser_run_id (runs are jobs,
+// which carry no metadata), readmitted_source_id unless that source is itself in scope, and
+// confidence (the score_at_removal snapshot: a mean over every claim the source grounded, in and
+// out of scope - the same value the scoped suppression context drops).
+export async function tombstoneById(db: Db, id: string, f: MetadataFilter = null): Promise<TombstoneRow | null> {
+  const mf = f ? JSON.stringify(f) : null;
+  const t = (await db.query<TombstoneRow & { readmitted_in_scope: boolean }>(
+    `SELECT x.*, EXISTS (SELECT 1 FROM public.sources r WHERE r.id = x.readmitted_source_id AND r.metadata @> $2::jsonb)
+                 AS readmitted_in_scope
+       FROM (${TOMBSTONE_SELECT} WHERE t.id = $1 AND ($2::jsonb IS NULL OR t.metadata @> $2::jsonb)) x`,
+    [id, mf],
+  ))[0];
+  if (!t) return null;
+  const { readmitted_in_scope, ...row } = t;
+  if (!mf) return row;
+  return {
+    ...row,
+    batch_run_id: null,
+    eraser_run_id: null,
+    confidence: null,
+    readmitted_source_id: readmitted_in_scope ? row.readmitted_source_id : null,
+    attempts: (Array.isArray(row.attempts) ? row.attempts : []).map((a) => ({
+      ...(a as Record<string, unknown>), session_id: null, note: null,
+    })),
+  };
 }
 
 export async function tombstoneForUrl(db: Db, url: string): Promise<TombstoneRow | null> {
@@ -140,7 +172,7 @@ export async function reference(
   const s = await getSource(db, id, opts.filter);
   if (s) {
     if (opts.evidenceOnly && !opts.visible.has(s.lifecycle)) return omitted(base);
-    return await sourceReference(db, s, opts.version, base);
+    return await sourceReference(db, s, opts.version, base, opts.filter);
   }
   const h = await getHeld(db, id, opts.filter);
   if (h) {
@@ -166,7 +198,7 @@ function omitted(base: Record<string, unknown>) {
   return { ...base, state: "omitted", lifecycle: null, version: null, state_detail: { reason: "evidence_only" } };
 }
 
-async function sourceReference(db: Db, s: SourceRow, version: number | null, base: Record<string, unknown>) {
+async function sourceReference(db: Db, s: SourceRow, version: number | null, base: Record<string, unknown>, f: MetadataFilter) {
   const current = s.max_revision ?? 1;
   let excerpt = s.excerpt;
   let versionState = "current";
@@ -185,7 +217,7 @@ async function sourceReference(db: Db, s: SourceRow, version: number | null, bas
     state,
     lifecycle: s.lifecycle,
     version: current,
-    state_detail: sourceStateDetail(s),
+    state_detail: sourceStateDetail(s, f),
     source: {
       title: s.title, url: s.url, content_type: s.content_type, domain: s.domain,
       family: sourceFamily(s.content_type, s.metadata), excerpt,
@@ -194,11 +226,19 @@ async function sourceReference(db: Db, s: SourceRow, version: number | null, bas
   };
 }
 
-export function sourceStateDetail(s: SourceRow): Record<string, unknown> {
+// The suppression context is a snapshot taken at suppress time (lifecycle.ts suppress()). Beside
+// the source's own title / url / who / when it counts notebooks and citing pages (records with no
+// metadata) and averages the claims the source grounded (in and out of scope). Under a filter only
+// the source's own fields are kept - an ALLOW-LIST, so a key a later snapshot gains is dropped
+// (rw-p0-contract2 attempt 2, tester finding N4).
+const SCOPED_CONTEXT_KEYS = ["title", "url", "suppressed_by", "suppressed_at", "retracted_by", "committed_at"];
+
+export function sourceStateDetail(s: SourceRow, f: MetadataFilter = null): Record<string, unknown> {
   if (s.lifecycle === "suppressed" || s.lifecycle === "unlinked") {
+    const context: Record<string, unknown> = s.suppression_context ?? { retracted_by: s.retracted_by, committed_at: s.retraction_committed_at };
     return {
       reason: s.suppression_reason ?? (s.metadata?.purged ? "purged (legacy, no reason recorded)" : "retracted (legacy, no reason recorded)"),
-      context: s.suppression_context ?? { retracted_by: s.retracted_by, committed_at: s.retraction_committed_at },
+      context: f ? Object.fromEntries(Object.entries(context).filter(([k]) => SCOPED_CONTEXT_KEYS.includes(k))) : context,
     };
   }
   if (s.staged_retract) return { reason: "retraction staged; commits at the next compile", retracted_by: s.retracted_by };
@@ -231,7 +271,7 @@ export async function chunkContext(
   const state = s ? sourceRecordState({ lifecycle, staged_retract: s.staged_retract }) : "held";
   return {
     ...base, state, lifecycle,
-    state_detail: s ? sourceStateDetail(s) : { refinery_id: h!.refinery_id },
+    state_detail: s ? sourceStateDetail(s, opts.filter) : { refinery_id: h!.refinery_id },
     chunks: rows.map((r) => ({ idx: r.idx, content: r.content, is_target: r.idx === idx })),
   };
 }
@@ -272,6 +312,10 @@ export async function diffCheck(db: Db, refs: { source_id: string; revision: num
 // model (init-research-credibility.sql: source_credibility / source_rolling_total), which reads
 // the research service's admission record (metadata.credibility) or, for a source stored before
 // P3a, derives the general family's domain-class score and says so.
+// Under a filter (the cloud door) every named row is scoped the way P0 scoped
+// the pre-D15 score (rw-p0-contract2 attempt 2, tester finding N2/N4): a source is named in
+// corroborated_by / contradicted_by only when it is itself in scope AND the claim that links it is
+// in scope.
 interface CredRow { family: string | null; score: number | null; is_primary: boolean | null; basis: string | null; kind: string | null; total: number | null; model: string }
 interface QSourceRow { source_id: string; title: string; url: string | null; family: string | null; relation: string; amount: number | null; claim: string | null }
 
@@ -284,6 +328,7 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
     return heldQuality(h, userTerm);
   }
   const cred = (s.metadata?.credibility ?? null) as Record<string, unknown> | null;
+  const mf = f ? JSON.stringify(f) : null;
   const [c] = await db.query<CredRow>(
     `WITH k AS (SELECT COALESCE($2::text, public.credibility_fallback_kind()) AS kind)
      SELECT sc.family, sc.score, sc.is_primary, sc.basis, k.kind,
@@ -298,6 +343,7 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
             sc.amount::float AS amount, sc.claim_text AS claim
        FROM public.source_corroborations sc
        JOIN public.sources g ON g.id = sc.from_source_id AND g.retraction_committed_at IS NULL
+            AND ($2::jsonb IS NULL OR g.metadata @> $2::jsonb)
        LEFT JOIN LATERAL public.source_credibility(g.id) gc ON TRUE
       WHERE sc.to_source_id = $1::uuid
      UNION ALL
@@ -306,32 +352,39 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
        JOIN public.claim_sources other ON other.claim_id = mine.claim_id AND other.source_id <> mine.source_id
             AND other.edge_type IN ('states', 'corroborates')
        JOIN public.sources o ON o.id = other.source_id AND o.retraction_committed_at IS NULL
+            AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
        JOIN public.claims cl ON cl.id = mine.claim_id AND cl.status = 'active'
+            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb)
        LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
       WHERE mine.source_id = $1::uuid AND mine.edge_type IN ('states', 'corroborates')`,
-    [id],
+    [id, mf],
   );
   const contradicted = await db.query<QSourceRow>(
     `SELECT DISTINCT ON (o.id) o.id AS source_id, o.title, o.url, oc.family,
             'contradicts a claim this source grounds' AS relation, NULL::float AS amount, cl.text AS claim
        FROM public.claim_sources mine
        JOIN public.claims cl ON cl.id = mine.claim_id AND cl.status = 'active'
+            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb)
        JOIN public.claim_sources against ON against.claim_id = mine.claim_id AND against.edge_type = 'contradicts'
             AND against.source_id IS NOT NULL AND against.source_id <> mine.source_id
        JOIN public.sources o ON o.id = against.source_id AND o.retraction_committed_at IS NULL
+            AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
        LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
       WHERE mine.source_id = $1::uuid AND mine.edge_type <> 'contradicts'
      UNION
      SELECT DISTINCT ON (o.id) o.id, o.title, o.url, oc.family,
             'grounds a claim that contradicts one this source grounds', NULL::float, other.text
        FROM public.claim_sources mine
+       JOIN public.claims mc ON mc.id = mine.claim_id AND ($2::jsonb IS NULL OR mc.metadata @> $2::jsonb)
        JOIN public.claim_sources cc ON cc.claim_id = mine.claim_id AND cc.edge_type = 'contradicts' AND cc.parent_claim_id IS NOT NULL
        JOIN public.claims other ON other.id = cc.parent_claim_id AND other.status = 'active'
+            AND ($2::jsonb IS NULL OR other.metadata @> $2::jsonb)
        JOIN public.claim_sources theirs ON theirs.claim_id = other.id AND theirs.edge_type <> 'contradicts' AND theirs.source_id IS NOT NULL
        JOIN public.sources o ON o.id = theirs.source_id AND o.retraction_committed_at IS NULL AND o.id <> $1::uuid
+            AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
        LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
       WHERE mine.source_id = $1::uuid AND mine.edge_type <> 'contradicts'`,
-    [id],
+    [id, mf],
   );
   const history = await db.query<{ score: number; total: number | null; claim_kind: string | null; model_version: string; computed_at: string }>(
     `SELECT score::float AS score, total::float AS total, claim_kind, model_version, computed_at
@@ -345,7 +398,7 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
   return {
     source_id: id, lifecycle: s.lifecycle,
     state: sourceRecordState({ lifecycle: s.lifecycle, staged_retract: s.staged_retract }),
-    state_detail: sourceStateDetail(s),
+    state_detail: sourceStateDetail(s, f),
     family,
     score: {
       value: total, refinery_scoped: null,

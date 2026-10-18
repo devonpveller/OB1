@@ -591,6 +591,86 @@ t("the metadata filter fails closed for record kinds that carry no metadata", as
   assertEquals((await call("GET", `/references/${FX.sourceLead}?metadata_filter=${f}`)).status, 200);
 });
 
+// rw-p0-contract2 (reviewer reject of rw-p0-contract): dependence and tombstone honour the filter
+t("dependence and tombstone fail closed under the metadata filter; erase snapshots the source metadata", async () => {
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  // a fixture source with no share=cloud: unknown under the filter, listed without it
+  const out = await call("GET", `/sources/${FX.sourceSuppressed}/dependence?metadata_filter=${f}`);
+  assertEquals(out.status, 404);
+  assertEquals(out.json.connections, undefined);
+  assertEquals((await call("GET", `/sources/${FX.sourceSuppressed}/dependence`)).status, 200);
+  // an in-scope source: its own chunk, the in-scope claim; the metadata-less page is dropped
+  const s = await newSource();
+  await sql(`UPDATE public.sources SET metadata = '{"share":"cloud"}' WHERE id = $1`, [s]);
+  await sql(`INSERT INTO public.source_chunks (source_id, idx, content) VALUES ($1, 0, 'c')`, [s]);
+  const [cIn, cOut] = [uuid(), uuid()];
+  await sql(`INSERT INTO public.claims (id, text, metadata) VALUES ($1, 'in', '{"share":"cloud"}'), ($2, 'out', '{}')`, [cIn, cOut]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $3, 'states'), ($2, $3, 'states')`, [cIn, cOut, s]);
+  const page = `content/scope-test/${s}`;
+  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body, links) VALUES ($1, 'entity', 'p', 'b', $2::jsonb)`,
+    [page, JSON.stringify([`content/source/${s}`])]);
+  const scoped = await call("GET", `/sources/${s}/dependence?metadata_filter=${f}`);
+  assertEquals(scoped.status, 200);
+  assert(S.Dependence.safeParse(scoped.json).success);
+  assertEquals(scoped.json.counts, { chunk: 1, claim_edge: 1 });
+  assertEquals(scoped.json.connections.find((c: any) => c.kind === "claim_edge").detail.claim_id, cIn);
+  assertEquals(scoped.json.erase_allowed, false);
+  const all = await call("GET", `/sources/${s}/dependence`);
+  assertEquals(all.json.counts, { chunk: 1, claim_edge: 2, citing_page: 1 });
+  await sql(`DELETE FROM public.wiki_pages WHERE slug = $1`, [page]);
+  await sql(`DELETE FROM public.claim_sources WHERE source_id = $1`, [s]);
+  await sql(`DELETE FROM public.claims WHERE id = ANY($1::uuid[])`, [[cIn, cOut]]);
+  // erase snapshots metadata: the cloud source's tombstone resolves under the filter, a local one does not
+  const tomb = async (meta: string) => {
+    const x = await newSource();
+    await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [x, meta]);
+    await call("POST", `/sources/${x}/suppress`, { reason: "scope test" });
+    const e = await call("POST", `/sources/${x}/erase`, { reason_type: "deliberate", eraser: { kind: "user", user: "t" } });
+    assertEquals(e.status, 200, JSON.stringify(e.json));
+    return e.json.tombstone.id as string;
+  };
+  const tIn = await tomb('{"share":"cloud"}');
+  const tOut = await tomb("{}");
+  const a = await call("GET", `/tombstones/${tIn}?metadata_filter=${f}`);
+  assertEquals(a.status, 200);
+  assert(S.Tombstone.safeParse(a.json).success);
+  const b = await call("GET", `/tombstones/${tOut}?metadata_filter=${f}`);
+  assertEquals(b.status, 404);
+  assertEquals(b.json.url, undefined);
+  assertEquals((await call("GET", `/tombstones/${tOut}`)).status, 200);
+  // a fixture tombstone written with no snapshot never resolves under a filter
+  assertEquals((await call("GET", `/tombstones/${FX.tombstoneAutomation}?metadata_filter=${f}`)).status, 404);
+});
+
+// rw-p0-contract2 attempt 2 (tester t-rw-p0 finding N1-N4): what an in-scope row CARRIES is scoped too
+t("under the metadata filter nested collections are scoped: claims' sources, quality's aggregates, malformed ids", async () => {
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  const [sIn, sOut] = [await newSource(), await newSource()];
+  await sql(`UPDATE public.sources SET metadata = '{"share":"cloud"}' WHERE id = $1`, [sIn]);
+  const [cIn, cOut] = [uuid(), uuid()];
+  await sql(`INSERT INTO public.claims (id, text, metadata) VALUES ($1, 'nested in', '{"share":"cloud"}'), ($2, 'nested out', '{}')`, [cIn, cOut]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $3, 'states'), ($1, $4, 'states'), ($2, $3, 'states')`,
+    [cIn, cOut, sIn, sOut]);
+  const scoped = await call("GET", `/claims?q=nested&metadata_filter=${f}`);
+  assertEquals(scoped.status, 200);
+  assertEquals(scoped.json.claims.map((c: any) => c.id), [cIn]);
+  assertEquals(scoped.json.claims[0].sources.map((x: any) => x.source_id), [sIn]);
+  assertEquals((await call("GET", `/claims?source_id=${sOut}&metadata_filter=${f}`)).json.count, 0);
+  const all = await call("GET", `/claims?q=nested`);
+  assertEquals(all.json.claims.find((c: any) => c.id === cIn).sources.length, 2);
+  const grounded = async (q: string) =>
+    (await call("GET", `/sources/${sIn}/quality${q}`)).json.factors.find((x: any) => x.name === "grounded_claims").value;
+  assertEquals(await grounded(`?metadata_filter=${f}`), 1);
+  assertEquals(await grounded(""), 2);
+  for (const p of [`/sources/not-a-uuid/dependence`, `/references/not-a-uuid`, `/tombstones/not-a-uuid?metadata_filter=${f}`]) {
+    const r = await call("GET", p);
+    assertEquals(r.status, 400, p);
+    assert(!JSON.stringify(r.json).includes("invalid input syntax"), p);
+  }
+  await sql(`DELETE FROM public.claim_sources WHERE claim_id = ANY($1::uuid[])`, [[cIn, cOut]]);
+  await sql(`DELETE FROM public.claims WHERE id = ANY($1::uuid[])`, [[cIn, cOut]]);
+});
+
 t("every read the fixture answers validates against its schema (live conformance)", async () => {
   const reads: [string, { safeParse: (x: unknown) => { success: boolean } }][] = [
     [`/references/${FX.sourceActive}`, S.Reference], [`/chunks/${FX.sourceActive}:1/context`, S.ChunkContext],
