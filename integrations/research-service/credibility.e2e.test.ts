@@ -125,7 +125,9 @@ t("the GATE's tables are read-only to the app roles: no confirmation or trigger 
     await c2.queryArray("BEGIN");
     await c2.queryArray("SET LOCAL ROLE service_role");
     let m = "";
+    await c2.queryArray("SAVEPOINT before_write");   // the refused write aborts the transaction otherwise
     try { await c2.queryArray(`UPDATE public.credibility_trigger_state SET model = 'd15'`); } catch (e) { m = String((e as Error).message); }
+    await c2.queryArray("ROLLBACK TO SAVEPOINT before_write");
     assert(/permission denied/.test(m), `an app role flipped the trigger: ${m}`);
     const r = await c2.queryObject<{ v: string }>(`SELECT public.credibility_trigger_model() AS v`);
     assertEquals(r.rows[0].v, "legacy", "the app role can still READ the model");
