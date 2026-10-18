@@ -2,7 +2,7 @@
 //
 // Pages carry no metadata, so under a metadata filter they are never returned (fail closed).
 // Held sources are not rows of `sources`, so no query here can surface one; search reaches
-// held_sources only when the caller scopes it to their refinery.
+// held_sources only when the caller scopes it to their refinery, and never under a filter.
 import type { Db } from "../db.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 
@@ -90,25 +90,52 @@ interface ClaimRow {
 
 // claims(scope, filter). An evidence-only caller sees only edges whose source is active; a claim
 // left with no active edge is not evidence and is dropped. Others see every edge, typed.
+//
+// Under a metadata filter (the cloud door forces {"share":"cloud"}) EVERYTHING the answer carries
+// is scoped, not only the claim rows (rw-p0-contract2 attempt 2, tester finding N1):
+//   - claims: c.metadata contains the filter;
+//   - sources[] / edges_by_type / suppressed_edges: only edges whose source's metadata contains
+//     it - an out-of-scope source's id, title and URL never appear inside an in-scope claim;
+//   - grounded: recomputed from those in-scope source edges (depth 0; a chain through a parent
+//     claim is not followed, so it can only under-report - fail closed);
+//   - synthesis_id: the synthesis is a source row, kept only when it is in scope, else null;
+//   - thread_id: threads carry no metadata, so it is null;
+//   - selectors: source_id / synthesis_id name a row that must itself be in scope, else the answer
+//     is empty (an out-of-scope id is never a selector over in-scope rows - the oracle); thread_id
+//     names a metadata-less row, so under a filter it selects nothing.
+// Residual, documented: c.confidence and c.contradicted are the claim's own STORED columns (the
+// same value every door reads, recomputed by claim_confidence over every edge); they are not
+// recomputed per caller.
 export async function claims(db: Db, q: ClaimsQuery) {
+  const mf = q.filter ? JSON.stringify(q.filter) : null;
   const rows = await db.query<ClaimRow>(
     `SELECT c.id, c.text, c.epistemic_tag, c.status, c.confidence, c.contradicted,
-            public.claim_is_grounded(c.id) AS grounded, c.thread_id, c.synthesis_id,
+            CASE WHEN $6::jsonb IS NULL THEN public.claim_is_grounded(c.id)
+                 ELSE EXISTS (SELECT 1 FROM public.claim_sources g JOIN public.sources gs ON gs.id = g.source_id
+                               WHERE g.claim_id = c.id AND g.edge_type <> 'contradicts' AND gs.metadata @> $6::jsonb)
+            END AS grounded,
+            CASE WHEN $6::jsonb IS NULL THEN c.thread_id END AS thread_id,
+            CASE WHEN $6::jsonb IS NULL OR EXISTS (SELECT 1 FROM public.sources y
+                                                    WHERE y.id = c.synthesis_id AND y.metadata @> $6::jsonb)
+                 THEN c.synthesis_id END AS synthesis_id,
             COALESCE((SELECT jsonb_agg(jsonb_build_object('edge_id', cs.id, 'source_id', s.id, 'edge_type', cs.edge_type,
                         'lifecycle', public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at),
                         'title', s.title, 'url', s.url) ORDER BY cs.id)
                         FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
-                       WHERE cs.claim_id = c.id), '[]'::jsonb) AS edges
+                       WHERE cs.claim_id = c.id AND ($6::jsonb IS NULL OR s.metadata @> $6::jsonb)), '[]'::jsonb) AS edges
        FROM public.claims c
-      WHERE ($1::uuid IS NULL OR c.thread_id = $1)
-        AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM public.claim_sources x WHERE x.claim_id = c.id AND x.source_id = $2))
-        AND ($3::uuid IS NULL OR c.synthesis_id = $3)
+      WHERE ($1::uuid IS NULL OR (c.thread_id = $1 AND $6::jsonb IS NULL))
+        AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM public.claim_sources x JOIN public.sources xs ON xs.id = x.source_id
+                                          WHERE x.claim_id = c.id AND x.source_id = $2
+                                            AND ($6::jsonb IS NULL OR xs.metadata @> $6::jsonb)))
+        AND ($3::uuid IS NULL OR (c.synthesis_id = $3 AND ($6::jsonb IS NULL OR EXISTS (
+              SELECT 1 FROM public.sources z WHERE z.id = $3 AND z.metadata @> $6::jsonb))))
         AND ($4::text IS NULL OR c.status = $4)
         AND ($5::text IS NULL OR c.text ILIKE '%' || $5 || '%')
         AND ($6::jsonb IS NULL OR c.metadata @> $6::jsonb)
       ORDER BY c.confidence DESC, c.created_at DESC
       LIMIT $7`,
-    [q.thread_id, q.source_id, q.synthesis_id, q.status, q.q, q.filter ? JSON.stringify(q.filter) : null, q.limit],
+    [q.thread_id, q.source_id, q.synthesis_id, q.status, q.q, mf, q.limit],
   );
   const out = rows.map((r) => shapeClaim(r, q.evidenceOnly)).filter((c) => c !== null);
   return { count: out.length, claims: out };
@@ -170,7 +197,9 @@ export async function search(db: Db, s: SearchQuery) {
       [s.q, s.limit, mf],
     );
     hits.push(...(s.evidenceOnly ? rows.filter((r) => r.lifecycle === "active") : rows));
-    if (s.refinery_id && !s.evidenceOnly) hits.push(...await searchHeld(db, s.q, s.refinery_id, s.limit, mf));
+    // Held sources belong to a refinery, and refineries carry no metadata: under a filter they are
+    // out of scope whatever their own metadata says (rw-p0-contract2 attempt 2).
+    if (s.refinery_id && !s.evidenceOnly && !s.filter) hits.push(...await searchHeld(db, s.q, s.refinery_id, s.limit, mf));
   }
   return { query: s.q, kinds: s.kinds, scope: { refinery_id: s.refinery_id }, count: hits.length, results: hits };
 }

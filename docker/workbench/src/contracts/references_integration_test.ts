@@ -469,6 +469,26 @@ t("diffCheck: a current pin answers its pinned chunk; a bare pin keeps P0's same
   assertEquals((await call("POST", "/diff-check", { references: [{ reference_id: uuid() }] })).status, 404);
 });
 
+// Integration with P0 attempt 2 (rw-p0-contract2): under a filter a held source is out of scope
+// whatever its own metadata says (it belongs to a refinery, which carries no metadata). A bare pin
+// to a held source whose metadata even claims share=cloud is omitted, as P0's getHeld answers.
+t("diffCheck: under a filter a bare pin to a held source is omitted, even one whose metadata claims share=cloud", async () => {
+  const id = uuid();
+  await sql(`INSERT INTO public.held_sources (id, refinery_id, url, title, content, content_type, metadata)
+             VALUES ($1, $2, NULL, 'p2a held cloud-claiming', 'p2a held text', 'manual', '{"share":"cloud"}')`, [id, FX.idea]);
+  try {
+    const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+    const r = await call("POST", `/diff-check?metadata_filter=${f}`, { references: [{ source_id: id, revision: 1 }] });
+    assertEquals(r.status, 200, r.text);
+    assertEquals([r.json.results[0].state, r.json.results[0].lifecycle, r.json.results[0].current_revision], ["omitted", null, null]);
+    // unfiltered, the same pin is answered (the control)
+    const u = await call("POST", "/diff-check", { references: [{ source_id: id, revision: 1 }] });
+    assertEquals([u.json.results[0].lifecycle, u.json.results[0].current_revision], ["held", 1]);
+  } finally {
+    await sql(`DELETE FROM public.held_sources WHERE id = $1`, [id]);
+  }
+});
+
 // ── reference(id) over a record ────────────────────────────────────────────────────────────
 t("reference(id) of a record: kind reference, read at the pin (state updated), record with selectors; fail closed under a filter", async () => {
   const r = await call("GET", `/references/${FX.referenceSpan}`);

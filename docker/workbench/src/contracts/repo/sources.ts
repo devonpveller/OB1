@@ -56,7 +56,11 @@ export interface HeldRow {
   metadata: Record<string, unknown>;
 }
 
+// A held source belongs to exactly one refinery, and a refinery (an idea) carries no metadata, so
+// under a filter a held source is out of scope whatever its own metadata says: answering it would
+// name the refinery (rw-p0-contract2 attempt 2). Unfiltered callers read it as before.
 export async function getHeld(db: Db, id: string, f: MetadataFilter): Promise<HeldRow | null> {
+  if (f) return null;
   const rows = await db.query<HeldRow>(
     `SELECT h.id, h.refinery_id, h.url, h.title, h.content_type, h.revision,
             left(h.content, 500) AS excerpt, rus.status, h.metadata
@@ -103,8 +107,36 @@ export async function tombstoneBySource(db: Db, sourceId: string): Promise<Tombs
   return (await db.query<TombstoneRow>(`${TOMBSTONE_SELECT} WHERE t.source_id = $1`, [sourceId]))[0] ?? null;
 }
 
-export async function tombstoneById(db: Db, id: string): Promise<TombstoneRow | null> {
-  return (await db.query<TombstoneRow>(`${TOMBSTONE_SELECT} WHERE t.id = $1`, [id]))[0] ?? null;
+// `f` scopes by the erased source's metadata, snapshotted onto the tombstone at erase time
+// (rw-p0-contract2): under the cloud door's filter only a tombstone of a share=cloud source
+// resolves; a tombstone with no snapshot ('{}', e.g. one written before the column) does not.
+// What an in-scope tombstone carries that names ANOTHER row is redacted to in-scope ids
+// (attempt 2, tester finding N4): attempts[].session_id and .note (a session carries no metadata;
+// the note is the door's free text about it), batch_run_id and eraser_run_id (runs are jobs,
+// which carry no metadata), readmitted_source_id unless that source is itself in scope, and
+// confidence (the score_at_removal snapshot: a mean over every claim the source grounded, in and
+// out of scope - the same value the scoped suppression context drops).
+export async function tombstoneById(db: Db, id: string, f: MetadataFilter = null): Promise<TombstoneRow | null> {
+  const mf = f ? JSON.stringify(f) : null;
+  const t = (await db.query<TombstoneRow & { readmitted_in_scope: boolean }>(
+    `SELECT x.*, EXISTS (SELECT 1 FROM public.sources r WHERE r.id = x.readmitted_source_id AND r.metadata @> $2::jsonb)
+                 AS readmitted_in_scope
+       FROM (${TOMBSTONE_SELECT} WHERE t.id = $1 AND ($2::jsonb IS NULL OR t.metadata @> $2::jsonb)) x`,
+    [id, mf],
+  ))[0];
+  if (!t) return null;
+  const { readmitted_in_scope, ...row } = t;
+  if (!mf) return row;
+  return {
+    ...row,
+    batch_run_id: null,
+    eraser_run_id: null,
+    confidence: null,
+    readmitted_source_id: readmitted_in_scope ? row.readmitted_source_id : null,
+    attempts: (Array.isArray(row.attempts) ? row.attempts : []).map((a) => ({
+      ...(a as Record<string, unknown>), session_id: null, note: null,
+    })),
+  };
 }
 
 export async function tombstoneForUrl(db: Db, url: string): Promise<TombstoneRow | null> {
@@ -138,7 +170,7 @@ export async function reference(
   const s = await getSource(db, id, opts.filter);
   if (s) {
     if (opts.evidenceOnly && !opts.visible.has(s.lifecycle)) return omitted(base);
-    return await sourceReference(db, s, opts.version, base);
+    return await sourceReference(db, s, opts.version, base, opts.filter);
   }
   const h = await getHeld(db, id, opts.filter);
   if (h) {
@@ -164,7 +196,7 @@ export function omitted(base: Record<string, unknown>) {
   return { ...base, state: "omitted", lifecycle: null, version: null, state_detail: { reason: "evidence_only" } };
 }
 
-export async function sourceReference(db: Db, s: SourceRow, version: number | null, base: Record<string, unknown>) {
+export async function sourceReference(db: Db, s: SourceRow, version: number | null, base: Record<string, unknown>, f: MetadataFilter) {
   const current = s.max_revision ?? 1;
   let excerpt = s.excerpt;
   let versionState = "current";
@@ -183,7 +215,7 @@ export async function sourceReference(db: Db, s: SourceRow, version: number | nu
     state,
     lifecycle: s.lifecycle,
     version: current,
-    state_detail: sourceStateDetail(s),
+    state_detail: sourceStateDetail(s, f),
     source: {
       title: s.title, url: s.url, content_type: s.content_type, domain: s.domain,
       family: sourceFamily(s.content_type, s.metadata), excerpt,
@@ -192,11 +224,19 @@ export async function sourceReference(db: Db, s: SourceRow, version: number | nu
   };
 }
 
-export function sourceStateDetail(s: SourceRow): Record<string, unknown> {
+// The suppression context is a snapshot taken at suppress time (lifecycle.ts suppress()). Beside
+// the source's own title / url / who / when it counts notebooks and citing pages (records with no
+// metadata) and averages the claims the source grounded (in and out of scope). Under a filter only
+// the source's own fields are kept - an ALLOW-LIST, so a key a later snapshot gains is dropped
+// (rw-p0-contract2 attempt 2, tester finding N4).
+const SCOPED_CONTEXT_KEYS = ["title", "url", "suppressed_by", "suppressed_at", "retracted_by", "committed_at"];
+
+export function sourceStateDetail(s: SourceRow, f: MetadataFilter = null): Record<string, unknown> {
   if (s.lifecycle === "suppressed" || s.lifecycle === "unlinked") {
+    const context: Record<string, unknown> = s.suppression_context ?? { retracted_by: s.retracted_by, committed_at: s.retraction_committed_at };
     return {
       reason: s.suppression_reason ?? (s.metadata?.purged ? "purged (legacy, no reason recorded)" : "retracted (legacy, no reason recorded)"),
-      context: s.suppression_context ?? { retracted_by: s.retracted_by, committed_at: s.retraction_committed_at },
+      context: f ? Object.fromEntries(Object.entries(context).filter(([k]) => SCOPED_CONTEXT_KEYS.includes(k))) : context,
     };
   }
   if (s.staged_retract) return { reason: "retraction staged; commits at the next compile", retracted_by: s.retracted_by };
@@ -229,13 +269,16 @@ export async function chunkContext(
   const state = s ? sourceRecordState({ lifecycle, staged_retract: s.staged_retract }) : "held";
   return {
     ...base, state, lifecycle,
-    state_detail: s ? sourceStateDetail(s) : { refinery_id: h!.refinery_id },
+    state_detail: s ? sourceStateDetail(s, opts.filter) : { refinery_id: h!.refinery_id },
     chunks: rows.map((r) => ({ idx: r.idx, content: r.content, is_target: r.idx === idx })),
   };
 }
 
 // quality(id): the factors that exist before the D15 model (P3a) - authority, the claims the
 // source grounds and their confidence. Version-stamped so P3a's model replaces it visibly.
+// Under a filter the claim aggregates count and average only claims whose metadata contains it
+// (rw-p0-contract2 attempt 2, tester finding N2): an in-scope source's score says nothing about
+// the out-of-scope claims it also grounds.
 export async function quality(db: Db, reg: RegistryReader, id: string, f: MetadataFilter) {
   const s = await getSource(db, id, f);
   const userTerm = termDef((await reg.entry("credibility_terms", "user_provided"))?.definition);
@@ -252,15 +295,15 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
             (CASE WHEN $2::text ~* '\\.(gov|edu|mil)(:|/|$)' OR $3::text ~* '://[^/]*\\.(gov|edu|mil)(:|/|$)'
                    OR $4::text = 'primary' THEN 1.0 ELSE 0.85 END)::float AS authority
        FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
-      WHERE cs.source_id = $1`,
-    [id, s.domain ?? "", s.url ?? "", String(s.metadata?.authority ?? "")],
+      WHERE cs.source_id = $1 AND ($5::jsonb IS NULL OR c.metadata @> $5::jsonb)`,
+    [id, s.domain ?? "", s.url ?? "", String(s.metadata?.authority ?? ""), f ? JSON.stringify(f) : null],
   );
   const q = rows[0];
   const mean = q?.mean === null || q?.mean === undefined ? null : Number(q.mean);
   return {
     source_id: id, lifecycle: s.lifecycle,
     state: sourceRecordState({ lifecycle: s.lifecycle, staged_retract: s.staged_retract }),
-    state_detail: sourceStateDetail(s),
+    state_detail: sourceStateDetail(s, f),
     family: sourceFamily(s.content_type, s.metadata),
     score: {
       value: mean, refinery_scoped: null, version: "claim-confidence-mean-v1",

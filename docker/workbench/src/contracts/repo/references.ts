@@ -65,7 +65,8 @@ export async function referenceById(
   const s = await getSource(db, rec.source_id, null);
   if (s) {
     if (opts.evidenceOnly && !opts.visible.has(s.lifecycle)) return omitted({ ...base, record: null });
-    return await sourceReference(db, s, rec.pinned_revision, base);
+    // the filter is null here (a filtered caller returned above): records carry no metadata
+    return await sourceReference(db, s, rec.pinned_revision, base, null);
   }
   const h = await getHeld(db, rec.source_id, null);
   if (h) {
@@ -571,10 +572,13 @@ const TARGET_COLS = (sid: string, idx: string) => `
        WHEN h.id IS NOT NULL THEN EXISTS (SELECT 1 FROM public.held_source_chunks c WHERE c.held_source_id = h.id AND c.idx = ${idx})
        ELSE false END AS chunk_exists`;
 
+// Under a filter only a SOURCE whose metadata contains it is visible: a held source is out of scope
+// whatever its own metadata says (it belongs to a refinery, which carries no metadata - P0's getHeld
+// rule, rw-p0-contract2 attempt 2), and an erased or unknown id is omitted.
 async function diffBarePins(db: Db, refs: { source_id: string; revision: number; chunk_idx?: number }[], f: MetadataFilter) {
   return await db.query<DiffRow>(
     `SELECT q.ord::int AS ord, NULL::text AS reference_id, q.source_id::text AS source_id, q.revision AS pinned_revision,
-            q.chunk_idx, ($4::jsonb IS NULL OR COALESCE(s.metadata, h.metadata) @> $4::jsonb) AS visible,
+            q.chunk_idx, ($4::jsonb IS NULL OR COALESCE(s.metadata @> $4::jsonb, false)) AS visible,
             NULL::text AS reanchor, NULL::int AS moved_idx, ${TARGET_COLS("q.source_id", "q.chunk_idx")}
        FROM unnest($1::uuid[], $2::int[], $3::int[]) WITH ORDINALITY AS q(source_id, revision, chunk_idx, ord)
        LEFT JOIN public.sources s ON s.id = q.source_id
@@ -650,8 +654,8 @@ function result(r: DiffRow) {
 }
 
 // diffCheck(references | holder). A metadata filter (the cloud door) fails closed for reference
-// records and holders, which carry no metadata; a bare pin is answered only for a source whose
-// metadata contains the filter.
+// records and holders, which carry no metadata; a bare pin is answered only for a source (never a
+// held source) whose metadata contains the filter.
 export async function diffCheck(db: Db, input: DiffCheckInput, f: MetadataFilter) {
   if (input.holder) {
     if (f) return { results: [] };

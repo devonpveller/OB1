@@ -15,7 +15,12 @@
 #   4b. builds openbrain-research:wt-<id>, runs it on database A with two caller keys, and runs
 #      integrations/research-service/origin.e2e.test.ts against it (D17 origin binding)
 #   5. database B: a fresh chain + fixtures; starts the :wt workbench and a stub embedder; runs
-#      Dredd (rw-dredd:wt-<id>) against every example in generated/openapi.json
+#      (5a) integrations/kubernetes-deployment/contract-scope.e2e.test.ts - the openbrain-mcp
+#      adapter calling the workbench under the cloud door's forced {"share":"cloud"} filter
+#      (rw-p0-contract2): every cloud tool, with the arguments the REAL gateway policy forwards
+#      (contract-scope-calls.py runs openbrain-gateway/app.py _apply_policy on the host, with
+#      -Python), checked for every out-of-scope string - then Dredd (rw-dredd:wt-<id>) against every example in
+#      generated/openapi.json
 #   6. runs the eleven-router smoke (scripts/checks/smoke-workbench-routers.ps1) against the
 #      :wt workbench twice and compares (the script works; the routers answer), then against a
 #      workbench built from -BaseSha on the same database: the pre-change capture, which must
@@ -43,7 +48,10 @@ param(
   [string]$BaseSha = 'ce731ff',
   # Re-record src/contracts/schemas/examples.ts from the fixture (then: deno task contract:gen,
   # and run again without the switch). Skips Dredd and the smoke.
-  [switch]$RecordExamples
+  [switch]$RecordExamples,
+  # The interpreter that loads openbrain-gateway/app.py (needs httpx and starlette) for step 5a.
+  # Default: <checkout>\.venv, then the main checkout's .venv (a worktree has none), then python.
+  [string]$Python = ''
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -65,6 +73,7 @@ $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwp0-evidence-$rand" }
 New-Item -ItemType Directory -Force $Evidence | Out-Null
 $stage = Join-Path $env:TEMP "rwp0-initdb-$rand"
+$callsDir = Join-Path $env:TEMP "rwp0-calls-$rand"
 
 $script:fail = 0
 function Pass([string]$m) { Write-Host "  PASS  $m" }
@@ -271,6 +280,41 @@ try {
     Write-Host '  next: deno task contract:gen, then run again without -RecordExamples'
     throw 'recorded'
   }
+  # 5a. the cloud door's forced filter through the adapter (rw-p0-contract2). FIRST the REAL
+  # gateway policy (openbrain-gateway/app.py, loaded by contract-scope-calls.py; no server, no
+  # network) polices every cloud tool x its argument sets x eight metadata_filter shapes and
+  # writes what it would forward; THEN the openbrain-mcp adapter
+  # (integrations/kubernetes-deployment/contract-tools.ts, mounted read-only) sends each forwarded
+  # call to this :wt workbench, and no answer may carry an out-of-scope string (the test also
+  # keeps attempt 1's dependence/tombstone test). Runs in the :wt image with ITS import map
+  # (cached deps, offline); the test seeds its own run-unique rows on database B and removes them
+  # before Dredd.
+  Write-Host '[5a] every cloud-door contract tool through the gateway policy and the adapter under the forced cloud filter'
+  $k8s = Join-Path $ob1 'integrations\kubernetes-deployment'
+  $py = $Python
+  if (-not $py) {
+    $common = (& git -C $repo rev-parse --path-format=absolute --git-common-dir 2>$null)
+    $cands = @((Join-Path $repo '.venv\Scripts\python.exe'))
+    if ($common) { $cands += (Join-Path (Split-Path -Parent ($common.Trim())) '.venv\Scripts\python.exe') }
+    $py = @($cands | Where-Object { Test-Path $_ }) | Select-Object -First 1
+    if (-not $py) { $py = 'python' }
+  }
+  New-Item -ItemType Directory -Force $callsDir | Out-Null
+  $o = (& $py (Join-Path $k8s 'contract-scope-calls.py') (Join-Path $repo 'openbrain-gateway\app.py') `
+      (Join-Path $k8s 'contract-tools.json') $callsDir 2>&1 | ForEach-Object { "$_" }) -join "`n"
+  $pyRc = $LASTEXITCODE
+  Save 'contract-scope-calls.log' $o
+  Check (($pyRc -eq 0) -and (Test-Path (Join-Path $callsDir 'calls.json'))) "gateway policy over the cloud tools ($py): $(($o -split "`n")[0])"
+  $o = Dk run --rm --label $label --network $net -v "${k8s}:/k8s:ro" -v "${callsDir}:/calls:ro" `
+    -e "CONTRACT_SCOPE_E2E_URL=http://${wbName}:8000" -e "CONTRACT_SCOPE_E2E_KEY=$key" `
+    -e "CONTRACT_SCOPE_E2E_DB_HOST=$dbB" -e "CONTRACT_SCOPE_E2E_DB_PASSWORD=$pw" -e CONTRACT_SCOPE_E2E_CALLS=/calls/calls.json `
+    $tag deno test --config /app/deno.json --no-lock --cached-only --allow-net --allow-env --allow-read /k8s/contract-scope.e2e.test.ts
+  Save 'contract-scope-e2e.log' ($o -replace $key, '***')
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed( \(\d+ steps?\))? \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
+  $line = @(($o -split "`n") | Where-Object { $_ -match 'SUMMARY calls=' }) | Select-Object -First 1
+  Check ($line -match 'leaking_calls=0 ') "cloud scoping probe: $(([string]$line).Trim() -replace ' control_hits_by_tool=.*$', '')"
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[2].Value -eq '2' -and $sum.Groups[4].Value -eq '0') "cloud scoping e2e: $($sum.Value)"
+
   $null = Dk image inspect $dreddTag
   if ($script:rc -ne 0) {
     $o = Dk build --label $label -t $dreddTag -f (Join-Path $ct 'dredd.Dockerfile') $ct
@@ -418,6 +462,7 @@ try {
   if ($made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $made.images) { $null = Dk rmi $i } }
   Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item $callsDir -Recurse -Force -ErrorAction SilentlyContinue
   if ($made.smokeDir) { Remove-Item $made.smokeDir -Recurse -Force -ErrorAction SilentlyContinue }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   $leftNet = (Dk network ls --filter "label=$label" --format '{{.Name}}' | Out-String).Trim()

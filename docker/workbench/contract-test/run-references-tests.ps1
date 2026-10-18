@@ -48,8 +48,9 @@ param(
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$Evidence = '',
   [switch]$KeepImages,
-  # The OB1 commit P2a branched from (the P0 tip): the pre-change workbench is built from it.
-  [string]$BaseSha = '29834e3',
+  # The pre-change workbench is built from this OB1 commit: P0's FINAL tip (rw-p0-contract2 attempt 2,
+  # 5d919e6), which P2a was forward-merged onto on 2026-10-18 (P2a first branched from 29834e3).
+  [string]$BaseSha = '5d919e6',
   [switch]$SkipDredd
 )
 $ErrorActionPreference = 'Continue'
