@@ -700,6 +700,52 @@ t("restore still refuses a purged source", async () => {
   assertEquals((await lifeOf(s)).committed, true);
 });
 
+
+// ── research-workbench P3a (rw-p3a-entail): quality(id) names its sources, never a bare number ──
+t("P3a: quality(id) names the corroborating and contradicting sources behind the D15 score, with reasons and history", async () => {
+  const subject = await newSource({ url: "https://blog.example.com/p3a-subject", title: "a post that links a paper" });
+  const paper = await newSource({ url: "https://journal.example.org/p3a-paper", title: "the linked paper" });
+  const peer = await newSource({ url: "https://news.example.net/p3a-peer", title: "a peer that co-grounds" });
+  const against = await newSource({ url: "https://forum.example.com/p3a-against", title: "a source that contradicts" });
+  await sql(`UPDATE public.sources SET metadata = metadata || $2::jsonb WHERE id = $1`, [paper, JSON.stringify({
+    credibility: { family: "scholarly", claim_kind: "general_theory", score: 0.8, total: 0.8, model_version: "d15 weights v1 paper p1",
+      signals: { cited_by: 40, author_works_count: 90, age_years: 3 }, reasons: ["fixture"] } })]);
+  await sql(`UPDATE public.sources SET metadata = metadata || $2::jsonb WHERE id = $1`, [subject, JSON.stringify({
+    credibility: { family: "general", claim_kind: "general_theory", score: 0.27, total: 0.535, model_version: "d15 weights v1 paper p1",
+      signals: { author_identity: "A. Blogger", domain_class: "general", primary: false,
+        link_structure: { inbound_corroborations: 1, found_via: 0 }, entailment_agreement: { supports: 1, partial: 0, unsupported: 0 } },
+      reasons: ["domain class general: 0.22", "author stated (A. Blogger): +0.05"] } })]);
+  await sql(`INSERT INTO public.source_credibility_history (source_id, family, claim_kind, score, total, model_version, signals, reasons)
+             VALUES ($1, 'general', 'general_theory', 0.27, 0.535, 'd15 weights v1 paper p1', '{}', '[]')`, [subject]);
+  await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+             VALUES ($1, $2, 'strong', 0.4, 'the claim both state', 'general_theory', 'supports', 'd15 weights v1 paper p1')`, [paper, subject]);
+  // a partial verdict cannot transfer (OBC02)
+  let refused = "";
+  try {
+    await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+               VALUES ($1, $2, 'weak', 0.1, 'x', 'general_theory', 'partial', 'd15 weights v1 paper p1')`, [subject, paper]);
+  } catch (e) { refused = (e as Error).message; }
+  assert(/does not transfer/.test(refused), `a partial verdict transferred: ${refused}`);
+  const claim = uuid();
+  await sql(`INSERT INTO public.claims (id, text, metadata) VALUES ($1, 'P3a quality fixture claim', '{"claim_kind":"general_theory"}')`, [claim]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $2, 'states'), ($1, $3, 'corroborates'), ($1, $4, 'contradicts')`,
+    [claim, subject, peer, against]);
+  const q = await call("GET", `/sources/${subject}/quality`);
+  assertEquals(q.status, 200);
+  assert(S.Quality.safeParse(q.json).success, JSON.stringify(S.Quality.safeParse(q.json).error?.issues ?? []));
+  assertEquals(q.json.family, "general");
+  assertEquals(q.json.claim_kind, "general_theory");
+  assert(typeof q.json.score.value === "number" && q.json.score.value > 0, "the D15 total");
+  assertEquals(q.json.score.version, "d15 weights v1 paper p1");
+  const by = (list: Array<Record<string, unknown>>) => list.map((x) => x.source_id);
+  assert(by(q.json.corroborated_by).includes(paper), "the paper whose corroboration is in the score is named");
+  assert(by(q.json.corroborated_by).includes(peer), "the co-grounding source is named");
+  assertEquals(q.json.corroborated_by.find((x: Record<string, unknown>) => x.source_id === paper).amount, 0.4);
+  assert(by(q.json.contradicted_by).includes(against), "the contradicting source is named");
+  assertEquals(q.json.signals.domain_class, "general");
+  assertEquals(q.json.history.length, 1);
+  assert(q.json.factors.some((f: Record<string, unknown>) => f.name === "corroboration_received"), "the received corroboration is a factor");
+});
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();

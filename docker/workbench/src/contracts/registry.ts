@@ -33,6 +33,7 @@ export const REGISTRY = {
   refineryMemberKinds: "refinery_member_kinds",
   ideaStates: "idea_states",
   credibilityTerms: "credibility_terms",
+  claimKinds: "claim_kinds",
   trailEventKinds: "trail_event_kinds",
   timelineEventKinds: "timeline_event_kinds",
   settings: "settings",
