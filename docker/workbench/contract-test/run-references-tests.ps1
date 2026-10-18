@@ -2,6 +2,7 @@
 # references as first-class records.
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-references-tests.ps1 [-Id <owner id>] [-Evidence <dir>]
+#       [-Subnet <a.b.c.d/nn> | -SubnetBase <a.b>]   (the network's subnet, pinned outside 192.168.0.0/16)
 #
 # What it does, and ONLY this:
 #   1. stages the REAL initdb chain from docker-compose.yml (every mounted init*.sql, P0's 230
@@ -51,7 +52,10 @@ param(
   # The pre-change workbench is built from this OB1 commit: P0's FINAL tip (rw-p0-contract2 attempt 2,
   # 5d919e6), which P2a was forward-merged onto on 2026-10-18 (P2a first branched from 29834e3).
   [string]$BaseSha = '5d919e6',
-  [switch]$SkipDredd
+  [switch]$SkipDredd,
+  # rw-p6a-resolve attempt 2: the disposable network's subnet (empty = a /24 drawn from -SubnetBase)
+  [string]$Subnet = '',
+  [string]$SubnetBase = '10.244'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -89,6 +93,29 @@ function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 function Dk { $o = (& docker @args 2>&1 | ForEach-Object { "$_" }) -join "`n"; $script:rc = $LASTEXITCODE; return $o }
 function Save([string]$name, [string]$text) {
   [System.IO.File]::WriteAllText((Join-Path $Evidence $name), $text, (New-Object System.Text.UTF8Encoding $false))
+}
+# The network's subnet is PINNED (rw-p6a-resolve attempt 2, tester near-miss 8; P3a's runners do
+# the same with the same parameter names): the daemon's default pool runs into 192.168.0.0/20, and a
+# Docker network there once cut the host off its home LAN (192.168.1.x). -Subnet names one; otherwise
+# a /24 is drawn from -SubnetBase and retried on an overlap. Anything inside 192.168.0.0/16, a prefix
+# shorter than /16 or longer than /28, or a malformed value is refused before docker is asked.
+function Test-SubnetAllowed([string]$s) {
+  if ($s -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$') { return $false }
+  $o = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]); $len = [int]$Matches[5]
+  if (@($o | Where-Object { $_ -gt 255 }).Count -gt 0) { return $false }
+  if ($len -lt 16 -or $len -gt 28) { return $false }
+  if ($o[0] -eq 192 -and $o[1] -eq 168) { return $false }
+  return $true
+}
+function New-PinnedNetwork([string]$name) {
+  if ($SubnetBase -notmatch '^(\d{1,3})\.(\d{1,3})$' -or $SubnetBase -match '^192\.168$') { Fail "refusing -SubnetBase '$SubnetBase'"; return '' }
+  $cands = if ($Subnet) { @($Subnet) } else { @(1..8 | ForEach-Object { "$SubnetBase.$(Get-Random -Minimum 1 -Maximum 255).0/24" }) }
+  foreach ($s in $cands) {
+    if (-not (Test-SubnetAllowed $s)) { Fail "refusing subnet '$s' (inside 192.168.0.0/16, or malformed)"; return '' }
+    $null = Dk network create --internal --subnet $s --label $label $name
+    if ($script:rc -eq 0) { return $s }
+  }
+  return ''
 }
 function Psql([string]$db, [string]$sql) {
   # base64 through the shell: PowerShell 5.1 strips embedded double quotes from native arguments
@@ -229,10 +256,12 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, labelled)"
-  if ($script:rc -ne 0) { throw 'network' }
+  $sub = New-PinnedNetwork $net
+  Check ($sub -ne '') "network $net created (internal, labelled, --subnet $sub)"
+  if ($sub -eq '') { throw 'network' }
   $made.net = $true
+  $got = (Dk network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $net).Trim()
+  Check (($got -eq $sub) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
 
   # ---------------------------------------------------------------- 3. the :wt image
   Write-Host "[3] build $tag (the build runs the image test gate)"

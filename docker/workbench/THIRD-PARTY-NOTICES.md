@@ -42,9 +42,10 @@ pinned version's own metadata on 2026-10-17 (registry entry, LICENSE at the tag,
 | Name | Version | Licence | Use | URL |
 |---|---|---|---|---|
 | Deno | 2.3.3 | MIT | runtime (base image denoland/deno:2.3.3) | https://github.com/denoland/deno |
-| pandoc | 3.11 (upstream release binary pandoc-3.11-linux-amd64, sha256 37edb3bb...062ab6) | GPL-2.0-or-later (COPYRIGHT and pandoc.cabal at tag 3.11) | SEPARATE PROCESS only (the export: markdown + a JSON metadata file in, PDF/DOCX/MD/TXT out, --citeproc built in); never linked, no Lua or JSON filter, no JSON-AST round trip (D9 rule 4); source offer below | https://pandoc.org |
+| pandoc | 3.11 (upstream release binary pandoc-3.11-linux-amd64, sha256 37edb3bb...062ab6) | GPL-2.0-or-later (COPYRIGHT and pandoc.cabal at tag 3.11) | SEPARATE PROCESS only (the export: markdown + a JSON metadata file + a CSL-JSON bibliography file + the verified CSL style in, PDF/DOCX/MD/TXT out, --citeproc built in); never linked, no Lua or JSON filter, no JSON-AST round trip (D9 rule 4); source offer below | https://pandoc.org |
 | Typst | 0.15.1 (upstream release binary typst-x86_64-unknown-linux-musl, sha256 a6d077d0...33118c) | Apache-2.0 (LICENSE in the release archive; its NOTICE is carried to /usr/local/share/doc/typst/NOTICE) | separate process: pandoc's PDF engine | https://typst.app |
 | Noto CJK fonts (fonts-noto-cjk) | Debian 1:20240730+repack1-1 | OFL-1.1 (Debian copyright: SIL-1.1, Copyright 2010-2012 Google Corporation) | font data: Noto Serif CJK SC is the PDF's main face (CJK glyphs, acceptance 4) | https://github.com/notofonts/noto-cjk |
+| Noto Color Emoji (fonts-noto-color-emoji) | Debian 2.051-0+deb13u1 | OFL-1.1 for the font (Debian copyright: `Files: fonts/*`, SIL-1.1, Copyright 2013-2017 Google Inc.; the build tooling is Apache-2.0 and not shipped) | font data: the face Typst falls back to for emoji (rw-p6a-resolve attempt 2) | https://github.com/googlefonts/noto-emoji |
 | poppler-utils (pdftoppm, pdftotext, pdffonts, pdfinfo) | 25.03.0 (Debian 25.03.0-5+deb13u4) | GPL-2.0-only OR GPL-3.0-only (Debian copyright: GPL-2 or GPL-3) | SEPARATE PROCESS only, over files: reads the export's PDFs back in the image's TEST and PARITY stages; not in the runtime image | https://poppler.freedesktop.org |
 | WeasyPrint (parity stage only, never shipped) | 62.3 (Debian 62.3-1) | BSD-3-Clause | the PDF engine before P6a; kept ONLY in the image's parity stage to render the parity fixture through the retired path (acceptance 6); removed from the runtime image | https://weasyprint.org |
 | git | 2.47.3 (Debian 1:2.47.3-0+deb13u1) | GPL-2.0-only | SEPARATE PROCESS only (vault commits) | https://git-scm.com |
@@ -169,5 +170,9 @@ build stages only.
   copyright file: `Files: *`, `Copyright: 2010-2012, Google Corporation`, `License: SIL-1.1`); the
   font files are used unmodified from Debian's `fonts-noto-cjk` 1:20240730+repack1-1, whose
   copyright file carries the licence text (`/usr/share/doc/fonts-noto-cjk/copyright` in the image).
+- Noto Color Emoji (the export PDF's emoji fallback face): SIL Open Font License 1.1 (Debian's
+  copyright file: `Files: fonts/*`, `Copyright: 2013-2017 Google Inc.`, `License: SIL-1.1`); the
+  font file is used unmodified from Debian's `fonts-noto-color-emoji` 2.051-0+deb13u1, whose
+  copyright file carries the licence text (`/usr/share/doc/fonts-noto-color-emoji/copyright`).
 - Typst embeds its own default fonts (Libertinus Serif, New Computer Modern, DejaVu Sans Mono);
   their licences are listed in Typst's NOTICE, carried to `/usr/local/share/doc/typst/NOTICE`.

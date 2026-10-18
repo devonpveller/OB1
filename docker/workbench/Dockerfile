@@ -39,11 +39,14 @@ LABEL org.opencontainers.image.revision="$OB1_SHA"
 # the G1 exception). The Deno base image doesn't ship it.
 # fonts-noto-cjk (OFL-1.1): the PDF's main face, Noto Serif CJK SC, pan-CJK, so Typst renders
 # Chinese, Japanese and Korean text with real glyphs (P6a acceptance 4).
+# fonts-noto-color-emoji (OFL-1.1): an emoji face Typst falls back to (rw-p6a-resolve attempt 2: an
+# emoji rendered as a tofu box with status 200). A character no installed face covers is refused
+# before Typst runs (src/export/glyphs.ts), so a PDF never carries a box.
 # The export (P6a) converts markdown to PDF/DOCX/MD/TXT with pandoc --citeproc, locally (no
 # network); Typst is pandoc's PDF engine. WeasyPrint, the PDF engine before P6a, is removed: the
 # parity fixture passed (see the parity stage).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates fonts-noto-cjk \
+  && apt-get install -y --no-install-recommends git ca-certificates fonts-noto-cjk fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /out/bin/pandoc /out/bin/typst /usr/local/bin/
 # Typst's LICENSE and NOTICE carried through (Apache-2.0 section 4).

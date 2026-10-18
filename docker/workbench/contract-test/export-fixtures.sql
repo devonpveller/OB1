@@ -26,4 +26,29 @@ INSERT INTO public.sources (id, url, title, content, content_type, domain, metad
    'Fixture declared-DOI record: the opening line of an authored text.', 'paper', 'example.org',
    '{"scholarly": {"doi": "10.5555/p6a.095"}}');
 
+-- rw-p6a-resolve attempt 2: the tester's hostile shapes as fixtures.
+-- 105-109: the stub answers these with a redirect or an echoing 200 (stub-scholarly.ts)
+INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata)
+SELECT ('f6a00000-0000-4000-8000-' || lpad((104 + n)::text, 12, '0'))::uuid,
+       'https://doi.org/10.5555/p6a.' || c,
+       'Fixture hostile-answer record ' || c,
+       'Fixture hostile-answer record ' || c || ': an authored fixture text.', 'paper', 'doi.org', '{}'::jsonb
+  FROM (VALUES (1, 'r01'), (2, 'r02'), (3, 'r03'), (4, 'r04'), (5, 't01')) AS v(n, c);
+
+-- 110-115: identifiers outside the grammar, declared in the metadata (each refused before any request)
+INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata)
+SELECT ('f6a00000-0000-4000-8000-' || lpad((109 + n)::text, 12, '0'))::uuid,
+       'https://example.org/p6a/hostile-' || n,
+       'Fixture hostile-identifier record ' || n,
+       'Fixture hostile-identifier record ' || n || ': an authored fixture text.', 'paper', 'example.org',
+       jsonb_build_object('doi', d)
+  FROM (VALUES (1, '10.5555/adv.inj@evil.stub'), (2, '10.5555/../../../x'), (3, '10.5555/adv.001,10.5555/adv.002'),
+               (4, '10.5555/adv?api_key=stolen&x=http://evil.stub/'), (5, '10.5555/' || repeat('a', 300)),
+               (6, '10.5555/adv.inj' || chr(252) || chr(8364))) AS v(n, d);
+
+-- 116: a DOI no other note cites (the egress case: its resolution is never cached before)
+INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata) VALUES
+  ('f6a00000-0000-4000-8000-000000000116', 'https://doi.org/10.5555/p6a.e01', 'Fixture egress record',
+   'Fixture egress record: an authored fixture text.', 'paper', 'doi.org', '{}');
+
 NOTIFY pgrst, 'reload schema';

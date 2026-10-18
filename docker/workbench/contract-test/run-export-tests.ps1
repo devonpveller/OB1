@@ -2,11 +2,13 @@
 # the resolver, pandoc citeproc with a CSL style chosen from the registry, Typst PDFs.
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-export-tests.ps1 [-Id <owner id>] [-Evidence <dir>]
+#       [-Subnet <a.b.c.d/nn> | -SubnetBase <a.b>]
 #
 # What it does, and ONLY this:
 #   1. stages the REAL initdb chain from docker-compose.yml (every mounted init*.sql, P6a's 250 slot)
-#   2. creates ONE internal docker network on a pinned subnet outside 192.168.0.0/16; every container
-#      and the network are labelled ai-stack.harness.owner=<Id>
+#   2. creates ONE internal docker network on a PINNED subnet (-Subnet, or a /24 from -SubnetBase;
+#      anything in 192.168.0.0/16 refused before docker is asked, the result inspected); every
+#      container and the network are labelled ai-stack.harness.owner=<Id>
 #   3. builds the workbench three ways, never :local: the runtime image (its build runs the test
 #      gate), the test stage and the parity stage; checks the runtime image carries no WeasyPrint
 #      and no poppler, and that it is built from the pinned pandoc and Typst
@@ -26,7 +28,16 @@
 #           CJK note's PDF (acceptance 4) and, RED, the same export with the CJK fonts hidden FAILS
 #        f. shipped inert / fail-closed / one service: a workbench with no key and no mailto, one with
 #           no proxy, one with the key but no mailto - each refuses what it cannot resolve, naming
-#           it, and the stub sees no request from it
+#           it, and the stub sees no request from it; "Copy page" (mode=copy) answers 200 with the
+#           unresolved references marked UNRESOLVED (attempt 2, decision C)
+#        g. attempt 2 (the tester's adversarial shapes): redirects (Crossref->OpenAlex, OpenAlex->
+#           Crossref, a third host, the key echoed in Location) and a 200 echoing the key - each
+#           reference fails, 0 follow-ups, nothing cached; malformed identifiers refused before any
+#           request; raw HTML absent from MD/DOCX/PDF/TXT; a title with @/#set/$x$/\ exports and
+#           prints literally; emoji render, an uncovered character is refused (422 glyphs); the
+#           refused export's retry asks only for the dead DOI (decision B); a one-byte-modified style
+#           and a row-only style refused at use (503); a non-proxy egress names a code, no address.
+#           A DIRECT CATCHER holding the service names as aliases must see 0 requests.
 #   6. tears down exactly what it created (containers with -v, their volumes recorded first);
 #      verifies nothing labelled <Id> is left, no volume of ours is left, no :local image changed
 # It never touches the live stack: no compose up/down, no ai-stack_* / open-brain_* network, no
@@ -39,7 +50,11 @@ param(
   [switch]$KeepImages,
   # The pre-change workbench (the RED of acceptance 2) is built from this OB1 commit: P2a's
   # integration merge, the base P6a was cut from.
-  [string]$BaseSha = '0741b36'
+  [string]$BaseSha = '0741b36',
+  # rw-p6a-resolve attempt 2 (tester near-miss 8; the parameter names of P3a's runners): the
+  # disposable network's subnet. Empty = a /24 drawn from -SubnetBase.
+  [string]$Subnet = '',
+  [string]$SubnetBase = '10.231'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -49,10 +64,9 @@ $wb = Split-Path -Parent $ct
 $dockerDir = Split-Path -Parent $wb
 $ob1 = Split-Path -Parent $dockerDir
 $rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
-$octet = Get-Random -Minimum 16 -Maximum 250
-$subnet = "10.231.$octet.0/24"
 $net = "rwp6a-net-$rand"
 $dbName = "rwp6a-db-$rand"; $stubName = "rwp6a-stub-$rand"; $wbName = "rwp6a-wb-$rand"; $baseName = "rwp6a-wbbase-$rand"
+$catchName = "rwp6a-catch-$rand"
 $short = ($Id -replace '^wt-', '')
 $tag = "openbrain-workbench:wt-$short"
 $testTag = "openbrain-workbench:wt-$short-test"
@@ -82,6 +96,28 @@ function Save([string]$name, [string]$text) {
 function Psql([string]$sql) {
   $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sql))
   return Dk exec $dbName sh -c "echo $b64 | base64 -d | psql -U postgres -d openbrain -X -q -At -v ON_ERROR_STOP=1"
+}
+# The network's subnet is PINNED: the daemon's default pool runs into 192.168.0.0/20, and a Docker
+# network there once cut the host off its home LAN (192.168.1.x). -Subnet names one; otherwise a /24
+# is drawn from -SubnetBase and retried on an overlap. Anything inside 192.168.0.0/16, a prefix
+# shorter than /16 or longer than /28, or a malformed value is refused before docker is asked.
+function Test-SubnetAllowed([string]$s) {
+  if ($s -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$') { return $false }
+  $o = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]); $len = [int]$Matches[5]
+  if (@($o | Where-Object { $_ -gt 255 }).Count -gt 0) { return $false }
+  if ($len -lt 16 -or $len -gt 28) { return $false }
+  if ($o[0] -eq 192 -and $o[1] -eq 168) { return $false }
+  return $true
+}
+function New-PinnedNetwork([string]$name) {
+  if ($SubnetBase -notmatch '^(\d{1,3})\.(\d{1,3})$' -or $SubnetBase -match '^192\.168$') { Fail "refusing -SubnetBase '$SubnetBase'"; return '' }
+  $cands = if ($Subnet) { @($Subnet) } else { @(1..8 | ForEach-Object { "$SubnetBase.$(Get-Random -Minimum 16 -Maximum 250).0/24" }) }
+  foreach ($s in $cands) {
+    if (-not (Test-SubnetAllowed $s)) { Fail "refusing subnet '$s' (inside 192.168.0.0/16, or malformed)"; return '' }
+    $null = Dk network create --internal --subnet $s --label $label $name
+    if ($script:rc -eq 0) { return $s }
+  }
+  return ''
 }
 function TestSummary([string]$o) { return ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', '')) }
 function Wait-Health([string]$name) {
@@ -124,7 +160,7 @@ $onEnv = @("OPENALEX_API_KEY=$oaKey", "CROSSREF_MAILTO=$mailto", "FETCH_PROXY_UR
 
 foreach ($t in @($tag, $testTag, $parityTag, $baseTag)) { if ($t -match ':local$') { throw 'refusing to build a :local tag' } }
 
-Write-Host "== rw-p6a-resolve test run  owner=$Id  net=$net ($subnet)  evidence=$Evidence"
+Write-Host "== rw-p6a-resolve test run  owner=$Id  net=$net  evidence=$Evidence"
 $null = Dk version --format '{{.Server.Version}}'
 if ($script:rc -ne 0) { Write-Host 'docker is not reachable'; exit 2 }
 function LocalSnapshot { (Dk images --filter 'reference=*:local' --format '{{.Repository}}:{{.Tag}} {{.ID}}' | Out-String).Trim() -split "`r?`n" | Sort-Object }
@@ -148,10 +184,12 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --subnet $subnet --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, $subnet, labelled)"
-  if ($script:rc -ne 0) { throw 'network' }
+  $subnet = New-PinnedNetwork $net
+  Check ($subnet -ne '') "network $net created (internal, labelled, --subnet $subnet)"
+  if ($subnet -eq '') { throw 'network' }
   $made.net = $true
+  $got = (Dk network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $net).Trim()
+  Check (($got -eq $subnet) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
 
   # ---------------------------------------------------------------- 3. images
   Write-Host "[3] build $tag, $testTag, $parityTag"
@@ -181,12 +219,14 @@ try {
   }
   Check ($gate.Success -and $gate.Groups[3].Value -eq '0') "image test gate: $($gate.Value) ($gateHow)"
   # the export's own suites, re-run with their output kept (the gate's log may be a cached layer):
-  # the real-program renders (numbering, styles, CJK glyphs with the tofu RED, the process tree)
+  # the real-program renders (numbering, styles, CJK glyphs with the tofu RED, the process tree) and,
+  # attempt 2, the resolver through a real loopback proxy (resolver_test), the renderer's safety
+  # cases (render_safety_test) and the route with fakes (exporter_test)
   $o = Dk run --rm --label $label --network none --entrypoint deno $testTag test --allow-net --allow-env --allow-read --allow-write --allow-run `
-    src/export/export_test.ts src/export/render_test.ts
+    src/export/
   Save 'export-suites.log' ($o -replace '\x1b\[[0-9;]*m', '')
   $es = TestSummary $o
-  Check ($es.Success -and $es.Groups[3].Value -eq '0') "export suites (export_test.ts + render_test.ts) in the test image: $($es.Value)"
+  Check ($es.Success -and $es.Groups[3].Value -eq '0') "export suites (every src/export/*_test.ts) in the test image: $($es.Value)"
   $cjk = ([regex]'cjk: fonts [^\r\n]+').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   if ($cjk.Success) { Write-Host "        $($cjk.Value)" }
   $o = Dk run --rm --label $label --network none --entrypoint deno $testTag task contract:check
@@ -240,6 +280,13 @@ try {
   $o = Dk run -d --name $stubName --label $label --network $net -v "${ct}:/ct:ro" --entrypoint deno $testTag run --allow-net /ct/stub-scholarly.ts
   if ($script:rc -eq 0) { $made.containers += $stubName }
   Check ($script:rc -eq 0) "stub $stubName started"
+  # the DIRECT CATCHER (attempt 2): the same stub holding the service names (and a third host's) as
+  # network aliases, so a request that skipped the proxy - or followed a redirect around it - lands
+  # here and is logged. The run expects it to see nothing.
+  $o = Dk run -d --name $catchName --label $label --network $net --network-alias api.openalex.stub --network-alias api.crossref.stub `
+    --network-alias evil.stub -v "${ct}:/ct:ro" --entrypoint deno $testTag run --allow-net /ct/stub-scholarly.ts
+  if ($script:rc -eq 0) { $made.containers += $catchName }
+  Check ($script:rc -eq 0) "direct catcher $catchName started (aliases api.openalex.stub, api.crossref.stub, evil.stub)"
   Check (Start-Workbench $wbName $tag $onEnv) "workbench $wbName (resolver ON: test key + mailto, proxy = the stub) answers /health"
 
   # a. acceptance 1
@@ -331,14 +378,19 @@ try {
   $o = Client @('cjk', '/ev/exports/cjk.pdf', '/ct/export-vault/notes/p6a/cjk.md')
   Save 'cjk-check.log' $o
   Check ($script:rc -eq 0) "acceptance 4 (HTTP): $(($o -split "`n")[-1])"
-  # RED: the same export with the CJK faces hidden from the workbench must FAIL, never render tofu
+  # RED: the same export with the CJK faces hidden from the workbench must FAIL, never render tofu.
+  # Attempt 2: the CJK text is refused BEFORE Typst runs (422 glyphs, the characters named); a note
+  # whose text the remaining faces cover still fails, on the missing registered main face (503 font).
   $nf = "$wbName-nofonts"
   New-Item -ItemType Directory -Force $noFonts | Out-Null
   if (Start-Workbench $nf $tag $onEnv @('-v', "${noFonts}:/usr/share/fonts/opentype/noto:ro")) {
     $o = Export $nf 'notes/p6a/cjk.md' 'pdf' 'cjk-nofonts.json'
     $j = [System.IO.File]::ReadAllText((Join-Path $out 'cjk-nofonts.json'))
-    Save 'cjk-red.log' "$o`n$j"
-    Check (($o -match '^status 500 ') -and ($j -match 'unknown font family')) "RED: with the CJK faces missing the export FAILS (no tofu PDF): $o"
+    $o2 = Export $nf 'notes/p6a/web-only.md' 'pdf' 'web-only-nofonts.json'
+    $j2 = [System.IO.File]::ReadAllText((Join-Path $out 'web-only-nofonts.json'))
+    Save 'cjk-red.log' "$o`n$j`n$o2`n$j2"
+    Check (($o -match '^status 422 ') -and ($j -match '"code":"glyphs"') -and ($j -match 'no installed font covers U\+')) "RED: with the CJK faces missing the CJK export is refused before typesetting, the characters named (no tofu PDF): $o"
+    Check (($o2 -match '^status 503 ') -and ($j2 -match '"code":"font"') -and ($j2 -notmatch 'warning|typ:|/tmp/')) "RED: with the registered main face missing a Latin note fails 503 'font', no program report: $o2"
     $null = Dk rm -f -v $nf
   } else { Fail 'the no-fonts workbench did not start' }
 
@@ -358,6 +410,12 @@ try {
       Check (($o -match '^status 422 ') -and ($r -match '^PASS')) "$($cs.n): the arXiv and the declared-DOI references are refused, named ('$($cs.needle)')"
       $o = Export $name 'notes/p6a/web-only.md' 'pdf' "web-only-$($cs.n).pdf"
       Check ($o -match '^status 200 ') "$($cs.n): a note without persistent identifiers still exports: $o"
+      # decision C (tester near-miss 9): "Copy page" (mode=copy) is never refused for an unresolved
+      # reference: 200 inline plain text, each one marked UNRESOLVED, nothing requested
+      $o = Export $name 'notes/p6a/mixed.md' 'txt' "mixed-copy-$($cs.n).txt" '&mode=copy'
+      $t = [System.IO.File]::ReadAllText((Join-Path $out "mixed-copy-$($cs.n).txt"))
+      Save "mixed-copy-$($cs.n).log" "$o`n$t"
+      Check (($o -match '^status 200 .*mode copy unresolved 2$') -and ($t -match 'UNRESOLVED \(not resolved yet\): Fixture arXiv record') -and ($t -match 'A fixture web page')) "$($cs.n): Copy page answers 200 with the 2 unresolved references marked UNRESOLVED: $o"
       $null = Dk rm -f -v $name
     } else { Fail "the $($cs.n) workbench did not start" }
   }
@@ -372,6 +430,109 @@ try {
     Check (($o -match '^status 422 ') -and ($r -match '^PASS') -and (@($log4 | Where-Object { $_.host -eq 'api.crossref.stub' }).Count -eq 0)) 'key only: the arXiv work resolves (OpenAlex), the Crossref-only DOI is refused, named, and Crossref is never called'
     $null = Dk rm -f -v $name
   } else { Fail 'the key-only workbench did not start' }
+
+  # g. attempt 2: the tester's adversarial shapes, each a case (rw-p6a-resolve test-attempt1)
+  Write-Host '  [5g] attempt 2: redirects, hostile answers and identifiers, raw HTML, titles, glyphs, styles, egress'
+  # ADV-2b + ADV-3: Crossref->OpenAlex 302, OpenAlex->Crossref 302, 302 to a third host, Location echoing
+  # the key, a 200 echoing the key. Each reference fails; no follow-up request; nothing cached.
+  $null = StubPost '/_reset'
+  $o = Export $wbName 'notes/p6a/hostile-answers.md' 'pdf' 'hostile-answers.json'
+  $r = Client @('refused', '/ev/exports/hostile-answers.json', '5', 'Crossref answered a redirect (3xx), not followed',
+    'OpenAlex answered a redirect (3xx), not followed', 'OpenAlex returned a record carrying credential-shaped text (refused)')
+  $log5 = StubLog 'stub-log-hostile-answers.json'
+  $h = Client @('headers', '/ev/stub-log-hostile-answers.json', $oaKey, $mailto)
+  Save 'hostile-answers.log' "$o`n$r`n$h"
+  Write-Host ($r -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
+  Check (($o -match '^status 422 ') -and ($r -match '^PASS')) 'ADV-2b/ADV-3: the five hostile answers each fail their reference, named (redirect x4 not followed, the echoing record refused)'
+  Check (($script:rc -eq 0) -and ($log5.Count -eq 7) -and (@($log5 | Where-Object { $_.host -eq 'evil.stub' }).Count -eq 0)) "ADV-2b: the proxy saw only the resolver's own 7 requests, every one keyed / mailto'd, 0 follow-ups, 0 to the third host ($($log5.Count) logged)"
+  $j = [System.IO.File]::ReadAllText((Join-Path $out 'hostile-answers.json'))
+  Check (($j -notmatch [regex]::Escape($oaKey)) -and ($j -notmatch [regex]::Escape($mailto))) 'ADV-3: the 422 body carries neither the key nor the mailto'
+  $o = Psql "SELECT count(*) FROM public.reference_resolutions rr JOIN public.reference_records r ON r.id = rr.reference_id WHERE r.source_id::text LIKE 'f6a00000-0000-4000-8000-00000000010_' AND r.source_id::text > 'f6a00000-0000-4000-8000-000000000104'"
+  Check ($o.Trim() -eq '0') "ADV-2b/ADV-3: nothing from a redirect or an echoing record is cached ($($o.Trim()) rows)"
+  # ADV-2c: identifiers outside the grammar, refused before any request
+  $null = StubPost '/_reset'
+  $o = Export $wbName 'notes/p6a/hostile-ids.md' 'pdf' 'hostile-ids.json'
+  $r = Client @('refused', '/ev/exports/hostile-ids.json', '6', 'the source declares a malformed identifier', 'is not a valid doi identifier')
+  $log6 = StubLog 'stub-log-hostile-ids.json'
+  Save 'hostile-ids.log' "$o`n$r"
+  $len = (Get-Item (Join-Path $out 'hostile-ids.json')).Length
+  Check (($o -match '^status 422 ') -and ($r -match '^PASS') -and ($log6.Count -eq 0) -and ($len -lt 6000)) "ADV-2c: six malformed identifiers (@, .., a second DOI, a query, 300 chars, non-ASCII) refused, named, 0 requests, body $len bytes"
+  # ADV-1c (amended fact A5): raw HTML dropped from MD, DOCX and PDF
+  $ok = $true
+  foreach ($f in @('md', 'docx', 'pdf', 'txt')) {
+    $o = Export $wbName 'notes/p6a/raw-html.md' $f "raw-html.$f"
+    if ($o -notmatch '^status 200 ') { $ok = $false; Fail "raw-html $f export: $o" }
+  }
+  $o = Client @('forbidden', '/ev/exports/raw-html.md', '/ev/exports/raw-html.docx', '/ev/exports/raw-html.pdf', '/ev/exports/raw-html.txt')
+  Save 'raw-html-check.log' $o
+  Write-Host ($o -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
+  Check ($ok -and ($script:rc -eq 0)) 'ADV-1c / A5: no <script, <iframe, on*=, javascript:, data:text/html, {=html} or comment in the MD, the DOCX XML, the PDF (text + objects) or the TXT; the MD re-read by pandoc has no raw node'
+  # ADV-5a: a title with citation, Typst and markdown syntax
+  $ok = $true
+  foreach ($f in @('pdf', 'docx', 'md', 'txt')) {
+    $o = Export $wbName 'notes/p6a/title-at.md' $f "title-at.$f"
+    if ($o -notmatch '^status 200 ') { $ok = $false; Fail "title-at $f export: $o" }
+  }
+  $o = Client @('title', '/ev/exports/title-at.pdf', '/ct/export-vault/notes/p6a/title-at.md')
+  $o2 = Client @('title', '/ev/exports/title-at.docx', '/ct/export-vault/notes/p6a/title-at.md')
+  Save 'title-at.log' "$o`n$o2"
+  Check ($ok -and ($o -match '^PASS') -and ($o2 -match '^PASS')) "ADV-5a: the @me / [@you] / #set / `$x`$ / backslash title exports in every format (200) and prints literally in the PDF and the DOCX"
+  # ADV-5: emoji render with the emoji face; a character no face covers is refused, named
+  $o = Export $wbName 'notes/p6a/emoji.md' 'pdf' 'emoji.pdf'
+  $f2 = Client @('fonts', '/ev/exports/emoji.pdf', 'Emoji')
+  Save 'emoji.log' "$o`n$f2"
+  Check (($o -match '^status 200 ') -and ($f2 -match '^PASS')) "ADV-5: emoji + CJK + Hebrew export to PDF with an emoji face embedded: $f2"
+  $o = Export $wbName 'notes/p6a/lost-glyph.md' 'pdf' 'lost-glyph.json'
+  $j = [System.IO.File]::ReadAllText((Join-Path $out 'lost-glyph.json'))
+  $o2 = Export $wbName 'notes/p6a/lost-glyph.md' 'md' 'lost-glyph.md'
+  Save 'lost-glyph.log' "$o`n$j`n$o2"
+  Check (($o -match '^status 422 ') -and ($j -match '"code":"glyphs"') -and ($j -match 'U\+10600') -and ($j -match 'U\+E000') -and ($o2 -match '^status 200 ')) "ADV-5: a character no installed face covers is refused before typesetting (422 glyphs, U+10600 named); the MD export still answers 200"
+  # near-miss 2 (decision B): the dead-DOI note's retry asks only for the dead reference
+  $null = StubPost '/_reset'
+  $o = Export $wbName 'notes/p6a/dead-doi.md' 'pdf' 'dead-doi-retry.json'
+  $log7 = StubLog 'stub-log-dead-retry.json'
+  $paths = (@($log7 | ForEach-Object { "$($_.host)$($_.path)" }) -join ' ')
+  Save 'dead-doi-retry.log' "$o`n$paths"
+  Check (($o -match '^status 422 ') -and ($log7.Count -eq 2) -and ($paths -match 'api.openalex.stub/works/doi:10.5555/p6a.dead') -and ($paths -match 'api.crossref.stub/works/10.5555/p6a.dead')) "decision B: the good resolutions stayed cached on the refused export; the retry requested only the dead DOI ($($log7.Count) requests: $paths)"
+  # ADV-4b: a one-byte-modified style and a row-only style refused at USE time
+  $cslTmp = Join-Path $env:TEMP "rwp6a-csl-$rand"
+  New-Item -ItemType Directory -Force $cslTmp | Out-Null
+  $ieee = [System.IO.File]::ReadAllText((Join-Path $wb 'csl\ieee.csl'))
+  [System.IO.File]::WriteAllText((Join-Path $cslTmp 'ieee.csl'), $ieee.Replace('<title>IEEE', '<title>JEEE'), (New-Object System.Text.UTF8Encoding $false))
+  $null = Psql "INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES ('citation_styles', 'row-only', 'A row without a file', '{""file"":""row-only.csl"",""sha256"":""$('0' * 64)"",""citation_format"":""numeric"",""authors"":[],""contributors"":[]}')"
+  $cs = "$wbName-csl"
+  if (Start-Workbench $cs $tag $onEnv @('-v', "$(Join-Path $cslTmp 'ieee.csl'):/app/csl/ieee.csl:ro")) {
+    $o = Export $cs 'notes/p6a/web-only.md' 'pdf' 'csl-modified.json'
+    $j = [System.IO.File]::ReadAllText((Join-Path $out 'csl-modified.json'))
+    $o2 = Export $cs 'notes/p6a/web-only.md' 'pdf' 'csl-apa.pdf' '&style=apa'
+    $o3 = Export $cs 'notes/p6a/web-only.md' 'pdf' 'csl-row-only.json' '&style=row-only'
+    $j3 = [System.IO.File]::ReadAllText((Join-Path $out 'csl-row-only.json'))
+    Save 'csl-integrity.log' "$o`n$j`n$o2`n$o3`n$j3"
+    Check (($o -match '^status 503 ') -and ($j -match '"code":"style-integrity"') -and ($j -match "citation style 'ieee' failed its integrity check")) "ADV-4b: the one-byte-modified ieee.csl is refused at use: $o"
+    Check ($o2 -match '^status 200 .*style apa') "ADV-4b: an unmodified style on the same workbench still renders: $o2"
+    Check (($o3 -match '^status 503 ') -and ($j3 -match "citation style 'row-only' failed its integrity check") -and ($j3 -match 'missing')) "ADV-4b: a registry row whose file is missing is refused: $o3"
+    $null = Dk rm -f -v $cs
+  } else { Fail 'the modified-style workbench did not start' }
+  $null = Psql "DELETE FROM public.contract_registry_entries WHERE registry = 'citation_styles' AND key = 'row-only'"
+  Remove-Item $cslTmp -Recurse -Force -ErrorAction SilentlyContinue
+  # ADV-2a / near-miss 4: a FETCH_PROXY_URL that is not a proxy (the database's port): the 422 names a
+  # reason code + egress, no address; the detail is in the server log, masked
+  $eg = "$wbName-egress"
+  if (Start-Workbench $eg $tag @("OPENALEX_API_KEY=$oaKey", "CROSSREF_MAILTO=$mailto", "FETCH_PROXY_URL=http://${dbName}:5432", 'RESOLVER_OPENALEX_BASE=http://api.openalex.stub', 'RESOLVER_CROSSREF_BASE=http://api.crossref.stub', 'RESOLVER_TIMEOUT_MS=5000')) {
+    $o = Export $eg 'notes/p6a/egress.md' 'pdf' 'egress-nonproxy.json'
+    $j = [System.IO.File]::ReadAllText((Join-Path $out 'egress-nonproxy.json'))
+    $logs = Dk logs $eg
+    Save 'egress-nonproxy.log' "$o`n$j"
+    Check (($o -match '^status 422 ') -and ($j -match 'request failed \(egress: (network error|timeout)\)') -and ($j -notmatch '\d+\.\d+\.\d+\.\d+') -and ($j -notmatch [regex]::Escape($dbName)) -and ($j -notmatch '5432')) "near-miss 4: a non-proxy egress fails 422 with a reason code + egress, no address or host in the body: $o"
+    Check (($logs -match '\[export resolver\]') -and ($logs -notmatch [regex]::Escape($oaKey)) -and ($logs -notmatch [regex]::Escape($mailto))) 'near-miss 4: the detail is in the workbench log, the key and the mailto masked'
+    $null = Dk rm -f -v $eg
+  } else { Fail 'the egress workbench did not start' }
+  # nothing went direct, and no workbench log carries a secret
+  $null = Client @('get', "http://${catchName}:8080/_log", '/ev/catcher-log.json')
+  $caught = @(Get-Content -Raw (Join-Path $Evidence 'catcher-log.json') | ConvertFrom-Json)
+  Check ($caught.Count -eq 0) "the direct catcher received $($caught.Count) requests over the whole run (nothing skipped the proxy, nothing followed a redirect)"
+  $logs = Dk logs $wbName
+  Check (($logs -notmatch [regex]::Escape($oaKey)) -and ($logs -notmatch [regex]::Escape($mailto))) 'the main workbench log carries neither the key nor the mailto'
 } catch {
   Fail "aborted: $_"
 } finally {

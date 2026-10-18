@@ -50,15 +50,16 @@ Deno.test("the gate's registry entries are exactly the rows init-export.sql seed
 
 Deno.test("formats and styles are registry entries, not a closed list in the renderer or the route", async () => {
   const route = await Deno.readTextFile(new URL("src/routes/export.ts", root));
+  const exporter = await Deno.readTextFile(new URL("src/export/exporter.ts", root));
   const render = await Deno.readTextFile(new URL("src/export/render.ts", root));
-  for (const [name, src] of [["routes/export.ts", route], ["export/render.ts", render]]) {
+  for (const [name, src] of [["routes/export.ts", route], ["export/exporter.ts", exporter], ["export/render.ts", render]]) {
     const code = src.replace(/\/\/.*$/gm, "");
     for (const key of ["pdf", "docx", "md", "txt", "ieee", "apa", "elsevier-vancouver", "typst", "weasyprint"]) {
       assert(!new RegExp(`["'\`]${key}["'\`]`).test(code), `${name} names the registry key '${key}' in code`);
     }
     assert(!/\bswitch\s*\(/.test(code), `${name} switches on something`);
   }
-  assert(route.includes('live("export_formats")') && route.includes('live("citation_styles")'));
+  assert(exporter.includes('live("export_formats")') && exporter.includes('live("citation_styles")'));
   assertEquals(fxEntries("citation_styles").filter((e) => e.definition.default === true).length, 1, "exactly one default style");
 });
 
@@ -97,6 +98,44 @@ Deno.test("a source's own identifier: declared metadata first (incl. P3a's schol
   assertEquals(id("https://doi.org/10.5555/d", {}), "doi:10.5555/d");
   assertEquals(id("https://example.org/post", { linked: ["10.5555/e"] }), null, "a linked DOI is never the source's own");
   assertThrows(() => id(null, { doi: "not-a-doi" }), IdentifierError);
+});
+
+// rw-p6a-resolve attempt 2, ADV-2c (near-miss 3): the tester's identifier strings, every one of
+// which matched manubot's `10\.[0-9]{4,9}/\S+` and was sent. Each is refused BEFORE any request,
+// declared (metadata) or recognised in a URL, with the reference named by the route (422).
+const HOSTILE_DOIS = [
+  "10.5555/adv.inj@evil.stub", "10.5555/../../../x", "10.5555/adv?api_key=stolen&x=http://evil.stub/",
+  "10.5555/adv.001,10.5555/adv.002", "10.5555/adv.001;10.5555/adv.002", "10.5555/adv.injü€中", `10.5555/${"a".repeat(2048)}`,
+  "10.5555/adv#http://evil.stub/", "10.5555/%2F..%2Fevil", "10.5555/a b", "10.5555/a\tb", "10.5555/x//y",
+  "http://evil.stub/10.5555/adv.inj", "10.5555/adv:http://evil.stub/",
+];
+Deno.test("ADV-2c: identifiers outside their kind's grammar are refused - @, .., a query, a second id, non-ASCII, >256 chars, a URL, whitespace", () => {
+  for (const d of HOSTILE_DOIS) {
+    assertThrows(() => parseCitekey(KINDS, `doi:${d}`), IdentifierError, undefined, `declared ${d.slice(0, 60)}`);
+    assertThrows(() => sourceIdentifier(KINDS, { url: null, metadata: { doi: d } }), IdentifierError, undefined, `metadata ${d.slice(0, 60)}`);
+  }
+  // a doi.org URL claims a DOI: one that fails the grammar is malformed, not silently a web page
+  assertThrows(() => sourceIdentifier(KINDS, { url: "https://doi.org/10.5555/adv.inj@evil.stub", metadata: {} }), IdentifierError);
+  assertThrows(() => parseCitekey(KINDS, `pmid:1 2`), IdentifierError);
+  assertThrows(() => parseCitekey(KINDS, `arxiv:2101.00001/../x`), IdentifierError);
+  // what real DOIs look like still passes: SICI (<>;:()), dots, dashes, underscores, slashes
+  for (const ok of ["10.1002/(SICI)1097-4679(199711)53:7<657::AID-JCLP3>3.0.CO;2-F", "10.1000/xyz.abc-1_2/3", "10.48550/arxiv.2101.00001"]) {
+    assertEquals(parseCitekey(KINDS, `doi:${ok}`).accession, ok.toLowerCase());
+  }
+});
+
+Deno.test("near-miss 7: declared-metadata identifier keys come from the identifier-kind rows (metadata_keys), not a list in code", () => {
+  const advk: IdentifierKind = { key: "advk", prefixes: ["advk"], pattern: "ADV[0-9]{3}", metadata_keys: ["advk", "ids.advk"], openalex_work: "advk:{accession}" } as IdentifierKind;
+  const kinds = [...KINDS, advk];
+  assertEquals(sourceIdentifier(kinds, { url: null, metadata: { advk: "ADV005" } })?.citekey, "advk:ADV005");
+  assertEquals(sourceIdentifier(kinds, { url: null, metadata: { ids: { advk: "ADV006" } } })?.citekey, "advk:ADV006", "a dotted key reads a nested field");
+  // the row is the authority: a doi row without metadata_keys does not read metadata.doi
+  const noKeys = KINDS.map((k) => k.key === "doi" ? { ...k, metadata_keys: [] } : k);
+  assertEquals(sourceIdentifier(noKeys, { url: null, metadata: { doi: "10.5555/b" } }), null);
+  // a declared value written as a URL is read through the kind's own URL rules
+  assertEquals(sourceIdentifier(KINDS, { url: null, metadata: { doi: "https://doi.org/10.5555/B" } })?.citekey, "doi:10.5555/b");
+  assertEquals(sourceIdentifier(KINDS, { url: null, metadata: { openalex: "https://openalex.org/W123" } })?.citekey, "openalex:W123");
+  for (const k of KINDS) assert(Array.isArray((k as { metadata_keys?: unknown }).metadata_keys), `${k.key}: the row declares its metadata_keys`);
 });
 
 // ── CSL items ─────────────────────────────────────────────────────────────────────────────────
@@ -181,7 +220,7 @@ Deno.test("acceptance 3 RED->GREEN at the door: a request without the key / the 
   await assertRejects(() => r.send("openalex", "http://api.openalex.stub/works/doi%3A10.5555%2Fx"), RequestRefused, "must carry the API key");
   await assertRejects(() => r.send("openalex", "http://api.openalex.stub/works/x?api_key=other"), RequestRefused, "must carry the API key");
   await assertRejects(() => r.send("crossref", "http://api.crossref.stub/works/10.5555%2Fx"), RequestRefused, "polite-pool mailto");
-  await assertRejects(() => r.send("crossref", "http://elsewhere.stub/works/x?mailto=p6a@example.invalid"), RequestRefused, "not the Crossref API");
+  await assertRejects(() => r.send("crossref", "http://elsewhere.stub/works/x?mailto=p6a@example.invalid"), RequestRefused, "not to the configured Crossref API");
   assertEquals(n.calls.length, 0, "nothing left");
   // GREEN: the resolver's own requests carry both, through the proxy client
   await r.resolve(DOI1, kind("doi"));
@@ -209,15 +248,20 @@ Deno.test("acceptance 2 at the resolver: a dead identifier is a HARD failure nam
   assertMatch(e.message, /OpenAlex answered 404 for doi:10\.5555\/p6a\.001; Crossref answered 404 for 10\.5555\/p6a\.001/);
   const five = createResolver(cfg(), { fetch: net({ "api.openalex.stub": [500, {}], "api.crossref.stub": [503, {}] }).fetch, buildClient: () => CLIENT });
   await assertRejects(() => five.resolve(DOI1, kind("doi")), ResolutionFailed, "Crossref answered 503");
-  const torn = createResolver(cfg(), { fetch: () => Promise.reject(new Error("connection reset")), buildClient: () => CLIENT });
-  await assertRejects(() => torn.resolve(DOI1, kind("doi")), ResolutionFailed, "connection reset");
-  // the failure text reaches the export's 422 body: a fetch error that quotes its URL leaks neither the key nor the mailto
+  const torn = createResolver(cfg(), { fetch: () => Promise.reject(new Error("connection reset")), buildClient: () => CLIENT, log: () => {} });
+  await assertRejects(() => torn.resolve(DOI1, kind("doi")), ResolutionFailed, "OpenAlex request failed (egress: network error)");
+  // the failure text reaches the export's 422 body: a fetch error that quotes its URL is NOT quoted
+  // (attempt 2: a reason code only); the server log gets it with the query cut and both secrets masked
+  const logged: string[] = [];
   const leaky = createResolver(cfg(), {
     fetch: (url: string) => Promise.reject(new TypeError(`error sending request for url (${url}): connection refused`)), buildClient: () => CLIENT,
+    log: (m: string) => logged.push(m),
   });
-  const e2 = await assertRejects(() => leaky.resolve(DOI1, kind("doi")), ResolutionFailed, "connection refused");
+  const e2 = await assertRejects(() => leaky.resolve(DOI1, kind("doi")), ResolutionFailed, "Crossref request failed (egress: network error)");
   assert(!e2.message.includes("oa-test-key") && !e2.message.includes("p6a@example.invalid") && !e2.message.includes("p6a%40example.invalid"), e2.message);
-  assertMatch(e2.message, /\[query removed\]/);
+  assert(!/connection refused|stub/.test(e2.message), e2.message);
+  assert(logged.some((l) => /\[query removed\]/.test(l) && l.includes("connection refused")), logged.join("\n"));
+  assert(logged.every((l) => !l.includes("oa-test-key") && !l.includes("p6a@example.invalid") && !l.includes("p6a%40example.invalid")), logged.join("\n"));
   const empty = createResolver(cfg({ mailto: "" }), { fetch: net({ "api.openalex.stub": [200, { type: "article" }] }).fetch, buildClient: () => CLIENT });
   await assertRejects(() => empty.resolve(DOI1, kind("doi")), ResolutionFailed, "OpenAlex returned a record without a title");
 });
@@ -254,7 +298,8 @@ Deno.test("the pandoc input: source wikilinks cite their reference keys, other w
   assertEquals(p.nocite, [`src-${c}`], "the added reference is nocited");
   assertEquals(p.metadata.nocite, `@src-${c}`);
   assertEquals(p.metadata.title, "My note");
-  assertEquals((p.metadata.references as { id: string }[]).map((r) => r.id), refs.map((r) => r.key));
+  assertEquals(p.references.map((r) => r.id), refs.map((r) => r.key), "the references are the CSL-JSON bibliography, in number order");
+  assert(!("references" in p.metadata), "not in the metadata (pandoc would read their strings as markdown)");
   assert(!("bibliography" in p.metadata) && !("csl" in p.metadata));
   assertEquals(escapeStrayCitations("    @indented code"), "    @indented code");
   // a link the numbering does not know (not a uuid) is refused, never rendered as text
@@ -266,10 +311,11 @@ Deno.test("acceptance 5: pandoc is called with files (markdown + metadata in, do
   const style = { key: "ieee", ...fxEntries("citation_styles")[0].definition } as never;
   const args = pandocArgs("/tmp/ob-export-x", { md: "", refs: [], format: PDF, style, cslDir: "/app/csl", wrapNone: true });
   assertEquals(args.slice(-3), ["--output", "/tmp/ob-export-x/out.pdf", "/tmp/ob-export-x/in.md"]);
-  for (const want of ["--citeproc", "--csl", "/app/csl/ieee.csl", "--metadata-file", "/tmp/ob-export-x/meta.json", "--pdf-engine", "typst"]) {
+  for (const want of ["--citeproc", "--csl", "/tmp/ob-export-x/ieee.csl", "--bibliography", "/tmp/ob-export-x/references.json", "--metadata-file", "/tmp/ob-export-x/meta.json", "--pdf-engine", "typst"]) {
     assert(args.includes(want), `missing ${want}`);
   }
-  const joined = args.join(" ").replaceAll("meta.json", "META");
+  const joined = args.join(" ").replaceAll("meta.json", "META").replaceAll("references.json", "BIB");
+  assertEquals(args[args.indexOf("--from") + 1], "markdown-yaml_metadata_block-raw_attribute-raw_tex", "no YAML block, no raw-attribute blocks, no raw TeX");
   assert(!/--(lua-)?filter|(^| )-[FL]\b|\bjson\b|native/.test(joined), joined);
 });
 

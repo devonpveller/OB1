@@ -71,7 +71,9 @@ document.addEventListener("nav", () => {
       // so sentences flow when pasted — not the DOM's ragged innerText.
       copyBtn.textContent = "copying…"
       try {
-        const r = await fetch("/workbench/export?path=" + encodeURIComponent(vaultPath) + "&format=txt&wrap=none")
+        // mode=copy (research-workbench P6a): never refused for an unresolved reference - it is
+        // printed marked UNRESOLVED - and never asks the resolver; the download exports still refuse.
+        const r = await fetch("/workbench/export?path=" + encodeURIComponent(vaultPath) + "&mode=copy")
         if (!r.ok) throw new Error("HTTP " + r.status)
         const text = await r.text()
         await navigator.clipboard.writeText(text)

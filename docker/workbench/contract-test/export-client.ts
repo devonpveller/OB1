@@ -13,8 +13,16 @@
 //                                          mailto=<mailto> (query) and the mailto in its User-Agent; nothing else
 //                                          was requested. Exit 1 on any violation (the per-request verdicts printed)
 //   cjk      <pdf> <note.md>               the PDF embeds a CJK face and its text layer carries the note's CJK paragraph
+// rw-p6a-resolve attempt 2:
+//   forbidden <file>...                    no <script, <iframe, on*=, javascript:, vbscript:, data:text/html, {=html},
+//                                          COMMENT-LEAK in an MD/TXT file, a DOCX's XML parts, a PDF's text layer
+//                                          and its raw objects (link annotations); an MD file also re-read by pandoc
+//                                          (raw HTML + raw attributes ON) has no raw node
+//   title    <pdf|docx> <note.md>          the output carries the note's frontmatter title LITERALLY
+//   fonts    <pdf> <regex>                 a face matching <regex> is embedded
 // The key is read from $WB_KEY and sent as X-Brain-Key, as Caddy does.
 import { pdfFonts, pdfText } from "/app/src/export/pdf_tools.ts";
+import { docxXml } from "/app/src/export/zip_read.ts";
 
 const [mode, ...args] = Deno.args;
 const key = Deno.env.get("WB_KEY") ?? "";
@@ -44,7 +52,8 @@ if (mode === "get") {
   const r = await fetch(args[0], { headers: { "x-brain-key": key } });
   const b = new Uint8Array(await r.arrayBuffer());
   await Deno.writeFile(args[1], b);
-  console.log(`status ${r.status} bytes ${b.length} type ${r.headers.get("content-type")} style ${r.headers.get("x-citation-style")}`);
+  const extra = r.headers.get("x-export-mode") ? ` mode ${r.headers.get("x-export-mode")} unresolved ${r.headers.get("x-export-unresolved")}` : "";
+  console.log(`status ${r.status} bytes ${b.length} type ${r.headers.get("content-type")} style ${r.headers.get("x-citation-style")}${extra}`);
 } else if (mode === "hundred") {
   const dir = args[0];
   const texts: Record<string, string> = {
@@ -101,8 +110,44 @@ if (mode === "get") {
   const ok = fonts.some((f) => /CJK/i.test(f)) && text.includes(expected);
   console.log(`${ok ? "PASS" : "FAIL"} cjk: fonts ${fonts.join(", ")}; text layer carries the fixture text (${expected.length} chars) ${text.includes(expected)}`);
   if (!ok) rc = 1;
+} else if (mode === "forbidden") {
+  const FORBIDDEN = /<script|<iframe|\bon[a-z]+\s*=|javascript:|vbscript:|data:text\/html|\{=html\}|COMMENT-LEAK/i;
+  for (const file of args) {
+    const b = await Deno.readFile(file);
+    const views: [string, string][] = file.endsWith(".pdf")
+      ? [["text layer", await pdfText(b)], ["objects", new TextDecoder("latin1").decode(b)]]
+      : file.endsWith(".docx") ? [["xml", await docxXml(b)]] : [["text", new TextDecoder().decode(b)]];
+    if (file.endsWith(".md")) {
+      const p = new Deno.Command("pandoc", { args: ["-f", "markdown", "-t", "native", file], stdout: "piped" });
+      const raw = [...new TextDecoder().decode((await p.output()).stdout).matchAll(/Raw(?:Inline|Block) \(\s*Format "(\w+)"/g)].map((m) => m[1]);
+      views.push(["pandoc re-read raw nodes", raw.length ? `<script raw nodes: ${raw.join(",")}` : ""]);
+    }
+    for (const [what, t] of views) {
+      const hit = FORBIDDEN.exec(t)?.[0];
+      console.log(`${hit ? "FAIL" : "PASS"} forbidden: ${file.split("/").pop()} (${what})${hit ? `: carries ${hit}` : ": clean"}`);
+      if (hit) rc = 1;
+    }
+  }
+} else if (mode === "title") {
+  const note = await Deno.readTextFile(args[1]);
+  const title = /^title:[ \t]*'(.*)'[ \t]*$/m.exec(note)![1];
+  const b = await Deno.readFile(args[0]);
+  let t: string;
+  if (args[0].endsWith(".pdf")) t = await pdfText(b);
+  else {
+    const p = new Deno.Command("pandoc", { args: ["-f", "docx", "-t", "plain", "--wrap=none", "--standalone", args[0]], stdout: "piped" });
+    t = new TextDecoder().decode((await p.output()).stdout);
+  }
+  const ok = t.replace(/\s+/g, " ").includes(title);
+  console.log(`${ok ? "PASS" : "FAIL"} title: ${args[0].split("/").pop()} carries the title literally (${title.length} chars)`);
+  if (!ok) rc = 1;
+} else if (mode === "fonts") {
+  const fonts = await pdfFonts(await Deno.readFile(args[0]));
+  const ok = fonts.some((x) => new RegExp(args[1], "i").test(x));
+  console.log(`${ok ? "PASS" : "FAIL"} fonts: ${fonts.join(", ")}`);
+  if (!ok) rc = 1;
 } else {
-  console.error("usage: export-client.ts get|hundred|refused|headers|cjk ...");
+  console.error("usage: export-client.ts get|hundred|refused|headers|cjk|forbidden|title|fonts ...");
   rc = 2;
 }
 Deno.exit(rc);

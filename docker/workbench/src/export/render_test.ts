@@ -94,7 +94,7 @@ Deno.test("a PDF font that is not installed fails the export instead of falling 
   const { md, refs } = numberedDocument(1);
   const f = fmt("pdf");
   const bad = { ...f, metadata: { ...f.metadata, mainfont: "No Such Font P6a" } };
-  await assertRejects(() => render({ ...input(md, refs, "pdf"), format: bad }), RenderFailed, "missing font");
+  await assertRejects(() => render({ ...input(md, refs, "pdf"), format: bad }), RenderFailed, "a font the format names is not installed");
 });
 
 Deno.test("acceptance 5: pandoc runs as its own process, files in and out, and Typst as pandoc's child - never in-process", async () => {
@@ -120,7 +120,7 @@ Deno.test("acceptance 5: pandoc runs as its own process, files in and out, and T
       assertEquals(Number(t[2]), Number(p[1]), "Typst is pandoc's child, not the workbench's");
       assertEquals(p[3], out.args.join(" "), "the argument list is the one the renderer built");
       assertMatch(p[3], /--metadata-file \S+\/meta\.json .*--output \S+\/out\.pdf \S+\/in\.md$/);
-      assert(!/filter|json\b/.test(p[3].replace(/meta\.json/g, "")), "no filter, no JSON");
+      assert(!/filter|json\b/.test(p[3].replace(/meta\.json|references\.json/g, "")), "no filter, no JSON AST");
     } finally {
       Deno.env.set("PATH", path);
     }
@@ -149,4 +149,9 @@ Deno.test("the programs in the image are the versions the notices list (pandoc 3
   assertMatch(await v("pdftoppm", ["-v"]), /pdftoppm version 25\.03\.0/);
   const notices = await Deno.readTextFile(new URL("../../THIRD-PARTY-NOTICES.md", import.meta.url));
   for (const s of ["| pandoc | 3.11 ", "| Typst | 0.15.1 ", "| poppler-utils (pdftoppm, pdftotext, pdffonts, pdfinfo) | 25.03.0 "]) assert(notices.includes(s), s);
+  // the font packages, at the versions the notices list (attempt 2 adds the emoji face)
+  const pkgs = await v("dpkg-query", ["-W", "-f", "${Package} ${Version}\\n", "fonts-noto-cjk", "fonts-noto-color-emoji"]);
+  for (const [pkg, ver] of pkgs.trim().split("\n").map((l) => l.split(" "))) {
+    assert(notices.includes(`(${pkg}) | Debian ${ver} |`), `${pkg} ${ver} is the version the notices list`);
+  }
 });

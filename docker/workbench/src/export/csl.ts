@@ -44,8 +44,17 @@ export function dateToDateParts(date: string | null | undefined): number[] | nul
   return parts.length ? parts : null;
 }
 
+// The markup citeproc itself understands in a CSL string (rich text: italics, bold, super/subscript,
+// small caps, nocase). Any other tag - <script>, <a href>, <img onerror> from an upstream record - is
+// removed with its brackets (the text between stays text), and so is an HTML comment (attempt 2,
+// ADV-1c: nothing from a record may carry raw HTML into an output).
+const CITEPROC_TAG = /^<\/?(?:i|b|sup|sub|sc)>$|^<span (?:class="nocase"|style="font-variant:\s*small-caps;?")>$|^<\/span>$/i;
+export function cleanMarkup(s: string): string {
+  return s.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<\/?[A-Za-z][^>]*>?/g, (m) => CITEPROC_TAG.test(m) ? m : "");
+}
+
 function str(v: unknown): string | undefined {
-  if (typeof v === "string" && v.trim()) return v.trim();
+  if (typeof v === "string" && v.trim()) return cleanMarkup(v).replace(/\s+/g, " ").trim() || undefined;
   if (typeof v === "number") return String(v);
   return undefined;
 }
@@ -66,6 +75,12 @@ function finish(item: Record<string, unknown>, from: string): CslItem {
   out.type = (out.type as string) || "entry"; // manubot set_default_type
   return out as CslItem;
 }
+
+// A URL a reference may link to: http(s) only (citeproc renders URL as a link).
+const httpUrl = (v: unknown) => {
+  const s = typeof v === "string" ? v.trim() : "";
+  return /^https?:\/\/[^\s<>"]+$/i.test(s) ? s : undefined;
+};
 
 const cleanDoi = (d: unknown) => str(d)?.replace(/^https?:\/\/(dx\.)?doi\.org\//i, "").toLowerCase();
 
@@ -91,7 +106,7 @@ export function crossrefToCsl(msg: Record<string, unknown>): CslItem {
     issued: dp.length ? { "date-parts": [dp] } : undefined,
     DOI: cleanDoi(msg.DOI),
     ISSN: first(msg.ISSN),
-    URL: cleanDoi(msg.DOI) ? `https://doi.org/${cleanDoi(msg.DOI)}` : str(msg.URL),
+    URL: cleanDoi(msg.DOI) ? `https://doi.org/${cleanDoi(msg.DOI)}` : httpUrl(msg.URL),
   }, "Crossref");
 }
 
@@ -122,7 +137,7 @@ export function openalexToCsl(work: Record<string, unknown>): CslItem {
     publisher: str(source.host_organization_name),
     issued: dp ? { "date-parts": [dp] } : undefined,
     DOI: doi,
-    URL: doi ? `https://doi.org/${doi}` : str(work.id),
+    URL: doi ? `https://doi.org/${doi}` : httpUrl(work.id),
   }, "OpenAlex");
 }
 
@@ -131,9 +146,9 @@ export function openalexToCsl(work: Record<string, unknown>): CslItem {
 export function recordToCsl(r: { title: string | null; url: string | null; accessed: string | null }): CslItem {
   const dp = dateToDateParts(r.accessed ?? undefined);
   return finish({
-    type: r.url ? "webpage" : "document",
-    title: (r.title || "").replace(/\s+/g, " ").trim() || r.url || "Untitled source",
-    URL: r.url ?? undefined,
+    type: httpUrl(r.url) ? "webpage" : "document",
+    title: cleanMarkup(r.title || "").replace(/\s+/g, " ").trim() || httpUrl(r.url) || "Untitled source",
+    URL: httpUrl(r.url),
     accessed: dp ? { "date-parts": [dp] } : undefined,
   }, "the source record");
 }

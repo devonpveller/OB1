@@ -36,22 +36,25 @@
 INSERT INTO public.contract_registries (name, owner, description) VALUES
     ('export_formats',             'P6a', 'what GET /workbench/export produces; definition.pandoc_to / ext / mime, and for a PDF the engine and its page metadata'),
     ('citation_styles',            'P6a', 'CSL styles, used unmodified (CC BY-SA 3.0); definition.file / sha256 / upstream / authors / contributors / citation_format / default'),
-    ('reference_identifier_kinds', 'P6a', 'persistent identifiers the resolver understands; definition.pattern / prefixes / url_rules / openalex_work / crossref_doi')
+    ('reference_identifier_kinds', 'P6a', 'persistent identifiers the resolver understands; definition.pattern / prefixes / url_rules / metadata_keys / openalex_work / crossref_doi')
 ON CONFLICT (name) DO NOTHING;
 
 -- Written as upserts so a re-run converges on the CURRENT definitions.
 INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES
     ('export_formats', 'pdf', 'PDF (Typst)',
-        '{"pandoc_to":"pdf","ext":"pdf","mime":"application/pdf","engine":"typst","binary":true,"default":true,
+        '{"pandoc_to":"pdf","ext":"pdf","mime":"application/pdf","engine":"typst","binary":true,"default":true,"glyph_check":true,
           "metadata":{"papersize":"a4","margin":{"x":"2.5cm","y":"2.5cm"},"fontsize":"11pt","mainfont":"Noto Serif CJK SC"}}'),
     ('export_formats', 'docx', 'Word (DOCX)',
         '{"pandoc_to":"docx","ext":"docx","mime":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","binary":true}'),
     -- md: pandoc Markdown with the references rendered as text (citations, divs, spans, header
-    -- attributes and raw HTML off), so the file reads as plain Markdown.
+    -- attributes, raw HTML, raw attributes and raw TeX off), so the file reads as plain Markdown and
+    -- carries no raw HTML (rw-p6a-resolve attempt 2: with raw_attribute on, raw HTML was written
+    -- back as {=html} fences). glyph_check (pdf): text no installed face covers is refused before
+    -- Typst runs. copy (txt): the format "Copy page" (mode=copy) asks for.
     ('export_formats', 'md', 'Markdown (references rendered)',
-        '{"pandoc_to":"markdown-citations-native_divs-native_spans-fenced_divs-bracketed_spans-header_attributes-raw_html","ext":"md","mime":"text/markdown; charset=utf-8"}'),
+        '{"pandoc_to":"markdown-citations-native_divs-native_spans-fenced_divs-bracketed_spans-header_attributes-raw_html-raw_attribute-raw_tex","ext":"md","mime":"text/markdown; charset=utf-8"}'),
     ('export_formats', 'txt', 'Plain text',
-        '{"pandoc_to":"plain","ext":"txt","mime":"text/plain; charset=utf-8"}'),
+        '{"pandoc_to":"plain","ext":"txt","mime":"text/plain; charset=utf-8","copy":true}'),
 
     ('citation_styles', 'ieee', 'IEEE Reference Guide version 11.29.2023',
         '{"file":"ieee.csl","sha256":"b4c7619fc16c45a31e4cc3271eab94ffe83192d3b4c7fc729470a3b459448de3","citation_format":"numeric","default":true,
@@ -70,25 +73,29 @@ INSERT INTO public.contract_registry_entries (registry, key, label, definition) 
     -- The citekey grammar of manubot 859dd15 (manubot/cite/doi.py, arxiv.py, pubmed.py,
     -- citekey.py url_to_citekey), plus OpenAlex work ids. `lower` = the accession is
     -- case-insensitive and standardised to lower case (manubot Handler_DOI). Templates take
-    -- {accession}; a null template means that service cannot resolve the kind.
+    -- {accession}; a null template means that service cannot resolve the kind. `metadata_keys`:
+    -- the source metadata fields (dotted paths) that declare the kind. rw-p6a-resolve attempt 2:
+    -- the DOI pattern is the character class Crossref recommends plus the <> of SICI DOIs, with no
+    -- `..`, no `//` and no second 10.NNNN/ (the \S+ of manubot let `@`, a query, a second DOI and
+    -- non-ASCII through).
     ('reference_identifier_kinds', 'doi', 'DOI',
-        '{"prefixes":["doi"],"pattern":"10\\.[0-9]{4,9}/\\S+","lower":true,
+        '{"prefixes":["doi"],"pattern":"(?!.*\\.\\.)(?!.*//)(?!.+10\\.[0-9]{4,9}/)10\\.[0-9]{4,9}/[-._;()/:<>A-Za-z0-9]+","lower":true,"metadata_keys":["doi","scholarly.doi"],
           "url_rules":[{"host":"doi.org","path":"^/(10\\..+)$"},{"host":"dx.doi.org","path":"^/(10\\..+)$"}],
           "openalex_work":"doi:{accession}","crossref_doi":"{accession}"}'),
     ('reference_identifier_kinds', 'arxiv', 'arXiv identifier',
-        '{"prefixes":["arxiv"],"pattern":"([0-9]{4}\\.[0-9]{4,5}|[a-z\\-]+(\\.[A-Z]{2})?/[0-9]{7})(v[0-9]+)?",
+        '{"prefixes":["arxiv"],"metadata_keys":["arxiv"],"pattern":"([0-9]{4}\\.[0-9]{4,5}|[a-z\\-]+(\\.[A-Z]{2})?/[0-9]{7})(v[0-9]+)?",
           "url_rules":[{"host":"arxiv.org","path":"^/(?:abs|pdf)/(.+?)(?:\\.pdf)?$"}],
           "openalex_work":"doi:10.48550/arxiv.{accession}","crossref_doi":null}'),
     ('reference_identifier_kinds', 'pubmed', 'PubMed id',
-        '{"prefixes":["pubmed","pmid"],"pattern":"[1-9][0-9]{0,7}",
+        '{"prefixes":["pubmed","pmid"],"metadata_keys":["pmid"],"pattern":"[1-9][0-9]{0,7}",
           "url_rules":[{"host":"pubmed.ncbi.nlm.nih.gov","path":"^/([1-9][0-9]{0,7})/?$"},{"host":"www.ncbi.nlm.nih.gov","path":"^/pubmed/([1-9][0-9]{0,7})/?$"}],
           "openalex_work":"pmid:{accession}","crossref_doi":null}'),
     ('reference_identifier_kinds', 'pmc', 'PubMed Central id',
-        '{"prefixes":["pmc","pmcid"],"pattern":"PMC[0-9]+",
+        '{"prefixes":["pmc","pmcid"],"metadata_keys":["pmcid"],"pattern":"PMC[0-9]+",
           "url_rules":[{"host":"pmc.ncbi.nlm.nih.gov","path":"^/articles/(PMC[0-9]+)/?$"},{"host":"www.ncbi.nlm.nih.gov","path":"^/pmc/articles/(PMC[0-9]+)/?$"}],
           "openalex_work":"pmcid:{accession}","crossref_doi":null}'),
     ('reference_identifier_kinds', 'openalex', 'OpenAlex work id',
-        '{"prefixes":["openalex"],"pattern":"W[0-9]+",
+        '{"prefixes":["openalex"],"metadata_keys":["openalex"],"pattern":"W[0-9]+",
           "url_rules":[{"host":"openalex.org","path":"^/(W[0-9]+)$"},{"host":"api.openalex.org","path":"^/works/(W[0-9]+)$"}],
           "openalex_work":"{accession}","crossref_doi":null}')
 ON CONFLICT (registry, key) DO UPDATE SET label = EXCLUDED.label, definition = EXCLUDED.definition;

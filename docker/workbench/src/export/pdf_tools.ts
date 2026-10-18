@@ -28,6 +28,13 @@ export const pdfFonts = (pdf: Uint8Array) =>
 export const pdfPages = (pdf: Uint8Array) =>
   withFile(pdf, async (p) => Number(/^Pages:\s+(\d+)/m.exec(await run("pdfinfo", [p]))?.[1] ?? NaN));
 
+// Page 1's size in points (pdfinfo "Page size: W x H pts").
+export const pdfPageSize = (pdf: Uint8Array) =>
+  withFile(pdf, async (p) => {
+    const m = /^Page size:\s+([\d.]+) x ([\d.]+) pts/m.exec(await run("pdfinfo", [p]));
+    return m ? { width: Number(m[1]), height: Number(m[2]) } : null;
+  });
+
 export interface Raster {
   width: number;
   height: number;

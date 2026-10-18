@@ -11,6 +11,16 @@
 //   10.5555/p6a.091 .. .100      OpenAlex 404, Crossref 200 ("Resolved title N (Crossref)")
 //   10.5555/p6a.dead             404 from both: the dead DOI
 //   10.48550/arxiv.2101.00001    OpenAlex 200 (an arXiv work)
+// Hostile answers (rw-p6a-resolve attempt 2, the tester's ADV-2b / ADV-3 shapes):
+//   10.5555/p6a.r01              OpenAlex 404; Crossref 302 -> http://api.openalex.stub/works/doi:... (no key)
+//   10.5555/p6a.r02              OpenAlex 302 -> http://api.crossref.stub/works/... (no mailto)
+//   10.5555/p6a.r03              OpenAlex 302 -> http://evil.stub/works/...
+//   10.5555/p6a.r04              OpenAlex 302 -> http://evil.stub/leak?<the request's query: key + mailto>
+//   10.5555/p6a.t01              OpenAlex 200 whose title echoes the request's query (key + mailto);
+//                                Crossref 404 (so the reference fails: no clean record anywhere)
+// Any other .stub host (evil.stub) is logged and answered 200, so a followed redirect is SEEN.
+// Run with --network-alias api.openalex.stub/api.crossref.stub/evil.stub as the DIRECT CATCHER, it
+// logs a request that skipped the proxy (the run expects none).
 // Control (Host = this container's name, not a .stub name):
 //   GET  /_log            every request logged so far: method, host, path, query, user-agent
 //   POST /_reset          clear the log
@@ -20,7 +30,16 @@ let failAll = false;
 
 const n3 = (doi: string) => /^10\.5555\/p6a\.(\d{3})$/.exec(doi)?.[1];
 
-function openalexWork(key: string): [number, unknown] {
+const redirect = (to: string): [number, unknown, string] => [302, null, to];
+
+function openalexWork(key: string, query: URLSearchParams): [number, unknown, string?] {
+  if (key === "doi:10.5555/p6a.r01") return [404, { error: "Not Found" }];
+  if (key === "doi:10.5555/p6a.r02") return redirect("http://api.crossref.stub/works/10.5555/p6a.r02");
+  if (key === "doi:10.5555/p6a.r03") return redirect("http://evil.stub/works/10.5555/p6a.r03");
+  if (key === "doi:10.5555/p6a.r04") return redirect(`http://evil.stub/leak?${query}`);
+  if (key === "doi:10.5555/p6a.t01") {
+    return [200, { id: "https://openalex.org/W6AT01", title: `Echo title ${[...query].map(([k, v]) => `${k}=${v}`).join(" ")}`, type: "article" }];
+  }
   if (key === "doi:10.48550/arxiv.2101.00001") {
     return [200, { id: "https://openalex.org/W6A0000001", doi: "https://doi.org/10.48550/arxiv.2101.00001", title: "Resolved arXiv work (OpenAlex)",
       type: "preprint", publication_date: "2021-01-01", authorships: [{ author: { display_name: "Arxiv Fixture Author" } }],
@@ -37,7 +56,8 @@ function openalexWork(key: string): [number, unknown] {
   }];
 }
 
-function crossrefWork(doi: string): [number, unknown] {
+function crossrefWork(doi: string): [number, unknown, string?] {
+  if (doi === "10.5555/p6a.r01") return redirect("http://api.openalex.stub/works/doi:10.5555/p6a.r01");
   const n = n3(doi);
   if (!n || Number(n) <= 90) return [404, { status: "error", message: "Resource not found." }];
   return [200, { status: "ok", message: {
@@ -59,9 +79,10 @@ Deno.serve({ port: 8080, hostname: "0.0.0.0" }, async (req) => {
   await req.body?.cancel();
   log.push({ at: Date.now(), method: req.method, host, path: decodeURIComponent(u.pathname), query: Object.fromEntries(u.searchParams), user_agent: req.headers.get("user-agent") });
   if (failAll) return Response.json({ error: "stub fail mode" }, { status: 503 });
-  let r: [number, unknown] = [404, { error: "unknown service" }];
+  let r: [number, unknown, string?] = [200, { title: "evil", type: "article" }]; // a third host
   const path = decodeURIComponent(u.pathname);
-  if (host === "api.openalex.stub" && path.startsWith("/works/")) r = openalexWork(path.slice("/works/".length));
-  if (host === "api.crossref.stub" && path.startsWith("/works/")) r = crossrefWork(path.slice("/works/".length));
+  if (host === "api.openalex.stub") r = path.startsWith("/works/") ? openalexWork(path.slice("/works/".length), u.searchParams) : [404, { error: "unknown path" }];
+  if (host === "api.crossref.stub") r = path.startsWith("/works/") ? crossrefWork(path.slice("/works/".length)) : [404, { error: "unknown path" }];
+  if (r[2]) return new Response(null, { status: r[0], headers: { location: r[2] } });
   return Response.json(r[1], { status: r[0] });
 });
