@@ -1,7 +1,7 @@
 # run-references-tests.ps1 - the disposable test run for research-workbench P2a (rw-p2a-refs):
 # references as first-class records.
 #
-#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-references-tests.ps1 [-Id <owner id>] [-Evidence <dir>]
+#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-references-tests.ps1 [-Id <owner id>] [-Subnet <a /24 outside 192.168/16>] [-BaseSha <OB1 sha>] [-Evidence <dir>]
 #
 # What it does, and ONLY this:
 #   1. stages the REAL initdb chain from docker-compose.yml (every mounted init*.sql, P0's 230
@@ -51,7 +51,12 @@ param(
   # The pre-change workbench is built from this OB1 commit: P0's FINAL tip (rw-p0-contract2 attempt 2,
   # 5d919e6), which P2a was forward-merged onto on 2026-10-18 (P2a first branched from 29834e3).
   [string]$BaseSha = '5d919e6',
-  [switch]$SkipDredd
+  [switch]$SkipDredd,
+  # rw-p3a-entail integration (2026-10-18): the disposable network's subnet is PINNED, as in P3a's
+  # two runners (empty = a /24 drawn from -SubnetBase, retried on an overlap). The daemon's default
+  # pool runs into 192.168.0.0/20, and a Docker network there once cut the host off its home LAN.
+  [string]$Subnet = '',
+  [string]$SubnetBase = '10.245'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -83,6 +88,17 @@ $sentinel = 'zq-p2a-chunk-text-sentinel'
 $twoHundred = 'notes/p2a-vault/two-hundred.md'
 
 $script:fail = 0
+# Anything inside 192.168.0.0/16, a prefix shorter than /16 or longer than /28, and the tester lab
+# range 10.234.77.0/24 are refused before docker is asked (the same rule as run-credibility-e2e.ps1).
+function Test-SubnetAllowed([string]$s) {
+  if ($s -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$') { return $false }
+  $o = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]); $len = [int]$Matches[5]
+  if (@($o | Where-Object { $_ -gt 255 }).Count -gt 0) { return $false }
+  if ($len -lt 16 -or $len -gt 28) { return $false }
+  if ($o[0] -eq 192 -and $o[1] -eq 168) { return $false }
+  if ($o[0] -eq 10 -and $o[1] -eq 234 -and $o[2] -eq 77) { return $false }
+  return $true
+}
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
@@ -229,9 +245,18 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, labelled)"
-  if ($script:rc -ne 0) { throw 'network' }
+  if ($SubnetBase -notmatch '^(\d{1,3})\.(\d{1,3})$' -or $SubnetBase -match '^192\.168$') { Fail "refusing -SubnetBase '$SubnetBase'"; throw 'network' }
+  $cands = if ($Subnet) { @($Subnet) } else { @(1..8 | ForEach-Object { "$SubnetBase.$(Get-Random -Minimum 1 -Maximum 255).0/24" }) }
+  $sub = ''
+  foreach ($s in $cands) {
+    if (-not (Test-SubnetAllowed $s)) { Fail "refusing subnet '$s' (inside 192.168.0.0/16, the lab range, or malformed)"; break }
+    $null = Dk network create --internal --subnet $s --label $label $net
+    if ($script:rc -eq 0) { $sub = $s; break }
+  }
+  Check ($sub -ne '') "network $net created (internal, labelled, --subnet $sub)"
+  if ($sub -eq '') { throw 'network' }
+  $got = (Dk network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $net).Trim()
+  Check (($got -eq $sub) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
   $made.net = $true
 
   # ---------------------------------------------------------------- 3. the :wt image
