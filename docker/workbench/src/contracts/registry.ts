@@ -96,8 +96,18 @@ export class RegistryReader {
     return (await this.all()).find((e) => e.registry === registry && e.key === key);
   }
 
+  // A key a write may use: registered and NOT retired. A retired entry "stays readable, never
+  // reused" (init-research-contract.sql): entry() still returns it for reads, but every door that
+  // validates a value through has() / requireRegistered() refuses it (rw-p0b-purge-door attempt 2,
+  // tester finding F2: a retired erasure reason was accepted by the purge and the erase doors).
   async has(registry: string, key: string): Promise<boolean> {
-    return (await this.entry(registry, key)) !== undefined;
+    const e = await this.entry(registry, key);
+    return e !== undefined && !e.retired_at;
+  }
+
+  // The retirement time of a registered key, or null (active, or not registered at all).
+  async retiredAt(registry: string, key: string): Promise<string | null> {
+    return (await this.entry(registry, key))?.retired_at ?? null;
   }
 
   // A definition field, or the fallback when the entry or the field is absent.

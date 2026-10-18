@@ -15,6 +15,8 @@ import * as lifecycle from "../contracts/repo/lifecycle.ts";
 // The contract's lifecycle over this router's pool (the same pool src/contracts/wiring.ts uses).
 const contractDb = poolDb(pool);
 const registry = new RegistryReader(contractDb);
+// The purge door's registry reader (exported so a test can drop its 30 s cache after a registry write).
+export const purgeRegistry = registry;
 
 export const sources = new Hono();
 
@@ -227,17 +229,25 @@ sources.delete("/:id", async (c) => {
     }, 400);
   }
   if (!(await registry.has(ERASURE_REASONS, reasonType))) {
+    const retired = await registry.retiredAt(ERASURE_REASONS, reasonType);
     return c.json({
-      error: `purge requires a reason_type registered in ${ERASURE_REASONS}; '${reasonType}' is not`,
+      error: retired
+        ? `purge requires an active reason_type; '${reasonType}' is retired in ${ERASURE_REASONS} (since ${retired})`
+        : `purge requires a reason_type registered in ${ERASURE_REASONS}; '${reasonType}' is not`,
       missing: "reason_type",
     }, 400);
   }
   const note = typeof body?.note === "string" && body.note.trim() ? body.note.trim() : null;
-  const by = (typeof body?.by === "string" && body.by) || authorOf(c);
+  // The trail actor is the AUTHENTICATED user (rw-p0b-purge-door attempt 2, tester finding F3: a
+  // body 'by' named the actor ahead of Remote-User, so any caller could name anyone). A body 'by'
+  // that differs is kept in the event's detail as a note (claimed_by), never as the actor.
+  const by = authorOf(c);
+  const claimedBy = typeof body?.by === "string" && body.by.trim() && body.by.trim() !== by ? body.by.trim() : null;
   let res;
   try {
     res = await lifecycle.suppress(contractDb, id, reasonType, by, {
       door: "DELETE /workbench/sources/:id", reason_type: reasonType, note,
+      ...(claimedBy ? { claimed_by: claimedBy } : {}),
     });
   } catch (e) {
     if (e instanceof lifecycle.NotFound) return c.json({ error: "not found" }, 404);

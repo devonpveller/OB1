@@ -20,19 +20,95 @@ import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
 const HOST = Deno.env.get("D5_TEST_DB_HOST");
 const ignore = !HOST;
 
-// The binding: registerSuggestionList runs SUGGESTION_LIST_SQL and no other query text, so the
-// query tested below IS the query the tools run.
-Deno.test("the triage listing runs SUGGESTION_LIST_SQL, and only it", async () => {
-  const src = (await Deno.readTextFile(new URL("./index.ts", import.meta.url))).replace(/\r\n/g, "\n");
-  const start = src.indexOf("function registerSuggestionList(");
-  assert(start >= 0, "registerSuggestionList not found in index.ts");
-  // the function ends at the first column-0 closing brace after its start
-  const end = src.indexOf("\n}\n", start);
-  assert(end > start, "the end of registerSuggestionList not found");
-  const body = src.slice(start, end);
-  assertEquals((body.match(/queryObject\b/g) ?? []).length, 1, "registerSuggestionList runs one query");
-  assert(/queryObject<SuggestionView>\(SUGGESTION_LIST_SQL,/.test(body), "registerSuggestionList does not run SUGGESTION_LIST_SQL");
-  assert(!/`[^`]*\bSELECT\b/i.test(body), "registerSuggestionList carries inline SQL besides SUGGESTION_LIST_SQL");
+// THE BINDING, by execution (rw-p0b-purge-door attempt 2, tester finding N3: attempt 1 counted
+// `queryObject` in index.ts's text, so a second query through queryArray, a template literal or a
+// double-quoted string, or a module-level shadow `const SUGGESTION_LIST_SQL = SLS.replace(...)`,
+// passed). Now index.ts itself is EXECUTED, its external imports swapped for recording stand-ins
+// (the MCP server records each registered tool; the pg Pool hands out a client that records EVERY
+// method call, whatever its name or argument shape), and the two triage tools are invoked. Each call
+// must make exactly the pool's own liveness probe (ResilientPool.connect: queryArray "SELECT 1")
+// and ONE statement: queryObject(SUGGESTION_LIST_SQL - the very constant the database test below
+// runs - , [status, thread]). Anything else - another statement, another method, a different text -
+// FAILS. Only the module's import lines and its final Deno.serve call are rewritten (counted below);
+// the code that registers and runs the tools is index.ts as it is.
+const STUB_MCP = `
+export const registered = (globalThis.__d5Registered ??= []);
+const chain = new Proxy(function () {}, {
+  get(_t, p) { if (p === "then") return undefined; if (p === Symbol.toPrimitive) return () => ""; if (p === Symbol.iterator) return function* () {}; return chain; },
+  apply() { return chain; }, construct() { return chain; },
+});
+export class McpServer {
+  constructor() {
+    return new Proxy(this, { get(t, p, r) { if (p in t) return Reflect.get(t, p, r); if (p === "then") return undefined; return chain; } });
+  }
+  registerTool(name, config, handler) { registered.push({ server: this, name, handler }); return chain; }
+}`;
+const STUB_HONO_MCP = `export class StreamableHTTPTransport { handleRequest() { return new Response(null); } }`;
+const STUB_PG = `
+export const calls = (globalThis.__d5Calls ??= []);
+function client() {
+  return new Proxy({}, {
+    get(_t, p) {
+      if (p === "then") return undefined;
+      if (p === "release") return () => {};
+      return (...args) => { calls.push({ method: String(p), args }); return Promise.resolve({ rows: [], rowCount: 0, command: "SELECT" }); };
+    },
+  });
+}
+export class Pool { constructor() {} async connect() { return client(); } async end() {} }`;
+const dataUrl = (mime: string, text: string) =>
+  `data:${mime};base64,${btoa(String.fromCharCode(...new TextEncoder().encode(text)))}`;
+
+Deno.test({
+  name: "the triage tools, executed: each call runs SUGGESTION_LIST_SQL and no other statement",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const here = new URL("./", import.meta.url);
+    let src = (await Deno.readTextFile(new URL("./index.ts", import.meta.url))).replace(/\r\n/g, "\n");
+    const swaps: Array<[RegExp, string]> = [
+      [/from "@modelcontextprotocol\/sdk\/server\/mcp\.js";/g, `from "${dataUrl("application/javascript", STUB_MCP)}";`],
+      [/from "@hono\/mcp";/g, `from "${dataUrl("application/javascript", STUB_HONO_MCP)}";`],
+      [/from "postgres";/g, `from "${dataUrl("application/javascript", STUB_PG)}";`],
+      [/^Deno\.serve\(/gm, "(globalThis as any).__d5Serve("],
+    ];
+    for (const [rx, to] of swaps) {
+      const n = (src.match(rx) ?? []).length;
+      assertEquals(n, 1, `index.ts: expected one ${rx} to swap, found ${n}`);
+      src = src.replace(rx, to);
+    }
+    // every relative import, to the real module beside index.ts (the same URL this test imports)
+    src = src.replace(/from "\.\/([^"]+)"/g, (_m, rel) => `from "${new URL(rel, here).href}"`);
+    (globalThis as any).__d5Serve = () => ({ finished: Promise.resolve(), shutdown: async () => {}, ref() {}, unref() {} });
+    const env: Record<string, string> = { DB_HOST: "d5-binding.invalid", DB_PASSWORD: "x", MCP_ACCESS_KEY: "d5-binding-test-key-0123456789", PORT: "0" };
+    const saved = Object.fromEntries(Object.keys(env).map((k) => [k, Deno.env.get(k)]));
+    for (const [k, v] of Object.entries(env)) Deno.env.set(k, v);
+    try {
+      await import(dataUrl("application/typescript", src));
+    } finally {
+      for (const [k, v] of Object.entries(saved)) v === undefined ? Deno.env.delete(k) : Deno.env.set(k, v);
+    }
+    const registered = (globalThis as any).__d5Registered as Array<{ name: string; handler: (a: unknown) => Promise<any> }>;
+    const calls = (globalThis as any).__d5Calls as Array<{ method: string; args: unknown[] }>;
+    const thread = crypto.randomUUID();
+    for (const [tool, status] of [["get_suggestions", "pending"], ["get_hidden_suggestions", "hidden"]]) {
+      const regs = registered.filter((r) => r.name === tool);
+      assert(regs.length >= 1, `${tool} is not registered by index.ts`);
+      for (const r of regs) {
+        for (const input of [{ thread_id: thread }, {}]) {
+          calls.length = 0;
+          const res = await r.handler(input);
+          assert(!res?.isError, `${tool}(${JSON.stringify(input)}) answered an error: ${JSON.stringify(res)}`);
+          const seen = calls.map((c) => ({ method: c.method, text: typeof c.args[0] === "string" ? c.args[0] : JSON.stringify(c.args[0]), params: c.args[1] }));
+          assertEquals(seen.length, 2, `${tool}: exactly the pool's probe and ONE statement, saw ${JSON.stringify(seen)}`);
+          assertEquals([seen[0].method, seen[0].text], ["queryArray", "SELECT 1"], `${tool}: the first call is ResilientPool's probe`);
+          assertEquals(seen[1].method, "queryObject", `${tool}: the statement goes through queryObject`);
+          assert(seen[1].text === SUGGESTION_LIST_SQL, `${tool}: the statement is not SUGGESTION_LIST_SQL: ${seen[1].text}`);
+          assertEquals(seen[1].params, [status, (input as { thread_id?: string }).thread_id ?? null], `${tool}: the parameters`);
+        }
+      }
+    }
+  },
 });
 
 Deno.test({

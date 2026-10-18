@@ -42,6 +42,15 @@
 #      run made; then the logs are published through Protect-EvidenceText (a FAIL compare's
 #      response excerpts redacted to their fixture ids, non-fixture uuids and host paths
 #      replaced). A planted live-shaped excerpt proves it in every run (smoke-planted-red.log).
+#      Attempt 2 (the tester's network-namespace bypass and near-misses): the smoke script's
+#      disposable-target check is unit-tested here (scripts/checks/smoke-workbench-routers.test.ps1:
+#      every refusal shape on synthetic docker JSON, a silent docker endpoint, and a revert check
+#      that FAILS when either half of the check is reduced to "return ''"), and refused against
+#      REAL docker for a never-started container sharing the workbench's network namespace and
+#      one on the host network. Every log, not only the smoke logs, is redacted (names in quotes,
+#      uuids in any spelling, docker ids, IPs, host paths; planted-nonsmoke.log proves it); a
+#      file over 16 KB, a link or a directory is not published and is named (_dropped.txt;
+#      planted-oversized.log proves the cap).
 #   7. tears down exactly what it created (containers with -v, so no anonymous volume is
 #      left); verifies nothing labelled <Id> is left, no NEW dangling volume exists, and no
 #      :local image changed
@@ -397,7 +406,28 @@ try {
     # rw-p0b-purge-door, T2-2: the tester's bypass (another exec container name, the live service URL)
     $o0d = (& $smoke -Capture $probe -ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000 *>&1 | Out-String); $r0d = $LASTEXITCODE
     Check (($r0d -eq 2) -and ($o0d -match "base URL host 'openbrain-workbench'") -and -not (Test-Path $probe)) "the tester's bypass (-ExecContainer zz-not-a-container -BaseUrl http://openbrain-workbench:8000) is refused by host, nothing captured (rc $r0d)"
-    Save 'smoke-refusals.log' ($o0 + $o0b + $o0c + $o0d)
+    # rw-p0b-purge-door attempt 2: the label / compose / network-namespace half of the check, by
+    # test - the Docker-free unit test (synthetic docker inspect JSON for every refusal shape, the
+    # accepted shapes, a real docker.exe against a silent endpoint, and its own revert check: each
+    # half of the check reduced to "return ''" must make it FAIL).
+    $unit = Join-Path $repo 'scripts\checks\smoke-workbench-routers.test.ps1'
+    $ou = (& powershell -NoProfile -File $unit 2>&1 | Out-String -Width 4096); $ru = $LASTEXITCODE
+    Save 'smoke-check-unit.log' $ou
+    $uPass = ([regex]::Matches($ou, '(?m)^\s*PASS\s')).Count; $uFail = ([regex]::Matches($ou, '(?m)^\s*FAIL\s')).Count
+    Check (($ru -eq 0) -and ($uFail -eq 0) -and ($ou -match 'all checks passed') -and ($ou -match "Test-DisposableContainer reduced to return '': this test FAILS") -and ($ou -match "Test-DisposableTarget reduced to return '': this test FAILS")) "smoke check unit test (synthetic docker, every refusal shape, revert check): $uPass PASS, $uFail FAIL, rc $ru"
+    # ... and the same shapes against REAL docker, on this run's own containers: a never-started
+    # owner-labelled container sharing the :wt workbench's network namespace, and one on the host
+    # network. Both must be refused (exit 2, no directory) - the attempt-1 bypass.
+    $nsSide = "rwp0-nsside-$rand"; $nsHost = "rwp0-nshost-$rand"
+    $null = Dk create --name $nsSide --label $label --network "container:$wbName" --entrypoint true $tag
+    if ($script:rc -eq 0) { $made.containers += $nsSide }
+    $null = Dk create --name $nsHost --label $label --network host --entrypoint true $tag
+    if ($script:rc -eq 0) { $made.containers += $nsHost }
+    $o0e = (& $smoke -Capture $probe -ExecContainer $nsSide -BaseUrl http://localhost:8000 *>&1 | Out-String -Width 4096); $r0e = $LASTEXITCODE
+    Check (($r0e -eq 2) -and ($o0e -match 'shares the network namespace of container') -and -not (Test-Path $probe)) "a container sharing the workbench's network namespace (--network container:$wbName) is refused, nothing captured (rc $r0e)"
+    $o0f = (& $smoke -Capture $probe -ExecContainer $nsHost -BaseUrl http://localhost:8000 *>&1 | Out-String -Width 4096); $r0f = $LASTEXITCODE
+    Check (($r0f -eq 2) -and ($o0f -match "NetworkMode 'host'") -and -not (Test-Path $probe)) "a container on the host network (--network host) is refused, nothing captured (rc $r0f)"
+    Save 'smoke-refusals.log' ($o0 + $o0b + $o0c + $o0d + $o0e + $o0f)
     $a = Join-Path $own 'smoke-a'; $b = Join-Path $own 'smoke-b'
     $c1 = Smoke-Capture $a $wbName; $c2 = Smoke-Capture $b $wbName
     $cmp = Smoke-Compare $a $b
@@ -478,6 +508,16 @@ try {
     $cp = Smoke-Compare $a $planted
     Save 'smoke-planted-red.log' $cp.out
     Check (($cp.rc -eq 1) -and ($cp.out -match [regex]::Escape($script:plantedName)) -and ($cp.out -match [regex]::Escape($script:plantedUuid))) "evidence gate RED: a FAIL compare prints the planted live-shaped excerpt into the STAGED log (rc $($cp.rc))"
+    # attempt 2 (N7, N8): the same excerpt planted in a NON-smoke log, in every uuid spelling, with a
+    # docker id, an IP and a host path; plus an oversized log - published redacted / dropped.
+    $script:plantedForms = @($script:plantedName, $script:plantedUuid, $script:plantedUuid.Replace('-', ''), $script:plantedUuid.Replace('-', '%2D'), $script:plantedUuid.ToUpper())
+    Save 'planted-nonsmoke.log' ((@(
+          ('PROBE {"notebooks":[{"id":"' + $script:plantedUuid + '","name":"' + $script:plantedName + '"}]}'),
+          ('error: AssertionError: Values are not equal: { name: "' + $script:plantedName + '" }'),
+          ("the notebook '$($script:plantedName)' was listed"),
+          ("compact $($script:plantedForms[2]) encoded $($script:plantedForms[3]) upper {$($script:plantedForms[4])}"),
+          "at $own on 172.27.1.4") -join "`n"))
+    Save 'planted-oversized.log' ('z' * ($EvidenceMaxBytes + 1))
     Remove-Item -Recurse -Force $planted
     Remove-Item $baseSrc, $baseTar -Recurse -Force -ErrorAction SilentlyContinue
   } else {
@@ -511,16 +551,24 @@ try {
   Write-Host '[8] evidence gate'
   $untouched = -not (Test-Path $Evidence) -or @(Get-ChildItem -Force $Evidence).Count -eq 0
   Check $untouched "nothing was written under -Evidence before the guard passed for every capture ($($script:captures.Count) capture(s))"
-  $pub = Publish-Evidence $evStage $Evidence $script:captures ${function:Test-Capture} $FixtureUuids
+  $FixtureText = Get-FixtureText @((Join-Path $ct 'fixtures.sql'), (Join-Path $ct 'fixture-vault.ts'))
+  $pub = Publish-Evidence $evStage $Evidence $script:captures ${function:Test-Capture} $FixtureUuids $FixtureText
   if ($pub.published) {
-    Pass "evidence published after the guard passed for all $($script:captures.Count) capture(s): $($pub.files) item(s)"
+    Pass "evidence published after the guard passed for all $($script:captures.Count) capture(s): $($pub.files) item(s), $(@($pub.dropped).Count) dropped (listed in _dropped.txt)"
+    foreach ($x in @($pub.dropped)) { Write-Host "  DROPPED  $x" }
     if ($script:plantedUuid) {
-      $evAll = @(Get-ChildItem -Recurse -File $Evidence | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join "`n"
-      $leak = @(@($script:plantedUuid, $script:plantedName) | Where-Object { $evAll.Contains($_) })
-      $foreign = @([regex]::Matches($evAll, $UuidRx) | Where-Object { -not $FixtureUuids.ContainsKey($_.Value.ToLower()) })
-      Check (($leak.Count -eq 0) -and ($foreign.Count -eq 0)) "evidence gate: the planted live-shaped excerpt reached no evidence file (planted strings found: $($leak.Count); non-fixture uuids: $($foreign.Count))"
+      $evFiles = @(Get-ChildItem -Recurse -File $Evidence)
+      $evAll = @($evFiles | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join "`n"
+      $leak = @($script:plantedForms | Where-Object { $evAll.Contains($_) })
+      $foreign = @([regex]::Matches($evAll, $UuidAnyRx) | Where-Object {
+          $g = $_.Groups; -not $FixtureUuids.ContainsKey(('{0}-{1}-{2}-{3}-{4}' -f $g[1].Value, $g[3].Value, $g[4].Value, $g[5].Value, $g[6].Value).ToLower()) })
+      Check (($leak.Count -eq 0) -and ($foreign.Count -eq 0)) "evidence gate: the planted live-shaped excerpt (smoke and non-smoke logs, every uuid spelling) reached no evidence file (planted strings found: $($leak.Count); non-fixture uuids in any spelling: $($foreign.Count))"
       $pl = Join-Path $Evidence 'smoke-planted-red.log'
       Check ((Test-Path $pl) -and ([System.IO.File]::ReadAllText($pl) -match 'after: \[response excerpt redacted to its fixture ids: none\]')) 'evidence gate: the planted excerpt is published redacted to its fixture ids (none)'
+      $pn = Join-Path $Evidence 'planted-nonsmoke.log'
+      Check ((Test-Path $pn) -and ([System.IO.File]::ReadAllText($pn) -match '"<non-fixture-text>"') -and ([System.IO.File]::ReadAllText($pn) -notmatch '172\.27\.1\.4')) 'evidence gate: the non-smoke log with the planted excerpt is published redacted (name, uuids, IP, host path)'
+      $big = @($evFiles | Where-Object { $_.Length -gt $EvidenceMaxBytes })
+      Check ((-not (Test-Path (Join-Path $Evidence 'planted-oversized.log'))) -and (@($pub.dropped) -match '^planted-oversized\.log: ').Count -eq 1 -and $big.Count -eq 0) "evidence gate: no published file is over $EvidenceMaxBytes bytes; the planted oversized log is dropped and named ($($big.Count) over the cap)"
     }
   } else {
     Fail "evidence WITHHELD: the guard failed for $($pub.violations.Count) capture item(s); nothing was written under -Evidence"

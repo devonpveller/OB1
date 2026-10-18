@@ -128,5 +128,5 @@ A database trigger refuses any reference without a quote, so the rule holds for 
   frontmatter `sources:` list is no longer read; added references live in the record.
 
 ```
-powershell -NoProfile -File contract-test/run-references-tests.ps1   # disposable P2a run
+powershell -NoProfile -File contract-test/run-references-tests.ps1 -Subnet <x.y.z.0/24>   # disposable P2a run (same -Subnet / evidence gate as P0)
 ```

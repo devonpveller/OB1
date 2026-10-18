@@ -95,20 +95,44 @@ Deno.test("every tool's input schema matches its OpenAPI operation: properties, 
 // items - each nested level the same way. Descriptions and examples are not compared. Zod's
 // integer adds the safe-integer range when no bound is set; that default is not a bound.
 const SAFE = 9007199254740991;
+// THE KEYWORD LIST IS CLOSED (rw-p0b-purge-door attempt 2, tester finding N4: `not`, `enum`,
+// `oneOf` were never read, so `additionalProperties: {"not": {}}` or `{"enum": []}` - both
+// semantically `false` - and any oneOf branch passed). Every keyword is either COMPARED or
+// deliberately IGNORED below; a schema carrying any other keyword fails the test, naming it, so a
+// keyword this diff does not understand can never be skipped silently.
+const COMPARED_SCALARS = ["pattern", "format", "minLength", "maxLength", "minimum", "maximum", "exclusiveMinimum",
+  "exclusiveMaximum", "multipleOf", "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties", "default"];
+// annotations that change no accepted value ($ref is resolved; type/nullable/required/properties/
+// items/additionalProperties/not/enum/const/anyOf/oneOf/allOf/propertyNames/patternProperties/
+// prefixItems are compared structurally below)
+const IGNORED = new Set(["description", "title", "example", "examples", "$schema", "x-registry", "$ref", "deprecated", "readOnly", "writeOnly"]);
+const STRUCTURAL = new Set(["type", "nullable", "required", "properties", "items", "additionalProperties", "not", "enum", "const",
+  "anyOf", "oneOf", "allOf", "propertyNames", "patternProperties", "prefixItems"]);
+const sortedBranches = (xs: J[], fromOpenApi: boolean) =>
+  xs.map((x) => shape(x, fromOpenApi)).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
 function shape(s: J | undefined, fromOpenApi: boolean): J {
   s = fromOpenApi ? resolve(s ?? {}) : (s ?? {});
+  for (const k of Object.keys(s)) {
+    if (!IGNORED.has(k) && !STRUCTURAL.has(k) && !COMPARED_SCALARS.includes(k)) {
+      throw new Error(`shape(): schema keyword '${k}' is neither compared nor deliberately ignored (${JSON.stringify(s).slice(0, 200)})`);
+    }
+  }
   let type = s.type;
   let nullable = !!s.nullable;
   if (Array.isArray(type)) {
     nullable = nullable || type.includes("null");
     type = type.filter((x: string) => x !== "null")[0];
   }
-  for (const alt of (s.anyOf ?? []) as J[]) {
-    if (alt.type === "null") nullable = true;
-    else return { ...shape(alt, fromOpenApi), nullable: true };
+  // anyOf [X, {type: null}] is how Zod writes a nullable X: collapse exactly that shape; any other
+  // anyOf is compared branch by branch (attempt 1 returned the first non-null branch and dropped
+  // the rest)
+  const any = (s.anyOf ?? []) as J[];
+  const nonNull = any.filter((alt) => alt.type !== "null");
+  if (any.length && nonNull.length === 1 && any.length === 2 && Object.keys(s).every((k) => k === "anyOf" || IGNORED.has(k))) {
+    return { ...shape(nonNull[0], fromOpenApi), nullable: true };
   }
   const out: J = { type: type ?? null, nullable };
-  for (const k of ["pattern", "minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"]) {
+  for (const k of COMPARED_SCALARS) {
     const v = s[k];
     if (v === undefined || ((k === "minimum" || k === "maximum") && Math.abs(v) === SAFE)) continue;
     out[k] = v;
@@ -116,14 +140,26 @@ function shape(s: J | undefined, fromOpenApi: boolean): J {
   if (s.properties) {
     out.required = [...(s.required ?? [])].sort();
     out.properties = Object.fromEntries(Object.keys(s.properties).sort().map((k) => [k, shape(s!.properties[k], fromOpenApi)]));
-  }
-  if (s.items) out.items = shape(s.items, fromOpenApi);
+  } else if (s.required) out.required = [...s.required].sort();
+  if (s.items) out.items = Array.isArray(s.items) ? s.items.map((x: J) => shape(x, fromOpenApi)) : shape(s.items, fromOpenApi);
+  if (s.prefixItems) out.prefixItems = (s.prefixItems as J[]).map((x) => shape(x, fromOpenApi));
   // additionalProperties (rw-p0b-purge-door, tester finding T2-4: `{}` -> `false` passed): a
   // boolean is kept as it is, a schema is compared as one; absent stays absent.
   if ("additionalProperties" in s) {
     const ap = s.additionalProperties;
     out.additionalProperties = typeof ap === "boolean" ? ap : shape(ap as J, fromOpenApi);
   }
+  if (s.patternProperties) {
+    out.patternProperties = Object.fromEntries(Object.keys(s.patternProperties).sort().map((k) => [k, shape(s!.patternProperties[k], fromOpenApi)]));
+  }
+  if ("propertyNames" in s) out.propertyNames = typeof s.propertyNames === "boolean" ? s.propertyNames : shape(s.propertyNames, fromOpenApi);
+  // the value-restricting keywords (attempt 2, N4): compared, never skipped
+  if ("not" in s) out.not = typeof s.not === "boolean" ? s.not : shape(s.not, fromOpenApi);
+  if ("enum" in s) out.enum = (s.enum as unknown[]).map((v) => JSON.stringify(v)).sort();
+  if ("const" in s) out.const = JSON.stringify(s.const);
+  if (any.length) out.anyOf = sortedBranches(any, fromOpenApi);
+  if (s.oneOf) out.oneOf = sortedBranches(s.oneOf, fromOpenApi);
+  if (s.allOf) out.allOf = sortedBranches(s.allOf, fromOpenApi);
   return out;
 }
 

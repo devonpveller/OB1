@@ -857,6 +857,51 @@ t("a purged source stays reversible through the restore door until a gated erase
   assert(Number(k.cached) > 0 && Number(k.cached) === Number(k.live), "the restored source grounds its claim again");
 });
 
+// rw-p0b-purge-door attempt 2, tester finding F2: a RETIRED erasure_reasons key was accepted by the
+// purge door (and by the contract's erase door) - RegistryReader.has ignored retired_at. A retired
+// entry "stays readable, never reused" (init-research-contract.sql): the shared lookup now refuses it.
+t("a RETIRED erasure reason is refused at the purge door (400 naming it) and at the contract's erase door", async () => {
+  const key = `zz-retired-${uuid().slice(0, 8)}`;
+  await sql(`INSERT INTO public.contract_registry_entries (registry, key, label, retired_at) VALUES ('erasure_reasons', $1, 'retired by a test', now())`, [key]);
+  try {
+    legacy!.routes.purgeRegistry.invalidate(); // the router's reader caches for 30 s
+    const { s, c } = await activeWithClaim();
+    const before = await confidences(c);
+    const r = await legacyDelete(`/${s}`, { confirm: true, reason_type: key });
+    assertEquals(r.status, 400, `purge with the retired reason ${key}: ${JSON.stringify(r.json)}`);
+    assertEquals(r.json.missing, "reason_type");
+    assert(String(r.json.error).includes(key) && /retired/.test(String(r.json.error)), `the refusal names the retired reason: ${r.json.error}`);
+    assertEquals(await lifeOf(s), { life: "active", committed: false, unlinked: false, reason: null }, "a refused purge changes nothing");
+    assertEquals((await trailKinds(s)).length, 0, "a refused purge writes no trail event");
+    assertEquals(await confidences(c), before);
+    // the contract's erase door reads the same registry through the same lookup
+    const u = await newSource();
+    assertEquals((await call("POST", `/sources/${u}/suppress`, { reason: "retired reason test", by: "tester" })).json.lifecycle, "unlinked");
+    const e = await call("POST", `/sources/${u}/erase`, { reason_type: key, eraser: { kind: "user", user: "tester" } });
+    assert(e.status >= 400 && e.status < 500, `erase with the retired reason ${key}: ${e.status} ${e.text}`);
+    assertEquals((await lifeOf(u)).life, "unlinked", "a refused erase leaves the source unlinked");
+    assertEquals((await sql(`SELECT 1 FROM public.source_tombstones WHERE source_id = $1`, [u])).length, 0, "no tombstone");
+    // a live key still works at both doors
+    assertEquals((await call("POST", `/sources/${u}/erase`, { reason_type: "deliberate", eraser: { kind: "user", user: "tester" } })).status, 200);
+  } finally {
+    await sql(`DELETE FROM public.contract_registry_entries WHERE registry = 'erasure_reasons' AND key = $1`, [key]);
+    legacy!.routes.purgeRegistry.invalidate();
+  }
+});
+
+// rw-p0b-purge-door attempt 2, tester finding F3: body.by named the trail actor ahead of the
+// authenticated Remote-User. The actor is the authenticated user; a body 'by' is kept as a note.
+t("the purge's trail actor is the authenticated user; a body 'by' is a note, never the actor", async () => {
+  const { s } = await activeWithClaim();
+  const r = await legacyDelete(`/${s}`, { confirm: true, reason_type: "deliberate", by: "body-actor" }, "purge-tester");
+  assertEquals(r.status, 200, JSON.stringify(r.json));
+  const ev = await sql<{ kind: string; detail: Record<string, unknown>; actor: string | null }>(
+    `SELECT kind, detail, actor FROM public.source_trail_events WHERE source_id = $1 ORDER BY created_at, id`, [s]);
+  assertEquals(ev.length, 1);
+  assertEquals([ev[0].kind, ev[0].actor], ["suppressed", "purge-tester"], "the trail actor is the Remote-User, not body.by");
+  assertEquals(ev[0].detail.claimed_by, "body-actor", "the body's 'by' is recorded as a note");
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();
