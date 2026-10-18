@@ -370,6 +370,62 @@ Deno.test("A3: the cleaned pandoc input (prepareDocument) holds no link but the 
   }
 });
 
+// ── A3-13: an image cannot make pandoc read a local file or fetch a URL (found in attempt 3) ─────
+const PNG_1PX = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+Deno.test("A3-13: an image path outside the resource path, a hidden or non-image file, or an http(s) image never makes pandoc read the file or fetch the URL; a local PNG still embeds", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "ob-img-a3-" });
+  try {
+    await Deno.mkdir(`${dir}/img`);
+    await Deno.writeFile(`${dir}/img/ok.png`, PNG_1PX);
+    await Deno.writeTextFile(`${dir}/notes.txt`, "NOT-AN-IMAGE-A3");
+    const body = "![ok](img/ok.png) ![p](../../../../../../etc/passwd) ![q](/etc/hostname) ![e](/proc/self/environ) " +
+      "![g](.git/config) ![t](%2e%2e/%2e%2e/etc/passwd) ![n](notes.txt) ![s](img/../notes.txt) ![r](http://img.example.invalid/a.png)";
+    for (const f of ["docx", "pdf"]) {
+      const out = await render(input(doc(body), f, { resourcePath: dir }));
+      assert(!/Could not fetch|fetch resource/i.test(out.stderr), `${f}: pandoc tried to fetch: ${out.stderr.slice(0, 300)}`);
+      assert(!/root:x:0|NOT-AN-IMAGE-A3/.test(new TextDecoder("latin1").decode(out.bytes)), `${f}: a local file was embedded`);
+      if (f === "docx") {
+        const xml = await docxXml(out.bytes);
+        assertEquals([...xml.matchAll(/Target="media\/[^"]+"/g)].length, 1, "exactly one embedded image: the PNG");
+        assertMatch(xml, /Target="http:\/\/img\.example\.invalid\/a\.png" TargetMode="External"/, "the remote image is a hyperlink");
+      }
+    }
+    // the cleaning bypassed: pandoc embeds the file, and the output verification refuses it
+    await Deno.writeTextFile(`${dir}/in.md`, "![q](/etc/hostname)\n");
+    const o = await new Deno.Command("pandoc", { args: ["-f", "markdown", "-t", "docx", "-o", `${dir}/raw.docx`, `${dir}/in.md`], cwd: dir, stdout: "piped", stderr: "piped" }).output();
+    assertEquals(o.code, 0);
+    await rejects(() => verifyDocx(Deno.readFileSync(`${dir}/raw.docx`), []), "output-verification", /an embedded part that is not an image/);
+    await Deno.writeTextFile(`${dir}/leak.png`, `env OPENALEX_API_KEY=${KEY}\n`);
+    await Deno.writeTextFile(`${dir}/in.md`, "![k](leak.png)\n");
+    await new Deno.Command("pandoc", { args: ["-f", "markdown", "-t", "docx", "-o", `${dir}/raw2.docx`, `${dir}/in.md`], cwd: dir, stdout: "piped", stderr: "piped" }).output();
+    await rejects(() => verifyDocx(Deno.readFileSync(`${dir}/raw2.docx`), [KEY]), "credential", /media/);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("A3-13: pandoc runs with a clean environment - the workbench's variables (the key, the mailto, the database password) never reach it", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "ob-env-a3-" });
+  const path = Deno.env.get("PATH") ?? "";
+  try {
+    const real = new TextDecoder().decode((await new Deno.Command("sh", { args: ["-c", "command -v pandoc"], stdout: "piped" }).output()).stdout).trim();
+    await Deno.writeTextFile(`${dir}/pandoc`, `#!/bin/sh\nenv > ${dir}/env.log\nexec ${real} "$@"\n`);
+    await Deno.chmod(`${dir}/pandoc`, 0o755);
+    Deno.env.set("PATH", `${dir}:${path}`);
+    Deno.env.set("OPENALEX_API_KEY", KEY);
+    Deno.env.set("CROSSREF_MAILTO", MAIL);
+    await render(input(doc("x"), "txt"));
+    const env = await Deno.readTextFile(`${dir}/env.log`);
+    assert(!env.includes(KEY) && !env.includes(MAIL) && !/OPENALEX|CROSSREF|PGPASSWORD|DB_PASS/i.test(env), env);
+    assertMatch(env, /^PATH=/m);
+  } finally {
+    Deno.env.set("PATH", path);
+    Deno.env.delete("OPENALEX_API_KEY");
+    Deno.env.delete("CROSSREF_MAILTO");
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("A3: the PDF text layer reader sees what pdftotext sees (the credential check reads it)", async () => {
   const pdf = (await render(input(doc("A sentence with Ünïcødé, 中文 and 😀 for the reader."), "pdf"))).bytes;
   const mine = (await (await PdfDocument.read(pdf)).glyphs()).text.replace(/\s+/g, "");

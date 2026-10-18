@@ -73,6 +73,14 @@ export async function verifyDocx(docx: Uint8Array, secrets: string[], format = "
   const dec = new TextDecoder();
   let words = "";
   for (const [name, bytes] of parts) {
+    // every part, whatever it is: no configured secret in its bytes (an embedded "image" that was a
+    // file - /proc/self/environ, the vault's .git/config - is caught here even if its name hides it)
+    const raw = secretInBytes(bytes, secrets);
+    if (raw) throw new OutputRejected("credential", format, `${name} holds ${mask(raw)}`);
+    // embedded media must BE images (by their first bytes): a note cannot make pandoc embed a file
+    if (/^word\/media\//.test(name) && !isRasterImage(bytes)) {
+      throw new OutputRejected("output-verification", format, `an embedded part that is not an image (${name})`);
+    }
     if (!/\.(xml|rels)$/i.test(name)) continue;
     const xml = dec.decode(bytes);
     if (/\.rels$/i.test(name)) {
@@ -126,6 +134,27 @@ export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pd
   }
   checkText(format, layer.text, secrets);
   for (const s of doc.dictStrings()) checkText(format, s, secrets);
+  // every stream's decoded bytes too (images, embedded data): no configured secret anywhere
+  for (const o of doc.objects.values()) {
+    if (!o.stream) continue;
+    const hit = secretInBytes(o.stream, secrets);
+    if (hit) throw new OutputRejected("credential", format, `a stream holds ${mask(hit)}`);
+  }
+}
+
+// A secret in binary bytes: as written (case-insensitive), and through the text normalisation.
+function secretInBytes(b: Uint8Array, secrets: string[]): string | null {
+  if (!secrets.length) return null;
+  const s = new TextDecoder("latin1").decode(b);
+  const low = s.toLowerCase();
+  return secrets.find((x) => x.length >= 4 && low.includes(x.toLowerCase())) ?? secretIn(s, secrets);
+}
+
+// PNG, JPEG, GIF, WebP, by their signatures (pandoc embeds a note's images as they are).
+export function isRasterImage(b: Uint8Array): boolean {
+  const at = (sig: number[], off = 0) => sig.every((x, k) => b[off + k] === x);
+  return at([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) || at([0xff, 0xd8, 0xff]) ||
+    at([0x47, 0x49, 0x46, 0x38]) || (at([0x52, 0x49, 0x46, 0x46]) && at([0x57, 0x45, 0x42, 0x50], 8));
 }
 
 // The writers the export can verify; any other registry row is refused before pandoc runs (a PDF

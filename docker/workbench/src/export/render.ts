@@ -218,7 +218,12 @@ export const pandocTimeoutMs = () => {
 // One pandoc run, bounded: wall clock, a CPU-time limit on its process (prlimit, inherited by
 // Typst), and on timeout pandoc and every process it started are killed.
 async function runPandoc(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stderr: string; timedOut: boolean }> {
-  const child = new Deno.Command(PANDOC, { args, cwd, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
+  // a CLEAN environment: pandoc and Typst get the path, a home in the scratch directory and a locale -
+  // never the workbench's own variables (the OpenAlex key, the Crossref mailto, the database password)
+  const env: Record<string, string> = { PATH: Deno.env.get("PATH") ?? "/usr/local/bin:/usr/bin:/bin", HOME: cwd, LANG: "C.UTF-8" };
+  const fonts = Deno.env.get("TYPST_FONT_PATHS");
+  if (fonts) env.TYPST_FONT_PATHS = fonts;
+  const child = new Deno.Command(PANDOC, { args, cwd, clearEnv: true, env, stdin: "null", stdout: "piped", stderr: "piped" }).spawn();
   const cpu = String(Math.max(1, Math.ceil(timeoutMs / 1000)));
   try {
     await new Deno.Command("prlimit", { args: ["--pid", String(child.pid), `--cpu=${cpu}:${cpu}`], stdin: "null", stdout: "null", stderr: "null" }).output();

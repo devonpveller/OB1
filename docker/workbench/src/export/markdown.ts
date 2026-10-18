@@ -102,6 +102,25 @@ export function safeTarget(dest: string, image = false): boolean {
   return !head.includes(":");
 }
 
+// What an image may load (rw-p6a-resolve attempt 3, found while verifying the DOCX): pandoc READS a
+// local image path and embeds the bytes, and FETCHES an http(s) one, from the workbench itself - so
+// `![x](/proc/self/environ)` or `![x](../../../etc/passwd)` put the workbench's environment (the API
+// key) or any file into a DOCX, and `![x](http://internal-host/)` made a request from inside. An image
+// may be: an inline raster `data:image/...` ("data"); a RELATIVE path inside the resource path - no
+// leading `/`, no `..` or hidden (`.x`) segment, no `%`, `:`, `?`, `#`, `&` or backslash, ending in a
+// raster image extension ("local"). An http(s) image becomes a link ("remote"); anything else, its alt.
+export function imageSource(dest: string): "data" | "local" | "remote" | null {
+  if (typeof dest !== "string") return null;
+  const d = normaliseTarget(dest);
+  if (/^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]*$/i.test(d)) return "data";
+  if (!safeTarget(dest)) return null;
+  if (/^https?:\/\//.test(d)) return "remote";
+  if (d.startsWith("/") || /[%:?#&\\]/.test(d)) return null;
+  const parts = d.split("/");
+  if (parts.some((p) => p === "" || p.startsWith("."))) return null;
+  return /\.(png|jpe?g|gif|webp)$/.test(d) ? "local" : null;
+}
+
 export { defang, UNSAFE_SCHEME_TEXT };
 
 // Text (not code): defanged, and never three colons in a row (schemes.ts noColonRuns).
@@ -356,9 +375,14 @@ export function cleanTree(tree: MdNode, src: string, links: Wikilink[], token: R
       case "imageReference": {
         const def = n.type === "imageReference" ? defs.get(n.identifier) : { url: restore(n.url ?? ""), title: n.title ? restore(n.title) : null };
         const alt = defang(restore(n.alt ?? ""));
-        if (!def || !safeTarget(def.url, true)) {
+        const kind = def ? imageSource(def.url) : null;
+        if (kind === "remote") { // pandoc would FETCH it from the workbench: a link instead, never a request
           dropped.images++;
-          return alt ? [{ type: "text", value: alt }] : [];
+          return [{ type: "link", url: def!.url, title: def!.title ? defang(def!.title) : null, children: [{ type: "text", value: textSafe(alt || def!.url) }] }];
+        }
+        if (!def || !kind) {
+          dropped.images++;
+          return alt ? [{ type: "text", value: textSafe(alt) }] : [];
         }
         return [{ type: "image", url: def.url, title: def.title ? defang(def.title) : null, alt }];
       }

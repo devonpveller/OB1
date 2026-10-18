@@ -565,6 +565,24 @@ try {
   Check (($o -match '^status 422 ') -and ($r -match '^PASS') -and ($j -notmatch [regex]::Escape($oaKey)) -and ($j -notmatch [regex]::Escape($mailto))) 'A3 / ADV-3: both split-key records are refused as credential-shaped (422, named), the body carries neither secret'
   Check ($o2.Trim() -eq '0') "A3 / ADV-3: neither split-key record is cached ($($o2.Trim()) rows)"
   Check (($o3 -match '^status 200 ') -and ($s3 -match '^PASS')) "A3 / ADV-3: the Copy page of the note answers 200 and carries neither secret: $o3 | $s3"
+  # found in attempt 3: an image path made pandoc embed a local file (/proc/self/environ held the key) or
+  # fetch a URL from the workbench itself (evil.stub is the direct catcher: a fetch would be logged there)
+  $ok = $true
+  foreach ($f in @('docx', 'pdf')) {
+    $o = Export $wbName 'notes/p6a/image-paths.md' $f "image-paths.$f"
+    if ($o -notmatch '^status 200 ') { $ok = $false; Fail "image-paths $f export: $o" }
+  }
+  $s1 = Client @('secret', '/ev/exports/image-paths.docx', $oaKey, $mailto)
+  $s2 = Client @('secret', '/ev/exports/image-paths.pdf', $oaKey, $mailto)
+  $media = -1
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $out 'image-paths.docx'))
+    $media = @($zip.Entries | Where-Object { $_.FullName -like 'word/media/*' }).Count
+    $zip.Dispose()
+  } catch { $media = -1 }
+  Save 'image-paths.log' "$s1`n$s2`nmedia parts in the DOCX: $media"
+  Check ($ok -and ($s1 -match '^PASS') -and ($s2 -match '^PASS') -and ($media -eq 0)) "A3-13: /proc/self/environ, ../etc/passwd, .git/config and http://evil.stub as images export 200 (DOCX, PDF), embed nothing ($media media parts) and carry neither secret"
   # near-miss 1: pathological nesting refused before pandoc, fast
   foreach ($c in @(@('brackets', 'bracket nesting depth'), @('deep-list', 'list nesting depth'), @('stars', 'delimiter|parser'))) {
     $t0 = Get-Date
