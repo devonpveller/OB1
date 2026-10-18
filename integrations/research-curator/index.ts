@@ -96,6 +96,8 @@ interface Pkg {
   report_type?: string; // report template id → sources.metadata.report_type (wiki rendering hint)
   needs?: string[]; // decomposed sub-questions → sources.metadata.needs (breadcrumbs)
   followup_queries?: string[]; // refined/deepen queries → sources.metadata.followup_queries
+  claim_kind?: string; // research-workbench P3a: the D15 claim kind → claims.metadata.claim_kind
+  credibility_model?: string; // research-workbench P3a: the model version that scored the run
   kind?: string;
   volatility?: string;
   revalidate_days?: number;
@@ -425,6 +427,9 @@ async function writeGroundedClaims(
       volatility: pkg.volatility ?? null,
       revalidateDays: pkg.revalidate_days ?? null,
       embed,
+      claimMetadata: pkg.claim_kind
+        ? { claim_kind: pkg.claim_kind, ...(pkg.credibility_model ? { credibility_model: pkg.credibility_model } : {}) }
+        : undefined,
       // research-trust 2026-09-11: statements ABOUT the run never become claims.
       // The judge is the second layer and fails open (claims.ts); the log line
       // is the point - eight of these were stored with nothing saying so.

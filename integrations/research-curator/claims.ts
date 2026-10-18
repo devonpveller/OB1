@@ -406,6 +406,12 @@ export interface WriteClaimsOpts {
   metaJudge?: (text: string) => Promise<"META" | "WORLD">;
   /** Called for every rejected claim so the refusal is visible, never silent. */
   onMetaSkip?: (text: string, by: "pattern" | "judge") => void;
+  /**
+   * research-workbench P3a: merged into each claim's metadata - the claim kind the research run's
+   * weight table read (`claim_kind`) and the credibility model version. claim_confidence_d15
+   * reads claim_kind; a claim without one is scored under the registry's declared fallback kind.
+   */
+  claimMetadata?: Record<string, unknown>;
 }
 
 export interface WriteClaimsResult {
@@ -476,7 +482,7 @@ export async function writeClaims(
       [
         claim.text, opts.threadId, opts.synthesisId, claim.tag,
         opts.volatility ?? null, opts.revalidateDays ?? null, emb,
-        JSON.stringify({ source: "deep-research-claim" }),
+        JSON.stringify({ ...(opts.claimMetadata ?? {}), source: "deep-research-claim" }),
       ],
     );
     const claimId = fc.rows[0].id;
