@@ -143,4 +143,38 @@ INSERT INTO public.research_notifications (id, class, subject, slug, error, dedu
   ('f0000000-0000-4000-8000-0000000000f1', 'transient', 'LLM call failing for this task: tool-fixture',
    'content/tool/tool-fixture', 'timeout after 3 retries', 'fixture-notification-1');
 
+-- P2a (rw-p2a-refs): reference records. A source at revision 2 whose revision 1 is pinned by
+-- one span reference (out of date; its quote is still in chunk 1) and revision 2 by another
+-- (current, chunk 2); a legacy note holds both by id; a PDF source for the page+quad rule.
+-- Texts avoid the words the P0 search tests query.
+INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata) VALUES
+  ('f1000000-0000-4000-8000-000000000001', 'https://example.org/reference-fixture', 'Reference fixture source',
+   'Opening line of the reference fixture. The quoted span about pinned anchors lives here. Closing line.',
+   'web_article', 'example.org', '{}'),
+  ('f1000000-0000-4000-8000-000000000002', 'https://example.org/reference-fixture.pdf', 'PDF reference fixture',
+   'Page one text of the PDF fixture.', 'pdf', 'example.org', '{}');
+INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by) VALUES
+  ('f1000000-0000-4000-8000-000000000001', 1, 'Opening line of the reference fixture. The quoted span about pinned anchors lives here.',
+   'Reference fixture source', 'original'),
+  ('f1000000-0000-4000-8000-000000000001', 2, 'Opening line of the reference fixture. The quoted span about pinned anchors lives here. Closing line.',
+   'Reference fixture source', 'operator');
+INSERT INTO public.source_chunks (source_id, idx, content) VALUES
+  ('f1000000-0000-4000-8000-000000000001', 0, 'Opening line of the reference fixture.'),
+  ('f1000000-0000-4000-8000-000000000001', 1, 'The quoted span about pinned anchors lives here.'),
+  ('f1000000-0000-4000-8000-000000000001', 2, 'Closing line.'),
+  ('f1000000-0000-4000-8000-000000000002', 0, 'Page one text of the PDF fixture.');
+INSERT INTO public.reference_records (id, source_id, scope, selectors, provenance, pinned_revision, chunk_idx, created_by) VALUES
+  ('f2000000-0000-4000-8000-000000000001', 'f1000000-0000-4000-8000-000000000001', 'span',
+   '{"quote": {"exact": "The quoted span about pinned anchors lives here.", "prefix": " line of the reference fixture. ", "suffix": ""},
+     "position": {"start": 39, "end": 87}}', 'user', 1, 1, 'fixture'),
+  ('f2000000-0000-4000-8000-000000000002', 'f1000000-0000-4000-8000-000000000001', 'span',
+   '{"quote": {"exact": "Closing line.", "prefix": "bout pinned anchors lives here. ", "suffix": ""},
+     "position": {"start": 88, "end": 101}}', 'assistant', 2, 2, 'fixture');
+INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number) VALUES
+  ('legacy_note', 'notes/p2a/fixture-note.md', 'f2000000-0000-4000-8000-000000000001', 'f1000000-0000-4000-8000-000000000001', 'cited', 0, 1);
+INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number) VALUES
+  ('user_document', 'documents/fixture-refinery.md', 'f2000000-0000-4000-8000-000000000002', 'f1000000-0000-4000-8000-000000000001', 'added', 0, 1);
+INSERT INTO public.reference_holder_state (holder_kind, holder_ref, content_sha256, migration) VALUES
+  ('legacy_note', 'notes/p2a/fixture-note.md', NULL, '{"fixture": true}');
+
 COMMIT;

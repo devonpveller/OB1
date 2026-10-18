@@ -139,22 +139,29 @@ export type DiffCheck = {
 };
 
 export type DiffCheckRef = {
-  source_id: string;
-  revision: number;
+  reference_id?: string;
+  source_id?: string;
+  revision?: number;
   chunk_idx?: number;
 };
 
 export type DiffCheckRequest = {
-  references: Array<DiffCheckRef>;
+  references?: Array<DiffCheckRef>;
+  holder?: {
+    kind: string; /** registry: reference_holder_kinds */
+    ref: string;
+  };
 };
 
 export type DiffCheckResult = {
+  reference_id: string | null;
   source_id: string;
   pinned_revision: number;
   current_revision: number | null;
   out_of_date: boolean;
   chunk_idx: number | null;
   equivalent_current_chunk_id: string | null;
+  anchor: string; /** registry: reference_anchor_outcomes */
   state: string; /** registry: record_states */
   lifecycle: string | null; /** registry: source_states */
 };
@@ -163,6 +170,7 @@ export type DocumentLink = {
   kind: string; /** registry: node_kinds */
   id: string;
   pin: number | null;
+  reference_id: string | null;
 };
 
 export type DocumentListing = {
@@ -229,6 +237,25 @@ export type HiddenState = {
   node_kind: string; /** registry: node_kinds */
   node_ref: string;
   hidden: boolean;
+};
+
+export type HolderReferences = {
+  holder_kind: string; /** registry: reference_holder_kinds */
+  holder_ref: string;
+  state: string; /** registry: record_states */
+  state_detail: Record<string, unknown>;
+  migrated_at: string | null;
+  references: Array<{
+    seq: number;
+    number: number | null;
+    origin: string; /** registry: reference_origins */
+    cited_ref: string;
+    reference_id: string | null;
+    source_id: string | null;
+    pinned_revision: number | null;
+    scope: string | null; /** registry: reference_scopes */
+    provenance: string | null; /** registry: reference_provenances */
+  }>;
 };
 
 export type Idea = {
@@ -404,6 +431,105 @@ export type Reference = {
     excerpt: string;
     user_source_status: string; /** registry: user_source_statuses */
   } | null;
+  record: {
+    id: string;
+    source_id: string;
+    scope: string; /** registry: reference_scopes */
+    provenance: string; /** registry: reference_provenances */
+    pinned_revision: number;
+    chunk_idx: number | null;
+    state: string; /** registry: reference_states */
+    selectors: {
+      quote: {
+        exact: string;
+        prefix: string;
+        suffix: string;
+      };
+      position: {
+        start: number;
+        end: number;
+        field?: string;
+      };
+      pdf?: {
+        page: number;
+        quads: Array<Array<number>>;
+      };
+    };
+    created_by: string | null;
+    created_at: string;
+  } | null;
+};
+
+export type ReferenceCreateRequest = {
+  source_id: string;
+  selectors: {
+    quote: {
+      exact: string;
+      prefix: string;
+      suffix: string;
+    };
+    position: {
+      start: number;
+      end: number;
+      field?: string;
+    };
+    pdf?: {
+      page: number;
+      quads: Array<Array<number>>;
+    };
+  };
+  provenance: string; /** registry: reference_provenances */
+  scope?: string; /** registry: reference_scopes */
+  chunk_idx?: number;
+  holder?: {
+    kind: string; /** registry: reference_holder_kinds */
+    ref: string;
+    origin?: string; /** registry: reference_origins */
+  };
+  by?: string;
+};
+
+export type ReferenceCreated = {
+  record: ReferenceRecord;
+  held: {
+    seq: number;
+    number: number | null;
+    origin: string; /** registry: reference_origins */
+    cited_ref: string;
+    reference_id: string | null;
+    source_id: string | null;
+    pinned_revision: number | null;
+    scope: string | null; /** registry: reference_scopes */
+    provenance: string | null; /** registry: reference_provenances */
+  } | null;
+};
+
+export type ReferenceRecord = {
+  id: string;
+  source_id: string;
+  scope: string; /** registry: reference_scopes */
+  provenance: string; /** registry: reference_provenances */
+  pinned_revision: number;
+  chunk_idx: number | null;
+  state: string; /** registry: reference_states */
+  selectors: {
+    quote: {
+      exact: string;
+      prefix: string;
+      suffix: string;
+    };
+    position: {
+      start: number;
+      end: number;
+      field?: string;
+    };
+    pdf?: {
+      page: number;
+      quads: Array<Array<number>>;
+    };
+  };
+  created_by: string | null;
+  created_at: string;
 };
 
 export type Refinery = {

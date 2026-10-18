@@ -146,6 +146,11 @@ services:
       # origin binding and the settings store. Fresh-volume only; the live DB gets it by hand
       # (psql -f, the operator's gated deploy). Revert: revert-research-contract.sql.
       - ./init-research-contract.sql:/docker-entrypoint-initdb.d/230-init-research-contract.sql:ro # research-workbench P0
+      # research-workbench P2a (rw-p2a-refs): references as first-class records (reference_records,
+      # holders, the selector rule by trigger, the reference_record dependence). Fresh-volume only;
+      # the live DB gets it by hand (psql -f), then the workbench's migrate-references.ts migrates
+      # the legacy notes. Revert: revert-references.sql (before P0's revert).
+      - ./init-references.sql:/docker-entrypoint-initdb.d/240-init-references.sql:ro # research-workbench P2a
     networks:
       - obnet
     restart: unless-stopped

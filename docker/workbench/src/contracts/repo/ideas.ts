@@ -96,7 +96,15 @@ export async function userSources(db: Db, refineryId: string) {
   );
 }
 
-interface Link { kind: string; id: string; pin: number | null }
+interface Link { kind: string; id: string; pin: number | null; reference_id?: string | null }
+
+// P2a (D12: pins live in the reference record, the listing points at it): a link that carries a
+// reference_id reads its pin FROM that record; a link without one keeps the pin it was written
+// with (listings written before P2a; P2b's documents writer sets reference_id on every pinned link).
+const RESOLVED_LINKS = (alias: string) => `COALESCE((
+    SELECT jsonb_agg(CASE WHEN rr.id IS NOT NULL THEN l || jsonb_build_object('pin', rr.pinned_revision) ELSE l END ORDER BY o)
+      FROM jsonb_array_elements(${alias}.outbound_links) WITH ORDINALITY AS e(l, o)
+      LEFT JOIN public.reference_records rr ON rr.id::text = l ->> 'reference_id'), '[]'::jsonb)`;
 
 // The context graph: a subgraph over the knowledge graph - the sources and claims of the
 // refinery's sessions, its user sources, and every link picked up from its document. A link
@@ -148,7 +156,7 @@ export async function idea(db: Db, id: string) {
   const sessions = await sessionsOf(db, row);
   const sessionPoolIds = sessions.map((s) => s.session_id).filter((x): x is string => !!x);
   const doc = (await db.query<{ path: string; title: string; outbound_links: Link[] }>(
-    `SELECT path, title, outbound_links FROM public.user_document_listings WHERE refinery_id = $1`, [id],
+    `SELECT d.path, d.title, ${RESOLVED_LINKS("d")} AS outbound_links FROM public.user_document_listings d WHERE d.refinery_id = $1`, [id],
   ))[0] ?? null;
   const state = (await db.query<{ origin_kind: string; origin_document_id: string | null; path: string | null }>(
     `SELECT rs.origin_kind, rs.origin_document_id, d.path FROM public.refinery_state rs
@@ -296,14 +304,16 @@ export async function removeHeld(db: Db, refineryId: string, sourceId: string) {
 // D12: title, path, updated, outbound links. Nothing else is selected, so nothing else can leak.
 export async function documents(db: Db, limit: number) {
   const rows = await db.query<{ title: string; path: string; updated: string; outbound_links: Link[] }>(
-    `SELECT title, path, updated_at AS updated, outbound_links
-       FROM public.user_document_listings ORDER BY updated_at DESC LIMIT $1`,
+    `SELECT d.title, d.path, d.updated_at AS updated, ${RESOLVED_LINKS("d")} AS outbound_links
+       FROM public.user_document_listings d ORDER BY d.updated_at DESC LIMIT $1`,
     [limit],
   );
   return {
     documents: rows.map((r) => ({
       title: r.title, path: r.path, updated: r.updated,
-      outbound_links: (r.outbound_links ?? []).map((l) => ({ kind: l.kind, id: l.id, pin: l.pin ?? null })),
+      outbound_links: (r.outbound_links ?? []).map((l) => ({
+        kind: l.kind, id: l.id, pin: l.pin ?? null, reference_id: l.reference_id ?? null,
+      })),
     })),
   };
 }

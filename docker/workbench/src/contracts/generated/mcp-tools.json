@@ -138,15 +138,25 @@
     "operationId": "diffCheck",
     "method": "POST",
     "path": "/workbench/contract/diff-check",
-    "description": "diffCheck(referenceIds[]) - is each pin out of date, and which current chunk stands for it [retrieval contract POST /workbench/contract/diff-check]",
+    "description": "diffCheck(referenceIds[]) - is each pin out of date, and which current chunk stands for it; ids, revisions and states only, never chunk text [retrieval contract POST /workbench/contract/diff-check]",
     "input": {
       "type": "object",
       "properties": {
+        "metadata_filter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+        },
         "references": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
+              "reference_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "description": "a reference record id"
+              },
               "source_id": {
                 "type": "string",
                 "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
@@ -160,25 +170,42 @@
                 "type": "integer",
                 "minimum": 0
               }
-            },
-            "required": [
-              "source_id",
-              "revision"
-            ]
+            }
           },
           "minItems": 1,
           "maxItems": 200
+        },
+        "holder": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1,
+              "x-registry": "reference_holder_kinds",
+              "description": "A key of the `reference_holder_kinds` registry (GET /workbench/contract/registries/reference_holder_kinds)."
+            },
+            "ref": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "ref"
+          ],
+          "description": "check every reference a note or user document holds"
         }
       },
-      "required": [
-        "references"
-      ]
+      "required": []
     },
     "path_params": [],
     "query_params": [],
-    "json_params": [],
+    "json_params": [
+      "metadata_filter"
+    ],
     "body_params": [
-      "references"
+      "references",
+      "holder"
     ]
   },
   {
@@ -463,14 +490,14 @@
     "operationId": "reference",
     "method": "GET",
     "path": "/workbench/contract/references/{id}",
-    "description": "reference(id, version?) - a source in any lifecycle state, typed [retrieval contract GET /workbench/contract/references/{id}]",
+    "description": "reference(id, version?) - a reference record read at its pin (P2a), or a source in any lifecycle state, typed [retrieval contract GET /workbench/contract/references/{id}]",
     "input": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
           "minLength": 1,
-          "description": "source id"
+          "description": "a reference record id, or a source id"
         },
         "version": {
           "type": "string",

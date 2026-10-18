@@ -1,0 +1,4 @@
+# The fixture vaults are note files exactly as the workbench writes them (LF); a CRLF checkout
+# would make a frontmatter block unreadable to the legacy reader and change what the test proves.
+references-vault/** text eol=lf
+references-vault-refused/** text eol=lf

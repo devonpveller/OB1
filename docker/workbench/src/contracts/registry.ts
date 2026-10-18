@@ -37,6 +37,14 @@ export const REGISTRY = {
   timelineEventKinds: "timeline_event_kinds",
   settings: "settings",
   implementationStates: "implementation_states",
+  // research-workbench P2a (init-references.sql): the reference record
+  referenceScopes: "reference_scopes",
+  referenceProvenances: "reference_provenances",
+  referenceStates: "reference_states",
+  referenceSelectorKinds: "reference_selector_kinds",
+  referenceHolderKinds: "reference_holder_kinds",
+  referenceOrigins: "reference_origins",
+  referenceAnchorOutcomes: "reference_anchor_outcomes",
 } as const;
 export type RegistryName = typeof REGISTRY[keyof typeof REGISTRY];
 

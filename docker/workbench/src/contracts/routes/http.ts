@@ -8,6 +8,7 @@ import { UnregisteredValue } from "../registry.ts";
 import type { AdmissionScorer } from "../logic/reopen.ts";
 import { BadRequest } from "../logic/scope.ts";
 import { Conflict, NotFound } from "../repo/lifecycle.ts";
+import { SelectorRefused } from "../repo/references.ts";
 import { ErrorBody } from "../schemas/common.ts";
 
 export interface ContractDeps {
@@ -69,8 +70,12 @@ export function fail(c: Context, err: unknown) {
   if (err instanceof UnregisteredValue) {
     return c.json({ error: err.message, detail: { registry: err.registry, value: err.value } }, 422);
   }
+  if (err instanceof SelectorRefused) return c.json({ error: err.message, detail: { rule: "reference" } }, 422);
   const pg = (err as { fields?: { code?: string; message?: string } })?.fields;
   if (pg?.code === "OBT01") return c.json({ error: "tombstoned", detail: { message: pg.message } }, 409);
+  // P2a: the reference rule (init-references.sql triggers) - no quote, a missing required
+  // selector, an unregistered kind, a target that is not a source
+  if (pg?.code === "OBR01") return c.json({ error: pg.message ?? "reference refused", detail: { rule: "reference" } }, 422);
   console.error("[contract] error:", (err as Error)?.message ?? err);
   return c.json({ error: "internal", detail: { message: String((err as Error)?.message ?? err) } }, 500);
 }
@@ -81,7 +86,7 @@ export const errors = {
   400: errorContent("invalid request"),
   404: errorContent("not found"),
   409: errorContent("refused by the lifecycle (the body says why)"),
-  422: errorContent("a value is not a key of its registry"),
+  422: errorContent("a value is not a key of its registry, or a reference the selector rule refuses"),
   500: errorContent("internal error or a response that violated its schema"),
 };
 

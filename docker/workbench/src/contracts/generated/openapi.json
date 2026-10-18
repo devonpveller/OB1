@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Open Brain retrieval contract",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "The typed retrieval contract every panel and MCP client reads the knowledge base through (research-workbench P0). The API owns record states; every enumerated kind is a registry (x-registry), never a closed list."
   },
   "security": [
@@ -274,6 +274,159 @@
               "excerpt",
               "user_source_status"
             ]
+          },
+          "record": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "f2000000-0000-4000-8000-000000000001",
+                "description": "reference id"
+              },
+              "source_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "f1000000-0000-4000-8000-000000000001",
+                "description": "the source pointer (a source or a held source)"
+              },
+              "scope": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "reference_scopes",
+                "example": "span",
+                "description": "A key of the `reference_scopes` registry (GET /workbench/contract/registries/reference_scopes)."
+              },
+              "provenance": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "reference_provenances",
+                "example": "user",
+                "description": "A key of the `reference_provenances` registry (GET /workbench/contract/registries/reference_provenances)."
+              },
+              "pinned_revision": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "the revision of the source the reference was placed on; it never moves (a held source is always 1)"
+              },
+              "chunk_idx": {
+                "type": "integer",
+                "nullable": true,
+                "description": "the chunk of the pinned revision the quote sits in"
+              },
+              "state": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "reference_states",
+                "example": "pinned",
+                "description": "A key of the `reference_states` registry (GET /workbench/contract/registries/reference_states)."
+              },
+              "selectors": {
+                "type": "object",
+                "properties": {
+                  "quote": {
+                    "type": "object",
+                    "properties": {
+                      "exact": {
+                        "type": "string",
+                        "minLength": 1,
+                        "example": "Alpha fixture text about contract retrieval."
+                      },
+                      "prefix": {
+                        "type": "string",
+                        "example": ""
+                      },
+                      "suffix": {
+                        "type": "string",
+                        "example": " Beta sentence two."
+                      }
+                    },
+                    "required": [
+                      "exact",
+                      "prefix",
+                      "suffix"
+                    ]
+                  },
+                  "position": {
+                    "type": "object",
+                    "properties": {
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "field": {
+                        "type": "string",
+                        "description": "the source field the offsets index; absent = the pinned revision's content (a whole-source anchor on a source with no text indexes its title)"
+                      }
+                    },
+                    "required": [
+                      "start",
+                      "end"
+                    ]
+                  },
+                  "pdf": {
+                    "type": "object",
+                    "properties": {
+                      "page": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "quads": {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "number"
+                          }
+                        },
+                        "minItems": 1
+                      }
+                    },
+                    "required": [
+                      "page",
+                      "quads"
+                    ]
+                  }
+                },
+                "required": [
+                  "quote",
+                  "position"
+                ],
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "nullable": true
+                  }
+                },
+                "description": "Anchor selectors, keyed by reference_selector_kinds: quote (required), position (required), pdf (required for the content types its registry entry names), plus any registered kind."
+              },
+              "created_by": {
+                "type": "string",
+                "nullable": true
+              },
+              "created_at": {
+                "type": "string",
+                "example": "2026-10-17T12:00:00.000Z",
+                "description": "ISO-8601 timestamp"
+              }
+            },
+            "required": [
+              "id",
+              "source_id",
+              "scope",
+              "provenance",
+              "pinned_revision",
+              "chunk_idx",
+              "state",
+              "selectors",
+              "created_by",
+              "created_at"
+            ]
           }
         },
         "required": [
@@ -286,7 +439,8 @@
           "requested_version",
           "source",
           "tombstone",
-          "held"
+          "held",
+          "record"
         ]
       },
       "TombstoneAttempt": {
@@ -441,6 +595,13 @@
       "DiffCheckResult": {
         "type": "object",
         "properties": {
+          "reference_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "f2000000-0000-4000-8000-000000000001",
+            "description": "null for a bare pin"
+          },
           "source_id": {
             "type": "string",
             "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
@@ -464,8 +625,15 @@
           "equivalent_current_chunk_id": {
             "type": "string",
             "nullable": true,
-            "example": "11111111-1111-4111-8111-111111111111:1",
-            "description": "the chunk of the current revision that stands for the pinned one (P0: the same idx when it exists; P2a replaces the rule over a real pinned revision)"
+            "example": "f1000000-0000-4000-8000-000000000001:1",
+            "description": "the chunk of the current revision that stands for the pinned one: the pinned chunk while the pin is current; once out of date, the chunk the reference scope's reanchor rule finds (span: the chunk containing the quote; source: the first chunk); null when none does"
+          },
+          "anchor": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "reference_anchor_outcomes",
+            "example": "requoted",
+            "description": "A key of the `reference_anchor_outcomes` registry (GET /workbench/contract/registries/reference_anchor_outcomes)."
           },
           "state": {
             "type": "string",
@@ -484,12 +652,14 @@
           }
         },
         "required": [
+          "reference_id",
           "source_id",
           "pinned_revision",
           "current_revision",
           "out_of_date",
           "chunk_idx",
           "equivalent_current_chunk_id",
+          "anchor",
           "state",
           "lifecycle"
         ]
@@ -504,15 +674,40 @@
             },
             "minItems": 1,
             "maxItems": 200
+          },
+          "holder": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "reference_holder_kinds",
+                "example": "legacy_note",
+                "description": "A key of the `reference_holder_kinds` registry (GET /workbench/contract/registries/reference_holder_kinds)."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "example": "notes/p2a/fixture-note.md"
+              }
+            },
+            "required": [
+              "kind",
+              "ref"
+            ],
+            "description": "check every reference a note or user document holds"
           }
-        },
-        "required": [
-          "references"
-        ]
+        }
       },
       "DiffCheckRef": {
         "type": "object",
         "properties": {
+          "reference_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "f2000000-0000-4000-8000-000000000001",
+            "description": "a reference record id"
+          },
           "source_id": {
             "type": "string",
             "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
@@ -527,11 +722,7 @@
             "type": "integer",
             "minimum": 0
           }
-        },
-        "required": [
-          "source_id",
-          "revision"
-        ]
+        }
       },
       "Quality": {
         "type": "object",
@@ -2834,14 +3025,523 @@
             "type": "integer",
             "nullable": true,
             "description": "the pinned revision; only the document defines pins"
+          },
+          "reference_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "P2a: the reference record the link points at; when set, pin IS that record's pinned revision (D12: pins live in the reference record, the listing points at it)"
           }
         },
         "required": [
           "kind",
           "id",
-          "pin"
+          "pin",
+          "reference_id"
         ],
         "additionalProperties": false
+      },
+      "ReferenceCreated": {
+        "type": "object",
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/ReferenceRecord"
+          },
+          "held": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "seq": {
+                "type": "integer"
+              },
+              "number": {
+                "type": "integer",
+                "nullable": true,
+                "description": "the citation number on export (null: not numbered)"
+              },
+              "origin": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "reference_origins",
+                "example": "cited",
+                "description": "A key of the `reference_origins` registry (GET /workbench/contract/registries/reference_origins)."
+              },
+              "cited_ref": {
+                "type": "string",
+                "description": "the id as the holder writes it"
+              },
+              "reference_id": {
+                "type": "string",
+                "nullable": true,
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "f2000000-0000-4000-8000-000000000001",
+                "description": "null: the cited id resolves to no source (kept only so the numbering stays whole)"
+              },
+              "source_id": {
+                "type": "string",
+                "nullable": true,
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "11111111-1111-4111-8111-111111111111",
+                "description": "uuid"
+              },
+              "pinned_revision": {
+                "type": "integer",
+                "nullable": true
+              },
+              "scope": {
+                "type": "string",
+                "nullable": true,
+                "minLength": 1,
+                "x-registry": "reference_scopes",
+                "example": "source",
+                "description": "A key of the `reference_scopes` registry (GET /workbench/contract/registries/reference_scopes)."
+              },
+              "provenance": {
+                "type": "string",
+                "nullable": true,
+                "minLength": 1,
+                "x-registry": "reference_provenances",
+                "example": "user",
+                "description": "A key of the `reference_provenances` registry (GET /workbench/contract/registries/reference_provenances)."
+              }
+            },
+            "required": [
+              "seq",
+              "number",
+              "origin",
+              "cited_ref",
+              "reference_id",
+              "source_id",
+              "pinned_revision",
+              "scope",
+              "provenance"
+            ]
+          }
+        },
+        "required": [
+          "record",
+          "held"
+        ]
+      },
+      "ReferenceRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "f2000000-0000-4000-8000-000000000001",
+            "description": "reference id"
+          },
+          "source_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "f1000000-0000-4000-8000-000000000001",
+            "description": "the source pointer (a source or a held source)"
+          },
+          "scope": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "reference_scopes",
+            "example": "span",
+            "description": "A key of the `reference_scopes` registry (GET /workbench/contract/registries/reference_scopes)."
+          },
+          "provenance": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "reference_provenances",
+            "example": "user",
+            "description": "A key of the `reference_provenances` registry (GET /workbench/contract/registries/reference_provenances)."
+          },
+          "pinned_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "the revision of the source the reference was placed on; it never moves (a held source is always 1)"
+          },
+          "chunk_idx": {
+            "type": "integer",
+            "nullable": true,
+            "description": "the chunk of the pinned revision the quote sits in"
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "reference_states",
+            "example": "pinned",
+            "description": "A key of the `reference_states` registry (GET /workbench/contract/registries/reference_states)."
+          },
+          "selectors": {
+            "type": "object",
+            "properties": {
+              "quote": {
+                "type": "object",
+                "properties": {
+                  "exact": {
+                    "type": "string",
+                    "minLength": 1,
+                    "example": "Alpha fixture text about contract retrieval."
+                  },
+                  "prefix": {
+                    "type": "string",
+                    "example": ""
+                  },
+                  "suffix": {
+                    "type": "string",
+                    "example": " Beta sentence two."
+                  }
+                },
+                "required": [
+                  "exact",
+                  "prefix",
+                  "suffix"
+                ]
+              },
+              "position": {
+                "type": "object",
+                "properties": {
+                  "start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "end": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "field": {
+                    "type": "string",
+                    "description": "the source field the offsets index; absent = the pinned revision's content (a whole-source anchor on a source with no text indexes its title)"
+                  }
+                },
+                "required": [
+                  "start",
+                  "end"
+                ]
+              },
+              "pdf": {
+                "type": "object",
+                "properties": {
+                  "page": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "quads": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "page",
+                  "quads"
+                ]
+              }
+            },
+            "required": [
+              "quote",
+              "position"
+            ],
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "nullable": true
+              }
+            },
+            "description": "Anchor selectors, keyed by reference_selector_kinds: quote (required), position (required), pdf (required for the content types its registry entry names), plus any registered kind."
+          },
+          "created_by": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "source_id",
+          "scope",
+          "provenance",
+          "pinned_revision",
+          "chunk_idx",
+          "state",
+          "selectors",
+          "created_by",
+          "created_at"
+        ]
+      },
+      "ReferenceCreateRequest": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "f1000000-0000-4000-8000-000000000001",
+            "description": "uuid"
+          },
+          "selectors": {
+            "type": "object",
+            "properties": {
+              "quote": {
+                "type": "object",
+                "properties": {
+                  "exact": {
+                    "type": "string",
+                    "minLength": 1,
+                    "example": "Alpha fixture text about contract retrieval."
+                  },
+                  "prefix": {
+                    "type": "string",
+                    "example": ""
+                  },
+                  "suffix": {
+                    "type": "string",
+                    "example": " Beta sentence two."
+                  }
+                },
+                "required": [
+                  "exact",
+                  "prefix",
+                  "suffix"
+                ]
+              },
+              "position": {
+                "type": "object",
+                "properties": {
+                  "start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "end": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "field": {
+                    "type": "string",
+                    "description": "the source field the offsets index; absent = the pinned revision's content (a whole-source anchor on a source with no text indexes its title)"
+                  }
+                },
+                "required": [
+                  "start",
+                  "end"
+                ]
+              },
+              "pdf": {
+                "type": "object",
+                "properties": {
+                  "page": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "quads": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "page",
+                  "quads"
+                ]
+              }
+            },
+            "required": [
+              "quote",
+              "position"
+            ],
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "nullable": true
+              }
+            },
+            "description": "Anchor selectors, keyed by reference_selector_kinds: quote (required), position (required), pdf (required for the content types its registry entry names), plus any registered kind."
+          },
+          "provenance": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "reference_provenances",
+            "example": "user",
+            "description": "A key of the `reference_provenances` registry (GET /workbench/contract/registries/reference_provenances)."
+          },
+          "scope": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "reference_scopes",
+            "example": "span",
+            "description": "A key of the `reference_scopes` registry (GET /workbench/contract/registries/reference_scopes)."
+          },
+          "chunk_idx": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "omit to locate the quote among the pinned revision's chunks"
+          },
+          "holder": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "reference_holder_kinds",
+                "example": "legacy_note",
+                "description": "A key of the `reference_holder_kinds` registry (GET /workbench/contract/registries/reference_holder_kinds)."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "example": "notes/p2a/fixture-note.md",
+                "description": "the vault path of the note or document"
+              },
+              "origin": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "reference_origins",
+                "example": "added",
+                "description": "A key of the `reference_origins` registry (GET /workbench/contract/registries/reference_origins)."
+              }
+            },
+            "required": [
+              "kind",
+              "ref"
+            ],
+            "description": "attach the new reference to a note or user document"
+          },
+          "by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "selectors",
+          "provenance"
+        ]
+      },
+      "HolderReferences": {
+        "type": "object",
+        "properties": {
+          "holder_kind": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "reference_holder_kinds",
+            "example": "legacy_note",
+            "description": "A key of the `reference_holder_kinds` registry (GET /workbench/contract/registries/reference_holder_kinds)."
+          },
+          "holder_ref": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "record_states",
+            "example": "current",
+            "description": "A key of the `record_states` registry (GET /workbench/contract/registries/record_states)."
+          },
+          "state_detail": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "example": {},
+            "description": "What the state needs to be read: reason, original context, the action a loading record is waiting on, the last-known value of an unreachable one."
+          },
+          "migrated_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "seq": {
+                  "type": "integer"
+                },
+                "number": {
+                  "type": "integer",
+                  "nullable": true,
+                  "description": "the citation number on export (null: not numbered)"
+                },
+                "origin": {
+                  "type": "string",
+                  "minLength": 1,
+                  "x-registry": "reference_origins",
+                  "example": "cited",
+                  "description": "A key of the `reference_origins` registry (GET /workbench/contract/registries/reference_origins)."
+                },
+                "cited_ref": {
+                  "type": "string",
+                  "description": "the id as the holder writes it"
+                },
+                "reference_id": {
+                  "type": "string",
+                  "nullable": true,
+                  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                  "example": "f2000000-0000-4000-8000-000000000001",
+                  "description": "null: the cited id resolves to no source (kept only so the numbering stays whole)"
+                },
+                "source_id": {
+                  "type": "string",
+                  "nullable": true,
+                  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                  "example": "11111111-1111-4111-8111-111111111111",
+                  "description": "uuid"
+                },
+                "pinned_revision": {
+                  "type": "integer",
+                  "nullable": true
+                },
+                "scope": {
+                  "type": "string",
+                  "nullable": true,
+                  "minLength": 1,
+                  "x-registry": "reference_scopes",
+                  "example": "source",
+                  "description": "A key of the `reference_scopes` registry (GET /workbench/contract/registries/reference_scopes)."
+                },
+                "provenance": {
+                  "type": "string",
+                  "nullable": true,
+                  "minLength": 1,
+                  "x-registry": "reference_provenances",
+                  "example": "user",
+                  "description": "A key of the `reference_provenances` registry (GET /workbench/contract/registries/reference_provenances)."
+                }
+              },
+              "required": [
+                "seq",
+                "number",
+                "origin",
+                "cited_ref",
+                "reference_id",
+                "source_id",
+                "pinned_revision",
+                "scope",
+                "provenance"
+              ]
+            }
+          }
+        },
+        "required": [
+          "holder_kind",
+          "holder_ref",
+          "state",
+          "state_detail",
+          "migrated_at",
+          "references"
+        ]
       },
       "Notifications": {
         "type": "object",
@@ -3138,7 +3838,7 @@
         "tags": [
           "retrieval contract (appendix)"
         ],
-        "summary": "reference(id, version?) - a source in any lifecycle state, typed",
+        "summary": "reference(id, version?) - a reference record read at its pin (P2a), or a source in any lifecycle state, typed",
         "x-appendix-call": "reference",
         "x-mcp-tool": "contract_reference",
         "parameters": [
@@ -3146,10 +3846,10 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "description": "source id"
+              "description": "a reference record id, or a source id"
             },
             "required": true,
-            "description": "source id",
+            "description": "a reference record id, or a source id",
             "name": "id",
             "in": "path",
             "example": "11111111-1111-4111-8111-111111111111"
@@ -3212,7 +3912,8 @@
                     "updated_at": "2026-10-17T12:00:00.000Z"
                   },
                   "tombstone": null,
-                  "held": null
+                  "held": null,
+                  "record": null
                 },
                 "schema": {
                   "$ref": "#/components/schemas/Reference"
@@ -3251,7 +3952,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -3397,7 +4098,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -3425,15 +4126,31 @@
         "tags": [
           "retrieval contract (appendix)"
         ],
-        "summary": "diffCheck(referenceIds[]) - is each pin out of date, and which current chunk stands for it",
+        "summary": "diffCheck(referenceIds[]) - is each pin out of date, and which current chunk stands for it; ids, revisions and states only, never chunk text",
         "x-appendix-call": "diffCheck",
         "x-mcp-tool": "contract_diff_check",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "example": {
                 "references": [
+                  {
+                    "reference_id": "f2000000-0000-4000-8000-000000000001"
+                  },
                   {
                     "source_id": "11111111-1111-4111-8111-111111111111",
                     "revision": 1,
@@ -3455,12 +4172,26 @@
                 "example": {
                   "results": [
                     {
+                      "reference_id": "f2000000-0000-4000-8000-000000000001",
+                      "source_id": "f1000000-0000-4000-8000-000000000001",
+                      "pinned_revision": 1,
+                      "current_revision": 2,
+                      "out_of_date": true,
+                      "chunk_idx": 1,
+                      "equivalent_current_chunk_id": "f1000000-0000-4000-8000-000000000001:1",
+                      "anchor": "requoted",
+                      "state": "updated",
+                      "lifecycle": "active"
+                    },
+                    {
+                      "reference_id": null,
                       "source_id": "11111111-1111-4111-8111-111111111111",
                       "pinned_revision": 1,
                       "current_revision": 2,
                       "out_of_date": true,
                       "chunk_idx": 1,
                       "equivalent_current_chunk_id": "11111111-1111-4111-8111-111111111111:1",
+                      "anchor": "same_idx",
                       "state": "updated",
                       "lifecycle": "active"
                     }
@@ -3503,7 +4234,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -3636,7 +4367,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -3808,7 +4539,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4011,7 +4742,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4212,7 +4943,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4364,7 +5095,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4493,7 +5224,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4622,7 +5353,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4711,7 +5442,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4801,7 +5532,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -4972,7 +5703,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5035,7 +5766,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5127,7 +5858,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5219,7 +5950,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5298,7 +6029,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5377,7 +6108,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5456,7 +6187,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5649,7 +6380,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5767,7 +6498,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -5880,7 +6611,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6005,7 +6736,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6111,7 +6842,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6230,7 +6961,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6365,7 +7096,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6476,7 +7207,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6770,7 +7501,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6876,7 +7607,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -6989,7 +7720,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7110,7 +7841,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7180,17 +7911,20 @@
                         {
                           "kind": "source",
                           "id": "11111111-1111-4111-8111-111111111111",
-                          "pin": 2
+                          "pin": 2,
+                          "reference_id": null
                         },
                         {
                           "kind": "source",
                           "id": "cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
-                          "pin": null
+                          "pin": null,
+                          "reference_id": null
                         },
                         {
                           "kind": "page",
                           "id": "content/tool/tool-fixture",
-                          "pin": null
+                          "pin": null,
+                          "reference_id": null
                         }
                       ]
                     },
@@ -7202,7 +7936,8 @@
                         {
                           "kind": "source",
                           "id": "d0000000-0000-4000-8000-0000000000d2",
-                          "pin": null
+                          "pin": null,
+                          "reference_id": null
                         }
                       ]
                     }
@@ -7245,7 +7980,261 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/references": {
+      "post": {
+        "operationId": "createReference",
+        "tags": [
+          "references (P2a)"
+        ],
+        "summary": "place a reference: a source pointer with its quote, position (and page+quad where required), pinned to the source's current revision; optionally held by a note or user document",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "source_id": "f1000000-0000-4000-8000-000000000001",
+                "provenance": "user",
+                "scope": "span",
+                "selectors": {
+                  "quote": {
+                    "exact": "Opening line of the reference fixture.",
+                    "prefix": "",
+                    "suffix": " The quoted span about pinned an"
+                  },
+                  "position": {
+                    "start": 0,
+                    "end": 38
+                  }
+                },
+                "holder": {
+                  "kind": "user_document",
+                  "ref": "documents/fixture-refinery.md",
+                  "origin": "cited"
+                },
+                "by": "dredd"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ReferenceCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the reference, pinned",
+            "content": {
+              "application/json": {
+                "example": {
+                  "record": {
+                    "id": "f2000000-0000-4000-8000-0000000000c1",
+                    "source_id": "f1000000-0000-4000-8000-000000000001",
+                    "scope": "span",
+                    "provenance": "user",
+                    "pinned_revision": 2,
+                    "chunk_idx": 0,
+                    "state": "pinned",
+                    "selectors": {
+                      "quote": {
+                        "exact": "Opening line of the reference fixture.",
+                        "prefix": "",
+                        "suffix": " The quoted span about pinned an"
+                      },
+                      "position": {
+                        "start": 0,
+                        "end": 38
+                      }
+                    },
+                    "created_by": "dredd",
+                    "created_at": "2026-10-17T12:00:00.000Z"
+                  },
+                  "held": {
+                    "seq": 1,
+                    "number": 2,
+                    "origin": "cited",
+                    "cited_ref": "f1000000-0000-4000-8000-000000000001",
+                    "reference_id": "f2000000-0000-4000-8000-0000000000c1",
+                    "source_id": "f1000000-0000-4000-8000-000000000001",
+                    "pinned_revision": 2,
+                    "scope": "span",
+                    "provenance": "user"
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ReferenceCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/holders/{kind}/references": {
+      "get": {
+        "operationId": "holderReferences",
+        "tags": [
+          "references (P2a)"
+        ],
+        "summary": "the references a note or user document holds, by id, in order - no selectors, no text",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "a key of reference_holder_kinds"
+            },
+            "required": true,
+            "description": "a key of reference_holder_kinds",
+            "name": "kind",
+            "in": "path",
+            "example": "legacy_note"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "the vault path of the holder"
+            },
+            "required": false,
+            "description": "the vault path of the holder",
+            "name": "ref",
+            "in": "query",
+            "example": "notes/p2a/fixture-note.md"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the held references",
+            "content": {
+              "application/json": {
+                "example": {
+                  "holder_kind": "legacy_note",
+                  "holder_ref": "notes/p2a/fixture-note.md",
+                  "state": "current",
+                  "state_detail": {},
+                  "migrated_at": "2026-10-17T12:00:00.000Z",
+                  "references": [
+                    {
+                      "seq": 0,
+                      "number": 1,
+                      "origin": "cited",
+                      "cited_ref": "f1000000-0000-4000-8000-000000000001",
+                      "reference_id": "f2000000-0000-4000-8000-000000000001",
+                      "source_id": "f1000000-0000-4000-8000-000000000001",
+                      "pinned_revision": 1,
+                      "scope": "span",
+                      "provenance": "user"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/HolderReferences"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7393,7 +8382,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7483,7 +8472,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7583,7 +8572,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7697,7 +8686,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7794,7 +8783,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -7920,7 +8909,7 @@
             }
           },
           "422": {
-            "description": "a value is not a key of its registry",
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
             "content": {
               "application/json": {
                 "schema": {
