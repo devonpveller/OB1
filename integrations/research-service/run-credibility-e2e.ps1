@@ -120,7 +120,9 @@ try {
 
   Write-Host "[3] build $rsTag (the build runs the test suite) and its test stage"
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
-  $o = Dk build --progress=plain --build-arg "OB1_SHA=$sha" --label $label -t $rsTag $rs
+  # --no-cache: a cached test layer is a suite that passed on SOME earlier build of the same
+  # inputs, and prints no summary - this run must show the suite running.
+  $o = Dk build --no-cache --progress=plain --build-arg "OB1_SHA=$sha" --label $label -t $rsTag $rs
   Save 'research-build.log' $o
   Check ($script:rc -eq 0) "image $rsTag built"
   if ($script:rc -eq 0) { $made.images += $rsTag }
@@ -143,7 +145,7 @@ try {
   [System.IO.File]::WriteAllText((Join-Path $negCtx 'zz-gate-negative.test.ts'),
     "Deno.test('gate negative control: this test fails on purpose', () => { throw new Error('the image build must stop here'); });`n",
     (New-Object System.Text.UTF8Encoding $false))
-  $o = Dk build --progress=plain --label $label -t $negTag $negCtx
+  $o = Dk build --no-cache --progress=plain --label $label -t $negTag $negCtx
   Save 'gate-negative-build.log' $o
   $negRc = $script:rc
   Check ($negRc -ne 0 -and $o -match 'gate negative control') "a failing test fails the image build (rc=$negRc)"
