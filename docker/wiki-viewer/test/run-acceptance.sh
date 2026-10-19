@@ -8,6 +8,9 @@
 #   P1A_PREFIX=wt-t-x P1A_TAG=wt-t-x P1A_SUBNET=10.233.91.0/24 P1A_PORT=18900 bash .../run-acceptance.sh
 #                                                                       # a tester's own names (p1a-env.sh header)
 #   ONLY="C12" bash .../run-acceptance.sh                               # (debug) only these cases, after C0
+#   P1A_NO_BUILD=1 ...                                                  # use the images already tagged $P1A_TAG
+#                                                                       # (rw-p1a-deploy-prep: the RED run on images
+#                                                                       # built from the 7e61837 tree)
 #
 # Nothing here touches a live container, network, volume or image: every
 # name is $P1A_PREFIX-* (default wt-rw-p1a-render-*), the network is private,
@@ -35,8 +38,10 @@ echo "fixed URL list: $NURL URLs ($NALIAS alias redirect documents)"
 
 hdr "C0 build + environment"
 bash "$E" down >/dev/null 2>&1
+if [ -z "${P1A_NO_BUILD:-}" ]; then
 T 1800 bash "$E" build 2>&1 | grep -E "# (tests|pass|fail)|label org|ERROR|error:" | tail -6
 T 900 bash "$E" wsbuild 2>&1 | grep -E "# (tests|pass|fail)|ERROR|naming to" | tail -4
+else echo "P1A_NO_BUILD: using $IMG / $WSIMG as tagged"; fi
 T 300 bash "$E" up 2>&1 | tail -6
 bash "$E" wait_built 300 && pass C0 || fail C0 "viewer never served"
 
@@ -49,7 +54,7 @@ if echo "$out" | grep -q "PARITY: PASS" && [ "$(echo "$out" | grep -c '^200 x-wi
    && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/kitchen-sink +built=yes .* unlisted=0' >/dev/null \
    && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/transclude-fixture +built=yes .* unlisted=0' >/dev/null \
    && echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/empty-body-note +built=yes .* unlisted=0' >/dev/null \
-   && [ "$(echo "$out" | grep -c '^200 x-wiki-render=db alias redirect .*whole document identical')" = "$NALIAS" ]    && echo "$out" | grep -E '^200 x-wiki-render=db retired slug +/content/topic/fixture-retired-topic +built=NO .*"D7-retired"' >/dev/null; then pass "C1+C2 parity"; else fail "C1+C2 parity" "see output"; fi
+   && [ "$(echo "$out" | grep -c '^200 x-wiki-render=db alias redirect .*whole document identical')" = "$NALIAS" ]    && echo "$out" | grep -E '^200 x-wiki-render=db retired slug +/content/topic/fixture-retired-topic +built=NO .*"D7-retired".* class=retired@1$' >/dev/null; then pass "C1+C2 parity"; else fail "C1+C2 parity" "see output"; fi
 # attempt 4 (tester AT3-3): who owns each shared alias, on BOTH sides (the built file and the live document)
 if want C1; then
 for a in "/Ada-Fixture content/tool/tool-ada-dup" "/shared-alias notes/alias-dup-b" "/path-order-alias notes/alias-x" "/content/topic/aliased-retired-topic notes/alias-retired"; do
@@ -60,6 +65,57 @@ for a in "/Ada-Fixture content/tool/tool-ada-dup" "/shared-alias notes/alias-dup
 done
 echo "$out" | grep -E '^200 x-wiki-render=db legacy user note /notes/fixture-note +built=yes .* unlisted=0' >/dev/null || fail "C1+C2 alias owners" "an alias equal to a real slug (notes/fixture-note)"
 fi
+fi
+
+if want C19; then
+hdr "C19 (rw-p1a-deploy-prep, NA4-1): legacy notes whose file names Quartz slugifies are served at Quartz's URL, db, full chrome; their folder lists each once with the built href"
+c19_ok=1
+[ -n "${out:-}" ] || out="$(T 300 bash "$E" parity 2>&1)"
+# (a) the shared rule = Quartz's own slugifyFilePath for every page file, each built; no non-page built
+qs="$(T 180 docker run --rm --network none -v "$OB1:/ob1:ro" -v "$VOL:/wiki:ro" -v "$SRV:/srv:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/quartz-slug-check.mjs 2>&1)"; echo "$qs"
+echo "$qs" | grep -q "QUARTZ-SLUG-CHECK: PASS" || { echo "x the shared slug differs from Quartz's, or a page was not built"; c19_ok=0; }
+# (b) each slug fixture: 200 db, built, nothing unlisted, every element, the note class
+for u in sp-ace pv.1 a-and-b qx ht 50-percent up up/inner deep-folder/sub-dir/leaf-note; do
+  l="$(echo "$out" | grep -F " /notes/slug-names/$u " | grep '^200 ')"; echo "${l:-(no line) /notes/slug-names/$u}" | cut -c1-230
+  echo "$l" | grep -E "^200 x-wiki-render=db legacy user note .* built=yes .* unlisted=0 .*missing=none class=note@1$" >/dev/null || { echo "x /notes/slug-names/$u"; c19_ok=0; }
+done
+# (b2) attempt 2 (tester, clause 2 + N1): a backslash is a character of the name (one page each at Quartz's URL,
+# no phantom back/ or private/ folder in the listing); < > escaped as Quartz escapes them
+for u in /notes/adv/back%5Cslash /notes/adv/back%5C.dot /notes/adv/private%5Cx /notes/adv/lt%3Cgt%3E; do
+  l="$(echo "$out" | grep -F " $u " | grep '^200 ')"; echo "${l:-(no line) $u}" | cut -c1-230
+  echo "$l" | grep -E "^200 x-wiki-render=db legacy user note .* built=yes .* unlisted=0 .*missing=none class=note@1$" >/dev/null || { echo "x $u"; c19_ok=0; }
+done
+la="$(curl_ /notes/adv/ body)"
+echo "notes/adv/ live: back-folder=$(printf '%s' "$la" | grep -c 'href="../../notes/adv/back/"') private-folder=$(printf '%s' "$la" | grep -c 'href="../../notes/adv/private/"') count=[$(printf '%s' "$la" | grep -o '<p>[0-9]* items\? under this folder.</p>')]"
+printf '%s' "$la" | grep -q 'href="../../notes/adv/back/"\|href="../../notes/adv/private/"' && { echo "x a phantom folder in notes/adv/"; c19_ok=0; }
+for u in /notes/slug-names/ /notes/slug-names/deep-folder/ /notes/slug-names/deep-folder/sub-dir/ /notes/adv/; do
+  echo "$out" | grep -F " $u " | grep -E "^200 x-wiki-render=db folder index .* built=yes .* unlisted=0 .*missing=none class=folder@1$" >/dev/null || { echo "x $u"; c19_ok=0; }
+done
+# (c) the folder index lists "up" ONCE (the page), no separate "up/" entry, the same count as the built page; no raw-name href
+lf="$(curl_ /notes/slug-names/ body)"; bf="$(docker exec "$P-viewer" cat /srv/current/notes/slug-names/index.html)"
+cnt() { printf '%s' "$1" | grep -o "$2" | wc -l | tr -d ' '; }
+for side in live built; do
+  [ "$side" = live ] && t="$lf" || t="$bf"
+  echo "$side: up-page=$(cnt "$t" 'href="../../notes/slug-names/up"') up-folder=$(cnt "$t" 'href="../../notes/slug-names/up/"') sp-ace=$(cnt "$t" 'href="../../notes/slug-names/sp-ace"') raw-space-href=$(cnt "$t" 'href="[^"]*sp ace"') count=[$(printf '%s' "$t" | grep -o '<p>[0-9]* items\? under this folder.</p>')]"
+done
+[ "$(cnt "$lf" 'href="../../notes/slug-names/up"')" = 1 ] && [ "$(cnt "$lf" 'href="../../notes/slug-names/up/"')" = 0 ] \
+  && [ "$(cnt "$lf" 'href="../../notes/slug-names/sp-ace"')" = 1 ] && [ "$(cnt "$lf" 'href="[^"]*sp ace"')" = 0 ] \
+  && [ "$(printf '%s' "$lf" | grep -o '<p>[0-9]* items\? under this folder.</p>')" = "$(printf '%s' "$bf" | grep -o '<p>[0-9]* items\? under this folder.</p>')" ] \
+  || { echo "x the folder listing"; c19_ok=0; }
+# (c2) the folder "up/" beside the note "up.md": the live page is THAT FOLDER's page (folder@1, its one child, hrefs for
+# its own URL, up.md as its article as Quartz uses it). NOT in the parity list: Quartz renders this page with the
+# NOTE's slug, so its hrefs are one level short (broken in a browser) and it carries the note's editor - named in
+# the findings (rw-p1a-deploy-prep residual R-UP), not replicated.
+ud="$(curl_ /notes/slug-names/up/ body)"; bu="$(docker exec "$P-viewer" cat /srv/current/notes/slug-names/up/index.html)"
+echo "up/: $(echo "$ud" | head -1) items=[$(printf '%s' "$ud" | grep -o '<p>[0-9]* items\? under this folder.</p>')] live-href=$(cnt "$ud" 'href="../../../notes/slug-names/up/inner"') built-href(one level short)=$(cnt "$bu" 'href="../../notes/slug-names/up/inner"') article=$(cnt "$ud" 'A note with the name of a folder beside it')"
+echo "$ud" | head -1 | grep -q "^200 x-wiki-render=db x-wiki-page-class=folder@1" && [ "$(cnt "$ud" 'href="../../../notes/slug-names/up/inner"')" = 1 ] \
+  && printf '%s' "$ud" | grep -q '<p>1 item under this folder.</p>' && [ "$(cnt "$ud" 'A note with the name of a folder beside it')" -ge 1 ] || { echo "x the up/ folder page"; c19_ok=0; }
+# (d) the raw vault path answers with a redirect to Quartz's URL; a dotted name is a page, assets stay assets
+loc="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('http://$P-viewer:8080/notes/slug-names/sp%20ace',{redirect:'manual'}).then(r=>console.log(r.status, r.headers.get('location')))")"; echo "raw path: $loc"
+[ "$loc" = "302 /notes/slug-names/sp-ace" ] || { echo "x the raw path"; c19_ok=0; }
+a1="$(curl_ /index.css)"; a2="$(curl_ /static/no-such-asset.js)"; echo "asset: $a1 | missing asset: $a2"
+echo "$a1" | grep -q '^200 ' && echo "$a2" | grep -q '^404 ' || { echo "x assets"; c19_ok=0; }
+[ "$c19_ok" = 1 ] && pass C19 || fail C19 "see output"
 fi
 
 if want C2b; then
@@ -164,18 +220,36 @@ docker stop "$P-db" >/dev/null; sleep 8
 o="$(T 300 bash "$E" node /ob1/docker/wiki-viewer/test/outage-probe.mjs sweep --expect unreachable --base "http://$P-viewer:8080" 2>&1)"; rc=$?; echo "$o" | cut -c1-260
 h="$(health)"; echo "health(stopped): $h" | cut -c1-300
 docker rm -f -v "$P-watch" >/dev/null 2>&1
+# rw-p1a-deploy-prep attempt 2 (tester N7): the "connecting" window is HELD
+# OPEN, not raced. Attempt 1 started the database with PostgREST running; the
+# API answered within one viewer read of the TCP port opening, so the viewer
+# went "unreachable -> up" with no connecting state at all (its own log), and
+# the watcher could not see one. Now PostgREST is stopped as well: once the
+# database host accepts TCP again the API still does not answer, which is
+# connecting by the viewer's definition (lib/wiki-db.mjs), and it stays so
+# until PostgREST is started - only after BOTH the viewer's log and the
+# watcher have shown it. Every wait is bounded.
+tc6="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker stop "$P-postgrest" >/dev/null
 docker run -d --name "$P-watch" --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" \
-  /ob1/docker/wiki-viewer/test/outage-probe.mjs watch --seconds 90 --base "http://$P-viewer:8080" >/dev/null
-# start the database only once the watcher is sampling (its first line is the
-# "unreachable" state), so the connecting window cannot fall before its first sample
+  /ob1/docker/wiki-viewer/test/outage-probe.mjs watch --seconds 150 --base "http://$P-viewer:8080" >/dev/null
 for _ in $(seq 1 30); do docker logs "$P-watch" 2>&1 | grep -q " unreachable" && break; sleep 1; done
 docker start "$P-db" >/dev/null
+for _ in $(seq 1 60); do docker exec "$P-db" pg_isready -U postgres -d openbrain -q 2>/dev/null && break; sleep 1; done
+held=0
+for _ in $(seq 1 60); do
+  docker logs --since "$tc6" "$P-viewer" 2>&1 | grep -q "database unreachable -> connecting" && docker logs "$P-watch" 2>&1 | grep -q " connecting" && { held=1; break; }
+  sleep 1
+done
+echo "connecting window held open (viewer log + watcher): $([ "$held" = 1 ] && echo yes || echo NO)"
+docker start "$P-postgrest" >/dev/null
 for _ in $(seq 1 60); do docker logs "$P-watch" 2>&1 | grep -q "WATCH:" && break; sleep 2; done
 w="$(docker logs "$P-watch" 2>&1)"; echo "$w"; docker rm -f -v "$P-watch" >/dev/null
-sleep 3; vlog="$(docker logs "$P-viewer" 2>&1 | grep -E "database (unreachable|connecting|up)|reconcile pass \(reconnect|repair pass" | tail -6)"; echo "$vlog" | cut -c1-300
+sleep 3; vlog="$(docker logs --since "$tc6" "$P-viewer" 2>&1 | grep -E "database (unreachable|connecting|up)|reconcile pass \(reconnect|repair pass" | tail -10)"; echo "$vlog" | cut -c1-300
 h2="$(health)"; echo "health(after): $h2" | cut -c1-200
 if [ "$rc" = 0 ] && echo "$o" | grep -q "SWEEP: all $NURL URLs show unreachable" && echo "$h" | grep -q '^503 .*"database unreachable"' \
-   && echo "$w" | grep -q "WATCH: sequence .*unreachable.*connecting.*db" \
+   && [ "$held" = 1 ] && echo "$w" | grep -q "WATCH: sequence .*unreachable.*connecting.*db" \
+   && echo "$vlog" | grep -q "database unreachable -> connecting" && echo "$vlog" | grep -q "database connecting -> up" \
    && echo "$vlog" | grep -q "reconcile pass (reconnect" && echo "$h2" | grep -q '^200 '; then pass C6; else fail C6 "see output"; fi
 fi
 
@@ -501,11 +575,120 @@ docker rm -f -v "$P-ws" >/dev/null 2>&1
 [ "$c12_ok" = 1 ] && pass C12 || fail C12 "see output"
 fi
 
+if want C20 || want C21 || want C22 || want C23; then
+hdr "rw-p1a-deploy-prep C20-C23: a FRESH environment; a vault .gitignore with operator lines and ledger files before the wiki-service's first boot"
+bash "$E" down >/dev/null 2>&1; T 300 bash "$E" up 2>&1 | tail -2; bash "$E" wait_built 300 >/dev/null
+bash "$E" node -e 'const fs=require("fs"); fs.writeFileSync("/wiki/.gitignore", "# operator: my own lines\n*.bak\ndrafts/\n.wikistate.json\n"); fs.mkdirSync("/wiki/content", {recursive:true}); fs.writeFileSync("/wiki/content/.unsynced-rows.json", "{\"rows\":{}}\n"); fs.writeFileSync("/wiki/content/.structural-failures.json", "{\"failures\":{}}\n"); const old = new Date("2020-01-01T00:00:00Z"); for (const f of ["content/.unsynced-rows.json.lock", "content/.structural-failures.json.lock", "x.bak"]) { fs.writeFileSync("/wiki/" + f, "x\n"); fs.utimesSync("/wiki/" + f, old, old); } console.log("operator .gitignore + ledger/lock files written (the locks long expired)")'
+t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; bash "$E" ws; boot="$(bash "$E" ws_wait)"; echo "boot: $(echo "$boot" | cut -c1-200)"
+
+if want C23; then
+hdr "C23 (rw-p1a-deploy-prep, RV-5): the wiki-service's .gitignore write keeps every operator line and ignores the ledgers and locks; git add -A stages none of them"
+c23_ok=1
+gi="$(bash "$E" cat .gitignore)"; echo "$gi"
+docker logs --since "$t0" "$P-ws" 2>&1 | grep "vault .gitignore" | cut -c1-260
+[ "$(printf '%s\n' "$gi" | head -4)" = "$(printf '# operator: my own lines\n*.bak\ndrafts/\n.wikistate.json')" ] || { echo "x an operator line was dropped or moved"; c23_ok=0; }
+for e in .structural-failures.json .unsynced-rows.json .unsynced-rows.json.lock '*.lock' planned.json .compile-notifications.jsonl; do
+  printf '%s\n' "$gi" | grep -qxF "$e" || { echo "x missing entry $e"; c23_ok=0; }
+done
+tr="$(docker exec "$P-ws" git -C /wiki ls-files | grep -E 'structural-failures|unsynced-rows|\.lock$|\.bak$' || true)"; echo "tracked ledger/lock/bak files: [${tr}]"
+dr="$(docker exec "$P-ws" git -C /wiki add -A --dry-run 2>&1 | grep -E 'structural-failures|unsynced-rows|\.lock|\.bak' || true)"; echo "git add -A --dry-run would stage: [${dr}]"
+ig="$(docker exec "$P-ws" git -C /wiki status --porcelain --ignored -- content x.bak 2>&1 | grep -E '^!! ' | tr '\n' ' ')"; echo "ignored: $ig"
+[ -z "$tr" ] && [ -z "$dr" ] && echo "$ig" | grep -q 'content/.unsynced-rows.json' && echo "$ig" | grep -q 'x.bak' || { echo "x a ledger, lock or operator-ignored file is staged"; c23_ok=0; }
+[ "$c23_ok" = 1 ] && pass C23 || fail C23 "see output"
+fi
+
+if want C20; then
+hdr "C20 (rw-p1a-deploy-prep, RV-1): the one-time backfill over the authored vault - note links as the repair pass writes them, no row for private/, templates/ or dot paths, --prune never deletes an excluded row"
+c20_ok=1
+bash "$E" psql "delete from wiki_pages" >/dev/null; echo "rows deleted (a database before the backfill)"
+bash "$E" psql "insert into wiki_pages(slug,page_class,title,body) values ('private/secret','root','planted','x'),('gone-fixture','root','planted','x') returning slug"
+o="$(T 300 bash "$E" node /ob1/recipes/_shared/backfill-wiki-pages.mjs 2>&1)"; rc=$?; echo "$o" | grep -E "done:|EXCLUDES|FAILED|CANNOT"; echo "exit=$rc"
+ex="$(bash "$E" psql "select slug from wiki_pages where slug ~ '^(private|templates)/' or slug ~ '(^|/)[.]' order by 1" | tr '\n' ' ')"; echo "rows for excluded paths: [$ex] (want only the planted private/secret)"
+ln="$(bash "$E" psql "select links::text from wiki_pages where slug='notes/slug-names/sp ace'")"; echo "sp ace links: $ln"
+# attempt 2 (tester, clause 2): each backslash file has ONE row keyed by its own name; no row at a phantom folder
+adv="$(bash "$E" psql "select string_agg(slug, ' ' order by slug) from wiki_pages where slug like 'notes/adv/%'")"; echo "notes/adv rows: [$adv]"
+ph="$(bash "$E" psql "select count(*) from wiki_pages where slug in ('notes/adv/back/slash','notes/adv/back/.dot','notes/adv/private/x')")"; echo "phantom-folder rows: $ph"
+for s in 'notes/adv/back\slash' 'notes/adv/back\.dot' 'notes/adv/private\x' 'notes/adv/lt<gt>'; do printf '%s\n' "$adv" | tr ' ' '\n' | grep -qxF "$s" || { echo "x no row $s"; c20_ok=0; }; done
+[ "$ph" = 0 ] || { echo "x a row at a phantom folder slug"; c20_ok=0; }
+# basename links to pages that exist are resolved (fixture-note, nested-note); [[tool-fixture-db]] resolves only while
+# its entity page exists - the wiki-service's boot compile may have swept it, and then the repair pass leaves it raw too
+tf="$(bash "$E" cat content/tool/tool-fixture-db.md | head -1)"; [ "$tf" = "(absent)" ] && want_tool='"tool-fixture-db"' || want_tool='"content/tool/tool-fixture-db"'
+echo "content/tool/tool-fixture-db.md: $([ "$tf" = "(absent)" ] && echo absent || echo present) -> want $want_tool"
+[ "$rc" = 0 ] && [ "$ex" = "private/secret " ] && echo "$ln" | grep -q '"notes/fixture-note"' && echo "$ln" | grep -q '"notes/fixture-folder/nested-note"' \
+  && echo "$ln" | grep -qF "$want_tool" && ! echo "$ln" | grep -qE '"(fixture-note|nested-note)"' || { echo "x a raw link target, an excluded row, or a failed run"; c20_ok=0; }
+b1="$(bash "$E" psql "select slug||' '||links::text from wiki_pages where page_class='note' order by slug")"
+bash "$E" psql "delete from wiki_pages where page_class='note'" >/dev/null
+r="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki --repair 2>&1)"; echo "$r" | grep -E "repair pass" | cut -c1-200
+b2="$(bash "$E" psql "select slug||' '||links::text from wiki_pages where page_class='note' order by slug")"
+echo "note rows: backfill $(printf '%s\n' "$b1" | grep -c .) / repair $(printf '%s\n' "$b2" | grep -c .); identical links: $([ "$b1" = "$b2" ] && echo yes || echo NO)"
+[ "$b1" = "$b2" ] && [ -n "$b1" ] || { echo "x the backfill's note links differ from the repair pass's"; diff <(echo "$b1") <(echo "$b2") | head -10; c20_ok=0; }
+v="$(curl_ /private/secret body)"; echo "/private/secret: $(echo "$v" | head -1) marker=$(echo "$v" | grep -c 'SECRET-FIXTURE-MARKER\|planted')"
+echo "$v" | head -1 | grep -q "x-wiki-render=not-available" && ! echo "$v" | grep -q 'SECRET-FIXTURE-MARKER' || { echo "x a row for an excluded path was presented"; c20_ok=0; }
+p="$(P1A_NODE_ENV="-e BACKFILL_PRUNE_MIN=1" T 300 bash "$E" node /ob1/recipes/_shared/backfill-wiki-pages.mjs --prune 2>&1)"; prc=$?; echo "$p" | grep -E "pruned|EXCLUDES|refusing|done:"; echo "exit(prune)=$prc"
+kept="$(bash "$E" psql "select string_agg(slug, ' ' order by slug) from wiki_pages where slug in ('private/secret','gone-fixture')")"; echo "after --prune: [$kept] (want private/secret only)"
+[ "$prc" = 0 ] && [ "$kept" = "private/secret" ] && echo "$p" | grep -q "pruned 1 row(s) with no page on disk" || { echo "x prune"; c20_ok=0; }
+bash "$E" psql "delete from wiki_pages where slug='private/secret'" >/dev/null
+c="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki 2>&1)"; crc=$?; echo "$c" | head -1; echo "exit(reconcile)=$crc"
+[ "$crc" = 0 ] || { echo "x not clean after the backfill"; c20_ok=0; }
+[ "$c20_ok" = 1 ] && pass C20 || fail C20 "see output"
+fi
+
+if want C21; then
+hdr "C21 (rw-p1a-deploy-prep, NA4-2): the retire step deletes the content/topic + content/notebook ROWS with their files; an orphan row is pending, never presented, named by the reconcile"
+c21_ok=1
+bash "$E" node -e 'const fs=require("fs"); fs.mkdirSync("/wiki/content/topic",{recursive:true}); fs.writeFileSync("/wiki/content/topic/deploy-prep-old.md", "---\ntitle: Deploy prep old topic\n---\n# Old topic\n\nOLD-TOPIC-MARKER\n"); console.log("content/topic/deploy-prep-old.md written")'
+T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki --repair 2>&1 | grep -E "repair pass" | cut -c1-200
+bash "$E" psql "insert into wiki_pages(slug,page_class,title,body) values ('content/topic/orphan-only','root','Orphan only','ORPHAN-ONLY-MARKER'),('content/notebook/old-hub','note','Old hub','OLD-HUB-MARKER') returning slug"
+echo "before: $(bash "$E" psql "select string_agg(slug, ' ' order by slug) from wiki_pages where slug like 'content/topic/%' or slug like 'content/notebook/%'")"
+b1="$(curl_ /content/topic/deploy-prep-old)"; b2="$(curl_ /content/topic/orphan-only body)"; echo "row+file: $b1 | orphan: $(echo "$b2" | head -1)"
+echo "$b2" | head -1 | grep -q "x-wiki-page-class=retired@1" && ! echo "$b2" | grep -q "ORPHAN-ONLY-MARKER" || { echo "x an orphan under a retired prefix was presented"; c21_ok=0; }
+t1="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; s1="$(bash "$E" ws_cycle)"; L1="$(docker logs --since "$t1" "$P-ws" 2>&1)"
+echo "$L1" | grep -E "orphan-sweep|\[reconcile\]|compile (ok|FAILED)" | cut -c1-220
+left="$(bash "$E" psql "select count(*) from wiki_pages where slug like 'content/topic/%' or slug like 'content/notebook/%' or slug in ('content/topic','content/notebook')")"; f="$(bash "$E" cat content/topic/deploy-prep-old.md | head -1)"
+echo "rows left under the retired layers: $left; file: $f"
+echo "$L1" | grep -q "orphan-sweep: deleted 3 row(s) of the retired topic/+notebook/ layers" && [ "$left" = 0 ] && [ "$f" = "(absent)" ] \
+  && echo "$L1" | grep -q "\[reconcile\] clean: " || { echo "x the retire step left a row (or its file)"; c21_ok=0; }
+c="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki 2>&1)"; crc=$?; echo "$c" | head -1; echo "exit(reconcile)=$crc"
+sleep 7; h="$(health)"; echo "health: $(echo "$h" | cut -c1-160)"
+a1="$(curl_ /content/topic/deploy-prep-old body)"; a2="$(curl_ /content/topic/orphan-only)"; echo "after: $(echo "$a1" | head -1) | $a2"
+[ "$crc" = 0 ] && echo "$h" | grep -q '^200 ' && echo "$a1" | head -1 | grep -q "x-wiki-page-class=retired@1" && ! echo "$a1" | grep -q "OLD-TOPIC-MARKER" \
+  && echo "$a2" | grep -q "x-wiki-page-class=retired@1" || { echo "x after the retire step"; c21_ok=0; }
+echo "-- an orphan row anywhere: pending (never presented), named orphan, health degraded; deleted -> clean"
+bash "$E" psql "insert into wiki_pages(slug,page_class,title,body) values ('notes/orphan-fixture','note','Orphan','ORPHAN-NOTE-MARKER') returning slug"
+o1="$(curl_ /notes/orphan-fixture body)"; echo "orphan note: $(echo "$o1" | head -1) why=[$(echo "$o1" | grep -o 'its row has no file[^)]*' | head -1)]"
+c="$(T 120 bash "$E" node /ob1/recipes/_shared/reconcile-wiki-pages.mjs --vault /wiki 2>&1)"; crc=$?; echo "$c" | grep -E "DRIFT|clean|orphan:" | cut -c1-200; echo "exit=$crc"
+sleep 7; h="$(health)"; echo "health: $(echo "$h" | cut -c1-200)"
+echo "$o1" | head -1 | grep -q "x-wiki-render=pending .*cache-control=no-store" && ! echo "$o1" | grep -q "ORPHAN-NOTE-MARKER" \
+  && [ "$crc" = 1 ] && echo "$c" | grep -q "orphan: notes/orphan-fixture" && echo "$h" | grep -q '^503 .*1 orphan' || { echo "x the orphan row"; c21_ok=0; }
+bash "$E" psql "delete from wiki_pages where slug='notes/orphan-fixture'" >/dev/null
+# attempt 2 (tester N5): an orphan row at a name Quartz slugifies answers pending at its Quartz URL as every other
+# orphan does. Its URL is found through the nav index, so a row inserted after the last nav refresh answers
+# not-available until the next one (<= WIKI_NAV_TTL_MS, the named freshness residual) - the bounded poll waits it out.
+bash "$E" psql "insert into wiki_pages(slug,page_class,title,body) values ('notes/adv/or phan','note','Orphan','ORPHAN-SPECIAL-MARKER') returning slug"
+for _ in $(seq 1 30); do os="$(curl_ /notes/adv/or-phan body)"; echo "$os" | head -1 | grep -q "x-wiki-render=not-available" || break; sleep 2; done
+echo "special-name orphan: $(echo "$os" | head -1) why=[$(echo "$os" | grep -o 'its row has no file[^)]*' | head -1)]"
+echo "$os" | head -1 | grep -q "x-wiki-render=pending .*cache-control=no-store" && echo "$os" | grep -q "its row has no file" && ! echo "$os" | grep -q "ORPHAN-SPECIAL-MARKER" \
+  || { echo "x the special-name orphan is not pending"; c21_ok=0; }
+bash "$E" psql "delete from wiki_pages where slug='notes/adv/or phan'" >/dev/null; sleep 7; h="$(health)"; echo "health after delete: $(echo "$h" | cut -c1-80)"
+echo "$h" | grep -q '^200 ' || { echo "x not healthy after the orphan was deleted"; c21_ok=0; }
+[ "$c21_ok" = 1 ] && pass C21 || fail C21 "see output"
+fi
+
+if want C22; then
+hdr "C22 (rw-p1a-deploy-prep, NA4-3): parity rule D7 explains a retired URL only when it is served as retired@1"
+o="$(T 120 docker run --rm --network none -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/d7-selftest.mjs 2>&1)"; rc=$?; echo "$o"
+[ "$rc" = 0 ] && echo "$o" | grep -q "D7-SELFTEST: PASS" && pass C22 || fail C22 "D7 accepted another class"
+fi
+docker rm -f -v "$P-ws" >/dev/null 2>&1
+fi
+
 if want C13; then
 hdr "C13 existing suites: recipes on the host, viewer in a CLEAN container"
 o1="$(cd "$OB1" && T 600 node --test recipes/_shared/*.test.mjs recipes/entity-wiki/generate-wiki.test.mjs recipes/wiki-synthesis/scripts/synthesize-notebooks.test.mjs 2>&1)"; echo "$o1" | grep -E "^# (tests|pass|fail)"
 o2="$(T 600 docker run --rm --network none --entrypoint sh "$IMG" -c 'cd /quartz && node --test lib/*.test.mjs' 2>&1)"; echo "$o2" | grep -E "^# (tests|pass|fail)"
-if echo "$o1" | grep -q "^# fail 0" && echo "$o2" | grep -q "^# fail 0"; then pass C13; else fail C13 "a suite failed"; fi
+# rw-p1a-deploy-prep: the wiki-service's unit tests (incl. the .gitignore merge, with git) in its own image
+o3="$(T 300 docker run --rm --network none --entrypoint sh "$WSIMG" -c 'cd /app && node --test lib/*.test.mjs' 2>&1)"; echo "$o3" | grep -E "^# (tests|pass|fail)"
+if echo "$o1" | grep -q "^# fail 0" && echo "$o2" | grep -q "^# fail 0" && echo "$o3" | grep -q "^# fail 0"; then pass C13; else fail C13 "a suite failed"; fi
 fi
 
 [ -n "${KEEP:-}" ] || bash "$E" down

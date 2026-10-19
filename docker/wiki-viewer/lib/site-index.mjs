@@ -7,12 +7,26 @@
  * PURE: rows in, index out (the rows come from nav-index's keyset walk, so the
  * explorer, the graph and the page chrome all see the same snapshot). Built
  * once per nav refresh and memoised by its ETag.
+ *
+ * Keyed by QUARTZ'S URL SLUG (rw-p1a-deploy-prep, NA4-1): a row is keyed by
+ * its vault path ("notes/sp ace"), Quartz serves it at the slugified path
+ * ("notes/sp-ace", quartz-slug.mjs urlSlugOf), and every href, folder,
+ * backlink, tag listing and link resolution of a built page is in that URL
+ * space. bySlug / slugs / folders / byTag / backlinks are URL slugs;
+ * `rowSlugOf` maps a URL slug back to the row (the live route's lookup);
+ * `folderHint` is the folder's own name as written in the vault (Quartz's
+ * FileTrieNode fileSegmentHint: "deep folder", not "deep-folder"). Where two
+ * files slugify to one URL, the LAST in Quartz's path order is the page (its
+ * emitter writes the file last), as for aliases. A row whose path Quartz
+ * does not build (private/, templates/, a dot-directory: quartz-slug.mjs
+ * isPagePath) is not in the index.
  */
 import path from "node:path";
 import {
   basenameIndex, canonicalDest, simplifySlug, slugTag, slugifyFilePath, transformLink, resolveRelative,
   getFileExtension, endsWith,
 } from "./quartz-path.mjs";
+import { urlSlugOf, isPagePath } from "./shared/quartz-slug.mjs";
 
 function asArray(v) {
   if (Array.isArray(v)) return v.map(String);
@@ -73,7 +87,8 @@ export function quartzPathOrder(a, b) {
  */
 export function aliasRedirects(entries) {
   const out = new Map();
-  const ordered = [...entries].filter((e) => e && e.slug).sort((x, y) => quartzPathOrder(x.slug, y.slug));
+  // the order is the vault PATHS' (rowSlug), the slugs are URL slugs
+  const ordered = [...entries].filter((e) => e && e.slug).sort((x, y) => quartzPathOrder(x.rowSlug ?? x.slug, y.rowSlug ?? y.slug));
   for (const e of ordered) {
     const ogSlug = simplifySlug(e.slug);
     const targets = [...aliasSlugs(e.aliases), ...(e.permalink ? [String(e.permalink)] : [])];
@@ -89,10 +104,19 @@ export function aliasRedirects(entries) {
 
 export function buildSiteIndex(rows, etag = "") {
   const bySlug = new Map();
-  for (const r of rows || []) {
-    if (!r || !r.slug) continue;
-    bySlug.set(r.slug, {
-      slug: r.slug,
+  const rowSlugOf = new Map(); // URL slug -> row slug
+  const folderHint = new Map(); // URL folder path -> the folder's name in the vault
+  const ordered = (rows || []).filter((r) => r && r.slug && isPagePath(`${r.slug}.md`))
+    .sort((x, y) => quartzPathOrder(x.slug, y.slug));
+  for (const r of ordered) {
+    const slug = urlSlugOf(r.slug);
+    const raw = r.slug.split("/");
+    const parts = slug.split("/");
+    for (let i = 0; i < parts.length - 1; i++) folderHint.set(parts.slice(0, i + 1).join("/"), raw[i]);
+    rowSlugOf.set(slug, r.slug);
+    bySlug.set(slug, {
+      slug,
+      rowSlug: r.slug,
       title: r.title || r.slug.split("/").pop(),
       tags: normalizeTags(r.tags),
       links: Array.isArray(r.links) ? r.links : [],
@@ -158,14 +182,19 @@ export function buildSiteIndex(rows, etag = "") {
     }
   }
   const aliases = aliasRedirects(slugs.map((s) => bySlug.get(s)));
-  return { etag, bySlug, slugs, allSlugs, byBase, backlinks, folders, byTag, aliases };
+  return { etag, bySlug, slugs, allSlugs, byBase, backlinks, folders, byTag, aliases, rowSlugOf, folderHint };
 }
 
-// Breadcrumb / listing display name of a folder: its index page's title, else
-// the folder's last segment (Quartz FileTrieNode.displayName).
+// Breadcrumb / listing display name of a folder (Quartz FileTrieNode
+// displayName: the node's own page title unless it is "index" - a page named
+// like the folder ("up.md" beside "up/") is that node's data, before its
+// index page - else the folder's name as written in the vault, else the last
+// URL segment).
 export function folderDisplayName(site, folder) {
+  const own = folder ? site.bySlug.get(folder) : null;
   const idx = site.bySlug.get(folder ? `${folder}/index` : "index");
-  return idx?.title || folder.split("/").pop() || "";
+  const t = [own?.title, idx?.title].find((x) => x && x !== "index");
+  return t || site.folderHint?.get(folder) || folder.split("/").pop() || "";
 }
 
 export function isFolder(site, path) {

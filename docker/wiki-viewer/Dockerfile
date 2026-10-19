@@ -302,7 +302,7 @@ COPY lib /quartz/lib
 # pass). They come from OB1/recipes/_shared through the named build context
 # `recipes` (compose: build.additional_contexts; by hand:
 # docker build --build-context recipes=OB1/recipes ...).
-COPY --from=recipes _shared/page-classes.mjs _shared/wiki-pages.mjs _shared/links.mjs _shared/reconcile-wiki-pages.mjs _shared/structural-ledger.mjs /quartz/lib/shared/
+COPY --from=recipes _shared/page-classes.mjs _shared/wiki-pages.mjs _shared/links.mjs _shared/reconcile-wiki-pages.mjs _shared/structural-ledger.mjs _shared/quartz-slug.mjs /quartz/lib/shared/
 
 # The STATIC chrome (left sidebar, graph shell, head resources, after-body
 # scripts, ...) is cut from a page this image's own Quartz builds from the

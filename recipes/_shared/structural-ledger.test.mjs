@@ -160,12 +160,15 @@ test("the lock: a STALE lock (a crashed holder, past its expiry) is taken over",
 function lockChild(file, { env = {}, opts = "{}", timeoutMs = 15000 } = {}) {
   const code = `
     import { withLedgerLock } from ${JSON.stringify(LEDGER_URL)};
+    // a late start, as a loaded host gives a spawned child (the attempt-1 flake)
+    const delay = Number(process.env.LOCK_CHILD_START_DELAY_MS || 0);
+    if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
     const t0 = Date.now(), c0 = process.cpuUsage();
-    let out;
-    try { const v = withLedgerLock(${JSON.stringify(file)}, () => 42, ${opts}); out = "OK " + v; }
+    let out, tookAt = null;
+    try { const v = withLedgerLock(${JSON.stringify(file)}, () => { tookAt = Date.now(); return 42; }, ${opts}); out = "OK " + v; }
     catch (e) { out = "THREW " + String(e?.message || e); }
     const ms = Date.now() - t0, c = process.cpuUsage(c0);
-    console.log(JSON.stringify({ out, ms, cpuMs: Math.round((c.user + c.system) / 1000) }));
+    console.log(JSON.stringify({ out, ms, t0, tookAt, cpuMs: Math.round((c.user + c.system) / 1000) }));
   `;
   const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, ...env }, encoding: "utf8", timeout: timeoutMs });
   const line = (r.stdout || "").trim().split("\n").filter(Boolean).at(-1) || "";
@@ -222,15 +225,25 @@ test("NA3-2: the wait outlasts the stale time - a run starting right after a cra
   assert.ok(t.waitMs > t.staleMs, `default wait ${t.waitMs} ms > stale ${t.staleMs} ms`);
   assert.deepEqual(L.lockTimes({ WIKI_LEDGER_LOCK_STALE_MS: "1000", WIKI_LEDGER_LOCK_WAIT_MS: "1500" }), { staleMs: 1000, waitMs: 1500 });
   assert.throws(() => L.lockTimes({ WIKI_LEDGER_LOCK_STALE_MS: "30000", WIKI_LEDGER_LOCK_WAIT_MS: "20000" }), /WIKI_LEDGER_LOCK_WAIT_MS \(20000\) must exceed WIKI_LEDGER_LOCK_STALE_MS \(30000\)/);
-  // a holder that crashed a moment ago: its lock is fresh, nobody will release it
-  const d = dir();
-  const file = join(d, ".structural-failures.json");
-  const now = Date.now();
-  writeFileSync(`${file}.lock`, JSON.stringify({ owner: "crashed:9:x", acquired: new Date(now).toISOString(), expires: new Date(now + 1000).toISOString() }));
-  const r = lockChild(file, { env: { WIKI_LEDGER_LOCK_STALE_MS: "1000", WIKI_LEDGER_LOCK_WAIT_MS: "1500" } });
-  assert.ok(r.j, `signal=${r.signal}`);
-  assert.equal(r.j.out, "OK 42", "taken over once stale, inside the wait");
-  assert.ok(r.j.ms >= 700 && r.j.ms < 1500, `${r.j.ms} ms`);
+  // A holder that crashed a moment ago: its lock is fresh, nobody will release
+  // it. The INVARIANT, on the lock's own recorded times (rw-p1a-deploy-prep
+  // attempt 2: the wall-clock bound "ms >= 700" measured the child's spawn
+  // latency too and failed at 662 ms under Docker load): the run takes the lock
+  // over (never throws), and never BEFORE the holder's recorded expiry - it
+  // waited the stale time out. Run on time and with a late start (a loaded
+  // host), where the old bound failed.
+  for (const late of [0, 400]) {
+    const d = dir();
+    const file = join(d, ".structural-failures.json");
+    const now = Date.now();
+    const expires = now + 1000;
+    writeFileSync(`${file}.lock`, JSON.stringify({ owner: "crashed:9:x", acquired: new Date(now).toISOString(), expires: new Date(expires).toISOString() }));
+    const r = lockChild(file, { env: { WIKI_LEDGER_LOCK_STALE_MS: "1000", WIKI_LEDGER_LOCK_WAIT_MS: "1500", LOCK_CHILD_START_DELAY_MS: String(late) } });
+    assert.ok(r.j, `late=${late}: signal=${r.signal}`);
+    assert.equal(r.j.out, "OK 42", `late=${late}: taken over once stale, inside the wait`);
+    assert.match(r.stderr, /ledger lock .* was stale \(holder crashed:9:x, expired /, `late=${late}: the takeover is of the crashed holder's lock`);
+    assert.ok(r.j.tookAt > expires, `late=${late}: taken ${r.j.tookAt - expires} ms after the recorded expiry (must be after it)`);
+  }
 });
 
 test("the temp file of a write is unique per writer (pid 1 in every one-off container is not unique)", () => {

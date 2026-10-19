@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync, cpSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -45,7 +45,20 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify(out.slice(0, limit)));
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
+// The vault the route stats: a COPY of the committed fixture vault (its rows
+// below come from the same files), dated in the past so no row is older than
+// its file. rw-p1a-deploy-prep (NA4-2): a row whose file is gone is an orphan
+// and never presented, so the files must be there.
 const vaultTmp = mkdtempSync(join(tmpdir(), "p1a-vault-"));
+const FIXTURE_VAULT = join(HERE, "..", "test", "fixtures", "vault");
+const PAST = new Date("2020-01-01T00:00:00Z");
+function restore(rel) { // put a fixture file back as it was (or remove a file the fixture does not have)
+  const src = join(FIXTURE_VAULT, rel);
+  const dst = join(vaultTmp, rel);
+  if (existsSync(src)) { cpSync(src, dst); utimesSync(dst, PAST, PAST); } else rmSync(dst, { force: true });
+}
+cpSync(FIXTURE_VAULT, vaultTmp, { recursive: true });
+(function age(d) { for (const n of readdirSync(d)) { const f = join(d, n); if (statSync(f).isDirectory()) age(f); else utimesSync(f, PAST, PAST); } })(vaultTmp);
 process.env.OPEN_BRAIN_URL = `http://127.0.0.1:${server.address().port}`;
 process.env.WIKI_NAV_MIN_ROWS = "0";
 process.env.WIKI_NAV_TTL_MS = "5000";
@@ -242,7 +255,7 @@ test("A5/F-T2 (D13 item 5, stale is a miss): a row older than its file is pendin
   const undo2 = withRow("content/person/person-bob-fixture", { updated_at: new Date(Date.now() + 1000).toISOString() });
   try {
     assert.equal((await renderLive("/content/person/person-bob-fixture")).headers["x-wiki-render"], "db");
-  } finally { undo2(); rmSync(join(vaultTmp, "content/person/person-bob-fixture.md")); }
+  } finally { undo2(); restore("content/person/person-bob-fixture.md"); }
 });
 
 test("A5/N2: a row dated in the future cannot hide a newer file - pending", async () => {
@@ -266,7 +279,7 @@ test("A5: a folder index row may be empty (the listing is the page); a stale one
   const undo2 = withRow("content/notebooks/index", { updated_at: "2020-01-01T00:00:00.000Z" });
   try {
     assert.equal((await renderLive("/content/notebooks/")).headers["x-wiki-render"], "pending");
-  } finally { undo2(); rmSync(join(vaultTmp, "content/notebooks/index.md")); }
+  } finally { undo2(); restore("content/notebooks/index.md"); }
 });
 
 // A7: loading entry files fails LOUD on every bad shape; nothing is replaced.
@@ -387,7 +400,7 @@ test("AT2-1a transclusion: an embedded page with no presentable row is the pendi
     const a = article(r.body);
     assert.ok(a.includes('<p class="transclude-pending" data-render-state="pending">Pending compile: notes/block-source is not presented yet (its row is older than its file'), a.slice(0, 400));
     assert.ok(!a.includes("FILE BODY MARKER"), "never the file");
-  } finally { undo(); rmSync(join(vaultTmp, "notes/block-source.md")); }
+  } finally { undo(); restore("notes/block-source.md"); }
 });
 
 test("AT2-1a transclusion: a cycle (a page transcluding itself, or A -> B -> A) is left as the placeholder at the repeat - it terminates", async () => {
@@ -397,6 +410,8 @@ test("AT2-1a transclusion: a cycle (a page transcluding itself, or A -> B -> A) 
     { slug: "notes/cyc-a", page_class: "note", title: "Cyc A", body: "# A\n\n![[cyc-b]]\n", tags: [], links: ["cyc-b"], frontmatter: {}, updated_at: "2026-10-18T00:00:00.000Z" },
     { slug: "notes/cyc-b", page_class: "note", title: "Cyc B", body: "# B\n\n![[cyc-a]]\n", tags: [], links: ["cyc-a"], frontmatter: {}, updated_at: "2026-10-18T00:00:00.000Z" },
   );
+  // each row has its file (a row without one is an orphan, never presented)
+  for (const n of ["cyc-self", "cyc-a", "cyc-b"]) { writeFileSync(join(vaultTmp, `notes/${n}.md`), "# c\n"); utimesSync(join(vaultTmp, `notes/${n}.md`), PAST, PAST); }
   nav._resetForTests();
   try {
     const s = article((await renderLive("/notes/cyc-self")).body);
@@ -404,7 +419,7 @@ test("AT2-1a transclusion: a cycle (a page transcluding itself, or A -> B -> A) 
     const a = article((await renderLive("/notes/cyc-a")).body);
     assert.ok(a.includes("<h1>Cyc B</h1>"), "B is filled");
     assert.ok(a.includes("Transclude of cyc-a"), "A inside B is the placeholder");
-  } finally { seed(); }
+  } finally { seed(); for (const n of ["cyc-self", "cyc-a", "cyc-b"]) restore(`notes/${n}.md`); }
 });
 
 test("AT2-1a transclusion: the database not answering for an embedded page's row is the database screen for the request, never half a page", async () => {
@@ -546,9 +561,13 @@ test("N2-4/N2-5: a note whose source is frontmatter only is presented as Quartz 
     const r = await renderLive("/notes/empty-body-note");
     assert.equal(r.headers["x-wiki-render"], "db");
     assert.equal(article(r.body), "");
-  } finally { undo(); rmSync(join(vaultTmp, "notes/empty-body-note.md")); }
-  // the same empty row WITHOUT a file showing it is meant to be empty: pending (never an empty leaf standing in)
-  assert.equal((await renderLive("/notes/empty-body-note")).headers["x-wiki-render"], "pending");
+  } finally { undo(); }
+  // the same empty row WITHOUT a file showing it is meant to be empty: pending (never an empty leaf standing in;
+  // since rw-p1a-deploy-prep a row with no file at all is also an orphan - pending either way)
+  rmSync(join(vaultTmp, "notes/empty-body-note.md"));
+  try {
+    assert.equal((await renderLive("/notes/empty-body-note")).headers["x-wiki-render"], "pending");
+  } finally { restore("notes/empty-body-note.md"); }
 });
 
 test("N2-3: an NBSP / ideographic-space body over a file with content is pending (the reconcile's rule, shared)", async () => {
@@ -563,7 +582,7 @@ test("N2-3: an NBSP / ideographic-space body over a file with content is pending
       assert.ok(r.body.includes("empty body"));
     } finally { undo(); }
   }
-  rmSync(join(vaultTmp, "content/thought/9002.md"));
+  restore("content/thought/9002.md");
 });
 
 test("N2-1: a resolve() returning a hand-built { unreachable } (or a non-object) is a registry fault named in health - never the database screen", async () => {
@@ -589,5 +608,175 @@ test("N2-1: a resolve() returning a hand-built { unreachable } (or a non-object)
   } finally {
     console.error = orig;
     for (const n of ["shape-unreach", "shape-string", "tpl-shape"]) unregisterPageClass(n);
+  }
+});
+
+// ── rw-p1a-deploy-prep ─────────────────────────────────────────────────────
+// NA4-1: legacy notes whose file names Quartz slugifies (a space, a dot, & % ? #,
+// a deep folder with spaces, a note and a folder of one name). Each one: a
+// FILE in the vault and the row the compile rule writes for it.
+const SLUG_NOTES = {
+  "notes/sn/sp ace.md": "# Space\n\nSee [[a&b]] and [[pv.1]].\n",
+  "notes/sn/pv.1.md": "# Dotted\n",
+  "notes/sn/a&b.md": "# Amp\n",
+  "notes/sn/q?x.md": "# Query\n",
+  "notes/sn/h#t.md": "# Hash\n",
+  "notes/sn/50%.md": "# Percent\n",
+  "notes/sn/up.md": "# Up page\n",
+  "notes/sn/up/inner.md": "# Inner\n",
+  "notes/sn/deep folder/sub dir/leaf note.md": "# Leaf\n",
+};
+function withSlugNotes() {
+  const added = [];
+  for (const [rel, md] of Object.entries(SLUG_NOTES)) {
+    mkdirSync(dirname(join(vaultTmp, rel)), { recursive: true });
+    writeFileSync(join(vaultTmp, rel), md);
+    utimesSync(join(vaultTmp, rel), PAST, PAST);
+    const row = { ...parseWikiPage(rel, md), updated_at: "2026-10-18T00:00:00.000Z" };
+    rows.push(row);
+    added.push(row.slug);
+  }
+  nav._resetForTests();
+  return () => {
+    rows = rows.filter((r) => !added.includes(r.slug));
+    rmSync(join(vaultTmp, "notes/sn"), { recursive: true, force: true });
+    nav._resetForTests();
+  };
+}
+
+test("NA4-1: a note named with a space, a dot, & % ? # is served at Quartz's URL (db, full chrome); its raw path 302s there", async () => {
+  mode = "up";
+  const undo = withSlugNotes();
+  try {
+    for (const url of ["/notes/sn/sp-ace", "/notes/sn/pv.1", "/notes/sn/a-and-b", "/notes/sn/qx", "/notes/sn/ht", "/notes/sn/50-percent",
+      "/notes/sn/up", "/notes/sn/up/inner", "/notes/sn/deep-folder/sub-dir/leaf-note"]) {
+      const r = await renderLive(url);
+      assert.equal(r.status, 200, url);
+      assert.equal(r.headers["x-wiki-render"], "db", url);
+      assert.equal(r.headers["x-wiki-page-class"], "note@1", url);
+      assert.ok(r.body.includes(`<body data-slug="${url.slice(1)}">`), `${url}: data-slug is Quartz's slug`);
+      assert.ok(/<div class="explorer"[^>]*>/.test(r.body) && r.body.includes('<div class="graph-container"'), `${url}: chrome`);
+    }
+    const raw = await renderLive("/notes/sn/sp%20ace");
+    assert.equal(raw.status, 302);
+    assert.equal(raw.headers.location, "/notes/sn/sp-ace");
+    // a link written to the raw name resolves to the Quartz URL, as CrawlLinks does
+    const sp = (await renderLive("/notes/sn/sp-ace")).body;
+    assert.ok(sp.includes('href="../../notes/sn/a-and-b"') && sp.includes('href="../../notes/sn/pv.1"'), "links to Quartz URLs");
+  } finally { undo(); }
+});
+
+test("NA4-1: the folder index lists each slugified note once with Quartz's href; a note and a folder of one name are ONE entry (the page)", async () => {
+  mode = "up";
+  const undo = withSlugNotes();
+  try {
+    const r = await renderLive("/notes/sn/");
+    assert.equal(r.headers["x-wiki-render"], "db");
+    const b = r.body;
+    assert.match(b, /<p>8 items under this folder\.<\/p>/);
+    for (const h of ["sp-ace", "pv.1", "a-and-b", "qx", "ht", "50-percent", "up"]) {
+      assert.equal(b.split(`<a href="../../notes/sn/${h}" class="internal">`).length - 1, 1, `one entry for ${h}`);
+    }
+    assert.ok(!b.includes('href="../../notes/sn/up/"'), "no separate up/ folder entry");
+    assert.ok(!/href="[^"]*sp ace"/.test(b), "no raw-path href");
+    // the subfolder entry is named as the folder is written in the vault (Quartz's fileSegmentHint)
+    assert.ok(b.includes('<a href="../../notes/sn/deep-folder/" class="internal">deep folder</a>'), "deep folder entry");
+    // "up/" is the folder page (Quartz emits up.html AND up/index.html); with no
+    // index page of its own, up.md is its article (Quartz computeFolderInfo)
+    const upDir = await renderLive("/notes/sn/up/");
+    assert.equal(upDir.headers["x-wiki-page-class"], "folder@1");
+    assert.ok(upDir.body.includes('<body data-slug="notes/sn/up/index">') && upDir.body.includes("Up page"));
+    assert.match(upDir.body, /<p>1 item under this folder\.<\/p>/);
+    assert.equal((await renderLive("/notes/sn/up")).headers["x-wiki-page-class"], "note@1");
+    const deep = await renderLive("/notes/sn/deep-folder/sub-dir/");
+    assert.equal(deep.headers["x-wiki-render"], "db");
+    assert.ok(deep.body.includes('href="../../../../notes/sn/deep-folder/sub-dir/leaf-note"'));
+  } finally { undo(); }
+});
+
+// rw-p1a-deploy-prep attempt 2 (tester, clause 2 + near-miss N1): on Linux
+// Quartz treats "\" as a CHARACTER - it builds notes/bs/back\slash.html and
+// lists back\slash, back\.dot and private\x as pages of notes/bs/ (no back/ or
+// private/ folder). Its chrome escapes attribute and text values as preact
+// does (& < " - not >): data-slug="notes/bs/lt&lt;gt>".
+test("attempt 2: back\\slash.md, back\\.dot.md, private\\x.md and lt<gt>.md are pages at Quartz's URL; their folder lists 4 pages, no phantom folder", { skip: process.platform === "win32" && "a Windows filesystem cannot hold a backslash in a name" }, async () => {
+  mode = "up";
+  const B = "\\";
+  const files = { [`notes/bs/back${B}slash.md`]: "# One\n", [`notes/bs/back${B}.dot.md`]: "# Two\n", [`notes/bs/private${B}x.md`]: "# Three\n", "notes/bs/lt<gt>.md": "# Four\n" };
+  const added = [];
+  for (const [rel, md] of Object.entries(files)) {
+    mkdirSync(dirname(join(vaultTmp, rel)), { recursive: true });
+    writeFileSync(join(vaultTmp, rel), md);
+    utimesSync(join(vaultTmp, rel), PAST, PAST);
+    const row = { ...parseWikiPage(rel, md), updated_at: "2026-10-18T00:00:00.000Z" };
+    rows.push(row);
+    added.push(row.slug);
+  }
+  nav._resetForTests();
+  try {
+    assert.deepEqual(added, [`notes/bs/back${B}slash`, `notes/bs/back${B}.dot`, `notes/bs/private${B}x`, "notes/bs/lt<gt>"], "the compile rule keys each row by its own name");
+    for (const [url, slugAttr] of [["/notes/bs/back%5Cslash", `notes/bs/back${B}slash`], ["/notes/bs/back%5C.dot", `notes/bs/back${B}.dot`],
+      ["/notes/bs/private%5Cx", `notes/bs/private${B}x`], ["/notes/bs/lt%3Cgt%3E", "notes/bs/lt&lt;gt>"]]) {
+      const r = await renderLive(url);
+      assert.equal(r.status, 200, url);
+      assert.equal(r.headers["x-wiki-render"], "db", url);
+      assert.equal(r.headers["x-wiki-page-class"], "note@1", url);
+      assert.ok(r.body.includes(`<body data-slug="${slugAttr}">`), `${url}: data-slug as Quartz writes it`);
+    }
+    const f = await renderLive("/notes/bs/");
+    assert.equal(f.headers["x-wiki-render"], "db");
+    assert.match(f.body, /<p>4 items under this folder\.<\/p>/);
+    for (const h of [`back${B}slash`, `back${B}.dot`, `private${B}x`, "lt&lt;gt>"]) {
+      assert.equal(f.body.split(`<a href="../../notes/bs/${h}" class="internal">`).length - 1, 1, `one entry for ${h}`);
+    }
+    assert.ok(!f.body.includes('href="../../notes/bs/back/"') && !f.body.includes('href="../../notes/bs/private/"'), "no phantom folder");
+  } finally {
+    rows = rows.filter((r) => !added.includes(r.slug));
+    rmSync(join(vaultTmp, "notes/bs"), { recursive: true, force: true });
+    nav._resetForTests();
+  }
+});
+
+test("NA4-2: an ORPHAN row (no file) is pending, never presented; under a retired prefix it is the retired page", async () => {
+  mode = "up";
+  rows.push({ ...parseWikiPage("notes/orphan-x.md", "# Orphan body MARKER\n"), updated_at: "2026-10-18T00:00:00.000Z" });
+  rows.push({ ...parseWikiPage("content/topic/orphan-topic.md", "# Orphan topic MARKER\n"), updated_at: "2026-10-18T00:00:00.000Z" });
+  nav._resetForTests();
+  try {
+    const o = await renderLive("/notes/orphan-x");
+    assert.equal(o.headers["x-wiki-render"], "pending");
+    assert.equal(o.headers["cache-control"], "no-store");
+    assert.ok(o.body.includes("orphan") && !o.body.includes("Orphan body MARKER"));
+    const t = await renderLive("/content/topic/orphan-topic");
+    assert.equal(t.headers["x-wiki-page-class"], "retired@1");
+    assert.ok(!t.body.includes("Orphan topic MARKER"));
+  } finally {
+    rows = rows.filter((r) => r.slug !== "notes/orphan-x" && r.slug !== "content/topic/orphan-topic");
+    nav._resetForTests();
+  }
+});
+
+test("RV-1: a row for a path Quartz does not build (private/, templates/, a dot-directory) is never presented or listed", async () => {
+  mode = "up";
+  const add = [["private/secret.md", "# Secret MARKER\n"], ["templates/tpl.md", "# Tpl MARKER\n"], ["notes/.hidden/h.md", "# Hidden MARKER\n"]];
+  for (const [rel, md] of add) {
+    mkdirSync(dirname(join(vaultTmp, rel)), { recursive: true });
+    writeFileSync(join(vaultTmp, rel), md);
+    utimesSync(join(vaultTmp, rel), PAST, PAST);
+    rows.push({ ...parseWikiPage(rel, md), updated_at: "2026-10-18T00:00:00.000Z" });
+  }
+  nav._resetForTests();
+  try {
+    for (const u of ["/private/secret", "/templates/tpl", "/notes/.hidden/h"]) {
+      const r = await renderLive(u);
+      assert.equal(r.headers["x-wiki-render"], "not-available", u);
+      assert.ok(!r.body.includes("MARKER"), u);
+    }
+    const idx = nav.rowsToIndex(rows);
+    assert.ok(!idx["private/secret"] && !idx["templates/tpl"] && !idx["notes/.hidden/h"] && idx["notes/fixture-note"]);
+  } finally {
+    rows = rows.filter((r) => !["private/secret", "templates/tpl", "notes/.hidden/h"].includes(r.slug));
+    for (const d of ["private", "templates", "notes/.hidden"]) rmSync(join(vaultTmp, d), { recursive: true, force: true });
+    nav._resetForTests();
   }
 });

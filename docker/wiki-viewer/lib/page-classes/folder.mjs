@@ -12,8 +12,17 @@ export default {
     const folder = req.key.replace(/(^|\/)index$/, "");
     if (!deps.site) return deps.siteUnavailable();
     if (!isFolder(deps.site, folder) && !(req.isDir && deps.site.folders.has(folder))) return null;
-    const r = await deps.rowAt(folder ? `${folder}/index` : "index");
+    let r = await deps.rowAt(folder ? `${folder}/index` : "index");
     if (!r.ok) return deps.unavailable(r);
+    // Quartz FolderPage: a page named like the folder ("up.md" beside "up/")
+    // is the folder page's content when the folder has no index page (its
+    // computeFolderInfo maps every page whose simple slug is the folder;
+    // index.md sorts after up.md, so index.md wins when both exist).
+    if (!r.row && folder) {
+      const own = await deps.rowAt(folder);
+      if (!own.ok) return deps.unavailable(own);
+      if (own.row) r = own;
+    }
     const pending = await indexRowPending(r.row, deps);
     return pending ? { pending, row: r.row } : { folder, indexRow: r.row };
   },

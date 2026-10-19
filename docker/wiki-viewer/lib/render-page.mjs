@@ -78,7 +78,7 @@ import readingTime from "reading-time";
 import path from "node:path";
 import {
   slugifyFilePath, splitAnchor, slugTag, pathToRoot, transformLink, canonicalDest, simplifySlug,
-  getFileExtension, endsWith, joinSegments, resolveRelative,
+  getFileExtension, endsWith, joinSegments, resolveRelative, urlSlugOf,
 } from "./quartz-path.mjs";
 
 const esc = (s) =>
@@ -748,8 +748,9 @@ export async function renderPage(body, ctx = {}) {
           const row = e.row;
           const fm = { ...(row.frontmatter || {}) };
           const title = row.title || fm.title || row.slug.split("/").pop();
-          const t = await renderTree(row.body, { slug: row.slug, frontmatter: { ...fm, title }, byBase: c.byBase });
-          return { state: "page", slug: row.slug, title, tree: t.hast, blocks: t.c.blocks };
+          // rendered at its own URL (Quartz's slug for the embedded file)
+          const t = await renderTree(row.body, { slug: urlSlugOf(row.slug), frontmatter: { ...fm, title }, byBase: c.byBase });
+          return { state: "page", slug: urlSlugOf(row.slug), title, tree: t.hast, blocks: t.c.blocks };
         })());
       }
       return cache.get(slug);
