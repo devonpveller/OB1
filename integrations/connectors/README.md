@@ -71,7 +71,7 @@ in provenance, and (with `labels`) as top-level metadata keys too.
 
 | intake answers | the kit |
 |---|---|
-| 200 `clean` / `suspicious` / `pending` / `injected` | **record** (the text intake returns is dropped: consumers read Open Brain) |
+| 200 `clean` / `suspicious` / `pending` / `injected` | **record** (the text intake returns is dropped: consumers read Open Brain; the one opt-in exception is `IntakeClient(return_clean_text=True)`, used by the search gate, which answers its caller with intake's text for `clean` only, in `Outcome.extra`) |
 | 200 `rejected` (content, e.g. a parser bomb) | **record**, never resent |
 | 200 for another key or connector, an unknown label, text for injected/pending | **stop** (protocol) |
 | 408, 503 (busy, not ready, store down, too many in flight, no key announced), no answer | **retry**: capped exponential backoff, `Retry-After` honoured (capped), until `max_attempts` / `budget_s`; then the item is **deferred** and the run stops |
