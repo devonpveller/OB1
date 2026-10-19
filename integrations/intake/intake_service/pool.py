@@ -27,6 +27,11 @@ wire.py has the frames and the caps):
 A worker that breaks the protocol - a frame that is not JSON (a pickle), one over its cap, a
 message for another job, an unknown op, an invalid "started" or result - is DROPPED (SIGKILL,
 discarded, replaced: phase "died"), never re-pooled (R-4), and the request gets killed_result().
+THE ORDER is enforced too (intake-i5b TF-3): one "started", answered once; then a `done` whose
+kind is the one that answer allows - `bad` only before any "started" (the body is not a JSON
+object: the worker never got as far as stage 1), `skipped` only after "skip", `result` only after
+"go" - and a result's key must be the announced key (none when "started" was null). So the
+connector-binding gate cannot be skipped and a result cannot land under another item's key.
 
 THE WALL CLOCKS (the parent's, measured with time.monotonic):
   transfer    from BEFORE the job is sent to "started": wall_transfer_s (the body is up to
@@ -37,6 +42,14 @@ THE WALL CLOCKS (the parent's, measured with time.monotonic):
               deadline is 1.6 s, the D34 bound < 2 s)
   classifier  from "stage6" to "done": wall_classifier_s (the classifier's own budget plus slack;
               its budget is checked between chunks, so one forward pass can overshoot it)
+EVERY READ of a worker frame - its length header AND its body - is bounded by the clock of the
+phase it is read in (intake-i5b TF-1): poll() only says that SOME bytes arrived, and recv_bytes()
+then blocks until the whole frame has, so a worker that writes a header and part of a body and
+then stops (compromised, or frozen mid-write) would hold the parent past every clock. The read
+runs in a helper thread (_read_frame) and the parent waits for it only until the deadline; then
+the worker is killed, which ends the read (the pipe's far end closes; on a Unix socket pair the
+parent also shuts its end down, in case anything else still holds the far one). The "ready"
+frame is read the same way under the start clock (start and every replacement).
 A busy worker whose job has outlived every wall clock (max_job_seconds) counts as STUCK, and
 status()["serving"] (what /healthz reads) leaves it out.
 A deadline passing -> proc.kill() -> join -> the worker is discarded and replaced -> the request
@@ -219,6 +232,72 @@ class _Worker:
         self.conn = conn
         self.pid = proc.pid or 0
         self.version = None
+        self.reader: threading.Thread | None = None  # a frame read the clock gave up on (TF-1)
+
+
+class _ReadTimeout(Exception):
+    """The phase clock ran out before a whole frame arrived (TF-1)."""
+
+
+def _read_frame(w: _Worker, max_bytes: int, deadline: float) -> list:
+    """One frame from the worker, bounded by `deadline` (time.monotonic) - header and body (TF-1).
+    -> the message; raises _ReadTimeout when the clock runs out first (the caller then kills the
+    worker, which ends the read), else what wire.recv_msg raises (EOFError, OSError, WireError)."""
+    left = deadline - time.monotonic()
+    if left <= 0 or not w.conn.poll(left):
+        raise _ReadTimeout()
+    box: list = []
+    done = threading.Event()
+
+    def read():
+        try:
+            box.append((True, wire.recv_msg(w.conn, max_bytes)))
+        except BaseException as e:  # noqa: BLE001 - handed to the waiting thread
+            box.append((False, e))
+        finally:
+            done.set()
+
+    th = threading.Thread(target=read, name="intake-job-recv", daemon=True)
+    th.start()
+    if not done.wait(max(0.0, deadline - time.monotonic())):
+        w.reader = th
+        raise _ReadTimeout()
+    ok, value = box[0]
+    if not ok:
+        raise value
+    return value
+
+
+_DONE_AFTER = {None: "bad", "skip": "skipped", "go": "result"}
+
+
+def _order_violation(answer, kind: str, result: IntakeResult | None, started) -> str:
+    """TF-3: what is wrong with a `done` of this kind after the parent's `answer` to "started"
+    (None: no "started" yet), or "" when nothing is."""
+    want = _DONE_AFTER[answer]
+    if kind != want:
+        before = {None: "before any started", "skip": "after skip", "go": "after go"}[answer]
+        return f"a done of kind {kind} {before} (only {want} is valid there)"
+    if result is not None and result.key is not None:
+        k = (started or {}).get("key")
+        if k is None or (result.key.source, result.key.external_id, result.key.sha256) != \
+                (k["source"], k["external_id"], k["sha256"]):
+            return "a result whose key is not the announced key"
+    return ""
+
+
+def _shutdown(conn) -> None:
+    """Wake a reader blocked on a Unix socket-pair connection (Windows pipes need no help: the
+    killed worker's handle closing ends the read)."""
+    if os.name != "posix":
+        return
+    import socket
+    with contextlib.suppress(Exception):
+        s = socket.socket(fileno=os.dup(conn.fileno()))
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        finally:
+            s.close()
 
 
 @contextlib.contextmanager
@@ -273,9 +352,10 @@ class WorkerPool:
 
     def _await_ready(self, w: _Worker, timeout: float) -> None:
         try:
-            if not w.conn.poll(timeout):
-                raise PoolError(f"a worker did not finish loading in {timeout:.0f}s")
-            msg = wire.recv_msg(w.conn, wire.MAX_CONTROL_BYTES)
+            try:
+                msg = _read_frame(w, wire.MAX_CONTROL_BYTES, time.monotonic() + timeout)
+            except _ReadTimeout:
+                raise PoolError(f"a worker did not finish loading in {timeout:.0f}s") from None
         except (EOFError, OSError):
             w.proc.join(5)
             self._reap(w)
@@ -316,6 +396,9 @@ class WorkerPool:
             if w.proc.is_alive():
                 w.proc.kill()
             w.proc.join(5)
+        if w.reader is not None:  # a read the clock gave up on: end it before the close (TF-1)
+            _shutdown(w.conn)
+            w.reader.join(2)
         with contextlib.suppress(Exception):
             w.conn.close()
 
@@ -421,10 +504,12 @@ class WorkerPool:
         w = self._acquire(self.queue_wait_s)
         try:
             wire.send_msg(w.conn, ["env"])
-            msg = wire.recv_msg(w.conn, wire.MAX_CONTROL_BYTES)
-            return [str(n) for n in msg[1]] if msg[0] == "env" and isinstance(msg[1], list) else []
-        finally:
-            self._release(w)
+            msg = _read_frame(w, wire.MAX_CONTROL_BYTES, time.monotonic() + self.wall_transfer_s)
+        except (_ReadTimeout, EOFError, OSError, wire.WireError):
+            self._drop_worker(w, killed=False)
+            return []
+        self._release(w)
+        return [str(n) for n in msg[1]] if msg[0] == "env" and len(msg) > 1 and isinstance(msg[1], list) else []
 
     def run(self, body: bytes, gate) -> Outcome:
         """Screen one request body in a worker. gate(started_info) -> None (go) or a refusal."""
@@ -457,11 +542,12 @@ class WorkerPool:
         if failed:
             self._drop_worker(w, killed=False)
             return Outcome("died", None, None, phase, time.monotonic() - t0, "the pipe to the worker broke", w.pid)
+        answer = None  # the parent's answer to "started": "go" or "skip" (TF-3)
         while True:
-            left = deadline - time.monotonic()
             try:
-                ready = left > 0 and w.conn.poll(left)
-                msg = wire.recv_msg(w.conn, self.max_message_bytes) if ready else None
+                msg = _read_frame(w, self.max_message_bytes, deadline)
+            except _ReadTimeout:
+                msg = None
             except EOFError:
                 elapsed = time.monotonic() - t0
                 code = None
@@ -485,7 +571,7 @@ class WorkerPool:
             kind = msg[0]
             if len(msg) < 2 or isinstance(msg[1], bool) or msg[1] != jid:
                 return self._violation(w, t0, started, phase, f"a {kind[:20]!r} message for another job")
-            if kind == "started" and phase == "transfer" and len(msg) == 3:
+            if kind == "started" and answer is None and len(msg) == 3:
                 try:
                     started = wire.started_from_wire(msg[2])
                 except wire.WireError as e:
@@ -495,8 +581,10 @@ class WorkerPool:
                 except Exception as e:  # noqa: BLE001 - a broken gate refuses
                     refusal = "gate: " + type(e).__name__
                 if refusal:
+                    answer = "skip"
                     wire.send_msg(w.conn, ["skip", str(refusal)])
                 else:
+                    answer = "go"
                     wire.send_msg(w.conn, ["go"])
                     phase = "stages"
                     deadline = time.monotonic() + self.wall_stages_s
@@ -510,6 +598,9 @@ class WorkerPool:
                 except wire.WireError as e:
                     # R-4: checked BEFORE the worker goes back to idle; an invalid result drops it
                     return self._violation(w, t0, started, phase, str(e))
+                why = _order_violation(answer, out_kind, result, started)
+                if why:
+                    return self._violation(w, t0, started, phase, why)
                 self._release(w)
                 return Outcome(out_kind, result, started, phase, elapsed, detail, w.pid)
             else:

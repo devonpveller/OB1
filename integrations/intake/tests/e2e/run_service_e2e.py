@@ -35,7 +35,9 @@ WHAT IT CHECKS (acceptance lines 1-3; the verdict file is <out>/e2e-results.json
   G  slow shapes: instance K (INTAKE_WALL_STAGES_SECONDS=0.001) - EVERY shape killed at the wall
      clock -> pending (transient error, no text, a pending row with the error); response time per
      shape; the worker replaced and a later request served. Instance A (production limits) - each
-     shape's answer and time (none may be `clean` by way of an error)
+     shape's answer and time (none may be `clean` by way of an error). K is judged after A
+     (intake-i5c, the i5b tester's TF-5): a shape A rejects in a few ms can finish inside K's 1 ms
+     clock, and then passes only with exactly its production answer (k_verdict)
   H  no secret in any container log (caller keys, the DB password, the judge key, the postgres
      password)
   J  intake-i5b: (R2-F1) the secrets are FILES - the service container's configured environment
@@ -558,32 +560,25 @@ class Run:
         self.check("G instance K is up", boot["healthz"].get("status") == 200, boot["healthz"])
         ids, plan = self.shapes_plan("k", "openbrain-intake-k")
         r = self.client(plan, "kshapes", timeout=7200)
-        timings = {}
+        timings, kanswers = {}, {}
         for n in ids:
             body = r[n].get("body") if isinstance(r[n].get("body"), dict) else {}
             err = (body.get("error") or {}).get("detail", "") if isinstance(body.get("error"), dict) else ""
             timings[n] = {"http": r[n].get("status"), "label": body.get("label"), "seconds": r[n].get("seconds"),
                           "busy_retries": r[n].get("retried_503", 0), "error": err[:120]}
-            self.check(f"G[K] {n}: killed at the wall clock -> pending, no text",
-                       r[n].get("status") == 200 and body.get("label") == "pending" and "killed" in err
-                       and body.get("text") is None, timings[n])
+            kanswers[n] = {"http": r[n].get("status"), "label": body.get("label"), "error": err,
+                           "text": body.get("text")}
         self.results["kill_timings"] = timings
         rows = {x[0]: x[1:] for x in self.psql(
             "SELECT external_id, status, coalesce(scores->>'error',''), coalesce(scores->>'error_kind','') "
             "FROM intake.items WHERE external_id LIKE 'k-%'")}
-        self.check("G[K] every killed shape is a pending row with a transient error",
-                   all(rows.get("k-" + n, ("",))[0] == "pending" and "killed" in rows["k-" + n][1]
-                       and rows["k-" + n][2] == "transient" for n in ids), {n: rows.get("k-" + n) for n in ids[:3]})
         after = self.client([{"name": "host", "host": "openbrain-intake-k", "sleep": 0},
                              {"name": "healthz", "wait_healthz": 300}], "kafter")
-        self.check("G[K] the pool replaced its killed workers (/healthz 200 afterwards)",
-                   after["healthz"].get("status") == 200, after["healthz"])
         km = self.client([{"name": "host", "host": "openbrain-intake-k", "sleep": 0},
                           {"name": "metrics", "method": "GET", "path": "/metrics",
                            "headers": {"Authorization": "Bearer " + self.keys["research"]}}], "kmetrics")
         mt = km["metrics"].get("body") or ""
         kills = sum(float(m.group(1)) for m in re.finditer(r'intake_worker_kills_total\{phase="stages"\} (\S+)', mt))
-        self.check("G[K] /metrics counts one stage kill per shape", kills >= len(ids), kills)
         sh("rm", "-f", k, check=False)
         # A: production limits -> each shape's own answer and time; never `clean` through an error
         ids, plan = self.shapes_plan("a", "openbrain-intake")
@@ -596,6 +591,23 @@ class Run:
                        "seconds": r[n].get("seconds"), "error": (err or {}).get("detail", "")[:120] if isinstance(err, dict) else None}
             self.check(f"G[A] {n}: answered, and never clean with an error",
                        r[n].get("status") in (200, 422) and not (body.get("label") == "clean" and err), prod[n])
+        # K's verdict, judged with A's answers (intake-i5b TF-5: a shape that A rejects in a few ms can
+        # finish inside K's 1 ms stages clock; it then must give exactly its production answer)
+        v = k_verdict(kanswers, prod)
+        for n in ids:
+            ok, why = v["per_shape"][n]
+            self.check(f"G[K] {n}: killed at the wall clock -> pending, no text (or a fast reject: its production answer)",
+                       ok, {**timings[n], "verdict": why})
+        killed = v["killed"]
+        self.results["k_killed"] = {"killed": len(killed), "fast_rejects": sorted(set(ids) - set(killed))}
+        self.check("G[K] every killed shape is a pending row with a transient error",
+                   all(rows.get("k-" + n, ("",))[0] == "pending" and "killed" in rows["k-" + n][1]
+                       and rows["k-" + n][2] == "transient" for n in killed),
+                   {n: rows.get("k-" + n) for n in killed[:3]})
+        self.check("G[K] the pool replaced its killed workers (/healthz 200 afterwards)",
+                   after["healthz"].get("status") == 200, after["healthz"])
+        self.check("G[K] /metrics counts one stage kill per killed shape", kills >= len(killed) > 0,
+                   {"kills": kills, "killed": len(killed)})
         self.results["production_limit_shapes"] = prod
 
     def part_i(self, svc):
@@ -750,6 +762,26 @@ class Run:
         nets = sh("network", "ls", "--filter", f"name={self.p}", "--format", "{{.Name}}", check=False).stdout.split()
         self.results["cleanup"] = {"containers_left": left, "networks_left": nets}
         print(f"cleanup: containers left {left}, networks left {nets}", flush=True)
+
+
+def k_verdict(k: dict, a: dict) -> dict:
+    """Part K's verdict per shape (intake-i5b TF-5). k[name] = {http, label, error, text} from instance
+    K (stages clock 1 ms); a[name] = {http, label, ...} from instance A (production limits).
+    A shape passes when K killed it (200, pending, a "killed" error, no text), or when it is a FAST
+    REJECT: A rejects it and K gave that same answer (same status, `rejected`, no text) - the
+    shape's stages finished inside 1 ms, before the clock could fire. Any other answer fails, so no
+    shape can dodge the kill with a different label. -> {"per_shape": {name: (ok, why)}, "killed": [...]}"""
+    per, killed = {}, []
+    for n, kn in k.items():
+        an = a.get(n) or {}
+        if kn.get("http") == 200 and kn.get("label") == "pending" and "killed" in (kn.get("error") or "")                 and kn.get("text") is None:
+            per[n] = (True, "killed")
+            killed.append(n)
+        elif kn.get("label") == "rejected" and an.get("label") == "rejected" and kn.get("http") == an.get("http")                 and kn.get("text") is None:
+            per[n] = (True, "fast reject: the production answer")
+        else:
+            per[n] = (False, f"neither killed nor the production reject (K {kn.get('label')}, A {an.get('label')})")
+    return {"per_shape": per, "killed": killed}
 
 
 def main():

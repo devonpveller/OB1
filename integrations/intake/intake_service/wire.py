@@ -7,8 +7,10 @@ execution in the parent, which holds the DB password, the caller keys and the Li
 ONE frame of UTF-8 JSON (a list whose first item is the op name), sent with send_bytes() and read
 with recv_bytes(maxlength): a frame over the reader's cap is refused from its length header
 before its body is read (the connection is then closed: the pool drops that worker). NaN and
-Infinity are refused both ways. The one non-JSON frame is a job's body, raw bytes sent right
-after the parent's ["job", id] header; only the worker reads it.
+Infinity are refused both ways; inbound, so is a number that overflows to one (`1e99999` decodes
+to inf: intake-i5b TF-2). The one non-JSON frame is a job's body, raw bytes sent right after the
+parent's ["job", id] header; only the worker reads it. How long a read may take is the pool's
+business: it reads every frame under the phase clock (pool.py, TF-1).
 
 The caps (the frame length, bytes):
   MAX_CONTROL_BYTES        64 KiB  every parent -> worker header, and the worker's "ready"
@@ -19,16 +21,26 @@ The caps (the frame length, bytes):
 
 What the parent acts on is rebuilt and re-checked here: an IntakeResult through its constructor
 (no `clean` with an error or reasons, no text on `injected`/`rejected`, ...) and the "started"
-announcement field by field. Anything else is a WireError, and the pool drops the worker that
-sent it (R-4: a worker that sent something invalid is never re-pooled).
+announcement by stage 1 itself (intake-i5b TF-7): exactly the announced fields, then
+envelope.validate over them - the same function the worker ran, so an honest worker's
+announcement always passes and a compromised one cannot smuggle what stage 1 refuses (a field
+outside the schema, metadata over 64 KiB, more than 1000 links or one outside 1..2048 characters,
+a raw over 5 MiB, a source/connector that is not a slug, a bad timestamp or content type) - and
+the key's sha256 must be the raw's. That is plain-data checking of an already-decoded JSON
+object; the parent still never parses the content itself. Anything else is a WireError, and the
+pool drops the worker that sent it (R-4: a worker that sent something invalid is never
+re-pooled).
 """
 from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
+import math
 import re
 
+from intake import envelope as _envelope
 from intake.result import IdempotencyKey, IntakeResult, Reason, StageRecord
 
 MAX_CONTROL_BYTES = 64 * 1024
@@ -42,6 +54,14 @@ class WireError(ValueError):
 
 def _no_constant(name):
     raise WireError(f"{name} is not JSON")
+
+
+def _finite_float(text: str) -> float:
+    """TF-2: json hands every float literal here; one that overflows (1e99999) would be inf."""
+    v = float(text)
+    if not math.isfinite(v):
+        raise WireError("a non-finite number")
+    return v
 
 
 def send_msg(conn, msg: list) -> None:
@@ -59,7 +79,9 @@ def recv_msg(conn, max_bytes: int) -> list:
     WireError when it is not a JSON list starting with an op name."""
     data = conn.recv_bytes(max_bytes)
     try:
-        msg = json.loads(data.decode("utf-8"), parse_constant=_no_constant)
+        msg = json.loads(data.decode("utf-8"), parse_constant=_no_constant, parse_float=_finite_float)
+    except WireError as e:
+        raise WireError(f"not a JSON frame ({e})") from None
     except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise WireError(f"not a JSON frame ({type(e).__name__})") from None
     if not isinstance(msg, list) or not msg or not isinstance(msg[0], str):
@@ -83,28 +105,46 @@ def _str(d: dict, k: str, limit: int = 4096) -> str:
     return v
 
 
+_KEY_FIELDS = frozenset(("source", "external_id", "sha256"))
+_ENVELOPE_FIELDS = frozenset(("source", "connector", "external_id", "fetched_at", "content_type", "raw",
+                              "metadata", "links"))
+
+
 def started_from_wire(obj):
     """The worker's stage-1 announcement, checked: None (an invalid envelope) or
     {"key": {source, external_id, sha256}, "envelope": {..., "raw": bytes}}."""
     if obj is None:
         return None
-    if not isinstance(obj, dict) or not isinstance(obj.get("key"), dict) or not isinstance(obj.get("envelope"), dict):
+    if not isinstance(obj, dict) or set(obj) != {"key", "envelope"} or not isinstance(obj["key"], dict) \
+            or not isinstance(obj["envelope"], dict):
         raise WireError("started: not {key, envelope}")
     k, e = obj["key"], obj["envelope"]
+    if set(k) != _KEY_FIELDS:
+        raise WireError("started: the key's fields are not source, external_id, sha256")
+    if set(e) != _ENVELOPE_FIELDS:
+        raise WireError("started: the envelope's fields are not the announced set")
     key = {"source": _str(k, "source"), "external_id": _str(k, "external_id"), "sha256": _str(k, "sha256")}
     if not _SHA.fullmatch(key["sha256"]):
         raise WireError("started: sha256 is not 64 hex characters")
     try:
-        raw = base64.b64decode(_str(e, "raw", MAX_WORKER_MESSAGE_BYTES), validate=True)
+        base64.b64decode(_str(e, "raw", MAX_WORKER_MESSAGE_BYTES), validate=True)
     except (binascii.Error, ValueError):
         raise WireError("started: raw is not base64") from None
-    if not isinstance(e.get("metadata"), dict) or not isinstance(e.get("links"), list):
-        raise WireError("started: metadata/links have the wrong type")
-    env = {"source": _str(e, "source"), "connector": _str(e, "connector"), "external_id": _str(e, "external_id"),
-           "fetched_at": _str(e, "fetched_at"), "content_type": _str(e, "content_type"), "raw": raw,
-           "metadata": e["metadata"], "links": e["links"]}
-    if env["source"] != key["source"] or env["external_id"] != key["external_id"]:
+    # TF-7: stage 1 itself, over the announced fields (the raw as the base64 it travelled as)
+    try:
+        v = _envelope.validate({"source": e["source"], "connector": e["connector"], "external_id": e["external_id"],
+                                "fetched_at": e["fetched_at"], "content_type": e["content_type"], "raw": e["raw"],
+                                "raw_encoding": "base64", "metadata": e["metadata"], "links": e["links"]})
+    except _envelope.Rejected as x:
+        raise WireError(f"started: the envelope fails stage 1 ({str(x)[:200]})") from None
+    except Exception as x:  # noqa: BLE001 - anything else stage 1 trips on is equally invalid
+        raise WireError(f"started: the envelope fails stage 1 ({type(x).__name__})") from None
+    if v.source != key["source"] or v.external_id != key["external_id"]:
         raise WireError("started: the key does not match the envelope")
+    if hashlib.sha256(v.raw).hexdigest() != key["sha256"]:
+        raise WireError("started: the key's sha256 is not the raw's")
+    env = {"source": v.source, "connector": v.connector, "external_id": v.external_id, "fetched_at": v.fetched_at,
+           "content_type": e["content_type"], "raw": v.raw, "metadata": dict(v.metadata), "links": list(v.links)}
     return {"key": key, "envelope": env}
 
 

@@ -210,7 +210,8 @@ def _serve(s, env) -> int:
                     "the second opinion expire suspicious (never clean)")
     pool = WorkerPool(s.workers, wall_stages_s=s.wall_stages_s, wall_transfer_s=s.wall_transfer_s,
                       wall_classifier_s=s.wall_classifier_s, start_timeout_s=s.worker_start_s,
-                      queue_wait_s=s.queue_wait_s, child_env_drop=settings.SECRET_ENV)
+                      queue_wait_s=s.queue_wait_s, child_env_drop=settings.SECRET_ENV,
+                      max_body_bytes=s.max_request_bytes)  # RV-3: the worker's cap is the request cap
     try:
         pool.start()
     except PoolError as e:

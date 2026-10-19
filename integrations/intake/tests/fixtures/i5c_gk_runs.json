@@ -1,0 +1,676 @@
+{
+ "run1": {
+  "a": {
+   "calc-page-31x64k": {
+    "http": 200,
+    "label": "clean"
+   },
+   "email-CR-5MB-continuation-flood": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "email-CR-body-lines-x149950": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "email-CR-header-continuation-x149950": {
+    "http": 200,
+    "label": "pending"
+   },
+   "email-CR-headers-x149950": {
+    "http": 200,
+    "label": "clean"
+   },
+   "email-CRLF-5MB-continuation-flood": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "email-CRLF-body-lines-x149950": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "email-CRLF-header-continuation-x149950": {
+    "http": 200,
+    "label": "pending"
+   },
+   "email-CRLF-headers-x149950": {
+    "http": 200,
+    "label": "clean"
+   },
+   "email-mixed-CR-LF-CRLF-5MB": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "email-mixed-CR-LF-CRLF-body-x-cap": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "huge-tag-0": {
+    "http": 200,
+    "label": "clean"
+   },
+   "huge-tag-13": {
+    "http": 200,
+    "label": "clean"
+   },
+   "huge-tag-26": {
+    "http": 200,
+    "label": "clean"
+   },
+   "json-json-escape-flood-backslash": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escape-flood-mixed": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escape-flood-surrogate-pair": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escape-flood-u0001": {
+    "http": 200,
+    "label": "clean"
+   },
+   "json-json-escapes-in-keys-values-backslash": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escapes-in-keys-values-mixed": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escapes-in-keys-values-surrogate-pair": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escapes-in-keys-values-u0001": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "re2-spaced-chat-template": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "re2-spaced-chat-token": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "semicolon-at-cap-0": {
+    "http": 200,
+    "label": "clean"
+   },
+   "semicolon-at-cap-1": {
+    "http": 200,
+    "label": "clean"
+   },
+   "semicolon-flood-0": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-1": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-2": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-3": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-4": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-5": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-6": {
+    "http": 200,
+    "label": "rejected"
+   }
+  },
+  "k": {
+   "calc-page-31x64k": {
+    "error": "worker: killed at the stages wall clock after 0.133s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-5MB-continuation-flood": {
+    "error": "worker: killed at the stages wall clock after 0.278s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-body-lines-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.026s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-header-continuation-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.034s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-headers-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.045s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-5MB-continuation-flood": {
+    "error": "worker: killed at the stages wall clock after 0.313s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-body-lines-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.030s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-header-continuation-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.049s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-headers-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.074s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-mixed-CR-LF-CRLF-5MB": {
+    "error": "worker: killed at the stages wall clock after 0.193s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-mixed-CR-LF-CRLF-body-x-cap": {
+    "error": "worker: killed at the stages wall clock after 0.032s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "huge-tag-0": {
+    "error": "worker: killed at the stages wall clock after 0.252s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "huge-tag-13": {
+    "error": "worker: killed at the stages wall clock after 0.115s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "huge-tag-26": {
+    "error": "worker: killed at the stages wall clock after 0.140s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-backslash": {
+    "error": "worker: killed at the stages wall clock after 0.379s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-mixed": {
+    "error": "worker: killed at the stages wall clock after 0.380s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-surrogate-pair": {
+    "error": "worker: killed at the stages wall clock after 0.284s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-u0001": {
+    "error": "worker: killed at the stages wall clock after 0.489s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-backslash": {
+    "error": "worker: killed at the stages wall clock after 0.311s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-mixed": {
+    "error": "worker: killed at the stages wall clock after 0.270s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-surrogate-pair": {
+    "error": "worker: killed at the stages wall clock after 0.326s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-u0001": {
+    "error": "worker: killed at the stages wall clock after 0.332s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "re2-spaced-chat-template": {
+    "error": "worker: killed at the stages wall clock after 0.272s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "re2-spaced-chat-token": {
+    "error": "worker: killed at the stages wall clock after 0.279s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-at-cap-0": {
+    "error": "worker: killed at the stages wall clock after 0.255s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-at-cap-1": {
+    "error": "worker: killed at the stages wall clock after 0.230s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-0": {
+    "error": "worker: killed at the stages wall clock after 0.044s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-1": {
+    "error": "worker: killed at the stages wall clock after 0.053s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-2": {
+    "error": "",
+    "http": 200,
+    "label": "rejected",
+    "text": null
+   },
+   "semicolon-flood-3": {
+    "error": "worker: killed at the stages wall clock after 0.027s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-4": {
+    "error": "worker: killed at the stages wall clock after 0.023s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-5": {
+    "error": "worker: killed at the stages wall clock after 0.051s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-6": {
+    "error": "worker: killed at the stages wall clock after 0.036s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   }
+  },
+  "source": "intake-i5b tester-t1 e2e-run1/e2e-results.json (kill_timings, production_limit_shapes)"
+ },
+ "run2": {
+  "a": {
+   "calc-page-31x64k": {
+    "http": 200,
+    "label": "clean"
+   },
+   "email-CR-5MB-continuation-flood": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "email-CR-body-lines-x149950": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "email-CR-header-continuation-x149950": {
+    "http": 200,
+    "label": "pending"
+   },
+   "email-CR-headers-x149950": {
+    "http": 200,
+    "label": "clean"
+   },
+   "email-CRLF-5MB-continuation-flood": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "email-CRLF-body-lines-x149950": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "email-CRLF-header-continuation-x149950": {
+    "http": 200,
+    "label": "pending"
+   },
+   "email-CRLF-headers-x149950": {
+    "http": 200,
+    "label": "clean"
+   },
+   "email-mixed-CR-LF-CRLF-5MB": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "email-mixed-CR-LF-CRLF-body-x-cap": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "huge-tag-0": {
+    "http": 200,
+    "label": "clean"
+   },
+   "huge-tag-13": {
+    "http": 200,
+    "label": "clean"
+   },
+   "huge-tag-26": {
+    "http": 200,
+    "label": "clean"
+   },
+   "json-json-escape-flood-backslash": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escape-flood-mixed": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escape-flood-surrogate-pair": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escape-flood-u0001": {
+    "http": 200,
+    "label": "clean"
+   },
+   "json-json-escapes-in-keys-values-backslash": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escapes-in-keys-values-mixed": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escapes-in-keys-values-surrogate-pair": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "json-json-escapes-in-keys-values-u0001": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "re2-spaced-chat-template": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "re2-spaced-chat-token": {
+    "http": 200,
+    "label": "suspicious"
+   },
+   "semicolon-at-cap-0": {
+    "http": 200,
+    "label": "clean"
+   },
+   "semicolon-at-cap-1": {
+    "http": 200,
+    "label": "clean"
+   },
+   "semicolon-flood-0": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-1": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-2": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-3": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-4": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-5": {
+    "http": 200,
+    "label": "rejected"
+   },
+   "semicolon-flood-6": {
+    "http": 200,
+    "label": "rejected"
+   }
+  },
+  "k": {
+   "calc-page-31x64k": {
+    "error": "worker: killed at the stages wall clock after 0.188s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-5MB-continuation-flood": {
+    "error": "worker: killed at the stages wall clock after 0.205s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-body-lines-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.014s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-header-continuation-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.025s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CR-headers-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.030s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-5MB-continuation-flood": {
+    "error": "worker: killed at the stages wall clock after 0.190s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-body-lines-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.016s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-header-continuation-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.020s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-CRLF-headers-x149950": {
+    "error": "worker: killed at the stages wall clock after 0.059s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-mixed-CR-LF-CRLF-5MB": {
+    "error": "worker: killed at the stages wall clock after 0.128s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "email-mixed-CR-LF-CRLF-body-x-cap": {
+    "error": "worker: killed at the stages wall clock after 0.012s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "huge-tag-0": {
+    "error": "worker: killed at the stages wall clock after 0.079s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "huge-tag-13": {
+    "error": "worker: killed at the stages wall clock after 0.082s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "huge-tag-26": {
+    "error": "worker: killed at the stages wall clock after 0.072s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-backslash": {
+    "error": "worker: killed at the stages wall clock after 0.379s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-mixed": {
+    "error": "worker: killed at the stages wall clock after 0.358s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-surrogate-pair": {
+    "error": "worker: killed at the stages wall clock after 0.351s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escape-flood-u0001": {
+    "error": "worker: killed at the stages wall clock after 0.328s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-backslash": {
+    "error": "worker: killed at the stages wall clock after 0.304s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-mixed": {
+    "error": "worker: killed at the stages wall clock after 0.255s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-surrogate-pair": {
+    "error": "worker: killed at the stages wall clock after 0.245s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "json-json-escapes-in-keys-values-u0001": {
+    "error": "worker: killed at the stages wall clock after 0.282s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "re2-spaced-chat-template": {
+    "error": "worker: killed at the stages wall clock after 0.173s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "re2-spaced-chat-token": {
+    "error": "worker: killed at the stages wall clock after 0.186s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-at-cap-0": {
+    "error": "worker: killed at the stages wall clock after 0.296s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-at-cap-1": {
+    "error": "worker: killed at the stages wall clock after 0.526s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-0": {
+    "error": "worker: killed at the stages wall clock after 0.099s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-1": {
+    "error": "worker: killed at the stages wall clock after 0.036s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-2": {
+    "error": "worker: killed at the stages wall clock after 0.012s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-3": {
+    "error": "worker: killed at the stages wall clock after 0.066s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-4": {
+    "error": "worker: killed at the stages wall clock after 0.050s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-5": {
+    "error": "worker: killed at the stages wall clock after 0.043s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   },
+   "semicolon-flood-6": {
+    "error": "worker: killed at the stages wall clock after 0.048s",
+    "http": 200,
+    "label": "pending",
+    "text": null
+   }
+  },
+  "source": "intake-i5b tester-t1 e2e-run2/e2e-results.json (kill_timings, production_limit_shapes)"
+ }
+}

@@ -213,7 +213,9 @@ class PgStore:
                 conn, since = self._pool.get_nowait()
             except queue.Empty:
                 return self._connect()
-            if conn.closed or conn.broken:
+            if conn.closed or conn.broken:  # RV-4: closed too, so a broken one leaks nothing
+                with contextlib.suppress(Exception):
+                    conn.close()
                 continue
             if time.monotonic() - since > self._max_idle:
                 with contextlib.suppress(Exception):
