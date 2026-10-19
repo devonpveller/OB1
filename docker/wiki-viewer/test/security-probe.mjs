@@ -11,11 +11,15 @@
  *     relative or http(s) src (the PDF-embed shape)
  *   - no URL attribute (href, src, ...) with a javascript:/vbscript:/data:
  *     scheme (a data:image/<raster> src excepted)
- * The rows are deleted again at the end (they have no file: orphans).
+ * Each row gets its FILE in the vault first (rw-p1a-deploy-prep, NA4-2: a
+ * row without a file is an orphan and never presented - the probe must hit
+ * presented pages, so it also requires x-wiki-render: db on the three row
+ * URLs); rows and files are removed again at the end.
  * Runs inside the viewer image on the env's network: p1a-env.sh node ...
  * Exit 1 on any hit, 2 if the probe could not run.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 const { fromHtml } = await import("/quartz/node_modules/hast-util-from-html/index.js");
 const { visit } = await import("/quartz/node_modules/unist-util-visit/index.js");
@@ -25,6 +29,13 @@ const OB = (process.env.OPEN_BRAIN_URL || "").replace(/\/+$/, "");
 const BASE = (process.env.P1A_BASE || "").replace(/\/+$/, "");
 const body = readFileSync("/ob1/docker/wiki-viewer/test/fixtures/security/injection-probe.md", "utf8").replace(/^# .*\n/, "");
 const HOSTILE = '"><img src=x onerror=alert(201)>';
+const VAULT = process.env.WIKI_GIT_DIR || "/wiki";
+const SLUGS = ["content/source/00000000-0000-4000-8000-000000000003", "content/person/person-probe-fixture", "notes/probe-note"];
+for (const s of SLUGS) {
+  mkdirSync(dirname(`${VAULT}/${s}.md`), { recursive: true });
+  writeFileSync(`${VAULT}/${s}.md`, `# Probe\n\n${body}`);
+}
+await new Promise((res) => setTimeout(res, 50));
 const rows = [
   { slug: "content/source/00000000-0000-4000-8000-000000000003", page_class: "source", entity_type: null },
   { slug: "content/person/person-probe-fixture", page_class: "entity", entity_type: "person" },
@@ -61,8 +72,10 @@ for (const u of ["/content/thought/9001", "/tags/fixture-tag"]) {
   visit(fromHtml(await (await fetch(BASE + u)).text()), "element", (n) => { if (n.tagName === "script") baseline.add(scriptSig(n)); });
 }
 let hits = 0;
+let notDb = 0;
 for (const u of URLS) {
   const res = await fetch(BASE + u, { redirect: "manual" });
+  if (SLUGS.includes(u.slice(1)) && res.headers.get("x-wiki-render") !== "db") notDb++;
   const html = await res.text();
   const found = [];
   visit(fromHtml(html), "element", (n) => {
@@ -86,5 +99,8 @@ for (const u of URLS) {
 }
 r = await rest("DELETE", `wiki_pages?slug=in.(${rows.map((x) => `"${x.slug}"`).join(",")})`);
 console.log(`[probe] rows removed: ${r.status}`);
-console.log(hits ? `SECURITY-PROBE: FAIL (${hits} hit(s))` : `SECURITY-PROBE: PASS (${URLS.length} pages parsed; no handler, no script, no unsafe URL)`);
-process.exitCode = hits ? 1 : 0;
+for (const s of SLUGS) rmSync(`${VAULT}/${s}.md`, { force: true });
+console.log(`[probe] files removed: ${SLUGS.length}`);
+if (notDb) console.log(`SECURITY-PROBE: FAIL (${notDb} probe page(s) not presented as x-wiki-render: db - nothing was probed there)`);
+else console.log(hits ? `SECURITY-PROBE: FAIL (${hits} hit(s))` : `SECURITY-PROBE: PASS (${URLS.length} pages parsed; no handler, no script, no unsafe URL)`);
+process.exitCode = hits || notDb ? 1 : 0;

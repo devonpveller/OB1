@@ -7,9 +7,9 @@
  */
 import { renderPage, EmbedUnavailable } from "./render-page.mjs";
 import { unavailableState } from "./page-classes.mjs";
-import { normalizeTags, folderDisplayName } from "./site-index.mjs";
+import { normalizeTags, folderDisplayName, isFolder } from "./site-index.mjs";
 import { ListingBody, PageList, html } from "./components.mjs";
-import { simplifySlug, resolveRelative } from "./quartz-path.mjs";
+import { simplifySlug, resolveRelative, urlSlugOf } from "./quartz-path.mjs";
 import { h } from "preact";
 
 const asList = (v) => (Array.isArray(v) ? v.map(String) : v == null || v === "" ? [] : String(v).split(",").map((s) => s.trim()).filter(Boolean));
@@ -29,7 +29,11 @@ export function presentedDate(fm, updatedAt) {
 // future; or an empty body) is this entry's page in the pending-compile state
 // (D13 item 5: "stale is a miss"; never an empty leaf) - ctx.pending.
 export function rowBacked(match) {
-  return async (_req, deps) => {
+  return async (req, deps) => {
+    // A folder URL ("up/") is the folder's page even when a page has the
+    // folder's name ("up.md" beside "up/"): Quartz emits up.html AND
+    // up/index.html (rw-p1a-deploy-prep, NA4-1).
+    if (req?.isDir && deps.site && isFolder(deps.site, req.key)) return null;
     const r = await deps.row();
     if (!r.ok) return deps.unavailable(r);
     if (!r.row || !match(r.row)) return null;
@@ -51,19 +55,22 @@ export async function indexRowPending(row, deps) {
 // notebook hub, note, root - and any row-backed class without its own).
 export async function contentTemplate(ctx, deps) {
   const row = ctx.row;
+  // The page is presented at Quartz's URL for its file (NA4-1: "sp ace.md"
+  // is /sp-ace); every href on it is relative to that URL.
+  const slug = urlSlugOf(row.slug);
   const fm = { ...(row.frontmatter || {}) };
   fm.title = row.title || fm.title || row.slug.split("/").pop();
   let r;
   try {
     // deps.embed: a transcluded page is its row (live-route.mjs); without it
     // (a caller with no database) the placeholder stays.
-    r = await renderPage(row.body, { slug: row.slug, frontmatter: fm, byBase: deps.site?.byBase, embed: deps.embed });
+    r = await renderPage(row.body, { slug, frontmatter: fm, byBase: deps.site?.byBase, embed: deps.embed });
   } catch (e) {
     if (e instanceof EmbedUnavailable) return e.value; // the database screen, never half a page
     throw e;
   }
   return {
-    slug: row.slug,
+    slug,
     layout: "content",
     site: deps.site,
     fm,
@@ -103,6 +110,10 @@ export async function folderTemplate(ctx, deps) {
   const node = site.folders.get(folder) || { files: new Set(), folders: new Set() };
   const items = [...node.files].map((s) => listItem(site, s));
   for (const sub of node.folders) {
+    // Quartz's trie: a page named like the folder ("up.md" beside "up/") is
+    // that node's data, so the folder is listed ONCE, as that page (NA4-1:
+    // the live listing had the page and a separate "up/" entry).
+    if (node.files.has(sub)) continue;
     // Quartz FolderContent: a subfolder whose index page exists IS that page's
     // data (its title, tags and date); only a subfolder without one gets the
     // synthetic entry (display name, no tags, the newest child's date).

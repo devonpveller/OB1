@@ -21,7 +21,7 @@ import { createReadStream } from "node:fs";
 import { stat, writeFile } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
 import { getNavIndex, navIndexEnabled } from "./lib/nav-index.mjs";
-import { renderLive, routeErrors } from "./lib/live-route.mjs";
+import { renderLive, routeErrors, isKnownPageUrl } from "./lib/live-route.mjs";
 import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-classes.mjs";
 import { dbState, onConnect, startProbe } from "./lib/wiki-db.mjs";
 import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
@@ -57,13 +57,18 @@ async function resolveAsset(urlPath) {
   return null;
 }
 
-// A page URL: no extension (Quartz pretty URLs), a folder URL, or a legacy
-// .html form. Everything else is an asset.
+// A page URL for sure: no extension (Quartz pretty URLs), a folder URL, or a
+// legacy .html form. A URL whose last segment has a dot ("/notes/pv.1": Quartz
+// keeps the dots of a file name) is a published asset when that file exists,
+// else a page - unless its extension is a known asset type, which is a page
+// only when the site index knows one at that URL (rw-p1a-deploy-prep, NA4-1 /
+// RV-4: every dotted URL used to be an asset, so "pv.1.md" was a 404).
 function isPageUrl(urlPath) {
   const p = urlPath.split("?")[0].split("#")[0];
   const ext = extname(p);
   return !ext || ext === ".html" || p.endsWith("/");
 }
+const extOf = (urlPath) => extname(urlPath.split("?")[0].split("#")[0]).toLowerCase();
 
 // No published bundle yet (cold start, first build): the page chrome needs the
 // bundle, so a self-refreshing splash. P1b replaces this readiness contract.
@@ -232,13 +237,13 @@ async function handle(req, res) {
       return;
     } catch { /* fall through */ }
   }
-  if (isPageUrl(url)) {
-    const out = await renderLive(url.replace(/\.html(?=$|[?#])/, ""));
+  const page = async (u) => {
+    const out = await renderLive(u);
     const body = req.method === "HEAD" ? undefined : out.body;
     res.writeHead(out.status, { ...out.headers, "content-length": Buffer.byteLength(out.body || "") });
     res.end(body);
-    return;
-  }
+  };
+  if (isPageUrl(url)) return page(url.replace(/\.html(?=$|[?#])/, ""));
   const hit = await resolveAsset(url);
   if (hit) {
     const { file, st } = hit;
@@ -253,6 +258,8 @@ async function handle(req, res) {
     createReadStream(file).pipe(res);
     return;
   }
+  // No published file: a dotted page name, unless the extension is an asset's.
+  if (!MIME[extOf(url)] || (await isKnownPageUrl(url))) return page(url);
   res.writeHead(404, { "content-type": "text/plain", "cache-control": "no-cache" });
   res.end("not found");
 }

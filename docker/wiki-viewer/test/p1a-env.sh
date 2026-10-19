@@ -126,8 +126,11 @@ cmd_llm() {
 cmd_vault() {
   docker volume inspect "$VOL" >/dev/null 2>&1 && docker volume rm "$VOL" >/dev/null
   docker volume create "$VOL" >/dev/null
-  docker run --rm -v "$VOL:/wiki" -v "$HERE/fixtures/vault:/src:ro" --entrypoint sh "$IMG" \
-    -c 'cp -a /src/. /wiki/ && find /wiki -type f | wc -l' | sed 's/^/[p1a-env] vault files: /'
+  # the committed fixture vault, then (rw-p1a-deploy-prep, NA4-1/RV-1) the
+  # legacy notes whose names Quartz slugifies and the paths Quartz never
+  # builds - written here because a Windows checkout cannot hold "q?x.md"
+  docker run --rm -v "$VOL:/wiki" -v "$HERE/fixtures/vault:/src:ro" -v "$HERE/fixtures:/fx:ro" --entrypoint sh "$IMG" \
+    -c 'cp -a /src/. /wiki/ && node /fx/slug-vault.mjs /wiki >/dev/null && find /wiki -type f | wc -l' | sed 's/^/[p1a-env] vault files: /'
 }
 
 cmd_node() { # run node inside the viewer image: OB1 tree at /ob1 (ro), vault at /wiki (rw)

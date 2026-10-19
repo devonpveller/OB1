@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   diffFilesRows, resolveNoteLinks, formatReport, rowState, isEmptyBody, markEmptyFiles, listRows, EMPTY_BODY_PREFILTER,
+  walkVault, listFiles, rowFromFile,
 } from "./reconcile-wiki-pages.mjs";
 import { classify } from "./page-classes.mjs";
 
@@ -169,4 +170,37 @@ test("N2-3/N2-5: listRows reads the prefiltered bodies and applies isEmptyBody; 
   assert.equal(files.get("notes/full").emptyBody, undefined, "a non-empty row's file is never read");
   const r = diffFilesRows(files, rows, cls, { now: NOW });
   assert.deepEqual(r.empty, ["notes/nbsp"], "NBSP row over a real file is drift (the tester's N2-3); the frontmatter-only note is not (N2-5)");
+});
+
+// rw-p1a-deploy-prep attempt 2 (tester, clause 2): a file whose NAME holds a
+// backslash (a Linux-made file; Windows cannot hold one, so this case runs
+// where the filesystem can) is ONE page: the walk yields it, its row is keyed
+// by the same slug, the reconcile is clean - no phantom back/ folder, no
+// missing + orphan pair that no repair can fix.
+test("attempt 2: a file named back\\slash.md / back\\.dot.md / private\\x.md is walked, keyed and reconciled as itself", { skip: process.platform === "win32" && "a Windows filesystem cannot hold a backslash in a name" }, async () => {
+  const B = "\\";
+  const v = mkdtempSync(join(tmpdir(), "bs-vault-"));
+  mkdirSync(join(v, "notes", "adv"), { recursive: true });
+  const md = "# x\n\nSee [[ok]].\n";
+  const names = [`notes/adv/back${B}slash.md`, `notes/adv/back${B}.dot.md`, `notes/adv/private${B}x.md`, `private${B}x.md`];
+  for (const n of names) writeFileSync(join(v, ...n.split("/")), md);
+  writeFileSync(join(v, "notes", "adv", "ok.md"), "# ok\n");
+  writeFileSync(join(v, "notes", "adv", `.x${B}y.md`), "# dot-file\n");
+  const walked = [];
+  for await (const rel of walkVault(v)) walked.push(rel);
+  assert.deepEqual(walked.sort(), [...names, "notes/adv/ok.md"].sort());
+  const files = await listFiles(v);
+  const slugs = new Set(files.keys());
+  const rows = new Map();
+  for (const [slug, f] of files) {
+    const row = rowFromFile(f.rel, md, slugs);
+    assert.equal(row.slug, slug, `${f.rel}: the row is keyed by the file's own slug`);
+    rows.set(row.slug, { ...row, updated_at: new Date(f.mtimeMs + 1000).toISOString() });
+  }
+  assert.ok(!slugs.has("notes/adv/back/slash") && !slugs.has("notes/adv/private/x"), "no phantom folder slug");
+  assert.ok(!rows.has("notes/adv/back/slash") && !rows.has("notes/adv/private/x"), "no row at a phantom folder slug");
+  assert.equal(rows.get(`notes/adv/back${B}slash`).page_class, "note");
+  assert.deepEqual(rows.get(`notes/adv/back${B}slash`).links, ["notes/adv/ok"]);
+  const r = diffFilesRows(files, rows, cls, { now: Date.now() + 5000 });
+  assert.equal(r.drift, 0, formatReport(r));
 });

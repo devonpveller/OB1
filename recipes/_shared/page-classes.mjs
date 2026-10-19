@@ -49,10 +49,14 @@ export function compileClasses() {
   return [..._entries.values()].sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name));
 }
 
-// Vault-relative path (no leading slash, forward slashes, with or without
-// .md) -> { slug, page_class, entity_type, class }.
+// Vault-relative path ("/"-separated, with or without .md; a leading slash is
+// dropped) -> { slug, page_class, entity_type, class }. A "\" is a character
+// of a file name, as Quartz on Linux reads it - never a separator (rw-p1a-
+// deploy-prep attempt 2: "back\slash.md" was keyed notes/adv/back/slash, a
+// row Quartz has no page for). An OS path is made a vault path by vaultRel
+// (wiki-pages.mjs), which splits on the OS's own separator.
 export function classify(relPath) {
-  const clean = String(relPath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const clean = String(relPath || "").replace(/^\/+/, "");
   const slug = clean.replace(/\.md$/i, "");
   const parts = slug.split("/");
   for (const e of compileClasses()) {

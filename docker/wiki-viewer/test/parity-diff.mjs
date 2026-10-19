@@ -30,8 +30,11 @@ const ONLY_URLS = arg("--urls", "") ? new Set(arg("--urls", "").split(",").map((
 import { URLS } from "./parity-diff-urls.mjs";
 export { URLS };
 
+// The built FILE for a URL: Quartz writes the file under the decoded name
+// (notes/adv/back\slash.html for /notes/adv/back%5Cslash; rw-p1a-deploy-prep
+// attempt 2 - the attempt-1 tester's copy decoded it the same way).
 function builtFile(url) {
-  const p = url.replace(/^\/+/, "");
+  const p = decodeURIComponent(url).replace(/^\/+/, "");
   if (p === "") return join(BUILT, "index.html");
   if (p.endsWith("/")) return join(BUILT, p, "index.html");
   return join(BUILT, `${p}.html`);
@@ -155,11 +158,13 @@ export const RULES = [
   },
   {
     id: "D7-retired",
-    why: "a retired slug has no built page (the builder emitted nothing; served the generic 404); the live page is the retired-class explanation",
+    why: "a retired slug has no built page (the builder emitted nothing; served the generic 404); the live page is the retired-class " +
+      "explanation - and ONLY that: the live response must carry x-wiki-page-class: retired@1 (rw-p1a-deploy-prep, NA4-3: any live " +
+      "body used to pass, so a retired URL served from an orphan row by another class read as parity)",
     // attempt 4 (tester AT3-3): only when the builder wrote NO file at all - a
     // built redirect document (an alias claiming the slug) has no <body>, and
     // it used to read as "no built page" here
-    test: (h, ctx) => ctx.cls === "retired slug" && ctx.builtFileExists === false,
+    test: (h, ctx) => ctx.cls === "retired slug" && ctx.builtFileExists === false && ctx.pageClass === "retired@1",
   },
 ];
 
@@ -274,7 +279,8 @@ for (const [cls, url] of URLS) {
   if (missing.length) failed = true;
   const bf = builtFile(url);
   const built = existsSync(bf) ? bodyOf(readFileSync(bf, "utf8")) : "";
-  const ctx = { cls, url, builtFileExists: existsSync(bf) };
+  const pageClass = r.headers.get("x-wiki-page-class");
+  const ctx = { cls, url, builtFileExists: existsSync(bf), pageClass };
   const fired = {};
   const norm = normalizeListSidebar(live, built, ctx);
   if (norm.fired) fired["D5-list-sidebar"] = 1;
@@ -300,7 +306,7 @@ for (const [cls, url] of URLS) {
   if (unlisted.length) failed = true;
   summary.push(`${String(r.status)} x-wiki-render=${render} ${cls.padEnd(16)} ${url.padEnd(56)} ` +
     `built=${built ? "yes" : "NO"} hunks=${hunks.length} unlisted=${unlisted.length} ` +
-    `rules=${JSON.stringify(fired)} missing=${missing.length ? missing.join(",") : "none"}`);
+    `rules=${JSON.stringify(fired)} missing=${missing.length ? missing.join(",") : "none"} class=${pageClass}`);
 }
 console.log("\n== parity summary ==");
 for (const l of summary) console.log(l);

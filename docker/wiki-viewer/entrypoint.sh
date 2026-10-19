@@ -165,6 +165,19 @@ while [ "$i" -lt 240 ]; do
   is_complete /quartz/public && index_ok /quartz/public && { echo "[wiki-viewer] first COMPLETE build emitted"; break; }
   sleep 2; i=$((i + 1))
 done
+# ...and SETTLED (no write in the last STABLE_SECONDS, the snapshot loop's own
+# rule): index.html + css + js appear before Quartz has emitted every page, and
+# a build-0 copied then lacked the pages emitted after it - for good, as the
+# loop below sees nothing newer than its marker (rw-p1a-deploy-prep attempt 2:
+# 6 of 40 pages absent from the first snapshot, "Emitted 90 files" logged after
+# "first COMPLETE build emitted"). Bounded: 120 s, then publish as before.
+j=0
+while [ "$j" -lt 60 ]; do
+  newest=$(find /quartz/public -type f -printf '%T@\n' 2>/dev/null | sort -nr | head -1 | cut -d. -f1)
+  [ -z "$newest" ] || [ $(( $(date +%s) - newest )) -ge "$STABLE_SECONDS" ] && break
+  sleep 2; j=$((j + 1))
+done
+[ "$j" -gt 0 ] && echo "[wiki-viewer] first build settled after ~$((j * 2))s"
 
 # Publish the initial snapshot ONLY if complete (render assets) AND its search
 # index is intact — serve.mjs serves the splash until /srv/current is a complete

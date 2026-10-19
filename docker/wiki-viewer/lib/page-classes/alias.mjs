@@ -5,6 +5,8 @@
 // aliasRedirects), and the response is Quartz's redirect document byte for
 // byte (rw-p1a-render attempt 3, AT2-1 / F7: alias URLs were not-available).
 // Below every row-backed and listing class: a real page at the same slug wins.
+import { urlSlugOf } from "../quartz-path.mjs";
+
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 // Quartz's template, whitespace included. Quartz interpolates unescaped; the
@@ -35,7 +37,7 @@ export default {
     if (!a) return null;
     const r = await deps.row();
     if (!r.ok) return deps.unavailable(r);
-    if (r.row && r.row.slug === req.key) return null; // a page at this slug is that page
+    if (r.row && urlSlugOf(r.row.slug) === req.key) return null; // a page at this URL is that page
     return { alias: req.key, target: a.target, redirUrl: a.redirUrl };
   },
   async template(ctx) {

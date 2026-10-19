@@ -38,6 +38,7 @@ import nodePath from "node:path";
 import { withLedgerLock } from "./structural-ledger.mjs";
 import { extractLinks } from "./links.mjs";
 import { classify } from "./page-classes.mjs";
+import { sluggifySegment, toPosixPath } from "./quartz-slug.mjs";
 export { extractLinks };
 
 // Back-compat name for the class lookup (now registry-driven).
@@ -89,9 +90,10 @@ function parseTags(raw) {
 // Inline #tags, as Quartz's Obsidian-flavoured-markdown transform reads them
 // (same expression; code fences and inline code skipped; numeric-only tags
 // ignored), normalised the way Quartz slugs a tag. The viewer's tag pages are
-// generated from rows, so the row must carry them.
+// generated from rows, so the row must carry them. The segment rule is
+// Quartz's sluggify (quartz-slug.mjs - one copy for compile and renderer).
 const TAG_RE = /(?<=^| )#((?:[-_\p{L}\p{Emoji}\p{M}\d])+(?:\/[-_\p{L}\p{Emoji}\p{M}\d]+)*)/gu;
-const slugTagSeg = (s) => s.replace(/\s/g, "-").replace(/&/g, "-and-").replace(/%/g, "-percent").replace(/\?/g, "").replace(/#/g, "");
+const slugTagSeg = sluggifySegment;
 export function inlineTags(body) {
   const text = String(body || "").replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
   const out = [];
@@ -190,10 +192,12 @@ const _unsynced = new Map();  // slug -> error (the page's file exists; its row 
 let _synced = 0;
 
 // Vault-relative path from an absolute one; null OUTSIDE the vault root (a
-// scratch --out-dir must never write junk slugs, observed 2026-08-26).
-export function vaultRel(absPath, vaultDir = process.env.WIKI_GIT_DIR || "/wiki") {
-  const abs = String(absPath || "").replace(/\\/g, "/");
-  const root = String(vaultDir).replace(/\\/g, "/").replace(/\/+$/, "");
+// scratch --out-dir must never write junk slugs, observed 2026-08-26). The
+// OS's separator becomes "/" (Quartz's toPosixPath); on Linux a "\" stays a
+// character of the name (rw-p1a-deploy-prep attempt 2). `sep`: a test seam.
+export function vaultRel(absPath, vaultDir = process.env.WIKI_GIT_DIR || "/wiki", sep = nodePath.sep) {
+  const abs = toPosixPath(String(absPath || ""), sep);
+  const root = toPosixPath(String(vaultDir), sep).replace(/\/+$/, "");
   if (!root || !abs.startsWith(root + "/")) return null;
   return abs.slice(root.length + 1);
 }
@@ -471,6 +475,40 @@ export async function deleteWikiPages(slugs) {
   } catch (e) {
     warnOnce("delete", e);
     return false;
+  }
+}
+
+/**
+ * Delete EVERY row under these slug prefixes (each a folder: "content/topic/"
+ * deletes content/topic/<anything>, plus the folder's own "content/topic"
+ * row). The retire step's DELETE half (rw-p1a-deploy-prep, NA4-2): a retired
+ * layer is removed wholesale, so its rows go wholesale too - with or without a
+ * file, including rows a writer racing the sweep (a backfill) left behind.
+ * Returns the number of rows deleted, or null when the delete did not land
+ * (logged: the reconciliation names what is left, and an orphan row is never
+ * presented).
+ */
+export async function deleteWikiPagesUnder(prefixes) {
+  const list = [...new Set((prefixes || []).map((p) => String(p).replace(/\/+$/, "")).filter(Boolean))];
+  if (!list.length) return 0;
+  // A prefix is a plain folder slug: no PostgREST or LIKE metacharacter can
+  // widen the delete.
+  const bad = list.find((p) => !/^[A-Za-z0-9][A-Za-z0-9/-]*$/.test(p));
+  if (bad) throw new Error(`deleteWikiPagesUnder: refusing prefix ${JSON.stringify(bad)} (a folder slug of [A-Za-z0-9/-] only)`);
+  const or = list.flatMap((p) => [`slug.eq.${p}`, `slug.like.${p}/*`]).join(",");
+  try {
+    const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?or=(${encodeURIComponent(or)})&select=slug`, {
+      method: "DELETE",
+      headers: { apikey: "local-trust", prefer: "return=representation" },
+      signal: AbortSignal.timeout(TIMEOUT_MS()),
+    });
+    if (!r.ok) throw new Error(`DELETE wiki_pages: ${r.status} ${(await r.text()).slice(0, 200)}`);
+    const rows = await r.json().catch(() => []);
+    return Array.isArray(rows) ? rows.length : 0;
+  } catch (e) {
+    console.error(`[wiki-pages] delete of the rows under ${list.join(", ")} FAILED: ${e?.message || e} - ` +
+      "the reconciliation names the orphan rows left behind (never presented)");
+    return null;
   }
 }
 

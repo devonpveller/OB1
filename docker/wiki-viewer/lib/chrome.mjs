@@ -28,8 +28,13 @@ import {
 } from "./components.mjs";
 import { pathToRoot, joinSegments } from "./quartz-path.mjs";
 
-const escText = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const escAttr = (s) => escText(s).replace(/"/g, "&quot;");
+// Quartz renders its chrome with preact-render-to-string, whose encodeEntities
+// escapes & < " - and NOT > - in text and attribute values alike (6.5.13 in the
+// image, measured 2026-10-18: <title>a&quot;b>c&lt;d&amp;e</title>). The same
+// rule here, so a slug or title with ">" is byte-identical to the built page
+// (rw-p1a-deploy-prep attempt 2, tester N1: data-slug="notes/adv/lt&lt;gt>").
+const escText = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+const escAttr = escText;
 const unescapeHTML = (s) => String(s ?? "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#039;/g, "'");
 
 const BASE_URL = "quartz.jzhao.xyz"; // quartz.config.ts baseUrl (as built)

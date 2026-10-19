@@ -25,7 +25,12 @@ viewer (openbrain-wiki-viewer, node:22 + Quartz 4.5.1 fork)
   serve.mjs: every PAGE URL -> lib/live-route.mjs -> page-class registry
     -> the row rendered with the Quartz chrome          x-wiki-render: db
     -> known page, no row - or a row not presentable as-is
-       (stale, future-dated, empty body): pending-compile x-wiki-render: pending
+       (stale, future-dated, empty body, or its FILE gone - an
+       orphan): pending-compile                         x-wiki-render: pending
+    URLs are Quartz's slugified paths ("sp ace.md" -> /sp-ace; a dotted
+    name like "pv.1.md" is a page when no published file has that path);
+    the row's vault path 302s there; a row for a path Quartz does not build
+    (private/, templates/, a dot-directory) is never presented
     -> database not answering: ONE screen, every URL    x-wiki-render: connecting|unreachable
     -> nothing known: themed not-available              x-wiki-render: not-available
     -> a renderer bug outside an isolated entry         x-wiki-render: error (500)

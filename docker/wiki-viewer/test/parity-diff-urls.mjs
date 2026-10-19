@@ -1,6 +1,6 @@
 /**
  * The fixed URL list of rw-p1a-render acceptance 1/2/6 (every page class at
- * least once): the anchor's 20, 7 added in attempt 2, 7 in attempt 3, 3 in attempt 4. Shared by
+ * least once): the anchor's 20, 7 added in attempt 2, 7 in attempt 3, 3 in attempt 4, 13 in rw-p1a-deploy-prep. Shared by
  * parity-diff.mjs and outage-probe.mjs.
  */
 export const URLS = [
@@ -59,4 +59,32 @@ export const URLS = [
   ["alias redirect", "/shared-alias"],
   ["alias redirect", "/path-order-alias"],
   ["alias redirect", "/content/topic/aliased-retired-topic"],
+  // rw-p1a-deploy-prep (NA4-1): legacy notes whose FILE NAMES Quartz
+  // slugifies (test/fixtures/slug-vault.mjs writes them at run time: a space,
+  // a dot in the stem, & ? # %, a note and a folder of one name, a deep folder
+  // with spaces) at the URL Quartz builds for each, their folder indexes, and
+  // a note in a NESTED private/ folder (Quartz's ignore patterns are
+  // root-anchored: it is a page).
+  ["legacy user note", "/notes/slug-names/sp-ace"],
+  ["legacy user note", "/notes/slug-names/pv.1"],
+  ["legacy user note", "/notes/slug-names/a-and-b"],
+  ["legacy user note", "/notes/slug-names/qx"],
+  ["legacy user note", "/notes/slug-names/ht"],
+  ["legacy user note", "/notes/slug-names/50-percent"],
+  ["legacy user note", "/notes/slug-names/up"],
+  ["legacy user note", "/notes/slug-names/up/inner"],
+  ["legacy user note", "/notes/slug-names/deep-folder/sub-dir/leaf-note"],
+  ["legacy user note", "/notes/private/kept"],
+  ["folder index", "/notes/slug-names/"],
+  ["folder index", "/notes/slug-names/deep-folder/"],
+  ["folder index", "/notes/slug-names/deep-folder/sub-dir/"],
+  // rw-p1a-deploy-prep attempt 2 (tester, clause 2 + N1): names with a
+  // backslash (a character on Linux, as Quartz reads it: one page each, no
+  // phantom back/ or private/ folder), and < > (data-slug escaped as preact
+  // does). The URL is percent-encoded; parity-diff decodes it to the file.
+  ["legacy user note", "/notes/adv/back%5Cslash"],
+  ["legacy user note", "/notes/adv/back%5C.dot"],
+  ["legacy user note", "/notes/adv/private%5Cx"],
+  ["legacy user note", "/notes/adv/lt%3Cgt%3E"],
+  ["folder index", "/notes/adv/"],
 ];
