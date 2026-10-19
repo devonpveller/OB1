@@ -297,8 +297,9 @@ for f in OB1/docker/wiki-service/wiki-service.mjs scripts/checks/wiki-latency-pr
          scripts/checks/check-openbrain-health.ps1 scripts/recovery/emergency-recovery.ps1 scripts/lib/stack-services.json \
          OB1/docker/wiki-viewer/README.md OB1/docker/docker-compose.preview.yml frontend/status-pipe .claude/skills/stack-map/SKILL.md \
          .claude/skills/stack-map/references/workspace-stacks.md portal/config/caddy/Caddyfile; do
-  case "$f" in OB1/*) ch="$(git -C "$OB1" diff --stat "$(git -C "$REPO" rev-parse "$base:OB1" 2>/dev/null || echo d79b7db)" -- "${f#OB1/}" | tail -1)" ;;
-               *) ch="$(git -C "$REPO" diff --stat "$base" -- "$f" | tail -1)" ;; esac
+  mb="$(git -C "$REPO" merge-base "$base" HEAD)"   # the branch point: a development that moved since is not this item's change
+  case "$f" in OB1/*) ch="$(git -C "$OB1" diff --stat "$(git -C "$REPO" rev-parse "$mb:OB1" 2>/dev/null || echo d79b7db)" -- "${f#OB1/}" | tail -1)" ;;
+               *) ch="$(git -C "$REPO" diff --stat "$mb" -- "$f" | tail -1)" ;; esac
   echo "consumer $f: ${ch:-UNCHANGED}"; [ -n "$ch" ] || { echo "x consumer $f not changed"; b5=0; }
 done
 [ "$b5" = 1 ] && pass B5 || fail B5 "crawl / consumers"
