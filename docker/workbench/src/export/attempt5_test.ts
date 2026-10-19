@@ -117,7 +117,8 @@ async function refusedCredential(i: RenderInput): Promise<string> {
   } catch (e) {
     if (!(e instanceof RenderFailed)) throw e;
     const [k, m] = (i.secrets as string[] | undefined) ?? SECRETS;
-    return e.code === "credential" && !leaksOf(e.message, k, m) ? "credential" : `${e.code}: ${e.message.slice(0, 120)}`;
+    if ((e.code === "credential" || e.code === "verification-budget") && !leaksOf(e.message, k, m)) return e.code; // rw-p6a-resolve2
+    return `${e.code}: ${e.message.slice(0, 120)}`;
   }
 }
 const esc = (s: string) => [...s].map((c) => c.codePointAt(0)! > 0x7e || c.codePointAt(0)! < 0x20 ? `\\u{${c.codePointAt(0)!.toString(16)}}` : c).join("");
@@ -448,6 +449,7 @@ Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding
 
   const miss: Record<string, string[]> = { input: [], fresh: [], cached: [], txt: [], md: [], docx: [], rendered: [] };
   const hit: Record<string, number> = { input: 0, fresh: 0, cached: 0, txt: 0, md: 0, docx: 0, rendered: 0, renderedGlyphs: 0 };
+  const budgetRefused: Record<string, number> = { txt: 0, md: 0, docx: 0, rendered: 0 };
   const layerCount: Record<string, number> = {};
   const w = world({ key: P_KEY, mail: P_MAIL });
   const resolver = w.deps.resolver;
@@ -483,14 +485,19 @@ Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding
       if (c.status === 422 && /cached record carries credential-shaped text/.test(cb) && !pleaks(cb)) hit.cached++; else miss.cached.push(`${label} -> ${c.status}`);
       w.cache.clear();
       // the output verifier over rendered outputs carrying the text where the title was
-      const t1 = await verifierCode(() => verifyText(txt.replace(PLACE, text), P_SECRETS));
-      if (t1 === "credential") hit.txt++; else miss.txt.push(`${label} -> ${t1}`);
-      const t2 = await verifierCode(() => verifyMarkdown(md.replace(PLACE, mdEscape(text)), P_SECRETS));
-      if (t2 === "credential") hit.md++; else miss.md.push(`${label} -> ${t2}`);
+      // rw-p6a-resolve2: an output the verifier cannot judge within its budget (attempt 6's fail-closed
+      // views cap, now under its own code) is REFUSED 503 `verification-budget` - never served; counted
+      // as detected and reported apart (attempt 6 reported these as `credential`)
+      const door = (k: "txt" | "md" | "docx", code: string) => {
+        if (code === "credential") hit[k]++;
+        else if (code === "verification-budget") (hit[k]++, budgetRefused[k]++);
+        else miss[k].push(`${label} -> ${code}`);
+      };
+      door("txt", await verifierCode(() => verifyText(txt.replace(PLACE, text), P_SECRETS)));
+      door("md", await verifierCode(() => verifyMarkdown(md.replace(PLACE, mdEscape(text)), P_SECRETS)));
       const parts = new Map(docxParts);
       parts.set("word/document.xml", new TextEncoder().encode(docXml.replace(PLACE, xmlEscape(text))));
-      const t3 = await verifierCode(() => verifyDocx(storedZip(parts), P_SECRETS));
-      if (t3 === "credential") hit.docx++; else miss.docx.push(`${label} -> ${t3}`);
+      door("docx", await verifierCode(() => verifyDocx(storedZip(parts), P_SECRETS)));
       // a sample rendered for real (output stage: the row handed straight to the renderer)
       if (i % 80 === 0) {
         const refs = fixtureRefs(1);
@@ -500,6 +507,7 @@ Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding
           // refused either way; a PDF whose text no installed face draws is refused 422 glyphs
           // before typesetting (nothing served) - counted apart
           if (o === "credential") hit.rendered++;
+          else if (o === "verification-budget") (hit.rendered++, budgetRefused.rendered++);
           else if (fm === "pdf" && o.startsWith("glyphs:")) hit.renderedGlyphs++;
           else miss.rendered.push(`#${i} ${fm} -> ${o} | text ${JSON.stringify(text)}`);
         }
@@ -511,6 +519,7 @@ Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding
   const marksUsed = Math.min(markCursor, MARKS.length);
   console.log(`A5-2: N=${N} seed=${SEED} | input ${hit.input}/${N} | fresh ${hit.fresh}/${N} | cached ${hit.cached}/${N} | verifier txt ${hit.txt}/${N} md ${hit.md}/${N} docx ${hit.docx}/${N} | rendered ${hit.rendered}/${Math.ceil(N / 80) * 4} credential + ${hit.renderedGlyphs} PDF refused 422 glyphs`);
   console.log(`A5-2: pair ${P_KEY.slice(0, 4)}../${P_MAIL.slice(0, 4)}.. | max views ${maxViews} under the fail-closed cap of ${MAX_VIEWS}; ${atCap} texts over it (refused by the cap, counted as refusals) | generator max depth ${JSON.stringify(maxDepth)} | declared ${JSON.stringify(Object.fromEntries(Object.keys(maxDepth).map((k) => [k, declared(k)])))}`);
+  console.log(`A5-2: of those, refused 503 verification-budget (not judged within the budget: never served): ${JSON.stringify(budgetRefused)}`);
   console.log(`A5-2: combining marks used ${marksUsed}/${MARKS.length} (every Mn/Mc/Me code point: ${marksUsed === MARKS.length}); default-ignorables pool ${IGNORABLE.length}; layers ${JSON.stringify(layerCount)}`);
   const missed = Object.entries(miss).filter(([, v]) => v.length);
   for (const [k, v] of missed) console.log(`A5-2 MISSED at ${k}: ${v.length}; first: ${v.slice(0, 3).join(" || ")}`);
