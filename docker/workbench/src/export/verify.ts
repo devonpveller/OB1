@@ -23,27 +23,83 @@
 // and the exporter's error bodies. Attempt 4 composed `Z` + U+0301 into `Ź` first and served the key.
 // A failure is a RenderFailed: `output-verification` naming the format and the first offending
 // target, or `credential` - 503, never a 200.
-import { base64Forms, decodeEntities, INVISIBLE, secretIn } from "./credentials.ts";
+//
+// rw-p6a-resolve2 (the reviewer's B1, B2):
+//   - THE PART CLASSIFIER (partClass, below) is the one rule for how much of the invariant a part gets:
+//     a MEDIA part (an embedded raster, a PDF image or font program) is judged raw and base64 only; a
+//     TEXT part (everything else) gets the whole invariant. Attempt 6 ran the whole invariant on every
+//     part up to 4 MB: a 1.5 MB screenshot took minutes and gigabytes, and a 2.7 MB one was refused
+//     `credential` though it held none (the views cap).
+//   - THE BUDGET (VERIFY_BUDGET): the credential judging of one export may take VERIFY_BUDGET.ms of its
+//     own time, and one text it judges may be at most VERIFY_BUDGET.textChars long; running out of
+//     either, or a text over the views cap, is 503 `verification-budget` - never `credential`.
+//   - A body names the credential's KIND (credentials.ts credentialKind), never its prefix or length.
+import { base64Forms, credentialKind, decodeEntities, INVISIBLE, judgeSecret } from "./credentials.ts";
 import { markdownOffence, UNSAFE_SCHEME_TEXT } from "./markdown.ts";
-import { PdfDocument } from "./pdf_read.ts";
+import { type PdfDict, PdfDocument, PdfName, type PdfObject, PdfRef, type PdfValue } from "./pdf_read.ts";
 import { zipEntries } from "./zip_read.ts";
 
+export type RejectCode = "output-verification" | "credential" | "verification-budget";
 export class OutputRejected extends Error {
-  constructor(public code: "output-verification" | "credential", public format: string, public offence: string) {
+  constructor(public code: RejectCode, public format: string, public offence: string) {
     super(code === "credential"
       ? `the ${format} export was not served: it would carry the configured service credential (${offence})`
+      : code === "verification-budget"
+      ? `the ${format} export was not served: it could not be checked for the configured service credential within the verification budget (${offence})`
       : `the ${format} export was not served: its output verification found ${offence}`);
   }
 }
 
-const mask = (s: string) => `${s.slice(0, 2)}...${s.length} characters`;
+// ── the budget ─────────────────────────────────────────────────────────────────────────────────
+// Per export: the time the credential judging may take (counted only while a check runs: the pandoc /
+// Typst run between the drawn-text check and the output check is not), and the length of one text it
+// judges with the whole invariant. The values and their measurements: findings rw-p6a-resolve2.
+export const VERIFY_BUDGET = { ms: 15_000, textChars: 4 * 1024 * 1024 };
+export class Budget {
+  private used = 0;
+  private since = 0;
+  constructor(public ms = VERIFY_BUDGET.ms, public textChars = VERIFY_BUDGET.textChars) {}
+  // the deadline of the check running now (performance.now() ms)
+  get deadline(): number {
+    return (this.since || performance.now()) + this.ms - this.used;
+  }
+  // run a check, counting its time (synchronous or not); a nested run is counted by the outer one
+  run<T>(f: () => T): T {
+    if (this.since) return f();
+    this.since = performance.now();
+    const stop = () => {
+      this.used += performance.now() - this.since;
+      this.since = 0;
+    };
+    let r: T;
+    try {
+      r = f();
+    } catch (e) {
+      stop();
+      throw e;
+    }
+    if (r instanceof Promise) return r.finally(stop) as T;
+    stop();
+    return r;
+  }
+}
 
-function checkText(format: string, text: string, secrets: string[]) {
+// The verdict on one text, as an OutputRejected: `credential` naming the KIND, or `verification-budget`.
+function judge(format: string, where: string, text: string, secrets: string[], budget: Budget) {
+  if (!secrets.length || !text) return;
+  if (text.length > budget.textChars) {
+    throw new OutputRejected("verification-budget", format, `${where} is ${text.length} characters long; one text may be ${budget.textChars}`);
+  }
+  const v = judgeSecret(text, secrets, budget.deadline);
+  if (v && "secret" in v) throw new OutputRejected("credential", format, `${where} holds ${credentialKind(v.secret)}`);
+  if (v) throw new OutputRejected("verification-budget", format, `${where}: ${v.unjudged}; the budget is ${budget.ms / 1000} s per export`);
+}
+
+function checkText(format: string, text: string, secrets: string[], budget: Budget, where = "the text") {
   const n = text.replace(INVISIBLE, "");
   const scheme = UNSAFE_SCHEME_TEXT.exec(n);
   if (scheme) throw new OutputRejected("output-verification", format, `an unsafe-scheme string '${scheme[0]}' in its text`);
-  const hit = secretIn(text, secrets);
-  if (hit) throw new OutputRejected("credential", format, `the text holds ${mask(hit)}`);
+  judge(format, where, text, secrets, budget);
 }
 
 // An absolute target an output may carry: http(s) or mailto only (no relative path in a PDF action
@@ -58,23 +114,22 @@ export function safeAbsolute(target: string): boolean {
 // as `& #72 &;`), so the layer no longer spells the encoding the document holds (property text seed
 // 2026101806 #0). Each string the document draws (prepare.ts `text`: the parsed text, the title, every
 // reference field) is checked under the same invariant before Typst runs.
-export function verifyDrawnText(texts: string[], secrets: string[], format: string) {
+export function verifyDrawnText(texts: string[], secrets: string[], format: string, budget = new Budget()) {
   if (!secrets.length) return;
-  for (const t of texts) {
-    const hit = secretIn(t, secrets);
-    if (hit) throw new OutputRejected("credential", format, `the text it would draw holds ${mask(hit)}`);
-  }
+  budget.run(() => {
+    for (const t of texts) judge(format, "the text it would draw", t, secrets, budget);
+  });
 }
 
 // ── per format ─────────────────────────────────────────────────────────────────────────────────
-export function verifyMarkdown(md: string, secrets: string[], format = "md") {
+export function verifyMarkdown(md: string, secrets: string[], format = "md", budget = new Budget()) {
   const o = markdownOffence(md);
   if (o) throw new OutputRejected("output-verification", format, o);
-  checkText(format, md, secrets);
+  budget.run(() => checkText(format, md, secrets, budget));
 }
 
-export function verifyText(txt: string, secrets: string[], format = "txt") {
-  checkText(format, txt, secrets);
+export function verifyText(txt: string, secrets: string[], format = "txt", budget = new Budget()) {
+  budget.run(() => checkText(format, txt, secrets, budget));
 }
 
 const attr = (el: string, a: string) => {
@@ -83,7 +138,10 @@ const attr = (el: string, a: string) => {
 };
 const xmlText = (x: string) => decodeEntities(x.replace(/<[^<>]*>/g, " "));
 
-export async function verifyDocx(docx: Uint8Array, secrets: string[], format = "docx") {
+export async function verifyDocx(docx: Uint8Array, secrets: string[], format = "docx", budget = new Budget()) {
+  await budget.run(() => docxChecked(docx, secrets, format, budget));
+}
+async function docxChecked(docx: Uint8Array, secrets: string[], format: string, budget: Budget) {
   let parts: Map<string, Uint8Array>;
   try {
     parts = await zipEntries(docx);
@@ -94,9 +152,9 @@ export async function verifyDocx(docx: Uint8Array, secrets: string[], format = "
   let words = "";
   for (const [name, bytes] of parts) {
     // every part, whatever it is: no configured secret in its bytes (an embedded "image" that was a
-    // file - /proc/self/environ, the vault's .git/config - is caught here even if its name hides it)
-    const raw = secretInBytes(bytes, secrets);
-    if (raw) throw new OutputRejected("credential", format, `${name} holds ${mask(raw)}`);
+    // file - /proc/self/environ, the vault's .git/config - is not a raster: a TEXT part, judged whole,
+    // even if its name hides it); how much of the invariant, by partClass
+    partJudged(format, name, bytes, partClass({ in: "docx", name, bytes }), secrets, budget);
     // embedded media must BE images (by their first bytes): a note cannot make pandoc embed a file
     if (/^word\/media\//.test(name) && !isRasterImage(bytes)) {
       throw new OutputRejected("output-verification", format, `an embedded part that is not an image (${name})`);
@@ -124,17 +182,20 @@ export async function verifyDocx(docx: Uint8Array, secrets: string[], format = "
     }
     if (/^(word|docProps)\//.test(name)) {
       words += " " + [...xml.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map((m) => m[1]).join("");
-      // the raw XML too (attributes, properties): a secret in a target or a property is still a secret
-      const hit = secretIn(xml, secrets) ?? secretIn(xmlText(xml), secrets);
-      if (hit) throw new OutputRejected("credential", format, `${name} holds ${mask(hit)}`);
+      // the raw XML (attributes, properties: a secret in a target or a property is still a secret) is
+      // the part's own UTF-8 text, judged above by partJudged; and its text with the tags as spaces
+      judge(format, name, xmlText(xml), secrets, budget);
       const scheme = UNSAFE_SCHEME_TEXT.exec(xmlText(xml).replace(INVISIBLE, ""));
       if (scheme) throw new OutputRejected("output-verification", format, `an unsafe-scheme string '${scheme[0]}' in ${name}`);
     }
   }
-  checkText(format, decodeEntities(words), secrets);
+  checkText(format, decodeEntities(words), secrets, budget);
 }
 
-export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pdf") {
+export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pdf", budget = new Budget()) {
+  await budget.run(() => pdfChecked(pdf, secrets, format, budget));
+}
+async function pdfChecked(pdf: Uint8Array, secrets: string[], format: string, budget: Budget) {
   let doc: PdfDocument;
   let layer: Awaited<ReturnType<PdfDocument["glyphs"]>>;
   try {
@@ -152,28 +213,70 @@ export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pd
     const f = layer.notdef[0];
     throw new OutputRejected("output-verification", format, `${f.count} .notdef glyph(s) (an empty box) drawn in ${f.font.replace(/^[A-Z]{6}\+/, "")}: a character no face draws`);
   }
-  checkText(format, layer.text, secrets);
-  if (layer.body !== layer.text) checkText(format, layer.body, secrets); // attempt 6: without the page numbers
-  for (const s of doc.dictStrings()) checkText(format, s, secrets);
-  // every stream's decoded bytes too (images, embedded data): no configured secret anywhere
-  for (const o of doc.objects.values()) {
+  checkText(format, layer.text, secrets, budget, "the text layer");
+  if (layer.body !== layer.text) checkText(format, layer.body, secrets, budget, "the text layer"); // attempt 6: without the page numbers
+  for (const s of doc.dictStrings()) checkText(format, s, secrets, budget, "a dictionary string");
+  // every stream's decoded bytes too (images, fonts, content, embedded data): how much, by partClass
+  const fonts = fontPrograms(doc);
+  for (const [num, o] of doc.objects) {
     if (!o.stream) continue;
-    const hit = secretInBytes(o.stream, secrets);
-    if (hit) throw new OutputRejected("credential", format, `a stream holds ${mask(hit)}`);
+    partJudged(format, `stream ${num}`, o.stream, partClass({ in: "pdf", dict: streamDict(o), fontProgram: fonts.has(num) }), secrets, budget);
   }
 }
 
-// A secret in binary bytes: as written (case-insensitive) and as base64 (depth 2), always; and, for a
-// part up to 4 MB, the whole invariant (secretIn), decoded as Latin-1 and as UTF-8 (a fullwidth key
-// is UTF-8). Over 4 MB: raw and base64 only (a declared residual, bounded cost).
-const FULL_FORMS_MAX = 4 * 1024 * 1024;
-function secretInBytes(b: Uint8Array, secrets: string[]): string | null {
-  if (!secrets.length) return null;
-  const s = new TextDecoder("latin1").decode(b);
-  const low = s.toLowerCase();
-  const raw = secrets.find((x) => x.length >= 4 && (low.includes(x.toLowerCase()) || base64Forms(x).some((f) => s.includes(f))));
-  if (raw || b.byteLength > FULL_FORMS_MAX) return raw ?? null;
-  return secretIn(s, secrets) ?? secretIn(new TextDecoder("utf-8", { fatal: false }).decode(b), secrets);
+// ── THE PART CLASSIFIER (rw-p6a-resolve2): the one rule ─────────────────────────────────────────
+//   media  a DOCX `word/media/` part whose first bytes ARE a raster (isRasterImage: PNG, JPEG, GIF,
+//          WebP - the only files the note's image rule lets pandoc embed, markdown.ts imageSource);
+//          a PDF image XObject (/Subtype /Image: the pixels Typst drew from such a raster, inflated,
+//          or the JPEG itself, DCT); a PDF font program (a font descriptor's /FontFile, /FontFile2 or
+//          /FontFile3, or a stream with /Length1-3 or /Subtype Type1C, CIDFontType0C, OpenType: the
+//          installed faces, subset)
+//          -> the secret as written (case-insensitive) and its base64 (depth 1-2, every alignment).
+//   text   every other part: DOCX XML and relationships, any part that is NOT a raster (a disguised
+//          file: refused `credential` or `output-verification`), PDF content streams, object streams,
+//          CMaps, metadata, anything else
+//          -> the whole invariant (credentials.ts judgeSecret) over its UTF-8 text, and over its
+//          Latin-1 text where that differs, within the budget.
+// DECLARED RESIDUAL: a media part whose bytes encode the secret in a form other than raw or base64 (an
+// image's metadata chunk holding the key entity-, percent- or hex-encoded, a font's name table) is not
+// judged by the decoders: the note's own image file, in the vault, can carry it.
+export type PartClass = "media" | "text";
+export type Part = { in: "docx"; name: string; bytes: Uint8Array } | { in: "pdf"; dict: PdfDict; fontProgram: boolean };
+const nameOf = (v: PdfValue | undefined) => (v instanceof PdfName ? v.name : undefined);
+export function partClass(p: Part): PartClass {
+  if (p.in === "docx") return /^word\/media\//.test(p.name) && isRasterImage(p.bytes) ? "media" : "text";
+  if (p.fontProgram) return "media";
+  const sub = nameOf(p.dict.get("Subtype"));
+  if (sub === "Image" || sub === "Type1C" || sub === "CIDFontType0C" || sub === "OpenType") return "media";
+  if (p.dict.has("Length1") || p.dict.has("Length2") || p.dict.has("Length3")) return "media";
+  return "text";
+}
+const streamDict = (o: PdfObject): PdfDict => (o.value instanceof Map ? o.value : new Map());
+// the object numbers a font descriptor names as its font program
+function fontPrograms(doc: PdfDocument): Set<number> {
+  const out = new Set<number>();
+  for (const o of doc.objects.values()) {
+    if (!(o.value instanceof Map) || nameOf(o.value.get("Type")) !== "FontDescriptor") continue;
+    for (const k of ["FontFile", "FontFile2", "FontFile3"]) {
+      const r = o.value.get(k);
+      if (r instanceof PdfRef) out.add(r.num);
+    }
+  }
+  return out;
+}
+
+// One part, judged by its class: as written and base64, always (linear in its size); a text part also
+// the whole invariant.
+function partJudged(format: string, where: string, b: Uint8Array, cls: PartClass, secrets: string[], budget: Budget) {
+  if (!secrets.length) return;
+  const latin1 = new TextDecoder("latin1").decode(b);
+  const low = latin1.toLowerCase();
+  const raw = secrets.find((x) => x.length >= 4 && (low.includes(x.toLowerCase()) || base64Forms(x).some((f) => latin1.includes(f))));
+  if (raw) throw new OutputRejected("credential", format, `${where} holds ${credentialKind(raw)}`);
+  if (cls === "media") return;
+  const utf8 = new TextDecoder("utf-8", { fatal: false }).decode(b);
+  judge(format, where, utf8, secrets, budget);
+  if (latin1 !== utf8) judge(format, where, latin1, secrets, budget);
 }
 
 // PNG, JPEG, GIF, WebP, by their signatures (pandoc embeds a note's images as they are).
@@ -195,12 +298,12 @@ export function unverifiableWriter(pandocTo: string, engine: string | undefined)
   return null;
 }
 
-export async function verifyOutput(pandocTo: string, format: string, bytes: Uint8Array, secrets: string[]) {
+export async function verifyOutput(pandocTo: string, format: string, bytes: Uint8Array, secrets: string[], budget = new Budget()) {
   const w = writerOf(pandocTo);
-  if (w === "pdf") return await verifyPdf(bytes, secrets, format);
-  if (w === "docx") return await verifyDocx(bytes, secrets, format);
+  if (w === "pdf") return await verifyPdf(bytes, secrets, format, budget);
+  if (w === "docx") return await verifyDocx(bytes, secrets, format, budget);
   const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  if (w === "markdown") return verifyMarkdown(text, secrets, format);
-  if (w === "plain") return verifyText(text, secrets, format);
+  if (w === "markdown") return verifyMarkdown(text, secrets, format, budget);
+  if (w === "plain") return verifyText(text, secrets, format, budget);
   throw new OutputRejected("output-verification", format, `a writer ('${w}') the export cannot verify`);
 }

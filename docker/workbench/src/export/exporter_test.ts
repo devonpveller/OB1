@@ -219,7 +219,7 @@ Deno.test("A3 (near-miss 2): the download 422 names a suppressed source by its n
 Deno.test("A3 at the route: a failed output verification, a credential in the output and a format the export cannot verify are 503, a limit 422 - never a 200 or a 500", async () => {
   const cases: [RenderFailed, number][] = [
     [new RenderFailed("the pdf export was not served: its output verification found a URI action to 'javascript:x'", "javascript:x", "output-verification", { format: "pdf", offence: "a URI action" }), 503],
-    [new RenderFailed("the md export was not served: it would carry the configured service credential (the text holds ex...16 characters)", "", "credential", { format: "md" }), 503],
+    [new RenderFailed("the md export was not served: it would carry the configured service credential (the text holds the OpenAlex key)", "", "credential", { format: "md" }), 503],
     [new RenderFailed("the export format 'html' uses a writer the export cannot verify ('html5')", "", "format", { format: "html" }), 503],
     [new RenderFailed("the document is too complex to export: the bracket nesting depth is 33, the limit is 32", "", "too-complex", { limit: "the bracket nesting depth", value: 33, max: 32 }), 422],
   ];

@@ -7,8 +7,8 @@
 //
 // attempt 5 (structural): ONE invariant, ONE function, ONE list, used by every door - the input
 // check (resolver.ts unsafe / carries: the CSL item AND the raw upstream strings), the cached-row
-// check (exporter.ts, through resolver.unsafe), the output verifier (verify.ts checkText,
-// secretInBytes) and the exporter's error bodies (exporter.ts guardBody):
+// check (exporter.ts, through resolver.unsafe), the output verifier (verify.ts judge /
+// partJudged; rw-p6a-resolve2: judgeSecret) and the exporter's error bodies (exporter.ts guardBody):
 //
 //   canon(text) = NFD -> remove every combining mark (Mn, Mc, Me), every default-ignorable code point
 //                 and every format character (zero-width, joiners, bidi controls, soft hyphen,
@@ -44,11 +44,17 @@
 // attempt 5 followed 3 and missed them). The property test's generator counts the same way and asserts it
 // never emits deeper than this table (attempt5_test.ts `deeper`).
 //
+// rw-p6a-resolve2 (the reviewer's B1/B2): a text whose views exceed MAX_VIEWS, or whose judging passes
+// a caller's deadline, is NOT JUDGED - judgeSecret answers { unjudged } and never names a secret
+// (attempt 6 returned the first configured secret, and the verifier reported a key the text did not
+// hold). secretIn, for the input doors, still fails closed on it (non-null: UNJUDGED, not a secret).
+// How much of the invariant a binary output part gets is verify.ts partClass (the one rule).
+//
 // DECLARED RESIDUALS (not encodings; named, not claimed): scrambles - reversal under bidi overrides,
 // ROT13-style substitutions, interleaving with a literal entity or other text; cross-script
 // look-alikes beyond LOOKALIKE (Cyrillic `а` for Latin `a`); a secret whose canon is shorter than 8
-// characters is matched as written and through the decoders only; binary parts over 4 MB (verify.ts:
-// raw and base64 only).
+// characters is matched as written and through the decoders only; a MEDIA part (verify.ts partClass:
+// an embedded raster, a PDF image or font program) is judged raw and base64 only.
 
 const NAMED: Record<string, string> = {
   amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", commat: "@", period: ".", hyphen: "-", dash: "-",
@@ -124,7 +130,15 @@ function lookalike(c: string): string {
 const casefold = (s: string) => s.toUpperCase().toLowerCase();
 
 // canon before its letters-and-digits step (punctuation kept, for the mailto's at/dot spellings).
-function canonText(t: string): string {
+// rw-p6a-resolve2 (cost, not meaning): on pure ASCII every step but the case fold is the identity (no
+// mark, no default-ignorable or format character, NFD and NFKC change nothing, no look-alike is ASCII),
+// so canonText(ascii) === ascii.toLowerCase(); resolve2_test.ts "A7-2 (cost, not meaning)" asserts the two agree.
+const ASCII_ONLY = /^[\x00-\x7f]*$/;
+export function canonText(t: string): string {
+  if (ASCII_ONLY.test(t)) return t.toLowerCase();
+  return canonTextFull(t);
+}
+export function canonTextFull(t: string): string {
   let x = t;
   for (let k = 0; k < 4; k++) {
     const y = casefold(x.normalize("NFD").replace(STRIP, "").normalize("NFKC")).replace(LOOKALIKE, lookalike)
@@ -139,7 +153,8 @@ export const canon = (t: string) => lettersDigits(canonText(t));
 // The mailto's URL-safe spellings, removed (`@` and `.` are not letters or digits either); a markdown
 // backslash escape (`\[at\]`, as pandoc writes it) is not a break.
 const AT_DOT = /\s*[([{<]\s*(?:at|dot)\s*[)\]}>]\s*|\s(?:at|dot)(?=\s)/g;
-const canonAtDot = (t: string) => lettersDigits(canonText(t).replace(/\\/g, "").replace(AT_DOT, " "));
+const atDotOf = (ct: string) => lettersDigits(ct.replace(/\\/g, "").replace(AT_DOT, " "));
+export const canonAtDot = (t: string) => atDotOf(canonText(t));
 
 // ── the encodings ───────────────────────────────────────────────────────────────────────────────
 const utf8 = (b: Uint8Array) => new TextDecoder("utf-8", { fatal: false }).decode(b);
@@ -190,16 +205,33 @@ export const ENCODINGS: { name: string; depth: number; decode: (t: string) => st
   { name: "hex", depth: 2, decode: hexRuns },
 ];
 export const MAX_VIEWS = 512;
-export class TooManyViews extends Error {}
+// Judging stopped before a verdict (rw-p6a-resolve2): the views cap, or the caller's deadline. Never a
+// finding: the verifier answers its own code (verify.ts `verification-budget`), not `credential`.
+export class OverBudget extends Error {}
+export class TooManyViews extends OverBudget {
+  constructor() {
+    super(`more than ${MAX_VIEWS} views`);
+  }
+}
+export class OutOfTime extends OverBudget {
+  constructor() {
+    super("its time budget ran out");
+  }
+}
+const checkTime = (deadline: number) => {
+  if (deadline !== Infinity && performance.now() > deadline) throw new OutOfTime();
+};
 
-// Every view of `s`: the raw text and every decoding of it within the depths above.
-export function views(s: string): string[] {
+// Every view of `s`: the raw text and every decoding of it within the depths above. `deadline`
+// (performance.now() ms; verify.ts's budget) is checked before every decoding.
+export function views(s: string, deadline = Infinity): string[] {
   const seen = new Set<string>([s]);
   const queue: { t: string; used: number[] }[] = [{ t: s, used: ENCODINGS.map(() => 0) }];
   for (let q = queue.shift(); q; q = queue.shift()) {
     const { t, used } = q;
     ENCODINGS.forEach((e, i) => {
       if (used[i] >= e.depth) return;
+      checkTime(deadline);
       const d = e.decode(t);
       if (!d || seen.has(d)) return;
       seen.add(d);
@@ -232,31 +264,48 @@ export function base64Forms(x: string, depth = 2): string[] {
   return [...new Set([...one, ...one.flatMap((f) => b64(enc.encode(f)))])];
 }
 
-// The configured secret (if any) the text carries, under the invariant above.
-export function secretIn(s: string, secrets: string[]): string | null {
+// The verdict on a text under the invariant above: the configured secret it carries ({ secret }), or
+// { unjudged } when judging stopped first (more than MAX_VIEWS views, or past `deadline`), or null.
+export type Verdict = { secret: string } | { unjudged: string };
+export function judgeSecret(s: string, secrets: string[], deadline = Infinity): Verdict | null {
   const live = secrets.filter((x) => x && x.length >= 4);
   if (!live.length || !s) return null;
-  let all: string[];
   try {
-    all = views(s);
+    const all = views(s, deadline);
+    const keys = live.map((x) => ({ x, low: x.toLowerCase(), c: canon(x), b: base64Forms(x) }));
+    for (const v of all) {
+      checkTime(deadline);
+      const low = v.toLowerCase();
+      const sq = low.replace(/\s+/g, "");
+      const ct = canonText(v); // once per view: canon and canonAtDot share it (rw-p6a-resolve2, cost)
+      const c = lettersDigits(ct);
+      const ca = atDotOf(ct);
+      for (const k of keys) {
+        if (low.includes(k.low) || sq.includes(k.low)) return { secret: k.x };
+        if (k.c.length >= 8 && (c.includes(k.c) || ca.includes(k.c))) return { secret: k.x };
+        if (k.b.some((f) => v.includes(f))) return { secret: k.x };
+      }
+    }
+    return null;
   } catch (e) {
-    if (e instanceof TooManyViews) return live[0]; // fail closed
+    if (e instanceof OverBudget) return { unjudged: e.message };
     throw e;
   }
-  const keys = live.map((x) => ({ x, low: x.toLowerCase(), c: canon(x), b: base64Forms(x) }));
-  for (const v of all) {
-    const low = v.toLowerCase();
-    const sq = low.replace(/\s+/g, "");
-    const c = canon(v);
-    const ca = canonAtDot(v);
-    for (const k of keys) {
-      if (low.includes(k.low) || sq.includes(k.low)) return k.x;
-      if (k.c.length >= 8 && (c.includes(k.c) || ca.includes(k.c))) return k.x;
-      if (k.b.some((f) => v.includes(f))) return k.x;
-    }
-  }
-  return null;
 }
+
+// What the input doors refuse (resolver unsafe / carries, the cached-row check, the exporter's error
+// bodies): non-null when the text carries a configured secret - the secret - or could not be judged -
+// UNJUDGED, fail closed, which names no secret.
+export const UNJUDGED = "(not judged: over the credential check's budget)";
+export function secretIn(s: string, secrets: string[]): string | null {
+  const v = judgeSecret(s, secrets);
+  return v === null ? null : "secret" in v ? v.secret : UNJUDGED;
+}
+
+// The credential's KIND, the only thing an error body says about it (rw-p6a-resolve2, B2: attempt 6 put
+// its first two characters and its length in every 503). The mailto is the one with an `@` (as
+// configured, or URL-encoded by secretForms).
+export const credentialKind = (secret: string) => (/@|%40/i.test(secret) ? "the Crossref mailto" : "the OpenAlex key");
 
 // The secrets as configured, and URL-encoded.
 export const secretForms = (secrets: string[]) =>

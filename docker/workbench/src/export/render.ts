@@ -25,7 +25,9 @@
 //   - THE OUTPUT IS VERIFIED before it is served (verify.ts): the MD re-parsed, the DOCX unzipped,
 //     the PDF parsed (link actions, other actions, .notdef boxes), the text of every format searched
 //     for unsafe-scheme strings and the configured key and mailto. A failure is 503
-//     `output-verification` or `credential`, naming the format and the first offence.
+//     `output-verification` or `credential`, naming the format and the first offence (and the
+//     credential's kind only); rw-p6a-resolve2: within one budget per export (verify.ts Budget) - an
+//     output it cannot judge within it is 503 `verification-budget`, never `credential`.
 //   - THE GLYPH CHECK reads the parsed text: every text node, code span, code block, math, image alt
 //     and link title, the title and the reference strings - what Typst will draw (attempt 2 stripped
 //     `$..$` from the raw text, code spans included). The PDF is then checked for .notdef glyphs.
@@ -40,7 +42,7 @@ import type { CslItem } from "./csl.ts";
 import { describe, uncovered } from "./glyphs.ts";
 import { DEFAULT_LIMITS, type Limits, TooComplex } from "./markdown.ts";
 import { type Prepared, UnnumberedCitation } from "./prepare.ts";
-import { OutputRejected, unverifiableWriter, verifyDrawnText, verifyOutput } from "./verify.ts";
+import { Budget, OutputRejected, unverifiableWriter, verifyDrawnText, verifyOutput } from "./verify.ts";
 // the pandoc input (prepare.ts), re-exported where the tests and the exporter have always found it
 export { citeKey, frontmatterTitle, literalMarkdown, type Prepared, prepareDocument, UnnumberedCitation } from "./prepare.ts";
 
@@ -70,7 +72,7 @@ export interface RefItem {
   csl: CslItem;
 }
 
-export type RenderCode = "citation" | "font" | "glyphs" | "pandoc" | "style-integrity" | "too-complex" | "output-verification" | "credential" | "format";
+export type RenderCode = "citation" | "font" | "glyphs" | "pandoc" | "style-integrity" | "too-complex" | "output-verification" | "credential" | "verification-budget" | "format";
 
 export class RenderFailed extends Error {
   constructor(message: string, public detail: string, public code: RenderCode = "pandoc", public extra: Record<string, unknown> = {}) {
@@ -110,6 +112,7 @@ export interface RenderInput {
   parseTimeoutMs?: number; // the parser's (prepare_worker.ts; default EXPORT_PARSE_TIMEOUT_MS or 15 s)
   verify?: boolean; // default true; false only for a test's control render (the tofu control, the parity
   // fixture's retired WeasyPrint engine) - the exporter never sets it
+  verifyBudget?: { ms: number; textChars: number }; // default verify.ts VERIFY_BUDGET; a test's smaller one
 }
 
 export interface RenderOutput {
@@ -344,10 +347,11 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
     }
   }
   // attempt 6: a typeset format's (the glyph check's) text layer is in drawn (visual) order; the
-  // logical text it will draw is checked first
+  // logical text it will draw is checked first. rw-p6a-resolve2: one verification budget per export
+  const budget = new Budget(i.verifyBudget?.ms, i.verifyBudget?.textChars);
   if (i.verify !== false && i.format.glyph_check) {
     try {
-      verifyDrawnText(p.text, i.secrets ?? [], i.format.key);
+      verifyDrawnText(p.text, i.secrets ?? [], i.format.key, budget);
     } catch (e) {
       if (e instanceof OutputRejected) throw new RenderFailed(e.message, e.offence, e.code, { format: e.format, offence: e.offence });
       throw e;
@@ -385,7 +389,7 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
       const bytes = await Deno.readFile(`${dir}/out.${i.format.ext}`);
       if (i.verify !== false) {
         try {
-          await verifyOutput(i.format.pandoc_to, i.format.key, bytes, i.secrets ?? []);
+          await verifyOutput(i.format.pandoc_to, i.format.key, bytes, i.secrets ?? [], budget);
         } catch (e) {
           if (e instanceof OutputRejected) throw new RenderFailed(e.message, e.offence, e.code, { format: e.format, offence: e.offence });
           throw e;

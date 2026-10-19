@@ -37,7 +37,7 @@ import type { ExportRef } from "./repo.ts";
 import { citeKey, type FormatDef, type RefItem, render as realRender, RenderFailed, type StyleDef, UnnumberedCitation } from "./render.ts";
 import { aboutExport } from "./about.ts";
 import type { Limits } from "./markdown.ts";
-import { secretIn } from "./credentials.ts";
+import { judgeSecret, secretIn } from "./credentials.ts";
 
 export interface ExporterDeps {
   reg: { entries(registry: string): Promise<RegistryEntry[]> };
@@ -148,10 +148,11 @@ const styleOf = (e: RegistryEntry): StyleDef => ({ key: e.key, ...(e.definition 
 
 // attempt 3: `too-complex` (a limit before pandoc, or pandoc's time) is the document's, 422; an output
 // that fails its verification (`output-verification`, `credential`) or a format row whose writer the
-// export cannot verify (`format`) is the server's, 503 - never a 200.
+// export cannot verify (`format`) is the server's, 503 - never a 200. rw-p6a-resolve2: an output the
+// verifier could not judge within its budget (`verification-budget`) is 503 too, under its own code.
 const STATUS_OF: Record<string, 422 | 503> = {
   glyphs: 422, citation: 422, pandoc: 422, "too-complex": 422,
-  font: 503, "style-integrity": 503, "output-verification": 503, credential: 503, format: 503,
+  font: 503, "style-integrity": 503, "output-verification": 503, credential: 503, "verification-budget": 503, format: 503,
 };
 
 // rw-p6a-resolve attempt 5 (the tester's attempt-4 near-miss 1): an ERROR body is an output too. A
@@ -168,7 +169,10 @@ function withheldRefs<T extends Record<string, unknown>>(refs: T[], secrets: str
   });
 }
 export function guardBody(body: Record<string, unknown>, status: number, secrets: string[]): { body: Record<string, unknown>; status: number } {
-  if (secretIn(JSON.stringify(body), secrets) === null) return { body, status };
+  const v = judgeSecret(JSON.stringify(body), secrets);
+  if (v === null) return { body, status };
+  // rw-p6a-resolve2: a body that could not be judged is not a body that carries the credential
+  if (!("secret" in v)) return { body: { error: "the response was not served: it could not be checked for the configured service credential within the verification budget", code: "verification-budget" }, status: 503 };
   return { body: { error: "the response was not served: it would carry the configured service credential", code: "credential" }, status: 503 };
 }
 
