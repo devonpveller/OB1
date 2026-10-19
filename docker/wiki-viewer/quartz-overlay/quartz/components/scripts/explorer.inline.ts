@@ -115,23 +115,17 @@ function recordState(path: string, collapsed: boolean) {
   else currentExplorerState.push({ path, collapsed })
 }
 
-function toggleFolder(evt: MouseEvent) {
-  evt.stopPropagation()
-  const target = evt.target as MaybeHTMLElement
-  if (!target) return
-
-  // Check if target was svg icon or button
-  const isSvg = target.nodeName === "svg"
-
-  // corresponding <ul> element relative to clicked button/folder
-  const folderContainer = (
-    isSvg
-      ? // svg -> div.folder-container
-        target.parentElement
-      : // button.folder-button -> div -> div.folder-container
-        target.parentElement?.parentElement
-  ) as MaybeHTMLElement
+// ONE delegated click handler per explorer list (not two listeners + two
+// cleanup closures per folder): a click on a folder's icon (or its button in
+// "collapse" mode) toggles it; the first expand fetches its children. In
+// "link" mode the folder title is a link and navigates.
+function onExplorerClick(evt: MouseEvent) {
+  const t = evt.target as Element | null
+  const toggle = t?.closest?.(".folder-icon, .folder-button")
+  if (!toggle || toggle.closest(".explorer-more")) return
+  const folderContainer = toggle.closest(".folder-container") as MaybeHTMLElement
   if (!folderContainer) return
+  evt.stopPropagation()
   const childFolderContainer = folderContainer.nextElementSibling as MaybeHTMLElement
   if (!childFolderContainer) return
 
@@ -143,22 +137,6 @@ function toggleFolder(evt: MouseEvent) {
   }
   recordState(folderContainer.dataset.folderpath as string, isCollapsed)
   saveState()
-}
-
-function createFileNode(currentSlug: FullSlug, node: NavEntry): HTMLLIElement {
-  const template = document.getElementById("template-file") as HTMLTemplateElement
-  const clone = template.content.cloneNode(true) as DocumentFragment
-  const li = clone.querySelector("li") as HTMLLIElement
-  const a = li.querySelector("a") as HTMLAnchorElement
-  a.href = node.href
-  a.dataset.for = node.slug
-  a.textContent = node.title
-
-  if (currentSlug === node.slug) {
-    a.classList.add("active")
-  }
-
-  return li
 }
 
 let explorerOpts: ParsedOptions = {
@@ -182,47 +160,46 @@ function folderOpen(folderPath: string, currentSlug: FullSlug) {
   return !isCollapsed || isPrefixOfCurrent(folderPath, currentSlug)
 }
 
-function createFolderNode(currentSlug: FullSlug, node: NavEntry): HTMLLIElement {
-  const template = document.getElementById("template-folder") as HTMLTemplateElement
-  const clone = template.content.cloneNode(true) as DocumentFragment
-  const li = clone.querySelector("li") as HTMLLIElement
-  const folderContainer = li.querySelector(".folder-container") as HTMLElement
-  const titleContainer = folderContainer.querySelector("div") as HTMLElement
-  const folderOuter = li.querySelector(".folder-outer") as HTMLElement
+const esc = (v: string) =>
+  String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
 
+// The page's own <template> markup, cut once per setup into the pieces an
+// entry fills in. Building a list as ONE HTML string (one parse) instead of a
+// template clone + queries per entry is what keeps a navigation's explorer work
+// small on a slow phone (rw-p1b-ready perf, 4x CPU throttling).
+type Tpl = { folderHead: string; folderTitleBtn: string; folderMid: string; folderTail: string } | null
+let tpl: Tpl = null
+function cutTemplates(): Tpl {
+  const tf = (document.getElementById("template-folder") as HTMLTemplateElement | null)?.innerHTML ?? ""
+  const tfile = (document.getElementById("template-file") as HTMLTemplateElement | null)?.innerHTML ?? ""
+  const C = '<div class="folder-container">'
+  const B = '<button class="folder-button"><span class="folder-title"></span></button>'
+  const O = '<div class="folder-outer">'
+  const iC = tf.indexOf(C), iB = tf.indexOf(B), iO = tf.indexOf(O)
+  if (tfile.replace(/\s+/g, "") !== '<li><ahref="#"></a></li>' || iC < 0 || iB < iC || iO < iB) return null
+  return {
+    folderHead: tf.slice(0, iC),
+    folderTitleBtn: tf.slice(iC + C.length, iB),
+    folderMid: tf.slice(iB + B.length, iO),
+    folderTail: tf.slice(iO + O.length),
+  }
+}
+
+function entryHtml(t: NonNullable<Tpl>, node: NavEntry, currentSlug: FullSlug): string {
+  if (!node.folder) {
+    return `<li><a href="${esc(node.href)}" data-for="${esc(node.slug)}"${currentSlug === node.slug ? ' class="active"' : ""}>${esc(node.title)}</a></li>`
+  }
   const folderPath = node.slug
-  folderContainer.dataset.folderpath = folderPath
-
-  if (explorerOpts.folderClickBehavior === "link") {
-    // Replace button with link for link behavior
-    const button = titleContainer.querySelector(".folder-button") as HTMLElement
-    const a = document.createElement("a")
-    a.href = node.href
-    a.dataset.for = folderPath
-    a.className = "folder-title"
-    a.textContent = node.title
-    button.replaceWith(a)
-  } else {
-    const span = titleContainer.querySelector(".folder-title") as HTMLElement
-    span.textContent = node.title
-    const button = titleContainer.querySelector(".folder-button") as HTMLElement
-    button.addEventListener("click", toggleFolder)
-    window.addCleanup(() => button.removeEventListener("click", toggleFolder))
-  }
-  const icon = folderContainer.querySelector(".folder-icon") as HTMLElement | null
-  if (icon) {
-    icon.addEventListener("click", toggleFolder)
-    window.addCleanup(() => icon.removeEventListener("click", toggleFolder))
-  }
-
-  if (folderOpen(folderPath, currentSlug)) {
-    folderOuter.classList.add("open")
-    // 2026-08-23 state fix 1: an ancestor opened because it holds the current
-    // page is RECORDED open, so the next toggle does not persist a stale
-    // collapsed:true (the "explorer reverts to an old state" bug).
-    if (isPrefixOfCurrent(folderPath, currentSlug)) recordState(folderPath, false)
-  }
-  return li
+  const open = folderOpen(folderPath, currentSlug)
+  // 2026-08-23 state fix 1: an ancestor opened because it holds the current
+  // page is RECORDED open, so the next toggle does not persist a stale
+  // collapsed:true (the "explorer reverts to an old state" bug).
+  if (open && isPrefixOfCurrent(folderPath, currentSlug)) recordState(folderPath, false)
+  const title = explorerOpts.folderClickBehavior === "link"
+    ? `<a href="${esc(node.href)}" data-for="${esc(folderPath)}" class="folder-title">${esc(node.title)}</a>`
+    : `<button class="folder-button"><span class="folder-title">${esc(node.title)}</span></button>`
+  return t.folderHead + `<div class="folder-container" data-folderpath="${esc(folderPath)}">` + t.folderTitleBtn + title +
+    t.folderMid + `<div class="folder-outer${open ? " open" : ""}">` + t.folderTail
 }
 
 // Fill a folder's <ul> from the nav: one page, plus "show earlier" / "show
@@ -258,20 +235,44 @@ function moreItem(label: string, onClick: () => void): HTMLLIElement {
 
 async function renderEntries(entries: NavEntry[]): Promise<{ frag: DocumentFragment; open: Array<Promise<void>> }> {
   const t = performance.now()
-  const frag = document.createDocumentFragment()
+  tpl ??= cutTemplates()
   const open: Array<Promise<void>> = []
-  for (const e of entries) {
-    if (e.folder) {
-      const li = createFolderNode(explorerSlug, e)
-      frag.appendChild(li)
-      const outer = li.querySelector(".folder-outer") as HTMLElement
-      if (outer.classList.contains("open")) open.push(loadChildren(outer, e.slug))
-    } else {
-      frag.appendChild(createFileNode(explorerSlug, e))
-    }
+  let frag: DocumentFragment
+  if (tpl) {
+    const holder = document.createElement("template")
+    holder.innerHTML = entries.map((e) => entryHtml(tpl!, e, explorerSlug)).join("")
+    frag = holder.content
+  } else {
+    // the page's templates are not the shape this fork was written against
+    // (a Quartz bump): build entry by entry from them, the slow way
+    frag = document.createDocumentFragment()
+    for (const e of entries) frag.appendChild(slowEntry(e))
+  }
+  for (const outer of frag.querySelectorAll(":scope > li > .folder-outer.open")) {
+    const c = outer.previousElementSibling as HTMLElement | null
+    open.push(loadChildren(outer as HTMLElement, c?.dataset.folderpath ?? ""))
   }
   buildMs += performance.now() - t
   return { frag, open }
+}
+
+function slowEntry(node: NavEntry): HTMLLIElement {
+  const id = node.folder ? "template-folder" : "template-file"
+  const clone = (document.getElementById(id) as HTMLTemplateElement).content.cloneNode(true) as DocumentFragment
+  const li = clone.querySelector("li") as HTMLLIElement
+  if (!node.folder) {
+    const a = li.querySelector("a") as HTMLAnchorElement
+    a.href = node.href
+    a.dataset.for = node.slug
+    a.textContent = node.title
+    if (explorerSlug === node.slug) a.classList.add("active")
+    return li
+  }
+  const c = li.querySelector(".folder-container") as HTMLElement
+  c.dataset.folderpath = node.slug
+  ;(li.querySelector(".folder-title") as HTMLElement).textContent = node.title
+  if (folderOpen(node.slug, explorerSlug)) (li.querySelector(".folder-outer") as HTMLElement).classList.add("open")
+  return li
 }
 
 // "Show earlier": the page before `offset`, inserted where this item stands.
@@ -312,6 +313,7 @@ async function fillList(ul: HTMLElement, page: NavPage, pageAt: (off: number) =>
 async function setupExplorer(currentSlug: FullSlug) {
   const allExplorers = document.querySelectorAll("div.explorer") as NodeListOf<HTMLElement>
   buildMs = 0
+  tpl = null // re-cut from this page's templates
   explorerSlug = currentSlug
 
   for (const explorer of allExplorers) {
@@ -347,6 +349,8 @@ async function setupExplorer(currentSlug: FullSlug) {
     }
     explorerUl.addEventListener("wheel", onExplorerWheel, { passive: false })
     window.addCleanup(() => explorerUl.removeEventListener("wheel", onExplorerWheel))
+    explorerUl.addEventListener("click", onExplorerClick)
+    window.addCleanup(() => explorerUl.removeEventListener("click", onExplorerClick))
 
     // Idempotent: clear a previous render before inserting (2026-08-23).
     const tc = performance.now()
