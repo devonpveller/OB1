@@ -59,7 +59,7 @@ interface NavPage {
   next: number | null
 }
 
-const NAV_LIMIT = 100
+const NAV_LIMIT = 50 // entries per request: a reader with ~10 folders open builds ~500 <li> per navigation (4x CPU: < 150 ms)
 const NAV_TTL_MS = 30_000
 let currentExplorerState: Array<FolderState> = []
 let buildMs = 0 // main-thread time spent building explorer DOM in this setup
