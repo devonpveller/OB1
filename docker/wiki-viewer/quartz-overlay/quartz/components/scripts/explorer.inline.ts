@@ -248,9 +248,12 @@ async function renderEntries(entries: NavEntry[]): Promise<{ frag: DocumentFragm
     frag = document.createDocumentFragment()
     for (const e of entries) frag.appendChild(slowEntry(e))
   }
-  for (const outer of frag.querySelectorAll(":scope > li > .folder-outer.open")) {
+  // (no ":scope" here: it matches nothing inside a DocumentFragment)
+  for (const li of Array.from(frag.children)) {
+    const outer = li.lastElementChild as HTMLElement | null
+    if (!outer || !outer.classList.contains("folder-outer") || !outer.classList.contains("open")) continue
     const c = outer.previousElementSibling as HTMLElement | null
-    open.push(loadChildren(outer as HTMLElement, c?.dataset.folderpath ?? ""))
+    open.push(loadChildren(outer, c?.dataset.folderpath ?? ""))
   }
   buildMs += performance.now() - t
   return { frag, open }

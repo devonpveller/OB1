@@ -381,6 +381,8 @@ docker run --rm -i -v "$RUNDIR_W:/r:ro" --entrypoint node "$IMG" --input-type=mo
         if (!ok) fail++;
         L(f + ' nav ' + n.to + ' explorer ' + ex + 'ms ttfb(server part) ' + tm.toFixed(1) + 'ms bytes ' + n.navBytes + ' index ' + n.indexFetched.length + (ok ? ' ok' : ' OVER'));
       }
+      if (!r.mobile && !(r.browser.toggle && r.browser.toggle.ok)) { fail++; L(f + ' folder toggle BROKEN ' + JSON.stringify(r.browser.toggle)); }
+      for (const n of r.browser.navs.slice(1)) if (!r.mobile && n.active !== true) { fail++; L(f + ' nav ' + n.to + ': its entry is not shown active in the explorer (BROKEN)'); }
       if (r.browser.mobileOpen) { const m = r.browser.mobileOpen; const ok = m.explorerOpenMs < 200 && m.navBytes < 2e6; if (!ok) fail++; L(f + ' mobile open explorer ' + m.explorerOpenMs + 'ms bytes ' + m.navBytes + (ok ? ' ok' : ' OVER')); }
     }
   }

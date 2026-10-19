@@ -205,7 +205,22 @@ async function browserPart() {
     const ok = await waitFor(`(window.__wikiperfLog || []).length >= ${before + (MOBILE ? 1 : 2)}`, 120000);
     await sleep(200);
     const log = await lastLog();
-    navs.push({ ...summarize(p, since, log), ok, slug: await ev("document.body.dataset.slug") });
+    // the page's own entry is in the explorer, marked active (its ancestors were opened and loaded)
+    const active = MOBILE ? null : await waitFor(`!!document.querySelector('.explorer-ul a.active[data-for="${p}"]')`, 30000);
+    navs.push({ ...summarize(p, since, log), ok, active, slug: await ev("document.body.dataset.slug") });
+  }
+  // The explorer still WORKS (not only fast): a collapsed folder opens on its
+  // icon and loads its children; a second click closes it (delegated handler).
+  let toggle = null;
+  if (!MOBILE) {
+    const before = await ev(`(() => { const c = [...document.querySelectorAll(".explorer-ul .folder-container")].find((x) => !x.nextElementSibling.classList.contains("open")); if (!c) return null; c.setAttribute("data-perf-pick", "1"); c.querySelector(".folder-icon").dispatchEvent(new MouseEvent("click", { bubbles: true })); return { path: c.dataset.folderpath, li: document.querySelectorAll(".explorer-ul li").length }; })()`);
+    if (before) {
+      await waitFor(`(() => { const c = document.querySelector("[data-perf-pick]"); return c && c.nextElementSibling.querySelectorAll("li").length > 0; })()`, 30000);
+      const opened = await ev(`(() => { const c = document.querySelector("[data-perf-pick]"); return { open: c.nextElementSibling.classList.contains("open"), children: c.nextElementSibling.querySelectorAll(":scope > ul > li").length }; })()`);
+      await ev(`document.querySelector("[data-perf-pick] .folder-icon").dispatchEvent(new MouseEvent("click", { bubbles: true }))`);
+      const closed = await ev(`!document.querySelector("[data-perf-pick]").nextElementSibling.classList.contains("open")`);
+      toggle = { folder: before.path, opened: opened.open, children: opened.children, closedAgain: closed, ok: opened.open && opened.children > 0 && closed };
+    }
   }
   let mobileOpen = null;
   if (MOBILE) {
@@ -218,7 +233,7 @@ async function browserPart() {
   }
   await cdp.send("Target.closeTarget", { targetId });
   cdp.ws.close();
-  return { navs, mobileOpen, loaded };
+  return { navs, mobileOpen, toggle, loaded };
 }
 
 const result = { label: LABEL, throttle: THROTTLE ? { network: "Chrome DevTools Slow 4G", ...SLOW4G, cpuSlowdown: CPU } : null, mobile: MOBILE };
@@ -244,6 +259,7 @@ if (result.browser) {
     lines.push(`nav -> ${String(n.to).slice(0, 48).padEnd(48)} explorer=${n.explorerMs}ms fetch=${n.fetchMs}ms li=${n.li} navReq=${n.navRequests} navBytes=${n.navBytes} ` +
       `navTTFB(max)=${ttfb.length ? Math.max(...ttfb).toFixed(1) : "-"}ms${lat ? ` (-latency ${ttfb.length ? (Math.max(...ttfb) - lat).toFixed(1) : "-"}ms)` : ""} index=${n.indexFetched.length}`);
   }
+  if (result.browser.toggle) lines.push(`folder toggle ${result.browser.toggle.folder}: opened=${result.browser.toggle.opened} children=${result.browser.toggle.children} closedAgain=${result.browser.toggle.closedAgain}`);
   if (result.browser.mobileOpen) lines.push(`mobile hamburger open: explorer-open=${result.browser.mobileOpen.explorerOpenMs}ms fetch=${result.browser.mobileOpen.fetchMs}ms navBytes=${result.browser.mobileOpen.navBytes}`);
 }
 console.log(lines.join("\n"));
