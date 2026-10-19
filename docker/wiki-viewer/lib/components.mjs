@@ -247,8 +247,8 @@ const SourceRetractor = ({ fm }) => {
       h("button", { "data-sr": "retract", class: "sr-default" }, "Retract (reversible)"),
       h("button", { "data-sr": "restore", class: "sr-alt" }, "Restore")),
     h("div", { class: "sr-purge-row" },
-      h("label", { class: "sr-purge-toggle" }, h("input", { type: "checkbox", "data-sr-show-purge": true }), " show purge — permanent suppression (record kept)"),
-      h("button", { "data-sr": "purge", class: "sr-danger", hidden: true }, "Purge (irreversible)")),
+      h("label", { class: "sr-purge-toggle" }, h("input", { type: "checkbox", "data-sr-show-purge": true }), " show purge — suppression with a reason (record kept)"),
+      h("button", { "data-sr": "purge", class: "sr-danger", hidden: true }, "Purge")),
     h("div", { class: "sr-status", "data-sr-status": true }));
 };
 
