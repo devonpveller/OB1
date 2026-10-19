@@ -161,3 +161,36 @@ test("the nav worker's nav-only index answers exactly what the full index answer
   assert.equal(navPage(nav, "content/tool", { limit: 100, focus: "content/tool/tool-2999" }).json,
     navPage(full, "content/tool", { limit: 100, focus: "content/tool/tool-2999" }).json);
 });
+
+test("focus on a page deeper down pages an ancestor's list to the subfolder that holds it", () => {
+  const rows = [];
+  for (let i = 1; i <= 300; i++) rows.push(row(`content/notebooks/nb-${i}/nb-${i}`, `NB ${i}`));
+  const s = site(rows);
+  const p = navPage(s, "content/notebooks", { limit: 50, focus: "content/notebooks/nb-277/nb-277" });
+  assert.ok(p.body.entries.some((e) => e.slug === "content/notebooks/nb-277/index"), `offset ${p.body.offset}`);
+  assert.equal(p.body.offset, 250);
+});
+
+test("the nav worker's delta: new pages and new titles land in the sorted lists exactly as a rebuild would", async () => {
+  const { buildSiteIndexYielding } = await import("./site-index.mjs");
+  const { applyNavDelta, warmFolders } = await import("./nav-tree.mjs");
+  const base = [row("index", "Home"), row("content/tool/index", "Tools")];
+  for (let i = 0; i < 2000; i++) base.push(row(`content/tool/tool-${i}`, `Tool ${i}`));
+  for (let i = 0; i < 10; i++) base.push(row(`content/person/p-${i}`, `P ${i}`));
+  _resetNavTreeForTests();
+  const live = await buildSiteIndexYielding(base, "a", { navOnly: true });
+  await warmFolders(live, 1);
+  const delta = [row("content/tool/tool-new", "Aardvark tool"), row("content/tool/tool-5", "Zebra tool"), row("content/person/p-new", "P 4.5"), row("content/tool/tool-7", "Tool 7")];
+  const res = applyNavDelta(live, delta, 2);
+  assert.equal(res.ok, true);
+  assert.deepEqual([res.added, res.retitled], [2, 1]);
+  const after = base.map((r) => (r.slug === "content/tool/tool-5" ? { ...r, title: "Zebra tool" } : r)).concat([delta[0], delta[2]]);
+  const fresh = await buildSiteIndexYielding(after, "b", { navOnly: true });
+  for (const f of ["", "content", "content/tool", "content/person"]) {
+    assert.deepEqual(navPage(live, f, { limit: 2000 }).body.entries, navPage(fresh, f, { limit: 2000 }).body.entries, `folder ${f || "(root)"}`);
+  }
+  // a deletion (the table grew by fewer pages than the rows account for), a new folder, an index page: rebuild
+  assert.equal(applyNavDelta(live, [row("content/tool/tool-x", "X")], 0).ok, false);
+  assert.equal(applyNavDelta(live, [row("content/newfolder/a", "A")], 1).ok, false);
+  assert.equal(applyNavDelta(live, [row("content/tool/index", "Renamed tools")], 0).ok, false);
+});

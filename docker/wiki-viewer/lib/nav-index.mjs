@@ -44,7 +44,7 @@ import { createHash } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { isPagePath } from "./shared/quartz-slug.mjs";
 import { buildSiteIndexYielding } from "./site-index.mjs";
-import { warmFolders } from "./nav-tree.mjs";
+import { warmFolders, applyNavDelta } from "./nav-tree.mjs";
 
 const OB_URL = (process.env.OPEN_BRAIN_URL || "http://openbrain-rest").replace(/\/+$/, "");
 const ENABLED = process.env.WIKI_NAV_API !== "0";
@@ -177,6 +177,37 @@ async function makeCache(rows, at, sig) {
   return c;
 }
 
+// NAV-ONLY DELTA (the nav worker): when the signature moved and no row was
+// deleted, only the rows written since the last snapshot are read (with a
+// 2-minute overlap for writers whose clock stamped a little earlier) and
+// applied in place (nav-tree.mjs applyNavDelta: a body rewrite - most of a
+// compile - changes nothing the explorer shows; a new page or a new title is
+// inserted into its folder's sorted list). Measured reason: a full rebuild at
+// 5x is a 383k-row walk + build whose garbage made the worker's longest
+// event-loop block 150-300 ms; a delta is a few rows. A deletion (the count
+// fell short of old + new) or a large delta falls back to the full rebuild.
+const DELTA_OVERLAP_MS = 120_000;
+const DELTA_MAX = 20_000;
+async function tryDelta(sig, fetchImpl, now) {
+  if (!_navOnly || !_cache?.sig || !sig) return false;
+  const [oldCount, oldMax] = _cache.sig.split("|");
+  const [newCount] = sig.split("|");
+  const since = Date.parse(oldMax);
+  if (!Number.isFinite(since)) return false;
+  const from = new Date(since - DELTA_OVERLAP_MS).toISOString();
+  const r = await fetchImpl(`${OB_URL}/rest/v1/wiki_pages?select=slug,title,updated_at&updated_at=gte.${encodeURIComponent(from)}` +
+    `&order=updated_at.asc&limit=${DELTA_MAX + 1}`, { headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(10_000) });
+  if (!r.ok) return false;
+  const rows = await r.json();
+  if (!Array.isArray(rows) || rows.length > DELTA_MAX) return false;
+  const res = applyNavDelta(_cache.site, rows, Number(newCount) - Number(oldCount));
+  if (!res.ok) return false;
+  _cache.sig = sig;
+  _cache.at = now();
+  if (res.changed) console.log(`[wiki-viewer] nav delta applied: ${rows.length} row(s) read, ${res.added} new, ${res.retitled} retitled, ${res.folders} folder(s) updated`);
+  return true;
+}
+
 // Rebuild the cache. Never throws: on any failure the previous copy stays
 // exactly as it was (fail-soft is the whole point of this module).
 async function refresh(fetchImpl, now) {
@@ -184,6 +215,7 @@ async function refresh(fetchImpl, now) {
   try {
     const sig = await tableSignature(AbortSignal.timeout(10_000), fetchImpl).catch(() => null);
     if (sig && _cache && _cache.sig === sig) { _cache.at = now(); _status = { ok: true, at: Date.now(), error: null }; return; } // unchanged: nothing to walk
+    if (await tryDelta(sig, fetchImpl, now).catch(() => false)) { _status = { ok: true, at: Date.now(), error: null }; return; }
     // the longest the event loop was blocked during this refresh: what a reader
     // arriving meanwhile could have waited (logged; the P1b floor is 300 ms)
     const lag = monitorEventLoopDelay({ resolution: 10 });
