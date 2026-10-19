@@ -81,6 +81,10 @@ def _pg_image():
 
 
 PG_IMAGE = _pg_image()
+# the unit tests inside the image: the image's own code (/app first on sys.path), the tests and the
+# compose files from this checkout mounted read-only at /ob1
+IN_IMAGE_UNIT = ("import sys, unittest; sys.path.append('/ob1/integrations/intake'); "
+                 "unittest.main(module=None, argv=['unittest', '-v', *sys.argv[1:]])")
 SUBNETS = {"ob": "10.243.201.0/24", "intake": "10.243.202.0/24", "llm": "10.243.203.0/24"}
 
 
@@ -674,8 +678,8 @@ class Run:
                    and text.index("secrets directory sealed") < text.index("worker pool ready"),
                    [ln for ln in text.splitlines() if "sealed" in ln][-1:])
         unit = sh("run", "--rm", "--label", self.label, "--network", "none", *self.hardening(), "--tmpfs",
-                  "/tmp:size=64m", "-v", f"{INTAKE_DIR / 'tests'}:/app/tests:ro", "-w", "/app", "--entrypoint", "python",
-                  self.a.image, "-m", "unittest", "tests.test_service_i5b.R2F1SealLinux",
+                  "/tmp:size=256m", "-v", f"{OB1_DOCKER.parent}:/ob1:ro", "-w", "/app", "--entrypoint", "python",
+                  self.a.image, "-c", IN_IMAGE_UNIT, "tests.test_service_i5b.R2F1SealLinux",
                   "tests.test_service_round2.FT1NonDumpableParent", check=False, timeout=900)
         tail = (unit.stdout + unit.stderr).strip().splitlines()
         self.results["seal_unit_in_image"] = tail[-6:]
