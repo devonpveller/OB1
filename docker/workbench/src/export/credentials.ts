@@ -30,12 +30,19 @@
 //     loose    every `<...>` span removed (attempt 3's form; one more view, never the only one)  1
 //     unescape markdown backslash escapes undone (`\<i\>`, `&\#64;`: how the MD output spells text) 2
 //     entity   HTML entities: named, decimal, hex; a named letter entity (`&Zacute;`, `&Zopf;`)
-//              read as its base letter                                                            3
-//     percent  `%xx` runs decoded as UTF-8                                                        3
+//              read as its base letter                                                            4
+//     percent  `%xx` runs decoded as UTF-8                                                        4
 //     base64   every run of the base64/base64url alphabet (12+ characters; whitespace and
 //              invisible characters inside it ignored) decoded at each of the 4 offsets           2
 //     hex      every run of 16+ hex digits (upper or lower) decoded at both offsets               2
 //   A text whose views exceed MAX_VIEWS is refused (fail closed).
+//
+// attempt 6 (bounded): entity and percent 3 -> 4. A depth counts EVERY application of a decoder, the
+// token-level ones included: two whole-text entity layers over a text whose characters are already
+// `&#NN;` tokens, with a literal `&shy;` inside a hex run, is entity depth 4; three percent layers over a
+// mailto whose `@` is `%40` is percent depth 4 (tester t-rw-p6a-5b, seed 2718281828 #687, #1362, #843 -
+// attempt 5 followed 3 and missed them). The property test's generator counts the same way and asserts it
+// never emits deeper than this table (attempt5_test.ts `deeper`).
 //
 // DECLARED RESIDUALS (not encodings; named, not claimed): scrambles - reversal under bidi overrides,
 // ROT13-style substitutions, interleaving with a literal entity or other text; cross-script
@@ -177,8 +184,8 @@ export const ENCODINGS: { name: string; depth: number; decode: (t: string) => st
   { name: "untag", depth: 3, decode: untag },
   { name: "loose", depth: 1, decode: loose },
   { name: "unescape", depth: 2, decode: unescape },
-  { name: "entity", depth: 3, decode: decodeEntitiesDeep },
-  { name: "percent", depth: 3, decode: percent },
+  { name: "entity", depth: 4, decode: decodeEntitiesDeep }, // attempt 6: 3 -> 4
+  { name: "percent", depth: 4, decode: percent }, // attempt 6: 3 -> 4
   { name: "base64", depth: 2, decode: base64Runs },
   { name: "hex", depth: 2, decode: hexRuns },
 ];

@@ -12,6 +12,12 @@
 //                    singly and nested): detected in EVERY case at the input check, the fresh and the
 //                    cached route, and the output verifier over a rendered TXT and MD and a crafted
 //                    DOCX part; a sample also rendered for real in all four formats
+//                    (attempt 6: A5_PROPERTY_KEY / A5_PROPERTY_MAIL run it with another synthetic pair;
+//                    the generator counts every encoding it applies, token-level included, and the
+//                    test asserts none deeper than credentials.ts ENCODINGS declares)
+//   A5-2s (sweep)    attempt 6: 8 seeds x 2 key pairs at secretIn (A5_SWEEP_N per pair, 250 in the gate)
+//   A6 (fixed)       attempt 6: the tester's seed-2718281828 misses #687, #1362, #843, regenerated
+//   A6 (PDF)         attempt 6: the four rendered PDF samples the sweep found served (page break, RLI)
 //   A5-3 (false +)   canon of 10 000 real-looking titles never holds canon of a random 32-char key
 //   A5-4 (422 body)  a dead reference whose record title carries the secret: the 422 withholds it
 // Imports only what attempt 4 (OB1 22637cd) already exported, so the same file is the RED there.
@@ -23,8 +29,8 @@ import type { ExportRef } from "./repo.ts";
 import { type FormatDef, render, RenderFailed, type RenderInput, type StyleDef } from "./render.ts";
 import type { CslItem } from "./csl.ts";
 import { fixtureId, fixtureRefs } from "./test_fixtures.ts";
-import { secretIn } from "./credentials.ts";
-import { verifyDocx, verifyMarkdown, verifyText } from "./verify.ts";
+import { ENCODINGS, MAX_VIEWS, secretIn, TooManyViews, views } from "./credentials.ts";
+import { verifyDocx, verifyMarkdown, verifyPdf, verifyText } from "./verify.ts";
 import { zipEntries } from "./zip_read.ts";
 
 const CSL_DIR = new URL("../../csl", import.meta.url).pathname;
@@ -32,25 +38,32 @@ const CSL_DIR = new URL("../../csl", import.meta.url).pathname;
 const KEY = "T4kq9Zx2Lm7Pw3Rv8Ns5Bd1Hf6Gj0Yc";
 const MAIL = "t4-synth.ops@example.invalid";
 const SECRETS = [KEY, MAIL];
+// A5-2's pair (attempt 6): the fixture pair above unless A5_PROPERTY_KEY / A5_PROPERTY_MAIL name another
+// synthetic pair (the tester's own, e.g. `Vb7KxzNq9M2Lc8Rw4Ts6Hp1Gd5Yf0Ja3` / `t5b.relay-ops@exemplar.invalid`)
+const P_KEY = Deno.env.get("A5_PROPERTY_KEY") ?? KEY;
+const P_MAIL = Deno.env.get("A5_PROPERTY_MAIL") ?? MAIL;
+const P_SECRETS = [P_KEY, P_MAIL];
 const FORMATS = ["md", "txt", "docx", "pdf"];
 
 // An INDEPENDENT reader (not credentials.ts): marks and invisibles stripped after NFKD, letters and
 // digits only. It proves a fixed shape holds the secret, and that no served text does.
 const reader = (t: string) =>
   t.normalize("NFKD").replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
-const leaks = (t: string) => {
+const leaksOf = (t: string, key: string, mail: string) => {
   const r = reader(t);
-  return r.includes(reader(KEY)) || r.includes(reader(MAIL)) || t.toLowerCase().includes(KEY.toLowerCase()) || t.toLowerCase().includes(MAIL);
+  return r.includes(reader(key)) || r.includes(reader(mail)) || t.toLowerCase().includes(key.toLowerCase()) || t.toLowerCase().includes(mail.toLowerCase());
 };
+const leaks = (t: string) => leaksOf(t, KEY, MAIL);
 
 // ── the route, with fakes for the database and the network ─────────────────────────────────────
 const CLIENT = { close() {} } as unknown as Deno.HttpClient;
-const cfg: ResolverConfig = {
-  openalexKey: KEY, mailto: MAIL, proxyUrl: "http://proxy.invalid:8888",
+const cfgFor = (key: string, mail: string): ResolverConfig => ({
+  openalexKey: key, mailto: mail, proxyUrl: "http://proxy.invalid:8888",
   openalexBase: "http://api.openalex.stub", crossrefBase: "http://api.crossref.stub", timeoutMs: 2000,
-};
+});
 type Shape = { title: string; author?: string };
-function world(opts: { recordTitle?: string; dead?: boolean } = {}) {
+function world(opts: { recordTitle?: string; dead?: boolean; key?: string; mail?: string } = {}) {
+  const cfg = cfgFor(opts.key ?? KEY, opts.mail ?? MAIL);
   const cache = new Map<string, { identifier: string; csl: CslItem; via: string }[]>();
   let calls = 0;
   let shape: Shape | null = null;
@@ -103,7 +116,8 @@ async function refusedCredential(i: RenderInput): Promise<string> {
     return `served 200${i.format.key === "md" || i.format.key === "txt" ? `: ${esc(t.slice(t.indexOf("[1]"), t.indexOf("[1]") + 400))}` : ""}`;
   } catch (e) {
     if (!(e instanceof RenderFailed)) throw e;
-    return e.code === "credential" && !leaks(e.message) ? "credential" : `${e.code}: ${e.message.slice(0, 120)}`;
+    const [k, m] = (i.secrets as string[] | undefined) ?? SECRETS;
+    return e.code === "credential" && !leaksOf(e.message, k, m) ? "credential" : `${e.code}: ${e.message.slice(0, 120)}`;
   }
 }
 const esc = (s: string) => [...s].map((c) => c.codePointAt(0)! > 0x7e || c.codePointAt(0)! < 0x20 ? `\\u{${c.codePointAt(0)!.toString(16)}}` : c).join("");
@@ -235,9 +249,16 @@ const TAGS = ["<i></i>", "<b></b>", "<sup></sup>", "<sub></sub>", "<sc></sc>", '
 const WORDS = "survey effects of policy on rural education outcomes evidence from panel data analysis network model".split(" ");
 
 let markCursor = 0;
-function generate(r: () => number, secret: string): { text: string; layers: string[] } {
+// attempt 6: `depth` counts EVERY encoding the generator applies, per decoder of credentials.ts
+// ENCODINGS - the token-level ones (an entity or `%40` token, a tag or CDATA between tokens) and an
+// `&shy;` or tag put inside a base64 / hex run, not only the whole-text layers. Attempt 5 counted only the
+// layers, so it emitted texts one entity / percent level deeper than it declared (tester t-rw-p6a-5b:
+// seed 2718281828 #687, #1362, #843). The tests assert depth <= the declared depth of every decoder.
+type Depth = Record<string, number>;
+function generate(r: () => number, secret: string): { text: string; layers: string[]; depth: Depth } {
   const pick = <T>(a: T[]) => a[Math.floor(r() * a.length)];
   const layers: string[] = [];
+  const tok = { entity: 0, percent: 0, untag: 0 }; // token-level encodings present (0 or 1 level each)
   // 1. tokens: the secret's characters; the mailto's `@` / `.` maybe spelled out (atomic tokens)
   let toks: string[] = [...secret];
   if (secret.includes("@")) {
@@ -246,6 +267,10 @@ function generate(r: () => number, secret: string): { text: string; layers: stri
       if (c === "." && r() < 0.4) return pick(["(dot)", " dot ", " (dot) ", "&period;", "&#46;"]);
       return c;
     });
+  }
+  for (const t of toks) {
+    if (/&[#a-z]/i.test(t)) tok.entity = 1;
+    if (/%[0-9a-f]{2}/i.test(t)) tok.percent = 1;
   }
   // 2. per character: substitutions (letters and digits only)
   toks = toks.map((c) => {
@@ -265,15 +290,18 @@ function generate(r: () => number, secret: string): { text: string; layers: stri
     }
     if (x < 0.47 && /[0-9]/.test(c)) return r() < 0.5 ? SUP[Number(c)] : String.fromCodePoint(0x2080 + Number(c));
     if (x < 0.5 && /[0-9]/.test(c)) return c === "0" ? "⓿" : String.fromCodePoint(0x2776 + Number(c) - 1); // negative circled
-    if (x < 0.55) return `&#${c.codePointAt(0)};`;
-    if (x < 0.58) return `&#x${c.codePointAt(0)!.toString(16)};`;
+    if (x < 0.55) return (tok.entity = 1, `&#${c.codePointAt(0)};`);
+    if (x < 0.58) return (tok.entity = 1, `&#x${c.codePointAt(0)!.toString(16)};`);
     return c;
   });
   // 3. between and after tokens: combining marks (walking every Mn/Mc/Me code point), invisibles,
   //    bidi controls, real tags, comments; a CDATA section around one token
   const out: string[] = [];
   for (const t of toks) {
-    out.push(r() < 0.04 ? `<![CDATA[${t}]]>` : t);
+    if (r() < 0.04) {
+      out.push(`<![CDATA[${t}]]>`);
+      tok.untag = 1;
+    } else out.push(t);
     const x = r();
     if (x < 0.3) {
       const k = 1 + Math.floor(r() * 3);
@@ -281,7 +309,10 @@ function generate(r: () => number, secret: string): { text: string; layers: stri
     } else if (x < 0.38) out.push(String.fromCodePoint(pick(IGNORABLE)));
     else if (x < 0.44) out.push(String.fromCodePoint(pick(ZERO_WIDTH)));
     else if (x < 0.5) out.push(String.fromCodePoint(pick(BIDI)));
-    else if (x < 0.58) out.push(pick(TAGS));
+    else if (x < 0.58) {
+      out.push(pick(TAGS));
+      tok.untag = 1;
+    }
   }
   let text = `${pick(WORDS)} ${pick(WORDS)} ${out.join("")} ${pick(WORDS)}`;
   // 4. whole-text encodings, singly and nested, within the declared depths
@@ -312,12 +343,37 @@ function generate(r: () => number, secret: string): { text: string; layers: stri
     }
   }
   // 5. after a base64 / hex layer: real tags, comments or invisible characters inside the run
+  let inRun = "";
   if (layers.length && /base64|hex/.test(layers[layers.length - 1]) && r() < 0.5) {
     const at = 6 + Math.floor(r() * Math.max(1, text.length - 12));
-    text = text.slice(0, at) + pick([...TAGS, "​", "­", "&shy;", "⁠"]) + text.slice(at);
+    inRun = pick([...TAGS, "​", "­", "&shy;", "⁠"]);
+    text = text.slice(0, at) + inRun + text.slice(at);
   }
-  return { text, layers };
+  const n = (k: string) => layers.filter((l) => l === k).length;
+  const depth: Depth = {
+    entity: n("entity") + tok.entity + (inRun === "&shy;" ? 1 : 0),
+    percent: n("percent") + tok.percent,
+    base64: n("base64"),
+    hex: n("hex"),
+    untag: tok.untag + (TAGS.includes(inRun) ? 1 : 0),
+  };
+  return { text, layers, depth };
 }
+// the declared depth of each decoder (credentials.ts ENCODINGS) vs the deepest the generator emitted
+const declared = (k: string) => ENCODINGS.find((e) => e.name === k)?.depth ?? 0;
+function deeper(maxDepth: Depth): string[] {
+  return Object.entries(maxDepth).filter(([k, d]) => d > declared(k)).map(([k, d]) => `${k} ${d} > declared ${declared(k)}`);
+}
+// the number of views (MAX_VIEWS + 1 when the fail-closed cap is hit: a refusal by the cap, counted apart)
+function viewCount(t: string): number {
+  try {
+    return views(t).length;
+  } catch (e) {
+    if (e instanceof TooManyViews) return MAX_VIEWS + 1;
+    throw e;
+  }
+}
+const bump = (maxDepth: Depth, d: Depth) => { for (const [k, v] of Object.entries(d)) maxDepth[k] = Math.max(maxDepth[k] ?? 0, v); };
 
 // a crafted DOCX: a rendered one with one part rewritten, re-zipped (stored entries)
 const CRC = (() => {
@@ -376,19 +432,24 @@ async function verifierCode(v: () => unknown): Promise<string> {
 
 Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding the key or the mailto - detected in EVERY case at the input check, the fresh and cached route, and the output verifier (TXT, MD, a crafted DOCX part); a sample rendered for real in all four formats`, async () => {
   const r = rng(SEED);
+  markCursor = 0;
+  const maxDepth: Depth = {};
+  let maxViews = 0;
+  let atCap = 0;
+  const pleaks = (t: string) => leaksOf(t, P_KEY, P_MAIL);
   // rendered carriers: a real TXT, MD and DOCX whose reference title is a placeholder
   const carrier = fixtureRefs(1);
   carrier[0].csl = { ...carrier[0].csl, title: PLACE };
-  const txt = new TextDecoder().decode((await render({ ...input(doc("x"), "txt"), refs: carrier, secrets: SECRETS })).bytes);
-  const md = new TextDecoder().decode((await render({ ...input(doc("x"), "md"), refs: carrier, secrets: SECRETS })).bytes);
-  const docxParts = await zipEntries((await render({ ...input(doc("x"), "docx"), refs: carrier, secrets: SECRETS })).bytes);
+  const txt = new TextDecoder().decode((await render({ ...input(doc("x"), "txt"), refs: carrier, secrets: P_SECRETS })).bytes);
+  const md = new TextDecoder().decode((await render({ ...input(doc("x"), "md"), refs: carrier, secrets: P_SECRETS })).bytes);
+  const docxParts = await zipEntries((await render({ ...input(doc("x"), "docx"), refs: carrier, secrets: P_SECRETS })).bytes);
   const docXml = new TextDecoder().decode(docxParts.get("word/document.xml")!);
   assert(txt.includes(PLACE) && md.includes(PLACE) && docXml.includes(PLACE), "the carriers hold the placeholder");
 
   const miss: Record<string, string[]> = { input: [], fresh: [], cached: [], txt: [], md: [], docx: [], rendered: [] };
   const hit: Record<string, number> = { input: 0, fresh: 0, cached: 0, txt: 0, md: 0, docx: 0, rendered: 0, renderedGlyphs: 0 };
   const layerCount: Record<string, number> = {};
-  const w = world();
+  const w = world({ key: P_KEY, mail: P_MAIL });
   const resolver = w.deps.resolver;
   try {
     assertEquals((await w.get("path=notes/t/n.md&format=txt")).status, 200); // fills the cache row
@@ -396,8 +457,12 @@ Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding
     const clean = row.csl;
     w.cache.clear();
     for (let i = 0; i < N; i++) {
-      const secret = i % 2 === 0 ? KEY : MAIL;
-      const { text, layers } = generate(r, secret);
+      const secret = i % 2 === 0 ? P_KEY : P_MAIL;
+      const { text, layers, depth } = generate(r, secret);
+      bump(maxDepth, depth);
+      const vc = viewCount(text);
+      if (vc > MAX_VIEWS) atCap++;
+      else maxViews = Math.max(maxViews, vc);
       for (const l of layers.length ? layers : ["none"]) layerCount[l] = (layerCount[l] ?? 0) + 1;
       const label = `#${i} [${layers.join(">") || "none"}] ${esc(text.slice(0, 140))}`;
       const shape: Shape = i % 4 === 1 ? { title: "Mail in author", author: text } : { title: text };
@@ -408,30 +473,30 @@ Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding
       w.setShape(shape);
       const f = await w.get("path=notes/t/n.md&format=txt");
       const fb = await f.text();
-      if (f.status === 422 && w.cache.size === 0 && !leaks(fb)) hit.fresh++; else miss.fresh.push(`${label} -> ${f.status} cached=${w.cache.size}`);
+      if (f.status === 422 && w.cache.size === 0 && !pleaks(fb)) hit.fresh++; else miss.fresh.push(`${label} -> ${f.status} cached=${w.cache.size}`);
       w.cache.clear();
       w.setShape(null);
       // cached, through the route: the row as an earlier attempt could have stored it
       w.cache.set("ref-1", [{ ...row, csl: { ...clean, ...csl } as CslItem }]);
       const c = await w.get("path=notes/t/n.md&format=txt");
       const cb = await c.text();
-      if (c.status === 422 && /cached record carries credential-shaped text/.test(cb) && !leaks(cb)) hit.cached++; else miss.cached.push(`${label} -> ${c.status}`);
+      if (c.status === 422 && /cached record carries credential-shaped text/.test(cb) && !pleaks(cb)) hit.cached++; else miss.cached.push(`${label} -> ${c.status}`);
       w.cache.clear();
       // the output verifier over rendered outputs carrying the text where the title was
-      const t1 = await verifierCode(() => verifyText(txt.replace(PLACE, text), SECRETS));
+      const t1 = await verifierCode(() => verifyText(txt.replace(PLACE, text), P_SECRETS));
       if (t1 === "credential") hit.txt++; else miss.txt.push(`${label} -> ${t1}`);
-      const t2 = await verifierCode(() => verifyMarkdown(md.replace(PLACE, mdEscape(text)), SECRETS));
+      const t2 = await verifierCode(() => verifyMarkdown(md.replace(PLACE, mdEscape(text)), P_SECRETS));
       if (t2 === "credential") hit.md++; else miss.md.push(`${label} -> ${t2}`);
       const parts = new Map(docxParts);
       parts.set("word/document.xml", new TextEncoder().encode(docXml.replace(PLACE, xmlEscape(text))));
-      const t3 = await verifierCode(() => verifyDocx(storedZip(parts), SECRETS));
+      const t3 = await verifierCode(() => verifyDocx(storedZip(parts), P_SECRETS));
       if (t3 === "credential") hit.docx++; else miss.docx.push(`${label} -> ${t3}`);
       // a sample rendered for real (output stage: the row handed straight to the renderer)
       if (i % 80 === 0) {
         const refs = fixtureRefs(1);
         refs[0].csl = { ...refs[0].csl, ...csl } as CslItem;
         for (const fm of FORMATS) {
-          const o = await refusedCredential({ ...input(doc("x"), fm), refs, secrets: SECRETS });
+          const o = await refusedCredential({ ...input(doc("x"), fm), refs, secrets: P_SECRETS });
           // refused either way; a PDF whose text no installed face draws is refused 422 glyphs
           // before typesetting (nothing served) - counted apart
           if (o === "credential") hit.rendered++;
@@ -445,11 +510,111 @@ Deno.test(`A5-2 (property): ${N} seeded adversarial texts (seed ${SEED}) holding
   }
   const marksUsed = Math.min(markCursor, MARKS.length);
   console.log(`A5-2: N=${N} seed=${SEED} | input ${hit.input}/${N} | fresh ${hit.fresh}/${N} | cached ${hit.cached}/${N} | verifier txt ${hit.txt}/${N} md ${hit.md}/${N} docx ${hit.docx}/${N} | rendered ${hit.rendered}/${Math.ceil(N / 80) * 4} credential + ${hit.renderedGlyphs} PDF refused 422 glyphs`);
+  console.log(`A5-2: pair ${P_KEY.slice(0, 4)}../${P_MAIL.slice(0, 4)}.. | max views ${maxViews} under the fail-closed cap of ${MAX_VIEWS}; ${atCap} texts over it (refused by the cap, counted as refusals) | generator max depth ${JSON.stringify(maxDepth)} | declared ${JSON.stringify(Object.fromEntries(Object.keys(maxDepth).map((k) => [k, declared(k)])))}`);
   console.log(`A5-2: combining marks used ${marksUsed}/${MARKS.length} (every Mn/Mc/Me code point: ${marksUsed === MARKS.length}); default-ignorables pool ${IGNORABLE.length}; layers ${JSON.stringify(layerCount)}`);
   const missed = Object.entries(miss).filter(([, v]) => v.length);
   for (const [k, v] of missed) console.log(`A5-2 MISSED at ${k}: ${v.length}; first: ${v.slice(0, 3).join(" || ")}`);
   assertEquals(marksUsed, MARKS.length, "every combining mark was inserted at least once");
+  assertEquals(deeper(maxDepth), [], "the generator emits nothing deeper than the declared depth of any decoder");
   assertEquals(missed.map(([k, v]) => `${k}:${v.length}`), [], "the secret is detected in every case at every door");
+});
+
+// ═════ A5-2s: the seed sweep (attempt 6) ═════════════════════════════════════════════════════════════
+// The property test at ONE seed passed by luck in attempt 5 (the tester's seed 2718281828 missed three).
+// The sweep: 8 seeds x 2 synthetic key pairs, N texts each, at the ONE function every door calls
+// (credentials.ts secretIn, which resolver.unsafe / carries, the cached-row check, verify.ts and
+// guardBody all run); the full doors run per seed with A5_PROPERTY_SEED / A5_PROPERTY_KEY / A5_PROPERTY_MAIL.
+const SWEEP_SEEDS = [2718281828, 0x5a5a2026, 3, 65537, 8675309, 123456789, 2026101806, 4000000007];
+const SWEEP_PAIRS: [string, string][] = [[KEY, MAIL], ["Vb7KxzNq9M2Lc8Rw4Ts6Hp1Gd5Yf0Ja3", "t5b.relay-ops@exemplar.invalid"]];
+// 250 per seed and pair in the build gate (4 000 texts); the evidence run sets A5_SWEEP_N=2000 (32 000)
+const SWEEP_N = Number(Deno.env.get("A5_SWEEP_N") ?? 250);
+function sweep(seed: number, [key, mail]: [string, string], n: number) {
+  const r = rng(seed);
+  markCursor = 0;
+  const missed: string[] = [];
+  const maxDepth: Depth = {};
+  let maxViews = 0;
+  let atCap = 0;
+  for (let i = 0; i < n; i++) {
+    const { text, layers, depth } = generate(r, i % 2 === 0 ? key : mail);
+    bump(maxDepth, depth);
+    const vc = viewCount(text);
+    if (vc > MAX_VIEWS) atCap++;
+    else maxViews = Math.max(maxViews, vc);
+    if (secretIn(text, [key, mail]) === null) missed.push(`#${i}[${layers.join(">")}]`);
+  }
+  return { missed, maxDepth, maxViews, atCap };
+}
+Deno.test(`A5-2s (seed sweep): ${SWEEP_SEEDS.length} seeds x ${SWEEP_PAIRS.length} key pairs x ${SWEEP_N} texts - the invariant (secretIn, every door's function) detects every one; the generator never exceeds a declared depth; views counted (over the 512 cap = refused, counted apart)`, () => {
+  const bad: string[] = [];
+  const allDepth: Depth = {};
+  let allViews = 0;
+  let missedTotal = 0;
+  let capTotal = 0;
+  const t0 = performance.now();
+  for (const seed of SWEEP_SEEDS) {
+    for (const pair of SWEEP_PAIRS) {
+      const { missed, maxDepth, maxViews, atCap } = sweep(seed, pair, SWEEP_N);
+      capTotal += atCap;
+      bump(allDepth, maxDepth);
+      allViews = Math.max(allViews, maxViews);
+      missedTotal += missed.length;
+      console.log(`A5-2s: seed ${seed} key ${pair[0].slice(0, 4)}..: missed ${missed.length}/${SWEEP_N} ${missed.slice(0, 4).join(" ")} | max views ${maxViews} (under the cap), over the cap ${atCap} | depth ${JSON.stringify(maxDepth)}`);
+      if (missed.length) bad.push(`seed ${seed} ${pair[0].slice(0, 4)}: ${missed.join(" ")}`);
+    }
+  }
+  console.log(`A5-2s: total missed ${missedTotal}/${SWEEP_SEEDS.length * SWEEP_PAIRS.length * SWEEP_N} | max views ${allViews} under the cap of ${MAX_VIEWS}; ${capTotal} texts over it (refused by the cap, fail closed) | generator max depth ${JSON.stringify(allDepth)} | ${(performance.now() - t0).toFixed(0)} ms`);
+  assertEquals(deeper(allDepth), [], "the generator emits nothing deeper than the declared depth of any decoder");
+  assertEquals(bad, [], "every sweep text is detected");
+});
+
+// The tester's three misses (t-rw-p6a-5b, seed 2718281828), regenerated byte-exact by this generator.
+Deno.test("A6 (fixed): the tester's attempt-5 misses #687, #1362 (fixture pair) and #843 (the tester's pair) at seed 2718281828 are detected", () => {
+  const want: [number, [string, string]][] = [[687, SWEEP_PAIRS[0]], [1362, SWEEP_PAIRS[0]], [843, SWEEP_PAIRS[1]]];
+  const got: string[] = [];
+  for (const [at, pair] of want) {
+    const r = rng(2718281828);
+    markCursor = 0;
+    for (let i = 0; i <= at; i++) {
+      const { text, layers } = generate(r, i % 2 === 0 ? pair[0] : pair[1]);
+      if (i !== at) continue;
+      const hitBy = secretIn(text, pair);
+      console.log(`A6: #${i} [${layers.join(">")}] ${text.length} chars, starts ${JSON.stringify(text.slice(0, 48))} | views ${viewCount(text)} -> ${hitBy === null ? "MISSED" : "detected"}`);
+      if (hitBy === null) got.push(`#${i}`);
+    }
+  }
+  assertEquals(got, [], "each of the tester's three texts is detected");
+});
+
+// The four rendered-PDF samples the attempt-6 sweep found SERVED (input, fresh and cached refused them;
+// the sample hands the row straight to the renderer): #1920, #1120, #960 - a base64 / percent run that
+// crosses a page break has the footer's page number inside it in the PDF text layer; #0 - an RLI bidi
+// control reorders the entities after it in the drawn text. Fixed twice: the PDF's logical text is checked
+// before Typst runs (render.ts, verify.ts verifyDrawnText), and the text layer is also read without the
+// page numbers (pdf_read.ts glyphs().body).
+const textAt = (seed: number, at: number, [key, mail]: [string, string]) => {
+  const r = rng(seed);
+  markCursor = 0;
+  let text = "";
+  for (let i = 0; i <= at; i++) text = generate(r, i % 2 === 0 ? key : mail).text;
+  return text;
+};
+Deno.test("A6 (PDF): the sweep's four served PDF samples are refused 'credential' when rendered; the page-break ones also by the text-layer check alone", async () => {
+  const bad: string[] = [];
+  for (const [seed, at, pageBreak] of [[123456789, 1920, true], [2026101806, 1120, true], [3, 960, true], [2026101806, 0, false]] as [number, number, boolean][]) {
+    const refs = fixtureRefs(1);
+    refs[0].csl = { ...refs[0].csl, type: "article-journal", title: textAt(seed, at, SWEEP_PAIRS[0]) } as CslItem;
+    const o = await refusedCredential({ ...input(doc("x"), "pdf"), refs, secrets: SECRETS });
+    console.log(`A6 (PDF): seed ${seed} #${at} rendered -> ${o.slice(0, 60)}`);
+    if (o !== "credential") bad.push(`seed ${seed} #${at} rendered: ${o.slice(0, 80)}`);
+    if (pageBreak) {
+      const bytes = (await render({ ...input(doc("x"), "pdf"), refs, verify: false })).bytes;
+      const v = await verifierCode(() => verifyPdf(bytes, SECRETS));
+      console.log(`A6 (PDF): seed ${seed} #${at} verifyPdf alone -> ${v}`);
+      if (v !== "credential") bad.push(`seed ${seed} #${at} verifyPdf: ${v}`);
+    }
+  }
+  assertEquals(bad, [], "every one is refused");
 });
 
 // ═════ A5-3: false positives ══════════════════════════════════════════════════════════════════════

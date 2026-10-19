@@ -40,7 +40,7 @@ import type { CslItem } from "./csl.ts";
 import { describe, uncovered } from "./glyphs.ts";
 import { DEFAULT_LIMITS, type Limits, TooComplex } from "./markdown.ts";
 import { type Prepared, UnnumberedCitation } from "./prepare.ts";
-import { OutputRejected, unverifiableWriter, verifyOutput } from "./verify.ts";
+import { OutputRejected, unverifiableWriter, verifyDrawnText, verifyOutput } from "./verify.ts";
 // the pandoc input (prepare.ts), re-exported where the tests and the exporter have always found it
 export { citeKey, frontmatterTitle, literalMarkdown, type Prepared, prepareDocument, UnnumberedCitation } from "./prepare.ts";
 
@@ -341,6 +341,16 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
     if (lost.length) {
       throw new RenderFailed(`the PDF cannot be typeset: no installed font covers ${describe(lost)}`, "", "glyphs",
         { characters: lost.slice(0, 20).map((c) => `U+${c.toString(16).toUpperCase().padStart(4, "0")}`) });
+    }
+  }
+  // attempt 6: a typeset format's (the glyph check's) text layer is in drawn (visual) order; the
+  // logical text it will draw is checked first
+  if (i.verify !== false && i.format.glyph_check) {
+    try {
+      verifyDrawnText(p.text, i.secrets ?? [], i.format.key);
+    } catch (e) {
+      if (e instanceof OutputRejected) throw new RenderFailed(e.message, e.offence, e.code, { format: e.format, offence: e.offence });
+      throw e;
     }
   }
   // Scratch OUTSIDE the vault: pandoc and its engines write transient files in the cwd, and the

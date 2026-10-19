@@ -53,6 +53,19 @@ export function safeAbsolute(target: string): boolean {
   return /^(https?:\/\/[^\s]|mailto:[^\s])/.test(d) && !UNSAFE_SCHEME_TEXT.test(d);
 }
 
+// attempt 6: the PDF's text in LOGICAL order, before it is typeset. A PDF text layer is in the order
+// the glyphs are drawn: a bidi control (U+2067 RLI) reorders the entities after it (`&#72;` read back
+// as `& #72 &;`), so the layer no longer spells the encoding the document holds (property text seed
+// 2026101806 #0). Each string the document draws (prepare.ts `text`: the parsed text, the title, every
+// reference field) is checked under the same invariant before Typst runs.
+export function verifyDrawnText(texts: string[], secrets: string[], format: string) {
+  if (!secrets.length) return;
+  for (const t of texts) {
+    const hit = secretIn(t, secrets);
+    if (hit) throw new OutputRejected("credential", format, `the text it would draw holds ${mask(hit)}`);
+  }
+}
+
 // ── per format ─────────────────────────────────────────────────────────────────────────────────
 export function verifyMarkdown(md: string, secrets: string[], format = "md") {
   const o = markdownOffence(md);
@@ -140,6 +153,7 @@ export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pd
     throw new OutputRejected("output-verification", format, `${f.count} .notdef glyph(s) (an empty box) drawn in ${f.font.replace(/^[A-Z]{6}\+/, "")}: a character no face draws`);
   }
   checkText(format, layer.text, secrets);
+  if (layer.body !== layer.text) checkText(format, layer.body, secrets); // attempt 6: without the page numbers
   for (const s of doc.dictStrings()) checkText(format, s, secrets);
   // every stream's decoded bytes too (images, embedded data): no configured secret anywhere
   for (const o of doc.objects.values()) {

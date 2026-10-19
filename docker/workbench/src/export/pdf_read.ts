@@ -335,9 +335,14 @@ export class PdfDocument {
     return out;
   }
 
-  // The text layer and the .notdef glyphs, page by page through the content streams.
-  async glyphs(): Promise<{ text: string; notdef: { font: string; count: number }[] }> {
+  // The text layer and the .notdef glyphs, page by page through the content streams. `body` is the
+  // same layer without the page furniture: a text object (BT .. ET) that is only a page number. A run of
+  // text that crosses a page break has the footer's number inside it in `text` (attempt 6: a base64 run
+  // split by the page number `1` hid the key from the decoders - property text seed 123456789 #1920).
+  async glyphs(): Promise<{ text: string; body: string; notdef: { font: string; count: number }[] }> {
     let text = "";
+    const furniture: [number, number][] = [];
+    let objStart = -1;
     const notdef = new Map<string, number>();
     const fontCache = new Map<PdfDict, { two: boolean; map: Map<number, string>; label: string }>();
     const fontOf = (fd: PdfDict) => {
@@ -393,7 +398,12 @@ export class PdfDocument {
               if (xo.filtered) throw new Error("a form XObject with a filter this reader does not decode");
               run(xo.stream, this.dict(xd.get("Resources")) ?? resources, depth + 1);
             }
-          } else if (op === "ET") text += " ";
+          } else if (op === "BT") objStart = text.length;
+          else if (op === "ET") {
+            if (objStart >= 0 && /^\s*\d{1,6}\s*$/.test(text.slice(objStart))) furniture.push([objStart, text.length]);
+            objStart = -1;
+            text += " ";
+          }
           ops.length = 0;
         } else ops.push(v);
       }
@@ -410,7 +420,14 @@ export class PdfDocument {
       }
       text += "\n";
     }
-    return { text, notdef: [...notdef].map(([font, count]) => ({ font, count })) };
+    let body = "";
+    let at = 0;
+    for (const [a, b] of furniture) {
+      body += text.slice(at, a);
+      at = b;
+    }
+    body += text.slice(at);
+    return { text, body, notdef: [...notdef].map(([font, count]) => ({ font, count })) };
   }
 }
 
