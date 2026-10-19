@@ -38,12 +38,23 @@ WHAT IT CHECKS (acceptance lines 1-3; the verdict file is <out>/e2e-results.json
      shape's answer and time (none may be `clean` by way of an error)
   H  no secret in any container log (caller keys, the DB password, the judge key, the postgres
      password)
+  J  intake-i5b: (R2-F1) the secrets are FILES - the service container's configured environment
+     (docker inspect Config.Env) and a `docker exec` process's own environ carry none of the
+     three, by name or by sha256 of any value (never printed); a secret NAME in the environment
+     refuses the start (part B); the service logs that it sealed its secrets directory, and the
+     Linux-only unit cases (the Landlock seal with a real worker) pass inside the image;
+     (R2-F2) net.ipv4.ip_forward is 0 in both relays; (R-6) a client that half-closes after its
+     request still gets the reply through the LLM relay, and a relay closes an idle connection
+     and frees its slot
+The service gets its secrets as compose does: one read-only file each under /run/secrets
+(intake_caller_keys, intake_db_password, intake_second_opinion_key), never `-e`.
 Every container and network is removed in `finally` (unless --keep).
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -176,10 +187,29 @@ class Run:
            timeout=timeout)
         return {s["name"]: s for s in json.loads(of.read_text(encoding="utf-8"))}
 
+    def secret_files(self, tag, values=None):
+        """The three secrets as compose delivers them (intake-i5b R2-F1): one file each, mounted
+        read-only at /run/secrets/<name>. values: {file name: value or None (no file)}."""
+        vals = {"intake_caller_keys": ",".join(f"{c}={k}" for c, k in self.keys.items()),
+                "intake_db_password": self.db_pw, "intake_second_opinion_key": self.so_key}
+        vals.update(values or {})
+        d = self.work / f"secrets-{tag}"
+        d.mkdir(exist_ok=True)
+        args = []
+        for fn, v in vals.items():
+            if v is None:
+                continue
+            (d / fn).write_text(v, encoding="utf-8")
+            args += ["-v", f"{d / fn}:/run/secrets/{fn}:ro"]
+        return args
+
+    @staticmethod
+    def relay_hardening():
+        """The relays as compose runs them: + net.ipv4.ip_forward=0 (intake-i5b R2-F2)."""
+        return [*Run.hardening(), "--sysctl", "net.ipv4.ip_forward=0"]
+
     def service(self, name, alias, extra_env=None):
-        env = {"INTAKE_DB_HOST": "openbrain-intake-dbrelay", "INTAKE_DB_PASSWORD": self.db_pw,
-               "INTAKE_CALLER_KEYS": ",".join(f"{c}={k}" for c, k in self.keys.items()),
-               "INTAKE_SECOND_OPINION_KEY": self.so_key, "INTAKE_SO_INTERVAL_SECONDS": "2",
+        env = {"INTAKE_DB_HOST": "openbrain-intake-dbrelay", "INTAKE_SO_INTERVAL_SECONDS": "2",
                "INTAKE_RESCREEN_INTERVAL_SECONDS": "3", "INTAKE_PURGE_INTERVAL_SECONDS": "5",
                "INTAKE_SECOND_OPINION_BACKOFF_BASE_SECONDS": "1", "INTAKE_SECOND_OPINION_BACKOFF_CAP_SECONDS": "2",
                "INTAKE_SECOND_OPINION_MAX_ATTEMPTS": "2", "INTAKE_CLASSIFIER_THREADS": "4", "HOME": "/tmp",
@@ -188,7 +218,8 @@ class Run:
                "INTAKE_RESCREEN_BACKOFF_SECONDS": "86400", "INTAKE_BODY_READ_SECONDS": "5"}
         env.update(extra_env or {})
         return self.container(name, self.a.image, *self.hardening(), "--tmpfs", "/tmp:noexec,nosuid,size=64m",
-                              "-v", f"{self.a.model_dir}:/models:ro", "--memory", "4g", "--pids-limit", "256",
+                              "-v", f"{self.a.model_dir}:/models:ro", *self.secret_files(name),
+                              "--memory", "4g", "--pids-limit", "256",
                               nets=(f"{self.p}-intake",), aliases=(alias,), env=env, cmd=("serve",))
 
     @staticmethod
@@ -222,13 +253,14 @@ class Run:
         self.psql(f"ALTER ROLE intake PASSWORD '{self.db_pw}'")
         tables = self.psql("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'intake'")
         self.check("postgres carries the I1 migration (schema intake)", int(tables[0][0]) >= 4, tables)
-        self.container("relay", a.image, *self.hardening(), nets=(f"{self.p}-ob", f"{self.p}-intake"),
-                       aliases=("openbrain-intake-dbrelay",), env={"INTAKE_RELAY_TARGET_HOST": "openbrain-db"},
+        self.container("relay", a.image, *self.relay_hardening(), nets=(f"{self.p}-ob", f"{self.p}-intake"),
+                       aliases=("openbrain-intake-dbrelay",), env={"INTAKE_RELAY_TARGET_HOST": "openbrain-db",
+                                                                   "INTAKE_RELAY_IDLE_SECONDS": "900"},
                        cmd=("relay",))
-        self.container("llmrelay", a.image, *self.hardening(), nets=(f"{self.p}-intake", f"{self.p}-llm"),
+        self.container("llmrelay", a.image, *self.relay_hardening(), nets=(f"{self.p}-intake", f"{self.p}-llm"),
                        aliases={f"{self.p}-intake": ["llama-cpp"], f"{self.p}-llm": []},
                        env={"INTAKE_RELAY_TARGET_HOST": "llm-gateway", "INTAKE_RELAY_TARGET_PORT": "8080",
-                            "INTAKE_RELAY_LISTEN_PORT": "8080"}, cmd=("relay",))
+                            "INTAKE_RELAY_LISTEN_PORT": "8080", "INTAKE_RELAY_IDLE_SECONDS": "600"}, cmd=("relay",))
         svc = self.service("svc", "openbrain-intake")
         r = self.client([{"name": "healthz", "wait_healthz": 300}], "boot")
         self.check("the service starts and /healthz is 200 (worker loaded, db through the relay)",
@@ -241,6 +273,7 @@ class Run:
         self.part_f()
         self.part_g()
         self.part_i(svc)
+        self.part_j(svc)
         self.part_h()
 
     def part_a(self, svc):
@@ -318,13 +351,13 @@ class Run:
         self.check("A F-T1: no secret in any worker process's own environ (and none readable at all)",
                    not leaked and r.returncode == 0, {"leaked_index": leaked, "exit": r.returncode})
 
-    def refusal(self, name, env, expect, model_dir=None):
+    def refusal(self, name, env, expect, model_dir=None, files=None):
         cname = f"{self.p}-refuse-" + re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40]
-        base = {"INTAKE_DB_PASSWORD": self.db_pw, "INTAKE_CALLER_KEYS": f"research={self.keys['research']}",
-                "INTAKE_SECOND_OPINION_KEY": self.so_key, "HOME": "/tmp"}
+        base = {"HOME": "/tmp"}
         base.update(env)
         argv = ["run", "--name", cname, "--label", self.label, "--network", "none", *self.hardening(),
-                "--tmpfs", "/tmp:size=64m", "-v", f"{model_dir or self.a.model_dir}:/models:ro"]
+                "--tmpfs", "/tmp:size=64m", "-v", f"{model_dir or self.a.model_dir}:/models:ro",
+                *self.secret_files(cname[-40:], files)]
         for k, v in base.items():
             if v is not None:
                 argv += ["-e", f"{k}={v}"]
@@ -341,7 +374,12 @@ class Run:
 
     def part_b(self):
         self.refusal("invalid D40 (INTAKE_D2_WEAK_RULE_JUDGE_CLEAN=maybe)", {"INTAKE_D2_WEAK_RULE_JUDGE_CLEAN": "maybe"}, 2)
-        self.refusal("no caller keys", {"INTAKE_CALLER_KEYS": None}, 2)
+        self.refusal("no caller keys", {}, 2, files={"intake_caller_keys": None})
+        # intake-i5b R2-F1: a secret NAME in the environment refuses the start, whatever its value
+        for n in ("INTAKE_DB_PASSWORD", "INTAKE_CALLER_KEYS", "INTAKE_SECOND_OPINION_KEY"):
+            txt = self.refusal(f"a secret in the environment ({n})", {n: "x" * 40}, 2)
+            self.check(f"B the {n} refusal says the secrets are files", "environment" in txt and n in txt,
+                       txt.strip().splitlines()[-1:])
         tampered = self.work / "tampered-model"
         tampered.mkdir()
         for f in Path(self.a.model_dir).iterdir():
@@ -591,6 +629,96 @@ class Run:
         self.results["drip"] = d
         self.check("I F-T3: a 1-byte-per-second drip is cut with 408 at the 5 s body deadline",
                    d.get("status") == 408 and d.get("seconds", 99) < 5 + 3, d)
+
+    def part_j(self, svc):
+        """intake-i5b: R2-F1 (no secret in any exec'd environment), R2-F2 (ip_forward 0), R-6
+        (relay half-close, idle timeout)."""
+        secrets_ = [*self.keys.values(), self.db_pw, self.so_key,
+                    ",".join(f"{c}={k}" for c, k in self.keys.items())]
+        hashes = sorted(hashlib.sha256(s.encode()).hexdigest() for s in secrets_)
+        names = ["INTAKE_CALLER_KEYS", "INTAKE_DB_PASSWORD", "INTAKE_SECOND_OPINION_KEY"]
+
+        def scan(pairs):
+            """(names of secret variables, number of values or ,/= pieces whose sha256 is a secret's)."""
+            found, hits = [], 0
+            for k, v in pairs:
+                if k in names:
+                    found.append(k)
+                pieces = {v, *v.replace("=", ",").split(",")}
+                hits += sum(1 for x in pieces if hashlib.sha256(x.encode()).hexdigest() in hashes)
+            return found, hits
+
+        cfg = json.loads(sh("inspect", svc).stdout)[0]["Config"]["Env"] or []
+        found, hits = scan([e.partition("=")[::2] for e in cfg])
+        self.check("J R2-F1: the container's configured environment (Config.Env) has no secret, by name or hash",
+                   not found and hits == 0, {"names": found, "hash_hits": hits, "vars": len(cfg)})
+        code = ("import hashlib,json,sys\nH=set(json.loads(sys.argv[1]));N=json.loads(sys.argv[2])\n"
+                "found=[];hits=0;n=0\n"
+                "for kv in open('/proc/self/environ','rb').read().split(b'\\0'):\n"
+                " if not kv: continue\n"
+                " n+=1;k,_,v=kv.partition(b'=')\n"
+                " if k.decode() in N: found.append(k.decode())\n"
+                " hits+=sum(1 for x in {v,*v.replace(b'=',b',').split(b',')} if hashlib.sha256(x).hexdigest() in H)\n"
+                "print(json.dumps({'names':found,'hash_hits':hits,'vars':n}))")
+        r = sh("exec", svc, "python", "-c", code, json.dumps(hashes), json.dumps(names), check=False)
+        got = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {"error": r.stderr[-200:]}
+        self.results["exec_environ_probe"] = got
+        self.check("J R2-F1: a `docker exec` process's own environ has no secret, by name or hash (the "
+                   "healthcheck, stack.py health and check-openbrain-health run exactly so)",
+                   got.get("names") == [] and got.get("hash_hits") == 0 and got.get("vars", 0) > 0, got)
+        # the parent read the files, then sealed them against itself and its workers
+        logs = sh("logs", svc, check=False)
+        text = logs.stdout + logs.stderr
+        self.check("J R2-F1: the service sealed its secrets directory (Landlock) before the pool started",
+                   "secrets directory sealed" in text
+                   and text.index("secrets directory sealed") < text.index("worker pool ready"),
+                   [ln for ln in text.splitlines() if "sealed" in ln][-1:])
+        unit = sh("run", "--rm", "--label", self.label, "--network", "none", *self.hardening(), "--tmpfs",
+                  "/tmp:size=64m", "-v", f"{INTAKE_DIR / 'tests'}:/app/tests:ro", "-w", "/app", "--entrypoint", "python",
+                  self.a.image, "-m", "unittest", "tests.test_service_i5b.R2F1SealLinux",
+                  "tests.test_service_round2.FT1NonDumpableParent", check=False, timeout=900)
+        tail = (unit.stdout + unit.stderr).strip().splitlines()
+        self.results["seal_unit_in_image"] = tail[-6:]
+        self.check("J R2-F1: in the image, a worker started after the seal cannot read a secret file "
+                   "(tests.test_service_i5b.R2F1SealLinux, real spawn workers)",
+                   unit.returncode == 0 and tail and tail[-1].startswith("OK") and "skipped" not in tail[-1], tail[-3:])
+        # R2-F2
+        for c in (f"{self.p}-relay", f"{self.p}-llmrelay"):
+            v = sh("exec", c, "cat", "/proc/sys/net/ipv4/ip_forward", check=False).stdout.strip()
+            self.check(f"J R2-F2: net.ipv4.ip_forward is 0 in {c.split('-', 2)[-1]}", v == "0", v)
+        # R-6: half-close through the LLM relay, from a client on the intake net
+        half = ("import socket\ns=socket.create_connection(('llama-cpp',8080),5);s.settimeout(10)\n"
+                "s.sendall(b'GET /health/liveliness HTTP/1.0\\r\\nHost: llama-cpp\\r\\n\\r\\n');s.shutdown(socket.SHUT_WR)\n"
+                "d=b''\nwhile True:\n b=s.recv(4096)\n if not b: break\n d+=b\nprint(d.split(b'\\r\\n')[0].decode())")
+        r = self.on_intake_net(half)
+        self.check("J R-6: a client that half-closes after its request still gets the reply through the LLM relay",
+                   r.returncode == 0 and " 200" in r.stdout, (r.stdout.strip()[-80:], r.stderr.strip()[-200:]))
+        idle = self.container("idlerelay", self.a.image, *self.relay_hardening(),
+                              nets=(f"{self.p}-intake", f"{self.p}-llm"),
+                              aliases={f"{self.p}-intake": ["llama-cpp-idle"], f"{self.p}-llm": []},
+                              env={"INTAKE_RELAY_TARGET_HOST": "llm-gateway", "INTAKE_RELAY_TARGET_PORT": "8080",
+                                   "INTAKE_RELAY_LISTEN_PORT": "8080", "INTAKE_RELAY_IDLE_SECONDS": "3",
+                                   "INTAKE_RELAY_MAX_CONNECTIONS": "1"}, cmd=("relay",))
+        time.sleep(3)
+        code = ("import socket,time,json\nt=time.monotonic();s=socket.create_connection(('llama-cpp-idle',8080),5);s.settimeout(20)\n"
+                "try:\n d=s.recv(10)\nexcept socket.timeout:\n d=b'STILL-OPEN'\n"
+                "idle=round(time.monotonic()-t,2);s.close();time.sleep(0.5)\n"
+                "s=socket.create_connection(('llama-cpp-idle',8080),5);s.settimeout(10)\n"
+                "s.sendall(b'GET /health/liveliness HTTP/1.0\\r\\nHost: x\\r\\n\\r\\n')\n"
+                "line=s.recv(200).split(b'\\r\\n')[0].decode()\nprint(json.dumps({'first':d.decode(),'idle_s':idle,'next':line}))")
+        r = self.on_intake_net(code)
+        try:
+            got = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            got = {"error": r.stderr[-300:]}
+        self.results["relay_idle"] = got
+        self.check("J R-6: a relay closes a connection idle for INTAKE_RELAY_IDLE_SECONDS (3 s here) and frees its slot",
+                   got.get("first") == "" and 2.5 <= got.get("idle_s", 0) < 8 and " 200" in got.get("next", ""), got)
+        sh("rm", "-f", idle, check=False)
+
+    def on_intake_net(self, code, timeout=120):
+        return sh("run", "--rm", "--label", self.label, "--network", f"{self.p}-intake", "--user", "10030:10030",
+                  "--entrypoint", "python", self.a.image, "-c", code, check=False, timeout=timeout)
 
     def part_h(self):
         secrets_ = [*self.keys.values(), self.db_pw, self.so_key, self.pg_pw]

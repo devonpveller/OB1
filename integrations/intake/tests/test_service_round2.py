@@ -8,6 +8,7 @@ environ, drip and frozen-worker probes against the real image are in the e2e run
 import io
 import json
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -70,8 +71,9 @@ class LineThreeNetworks(unittest.TestCase):
 
 
 class FT5OwnEnvFile(unittest.TestCase):
-    """The intake secrets live in docker/intake.env, loaded by the intake services ONLY - not in
-    docker/.env, which open_notebook loads whole (`env_file: ./.env`)."""
+    """docker/intake.env is loaded by the intake service ONLY - not docker/.env, which open_notebook
+    loads whole (`env_file: ./.env`). Since intake-i5b (R2-F1) it carries no secret at all: the
+    secrets are compose secrets (tests/test_service_i5b.py)."""
 
     def test_only_the_intake_service_loads_intake_env(self):
         d = _compose()
@@ -89,14 +91,16 @@ class FT5OwnEnvFile(unittest.TestCase):
         text = COMPOSE.read_text(encoding="utf-8")
         self.assertNotIn("${INTAKE_", text, "every ${INTAKE_*} is read from .env, which open_notebook loads")
 
-    def test_the_example_file_carries_the_secrets_and_dot_env_example_does_not(self):
+    def test_neither_example_file_carries_a_secret_and_the_intake_one_names_the_secret_files(self):
         ex = (COMPOSE.parent / "intake.env.example").read_text(encoding="utf-8")
-        for k in ("INTAKE_CALLER_KEYS=", "INTAKE_DB_PASSWORD=", "INTAKE_SECOND_OPINION_KEY="):
-            self.assertIn(k, ex)
         dot = (COMPOSE.parent / ".env.example").read_text(encoding="utf-8")
-        self.assertNotIn("INTAKE_DB_PASSWORD=", dot)
-        self.assertNotIn("INTAKE_CALLER_KEYS=", dot)
+        for k in ("INTAKE_CALLER_KEYS=", "INTAKE_DB_PASSWORD=", "INTAKE_SECOND_OPINION_KEY="):
+            self.assertNotIn(k, ex)
+            self.assertNotIn(k, dot)
+        for fn in settings.SECRET_FILES.values():
+            self.assertIn(fn, ex)
 
+    @unittest.skipUnless(shutil.which("git"), "needs git (intake-i5 R2-F6: the image has none)")
     def test_intake_env_is_gitignored(self):
         import subprocess
         r = subprocess.run(["git", "-C", str(COMPOSE.parent), "check-ignore", "-q", "intake.env"])
@@ -115,14 +119,19 @@ class FT1NonDumpableParent(unittest.TestCase):
 
     def test_harden_runs_before_the_pool_and_a_failure_refuses_the_start(self):
         order = []
+        # intake-i5b: the seal (a Landlock domain, irreversible) is patched out here: run for real
+        # it would confine this test process; it runs for real in tests.test_service_i5b.R2F1SealLinux
         with mock.patch.object(app, "harden_process", side_effect=lambda: order.append("harden")), \
+                mock.patch.object(app, "seal_secrets", side_effect=lambda d: order.append("seal")), \
                 mock.patch("intake_service.pool.WorkerPool.start", side_effect=lambda *a: order.append("pool")
                            or (_ for _ in ()).throw(poolmod.PoolError("stop here"))):
             code = app._serve(settings.load(ss.base_env()), ss.base_env())
-        self.assertEqual(order[:2], ["harden", "pool"])
+        self.assertEqual(order[:3], ["harden", "seal", "pool"])
         self.assertEqual(code, app.EXIT_WORKERS)
-        with mock.patch.object(app, "harden_process", side_effect=OSError("prctl refused")):
+        with mock.patch.object(app, "harden_process", side_effect=OSError("prctl refused")), \
+                mock.patch.object(app, "seal_secrets") as seal:
             self.assertEqual(app._serve(settings.load(ss.base_env()), ss.base_env()), app.EXIT_HARDEN)
+        seal.assert_not_called()
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "prctl is Linux")
     def test_harden_process_makes_this_process_non_dumpable(self):
@@ -167,14 +176,14 @@ class FT2TransferClockCoversTheSend(unittest.TestCase):
         try:
             w = p._idle[0]
             release = threading.Event()
-            real_send = w.conn.send
+            real_send = w.conn.send_bytes
 
-            def blocking_send(msg):
-                if msg[0] == "job":
+            def blocking_send(data):
+                if data.startswith(b'["job"'):
                     release.wait(30)  # a worker that never reads: the send never returns
-                return real_send(msg)
+                return real_send(data)
 
-            w.conn.send = blocking_send
+            w.conn.send_bytes = blocking_send
             t0 = time.monotonic()
             out = p.run(ss.envelope_bytes("x"), lambda i: None)
             self.assertEqual((out.kind, out.phase), ("killed", "transfer"))

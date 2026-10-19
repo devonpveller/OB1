@@ -17,10 +17,13 @@ Stub classifier factories (the pool's `factory` argument, "module:function"):
 """
 from __future__ import annotations
 
+import atexit
 import io
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 
 from tests import support
@@ -33,16 +36,50 @@ SO_KEY = "sk-so-" + "d4" * 14
 SECRETS = (*CALLER_KEYS.values(), DB_PASSWORD, SO_KEY)
 
 
+# intake-i5b R2-F1: the three secrets are FILES in INTAKE_SECRETS_DIR (compose secrets at
+# /run/secrets), never environment variables; a secret name in the environment refuses the start.
+SECRET_FILES = {"INTAKE_CALLER_KEYS": "intake_caller_keys", "INTAKE_DB_PASSWORD": "intake_db_password",
+                "INTAKE_SECOND_OPINION_KEY": "intake_second_opinion_key"}
+_SECRET_DIRS: list[str] = []
+
+
+def _cleanup_secret_dirs():
+    for d in _SECRET_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+atexit.register(_cleanup_secret_dirs)
+
+
+def write_secrets(values: dict) -> str:
+    """A fresh secrets directory holding one file per non-None value -> its path."""
+    d = tempfile.mkdtemp(prefix="intake-secrets-")
+    _SECRET_DIRS.append(d)
+    for name, value in values.items():
+        if value is not None:
+            with open(os.path.join(d, SECRET_FILES[name]), "w", encoding="utf-8", newline="") as fh:
+                fh.write(value)
+    return d
+
+
 def base_env(**over) -> dict:
-    env = {
+    """The service environment for a test: no secret in it, INTAKE_SECRETS_DIR naming a fresh
+    directory with the three secret files. An override of a SECRET name changes its FILE (None =
+    the file is absent); any other override changes the environment (None = unset)."""
+    secrets = {
         "INTAKE_CALLER_KEYS": ",".join(f"{c}={k}" for c, k in CALLER_KEYS.items()),
-        "INTAKE_DB_HOST": "intake-db",
         "INTAKE_DB_PASSWORD": DB_PASSWORD,
         "INTAKE_SECOND_OPINION_KEY": SO_KEY,
     }
-    env.update({k: v for k, v in over.items() if v is not None})
-    for k in [k for k, v in over.items() if v is None]:
-        env.pop(k, None)
+    env = {"INTAKE_DB_HOST": "intake-db"}
+    for k, v in over.items():
+        if k in SECRET_FILES:
+            secrets[k] = v
+        elif v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
+    env.setdefault("INTAKE_SECRETS_DIR", write_secrets(secrets))
     return env
 
 

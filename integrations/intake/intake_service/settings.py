@@ -1,4 +1,5 @@
-"""The service configuration, read ONCE at start-up from the environment (I5).
+"""The service configuration, read ONCE at start-up from the environment and, for the three
+secrets, from FILES (I5; intake-i5b R2-F1).
 
 Every value - the service's own and the library's (retention, classifier, second opinion, the
 D40 policy point) - is parsed here, before any worker starts. A value that does not parse or is
@@ -6,8 +7,18 @@ out of range raises ConfigError and the service REFUSES TO START (I4 review R3-T
 D40 policy the service decides with is the configured one, never d2's default, and a bad value
 is caught at start, not on the first item that needs it. Nothing is ever replaced by a default.
 
-  INTAKE_LISTEN_HOST / _PORT          0.0.0.0 / 8000
-  INTAKE_CALLER_KEYS                  REQUIRED, secret: `connector=key[,connector=key...]`. One key
+THE SECRETS ARE FILES, NEVER ENVIRONMENT VARIABLES (intake-i5 round-2 tester R2-F1): every
+process `docker exec` starts in the container - the compose healthcheck, `stack.py health`,
+check-openbrain-health - runs with the container's configured environment, so a secret there
+reaches each of them, ordinary dumpable processes of the service's uid. The secrets are compose
+secrets instead (docker/intake-secrets/, gitignored, mounted read-only at /run/secrets), read
+here once; a secret NAME in the environment refuses the start (exit 2), so an old intake.env
+that still carries one cannot quietly put it back. Each file: UTF-8, at most 16 KiB, one
+trailing line break dropped (an editor's), nothing else stripped. After reading them the
+service seals the directory against itself and its workers (app.seal_secrets, Landlock).
+
+  INTAKE_SECRETS_DIR                  /run/secrets (an absolute path): the directory of the files
+  intake_caller_keys    (file)        REQUIRED, secret: `connector=key[,connector=key...]`. One key
                                       per connector (DESIGN section 2: a per-connector key); the
                                       key a request presents decides which connector it may submit
                                       for (envelope.connector must match, else 403). Keys are 32-256
@@ -27,7 +38,7 @@ is caught at start, not on the first item that needs it. Nothing is ever replace
                                       (INTAKE_CLASSIFIER_MAX_SECONDS) plus this
   INTAKE_WORKER_START_SECONDS         300: a worker must load (verify + build the model) in this
   INTAKE_DB_HOST / _PORT / _NAME / _USER  the relay host / 5432 / openbrain / intake
-  INTAKE_DB_PASSWORD                  REQUIRED, secret: the intake role's password
+  intake_db_password    (file)        REQUIRED, secret: the intake role's password
   INTAKE_SO_INTERVAL_SECONDS          30: the second-opinion loop's period
   INTAKE_SO_BATCH / _CONCURRENCY      8 items per sweep / 1 request at a time (llm-queue's
                                       ob-intake class is max_concurrency 1, I4 F-2)
@@ -36,9 +47,11 @@ is caught at start, not on the first item that needs it. Nothing is ever replace
   INTAKE_RESCREEN_BACKOFF_SECONDS     300 between re-screens
   INTAKE_PURGE_INTERVAL_SECONDS       3600: the retention purge (I4 purge.run_all)
   INTAKE_LOG_LEVEL                    INFO | WARNING | ERROR | DEBUG
-  INTAKE_SECOND_OPINION_KEY           secret, read by second_opinion.Judge (the library); unset is
-                                      reported (healthz, a warning), not refused: every judge ask
-                                      is then `no_key` and items expire `suspicious`, never clean
+  intake_second_opinion_key (file)    secret, handed to second_opinion.Judge (the library); an
+                                      absent or empty file is reported (healthz, a warning), not
+                                      refused: every judge ask is then `no_key` and items expire
+                                      `suspicious`, never clean
+  INTAKE_LISTEN_HOST / _PORT          0.0.0.0 / 8000
 
 The secrets are held in Secret objects whose repr is a mask; the caller names the service logs
 are connector names, never keys.
@@ -56,6 +69,12 @@ from intake.config import ClassifierConfig, Retention, SecondOpinionConfig
 from intake.d2 import Policy
 
 SECRET_ENV = ("INTAKE_CALLER_KEYS", "INTAKE_DB_PASSWORD", "INTAKE_SECOND_OPINION_KEY")
+# the secret (by its logical name) -> its file in INTAKE_SECRETS_DIR (the compose secret's name)
+SECRET_FILES = {"INTAKE_CALLER_KEYS": "intake_caller_keys", "INTAKE_DB_PASSWORD": "intake_db_password",
+                "INTAKE_SECOND_OPINION_KEY": "intake_second_opinion_key"}
+SECRETS_DIR_ENV = "INTAKE_SECRETS_DIR"
+DEFAULT_SECRETS_DIR = "/run/secrets"
+MAX_SECRET_BYTES = 16 * 1024
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 _SLUG = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -147,8 +166,10 @@ class Settings:
     classifier: ClassifierConfig
     second_opinion: SecondOpinionConfig
     second_opinion_key_set: bool
+    secrets_dir: str
     callers: CallerKeys = field(repr=False)
     db_password: Secret = field(repr=False)
+    second_opinion_key: Secret = field(repr=False, default_factory=lambda: Secret(""))
 
     @property
     def workers(self) -> int:
@@ -182,10 +203,50 @@ def _num(env, name, default: float, lo: float, hi: float) -> float:
     return float(raw)
 
 
-def _caller_keys(env) -> CallerKeys:
-    raw = env.get("INTAKE_CALLER_KEYS")
+def _secrets_dir(env) -> str:
+    d = _get(env, SECRETS_DIR_ENV, DEFAULT_SECRETS_DIR)
+    if not os.path.isabs(d) or "\x00" in d:
+        raise ConfigError(f"{SECRETS_DIR_ENV}={d!r} is not an absolute directory path")
+    return d
+
+
+def read_secrets(env) -> tuple[str, dict]:
+    """(the directory, {logical name: value or None when the file is absent}). Never the
+    environment: a secret name there is refused. Errors name the file, never a value."""
+    for name in SECRET_FILES:
+        if name in env:
+            raise ConfigError(f"{name} is set in the environment: the intake secrets are files only "
+                              f"({SECRETS_DIR_ENV}, compose secrets; intake-i5b R2-F1) - remove it from "
+                              "the environment (docker/intake.env)")
+    d = _secrets_dir(env)
+    out: dict = {}
+    for name, fn in SECRET_FILES.items():
+        path = os.path.join(d, fn)
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(MAX_SECRET_BYTES + 1)
+        except FileNotFoundError:
+            out[name] = None
+            continue
+        except OSError as e:
+            raise ConfigError(f"{name}: the secret file {path} cannot be read ({type(e).__name__})") from None
+        if len(data) > MAX_SECRET_BYTES:
+            raise ConfigError(f"{name}: the secret file {path} is over {MAX_SECRET_BYTES} bytes")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ConfigError(f"{name}: the secret file {path} is not UTF-8") from None
+        for tail in ("\r\n", "\n"):
+            if text.endswith(tail):
+                text = text[: -len(tail)]
+                break
+        out[name] = text
+    return d, out
+
+
+def _caller_keys(raw: str | None, path: str) -> CallerKeys:
     if raw is None or not raw.strip():
-        raise ConfigError("INTAKE_CALLER_KEYS is required: connector=key[,connector=key...]")
+        raise ConfigError(f"INTAKE_CALLER_KEYS is required (the secret file {path}): connector=key[,connector=key...]")
     entries: dict[str, str] = {}
     seen_keys: set[str] = set()
     for i, part in enumerate(raw.split(","), 1):
@@ -226,15 +287,17 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
     for name, v in (("INTAKE_DB_NAME", db_name), ("INTAKE_DB_USER", db_user)):
         if not _NAME.fullmatch(v):
             raise ConfigError(f"{name}={v!r} is not a plain SQL name")
-    password = env.get("INTAKE_DB_PASSWORD")
+    secrets_dir, secret = read_secrets(env)
+    password = secret["INTAKE_DB_PASSWORD"]
     if not password:
-        raise ConfigError("INTAKE_DB_PASSWORD is required (the intake role's password)")
+        raise ConfigError("INTAKE_DB_PASSWORD is required (the intake role's password, the secret file "
+                          f"{os.path.join(secrets_dir, SECRET_FILES['INTAKE_DB_PASSWORD'])})")
     if any(c in password for c in "\r\n\x00"):
         raise ConfigError("INTAKE_DB_PASSWORD contains a line break or NUL")
     level = _get(env, "INTAKE_LOG_LEVEL", "INFO")
     if level not in LOG_LEVELS:
         raise ConfigError(f"INTAKE_LOG_LEVEL={level!r} is not one of {LOG_LEVELS}")
-    so_key = env.get("INTAKE_SECOND_OPINION_KEY", "")
+    so_key = secret["INTAKE_SECOND_OPINION_KEY"] or ""
     return Settings(
         listen_host=host,
         listen_port=_int(env, "INTAKE_LISTEN_PORT", 8000, 1, 65535),
@@ -264,6 +327,9 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
         classifier=clf,
         second_opinion=so,
         second_opinion_key_set=bool(so_key and so_key.strip()),
-        callers=_caller_keys(env),
+        secrets_dir=secrets_dir,
+        callers=_caller_keys(secret["INTAKE_CALLER_KEYS"],
+                             os.path.join(secrets_dir, SECRET_FILES["INTAKE_CALLER_KEYS"])),
         db_password=Secret(password),
+        second_opinion_key=Secret(so_key),
     )

@@ -12,15 +12,21 @@ report ready before the service listens) and then serves request after request. 
 crashed worker is replaced in the background; until its replacement is warm the pool has one
 worker fewer, and a request that finds no free worker within queue_wait_s gets 503 (Busy).
 
-THE JOB PROTOCOL (one duplex pipe per worker; the parent never parses untrusted content):
-  parent -> worker   ("job", id, body bytes)
+THE JOB PROTOCOL (one duplex pipe per worker; the parent never parses untrusted content).
+Every message is one size-capped JSON frame over send_bytes/recv_bytes - NEVER a pickle
+(intake-i5b R-2: unpickling runs code, and the worker is the process exposed to untrusted bytes;
+wire.py has the frames and the caps):
+  parent -> worker   ["job", id], then the body as one raw-bytes frame
   worker             parses the JSON body; stage 1 (envelope.validate) and the idempotency key
-  worker -> parent   ("started", id, {key, envelope}) or ("started", id, None) when the envelope
-                     is invalid (the screen then returns its `rejected` result)
-  parent -> worker   ("go",) or ("skip", reason): the parent checks the key's connector binding
+  worker -> parent   ["started", id, {key, envelope}] (the raw as base64) or ["started", id, null]
+                     when the envelope is invalid (the screen then returns its `rejected` result)
+  parent -> worker   ["go"] or ["skip", reason]: the parent checks the key's connector binding
   worker             screen(envelope, classifier=<reporting wrapper>)
-  worker -> parent   ("stage6", id) when stages 1-5 are done and the classifier starts
-  worker -> parent   ("done", id, {kind, result, detail})
+  worker -> parent   ["stage6", id] when stages 1-5 are done and the classifier starts
+  worker -> parent   ["done", id, {kind, result, detail}]
+A worker that breaks the protocol - a frame that is not JSON (a pickle), one over its cap, a
+message for another job, an unknown op, an invalid "started" or result - is DROPPED (SIGKILL,
+discarded, replaced: phase "died"), never re-pooled (R-4), and the request gets killed_result().
 
 THE WALL CLOCKS (the parent's, measured with time.monotonic):
   transfer    from BEFORE the job is sent to "started": wall_transfer_s (the body is up to
@@ -58,7 +64,7 @@ from dataclasses import dataclass
 
 from intake.result import IdempotencyKey, IntakeResult
 
-from .wire import result_from_dict
+from . import wire
 
 log = logging.getLogger("intake_service.pool")
 _CTX = mp.get_context("spawn")
@@ -161,7 +167,7 @@ def _make(factory: str):
     return getattr(importlib.import_module(mod), fn)()
 
 
-def _worker_main(conn, factory: str) -> None:
+def _worker_main(conn, factory: str, max_body: int = 16 * 1024 * 1024 + 1) -> None:
     """A worker process: load once, then serve jobs until told to stop or the pipe closes."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
@@ -170,37 +176,40 @@ def _worker_main(conn, factory: str) -> None:
         if callable(load):
             load()
         from intake import pipeline  # noqa: F401 - build the Unicode tables before "ready"
-        conn.send(("ready", {"version": getattr(clf, "version", None), "pid": os.getpid()}))
+        version = getattr(clf, "version", None)
+        wire.send_msg(conn, ["ready", {"version": None if version is None else str(version), "pid": os.getpid()}])
     except BaseException as e:  # noqa: BLE001
         with contextlib.suppress(Exception):
-            conn.send(("failed", _describe(e)))
+            wire.send_msg(conn, ["failed", _describe(e)])
         return
     while True:
         try:
-            msg = conn.recv()
-        except (EOFError, OSError):
+            msg = wire.recv_msg(conn, wire.MAX_CONTROL_BYTES)
+            op = msg[0]
+            if op == "job":
+                body = conn.recv_bytes(max_body)
+        except (EOFError, OSError, wire.WireError):
             return
-        op = msg[0]
         if op == "stop":
             return
         if op == "env":
-            conn.send(("env", sorted(os.environ)))
+            wire.send_msg(conn, ["env", sorted(os.environ)])
             continue
         if op != "job":
             continue
-        job_id, body = msg[1], msg[2]
+        job_id = msg[1]
 
         def gate(info, job_id=job_id):
-            conn.send(("started", job_id, info))
-            reply = conn.recv()
-            return None if reply[0] == "go" else (reply[1] if len(reply) > 1 else "refused")
+            wire.send_msg(conn, ["started", job_id, wire.started_to_wire(info)])
+            reply = wire.recv_msg(conn, wire.MAX_CONTROL_BYTES)
+            return None if reply[0] == "go" else (str(reply[1]) if len(reply) > 1 else "refused")
 
         def emit(event, job_id=job_id):
-            conn.send((event, job_id))
+            wire.send_msg(conn, [event, job_id])
 
         out = screen_job(body, clf, gate, emit)
-        conn.send(("done", job_id, {"kind": out.kind, "detail": out.detail,
-                                    "result": None if out.result is None else out.result.to_dict()}))
+        wire.send_msg(conn, ["done", job_id, {"kind": out.kind, "detail": out.detail,
+                                              "result": None if out.result is None else out.result.to_dict()}])
 
 
 # -- the parent side ------------------------------------------------------------------------------
@@ -225,7 +234,8 @@ def _scrubbed_env(names):
 class WorkerPool:
     def __init__(self, size: int, *, factory: str = DEFAULT_FACTORY, wall_stages_s: float,
                  wall_transfer_s: float, wall_classifier_s: float, start_timeout_s: float,
-                 queue_wait_s: float, child_env_drop=(), respawn_backoff_s: float = 30.0):
+                 queue_wait_s: float, child_env_drop=(), respawn_backoff_s: float = 30.0,
+                 max_body_bytes: int = 16 * 1024 * 1024, max_message_bytes: int = wire.MAX_WORKER_MESSAGE_BYTES):
         if size < 1:
             raise ValueError("a pool has at least one worker")
         self.size = size
@@ -237,6 +247,8 @@ class WorkerPool:
         self.queue_wait_s = queue_wait_s
         self._drop = tuple(child_env_drop)
         self._backoff = respawn_backoff_s
+        self.max_body_bytes = max_body_bytes
+        self.max_message_bytes = max_message_bytes
         self._cv = threading.Condition()
         self._idle: list[_Worker] = []
         self._busy: set[_Worker] = set()
@@ -253,8 +265,8 @@ class WorkerPool:
     def _spawn(self) -> _Worker:
         parent, child = _CTX.Pipe(duplex=True)
         with _scrubbed_env(self._drop):
-            proc = _CTX.Process(target=_worker_main, args=(child, self._factory), daemon=True,
-                                name="intake-worker")
+            proc = _CTX.Process(target=_worker_main, args=(child, self._factory, self.max_body_bytes + 1),
+                                daemon=True, name="intake-worker")
             proc.start()
         child.close()
         return _Worker(proc, parent)
@@ -263,19 +275,25 @@ class WorkerPool:
         try:
             if not w.conn.poll(timeout):
                 raise PoolError(f"a worker did not finish loading in {timeout:.0f}s")
-            msg = w.conn.recv()
+            msg = wire.recv_msg(w.conn, wire.MAX_CONTROL_BYTES)
         except (EOFError, OSError):
             w.proc.join(5)
             self._reap(w)
             raise PoolError(f"a worker exited while loading (exit code {w.proc.exitcode})") from None
+        except wire.WireError as e:
+            self._reap(w)
+            raise PoolError(f"a worker sent an invalid ready message ({e})") from None
         except PoolError:
             self._reap(w)
             raise
-        if msg[0] != "ready":
+        info = msg[1] if len(msg) > 1 else None
+        if msg[0] != "ready" or not isinstance(info, dict):
             self._reap(w)
-            raise PoolError(f"a worker failed to load: {msg[1] if len(msg) > 1 else msg[0]}")
-        w.version = msg[1].get("version")
-        w.pid = msg[1].get("pid") or w.pid
+            detail = info if isinstance(info, str) else msg[0]
+            raise PoolError(f"a worker failed to load: {str(detail)[:300]}")
+        version, pid = info.get("version"), info.get("pid")
+        w.version = version if isinstance(version, str) else None
+        w.pid = pid if isinstance(pid, int) and pid > 0 else w.pid
         self.version = w.version
 
     def start(self) -> None:
@@ -342,7 +360,7 @@ class WorkerPool:
             self._cv.notify_all()
         for w in workers:
             with contextlib.suppress(Exception):
-                w.conn.send(("stop",))
+                wire.send_msg(w.conn, ["stop"])
             w.proc.join(2)
             self._reap(w)
 
@@ -402,8 +420,9 @@ class WorkerPool:
         """The variable NAMES a worker process sees (tests; never values)."""
         w = self._acquire(self.queue_wait_s)
         try:
-            w.conn.send(("env",))
-            return w.conn.recv()[1]
+            wire.send_msg(w.conn, ["env"])
+            msg = wire.recv_msg(w.conn, wire.MAX_CONTROL_BYTES)
+            return [str(n) for n in msg[1]] if msg[0] == "env" and isinstance(msg[1], list) else []
         finally:
             self._release(w)
 
@@ -421,7 +440,8 @@ class WorkerPool:
 
         def _send():
             try:
-                w.conn.send(("job", jid, body))
+                wire.send_msg(w.conn, ["job", jid])
+                w.conn.send_bytes(body)
             except Exception as e:  # noqa: BLE001
                 failed.append(e)
             finally:
@@ -441,8 +461,8 @@ class WorkerPool:
             left = deadline - time.monotonic()
             try:
                 ready = left > 0 and w.conn.poll(left)
-                msg = w.conn.recv() if ready else None
-            except (EOFError, OSError):
+                msg = wire.recv_msg(w.conn, self.max_message_bytes) if ready else None
+            except EOFError:
                 elapsed = time.monotonic() - t0
                 code = None
                 with contextlib.suppress(Exception):
@@ -451,38 +471,53 @@ class WorkerPool:
                 self._drop_worker(w, killed=False)
                 log.warning("worker %s died during %s (exit code %s)", w.pid, phase, code)
                 return Outcome("died", None, started, phase, elapsed, f"exit code {code}", w.pid)
+            except (OSError, wire.WireError) as e:
+                # an oversize frame (refused from its length header) or one that is not a JSON
+                # message - a pickle among them: the worker is dropped, never re-pooled (R-2, R-4)
+                oversize = isinstance(e, OSError) and "message length" in str(e)
+                return self._violation(w, t0, started, phase,
+                                       "an oversize message" if oversize else f"an invalid message ({_describe(e)})")
             if msg is None:
                 elapsed = time.monotonic() - t0
                 kill_s = self._drop_worker(w, killed=True)
                 log.warning("worker %s killed at the %s wall clock after %.3fs", w.pid, phase, elapsed)
                 return Outcome("killed", None, started, phase, elapsed, "wall clock", w.pid, kill_s)
-            if msg[1] != jid and msg[0] != "env":
-                continue
             kind = msg[0]
-            if kind == "started":
-                started = msg[2]
+            if len(msg) < 2 or isinstance(msg[1], bool) or msg[1] != jid:
+                return self._violation(w, t0, started, phase, f"a {kind[:20]!r} message for another job")
+            if kind == "started" and phase == "transfer" and len(msg) == 3:
+                try:
+                    started = wire.started_from_wire(msg[2])
+                except wire.WireError as e:
+                    return self._violation(w, t0, None, phase, f"an invalid started message ({e})")
                 try:
                     refusal = gate(started)
                 except Exception as e:  # noqa: BLE001 - a broken gate refuses
                     refusal = "gate: " + type(e).__name__
                 if refusal:
-                    w.conn.send(("skip", str(refusal)))
+                    wire.send_msg(w.conn, ["skip", str(refusal)])
                 else:
-                    w.conn.send(("go",))
+                    wire.send_msg(w.conn, ["go"])
                     phase = "stages"
                     deadline = time.monotonic() + self.wall_stages_s
-            elif kind == "stage6":
+            elif kind == "stage6" and phase == "stages" and len(msg) == 2:
                 phase = "classifier"
                 deadline = time.monotonic() + self.wall_classifier_s
-            elif kind == "done":
+            elif kind == "done" and len(msg) == 3:
                 elapsed = time.monotonic() - t0
-                payload = msg[2]
+                try:
+                    out_kind, result, detail = wire.done_from_wire(msg[2])
+                except wire.WireError as e:
+                    # R-4: checked BEFORE the worker goes back to idle; an invalid result drops it
+                    return self._violation(w, t0, started, phase, str(e))
                 self._release(w)
-                result = None
-                if payload.get("result") is not None:
-                    try:
-                        result = result_from_dict(payload["result"])
-                    except Exception as e:  # noqa: BLE001 - an invalid result is no result
-                        return Outcome("died", None, started, phase, elapsed,
-                                       "an invalid result: " + _describe(e), w.pid)
-                return Outcome(payload["kind"], result, started, phase, elapsed, payload.get("detail", ""), w.pid)
+                return Outcome(out_kind, result, started, phase, elapsed, detail, w.pid)
+            else:
+                return self._violation(w, t0, started, phase, f"an unexpected {kind[:20]!r} message in {phase}")
+
+    def _violation(self, w: _Worker, t0: float, started, phase: str, why: str) -> Outcome:
+        """A worker broke the protocol: drop it (SIGKILL, discard, replace) - never re-pool it."""
+        elapsed = time.monotonic() - t0
+        self._drop_worker(w, killed=False)
+        log.warning("worker %s dropped during %s: it sent %s", w.pid, phase, why[:200])
+        return Outcome("died", None, started, phase, elapsed, why[:300], w.pid)

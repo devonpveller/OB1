@@ -2,22 +2,28 @@
 loads, until everything that can be checked has been.
 
   1. configuration (settings.load): any invalid value -> exit 2 (EXIT_CONFIG), naming the
-     variable, never a secret value (I4 R3-T3: the D40 policy point is validated here)
+     variable, never a secret value (I4 R3-T3: the D40 policy point is validated here). The three
+     secrets are read from their FILES here (intake-i5b R2-F1: never the environment, which every
+     `docker exec` process inherits; a secret name in the environment is refused)
   2. the classifier files (weights.verify_model_dir): missing or not the pinned bytes -> exit 3
-  3. the process makes itself NON-DUMPABLE (prctl PR_SET_DUMPABLE 0; exit 5 if that fails):
-     the kernel keeps the start-up environment in /proc/<pid>/environ whatever os.environ says,
-     and a worker runs with the same uid - non-dumpable is what stops a worker (no capability)
-     reading /proc/1/environ or /proc/1/mem (intake-i5 attempt 1 F-T1). Then the secrets leave
-     the process environment: the second-opinion key goes into the Judge's
-     closure (the library's), the DB password and caller keys stay in Settings' masked objects,
-     and os.environ no longer carries any of them - the worker processes are spawned without
-     them (and child_env_drop names them again, belt and braces)
+  3. the process makes itself NON-DUMPABLE (prctl PR_SET_DUMPABLE 0; exit 5 if that fails): a
+     worker runs with the same uid - non-dumpable is what stops a worker (no capability) reading
+     /proc/1/environ or /proc/1/mem (intake-i5 attempt 1 F-T1). The second-opinion key goes into
+     the Judge's closure (the library's); the DB password and caller keys stay in Settings'
+     masked objects; os.environ never held them (and child_env_drop names them, belt and braces)
+  3b. the secrets directory is SEALED (seal_secrets, Landlock; exit 5 if that fails): this
+     process and every process it starts from now on - every worker, every replacement - can no
+     longer read a file under it. The bind is world-readable on this host (a Windows source
+     mounts 0777; 0400 cannot be enforced), and a worker has the service's uid, so without the
+     seal a compromised worker would simply read the files. A Landlock domain also keeps its
+     members from ptrace-ing a process outside it, such as a `docker exec` probe
   4. the warm pool: every worker loads and verifies the model; any failure -> exit 4
   5. the loops (second opinion, re-screen, purge), then the HTTP server
 SIGTERM stops the server, the loops and the workers.
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import signal
@@ -61,6 +67,95 @@ def harden_process() -> None:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE, 0) refused")
 
 
+# Landlock (linux/landlock.h; the syscall numbers are the same on every architecture)
+_SYS_CREATE_RULESET, _SYS_ADD_RULE, _SYS_RESTRICT_SELF = 444, 445, 446
+_LANDLOCK_CREATE_RULESET_VERSION = 1
+_LANDLOCK_RULE_PATH_BENEATH = 1
+_LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
+_PR_SET_NO_NEW_PRIVS = 38
+
+
+def _outside(path: str) -> list[str]:
+    """Every entry beside the path from / down to it: granting each of them leaves exactly the
+    path's own subtree without a rule."""
+    parts = [x for x in path.split("/") if x]
+    out, cur = [], "/"
+    for part in parts:
+        out += [os.path.join(cur, name) for name in sorted(os.listdir(cur)) if name != part]
+        cur = os.path.join(cur, part)
+    return out
+
+
+def seal_secrets(path: str) -> None:
+    """Deny READING FILES under `path` to this process and every process it starts afterwards
+    (Landlock, ABI >= 1; irreversible). Only file reads are handled, so execution, writes and
+    directory listing are unchanged; every other part of the file system stays readable (a
+    read rule on each entry beside the path, from / down). The calling thread must be the only
+    one: a Landlock domain covers the thread that enforces it and its future children only.
+    Verified before it returns: a file under `path` must no longer open. Raises OSError (the
+    service exits 5). Not Linux: a logged no-op - the service runs only in its Linux container."""
+    if not sys.platform.startswith("linux"):
+        log.warning("not Linux: the secrets directory is NOT sealed")
+        return
+    import ctypes
+    real = os.path.realpath(path)
+    if real == "/" or not os.path.isdir(real):
+        raise OSError(errno.EINVAL, f"cannot seal {path!r}: not a directory below /")
+    tasks = os.listdir("/proc/self/task")
+    if len(tasks) != 1:
+        raise OSError(errno.EBUSY, f"cannot seal with {len(tasks)} threads running (the seal covers one)")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    L = ctypes.c_long
+    abi = libc.syscall(L(_SYS_CREATE_RULESET), None, L(0), L(_LANDLOCK_CREATE_RULESET_VERSION))
+    if abi < 1:
+        raise OSError(ctypes.get_errno(), "Landlock is not available in this kernel")
+
+    class _Ruleset(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    class _PathBeneath(ctypes.Structure):
+        _pack_ = 1
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+    attr = _Ruleset(_LANDLOCK_ACCESS_FS_READ_FILE)
+    rfd = libc.syscall(L(_SYS_CREATE_RULESET), ctypes.byref(attr), L(ctypes.sizeof(attr)), L(0))
+    if rfd < 0:
+        raise OSError(ctypes.get_errno(), "landlock_create_ruleset failed")
+    skipped = 0
+    try:
+        for entry in _outside(real):
+            try:
+                fd = os.open(entry, os.O_PATH | os.O_CLOEXEC)
+            except OSError:
+                skipped += 1  # a dangling link: nothing to read there
+                continue
+            try:
+                rule = _PathBeneath(_LANDLOCK_ACCESS_FS_READ_FILE, fd)
+                if libc.syscall(L(_SYS_ADD_RULE), L(rfd), L(_LANDLOCK_RULE_PATH_BENEATH), ctypes.byref(rule), L(0)) != 0:
+                    skipped += 1  # unreadable from now on: costs availability, never secrecy
+                    log.warning("seal: no read rule for %s (errno %d)", entry, ctypes.get_errno())
+            finally:
+                os.close(fd)
+        if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) refused")
+        if libc.syscall(L(_SYS_RESTRICT_SELF), L(rfd), L(0)) != 0:
+            raise OSError(ctypes.get_errno(), "landlock_restrict_self failed")
+    finally:
+        os.close(rfd)
+    for name in sorted(os.listdir(real)):
+        f = os.path.join(real, name)
+        if os.path.isfile(f):
+            try:
+                with open(f, "rb"):
+                    pass
+            except PermissionError:
+                continue
+            raise OSError(errno.EPERM, f"the seal did not take: {name} is still readable")
+    log.info("secrets directory sealed (Landlock ABI %d; %d entr%s without a rule)", abi, skipped,
+             "y" if skipped == 1 else "ies")
+
+
 def main(argv=None, env=None, *, start: bool = True, files=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "serve"
@@ -102,9 +197,13 @@ def _serve(s, env) -> int:
     except OSError as e:
         log.error("could not make the process non-dumpable, not starting: %s", e)
         return EXIT_HARDEN
-    source = os.environ if env is None else env
-    judge = Judge(http_gateway.send, cfg=s.second_opinion, env={KEY_ENV: source.get(KEY_ENV, "")})
-    for name in settings.SECRET_ENV:
+    try:
+        seal_secrets(s.secrets_dir)
+    except OSError as e:
+        log.error("could not seal the secrets directory, not starting: %s", e)
+        return EXIT_HARDEN
+    judge = Judge(http_gateway.send, cfg=s.second_opinion, env={KEY_ENV: s.second_opinion_key.reveal()})
+    for name in settings.SECRET_ENV:  # never set (settings refuses them); belt and braces
         os.environ.pop(name, None)
     if not s.second_opinion_key_set:
         log.warning("INTAKE_SECOND_OPINION_KEY is not set: every judge ask is no_key, and items that need "

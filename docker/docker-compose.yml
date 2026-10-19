@@ -342,16 +342,22 @@ services:
   # llm-gateway-db, openwebui, open-terminal, agent-bridge, ... - all reachable from there).
   # HARDENED: non-root (uid 10030), read-only root FS + a small tmpfs, cap_drop ALL,
   # no-new-privileges, pids/memory/cpu limits. The classifier files are NOT in the image: they
-  # are mounted READ-ONLY from INTAKE_MODEL_DIR (default: where tools/fetch_classifier.py
-  # puts them) and checked against their sha256 pins at start - a missing or altered file
-  # refuses the start (exit 3). Every screen runs in a killable worker process under a hard
-  # wall clock (operator D38): an overrun is killed and the item stays `pending`.
-  # SECRETS: in docker/intake.env (from intake.env.example; gitignored), loaded by THIS service
-  # only - never docker/.env, which open_notebook loads whole (`env_file: ./.env`; intake-i5
-  # attempt 1 F-T5). No INTAKE_* value is interpolated in this file for the same reason. The
-  # env file is `required: false` so a host without intake still renders; the service itself
-  # refuses to start on a blank key or password (exit 2). No compose `:?` guards: compose
-  # interpolates a profiled-off service too (measured, compose v5).
+  # are mounted READ-ONLY from the fixed path tools/fetch_classifier.py writes them to
+  # (../integrations/intake/models/<pinned dir>; no variable - see SECRETS) and checked
+  # against their sha256 pins at start - a missing or altered file refuses the start (exit 3).
+  # Every screen runs in a killable worker process under a hard wall clock (operator D38): an
+  # overrun is killed and the item stays `pending`.
+  # SECRETS ARE FILES (intake-i5b R2-F1): the caller keys, the intake role's password and the
+  # judge's LiteLLM key are compose SECRETS from docker/intake-secrets/ (gitignored), mounted
+  # read-only at /run/secrets - NEVER environment variables, which every `docker exec` process
+  # inherits (the healthcheck below, stack.py health, check-openbrain-health), and never
+  # docker/.env, which open_notebook loads whole (intake-i5 attempt 1 F-T5). The service refuses
+  # to start when a secret NAME is in its environment, when a required file is absent or blank
+  # (exit 2), or when it cannot seal the directory against its own workers after reading it
+  # (Landlock, exit 5). docker/intake.env (from intake.env.example; gitignored, `required:
+  # false`) holds only non-secret tuning. No INTAKE_* value is interpolated in this file and no
+  # compose `:?` guard is used: compose interpolates a profiled-off service too (measured,
+  # compose v5); a missing secret file fails the `up` of this service only.
   openbrain-intake:
     profiles: ["intake"]
     build:
@@ -364,11 +370,18 @@ services:
         condition: service_healthy
       openbrain-intake-llmrelay:
         condition: service_healthy
-    # INTAKE_DB_PASSWORD, INTAKE_CALLER_KEYS (connector=key,...), INTAKE_SECOND_OPINION_KEY and
-    # any INTAKE_* tuning (workers, threads, the D40 policy): see intake.env.example
+    # non-secret INTAKE_* tuning only (workers, threads, the D40 policy): see intake.env.example
     env_file:
       - path: intake.env
         required: false
+    # the three secrets, as files under /run/secrets (top-level `secrets:` at the end)
+    secrets:
+      - source: intake_caller_keys
+        target: intake_caller_keys
+      - source: intake_db_password
+        target: intake_db_password
+      - source: intake_second_opinion_key
+        target: intake_second_opinion_key
     environment:
       INTAKE_DB_HOST: openbrain-intake-dbrelay
       INTAKE_DB_PORT: "5432"
@@ -430,9 +443,14 @@ services:
       INTAKE_RELAY_TARGET_PORT: "5432"
       INTAKE_RELAY_LISTEN_PORT: "5432"
       INTAKE_RELAY_MAX_CONNECTIONS: "16"
+      # above the store's 300 s pooled-connection idle limit (intake-i5b R-6)
+      INTAKE_RELAY_IDLE_SECONDS: "900"
     networks:
       - obnet
       - intake-net
+    # no routing through the relay into intake-net (intake-i5b R2-F2)
+    sysctls:
+      net.ipv4.ip_forward: 0
     user: "10030:10030"
     read_only: true
     security_opt:
@@ -471,11 +489,17 @@ services:
       INTAKE_RELAY_TARGET_PORT: "8080"
       INTAKE_RELAY_LISTEN_PORT: "8080"
       INTAKE_RELAY_MAX_CONNECTIONS: "8"
+      # above the judge's request timeout (INTAKE_SECOND_OPINION_TIMEOUT_SECONDS, 120; R-6)
+      INTAKE_RELAY_IDLE_SECONDS: "600"
     networks:
       intake-net:
         aliases:
           - llama-cpp
       llm-net: {}
+    # no routing through the relay into intake-net (intake-i5b R2-F2: tailscale shares
+    # openwebui's namespace on llm-net with NET_ADMIN)
+    sysctls:
+      net.ipv4.ip_forward: 0
     user: "10030:10030"
     read_only: true
     security_opt:
@@ -1647,6 +1671,18 @@ services:
         exec /usr/local/bin/supercronic /tmp/crontab.rendered
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
+
+# intake I5 (intake-i5b R2-F1): openbrain-intake's three secrets, as FILES - one value per file, no
+# suffix, in docker/intake-secrets/ (gitignored; how to make them: intake.env.example). Read only
+# by openbrain-intake (its `secrets:`); a host that never enables intake needs none of them (the
+# render does not open them; an `up` of openbrain-intake without them fails).
+secrets:
+  intake_caller_keys:
+    file: ./intake-secrets/intake_caller_keys
+  intake_db_password:
+    file: ./intake-secrets/intake_db_password
+  intake_second_opinion_key:
+    file: ./intake-secrets/intake_second_opinion_key
 
 volumes:
   openbrain-db-data:

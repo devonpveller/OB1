@@ -65,9 +65,10 @@ setup differs.
 
 A bare `docker compose up -d` in this directory starts the **core** fleet
 only — the knowledge store, the doors onto it, the workers that keep it
-coherent, and its backup. Three groups sit behind compose profiles so a
+coherent, and its backup. Groups sit behind compose profiles so a
 caller turns on the engines and surfaces it actually needs without editing
-`docker-compose.yml` (added 2026-09-19, ai-stack item `sl-ob1-profiles`):
+`docker-compose.yml` (added 2026-09-19, ai-stack item `sl-ob1-profiles`;
+`pantry` and `intake` are opt-in and OFF by default):
 
 ```bash
 docker compose up -d                                     # core only
@@ -95,6 +96,10 @@ Core is everything NOT listed below: `openbrain-db`, `-mcp`, `-ext`,
 | `surrealdb` | `notebook` | Open Notebook's local UI/queue/chat store and nothing else's; no other service in this project speaks to it. |
 | `open_notebook` | `notebook` | A surface onto `openbrain-db` (the canonical store since IKS), not an engine. `depends_on: surrealdb`, same group. |
 | `open-notebook-backup` | `notebook` | Exports the SurrealDB datastore and `notebook_data` — both belong to the notebook surface. |
+| `openbrain-pantry` | `pantry` | The household pantry / meal planner: a plain HTTP/JSON service (x-pantry-key) called by the OWUI `pantry` tool over ai-stack_llm-net, connecting as the least-privilege `ob_pantry` role (it cannot read thoughts). A product, not part of the store; opt-in (off until `stack.py enable pantry`). |
+| `openbrain-intake` | `intake` | The content screen (security-hardening-2026-10 I5; `../integrations/intake/`, fork-owned): the screened way in for external content. Nothing calls it before the I6-I8 cut-over, and its secrets are a gated deploy step, so it is shipped inert (off until `stack.py enable intake`). On the internal `intake-net` only; its secrets are compose secrets from `intake-secrets/`, never environment variables. |
+| `openbrain-intake-dbrelay` | `intake` | The intake service's only route to `openbrain-db` (a fixed-target byte relay on `obnet` + `intake-net`). Exists only for `openbrain-intake`. |
+| `openbrain-intake-llmrelay` | `intake` | The intake service's only route to the LiteLLM gateway (aliased `llama-cpp` on `intake-net`, forwarding to `llm-gateway:8080` on ai-stack_llm-net). Exists only for `openbrain-intake`. |
 | `openbrain-idea-refinery` | `idea-refinery` | Pre-existing profile in `docker-compose.scheduled.yml`; the owed-idea drain. It is gated because it needs a Mattermost bot token to deliver dossiers — but it is **running today**, not waiting: the token is set on this host and both ai-stack drivers pass the profile on every invocation. Its only engine is `openbrain-research`, so see the cross-group table below. |
 
 ### The invariant a change here must not break

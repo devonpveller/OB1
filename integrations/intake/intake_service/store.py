@@ -12,6 +12,9 @@ silver and the discard record together or not at all. The purge and stats run th
 execute() in autocommit (each purge batch its own short transaction, as purge.py expects).
 
 A connection or server failure raises StoreUnavailable -> HTTP 503; nothing is half-written.
+A pooled connection idle longer than MAX_IDLE_SECONDS (300) is closed and replaced when it is next
+taken: the DB relay closes a connection idle for its INTAKE_RELAY_IDLE_SECONDS (900 in compose;
+intake-i5b R-6), and a connection the relay has cut must never be the one a request gets.
 The DSN and the password are never logged; errors carry the exception type only.
 """
 from __future__ import annotations
@@ -22,9 +25,11 @@ import json
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 
 log = logging.getLogger("intake_service.store")
+MAX_IDLE_SECONDS = 300.0
 
 
 class StoreUnavailable(Exception):
@@ -183,7 +188,7 @@ class PgStore:
     """psycopg 3, a small pool of connections, each logged in as the intake role."""
 
     def __init__(self, *, host: str, port: int, dbname: str, user: str, password, size: int = 4,
-                 connect_timeout: int = 10):
+                 connect_timeout: int = 10, max_idle_s: float = MAX_IDLE_SECONDS):
         import psycopg
         from psycopg.types.json import Jsonb
         self._psycopg = psycopg
@@ -191,8 +196,9 @@ class PgStore:
         self._kw = dict(host=host, port=port, dbname=dbname, user=user, connect_timeout=connect_timeout,
                         application_name="intake-service")
         self._password = password
-        self._pool: queue.LifoQueue = queue.LifoQueue(maxsize=size)
+        self._pool: queue.LifoQueue = queue.LifoQueue(maxsize=size)  # (connection, idle since)
         self._lock = threading.Lock()
+        self._max_idle = max_idle_s
 
     def _connect(self):
         try:
@@ -202,17 +208,22 @@ class PgStore:
         return conn
 
     def _get(self):
-        try:
-            conn = self._pool.get_nowait()
-        except queue.Empty:
-            return self._connect()
-        if conn.closed or conn.broken:
-            return self._connect()
-        return conn
+        while True:
+            try:
+                conn, since = self._pool.get_nowait()
+            except queue.Empty:
+                return self._connect()
+            if conn.closed or conn.broken:
+                continue
+            if time.monotonic() - since > self._max_idle:
+                with contextlib.suppress(Exception):
+                    conn.close()
+                continue
+            return conn
 
     def _put(self, conn):
         try:
-            self._pool.put_nowait(conn)
+            self._pool.put_nowait((conn, time.monotonic()))
         except queue.Full:
             conn.close()
 

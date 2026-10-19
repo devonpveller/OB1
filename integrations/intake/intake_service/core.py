@@ -289,10 +289,12 @@ class Intake:
         label = row.verdict if row.status == "done" else row.status
         svc = row.scores.get("service") or {}
         stored_ev = {k: (svc.get("evidence") or {}).get(k) for k in ("rule", "classifier", "error")}
-        try:
-            fresh_ev = {k: v for k, v in base_evidence(fresh).items() if k in stored_ev}                 if fresh.verdict != "rejected" else None
-        except ValueError:
-            fresh_ev = None
+        fresh_ev = None  # a rejected screen, or evidence D2 cannot read, matches no stored decision
+        if fresh.verdict != "rejected":
+            try:
+                fresh_ev = {k: v for k, v in base_evidence(fresh).items() if k in stored_ev}
+            except ValueError:
+                fresh_ev = None
         same = fresh_ev is not None and fresh_ev == stored_ev and fresh.error is None
         withheld = None
         if label in _TEXT_LABELS and not same:
