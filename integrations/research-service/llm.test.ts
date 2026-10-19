@@ -33,7 +33,13 @@ function stubGateway(initial: Mode) {
       case "429": return new Response(`{"error":{"message":"llm-queue: projected wait exceeds budget"}}`, { status: 429 });
       case "503": return new Response(`{"error":{"message":"model is loading"}}`, { status: 503 });
       case "bare502": return new Response(`{"error":{"message":"Bad Gateway"}}`, { status: 502 });
-      case "hang": await new Promise((r) => setTimeout(r, 2000)); return new Response("late", { status: 200 });
+      // The pending answer ends with the server: on Deno 2.3.3 (the image's runtime) server.finished
+      // does not wait for an in-flight handler, so an uncleared 2 s timer outlived the test and the
+      // leak sanitizer failed it - first seen when the image build began running the suite (P3a).
+      case "hang": await new Promise((r) => {
+        const t = setTimeout(r, 2000);
+        ac.signal.addEventListener("abort", () => { clearTimeout(t); r(undefined); }, { once: true });
+      }); return new Response("late", { status: 200 });
       default: return Response.json({ choices: [{ message: { content: answer } }] });
     }
   });

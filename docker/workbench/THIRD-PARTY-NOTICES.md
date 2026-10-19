@@ -49,6 +49,20 @@ pinned version's own metadata on 2026-10-17 (registry entry, LICENSE at the tag,
 | Dredd (contract test tool, never shipped) | 14.1.0 | MIT | contract-test/run-contract-tests.ps1 | https://github.com/apiaryio/dredd |
 | Node.js (Dredd's runtime, test image only) | 20 (node:20-alpine) | MIT | contract test image only | https://nodejs.org |
 
+## Data services queried by the research service (research-workbench P3a; no code used)
+
+The research service (`integrations/research-service/scholarly.ts`) resolves scholarly
+identifiers for the D15 credibility model by calling two public REST APIs through its egress
+proxy. No code, SDK or dataset of either is copied, linked or shipped: the client is written in
+this repository. The terms below are as the services publish them and were NOT re-read in
+rw-p3a-entail (the item made no network call); re-verify before enabling the resolver
+(`RESEARCH_SCHOLARLY_MAILTO`).
+
+| Service | Used for | Data terms (as published) | URL |
+|---|---|---|---|
+| OpenAlex API (OurResearch) | work metadata (`cited_by_count`, `publication_date`, authorships) and author `works_count`; keyed client | data CC0; API key per the service's terms | https://openalex.org |
+| Crossref REST API | fallback work metadata (`is-referenced-by-count`, `published`, authors) via the polite pool (`mailto`) | bibliographic metadata facts, no licence restriction stated for metadata | https://api.crossref.org |
+
 ## Model weights in use
 
 Every weight the stack configures to serve or load, with the licence its model card states.

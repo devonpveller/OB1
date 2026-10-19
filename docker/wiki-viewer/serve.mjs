@@ -1,54 +1,34 @@
-// Minimal static file server for the compiled Quartz site (Research Engine /
-// wiki availability rework). Always serves the CURRENT good build via the
-// /srv/current symlink — the entrypoint rebuilds into a new versioned dir and
-// atomically re-points the symlink only when the viewer is idle, so a reader
-// NEVER sees a "rebuilding" splash. Records request activity to
-// /tmp/last-access so the rebuild loop can tell when the viewer is in use.
+// The wiki viewer's server (research-workbench P1a: the live renderer).
 //
-// 2026-08-23 perf rework: fully async I/O, ETag/Last-Modified validators with
-// 304 handling (the site is served `no-cache` so browsers/CDNs always
-// revalidate — before this there were NO validators, so every visit
-// re-downloaded everything, including the multi-MB index), throttled
-// last-access bookkeeping, and a cached readiness probe.
+// EVERY PAGE URL IS PRESENTED FROM wiki_pages (D13: ingest -> compile ->
+// present; the row is what is presented). lib/live-route.mjs resolves the URL
+// through the page-class registry and renders it with the Quartz chrome
+// (lib/chrome.mjs): x-wiki-render: db. A known page without a row is the
+// typed pending-compile state (x-wiki-render: pending); a database that does
+// not answer is ONE front-end screen for every URL (x-wiki-render:
+// connecting|unreachable). Nothing is rendered from a vault file.
+//
+// What still comes from the published Quartz snapshot (/srv/current, written
+// by entrypoint.sh's builder while WIKI_BUILDER=1): the client bundle and
+// static assets (index.css, prescript.js, postscript.js, static/*). P1c
+// freezes that bundle and removes the builder.
+//
+// Kept from the 2026-08-23 perf rework: async I/O, ETag/Last-Modified
+// validators with 304s on assets, throttled last-access bookkeeping (the
+// compiler's drain gate reads /__last-access), the cached readiness probe.
 import http from "node:http";
-// Phase B (no-rebuild): DB-rendered fallback. lib/ is COPYed next to this
-// file at /quartz/serve.mjs so Quartz's own node_modules resolve the
-// unified/remark imports (ESM ignores NODE_PATH).
-import { renderMarkdown } from "./lib/render-page.mjs";
-import { pageDocument, notAvailableDocument } from "./lib/page-document.mjs";
-import { fetchWikiPage, dbRenderEnabled } from "./lib/wiki-db.mjs";
-import { getNavIndex, navIndexEnabled } from "./lib/nav-index.mjs";
 import { createReadStream } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { stat, writeFile } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
+import { getNavIndex, navIndexEnabled } from "./lib/nav-index.mjs";
+import { renderLive, routeErrors, isKnownPageUrl } from "./lib/live-route.mjs";
+import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-classes.mjs";
+import { dbState, onConnect, startProbe } from "./lib/wiki-db.mjs";
+import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
 
-const ROOT = "/srv/current"; // a symlink → /srv/build-N (swapped atomically)
-// The builder's LIVE output. Fallback for a just-created note/folder that the
-// incremental watcher has already emitted but the idle-gated snapshot hasn't
-// published yet — so user-created content appears in ~seconds instead of waiting
-// out the idle gate (2026-06-17). Serving an individual fresh page from here is
-// safe: render assets (css/js) still come from the complete snapshot.
-const LIVE = "/quartz/public";
-// The prompt-publish flag. serve.mjs writes it; entrypoint.sh's snapshot loop
-// reads it and publishes immediately, bypassing its IDLE_SECONDS gate (default
-// 90s of no requests), then deletes it.
-//
-// THIS COUPLING IS LOAD-BEARING, not an optimisation. The idle gate measures
-// requests to THIS server, and a browser sitting on a freshly created note
-// polls it every few seconds — so for as long as someone is actually looking
-// at the page, "idle" never reaches IDLE_SECONDS and the snapshot swap never
-// happens. Without this flag the reader would be pinned on the LIVE-output
-// fallback render indefinitely and the fallback-to-built transition would
-// simply never be observable: the page only becomes the built, sidebar-bearing
-// document because serving it from LIVE (below) asks for a publish.
-//
-// Two consequences worth knowing before you change either side:
-//   * remove/rename it here without removing the entrypoint's check and a new
-//     note is invisible in nav/search until the reader walks away for 90s;
-//   * anything testing the fallback-to-built transition depends on it — that
-//     is why the transition takes seconds in a test rather than minutes.
-const PUBLISH_FLAG = "/tmp/ne-publish";
+const ROOT = "/srv/current"; // a symlink -> /srv/build-N (swapped atomically)
 const PORT = parseInt(process.env.PORT || "8080", 10);
+const VAULT = process.env.WIKI_VAULT_DIR || "/wiki";
 const MIME = {
   ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript",
   ".mjs": "text/javascript", ".json": "application/json", ".svg": "image/svg+xml",
@@ -58,83 +38,53 @@ const MIME = {
   ".map": "application/json", ".webmanifest": "application/manifest+json",
 };
 
-// Quartz emits the client bundle + styles under STABLE names (postscript.js,
-// prescript.js, index.css) whose CONTENT changes every rebuild. `no-cache`
-// forces revalidation on every use; the ETag/Last-Modified validators below
-// turn that revalidation into a cheap 304 instead of a re-download. True
-// static (fonts/images) may cache for a day.
+// The bundle + styles have STABLE names whose CONTENT changes every rebuild:
+// `no-cache` forces revalidation, the validators make it a cheap 304.
 const REBUILDABLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".xml", ".map", ".webmanifest", ".txt"]);
-const cacheControl = (ext) =>
-  REBUILDABLE.has(ext) ? "no-cache, must-revalidate" : "public, max-age=86400";
-
-// Snapshot dirs are immutable once published, so size+mtime is a sound ETag.
+const cacheControl = (ext) => (REBUILDABLE.has(ext) ? "no-cache, must-revalidate" : "public, max-age=86400");
 const etagOf = (st) => `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
 
-async function resolveIn(root, p) {
-  const base = normalize(join(root, p || "/"));
-  if (!base.startsWith(root)) return null; // path traversal guard
-  const candidates = p === "" || p === "/"
-    ? [join(root, "index.html")]
-    : [base, `${base}.html`, join(base, "index.html")];
-  for (const c of candidates) {
-    try {
-      const st = await stat(c);
-      if (st.isFile()) return { file: c, st };
-    } catch { /* next */ }
-  }
+// A static ASSET from the published snapshot (never a page: pages are live).
+async function resolveAsset(urlPath) {
+  let p;
+  try { p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]); } catch { return null; }
+  const base = normalize(join(ROOT, p));
+  if (!base.startsWith(ROOT)) return null; // path traversal guard
+  try {
+    const st = await stat(base);
+    if (st.isFile()) return { file: base, st };
+  } catch { /* none */ }
   return null;
 }
-async function resolve(urlPath) {
-  // Quartz prettyURLs emit `foo/index.html`; also tolerate `foo.html`.
-  let p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]);
-  if (p.endsWith("/")) p = p.slice(0, -1);
-  // Published snapshot first (stable, gated); fall back to the LIVE builder
-  // output for a page that exists there but isn't snapshotted yet (a brand-new
-  // note/folder), so it's reachable in ~seconds.
-  return (await resolveIn(ROOT, p)) || (await resolveIn(LIVE, p));
-}
 
-// No good build yet (cold start / very first compile, before /srv/current is
-// published)? Serve a self-refreshing splash so a reader who arrives mid-build
-// sees "Building…" rather than a connection error. Once a snapshot exists this
-// never shows again — nightly rebuilds keep serving the previous snapshot.
-//
-// COMPLETENESS gate (2026-06-15): a build is "ready" ONLY if it has index.html
-// AND the core ComponentResources (styles + client JS). Requiring the full set
-// means an incomplete /srv/current falls back to the splash instead of serving
-// a broken, unstyled page. (Belt-and-suspenders with the entrypoint publish
-// gate.) static/contentIndex.json = the search index; static/graphIndex.json =
-// the lean graph/explorer index derived at publish time (2026-08-23) — a
-// snapshot missing either falls back to the splash.
-const REQUIRED = [
-  "index.html", "index.css", "prescript.js", "postscript.js",
-  // contentIndex.json was dropped here in wiki-dynamic-index P2: Quartz's
-  // ContentIndex emitter is switched off (it was the last non-incremental
-  // emitter), so the file no longer exists and requiring it would pin
-  // buildReady() false forever -> the splash on every request.
-  "static/graphIndex.json",
-];
-// Readiness only changes when the /srv/current symlink is re-pointed — cache
-// the probe briefly instead of stat()ing 6 files on EVERY request.
+// A page URL for sure: no extension (Quartz pretty URLs), a folder URL, or a
+// legacy .html form. A URL whose last segment has a dot ("/notes/pv.1": Quartz
+// keeps the dots of a file name) is a published asset when that file exists,
+// else a page - unless its extension is a known asset type, which is a page
+// only when the site index knows one at that URL (rw-p1a-deploy-prep, NA4-1 /
+// RV-4: every dotted URL used to be an asset, so "pv.1.md" was a 404).
+function isPageUrl(urlPath) {
+  const p = urlPath.split("?")[0].split("#")[0];
+  const ext = extname(p);
+  return !ext || ext === ".html" || p.endsWith("/");
+}
+const extOf = (urlPath) => extname(urlPath.split("?")[0].split("#")[0]).toLowerCase();
+
+// No published bundle yet (cold start, first build): the page chrome needs the
+// bundle, so a self-refreshing splash. P1b replaces this readiness contract.
+const REQUIRED = ["index.css", "prescript.js", "postscript.js", "static/graphIndex.json"];
 let _ready = { at: 0, ok: false };
-async function buildReady() {
+async function bundleReady() {
   const now = Date.now();
   if (now - _ready.at < 2000) return _ready.ok;
   let ok = true;
   try {
-    for (const f of REQUIRED) {
-      if (!(await stat(join(ROOT, f))).isFile()) { ok = false; break; }
-    }
+    for (const f of REQUIRED) if (!(await stat(join(ROOT, f))).isFile()) { ok = false; break; }
   } catch { ok = false; }
   _ready = { at: now, ok };
   return ok;
 }
 
-// Throttled request-activity marker (was a SYNCHRONOUS write per request).
-// lastAccessMs is exact (in memory) — the file write for the snapshot loop
-// stays throttled. Exposed at /__last-access so the COMPILER can defer its
-// bulk backfill while a human is actually using the wiki (operator
-// 2026-08-24: drain waits until 15min after the last interaction).
 let lastAccessMs = 0;
 let _lastAccessWrote = 0;
 function markAccess() {
@@ -144,107 +94,6 @@ function markAccess() {
   _lastAccessWrote = now;
   writeFile("/tmp/last-access", String(Math.floor(now / 1000))).catch(() => {});
 }
-
-// ── Truthful miss-handling (2026-08-23) ─────────────────────────────────────
-// The vault is mounted read-only at /wiki, so an HTML miss can be told apart:
-//   1. JUST-CREATED — the markdown exists but the builder hasn't emitted the
-//      page yet → an auto-refreshing "building" page (+ prompt-publish flag),
-//      instead of the 404 that made a fresh note look broken.
-//   2. REGISTERED-BUT-UNBUILT — the slug is in the compiler's planned.json
-//      (entities the brain knows whose page hasn't been synthesized yet — the
-//      truthful wiki-filler queue) → a "queued for synthesis" page.
-//   3. Anything else → the real 404.
-const WIKI = "/wiki";
-
-let _planned = { at: 0, mtimeMs: 0, map: {}, byBase: {} };
-async function plannedFor(urlPath) {
-  const key = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "");
-  const now = Date.now();
-  if (now - _planned.at > 10_000) {
-    _planned.at = now;
-    try {
-      const file = join(WIKI, "planned.json");
-      const st = await stat(file);
-      if (st.mtimeMs !== _planned.mtimeMs) {
-        const map = JSON.parse(await readFile(file, "utf8")).planned ?? {};
-        // Quartz renders a wikilink to a nonexistent page as its BASENAME url
-        // (`/organization-anthropic`, not `/content/organization/…`), so the
-        // queue must also answer by basename.
-        const byBase = {};
-        for (const [k, v] of Object.entries(map)) byBase[k.split("/").pop()] = v;
-        _planned = { at: now, mtimeMs: st.mtimeMs, map, byBase };
-      }
-    } catch {
-      _planned = { at: now, mtimeMs: 0, map: {}, byBase: {} };
-    }
-  }
-  return _planned.map[key] ?? (key.includes("/") ? null : _planned.byBase[key] ?? null);
-}
-
-async function findFreshMarkdown(urlPath) {
-  let rel = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "");
-  if (!rel || extname(rel)) return null; // page URLs only, never assets
-  const base = normalize(join(WIKI, rel));
-  if (!base.startsWith(WIKI)) return null; // traversal guard
-  const candidates = [`${base}.md`, join(base, "index.md")];
-  // Quartz slugifies spaces to dashes; author-owned trees may hold the
-  // space-named original of a dash URL.
-  if (/^(notes|content\/notebooks)\//.test(rel) && rel.includes("-")) {
-    candidates.push(`${normalize(join(WIKI, rel.replace(/-/g, " ")))}.md`);
-  }
-  for (const c of candidates) {
-    try {
-      const st = await stat(c);
-      // Only a RECENT file counts as "just created, still building" — an old
-      // markdown with no emitted HTML is some other condition, not a build lag.
-      if (st.isFile() && Date.now() - st.mtimeMs < 3600_000) {
-        return { file: c, isNote: rel.startsWith("notes/"), mtimeMs: st.mtimeMs };
-      }
-    } catch { /* next */ }
-  }
-  return null;
-}
-
-// Interim rendering for a just-created page: the CONTENT is available (we
-// have the markdown) even though the built page isn't — show it. For user
-// notes this matters most (operator 2026-08-24: notes are the user's own
-// editable documents, not knowledge-base pages — a bare "wait for the build"
-// screen made a fresh note unusable). Minimal, safe markdown-ish rendering:
-// escaped text with headings/paragraph breaks preserved.
-function renderInterimContent(md) {
-  const body = md.replace(/^---\n[\s\S]*?\n---\n?/, ""); // drop frontmatter
-  const blocks = esc(body).split(/\n{2,}/).map((b) => {
-    const h = b.match(/^(#{1,6})\s+(.*)$/);
-    if (h) {
-      const lvl = Math.min(6, h[1].length + 1);
-      return `<h${lvl}>${h[2]}</h${lvl}>`;
-    }
-    return `<p>${b.replace(/\n/g, "<br>")}</p>`;
-  });
-  return blocks.join("\n");
-}
-
-const miniPage = (title, heading, body, refresh) =>
-  `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-${refresh ? `<meta http-equiv="refresh" content="${refresh}">` : ""}<title>${title}</title>
-<style>html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;
-font-family:system-ui,-apple-system,sans-serif;background:#1e1e24;color:#d4d4dc}
-.box{text-align:center;max-width:34rem;padding:2rem}
-.badge{display:inline-block;padding:.15rem .6rem;border:1px solid #44454f;border-radius:1rem;
-font-size:.75rem;color:#9a9ba6;margin-bottom:1rem}
-h1{font-size:1.15rem;font-weight:600;margin:0 0 .5rem}
-p{font-size:.9rem;color:#9a9ba6;margin:.3rem 0;line-height:1.55}
-a{color:#84a9ff;text-decoration:none}</style>
-</head><body><div class="box"><div class="badge">${title}</div><h1>${heading}</h1>
-${body}<p><a href="/">← Knowledge Vault home</a></p></div></body></html>`;
-
-const esc = (s) =>
-  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const SPLASH = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -256,11 +105,9 @@ font-family:system-ui,-apple-system,sans-serif;background:#1e1e24;color:#d4d4dc}
 margin:0 auto 1.2rem;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
 h1{font-size:1.1rem;font-weight:600;margin:0 0 .4rem}p{font-size:.85rem;color:#9a9ba6;margin:.2rem 0;line-height:1.5}</style>
 </head><body><div class="box"><div class="spin"></div><h1>Building the wiki…</h1>
-<p>The site is compiling. This page refreshes automatically and will load as soon as a complete build is ready.</p>
+<p>The site bundle is compiling. This page refreshes automatically.</p>
 </div></body></html>`;
 
-// 304 when the client's validator still matches (site is no-cache → every use
-// revalidates; this makes that revalidation ~free).
 function notModified(req, st) {
   const inm = req.headers["if-none-match"];
   if (inm) return inm === etagOf(st);
@@ -272,33 +119,96 @@ function notModified(req, st) {
   return false;
 }
 
-function baseHeaders(st, ext) {
+const baseHeaders = (st, ext) => ({
+  etag: etagOf(st),
+  "last-modified": new Date(st.mtimeMs).toUTCString(),
+  "cache-control": cacheControl(ext),
+});
+
+// ── reconciliation (D13 item 4): health probe + repair pass on (re)connect ──
+const RECONCILE_MS = Math.max(5_000, Number(process.env.WIKI_RECONCILE_INTERVAL_MS || "300000"));
+const REPAIR = process.env.WIKI_RECONCILE_REPAIR !== "0";
+let _reconcile = { report: null, at: null, error: null, running: null };
+function runReconcile(why, repair) {
+  if (_reconcile.running) return _reconcile.running;
+  _reconcile.running = (async () => {
+    try {
+      const r = await reconcile({ vault: VAULT, repair, log: (m) => console.log(`[wiki-viewer] ${m}`) });
+      const final = r.after || r;
+      _reconcile.report = final;
+      _reconcile.error = null;
+      _reconcile.at = new Date().toISOString();
+      console.log(`[wiki-viewer] reconcile pass (${why}${repair ? ", repair" : ""}): ` +
+        formatReport(r).split("\n").join(" | "));
+      if (r.after) console.log(`[wiki-viewer] reconcile after repair: ${formatReport(r.after).split("\n")[0]}`);
+    } catch (e) {
+      _reconcile.error = String(e?.message || e);
+      _reconcile.at = new Date().toISOString();
+      console.error(`[wiki-viewer] reconcile pass (${why}) CANNOT CHECK: ${_reconcile.error}`);
+    } finally {
+      _reconcile.running = null;
+    }
+  })();
+  return _reconcile.running;
+}
+
+function health() {
+  const db = dbState();
+  const rep = _reconcile.report;
+  const reasons = [];
+  if (db.state !== "up") reasons.push(`database ${db.state}`);
+  if (_reconcile.error) reasons.push(`reconciliation cannot check: ${_reconcile.error}`);
+  else if (!rep) reasons.push("reconciliation not yet run");
+  else if (rep.drift > 0) {
+    reasons.push(`drift ${rep.drift} (${rep.missing.length} missing, ${rep.stale.length} stale, ${rep.empty.length} empty, ` +
+      `${rep.orphan.length} orphan, ${rep.failed.length} failed)`);
+  }
+  // A page-class entry that threw, or the route itself: a renderer bug, named.
+  const broken = brokenPageClasses();
+  for (const b of broken) {
+    reasons.push(`page class ${b.name}@${b.version} ${b.phase}() ${b.kind === "invalid" ? "returned an invalid result" : "threw"} ${b.count}x: ${b.error}`);
+  }
+  const re = routeErrors();
+  if (re.count) reasons.push(`render errors ${re.count} (last ${re.last.key}: ${re.last.error})`);
   return {
-    etag: etagOf(st),
-    "last-modified": new Date(st.mtimeMs).toUTCString(),
-    "cache-control": cacheControl(ext),
+    status: reasons.length ? "degraded" : "ok",
+    reasons,
+    db: { state: db.state, since: new Date(db.since).toISOString(), lastOkAt: db.lastOkAt ? new Date(db.lastOkAt).toISOString() : null, lastError: db.lastError },
+    reconcile: rep ? {
+      checkedAt: _reconcile.at, drift: rep.drift, files: rep.files, rows: rep.rows,
+      missing: rep.missing.slice(0, 50), stale: rep.stale.slice(0, 50), future: (rep.future || []).slice(0, 50),
+      empty: rep.empty.slice(0, 50), orphan: rep.orphan.slice(0, 50), failed: rep.failed.slice(0, 50),
+    } : { checkedAt: _reconcile.at, error: _reconcile.error },
+    pageClasses: pageClasses().map((e) => `${e.name}@${e.version}`),
+    brokenPageClasses: broken,
+    renderErrors: re,
+    builder: process.env.WIKI_BUILDER !== "0",
   };
 }
 
 async function handle(req, res) {
-  // Machine probe — must NOT count as user interaction.
-  if (req.url === "/__last-access") {
+  const url = req.url || "/";
+  // Machine probes - must NOT count as user interaction.
+  if (url === "/__last-access") {
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify({ ts: lastAccessMs }));
     return;
   }
+  if (url.split("?")[0] === "/__health") {
+    const hb = health();
+    res.writeHead(hb.status === "ok" ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify(hb));
+    return;
+  }
   markAccess();
-  if (!(await buildReady())) {
+  if (!(await bundleReady())) {
     res.writeHead(503, { "content-type": "text/html; charset=utf-8", "retry-after": "6" });
     res.end(SPLASH);
     return;
   }
-  // Phase C: serve the nav/graph index LIVE from wiki_pages. Same url, same
-  // shape, so the Explorer/graph/autocomplete need no change - but a page
-  // created seconds ago is in the sidebar on the next load instead of waiting
-  // for a snapshot swap. Falls back to the published file if the DB is
-  // unavailable (handled by returning null).
-  if (navIndexEnabled() && (req.url || "").split("?")[0].endsWith("/static/graphIndex.json")) {
+  // The nav/graph index, LIVE from wiki_pages (Phase C); the published file
+  // is the fallback while the database is unreachable.
+  if (navIndexEnabled() && url.split("?")[0].endsWith("/static/graphIndex.json")) {
     const nav = await getNavIndex();
     if (nav) {
       const headers = {
@@ -317,187 +227,57 @@ async function handle(req, res) {
       return;
     }
   }
-
-  // Alias for clients cached from before the index change (see above).
-  if ((req.url || "").split("?")[0].endsWith("/static/contentIndex.json")) {
+  // Alias for clients cached from before the index change.
+  if (url.split("?")[0].endsWith("/static/contentIndex.json")) {
     const lean = join(ROOT, "static", "graphIndex.json");
     try {
       const st = await stat(lean);
-      res.writeHead(200, {
-        ...baseHeaders(st, ".json"),
-        "content-type": "application/json; charset=utf-8",
-        "content-length": st.size,
-      });
+      res.writeHead(200, { ...baseHeaders(st, ".json"), "content-type": "application/json; charset=utf-8", "content-length": st.size });
       createReadStream(lean).pipe(res);
       return;
-    } catch { /* no lean index either - fall through to the normal 404 */ }
+    } catch { /* fall through */ }
   }
-  const hit = await resolve(req.url || "/");
+  const page = async (u) => {
+    const out = await renderLive(u);
+    const body = req.method === "HEAD" ? undefined : out.body;
+    res.writeHead(out.status, { ...out.headers, "content-length": Buffer.byteLength(out.body || "") });
+    res.end(body);
+  };
+  if (isPageUrl(url)) return page(url.replace(/\.html(?=$|[?#])/, ""));
+  const hit = await resolveAsset(url);
   if (hit) {
     const { file, st } = hit;
-    // Served from the LIVE builder output ⇒ this page isn't in the published
-    // snapshot yet (a just-created note/folder). Signal the snapshot loop to
-    // publish promptly (bypassing the idle gate) so the nav/index catch up.
-    if (file.startsWith(LIVE)) writeFile(PUBLISH_FLAG, "1").catch(() => {});
     const ext = extname(file);
     if (notModified(req, st)) {
       res.writeHead(304, baseHeaders(st, ext));
       res.end();
       return;
     }
-    const head = { ...baseHeaders(st, ext), "content-type": MIME[ext] || "application/octet-stream" };
-    if (req.method === "HEAD") {
-      res.writeHead(200, { ...head, "content-length": st.size });
-      res.end();
-      return;
-    }
-    if (ext === ".html") {
-      // Legacy dev-mode hot-reload strip. The builder no longer injects the
-      // ws://localhost reload client (patched out in the Dockerfile), so this
-      // only fires for pages built before that patch; the cheap substring
-      // check keeps the streaming path for everything else.
-      const html = await readFile(file, "utf8");
-      const cleaned = html.includes("ws://localhost")
-        ? html.replace(
-            /<script\b[^>]*>(?:(?!<\/script>)[\s\S])*?ws:\/\/localhost(?:(?!<\/script>)[\s\S])*?<\/script>/gi,
-            "",
-          )
-        : html;
-      res.writeHead(200, { ...head, "content-length": Buffer.byteLength(cleaned) });
-      res.end(cleaned);
-      return;
-    }
-    res.writeHead(200, { ...head, "content-length": st.size });
+    res.writeHead(200, { ...baseHeaders(st, ext), "content-type": MIME[ext] || "application/octet-stream", "content-length": st.size });
+    if (req.method === "HEAD") { res.end(); return; }
     createReadStream(file).pipe(res);
     return;
   }
-  const urlPath = req.url || "/";
-  // 1. Phase B — the page is not in any build but IS in Open Brain: render it
-  // from wiki_pages with the REAL markdown renderer. Read-only, no client
-  // bundle (audit A-1); no-store so a cached transient fallback can never pin
-  // itself over the real page (audit A-4). Runs BEFORE the fresh-file interim
-  // so drain-written pages get the real render; a brand-new NOTE (file exists,
-  // row not yet synced) falls through to the interim below.
-  if (dbRenderEnabled()) {
-    const key = decodeURIComponent(urlPath.split("?")[0].split("#")[0])
-      .replace(/^\/+/, "").replace(/\/+$/, "");
-    if (key && !extname(key)) {
-      const row = await fetchWikiPage(key);
-      if (row) {
-        writeFile(PUBLISH_FLAG, "1").catch(() => {});
-        let bodyHtml = "";
-        try { bodyHtml = renderMarkdown(row.body); } catch { /* render never blocks the page */ }
-        res.writeHead(200, {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store",
-          "x-wiki-render": "db",
-        });
-        // editable on notes HERE too. A UI-created note always has a row (the
-        // workbench syncs wiki_pages at save time), so it resolves on THIS
-        // path; the fresh-file path below only catches notes with no row yet
-        // (written straight to disk). Setting the flag only there shipped the
-        // "editable immediately" feature on a path real notes never take
-        // (operator caught it, 2026-08-27).
-        res.end(pageDocument({
-          title: row.title, bodyHtml, slug: row.slug, updatedAt: row.updated_at,
-          editable: key.startsWith("notes/"),
-        }));
-        return;
-      }
-    }
-  }
-
-  // 1. Just-created page: markdown exists, HTML not emitted yet — serve the
-  // CONTENT immediately (readable interim render) with an auto-refresh, and
-  // ask the snapshot loop to publish promptly. A fresh user note is the
-  // user's own document — it must be readable the second it exists.
-  const fresh = await findFreshMarkdown(urlPath);
-  if (fresh) {
-    // A file exists but has no build and no DB row yet (a note saved seconds
-    // ago). Render it with the SAME renderer + themed document as the DB path:
-    // the old bespoke interim markup linked NO stylesheet, which is exactly the
-    // unstyled "white screen with a title" the operator hit (2026-08-26).
-    writeFile(PUBLISH_FLAG, "1").catch(() => {});
-    let md = "";
-    try { md = await readFile(fresh.file, "utf8"); } catch { /* vanished */ }
-    let bodyHtml = "";
-    let title = "";
-    try {
-      const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(md);
-      const body = fm ? md.slice(fm[0].length) : md;
-      const t = fm ? /^title:\s*(.*)$/m.exec(fm[1]) : null;
-      title = t ? t[1].trim().replace(/^["']|["']$/g, "") : "";
-      bodyHtml = renderMarkdown(body);
-    } catch { /* never block the page on a render error */ }
-    res.writeHead(200, {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-      "x-wiki-render": "fresh",
-    });
-    res.end(pageDocument({
-      title, bodyHtml,
-      slug: decodeURIComponent(urlPath.split("?")[0]).replace(/^\/+/, ""),
-      editable: fresh.isNote,
-    }));
-    return;
-  }
-  // 2. Registered-but-unbuilt entity: honest status page from planned.json.
-  // `unlinked` entries (below the sweep's link threshold — see the wiki
-  // service's lib/entity-links.mjs) are NOT in the backfill queue, so
-  // promising "an upcoming compile" for them would be a lie.
-  const planned = await plannedFor(urlPath);
-  if (planned) {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    res.end(miniPage(
-      planned.unlinked ? "Known, not yet cited" : "Queued for synthesis",
-      esc(planned.name || "This page"),
-      planned.unlinked
-        ? `<p><strong>${esc(planned.name || "This entity")}</strong> (${esc(planned.type || "entity")})
-       is registered in Open Brain, but no thought or source cites it yet.
-       A wiki page is synthesized automatically once something links to it.</p>`
-        : `<p><strong>${esc(planned.name || "This entity")}</strong> (${esc(planned.type || "entity")})
-       is registered in Open Brain but its wiki page hasn't been synthesized yet.
-       It will appear automatically on an upcoming compile — no action needed.</p>`,
-      null,
-    ));
-    return;
-  }
-  // 3. Nothing anywhere. For a wiki-looking (extension-less) path this is
-  // almost always a link to a RETIRED page class, so answer with a themed
-  // explanation rather than a bare 404: the client prefetches links for
-  // popovers and a non-2xx there logs a console error on every hover
-  // (operator, 2026-08-26). Assets and anything with an extension still 404.
-  {
-    const p3 = decodeURIComponent((req.url || "/").split("?")[0].split("#")[0]);
-    if (!extname(p3) && p3 !== "/") {
-      res.writeHead(200, {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store",
-        "x-wiki-render": "not-available",
-      });
-      res.end(notAvailableDocument({ slug: p3.replace(/^\/+/, "") }));
-      return;
-    }
-  }
-
-  // 3. True 404 — fall back to Quartz's generated 404 page if present.
-  try {
-    const nf = join(ROOT, "404.html");
-    await stat(nf);
-    res.writeHead(404, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    createReadStream(nf).pipe(res);
-    return;
-  } catch { /* no 404 page */ }
-  res.writeHead(404, { "content-type": "text/plain" });
+  // No published file: a dotted page name, unless the extension is an asset's.
+  if (!MIME[extOf(url)] || (await isKnownPageUrl(url))) return page(url);
+  res.writeHead(404, { "content-type": "text/plain", "cache-control": "no-cache" });
   res.end("not found");
 }
+
+await loadPageClassDir();
+console.log(`[wiki-viewer] page classes: ${pageClasses().map((e) => `${e.name}@${e.version}/p${e.priority}`).join(", ")}`);
+// Repair pass on every (re)connect; periodic check as the health probe.
+onConnect((why) => runReconcile(why, REPAIR));
+startProbe();
+setInterval(() => { if (dbState().state === "up") runReconcile("periodic", false); }, RECONCILE_MS).unref();
 
 http
   .createServer((req, res) => {
     handle(req, res).catch((e) => {
-      console.error("[wiki-viewer] request failed:", e?.message || e);
+      console.error("[wiki-viewer] request failed:", e?.stack || e?.message || e);
       if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain" });
       res.end("internal error");
     });
   })
-  .listen(PORT, () => console.log(`[wiki-viewer] static idle-swap server on :${PORT}`));
+  .listen(PORT, () => console.log(`[wiki-viewer] live renderer on :${PORT} (WIKI_BUILDER=${process.env.WIKI_BUILDER ?? "1"})`));
+

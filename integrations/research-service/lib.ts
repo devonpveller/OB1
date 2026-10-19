@@ -39,6 +39,28 @@ export function extractTextFromHtml(html: string): string {
   return s.split("\n").map((l) => l.trim()).filter(Boolean).join("\n").trim();
 }
 
+/**
+ * The outbound http(s) links of a page, absolute and de-duplicated, fragments dropped, in
+ * document order (research-workbench P3a: a below-floor page is followed through these, D15
+ * item 8). Same-page anchors and non-http schemes are not links to another source.
+ */
+export function extractLinks(html: string, baseUrl: string, max = 200): string[] {
+  const out: string[] = [];
+  const re = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(String(html || ""))) !== null && out.length < max) {
+    const raw = decodeEntities((m[1] ?? m[2] ?? m[3] ?? "").trim());
+    if (!raw || raw.startsWith("#")) continue;
+    let u: URL;
+    try { u = new URL(raw, baseUrl); } catch { continue; }
+    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    u.hash = "";
+    const s = u.toString();
+    if (s !== baseUrl && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
 export function extractTitle(html: string): string {
   const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(String(html || ""));
   return m ? decodeEntities(m[1]).replace(/\s+/g, " ").trim() : "";

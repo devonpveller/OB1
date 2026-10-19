@@ -12,6 +12,9 @@
  * claims and STAGES candidate sources.
  */
 
+import { amountUnit, CredibilityGateError, totalUnit, unit } from "./credibility.ts";
+import { safeReasonText, safeScholarlyRecord } from "./scholarly.ts";
+
 interface QueryClient {
   queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }>;
 }
@@ -266,4 +269,197 @@ export async function existingFreshSource(
   const row = r.rows[0];
   if (!row || row.stale) return null;
   return { id: row.id, title: row.title, content: row.content, domain: row.domain };
+}
+
+// ── D15 credibility records (research-workbench P3a) ────────────────────────
+// The research service still never writes CLAIMS (the curator does). What it writes here is
+// the credibility record of the sources it admitted: the family, the signals and the score on
+// sources.metadata.credibility (+ the resolved scholarly record), the rolling-total history,
+// the entailment-gated corroborations, found_via on a source reached through a lead, and the
+// admission trail - where a below-floor lead lives, never as a sources row.
+
+/** A scholarly record already cached on a stored source with this URL (D15 item 1: cached). */
+export async function cachedScholarly(client: QueryClient, url: string): Promise<Record<string, unknown> | null> {
+  const r = await client.queryObject<{ scholarly: Record<string, unknown> | null }>(
+    `SELECT metadata -> 'scholarly' AS scholarly FROM public.sources
+      WHERE url = $1 AND metadata ? 'scholarly' AND retraction_committed_at IS NULL
+      ORDER BY updated_at DESC LIMIT 1`,
+    [url],
+  );
+  // attempt 2: a cached record is re-read through the allow-list (no stored error text travels on)
+  const rec = r.rows[0]?.scholarly ?? null;
+  return rec ? safeScholarlyRecord(rec) : null;
+}
+
+export interface CredibilityStamp {
+  family: string;
+  claim_kind: string;
+  signals: unknown;
+  score: number;
+  total: number;
+  reasons: string[];
+  model_version: string;
+  admission: { path: string; floor: number | null; total: number | null; trail_id: string | null };
+  found_via?: string | null;
+  found_via_kind?: "lead" | "held" | null;
+}
+
+/** Stamp one source's credibility record and append its history row. */
+export async function stampSourceCredibility(
+  client: QueryClient,
+  sourceId: string,
+  stamp: CredibilityStamp,
+  scholarly: Record<string, unknown> | null,
+  jobId: string | null,
+): Promise<void> {
+  // attempt 2: a stamp the SQL twin would refuse (OBC04) is refused here, before it is stored;
+  // and a scholarly record is stored only with an allow-listed reason (no URL, no key, no mailto)
+  unit(stamp.score, `credibility stamp of ${sourceId}: score`);
+  totalUnit(stamp.total, `credibility stamp of ${sourceId}: total`);   // a record, never read as an input (attempt 4)
+  if (!stamp.family) throw new CredibilityGateError(`credibility stamp of ${sourceId}: no family`);
+  // attempt 4 (tester near-miss P3): `primary` is the JSON boolean or absent - the SQL twin reads only
+  // `= 'true'::jsonb` and the CHECK sources_credibility_stamp_ok refuses any other shape
+  const primary = (stamp.signals as Record<string, unknown> | null | undefined)?.primary;
+  if (primary !== undefined && typeof primary !== "boolean") {
+    throw new CredibilityGateError(`credibility stamp of ${sourceId}: signals.primary is ${JSON.stringify(primary)}, not a boolean`);
+  }
+  const patch: Record<string, unknown> = { credibility: { ...stamp, reasons: stamp.reasons.map(safeReasonText) } };
+  if (scholarly) patch.scholarly = safeScholarlyRecord(scholarly);
+  if (stamp.found_via) { patch.found_via = stamp.found_via; patch.found_via_kind = stamp.found_via_kind ?? "lead"; }
+  await client.queryObject(
+    `UPDATE public.sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1::uuid`,
+    [sourceId, JSON.stringify(patch)],
+  );
+  await client.queryObject(
+    `INSERT INTO public.source_credibility_history
+        (source_id, family, claim_kind, score, total, model_version, signals, reasons, job_id)
+     VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::uuid)`,
+    [sourceId, stamp.family, stamp.claim_kind, stamp.score, stamp.total, stamp.model_version,
+      JSON.stringify(stamp.signals), JSON.stringify(stamp.reasons.map(safeReasonText)), jobId],
+  );
+  if (stamp.found_via) {
+    await client.queryObject(
+      `INSERT INTO public.source_trail_events (source_id, kind, detail) VALUES ($1::uuid, 'found_via', $2::jsonb)`,
+      [sourceId, JSON.stringify({ found_via: stamp.found_via, kind: stamp.found_via_kind ?? "lead", job_id: jobId })],
+    );
+  }
+}
+
+/**
+ * One entailment-gated corroboration (the DB refuses a non-transferring verdict, OBC02).
+ * Attempt 2: ONE row per giver -> receiver -> line. A re-run of the same line (after the weights
+ * were tuned, say) REPLACES the pair's row with the current amount and model version, so the
+ * rolling total never sums the same pair twice; an amount outside [0, 1] or a self-corroboration
+ * is refused here as well as by the table's CHECKs.
+ */
+export async function recordCorroboration(
+  client: QueryClient,
+  e: { from: string; to: string; strength: "strong" | "weak"; amount: number; claim: string; kind: string; verdict: string; model: string },
+  jobId: string | null,
+): Promise<void> {
+  // attempt 4 (tester finding F1): 0 or in [1e-9, 1] - attempt 3 SENT 5e-324, which the stored twin's
+  // REAL cast could not hold; the table's CHECK (source_corroborations_amount_unit) applies the same rule
+  amountUnit(e.amount, `corroboration ${e.from} -> ${e.to}: amount`);
+  if (e.from === e.to) throw new CredibilityGateError(`corroboration refused: source ${e.from} cannot corroborate itself`);
+  await client.queryObject(
+    `INSERT INTO public.source_corroborations
+        (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version, job_id)
+     VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9::uuid)
+     ON CONFLICT (from_source_id, to_source_id, claim_text) DO UPDATE
+        SET strength = EXCLUDED.strength, amount = EXCLUDED.amount, claim_kind = EXCLUDED.claim_kind,
+            verdict = EXCLUDED.verdict, model_version = EXCLUDED.model_version, job_id = EXCLUDED.job_id,
+            created_at = now()`,
+    [e.from, e.to, e.strength, e.amount, e.claim.slice(0, 2000), e.kind, e.verdict, e.model, jobId],
+  );
+}
+
+export interface TrailRow {
+  id: string; url: string; kind: string; claim_kind: string; family: string | null; score: number | null;
+  total: number | null; floor: number | null; model_version: string; signals: unknown; reasons: string[];
+  found_via: string | null; path: unknown[]; source_id: string | null;
+}
+
+/** Persist the run's admission trail (every judged hit, every lead, every path). */
+export async function recordAdmissionTrail(
+  client: QueryClient, rows: TrailRow[], jobId: string | null, sessionId: string | null,
+): Promise<void> {
+  for (const t of rows) {
+    await client.queryObject(
+      `INSERT INTO public.research_admission_trail
+          (id, job_id, session_id, url, url_key, kind, claim_kind, family, score, total, floor, model_version,
+           signals, reasons, found_via, path, source_id)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4, public.contract_url_key($4), $5, $6, $7, $8, $9, $10, $11,
+               $12::jsonb, $13::jsonb, $14::uuid, $15::jsonb, $16::uuid)
+       ON CONFLICT (id) DO NOTHING`,
+      [t.id, jobId, sessionId, t.url, t.kind, t.claim_kind, t.family, t.score, t.total, t.floor, t.model_version,
+        JSON.stringify(t.signals ?? {}), JSON.stringify(t.reasons ?? []), t.found_via, JSON.stringify(t.path ?? []), t.source_id],
+    );
+  }
+}
+
+export interface HeldRow { id: string; url: string | null; title: string; content: string; content_type: string; metadata: Record<string, unknown> }
+
+/** A refinery's held sources, minus the ones its hidden set narrows out of this session. */
+export async function loadHeldSources(client: QueryClient, refineryId: string): Promise<HeldRow[]> {
+  const r = await client.queryObject<HeldRow>(
+    `SELECT h.id, h.url, h.title, h.content, h.content_type, h.metadata
+       FROM public.held_sources h
+      WHERE h.refinery_id = $1::uuid
+        AND NOT EXISTS (SELECT 1 FROM public.refinery_hidden x
+                         WHERE x.refinery_id = h.refinery_id AND x.node_kind = 'source' AND x.node_ref = h.id::text)
+      ORDER BY h.created_at`,
+    [refineryId],
+  );
+  return r.rows;
+}
+
+/** The refinery's unhidden ACTIVE context sources (its folded user sources), for the scoped pass. */
+export async function loadRefineryContext(client: QueryClient, refineryId: string): Promise<Array<{ id: string; url: string | null; title: string }>> {
+  const r = await client.queryObject<{ id: string; url: string | null; title: string }>(
+    `SELECT s.id, s.url, s.title
+       FROM public.refinery_user_sources u JOIN public.sources s ON s.id = u.source_id
+      WHERE u.refinery_id = $1::uuid AND s.retraction_committed_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM public.refinery_hidden x
+                         WHERE x.refinery_id = u.refinery_id AND x.node_kind = 'source' AND x.node_ref = s.id::text)`,
+    [refineryId],
+  );
+  return r.rows;
+}
+
+export class TombstonedError extends Error {
+  constructor(readonly url: string, message: string) { super(message); this.name = "TombstonedError"; }
+}
+
+/**
+ * The fold's move (public.fold_held_source). A tombstoned URL makes the sources gate raise
+ * OBT01; that is surfaced as TombstonedError so the caller routes the D5 reopening path.
+ */
+/**
+ * The fold's credibility record as it may be STORED (attempt 3, tester near-miss: the stamp path
+ * scrubbed its reasons and the fold path did not). fold_held_source writes it to the source's
+ * metadata.credibility and to the folded trail event, so every reason line goes through
+ * safeReasonText and a scholarly record through safeScholarlyRecord, as in stampSourceCredibility.
+ */
+export function safeFoldCredibility(credibility: unknown): unknown {
+  if (!credibility || typeof credibility !== "object" || Array.isArray(credibility)) return credibility;
+  const c = { ...(credibility as Record<string, unknown>) };
+  if (Array.isArray(c.reasons)) c.reasons = c.reasons.map((r) => safeReasonText(String(r)));
+  if (c.scholarly && typeof c.scholarly === "object") c.scholarly = safeScholarlyRecord(c.scholarly as Record<string, unknown>);
+  return c;
+}
+
+export async function foldHeld(client: QueryClient, heldId: string, credibility: unknown, jobId: string | null): Promise<string> {
+  try {
+    const r = await client.queryObject<{ id: string }>(
+      `SELECT public.fold_held_source($1::uuid, $2::jsonb, $3::uuid) AS id`,
+      [heldId, JSON.stringify(safeFoldCredibility(credibility)), jobId],
+    );
+    return r.rows[0].id;
+  } catch (e) {
+    const m = String((e as Error)?.message ?? e);
+    if (/tombstoned url refused|OBT01/i.test(m) || (e as { fields?: { code?: string } })?.fields?.code === "OBT01") {
+      throw new TombstonedError("", m);
+    }
+    throw e;
+  }
 }

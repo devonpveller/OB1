@@ -1,0 +1,36 @@
+{
+ "_provenance": "rw-p3a-entail 2026-10-17. SHAPE-FAITHFUL SYNTHETIC responses: the field names and nesting are OpenAlex's /works and /authors and Crossref's /works (as documented by both APIs); the VALUES (ids, counts, dates, names) are illustrative and were NOT fetched - this item makes no live call. Keys: '<service> <path> <id or filter>'.",
+ "openalex works doi:10.3389/fnhum.2021.757735": { "status": 200, "body": {
+   "id": "https://openalex.org/W9000000001", "doi": "https://doi.org/10.3389/fnhum.2021.757735",
+   "publication_date": "2021-11-09", "cited_by_count": 21,
+   "authorships": [
+     { "author": { "id": "https://openalex.org/A9000000001", "display_name": "Synthetic Author One" } },
+     { "author": { "id": "https://openalex.org/A9000000002", "display_name": "Synthetic Author Two" } },
+     { "author": { "id": "https://openalex.org/A9000000003", "display_name": "Synthetic Author Three" } } ] } },
+ "openalex authors openalex:A9000000001|A9000000002|A9000000003": { "status": 200, "body": { "results": [
+   { "id": "https://openalex.org/A9000000001", "works_count": 35 },
+   { "id": "https://openalex.org/A9000000002", "works_count": 212 },
+   { "id": "https://openalex.org/A9000000003", "works_count": 12 } ] } },
+ "openalex works doi:10.1038/s44172-025-00417-2": { "status": 404, "body": { "error": "not found" } },
+ "crossref works 10.1038/s44172-025-00417-2": { "status": 200, "body": { "status": "ok", "message": {
+   "DOI": "10.1038/s44172-025-00417-2", "is-referenced-by-count": 3,
+   "published": { "date-parts": [[2025, 5, 2]] },
+   "author": [ { "given": "Synthetic", "family": "Crossref-One" }, { "given": "Synthetic", "family": "Crossref-Two" } ] } } },
+ "openalex works doi:10.1186/s12984-025-01858-8": { "status": 200, "body": {
+   "id": "https://openalex.org/W9000000002", "doi": "https://doi.org/10.1186/s12984-025-01858-8",
+   "publication_date": "2025-12-01", "cited_by_count": 0,
+   "authorships": [
+     { "author": { "id": "https://openalex.org/A9000000004", "display_name": "Synthetic Author Four" } },
+     { "author": { "id": "https://openalex.org/A9000000005", "display_name": "Synthetic Author Five" } } ] } },
+ "openalex authors openalex:A9000000004|A9000000005": { "status": 200, "body": { "results": [
+   { "id": "https://openalex.org/A9000000004", "works_count": 8 },
+   { "id": "https://openalex.org/A9000000005", "works_count": 64 } ] } },
+ "openalex works pmcid:PMC12882250": { "status": 200, "body": {
+   "id": "https://openalex.org/W9000000002", "doi": "https://doi.org/10.1186/s12984-025-01858-8",
+   "publication_date": "2025-12-01", "cited_by_count": 0,
+   "authorships": [
+     { "author": { "id": "https://openalex.org/A9000000004", "display_name": "Synthetic Author Four" } },
+     { "author": { "id": "https://openalex.org/A9000000005", "display_name": "Synthetic Author Five" } } ] } },
+ "openalex works doi:10.48550/arxiv.2401.00001": { "status": 503, "body": null },
+ "crossref works 10.48550/arxiv.2401.00001": { "status": 503, "body": null }
+}

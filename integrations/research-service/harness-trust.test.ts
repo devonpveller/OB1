@@ -13,6 +13,7 @@
  * Everything here runs on mocked chat/search/fetch: no LLM call, no network.
  */
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { credibilityRows } from "./fixtures/credibility-seeds.ts";
 import { runResearch, type Deps, type FetchResult, type QueryClient, type SearchHit } from "./harness.ts";
 import { coverageFooter } from "./report.ts";
 
@@ -21,6 +22,9 @@ function stubClient(): QueryClient {
   return {
     // deno-lint-ignore no-explicit-any
     queryObject<T>(sql: string, _args?: unknown[]): Promise<{ rows: T[] }> {
+      // P3a: the run reads the credibility registries; answer with the migrations' seeds.
+      const cred = credibilityRows(sql);
+      if (cred) return Promise.resolve({ rows: cred as T[] });
       if (/INSERT INTO public\.sessions/i.test(sql)) {
         return Promise.resolve({ rows: [{ id: "00000000-0000-0000-0000-000000000001" }] as unknown as T[] });
       }
@@ -83,6 +87,8 @@ function mockDeps(o: MockOpts = {}) {
   const deps: Deps = {
     embed: () => Promise.resolve(new Array(1024).fill(0)),
     chat: (sys, user) => {
+      // P3a: the entailment judge (D10) - these replays are about retrieval, so every line holds.
+      if (sys.includes("ENTAILMENT JUDGE")) return Promise.resolve(JSON.stringify({ verdict: "supports" }));
       if (sys.includes("research planner")) {
         return Promise.resolve(JSON.stringify({ needs: o.needs ?? OPTIPLEX_NEEDS }));
       }
@@ -235,6 +241,8 @@ function recallingClient(): QueryClient {
   ];
   return {
     queryObject<T>(sql: string): Promise<{ rows: T[] }> {
+      const cred = credibilityRows(sql);
+      if (cred) return Promise.resolve({ rows: cred as T[] });
       if (/INSERT INTO public\.sessions/i.test(sql)) {
         return Promise.resolve({ rows: [{ id: "00000000-0000-0000-0000-000000000001" }] as unknown as T[] });
       }
@@ -450,6 +458,8 @@ Deno.test("B3: an empty pool WITH a reuse claim still refuses the curator", asyn
   // delegateToCurator with sources: [] and the poison sentence as the headline.
   const client: QueryClient = {
     queryObject<T>(sql: string): Promise<{ rows: T[] }> {
+      const cred = credibilityRows(sql);
+      if (cred) return Promise.resolve({ rows: cred as T[] });
       if (/INSERT INTO public\.sessions/i.test(sql)) {
         return Promise.resolve({ rows: [{ id: "00000000-0000-0000-0000-000000000001" }] as unknown as T[] });
       }

@@ -1,0 +1,74 @@
+{
+ "_provenance": "rw-p3a-entail 2026-10-17: the Skeptic's recorded downgrades (OB1 integrations/research-service/skeptic.test.ts at a28e9db, applyDowngrades cases), with skeptic_output produced by the Skeptic's own applyDowngrades before it was archived to archive/skeptic/. D10: the entailment stage must reproduce each skeptic_output from the per-line verdicts before the Skeptic flag and code are removed.",
+ "synthesis": "[SOURCED] Cats purr at 25Hz. [Source 1]\n[SOURCED] Cats can fly unaided. [Source 2]\n[INFERRED] Cats are mammals. [Source 3]",
+ "cases": [
+  {
+   "name": "rewrites the matched line's tag, preserves citation + others",
+   "downgrades": [
+    {
+     "claim": "Cats can fly unaided",
+     "to": "UNCERTAIN"
+    }
+   ],
+   "verdicts": [
+    "supports",
+    "partial",
+    "supports"
+   ],
+   "skeptic_output": "[SOURCED] Cats purr at 25Hz. [Source 1]\n[UNCERTAIN] Cats can fly unaided. [Source 2]\n[INFERRED] Cats are mammals. [Source 3]",
+   "skeptic_applied": 1
+  },
+  {
+   "name": "to GAP strips the citation",
+   "downgrades": [
+    {
+     "claim": "Cats can fly unaided",
+     "to": "GAP"
+    }
+   ],
+   "verdicts": [
+    "supports",
+    "unsupported",
+    "supports"
+   ],
+   "skeptic_output": "[SOURCED] Cats purr at 25Hz. [Source 1]\n[GAP] Cats can fly unaided.\n[INFERRED] Cats are mammals. [Source 3]",
+   "skeptic_applied": 1
+  },
+  {
+   "name": "no matching downgrade => untouched",
+   "downgrades": [
+    {
+     "claim": "dogs bark",
+     "to": "GAP"
+    }
+   ],
+   "verdicts": [
+    "supports",
+    "supports",
+    "supports"
+   ],
+   "skeptic_output": "[SOURCED] Cats purr at 25Hz. [Source 1]\n[SOURCED] Cats can fly unaided. [Source 2]\n[INFERRED] Cats are mammals. [Source 3]",
+   "skeptic_applied": 0
+  },
+  {
+   "name": "two downgrades hit two distinct lines",
+   "downgrades": [
+    {
+     "claim": "Cats purr",
+     "to": "UNCERTAIN"
+    },
+    {
+     "claim": "Cats can fly",
+     "to": "GAP"
+    }
+   ],
+   "verdicts": [
+    "partial",
+    "unsupported",
+    "supports"
+   ],
+   "skeptic_output": "[UNCERTAIN] Cats purr at 25Hz. [Source 1]\n[GAP] Cats can fly unaided.\n[INFERRED] Cats are mammals. [Source 3]",
+   "skeptic_applied": 2
+  }
+ ]
+}

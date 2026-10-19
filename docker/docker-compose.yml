@@ -153,6 +153,10 @@ services:
       # the live DB gets it by hand (psql -f), then the workbench's migrate-references.ts migrates
       # the legacy notes. Revert: revert-references.sql (before P0's revert).
       - ./init-references.sql:/docker-entrypoint-initdb.d/240-init-references.sql:ro # research-workbench P2a
+      # research-workbench P3a (rw-p3a-entail): the D15 credibility model (registries, source and
+      # line credibility, the entailment stage). Slot 245, after P2a's 240 (fresh-volume only; the
+      # live DB gets it by hand, psql -f). Revert: revert-research-credibility.sql (before P2a's).
+      - ./init-research-credibility.sql:/docker-entrypoint-initdb.d/245-init-research-credibility.sql:ro # research-workbench P3a
     networks:
       - obnet
     restart: unless-stopped
@@ -1025,6 +1029,21 @@ services:
       # Bounded preliminary gap research for article-mode (podcast) jobs.
       PRELIM_MAX_FETCH: ${RESEARCH_PRELIM_MAX_FETCH:-6}
       PRELIM_GAP_LIMIT: ${RESEARCH_PRELIM_GAP_LIMIT:-3}
+      # ---- research-workbench P3a (D15 / D10) ---------------------------------
+      # Scholarly metadata: the KEYED OpenAlex client with Crossref's polite pool as fallback,
+      # through FETCH_PROXY_URL above (the resolver refuses any other egress). SHIPPED INERT:
+      # with RESEARCH_SCHOLARLY_MAILTO empty there is no resolver and every DOI/PMID/PMCID/arXiv
+      # id is recorded `unresolved` (never a silent zero). OpenAlex is skipped without its key.
+      OPENALEX_API_KEY: ${RESEARCH_OPENALEX_API_KEY:-}
+      SCHOLARLY_MAILTO: ${RESEARCH_SCHOLARLY_MAILTO:-}
+      # A below-floor hit is a LEAD: fetched only to read its links, never stored (D15 item 8).
+      LEAD_MAX: ${RESEARCH_LEAD_MAX:-4}
+      LEAD_LINKS_MAX: ${RESEARCH_LEAD_LINKS_MAX:-5}
+      # The entailment stage's judge calls in flight (one verdict per cited line, D10).
+      ENTAIL_CONCURRENCY: ${RESEARCH_ENTAIL_CONCURRENCY:-4}
+      # The fold routes a tombstoned held source through the workbench's D5 admission gate.
+      WORKBENCH_URL: http://openbrain-workbench:8000
+      WORKBENCH_KEY: ${MCP_ACCESS_KEY}
       PORT: "8000"
     ports:
       - "127.0.0.1:8818:8000"
@@ -1161,6 +1180,10 @@ services:
     build:
       context: ./wiki-viewer
       dockerfile: Dockerfile
+      # The page-class registry + reconciler shared with the compiler
+      # (research-workbench P1a): COPY --from=recipes in the Dockerfile.
+      additional_contexts:
+        recipes: ../recipes
     image: openbrain-wiki-viewer:local
     container_name: openbrain-wiki-viewer
     logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
@@ -1239,6 +1262,11 @@ services:
       PORT: "8000"
       # Caddy injects this as X-Brain-Key when proxying; reuse MCP_ACCESS_KEY.
       WORKBENCH_KEY: ${MCP_ACCESS_KEY}
+      # research-workbench P3a: the D5 admission gate's debunked / credibility reopen paths score
+      # a returning URL with the research service's D15 model (one implementation). Unset or
+      # unreachable = "score unavailable", and those paths refuse (P0's behaviour).
+      RESEARCH_SCORER_URL: http://openbrain-research:8000
+      RESEARCH_SCORER_KEY: ${MCP_ACCESS_KEY}
       # Direct Postgres (atomic multi-row writes — G8).
       DB_HOST: openbrain-db
       DB_PORT: "5432"

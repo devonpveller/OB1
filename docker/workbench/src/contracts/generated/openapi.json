@@ -769,7 +769,7 @@
               "value": {
                 "type": "number",
                 "nullable": true,
-                "description": "the database (admission) score"
+                "description": "the database (admission) score: the D15 rolling total for the claim kind below"
               },
               "refinery_scoped": {
                 "type": "number",
@@ -790,6 +790,42 @@
               "computed_from"
             ]
           },
+          "claim_kind": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "claim_kinds",
+            "example": "general_theory",
+            "description": "A key of the `claim_kinds` registry (GET /workbench/contract/registries/claim_kinds)."
+          },
+          "signals": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "the signals of the source's FAMILY the score was computed from (D15 item 10)"
+          },
+          "corroborated_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QualitySource"
+            },
+            "description": "every source whose corroboration is in the score"
+          },
+          "contradicted_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QualitySource"
+            },
+            "description": "every source contradicting a claim this source grounds"
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QualityHistory"
+            },
+            "description": "the rolling total over time, newest first"
+          },
           "factors": {
             "type": "array",
             "items": {
@@ -804,7 +840,96 @@
           "lifecycle",
           "family",
           "score",
+          "claim_kind",
+          "signals",
+          "corroborated_by",
+          "contradicted_by",
+          "history",
           "factors"
+        ]
+      },
+      "QualitySource": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true
+          },
+          "family": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "source_families",
+            "example": "scholarly",
+            "description": "A key of the `source_families` registry (GET /workbench/contract/registries/source_families)."
+          },
+          "relation": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number",
+            "nullable": true,
+            "description": "the corroboration this source received from that one (null when it is not a transfer)"
+          },
+          "claim": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "source_id",
+          "title",
+          "url",
+          "family",
+          "relation",
+          "amount",
+          "claim"
+        ]
+      },
+      "QualityHistory": {
+        "type": "object",
+        "properties": {
+          "score": {
+            "type": "number"
+          },
+          "total": {
+            "type": "number",
+            "nullable": true
+          },
+          "claim_kind": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "claim_kinds",
+            "example": "general_theory",
+            "description": "A key of the `claim_kinds` registry (GET /workbench/contract/registries/claim_kinds)."
+          },
+          "model_version": {
+            "type": "string",
+            "nullable": true,
+            "description": "the D15 model label the row was computed under; null when the stored label names no registered paper score version (attempt 4)"
+          },
+          "computed_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "score",
+          "total",
+          "claim_kind",
+          "model_version",
+          "computed_at"
         ]
       },
       "QualityFactor": {
@@ -4302,31 +4427,26 @@
                   "lifecycle": "active",
                   "family": "general",
                   "score": {
-                    "value": 0.765,
+                    "value": 0.22,
                     "refinery_scoped": null,
-                    "version": "claim-confidence-mean-v1",
-                    "computed_from": "mean confidence of the claims this source grounds (init-claims.sql claim_confidence); the D15 model replaces it in P3a"
+                    "version": "d15 weights v1 paper p1",
+                    "computed_from": "D15 rolling total for claim kind practical: family score (derived: domain class general only (no admission record)) x the weight row"
                   },
+                  "claim_kind": "practical",
+                  "signals": {},
+                  "corroborated_by": [],
+                  "contradicted_by": [],
+                  "history": [],
                   "factors": [
                     {
-                      "name": "authority",
-                      "value": 0.85,
-                      "reason": "1.0 for .gov/.edu/.mil or metadata.authority=primary, else 0.85"
+                      "name": "general_family_score",
+                      "value": 0.22,
+                      "reason": "derived: domain class general only (no admission record)"
                     },
                     {
-                      "name": "grounded_claims",
-                      "value": 1,
-                      "reason": "claims this source states, corroborates or is inferred from"
-                    },
-                    {
-                      "name": "corroborating_edges",
+                      "name": "contradicting_sources",
                       "value": 0,
-                      "reason": "corroborates edges"
-                    },
-                    {
-                      "name": "contradicting_edges",
-                      "value": 0,
-                      "reason": "contradicts edges"
+                      "reason": "sources contradicting a claim this source grounds (listed in contradicted_by)"
                     }
                   ]
                 },
@@ -5052,9 +5172,9 @@
                     },
                     {
                       "at": "2026-10-17T12:00:00.000Z",
-                      "kind": "trail",
-                      "ref": "55555555-5555-4555-8555-555555555555",
-                      "summary": "erased"
+                      "kind": "source_revision",
+                      "ref": "f1000000-0000-4000-8000-000000000001@1",
+                      "summary": "revision 1 by original"
                     }
                   ]
                 },
@@ -8332,7 +8452,7 @@
                 "example": {
                   "notifications": [
                     {
-                      "id": "987c0018-2a8e-48da-8d71-01efeb0248fc",
+                      "id": "c88197be-b024-4aed-9841-d2a3a7bad610",
                       "class": "informational",
                       "subject": "a new idea has been added",
                       "slug": null,
@@ -8344,7 +8464,7 @@
                       "count": 1
                     },
                     {
-                      "id": "2d43f615-4b53-4352-92f4-a2df859ed6c2",
+                      "id": "f417be09-9691-4307-a0b1-3666bdfa090d",
                       "class": "informational",
                       "subject": "dossier delivered",
                       "slug": null,
@@ -8762,11 +8882,11 @@
                       "entries": 4
                     },
                     {
-                      "name": "claim_edge_types",
-                      "version": 1,
-                      "owner": "P0",
-                      "description": "claim_sources.edge_type (grounding chain, unchanged)",
-                      "entries": 4
+                      "name": "admission_trail_kinds",
+                      "version": 0,
+                      "owner": "P3a",
+                      "description": "D15 items 7-8: what the pre-ingestion stage recorded about a hit",
+                      "entries": 7
                     }
                   ]
                 },

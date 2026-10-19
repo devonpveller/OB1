@@ -26,7 +26,8 @@
  *   - and every rendered sentence that carries a citation is CHECKED against
  *     the lines it cites, by a judge that answers in one word.
  *
- * The judge is advisory in the same way the skeptic is: it fails OPEN. A judge
+ * The judge is advisory: it fails OPEN (unlike the entailment stage, which fails
+ * closed because it decides what the curator files). A judge
  * that errors, times out or answers nonsense leaves the document exactly as the
  * renderer wrote it and records that it was not checked. A report is never
  * withheld because a checker broke.

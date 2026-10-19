@@ -13,10 +13,14 @@ Full design: [`../../../documentation/implementation-guide/research-engine-for-O
 
 1. **reuse** — recall grounded+fresh claims from the OB KB (`retrieveRelevantClaims`); OD-5 `decideReuse` keeps the ones safe to reuse as-is.
 2. **plan** — decompose the question into needs; **coverage** check → which needs are gaps.
-3. **stage** (gaps only, P3) — SearXNG search → **per-page** fetch+extract (NOT SmolCrawl; that's the separate whole-domain mode) → dedup vs OB (`find_or_create_source`) → into the `sessions` candidate pool. A URL already fresh in OB is reused, not re-fetched (P3.3).
+3. **admit** (research-workbench P3a, D15) — every search hit is scored BEFORE fetch on what resolves about it (`admission.ts`: its family - `scholarly` when a DOI/PMID/PMCID/arXiv id resolves via `scholarly.ts`, else `general` - and that family's signals, × the weight row for the run's claim kind, `credibility.ts`). Below the kind's admission floor it is a **lead**: fetched only to read its links, never staged; a link that clears the floor is admitted and, if a line citing it is later `supports`, carries `found_via`. Every judged hit is on the admission trail (`research_admission_trail`).
+3b. **stage** (gaps only, P3) — SearXNG search → **per-page** fetch+extract (NOT SmolCrawl; that's the separate whole-domain mode) → dedup vs OB (`find_or_create_source`) → into the `sessions` candidate pool. A URL already fresh in OB is reused, not re-fetched (P3.3).
 4. **synthesize** — verbatim, with `[SOURCED]/[INFERRED]/[UNCERTAIN]/[GAP]` + `[Source N]` tags.
+4b. **entail** (P3a, D10) — every cited line is judged against the text of the sources it cites (`entailment.ts`): one verdict per line, `supports | partial | unsupported` (the `entailment_verdicts` registry); `partial` lowers the tag to `[UNCERTAIN]`, `unsupported` makes the line a `[GAP]` (fail-closed: no verdict = `unsupported`). The footer prints how many lines were demoted and the report credibility roll-up. Replaces the Skeptic (archived, `archive/skeptic/`).
 5. **enforce + curate** — cited-only sources (§6.3); delegate to **openbrain-curator** (OD-2), which stores the synthesis verbatim and writes grounded claim→source edges (P2). Honest gaps on backstop (OD-6).
-6. **metric** — `claims_reused / claims_freshly_gathered / gap_ratio` per run (`research_run_metrics` view) — the compounding-reuse proof.
+6. **metric** — `claims_reused / claims_freshly_gathered / gap_ratio` per run (`research_run_metrics` view) — the compounding-reuse proof; since P3a also `entailment` (lines, demoted, per verdict), `credibility` (the report roll-up with the model version) and `admission` (judged / admitted / leads / lead paths / held folded) in `research_jobs.metrics`.
+7. **credibility records** (P3a) — after the curator files the sources: `sources.metadata.credibility` (family, signals, score, rolling total, reasons, model version) and `.scholarly`, a `source_credibility_history` row, the entailment-gated `source_corroborations`, the trail. On a refinery job (`research_jobs.refinery_id`) the **fold** runs: a held source that clears its floor AND is `supports`-cited moves into `sources` with its uuid; otherwise it stays held (refinery-only, kept out of the curator's copy); a tombstoned one goes through the workbench's D5 admission gate.
+8. **the re-score gate** — `claim_confidence_d15` (SQL twin of the model) and the `credibility_before_after` view exist, but the claim trigger keeps the old model until `rescore-gate.ts` finds the operator's confirmation of the current view digest in the findings sink and the DB records it (`credibility_apply_d15_trigger`, refuses otherwise).
 
 ## Files
 
@@ -30,6 +34,14 @@ Full design: [`../../../documentation/implementation-guide/research-engine-for-O
 | `lib.ts` | pure helpers: HTML→text, OD-5 reuse decision, OD-6 backstop, citations |
 | `contract.ts` | the per-job contract (`options.contract`): source classes (`advisories`, `academic`, `vendor-psirt`, `software-docs`), allow/deny entries as `host`, `*.suffix` or `host/path/prefix`, budget, red lines; `harness.ts` `withContract` + `runResearch` enforce it on search hits, fetches (final url after redirects), seeds (deny), KB recall and reused claims, recording every drop in `result.contract_drops` (`contract.test.ts`, `harness-contract.test.ts`) |
 | `urlnorm.ts` | the one URL normaliser for source-trust checks (ported from agent-bridge; parity corpus `fixtures/url-normalise-corpus.json`, `urlnorm.test.ts`) |
+| `credibility.ts` | the D15 model: families, weight table by claim kind × family (fails loud), paper score, corroboration, the filed-claim and report credibility - built from the registries (`credibility.test.ts`) |
+| `claim-list.ts`, `claim-edges.ts` | byte-identical copies of the research curator's: the claim list the curator files from a package and its tag -> edge rule. The report scores exactly the claims of the package it hands the curator (`harness.ts` `scoreCuratorPackage`); the figure is over those filed claims only, and `metrics.credibility.judged_not_filed` counts the judged lines that file none (`claim-list.test.ts`, `claim-edges.test.ts` holds the identity, `credibility-attempt6.e2e.test.ts`) |
+| `admission.ts` | the pre-ingestion stage of the admission chokepoint: assess a hit, leads, final scores (`admission.test.ts`) |
+| `scholarly.ts` | identifiers + the keyed OpenAlex / Crossref-fallback resolver, only through the egress proxy (`scholarly.test.ts`) |
+| `entailment.ts` | the per-claim entailment stage (D10), fixture layer `fixtures/entailment/` (`entailment.test.ts`) |
+| `rescore-gate.ts` | operator tool: re-score the store only on a confirmation recorded in the findings sink (`rescore-gate.test.ts`) |
+| `record-entailment.ts` | operator/tester tool: re-record the entailment fixture layer from the real judge via LiteLLM |
+| `run-credibility-e2e.ps1` | the disposable run: image build with its test gate (and a negative control), the SQL twin + gate + fold on a throwaway DB, the workbench quality(id) |
 | `lib.test.ts` | 9 pure-logic unit tests (`deno test --allow-net lib.test.ts`) |
 | `orchestrator.test.ts` | end-to-end vs the real schema with mocked seams (`deno run --allow-net --allow-env orchestrator.test.ts`, DB on a docker network) |
 

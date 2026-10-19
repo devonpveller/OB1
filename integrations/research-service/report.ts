@@ -301,12 +301,34 @@ export interface GapPassRecord {
   total: number;
 }
 
+/** P3a (D10) - what the entailment stage did to the cited lines. */
+export interface EntailmentFooter { lines: number; demoted: number }
+/** P3a (D15 item 5) - the report credibility roll-up and the model version that produced it. */
+export interface CredibilityFooter { value: number | null; model_version: string; kind: string }
+
+/**
+ * The entailment + credibility clause, printed whenever the stage ran - including "0 demoted":
+ * the reader is owed the denominator, and a report whose every line held up should say so.
+ */
+export function entailmentFooterLine(e?: EntailmentFooter | null, c?: CredibilityFooter | null): string {
+  const parts: string[] = [];
+  if (e) parts.push(`entailment: ${e.demoted} of ${e.lines} cited line(s) demoted`);
+  if (c) {
+    parts.push(c.value === null
+      ? `report credibility: n/a (no judged line; ${c.model_version}, kind ${c.kind})`
+      : `report credibility ${c.value.toFixed(2)} (${c.model_version}, kind ${c.kind})`);
+  }
+  return parts.join(" · ");
+}
+
 export function coverageFooter(
   needs: NeedState[],
   record: SearchRecord,
   backstop?: string | null,
   gapPass?: GapPassRecord | null,
   fidelity?: FidelityFooter | null,
+  entailment?: EntailmentFooter | null,
+  credibility?: CredibilityFooter | null,
 ): string {
   const parts: string[] = [];
   const partial = partialCount(needs);
@@ -401,6 +423,8 @@ export function coverageFooter(
       parts.push("render check: not run");
     }
   }
+  const ec = entailmentFooterLine(entailment, credibility);
+  if (ec) parts.push(ec);
   if (backstop && backstop !== "complete") parts.push(`stopped early: ${backstop}`);
   return parts.join(" · ");
 }

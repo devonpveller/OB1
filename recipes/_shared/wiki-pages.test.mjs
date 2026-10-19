@@ -1,9 +1,10 @@
 // node --test recipes/_shared/wiki-pages.test.mjs
-// Pure-logic gate for the wiki_pages sync (the I/O helpers are best-effort by
-// contract and are exercised live, not here).
+// Pure-logic gate for the wiki_pages row the compile writes (the flush /
+// unsynced / exit-code contract is in wiki-pages.warnonce.test.mjs and the
+// rw-p1a-render integration cases).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifySlug, extractLinks, parseWikiPage, vaultRel, queueWikiPage, queuedWikiPageCount } from "./wiki-pages.mjs";
+import { classifySlug, extractLinks, parseWikiPage, vaultRel, queueWikiPage, queuedWikiPageCount, inlineTags } from "./wiki-pages.mjs";
 
 test("classifySlug maps every page class the compiler emits", () => {
   assert.deepEqual(classifySlug("content/person/person-ada.md"),
@@ -22,8 +23,18 @@ test("classifySlug maps every page class the compiler emits", () => {
   assert.equal(classifySlug("content/entities.md").page_class, "root");
 });
 
-test("classifySlug normalises separators and leading slashes", () => {
-  assert.equal(classifySlug("\\content\\person\\person-ada.md").slug, "content/person/person-ada");
+// rw-p1a-deploy-prep attempt 2 (tester, clause 2): classify takes a VAULT path
+// ("/"-separated, what the walk and vaultRel give it). A backslash in it is a
+// character of the file name, as Quartz on Linux reads it - never a separator
+// (the old rule keyed back\slash.md's row as notes/adv/back/slash, a phantom
+// folder and a reconcile that could never be clean). OS separators are turned
+// into "/" where an OS path becomes a vault path: vaultRel (below).
+test("classifySlug strips leading slashes; a backslash is a character of the name, never a separator", () => {
+  assert.equal(classifySlug("notes/adv/back\\slash.md").slug, "notes/adv/back\\slash");
+  assert.equal(classifySlug("notes/adv/back\\slash.md").page_class, "note");
+  assert.equal(classifySlug("notes/adv/back\\.dot.md").slug, "notes/adv/back\\.dot");
+  assert.equal(classifySlug("content\\person\\person-ada.md").slug, "content\\person\\person-ada");
+  assert.equal(classifySlug("content\\person\\person-ada.md").page_class, "root", "one segment: not content/<type>/<slug>");
   assert.equal(classifySlug("/notes/x.md").slug, "notes/x");
   // Extension-stripping is case-insensitive but only touches a trailing .md
   assert.equal(classifySlug("content/tool/a.md.md").slug, "content/tool/a.md");
@@ -92,8 +103,13 @@ test("frontmatter entity_type overrides the directory-derived one", () => {
 test("vaultRel strips the vault root and normalises separators", () => {
   assert.equal(vaultRel("/wiki/content/person/x.md", "/wiki"), "content/person/x.md");
   assert.equal(vaultRel("/wiki/notes/n.md", "/wiki/"), "notes/n.md");
-  // Windows-style separators (bind mount) normalise to forward slashes.
-  assert.equal(vaultRel("\\wiki\\notes\\n.md", "/wiki"), "notes/n.md");
+  // The OS's separator (Windows: "\") becomes "/" - Quartz's toPosixPath,
+  // split on path.sep; on Linux "\" is a character of the name and is kept
+  // (rw-p1a-deploy-prep attempt 2).
+  assert.equal(vaultRel("\\wiki\\notes\\n.md", "/wiki", "\\"), "notes/n.md");
+  assert.equal(vaultRel("C:\\v\\notes\\n.md", "C:\\v", "\\"), "notes/n.md");
+  assert.equal(vaultRel("/wiki/notes/adv/back\\slash.md", "/wiki", "/"), "notes/adv/back\\slash.md");
+  assert.equal(vaultRel("\\wiki\\notes\\n.md", "/wiki", "/"), null, "on Linux a name with backslashes is not under /wiki/");
   // OUTSIDE the vault (scratch --out-dir) must be null, so probe runs never
   // pollute the table with junk slugs.
   assert.equal(vaultRel("/tmp/greenout/place/x.md", "/wiki"), null);
@@ -112,4 +128,30 @@ test("queueWikiPage ignores pages outside the vault root", () => {
   const before = queuedWikiPageCount();
   queueWikiPage("/tmp/scratch/place/x.md", "---\ntitle: X\n---\nbody");
   assert.equal(queuedWikiPageCount(), before);
+});
+
+test("parseWikiPage carries the frontmatter the page presents (D13: the row is what is presented)", () => {
+  const md = [
+    "---",
+    'title: "Ada Wiki"',
+    "type: wiki",
+    "entity_id: 901",
+    'aliases: ["Ada"]',
+    "derived_from_ids: [1,2]",
+    "date: 2026-10-02",
+    "tags: [wiki, generated]",
+    "---",
+    "# Ada",
+  ].join("\n");
+  const row = parseWikiPage("content/person/person-ada.md", md);
+  assert.deepEqual(row.frontmatter, {
+    title: "Ada Wiki", type: "wiki", entity_id: 901, aliases: ["Ada"], derived_from_ids: [1, 2],
+    date: "2026-10-02", tags: ["wiki", "generated"],
+  });
+});
+
+test("inline #tags join the row's tags (Quartz's expression; code skipped; numeric-only ignored)", () => {
+  assert.deepEqual(inlineTags("a #one and #two/sub but `#code` and #123 and #[[x]]\n```\n#fenced\n```"), ["one", "two/sub"]);
+  const row = parseWikiPage("content/thought/1.md", "---\ntags: [leaf]\n---\n# T\ntext #fixture-inline-tag\n");
+  assert.deepEqual(row.tags, ["leaf", "fixture-inline-tag"]);
 });
