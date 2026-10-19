@@ -117,6 +117,16 @@ function Save([string]$name, [string]$text) {
   # into the STAGING directory; Publish-Evidence copies it to -Evidence after the guard (T2-6)
   [System.IO.File]::WriteAllText((Join-Path $evStage $name), $text, (New-Object System.Text.UTF8Encoding $false))
 }
+# rw-p6a-resolve attempt 2 (tester near-miss 8), kept with rw-p0b's required -Subnet: after the
+# network is created its subnet is read back and must be the pinned one, outside 192.168.0.0/16.
+function Test-SubnetAllowed([string]$s) {
+  if ($s -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$') { return $false }
+  $o = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]); $len = [int]$Matches[5]
+  if (@($o | Where-Object { $_ -gt 255 }).Count -gt 0) { return $false }
+  if ($len -lt 16 -or $len -gt 28) { return $false }
+  if ($o[0] -eq 192 -and $o[1] -eq 168) { return $false }
+  return $true
+}
 if ($tag -match ':local$' -or $dreddTag -match ':local$') { throw 'refusing to build a :local tag' }
 
 Write-Host "== rw-p0-contract test run  owner=$Id  net=$net  evidence=$Evidence"
@@ -226,6 +236,8 @@ try {
   Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $($subnets.run); the smoke's fetch network gets $($subnets.smoke))"
   if ($script:rc -ne 0) { throw 'network' }
   $made.net = $true
+  $got = (Dk network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $net).Trim()
+  Check (($got -eq $subnets.run) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
 
   # ---------------------------------------------------------------- 3. the :wt image
   Write-Host "[3] build $tag (the build runs the image test gate)"

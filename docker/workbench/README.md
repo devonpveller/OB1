@@ -54,7 +54,8 @@ src/
 ## Networks
 
 `obnet` (PostgREST) + `llm-net` (embeddings) + `app-net` (portal-Caddy name
-resolution — required, §2.3).
+resolution — required, §2.3) + `search-gw-net` (= `ai-stack_default`: the `vpn` proxy the
+export's resolver goes out through, research-workbench P6a).
 
 ## Env
 
@@ -62,6 +63,9 @@ resolution — required, §2.3).
 `OPEN_BRAIN_URL`, `EMBEDDING_*`, `EXTRACT_URL`, `WIKI_GIT_DIR`, `WIKI_OUT_DIR`,
 `WIKI_ASSETS_DIR`, `CONTRACT_MOUNTS_ROOT` (default `/mounts`: where named mounts such as
 `podcast-archive` live), `CONTRACT_STREAM_POLL_MS` (default `1000`).
+The export's resolver (P6a): `OPENALEX_API_KEY`, `CROSSREF_MAILTO` (both blank = off), `FETCH_PROXY_URL`
+(blank = refused, never direct); `RESOLVER_OPENALEX_BASE` / `RESOLVER_CROSSREF_BASE` / `RESOLVER_TIMEOUT_MS`
+exist for the disposable test run's stub only.
 
 ## The retrieval contract (research-workbench P0)
 
@@ -129,4 +133,68 @@ A database trigger refuses any reference without a quote, so the rule holds for 
 
 ```
 powershell -NoProfile -File contract-test/run-references-tests.ps1 -Subnet <x.y.z.0/24>   # disposable P2a run (same -Subnet / evidence gate as P0)
+```
+
+## Export with resolved references (research-workbench P6a)
+
+`GET /workbench/export?path=<vault .md>&format=<key>&style=<key>[&wrap=none][&mode=copy]` renders a page with its
+numbered references through pandoc 3.11 `--citeproc` and a CSL style; a PDF is typeset by Typst
+0.15.1 (main face Noto Serif CJK SC, so CJK text renders). `GET /workbench/export/about` is the
+attribution: the CSL project (https://citationstyles.org/), every style with its authors, pandoc's
+GPL source offer.
+
+- **Registries, not lists** (`init-export.sql`): `export_formats` (pdf, docx, md, txt - each entry
+  carries pandoc's output format, the PDF engine and the page), `citation_styles` (ieee - the default,
+  numbered - elsevier-vancouver, apa; each the upstream CSL file in `csl/`, unmodified, with its
+  sha256 and author listing) and `reference_identifier_kinds` (doi, arxiv, pubmed, pmc, openalex:
+  the pattern, the URL rules, the OpenAlex/Crossref templates). A new format, style or identifier
+  kind is a row (plus its `.csl` file); no code switches on a key.
+- **Resolution**: each numbered reference's source identifier (declared metadata, then its URL) is
+  resolved once through the keyed OpenAlex API, Crossref's polite pool as the fallback, through the
+  egress proxy (`src/export/resolver.ts`), and the CSL-JSON is cached on the reference record at its
+  pinned revision (`reference_resolutions`), so later exports are deterministic offline. A source
+  without an identifier is cited as the page it is. Shipped inert: no key and no mailto, no resolver.
+- **Hard failure**: a dead identifier, the resolver off, a malformed identifier, a citation of a
+  source that does not exist or is suppressed - the export answers 422 naming every such reference;
+  nothing is rendered as text. Good resolutions of a refused export stay cached (a retry asks only
+  for what failed). **Copy page** (`mode=copy`, plain text) is not an export: it never calls the
+  resolver and prints an unresolved reference marked `UNRESOLVED (<reason>)` (no suppressed title).
+- **The resolver's door** (`send()`): only the configured OpenAlex/Crossref origins, the key on every
+  OpenAlex request and the mailto on every Crossref one, checked before sending; redirects are never
+  followed (a 3xx fails the reference); a record carrying the key, the mailto or a URL with a query
+  is refused; a transport failure shows a reason code (`egress: network error|timeout`), and its
+  detail goes to the workbench log with the secrets masked.
+- **What a note cannot do**: its title prints literally (`@`, `#set`, `$x$`, a backslash are text),
+  a stray `@` never becomes a citation, raw HTML / raw TeX / `{=format}` blocks are not passed
+  through (dropped from the MD, DOCX and PDF), a `javascript:` or `data:` link keeps only its text.
+  A style is hashed when it is USED (a modified or missing file, or one that is a symlink or lies
+  outside the style directory, answers 503 `style-integrity`); a character no installed face covers
+  refuses the PDF before Typst runs (422 `glyphs`; emoji render with Noto Color Emoji).
+- **The note is parsed, not pattern-matched** (rw-p6a-resolve attempt 3, `src/export/markdown.ts`):
+  micromark (MIT) parses the body into a syntax tree; links, images and references with a target
+  other than http(s)/mailto/relative lose the target, raw HTML and every attribute block go, text is
+  written back escaped, an unsafe-scheme string in text reads `javascript[:]`. The glyph check reads
+  the parsed text (code, fences, math, alt text, titles, references). The parse runs in a worker pool
+  (`src/export/prepare_worker.ts`, `EXPORT_PARSE_WORKERS`, `EXPORT_PARSE_TIMEOUT_MS` 15 s).
+- **Limits before pandoc** (422 `too-complex`, naming the limit): the note's size
+  (`EXPORT_MAX_NOTE_BYTES`, 1 MB), bracket nesting (32), tree depth (64), list depth (16),
+  emphasis delimiters and brackets per paragraph (1000 each), the parser's time; pandoc runs with
+  `+RTS -N1 -M2g`, a CPU limit (prlimit) and a wall clock (`EXPORT_PANDOC_TIMEOUT_MS`, 60 s) after
+  which it is killed with its children.
+- **Every output is verified before it is served** (`src/export/verify.ts`, `pdf_read.ts`): the MD
+  re-parsed (no unsafe target, raw node, attribute block, fenced div with attributes, raw TeX), the
+  DOCX unzipped (external relationships and HYPERLINK fields http(s)/mailto, no fetching field), the
+  PDF parsed (URI actions http(s)/mailto, no other action, no .notdef box drawn), and every format's
+  text searched for unsafe-scheme strings and the configured key or mailto (tags stripped,
+  invisible characters removed): 503 `output-verification` or `credential`, never a 200. Only the
+  writers this verifies (pdf through Typst, docx, markdown, plain) can be registered formats
+  (503 `format` otherwise).
+- **D9**: pandoc runs as a separate process over files (markdown, a JSON metadata file, a CSL-JSON
+  bibliography file and the verified style in, the document out), Typst as its child; no Lua/JSON filter, no AST round trip. The citekey grammar and
+  CSL clean-up are ported from manubot 859dd15 (BSD-2-Clause-Patent), not run. WeasyPrint, the
+  former PDF engine, is gone from the runtime image; it lives only in the image's `parity` stage,
+  which renders the parity fixture through both engines (`src/export/parity_fixture.ts`).
+
+```
+powershell -NoProfile -File contract-test/run-export-tests.ps1 [-Subnet a.b.c.0/24]   # disposable P6a run (stub APIs)
 ```

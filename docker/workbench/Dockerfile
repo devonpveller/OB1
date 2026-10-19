@@ -1,4 +1,32 @@
-FROM denoland/deno:2.3.3
+# openbrain-workbench. Four stages:
+#   tools    fetches the pinned pandoc and Typst release archives (sha256-checked) and unpacks them
+#   base     the runtime: Deno, git, pandoc, Typst, the CJK fonts, the app
+#   test     base + poppler-utils (pdftoppm/pdftotext/pdffonts/pdfinfo): the build test gate. The
+#            runtime stage copies its marker, so the gate cannot be skipped; poppler never ships.
+#   parity   test + WeasyPrint: the P6a parity fixture (Typst vs the retired WeasyPrint path). Built
+#            only on request (`docker build --target parity`), never shipped.
+#   runtime  (the default target) base + the gate marker.
+
+FROM denoland/deno:2.3.3 AS tools
+# research-workbench P6a: pandoc 3.11 (GPL-2.0-or-later; a SEPARATE PROCESS, never linked - D9) and
+# Typst 0.15.1 (Apache-2.0), the upstream release binaries, checked against the sha256 below.
+ARG PANDOC_VERSION=3.11
+ARG PANDOC_SHA256=37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6
+ARG TYPST_VERSION=0.15.1
+ARG TYPST_SHA256=a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends xz-utils \
+  && rm -rf /var/lib/apt/lists/*
+ADD --checksum=sha256:${PANDOC_SHA256} https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz /tmp/pandoc.tar.gz
+ADD --checksum=sha256:${TYPST_SHA256} https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz /tmp/typst.tar.xz
+RUN mkdir -p /out/bin /out/doc/typst \
+  && tar -xzf /tmp/pandoc.tar.gz -C /tmp \
+  && install -m 0755 /tmp/pandoc-${PANDOC_VERSION}/bin/pandoc /out/bin/pandoc \
+  && tar -xJf /tmp/typst.tar.xz -C /tmp \
+  && install -m 0755 /tmp/typst-x86_64-unknown-linux-musl/typst /out/bin/typst \
+  && cp /tmp/typst-x86_64-unknown-linux-musl/LICENSE /tmp/typst-x86_64-unknown-linux-musl/NOTICE /out/doc/typst/
+
+FROM denoland/deno:2.3.3 AS base
 
 # Provenance label (research-workbench P0). The ai-stack deploy door (scripts/stack/ob1-deploy.ps1)
 # builds with --build-arg OB1_SHA=<the parent repo's OB1 gitlink> so `docker inspect` can say
@@ -9,12 +37,27 @@ LABEL org.opencontainers.image.revision="$OB1_SHA"
 
 # git: the workbench commits notes + the Changes log into the vault repo (P3 /
 # the G1 exception). The Deno base image doesn't ship it.
-# pandoc + weasyprint: the note exporter (P3.5) converts markdown → DOCX/HTML/
-# PDF/ODT/EPUB locally (no network). weasyprint is pandoc's PDF engine (HTML/CSS
-# based — avoids a full TeX install; wkhtmltopdf was dropped from Debian).
+# fonts-noto-cjk (OFL-1.1): the PDF's main face, Noto Serif CJK SC, pan-CJK, so Typst renders
+# Chinese, Japanese and Korean text with real glyphs (P6a acceptance 4).
+# fonts-noto-color-emoji (OFL-1.1): an emoji face Typst falls back to (rw-p6a-resolve attempt 2: an
+# emoji rendered as a tofu box with status 200). A character no installed face covers is refused
+# before Typst runs (src/export/glyphs.ts), so a PDF never carries a box.
+# fonts-dejavu-core (DejaVu fonts licence, Bitstream Vera based, permissive): Hebrew, Arabic and other
+# scripts Typst draws from its own embedded DejaVu Sans Mono - installed so the coverage scan sees
+# them too. It came into the TEST stage only through poppler's fontconfig dependency; named here, the
+# runtime and test stages carry the same font files (run-export-tests.ps1 checks it).
+# The export (P6a) converts markdown to PDF/DOCX/MD/TXT with pandoc --citeproc, locally (no
+# network); Typst is pandoc's PDF engine. WeasyPrint, the PDF engine before P6a, is removed: the
+# parity fixture passed (see the parity stage).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates pandoc weasyprint \
+  && apt-get install -y --no-install-recommends git ca-certificates fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu-core \
   && rm -rf /var/lib/apt/lists/*
+COPY --from=tools /out/bin/pandoc /out/bin/typst /usr/local/bin/
+# Typst's LICENSE and NOTICE carried through (Apache-2.0 section 4).
+COPY --from=tools /out/doc/typst /usr/local/share/doc/typst
+ARG PANDOC_VERSION=3.11
+ARG TYPST_VERSION=0.15.1
+ENV EXPORT_PANDOC_VERSION=${PANDOC_VERSION} EXPORT_TYPST_VERSION=${TYPST_VERSION} EXPORT_CSL_DIR=/app/csl
 
 WORKDIR /app
 
@@ -22,17 +65,28 @@ WORKDIR /app
 # every jsr/npm/remote module to the version its licence was verified at (D9 rule 6).
 COPY deno.json deno.lock ./
 COPY THIRD-PARTY-NOTICES.md ./
+# The CSL styles, upstream files used unmodified (CC BY-SA 3.0; their sha256 is in the
+# citation_styles registry and checked by src/export/export_test.ts).
+COPY csl ./csl
 COPY src ./src
 
-# Pre-cache the deps actually imported by the entrypoint (hono, postgres).
+# Pre-cache the deps actually imported by the entrypoint (hono, postgres; rw-p6a-resolve attempt 3 adds
+# the export's markdown parser - micromark and the mdast utilities, MIT, pinned in deno.lock and noticed
+# in THIRD-PARTY-NOTICES.md - which the frozen step below caches through src/routes/export.ts).
 # The "@shared/slug" map points at a RUNTIME bind-mount (/recipes/_shared) and
 # is only imported by later phases, so it is not resolvable at build time —
 # `|| true` keeps the build green; runtime resolves it from the mount.
 RUN deno cache src/main.ts || true
 # The retrieval contract and its tests import nothing from the runtime mount, so they cache
 # FROZEN: a dependency that drifted from deno.lock fails the build.
-RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/contracts/migrate-references.ts
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/render_test.ts src/export/prepare_worker.ts
 
+FROM base AS test
+# poppler-utils (GPL): pdftoppm, pdftotext, pdffonts and pdfinfo, run as SEPARATE PROCESSES by the
+# export tests to read the PDFs back (glyph coverage, numbering, parity). Test stage only.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends poppler-utils \
+  && rm -rf /var/lib/apt/lists/*
 # Build gate (wiki-dynamic-index P3): pure-logic tests run at image build so a
 # regression cannot ship silently - mirrors the wiki-service image, which runs
 # lib/entity-links.test.mjs. Only tests that need no DB/network AND no
@@ -41,7 +95,22 @@ RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/
 # research-workbench P0 adds src/contracts/: the document coverage, the registry rule, every
 # example against its schema, the generated artifacts current, the notices check (D9 rule 5).
 # Its integration test is skipped here (no CONTRACT_TEST_DB_HOST); run-contract-tests.ps1 runs it.
-RUN deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/routes/graph_test.ts src/util/ src/contracts/
+# research-workbench P6a adds src/export/: the resolver (keys, egress, hard failure), the CSL
+# styles unmodified, and real renders through pandoc + Typst read back with poppler (numbering,
+# CJK glyphs, process separation). parity_fixture.ts runs only in the parity stage.
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/util/ src/contracts/ src/export/ \
+  && touch /app/.test-gate-passed
+
+FROM test AS parity
+# WeasyPrint (BSD-3-Clause) - the PDF engine the export used before P6a - only to render the
+# parity fixture through the retired path. Never in the runtime image.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends weasyprint \
+  && rm -rf /var/lib/apt/lists/*
+CMD ["deno", "test", "--allow-env", "--allow-read", "--allow-write", "--allow-run", "src/export/parity_fixture.ts"]
+
+FROM base AS runtime
+COPY --from=test /app/.test-gate-passed /app/.test-gate-passed
 
 # Runs as root: the workbench WRITES the shared vault (notes, the Changes log,
 # and image assets under /wiki/assets), which the root-running wiki-service
@@ -52,6 +121,7 @@ RUN deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src
 
 EXPOSE 8000
 
-# --allow-read/write: vault notes + wiki-assets (P3/P5). --allow-run: `git`
-# commit in the vault repo (P3). --allow-net/env: DB, REST, embeddings, extract.
+# --allow-read/write: vault notes + wiki-assets (P3/P5) + the export's scratch dir. --allow-run:
+# `git` commit in the vault repo (P3), `pandoc` for the export (P6a). --allow-net/env: DB, REST,
+# embeddings, extract, the export's resolver (through FETCH_PROXY_URL only).
 CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read", "--allow-write", "--allow-run", "src/main.ts"]

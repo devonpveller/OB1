@@ -2,6 +2,17 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { parseGraphParams, buildGraph } from "./graph.ts";
 
+// rw-p6a-resolve attempt 4 (tester N1): importing the route imports src/db/pool.ts, whose Pool opens
+// its connections when it is created. These tests need no database; but with no network (the export
+// runner's cached-layer gate re-run, --network none) that lookup fails at once and its rejection - no
+// test's - failed the whole file, while in a build it usually lost the race and nothing was reported.
+// So the outcome no longer depends on the network: that one rejection (the postgres pool's own
+// connect) is absorbed here; any other unhandled rejection stays fatal.
+globalThis.addEventListener("unhandledrejection", (e) => {
+  const r = (e as PromiseRejectionEvent).reason as { stack?: string } | undefined;
+  if (/deno\.land\/x\/postgres@[^/]+\/pool\.ts/.test(String(r?.stack ?? ""))) e.preventDefault();
+});
+
 Deno.test("depth is clamped and slug normalised", () => {
   assertEquals(parseGraphParams("/notes/x/", undefined).slug, "notes/x");
   assertEquals(parseGraphParams("a", undefined).depth, 2);

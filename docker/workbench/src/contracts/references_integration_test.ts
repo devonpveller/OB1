@@ -15,10 +15,9 @@ import { createContractApp } from "./app.ts";
 import { unavailableScorer } from "./logic/reopen.ts";
 import { chunkText } from "../util/chunk.ts";
 import {
-  bodyExportReferences, ensureLegacyNote, markHolderRemoved, MigrationRefused, moveHolder, noteExportReferences,
-  noteRefsView, syncLegacyNote,
+  ensureLegacyNote, markHolderRemoved, MigrationRefused, moveHolder, noteRefsView, syncLegacyNote,
 } from "./repo/references.ts";
-import { renderCitations } from "./logic/citations.ts";
+import { noteExportRefs, pageExportRefs } from "../export/repo.ts";
 import * as S from "./schemas/sources.ts";
 import * as R from "./schemas/references.ts";
 import { Documents } from "./schemas/ideas.ts";
@@ -316,9 +315,11 @@ t("added references live in the record after migration: add / remove keep pins; 
   assertEquals((await sql(`SELECT 1 FROM public.reference_holders WHERE holder_ref = $1`, [rel])).length, 0);
 });
 
-// ── acceptance 3: the export's numbered References, read from the records, equal the legacy ones ──
-// The legacy export (OB1 a28e9db routes/export.ts applyCitations), verbatim, over the same rows.
-async function legacyExport(md: string): Promise<string> {
+// ── acceptance 3: the export's numbers, read from the records, equal the legacy ones ──────────
+// The legacy export's numbering (OB1 a28e9db routes/export.ts applyCitations, its enrol step,
+// verbatim). Its rendering is retired by P6a (citeproc over the holder numbers, src/export/);
+// the numbers are what P2a still owes the export, so they are what is compared.
+function legacyNumbers(md: string): [string, number][] {
   const UUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
   const SOURCE_LINK_RE = /\[\[([^\]|]*?source\/([0-9a-fA-F-]{36}))(?:\|([^\]]+))?\]\]/g;
   const order: string[] = [];
@@ -337,29 +338,10 @@ async function legacyExport(md: string): Promise<string> {
     const sm = fmMatch[1].match(/^sources:\s*\[([^\]]*)\]\s*$/m);
     if (sm) sm[1].split(",").forEach((s) => enrol(s.trim().replace(/^["']|["']$/g, "")));
   }
-  let out = md.replace(SOURCE_LINK_RE, (_full, _target, uuid, alias) => {
-    const n = numFor.get(uuid);
-    const label = (alias || "").trim();
-    return label ? `${label} [${n}]` : `[${n}]`;
-  });
-  out = out.replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2").replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
-  if (order.length) {
-    const rows = await db!.query<{ id: string; title: string; url: string }>(
-      `SELECT id::text AS id, title, url FROM public.sources WHERE id = ANY($1::uuid[]) AND retraction_committed_at IS NULL`, [order],
-    ).catch(() => []);
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const lines = order.map((u) => {
-      const r = byId.get(u);
-      if (!r) return null;
-      const title = (r.title || "Untitled source").replace(/\n/g, " ");
-      return `[${numFor.get(u)}] ${title}${r.url ? `. <${r.url}>` : "."}`;
-    }).filter(Boolean);
-    if (lines.length) out += "\n\n## References\n\n" + lines.join("\n\n");
-  }
-  return out;
+  return [...numFor];
 }
 
-t("export: a migrated note renders the same numbered references (and the same text) as the legacy export", async () => {
+t("export: a migrated note's numbered references (read by the P6a export) carry the legacy export's numbers", async () => {
   const a = await newSource(["A text."], { title: "Source A" });
   const b = await newSource(["B text."], { title: "Source\nB" });
   const sup = await newSource(["Suppressed text."], { title: "Suppressed S" });
@@ -372,18 +354,19 @@ t("export: a migrated note renders the same numbered references (and the same te
   ];
   for (const md of notes) {
     const rel = `notes/p2a/export-${uuid().slice(0, 8)}.md`;
-    const before = await legacyExport(md); // the legacy export, before the migration
+    const before = legacyNumbers(md); // the legacy numbering, before the migration
     await ensureLegacyNote(db!, rel, md); // the migration (first touch)
-    const refs = await noteExportReferences(db!, rel);
-    const after = renderCitations(md, refs.numberOf, refs.lines);
-    const section = (s: string) => s.includes("\n## References\n") ? s.slice(s.indexOf("\n## References\n")) : "";
-    assertEquals(section(after), section(before), "the References section differs");
-    assertEquals(after, before, "the rendered export differs");
+    const refs = await noteExportRefs(db!, rel);
+    assertEquals(refs.map((r) => [r.cited_ref, r.number]), before, "the numbers differ");
+    // what the export is told about each: a citation of nothing has no source; a suppressed one says so
+    for (const r of refs) {
+      if (r.cited_ref === sup) assert(r.suppressed);
+      if (!([a, b, sup, added] as string[]).includes(r.cited_ref)) assertEquals(r.source_id, null);
+    }
   }
   // a page that is not a note: body numbering, no frontmatter list
   const page = `[[content/source/${a}|S1]] [[source/${b}]]`;
-  const r = await bodyExportReferences(db!, page);
-  assertEquals(renderCitations(page, r.numberOf, r.lines), await legacyExport(page));
+  assertEquals((await pageExportRefs(db!, page)).map((r) => [r.cited_ref, r.number]), legacyNumbers(page));
 });
 
 // ── acceptance 4: diffCheck over 200 references, under 200 ms, no chunk text fetched ──────

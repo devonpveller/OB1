@@ -1,11 +1,11 @@
 // deno test src/contracts/references_test.ts - the P2a reference record WITHOUT a database:
-// the legacy citation grammars against literal copies of the retired readers, the export render,
+// the legacy citation grammars against literal copies of the retired readers, the export numbering,
 // whole-source anchors, the selector schemas (a reference without a quote fails), the diffCheck
 // request/response shapes (no chunk text), and the migration SQL's shape.
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import {
   anchorText, deriveWholeSourceSelectors, exportOrder, frontmatterSources, noteRefsCited, planLegacyHolders,
-  referenceLine, renderCitations, requiredSelectorKinds, wholeSourceQuote,
+  requiredSelectorKinds, wholeSourceQuote,
 } from "./logic/citations.ts";
 import { ReferenceCreateRequest, ReferenceRecord, Selectors } from "./schemas/references.ts";
 import { DiffCheck, DiffCheckRef, DiffCheckRequest, Reference } from "./schemas/sources.ts";
@@ -84,7 +84,10 @@ function legacyGather(content: string, q: ReturnType<typeof table>) {
   return { added: resolve(added).map((r) => r.id), cited: resolve(cited).map((r) => r.id) };
 }
 const L_SOURCE_LINK_RE = /\[\[([^\]|]*?source\/([0-9a-fA-F-]{36}))(?:\|([^\]]+))?\]\]/g;
-function legacyApplyCitations(md: string, q: ReturnType<typeof table>): string {
+// The legacy export's numbering (its applyCitations enrol step, verbatim). Its rendering - inline
+// [N] markers and a plain References list - is retired by P6a (citeproc renders the holder numbers);
+// what P2a still owes is the NUMBERS, so they are what is compared.
+function legacyNumbering(md: string): Map<string, number> {
   const order: string[] = [];
   const numFor = new Map<string, number>();
   const enrol = (u: string) => {
@@ -101,33 +104,7 @@ function legacyApplyCitations(md: string, q: ReturnType<typeof table>): string {
     const sm = fmMatch[1].match(/^sources:\s*\[([^\]]*)\]\s*$/m);
     if (sm) sm[1].split(",").forEach((s) => enrol(s.trim().replace(/^["']|["']$/g, "")));
   }
-  let out = md.replace(L_SOURCE_LINK_RE, (_full, _target, uuid, alias) => {
-    const n = numFor.get(uuid);
-    const label = (alias || "").trim();
-    return label ? `${label} [${n}]` : `[${n}]`;
-  });
-  out = out
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
-    .replace(/\[\[([^\]]+)\]\]/g, (_m, t) => String(t).split("/").pop() || String(t));
-  if (order.length) {
-    let rows: Row[] = [];
-    try {
-      rows = q(order, true);
-    } catch {
-      rows = [];
-    }
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const lines = order
-      .map((u) => {
-        const r = byId.get(u);
-        if (!r) return null;
-        const title = (r.title || "Untitled source").replace(/\n/g, " ");
-        return `[${numFor.get(u)}] ${title}${r.url ? `. <${r.url}>` : "."}`;
-      })
-      .filter(Boolean);
-    if (lines.length) out += "\n\n## References\n\n" + lines.join("\n\n");
-  }
-  return out;
+  return numFor;
 }
 
 // ── the P2a path, as the repository runs it (the SQL parts as in-memory equivalents) ─────────
@@ -142,8 +119,7 @@ function p2a(content: string, rows: Row[]) {
   };
   const numbered = held.filter((h) => h.number !== null).sort((a, b) => a.number! - b.number!);
   const numberOf = new Map(numbered.map((h) => [h.cited_ref, h.number!]));
-  const lines = numbered.filter((h) => h.target && !h.target.suppressed).map((h) => referenceLine(h.number!, h.target!.title, h.target!.url));
-  return { plan, view, exported: renderCitations(content, numberOf, lines) };
+  return { plan, view, numberOf };
 }
 
 const A = "11111111-1111-4111-8111-111111111111";
@@ -184,10 +160,9 @@ Deno.test("P2a holders reproduce what the legacy note-refs listed, for every cor
   }
 });
 
-Deno.test("P2a export output (inline markers AND the References section) is byte-identical to the legacy export", () => {
-  const q = table(ROWS);
+Deno.test("P2a holder numbers are the legacy export's citation numbers, for every corpus note", () => {
   for (const [name, content] of Object.entries(CORPUS)) {
-    assertEquals(p2a(content, ROWS).exported, legacyApplyCitations(content, q), name);
+    assertEquals([...p2a(content, ROWS).numberOf], [...legacyNumbering(content)], name);
   }
 });
 

@@ -5,6 +5,18 @@
     "@hono/zod-openapi": "jsr:@hono/zod-openapi@1.6.3",
     "zod": "npm:zod@4.6.5",
     "postgres": "https://deno.land/x/postgres@v0.19.3/mod.ts",
+    "mdast-util-from-markdown": "npm:mdast-util-from-markdown@2.1.0",
+    "mdast-util-to-markdown": "npm:mdast-util-to-markdown@2.2.0",
+    "micromark-extension-gfm-footnote": "npm:micromark-extension-gfm-footnote@2.1.0",
+    "micromark-extension-gfm-strikethrough": "npm:micromark-extension-gfm-strikethrough@2.1.0",
+    "micromark-extension-gfm-table": "npm:micromark-extension-gfm-table@2.1.2",
+    "micromark-extension-gfm-task-list-item": "npm:micromark-extension-gfm-task-list-item@2.1.0",
+    "mdast-util-gfm-footnote": "npm:mdast-util-gfm-footnote@2.1.0",
+    "mdast-util-gfm-strikethrough": "npm:mdast-util-gfm-strikethrough@2.0.1",
+    "mdast-util-gfm-table": "npm:mdast-util-gfm-table@2.0.0",
+    "mdast-util-gfm-task-list-item": "npm:mdast-util-gfm-task-list-item@2.0.0",
+    "micromark-extension-math": "npm:micromark-extension-math@3.1.0",
+    "mdast-util-math": "npm:mdast-util-math@3.0.0",
     "@shared/slug": "file:///recipes/_shared/slug.mjs"
   },
   "tasks": {

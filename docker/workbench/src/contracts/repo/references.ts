@@ -1,6 +1,6 @@
 // References as first-class records (research-workbench P2a): create and read reference rows,
-// the holders that hold them by id, the legacy-note migration and reconcile, the export's
-// numbered References, and diffCheck over pinned revisions.
+// the holders that hold them by id, the legacy-note migration and reconcile,
+// and diffCheck over pinned revisions.
 //
 // Invariants this module keeps:
 //   - a reference row is written ONLY with a quote and a position selector (and page+quad where
@@ -17,8 +17,8 @@ import type { RegistryReader } from "../registry.ts";
 import { requireRegistered, REGISTRY } from "../registry.ts";
 import { Conflict, NotFound } from "./lifecycle.ts";
 import {
-  anchorText, deriveWholeSourceSelectors, exportOrder, frontmatterSources, noteRefsCited,
-  planLegacyHolders, referenceLine, requiredSelectorKinds,
+  anchorText, deriveWholeSourceSelectors, frontmatterSources, noteRefsCited, planLegacyHolders,
+  requiredSelectorKinds,
 } from "../logic/citations.ts";
 import { getHeld, getSource, omitted, reference, sourceReference, tombstoneBySource, tombstoneOut } from "./sources.ts";
 
@@ -499,45 +499,10 @@ export async function markHolderRemoved(db: Db, ref: string, kind = LEGACY_NOTE)
   );
 }
 
-// ── export: the numbered References ─────────────────────────────────────────────────────
-// A legacy note's numbering and list come from its holder rows. The list prints the current
-// title and url of each numbered source, and leaves out a suppressed source (P0, D5 stage 1) and
-// a numbered id that resolves to nothing - both keep their number, as before P2a.
-export async function noteExportReferences(db: Db, rel: string) {
-  const rows = await db.query<{ cited_ref: string; number: number; title: string | null; url: string | null; listed: boolean }>(
-    `SELECT h.cited_ref, h.number, s.title, s.url,
-            (s.id IS NOT NULL AND s.retraction_committed_at IS NULL) AS listed
-       FROM public.reference_holders h
-       LEFT JOIN public.reference_records r ON r.id = h.reference_id
-       LEFT JOIN public.sources s ON s.id = r.source_id
-      WHERE h.holder_kind = $1 AND h.holder_ref = $2 AND h.number IS NOT NULL
-      ORDER BY h.number`,
-    [LEGACY_NOTE, rel],
-  );
-  return {
-    numberOf: new Map(rows.map((r) => [r.cited_ref, r.number])),
-    lines: rows.filter((r) => r.listed).map((r) => referenceLine(r.number, r.title, r.url)),
-  };
-}
-
-// Any other exported page (a compiled page is not a holder): its body links, numbered by first
-// appearance - the legacy rule without the retired frontmatter list.
-export async function bodyExportReferences(db: Db, md: string) {
-  const order = exportOrder(md, []);
-  const numberOf = new Map(order.map((u, i) => [u, i + 1]));
-  if (!order.length) return { numberOf, lines: [] as string[] };
-  const rows = await db.query<{ id: string; title: string; url: string | null }>(
-    `SELECT id::text AS id, title, url FROM public.sources
-      WHERE id = ANY($1::uuid[]) AND retraction_committed_at IS NULL`,
-    [order],
-  ).catch(() => []);
-  const byId = new Map(rows.map((r) => [r.id, r]));
-  const lines = order.map((u) => {
-    const r = byId.get(u);
-    return r ? referenceLine(numberOf.get(u)!, r.title, r.url) : null;
-  }).filter((l): l is string => l !== null);
-  return { numberOf, lines };
-}
+// ── export ───────────────────────────────────────────────────────────────────────────────
+// The export (research-workbench P6a, src/export/repo.ts) reads a legacy note's numbered references
+// from its holder rows and renders them through pandoc --citeproc; the plain References list that
+// was rendered here is retired.
 
 // ── diffCheck ────────────────────────────────────────────────────────────────────────────
 export interface DiffCheckInput {

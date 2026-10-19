@@ -33,8 +33,8 @@
 #        c. SQL: every legacy-note reference has provenance user and its pinned revision equal to
 #           its source's current revision; none lacks a quote selector
 #        d. the :wt workbench answers the same requests: the post-change capture; compared with
-#           the pre-change one byte for byte (note-refs bodies, the References sections, the whole
-#           export) - a difference FAILS
+#           the pre-change one byte for byte (note-refs bodies) - a difference FAILS; the export is
+#           captured only (P6a replaced its rendering: run-export-tests.ps1 tests it)
 #        e. every one of the 200 sources gets a new revision; diffCheck over the 200-reference
 #           note, over HTTP, 5 runs: each under 200 ms, all out of date, and the recorded network
 #           log carries no chunk text
@@ -115,6 +115,16 @@ function Dk { $o = (& docker @args 2>&1 | ForEach-Object { "$_" }) -join "`n"; $
 function Save([string]$name, [string]$text) {
   # into the STAGING directory; Publish-Evidence copies it to -Evidence after the guard
   [System.IO.File]::WriteAllText((Join-Path $evStage $name), $text, (New-Object System.Text.UTF8Encoding $false))
+}
+# rw-p6a-resolve attempt 2 (tester near-miss 8), kept with rw-p0b's required -Subnet: after the
+# network is created its subnet is read back and must be the pinned one, outside 192.168.0.0/16.
+function Test-SubnetAllowed([string]$s) {
+  if ($s -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$') { return $false }
+  $o = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]); $len = [int]$Matches[5]
+  if (@($o | Where-Object { $_ -gt 255 }).Count -gt 0) { return $false }
+  if ($len -lt 16 -or $len -gt 28) { return $false }
+  if ($o[0] -eq 192 -and $o[1] -eq 168) { return $false }
+  return $true
 }
 function Psql([string]$db, [string]$sql) {
   # base64 through the shell: PowerShell 5.1 strips embedded double quotes from native arguments
@@ -259,6 +269,8 @@ try {
   Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $($subnets.run); the smoke's fetch network gets $($subnets.smoke))"
   if ($script:rc -ne 0) { throw 'network' }
   $made.net = $true
+  $got = (Dk network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $net).Trim()
+  Check (($got -eq $subnets.run) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
 
   # ---------------------------------------------------------------- 3. the :wt image
   Write-Host "[3] build $tag (the build runs the image test gate)"
@@ -415,7 +427,9 @@ SELECT count(*),
   $o = Client @('compare', '/ev/capture-pre-change.json', '/ev/capture-post-change.json')
   Save 'compare-pre-post.log' $o
   Write-Host ($o -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
-  Check ($script:rc -eq 0) 'note-refs, References sections and whole exports: pre-change == post-change for every note'
+  # (P6a, rw-p6a-resolve: the export is captured, not compared - its rendering is citeproc now;
+  # the numbers are compared by the unit and integration tests, the export by run-export-tests.ps1)
+  Check ($script:rc -eq 0) 'note-refs: pre-change == post-change for every note'
 
   # e. diffCheck over the 200-reference note, after every one of its sources moved to revision 3
   $o = Psql $dbC "INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by) SELECT id, 3, content, title, 'fixture' FROM public.sources WHERE id::text LIKE 'f3000000-%'; SELECT count(*) FROM public.source_revisions WHERE revision = 3 AND source_id::text LIKE 'f3000000-%';"
