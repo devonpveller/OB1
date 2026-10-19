@@ -4,7 +4,7 @@ and the inline pool that runs the same job function a worker process runs) and a
 Everything between the socket and the store is the shipped code: the HTTP checks, stage 1, the
 connector binding, the screen (stages 1-5), D2, the response bodies.
 
-Needs intake's runtime deps (google-re2, selectolax). HAVE_RUNTIME says whether they import.
+Needs intake's runtime dep google-re2 (intake's requirements.txt / requirements-dev.txt). HAVE_RUNTIME says whether they import.
 NOTE: intake's tests/service_support.py is NOT imported - importing it switches sockets off for the
 whole process (tests/support.py); the few helpers needed are re-made here.
 """
@@ -18,8 +18,7 @@ import threading
 import connector_tests  # noqa: F401 - sys.path
 
 try:
-    import re2  # noqa: F401
-    import selectolax  # noqa: F401
+    import re2  # noqa: F401 - intake's one native runtime dep for stages 1-5 (requirements.txt)
     HAVE_RUNTIME = True
     WHY = ""
 except Exception as e:  # noqa: BLE001

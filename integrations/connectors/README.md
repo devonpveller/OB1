@@ -41,8 +41,8 @@ A connector **collects**. The kit builds, checks and sends.
 5. **Its key never appears** in a log line, stdout, stderr, an envelope or a report.
 6. **Its item ids are stable**: the same thing collected twice has the same `external_id`, so
    intake answers a repeat (same bytes) or a new revision (changed bytes), never a second item.
-7. `envelopes()` and `run()` are the kit's: overriding them, or declaring a non-gate host, is
-   refused when the class is created (`TypeError`).
+7. `envelopes()`, `run()` and `client()` are the kit's: overriding them, or declaring a non-gate
+   host, is refused when the class is created (`TypeError`).
 
 ### The envelope (intake's stage 1, exactly)
 
@@ -65,7 +65,7 @@ external_id}}` - exactly these keys. `origin` is a URL or a connector locator (`
 `stdin`; never a host path); `redirect_chain` lists the URLs a fetch passed through (from the
 search gate's report, for gate connectors), at most 20. **A connector cannot pre-label its
 content**: `verdict`, `intake_id`, `classifier` and `flags` are intake's and are refused anywhere
-in provenance.
+in provenance, and (with `labels`) as top-level metadata keys too.
 
 ### What each intake answer means (`outcomes.py`)
 
@@ -143,9 +143,19 @@ The sandbox and the static scan are TEST tools: they make a connector that break
 its tests. At run time the boundary is the network (plan step 6: a connector container has no
 route except to intake and the gate) and intake's own checks.
 
+**What the kit is, plainly.** It catches mistakes, not a connector written to evade it: access through
+`sys.modules`, `getattr` with built strings or `__builtins__`, and code on a path the fixture input does not
+reach (an environment-dependent branch) all pass it. The key check searches four forms of the key only - the
+key itself, its base64, hex and sha256 - in log records of every logger, `sys.stdout`/`sys.stderr`, file
+descriptors 1 and 2, the request bodies and the run report; a key transformed any other way is not found.
+There is NO run-time barrier until plan step 6 (network enforcement): until then, a connector process can
+open any socket its container can reach, and reviewing each connector's source is the barrier.
+
 ### The proof: mutants (`connector_tests/test_mutants.py`)
 
-15 mutant connectors, each breaking one rule, MUST fail conformance on that rule: a non-envelope
+21 mutant connectors, each breaking one rule, MUST fail conformance on that rule (6 of them written by the
+round-1 reviewer: the C modules `_socket`, `_winapi`/`_posixsubprocess` and `_sqlite3`, a non-propagating
+logger, `sys.__stderr__` and `os.write(2, ...)`): a non-envelope
 (dict items; a direct urllib POST; a post through the client's private transport; an overridden
 `run()`), a table write (psycopg; sqlite3), a socket to a non-allowed host (the DB by name; an IP;
 the model alias; a curl subprocess; a non-gate `allowed_hosts`), a leaked key (a log line;
@@ -178,7 +188,7 @@ overriding its send path.
 ## Tests
 
 From this directory, in a venv with intake's `requirements-dev.txt` (the parity tests run the
-real intake code; without google-re2/selectolax they are skipped with that reason):
+real intake code, which needs google-re2; without it they are skipped with that reason):
 
     python -m unittest discover -s connector_tests -t .
     ruff check .

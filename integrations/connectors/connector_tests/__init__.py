@@ -4,8 +4,8 @@
 
 The intake package (../intake) is put on sys.path so the tests can use intake's own stage 1 as the
 oracle and the real I5 service code for the parity tests; those need intake's runtime deps
-(requirements-dev.txt there: google-re2, selectolax) for the in-process service, and are SKIPPED
-(with the reason) where they are missing - the test plan runs them in the intake venv, 0 skips."""
+(google-re2, from requirements-dev.txt there) for the in-process service, and are SKIPPED (with
+the reason) where it is missing - the test plan runs them in the intake venv, 0 skips."""
 import sys
 from pathlib import Path
 

@@ -169,6 +169,13 @@ class Build(unittest.TestCase):
         env = build(fetched_at=None)
         self.assertIsNotNone(dt.datetime.fromisoformat(env.body["fetched_at"]).tzinfo)
 
+    def test_trust_labels_in_top_level_metadata_are_refused(self):
+        for k in ("verdict", "intake_id", "classifier", "flags", "labels"):
+            with self.subTest(key=k):
+                with self.assertRaisesRegex(kit.InvalidEnvelope, "trust labels"):
+                    build(metadata={k: "clean"})
+        build(metadata={"title": "fine"})
+
     def test_a_lone_surrogate_is_refused_not_silently_replaced(self):
         with self.assertRaises(kit.InvalidEnvelope):
             build(raw="a" + chr(0xDC00))

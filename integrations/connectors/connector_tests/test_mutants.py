@@ -35,6 +35,13 @@ MUTANTS = {
     "m_key_in_metadata": ("key", {"test_no_secret_in_logs"}),
     # an unstable item id
     "m_unstable_id": ("idempotency", {"test_idempotency_key"}),
+    # round 2: the reviewer's six (reviews/connector-template.md, r-conn) that passed round 1
+    "m_r_s6b_from_c_socket": ("socket", {"test_static_scan"}),
+    "m_r_s7_c_spawn": ("socket", {"test_static_scan"}),
+    "m_r_t4b_c_sqlite": ("table write", {"test_static_scan"}),
+    "m_r_k1_private_logger": ("key", {"test_no_secret_in_logs"}),
+    "m_r_k7_real_stderr": ("key", {"test_no_secret_in_logs"}),
+    "m_r_k10_fd2": ("key", {"test_no_secret_in_logs"}),
 }
 
 
