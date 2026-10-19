@@ -748,7 +748,7 @@ try {
   $volNew = @(DanglingVolumes | Where-Object { $volBefore -notcontains $_ })
   Write-Host "  INFO  dangling volumes on the host: $($volBefore.Count) before, $(@(DanglingVolumes).Count) after; new during the run: $($volNew.Count) (ours among them: $(@($volNew | Where-Object { $ourVolumes -contains $_ }).Count))"
   $localAfter = LocalSnapshot
-  Check ((Compare-Object $localBefore $localAfter) -eq $null) 'no :local image changed'
+  Check (-not (Compare-Object $localBefore $localAfter)) 'no :local image changed'
 }
 Write-Host "evidence: $Evidence"
 if ($script:fail) { Write-Host "$($script:fail) check(s) FAILED"; exit 1 }

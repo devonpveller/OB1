@@ -274,7 +274,7 @@ finally {
   $volLeft = @($ourVolumes | Where-Object { $null = Dk volume inspect $_; $script:rc -eq 0 })
   Check (($made.containers.Count -eq 0 -or $ourVolumes.Count -gt 0) -and ($volLeft.Count -eq 0)) "no volume of ours is left ($($ourVolumes.Count) recorded, $($volLeft.Count) left: '$($volLeft -join ' ')')"
   $localAfter = LocalSnapshot
-  Check ((Compare-Object $localBefore $localAfter) -eq $null) 'no :local image changed'
+  Check (-not (Compare-Object $localBefore $localAfter)) 'no :local image changed'
   Write-Host "== $(if ($script:fail) { "FAILED ($script:fail)" } else { 'ALL PASSED' })  evidence: $Evidence"
 }
 exit $script:fail
