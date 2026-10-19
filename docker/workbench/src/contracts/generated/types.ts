@@ -377,6 +377,11 @@ export type Quality = {
     version: string;
     computed_from: string;
   };
+  claim_kind: string | null; /** registry: claim_kinds */
+  signals: Record<string, unknown>;
+  corroborated_by: Array<QualitySource>;
+  contradicted_by: Array<QualitySource>;
+  history: Array<QualityHistory>;
   factors: Array<QualityFactor>;
 };
 
@@ -384,6 +389,24 @@ export type QualityFactor = {
   name: string;
   value: number;
   reason: string;
+};
+
+export type QualityHistory = {
+  score: number;
+  total: number | null;
+  claim_kind: string | null; /** registry: claim_kinds */
+  model_version: string | null;
+  computed_at: string;
+};
+
+export type QualitySource = {
+  source_id: string;
+  title: string;
+  url: string | null;
+  family: string | null; /** registry: source_families */
+  relation: string;
+  amount: number | null;
+  claim: string | null;
 };
 
 export type Reference = {

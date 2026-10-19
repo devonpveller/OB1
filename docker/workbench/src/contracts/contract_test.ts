@@ -69,9 +69,11 @@ Deno.test("every x-registry annotation names a declared registry", () => {
 Deno.test("every registry in registry.ts is seeded by the migrations (when the migrations are reachable)", async () => {
   let sql: string;
   try {
-    // P0's contract registries, and P2a's reference registries (init-references.sql)
+    // P0's contract registries, P2a's reference registries (init-references.sql) and the ones
+    // research-workbench P3a declares (init-research-credibility.sql, rw-p3a-entail).
     sql = await Deno.readTextFile(new URL("../../../init-research-contract.sql", import.meta.url)) +
-      await Deno.readTextFile(new URL("../../../init-references.sql", import.meta.url));
+      await Deno.readTextFile(new URL("../../../init-references.sql", import.meta.url)) +
+      await Deno.readTextFile(new URL("../../../init-research-credibility.sql", import.meta.url));
   } catch {
     return; // inside the image the migrations are not in the build context
   }

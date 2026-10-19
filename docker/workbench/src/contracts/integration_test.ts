@@ -658,10 +658,38 @@ t("under the metadata filter nested collections are scoped: claims' sources, qua
   assertEquals((await call("GET", `/claims?source_id=${sOut}&metadata_filter=${f}`)).json.count, 0);
   const all = await call("GET", `/claims?q=nested`);
   assertEquals(all.json.claims.find((c: any) => c.id === cIn).sources.length, 2);
-  const grounded = async (q: string) =>
-    (await call("GET", `/sources/${sIn}/quality${q}`)).json.factors.find((x: any) => x.name === "grounded_claims").value;
-  assertEquals(await grounded(`?metadata_filter=${f}`), 1);
-  assertEquals(await grounded(""), 2);
+  // quality (the D15 record since P3a): under the filter an out-of-scope source is neither named
+  // (co-grounding, corroboration) nor counted in the rolling total; unfiltered it is both.
+  await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+             VALUES ($1, $2, 'weak', 0.1, 'nested corroboration', 'general_theory', 'supports', 'd15 weights v1 paper p1')`, [sOut, sIn]);
+  const qf = (await call("GET", `/sources/${sIn}/quality?metadata_filter=${f}`)).json;
+  const qu = (await call("GET", `/sources/${sIn}/quality`)).json;
+  assert(S.Quality.safeParse(qf).success, JSON.stringify(qf));
+  const named = (q: any) => [...q.corroborated_by, ...q.contradicted_by].map((x: any) => x.source_id);
+  assert(!named(qf).includes(sOut), `scoped quality names the out-of-scope source: ${JSON.stringify(qf)}`);
+  assert(named(qu).includes(sOut), "the control: unfiltered quality names it");
+  const received = (q: any) => q.factors.filter((x: any) => x.name === "corroboration_received").length;
+  assertEquals(received(qf), 0);
+  assertEquals(received(qu), 1);
+  assert(qu.score.value < 1, `precondition: the unscoped total is not capped (${qu.score.value})`);
+  assert(Math.abs(qu.score.value - qf.score.value - 0.1) < 1e-4, `scoped ${qf.score.value} vs unscoped ${qu.score.value}`);
+  // rw-p3a-entail attempt 2 (tester t-rw-p3a finding 1): an IN-SCOPE giver whose corroboration LINE is
+  // an OUT-OF-SCOPE claim's text ('nested out' = cOut). Under the filter the giver and its amount stay
+  // (the number is the accepted residual), the line's text never does; a line that IS an in-scope
+  // claim's text ('nested in' = cIn) is served. Unfiltered, both texts are served.
+  const sGiver = await newSource();
+  await sql(`UPDATE public.sources SET metadata = '{"share":"cloud"}' WHERE id = $1`, [sGiver]);
+  await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+             VALUES ($1, $2, 'weak', 0.03, 'nested out', 'general_theory', 'supports', 'd15 weights v1 paper p1'),
+                    ($1, $2, 'weak', 0.02, 'nested in', 'general_theory', 'supports', 'd15 weights v1 paper p1')`, [sGiver, sIn]);
+  const qf2 = (await call("GET", `/sources/${sIn}/quality?metadata_filter=${f}`)).json;
+  const qu2 = (await call("GET", `/sources/${sIn}/quality`)).json;
+  assert(S.Quality.safeParse(qf2).success, JSON.stringify(qf2));
+  const giverRows = (q: any) => q.corroborated_by.filter((x: any) => x.source_id === sGiver).map((x: any) => `${x.amount} ${x.claim}`).sort();
+  assertEquals(giverRows(qf2), ["0.02 nested in", "0.03 null"], JSON.stringify(qf2.corroborated_by));
+  assertEquals(giverRows(qu2), ["0.02 nested in", "0.03 nested out"], JSON.stringify(qu2.corroborated_by));
+  assert(!JSON.stringify(qf2).includes("nested out"), `the scoped answer names an out-of-scope claim's text: ${JSON.stringify(qf2)}`);
+  await sql(`DELETE FROM public.source_corroborations WHERE to_source_id = $1`, [sIn]);
   for (const p of [`/sources/not-a-uuid/dependence`, `/references/not-a-uuid`, `/tombstones/not-a-uuid?metadata_filter=${f}`]) {
     const r = await call("GET", p);
     assertEquals(r.status, 400, p);
@@ -778,6 +806,140 @@ t("restore still refuses a purged source", async () => {
   const r = await legacyPost(`/${s}/restore`);
   assertEquals(r.status, 404);
   assertEquals((await lifeOf(s)).committed, true);
+});
+
+
+// ── research-workbench P3a (rw-p3a-entail): quality(id) names its sources, never a bare number ──
+t("P3a: quality(id) names the corroborating and contradicting sources behind the D15 score, with reasons and history", async () => {
+  const subject = await newSource({ url: "https://blog.example.com/p3a-subject", title: "a post that links a paper" });
+  const paper = await newSource({ url: "https://journal.example.org/p3a-paper", title: "the linked paper" });
+  const peer = await newSource({ url: "https://news.example.net/p3a-peer", title: "a peer that co-grounds" });
+  const against = await newSource({ url: "https://forum.example.com/p3a-against", title: "a source that contradicts" });
+  await sql(`UPDATE public.sources SET metadata = metadata || $2::jsonb WHERE id = $1`, [paper, JSON.stringify({
+    credibility: { family: "scholarly", claim_kind: "general_theory", score: 0.8, total: 0.8, model_version: "d15 weights v1 paper p1",
+      signals: { cited_by: 40, author_works_count: 90, age_years: 3 }, reasons: ["fixture"] } })]);
+  await sql(`UPDATE public.sources SET metadata = metadata || $2::jsonb WHERE id = $1`, [subject, JSON.stringify({
+    credibility: { family: "general", claim_kind: "general_theory", score: 0.27, total: 0.535, model_version: "d15 weights v1 paper p1",
+      signals: { author_identity: "A. Blogger", domain_class: "general", primary: false,
+        link_structure: { inbound_corroborations: 1, found_via: 0 }, entailment_agreement: { supports: 1, partial: 0, unsupported: 0 } },
+      reasons: ["domain class general: 0.22", "author stated (A. Blogger): +0.05"] } })]);
+  await sql(`INSERT INTO public.source_credibility_history (source_id, family, claim_kind, score, total, model_version, signals, reasons)
+             VALUES ($1, 'general', 'general_theory', 0.27, 0.535, 'd15 weights v1 paper p1', '{}', '[]')`, [subject]);
+  await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+             VALUES ($1, $2, 'strong', 0.4, 'the claim both state', 'general_theory', 'supports', 'd15 weights v1 paper p1')`, [paper, subject]);
+  // a partial verdict cannot transfer (OBC02)
+  let refused = "";
+  try {
+    await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+               VALUES ($1, $2, 'weak', 0.1, 'x', 'general_theory', 'partial', 'd15 weights v1 paper p1')`, [subject, paper]);
+  } catch (e) { refused = (e as Error).message; }
+  assert(/does not transfer/.test(refused), `a partial verdict transferred: ${refused}`);
+  const claim = uuid();
+  await sql(`INSERT INTO public.claims (id, text, metadata) VALUES ($1, 'P3a quality fixture claim', '{"claim_kind":"general_theory"}')`, [claim]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $2, 'states'), ($1, $3, 'corroborates'), ($1, $4, 'contradicts')`,
+    [claim, subject, peer, against]);
+  const q = await call("GET", `/sources/${subject}/quality`);
+  assertEquals(q.status, 200);
+  assert(S.Quality.safeParse(q.json).success, JSON.stringify(S.Quality.safeParse(q.json).error?.issues ?? []));
+  assertEquals(q.json.family, "general");
+  assertEquals(q.json.claim_kind, "general_theory");
+  assert(typeof q.json.score.value === "number" && q.json.score.value > 0, "the D15 total");
+  assertEquals(q.json.score.version, "d15 weights v1 paper p1");
+  const by = (list: Array<Record<string, unknown>>) => list.map((x) => x.source_id);
+  assert(by(q.json.corroborated_by).includes(paper), "the paper whose corroboration is in the score is named");
+  assert(by(q.json.corroborated_by).includes(peer), "the co-grounding source is named");
+  assertEquals(q.json.corroborated_by.find((x: Record<string, unknown>) => x.source_id === paper).amount, 0.4);
+  assert(by(q.json.contradicted_by).includes(against), "the contradicting source is named");
+  assertEquals(q.json.signals.domain_class, "general");
+  assertEquals(q.json.history.length, 1);
+  assert(q.json.factors.some((f: Record<string, unknown>) => f.name === "corroboration_received"), "the received corroboration is a factor");
+});
+// rw-p3a-entail attempt 2 (tester t-rw-p3a finding 3): a scholarly reason or a credibility reason line
+// that carries the OpenAlex key, the mailto or a request URL (attempt 1 stored the fetch error's
+// message) is never served - not through the local door, not through the cloud door.
+t("P3a attempt 2: quality(id) never serves a stored credential-shaped reason (signals.scholarly.reason is an allow-listed code)", async () => {
+  const secret = `SECRETKEY-${uuid().slice(0, 8)}`;
+  const leaky = `OpenAlex error: error sending request for url (https://api.openalex.org/works/doi%3A10.1%2Fx?api_key=${secret}&mailto=tester%40example.invalid)`;
+  const s1 = await newSource({ url: "https://blog.example.com/p3a-secret" });
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s1, JSON.stringify({
+    share: "cloud", scholarly: { state: "unresolved", identifier: { kind: "doi", value: "10.1/x" }, doi: "10.1/x", cited_by: null, reason: leaky } })]);
+  const s2 = await newSource({ url: "https://blog.example.com/p3a-secret-2" });
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s2, JSON.stringify({
+    share: "cloud", credibility: { family: "general", claim_kind: "practical", score: 0.22, total: 0.22, model_version: "d15 weights v1 paper p1",
+      signals: { domain_class: "general", primary: false, author_identity: null }, reasons: [`doi 10.1/x UNRESOLVED (${leaky}): scored as general`, "domain class general: 0.22"] },
+    scholarly: { state: "unresolved", reason: "OpenAlex 404 (api.openalex.org); Crossref 503 (api.crossref.org)" } })]);
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  for (const path of [`/sources/${s1}/quality`, `/sources/${s1}/quality?metadata_filter=${f}`, `/sources/${s2}/quality`, `/sources/${s2}/quality?metadata_filter=${f}`]) {
+    const r = await call("GET", path);
+    assertEquals(r.status, 200, path);
+    assert(S.Quality.safeParse(r.json).success, JSON.stringify(r.json));
+    const text = JSON.stringify(r.json);
+    for (const bad of [secret, "api_key", "mailto", "tester%40example.invalid"]) assert(!text.includes(bad), `${path} serves '${bad}': ${text}`);
+  }
+  const q1 = (await call("GET", `/sources/${s1}/quality`)).json;
+  assertEquals(q1.signals.scholarly.state, "unresolved");
+  assertEquals(q1.signals.scholarly.reason, "reason redacted (not an allow-listed reason code)");
+  const q2 = (await call("GET", `/sources/${s2}/quality`)).json;
+  assert(q2.factors.some((x: any) => x.name === "reason" && /redacted/.test(x.reason)), JSON.stringify(q2.factors));
+  assert(q2.factors.some((x: any) => x.name === "reason" && x.reason === "domain class general: 0.22"), "a clean reason line is served as is");
+});
+
+// attempt 3 (tester t-rw-p3a-2 (4)): a bare key and a fully percent-encoded query passed the serving
+// side's credential test on both doors, and the scholarly record's data fields (doi, identifier,
+// authors) were served unscanned. Planted directly in the DB (no writer forms them).
+t("P3a attempt 3: quality(id) serves no bare key, no percent-encoded query and no tainted scholarly field - on either door", async () => {
+  const secret = `SECRETKEY-${uuid().slice(0, 8)}`;
+  const s = await newSource({ url: "https://blog.example.com/p3a-secret-3" });
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s, JSON.stringify({
+    share: "cloud",
+    credibility: { family: "general", claim_kind: "practical", score: 0.22, total: 0.22, model_version: "d15 weights v1 paper p1",
+      signals: { domain_class: "general", primary: false, author_identity: `Jane ${secret}`,
+        scholarly: { state: "resolved", identifier: { kind: "doi", value: `10.1/x?api_key=${secret}` }, doi: `https://api.openalex.org/w?mailto=t%40x.invalid`,
+          authors: [{ id: secret, name: `https%3A%2F%2Fapi.openalex.org%2Fw%3Fapi_key%3D${secret}`, works_count: 3 }], via: "openalex", cited_by: 2 } },
+      reasons: [`OpenAlex 401 bare ${secret} rejected`, `see https%3A%2F%2Fapi.openalex.org%2Fworks%2Fx%3Fapi_key%3D${secret}`, "domain class general: 0.22"] },
+  })]);
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  for (const path of [`/sources/${s}/quality`, `/sources/${s}/quality?metadata_filter=${f}`]) {
+    const r = await call("GET", path);
+    assertEquals(r.status, 200, path);
+    assert(S.Quality.safeParse(r.json).success, JSON.stringify(r.json));
+    const text = JSON.stringify(r.json);
+    for (const bad of [secret, "api_key", "mailto", "x.invalid", "api.openalex.org%2F", "%3Fapi_key"]) assert(!text.includes(bad), `${path} serves '${bad}': ${text}`);
+    const q = r.json;
+    assertEquals(q.signals.scholarly.identifier, null, path);
+    assertEquals(q.signals.scholarly.doi, null, path);
+    assertEquals(q.signals.scholarly.authors, [{ id: null, name: null, works_count: 3 }], path);
+    assertEquals(q.factors.filter((x: any) => x.name === "reason" && /redacted/.test(x.reason)).length, 2, JSON.stringify(q.factors));
+    assert(q.factors.some((x: any) => x.name === "reason" && x.reason === "domain class general: 0.22"), "a clean reason line is served as is");
+  }
+});
+
+t("P3a attempt 4: quality(id) history serves a claim_kind / model_version label only when it names a registry row (else null) - on either door", async () => {
+  const s = await newSource({ url: "https://blog.example.com/p3a-history-4" });
+  const junk = `LABELKIND-${uuid().slice(0, 8)}`;
+  await sql(`UPDATE public.sources SET metadata = $2::jsonb WHERE id = $1`, [s, JSON.stringify({
+    share: "cloud", credibility: { family: "general", claim_kind: "practical", score: 0.22, total: 0.22, model_version: "d15 weights v1 paper p1", signals: {}, reasons: [] },
+  })]);
+  // oldest first: a good row, a junk kind, a junk model label (out-of-scope text), an unregistered paper key
+  for (const [kind, mv, at] of [["practical", "d15 weights v1 paper p1", "2026-10-01"], [junk, "d15 weights v1 paper p1", "2026-10-02"],
+    ["release", `LABELMV out-of-scope claim ${junk}`, "2026-10-03"], ["price", "d15 weights v1 paper p9", "2026-10-04"],
+    // attempt 5: zero-padded / signed / spaced versions are not the label the model prints (exact text, no numeric coercion)
+    ["practical", "d15 weights v0001 paper p1", "2026-10-05"], ["practical", "d15 weights v01 paper p1", "2026-10-06"],
+    ["practical", "d15 weights v+1 paper p1", "2026-10-07"], ["practical", "d15 weights v1.0 paper p1", "2026-10-08"],
+    ["practical", "d15 weights v0 paper p1", "2026-10-09"]]) {
+    await sql(`INSERT INTO public.source_credibility_history (source_id, family, claim_kind, score, total, model_version, computed_at)
+               VALUES ($1, 'general', $2, 0.22, 0.22, $3, $4::timestamptz)`, [s, kind, mv, at]);
+  }
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  for (const path of [`/sources/${s}/quality`, `/sources/${s}/quality?metadata_filter=${f}`]) {
+    const r = await call("GET", path);
+    assertEquals(r.status, 200, path);
+    assert(S.Quality.safeParse(r.json).success, JSON.stringify(r.json));
+    const h = r.json.history.map((x: any) => [x.claim_kind, x.model_version]);
+    assertEquals(h, [["practical", "d15 weights v0 paper p1"], ["practical", null], ["practical", null], ["practical", null], ["practical", null],
+      ["price", null], ["release", null], [null, "d15 weights v1 paper p1"], ["practical", "d15 weights v1 paper p1"]], path);
+    assert(!JSON.stringify(r.json).includes(junk), `${path} serves the junk label`);
+  }
 });
 
 // ── the legacy purge door (DELETE /workbench/sources/:id) through the D5 lifecycle ──────────────

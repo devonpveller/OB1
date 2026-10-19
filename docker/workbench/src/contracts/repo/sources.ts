@@ -5,6 +5,7 @@ import type { Db } from "../db.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 import { sourceRecordState } from "../logic/state.ts";
 import { refineryScopedScore, termDef } from "../logic/credibility.ts";
+import { safeReasonText, safeSignals } from "../logic/scholarly_reason.ts";
 import type { RegistryReader } from "../registry.ts";
 
 export interface SourceRow {
@@ -146,10 +147,13 @@ export async function tombstoneForUrl(db: Db, url: string): Promise<TombstoneRow
   ))[0] ?? null;
 }
 
-export function sourceFamily(contentType: string, metadata: Record<string, unknown>): string {
-  const scholarly = contentType === "paper" ||
-    ["doi", "arxiv", "pmid", "pmcid"].some((k) => metadata?.[k] || (metadata?.scholarly as Record<string, unknown>)?.[k]);
-  return scholarly ? "scholarly" : "general";
+// D15 item 10 (P3a): scholarly when a scholarly identifier RESOLVED, general otherwise - an
+// identifier that did not resolve, or a content_type of "paper" alone, is not the scholarly family
+// (it has no cited_by / works_count to be scored from). The admission record's family wins.
+export function sourceFamily(_contentType: string, metadata: Record<string, unknown>): string {
+  const recorded = (metadata?.credibility as Record<string, unknown> | undefined)?.family;
+  if (typeof recorded === "string") return recorded;
+  return (metadata?.scholarly as Record<string, unknown> | undefined)?.state === "resolved" ? "scholarly" : "general";
 }
 
 export function tombstoneOut(t: TombstoneRow) {
@@ -274,11 +278,34 @@ export async function chunkContext(
   };
 }
 
-// quality(id): the factors that exist before the D15 model (P3a) - authority, the claims the
-// source grounds and their confidence. Version-stamped so P3a's model replaces it visibly.
-// Under a filter the claim aggregates count and average only claims whose metadata contains it
-// (rw-p0-contract2 attempt 2, tester finding N2): an in-scope source's score says nothing about
-// the out-of-scope claims it also grounds.
+// diffCheck(referenceIds[]) lives in repo/references.ts since research-workbench P2a (it reads
+// the reference_records pin); P3a's quality() below is unchanged by it.
+
+// quality(id) - why this source is rated as it is (research-workbench P3a, D15). Never a bare
+// number: the D15 rolling total for the claim kind it was admitted under, the family and the
+// signals it was computed from, every source whose corroboration is in it, every source that
+// contradicts a claim it grounds, and the history. The numbers come from the SQL twin of the
+// model (init-research-credibility.sql: source_credibility / source_rolling_total), which reads
+// the research service's admission record (metadata.credibility) or, for a source stored before
+// P3a, derives the general family's domain-class score and says so.
+// Under a filter (the cloud door) every aggregate and every named row is scoped the way P0 scoped
+// the pre-D15 score (rw-p0-contract2 attempt 2, tester finding N2/N4): a source is named in
+// corroborated_by / contradicted_by only when it is itself in scope AND the claim that links it is
+// in scope; the rolling total counts only corroborations received from in-scope givers
+// (source_rolling_total's scoped form); a history row's stored total (a snapshot over every giver,
+// in and out of scope) is null - its family score is the source's own and stays.
+// Attempt 2 (tester t-rw-p3a finding 1): a giver row's `claim` is the corroboration LINE - the
+// synthesis line, i.e. the text of the claim filed from it - and a line has no metadata of its own.
+// Under a filter the line's text is served only when an ACTIVE IN-SCOPE claim has exactly that
+// text; otherwise it is null (fail closed: an in-scope giver on an out-of-scope claim's line, or a
+// line no in-scope claim was filed as). The giver itself (in scope) and its amount stay: the number
+// is the accepted residual class, the text is not. The rule for a cloud answer: every text, id,
+// title or URL it carries belongs to an in-scope row. signals.scholarly.reason is served only as an
+// allow-listed reason code and every reason line is scrubbed of credential-shaped text, on both
+// doors (logic/scholarly_reason.ts).
+interface CredRow { family: string | null; score: number | null; is_primary: boolean | null; basis: string | null; kind: string | null; total: number | null; model: string }
+interface QSourceRow { source_id: string; title: string; url: string | null; family: string | null; relation: string; amount: number | null; claim: string | null }
+
 export async function quality(db: Db, reg: RegistryReader, id: string, f: MetadataFilter) {
   const s = await getSource(db, id, f);
   const userTerm = termDef((await reg.entry("credibility_terms", "user_provided"))?.definition);
@@ -287,35 +314,124 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
     if (!h) return null;
     return heldQuality(h, userTerm);
   }
-  const rows = await db.query<{ claims: number; mean: number | null; corroborating: number; contradicting: number; authority: number }>(
-    `SELECT count(DISTINCT cs.claim_id) FILTER (WHERE cs.edge_type <> 'contradicts')::int AS claims,
-            avg(c.confidence) FILTER (WHERE cs.edge_type <> 'contradicts') AS mean,
-            count(*) FILTER (WHERE cs.edge_type = 'corroborates')::int AS corroborating,
-            count(*) FILTER (WHERE cs.edge_type = 'contradicts')::int AS contradicting,
-            (CASE WHEN $2::text ~* '\\.(gov|edu|mil)(:|/|$)' OR $3::text ~* '://[^/]*\\.(gov|edu|mil)(:|/|$)'
-                   OR $4::text = 'primary' THEN 1.0 ELSE 0.85 END)::float AS authority
-       FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
-      WHERE cs.source_id = $1 AND ($5::jsonb IS NULL OR c.metadata @> $5::jsonb)`,
-    [id, s.domain ?? "", s.url ?? "", String(s.metadata?.authority ?? ""), f ? JSON.stringify(f) : null],
+  const cred = (s.metadata?.credibility ?? null) as Record<string, unknown> | null;
+  const mf = f ? JSON.stringify(f) : null;
+  const [c] = await db.query<CredRow>(
+    `WITH k AS (SELECT COALESCE($2::text, public.credibility_fallback_kind()) AS kind)
+     SELECT sc.family, sc.score, sc.is_primary, sc.basis, k.kind,
+            public.source_rolling_total($1::uuid, k.kind, $3::jsonb) AS total, public.credibility_model_version() AS model
+       FROM k LEFT JOIN LATERAL public.source_credibility($1::uuid) sc ON TRUE`,
+    [id, typeof cred?.claim_kind === "string" ? cred.claim_kind : null, mf],
   );
-  const q = rows[0];
-  const mean = q?.mean === null || q?.mean === undefined ? null : Number(q.mean);
+  const corroborated = await db.query<QSourceRow>(
+    `SELECT g.id AS source_id, g.title, g.url, gc.family,
+            CASE sc.strength WHEN 'strong' THEN 'strong corroboration (entailment ' || sc.verdict || ')'
+                             ELSE 'weak corroboration (entailment ' || sc.verdict || ')' END AS relation,
+            sc.amount::float AS amount,
+            CASE WHEN $2::jsonb IS NULL THEN sc.claim_text
+                 WHEN EXISTS (SELECT 1 FROM public.claims lc
+                               WHERE btrim(lc.text) = btrim(sc.claim_text) AND lc.status = 'active'
+                                 AND lc.metadata @> $2::jsonb) THEN sc.claim_text
+                 ELSE NULL END AS claim
+       FROM public.source_corroborations sc
+       JOIN public.sources g ON g.id = sc.from_source_id AND g.retraction_committed_at IS NULL
+            AND ($2::jsonb IS NULL OR g.metadata @> $2::jsonb)
+       LEFT JOIN LATERAL public.source_credibility(g.id) gc ON TRUE
+      WHERE sc.to_source_id = $1::uuid
+     UNION ALL
+     SELECT DISTINCT ON (o.id) o.id, o.title, o.url, oc.family, 'co-grounds a claim' AS relation, NULL::float, cl.text
+       FROM public.claim_sources mine
+       JOIN public.claim_sources other ON other.claim_id = mine.claim_id AND other.source_id <> mine.source_id
+            AND other.edge_type IN ('states', 'corroborates')
+       JOIN public.sources o ON o.id = other.source_id AND o.retraction_committed_at IS NULL
+            AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
+       JOIN public.claims cl ON cl.id = mine.claim_id AND cl.status = 'active'
+            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb)
+       LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
+      WHERE mine.source_id = $1::uuid AND mine.edge_type IN ('states', 'corroborates')`,
+    [id, mf],
+  );
+  const contradicted = await db.query<QSourceRow>(
+    `SELECT DISTINCT ON (o.id) o.id AS source_id, o.title, o.url, oc.family,
+            'contradicts a claim this source grounds' AS relation, NULL::float AS amount, cl.text AS claim
+       FROM public.claim_sources mine
+       JOIN public.claims cl ON cl.id = mine.claim_id AND cl.status = 'active'
+            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb)
+       JOIN public.claim_sources against ON against.claim_id = mine.claim_id AND against.edge_type = 'contradicts'
+            AND against.source_id IS NOT NULL AND against.source_id <> mine.source_id
+       JOIN public.sources o ON o.id = against.source_id AND o.retraction_committed_at IS NULL
+            AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
+       LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
+      WHERE mine.source_id = $1::uuid AND mine.edge_type <> 'contradicts'
+     UNION
+     SELECT DISTINCT ON (o.id) o.id, o.title, o.url, oc.family,
+            'grounds a claim that contradicts one this source grounds', NULL::float, other.text
+       FROM public.claim_sources mine
+       JOIN public.claims mc ON mc.id = mine.claim_id AND ($2::jsonb IS NULL OR mc.metadata @> $2::jsonb)
+       JOIN public.claim_sources cc ON cc.claim_id = mine.claim_id AND cc.edge_type = 'contradicts' AND cc.parent_claim_id IS NOT NULL
+       JOIN public.claims other ON other.id = cc.parent_claim_id AND other.status = 'active'
+            AND ($2::jsonb IS NULL OR other.metadata @> $2::jsonb)
+       JOIN public.claim_sources theirs ON theirs.claim_id = other.id AND theirs.edge_type <> 'contradicts' AND theirs.source_id IS NOT NULL
+       JOIN public.sources o ON o.id = theirs.source_id AND o.retraction_committed_at IS NULL AND o.id <> $1::uuid
+            AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
+       LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
+      WHERE mine.source_id = $1::uuid AND mine.edge_type <> 'contradicts'`,
+    [id, mf],
+  );
+  // attempt 4 (tester near-miss: a history row's labels were served verbatim, so a writer could put any
+  // text there): claim_kind is served only when it is a claim_kinds registry key, model_version only
+  // when it is a D15 model label ("d15 weights v<N> paper <key>") naming a paper_score_versions row;
+  // anything else is null. Retired rows count (the history is historical).
+  // attempt 5 (tester near-miss): the match is EXACT TEXT, never a numeric reading - the version is the
+  // canonical decimal credibility_model_version() prints (0, or no leading zero: "v0001" is not "v1"),
+  // and the paper key is compared as text.
+  const history = await db.query<{ score: number; total: number | null; claim_kind: string | null; model_version: string | null; computed_at: string }>(
+    `SELECT h.score::float AS score, h.total::float AS total,
+            CASE WHEN EXISTS (SELECT 1 FROM public.contract_registry_entries e
+                               WHERE e.registry = 'claim_kinds' AND e.key = h.claim_kind) THEN h.claim_kind END AS claim_kind,
+            CASE WHEN h.model_version ~ '^d15 weights v(0|[1-9][0-9]{0,8}) paper [a-z0-9][a-z0-9._-]*$'
+                  AND EXISTS (SELECT 1 FROM public.contract_registry_entries e WHERE e.registry = 'paper_score_versions'
+                                 AND e.key = substring(h.model_version from ' paper ([a-z0-9][a-z0-9._-]*)$'))
+                 THEN h.model_version END AS model_version,
+            h.computed_at
+       FROM public.source_credibility_history h WHERE h.source_id = $1::uuid ORDER BY h.computed_at DESC, h.id DESC LIMIT 50`,
+    [id],
+  );
+  const family = c?.family ?? sourceFamily(s.content_type, s.metadata);
+  const reasons = Array.isArray(cred?.reasons) ? (cred!.reasons as unknown[]).map(safeReasonText) : [];
+  const received = corroborated.filter((r) => r.amount !== null);
+  const total = c?.total === null || c?.total === undefined ? null : r4(c.total);
   return {
     source_id: id, lifecycle: s.lifecycle,
     state: sourceRecordState({ lifecycle: s.lifecycle, staged_retract: s.staged_retract }),
     state_detail: sourceStateDetail(s, f),
-    family: sourceFamily(s.content_type, s.metadata),
+    family,
     score: {
-      value: mean, refinery_scoped: null, version: "claim-confidence-mean-v1",
-      computed_from: "mean confidence of the claims this source grounds (init-claims.sql claim_confidence); the D15 model replaces it in P3a",
+      value: total, refinery_scoped: null,
+      version: typeof cred?.model_version === "string" ? cred.model_version : (c?.model ?? "d15"),
+      computed_from: `D15 rolling total for claim kind ${c?.kind ?? "?"}: family score (${c?.basis ?? "no record"}) x the weight row` +
+        `${received.length ? `, plus ${received.length} entailment-gated corroboration(s) received` : ""}`,
     },
+    claim_kind: c?.kind ?? null,
+    signals: safeSignals(cred?.signals ?? (s.metadata?.scholarly ? { scholarly: s.metadata.scholarly } : {})),
+    corroborated_by: corroborated.map(qSource),
+    contradicted_by: contradicted.map(qSource),
+    history: history.map((h) => ({ score: r4(h.score), total: h.total === null || mf ? null : r4(h.total), claim_kind: h.claim_kind, model_version: h.model_version, computed_at: new Date(h.computed_at).toISOString() })),
     factors: [
-      { name: "authority", value: Number(q?.authority ?? 0.85), reason: "1.0 for .gov/.edu/.mil or metadata.authority=primary, else 0.85" },
-      { name: "grounded_claims", value: q?.claims ?? 0, reason: "claims this source states, corroborates or is inferred from" },
-      { name: "corroborating_edges", value: q?.corroborating ?? 0, reason: "corroborates edges" },
-      { name: "contradicting_edges", value: q?.contradicting ?? 0, reason: "contradicts edges" },
+      { name: `${family}_family_score`, value: r4(c?.score ?? 0), reason: c?.basis ?? "no credibility record and no derivable signal" },
+      ...reasons.map((r) => ({ name: "reason", value: 0, reason: r })),
+      ...received.map((r) => ({ name: "corroboration_received", value: r4(r.amount), reason: `${r.relation} from ${r.title || r.source_id}` })),
+      { name: "contradicting_sources", value: contradicted.length, reason: "sources contradicting a claim this source grounds (listed in contradicted_by)" },
     ],
   };
+}
+
+// REAL columns read back as 0.40000000596; the contract carries 4 decimals.
+const r4 = (x: unknown) => Math.round(Number(x) * 10_000) / 10_000;
+
+function qSource(r: QSourceRow) {
+  return { source_id: r.source_id, title: r.title ?? "", url: r.url, family: r.family, relation: r.relation,
+    amount: r.amount === null || r.amount === undefined ? null : r4(r.amount), claim: r.claim };
 }
 
 function heldQuality(h: HeldRow, t: ReturnType<typeof termDef>) {
@@ -327,6 +443,11 @@ function heldQuality(h: HeldRow, t: ReturnType<typeof termDef>) {
       value: 0, refinery_scoped: refineryScopedScore(0, true, t), version: `user_provided-v${t.term_version}`,
       computed_from: "a held source is not scored for the database; user_provided counts in its refinery only and is zero for admission",
     },
+    claim_kind: null,
+    signals: {},
+    corroborated_by: [],
+    contradicted_by: [],
+    history: [],
     factors: [
       { name: "user_provided", value: t.refinery_weight, reason: `refinery-scoped only (credibility_terms user_provided v${t.term_version}); admission weight 0` },
     ],

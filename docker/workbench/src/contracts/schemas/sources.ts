@@ -146,6 +146,28 @@ export const QualityFactor = z.object({
   reason: z.string(),
 }).openapi("QualityFactor");
 
+// A source behind a quality score (D15 P3a): who corroborates it and who contradicts it, and how.
+// `relation` is descriptive text from the D15 model, not an enumerated kind: "strong
+// corroboration (paper linked from this source, entailment supports)", "weak corroboration",
+// "co-grounds a claim", "contradicts a claim this source grounds".
+export const QualitySource = z.object({
+  source_id: uuid(),
+  title: z.string(),
+  url: z.string().nullable(),
+  family: registryValue(REGISTRY.sourceFamilies, "scholarly").nullable(),
+  relation: z.string(),
+  amount: z.number().nullable().openapi({ description: "the corroboration this source received from that one (null when it is not a transfer)" }),
+  claim: z.string().nullable(),
+}).openapi("QualitySource");
+
+export const QualityHistory = z.object({
+  score: z.number(),
+  total: z.number().nullable(),
+  claim_kind: registryValue(REGISTRY.claimKinds, "general_theory").nullable(),
+  model_version: z.string().nullable().openapi({ description: "the D15 model label the row was computed under; null when the stored label names no registered paper score version (attempt 4)" }),
+  computed_at: Iso,
+}).openapi("QualityHistory");
+
 export const Quality = z.object({
   source_id: uuid(),
   state: recordState("active"),
@@ -153,11 +175,16 @@ export const Quality = z.object({
   lifecycle: lifecycle().nullable(),
   family: registryValue(REGISTRY.sourceFamilies, "general"),
   score: z.object({
-    value: z.number().nullable().openapi({ description: "the database (admission) score" }),
+    value: z.number().nullable().openapi({ description: "the database (admission) score: the D15 rolling total for the claim kind below" }),
     refinery_scoped: z.number().nullable().openapi({ description: "held sources only: the score inside their refinery, user_provided included" }),
     version: z.string(),
     computed_from: z.string(),
   }),
+  claim_kind: registryValue(REGISTRY.claimKinds, "general_theory").nullable(),
+  signals: Json.openapi({ description: "the signals of the source's FAMILY the score was computed from (D15 item 10)" }),
+  corroborated_by: z.array(QualitySource).openapi({ description: "every source whose corroboration is in the score" }),
+  contradicted_by: z.array(QualitySource).openapi({ description: "every source contradicting a claim this source grounds" }),
+  history: z.array(QualityHistory).openapi({ description: "the rolling total over time, newest first" }),
   factors: z.array(QualityFactor),
 }).openapi("Quality");
 

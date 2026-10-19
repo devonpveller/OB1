@@ -1,19 +1,23 @@
 // Production wiring for the contract: the workbench's own pool, the registry reader, the
-// pre-ingestion scorer (unavailable until P3a), the local embedder and the chunker.
+// pre-ingestion scorer (P3a: the research service's D15 model over HTTP when RESEARCH_SCORER_URL
+// is set; unavailable - every debunked/credibility reopen refused - when it is not), the local
+// embedder and the chunker.
 import { pool } from "../db/pool.ts";
 import { embed } from "../util/embed.ts";
 import { chunkText } from "../util/chunk.ts";
 import { poolDb } from "./db.ts";
 import { RegistryReader } from "./registry.ts";
-import { unavailableScorer } from "./logic/reopen.ts";
+import { httpScorer, unavailableScorer } from "./logic/reopen.ts";
 import type { ContractDeps } from "./routes/http.ts";
 
 export function contractDeps(): ContractDeps {
   const db = poolDb(pool);
+  const scorerUrl = Deno.env.get("RESEARCH_SCORER_URL") ?? "";
+  const scorerKey = Deno.env.get("RESEARCH_SCORER_KEY") ?? "";
   return {
     db,
     registry: new RegistryReader(db),
-    scorer: unavailableScorer,
+    scorer: scorerUrl && scorerKey ? httpScorer(scorerUrl, scorerKey) : unavailableScorer,
     embed,
     chunk: chunkText,
     // Where named mounts live inside this container (compose binds e.g. the podcast archive

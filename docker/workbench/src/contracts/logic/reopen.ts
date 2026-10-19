@@ -100,3 +100,36 @@ export const unavailableScorer: AdmissionScorer = {
       reason: "the pre-ingestion credibility stage lands in P3a (D15)",
     }),
 };
+
+// research-workbench P3a: the D15 pre-ingestion score of a URL, from the research service that
+// owns the model (POST /research/credibility/score) - one implementation, read through HTTP, so
+// the debunked and credibility reopen paths use the same score a research run admits by. A
+// research service that cannot answer is "unavailable" (refused), never a guess; a claim kind
+// with no weight row comes back as the research service's own refusal, naming the kind.
+export function httpScorer(
+  baseUrl: string,
+  key: string,
+  fetchFn: (url: string, init: RequestInit) => Promise<Response> = fetch,
+  timeoutMs = 30_000,
+): AdmissionScorer {
+  const url = `${baseUrl.replace(/\/+$/, "")}/research/credibility/score`;
+  return {
+    async score(input) {
+      const off = (reason: string): ScoreResult => ({ available: false, value: null, floor: null, version: null, reason });
+      let r: Response;
+      try {
+        r = await fetchFn(url, {
+          method: "POST", headers: { "content-type": "application/json", "x-brain-key": key },
+          body: JSON.stringify(input), signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch (e) {
+        return off(`the D15 scorer is unreachable: ${(e as Error).message}`);
+      }
+      const d = await r.json().catch(() => null) as Record<string, unknown> | null;
+      if (!r.ok || !d) return off(`the D15 scorer answered ${r.status}: ${String(d?.detail ?? d?.error ?? "no body")}`);
+      const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      if (d.available !== true || num(d.value) === null || num(d.floor) === null) return off(`the D15 scorer gave no score: ${String(d.reason ?? "")}`);
+      return { available: true, value: num(d.value), floor: num(d.floor), version: String(d.version ?? ""), reason: String(d.reason ?? "") };
+    },
+  };
+}
