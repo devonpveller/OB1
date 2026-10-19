@@ -343,6 +343,15 @@ export class PdfDocument {
     let text = "";
     const furniture: [number, number][] = [];
     let objStart = -1;
+    // rw-p6a-resolve2 attempt 2 (cost): what was added to `text` since the open BT, kept apart - the ET
+    // test read text.slice(objStart), which flattens the whole layer built so far at every ET (quadratic
+    // in the layer: 2.3 s for a 400 KB note). The same string: while a text object is open, every addition
+    // goes to both.
+    let obj = "";
+    const add = (s: string) => {
+      text += s;
+      if (objStart >= 0) obj += s;
+    };
     const notdef = new Map<string, number>();
     const fontCache = new Map<PdfDict, { two: boolean; map: Map<number, string>; label: string }>();
     const fontOf = (fd: PdfDict) => {
@@ -372,9 +381,9 @@ export class PdfDocument {
           for (let k = 0; k + 1 < b.length; k += 2) {
             const code = (b[k] << 8) | b[k + 1];
             if (code === 0) notdef.set(font.label, (notdef.get(font.label) ?? 0) + 1);
-            text += font.map.get(code) ?? "";
+            add(font.map.get(code) ?? "");
           }
-        } else for (const c of b) text += font.map.get(c) ?? String.fromCharCode(c);
+        } else for (const c of b) add(font.map.get(c) ?? String.fromCharCode(c));
       };
       while (!lx.eof()) {
         const v = lx.value();
@@ -398,11 +407,14 @@ export class PdfDocument {
               if (xo.filtered) throw new Error("a form XObject with a filter this reader does not decode");
               run(xo.stream, this.dict(xd.get("Resources")) ?? resources, depth + 1);
             }
-          } else if (op === "BT") objStart = text.length;
-          else if (op === "ET") {
-            if (objStart >= 0 && /^\s*\d{1,6}\s*$/.test(text.slice(objStart))) furniture.push([objStart, text.length]);
+          } else if (op === "BT") {
+            objStart = text.length;
+            obj = "";
+          } else if (op === "ET") {
+            if (objStart >= 0 && /^\s*\d{1,6}\s*$/.test(obj)) furniture.push([objStart, text.length]);
             objStart = -1;
-            text += " ";
+            obj = "";
+            add(" ");
           }
           ops.length = 0;
         } else ops.push(v);
@@ -418,7 +430,7 @@ export class PdfDocument {
         if (o.filtered) throw new Error("a content stream with a filter this reader does not decode");
         run(o.stream, res, 0);
       }
-      text += "\n";
+      add("\n");
     }
     let body = "";
     let at = 0;

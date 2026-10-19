@@ -351,7 +351,7 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
   const budget = new Budget(i.verifyBudget?.ms, i.verifyBudget?.textChars);
   if (i.verify !== false && i.format.glyph_check) {
     try {
-      verifyDrawnText(p.text, i.secrets ?? [], i.format.key, budget);
+      await verifyDrawnText(p.text, i.secrets ?? [], i.format.key, budget);
     } catch (e) {
       if (e instanceof OutputRejected) throw new RenderFailed(e.message, e.offence, e.code, { format: e.format, offence: e.offence });
       throw e;

@@ -156,50 +156,194 @@ const AT_DOT = /\s*[([{<]\s*(?:at|dot)\s*[)\]}>]\s*|\s(?:at|dot)(?=\s)/g;
 const atDotOf = (ct: string) => lettersDigits(ct.replace(/\\/g, "").replace(AT_DOT, " "));
 export const canonAtDot = (t: string) => atDotOf(canonText(t));
 
+// rw-p6a-resolve2 attempt 2 (cost, not meaning): canonText piece by piece, each distinct piece once.
+// PLAIN characters: ASCII and U+FFFD (the replacement character a decoder writes for a byte that is not
+// UTF-8). A text splits BEFORE every PLAIN character into pieces (a PLAIN character and the run of other
+// characters after it; such a run at the start), and canonText(text) is the pieces' canonText joined, up
+// to the choice between σ and ς:
+//   - NFD and NFKC: a PLAIN character is a starter with no decomposition that never composes with the
+//     character before it (NFC_QC / NFKC_QC = Yes) and blocks any composition or reordering across it, so
+//     normalisation never crosses the split (Unicode UAX #15, normalization boundaries); STRIP and
+//     LOOKALIKE are per character and match no PLAIN character;
+//   - the case fold: toUpperCase has no context; toLowerCase's only context is Final_Sigma (V8, the root
+//     locale), which picks σ or ς for a Σ by its neighbours - a piece may pick the other one;
+//   - every step keeps a PLAIN character PLAIN (ASCII lowercased, U+FFFD itself), so the split holds
+//     through every round, and a piece that is stable stays stable (the whole stops at the same round or
+//     later; the cap of 4 rounds is shared). A PLAIN text's canon is its lowercase.
+// σ and ς are both letters (lettersDigits keeps both) and neither is in AT_DOT, so for an ASCII secret
+// every check below answers the same on the joined pieces as on canonText; judgeSecret uses canonPieces
+// only when every configured secret is ASCII (canonText otherwise). The decoded bytes of a base64 or hex
+// run (U+FFFD and control characters around single ASCII characters) repeat their pieces: one
+// canonTextFull per distinct piece. resolve2_cost_test.ts A7-5e4 compares the two (σ and ς read as one)
+// on every BMP character before, after and between PLAIN characters, and on generated texts; A7-5e3
+// compares judgeSecret with the a06b72f one (credentials_oracle.ts).
+const RC = String.fromCharCode(0xfffd);
+const PLAIN_ONLY = new RegExp(`^[\\x00-\\x7f${RC}]*$`);
+const NOT_PLAIN = new RegExp(`[^\\x00-\\x7f${RC}]+`, "g");
+const PIECES = new Map<string, string>();
+let piecesChars = 0;
+export function canonPieces(t: string): string {
+  if (PLAIN_ONLY.test(t)) return t.toLowerCase();
+  const out: string[] = [];
+  let last = 0;
+  for (const m of t.matchAll(NOT_PLAIN)) {
+    const start = m.index! > 0 ? m.index! - 1 : 0; // the PLAIN character before the run is in its piece
+    if (start > last) out.push(t.slice(last, start).toLowerCase());
+    last = m.index! + m[0].length;
+    const piece = t.slice(start, last);
+    let c = PIECES.get(piece);
+    if (c === undefined) {
+      c = canonTextFull(piece);
+      if (piecesChars > 4_000_000) {
+        PIECES.clear();
+        piecesChars = 0;
+      }
+      PIECES.set(piece, c);
+      piecesChars += piece.length + c.length;
+    }
+    out.push(c);
+  }
+  if (last < t.length) out.push(t.slice(last).toLowerCase());
+  return out.join("");
+}
+// AT_DOT somewhere in a text: its two alternatives without the optional whitespace around them (a text
+// holds a match of AT_DOT exactly when it holds one of these)
+const AT_DOT_ANY = /[([{<]\s*(?:at|dot)\s*[)\]}>]|\s(?:at|dot)\s/;
+
 // ── the encodings ───────────────────────────────────────────────────────────────────────────────
-const utf8 = (b: Uint8Array) => new TextDecoder("utf-8", { fatal: false }).decode(b);
+// rw-p6a-resolve2 attempt 2 (cost, not meaning): one decoder instance (decode() without `stream` keeps
+// no state between calls), and the base64 / hex bytes read through a table instead of atob +
+// Uint8Array.from(callback) / match(/../g) + parseInt - the same bytes (resolve2_cost_test.ts A7-5e1 compares
+// every decoder with the a06b72f one, credentials_oracle.ts).
+const UTF8 = new TextDecoder("utf-8", { fatal: false });
+const utf8 = (b: Uint8Array) => UTF8.decode(b);
+const B64 = new Int8Array(128).fill(-1);
+"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".split("").forEach((c, i) => B64[c.charCodeAt(0)] = i);
+B64["-".charCodeAt(0)] = 62; // base64url, read as + and / (base64Runs)
+B64["_".charCodeAt(0)] = 63;
+// `s` from `from` to `to` (a multiple of 4, every character in the alphabet above), as bytes
+function b64Bytes(s: string, from: number, to: number): Uint8Array {
+  const out = new Uint8Array(((to - from) / 4) * 3);
+  for (let i = from, o = 0; i < to; i += 4, o += 3) {
+    const n = (B64[s.charCodeAt(i)] << 18) | (B64[s.charCodeAt(i + 1)] << 12) | (B64[s.charCodeAt(i + 2)] << 6) | B64[s.charCodeAt(i + 3)];
+    out[o] = n >> 16;
+    out[o + 1] = (n >> 8) & 255;
+    out[o + 2] = n & 255;
+  }
+  return out;
+}
+const HEX = new Int8Array(128).fill(-1);
+"0123456789abcdef".split("").forEach((c, i) => {
+  HEX[c.charCodeAt(0)] = i;
+  HEX[c.toUpperCase().charCodeAt(0)] = i;
+});
+// `s` from `from`, `n` pairs of hex digits, as bytes
+function hexBytes(s: string, from: number, n: number): Uint8Array {
+  const out = new Uint8Array(n);
+  for (let k = 0, i = from; k < n; k++, i += 2) out[k] = (HEX[s.charCodeAt(i)] << 4) | HEX[s.charCodeAt(i + 1)];
+  return out;
+}
 const percent = (t: string) =>
-  t.replace(/(?:%[0-9a-f]{2})+/gi, (m) => utf8(Uint8Array.from(m.slice(1).split("%"), (h) => parseInt(h, 16))));
+  t.indexOf("%") < 0 ? t : t.replace(/(?:%[0-9a-f]{2})+/gi, (m) => utf8(hexBytes(m.replace(/%/g, ""), 0, m.length / 3)));
 // a run of an encoding's alphabet: whitespace, invisible characters and a markdown backslash escape
-// inside it are not breaks
-const packed = (t: string) => t.replace(/[\s\\]+/g, "").replace(STRIP, "");
+// inside it are not breaks. attempt 2 (cost): squeeze, base64 and hex all start from it, so the last one
+// is kept; STRIP matches no ASCII character, so an ASCII text skips it - the same string either way.
+const NON_ASCII = /[^\x00-\x7f]/;
+let packedOf = "", packedIs = "", runsIs: string[] = [];
+const packed = (t: string) => {
+  if (t !== packedOf) {
+    packedIs = !NON_ASCII.test(t) ? t.replace(/[\s\\]+/g, "") : t.length < 2048 ? packOne(t) : packChunks(t);
+    runsIs = Array.from(packedIs.matchAll(/[A-Za-z0-9+/_-]{12,}/g), (m) => m[0]);
+    packedOf = t;
+  }
+  return packedIs;
+};
+const packOne = (t: string) => t.replace(/[\s\\]+/g, "").replace(STRIP, "");
+// packing removes characters one by one, so a text packs chunk by chunk (any split); a long non-ASCII
+// text's chunks (chunkEnds) are packed once each while views() runs (PACKED)
+let PACKED: Map<string, string> | null = null;
+function packChunks(t: string): string {
+  const out: string[] = [];
+  let from = 0;
+  for (const to of chunkEnds(t)) {
+    const x = t.slice(from, to);
+    let p = PACKED?.get(x);
+    if (p === undefined) {
+      p = packOne(x);
+      PACKED?.set(x, p);
+    }
+    out.push(p);
+    from = to;
+  }
+  return out.join("");
+}
+// the runs of the base64 alphabet (12+ characters) in packed(t), in order: every maximal run, since the
+// pattern is greedy and one character class
+const runsOf = (t: string) => (packed(t), runsIs);
+// A run decodes to the same text wherever it stands; the views of one text share most of their runs
+// (a tag removed here, an escape undone there), so views() keeps what each run decoded to (RUNS) while it
+// runs. Same output with or without it.
+let RUNS: Map<string, string> | null = null;
 function base64Runs(t: string): string {
   const out: string[] = [];
-  for (const m of packed(t).matchAll(/[A-Za-z0-9+/_-]{12,}/g)) {
-    const run = m[0].replace(/-/g, "+").replace(/_/g, "/");
-    for (let k = 0; k < 4; k++) {
-      const s = run.slice(k);
-      const body = s.slice(0, s.length - (s.length % 4));
-      if (body.length < 12) continue;
-      out.push(utf8(Uint8Array.from(atob(body), (c) => c.charCodeAt(0))));
+  for (const run of runsOf(t)) {
+    const hit = RUNS?.get("b" + run);
+    if (hit !== undefined) {
+      out.push(hit);
+      continue;
     }
+    const parts: string[] = [];
+    for (let k = 0; k < 4; k++) {
+      const len = run.length - k;
+      const body = len - (len % 4);
+      if (body < 12) continue;
+      parts.push(utf8(b64Bytes(run, k, k + body)));
+    }
+    const d = parts.join("\n"); // k = 0 always decodes (a run has 12+ characters): never empty
+    RUNS?.set("b" + run, d);
+    out.push(d);
   }
   return out.join("\n");
 }
+// attempt 2 (cost): the hex alphabet is inside the base64 one, so every run of 16+ hex digits in packed(t)
+// lies inside one of runsOf(t) (16 >= 12) and is found there, in the same order
 function hexRuns(t: string): string {
   const out: string[] = [];
-  for (const m of packed(t).matchAll(/[0-9a-f]{16,}/gi)) {
-    for (let k = 0; k < 2; k++) {
-      const s = m[0].slice(k);
-      const pairs = s.slice(0, s.length - (s.length % 2)).match(/../g) ?? [];
-      out.push(utf8(Uint8Array.from(pairs, (h) => parseInt(h, 16))));
+  for (const b of runsOf(t)) {
+    if (b.length < 16) continue;
+    let d = RUNS?.get("h" + b);
+    if (d === undefined) {
+      const parts: string[] = [];
+      for (const m of b.matchAll(/[0-9a-f]{16,}/gi)) {
+        const run = m[0];
+        parts.push(utf8(hexBytes(run, 0, run.length >> 1)), utf8(hexBytes(run, 1, (run.length - 1) >> 1)));
+      }
+      d = parts.length ? parts.join("\n") : "";
+      RUNS?.set("h" + b, d);
     }
+    if (d) out.push(d);
   }
   return out.join("\n");
 }
 // a markdown backslash escape undone (`\<sup\>`, `&\#50;`: the MD output's spelling of text)
-const unescape = (t: string) => t.replace(/\\([!-/:-@[-`{-~])/g, "$1");
-const untag = (t: string) => stripRealTags(t).replace(/<!\[CDATA\[|\]\]>/gi, "");
-const loose = (t: string) => t.replace(/<[^<>]*>/g, "");
+// attempt 2 (cost): a decoder whose every pattern starts with a character the text does not hold
+// returns the text unchanged without running them (the same string)
+const unescape = (t: string) => t.indexOf("\\") < 0 ? t : t.replace(/\\([!-/:-@[-`{-~])/g, "$1");
+const untag = (t: string) =>
+  t.indexOf("<") < 0 && t.indexOf("]]>") < 0 ? t : stripRealTags(t).replace(/<!\[CDATA\[|\]\]>/gi, "");
+const loose = (t: string) => t.indexOf("<") < 0 ? t : t.replace(/<[^<>]*>/g, "");
+// NFKC changes no ASCII text
+const compat = (t: string) => NON_ASCII.test(t) ? t.normalize("NFKC") : t;
+const entity = (t: string) => t.indexOf("&") < 0 ? t : decodeEntitiesDeep(t);
 
 // The ONE list: each decoder and the depth it is followed to.
 export const ENCODINGS: { name: string; depth: number; decode: (t: string) => string }[] = [
   { name: "squeeze", depth: 1, decode: packed },
-  { name: "compat", depth: 1, decode: (t) => t.normalize("NFKC") },
+  { name: "compat", depth: 1, decode: compat },
   { name: "untag", depth: 3, decode: untag },
   { name: "loose", depth: 1, decode: loose },
   { name: "unescape", depth: 2, decode: unescape },
-  { name: "entity", depth: 4, decode: decodeEntitiesDeep }, // attempt 6: 3 -> 4
+  { name: "entity", depth: 4, decode: entity }, // attempt 6: 3 -> 4
   { name: "percent", depth: 4, decode: percent }, // attempt 6: 3 -> 4
   { name: "base64", depth: 2, decode: base64Runs },
   { name: "hex", depth: 2, decode: hexRuns },
@@ -225,6 +369,21 @@ const checkTime = (deadline: number) => {
 // Every view of `s`: the raw text and every decoding of it within the depths above. `deadline`
 // (performance.now() ms; verify.ts's budget) is checked before every decoding.
 export function views(s: string, deadline = Infinity): string[] {
+  const outer = RUNS;
+  RUNS = outer ?? new Map();
+  PACKED = PACKED ?? new Map();
+  try {
+    return viewsOf(s, deadline);
+  } finally {
+    RUNS = outer;
+    if (!outer) {
+      PACKED = null;
+      packedOf = packedIs = "";
+      runsIs = [];
+    }
+  }
+}
+function viewsOf(s: string, deadline: number): string[] {
   const seen = new Set<string>([s]);
   const queue: { t: string; used: number[] }[] = [{ t: s, used: ENCODINGS.map(() => 0) }];
   for (let q = queue.shift(); q; q = queue.shift()) {
@@ -264,6 +423,140 @@ export function base64Forms(x: string, depth = 2): string[] {
   return [...new Set([...one, ...one.flatMap((f) => b64(enc.encode(f)))])];
 }
 
+// What judgeSecret looks for in a view, per secret k (the a06b72f checks, in their order):
+//   low  k as written, case-insensitive, in the view lowercased          (low.includes(k.low))
+//   sq   the same with the view's whitespace removed                      (sq.includes(k.low))
+//   c    canon(k) in canon(view), or in canonAtDot(view)                  (c / ca .includes(k.c), k.c 8+)
+//   b    one of k's base64 forms in the view                              (v.includes(f))
+type Key = { x: string; low: string; c: string; b: string[] };
+type Hits = { low: boolean[]; sq: boolean[]; c: boolean[]; b: boolean[]; ct: string };
+type Judged = Hits & { lowForm: string; sqForm: string; cForm: string };
+const lettersOf = (ct: string, plain: boolean) => plain ? ct.replace(/[^a-z0-9]+/g, "") : lettersDigits(ct);
+// the a06b72f way, on the whole view: canonText (any secret), or canonPieces (an ASCII secret, below)
+function wholeHits(v: string, keys: Key[], ascii: boolean): Judged {
+  const plain = PLAIN_ONLY.test(v);
+  const low = v.toLowerCase();
+  const sq = low.replace(/\s+/g, "");
+  const ct = plain ? low : ascii ? canonPieces(v) : canonText(v);
+  const c = lettersOf(ct, plain);
+  return {
+    low: keys.map((k) => low.includes(k.low)),
+    sq: keys.map((k) => sq.includes(k.low)),
+    c: keys.map((k) => k.c.length >= 8 && c.includes(k.c)),
+    b: keys.map((k) => k.b.some((f) => v.includes(f))),
+    ct,
+    lowForm: low,
+    sqForm: sq,
+    cForm: c,
+  };
+}
+
+// rw-p6a-resolve2 attempt 2 (cost, not meaning): a long view that is not PLAIN, judged CHUNK BY CHUNK.
+// It splits before line feeds and U+0000-U+0002 (chunkEnds: ASCII characters, so canonPieces' split holds;
+// chosen by the character, so two views that differ in a few places - the views of a decoded run, a tag
+// removed here, an escape undone there - split alike everywhere else and share most of their chunks).
+// Each distinct chunk's forms (lowercase, without whitespace, canon, letters and digits) and whether each
+// holds each secret's pattern are computed once (CHUNKS). A pattern in the joined form either lies inside
+// one chunk's form, or crosses a boundary: then it lies inside the last (length - 1) characters of the
+// form so far plus the first (length - 1) of the next chunk's form (take the last boundary it crosses) -
+// `edge` below tests exactly those windows. Lowercasing, removing whitespace and keeping letters and digits
+// are per character but for toLowerCase's Final_Sigma, so the joined forms equal the whole view's up to
+// σ / ς (canonPieces): for an ASCII secret every check answers the same. ASCII secrets only.
+const CHUNK_AT = /[\n\x00-\x02]/g;
+// where a long text's chunks end: before a line feed or U+0000-U+0002 at least 128 characters on, and at
+// its end (packed() splits the same way)
+function chunkEnds(v: string): number[] {
+  const ends: number[] = [];
+  let from = 0;
+  for (;;) {
+    CHUNK_AT.lastIndex = from + 128;
+    const m = CHUNK_AT.exec(v);
+    if (!m) break;
+    ends.push(m.index);
+    from = m.index;
+  }
+  ends.push(v.length);
+  return ends;
+}
+type Chunk = { raw: string; j: Judged };
+const CHUNKS = new Map<string, Chunk>();
+let chunksChars = 0;
+function chunkOf(x: string, keys: Key[]): Chunk {
+  let ch = CHUNKS.get(x);
+  if (ch === undefined) {
+    ch = { raw: x, j: wholeHits(x, keys, true) };
+    if (chunksChars > 64_000_000) {
+      CHUNKS.clear();
+      chunksChars = 0;
+    }
+    CHUNKS.set(x, ch);
+    chunksChars += 4 * x.length;
+  }
+  return ch;
+}
+// a form joined chunk by chunk, keeping only its last `keep` characters: does `pats[i]` cross a boundary?
+class Edge {
+  tail = "";
+  hit: boolean[];
+  private any: RegExp | null; // one pass for all the patterns; which ones, only when it finds one
+  constructor(private pats: string[], private keep: number) {
+    this.hit = pats.map(() => false);
+    const ps = pats.filter((p) => p);
+    this.any = ps.length ? new RegExp(ps.map((p) => p.replace(/[.*+?^${}()|[\]\\/-]/g, "\\$&")).join("|")) : null;
+  }
+  next(form: string) {
+    if (this.tail && this.any) {
+      const w = this.tail + form.slice(0, this.keep);
+      if (this.any.test(w)) {
+        this.pats.forEach((p, i) => {
+          if (p && w.includes(p)) this.hit[i] = true;
+        });
+      }
+    }
+    this.tail = form.length >= this.keep ? form.slice(form.length - this.keep) : (this.tail + form).slice(-this.keep);
+  }
+}
+function chunkHits(v: string, keys: Key[]): Hits {
+  const max = (ps: string[]) => Math.max(1, ...ps.map((p) => p.length)) - 1;
+  const lowP = keys.map((k) => k.low), cP = keys.map((k) => (k.c.length >= 8 ? k.c : ""));
+  const bP = keys.flatMap((k) => k.b);
+  const eLow = new Edge(lowP, max(lowP)), eSq = new Edge(lowP, max(lowP)), eC = new Edge(cP, max(cP)), eB = new Edge(bP, max(bP));
+  const h: Hits = { low: keys.map(() => false), sq: keys.map(() => false), c: keys.map(() => false), b: keys.map(() => false), ct: "" };
+  const ct: string[] = [];
+  let from = 0;
+  for (const to of chunkEnds(v)) {
+    const ch = chunkOf(v.slice(from, to), keys);
+    from = to;
+    keys.forEach((_, i) => {
+      h.low[i] ||= ch.j.low[i];
+      h.sq[i] ||= ch.j.sq[i];
+      h.c[i] ||= ch.j.c[i];
+      h.b[i] ||= ch.j.b[i];
+    });
+    eLow.next(ch.j.lowForm);
+    eSq.next(ch.j.sqForm);
+    eC.next(ch.j.cForm);
+    eB.next(ch.raw);
+    ct.push(ch.j.ct);
+  }
+  let j = 0;
+  keys.forEach((k, i) => {
+    h.low[i] ||= eLow.hit[i];
+    h.sq[i] ||= eSq.hit[i];
+    h.c[i] ||= eC.hit[i];
+    for (const _ of k.b) h.b[i] ||= eB.hit[j++];
+  });
+  h.ct = ct.join("");
+  return h;
+}
+// the memos hold slices of the views: emptied when a judging ends
+const forget = () => {
+  CHUNKS.clear();
+  chunksChars = 0;
+  PIECES.clear();
+  piecesChars = 0;
+};
+
 // The verdict on a text under the invariant above: the configured secret it carries ({ secret }), or
 // { unjudged } when judging stopped first (more than MAX_VIEWS views, or past `deadline`), or null.
 export type Verdict = { secret: string } | { unjudged: string };
@@ -272,24 +565,29 @@ export function judgeSecret(s: string, secrets: string[], deadline = Infinity): 
   if (!live.length || !s) return null;
   try {
     const all = views(s, deadline);
-    const keys = live.map((x) => ({ x, low: x.toLowerCase(), c: canon(x), b: base64Forms(x) }));
+    const keys: Key[] = live.map((x) => ({ x, low: x.toLowerCase(), c: canon(x), b: base64Forms(x) }));
+    // attempt 2 (cost): an ASCII secret (every configured one: a key and a mailto) is looked for with
+    // canonPieces, a long non-PLAIN view chunk by chunk (chunkHits); any other secret as at a06b72f
+    const ascii = keys.every((k) => ASCII_ONLY.test(k.x));
     for (const v of all) {
       checkTime(deadline);
-      const low = v.toLowerCase();
-      const sq = low.replace(/\s+/g, "");
-      const ct = canonText(v); // once per view: canon and canonAtDot share it (rw-p6a-resolve2, cost)
-      const c = lettersDigits(ct);
-      const ca = atDotOf(ct);
-      for (const k of keys) {
-        if (low.includes(k.low) || sq.includes(k.low)) return { secret: k.x };
-        if (k.c.length >= 8 && (c.includes(k.c) || ca.includes(k.c))) return { secret: k.x };
-        if (k.b.some((f) => v.includes(f))) return { secret: k.x };
+      const h = ascii && v.length >= 2048 && !PLAIN_ONLY.test(v) ? chunkHits(v, keys) : wholeHits(v, keys, ascii);
+      // canonAtDot(view): with no at/dot spelling in it, it IS canon(view) (a backslash is not a letter)
+      const nb = h.ct.indexOf("\\") < 0 ? h.ct : h.ct.replace(/\\/g, "");
+      const ca = AT_DOT_ANY.test(nb) ? atDotOf(h.ct) : null;
+      for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        if (h.low[i] || h.sq[i]) return { secret: k.x };
+        if (k.c.length >= 8 && (h.c[i] || (ca !== null && ca.includes(k.c)))) return { secret: k.x };
+        if (h.b[i]) return { secret: k.x };
       }
     }
     return null;
   } catch (e) {
     if (e instanceof OverBudget) return { unjudged: e.message };
     throw e;
+  } finally {
+    forget();
   }
 }
 
