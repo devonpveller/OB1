@@ -33,6 +33,12 @@ discard record) under the item's key, and the second opinion / re-screen loops a
 `repeat: true` means intake already had this exact key; it is recorded like any answer.
 The text intake returns for clean/suspicious is NOT kept: a connector is a producer, and
 consumers read screened text from Open Brain with its labels.
+ONE EXCEPTION, opt-in (`keep_clean_text=True`, IntakeClient(return_clean_text=True)): the search
+gate (plan step 3) answers its caller synchronously and returns intake's screened text in place
+of the page. Then a `clean` answer carries `extra = {"text", "title", "labels"}` - intake's
+extracted text and labels exactly as returned, never the raw bytes - and every other label
+carries none (suspicious is withheld from the gate's model-facing callers, DESIGN section 6 /
+D41). A connector that does not ask gets the default: no text, as above.
 """
 from __future__ import annotations
 
@@ -81,7 +87,7 @@ def network(kind: str, detail: str = "") -> Outcome:
 
 
 def classify(status: int, doc: object, retry_after: float | None, sent_key: Mapping[str, str],
-             connector: str) -> Outcome:
+             connector: str, keep_clean_text: bool = False) -> Outcome:
     if status == 200:
         if not isinstance(doc, Mapping):
             return Outcome("stop", 200, reason="protocol: a 200 without a JSON object")
@@ -98,9 +104,14 @@ def classify(status: int, doc: object, retry_after: float | None, sent_key: Mapp
         if label in ("injected", "pending", "rejected") and doc.get("text") is not None:
             return Outcome("stop", 200, reason=f"protocol: text returned for a {label} item")
         rev = doc.get("revision")
+        extra: dict[str, object] = {}
+        if keep_clean_text and label == "clean" and isinstance(doc.get("text"), str):
+            title = doc.get("title")
+            extra = {"text": doc["text"], "title": title if isinstance(title, str) else None,
+                     "labels": dict(labels)}
         return Outcome("record", 200, label=label, reason="", intake_id=str(doc.get("intake_id") or "") or None,
                        repeat=bool(doc.get("repeat")), revision=rev if isinstance(rev, int) else None,
-                       d2_row=doc.get("d2_row") if isinstance(doc.get("d2_row"), str) else None)
+                       d2_row=doc.get("d2_row") if isinstance(doc.get("d2_row"), str) else None, extra=extra)
     err = _error_text(doc)
     if status in RETRY_CODES:
         return Outcome("retry", status, reason=f"http {status}: {err}", retry_after=retry_after)

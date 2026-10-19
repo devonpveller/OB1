@@ -149,6 +149,20 @@ class Outcomes(unittest.TestCase):
                                  ("record", label, 1, 1))
                 self.assertIsNotNone(sub.outcome.intake_id)
 
+    def test_clean_text_is_dropped_unless_the_client_asks(self):
+        """The default keeps no text (a connector is a producer); return_clean_text=True (the
+        search gate) gets intake's text, title and labels for clean ONLY."""
+        sub, _ = self.run_one(["clean"])
+        self.assertEqual(dict(sub.outcome.extra), {})
+        sub, _ = self.run_one(["clean"], return_clean_text=True)
+        self.assertEqual(sub.outcome.extra["text"], "hello")
+        self.assertEqual(sub.outcome.extra["labels"]["connector"], CID)
+        self.assertIn("title", sub.outcome.extra)
+        for label in ("suspicious", "pending", "injected", "rejected"):
+            with self.subTest(label=label):
+                sub, _ = self.run_one([label], return_clean_text=True)
+                self.assertEqual((sub.outcome.label, dict(sub.outcome.extra)), (label, {}))
+
     def test_503_and_408_are_retried_then_recorded(self):
         for code in (503, "503:busy", "503:not-ready", "503:inflight", "503:no-key", 408):
             with self.subTest(code=code):

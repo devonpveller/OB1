@@ -23,6 +23,9 @@ capped exponential backoff (Retry-After honoured, capped) until `max_attempts` o
 `budget_s` runs out; then the item is `deferred` (not stored; a later run sends it again - the
 key makes that idempotent). Everything else is final for the item: record, or stop the run.
 
+CLEAN TEXT (opt-in, `return_clean_text=True`; the search gate only): a `clean` answer's Outcome
+carries intake's text, title and labels in `extra` (outcomes.py). Off by default.
+
 LOGGING: one line per attempt - the connector, the key's sha256 prefix, the HTTP status, the
 label, the action. Never a header, the key, a body or intake's text.
 """
@@ -151,7 +154,7 @@ class IntakeClient:
     def __init__(self, url: str, key: Secret, *, connector: str, timeout_s: float = 60.0,
                  max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
                  max_reply_bytes: int = DEFAULT_MAX_REPLY_BYTES, retry: RetryPolicy = RetryPolicy(),
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, return_clean_text: bool = False):
         if not isinstance(key, Secret):
             raise ClientConfigError("the key must be a Secret (secret.load_key_file)")
         if not _env.is_slug(connector):
@@ -167,6 +170,7 @@ class IntakeClient:
         self.max_reply_bytes = int(max_reply_bytes)
         self.retry = retry
         self._sleep = sleep
+        self.return_clean_text = bool(return_clean_text)
 
     def __repr__(self) -> str:
         return f"IntakeClient({self.url}, connector={self.connector}, key=***)"
@@ -258,7 +262,7 @@ class IntakeClient:
         except (UnicodeDecodeError, ValueError):
             doc = None
         out = outcomes.classify(status, doc, _retry_after(headers.get("retry-after")), checked.key.to_dict(),
-                                self.connector)
+                                self.connector, keep_clean_text=self.return_clean_text)
         log.info("intake %s %s: http %s label=%s -> %s", self.connector, tag, status, out.label, out.action)
         return out
 
