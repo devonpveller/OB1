@@ -1,9 +1,10 @@
 // node --test recipes/_shared/wiki-pages.test.mjs
-// Pure-logic gate for the wiki_pages sync (the I/O helpers are best-effort by
-// contract and are exercised live, not here).
+// Pure-logic gate for the wiki_pages row the compile writes (the flush /
+// unsynced / exit-code contract is in wiki-pages.warnonce.test.mjs and the
+// rw-p1a-render integration cases).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifySlug, extractLinks, parseWikiPage, vaultRel, queueWikiPage, queuedWikiPageCount } from "./wiki-pages.mjs";
+import { classifySlug, extractLinks, parseWikiPage, vaultRel, queueWikiPage, queuedWikiPageCount, inlineTags } from "./wiki-pages.mjs";
 
 test("classifySlug maps every page class the compiler emits", () => {
   assert.deepEqual(classifySlug("content/person/person-ada.md"),
@@ -112,4 +113,30 @@ test("queueWikiPage ignores pages outside the vault root", () => {
   const before = queuedWikiPageCount();
   queueWikiPage("/tmp/scratch/place/x.md", "---\ntitle: X\n---\nbody");
   assert.equal(queuedWikiPageCount(), before);
+});
+
+test("parseWikiPage carries the frontmatter the page presents (D13: the row is what is presented)", () => {
+  const md = [
+    "---",
+    'title: "Ada Wiki"',
+    "type: wiki",
+    "entity_id: 901",
+    'aliases: ["Ada"]',
+    "derived_from_ids: [1,2]",
+    "date: 2026-10-02",
+    "tags: [wiki, generated]",
+    "---",
+    "# Ada",
+  ].join("\n");
+  const row = parseWikiPage("content/person/person-ada.md", md);
+  assert.deepEqual(row.frontmatter, {
+    title: "Ada Wiki", type: "wiki", entity_id: 901, aliases: ["Ada"], derived_from_ids: [1, 2],
+    date: "2026-10-02", tags: ["wiki", "generated"],
+  });
+});
+
+test("inline #tags join the row's tags (Quartz's expression; code skipped; numeric-only ignored)", () => {
+  assert.deepEqual(inlineTags("a #one and #two/sub but `#code` and #123 and #[[x]]\n```\n#fenced\n```"), ["one", "two/sub"]);
+  const row = parseWikiPage("content/thought/1.md", "---\ntags: [leaf]\n---\n# T\ntext #fixture-inline-tag\n");
+  assert.deepEqual(row.tags, ["leaf", "fixture-inline-tag"]);
 });

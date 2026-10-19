@@ -32,12 +32,23 @@ sed -i 's#^\([[:space:]]*\)Plugin.CustomOgImages(),#\1// Plugin.CustomOgImages()
 # (We keep --serve rather than a one-shot `quartz build` because production build
 # minifies the bundled component JS and the workbench overlay inline scripts trip
 # esbuild's minifier; --serve/dev mode skips minify and is the proven path.)
-# NB IDLE_SECONDS is NOT the only path to a swap: serve.mjs writes
-# /tmp/ne-publish whenever it serves a page from the LIVE build output, and the
-# loop below treats that as "publish now" and bypasses this gate. That escape
-# hatch is what makes a just-created note reach the published snapshot at all —
-# a reader watching the page keeps the viewer non-idle forever, so the gate on
-# its own would never open. See the PUBLISH_FLAG comment in serve.mjs.
+# Since the live renderer (research-workbench P1a) every PAGE is presented
+# from wiki_pages by serve.mjs; the builder only produces the client bundle and
+# static assets (and, during parity work, the built pages the parity diff
+# compares against). So a snapshot swap no longer decides when a reader sees a
+# page, and the old prompt-publish flag (/tmp/ne-publish) and the notes
+# "restart the builder until the note has a built page" safety net are gone.
+#
+# WIKI_BUILDER=0 runs the live renderer ALONE: no Quartz builder, no snapshot
+# loop; static assets come from the last published snapshot on the /srv volume
+# (P1c freezes the bundle and removes the builder; P1b makes an empty /srv
+# serve).
+if [ "${WIKI_BUILDER:-1}" = "0" ]; then
+  echo "[wiki-viewer] WIKI_BUILDER=0: live renderer only (no Quartz builder)"
+  mkdir -p /srv
+  echo 0 > /tmp/last-access
+  exec node /quartz/serve.mjs
+fi
 IDLE_SECONDS="${WIKI_REBUILD_IDLE_SECONDS:-90}"    # viewer must be quiet this long before a swap
 STABLE_SECONDS="${WIKI_REBUILD_STABLE_SECONDS:-8}" # build output must be unchanged this long (build finished)
 POLL="${WIKI_REBUILD_POLL_SECONDS:-15}"            # how often to check
@@ -132,6 +143,17 @@ echo 0 > /tmp/last-access
 node /quartz/serve.mjs &
 SERVE_PID=$!
 trap 'kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
+# The live renderer IS the viewer: if serve.mjs exits (e.g. the page-class
+# registry refused an entry file at start - it fails loud on a duplicate name,
+# a priority tie, a missing default export), the container exits with its
+# code instead of running a builder that serves nothing (rw-p1a-render).
+serve_or_die() {
+  kill -0 "$SERVE_PID" 2>/dev/null && return 0
+  code=0; wait "$SERVE_PID" || code=$?   # (set -e: a bare failing wait would exit before the message)
+  echo "[wiki-viewer] serve.mjs EXITED (code $code) - stopping the container"
+  kill -TERM "-$BUILD_PID" 2>/dev/null || true
+  exit "$([ "$code" = 0 ] && echo 1 || echo "$code")"
+}
 
 # Wait (bounded) for the first COMPLETE build (index.html + css + js, not just
 # index.html — the old check published build-0 too early, before ComponentResources
@@ -139,6 +161,7 @@ trap 'kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 
 # vault's first build can take several minutes.
 i=0
 while [ "$i" -lt 240 ]; do
+  serve_or_die
   is_complete /quartz/public && index_ok /quartz/public && { echo "[wiki-viewer] first COMPLETE build emitted"; break; }
   sleep 2; i=$((i + 1))
 done
@@ -156,29 +179,17 @@ if is_complete /quartz/public && index_ok /quartz/public; then
   fi
 fi
 
-# Cold-build race guard REMOVED (Phase B, 2026-08-26). It restarted the
-# builder whenever any page was written mid-parse — with the 24/7 drain that
-# fired on essentially every cold build, doubling it (~15 → ~30 min per
-# deploy). Now that serve.mjs renders any unbuilt page straight from
-# wiki_pages (read-only, real renderer), a page missed by the initial parse is
-# STILL SERVED immediately; the builder picks it up on its next change or the
-# nightly clean rebuild. The notes reconciliation below remains as the
-# builder-side safety net.
+# Cold-build race guard REMOVED (Phase B, 2026-08-26): pages are served from
+# wiki_pages, so a page missed by the initial parse costs nothing a reader sees.
 
 # Idle-gated snapshot loop + nightly clean rebuild.
 REBUILD_HH=$(printf '%02d' "${WIKI_VIEWER_REBUILD_HOUR:-0}" 2>/dev/null || echo 00)
 last_rebuild_day=""
 marker=/tmp/last-snap; touch "$marker"
-# Notes reconciliation cadence (see the loop body).
-NOTES_CHECK_SECONDS="${WIKI_NOTES_CHECK_SECONDS:-60}"
-NOTES_FIX_COOLDOWN="${WIKI_NOTES_FIX_COOLDOWN:-900}"
-# How long a note may lack a page before we treat it as genuinely stuck.
-NOTES_GRACE_MIN="${WIKI_NOTES_GRACE_MIN:-10}"
-last_notes_check=0
-last_notes_fix=0
 N=0
 while true; do
   sleep "$POLL"
+  serve_or_die
   now=$(date +%s)
   la=$(cat /tmp/last-access 2>/dev/null || echo 0)
   idle=$((now - la))
@@ -210,43 +221,6 @@ while true; do
     continue
   fi
 
-  # Notes reconciliation (operator report 2026-08-26): a USER NOTE whose page
-  # was never emitted is invisible forever - the vault is read-only here, so we
-  # cannot touch it into the watcher; restarting the builder re-parses the whole
-  # vault and picks it up. Rate-limited, and only for notes/ (a handful of
-  # files) so this can never thrash on the 24/7 knowledge churn.
-  # GUARD (bug found 2026-08-26, minutes after shipping this): /quartz/public
-  # is EMPTY while a cold build runs, so an unguarded check saw every note as
-  # missing and restarted the builder before it could ever finish - a restart
-  # loop that blocked all publishing. Only compare against a COMPLETE build.
-  if is_complete /quartz/public && [ "$((now - last_notes_check))" -ge "$NOTES_CHECK_SECONDS" ]; then
-    last_notes_check="$now"
-    missing_note=""
-    for f in $(find /wiki/notes -name "*.md" 2>/dev/null | head -200); do
-      rel="${f#/wiki/}"
-      case "$rel" in */README.md|*/index.md|README.md|index.md) continue;; esac
-      [ -f "/quartz/public/${rel%.md}.html" ] && continue
-      # GRACE: a JUST-WRITTEN note is the watcher's job, not ours. Without
-      # this the reconciliation fired within 60s of every new note and
-      # restarted the builder - killing the incremental rebuild that would
-      # have emitted it in ~1min and starting a ~15min cold parse instead,
-      # so a new note took LONGER than before the safety net existed
-      # (measured 2026-08-26). Only act on a note still missing after the
-      # watcher has had a fair chance.
-      [ -n "$(find "$f" -mmin +"$NOTES_GRACE_MIN" 2>/dev/null)" ] || continue
-      missing_note="$rel"; break
-    done
-    if [ -n "$missing_note" ] && [ "$((now - last_notes_fix))" -ge "$NOTES_FIX_COOLDOWN" ]; then
-      last_notes_fix="$now"
-      echo "[wiki-viewer] note without a page ($missing_note) - restarting builder to re-parse"
-      kill_builder
-      wait_port_3001_free
-      touch /tmp/builder-start
-      start_builder
-      continue
-    fi
-  fi
-
   # Anything new in the build output since our last snapshot?
   changed=$(find /quartz/public -type f -newer "$marker" 2>/dev/null | head -1)
   [ -z "$changed" ] && continue
@@ -265,11 +239,9 @@ while true; do
     echo "[wiki-viewer] search index mid-write (contentIndex.json not terminated) — NOT publishing yet"
     continue
   fi
-  # Is the viewer idle? If a reader is active, defer the swap (don't yank content)
-  # — UNLESS a user just created a note/folder (serve.mjs set /tmp/ne-publish when
-  # it served fresh content from the live output), in which case publish promptly
-  # so the nav/contentIndex catch up in seconds instead of waiting out the idle gate.
-  if [ "$idle" -lt "$IDLE_SECONDS" ] && [ ! -f /tmp/ne-publish ]; then
+  # Is the viewer idle? If a reader is active, defer the swap (a new bundle under
+  # an open page is the only thing a swap can still change for them).
+  if [ "$idle" -lt "$IDLE_SECONDS" ]; then
     echo "[wiki-viewer] new build ready; viewer active (${idle}s < ${IDLE_SECONDS}s idle) — deferring swap"
     continue
   fi
@@ -299,6 +271,5 @@ while true; do
   ln -sfn "/srv/build-$N" /srv/current     # atomic swap; in-flight reads keep the old dir
   rm -rf "/srv/build-$((N - 2))"           # keep current + one previous
   touch "$marker"
-  rm -f /tmp/ne-publish                    # consumed: prompt-publish request satisfied
   echo "[wiki-viewer] snapshot #$N swapped live"
 done

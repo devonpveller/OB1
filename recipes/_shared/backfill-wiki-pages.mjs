@@ -2,10 +2,12 @@
 /**
  * backfill-wiki-pages — (re)build the `wiki_pages` table from the vault.
  *
- * The table is DERIVED data: the markdown on disk is the source of truth.
- * This walks the vault and upserts a row per page, so the table can be
- * rebuilt at any time — after the initial migration, after a sync outage, or
- * whenever the per-compile reconciliation count reports drift.
+ * The one-time FULL backfill (research-workbench D13 item 4: precedes P1b,
+ * notes excluded as on 09-02). Since D13 the row is what the viewer presents
+ * and compile owns both file and row; day-to-day drift is measured and
+ * repaired slug by slug by reconcile-wiki-pages.mjs (after each compile, as
+ * the viewer's health probe, and as its repair pass on (re)connect). This walks
+ * the vault and upserts a row per page.
  *
  * Idempotent (upsert on slug) and resumable (re-running simply rewrites the
  * same rows). Safe to run while the compiler is working: a page written
@@ -61,9 +63,13 @@ const main = async () => {
   const flush = async () => {
     if (!batch.length) return;
     if (!DRY) {
-      const ok = await upsertWikiPages(batch);
-      if (ok) sent += batch.length;
-      else failed += batch.length;
+      try {
+        await upsertWikiPages(batch);
+        sent += batch.length;
+      } catch (e) {
+        failed += batch.length;
+        console.error(`[backfill] batch of ${batch.length} FAILED (first ${batch[0]?.slug}): ${e?.message || e}`);
+      }
     }
     batch = [];
     if (seen % 2000 < BATCH) console.log(`[backfill] ${seen} pages walked, ${sent} upserted, ${failed} failed`);
@@ -86,6 +92,7 @@ const main = async () => {
 
   const after = await countWikiPages();
   console.log(`[backfill] done: walked=${seen} upserted=${sent} failed=${failed} rows_after=${after ?? "unknown"}`);
+  if (failed) process.exitCode = 1; // rows that did not land are a failure, never a clean run (D13)
 
   if (PRUNE && !DRY) {
     // Guard: never prune off a walk that clearly under-counted (an aborted or

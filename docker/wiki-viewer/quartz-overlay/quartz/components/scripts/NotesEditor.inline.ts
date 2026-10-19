@@ -695,16 +695,6 @@ function reloadWhenIdle(minIdleMs = 1500, capMs = 15000) {
 
 // ── per-page wiring: edit-in-place on note AND source pages; create on hubs ──
 document.addEventListener("nav", () => {
-  // Any navigation re-enables the dev hot-reload (the viewer's `quartz build
-  // --serve` hard-reloads on every vault change). We suppress it ONLY while a
-  // CM editor is open (the injected reload client checks window.__neEditing —
-  // patched in the viewer Dockerfile), so autosave persists without flashing.
-  ;(window as any).__neEditing = false
-  // The unsaved-work flags the fallback document's takeover poll reads
-  // (page-document.mjs). A fresh page has nothing unsaved; leaving a stale
-  // `true` behind after an SPA navigation would block that poll forever.
-  ;(window as any).__neDirty = false
-  ;(window as any).__neSaving = false
   hideLinkPopover() // never let an in-editor popover survive a navigation
 
   // Mark trashed notes with a 🗑 + dim wherever they're linked (the Explorer and
@@ -815,9 +805,6 @@ document.addEventListener("nav", () => {
       // Notes: autosave is a working draft (no git commit); Done adds ?commit=1
       // to record an authored revision. Sources PATCH the head (commit at compile).
       const url = isSource ? saveUrl() : api(apiPath) + (commitNow ? "?commit=1" : "")
-      // Published so the fallback document's takeover poll can tell "saved" from
-      // "mid-save" and never reload over an in-flight write (page-document.mjs).
-      ;(window as any).__neSaving = true
       let ok = false
       try {
         const r = await fetch(url, {
@@ -829,10 +816,6 @@ document.addEventListener("nav", () => {
         if (r.ok) {
           ok = true
           if (!isSource) lastHash = j.hash
-          // The buffer is on disk. Only a SUCCESSFUL save clears this: on 409 or
-          // a network error the edits are still only in the browser, and the
-          // poll must keep treating the page as unsafe to refresh.
-          ;(window as any).__neDirty = false
           setStatus(
             isSource
               ? "✓ saved (working draft — a revision commits at the next compile)"
@@ -846,8 +829,6 @@ document.addEventListener("nav", () => {
         }
       } catch (e: any) {
         setStatus("✗ " + (e && e.message ? e.message : e))
-      } finally {
-        ;(window as any).__neSaving = false
       }
       return ok
     }
@@ -880,7 +861,6 @@ document.addEventListener("nav", () => {
       if (!saved) return
       hideLinkPopover()
       window.removeEventListener("beforeunload", flush)
-      ;(window as any).__neEditing = false
       if (isSource) {
         // Re-render the body from the saved content so the edit is visible
         // immediately (the static leaf isn't recompiled in the preview; in prod
@@ -901,8 +881,8 @@ document.addEventListener("nav", () => {
         // refresh the SourceRevisions card (its uncommitted diff updates live)
         document.dispatchEvent(new CustomEvent("workbench-source-saved"))
       } else {
-        // Notes: reload once to render the saved note (hot-reloads were
-        // suppressed while editing) — a single refresh, not a per-keystroke flash.
+        // Notes: reload once to render the saved note — a single refresh, not a
+        // per-keystroke flash.
         // `await save(body)` above already resolved, so the PUT is complete and
         // the reload cannot race it back to pre-save content. It still waits for
         // the user to PAUSE before navigating (operator, 2026-09-03): clicking
@@ -948,16 +928,11 @@ document.addEventListener("nav", () => {
       // current values shown (edit tags etc. in place; nothing is defaulted).
       view = makeEditor(host, raw, (body) => {
         setStatus("editing…")
-        // Unsaved from this keystroke until the autosave PUT comes back OK.
-        // The takeover poll refuses to refresh while this is set, so a pending
-        // debounce can never be reloaded away (page-document.mjs).
-        ;(window as any).__neDirty = true
         if (timer) clearTimeout(timer)
         timer = setTimeout(() => save(body), 1500)
       })
       view.focus()
-      // Suppress dev hot-reload while the editor is open; flush on unload.
-      ;(window as any).__neEditing = true
+      // Flush on unload.
       window.addEventListener("beforeunload", flush)
       editBtn.textContent = "✓ Done editing"
       editBtn.classList.add("ne-editing")
@@ -1013,10 +988,9 @@ document.addEventListener("nav", () => {
           const j = await r.json().catch(() => ({}))
           if (r.ok && j.to) {
             // The move recompiles the vault, so the moved note's new URL exists
-            // only AFTER the rebuild. Suppress hot-reload, then poll for the new
-            // page and navigate once it's ready (never land on a transient 404),
+            // only AFTER the rebuild. Poll for the new page and navigate once it's
+            // ready (never land on a transient 404),
             // reopening the editor on arrival. Fall back to a refresh.
-            ;(window as any).__neEditing = true
             try {
               sessionStorage.setItem("ne-autoedit", j.to)
             } catch {
@@ -1099,7 +1073,6 @@ document.addEventListener("nav", () => {
           const r = await fetch(api(apiPath), { method: "DELETE" })
           const j = await r.json().catch(() => ({}))
           if (r.ok) {
-            ;(window as any).__neEditing = true
             setStatus("✓ moved to trash — updating…")
             // Strike it through in the Explorer straight away: that is the
             // confirmation the user needs, and it does not wait on a rebuild.
@@ -1209,8 +1182,6 @@ document.addEventListener("nav", () => {
         ["---", "title: " + JSON.stringify(title), "source: user_note", "notebook: " + JSON.stringify(nbName), "tags: [note]", "---", "", "# " + title, "", ""].join("\n")
       launch.textContent = "creating…"
       ;(launch as HTMLButtonElement).disabled = true // no re-clicks during the hop
-      // Suppress the hub's hot-reload so the create→navigate hop isn't interrupted.
-      ;(window as any).__neEditing = true
       try {
         const r = await fetch(api(path), {
           method: "PUT",
@@ -1219,7 +1190,7 @@ document.addEventListener("nav", () => {
         })
         if (!r.ok) throw new Error("HTTP " + r.status)
         // The new page exists after Quartz rebuilds (~1s). Navigate to it and
-        // auto-open the editor on arrival (nav resets __neEditing).
+        // auto-open the editor on arrival.
         try {
           sessionStorage.setItem("ne-autoedit", path)
         } catch {
@@ -1246,7 +1217,6 @@ document.addEventListener("nav", () => {
         }
         setTimeout(tryGo, 700)
       } catch (e: any) {
-        ;(window as any).__neEditing = false
         ;(launch as HTMLButtonElement).disabled = false
         launch.textContent = "✗ " + (e && e.message ? e.message : e)
       }
@@ -1296,7 +1266,6 @@ document.addEventListener("nav", () => {
       const path = (folderRel ? folderRel + "/" : "") + sub
       nfLaunch.textContent = "creating…"
       ;(nfLaunch as HTMLButtonElement).disabled = true // no re-clicks during the hop
-      ;(window as any).__neEditing = true // hold hot-reload during the create→open hop
       try {
         const r = await fetch("/workbench/notes/folders", {
           method: "POST",
@@ -1324,13 +1293,11 @@ document.addEventListener("nav", () => {
           if (Date.now() < deadline) {
             setTimeout(tryGo, 700)
           } else {
-            ;(window as any).__neEditing = false
             window.location.reload()
           }
         }
         setTimeout(tryGo, 700)
       } catch (e: any) {
-        ;(window as any).__neEditing = false
         ;(nfLaunch as HTMLButtonElement).disabled = false
         nfLaunch.textContent = "✗ " + (e && e.message ? e.message : e)
       }
@@ -1367,7 +1334,6 @@ document.addEventListener("nav", () => {
         return
       }
       nfDelete.textContent = "moving to trash…"
-      ;(window as any).__neEditing = true
       try {
         const r = await fetch("/workbench/notes/folders", {
           method: "DELETE",
@@ -1393,11 +1359,9 @@ document.addEventListener("nav", () => {
           }
           setTimeout(tryReload, 800)
         } else {
-          ;(window as any).__neEditing = false
           nfDelete.textContent = "✗ " + (j.error || "HTTP " + r.status)
         }
       } catch (e: any) {
-        ;(window as any).__neEditing = false
         nfDelete.textContent = "✗ " + (e && e.message ? e.message : e)
       }
     })
@@ -1414,7 +1378,6 @@ document.addEventListener("nav", () => {
     const tFolderRel = trashCard.dataset.folderRel || ""
     restoreBtn.addEventListener("click", async () => {
       if (tStatus) tStatus.textContent = "restoring…"
-      ;(window as any).__neEditing = true
       try {
         const r = isFolder
           ? await fetch("/workbench/notes/folders/restore", {
@@ -1442,11 +1405,9 @@ document.addEventListener("nav", () => {
           }
           setTimeout(tryReload, 700)
         } else {
-          ;(window as any).__neEditing = false
           if (tStatus) tStatus.textContent = "✗ restore failed (" + r.status + ")"
         }
       } catch (e: any) {
-        ;(window as any).__neEditing = false
         if (tStatus) tStatus.textContent = "✗ " + (e && e.message ? e.message : e)
       }
     })

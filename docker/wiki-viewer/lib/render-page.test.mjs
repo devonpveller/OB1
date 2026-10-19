@@ -1,163 +1,181 @@
-// node --test lib/  — image-build gate for the DB-render fallback (Phase B).
+// node --test lib/  - image-build gate for the live renderer's markdown
+// pipeline (research-workbench P1a: the Quartz transform set, ported).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { renderMarkdown, rewriteWikilinks } from "./render-page.mjs";
-import { pageDocument } from "./page-document.mjs";
+import { renderPage, renderMarkdown, ofmTextTransform } from "./render-page.mjs";
+import { basenameIndex } from "./quartz-path.mjs";
 
-test("renders headings, lists, tables, code (GFM)", () => {
-  const html = renderMarkdown("# H1\n\n- a\n- b\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n`code`\n");
-  assert.ok(html.includes("<h1>H1</h1>"));
+const ctx = (slug = "content/person/person-x", slugs = []) => ({ slug, byBase: basenameIndex(slugs) });
+
+test("GFM: headings, lists, tables (wrapped like a built page), code, task lists", async () => {
+  const html = await renderMarkdown("# H1\n\n- a\n- b\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n`code`\n\n- [x] done\n", ctx());
+  assert.ok(html.includes('<h1 id="h1">H1'), html);
   assert.ok(html.includes("<li>a</li>"));
-  assert.ok(html.includes("<table>"));
+  assert.ok(html.includes('<div class="table-container"><table>'), "Quartz's htmlToJsx wraps tables");
   assert.ok(html.includes("<code>code</code>"));
+  assert.ok(html.includes('<input type="checkbox" checked disabled/>'), html);
 });
 
-test("wikilinks become hrefs; alias + anchor + basename label", () => {
-  assert.equal(
-    rewriteWikilinks("see [[content/person/person-ada|Ada]]"),
-    "see [Ada](/content/person/person-ada)");
-  assert.equal(
-    rewriteWikilinks("[[content/tool/tool-x#Usage]]"),
-    "[tool-x](/content/tool/tool-x#Usage)");
-  const html = renderMarkdown("go [[notes/my note]]");
-  assert.ok(html.includes('href="/notes/my%20note"'), html);
+test("wikilinks resolve with Quartz's 'shortest' strategy: relative href, data-slug, alias class", async () => {
+  const slugs = ["content/person/person-ada", "content/tool/tool-x"];
+  const html = await renderMarkdown("see [[content/person/person-ada|Ada]] and [[tool-x#Usage]]", ctx("content/person/person-x", slugs));
+  assert.ok(html.includes('<a href="../../content/person/person-ada" class="internal alias" data-slug="content/person/person-ada">Ada</a>'), html);
+  assert.ok(html.includes('href="../../content/tool/tool-x#usage"'), html);
 });
 
-test("a bare % in a wikilink target is encoded, never raw in the href", () => {
-  const html = renderMarkdown("bad [[content/tool/50% off]]");
-  assert.ok(html.includes("50%25%20off"), html);
+test("a bare % in a wikilink target never reaches an href un-encoded", async () => {
+  const html = await renderMarkdown("bad [[content/tool/50% off]]", ctx());
+  assert.ok(!/href="[^"]*%(?![0-9A-Fa-f]{2})/.test(html), html);
 });
 
-test("SECURITY: raw HTML from source content is dropped, not executed", () => {
-  const html = renderMarkdown('before <script>alert(1)</script> <img src=x onerror="x()"> after');
+test("SECURITY: raw HTML from source content is dropped, not executed", async () => {
+  const html = await renderMarkdown('before <script>alert(1)</script> <img src=x onerror="x()"> <div onclick="y()">z</div> after\n\n<iframe src="https://e.invalid/t"></iframe>\n', ctx());
   assert.ok(!html.includes("<script"), "script tag must not survive");
   assert.ok(!html.includes("onerror"), "event handler must not survive");
-  assert.ok(html.includes("before"), "surrounding text survives");
+  assert.ok(!html.includes("onclick"), "event handler must not survive");
+  assert.ok(!html.includes("<iframe"), "iframe must not survive");
+  assert.ok(html.includes("before") && html.includes("after"), "surrounding text survives");
 });
 
-test("frontmatter is not rendered; CRLF and empty bodies are fine", () => {
-  const html = renderMarkdown("---\r\ntitle: X\r\n---\r\n\r\nbody\r\n");
+test("SECURITY: transform-generated HTML escapes what it interpolates (highlight, callout title)", async () => {
+  const html = await renderMarkdown('==a < b & "c"== and ==<img src=x onerror=a()>==\n\n> [!note] <b onclick=z()>t</b>\n> body\n', ctx());
+  assert.ok(!html.includes("onerror"), html);
+  assert.ok(!html.includes("onclick"), html);
+  assert.ok(html.includes('<span class="text-highlight">a &lt; b &amp; &quot;c&quot;</span>'), html);
+});
+
+test("Obsidian callouts, foldable callouts, highlights, comments", async () => {
+  const html = await renderMarkdown("> [!warning]- Folded\n> inside\n\n==hi==\n\n%% secret %%\n", ctx());
+  assert.ok(html.includes('class="callout warning is-collapsible is-collapsed" data-callout="warning"'), html);
+  assert.ok(html.includes('<span class="text-highlight">hi</span>'));
+  assert.ok(!html.includes("secret"), "comments never render");
+});
+
+test("math (katex), mermaid, footnotes, syntax highlighting", async () => {
+  const out = await renderPage("$E=mc^2$\n\n```mermaid\ngraph TD\n A-->B\n```\n\nRef.[^1]\n\n[^1]: Note.\n\n```js\nconst a = 1;\n```\n", ctx());
+  assert.ok(out.html.includes('<span class="katex">'), "inline math rendered by katex");
+  assert.ok(out.html.includes('class="mermaid"') && out.html.includes('id="mermaid-container"'), "mermaid block + Quartz's container");
+  assert.ok(out.hasMermaid);
+  assert.ok(out.html.includes('data-footnotes') && out.html.includes('data-footnote-ref'), "GFM footnotes");
+  assert.ok(out.html.includes("data-rehype-pretty-code-figure"), "rehype-pretty-code (shiki) highlighting");
+});
+
+test("TOC entries, inline #tags (slugged, collected), reading time, text", async () => {
+  const out = await renderPage("# Top\n\n## A part\n\ntext #my-tag and #123\n\n### Sub\n", ctx());
+  assert.deepEqual(out.toc.map((e) => [e.depth, e.slug]), [[0, "top"], [1, "a-part"], [2, "sub"]]);
+  assert.deepEqual(out.inlineTags, ["my-tag"], "numeric-only #123 is not a tag (Quartz)");
+  assert.ok(out.html.includes('href="../../tags/my-tag" class="tag-link internal alias"') || out.html.includes("tag-link"), out.html);
+  assert.equal(out.readingMinutes, 1);
+  assert.ok(out.text.includes("A part"));
+});
+
+test("external links get Quartz's external class + icon; anchors stay intra-document", async () => {
+  const html = await renderMarkdown("[x](https://example.invalid/a) and [y](#here)", ctx());
+  assert.ok(html.includes('class="external"') && html.includes('class="external-icon"'), html);
+  assert.ok(html.includes('href="#here" class="internal alias"'), html);
+});
+
+test("frontmatter is not rendered; CRLF and empty bodies are fine", async () => {
+  const html = await renderMarkdown("---\r\ntitle: X\r\n---\r\n\r\nbody\r\n", ctx());
   assert.ok(!html.includes("title: X"));
   assert.ok(html.includes("body"));
-  assert.equal(typeof renderMarkdown(""), "string");
-  assert.equal(typeof renderMarkdown(null), "string");
+  assert.equal(typeof (await renderMarkdown("", ctx())), "string");
+  assert.equal(typeof (await renderMarkdown(null, ctx())), "string");
 });
 
-test("SECURITY: the live document carries no identity attrs and no client bundle", () => {
-  const doc = pageDocument({
-    title: "T <script>", bodyHtml: "<p>x</p>",
-    slug: "content/person/person-x", updatedAt: "2026-08-26T12:00:00Z",
+test("ofmTextTransform: comments stripped, callout title gets its own line", () => {
+  assert.equal(ofmTextTransform("a %%x%% b"), "a  b");
+  assert.ok(ofmTextTransform("> [!note] T\n> body").startsWith("> [!note] T\n> \n"));
+});
+
+// rw-p1a-render attempt 2, finding F-T1: the tester's injection probe (A4),
+// verbatim. No script-capable URL scheme may survive into any URL attribute,
+// and no raw element or on* handler either (the first property, re-checked
+// through every transform).
+const PROBE = [
+  "# Injection probe",
+  "",
+  "Plain link [jl](javascript:alert(101)) and image ![ji](javascript:alert(102)) and data [dl](data:text/html,<script>alert(103)</script>).",
+  "",
+  "Raw: <img src=x onerror=alert(104)> <svg onload=alert(105)></svg> <script>alert(106)</script>",
+  "",
+  "<div onclick=\"alert(107)\">block</div>",
+  "",
+  "Wikilink [[javascript:alert(108)|wl]] and [[foo\" onmouseover=\"alert(109)]] and [[x<img src=y onerror=alert(110)>]].",
+  "",
+  "Embed ![[javascript:alert(111).png]] and ![[evil\" onerror=\"alert(112).pdf]] and ![[q\" onload=\"alert(113)]].",
+  "",
+  "Highlight ==<img src=x onerror=alert(114)>== and tag #<img",
+  "",
+  "Autolink <https://ex.invalid/\" onmouseover=\"alert(115)> and titled [t](https://ex.invalid \"a\\\" onmouseover=\\\"alert(116)\").",
+  "",
+  "> [!note] Title <img src=x onerror=alert(117)> `<script>alert(118)</script>`",
+  "> body",
+  "",
+  "> [!warning|<script>alert(119)</script>\" onmouseover=\"alert(120)]- meta",
+  "> folded",
+  "",
+  "Math $\\href{javascript:alert(121)}{m}$ and $\\htmlClass{x\" onmouseover=\"alert(122)}{y}$ and $$\\url{javascript:alert(123)}$$",
+  "",
+  "```mermaid",
+  "%%{init: {\"securityLevel\": \"loose\"}}%%",
+  "graph TD",
+  "  A[<img src=x onerror=alert(124)>] --> B",
+  "  click A callback \"alert(125)\"",
+  "  click B \"javascript:alert(126)\"",
+  "```",
+  "",
+  "Footnote[^<img src=x onerror=alert(127)>] and [^ok].",
+  "",
+  "[^<img src=x onerror=alert(127)>]: fn <script>alert(128)</script>",
+  "[^ok]: fine",
+  "",
+  "## Second heading <img src=x onerror=alert(129)>",
+  "",
+  "Block ref ^\"onmouseover=alert(130)",
+  "",
+  "![yt](https://www.youtube.com/watch?v=aaaaaaaaaaa\"onload=\"alert(131))",
+  "",
+  "Obfuscated [o1](JaVaScRiPt:alert(132)) [o2](java&#x09;script:alert(133)) [o3](vbscript:msgbox(134)) [o4](%20javascript:alert(135)).",
+].join("\n");
+
+test("SECURITY (F-T1): no javascript:/vbscript:/data: URL survives in any attribute - the tester's probe", async () => {
+  const html = await renderMarkdown(PROBE, ctx("content/source/00000000-0000-4000-8000-000000000003", ["content/person/foo"]));
+  // Parsed, as a browser would (a regex over the markup also matches inside
+  // escaped attribute VALUES, e.g. a title or the mermaid data-clipboard).
+  const { fromHtml } = await import("hast-util-from-html");
+  const { visit } = await import("unist-util-visit");
+  const bad = [];
+  const handlers = [];
+  const scripts = [];
+  visit(fromHtml(html, { fragment: true }), "element", (n) => {
+    if (n.tagName === "script") scripts.push(n);
+    for (const [k, v] of Object.entries(n.properties || {})) {
+      if (/^on/i.test(k)) handlers.push(`${n.tagName}.${k}`);
+      if (["href", "src", "poster", "cite", "action", "formAction", "xLinkHref", "data", "background"].includes(k) &&
+          /^(?:javascript|vbscript|data):/i.test(String(v).replace(/[\x00-\x20]/g, ""))) bad.push(`${n.tagName}.${k}=${v}`);
+    }
   });
-  // The audit A-1 invariant, as regexes so a future edit FAILS the build:
-  assert.ok(!/data-(entity-id|note-path|folder-rel|source-id|notebook-name)/.test(doc),
-    "identity attributes are forbidden in the fallback document");
-  assert.ok(!/<script[^>]*src=/.test(doc), "no external scripts (no client bundle)");
-  assert.ok(doc.includes("data-live-page"), "must self-identify for the poll/probe");
-  assert.ok(doc.includes('href="/index.css"'), "site css for theme parity");
-  assert.ok(doc.includes("&lt;script&gt;"), "title is escaped");
-  assert.ok(/read-only|editable page is being prepared/.test(doc), "states what this view is");
-  // Theme parity: without Quartz's wrapper structure index.css does not
-  // apply and the page renders as a white screen (operator, 2026-08-26).
-  assert.ok(doc.includes('id="quartz-root"') && doc.includes('class="center"'),
-    "must use Quartz wrapper structure so the theme applies");
+  assert.deepEqual(bad, [], `unsafe URL attributes: ${bad.join(" | ")}`);
+  assert.equal(scripts.length, 0, "no script element");
+  assert.deepEqual(handlers, [], "no on* handler attribute");
+  // the refused links keep their text, unlinked
+  for (const t of ["jl", "dl", "wl", "o1", "o3"]) assert.ok(new RegExp(`>${t}<|\\b${t}\\b`).test(html), `text of ${t} kept`);
+  assert.ok(!/<a [^>]*>jl<\/a>/.test(html), "the javascript: link is not an anchor");
 });
 
-test("live document tolerates missing fields", () => {
-  const doc = pageDocument({ slug: "notes/x" });
-  assert.ok(doc.includes("<h1>x</h1>"));
-  assert.ok(doc.includes("no content yet"));
-});
-
-test("editable notes get the note-specific banner", () => {
-  const doc = pageDocument({ slug: "notes/x", editable: true });
-  assert.ok(doc.includes("editable right here"));
-});
-
-test("THEME: the document applies the user's saved theme before paint", () => {
-  const doc = pageDocument({ slug: "notes/x" });
-  // Quartz themes via a saved-theme attribute its client bundle sets; this
-  // document loads no bundle, so it must set it itself or always render light.
-  assert.ok(doc.includes('setAttribute("saved-theme"'), "must set saved-theme");
-  assert.ok(doc.indexOf("saved-theme") < doc.indexOf("<body"), "must run before body (no flash)");
-  assert.ok(!/<script[^>]*src=/.test(doc), "still no external bundle");
-});
-
-test("EDITOR: editable notes emit the BUILT page's editor contract, derived from their own slug", () => {
-  const doc = pageDocument({ slug: "notes/folder/my note", editable: true });
-  // The corrected A-1 invariant: identity is GENERATED from the rendered
-  // slug (never inherited), and it must be the exact contract the bundled
-  // NotesEditor wires (NotesEditor.tsx:88). The .md matters: slugs are
-  // extension-less but the notes API addresses FILES.
-  assert.ok(doc.includes('data-note-path="folder/my note.md"'), "note-path = own slug as a FILE");
-  assert.ok(doc.includes('data-note-slug="notes/folder/my note"'), "note-slug = own slug");
-  assert.ok(doc.includes("data-wb-edit") && doc.includes('data-edit-kind="note"'), "the real edit button");
-  assert.ok(doc.includes("data-notes-root") && doc.includes('data-folder-rel="folder"'), "notes root contract");
-  // ONE editor: the real client bundle drives it — no bespoke editor code.
-  assert.ok(doc.includes('src="/postscript.js"') && doc.includes('src="/prescript.js"'), "loads the site bundle");
-  assert.ok(!doc.includes("live-editor"), "the bespoke textarea editor is gone");
-  assert.ok(doc.includes("__neEditing"), "takeover poll defers to the open editor");
-  assert.ok(doc.includes('dataset.livePage !== "1"'), "poll self-cancels after SPA nav away");
-});
-
-test("LAYOUT: the fallback places .center in the built page's grid column, never a narrow strip", () => {
-  const doc = pageDocument({ slug: "notes/x", editable: true });
-  // WHY (operator, 2026-09-03: "confined within a very narrow window"):
-  // index.css makes `.page > #quartz-body` a 320px/auto/320px grid. This
-  // document has no sidebars, so .center was the grid's only child and CSS
-  // auto-placement put it in the FIRST cell — the 320px left gutter. Pinning
-  // it to grid-center is what makes a not-yet-built note the same width, in
-  // the same place, as the built one.
-  assert.ok(/\.center\{grid-area:grid-center\}/.test(doc),
-    ".center must be placed in the grid-center area or it auto-places into the 320px gutter");
-  // The two rules this replaced never applied (`.page>#quartz-body …`
-  // out-specifies a bare `#quartz-body`/`.center`), and re-adding either
-  // would re-describe the wrong cause AND could win if index.css changes.
-  assert.ok(!/#quartz-body\{display:\s*block/.test(doc),
-    "must not override Quartz's grid — that was the dead rule that hid the real cause");
-  assert.ok(!/\.center\{[^}]*max-width/.test(doc),
-    "no hard-coded column width: the geometry lives in index.css, one source of truth");
-});
-
-test("REFRESH: the takeover reloads only when the page is built, saved AND the user has paused", () => {
-  const doc = pageDocument({ slug: "notes/x", editable: true });
-  const poll = doc.slice(doc.lastIndexOf("<script>"));
-  // Never over unsaved work: an open editor, an in-flight save, or a buffer
-  // still waiting on the autosave debounce (NotesEditor.inline.ts sets all
-  // three). Dropping any one of these makes a refresh able to eat keystrokes.
-  for (const flag of ["__neEditing", "__neSaving", "__neDirty"]) {
-    assert.ok(poll.includes(flag), "poll must defer to " + flag);
-  }
-  // Never mid-gesture: idle is measured from real user activity.
-  for (const ev of ["keydown", "pointermove", "wheel", "scroll", "touchstart"]) {
-    assert.ok(poll.includes('"' + ev + '"'), "idle tracking must watch " + ev);
-  }
-  assert.ok(poll.includes("document.hidden"), "a hidden tab counts as paused");
-  // The gate must be re-checked AFTER the readiness fetch, not only before it:
-  // the fetch takes time and the user may start typing during it. Two calls to
-  // settled() — one before the fetch, one immediately before the reload.
-  const settledCalls = poll.match(/settled\(\)/g) || [];
-  assert.ok(settledCalls.length >= 2,
-    "re-check the gate immediately before location.reload(), not just before the fetch");
-  const lastGate = poll.lastIndexOf("!settled()");
-  assert.ok(lastGate > poll.indexOf('indexOf("data-live-page")'),
-    "the last gate must come AFTER the readiness fetch resolves");
-  assert.ok(lastGate < poll.indexOf("location.reload()"),
-    "the last gate must come BEFORE the reload");
-  // ...but it must still fire: the readiness check is what ends the fallback.
-  assert.ok(poll.includes('indexOf("data-live-page")'), "still detects the built page");
-  assert.ok(poll.includes("location.reload()"), "the takeover must still happen");
-  assert.ok(poll.includes('dataset.livePage !== "1"'), "poll self-cancels after SPA nav away");
-});
-
-test("EDITOR: everything that is not a user note stays bundle-free and identity-free", () => {
-  for (const [label, doc] of [
-    ["read-only entity", pageDocument({ slug: "content/place/place-x" })],
-    ["machine-written Changes log", pageDocument({ slug: "notes/Changes/2026", editable: true })],
-    ["editable flag on a non-note", pageDocument({ slug: "content/place/place-x", editable: true })],
-  ]) {
-    assert.ok(!/<script[^>]*src=/.test(doc), label + ": no client bundle");
-    assert.ok(!/data-(entity-id|note-path|folder-rel|source-id|notebook-name)=/.test(doc),
-      label + ": no identity attributes");
-    assert.ok(!doc.includes("data-wb-edit"), label + ": no edit button");
-  }
+test("SECURITY (F-T1): safe links are untouched; a raster data: image is allowed, an svg data: image and a data: link are not", async () => {
+  const { isUnsafeUrl } = await import("./render-page.mjs");
+  assert.equal(isUnsafeUrl("java\tscript:alert(1)"), true);
+  assert.equal(isUnsafeUrl(" JAVASCRIPT:alert(1)"), true);
+  assert.equal(isUnsafeUrl("vbscript:x"), true);
+  assert.equal(isUnsafeUrl("data:text/html,x"), true);
+  assert.equal(isUnsafeUrl("data:image/png;base64,AAAA", { image: true }), false);
+  assert.equal(isUnsafeUrl("data:image/svg+xml,<svg onload=x>", { image: true }), true);
+  assert.equal(isUnsafeUrl("data:image/png;base64,AAAA"), true, "a data: href is refused even for a raster type");
+  assert.equal(isUnsafeUrl("https://example.invalid/a"), false);
+  assert.equal(isUnsafeUrl("../../content/x"), false);
+  const html = await renderMarkdown("[ok](https://example.invalid/a) and [rel](../x) and ![img](data:image/png;base64,AAAA)", ctx());
+  assert.ok(html.includes('href="https://example.invalid/a"'), html);
+  assert.ok(html.includes('src="data:image/png;base64,AAAA"'), html);
 });
