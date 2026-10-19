@@ -1,7 +1,16 @@
 # run-references-tests.ps1 - the disposable test run for research-workbench P2a (rw-p2a-refs):
 # references as first-class records.
 #
-#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-references-tests.ps1 [-Id <owner id>] [-Evidence <dir>]
+#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-references-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner id>] [-Evidence <dir>]
+#
+# -Subnet is REQUIRED and -Evidence must be absent or empty (rw-p0b-purge-door attempt 2, tester
+# finding F1: this is the same disposable harness as run-contract-tests.ps1, so it gets the same two
+# guards): exactly a /24, never one from Docker's default pools (refused inside 172.16.0.0/12 and
+# 192.168.0.0/16; harness-subnet.ps1 - the run's network gets the lower /25, the smoke script's own
+# fetch network the upper /25), and nothing is written under -Evidence until the live-data guard has passed for
+# every capture - logs and client outputs are staged, then published through the shared evidence
+# gate (evidence-gate.ps1: every log redacted, regular files of at most 16 KB only, links not
+# followed, a drop list).
 #
 # What it does, and ONLY this:
 #   1. stages the REAL initdb chain from docker-compose.yml (every mounted init*.sql, P0's 230
@@ -32,11 +41,15 @@
 #        f. a vault whose one note the legacy reader listed differently (a duplicated frontmatter
 #           id) is refused by the migration: exit 1, the note named, nothing written for it
 #   7. the eleven-router smoke (scripts/checks/smoke-workbench-routers.ps1) against the
-#      pre-change and the :wt workbench on database C: captured with an explicit -ExecContainer,
+#      pre-change and the :wt workbench on database C: captured with an explicit -Target (the
+#      smoke script fetches it by its address on a network of its own; attempt 3),
 #      compared IN-PROCESS (-Compare @(a, b)), 13 PASS / 'all 13 router responses identical',
 #      plus the built-in RED (an altered copy: 12 PASS, 1 FAIL, rc 1). The LIVE-DATA GUARD
 #      (size cap, fixture-only ids and notes, _target.txt 'live: False') runs over every capture
 #      BEFORE anything is copied into -Evidence.
+#   9. THE EVIDENCE GATE (evidence-gate.ps1, shared with run-contract-tests.ps1): -Evidence is
+#      untouched until here; the guard runs over every capture again, and only if all pass are
+#      the staged logs (redacted) and the captures published. A failing guard publishes nothing.
 #   8. tears down exactly what it created (containers removed with -v, their volumes recorded
 #      first); verifies nothing labelled <Id> is left, no volume of ours is left, and no :local
 #      image changed
@@ -47,6 +60,8 @@ param(
   [string]$Id = 'wt-rw-p2a-refs',
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$Evidence = '',
+  # The disposable network's subnet (required; see the header).
+  [string]$Subnet = '',
   [switch]$KeepImages,
   # The pre-change workbench is built from this OB1 commit: P0's FINAL tip (rw-p0-contract2 attempt 2,
   # 5d919e6), which P2a was forward-merged onto on 2026-10-18 (P2a first branched from 29834e3).
@@ -55,6 +70,12 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
+. (Join-Path $PSScriptRoot 'harness-subnet.ps1')
+if (-not (Get-Command Test-HarnessSubnet -ErrorAction SilentlyContinue) -or -not (Get-Command Split-HarnessSubnet -ErrorAction SilentlyContinue)) { Write-Host 'REFUSED: harness-subnet.ps1 did not load (the -Subnet rule is not checked; fail closed)'; exit 2 }
+$w = Test-HarnessSubnet $Subnet
+if ($w) { Write-Host "REFUSED: $w"; exit 2 }
+$subnets = Split-HarnessSubnet $Subnet          # .run = this run's network, .smoke = the smoke script's fetch network
+if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty (the run publishes into an empty or absent directory)"; exit 2 }
 $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot                                  # .../workbench/contract-test
 $wb = Split-Path -Parent $ct                         # .../OB1/docker/workbench
@@ -73,8 +94,12 @@ $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwp2a-evidence-$rand" }
-New-Item -ItemType Directory -Force $Evidence | Out-Null
-$Evidence = (Resolve-Path $Evidence).Path
+# The evidence gate: logs and client outputs are staged HERE; -Evidence is not touched until the end.
+$evStage = Join-Path $env:TEMP "rwp2a-evstage-$rand"
+New-Item -ItemType Directory -Force $evStage | Out-Null
+. (Join-Path $PSScriptRoot 'evidence-gate.ps1')
+# Every capture the run makes, @(dir, container): ALL must pass Test-Capture before anything is published.
+$script:captures = @()
 $stage = Join-Path $env:TEMP "rwp2a-initdb-$rand"
 $vaultPre = Join-Path $env:TEMP "rwp2a-vault-pre-$rand"
 $vaultPost = Join-Path $env:TEMP "rwp2a-vault-post-$rand"
@@ -88,7 +113,8 @@ function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 function Dk { $o = (& docker @args 2>&1 | ForEach-Object { "$_" }) -join "`n"; $script:rc = $LASTEXITCODE; return $o }
 function Save([string]$name, [string]$text) {
-  [System.IO.File]::WriteAllText((Join-Path $Evidence $name), $text, (New-Object System.Text.UTF8Encoding $false))
+  # into the STAGING directory; Publish-Evidence copies it to -Evidence after the guard
+  [System.IO.File]::WriteAllText((Join-Path $evStage $name), $text, (New-Object System.Text.UTF8Encoding $false))
 }
 function Psql([string]$db, [string]$sql) {
   # base64 through the shell: PowerShell 5.1 strips embedded double quotes from native arguments
@@ -124,10 +150,10 @@ function Start-Workbench([string]$name, [string]$image, [string]$db, [string]$va
   return (Wait-Health $name)
 }
 # Run references-client.ts in a throwaway container on the run network (contract-test and the
-# evidence dir mounted).
+# STAGING dir mounted: its outputs reach -Evidence only through the gate).
 function Client([string[]]$argv, [string[]]$envs = @()) {
   $e = @(); foreach ($x in $envs) { $e += @('-e', $x) }
-  return Dk run --rm --label $label --network $net -e "WB_KEY=$key" @e -v "${ct}:/ct:ro" -v "${Evidence}:/ev" $tag `
+  return Dk run --rm --label $label --network $net -e "WB_KEY=$key" @e -v "${ct}:/ct:ro" -v "${evStage}:/ev" $tag `
     deno run --allow-net --allow-env --allow-read --allow-write=/ev /ct/references-client.ts @argv
 }
 
@@ -229,8 +255,8 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $null = Dk network create --internal --label $label $net
-  Check ($script:rc -eq 0) "network $net created (internal, labelled)"
+  $null = Dk network create --driver bridge --internal --subnet $subnets.run --label $label $net
+  Check ($script:rc -eq 0) "network $net created (internal, labelled, subnet $($subnets.run); the smoke's fetch network gets $($subnets.smoke))"
   if ($script:rc -ne 0) { throw 'network' }
   $made.net = $true
 
@@ -398,7 +424,7 @@ SELECT count(*),
   Save 'diffcheck.log' $o
   Write-Host ($o -split "`n" | ForEach-Object { "        $_" } | Out-String).TrimEnd()
   Check ($script:rc -eq 0) 'diffCheck over 200 references: 5 runs, each < 200 ms, all out of date, no chunk text in the network log'
-  $logText = [System.IO.File]::ReadAllText((Join-Path $Evidence 'diffcheck-network-log.json'))
+  $logText = [System.IO.File]::ReadAllText((Join-Path $evStage 'diffcheck-network-log.json'))
   Check (-not $logText.Contains($sentinel) -and -not $logText.Contains('Quoted span')) 'the recorded network log carries no chunk text'
 
   # f. a note the legacy reader listed differently is refused
@@ -422,8 +448,13 @@ SELECT count(*),
     $made.smokeDir = $own
     function Smoke-Capture([string]$dir, [string]$container) {
       # In-process; every capture names its disposable target explicitly (never the defaults).
-      $o = (& $smoke -Capture $dir -ExecContainer $container -BaseUrl http://localhost:8000 -KeyEnv WORKBENCH_KEY *>&1 | Out-String)
-      return @{ out = $o; rc = $LASTEXITCODE }
+      # Recorded BEFORE it runs: a capture that fails half-way still has to pass the guard.
+      $script:captures += , @($dir, $container)
+      # (attempt 3: -Target, verified and fetched by its address on the smoke script's own network;
+      # a throw never aborts the run)
+      $global:LASTEXITCODE = 0
+      try { $o = (& $smoke -Capture $dir -Target $container -Subnet $subnets.smoke -KeyEnv WORKBENCH_KEY *>&1 | Out-String); $rc = $LASTEXITCODE } catch { $o = "THREW: $_"; $rc = -1 }
+      return @{ out = $o; rc = $rc }
     }
     function Smoke-Compare([string]$x, [string]$y) {
       # In-process with ONE array argument: '-File ... -Compare $a $b' binds $b to -Capture and the
@@ -446,7 +477,7 @@ SELECT count(*),
     Save 'smoke-red.log' $cr.out
     Check (($cr.rc -eq 1) -and ($cr.fail -eq 1) -and ($cr.pass -eq 12) -and ($cr.out -match 'notes-list: the response changed')) "eleven-router smoke RED: an altered capture FAILS ($($cr.pass) PASS, $($cr.fail) FAIL, rc $($cr.rc))"
     Remove-Item -Recurse -Force $red
-    # The LIVE-DATA GUARD, then - and only then - the copy into -Evidence.
+    # The LIVE-DATA GUARD (the copy into -Evidence is the evidence gate's, step 9).
     $guardBad = @()
     foreach ($pair in @(@($pre, $baseName), @($post, $postName))) {
       foreach ($x in @(Test-Capture $pair[0] $pair[1])) { $guardBad += "$(Split-Path -Leaf $pair[0]): $x" }
@@ -466,7 +497,6 @@ SELECT count(*),
     Check ($redBad.Count -ge 5) "live-data guard RED: a live-shaped capture is caught ($($redBad.Count) violation(s): target, live, size, uuid, notebook)"
     Remove-Item -Recurse -Force $fake
     if ($guardBad.Count -eq 0) {
-      foreach ($d in @($pre, $post)) { Copy-Item -Recurse $d (Join-Path $Evidence (Split-Path -Leaf $d)) }
       $diff = @(Get-ChildItem -File $pre | Where-Object { $_.Name -ne '_target.txt' } | Where-Object {
           [System.IO.File]::ReadAllText($_.FullName) -cne [System.IO.File]::ReadAllText((Join-Path $post $_.Name)) })
       Save 'smoke-diff.txt' ($(if ($diff.Count) { ($diff | ForEach-Object { $_.Name }) -join "`n" } else { '(empty: no response file differs between smoke-pre-change and smoke-post-change)' }))
@@ -498,7 +528,6 @@ SELECT count(*),
   if ($made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $made.images) { $null = Dk rmi $i } }
   Remove-Item $stage, $vaultPre, $vaultPost, $vaultBad -Recurse -Force -ErrorAction SilentlyContinue
-  if ($made.smokeDir) { Remove-Item $made.smokeDir -Recurse -Force -ErrorAction SilentlyContinue }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   $leftNet = (Dk network ls --filter "label=$label" --format '{{.Name}}' | Out-String).Trim()
   Check (($left -eq '') -and ($leftNet -eq '')) "nothing labelled $Id is left (containers: '$left', networks: '$leftNet')"
@@ -510,6 +539,24 @@ SELECT count(*),
   Write-Host "  INFO  dangling volumes on the host: $($volBefore.Count) before, $(@(DanglingVolumes).Count) after; new during the run: $($volNew.Count) (ours among them: $(@($volNew | Where-Object { $ourVolumes -contains $_ }).Count))"
   $localAfter = LocalSnapshot
   Check ((Compare-Object $localBefore $localAfter) -eq $null) 'no :local image changed'
+  # ---------------------------------------------------------------- 9. the evidence gate
+  Write-Host '[9] evidence gate'
+  $untouched = -not (Test-Path $Evidence) -or @(Get-ChildItem -Force $Evidence).Count -eq 0
+  Check $untouched "nothing was written under -Evidence before the guard passed for every capture ($($script:captures.Count) capture(s))"
+  $FixtureText = Get-FixtureText @((Join-Path $ct 'fixtures.sql'), (Join-Path $ct 'fixture-vault.ts'))
+  $pub = Publish-Evidence $evStage $Evidence $script:captures ${function:Test-Capture} $FixtureUuids $FixtureText
+  if ($pub.published) {
+    Pass "evidence published after the guard passed for all $($script:captures.Count) capture(s): $($pub.files) item(s), $(@($pub.dropped).Count) dropped (listed in _dropped.txt)"
+    foreach ($x in @($pub.dropped)) { Write-Host "  DROPPED  $x" }
+    $big = @(Get-ChildItem -Recurse -File $Evidence | Where-Object { $_.Length -gt $EvidenceMaxBytes })
+    Check ($big.Count -eq 0) "evidence gate: no published file is over $EvidenceMaxBytes bytes ($($big.Count))"
+  } else {
+    Fail "evidence WITHHELD: the guard failed for $($pub.violations.Count) capture item(s); nothing was written under -Evidence"
+    foreach ($x in $pub.violations) { Write-Host "    guard: $x" }
+  }
+  Remove-Item $evStage -Recurse -Force -ErrorAction SilentlyContinue
+  # the smoke captures were published (or withheld) by the gate above; only now is their directory removed
+  if ($made.smokeDir) { Remove-Item $made.smokeDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Write-Host "evidence: $Evidence"
 if ($script:fail) { Write-Host "$($script:fail) check(s) FAILED"; exit 1 }
