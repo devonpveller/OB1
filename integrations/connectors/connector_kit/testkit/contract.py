@@ -275,4 +275,3 @@ class ConnectorContract:
                 self.assertEqual((r.report.items[0].result, r.report.items[0].http), ("stop", code))
                 self.assertIsNotNone(r.report.stopped)
                 self.assertEqual(len(r.report.items), 1, f"{code}: no item after the stop")
-
