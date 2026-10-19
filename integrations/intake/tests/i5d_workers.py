@@ -19,6 +19,7 @@ dispatches).
   grandchild_main       forks a grandchild that keeps every inherited fd (the sentinel among them)
                         and writes its pid to INTAKE_TEST_GC_FILE, then stalls (TC-1/F-3)
   always_partial_main   a partial frame then a stall, on EVERY job (TC-3, the fd count)
+  always_stall_main     reads the job and says nothing, on EVERY job (RV6-1: a worker held busy)
 """
 from __future__ import annotations
 
@@ -130,5 +131,12 @@ def grandchild_main(conn, factory="tests.service_support:zero", *_a):
 def always_partial_main(conn, factory="tests.service_support:zero", *_a):
     def hostile(c, clf, jid, body):
         _c._partial(c)
+        _c._hold()
+    _serve(conn, factory, hostile, always=True)
+
+
+# -- RV6-1 ---------------------------------------------------------------------------------------------
+def always_stall_main(conn, factory="tests.service_support:zero", *_a):
+    def hostile(c, clf, jid, body):
         _c._hold()
     _serve(conn, factory, hostile, always=True)

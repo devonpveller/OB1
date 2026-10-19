@@ -22,6 +22,9 @@ and the key are the parent's reading of the caller's bytes, never a worker's cla
 tester's TC-2: a compromised worker could announce a self-consistent envelope of its own choosing).
 The worker still parses and announces; its "started" must be EXACTLY the parent's announcement, or
 it is dropped and nothing is stored.
+The parent keeps only the announcement, never the parsed body, and parses at most as many bodies
+at once as it has workers (the intake-i5d review's RV6-1: an 8 MiB body can parse to ~194 MiB, and
+16 in flight would hold ~3 GiB).
 
 THE JOB PROTOCOL (one duplex pipe per worker). Every message is one size-capped JSON frame over
 send_bytes/recv_bytes - NEVER a pickle (intake-i5b R-2: unpickling runs code, and the worker is the
@@ -392,6 +395,7 @@ class WorkerPool:
         self.max_body_bytes = max_body_bytes
         self.max_message_bytes = max_message_bytes
         self._cv = threading.Condition()
+        self._parse_slots = threading.BoundedSemaphore(size)  # RV6-1: parses in the parent at once
         self._idle: list[_Worker] = []
         self._busy: set[_Worker] = set()
         self._replacing = 0
@@ -601,7 +605,11 @@ class WorkerPool:
             except Exception as e:  # noqa: BLE001 - a broken gate refuses
                 return "gate: " + type(e).__name__
 
-        early, info, _obj = prepare(body, checked_gate)
+        # RV6-1 (the intake-i5d review): the parsed body is NOT kept - a near-cap body parses to ~24x
+        # its size, and a request then waits in _acquire and runs a whole job - and at most as many
+        # bodies are parsed at once as there are workers (more could not be screened at once anyway)
+        with self._parse_slots:
+            early, info = prepare(body, checked_gate)[:2]
         if early is not None:
             early.elapsed_s = time.monotonic() - t0
             return early

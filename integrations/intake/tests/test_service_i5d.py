@@ -16,10 +16,13 @@ and the review's RV5-1). Every class here failed on OB1 a222ec72 (journal/eviden
 The Unix-only cases (a byte-stream pipe, fork, process groups, /proc) run in the image.
 """
 import gc
+import json
 import os
 import shutil
 import tempfile
+import threading
 import time
+import tracemalloc
 import unittest
 from unittest import mock
 
@@ -185,6 +188,105 @@ class TC3FdsReleasedWithoutTheCyclicGC(unittest.TestCase):
             gc.enable()
             _restore(saved)
         self.assertLessEqual(after - base, 1, f"fds {base} -> {after} after {kills} kills without gc.collect()")
+
+
+# -- RV6-1 (the intake-i5d review; folded into intake-i5d-int) ------------------------------------------
+def _big_body(n_bytes: int) -> bytes:
+    """A body whose PARSED form is large (~24x its size: an array of empty objects), and which is not
+    a valid envelope, so the parent dispatches it to a worker (the screen would reject it)."""
+    return ('{"a":[' + ",".join(["{}"] * ((n_bytes - 10) // 3)) + "]}").encode()
+
+
+class RV61TheParentHoldsNoParsedBody(unittest.TestCase):
+    N = 6
+    BODY = 1024 * 1024
+
+    def _counting_announce(self, extra=None):
+        """poolmod.announce wrapped to count the parses in flight (it runs inside prepare)."""
+        stats = {"done": 0, "now": 0, "max": 0}
+        lock = threading.Lock()
+        real = poolmod.announce
+
+        def counting(obj):
+            with lock:
+                stats["now"] += 1
+                stats["max"] = max(stats["max"], stats["now"])
+            try:
+                if extra:
+                    extra()
+                return real(obj)
+            finally:
+                with lock:
+                    stats["now"] -= 1
+                    stats["done"] += 1
+        return counting, stats
+
+    @staticmethod
+    def _quiet_run(p, body):
+        try:
+            p.run(body, lambda i: None)
+        except poolmod.PoolError:  # the pool closes under the queued requests when the test ends
+            pass
+
+    def _run(self, measure, extra_announce=None):
+        """N requests queued behind the one worker, which a stalled request holds."""
+        counting, stats = self._counting_announce(extra_announce)
+        saved = _env(INTAKE_TEST_HOLD="60")
+        try:
+            with mock.patch.object(poolmod, "_worker_main", i5d_workers.always_stall_main), mock.patch.object(
+                    poolmod, "announce", counting):
+                p = _pool(wall_transfer_s=40.0, queue_wait_s=40.0)
+                try:
+                    # the one worker is taken by a request that stalls (killed only at 40 s)
+                    blocker = threading.Thread(target=self._quiet_run, args=(p, ss.envelope_bytes()), daemon=True)
+                    blocker.start()
+                    end = time.monotonic() + 20
+                    while p.status()["busy"] < 1 and time.monotonic() < end:
+                        time.sleep(0.05)
+                    body = _big_body(self.BODY)
+                    gc.collect()
+                    tracemalloc.start()
+                    base, _ = tracemalloc.get_traced_memory()
+                    ths = [threading.Thread(target=self._quiet_run, args=(p, body), daemon=True)
+                           for _ in range(self.N)]
+                    for t in ths:
+                        t.start()
+                    end = time.monotonic() + 60
+                    while stats["done"] < self.N + 1 and time.monotonic() < end:
+                        time.sleep(0.05)
+                    time.sleep(0.3)
+                    cur, _ = tracemalloc.get_traced_memory()
+                    tracemalloc.stop()
+                    return measure(stats, cur - base)
+                finally:
+                    p.close()
+        finally:
+            _restore(saved)
+
+    def test_queued_requests_do_not_hold_their_parsed_bodies(self):
+        one_parse = []
+
+        def measure(stats, held):
+            tracemalloc.start()
+            keep = json.loads(_big_body(self.BODY))
+            one, _ = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            del keep
+            one_parse.append(one)
+            return stats, held
+
+        stats, held = self._run(measure)
+        self.assertEqual(stats["done"], self.N + 1, "not every request was parsed")
+        # the raw bodies (N x 1 MiB, shared here) and the announcements may stay; N parsed objects may not
+        self.assertLess(held, 2 * one_parse[0],
+                        f"{self.N} queued requests hold {held / 2**20:.0f} MiB (one parse = {one_parse[0] / 2**20:.0f} MiB)")
+
+    def test_parses_beyond_the_worker_count_wait(self):
+        # a 2 s pause inside the parse: longer than a 1 MiB json.loads (which holds the GIL), so
+        # unbounded parses overlap for certain
+        stats = self._run(lambda st, held: st, extra_announce=lambda: time.sleep(2.0))
+        self.assertEqual(stats["done"], self.N + 1)
+        self.assertLessEqual(stats["max"], 1, f"{stats['max']} parses ran at once with 1 worker")
 
 
 # -- TC-4 ----------------------------------------------------------------------------------------------
