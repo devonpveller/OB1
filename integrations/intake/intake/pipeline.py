@@ -16,11 +16,14 @@ service, no DB, no network; stage 6 reads a local, hash-verified model (classifi
                                                   `injected` on the score alone); below it the
                                                   stage-5 verdict stands. Its own time budget
                                                   (config), not the stage 1-5 deadline.
+  7 second opinion  NOT run here (I4: second_opinion.py, decided by d2.py). An item pending
+                  for it carries judge_chunks / judge_complete: what the judge reads.
   8 fail closed   any exception in any stage, or the deadline passing INSIDE a stage
                   (deadline.py: the stages check it in their loops), gives `pending` with the
                   error, never `clean`. That includes every classifier failure: missing or
                   corrupt model files, a hash mismatch, a tokenizer or model exception, the
-                  classifier's time or chunk budget.
+                  classifier's time or chunk budget. The result's error_kind says whether a retry can help:
+  `permanent` for the classifier's budget (I3 F-2), `transient` for everything else.
 
 Callers run screen() in a killable worker process with a hard wall-clock limit (operator D38,
 I5): single library calls (stdlib parsers, the tokenizer, a model forward pass) cannot be
@@ -88,8 +91,30 @@ def stage_idempotency(st: dict) -> str:
     st["key"], st["decision"] = key, decision
     if decision.kind == "repeat":
         st["repeat"] = decision.stored
-        return f"repeat of revision {decision.revision}"
+        st["rescreen"] = _needs_rescreen(decision.stored, st["classifier"])
+        return f"repeat of revision {decision.revision}" + (
+            " (re-screen: another classifier version)" if st["rescreen"] else "")
     return f"{decision.kind}, revision {decision.revision}"
+
+
+def _current_classifier_version(clf) -> str | None:
+    try:
+        clf = clf if clf is not None else _classifier.default()
+        v = getattr(clf, "version", None)
+        return v if isinstance(v, str) and v else None
+    except Exception:  # noqa: BLE001 - a misconfigured default: the version is unknown
+        return None
+
+
+def _needs_rescreen(stored: IntakeResult, clf) -> bool:
+    """I3 F-3: a stored `clean` or `pending` was decided with the classifier's evidence (or
+    without it, before I3); when that classifier is not the current one the caller re-screens
+    (DESIGN section 7, "classifier upgrade"). `injected` and `rejected` never depend on the
+    classifier. An unknown current version flags too (the safe direction)."""
+    if stored.verdict not in ("clean", "pending"):
+        return False
+    current = _current_classifier_version(clf)
+    return current is None or stored.classifier_version != current
 
 
 def stage_cdr(st: dict) -> str:
@@ -251,8 +276,8 @@ def screen(env_input: object, history: revisions.History | None = None, *,
         return _minimal_pending("screen: " + _describe(e))
 
 
-def _minimal_pending(error: str) -> IntakeResult:
-    return IntakeResult(verdict="pending", error=error[:300])
+def _minimal_pending(error: str, kind: str = "transient") -> IntakeResult:
+    return IntakeResult(verdict="pending", error=error[:300], error_kind=kind)
 
 
 def _screen(env_input, history, deadline_s, clock, clf=None) -> IntakeResult:
@@ -270,7 +295,9 @@ def _screen(env_input, history, deadline_s, clock, clf=None) -> IntakeResult:
         except BaseException as e:  # noqa: BLE001 - stage 8: any error fails closed
             msg = _describe(e)  # a DeadlineExceeded reads "DeadlineExceeded: deadline: ..."
             st["trace"].append(StageRecord(name, "error", (clock() - t0) * 1000, msg))
-            return _fail_closed(st, f"{name}: {msg}")
+            # I3 F-2: the classifier's time or chunk budget is passed again on every retry
+            kind = "permanent" if isinstance(e, _classifier.ClassifierBudget) else "transient"
+            return _fail_closed(st, f"{name}: {msg}", kind)
         elapsed = clock()
         if "stop" in st:
             verdict, reason = st["stop"]
@@ -281,7 +308,8 @@ def _screen(env_input, history, deadline_s, clock, clf=None) -> IntakeResult:
             st["trace"].append(StageRecord(name, "stop", (elapsed - t0) * 1000, detail))
             stored: IntakeResult = st["repeat"]
             return IntakeResult(**{**_fields(stored), "repeat": True,
-                                   "trace": tuple(st["trace"])})
+                                   "trace": tuple(st["trace"]),
+                                   "rescreen": st.get("rescreen", False)})
         status = "skipped" if st.pop("skipped", False) else "ok"
         st["trace"].append(StageRecord(name, status, (elapsed - t0) * 1000, detail))
     return _decide(st)
@@ -291,13 +319,14 @@ def _fields(r: IntakeResult) -> dict:
     return {f: getattr(r, f) for f in r.__dataclass_fields__}
 
 
-def _fail_closed(st: dict, error: str) -> IntakeResult:
+def _fail_closed(st: dict, error: str, kind: str = "transient") -> IntakeResult:
     try:
-        return _result(st, "pending", error=error, needs_second_opinion=False, title=None)
+        return _result(st, "pending", error=error, error_kind=kind, needs_second_opinion=False,
+                       title=None)
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException:  # noqa: BLE001 - even building the result failed: minimal pending
-        return _minimal_pending(error)
+        return _minimal_pending(error, kind)
 
 
 def _decide(st: dict) -> IntakeResult:
@@ -309,6 +338,76 @@ def _decide(st: dict) -> IntakeResult:
         return _fail_closed(st, "classifier: no score")
     if reasons or scored.over_threshold:
         # D24: a confident score alone goes to the second opinion, never to a discard
+        try:
+            chunks, complete = _judge_chunks(st, scored, reasons)
+        except Exception:  # noqa: BLE001 - no judge input: the judge cannot clear the item
+            chunks, complete = (), False
         return _result(st, "pending", text=st["text"], links=_escaped_links(st["links"]),
-                       needs_second_opinion=True)
+                       needs_second_opinion=True, judge_chunks=chunks, judge_complete=complete)
     return _result(st, "clean", text=st["text"], links=_escaped_links(st["links"]))
+
+
+def _judge_chunks(st: dict, scored, reasons) -> tuple[tuple[dict, ...], bool]:
+    """Stage 7's input (I4): the flagged classifier chunks (highest score first) and the
+    context of EVERY match of each WEAK rule in every field (attempt 2 D-2: a decoy first match
+    must not hide the payload), cut from the texts the classifier and the rules read (the
+    stage-4 NFKC copies), fields searched in rules.FIELD_ORDER. Match windows in one field that
+    overlap are merged while the result fits one piece. Returns (chunks, complete); complete is
+    False when anything was cut, left out, more matches existed than fit, or a rule hit could
+    not be located - and D2 never ends `clean` on an incomplete input."""
+    fields = {"body": st["copy"], "side": st["side_copy"], "payload": "\n".join(st["payloads"])}
+    pieces: list[dict] = []
+    complete = scored.flagged_count == len(scored.flagged)
+    for c in scored.flagged:
+        text = fields.get(c.field, "")[c.start:c.end]
+        if not text.strip():
+            complete = False
+            continue
+        pieces.append({"why": "classifier", "field": c.field, "start": c.start, "end": c.end,
+                       "text": text})
+    seen: set[str] = set()
+    windows: dict[str, list[tuple[int, int, str]]] = {name: [] for name in rules.FIELD_ORDER}
+    cap = limits.JUDGE_MAX_CHUNKS
+    for r in reasons:
+        if r.strength != "weak" or r.rule in seen:
+            continue
+        seen.add(r.rule)
+        found = False
+        for name in rules.FIELD_ORDER:
+            hits = rules.spans(r.rule, fields[name], cap)
+            if len(hits) > cap:  # more matches than could ever be shown
+                complete = False
+                hits = hits[:cap]
+            for a, b in hits:
+                found = True
+                windows[name].append((max(0, a - limits.JUDGE_CONTEXT_CHARS),
+                                      min(len(fields[name]), b + limits.JUDGE_CONTEXT_CHARS), r.rule))
+        if not found:  # e.g. tag-chars: nothing in the text to show the judge
+            complete = False
+    for name in rules.FIELD_ORDER:
+        merged: list[list] = []
+        for a, b, rule in sorted(windows[name]):
+            if merged and a <= merged[-1][1] and max(b, merged[-1][1]) - merged[-1][0] <= limits.JUDGE_CHUNK_MAX_CHARS:
+                merged[-1][1] = max(b, merged[-1][1])
+                if rule not in merged[-1][2]:
+                    merged[-1][2].append(rule)
+            else:
+                merged.append([a, b, [rule]])
+        for a, b, rule_ids in merged:
+            pieces.append({"why": "rule:" + "+".join(rule_ids), "field": name, "start": a, "end": b,
+                           "text": fields[name][a:b]})
+    out: list[dict] = []
+    total = 0
+    for p in pieces:
+        if len(out) >= limits.JUDGE_MAX_CHUNKS or total >= limits.JUDGE_TOTAL_MAX_CHARS:
+            complete = False
+            break
+        room = min(limits.JUDGE_CHUNK_MAX_CHARS, limits.JUDGE_TOTAL_MAX_CHARS - total)
+        if len(p["text"]) > room:
+            p = {**p, "text": p["text"][:room], "end": p["start"] + room}
+            complete = False
+        out.append(p)
+        total += len(p["text"])
+    if not out:
+        complete = False
+    return tuple(out), complete

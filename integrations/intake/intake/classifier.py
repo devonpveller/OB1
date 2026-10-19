@@ -182,6 +182,7 @@ class Classifier:
         self._torch = None
         self._cls = self._sep = 0
         self._inj = 1
+        self._n_labels = 0  # set from the pinned config.json at load (else the model's own config)
         self.load_seconds = 0.0
 
     # -- loading -------------------------------------------------------------------------
@@ -238,6 +239,7 @@ class Classifier:
             model = _to_int8(torch, model, self.cfg.int8_layers)
         self._torch, self._tokenizer, self._model = torch, tok, model
         self._cls, self._sep, self._inj = cls_id, sep_id, label2id[INJECTION_LABEL]
+        self._n_labels = len(label2id)
 
     # -- scoring -------------------------------------------------------------------------
     def tokenize(self, text: str, check: Callable[[], None]) -> tuple[list[int], list[tuple[int, int]]]:
@@ -279,6 +281,12 @@ class Classifier:
         x = torch.tensor([[self._cls, *ids, self._sep]], dtype=torch.long)
         with torch.inference_mode():
             logits = self._model(input_ids=x, attention_mask=torch.ones_like(x)).logits
+            # I3 review R-1: a head with another number of classes would give a softmax over
+            # the wrong set (3 logits [5,-5,0] scored 4.5e-05, `clean`); refuse it (pending)
+            n = self._n_labels or _config_labels(self._model)
+            if tuple(logits.shape) != (1, n):
+                raise ValueError(f"model returned logits of shape {tuple(logits.shape)}, the pinned "
+                                 f"config has {n} labels")
             return float(torch.softmax(logits.float(), -1)[0][self._inj])
 
     def score(self, fields: Iterable[tuple[str, str]]) -> Scored:
@@ -318,6 +326,13 @@ class Classifier:
                       threshold=self.cfg.threshold, max_score=best, chunks=total,
                       flagged_count=len(flagged), flagged=tuple(flagged[:MAX_FLAGGED_LISTED]),
                       ms=(self._clock() - t0) * 1000)
+
+
+def _config_labels(model) -> int:
+    """The label count of a model built from the pinned config.json (its config.num_labels);
+    0 - which refuses every score - for anything else."""
+    n = getattr(getattr(model, "config", None), "num_labels", 0)
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
 
 
 def _to_int8(torch, model, groups):

@@ -142,6 +142,49 @@ def rules() -> tuple[Rule, ...]:
     return load_rules()
 
 
+# The order in which the texts of one item are searched: the body (stage-4 NFKC copy), the
+# decoded TAG payloads, the side text (title, link texts and URLs, attachment names).
+# evaluate() and the judge input (pipeline._judge_chunks) both follow it (attempt 2 T2-F5).
+FIELD_ORDER = ("body", "payload", "side")
+
+
+def spans(rule_id: str, text: str, limit: int) -> list[tuple[int, int]]:
+    """Character spans of EVERY match of regex rule `rule_id` in `text`, in order, at most
+    limit + 1 of them (a caller that gets more than `limit` knows it cannot show them all).
+    One linear RE2 pass; byte offsets are turned into character offsets incrementally. Used
+    by I4 so the second opinion sees every place a WEAK rule matched (attempt 2 D-2)."""
+    rule = next((r for r in rules() if r.id == rule_id and r.kind == "regex"), None)
+    if rule is None or not text:
+        return []
+    b = text.encode("utf-8", "surrogatepass")
+    out: list[tuple[int, int]] = []
+    last_b = last_c = 0
+    for m in rule.regex.finditer(b):
+        if len(out) > limit:
+            break
+        start = last_c + len(b[last_b:m.start()].decode("utf-8", "ignore"))
+        end = start + len(b[m.start():m.end()].decode("utf-8", "ignore"))
+        out.append((start, end))
+        last_b, last_c = m.start(), start
+    return out
+
+
+def locate(rule_id: str, text: str) -> tuple[int, int] | None:
+    """Character offsets (start, end) of the first match of regex rule `rule_id` in `text`, or
+    None (no such regex rule, or no match). One RE2 search: linear. Used by I4 to give the
+    second opinion the context of each WEAK rule hit."""
+    rule = next((r for r in rules() if r.id == rule_id and r.kind == "regex"), None)
+    if rule is None:
+        return None
+    b = text.encode("utf-8", "surrogatepass")
+    m = rule.regex.search(b)
+    if m is None:
+        return None
+    start = len(b[:m.start()].decode("utf-8", "ignore"))
+    end = start + len(b[m.start():m.end()].decode("utf-8", "ignore"))
+    return start, end
+
+
 def _snippet(b: bytes, start: int, end: int) -> str:
     s = b[max(0, start - 30): min(end, start + 120) + 30].decode("utf-8", "replace")
     return " ".join(s.split())[:200]
@@ -174,6 +217,7 @@ def evaluate(copy: str, payloads: list[str], counts: dict[str, int], side: str =
              dl=_deadline.NONE) -> list[Reason]:
     """All reasons for one item: the NFKC copy of the text, the decoded TAG payloads, and the
     NFKC copy of the side text (link texts, alt/title, attachment names)."""
+    # FIELD_ORDER: body, payloads, side (the judge input searches in the same order)
     texts = [("", copy.encode("utf-8"))]
     texts += [("in TAG payload: ", p.encode("utf-8")) for p in payloads]
     if side:

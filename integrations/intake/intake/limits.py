@@ -93,3 +93,13 @@ MAX_NEUTRALISED = 10_000
 
 # Stage 8: the run's time limit, checked inside the stages (deadline.py).
 DEADLINE_SECONDS = 1.6
+
+# Stage 7, the second opinion (I4): what the judge reads of an item. The flagged classifier
+# chunks (a 256-token chunk is ~1,000-1,500 characters) and, for each WEAK rule hit, this many
+# characters either side of the match; at most JUDGE_MAX_CHUNKS pieces, each cut at
+# JUDGE_CHUNK_MAX_CHARS, JUDGE_TOTAL_MAX_CHARS in all (~4k tokens). Anything cut or left out
+# marks the input incomplete: a `clean` answer on part of the evidence is never `clean` (d2.py).
+JUDGE_MAX_CHUNKS = 8
+JUDGE_CHUNK_MAX_CHARS = 2000
+JUDGE_TOTAL_MAX_CHARS = 12_000
+JUDGE_CONTEXT_CHARS = 600

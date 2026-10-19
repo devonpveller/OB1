@@ -6,8 +6,9 @@ before it is stored in Open Brain or shown to a model. This directory is fork-ow
 any upstream change that touches them.
 
 Status: **I1, the schema; I2, the deterministic stages as a library; I3, the classifier
-stage.** The second opinion, the service and its container arrive in the later build items I4
-to I9.
+stage; I4, the second opinion, the D2 table, the purge jobs and the stats query; I5, the
+service and its container (built and tested, NOT deployed: compose profile `intake`, off by
+default).** I6 to I9 follow.
 
 **Callers run `screen()` in a killable worker process with a hard wall-clock limit** (operator
 D38; built in I5). The stages check their own deadline, but a single library call - a stdlib
@@ -66,13 +67,65 @@ yet hash-pinned, see the file). The eval set of DESIGN section 9 is frozen in
 the I2 corpus scores in `tests/fixtures/classifier_corpus_scores.json`; the classifier tests
 need the fetched model and load it with sockets disabled.
 
+## What I4 ships: stage 7, D2, purge, stats
+
+| What | Module | How |
+|---|---|---|
+| D2 table | `d2.py` | `decide(Evidence) -> Decision`: one pure function over (rule, classifier, second opinion, judge saw everything, error kind, expired); the table and its row ids are in the module docstring. A disagreement goes to the less-trusted label; missing evidence never resolves to `clean`. `evidence_from(result, ...)` reads an `IntakeResult` |
+| second opinion | `second_opinion.py` | `Judge(transport).ask(JudgeInput) -> Opinion`: POST `http://llama-cpp:8080/v1/chat/completions` (the LiteLLM alias; a constant, not config) with intake's own virtual key from `INTAKE_SECOND_OPINION_KEY` and the OpenAI `user` field `ob-intake` (the llm-queue class). The flagged chunks sit in ONE per-prompt nonce fence; the reply must be exactly `{"verdict": "injection" or "clean" or "uncertain"}`; every other outcome (documented in the module) is `pending` + retry. `advance()` is the scheduler step: capped exponential backoff, and after the attempt budget or 24 h (D27) the item expires, which D2 makes `suspicious` |
+| judge input | `pipeline.py` | an item waiting for the judge carries `judge_chunks` (flagged classifier chunks and the context of EVERY match of each WEAK rule in every field, from the stage-4 copies; caps in `limits.py`) and `judge_complete`, False whenever anything flagged could not be shown |
+| fence | `fence.py` | `<<UNTRUSTED-{12 hex} src=... verdict=...>> ... <<END-{same}>>`; a fresh CSPRNG nonce per call, never one that occurs in the text; runs of angle brackets (and lookalikes) in the text are broken |
+| HTTP | `transport/http_gateway.py` | the only module that opens a socket; it refuses every URL but the alias, follows no redirect, uses no proxy, reads at most 16 KB + 1 |
+| purge | `purge.py` | `purge_clean_bronze` (30 d), `purge_suspicious_bronze` (30 d), `purge_discards` (365 d), `run_all`: pure functions over a DB interface, run as the `intake` role, bounded batches, idempotent; they delete only the rows named in the module docstring |
+| stats | `stats.py` | `collect(db, now, since=None) -> Stats` for `/v1/stats` (shape in the module docstring); `item_scores(result, wait_state)` is the `intake.items.scores` JSON it reads |
+| carry-ins | | the classifier checks the logit count (fails closed); the fetch tool stops at the pinned size + 1; a classifier budget overrun is `error_kind="permanent"` (D2: `suspicious`, no retry); a repeat whose stored result came from another classifier version carries `rescreen=True` |
+
+Configuration: `INTAKE_SECOND_OPINION_KEY` (secret), `_MODEL` (`local-large:nothink`),
+`_QUEUE_USER` (`ob-intake`), `_TIMEOUT_SECONDS` (120), `_MAX_ATTEMPTS` (12),
+`_BACKOFF_BASE_SECONDS` (60), `_BACKOFF_CAP_SECONDS` (3600), `_MAX_TOKENS` (32);
+`INTAKE_SUSPICIOUS_RETENTION_DAYS` (30) beside the I1 retention values;
+`INTAKE_D2_WEAK_RULE_JUDGE_CLEAN` (`clean` by operator decision D40: a WEAK rule hit that a
+judge who saw all the flagged evidence called clean ends `clean`; `suspicious` restores the
+first DESIGN row). The purge cutoff is the database's `now()` minus N x 24 hours (absolute
+time, so DST never shortens it; a test may pass a `now`, used in UTC). D41: the purge deletes
+only intake's raw copy; `suspicious` content rows in `sources`/`thoughts` stay, and must not
+feed research or any generated outcome (a read policy for I6; `purge.py` docstring). The transport gives each request one wall-clock deadline
+(`_TIMEOUT_SECONDS`), not a per-socket-operation timeout. Before I5 goes live
+the gated steps are: create intake's LiteLLM virtual key (metadata.lane `ob-intake`), and give
+llm-queue an `ob-intake` batch class (rank 3, a long acceptable wait, max concurrency 1);
+until then llm-queue files it under its default class.
+
+DB tests for I4 (throwaway container, as for I1):
+`python tests/db/run_i4_db_tests.py --start --image pgvector/pgvector:pg16 --label intake-i4 --roles roles.sql --schema schema.sql`
+
+## What I5 ships: the service (`intake_service/`) and its container
+
+| What | Where | How |
+|---|---|---|
+| HTTP | `web.py` | `POST /v1/intake` (one envelope in, the result out), `GET /v1/stats` (`stats.collect`, `?since=`), `GET /metrics` (Prometheus text), `GET /healthz` (no key; 200 only with a SERVING worker - a busy worker past every wall clock is stuck, not serving - AND the DB; it also reports `judge_route`). Standard library server, one access-log line per request: method, path, status, the caller's connector name - never a header, key or body |
+| auth and limits | `settings.py`, `web.py` | `INTAKE_CALLER_KEYS=connector=key,...` (one key per connector, 32-256 printable characters): no key -> 401, a key that is no caller's -> 403 (constant-time over every key), an envelope for another connector -> 403. No/garbled Content-Length or chunked -> 411/400; over `INTAKE_MAX_REQUEST_BYTES` (8 MiB) -> 413, the body never read; more than `INTAKE_MAX_INFLIGHT` -> 503; a body that does not arrive WHOLE within `INTAKE_BODY_READ_SECONDS` (30) -> 408 (a drip cannot hold a slot); more than `INTAKE_MAX_CONNECTIONS` (64) open connections are closed at accept |
+| killable workers (D38/D39) | `pool.py` | every `screen()` runs in a worker PROCESS of a warm pool (`INTAKE_CLASSIFIER_WORKERS`, each loads and verifies the model once, ~12-20 s / ~1.9 GB). The parent never parses the body: the worker parses, validates, announces the key, the parent checks the connector binding, then the worker screens. Hard wall clocks in the parent: transfer (`INTAKE_WALL_TRANSFER_SECONDS`, 10), stages 1-5 (`INTAKE_WALL_STAGES_SECONDS`, 5), classifier (its budget + `INTAKE_WALL_CLASSIFIER_SLACK_SECONDS`). An overrun is SIGKILLed, the worker replaced in the background, and the item is `pending` with a transient error (never clean); a worker that dies is the same. Workers hold no secret and no DB connection |
+| D2 and storage | `core.py`, `store.py` | the result is labelled by `second_opinion.decision` logic with the D40 policy read ONCE at start (I4 R3-T2/T3; a bad value refuses the start). One transaction per item under a per-item advisory lock: clean/pending/suspicious keep bronze, injected deletes it and keeps a discard record, rejected keeps neither; a stored, non-errored item is a REPEAT (nothing written; the text comes from this screen); an ERRORED item is never the idempotency record (I2 F-r1): the next screen overwrites it; a new hash is revision n+1. `scores` is exactly `stats.item_scores()` (I4 F-8) plus `scores.service` (revision, D2 row, evidence, the judge input while waiting - dropped at the decision) |
+| loops | `core.Scheduler` | second opinion every `INTAKE_SO_INTERVAL_SECONDS` (30), `INTAKE_SO_BATCH` items, `INTAKE_SO_CONCURRENCY` (1) asks at once, through the alias with intake's own key; re-screen of errored items from bronze (`INTAKE_RESCREEN_*`: 3 tries, then D2 `expired` -> suspicious); purge (`purge.run_all`) every `INTAKE_PURGE_INTERVAL_SECONDS` (3600) |
+| metrics (section 7) | `metrics.py` | verdicts per connector, kills per phase, errors per kind, screen latency and per-stage time, the score histogram, stripped counts, zero-chunk cleans (I3 R-4), judge outcomes, D2 rows, purge counts; gauges for the pending queue and its age from the DB. Alert expressions in the module docstring |
+| start-up | `app.py` | config (exit 2) -> the classifier files' sha256 pins (exit 3) -> the process makes itself NON-DUMPABLE (exit 5 if it cannot), so no worker (same uid, no capability) can read `/proc/1/environ` or `/proc/1/mem` -> the secrets leave the process environment -> the pool (exit 4) -> loops -> listen |
+| routes out | `relay.py` | the service is on the internal `intake-net` ONLY. Two byte relays (same image, `relay`) are its only routes: `openbrain-intake-dbrelay` (obnet) to `openbrain-db:5432`, and `openbrain-intake-llmrelay` (ai-stack_llm-net; aliased `llama-cpp` on intake-net) to `llm-gateway:8080`. So the service reaches exactly those two, `openbrain-db` is not changed, and no other caller on ai-stack_llm-net is reachable |
+| secrets | `docker/intake.env` | `INTAKE_CALLER_KEYS`, `INTAKE_DB_PASSWORD`, `INTAKE_SECOND_OPINION_KEY` (and any tuning) from `docker/intake.env.example`, gitignored, loaded by `openbrain-intake` ONLY - never `docker/.env`, which open_notebook loads whole |
+| container | `Dockerfile` | base image by digest; `requirements-container.txt` installed with `--require-hashes --no-deps --only-binary` (torch CPU from the PyTorch index, I3 F-4); non-root uid 10030; compose adds a read-only root FS, a tmpfs `/tmp`, cap_drop ALL, no-new-privileges, limits; the model mounted read-only from `INTAKE_MODEL_DIR` |
+
+The compose service, network and the gated deploy steps: `../../docker/docker-compose.yml`
+(`openbrain-intake`, `openbrain-intake-dbrelay`, `openbrain-intake-llmrelay`, `intake-net` 10.243.50.0/24 internal). Tests:
+`tests/test_service_*.py` (unit, sockets off; the pool tests start real worker processes) and
+`tests/e2e/run_service_e2e.py` (the image against a throwaway postgres with the I1 migration and
+a fake LiteLLM, on internal test networks it creates and removes).
+
 ## What I1 ships
 
 | File | Role |
 |---|---|
 | `sql/init-intake.sql` | the migration: schema `intake` (bronze `raw_items`; silver `items`, `discards`), `screen_verdict` + `intake_item_id` on `sources`/`thoughts`, the `intake` role, the authority trigger |
 | `sql/revert-intake.sql` | undoes it exactly; refuses while intake holds state unless `-v intake_revert_drop_data=1` |
-| `intake/config.py` | retention values (30 d bronze, 365 d discards, 24 h second-opinion cap), env-overridable; nothing purges yet (I4) |
+| `intake/config.py` | retention values (30 d bronze, 365 d discards, 24 h second-opinion cap), env-overridable; the purge jobs that read them are I4's `purge.py` |
 | `tools/check_fork_owned.py` | the FORK-OWNED guard (`--diff`, `--upstream`, `--range`) |
 | `tests/` | unit tests (config, guard) and `tests/db/run_db_tests.py`, which runs the migration against a throwaway postgres |
 
@@ -138,7 +191,5 @@ once per database: a re-apply after a revert leaves every row `unscreened` unles
 
 ## Not yet (later items)
 
-- I4: the second opinion, purge jobs.
-- I5: the service and its container.
 - I6: read filters and fences.
 - I8: retiring `metadata.injection_screen` and moving the writers.
