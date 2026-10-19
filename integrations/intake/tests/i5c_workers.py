@@ -63,8 +63,7 @@ def _honest(conn, clf, jid, body, *, mutate_started=None, mutate_done=None):
         if mutate_started is not None:
             payload = mutate_started(payload)
         wire.send_msg(conn, ["started", jid, payload])
-        reply = wire.recv_msg(conn, wire.MAX_CONTROL_BYTES)
-        return None if reply[0] == "go" else (str(reply[1]) if len(reply) > 1 else "refused")
+        return None  # intake-i5d: no go/skip round trip (the parent decided before it dispatched)
 
     out = pool.screen_job(body, clf, gate, lambda ev: wire.send_msg(conn, [ev, jid]))
     payload = {"kind": out.kind, "detail": out.detail, "result": None if out.result is None else out.result.to_dict()}
@@ -103,11 +102,10 @@ def partial_transfer_main(conn, factory="tests.service_support:zero", *_a):
 
 
 def partial_stages_main(conn, factory="tests.service_support:zero", *_a):
-    """In the stages phase: a valid "started", the parent's "go", then a partial frame."""
+    """In the stages phase: a valid "started", then a partial frame."""
     def hostile(c, clf, jid, body):
         info = pool.announce(json.loads(body.decode("utf-8")))
         wire.send_msg(c, ["started", jid, wire.started_to_wire(info)])
-        wire.recv_msg(c, wire.MAX_CONTROL_BYTES)
         _partial(c, 5000, b'["done",' + str(jid).encode() + b',{"kind":"result"')
         _hold()
     _serve(conn, factory, hostile)
@@ -147,17 +145,20 @@ def order_main(conn, factory="tests.service_support:zero", *_a):
     """INTAKE_TEST_ORDER:
       done_result_first   a `done` with a result before any "started" (the connector gate never ran)
       done_skipped_first  a `done` of kind skipped before any "started"
-      result_after_skip   the parent says skip; the worker answers with a result anyway
-      second_started      two "started" in a row (the second after the parent's answer)
+      skipped_after_started  a valid "started", then a `done` of kind skipped (intake-i5d: only the
+                          parent decides skipped, before it dispatches; this replaced
+                          result_after_skip, which needed the go/skip round trip i5d removed)
+      second_started      two "started" in a row
       key_mismatch        the honest flow, but the result's key has another sha256
-      key_without_started "started" null (an invalid envelope), then a result WITH a key
+      key_without_started "started" null (an invalid envelope), then a result WITH a key (since
+                          intake-i5d refused at "started": the parent's announcement is not null)
     """
     how = os.environ.get("INTAKE_TEST_ORDER", "")
 
     def hostile(c, clf, jid, body):
         info = pool.announce(json.loads(body.decode("utf-8")))
         honest_result = None
-        if how in ("done_result_first", "result_after_skip", "key_without_started"):
+        if how in ("done_result_first", "key_without_started"):
             obj = json.loads(body.decode("utf-8"))
             from intake import pipeline
             honest_result = pipeline.screen(obj, classifier=clf).to_dict()
@@ -165,13 +166,11 @@ def order_main(conn, factory="tests.service_support:zero", *_a):
             wire.send_msg(c, ["done", jid, {"kind": "result", "detail": "", "result": honest_result}])
         elif how == "done_skipped_first":
             wire.send_msg(c, ["done", jid, {"kind": "skipped", "detail": "x", "result": None}])
-        elif how == "result_after_skip":
+        elif how == "skipped_after_started":
             wire.send_msg(c, ["started", jid, wire.started_to_wire(info)])
-            wire.recv_msg(c, wire.MAX_CONTROL_BYTES)
-            wire.send_msg(c, ["done", jid, {"kind": "result", "detail": "", "result": honest_result}])
+            wire.send_msg(c, ["done", jid, {"kind": "skipped", "detail": "x", "result": None}])
         elif how == "second_started":
             wire.send_msg(c, ["started", jid, wire.started_to_wire(info)])
-            wire.recv_msg(c, wire.MAX_CONTROL_BYTES)
             wire.send_msg(c, ["started", jid, wire.started_to_wire(info)])
         elif how == "key_mismatch":
             def other_key(p):
@@ -182,7 +181,6 @@ def order_main(conn, factory="tests.service_support:zero", *_a):
             return
         elif how == "key_without_started":
             wire.send_msg(c, ["started", jid, None])
-            wire.recv_msg(c, wire.MAX_CONTROL_BYTES)
             wire.send_msg(c, ["done", jid, {"kind": "result", "detail": "", "result": honest_result}])
         else:
             raise SystemExit("unknown INTAKE_TEST_ORDER")

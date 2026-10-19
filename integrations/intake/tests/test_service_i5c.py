@@ -7,7 +7,7 @@ tester's TF-1/2/3/5/7 and the review's RV-3/RV-4). Every class here failed on OB
         and replaced (before: the parent waited until the worker exited, i.e. forever)
   TF-2  non-finite numbers are refused on decode: NaN, Infinity, -Infinity and an overflowing
         literal such as 1e99999 (which json decodes to inf)
-  TF-3  the message order is enforced (no `done` before "started", no result after a "skip", one
+  TF-3  the message order is enforced (no `done` before "started", no `done` but a result, one
         "started") and the result's key must be the announced one
   TF-5  the e2e G[K] check no longer races a fast-rejected shape against the 1 ms stages clock
   TF-7  the announced envelope is re-checked in the parent by stage 1 itself (envelope.validate):
@@ -174,8 +174,10 @@ class TF3MessageOrderAndKey(_Hostile, unittest.TestCase):
     def test_a_skipped_done_before_started_is_refused(self):
         self.assert_dropped(self._order("done_skipped_first"))
 
-    def test_a_result_after_the_parent_said_skip_is_refused(self):
-        self.assert_dropped(self._order("result_after_skip", gate=lambda i: "wrong connector"))
+    def test_a_skipped_done_from_a_worker_is_refused(self):
+        # intake-i5d: was "a result after the parent said skip"; the parent now refuses a foreign
+        # connector before it dispatches (tests/test_service_i5d.py), so no worker can answer it
+        self.assert_dropped(self._order("skipped_after_started"))
 
     def test_a_second_started_is_refused(self):
         self.assert_dropped(self._order("second_started"))

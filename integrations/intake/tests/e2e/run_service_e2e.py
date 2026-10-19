@@ -774,10 +774,14 @@ def k_verdict(k: dict, a: dict) -> dict:
     per, killed = {}, []
     for n, kn in k.items():
         an = a.get(n) or {}
-        if kn.get("http") == 200 and kn.get("label") == "pending" and "killed" in (kn.get("error") or "")                 and kn.get("text") is None:
+        was_killed = (kn.get("http") == 200 and kn.get("label") == "pending"
+                      and "killed" in (kn.get("error") or "") and kn.get("text") is None)
+        fast_reject = (kn.get("label") == "rejected" and an.get("label") == "rejected"
+                       and kn.get("http") == an.get("http") and kn.get("text") is None)
+        if was_killed:
             per[n] = (True, "killed")
             killed.append(n)
-        elif kn.get("label") == "rejected" and an.get("label") == "rejected" and kn.get("http") == an.get("http")                 and kn.get("text") is None:
+        elif fast_reject:
             per[n] = (True, "fast reject: the production answer")
         else:
             per[n] = (False, f"neither killed nor the production reject (K {kn.get('label')}, A {an.get('label')})")

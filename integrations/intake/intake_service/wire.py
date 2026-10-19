@@ -9,7 +9,7 @@ with recv_bytes(maxlength): a frame over the reader's cap is refused from its le
 before its body is read (the connection is then closed: the pool drops that worker). NaN and
 Infinity are refused both ways; inbound, so is a number that overflows to one (`1e99999` decodes
 to inf: intake-i5b TF-2). The one non-JSON frame is a job's body, raw bytes sent right after the
-parent's ["job", id] header; only the worker reads it. How long a read may take is the pool's
+parent's ["job", id] header (the parent parses it too, before it dispatches: D51(a), pool.py). How long a read may take is the pool's
 business: it reads every frame under the phase clock (pool.py, TF-1).
 
 The caps (the frame length, bytes):
@@ -20,21 +20,23 @@ The caps (the frame length, bytes):
   the job body             the service's INTAKE_MAX_REQUEST_BYTES (<= 16 MiB) - the worker's cap
 
 What the parent acts on is rebuilt and re-checked here: an IntakeResult through its constructor
-(no `clean` with an error or reasons, no text on `injected`/`rejected`, ...) and the "started"
-announcement by stage 1 itself (intake-i5b TF-7): exactly the announced fields, then
+(no `clean` with an error or reasons, no text on `injected`/`rejected`, ...). Since intake-i5d the
+pool requires a worker's "started" to EQUAL the announcement the parent derived from the request
+itself (pool.prepare), so nothing a worker announces is ever taken on its word;
+started_from_wire() remains the standalone check of an announcement on its own terms (intake-i5b
+TF-7): exactly the announced fields, then
 envelope.validate over them - the same function the worker ran, so an honest worker's
 announcement always passes and a compromised one cannot smuggle what stage 1 refuses (a field
 outside the schema, metadata over 64 KiB, more than 1000 links or one outside 1..2048 characters,
 a raw over 5 MiB, a source/connector that is not a slug, a bad timestamp or content type) - and
 the key's sha256 must be the raw's. That is plain-data checking of an already-decoded JSON
-object; the parent still never parses the content itself. Anything else is a WireError, and the
+object. Anything else is a WireError, and the
 pool drops the worker that sent it (R-4: a worker that sent something invalid is never
 re-pooled).
 """
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import json
 import math
@@ -126,11 +128,9 @@ def started_from_wire(obj):
     key = {"source": _str(k, "source"), "external_id": _str(k, "external_id"), "sha256": _str(k, "sha256")}
     if not _SHA.fullmatch(key["sha256"]):
         raise WireError("started: sha256 is not 64 hex characters")
-    try:
-        base64.b64decode(_str(e, "raw", MAX_WORKER_MESSAGE_BYTES), validate=True)
-    except (binascii.Error, ValueError):
-        raise WireError("started: raw is not base64") from None
-    # TF-7: stage 1 itself, over the announced fields (the raw as the base64 it travelled as)
+    # TF-7: stage 1 itself, over the announced fields (the raw as the base64 it travelled as). It
+    # checks the raw's type and length BEFORE it decodes, and decodes it once (validate=True: not
+    # base64 -> Rejected) - the intake-i5c tester's TC-4: no second, unbounded decode here
     try:
         v = _envelope.validate({"source": e["source"], "connector": e["connector"], "external_id": e["external_id"],
                                 "fetched_at": e["fetched_at"], "content_type": e["content_type"], "raw": e["raw"],
