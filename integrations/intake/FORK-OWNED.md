@@ -13,6 +13,7 @@ Everything intake adds is namespaced:
 | I3 classifier stage | `intake/classifier.py`, the classifier settings in `intake/config.py`, `tools/fetch_classifier.py`, `requirements-classifier.txt`, `tests/fixtures/classifier_eval.json` and `classifier_corpus_scores.json` (the frozen eval fixtures), `tests/test_classifier*.py`, `tests/classifier_support.py`, `tests/adversarial_i3.py`, `tests/adversarial_r3.py`, `.gitignore` (the fetched model under `models/` is never committed) - all inside the path below |
 | I4 second opinion, D2, purge, stats | `intake/{d2,second_opinion,fence,purge,stats}.py`, the second-opinion settings in `intake/config.py`, `transport/` (the one HTTP module), `tests/test_{d2,second_opinion,purge_stats,i4_carryins,i4_round2,i4_round3}.py`, `tests/db/run_i4_db_tests.py` - all inside the path below |
 | I5 service and container | `intake_service/` (the HTTP service, worker pool, store, loops, relay), `Dockerfile`, `.dockerignore`, `requirements-container.txt` (hash-pinned Linux wheel set), `tests/test_service_*.py`, `tests/service_support.py`, `tests/service_memory.py`, `tests/e2e/` - all inside the path below; and in `docker/docker-compose.yml` the services `openbrain-intake`, `openbrain-intake-dbrelay` and `openbrain-intake-llmrelay` (profile `intake`), the network `intake-net`, and `docker/intake.env.example` (identifiers below) |
+| connector kit (security plan step 2) | `integrations/connectors/` (the whole directory: `connector_kit/` - the connector contract, envelope builder, provenance, intake client and the test kit; `reference/` - the reference connector; `connector_tests/`; `roundtrip/`; `README.md`). It adds no SQL, schema, role, column or compose service |
 | migration | `integrations/intake/sql/init-intake.sql`, revert `sql/revert-intake.sql`, mounted as `220-init-intake.sql` by `docker/docker-compose.yml` and `docker/docker-compose.preview.yml` (the whole `220-` initdb slot is ours) |
 | SQL schema | `intake` (`intake.raw_items`, `intake.items`, `intake.discards`, `intake.migration_ledger`, `intake.enforce_screen_verdict_authority()`) |
 | DB role | `intake` (no members, a member of nothing) |
@@ -43,6 +44,8 @@ Adding to what intake owns? Add it to the table AND the block in the same commit
 ```fork-owned
 # paths (a directory ends in "/"); path-glob is an fnmatch over the repo path
 path: integrations/intake/
+# the connector kit (security plan step 2): connectors build on it, intake is their only sink
+path: integrations/connectors/
 # the initdb slot our migration is mounted at - an upstream file or mount there collides
 path-glob: docker/220-*
 pattern: docker-entrypoint-initdb\.d/220-
