@@ -23,7 +23,7 @@
  */
 import path from "node:path";
 import {
-  basenameIndex, canonicalDest, simplifySlug, slugTag, slugifyFilePath, transformLink, resolveRelative,
+  canonicalDest, simplifySlug, slugTag, slugifyFilePath, transformLink, resolveRelative,
   getFileExtension, endsWith,
 } from "./quartz-path.mjs";
 import { urlSlugOf, isPagePath } from "./shared/quartz-slug.mjs";
@@ -86,10 +86,19 @@ export function quartzPathOrder(a, b) {
  * writes the redirect there (retired.mjs).
  */
 export function aliasRedirects(entries) {
+  return runSync(aliasSteps(entries, false));
+}
+
+// presorted: the entries already come in Quartz's page order (the site
+// index passes them in its own row order - P1b, no second sort).
+function* aliasSteps(entries, presorted) {
   const out = new Map();
   // the order is the vault PATHS' (rowSlug), the slugs are URL slugs
-  const ordered = [...entries].filter((e) => e && e.slug).sort((x, y) => quartzPathOrder(x.rowSlug ?? x.slug, y.rowSlug ?? y.slug));
+  const kept = [...entries].filter((e) => e && e.slug);
+  const ordered = presorted ? kept : kept.sort((x, y) => quartzPathOrder(x.rowSlug ?? x.slug, y.rowSlug ?? y.slug));
+  let n = 0;
   for (const e of ordered) {
+    if (++n % 4096 === 0) yield;
     const ogSlug = simplifySlug(e.slug);
     const targets = [...aliasSlugs(e.aliases), ...(e.permalink ? [String(e.permalink)] : [])];
     for (const aliasTarget of targets) {
@@ -102,18 +111,86 @@ export function aliasRedirects(entries) {
   return out;
 }
 
-export function buildSiteIndex(rows, etag = "") {
+// A stable merge sort that YIELDS between bounded slices of work (P1b: the
+// site index of a 5x vault - 383k rows - is built while readers are being
+// served; one Array.sort over it blocked the event loop for ~0.5 s). Same
+// order as Array.prototype.sort with the same comparator (both are stable).
+const SLICE = 4096;
+export function* sortYielding(arr, cmp) {
+  const a = arr.slice();
+  for (let i = 0; i < a.length; i += SLICE) {
+    const part = a.slice(i, i + SLICE).sort(cmp);
+    for (let j = 0; j < part.length; j++) a[i + j] = part[j];
+    yield;
+  }
+  let src = a, dst = new Array(a.length);
+  for (let w = SLICE; w < src.length; w *= 2) {
+    let n = 0;
+    for (let lo = 0; lo < src.length; lo += 2 * w) {
+      const mid = Math.min(lo + w, src.length), hi = Math.min(lo + 2 * w, src.length);
+      let i = lo, j = mid, k = lo;
+      while (i < mid && j < hi) { dst[k++] = cmp(src[j], src[i]) < 0 ? src[j++] : src[i++]; if (++n % (SLICE * 8) === 0) yield; }
+      while (i < mid) dst[k++] = src[i++];
+      while (j < hi) dst[k++] = src[j++];
+    }
+    [src, dst] = [dst, src];
+    yield;
+  }
+  return src;
+}
+
+// Run a build generator to completion: synchronously, or yielding to the
+// event loop between its slices (the nav refresh; no reader waits behind it).
+export function runSync(gen) {
+  for (;;) { const r = gen.next(); if (r.done) return r.value; }
+}
+export async function runYielding(gen) {
+  for (;;) {
+    const r = gen.next();
+    if (r.done) return r.value;
+    await new Promise((res) => setImmediate(res));
+  }
+}
+
+export function buildSiteIndex(rows, etag = "", opts = {}) {
+  return runSync(siteIndexSteps(rows, etag, opts));
+}
+/**
+ * The same index, built in slices that yield to the event loop (lib/nav-index.mjs refresh).
+ * opts.navOnly: only what the explorer needs (bySlug titles, rowSlugOf,
+ * folderHint, folders, slugs) - the nav worker's index (lib/nav-worker.mjs).
+ */
+export function buildSiteIndexYielding(rows, etag = "", opts = {}) {
+  return runYielding(siteIndexSteps(rows, etag, opts));
+}
+
+// Exported for the perf probe (test/): each yielded STRING names the phase that
+// follows, so a probe can attribute the longest slice; the runners ignore values.
+export function* siteIndexSteps(rows, etag, { navOnly = false } = {}) {
+  yield "filter";
   const bySlug = new Map();
   const rowSlugOf = new Map(); // URL slug -> row slug
   const folderHint = new Map(); // URL folder path -> the folder's name in the vault
-  const ordered = (rows || []).filter((r) => r && r.slug && isPagePath(`${r.slug}.md`))
-    .sort((x, y) => quartzPathOrder(x.slug, y.slug));
+  const kept = [];
+  let n = 0;
+  for (const r of rows || []) {
+    if (++n % SLICE === 0) yield;
+    if (r && r.slug && isPagePath(`${r.slug}.md`)) kept.push(r);
+  }
+  yield "sort-rows";
+  const ordered = yield* sortYielding(kept, (x, y) => quartzPathOrder(x.slug, y.slug));
+  yield "entries";
+  const winner = []; // [row, its URL slug], in Quartz's page order
+  n = 0;
   for (const r of ordered) {
+    if (++n % SLICE === 0) yield;
     const slug = urlSlugOf(r.slug);
+    winner.push([r, slug]);
     const raw = r.slug.split("/");
     const parts = slug.split("/");
     for (let i = 0; i < parts.length - 1; i++) folderHint.set(parts.slice(0, i + 1).join("/"), raw[i]);
     rowSlugOf.set(slug, r.slug);
+    if (navOnly) { bySlug.set(slug, { slug, rowSlug: r.slug, title: r.title || r.slug.split("/").pop() }); continue; }
     bySlug.set(slug, {
       slug,
       rowSlug: r.slug,
@@ -129,16 +206,52 @@ export function buildSiteIndex(rows, etag = "") {
       permalink: permalinkOf(r.permalink ?? r.frontmatter?.permalink),
     });
   }
-  const slugs = [...bySlug.keys()].sort();
+  yield "sort-slugs";
+  const slugs = yield* sortYielding([...bySlug.keys()], (a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  if (navOnly) {
+    yield "folders";
+    const folders = new Map();
+    const ensureF = (f) => { let e = folders.get(f); if (!e) { e = { files: new Set(), folders: new Set() }; folders.set(f, e); } return e; };
+    n = 0;
+    for (const s of slugs) {
+      if (++n % SLICE === 0) yield;
+      const parts = s.split("/");
+      for (let i = 0; i < parts.length - 1; i++) ensureF(parts.slice(0, i).join("/")).folders.add(parts.slice(0, i + 1).join("/"));
+      const dir = parts.slice(0, -1).join("/");
+      if (parts.at(-1) !== "index") ensureF(dir).files.add(s);
+      ensureF(dir);
+    }
+    return { etag, navOnly: true, bySlug, slugs, folders, rowSlugOf, folderHint };
+  }
+  yield "alias-slugs";
   const allSlugs = [...slugs];
-  for (const s of slugs) for (const a of aliasSlugs(bySlug.get(s).aliases)) allSlugs.push(a);
-  const byBase = basenameIndex([...new Set(allSlugs)]);
+  n = 0;
+  for (const s of slugs) {
+    if (++n % SLICE === 0) yield;
+    for (const a of aliasSlugs(bySlug.get(s).aliases)) allSlugs.push(a);
+  }
+  yield "basenames";
+  // basenameIndex (quartz-path.mjs), in slices
+  // (a repeat - an alias equal to a slug - is found in its basename's list,
+  // which is short; no whole-vault Set: its rehash at 383k was a 0.7 s slice)
+  const byBase = new Map();
+  n = 0;
+  for (const s of allSlugs) {
+    if (++n % SLICE === 0) yield;
+    const b = s.split("/").at(-1);
+    const list = byBase.get(b);
+    if (!list) byBase.set(b, [s]);
+    else if (!list.includes(s)) list.push(s);
+  }
 
   // Backlinks: a row's raw wikilink targets resolved exactly as CrawlLinks
   // resolves them on that row's own page, keyed by the SIMPLE slug.
+  yield "backlinks";
   const backlinks = new Map();
   const opts = { strategy: "shortest", byBase };
+  n = 0;
   for (const s of slugs) {
+    if (++n % 1024 === 0) yield;
     const seen = new Set();
     for (const target of bySlug.get(s).links) {
       let simple;
@@ -155,6 +268,7 @@ export function buildSiteIndex(rows, etag = "") {
     }
   }
 
+  yield "folders-tags";
   // Folder children (direct), tags.
   const folders = new Map(); // folder path ("" = root) -> { files:Set, folders:Set }
   const ensure = (f) => {
@@ -163,7 +277,9 @@ export function buildSiteIndex(rows, etag = "") {
     return e;
   };
   const byTag = new Map();
+  n = 0;
   for (const s of slugs) {
+    if (++n % SLICE === 0) yield;
     const parts = s.split("/");
     for (let i = 0; i < parts.length - 1; i++) {
       const parent = parts.slice(0, i).join("/");
@@ -177,11 +293,19 @@ export function buildSiteIndex(rows, etag = "") {
       for (let i = 1; i <= segs.length; i++) {
         const prefix = segs.slice(0, i).join("/");
         const l = byTag.get(prefix);
-        if (l) { if (!l.includes(s)) l.push(s); } else byTag.set(prefix, [s]);
+        // one slug at a time, so a repeat (tags "a/b" and "a/c" both add "a") is
+        // always the LAST entry: O(1), not l.includes (O(n) - quadratic for a tag
+        // on every page: 28 s of the 76k-page build, rw-p1b-ready)
+        if (l) { if (l[l.length - 1] !== s) l.push(s); } else byTag.set(prefix, [s]);
       }
     }
   }
-  const aliases = aliasRedirects(slugs.map((s) => bySlug.get(s)));
+  // Quartz's page order of the presented entries (the row that won its URL)
+  const inPathOrder = [];
+  for (const [r, slug] of winner) { const e = bySlug.get(slug); if (e && e.rowSlug === r.slug) inPathOrder.push(e); }
+  yield;
+  yield "aliases";
+  const aliases = yield* aliasSteps(inPathOrder, true);
   return { etag, bySlug, slugs, allSlugs, byBase, backlinks, folders, byTag, aliases, rowSlugOf, folderHint };
 }
 
@@ -201,9 +325,13 @@ export function isFolder(site, path) {
   return site.folders.has(path) && (site.folders.get(path).files.size > 0 || site.folders.get(path).folders.size > 0);
 }
 
-let _memo = { etag: null, site: null };
+// The site index of a nav snapshot. A snapshot from lib/nav-index.mjs carries
+// it prebuilt (built in the background refresh, never on a request - P1b);
+// anything else (a test's plain object) is built once and memoised.
+let _memo = { rows: null, site: null };
 export function siteIndexFor(nav) {
   if (!nav || !nav.rows) return null;
-  if (_memo.etag !== nav.etag) _memo = { etag: nav.etag, site: buildSiteIndex(nav.rows, nav.etag) };
+  if (nav.site) return nav.site;
+  if (_memo.rows !== nav.rows) _memo = { rows: nav.rows, site: buildSiteIndex(nav.rows, nav.etag) };
   return _memo.site;
 }

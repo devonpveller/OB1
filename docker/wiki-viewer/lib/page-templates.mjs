@@ -8,7 +8,7 @@
 import { renderPage, EmbedUnavailable } from "./render-page.mjs";
 import { unavailableState } from "./page-classes.mjs";
 import { normalizeTags, folderDisplayName, isFolder } from "./site-index.mjs";
-import { ListingBody, PageList, html } from "./components.mjs";
+import { ListingBody, PageList, html, byDateAndAlphabetical } from "./components.mjs";
 import { simplifySlug, resolveRelative, urlSlugOf } from "./quartz-path.mjs";
 import { h } from "preact";
 
@@ -162,7 +162,9 @@ export async function tagTemplate(ctx, deps) {
     h("article", { class: "" }, h("p", null)),
     h("p", null, `Found ${tags.length} total tags.`),
     h("div", null, tags.map((t) => {
-      const items = site.byTag.get(t).map((s) => listItem(site, s));
+      // Quartz TagContent sorts the tag's pages, THEN keeps the first NUM
+      // (P1b; P1a F7: the live index sliced first, so it showed an arbitrary 10).
+      const items = site.byTag.get(t).map((s) => listItem(site, s)).sort(byDateAndAlphabetical(true));
       return h("div", null,
         h("h2", null, h("a", { class: "internal tag-link", href: resolveRelative(slug, `/tags/${t}`) }, t)),
         h("div", { class: "page-listing" },

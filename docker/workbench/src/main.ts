@@ -34,6 +34,7 @@ import { noteRefs } from "./routes/note-refs.ts";
 import { noteHistory, noteCommit } from "./routes/note-history.ts";
 import { search } from "./routes/search.ts";
 import { graph } from "./routes/graph.ts";
+import { nav } from "./routes/nav.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
 import { emptyTrash } from "./repositories/notes.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
@@ -80,6 +81,7 @@ app.route("/workbench/note-history", noteHistory); // P4.7 — note git revision
 app.route("/workbench/note-commit", noteCommit); // P4.7 — commit-now / compile-catch
 app.route("/workbench/search", search); // wiki-dynamic-index P3 — DB-backed wiki search
 app.route("/workbench/graph", graph); // wiki-dynamic-index — page-scoped graph neighbourhood
+app.route("/workbench/nav", nav); // research-workbench P1b — the explorer, one folder at a time (forwards to the viewer)
 app.get("/workbench/openapi.json", (c) => c.json(contractDoc)); // research-workbench P0
 app.route("/", contract); // research-workbench P0 — /workbench/contract/* (paths are absolute)
 

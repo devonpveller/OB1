@@ -88,12 +88,19 @@ function fakeRows(n, marker) {
   return Array.from({ length: n }, (_, i) => ({ slug: `p/${i}`, title: `${marker}${i}` }));
 }
 
+// P1b: a refresh first asks for the table's signature (one cheap request);
+// these fakes answer it WITHOUT a content-range header (no signature), so
+// every refresh walks - the pre-P1b behaviour the V5 tests pin. `calls`
+// counts refreshes started (signature requests); `walks` counts row walks.
+const SIG = (url) => String(url).includes("order=updated_at");
+const noSig = { ok: true, headers: { get: () => null }, json: async () => [] };
+
 test("getNavIndex: cold blocks once, then NEVER blocks again", async () => {
   _resetForTests();
   let calls = 0;
   let marker = "a";
-  const fetchImpl = async () => {
-    calls += 1;
+  const fetchImpl = async (url) => {
+    if (SIG(url)) { calls += 1; return noSig; }
     return { ok: true, json: async () => fakeRows(200, marker) };
   };
   let clock = 1_000;
@@ -127,10 +134,10 @@ test("getNavIndex: cold blocks once, then NEVER blocks again", async () => {
 test("getNavIndex: concurrent stale reads trigger ONE refresh (single-flight)", async () => {
   _resetForTests();
   let calls = 0;
-  const fetchImpl = async () => {
-    calls += 1;
+  const fetchImpl = async (url) => {
+    if (SIG(url)) calls += 1;
     await new Promise((r) => setTimeout(r, 5));
-    return { ok: true, json: async () => fakeRows(200, "x") };
+    return SIG(url) ? noSig : { ok: true, json: async () => fakeRows(200, "x") };
   };
   let clock = 1_000;
   const now = () => clock;
@@ -172,4 +179,39 @@ test("getNavIndex: a truncated read below MIN_ROWS is rejected, not published", 
   const fetchImpl = async () => ({ ok: true, json: async () => fakeRows(3, "tiny") });
   const res = await getNavIndex({ fetchImpl, now: () => 1000, ttlMs: 1000 });
   assert.equal(res, null, "3 rows is a broken read, not a 48k-page wiki");
+});
+
+test("getNavIndex (P1b): an unchanged table signature refreshes WITHOUT walking the rows; a changed one walks", async () => {
+  _resetForTests();
+  let walks = 0;
+  let sig = "200|2026-10-19T00:00:00Z";
+  let marker = "a";
+  const fetchImpl = async (url) => {
+    if (SIG(url)) {
+      const [count, at] = sig.split("|");
+      return { ok: true, headers: { get: (h) => (h === "content-range" ? `0-0/${count}` : null) }, json: async () => [{ updated_at: at }] };
+    }
+    walks += 1;
+    return { ok: true, json: async () => fakeRows(200, marker) };
+  };
+  let clock = 1_000;
+  const now = () => clock;
+  const cold = await getNavIndex({ fetchImpl, now, ttlMs: 1000 });
+  assert.equal(walks, 1);
+  assert.ok(cold.site && cold.site.bySlug.has("p/0"), "the site index is built in the refresh, not on a request");
+  clock += 600;
+  await getNavIndex({ fetchImpl, now, ttlMs: 1000 });
+  await _pendingRefresh();
+  assert.equal(walks, 1, "same signature: no walk");
+  const same = await getNavIndex({ fetchImpl, now, ttlMs: 1000 });
+  assert.equal(same, cold, "the same snapshot (and site index) is kept");
+  clock += 600;
+  sig = "200|2026-10-19T00:00:05Z";
+  marker = "b";
+  await getNavIndex({ fetchImpl, now, ttlMs: 1000 });
+  await _pendingRefresh();
+  assert.equal(walks, 2, "a row was written: walk");
+  const next = await getNavIndex({ fetchImpl, now, ttlMs: 1000 });
+  assert.ok(next.json.includes("b0"));
+  assert.notEqual(next.site, cold.site);
 });

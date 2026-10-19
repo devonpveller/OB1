@@ -41,7 +41,7 @@ RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/
 # research-workbench P0 adds src/contracts/: the document coverage, the registry rule, every
 # example against its schema, the generated artifacts current, the notices check (D9 rule 5).
 # Its integration test is skipped here (no CONTRACT_TEST_DB_HOST); run-contract-tests.ps1 runs it.
-RUN deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/routes/graph_test.ts src/util/ src/contracts/
+RUN deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/util/ src/contracts/
 
 # Runs as root: the workbench WRITES the shared vault (notes, the Changes log,
 # and image assets under /wiki/assets), which the root-running wiki-service

@@ -1,15 +1,20 @@
 /**
- * nav-index — serve `static/graphIndex.json` from the DATABASE (Phase C).
+ * nav-index — the site's rows from the DATABASE, and `static/graphIndex.json`
+ * served from them (Phase C).
  *
- * WHY THIS SHAPE, not a new endpoint: the Explorer, the graph and the notes
- * autocomplete all already consume `/static/graphIndex.json`, which
- * derive-graph-index.mjs builds from `wiki_pages` — but only at PUBLISH time.
- * So a brand-new page was missing from the sidebar until a snapshot swap.
+ * Since research-workbench P1b the explorer reads one folder at a time
+ * (lib/nav-tree.mjs over the site index built from these rows) and search
+ * uses the API, so the full `/static/graphIndex.json` is read only by the
+ * graph's offline fallback and the notes editor's link autocomplete. There is
+ * no published file behind it any more (derive-graph-index.mjs, the publish-
+ * time derive, was removed with the builder-era readiness contract - E3).
  *
- * Serving the SAME url with the SAME shape from the same table gives the
- * freshness (a new page appears on the next page load, no build involved)
- * without forking three client scripts. Fewer moving parts, no bundle rebuild,
- * and the published file remains the fallback if the DB is unreachable.
+ * P1b PERF (the floor at five times today's 76,542 pages): a refresh first
+ * asks the database for the table's SIGNATURE (row count + newest updated_at,
+ * one cheap request) and walks the rows only when it changed; the site index
+ * (lib/site-index.mjs) is built IN the refresh, off the request path, so no
+ * reader pays for it; the graphIndex.json payload (and its ETag) is built
+ * lazily, the first time one of its two readers asks for it.
  *
  * PERF REWORK 2026-08-28 (PLAN-VIEWER-PERF V5). Measured before: a request
  * arriving after the TTL expired paid the WHOLE rebuild inline — 3.4 s TTFB,
@@ -36,7 +41,10 @@
  */
 
 import { createHash } from "node:crypto";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { isPagePath } from "./shared/quartz-slug.mjs";
+import { buildSiteIndexYielding } from "./site-index.mjs";
+import { warmFolders } from "./nav-tree.mjs";
 
 const OB_URL = (process.env.OPEN_BRAIN_URL || "http://openbrain-rest").replace(/\/+$/, "");
 const ENABLED = process.env.WIKI_NAV_API !== "0";
@@ -44,15 +52,27 @@ const TTL_MS = Math.max(5_000, Number(process.env.WIKI_NAV_TTL_MS || "30000"));
 const PAGE = 5000;
 const MIN_ROWS = Math.max(0, Number(process.env.WIKI_NAV_MIN_ROWS || "100"));
 
-let _cache = { at: 0, json: null, etag: null, rows: null };
+let _cache = null; // see makeCache()
 let _refreshing = null; // in-flight refresh promise (single-flight)
+// NAV-ONLY mode (the nav worker, lib/nav-worker.mjs): the narrow projection,
+// a nav-only site index, no rows kept, no graphIndex payload.
+let _navOnly = false;
+let _status = { ok: false, at: 0, error: "not yet refreshed" };
+export function configureNavIndex({ navOnly = false } = {}) {
+  _navOnly = !!navOnly;
+}
+/** The last refresh's outcome: { ok, at, error } (a failed read keeps the previous snapshot). */
+export function navIndexStatus() {
+  return { ..._status };
+}
 
 export function navIndexEnabled() {
   return ENABLED;
 }
 
-// Same projection derive-graph-index.mjs emits. `slug` MUST be inside the
-// value: the Explorer's FileTrieNode.add does file.slug.split("/").
+// The graphIndex.json shape (byte-compatible with the retired publish-time
+// derive). `slug` MUST be inside the value: a FileTrieNode.add does
+// file.slug.split("/").
 // A row for a path Quartz does not build (private/, templates/, a
 // dot-directory: quartz-slug.mjs isPagePath) is not offered (rw-p1a-deploy-prep, RV-1).
 export function rowsToIndex(rows) {
@@ -82,11 +102,12 @@ export function rowsToIndex(rows) {
 // init-wiki-pages.sql is applied) answers the narrow projection instead.
 const SELECT_SITE = "select=slug,title,links,tags,updated_at,page_class,aliases:frontmatter->aliases,alias:frontmatter->alias,permalink:frontmatter->>permalink,fm_date:frontmatter->>date";
 const SELECT_NAV = "select=slug,title,links,tags,updated_at,page_class";
+const SELECT_NAVONLY = "select=slug,title,updated_at";
 let _projection = SELECT_SITE;
 
 export function pageUrl(cursor) {
   const params = [
-    _projection,
+    _navOnly ? SELECT_NAVONLY : _projection,
     "order=slug.asc",
     `limit=${PAGE}`,
   ];
@@ -124,22 +145,64 @@ export async function fetchAllRows(signal, fetchImpl = fetch) {
   return out;
 }
 
+// The table's signature: row count (PostgREST exact count) + the newest
+// updated_at. Every writer stamps updated_at = now() and a delete changes the
+// count, so an unchanged signature means unchanged rows. null when the answer
+// does not carry it (then the rows are walked, as before P1b).
+export async function tableSignature(signal, fetchImpl = fetch) {
+  const r = await fetchImpl(`${OB_URL}/rest/v1/wiki_pages?select=updated_at&order=updated_at.desc.nullslast&limit=1`, {
+    headers: { apikey: "local-trust", prefer: "count=exact" }, signal,
+  });
+  if (!r.ok) throw new Error(`wiki_pages signature ${r.status}`);
+  const range = r.headers?.get?.("content-range") || "";
+  const m = /\/(\d+)$/.exec(range);
+  if (!m) return null;
+  const rows = await r.json();
+  return `${m[1]}|${Array.isArray(rows) && rows[0] ? rows[0].updated_at : ""}`;
+}
+
+// One snapshot of the rows: its site index is built now, in slices that
+// yield to the event loop (off the request path - readers keep being served
+// from the previous snapshot meanwhile), and the explorer's large folders are
+// pre-sorted; the graphIndex.json payload and its ETag only when first asked.
+let _generation = 0;
+async function makeCache(rows, at, sig) {
+  const c = {
+    at, rows: _navOnly ? [] : rows, sig, site: null, _json: null, _etag: null,
+    get json() { return (this._json ??= JSON.stringify(rowsToIndex(this.rows))); },
+    get etag() { return (this._etag ??= etagFor(this.json)); },
+  };
+  c.site = await buildSiteIndexYielding(rows, `site-${++_generation}`, { navOnly: _navOnly }); // a new identity per snapshot (nav-tree memo key)
+  await warmFolders(c.site);
+  return c;
+}
+
 // Rebuild the cache. Never throws: on any failure the previous copy stays
 // exactly as it was (fail-soft is the whole point of this module).
 async function refresh(fetchImpl, now) {
   const started = Date.now();
   try {
-    const rows = await fetchAllRows(AbortSignal.timeout(30_000), fetchImpl);
+    const sig = await tableSignature(AbortSignal.timeout(10_000), fetchImpl).catch(() => null);
+    if (sig && _cache && _cache.sig === sig) { _cache.at = now(); _status = { ok: true, at: Date.now(), error: null }; return; } // unchanged: nothing to walk
+    // the longest the event loop was blocked during this refresh: what a reader
+    // arriving meanwhile could have waited (logged; the P1b floor is 300 ms)
+    const lag = monitorEventLoopDelay({ resolution: 10 });
+    lag.enable();
+    const rows = await fetchAllRows(AbortSignal.timeout(60_000), fetchImpl).finally(() => lag.disable());
     // A tiny result means a half-applied migration or a truncated read, not a
     // real wiki: keep serving whatever we had rather than emptying the nav.
-    if (rows.length < MIN_ROWS) return;
-    const json = JSON.stringify(rowsToIndex(rows));
-    _cache = { at: now(), json, etag: etagFor(json), rows };
+    if (rows.length < MIN_ROWS) { _status = { ok: false, at: Date.now(), error: `only ${rows.length} rows (< ${MIN_ROWS})` }; return; }
+    const walked = Date.now();
+    const walkLag = lag.max / 1e6;
+    lag.reset(); lag.enable();
+    _cache = await makeCache(rows, now(), sig).finally(() => lag.disable());
+    _status = { ok: true, at: Date.now(), error: null };
     console.log(
-      `[wiki-viewer] nav index refreshed: ${rows.length} rows, ` +
-        `${json.length} bytes, ${Date.now() - started}ms`,
+      `[wiki-viewer] nav index refreshed: ${rows.length} rows, walk ${walked - started}ms, ` +
+        `site index ${Date.now() - walked}ms, longest event-loop block ${Math.round(Math.max(walkLag, lag.max / 1e6))}ms`,
     );
   } catch (e) {
+    _status = { ok: false, at: Date.now(), error: String(e?.message || e).slice(0, 200) };
     console.warn(`[wiki-viewer] nav index refresh failed (serving previous): ${e?.message || e}`);
   }
 }
@@ -153,8 +216,8 @@ function startRefresh(fetchImpl, now) {
 }
 
 /**
- * Returns { json, etag } or null when unavailable (caller serves the published
- * file instead). Never throws, and never blocks once warm.
+ * Returns the snapshot { rows, site, json, etag } or null when unavailable
+ * (the database screen / a 503). Never throws, and never blocks once warm.
  *
  * opts is for TESTS ONLY (injected clock/fetch/ttl); production calls it bare.
  */
@@ -164,7 +227,7 @@ export async function getNavIndex(opts = {}) {
   const now = opts.now || Date.now;
   const ttl = opts.ttlMs ?? TTL_MS;
 
-  if (_cache.json) {
+  if (_cache) {
     // Refresh at HALF the TTL so an actively-used wiki is refreshed before a
     // reader can observe staleness, and the reader never waits either way.
     if (now() - _cache.at >= ttl / 2) void startRefresh(fetchImpl, now);
@@ -172,12 +235,14 @@ export async function getNavIndex(opts = {}) {
   }
   // Cold: nothing truthful to serve, so this one request does wait.
   await startRefresh(fetchImpl, now);
-  return _cache.json ? _cache : null;
+  return _cache || null;
 }
 
 // Test seam: the module holds process-lifetime state by design.
 export function _resetForTests() {
-  _cache = { at: 0, json: null, etag: null, rows: null };
+  _cache = null;
+  _navOnly = false;
+  _status = { ok: false, at: 0, error: "not yet refreshed" };
   _refreshing = null;
   _projection = SELECT_SITE;
 }
