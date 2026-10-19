@@ -269,3 +269,33 @@ Deno.test("A7-5v (cost, not meaning): in parallel, the verifier reports the offe
   assert(e.startsWith("verification-budget"), e);
   console.log(`A7-5v: ${[a, b, c, d, e].map((x) => x.split(":")[0]).join(", ")}`);
 });
+
+// The drawn text's check runs while pandoc and Typst run (render.ts); its verdict is read first. A note
+// that holds the key AND names a face no one installed: the a06b72f order refused it `credential` before
+// pandoc ran - so does this one, though the conversion fails `font` meanwhile; without the key, `font`.
+Deno.test("A7-5r (placement, not meaning): the drawn text's verdict is read before any later error", async () => {
+  const { fxEntries } = await import("./registry_fixtures.ts");
+  const { render, RenderFailed } = await import("./render.ts");
+  const { fixtureId, fixtureRefs } = await import("./test_fixtures.ts");
+  const def = (k: string) => fxEntries("export_formats").find((e) => e.key === k)!.definition as Record<string, unknown>;
+  const pdf = { key: "pdf", ...def("pdf") } as Record<string, unknown>;
+  const noFace = { ...pdf, metadata: { ...(pdf.metadata as Record<string, unknown>), mainfont: "No Such Face Nine" } };
+  const style = { key: "ieee", ...fxEntries("citation_styles").find((e) => e.key === "ieee")!.definition };
+  const cslDir = new URL("../../csl", import.meta.url).pathname;
+  const run = async (md: string, format: Record<string, unknown>) => {
+    try {
+      await render({ md, refs: fixtureRefs(1), format, style, cslDir, wrapNone: true, secrets: SECRETS } as never);
+      return "200";
+    } catch (e) {
+      return e instanceof RenderFailed ? e.code : String(e);
+    }
+  };
+  const body = (s: string) => `# P\n\nBody [[source/${fixtureId(1)}|s]].\n\n${filler(rng(7), PARALLEL_CHARS + 2000).replace(/[^ -~]/g, " ").replace(/[<>&\[\]_*`#]/g, " ")} ${s}\n`;
+  const withKey = await run(body(`The key is ${KEY} here.`), noFace);
+  const without = await run(body("nothing here"), noFace);
+  const keyOnly = await run(body(`The key is ${KEY} here.`), pdf);
+  console.log(`A7-5r: key + missing face -> ${withKey}; missing face alone -> ${without}; key alone -> ${keyOnly}`);
+  assertEquals(withKey, "credential");
+  assertEquals(without, "font");
+  assertEquals(keyOnly, "credential");
+});

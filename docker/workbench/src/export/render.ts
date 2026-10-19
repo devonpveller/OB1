@@ -347,20 +347,27 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
     }
   }
   // attempt 6: a typeset format's (the glyph check's) text layer is in drawn (visual) order; the
-  // logical text it will draw is checked first. rw-p6a-resolve2: one verification budget per export
+  // logical text it will draw is checked first. rw-p6a-resolve2: one verification budget per export.
+  // rw-p6a-resolve2 attempt 2 (placement, not meaning): that check RUNS while pandoc and Typst run, and its
+  // verdict is READ first - before the output check, and before any error of the conversion - so the
+  // answer is the sequential one (a refused drawn text is refused with its own code whatever pandoc did);
+  // nothing is served before it is read, and the output check starts after it ends (one budget, never
+  // two checks counted at once).
   const budget = new Budget(i.verifyBudget?.ms, i.verifyBudget?.textChars);
-  if (i.verify !== false && i.format.glyph_check) {
-    try {
-      await verifyDrawnText(p.text, i.secrets ?? [], i.format.key, budget);
-    } catch (e) {
-      if (e instanceof OutputRejected) throw new RenderFailed(e.message, e.offence, e.code, { format: e.format, offence: e.offence });
-      throw e;
-    }
-  }
+  const asRendered = (e: unknown) =>
+    e instanceof OutputRejected ? new RenderFailed(e.message, e.offence, e.code, { format: e.format, offence: e.offence }) : e;
+  const drawn: Promise<unknown> = i.verify !== false && i.format.glyph_check
+    ? verifyDrawnText(p.text, i.secrets ?? [], i.format.key, budget).then(() => null, (e) => asRendered(e) ?? new Error("drawn text check"))
+    : Promise.resolve(null);
+  const drawnFirst = async () => {
+    const e = await drawn;
+    if (e) throw e;
+  };
   // Scratch OUTSIDE the vault: pandoc and its engines write transient files in the cwd, and the
   // wiki viewer watching the vault crashes on a file that vanishes (ENOENT unlink).
-  const dir = await Deno.makeTempDir({ prefix: "ob-export-" });
+  let dir = "";
   try {
+    dir = await Deno.makeTempDir({ prefix: "ob-export-" });
     await Deno.writeFile(`${dir}/${i.style.file}`, style);
     await Deno.writeTextFile(`${dir}/references.json`, JSON.stringify(p.references));
     await Deno.writeTextFile(`${dir}/meta.json`, JSON.stringify(p.metadata));
@@ -387,6 +394,7 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
         throw new RenderFailed("the export would print a citation it holds no reference for", err.slice(0, 2000), "citation");
       }
       const bytes = await Deno.readFile(`${dir}/out.${i.format.ext}`);
+      await drawnFirst();
       if (i.verify !== false) {
         try {
           await verifyOutput(i.format.pandoc_to, i.format.key, bytes, i.secrets ?? [], budget);
@@ -397,7 +405,10 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
       }
       return { bytes, args, stderr: err };
     }
+  } catch (e) {
+    await drawnFirst(); // the drawn text's verdict comes before any later error, as when it ran first
+    throw e;
   } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
+    if (dir) await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 }
