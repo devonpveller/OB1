@@ -24,6 +24,10 @@
  *      OFFSET 0 = 46 ms but OFFSET 25000 = 289 ms (it re-walks the rows it
  *      skips), while a slug=gt.<cursor> page is 47 ms at ANY depth.
  *
+ * The same rows feed the live renderer's site index (lib/site-index.mjs:
+ * backlinks, folder and tag listings, link resolution) through getNavIndex's
+ * `rows`, so the explorer and the page chrome can never disagree.
+ *
  * Freshness trade, stated: a reader can now see a nav up to one refresh
  * behind (the request that finds it stale gets the old copy and starts the
  * refresh; the next one gets the new). The refresh is kicked off at TTL/2 so
@@ -39,7 +43,7 @@ const TTL_MS = Math.max(5_000, Number(process.env.WIKI_NAV_TTL_MS || "30000"));
 const PAGE = 5000;
 const MIN_ROWS = Math.max(0, Number(process.env.WIKI_NAV_MIN_ROWS || "100"));
 
-let _cache = { at: 0, json: null, etag: null };
+let _cache = { at: 0, json: null, etag: null, rows: null };
 let _refreshing = null; // in-flight refresh promise (single-flight)
 
 export function navIndexEnabled() {
@@ -69,9 +73,17 @@ export function rowsToIndex(rows) {
  * (null for the first). Ordering by the PRIMARY KEY makes the cursor total and
  * stable, so no row can be skipped or repeated between pages.
  */
+// The site index (backlinks, folders, tags, aliases, link resolution) rides
+// the same walk, so it also carries page_class and the two frontmatter keys
+// the chrome needs. A database without the frontmatter column (before
+// init-wiki-pages.sql is applied) answers the narrow projection instead.
+const SELECT_SITE = "select=slug,title,links,tags,updated_at,page_class,aliases:frontmatter->aliases,alias:frontmatter->alias,permalink:frontmatter->>permalink,fm_date:frontmatter->>date";
+const SELECT_NAV = "select=slug,title,links,tags,updated_at,page_class";
+let _projection = SELECT_SITE;
+
 export function pageUrl(cursor) {
   const params = [
-    "select=slug,title,links,tags,updated_at",
+    _projection,
     "order=slug.asc",
     `limit=${PAGE}`,
   ];
@@ -95,6 +107,10 @@ export async function fetchAllRows(signal, fetchImpl = fetch) {
   let cursor = null;
   for (;;) {
     const r = await fetchImpl(pageUrl(cursor), { headers: { apikey: "local-trust" }, signal });
+    if (!r.ok && r.status === 400 && _projection === SELECT_SITE) {
+      _projection = SELECT_NAV; // pre-migration database: no frontmatter column
+      continue;
+    }
     if (!r.ok) throw new Error(`wiki_pages ${r.status}`);
     const rows = await r.json();
     if (!Array.isArray(rows) || rows.length === 0) break;
@@ -115,7 +131,7 @@ async function refresh(fetchImpl, now) {
     // real wiki: keep serving whatever we had rather than emptying the nav.
     if (rows.length < MIN_ROWS) return;
     const json = JSON.stringify(rowsToIndex(rows));
-    _cache = { at: now(), json, etag: etagFor(json) };
+    _cache = { at: now(), json, etag: etagFor(json), rows };
     console.log(
       `[wiki-viewer] nav index refreshed: ${rows.length} rows, ` +
         `${json.length} bytes, ${Date.now() - started}ms`,
@@ -158,8 +174,9 @@ export async function getNavIndex(opts = {}) {
 
 // Test seam: the module holds process-lifetime state by design.
 export function _resetForTests() {
-  _cache = { at: 0, json: null, etag: null };
+  _cache = { at: 0, json: null, etag: null, rows: null };
   _refreshing = null;
+  _projection = SELECT_SITE;
 }
 export function _pendingRefresh() {
   return _refreshing;

@@ -1137,6 +1137,10 @@ services:
     build:
       context: ./wiki-viewer
       dockerfile: Dockerfile
+      # The page-class registry + reconciler shared with the compiler
+      # (research-workbench P1a): COPY --from=recipes in the Dockerfile.
+      additional_contexts:
+        recipes: ../recipes
     image: openbrain-wiki-viewer:local
     container_name: openbrain-wiki-viewer
     logging: # sysadmin log cap (disk-prune-watcher); applies on recreate

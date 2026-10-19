@@ -44,7 +44,22 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // The sweeps are the DELETE half of the wiki_pages contract: a page removed
 // from disk must lose its row, or search/nav would keep serving a dead link
 // (wiki-dynamic-index P1). Best-effort: never fails a compile.
-import { deleteWikiPages, countWikiPages } from "file:///recipes/_shared/wiki-pages.mjs";
+// The pages this service writes itself (the vault-root index, notes/README)
+// get their rows through the same queue + flush as every compiled page (D13:
+// compiled means the row landed).
+import {
+  deleteWikiPages, queueWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
+  isDatabaseUnavailableError,
+} from "file:///recipes/_shared/wiki-pages.mjs";
+// rw-p1a-render attempt 4 (tester NA3-3): a compile the database outage
+// stopped sends one transient notification per outage (lib/outage-notify.mjs).
+import { notify, forgetNotification } from "file:///recipes/_shared/compile-notify.mjs";
+import { createOutageNotifier } from "./lib/outage-notify.mjs";
+// D13 item 4: the files-vs-rows check runs after every compile.
+import { reconcile, formatReport } from "file:///recipes/_shared/reconcile-wiki-pages.mjs";
+// D13 item 6: the compile's open structural failures (skipped until their
+// inputs change; listed in /status and by the reconciliation).
+import { listOpen } from "file:///recipes/_shared/structural-ledger.mjs";
 
 const pexec = promisify(execFile);
 
@@ -151,6 +166,7 @@ const GIT_SSH_COMMAND =
   `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/known_hosts`;
 
 let running = false;
+let outage = null; // createOutageNotifier(...), made once WIKI_OUT_DIR is known (below)
 // When the last compile FINISHED, whatever its outcome. The supervisor uses
 // this rather than "last success" on purpose: a compile that fails but keeps
 // cycling is a different problem from a chain that has stopped cycling.
@@ -195,12 +211,13 @@ async function ensureRepo() {
   // git so the workbench's note commits never stage images.
   const wantIgnore =
     ".quartz-cache/\npublic/\nnode_modules/\n.wikistate.json\nassets/\n" +
-    ".failed-entity-ids.json\nplanned.json\n";
+    ".failed-entity-ids.json\nplanned.json\n.compile-notifications.jsonl\n";
   let curIgnore = "";
   try { curIgnore = await readFile(`${WIKI_GIT_DIR}/.gitignore`, "utf8"); } catch { /* */ }
   if (
     !curIgnore.includes(".wikistate.json") || !curIgnore.includes("assets/") ||
-    !curIgnore.includes(".failed-entity-ids.json") || !curIgnore.includes("planned.json")
+    !curIgnore.includes(".failed-entity-ids.json") || !curIgnore.includes("planned.json") ||
+    !curIgnore.includes(".compile-notifications.jsonl")
   ) {
     await writeFile(`${WIKI_GIT_DIR}/.gitignore`, wantIgnore);
   }
@@ -673,16 +690,24 @@ async function sweepOrphanNotebookPages() {
   let entries;
   try { entries = await readdir(nbDir, { withFileTypes: true }); } catch { return { kept: active.size, deleted: retired }; }
   let deleted = 0;
+  const droppedHubSlugs = [];
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const slug = e.name;
     if (active.has(slug)) continue;
     const hub = `${nbDir}/${slug}/${slug}.md`;
     if (existsSync(hub)) {
-      try { await rm(hub, { force: true }); deleted++; }
-      catch (err) { console.error(`[wiki-service] notebook hub delete failed for ${slug}:`, err?.message || err); }
+      try {
+        await rm(hub, { force: true });
+        deleted++;
+        droppedHubSlugs.push(`content/notebooks/${slug}/${slug}`); // the slug form the entity sweep uses
+      } catch (err) { console.error(`[wiki-service] notebook hub delete failed for ${slug}:`, err?.message || err); }
     }
   }
+  // The DELETE half, as the entity and leaf sweeps do: a swept hub must lose
+  // its row too, or the live renderer keeps presenting it (rw-p1a-render
+  // attempt 2: the hub sweep removed the file and left an orphan row).
+  if (droppedHubSlugs.length) await deleteWikiPages(droppedHubSlugs);
   if (deleted > 0 || retired > 0) {
     console.log(`[wiki-service] orphan-sweep: deleted ${deleted} stale notebook hub(s)${retired ? " + retired topic/+notebook/ layers" : ""}`);
   }
@@ -858,6 +883,15 @@ async function commitNoteEdits() {
   }
 }
 
+function outageNotifier() {
+  if (!outage) {
+    outage = createOutageNotifier({
+      isUnavailable: isDatabaseUnavailableError, notify, forget: forgetNotification, outDir: WIKI_OUT_DIR,
+    });
+  }
+  return outage;
+}
+
 async function compile(reason) {
   if (running) return { skipped: true, reason: "compile already in progress" };
   running = true;
@@ -879,6 +913,14 @@ async function compile(reason) {
     await ingestNotes(prevCommit);
     // Extract from the freshly-ingested notes + any pending sources.
     await drainWorkerQueues();
+    // Rows an earlier cycle left unsynced because the DATABASE was down
+    // (transient infrastructure, notified as such) are written from their
+    // files now, before this cycle's compile (rw-p1a-render attempt 3).
+    try {
+      await retryUnsyncedRows({ outDir: WIKI_OUT_DIR, vaultDir: WIKI_GIT_DIR, log: (m) => console.log(m) });
+    } catch (e) {
+      console.error(`[wiki-service] unsynced-row retry FAILED (kept for the next cycle): ${e?.message || e}`);
+    }
 
     const childEnv = {
       ...ENV,
@@ -941,11 +983,29 @@ async function compile(reason) {
       `[wiki-service] ${fullRebuild ? "FULL" : "incremental"} compile` +
         `${fullRebuild ? "" : ` (${dirty.length} dirty entities)`}`,
     );
-    const { stdout, stderr } = await pexec("node", args, {
-      env: childEnv,
-      maxBuffer: 32 * 1024 * 1024,
-      timeout: COMPILE_TIMEOUT_MS,
-    });
+    // A run that COMPLETED with structural failures or unsynced rows exits
+    // EXIT_COMPLETED_WITH_FAILURES: the pages that compiled landed, the
+    // failures are recorded (structural ledger, notifications), so the rest
+    // of this cycle runs and the watermark advances - a structural failure is
+    // never retried by the next cycle (D13 item 6; it would fail identically).
+    // Any other non-zero exit is a crashed run: the recovery path below.
+    let stdout = "";
+    let stderr = "";
+    let recipeFailed = null;
+    try {
+      ({ stdout, stderr } = await pexec("node", args, {
+        env: childEnv,
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: COMPILE_TIMEOUT_MS,
+      }));
+    } catch (e) {
+      if (e?.code !== EXIT_COMPLETED_WITH_FAILURES) throw e;
+      stdout = String(e.stdout || "");
+      stderr = String(e.stderr || "");
+      const why = stderr.split("\n").filter((l) => /run FAILED|UNSYNCED/.test(l)).slice(-2).join(" | ");
+      recipeFailed = (why || "generate-wiki completed with failures").slice(0, 600);
+      console.error(`[wiki-service] generate-wiki completed WITH FAILURES (exit ${e.code}); the cycle continues: ${recipeFailed}`);
+    }
     let tail = stdout.trim().split("\n").slice(-3).join(" | ");
     // Surface the recipe's per-entity failures: they exit 0 (the rest of the
     // batch still lands) and only ever reached the child's stderr, which this
@@ -956,8 +1016,10 @@ async function compile(reason) {
       console.error(`[wiki-service] recipe stderr tail: ${errLines.join(" | ").slice(0, 600)}`);
     }
 
-    // Notebook → topic synthesis (research lives here, not on entity
-    // pages). Non-fatal: entity pages already written above.
+    // Notebook hub synthesis. Its failure no longer reads as a clean compile
+    // (D13 item 1: the same for notebook synthesis): the rest of the compile
+    // still runs and commits what landed, then the compile reports FAILED.
+    let synthFailed = null;
     try {
       const { stdout: so } = await pexec("node", [SYNTH_PATH], {
         env: childEnv,
@@ -966,14 +1028,15 @@ async function compile(reason) {
       });
       tail += " | " + so.trim().split("\n").slice(-1)[0];
     } catch (e) {
-      console.error("[wiki-service] notebook synthesis failed (non-fatal):",
-        (e?.stderr || e?.message || String(e)).toString().slice(0, 300));
+      synthFailed = (e?.stderr || e?.message || String(e)).toString().slice(-600);
+      console.error("[wiki-service] notebook synthesis FAILED:", synthFailed);
     }
 
     // Vault-root home (Quartz `/`). Compiler-owned, distinct basename
-    // from content/entities.md and notes/. Links across both layers.
-    writeIfChanged(
-      `${WIKI_GIT_DIR}/index.md`,
+    // from content/entities.md and notes/. Links across both layers. Its row
+    // (and notes/README's, written by ensureRepo) is queued every compile,
+    // changed or not (F-T3: both used to be written with no row).
+    const homeMd =
       [
         "---",
         'title: "Knowledge Vault"',
@@ -991,8 +1054,12 @@ async function compile(reason) {
         "Generated pages regenerate from OpenBrain; never hand-edit them — " +
           "edit the source/thought (or your note) and the next compile reflects it.",
         "",
-      ].join("\n"),
-    );
+      ].join("\n");
+    writeIfChanged(`${WIKI_GIT_DIR}/index.md`, homeMd);
+    queueWikiPage(`${WIKI_GIT_DIR}/index.md`, homeMd);
+    try {
+      queueWikiPage(`${NOTES_DIR}/README.md`, await readFile(`${NOTES_DIR}/README.md`, "utf8"));
+    } catch { /* removed by hand: nothing to publish */ }
 
     // Brain → wiki delete-propagation. Run AFTER the recipe writes
     // dirty entity pages and BEFORE we git-commit, so deletions land in
@@ -1032,25 +1099,26 @@ async function compile(reason) {
     // AFTER pages + sweeps, so the on-disk diff is accurate.
     const plannedRemaining = await writePlannedManifest(linkData);
 
-    // wiki_pages reconciliation (wiki-dynamic-index P1): the table is DERIVED
-    // from disk, so a drift between rows and pages means a sync outage - log
-    // it so it is visible before search/nav start serving stale entries.
-    // Tolerance absorbs the normal in-flight window (pages written after the
-    // count, notes not yet compiled). Fix with backfill-wiki-pages.mjs.
+    // This service's own page rows land before the reconciliation measures.
+    const rowsFailed = (await finishWikiPages("wiki-service", { outDir: WIKI_OUT_DIR })) !== 0;
+
+    // Files-vs-rows reconciliation after the compile (D13 item 4): per
+    // page_class, no file without a row, no row older than its file. Non-zero
+    // drift is red and names the slugs; the viewer repairs it on (re)connect.
+    let drift = null;
     try {
-      // ENTITY rows vs ENTITY files: listEntityFiles() skips leaf/notebook
-      // dirs, so an unfiltered row count can never match it.
-      const rows = await countWikiPages("entity");
-      if (rows !== null) {
-        const onDisk = (await listEntityFiles(WIKI_OUT_DIR)).length;
-        if (onDisk > 0 && Math.abs(rows - onDisk) / onDisk > 0.25) {
-          console.error(
-            `[wiki-pages] DRIFT: ${rows} row(s) vs ${onDisk} entity page(s) on disk - ` +
-              `run backfill-wiki-pages.mjs`,
-          );
-        }
-      }
-    } catch { /* reconciliation is diagnostics only */ }
+      const report = await reconcile({ vault: WIKI_GIT_DIR });
+      drift = {
+        drift: report.drift, missing: report.missing.slice(0, 20), stale: report.stale.slice(0, 20),
+        empty: report.empty.slice(0, 20), orphan: report.orphan.slice(0, 20), failed: report.failed.slice(0, 20),
+      };
+      const text = formatReport(report);
+      if (report.drift > 0) console.error(text);
+      else console.log(text.split("\n")[0]);
+    } catch (e) {
+      drift = { error: String(e?.message || e) };
+      console.error(`[reconcile] CANNOT CHECK after compile: ${e?.message || e}`);
+    }
     // Keep the drain converging: this compile consumed a slice (or deferred
     // one for user activity) and more remains → schedule the next attempt
     // (single timer; any compile that runs in the meantime re-schedules
@@ -1097,13 +1165,40 @@ async function compile(reason) {
       last_commit: head || prevCommit || null,
       mode: fullRebuild ? "full" : "incremental",
     }).catch(() => {});
+    outageNotifier().onCompleted(); // the compile got through the database: a database outage is over
 
+    // The compile's failures, each already loud where it happened: a run
+    // that completed with structural failures / unsynced rows, notebook
+    // synthesis, this service's own rows. Open structural failures are
+    // listed (they are skipped until their inputs change).
+    const structuralOpen = (() => {
+      try { return listOpen(WIKI_OUT_DIR).map((e) => ({ slug: e.slug, error: String(e.error).slice(0, 200), first_seen: e.first_seen })); } catch { return []; }
+    })();
+    if (structuralOpen.length) {
+      console.error(`[wiki-service] ${structuralOpen.length} open structural failure(s), not retried until their inputs change: ` +
+        structuralOpen.slice(0, 10).map((e) => e.slug).join(", "));
+    }
+    const failures = [
+      recipeFailed && `generate-wiki: ${recipeFailed}`,
+      synthFailed && `notebook synthesis failed: ${synthFailed.slice(-300)}`,
+      rowsFailed && "wiki-service page rows did not land (see [wiki-pages] above)",
+    ].filter(Boolean);
     lastStatus = {
-      state: "idle", at: new Date().toISOString(), ok: true,
+      state: "idle", at: new Date().toISOString(), ok: failures.length === 0,
       summary: tail, committed, push,
       mode: fullRebuild ? "full" : "incremental",
       pull_ok: pull.ok !== false,
+      reconcile: drift,
+      structural_open: structuralOpen,
+      ...(failures.length ? { error: failures.join(" ; ") } : {}),
     };
+    if (failures.length) {
+      console.error(
+        `[wiki-service] compile FAILED (${failures.length} failure(s); committed=${committed}, ` +
+          `pushed=${push.pushed}, watermark advanced): ${failures.join(" ; ").slice(0, 800)}`,
+      );
+      return { ok: false, committed, summary: tail, error: lastStatus.error };
+    }
     console.log(
       `[wiki-service] compile ok (committed=${committed}, ` +
         `pushed=${push.pushed}): ${tail}`,
@@ -1135,6 +1230,13 @@ async function compile(reason) {
       `[wiki-service] compile FAILED (recovery_committed=${recoveryCommitted}):`,
       msg,
     );
+    // A database outage stopped the compile: ONE transient notification per
+    // outage (NA3-3); the watermark is held - this path never writes state.
+    try {
+      await outageNotifier().onFailed(`${e?.message || ""}\n${msg}`, String(e?.stderr || ""));
+    } catch (ne) {
+      console.error(`[wiki-service] outage notification FAILED: ${ne?.message || ne}`);
+    }
     return { ok: false, error: msg, recovery_committed: recoveryCommitted };
   } finally {
     running = false;

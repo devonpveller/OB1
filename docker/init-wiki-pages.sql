@@ -14,11 +14,16 @@
 --   ~2min and made a new note take minutes to appear.
 --
 --   This table is the compiler PUBLISHING what it wrote, so those indexes
---   become queries instead of whole-vault walks. Rows are derived data:
---   the markdown on disk remains the source of truth and the table can be
---   rebuilt from it at any time (backfill-wiki-pages.mjs).
+--   become queries instead of whole-vault walks.
 --
--- WRITERS (all best-effort; a failed sync must never abort a compile)
+--   Since research-workbench D13 (P1a) the ROW IS WHAT IS PRESENTED: the
+--   viewer renders every page from its row (no row = the pending-compile
+--   state). Compile owns both the file (the durable copy: git vault,
+--   backups) and the row; a compile whose rows do not land FAILS
+--   (recipes/_shared/wiki-pages.mjs), and reconcile-wiki-pages.mjs measures
+--   files vs rows per page_class and repairs drift on (re)connect.
+--
+-- WRITERS
 --   recipes/entity-wiki/generate-wiki.mjs        entity pages
 --   recipes/_shared/source-leaf.mjs              thought/source leaves
 --   recipes/wiki-synthesis/.../synthesize-notebooks.mjs   notebook hubs
@@ -44,6 +49,12 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
   links       jsonb NOT NULL DEFAULT '[]'::jsonb,
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- The page's frontmatter as the compiler wrote it (P1a: the row is what is
+-- presented, so it carries what the page shows - the ids the hydrated cards
+-- key on, dates, aliases, cssclasses). Additive; a row written before this
+-- column existed reads as {} until its next compile or the repair pass.
+ALTER TABLE wiki_pages ADD COLUMN IF NOT EXISTS frontmatter jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 -- Weighted FTS: a title hit outranks a body hit. GENERATED ALWAYS means the
 -- writers never compute it and it can never drift from title/body.

@@ -210,6 +210,10 @@ services:
   preview-viewer:
     build:
       context: ./wiki-viewer
+      # The page-class registry + reconciler shared with the compiler
+      # (research-workbench P1a): COPY --from=recipes in the Dockerfile.
+      additional_contexts:
+        recipes: ../recipes
     image: openbrain-wiki-viewer:preview
     depends_on:
       preview-seed:

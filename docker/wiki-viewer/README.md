@@ -9,21 +9,29 @@ user-visible bug.
 
 ```
 compile pipeline (node, openbrain-wiki)      workbench (Deno, openbrain-workbench)
-  writes content/* pages                        writes notes/* files (+ git)
-        │                                            │
-        ├────────────► /wiki vault (files = SOURCE OF TRUTH) ◄────────────┤
+  writes content/* page FILE + its ROW          writes notes/* files (+ git) + rows
+        │  (rows flushed per batch; unsynced         │
+        │   rows FAIL the run - D13 item 1)          │
+        ├────────────► /wiki vault (the durable copy) ◄───────────────────┤
         │                                            │
         └── recipes/_shared/wiki-pages.mjs           └── repositories/notes.ts
-              upserts wiki_pages rows                      syncNoteRow/deleteNoteRow
                         │                                        │
                         └────────► wiki_pages (Postgres) ◄───────┘
-                                   DERIVED index: search / nav / graph / fallback render
+                                   WHAT IS PRESENTED: every page, nav, graph, search
+              recipes/_shared/reconcile-wiki-pages.mjs: files vs rows per page_class
+              (after each compile; viewer health probe; repair pass on (re)connect)
 
 viewer (openbrain-wiki-viewer, node:22 + Quartz 4.5.1 fork)
-  internal builder (quartz build --serve, watcher polls the vault)
-  → /quartz/public → completeness-gated snapshot → /srv/current (named volume)
-  serve.mjs serves: snapshot → live build → wiki_pages DB render → fresh file
-  → planned status → themed not-available. NEVER a bare 404 for a page URL.
+  serve.mjs: every PAGE URL -> lib/live-route.mjs -> page-class registry
+    -> the row rendered with the Quartz chrome          x-wiki-render: db
+    -> known page, no row - or a row not presentable as-is
+       (stale, future-dated, empty body): pending-compile x-wiki-render: pending
+    -> database not answering: ONE screen, every URL    x-wiki-render: connecting|unreachable
+    -> nothing known: themed not-available              x-wiki-render: not-available
+    -> a renderer bug outside an isolated entry         x-wiki-render: error (500)
+  internal builder (WIKI_BUILDER=1, default): quartz build --serve -> idle-gated
+  snapshot /srv/current: ONLY the client bundle + static assets are served from it
+  (P1c freezes the bundle and removes the builder). Never a bare 404 for a page URL.
 
 ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   /workbench/* → openbrain-workbench:8000 (X-Brain-Key injected server-side)
@@ -32,9 +40,31 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 ## Invariants (violating any of these re-ships a known bug)
 
-1. **Files are the source of truth; `wiki_pages` is derived.** Losing a row
-   must never fail a file op (sync helpers are best-effort), and
-   `recipes/backfill-wiki-pages.mjs` can rebuild the whole table.
+1. **Compile owns both; the row is what is presented; the file is the
+   durable copy** (research-workbench D13, settled 2026-09-25; rewritten from
+   "files are the source of truth, rows derived"). Ingest -> compile ->
+   present: a page is offered only once its row landed. A compile whose rows
+   do not land FAILS (non-zero exit, the unsynced count and first slugs in the
+   log) - never "compile ok" with unsynced rows. No row = the typed
+   `pending-compile` state, never an empty leaf and never a render of the
+   file. **Stale is a miss** (D13 item 5): a row older than its file, a row
+   dated in the future (its time cannot show a newer file replaced it) or a
+   row with an empty body (folder/tag indexes excepted) is pending too - the
+   same `rowState()` + `isEmptyBody()` rules the reconciliation applies. A row
+   whose body is empty while its FILE is empty too (a note that is frontmatter
+   only) is a faithfully empty page and is presented as Quartz presents it (an
+   empty article), not pending and not drift. A transcluded page (`![[page]]`)
+   is its row too; a known page without a presentable row is the
+   pending-compile marker inside the transclude block. Drift (file without
+   row, stale / future / empty row, row without file, an open structural
+   compile failure) is measured per page_class by
+   `recipes/_shared/reconcile-wiki-pages.mjs` and repaired on (re)connect,
+   never on read. A structural compile failure is not retried until its
+   inputs change (`recipes/_shared/structural-ledger.mjs`; manual clear:
+   `generate-wiki.mjs --clear-structural <ids|all>` - an id that is not open
+   exits 1). Every ledger change is one locked read-modify-write (a lockfile
+   beside it), so racing compiles lose nothing and a clear is never written
+   back.
 2. **Every notes mutation syncs its row — through the chokepoint.** write,
    move, trash, restore, recover, empty-trash ALL call
    `syncNoteRow`/`deleteNoteRow` in `repositories/notes.ts`. The 2026-08-28
@@ -48,15 +78,17 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
    unresolvable targets raw (self-healing if the page appears later). Without
    this the graph dropped every hand-written link (the "3 nodes local, 2
    fullscreen" report). Generated content pages already write full slugs.
-4. **ONE editor.** The DB/fresh fallback for a note emits the SAME DOM
-   contract a built note page emits (`NotesEditor.tsx`: `data-notes-root` +
-   `data-wb-edit` button) with every value DERIVED from the rendered slug,
-   and loads the real bundle. Identity attributes are either generated from
+4. **ONE editor.** The live page for a note (and for a source) emits the SAME
+   DOM contract a built page emits (`NotesEditor.tsx`: `data-notes-root` +
+   `data-wb-edit` button; `SourceEditor.tsx`: `data-source-editor`) with every
+   value DERIVED from the slug / row being rendered, and loads the real
+   bundle (`lib/components.mjs`). Identity attributes are either generated from
    the slug being rendered or absent — never inherited from other markup
    (inherited identity = editing the WRONG note = silent data loss; that's
    audit A-1's actual lesson). No bespoke second editor, ever again.
-5. **Page fallbacks are `Cache-Control: no-store`.** A transient fallback
-   cached by CF/browser pins itself over the real page.
+5. **State pages are `Cache-Control: no-store`** (pending-compile, the
+   database screen, not-available). A transient state cached by CF/browser
+   pins itself over the real page.
 6. **All inference through the LiteLLM gateway** (repo-wide rule) and all
    client → workbench calls through caddy's `/workbench/*` (key injected
    server-side; keys never appear in client JS).
@@ -67,6 +99,28 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
    limit ≤ 800 (past ~1000 the d3 simulation stops being interactive).
    Local sidebar and fullscreen are the SAME query at different depth/limit —
    fullscreen must render a superset of local.
+
+8. **Page classes are a REGISTRY** (research-workbench expansion by
+   registration). The renderer never names a class: `lib/page-classes/*.mjs`
+   entries (one renderer template each) resolve a request in priority order;
+   their compile halves are `recipes/_shared/page-classes.mjs` (one compile
+   rule each, the `page_class` the row carries). Adding a class = one entry on
+   each side; no existing entry changes (`live-render.test.mjs` proves it).
+   Names AND priorities are unique: an entry file that reuses a name, ties a
+   priority, has no default export or an invalid shape FAILS the load and
+   the container exits (a duplicate never silently replaces a built-in). An
+   entry whose `resolve()`/`template()` throws is isolated: logged, counted,
+   named by `/__health`, and resolution falls through to the next entry.
+9. **The database being unreachable is a front-end condition, not a page
+   state**: one screen (`connecting to database` / `database unreachable`)
+   for every URL and a degraded `/__health`, never a pending page, never a
+   file render.
+10. **Raw HTML in a body is dropped** (`lib/render-page.mjs`): only the HTML
+   the transform set itself generates (escaped) reaches the page. The Quartz
+   builder renders raw HTML; the live renderer never does. **No
+   `javascript:`/`vbscript:`/`data:` URL** survives into an article attribute
+   (a link becomes its text, an image its alt; a `data:image/<raster>` src
+   is allowed), and mermaid runs with `securityLevel: "strict"` (Dockerfile).
 
 ## Testing discipline
 
@@ -81,9 +135,16 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 - **Verification enters through the user's door.** Drive caddy
   (`http://caddy:8446` from any obnet container), not the container ports,
   and create notes via the workbench API the way the UI does (UI-created
-  notes have rows and take the DB-render path; disk-written test files take
-  the fresh path — validating the wrong path once shipped a "feature" real
-  notes never saw). RED before the fix, GREEN after, in the deployed artifact.
+  notes have rows; a disk-written test file with no row is `pending` - there
+  is no file-render path any more). RED before the fix, GREEN after, in the
+  deployed artifact.
+- **The disposable P1a environment** (`test/p1a-env.sh`): a private network,
+  a fresh Postgres seeded only with the committed synthetic fixtures
+  (`test/fixtures/`), the real Caddyfile + PostgREST, a stub LLM
+  (`test/stub-llm.mjs`), and the `:wt-<id>` image; `test/parity-diff.mjs`
+  diffs every rendered body against the built page for the 27-URL list;
+  `test/run-acceptance.sh` runs every case (names, subnet and port are
+  parameters: `P1A_PREFIX`, `P1A_TAG`, `P1A_SUBNET`, `P1A_PORT`).
 
 ## Dev workflow
 
@@ -131,8 +192,7 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 
 - **Sidecar, not live iteration** (each viewer deploy costs a ~25-min cold
-  rebuild during which built-page takeover stalls; the DB fallback keeps
-  serving):
+  rebuild of the bundle snapshot; pages are live from their rows throughout):
   `docker run --rm -p 127.0.0.1:8899:8080 --entrypoint node -v open-brain_openbrain-wiki-data:/wiki:ro -v open-brain_wiki-viewer-srv:/srv:ro --network open-brain_obnet openbrain-wiki-viewer:local /quartz/serve.mjs`
   (`--entrypoint node` is REQUIRED — otherwise a competing builder runs at
   400% CPU). Batch changes; deploy ONCE.
@@ -147,11 +207,10 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 ## Known windows / accepted behaviour
 
-- After a viewer deploy, the cold rebuild (~25 min at 41k pages) delays
-  built-page takeover; pages and the note editor serve from the DB fallback
-  throughout. Built FOLDER LISTINGS are static HTML and can lag reality
-  between rebuilds — the live nav (Explorer) and trash strike markers are the
-  fresh views.
+- After a viewer deploy every page is live from its row at once; the cold
+  rebuild (~25 min at 41k pages) only delays a NEW client bundle. Folder and
+  tag listings are generated from the rows too (the site index refreshes with
+  the nav index, WIKI_NAV_TTL_MS).
 - Trashed notes stay listed (struck through) until the nightly cleanup
   hard-removes them; `empty-trash` is the manual equivalent. Removed notes
   are recoverable from git history via the recover endpoint.
