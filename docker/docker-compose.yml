@@ -246,6 +246,22 @@ services:
       - llm-net
       - search-gw-net   # reach the `vpn` proxy (ai-stack_default) for URL fetches (eh-ingest)
     restart: unless-stopped
+    # mcpo-resilience (2026-10-19): the MCP server must ANSWER before the tool proxies start,
+    # or they load an empty server list. The probe is an MCP `initialize` with the container's
+    # own MCP_ACCESS_KEY (the full lane): it passes only when the HTTP server is up, the key
+    # lane resolves and the transport dispatches. A bare GET would be a 401 from the same
+    # server and prove less; the server has no /health route. initialize touches no DB and
+    # no model. The key is read from the container env, never written into this file.
+    healthcheck:
+      test:
+        - CMD
+        - deno
+        - eval
+        - "const r = await fetch('http://127.0.0.1:8000/', {method: 'POST', headers: {'content-type': 'application/json', 'accept': 'application/json, text/event-stream', 'x-brain-key': Deno.env.get('MCP_ACCESS_KEY') ?? ''}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'initialize', params: {protocolVersion: '2025-03-26', capabilities: {}, clientInfo: {name: 'healthcheck', version: '1'}}})}); Deno.exit(r.ok ? 0 : 1)"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # Combined extensions MCP server: all 6 OB1 extensions (39 tools),
   # ported to raw PostgreSQL. Shares openbrain-db; no model/internet
@@ -668,8 +684,16 @@ services:
       dockerfile: Dockerfile
     image: openbrain-mcpo:local
     container_name: openbrain-mcpo
+    # mcpo-resilience: start only once openbrain-mcp ANSWERS (its healthcheck above), and
+    # run mcpo under mcpo-guard.py, which exits when the proxy serves no tools so compose
+    # restarts it (see the healthcheck below). The guard is mounted, not built into the
+    # image: no rebuild of openbrain-mcpo:local. `command` is mcpo's own arguments.
     depends_on:
-      - openbrain-mcp
+      openbrain-mcp:
+        condition: service_healthy
+    entrypoint: ["python", "/guard/mcpo-guard.py"]
+    environment:
+      MCPO_GUARD_URL: http://127.0.0.1:8000/open-brain/openapi.json
     command:
       - --config
       - /config/mcpo.config.json
@@ -681,16 +705,25 @@ services:
       - ${MCPO_API_KEY}
     volumes:
       - ./mcpo.config.json:/config/mcpo.config.json:ro
+      - ./mcpo/mcpo-guard.py:/guard/mcpo-guard.py:ro
     networks:
       - obnet
       - llm-net
     restart: unless-stopped
+    # mcpo-resilience (2026-10-19): healthy ONLY when the proxy serves at least one tool.
+    # mcpo loads its MCP servers once, at start; started before its upstream answered it
+    # served an openapi.json with "paths": {} for good, and the old probe (fetch it, any 200)
+    # called that healthy. Docker does not restart an unhealthy container, so the restart is
+    # mcpo-guard.py's (entrypoint above): it exits when the document stays empty, and
+    # `restart: unless-stopped` brings the proxy back to load the tools afresh. This probe
+    # is the visible half: `docker ps`, stack.py health and check-openbrain-health read it.
+    # start_period covers a real tool load.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/open-brain/openapi.json')"]
+      test: ["CMD", "python", "-c", "import json,sys,urllib.request; d = json.load(urllib.request.urlopen('http://localhost:8000/open-brain/openapi.json', timeout=8)); sys.exit(0 if d.get('paths') else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 90s
 
   openbrain-mcpo-ext:
     # Same derived image as openbrain-mcpo (see the note above it).
@@ -699,8 +732,18 @@ services:
       dockerfile: Dockerfile
     image: openbrain-mcpo:local
     container_name: openbrain-mcpo-ext
+    # Same two rules as openbrain-mcpo. Its upstream is openbrain-ext; it ALSO waits on
+    # openbrain-mcp healthy (the operator's rule for both proxies, and the gateway the
+    # extensions stack shares its host with). openbrain-ext keeps its plain start order
+    # (no healthcheck of its own: its render is unchanged), so the guard covers that gap.
     depends_on:
-      - openbrain-ext
+      openbrain-ext:
+        condition: service_started
+      openbrain-mcp:
+        condition: service_healthy
+    entrypoint: ["python", "/guard/mcpo-guard.py"]
+    environment:
+      MCPO_GUARD_URL: http://127.0.0.1:8000/open-brain-extensions/openapi.json
     command:
       - --config
       - /config/mcpo-ext.config.json
@@ -712,16 +755,25 @@ services:
       - ${MCPO_API_KEY}
     volumes:
       - ./mcpo-ext.config.json:/config/mcpo-ext.config.json:ro
+      - ./mcpo/mcpo-guard.py:/guard/mcpo-guard.py:ro
     networks:
       - obnet
       - llm-net
     restart: unless-stopped
+    # mcpo-resilience (2026-10-19): healthy ONLY when the proxy serves at least one tool.
+    # mcpo loads its MCP servers once, at start; started before its upstream answered it
+    # served an openapi.json with "paths": {} for good, and the old probe (fetch it, any 200)
+    # called that healthy. Docker does not restart an unhealthy container, so the restart is
+    # mcpo-guard.py's (entrypoint above): it exits when the document stays empty, and
+    # `restart: unless-stopped` brings the proxy back to load the tools afresh. This probe
+    # is the visible half: `docker ps`, stack.py health and check-openbrain-health read it.
+    # start_period covers a real tool load.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/open-brain-extensions/openapi.json')"]
+      test: ["CMD", "python", "-c", "import json,sys,urllib.request; d = json.load(urllib.request.urlopen('http://localhost:8000/open-brain-extensions/openapi.json', timeout=8)); sys.exit(0 if d.get('paths') else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 90s
 
   # PostgREST over openbrain-db — the API surface the wiki-compiler
   # scripts expect (they were written for Supabase /rest/v1). Local

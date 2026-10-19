@@ -429,6 +429,43 @@ nothing else. `./mcpo/repro/repro_spin.py` is the disposable rig that
 reproduces the spin on the stock digest and shows the derived image idle;
 rerun it before dropping the layer for a newer mcpo release.
 
+### Tool servers: a proxy that loaded zero tools (mcpo-resilience, 2026-10-19)
+
+**Failure mode.** mcpo loads its MCP servers **once, at start**. After the 2026-10-18 Docker
+Desktop restart both proxies started before `openbrain-mcp` answered, loaded an empty
+server list and served `/<name>/openapi.json` with `"paths": {}` for good. The old
+healthcheck only fetched that file (HTTP 200 either way), so both read **healthy**; Open
+WebUI listed the servers as connected while the models had no Open Brain tools, until a
+human restarted them. Docker's own restart-on-boot ignores `depends_on` (it restarts each
+container by policy), so ordering alone cannot prevent it.
+
+**What stops it now** (three rules, each pinned by `mcpo/resilience/test_mcpo_resilience.py`):
+
+1. `openbrain-mcp` has a healthcheck that proves it answers (an MCP `initialize` with its own
+   key, the server has no `/health`), and both proxies `depends_on` it with
+   `condition: service_healthy` (a `compose up` / recovery starts them in order).
+2. Each proxy's healthcheck **fails unless its openapi.json has more than 0 paths**
+   (`start_period: 90s` covers a real tool load). This is the visible half: `docker ps`,
+   `stack.py health` and `check-openbrain-health.ps1` read it.
+3. Docker does **not** restart an unhealthy container (`restart: unless-stopped` reacts to an
+   exit), so the proxies run under `./mcpo/mcpo-guard.py` (mounted read-only; the image is not
+   rebuilt): it starts `mcpo` with the unchanged `command`, and if its own openapi.json shows
+   0 paths on 3 reads 15 s apart (after a 90 s grace) it stops mcpo and exits 1; compose
+   restarts the container, which loads the tools afresh. A proxy started before its upstream
+   therefore ends with the full tool set once the upstream is up, with no human step.
+
+**Check it.** `scripts/checks/check-openbrain-health.ps1` prints the tool count per proxy
+(0 = fault; `-Repair` restarts that proxy), `stack.py health` probes the same count. By hand:
+`docker exec openbrain-mcpo python -c "import json,urllib.request; print(len(json.load(urllib.request.urlopen('http://localhost:8000/open-brain/openapi.json'))['paths']))"`.
+
+**Deploy** (the compose file changes, the image does not): recreate `openbrain-mcp` (gains a
+healthcheck) and the two proxies in a window:
+`docker compose -f OB1/docker/docker-compose.yml up -d openbrain-mcp openbrain-mcpo openbrain-mcpo-ext`.
+
+**Test** (stdlib `unittest`; Docker needed for the compose scenarios, which run only
+stand-in images on one internal network `10.231.77.0/24`, never a live container):
+`OB1_BASE_REF=<pin> python mcpo/resilience/test_mcpo_resilience.py`.
+
 ### Connect from Claude Desktop / other MCP clients
 
 ```json
