@@ -1801,6 +1801,15 @@ networks:
   # this stack and every model/DB URL points only at local containers.
   obnet:
     driver: bridge
+  # default: the implicit network of services that name no network (open-brain_default).
+  # Fixed subnet (net-pins, 2026-10-19): 10.241.4.0/24 from the allocation table in the
+  # ai-stack repo, documentation/runbooks/DOCKER-SUBNETS.md. Outside 192.168.0.0/16 (incident
+  # 2026-10-17: that range contains the home LAN) and outside the daemon default pools.
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.241.4.0/24
   # intake I5: the intake service's own network - INTERNAL (no gateway, no route out) with an
   # explicit subnet outside 192.168.0.0/16 and outside the daemon's default address pools
   # (172.16.0.0/12, 10.240.0.0/16; incident 2026-10-17, the home LAN is 192.168.1.x). Its only
