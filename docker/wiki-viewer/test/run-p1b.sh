@@ -311,7 +311,10 @@ bash "$E" node -e "
 T 300 bash "$E" node /ob1/recipes/_shared/backfill-wiki-pages.mjs 2>&1 | tail -1
 quiet=$(( 4 * ${WIKI_NAV_TTL_MS:-30000} / 1000 )); echo "quiet: ${quiet} s, no reads"; sleep "$quiet"
 # the FIRST read of each, nothing in between
-r_tag="$(bash "$B" fget /tags/fixture-tag)"; c2="$(items /tags/fixture-tag)"; f2="$(items /tags/fresh-one)"; p2="$(items /content/person/)"; n2="$(navtotal notes/adv3)"; np2="$(navtotal content/person)"
+# the very first request carries both the count and the ETag (ONE response: a second request could
+# already see the refresh the first one started - the RED behaviour)
+r_tag="$(BODY=1 bash "$B" fget /tags/fixture-tag)"; c2="$(echo "$r_tag" | grep -oE '[0-9]+ items? with this tag' | head -1 | cut -d' ' -f1)"; r_tag="$(echo "$r_tag" | head -1)"
+f2="$(items /tags/fresh-one)"; p2="$(items /content/person/)"; n2="$(navtotal notes/adv3)"; np2="$(navtotal content/person)"
 e2="$(echo "$r_tag" | sed -E 's/.*etag=([^ ]*).*/\1/')"
 s_tag="$(sqltag fixture-tag)"; s_fresh="$(sqltag fresh-one)"; s_p="$(sqlfolder content/person)"; s_n="$(sqlfolder notes/adv3)"
 echo "first reads: /tags/fixture-tag $c2 (sql $s_tag, etag $e2)  /tags/fresh-one $f2 (sql $s_fresh)  /content/person/ $p2 (sql $s_p)  nav notes/adv3 ${n2:-none} (sql $s_n)  nav content/person $np2"
