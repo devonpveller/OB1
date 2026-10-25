@@ -335,3 +335,117 @@ export function siteIndexFor(nav) {
   if (_memo.rows !== nav.rows) _memo = { rows: nav.rows, site: buildSiteIndex(nav.rows, nav.etag) };
   return _memo.site;
 }
+
+// ── the page thread's DELTA (rw-p1b-ready fix round 1) ──────────────────────
+// Tester attempt 1, defect 3: folder and tag listings were rebuilt only by a
+// FULL walk + build that a reader's request started, so after a quiet period
+// the first readers got the old snapshot (116 reads / 35.9 s at ~400k rows)
+// with its old ETag. Now a background tick (lib/nav-index.mjs) applies the
+// rows written since the snapshot IN PLACE, here, so a listing follows a write
+// within the tick period, whatever the vault size; the full rebuild still
+// runs behind it for what a delta cannot know (another page's link that now
+// resolves to a NEW page - backlinks - and deletions).
+//
+// Applied in place: an existing row's title, tags (tag listings), links (its
+// own backlinks contributions; byBase is unchanged by an update), dates and
+// page class; a NEW page in an EXISTING folder whose basename and URL are new
+// (no alias, no permalink). Anything else - a deletion (the count grew by a
+// different number than the new pages read), two files on one URL, an alias
+// or permalink change, a new folder, a basename another page already has -
+// is { ok: false } and the caller rebuilds. { needsRebuild } = a page was
+// added (other pages' links to it are resolved only by a rebuild).
+const slugCmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+function sortedInsert(list, s) {
+  let lo = 0, hi = list.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (slugCmp(list[mid], s) < 0) lo = mid + 1; else hi = mid; }
+  if (list[lo] !== s) list.splice(lo, 0, s);
+}
+function sortedRemove(list, s) {
+  let lo = 0, hi = list.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (slugCmp(list[mid], s) < 0) lo = mid + 1; else hi = mid; }
+  if (list[lo] === s) list.splice(lo, 1);
+}
+const tagPrefixes = (tags) => {
+  const out = new Set();
+  for (const t of tags) { const segs = t.split("/"); for (let i = 1; i <= segs.length; i++) out.add(segs.slice(0, i).join("/")); }
+  return out;
+};
+function resolvedTargets(s, links, byBase) {
+  const opts = { strategy: "shortest", byBase };
+  const out = new Set();
+  for (const target of links) {
+    try { out.add(simplifySlug(canonicalDest(s, transformLink(s, String(target), opts)))); } catch { /* as the build: skipped */ }
+  }
+  return out;
+}
+const sameArr = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+export function applySiteDelta(site, rows, expectedNew) {
+  if (!site || site.navOnly || !site.byTag) return { ok: false };
+  const plan = [];
+  let fresh = 0;
+  for (const r of rows) {
+    if (!r?.slug || !isPagePath(`${r.slug}.md`)) continue;
+    const url = urlSlugOf(r.slug);
+    const next = {
+      title: r.title || r.slug.split("/").pop(), tags: normalizeTags(r.tags), links: Array.isArray(r.links) ? r.links : [],
+      updated_at: r.updated_at || null, date: r.fm_date || null, page_class: r.page_class || null,
+      aliases: asArray(r.aliases ?? r.alias ?? r.frontmatter?.aliases ?? r.frontmatter?.alias),
+      permalink: permalinkOf(r.permalink ?? r.frontmatter?.permalink),
+    };
+    const cur = site.bySlug.get(url);
+    if (cur) {
+      if (cur.rowSlug !== r.slug) return { ok: false }; // two files, one URL
+      if (!sameArr(cur.aliases || [], next.aliases) || (cur.permalink || null) !== next.permalink) return { ok: false };
+      if (cur.title === next.title && sameArr(cur.tags, next.tags) && sameArr(cur.links, next.links) && cur.updated_at === next.updated_at &&
+          cur.date === next.date && cur.page_class === next.page_class) continue;
+      plan.push({ kind: "update", url, cur, next });
+      continue;
+    }
+    fresh++;
+    const parts = url.split("/");
+    const name = parts.at(-1), dir = parts.slice(0, -1).join("/");
+    const node = site.folders.get(dir);
+    if (!node || name === "index" || parts[0] === "tags" || site.folders.has(url) || node.folders.has(url) ||
+        next.aliases.length || next.permalink || site.byBase.has(name) || site.aliases?.has(url) || site.rowSlugOf.has(url)) return { ok: false };
+    if (plan.some((p) => p.kind === "add" && p.url.split("/").at(-1) === name)) return { ok: false };
+    plan.push({ kind: "add", url, row: r, next, dir, name });
+  }
+  if (fresh !== expectedNew) return { ok: false };
+  let added = 0, updated = 0;
+  const touched = new Set();
+  const tagAdd = (s, prefixes) => { for (const p of prefixes) { const l = site.byTag.get(p); if (l) sortedInsert(l, s); else site.byTag.set(p, [s]); touched.add(`tags/${p}`); } };
+  const tagDel = (s, prefixes) => { for (const p of prefixes) { const l = site.byTag.get(p); if (!l) continue; sortedRemove(l, s); if (!l.length) site.byTag.delete(p); touched.add(`tags/${p}`); } };
+  const blAdd = (s, targets) => { for (const t of targets) { const l = site.backlinks.get(t); if (l) sortedInsert(l, s); else site.backlinks.set(t, [s]); } };
+  const blDel = (s, targets) => { for (const t of targets) { const l = site.backlinks.get(t); if (!l) continue; sortedRemove(l, s); if (!l.length) site.backlinks.delete(t); } };
+  for (const p of plan) {
+    if (p.kind === "add") {
+      // the new page first, so its own links resolve against a byBase that has it
+      site.bySlug.set(p.url, { slug: p.url, rowSlug: p.row.slug, ...p.next });
+      site.rowSlugOf.set(p.url, p.row.slug);
+      sortedInsert(site.slugs, p.url);
+      site.allSlugs.push(p.url);
+      site.byBase.set(p.name, [p.url]);
+      const node = site.folders.get(p.dir);
+      node.files = new Set([...node.files, p.url].sort(slugCmp));
+      tagAdd(p.url, tagPrefixes(p.next.tags));
+      blAdd(p.url, resolvedTargets(p.url, p.next.links, site.byBase));
+      touched.add(p.dir);
+      added++;
+    } else {
+      const { cur, next, url } = p;
+      const oldT = tagPrefixes(cur.tags), newT = tagPrefixes(next.tags);
+      tagDel(url, [...oldT].filter((t) => !newT.has(t)));
+      tagAdd(url, [...newT].filter((t) => !oldT.has(t)));
+      if (!sameArr(cur.links, next.links)) {
+        const oldL = resolvedTargets(url, cur.links, site.byBase), newL = resolvedTargets(url, next.links, site.byBase);
+        blDel(url, [...oldL].filter((t) => !newL.has(t)));
+        blAdd(url, [...newL].filter((t) => !oldL.has(t)));
+      }
+      Object.assign(cur, { title: next.title, tags: next.tags, links: next.links, updated_at: next.updated_at, date: next.date, page_class: next.page_class });
+      touched.add(url.split("/").slice(0, -1).join("/"));
+      updated++;
+    }
+  }
+  return { ok: true, changed: plan.length > 0, added, updated, needsRebuild: added > 0, touched: touched.size };
+}

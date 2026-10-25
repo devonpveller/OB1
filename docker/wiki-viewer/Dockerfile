@@ -179,6 +179,13 @@ RUN set -e; for f in NotesEditor explorer search; do \
 COPY patches/graph-api.mjs /tmp/graph-api.mjs
 RUN node /tmp/graph-api.mjs
 RUN node_modules/.bin/esbuild --log-level=error --outfile=/dev/null quartz/components/scripts/graph.inline.ts
+# No client script reads the whole-vault index on a navigation (rw-p1b-ready
+# fix round 1, tester attempt 1 defect 1: the graph's fallback awaited
+# fetchData on every folder and tag page). fetchData stays a lazy thenable in
+# renderPage.tsx with no reader; the notes editor reads /static/graphIndex.json
+# only when the editor opens (findings R5).
+RUN set -e; ! grep -rnE 'await fetchData|fetchData[.]then|[(]fetchData[)]' quartz/components/scripts/; \
+  grep -q 'the page alone - never the whole-vault index' quartz/components/scripts/graph.inline.ts
 
 # Register overlay components. Append-only re-export needs NO upstream anchor —
 # Quartz's `import * as Component from "./components"` picks up every named

@@ -38,8 +38,10 @@ viewer (openbrain-wiki-viewer, node:22 + Quartz 4.5.1 fork)
   every page; no "Building the wiki" splash, no 503 for readiness. HEALTH:
   /__health (200 ok | 503 degraded: database not up, reconciliation drift,
   a broken page class, a render error) = the Docker/compose healthcheck.
-  client bundle + static assets: /srv/current when the builder published one,
-  else the copy BAKED into the image (/quartz/bundle, emitted at image build)
+  client bundle + static assets: the copy BAKED into the image (/quartz/bundle,
+  emitted at image build) ALWAYS wins; /srv/current serves only what the image
+  does not carry (vault attachments). A stale snapshot on the volume can never
+  put a retired bundle in front of a reader (fix round 1, tester defect 2)
   internal builder (WIKI_BUILDER=1, default): quartz build --serve -> idle-gated
   snapshot /srv/current (the parity target; P1c freezes the bundle and removes
   the builder). Never a bare 404 for a page URL. Pages carry ETag W/"p-..."
@@ -51,7 +53,9 @@ viewer (openbrain-wiki-viewer, node:22 + Quartz 4.5.1 fork)
   so the page thread's GC never delays it); the browser reaches it as
   /workbench/nav (the workbench forwards to :8082; :8080/__nav proxies). Search
   (incl. #tag) is /workbench/search. /static/graphIndex.json is live from the
-  rows, read only by the graph's offline fallback and the notes autocomplete.
+  rows (streamed in slices), read only by the notes editor's autocomplete when
+  the editor opens; the graph never falls back to it (a page without a graph
+  answer - a folder or tag page - draws itself alone).
 
 ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   /workbench/* → openbrain-workbench:8000 (X-Brain-Key injected server-side)
@@ -180,25 +184,25 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   vault-INDEPENDENT: `postscript.js` is the same file whether the vault holds
   1 page or 76,542, and since P1b every image CARRIES its own bundle
   (`/quartz/bundle`, emitted by the image's Quartz at build time from the
-  synthetic fixture vault). A viewer with no published snapshot serves that
-  copy; a published `/srv/current` takes precedence while the builder runs.
+  synthetic fixture vault). The viewer ALWAYS serves its own image's copy -
+  a published `/srv/current` no longer takes precedence (rw-p1b-ready fix
+  round 1: a stale snapshot from an older image served the retired bundle) -
+  so a client change ships with the image, and swapping a file in
+  `/srv/current` changes nothing a reader sees.
 
-  So iterate by taking the bundle out of the candidate image and swapping it in:
+  So iterate by taking the bundle out of the candidate image and checking it
+  in a drill viewer of that image (or bind-mount the file over
+  `/quartz/bundle/postscript.js` in a DRILL container, never the live one):
 
   ```sh
   # 1. the candidate image's bundle (no build needed - it is in the image)
   docker run --rm --entrypoint sh -v bundleout:/out <image> -c 'cp /quartz/bundle/postscript.js /out/postscript.js'
 
-  # 2. if the live viewer has a published snapshot (/srv/current exists: the
-  #    builder is on), swap it in there - temp file + RENAME, never edit in
-  #    place: snapshots share files by HARDLINK, so an in-place write would
-  #    silently rewrite other snapshots too. With NO snapshot the live viewer
-  #    serves its own image's baked bundle and the change ships with the image.
-  docker run --rm -v bundleout:/out -v open-brain_wiki-viewer-srv:/srv alpine sh -c '
-    test -e /srv/current || { echo "no snapshot: the image bundle serves - deploy the image"; exit 0; }
-    T=$(readlink -f /srv/current)          # absolute already - do not prefix /srv
-    cp /out/postscript.js "$T/postscript.js.new"
-    mv "$T/postscript.js.new" "$T/postscript.js"'
+  # 2. the bundle a viewer serves is the one its IMAGE carries (baked first,
+  #    since fix round 1): deploy the candidate image, or for a drill run it
+  #    with  -v "$PWD/postscript.js:/quartz/bundle/postscript.js:ro"  on its
+  #    own network. Never write into the live /srv/current (it no longer
+  #    serves the bundle; snapshots share files by HARDLINK).
 
   # 3. verify THROUGH CADDY, not the container port (the explorer's nav too)
   docker exec openbrain-wiki-viewer node -e 'fetch("http://caddy:8446/postscript.js").then(r=>r.text()).then(j=>console.log(j.length, /<marker>/.test(j)))'
@@ -239,10 +243,15 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 - After a viewer deploy every page is live from its row at once, with the
   image's own bundle; the builder's cold rebuild (~25 min at 41k pages) only
-  decides when /srv/current replaces it. Folder and tag listings and the
-  explorer's folders are generated from the rows too (the site index is
-  rebuilt in the nav refresh, off the request path, when the table's
-  signature - row count + newest updated_at - changes; WIKI_NAV_TTL_MS).
+  only refreshes the vault attachments in /srv/current (the bundle is the
+  image's). Folder and tag listings and the explorer's folders are generated
+  from the rows and follow a write within WIKI_NAV_TTL_MS (default 30 s) with
+  no reader waiting (fix round 1): a background tick every TTL/4 checks the
+  table signature (row count + newest updated_at) and applies the rows written
+  since the snapshot in place (a new page in an existing folder, a title, tags,
+  links); a deletion, a new folder or an alias change takes the full rebuild,
+  off the request path, while the tick keeps applying deltas. Backlinks TO a
+  new page follow that rebuild.
 - Trashed notes stay listed (struck through) until the nightly cleanup
   hard-removes them; `empty-trash` is the manual equivalent. Removed notes
   are recoverable from git history via the recover endpoint.

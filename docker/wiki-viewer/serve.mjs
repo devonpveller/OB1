@@ -10,12 +10,17 @@
 //
 // READINESS (research-workbench P1b): the viewer serves the moment it
 // listens. The client bundle and static assets (index.css, prescript.js,
-// postscript.js, static/*) come from the published Quartz snapshot
-// (/srv/current, written by entrypoint.sh's builder while WIKI_BUILDER=1) when
-// it has them, else from the BAKED bundle the image carries (/quartz/bundle,
-// emitted by the image's own Quartz at build time - the bundle does not depend
-// on the vault). So an EMPTY /srv serves every page; there is no "Building the
-// wiki" splash and no 503 for readiness. Health is /__health (the compose
+// postscript.js, static/*) come from the BAKED bundle the image carries
+// (/quartz/bundle, emitted by the image's own Quartz at build time - the
+// bundle does not depend on the vault), and only a file the image does not
+// carry (a vault attachment) from the published Quartz snapshot (/srv/current,
+// written by entrypoint.sh's builder while WIKI_BUILDER=1). So an EMPTY /srv
+// serves every page, and a STALE /srv - a snapshot an older image's builder
+// left on the volume - can never put a retired client bundle in front of a
+// reader (rw-p1b-ready fix round 1, tester attempt 1 defect 2: the old order
+// served the pre-P1b postscript.js, which fetched the whole-vault index,
+// forever with WIKI_BUILDER=0 and until the first new build with =1). There
+// is no "Building the wiki" splash and no 503 for readiness. Health is /__health (the compose
 // healthcheck): database up, reconciliation at zero drift, no broken page
 // class, no render error. P1c freezes the bundle and removes the builder.
 //
@@ -36,7 +41,8 @@ import { createReadStream } from "node:fs";
 import { stat, writeFile } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
 import { createHash } from "node:crypto";
-import { getNavIndex, navIndexEnabled } from "./lib/nav-index.mjs";
+import { getNavIndex, navIndexEnabled, indexChunks } from "./lib/nav-index.mjs";
+import { once } from "node:events";
 import { Worker } from "node:worker_threads";
 import { stripHtml, listDocument, ACK_COOKIE, safeBack } from "./lib/notifications.mjs";
 import { renderLive, routeErrors, isKnownPageUrl } from "./lib/live-route.mjs";
@@ -63,12 +69,13 @@ const REBUILDABLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".xml", ".
 const cacheControl = (ext) => (REBUILDABLE.has(ext) ? "no-cache, must-revalidate" : "public, max-age=86400");
 const etagOf = (st) => `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
 
-// A static ASSET (never a page: pages are live): the published snapshot's copy
-// when there is one, else the image's baked bundle.
+// A static ASSET (never a page: pages are live): the image's baked bundle
+// FIRST (it is this image's client code; a builder-made copy of it is the same
+// bytes - B9), then the published snapshot for what only the vault has.
 async function resolveAsset(urlPath) {
   let p;
   try { p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]); } catch { return null; }
-  for (const root of [ROOT, BUNDLE]) {
+  for (const root of [BUNDLE, ROOT]) {
     const base = normalize(join(root, p));
     if (!base.startsWith(root + "/")) continue; // path traversal guard
     try {
@@ -262,9 +269,13 @@ async function handle(req, res) {
     res.end(req.method === "HEAD" ? undefined : body);
     return;
   }
-  // The full nav/graph index, LIVE from wiki_pages, for its two lazy readers
-  // (graph offline fallback, notes-editor autocomplete). No file fallback
-  // (E3): the database being down is the database screen, not a stale index.
+  // The full index, LIVE from wiki_pages, for its one remaining lazy reader
+  // (the notes editor's link autocomplete, when the editor opens; the graph no
+  // longer falls back to it - fix round 1). No file fallback (E3): the
+  // database being down is the database screen, not a stale index. STREAMED
+  // in slices with a yield between them (fix round 1, tester attempt 1 defect
+  // 1: building it as one string on this thread - JSON.stringify of 383k rows,
+  // 128 MB - stalled every page for 32 s).
   if (navIndexEnabled() && path.endsWith("/static/graphIndex.json")) {
     const nav = await getNavIndex();
     if (nav) {
@@ -279,8 +290,16 @@ async function handle(req, res) {
         res.end();
         return;
       }
-      res.writeHead(200, { ...headers, "content-length": Buffer.byteLength(nav.json) });
-      res.end(req.method === "HEAD" ? undefined : nav.json);
+      res.writeHead(200, headers); // chunked: no whole-payload length is ever computed
+      if (req.method === "HEAD") { res.end(); return; }
+      let closed = false;
+      res.on("close", () => { closed = true; });
+      for (const chunk of indexChunks(nav)) {
+        if (closed) return;
+        if (!res.write(chunk)) await Promise.race([once(res, "drain"), once(res, "close")]).catch(() => {});
+        await new Promise((r) => setImmediate(r)); // a page request waiting meanwhile is served between slices
+      }
+      res.end();
       return;
     }
     res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });

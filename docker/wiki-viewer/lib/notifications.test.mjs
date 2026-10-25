@@ -91,10 +91,40 @@ test("subjects are escaped; the list page anchors every notification; back is sa
   const page = await N.listDocument({ cookie: "" });
   assert.match(page, /<li id="n-44444444-4444-4444-8444-444444444444" class="unread">/);
   assert.match(page, /<pre>a&lt;b<\/pre>/);
-  assert.equal(N.safeBack("/content/x?y=1"), "/content/x?y=1");
   assert.equal(N.safeBack("//evil.example/"), "/");
   assert.equal(N.safeBack("https://evil.example/"), "/");
   assert.equal(N.safeBack("/a\r\nSet-Cookie: x"), "/");
+});
+
+// rw-p1b-ready fix round 1 (tester attempt 1, defect 4): back= is an ALLOW-list.
+// The tester's case: ?back=/%09/evil.example/landing reached safeBack as
+// "/\t/evil.example/landing", answered 303 Location "/\t/evil..." and Chromium
+// (which strips TAB from URLs) then requested http://evil.example/landing.
+test("ack back= is an allow-list: same-origin absolute path, ^/[A-Za-z0-9._~/%-]*$, no control/backslash/'//' after one decode", () => {
+  for (const ok of ["/", "/content/person/person-ada-fixture", "/content/tool/", "/tags/space-tag", "/notes/sp%20ace", "/content/thought/9001", "/a.b_c~d-e/f%C3%A9"]) {
+    assert.equal(N.safeBack(ok), ok, ok);
+  }
+  // the tester's TAB case, raw (as URLSearchParams hands it over) and encoded
+  assert.equal(N.safeBack("/\t/evil.example/landing"), "/");
+  assert.equal(N.safeBack("/%09/evil.example/landing"), "/");
+  // every C0 control, raw and percent-encoded, at the start and at the end of the path
+  for (let c = 0; c < 0x20; c++) {
+    const ch = String.fromCharCode(c), hex = "%" + c.toString(16).padStart(2, "0");
+    assert.equal(N.safeBack("/" + ch + "/evil.example/x"), "/", "raw 0x" + c.toString(16));
+    assert.equal(N.safeBack("/" + hex + "/evil.example/x"), "/", "encoded " + hex);
+    assert.equal(N.safeBack("/" + hex.toUpperCase() + "/evil.example/x"), "/", "encoded upper " + hex);
+    assert.equal(N.safeBack("/ok/" + ch), "/", "raw tail 0x" + c.toString(16));
+  }
+  // DEL, the C1 range, the line/paragraph separators
+  for (const bad of ["/\x7f/evil", "/%7F/evil", "/%C2%85/evil", "/\u0085/evil", "/ x", "/%E2%80%A8x"]) assert.equal(N.safeBack(bad), "/", JSON.stringify(bad));
+  // backslash and '//' anywhere, raw or after one decode
+  for (const bad of ["/\\evil.example", "/%5Cevil.example", "/%5cevil", "/a/\\b", "//evil.example/", "/a//b", "/%2F/evil.example", "/%2f%2fevil", "/a/%2F%2Fb", "///evil"]) {
+    assert.equal(N.safeBack(bad), "/", JSON.stringify(bad));
+  }
+  // not a same-origin absolute path, or a character outside the allow-list
+  for (const bad of ["", null, undefined, "evil.example", "https://evil.example/", "javascript:alert(1)", "/a?b=1", "/content/x?y=1", "/a#x", "/a b", "/a\"q", "/<x>", "/a@b", "/%zz", "/%", "%2F/evil", " /a"]) {
+    assert.equal(N.safeBack(bad), "/", JSON.stringify(bad));
+  }
 });
 
 test("the strip is fresh within the TTL: a newly posted notification is on the next load", async () => {

@@ -33,6 +33,16 @@
  *     (observed - 562.5 ms, and the response's server-timing app;dur) is what
  *     the floor is judged on there (findings: anchor fact F3).
  *
+ *  4. LISTING PAGES (rw-p1b-ready fix round 1, tester attempt 1 defect 1):
+ *     --pages may name folder pages ("content/tool/") and tag pages
+ *     ("tags/<t>"); after each navigation the probe waits for the graph's
+ *     /workbench/graph answer and 1.5 s more, so a whole-index fallback the
+ *     graph would start is recorded (indexFetched) - the judge fails any.
+ *     Listing pages are not explorer entries, so "active" is not asked there.
+ *  5. --freeze: /static/graphIndex.json is read in full while a page and a
+ *     nav are requested every 100 ms; the longest page/nav wait is reported
+ *     (tester attempt 1: one cold request stalled pages 31,966 ms at 5x).
+ *
  * Usage (inside the env network, the viewer image's node):
  *   node perf-nav.mjs --front http://<p>-front:8080 --chrome <p>-chrome --pages a,b,c [--label 1x] [--throttle] [--mobile] [--server-only]
  * Prints one JSON line "PERF-RESULT {...}" and a human summary; exit 0 always
@@ -171,7 +181,7 @@ async function browserPart() {
   }
   const ev = async (expr) => (await cdp.send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }, s)).result.value;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const waitFor = async (expr, ms = 120000) => { const t0 = Date.now(); for (;;) { if (await ev(expr)) return true; if (Date.now() - t0 > ms) return false; await sleep(100); } };
+  const waitFor = async (expr, ms = 120000) => { const t0 = Date.now(); for (;;) { if (typeof expr === "function" ? expr() : await ev(expr)) return true; if (Date.now() - t0 > ms) return false; await sleep(100); } };
 
   const navs = [];
   const first = PAGES[0];
@@ -205,9 +215,13 @@ async function browserPart() {
     const ok = await waitFor(`(window.__wikiperfLog || []).length >= ${before + (MOBILE ? 1 : 2)}`, 120000);
     await sleep(200);
     const log = await lastLog();
+    const listing = p.endsWith("/") || p.startsWith("tags/");
     // the page's own entry is in the explorer, marked active (its ancestors were opened and loaded)
-    const active = MOBILE ? null : await waitFor(`!!document.querySelector('.explorer-ul a.active[data-for="${p}"]')`, 30000);
-    navs.push({ ...summarize(p, since, log), ok, active, slug: await ev("document.body.dataset.slug") });
+    const active = MOBILE || listing ? null : await waitFor(`!!document.querySelector('.explorer-ul a.active[data-for="${p}"]')`, 30000);
+    // the graph answered (or failed) for this page, then 1.5 s for a fallback it would start
+    const graphSettled = await waitFor(() => [...reqs.values()].some((r) => r.t >= since && /\/workbench\/graph\?/.test(r.url) && (r.done || r.status >= 400)), 30000);
+    await sleep(1500);
+    navs.push({ ...summarize(p, since, log), ok, active, listing, graphSettled, slug: await ev("document.body.dataset.slug") });
   }
   // The explorer still WORKS (not only fast): a collapsed folder opens on its
   // icon and loads its children; a second click closes it (delegated handler).
@@ -237,12 +251,34 @@ async function browserPart() {
 }
 
 const result = { label: LABEL, throttle: THROTTLE ? { network: "Chrome DevTools Slow 4G", ...SLOW4G, cpuSlowdown: CPU } : null, mobile: MOBILE };
-if (has("--refresh-burst")) {
+if (has("--freeze")) {
+  result.freeze = await freezeProbe();
+} else if (has("--refresh-burst")) {
   result.refreshBurst = await refreshBurst();
 } else {
   result.navReadyAfterMs = await navReady();
   if (!has("--browser-only")) result.server = await serverPart();
   if (CHROME && !has("--server-only")) result.browser = await browserPart();
+}
+
+// --freeze: the whole index read in full while pages and the nav are asked
+// every 100 ms; what a reader of a page waited meanwhile.
+async function freezeProbe() {
+  const page = arg("--freeze-page", "content/person/person-syn-500");
+  const pages = [], navs = [];
+  let stop = false;
+  const loop = async (path, out) => { while (!stop) { const t0 = performance.now(); try { const r = await fetch(FRONT + path); await r.arrayBuffer(); out.push({ ms: performance.now() - t0, status: r.status }); } catch (e) { out.push({ ms: performance.now() - t0, status: String(e) }); } await new Promise((r) => setTimeout(r, 100)); } };
+  const l1 = loop("/" + page, pages), l2 = loop("/workbench/nav?folder=content", navs);
+  await new Promise((r) => setTimeout(r, 3000));
+  const g0 = performance.now();
+  const r = await fetch(FRONT + "/static/graphIndex.json", { headers: { "cache-control": "no-cache" } });
+  const ttfb = performance.now() - g0;
+  const bytes = (await r.arrayBuffer()).byteLength;
+  const total = performance.now() - g0;
+  await new Promise((res) => setTimeout(res, 2000));
+  stop = true; await Promise.all([l1, l2]);
+  const s = (a) => ({ n: a.length, max: a.length ? +Math.max(...a.map((x) => x.ms)).toFixed(1) : null, over300: a.filter((x) => x.ms > 300).length, over1000: a.filter((x) => x.ms > 1000).length, non200: a.filter((x) => x.status !== 200).length });
+  return { graphIndex: { status: r.status, bytes, ttfb: +ttfb.toFixed(1), ms: +total.toFixed(1), xWikiNav: r.headers.get("x-wiki-nav") }, pages: s(pages), nav: s(navs) };
 }
 
 // ── judge + summary ─────────────────────────────────────────────────────────
@@ -252,12 +288,13 @@ if (result.server) {
   for (const [k, v] of Object.entries(result.server)) if (v.ttfb) lines.push(`server ${k.padEnd(18)} ttfb p50=${v.ttfb.p50} p95=${v.ttfb.p95} max=${v.ttfb.max} ms  app=${v.serverTiming.p95}ms  bytes<=${v.bytesMax}`);
   lines.push(`largest folder: ${result.server.largestFolder.slug} (${result.server.largestFolder.children} children)`);
 }
+if (result.freeze) { const f = result.freeze; lines.push(`freeze: graphIndex.json ${f.graphIndex.status} ${f.graphIndex.bytes}B ttfb ${f.graphIndex.ttfb}ms total ${f.graphIndex.ms}ms | pages n=${f.pages.n} max=${f.pages.max}ms >300:${f.pages.over300} >1000:${f.pages.over1000} non200:${f.pages.non200} | nav n=${f.nav.n} max=${f.nav.max}ms >300:${f.nav.over300}`); }
 if (result.refreshBurst) lines.push(`refresh burst ttfb p50=${result.refreshBurst.p50} p95=${result.refreshBurst.p95} max=${result.refreshBurst.max} ms (n=${result.refreshBurst.n})`);
 if (result.browser) {
   for (const n of result.browser.navs) {
     const ttfb = n.navTtfb.filter((x) => x != null);
     lines.push(`nav -> ${String(n.to).slice(0, 48).padEnd(48)} explorer=${n.explorerMs}ms fetch=${n.fetchMs}ms li=${n.li} navReq=${n.navRequests} navBytes=${n.navBytes} ` +
-      `navTTFB(max)=${ttfb.length ? Math.max(...ttfb).toFixed(1) : "-"}ms${lat ? ` (-latency ${ttfb.length ? (Math.max(...ttfb) - lat).toFixed(1) : "-"}ms)` : ""} index=${n.indexFetched.length}`);
+      `navTTFB(max)=${ttfb.length ? Math.max(...ttfb).toFixed(1) : "-"}ms${lat ? ` (-latency ${ttfb.length ? (Math.max(...ttfb) - lat).toFixed(1) : "-"}ms)` : ""} index=${n.indexFetched.length}${n.listing ? " (listing page)" : ""}${n.graphSettled === false ? " graph-not-settled" : ""}`);
   }
   if (result.browser.toggle) lines.push(`folder toggle ${result.browser.toggle.folder}: opened=${result.browser.toggle.opened} children=${result.browser.toggle.children} closedAgain=${result.browser.toggle.closedAgain}`);
   if (result.browser.mobileOpen) lines.push(`mobile hamburger open: explorer-open=${result.browser.mobileOpen.explorerOpenMs}ms fetch=${result.browser.mobileOpen.fetchMs}ms navBytes=${result.browser.mobileOpen.navBytes}`);

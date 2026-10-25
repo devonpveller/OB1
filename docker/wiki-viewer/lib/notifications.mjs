@@ -135,7 +135,7 @@ export async function stripHtml({ cookie, back }) {
       (n.count > 1 ? ` <span class="wn-count">x${esc(n.count)}</span>` : "") + "</li>");
   }
   const ackLink = unread.length
-    ? ` <a class="wn-ack" href="/__notifications/ack?until=${encodeURIComponent(new Date(newest).toISOString())}&amp;back=${encodeURIComponent(back || "/")}">acknowledge</a>`
+    ? ` <a class="wn-ack" href="/__notifications/ack?until=${encodeURIComponent(new Date(newest).toISOString())}&amp;back=${encodeURIComponent(safeBack(String(back || "/").split(/[?#]/)[0]))}">acknowledge</a>`
     : "";
   return `${open} data-unread="${unread.length}">${style}` +
     `<span class="wn-head"><a href="/__notifications">${unread.length === 1 ? "1 unread research notification" : `${unread.length} unread research notifications`}</a></span>` +
@@ -162,10 +162,24 @@ export async function listDocument({ cookie }) {
     `<p><a href="/">&larr; Knowledge Vault home</a></p></body></html>`;
 }
 
-/** A safe same-origin back target ("/x/y?z"), else "/". */
+/**
+ * The acknowledgement's redirect target (rw-p1b-ready fix round 1, tester
+ * attempt 1 defect 4: a deny-list let "/<TAB>/evil.example" through - browsers
+ * strip TAB from a URL, so Location "/<TAB>/evil.example/x" went to
+ * http://evil.example/x). An ALLOW-list now: the value must be a same-origin
+ * absolute PATH of only ^/[A-Za-z0-9._~/%-]*$ (no query, no fragment, no
+ * scheme, no host), and its one-time percent-decoding must not contain a
+ * control character (C0, DEL, C1, U+2028/2029), a backslash or "//". Anything
+ * else is "/". The strip itself passes the page's path only (stripHtml).
+ */
+const BACK_ALLOWED = /^\/[A-Za-z0-9._~\/%-]*$/;
+const BACK_FORBIDDEN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\\]|\/\//;
 export function safeBack(raw) {
-  const b = String(raw || "/");
-  return b.startsWith("/") && !b.startsWith("//") && !/[\r\n\\]/.test(b) ? b : "/";
+  if (typeof raw !== "string" || !BACK_ALLOWED.test(raw) || BACK_FORBIDDEN.test(raw)) return "/";
+  let decoded;
+  try { decoded = decodeURIComponent(raw); } catch { return "/"; }
+  if (!decoded.startsWith("/") || BACK_FORBIDDEN.test(decoded)) return "/";
+  return raw;
 }
 
 export function _resetNotificationsForTests() {

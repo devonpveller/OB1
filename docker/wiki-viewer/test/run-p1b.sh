@@ -252,6 +252,100 @@ viewer_fresh "$IMG" 0; wait_db_page 90
 [ "$b9" = 1 ] && pass B9 || fail B9 "graphIndex readiness"
 fi
 
+if want B13; then
+hdr "B13 (fix round 1, tester attempt 1 defect 2): a STALE /srv/current (an older image's snapshot on the volume) never serves the client bundle - the image's baked bundle wins, WIKI_BUILDER=0 and =1"
+b13=1
+stale_vol() { # a volume holding a pre-P1b-shaped snapshot: /srv/current -> build-1 with a retired bundle
+  docker rm -f -v "$P-viewer" >/dev/null 2>&1 || true
+  docker volume rm "$P-srv-stale" >/dev/null 2>&1 || true
+  docker volume create "$P-srv-stale" >/dev/null
+  docker run --rm --network none -v "$P-srv-stale:/srv" --entrypoint sh "$IMG" -c 'mkdir -p /srv/build-1/static && for f in index.css prescript.js postscript.js; do echo "/* STALE-SNAPSHOT $f: fetch(\"/static/graphIndex.json\") */" > /srv/build-1/$f; done && echo stale > /srv/build-1/static/stale-only.txt && ln -sfn /srv/build-1 /srv/current && ls -l /srv/current'
+}
+bundle_check() { # [image] [builder] [label]: the served bytes of the three files vs the image's baked copy
+  local img="$1" bld="$2" lab="$3" ok=1
+  stale_vol >/dev/null; P1A_SRV="$P-srv-stale" P1A_VIEWER_IMG="$img" WIKI_BUILDER="$bld" bash "$E" viewer >/dev/null; wait_db_page 60 >/dev/null
+  local cur; cur="$(docker exec "$P-viewer" readlink /srv/current)"
+  echo "$lab WIKI_BUILDER=$bld /srv/current -> $cur at the check"
+  [ "$cur" = /srv/build-1 ] || { echo "x the builder had already replaced the stale snapshot: inconclusive"; ok=0; }
+  for f in index.css prescript.js postscript.js; do
+    baked="$(docker exec "$P-viewer" sha256sum "/quartz/bundle/$f" | cut -c1-16)"
+    served="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('$FRONT/$f').then(async r=>{const b=Buffer.from(await r.arrayBuffer());console.log(r.status, require('crypto').createHash('sha256').update(b).digest('hex').slice(0,16), b.includes('STALE-SNAPSHOT')?'STALE':'fresh')})")"
+    echo "$lab WIKI_BUILDER=$bld $f baked=$baked served=$served"
+    echo "$served" | grep -q "^200 $baked fresh$" || ok=0
+  done
+  # what only the vault snapshot has still serves from it (WIKI_BUILDER=0: with the builder on, its first
+  # publish replaces the stale snapshot within seconds, so the file is legitimately gone then)
+  if [ "$bld" = 0 ]; then
+    v="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('$FRONT/static/stale-only.txt').then(async r=>console.log(r.status,(await r.text()).trim()))")"; echo "$lab snapshot-only file: $v"
+    echo "$v" | grep -q '^200 stale$' || ok=0
+  fi
+  echo "$ok"
+}
+for bld in 0 1; do o="$(bundle_check "$IMG" "$bld" GREEN)"; echo "$o" | sed '$d'; [ "$(echo "$o" | tail -1)" = 1 ] || { echo "x WIKI_BUILDER=$bld: a stale /srv/current served the client bundle"; b13=0; }; done
+if [ -n "${P1B_RED_IMG:-}" ]; then
+  echo "-- RED: the same check against $P1B_RED_IMG (WIKI_BUILDER=0)"; o="$(bundle_check "$P1B_RED_IMG" 0 RED)"; echo "$o" | sed '$d'
+fi
+docker rm -f -v "$P-viewer" >/dev/null 2>&1; docker volume rm "$P-srv-stale" >/dev/null 2>&1
+viewer_fresh "$IMG" 0; wait_db_page 60
+[ "$b13" = 1 ] && pass B13 || fail B13 "a stale /srv/current overrides the image's bundle"
+fi
+
+if want B14; then
+hdr "B14 (fix round 1, tester attempt 1 defect 3): after a write and a quiet period of 4x WIKI_NAV_TTL_MS (no reads), the FIRST read of each listing is fresh, and its ETag is new"
+b14=1
+items() { BODY=1 bash "$B" fget "$1" | grep -oE '[0-9]+ items? (under this folder|with this tag)' | head -1 | cut -d' ' -f1; }
+navtotal() { BODY=1 bash "$B" fget "/workbench/nav?folder=$1&limit=1" | grep -oE '"total":[0-9]+' | head -1 | cut -d: -f2; }
+pagefilter="slug !~ '^(private|templates|\.obsidian)(/|\$)' AND slug !~ '(^|/)\\.'"
+sqltag() { psqlq -c "SELECT count(*) FROM wiki_pages w WHERE $pagefilter AND w.slug <> 'tags/$1' AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(w.tags) t WHERE t = '$1' OR t LIKE '$1/%')"; }
+sqlfolder() { psqlq -c "SELECT count(DISTINCT split_part(substr(slug, length('$1/') + 1), '/', 1)) FROM wiki_pages WHERE slug LIKE '$1/%' AND substr(slug, length('$1/') + 1) <> 'index' AND $pagefilter"; }
+for u in /tags/fixture-tag /content/person/; do bash "$B" fget "$u" >/dev/null; done
+e1="$(bash "$B" fget /tags/fixture-tag | sed -E 's/.*etag=([^ ]*).*/\1/')"; c1="$(items /tags/fixture-tag)"; p1="$(items /content/person/)"
+echo "before: /tags/fixture-tag $c1 (etag $e1)  /content/person/ $p1"
+# the write, through the real writer: two vault files + the backfill (a new page in an EXISTING folder, one in a NEW folder)
+bash "$E" node -e "
+  const fs=require('fs');
+  fs.writeFileSync('/wiki/content/person/person-quiet-q.md','---\ntitle: \"Quiet Q\"\ntags: [fixture-tag, fresh-one]\nentity_id: 7701\n---\n# Quiet Q\n\nSee [[person-ada-fixture]].\n');
+  fs.mkdirSync('/wiki/notes/adv3',{recursive:true});
+  fs.writeFileSync('/wiki/notes/adv3/quiet-note.md','---\ntitle: \"Quiet note\"\ntags: [fresh-one]\n---\n# Quiet note\n');
+  console.log('wrote 2 vault files')"
+T 300 bash "$E" node /ob1/recipes/_shared/backfill-wiki-pages.mjs 2>&1 | tail -1
+quiet=$(( 4 * ${WIKI_NAV_TTL_MS:-30000} / 1000 )); echo "quiet: ${quiet} s, no reads"; sleep "$quiet"
+# the FIRST read of each, nothing in between
+r_tag="$(bash "$B" fget /tags/fixture-tag)"; c2="$(items /tags/fixture-tag)"; f2="$(items /tags/fresh-one)"; p2="$(items /content/person/)"; n2="$(navtotal notes/adv3)"; np2="$(navtotal content/person)"
+e2="$(echo "$r_tag" | sed -E 's/.*etag=([^ ]*).*/\1/')"
+s_tag="$(sqltag fixture-tag)"; s_fresh="$(sqltag fresh-one)"; s_p="$(sqlfolder content/person)"; s_n="$(sqlfolder notes/adv3)"
+echo "first reads: /tags/fixture-tag $c2 (sql $s_tag, etag $e2)  /tags/fresh-one $f2 (sql $s_fresh)  /content/person/ $p2 (sql $s_p)  nav notes/adv3 ${n2:-none} (sql $s_n)  nav content/person $np2"
+[ "$c2" = "$s_tag" ] && [ "$f2" = "$s_fresh" ] && [ "$p2" = "$s_p" ] && [ "$n2" = "$s_n" ] && [ "$np2" = "$s_p" ] || { echo "x a first read after the quiet period is stale"; b14=0; }
+[ "$e2" != "$e1" ] || { echo "x the listing kept its old ETag"; b14=0; }
+l2="$(bash "$B" fget /tags/fixture-tag "if-none-match=$e1")"; echo "revalidation with the old ETag: $l2"; echo "$l2" | grep -q '^200 ' || { echo "x a revalidating browser got 304 for the old listing"; b14=0; }
+docker logs --since 200s "$P-viewer" 2>&1 | grep -E "delta applied|nav index refreshed" | tail -4
+# clean up through the writer (files first, then the backfill prunes) so the later cases see zero drift
+bash "$E" node -e "const fs=require('fs'); fs.rmSync('/wiki/content/person/person-quiet-q.md'); fs.rmSync('/wiki/notes/adv3',{recursive:true}); console.log('removed')"
+psqlq -c "DELETE FROM wiki_pages WHERE slug IN ('content/person/person-quiet-q','notes/adv3/quiet-note')" >/dev/null
+[ "$b14" = 1 ] && pass B14 || fail B14 "listing freshness bound"
+fi
+
+if want B15; then
+hdr "B15 (fix round 1, tester attempt 1 defect 4): /__notifications/ack back= is an allow-list - the tester's TAB case and every control character redirect to /"
+b15=1
+o="$(docker run --rm --network "$NET" --entrypoint node "$IMG" --input-type=module -e "
+  const cases = ['/%09/evil.example/landing', '/%0a/evil.example', '/%0d/evil.example', '/%00/evil.example', '/%1f/evil.example', '/%7f/evil.example', '/%C2%85/evil.example',
+    '/%5Cevil.example', '//evil.example/x', '/%2F%2Fevil.example', '/%252F%252Fevil.example', 'https://evil.example', 'javascript:alert(1)', '/a?x=1', '/%2509/evil.example'];
+  for (let c = 0; c < 32; c++) cases.push('/%' + c.toString(16).padStart(2, '0') + '/evil.example/x');
+  let bad = 0;
+  for (const b of cases) {
+    const r = await fetch('$FRONT/__notifications/ack?until=2026-10-19T10:00:00Z&back=' + b, { redirect: 'manual' });
+    const loc = r.headers.get('location');
+    if (r.status !== 303 || loc !== '/') { bad++; console.log('BAD', b, r.status, JSON.stringify(loc)); }
+  }
+  const ok = await fetch('$FRONT/__notifications/ack?until=2026-10-19T10:00:00Z&back=%2Fcontent%2Fthought%2F9001', { redirect: 'manual' });
+  console.log('legit back ->', ok.status, ok.headers.get('location'));
+  if (ok.headers.get('location') !== '/content/thought/9001') bad++;
+  console.log('ACK-REDIRECT:', cases.length, 'hostile cases,', bad ? 'FAIL ' + bad : 'PASS');")"
+echo "$o"; echo "$o" | grep -q 'ACK-REDIRECT: .* PASS$' || b15=0
+[ "$b15" = 1 ] && pass B15 || fail B15 "ack open redirect"
+fi
+
 if want B4; then
 hdr "B4 (acceptance 4): docker inspect shows the viewer's healthcheck healthy; it goes unhealthy with the database down and back to healthy"
 b4=1
@@ -334,6 +428,9 @@ bash "$B" down >/dev/null 2>&1; bash "$E" down >/dev/null 2>&1
 WIKI_BUILDER=0 WIKI_RECONCILE_INTERVAL_MS=600000 P1A_HEAP_MB=6144 T 600 bash "$E" up 2>&1 | tail -2
 T 600 bash "$B" cdb >/dev/null 2>&1; T 300 bash "$B" wb 2>&1 | tail -1; T 120 bash "$B" front 2>&1 | tail -1; T 120 bash "$B" chrome 2>&1 | tail -1
 TARGETS="index content/tool/tool-syn-1 content/person/person-syn-500 content/organization/organization-syn-9000 content/source/source-syn-30 content/thought/thought-syn-6000 content/place/place-syn-4000 content/tool/tool-syn-18000 content/project/project-syn-8000 notes/syn-folder-1/note-syn-9 content/topic/topic-syn-3000 content/notebooks/nb-syn-77/nb-syn-77"
+# fix round 1 (tester attempt 1 defect 1): the crawl also visits FOLDER and TAG pages - the explorer links to
+# them, and they fetched the whole-vault index; the judge fails any navigation with indexFetched > 0
+LISTINGS="content/notebooks/nb-syn-77/ content/ notes/ tags/syn-7 tags/"
 for rows in ${P1B_PERF_SCALES:-76542 382710}; do
   echo "-- vault of $rows rows"
   T 900 bash "$B" perfseed "$rows" | sed 's/^/seeded (rows|folders): /'
@@ -350,7 +447,7 @@ for rows in ${P1B_PERF_SCALES:-76542 382710}; do
   echo "nav shows content/tool with $want_tool children after ~$((i * 5)) s"
   docker logs "$P-viewer" 2>&1 | grep "nav index refreshed" | tail -2
   for w in 1 2 3; do bash "$B" fget '/workbench/nav?folder=content' >/dev/null; done
-  pages="$(echo $TARGETS | tr ' ' ',')"
+  pages="$(echo $TARGETS $LISTINGS | tr ' ' ',')"
   for mode in "" "--throttle" "--throttle --mobile"; do
     o="$(T 1800 docker run --rm --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/perf-nav.mjs \
          --front "$FRONT" --chrome "$P-chrome" --pages "$pages" --label "${rows}${mode:+ $mode}" $mode $( [ -n "$mode" ] && echo --browser-only ) 2>&1)"
@@ -363,6 +460,9 @@ for rows in ${P1B_PERF_SCALES:-76542 382710}; do
   o="$(T 120 docker run --rm --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/perf-nav.mjs --front "$FRONT" --refresh-burst --burst-ms 20000 2>&1)"
   echo "$o" | grep -v '^PERF-RESULT'; echo "$o" | grep '^PERF-RESULT' > "$RUNDIR/perf-$rows-burst.json"
   docker logs --since 60s "$P-viewer" 2>&1 | grep "nav index refreshed" | tail -2
+  # fix round 1 (defect 1): the whole index read in full while pages and the nav are asked every 100 ms
+  o="$(T 600 docker run --rm --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/perf-nav.mjs --front "$FRONT" --freeze 2>&1)"
+  echo "$o" | grep -v '^PERF-RESULT'; echo "$o" | grep '^PERF-RESULT' > "$RUNDIR/perf-$rows-freeze.json"
 done
 # the judge: floor in every run (explorer < 200 ms per navigation, nav TTFB < 300 ms server-attributable, payload < 2 MB per navigation)
 docker run --rm -i -v "$RUNDIR_W:/r:ro" --entrypoint node "$IMG" --input-type=module -e "
@@ -372,6 +472,7 @@ docker run --rm -i -v "$RUNDIR_W:/r:ro" --entrypoint node "$IMG" --input-type=mo
     const r = JSON.parse(readFileSync('/r/' + f, 'utf8').replace(/^PERF-RESULT /, ''));
     const lat = r.throttle ? r.throttle.latency : 0;
     if (r.server) for (const [k, v] of Object.entries(r.server)) if (v.ttfb) { const ok = v.ttfb.max < 300 && v.bytesMax < 2e6; if (!ok) fail++; L(f + ' server ' + k + ' ttfb max ' + v.ttfb.max + ' p95 ' + v.ttfb.p95 + ' bytes ' + v.bytesMax + (ok ? ' ok' : ' OVER')); }
+    if (r.freeze) { const f = r.freeze; const ok = f.graphIndex.status === 200 && f.pages.max < 1000 && f.nav.max < 300 && f.pages.non200 === 0; if (!ok) fail++; L('freeze graphIndex ' + f.graphIndex.status + ' ' + f.graphIndex.bytes + 'B in ' + f.graphIndex.ms + 'ms: pages max ' + f.pages.max + 'ms (n=' + f.pages.n + '), nav max ' + f.nav.max + 'ms' + (ok ? ' ok' : ' OVER')); }
     if (r.refreshBurst) { const ok = r.refreshBurst.max < 300; if (!ok) fail++; L(f + ' refresh-burst ttfb max ' + r.refreshBurst.max + ' p95 ' + r.refreshBurst.p95 + (ok ? ' ok' : ' OVER')); }
     if (r.browser) {
       for (const n of r.browser.navs) {
@@ -382,7 +483,7 @@ docker run --rm -i -v "$RUNDIR_W:/r:ro" --entrypoint node "$IMG" --input-type=mo
         L(f + ' nav ' + n.to + ' explorer ' + ex + 'ms ttfb(server part) ' + tm.toFixed(1) + 'ms bytes ' + n.navBytes + ' index ' + n.indexFetched.length + (ok ? ' ok' : ' OVER'));
       }
       if (!r.mobile && !(r.browser.toggle && r.browser.toggle.ok)) { fail++; L(f + ' folder toggle BROKEN ' + JSON.stringify(r.browser.toggle)); }
-      for (const n of r.browser.navs.slice(1)) if (!r.mobile && n.active !== true) { fail++; L(f + ' nav ' + n.to + ': its entry is not shown active in the explorer (BROKEN)'); }
+      for (const n of r.browser.navs.slice(1)) if (!r.mobile && !n.listing && n.active !== true) { fail++; L(f + ' nav ' + n.to + ': its entry is not shown active in the explorer (BROKEN)'); }
       if (r.browser.mobileOpen) { const m = r.browser.mobileOpen; const ok = m.explorerOpenMs < 200 && m.navBytes < 2e6; if (!ok) fail++; L(f + ' mobile open explorer ' + m.explorerOpenMs + 'ms bytes ' + m.navBytes + (ok ? ' ok' : ' OVER')); }
     }
   }
