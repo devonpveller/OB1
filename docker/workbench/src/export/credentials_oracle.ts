@@ -1,6 +1,6 @@
 // TEST ORACLE (rw-p6a-resolve2 attempt 2): credentials.ts exactly as committed at a06b72f, kept only so
-// resolve2_test.ts can prove the attempt-2 cost changes answer the same as the a06b72f invariant (views,
-// canon, judgeSecret) on every text it is given. Never imported by the exporter.
+// resolve2_cost_test.ts can prove the attempt-2 cost changes answer the same as the a06b72f invariant (views,
+// canon, judgeSecret) on every text it is given. Never imported by the exporter; not in the runtime image.
 
 // Credential-shaped text, judged on what a READER sees (rw-p6a-resolve attempts 3, 4 and 5). PURE.
 //

@@ -96,6 +96,7 @@ $net = "rwp0-net-$rand"
 $dbA = "rwp0-dba-$rand"; $dbB = "rwp0-dbb-$rand"; $wbName = "rwp0-wb-$rand"; $embName = "rwp0-embed-$rand"
 $short = ($Id -replace '^wt-', '')
 $tag = "openbrain-workbench:wt-$short"
+$testTag = "openbrain-workbench:wt-$short-test"
 $dreddTag = "rw-dredd:wt-$short"
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
@@ -127,7 +128,7 @@ function Test-SubnetAllowed([string]$s) {
   if ($o[0] -eq 192 -and $o[1] -eq 168) { return $false }
   return $true
 }
-if ($tag -match ':local$' -or $dreddTag -match ':local$') { throw 'refusing to build a :local tag' }
+if ($tag -match ':local$' -or $testTag -match ':local$' -or $dreddTag -match ':local$') { throw 'refusing to build a :local tag' }
 
 Write-Host "== rw-p0-contract test run  owner=$Id  net=$net  evidence=$Evidence"
 $null = Dk version --format '{{.Server.Version}}'
@@ -250,12 +251,19 @@ try {
   $labels = (Dk image inspect --format '{{json .Config.Labels}}' $tag) | ConvertFrom-Json
   $lbl = [string]$labels.'org.opencontainers.image.revision'
   Check ($lbl -eq $sha) "label org.opencontainers.image.revision = $lbl"
+  # rw-p6a-followups: the runtime image ships no *_test.ts (and no test oracle); the tests run in the
+  # image's TEST stage, the one the build gate ran (a cache hit of the build above).
+  $o = Dk build --build-arg "OB1_SHA=$sha" --label $label --target test -t $testTag $wb
+  Save 'build-test-stage.log' $o
+  Check ($script:rc -eq 0) "test stage $testTag built at OB1 $($sha.Substring(0, 7))"
+  if ($script:rc -ne 0) { throw 'build test stage' }
+  $made.images += $testTag
 
   # ---------------------------------------------------------------- 4. integration tests
   Write-Host '[4] database A + src/contracts/integration_test.ts (as ob_app_memory)'
   if (-not (Start-Db $dbA)) { throw 'db A' }
   $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_app_memory `
-    -e "CONTRACT_TEST_DB_PASSWORD=$appPw" $tag deno test --allow-net --allow-env --allow-read src/contracts/integration_test.ts
+    -e "CONTRACT_TEST_DB_PASSWORD=$appPw" $testTag deno test --allow-net --allow-env --allow-read src/contracts/integration_test.ts
   Save 'integration-test.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "integration tests: $($sum.Value)"
@@ -263,7 +271,7 @@ try {
   # T2-3): one active and one suppressed source; the :wt image's cached deps, offline.
   $k8sDir = Join-Path $ob1 'integrations\kubernetes-deployment'
   $o = Dk run --rm --label $label --network $net -v "${k8sDir}:/k8s:ro" -e "D5_TEST_DB_HOST=$dbA" -e "D5_TEST_DB_PASSWORD=$pw" `
-    $tag deno test --config /app/deno.json --no-lock --cached-only --allow-read --allow-env --allow-net /k8s/d5-consumers.test.ts
+    $testTag deno test --config /app/deno.json --no-lock --cached-only --allow-read --allow-env --allow-net /k8s/d5-consumers.test.ts
   Save 'd5-consumers.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[2].Value -eq '2' -and $sum.Groups[3].Value -eq '0') "triage listing SQL over database A (d5-consumers.test.ts): $($sum.Value)"
@@ -294,7 +302,7 @@ try {
   $o = Dk run --rm --label $label --network $net -v "$(Join-Path $ob1 'integrations\research-service'):/rs:ro" `
     -e "RESEARCH_E2E_URL=http://${rsName}:8000" -e "RESEARCH_E2E_OWUI_KEY=$kOwui" -e "RESEARCH_E2E_AO_KEY=$kAo" `
     -e "RESEARCH_E2E_SHARED_KEY=$key" -e "RESEARCH_E2E_DB_HOST=$dbA" -e "RESEARCH_E2E_DB_PASSWORD=$pw" `
-    $tag deno test --no-lock --allow-net --allow-env --allow-read /rs/origin.e2e.test.ts
+    $testTag deno test --no-lock --allow-net --allow-env --allow-read /rs/origin.e2e.test.ts
   Save 'origin-e2e.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "origin binding e2e: $($sum.Value)"
@@ -362,7 +370,7 @@ try {
   $o = Dk run --rm --label $label --network $net -v "${k8s}:/k8s:ro" -v "${callsDir}:/calls:ro" `
     -e "CONTRACT_SCOPE_E2E_URL=http://${wbName}:8000" -e "CONTRACT_SCOPE_E2E_KEY=$key" `
     -e "CONTRACT_SCOPE_E2E_DB_HOST=$dbB" -e "CONTRACT_SCOPE_E2E_DB_PASSWORD=$pw" -e CONTRACT_SCOPE_E2E_CALLS=/calls/calls.json `
-    $tag deno test --config /app/deno.json --no-lock --cached-only --allow-net --allow-env --allow-read /k8s/contract-scope.e2e.test.ts
+    $testTag deno test --config /app/deno.json --no-lock --cached-only --allow-net --allow-env --allow-read /k8s/contract-scope.e2e.test.ts
   Save 'contract-scope-e2e.log' ($o -replace $key, '***')
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed( \(\d+ steps?\))? \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   $line = @(($o -split "`n") | Where-Object { $_ -match 'SUMMARY calls=' }) | Select-Object -First 1

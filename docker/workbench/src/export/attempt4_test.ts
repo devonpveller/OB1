@@ -191,12 +191,12 @@ Deno.test("A3-4 (attempt 4): at the OUTPUT stage every shape is refused 503 cred
   }
 });
 
-Deno.test("A3-4 (attempt 4): the text checks see the raw text - verifyText / verifyMarkdown refuse `< KEY >`, `< MAILTO >`, `<1 KEY>` and a typed <mailto:...> autolink (attempt 3 deleted them as tags)", () => {
+Deno.test("A3-4 (attempt 4): the text checks see the raw text - verifyText / verifyMarkdown refuse `< KEY >`, `< MAILTO >`, `<1 KEY>` and a typed <mailto:...> autolink (attempt 3 deleted them as tags)", async () => {
   for (const t of [`x < ${KEY} > y`, `x < ${MAIL} > y`, `x <1 ${KEY}> y`, `x < ${KEY} and later > end`, `x <<${KEY}>> y`, `<mailto:${MAIL}>`]) {
     for (const v of [() => verifyText(t, [KEY, MAIL]), () => verifyMarkdown(t.replace(/</g, "\\<").replace(/>/g, "\\>"), [KEY, MAIL])]) {
       let code = "";
       try {
-        v();
+        await v(); // rw-p6a-followups: judged in a worker, so the verifiers answer asynchronously
       } catch (e) {
         code = (e as { code?: string }).code ?? "";
       }

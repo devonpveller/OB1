@@ -191,8 +191,8 @@ Deno.test("A7-2: out of time, or a text over the size budget, is 503 verificatio
   // the budget counts only the checks' own time: idle time between them is not spent
   const b = new Budget(400);
   await new Promise((r) => setTimeout(r, 600));
-  verifyText("A plain paragraph.", SECRETS, "txt", b);
-  verifyText("Another plain paragraph.", SECRETS, "txt", b);
+  await verifyText("A plain paragraph.", SECRETS, "txt", b);
+  await verifyText("Another plain paragraph.", SECRETS, "txt", b);
 });
 
 Deno.test("A7-2 (cost, not meaning): canonText's ASCII fast path equals the full canon on every ASCII text", () => {
@@ -317,7 +317,7 @@ Deno.test("A7-4: a text over the views cap is NOT JUDGED - judgeSecret answers u
   assertEquals([g.status, g.body.code], [503, "verification-budget"]);
   assertEquals(guardBody({ error: `x ${KEY}` }, 422, SECRETS).body.code, "credential");
   // inert (no secrets): nothing to judge, nothing refused
-  verifyText(OVER_CAP, []);
+  await verifyText(OVER_CAP, []);
 });
 
 Deno.test("A7-4 (route): the over-cap text in a note is 503 verification-budget (not credential) in every format that keeps it; a part over the size budget is 503 verification-budget; no body names secret material", async () => {

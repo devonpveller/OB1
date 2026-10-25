@@ -1,11 +1,16 @@
-# openbrain-workbench. Four stages:
+# openbrain-workbench. Stages:
 #   tools    fetches the pinned pandoc and Typst release archives (sha256-checked) and unpacks them
-#   base     the runtime: Deno, git, pandoc, Typst, the CJK fonts, the app
-#   test     base + poppler-utils (pdftoppm/pdftotext/pdffonts/pdfinfo): the build test gate. The
+#   base     the runtime: Deno, git, pandoc, Typst, the CJK fonts, the manifest and the styles (no source)
+#   app      base + the whole source tree (tests included) and its dependency cache
+#   app-src  the source tree the service runs: app's src without *_test.ts and the test oracle
+#            (rw-p6a-followups: the runtime image ships no test and no oracle)
+#   test     app + poppler-utils (pdftoppm/pdftotext/pdffonts/pdfinfo): the build test gate. The
 #            runtime stage copies its marker, so the gate cannot be skipped; poppler never ships.
 #   parity   test + WeasyPrint: the P6a parity fixture (Typst vs the retired WeasyPrint path). Built
 #            only on request (`docker build --target parity`), never shipped.
-#   runtime  (the default target) base + the gate marker.
+#   runtime-deps  base + app-src, and the dependency cache of the RUNTIME module graph only (round 2:
+#            app's cache held transpiled tests, /deno-dir/gen/.../*_test.ts.js)
+#   runtime  (the default target) base + runtime-deps' source, lockfile and cache + the gate marker.
 
 FROM denoland/deno:2.3.3 AS tools
 # research-workbench P6a: pandoc 3.11 (GPL-2.0-or-later; a SEPARATE PROCESS, never linked - D9) and
@@ -68,6 +73,8 @@ COPY THIRD-PARTY-NOTICES.md ./
 # The CSL styles, upstream files used unmodified (CC BY-SA 3.0; their sha256 is in the
 # citation_styles registry and checked by src/export/export_test.ts).
 COPY csl ./csl
+
+FROM base AS app
 COPY src ./src
 
 # Pre-cache the deps actually imported by the entrypoint (hono, postgres; rw-p6a-resolve attempt 3 adds
@@ -81,7 +88,13 @@ RUN deno cache src/main.ts || true
 # FROZEN: a dependency that drifted from deno.lock fails the build.
 RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/render_test.ts src/export/prepare_worker.ts
 
-FROM base AS test
+# The tests (every *_test.ts) and the test oracle (src/export/credentials_oracle.ts, imported only by
+# resolve2_cost_test.ts) are the test stage's; the runtime copies the source tree from here, so no layer
+# of the runtime image holds them (rw-p6a-followups; the review r-rw-p6a2's tester finding 5).
+FROM app AS app-src
+RUN find src -name '*_test.ts' -delete && rm src/export/credentials_oracle.ts
+
+FROM app AS test
 # poppler-utils (GPL): pdftoppm, pdftotext, pdffonts and pdfinfo, run as SEPARATE PROCESSES by the
 # export tests to read the PDFs back (glyph coverage, numbering, parity). Test stage only.
 RUN apt-get update \
@@ -109,7 +122,17 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 CMD ["deno", "test", "--allow-env", "--allow-read", "--allow-write", "--allow-run", "src/export/parity_fixture.ts"]
 
+# The runtime's dependency cache, built from a source tree that never held a test: only the service's
+# entrypoints and its workers are cached, so no test module (nor its transpiled form) is in it.
+FROM base AS runtime-deps
+COPY --from=app-src /app/src ./src
+RUN deno cache src/main.ts || true
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/prepare_worker.ts src/export/judge_worker.ts
+
 FROM base AS runtime
+COPY --from=runtime-deps /app/src ./src
+COPY --from=runtime-deps /app/deno.lock ./deno.lock
+COPY --from=runtime-deps ${DENO_DIR} ${DENO_DIR}
 COPY --from=test /app/.test-gate-passed /app/.test-gate-passed
 
 # Runs as root: the workbench WRITES the shared vault (notes, the Changes log,

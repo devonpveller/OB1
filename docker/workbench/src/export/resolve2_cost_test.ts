@@ -21,7 +21,10 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import * as NEW from "./credentials.ts";
 import * as OLD from "./credentials_oracle.ts";
-import { Budget, OutputRejected, PARALLEL_CHARS, verifyDocx } from "./verify.ts";
+import { Budget, OutputRejected, verifyDocx } from "./verify.ts";
+// a text long enough to be judged slowly (rw-p6a-followups: every text is judged in a worker; attempt 2
+// sent only texts of 16 Ki characters or more there)
+const PARALLEL_CHARS = 16 * 1024;
 
 const KEY = "Hq4WmZ8tRv2Lx6Nc9Bp3Ks7Dy1Fg5Ja0"; // synthetic, 32
 const MAIL = "c4r.cost-audit@probe.invalid"; // synthetic
@@ -133,6 +136,84 @@ Deno.test("A7-5e2 (cost, not meaning): views() gives the a06b72f set of views", 
     if (typeof a === "string") cap++;
   }
   console.log(`A7-5e2: 400 texts, the same views (${cap} over the cap in both)`);
+});
+
+// rw-p6a-followups (d), the tester's finding 4: no comparison above reached the views cap often (A7-5e2
+// counts what happens to cross it). Texts BUILT to sit on it: layered encodings with no secret in them
+// (percent, entities, nested tags, a full-width letter, escapes), selected by their seed for how many
+// views an UNCAPPED walk of the a06b72f decoders finds - exactly MAX_VIEWS (judged: the last view still
+// fits) and just over it (refused by the cap) - plus every over-cap text among the first seeds.
+function capText(seed: number): string {
+  const r = rng(seed);
+  const P = (n: number) => Math.floor(r() * n);
+  const rep = (f: (s: string) => string, n: number, s: string) => {
+    for (let i = 0; i < n; i++) s = f(s);
+    return s;
+  };
+  const tags = (n: number) => "<".repeat(n) + "b>".repeat(n);
+  const amp = (x: string) => x.replace(/&/g, "&amp;");
+  const parts = ["alpha", rep(pct, P(5), "q"), rep(ent, P(5), "r"), tags(P(4)) + "s", r() < 0.5 ? "Ｔ" : "t"];
+  for (let k = P(4); k > 0; k--) {
+    const c = String.fromCharCode(97 + P(26));
+    parts.push([
+      () => rep(pct, 1 + P(4), c + "&"),
+      () => rep(ent, 1 + P(4), c + "%"),
+      () => amp(rep(ent, P(3), c)),
+      () => "\\".repeat(1 + P(3)) + c,
+      () => tags(1 + P(3)) + "&" + c,
+      () => rep(pct, P(3), rep(ent, P(3), c)),
+      () => b64("plain words " + c + " here and there"),
+      () => hex("plain " + c + " words!"),
+      () => b64(b64("some " + c + " text value")),
+      () => hex(pct(c + "z")),
+      () => b64(ent(c + "yx w")),
+    ][P(11)]());
+  }
+  return parts.join(" ");
+}
+// the number of views with no cap (the a06b72f walk, OLD.ENCODINGS; `limit` only stops a runaway)
+function uncappedViews(s: string, limit = 4096): number {
+  const seen = new Set<string>([s]);
+  const queue: { t: string; used: number[] }[] = [{ t: s, used: OLD.ENCODINGS.map(() => 0) }];
+  for (let q = queue.shift(); q; q = queue.shift()) {
+    const { t, used } = q;
+    OLD.ENCODINGS.forEach((e, i) => {
+      if (used[i] >= e.depth || seen.size > limit) return;
+      const d = e.decode(t);
+      if (!d || seen.has(d)) return;
+      seen.add(d);
+      const next = [...used];
+      next[i]++;
+      queue.push({ t: d, used: next });
+    });
+  }
+  return seen.size;
+}
+// round 2 (tester t-p6a-fu, Case 8): a cap moved to 513 or tested only on even sizes passed the attempt-1
+// corpus (512 and 528+ only). Now every neighbour the search found: 509 (odd, under), 512 (on), 513 (odd,
+// the first over), 514 (even), 516 views - so an off-by-one either way and a parity-dependent cap fail.
+const EXACT: [number, number][] = [[40387, 509], [3926, 512], [5528, 512], [7102, 512], [9556, 513], [44743, 513], [33879, 514], [31222, 516]];
+const AT_CAP = EXACT.filter(([, n]) => n <= 512).map(([s]) => s); // judged
+const OVER_CAP = EXACT.filter(([, n]) => n > 512).map(([s]) => s); // refused by the cap
+Deno.test("A7-5e2c (cost, not meaning; rw-p6a-followups): over the 512-view cap path, views() and judgeSecret answer what the a06b72f ones answer", () => {
+  assertEquals(NEW.MAX_VIEWS, 512);
+  for (const [s, n] of EXACT) assertEquals(uncappedViews(capText(s)), n, `seed ${s} has ${n} views`);
+  const over = [...OVER_CAP];
+  for (let s = 1; s <= 600; s++) if (uncappedViews(capText(s), 1024) > NEW.MAX_VIEWS) over.push(s);
+  const texts = [...AT_CAP, ...over].map(capText);
+  // each also with the key and the mailto in it (the verdict, not just the views)
+  const all = texts.flatMap((t) => [t, `${t} ${KEY}`, `${MAIL} ${t}`]);
+  let judged = 0, refused = 0;
+  for (const t of all) {
+    const a = viewsOr(NEW, t), b = viewsOr(OLD, t);
+    assertEquals(a, b, `views over the cap path: ${t.slice(0, 80)}`);
+    assertEquals(NEW.judgeSecret(t, SECRETS), OLD.judgeSecret(t, SECRETS), `verdict: ${t.slice(0, 80)}`);
+    if (typeof a === "string") refused++;
+    else judged++;
+  }
+  for (const [s, n] of EXACT.filter(([, n]) => n <= 512)) assertEquals((viewsOr(NEW, capText(s)) as string[]).length, n, `seed ${s}: a text of ${n} views is judged`);
+  for (const t of OVER_CAP.map(capText)) assertEquals(viewsOr(NEW, t), `more than ${NEW.MAX_VIEWS} views`, "a text over the cap is refused by it");
+  console.log(`A7-5e2c: ${all.length} texts beside, on or over the cap (${texts.length - AT_CAP.length} over it uncapped): ${judged} judged in both, ${refused} refused by the cap in both`);
 });
 
 Deno.test("A7-5e3 (cost, not meaning): judgeSecret gives the a06b72f verdict - short and long, secrets across chunk boundaries", () => {
@@ -252,7 +333,7 @@ Deno.test("A7-5v (cost, not meaning): in parallel, the verifier reports the offe
       return e instanceof OutputRejected ? `${e.code}: ${e.offence}` : String(e);
     }
   };
-  // the key (long part, judged in a worker) before the mailto (short part, judged where it stands)
+  // the key (long part, judged slowly) before the mailto (short part, judged quickly; both in workers)
   const a = await code(() => verifyDocx(storedZip([["word/a.xml", xml(long(KEY))], ["word/b.xml", xml(MAIL)]]), SECRETS));
   assert(a.startsWith("credential: word/a.xml holds the OpenAlex key"), a);
   // the mailto (short, first) before the key (long, later): the mailto

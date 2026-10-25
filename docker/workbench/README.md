@@ -189,6 +189,15 @@ GPL source offer.
   invisible characters removed): 503 `output-verification` or `credential`, never a 200. Only the
   writers this verifies (pdf through Typst, docx, markdown, plain) can be registered formats
   (503 `format` otherwise).
+- **The credential check's cost is bounded per process** (rw-p6a-followups, `src/export/judge_pool.ts`):
+  every text an output's check judges (the MD and TXT included) is judged in a worker, never on the
+  request thread; one export's check runs at a time (`VERIFY_SLOTS` 1) over one pool of at most
+  `VERIFY_WORKERS` (min(8, cores - 1)) workers, and an export waits for its turn without spending its
+  15 s budget (`verification-busy` 503 after `VERIFY_WAIT_MS`, 300 s). Peak memory of one 400 KB note's
+  check: +1.17 GB for the DOCX, +1.02 GB for the PDF; concurrent exports of it peak at about the same.
+  A 422 reference field that could not be judged is withheld as "could not be judged", not as carrying
+  the credential. The runtime image carries no `*_test.ts` and no test oracle (`credentials_oracle.ts`);
+  the test stage runs them and the build gates on it.
 - **D9**: pandoc runs as a separate process over files (markdown, a JSON metadata file, a CSL-JSON
   bibliography file and the verified style in, the document out), Typst as its child; no Lua/JSON filter, no AST round trip. The citekey grammar and
   CSL clean-up are ported from manubot 859dd15 (BSD-2-Clause-Patent), not run. WeasyPrint, the
