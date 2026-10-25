@@ -13,8 +13,15 @@
  * fetched text become ONE stored source, find_or_create_source's md5(content) dedup): the claim is
  * still the same claim (text, tag, order) but it is filed with fewer distinct sources than it cites.
  * Such a claim is counted as `r1`, never as agreement, and only when one of its cited package sources
- * really persisted to the same id as another package source, or received corroboration from such a
- * merged source (the run gave one amount per package source; the store keeps one per stored source).
+ * really persisted to the same id as another package source, or (rw-p3a-figure-filed, F8: narrowed)
+ * when a stored source it cites received corroboration THROUGH the merge - one scored claim co-cites
+ * that source with two or more package copies of the merged source and the store holds the collapsed
+ * row (the run gave one amount per package copy; source_corroborations keeps one per (from, to, claim
+ * text)), and the merged source is not one of this claim's own grounders (p_exclude would drop it).
+ * A claim whose source got corroboration from a merged source by ONE copy is not exempt. An exempt
+ * claim's total is still checked: claim_confidence_d15 must equal the expected total computed with the
+ * merged amount - the D15 claim math (credibility.ts edgeTotal, claimTotal) over its stored edges, each
+ * source's rolling total read from the store (source_rolling_total_core, which holds the one merged row).
  *
  * Used by credibility-attempt5.e2e.test.ts (Cases 41-43) and credibility-attempt6.e2e.test.ts (Cases
  * 47-48). Test-only: the runtime image ships no fixtures.
@@ -145,9 +152,41 @@ export async function compareInvariant(c: PoolClient, r: RunResult, filed: Filed
   // R1's reach: a stored source that two package sources persisted to, and every stored source that
   // received corroboration from one (the run gave it one amount per package source, the store one)
   const mergedIds = [...new Set((filed?.sourceIds ?? []).filter((x, k, a) => a.indexOf(x) !== k))];
-  const fedByMerged = new Set(mergedIds.length
-    ? (await c.queryObject<{ t: string }>(`SELECT DISTINCT to_source_id::text AS t FROM public.source_corroborations WHERE from_source_id = ANY($1::uuid[])`, [mergedIds])).rows.map((x) => x.t)
-    : []);
+  // F8 (narrowed): T -> the merged sources whose corroboration of T collapsed in the store - a scored
+  // claim co-cites T with >= 2 package copies of S, and the store holds a corroboration row S -> T
+  const rows = mergedIds.length
+    ? (await c.queryObject<{ f: string; t: string }>(`SELECT DISTINCT from_source_id::text AS f, to_source_id::text AS t FROM public.source_corroborations WHERE from_source_id = ANY($1::uuid[])`, [mergedIds])).rows
+    : [];
+  const viaMerge = new Map<string, Set<string>>();
+  for (const s of scored) {
+    const cites = [...new Set((s.edges ?? []).map((e: { cite: number }) => e.cite))] as number[];
+    const stored = cites.map((k) => filed!.sourceIds[k - 1]);
+    for (const S of mergedIds) {
+      if (stored.filter((x) => x === S).length < 2) continue;
+      for (const T of new Set(stored)) {
+        if (!T || T === S || !rows.some((r) => r.f === S && r.t === T)) continue;
+        if (!viaMerge.has(T)) viaMerge.set(T, new Set());
+        viaMerge.get(T)!.add(S);
+      }
+    }
+  }
+  let model: C.CredibilityModel | null = null;
+  /** The expected total of an R1 claim, with the merged amount: the D15 claim math over its STORED edges. */
+  const expectedFromStore = async (claimId: string) => {
+    model ??= await C.loadCredibilityModel(c);
+    const es = (await c.queryObject<{ sid: string; t: string; w: number }>(
+      `SELECT source_id::text AS sid, edge_type AS t, weight::float8 AS w FROM public.claim_sources
+        WHERE claim_id = $1 AND source_id IS NOT NULL AND edge_type <> 'contradicts'`, [claimId])).rows;
+    const grounders = [...new Set(es.map((e) => e.sid))];
+    const best = new Map<string, number>();
+    for (const e of es) {
+      const srt = Number((await one<{ v: number }>(c, `SELECT public.source_rolling_total_core($1::uuid, $2, NULL::jsonb, $3::uuid[]) AS v`,
+        [e.sid, kind, grounders])).v);
+      const t = C.edgeTotal(model, srt, e.t, Number(e.w));
+      best.set(e.sid, Math.max(best.get(e.sid) ?? 0, t));
+    }
+    return best.size ? C.claimTotal(model, floor, [...best.values()]).total : 0;
+  };
   const toFlip: Array<{ id: string; total: number; at: string }> = [];
   for (let i = 0; i < Math.max(scored.length, ids.length); i++) {
     const s = scored[i];
@@ -166,16 +205,21 @@ export async function compareInvariant(c: PoolClient, r: RunResult, filed: Filed
       `${filed!.sourceIds[e.cite - 1]}|${e.edge_type}|${Math.fround(e.weight)}`);
     const got = edges.map((e) => `${e.sid}|${e.t}|${Number(e.w)}`);
     const sids = (s.edges ?? []).map((e: { cite: number }) => filed!.sourceIds[e.cite - 1]);
-    // R1 scope: the claim cites a package source that persisted to the same stored source as another
-    // package source (its edges collapse, and that stored source's rolling total sums both)
-    const merged = sids.some((sid: string) => mergedIds.includes(sid) || fedByMerged.has(sid));
-    if (merged) {
-      // R1: two cited package sources persisted to ONE stored source - the same claim, fewer sources
+    // R1 scope (F8, narrowed): the claim cites a package source that persisted to the same stored
+    // source as another package source (its edges collapse), or a stored source whose corroboration
+    // from a merged source came THROUGH the merge and is not excluded on this claim (not a grounder)
+    const direct = sids.some((sid: string) => mergedIds.includes(sid));
+    const hop = !direct && sids.some((sid: string) => [...(viaMerge.get(sid) ?? [])].some((S) => !sids.includes(S)));
+    if (direct || hop) {
       out.r1++;
       r1Totals.push(s.total);
-      if (!got.length || !got.every((g) => want.includes(g))) {
+      if (direct && (!got.length || !got.every((g) => want.includes(g)))) {
         out.bad.push(`${at}: EDGES (R1) scored ${want.join(" ")} filed ${got.join(" ")}`);
       }
+      if (hop && [...want].sort().join() !== [...got].sort().join()) out.bad.push(`${at}: EDGES (R1 hop) scored ${want.join(" ")} filed ${got.join(" ")}`);
+      // the total is checked, with the merged amount (never skipped)
+      const expected = await expectedFromStore(id);
+      if (d15 !== expected || Number(view.v) !== d15) out.bad.push(`${at}: TOTAL (R1) d15 ${d15} view ${view.v} expected with the merged amount ${expected}`);
       continue;
     }
     if ([...want].sort().join() !== [...got].sort().join()) out.bad.push(`${at}: EDGES scored ${want.join(" ")} filed ${got.join(" ")}`);

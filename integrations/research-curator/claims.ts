@@ -163,6 +163,14 @@ export interface WriteClaimsResult {
   metaSkipped: number;
   gaps: string[];
   claimIds: string[];     // ids of the claims written/deduped (for conflict detection)
+  /**
+   * rw-p3a-figure-filed: per claim of the shared claim list (claim-list.ts claimList(synthesis).claims,
+   * index for index), the claim row it was filed into - null when it was not filed (the LLM meta judge
+   * refused it, or none of its sources persisted). A repeated id is the database's own text dedup
+   * (find_or_create_claim) merging two listed claims into one row. The research service re-states the
+   * report credibility figure from this, so the figure is over the claims this write actually filed.
+   */
+  filed: Array<string | null>;
 }
 
 const toVector = (v: number[]): string => `[${v.join(",")}]`;
@@ -182,7 +190,7 @@ export async function writeClaims(
   const { claims, metaSkipped, gaps } = claimList(synthesis);
   const res: WriteClaimsResult = {
     claimsWritten: 0, claimsDeduped: 0, edgesWritten: 0,
-    edgesSkipped: 0, ungroundedSkipped: 0, metaSkipped: 0, gaps, claimIds: [],
+    edgesSkipped: 0, ungroundedSkipped: 0, metaSkipped: 0, gaps, claimIds: [], filed: [],
   };
   // Phase 3.1 — a statement ABOUT THE RUN is not a claim about the world and
   // must not enter the knowledge base. Patterns first (free, deterministic, in
@@ -198,6 +206,7 @@ export async function writeClaims(
       try { verdict = await opts.metaJudge(claim.text); } catch { verdict = "WORLD"; }
       if (verdict === "META") {
         res.metaSkipped++;
+        res.filed.push(null);
         opts.onMetaSkip?.(claim.text, "judge");
         continue;
       }
@@ -210,7 +219,7 @@ export async function writeClaims(
         if (!e.sourceId) { res.edgesSkipped++; return false; }
         return true;
       });
-    if (resolved.length === 0) { res.ungroundedSkipped++; continue; }
+    if (resolved.length === 0) { res.ungroundedSkipped++; res.filed.push(null); continue; }
 
     let emb: string | null = null;
     if (opts.embed) {
@@ -227,6 +236,7 @@ export async function writeClaims(
     );
     const claimId = fc.rows[0].id;
     res.claimIds.push(claimId);
+    res.filed.push(claimId);
     if (fc.rows[0].was_duplicate) res.claimsDeduped++; else res.claimsWritten++;
 
     for (const e of resolved) {

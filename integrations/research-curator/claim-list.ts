@@ -22,7 +22,10 @@
  * LLM meta judge (index.ts metaJudge, fails open), a citation whose source did not persist
  * (sourceIds[N-1] null), and the database's own text dedup (find_or_create_claim:
  * md5(lower(btrim(text))) within a thread - across runs, and on case mappings where Postgres' lower()
- * and JavaScript's toLowerCase() differ).
+ * and JavaScript's toLowerCase() differ). This list is NOT made to match lower(btrim()) (collation-
+ * dependent; it would move the seam): since rw-p3a-figure-filed the curator's writeClaims returns,
+ * per claim of this list, the row it filed it into (filed[], null = not filed), and the research
+ * service re-states the report figure from that filing result (credibility.ts filedClaimsCredibility).
  */
 
 import { claimEdges, type EpistemicTag, type ParsedEdge } from "./claim-edges.ts";

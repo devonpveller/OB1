@@ -793,7 +793,8 @@ export function lineCredibility(
  * twin's order (totals descending, the extra summed from 0 in that order). Shared by lineCredibility
  * and the filed-claim scorer (filedClaimsCredibility), so there is one arithmetic.
  */
-function claimTotal(m: CredibilityModel, floor: number, sourceTotals: number[]) {
+/** The D15 claim total over its sources' best edge totals (claim_confidence_d15's loop, depth 0, fresh). */
+export function claimTotal(m: CredibilityModel, floor: number, sourceTotals: number[]) {
   const totals = [...sourceTotals].sort((a, b) => b - a);
   const lead = totals[0];
   const extra = Math.min(m.corroboration.claimCap, totals.slice(1).reduce((a, t) => a + m.corroboration.claimPer * t, 0));
@@ -886,6 +887,14 @@ export interface ScoredClaim {
  * source the curator persists, so the curator skips the edge (claims.ts writeClaims: edgesSkipped)
  * and a claim left with no edge is not filed (ungroundedSkipped) - mirrored here.
  * `lineOf(start)` maps a claim's offset in the package synthesis to its judged line (null = none).
+ *
+ * rw-p3a-figure-filed: `filedIds` (optional) is the curator's FILING RESULT for this list (writeClaims'
+ * `filed`, index for index): the row each listed claim was filed into, null = not filed. With it, the
+ * same list is scored over what was filed - a claim the curator did not file (its LLM meta judge, a
+ * citation whose source did not persist and the sourceTotal that says so) contributes nothing, and two
+ * listed claims the database merged into one row (find_or_create_claim's own text dedup) are ONE claim
+ * over the union of their edges (link_claim_to_source: one edge per source and type, the later weight).
+ * Without it the list is scored as the curator is handed it (the pre-filing figure, unchanged).
  */
 export function filedClaimsCredibility(
   m: CredibilityModel,
@@ -893,12 +902,29 @@ export function filedClaimsCredibility(
   packageSynthesis: string,
   lineOf: (start: number) => { line: number; verdict: string } | null,
   sourceTotal: (n: number, grounders: number[]) => number | null,
+  filedIds?: ReadonlyArray<string | null>,
 ): ScoredClaim[] {
   const floor = claimFloor(m, kind);
-  const out: ScoredClaim[] = [];
-  for (const c of claimList(packageSynthesis).claims) {
+  const groups: Array<{ c: ReturnType<typeof claimList>["claims"][number]; edges: ParsedEdge[] }> = [];
+  const groupOf = new Map<string, number>();
+  claimList(packageSynthesis).claims.forEach((c, k) => {
+    const row = filedIds ? filedIds[k] : null;
+    if (filedIds && !row) return;
     const edges: ParsedEdge[] = c.edges.filter((e) => sourceTotal(e.sourceIndex, []) !== null);
-    if (!edges.length) continue;
+    const into = row ? groupOf.get(row) : undefined;
+    if (into !== undefined) {
+      const g = groups[into];
+      const byEdge = new Map(g.edges.map((e) => [`${e.sourceIndex}|${e.edgeType}`, e] as const));
+      for (const e of edges) byEdge.set(`${e.sourceIndex}|${e.edgeType}`, e);
+      g.edges = [...byEdge.values()];
+      return;
+    }
+    if (!edges.length) return;
+    if (row) groupOf.set(row, groups.length);
+    groups.push({ c, edges });
+  });
+  const out: ScoredClaim[] = [];
+  for (const { c, edges } of groups) {
     const grounders = [...new Set(edges.map((e) => e.sourceIndex))];
     const best = new Map<number, number>();
     for (const e of edges) {

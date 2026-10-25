@@ -35,7 +35,7 @@ import { checkRenderFidelity, countUnits, supersetCitations, type FidelityRecord
 import {
   coverageFooter, emptySearchRecord, entailmentFooterLine, failureNotice, gapQuestions, reconcileNeedsStatus,
   shouldClassifyTemplate, type GapPassRecord,
-  type NeedState, type NeedStatus, type SearchRecord,
+  type NeedState, type NeedStatus, type NotFiled, type SearchRecord,
 } from "./report.ts";
 
 // Tunables (env-read; reading env does not start a server).
@@ -214,6 +214,8 @@ export function curatorCopyLines(hardened: string, unfolded: ReadonlySet<number>
  * the package's line j is the judged line of its j-th non-null entry. `sourceTotal(page, grounders)`
  * is the rolling total the page brings to a claim whose cited pages are `grounders` (null = the page
  * is not a source the curator persists). runResearch calls this; so does the credibility sweep.
+ * rw-p3a-figure-filed: `filedIds` = the curator's filing result for the package's claim list
+ * (writeClaims' `filed`); with it the same list is scored over what was filed (filedClaimsCredibility).
  */
 export function scoreCuratorPackage<T>(
   m: CredibilityModel,
@@ -223,6 +225,7 @@ export function scoreCuratorPackage<T>(
   curatorLines: ReadonlyArray<string | null>,
   verdicts: ReadonlyArray<{ line: number; verdict: string }>,
   sourceTotal: (page: T, grounders: T[]) => number | null,
+  filedIds?: ReadonlyArray<string | null>,
 ): { claims: ScoredClaim[]; report: ReportCredibility } {
   const pkgLineToJudged = curatorLines.flatMap((l, i) => (l === null ? [] : [i]));
   const verdictOnLine = new Map(verdicts.map((v) => [v.line, v.verdict] as const));
@@ -235,8 +238,61 @@ export function scoreCuratorPackage<T>(
       const page = curatorCited[k - 1];
       if (page === undefined) return null;
       return sourceTotal(page, grounders.map((g) => curatorCited[g - 1]).filter((g): g is T => g !== undefined));
-    });
+    }, filedIds);
   return { claims, report: reportCredibility(m, kind, claims, verdicts.map((v) => v.line)) };
+}
+
+/**
+ * rw-p3a-figure-filed - the report credibility as the job row publishes it: the roll-up, plus WHETHER it
+ * is over filed claims. `filed` true = re-stated from the curator's filing result (`basis` "filing"), or
+ * the curator reported success without a per-claim result (`basis` "package": the pre-filing figure);
+ * false = nothing of the run was filed (`not_filed` says why, and the value is null over 0 claims);
+ * null = no package was handed to the curator (no cited source and no reuse), so there was nothing to file.
+ */
+export interface FiledCredibility extends ReportCredibility {
+  filed: boolean | null;
+  not_filed?: NotFiled;
+  basis?: "filing" | "package";
+}
+
+/** The not-filed state: no claim of the run is in the store, so no figure is published over one. */
+export function notFiledCredibility(c: ReportCredibility, why: NotFiled): FiledCredibility {
+  return { ...c, value: null, claims: 0, below_floor: 0, judged_not_filed: c.judged_lines, filed: false, not_filed: why };
+}
+
+const nonEmptyText = (v: unknown) => typeof v === "string" && v.trim() !== "";
+
+/**
+ * rw-p3a-figure-filed - THE FIGURE IS RE-STATED FROM THE FILING RESULT. `reportCred` is the pre-filing
+ * figure (the package's claim list, attempt 6); `curator` the curator's reply (null = not called).
+ *   error / claims_error (classifyCuratorOutcome's two failure shapes): not filed;
+ *   claims: null (the curator had no synthesis row to anchor claims to) over a non-empty list: not filed;
+ *   claims.filed (writeClaims' per-claim filing result): `rescore(filed, sourceIds)` re-scores the same
+ *     list over what was filed - the meta judge's drops (R3), the unpersisted sources (R5,
+ *     persist.source_ids[k] null) and the database's merges (F1/R4) - and a filing that wrote no claim
+ *     of a non-empty list is not filed;
+ *   anything else that succeeded: the pre-filing figure, basis "package".
+ */
+export function restateFiledCredibility(
+  reportCred: ReportCredibility,
+  curator: Record<string, unknown> | null,
+  rescore: (filedIds: ReadonlyArray<string | null>, sourceIds: ReadonlyArray<string | null> | null) => ReportCredibility,
+): FiledCredibility {
+  if (!curator || curator.state === "skipped") return { ...reportCred, filed: null };
+  if (nonEmptyText(curator.error)) return notFiledCredibility(reportCred, "curator_error");
+  if (nonEmptyText(curator.claims_error)) return notFiledCredibility(reportCred, "claims_error");
+  if (curator.claims === null) {
+    return reportCred.claims ? notFiledCredibility(reportCred, "no_claim_written") : { ...reportCred, filed: true, basis: "filing" };
+  }
+  const claims = curator.claims as Record<string, unknown> | undefined;
+  if (claims && Array.isArray(claims.filed)) {
+    const persist = curator.persist as Record<string, unknown> | undefined;
+    const sourceIds = Array.isArray(persist?.source_ids) ? persist!.source_ids as Array<string | null> : null;
+    const re = rescore(claims.filed as Array<string | null>, sourceIds);
+    if (!re.claims && reportCred.claims) return notFiledCredibility(reportCred, "no_claim_written");
+    return { ...re, filed: true, basis: "filing" };
+  }
+  return { ...reportCred, filed: true, basis: "package" };
 }
 
 /**
@@ -409,8 +465,8 @@ export interface RunOptions {
 export interface RunMetrics extends ReturnType<typeof reuseMetric> {
   /** P3a - the entailment stage's counts (D10). */
   entailment?: Omit<EntailmentRecord, "audit">;
-  /** P3a - the report credibility roll-up (D15 item 5). */
-  credibility?: ReportCredibility | null;
+  /** P3a - the report credibility roll-up (D15 item 5); rw-p3a-figure-filed - over what was filed. */
+  credibility?: FiledCredibility | ReportCredibility | null;
   /** P3a - what the pre-ingestion stage did (D15 items 7-8). */
   admission?: { claim_kind: string; kind_basis: string; judged: number; admitted: number; leads: number; lead_paths: number; held_folded: number; held_kept: number };
 }
@@ -1876,16 +1932,23 @@ export async function runResearch(
     const i = pool.indexOf(page);
     return i >= 0 ? i : pool.findIndex((p) => p.url === page.url);
   };
-  const { claims: lineCred, report: reportCred } = scoreCuratorPackage(model, claimKind.kind,
-    curatorSynthesis, curatorCited, curatorLines, verdicts, (page, grounders) => {
-      const i = poolIndexOf(page);
-      if (i < 0) return null;
-      const coCited = new Set(grounders.map((g) => g.url));
-      // only the corroboration that is FILED: an unfolded held source is never a stored source, so
-      // recordCorroboration files nothing from it and claim_confidence_d15 never sees its amount
-      const filedIn = receivedBy(i).filter((r) => { const j = pool.findIndex((p) => p.url === r.from); return !unfolded.has(j + 1); });
-      return foldReceived(finals[i].total, filedIn, coCited);
+  // `unpersisted` (rw-p3a-figure-filed, R5): the package sources the curator's filing result says did
+  // not persist - empty before the hand-off. Such a source is no stored source: it grounds no edge and
+  // recordCorroboration files nothing from it.
+  const packageSourceTotal = (unpersisted: ReadonlySet<string>) => (page: Page, grounders: Page[]) => {
+    const i = poolIndexOf(page);
+    if (i < 0 || unpersisted.has(page.url)) return null;
+    const coCited = new Set(grounders.map((g) => g.url));
+    // only the corroboration that is FILED: an unfolded held source is never a stored source, so
+    // recordCorroboration files nothing from it and claim_confidence_d15 never sees its amount
+    const filedIn = receivedBy(i).filter((r) => {
+      const j = pool.findIndex((p) => p.url === r.from);
+      return !unfolded.has(j + 1) && !unpersisted.has(r.from);
     });
+    return foldReceived(finals[i].total, filedIn, coCited);
+  };
+  const { claims: lineCred, report: reportCred } = scoreCuratorPackage(model, claimKind.kind,
+    curatorSynthesis, curatorCited, curatorLines, verdicts, packageSourceTotal(new Set()));
 
   const answeredNeeds = needsStatus.filter((n) => n.status === "answered").length;
   const partialNeeds = needsStatus.filter((n) => n.status === "partial").length;
@@ -1990,12 +2053,19 @@ export async function runResearch(
   }
   const entailRec = entailment as EntailmentRecord | null;
   const entailFooter = entailRec ? { lines: entailRec.lines, demoted: entailRec.demoted } : null;
-  const credFooter = { value: reportCred.value, model_version: model.modelVersion, kind: claimKind.kind };
-  if (prose && topicPath) {
-    prose = `${prose}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop, gapPass, renderFidelity, entailFooter, credFooter)}_`;
-  } else if (prose) {
-    prose = `${prose}\n\n_— ${entailmentFooterLine(entailFooter, credFooter)}_`;
-  }
+  // rw-p3a-figure-filed: the footer is a function of the figure, so it can be re-stated once the
+  // curator's filing result is known (the curator stores `prose` before it files the claims).
+  const proseBody = prose;
+  const withFooter = (cred: ReportCredibility & { not_filed?: NotFiled }) => {
+    if (!proseBody) return proseBody;
+    const credFooter = { value: cred.value, model_version: model.modelVersion, kind: claimKind.kind, not_filed: cred.not_filed ?? null };
+    return topicPath
+      ? `${proseBody}\n\n_— ${coverageFooter(needsStatus, searchRecord, backstop, gapPass, renderFidelity, entailFooter, credFooter)}_`
+      : `${proseBody}\n\n_— ${entailmentFooterLine(entailFooter, credFooter)}_`;
+  };
+  // a dry run files nothing: its figure and footer say so (the dry-run note)
+  const handedCred: FiledCredibility | ReportCredibility = dryRun ? notFiledCredibility(reportCred, "dry_run") : reportCred;
+  prose = withFooter(handedCred);
 
   const gapMatches = synthesis.match(/\[GAP\]/gi) || [];
   // Reuse signal = needs actually COVERED by existing claims (needs - gaps), not
@@ -2006,7 +2076,7 @@ export async function runResearch(
   const freshCited = cited.filter((p) => !(p.url && reuseUrls.has(p.url)));
   const metrics: RunMetrics = {
     ...reuseMetric(coveredNeeds, freshCited.length, gapMatches.length),
-    credibility: reportCred,
+    credibility: handedCred,
     admission: { claim_kind: claimKind.kind, kind_basis: claimKind.basis, ...admissionStats },
   };
   if (entailRec) {
@@ -2035,6 +2105,38 @@ export async function runResearch(
       sources: curatorCited.map((p) => ({ url: p.url, title: p.title, content: p.content, domain: p.domain })),
     };
     try { curator = await deps.delegateToCurator(pkg); } catch (e) { curator = { error: String((e as Error).message) }; }
+  }
+
+  // rw-p3a-figure-filed - the published figure and the stored footer state what the curator FILED:
+  // re-stated from its filing result (restateFiledCredibility). The scored list (lineCredibility) stays
+  // the list the curator files from the package (the attempt-6 invariant); only the roll-up follows the
+  // filing. A changed footer is re-stamped onto the report prose the curator stored.
+  if (!dryRun) {
+    const filedCred = restateFiledCredibility(reportCred, curator, (filedIds, sourceIds) => {
+      const unpersisted = new Set(sourceIds ? curatorCited.filter((_, k) => !sourceIds[k]).map((p) => p.url) : []);
+      return scoreCuratorPackage(model, claimKind.kind, curatorSynthesis, curatorCited, curatorLines, verdicts,
+        packageSourceTotal(unpersisted), filedIds).report;
+    });
+    metrics.credibility = filedCred;
+    if (filedCred.filed === false) {
+      await progress("persist", `report credibility: not filed (${filedCred.not_filed})`, { credibility_filed: 0 });
+    }
+    const restated = withFooter(filedCred);
+    if (restated !== prose) {
+      prose = restated;
+      const synthesisId = (curator?.persist as Record<string, unknown> | undefined)?.synthesis_id;
+      if (typeof synthesisId === "string" && synthesisId) {
+        try {
+          // only a prose the curator stamped (index.ts: prose_synthesis is written only when present)
+          await client.queryObject(
+            `UPDATE public.sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1::uuid AND metadata ? 'prose_synthesis'`,
+            [synthesisId, JSON.stringify({ prose_synthesis: prose })],
+          );
+        } catch (e) {
+          await progress("persist", `the stored report footer was not re-stated: ${(e as Error).message}`, { footer_restated: 0 });
+        }
+      }
+    }
   }
 
   // P3a - the credibility records of what the curator filed: family, signals, score and rolling

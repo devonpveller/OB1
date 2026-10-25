@@ -304,7 +304,19 @@ export interface GapPassRecord {
 /** P3a (D10) - what the entailment stage did to the cited lines. */
 export interface EntailmentFooter { lines: number; demoted: number }
 /** P3a (D15 item 5) - the report credibility roll-up and the model version that produced it. */
-export interface CredibilityFooter { value: number | null; model_version: string; kind: string }
+export interface CredibilityFooter {
+  value: number | null; model_version: string; kind: string;
+  /** rw-p3a-figure-filed: why the run's claims were not filed (absent/null = filed, or nothing to file) */
+  not_filed?: NotFiled | null;
+}
+/** rw-p3a-figure-filed - why a run's claims are not in the store (a fixed vocabulary: it is printed). */
+export type NotFiled = "dry_run" | "curator_error" | "claims_error" | "no_claim_written";
+const NOT_FILED_TEXT: Record<NotFiled, string> = {
+  dry_run: "dry run, nothing was filed",
+  curator_error: "the curator did not file this run",
+  claims_error: "the grounded claims were not written",
+  no_claim_written: "the curator wrote no claim of this run",
+};
 
 /**
  * The entailment + credibility clause, printed whenever the stage ran - including "0 demoted":
@@ -313,7 +325,9 @@ export interface CredibilityFooter { value: number | null; model_version: string
 export function entailmentFooterLine(e?: EntailmentFooter | null, c?: CredibilityFooter | null): string {
   const parts: string[] = [];
   if (e) parts.push(`entailment: ${e.demoted} of ${e.lines} cited line(s) demoted`);
-  if (c) {
+  if (c?.not_filed) {
+    parts.push(`report credibility (not filed): n/a - ${NOT_FILED_TEXT[c.not_filed] ?? "not filed"} (${c.model_version}, kind ${c.kind})`);
+  } else if (c) {
     parts.push(c.value === null
       ? `report credibility: n/a (no judged line; ${c.model_version}, kind ${c.kind})`
       : `report credibility ${c.value.toFixed(2)} (${c.model_version}, kind ${c.kind})`);

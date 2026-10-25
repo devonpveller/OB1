@@ -2,9 +2,10 @@
  * claim-edges.ts - THE line-tag -> grounding-edge rule (rw-p3a-entail attempt 4, tester finding F2).
  *
  * ONE SOURCE. This file is the only place that says which edges a tagged synthesis line is filed
- * with. The research curator files claims with it (claims.ts parseSynthesisClaims) and the research
- * service computes each line's credibility with it (credibility.ts filedLineCredibility), so the
- * run's line total is the total of the claim the curator files from that line. The two services
+ * with. Both services reach it through the one claim list (claim-list.ts claimList): the research
+ * curator files each listed claim with these edges (claims.ts writeClaims) and the research service
+ * scores the same list through them (credibility.ts filedClaimsCredibility), so a claim's reported
+ * total is the total of the claim the curator files. The two services
  * build from separate Docker contexts, so the research service carries a byte-identical copy at
  * integrations/research-service/claim-edges.ts; claim-edges.test.ts in BOTH services fails when
  * the two files differ (and the credibility e2e runner checks it too). Edit this file, then copy it.
