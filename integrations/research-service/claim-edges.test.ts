@@ -55,3 +55,13 @@ Deno.test("attempt 4: an edge weight is 0 or in [1e-9, 1] as the REAL it is stor
     assertEquals(edgeWeightOk(w), false, String(w));
   }
 });
+
+// rw-p3a-figure-filed (F4): the header named functions that no longer exist (claims.ts
+// parseSynthesisClaims as the filer, credibility.ts filedLineCredibility as the scorer). The claim
+// list (claim-list.ts claimList) is what both services derive from now.
+Deno.test("rw-p3a-figure-filed F4: claim-edges.ts names no retired function in its comment", () => {
+  const text = Deno.readTextFileSync(new URL("./claim-edges.ts", import.meta.url));
+  for (const stale of ["parseSynthesisClaims", "filedLineCredibility"]) {
+    assertEquals(text.includes(stale), false, `claim-edges.ts still names ${stale}`);
+  }
+});

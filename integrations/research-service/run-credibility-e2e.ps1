@@ -14,7 +14,8 @@
 #      (attempt 4) credibility-attempt4.e2e.test.ts - the last files claims through the research curator's
 #      own writeClaims, so the curator directory is bind-mounted read-only at /curator; (attempt 5)
 #      credibility-attempt5.e2e.test.ts - the REAL runResearch / harden() order -> writeClaims (Cases 41-44);
-#      (attempt 6) credibility-attempt6.e2e.test.ts - scored claims == filed claims (Cases 47-48)
+#      (attempt 6) credibility-attempt6.e2e.test.ts - scored claims == filed claims (Cases 47-48);
+#      (rw-p3a-figure-filed) credibility-figure-filed.e2e.test.ts - the figure re-stated from the filing
 #      - the SQL twin vs the TS model on the same rows - in the test image (the SQL twin of
 #      the model, the before/after view, the re-score gate, the fold's move)
 #   6. builds openbrain-workbench:wt-<id>; database B (chain + the P0 contract fixtures, the
@@ -218,7 +219,7 @@ try {
   Check ($negRc -ne 0 -and $o -match 'gate negative control') "a failing test fails the image build (rc=$negRc)"
   if ($negRc -eq 0) { $made.images += $negTag }
 
-  Write-Host '[5] database A + credibility.e2e.test.ts + credibility-twins.e2e.test.ts + credibility-attempt4.e2e.test.ts + credibility-attempt5.e2e.test.ts + credibility-attempt6.e2e.test.ts (SQL twin, twins on one table, the filed-line sweep, before/after, gate, fold, the scored == filed invariant)'
+  Write-Host '[5] database A + credibility.e2e.test.ts + credibility-twins.e2e.test.ts + credibility-attempt4.e2e.test.ts + credibility-attempt5.e2e.test.ts + credibility-attempt6.e2e.test.ts + credibility-figure-filed.e2e.test.ts (SQL twin, twins on one table, the filed-line sweep, before/after, gate, fold, the scored == filed invariant, the figure over what was filed)'
   # attempt 4: the line-tag -> edge rule has one source (research-curator/claim-edges.ts); this service's copy must be identical
   # attempt 6: so has the claim list (research-curator/claim-list.ts) the report is scored from
   $curatorDir = Join-Path (Split-Path -Parent $rs) 'research-curator'
@@ -230,7 +231,7 @@ try {
   if (-not (Start-Db $dbA $false)) { throw 'db A' }
   $o = Dk run --rm --label $label --network $net -e "CRED_E2E_DB_HOST=$dbA" -e "CRED_E2E_DB_PASSWORD=$pw" `
     --mount "type=bind,src=$curatorDir,dst=/curator,readonly" -e CURATOR_DIR=/curator `
-    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts credibility-attempt5.e2e.test.ts credibility-attempt6.e2e.test.ts
+    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts credibility-attempt5.e2e.test.ts credibility-attempt6.e2e.test.ts credibility-figure-filed.e2e.test.ts
   Save 'credibility-e2e.log' $o
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "credibility e2e: $($sum.Value)"

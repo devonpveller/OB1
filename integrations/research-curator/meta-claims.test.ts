@@ -330,3 +330,41 @@ Deno.test("a judge verdict of META drops the claim", async () => {
   assertEquals(res.metaSkipped, 1);
   assertEquals(written.length, 0);
 });
+
+// rw-p3a-figure-filed (R3 / R5 / F1): writeClaims reports, per claim of the shared claim list, the
+// claim row it filed it into (null = not filed), so the research service re-states the report figure
+// from the filing result rather than from the package.
+Deno.test("rw-p3a-figure-filed: writeClaims returns filed[] aligned with claimList - null for a judge drop and an unpersisted source, a repeated id for a database merge", async () => {
+  const written: string[] = [];
+  const client = {
+    queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }> {
+      if (/find_or_create_claim/.test(sql)) {
+        const text = String((args || [])[0]);
+        written.push(text);
+        // the database's md5(lower(btrim(text))) dedup: claim 4 merges into claim 3
+        const dup = text.startsWith("istanbul");
+        return Promise.resolve({ rows: [{ id: dup ? "c-ist" : text.startsWith("İstanbul") ? "c-ist" : `c${written.length}`, was_duplicate: dup }] as unknown as T[] });
+      }
+      return Promise.resolve({ rows: [] as T[] });
+    },
+  };
+  const synthesis = [
+    "[SOURCED] The OptiPlex 3050 uses an LGA 1151 socket. [Source 1]",
+    "[SOURCED] A sentence the planted judge calls META. [Source 1]",
+    "[SOURCED] A claim grounded only in an unpersisted source. [Source 3]",
+    "[SOURCED] İstanbul clinics report ferry sickness. [Source 1]",
+    "[SOURCED] istanbul clinics report ferry sickness. [Source 2]",
+  ].join("\n");
+  const res = await writeClaims(client, synthesis, opts({
+    sourceIds: ["src1", "src2", null],
+    metaJudge: (t: string) => Promise.resolve(t.includes("planted judge") ? "META" as const : "WORLD" as const),
+  }));
+  // deno-lint-ignore no-explicit-any
+  const filed = (res as any).filed as Array<string | null>;
+  assertEquals(filed.length, 5, "one entry per claim of claimList(synthesis)");
+  assertEquals(filed[1], null, "the meta judge drop");
+  assertEquals(filed[2], null, "the claim whose only source did not persist");
+  assertEquals(filed[3], "c-ist");
+  assertEquals(filed[4], "c-ist", "the database merged claim 4 into claim 3");
+  assertEquals(filed[0], res.claimIds[0]);
+});
