@@ -82,7 +82,7 @@ export class Slots {
 export const verificationSlot = new Slots();
 
 // ── the pool: at most VERIFY_WORKERS workers in the process ────────────────────────────────────
-interface Job { session: number; text: string; secrets: string[]; deadline: number; resolve: (v: Verdict | null) => void; reject: (e: unknown) => void }
+interface Job { session: number; op?: "offence"; text: string; secrets: string[]; deadline: number; resolve: (v: Verdict | null) => void; reject: (e: unknown) => void }
 
 export class JudgePool {
   private all: Worker[] = [];
@@ -105,13 +105,18 @@ export class JudgePool {
   // a verification's handle: its jobs, and close() when it ends
   open(): Session {
     const id = ++this.sessions;
-    return { judge: (text, secrets, deadline) => this.judge(id, text, secrets, deadline), close: () => this.closeSession(id) };
+    return {
+      judge: (text, secrets, deadline) => this.judge(id, text, secrets, deadline),
+      // the MD output's re-parse (markdown.ts markdownOffence): the offence, or null
+      offence: (md) => this.judge(id, md, [], Infinity, "offence") as unknown as Promise<string | null>,
+      close: () => this.closeSession(id),
+    };
   }
 
   // the verdict on `text`, judged in a worker; `deadline` as judgeSecret's (performance.now() ms)
-  private judge(session: number, text: string, secrets: string[], deadline: number): Promise<Verdict | null> {
+  private judge(session: number, text: string, secrets: string[], deadline: number, op?: "offence"): Promise<Verdict | null> {
     const p = new Promise<Verdict | null>((resolve, reject) => {
-      this.queue.push({ session, text, secrets, deadline, resolve, reject });
+      this.queue.push({ session, op, text, secrets, deadline, resolve, reject });
       this.pump();
     });
     p.catch(() => {}); // read in order by verify.ts; a later one failing first is not unhandled
@@ -136,7 +141,7 @@ export class JudgePool {
     this.running.set(w, job);
     w.onmessage = (e: MessageEvent) => {
       this.running.delete(w);
-      const d = e.data as { verdict?: Verdict | null; error?: string };
+      const d = e.data as { verdict?: Verdict | null; offence?: string | null; error?: string };
       const n = (this.judged.get(w) ?? 0) + job.text.length;
       if (n >= RECYCLE_CHARS) this.retire(w);
       else {
@@ -144,7 +149,7 @@ export class JudgePool {
         this.idle.push(w);
       }
       if (d.error !== undefined) job.reject(new Error(d.error));
-      else job.resolve(d.verdict ?? null);
+      else job.resolve((job.op === "offence" ? d.offence : d.verdict) as Verdict | null ?? null);
       this.pump();
     };
     w.onerror = (e: ErrorEvent) => {
@@ -154,7 +159,7 @@ export class JudgePool {
       job.reject(new Error(`the credential check stopped: ${e.message}`));
       this.pump();
     };
-    w.postMessage({ text: job.text, secrets: job.secrets, at: Number.isFinite(job.deadline) ? performance.timeOrigin + job.deadline : null });
+    w.postMessage({ op: job.op, text: job.text, secrets: job.secrets, at: Number.isFinite(job.deadline) ? performance.timeOrigin + job.deadline : null });
   }
 
   private retire(w: Worker) {
@@ -183,6 +188,7 @@ export class JudgePool {
 }
 export interface Session {
   judge(text: string, secrets: string[], deadline: number): Promise<Verdict | null>;
+  offence(md: string): Promise<string | null>;
   close(): void;
 }
 export const sharedPool = new JudgePool();

@@ -243,12 +243,13 @@ try {
   $o = Dk run --rm --label $label --network none --entrypoint sh $tag -c 'dpkg -s weasyprint >/dev/null 2>&1 && echo weasyprint-present; command -v weasyprint pdftoppm pdftotext || true; dpkg -s poppler-utils >/dev/null 2>&1 && echo poppler-present; pandoc --version | head -1; typst --version; ls /usr/local/share/doc/typst; test -f /app/.test-gate-passed && echo gate-marker'
   Save 'runtime-image.txt' $o
   Check (($o -notmatch 'weasyprint') -and ($o -notmatch 'pdftoppm|pdftotext|poppler-present')) "the runtime image carries no WeasyPrint and no poppler"
-  # rw-p6a-followups: no test file and no test oracle in the runtime image; the test stage keeps them
-  $find = "find /app -name '*_test.ts' -o -name 'credentials_oracle.ts'"
+  # rw-p6a-followups: no test file and no test oracle in the runtime image - nowhere in it, the dependency
+  # cache included (round 2: DENO_DIR held gen/.../*_test.ts.js); the test stage keeps them
+  $find = "find / \( -path /proc -o -path /sys -o -path /dev \) -prune -o \( -name '*_test.ts*' -o -name '*_test.js*' -o -name '*credentials_oracle*' \) -print"
   $rt = (Dk run --rm --label $label --network none --entrypoint sh $tag -c $find).Trim()
   $ts = (Dk run --rm --label $label --network none --entrypoint sh $testTag -c $find).Trim()
   Save 'runtime-tests.txt' "runtime:`n$rt`ntest:`n$ts"
-  Check ($rt -eq '') "the runtime image carries no *_test.ts and no credentials_oracle.ts ($(@($rt -split "`n" | Where-Object { $_ }).Count) found)"
+  Check ($rt -eq '') "the runtime image carries no *_test.ts / *_test.ts.js and no credentials_oracle anywhere (/, DENO_DIR included) ($(@($rt -split "`n" | Where-Object { $_ }).Count) found)"
   Check (($ts -match 'credentials_oracle\.ts') -and ($ts -match 'resolve2_cost_test\.ts')) "the test stage keeps them ($(@($ts -split "`n" | Where-Object { $_ }).Count) files)"
   # attempt 2: the glyph-coverage verdicts the build gate reaches in the TEST stage hold for the
   # RUNTIME image only if both carry the same font files (poppler once pulled DejaVu into test only)

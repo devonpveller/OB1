@@ -8,7 +8,9 @@
 #            runtime stage copies its marker, so the gate cannot be skipped; poppler never ships.
 #   parity   test + WeasyPrint: the P6a parity fixture (Typst vs the retired WeasyPrint path). Built
 #            only on request (`docker build --target parity`), never shipped.
-#   runtime  (the default target) base + app-src + app's dependency cache + the gate marker.
+#   runtime-deps  base + app-src, and the dependency cache of the RUNTIME module graph only (round 2:
+#            app's cache held transpiled tests, /deno-dir/gen/.../*_test.ts.js)
+#   runtime  (the default target) base + runtime-deps' source, lockfile and cache + the gate marker.
 
 FROM denoland/deno:2.3.3 AS tools
 # research-workbench P6a: pandoc 3.11 (GPL-2.0-or-later; a SEPARATE PROCESS, never linked - D9) and
@@ -120,11 +122,17 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 CMD ["deno", "test", "--allow-env", "--allow-read", "--allow-write", "--allow-run", "src/export/parity_fixture.ts"]
 
-FROM base AS runtime
+# The runtime's dependency cache, built from a source tree that never held a test: only the service's
+# entrypoints and its workers are cached, so no test module (nor its transpiled form) is in it.
+FROM base AS runtime-deps
 COPY --from=app-src /app/src ./src
-# the dependency cache app built (and the lockfile as it left it), so the runtime resolves what it did
-COPY --from=app /app/deno.lock ./deno.lock
-COPY --from=app ${DENO_DIR} ${DENO_DIR}
+RUN deno cache src/main.ts || true
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/prepare_worker.ts src/export/judge_worker.ts
+
+FROM base AS runtime
+COPY --from=runtime-deps /app/src ./src
+COPY --from=runtime-deps /app/deno.lock ./deno.lock
+COPY --from=runtime-deps ${DENO_DIR} ${DENO_DIR}
 COPY --from=test /app/.test-gate-passed /app/.test-gate-passed
 
 # Runs as root: the workbench WRITES the shared vault (notes, the Changes log,

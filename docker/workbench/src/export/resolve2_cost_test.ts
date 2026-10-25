@@ -153,7 +153,7 @@ function capText(seed: number): string {
   const tags = (n: number) => "<".repeat(n) + "b>".repeat(n);
   const amp = (x: string) => x.replace(/&/g, "&amp;");
   const parts = ["alpha", rep(pct, P(5), "q"), rep(ent, P(5), "r"), tags(P(4)) + "s", r() < 0.5 ? "Ｔ" : "t"];
-  for (let k = P(3); k > 0; k--) {
+  for (let k = P(4); k > 0; k--) {
     const c = String.fromCharCode(97 + P(26));
     parts.push([
       () => rep(pct, 1 + P(4), c + "&"),
@@ -162,7 +162,12 @@ function capText(seed: number): string {
       () => "\\".repeat(1 + P(3)) + c,
       () => tags(1 + P(3)) + "&" + c,
       () => rep(pct, P(3), rep(ent, P(3), c)),
-    ][P(6)]());
+      () => b64("plain words " + c + " here and there"),
+      () => hex("plain " + c + " words!"),
+      () => b64(b64("some " + c + " text value")),
+      () => hex(pct(c + "z")),
+      () => b64(ent(c + "yx w")),
+    ][P(11)]());
   }
   return parts.join(" ");
 }
@@ -184,12 +189,15 @@ function uncappedViews(s: string, limit = 4096): number {
   }
   return seen.size;
 }
-const AT_CAP = [174, 1420, 1569]; // exactly MAX_VIEWS (512) views each
-const OVER_CAP = [12282, 2089, 2910]; // 528, 544, 552 views
+// round 2 (tester t-p6a-fu, Case 8): a cap moved to 513 or tested only on even sizes passed the attempt-1
+// corpus (512 and 528+ only). Now every neighbour the search found: 509 (odd, under), 512 (on), 513 (odd,
+// the first over), 514 (even), 516 views - so an off-by-one either way and a parity-dependent cap fail.
+const EXACT: [number, number][] = [[40387, 509], [3926, 512], [5528, 512], [7102, 512], [9556, 513], [44743, 513], [33879, 514], [31222, 516]];
+const AT_CAP = EXACT.filter(([, n]) => n <= 512).map(([s]) => s); // judged
+const OVER_CAP = EXACT.filter(([, n]) => n > 512).map(([s]) => s); // refused by the cap
 Deno.test("A7-5e2c (cost, not meaning; rw-p6a-followups): over the 512-view cap path, views() and judgeSecret answer what the a06b72f ones answer", () => {
   assertEquals(NEW.MAX_VIEWS, 512);
-  for (const s of AT_CAP) assertEquals(uncappedViews(capText(s)), NEW.MAX_VIEWS, `seed ${s} sits on the cap`);
-  for (const s of OVER_CAP) assert(uncappedViews(capText(s)) > NEW.MAX_VIEWS, `seed ${s} is over the cap`);
+  for (const [s, n] of EXACT) assertEquals(uncappedViews(capText(s)), n, `seed ${s} has ${n} views`);
   const over = [...OVER_CAP];
   for (let s = 1; s <= 600; s++) if (uncappedViews(capText(s), 1024) > NEW.MAX_VIEWS) over.push(s);
   const texts = [...AT_CAP, ...over].map(capText);
@@ -203,9 +211,9 @@ Deno.test("A7-5e2c (cost, not meaning; rw-p6a-followups): over the 512-view cap 
     if (typeof a === "string") refused++;
     else judged++;
   }
-  for (const t of AT_CAP.map(capText)) assertEquals((viewsOr(NEW, t) as string[]).length, 512, "a text on the cap is judged");
+  for (const [s, n] of EXACT.filter(([, n]) => n <= 512)) assertEquals((viewsOr(NEW, capText(s)) as string[]).length, n, `seed ${s}: a text of ${n} views is judged`);
   for (const t of OVER_CAP.map(capText)) assertEquals(viewsOr(NEW, t), `more than ${NEW.MAX_VIEWS} views`, "a text over the cap is refused by it");
-  console.log(`A7-5e2c: ${all.length} texts on or over the cap (${texts.length - AT_CAP.length} over it uncapped): ${judged} judged in both, ${refused} refused by the cap in both`);
+  console.log(`A7-5e2c: ${all.length} texts beside, on or over the cap (${texts.length - AT_CAP.length} over it uncapped): ${judged} judged in both, ${refused} refused by the cap in both`);
 });
 
 Deno.test("A7-5e3 (cost, not meaning): judgeSecret gives the a06b72f verdict - short and long, secrets across chunk boundaries", () => {

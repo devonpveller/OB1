@@ -36,7 +36,7 @@
 //   - A body names the credential's KIND (credentials.ts credentialKind), never its prefix or length.
 import { base64Forms, credentialKind, decodeEntities, INVISIBLE, type Verdict } from "./credentials.ts";
 import { type Session, sharedPool, verificationSlot, VerifyBusy } from "./judge_pool.ts";
-import { markdownOffence, UNSAFE_SCHEME_TEXT } from "./markdown.ts";
+import { UNSAFE_SCHEME_TEXT } from "./markdown.ts";
 import { type PdfDict, PdfDocument, PdfName, type PdfObject, PdfRef, type PdfValue } from "./pdf_read.ts";
 import { zipEntries } from "./zip_read.ts";
 
@@ -73,8 +73,22 @@ export class Budget {
   constructor(public ms = VERIFY_BUDGET.ms, public textChars = VERIFY_BUDGET.textChars) {}
   // a whole check: the slot first (waiting for it is not the check's time), then the counted, settled
   // check; with no secret configured there is nothing to judge and no slot is taken
-  async check(format: string, secrets: string[], check: () => void | Promise<void>): Promise<void> {
-    if (!secrets.length || this.pool) return await this.run(() => this.settle(check));
+  // `pre` (round 2: the MD re-parse) runs in the pool after the slot is taken and before the clock starts
+  async check(format: string, secrets: string[], check: () => void | Promise<void>, pre?: (s: Session) => Promise<void>): Promise<void> {
+    const before = async () => {
+      if (!pre) return;
+      if (this.pool) return await pre(this.pool);
+      const s = sharedPool.open();
+      try {
+        await pre(s);
+      } finally {
+        s.close();
+      }
+    };
+    if (!secrets.length || this.pool) {
+      await before();
+      return await this.run(() => this.settle(check));
+    }
     let release: () => void;
     try {
       release = await verificationSlot.acquire();
@@ -83,6 +97,7 @@ export class Budget {
       throw e;
     }
     try {
+      await before();
       await this.run(() => this.settle(check));
     } finally {
       release();
@@ -177,10 +192,13 @@ export async function verifyDrawnText(texts: string[], secrets: string[], format
 }
 
 // ── per format ─────────────────────────────────────────────────────────────────────────────────
+// round 2 (tester t-p6a-fu, Case 5): the re-parse runs in a worker too - 4 concurrent 1 MB MD exports stacked
+// ~300 ms each on the export's thread (/health 1.75 s)
 export async function verifyMarkdown(md: string, secrets: string[], format = "md", budget = new Budget()) {
-  const o = markdownOffence(md);
-  if (o) throw new OutputRejected("output-verification", format, o);
-  await budget.check(format, secrets, () => checkText(format, md, secrets, budget));
+  await budget.check(format, secrets, () => checkText(format, md, secrets, budget), async (s) => {
+    const o = await s.offence(md);
+    if (o) throw new OutputRejected("output-verification", format, o);
+  });
 }
 
 export async function verifyText(txt: string, secrets: string[], format = "txt", budget = new Budget()) {

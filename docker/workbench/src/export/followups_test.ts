@@ -10,8 +10,8 @@
 //   F-a4  the route answers `verification-busy` 503 (not 422)
 //   F-b1  a 422 field withheld because it could not be judged says "could not be judged"; a field that
 //         carries the credential keeps "carries the configured service credential" (R2-4, error-as-fact)
-//   F-b2  MD and TXT are judged off the export's thread: while a large MD and TXT are verified, a health
-//         request to the same process answers within HEALTH_BOUND_MS
+//   F-b2  MD and TXT are judged (and the MD re-parsed) off the export's thread: while 4 large MD (and MD + TXT)
+//         exports are verified concurrently, a health request from another process answers within HEALTH_BOUND_MS
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import * as POOL from "./judge_pool.ts";
 import { Budget, OutputRejected, verifyDrawnText, verifyMarkdown, verifyText } from "./verify.ts";
@@ -210,35 +210,35 @@ Deno.test("F-b1 (422 field): a title withheld because it could not be judged say
   }
 });
 
-Deno.test(`F-b2 (off the thread): while a large MD and a large TXT are verified, a health request to the same process answers within ${HEALTH_BOUND_MS} ms`, async () => {
-  const big = prose(800_000, 4401);
+// round 2 (tester t-p6a-fu, Case 5): the probe runs in a SEPARATE process, so a stall of this thread shows as
+// latency (an in-thread probe could only miss its turn), and the exports run CONCURRENTLY - 4 MD of 1 MB, then
+// MD and TXT mixed: their re-parses stacked on this thread before.
+const PROBE = `const u = Deno.args[0]; const lat = [];
+for (;;) { const t = performance.now(); let r; try { r = await (await fetch(u)).text(); } catch { break; }
+  if (r === "stop") break; lat.push(performance.now() - t); await new Promise((x) => setTimeout(x, 20)); }
+console.log(JSON.stringify(lat));`;
+Deno.test(`F-b2 (off the thread): while 4 large MD (and MD + TXT) exports are verified concurrently, a health request from another process answers within ${HEALTH_BOUND_MS} ms`, async () => {
+  const big = prose(1_000_000, 4401);
+  let stop = false;
   const ac = new AbortController();
-  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, signal: ac.signal, onListen: () => {} }, () => new Response("ok"));
-  const url = `http://127.0.0.1:${server.addr.port}/health`;
-  const lat: number[] = [];
-  let done = false;
-  const probe = (async () => {
-    while (!done) {
-      const t0 = performance.now();
-      await (await fetch(url)).text();
-      lat.push(performance.now() - t0);
-      await new Promise((r) => setTimeout(r, 25));
-    }
-  })();
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, signal: ac.signal, onListen: () => {} }, () => new Response(stop ? "stop" : "ok"));
   try {
-    await new Promise((r) => setTimeout(r, 100));
-    const t0 = performance.now();
-    const got = [await outcome(() => verifyText(big, SECRETS)), await outcome(() => verifyMarkdown(big, SECRETS))];
-    const took = performance.now() - t0;
-    done = true;
-    await probe;
-    const worst = Math.max(...lat);
-    console.log(`F-b2: txt + md of ${big.length} characters verified in ${took.toFixed(0)} ms: ${JSON.stringify(got)} | ${lat.length} health requests, the slowest ${worst.toFixed(0)} ms (bound ${HEALTH_BOUND_MS} ms)`);
-    assertEquals(got, ["served", "served"]);
-    assert(worst < HEALTH_BOUND_MS, `a health request waited ${worst.toFixed(0)} ms`);
-    assert(lat.length >= 5, "health was probed during the verification");
+    for (const mix of [["md", "md", "md", "md"], ["txt", "md", "txt", "md"]]) {
+      stop = false;
+      const child = new Deno.Command(Deno.execPath(), { args: ["eval", PROBE, `http://127.0.0.1:${server.addr.port}/health`], stdout: "piped", stderr: "null" }).spawn();
+      await new Promise((r) => setTimeout(r, 1500)); // the probe process is up and probing
+      const t0 = performance.now();
+      const got = await Promise.all(mix.map((f) => outcome(() => f === "md" ? verifyMarkdown(big, SECRETS) : verifyText(big, SECRETS))));
+      const took = performance.now() - t0;
+      stop = true;
+      const lat = JSON.parse(new TextDecoder().decode((await child.output()).stdout).trim() || "[]") as number[];
+      const worst = Math.max(...lat);
+      console.log(`F-b2: ${mix.join(",")} of ${big.length} characters, concurrent, verified in ${took.toFixed(0)} ms: ${JSON.stringify(got)} | ${lat.length} health requests from another process, the slowest ${worst.toFixed(0)} ms (bound ${HEALTH_BOUND_MS} ms)`);
+      assertEquals(got, mix.map(() => "served"));
+      assert(worst < HEALTH_BOUND_MS, `a health request waited ${worst.toFixed(0)} ms`);
+      assert(lat.length >= 10, "health was probed during the verification");
+    }
   } finally {
-    done = true;
     ac.abort();
     await server.finished;
   }
