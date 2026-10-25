@@ -28,6 +28,9 @@
 //     `output-verification` or `credential`, naming the format and the first offence (and the
 //     credential's kind only); rw-p6a-resolve2: within one budget per export (verify.ts Budget) - an
 //     output it cannot judge within it is 503 `verification-budget`, never `credential`.
+//     rw-p6a-followups: one verification at a time in the process, through one pool of workers
+//     (judge_pool.ts); an export waits for its turn without spending its budget, and one that waited
+//     past VERIFY_WAIT_MS is 503 `verification-busy` - never a 200 that skipped the check.
 //   - THE GLYPH CHECK reads the parsed text: every text node, code span, code block, math, image alt
 //     and link title, the title and the reference strings - what Typst will draw (attempt 2 stripped
 //     `$..$` from the raw text, code spans included). The PDF is then checked for .notdef glyphs.
@@ -72,7 +75,7 @@ export interface RefItem {
   csl: CslItem;
 }
 
-export type RenderCode = "citation" | "font" | "glyphs" | "pandoc" | "style-integrity" | "too-complex" | "output-verification" | "credential" | "verification-budget" | "format";
+export type RenderCode = "citation" | "font" | "glyphs" | "pandoc" | "style-integrity" | "too-complex" | "output-verification" | "credential" | "verification-budget" | "verification-busy" | "format";
 
 export class RenderFailed extends Error {
   constructor(message: string, public detail: string, public code: RenderCode = "pandoc", public extra: Record<string, unknown> = {}) {
@@ -352,7 +355,8 @@ export async function render(i: RenderInput): Promise<RenderOutput> {
   // verdict is READ first - before the output check, and before any error of the conversion - so the
   // answer is the sequential one (a refused drawn text is refused with its own code whatever pandoc did);
   // nothing is served before it is read, and the output check starts after it ends (one budget, never
-  // two checks counted at once).
+  // two checks counted at once). rw-p6a-followups: each check takes the process's verification slot
+  // first (verify.ts Budget.check); the time it waits for it is not the budget's.
   const budget = new Budget(i.verifyBudget?.ms, i.verifyBudget?.textChars);
   const asRendered = (e: unknown) =>
     e instanceof OutputRejected ? new RenderFailed(e.message, e.offence, e.code, { format: e.format, offence: e.offence }) : e;

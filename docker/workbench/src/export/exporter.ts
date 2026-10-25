@@ -37,7 +37,7 @@ import type { ExportRef } from "./repo.ts";
 import { citeKey, type FormatDef, type RefItem, render as realRender, RenderFailed, type StyleDef, UnnumberedCitation } from "./render.ts";
 import { aboutExport } from "./about.ts";
 import type { Limits } from "./markdown.ts";
-import { judgeSecret, secretIn } from "./credentials.ts";
+import { judgeSecret } from "./credentials.ts";
 
 export interface ExporterDeps {
   reg: { entries(registry: string): Promise<RegistryEntry[]> };
@@ -152,20 +152,30 @@ const styleOf = (e: RegistryEntry): StyleDef => ({ key: e.key, ...(e.definition 
 // verifier could not judge within its budget (`verification-budget`) is 503 too, under its own code.
 const STATUS_OF: Record<string, 422 | 503> = {
   glyphs: 422, citation: 422, pandoc: 422, "too-complex": 422,
-  font: 503, "style-integrity": 503, "output-verification": 503, credential: 503, "verification-budget": 503, format: 503,
+  font: 503, "style-integrity": 503, "output-verification": 503, credential: 503, "verification-budget": 503, "verification-busy": 503, format: 503,
 };
 
 // rw-p6a-resolve attempt 5 (the tester's attempt-4 near-miss 1): an ERROR body is an output too. A
 // 422's reference whose text (a source record's title, an identifier) carries the configured key or
-// mailto under the credential invariant (credentials.ts secretIn) is answered with that text withheld;
+// mailto under the credential invariant (credentials.ts judgeSecret) is answered with that text withheld;
 // any body that would still carry it is not served (503 credential).
-const WITHHELD = "withheld: it carries the configured service credential";
-function withheldRefs<T extends Record<string, unknown>>(refs: T[], secrets: string[]): T[] {
+// rw-p6a-followups (R2-4, error-as-fact): a field withheld because the check could not judge it (the views
+// cap; credentials.ts judgeSecret `unjudged`) is reported as not judged - "carries the credential" is said
+// only of a field judged to carry it.
+export const WITHHELD = "withheld: it carries the configured service credential";
+export const WITHHELD_UNJUDGED = "withheld: it could not be judged for the configured service credential (over the credential check's budget)";
+export function withheldRefs<T extends Record<string, unknown>>(refs: T[], secrets: string[]): T[] {
   return refs.map((u) => {
     const out: Record<string, unknown> = { ...u };
-    const held = Object.keys(out).filter((k) => typeof out[k] === "string" && secretIn(out[k] as string, secrets) !== null);
-    for (const k of held) out[k] = null;
-    return (held.length ? { ...out, withheld: `${held.join(", ")} ${WITHHELD}` } : out) as T;
+    const carries: string[] = [], unjudged: string[] = [];
+    for (const k of Object.keys(out)) {
+      if (typeof out[k] !== "string") continue;
+      const v = judgeSecret(out[k] as string, secrets);
+      if (v) ("secret" in v ? carries : unjudged).push(k);
+    }
+    for (const k of [...carries, ...unjudged]) out[k] = null;
+    const why = [carries.length ? `${carries.join(", ")} ${WITHHELD}` : "", unjudged.length ? `${unjudged.join(", ")} ${WITHHELD_UNJUDGED}` : ""].filter(Boolean).join("; ");
+    return (why ? { ...out, withheld: why } : out) as T;
   });
 }
 export function guardBody(body: Record<string, unknown>, status: number, secrets: string[]): { body: Record<string, unknown>; status: number } {

@@ -34,19 +34,21 @@
 //     own time, and one text it judges may be at most VERIFY_BUDGET.textChars long; running out of
 //     either, or a text over the views cap, is 503 `verification-budget` - never `credential`.
 //   - A body names the credential's KIND (credentials.ts credentialKind), never its prefix or length.
-import { base64Forms, credentialKind, decodeEntities, INVISIBLE, judgeSecret, type Verdict } from "./credentials.ts";
-import { JudgePool } from "./judge_pool.ts";
+import { base64Forms, credentialKind, decodeEntities, INVISIBLE, type Verdict } from "./credentials.ts";
+import { type Session, sharedPool, verificationSlot, VerifyBusy } from "./judge_pool.ts";
 import { markdownOffence, UNSAFE_SCHEME_TEXT } from "./markdown.ts";
 import { type PdfDict, PdfDocument, PdfName, type PdfObject, PdfRef, type PdfValue } from "./pdf_read.ts";
 import { zipEntries } from "./zip_read.ts";
 
-export type RejectCode = "output-verification" | "credential" | "verification-budget";
+export type RejectCode = "output-verification" | "credential" | "verification-budget" | "verification-busy";
 export class OutputRejected extends Error {
   constructor(public code: RejectCode, public format: string, public offence: string) {
     super(code === "credential"
       ? `the ${format} export was not served: it would carry the configured service credential (${offence})`
       : code === "verification-budget"
       ? `the ${format} export was not served: it could not be checked for the configured service credential within the verification budget (${offence})`
+      : code === "verification-busy"
+      ? `the ${format} export was not served: it was not checked, because the credential check runs one export at a time (${offence}); try again`
       : `the ${format} export was not served: its output verification found ${offence}`);
   }
 }
@@ -56,23 +58,42 @@ export class OutputRejected extends Error {
 // Typst run between the drawn-text check and the output check is not), and the length of one text it
 // judges with the whole invariant. The values and their measurements: findings rw-p6a-resolve2.
 export const VERIFY_BUDGET = { ms: 15_000, textChars: 4 * 1024 * 1024 };
-// rw-p6a-resolve2 attempt 2: a text of PARALLEL_CHARS or more, in a PDF, a DOCX or the drawn text, is
-// judged in a worker (judge_pool.ts) while the check goes on; the verdicts are read in the check's order
-// (settle, below). A shorter text, and the MD and TXT (one text each), are judged where they stand.
-export const PARALLEL_CHARS = 16 * 1024;
+// rw-p6a-resolve2 attempt 2: the texts of a PDF, a DOCX or the drawn text are judged in workers
+// (judge_pool.ts) while the check goes on; the verdicts are read in the check's order (settle, below).
+// rw-p6a-followups (R2-4): EVERY text is - the MD and the TXT (one text each) and the short ones too; none
+// is judged on the export's thread, so a large MD or TXT export no longer holds it for up to the budget.
+// And (R3-2) one verification at a time in the process (judge_pool.ts verificationSlot), its budget
+// running only once it holds the slot.
 type Pending = { format: string; where: string; p: Promise<Verdict | null> };
 export class Budget {
   private used = 0;
   private since = 0;
-  pool: JudgePool | null = null;
+  pool: Session | null = null;
   pending: Pending[] = [];
   constructor(public ms = VERIFY_BUDGET.ms, public textChars = VERIFY_BUDGET.textChars) {}
-  // run a check whose long texts are judged in parallel, answering as if they were judged in order:
+  // a whole check: the slot first (waiting for it is not the check's time), then the counted, settled
+  // check; with no secret configured there is nothing to judge and no slot is taken
+  async check(format: string, secrets: string[], check: () => void | Promise<void>): Promise<void> {
+    if (!secrets.length || this.pool) return await this.run(() => this.settle(check));
+    let release: () => void;
+    try {
+      release = await verificationSlot.acquire();
+    } catch (e) {
+      if (e instanceof VerifyBusy) throw new OutputRejected("verification-busy", format, e.message);
+      throw e;
+    }
+    try {
+      await this.run(() => this.settle(check));
+    } finally {
+      release();
+    }
+  }
+  // run a check whose texts are judged in parallel, answering as if they were judged in order:
   // every text judged before the check stopped (or all of them) is read in order, and the first offence
-  // among them is the answer; then what stopped the check, if anything. The workers end with it.
+  // among them is the answer; then what stopped the check, if anything. Its jobs end with it.
   async settle(check: () => void | Promise<void>): Promise<void> {
     if (this.pool) return await check(); // nested: the outer one settles
-    this.pool = new JudgePool();
+    this.pool = sharedPool.open();
     this.pending = [];
     let stopped: { e: unknown } | null = null;
     try {
@@ -120,11 +141,9 @@ function judge(format: string, where: string, text: string, secrets: string[], b
   if (text.length > budget.textChars) {
     throw new OutputRejected("verification-budget", format, `${where} is ${text.length} characters long; one text may be ${budget.textChars}`);
   }
-  if (budget.pool && text.length >= PARALLEL_CHARS) {
-    budget.pending.push({ format, where, p: budget.pool.judge(text, secrets, budget.deadline) });
-    return;
-  }
-  verdictThrows(format, where, judgeSecret(text, secrets, budget.deadline), budget);
+  // rw-p6a-followups: never on the export's thread (every check runs inside Budget.check / settle)
+  if (!budget.pool) throw new Error("a credential judging outside a verification (verify.ts Budget.check)");
+  budget.pending.push({ format, where, p: budget.pool.judge(text, secrets, budget.deadline) });
 }
 function verdictThrows(format: string, where: string, v: Verdict | null, budget: Budget) {
   if (v && "secret" in v) throw new OutputRejected("credential", format, `${where} holds ${credentialKind(v.secret)}`);
@@ -152,22 +171,20 @@ export function safeAbsolute(target: string): boolean {
 // reference field) is checked under the same invariant before Typst runs.
 export async function verifyDrawnText(texts: string[], secrets: string[], format: string, budget = new Budget()) {
   if (!secrets.length) return;
-  await budget.run(() =>
-    budget.settle(() => {
-      for (const t of texts) judge(format, "the text it would draw", t, secrets, budget);
-    })
-  );
+  await budget.check(format, secrets, () => {
+    for (const t of texts) judge(format, "the text it would draw", t, secrets, budget);
+  });
 }
 
 // ── per format ─────────────────────────────────────────────────────────────────────────────────
-export function verifyMarkdown(md: string, secrets: string[], format = "md", budget = new Budget()) {
+export async function verifyMarkdown(md: string, secrets: string[], format = "md", budget = new Budget()) {
   const o = markdownOffence(md);
   if (o) throw new OutputRejected("output-verification", format, o);
-  budget.run(() => checkText(format, md, secrets, budget));
+  await budget.check(format, secrets, () => checkText(format, md, secrets, budget));
 }
 
-export function verifyText(txt: string, secrets: string[], format = "txt", budget = new Budget()) {
-  budget.run(() => checkText(format, txt, secrets, budget));
+export async function verifyText(txt: string, secrets: string[], format = "txt", budget = new Budget()) {
+  await budget.check(format, secrets, () => checkText(format, txt, secrets, budget));
 }
 
 const attr = (el: string, a: string) => {
@@ -177,7 +194,7 @@ const attr = (el: string, a: string) => {
 const xmlText = (x: string) => decodeEntities(x.replace(/<[^<>]*>/g, " "));
 
 export async function verifyDocx(docx: Uint8Array, secrets: string[], format = "docx", budget = new Budget()) {
-  await budget.run(() => budget.settle(() => docxChecked(docx, secrets, format, budget)));
+  await budget.check(format, secrets, () => docxChecked(docx, secrets, format, budget));
 }
 async function docxChecked(docx: Uint8Array, secrets: string[], format: string, budget: Budget) {
   let parts: Map<string, Uint8Array>;
@@ -231,7 +248,7 @@ async function docxChecked(docx: Uint8Array, secrets: string[], format: string, 
 }
 
 export async function verifyPdf(pdf: Uint8Array, secrets: string[], format = "pdf", budget = new Budget()) {
-  await budget.run(() => budget.settle(() => pdfChecked(pdf, secrets, format, budget)));
+  await budget.check(format, secrets, () => pdfChecked(pdf, secrets, format, budget));
 }
 async function pdfChecked(pdf: Uint8Array, secrets: string[], format: string, budget: Budget) {
   let doc: PdfDocument;
@@ -341,7 +358,7 @@ export async function verifyOutput(pandocTo: string, format: string, bytes: Uint
   if (w === "pdf") return await verifyPdf(bytes, secrets, format, budget);
   if (w === "docx") return await verifyDocx(bytes, secrets, format, budget);
   const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-  if (w === "markdown") return verifyMarkdown(text, secrets, format, budget);
-  if (w === "plain") return verifyText(text, secrets, format, budget);
+  if (w === "markdown") return await verifyMarkdown(text, secrets, format, budget);
+  if (w === "plain") return await verifyText(text, secrets, format, budget);
   throw new OutputRejected("output-verification", format, `a writer ('${w}') the export cannot verify`);
 }

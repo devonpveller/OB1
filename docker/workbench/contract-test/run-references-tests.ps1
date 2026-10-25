@@ -88,6 +88,7 @@ $dbA = "rwp2a-dba-$rand"; $dbB = "rwp2a-dbb-$rand"; $dbC = "rwp2a-dbc-$rand"
 $wbName = "rwp2a-wb-$rand"; $embName = "rwp2a-embed-$rand"; $baseName = "rwp2a-wbbase-$rand"; $postName = "rwp2a-wbpost-$rand"
 $short = ($Id -replace '^wt-', '')
 $tag = "openbrain-workbench:wt-$short"
+$testTag = "openbrain-workbench:wt-$short-test"
 $baseTag = "openbrain-workbench:wt-$short-base"
 $dreddTag = "rw-dredd:wt-$short"
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
@@ -282,6 +283,13 @@ try {
   Check ($script:rc -eq 0) "image $tag built at OB1 $($sha.Substring(0, 7)) (test gate passed)"
   if ($script:rc -ne 0) { throw 'build' }
   $made.images += $tag
+  # rw-p6a-followups: the runtime image ships no *_test.ts (and no test oracle); the tests run in the
+  # image's TEST stage, the one the build gate ran (a cache hit of the build above).
+  $o = Dk build --build-arg "OB1_SHA=$sha" --label $label --target test -t $testTag $wb
+  Save 'build-test-stage.log' $o
+  Check ($script:rc -eq 0) "test stage $testTag built at OB1 $($sha.Substring(0, 7))"
+  if ($script:rc -ne 0) { throw 'build test stage' }
+  $made.images += $testTag
   # The gate line must always be there: a cached gate layer prints no test output, so when the
   # build log carries no count the gate command is re-run in the built image (the same command as
   # the Dockerfile's gate RUN). Attempt 1's tester saw no line at all on a cached build.
@@ -289,7 +297,7 @@ try {
   $gate = TestSummary $o
   $gateHow = 'from the build log'
   if (-not $gate.Success) {
-    $o2 = Dk run --rm --label $label $tag deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/routes/graph_test.ts src/util/ src/contracts/
+    $o2 = Dk run --rm --label $label $testTag deno test --allow-net --allow-env --allow-read src/routes/search_test.ts src/routes/graph_test.ts src/util/ src/contracts/
     Save 'image-gate.log' $o2
     $gate = TestSummary $o2
     $gateHow = 'build layer cached; gate command re-run in the built image'
@@ -301,7 +309,7 @@ try {
   if (-not (Start-Db $dbA)) { throw 'db A' }
   foreach ($f in @('integration_test.ts', 'references_integration_test.ts')) {
     $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_app_memory `
-      -e "CONTRACT_TEST_DB_PASSWORD=$appPw" $tag deno test --allow-net --allow-env --allow-read "src/contracts/$f"
+      -e "CONTRACT_TEST_DB_PASSWORD=$appPw" $testTag deno test --allow-net --allow-env --allow-read "src/contracts/$f"
     Save "$f.log" $o
     $sum = TestSummary $o
     Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "${f}: $($sum.Value)"
