@@ -117,6 +117,51 @@ export async function claimNext(c: SqlClient): Promise<ClaimedJob | null> {
   };
 }
 
+/**
+ * research-workbench P4a round 2: a queued human steer whose parent runs in THIS process. Claimed
+ * when the lane has no free slot; the child then runs in its parent's slot (see Dispatcher).
+ */
+export const CLAIM_STEER_IN_SLOT_SQL =
+  `UPDATE research_jobs SET status='running', started_at=now()
+   WHERE id = (SELECT id FROM research_jobs
+               WHERE status='queued' AND branch_kind='steer' AND parent_job_id = ANY($1::uuid[]) AND NOT ${EXPIRED_SQL}
+               ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+   RETURNING id, query, thread_id, origin, options, refinery_id,
+             branch_kind, parent_job_id, root_job_id, rooted_step_id, anchor`;
+
+export async function claimSteerInSlot(c: SqlClient, runningIds: string[]): Promise<ClaimedJob | null> {
+  if (!runningIds.length) return null;
+  const r = await c.queryObject<{
+    id: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown>; refinery_id?: string | null;
+    branch_kind?: string; parent_job_id?: string | null; root_job_id?: string | null; rooted_step_id?: string | null; anchor?: string | null;
+  }>(CLAIM_STEER_IN_SLOT_SQL, [runningIds]);
+  const row = r.rows[0];
+  if (!row) return null;
+  return {
+    jobId: row.id, query: row.query, thread_id: row.thread_id, origin: row.origin, options: row.options ?? {}, refinery_id: row.refinery_id ?? null,
+    branch_kind: row.branch_kind ?? "steer", parent_job_id: row.parent_job_id ?? null, root_job_id: row.root_job_id ?? null,
+    rooted_step_id: row.rooted_step_id ?? null, anchor: row.anchor ?? null,
+  };
+}
+
+/**
+ * One lane slot's model gate: the jobs sharing a slot make their model calls one at a time, first
+ * come first served. A slot held by one job is an uncontended gate (no cost).
+ */
+export class SlotGate {
+  #busy = false;
+  #waiters: Array<() => void> = [];
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#busy) await new Promise<void>((r) => this.#waiters.push(r));
+    this.#busy = true;
+    try { return await fn(); } finally {
+      const next = this.#waiters.shift();
+      if (next) next(); else this.#busy = false;
+    }
+  }
+}
+interface Slot { gate: SlotGate; members: Set<string> }
+
 export async function cancelExpired(c: SqlClient): Promise<Array<{ id: string; options: Record<string, unknown> }>> {
   const r = await c.queryObject<{ id: string; options: Record<string, unknown> }>(CANCEL_EXPIRED_SQL);
   return r.rows;
@@ -201,7 +246,8 @@ export class JobCancelled extends Error {
 export interface DispatcherOpts {
   connect(): Promise<SqlClient>;
   /** Runs one claimed job to a terminal (or paused) state. Never re-claims. */
-  execute(job: ClaimedJob, signal: AbortSignal): Promise<void>;
+  /** `gate`: the lane slot's model gate - every model call of the job goes through it. */
+  execute(job: ClaimedJob, signal: AbortSignal, gate: SlotGate): Promise<void>;
   health: ModelHealth;
   probe(): Promise<boolean>;
   /** A number, or (P4a, D16) a getter read on every tick: the research-branch lane's derived
@@ -209,6 +255,13 @@ export interface DispatcherOpts {
   maxConcurrency: number | (() => number);
   probeIntervalMs: number;
   onExpired?(rows: Array<{ id: string; options: Record<string, unknown> }>): void;
+  /**
+   * P4a round 2 (Case 1 under a full lane): when no lane slot is free, a queued human steer whose
+   * parent runs here starts at once IN ITS PARENT'S SLOT - parent and children share that slot's
+   * model gate, so the model calls in flight never exceed the slots held (<= the lane), and the
+   * child's first model call comes as soon as the call the slot is making returns.
+   */
+  steersShareParentSlot?: boolean;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -234,7 +287,10 @@ export class Dispatcher {
     this.#log = o.log ?? console.log;
   }
 
-  get inFlight(): number { return this.running.size; }
+  readonly #slotOf = new Map<string, Slot>();
+  readonly #slots = new Set<Slot>();
+  /** Lane slots held (a steer's child running in its parent's slot does not take another). */
+  get inFlight(): number { return this.#slots.size; }
 
   /** The current cap (re-read every tick). */
   get maxConcurrency(): number {
@@ -280,7 +336,7 @@ export class Dispatcher {
     }
 
     // 3. Fill free slots.
-    while (this.running.size < this.maxConcurrency && !this.o.health.isDown) {
+    while (this.#slots.size < this.maxConcurrency && !this.o.health.isDown) {
       let job: ClaimedJob | null = null;
       try {
         const c = await this.o.connect();
@@ -289,11 +345,28 @@ export class Dispatcher {
       if (!job) break;
       this.#start(job);
     }
+    // 4. The lane is full: a pending human steer on a job running here runs in its parent's slot.
+    while (this.o.steersShareParentSlot && this.#slots.size >= this.maxConcurrency && !this.o.health.isDown) {
+      let job: ClaimedJob | null = null;
+      try {
+        const c = await this.o.connect();
+        try { job = await claimSteerInSlot(c, [...this.running.keys()]); } finally { c.release(); }
+      } catch (e) { this.#log(`claimSteerInSlot failed: ${(e as Error).message}`); break; }
+      if (!job) break;
+      const slot = this.#slotOf.get(job.parent_job_id ?? "");
+      if (!slot) { this.#log(`[job ${job.jobId}] parent slot vanished; running in a slot of its own`); }
+      else this.#log(`[job ${job.jobId}] lane full: steer runs in its parent's slot (${job.parent_job_id})`);
+      this.#start(job, slot);
+    }
   }
 
-  #start(job: ClaimedJob): void {
+  #start(job: ClaimedJob, shared?: Slot): void {
     const ctl = new AbortController();
     this.running.set(job.jobId, ctl);
+    const slot: Slot = shared ?? { gate: new SlotGate(), members: new Set() };
+    slot.members.add(job.jobId);
+    this.#slots.add(slot);
+    this.#slotOf.set(job.jobId, slot);
     const pending = this.#pendingCancel.get(job.jobId);
     if (pending !== undefined) {
       this.#pendingCancel.delete(job.jobId);
@@ -310,11 +383,14 @@ export class Dispatcher {
         ms,
       );
     }
-    this.o.execute(job, ctl.signal)
+    this.o.execute(job, ctl.signal, slot.gate)
       .catch((e) => this.#log(`executeJob failed: ${(e as Error).message}`))
       .finally(() => {
         if (timer !== undefined) clearTimeout(timer);
         this.running.delete(job.jobId);
+        this.#slotOf.delete(job.jobId);
+        slot.members.delete(job.jobId);
+        if (slot.members.size === 0) this.#slots.delete(slot); // a slot is free when its last job ends
         this.wake();
       });
   }

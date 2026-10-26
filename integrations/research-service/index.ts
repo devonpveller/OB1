@@ -29,7 +29,7 @@ import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
 import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
-import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, type ClaimedJob } from "./jobs.ts";
+import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, parseCallers, resolveOrigin } from "./origin.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
@@ -745,7 +745,7 @@ function jobSeams(base: Deps, signal: AbortSignal, state: SeamState, jobId: stri
 // A job claimed by the dispatcher: it has already been flipped to status='running'
 // (started_at set) by the atomic claim, so executeJob only runs the harness and
 // persists the terminal (or paused) state — it never re-claims.
-async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
+async function executeJob(job: ClaimedJob, signal: AbortSignal, gate: SlotGate = new SlotGate()): Promise<void> {
   const { jobId, query, thread_id, origin, options, refinery_id } = job;
   // P4a: the job's place in its tree. A root (or an idea's research) is its own tree's root.
   const rootId = job.root_job_id ?? jobId;
@@ -790,11 +790,16 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     // queue_origin is engine-owned (set at submit from the caller's key; origin.ts).
     const queueUser = QUEUE_USER_BY_ORIGIN[String(options?.queue_origin ?? origin)] ?? "";
     // P4a (D16): a tree branch runs in the research-branch lane, under the branch key.
-    const baseDeps: Deps = jobSeams(inLane
+    const laneDeps: Deps = inLane
       ? { ...realDeps, chat: (s, u, o) => branchChat(s, u, o) }
       : queueUser
       ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
-      : realDeps, signal, seamState, jobId);
+      : realDeps;
+    // P4a round 2: every model call goes through the job's lane-slot gate. A steer's child running in
+    // its parent's slot (lane full) interleaves with the parent there, so the calls in flight never
+    // exceed the slots held.
+    const baseDeps: Deps = jobSeams({ ...laneDeps, chat: (s, u, o) => gate.run(() => laneDeps.chat(s, u, o)) },
+      signal, seamState, jobId);
     // P4a: a branch researches its steer IN the tree - it sees the anchor (its parent's query) and
     // the tree's current topic estimate.
     let runQuery = query;
@@ -979,7 +984,7 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     filingJobs.delete(jobId);
     // P4a: a closed branch (or a root with branches) re-estimates the tree's topic and rebuilds the
     // cumulative report. A requeued (paused) job is not closed.
-    await finishTree(client, jobId, rootId, branchKind).catch((e) =>
+    await finishTree(client, jobId, rootId, branchKind, gate).catch((e) =>
       console.error(`[job ${jobId}] tree close failed: ${(e as Error).message}`));
     client.release();
   }
@@ -1014,14 +1019,14 @@ async function openTreeGaps(
   if (opened.length) { console.log(`[job ${jobId}] opened ${opened.length} gap branch(es)`); wake(); }
 }
 
-async function finishTree(c: Awaited<ReturnType<typeof pool.connect>>, jobId: string, rootId: string, branchKind: string): Promise<void> {
+async function finishTree(c: Awaited<ReturnType<typeof pool.connect>>, jobId: string, rootId: string, branchKind: string, gate: SlotGate): Promise<void> {
   const r = await c.queryObject<{ status: string; branches: number }>(
     `SELECT status, (SELECT count(*)::int FROM research_jobs WHERE root_job_id = $2::uuid) AS branches
        FROM research_jobs WHERE id = $1::uuid`, [jobId, rootId]);
   const row = r.rows[0];
   if (!row || !["done", "error", "cancelled"].includes(row.status)) return;
   if (branchKind === "root" || branchKind === "idea") { if (!row.branches) return; }
-  await closeBranch(c, jobId, (s, u) => branchChat(s, u, { json: true, nothink: true }));
+  await closeBranch(c, jobId, (s, u) => gate.run(() => branchChat(s, u, { json: true, nothink: true })));
 }
 
 // ── Dispatcher: queued jobs, bounded by the research-branch lane (P4a, D16) ──
@@ -1038,6 +1043,7 @@ const dispatcher = new Dispatcher({
   health: modelHealth,
   probe: () => llm.probe(RESEARCH_QUEUE_USER),
   maxConcurrency: () => laneConcurrency,
+  steersShareParentSlot: true, // P4a round 2: a steer never waits for its parent behind a full lane
   probeIntervalMs: MODEL_PROBE_INTERVAL_MS,
   onExpired: (rows) => {
     for (const r of rows) {

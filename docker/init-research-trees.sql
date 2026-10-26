@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS public.research_job_events (
     payload     JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT research_job_events_stage_step  CHECK (type <> 'stage' OR step_id IS NOT NULL),
-    CONSTRAINT research_job_events_source_trail CHECK (type <> 'source' OR (trail IS NOT NULL AND jsonb_typeof(trail) = 'object')),
+    CONSTRAINT research_job_events_source_trail CHECK (type <> 'source' OR (trail IS NOT NULL AND jsonb_typeof(trail) = 'object' AND trail <> '{}'::jsonb)),
     CONSTRAINT research_job_events_human_steer CHECK (type <> 'human_steer'
         OR (kind = 'steering' AND payload ? 'topic_estimate' AND payload ? 'anchor' AND payload ? 'step_id')),
     CONSTRAINT research_job_events_gap CHECK (type <> 'gap'
