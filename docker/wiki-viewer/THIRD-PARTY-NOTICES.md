@@ -17,6 +17,9 @@ Ported (rewritten as plain ESM, behaviour kept) into the live renderer
 | `lib/page-classes/alias.mjs`, `lib/site-index.mjs` (`aliasRedirects`) | `quartz/plugins/emitters/aliases.ts` (the redirect document), `quartz/plugins/transformers/frontmatter.ts` (`getAliasSlugs`, the aliases/alias coalesce) |
 | `lib/components.mjs` | `quartz/components/Breadcrumbs.tsx`, `ArticleTitle.tsx`, `ContentMeta.tsx`, `Date.tsx`, `TagList.tsx`, `TableOfContents.tsx`, `Backlinks.tsx`, `OverflowList.tsx`, `PageList.tsx`, `Footer.tsx`, `pages/FolderContent.tsx`, `pages/TagContent.tsx` |
 | `lib/chrome.mjs` | `quartz/components/renderPage.tsx`, `Head.tsx` |
+| `quartz-overlay/quartz/components/scripts/explorer.inline.ts` (research-workbench P1b, rw-p1b-ready: a FORK - the explorer reads one folder at a time from `/workbench/nav`; the Dockerfile sha256-guards the upstream file) | `quartz/components/scripts/explorer.inline.ts` |
+| `quartz-overlay/quartz/components/scripts/search.inline.ts` (rw-p1b-ready: a FORK - search and `#tag` search read `/workbench/search`, no local index; sha256-guarded) | `quartz/components/scripts/search.inline.ts` |
+| `lib/nav-tree.mjs` (rw-p1b-ready: the explorer's order and entries, server-side) | `quartz/components/Explorer.tsx` (`defaultOptions.sortFn`, `filterFn`), `quartz/util/fileTrie.ts` (`displayName`, folder slugs) |
 | `lib/chrome-static.mjs` (generated at image build by `test/extract-chrome-static.mjs`) | the HTML Quartz's `PageTitle`, `Search`, `Darkmode`, `ReaderMode`, `Explorer`, `Graph`, `Flex`, `Spacer`, `MobileOnly`, `DesktopOnly` components emit |
 
 The Quartz clone itself (`/quartz` in the image, fetched at build) carries its

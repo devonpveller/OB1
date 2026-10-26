@@ -189,6 +189,7 @@ export const EXIT_COMPLETED_WITH_FAILURES = 3;
 // ── the run's write queue and its unsynced ledger ──────────────────────────
 const _queue = new Map();     // slug -> row (last write wins)
 const _unsynced = new Map();  // slug -> error (the page's file exists; its row did not land)
+const _pathOf = new Map();    // slug -> the absolute path it was queued from (round 2: staged files)
 let _synced = 0;
 
 // Vault-relative path from an absolute one; null OUTSIDE the vault root (a
@@ -210,14 +211,110 @@ export function queueWikiPage(absPath, markdown) {
   try {
     const row = parseWikiPage(rel, markdown);
     _queue.set(row.slug, row);
+    _pathOf.set(row.slug, absPath);
     _unsynced.delete(row.slug);
     return row;
   } catch (e) {
     const slug = rel.replace(/\.md$/i, "");
+    commitStaged(absPath, null); // no row will land: the file goes in place now (it reads stale, as it is)
     _unsynced.set(slug, `row build failed: ${e?.message || e}`);
     console.error(`[wiki-pages] row build failed for ${slug}: ${e?.message || e}`);
     return null;
   }
+}
+
+
+// ── ROW FIRST, THEN THE FILE (rw-p1b-ready round 2) ────────────────────────
+// Tester attempt 2's 24 h soak: two reconcile samples named
+// content/person/person-ada-fixture STALE (its row older than its file). The
+// writers wrote the FILE, then queued the row, and the row landed at the next
+// batch flush - 60-90 ms later for a one-page fixture compile (measured), up
+// to a whole batch of LLM calls later in a real compile. A reconcile pass
+// (files listed first, then rows) falling in that gap saw the new file
+// beside the old row. writeWikiPage closes it:
+//   - an UPDATE (the file exists) is STAGED: its new content goes to a hidden
+//     sibling (".<name>.wp-staged-<pid>" - a dot-file, which the vault walk
+//     and Quartz never read), the row is queued, and only after the row's
+//     batch has LANDED is the staged file given an mtime at or before the
+//     row's stamp and renamed into place. Since the reconcile lists files
+//     before it reads rows, it can never see the new file with the old row
+//     (a file seen new was renamed after its row landed, so the later row
+//     read sees the new row). A batch that fails still puts the file in
+//     place, with the current mtime - stale, as a failed row must read.
+//   - a CREATE (no file yet) is written at once and asks for the next flush
+//     immediately (maybeFlushWikiPages flushes when one is pending), so the
+//     file-before-row gap of a new page is one upsert, not a batch. (A row
+//     first would leave a row without a file for the reconcile's whole walk.)
+//   - an unchanged page (exactly, or but for volatileKeys) is not written;
+//     its row is queued as before.
+// The callers' reads see staged content through readWikiPageFile /
+// wikiPageExists (generate-wiki's collision check), so a staged page is not
+// invisible to its own compile.
+const _staged = new Map(); // absolute path -> hidden staged file
+let _createPending = false;
+const stagedName = (absPath) => nodePath.join(nodePath.dirname(absPath), `.${nodePath.basename(absPath)}.wp-staged-${process.pid}`);
+function stripVolatile(s, keys) {
+  let out = s;
+  for (const k of keys) {
+    out = out
+      .replace(new RegExp(`^${k}: .*$`, "m"), `${k}: <volatile>`)
+      .replace(new RegExp(`"${k}": "[^"]*"`), `"${k}": "<volatile>"`);
+  }
+  return out;
+}
+
+/** The page's current content as this run sees it: its staged copy, else the file. Throws like readFileSync. */
+export function readWikiPageFile(absPath) {
+  const st = _staged.get(absPath);
+  return fs.readFileSync(st || absPath, "utf8");
+}
+export function wikiPageExists(absPath) {
+  return _staged.has(absPath) || fs.existsSync(absPath);
+}
+
+/**
+ * Write a page (row first for an update, see above) and queue its row.
+ * Returns true when the content changed. volatileKeys: frontmatter keys whose
+ * value alone does not count as a change (writeIfChangedStable's rule);
+ * omit for an exact comparison (writeIfChanged's).
+ */
+export function writeWikiPage(absPath, content, { volatileKeys = null } = {}) {
+  let prev = null;
+  try { prev = readWikiPageFile(absPath); } catch { /* none yet */ }
+  const same = prev != null && (volatileKeys ? stripVolatile(prev, volatileKeys) === stripVolatile(content, volatileKeys) : prev === content);
+  if (!same) {
+    fs.mkdirSync(nodePath.dirname(absPath), { recursive: true });
+    if (prev == null || !vaultRel(absPath)) {
+      fs.writeFileSync(absPath, content, "utf8");
+      if (vaultRel(absPath)) _createPending = true;
+    } else {
+      const tmp = _staged.get(absPath) || stagedName(absPath);
+      fs.writeFileSync(tmp, content, "utf8");
+      _staged.set(absPath, tmp);
+    }
+  }
+  queueWikiPage(absPath, content);
+  return !same;
+}
+
+// Put a staged page in place: mtime = at (a Date; at or before its row's stamp), else now.
+function commitStaged(absPath, at) {
+  const tmp = _staged.get(absPath);
+  if (!tmp) return;
+  _staged.delete(absPath);
+  try {
+    if (at) fs.utimesSync(tmp, at, at);
+    fs.renameSync(tmp, absPath);
+  } catch (e) {
+    console.error(`[wiki-pages] staged page ${absPath} could not be put in place: ${e?.message || e}`);
+  }
+}
+/** Put every staged page in place now (current mtime). finishWikiPages does this after its flush. */
+export function commitAllStagedWikiPages() {
+  for (const p of [..._staged.keys()]) commitStaged(p, null);
+}
+export function stagedWikiPageCount() {
+  return _staged.size;
 }
 
 export function queuedWikiPageCount() {
@@ -238,6 +335,8 @@ export async function flushWikiPages() {
   for (let i = 0; i < rows.length; i += CHUNK) {
     const part = rows.slice(i, i + CHUNK);
     let err = null;
+    // at or before the rows' stamp (upsertWikiPages stamps them after this)
+    const landedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await upsertWikiPages(part);
@@ -249,12 +348,12 @@ export async function flushWikiPages() {
     }
     if (err) {
       failed += part.length;
-      for (const r of part) _unsynced.set(r.slug, String(err?.message || err));
+      for (const r of part) { _unsynced.set(r.slug, String(err?.message || err)); commitStaged(_pathOf.get(r.slug), null); _pathOf.delete(r.slug); }
       console.error(`[wiki-pages] row flush FAILED for ${part.length} page(s) after one retry: ${err?.message || err}`);
     } else {
       sent += part.length;
       _synced += part.length;
-      for (const r of part) _unsynced.delete(r.slug);
+      for (const r of part) { _unsynced.delete(r.slug); commitStaged(_pathOf.get(r.slug), landedAt); _pathOf.delete(r.slug); }
     }
   }
   if (sent) console.log(`[wiki-pages] synced ${sent} page row(s)`);
@@ -264,6 +363,7 @@ export async function flushWikiPages() {
 // Per-batch flush: call after each page write. Flushes when the queue holds a
 // batch (WIKI_PAGES_BATCH, default 25), so rows land during the run.
 export async function maybeFlushWikiPages() {
+  if (_createPending) { _createPending = false; return flushWikiPages(); }
   if (_queue.size >= BATCH()) return flushWikiPages();
   return { sent: 0, failed: 0 };
 }
@@ -279,6 +379,8 @@ export function unsyncedWikiPages() {
  */
 export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   await flushWikiPages();
+  _createPending = false;
+  commitAllStagedWikiPages(); // anything staged but never queued (none expected): in place now
   const u = unsyncedWikiPages();
   const synced = _synced;
   _synced = 0; // per run: the next run (or wiki-service cycle) counts its own

@@ -12,8 +12,16 @@
 // 1); fullscreen is the SAME page-scoped query at a greater depth. No vault
 // scan, no global node list.
 //
-// Falls back to the previous whole-index behaviour if the endpoint fails, so a
-// workbench outage degrades rather than blanking the panel.
+// NO WHOLE-INDEX FALLBACK (rw-p1b-ready fix round 1, tester attempt 1 defect
+// 1). This used to fall back to `await fetchData` (/static/graphIndex.json, the
+// whole vault: 25 MB raw at 76,542 rows, 128 MB at 5x) whenever the endpoint
+// answered no nodes - and it answers none for a folder page ("content/index")
+// or a tag page ("tags/<t>"), which are not rows with links, so EVERY folder
+// and tag navigation downloaded and parsed the whole vault. Now an endpoint
+// that fails or has no node for the page draws the page alone (one node): a
+// folder/tag page has no link neighbourhood to show, and a workbench outage
+// degrades to a one-node graph rather than a whole-vault download. The
+// Dockerfile asserts that no client script awaits fetchData any more.
 import { readFileSync, writeFileSync } from "node:fs";
 
 const FILE = "/quartz/quartz/components/scripts/graph.inline.ts";
@@ -69,12 +77,11 @@ const TO = `  // [ai-stack patch] Page-scoped graph. depth < 0 means the compone
           { title: n.title, links: [], tags: n.tags ?? [] } as unknown as ContentDetails,
         ]),
       )
-    : new Map(
-        Object.entries<ContentDetails>(await fetchData).map(([k, v]) => [
-          simplifySlug(k as FullSlug),
-          v,
-        ]),
-      )`;
+    : // no node for this page (a folder or tag page) or the endpoint failed:
+      // the page alone - never the whole-vault index (rw-p1b-ready fix round 1)
+      new Map([
+        [slug, { title: document.title, links: [], tags: [] } as unknown as ContentDetails],
+      ])`;
 
 // The neighbourhood walk is skipped entirely when the API answered: the server
 // already returned exactly the nodes to draw.

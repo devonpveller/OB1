@@ -180,12 +180,16 @@ export async function isKnownPageUrl(urlPath) {
   return !!site && (site.bySlug.has(req.key) || site.bySlug.has(urlSlugOf(req.key)));
 }
 
-/** Render one page URL. Returns { status, headers, body }. Never throws. */
-export async function renderLive(urlPath) {
+/**
+ * Render one page URL. Returns { status, headers, body }. Never throws.
+ * opts.strip: async () => the notifications strip's HTML for this request
+ * (P1b, lib/notifications.mjs); a page rendered with the chrome carries it.
+ */
+export async function renderLive(urlPath, opts = {}) {
   const req = keyOf(urlPath);
   if (!req) return respond(400, { "cache-control": "no-store" }, "bad request");
   try {
-    return await renderLiveInner(req);
+    return await renderLiveInner(req, opts);
   } catch (e) {
     // Not a database condition: a renderer bug. Its own state (never the
     // "connecting" screen), counted for the health probe.
@@ -196,7 +200,7 @@ export async function renderLive(urlPath) {
   }
 }
 
-async function renderLiveInner(req) {
+async function renderLiveInner(req, opts = {}) {
   // Not known to be up: ask the database first, so a page assembled from a
   // cached site index is never presented while it is down (D13 item 3).
   if (dbState().state !== "up") {
@@ -285,6 +289,7 @@ async function renderLiveInner(req) {
         "cache-control": "no-cache, must-revalidate", "x-wiki-render": "db", "x-wiki-page-class": `${entry.name}@${entry.version}`,
       }, model.rawDocument);
     }
+    if (opts.strip) model.notificationsHtml = await opts.strip();
     return respond(200, {
       "cache-control": "no-cache, must-revalidate",
       "x-wiki-render": "db",

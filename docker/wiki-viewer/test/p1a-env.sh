@@ -28,6 +28,11 @@
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh ws           # start the wiki-service on the env's vault (boot compile)
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh ws_cycle     # POST /recompile and wait (bounded) for it to finish
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh down         # remove everything this script created (not the images)
+# rw-p1b-ready adds (test/p1b-env.sh holds the P1b-only pieces):
+#   P1A_SRV=<volume>      the viewer's /srv volume (default $P1A_PREFIX-srv; a NEW name = an empty /srv)
+#   P1A_VIEWER_IMG=<img>  run the viewer from another image (the RED runs: the base image)
+#   the viewer joins the network as openbrain-wiki-viewer too (the front door's
+#   upstream name) and reads the notifications endpoint with WORKBENCH_KEY=fixture-key
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
@@ -40,7 +45,7 @@ case "$TAG" in wt-*) ;; *) echo "[p1a-env] refusing: P1A_TAG must start with wt-
 case "$SUBNET" in 192.168.*) echo "[p1a-env] refusing: P1A_SUBNET $SUBNET is inside 192.168.0.0/16 (the home LAN)" >&2; exit 2 ;; esac
 NET="$P-net"
 VOL="$P-vault"
-SRV="$P-srv"
+SRV="${P1A_SRV:-$P-srv}"
 IMG="openbrain-wiki-viewer:$TAG"
 WSIMG="openbrain-wiki:$TAG"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && (pwd -W 2>/dev/null || pwd))"
@@ -155,21 +160,23 @@ cmd_viewer() {
   local extra=()
   [ -n "${P1A_EXTRA_CLASS:-}" ] && extra=(-v "$HERE/fixtures/extra-class/glossary.mjs:/quartz/lib/page-classes/glossary.mjs:ro")
   [ -n "${P1A_EXTRA_ENTRY:-}" ] && extra=(-v "$HERE/fixtures/extra-class/${P1A_EXTRA_ENTRY}:/quartz/lib/page-classes/${P1A_EXTRA_ENTRY}:ro")
-  docker run -d --name "$P-viewer" --network "$NET" -p "127.0.0.1:$PORT:8080" \
+  docker run -d --name "$P-viewer" --network "$NET" --network-alias openbrain-wiki-viewer -p "127.0.0.1:$PORT:8080" \
     -v "$VOL:/wiki:ro" -v "$SRV:/srv" \
-    -e OPEN_BRAIN_URL=http://openbrain-rest -e GRAPH_INDEX_MIN_ROWS=0 -e WIKI_NAV_MIN_ROWS=0 \
+    -e OPEN_BRAIN_URL=http://openbrain-rest -e WIKI_NAV_MIN_ROWS=0 \
+    -e WORKBENCH_KEY=fixture-key -e WIKI_NOTIFY_TTL_MS="${WIKI_NOTIFY_TTL_MS:-1000}" -e WIKI_NOTIFY_TIMEOUT_MS="${WIKI_NOTIFY_TIMEOUT_MS:-1000}" \
     -e WIKI_REBUILD_IDLE_SECONDS=1 -e WIKI_REBUILD_POLL_SECONDS=2 -e WIKI_REBUILD_STABLE_SECONDS=2 \
     -e WIKI_BUILDER="${WIKI_BUILDER:-1}" -e WIKI_DB_PROBE_MS="${WIKI_DB_PROBE_MS:-1000}" \
     -e WIKI_DB_CONNECT_GRACE_MS="${WIKI_DB_CONNECT_GRACE_MS:-4000}" \
     -e WIKI_RECONCILE_INTERVAL_MS="${WIKI_RECONCILE_INTERVAL_MS:-5000}" \
-    -e NODE_OPTIONS=--max-old-space-size=2048 "${extra[@]}" \
-    "$IMG" >/dev/null
+    -e NODE_OPTIONS=--max-old-space-size="${P1A_HEAP_MB:-2048}" ${P1B_VIEWER_ENV:-} "${extra[@]}" \
+    "${P1A_VIEWER_IMG:-$IMG}" >/dev/null
   log "viewer started on http://127.0.0.1:$PORT (WIKI_BUILDER=${WIKI_BUILDER:-1})"
 }
 
 cmd_wait_built() { # wait until THIS viewer published its snapshot (the parity diff target) and serves pages
+  # (rw-p1b-ready, E3: no graphIndex.json is published any more - the snapshot is index.html + the bundle)
   local i=0
-  until docker exec "$P-viewer" sh -c 'test -f /srv/current/index.html && test -f /srv/current/static/graphIndex.json' 2>/dev/null \
+  until docker exec "$P-viewer" sh -c 'test -f /srv/current/index.html && test -f /srv/current/postscript.js' 2>/dev/null \
       && docker logs "$P-viewer" 2>&1 | grep -q "first COMPLETE build emitted" \
       && docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('http://$P-viewer:8080/').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; do
     i=$((i + 1)); [ "$i" -gt "${1:-300}" ] && { log "viewer not serving after ${1:-300}s"; return 1; }; sleep 1
@@ -286,7 +293,7 @@ cmd_up() {
 
 cmd_down() {
   docker rm -f -v "$P-viewer" "$P-ws" "$P-llm" "$P-rest" "$P-postgrest" "$P-db" "$P-watch" >/dev/null 2>&1 || true
-  docker volume rm "$VOL" "$SRV" >/dev/null 2>&1 || true
+  docker volume rm "$VOL" "$SRV" "$P-srv" "$P-srv-empty" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   log "removed containers $P-*, volumes $VOL $SRV and network $NET (images $IMG / $WSIMG kept)"
 }

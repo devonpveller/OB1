@@ -111,7 +111,7 @@ export const Footer = () => html(h("footer", { class: "" },
     h("li", null, h("a", { href: "https://discord.gg/cRFFHYye7t" }, "Discord Community")))));
 
 // ── PageList / FolderContent / TagContent (Quartz) ──────────────────────────
-function byDateAndAlphabetical(folderFirst) {
+export function byDateAndAlphabetical(folderFirst) {
   return (a, b) => {
     if (folderFirst) {
       if (a.isFolder && !b.isFolder) return -1;

@@ -111,7 +111,7 @@ RUN apt-get update \
 # research-workbench P6a adds src/export/: the resolver (keys, egress, hard failure), the CSL
 # styles unmodified, and real renders through pandoc + Typst read back with poppler (numbering,
 # CJK glyphs, process separation). parity_fixture.ts runs only in the parity stage.
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/util/ src/contracts/ src/export/ \
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/util/ src/contracts/ src/export/ \
   && touch /app/.test-gate-passed
 
 FROM test AS parity

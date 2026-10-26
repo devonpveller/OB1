@@ -48,7 +48,7 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // get their rows through the same queue + flush as every compiled page (D13:
 // compiled means the row landed).
 import {
-  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
+  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, writeWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
   isDatabaseUnavailableError,
 } from "file:///recipes/_shared/wiki-pages.mjs";
 // rw-p1a-deploy-prep (RV-5): the vault .gitignore is MERGED, never rewritten.
@@ -119,9 +119,18 @@ const VIEWER_URL = (ENV.VIEWER_URL || "http://openbrain-wiki-viewer:8080").repla
 // ms since the viewer last served a real user request. Unreachable/down
 // viewer → Infinity (nobody can be browsing a dead viewer; never stall the
 // drain on an outage).
+// research-workbench P1b: the viewer serves from the moment it starts (no
+// "Building…" splash), counts pages, the bundle and the explorer's
+// /__nav as reader activity, and NEVER its machine probes (/__health, which
+// its Docker healthcheck now polls every 30 s, and /__last-access itself) -
+// so the healthcheck cannot hold the drain off forever. Only a 200 JSON
+// answer is a reading; anything else (a front-door error page, a 5xx while
+// the viewer restarts) is "not known to be in use". P1c removes this gate
+// with the rest of the rebuild machinery.
 async function viewerIdleMs() {
   try {
     const r = await fetch(`${VIEWER_URL}/__last-access`, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return Infinity;
     const ts = Number((await r.json())?.ts || 0);
     return ts > 0 ? Math.max(0, Date.now() - ts) : Infinity;
   } catch {
@@ -1067,8 +1076,7 @@ async function compile(reason) {
           "edit the source/thought (or your note) and the next compile reflects it.",
         "",
       ].join("\n");
-    writeIfChanged(`${WIKI_GIT_DIR}/index.md`, homeMd);
-    queueWikiPage(`${WIKI_GIT_DIR}/index.md`, homeMd);
+    writeWikiPage(`${WIKI_GIT_DIR}/index.md`, homeMd); // row first for an update (rw-p1b-ready round 2), and the row queued
     try {
       queueWikiPage(`${NOTES_DIR}/README.md`, await readFile(`${NOTES_DIR}/README.md`, "utf8"));
     } catch { /* removed by hand: nothing to publish */ }

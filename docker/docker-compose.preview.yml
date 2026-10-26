@@ -7,13 +7,13 @@
 #   docker compose -f OB1/docker/docker-compose.preview.yml up -d --build
 #
 #   # (--build is the slow part on a cold machine — three images. After that
-#   #  the vault seeds itself (preview-seed) and the viewer cold-builds it in
-#   #  seconds on the 10-page seed vault.)
-#   # Until that first build lands, :8099 serves the viewer's "Building…"
-#   # splash — that is expected, not a fault. Watch it land:
-#   docker compose -f OB1/docker/docker-compose.preview.yml logs -f preview-viewer
-#   #   ...wait for:  [wiki-viewer] snapshot #N swapped live   (or the initial
-#   #   publish right after "first COMPLETE build emitted")
+#   #  the vault seeds itself (preview-seed).)
+#   # The viewer serves at once (research-workbench P1b: pages are rows, the
+#   # client bundle is baked into the image - there is no "Building…" splash
+#   # any more). A page whose row has not been written yet shows the
+#   # "pending compile" state. The viewer is ready when its healthcheck is:
+#   docker compose -f OB1/docker/docker-compose.preview.yml ps preview-viewer
+#   #   ...STATUS "(healthy)" (database up, reconciliation at zero drift)
 #
 #   ...then open http://127.0.0.1:8099
 #
@@ -108,9 +108,10 @@ services:
   # PostgREST over preview-db, behind the same `/rest/v1/*` path-strip that
   # `openbrain-rest` gives the real stack (that route lives on preview-caddy).
   # The preview USED to have no REST tier at all, which quietly broke the
-  # viewer once its graph/nav indexes became DB queries (2026-08-26): with
-  # nothing answering, derive-graph-index.mjs exits non-zero, EVERY snapshot is
-  # discarded, /srv/current is never created and :8099 serves a permanent 503.
+  # viewer once its graph/nav indexes became DB queries (2026-08-26). Since
+  # research-workbench P1b every page, folder, tag and explorer folder is a
+  # wiki_pages query, so without this tier the viewer shows the
+  # "database unreachable" screen on every URL.
   preview-postgrest:
     image: postgrest/postgrest:v12.2.3
     depends_on:
@@ -221,24 +222,32 @@ services:
       preview-workbench:
         condition: service_started
     environment:
-      # The viewer's graph index, nav index and DB-render fallback are all
-      # QUERIES against wiki_pages over PostgREST. Their built-in default is
-      # `http://openbrain-rest` — a PRODUCTION hostname that does not resolve
-      # here, so every one of them failed and derive-graph-index.mjs exiting
-      # non-zero made the entrypoint discard every snapshot: /srv/current was
-      # never created and :8099 served a permanent 503. Point them at the
-      # preview's own REST tier instead.
+      # Every page, folder, tag and explorer folder is a QUERY against
+      # wiki_pages over PostgREST (research-workbench P1a/P1b). The built-in
+      # default is `http://openbrain-rest` — a PRODUCTION hostname that does
+      # not resolve here. Point it at the preview's own REST tier instead.
       OPEN_BRAIN_URL: http://preview-caddy:8080
-      # Both indexes refuse to publish a suspiciously small result (default
-      # 100 rows) because on the real 29.6k-page vault that means a truncated
-      # read. The preview's vault is ~10 pages and starts with ZERO rows in
-      # wiki_pages (nothing compiles into it until you create a note), so the
-      # floor has to come off or the guard rejects the whole preview.
-      GRAPH_INDEX_MIN_ROWS: "0"
+      # The nav index refuses a suspiciously small result (default 100 rows)
+      # because on the real vault that means a truncated read. The preview's
+      # vault is ~10 pages and starts with ZERO rows in wiki_pages (nothing
+      # compiles into it until you create a note), so the floor comes off.
       WIKI_NAV_MIN_ROWS: "0"
+      # The notifications strip reads the preview workbench's contract
+      # endpoint (research-workbench P1b, D13 item 7) with the preview key.
+      WORKBENCH_URL: http://preview-workbench:8000
+      WORKBENCH_KEY: preview-key
+      # The DB-down probe's TCP target (default openbrain-db:5432).
+      WIKI_DB_TCP: preview-db:5432
     volumes:
       - preview-wiki:/wiki:ro
     networks: [pnet]
+    # Same healthcheck as production (and the image's HEALTHCHECK).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/__health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   preview-caddy:
     image: caddy:2-alpine

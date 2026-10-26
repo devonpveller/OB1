@@ -30,10 +30,9 @@ import { linkSafeLabel, rewriteCitations } from "../../_shared/citations.mjs";
 import { slugifyNotebook } from "../../_shared/slug.mjs";
 import { clip } from "../../_shared/clip.mjs"; // surrogate-safe truncation for LLM payloads
 import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
-import { writeIfChanged, writeIfChangedStable } from "../../_shared/write-if-changed.mjs";
 // Compile writes file AND row, flushed per batch; unsynced rows fail the run
 // (research-workbench D13 item 1). LLM failures are classified (item 6).
-import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../../_shared/wiki-pages.mjs";
+import { queueWikiPage, writeWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../../_shared/wiki-pages.mjs";
 // D13 item 6: an open structural failure is not retried until its inputs
 // (the hub's synthesis input hash, or the code) change; one notification per
 // distinct failure.
@@ -457,8 +456,7 @@ async function main() {
         "",
       ].join("\n");
       fs.mkdirSync(hubDir, { recursive: true });
-      writeIfChangedStable(hubPath, fm + body + "\n");
-      queueWikiPage(hubPath, fm + body + "\n");
+      writeWikiPage(hubPath, fm + body + "\n", { volatileKeys: ["generated_at"] }); // row first for an update (round 2)
       // Emit a source leaf for every source this hub cites, so the [Sn] links
       // resolve even for web_articles never extracted into an entity page
       // (entity-wiki's emitLeafPages only covers ENTITY-cited sources). Shared
@@ -518,9 +516,8 @@ async function main() {
   // FolderPage is generated. (Every clean folder — organization, person… —
   // already works this way.)
   const mocPath = path.join(nbDir, "index.md");
-  writeIfChanged(mocPath, moc.join("\n"));
-  // The MOC is a page too (the notebooks index): it gets its row like any other.
-  queueWikiPage(mocPath, moc.join("\n"));
+  // The MOC is a page too (the notebooks index): it gets its row like any other (row first for an update, round 2).
+  writeWikiPage(mocPath, moc.join("\n"));
   console.log(
     `[notebook-synth] done: ${ok} regenerated + ${skipped} unchanged (skipped) ` +
       `of ${active.length} notebook hubs + notebooks/index.md MOC; ` +

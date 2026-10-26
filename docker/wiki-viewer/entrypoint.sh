@@ -41,13 +41,13 @@ sed -i 's#^\([[:space:]]*\)Plugin.CustomOgImages(),#\1// Plugin.CustomOgImages()
 #
 # WIKI_BUILDER=0 runs the live renderer ALONE: no Quartz builder, no snapshot
 # loop; static assets come from the last published snapshot on the /srv volume
-# (P1c freezes the bundle and removes the builder; P1b makes an empty /srv
-# serve).
+# when there is one, else from the bundle baked into the image (P1b: an EMPTY
+# /srv serves every page; P1c freezes the bundle and removes the builder).
 if [ "${WIKI_BUILDER:-1}" = "0" ]; then
   echo "[wiki-viewer] WIKI_BUILDER=0: live renderer only (no Quartz builder)"
   mkdir -p /srv
   echo 0 > /tmp/last-access
-  exec node /quartz/serve.mjs
+  exec node --max-semi-space-size=64 /quartz/serve.mjs
 fi
 IDLE_SECONDS="${WIKI_REBUILD_IDLE_SECONDS:-90}"    # viewer must be quiet this long before a swap
 STABLE_SECONDS="${WIKI_REBUILD_STABLE_SECONDS:-8}" # build output must be unchanged this long (build finished)
@@ -78,9 +78,8 @@ index_ok() {
   [ "$(tail -c 1 "$ci")" = "}" ] || return 1
   # (A 2026-06-16 searchIndex.json split was reverted the same day; the guard
   # below is kept as a harmless no-op for any snapshot that still carries one.
-  # The 2026-08-23 index diet works differently: static/graphIndex.json is
-  # DERIVED from contentIndex at publish time — see derive-graph-index.mjs —
-  # so it can never be torn and needs no guard here.)
+  # static/graphIndex.json is no longer a file at all: the viewer answers it
+  # live from wiki_pages - P1b, E3.)
   si="$1/static/searchIndex.json"
   [ ! -f "$si" ] || [ "$(tail -c 1 "$si")" = "}" ]
 }
@@ -115,34 +114,19 @@ wait_port_3001_free() {
   echo "[wiki-viewer] WARN :3001 still busy after ${k}s — relaunching anyway (self-heal will retry)"
 }
 
-# On a cold stack the compiler may not have produced pages yet; Quartz errors on
-# empty content, so wait (bounded) for the home page before starting the builder.
-i=0
-while [ "$i" -lt 60 ]; do
-  if [ -f /wiki/index.md ] || ls /wiki/content/*.md >/dev/null 2>&1; then
-    echo "[wiki-viewer] vault present, starting builder"; break
-  fi
-  echo "[wiki-viewer] waiting for first compile... ($i)"; i=$((i + 1)); sleep 10
-done
-
-# Stage 1 — the internal builder/watcher (proven dev build; emits /quartz/public).
-# Marker BEFORE the builder starts: a vault file written DURING the initial
-# parse can be missed by both the parse set and the (later-armed) watcher —
-# its page then never emits until the next mtime bump (found 2026-08-23:
-# organization-anthropic.md written mid-cold-build stayed unemitted for
-# 45+ min). The post-first-build check below catches exactly that window.
-touch /tmp/builder-start
-start_builder
-
-# Stage 2 — the always-up static server starts IMMEDIATELY so :8080 is bound from
-# the start. Until the first snapshot is published (cold start / first build) it
-# serves a self-refreshing "Building…" splash instead of a connection error; once
-# /srv/current exists it serves the real site (serve.mjs decides per request).
+# The live renderer starts FIRST and serves at once (research-workbench P1b):
+# every page is a row, the bundle comes from the published snapshot or the
+# image's baked copy, so neither an empty vault nor an empty /srv delays it.
+# (Before P1b it started after the vault wait below and served a 503
+# "Building the wiki" splash until the first snapshot - up to ~10 min.)
 mkdir -p /srv
 echo 0 > /tmp/last-access
-node /quartz/serve.mjs &
+# A roomy young generation: request garbage dies young instead of being
+# promoted into a mark-compact of the large site index (rw-p1b-ready findings).
+node --max-semi-space-size=64 /quartz/serve.mjs &
 SERVE_PID=$!
-trap 'kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
+BUILD_PID=""
+trap '[ -n "$BUILD_PID" ] && kill -TERM "-$BUILD_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; exit 0' TERM INT
 # The live renderer IS the viewer: if serve.mjs exits (e.g. the page-class
 # registry refused an entry file at start - it fails loud on a duplicate name,
 # a priority tie, a missing default export), the container exits with its
@@ -151,9 +135,31 @@ serve_or_die() {
   kill -0 "$SERVE_PID" 2>/dev/null && return 0
   code=0; wait "$SERVE_PID" || code=$?   # (set -e: a bare failing wait would exit before the message)
   echo "[wiki-viewer] serve.mjs EXITED (code $code) - stopping the container"
-  kill -TERM "-$BUILD_PID" 2>/dev/null || true
+  [ -n "$BUILD_PID" ] && kill -TERM "-$BUILD_PID" 2>/dev/null || true
   exit "$([ "$code" = 0 ] && echo 1 || echo "$code")"
 }
+
+# The BUILDER only: on a cold stack the compiler may not have produced pages
+# yet and Quartz errors on empty content, so wait (bounded) for the home page
+# before starting it. The server above is already serving.
+i=0
+while [ "$i" -lt 60 ]; do
+  serve_or_die
+  if [ -f /wiki/index.md ] || ls /wiki/content/*.md >/dev/null 2>&1; then
+    echo "[wiki-viewer] vault present, starting builder"; break
+  fi
+  echo "[wiki-viewer] waiting for first compile before starting the builder... ($i)"; i=$((i + 1)); sleep 10
+done
+
+# The internal builder/watcher (proven dev build; emits /quartz/public): the
+# parity target and the bundle copy in /srv until P1c freezes the bundle.
+# Marker BEFORE the builder starts: a vault file written DURING the initial
+# parse can be missed by both the parse set and the (later-armed) watcher —
+# its page then never emits until the next mtime bump (found 2026-08-23:
+# organization-anthropic.md written mid-cold-build stayed unemitted for
+# 45+ min).
+touch /tmp/builder-start
+start_builder
 
 # Wait (bounded) for the first COMPLETE build (index.html + css + js, not just
 # index.html — the old check published build-0 too early, before ComponentResources
@@ -180,14 +186,13 @@ done
 [ "$j" -gt 0 ] && echo "[wiki-viewer] first build settled after ~$((j * 2))s"
 
 # Publish the initial snapshot ONLY if complete (render assets) AND its search
-# index is intact — serve.mjs serves the splash until /srv/current is a complete
-# build, so a slow/failed first build shows "Building…" rather than a broken page.
+# index is intact. Until then (and whenever /srv/current dangles) serve.mjs
+# takes the bundle from the image's baked copy, so readers never wait on this.
+# No graph index is derived any more (P1b, E3): the nav is a query
+# (lib/nav-tree.mjs, lib/nav-index.mjs), never a published file.
 if is_complete /quartz/public && index_ok /quartz/public; then
   rm -rf /srv/build-0; cp -a /quartz/public /srv/build-0
-  # Lean graph/explorer index (see derive-graph-index.mjs) — derived on the
-  # immutable copy so it can never be torn; a failed derive = no publish.
-  if is_complete /srv/build-0 && index_ok /srv/build-0 \
-    && node /derive-graph-index.mjs /srv/build-0; then
+  if is_complete /srv/build-0 && index_ok /srv/build-0; then
     ln -sfn /srv/build-0 /srv/current
   fi
 fi
@@ -273,10 +278,8 @@ while true; do
   # Re-verify the COPY is complete AND its search index is intact — guards against
   # cp racing a build that started rewriting public mid-snapshot (the torn-index
   # 2026-06-16 incident: render assets fine but contentIndex.json truncated).
-  # The lean graph/explorer index is derived here too (immutable copy → can't
-  # tear); a parse failure means the copy raced the build — discard.
-  if ! is_complete "/srv/build-$N.tmp" || ! index_ok "/srv/build-$N.tmp" \
-    || ! node /derive-graph-index.mjs "/srv/build-$N.tmp"; then
+  # (No graph index is derived here any more - P1b, E3.)
+  if ! is_complete "/srv/build-$N.tmp" || ! index_ok "/srv/build-$N.tmp"; then
     echo "[wiki-viewer] snapshot copy was torn (build raced the cp) — discarding, will retry"
     rm -rf "/srv/build-$N.tmp"; N=$((N - 1)); continue
   fi

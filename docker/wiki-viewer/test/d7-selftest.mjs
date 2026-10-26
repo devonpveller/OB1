@@ -28,7 +28,9 @@ const SCRIPT = process.env.PARITY_DIFF || join(HERE, "parity-diff.mjs");
 const URL_ = "/content/topic/fixture-retired-topic";
 const BODY = '<body data-slug="content/topic/fixture-retired-topic"><div class="page"><div class="left sidebar">' +
   '<div class="explorer" data-behavior="collapse"><ul class="explorer-ul overflow"></ul></div></div><div class="center">' +
-  '<div class="popover-hint"><article><p><a href="../../index" class="internal">Home</a></p></article></div></div>' +
+  // rw-p1b-ready: every live page carries the notifications strip first in .center (parity D11)
+  '<div class="wiki-notifications" data-wiki-notifications="1" data-unread="0"><span class="wn-head">0 unread research notifications</span></div>' +
+  '<div class="page-header"></div><div class="popover-hint"><article><p><a href="../../index" class="internal">Home</a></p></article></div></div>' +
   '<div class="right sidebar"><div class="graph"><div class="graph-container"></div></div><div class="toc desktop-only">' +
   '<ul class="toc-content overflow" id="list-1"></ul></div><div class="backlinks"><h3>Backlinks</h3><ul id="list-2" class="overflow">' +
   "<li>No backlinks found</li></ul></div></div></div></body>";

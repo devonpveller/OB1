@@ -52,7 +52,7 @@ import { writeIfChanged, writeIfChangedStable } from "../_shared/write-if-change
 // Compile writes the page's file AND its wiki_pages row; the row is what the
 // viewer presents (research-workbench D13). Rows are flushed PER BATCH during
 // the run and the run exits non-zero when any written page's row did not land.
-import { queueWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../_shared/wiki-pages.mjs";
+import { queueWikiPage, writeWikiPage, readWikiPageFile, wikiPageExists, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../_shared/wiki-pages.mjs";
 // D13 item 6: an open structural failure is not retried until its inputs
 // change, and is notified once per distinct failure (not once per cycle).
 import {
@@ -1086,7 +1086,7 @@ function resolveOutputPath(outDir, baseSlug, entity) {
   const tryPath = (suffix) => path.join(typeDir, `${baseSlug}${suffix}.md`);
   const ownedBy = (p) => {
     try {
-      const head = fs.readFileSync(p, "utf8").slice(0, 2048);
+      const head = readWikiPageFile(p).slice(0, 2048); // a page staged this run counts (round 2)
       const match = head.match(/^entity_id:\s*(\S+)/m);
       return match ? String(match[1]) === String(entity.id) : false;
     } catch {
@@ -1094,11 +1094,11 @@ function resolveOutputPath(outDir, baseSlug, entity) {
     }
   };
   let candidate = tryPath("");
-  if (!fs.existsSync(candidate) || ownedBy(candidate)) return candidate;
+  if (!wikiPageExists(candidate) || ownedBy(candidate)) return candidate;
   // Collision with a different entity — warn and pick a numeric suffix.
   for (let i = 1; i < 1000; i++) {
     candidate = tryPath(`-${i}`);
-    if (!fs.existsSync(candidate) || ownedBy(candidate)) {
+    if (!wikiPageExists(candidate) || ownedBy(candidate)) {
       console.warn(
         `[wiki] slug collision on "${baseSlug}.md" for entity #${entity.id} ` +
           `${entity.canonical_name} (${entity.entity_type}); writing as ` +
@@ -1254,8 +1254,7 @@ async function writeGraphManifest(sb, outDir, limit) {
   // entities.md predates its row converges.
   const indexPath = path.join(outDir, "entities.md");
   const indexMd = buildEntityIndex(nodes, links);
-  writeIfChanged(indexPath, indexMd);
-  queueWikiPage(indexPath, indexMd);
+  writeWikiPage(indexPath, indexMd); // row first for an update (rw-p1b-ready round 2), and the row queued
   return { path: p, node_count: nodes.length, edge_count: links.length };
 }
 
@@ -1311,8 +1310,7 @@ async function emitLeafPages(sb, outDir, run) {
           "",
         ].join("\n");
         const tp = path.join(dir, `${r.id}.md`);
-        if (writeIfChanged(tp, fm + "\n")) thoughts++;
-        queueWikiPage(tp, fm + "\n");
+        if (writeWikiPage(tp, fm + "\n")) thoughts++; // row first for an update (round 2)
       }
       await maybeFlushWikiPages();
     }
@@ -1352,8 +1350,8 @@ function writeFile(wiki, entity, sourceCounts, provenance, sourceProvenance, out
   // Only the volatile generated_at differing does not rewrite the page — an
   // unchanged entity page keeps its mtime so the viewer's watcher stays quiet.
   const md = buildFrontmatter(entity, sourceCounts, provenance, sourceProvenance, notebook) + wiki + "\n";
-  writeIfChangedStable(filepath, md);
-  queueWikiPage(filepath, md);
+  // row first for an update: the reconcile never sees the new file beside the old row (rw-p1b-ready round 2)
+  writeWikiPage(filepath, md, { volatileKeys: ["generated_at"] });
   return filepath;
 }
 

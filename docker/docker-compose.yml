@@ -1275,6 +1275,14 @@ services:
       # knowledge-collection migration pushed it past 12k pages / ~200MB). Give
       # the Quartz builder real headroom (host has ~94GB). Configurable.
       NODE_OPTIONS: "--max-old-space-size=${WIKI_VIEWER_HEAP_MB:-20480}"
+      # research-workbench P1b (D13 item 7): the page chrome's notifications
+      # strip reads the retrieval contract's read endpoint
+      # (openbrain-workbench /workbench/contract/notifications), which is behind
+      # the workbench key - the same value the workbench takes as WORKBENCH_KEY.
+      # Server-side only: the strip is rendered into the page, the key never
+      # reaches the browser.
+      WORKBENCH_URL: http://openbrain-workbench:8000
+      WORKBENCH_KEY: ${MCP_ACCESS_KEY}
     volumes:
       - openbrain-wiki-data:/wiki:ro
       # Binary assets (images now, audio later) live on their own volume,
@@ -1282,11 +1290,13 @@ services:
       # path so Quartz resolves `![](assets/<id>/img.png)` links; read-only
       # here (the workbench is the writer).
       - wiki-assets:/wiki/assets:ro
-      # Published snapshots survive container recreates (2026-08-25): without
-      # this, every recreate/image-deploy lost /srv and served the "Building…"
-      # splash for the whole ~9-min cold build. With it, serve.mjs keeps
-      # serving the last good snapshot instantly while the fresh builder
-      # catches up. Derived data (rebuildable) — deliberately NOT backed up.
+      # The builder's published snapshots (/srv/current: its copy of the client
+      # bundle, and the built pages the parity work diffs against). Since
+      # research-workbench P1b the viewer does NOT need it to serve: pages are
+      # rows and the bundle falls back to the copy baked into the image, so an
+      # empty or lost /srv serves every page at once (no "Building…" splash).
+      # Derived data (rebuildable) — deliberately NOT backed up. P1c removes
+      # the builder and this volume's last purpose.
       - wiki-viewer-srv:/srv
     ports:
       - "127.0.0.1:8812:8080"
@@ -1297,6 +1307,17 @@ services:
       # container — which shares openwebui's netns, and openwebui is on
       # app-net — can reach openbrain-wiki-viewer:8080 by name.
       - app-net
+    # research-workbench P1b: healthy = /__health answers 200 (database up,
+    # files-vs-rows reconciliation at zero drift, no broken page class, no
+    # render error). The same command is the image's HEALTHCHECK
+    # (wiki-viewer/Dockerfile). start_period covers the first reconciliation
+    # of the whole vault; a probe never counts as reader activity.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/__health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     restart: unless-stopped
 
   # Browser-facing read/write API behind the Quartz viewer (D-A). Deno+Hono,
