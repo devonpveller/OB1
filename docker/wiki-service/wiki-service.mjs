@@ -48,7 +48,7 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // get their rows through the same queue + flush as every compiled page (D13:
 // compiled means the row landed).
 import {
-  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, writeWikiPage, maybeFlushWikiPages, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
+  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, writeWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
   isDatabaseUnavailableError,
 } from "file:///recipes/_shared/wiki-pages.mjs";
 // rw-p1a-deploy-prep (RV-5): the vault .gitignore is MERGED, never rewritten.
@@ -248,7 +248,10 @@ async function ensureRepo() {
         "(by path) and ingested back so it joins the research effort. " +
         "Link freely into `content/` with [[wikilinks]].\n",
     );
-    await maybeFlushWikiPages(); // a create: flushed at once (a failed write is ledgered by the compile's finish)
+    // flushed at once, as its own run: the boot's row is not counted in the first compile's
+    // "all N written page row(s) landed" (P1a C12: per cycle), and a row the database
+    // refused now is ledgered for the next cycle's retry like any unsynced row
+    await finishWikiPages("boot", { outDir: WIKI_OUT_DIR });
   }
   if (freshRepo) {
     await git(["add", "-A"]);
