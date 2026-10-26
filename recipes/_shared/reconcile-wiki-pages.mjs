@@ -290,29 +290,37 @@ export function structuralFileFor(vault) {
 // re-checked: stale, orphan, empty and failed are counted as found.
 export const RECHECK_MAX_MS = 270;
 export const RECHECK_MAX_SLUGS = 500;
+export const RECHECK_CHUNK = 100; // slugs per request (a 100-slug in.() URL is ~6-8 KB; 300-500 failed - round 4)
 const RECHECK_MS = () => Math.min(RECHECK_MAX_MS, Math.max(0, Number(process.env.RECONCILE_MISSING_RECHECK_MS ?? "250")));
 export async function recheckMissing({ rows, missing, fetchImpl = fetch, delayMs = RECHECK_MS() } = {}) {
   const ask = (missing || []).slice(0, RECHECK_MAX_SLUGS);
   if (!ask.length) return { asked: 0, resolved: 0, delayMs: 0 };
   const d = Math.min(RECHECK_MAX_MS, Math.max(0, Number(delayMs) || 0));
   if (d) await new Promise((r) => setTimeout(r, d));
+  // In chunks of RECHECK_CHUNK slugs (round 4, tester attempt 3 F-T3-2: one request for
+  // 300-500 slugs exceeded the URL limit and resolved nothing). Still ONE re-read per
+  // slug; a chunk that fails leaves its slugs counted, the others are still taken.
   let resolved = 0;
-  try {
-    const list = ask.map((s) => `"${String(s).replace(/["\\]/g, (c) => "\\" + c)}"`).join(",");
-    const r = await fetchImpl(`${OB_URL()}/rest/v1/wiki_pages?select=slug,page_class,updated_at,links,body&slug=in.(${encodeURIComponent(list)})`, {
-      headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(10_000),
-    });
-    if (!r.ok) throw new Error(`wiki_pages ${r.status}`);
-    for (const x of await r.json()) {
-      if (!x || !ask.includes(x.slug) || rows.has(x.slug)) continue;
-      const { body, ...row } = x;
-      rows.set(x.slug, { ...row, empty: isEmptyBody(body) });
-      resolved++;
+  let error = null;
+  const want = new Set(ask);
+  for (let i = 0; i < ask.length; i += RECHECK_CHUNK) {
+    try {
+      const list = ask.slice(i, i + RECHECK_CHUNK).map((s) => `"${String(s).replace(/["\\]/g, (c) => "\\" + c)}"`).join(",");
+      const r = await fetchImpl(`${OB_URL()}/rest/v1/wiki_pages?select=slug,page_class,updated_at,links,body&slug=in.(${encodeURIComponent(list)})`, {
+        headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(10_000),
+      });
+      if (!r.ok) throw new Error(`wiki_pages ${r.status}`);
+      for (const x of await r.json()) {
+        if (!x || !want.has(x.slug) || rows.has(x.slug)) continue;
+        const { body, ...row } = x;
+        rows.set(x.slug, { ...row, empty: isEmptyBody(body) });
+        resolved++;
+      }
+    } catch (e) {
+      error ??= String(e?.message || e).slice(0, 200);
     }
-  } catch (e) {
-    return { asked: ask.length, resolved: 0, delayMs: d, error: String(e?.message || e).slice(0, 200) };
   }
-  return { asked: ask.length, resolved, delayMs: d };
+  return error ? { asked: ask.length, resolved, delayMs: d, error } : { asked: ask.length, resolved, delayMs: d };
 }
 
 /**

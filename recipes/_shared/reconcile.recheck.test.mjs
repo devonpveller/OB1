@@ -62,3 +62,25 @@ test("a re-read that fails leaves every missing slug counted (never read as reso
   assert.ok(rc.error);
   assert.equal(diffFilesRows(files(), rows, cls, { now: Date.parse(T) }).missing.length, 2);
 });
+
+// round 4 (tester attempt 3 F-T3-2): one request for 300-500 slugs failed (URL too long) and resolved nothing
+test("the re-check is chunked: 500 missing slugs are re-read in requests of RECHECK_CHUNK, and a failing chunk only keeps ITS slugs counted", async () => {
+  const { RECHECK_CHUNK } = await import("./reconcile-wiki-pages.mjs");
+  const many = Array.from({ length: 500 }, (_, i) => `content/tool/bulk-${String(i).padStart(3, "0")}`);
+  const landed = new Set(many.filter((_, i) => i % 2 === 0)); // half of them landed meanwhile
+  let calls = 0, maxUrl = 0;
+  const fetchImpl = async (url) => {
+    calls++; maxUrl = Math.max(maxUrl, String(url).length);
+    if (calls === 3) throw new Error("chunk 3 fails");
+    const m = /slug=in\.\(([^)]*)\)/.exec(decodeURIComponent(String(url)));
+    const asked = m[1].split(",").map((s) => s.replace(/^"|"$/g, ""));
+    return { ok: true, json: async () => asked.filter((s) => landed.has(s)).map((slug) => ({ slug, page_class: "entity", updated_at: T, links: [], body: "# x" })) };
+  };
+  const rows = new Map();
+  const rc = await recheckMissing({ rows, missing: many, fetchImpl, delayMs: 0 });
+  assert.equal(calls, Math.ceil(500 / RECHECK_CHUNK));
+  assert.ok(maxUrl < 16_000, `each request stays well under the URL limit (${maxUrl} chars)`);
+  assert.equal(rc.asked, 500);
+  assert.equal(rc.resolved, 250 - RECHECK_CHUNK / 2, "every landed slug outside the failed chunk is taken");
+  assert.match(rc.error, /chunk 3 fails/);
+});

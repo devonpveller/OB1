@@ -36,7 +36,8 @@ mkdirSync(dir, { recursive: true });
 const A = join(dir, "person-a.md");
 const OLD = "---\ntitle: A\nentity_id: 1\n---\n# A\n\nold body\n";
 writeFileSync(A, OLD);
-const past = new Date(Date.now() - 3600_000);
+// whole seconds: a sub-ms utimes value comes back as e.g. ...642.999 (tester attempt 3 F-T3-3: 1 run in 3 failed)
+const past = new Date(Math.floor((Date.now() - 3600_000) / 1000) * 1000);
 utimesSync(A, past, past);
 const m = await import("./wiki-pages.mjs");
 const visible = () => readdirSync(dir).filter((f) => !f.startsWith(".")).sort();

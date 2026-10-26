@@ -459,6 +459,27 @@ echo "B16: $N16 churn compiles, $wins with a stale window, health drift max $hdr
 [ "$b16" = 1 ] && pass B16 || fail B16 "an entity page's file was newer than its row"
 fi
 
+if want B17; then
+hdr "B17 (round 4, tester attempt 3 F-T3-1): a wiki-service START on a vault WITHOUT notes/README.md - the reconcile, polled every <= 100 ms through the boot, never reports drift"
+b17=1
+docker ps --format '{{.Names}}' | grep -qx "$P-ws" || { T 300 bash "$E" ws >/dev/null 2>&1; T 300 bash "$E" ws_wait >/dev/null 2>&1; }
+docker stop "$P-ws" >/dev/null
+bash "$E" node -e "require('fs').rmSync('/wiki/notes/README.md', { force: true }); console.log('README removed')"
+psqlq -c "DELETE FROM wiki_pages WHERE slug = 'notes/README'" | tail -1
+base="$(docker run --rm --network "$NET" -v "$VOL:/wiki:ro" -v "$OB1:/ob1:ro" -e OPEN_BRAIN_URL=http://openbrain-rest --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/rcloop.mjs --ms 1500 2>&1 | tail -1)"
+echo "before the start (README gone, file and row): $base"
+docker rm -f "$P-rcloop" >/dev/null 2>&1
+docker run -d --name "$P-rcloop" --network "$NET" -v "$VOL:/wiki:ro" -v "$OB1:/ob1:ro" -e OPEN_BRAIN_URL=http://openbrain-rest --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/rcloop.mjs --ms "${P1B_B17_MS:-30000}" --gap 50 >/dev/null
+sleep 1; docker start "$P-ws" >/dev/null; echo "wiki-service started"
+T $(( ${P1B_B17_MS:-30000} / 1000 + 60 )) docker wait "$P-rcloop" >/dev/null 2>&1
+o="$(docker logs "$P-rcloop" 2>&1)"; docker rm -f "$P-rcloop" >/dev/null 2>&1; echo "$o" | tail -8 | cut -c1-260
+readme="$(bash "$E" node -e "console.log(require('fs').existsSync('/wiki/notes/README.md') ? 'file' : 'NO FILE')") $(psqlq -c "SELECT count(*) || ' row' FROM wiki_pages WHERE slug = 'notes/README'")"
+echo "after the boot: notes/README $readme"
+echo "$o" | grep -qE '^RCLOOP passes=([0-9]{3,}) driftPasses=0 ' || { echo "x a reconcile pass during the boot reported drift (or too few passes)"; b17=0; }
+[ "$readme" = "file 1 row" ] || { echo "x the boot did not leave the README with its row"; b17=0; }
+[ "$b17" = 1 ] && pass B17 || fail B17 "drift during a wiki-service start"
+fi
+
 if want B3; then
 hdr "B3 (acceptance 3): explorer per navigation, nav TTFB, nav payload - the current vault's size, five times it, and through Slow 4G"
 b3=1

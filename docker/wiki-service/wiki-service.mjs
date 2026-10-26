@@ -48,7 +48,7 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // get their rows through the same queue + flush as every compiled page (D13:
 // compiled means the row landed).
 import {
-  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, writeWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
+  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, writeWikiPage, maybeFlushWikiPages, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
   isDatabaseUnavailableError,
 } from "file:///recipes/_shared/wiki-pages.mjs";
 // rw-p1a-deploy-prep (RV-5): the vault .gitignore is MERGED, never rewritten.
@@ -236,13 +236,19 @@ async function ensureRepo() {
   // If a prior (pre-fix) run already tracked the state file, untrack it.
   await git(["rm", "--cached", "-q", "--ignore-unmatch", ".wikistate.json"]).catch(() => {});
   if (!existsSync(`${NOTES_DIR}/README.md`)) {
-    await writeFile(
+    // A page like any other (rw-p1b-ready round 4, tester attempt 3 F-T3-1): written
+    // through writeWikiPage and its row flushed NOW. It used to be a raw writeFile whose
+    // row was only queued with the first compile and landed 1.1-1.7 s later - past the
+    // reconcile's 270 ms missing re-check, so every start on a vault without the README
+    // read drift 1 (missing: notes/README). Now file -> row is one upsert.
+    writeWikiPage(
       `${NOTES_DIR}/README.md`,
       "# Notes\n\nHand-written notes live here. The wiki compiler NEVER " +
         "edits this folder. Each note is tethered to one OpenBrain record " +
         "(by path) and ingested back so it joins the research effort. " +
         "Link freely into `content/` with [[wikilinks]].\n",
     );
+    await maybeFlushWikiPages(); // a create: flushed at once (a failed write is ledgered by the compile's finish)
   }
   if (freshRepo) {
     await git(["add", "-A"]);
