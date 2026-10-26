@@ -19,8 +19,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { rewriteResearchCitations } from "./citations.mjs";
-import { writeIfChanged } from "./write-if-changed.mjs";
-import { queueWikiPage } from "./wiki-pages.mjs";
+import { writeWikiPage } from "./wiki-pages.mjs";
 import { clip } from "./clip.mjs";
 
 // YAML-safe scalar (quoted JSON string — handles colons, quotes, emoji).
@@ -172,8 +171,7 @@ export function writeSourceLeaves(rows, outDir) {
     if (!r || !r.id) continue;
     const lp = path.join(dir, `${r.id}.md`);
     const lmd = renderSourceLeaf(r);
-    if (writeIfChanged(lp, lmd)) n++;
-    queueWikiPage(lp, lmd);
+    if (writeWikiPage(lp, lmd)) n++; // row first for an update (rw-p1b-ready round 2), and the row queued
   }
   return n;
 }

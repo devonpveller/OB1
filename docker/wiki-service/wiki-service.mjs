@@ -48,7 +48,7 @@ import { shouldSupervisorCompile } from "./lib/drain-supervisor.mjs";
 // get their rows through the same queue + flush as every compiled page (D13:
 // compiled means the row landed).
 import {
-  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
+  deleteWikiPages, deleteWikiPagesUnder, queueWikiPage, writeWikiPage, finishWikiPages, retryUnsyncedRows, EXIT_COMPLETED_WITH_FAILURES,
   isDatabaseUnavailableError,
 } from "file:///recipes/_shared/wiki-pages.mjs";
 // rw-p1a-deploy-prep (RV-5): the vault .gitignore is MERGED, never rewritten.
@@ -1076,8 +1076,7 @@ async function compile(reason) {
           "edit the source/thought (or your note) and the next compile reflects it.",
         "",
       ].join("\n");
-    writeIfChanged(`${WIKI_GIT_DIR}/index.md`, homeMd);
-    queueWikiPage(`${WIKI_GIT_DIR}/index.md`, homeMd);
+    writeWikiPage(`${WIKI_GIT_DIR}/index.md`, homeMd); // row first for an update (rw-p1b-ready round 2), and the row queued
     try {
       queueWikiPage(`${NOTES_DIR}/README.md`, await readFile(`${NOTES_DIR}/README.md`, "utf8"));
     } catch { /* removed by hand: nothing to publish */ }

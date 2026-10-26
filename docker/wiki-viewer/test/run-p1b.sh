@@ -34,6 +34,12 @@ T() { timeout "${1}" "${@:2}"; }
 FRONT="http://$P-front:8080"
 chk() { timeout 900 docker run --rm -i --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/p1b-checks.mjs "$@"; }
 psqlq() { docker exec -i "$P-db" psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA "$@"; }
+churn() { # round 2: a new thought on an entity + the entity bumped, so the next compile REGENERATES its page
+  local id="$1" ent="${2:-901}"
+  psqlq -c "INSERT INTO thoughts (id, content, metadata, created_at) VALUES ($id, 'Churn note $id at '||now(), '{\"type\":\"observation\"}', now()) ON CONFLICT DO NOTHING;
+            INSERT INTO thought_entities (thought_id, entity_id, mention_role, confidence, source, created_at) VALUES ($id, $ent, 'subject', 0.9, 'churn', now()) ON CONFLICT DO NOTHING;
+            UPDATE entities SET updated_at = now(), last_seen_at = now() WHERE id = $ent;" >/dev/null
+}
 viewer_fresh() { # [image] [WIKI_BUILDER]: a viewer on a NEW, EMPTY /srv volume
   docker rm -f -v "$P-viewer" >/dev/null 2>&1 || true
   docker volume rm "$P-srv-empty" >/dev/null 2>&1 || true
@@ -403,10 +409,16 @@ done
 # soak: the compiler cycles while the reconcile is read every 30 s
 SOAK="${P1B_SOAK_MIN:-20}"
 T 300 bash "$E" ws >/dev/null 2>&1; T 300 bash "$E" ws_wait >/dev/null 2>&1
-echo "soak: ${SOAK} min, a compile every 3 min, the reconcile every 30 s"
-end=$(( $(date +%s) + SOAK * 60 )); nxt=$(date +%s); worst=0; samples=0
+# round 2: each soak compile is preceded by a churn write (P1B_SOAK_CHURN=1, the default) so the compile
+# REGENERATES a page - attempt 1's soak compiled nothing; attempt 2's tester added this by hand
+SOAK_EVERY="${P1B_SOAK_COMPILE_S:-180}"; SOAK_SAMPLE="${P1B_SOAK_SAMPLE_S:-30}"
+echo "soak: ${SOAK} min, a compile every ${SOAK_EVERY} s (churn ${P1B_SOAK_CHURN:-1}), the reconcile read every ${SOAK_SAMPLE} s"
+end=$(( $(date +%s) + SOAK * 60 )); nxt=$(date +%s); worst=0; samples=0; cyc=0
 while [ "$(date +%s)" -lt "$end" ]; do
-  if [ "$(date +%s)" -ge "$nxt" ]; then T 300 bash "$E" ws_cycle >/dev/null 2>&1; nxt=$(( $(date +%s) + 180 )); fi
+  if [ "$(date +%s)" -ge "$nxt" ]; then
+    cyc=$((cyc + 1)); [ "${P1B_SOAK_CHURN:-1}" = 1 ] && churn $((80000 + cyc)) $([ $((cyc % 2)) = 0 ] && echo 901 || echo 903)
+    T 300 bash "$E" ws_cycle >/dev/null 2>&1; nxt=$(( $(date +%s) + SOAK_EVERY ))
+  fi
   hj="$(bash "$E" health)"; d="$(echo "$hj" | grep -oE '"drift":[0-9]+' | head -1 | cut -d: -f2)"; samples=$((samples + 1))
   if [ -n "$d" ] && [ "$d" -gt 0 ]; then
     worst=$(( d > worst ? d : worst ))
@@ -415,11 +427,36 @@ while [ "$(date +%s)" -lt "$end" ]; do
       -e 's#"content/(person|organization|tool|project|place|topic)/#&<generate-wiki entity pages>#g' -e 's#"content/source/#&<source leaves (wiki-service)>#g' \
       -e 's#"content/thought/#&<generate-wiki thought leaves>#g' -e 's#"content/notebooks/#&<synthesize-notebooks>#g' -e 's#"notes/#&<workbench notes>#g' | head -5
   fi
-  sleep 30
+  sleep "$SOAK_SAMPLE"
 done
-echo "soak done: $samples reconcile samples, worst drift $worst"
+echo "soak done: $samples reconcile samples, worst drift $worst ($cyc compiles)"
 [ "$worst" = 0 ] || b6=0
 [ "$b6" = 1 ] && pass B6 || fail B6 "drift (see the named writers above)"
+fi
+
+if want B16; then
+hdr "B16 (round 2, tester attempt 2's soak: an entity page STALE): across churn compiles that regenerate an entity page, its FILE is never newer than its ROW (polled every 25 ms), the reconcile reads drift 0, and no staged file is left"
+b16=1
+docker ps --format '{{.Names}}' | grep -qx "$P-ws" || { T 300 bash "$E" ws >/dev/null 2>&1; T 300 bash "$E" ws_wait >/dev/null 2>&1; }
+N16="${P1B_B16_CYCLES:-6}"; wins=0; hdrift=0
+for i in $(seq 1 "$N16"); do
+  churn $((70000 + i)) 901
+  docker rm -f "$P-stalewin" >/dev/null 2>&1
+  docker run -d --name "$P-stalewin" --network "$NET" -v "$VOL:/wiki:ro" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/stalewin.mjs --ms 40000 >/dev/null
+  ( for s in $(seq 1 18); do bash "$E" health 2>/dev/null | grep -oE '"drift":[0-9]+' | head -1; sleep 2; done ) > "$RUNDIR/b16-h-$i" &
+  hp=$!
+  T 300 bash "$E" ws_cycle 2>&1 | tail -1 | grep -oE '"summary":"[^|]*' | cut -c1-120
+  wait "$hp"; T 60 docker wait "$P-stalewin" >/dev/null 2>&1
+  sw="$(docker logs "$P-stalewin" 2>&1 | tail -1)"; docker rm -f "$P-stalewin" >/dev/null 2>&1
+  d="$(cut -d: -f2 "$RUNDIR/b16-h-$i" | sort -n | tail -1)"
+  echo "cycle $i: $sw | health drift max ${d:-?}"
+  n="$(echo "$sw" | sed -E 's/.* windows=([0-9]+) .*/\1/')"; [ "$n" = 0 ] || wins=$((wins + 1))
+  [ -n "$d" ] && [ "$d" -gt "$hdrift" ] && hdrift=$d
+done
+left="$(bash "$E" node -e "const {execSync}=require('child_process'); console.log(execSync('find /wiki -name \".*.wp-staged-*\" | wc -l').toString().trim())")"
+echo "B16: $N16 churn compiles, $wins with a stale window, health drift max $hdrift, staged files left $left"
+[ "$wins" = 0 ] && [ "$hdrift" = 0 ] && [ "$left" = 0 ] || b16=0
+[ "$b16" = 1 ] && pass B16 || fail B16 "an entity page's file was newer than its row"
 fi
 
 if want B3; then
