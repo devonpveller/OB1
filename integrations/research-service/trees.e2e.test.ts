@@ -224,7 +224,7 @@ Deno.test({ name: "T1 a steer on a RUNNING job opens a child that starts while t
 }});
 
 // ── Case 7: the dispatcher's concurrency is the lane, read back from llm-queue ───────────────
-Deno.test({ name: "T2 the research service runs as many jobs as the lane says; a raised lane raises it; unreadable = 2 with a warning; RESEARCH_MAX_CONCURRENCY is ignored", ...opts, fn: async () => {
+Deno.test({ name: "T2 the research service runs as many jobs as the lane says; a raised lane raises it, a lowered one lowers it (no floor); unreadable = the queue default 3 with a warning; RESEARCH_MAX_CONCURRENCY is ignored", ...opts, fn: async () => {
   let lane: { status: number; body: unknown } = { status: 200, body: { max_concurrency: 3, capacity_declared: true } };
   await withStack(async (gw, svc) => {
     gw.hold("HOLDB");
@@ -237,8 +237,10 @@ Deno.test({ name: "T2 the research service runs as many jobs as the lane says; a
     lane = { status: 200, body: { max_concurrency: 4, capacity_declared: true } };
     await until("4 running after the lane is raised", async () => (await running()) === 4, 30_000, svc);
     assert(/lane concurrency 3 -> 4/.test(svc.log), svc.log.slice(-1500));
+    lane = { status: 200, body: { max_concurrency: 1, capacity_declared: true } };
+    await until("lowered to 1 (no P4a floor)", async () => /lane concurrency 4 -> 1/.test(svc.log), 30_000, svc);
     lane = { status: 503, body: {} };
-    await until("the floor with a warning", async () => /WARNING research-branch capacity unreadable \(HTTP 503\); running at the floor 2/.test(svc.log) && /lane concurrency 4 -> 2/.test(svc.log), 30_000, svc);
+    await until("the queue default with a warning", async () => /WARNING research-branch capacity unreadable \(HTTP 503\); running at the queue's default 3/.test(svc.log) && /lane concurrency 1 -> 3/.test(svc.log), 30_000, svc);
     assert(/RESEARCH_MAX_CONCURRENCY is set and IGNORED/.test(svc.log));
     gw.release("HOLDB");
   }, { lane: () => lane, env: { RESEARCH_MAX_CONCURRENCY: "1" } });
@@ -417,4 +419,31 @@ Deno.test({ name: "T8 full lane: two steers on a running job make their first mo
 Deno.test({ name: "T9 a source event whose trail is an empty object is refused like a missing one", ...opts, fn: async () => {
   const root = await rootRow("empty trail");
   await assertRejects(() => sql(`INSERT INTO research_job_events (job_id, root_job_id, type, kind, trail) VALUES ($1, $1, 'source', 'due_process', '{}'::jsonb)`, [root]));
+}});
+
+// ── Case 1 at SLOTS=1 (round 3: no P4a floor): a lane of 1, the parent holds it; two steers start in
+// its slot and the stack never has more than ONE model call in flight.
+Deno.test({ name: "T10 lane of 1: steers start in the parent's only slot; their first model calls come while it runs; max 1 in flight", ...opts, fn: async () => {
+  await withStack(async (gw, svc) => {
+    gw.hold("HOLDR");
+    const a = await submit(svc.base, "HOLDR When should garlic be planted in zone 6?");
+    await until("root running + held", async () => (await job(a)).status === "running" && gw.blocked >= 1, 30_000, svc);
+    await until("lane read back as 1", async () => /lane concurrency 3 -> 1/.test(svc.log), 15_000, svc);
+    const [r1, r2] = await Promise.all([
+      steer(svc.base, a, { step_id: "s1", text: "softneck versus hardneck" }),
+      steer(svc.base, a, { step_id: "s1", text: "how deep to plant cloves" }),
+    ]);
+    const o1 = await r1.json(), o2 = await r2.json();
+    assertEquals([r1.status, r2.status], [201, 201]);
+    await until("both children running in the parent's slot", async () =>
+      (await job(o1.child_job_id)).status === "running" && (await job(o2.child_job_id)).status === "running", 15_000, svc);
+    gw.release("HOLDR");
+    await until("parent closed", async () => ["done", "error"].includes((await job(a)).status), 60_000, svc);
+    const fin = (await sql<{ f: Date }>(`SELECT finished_at AS f FROM research_jobs WHERE id=$1`, [a]))[0].f.getTime();
+    const first = (q: string) => gw.seen.find((x) => x.auth === BRANCH_KEY && x.text.includes(q))?.at ?? Infinity;
+    assert(first("softneck versus hardneck") < fin && first("how deep to plant cloves") < fin, "both children called the model before the parent finished");
+    await until("children closed", async () => ["done", "error"].includes((await job(o1.child_job_id)).status) &&
+      ["done", "error"].includes((await job(o2.child_job_id)).status), 60_000, svc);
+    assertEquals(gw.maxInFlight, 1, "a lane of 1 never has two model calls in flight");
+  }, { lane: () => ({ status: 200, body: { max_concurrency: 1, capacity_declared: true } }) });
 }});

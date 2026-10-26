@@ -5,8 +5,8 @@
  * branches inherit the anchor and the tree's current topic estimate; every steer is recorded with
  * what it was made against; the report is cumulative over the tree. Gap work (D15) and inter-hub
  * gaps (D1) open branches from inside the run, always scheduled below a pending human steer (D3).
- * Branches run in llm-queue's `research-branch` lane, whose concurrency is a share of the plane's
- * declared capacity (D16) - read back from the queue, never hand-set here.
+ * Branches run in llm-queue's `research-branch` lane, which is ALL of the plane's declared slots
+ * (D16 as amended 2026-10-26) - read back from the queue, never capped or floored here.
  *
  * Storage: init-research-trees.sql (research_jobs tree columns, research_steers,
  * research_job_events). No topic or hub table: hubs are neighbourhoods computed from the claim
@@ -587,12 +587,14 @@ export async function closeBranch(c: Q, jobId: string, chat: (sys: string, user:
   return report;
 }
 
-// ── the research-branch lane's derived concurrency (D16) ───────────────────────────────────
-export const LANE_FLOOR = 2;
+// ── the research-branch lane (D16 as amended by the operator 2026-10-26) ───────────────────
+/** llm-queue's default slot count (its DEFAULT_SLOTS): what an unreadable lane is taken to be. */
+export const LANE_DEFAULT = 3;
 /**
- * Read the lane's derived concurrency back from llm-queue (GET /observe/queue/estimate through the
- * gateway's read-only pass-through). Unreadable (no answer, no number, below the floor) = the floor
- * with a logged warning. There is no local, hand-set cap.
+ * Read the lane back from llm-queue (GET /observe/queue/estimate through the gateway's read-only
+ * pass-through): ALL of LLM_QUEUE_SLOTS. There is no P4a-side cap, share or floor - how much research
+ * runs is what the queue admits. Unreadable (no answer, not a positive integer) = the queue's default
+ * slot count with a logged warning.
  */
 export async function readLaneConcurrency(
   url: string, apiKey: string, log: (line: string) => void, fetchFn: typeof fetch = fetch, timeoutMs = 5000,
@@ -601,17 +603,17 @@ export async function readLaneConcurrency(
     const u = new URL(url);
     u.searchParams.set("key", "research-branch");
     const r = await fetchFn(u, { headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal: AbortSignal.timeout(timeoutMs) });
-    if (!r.ok) { await r.body?.cancel(); log(`[lane] WARNING research-branch capacity unreadable (HTTP ${r.status}); running at the floor ${LANE_FLOOR}`); return LANE_FLOOR; }
+    if (!r.ok) { await r.body?.cancel(); log(`[lane] WARNING research-branch capacity unreadable (HTTP ${r.status}); running at the queue's default ${LANE_DEFAULT}`); return LANE_DEFAULT; }
     const j = await r.json() as { max_concurrency?: unknown; capacity_declared?: unknown };
     const n = Number(j?.max_concurrency);
-    if (!Number.isInteger(n) || n < LANE_FLOOR) {
-      log(`[lane] WARNING research-branch capacity unreadable (max_concurrency=${JSON.stringify(j?.max_concurrency)}); running at the floor ${LANE_FLOOR}`);
-      return LANE_FLOOR;
+    if (!Number.isInteger(n) || n < 1) {
+      log(`[lane] WARNING research-branch capacity unreadable (max_concurrency=${JSON.stringify(j?.max_concurrency)}); running at the queue's default ${LANE_DEFAULT}`);
+      return LANE_DEFAULT;
     }
     if (j?.capacity_declared === false) log(`[lane] WARNING llm-queue reports LLM_QUEUE_SLOTS undeclared; the lane runs at ${n}`);
     return n;
   } catch (e) {
-    log(`[lane] WARNING research-branch capacity unreadable (${(e as Error).message}); running at the floor ${LANE_FLOOR}`);
-    return LANE_FLOOR;
+    log(`[lane] WARNING research-branch capacity unreadable (${(e as Error).message}); running at the queue's default ${LANE_DEFAULT}`);
+    return LANE_DEFAULT;
   }
 }

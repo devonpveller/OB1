@@ -253,14 +253,16 @@ Deno.test("P4a lane: the dispatcher's cap is re-read every tick (a reloaded queu
   queue = [];
 });
 
-Deno.test("P4a lane: the research service reads the derived concurrency back; unreadable = 2 with a warning", async () => {
+Deno.test("P4a lane: the research service reads the lane back (all of the slots); no floor; unreadable = the queue default 3 with a warning", async () => {
   const logs: string[] = [];
   const fx = (status: number, body: unknown) => (() => Promise.resolve(new Response(JSON.stringify(body), { status }))) as unknown as typeof fetch;
   assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), fx(200, { max_concurrency: 5, capacity_declared: true })), 5);
   assertEquals(logs.length, 0);
-  assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), fx(503, {})), 2);
-  assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), fx(200, { max_concurrency: 1 })), 2, "never 1");
-  assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), (() => Promise.reject(new Error("refused"))) as unknown as typeof fetch), 2);
+  assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), fx(200, { max_concurrency: 1, capacity_declared: true })), 1, "no P4a floor: SLOTS=1 is a lane of 1");
+  assertEquals(logs.length, 0);
+  assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), fx(503, {})), 3, "unreadable = the queue's default slot count");
+  assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), fx(200, { max_concurrency: 0 })), 3);
+  assertEquals(await readLaneConcurrency("http://q/observe/queue/estimate", "k", (l) => logs.push(l), (() => Promise.reject(new Error("refused"))) as unknown as typeof fetch), 3);
   assertEquals(logs.filter((l) => /WARNING/.test(l)).length, 3);
   // the request names the lane
   let asked = "";

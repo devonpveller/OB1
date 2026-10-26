@@ -35,7 +35,7 @@ import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from ".
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
 import {
-  appendEvent, buildTreeReport, closeBranch, createSteer, interHubEvent, interHubGaps, interHubRef, LANE_FLOOR, LANE_KINDS,
+  appendEvent, buildTreeReport, closeBranch, createSteer, interHubEvent, interHubGaps, interHubRef, LANE_DEFAULT, LANE_KINDS,
   learningRecords, loadClaimGraph, loadTree, openGapBranches, readLaneConcurrency, stageEvent, SteerError, treeEstimate,
 } from "./tree.ts";
 
@@ -163,15 +163,16 @@ const PORT = parseInt(env("PORT", "8000"), 10);
 // How many research jobs may run at once across the whole stack.
 //
 // research-workbench P4a (D16): there is no hand-set cap any more. The dispatcher's concurrency IS
-// llm-queue's research-branch lane - a share of LLM_QUEUE_SLOTS, floor 2 - read back through the
+// llm-queue's research-branch lane - ALL of LLM_QUEUE_SLOTS, no cap or floor here (D16 as amended
+// 2026-10-26: how much research runs is the queue's decision) - read back through the
 // gateway's GET-only /observe/queue/estimate pass-through at boot and every RESEARCH_LANE_REFRESH_MS,
-// so a reloaded queue moves it with no other change. Unreadable = the floor (2) with a warning.
+// so a reloaded queue moves it with no other change. Unreadable = the queue's default (3) with a warning.
 if (Deno.env.get("RESEARCH_MAX_CONCURRENCY") !== undefined) {
-  console.warn("[lane] WARNING RESEARCH_MAX_CONCURRENCY is set and IGNORED: research concurrency is derived from llm-queue's research-branch lane (LLM_QUEUE_SLOTS x share, floor 2)");
+  console.warn("[lane] WARNING RESEARCH_MAX_CONCURRENCY is set and IGNORED: research concurrency is derived from llm-queue's research-branch lane (all of LLM_QUEUE_SLOTS)");
 }
 const LANE_URL = env("RESEARCH_LANE_URL", `${CHAT_API_BASE.replace(/\/v1$/, "")}/observe/queue/estimate`);
 const LANE_REFRESH_MS = parseInt(env("RESEARCH_LANE_REFRESH_MS", "60000"), 10);
-let laneConcurrency = LANE_FLOOR;
+let laneConcurrency = LANE_DEFAULT;
 /** Gap branches (D15 per-claim + D1 inter-hub) a tree may open from inside its runs. */
 const MAX_GAP_BRANCHES = Math.max(0, parseInt(env("RESEARCH_TREE_MAX_GAP_BRANCHES", "3"), 10) || 0);
 

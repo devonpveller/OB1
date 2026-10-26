@@ -1025,7 +1025,7 @@ services:
       CHAT_MODEL: ${RESEARCH_CHAT_MODEL:-local-large}
       NOTHINK_SUFFIX: ":nothink"
       # Concurrency (research-workbench P4a, D16): NOT set here any more. How many research jobs
-      # run at once is llm-queue's research-branch lane - a share of LLM_QUEUE_SLOTS, floor 2 -
+      # run at once is llm-queue's research-branch lane - ALL of LLM_QUEUE_SLOTS (D16 amended 2026-10-26) -
       # read back through the gateway's GET-only /observe/queue/estimate every minute. One number
       # describes the plane; RESEARCH_MAX_CONCURRENCY, if still set, is ignored with a warning.
       # Branch jobs (steers, gap work, idea research) call the model under their OWN LiteLLM
