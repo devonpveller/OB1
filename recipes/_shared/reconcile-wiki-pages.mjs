@@ -275,6 +275,46 @@ export function structuralFileFor(vault) {
   return process.env.WIKI_STRUCTURAL_FILE || join(vault, "content", STRUCTURAL_FILE);
 }
 
+
+// ── the MISSING re-check (rw-p1b-ready round 3, operator 2026-10-26, option 1) ──
+// A page CREATED inside a pass has its file before its row for one row write
+// (writeWikiPage: file first, then an immediate flush; measured 10.5-27.4 ms,
+// n=8), and this pass lists files before it reads rows - so it can see the
+// file and not yet the row. Every slug found MISSING is re-read ONCE, after a
+// short delay, before it counts: a row that has landed by then is taken (its
+// state still judged by rowState - a stale or empty row still counts). A slug
+// still missing on the re-read COUNTS; a re-read that fails resolves nothing.
+// Bounds: one re-read, delay RECONCILE_MISSING_RECHECK_MS (default 250 ms,
+// capped at RECHECK_MAX_MS = 270 ms = 10 x the 27 ms measured window), at most
+// RECHECK_MAX_SLUGS slugs re-read (the rest count as reported). Only MISSING is
+// re-checked: stale, orphan, empty and failed are counted as found.
+export const RECHECK_MAX_MS = 270;
+export const RECHECK_MAX_SLUGS = 500;
+const RECHECK_MS = () => Math.min(RECHECK_MAX_MS, Math.max(0, Number(process.env.RECONCILE_MISSING_RECHECK_MS ?? "250")));
+export async function recheckMissing({ rows, missing, fetchImpl = fetch, delayMs = RECHECK_MS() } = {}) {
+  const ask = (missing || []).slice(0, RECHECK_MAX_SLUGS);
+  if (!ask.length) return { asked: 0, resolved: 0, delayMs: 0 };
+  const d = Math.min(RECHECK_MAX_MS, Math.max(0, Number(delayMs) || 0));
+  if (d) await new Promise((r) => setTimeout(r, d));
+  let resolved = 0;
+  try {
+    const list = ask.map((s) => `"${String(s).replace(/["\\]/g, (c) => "\\" + c)}"`).join(",");
+    const r = await fetchImpl(`${OB_URL()}/rest/v1/wiki_pages?select=slug,page_class,updated_at,links,body&slug=in.(${encodeURIComponent(list)})`, {
+      headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) throw new Error(`wiki_pages ${r.status}`);
+    for (const x of await r.json()) {
+      if (!x || !ask.includes(x.slug) || rows.has(x.slug)) continue;
+      const { body, ...row } = x;
+      rows.set(x.slug, { ...row, empty: isEmptyBody(body) });
+      resolved++;
+    }
+  } catch (e) {
+    return { asked: ask.length, resolved: 0, delayMs: d, error: String(e?.message || e).slice(0, 200) };
+  }
+  return { asked: ask.length, resolved, delayMs: d };
+}
+
 /**
  * Check (and with repair:true, repair) a vault against the table.
  * Returns the report; with repair, `repaired` lists the slugs whose row was
@@ -287,7 +327,13 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
   const rows = await listRows();
   await markEmptyFiles(vault, files, rows);
   const failed = listOpen(null, structuralFile || structuralFileFor(vault));
-  const report = diffFilesRows(files, rows, cls, { failed });
+  let report = diffFilesRows(files, rows, cls, { failed });
+  if (report.missing.length) {
+    // round 3: a page created inside this pass is re-read once before it counts
+    const rc = await recheckMissing({ rows, missing: report.missing });
+    if (rc.resolved) { await markEmptyFiles(vault, files, rows); report = diffFilesRows(files, rows, cls, { failed }); }
+    report.missingRecheck = rc;
+  }
   report.checkedAt = new Date().toISOString();
   // What a file can fix: a missing, stale / future-dated or empty row whose
   // file exists. Orphans and open structural failures are only reported.
