@@ -46,8 +46,8 @@ function stubGateway(o: { lane?: () => { status: number; body: unknown } } = {})
   const held = new Set<string>();
   let wake: () => void = () => {};
   let gate = new Promise<void>((r) => { wake = r; });
-  const seen: Array<{ auth: string; user: string; kind: string }> = [];
-  let blocked = 0;
+  const seen: Array<{ auth: string; user: string; kind: string; at: number; text: string }> = [];
+  let blocked = 0, inFlight = 0, maxInFlight = 0;
   const ac = new AbortController();
   const server = Deno.serve({ port: 0, hostname: "127.0.0.1", signal: ac.signal, onListen: () => {} }, async (req) => {
     const u = new URL(req.url);
@@ -61,8 +61,10 @@ function stubGateway(o: { lane?: () => { status: number; body: unknown } } = {})
     if (u.pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: VEC }] });
     const auth = (req.headers.get("authorization") ?? "").replace(/^Bearer /, "");
     const sys = String(body?.messages?.[0]?.content ?? "");
-    seen.push({ auth, user: String(body?.user ?? ""), kind: sys.slice(0, 40) });
+    seen.push({ auth, user: String(body?.user ?? ""), kind: sys.slice(0, 40), at: Date.now(), text: raw });
     if (body?.max_tokens === 1) return Response.json({ choices: [{ message: { content: "ok" } }] });
+    inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    try {
     // hold a ROOT-key request whose text carries a held token (a branch, under its own key, is never held)
     while (auth === ROOT_KEY && [...held].some((t) => raw.includes(t))) { blocked++; await gate; blocked--; }
     let content = "{}";
@@ -73,9 +75,11 @@ function stubGateway(o: { lane?: () => { status: number; body: unknown } } = {})
     else if (sys.includes("grounded synthesizer")) content = "[SOURCED] Loosen the soil and add compost. [Source 1]";
     else if (!body?.response_format) content = "A short report.";
     return Response.json({ choices: [{ message: { content } }] });
+    } finally { inFlight--; }
   });
   return {
     base: `http://127.0.0.1:${server.addr.port}/v1`, seen,
+    get maxInFlight() { return maxInFlight; },
     hold(t: string) { held.add(t); },
     release(t: string) { held.delete(t); const w = wake; gate = new Promise<void>((r) => { wake = r; }); w(); },
     get blocked() { return blocked; },
@@ -369,4 +373,48 @@ Deno.test({ name: "T7 the schema refuses an event without its marker, a source e
     await appendEvent(c, root, root, { type: "source", kind: "due_process", trail: { url: "https://x.example" }, payload: {} });
     await c.queryObject("ROLLBACK");
   } finally { c.release(); }
+}});
+
+// ── Case 1, full lane (round 2, after t-p4a attempt 1): the lane (2) is full of two unrelated root
+// jobs; steers on one of them must make their first MODEL call while that parent still runs, and the
+// stack never has more model calls in flight than the lane. Rule: a steer's child that finds no free
+// lane slot runs in its parent's slot - the tree's calls interleave first-come through that slot.
+Deno.test({ name: "T8 full lane: two steers on a running job make their first model calls while the parent still runs; never past the lane", ...opts, fn: async () => {
+  await withStack(async (gw, svc) => {
+    gw.hold("HOLDP"); gw.hold("HOLDQ");
+    const a = await submit(svc.base, "HOLDP Which cover crops fix nitrogen for a vegetable plot?");
+    const b = await submit(svc.base, "HOLDQ How deep should raspberry canes be planted?");
+    await until("both roots running + held in a model call", async () =>
+      (await job(a)).status === "running" && (await job(b)).status === "running" && gw.blocked >= 2, 30_000, svc);
+    const [r1, r2] = await Promise.all([
+      steer(svc.base, a, { step_id: "s1", text: "compare clover with vetch" }),
+      steer(svc.base, a, { step_id: "s1", text: "does buckwheat fit a short season" }),
+    ]);
+    const o1 = await r1.json(), o2 = await r2.json();
+    assertEquals([r1.status, r2.status], [201, 201]);
+    // both children are running now (in the parent's slot), not queued behind the full lane
+    await until("both children running", async () =>
+      (await job(o1.child_job_id)).status === "running" && (await job(o2.child_job_id)).status === "running", 15_000, svc);
+    const t0 = Date.now();
+    gw.release("HOLDP"); // the parent's current model call returns; the tree's calls now interleave
+    await until("parent A closed", async () => ["done", "error"].includes((await job(a)).status), 60_000, svc);
+    const fin = (await sql<{ f: Date }>(`SELECT finished_at AS f FROM research_jobs WHERE id=$1`, [a]))[0].f.getTime();
+    const branchCalls = gw.seen.filter((x) => x.auth === BRANCH_KEY && x.at >= t0 - 60_000);
+    const firstOf = (q: string) => branchCalls.find((x) => x.text.includes(q))?.at ?? Infinity;
+    const c1 = firstOf("compare clover with vetch"), c2 = firstOf("does buckwheat fit a short season");
+    assert(c1 < fin, `child 1's first model call (${c1}) came before the parent finished (${fin})`);
+    assert(c2 < fin, `child 2's first model call (${c2}) came before the parent finished (${fin})`);
+    const parentAfter = gw.seen.filter((x) => x.auth === ROOT_KEY && x.text.includes("HOLDP") && x.at > Math.max(c1, c2));
+    assert(parentAfter.length >= 1, "the parent kept calling the model after both children had started: they ran WHILE it ran");
+    assert(gw.maxInFlight <= 2, `never more model calls in flight than the lane (max ${gw.maxInFlight})`);
+    gw.release("HOLDQ");
+    await until("children closed", async () => ["done", "error"].includes((await job(o1.child_job_id)).status) &&
+      ["done", "error"].includes((await job(o2.child_job_id)).status), 60_000, svc);
+    assert(gw.maxInFlight <= 2, `max in flight ${gw.maxInFlight}`);
+  });
+}});
+
+Deno.test({ name: "T9 a source event whose trail is an empty object is refused like a missing one", ...opts, fn: async () => {
+  const root = await rootRow("empty trail");
+  await assertRejects(() => sql(`INSERT INTO research_job_events (job_id, root_job_id, type, kind, trail) VALUES ($1, $1, 'source', 'due_process', '{}'::jsonb)`, [root]));
 }});

@@ -8,7 +8,7 @@ import { credibilityRows } from "./fixtures/credibility-seeds.ts";
 import { runResearch, type Deps, type QueryClient } from "./harness.ts";
 import { loadCredibilityModel, claimFloor, classifyClaimKind } from "./credibility.ts";
 import { ContractError, resolveContract } from "./contract.ts";
-import { Dispatcher, CLAIM_SQL } from "./jobs.ts";
+import { Dispatcher, CLAIM_SQL, type SlotGate } from "./jobs.ts";
 import { ModelHealth } from "./llm.ts";
 import {
   branchRank, buildTreeReport, entryWithin, interHubGaps, learningRecords, narrowContract, readLaneConcurrency,
@@ -34,7 +34,7 @@ Deno.test("P4a events: the migration refuses an unmarked event and a source even
   const sql = readOr(here("../../docker/init-research-trees.sql"));
   if (sql === null) return; // image build context: the docker/ dir is not there
   assert(/kind\s+TEXT NOT NULL CHECK \(kind IN \('steering', 'due_process'\)\)/.test(sql), "kind NOT NULL + CHECK");
-  assert(/type <> 'source' OR \(trail IS NOT NULL AND jsonb_typeof\(trail\) = 'object'\)/.test(sql), "source events need a trail (NULL included)");
+  assert(/type <> 'source' OR \(trail IS NOT NULL AND jsonb_typeof\(trail\) = 'object' AND trail <> '\{\}'::jsonb\)/.test(sql), "source events need a non-empty trail (NULL and {} refused)");
   assert(/type <> 'human_steer'[\s\S]*payload \? 'topic_estimate' AND payload \? 'anchor'/.test(sql), "human steer carries estimate + anchor");
 });
 
@@ -286,4 +286,49 @@ Deno.test("P4a ideas: no nightly drain - the refinery no longer researches owed 
   assert(/research_idea_queue\(/.test(ref), "`research now` goes through the database's coalescing path");
   const sql = readOr(here("../../docker/init-research-trees.sql"));
   if (sql !== null) assert(/BEFORE INSERT ON public\.idea_revisions/.test(sql), "a captured/changed idea engages at once (trigger)");
+});
+
+// ── Case 1 under a full lane (round 2): a steer's child runs in its parent's slot ──────────
+Deno.test("P4a lane full: a pending steer on a running job starts in its parent's slot - shared gate, no extra slot", async () => {
+  const started: Array<{ id: string; gate: SlotGate }> = [];
+  const roots = ["p", "q"];
+  let steers = ["s1", "s2"];
+  const d = new Dispatcher({
+    connect: () => Promise.resolve({
+      queryObject: <T>(sql: string, args?: unknown[]) => {
+        if (/branch_kind='steer' AND parent_job_id = ANY/.test(sql)) {
+          assert((args?.[0] as string[]).includes("p"), "only steers of jobs running here");
+          const id = steers.shift();
+          return Promise.resolve({ rows: (id ? [{ id, query: "q", thread_id: null, origin: "manual", options: {}, branch_kind: "steer", parent_job_id: "p" }] : []) as T[] });
+        }
+        if (/SET status='running'/.test(sql)) {
+          const id = roots.shift();
+          return Promise.resolve({ rows: (id ? [{ id, query: "q", thread_id: null, origin: "manual", options: {} }] : []) as T[] });
+        }
+        return Promise.resolve({ rows: [] as T[] });
+      },
+      release: () => {},
+    }),
+    execute: (job, _s, gate) => { started.push({ id: job.jobId, gate }); return new Promise(() => {}); },
+    health: new ModelHealth(), probe: () => Promise.resolve(true),
+    maxConcurrency: 2, probeIntervalMs: 0, log: () => {}, steersShareParentSlot: true,
+  });
+  await d.tick();
+  assertEquals(started.map((s) => s.id), ["p", "q", "s1", "s2"], "both steers start although the lane (2) is full");
+  assertEquals(d.inFlight, 2, "no extra lane slot is taken");
+  const gateOf = Object.fromEntries(started.map((s) => [s.id, s.gate]));
+  assert(gateOf.s1 === gateOf.p && gateOf.s2 === gateOf.p && gateOf.q !== gateOf.p, "the children share the parent's model gate");
+  steers = [];
+  // the shared gate serialises the slot's model calls first-come
+  const order: string[] = [];
+  let releaseFirst: () => void = () => {};
+  const g = gateOf.p;
+  const first = g.run(() => new Promise<void>((r) => { order.push("p1"); releaseFirst = r; }));
+  const child = g.run(() => { order.push("s1"); return Promise.resolve(); });
+  const second = g.run(() => { order.push("p2"); return Promise.resolve(); });
+  await Promise.resolve();
+  assertEquals(order, ["p1"], "one call at a time through a slot");
+  releaseFirst();
+  await Promise.all([first, child, second]);
+  assertEquals(order, ["p1", "s1", "p2"], "the child's first call comes before the parent's next one");
 });
