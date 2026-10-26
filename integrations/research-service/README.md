@@ -105,6 +105,24 @@ GET  /health                     -> { ok, db, model }   (`ok` is DB-only)
   `upstream_refused`, `queue_unreachable`, `gateway_unreachable`,
   `model_unreachable`), never gateway text.
 
+### Job trees (research-workbench P4a)
+
+- `POST /research/jobs/:id/steer` `{step_id, text, contract?, context_snapshot?}` -> 201: a child job
+  rooted at the named stage step (`s1`, `s2`, ... from the job's stage events), queued in the
+  research-branch lane while the parent keeps running (its status is untouched). The child's anchor
+  is the parent's `query`; its contract is the parent's narrowed by the request (a widening is 400).
+  The steer record keeps the tree's topic estimate and the anchor it was made against.
+- `GET /research/jobs/:id/tree` -> branches, steers, the cumulative report (headed by the topic
+  estimate, the prompt shown as origin) and one `exploratory` learning record per branch.
+- `GET /research/jobs/:id/events?after=<id>` -> the tree's typed events: `stage` (kind
+  `steering|due_process`, step id), `source` (with its admission `trail`), `gap` (D15: a recalled
+  claim below its kind's threshold), `interhub_gap` (D1: a thin link between claim-graph
+  neighbourhoods), `human_steer`, `branch_open|close`, `topic`.
+- Order of claims: a human steer's branch, then main lines, then gap work (D3). Concurrency is
+  llm-queue's research-branch lane read back from `/observe/queue/estimate` (no
+  `RESEARCH_MAX_CONCURRENCY`). Branch jobs use `RESEARCH_BRANCH_LLM_KEY` (operator-provisioned
+  LiteLLM virtual key, `metadata.lane=research-branch`). Lab test: `run-trees-e2e.ps1`.
+
 ## Inlets
 
 - **OWUI** → [`smolcrawl/deep_research_thin_client.py`](../../../smolcrawl/deep_research_thin_client.py) (P5). Replaces the heavy in-tool harness once this service is deployed + reachable from OWUI.

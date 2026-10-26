@@ -22,11 +22,18 @@
  * progress.code and the `model_down:` / `cancelled:` prefix of `error`.
  */
 import type { ModelHealth } from "./llm.ts";
+import { BRANCH_RANK_SQL } from "./tree.ts";
 
 export type ClaimedJob = {
   jobId: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown>;
   /** research-workbench P0 column; P3a's fold runs on a job that carries one. */
   refinery_id?: string | null;
+  /** research-workbench P4a: the tree. A root has none of parent / root / step. */
+  branch_kind?: string;
+  parent_job_id?: string | null;
+  root_job_id?: string | null;
+  rooted_step_id?: string | null;
+  anchor?: string | null;
 };
 
 /** The minimal pg client surface used here (deno-postgres PoolClient fits). */
@@ -74,11 +81,14 @@ export function deadlineMs(options: Record<string, unknown> | null | undefined):
 
 // ── SQL (the real statements; exercised against Postgres in failfast.e2e) ──
 
+// research-workbench P4a (D3): a human steer's branch is claimed first, then main lines, then
+// system gap work - FIFO within a rank (tree.ts BRANCH_RANK_SQL).
 export const CLAIM_SQL =
   `UPDATE research_jobs SET status='running', started_at=now()
    WHERE id = (SELECT id FROM research_jobs WHERE status='queued' AND NOT ${EXPIRED_SQL}
-               ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-   RETURNING id, query, thread_id, origin, options, refinery_id`;
+               ORDER BY ${BRANCH_RANK_SQL}, created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+   RETURNING id, query, thread_id, origin, options, refinery_id,
+             branch_kind, parent_job_id, root_job_id, rooted_step_id, anchor`;
 
 /** Cancel every QUEUED job whose caller deadline has passed. A job that was
  *  paused for model_down says so in its reason - the caller can tell "the model
@@ -94,10 +104,17 @@ export const CANCEL_EXPIRED_SQL =
    RETURNING id, options`;
 
 export async function claimNext(c: SqlClient): Promise<ClaimedJob | null> {
-  const r = await c.queryObject<{ id: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown>; refinery_id?: string | null }>(CLAIM_SQL);
+  const r = await c.queryObject<{
+    id: string; query: string; thread_id: string | null; origin: string; options: Record<string, unknown>; refinery_id?: string | null;
+    branch_kind?: string; parent_job_id?: string | null; root_job_id?: string | null; rooted_step_id?: string | null; anchor?: string | null;
+  }>(CLAIM_SQL);
   if (!r.rows.length) return null;
   const row = r.rows[0];
-  return { jobId: row.id, query: row.query, thread_id: row.thread_id, origin: row.origin, options: row.options ?? {}, refinery_id: row.refinery_id ?? null };
+  return {
+    jobId: row.id, query: row.query, thread_id: row.thread_id, origin: row.origin, options: row.options ?? {}, refinery_id: row.refinery_id ?? null,
+    branch_kind: row.branch_kind ?? "root", parent_job_id: row.parent_job_id ?? null, root_job_id: row.root_job_id ?? null,
+    rooted_step_id: row.rooted_step_id ?? null, anchor: row.anchor ?? null,
+  };
 }
 
 export async function cancelExpired(c: SqlClient): Promise<Array<{ id: string; options: Record<string, unknown> }>> {
@@ -187,7 +204,9 @@ export interface DispatcherOpts {
   execute(job: ClaimedJob, signal: AbortSignal): Promise<void>;
   health: ModelHealth;
   probe(): Promise<boolean>;
-  maxConcurrency: number;
+  /** A number, or (P4a, D16) a getter read on every tick: the research-branch lane's derived
+   *  concurrency, which moves when llm-queue reloads with another LLM_QUEUE_SLOTS. */
+  maxConcurrency: number | (() => number);
   probeIntervalMs: number;
   onExpired?(rows: Array<{ id: string; options: Record<string, unknown> }>): void;
   now?: () => number;
@@ -216,6 +235,12 @@ export class Dispatcher {
   }
 
   get inFlight(): number { return this.running.size; }
+
+  /** The current cap (re-read every tick). */
+  get maxConcurrency(): number {
+    const m = this.o.maxConcurrency;
+    return Math.max(1, typeof m === "function" ? m() : m);
+  }
 
   wake(): void { this.#wake?.(); }
 
@@ -255,7 +280,7 @@ export class Dispatcher {
     }
 
     // 3. Fill free slots.
-    while (this.running.size < this.o.maxConcurrency && !this.o.health.isDown) {
+    while (this.running.size < this.maxConcurrency && !this.o.health.isDown) {
       let job: ClaimedJob | null = null;
       try {
         const c = await this.o.connect();

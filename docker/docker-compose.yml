@@ -161,6 +161,11 @@ services:
       # identifier kinds) and the resolution cache on the reference record. Fresh-volume only; the
       # live DB gets it by hand (psql -f). Revert: revert-export.sql (before P2a's revert).
       - ./init-export.sql:/docker-entrypoint-initdb.d/250-init-export.sql:ro # research-workbench P6a
+      # research-workbench P4a (rw-p4a-trees): job trees (parent/root/rooted step/anchor/topic estimate/
+      # tree report on research_jobs), steer records, the typed event stream, on-demand idea engagement
+      # (a trigger on idea_revisions). Fresh-volume only; the live DB gets it by hand (psql -f).
+      # Revert: revert-research-trees.sql.
+      - ./init-research-trees.sql:/docker-entrypoint-initdb.d/260-init-research-trees.sql:ro # research-workbench P4a
     networks:
       - obnet
     restart: unless-stopped
@@ -1019,11 +1024,14 @@ services:
       CHAT_API_KEY: ${OB_RESEARCH_LLM_KEY:-not-needed}
       CHAT_MODEL: ${RESEARCH_CHAT_MODEL:-local-large}
       NOTHINK_SUFFIX: ":nothink"
-      # Concurrency: how many research jobs run at once across the stack. Default
-      # 1 = strict global serialization so a burst of research can't flood LiteLLM
-      # / the llm-queue admission controller; jobs queue FIFO and a drain loop
-      # dispatches them. Raise only if the inference plane can absorb concurrent fan-out.
-      RESEARCH_MAX_CONCURRENCY: ${RESEARCH_MAX_CONCURRENCY:-1}
+      # Concurrency (research-workbench P4a, D16): NOT set here any more. How many research jobs
+      # run at once is llm-queue's research-branch lane - a share of LLM_QUEUE_SLOTS, floor 2 -
+      # read back through the gateway's GET-only /observe/queue/estimate every minute. One number
+      # describes the plane; RESEARCH_MAX_CONCURRENCY, if still set, is ignored with a warning.
+      # Branch jobs (steers, gap work, idea research) call the model under their OWN LiteLLM
+      # virtual key (metadata.lane=research-branch), operator-provisioned; unset = they fall back
+      # to OB_RESEARCH_LLM_KEY's lane with a warning at boot.
+      RESEARCH_BRANCH_LLM_KEY: ${OB_RESEARCH_BRANCH_LLM_KEY:-}
       # Harness tuning (override via .env). See PLAN §5/§6 + OD-5/OD-6.
       SEARCH_K: ${RESEARCH_SEARCH_K:-8}
       CLAIM_SHORTLIST_K: ${RESEARCH_CLAIM_SHORTLIST_K:-12}

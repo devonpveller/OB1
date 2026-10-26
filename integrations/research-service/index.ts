@@ -34,6 +34,10 @@ import { type Caller, callerFor, inletRef, MismatchLog, parseCallers, resolveOri
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
+import {
+  appendEvent, buildTreeReport, closeBranch, createSteer, interHubEvent, interHubGaps, interHubRef, LANE_FLOOR, LANE_KINDS,
+  learningRecords, loadClaimGraph, loadTree, openGapBranches, readLaneConcurrency, stageEvent, SteerError, treeEstimate,
+} from "./tree.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const DB_HOST = env("DB_HOST", "openbrain-db");
@@ -156,13 +160,20 @@ const CURATOR_RETRIES = curatorRetriesFromEnv(Deno.env.get("CURATOR_RETRIES"));
 // harness slice (SOURCE_SLICE_CHARS) moved with it.
 const FETCH_MAX_CHARS = parseInt(env("FETCH_MAX_CHARS", "16000"), 10);
 const PORT = parseInt(env("PORT", "8000"), 10);
-// How many research jobs may run at once across the whole stack. Default 1 =
-// strict global serialization: at most one job's ~12-15 LLM calls are ever in
-// flight, so a burst of research requests can't flood LiteLLM / the llm-queue
-// admission controller and delay all chat traffic. Raise only if the inference
-// plane can absorb concurrent research fan-out. Jobs queue (FIFO by created_at)
-// and the background Dispatcher (jobs.ts) dispatches them; see below.
-const MAX_CONCURRENCY = Math.max(1, parseInt(env("RESEARCH_MAX_CONCURRENCY", "1"), 10) || 1);
+// How many research jobs may run at once across the whole stack.
+//
+// research-workbench P4a (D16): there is no hand-set cap any more. The dispatcher's concurrency IS
+// llm-queue's research-branch lane - a share of LLM_QUEUE_SLOTS, floor 2 - read back through the
+// gateway's GET-only /observe/queue/estimate pass-through at boot and every RESEARCH_LANE_REFRESH_MS,
+// so a reloaded queue moves it with no other change. Unreadable = the floor (2) with a warning.
+if (Deno.env.get("RESEARCH_MAX_CONCURRENCY") !== undefined) {
+  console.warn("[lane] WARNING RESEARCH_MAX_CONCURRENCY is set and IGNORED: research concurrency is derived from llm-queue's research-branch lane (LLM_QUEUE_SLOTS x share, floor 2)");
+}
+const LANE_URL = env("RESEARCH_LANE_URL", `${CHAT_API_BASE.replace(/\/v1$/, "")}/observe/queue/estimate`);
+const LANE_REFRESH_MS = parseInt(env("RESEARCH_LANE_REFRESH_MS", "60000"), 10);
+let laneConcurrency = LANE_FLOOR;
+/** Gap branches (D15 per-claim + D1 inter-hub) a tree may open from inside its runs. */
+const MAX_GAP_BRANCHES = Math.max(0, parseInt(env("RESEARCH_TREE_MAX_GAP_BRANCHES", "3"), 10) || 0);
 
 // Privacy: page fetches egress through the configured proxy (compose points
 // this at the Mullvad VPN, http://vpn:8888; DNS follows the proxy scheme).
@@ -339,6 +350,30 @@ const llm = createChat({
 });
 function chat(system: string, user: string, opts: ChatOpts = {}, queueUser = ""): Promise<string> {
   return llm.chat(system, user, opts, queueUser);
+}
+// P4a (D16): tree branches (steers, gap work, idea research) call the model under their OWN LiteLLM
+// virtual key, whose metadata.lane=research-branch attributes them to llm-queue's research-branch
+// lane. Operator-provisioned (OB_RESEARCH_BRANCH_LLM_KEY); unset = the research key, with a warning
+// (the calls then carry `user: research-branch`, which the queue reads as a fallback).
+const BRANCH_CHAT_API_KEY = env("RESEARCH_BRANCH_LLM_KEY", "");
+if (!BRANCH_CHAT_API_KEY) console.warn("[lane] WARNING RESEARCH_BRANCH_LLM_KEY is not set: branch jobs use the research key (provision a LiteLLM virtual key with metadata.lane=research-branch)");
+const BRANCH_QUEUE_USER = "research-branch";
+const branchLlm = createChat({
+  base: CHAT_API_BASE, apiKey: BRANCH_CHAT_API_KEY || CHAT_API_KEY, model: CHAT_MODEL, nothinkSuffix: NOTHINK_SUFFIX,
+  retryBudgetMs: CHAT_RETRY_BUDGET_MS, downBudgetMs: CHAT_DOWN_BUDGET_MS,
+  fetchTimeoutMs: CHAT_FETCH_TIMEOUT_MS, probeTimeoutMs: MODEL_PROBE_TIMEOUT_MS,
+  health: modelHealth,
+});
+function branchChat(system: string, user: string, opts: ChatOpts = {}): Promise<string> {
+  return branchLlm.chat(system, user, opts, BRANCH_QUEUE_USER);
+}
+async function refreshLane(): Promise<void> {
+  const n = await readLaneConcurrency(LANE_URL, BRANCH_CHAT_API_KEY || CHAT_API_KEY, (l) => console.warn(l));
+  if (n !== laneConcurrency) {
+    console.log(`[lane] research-branch lane concurrency ${laneConcurrency} -> ${n}`);
+    laneConcurrency = n;
+    dispatcher.wake();
+  }
 }
 
 async function searchWeb(query: string, k: number): Promise<SearchHit[]> {
@@ -712,6 +747,11 @@ function jobSeams(base: Deps, signal: AbortSignal, state: SeamState, jobId: stri
 // persists the terminal (or paused) state — it never re-claims.
 async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
   const { jobId, query, thread_id, origin, options, refinery_id } = job;
+  // P4a: the job's place in its tree. A root (or an idea's research) is its own tree's root.
+  const rootId = job.root_job_id ?? jobId;
+  const branchKind = job.branch_kind ?? "root";
+  const inLane = LANE_KINDS.has(branchKind) || options?.lane === "research-branch";
+  const stepOf = new Map<string, string>();
   const seamState: SeamState = { modelDown: null, filing: false };
   // Conservative: measured from CLAIM, not submit, so a job that queued first
   // only ever waits longer than it needs to. See CALLBACK_MIN_AGE_MS.
@@ -722,6 +762,10 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
       `UPDATE research_jobs SET status='running', progress=$2::jsonb WHERE id=$1`,
       [jobId, JSON.stringify({ phase, message, counters })],
     ).catch(() => {});
+    // P4a: every stage is an event with its steering|due_process marker and a step id a steer names.
+    const ev = await appendEvent(client, jobId, rootId, stageEvent(phase, message, counters))
+      .catch((e) => { console.error(`[job ${jobId}] stage event not recorded: ${(e as Error).message}`); return null; });
+    if (ev?.step_id) stepOf.set(phase, ev.step_id);
     // The ONE progress event that reaches the person rather than the job row.
     // The gap-closing pass can add minutes to a run that already looked finished
     // from the chat's side, so the run says what it is doing and what it has so
@@ -745,12 +789,24 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     // own tuning). All origins still get chat()'s 429 backpressure retry.
     // queue_origin is engine-owned (set at submit from the caller's key; origin.ts).
     const queueUser = QUEUE_USER_BY_ORIGIN[String(options?.queue_origin ?? origin)] ?? "";
-    const baseDeps: Deps = jobSeams(queueUser
+    // P4a (D16): a tree branch runs in the research-branch lane, under the branch key.
+    const baseDeps: Deps = jobSeams(inLane
+      ? { ...realDeps, chat: (s, u, o) => branchChat(s, u, o) }
+      : queueUser
       ? { ...realDeps, chat: (s, u, o) => chat(s, u, o, queueUser) }
       : realDeps, signal, seamState, jobId);
+    // P4a: a branch researches its steer IN the tree - it sees the anchor (its parent's query) and
+    // the tree's current topic estimate.
+    let runQuery = query;
+    if (job.parent_job_id) {
+      const { estimate } = await treeEstimate(client, rootId).catch(() => ({ estimate: "", origin: "" }));
+      const ctx = [job.anchor ? `origin question: ${job.anchor}` : "", estimate && estimate !== job.anchor ? `current topic: ${estimate}` : ""]
+        .filter(Boolean).join("; ");
+      if (ctx) runQuery = `${query} (${ctx})`;
+    }
     // Contract enforcement (search hits, fetches, final urls, seeds, KB recall,
     // reused claims) lives in runResearch (harness.ts withContract) - one point.
-    const res = await runResearch(baseDeps, client, query, {
+    const res = await runResearch(baseDeps, client, runQuery, {
       threadId: thread_id, origin,
       confidenceFloor: typeof options?.confidence_floor === "number" ? options.confidence_floor : undefined,
       seedSources,
@@ -761,6 +817,10 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
       dryRun: options?.dry_run === true,
       contract: contract ?? undefined,
       jobId, refineryId: refinery_id ?? null,
+      onEvent: async (ev) => {
+        await appendEvent(client, jobId, rootId, ev)
+          .catch((e) => console.error(`[job ${jobId}] ${ev.type} event not recorded: ${(e as Error).message}`));
+      },
     }, progress);
     // The harness swallows some step failures (fail-open classifiers,
     // prose render). If the job was cancelled or the model went down under it,
@@ -838,6 +898,12 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
       message: `outcome=${res.outcome} backstop=${res.backstop} curator=${outcome.state}`,
     });
     if (outcome.error) console.error(`[job ${jobId}] ${outcome.error}`);
+    // P4a: gap work opens branches from inside the run (D15 per claim, D1 between hubs), queued
+    // BELOW any pending human steer. Never from a gap branch; capped and deduplicated per tree.
+    if (MAX_GAP_BRANCHES > 0 && !signal.aborted) {
+      await openTreeGaps(client, jobId, rootId, res, stepOf).catch((e) =>
+        console.error(`[job ${jobId}] gap branches not opened: ${(e as Error).message}`));
+    }
 
     // `result` is written in FULL on both paths, including the failure one: the
     // report is real, only its filing failed, and the OWUI tool renders it from
@@ -911,24 +977,67 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal): Promise<void> {
     ).catch(() => {});
   } finally {
     filingJobs.delete(jobId);
+    // P4a: a closed branch (or a root with branches) re-estimates the tree's topic and rebuilds the
+    // cumulative report. A requeued (paused) job is not closed.
+    await finishTree(client, jobId, rootId, branchKind).catch((e) =>
+      console.error(`[job ${jobId}] tree close failed: ${(e as Error).message}`));
     client.release();
   }
 }
 
-// ── Dispatcher: serialize queued jobs, bounded by MAX_CONCURRENCY ───────────
+/** Gap branches for one finished run: per-claim gaps (the harness's gap work) and inter-hub gaps. */
+async function openTreeGaps(
+  c: Awaited<ReturnType<typeof pool.connect>>, jobId: string, rootId: string,
+  res: Awaited<ReturnType<typeof runResearch>>, stepOf: Map<string, string>,
+): Promise<void> {
+  const gaps: Parameters<typeof openGapBranches>[3] = [];
+  const reuseStep = stepOf.get("reuse") ?? [...stepOf.values()].pop();
+  if (!reuseStep) return;
+  for (const g of res.gapWork ?? []) {
+    gaps.push({ kind: "gap", text: g.text, query: `Verify: ${g.text}`, ref: `claim:${g.claim_id}`, gap: { ...g } });
+  }
+  const graph = await loadClaimGraph(c, res.reuseClaims.map((r) => r.id), res.citedSources.map((s) => s.url ?? "").filter(Boolean));
+  const lastStep = [...stepOf.values()].pop() ?? reuseStep;
+  for (const h of interHubGaps(graph.nodes, graph.edges)) {
+    await appendEvent(c, jobId, rootId, interHubEvent(h));
+    gaps.push({
+      kind: "interhub", text: `${h.a.sample} <-> ${h.b.sample}`,
+      query: `How does "${h.a.sample}" relate to "${h.b.sample}"?`, ref: interHubRef(h),
+      gap: { a: h.a, b: h.b, density: h.density, links: h.links },
+    });
+  }
+  if (!gaps.length) return;
+  const opened = [];
+  for (const g of gaps) {
+    opened.push(...await openGapBranches(c, jobId, g.kind === "gap" ? reuseStep : lastStep, [g], MAX_GAP_BRANCHES, resolveContract));
+  }
+  if (opened.length) { console.log(`[job ${jobId}] opened ${opened.length} gap branch(es)`); wake(); }
+}
+
+async function finishTree(c: Awaited<ReturnType<typeof pool.connect>>, jobId: string, rootId: string, branchKind: string): Promise<void> {
+  const r = await c.queryObject<{ status: string; branches: number }>(
+    `SELECT status, (SELECT count(*)::int FROM research_jobs WHERE root_job_id = $2::uuid) AS branches
+       FROM research_jobs WHERE id = $1::uuid`, [jobId, rootId]);
+  const row = r.rows[0];
+  if (!row || !["done", "error", "cancelled"].includes(row.status)) return;
+  if (branchKind === "root" || branchKind === "idea") { if (!row.branches) return; }
+  await closeBranch(c, jobId, (s, u) => branchChat(s, u, { json: true, nothink: true }));
+}
+
+// ── Dispatcher: queued jobs, bounded by the research-branch lane (P4a, D16) ──
 // POST /research only enqueues (status='queued'); the Dispatcher (jobs.ts) is the
 // sole dispatcher. Each tick it cancels queued jobs past their caller deadline,
 // claims nothing while the model is down (one bounded probe per interval
-// instead), and otherwise claims the oldest queued job FIFO with FOR UPDATE SKIP
-// LOCKED. With the default MAX_CONCURRENCY=1 this is strict global serialization
-// — exactly one research fan-out hits the inference plane at a time. wake()
-// nudges it the instant a job arrives or finishes; a 2s safety poll backstops.
+// instead), and otherwise claims a queued job with FOR UPDATE SKIP LOCKED - a
+// human steer's branch first, then main lines, then gap work, FIFO within each
+// (D3). The cap is laneConcurrency, re-read every tick. wake() nudges it the
+// instant a job arrives or finishes; a 2s safety poll backstops.
 const dispatcher = new Dispatcher({
   connect: () => pool.connect(),
   execute: executeJob,
   health: modelHealth,
   probe: () => llm.probe(RESEARCH_QUEUE_USER),
-  maxConcurrency: MAX_CONCURRENCY,
+  maxConcurrency: () => laneConcurrency,
   probeIntervalMs: MODEL_PROBE_INTERVAL_MS,
   onExpired: (rows) => {
     for (const r of rows) {
@@ -1219,6 +1328,54 @@ Deno.serve({ port: PORT }, async (req) => {
     } finally { c.release(); }
   }
 
+  // P4a: steer a job - a child branch rooted at the named step, while the job keeps running.
+  const steerMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})\/steer$/i);
+  if (req.method === "POST" && steerMatch) {
+    const caller = callerOf(req, url);
+    if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
+    let b: { step_id?: unknown; text?: unknown; contract?: unknown; context_snapshot?: unknown };
+    try { b = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    const c = await pool.connect();
+    try {
+      const opened = await createSteer(c, {
+        parentId: steerMatch[1], stepId: String(b.step_id ?? ""), text: String(b.text ?? ""), contract: b.contract,
+        caller: caller.name, contextSnapshot: b.context_snapshot,
+      }, resolveContract);
+      console.log(`[job ${steerMatch[1]}] steered at ${opened.step_id} -> branch ${opened.child_job_id}`);
+      wake();
+      return Response.json(opened, { status: 201 });
+    } catch (e) {
+      if (e instanceof SteerError) return Response.json({ error: e.code, detail: e.message }, { status: e.status });
+      return Response.json({ error: "steer_failed", detail: (e as Error).message }, { status: 500 });
+    } finally { c.release(); }
+  }
+
+  // P4a: the session record as a tree - branches, steers (where the operator steered, with what
+  // they were made against), the cumulative report and one exploratory learning record per branch.
+  const treeMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})\/(tree|events)$/i);
+  if (req.method === "GET" && treeMatch) {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const c = await pool.connect();
+    try {
+      if (treeMatch[2] === "events") {
+        const after = parseInt(url.searchParams.get("after") ?? "0", 10) || 0;
+        const r = await c.queryObject(
+          `SELECT id::text, job_id::text, root_job_id::text, step_id, type, kind, trail, payload, created_at
+             FROM research_job_events
+            WHERE root_job_id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid) AND id > $2
+            ORDER BY id LIMIT 1000`, [treeMatch[1], after]);
+        return Response.json({ events: r.rows });
+      }
+      const t = await loadTree(c, treeMatch[1]);
+      if (!t) return Response.json({ error: "not found" }, { status: 404 });
+      return Response.json({
+        root_job_id: t.root.id, topic_estimate: t.estimate, origin: t.root.query,
+        branches: t.nodes.map((n) => ({ id: n.id, parent_job_id: n.parent_job_id, branch_kind: n.branch_kind, rooted_step_id: n.rooted_step_id, anchor: n.anchor, query: n.query, status: n.status })),
+        steers: t.steers, report: buildTreeReport(t), learning_records: learningRecords(t),
+      });
+    } finally { c.release(); }
+  }
+
   const jobMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})(\/stream)?$/i);
   if (req.method === "GET" && jobMatch) {
     if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -1284,8 +1441,11 @@ Deno.serve({ port: PORT }, async (req) => {
   return new Response("not found", { status: 404 });
 });
 
-console.log(`openbrain-research listening on :${PORT} (curator=${CURATOR_URL}, search=${SEARCH_API_BASE}, max_concurrency=${MAX_CONCURRENCY})`);
+console.log(`openbrain-research listening on :${PORT} (curator=${CURATOR_URL}, search=${SEARCH_API_BASE}, lane=${LANE_URL})`);
 
 // Requeue any jobs orphaned by a restart, then start the single background
 // dispatcher. This is the ONLY thing that runs queued jobs.
-void recoverOrphanedJobs().then(() => { void dispatcher.run(); });
+void refreshLane().finally(() => {
+  setInterval(() => { void refreshLane(); }, Math.max(1000, LANE_REFRESH_MS));
+  void recoverOrphanedJobs().then(() => { void dispatcher.run(); });
+});

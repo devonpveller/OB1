@@ -23,6 +23,7 @@ import {
 } from "./credibility.ts";
 import { assess, type AdmissionContext, type Assessment, finalScore, subjectTokens, type TrailEntry, trailEntry } from "./admission.ts";
 import { linkedDois, type ScholarlyResolver } from "./scholarly.ts";
+import { gapEvent, type GapClaim, sourceEvent, splitAtThreshold, type TreeEvent } from "./tree.ts";
 import {
   cachedScholarly, foldHeld, loadHeldSources, loadRefineryContext, recordAdmissionTrail, recordCorroboration,
   stampSourceCredibility, TombstonedError,
@@ -461,6 +462,9 @@ export interface RunOptions {
   jobId?: string | null;
   /** P3a - a refinery session: its held sources are scored by the fold (ingestion model item 2). */
   refineryId?: string | null;
+  /** P4a - the typed event stream: per-source events (with the trail) and gap events (D15). A
+   *  failing sink never fails the run. */
+  onEvent?: (ev: TreeEvent) => Promise<void>;
 }
 export interface RunMetrics extends ReturnType<typeof reuseMetric> {
   /** P3a - the entailment stage's counts (D10). */
@@ -537,6 +541,10 @@ export interface RunResult {
   lineCredibility: ScoredClaim[];
   /** P3a - the fold, on a refinery session. */
   fold: FoldRecord | null;
+  /** P4a (D15) - recalled claims held below their kind's confidence threshold: the run's gap work
+   *  (each was a `gap` event; the service opens a gap branch per claim). Above-threshold claims are
+   *  never here. */
+  gapWork?: GapClaim[];
   /** kp-contract — what the job's contract dropped, per stage (absent without a contract). */
   contractDrops?: ContractDrops;
 }
@@ -599,6 +607,9 @@ export async function runResearch(
   const trail: TrailEntry[] = [];
   /** url of a source reached through a lead -> the lead's trail entry id. */
   const viaLead = new Map<string, string>();
+  // P4a: the event sink. A sink failure is logged by the caller's sink, never fails the run.
+  const emit = async (ev: TreeEvent) => { if (opts.onEvent) await opts.onEvent(ev).catch(() => {}); };
+  let gapWork: GapClaim[] = [];
   const admissionStats = { judged: 0, admitted: 0, leads: 0, lead_paths: 0, held_folded: 0, held_kept: 0 };
   let leadsFollowed = 0;
   /** Judge one hit before fetch (or a page, with its content). Records the trail entry. */
@@ -607,7 +618,9 @@ export async function runResearch(
     assessed.set(hit.url, a);
     admissionStats.judged++;
     if (a.admitted) admissionStats.admitted++; else admissionStats.leads++;
-    trail.push(trailEntry(a, a.admitted ? "admitted" : "lead", admissionCtx, { found_via: via }));
+    const entry = trailEntry(a, a.admitted ? "admitted" : "lead", admissionCtx, { found_via: via });
+    trail.push(entry);
+    await emit(sourceEvent(entry));
     return a;
   };
 
@@ -652,7 +665,14 @@ export async function runResearch(
   const relevant = sourcesOnly
     ? []
     : await retrieveRelevantClaims(client, queryEmb, threadId, CLAIM_SHORTLIST_K, REUSE_MAX_DISTANCE);
-  let reuseClaims = relevant.filter((c) => decideReuse(c, floor, now) === "reuse");
+  // P4a (D15, extending the reuse-gate floor into the run): a recalled claim held below its
+  // kind's confidence threshold is gap work - a `gap` event naming it and its score, never reused
+  // as-is; a claim at or above the threshold is left alone (no event, no gap branch).
+  const thresholdSplit = splitAtThreshold(model, relevant);
+  gapWork = thresholdSplit.below;
+  for (const g of gapWork) await emit(gapEvent(g));
+  const belowIds = new Set(gapWork.map((g) => g.claim_id));
+  let reuseClaims = relevant.filter((c) => !belowIds.has(c.id) && decideReuse(c, floor, now) === "reuse");
   // kp-contract (PLAN-v2 EXTEND a; audit B11) — a reused claim is only as
   // in-scope as the source it was grounded on. With a source-scoping contract,
   // resolve each claim's grounding source NOW, before the claim text reaches the
@@ -1424,7 +1444,7 @@ export async function runResearch(
         ...reuseMetric(0, 0, needsStatus.length),
         admission: { claim_kind: claimKind.kind, kind_basis: claimKind.basis, ...admissionStats },
       },
-      entailment: null, verdicts: [], admissionTrail: trail, lineCredibility: [], fold: null,
+      entailment: null, verdicts: [], admissionTrail: trail, lineCredibility: [], fold: null, gapWork,
       // The curator is not called; this is the CuratorOutcome path that keeps
       // research_jobs truthful about it (lib.ts classifyCuratorOutcome).
       curator: { state: "skipped", reason: backstop },
@@ -1863,10 +1883,12 @@ export async function runResearch(
         }
       }
       if (row.outcome === "held_folded") { foldedIdx.add(i); admissionStats.held_folded++; } else admissionStats.held_kept++;
-      trail.push({
+      const foldEntry = {
         ...trailEntry(a, row.outcome, admissionCtx),
         source_url: row.outcome === "held_folded" ? pool[i].url : null, reasons: [...a.reasons, row.reason],
-      });
+      };
+      trail.push(foldEntry);
+      await emit(sourceEvent(foldEntry));
       fold.held.push(row);
     }
     // Fold-time corroboration, both ways, with the sources a folded one was co-supported with.
@@ -2208,7 +2230,7 @@ export async function runResearch(
       errorKinds,
       search: searchStats,
     },
-    entailment: entailRec, verdicts, admissionTrail: trail, lineCredibility: lineCred, fold,
+    entailment: entailRec, verdicts, admissionTrail: trail, lineCredibility: lineCred, fold, gapWork,
     ...dropsField(),
   };
 }

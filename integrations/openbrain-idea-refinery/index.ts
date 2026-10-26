@@ -1,23 +1,21 @@
 /**
  * openbrain-idea-refinery — the Idea Refinery drain + delivery (IR.1 + IR.2).
  *
- * A cron-triggered nightly batch (NOT an always-on loop) that walks the owed-
- * research queue, researches each owed idea via the existing research service
- * (gently), and delivers the gap-centered dossier to the idea's Mattermost
- * thread. Deliberately thin: the real GPU governance is the research service's
- * FIFO drain + the llm-queue budget; this only bounds how many idea jobs it puts
- * in flight at once (submit-on-complete) and rolls the rest over.
+ * research-workbench P4a (D17 amended 2026-09-25 20:27): idea engagement is ON DEMAND. An idea
+ * captured or changed queues its research at once - the database does it (trigger
+ * trg_idea_revisions_engage -> research_idea_queue(), init-research-trees.sql) in the research
+ * service's research-branch lane, coalescing so a change during a run queues exactly one follow-up
+ * run. The nightly drain is gone; this service DELIVERS: a short delivery loop posts each finished
+ * dossier to the idea's Mattermost thread, and POST /run stays as the explicit `research now`.
  *
- *   POST /run[?wait=1]  -> start the drain (202 {started}); wait=1 awaits + returns the summary
+ *   POST /run[?wait=1]  -> `research now` for flagged ideas + one delivery pass; wait=1 returns the summary
  *   GET  /health        -> {ok, db}
  *
- * Two passes per run:
- *   1. deliver-pending — ideas researched in a prior run whose Mattermost post
- *      failed/crashed (status 'queued', a job id present): refetch the job +
- *      deliver, so a flaky post never loses the research (P25 durability).
- *   2. research-owed   — the owed set (priority research_now -> fresh -> oldest,
- *      attempts-capped): submit -> poll -> deliver. Coalescing is structural
- *      (only the current revision is researched).
+ * Each pass:
+ *   1. research-now - ideas flagged metadata.research_now are queued through the same
+ *      research_idea_queue() (coalescing: never a second queued run).
+ *   2. deliver      - every idea whose current job (ideas.last_job_id) finished and has not been
+ *      delivered: refetch the job + deliver (P25 durability: a flaky post is retried next pass).
  *
  * Design: documentation/implementation-guide/idea-refinery/DESIGN-idea-refinery.md
  *   §3 (research frame), §3.1 (dossier), §6/§6.2 (batch + throttle), §7 (delivery).
@@ -58,7 +56,6 @@ const MM_MAX_CHARS = num("IDEA_MM_MAX_CHARS", 12000);
 // finish, deliver, submit the next — so we never stampede the shared research
 // queue, and whatever doesn't fit the window rolls over to the next cycle.
 const RUN_MAX = num("IDEA_RUN_MAX", 25);
-const RUN_BUDGET_MS = num("IDEA_RUN_BUDGET_MS", 4 * 60 * 60 * 1000);
 const POLL_MS = num("IDEA_POLL_MS", 5000);
 const JOB_TIMEOUT_MS = num("IDEA_JOB_TIMEOUT_MS", 2 * 60 * 60 * 1000);
 const MAX_ATTEMPTS = num("IDEA_MAX_ATTEMPTS", 3);
@@ -91,58 +88,27 @@ type OwedIdea = {
 
 type JobResult = { synthesis?: string; cited_sources?: unknown[]; thread_id?: string | null; [k: string]: unknown };
 
-// ── the research frame (§3): gather evidence, do NOT judge worth ────────────────
-function ideaQuery(idea: OwedIdea): string {
-  return [
-    `Gather evidence to help the user decide whether to build this idea for the ${idea.domain}. ` +
-    `Do NOT judge whether it is worth building — present the evidence and the gaps only; the value ` +
-    `decision is the user's.`,
-    `Idea: "${idea.title}" — ${idea.summary}`,
-    `Find and cite: (1) existing products or tools in industry that already do this or something ` +
-    `adjacent, and for each, its value proposition (the problem it claims to solve and how it ` +
-    `positions itself); (2) what prior research already established about this feature, directly or ` +
-    `adjacently. Surface where this idea differs from what already exists (gaps in the landscape) as ` +
-    `open questions.`,
-  ].join("\n\n");
-}
-
-// IR.3 — a dirty re-research is seeded with the prior dossier so the model builds on
-// what was already found (continuation), focusing on what changed. First research of
-// an idea (no prior thread/job) uses the base query unchanged.
-async function ideaQuerySeeded(idea: OwedIdea): Promise<string> {
-  const base = ideaQuery(idea);
-  if (!idea.thread_root || !idea.last_job_id) return base;
-  try {
-    const jr = await jobResult(idea.last_job_id);
-    const prior = jr.status === "done" ? String(jr.result?.synthesis ?? "").trim().slice(0, 2000) : "";
-    if (prior) {
-      return `${base}\n\nThe user previously explored this idea; prior research found:\n${prior}\n\n` +
-        `The idea has since been updated (see it above). Build on the prior findings — focus on what ` +
-        `is new or changed, and note anything the prior research missed.`;
-    }
-  } catch { /* prior unavailable → fall back to the base query */ }
-  return base;
-}
+// The research frame (§3) moved to the database with on-demand engagement (P4a):
+// research_idea_queue() in init-research-trees.sql builds the query, IR.3 continuation included.
 
 const OWED_COLS =
   `i.id, i.title, i.summary, i.current_revision, i.domain, i.thread_root, i.last_job_id,
    (i.metadata->>'research_now' = 'true') AS priority`;
 
-// ── the owed-research queue read (§6.2): priority, then fresh, then oldest ───────
-async function selectOwed(limit: number): Promise<OwedIdea[]> {
+// Deliver (P25 durability): an idea whose current job finished and was neither delivered nor
+// already counted as failed. A flaky post leaves it selectable for the next pass.
+async function selectPending(limit: number): Promise<OwedIdea[]> {
   const c = await pool.connect();
   try {
     const r = await c.queryObject<OwedIdea>(
       `SELECT ${OWED_COLS}
          FROM ideas i
-         JOIN idea_revisions rev
-           ON rev.idea_id = i.id AND rev.revision = i.current_revision
-        WHERE i.status <> 'archived'
+         JOIN research_jobs j ON j.id::text = i.last_job_id
+        WHERE i.status IN ('new', 'queued', 'dirty')
+          AND j.status IN ('done', 'error', 'cancelled')
+          AND i.last_job_id IS DISTINCT FROM i.metadata->>'failed_job'
           AND COALESCE((i.metadata->>'research_attempts')::int, 0) < $2
-          AND (rev.research_job_id IS NULL OR i.metadata->>'research_now' = 'true')
-        ORDER BY (i.metadata->>'research_now' = 'true') DESC,
-                 (i.status IN ('new','dirty')) DESC,
-                 i.created_at ASC
+        ORDER BY i.updated_at ASC
         LIMIT $1`,
       [limit, MAX_ATTEMPTS],
     );
@@ -152,56 +118,17 @@ async function selectOwed(limit: number): Promise<OwedIdea[]> {
   }
 }
 
-// Pass 1 (P25 durability): research succeeded but delivery didn't (status still
-// 'queued' with a job id) — refetch + deliver so a flaky post never loses work.
-async function selectPending(limit: number): Promise<OwedIdea[]> {
-  const c = await pool.connect();
-  try {
-    const r = await c.queryObject<OwedIdea>(
-      `SELECT ${OWED_COLS}
-         FROM ideas i
-        WHERE i.status = 'queued' AND i.last_job_id IS NOT NULL
-        ORDER BY i.updated_at ASC
-        LIMIT $1`,
-      [limit],
-    );
-    return r.rows;
-  } finally {
-    c.release();
-  }
-}
-
-async function markQueued(idea: OwedIdea, jobId: string): Promise<void> {
-  const c = await pool.connect();
-  try {
-    await c.queryArray(
-      `UPDATE idea_revisions SET research_job_id=$3 WHERE idea_id=$1 AND revision=$2`,
-      [idea.id, idea.current_revision, jobId],
-    );
-    await c.queryArray(
-      `UPDATE ideas SET status='queued', last_job_id=$2, metadata = metadata - 'research_now' WHERE id=$1`,
-      [idea.id, jobId],
-    );
-  } finally {
-    c.release();
-  }
-}
-
-// On failure: re-owe (clear the stamp) + count the attempt. After MAX_ATTEMPTS the
-// selectOwed filter drops it, so a persistently-failing idea stops looping.
+// On failure: count the attempt and remember the failed job so the delivery pass skips it. The
+// next change to the idea (or `research now`) queues a fresh run; after MAX_ATTEMPTS it stops.
 async function markFailed(idea: OwedIdea): Promise<void> {
   const c = await pool.connect();
   try {
     await c.queryArray(
-      `UPDATE idea_revisions SET research_job_id=NULL WHERE idea_id=$1 AND revision=$2`,
-      [idea.id, idea.current_revision],
-    );
-    await c.queryArray(
       `UPDATE ideas
           SET status='new',
-              metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), '{research_attempts}',
-                         to_jsonb(COALESCE((metadata->>'research_attempts')::int,0)+1))
-                         - 'research_now'
+              metadata = (jsonb_set(COALESCE(metadata,'{}'::jsonb), '{research_attempts}',
+                          to_jsonb(COALESCE((metadata->>'research_attempts')::int,0)+1))
+                          || jsonb_build_object('failed_job', last_job_id)) - 'research_now'
         WHERE id=$1`,
       [idea.id],
     );
@@ -264,6 +191,7 @@ async function nearDormant(ideaId: string): Promise<string[]> {
 // ── research service client ─────────────────────────────────────────────────────
 class Backpressure extends Error {}
 
+// Brainstorm gap research (IR.4) still submits an ad-hoc job to the research service.
 async function submitResearch(query: string): Promise<string> {
   const r = await fetch(`${RESEARCH_URL}/research`, {
     method: "POST",
@@ -402,70 +330,69 @@ async function deliverForIdea(idea: OwedIdea, result: JobResult): Promise<void> 
   console.log(`delivered idea ${idea.id} ("${idea.title}") -> thread ${rootId}${link ? " " + link : ""}`);
 }
 
-// ── the drain ───────────────────────────────────────────────────────────────────
-type Summary = {
-  selected: number; processed: number; succeeded: number; failed: number;
-  delivered_pending: number; dormant: number; budget_hit: boolean; backpressure: boolean;
-};
+// ── the pass: research-now + delivery (no nightly drain, P4a) ─────────────────────
+type Summary = { research_now: number; delivered: number; failed: number; dormant: number };
 
-async function deliverPending(): Promise<number> {
-  let delivered = 0;
+/** `research now`: flagged ideas are queued through the database's own coalescing path. */
+async function researchNow(): Promise<number> {
+  const c = await pool.connect();
+  try {
+    const r = await c.queryObject<{ id: string }>(
+      `WITH flagged AS (
+         SELECT i.id, i.current_revision, i.summary FROM ideas i
+          WHERE i.metadata->>'research_now' = 'true' AND i.status <> 'archived'
+          ORDER BY i.updated_at LIMIT $1)
+       SELECT f.id::text, public.research_idea_queue(f.id, f.current_revision, f.summary)::text AS job
+         FROM flagged f`,
+      [RUN_MAX],
+    );
+    if (r.rows.length) {
+      await c.queryArray(`UPDATE ideas SET metadata = metadata - 'research_now' WHERE id = ANY($1::uuid[])`, [r.rows.map((x) => x.id)]);
+    }
+    return r.rows.length;
+  } finally {
+    c.release();
+  }
+}
+
+async function deliverPending(): Promise<{ delivered: number; failed: number }> {
+  let delivered = 0, failed = 0;
   for (const idea of await selectPending(RUN_MAX)) {
     const jr = await jobResult(idea.last_job_id!);
     if (jr.status === "done") {
       try { await deliverForIdea(idea, jr.result ?? {}); delivered++; }
-      catch (e) { console.error(`redeliver failed for ${idea.id}: ${(e as Error).message}`); }
+      catch (e) { console.error(`deliver failed for ${idea.id}: ${(e as Error).message}`); } // retried next pass
     } else if (jr.status === "error" || jr.status === "cancelled") {
-      await markFailed(idea);
-    } // running/unknown → leave for next run
+      await markFailed(idea); failed++;
+    }
   }
-  return delivered;
+  return { delivered, failed };
 }
 
-async function runDrain(): Promise<Summary> {
-  const started = Date.now();
-  const dormant = await ageIdeas();          // IR.5: fizzle BEFORE research, so fresh work isn't aged
-  const delivered_pending = await deliverPending();
-  const selected = await selectOwed(RUN_MAX);
-  const s: Summary = {
-    selected: selected.length, processed: 0, succeeded: 0, failed: 0,
-    delivered_pending, dormant, budget_hit: false, backpressure: false,
-  };
-  for (const idea of selected) {
-    if (Date.now() - started > RUN_BUDGET_MS) { s.budget_hit = true; break; }
-    let jobId: string;
-    try {
-      jobId = await submitWithBackpressure(await ideaQuerySeeded(idea));
-    } catch (e) {
-      if (e instanceof Backpressure) { s.backpressure = true; break; }
-      console.error(`submit failed for ${idea.id}: ${(e as Error).message}`);
-      await markFailed(idea); s.failed++; s.processed++; continue;
-    }
-    await markQueued(idea, jobId);
-    const res = await pollJob(jobId);
-    if (res.ok) {
-      try { await deliverForIdea(idea, res.result ?? {}); s.succeeded++; }
-      catch (e) { console.error(`deliver failed for ${idea.id}: ${(e as Error).message}`); } // stays 'queued' → pass 1 retries
-    } else {
-      console.error(`research failed for ${idea.id}: ${res.error}`);
-      await markFailed(idea); s.failed++;
-    }
-    s.processed++;
-  }
-  console.log(`drain complete: ${JSON.stringify(s)}`);
+async function runPass(): Promise<Summary> {
+  const dormant = await ageIdeas();          // IR.5: fizzle BEFORE delivery, so fresh work isn't aged
+  const research_now = await researchNow();
+  const { delivered, failed } = await deliverPending();
+  const s: Summary = { research_now, delivered, failed, dormant };
+  if (research_now || delivered || failed || dormant) console.log(`pass: ${JSON.stringify(s)}`);
   return s;
 }
 
-// Single-flight: a second /run while a drain is in progress is a no-op.
-let draining = false;
+// Single-flight: a second /run (or a delivery tick) while a pass is in progress is a no-op.
+let passing = false;
 async function handleRun(wait: boolean): Promise<Record<string, unknown>> {
-  if (draining) return { already_running: true };
-  draining = true;
-  const p = runDrain().finally(() => { draining = false; });
+  if (passing) return { already_running: true };
+  passing = true;
+  const p = runPass().finally(() => { passing = false; });
   if (wait) return await p as unknown as Record<string, unknown>;
-  p.catch((e) => console.error(`drain error: ${(e as Error).message}`));
+  p.catch((e) => console.error(`pass error: ${(e as Error).message}`));
   return { started: true };
 }
+
+// The delivery loop: dossiers reach Mattermost shortly after their research finishes. This is
+// delivery only - research is never waiting on it (the database queued it at capture/change).
+const DELIVERY_POLL_MS = num("IDEA_DELIVERY_POLL_MS", 60000);
+setInterval(() => { void handleRun(false).catch(() => {}); }, Math.max(5000, DELIVERY_POLL_MS));
 
 // ── Grounded brainstorm (§7.2) — a LOCAL research consultant, nothing leaves the box ──
 // An operator reply under a dossier in #ideas is honed by the LOCAL model (qwen via the
