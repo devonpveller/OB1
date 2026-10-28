@@ -14,7 +14,7 @@ import { RegistryReader } from "../contracts/registry.ts";
 import { ensureLegacyNote } from "../contracts/repo/references.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 import { createResolver, resolverConfigFromEnv } from "../export/resolver.ts";
-import { cacheResolution, noteExportRefs, pageExportRefs } from "../export/repo.ts";
+import { cacheResolution, documentExportMarkdown, documentExportRefs, noteExportRefs, pageExportRefs } from "../export/repo.ts";
 import { createExporter } from "../export/exporter.ts";
 import { limitsFromEnv } from "../export/markdown.ts";
 
@@ -24,8 +24,15 @@ export const exporter = createExporter({
   resolver: createResolver(resolverConfigFromEnv()),
   cslDir: Deno.env.get("EXPORT_CSL_DIR") || new URL("../../csl", import.meta.url).pathname,
   vaultDir: config.vault.gitDir,
-  readNote: async (rel) => (await vaultExists(rel)) ? await vaultRead(rel) : null,
+  // research-workbench P2b: a user document (documents/) is exported from its file, its grammar
+  // rewritten to the export's citations, at the pins it holds
+  readNote: async (rel) => {
+    if (!(await vaultExists(rel))) return null;
+    const md = await vaultRead(rel);
+    return rel.startsWith("documents/") ? await documentExportMarkdown(db, md) : md;
+  },
   loadRefs: async (rel, md) => {
+    if (rel.startsWith("documents/")) return await documentExportRefs(db, rel, md);
     if (!rel.startsWith("notes/")) return await pageExportRefs(db, md);
     await ensureLegacyNote(db, rel, md);
     return await noteExportRefs(db, rel);

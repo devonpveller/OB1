@@ -1,0 +1,3 @@
+# the workspace app is built inside the image from its lockfile (Dockerfile stage `workspace`)
+workspace/node_modules
+workspace/dist

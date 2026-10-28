@@ -223,22 +223,8 @@ const unsafeLive = (body) => new RegExp(String.raw`\s(?:href|src|poster|cite|act
 RULES.push({ id: "D8-unsafe-url", why: "the live page refuses javascript:/vbscript:/data: URLs (a link becomes its text, an image its alt text); the built page kept them (pre-diff normalisation of the built body; a live unsafe URL fails)", test: () => false });
 RULES.push({ id: "D6-listing-order", why: "listing entries are compared in href order: the live order follows the row dates, the built order the file mtimes (pre-diff normalisation; entries themselves still diffed)", test: () => false });
 RULES.push({ id: "D5-list-sidebar", why: "list pages carry graph + TOC + backlinks in the right sidebar (acceptance 1); Quartz's list layout leaves it empty (pre-diff normalisation)", test: () => false });
-// D11 (research-workbench P1b, D13 item 7): every live page carries the
-// server-rendered research notifications strip as the FIRST child of
-// .center; Quartz never built one. Pre-diff normalisation of the LIVE body:
-// exactly one strip element, in that position, is removed before the diff
-// (its presence is an ELEMENTS check below, so a page without it fails);
-// a strip anywhere else, or a second one, stays in the diff.
-RULES.push({ id: "D11-notifications-strip", why: "every live page carries the research notifications strip as the first child of .center (P1b, D13 item 7); the built page has none (pre-diff normalisation of the live body; its presence is checked as an element)", test: () => false });
-const STRIP_RE = /(<div class="center">)<div class="wiki-notifications" data-wiki-notifications="1" data-unread="[^"]*">(?:(?!<div class="wiki-notifications")[\s\S])*?<\/div>(?=<div class="page-header">)/;
-function dropStrip(body) {
-  const m = STRIP_RE.exec(body);
-  if (!m) return { body, fired: false };
-  const inner = m[0].slice(m[1].length);
-  // the strip carries no markup a page could abuse: no script, no handler
-  if (/<script\b|\son[a-z]+=/i.test(inner.replace(/<style>[^<]*<\/style>/, ""))) return { body, fired: false };
-  return { body: body.slice(0, m.index) + m[1] + body.slice(m.index + m[0].length), fired: true };
-}
+// D11 retired (rw-p2b-workspace): the P1b notifications strip left every page - the workspace's title
+// bar bell replaced it (D13) - so nothing is normalised away and a live page carrying one fails below.
 
 function explain(h, ctx) {
   for (const r of RULES) if (r.test(h, ctx)) return r.id;
@@ -254,7 +240,7 @@ RULES.push({ id: "D10-alias-escape", why: "an alias redirect page escapes & < > 
 const unescapeHtml = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 
 const ELEMENTS = {
-  "notifications strip": (b) => /<div class="center"><div class="wiki-notifications" data-wiki-notifications="1" data-unread="[^"]*">/.test(b),
+  "NO notifications strip": (b) => !/wiki-notifications/.test(b),
   "explorer root": (b) => /<div class="explorer"[^>]*>/.test(b) && b.includes('class="explorer-ul overflow"'),
   "graph container": (b) => b.includes('<div class="graph-container"'),
   "backlinks list": (b) => /<div class="backlinks"><h3>Backlinks<\/h3><ul id="list-\d+" class="overflow">/.test(b),
@@ -292,8 +278,7 @@ for (const [cls, url] of URLS) {
   }
   const liveRaw = bodyOf(html);
   const missing = Object.entries(ELEMENTS).filter(([, f]) => !f(liveRaw)).map(([k]) => k);
-  const stripped = dropStrip(liveRaw);
-  const live = stripped.body;
+  const live = liveRaw;
   if (render !== "db") failed = true;
   if (missing.length) failed = true;
   const bf = builtFile(url);
@@ -301,7 +286,6 @@ for (const [cls, url] of URLS) {
   const pageClass = r.headers.get("x-wiki-page-class");
   const ctx = { cls, url, builtFileExists: existsSync(bf), pageClass };
   const fired = {};
-  if (stripped.fired) fired["D11-notifications-strip"] = 1;
   const norm = normalizeListSidebar(live, built, ctx);
   if (norm.fired) fired["D5-list-sidebar"] = 1;
   const safeBuilt = refuseUnsafeBuilt(built);

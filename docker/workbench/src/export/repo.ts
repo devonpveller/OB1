@@ -61,6 +61,57 @@ export async function pageExportRefs(db: Db, md: string): Promise<ExportRef[]> {
   });
 }
 
+// A user document (research-workbench P2b): its citations - chips, transclusions and source links,
+// rewritten to source wikilinks by documentExportMarkdown - numbered by first appearance, then the
+// references it ADDED (both fold into one References list, D12 parity item 8); each read at the
+// pin THIS document holds (its P2a record), with that record's cached resolutions.
+export async function documentExportRefs(db: Db, rel: string, md: string): Promise<ExportRef[]> {
+  const added = (await db.query<{ source_id: string }>(
+    `SELECT r.source_id::text AS source_id FROM public.reference_holders h JOIN public.reference_records r ON r.id = h.reference_id
+      WHERE h.holder_kind = 'user_document' AND h.holder_ref = $1 AND h.origin = 'added' ORDER BY h.seq`,
+    [rel],
+  )).map((r) => r.source_id);
+  const order = exportOrder(md, added);
+  if (!order.length) return [];
+  const rows = await db.query<Omit<ExportRef, "number">>(
+    `SELECT DISTINCT ON (r.source_id) r.source_id::text AS cited_ref, r.id::text AS reference_id, r.pinned_revision, ${SOURCE_COLS},
+            COALESCE(NULLIF(rv.title, ''), s.title) AS title,
+            COALESCE((SELECT jsonb_agg(jsonb_build_object('identifier', rr.identifier, 'csl', rr.csl, 'via', rr.via))
+                        FROM public.reference_resolutions rr WHERE rr.reference_id = r.id), '[]'::jsonb) AS cached
+       FROM public.reference_holders h
+       JOIN public.reference_records r ON r.id = h.reference_id
+       LEFT JOIN public.sources s ON s.id = r.source_id
+       LEFT JOIN public.source_revisions rv ON rv.source_id = s.id AND rv.revision = r.pinned_revision
+      WHERE h.holder_kind = 'user_document' AND h.holder_ref = $1 AND r.source_id::text = ANY($2::text[])
+      ORDER BY r.source_id, h.seq`,
+    [rel, order],
+  );
+  const bySource = new Map(rows.map((r) => [r.cited_ref, r]));
+  return order.map((u, i) => {
+    const r = bySource.get(u);
+    return r ? { ...r, number: i + 1 } : {
+      number: i + 1, cited_ref: u, reference_id: null, pinned_revision: null, cached: [], source_id: null,
+      suppressed: false, title: null, url: null, metadata: null, accessed: null,
+    };
+  });
+}
+
+// The user document grammar, rewritten for the export: a chip or a transclusion becomes its quoted
+// text (a transclusion) and the source wikilink the export numbers; a typed link becomes a source
+// wikilink (sources, reports) or its plain text (claims, other documents). Page links stay.
+export async function documentExportMarkdown(db: Db, md: string): Promise<string> {
+  const ids = [...new Set([...md.matchAll(/\[@ref:([0-9a-fA-F-]{36})\]|\{\{ref:([0-9a-fA-F-]{36})\}\}/g)].map((m) => (m[1] ?? m[2]).toLowerCase()))];
+  const src = new Map((await db.query<{ id: string; source_id: string }>(
+    `SELECT id::text AS id, source_id::text AS source_id FROM public.reference_records WHERE id::text = ANY($1::text[])`, [ids],
+  )).map((r) => [r.id, r.source_id]));
+  const leaf = (refId: string) => src.has(refId.toLowerCase()) ? `[[content/source/${src.get(refId.toLowerCase())}]]` : "";
+  return md
+    .replace(/\{\{ref:([0-9a-fA-F-]{36})\}\}([\s\S]*?)\{\{\/ref\}\}/g, (_m, id, text) => `${text} ${leaf(id)}`.trimEnd())
+    .replace(/\[@ref:([0-9a-fA-F-]{36})\]/g, (_m, id) => leaf(id))
+    .replace(/\[\[(source|report):([0-9a-fA-F-]{36})(\|[^\]\n]+)?\]\]/g, (_m, _k, id, alias) => `[[content/source/${id.toLowerCase()}${alias ?? ""}]]`)
+    .replace(/\[\[(claim|doc):([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g, (_m, _k, id, alias) => (alias ?? id).trim());
+}
+
 // Cache a resolution on its reference record, at the record's pinned revision (the trigger refuses
 // any other revision). A concurrent export that cached it first wins; the metadata is the same.
 export async function cacheResolution(db: Db, referenceId: string, identifier: string, csl: CslItem, via: string) {

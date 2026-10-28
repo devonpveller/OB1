@@ -58,19 +58,31 @@ export function shapeSession(r: JobRow) {
   };
 }
 
-export async function session(db: Db, id: string) {
+// rw-p2b-workspace (operator 2026-10-28): the text a user typed to start research is the user's own
+// (research_prompts); the job and everything it produces are shared. A job started from the workspace
+// shows its query to its owner only - to anyone else the query reads as empty.
+const OWN_QUERY = (alias: string, ownerParam: string) =>
+  `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = ${alias}.id AND p.owner_sub <> ${ownerParam})
+        THEN '' ELSE ${alias}.query END`;
+
+export async function session(db: Db, id: string, owner: string) {
   const rows = await db.query<JobRow>(
-    `SELECT id, status, origin, origin_claimed, caller, inlet_ref, refinery_id, query, progress, result,
-            session_id, thread_id, created_at, started_at, finished_at, error
-       FROM public.research_jobs WHERE id = $1`,
-    [id],
+    `SELECT j.id, j.status, j.origin, j.origin_claimed, j.caller, j.inlet_ref, j.refinery_id, ${OWN_QUERY("j", "$2")} AS query,
+            j.progress, j.result, j.session_id, j.thread_id, j.created_at, j.started_at, j.finished_at, j.error
+       FROM public.research_jobs j WHERE j.id = $1`,
+    [id, owner],
   );
   return rows[0] ? shapeSession(rows[0]) : null;
 }
 
-// jobs(state): the import queue and the research queue, newest first, one shape.
-export async function jobs(db: Db, state: string | null, kinds: string[], limit: number) {
-  const want = (k: string) => kinds.length === 0 || kinds.includes(k);
+// The kinds a caller gets when it names none (the two queues P0 shipped). The kinds P2b registered
+// (init-documents.sql) are answered when named: the title bar's progress indicators ask for them.
+const DEFAULT_KINDS = new Set(["import", "research"]);
+
+// jobs(state): the import queue and the research queue (and, when asked, pages waiting for a
+// compile and held user sources), newest first, one shape.
+export async function jobs(db: Db, state: string | null, kinds: string[], limit: number, owner: string) {
+  const want = (k: string) => kinds.length === 0 ? DEFAULT_KINDS.has(k) : kinds.includes(k);
   const out: unknown[] = [];
   if (want("import")) {
     const rows = await db.query<{ id: string; status: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
@@ -85,12 +97,35 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
   if (want("research")) {
     const rows = await db.query<{ id: string; status: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
       `SELECT id, status, created_at, updated_at,
-              jsonb_build_object('origin', origin, 'query', left(query, 200), 'refinery_id', refinery_id,
+              jsonb_build_object('origin', origin, 'query', left(${OWN_QUERY("j", "$3")}, 200), 'refinery_id', refinery_id,
                                  'phase', progress ->> 'phase', 'error', error) AS detail
-         FROM public.research_jobs WHERE ($1::text IS NULL OR status = $1) ORDER BY created_at DESC LIMIT $2`,
-      [state, limit],
+         FROM public.research_jobs j WHERE ($1::text IS NULL OR status = $1) ORDER BY created_at DESC LIMIT $2`,
+      [state, limit, owner],
     );
     out.push(...rows.map((r) => ({ kind: "research", state: isTerminal(r.status) ? "current" : "loading", ...r })));
+  }
+  if (want("compile") && (state === null || state === "pending")) {
+    // a page marked pending-compile (D13) that has not been recompiled since the mark
+    const rows = await db.query<{ id: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
+      `SELECT m.source_id::text AS id, m.marked_at AS created_at, m.marked_at AS updated_at,
+              jsonb_build_object('page_ref', m.page_ref, 'reason', m.reason) AS detail
+         FROM public.page_compile_marks m
+         LEFT JOIN public.wiki_pages w ON w.slug = m.page_ref
+        WHERE w.slug IS NULL OR m.marked_at >= w.updated_at
+        ORDER BY m.marked_at DESC LIMIT $1`,
+      [limit],
+    );
+    out.push(...rows.map((r) => ({ kind: "compile", status: "pending", state: "loading", ...r })));
+  }
+  if (want("held") && (state === null || state === "held")) {
+    const rows = await db.query<{ id: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
+      `SELECT rus.source_id::text AS id, rus.added_at AS created_at, COALESCE(h.updated_at, rus.added_at) AS updated_at,
+              jsonb_build_object('refinery_id', rus.refinery_id, 'title', COALESCE(h.title, '')) AS detail
+         FROM public.refinery_user_sources rus LEFT JOIN public.held_sources h ON h.id = rus.source_id
+        WHERE rus.status = 'held' ORDER BY rus.added_at DESC LIMIT $1`,
+      [limit],
+    );
+    out.push(...rows.map((r) => ({ kind: "held", status: "held", state: "current", ...r })));
   }
   return { jobs: out };
 }

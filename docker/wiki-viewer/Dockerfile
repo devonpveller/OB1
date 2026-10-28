@@ -1,3 +1,14 @@
+# research-workbench P2b: the workspace - a Vite + React 19 app (workspace/) served at /workspace.
+# Built from its lockfile (`npm ci`: CodeMirror 6, dockview and every other package at the version
+# package-lock.json pins); the build gate runs its type check, its unit tests and the D9 notices
+# check. Only the built dist/ reaches the runtime image (no node_modules, no source).
+FROM node:22-slim AS workspace
+WORKDIR /workspace
+COPY workspace/package.json workspace/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY workspace/ ./
+RUN npx vitest run && node scripts/notices.mjs --check && npm run build && test -s dist/index.html && test -s dist/assets/THIRD-PARTY-NOTICES.txt
+
 # Read-only Quartz 4 viewer (D15) for the compiled wiki.
 # Quartz is fetched at build time (build-time network is fine; the
 # "no cloud" rule governs runtime model/data, not image builds — same
@@ -244,7 +255,7 @@ RUN set -e; \
 # codepoints crash its emit). Needed here because the chrome extraction below
 # runs a real Quartz build of the fixture vault.
 RUN set -e; C=/quartz/quartz.config.ts; \
-  sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", ".git", ".git/**", "**/.git/**", ".quartz-cache", "public", "node_modules", ".wikistate.json", "**/.failed-entity-ids.json", "planned.json"]#' "$C"; \
+  sed -i 's#ignorePatterns: \[[^]]*\]#ignorePatterns: ["private", "templates", ".obsidian", "documents", ".git", ".git/**", "**/.git/**", ".quartz-cache", "public", "node_modules", ".wikistate.json", "**/.failed-entity-ids.json", "planned.json"]#' "$C"; \
   sed -i 's#^\([[:space:]]*\)Plugin.CustomOgImages(),#\1// Plugin.CustomOgImages(), // DISABLED: ZWJ-emoji codepoint crashes emit#' "$C"; \
   grep -q '// Plugin.CustomOgImages()' "$C"
 
@@ -296,6 +307,9 @@ RUN set -e; cd /quartz; \
 RUN set -e; cd /quartz; \
   node -e "await Promise.all(['unified','remark-parse','remark-gfm','remark-frontmatter','remark-rehype','remark-smartypants','remark-math','rehype-raw','rehype-pretty-code','rehype-slug','rehype-autolink-headings','rehype-katex','mdast-util-find-and-replace','mdast-util-to-hast','mdast-util-to-string','hast-util-to-html','hast-util-to-string','hast-util-to-jsx-runtime','preact','preact-render-to-string','unist-util-visit','github-slugger','is-absolute-url','reading-time'].map(m=>import(m)))"; \
   node --test lib/*.test.mjs
+
+# The workspace's build (stage `workspace` above): served at /workspace by serve.mjs.
+COPY --from=workspace /workspace/dist /quartz/workspace
 
 COPY entrypoint.sh /entrypoint.sh
 # Normalise line endings IN THE IMAGE. This repo is checked out on Windows,

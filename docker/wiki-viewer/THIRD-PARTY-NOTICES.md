@@ -64,3 +64,11 @@ preact 10.26.7 MIT, preact-render-to-string 6.5.13 MIT, unist-util-visit 5.0.0
 MIT, github-slugger 2.0.0 ISC, is-absolute-url 4.0.1 MIT, reading-time 1.5.0
 MIT. No new package is installed by this item; P1c (which removes the Quartz
 clone) must give the renderer its own pinned manifest for these.
+
+## The workspace (research-workbench P2b)
+
+The `/workspace` app's bundle carries code from the npm packages listed, with their licence texts, in
+`workspace/THIRD-PARTY-NOTICES.md` (generated from `workspace/package-lock.json` by
+`workspace/scripts/notices.mjs`; its `--check` runs in this image's build and refuses any licence
+outside the D9 allow-list). The built image serves the same file at
+`/workspace/assets/THIRD-PARTY-NOTICES.txt`. Every package there is MIT.

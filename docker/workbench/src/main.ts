@@ -20,9 +20,13 @@
 //   /workbench/grounding   — P6
 //   /workbench/contract/*  — research-workbench P0: the typed retrieval contract
 //                            (src/contracts/; GET /openapi.json is its document)
+//   /workbench/documents   — research-workbench P2b: user documents (D12) - the documents tree,
+//                            the listing record, references, the refinery from the document
+//   /workbench/workspace   — research-workbench P2b: the title bar bell's acknowledgement
 import { Hono } from "hono";
 import { config } from "./config.ts";
 import { requireBrainKey } from "./middleware/auth.ts";
+import { identitySeam } from "./middleware/identity.ts";
 import { health } from "./routes/health.ts";
 import { notebooks } from "./routes/notebooks.ts";
 import { notes } from "./routes/notes.ts";
@@ -35,6 +39,8 @@ import { noteHistory, noteCommit } from "./routes/note-history.ts";
 import { search } from "./routes/search.ts";
 import { graph } from "./routes/graph.ts";
 import { nav } from "./routes/nav.ts";
+import { documentsRouter, emptyDocumentsTrash, reconcileOnStart, workspaceRouter } from "./routes/documents.ts";
+import { refetchClient, researchClient } from "./documents/clients.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
 import { emptyTrash } from "./repositories/notes.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
@@ -59,13 +65,19 @@ app.route("/workbench/health", health);
 // The retrieval contract's OpenAPI document. Bare path unauthenticated like /health (internal
 // only: the service is never host-published except the loopback debug port); the
 // prefix-inclusive path is what Caddy forwards, behind the key gate below.
-const contract = createContractApp(contractDeps());
+const cdeps = contractDeps();
+const contract = createContractApp(cdeps);
+// research-workbench P2b: the documents API shares the contract's database seam and registry reader.
+const docDeps = { db: cdeps.db, reg: cdeps.registry, embed: cdeps.embed, chunk: cdeps.chunk, research: researchClient(), refetch: refetchClient() };
 const contractDoc = openApiDocument(contract);
 app.get("/openapi.json", (c) => c.json(contractDoc));
 
 // Everything else requires the Caddy-injected secret (G7). The gate is
 // registered before the resource routers so it runs first in the chain.
 app.use("/workbench/*", requireBrainKey);
+// research-workbench P2b: the identity seam - the ONE place that resolves who the request's user is
+// (src/middleware/identity.ts); user front-end state is read and written for that identity only.
+app.use("/workbench/*", identitySeam());
 
 // Resource sub-routers (prefix-inclusive). Added per phase.
 app.route("/workbench/notebooks", notebooks); // P2
@@ -82,6 +94,8 @@ app.route("/workbench/note-commit", noteCommit); // P4.7 — commit-now / compil
 app.route("/workbench/search", search); // wiki-dynamic-index P3 — DB-backed wiki search
 app.route("/workbench/graph", graph); // wiki-dynamic-index — page-scoped graph neighbourhood
 app.route("/workbench/nav", nav); // research-workbench P1b — the explorer, one folder at a time (forwards to the viewer)
+app.route("/workbench/documents", documentsRouter(docDeps)); // research-workbench P2b — user documents (D12)
+app.route("/workbench/workspace", workspaceRouter(cdeps.db)); // research-workbench P2b — the bell's acknowledgement
 app.get("/workbench/openapi.json", (c) => c.json(contractDoc)); // research-workbench P0
 app.route("/", contract); // research-workbench P0 — /workbench/contract/* (paths are absolute)
 
@@ -109,6 +123,8 @@ function scheduleEmptyTrash(): void {
       try {
         const { removed } = await emptyTrash("nightly-cleanup");
         if (removed.length) console.log(`[workbench] nightly empty-trash removed ${removed.length} note(s)`);
+        const docs = await emptyDocumentsTrash(docDeps);
+        if (docs.removed.length) console.log(`[workbench] nightly empty-trash removed ${docs.removed.length} user document(s)`);
       } catch (e) {
         console.error("[workbench] nightly empty-trash failed:", (e as Error).message);
       }
@@ -118,6 +134,8 @@ function scheduleEmptyTrash(): void {
   arm();
 }
 scheduleEmptyTrash();
+// D12 truth and repair: the documents listing is rebuilt from the documents tree where it drifted.
+reconcileOnStart(docDeps);
 
 Deno.serve({ port: config.port }, app.fetch);
 console.log(`[workbench] listening on :${config.port} (auth=${config.workbenchKey ? "on" : "OPEN — set WORKBENCH_KEY"})`);

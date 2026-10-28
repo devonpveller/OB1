@@ -97,7 +97,8 @@ function Test-LabDockerArgs([string[]]$a) {
     if ($x -match '^--net(work)?$') { $v = $a[$i + 1]; if ($v -ne $net -and $v -ne 'none') { return "network '$v' is not this run's" } }
     if ($x -match '^--net(work)?=(.+)$') { if ($Matches[2] -ne $net -and $Matches[2] -ne 'none') { return "network '$($Matches[2])' is not this run's" } }
     if ($x -match '^(-d|--driver)$' -and $a[0] -eq 'network' -and $a[$i + 1] -match 'macvlan|ipvlan') { return 'a macvlan / ipvlan driver' }
-    if ($x -match '(^|[/=])[^ ]*:local$') { return "a :local image ($x)" }
+    # a :local image is never run, built, tagged or removed (listing and inspecting them is read-only)
+    if ($x -match '(^|[/=])[^ ]*:local$' -and $a[0] -notin @('images', 'image')) { return "a :local image ($x)" }
   }
   if ($all -match 'macvlan|ipvlan') { return 'a macvlan / ipvlan driver' }
   if ($a.Count -ge 2 -and $a[0] -eq 'network' -and $a[1] -eq 'create') {
@@ -111,8 +112,8 @@ function Test-LabDockerArgs([string[]]$a) {
   }
   return ''
 }
-function Lab-Docker {
-  param([int]$TimeoutSec = 300, [Parameter(ValueFromRemainingArguments = $true)][string[]]$a)
+# Positional only: a docker flag such as -t or -a must never bind to a parameter of this function.
+function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   $why = Test-LabDockerArgs $a
   if ($why) { Write-Host "  SHIM REFUSED: $why :: docker $($a -join ' ')"; $script:rc = 2; $script:fail++; return "REFUSED: $why" }
   $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -130,8 +131,8 @@ function Lab-Docker {
   $script:rc = $p.ExitCode
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
-function Dk { Lab-Docker -TimeoutSec 300 @args }
-function DkLong { Lab-Docker -TimeoutSec 2400 @args }
+function Dk { Lab-Docker 300 ([string[]]$args) }
+function DkLong { Lab-Docker 2400 ([string[]]$args) }
 
 # the shim's own RED: each refused shape is refused before docker runs
 $shimCases = @(
@@ -287,10 +288,10 @@ try {
 
   # ---------------------------------------------------------------- 5. the tests
   Write-Host '[5a] the documents API integration test (as ob_app_memory? no: the fault trigger needs the superuser; the workbench itself runs as ob_app_memory)'
-  $o = Lab-Docker -TimeoutSec 900 run --rm --label $label --network $net -v "${vault}:/vault" `
-    -e "DOCS_TEST_BASE=http://$P-wb:8000" -e "DOCS_TEST_KEY=$key" -e DOCS_TEST_VAULT=/vault -e DOCS_TEST_PROXY_HOST=stub-proxy `
-    -e "CONTRACT_TEST_DB_HOST=$db" -e CONTRACT_TEST_DB_USER=postgres -e "CONTRACT_TEST_DB_PASSWORD=$pw" `
-    $wbTestTag deno test --allow-net --allow-env --allow-read src/documents/documents_integration_test.ts
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'DOCS_TEST_PROXY_HOST=stub-proxy',
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/documents/documents_integration_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save 'documents-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed' }) -join "`n")
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
@@ -299,8 +300,8 @@ try {
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the documents API integration test ($($sum.Value))" }
 
   Write-Host '[5b] the workspace e2e in a headless Chromium, through the front door'
-  $o = Lab-Docker -TimeoutSec 1200 run --rm --label $label --network $net -v "${shots}:/ev" -e "FRONT=http://$P-front:8080" `
-    -e "CDP=http://${chromeIp}:9222" -e "PGHOST=$db" -e "PGPASSWORD=$pw" -e "CASES=$Cases" $e2eTag
+  $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shots}:/ev", '-e', "FRONT=http://$P-front:8080",
+    '-e', "CDP=http://${chromeIp}:9222", '-e', "PGHOST=$db", '-e', "PGPASSWORD=$pw", '-e', "CASES=$Cases", $e2eTag)
   Save 'workspace-e2e.log' ((($o -replace '\x1b\[[0-9;]*m', '') -split "`n" | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:' }) -join "`n")
   foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:' }) { Write-Host "    $l" }
   $e2e = ([regex]'E2E: (\d+) passed, (\d+) failed').Match($o)

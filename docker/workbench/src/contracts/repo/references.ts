@@ -499,6 +499,76 @@ export async function markHolderRemoved(db: Db, ref: string, kind = LEGACY_NOTE)
   );
 }
 
+// ── placing a reference from a quote (research-workbench P2b) ─────────────────────────────
+// The workspace places references by what the user selected (a quote in a chunk), or for the
+// source as a whole (a link placed in a document). The position is found in the CURRENT revision's
+// text - the revision the new record pins - and the record goes through createReference, so the
+// selector rule, the registry checks and the holder bookkeeping are the ones every writer uses.
+export interface PlaceInput {
+  source_id: string;
+  exact?: string | null; // absent: the whole source (scope source)
+  near_chunk?: number | null; // where the user selected it (the first occurrence at or after it wins)
+  holder: { kind: string; ref: string; origin?: string };
+  provenance?: string;
+  by?: string;
+}
+
+export async function placeReference(db: Db, reg: RegistryReader, input: PlaceInput) {
+  const target = await anyTarget(db, input.source_id);
+  if (!target) throw new NotFound("no source or held source with this id");
+  const required = requiredSelectorKinds(await selectorEntries(db), target.content_type);
+  const exact = (input.exact ?? "").trim() ? input.exact! : null;
+  let selectors: Record<string, unknown>;
+  let scope = "span";
+  if (!exact) {
+    const a = anchorText(target.text, target.title);
+    if (!a) throw new SelectorRefused("the source has neither text nor title to anchor a quote in");
+    selectors = deriveWholeSourceSelectors(a, required);
+    scope = "source";
+  } else {
+    const text = target.text ?? "";
+    const start = await quoteStart(db, target, text, exact, input.near_chunk ?? null);
+    if (start < 0) throw new SelectorRefused(`the quote is not in revision ${target.revision} of ${target.id}`);
+    const end = start + exact.length;
+    selectors = {
+      quote: { exact, prefix: text.slice(Math.max(0, start - 32), start), suffix: text.slice(end, end + 32) },
+      position: { start, end },
+    };
+    // a span on a PDF without page geometry anchors to its first page as a whole (as the whole-source
+    // deriver does); the quote and position carry the precise anchor
+    if (required.includes("pdf")) selectors.pdf = { page: 1, quads: [[0, 0, 1, 0, 1, 1, 0, 1]] };
+  }
+  return await createReference(db, reg, {
+    source_id: target.id, selectors, provenance: input.provenance ?? "user", scope,
+    holder: input.holder, by: input.by,
+  });
+}
+
+// The offset of the quote in the revision text: the first occurrence at or after the chunk the
+// user selected it in (chunk text is a slice of the revision text), else the first anywhere.
+async function quoteStart(db: Db, target: Target, text: string, exact: string, nearChunk: number | null) {
+  if (nearChunk !== null) {
+    const table = target.in_sources ? "public.source_chunks" : "public.held_source_chunks";
+    const key = target.in_sources ? "source_id" : "held_source_id";
+    const c = (await db.query<{ content: string }>(`SELECT content FROM ${table} WHERE ${key} = $1 AND idx = $2`, [target.id, nearChunk]))[0];
+    if (c) {
+      const chunkAt = text.indexOf(c.content);
+      if (chunkAt >= 0) {
+        const at = text.indexOf(exact, chunkAt);
+        if (at >= 0) return at;
+      }
+    }
+  }
+  return text.indexOf(exact);
+}
+
+// The id, revision and content type of a source or held source - no text (the documents API checks
+// a link target exists before it pins it).
+export async function targetHead(db: Db, id: string) {
+  const t = await anyTarget(db, id);
+  return t ? { id: t.id, in_sources: t.in_sources, revision: t.revision, content_type: t.content_type, title: t.title } : null;
+}
+
 // ── export ───────────────────────────────────────────────────────────────────────────────
 // The export (research-workbench P6a, src/export/repo.ts) reads a legacy note's numbered references
 // from its holder rows and renders them through pandoc --citeproc; the plain References list that

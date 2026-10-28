@@ -44,14 +44,17 @@ import { createHash } from "node:crypto";
 import { getNavIndex, navIndexEnabled, indexChunks } from "./lib/nav-index.mjs";
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
-import { stripHtml, listDocument, ACK_COOKIE, safeBack } from "./lib/notifications.mjs";
 import { renderLive, routeErrors, isKnownPageUrl } from "./lib/live-route.mjs";
 import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-classes.mjs";
 import { dbState, onConnect, startProbe, probe } from "./lib/wiki-db.mjs";
 import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
+import { proxyConfig, proxyWorkbench } from "./lib/workbench-proxy.mjs";
 
 const ROOT = process.env.WIKI_SRV_CURRENT || "/srv/current"; // a symlink -> /srv/build-N (swapped atomically), or absent
 const BUNDLE = process.env.WIKI_BUNDLE_DIR || "/quartz/bundle"; // the image's baked bundle (Dockerfile)
+const WORKSPACE = process.env.WIKI_WORKSPACE_DIR || "/quartz/workspace"; // the workspace app's build (Dockerfile stage `workspace`)
+// /workbench/* forwarded with the key, server-side (rw-p2b-workspace: the edge targets the viewer alone)
+const WB_PROXY = proxyConfig();
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const VAULT = process.env.WIKI_VAULT_DIR || "/wiki";
 const MIME = {
@@ -233,6 +236,30 @@ async function proxyNav(req, res) {
   }
 }
 
+// /workspace: the app's index.html for the app's own URLs, its hashed assets from the build. The
+// build carries no page and reads no vault file; the app talks to /workbench/* like every panel.
+async function serveWorkspace(req, res, path) {
+  const rel = path.replace(/^\/workspace\/?/, "");
+  const isAsset = /^assets\/[A-Za-z0-9._-]+$/.test(rel);
+  const file = normalize(join(WORKSPACE, isAsset ? rel : "index.html"));
+  if (!file.startsWith(WORKSPACE + "/")) { res.writeHead(400); res.end(); return; }
+  let st;
+  try { st = await stat(file); } catch { st = null; }
+  if (!st?.isFile()) {
+    res.writeHead(isAsset ? 404 : 503, { "content-type": "text/plain", "cache-control": "no-store" });
+    res.end(isAsset ? "not found" : "the workspace is not in this image");
+    return;
+  }
+  const ext = extname(file);
+  // hashed asset names never change content: cache them; index.html revalidates
+  const headers = { ...baseHeaders(st, ext), "content-type": MIME[ext] || "application/octet-stream", "content-length": st.size,
+    "cache-control": isAsset ? "public, max-age=31536000, immutable" : "no-cache, must-revalidate", "x-wiki-render": "workspace" };
+  if (notModified(req, st)) { res.writeHead(304, headers); res.end(); return; }
+  res.writeHead(200, headers);
+  if (req.method === "HEAD") { res.end(); return; }
+  createReadStream(file).pipe(res);
+}
+
 async function handle(req, res) {
   const t0 = process.hrtime.bigint();
   const url = req.url || "/";
@@ -251,24 +278,10 @@ async function handle(req, res) {
   markAccess();
   const path = url.split("?")[0];
   if (path === "/__nav") return proxyNav(req, res);
-  // The notifications strip's acknowledgement and full list (P1b, D13 item 7).
-  if (path === "/__notifications/ack") {
-    const u = new URL(url, "http://viewer");
-    const until = Date.parse(u.searchParams.get("until") || "");
-    const headers = { location: safeBack(u.searchParams.get("back")), "cache-control": "no-store" };
-    if (Number.isFinite(until)) {
-      headers["set-cookie"] = `${ACK_COOKIE}=${encodeURIComponent(new Date(until).toISOString())}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly`;
-    }
-    res.writeHead(303, headers);
-    res.end();
-    return;
-  }
-  if (path === "/__notifications") {
-    const body = await listDocument({ cookie: req.headers.cookie });
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-length": Buffer.byteLength(body) });
-    res.end(req.method === "HEAD" ? undefined : body);
-    return;
-  }
+  // The workspace (research-workbench P2b): the Vite + React app at /workspace. Its notifications
+  // bell replaced the P1b strip and its /__notifications routes (D13, moved to the title bar 2026-09-25).
+  if (path === "/workspace" || path.startsWith("/workspace/")) return serveWorkspace(req, res, path);
+  if (path === "/workbench" || path.startsWith("/workbench/")) return proxyWorkbench(req, res, WB_PROXY);
   // The full index, LIVE from wiki_pages, for its one remaining lazy reader
   // (the notes editor's link autocomplete, when the editor opens; the graph no
   // longer falls back to it - fix round 1). No file fallback (E3): the
@@ -307,7 +320,7 @@ async function handle(req, res) {
     return;
   }
   const page = async (u) => {
-    const out = await renderLive(u, { strip: () => stripHtml({ cookie: req.headers.cookie, back: url }) });
+    const out = await renderLive(u);
     const headers = { ...out.headers, "server-timing": serverTiming(t0) };
     if (out.status === 200 && out.headers["x-wiki-render"] === "db" && out.body) {
       headers.etag = pageEtag(out.body);

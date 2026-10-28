@@ -166,6 +166,11 @@ services:
       # (a trigger on idea_revisions). Fresh-volume only; the live DB gets it by hand (psql -f).
       # Revert: revert-research-trees.sql.
       - ./init-research-trees.sql:/docker-entrypoint-initdb.d/260-init-research-trees.sql:ro # research-workbench P4a
+      # research-workbench P2b (rw-p2b-workspace): the workspace's storage - notification
+      # acknowledgement, refinery archive and pick-up, held-source revision snapshots, the bell's
+      # progress_indicators registry. Fresh-volume only; the live DB gets it by hand (psql -f).
+      # Revert: revert-documents.sql.
+      - ./init-documents.sql:/docker-entrypoint-initdb.d/270-init-documents.sql:ro # research-workbench P2b
     networks:
       - obnet
     restart: unless-stopped
@@ -1275,12 +1280,10 @@ services:
       # knowledge-collection migration pushed it past 12k pages / ~200MB). Give
       # the Quartz builder real headroom (host has ~94GB). Configurable.
       NODE_OPTIONS: "--max-old-space-size=${WIKI_VIEWER_HEAP_MB:-20480}"
-      # research-workbench P1b (D13 item 7): the page chrome's notifications
-      # strip reads the retrieval contract's read endpoint
-      # (openbrain-workbench /workbench/contract/notifications), which is behind
-      # the workbench key - the same value the workbench takes as WORKBENCH_KEY.
-      # Server-side only: the strip is rendered into the page, the key never
-      # reaches the browser.
+      # research-workbench P2b: the viewer forwards /workbench/* (the workspace's and the wiki pages'
+      # API calls, same-origin) to the workbench with the key, SERVER-SIDE - the browser never holds
+      # it. This is what lets the edge (Traefik, Authentik in front) target the viewer alone; while
+      # Caddy still fronts the plane it routes /workbench/* itself and the viewer never sees them.
       WORKBENCH_URL: http://openbrain-workbench:8000
       WORKBENCH_KEY: ${MCP_ACCESS_KEY}
     volumes:
@@ -1300,6 +1303,15 @@ services:
       - wiki-viewer-srv:/srv
     ports:
       - "127.0.0.1:8812:8080"
+      # OPT-IN LAN BINDING (rw-p2b-workspace, the edge-b2-pub pattern), SHIPPED INERT. The viewer is
+      # the ob1 plane's front end - the wiki and /workspace - and forwards /workbench/* to the
+      # workbench with the key server-side, so nothing else of this plane is ever on the LAN.
+      # WIKI_VIEWER_LAN_IP in OB1/docker/.env, set to the ONE host LAN address the Proxmox Traefik
+      # targets (never 0.0.0.0), adds <ip>:8812 BESIDE the loopback line; UNSET (or empty) it renders
+      # the loopback line a second time and compose collapses the pair to one binding.
+      # scripts/checks/check_lan_bindings.py proves it inert while unset and refuses any other binding.
+      # Apply the LAN firewall guard (cluster-transition B1) first; Authentik sits in front at the edge.
+      - "${WIKI_VIEWER_LAN_IP:-127.0.0.1}:8812:8080"
     networks:
       - obnet
       # ai-stack portal network (external). The viewer joins it so BOTH the
@@ -1352,6 +1364,12 @@ services:
       # unreachable = "score unavailable", and those paths refuse (P0's behaviour).
       RESEARCH_SCORER_URL: http://openbrain-research:8000
       RESEARCH_SCORER_KEY: ${MCP_ACCESS_KEY}
+      # research-workbench P2b: "queue research" and "open a gap session" from a user document call the
+      # research service with the WORKSPACE's own caller key, so the job's origin is `workspace` by
+      # the key (D17 item 1). Declare the same key in RESEARCH_CALLERS as workspace=workspace:<key>.
+      # SHIPPED INERT: a blank key turns both tools off (they answer 503 and say which variable).
+      RESEARCH_URL: http://openbrain-research:8000
+      RESEARCH_WORKSPACE_KEY: ${RESEARCH_WORKSPACE_KEY:-}
       # Direct Postgres (atomic multi-row writes — G8).
       DB_HOST: openbrain-db
       DB_PORT: "5432"

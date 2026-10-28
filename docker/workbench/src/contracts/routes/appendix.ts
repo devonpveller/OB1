@@ -19,6 +19,8 @@ import { Jobs, Session, SteerRequest, StreamEvent } from "../schemas/sessions.ts
 import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
 import { body, type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send, wire } from "./http.ts";
+import { requireIdea } from "../repo/ideas.ts";
+import { identityOf } from "../../middleware/identity.ts";
 
 const T = ["retrieval contract (appendix)"];
 
@@ -188,8 +190,11 @@ function registerKnowledgeReads(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const q = c.req.valid("query");
+      // rw-p2b-workspace: a refinery's held sources are its owner's - another user's refinery scopes nothing
+      const owner = (await identityOf(c)).sub;
+      const refinery = q.refinery_id && await requireIdea(deps.db, q.refinery_id, owner).then(() => q.refinery_id, () => null);
       return send(c, Search, await kn.search(deps.db, {
-        q: q.q.trim(), kinds: parseList(q.kinds), refinery_id: q.refinery_id || null, limit: parseLimit(q.limit, 25, 50),
+        q: q.q.trim(), kinds: parseList(q.kinds), refinery_id: refinery || null, limit: parseLimit(q.limit, 25, 50),
         evidenceOnly: parseFlag(q.evidence_only), filter: parseMetadataFilter(q.metadata_filter),
       }));
     } catch (e) {
@@ -244,7 +249,7 @@ function registerSessionReads(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       if (parseMetadataFilter(c.req.valid("query").metadata_filter)) return c.json({ error: "not found in scope" }, 404);
-      const r = await ses.session(deps.db, c.req.valid("param").id);
+      const r = await ses.session(deps.db, c.req.valid("param").id, (await identityOf(c)).sub);
       if (!r) return c.json({ error: "no session with this id" }, 404);
       return send(c, Session, r);
     } catch (e) {
@@ -265,7 +270,8 @@ function registerSessionReads(app: ContractApp, deps: ContractDeps) {
     },
   }), async (c) => {
     const id = c.req.valid("param").id;
-    const first = await ses.session(deps.db, id).catch(() => null);
+    const owner = (await identityOf(c)).sub;
+    const first = await ses.session(deps.db, id, owner).catch(() => null);
     if (!first) return c.json({ error: "no session with this id" }, 404);
     return streamSSE(c, async (s) => {
       let last = "";
@@ -276,7 +282,7 @@ function registerSessionReads(app: ContractApp, deps: ContractDeps) {
         last = data;
         if (ses.isTerminal(snap.status)) break;
         await s.sleep(deps.streamPollMs);
-        snap = await ses.session(deps.db, id);
+        snap = await ses.session(deps.db, id, owner);
       }
       await s.writeSSE({ event: "end", data: JSON.stringify({ event: "end", session_id: id }) });
     }) as never;
@@ -305,7 +311,7 @@ function registerSessionReads(app: ContractApp, deps: ContractDeps) {
     try {
       const q = c.req.valid("query");
       if (parseMetadataFilter(q.metadata_filter)) return send(c, Jobs, { jobs: [] });
-      return send(c, Jobs, await ses.jobs(deps.db, q.state || null, parseList(q.kinds), parseLimit(q.limit, 50, 200)));
+      return send(c, Jobs, await ses.jobs(deps.db, q.state || null, parseList(q.kinds), parseLimit(q.limit, 50, 200), (await identityOf(c)).sub));
     } catch (e) {
       return fail(c, e);
     }
