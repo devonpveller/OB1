@@ -78,3 +78,12 @@ test("attempt 2: a backslash is a character, never a separator - Quartz's slug a
   assert.equal(isContentDir(`notes/back${BS}dir`), true);
   assert.equal(isContentDir(`private${BS}x`), true, "a directory named private\\x is not private/");
 });
+
+// rw-p2b-workspace (D12): a user document is never a page. The vault's documents/ tree is ignored
+// at the root like private/ and templates/, so the compile, the reconciliation and the live renderer
+// never see one; documents/ deeper down (notes/documents/x.md) is an ordinary folder name.
+test("P2b: the documents/ tree is not a page (D12), at the vault root only", () => {
+  for (const p of ["documents/x.md", "documents/a/b.md", "documents/.trash/t.md"]) assert.equal(isPagePath(p), false, p);
+  assert.equal(isContentDir("documents"), false);
+  assert.equal(isPagePath("notes/documents/kept.md"), true);
+});
