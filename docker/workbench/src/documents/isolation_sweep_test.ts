@@ -43,12 +43,33 @@ async function sql<T = Record<string, any>>(text: string, args: unknown[] = []):
 }
 
 async function call(base: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
-  const r = await fetch(base + path, {
-    method, redirect: "manual",
+  // bounded: a stream (SSE) or a hung route must not stall the sweep; its partial body is still searched
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  let r: Response;
+  try {
+    r = await fetch(base + path, {
+    method, redirect: "manual", signal: ctl.signal,
     headers: { "content-type": "application/json", "x-brain-key": KEY, ...headers },
     body: body === undefined || method === "GET" || method === "HEAD" ? undefined : JSON.stringify(body),
   });
-  const text = method === "HEAD" ? "" : await r.text();
+  } catch {
+    clearTimeout(timer);
+    return { status: 0, json: {} as Record<string, any>, text: "", location: "" };
+  }
+  let text = "";
+  if (method !== "HEAD") {
+    const reader = r.body?.getReader();
+    const dec = new TextDecoder();
+    try {
+      while (reader) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += dec.decode(value, { stream: true });
+      }
+    } catch { /* aborted mid-stream: keep what arrived */ }
+  }
+  clearTimeout(timer);
   let json: Record<string, any> = {};
   try { json = JSON.parse(text); } catch { /* not json */ }
   return { status: r.status, json, text, location: r.headers.get("location") ?? "" };

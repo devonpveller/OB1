@@ -324,7 +324,7 @@ try {
   # with user B's ids as user A). Its route table is the router's own (src/app.ts, imported in the test
   # stage image with the workbench's DB_* / recipes so the import resolves; never served there).
   Write-Host '[5d] the route-wide isolation sweep (as user A, every registered route, both doors)'
-  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+  $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
     '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
