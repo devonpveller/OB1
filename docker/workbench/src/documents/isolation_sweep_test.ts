@@ -100,7 +100,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery };
 
   // ── the route table, from the router ─────────────────────────────────────────────────────────
-  const { app } = await import("../app.ts");
+  // a computed specifier: the build gate type-checks this file without the runtime /recipes mount
+  const { app } = await import(new URL("../app.ts", import.meta.url).href);
   const seen = new Set<string>();
   const routes = (app.routes as { method: string; path: string }[])
     .filter((r) => !r.path.endsWith("*") && r.method !== "ALL")
