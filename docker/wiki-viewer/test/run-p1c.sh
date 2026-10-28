@@ -105,6 +105,12 @@ rm -f "$HERE/.p1c-tamper.js"; fresh_viewer; bash "$E" wait_serving 60 >/dev/null
 [ "$c4" = 1 ] && pass C4 || fail C4 "see output"
 fi
 
+if want C4b; then
+hdr "C4b (clause 4/7 consequence): with no snapshot, a vault attachment is served from the vault at Quartz's URL; nothing outside Quartz's set is"
+o="$(T 300 bash "$HERE/attachments-probe.sh" "$IMG" "$P-att" 2>&1)"; echo "$o"
+echo "$o" | grep -q "ATTACHMENTS: PASS" && pass C4b || fail C4b "see output"
+fi
+
 if want C7; then
 hdr "C7 (clause 7): no Quartz clone, no patch step, no Quartz entry in the package manifest, no bundle build at image build; served CSS/JS = the committed asset"
 probe='for p in /quartz /quartz/quartz.config.ts /entrypoint.sh /viewer/quartz /tmp/watcher-polling.mjs /tmp/graph-api.mjs; do [ -e "$p" ] && echo "PRESENT $p"; done

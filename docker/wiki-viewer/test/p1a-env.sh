@@ -168,8 +168,8 @@ cmd_viewer() {
   # instead (the registry's adversarial cases: duplicate, tie, no default
   # export, a throwing resolve()).
   local extra=()
-  [ -n "${P1A_EXTRA_CLASS:-}" ] && extra=(-v "$HERE/fixtures/extra-class/glossary.mjs:/quartz/lib/page-classes/glossary.mjs:ro")
-  [ -n "${P1A_EXTRA_ENTRY:-}" ] && extra=(-v "$HERE/fixtures/extra-class/${P1A_EXTRA_ENTRY}:/quartz/lib/page-classes/${P1A_EXTRA_ENTRY}:ro")
+  [ -n "${P1A_EXTRA_CLASS:-}" ] && extra=(-v "$HERE/fixtures/extra-class/glossary.mjs:/viewer/lib/page-classes/glossary.mjs:ro")
+  [ -n "${P1A_EXTRA_ENTRY:-}" ] && extra=(-v "$HERE/fixtures/extra-class/${P1A_EXTRA_ENTRY}:/viewer/lib/page-classes/${P1A_EXTRA_ENTRY}:ro")
   local pub=() srv=()
   [ -n "${P1A_PUBLISH:-}" ] && pub=(-p "127.0.0.1:$PORT:8080")
   [ -n "$SRV" ] && srv=(-v "$SRV:/srv")

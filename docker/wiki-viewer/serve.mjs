@@ -69,11 +69,12 @@ const etagOf = (st) => `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toSt
 
 // A static ASSET (never a page: pages are live): the frozen bundle FIRST (this
 // image's client code), then a vault ATTACHMENT - what the retired builder's
-// Assets emitter used to copy into its snapshot. An attachment is a non-.md
-// file in a directory Quartz builds (isContentDir: never private/, templates/
-// or a dot-directory; never a dot-file), found at the URL's own path or, for
-// a name Quartz slugifies (a space, "&", "%"), through the slug index of the
-// vault's assets/ tree (Quartz's slugifyFilePath, the shared rule).
+// Assets emitter used to copy into its snapshot: a non-.md file in a directory
+// Quartz builds (isContentDir: never private/, templates/, a dot-directory or
+// the gitignored assets/ - Quartz honoured the vault .gitignore, so it never
+// published assets/ either; never a dot-file), at the URL Quartz gave it
+// (slugifyFilePath, the shared rule): the URL's own path, else the slug index
+// of the vault's attachments (built on a miss, at most once a minute).
 const statFile = async (p) => { try { const st = await stat(p); return st.isFile() ? { file: p, st } : null; } catch { return null; } };
 const isAttachmentPath = (rel) => {
   const parts = rel.split("/");
@@ -92,11 +93,20 @@ async function assetSlugIndex() {
       for (const e of ents) {
         if (e.name.startsWith(".")) continue;
         const r = `${rel}/${e.name}`;
-        if (e.isDirectory()) await walk(join(dir, e.name), r);
+        if (e.isDirectory()) { if (isContentDir(r)) await walk(join(dir, e.name), r); }
         else if (e.isFile() && isAttachmentPath(r)) map.set(slugifyFilePath(r), r);
       }
     };
-    await walk(join(VAULT, "assets"), "assets");
+    const top = async () => {
+      let ents;
+      try { ents = await readdir(VAULT, { withFileTypes: true }); } catch { return; }
+      for (const e of ents) {
+        if (e.name.startsWith(".")) continue;
+        if (e.isDirectory()) { if (isContentDir(e.name)) await walk(join(VAULT, e.name), e.name); }
+        else if (e.isFile() && isAttachmentPath(e.name)) map.set(slugifyFilePath(e.name), e.name);
+      }
+    };
+    await top();
     _assetIndex = { at: Date.now(), map, running: null };
     return map;
   })();
@@ -115,7 +125,6 @@ async function resolveAsset(urlPath) {
   if (!inVault.startsWith(VAULT + "/") || !isAttachmentPath(rel)) return null; // traversal + page-set guard
   const exact = await statFile(inVault);
   if (exact) return exact;
-  if (!rel.startsWith("assets/")) return null;
   const orig = (await assetSlugIndex()).get(rel);
   return orig ? statFile(join(VAULT, orig)) : null;
 }
