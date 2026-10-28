@@ -19,6 +19,8 @@ import { registerPanel } from "../../shell/registry";
 import type { PanelProps } from "../../shell/registry";
 import { Popover, type PopoverState, previewOf } from "./Popover";
 
+const POPOVER_GRACE_MS = 300;
+
 export const AUTOSAVE_MS = 1500;
 
 interface DocState {
@@ -41,8 +43,16 @@ export function DocumentPanel(_p: PanelProps) {
   const [editing, setEditing] = useState(false);
   const [status, setStatus] = useState("");
   const [unsaved, setUnsaved] = useState(false);
-  const [listingWarned, setListingWarned] = useState(false);
+  // a ref, not state: the editor's onChange holds the save it was created with, so state read there
+  // would stay false and every failing save would report again (reported ONCE, clause 9)
+  const listingWarned = useRef(false);
   const [popover, setPopover] = useState<PopoverState | null>(null);
+  // leaving the rendered view closes the popover only after a grace period that entering the popover
+  // cancels: the popover is not inside the article, so moving onto it (its preview, its jump) leaves
+  // the article first - an immediate close made the popover unreachable
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const keepPopover = () => { if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; } };
+  const closeSoon = () => { keepPopover(); closeTimer.current = setTimeout(() => setPopover(null), POPOVER_GRACE_MS); };
   const [tool, setTool] = useState<"research" | "gap" | "source" | null>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -75,14 +85,14 @@ export function DocumentPanel(_p: PanelProps) {
       latest.current.hash = r.data.hash;
       setHash(r.data.hash);
       setUnsaved(false);
-      if (r.status === 207 && !listingWarned) {
-        setListingWarned(true);
+      if (r.status === 207 && !listingWarned.current) {
+        listingWarned.current = true;
         setStatus("saved - the listing could not be updated; it is repaired when the workspace reconnects");
       } else setStatus("saved");
     } catch (e) {
       setStatus(e instanceof ApiError && e.status === 409 ? "conflict: the document changed elsewhere - reload it" : `not saved: ${(e as Error).message}`);
     }
-  }, [path, listingWarned]);
+  }, [path]);
 
   const selectSpan = useCallback((s: ProtectedSpan, pos: number) => {
     setState({ reference: { reference_id: s.reference_id, source_id: "", chunk_idx: null, from: { path: path ?? "", pos } } });
@@ -181,6 +191,7 @@ export function DocumentPanel(_p: PanelProps) {
     const el = e.target as HTMLElement;
     const chip = el.closest(".ws-chip") as HTMLElement | null;
     const link = el.closest(".ws-wikilink") as HTMLElement | null;
+    if (chip || link) keepPopover();
     if (chip) setPopover({ anchor: chip.getBoundingClientRect(), target: { kind: "reference", id: chip.dataset.ref! }, loading: true });
     else if (link) setPopover({ anchor: link.getBoundingClientRect(), target: { kind: link.dataset.kind!, id: link.dataset.id ?? link.getAttribute("href")!.slice(1) }, loading: true });
   };
@@ -209,7 +220,7 @@ export function DocumentPanel(_p: PanelProps) {
           title={canRefinery ? "" : "add an idea to the document to get started"}
           onClick={async () => {
             await post(`${D}/refinery/${dstate?.refinery ? "open" : "start"}`, { path });
-            await load(path);
+            setState({ documentRev: Date.now() }); // re-reads this document and every panel of it
             openPanel("refinery");
           }}
         >
@@ -226,11 +237,11 @@ export function DocumentPanel(_p: PanelProps) {
             data-testid="rendered"
             onClick={onViewClick}
             onMouseOver={onViewOver}
-            onMouseLeave={() => setPopover(null)}
+            onMouseLeave={closeSoon}
             dangerouslySetInnerHTML={{ __html: rendered.html }}
           />
         )}
-      {popover && <Popover state={popover} onClose={() => setPopover(null)} load={previewOf} />}
+      {popover && <Popover state={popover} onEnter={keepPopover} onClose={() => { keepPopover(); setPopover(null); }} load={previewOf} />}
       <span hidden data-hash={hash ?? ""} />
     </div>
   );

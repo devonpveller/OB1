@@ -317,7 +317,7 @@ await step("C9 a save whose listing update fails is reported once, the file stay
     await sql(`DROP TRIGGER IF EXISTS p2b_e2e_fault ON public.user_document_listings`);
     await sql(`DROP FUNCTION IF EXISTS public.p2b_e2e_fault()`);
   }
-  ok((await fileOf(p)).includes("renamed in a fault again"), "the file is on disk");
+  ok((await fileOf(p)).includes("(renamed in a fault) again"), "the file is on disk");
   ok((await sql(`SELECT count(*)::int AS n FROM public.research_notifications WHERE entity = $1`, [`document:${p}`]))[0].n === 1, "one notification");
   const stale = (await sql(`SELECT title FROM public.user_document_listings WHERE path = $1`, [p]))[0].title;
   ok(!stale.includes("renamed in a fault"), "the listing is stale before the reconnect");
@@ -325,7 +325,7 @@ await step("C9 a save whose listing update fails is reported once, the file stay
   await page.waitForSelector(".ws-titlebar");
   await sleep(1500);
   const fixed = (await sql(`SELECT title FROM public.user_document_listings WHERE path = $1`, [p]))[0].title;
-  ok(fixed.includes("renamed in a fault again"), `repaired: ${fixed}`);
+  ok(fixed.includes("(renamed in a fault) again"), `repaired: ${fixed}`);
   ok((await sql(`SELECT 1 FROM public.wiki_pages WHERE slug LIKE 'documents/%'`)).length === 0, "no wiki_pages row");
 });
 
@@ -395,8 +395,8 @@ await step("C12 parity: management from the documents panel - folder, create, tr
   await page.waitForSelector(`[data-panel="documents"] [data-doc="${path}"]`, { timeout: 5000 });
   await docs.locator(`[data-leaf="${path}"] .ws-leaf-label`).click();
   await docs.locator('[data-action="trash"]').click();
-  await page.waitForSelector(`[data-panel="documents"] [data-doc^="documents/.trash/"]`, { timeout: 5000 });
-  const tp = path.replace(/^documents\//, "documents/.trash/");
+  await page.waitForSelector(`[data-panel="documents"] [data-doc*="/.trash/"]`, { timeout: 5000 });
+  const tp = path.replace(/^(documents\/(?:[^./][^/]*\/)?)/, "$1.trash/"); // documents/<owner key>/.trash/...
   await docs.locator(`[data-leaf="${tp}"] .ws-leaf-label`).click();
   await docs.locator('[data-action="restore"]').click();
   await page.waitForSelector(`[data-panel="documents"] [data-doc="${path}"]`, { timeout: 5000 });
@@ -404,7 +404,12 @@ await step("C12 parity: management from the documents panel - folder, create, tr
   await page.waitForSelector(".ws-titlebar");
   await page.click('[data-nav="history"]');
   await sidePanel("history").locator(".ws-summary").click();
-  ok(await sidePanel("history").locator(".ws-leaf").count() >= 1, "history lists commits");
+  // the history is fetched after the panel opens: wait for its first leaf, then count
+  await sidePanel("history").locator(".ws-leaf").first().waitFor({ timeout: 10000 }).catch(() => {});
+  if (!(await sidePanel("history").locator(".ws-leaf").count())) {
+    const h = await api("GET", `/workbench/documents/history?path=${encodeURIComponent(path)}`);
+    throw new Error(`history lists commits: the panel shows none; the API: ${h.status} ${h.text.slice(0, 400)}; the panel: ${(await sidePanel("history").innerText()).slice(0, 200)}`);
+  }
   await page.click('[data-nav="properties"]');
   await sidePanel("properties").locator(".ws-summary").click();
   await sidePanel("properties").locator('[data-leaf="__new"] .ws-leaf-label').click();

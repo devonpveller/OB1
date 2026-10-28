@@ -75,6 +75,15 @@ $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force
 $shots = Join-Path $env:TEMP "$P-shots"; New-Item -ItemType Directory -Force $shots | Out-Null
 $stage = Join-Path $env:TEMP "$P-initdb"
 $vault = Join-Path $env:TEMP "$P-vault"; New-Item -ItemType Directory -Force $vault | Out-Null
+# the vault files of fixtures.sql's wiki_pages rows, written BEFORE the rows (older than them): a row
+# with no file is an orphan, which the viewer presents as pending and its health counts as drift
+foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page about contract retrieval fixtures.'),
+    @('content/source/11111111-1111-4111-8111-111111111111', 'Active fixture source', 'Leaf.'),
+    @('content/source/22222222-2222-4222-8222-222222222222', 'Suppressed fixture source', 'Leaf.'))) {
+  $fxPath = Join-Path $vault ($fx[0] + '.md')
+  New-Item -ItemType Directory -Force (Split-Path -Parent $fxPath) | Out-Null
+  [System.IO.File]::WriteAllText($fxPath, "---`ntitle: $($fx[1])`n---`n$($fx[2])`n", (New-Object System.Text.UTF8Encoding $false))
+}
 $frontCfg = Join-Path $env:TEMP "$P-front"; New-Item -ItemType Directory -Force $frontCfg | Out-Null
 . (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 
@@ -270,7 +279,8 @@ try {
   $null = Run-Detached "$P-front" @('-e', "WORKBENCH_KEY=$key", '-v', "${frontCfg}:/etc/caddy:ro", '-v', "$(Join-Path $repo 'portal/config/caddy/site'):/srv/site:ro", $CaddyImage)
   $null = Run-Detached "$P-chrome" @('--shm-size=1g', $ChromeImage)
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
-  Check (Wait-Http "http://$P-front:8080/__health" 90) 'the front door answers'
+  # /workspace/, not /__health: the viewer's health reports the lab wiki's reconcile state, not the door
+  Check (Wait-Http "http://$P-front:8080/workspace/" 90) 'the front door answers'
   # the new edge (operator 2026-10-28): Traefik targets the VIEWER alone - it serves /workspace and
   # forwards /workbench/* with the key server-side, dropping any key a client sends
   $edge = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
@@ -278,7 +288,7 @@ try {
     const ws = await fetch(v + '/workspace/'); const wsBody = await ws.text();
     const docs = await fetch(v + '/workbench/contract/documents', { headers: { 'x-brain-key': 'forged-by-the-client' } });
     const bare = await fetch('http://$P-wb:8000/workbench/contract/documents', { headers: { 'x-brain-key': 'forged-by-the-client' } });
-    console.log('workspace', ws.status, ws.headers.get('x-wiki-render'), wsBody.includes('id="root"'));
+    console.log('workspace', ws.status, ws.headers.get('x-wiki-render'), wsBody.includes('id=\x22root\x22'));
     console.log('forwarded', docs.status, 'direct-with-forged-key', bare.status);"
   Save 'edge-viewer.log' $edge
   Check ($edge -match 'workspace 200 workspace true') 'the viewer serves /workspace (x-wiki-render: workspace)'

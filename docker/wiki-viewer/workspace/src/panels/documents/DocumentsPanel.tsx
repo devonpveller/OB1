@@ -15,7 +15,10 @@ interface Listing {
   outbound_links: unknown[];
 }
 
-const groupOf = (p: string) => p.startsWith("documents/.trash/") ? "trash" : p.startsWith("documents/.archive/") ? "archive" : "documents";
+// documents/<owner key>/.trash/... (one directory per user, operator 2026-10-28) or a pre-P2b
+// documents/.trash/...: the same sub-tree rule as the documents API (workbench documents/paths.ts)
+const SUBTREE = /^documents\/(?:[^./][^/]*\/)?\.(trash|archive)\//;
+const groupOf = (p: string) => (SUBTREE.exec(p)?.[1] as "trash" | "archive" | undefined) ?? "documents";
 
 export function DocumentsPanel(_p: PanelProps) {
   const rev = useWorkspace((s) => s.documentRev);

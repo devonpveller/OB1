@@ -44,7 +44,7 @@ export async function previewOf(t: { kind: string; id: string }): Promise<Previe
   return { title: t.id, text: "", meta: t.kind };
 }
 
-export function Popover(props: { state: PopoverState; onClose: () => void; load: (t: { kind: string; id: string }) => Promise<Preview> }) {
+export function Popover(props: { state: PopoverState; onClose: () => void; onEnter?: () => void; load: (t: { kind: string; id: string }) => Promise<Preview> }) {
   const [p, setP] = useState<Preview | null>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
@@ -63,7 +63,7 @@ export function Popover(props: { state: PopoverState; onClose: () => void; load:
     props.onClose();
   };
   return (
-    <div className="ws-popover ws-link-popover" style={style} data-testid="popover" onMouseLeave={props.onClose}>
+    <div className="ws-popover ws-link-popover" style={style} data-testid="popover" onMouseEnter={props.onEnter} onMouseLeave={props.onClose}>
       {!p && !err && <span className="ws-muted">loading ...</span>}
       {err && <span className="ws-muted">{err}</span>}
       {p && (

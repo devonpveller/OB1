@@ -19,6 +19,9 @@ interface Flag {
 
 export function RefineryPanel(p: PanelProps) {
   const path = useWorkspace((s) => s.documentPath);
+  // the document changed on the server (the toolbar started / reopened its refinery): re-read, since
+  // an open panel is not remounted by openPanel
+  const rev = useWorkspace((s) => s.documentRev);
   const [dstate, setDstate] = useState<any>(null);
   const [idea, setIdea] = useState<any>(null);
   const [msg, setMsg] = useState("");
@@ -39,7 +42,7 @@ export function RefineryPanel(p: PanelProps) {
     return () => {
       live = false;
     };
-  }, [path, ideaParam, tick]);
+  }, [path, ideaParam, tick, rev]);
   const refresh = () => setTick((t) => t + 1);
 
   const leaves = useMemo<Leaf[]>(() => {
