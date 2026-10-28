@@ -206,7 +206,8 @@ services:
       - ../recipes:/recipes:ro
     networks: [pnet]
 
-  # The actual Quartz viewer — builds the overlay (.tsx) components and renders
+  # The live renderer (research-workbench P1c: no Quartz in the image - the client
+  # bundle is the frozen wiki-viewer/bundle/) - renders
   # the seeded wiki pages. Shares the preview-wiki volume (read-only).
   preview-viewer:
     build:

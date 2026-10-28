@@ -11,8 +11,8 @@
  * (explorer root, graph container, backlinks list, TOC, popover anchors) and
  * `x-wiki-render: db` are checked on every URL too (exit 1 on a miss).
  *
- * Usage (inside wt-rw-p1a-render-net, the built snapshot mounted read-only):
- *   node parity-diff.mjs --base http://wt-rw-p1a-render-viewer:8080 --built /srv/current [--show] [--urls /a,/b]
+ * Usage (inside wt-rw-p1a-render-net, the reference build mounted read-only - p1a-env.sh ref):
+ *   node parity-diff.mjs --base http://wt-rw-p1a-render-viewer:8080 --built /ref [--show] [--urls /a,/b]
  * --show prints every hunk, explained or not; --urls diffs only those URLs of
  * the list (a runner case that changes one page's state).
  * "alias redirect" URLs (attempt 3) are Quartz's AliasRedirects documents: the
@@ -23,7 +23,7 @@ import { join } from "node:path";
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i >= 0 ? process.argv[i + 1] : d; };
 const BASE = arg("--base", `http://${process.env.P1A_PREFIX || "wt-rw-p1a-render"}-viewer:8080`).replace(/\/+$/, "");
-const BUILT = arg("--built", "/srv/current");
+const BUILT = arg("--built", "/ref");
 const SHOW = process.argv.includes("--show");
 const ONLY_URLS = arg("--urls", "") ? new Set(arg("--urls", "").split(",").map((x) => x.trim()).filter(Boolean)) : null;
 

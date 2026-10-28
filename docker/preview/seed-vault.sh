@@ -15,7 +15,8 @@
 #   A real `git init -b main` plus a commit of the seed is what makes the vault
 #   a working git-backed vault instead of a directory with a .git in it.
 #
-# WHAT THIS DOES NOT FIX - DO NOT GO HUNTING IT (checked 2026-09-05)
+# WHAT THIS DID NOT FIX (checked 2026-09-05; HISTORICAL since research-workbench P1c -
+#   the viewer image runs no Quartz and has no entrypoint.sh, so the warning below is gone)
 #   Quartz still logs `isn't yet tracked by git, dates will be inaccurate` for
 #   every page after this seeder has run. That was checked with the vault a
 #   genuine repo on `main` (a real commit; `git show HEAD:index.md` works) and

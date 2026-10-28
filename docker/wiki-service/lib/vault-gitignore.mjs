@@ -35,6 +35,9 @@ export const REQUIRED_IGNORES = [
   // their write-then-rename temp files, left only by a crash mid-write
   ".structural-failures.json.tmp-*",
   ".unsynced-rows.json.tmp-*",
+  // writeWikiPage's hidden staged updates (".<name>.wp-staged-<pid>"), left only
+  // by a hard kill between staging and rename; swept at start (staged-sweep.mjs)
+  ".*.wp-staged-*",
 ];
 
 const HEADER = "# openbrain-wiki: state files the wiki-service and its recipes write (never committed)";

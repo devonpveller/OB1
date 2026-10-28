@@ -21,8 +21,8 @@
 import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-const { fromHtml } = await import("/quartz/node_modules/hast-util-from-html/index.js");
-const { visit } = await import("/quartz/node_modules/unist-util-visit/index.js");
+const { fromHtml } = await import("/viewer/node_modules/hast-util-from-html/index.js");
+const { visit } = await import("/viewer/node_modules/unist-util-visit/index.js");
 
 if (!/^wt-/.test(process.env.P1A_DISPOSABLE || "")) { console.error("refusing: not the disposable env"); process.exit(2); }
 const OB = (process.env.OPEN_BRAIN_URL || "").replace(/\/+$/, "");

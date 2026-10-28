@@ -1128,10 +1128,12 @@ services:
   # Wiki compiler + scheduler + on-demand trigger. Runs the (B.2/B.3-
   # extended) entity-wiki recipe --batch into the shared wiki volume,
   # then git-commits (D16: local commits only — no remote, no secrets).
-  # Compiles: on boot, deterministically at WIKI_RECOMPILE_HOUR local
-  # time daily (default 01:00 — set TZ so that = your 1am), whenever new
-  # research/sources/thoughts settle (change-watch, debounced), and on
-  # POST /recompile (the wiki_trigger_recompile MCP tool).
+  # Compiles are DEMAND-DRIVEN and coalesced (research-workbench P1c,
+  # operator 2026-09-25): on boot, whenever new research/sources/thoughts
+  # settle (change-watch, debounced), and on POST /recompile (the
+  # wiki_trigger_recompile MCP tool). No daily recompile; nothing waits for
+  # the viewer to be idle. Its LLM calls carry the wiki's own caller key
+  # (OB_WIKI_LLM_KEY), which llm-queue ranks below interactive callers.
   # obnet (openbrain-rest) + llm-net (local-small / local-embed).
   openbrain-wiki:
     # wiki group (sl-ob1-profiles). The vault compiler - it PRODUCES the
@@ -1166,13 +1168,10 @@ services:
       WIKI_OUT_DIR: /wiki/content
       WIKI_GIT_DIR: /wiki
       RECIPE_PATH: /recipes/entity-wiki/generate-wiki.mjs
-      # ── Wiki compile schedule (override via .env / shell, no edits
-      #    needed): WIKI_TZ, WIKI_RECOMPILE_HOUR, WIKI_WATCH_* ──────────
-      # Timezone the daily hour is interpreted in (IANA name; handles
-      # EST/EDT automatically). Default America/New_York (US Eastern).
+      # ── Wiki compile pacing (override via .env / shell, no edits
+      #    needed): WIKI_TZ, WIKI_WATCH_* ──────────────────────────────
+      # Timezone of the service's log and commit times (IANA name).
       TZ: ${WIKI_TZ:-America/New_York}
-      # Deterministic daily compile at this LOCAL hour (0-23), in TZ above.
-      WIKI_RECOMPILE_HOUR: ${WIKI_RECOMPILE_HOUR:-1}
       # Change-driven recompile: research/sources land → debounced compile
       # a few minutes after activity settles (no fixed-interval GPU churn).
       WIKI_WATCH_ENABLED: ${WIKI_WATCH_ENABLED:-true}
@@ -1191,11 +1190,8 @@ services:
       # minutes (0 = drain only on organic compiles). Keeps the backlog
       # converging on quiet days (operator: "working towards a completed state").
       WIKI_BACKFILL_CONTINUE_MIN: ${WIKI_BACKFILL_CONTINUE_MIN:-10}
-      # Interaction-aware drain (operator 2026-08-24): the bulk backfill slice
-      # DEFERS while the viewer served a real user request within this many
-      # minutes, and retries 15min after their last interaction. Organic
-      # compile work is unaffected. 0 disables the gate.
-      WIKI_BACKFILL_IDLE_MIN: ${WIKI_BACKFILL_IDLE_MIN:-15}
+      # (research-workbench P1c: the viewer-idle gate WIKI_BACKFILL_IDLE_MIN is
+      # gone - "purely performance-based", operator 2026-09-25 20:27.)
       # Recipe-execution timeouts (minutes). A FULL compile of the whole
       # graph plus topic synthesis can outrun 1-2h once the thought corpus
       # grows; killing pexec mid-write leaves an unstaged dirty tree that
@@ -1234,12 +1230,15 @@ services:
       - llm-net
     restart: unless-stopped
 
-  # Read-only Quartz 4 viewer (D15). Renders the compiled markdown +
-  # [[wikilinks]] + graph into a static site, rebuilding on change.
-  # Content is the shared wiki volume (read-only); fully regenerable.
+  # The wiki viewer (D15; research-workbench P1a-P1c): the LIVE RENDERER.
+  # Every page is rendered from wiki_pages with Quartz's chrome; the client
+  # bundle is a FROZEN committed asset (wiki-viewer/bundle/, D7). Nothing in
+  # this container builds anything (no Quartz, no builder, no snapshots, no
+  # nightly rebuild), so a redeploy serves pages at once. The vault volume is
+  # read-only here (attachments + the reconciliation's file side).
   openbrain-wiki-viewer:
-    # wiki group (sl-ob1-profiles). The Quartz renderer of the vault the
-    # compiler writes; depends_on openbrain-wiki, same profile.
+    # wiki group (sl-ob1-profiles). The renderer of the pages the compiler
+    # writes; depends_on openbrain-wiki, same profile.
     profiles: ["wiki"]
     build:
       context: ./wiki-viewer
@@ -1258,22 +1257,9 @@ services:
     depends_on:
       - openbrain-wiki
     environment:
-      # Quartz's `build --serve` watcher uses inotify by default, which does NOT
-      # reliably fire for the compiler's writes across the /quartz/content→/wiki
-      # symlink to a Docker volume owned by openbrain-wiki (cross-container). That
-      # left the served build refreshing only at the nightly clean rebuild. Poll
-      # instead so intraday content updates re-render within seconds and the
-      # idle-swap publishes them.
-      CHOKIDAR_USEPOLLING: "true"
-      CHOKIDAR_INTERVAL: "${WIKI_VIEWER_POLL_INTERVAL_MS:-5000}"
-      # Quartz's watcher polls at this interval (patches/watcher-polling.mjs).
-      # 10s -> 3s takes ~7s off the time a NEW note waits to be built; the
-      # stat load is trivial next to the emit that follows.
-      WIKI_WATCH_POLL_MS: "${WIKI_WATCH_POLL_MS:-3000}"
-      # A cold full build of the whole vault holds every parsed AST in memory at
-      # once; the default ~2GB node heap OOMs as the vault grows (the OWUI
-      # knowledge-collection migration pushed it past 12k pages / ~200MB). Give
-      # the Quartz builder real headroom (host has ~94GB). Configurable.
+      # Heap cap of the renderer (its site index holds one entry per page;
+      # rw-p1b-ready ran 401k synthetic rows under 6 GB). The value is the one
+      # the retired Quartz builder needed, kept as a cap (a cap, not a reservation).
       NODE_OPTIONS: "--max-old-space-size=${WIKI_VIEWER_HEAP_MB:-20480}"
       # research-workbench P1b (D13 item 7): the page chrome's notifications
       # strip reads the retrieval contract's read endpoint
@@ -1290,14 +1276,9 @@ services:
       # path so Quartz resolves `![](assets/<id>/img.png)` links; read-only
       # here (the workbench is the writer).
       - wiki-assets:/wiki/assets:ro
-      # The builder's published snapshots (/srv/current: its copy of the client
-      # bundle, and the built pages the parity work diffs against). Since
-      # research-workbench P1b the viewer does NOT need it to serve: pages are
-      # rows and the bundle falls back to the copy baked into the image, so an
-      # empty or lost /srv serves every page at once (no "Building…" splash).
-      # Derived data (rebuildable) — deliberately NOT backed up. P1c removes
-      # the builder and this volume's last purpose.
-      - wiki-viewer-srv:/srv
+      # (research-workbench P1c: the builder's snapshot volume wiki-viewer-srv
+      # is no longer mounted or declared - nothing writes or reads /srv. The
+      # operator removes the old volume after the rollback window.)
     ports:
       - "127.0.0.1:8812:8080"
     networks:
@@ -1818,9 +1799,6 @@ volumes:
   # NOT mounted into openbrain-wiki (the git committer), so binaries never enter
   # the vault git history.
   wiki-assets:
-  # Viewer's published snapshots (/srv) — persists across recreates so a
-  # deploy never shows the "Building…" splash. Derived, rebuildable.
-  wiki-viewer-srv:
 
 networks:
   # Normal bridge (user-authorized 2026-05-15): required so the host can

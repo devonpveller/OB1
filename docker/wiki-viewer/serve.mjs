@@ -8,21 +8,18 @@
 // not answer is ONE front-end screen for every URL (x-wiki-render:
 // connecting|unreachable). Nothing is rendered from a vault file.
 //
-// READINESS (research-workbench P1b): the viewer serves the moment it
+// READINESS (research-workbench P1b, P1c): the viewer serves the moment it
 // listens. The client bundle and static assets (index.css, prescript.js,
-// postscript.js, static/*) come from the BAKED bundle the image carries
-// (/quartz/bundle, emitted by the image's own Quartz at build time - the
-// bundle does not depend on the vault), and only a file the image does not
-// carry (a vault attachment) from the published Quartz snapshot (/srv/current,
-// written by entrypoint.sh's builder while WIKI_BUILDER=1). So an EMPTY /srv
-// serves every page, and a STALE /srv - a snapshot an older image's builder
-// left on the volume - can never put a retired client bundle in front of a
-// reader (rw-p1b-ready fix round 1, tester attempt 1 defect 2: the old order
-// served the pre-P1b postscript.js, which fetched the whole-vault index,
-// forever with WIKI_BUILDER=0 and until the first new build with =1). There
-// is no "Building the wiki" splash and no 503 for readiness. Health is /__health (the compose
-// healthcheck): database up, reconciliation at zero drift, no broken page
-// class, no render error. P1c freezes the bundle and removes the builder.
+// postscript.js, static/*) are the FROZEN bundle (/viewer/bundle: committed
+// repo files, D7 - emitted once by the Quartz freeze tool, freeze/; the image
+// carries no Quartz). A file the bundle does not carry is a vault attachment,
+// read from the vault itself (/wiki, read-only: assets/<id>/<name> and any
+// non-page file in a content directory). There is no builder, no snapshot
+// volume (/srv), no swap loop and no nightly rebuild (P1c): nothing in this
+// container rebuilds anything, so a redeploy serves pages at once. Health is
+// /__health (the compose healthcheck): the site index warm (P1c: the cold
+// build is paid at start, not by the first reader), database up,
+// reconciliation at zero drift, no broken page class, no render error.
 //
 // The nav (P1b, E3): the explorer reads ONE folder at a time from /__nav,
 // served by the NAV WORKER (lib/nav-worker.mjs: its own thread, heap and port
@@ -34,14 +31,16 @@
 // editor's link autocomplete); no published file backs it any more.
 //
 // Kept from the 2026-08-23 perf rework: async I/O, ETag/Last-Modified
-// validators with 304s on assets, throttled last-access bookkeeping (the
-// compiler's drain gate reads /__last-access). P1b adds ETag/304 on pages.
+// validators with 304s on assets. P1b adds ETag/304 on pages. P1c removes the
+// last-access bookkeeping (/__last-access): no background process waits for
+// the viewer to be idle any more (operator 2026-09-25 20:27).
 import http from "node:http";
 import { createReadStream } from "node:fs";
-import { stat, writeFile } from "node:fs/promises";
+import { stat, readdir } from "node:fs/promises";
 import { join, normalize, extname } from "node:path";
 import { createHash } from "node:crypto";
-import { getNavIndex, navIndexEnabled, indexChunks } from "./lib/nav-index.mjs";
+import { getNavIndex, navIndexEnabled, indexChunks, navIndexWarm } from "./lib/nav-index.mjs";
+import { isContentDir, slugifyFilePath } from "./lib/shared/quartz-slug.mjs";
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
 import { stripHtml, listDocument, ACK_COOKIE, safeBack } from "./lib/notifications.mjs";
@@ -50,8 +49,7 @@ import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-cla
 import { dbState, onConnect, startProbe, probe } from "./lib/wiki-db.mjs";
 import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
 
-const ROOT = process.env.WIKI_SRV_CURRENT || "/srv/current"; // a symlink -> /srv/build-N (swapped atomically), or absent
-const BUNDLE = process.env.WIKI_BUNDLE_DIR || "/quartz/bundle"; // the image's baked bundle (Dockerfile)
+const BUNDLE = process.env.WIKI_BUNDLE_DIR || "/viewer/bundle"; // the frozen bundle (committed, D7)
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const VAULT = process.env.WIKI_VAULT_DIR || "/wiki";
 const MIME = {
@@ -69,21 +67,57 @@ const REBUILDABLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".xml", ".
 const cacheControl = (ext) => (REBUILDABLE.has(ext) ? "no-cache, must-revalidate" : "public, max-age=86400");
 const etagOf = (st) => `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`;
 
-// A static ASSET (never a page: pages are live): the image's baked bundle
-// FIRST (it is this image's client code; a builder-made copy of it is the same
-// bytes - B9), then the published snapshot for what only the vault has.
+// A static ASSET (never a page: pages are live): the frozen bundle FIRST (this
+// image's client code), then a vault ATTACHMENT - what the retired builder's
+// Assets emitter used to copy into its snapshot. An attachment is a non-.md
+// file in a directory Quartz builds (isContentDir: never private/, templates/
+// or a dot-directory; never a dot-file), found at the URL's own path or, for
+// a name Quartz slugifies (a space, "&", "%"), through the slug index of the
+// vault's assets/ tree (Quartz's slugifyFilePath, the shared rule).
+const statFile = async (p) => { try { const st = await stat(p); return st.isFile() ? { file: p, st } : null; } catch { return null; } };
+const isAttachmentPath = (rel) => {
+  const parts = rel.split("/");
+  const name = parts.at(-1);
+  return !!name && !name.startsWith(".") && !name.toLowerCase().endsWith(".md") && isContentDir(parts.slice(0, -1).join("/"));
+};
+const ASSET_INDEX_MS = Math.max(5_000, Number(process.env.WIKI_ASSET_INDEX_MS || "60000"));
+let _assetIndex = { at: 0, map: new Map(), running: null };
+async function assetSlugIndex() {
+  if (Date.now() - _assetIndex.at < ASSET_INDEX_MS) return _assetIndex.map;
+  _assetIndex.running ??= (async () => {
+    const map = new Map();
+    const walk = async (dir, rel) => {
+      let ents;
+      try { ents = await readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of ents) {
+        if (e.name.startsWith(".")) continue;
+        const r = `${rel}/${e.name}`;
+        if (e.isDirectory()) await walk(join(dir, e.name), r);
+        else if (e.isFile() && isAttachmentPath(r)) map.set(slugifyFilePath(r), r);
+      }
+    };
+    await walk(join(VAULT, "assets"), "assets");
+    _assetIndex = { at: Date.now(), map, running: null };
+    return map;
+  })();
+  return _assetIndex.running;
+}
 async function resolveAsset(urlPath) {
   let p;
   try { p = decodeURIComponent(urlPath.split("?")[0].split("#")[0]); } catch { return null; }
-  for (const root of [BUNDLE, ROOT]) {
-    const base = normalize(join(root, p));
-    if (!base.startsWith(root + "/")) continue; // path traversal guard
-    try {
-      const st = await stat(base);
-      if (st.isFile()) return { file: base, st };
-    } catch { /* next root */ }
+  const inBundle = normalize(join(BUNDLE, p));
+  if (inBundle.startsWith(BUNDLE + "/")) {
+    const hit = await statFile(inBundle);
+    if (hit) return hit;
   }
-  return null;
+  const rel = p.replace(/^\/+/, "");
+  const inVault = normalize(join(VAULT, rel));
+  if (!inVault.startsWith(VAULT + "/") || !isAttachmentPath(rel)) return null; // traversal + page-set guard
+  const exact = await statFile(inVault);
+  if (exact) return exact;
+  if (!rel.startsWith("assets/")) return null;
+  const orig = (await assetSlugIndex()).get(rel);
+  return orig ? statFile(join(VAULT, orig)) : null;
 }
 
 // A page URL for sure: no extension (Quartz pretty URLs), a folder URL, or a
@@ -98,16 +132,6 @@ function isPageUrl(urlPath) {
   return !ext || ext === ".html" || p.endsWith("/");
 }
 const extOf = (urlPath) => extname(urlPath.split("?")[0].split("#")[0]).toLowerCase();
-
-let lastAccessMs = 0;
-let _lastAccessWrote = 0;
-function markAccess() {
-  const now = Date.now();
-  lastAccessMs = now;
-  if (now - _lastAccessWrote < 5000) return;
-  _lastAccessWrote = now;
-  writeFile("/tmp/last-access", String(Math.floor(now / 1000))).catch(() => {});
-}
 
 function notModified(req, st) {
   const inm = req.headers["if-none-match"];
@@ -157,6 +181,10 @@ function health() {
   const db = dbState();
   const rep = _reconcile.report;
   const reasons = [];
+  // P1c (rw-p1b-ready review A): the first site-index snapshot is built at
+  // start (warmNav below), so a redeploy reports healthy only once a reader's
+  // first page no longer pays the cold build.
+  if (navIndexEnabled() && !navIndexWarm()) reasons.push("site index warming");
   if (db.state !== "up") reasons.push(`database ${db.state}`);
   if (_reconcile.error) reasons.push(`reconciliation cannot check: ${_reconcile.error}`);
   else if (!rep) reasons.push("reconciliation not yet run");
@@ -185,7 +213,7 @@ function health() {
     brokenPageClasses: broken,
     renderErrors: re,
     navWorker: { up: _nav.up, port: NAV_PORT, restarts: _nav.restarts, lastExit: _nav.lastExit },
-    builder: process.env.WIKI_BUILDER !== "0",
+    siteIndex: { warm: navIndexWarm(), enabled: navIndexEnabled() },
   };
 }
 
@@ -236,19 +264,12 @@ async function proxyNav(req, res) {
 async function handle(req, res) {
   const t0 = process.hrtime.bigint();
   const url = req.url || "/";
-  // Machine probes - must NOT count as user interaction.
-  if (url === "/__last-access") {
-    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-    res.end(JSON.stringify({ ts: lastAccessMs }));
-    return;
-  }
   if (url.split("?")[0] === "/__health") {
     const hb = health();
     res.writeHead(hb.status === "ok" ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify(hb));
     return;
   }
-  markAccess();
   const path = url.split("?")[0];
   if (path === "/__nav") return proxyNav(req, res);
   // The notifications strip's acknowledgement and full list (P1b, D13 item 7).
@@ -342,6 +363,19 @@ await loadPageClassDir();
 console.log(`[wiki-viewer] page classes: ${pageClasses().map((e) => `${e.name}@${e.version}/p${e.priority}`).join(", ")}`);
 // Repair pass on every (re)connect; periodic check as the health probe.
 startNavWorker();
+// Warm THIS thread's site index now (rw-p1b-ready review A, P1c): the cold
+// build (keyset walk + site index) used to wait for the first reader after a
+// start - 26-29 s at 401k rows. Started here it overlaps the healthcheck's
+// start period; /__health says "site index warming" until it lands. Retried
+// while the database is not up yet (getNavIndex returns null then).
+(function warmNav(attempt = 0) {
+  if (!navIndexEnabled()) return;
+  const retry = () => setTimeout(() => warmNav(attempt + 1), Math.min(10_000, 1_000 * (attempt + 1))).unref();
+  getNavIndex().then((n) => {
+    if (n) console.log(`[wiki-viewer] site index warm after start (attempt ${attempt + 1})`);
+    else retry();
+  }).catch(retry);
+})();
 onConnect((why) => runReconcile(why, REPAIR));
 startProbe();
 setInterval(() => { if (dbState().state === "up") runReconcile("periodic", false); }, RECONCILE_MS).unref();
@@ -354,5 +388,9 @@ http
       res.end("internal error");
     });
   })
-  .listen(PORT, () => console.log(`[wiki-viewer] live renderer on :${PORT} (WIKI_BUILDER=${process.env.WIKI_BUILDER ?? "1"})`));
+  .listen(PORT, () => console.log(`[wiki-viewer] live renderer on :${PORT} (frozen bundle ${BUNDLE}; no builder)`));
+
+// node is PID 1 (no shell entrypoint since P1c): exit on a stop signal
+// instead of ignoring it until Docker's kill timeout.
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => process.exit(0));
 

@@ -1,0 +1,5 @@
+# research-workbench P1c (D7): the frozen Quartz assets are committed BYTE FOR BYTE
+# (their sha256 is the served bytes, bundle.sha256) - no line-ending conversion.
+bundle/** -text
+lib/chrome-static.mjs -text
+bundle.sha256 -text

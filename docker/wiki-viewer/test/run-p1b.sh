@@ -41,6 +41,8 @@ churn() { # round 2: a new thought on an entity + the entity bumped, so the next
             UPDATE entities SET updated_at = now(), last_seen_at = now() WHERE id = $ent;" >/dev/null
 }
 viewer_fresh() { # [image] [WIKI_BUILDER]: a viewer on a NEW, EMPTY /srv volume
+  # (rw-p1c-retire: the image has no builder and never reads /srv; the second argument only matters to a
+  # pre-P1c image - a RED run - and the empty volume stays mounted to prove nothing writes it)
   docker rm -f -v "$P-viewer" >/dev/null 2>&1 || true
   docker volume rm "$P-srv-empty" >/dev/null 2>&1 || true
   P1A_SRV="$P-srv-empty" P1A_VIEWER_IMG="${1:-$IMG}" WIKI_BUILDER="${2:-0}" bash "$E" viewer >/dev/null
@@ -75,7 +77,7 @@ o="$(chk urls --base "$FRONT" 2>&1)"; echo "$o" | tail -20
 echo "$o" | grep -q "URLS: PASS" || b1=0
 # the bundle answered from the image's baked copy: the same bytes
 for f in index.css prescript.js postscript.js; do
-  a="$(docker exec "$P-viewer" sha256sum "/quartz/bundle/$f" | cut -c1-16)"; s="$(echo "$o" | grep -E "^asset 200 /$f " | sed -E 's/.*sha256=([0-9a-f]+).*/\1/')"
+  a="$(docker exec "$P-viewer" sha256sum "/viewer/bundle/$f" | cut -c1-16)"; s="$(echo "$o" | grep -E "^asset 200 /$f " | sed -E 's/.*sha256=([0-9a-f]+).*/\1/')"
   echo "baked $f $a served $s"; [ -n "$a" ] && [ "$a" = "$s" ] || { echo "x $f not the baked bundle"; b1=0; }
 done
 # WIKI_BUILDER=1 on an empty /srv: served BEFORE the builder publishes anything
@@ -240,17 +242,17 @@ fi
 if want B9; then
 hdr "B9 (E3): graphIndex.json readiness retired - no derive step, no published index, the live index answers from the db, no file fallback; no splash code"
 b9=1
-docker run --rm --entrypoint sh "$IMG" -c 'test ! -e /derive-graph-index.mjs && echo "no /derive-graph-index.mjs"; grep -c "node /derive-graph-index" /entrypoint.sh || true; grep -cE "bundleReady|const SPLASH|const REQUIRED" /quartz/serve.mjs || true; ls /quartz/bundle /quartz/bundle/static | head -20' > "$RUNDIR/b9" 2>&1
+# (rw-p1c-retire: no /entrypoint.sh at all - line 2 is then 0 - and the server lives in /viewer)
+docker run --rm --entrypoint sh "$IMG" -c 'test ! -e /derive-graph-index.mjs && echo "no /derive-graph-index.mjs"; if [ -e /entrypoint.sh ]; then grep -c "node /derive-graph-index" /entrypoint.sh || true; else echo 0; fi; grep -cE "bundleReady|const SPLASH|const REQUIRED" /viewer/serve.mjs || true; ls /viewer/bundle /viewer/bundle/static | head -20' > "$RUNDIR/b9" 2>&1
 cat "$RUNDIR/b9"
 [ "$(sed -n 2p "$RUNDIR/b9")" = 0 ] && [ "$(sed -n 3p "$RUNDIR/b9")" = 0 ] && grep -q 'no /derive-graph-index.mjs' "$RUNDIR/b9" || { echo "x a builder-era readiness remnant in the image"; b9=0; }
 g="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('$FRONT/static/graphIndex.json').then(async r=>console.log(r.status, r.headers.get('x-wiki-nav'), (await r.text()).length))")"; echo "graphIndex.json: $g"
 echo "$g" | grep -q '^200 db ' || { echo "x the live index"; b9=0; }
-# the builder-on viewer publishes NO graphIndex.json
-viewer_fresh "$IMG" 1; T 400 bash "$E" wait_built 360 >/dev/null 2>&1
+# nothing publishes a graphIndex.json (rw-p1c-retire: nothing publishes anything - the empty /srv stays empty)
+viewer_fresh "$IMG" 1; T 400 bash "$E" wait_serving 360 >/dev/null 2>&1; sleep 10
 pub="$(docker exec "$P-viewer" sh -c 'ls /srv/current/static/ 2>/dev/null | tr "\n" " "; test -e /srv/current/static/graphIndex.json && echo PUBLISHED || echo none')"; echo "published static/: $pub"
 echo "$pub" | grep -q 'none$' || { echo "x a graph index was published"; b9=0; }
-# the built bundle and the baked one: same bytes? (informational - which one serves is in B1)
-for f in index.css prescript.js postscript.js; do echo "$f built=$(docker exec "$P-viewer" sha256sum "/srv/current/$f" | cut -c1-16) baked=$(docker exec "$P-viewer" sha256sum "/quartz/bundle/$f" | cut -c1-16)"; done
+echo "/srv entries after the start: $(docker exec "$P-viewer" sh -c 'ls -A /srv | wc -l')"
 docker stop "$P-db" >/dev/null; sleep 4
 g2="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('$FRONT/static/graphIndex.json').then(async r=>console.log(r.status, r.headers.get('x-wiki-nav')))")"; echo "graphIndex.json with the db stopped (after the cache): $g2"
 docker start "$P-db" >/dev/null; T 120 bash -c "until docker exec $P-db pg_isready -U postgres -q 2>/dev/null; do sleep 1; done"
@@ -259,7 +261,7 @@ viewer_fresh "$IMG" 0; wait_db_page 90
 fi
 
 if want B13; then
-hdr "B13 (fix round 1, tester attempt 1 defect 2): a STALE /srv/current (an older image's snapshot on the volume) never serves the client bundle - the image's baked bundle wins, WIKI_BUILDER=0 and =1"
+hdr "B13 (fix round 1, tester attempt 1 defect 2; rw-p1c-retire): a STALE /srv/current (an older image's snapshot on the volume) never serves the client bundle - the image's frozen bundle wins - and since P1c nothing at all is served from it"
 b13=1
 stale_vol() { # a volume holding a pre-P1b-shaped snapshot: /srv/current -> build-1 with a retired bundle
   docker rm -f -v "$P-viewer" >/dev/null 2>&1 || true
@@ -274,20 +276,18 @@ bundle_check() { # [image] [builder] [label]: the served bytes of the three file
   echo "$lab WIKI_BUILDER=$bld /srv/current -> $cur at the check"
   [ "$cur" = /srv/build-1 ] || { echo "x the builder had already replaced the stale snapshot: inconclusive"; ok=0; }
   for f in index.css prescript.js postscript.js; do
-    baked="$(docker exec "$P-viewer" sha256sum "/quartz/bundle/$f" | cut -c1-16)"
+    baked="$(docker exec "$P-viewer" sha256sum "/viewer/bundle/$f" | cut -c1-16)"
     served="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('$FRONT/$f').then(async r=>{const b=Buffer.from(await r.arrayBuffer());console.log(r.status, require('crypto').createHash('sha256').update(b).digest('hex').slice(0,16), b.includes('STALE-SNAPSHOT')?'STALE':'fresh')})")"
     echo "$lab WIKI_BUILDER=$bld $f baked=$baked served=$served"
     echo "$served" | grep -q "^200 $baked fresh$" || ok=0
   done
-  # what only the vault snapshot has still serves from it (WIKI_BUILDER=0: with the builder on, its first
-  # publish replaces the stale snapshot within seconds, so the file is legitimately gone then)
-  if [ "$bld" = 0 ]; then
-    v="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('$FRONT/static/stale-only.txt').then(async r=>console.log(r.status,(await r.text()).trim()))")"; echo "$lab snapshot-only file: $v"
-    echo "$v" | grep -q '^200 stale$' || ok=0
-  fi
+  # rw-p1c-retire: what only the snapshot has is NOT served any more - the viewer reads no /srv (a vault
+  # attachment comes from the vault itself); a pre-P1c image (RED) still answers 200 stale here
+  v="$(docker run --rm --network "$NET" --entrypoint node "$IMG" -e "fetch('$FRONT/static/stale-only.txt').then(async r=>console.log(r.status,(await r.text()).trim().slice(0,20)))")"; echo "$lab snapshot-only file: $v"
+  echo "$v" | grep -q '^404 ' || ok=0
   echo "$ok"
 }
-for bld in 0 1; do o="$(bundle_check "$IMG" "$bld" GREEN)"; echo "$o" | sed '$d'; [ "$(echo "$o" | tail -1)" = 1 ] || { echo "x WIKI_BUILDER=$bld: a stale /srv/current served the client bundle"; b13=0; }; done
+for bld in 0; do o="$(bundle_check "$IMG" "$bld" GREEN)"; echo "$o" | sed '$d'; [ "$(echo "$o" | tail -1)" = 1 ] || { echo "x WIKI_BUILDER=$bld: a stale /srv/current served the client bundle"; b13=0; }; done
 if [ -n "${P1B_RED_IMG:-}" ]; then
   echo "-- RED: the same check against $P1B_RED_IMG (WIKI_BUILDER=0)"; o="$(bundle_check "$P1B_RED_IMG" 0 RED)"; echo "$o" | sed '$d'
 fi

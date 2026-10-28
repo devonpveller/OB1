@@ -84,6 +84,10 @@ export function configureNavIndex({ navOnly = false } = {}) {
 export function navIndexStatus() {
   return { ..._status };
 }
+/** True once the first snapshot exists (P1c: serve.mjs warms it at start; /__health is "warming" until then). */
+export function navIndexWarm() {
+  return _cache !== null;
+}
 
 export function navIndexEnabled() {
   return ENABLED;

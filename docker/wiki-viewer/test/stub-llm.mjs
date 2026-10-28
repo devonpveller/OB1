@@ -8,7 +8,9 @@
  *   GET  /health/liveliness     200 when models are healthy, else 503
  * Control (test only):
  *   POST /__stub/mode  {"mode": <mode>, "n": 3, "modelsOk": true, "model": "stub-model"}
- *   GET  /__stub/state -> {mode, n, modelsOk, chatCalls, modelsCalls, livelinessCalls, perTask}
+ *   GET  /__stub/state -> {mode, n, modelsOk, chatCalls, modelsCalls, livelinessCalls, perTask, callers}
+ *   callers (rw-p1c-retire): chat + embedding calls per Authorization bearer - which caller key the
+ *   wiki's LLM calls carry (fixture keys only; this stub never sees a real key)
  * Modes: ok | flaky503 (503 for the first n calls) | fail (503 always) |
  *   badparse (a reply with no page heading) - and, from the attempt-1
  *   tester's stub (attempt 2: their failure-class matrix is a plan case):
@@ -22,7 +24,11 @@
  */
 import http from "node:http";
 
-const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", delayMs: 0, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} };
+const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", delayMs: 0, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {}, callers: {} };
+const noteCaller = (req) => {
+  const k = String(req.headers.authorization || "(none)").replace(/^Bearer\s+/i, "");
+  st.callers[k] = (st.callers[k] || 0) + 1;
+};
 
 function reply(res, code, obj) {
   res.writeHead(code, { "content-type": "application/json" });
@@ -46,7 +52,7 @@ http.createServer((req, res) => {
   req.on("end", () => {
     if (u.pathname === "/__stub/mode" && req.method === "POST") {
       const b = JSON.parse(raw || "{}");
-      Object.assign(st, { mode: b.mode ?? "ok", n: b.n ?? 3, modelsOk: b.modelsOk ?? true, model: b.model ?? st.model, delayMs: Number(b.delayMs || 0), chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {} });
+      Object.assign(st, { mode: b.mode ?? "ok", n: b.n ?? 3, modelsOk: b.modelsOk ?? true, model: b.model ?? st.model, delayMs: Number(b.delayMs || 0), chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {}, callers: {} });
       return reply(res, 200, st);
     }
     if (u.pathname === "/__stub/state") return reply(res, 200, st);
@@ -63,6 +69,7 @@ http.createServer((req, res) => {
       setTimeout(() => req.emit("end"), st.delayMs);
       return;
     }
+    if ((u.pathname === "/v1/chat/completions" || u.pathname === "/v1/embeddings") && req.method === "POST") noteCaller(req);
     if (u.pathname === "/v1/chat/completions" && req.method === "POST") {
       st.chatCalls++;
       const body = JSON.parse(raw || "{}");

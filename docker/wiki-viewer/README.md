@@ -21,7 +21,8 @@ compile pipeline (node, openbrain-wiki)      workbench (Deno, openbrain-workbenc
               recipes/_shared/reconcile-wiki-pages.mjs: files vs rows per page_class
               (after each compile; viewer health probe; repair pass on (re)connect)
 
-viewer (openbrain-wiki-viewer, node:22 + Quartz 4.5.1 fork)
+viewer (openbrain-wiki-viewer, node:22; NO Quartz in the image since P1c -
+        the Quartz 4.5.1 fork survives only as the frozen bundle, see below)
   serve.mjs: every PAGE URL -> lib/live-route.mjs -> page-class registry
     -> the row rendered with the Quartz chrome          x-wiki-render: db
     -> known page, no row - or a row not presentable as-is
@@ -34,17 +35,19 @@ viewer (openbrain-wiki-viewer, node:22 + Quartz 4.5.1 fork)
     -> database not answering: ONE screen, every URL    x-wiki-render: connecting|unreachable
     -> nothing known: themed not-available              x-wiki-render: not-available
     -> a renderer bug outside an isolated entry         x-wiki-render: error (500)
-  READINESS (P1b): serves from the moment it listens - an EMPTY /srv serves
-  every page; no "Building the wiki" splash, no 503 for readiness. HEALTH:
-  /__health (200 ok | 503 degraded: database not up, reconciliation drift,
-  a broken page class, a render error) = the Docker/compose healthcheck.
-  client bundle + static assets: the copy BAKED into the image (/quartz/bundle,
-  emitted at image build) ALWAYS wins; /srv/current serves only what the image
-  does not carry (vault attachments). A stale snapshot on the volume can never
-  put a retired bundle in front of a reader (fix round 1, tester defect 2)
-  internal builder (WIKI_BUILDER=1, default): quartz build --serve -> idle-gated
-  snapshot /srv/current (the parity target; P1c freezes the bundle and removes
-  the builder). Never a bare 404 for a page URL. Pages carry ETag W/"p-..."
+  READINESS (P1b, P1c): serves from the moment it listens; nothing in the
+  container builds anything (no builder, no snapshot loop, no nightly rebuild,
+  no /srv volume). The site index is warmed at start, not by the first reader.
+  HEALTH: /__health (200 ok | 503 degraded: site index warming, database not
+  up, reconciliation drift, a broken page class, a render error) = the
+  Docker/compose healthcheck.
+  client bundle + static assets: the FROZEN bundle (D7, P1c) - bundle/ in this
+  directory (index.css, prescript.js, postscript.js, static/), committed byte
+  for byte (.gitattributes -text) with its sha256 in bundle.sha256, copied to
+  /viewer/bundle (the image build checks the manifest). lib/chrome-static.mjs
+  is frozen the same way. A file the bundle lacks is a vault attachment, read
+  from /wiki itself (assets/<id>/<name>, slug-indexed; never a .md, never
+  private/, templates/ or a dot path). Never a bare 404 for a page URL. Pages carry ETag W/"p-..."
   (304 on If-None-Match) and server-timing; every db page carries the
   research notifications strip (lib/notifications.mjs, read from the P0
   contract endpoint with WORKBENCH_KEY; /__notifications lists them).
@@ -180,29 +183,21 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 ## Dev workflow
 
-- **CLIENT-side change? Do NOT wait for a cold rebuild.** The client bundle is
-  vault-INDEPENDENT: `postscript.js` is the same file whether the vault holds
-  1 page or 76,542, and since P1b every image CARRIES its own bundle
-  (`/quartz/bundle`, emitted by the image's Quartz at build time from the
-  synthetic fixture vault). The viewer ALWAYS serves its own image's copy -
-  a published `/srv/current` no longer takes precedence (rw-p1b-ready fix
-  round 1: a stale snapshot from an older image served the retired bundle) -
-  so a client change ships with the image, and swapping a file in
-  `/srv/current` changes nothing a reader sees.
-
-  So iterate by taking the bundle out of the candidate image and checking it
-  in a drill viewer of that image (or bind-mount the file over
-  `/quartz/bundle/postscript.js` in a DRILL container, never the live one):
+- **CLIENT-side change? The bundle is FROZEN (P1c, D7).** `bundle/` and
+  `lib/chrome-static.mjs` are committed files; the viewer image copies them and
+  builds nothing. They change only when a `quartz-overlay/` component changes
+  (until P8b retires the overlay), and then by hand with the Quartz freeze
+  tool, never at image build:
 
   ```sh
-  # 1. the candidate image's bundle (no build needed - it is in the image)
-  docker run --rm --entrypoint sh -v bundleout:/out <image> -c 'cp /quartz/bundle/postscript.js /out/postscript.js'
+  # 1. re-emit the frozen assets from Quartz + the overlay (offline; minutes)
+  FREEZE_TAG=wt-<id> bash OB1/docker/wiki-viewer/freeze/freeze.sh bundle
+  #    (writes bundle/, lib/chrome-static.mjs and bundle.sha256 - commit all three)
+  FREEZE_TAG=wt-<id> bash OB1/docker/wiki-viewer/freeze/freeze.sh check   # committed == emitted
 
-  # 2. the bundle a viewer serves is the one its IMAGE carries (baked first,
-  #    since fix round 1): deploy the candidate image, or for a drill run it
-  #    with  -v "$PWD/postscript.js:/quartz/bundle/postscript.js:ro"  on its
-  #    own network. Never write into the live /srv/current (it no longer
-  #    serves the bundle; snapshots share files by HARDLINK).
+  # 2. build the viewer image and run it in a DRILL environment
+  #    (test/p1a-env.sh), never the live container; a drill may bind-mount
+  #    a candidate file over /viewer/bundle/postscript.js.
 
   # 3. verify THROUGH CADDY, not the container port (the explorer's nav too)
   docker exec openbrain-wiki-viewer node -e 'fetch("http://caddy:8446/postscript.js").then(r=>r.text()).then(j=>console.log(j.length, /<marker>/.test(j)))'
@@ -212,39 +207,32 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   The ETag is size+mtime and the bundle is served `no-cache, must-revalidate`,
   so browsers pick it up on the next load with no purge.
 
-  **Limits, so this is not mistaken for a deploy:** it is TEMPORARY - the next
-  published snapshot overwrites it - and it only covers client assets
-  (`postscript.js`, `prescript.js`, `index.css`). Changes to `serve.mjs` or
-  `lib/` still need a container recreate. Use it to get behaviour in front of a
-  human in seconds, then do ONE real image deploy when the behaviour is right.
-
   **On a real deploy** nothing waits: the new image serves every page and its
-  own bundle from the first request (no splash), and is ready when
+  frozen bundle from the first request (no splash), and is ready when
   `docker inspect --format '{{.State.Health.Status}}' openbrain-wiki-viewer`
-  says `healthy` (the database answers and the reconciliation found no drift).
+  says `healthy` (site index warm, the database answers, the reconciliation
+  found no drift).
 
 
-- **Sidecar, not live iteration**: a viewer needs no `/srv` to serve, so a
-  sidecar is just the image on the live vault (read-only):
-  `docker run --rm -p 127.0.0.1:8899:8080 -e WIKI_BUILDER=0 -v open-brain_openbrain-wiki-data:/wiki:ro --network open-brain_obnet openbrain-wiki-viewer:<candidate>`
-  (`WIKI_BUILDER=0` = no competing 400%-CPU builder; its explorer and search
-  call `/workbench/*`, which only exists behind caddy - through the sidecar's
-  own port they are empty, pages are complete). Batch changes; deploy ONCE.
-- **Patching Quartz**: overlay forks live in `quartz-overlay/`; stock-file
-  changes go through grep/sha-asserted seds or anchor-asserted patch scripts
-  in `patches/` (sed into TypeScript is banned after it shipped `\x01`
-  bytes). Overlay files are CRLF while patch anchors are LF — patch scripts
-  must match in LF-space and restore endings (build CR/LF from
-  `String.fromCharCode`; every escaped form gets mangled by tooling layers).
+- **Sidecar, not live iteration**: the viewer is the image on a vault
+  (read-only) and a database; there is nothing to switch off (P1c: no builder).
+  Its explorer and search call `/workbench/*`, which only exists behind caddy.
+  Batch changes; deploy ONCE.
+- **Patching Quartz** (only to re-freeze the bundle, see above): overlay forks
+  live in `quartz-overlay/`; stock-file changes are the grep/sha-asserted seds
+  and the anchor-asserted `freeze/graph-api.mjs` in `freeze/Dockerfile` (sed
+  into TypeScript is banned after it shipped `\x01` bytes). Overlay files are
+  CRLF while patch anchors are LF — patch scripts must match in LF-space and
+  restore endings (build CR/LF from `String.fromCharCode`; every escaped form
+  gets mangled by tooling layers). The parity diff's "built" side is the
+  freeze tool's build of the env's vault (`test/p1a-env.sh ref`).
 - **Never `docker rm` by port filter** — inspect by NAME (a port filter once
   removed the production suggestion-worker).
 
 ## Known windows / accepted behaviour
 
 - After a viewer deploy every page is live from its row at once, with the
-  image's own bundle; the builder's cold rebuild (~25 min at 41k pages) only
-  only refreshes the vault attachments in /srv/current (the bundle is the
-  image's). Folder and tag listings and the explorer's folders are generated
+  frozen bundle; there is no rebuild of anything (P1c). Folder and tag listings and the explorer's folders are generated
   from the rows and follow a write within WIKI_NAV_TTL_MS (default 30 s) with
   no reader waiting (fix round 1): a background tick every TTL/4 checks the
   table signature (row count + newest updated_at) and applies the rows written
@@ -255,6 +243,8 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 - Trashed notes stay listed (struck through) until the nightly cleanup
   hard-removes them; `empty-trash` is the manual equivalent. Removed notes
   are recoverable from git history via the recover endpoint.
-- The interaction-aware drain gate pauses backfill compiles for 15 min after
-  viewer interaction; the compiler otherwise runs continuously until the
-  backfill queue drains.
+- Compile pacing is purely performance-based (P1c, operator 2026-09-25): the
+  compiler runs on boot, on the change-watch and on demand, the backfill drain
+  never pauses for a reader (the 15-min viewer-idle gate is gone), there is no
+  daily recompile, and the wiki's LLM calls carry its own caller key, which
+  llm-queue ranks below interactive callers.

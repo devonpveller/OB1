@@ -59,7 +59,7 @@ if echo "$out" | grep -q "PARITY: PASS" && [ "$(echo "$out" | grep -c '^200 x-wi
 if want C1; then
 for a in "/Ada-Fixture content/tool/tool-ada-dup" "/shared-alias notes/alias-dup-b" "/path-order-alias notes/alias-x" "/content/topic/aliased-retired-topic notes/alias-retired"; do
   set -- $a
-  bt="$(docker exec "$P-viewer" sh -c "grep -o '<title>[^<]*</title>' '/srv/current${1}.html'" 2>&1)"; lt="$(curl_ "$1" body | grep -o '<title>[^<]*</title>')"
+  bt="$(bash "$E" refcat "${1}.html" 2>&1 | grep -o '<title>[^<]*</title>')"; lt="$(curl_ "$1" body | grep -o '<title>[^<]*</title>')"
   echo "alias owner $1: built=$bt live=$lt want=<title>$2</title>"
   [ "$bt" = "<title>$2</title>" ] && [ "$lt" = "<title>$2</title>" ] || { fail "C1+C2 alias owners" "$1"; }
 done
@@ -72,7 +72,8 @@ hdr "C19 (rw-p1a-deploy-prep, NA4-1): legacy notes whose file names Quartz slugi
 c19_ok=1
 [ -n "${out:-}" ] || out="$(T 300 bash "$E" parity 2>&1)"
 # (a) the shared rule = Quartz's own slugifyFilePath for every page file, each built; no non-page built
-qs="$(T 180 docker run --rm --network none -v "$OB1:/ob1:ro" -v "$VOL:/wiki:ro" -v "$SRV:/srv:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/quartz-slug-check.mjs 2>&1)"; echo "$qs"
+# (rw-p1c-retire: Quartz's own path.ts/glob.ts live in the freeze tool image, not the viewer; the built side is $REF)
+qs="$(FREEZE_TAG="$TAG" FREEZE_NO_BUILD=1 T 180 bash "$HERE/../freeze/freeze.sh" slugcheck "$VOL" "$REF" 2>&1)"; echo "$qs"
 echo "$qs" | grep -q "QUARTZ-SLUG-CHECK: PASS" || { echo "x the shared slug differs from Quartz's, or a page was not built"; c19_ok=0; }
 # (b) each slug fixture: 200 db, built, nothing unlisted, every element, the note class
 for u in sp-ace pv.1 a-and-b qx ht 50-percent up up/inner deep-folder/sub-dir/leaf-note; do
@@ -92,7 +93,7 @@ for u in /notes/slug-names/ /notes/slug-names/deep-folder/ /notes/slug-names/dee
   echo "$out" | grep -F " $u " | grep -E "^200 x-wiki-render=db folder index .* built=yes .* unlisted=0 .*missing=none class=folder@1$" >/dev/null || { echo "x $u"; c19_ok=0; }
 done
 # (c) the folder index lists "up" ONCE (the page), no separate "up/" entry, the same count as the built page; no raw-name href
-lf="$(curl_ /notes/slug-names/ body)"; bf="$(docker exec "$P-viewer" cat /srv/current/notes/slug-names/index.html)"
+lf="$(curl_ /notes/slug-names/ body)"; bf="$(bash "$E" refcat notes/slug-names/index.html)"
 cnt() { printf '%s' "$1" | grep -o "$2" | wc -l | tr -d ' '; }
 for side in live built; do
   [ "$side" = live ] && t="$lf" || t="$bf"
@@ -106,7 +107,7 @@ done
 # its own URL, up.md as its article as Quartz uses it). NOT in the parity list: Quartz renders this page with the
 # NOTE's slug, so its hrefs are one level short (broken in a browser) and it carries the note's editor - named in
 # the findings (rw-p1a-deploy-prep residual R-UP), not replicated.
-ud="$(curl_ /notes/slug-names/up/ body)"; bu="$(docker exec "$P-viewer" cat /srv/current/notes/slug-names/up/index.html)"
+ud="$(curl_ /notes/slug-names/up/ body)"; bu="$(bash "$E" refcat notes/slug-names/up/index.html)"
 echo "up/: $(echo "$ud" | head -1) items=[$(printf '%s' "$ud" | grep -o '<p>[0-9]* items\? under this folder.</p>')] live-href=$(cnt "$ud" 'href="../../../notes/slug-names/up/inner"') built-href(one level short)=$(cnt "$bu" 'href="../../notes/slug-names/up/inner"') article=$(cnt "$ud" 'A note with the name of a folder beside it')"
 echo "$ud" | head -1 | grep -q "^200 x-wiki-render=db x-wiki-page-class=folder@1" && [ "$(cnt "$ud" 'href="../../../notes/slug-names/up/inner"')" = 1 ] \
   && printf '%s' "$ud" | grep -q '<p>1 item under this folder.</p>' && [ "$(cnt "$ud" 'A note with the name of a folder beside it')" -ge 1 ] || { echo "x the up/ folder page"; c19_ok=0; }
@@ -120,13 +121,14 @@ fi
 
 if want C2b; then
 hdr "C2b (clean replacement, tester A3): no remnant of the takeover poll in the image or the bundle; mermaid strict"
-src="$(docker run --rm --network none --entrypoint sh "$IMG" -c 'grep -rln "__neDirty\|__neSaving\|__neEditing\|page-document\|takeover poll" /quartz/serve.mjs /quartz/lib /quartz/quartz/components /entrypoint.sh 2>/dev/null | grep -v "\.quartz-cache" ; true')"
+# (rw-p1c-retire: the image holds serve.mjs + lib/ + the frozen bundle; the overlay sources are not in it)
+src="$(docker run --rm --network none --entrypoint sh "$IMG" -c 'grep -rln "__neDirty\|__neSaving\|__neEditing\|page-document\|takeover poll" /viewer/serve.mjs /viewer/lib 2>/dev/null; true')"
 echo "source/image hits: [${src}]"
-bund="$(docker exec "$P-viewer" sh -c 'f=/srv/current/postscript.js; echo "__neDirty=$(grep -o __neDirty $f | wc -l) __neSaving=$(grep -o __neSaving $f | wc -l) __neEditing=$(grep -o __neEditing $f | wc -l)"')"
+bund="$(docker exec "$P-viewer" sh -c 'f=/viewer/bundle/postscript.js; echo "__neDirty=$(grep -o __neDirty $f | wc -l) __neSaving=$(grep -o __neSaving $f | wc -l) __neEditing=$(grep -o __neEditing $f | wc -l)"')"
 echo "bundle (postscript.js): $bund"
 # mermaid's init is an INLINE after-body script: on the built page and, through
 # the chrome cut from it, on every live page
-mb="$(docker exec "$P-viewer" sh -c 'f=/srv/current/content/person/person-ada-fixture.html; echo "strict=$(grep -o "securityLevel:\"strict\"" $f | wc -l) loose=$(grep -o "securityLevel:\"loose\"" $f | wc -l)"')"
+mf="$(bash "$E" refcat content/person/person-ada-fixture.html)"; mb="strict=$(echo "$mf" | grep -o 'securityLevel:"strict"' | wc -l) loose=$(echo "$mf" | grep -o 'securityLevel:"loose"' | wc -l)"
 ml="$(curl_ /content/person/person-ada-fixture body)"; ml="strict=$(echo "$ml" | grep -o 'securityLevel:"strict"' | wc -l) loose=$(echo "$ml" | grep -o 'securityLevel:"loose"' | wc -l)"
 echo "mermaid built page: $mb; live page: $ml"
 if [ -z "$src" ] && echo "$bund" | grep -q "__neDirty=0 __neSaving=0 __neEditing=0" && [ "$mb" = "strict=1 loose=0" ] && [ "$ml" = "strict=1 loose=0" ]; then pass C2b; else fail C2b "remnant present or mermaid not strict"; fi
@@ -137,7 +139,7 @@ hdr "C9 (acceptance 9): raw HTML in a source body is dropped"
 o="$(curl_ /content/source/00000000-0000-4000-8000-000000000002 body)"
 art="$(echo "$o" | tr -d '\n' | grep -o '<article class="popover-hint">.*</article>')"
 echo "live article raw-HTML hits: $(echo "$art" | grep -oE '<script|onclick=|onerror=|<iframe' | wc -l)"
-built="$(docker exec "$P-viewer" cat /srv/current/content/source/00000000-0000-4000-8000-000000000002.html | tr -d '\n' | grep -o '<article class="popover-hint">.*</article>')"
+built="$(bash "$E" refcat content/source/00000000-0000-4000-8000-000000000002.html | tr -d '\n' | grep -o '<article class="popover-hint">.*</article>')"
 echo "built article raw-HTML hits: $(echo "$built" | grep -oE '<script|onclick=|onerror=|<iframe' | wc -l)"
 echo "live article unsafe-URL hits: $(echo "$art" | grep -oE '(href|src)="(javascript|data|vbscript):' | wc -l); built: $(echo "$built" | grep -oE '(href|src)="(javascript|data|vbscript):' | wc -l)"
 if [ -n "$art" ] && ! echo "$art" | grep -qE '<script|onclick=|onerror=|<iframe|(href|src)="(javascript|data|vbscript):'; then pass C9; else fail C9 "raw HTML or an unsafe URL rendered"; fi
@@ -433,21 +435,22 @@ if [ "$rc" = 0 ] && echo "$o" | grep -q "glossary: files=1 rows=1" && echo "$d" 
 
 hdr "C10b (tester A7, N3, N4): the registry fails LOUD on a duplicate name, a tie, no default export; a throwing resolve() is isolated"
 c10b_ok=1
-# (the production mode, WIKI_BUILDER=1: the container must EXIT, not keep a builder running)
+# (the container must EXIT non-zero; rw-p1c-retire: serve.mjs IS the container's process - no shell
+# entrypoint left to log "serve.mjs EXITED" - so the exit code is the evidence)
 for f in a-dup-entity.mjs tie-priority.mjs no-default.mjs; do
   P1A_EXTRA_ENTRY="$f" bash "$E" viewer >/dev/null; bash "$E" wait_serving 90; ws=$?
   lg="$(docker logs "$P-viewer" 2>&1 | grep "page class entry" | grep -F "$f" | head -1 | cut -c1-260)"
-  ex="$(docker logs "$P-viewer" 2>&1 | grep -c "serve.mjs EXITED")"
-  echo "-- $f: wait=$ws running=$(docker inspect -f '{{.State.Running}}' "$P-viewer") exit=$(docker inspect -f '{{.State.ExitCode}}' "$P-viewer") :: $lg"
-  [ "$ws" = 3 ] && [ -n "$lg" ] && [ "$ex" = 1 ] || c10b_ok=0
+  ex="$(docker inspect -f '{{.State.ExitCode}}' "$P-viewer")"
+  echo "-- $f: wait=$ws running=$(docker inspect -f '{{.State.Running}}' "$P-viewer") exit=$ex :: $lg"
+  [ "$ws" = 3 ] && [ -n "$lg" ] && [ "$ex" != 0 ] || c10b_ok=0
 done
-WIKI_BUILDER=0 P1A_EXTRA_ENTRY=aaa-throws.mjs bash "$E" viewer >/dev/null; bash "$E" wait_serving 60
+P1A_EXTRA_ENTRY=aaa-throws.mjs bash "$E" viewer >/dev/null; bash "$E" wait_serving 60
 for u in /content/person/person-bob-fixture /notes/fixture-note /tags/fixture-tag /; do r="$(curl_ "$u")"; echo "$r $u"; echo "$r" | grep -q "x-wiki-render=db" || c10b_ok=0; done
 sleep 6; h="$(health)"; echo "health: $(echo "$h" | grep -o '"reasons":\[[^]]*\]')"
 echo "$h" | grep -q 'page class aaa-throws@1 resolve() threw' || c10b_ok=0
 echo "$h" | grep -q '"brokenPageClasses":\[{"name":"aaa-throws"' || c10b_ok=0
 # attempt 3 (tester N2-1): a resolve() returning a hand-built { unreachable: true } is a registry fault, never the database screen
-WIKI_BUILDER=0 P1A_EXTRA_ENTRY=shape-unreach.mjs bash "$E" viewer >/dev/null; bash "$E" wait_serving 60
+P1A_EXTRA_ENTRY=shape-unreach.mjs bash "$E" viewer >/dev/null; bash "$E" wait_serving 60
 r="$(curl_ /notes/fixture-note)"; echo "$r /notes/fixture-note (shape-unreach.mjs claims it with { unreachable: true })"
 echo "$r" | grep -q "x-wiki-render=db x-wiki-page-class=note@1" || c10b_ok=0
 sleep 6; h="$(health)"; echo "health: $(echo "$h" | grep -o '"reasons":\[[^]]*\]')"
@@ -685,7 +688,7 @@ fi
 if want C13; then
 hdr "C13 existing suites: recipes on the host, viewer in a CLEAN container"
 o1="$(cd "$OB1" && T 600 node --test recipes/_shared/*.test.mjs recipes/entity-wiki/generate-wiki.test.mjs recipes/wiki-synthesis/scripts/synthesize-notebooks.test.mjs 2>&1)"; echo "$o1" | grep -E "^# (tests|pass|fail)"
-o2="$(T 600 docker run --rm --network none --entrypoint sh "$IMG" -c 'cd /quartz && node --test lib/*.test.mjs' 2>&1)"; echo "$o2" | grep -E "^# (tests|pass|fail)"
+o2="$(T 600 docker run --rm --network none --entrypoint sh "$IMG" -c 'cd /viewer && node --test lib/*.test.mjs' 2>&1)"; echo "$o2" | grep -E "^# (tests|pass|fail)"
 # rw-p1a-deploy-prep: the wiki-service's unit tests (incl. the .gitignore merge, with git) in its own image
 o3="$(T 300 docker run --rm --network none --entrypoint sh "$WSIMG" -c 'cd /app && node --test lib/*.test.mjs' 2>&1)"; echo "$o3" | grep -E "^# (tests|pass|fail)"
 if echo "$o1" | grep -q "^# fail 0" && echo "$o2" | grep -q "^# fail 0" && echo "$o3" | grep -q "^# fail 0"; then pass C13; else fail C13 "a suite failed"; fi

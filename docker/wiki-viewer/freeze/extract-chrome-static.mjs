@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * extract-chrome-static - cut the STATIC chrome fragments out of two pages
- * this image's own Quartz builder emitted for the committed synthetic fixture
- * vault, and print lib/chrome-static.mjs (run by the Dockerfile at image
- * build; never committed). Fails on a missing anchor so a Quartz change that
- * moves one fails the build.
+ * the freeze tool's Quartz emitted for the committed synthetic fixture vault,
+ * and print lib/chrome-static.mjs (run by freeze/Dockerfile; the output is a
+ * COMMITTED, frozen asset since research-workbench P1c). Fails on a missing
+ * anchor so a Quartz change that moves one fails the freeze.
  *   node extract-chrome-static.mjs <built content page> <built folder page> > lib/chrome-static.mjs
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -37,18 +37,16 @@ const out = `/**
  * sidebar: page title, search, dark/reader mode, explorer shell; the graph
  * shell; the upload-modal and grounding-panel bodies; the TOC header).
  *
- * GENERATED AT IMAGE BUILD (Dockerfile) by test/extract-chrome-static.mjs from a page the image's own
- * Quartz builder emitted for the synthetic fixture vault (no live content).
+ * FROZEN (research-workbench P1c, D7): emitted ONCE by freeze/extract-chrome-static.mjs from a page the
+ * freeze tool's Quartz emitted for the synthetic fixture vault (no live content), and committed.
  * These are byte-for-byte what Quartz's components (MIT, (c) jackyzha0;
  * THIRD-PARTY-NOTICES.md) and this repo's overlay components render with the
  * configuration in this image; the client bundle (postscript.js) hydrates
- * them exactly as it hydrates a built page. Never committed, never
- * hand-edited: the Dockerfile builds the fixture vault with the image's own
- * Quartz and runs this extractor, so a QUARTZ_REF bump regenerates it.
- * (P1c freezes the bundle; this file then becomes a committed asset.)
+ * them exactly as it hydrates a built page. Never hand-edited: re-emit it
+ * with the bundle (freeze/freeze.sh bundle; its sha256 is in bundle.sha256).
  * Placeholders: @@ROOT@@ (pathToRoot of the page), @@LIST@@ (overflow-list id).
  * Fails (non-zero) when an anchor it cuts on is missing, so a Quartz change
- * that moves one fails the image build instead of shipping wrong chrome.
+ * that moves one fails the freeze instead of shipping wrong chrome.
  */
 export const LEFT_SIDEBAR = ${js(left.replace('<a href="../..">Quartz 4</a>', '<a href="@@ROOT@@">Quartz 4</a>').replace('id="list-0"', 'id="@@LIST@@"'))};
 export const LEFT_SIDEBAR_LIST = ${js(leftList.replace('<a href="../..">Quartz 4</a>', '<a href="@@ROOT@@">Quartz 4</a>').replace(`id="${listId}"`, 'id="@@LIST@@"'))};

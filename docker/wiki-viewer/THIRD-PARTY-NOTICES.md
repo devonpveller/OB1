@@ -20,10 +20,19 @@ Ported (rewritten as plain ESM, behaviour kept) into the live renderer
 | `quartz-overlay/quartz/components/scripts/explorer.inline.ts` (research-workbench P1b, rw-p1b-ready: a FORK - the explorer reads one folder at a time from `/workbench/nav`; the Dockerfile sha256-guards the upstream file) | `quartz/components/scripts/explorer.inline.ts` |
 | `quartz-overlay/quartz/components/scripts/search.inline.ts` (rw-p1b-ready: a FORK - search and `#tag` search read `/workbench/search`, no local index; sha256-guarded) | `quartz/components/scripts/search.inline.ts` |
 | `lib/nav-tree.mjs` (rw-p1b-ready: the explorer's order and entries, server-side) | `quartz/components/Explorer.tsx` (`defaultOptions.sortFn`, `filterFn`), `quartz/util/fileTrie.ts` (`displayName`, folder slugs) |
-| `lib/chrome-static.mjs` (generated at image build by `test/extract-chrome-static.mjs`) | the HTML Quartz's `PageTitle`, `Search`, `Darkmode`, `ReaderMode`, `Explorer`, `Graph`, `Flex`, `Spacer`, `MobileOnly`, `DesktopOnly` components emit |
+| `lib/chrome-static.mjs` (FROZEN since research-workbench P1c: emitted once by `freeze/extract-chrome-static.mjs`, committed; sha256 in `bundle.sha256`) | the HTML Quartz's `PageTitle`, `Search`, `Darkmode`, `ReaderMode`, `Explorer`, `Graph`, `Flex`, `Spacer`, `MobileOnly`, `DesktopOnly` components emit |
 
-The Quartz clone itself (`/quartz` in the image, fetched at build) carries its
-own `LICENSE.txt`.
+| `bundle/` - `index.css`, `prescript.js`, `postscript.js`, `static/**` (FROZEN since research-workbench P1c, D7: emitted ONCE by Quartz v4.5.1 + this repo's `quartz-overlay/` through `freeze/freeze.sh bundle`, committed byte for byte; sha256 in `bundle.sha256`) | Quartz's client bundle as its build emits it (its components' inline scripts and styles, the overlay forks above, and the client libraries Quartz bundles from its own MIT/ISC/Apache-2.0 dependency set) |
+
+Since P1c the viewer image carries NO Quartz clone (the freeze tool in
+`freeze/` fetches it, offline from any deploy). This file is copied into the
+image as `/viewer/THIRD-PARTY-NOTICES.md`, so the licence below travels with
+the frozen bundle and the ported code. The image's runtime npm dependencies
+(`package.json`, pinned by `package-lock.json` to the versions Quartz v4.5.1
+locks) are MIT (188), ISC (4) and BSD-2-Clause (1) as their own package
+manifests declare (one, `format`, declares none and ships an MIT LICENSE),
+measured in `openbrain-wiki-viewer:wt-rw-p1c-retire` 2026-10-28; each keeps its
+own licence file under `/viewer/node_modules`.
 
 ```
 MIT License

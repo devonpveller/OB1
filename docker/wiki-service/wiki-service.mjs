@@ -3,8 +3,11 @@
  *
  * Runs recipes/entity-wiki/generate-wiki.mjs (--batch) into the shared
  * wiki volume, then git-commits the result (D16: local commits only, no
- * remote, no secrets). Compiles on boot (opt-out), on an interval, and
- * on POST /recompile. The wiki is fully regenerable: delete the volume
+ * remote, no secrets). Compiles are DEMAND-DRIVEN and coalesced
+ * (research-workbench P1c, operator 2026-09-25 20:21): on boot (opt-out),
+ * when new research/sources/thoughts settle (change-watch), and on
+ * POST /recompile - no daily recompile, and nothing waits for the viewer to
+ * be idle (20:27). The wiki is fully regenerable: delete the volume
  * and the next compile rebuilds it from OpenBrain.
  *
  * No npm deps — Node builtins only. Env:
@@ -13,10 +16,10 @@
  *   OPEN_BRAIN_SERVICE_KEY MCP_ACCESS_KEY
  *   WIKI_OUT_DIR (=/wiki/content)  WIKI_GIT_DIR (=/wiki)
  *   RECIPE_PATH (=/recipes/entity-wiki/generate-wiki.mjs)
- *   WIKI_RECOMPILE_HOUR (=1, local-time daily) COMPILE_ON_BOOT (=true)
+ *   COMPILE_ON_BOOT (=true)
  *   WIKI_WATCH_ENABLED (=true) WIKI_WATCH_INTERVAL_MIN (=3)
  *   WIKI_BATCH_MIN_LINKED (=1)  WIKI_MAX_SOURCES (=5)  PORT (=8000)
- *   TZ (set on the service so the daily hour = your local time)
+ *   TZ (log and commit times in local time)
  */
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
@@ -53,6 +56,8 @@ import {
 } from "file:///recipes/_shared/wiki-pages.mjs";
 // rw-p1a-deploy-prep (RV-5): the vault .gitignore is MERGED, never rewritten.
 import { mergeGitignore } from "./lib/vault-gitignore.mjs";
+// research-workbench P1c (rw-p1b-ready review R-1): a hard kill's staged leftovers.
+import { sweepStaged } from "./lib/staged-sweep.mjs";
 // rw-p1a-render attempt 4 (tester NA3-3): a compile the database outage
 // stopped sends one transient notification per outage (lib/outage-notify.mjs).
 import { notify, forgetNotification } from "file:///recipes/_shared/compile-notify.mjs";
@@ -72,10 +77,10 @@ const WIKI_OUT_DIR = ENV.WIKI_OUT_DIR || "/wiki/content";
 const WIKI_GIT_DIR = ENV.WIKI_GIT_DIR || "/wiki";
 const RECIPE_PATH = ENV.RECIPE_PATH || "/recipes/entity-wiki/generate-wiki.mjs";
 const SYNTH_PATH = ENV.SYNTH_PATH || "/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs";
-// Deterministic daily compile at a fixed local-time hour (default 01:00),
-// NOT a 24h-from-boot interval (that drifts and can hit during work).
-// Set the container TZ so this hour means your local time.
-const RECOMPILE_HOUR = Math.min(23, Math.max(0, Number(ENV.WIKI_RECOMPILE_HOUR || "1")));
+// research-workbench P1c: no daily recompile (it went with the rest of the
+// rebuild machinery - the 04:00 clean recompile existed for the retired
+// builder's orphan HTML; rows are what is presented). WIKI_RECOMPILE_HOUR is
+// no longer read.
 const COMPILE_ON_BOOT = (ENV.COMPILE_ON_BOOT || "true") !== "false";
 // Change-driven recompile: poll OpenBrain for new/edited sources or
 // thoughts since the last compile; when activity settles (no new arrivals
@@ -92,7 +97,7 @@ const MAX_SOURCES = ENV.WIKI_MAX_SOURCES || "5";
 const BACKFILL_PER_COMPILE = Math.max(0, Number(ENV.WIKI_BACKFILL_PER_COMPILE || "25"));
 // Self-continuing drain (operator 2026-08-23: "all compilations should be
 // working towards a completed state"): backfill only rides compiles, and
-// compiles only fire on research activity + the daily — on a quiet day the
+// compiles only fire on research activity (P1c: no daily) — on a quiet day the
 // queue stalled. When a compile backfilled pages AND the queue is still
 // non-empty, another compile is scheduled after this delay, so the drain
 // converges continuously in bounded slices. 0 disables (queue then drains
@@ -108,35 +113,16 @@ const BACKFILL_SUPERVISOR_FLOOR_MIN = Math.max(
   1,
   Number(ENV.WIKI_BACKFILL_SUPERVISOR_FLOOR_MIN || "45"),
 );
-// Interaction-aware drain (operator 2026-08-24): while a human is actively
-// using the wiki, the bulk backfill DEFERS — it resumes only once the viewer
-// has been idle this long (measured from the viewer's last real request via
-// its /__last-access probe endpoint). Organic compile work (fresh research,
-// notes ingest) still runs; only the backlog slice waits. 0 disables gating.
-const BACKFILL_IDLE_MIN = Math.max(0, Number(ENV.WIKI_BACKFILL_IDLE_MIN || "15"));
-const VIEWER_URL = (ENV.VIEWER_URL || "http://openbrain-wiki-viewer:8080").replace(/\/+$/, "");
-
-// ms since the viewer last served a real user request. Unreachable/down
-// viewer → Infinity (nobody can be browsing a dead viewer; never stall the
-// drain on an outage).
-// research-workbench P1b: the viewer serves from the moment it starts (no
-// "Building…" splash), counts pages, the bundle and the explorer's
-// /__nav as reader activity, and NEVER its machine probes (/__health, which
-// its Docker healthcheck now polls every 30 s, and /__last-access itself) -
-// so the healthcheck cannot hold the drain off forever. Only a 200 JSON
-// answer is a reading; anything else (a front-door error page, a 5xx while
-// the viewer restarts) is "not known to be in use". P1c removes this gate
-// with the rest of the rebuild machinery.
-async function viewerIdleMs() {
-  try {
-    const r = await fetch(`${VIEWER_URL}/__last-access`, { signal: AbortSignal.timeout(3000) });
-    if (!r.ok) return Infinity;
-    const ts = Number((await r.json())?.ts || 0);
-    return ts > 0 ? Math.max(0, Date.now() - ts) : Infinity;
-  } catch {
-    return Infinity;
-  }
-}
+// research-workbench P1c (operator 2026-09-25 20:27, "purely performance-
+// based"): the viewer-idle gate is GONE - the bulk backfill no longer defers
+// while a reader uses the wiki (it read the viewer's /__last-access, which the
+// viewer no longer serves). Pages are rows, so nothing a reader sees waits on
+// the drain, and the drain's LLM calls run under the wiki's own caller key
+// (LLM_API_KEY = OB_WIKI_LLM_KEY, compose), which llm-queue ranks below every
+// interactive caller (inference/llm-queue policy.py "ob-wiki" rank 3). The
+// gate returns only as a measured remedy: a P1 measurement on record showing
+// the backfill breaking the P1 floors. WIKI_BACKFILL_IDLE_MIN and VIEWER_URL
+// are no longer read.
 
 // Pre-compile entity extraction. The worker drains the thought + source
 // queues so entity/source_entities links are fresh before the wiki is
@@ -203,6 +189,7 @@ async function writeState(s) {
   await writeFile(STATE_FILE, JSON.stringify(s, null, 2) + "\n");
 }
 
+let _stagedSwept = false;
 async function ensureRepo() {
   await mkdir(WIKI_OUT_DIR, { recursive: true });
   // notes/ is the human-owned layer — created once, then never touched
@@ -213,6 +200,13 @@ async function ensureRepo() {
     await git(["init", "-q"]);
     await git(["config", "user.email", "wiki@openbrain.local"]);
     await git(["config", "user.name", "openbrain-wiki"]);
+  }
+  // A hard kill's staged leftovers (P1c): swept once per process, before the
+  // first compile - every writer is a child of this process, so none runs yet.
+  if (!_stagedSwept) {
+    _stagedSwept = true;
+    const removed = await sweepStaged(WIKI_GIT_DIR).catch((e) => { console.error(`[wiki-service] staged sweep failed: ${e?.message || e}`); return []; });
+    if (removed.length) console.log(`[wiki-service] staged sweep: removed ${removed.length} leftover staged file(s): ${removed.slice(0, 5).join(" ")}${removed.length > 5 ? " ..." : ""}`);
   }
   // Idempotent every run (existing repos created before these existed
   // must still get them): pull.rebase, .gitignore (so .wikistate.json is
@@ -967,33 +961,20 @@ async function compile(reason) {
     // freshly diffed against disk below after this run's pages land) a slice
     // per compile, most-recently-active entities first.
     let backfillAdded = 0;
-    let backfillDeferredMs = 0;
     if (!fullRebuild && BACKFILL_PER_COMPILE > 0) {
-      const idleMs = BACKFILL_IDLE_MIN > 0 ? await viewerIdleMs() : Infinity;
-      const needMs = BACKFILL_IDLE_MIN * 60_000;
-      if (idleMs < needMs) {
-        // Human at the wheel — skip the bulk slice this compile and come back
-        // 15min after their LAST interaction (re-checked then, so continued
-        // browsing keeps pushing the drain out).
-        backfillDeferredMs = needMs - idleMs + 30_000;
-        console.log(
-          `[wiki-service] backfill deferred: viewer active ${(idleMs / 60000).toFixed(1)}min ago — ` +
-            `retry ${(backfillDeferredMs / 60000).toFixed(1)}min after their last interaction`,
-        );
-      } else {
-        try {
-          const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
-          // Only backfill-eligible entries (entity-links.mjs): generating a
-          // page the sweep deletes the same compile is the churn loop.
-          const queued = backfillSlice(manifest.planned, BACKFILL_PER_COMPILE);
-          if (queued.length) {
-            const before = dirty.length;
-            for (const id of queued) if (!dirty.includes(id)) dirty.push(id);
-            backfillAdded = dirty.length - before;
-            console.log(`[wiki-service] backfill: +${backfillAdded} queued page(s) this compile`);
-          }
-        } catch { /* no manifest yet — nothing to drain */ }
-      }
+      // (P1c: no viewer-idle deferral - the slice runs whenever a compile does)
+      try {
+        const manifest = JSON.parse(await readFile(`${WIKI_GIT_DIR}/planned.json`, "utf8"));
+        // Only backfill-eligible entries (entity-links.mjs): generating a
+        // page the sweep deletes the same compile is the churn loop.
+        const queued = backfillSlice(manifest.planned, BACKFILL_PER_COMPILE);
+        if (queued.length) {
+          const before = dirty.length;
+          for (const id of queued) if (!dirty.includes(id)) dirty.push(id);
+          backfillAdded = dirty.length - before;
+          console.log(`[wiki-service] backfill: +${backfillAdded} queued page(s) this compile`);
+        }
+      } catch { /* no manifest yet — nothing to drain */ }
     }
     const args = fullRebuild
       ? [
@@ -1148,16 +1129,12 @@ async function compile(reason) {
       drift = { error: String(e?.message || e) };
       console.error(`[reconcile] CANNOT CHECK after compile: ${e?.message || e}`);
     }
-    // Keep the drain converging: this compile consumed a slice (or deferred
-    // one for user activity) and more remains → schedule the next attempt
-    // (single timer; any compile that runs in the meantime re-schedules
-    // through this same path). A deferral retries 15min after the user's
-    // last interaction; a consumed slice continues at the normal cadence.
-    const continueMs = backfillDeferredMs > 0
-      ? backfillDeferredMs
-      : backfillAdded > 0 && plannedRemaining > 0 && BACKFILL_CONTINUE_MIN > 0
-        ? BACKFILL_CONTINUE_MIN * 60_000
-        : 0;
+    // Keep the drain converging: this compile consumed a slice and more
+    // remains → schedule the next attempt (single timer; any compile that runs
+    // in the meantime re-schedules through this same path).
+    const continueMs = backfillAdded > 0 && plannedRemaining > 0 && BACKFILL_CONTINUE_MIN > 0
+      ? BACKFILL_CONTINUE_MIN * 60_000
+      : 0;
     if (continueMs > 0 && BACKFILL_PER_COMPILE > 0) {
       clearTimeout(backfillContinueTimer);
       backfillContinueTimer = setTimeout(
@@ -1165,7 +1142,7 @@ async function compile(reason) {
         continueMs,
       );
       console.log(
-        `[wiki-service] backfill ${backfillDeferredMs ? "deferred" : "continues"}: ` +
+        `[wiki-service] backfill continues: ` +
           `${plannedRemaining} still queued — next attempt in ${(continueMs / 60000).toFixed(1)}min`,
       );
     }
@@ -1306,30 +1283,10 @@ const httpServer = createServer((req, res) => {
 httpServer.listen(PORT, () => {
   console.log(
     `[wiki-service] listening on :${PORT} ` +
-      `(daily compile ~${String(RECOMPILE_HOUR).padStart(2, "0")}:00 local; ` +
-      `change-watch ${WATCH_ENABLED ? `every ${WATCH_INTERVAL_MIN}m` : "off"})`,
+      `(demand-driven: boot ${COMPILE_ON_BOOT ? "on" : "off"}, ` +
+      `change-watch ${WATCH_ENABLED ? `every ${WATCH_INTERVAL_MIN}m` : "off"}, POST /recompile; no daily compile)`,
   );
 });
-
-// ── Deterministic daily compile at RECOMPILE_HOUR local time ────────────────
-function msUntilNextDaily() {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(RECOMPILE_HOUR, 0, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1);
-  return next.getTime() - now.getTime();
-}
-function scheduleDaily() {
-  const ms = msUntilNextDaily();
-  console.log(
-    `[wiki-service] next daily compile in ${(ms / 3600000).toFixed(1)}h ` +
-      `(~${String(RECOMPILE_HOUR).padStart(2, "0")}:00 local)`,
-  );
-  setTimeout(async () => {
-    await compile("daily").catch(() => {});
-    scheduleDaily();
-  }, ms);
-}
 
 // ── Change-driven recompile (debounced) ─────────────────────────────────────
 // Poll OpenBrain for sources/thoughts newer than the last compile. Only
@@ -1339,7 +1296,7 @@ function scheduleDaily() {
 let _watchPrevCount = -1;
 async function changeWatchTick() {
   try {
-    // Stand down entirely while ANY compile (boot/daily/on-demand/change)
+    // Stand down entirely while ANY compile (boot/on-demand/change/backfill)
     // is in progress. Firing compile() now would just skip (running
     // guard) without advancing last_compile_iso → the watcher would
     // re-detect the same rows forever (infinite-loop bug). Let the
@@ -1466,7 +1423,6 @@ if (COMPILE_ON_BOOT) {
     await compile("boot").catch(() => {});
   })();
 }
-scheduleDaily();
 if (WATCH_ENABLED) setInterval(() => changeWatchTick(), WATCH_INTERVAL_MIN * 60_000);
 if (BACKFILL_SUPERVISOR_MIN > 0) {
   setInterval(() => backfillSupervisorTick(), BACKFILL_SUPERVISOR_MIN * 60_000);
