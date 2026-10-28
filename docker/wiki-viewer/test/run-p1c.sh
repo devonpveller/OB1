@@ -22,7 +22,7 @@ E="$HERE/p1a-env.sh"
 B="$HERE/p1b-env.sh"
 export P1A_PREFIX="${P1A_PREFIX:-wt-rw-p1c-retire}" P1A_TAG="${P1A_TAG:-${P1A_PREFIX:-wt-rw-p1c-retire}}" P1A_SUBNET="${P1A_SUBNET:-10.231.61.0/24}"
 eval "$(bash "$E" vars)" || { echo "p1a-env.sh vars failed"; exit 2; }
-REPO="$(cd "$OB1/.." && pwd)"
+REPO="$(cd "$OB1/.." && (pwd -W 2>/dev/null || pwd))"   # a path native git understands (Windows)
 RED="${P1C_RED:-1}"
 RED_IMG="${P1C_RED_IMG:-openbrain-wiki-viewer:wt-rw-p1b-ready}"
 SPLASH_IMG="${P1C_SPLASH_IMG:-openbrain-wiki-viewer:wt-rw-p1b-ready-base}"
@@ -81,7 +81,7 @@ top="$(docker top "$P-viewer" -eo pid,args 2>&1)"; echo "$top"
 if echo "$top" | grep -q "serve.mjs" && ! echo "$top" | grep -qiE "quartz|npx|esbuild|entrypoint"; then pass C2; else fail C2 "a builder process (or no server)"; fi
 if [ "$RED" = 1 ] && have "$RED_IMG"; then
   fresh_viewer "$RED_IMG"; sleep 20
-  rt="$(docker top "$P-viewer" -eo pid,args 2>&1 | grep -iE "quartz|npx" | head -3)"; red C2 "$RED_IMG processes: ${rt:-(none)}"
+  rt="$(docker top "$P-viewer" -eo pid,args 2>&1 | grep -iE "quartz build|npx|esbuild|entrypoint" | head -4)"; red C2 "$RED_IMG processes: ${rt:-(none)}"
   fresh_viewer; bash "$E" wait_serving 60 >/dev/null
 fi
 fi
@@ -149,9 +149,9 @@ echo "-- static: wiki-service.mjs"
 for pat in scheduleDaily RECOMPILE_HOUR viewerIdleMs "__last-access" BACKFILL_IDLE_MIN '"daily"'; do n="$(grep -c -- "$pat" "$WS")"; echo "  $pat: $n"; done
 [ "$(grep -cE 'scheduleDaily|RECOMPILE_HOUR =|viewerIdleMs|fetch\(`\$\{VIEWER_URL\}|BACKFILL_IDLE_MIN =|compile\("daily"\)' "$WS")" = 0 ] || { echo "x a daily schedule or the idle gate is still in the code"; c8=0; }
 grep -q 'setInterval(() => changeWatchTick(), WATCH_INTERVAL_MIN \* 60_000)' "$WS" && grep -q 'url.pathname === "/recompile"' "$WS" || { echo "x change-watch or the on-demand trigger is gone"; c8=0; }
-echo "-- static: compose (openbrain-wiki): $(grep -nE 'WIKI_RECOMPILE_HOUR:|WIKI_BACKFILL_IDLE_MIN:' "$OB1/docker/docker-compose.yml" | wc -l) schedule/idle env lines; keys: $(grep -nE '^\s+(LLM_API_KEY|EMBEDDING_API_KEY): \$\{OB_WIKI_LLM_KEY' "$OB1/docker/docker-compose.yml" | wc -l) of 2 on OB_WIKI_LLM_KEY; other services on that key: $(grep -c 'OB_WIKI_LLM_KEY' "$OB1/docker/docker-compose.yml")"
+echo "-- static: compose (openbrain-wiki): $(grep -nE 'WIKI_RECOMPILE_HOUR:|WIKI_BACKFILL_IDLE_MIN:' "$OB1/docker/docker-compose.yml" | wc -l) schedule/idle env lines; keys: $(grep -nE '^\s+(LLM_API_KEY|EMBEDDING_API_KEY): \$\{OB_WIKI_LLM_KEY' "$OB1/docker/docker-compose.yml" | wc -l) of 2 on OB_WIKI_LLM_KEY; uses of that key outside comments: $(grep -v '^ *#' "$OB1/docker/docker-compose.yml" | grep -c 'OB_WIKI_LLM_KEY')"
 [ "$(grep -cE 'WIKI_RECOMPILE_HOUR:|WIKI_BACKFILL_IDLE_MIN:' "$OB1/docker/docker-compose.yml")" = 0 ] && [ "$(grep -cE '^\s+(LLM_API_KEY|EMBEDDING_API_KEY): \$\{OB_WIKI_LLM_KEY' "$OB1/docker/docker-compose.yml")" = 2 ] \
-  && [ "$(grep -c 'OB_WIKI_LLM_KEY' "$OB1/docker/docker-compose.yml")" = 2 ] || { echo "x compose: schedule/idle env, or the wiki's calls not on its own key"; c8=0; }
+  && [ "$(grep -v '^ *#' "$OB1/docker/docker-compose.yml" | grep -c 'OB_WIKI_LLM_KEY')" = 2 ] || { echo "x compose: schedule/idle env, or the wiki's calls not on its own key"; c8=0; }
 pol="$REPO/inference/llm-queue/src/llm_queue/policy.py"
 rw="$(grep -oE '"ob-wiki": PriorityClass\("ob-wiki", rank=[0-9]+' "$pol" | grep -oE '[0-9]+$')"; rc="$(grep -oE '"owui-chat": PriorityClass\("owui-chat", rank=[0-9]+' "$pol" | grep -oE '[0-9]+$')"
 echo "-- llm-queue policy: ob-wiki rank=$rw, owui-chat rank=$rc (lower = first)"; [ -n "$rw" ] && [ -n "$rc" ] && [ "$rw" -gt "$rc" ] || { echo "x the wiki lane is not below interactive"; c8=0; }
@@ -175,7 +175,7 @@ ws_run() { # image label: stub reset, a staged leftover in the vault, boot compi
 g="$(ws_run "$WSIMG" GREEN)"; echo "$g"
 echo "$g" | grep -q "GREEN daily: 0 | deferred-for-viewer: 0 | staged sweep: \[wiki-service\] staged sweep: removed 1" || { echo "x daily / deferral / sweep"; c8=0; }
 echo "$g" | grep -q "no daily compile" || { echo "x the service does not say it is demand-driven"; c8=0; }
-echo "$g" | grep -q 'GREEN stub: lastAccessCalls=0 callers={"ob-wiki-fixture-key":[0-9]*}$' || { echo "x the viewer was asked, or a call carried another key"; c8=0; }
+echo "$g" | grep -qE 'GREEN stub: lastAccessCalls=0 callers="callers":\{"ob-wiki-fixture-key":[0-9]+\}$' || { echo "x the viewer was asked, or a call carried another key"; c8=0; }
 echo "$g" | grep -q "GREEN staged leftover: gone; tracked by vault git: 0" || { echo "x the staged leftover survived or was committed"; c8=0; }
 [ "$c8" = 1 ] && pass C8 || fail C8 "see output"
 if [ "$RED" = 1 ] && have "$RED_WSIMG"; then r="$(ws_run "$RED_WSIMG" RED)"; red C8 "$(echo "$r" | tr '\n' ' ' | cut -c1-900)"; fi
