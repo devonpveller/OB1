@@ -13,7 +13,7 @@
 //    export, note-history, holders?ref=, a contract reference into another user's holder.
 // 2. Responses. Every JSON response is walked: a string naming another user's document path is
 //    replaced (and an object carrying it loses its title), and a string that is another user's
-//    refinery (idea) id becomes null. A route's own SQL filters too (timeline, notifications); this
+//    refinery (idea) id becomes null (inside a longer string, the id is withheld). A route's own SQL filters too (timeline, notifications); this
 //    is the net under all of them, nested fields included.
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
@@ -22,7 +22,7 @@ import { identityOf, type Identity } from "./identity.ts";
 const OTHER = "(another user's document)";
 // a body field holding a document's TEXT, not a path: never searched (a document may quote a path)
 const TEXT_FIELDS = new Set(["content", "body", "text", "markdown", "exact", "note", "summary"]);
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_IN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 // the documents API's own URL prefixes are routes, not vault paths
 const ROUTE_PREFIX = /^\/workbench\/(?:documents|contract\/documents)(?=\/|$)/;
 
@@ -107,7 +107,7 @@ async function scrub(db: Db, body: unknown, who: Identity): Promise<unknown> {
   const uuids = new Set<string>();
   for (const s of strings) {
     for (const p of documentPathsIn(s)) docPaths.add(p);
-    if (UUID.test(s)) uuids.add(s.toLowerCase());
+    for (const m of s.matchAll(UUID_IN)) uuids.add(m[0].toLowerCase());
   }
   const foreignPaths = new Set<string>();
   for (const p of docPaths) if (!(await ownsAll(db, [p], who))) foreignPaths.add(p);
@@ -123,7 +123,9 @@ async function scrub(db: Db, body: unknown, who: Identity): Promise<unknown> {
   const walk = (v: unknown): unknown => {
     if (typeof v === "string") {
       if (foreignIdeas.has(v.toLowerCase())) return null;
-      return foreignIn(v) ? OTHER : v;
+      if (foreignIn(v)) return OTHER;
+      // an id inside a longer string (idea:<id>, a sentence): the id itself is withheld
+      return foreignIdeas.size ? v.replace(UUID_IN, (m) => foreignIdeas.has(m.toLowerCase()) ? "(another user's refinery)" : m) : v;
     }
     if (Array.isArray(v)) return v.map(walk);
     if (v && typeof v === "object") {

@@ -26,7 +26,7 @@ export async function postNotification(db: Db, n: NotificationInput) {
 
 // A notification about a user document (entity document:<path>, e.g. a listing that could not be
 // updated) is that document owner's event, not the shared stream's (rw-p2b-workspace round 2, F4):
-// it is answered to its owner only. `who` = { sub, key } from the identity seam.
+// it is answered to its owner only; an idea event (entity idea:<id>) likewise. `who` = { sub, key }.
 export async function notifications(db: Db, cls: string | null, since: string | null, limit: number, who: { sub: string; key: string } = { sub: "", key: "" }) {
   const rows = await db.query<Record<string, unknown>>(
     `SELECT n.id, n.class, n.subject, n.slug, n.entity, n.origin, n.error, n.first_seen, n.last_seen, n.count
@@ -36,6 +36,9 @@ export async function notifications(db: Db, cls: string | null, since: string | 
              OR starts_with(n.entity, 'document:documents/' || $5 || '/')
              OR EXISTS (SELECT 1 FROM public.user_document_listings d
                          WHERE 'document:' || d.path = n.entity AND d.owner_sub = $4))
+        -- an idea (refinery) event is its owner's too: another user's refinery id never rides the stream
+        AND (n.entity IS NULL OR NOT starts_with(n.entity, 'idea:')
+             OR NOT EXISTS (SELECT 1 FROM public.ideas i WHERE 'idea:' || i.id::text = n.entity AND i.owner_sub <> $4))
       ORDER BY n.last_seen DESC LIMIT $3`,
     [cls, since, limit, who.sub, who.key],
   );

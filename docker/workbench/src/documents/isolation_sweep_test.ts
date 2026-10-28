@@ -156,11 +156,14 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   console.log(`sweep: ${routes.length} routes, ${calls} calls, ${hits.length} hits`);
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);
   // shared knowledge answers both users alike
-  for (const p of [`/workbench/contract/sources/${FX_ACTIVE}`, `/workbench/contract/search?q=fixture`]) {
+  // (the fixture source may have been changed by A's mutating calls - shared, so alike for both)
+  for (const p of [`/workbench/contract/sources/${FX_ACTIVE}`, `/workbench/contract/search?q=fixture`, `/workbench/contract/sources?limit=50`]) {
     const a = await wb("GET", p);
     const b = await wb("GET", p, undefined, B);
-    assertEquals([a.status, b.status], [200, 200], p);
+    assertEquals(a.status, b.status, `${p}: ${a.status} ${b.status}`);
+    assertEquals(a.text, b.text, `${p}: shared knowledge reads the same for both users`);
   }
+  assertEquals((await wb("GET", `/workbench/contract/search?q=fixture`)).status, 200, "shared search answers");
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);
