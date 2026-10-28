@@ -115,6 +115,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     await sql(`DROP TRIGGER IF EXISTS p2b_sweep_fault ON public.user_document_listings`);
     await sql(`DROP FUNCTION IF EXISTS public.p2b_sweep_fault()`);
   }
+  // a reference row held by B's document (for the holder check below)
+  const bRef = await wb("POST", "/workbench/documents/references", { path: bPath, source_id: FX_ACTIVE, exact: "", form: "chip" }, B);
+  const bRefId: string = bRef.json.record?.id ?? "";
   // the reconcile repairs B's listing when B's workspace next connects; B's file as it now stands
   await wb("GET", `/workbench/contract/documents`, undefined, B);
   const before = await Deno.readTextFile(`${VAULT}/${bPath}`);
@@ -173,6 +176,13 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
         if (m && out.includes(m)) hits.push(`HIT ${name} ${r.method} ${r.path} bare (${door === BASE ? "workbench" : "viewer"}) -> ${res.status}`);
       }
     }
+  }
+  // what a marker cannot show: WHICH references B's document holds (reference rows are shared
+  // knowledge; the holder -> references mapping of a user document is its owner's). A asks for it.
+  for (const door of [BASE, VIEWER]) {
+    calls++;
+    const res = await call(door, "GET", `/workbench/contract/holders/user_document/references?ref=${encodeURIComponent(bPath)}`);
+    if (res.status === 200) hits.push(`HIT holder-references GET /workbench/contract/holders/:kind/references?ref=<B path> (${door === BASE ? "workbench" : "viewer"}) -> 200${bRefId && res.text.includes(bRefId) ? " (lists B's reference)" : ""}`);
   }
   console.log(`sweep: ${routes.length} routes, ${calls} calls, ${hits.length} hits`);
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);
