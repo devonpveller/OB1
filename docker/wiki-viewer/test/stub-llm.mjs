@@ -11,6 +11,8 @@
  *   GET  /__stub/state -> {mode, n, modelsOk, chatCalls, modelsCalls, livelinessCalls, perTask, callers}
  *   callers (rw-p1c-retire): chat + embedding calls per Authorization bearer - which caller key the
  *   wiki's LLM calls carry (fixture keys only; this stub never sees a real key)
+ *   GET  /__last-access (rw-p1c-retire): a VIEWER that is always "in use" ({ts: now}); lastAccessCalls
+ *   counts who still asks (a pre-P1c wiki-service's idle gate does; a P1c one never does)
  * Modes: ok | flaky503 (503 for the first n calls) | fail (503 always) |
  *   badparse (a reply with no page heading) - and, from the attempt-1
  *   tester's stub (attempt 2: their failure-class matrix is a plan case):
@@ -24,7 +26,7 @@
  */
 import http from "node:http";
 
-const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", delayMs: 0, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {}, callers: {} };
+const st = { mode: "ok", n: 3, modelsOk: true, model: "stub-model", delayMs: 0, chatCalls: 0, modelsCalls: 0, livelinessCalls: 0, perTask: {}, callers: {}, lastAccessCalls: 0 };
 const noteCaller = (req) => {
   const k = String(req.headers.authorization || "(none)").replace(/^Bearer\s+/i, "");
   st.callers[k] = (st.callers[k] || 0) + 1;
@@ -56,6 +58,7 @@ http.createServer((req, res) => {
       return reply(res, 200, st);
     }
     if (u.pathname === "/__stub/state") return reply(res, 200, st);
+    if (u.pathname === "/__last-access") { st.lastAccessCalls++; return reply(res, 200, { ts: Date.now() }); }
     if (u.pathname === "/v1/models") {
       st.modelsCalls++;
       return st.modelsOk ? reply(res, 200, { object: "list", data: [{ id: st.model, object: "model" }] }) : reply(res, 503, { error: "stub: models down" });

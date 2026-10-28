@@ -276,10 +276,10 @@ cmd_ws() {
     -e LLM_API_KEY=stub -e LLM_BASE_URL=http://llm-stub:8080/v1 -e LLM_MODEL=stub-model -e LLM_RETRY_BACKOFF_MS=200 \
     -e WIKI_GIT_DIR=/wiki -e WIKI_OUT_DIR=/wiki/content -e COMPILE_ON_BOOT=true -e WIKI_WATCH_ENABLED=false \
     -e DRAIN_BEFORE_COMPILE=false -e WORKER_URL=http://127.0.0.1:9 -e WORKBENCH_URL=http://127.0.0.1:9 \
-    -e VIEWER_URL=http://127.0.0.1:9 -e WIKI_BACKFILL_SUPERVISOR_MIN=0 -e WIKI_BACKFILL_CONTINUE_MIN=0 \
-    -e WIKI_BATCH_MIN_LINKED=1 -e WIKI_PAGES_SYNC_TIMEOUT_MS=3000 -e P1A_DISPOSABLE="$P" \
-    "$WSIMG" >/dev/null
-  log "wiki-service started ($WSIMG); boot compile running"
+    -e VIEWER_URL="${P1A_WS_VIEWER_URL:-http://127.0.0.1:9}" -e WIKI_BACKFILL_SUPERVISOR_MIN=0 -e WIKI_BACKFILL_CONTINUE_MIN=0 \
+    -e WIKI_BATCH_MIN_LINKED=1 -e WIKI_PAGES_SYNC_TIMEOUT_MS=3000 -e P1A_DISPOSABLE="$P" ${P1A_WS_ENV:-} \
+    "${P1A_WS_IMG:-$WSIMG}" >/dev/null
+  log "wiki-service started (${P1A_WS_IMG:-$WSIMG}); boot compile running"
 }
 
 cmd_ws_wait() { # wait (bounded) until the wiki-service finished a compile newer than $1 (an ISO time, default: any)
