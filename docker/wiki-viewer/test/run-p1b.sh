@@ -218,15 +218,12 @@ docker logs "$P-wb" 2>&1 | grep -Ei 'mattermost|telegram|status' | head -3
 fi
 
 if want B12; then
-hdr "B12 (consumers): the compiler's idle gate - healthchecks and probes never count as reader activity, a page does; the compose healthcheck = the image HEALTHCHECK"
+hdr "B12 (consumers): the compose healthcheck = the image HEALTHCHECK; rw-p1c-retire: the compiler's idle gate is GONE - the viewer keeps no reader-activity clock (/__last-access is no machine endpoint any more)"
 b12=1
-la() { bash "$E" node -e "fetch('http://$P-viewer:8080/__last-access').then(r=>r.json()).then(j=>console.log(j.ts))"; }
-t1="$(la)"; sleep 6
-for i in 1 2 3; do docker exec "$P-viewer" node -e "fetch('http://127.0.0.1:8080/__health').then(r=>r.text())" >/dev/null; done
-t2="$(la)"; echo "last-access before=$t1 after 3 health probes=$t2"
-[ "$t1" = "$t2" ] || { echo "x a health probe counted as activity"; b12=0; }
-bash "$B" fget /content/thought/9001 >/dev/null; t3="$(la)"; echo "after a page: $t3"
-[ "$t3" != "$t2" ] || { echo "x a page did not count"; b12=0; }
+# (P1b checked that probes never moved /__last-access; P1c retires the endpoint with the gate, anchor clause 8:
+# the URL is now an ordinary unknown page - never a JSON {ts} a compiler could wait on)
+la="$(bash "$E" node -e "fetch('http://$P-viewer:8080/__last-access').then(async r=>{const t=await r.text();let j=null;try{j=JSON.parse(t)}catch{};console.log(r.status, r.headers.get('x-wiki-render'), j&&('ts' in j)?'JSON-TS':'no-clock')})")"
+echo "/__last-access: $la"; echo "$la" | grep -q "no-clock$" || { echo "x the viewer still serves a reader-activity clock"; b12=0; }
 img="$(docker image inspect "$IMG" --format '{{json .Config.Healthcheck.Test}}')"
 cmp="$(grep -A1 'openbrain-wiki-viewer' -m1 "$OB1/docker/docker-compose.yml" >/dev/null; awk '/^  openbrain-wiki-viewer:/{f=1} f&&/test: \[/{print; exit}' "$OB1/docker/docker-compose.yml" | sed -E 's/^ *test: //')"
 echo "image  : $img"; echo "compose: $cmp"
