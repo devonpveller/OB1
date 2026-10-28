@@ -19,6 +19,7 @@ async function step(name, fn) {
   if (only.length && !only.some((c) => name.startsWith(c))) return;
   const t0 = Date.now();
   try {
+    if (setupError) throw new Error(`the shared setup failed: ${setupError.message}`);
     await fn();
     results.push(["PASS", name, Date.now() - t0]);
     console.log(`  PASS  ${name} (${Date.now() - t0} ms)`);
@@ -80,23 +81,27 @@ const openWorkspace = async (doc) => {
 const surface = () => page.locator('[data-panel="document"]');
 const sidePanel = (id) => page.locator(`[data-panel="${id}"]`);
 
-// shared fixtures for the reference cases
-const S1 = await newSource("First e2e source: alpha words to quote stay here.");
-const S2 = await newSource("Second e2e source: beta words to transclude live here.");
-const P1 = await docWith(`E2E refs ${uid()}`, "Intro paragraph.\n");
-const chip1 = await api("POST", "/workbench/documents/references", { path: P1, source_id: S1, exact: "alpha words to quote", form: "chip" });
-const tr2 = await api("POST", "/workbench/documents/references", { path: P1, source_id: S2, exact: "beta words to transclude", form: "transclusion" });
-ok(chip1.status === 201 && tr2.status === 201, `references: ${chip1.text} ${tr2.text}`);
-{
+// shared fixtures for the reference cases. A setup that cannot run (the -Red base has no documents
+// API) fails EVERY case with its error, so the run still reports one line per case and its summary.
+let S1, S2, P1, chip1, tr2, REF1, REF2, setupError = null;
+try {
+  S1 = await newSource("First e2e source: alpha words to quote stay here.");
+  S2 = await newSource("Second e2e source: beta words to transclude live here.");
+  P1 = await docWith(`E2E refs ${uid()}`, "Intro paragraph.\n");
+  chip1 = await api("POST", "/workbench/documents/references", { path: P1, source_id: S1, exact: "alpha words to quote", form: "chip" });
+  tr2 = await api("POST", "/workbench/documents/references", { path: P1, source_id: S2, exact: "beta words to transclude", form: "transclusion" });
+  ok(chip1.status === 201 && tr2.status === 201, `references: ${chip1.text} ${tr2.text}`);
   const f = await api("GET", `/workbench/documents/file?path=${encodeURIComponent(P1)}`);
   await api("PUT", `/workbench/documents/file?path=${encodeURIComponent(P1)}`, {
     content: `${f.json.content}A chip ${chip1.json.insert} and a transclusion ${tr2.json.insert} end.\n\n[[${FX.page}|the tool]] and [[source:${FX.active}|the active source]].\n`,
     if_match: f.json.hash,
   });
+  REF1 = chip1.json.record.id;
+  REF2 = tr2.json.record.id;
+  await revise(S1, "First e2e source, revised: alpha words to quote stay here.");
+} catch (e) {
+  setupError = e;
 }
-const REF1 = chip1.json.record.id;
-const REF2 = tr2.json.record.id;
-await revise(S1, "First e2e source, revised: alpha words to quote stay here.");
 
 await step("C8 a document created through the API opens in the editor from its file and listing within 2 s; no wiki_pages row", async () => {
   await openWorkspace();
