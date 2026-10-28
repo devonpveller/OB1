@@ -1370,6 +1370,10 @@ services:
       # SHIPPED INERT: a blank key turns both tools off (they answer 503 and say which variable).
       RESEARCH_URL: http://openbrain-research:8000
       RESEARCH_WORKSPACE_KEY: ${RESEARCH_WORKSPACE_KEY:-}
+      # research-workbench P2b identity seam: the default subject (whose user documents, ideas and
+      # read state these are) until sign-on lands - operator-set, see .env.example. Blank = "operator".
+      WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
+      WORKSPACE_DEFAULT_NAME: ${WORKSPACE_DEFAULT_NAME:-}
       # Direct Postgres (atomic multi-row writes — G8).
       DB_HOST: openbrain-db
       DB_PORT: "5432"

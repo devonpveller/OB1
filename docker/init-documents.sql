@@ -72,7 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_notification_acks_owner ON public.notification_ac
 -- front-end context (user documents, layouts, notifications read state, ...) is isolated per user.
 -- The workbench's identity seam (src/middleware/identity.ts) is the only reader of who the user is;
 -- it writes owner_sub and every read of user state filters by it. Rows written before P2b belong to
--- the seam's default identity (WORKSPACE_DEFAULT_SUB, shipped 'operator').
+-- the seam's default identity (WORKSPACE_DEFAULT_SUB, operator-set; the back-fill below).
 -- owner_sub holds the SUBJECT: the Authentik subject id whose data a row is (operator 2026-10-28: the
 -- same id Open WebUI stores for its SSO users, so one person is one owner across OWUI and the research
 -- front end) - an OPAQUE string, no format assumed. actor_sub holds who ACTED (equal to the subject
@@ -80,12 +80,32 @@ CREATE INDEX IF NOT EXISTS idx_notification_acks_owner ON public.notification_ac
 -- documents, ideas (refineries), the bell's read state, refinery pick-ups, the original text a user
 -- typed to start research. Shared (no owner): everything research produces - sources (a user-added
 -- one too: `held` is a quality gate, not privacy), chunks, claims, references, reports, wiki pages.
--- The DEFAULT backfills rows written before P2b (and what the MCP idea tools write until sign-on
--- lands) with the seam's shipped default subject.
-ALTER TABLE public.user_document_listings ADD COLUMN IF NOT EXISTS owner_sub TEXT NOT NULL DEFAULT 'operator';
+-- The back-fill subject (operator 2026-10-28: every existing private context row belongs to ONE user
+-- today) is the OPERATOR-SET WORKSPACE_DEFAULT_SUB - that user's Authentik subject, read from Open
+-- WebUI's user record - handed to this file as the session setting workspace.default_sub:
+--     PGOPTIONS='-c workspace.default_sub=<the WORKSPACE_DEFAULT_SUB value>' psql ... -f init-documents.sql
+-- The value is never written into code or docs. Unset (a fresh database, the lab), the seam's shipped
+-- placeholder 'operator'. It is also the column DEFAULT, so a row a writer outside the seam inserts
+-- (the MCP idea tools, until sign-on lands) belongs to the same subject; a re-run WITH the setting
+-- re-owns rows still on the placeholder (never a real Authentik subject).
+DO $$
+DECLARE
+  sub TEXT := COALESCE(NULLIF(btrim(current_setting('workspace.default_sub', true)), ''), 'operator');
+  t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['user_document_listings', 'ideas'] LOOP
+    EXECUTE format('ALTER TABLE public.%I ADD COLUMN IF NOT EXISTS owner_sub TEXT NOT NULL DEFAULT %L', t, sub);
+    EXECUTE format('ALTER TABLE public.%I ALTER COLUMN owner_sub SET DEFAULT %L', t, sub);
+    IF sub <> 'operator' THEN
+      EXECUTE format('UPDATE public.%I SET owner_sub = %L WHERE owner_sub = %L', t, sub, 'operator');
+    END IF;
+  END LOOP;
+  IF sub = 'operator' AND EXISTS (SELECT 1 FROM public.ideas) THEN
+    RAISE NOTICE 'init-documents: workspace.default_sub is not set - existing rows are owned by the placeholder ''operator''; re-run with WORKSPACE_DEFAULT_SUB as workspace.default_sub';
+  END IF;
+END $$;
 ALTER TABLE public.user_document_listings ADD COLUMN IF NOT EXISTS actor_sub TEXT;
 CREATE INDEX IF NOT EXISTS idx_user_document_listings_owner ON public.user_document_listings (owner_sub, updated_at DESC);
-ALTER TABLE public.ideas ADD COLUMN IF NOT EXISTS owner_sub TEXT NOT NULL DEFAULT 'operator';
 ALTER TABLE public.ideas ADD COLUMN IF NOT EXISTS actor_sub TEXT;
 CREATE INDEX IF NOT EXISTS idx_ideas_owner ON public.ideas (owner_sub, updated_at DESC);
 

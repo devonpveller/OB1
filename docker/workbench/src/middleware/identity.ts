@@ -6,7 +6,11 @@
 // carries no owner and is the same for everyone.
 //
 // Until single sign-on lands (a separate item: Authentik at the edge) the seam returns ONE configured
-// default identity: WORKSPACE_DEFAULT_SUB / WORKSPACE_DEFAULT_NAME (shipped "operator" / "Operator").
+// default identity: WORKSPACE_DEFAULT_SUB / WORKSPACE_DEFAULT_NAME. WORKSPACE_DEFAULT_SUB is
+// OPERATOR-SET (operator 2026-10-28): the Authentik subject of the one user every existing private
+// context row belongs to, read from Open WebUI's user record (its oauth JSON, oidc.sub) - never
+// written into code or docs; init-documents.sql back-fills owner_sub from the same value. Blank (a
+// fresh install, the lab) falls back to the placeholder "operator" / "Operator".
 // WORKSPACE_IDENTITY_HEADER (shipped BLANK = off) names a request header the seam takes the subject
 // from instead - the extension point the sign-on item fills (with the edge stripping any client copy
 // of it); the lab tests set it to prove two identities see only their own state.
