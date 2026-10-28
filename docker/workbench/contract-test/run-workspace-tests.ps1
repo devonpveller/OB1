@@ -320,6 +320,23 @@ try {
   else { Check ($e2e.Success -and [int]$e2e.Groups[2].Value -eq 0) "the workspace e2e ($($e2e.Value))" }
   if (-not $e2e.Success) { Save 'workspace-e2e-tail.log' (($o -split "`n" | Select-Object -Last 40) -join "`n") }
 
+  # round 2 (tester attempt 1 F1-F6): the route-wide isolation sweep, LAST (it calls mutating routes
+  # with user B's ids as user A). Its route table is the router's own (src/app.ts, imported in the test
+  # stage image with the workbench's DB_* / recipes so the import resolves; never served there).
+  Write-Host '[5d] the route-wide isolation sweep (as user A, every registered route, both doors)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+    '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
+    '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault',
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/isolation_sweep_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'isolation-sweep.log' ((($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT ' } | Select-Object -First 60) { Write-Host "    $l" }
+  $sw = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sw.Success -and $clean -match 'HIT ') "RED: the isolation sweep finds user B's context on the base ($($sw.Value))" }
+  else { Check ($sw.Success -and $sw.Groups[1].Value -eq 'ok' -and [int]$sw.Groups[3].Value -eq 0 -and $clean -match 'sweep: \d+ routes') "the route-wide isolation sweep ($($sw.Value))" }
+
   Write-Host '[5c] the grammar copy'
   $a = [System.IO.File]::ReadAllBytes((Join-Path $wb 'src/documents/grammar.ts'))
   $b = [System.IO.File]::ReadAllBytes((Join-Path $wsDir 'src/lib/grammar.ts'))
