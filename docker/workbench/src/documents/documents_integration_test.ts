@@ -610,7 +610,10 @@ t("identity: two users see only their own documents, ideas, read state and promp
 t("D12 overall: no user document has a wiki_pages row", async () => {
   assertEquals(await sql(`SELECT slug FROM public.wiki_pages WHERE slug LIKE 'documents/%' OR slug LIKE '%/documents/%'`), []);
   const docs = await sql<{ path: string }>(`SELECT path FROM public.user_document_listings`);
-  // not vacuous: the run made user documents (none at all = no documents API, the -Red base)
-  assert(docs.length > 0, "the run made user documents");
+  // not vacuous: the run made user documents through the API - listed AND on disk (a listing row a
+  // case inserted by SQL is not one; none on disk = no documents API, the -Red base)
+  let onDisk = 0;
+  for (const d of docs) if (await exists(d.path)) onDisk++;
+  assert(onDisk > 0, "the run made user documents (listed and on disk)");
   for (const d of docs) assertEquals(parseDocument("").links.length, 0, d.path);
 });
