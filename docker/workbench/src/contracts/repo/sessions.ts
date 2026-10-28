@@ -61,7 +61,7 @@ export function shapeSession(r: JobRow) {
 // rw-p2b-workspace (operator 2026-10-28): the text a user typed to start research is the user's own
 // (research_prompts); the job and everything it produces are shared. A job started from the workspace
 // shows its query to its owner only - to anyone else the query reads as empty.
-const OWN_QUERY = (alias: string, ownerParam: string) =>
+export const OWN_QUERY = (alias: string, ownerParam: string) =>
   `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = ${alias}.id AND p.owner_sub <> ${ownerParam})
         THEN '' ELSE ${alias}.query END`;
 

@@ -5,6 +5,7 @@
 // held_sources only when the caller scopes it to their refinery, and never under a filter.
 import type { Db } from "../db.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
+import { OWN_QUERY } from "./sessions.ts";
 
 const STATEMENT_TIMEOUT_MS = 3000;
 
@@ -233,7 +234,9 @@ async function searchHeld(db: Db, q: string, refineryId: string, limit: number, 
 }
 
 // timeline(scope, range): revisions, sessions, claims and trail events in one ordered list.
-export async function timeline(db: Db, from: string | null, to: string | null, sourceId: string | null, limit: number, f: MetadataFilter) {
+// `owner`: the caller (rw-p2b-workspace round 2, F3): a session started from the workspace shows its
+// typed prompt to its owner only, as sessions() does.
+export async function timeline(db: Db, from: string | null, to: string | null, sourceId: string | null, limit: number, f: MetadataFilter, owner = "") {
   if (f) return { from, to, events: [] };
   const events = await db.query<{ at: string; kind: string; ref: string; summary: string }>(
     `SELECT * FROM (
@@ -241,9 +244,9 @@ export async function timeline(db: Db, from: string | null, to: string | null, s
               'revision ' || r.revision || ' by ' || r.edited_by AS summary, r.source_id AS sid
          FROM public.source_revisions r
        UNION ALL
-       SELECT j.created_at, 'session_started', j.id::text, left(j.query, 120), NULL FROM public.research_jobs j
+       SELECT j.created_at, 'session_started', j.id::text, left(${OWN_QUERY("j", "$5")}, 120), NULL FROM public.research_jobs j
        UNION ALL
-       SELECT j.finished_at, 'session_finished', j.id::text, j.status || ': ' || left(j.query, 100), NULL
+       SELECT j.finished_at, 'session_finished', j.id::text, j.status || ': ' || left(${OWN_QUERY("j", "$5")}, 100), NULL
          FROM public.research_jobs j WHERE j.finished_at IS NOT NULL
        UNION ALL
        SELECT c.created_at, 'claim_created', c.id::text, left(c.text, 120), NULL FROM public.claims c
@@ -253,7 +256,7 @@ export async function timeline(db: Db, from: string | null, to: string | null, s
      WHERE ($1::timestamptz IS NULL OR e.at >= $1) AND ($2::timestamptz IS NULL OR e.at <= $2)
        AND ($3::uuid IS NULL OR e.sid = $3)
      ORDER BY e.at DESC LIMIT $4`,
-    [from, to, sourceId, limit],
+    [from, to, sourceId, limit, owner],
   );
   return { from, to, events: events.map(({ ...e }) => ({ at: e.at, kind: e.kind, ref: e.ref, summary: e.summary })) };
 }

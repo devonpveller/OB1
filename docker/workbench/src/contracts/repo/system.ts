@@ -24,13 +24,20 @@ export async function postNotification(db: Db, n: NotificationInput) {
   return rows[0];
 }
 
-export async function notifications(db: Db, cls: string | null, since: string | null, limit: number) {
+// A notification about a user document (entity document:<path>, e.g. a listing that could not be
+// updated) is that document owner's event, not the shared stream's (rw-p2b-workspace round 2, F4):
+// it is answered to its owner only. `who` = { sub, key } from the identity seam.
+export async function notifications(db: Db, cls: string | null, since: string | null, limit: number, who: { sub: string; key: string } = { sub: "", key: "" }) {
   const rows = await db.query<Record<string, unknown>>(
-    `SELECT id, class, subject, slug, entity, origin, error, first_seen, last_seen, count
-       FROM public.research_notifications
-      WHERE ($1::text IS NULL OR class = $1) AND ($2::timestamptz IS NULL OR last_seen >= $2)
-      ORDER BY last_seen DESC LIMIT $3`,
-    [cls, since, limit],
+    `SELECT n.id, n.class, n.subject, n.slug, n.entity, n.origin, n.error, n.first_seen, n.last_seen, n.count
+       FROM public.research_notifications n
+      WHERE ($1::text IS NULL OR n.class = $1) AND ($2::timestamptz IS NULL OR n.last_seen >= $2)
+        AND (n.entity IS NULL OR NOT starts_with(n.entity, 'document:')
+             OR starts_with(n.entity, 'document:documents/' || $5 || '/')
+             OR EXISTS (SELECT 1 FROM public.user_document_listings d
+                         WHERE 'document:' || d.path = n.entity AND d.owner_sub = $4))
+      ORDER BY n.last_seen DESC LIMIT $3`,
+    [cls, since, limit, who.sub, who.key],
   );
   return { notifications: rows };
 }

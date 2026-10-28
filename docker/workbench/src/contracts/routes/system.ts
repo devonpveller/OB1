@@ -1,5 +1,6 @@
 // Notifications (D13 item 7: a READ endpoint for the research front end only - no tool, no
 // webhook, no post anywhere), the configuration store (D6 item 5), the registries (D18).
+import { identityOf } from "../../middleware/identity.ts";
 import { createRoute, z } from "../deps.ts";
 import * as sys from "../repo/system.ts";
 import { parseLimit } from "../logic/scope.ts";
@@ -25,7 +26,7 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const q = c.req.valid("query");
-      return send(c, Notifications, await sys.notifications(deps.db, q.class || null, q.since || null, parseLimit(q.limit, 100, 500)));
+      return send(c, Notifications, await sys.notifications(deps.db, q.class || null, q.since || null, parseLimit(q.limit, 100, 500), await identityOf(c)));
     } catch (e) {
       return fail(c, e);
     }

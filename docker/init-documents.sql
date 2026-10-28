@@ -107,6 +107,13 @@ END $$;
 ALTER TABLE public.user_document_listings ADD COLUMN IF NOT EXISTS actor_sub TEXT;
 CREATE INDEX IF NOT EXISTS idx_user_document_listings_owner ON public.user_document_listings (owner_sub, updated_at DESC);
 ALTER TABLE public.ideas ADD COLUMN IF NOT EXISTS actor_sub TEXT;
+-- Every per-user row records an actor (round 2, tester attempt 1): a row back-filled here was written
+-- by no one through the seam, so its actor is the fixed system actor 'system:backfill'; a row a writer
+-- outside the seam inserts later (the MCP idea tools) gets 'system:outside-seam' by default.
+UPDATE public.user_document_listings SET actor_sub = 'system:backfill' WHERE actor_sub IS NULL;
+UPDATE public.ideas SET actor_sub = 'system:backfill' WHERE actor_sub IS NULL;
+ALTER TABLE public.user_document_listings ALTER COLUMN actor_sub SET DEFAULT 'system:outside-seam';
+ALTER TABLE public.ideas ALTER COLUMN actor_sub SET DEFAULT 'system:outside-seam';
 CREATE INDEX IF NOT EXISTS idx_ideas_owner ON public.ideas (owner_sub, updated_at DESC);
 
 -- The original text a user typed to start research from the workspace: the user's own (operator

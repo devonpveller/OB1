@@ -217,7 +217,7 @@ function registerKnowledgeReads(app: ContractApp, deps: ContractDeps) {
     try {
       const q = c.req.valid("query");
       return send(c, Timeline, await kn.timeline(deps.db, q.from || null, q.to || null, q.source_id || null,
-        parseLimit(q.limit, 100, 500), parseMetadataFilter(q.metadata_filter)));
+        parseLimit(q.limit, 100, 500), parseMetadataFilter(q.metadata_filter), (await identityOf(c)).sub));
     } catch (e) {
       return fail(c, e);
     }

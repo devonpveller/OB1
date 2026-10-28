@@ -14,6 +14,9 @@
 // WORKSPACE_IDENTITY_HEADER (shipped BLANK = off) names a request header the seam takes the subject
 // from instead - the extension point the sign-on item fills (with the edge stripping any client copy
 // of it); the lab tests set it to prove two identities see only their own state.
+// DEPLOY RULE (round 2): the viewer's /workbench/* forwarder passes client headers through, so whenever
+// WORKSPACE_IDENTITY_HEADER is set the edge (Traefik / the Authentik outpost) MUST strip any
+// client-sent copy of that header and set it itself - otherwise any client can claim any subject.
 import type { Context, Next } from "hono";
 
 // TWO subjects (operator 2026-10-28): `sub` is subject_sub - whose data is shown and written (every
