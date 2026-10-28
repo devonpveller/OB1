@@ -1,2 +1,0 @@
-# freeze tool scripts run in Linux containers and Git Bash: LF always
-*.sh text eol=lf

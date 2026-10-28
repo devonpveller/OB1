@@ -185,15 +185,17 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 - **CLIENT-side change? The bundle is FROZEN (P1c, D7).** `bundle/` and
   `lib/chrome-static.mjs` are committed files; the viewer image copies them and
-  builds nothing. They change only when a `quartz-overlay/` component changes
-  (until P8b retires the overlay), and then by hand with the Quartz freeze
-  tool, never at image build:
+  builds nothing. They were emitted ONCE by Quartz v4.5.1 + `quartz-overlay/`
+  with an offline freeze tool, which rw-p1c-retire2 deleted (operator
+  2026-10-28; it lives in git history at OB1 5dfa57b). There is NO re-emit
+  path: a change before P8b retires the overlay means editing the files in
+  `bundle/` (and `lib/chrome-static.mjs`) by hand, keeping `quartz-overlay/`
+  in step as the record of the source, and updating their lines in
+  `bundle.sha256` (`sha256sum`; the image build fails on a mismatch):
 
   ```sh
-  # 1. re-emit the frozen assets from Quartz + the overlay (offline; minutes)
-  FREEZE_TAG=wt-<id> bash OB1/docker/wiki-viewer/freeze/freeze.sh bundle
-  #    (writes bundle/, lib/chrome-static.mjs and bundle.sha256 - commit all three)
-  FREEZE_TAG=wt-<id> bash OB1/docker/wiki-viewer/freeze/freeze.sh check   # committed == emitted
+  # 1. edit bundle/<file> by hand, then refresh its manifest line
+  (cd OB1/docker/wiki-viewer && sha256sum bundle/postscript.js)   # replace that line in bundle.sha256
 
   # 2. build the viewer image and run it in a DRILL environment
   #    (test/p1a-env.sh), never the live container; a drill may bind-mount
@@ -218,14 +220,15 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   (read-only) and a database; there is nothing to switch off (P1c: no builder).
   Its explorer and search call `/workbench/*`, which only exists behind caddy.
   Batch changes; deploy ONCE.
-- **Patching Quartz** (only to re-freeze the bundle, see above): overlay forks
-  live in `quartz-overlay/`; stock-file changes are the grep/sha-asserted seds
-  and the anchor-asserted `freeze/graph-api.mjs` in `freeze/Dockerfile` (sed
-  into TypeScript is banned after it shipped `\x01` bytes). Overlay files are
-  CRLF while patch anchors are LF — patch scripts must match in LF-space and
-  restore endings (build CR/LF from `String.fromCharCode`; every escaped form
-  gets mangled by tooling layers). The parity diff's "built" side is the
-  freeze tool's build of the env's vault (`test/p1a-env.sh ref`).
+- **Quartz sources**: the overlay forks the frozen bundle was built from live
+  in `quartz-overlay/` (a record only - nothing builds them since
+  rw-p1c-retire2). The parity diff's "built" side is the COMMITTED reference
+  `test/fixtures/parity-reference.tar.gz` (the env's vault as Quartz built it,
+  html only; `test/p1a-env.sh ref` loads it) and the slug check compares the
+  shared rule against the committed `test/fixtures/quartz-slug-table.json`
+  (`test/slug-table-check.mjs`); both were emitted once, before the freeze
+  tool was deleted, so a new fixture-vault page needs its built page and its
+  table row added by hand.
 - **Never `docker rm` by port filter** — inspect by NAME (a port filter once
   removed the production suggestion-worker).
 

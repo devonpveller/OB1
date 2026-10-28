@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "The live wiki renderer (research-workbench P1a-P1c): serve.mjs + lib/. Runtime dependencies only - pinned to the exact versions the frozen client bundle was emitted with (freeze/).",
+  "description": "The live wiki renderer (research-workbench P1a-P1c): serve.mjs + lib/. Runtime dependencies only - pinned to the exact versions Quartz v4.5.1 locked when the frozen client bundle was emitted.",
   "license": "UNLICENSED",
   "dependencies": {
     "github-slugger": "2.0.0",

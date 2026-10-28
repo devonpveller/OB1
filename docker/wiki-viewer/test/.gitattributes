@@ -1,1 +1,3 @@
 * text eol=lf
+# rw-p1c-retire2: the committed parity reference is a gzip archive - bytes, never converted
+*.tar.gz binary

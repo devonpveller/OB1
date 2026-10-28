@@ -152,11 +152,11 @@ appearing under the `open-brain` project in Docker Desktop.
   expired short-term rows (label OR any sub-label) then POSTs
   `/recompile` to `http://openbrain-wiki:8000/recompile`. Wrapper:
   `D:\_data\gmail-prune-scheduled.ps1`.
-- **Wiki's in-container daily scheduler is moved off 01:00**
-  (`WIKI_RECOMPILE_HOUR=4` in `docker/.env`) so it cannot race the
-  pull. Change-watch remains on, so any work landed by the pull
-  triggers a debounced recompile naturally — and the explicit POST
-  from the prune script is the authoritative end-of-cycle compile.
+- **The wiki has no daily scheduler** (research-workbench P1c retired
+  it, and `WIKI_RECOMPILE_HOUR` with it), so nothing in the wiki can
+  race the 01:00 pull. Change-watch remains on, so any work landed by
+  the pull triggers a debounced recompile naturally — and the explicit
+  POST from the prune script is the authoritative end-of-cycle compile.
 - **OAuth secrets** are bind-mounted INDIVIDUALLY in the compose
   service definitions from `OB1/secrets/google/open-brain-email/` over
   the in-repo placeholder paths (the recipe-dir `credentials.json` and
@@ -240,5 +240,5 @@ appearing under the `open-brain` project in Docker Desktop.
 - Logs:
   - `D:\_data\gmail-pull-<timestamp>.log`
   - `D:\_data\gmail-prune-<timestamp>.log`
-- Wiki schedule offset (so 01:00 stays clear):
-  `OB1/docker/.env` → `WIKI_RECOMPILE_HOUR=4`
+- Wiki schedule: none (P1c retired the daily recompile; a leftover
+  `WIKI_RECOMPILE_HOUR` line in `OB1/docker/.env` is unread and can go)

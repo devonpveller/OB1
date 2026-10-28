@@ -12,9 +12,10 @@
 #     --internal since rw-p1c-retire: nothing in the env needs a route out);
 #   - containers named     $P1A_PREFIX-*  (removed with docker rm -f -v);
 #   - two named volumes    $P1A_PREFIX-vault (a COPY of the fixture vault)
-#                          and $P1A_PREFIX-ref (rw-p1c-retire: the vault as the
-#                          Quartz freeze tool builds it - the parity diff's
-#                          "built" side; the viewer image has no builder);
+#                          and $P1A_PREFIX-ref (the parity diff's "built" side:
+#                          the COMMITTED reference fixtures/parity-reference.tar.gz,
+#                          the fixture vault as Quartz built it, emitted once
+#                          before the freeze tool was retired, rw-p1c-retire2);
 #   - the database is a fresh postgres seeded ONLY with the fixtures in
 #     test/fixtures/ (synthetic rows; never the live openbrain-db).
 # Network aliases (openbrain-db / openbrain-postgrest / openbrain-rest) exist
@@ -23,8 +24,8 @@
 #
 # Usage (Git Bash on Windows or any POSIX shell, from anywhere):
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh vars         # print the resolved names (eval-able)
-#   bash OB1/docker/wiki-viewer/test/p1a-env.sh build        # viewer image (label = OB1 HEAD) + the freeze tool image
-#   bash OB1/docker/wiki-viewer/test/p1a-env.sh ref          # (re)build $P1A_PREFIX-ref from the vault (freeze tool)
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh build        # viewer image (label = OB1 HEAD)
+#   bash OB1/docker/wiki-viewer/test/p1a-env.sh ref          # (re)load $P1A_PREFIX-ref from the committed reference
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh refcat <p>   # cat a file of the reference build (<p> relative, e.g. index.html)
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh up           # db + rest + llm stub + seed + viewer
 #   bash OB1/docker/wiki-viewer/test/p1a-env.sh node <args>  # run node in the viewer image with OB1 at /ob1, vault at /wiki
@@ -55,7 +56,6 @@ SRV="${P1A_SRV:-}"
 REF="$P-ref"
 IMG="openbrain-wiki-viewer:$TAG"
 WSIMG="openbrain-wiki:$TAG"
-FRIMG="openbrain-wiki-quartz-freeze:$TAG"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && (pwd -W 2>/dev/null || pwd))"
 VIEWER="$(cd "$HERE/.." && (pwd -W 2>/dev/null || pwd))"
 OB1="$(cd "$HERE/../../.." && (pwd -W 2>/dev/null || pwd))"
@@ -76,8 +76,8 @@ wait_http() { # url, seconds
 }
 
 cmd_vars() {
-  printf 'P=%q\nTAG=%q\nSUBNET=%q\nPORT=%q\nNET=%q\nVOL=%q\nSRV=%q\nREF=%q\nIMG=%q\nWSIMG=%q\nFRIMG=%q\nOB1=%q\n' \
-    "$P" "$TAG" "$SUBNET" "$PORT" "$NET" "$VOL" "$SRV" "$REF" "$IMG" "$WSIMG" "$FRIMG" "$OB1"
+  printf 'P=%q\nTAG=%q\nSUBNET=%q\nPORT=%q\nNET=%q\nVOL=%q\nSRV=%q\nREF=%q\nIMG=%q\nWSIMG=%q\nOB1=%q\n' \
+    "$P" "$TAG" "$SUBNET" "$PORT" "$NET" "$VOL" "$SRV" "$REF" "$IMG" "$WSIMG" "$OB1"
 }
 
 cmd_build() {
@@ -86,8 +86,6 @@ cmd_build() {
   log "building $IMG from $VIEWER (OB1_SHA=$sha)"
   docker build --build-context "recipes=$OB1/recipes" --build-arg "OB1_SHA=$sha" -t "$IMG" "$VIEWER"
   docker image inspect "$IMG" --format 'label org.opencontainers.image.revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
-  # the Quartz freeze tool (test-only: the parity reference and the slug check; never deployed)
-  FREEZE_TAG="$TAG" bash "$VIEWER/freeze/freeze.sh" image
 }
 
 cmd_wsbuild() {
@@ -185,10 +183,13 @@ cmd_viewer() {
   log "viewer started ($P-viewer on $NET${P1A_PUBLISH:+, published on 127.0.0.1:$PORT})"
 }
 
-cmd_ref() { # the parity diff's "built" side: the env's vault as Quartz builds it (freeze tool; rw-p1c-retire)
+cmd_ref() { # the parity diff's "built" side: the committed reference (the env's vault = fixtures/vault +
+  # slug-vault.mjs, as Quartz v4.5.1 + quartz-overlay/ built it; html only; emitted ONCE by the freeze
+  # tool at OB1 5dfa57b, which rw-p1c-retire2 deleted - a fixture-vault change needs a hand-made page here)
   docker volume rm "$REF" >/dev/null 2>&1 || true
   docker volume create "$REF" >/dev/null
-  FREEZE_TAG="$TAG" FREEZE_NO_BUILD=1 bash "$VIEWER/freeze/freeze.sh" reference "$VOL" "$REF" | sed 's/^/[p1a-env] /'
+  docker run --rm --network none -v "$REF:/ref" -v "$HERE/fixtures:/fx:ro" --entrypoint sh "$IMG" \
+    -c 'tar xzf /fx/parity-reference.tar.gz -C /ref && echo "reference loaded: $(find /ref -name "*.html" | wc -l) html files"' | sed 's/^/[p1a-env] /'
 }
 
 cmd_refcat() { # cat a file of the reference build (path relative to its root), or "(absent)"
@@ -196,7 +197,7 @@ cmd_refcat() { # cat a file of the reference build (path relative to its root), 
 }
 
 cmd_wait_built() { # the reference build exists (built once per vault) and THIS viewer serves pages
-  # (rw-p1c-retire: the viewer has no builder; the "built" side is the freeze tool's build of the vault)
+  # (rw-p1c-retire: the viewer has no builder; the "built" side is the committed reference)
   docker run --rm --network none -v "$REF:/ref:ro" --entrypoint sh "$IMG" -c 'test -f /ref/index.html' >/dev/null 2>&1 || cmd_ref
   cmd_wait_serving "${1:-300}"
 }
@@ -314,7 +315,7 @@ cmd_down() {
   docker volume rm "$VOL" "$REF" "$P-srv" "$P-srv-empty" "$P-srv-stale" >/dev/null 2>&1 || true
   [ -n "$SRV" ] && docker volume rm "$SRV" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  log "removed containers $P-*, volumes $VOL $REF and network $NET (images $IMG / $WSIMG / $FRIMG kept)"
+  log "removed containers $P-*, volumes $VOL $REF and network $NET (images $IMG / $WSIMG kept)"
 }
 
 c="${1:-}"; shift || true

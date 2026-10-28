@@ -72,8 +72,8 @@ hdr "C19 (rw-p1a-deploy-prep, NA4-1): legacy notes whose file names Quartz slugi
 c19_ok=1
 [ -n "${out:-}" ] || out="$(T 300 bash "$E" parity 2>&1)"
 # (a) the shared rule = Quartz's own slugifyFilePath for every page file, each built; no non-page built
-# (rw-p1c-retire: Quartz's own path.ts/glob.ts live in the freeze tool image, not the viewer; the built side is $REF)
-qs="$(FREEZE_TAG="$TAG" FREEZE_NO_BUILD=1 T 180 bash "$HERE/../freeze/freeze.sh" slugcheck "$VOL" "$REF" 2>&1)"; echo "$qs"
+# (rw-p1c-retire2: Quartz's own answers are the committed fixtures/quartz-slug-table.json; the built side is $REF)
+qs="$(T 180 docker run --rm --network none -v "$OB1:/ob1:ro" -v "$VOL:/wiki:ro" -v "$REF:/ref:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/slug-table-check.mjs --vault /wiki --built /ref 2>&1)"; echo "$qs"
 echo "$qs" | grep -q "QUARTZ-SLUG-CHECK: PASS" || { echo "x the shared slug differs from Quartz's, or a page was not built"; c19_ok=0; }
 # (b) each slug fixture: 200 db, built, nothing unlisted, every element, the note class
 for u in sp-ace pv.1 a-and-b qx ht 50-percent up up/inner deep-folder/sub-dir/leaf-note; do

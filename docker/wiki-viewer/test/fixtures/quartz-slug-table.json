@@ -1,0 +1,244 @@
+{
+ "about": "Quartz v4.5.1's own slugifyFilePath (quartz/util/path.ts) and page set (quartz/util/glob.ts with quartz.config.ts ignorePatterns) for every .md file of the test env's vault (test/fixtures/vault + slug-vault.mjs). Emitted ONCE by the retired freeze tool (OB1 5dfa57b, rw-p1c-retire2); test/slug-table-check.mjs compares the shared rule against it.",
+ "ignorePatterns": [
+  "private",
+  "templates",
+  ".obsidian",
+  ".git",
+  ".git/**",
+  "**/.git/**",
+  ".quartz-cache",
+  "public",
+  "node_modules",
+  ".wikistate.json",
+  "**/.failed-entity-ids.json",
+  "planned.json"
+ ],
+ "files": [
+  {
+   "path": ".obsidian/o.md",
+   "quartzSlug": ".obsidian/o",
+   "quartzPage": false
+  },
+  {
+   "path": "content/notebooks/fixture-notebook/fixture-notebook.md",
+   "quartzSlug": "content/notebooks/fixture-notebook/fixture-notebook",
+   "quartzPage": true
+  },
+  {
+   "path": "content/notebooks/index.md",
+   "quartzSlug": "content/notebooks/index",
+   "quartzPage": true
+  },
+  {
+   "path": "content/notebooks/second-notebook/second-notebook.md",
+   "quartzSlug": "content/notebooks/second-notebook/second-notebook",
+   "quartzPage": true
+  },
+  {
+   "path": "content/person/person-ada-fixture.md",
+   "quartzSlug": "content/person/person-ada-fixture",
+   "quartzPage": true
+  },
+  {
+   "path": "content/person/person-bob-fixture.md",
+   "quartzSlug": "content/person/person-bob-fixture",
+   "quartzPage": true
+  },
+  {
+   "path": "content/source/00000000-0000-4000-8000-000000000001.md",
+   "quartzSlug": "content/source/00000000-0000-4000-8000-000000000001",
+   "quartzPage": true
+  },
+  {
+   "path": "content/source/00000000-0000-4000-8000-000000000002.md",
+   "quartzSlug": "content/source/00000000-0000-4000-8000-000000000002",
+   "quartzPage": true
+  },
+  {
+   "path": "content/source/00000000-0000-4000-8000-000000000101.md",
+   "quartzSlug": "content/source/00000000-0000-4000-8000-000000000101",
+   "quartzPage": true
+  },
+  {
+   "path": "content/source/00000000-0000-4000-8000-000000000102.md",
+   "quartzSlug": "content/source/00000000-0000-4000-8000-000000000102",
+   "quartzPage": true
+  },
+  {
+   "path": "content/thought/9001.md",
+   "quartzSlug": "content/thought/9001",
+   "quartzPage": true
+  },
+  {
+   "path": "content/thought/9002.md",
+   "quartzSlug": "content/thought/9002",
+   "quartzPage": true
+  },
+  {
+   "path": "content/tool/tool-ada-dup.md",
+   "quartzSlug": "content/tool/tool-ada-dup",
+   "quartzPage": true
+  },
+  {
+   "path": "content/tool/tool-fixture-db.md",
+   "quartzSlug": "content/tool/tool-fixture-db",
+   "quartzPage": true
+  },
+  {
+   "path": "index.md",
+   "quartzSlug": "index",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/.dot-note.md",
+   "quartzSlug": "notes/.dot-note",
+   "quartzPage": false
+  },
+  {
+   "path": "notes/.hidden/h.md",
+   "quartzSlug": "notes/.hidden/h",
+   "quartzPage": false
+  },
+  {
+   "path": "notes/adv/back\\.dot.md",
+   "quartzSlug": "notes/adv/back\\.dot",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/adv/back\\slash.md",
+   "quartzSlug": "notes/adv/back\\slash",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/adv/lt<gt>.md",
+   "quartzSlug": "notes/adv/lt<gt>",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/adv/private\\x.md",
+   "quartzSlug": "notes/adv/private\\x",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/alias-collide.md",
+   "quartzSlug": "notes/alias-collide",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/alias-dup-a.md",
+   "quartzSlug": "notes/alias-dup-a",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/alias-dup-b.md",
+   "quartzSlug": "notes/alias-dup-b",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/alias-retired.md",
+   "quartzSlug": "notes/alias-retired",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/alias-x-y.md",
+   "quartzSlug": "notes/alias-x-y",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/alias-x.md",
+   "quartzSlug": "notes/alias-x",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/block-source.md",
+   "quartzSlug": "notes/block-source",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/empty-body-note.md",
+   "quartzSlug": "notes/empty-body-note",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/fixture-folder/nested-note.md",
+   "quartzSlug": "notes/fixture-folder/nested-note",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/fixture-note.md",
+   "quartzSlug": "notes/fixture-note",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/kitchen-sink.md",
+   "quartzSlug": "notes/kitchen-sink",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/private/kept.md",
+   "quartzSlug": "notes/private/kept",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/50%.md",
+   "quartzSlug": "notes/slug-names/50-percent",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/a&b.md",
+   "quartzSlug": "notes/slug-names/a-and-b",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/deep folder/sub dir/leaf note.md",
+   "quartzSlug": "notes/slug-names/deep-folder/sub-dir/leaf-note",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/h#t.md",
+   "quartzSlug": "notes/slug-names/ht",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/pv.1.md",
+   "quartzSlug": "notes/slug-names/pv.1",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/q?x.md",
+   "quartzSlug": "notes/slug-names/qx",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/sp ace.md",
+   "quartzSlug": "notes/slug-names/sp-ace",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/up.md",
+   "quartzSlug": "notes/slug-names/up",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/slug-names/up/inner.md",
+   "quartzSlug": "notes/slug-names/up/inner",
+   "quartzPage": true
+  },
+  {
+   "path": "notes/transclude-fixture.md",
+   "quartzSlug": "notes/transclude-fixture",
+   "quartzPage": true
+  },
+  {
+   "path": "private/secret.md",
+   "quartzSlug": "private/secret",
+   "quartzPage": false
+  },
+  {
+   "path": "templates/tpl.md",
+   "quartzSlug": "templates/tpl",
+   "quartzPage": false
+  }
+ ]
+}

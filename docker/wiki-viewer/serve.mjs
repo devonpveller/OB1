@@ -11,10 +11,11 @@
 // READINESS (research-workbench P1b, P1c): the viewer serves the moment it
 // listens. The client bundle and static assets (index.css, prescript.js,
 // postscript.js, static/*) are the FROZEN bundle (/viewer/bundle: committed
-// repo files, D7 - emitted once by the Quartz freeze tool, freeze/; the image
-// carries no Quartz). A file the bundle does not carry is a vault attachment,
-// read from the vault itself (/wiki, read-only: assets/<id>/<name> and any
-// non-page file in a content directory). There is no builder, no snapshot
+// repo files, D7 - emitted once by Quartz v4.5.1 + quartz-overlay/, before the
+// freeze tool was retired (rw-p1c-retire2); the image carries no Quartz).
+// A file the bundle does not carry is a vault attachment,
+// read from the vault itself (/wiki, read-only: a non-page file in a content
+// directory that the vault .gitignore does not exclude). There is no builder, no snapshot
 // volume (/srv), no swap loop and no nightly rebuild (P1c): nothing in this
 // container rebuilds anything, so a redeploy serves pages at once. Health is
 // /__health (the compose healthcheck): the site index warm (P1c: the cold
@@ -41,6 +42,7 @@ import { join, normalize, extname } from "node:path";
 import { createHash } from "node:crypto";
 import { getNavIndex, navIndexEnabled, indexChunks, navIndexWarm } from "./lib/nav-index.mjs";
 import { isContentDir, slugifyFilePath } from "./lib/shared/quartz-slug.mjs";
+import { isVaultIgnored } from "./lib/vault-ignore.mjs";
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
 import { stripHtml, listDocument, ACK_COOKIE, safeBack } from "./lib/notifications.mjs";
@@ -72,9 +74,12 @@ const etagOf = (st) => `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toSt
 // Assets emitter used to copy into its snapshot: a non-.md file in a directory
 // Quartz builds (isContentDir: never private/, templates/, a dot-directory or
 // the gitignored assets/ - Quartz honoured the vault .gitignore, so it never
-// published assets/ either; never a dot-file), at the URL Quartz gave it
-// (slugifyFilePath, the shared rule): the URL's own path, else the slug index
-// of the vault's attachments (built on a miss, at most once a minute).
+// published assets/ either; never a dot-file) and NOT excluded by the vault's
+// .gitignore (rw-p1c-retire2, review r-p1c: Quartz ran with gitignore: true,
+// so it never published planned.json, the ledgers or *.lock; lib/vault-ignore.mjs,
+// fail-closed on the wiki-service's REQUIRED_IGNORES), at the URL Quartz gave
+// it (slugifyFilePath, the shared rule): the URL's own path, else the slug
+// index of the vault's attachments (built on a miss, at most once a minute).
 const statFile = async (p) => { try { const st = await stat(p); return st.isFile() ? { file: p, st } : null; } catch { return null; } };
 const isAttachmentPath = (rel) => {
   const parts = rel.split("/");
@@ -93,8 +98,8 @@ async function assetSlugIndex() {
       for (const e of ents) {
         if (e.name.startsWith(".")) continue;
         const r = `${rel}/${e.name}`;
-        if (e.isDirectory()) { if (isContentDir(r)) await walk(join(dir, e.name), r); }
-        else if (e.isFile() && isAttachmentPath(r)) map.set(slugifyFilePath(r), r);
+        if (e.isDirectory()) { if (isContentDir(r) && !(await isVaultIgnored(VAULT, r, true))) await walk(join(dir, e.name), r); }
+        else if (e.isFile() && isAttachmentPath(r) && !(await isVaultIgnored(VAULT, r))) map.set(slugifyFilePath(r), r);
       }
     };
     const top = async () => {
@@ -102,8 +107,8 @@ async function assetSlugIndex() {
       try { ents = await readdir(VAULT, { withFileTypes: true }); } catch { return; }
       for (const e of ents) {
         if (e.name.startsWith(".")) continue;
-        if (e.isDirectory()) { if (isContentDir(e.name)) await walk(join(VAULT, e.name), e.name); }
-        else if (e.isFile() && isAttachmentPath(e.name)) map.set(slugifyFilePath(e.name), e.name);
+        if (e.isDirectory()) { if (isContentDir(e.name) && !(await isVaultIgnored(VAULT, e.name, true))) await walk(join(VAULT, e.name), e.name); }
+        else if (e.isFile() && isAttachmentPath(e.name) && !(await isVaultIgnored(VAULT, e.name))) map.set(slugifyFilePath(e.name), e.name);
       }
     };
     await top();
@@ -123,10 +128,13 @@ async function resolveAsset(urlPath) {
   const rel = p.replace(/^\/+/, "");
   const inVault = normalize(join(VAULT, rel));
   if (!inVault.startsWith(VAULT + "/") || !isAttachmentPath(rel)) return null; // traversal + page-set guard
-  const exact = await statFile(inVault);
-  if (exact) return exact;
-  const orig = (await assetSlugIndex()).get(rel);
-  return orig ? statFile(join(VAULT, orig)) : null;
+  const vrel = inVault.slice(VAULT.length + 1);
+  if (!(await isVaultIgnored(VAULT, vrel))) {
+    const exact = await statFile(inVault);
+    if (exact) return exact;
+  }
+  const orig = (await assetSlugIndex()).get(rel); // the index holds no ignored path
+  return orig && !(await isVaultIgnored(VAULT, orig)) ? statFile(join(VAULT, orig)) : null;
 }
 
 // A page URL for sure: no extension (Quartz pretty URLs), a folder URL, or a

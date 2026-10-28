@@ -43,7 +43,7 @@ fresh_viewer() { # [image]: a NEW viewer container (the redeploy)
   P1A_VIEWER_IMG="${1:-$IMG}" bash "$E" viewer >/dev/null
 }
 have() { docker image inspect "$1" >/dev/null 2>&1; }
-echo "names: prefix=$P tag=$TAG net=$NET viewer=$IMG ws=$WSIMG freeze=$FRIMG; RED=$RED ($RED_IMG, $SPLASH_IMG, $RED_WSIMG)"
+echo "names: prefix=$P tag=$TAG net=$NET viewer=$IMG ws=$WSIMG; RED=$RED ($RED_IMG, $SPLASH_IMG, $RED_WSIMG)"
 
 hdr "C0 build + environment"
 bash "$B" down >/dev/null 2>&1; bash "$E" down >/dev/null 2>&1
@@ -125,7 +125,10 @@ echo "GREEN image history build steps naming Quartz/patches: [${hist}]"
 df="$(grep -nE "quartz build|git clone|esbuild|npx|sed -i|patches/" "$VIEWER_W/Dockerfile" | head -5)"; echo "viewer Dockerfile build/patch steps: [${df}]"
 pk="$(grep -ic quartz "$VIEWER_W/package.json" "$VIEWER_W/package-lock.json" | tr '\n' ' ')"; echo "package manifest quartz mentions: $pk"
 o="$(chk bundle --base "http://$P-viewer:8080" --manifest /ob1/docker/wiki-viewer/bundle.sha256 2>&1 | tail -1)"; echo "$o"
-if [ -z "$g" ] && [ -z "$hist" ] && [ -z "$df" ] && [ "$pk" = "$VIEWER_W/package.json:0 $VIEWER_W/package-lock.json:0 " ] && echo "$o" | grep -q "BUNDLE: PASS"; then pass C7; else fail C7 "Quartz tooling in the image or the manifest"; fi
+# rw-p1c-retire2 (operator 2026-10-28): the offline freeze tool is deleted, and nothing in the tree runs it
+fz="$( [ -e "$VIEWER_W/freeze" ] && echo "PRESENT $VIEWER_W/freeze"; git -C "$OB1" grep -n -e "freeze/freeze" -e "freeze\.sh" -e "quartz-freeze" -e "FRIMG" -- . ":!docker/wiki-viewer/test/run-p1c.sh" | head -5; git -C "$REPO" grep -n -e "freeze/freeze" -e "freeze\.sh" -- . ":!OB1" | head -5)"
+echo "freeze tool in the tree: [${fz}]"
+if [ -z "$g" ] && [ -z "$hist" ] && [ -z "$df" ] && [ -z "$fz" ] && [ "$pk" = "$VIEWER_W/package.json:0 $VIEWER_W/package-lock.json:0 " ] && echo "$o" | grep -q "BUNDLE: PASS"; then pass C7; else fail C7 "Quartz tooling in the image, the manifest or the tree"; fi
 if [ "$RED" = 1 ] && have "$RED_IMG"; then
   r="$(T 120 docker run --rm --network none --entrypoint sh "$RED_IMG" -c "$probe" 2>&1 | head -8)"; red C7 "$RED_IMG: $(echo "$r" | tr '\n' ' ' | cut -c1-400)"
 fi
@@ -188,9 +191,21 @@ if [ "$RED" = 1 ] && have "$RED_WSIMG"; then r="$(ws_run "$RED_WSIMG" RED)"; red
 fi
 
 if want C5; then
-hdr "C5 (clause 5): the pre-commit project-config check passes with the changed container"
+hdr "C5 (clause 5): the pre-commit project-config check passes with the changed container (the branch diff STAGED)"
+# rw-p1c-retire2 (tester F2): the check reads only STAGED paths, so in a clean checkout it skipped. With
+# nothing staged, stage the branch range itself: HEAD moves to the merge-base with the index left at the
+# branch tree (git reset --soft), the check runs, HEAD is put back (trap) - no commit, no working-tree change.
+c5base="${P1C_BASE:-development}"; c5head="$(git -C "$REPO" rev-parse HEAD)"; c5mb="$(git -C "$REPO" merge-base "$c5base" HEAD)"
+c5moved=0
+if git -C "$REPO" diff --cached --quiet; then
+  trap 'git -C "$REPO" reset -q --soft "$c5head"' EXIT
+  git -C "$REPO" reset -q --soft "$c5mb" && c5moved=1
+  echo "staged the branch range $c5mb..$c5head: $(git -C "$REPO" diff --cached --name-only | wc -l) paths"
+fi
 o="$(cd "$REPO" && T 600 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-project-configs.ps1 2>&1)"; rc=$?; echo "$o" | tail -12; echo "exit=$rc"
-[ "$rc" = 0 ] && pass C5 || fail C5 "check-project-configs.ps1 exit $rc"
+if [ "$c5moved" = 1 ]; then git -C "$REPO" reset -q --soft "$c5head"; trap - EXIT; fi
+[ "$(git -C "$REPO" rev-parse HEAD)" = "$c5head" ] || echo "x HEAD was not restored to $c5head"
+if [ "$rc" = 0 ] && [ "$(git -C "$REPO" rev-parse HEAD)" = "$c5head" ] && ! echo "$o" | grep -qi "nothing staged"; then pass C5; else fail C5 "check-project-configs.ps1 exit $rc, or it checked nothing"; fi
 fi
 
 if want C6; then

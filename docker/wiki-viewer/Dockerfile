@@ -5,8 +5,8 @@
 #   bundle/                 index.css, prescript.js, postscript.js, static/**
 #   lib/chrome-static.mjs   the static Quartz chrome fragments
 #   bundle.sha256           their sha256 (served bytes == committed bytes)
-# emitted once by the Quartz freeze tool (freeze/, run by hand, never by a
-# build or a deploy). This image has NO Quartz: no clone, no patch step, no
+# emitted once by Quartz v4.5.1 + quartz-overlay/ (the offline freeze tool,
+# deleted in rw-p1c-retire2; never by a build or a deploy). This image has NO Quartz: no clone, no patch step, no
 # builder, no watcher, no snapshot loop, no nightly rebuild, no Quartz entry
 # in package.json - only the renderer's own runtime dependencies, pinned by
 # package-lock.json to the exact versions the frozen bundle was built with.

@@ -22,7 +22,7 @@
 #   genuine repo on `main` (a real commit; `git show HEAD:index.md` works) and
 #   all 10 seed pages still warned. The warning does NOT report the vault's git
 #   state, and no amount of seeding removes it:
-#     * the viewer's entrypoint.sh (lines 7-8) points Quartz at the vault with
+#     * the retired viewer's entrypoint.sh (lines 7-8 at OB1 767c461) pointed Quartz at the vault with
 #       `ln -sfn /wiki /quartz/content`, so every page's path lies under
 #       /quartz, not under the vault;
 #     * Quartz's CreatedModifiedDate transformer
