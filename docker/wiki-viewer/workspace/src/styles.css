@@ -116,3 +116,15 @@ textarea { width: 100%; min-height: 4em; }
 @media (max-width: 700px) {
   .ws-nav { width: 80px; }
 }
+
+/* rw-identity: the sign-in screen, the impersonation banner, the admin panel */
+.ws-signin { max-width: 420px; margin: 18vh auto; text-align: center; }
+.ws-signin-btn { display: inline-block; padding: 8px 18px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); text-decoration: none; }
+.ws-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; background: #b45309; color: #fff; }
+.ws-banner button { margin-left: auto; }
+.ws-account { display: inline-flex; align-items: center; gap: 6px; }
+.ws-admin label { display: block; margin: 6px 0; }
+.ws-admin select, .ws-admin textarea { display: block; width: 100%; }
+.ws-audit { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.ws-audit td, .ws-audit th { border: 1px solid var(--line); padding: 2px 4px; text-align: left; }
+.ws-error { color: #b91c1c; }

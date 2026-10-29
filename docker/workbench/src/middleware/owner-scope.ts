@@ -163,6 +163,7 @@ function scrubStream(db: Db, body: ReadableStream<Uint8Array>, who: Identity): R
 export function ownerScope(db: Db) {
   return async (c: Context, next: Next) => {
     const who = await identityOf(c);
+    const url0 = new URL(c.req.url);
     let strings: string[];
     try {
       strings = await requestStrings(c);
@@ -175,7 +176,9 @@ export function ownerScope(db: Db) {
       return c.json({ error: "no such document" }, 404);
     }
     await next();
-    if (OFF()) return;
+    // rw-identity: the sign-in routes answer the caller's own identity and, to an admin, the audit
+    // log (whose routes may name any user's document - the log must show them as they were)
+    if (OFF() || url0.pathname.startsWith("/workbench/auth/")) return;
     const type = c.res.headers.get("content-type") ?? "";
     if (type.includes("text/event-stream") && c.res.body) {
       const headers = new Headers(c.res.headers);

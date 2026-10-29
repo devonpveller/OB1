@@ -6,6 +6,7 @@ import "dockview-react/dist/styles/dockview.css";
 import { navEntries, onRegistryChange, panels, registryVersion } from "./registry";
 import { defaultLayout, openPanel, restoreLayout, saveLayout, setDock } from "./dock";
 import { TitleBar } from "./TitleBar";
+import { ImpersonationBanner } from "./Identity";
 import { post, D } from "../lib/api";
 
 function useRegistry() {
@@ -57,6 +58,7 @@ export function Shell() {
 
   return (
     <div className="ws-root">
+      <ImpersonationBanner />
       <TitleBar />
       <div className="ws-body">
         <LeftNav />

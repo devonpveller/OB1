@@ -1,6 +1,6 @@
 // openbrain-workbench - the process: the app (src/app.ts) plus the vault repo, the nightly
 // empty-trash, the start-up reconcile and the server.
-import { app, docDeps } from "./app.ts";
+import { app, docDeps, seam } from "./app.ts";
 import { config } from "./config.ts";
 import { emptyDocumentsTrash, reconcileOnStart } from "./routes/documents.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
@@ -39,4 +39,5 @@ scheduleEmptyTrash();
 reconcileOnStart(docDeps);
 
 Deno.serve({ port: config.port }, app.fetch);
-console.log(`[workbench] listening on :${config.port} (auth=${config.workbenchKey ? "on" : "OPEN — set WORKBENCH_KEY"})`);
+console.log(`[workbench] listening on :${config.port} (auth=${config.workbenchKey ? "on" : "OPEN — set WORKBENCH_KEY"}, ` +
+  `sign-in=${seam.oidc ? `oidc ${new URL(seam.oidc.issuer).host}` : seam.cfg.header ? "identity header" : "off (one default identity)"})`);

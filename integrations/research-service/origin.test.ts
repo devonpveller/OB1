@@ -1,6 +1,6 @@
 // deno test origin.test.ts - D17 item 1: the caller's key decides the recorded origin.
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
-import { callerFor, inletRef, MismatchLog, parseCallers, resolveOrigin } from "./origin.ts";
+import { callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, promptOwner, resolveOrigin } from "./origin.ts";
 
 const OWUI = "owui-key-0123456789abcdef";
 const AO = "agent-org-key-0123456789ab";
@@ -69,4 +69,32 @@ Deno.test("RESEARCH_CALLERS is validated: shape, key length, no shared or duplic
   } catch (e) {
     assertEquals(String((e as Error).message).includes(OWUI), false);
   }
+});
+
+// rw-identity: research started from Open WebUI is filed under its user - accepted from OWUI's key only.
+Deno.test("on_behalf_of: accepted from the owui caller only; any other key naming a user is refused (403)", () => {
+  const ws = parseCallers(`owui-tool=owui:${OWUI};agent-org=mattermost:${AO};workspace=workspace:ws-key-0123456789abcd`, SHARED, "manual");
+  const by = (k: string) => callerFor(k, ws)!;
+  assertEquals(onBehalfOf(by(OWUI), { on_behalf_of: " ak-alice " }), { sub: "ak-alice" });
+  for (const k of [AO, "ws-key-0123456789abcd", SHARED]) {
+    const r = onBehalfOf(by(k), { on_behalf_of: "ak-alice" });
+    assert("error" in r && r.status === 403, `${by(k).name}: ${JSON.stringify(r)}`);
+  }
+  // none given = none (every caller)
+  for (const k of [OWUI, AO, SHARED]) assertEquals(onBehalfOf(by(k), {}), { sub: null });
+  // a reserved or malformed subject is refused even from OWUI
+  for (const bad of ["service:internal", "system:backfill", "anonymous:", "a\nb", "x".repeat(256), 7, { sub: "x" }]) {
+    const r = onBehalfOf(by(OWUI), { on_behalf_of: bad });
+    assert("error" in r && r.status === 400, `${JSON.stringify(bad)}: ${JSON.stringify(r)}`);
+  }
+});
+
+Deno.test("promptOwner: the user named by OWUI; the workspace records its own user; every other caller is a service identity", () => {
+  const ws = parseCallers(`owui-tool=owui:${OWUI};agent-org=mattermost:${AO};workspace=workspace:ws-key-0123456789abcd`, SHARED, "manual");
+  const by = (k: string) => callerFor(k, ws)!;
+  assertEquals(promptOwner(by(OWUI), "ak-alice"), { owner_sub: "ak-alice", actor_sub: "ak-alice" });
+  assertEquals(promptOwner(by(OWUI), null), { owner_sub: "service:owui-tool", actor_sub: "service:owui-tool" });
+  assertEquals(promptOwner(by(AO), null), { owner_sub: "service:agent-org", actor_sub: "service:agent-org" });
+  assertEquals(promptOwner(by(SHARED), null), { owner_sub: "service:shared-key", actor_sub: "service:shared-key" });
+  assertEquals(promptOwner(by("ws-key-0123456789abcd"), null), null);
 });
