@@ -90,7 +90,12 @@ export async function deliverToCurator(
       return await handOff(pkg);
     } catch (e) {
       const cause = describe(e);
-      causes.push(`attempt ${attempt}: ${cause}`);
+      // the inner wrapper's "not retried - the curator may still be working" describes ITS single call; the package was resent
+      causes.push(`attempt ${attempt}: ${cause.replace(/, not retried - the curator may still be working on the package/i, "")}`);
+      // A curator 4xx is returned before any write (bad json, claim required, 401): final, no settle wait.
+      if (isDefinitiveRefusal(e)) {
+        return { error: `${cause} (a final refusal: not resent)` };
+      }
       // The curator may have committed before the failure surfaced (timeout, dropped connection, a 5xx
       // after the persist): the event is the proof. Wait for it - a slow curator is still working.
       const deadline = now() + Math.max(0, opts.settleMs);
@@ -102,9 +107,6 @@ export async function deliverToCurator(
       if (rec) {
         log(`curator: attempt ${attempt}/${attempts} failed (${cause}) but the run is FILED (event: synthesis ${rec.synthesis_id})`);
         return recoveredReply(rec, attempt, cause);
-      }
-      if (isDefinitiveRefusal(e)) {
-        return { error: `${cause} (a final refusal: not retried; no filed event for the job)` };
       }
       if (attempt >= attempts) {
         return {

@@ -560,6 +560,30 @@ Deno.serve({ port: PORT }, async (req) => {
     const claim = (pkg.claim || "").trim();
     if (!claim) return Response.json({ error: "claim required" }, { status: 400 });
 
+    // rw-curator-filed2: ONE filing per job at a time, and a resend files into the SAME thread. A resend
+    // (the research service resends after a timeout) must not re-run resolve() against a first attempt
+    // that is still working or already committed: that can createThread() a second thread, link the one
+    // synthesis into both and write every claim again under the new thread. The advisory lock is held on a
+    // dedicated connection from BEFORE resolve() to the end of the claims pass (a resend waits for the
+    // first attempt), then the job's 'filed' event, if any, names the thread to use (resolve() skipped).
+    const lockKey = (pkg.job_id || "").trim() || (pkg.research_key || "").trim();
+    let lockClient: PgClient | null = null;
+    if (lockKey) {
+      lockClient = await pool.connect();
+      await lockClient.queryArray("SELECT pg_advisory_lock(hashtext($1))", [`research-file:${lockKey}`]);
+      const jobId = (pkg.job_id || "").trim();
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
+        try {
+          const ev = await lockClient.queryObject<{ thread_id: string | null }>(
+            `SELECT e.payload ->> 'thread_id' AS thread_id FROM public.research_job_events e
+              WHERE e.job_id = $1 AND e.type = 'filed'`, [jobId]);
+          const tid = ev.rows[0]?.thread_id;
+          if (tid) { pkg.thread_id = tid; console.log(`ingest: job ${jobId} already filed into thread ${tid}; resend reuses it (resolve skipped)`); }
+        } catch (e) {
+          console.error(`ingest: filed-event lookup failed (migration 280 not applied?): ${(e as Error).message}`);
+        }
+      }
+    }
     // Which step we are on, so a failure can say what died rather than just how.
     let stage: Stage = "embed";
     try {
@@ -656,6 +680,11 @@ Deno.serve({ port: PORT }, async (req) => {
       const loss = describeLoss(stage, pkg, e);
       console.error(lossLine(loss));
       return Response.json({ error: "ingest_failed", ...loss }, { status: 500 });
+    } finally {
+      if (lockClient) {
+        await lockClient.queryArray("SELECT pg_advisory_unlock(hashtext($1))", [`research-file:${lockKey}`]).catch(() => {});
+        lockClient.release();
+      }
     }
   }
 

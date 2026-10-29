@@ -160,7 +160,7 @@ const CURATOR_RETRIES = curatorRetriesFromEnv(Deno.env.get("CURATOR_RETRIES"));
 // was final). After a timeout / dropped connection / curator 5xx the harness now WAITS up to
 // CURATOR_SETTLE_MS for the curator's typed 'filed' event (research_job_events) and, if none appears,
 // resends the package (persist is idempotent on research_key), CURATOR_FILE_ATTEMPTS hand-offs in all,
-// 2 s / 4 s backoff between. Worst case with the defaults ~ 3 x (180 s + 30 s) + 6 s ~ 10.6 min before
+// 2 s / 4 s backoff between. Worst case with the defaults ~ 3 x (180 s + 30 s) + 6 s backoff + 3 x 6 s inner connect backoff ~ 10.9 min before
 // the job ends error "(not filed)". CURATOR_FILE_ATTEMPTS=1 restores the single hand-off.
 const CURATOR_FILE_ATTEMPTS = curatorFileAttemptsFromEnv(Deno.env.get("CURATOR_FILE_ATTEMPTS"));
 const CURATOR_SETTLE_MS = curatorSettleMsFromEnv(Deno.env.get("CURATOR_SETTLE_MS"));

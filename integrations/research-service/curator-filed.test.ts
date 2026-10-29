@@ -154,3 +154,29 @@ Deno.test("clause 1: attempts 1 / settle 0 is the pre-change behaviour (a slow c
     await L.stop();
   }
 });
+
+Deno.test("round 2: a curator 4xx is final BEFORE the settle wait (no 30 s wait), and says so", async () => {
+  const L = lab(["http400"]);
+  try {
+    const t0 = Date.now();
+    const r = await deliverToCurator(L.handOff, L.findFiled, JOB, pkg(), opts(3, 5000));
+    assert(Date.now() - t0 < 1500, `a 4xx must not wait out the settle window (${Date.now() - t0} ms)`);
+    assertEquals(L.requests, 1);
+    assert(String(r.error).includes("curator 400") && String(r.error).includes("final refusal"), String(r.error));
+  } finally {
+    await L.stop();
+  }
+});
+
+Deno.test("round 2: the final error does not claim 'not retried' for a package that WAS resent", async () => {
+  const L = lab(["slow-then-commit"], 5000); // every attempt times out (300 ms) and never answers in time
+  try {
+    const r = await deliverToCurator(L.handOff, () => Promise.resolve(null), JOB, pkg(), opts(2, 0));
+    assertEquals(L.requests, 2);
+    assert(String(r.error).includes("after 2 attempt(s)"), String(r.error));
+    assert(!/not retried/i.test(String(r.error)), String(r.error));
+    assert(String(r.error).includes("timed out after"), "the cause is still stated: " + String(r.error));
+  } finally {
+    await L.stop();
+  }
+});

@@ -2156,16 +2156,27 @@ app.post("/research/persist", async (c) => {
     );
 
     // One session per persist run (provenance: where did these come from?).
-    const sess = await client.queryObject<{ id: string }>(
-      `INSERT INTO sessions (origin_tool, query_text, thread_id, metadata)
-       VALUES ('owui', $1, $2, $3::jsonb)
-       RETURNING id`,
-      [
-        body.query ?? null, threadId,
-        JSON.stringify({ research_key: key, kind: body.kind ?? null, model: body.model ?? null }),
-      ],
-    );
-    const sessionId = sess.rows[0].id;
+    // rw-curator-filed2: a resend for a job that is already filed reuses that filing's session (one sessions
+    // row per job, not one per attempt); the curator's per-job lock serialises the attempts.
+    let sessionId: string | null = null;
+    if (filedJob.jobId) {
+      const prior = await client.queryObject<{ id: string }>(
+        `SELECT s.id::text AS id FROM public.research_job_events e JOIN sessions s ON s.id::text = e.payload ->> 'session_id'
+          WHERE e.job_id = $1 AND e.type = 'filed'`, [filedJob.jobId]);
+      sessionId = prior.rows[0]?.id ?? null;
+    }
+    if (!sessionId) {
+      const sess = await client.queryObject<{ id: string }>(
+        `INSERT INTO sessions (origin_tool, query_text, thread_id, metadata)
+         VALUES ('owui', $1, $2, $3::jsonb)
+         RETURNING id`,
+        [
+          body.query ?? null, threadId,
+          JSON.stringify({ research_key: key, kind: body.kind ?? null, model: body.model ?? null }),
+        ],
+      );
+      sessionId = sess.rows[0].id;
+    }
 
     // Make the synthesis row a first-class MEMBER of its session + thread. Without
     // this the research_synthesis source is an orphan (findable only by
