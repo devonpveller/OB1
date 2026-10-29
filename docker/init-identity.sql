@@ -110,4 +110,29 @@ REVOKE UPDATE, DELETE, TRUNCATE ON public.admin_audit FROM service_role;
 GRANT SELECT, INSERT ON public.admin_audit TO service_role;
 GRANT USAGE ON SEQUENCE public.admin_audit_id_seq TO service_role;
 
+-- ── 6. owners of research jobs that predate rw-identity (operator 2026-10-28: all existing private
+-- content is the one operator's = WORKSPACE_DEFAULT_SUB). Run with the deploy's value as the session
+-- setting, as init-documents.sql's back-fill is:  PGOPTIONS='-c workspace.default_sub=<WORKSPACE_DEFAULT_SUB>'
+-- A root job with no research_prompts row becomes that subject's - or, when an agent started it
+-- (origin mattermost / notebook), its service's (service:<caller>: shared, not private). Unset = no
+-- back-fill (a NOTICE): the readers then treat an ownerless job as WORKSPACE_DEFAULT_SUB's at run time.
+DO $$
+DECLARE d TEXT := nullif(btrim(coalesce(current_setting('workspace.default_sub', true), '')), '');
+        n INT;
+BEGIN
+    IF d IS NULL THEN
+        RAISE NOTICE 'init-identity: workspace.default_sub is not set - research jobs with no owner stay ownerless (read as WORKSPACE_DEFAULT_SUB''s); re-run with PGOPTIONS=''-c workspace.default_sub=<value>'' to record them';
+        RETURN;
+    END IF;
+    INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt)
+    SELECT j.id,
+           CASE WHEN j.origin IN ('mattermost', 'notebook') AND coalesce(j.caller, '') <> '' THEN 'service:' || j.caller ELSE d END,
+           'system:backfill', coalesce(j.query, '')
+      FROM public.research_jobs j
+     WHERE j.root_job_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = j.id);
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RAISE NOTICE 'init-identity: % ownerless research job(s) given an owner', n;
+END $$;
+
 NOTIFY pgrst, 'reload schema';

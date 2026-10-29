@@ -19,6 +19,31 @@
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
 import { DOCUMENTS_ROOT } from "./paths.ts";
+import { identityConfig } from "../middleware/identity.ts";
+
+// rw-identity round 3 (operator 2026-10-28: all existing private content is the one operator's): who
+// owns a research job with no recorded owner (started before rw-identity; init-identity.sql back-fills
+// them when WORKSPACE_DEFAULT_SUB is known at deploy). WORKSPACE_DEFAULT_SUB when set; unset and no
+// sign-in = the one default identity (exactly the single-user behaviour); unset with sign-in = nobody
+// (null) - then only an admin, not impersonating, reads them.
+export function ownerlessOwner(env = (k: string) => Deno.env.get(k)): string | null {
+  const d = (env("WORKSPACE_DEFAULT_SUB") ?? "").trim();
+  if (d) return d;
+  const cfg = identityConfig(env);
+  return cfg.signIn ? null : cfg.defaultSub;
+}
+export function adminSeesOwnerless(who: unknown): boolean {
+  const w = who as { admin?: boolean; impersonating?: unknown };
+  return !!w?.admin && !w?.impersonating && ownerlessOwner() === null;
+}
+const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+const ROOT = (j: string) => `coalesce(${j}.root_job_id, ${j}.id)`;
+// job `j` has no recorded owner (its root has no research_prompts row) and that owner is not `sub`
+export const OWNERLESS_FOREIGN = (j: string, sub: string, adminSees = false) => {
+  const o = ownerlessOwner();
+  const notMine = adminSees ? "false" : o === null ? "true" : `(${sub} <> ${lit(o)})`;
+  return `(NOT EXISTS (SELECT 1 FROM public.research_prompts own_r WHERE own_r.job_id IN (${j}.id, ${ROOT(j)})) AND ${notMine})`;
+};
 
 // The caller as the SQL needs it: the subject (owner_sub) and its directory key in documents/.
 export interface Viewer {
@@ -37,9 +62,10 @@ export const FOREIGN_IDEA = (id: string, sub: string) =>
   `EXISTS (SELECT 1 FROM public.ideas own_i WHERE own_i.id::text = (${id})::text AND own_i.owner_sub <> ${sub})`;
 
 // research job `j` belongs to another user (see the header).
-export const FOREIGN_JOB = (j: string, sub: string, key: string) =>
-  `(EXISTS (SELECT 1 FROM public.research_prompts own_p WHERE own_p.job_id = ${j}.id AND own_p.owner_sub <> ${sub}
+export const FOREIGN_JOB = (j: string, sub: string, key: string, adminSees = false) =>
+  `(EXISTS (SELECT 1 FROM public.research_prompts own_p WHERE own_p.job_id IN (${j}.id, ${ROOT(j)}) AND own_p.owner_sub <> ${sub}
              AND own_p.owner_sub NOT LIKE 'service:%')
+     OR ${OWNERLESS_FOREIGN(j, sub, adminSees)}
      OR ${FOREIGN_IDEA(`${j}.refinery_id`, sub)}
      OR (${j}.inlet_ref ->> 'kind' = 'refinery' AND ${FOREIGN_IDEA(`${j}.inlet_ref ->> 'id'`, sub)})
      OR ${FOREIGN_DOC(`${j}.inlet_ref ->> 'id'`, sub, key)})`;

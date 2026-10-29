@@ -1084,9 +1084,12 @@ function viewerOf(req: Request, url: URL): { sub: string } | Response {
   const v = readViewer(caller, req.headers.get("x-on-behalf-of"));
   return "error" in v ? Response.json({ error: v.error }, { status: v.status }) : v;
 }
+// rw-identity round 3: who owns a job that predates rw-identity (no research_prompts row) - the one
+// operator (07-MULTI-USER); blank = nobody (its prompt is read by no caller)
+const DEFAULT_SUB = (Deno.env.get("WORKSPACE_DEFAULT_SUB") ?? "").trim();
 // the prompts of job `id`'s tree that belong to another user than the viewer (omitted from what it reads)
 async function foreignPrompts(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<string[]> {
-  return (await c.queryObject<{ prompt: string }>(FOREIGN_PROMPTS_SQL, [id, viewer])).rows.map((r) => r.prompt);
+  return (await c.queryObject<{ prompt: string }>(FOREIGN_PROMPTS_SQL, [id, viewer, DEFAULT_SUB])).rows.map((r) => r.prompt);
 }
 
 Deno.serve({ port: PORT }, async (req) => {
@@ -1321,9 +1324,9 @@ Deno.serve({ port: PORT }, async (req) => {
               WHERE q.status='queued' AND q.created_at < j.created_at)::int
            END AS queue_position
          FROM research_jobs j
-         WHERE ($2::text IS NULL OR j.status = $2) AND ${LISTED_FOR("j", "$3")}
+         WHERE ($2::text IS NULL OR j.status = $2) AND ${LISTED_FOR("j", "$3", "$4")}
          ORDER BY j.created_at DESC LIMIT $1`,
-        [limit, statusFilter, viewer.sub],
+        [limit, statusFilter, viewer.sub, DEFAULT_SUB],
       );
       return Response.json({ jobs: r.rows });
     } finally { c.release(); }

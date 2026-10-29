@@ -35,17 +35,27 @@ export function readViewer(caller: Caller, header: string | null): Viewer {
   return { sub: raw };
 }
 
-/** SQL: job `j` is listed for viewer $n - its prompt is the viewer's, or it has no recorded owner. */
-export const LISTED_FOR = (j: string, param: string) =>
-  `(NOT EXISTS (SELECT 1 FROM research_prompts p WHERE p.job_id = ${j}.id)
-     OR EXISTS (SELECT 1 FROM research_prompts p WHERE p.job_id = ${j}.id AND p.owner_sub = ${param}))`;
+/** SQL: job `j` is listed for viewer `param` - its root's prompt is the viewer's, or it has no recorded
+ *  owner and the viewer is WORKSPACE_DEFAULT_SUB (`dflt`; blank = an ownerless job is listed for nobody).
+ *  rw-identity round 3 (operator 2026-10-28: all existing private content is the one operator's). */
+export const LISTED_FOR = (j: string, param: string, dflt: string) =>
+  `(EXISTS (SELECT 1 FROM research_prompts p WHERE p.job_id = coalesce(${j}.root_job_id, ${j}.id) AND p.owner_sub = ${param})
+     OR (NOT EXISTS (SELECT 1 FROM research_prompts p WHERE p.job_id = coalesce(${j}.root_job_id, ${j}.id))
+         AND ${dflt} <> '' AND ${param} = ${dflt}))`;
 
-/** SQL returning the prompts of the root job's tree that belong to another USER than the viewer. */
+/** SQL ($1 job, $2 viewer, $3 WORKSPACE_DEFAULT_SUB or ''): the texts to omit - the root's prompt and
+ *  every query of the tree (steer texts are the owner's too) - when the tree belongs to another USER:
+ *  its root's owner is a user other than the viewer, or it has no owner and the viewer is not the
+ *  default subject (no default = nobody's). Empty when the viewer may read the prompt. */
 export const FOREIGN_PROMPTS_SQL =
-  `SELECT p.prompt FROM research_prompts p
-     JOIN research_jobs j ON j.id = p.job_id
-    WHERE j.id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid)
-      AND p.owner_sub <> $2 AND p.owner_sub NOT LIKE 'service:%'`;
+  `WITH r AS (SELECT coalesce(root_job_id, id) AS root FROM research_jobs WHERE id = $1::uuid),
+        o AS (SELECT p.owner_sub, p.prompt FROM research_prompts p JOIN r ON p.job_id = r.root),
+        f AS (SELECT CASE WHEN EXISTS (SELECT 1 FROM o)
+                          THEN EXISTS (SELECT 1 FROM o WHERE o.owner_sub <> $2 AND o.owner_sub NOT LIKE 'service:%')
+                          ELSE ($3 = '' OR $2 <> $3) END AS foreign_)
+   SELECT x.prompt FROM f, (SELECT prompt FROM o
+                            UNION ALL SELECT j.query FROM research_jobs j JOIN r ON coalesce(j.root_job_id, j.id) = r.root) x
+    WHERE f.foreign_ AND x.prompt IS NOT NULL AND x.prompt <> ''`;
 
 function needles(prompts: string[]): string[] {
   const out = new Set<string>();
