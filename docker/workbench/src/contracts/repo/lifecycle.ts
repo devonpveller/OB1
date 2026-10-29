@@ -65,10 +65,11 @@ const OWNED_DEPENDENCE = `
   SELECT d.kind,
          CASE WHEN o.others THEN 'another-user-document:' || (row_number() OVER (ORDER BY d.ref))::text ELSE d.ref END AS ref,
          CASE WHEN o.others THEN jsonb_build_object('owner', 'another user') ELSE d.detail END AS detail
-    FROM (${SCOPED_DEPENDENCE}) d
+    FROM (SELECT s.*, row_number() OVER () AS n FROM (${SCOPED_DEPENDENCE}) s) d
     CROSS JOIN LATERAL (SELECT $3::text IS NOT NULL AND (
         (d.kind = 'document_link' AND ${FOREIGN_DOC("d.ref", "$3", "$4")})
-     OR (d.kind = 'reference_record' AND ${FOREIGN_DOC("d.detail ->> 'holder_ref'", "$3", "$4")})) AS others) o`;
+     OR (d.kind = 'reference_record' AND ${FOREIGN_DOC("d.detail ->> 'holder_ref'", "$3", "$4")})) AS others) o
+   ORDER BY d.n`;
 
 export async function dependence(db: Db, reg: RegistryReader, id: string, f: MetadataFilter = null, who: Viewer | null = null) {
   const mf = f ? JSON.stringify(f) : null;

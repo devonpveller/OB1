@@ -12,9 +12,17 @@ export async function acknowledge(db: Db, id: string, who: Identity) {
   const rows = await db.query<{ id: string; acked_at: string }>(
     `INSERT INTO public.notification_acks (owner_sub, actor_sub, notification_id)
      SELECT $2, $3, n.id FROM public.research_notifications n WHERE n.id = $1::uuid
+        -- only an event this user can read (the same visibility as contracts/repo/system.ts notifications):
+        -- another user's id answers like a nonexistent one (404), never as an existence oracle
+        AND (n.entity IS NULL OR NOT starts_with(n.entity, 'document:')
+             OR starts_with(n.entity, 'document:documents/' || $4 || '/')
+             OR EXISTS (SELECT 1 FROM public.user_document_listings d
+                         WHERE 'document:' || d.path = n.entity AND d.owner_sub = $2))
+        AND (n.entity IS NULL OR NOT starts_with(n.entity, 'idea:')
+             OR NOT EXISTS (SELECT 1 FROM public.ideas i WHERE 'idea:' || i.id::text = n.entity AND i.owner_sub <> $2))
      ON CONFLICT (owner_sub, notification_id) DO UPDATE SET acked_at = now(), actor_sub = EXCLUDED.actor_sub
      RETURNING notification_id::text AS id, acked_at`,
-    [id, who.sub, who.actor],
+    [id, who.sub, who.actor, who.key],
   );
   return rows[0] ?? null;
 }

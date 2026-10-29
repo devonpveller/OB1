@@ -541,6 +541,22 @@ t("C7: an acknowledgement is stored (survives a reload); a repeat after it is un
   assert(!again.json.acknowledged.some((a: any) => a.id === n.id), "a repeat is unread again");
 });
 
+t("C7b: acknowledging another user's notification answers 404, the same as a nonexistent id (no existence oracle)", async () => {
+  const B = { [SUB_HEADER]: `p2b-user-b-${uid()}` };
+  const bDoc = await call("POST", D, { title: `Owner B ack ${uid()}` }, B);
+  assertEquals(bDoc.status, 201, bDoc.text);
+  const n = (await sql<{ id: string }>(
+    `SELECT id::text AS id FROM public.post_research_notification('structural', $1, NULL, $2)`,
+    [`p2b ack foreign ${uid()}`, `document:${bDoc.json.path}`],
+  ))[0];
+  const ghost = await call("POST", `/workbench/workspace/notifications/00000000-0000-4000-8000-000000000000/ack`);
+  const foreign = await call("POST", `/workbench/workspace/notifications/${n.id}/ack`);
+  assertEquals(ghost.status, 404);
+  assertEquals(foreign.status, 404, foreign.text);
+  assertEquals(foreign.text, ghost.text);
+  assertEquals((await call("POST", `/workbench/workspace/notifications/${n.id}/ack`, undefined, B)).status, 200, "its owner can");
+});
+
 t("C20: the bell's progress indicators are registered and read through jobs(state)", async () => {
   const reg = await call("GET", `/workbench/contract/registries/progress_indicators`);
   assertEquals(reg.status, 200, reg.text);
