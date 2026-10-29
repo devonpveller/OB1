@@ -72,6 +72,9 @@ export function RefineryPanel(p: PanelProps) {
               Start refinery
             </button>
           )}
+          {r && !r.archived && idea && (
+            <button type="button" data-action="research-now" onClick={() => researchNow()}>Research now</button>
+          )}
           {r && !r.archived && <button type="button" data-action="archive-refinery" onClick={() => docAction("archive")}>Archive this idea refinery</button>}
           {r?.archived && <button type="button" data-action="open-refinery" onClick={() => docAction("open")}>Open the refinery</button>}
         </>
@@ -115,6 +118,17 @@ export function RefineryPanel(p: PanelProps) {
       );
     }
     return null;
+  };
+
+  // rw-idea-schedule: starts research on this idea at once, whatever the user's schedule says
+  const researchNow = async () => {
+    try {
+      await post(`/workbench/idea-schedule/research-now/${q(idea.id)}`);
+      setMsg("research queued now");
+      refresh();
+    } catch (e) {
+      setMsg(String((e as Error).message));
+    }
   };
 
   const docAction = async (what: "start" | "archive" | "open") => {

@@ -6,6 +6,7 @@ import { Bell } from "./Bell";
 import { UniversalPlus } from "./Plus";
 import { clearLayout, defaultLayout } from "./dock";
 import { ownedKey } from "../lib/owner";
+import { IdeaSchedule } from "./IdeaSchedule";
 
 const THEME_KEY = () => ownedKey("ws.theme"); // per user
 
@@ -48,6 +49,7 @@ export function TitleBar() {
         <div className="ws-popover ws-settings" role="dialog" aria-label="settings">
           <button type="button" onClick={() => { clearLayout(); defaultLayout(); setSettings(false); }}>Reset the layout</button>
           <p className="ws-muted">The layout is kept in this browser.</p>
+          <IdeaSchedule />
         </div>
       )}
     </header>
