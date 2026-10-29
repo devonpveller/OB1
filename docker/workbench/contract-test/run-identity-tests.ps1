@@ -43,7 +43,10 @@ param(
   [string]$BaseSha = '655bfd1',
   [switch]$Red,
   [switch]$KeepImages,
-  [switch]$SkipSweeps  # the integration test only (a targeted RED of one case)
+  [switch]$SkipSweeps,  # the integration test only (a targeted RED of one case)
+  # round 4: a tester's probe test (deno, mounted into the test image as src/identity/t_probe_test.ts,
+  # never part of the tree) run with the PROBE_* environment its author wrote it for
+  [string]$ExtraTest = ''
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -81,10 +84,15 @@ $users = @(
   @{ login = 'dave'; sub = (Rand 64); name = 'Dave Lab'; groups = @('lab-users') },
   @{ login = 'admin'; sub = (Rand 64); name = 'Admin Lab'; groups = @('lab-users', 'research-admins') },
   # the lab's WORKSPACE_DEFAULT_SUB (the ProfNovice analogue: owner of everything that predates sign-in)
-  @{ login = 'prof'; sub = (Rand 64); name = 'Prof Lab'; groups = @('lab-users') })
+  @{ login = 'prof'; sub = (Rand 64); name = 'Prof Lab'; groups = @('lab-users') },
+  # round 4 (tester attempt 1): a subject with characters a directory name cannot hold, and a second pair + admin
+  @{ login = 'tess'; sub = ('auth0|tess.lab@' + (Rand 16)); name = 'Tess Probe'; groups = @('lab-users') },
+  @{ login = 'uma'; sub = (Rand 64); name = 'Uma Probe'; groups = @('lab-users') },
+  @{ login = 'boss'; sub = (Rand 64); name = 'Boss Probe'; groups = @('lab-users', 'research-admins') })
 $usersJson = (ConvertTo-Json -Compress -Depth 4 @($users | ForEach-Object { [pscustomobject]$_ }))
 $daveSub = ($users | Where-Object { $_.login -eq 'dave' }).sub
 $profSub = ($users | Where-Object { $_.login -eq 'prof' }).sub
+$umaSub = ($users | Where-Object { $_.login -eq 'uma' }).sub
 $issuer = 'https://stub-oidc:8443/application/o/lab/'
 $redirect = "http://$P-viewer:8080/workbench/auth/callback"
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
@@ -92,6 +100,7 @@ $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force
 $stage = Join-Path $env:TEMP "$P-initdb"
 $vault = Join-Path $env:TEMP "$P-vault"; New-Item -ItemType Directory -Force $vault | Out-Null
 $vault2 = Join-Path $env:TEMP "$P-vault-plain"; New-Item -ItemType Directory -Force $vault2 | Out-Null
+$vault3 = Join-Path $env:TEMP "$P-vault-nodef"; New-Item -ItemType Directory -Force $vault3 | Out-Null
 $certs = Join-Path $env:TEMP "$P-certs"; New-Item -ItemType Directory -Force $certs | Out-Null
 foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page about contract retrieval fixtures.'),
     @('content/source/11111111-1111-4111-8111-111111111111', 'Active fixture source', 'Leaf.'),
@@ -103,7 +112,7 @@ foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page
 . (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 
 $script:fail = 0
-$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $vault2, $certs) }
+$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $vault2, $vault3, $certs) }
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
@@ -306,7 +315,30 @@ try {
   $null = Run-Detached "$P-wb" ($wbArgs + @($wbTag))
   # clause 5: the same image, NO sign-in configured, nothing rw-identity adds set (as shipped; its own vault; the same database)
   $null = Run-Detached "$P-wbplain" ($common + @('-v', "${vault2}:/wiki", $wbTag))
+  # round 4 (tester F4 / P6): sign-in on, WORKSPACE_DEFAULT_SUB blank (ownerless = nobody's but an admin's), its own vault
+  $nd = @($wbArgs | Select-Object -Skip 2 | ForEach-Object { if ($_ -eq "WORKSPACE_DEFAULT_SUB=$profSub") { 'WORKSPACE_DEFAULT_SUB=' } elseif ($_ -eq "${vault}:/wiki") { "${vault3}:/wiki" } else { $_ } })
+  $null = Run-Detached "$P-wbnodef" ($nd + @($wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench (sign-in configured) is up'
+  Check (Wait-Http "http://$P-wbnodef:8000/health" 90) 'the workbench (sign-in, WORKSPACE_DEFAULT_SUB blank) is up'
+  # round 4 (tester Case 5 probe): a half-configured or unsafe sign-in refuses to start
+  $half = @(
+    @('only-issuer', @('-e', "WORKSPACE_OIDC_ISSUER=$issuer")),
+    @('only-secret', @('-e', 'WORKSPACE_OIDC_CLIENT_SECRET=abcdefabcdefabcdef')),
+    @('only-admin-group', @('-e', 'WORKSPACE_OIDC_ADMIN_GROUP=research-admins')),
+    @('http-issuer', @('-e', 'WORKSPACE_OIDC_ISSUER=http://stub-oidc:8443/application/o/lab/', '-e', 'WORKSPACE_OIDC_CLIENT_ID=c', '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect", '-e', "WORKSPACE_DOOR_KEY=$door")),
+    @('no-door-key', @('-e', "WORKSPACE_OIDC_ISSUER=$issuer", '-e', 'WORKSPACE_OIDC_CLIENT_ID=c', '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect")),
+    @('door-equals-internal', @('-e', "WORKSPACE_OIDC_ISSUER=$issuer", '-e', 'WORKSPACE_OIDC_CLIENT_ID=c', '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect", '-e', "WORKSPACE_DOOR_KEY=$key")),
+    @('short-door-key', @('-e', 'WORKSPACE_DOOR_KEY=short')))
+  if (-not $Red) {
+    foreach ($h in $half) {
+      $hn = "$P-half-$($h[0])"
+      $o = Lab-Docker 60 (@('run', '--name', $hn, '--label', $label, '--network', 'none') + $common + $h[1] + @($wbTag))
+      $rcH = $script:rc
+      $null = Dk rm -f $hn
+      $msg = (($o -split "`n") | Where-Object { $_ -match 'error|half|must|needs|refus' } | Select-Object -First 1) -join ''
+      Check (($rcH -ne 0) -and ($o -notmatch 'listening on')) "a half-configured or unsafe sign-in refuses to start: $($h[0]) (exit $rcH)"
+    }
+  }
   Check (Wait-Http "http://$P-wbplain:8000/health" 90) 'the workbench (no sign-in) is up'
   Check (Wait-Http "http://$P-rs:8000/health" 60) 'the research service is up'
   Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the viewer is up'
@@ -331,6 +363,7 @@ try {
   Write-Host '[6b] the identity integration test (real sessions; the real research service)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
     '-e', "IDENTITY_TEST_VIEWER=http://$P-viewer:8080", '-e', "IDENTITY_TEST_WB=http://$P-wb:8000", '-e', "IDENTITY_TEST_WB_PLAIN=http://$P-wbplain:8000",
+    '-e', "IDENTITY_TEST_WB_NODEF=http://$P-wbnodef:8000",
     '-e', 'IDENTITY_TEST_STUB=https://stub-oidc:8443', '-e', "IDENTITY_TEST_RESEARCH=http://$P-rs:8000",
     '-e', "IDENTITY_TEST_DOOR_KEY=$door", '-e', "IDENTITY_TEST_INTERNAL_KEY=$key", '-e', "IDENTITY_TEST_OWUI_KEY=$kOwui", '-e', "IDENTITY_TEST_AO_KEY=$kAo",
     '-e', "IDENTITY_TEST_WS_KEY=$wsKey", '-e', "IDENTITY_TEST_USERS=$usersJson", '-e', "IDENTITY_TEST_DEFAULT_SUB=$profSub", '-e', 'IDENTITY_TEST_SUB_HEADER=X-Test-Sub',
@@ -341,7 +374,23 @@ try {
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: every identity case fails on the base ($($sum.Value))" }
-  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 14) "the identity integration test ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 18) "the identity integration test ($($sum.Value))" }
+
+  if ($ExtraTest) {
+    Write-Host "[6b'] the extra (tester's) probe test: $ExtraTest"
+    $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
+      '-v', "${ExtraTest}:/app/src/identity/t_probe_test.ts:ro",
+      '-e', "PROBE_VIEWER=http://$P-viewer:8080", '-e', "PROBE_WB=http://$P-wb:8000", '-e', "PROBE_WB_NODEF=http://$P-wbnodef:8000",
+      '-e', 'PROBE_STUB=https://stub-oidc:8443', '-e', "PROBE_RESEARCH=http://$P-rs:8000",
+      '-e', "PROBE_DOOR_KEY=$door", '-e', "PROBE_INTERNAL_KEY=$key", '-e', "PROBE_OWUI_KEY=$kOwui", '-e', "PROBE_AO_KEY=$kAo",
+      '-e', "PROBE_WS_KEY=$wsKey", '-e', "PROBE_USERS=$usersJson", '-e', "PROBE_APP_PASSWORD=$appPw", '-e', "PROBE_DB_HOST=$db", '-e', "PROBE_DB_PASSWORD=$pw",
+      $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/identity/t_probe_test.ts')
+    $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+    Save 'extra-probe.log' ((($clean -split "`n") | Where-Object { $_ -match '^PROBE|P\d |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:|AssertionError|=>' }) -join "`n")
+    foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|(ok|FAILED) \||LEAKS|leaks:' }) { Write-Host "    $l" }
+    $x = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+    Check ($x.Success -and $x.Groups[1].Value -eq 'ok' -and $clean -notmatch 'LEAKS to') "the extra probe test ($($x.Value); no 'LEAKS to' line)"
+  }
 
   # init-identity.sql's back-fill (C2c): re-applied with workspace.default_sub set, an ownerless job
   # becomes the default subject's, an ownerless AGENT job its service's; a job with an owner is untouched
@@ -353,7 +402,7 @@ try {
     Save 'backfill.log' "owners after the back-fill: $owners"
     Check (($script:rc -eq 0) -and $owners -eq '<default-sub> service:agent-org') "init-identity.sql back-fills ownerless jobs: the default subject's, an agent's its service's ($owners)"
   }
-  $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('carol', 'dave', 'off'))
+  $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('tess', 'uma', 'on'), @('boss', 'uma', 'on'), @('carol', 'dave', 'off'))
   if ($Red) { $sweeps = @(, @('carol', 'dave', 'on')) }
   if ($SkipSweeps) { $sweeps = @() }
   foreach ($sw in $sweeps) {
@@ -367,7 +416,7 @@ try {
     $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
       '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
       '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$door", '-e', 'DOCS_TEST_VAULT=/vault',
-      '-e', "SWEEP_OIDC_A=$($sw[0])", '-e', "SWEEP_OIDC_B=$($sw[1])", '-e', "SWEEP_OIDC_B_SUB=$daveSub", '-e', 'DOCS_TEST_SUB_HEADER=X-Test-Sub',
+      '-e', "SWEEP_OIDC_A=$($sw[0])", '-e', "SWEEP_OIDC_B=$($sw[1])", '-e', "SWEEP_OIDC_B_SUB=$(if ($sw[1] -eq 'uma') { $umaSub } else { $daveSub })", '-e', 'DOCS_TEST_SUB_HEADER=X-Test-Sub',
       '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
       '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/isolation_sweep_test.ts')
@@ -387,11 +436,23 @@ try {
   Save 'workbench-plain.log' (Dk logs --tail 40 "$P-wbplain")
   Save 'research-service.log' (Dk logs --tail 60 "$P-rs")
   Save 'viewer.log' (Dk logs --tail 40 "$P-viewer")
+  # round 4 (tester F5): the revert takes the rows rw-identity wrote into research_prompts with it -
+  # the back-fill's (actor system:backfill) and the service owners (service:<caller>) - and the tables
+  if (-not $Red) {
+    $null = Dk cp (Join-Path $dockerDir 'revert-identity.sql') "${db}:/tmp/revert-identity.sql"
+    $bf = (Dk exec $db psql -U postgres -d openbrain -tAqc "select count(*) from research_prompts where actor_sub = 'system:backfill' or owner_sub like 'service:%'").Trim()
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/revert-identity.sql
+    $rv = $script:rc
+    $after = (Dk exec $db psql -U postgres -d openbrain -tAqc "select count(*) from research_prompts where actor_sub = 'system:backfill' or owner_sub like 'service:%'").Trim()
+    $tbl = (Dk exec $db psql -U postgres -d openbrain -tAqc "select coalesce(to_regclass('public.admin_audit')::text, '-') || ' ' || coalesce(to_regclass('public.workspace_sessions')::text, '-')").Trim()
+    Save 'revert.log' "rw-identity rows before the revert: $bf; after: $after; tables after: $tbl; exit $rv"
+    Check (($rv -eq 0) -and [int]$bf -gt 0 -and $after -eq '0' -and $tbl -eq '- -') "revert-identity.sql removes rw-identity's research_prompts rows ($bf -> $after) and its tables ($tbl)"
+  }
 } catch {
   Fail "the run stopped: $_"
 } finally {
   Write-Host '[7] teardown'
-  foreach ($c in $script:made.containers + @("$P-wb")) { $null = Dk rm -f -v $c }
+  foreach ($c in $script:made.containers + @("$P-wb", "$P-wbnodef")) { $null = Dk rm -f -v $c }
   if ($script:made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $script:made.images) { $null = Dk rmi -f $i } }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()

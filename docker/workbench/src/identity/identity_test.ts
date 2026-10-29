@@ -9,7 +9,8 @@ import { Hono } from "hono";
 import { authorizeUrl, b64url, challengeOf, oidcConfig, pkcePair, type ProviderMeta, verifyIdToken } from "./oidc.ts";
 import { clearSessionCookie, loginCookie, readCookie, safeReturnTo, SESSION_COOKIE, sessionCookie } from "./cookies.ts";
 import { keyKind, keyRing } from "./keys.ts";
-import { identityConfig, identityOf, identitySeam, resolveIdentity, seamDeps } from "../middleware/identity.ts";
+import { identityConfig, identityOf, identitySeam, resolveIdentity, routePath, seamDeps } from "../middleware/identity.ts";
+import { REASON_MIN, reasonProblem } from "./reason.ts";
 
 const env = (m: Record<string, string>) => (k: string) => m[k];
 const OIDC = {
@@ -163,4 +164,29 @@ Deno.test("seam with sign-in: the identity header is ignored, no session = 401, 
   const s = await call("/workbench/contract/documents", { ...svc, "x-test-sub": "ak-sub-alice" });
   assertEquals((await s.json()).sub, "service:internal");
   assertEquals((await call("/workbench/documents/folders", svc)).status, 403);
+});
+
+// round 4 (tester F2): the route scope judges the path the router will route - decoded, slashes collapsed
+Deno.test("seam: a percent-encoded or doubled path is judged as the route it reaches", async () => {
+  assertEquals(routePath("/workbench/%64ocuments/folders"), "/workbench/documents/folders");
+  assertEquals(routePath("/workbench/%2564ocuments"), "/workbench/documents");
+  assertEquals(routePath("/workbench/documents%2Ffolders"), "/workbench/documents/folders");
+  assertEquals(routePath("/workbench//documents/./x/../folders"), "/workbench/documents/folders");
+  assertEquals(routePath("/workbench/%E0%A4%A"), "/workbench/%E0%A4%A");
+  const on = { ...OIDC, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789" };
+  const call = mount(on);
+  for (const p of ["/workbench/%64ocuments/folders", "/workbench//documents/folders", "/workbench/%2564ocuments/folders"]) {
+    const r = await call(p, { "x-brain-key": "internal-key-0123456789" });
+    assertEquals(r.status, 403, `${p}: ${r.status}`);
+  }
+});
+
+// round 4 (tester F3): a reason is visible characters - zero-width and white space do not count
+Deno.test("reason: at least REASON_MIN visible characters with a letter or digit", () => {
+  assertEquals(REASON_MIN, 8);
+  for (const bad of ["", "   ", "\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b", " \u200b\u2060\ufeff\u00ad\u180e ", "a\u200bb\u200bc\u200bd", "abcdefg", "........", "--------!"]) {
+    assert(reasonProblem(bad), JSON.stringify(bad));
+  }
+  for (const ok of ["support ticket 42", "alice asked for help", "ticket#12"]) assertEquals(reasonProblem(ok), null, ok);
+  assert(reasonProblem("x".repeat(1001)));
 });

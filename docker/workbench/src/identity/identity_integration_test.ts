@@ -19,6 +19,7 @@ const E = (k: string) => Deno.env.get(k) ?? "";
 const VIEWER = E("IDENTITY_TEST_VIEWER").replace(/\/+$/, "");
 const WB = E("IDENTITY_TEST_WB").replace(/\/+$/, "");
 const WB_PLAIN = E("IDENTITY_TEST_WB_PLAIN").replace(/\/+$/, "");
+const WB_NODEF = E("IDENTITY_TEST_WB_NODEF").replace(/\/+$/, ""); // sign-in on, WORKSPACE_DEFAULT_SUB blank
 const STUB = E("IDENTITY_TEST_STUB").replace(/\/+$/, "");
 const RS = E("IDENTITY_TEST_RESEARCH").replace(/\/+$/, "");
 const DOOR = E("IDENTITY_TEST_DOOR_KEY");
@@ -202,6 +203,16 @@ Deno.test({ name: "service key: WORKBENCH_KEY is service:internal - shared knowl
   assertEquals((await direct(WB, "GET", "/workbench/contract/search?q=fixture", { "x-brain-key": INTERNAL })).status, 200);
   assertEquals((await direct(WB, "GET", "/workbench/documents/folders", { "x-brain-key": INTERNAL })).status, 403);
   assertEquals((await direct(WB, "POST", "/workbench/auth/impersonate", { "x-brain-key": INTERNAL }, { sub: sub("alice"), reason: "a service tries" })).status, 403);
+  // round 4 (tester F2): a percent-encoded path is the same route - a service never reaches a user's front end
+  for (const p of ["/workbench/%64ocuments/folders", "/workbench/%2564ocuments/folders", "/workbench/documents%2Ffolders", "/workbench/%61uth/audit", "/workbench/%61uth/users", "/workbench/%77orkspace/whoami", "/workbench//documents/folders"]) {
+    const r = await direct(WB, "GET", p, { "x-brain-key": INTERNAL });
+    assert(r.status !== 200, `service ${p} -> ${r.status} ${r.text.slice(0, 80)}`);
+    const a = await direct(WB, "GET", p, { "x-brain-key": DOOR });
+    assert(a.status !== 200, `anonymous ${p} -> ${a.status}`);
+  }
+  assertEquals((await direct(WB, "GET", "/workbench/%64ocuments/folders", { "x-brain-key": INTERNAL })).status, 403);
+  const w = await direct(WB, "POST", "/workbench/%64ocuments", { "x-brain-key": INTERNAL }, { title: "a service wrote this" });
+  assertEquals(w.status, 403, `a service writing through an encoded path: ${w.text.slice(0, 100)}`);
 } });
 
 // ── C1: two users, each their own front-end context (the basics) ─────────────────────────────
@@ -251,7 +262,8 @@ Deno.test({ name: "C3 an admin impersonates only after a reason; subject = the u
   assertEquals([me0.json.admin, me0.json.subject_sub], [true, sub("admin")]);
   // the admin, as themself, does not see alice's document
   assert(!(await ad.req("GET", "/workbench/contract/documents?limit=500")).text.includes(marker));
-  for (const reason of [undefined, "", "   ", "ab"]) {
+  // round 4 (tester F3): visible characters only - zero-width and white space do not count; 8 at least
+  for (const reason of [undefined, "", "   ", "ab", "\u200b\u200b\u200b\u200b", " \u200b\u2060\ufeff\u00ad ", "a\u200bb\u200bc\u200bd", "abcdefg", "........"]) {
     const r = await ad.req("POST", "/workbench/auth/impersonate", { sub: sub("alice"), ...(reason === undefined ? {} : { reason }) });
     assertEquals(r.status, 400, `reason ${JSON.stringify(reason)}: ${r.text}`);
   }
@@ -457,6 +469,77 @@ Deno.test({ name: "C2c an ownerless pre-rw-identity job is the default subject's
       assert(!r.text.includes(mark), `${who} ${p} carries the old prompt: ${r.text.slice(0, 300)}`);
     }
   }
+} });
+
+// C2d (tester attempt 1, Case 7): ALLOW-LIST - a non-owner's view of a job carries only the shared
+// research output (status, the grounded report, its claims and sources). Fragments of the prompt in
+// any other field - the prefix before a comma (the failure notice's old subject), a title-cased copy,
+// a JSON-escaped copy, a middle chunk, a lower-cased copy - never reach another user or an agent key.
+Deno.test({ name: "C2d a non-owner reads only the shared fields: no fragment, case change, escape or middle chunk of the prompt", ...opts, fn: async () => {
+  const tok = `Zq${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+  const prompt = `My lawyer ${tok} Smith, should I sign the settlement my ex offered on Friday?`;
+  const r = await submit(K.owui, { query: prompt, origin: "owui", on_behalf_of: sub("alice"), callback: { chat_id: `chat-${tok}`, message_id: "m" } });
+  assertEquals(r.status, 202, JSON.stringify(r.json));
+  const job = r.json.job_id as string;
+  const prefix = prompt.split(/[:,;]/)[0].trim();
+  const title = prompt.replace(/\b\w/g, (c) => c.toUpperCase());
+  const escaped = JSON.stringify({ q: prompt.replace(/ /g, "\n") });
+  const mid = `the settlement ${tok} offered on Friday`;
+  await sql(`UPDATE public.research_jobs SET status = 'done', finished_at = now(),
+     progress = jsonb_build_object('phase', 'done', 'message', lower($2::text)),
+     metrics = jsonb_build_object('note', $3::text),
+     error = $4::text,
+     result = jsonb_build_object('outcome', 'complete', 'report', $5::text, 'prose', '# No sources about ' || $2::text || ' were retrieved',
+       'rendered', $3::text, 'needs', jsonb_build_array($3::text), 'followup_queries', jsonb_build_array($5::text), 'gaps', jsonb_build_array($5::text),
+       'search_record', jsonb_build_object('queries', jsonb_build_array($4::text)), 'sources', jsonb_build_array(jsonb_build_object('title', $5::text)),
+       'synthesis', 'Settlement offers are usually negotiable [Source 1].',
+       'cited_sources', jsonb_build_array(jsonb_build_object('title', 'Settlement basics', 'url', 'https://example.org/settle')),
+       'reuse_claims', jsonb_build_array(jsonb_build_object('id', 'c1', 'text', 'Offers can be countered.')))
+     WHERE id = $1::uuid`, [job, prefix, title, escaped, mid]);
+  await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload)
+             VALUES ($1::uuid, $1::uuid, 's1', 'stage', 'due_process', jsonb_build_object('note', $2::text))`, [job, title]);
+  const has = (t: string) => t.toLowerCase().includes(tok.toLowerCase());
+  assert(has((await rsGet(K.owui, `/research/jobs/${job}`, sub("alice"))).text), "alice reads all of it");
+  const reads = [`/research/jobs?limit=50`, `/research/jobs/${job}`, `/research/jobs/${job}/stream`, `/research/jobs/${job}/tree`, `/research/jobs/${job}/events`];
+  for (const [who, key, obo] of [["bob via owui", K.owui, sub("bob")], ["owui, no user", K.owui, undefined], ["agent-org", K.ao, undefined],
+      ["shared key", K.shared, undefined], ["workspace as bob", K.ws, sub("bob")]] as const) {
+    for (const p of reads) {
+      const res = await rsGet(key, p, obo);
+      assert(!has(res.text), `${who} ${p} carries a fragment of alice's prompt: ${res.text.slice(0, 300)}`);
+    }
+    // the shared research output is still there
+    const d = await rsGet(key, `/research/jobs/${job}`, obo);
+    assertEquals(d.status, 200);
+    assert(d.text.includes("Settlement basics") && d.text.includes("Offers can be countered") && d.text.includes("usually negotiable"),
+      `${who}: the shared report, sources and claims are kept: ${d.text.slice(0, 300)}`);
+  }
+  const bo = new Browser();
+  await bo.signIn("bob");
+  for (const p of [`/workbench/contract/sessions/${job}`, `/workbench/contract/sessions/${job}/stream`, "/workbench/contract/jobs?kinds=research&limit=200", "/workbench/contract/timeline?limit=500"]) {
+    const res = await bo.req("GET", p);
+    assert(!has(res.text), `bob ${p} carries a fragment of alice's prompt: ${res.text.slice(0, 300)}`);
+  }
+} });
+
+// C2e (tester F4): with sign-in on and WORKSPACE_DEFAULT_SUB blank, an ownerless job's prompt is read
+// only by an admin who is not impersonating - and every such read is in admin_audit.
+Deno.test({ name: "C2e default unset: ownerless prompts reach only a non-impersonating admin, and those reads are audited", ...opts, ignore: ignore || !WB_NODEF, fn: async () => {
+  const mark = `NodefPrompt${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+  const [{ id }] = await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, caller, finished_at)
+     VALUES ('error', 'manual', $1, 'shared-key', now()) RETURNING id::text AS id`, [`${mark} an old question`]);
+  const ad = new Browser();
+  await ad.signIn("admin");
+  const bo = new Browser();
+  await bo.signIn("bob");
+  const as = (b: Browser) => ({ "x-brain-key": DOOR, cookie: b.cookie() });
+  assert(!(await direct(WB_NODEF, "GET", `/workbench/contract/sessions/${id}`, as(bo))).text.includes(mark), "bob: nobody's prompt");
+  const count = async () => (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE actor_sub = $1 AND reason LIKE '%ownerless%'`, [sub("admin")]))[0].n;
+  const before = await count();
+  const r = await direct(WB_NODEF, "GET", `/workbench/contract/sessions/${id}`, as(ad));
+  assert(r.text.includes(mark), "the admin reads it");
+  assertEquals(await count(), before + 1, "the read is recorded");
+  const last = await sql<{ route: string }>(`SELECT route FROM public.admin_audit WHERE actor_sub = $1 AND reason LIKE '%ownerless%' ORDER BY id DESC LIMIT 1`, [sub("admin")]);
+  assertEquals(last[0].route, `/workbench/contract/sessions/${id}`);
 } });
 
 // ── C5: no sign-in configured = exactly the P2b behaviour ─────────────────────────────────────

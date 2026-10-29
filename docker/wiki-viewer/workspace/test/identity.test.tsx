@@ -87,6 +87,10 @@ describe("rw-identity: impersonation", () => {
     expect(start.disabled).toBe(true);
     fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "ab " } });
     expect(start.disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b" } });
+    expect(start.disabled).toBe(true); // round 4: zero-width characters are not a reason
+    fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "abcdefg" } });
+    expect(start.disabled).toBe(true); // 8 visible characters at least
     fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "support ticket 42" } });
     expect(start.disabled).toBe(false);
     await act(async () => { fireEvent.click(start); await settle(); });
@@ -98,6 +102,7 @@ describe("rw-identity: impersonation", () => {
     const { bodies } = fakeApi([["POST", "/workbench/auth/impersonate", () => ({})]]);
     await expect(impersonate("ak-bob", "  ")).rejects.toThrow(/reason/);
     await expect(impersonate("ak-bob", "")).rejects.toThrow(/reason/);
+    await expect(impersonate("ak-bob", "\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b")).rejects.toThrow(/reason/);
     expect(bodies.length).toBe(0);
   });
 
