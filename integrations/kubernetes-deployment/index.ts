@@ -19,6 +19,7 @@
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
  */
 
+import { parseFiledJobId, recordFiledEvent } from "./research-filed.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
@@ -2102,8 +2103,11 @@ app.post("/research/persist", async (c) => {
     thread_id?: string;   // active thread; absent => unthreaded inbox
     model?: string;       // originating model (provenance metadata)
     sources?: Array<{ url?: string; title?: string; content?: string; summary?: string; domain?: string }>;
+    job_id?: string;      // rw-curator-filed: the research job; present => a typed 'filed' event commits WITH the filing
   };
   try { body = await c.req.json(); } catch { return c.json({ error: "bad json" }, 400); }
+  const filedJob = parseFiledJobId(body.job_id);
+  if (filedJob.error) return c.json({ error: filedJob.error }, 400);
   const key = body.research_key;
   const claim = (body.claim || "").trim();
   if (!key || !claim) return c.json({ error: "research_key and claim required" }, 400);
@@ -2256,9 +2260,17 @@ app.post("/research/persist", async (c) => {
       sourceIds.push(sid);
       written++;
     }
+    // rw-curator-filed: the 'filed' event commits in THIS transaction - no event without the filing, no
+    // filing without the event (when the caller names its job). A missing job rolls the filing back.
+    let filedEventId: number | null = null;
+    if (filedJob.jobId) {
+      if (!synthesisId) throw new Error("filed event: the synthesis row was not written");
+      filedEventId = await recordFiledEvent(client, { jobId: filedJob.jobId, researchKey: key, synthesisId, sourcesWritten: written, threadId, sessionId });
+    }
     await client.queryArray("COMMIT");
     return c.json({
       synthesis_id: synth.rows[0]?.id,
+      filed_event_id: filedEventId,
       sources_written: written,
       source_ids: sourceIds,   // index-aligned with body.sources ([Source N] => [N-1])
       session_id: sessionId,

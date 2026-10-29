@@ -23,6 +23,7 @@ import {
 } from "./credibility.ts";
 import { assess, type AdmissionContext, type Assessment, finalScore, subjectTokens, type TrailEntry, trailEntry } from "./admission.ts";
 import { linkedDois, type ScholarlyResolver } from "./scholarly.ts";
+import { type CuratorFilingOptions, deliverToCurator, type FiledRecord } from "./curator-filed.ts";
 import { gapEvent, type GapClaim, sourceEvent, splitAtThreshold, type TreeEvent } from "./tree.ts";
 import {
   cachedScholarly, foldHeld, loadHeldSources, loadRefineryContext, recordAdmissionTrail, recordCorroboration,
@@ -157,6 +158,11 @@ export interface Deps {
   searchWeb(query: string, k: number): Promise<SearchHit[]>;
   fetchPage(url: string): Promise<FetchResult>;
   delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** rw-curator-filed - the typed 'filed' event of a job (written by the curator's persist in the filing
+   *  transaction); absent = no way to ask, the hand-off is then only resent, never confirmed. */
+  findFiled?: ((jobId: string) => Promise<FiledRecord | null>) | null;
+  /** rw-curator-filed - hand-off attempts + settle window; absent = ONE attempt (the pre-change behaviour). */
+  curatorFiling?: CuratorFilingOptions | null;
   /** P3a - the keyed OpenAlex/Crossref resolver behind the egress proxy; absent = every
    *  identifier is recorded `unresolved` with that reason (never a silent zero). */
   scholarly?: ScholarlyResolver | null;
@@ -2111,6 +2117,8 @@ export async function runResearch(
   if (!dryRun && (curatorCited.length || reuseClaims.length)) {
     const pkg = {
       research_key: `rs-${await sha1(query + (threadId || ""))}`,
+      // rw-curator-filed: the curator's persist writes the typed 'filed' event for this job in the filing transaction
+      ...(jobId ? { job_id: jobId } : {}),
       query,
       claim: firstParagraph(curatorSynthesis).slice(0, 600),
       synthesis: curatorSynthesis,
@@ -2126,7 +2134,11 @@ export async function runResearch(
       thread_id: threadId || undefined,
       sources: curatorCited.map((p) => ({ url: p.url, title: p.title, content: p.content, domain: p.domain })),
     };
-    try { curator = await deps.delegateToCurator(pkg); } catch (e) { curator = { error: String((e as Error).message) }; }
+    // rw-curator-filed: confirm by the 'filed' event, resend (idempotent on research_key) when there is none, bounded.
+    try {
+      curator = await deliverToCurator((p) => deps.delegateToCurator(p), deps.findFiled, jobId, pkg,
+        deps.curatorFiling ?? { attempts: 1, settleMs: 0 });
+    } catch (e) { curator = { error: String((e as Error).message) }; }
   }
 
   // rw-p3a-figure-filed - the published figure and the stored footer state what the curator FILED:

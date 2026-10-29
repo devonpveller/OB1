@@ -222,3 +222,46 @@ Deno.test("F1/R4: two claims the database merged (one id twice in claims.filed) 
   assertEquals(mc(r).claims, 2, JSON.stringify(mc(r)));
   assertEquals(mc(r).filed, true);
 });
+
+// ── rw-curator-filed: the harness wiring (the call site, the package's job_id, the seams) ──────────────
+const JOB_ID = "22222222-2222-4222-8222-222222222222";
+const fast = { attempts: 3, settleMs: 0, backoffBaseMs: 1, backoffCapMs: 1, sleep: () => Promise.resolve() };
+
+Deno.test("rw-curator-filed: the package names the job, and a curator that fails once then files ends filed (resent, not lost)", async () => {
+  let calls = 0;
+  const { d, seen } = deps((pkg) => {
+    if (++calls === 1) throw new Error("curator timed out after 179992 ms (CURATOR_TIMEOUT_MS=180000, attempt 1/3, not retried)");
+    return filedAll(pkg);
+  });
+  d.curatorFiling = fast;
+  d.findFiled = () => Promise.resolve(null);
+  const r = await runResearch(d, recordingDb().client, QUERY, { origin: "owui", jobId: JOB_ID });
+  assertEquals(calls, 2);
+  assert(seen.pkgs.every((p) => p.job_id === JOB_ID && String(p.research_key).startsWith("rs-")), "every hand-off carries job_id + research_key");
+  assertEquals(r.curator?.error, undefined);
+  assertEquals(mc(r).filed, true, JSON.stringify(mc(r)));
+});
+
+Deno.test("rw-curator-filed: a timeout whose curator DID file (the typed event) ends filed from the event, with no resend", async () => {
+  let calls = 0;
+  const { d } = deps(() => { calls++; throw new Error("curator timed out after 179992 ms"); });
+  d.curatorFiling = fast;
+  d.findFiled = (job) => Promise.resolve(job === JOB_ID ? { synthesis_id: SYN_ID, research_key: "rs-x" } : null);
+  const r = await runResearch(d, recordingDb().client, QUERY, { origin: "owui", jobId: JOB_ID });
+  assertEquals(calls, 1);
+  assertEquals((r.curator?.persist as { synthesis_id: string }).synthesis_id, SYN_ID);
+  assertEquals(mc(r).filed, true);
+  assert(!footerOf(r).includes("(not filed)"), footerOf(r));
+});
+
+Deno.test("rw-curator-filed: past the bound the run ends error, filed:false and '(not filed)' - rw-p3a-figure-filed's rule still holds", async () => {
+  let calls = 0;
+  const { d } = deps(() => { calls++; throw new Error("curator unreachable"); });
+  d.curatorFiling = fast;
+  d.findFiled = () => Promise.resolve(null);
+  const r = await runResearch(d, recordingDb().client, QUERY, { origin: "owui", jobId: JOB_ID });
+  assertEquals(calls, 3);
+  assert(String(r.curator?.error).includes("not filed"), String(r.curator?.error));
+  assertEquals(mc(r).filed, false);
+  assert(footerOf(r).includes("(not filed)"), footerOf(r));
+});

@@ -89,6 +89,7 @@ const pool = new ResilientPool<PgClient>(() => new Pool(DB_CONFIG, POOL_SIZE, tr
 // --- Types ------------------------------------------------------------------
 interface Pkg {
   research_key?: string;
+  job_id?: string; // rw-curator-filed: the research job; forwarded to /research/persist, which writes the typed 'filed' event in the filing transaction
   query?: string;
   claim?: string; // short standalone summary (required) — used for the resolver embedding
   synthesis?: string; // the FULL detailed research result (tagged claims) — stored as source content
@@ -370,6 +371,7 @@ async function resolve(pkg: Pkg, claimEmb: number[]): Promise<{
 async function delegatePersist(pkg: Pkg, threadId: string, notebookLabel: string): Promise<Record<string, unknown>> {
   const body = {
     research_key: pkg.research_key,
+    job_id: pkg.job_id,
     query: pkg.query,
     claim: pkg.claim,
     synthesis: pkg.synthesis, // full detailed result -> stored as source content

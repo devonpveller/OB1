@@ -23,6 +23,7 @@
  *      (+ harness.ts tunables).
  */
 import { Pool } from "postgres";
+import { curatorFileAttemptsFromEnv, curatorSettleMsFromEnv, type FiledRecord } from "./curator-filed.ts";
 import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, engineBlock, ENGINE_BLOCK_START, extractLinks, extractTextFromHtml, extractTitle, HANDOFF_WAIT_LINE, proxyPolicy, renderResult, rewriteChatBody, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
@@ -155,6 +156,14 @@ const FETCH_TIMEOUT_MS = parseInt(env("FETCH_TIMEOUT_MS", "15000"), 10);
 // hanging the slot. <= 0 / non-numeric values fall back to the defaults.
 const CURATOR_TIMEOUT_MS = curatorTimeoutMsFromEnv(Deno.env.get("CURATOR_TIMEOUT_MS"));
 const CURATOR_RETRIES = curatorRetriesFromEnv(Deno.env.get("CURATOR_RETRIES"));
+// rw-curator-filed (2026-10-29: 4 of 80 runs in 30 h completed but were never filed - a 180 s timeout
+// was final). After a timeout / dropped connection / curator 5xx the harness now WAITS up to
+// CURATOR_SETTLE_MS for the curator's typed 'filed' event (research_job_events) and, if none appears,
+// resends the package (persist is idempotent on research_key), CURATOR_FILE_ATTEMPTS hand-offs in all,
+// 2 s / 4 s backoff between. Worst case with the defaults ~ 3 x (180 s + 30 s) + 6 s ~ 10.6 min before
+// the job ends error "(not filed)". CURATOR_FILE_ATTEMPTS=1 restores the single hand-off.
+const CURATOR_FILE_ATTEMPTS = curatorFileAttemptsFromEnv(Deno.env.get("CURATOR_FILE_ATTEMPTS"));
+const CURATOR_SETTLE_MS = curatorSettleMsFromEnv(Deno.env.get("CURATOR_SETTLE_MS"));
 // Raised 8000 -> 16000 (research-trust 2026-09-11): the synthesizer saw 2 000
 // chars of each source, so "thin evidence" was partly a slicing decision. The
 // harness slice (SOURCE_SLICE_CHARS) moved with it.
@@ -537,8 +546,18 @@ async function admissionGate(req: Parameters<NonNullable<Deps["admission"]>>[0])
   if (!r.ok) throw new Error(`admission gate ${r.status}: ${JSON.stringify(d).slice(0, 200)}`);
   return { outcome: String(d.outcome), admits: d.admits === true, reason: String(d.reason ?? ""), source_id: d.source_id ?? null };
 }
+// rw-curator-filed - did the curator file this job? The typed 'filed' event it wrote in the filing transaction.
+async function findFiled(jobId: string): Promise<FiledRecord | null> {
+  const c = await pool.connect();
+  try {
+    const r = await c.queryObject(
+      `SELECT payload FROM public.research_job_events WHERE job_id = $1 AND type = 'filed' LIMIT 1`, [jobId]);
+    return ((r.rows[0] as { payload?: FiledRecord } | undefined)?.payload) ?? null;
+  } finally { c.release(); }
+}
 const realDeps: Deps = {
-  embed, chat, searchWeb, fetchPage, delegateToCurator,
+  embed, chat, searchWeb, fetchPage, delegateToCurator, findFiled,
+  curatorFiling: { attempts: CURATOR_FILE_ATTEMPTS, settleMs: CURATOR_SETTLE_MS, log: (l) => console.warn(l) },
   scholarly: scholarlyResolver,
   admission: WORKBENCH_URL && WORKBENCH_KEY ? admissionGate : null,
 };
@@ -734,8 +753,12 @@ function jobSeams(base: Deps, signal: AbortSignal, state: SeamState, jobId: stri
     },
     searchWeb: (q, k) => { guard(); return base.searchWeb(q, k); },
     fetchPage: (u) => { guard(); return base.fetchPage(u); },
+    findFiled: base.findFiled,
+    curatorFiling: base.curatorFiling,
     delegateToCurator: (pkg) => {
-      guard(); // synchronous with the flag below: a cancel lands wholly before or after
+      // synchronous with the flag below: a cancel lands wholly before or after. Only the FIRST hand-off is
+      // guarded: a resend (rw-curator-filed) is part of the same filing, past the point of no return.
+      if (!state.filing) guard();
       state.filing = true;
       filingJobs.add(jobId);
       return base.delegateToCurator(pkg);
