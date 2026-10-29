@@ -11,6 +11,7 @@ import { parseMetadataFilter } from "../logic/scope.ts";
 import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
+import { identityOf } from "../../middleware/identity.ts";
 
 const T = ["source lifecycle (D5)"];
 const idParam = (example: string) => z.object({ id: pathParam("id", example, "source id") });
@@ -28,7 +29,7 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const f = parseMetadataFilter(c.req.valid("query").metadata_filter);
-      const d = await lc.dependence(deps.db, deps.registry, c.req.valid("param").id, f);
+      const d = await lc.dependence(deps.db, deps.registry, c.req.valid("param").id, f, await identityOf(c));
       if (d.lifecycle === null) {
         return c.json({ error: f ? "not found in scope" : "no source or held source with this id" }, 404);
       }

@@ -6,6 +6,10 @@
 # -Subnet is REQUIRED (harness-subnet.ps1: exactly a /24 outside Docker's default pools and
 # 192.168.0.0/16); -Evidence must be absent or empty. -Red runs the SAME tests against images built
 # from -BaseSha (the development pin before P2b): every clause must FAIL there.
+# -WalkOff (round 3) starts the workbench with WORKSPACE_RESPONSE_WALK=off - the owner-scope response
+# walk (a backstop) off, so the sweep sees what the routes themselves return; with -Red the base tree
+# is patched (one line) to honour the same switch. Without -WalkOff the sweep runs TWICE: walk on
+# (as deployed), then the workbench restarted with the walk off.
 #
 # LAB DOCKER SHIM: every docker call goes through Lab-Docker, which REFUSES (exit 2, nothing run) a
 # published port (-p/-P/--publish*), a network other than this run's (and `none`), a network create
@@ -40,6 +44,7 @@ param(
   [string]$ChromeImage = 'chromedp/headless-shell@sha256:53cc0f33c0598ff244f6e45458f6dfaf0ae4206d388ae7364903afd1d9d14f0a',
   [string]$BaseSha = '767c461',
   [switch]$Red,
+  [switch]$WalkOff,
   [string]$Cases = '',
   [switch]$KeepImages
 )
@@ -178,6 +183,14 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
     & git -C $ob1 archive --format=tar -o $tar $sha
     & tar -xf $tar -C $tree
     Remove-Item -Force $tar
+    if ($WalkOff) {
+      # the base predates the switch: one line after the route runs, so the walk can be turned off
+      $os = Join-Path $tree 'docker/workbench/src/middleware/owner-scope.ts'
+      if ((Test-Path $os) -and -not ((Get-Content -Raw $os) -match 'WORKSPACE_RESPONSE_WALK')) {
+        $t = (Get-Content -Raw $os) -replace '(?m)^([ \t]*)await next\(\);', '$1await next();$1if ((Deno.env.get("WORKSPACE_RESPONSE_WALK") ?? "") === "off") return;'
+        [System.IO.File]::WriteAllText($os, $t, (New-Object System.Text.UTF8Encoding $false))
+      }
+    }
   }
   $ctx = if ($what -eq 'workbench') { Join-Path $tree 'docker/workbench' } else { Join-Path $tree 'docker/wiki-viewer' }
   $args2 = @('build', '--label', $label, '--build-arg', "OB1_SHA=$sha", '-t', $tag)
@@ -264,13 +277,15 @@ try {
       '-e', 'WIKI_BUILDER=0', '-e', 'WIKI_DB_TCP=openbrain-db:5432', '-e', 'WIKI_DB_PROBE_MS=1000', '-e', 'WIKI_RECONCILE_INTERVAL_MS=5000',
       '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",
       '-v', "${vault}:/wiki:ro", $viewerTag)
-  $null = Run-Detached "$P-wb" @('--network-alias', 'openbrain-workbench', '-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
+  $wbArgs = @('--network-alias', 'openbrain-workbench', '-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'FETCH_PROXY_URL=http://stub-proxy:3128', '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
       '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
-      '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro", $wbTag)
+      '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
+  $walkEnv = if ($WalkOff) { @('-e', 'WORKSPACE_RESPONSE_WALK=off') } else { @() }
+  $null = Run-Detached "$P-wb" ($wbArgs + $walkEnv + @($wbTag))
   # the portal's REAL (wiki_app) snippet as the front door
   $cf = Get-Content -Raw (Join-Path $repo 'portal/config/caddy/Caddyfile')
   $snip = ([regex]'(?ms)^\(wiki_app\) \{.*?^\}').Match($cf).Value
@@ -323,7 +338,16 @@ try {
   # round 2 (tester attempt 1 F1-F6): the route-wide isolation sweep, LAST (it calls mutating routes
   # with user B's ids as user A). Its route table is the router's own (src/app.ts, imported in the test
   # stage image with the workbench's DB_* / recipes so the import resolves; never served there).
-  Write-Host '[5d] the route-wide isolation sweep (as user A, every registered route, both doors)'
+  $walks = if ($WalkOff -or $Red) { @($(if ($WalkOff) { 'off' } else { 'on' })) } else { @('on', 'off') }
+  foreach ($walk in $walks) {
+  if ($walk -eq 'off' -and -not $WalkOff) {
+    # the same lab, the workbench restarted with the response walk OFF: the routes alone must hold
+    $null = Dk rm -f "$P-wb"
+    $restart = $wbArgs + @('-e', 'WORKSPACE_RESPONSE_WALK=off', $wbTag)
+    $null = Dk run -d --name "$P-wb" --label $label --network $net @restart
+    Check (($script:rc -eq 0) -and (Wait-Http "http://$P-wb:8000/health" 90)) 'the workbench restarted with the response walk off'
+  }
+  Write-Host "[5d] the route-wide isolation sweep (as user A, every registered route, both doors; response walk $walk)"
   $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
     '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault',
@@ -331,11 +355,13 @@ try {
     '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/isolation_sweep_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
-  Save 'isolation-sweep.log' ((($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:' }) -join "`n")
+  Save "isolation-sweep-walk-$walk.log" ((($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT ' } | Select-Object -First 60) { Write-Host "    $l" }
   $sw = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sw.Success -and $clean -match 'HIT ') "RED: the isolation sweep finds user B's context on the base ($($sw.Value))" }
-  else { Check ($sw.Success -and $sw.Groups[1].Value -eq 'ok' -and [int]$sw.Groups[3].Value -eq 0 -and $clean -match 'sweep: \d+ routes') "the route-wide isolation sweep ($($sw.Value))" }
+  if ($Red) { Check ($sw.Success -and $clean -match 'HIT ') "RED: the isolation sweep finds user B's context on the base, response walk $walk ($($sw.Value))" }
+  else { Check ($sw.Success -and $sw.Groups[1].Value -eq 'ok' -and [int]$sw.Groups[3].Value -eq 0 -and $clean -match 'sweep: \d+ routes') "the route-wide isolation sweep, response walk $walk ($($sw.Value))" }
+
+  }
 
   Write-Host '[5c] the grammar copy'
   $a = [System.IO.File]::ReadAllBytes((Join-Path $wb 'src/documents/grammar.ts'))

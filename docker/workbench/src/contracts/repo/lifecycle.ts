@@ -9,6 +9,7 @@ import { type AdmissionScorer, decideReopen } from "../logic/reopen.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 import type { RegistryReader } from "../registry.ts";
 import { tombstoneById, tombstoneForUrl, tombstoneOut } from "./sources.ts";
+import { FOREIGN_DOC, type Viewer } from "../../documents/ownership.ts";
 
 export class Conflict extends Error {
   constructor(message: string, public detail: Record<string, unknown> = {}) {
@@ -56,7 +57,20 @@ const SCOPED_DEPENDENCE = `
       OR (d.kind IN ('report_citation', 'found_via_lead') AND EXISTS (
             SELECT 1 FROM public.sources x WHERE x.id::text = d.ref AND x.metadata @> $2::jsonb))`;
 
-export async function dependence(db: Db, reg: RegistryReader, id: string, f: MetadataFilter = null) {
+// Read for a user (rw-p2b-workspace round 3), a connection from ANOTHER user's document - its
+// document_link, or a reference_record held by it - is still counted (it blocks erasure for everyone)
+// but its ref and detail are not selected: the SQL answers "another user's document" and nothing of
+// the path or title. `who` null is the internal view (sever / erase decide on it; never returned).
+const OWNED_DEPENDENCE = `
+  SELECT d.kind,
+         CASE WHEN o.others THEN 'another-user-document:' || (row_number() OVER (ORDER BY d.ref))::text ELSE d.ref END AS ref,
+         CASE WHEN o.others THEN jsonb_build_object('owner', 'another user') ELSE d.detail END AS detail
+    FROM (${SCOPED_DEPENDENCE}) d
+    CROSS JOIN LATERAL (SELECT $3::text IS NOT NULL AND (
+        (d.kind = 'document_link' AND ${FOREIGN_DOC("d.ref", "$3", "$4")})
+     OR (d.kind = 'reference_record' AND ${FOREIGN_DOC("d.detail ->> 'holder_ref'", "$3", "$4")})) AS others) o`;
+
+export async function dependence(db: Db, reg: RegistryReader, id: string, f: MetadataFilter = null, who: Viewer | null = null) {
   const mf = f ? JSON.stringify(f) : null;
   const life = await db.query<{ lifecycle: string }>(
     `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS lifecycle FROM public.sources
@@ -75,7 +89,7 @@ export async function dependence(db: Db, reg: RegistryReader, id: string, f: Met
     // out of scope: nothing about it, not even its connection count
     return { source_id: id, lifecycle, ...aggregateDependence([], defs), erase_allowed: false };
   }
-  const rows = await db.query<DependenceRow>(SCOPED_DEPENDENCE, [id, mf]);
+  const rows = await db.query<DependenceRow>(OWNED_DEPENDENCE, [id, mf, who?.sub ?? null, who?.key ?? null]);
   const agg = aggregateDependence(rows, defs);
   return { source_id: id, lifecycle, ...agg, erase_allowed: mf === null && lifecycle === "unlinked" && agg.blocking === 0 };
 }

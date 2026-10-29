@@ -7,6 +7,7 @@ import { sourceRecordState } from "../logic/state.ts";
 import { refineryScopedScore, termDef } from "../logic/credibility.ts";
 import { safeReasonText, safeSignals } from "../logic/scholarly_reason.ts";
 import type { RegistryReader } from "../registry.ts";
+import { FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
 
 export interface SourceRow {
   id: string;
@@ -47,7 +48,7 @@ export async function getSource(db: Db, id: string, f: MetadataFilter): Promise<
 
 export interface HeldRow {
   id: string;
-  refinery_id: string;
+  refinery_id: string | null;
   url: string | null;
   title: string;
   content_type: string;
@@ -60,15 +61,17 @@ export interface HeldRow {
 // A held source belongs to exactly one refinery, and a refinery (an idea) carries no metadata, so
 // under a filter a held source is out of scope whatever its own metadata says: answering it would
 // name the refinery (rw-p0-contract2 attempt 2). Unfiltered callers read it as before.
-export async function getHeld(db: Db, id: string, f: MetadataFilter): Promise<HeldRow | null> {
+// The held source itself is shared knowledge; WHICH refinery holds it is that refinery owner's
+// (rw-p2b-workspace round 3): refinery_id is selected for the refinery's owner only, null otherwise.
+export async function getHeld(db: Db, id: string, f: MetadataFilter, who: Viewer): Promise<HeldRow | null> {
   if (f) return null;
   const rows = await db.query<HeldRow>(
-    `SELECT h.id, h.refinery_id, h.url, h.title, h.content_type, h.revision,
+    `SELECT h.id, CASE WHEN ${FOREIGN_IDEA("h.refinery_id", "$3")} THEN NULL ELSE h.refinery_id END AS refinery_id, h.url, h.title, h.content_type, h.revision,
             left(h.content, 500) AS excerpt, rus.status, h.metadata
        FROM public.held_sources h
        JOIN public.refinery_user_sources rus ON rus.source_id = h.id
       WHERE h.id = $1 AND ($2::jsonb IS NULL OR h.metadata @> $2::jsonb)`,
-    [id, f ? JSON.stringify(f) : null],
+    [id, f ? JSON.stringify(f) : null, who.sub],
   );
   return rows[0] ?? null;
 }
@@ -168,7 +171,7 @@ export function tombstoneOut(t: TombstoneRow) {
 export async function reference(
   db: Db,
   id: string,
-  opts: { version: number | null; evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter },
+  opts: { version: number | null; evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter; who: Viewer },
 ) {
   const base = { id, kind: "source", requested_version: opts.version, source: null, tombstone: null, held: null, record: null };
   const s = await getSource(db, id, opts.filter);
@@ -176,7 +179,7 @@ export async function reference(
     if (opts.evidenceOnly && !opts.visible.has(s.lifecycle)) return omitted(base);
     return await sourceReference(db, s, opts.version, base, opts.filter);
   }
-  const h = await getHeld(db, id, opts.filter);
+  const h = await getHeld(db, id, opts.filter, opts.who);
   if (h) {
     if (opts.evidenceOnly && !opts.visible.has("held")) return omitted(base);
     return {
@@ -253,10 +256,10 @@ export async function chunkContext(
   sourceId: string,
   idx: number,
   window: number,
-  opts: { evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter },
+  opts: { evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter; who: Viewer },
 ) {
   const s = await getSource(db, sourceId, opts.filter);
-  const h = s ? null : await getHeld(db, sourceId, opts.filter);
+  const h = s ? null : await getHeld(db, sourceId, opts.filter, opts.who);
   if (!s && !h) return null;
   const lifecycle = s ? s.lifecycle : "held";
   const base = { chunk_id: `${sourceId}:${idx}`, source_id: sourceId, idx, window };
@@ -306,11 +309,11 @@ export async function chunkContext(
 interface CredRow { family: string | null; score: number | null; is_primary: boolean | null; basis: string | null; kind: string | null; total: number | null; model: string }
 interface QSourceRow { source_id: string; title: string; url: string | null; family: string | null; relation: string; amount: number | null; claim: string | null }
 
-export async function quality(db: Db, reg: RegistryReader, id: string, f: MetadataFilter) {
+export async function quality(db: Db, reg: RegistryReader, id: string, f: MetadataFilter, who: Viewer) {
   const s = await getSource(db, id, f);
   const userTerm = termDef((await reg.entry("credibility_terms", "user_provided"))?.definition);
   if (!s) {
-    const h = await getHeld(db, id, f);
+    const h = await getHeld(db, id, f, who);
     if (!h) return null;
     return heldQuality(h, userTerm);
   }

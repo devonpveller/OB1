@@ -11,6 +11,8 @@ import { pathParam, queryParam } from "../schemas/common.ts";
 import { HolderReferences, ReferenceCreated, ReferenceCreateRequest } from "../schemas/references.ts";
 import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
+import { identityOf } from "../../middleware/identity.ts";
+import { documentPathsIn, ownsDocumentPaths } from "../../documents/ownership.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send } from "./http.ts";
 
 const T = ["references (P2a)"];
@@ -25,6 +27,12 @@ export function registerReferences(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const b = c.req.valid("json");
+      // rw-p2b-workspace round 3: a reference held by a user document is placed by its owner only
+      // (checked here as well as at the request gate)
+      const holderRef = (b as { holder?: { ref?: string } }).holder?.ref ?? "";
+      if (holderRef && !(await ownsDocumentPaths(deps.db, documentPathsIn(holderRef), await identityOf(c)))) {
+        return c.json({ error: "no such document" }, 404);
+      }
       const out = await refs.createReference(deps.db, deps.registry, { ...b, by: b.by ?? authorOf(c) ?? undefined });
       return send(c, ReferenceCreated, out, 201);
     } catch (e) {
@@ -44,6 +52,10 @@ export function registerReferences(app: ContractApp, deps: ContractDeps) {
     try {
       const ref = c.req.valid("query").ref;
       if (!ref) return c.json({ error: "ref (the holder's path) is required" }, 400);
+      // a user document's holder list is its owner's (round 3: checked here, not only at the gate)
+      if (!(await ownsDocumentPaths(deps.db, documentPathsIn(ref), await identityOf(c)))) {
+        return c.json({ error: "this holder holds no references" }, 404);
+      }
       const r = await refs.holderReferences(deps.db, c.req.valid("param").kind, ref);
       if (!r) return c.json({ error: "this holder holds no references" }, 404);
       return send(c, HolderReferences, r);

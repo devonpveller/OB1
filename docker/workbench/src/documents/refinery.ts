@@ -157,6 +157,13 @@ export interface Flag {
 // resolves them by hand. Reads files and holder rows; writes nothing. The places are shown for the
 // user's OWN documents; another user's documents are counted, never opened (their text is theirs).
 export async function locateLinks(db: Db, sourceId: string, who: Identity) {
+  // round 3: only a source or held source is located; any other id (an idea's, a job's) is unknown
+  // here - 404, not a 200 that echoes the id back
+  const known = await db.query<{ n: number }>(
+    `SELECT 1 AS n FROM public.sources WHERE id::text = $1 UNION ALL SELECT 1 FROM public.held_sources WHERE id::text = $1 LIMIT 1`,
+    [sourceId],
+  );
+  if (!known.length) throw new DocError("no source or held source with this id", 404);
   const docs = await db.query<{ path: string; owner_sub: string }>(
     `SELECT d.ref AS path, l.owner_sub FROM public.source_dependence($1::uuid) d
        JOIN public.user_document_listings l ON l.path = d.ref

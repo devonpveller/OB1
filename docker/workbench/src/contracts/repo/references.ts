@@ -20,6 +20,7 @@ import {
   anchorText, deriveWholeSourceSelectors, frontmatterSources, noteRefsCited, planLegacyHolders,
   requiredSelectorKinds,
 } from "../logic/citations.ts";
+import { FOREIGN_DOC, type Viewer } from "../../documents/ownership.ts";
 import { getHeld, getSource, omitted, reference, sourceReference, tombstoneBySource, tombstoneOut } from "./sources.ts";
 
 // The holder kind the legacy note routes use (a key of reference_holder_kinds).
@@ -46,6 +47,17 @@ export async function getRecord(db: Db, id: string): Promise<RecordRow | null> {
     null;
 }
 
+// A record as a given user reads it (rw-p2b-workspace round 3): who placed it is withheld (null) when
+// the record is held by another user's document - selected so in SQL, never fetched and then hidden.
+async function getRecordFor(db: Db, id: string, who: Viewer): Promise<RecordRow | null> {
+  return (await db.query<RecordRow>(
+    `SELECT ${RECORD_COLS.replace("r.created_by", `CASE WHEN EXISTS (SELECT 1 FROM public.reference_holders oh
+        WHERE oh.reference_id = r.id AND ${FOREIGN_DOC("oh.holder_ref", "$2", "$3")}) THEN NULL ELSE r.created_by END AS created_by`)}
+       FROM public.reference_records r WHERE r.id = $1`,
+    [id, who.sub, who.key],
+  ))[0] ?? null;
+}
+
 // ── reference(id): a reference record, or (P0) a source in any lifecycle state ────────────
 // A record is read through its target at the PINNED revision, so the state says whether the
 // source has moved on ('updated'). Records carry no metadata: under a metadata filter they are
@@ -53,9 +65,9 @@ export async function getRecord(db: Db, id: string): Promise<RecordRow | null> {
 export async function referenceById(
   db: Db,
   id: string,
-  opts: { version: number | null; evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter },
+  opts: { version: number | null; evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter; who: Viewer },
 ) {
-  const rec = await getRecord(db, id);
+  const rec = await getRecordFor(db, id, opts.who);
   if (!rec) return await reference(db, id, opts);
   if (opts.filter) return null;
   const base = {
@@ -68,7 +80,7 @@ export async function referenceById(
     // the filter is null here (a filtered caller returned above): records carry no metadata
     return await sourceReference(db, s, rec.pinned_revision, base, null);
   }
-  const h = await getHeld(db, rec.source_id, null);
+  const h = await getHeld(db, rec.source_id, null, opts.who);
   if (h) {
     if (opts.evidenceOnly && !opts.visible.has("held")) return omitted({ ...base, record: null });
     return {

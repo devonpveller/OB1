@@ -7,7 +7,10 @@
 // exporter_test.ts); this file wires the live ones - the database, the registry reader, the resolver
 // from the environment, the vault - and nothing else.
 // `path` is the full vault-relative path, validated by the shared no-`../` validator.
+import { Hono } from "hono";
 import { config } from "../config.ts";
+import { ownedPathParam } from "../documents/ownership.ts";
+import { identityOf } from "../middleware/identity.ts";
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
 import { RegistryReader } from "../contracts/registry.ts";
@@ -19,7 +22,7 @@ import { createExporter } from "../export/exporter.ts";
 import { limitsFromEnv } from "../export/markdown.ts";
 
 const db = poolDb(pool);
-export const exporter = createExporter({
+const exportApp = createExporter({
   reg: new RegistryReader(db),
   resolver: createResolver(resolverConfigFromEnv()),
   cslDir: Deno.env.get("EXPORT_CSL_DIR") || new URL("../../csl", import.meta.url).pathname,
@@ -40,3 +43,8 @@ export const exporter = createExporter({
   cache: (referenceId, identifier, csl, via) => cacheResolution(db, referenceId, identifier, csl, via),
   limits: limitsFromEnv(), // EXPORT_MAX_NOTE_BYTES, EXPORT_MAX_BRACKET_DEPTH, EXPORT_MAX_DEPTH, EXPORT_MAX_LIST_DEPTH
 });
+
+// rw-p2b-workspace round 3: another user's document is never exported (checked here as well as at the gate)
+export const exporter = new Hono();
+exporter.use("*", ownedPathParam(db, identityOf));
+exporter.route("/", exportApp);

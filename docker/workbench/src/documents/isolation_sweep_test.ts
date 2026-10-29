@@ -8,8 +8,11 @@
 // src/app.ts, no hand list) is called with B's ids and paths wherever it can take one - every path
 // parameter, the usual query and body fields - directly on the workbench AND through the viewer's
 // /workbench forwarder (the edge's one port). Every full response body (and its Location) is
-// searched for every marker the request did not itself carry. Zero hits; shared knowledge still
-// answers both users alike; B's document is unchanged afterwards.
+// searched for every marker; only a REFUSAL may echo its own literal input (round 3). Then every read
+// route bare, harvesting the ids A can really discover (B's job id from A's own job list); every
+// parameterised read route filled with each real id alone; every real id's event stream read for N
+// events with a timeout. Zero hits; shared knowledge still answers both users alike; B's document is
+// unchanged afterwards. The lab runs it with the response walk on AND off (WORKSPACE_RESPONSE_WALK).
 //
 // SKIPPED unless SWEEP_BASE is set. contract-test/run-workspace-tests.ps1 runs it LAST in its
 // disposable lab (it calls mutating routes with B's ids). Never point it at a live stack.
@@ -42,8 +45,9 @@ async function sql<T = Record<string, any>>(text: string, args: unknown[] = []):
   }
 }
 
-async function call(base: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
-  // bounded: a stream (SSE) or a hung route must not stall the sweep; its partial body is still searched
+async function call(base: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}, events = 3) {
+  // bounded: a stream (SSE) or a hung route must not stall the sweep; its partial body is still searched.
+  // An event stream is read until `events` events (or its end event) have arrived, or 5 s have passed.
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   let r: Response;
@@ -55,8 +59,11 @@ async function call(base: string, method: string, path: string, body?: unknown, 
   });
   } catch {
     clearTimeout(timer);
-    return { status: 0, json: {} as Record<string, any>, text: "", location: "" };
+    return { status: 0, json: {} as Record<string, any>, text: "", location: "", sse: 0 };
   }
+  const isSse = (r.headers.get("content-type") ?? "").includes("text/event-stream");
+  const sseTimer = isSse ? setTimeout(() => ctl.abort(), 5000) : undefined;
+  const count = (t: string) => (t.match(/\n\n/g) ?? []).length;
   let text = "";
   if (method !== "HEAD") {
     const reader = r.body?.getReader();
@@ -66,13 +73,15 @@ async function call(base: string, method: string, path: string, body?: unknown, 
         const { done, value } = await reader.read();
         if (done) break;
         text += dec.decode(value, { stream: true });
+        if (isSse && (count(text) >= events || text.includes("event: end"))) { ctl.abort(); break; }
       }
     } catch { /* aborted mid-stream: keep what arrived */ }
   }
   clearTimeout(timer);
+  if (sseTimer !== undefined) clearTimeout(sseTimer);
   let json: Record<string, any> = {};
   try { json = JSON.parse(text); } catch { /* not json */ }
-  return { status: r.status, json, text, location: r.headers.get("location") ?? "" };
+  return { status: r.status, json, text, location: r.headers.get("location") ?? "", sse: isSse ? count(text) : 0 };
 }
 
 const rnd = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
@@ -121,7 +130,22 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // the reconcile repairs B's listing when B's workspace next connects; B's file as it now stands
   await wb("GET", `/workbench/contract/documents`, undefined, B);
   const before = await Deno.readTextFile(`${VAULT}/${bPath}`);
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery };
+  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: B[SUB_HEADER] };
+  const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
+  const hits: string[] = [];
+  let calls = 0;
+  // Round 3 (tester attempt 2: the sweep excused every echo, and its bare pass never resolved an id):
+  // a marker in a response is a LEAK unless the response is a REFUSAL (status >= 400, or no answer)
+  // and the marker is part of the literal input of that request. A 2xx excuses nothing.
+  const judge = (label: string, sent: string, res: Awaited<ReturnType<typeof call>>) => {
+    const out = res.text + "\n" + res.location;
+    const refusal = res.status === 0 || res.status >= 400;
+    for (const [name, m] of Object.entries(markers)) {
+      if (!m || !out.includes(m)) continue;
+      if (refusal && (sent.includes(m) || sent.includes(encodeURIComponent(m)))) continue; // a refusal echoing its own input
+      hits.push(`HIT ${name} ${label} -> ${res.status}${res.sse ? ` (${res.sse} events)` : ""}`);
+    }
+  };
 
   // ── the route table, from the router ─────────────────────────────────────────────────────────
   // a computed specifier: the build gate type-checks this file without the runtime /recipes mount
@@ -131,9 +155,12 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     .filter((r) => !r.path.endsWith("*") && r.method !== "ALL")
     .filter((r) => { const k = `${r.method} ${r.path}`; if (seen.has(k)) return false; seen.add(k); return true; });
   assert(routes.length > 50, `the router lists ${routes.length} routes`);
-  const ids = [bPath, bRefinery, bJob, bHeld].filter(Boolean);
   const fill = (path: string, v: string) =>
     path.replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, _n, re) => (re && re.includes(".")) ? v : encodeURIComponent(v));
+  const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
+
+  // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
+  const ids = [bPath, bRefinery, bJob, bHeld, bRefId].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -143,48 +170,84 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     source_id: bHeld || v, holder: { kind: "user_document", ref: bPath }, holder_kind: "user_document", holder_ref: bPath,
     title: "sweep", content: "sweep",
   });
-  const hits: string[] = [];
-  let calls = 0;
   for (const r of routes) {
     const values = r.path.includes(":") ? ids : [bRefinery];
     for (const v of values) {
       const url = `${fill(r.path, v)}?${query(v)}`;
       const reqBody = body(v);
-      const sent = url + JSON.stringify(reqBody);
       // GET-like through both doors; a mutating call once, through the viewer (the edge's door)
       const doors = ["GET", "HEAD"].includes(r.method) ? [BASE, VIEWER] : [VIEWER];
       for (const door of doors) {
         calls++;
-        const res = await call(door, r.method, url, reqBody);
-        const out = res.text + "\n" + res.location;
-        for (const [name, m] of Object.entries(markers)) {
-          if (!m || sent.includes(m) || sent.includes(encodeURIComponent(m))) continue; // its own echo is no leak
-          if (out.includes(m)) hits.push(`HIT ${name} ${r.method} ${r.path} (${door === BASE ? "workbench" : "viewer"}) -> ${res.status}`);
-        }
+        judge(`${r.method} ${r.path} templated (${doorName(door)})`, url + JSON.stringify(reqBody), await call(door, r.method, url, reqBody));
       }
     }
   }
-  // and every read route BARE (no B id anywhere in the request): then B's path and refinery id are
-  // markers too - a list, a stream or a count must not name another user's document or refinery
-  for (const r of routes.filter((x) => ["GET", "HEAD"].includes(x.method))) {
-    const url = `${fill(r.path, FX_ACTIVE)}?limit=500&q=fixture`;
+
+  // 2. BARE: every read route with no parameter, nothing of B's in the request; every id the answers
+  // carry is HARVESTED - the ids user A can really discover (job ids from A's own lists, ids in shared lists)
+  const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  const harvested = new Set<string>();
+  const bareUrls = [
+    ...reads.filter((x) => !x.path.includes(":")).map((x) => ({ m: x.method, url: `${x.path}?limit=500&q=fixture` })),
+    ...["research", "held", "compile", "import"].map((k) => ({ m: "GET", url: `/workbench/contract/jobs?kinds=${k}&limit=200` })),
+  ];
+  for (const { m, url } of bareUrls) {
     for (const door of [BASE, VIEWER]) {
       calls++;
-      const res = await call(door, r.method, url);
-      const out = res.text + "\n" + res.location;
-      for (const [name, m] of Object.entries(markers)) {
-        if (m && out.includes(m)) hits.push(`HIT ${name} ${r.method} ${r.path} bare (${door === BASE ? "workbench" : "viewer"}) -> ${res.status}`);
+      const res = await call(door, m, url);
+      judge(`${m} ${url} bare (${doorName(door)})`, url, res);
+      for (const x of (res.text + res.location).matchAll(UUID)) harvested.add(x[0].toLowerCase());
+    }
+  }
+  // job ids are shared knowledge: A's own job list names B's job (the harvest is not vacuous)
+  assert(harvested.has(bJob.toLowerCase()), "user A's job list names B's job id (job ids are shared)");
+
+  // 3. ID-ONLY: every read route with a path parameter, filled with each REAL id (harvested, plus B's
+  // own ids handed to A directly) and nothing else of B's in the request
+  const named = (v: string) =>
+    v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : v;
+  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+    .slice(0, 40);
+  for (const r of reads.filter((x) => x.path.includes(":"))) {
+    for (const v of realIds) {
+      const url = `${fill(r.path, v)}?limit=500`;
+      for (const door of [BASE, VIEWER]) {
+        calls++;
+        judge(`${r.method} ${r.path} id=${named(v)} (${doorName(door)})`, url, await call(door, r.method, url));
       }
     }
   }
+
+  // 4. STREAMS: every real id streamed as A on both doors, reading N events with a timeout
+  let streamed = 0;
+  for (const v of realIds) {
+    for (const door of [BASE, VIEWER]) {
+      calls++;
+      const url = `/workbench/contract/sessions/${v}/stream`;
+      const res = await call(door, "GET", url, undefined, {}, 3);
+      if (res.sse) streamed++;
+      judge(`GET /workbench/contract/sessions/:id/stream id=${named(v)} (${doorName(door)})`, url, res);
+    }
+  }
+  assert(streamed >= 2, `B's job streamed to A on both doors (${streamed} streams read)`);
+
   // what a marker cannot show: WHICH references B's document holds (reference rows are shared
   // knowledge; the holder -> references mapping of a user document is its owner's). A asks for it.
   for (const door of [BASE, VIEWER]) {
     calls++;
     const res = await call(door, "GET", `/workbench/contract/holders/user_document/references?ref=${encodeURIComponent(bPath)}`);
-    if (res.status === 200) hits.push(`HIT holder-references GET /workbench/contract/holders/:kind/references?ref=<B path> (${door === BASE ? "workbench" : "viewer"}) -> 200${bRefId && res.text.includes(bRefId) ? " (lists B's reference)" : ""}`);
+    if (res.status === 200) hits.push(`HIT holder-references GET /workbench/contract/holders/:kind/references?ref=<B path> (${doorName(door)}) -> 200${bRefId && res.text.includes(bRefId) ? " (lists B's reference)" : ""}`);
   }
-  console.log(`sweep: ${routes.length} routes, ${calls} calls, ${hits.length} hits`);
+  // content-type variants on the request gate: a refusal (400/404/415), never a 500
+  for (const ct of ["application/vnd.p2b+json", "application/json-patch+json", "text/plain"]) {
+    for (const door of [BASE, VIEWER]) {
+      calls++;
+      const res = await call(door, "POST", "/workbench/contract/diff-check", { holder: { kind: "user_document", ref: bPath } }, { "content-type": ct });
+      if (res.status >= 500 || res.status < 400) hits.push(`HIT content-type ${ct} POST /workbench/contract/diff-check (${doorName(door)}) -> ${res.status} (want 400/404/415)`);
+    }
+  }
+  console.log(`sweep: ${routes.length} routes, ${calls} calls, ${harvested.size} ids harvested, ${streamed} streams read, ${hits.length} hits`);
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);
   // shared knowledge answers both users alike
   // (the fixture source may have been changed by A's mutating calls - shared, so alike for both)

@@ -1,6 +1,7 @@
 // session(id), the jobs queue view, and the snapshot the stream emits. Research jobs carry no
 // metadata, so a metadata filter returns nothing (fail closed).
 import type { Db } from "../db.ts";
+import { FOREIGN_IDEA, FOREIGN_JOB, type Viewer } from "../../documents/ownership.ts";
 
 interface JobRow {
   id: string;
@@ -65,12 +66,21 @@ export const OWN_QUERY = (alias: string, ownerParam: string) =>
   `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = ${alias}.id AND p.owner_sub <> ${ownerParam})
         THEN '' ELSE ${alias}.query END`;
 
-export async function session(db: Db, id: string, owner: string) {
+// A job is shared research output; its private fields (the original prompt, inlet_ref, refinery_id,
+// thread_id) are selected for its owner only - for anyone else the SQL itself answers them empty
+// (documents/ownership.ts), so the JSON read and the event stream carry one owner-filtered row.
+export async function session(db: Db, id: string, who: Viewer) {
   const rows = await db.query<JobRow>(
-    `SELECT j.id, j.status, j.origin, j.origin_claimed, j.caller, j.inlet_ref, j.refinery_id, ${OWN_QUERY("j", "$2")} AS query,
-            j.progress, j.result, j.session_id, j.thread_id, j.created_at, j.started_at, j.finished_at, j.error
-       FROM public.research_jobs j WHERE j.id = $1`,
-    [id, owner],
+    `SELECT j.id, j.status, j.origin, j.origin_claimed, j.caller,
+            CASE WHEN o.others THEN NULL ELSE j.inlet_ref END AS inlet_ref,
+            CASE WHEN o.others THEN NULL ELSE j.refinery_id END AS refinery_id,
+            CASE WHEN o.others THEN '' ELSE j.query END AS query,
+            j.progress, j.result, j.session_id,
+            CASE WHEN o.others THEN NULL ELSE j.thread_id END AS thread_id,
+            j.created_at, j.started_at, j.finished_at, j.error
+       FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3")} AS others) o
+      WHERE j.id = $1`,
+    [id, who.sub, who.key],
   );
   return rows[0] ? shapeSession(rows[0]) : null;
 }
@@ -81,7 +91,7 @@ const DEFAULT_KINDS = new Set(["import", "research"]);
 
 // jobs(state): the import queue and the research queue (and, when asked, pages waiting for a
 // compile and held user sources), newest first, one shape.
-export async function jobs(db: Db, state: string | null, kinds: string[], limit: number, owner: string) {
+export async function jobs(db: Db, state: string | null, kinds: string[], limit: number, who: Viewer) {
   const want = (k: string) => kinds.length === 0 ? DEFAULT_KINDS.has(k) : kinds.includes(k);
   const out: unknown[] = [];
   if (want("import")) {
@@ -97,10 +107,13 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
   if (want("research")) {
     const rows = await db.query<{ id: string; status: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
       `SELECT id, status, created_at, updated_at,
-              jsonb_build_object('origin', origin, 'query', left(${OWN_QUERY("j", "$3")}, 200), 'refinery_id', refinery_id,
+              jsonb_build_object('origin', origin,
+                                 'query', CASE WHEN o.others THEN '' ELSE left(j.query, 200) END,
+                                 'refinery_id', CASE WHEN o.others THEN NULL ELSE j.refinery_id END,
                                  'phase', progress ->> 'phase', 'error', error) AS detail
-         FROM public.research_jobs j WHERE ($1::text IS NULL OR status = $1) ORDER BY created_at DESC LIMIT $2`,
-      [state, limit, owner],
+         FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4")} AS others) o
+        WHERE ($1::text IS NULL OR j.status = $1) ORDER BY j.created_at DESC LIMIT $2`,
+      [state, limit, who.sub, who.key],
     );
     out.push(...rows.map((r) => ({ kind: "research", state: isTerminal(r.status) ? "current" : "loading", ...r })));
   }
@@ -120,10 +133,11 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
   if (want("held") && (state === null || state === "held")) {
     const rows = await db.query<{ id: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
       `SELECT rus.source_id::text AS id, rus.added_at AS created_at, COALESCE(h.updated_at, rus.added_at) AS updated_at,
-              jsonb_build_object('refinery_id', rus.refinery_id, 'title', COALESCE(h.title, '')) AS detail
+              jsonb_build_object('refinery_id', CASE WHEN ${FOREIGN_IDEA("rus.refinery_id", "$2")} THEN NULL ELSE rus.refinery_id END,
+                                 'title', COALESCE(h.title, '')) AS detail
          FROM public.refinery_user_sources rus LEFT JOIN public.held_sources h ON h.id = rus.source_id
         WHERE rus.status = 'held' ORDER BY rus.added_at DESC LIMIT $1`,
-      [limit],
+      [limit, who.sub],
     );
     out.push(...rows.map((r) => ({ kind: "held", status: "held", state: "current", ...r })));
   }
