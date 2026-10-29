@@ -276,7 +276,7 @@ try {
   $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'WIKI_NAV_MIN_ROWS=0',
       '-e', 'WIKI_BUILDER=0', '-e', 'WIKI_DB_TCP=openbrain-db:5432', '-e', 'WIKI_DB_PROBE_MS=1000', '-e', 'WIKI_RECONCILE_INTERVAL_MS=5000',
       '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",
-      '-v', "${vault}:/wiki:ro", $viewerTag)
+      '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
   $wbArgs = @('--network-alias', 'openbrain-workbench', '-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
@@ -304,11 +304,19 @@ try {
     const docs = await fetch(v + '/workbench/contract/documents', { headers: { 'x-brain-key': 'forged-by-the-client' } });
     const bare = await fetch('http://$P-wb:8000/workbench/contract/documents', { headers: { 'x-brain-key': 'forged-by-the-client' } });
     console.log('workspace', ws.status, ws.headers.get('x-wiki-render'), wsBody.includes('id=\x22root\x22'));
-    console.log('forwarded', docs.status, 'direct-with-forged-key', bare.status);"
+    console.log('forwarded', docs.status, 'direct-with-forged-key', bare.status);
+    const csrf = await fetch(v + '/workbench/documents', { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'text/plain' }, body: '{}' });
+    const noOrigin = await fetch(v + '/workbench/documents', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const http = await import('node:http');
+    const rebind = await new Promise((ok) => { const q = http.request({ host: '$P-viewer', port: 8080, path: '/workbench/contract/documents', headers: { host: 'rebound.example:8080' } }, (r) => { r.resume(); ok(r.statusCode); }); q.on('error', () => ok(0)); q.end(); });
+    const own = await fetch(v + '/workbench/contract/diff-check', { method: 'POST', headers: { origin: v, 'content-type': 'application/json' }, body: '{}' });
+    const ownBody = await own.text();
+    console.log('guard csrf', csrf.status, 'no-origin', noOrigin.status, 'rebind', rebind, 'own-origin', /viewer's own origin|answers for/.test(ownBody) ? 'GUARDED' : 'reached-workbench');"
   Save 'edge-viewer.log' $edge
   if ($Red) { Check ($edge -match 'workspace \d+ ' -and $edge -notmatch 'workspace 200 workspace true') 'RED: the base viewer does not serve /workspace' }
   else { Check ($edge -match 'workspace 200 workspace true') 'the viewer serves /workspace (x-wiki-render: workspace)' }
   Check ($edge -match 'forwarded 200 direct-with-forged-key 401') 'the viewer forwards /workbench/* with the key injected server-side; a client key is never trusted'
+  if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin reached-workbench') 'the forwarder refuses a cross-origin or Origin-less write (403) and a rebound Host (421); a write from the viewer''s own origin reaches the workbench' }
   $chromeIp = (Dk inspect -f "{{(index .NetworkSettings.Networks `"$net`").IPAddress}}" "$P-chrome").Trim()
   Check ($chromeIp -match '^\d+\.\d+\.\d+\.\d+$') 'the headless Chromium is on the network'
 

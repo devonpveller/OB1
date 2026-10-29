@@ -54,7 +54,9 @@ async function call(base: string, method: string, path: string, body?: unknown, 
   try {
     r = await fetch(base + path, {
     method, redirect: "manual", signal: ctl.signal,
-    headers: { "content-type": "application/json", "x-brain-key": KEY, ...headers },
+    // through the viewer the request carries the viewer's own Origin, as the workspace page's would
+    // (the forwarder refuses a write without it: the CSRF / DNS-rebinding guard)
+    headers: { "content-type": "application/json", "x-brain-key": KEY, ...(base === VIEWER ? { origin: VIEWER } : {}), ...headers },
     body: body === undefined || method === "GET" || method === "HEAD" ? undefined : JSON.stringify(body),
   });
   } catch {
@@ -130,7 +132,15 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // the reconcile repairs B's listing when B's workspace next connects; B's file as it now stands
   await wb("GET", `/workbench/contract/documents`, undefined, B);
   const before = await Deno.readTextFile(`${VAULT}/${bPath}`);
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: B[SUB_HEADER] };
+  // a NON-.md attachment in B's documents/<key>/ (integration onto P1c: with Quartz's ignorePatterns
+  // gone, "documents" in QUARTZ_IGNORED_ROOTS is what keeps the viewer from serving it)
+  const bDir = bPath.slice(0, bPath.lastIndexOf("/"));
+  const attachSecret = `AttachSecret${rnd()}`;
+  const attachName = `attach-${rnd()}.txt`;
+  const attachPng = attachName.replace(/\.txt$/, ".png");
+  await Deno.writeTextFile(`${VAULT}/${bDir}/${attachName}`, `${attachSecret}\n`);
+  await Deno.writeFile(`${VAULT}/${bDir}/${attachPng}`, new TextEncoder().encode(`\x89PNG ${attachSecret}`));
+  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: B[SUB_HEADER], attach: attachSecret };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;
@@ -139,6 +149,10 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // and the marker is part of the literal input of that request. A 2xx excuses nothing.
   const judge = (label: string, sent: string, res: Awaited<ReturnType<typeof call>>) => {
     const out = res.text + "\n" + res.location;
+    // the forwarder's own guard refusing the sweep would hide the route behind it: never acceptable here
+    if (/accepted only from the viewer's own origin|not one the viewer answers for|cross-site write refused|referer is not the viewer/.test(res.text)) {
+      hits.push(`HIT guard-masked ${label} -> ${res.status}`);
+    }
     const refusal = res.status === 0 || res.status >= 400;
     for (const [name, m] of Object.entries(markers)) {
       if (!m || !out.includes(m)) continue;
@@ -247,6 +261,26 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
       if (res.status >= 500 || res.status < 400) hits.push(`HIT content-type ${ct} POST /workbench/contract/diff-check (${doorName(door)}) -> ${res.status} (want 400/404/415)`);
     }
   }
+  // B's non-.md attachments, asked for by user A: through the viewer (its vault file path and the
+  // slug forms) and through the forwarder (the documents file/state routes)
+  let attachCalls = 0;
+  for (const name of [attachName, attachPng]) {
+    const rel = `${bDir}/${name}`;
+    for (const url of [`/${rel}`, `/${rel.split("/").map(encodeURIComponent).join("/")}`, `/${rel.toLowerCase()}`, `/content/../${rel}`, `/static/../${rel}`]) {
+      calls++; attachCalls++;
+      const res = await call(VIEWER, "GET", url);
+      judge(`GET <B attachment ${name}> (viewer file)`, url, res);
+      if (res.status >= 200 && res.status < 300 && res.text.includes(attachSecret)) hits.push(`HIT attachment-served ${url} (viewer) -> ${res.status}`);
+    }
+    for (const url of [`/workbench/documents/file?path=${encodeURIComponent(rel)}`, `/workbench/documents/state?path=${encodeURIComponent(rel)}`,
+      `/workbench/contract/documents/file?path=${encodeURIComponent(rel)}`]) {
+      for (const door of [BASE, VIEWER]) {
+        calls++; attachCalls++;
+        judge(`GET <B attachment ${name}> ${url.split("?")[0]} (${doorName(door)})`, url, await call(door, "GET", url));
+      }
+    }
+  }
+  console.log(`sweep: ${attachCalls} attachment calls (B's non-.md files under documents/<key>/)`);
   console.log(`sweep: ${routes.length} routes, ${calls} calls, ${harvested.size} ids harvested, ${streamed} streams read, ${hits.length} hits`);
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);
   // shared knowledge answers both users alike
@@ -261,5 +295,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);
+  await Deno.remove(`${VAULT}/${bDir}/${attachName}`).catch(() => {});
+  await Deno.remove(`${VAULT}/${bDir}/${attachPng}`).catch(() => {});
   assertEquals([...new Set(hits)], [], "no response to user A carries anything of user B's private context");
 } });

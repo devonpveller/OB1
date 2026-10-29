@@ -1272,6 +1272,12 @@ services:
       # Caddy still fronts the plane it routes /workbench/* itself and the viewer never sees them.
       WORKBENCH_URL: http://openbrain-workbench:8000
       WORKBENCH_KEY: ${MCP_ACCESS_KEY}
+      # The forwarder's CSRF / DNS-rebinding guard (review r-p2b): a forwarded request must name an
+      # allowed Host (loopback, openbrain-wiki-viewer, the LAN address, plus this list - the edge's
+      # public host name), and a write must carry the viewer's own Origin or one of the listed origins.
+      WIKI_VIEWER_LAN_IP: ${WIKI_VIEWER_LAN_IP:-}
+      WIKI_VIEWER_ALLOWED_HOSTS: ${WIKI_VIEWER_ALLOWED_HOSTS:-}
+      WIKI_VIEWER_ALLOWED_ORIGINS: ${WIKI_VIEWER_ALLOWED_ORIGINS:-}
     volumes:
       - openbrain-wiki-data:/wiki:ro
       # Binary assets (images now, audio later) live on their own volume,

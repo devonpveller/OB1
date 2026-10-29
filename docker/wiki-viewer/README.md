@@ -55,6 +55,11 @@ viewer (openbrain-wiki-viewer, node:22; NO Quartz in the image since P1c -
   workspace/, built in the Dockerfile's `workspace` stage from its
   package-lock.json, served from /viewer/workspace - only that build, never
   the vault; see workspace/README.md).
+  /workbench/*: forwarded to the workbench with WORKBENCH_KEY injected
+  server-side (lib/workbench-proxy.mjs); only for an allow-listed Host
+  (WIKI_VIEWER_ALLOWED_HOSTS; 421 otherwise), and a write only from the
+  viewer's own origin or an allow-listed edge origin
+  (WIKI_VIEWER_ALLOWED_ORIGINS; 403 otherwise) - CSRF and DNS-rebinding guard.
   explorer: /__nav?folder= - ONE folder at a time, sorted (lib/nav-tree.mjs),
   served by the NAV WORKER (lib/nav-worker.mjs: own thread + heap, port 8082,
   so the page thread's GC never delays it); the browser reaches it as
