@@ -184,7 +184,8 @@ function Build-At([string]$sha, [string]$tag, [string]$ctxRel, [string]$what) {
     $script:made.dirs += $tree
     $tar = Join-Path $env:TEMP "$P-$sha.tar"
     & git -C $ob1 archive --format=tar -o $tar $sha
-    & tar -xf $tar -C $tree
+    # Windows' own tar: a GNU tar first on PATH (Git Bash) reads 'C:\...' as a remote host
+    & (Join-Path $env:SystemRoot 'System32/tar.exe') -xf $tar -C $tree
     Remove-Item -Force $tar
   }
   $args2 = @('build', '--label', $label, '--build-arg', "OB1_SHA=$sha", '-t', $tag)
@@ -339,7 +340,7 @@ try {
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 14) "the identity integration test ($($sum.Value))" }
 
   $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('carol', 'dave', 'off'))
-  if ($Red) { $sweeps = @(@('carol', 'dave', 'on')) }
+  if ($Red) { $sweeps = @(, @('carol', 'dave', 'on')) }
   foreach ($sw in $sweeps) {
     if ($sw[2] -eq 'off') {
       $null = Dk rm -f "$P-wb"
