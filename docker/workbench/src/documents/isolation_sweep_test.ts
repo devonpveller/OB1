@@ -14,6 +14,12 @@
 // events with a timeout. Zero hits; shared knowledge still answers both users alike; B's document is
 // unchanged afterwards. The lab runs it with the response walk on AND off (WORKSPACE_RESPONSE_WALK).
 //
+// rw-identity: REAL SESSIONS. With SWEEP_OIDC_A / SWEEP_OIDC_B set (lab login names) the two users are
+// signed in through the viewer against the lab OpenID provider (contract-test/stub-oidc.ts) and every
+// call carries a session cookie instead of the identity header: A's on every call, B's on B's plants.
+// Every call of A's ALSO sends the identity header naming B (the header must be ignored once sign-in is
+// configured), A's sign-out route is not called (it would end the sweep's own session; the end checks
+// A is still signed in), and SWEEP_OIDC_B_SUB is B's subject (a marker).
 // SKIPPED unless SWEEP_BASE is set. contract-test/run-workspace-tests.ps1 runs it LAST in its
 // disposable lab (it calls mutating routes with B's ids). Never point it at a live stack.
 // Environment: SWEEP_BASE (the workbench), SWEEP_VIEWER (the viewer), DOCS_TEST_KEY, DOCS_TEST_VAULT,
@@ -29,6 +35,27 @@ const VAULT = Deno.env.get("DOCS_TEST_VAULT") ?? "/vault";
 const HOST = Deno.env.get("CONTRACT_TEST_DB_HOST");
 const SUB_HEADER = Deno.env.get("DOCS_TEST_SUB_HEADER") ?? "X-Test-Sub";
 const ignore = !BASE || !VIEWER || !HOST;
+const OIDC_A = Deno.env.get("SWEEP_OIDC_A") ?? "";
+const OIDC_B = Deno.env.get("SWEEP_OIDC_B") ?? "";
+const OIDC = !!(OIDC_A && OIDC_B);
+// A's identity on every call (sign-in mode: A's session cookie, plus the header naming B - ignored)
+let AS_A: Record<string, string> = {};
+
+// rw-identity: a real sign-in through the viewer (the lab provider signs in login_hint); the session cookie
+async function signIn(login: string): Promise<string> {
+  const start = await fetch(`${VIEWER}/workbench/auth/login?return_to=/workspace/`, { redirect: "manual" });
+  await start.body?.cancel();
+  const bind = start.headers.getSetCookie().map((c) => c.split(";")[0]).find((c) => c.startsWith("__Host-ob-ws-login=")) ?? "";
+  const authz = new URL(start.headers.get("location") ?? "");
+  authz.searchParams.set("login_hint", login);
+  const at = await fetch(authz, { redirect: "manual" });
+  await at.body?.cancel();
+  const done = await fetch(at.headers.get("location") ?? "", { redirect: "manual", headers: { cookie: bind } });
+  await done.body?.cancel();
+  const session = done.headers.getSetCookie().map((c) => c.split(";")[0]).find((c) => c.startsWith("__Host-ob-ws-session=")) ?? "";
+  assert(session, `${login} signed in (${start.status} -> ${at.status} -> ${done.status})`);
+  return session;
+}
 const FX_ACTIVE = "11111111-1111-4111-8111-111111111111";
 
 async function sql<T = Record<string, any>>(text: string, args: unknown[] = []): Promise<T[]> {
@@ -56,7 +83,7 @@ async function call(base: string, method: string, path: string, body?: unknown, 
     method, redirect: "manual", signal: ctl.signal,
     // through the viewer the request carries the viewer's own Origin, as the workspace page's would
     // (the forwarder refuses a write without it: the CSRF / DNS-rebinding guard)
-    headers: { "content-type": "application/json", "x-brain-key": KEY, ...(base === VIEWER ? { origin: VIEWER } : {}), ...headers },
+    headers: { "content-type": "application/json", "x-brain-key": KEY, ...(base === VIEWER ? { origin: VIEWER } : {}), ...AS_A, ...headers },
     body: body === undefined || method === "GET" || method === "HEAD" ? undefined : JSON.stringify(body),
   });
   } catch {
@@ -89,7 +116,16 @@ async function call(base: string, method: string, path: string, body?: unknown, 
 const rnd = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
 Deno.test({ name: "isolation sweep: as user A, every route the app registers shows nothing of user B's private context", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => {
-  const B = { [SUB_HEADER]: `sweep-bee-${rnd()}` };
+  const B: Record<string, string> = OIDC ? { cookie: await signIn(OIDC_B) } : { [SUB_HEADER]: `sweep-bee-${rnd()}` };
+  const bSub = OIDC ? (Deno.env.get("SWEEP_OIDC_B_SUB") ?? "") : B[SUB_HEADER];
+  if (OIDC) {
+    assert(bSub, "SWEEP_OIDC_B_SUB names B's subject");
+    AS_A = { cookie: await signIn(OIDC_A), [SUB_HEADER]: bSub };
+  }
+  // an admin's own views list users and the audit log by design (whom to impersonate; what admins did):
+  // there, and only there, B's subject is expected - nothing else of B's
+  const aIsAdmin = OIDC && (await call(VIEWER, "GET", "/workbench/auth/me")).json.admin === true;
+  const ADMIN_VIEW = /^(GET|HEAD) \/workbench\/auth\/(users|audit) /;
   const M = {
     title: `TitleSecret${rnd()}X`, body: `BodySecret${rnd()}`, idea: `IdeaSecret${rnd()}`, prompt: `PromptSecret${rnd()}`,
   };
@@ -140,7 +176,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const attachPng = attachName.replace(/\.txt$/, ".png");
   await Deno.writeTextFile(`${VAULT}/${bDir}/${attachName}`, `${attachSecret}\n`);
   await Deno.writeFile(`${VAULT}/${bDir}/${attachPng}`, new TextEncoder().encode(`\x89PNG ${attachSecret}`));
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: B[SUB_HEADER], attach: attachSecret };
+  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;
@@ -156,6 +192,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     const refusal = res.status === 0 || res.status >= 400;
     for (const [name, m] of Object.entries(markers)) {
       if (!m || !out.includes(m)) continue;
+      if (name === "sub" && aIsAdmin && ADMIN_VIEW.test(label)) continue;
       if (refusal && (sent.includes(m) || sent.includes(encodeURIComponent(m)))) continue; // a refusal echoing its own input
       hits.push(`HIT ${name} ${label} -> ${res.status}${res.sse ? ` (${res.sse} events)` : ""}`);
     }
@@ -167,7 +204,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const seen = new Set<string>();
   const routes = (app.routes as { method: string; path: string }[])
     .filter((r) => !r.path.endsWith("*") && r.method !== "ALL")
-    .filter((r) => { const k = `${r.method} ${r.path}`; if (seen.has(k)) return false; seen.add(k); return true; });
+    .filter((r) => { const k = `${r.method} ${r.path}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    // A's own sign-out would end the sweep's session (every later call a vacuous 401)
+    .filter((r) => !(OIDC && r.path === "/workbench/auth/logout"));
   assert(routes.length > 50, `the router lists ${routes.length} routes`);
   const fill = (path: string, v: string) =>
     path.replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, _n, re) => (re && re.includes(".")) ? v : encodeURIComponent(v));
@@ -297,5 +336,11 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);
   await Deno.remove(`${VAULT}/${bDir}/${attachName}`).catch(() => {});
   await Deno.remove(`${VAULT}/${bDir}/${attachPng}`).catch(() => {});
+  if (OIDC) {
+    // the sweep's calls were made as a signed-in A, never as a refused anonymous caller
+    const me = await call(VIEWER, "GET", "/workbench/auth/me");
+    assertEquals([me.json.signed_in, me.json.subject_sub === bSub], [true, false], `A is still signed in as A: ${me.text}`);
+    console.log(`sweep: real sessions (A=${OIDC_A}${me.json.admin ? ", an admin not impersonating" : ""}, B=${OIDC_B}); every call of A's also sent ${SUB_HEADER}: <B's subject>`);
+  }
   assertEquals([...new Set(hits)], [], "no response to user A carries anything of user B's private context");
 } });
