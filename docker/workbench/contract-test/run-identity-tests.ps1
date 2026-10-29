@@ -19,7 +19,7 @@
 # labelled <Id> is left and no :local image changed.
 #
 # What it does:
-#   1. stages the REAL initdb chain from docker-compose.yml (rw-identity's 280 slot included)
+#   1. stages the REAL initdb chain from docker-compose.yml (rw-identity's 290 slot included)
 #   2. one internal network on the pinned /25
 #   3. builds openbrain-workbench:wt-<id> (+ its test stage: the identity unit tests are in its gate),
 #      openbrain-wiki-viewer:wt-<id>, openbrain-research:wt-<id>; with -Red the three from -BaseSha
@@ -42,7 +42,8 @@ param(
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$BaseSha = '655bfd1',
   [switch]$Red,
-  [switch]$KeepImages
+  [switch]$KeepImages,
+  [switch]$SkipSweeps  # the integration test only (a targeted RED of one case)
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -203,7 +204,7 @@ try {
   New-Item -ItemType Directory -Force $stage | Out-Null
   $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
   foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
-  Check (@($chain | Where-Object { $_[1] -eq '280-init-identity.sql' }).Count -eq 1) "the chain mounts 280-init-identity.sql ($($chain.Count) migrations)"
+  Check (@($chain | Where-Object { $_[1] -eq '290-init-identity.sql' }).Count -eq 1) "the chain mounts 290-init-identity.sql ($($chain.Count) migrations)"
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] the internal network'
@@ -265,7 +266,7 @@ try {
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'fixtures applied'
-  # the migration's idempotency: 280 applied a second time changes nothing and raises nothing
+  # the migration's idempotency: 290 applied a second time changes nothing and raises nothing
   $null = Dk cp (Join-Path $dockerDir 'init-identity.sql') "${db}:/tmp/init-identity.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/init-identity.sql
   if (-not $Red) { Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'init-identity.sql re-applied cleanly (idempotent)' }
@@ -341,6 +342,7 @@ try {
 
   $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('carol', 'dave', 'off'))
   if ($Red) { $sweeps = @(, @('carol', 'dave', 'on')) }
+  if ($SkipSweeps) { $sweeps = @() }
   foreach ($sw in $sweeps) {
     if ($sw[2] -eq 'off') {
       $null = Dk rm -f "$P-wb"

@@ -372,6 +372,59 @@ Deno.test({ name: "C2 research queued from alice's own document (the workspace k
   assertEquals(await owner(r.json.job_id), { owner_sub: sub("alice"), actor_sub: sub("alice") });
 } });
 
+// C2b (coordinator 2026-10-29): the research service's own read routes are owner-scoped too - the
+// list shows a caller only its user's (or its service's) jobs; a job's detail, stream, tree and events
+// stay readable (research output is shared) but carry nothing of another user's original prompt, in
+// any field (progress, result, error, event payloads). The prompt is seeded into every nested field.
+async function rsGet(key: string, path: string, onBehalf?: string) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 4000);
+  try {
+    const r = await fetch(`${RS}${path}`, { headers: { "x-brain-key": key, ...(onBehalf ? { "x-on-behalf-of": onBehalf } : {}) }, signal: ctl.signal });
+    let text = "";
+    try { text = await r.text(); } catch { /* aborted stream: keep nothing more */ }
+    return { status: r.status, text };
+  } finally { clearTimeout(t); }
+}
+
+Deno.test({ name: "C2b the research service's job list, detail, stream, tree and events never show one user's prompt to another", ...opts, fn: async () => {
+  const mark = `CrossUserPrompt${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const prompt = `${mark} how do tidal locks form`;
+  const r = await submit(K.owui, { query: prompt, origin: "owui", on_behalf_of: sub("alice") });
+  assertEquals(r.status, 202, JSON.stringify(r.json));
+  const job = r.json.job_id as string;
+  // the prompt in every nested field a read route returns; terminal, so the dispatcher leaves it alone
+  await sql(`UPDATE public.research_jobs SET status = 'error', finished_at = now(),
+               progress = jsonb_build_object('phase', 'plan', 'message', 'planning ' || $2::text),
+               result = jsonb_build_object('query', $2::text, 'sources', jsonb_build_array(jsonb_build_object('title', 'about ' || $2::text))),
+               error = 'failed while researching ' || $2::text
+             WHERE id = $1::uuid`, [job, prompt]);
+  await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload)
+             VALUES ($1::uuid, $1::uuid, 's1', 'stage', 'due_process', jsonb_build_object('note', 'stage for ' || $2::text))`, [job, prompt]);
+  const paths = [`/research/jobs?limit=50`, `/research/jobs/${job}`, `/research/jobs/${job}/stream`, `/research/jobs/${job}/tree`, `/research/jobs/${job}/events`];
+  // the owner sees it all
+  const own = await rsGet(K.owui, `/research/jobs/${job}`, sub("alice"));
+  assertEquals(own.status, 200, own.text);
+  assert(own.text.includes(mark), "alice reads her own prompt");
+  assert((await rsGet(K.owui, `/research/jobs?limit=50`, sub("alice"))).text.includes(job), "alice's list has her job");
+  // everyone else: bob through Open WebUI, the tool with no user, an agent, the shared key
+  const others: [string, string, string | undefined][] = [["bob via owui", K.owui, sub("bob")], ["owui, no user", K.owui, undefined],
+    ["agent-org", K.ao, undefined], ["shared key", K.shared, undefined]];
+  for (const [who, key, obo] of others) {
+    for (const p of paths) {
+      const res = await rsGet(key, p, obo);
+      assert(res.status < 500, `${who} ${p}: ${res.status}`);
+      assert(!res.text.includes(mark), `${who} ${p} carries alice's prompt: ${res.text.slice(0, 300)}`);
+    }
+    assert(!(await rsGet(key, `/research/jobs?limit=50`, obo)).text.includes(job), `${who}'s list does not list alice's job`);
+    const detail = await rsGet(key, `/research/jobs/${job}`, obo);
+    assertEquals(detail.status, 200, `${who}: the job itself stays readable (shared research output)`);
+  }
+  // naming a user is Open WebUI's (and the workspace's, for reads) alone
+  assertEquals((await rsGet(K.ao, `/research/jobs?limit=5`, sub("alice"))).status, 403);
+  assertEquals((await rsGet(K.shared, `/research/jobs/${job}`, sub("alice"))).status, 403);
+} });
+
 // ── C5: no sign-in configured = exactly the P2b behaviour ─────────────────────────────────────
 Deno.test({ name: "C5 a workbench with no WORKSPACE_OIDC_* behaves as before: one default identity, no sign-in", ...opts, ignore: ignore || !WB_PLAIN, fn: async () => {
   const h = { "x-brain-key": INTERNAL };

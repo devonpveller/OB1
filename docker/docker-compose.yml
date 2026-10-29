@@ -175,7 +175,7 @@ services:
       # admin_audit log (impersonation + every request during it). Fresh-volume only; the live DB
       # gets it by hand (psql -f). Revert: revert-identity.sql. NOTE: a new mount changes this
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
-      - ./init-identity.sql:/docker-entrypoint-initdb.d/280-init-identity.sql:ro # rw-identity
+      - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity
     networks:
       - obnet
     restart: unless-stopped

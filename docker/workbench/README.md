@@ -114,7 +114,7 @@ Open WebUI signs its own users in (env-only provider settings; nothing in a data
   or make it inject `WORKSPACE_DOOR_KEY` before turning sign-in on.
 - **Egress.** The only new outbound calls: the issuer's discovery document, its keys and its token
   endpoint (https), only when `WORKSPACE_OIDC_ISSUER` is set. Nothing goes to a model provider.
-- **Storage.** `init-identity.sql` (slot 280): `workspace_users`, `workspace_login_pending`,
+- **Storage.** `init-identity.sql` (slot 290): `workspace_users`, `workspace_login_pending`,
   `workspace_sessions`, `admin_audit`. Revert: `revert-identity.sql` (discards the audit log - export it).
 
 **The Authentik side** (the operator creates it; nothing here builds Authentik):

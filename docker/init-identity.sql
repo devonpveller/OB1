@@ -20,7 +20,7 @@
 --      user's row (the research service, origin `owui`); agent-started research is recorded under
 --      the service identity `service:<caller>` (never private: a service is not a user).
 -- Idempotent (IF NOT EXISTS, CREATE OR REPLACE); re-running it changes nothing. Revert:
--- revert-identity.sql. Mounted as /docker-entrypoint-initdb.d/280-init-identity.sql.
+-- revert-identity.sql. Mounted as /docker-entrypoint-initdb.d/290-init-identity.sql.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS public.workspace_users (
