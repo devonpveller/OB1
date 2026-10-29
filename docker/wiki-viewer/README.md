@@ -48,9 +48,13 @@ viewer (openbrain-wiki-viewer, node:22; NO Quartz in the image since P1c -
   is frozen the same way. A file the bundle lacks is a vault attachment, read
   from /wiki itself (assets/<id>/<name>, slug-indexed; never a .md, never
   private/, templates/ or a dot path). Never a bare 404 for a page URL. Pages carry ETag W/"p-..."
-  (304 on If-None-Match) and server-timing; every db page carries the
-  research notifications strip (lib/notifications.mjs, read from the P0
-  contract endpoint with WORKBENCH_KEY; /__notifications lists them).
+  (304 on If-None-Match) and server-timing. No page carries a
+  notifications strip any more: the workspace's title bar bell replaced it
+  (research-workbench P2b, D13).
+  workspace: /workspace - the Vite + React 19 panel workspace (source in
+  workspace/, built in the Dockerfile's `workspace` stage from its
+  package-lock.json, served from /viewer/workspace - only that build, never
+  the vault; see workspace/README.md).
   explorer: /__nav?folder= - ONE folder at a time, sorted (lib/nav-tree.mjs),
   served by the NAV WORKER (lib/nav-worker.mjs: own thread + heap, port 8082,
   so the page thread's GC never delays it); the browser reaches it as

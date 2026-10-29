@@ -86,7 +86,7 @@ COPY src ./src
 RUN deno cache src/main.ts || true
 # The retrieval contract and its tests import nothing from the runtime mount, so they cache
 # FROZEN: a dependency that drifted from deno.lock fails the build.
-RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/render_test.ts src/export/prepare_worker.ts
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/documents/documents_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/routes/documents.ts src/export/render_test.ts src/export/prepare_worker.ts
 
 # The tests (every *_test.ts) and the test oracle (src/export/credentials_oracle.ts, imported only by
 # resolve2_cost_test.ts) are the test stage's; the runtime copies the source tree from here, so no layer
@@ -111,7 +111,9 @@ RUN apt-get update \
 # research-workbench P6a adds src/export/: the resolver (keys, egress, hard failure), the CSL
 # styles unmodified, and real renders through pandoc + Typst read back with poppler (numbering,
 # CJK glyphs, process separation). parity_fixture.ts runs only in the parity stage.
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/util/ src/contracts/ src/export/ \
+# research-workbench P2b adds src/documents/: the user document grammar and the hub clustering (pure);
+# its integration test is skipped here (no DOCS_TEST_BASE); run-workspace-tests.ps1 runs it.
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/util/ src/contracts/ src/export/ src/documents/ \
   && touch /app/.test-gate-passed
 
 FROM test AS parity
@@ -127,7 +129,7 @@ CMD ["deno", "test", "--allow-env", "--allow-read", "--allow-write", "--allow-ru
 FROM base AS runtime-deps
 COPY --from=app-src /app/src ./src
 RUN deno cache src/main.ts || true
-RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/migrate-references.ts src/routes/export.ts src/export/prepare_worker.ts src/export/judge_worker.ts
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/migrate-references.ts src/routes/export.ts src/routes/documents.ts src/export/prepare_worker.ts src/export/judge_worker.ts
 
 FROM base AS runtime
 COPY --from=runtime-deps /app/src ./src

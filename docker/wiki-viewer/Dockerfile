@@ -10,6 +10,18 @@
 # builder, no watcher, no snapshot loop, no nightly rebuild, no Quartz entry
 # in package.json - only the renderer's own runtime dependencies, pinned by
 # package-lock.json to the exact versions the frozen bundle was built with.
+
+# research-workbench P2b: the workspace - a Vite + React 19 app (workspace/) served at /workspace.
+# Built from its lockfile (`npm ci`: CodeMirror 6, dockview and every other package at the version
+# package-lock.json pins); the build gate runs its type check, its unit tests and the D9 notices
+# check. Only the built dist/ reaches the runtime image (no node_modules, no source).
+FROM node:22-slim AS workspace
+WORKDIR /workspace
+COPY workspace/package.json workspace/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY workspace/ ./
+RUN npx vitest run && node scripts/notices.mjs --check && npm run build && test -s dist/index.html && test -s dist/assets/THIRD-PARTY-NOTICES.txt
+
 FROM node:22-slim
 
 WORKDIR /viewer
@@ -38,6 +50,10 @@ RUN set -e; cd /viewer; \
   sha256sum -c --quiet bundle.sha256; \
   node -e "await Promise.all(['unified','remark-parse','remark-gfm','remark-frontmatter','remark-rehype','remark-smartypants','remark-math','rehype-raw','rehype-pretty-code','rehype-slug','rehype-autolink-headings','rehype-katex','mdast-util-find-and-replace','mdast-util-to-hast','mdast-util-to-string','hast-util-to-html','hast-util-to-string','hast-util-to-jsx-runtime','hast-util-from-html','preact','preact-render-to-string','unist-util-visit','github-slugger','is-absolute-url','reading-time'].map(m=>import(m)))"; \
   node --test lib/*.test.mjs
+
+# The workspace's build (stage `workspace` above): served at /workspace by serve.mjs, which
+# streams only files under this directory (never the vault).
+COPY --from=workspace /workspace/dist /viewer/workspace
 
 # Provenance label (lifecycle row 11). The deploy door
 # (scripts/stack/ob1-deploy.ps1) builds with --build-arg OB1_SHA=<the parent's

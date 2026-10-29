@@ -26,9 +26,10 @@ const get = async (p, opts = {}) => {
   return { status: r.status, h: r.headers, body: buf.toString("utf8"), buf };
 };
 
-// The chrome elements (parity-diff.mjs ELEMENTS, the same regexes) + the P1b strip.
+// The chrome elements (parity-diff.mjs ELEMENTS, the same regexes). The P1b strip is gone (rw-p2b-workspace:
+// the workspace's bell replaced it, D13); a page carrying one fails.
 const ELEMENTS = {
-  "notifications strip": (b) => /<div class="center"><div class="wiki-notifications" data-wiki-notifications="1" data-unread="[^"]*">/.test(b),
+  "NO notifications strip": (b) => !/wiki-notifications/.test(b),
   "explorer root": (b) => /<div class="explorer"[^>]*>/.test(b) && b.includes('class="explorer-ul overflow"'),
   "graph container": (b) => b.includes('<div class="graph-container"'),
   "backlinks list": (b) => /<div class="backlinks"><h3>Backlinks<\/h3><ul id="list-\d+" class="overflow">/.test(b),

@@ -331,6 +331,12 @@ try {
   }
   Check $up 'workbench /health answers'
   Check (Seed-Vault $wbName) "fixture vault seeded in $wbName"
+  # the workbench's start-up reconcile removed the fixture document listings (their files were not there yet):
+  # re-list them now the files are (fixtures-documents.sql; the owner of both is the default identity Dredd uses)
+  $null = Dk cp (Join-Path $ct 'fixtures-documents.sql') "${dbB}:/tmp/fixtures-documents.sql"
+  $o = Dk exec $dbB psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures-documents.sql
+  Save "$dbB-fixtures-documents.log" $o
+  Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "fixture document listings re-listed on $dbB"
   $doc = Dk exec $wbName deno eval "const r=await fetch('http://localhost:8000/openapi.json');console.log(r.status)"
   Check ($doc.Trim() -eq '200') 'GET /openapi.json is served (bare path, internal)'
   if ($RecordExamples) {

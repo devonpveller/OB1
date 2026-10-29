@@ -6,6 +6,10 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { safeRelPath } from "../util/paths.ts";
+import { ownedPathParam } from "../documents/ownership.ts";
+import { identityOf } from "../middleware/identity.ts";
+import { pool } from "../db/pool.ts";
+import { poolDb } from "../contracts/db.ts";
 import {
   vaultCommitPath,
   vaultDiscard,
@@ -50,6 +54,8 @@ function readPath(c: Context): string {
 // → committed git revisions (with content for diffs) + the current WORKING
 //   content (head) so the UI can show the live "uncommitted changes" diff.
 export const noteHistory = new Hono();
+// rw-p2b-workspace round 3: another user's document has no history to read (route check + the gate)
+noteHistory.use("*", ownedPathParam(poolDb(pool), identityOf));
 noteHistory.get("/", async (c) => {
   let rel: string;
   try {

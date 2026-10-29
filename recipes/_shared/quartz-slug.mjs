@@ -78,7 +78,8 @@ export function urlSlugOf(rowSlug) {
 
 // Quartz's ignorePatterns (quartz.config.ts), root-anchored as globby applies
 // them; the dot rule covers ".obsidian".
-export const QUARTZ_IGNORED_ROOTS = new Set(["private", "templates", ".obsidian"]);
+// rw-p2b-workspace: "documents" - the user documents tree (D12: a user document is never a page).
+export const QUARTZ_IGNORED_ROOTS = new Set(["private", "templates", ".obsidian", "documents"]);
 // Not content at any depth (the vault .gitignore the wiki-service maintains,
 // which Quartz honours with gitignore: true).
 export const NON_CONTENT_DIRS = new Set([".git", ".quartz-cache", "public", "node_modules", "assets"]);

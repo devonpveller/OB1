@@ -27,12 +27,15 @@ interface IdeaRow {
   document_path?: string | null;
 }
 
-export async function ideas(db: Db, limit: number) {
+// rw-p2b-workspace (operator 2026-10-28): ideas and their refineries are the user's front-end
+// context - every read here is for the identity the seam resolved (owner_sub, the Authentik subject).
+export async function ideas(db: Db, limit: number, owner: string) {
   const rows = await db.query<IdeaRow>(
     `SELECT ${IDEA_COLS}, d.path AS document_path
        FROM public.ideas i LEFT JOIN public.user_document_listings d ON d.refinery_id = i.id
+      WHERE i.owner_sub = $2
       ORDER BY i.updated_at DESC LIMIT $1`,
-    [limit],
+    [limit, owner],
   );
   return {
     ideas: rows.map((r) => ({
@@ -146,8 +149,24 @@ async function contextGraph(db: Db, refineryId: string, sessionIds: string[], do
   return { nodes, links };
 }
 
-export async function idea(db: Db, id: string) {
-  const row = (await db.query<IdeaRow>(`SELECT ${IDEA_COLS} FROM public.ideas i WHERE i.id = $1`, [id]))[0];
+// P2b (D17 item 6, the pick-up rule): the refinery's context graph holds the links it PICKED UP
+// from its document - written by the documents API while the refinery is not archived - never the
+// document's live listing, so a link added while the refinery is archived is not in it until the
+// refinery is reopened. The pin is the document's (the reference record it placed); a link the
+// document never pinned has none.
+// The pick-ups are front-end context (the user's document fed them, rw-p2b-workspace): read for the
+// identity the seam resolved, never another user's.
+async function pickedLinks(db: Db, refineryId: string, owner: string): Promise<Link[]> {
+  return await db.query<Link>(
+    `SELECT p.node_kind AS kind, p.node_ref AS id, COALESCE(rr.pinned_revision, p.pin) AS pin, p.reference_id::text AS reference_id
+       FROM public.refinery_picked_links p LEFT JOIN public.reference_records rr ON rr.id = p.reference_id
+      WHERE p.refinery_id = $1 AND p.owner_sub = $2 ORDER BY p.picked_at, p.node_kind, p.node_ref`,
+    [refineryId, owner],
+  );
+}
+
+export async function idea(db: Db, id: string, owner: string) {
+  const row = (await db.query<IdeaRow>(`SELECT ${IDEA_COLS} FROM public.ideas i WHERE i.id = $1 AND i.owner_sub = $2`, [id, owner]))[0];
   if (!row) return null;
   const revisions = await db.query<{ revision: number; summary: string; research_job_id: string | null; created_at: string }>(
     `SELECT revision, summary, research_job_id, created_at FROM public.idea_revisions WHERE idea_id = $1 ORDER BY revision`,
@@ -194,7 +213,7 @@ export async function idea(db: Db, id: string) {
         exports: members.filter((m) => m.member_kind === "export").map((m) => m.member_ref),
         room: members.find((m) => m.member_kind === "room")?.member_ref ?? row.thread_root ?? null,
       },
-      context_graph: await contextGraph(db, id, sessionPoolIds, doc?.outbound_links ?? []),
+      context_graph: await contextGraph(db, id, sessionPoolIds, await pickedLinks(db, id, owner)),
       hidden: await db.query<{ node_kind: string; node_ref: string; hidden_at: string }>(
         `SELECT node_kind, node_ref, hidden_at FROM public.refinery_hidden WHERE refinery_id = $1 ORDER BY hidden_at`, [id],
       ),
@@ -203,13 +222,14 @@ export async function idea(db: Db, id: string) {
   };
 }
 
-async function requireIdea(db: Db, id: string) {
-  const r = await db.query<{ id: string }>(`SELECT id FROM public.ideas WHERE id = $1`, [id]);
+// The refinery, if it is this owner's (another user's refinery answers exactly like none).
+export async function requireIdea(db: Db, id: string, owner: string) {
+  const r = await db.query<{ id: string }>(`SELECT id FROM public.ideas WHERE id = $1 AND owner_sub = $2`, [id, owner]);
   if (!r[0]) throw new NotFound("refinery not found (a user source needs a pre-existing refinery)");
 }
 
-export async function setHidden(db: Db, refineryId: string, kind: string, ref: string, hidden: boolean) {
-  await requireIdea(db, refineryId);
+export async function setHidden(db: Db, refineryId: string, kind: string, ref: string, hidden: boolean, owner: string) {
+  await requireIdea(db, refineryId, owner);
   if (hidden) {
     await db.query(
       `INSERT INTO public.refinery_hidden (refinery_id, node_kind, node_ref) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
@@ -238,12 +258,19 @@ export async function addHeld(
   req: HeldInput,
   chunk: (t: string) => string[],
   embed: (t: string) => Promise<number[]>,
+  opts: { dedupe?: boolean; owner: string },
 ) {
-  await requireIdea(db, refineryId);
+  await requireIdea(db, refineryId, opts.owner);
   if (req.url) {
     const tb = await tombstoneForUrl(db, req.url);
     if (tb) throw new Conflict("this URL is tombstoned; it reopens through the admission call", { tombstone: tombstoneOut(tb) });
   }
+  // P2b (operator 20:09): the same file added again - in this or another refinery - is deduped onto
+  // the held source it matches (same URL, or for an upload the same title and type), validated like
+  // any candidate (the tombstone check above); when the contents differ the match gets a new
+  // revision. Another refinery lists the match as a member, never a second copy.
+  const match = opts.dedupe === false ? null : await sameHeld(db, req);
+  if (match) return await dedupe(db, refineryId, match, req, chunk, embed);
   const chunks = chunk(req.content);
   const vec = (v: number[]) => `[${v.join(",")}]`;
   const docVec = vec(await embed(`${req.title}\n\n${req.content}`));
@@ -271,9 +298,71 @@ export async function addHeld(
   });
 }
 
+// "The same file added again ANYWHERE" (operator 20:09): held sources are shared knowledge in waiting
+// (held is a quality gate, not privacy - operator 2026-10-28), so the match is across every refinery.
+async function sameHeld(db: Db, req: HeldInput) {
+  const rows = req.url
+    ? await db.query<{ id: string; refinery_id: string; content_hash: string | null }>(
+      `SELECT id::text AS id, refinery_id::text AS refinery_id, content_hash FROM public.held_sources
+        WHERE url IS NOT NULL AND public.contract_url_norm(url) = public.contract_url_norm($1) ORDER BY created_at LIMIT 1`,
+      [req.url],
+    )
+    : await db.query<{ id: string; refinery_id: string; content_hash: string | null }>(
+      `SELECT id::text AS id, refinery_id::text AS refinery_id, content_hash FROM public.held_sources
+        WHERE url IS NULL AND lower(btrim(title)) = lower(btrim($1)) AND content_type = $2 ORDER BY created_at LIMIT 1`,
+      [req.title, req.content_type ?? "manual"],
+    );
+  return rows[0] ?? null;
+}
+
+async function dedupe(
+  db: Db, refineryId: string, match: { id: string; refinery_id: string; content_hash: string | null }, req: HeldInput,
+  chunk: (t: string) => string[], embed: (t: string) => Promise<number[]>,
+) {
+  const same = (await db.query<{ same: boolean }>(`SELECT md5($1) IS NOT DISTINCT FROM $2 AS same`, [req.content, match.content_hash]))[0].same;
+  if (!same) await reviseHeld(db, match.id, req.title, req.content, chunk, embed);
+  if (match.refinery_id !== refineryId) {
+    await db.query(
+      `INSERT INTO public.refinery_members (refinery_id, member_kind, member_ref) VALUES ($1, 'user_source', $2) ON CONFLICT DO NOTHING`,
+      [refineryId, match.id],
+    );
+  }
+  const src = (await userSources(db, match.refinery_id)).find((u) => u.source_id === match.id)!;
+  const chunks = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM public.held_source_chunks WHERE held_source_id = $1`, [match.id]))[0].n;
+  return { source: src, chunks, embedded: true, deduped: true, revised: !same };
+}
+
+// A new revision of a held source: contents, chunks and embeddings replaced, revision + 1 (the
+// P2b snapshot trigger keeps every earlier revision). Embeddings are computed before the transaction.
+export async function reviseHeld(
+  db: Db, id: string, title: string, content: string, chunk: (t: string) => string[], embed: (t: string) => Promise<number[]>,
+): Promise<number> {
+  const chunks = chunk(content);
+  const vec = (v: number[]) => `[${v.join(",")}]`;
+  const docVec = vec(await embed(`${title}\n\n${content}`));
+  const chunkVecs: string[] = [];
+  for (const ch of chunks) chunkVecs.push(vec(await embed(ch)));
+  return await db.tx(async (t) => {
+    const r = (await t.query<{ revision: number }>(
+      `UPDATE public.held_sources SET title = $2, content = $3, content_hash = md5($3), embedding = $4::vector,
+              revision = revision + 1, updated_at = now() WHERE id = $1 RETURNING revision`,
+      [id, title, content, docVec],
+    ))[0];
+    await t.query(`DELETE FROM public.held_source_chunks WHERE held_source_id = $1`, [id]);
+    for (let i = 0; i < chunks.length; i++) {
+      await t.query(
+        `INSERT INTO public.held_source_chunks (held_source_id, idx, content, embedding) VALUES ($1, $2, $3, $4::vector)`,
+        [id, i, chunks[i], chunkVecs[i]],
+      );
+    }
+    return r.revision;
+  });
+}
+
 // Remove a held source: outright, no tombstone (D5's erasure begins at active). Refused while a
 // user document links it - the user resolves that in the document, by hand.
-export async function removeHeld(db: Db, refineryId: string, sourceId: string) {
+export async function removeHeld(db: Db, refineryId: string, sourceId: string, owner: string) {
+  await requireIdea(db, refineryId, owner);
   return await db.tx(async (t) => {
     const h = await t.query<{ id: string }>(
       `SELECT id FROM public.held_sources WHERE id = $1 AND refinery_id = $2 FOR UPDATE`, [sourceId, refineryId],
@@ -302,11 +391,12 @@ export async function removeHeld(db: Db, refineryId: string, sourceId: string) {
 }
 
 // D12: title, path, updated, outbound links. Nothing else is selected, so nothing else can leak.
-export async function documents(db: Db, limit: number) {
+// User documents are per user (rw-p2b-workspace): only the requesting identity's are listed.
+export async function documents(db: Db, limit: number, owner: string) {
   const rows = await db.query<{ title: string; path: string; updated: string; outbound_links: Link[] }>(
     `SELECT d.title, d.path, d.updated_at AS updated, ${RESOLVED_LINKS("d")} AS outbound_links
-       FROM public.user_document_listings d ORDER BY d.updated_at DESC LIMIT $1`,
-    [limit],
+       FROM public.user_document_listings d WHERE d.owner_sub = $2 ORDER BY d.updated_at DESC LIMIT $1`,
+    [limit, owner],
   );
   return {
     documents: rows.map((r) => ({

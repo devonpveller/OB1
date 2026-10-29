@@ -11,6 +11,7 @@ import {
 import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
+import { identityOf } from "../../middleware/identity.ts";
 
 const T = ["ideas and the idea refinery (D17)"];
 const ideaParam = z.object({ id: pathParam("id", FX.idea, "idea (refinery) id") });
@@ -25,7 +26,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
     try {
       const q = c.req.valid("query");
       if (blocksMetadataless(parseMetadataFilter(q.metadata_filter))) return send(c, Ideas, { ideas: [] });
-      return send(c, Ideas, await ideas.ideas(deps.db, parseLimit(q.limit, 50, 200)));
+      return send(c, Ideas, await ideas.ideas(deps.db, parseLimit(q.limit, 50, 200), (await identityOf(c)).sub));
     } catch (e) {
       return fail(c, e);
     }
@@ -42,7 +43,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
       if (blocksMetadataless(parseMetadataFilter(c.req.valid("query").metadata_filter))) {
         return c.json({ error: "not found in scope" }, 404);
       }
-      const r = await ideas.idea(deps.db, c.req.valid("param").id);
+      const r = await ideas.idea(deps.db, c.req.valid("param").id, (await identityOf(c)).sub);
       if (!r) return c.json({ error: "no idea with this id" }, 404);
       return send(c, Idea, r);
     } catch (e) {
@@ -62,7 +63,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
     try {
       const b = c.req.valid("json");
       await requireRegistered(deps.registry, "node_kinds", b.node_kind);
-      return send(c, HiddenState, await ideas.setHidden(deps.db, c.req.valid("param").id, b.node_kind, b.node_ref, b.hidden));
+      return send(c, HiddenState, await ideas.setHidden(deps.db, c.req.valid("param").id, b.node_kind, b.node_ref, b.hidden, (await identityOf(c)).sub));
     } catch (e) {
       return fail(c, e);
     }
@@ -78,7 +79,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
       const b = c.req.valid("json");
       if (b.content_type) await requireRegistered(deps.registry, "content_types", b.content_type);
       const r = await ideas.addHeld(deps.db, c.req.valid("param").id, { ...b, by: b.by ?? authorOf(c) ?? undefined },
-        deps.chunk, deps.embed).catch((e) => {
+        deps.chunk, deps.embed, { owner: (await identityOf(c)).sub }).catch((e) => {
           if (String((e as Error)?.message ?? "").startsWith("embedding")) return { embedFailed: String((e as Error).message) };
           throw e;
         });
@@ -97,7 +98,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const p = c.req.valid("param");
-      return send(c, UserSourceRemoved, await ideas.removeHeld(deps.db, p.id, p.sourceId));
+      return send(c, UserSourceRemoved, await ideas.removeHeld(deps.db, p.id, p.sourceId, (await identityOf(c)).sub));
     } catch (e) {
       return fail(c, e);
     }
@@ -113,7 +114,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
     try {
       const q = c.req.valid("query");
       if (blocksMetadataless(parseMetadataFilter(q.metadata_filter))) return send(c, Documents, { documents: [] });
-      return send(c, Documents, await ideas.documents(deps.db, parseLimit(q.limit, 100, 500)));
+      return send(c, Documents, await ideas.documents(deps.db, parseLimit(q.limit, 100, 500), (await identityOf(c)).sub));
     } catch (e) {
       return fail(c, e);
     }

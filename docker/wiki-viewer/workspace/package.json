@@ -1,0 +1,40 @@
+{
+  "name": "openbrain-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "research-workbench P2b: the panel workspace served at /workspace by the wiki viewer",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build && node -e \"require('node:fs').copyFileSync('THIRD-PARTY-NOTICES.md','dist/assets/THIRD-PARTY-NOTICES.txt')\"",
+    "test": "vitest run",
+    "notices": "node scripts/notices.mjs",
+    "notices:check": "node scripts/notices.mjs --check"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "6.20.4",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@lezer/highlight": "1.2.5",
+    "@lezer/markdown": "1.8.1",
+    "dockview": "8.3.1",
+    "dockview-core": "8.3.1",
+    "dockview-react": "8.3.1",
+    "micromark": "4.0.3",
+    "micromark-extension-gfm": "3.0.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "happy-dom": "21.0.4",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "3.2.4"
+  }
+}

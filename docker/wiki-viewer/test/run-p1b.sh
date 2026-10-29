@@ -188,33 +188,9 @@ echo "$o" | grep -q '"tag":"fixture-tag"' || { echo "x tag+term mode"; b11=0; }
 fi
 
 if want B7; then
-hdr "B7 (acceptance 7): a transient and a structural notification posted through the contract appear in the strip on the next page load - class, subject, jump; acknowledge; nothing routed elsewhere"
-b7=1
-bash "$B" post structural "compile structural failure: content/person/person-bob-fixture" content/person/person-bob-fixture 902
-bash "$B" post transient "LLM call failing for this task: #901" "" "#901"
-sleep 2
+hdr "B7 (acceptance 7): RETIRED by rw-p2b-workspace - the P1b notifications strip left every page; the workspace's title bar bell replaced it (D13). Its acceptance is the workspace runner's (OB1/docker/workbench/contract-test/run-workspace-tests.ps1, C7)"
 pg="$(BODY=1 bash "$B" fget /content/thought/9001)"
-strip="$(echo "$pg" | tr -d '\n' | grep -o '<div class="wiki-notifications"[^§]*</ul></div><div class="page-header">' | head -1)"
-echo "$strip" | sed 's/<style>[^<]*<\/style>//' | cut -c1-900
-echo "$strip" | grep -q 'data-class="structural"[^>]*><span class="wn-class">structural</span> <a class="wn-jump" href="/content/person/person-bob-fixture">compile structural failure: content/person/person-bob-fixture</a>' || { echo "x structural not in the strip with class/subject/jump"; b7=0; }
-echo "$strip" | grep -q 'data-class="transient"[^>]*><span class="wn-class">transient</span> <a class="wn-jump" href="/content/person/person-ada-fixture">LLM call failing for this task: #901</a>' || { echo "x transient not in the strip, or its entity jump is not the entity's page"; b7=0; }
-for j in /content/person/person-bob-fixture /content/person/person-ada-fixture; do bash "$B" fget "$j" | grep -q '^200 x-wiki-render=db' || { echo "x jump $j not a db page"; b7=0; }; done
-ack="$(echo "$strip" | grep -o 'href="/__notifications/ack?[^"]*"' | head -1 | sed -e 's/^href="//' -e 's/"$//' -e 's/&amp;/\&/g')"
-echo "ack link: $ack"
-ah="$(docker run --rm --network "$NET" --entrypoint node "$IMG" --input-type=module -e "
-  const r = await fetch('$FRONT' + process.argv[1], { redirect: 'manual' }); const c = r.headers.get('set-cookie');
-  console.log(r.status, r.headers.get('location'), c);
-  const p = await fetch('$FRONT/content/thought/9001', { headers: { cookie: c.split(';')[0] } }); const t = await p.text();
-  console.log('after-ack', (/data-unread=\"([^\"]*)\"/.exec(t) || [])[1]);" "$ack")"
-echo "$ah"
-echo "$ah" | grep -q '^303 /content/thought/9001 wiki_notif_ack=' && echo "$ah" | grep -q '^after-ack 0$' || { echo "x acknowledge"; b7=0; }
-lst="$(BODY=1 bash "$B" fget /__notifications)"; echo "$lst" | grep -o '<li id="n-[^"]*" class="[a-z]*"><b>[a-z]*</b> <a href="[^"]*">[^<]*' | head -5
-[ "$(echo "$lst" | grep -o '<li id="n-' | wc -l)" -ge 2 ] || { echo "x the list page"; b7=0; }
-# nothing routed elsewhere: the strip only reads; no chat/status-pipe sink anywhere in the viewer
-if grep -nEi 'mattermost|telegram|status[-_ ]?pipe|webhook|post_research_notification' "$OB1/docker/wiki-viewer/lib/notifications.mjs" "$OB1/docker/wiki-viewer/serve.mjs" | grep -v '^\s*//' | grep -v ':\s*//\|:\s*\*' ; then echo "x a sink outside the front end"; b7=0; fi
-grep -c 'notification' "$OB1/docker/wiki-viewer/lib/notifications.mjs" >/dev/null
-docker logs "$P-wb" 2>&1 | grep -Ei 'mattermost|telegram|status' | head -3
-[ "$b7" = 1 ] && pass B7 || fail B7 "the notifications strip"
+if echo "$pg" | grep -q 'wiki-notifications\|/__notifications'; then fail B7 "a page still carries the retired strip"; else pass B7; fi
 fi
 
 if want B12; then
@@ -332,24 +308,10 @@ psqlq -c "DELETE FROM wiki_pages WHERE slug IN ('content/person/person-quiet-q',
 fi
 
 if want B15; then
-hdr "B15 (fix round 1, tester attempt 1 defect 4): /__notifications/ack back= is an allow-list - the tester's TAB case and every control character redirect to /"
-b15=1
-o="$(docker run --rm --network "$NET" --entrypoint node "$IMG" --input-type=module -e "
-  const cases = ['/%09/evil.example/landing', '/%0a/evil.example', '/%0d/evil.example', '/%00/evil.example', '/%1f/evil.example', '/%7f/evil.example', '/%C2%85/evil.example',
-    '/%5Cevil.example', '//evil.example/x', '/%2F%2Fevil.example', '/%252F%252Fevil.example', 'https://evil.example', 'javascript:alert(1)', '/a?x=1', '/%2509/evil.example'];
-  for (let c = 0; c < 32; c++) cases.push('/%' + c.toString(16).padStart(2, '0') + '/evil.example/x');
-  let bad = 0;
-  for (const b of cases) {
-    const r = await fetch('$FRONT/__notifications/ack?until=2026-10-19T10:00:00Z&back=' + b, { redirect: 'manual' });
-    const loc = r.headers.get('location');
-    if (r.status !== 303 || loc !== '/') { bad++; console.log('BAD', b, r.status, JSON.stringify(loc)); }
-  }
-  const ok = await fetch('$FRONT/__notifications/ack?until=2026-10-19T10:00:00Z&back=%2Fcontent%2Fthought%2F9001', { redirect: 'manual' });
-  console.log('legit back ->', ok.status, ok.headers.get('location'));
-  if (ok.headers.get('location') !== '/content/thought/9001') bad++;
-  console.log('ACK-REDIRECT:', cases.length, 'hostile cases,', bad ? 'FAIL ' + bad : 'PASS');")"
-echo "$o"; echo "$o" | grep -q 'ACK-REDIRECT: .* PASS$' || b15=0
-[ "$b15" = 1 ] && pass B15 || fail B15 "ack open redirect"
+hdr "B15: RETIRED by rw-p2b-workspace - /__notifications/ack left with the strip; the route answers as an ordinary URL now (no redirect at all)"
+o="$(BODY=1 bash "$B" fget '/__notifications/ack?until=2026-10-19T10:00:00Z&back=//evil.example/x')"
+echo "$o" | head -1
+if echo "$o" | head -1 | grep -q '^30[0-9]'; then fail B15 "the retired ack route still redirects"; else pass B15; fi
 fi
 
 if want B4; then

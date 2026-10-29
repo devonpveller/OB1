@@ -16,6 +16,9 @@ export const MANIFEST: Record<string, string> = {
   "notes/rwp0-fixture-ideas/rwp0-fixture-idea.md": "---\ntitle: Fixture idea note\n---\n\nTop-level folder note.\n",
   "notes/rwp0-fixture-empty/.gitkeep": "",
   "content/notebooks/fixture-notebook/rwp0-fixture-ai-note.md": "---\ntitle: Fixture AI note\n---\n\nAn AI note.\n",
+  // the two user documents fixtures.sql lists (round 4: the listing is rebuildable from these files)
+  "documents/fixture-refinery.md": "---\ntitle: Fixture refinery document\n---\n\nThe fixture refinery document.\n",
+  "documents/links-suppressed.md": "---\ntitle: Document linking a suppressed source\n---\n\nThe fixture document that links a suppressed source.\n",
 };
 
 if (import.meta.main) {

@@ -174,6 +174,12 @@ INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cit
   ('legacy_note', 'notes/p2a/fixture-note.md', 'f2000000-0000-4000-8000-000000000001', 'f1000000-0000-4000-8000-000000000001', 'cited', 0, 1);
 INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number) VALUES
   ('user_document', 'documents/fixture-refinery.md', 'f2000000-0000-4000-8000-000000000002', 'f1000000-0000-4000-8000-000000000001', 'added', 0, 1);
+-- P2b (init-documents.sql): the fixture refinery picked its document's links up (the pick-up rule;
+-- the context graph reads these, never the live listing)
+INSERT INTO public.refinery_picked_links (refinery_id, node_kind, node_ref, reference_id, pin, owner_sub, actor_sub) VALUES
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', 'source', '11111111-1111-4111-8111-111111111111', NULL, 2, 'operator', 'operator'),
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', 'source', 'cccccccc-cccc-4ccc-8ccc-ccccccccccc1', NULL, NULL, 'operator', 'operator'),
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', 'page', 'content/tool/tool-fixture', NULL, NULL, 'operator', 'operator');
 INSERT INTO public.reference_holder_state (holder_kind, holder_ref, content_sha256, migration) VALUES
   ('legacy_note', 'notes/p2a/fixture-note.md', NULL, '{"fixture": true}');
 

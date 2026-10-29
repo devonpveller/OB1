@@ -62,8 +62,7 @@ function head(page) {
  * page: {
  *   slug, title, fm, tags, text, description, readingMinutes, date, toc,
  *   site, layout: "content"|"list", articleHtml, listingHtml (list layout),
- *   breadcrumbsKnown, cssclasses,
- *   notificationsHtml (P1b: the notifications strip, lib/notifications.mjs)
+ *   breadcrumbsKnown, cssclasses
  * }
  * Returns the full HTML document.
  */
@@ -97,9 +96,7 @@ export function renderDocument(page) {
   return "<!DOCTYPE html>\n" +
     `<html lang="${escAttr(lang)}">${head(page)}<body data-slug="${escAttr(page.slug)}">` +
     `<div id="quartz-root" class="page"><div id="quartz-body">${left}` +
-    // P1b (D13 item 7): the research notifications strip, server-rendered
-    // (lib/notifications.mjs) - first in the center column of every page.
-    `<div class="center">${page.notificationsHtml || ""}<div class="page-header"><div class="popover-hint">${before}</div></div>` +
+    `<div class="center"><div class="page-header"><div class="popover-hint">${before}</div></div>` +
     `${center}<hr/><div class="page-footer">${AfterBody(page)}</div></div>` +
     `<div class="right sidebar">${right}</div>${Footer()}</div></div></body>` +
     TAIL_SCRIPTS.split("@@ROOT@@").join(root) + `</html>`;

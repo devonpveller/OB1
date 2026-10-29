@@ -324,7 +324,17 @@ try {
     Write-Host '[5] database B + the :wt workbench + Dredd over every example'
     if (-not (Start-Db $dbB)) { throw 'db B' }
     $vB = Join-Path $env:TEMP "rwp2a-vault-b-$rand"; New-Item -ItemType Directory -Force $vB | Out-Null
+    # the two fixture documents' files (fixtures.sql lists them): the workbench's start-up reconcile removes a listing
+    # whose file is missing, so Dredd's GET /ideas/{id} saw members.document null and the documented POST /references
+    # example (holder documents/fixture-refinery.md) got 404 from the ownership gate (rw-p2b-workspace round 4)
+    New-Item -ItemType Directory -Force (Join-Path $vB 'documents') | Out-Null
+    foreach ($d in @(@('fixture-refinery.md', 'Fixture refinery document'), @('links-suppressed.md', 'Document linking a suppressed source'))) {
+      [IO.File]::WriteAllText((Join-Path (Join-Path $vB 'documents') $d[0]), "---`ntitle: $($d[1])`n---`n`nA fixture document.`n")
+    }
     Check (Start-Workbench $wbName $tag $dbB $vB) "workbench $wbName answers /health"
+    $null = Dk cp (Join-Path $ct 'fixtures-documents.sql') "${dbB}:/tmp/fixtures-documents.sql"
+    $o = Dk exec $dbB psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures-documents.sql
+    Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "fixture document listings re-listed on $dbB"
     $null = Dk image inspect $dreddTag
     if ($script:rc -ne 0) {
       $o = Dk build --label $label -t $dreddTag -f (Join-Path $ct 'dredd.Dockerfile') $ct
