@@ -29,7 +29,7 @@ export function proxyConfig(env = process.env) {
   const key = String(env.WORKBENCH_KEY || "");
   if (!(url && key)) return null;
   const hosts = new Set(["localhost", "127.0.0.1", "[::1]", "openbrain-wiki-viewer", osHostname().toLowerCase(),
-    ...list(env.WIKI_VIEWER_LAN_IP), ...list(env.WIKI_VIEWER_ALLOWED_HOSTS)]);
+    ...list(env.WIKI_VIEWER_ALLOWED_HOSTS)]);
   const origins = new Set(list(env.WIKI_VIEWER_ALLOWED_ORIGINS).map((o) => o.replace(/\/+$/, "")));
   return { url, key, hosts, origins };
 }
