@@ -125,7 +125,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // an admin's own views list users and the audit log by design (whom to impersonate; what admins did):
   // there, and only there, B's subject is expected - nothing else of B's
   const aIsAdmin = OIDC && (await call(VIEWER, "GET", "/workbench/auth/me")).json.admin === true;
-  const ADMIN_VIEW = /^(GET|HEAD) \/workbench\/auth\/(users|audit) /;
+  const ADMIN_VIEW = /^(GET|HEAD) \/workbench\/auth\/(users|audit)[ ?]/;
   const M = {
     title: `TitleSecret${rnd()}X`, body: `BodySecret${rnd()}`, idea: `IdeaSecret${rnd()}`, prompt: `PromptSecret${rnd()}`,
   };

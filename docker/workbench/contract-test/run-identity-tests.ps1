@@ -292,13 +292,14 @@ try {
       '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid',
       '-e', 'WIKI_GIT_DIR=/wiki', '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', "RESEARCH_URL=http://$P-rs:8000",
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'FETCH_PROXY_URL=http://stub-proxy:3128', '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
-      '-e', 'WORKSPACE_DEFAULT_SUB=lab-default-sub', '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
-  $wbArgs = @('--network-alias', 'openbrain-workbench') + $common + @('-v', "${vault}:/wiki", '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
+      '-e', 'WORKSPACE_DEFAULT_SUB=lab-default-sub', '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
+  # the signed-in workbench ALSO has the identity header configured: it must be ignored there
+  $wbArgs = @('--network-alias', 'openbrain-workbench') + $common + @('-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-v', "${vault}:/wiki", '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
       '-e', "WORKSPACE_DOOR_KEY=$door", '-e', "WORKSPACE_OIDC_ISSUER=$issuer", '-e', 'WORKSPACE_OIDC_CLIENT_ID=research-workspace-lab',
       '-e', "WORKSPACE_OIDC_CLIENT_SECRET=$clientSecret", '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect", '-e', 'WORKSPACE_OIDC_ADMIN_GROUP=research-admins',
       '-e', "WORKSPACE_OIDC_POST_LOGOUT_URI=http://$P-viewer:8080/workspace/")
   $null = Run-Detached "$P-wb" ($wbArgs + @($wbTag))
-  # clause 5: the same image, NO sign-in configured (its own vault; the same database)
+  # clause 5: the same image, NO sign-in configured, nothing rw-identity adds set (as shipped; its own vault; the same database)
   $null = Run-Detached "$P-wbplain" ($common + @('-v', "${vault2}:/wiki", $wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench (sign-in configured) is up'
   Check (Wait-Http "http://$P-wbplain:8000/health" 90) 'the workbench (no sign-in) is up'
@@ -331,7 +332,7 @@ try {
     '-e', "IDENTITY_TEST_APP_PASSWORD=$appPw", '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/identity/identity_integration_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
-  Save 'identity-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|=>' }) -join "`n")
+  Save 'identity-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|=>|^\s*[-+]\s' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: every identity case fails on the base ($($sum.Value))" }

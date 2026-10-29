@@ -27,14 +27,16 @@ export async function createPending(db: Db, p: Pending & { state: string; bindin
 // Single use: the row is deleted as it is read, whatever happens next. Null when the state is
 // unknown, used, expired, or was started by another browser (the binding cookie disagrees).
 export async function consumePending(db: Db, state: string, binding: string): Promise<Pending | null> {
-  if (!state || !binding) return null;
+  // the state row is deleted even when the binding is missing (a state shown by another browser is
+  // burnt, never left for a replay)
+  if (!state) return null;
   const rows = await db.query<Pending & { binding_hash: string; live: boolean }>(
     `DELETE FROM public.workspace_login_pending WHERE state_hash = $1
      RETURNING binding_hash, nonce, verifier, return_to, (expires_at > now()) AS live`,
     [await sha256b64url(state)],
   );
   const r = rows[0];
-  if (!r || !r.live || r.binding_hash !== await sha256b64url(binding)) return null;
+  if (!r || !r.live || !binding || r.binding_hash !== await sha256b64url(binding)) return null;
   return { nonce: r.nonce, verifier: r.verifier, return_to: r.return_to };
 }
 
