@@ -3,7 +3,7 @@
 // the audit log). Every decision is the workbench's (/workbench/auth); this only shows it.
 import { useEffect, useState } from "react";
 import {
-  type AuditEntry, auditLog, currentMe, endImpersonation, impersonate, REASON_MIN, signInHref, signOut, users,
+  type AuditEntry, auditLog, currentMe, endImpersonation, impersonate, reasonOk, signInHref, signOut, users,
 } from "../lib/auth";
 
 const reload = () => location.reload();
@@ -51,7 +51,7 @@ export function AdminPanel({ onSwitch = reload }: { onSwitch?: () => void }) {
   useEffect(() => {
     users().then((u) => setList(u.filter((x) => x.sub !== me?.actor_sub))).catch((e) => setErr((e as Error).message));
   }, [me?.actor_sub]);
-  const ready = !!target && reason.trim().length >= REASON_MIN && !me?.impersonating;
+  const ready = !!target && reasonOk(reason) && !me?.impersonating;
   const start = async () => {
     try {
       await impersonate(target, reason);

@@ -117,17 +117,40 @@ export interface SeamDeps {
   oidc: OidcConfig | null;
   ring: KeyRing;
   cfg: IdentityConfig;
+  defaultSet?: boolean; // WORKSPACE_DEFAULT_SUB is set (round 4: else an admin reads ownerless prompts, audited)
+}
+
+// round 4 (tester F2): the path the ROUTER will route - percent-decoding repeated until stable,
+// backslashes as slashes, empty and "." segments dropped, ".." resolved. Every scope decision of the
+// seam is taken on it, so /workbench/%64ocuments is /workbench/documents here too.
+export function routePath(raw: string): string {
+  let p = raw;
+  for (let i = 0; i < 4; i++) {
+    let d: string;
+    try { d = decodeURIComponent(p); } catch { break; }
+    if (d === p) break;
+    p = d;
+  }
+  const out: string[] = [];
+  for (const seg of p.replace(/\\/g, "/").split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return "/" + out.join("/");
 }
 
 export function seamDeps(db: Db | null, env = (k: string) => Deno.env.get(k)): SeamDeps {
   const oidc = oidcConfig(env);
-  return { db, oidc, ring: keyRing(env, oidc !== null), cfg: identityConfig(env) };
+  return { db, oidc, ring: keyRing(env, oidc !== null), cfg: identityConfig(env), defaultSet: !!(env("WORKSPACE_DEFAULT_SUB") ?? "").trim() };
 }
 
 // what a browser without a session may still reach: the sign-in itself
 const OPEN = /^\/workbench\/(health(\/|$)|auth\/(login|callback|me|logout)$)/;
 // a user's front end: never a service's
 const USER_ONLY = /^\/workbench\/(documents|workspace|auth\/(impersonate|users|audit))(\/|$)/;
+// the reads that can carry a research job's original prompt (round 4, F4)
+const JOB_READS = /^\/workbench\/contract\/(sessions|jobs|timeline)(\/|$)/;
 
 const KEY = "identity";
 
@@ -140,11 +163,26 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
     else who = (deps.db && await sessionIdentity(deps.db, readCookie(c.req.header("cookie"), SESSION_COOKIE))) || ANONYMOUS;
     c.set(KEY as never, who as never);
     const url = new URL(c.req.url);
-    if (who.kind === "anonymous" && !OPEN.test(url.pathname)) {
+    const path = routePath(url.pathname);
+    if (who.kind === "anonymous" && !OPEN.test(path)) {
       return c.json({ error: "sign in first", login: "/workbench/auth/login" }, 401);
     }
-    if (who.kind === "service" && USER_ONLY.test(url.pathname)) {
+    if (who.kind === "service" && USER_ONLY.test(path)) {
       return c.json({ error: "a service has no user front end; sign in as a user" }, 403);
+    }
+    // round 4 (F4): with sign-in on and WORKSPACE_DEFAULT_SUB unset, a job nobody owns is readable by an
+    // admin who is not impersonating (documents/ownership.ts) - every such read is recorded first
+    if (deps.oidc && !deps.defaultSet && who.kind === "user" && who.admin && !who.impersonating && deps.db &&
+        c.req.method === "GET" && JOB_READS.test(path)) {
+      try {
+        await audit(deps.db, {
+          actor_sub: who.actor, subject_sub: who.sub, action: "request", method: c.req.method, route: url.pathname + url.search,
+          reason: "an admin read of research that may carry ownerless prompts (WORKSPACE_DEFAULT_SUB unset)", session_ref: who.session,
+        });
+      } catch (e) {
+        console.error("[identity] admin_audit write failed, request refused:", (e as Error).message);
+        return c.json({ error: "this request could not be recorded in the admin audit log, so it was not run" }, 503);
+      }
     }
     if (who.impersonating && deps.db) {
       try {

@@ -480,13 +480,16 @@ export function failureNotice(
   record: SearchRecord,
   backstop: string,
 ): string {
-  const subj = (subject || "").trim() || "the subject of this question";
+  // round 4 (rw-identity, tester attempt 1 Case 7): the notice states the reason generically. The
+  // question, and a subject taken from it, are the asker's own; the notice is a stored result other
+  // readers may see, so it never quotes them (the owner sees the question in their own view).
+  void query; void subject;
   const reason = BACKSTOP_REASON[backstop] || "the retrieval step failed";
   const out: string[] = [];
-  out.push(`# No sources about ${subj} were retrieved`);
+  out.push(`# No sources were retrieved for this question`);
   out.push("");
   out.push(
-    `**Answer.** No source relevant to ${subj} was retrieved, so this run has nothing ` +
+    `**Answer.** No relevant source was retrieved, so this run has nothing ` +
     `to report about it. This is a **search failure, not evidence of absence**: ` +
     `${reason}. The question is unanswered, not answered in the negative. ` +
     `Re-run it once the search plane is healthy before concluding anything.`,

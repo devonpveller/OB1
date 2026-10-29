@@ -8,12 +8,18 @@
  *     subject; the workbench its signed-in user's). Without it they read as their service.
  *   - every other key reads as its service, `service:<caller>`; naming a user is refused (403).
  * What a viewer gets:
- *   - GET /research/jobs lists only the viewer's jobs (research_prompts.owner_sub = the viewer) and
- *     jobs with no recorded owner (before rw-identity: shared, as the workbench treats them).
+ *   - GET /research/jobs lists only the viewer's jobs (research_prompts.owner_sub = the viewer) and,
+ *     when the viewer is WORKSPACE_DEFAULT_SUB, jobs with no recorded owner (round 3).
  *   - a job read by id (detail, stream, tree, events) stays readable - research output is shared - but
  *     when the job's original prompt belongs to ANOTHER USER (not a service), every string field that
  *     carries that prompt (or its first 40 characters: the list truncates) is OMITTED, at any depth:
  *     progress, result, error, branch queries, event payloads. Omitted, not replaced.
+ * Round 4 (tester attempt 1, Case 7: prompt FRAGMENTS - a prefix, a case change, an escape, a middle
+ * chunk - survive any matching): a non-owner gets an ALLOW-LIST instead. Detail and stream: id, status,
+ * queue position/depth/eta and, of the result, the shared research output only - the grounded report
+ * (synthesis, when the run found something), its cited sources (title, url) and claims (id, text), the
+ * outcome and report type. Tree: ids, kinds, steps and status. Events: ids, kinds, steps and time.
+ * Every other field is omitted; the prompt omission still runs over what is left.
  */
 import type { Caller } from "./origin.ts";
 import { ON_BEHALF_ORIGINS } from "./origin.ts";
@@ -53,9 +59,46 @@ export const FOREIGN_PROMPTS_SQL =
         f AS (SELECT CASE WHEN EXISTS (SELECT 1 FROM o)
                           THEN EXISTS (SELECT 1 FROM o WHERE o.owner_sub <> $2 AND o.owner_sub NOT LIKE 'service:%')
                           ELSE ($3 = '' OR $2 <> $3) END AS foreign_)
-   SELECT x.prompt FROM f, (SELECT prompt FROM o
-                            UNION ALL SELECT j.query FROM research_jobs j JOIN r ON coalesce(j.root_job_id, j.id) = r.root) x
-    WHERE f.foreign_ AND x.prompt IS NOT NULL AND x.prompt <> ''`;
+   SELECT f.foreign_ AS foreign_,
+          coalesce((SELECT array_agg(x.prompt) FROM (SELECT prompt FROM o
+                      UNION ALL SELECT j.query FROM research_jobs j JOIN r ON coalesce(j.root_job_id, j.id) = r.root) x
+                     WHERE x.prompt IS NOT NULL AND x.prompt <> ''), '{}') AS prompts
+     FROM f`;
+
+type Obj = Record<string, unknown>;
+const str = (v: unknown) => (typeof v === "string" ? v : null);
+
+/** The job as a non-owner reads it (detail and stream): the allow-list above. */
+export function sharedJobView(job: Obj): Obj {
+  const r = job.result && typeof job.result === "object" ? job.result as Obj : null;
+  const result = r === null ? null : {
+    outcome: str(r.outcome),
+    report_type: str(r.report_type),
+    synthesis: r.outcome === "no_relevant_sources" ? "" : (str(r.synthesis) ?? ""),
+    cited_sources: Array.isArray(r.cited_sources)
+      ? r.cited_sources.map((s) => ({ title: str((s as Obj)?.title), url: str((s as Obj)?.url) })) : [],
+    reuse_claims: Array.isArray(r.reuse_claims)
+      ? r.reuse_claims.map((c) => ({ id: str((c as Obj)?.id) ?? String((c as Obj)?.id ?? ""), text: str((c as Obj)?.text) })) : [],
+  };
+  return {
+    id: job.id, status: job.status, queue_position: job.queue_position ?? null, queue_depth: job.queue_depth ?? null,
+    eta_seconds: job.eta_seconds ?? null, result,
+  };
+}
+
+/** The tree as a non-owner reads it: its shape and state, no text. */
+export function sharedTree(t: Obj): Obj {
+  const branches = Array.isArray(t.branches) ? t.branches as Obj[] : [];
+  return {
+    root_job_id: t.root_job_id,
+    branches: branches.map((b) => ({ id: b.id, parent_job_id: b.parent_job_id, branch_kind: b.branch_kind, rooted_step_id: b.rooted_step_id, status: b.status })),
+  };
+}
+
+/** The events as a non-owner reads them: which step, what kind, when - no trail, no payload. */
+export function sharedEvents(rows: Obj[]): Obj[] {
+  return rows.map((e) => ({ id: e.id, job_id: e.job_id, root_job_id: e.root_job_id, step_id: e.step_id, type: e.type, kind: e.kind, created_at: e.created_at }));
+}
 
 function needles(prompts: string[]): string[] {
   const out = new Set<string>();

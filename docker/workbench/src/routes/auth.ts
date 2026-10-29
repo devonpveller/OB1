@@ -23,6 +23,7 @@ import { authorizeUrl, displayName, groupsOf, OidcError, type OidcConfig, pkcePa
 import { clearLoginCookie, clearSessionCookie, LOGIN_COOKIE, loginCookie, readCookie, safeReturnTo, sessionCookie } from "../identity/cookies.ts";
 import * as store from "../identity/store.ts";
 import { identityOf, type Identity } from "../middleware/identity.ts";
+import { reasonProblem } from "../identity/reason.ts";
 
 export interface AuthDeps {
   db: Db;
@@ -31,8 +32,6 @@ export interface AuthDeps {
   mode: "oidc" | "header" | "default";
 }
 
-const REASON_MIN = 4;
-const REASON_MAX = 1000;
 
 function me(who: Identity, mode: AuthDeps["mode"]) {
   const signedIn = who.kind === "user";
@@ -153,8 +152,8 @@ export function authRouter(deps: AuthDeps) {
       return c.json({ error: msg }, status);
     };
     if (who.impersonating) return await refuse(409, "already impersonating - end it first");
-    if (reason.length < REASON_MIN) return await refuse(400, `a reason is required (at least ${REASON_MIN} characters)`);
-    if (reason.length > REASON_MAX) return await refuse(400, `the reason is longer than ${REASON_MAX} characters`);
+    const bad = reasonProblem(reason);
+    if (bad) return await refuse(400, bad);
     if (!target) return await refuse(400, "name the user (sub) to impersonate");
     if (target === who.actor) return await refuse(400, "that is you");
     const known = await store.knownUser(deps.db, target);

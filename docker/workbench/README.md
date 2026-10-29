@@ -82,7 +82,7 @@ Open WebUI signs its own users in (env-only provider settings; nothing in a data
 | `GET /workbench/auth/callback` | Authentik's answer: state, code + verifier, ID token (signature RS256/ES256/HS256, iss, aud, azp, exp, iat, nonce) |
 | `GET /workbench/auth/me` | who the request is (the workspace asks before it renders) |
 | `POST /workbench/auth/logout` | revokes the session server-side, clears the cookie; offers Authentik's end-session URL |
-| `POST /workbench/auth/impersonate {sub, reason}` / `.../impersonate/end` | admins only; a reason (>= 4 characters) first |
+| `POST /workbench/auth/impersonate {sub, reason}` / `.../impersonate/end` | admins only; a reason first (>= 8 visible characters with a letter or digit; zero-width and white space do not count) |
 | `GET /workbench/auth/users`, `GET /workbench/auth/audit?actor&subject&action&since&limit` | admins only: whom to impersonate; the audit log |
 
 - **Identity.** `subject_sub` = the Authentik `sub` of the signed-in user, `actor_sub` = the same user,
@@ -112,6 +112,14 @@ Open WebUI signs its own users in (env-only provider settings; nothing in a data
   `handle /workbench/*` route injects `MCP_ACCESS_KEY` - with sign-in on that would make a Caddy-path
   browser the internal service (shared knowledge, no user front end, no sign-in): remove that route
   or make it inject `WORKSPACE_DOOR_KEY` before turning sign-in on.
+- **What another user (or an agent key) reads of a job** (round 4): an ALLOW-LIST - status, queue
+  position, and of the result only the grounded report (synthesis, when the run found something), its
+  cited sources (title, url), claims (id, text), outcome and report type; tree and events: ids, kinds,
+  steps, status, time. The original prompt and everything derived from it (needs, follow-up queries,
+  gaps, the failure notice, progress messages, errors, event payloads) are the owner's only - in the
+  research service's reads and the workbench's session views alike. The failure notice no longer quotes
+  the question. The route scope is judged on the decoded path (`/workbench/%64ocuments` = documents).
+  With sign-in on and `WORKSPACE_DEFAULT_SUB` blank, every admin read of the job views is audited.
 - **Egress.** The only new outbound calls: the issuer's discovery document, its keys and its token
   endpoint (https), only when `WORKSPACE_OIDC_ISSUER` is set. Nothing goes to a model provider.
 - **Storage.** `init-identity.sql` (slot 290): `workspace_users`, `workspace_login_pending`,

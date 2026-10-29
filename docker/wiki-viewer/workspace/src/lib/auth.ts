@@ -53,12 +53,19 @@ export async function signOut(): Promise<string> {
   return r.end_session || "/workspace/";
 }
 
-export const REASON_MIN = 4;
+// The reason rule (the workbench's src/identity/reason.ts): REASON_MIN visible characters, one a letter
+// or digit; zero-width characters and white space do not count.
+export const REASON_MIN = 8;
+const INVISIBLE = /[\s\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0]/gu;
+export function reasonOk(reason: string): boolean {
+  const visible = reason.replace(INVISIBLE, "");
+  return [...visible].length >= REASON_MIN && /[\p{L}\p{N}]/u.test(visible);
+}
 
 // The reason is required BEFORE anything is sent (the workbench refuses without one as well).
 export async function impersonate(sub: string, reason: string) {
   if (!sub) throw new Error("choose the user to impersonate");
-  if (reason.trim().length < REASON_MIN) throw new Error(`a reason is required (at least ${REASON_MIN} characters)`);
+  if (!reasonOk(reason)) throw new Error(`a reason is required (at least ${REASON_MIN} visible characters)`);
   return await post(`${A}/impersonate`, { sub, reason: reason.trim() });
 }
 

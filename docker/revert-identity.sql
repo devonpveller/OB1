@@ -9,6 +9,15 @@
 -- refuses to start a sign-in without these tables). Nothing else references them.
 \set ON_ERROR_STOP on
 BEGIN;
+-- round 4 (tester F5): the research_prompts rows rw-identity wrote that the pre-rw-identity code would
+-- misread - the back-fill's (actor system:backfill) and the service owners (service:<caller>; the old
+-- code treats any other owner as a foreign user). The rows of real users (Open WebUI on-behalf-of, the
+-- workspace) stay: they are those users' prompts.
+DO $$ BEGIN
+    IF to_regclass('public.research_prompts') IS NOT NULL THEN
+        DELETE FROM public.research_prompts WHERE actor_sub = 'system:backfill' OR owner_sub LIKE 'service:%';
+    END IF;
+END $$;
 DROP TRIGGER IF EXISTS trg_admin_audit_append_only ON public.admin_audit;
 DROP TRIGGER IF EXISTS trg_admin_audit_no_truncate ON public.admin_audit;
 DROP TABLE IF EXISTS public.admin_audit;

@@ -31,7 +31,7 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, promptOwner, resolveOrigin } from "./origin.ts";
-import { FOREIGN_PROMPTS_SQL, LISTED_FOR, omitPrompts, readViewer } from "./viewer.ts";
+import { FOREIGN_PROMPTS_SQL, LISTED_FOR, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
@@ -1087,9 +1087,11 @@ function viewerOf(req: Request, url: URL): { sub: string } | Response {
 // rw-identity round 3: who owns a job that predates rw-identity (no research_prompts row) - the one
 // operator (07-MULTI-USER); blank = nobody (its prompt is read by no caller)
 const DEFAULT_SUB = (Deno.env.get("WORKSPACE_DEFAULT_SUB") ?? "").trim();
-// the prompts of job `id`'s tree that belong to another user than the viewer (omitted from what it reads)
-async function foreignPrompts(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<string[]> {
-  return (await c.queryObject<{ prompt: string }>(FOREIGN_PROMPTS_SQL, [id, viewer, DEFAULT_SUB])).rows.map((r) => r.prompt);
+// whether job `id`'s tree belongs to another user than the viewer, and its texts (round 4: a foreign
+// viewer reads the allow-list of viewer.ts, the texts omitted from what is left)
+async function scopeOf(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<{ foreign: boolean; prompts: string[] }> {
+  const row = (await c.queryObject<{ foreign_: boolean; prompts: string[] }>(FOREIGN_PROMPTS_SQL, [id, viewer, DEFAULT_SUB])).rows[0];
+  return { foreign: !!row?.foreign_, prompts: row?.prompts ?? [] };
 }
 
 Deno.serve({ port: PORT }, async (req) => {
@@ -1398,7 +1400,8 @@ Deno.serve({ port: PORT }, async (req) => {
     if (viewer instanceof Response) return viewer;
     const c = await pool.connect();
     try {
-      const foreign = await foreignPrompts(c, treeMatch[1], viewer.sub);
+      const scope = await scopeOf(c, treeMatch[1], viewer.sub);
+      const foreign = scope.prompts;
       if (treeMatch[2] === "events") {
         const after = parseInt(url.searchParams.get("after") ?? "0", 10) || 0;
         const r = await c.queryObject(
@@ -1406,15 +1409,17 @@ Deno.serve({ port: PORT }, async (req) => {
              FROM research_job_events
             WHERE root_job_id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid) AND id > $2
             ORDER BY id LIMIT 1000`, [treeMatch[1], after]);
-        return Response.json(omitPrompts({ events: r.rows }, foreign));
+        const rows = r.rows as Record<string, unknown>[];
+        return Response.json(scope.foreign ? omitPrompts({ events: sharedEvents(rows) }, foreign) : { events: rows });
       }
       const t = await loadTree(c, treeMatch[1]);
       if (!t) return Response.json({ error: "not found" }, { status: 404 });
-      return Response.json(omitPrompts({
+      const tree: Record<string, unknown> = {
         root_job_id: t.root.id, topic_estimate: t.estimate, origin: t.root.query,
         branches: t.nodes.map((n) => ({ id: n.id, parent_job_id: n.parent_job_id, branch_kind: n.branch_kind, rooted_step_id: n.rooted_step_id, anchor: n.anchor, query: n.query, status: n.status })),
         steers: t.steers, report: buildTreeReport(t), learning_records: learningRecords(t),
-      }, foreign));
+      };
+      return Response.json(scope.foreign ? omitPrompts(sharedTree(tree), foreign) : tree);
     } finally { c.release(); }
   }
 
@@ -1423,10 +1428,10 @@ Deno.serve({ port: PORT }, async (req) => {
     const viewer = viewerOf(req, url);
     if (viewer instanceof Response) return viewer;
     const id = jobMatch[1];
-    let foreign: string[] = [];
+    let scope = { foreign: false, prompts: [] as string[] };
     {
       const c = await pool.connect();
-      try { foreign = await foreignPrompts(c, id, viewer.sub); } finally { c.release(); }
+      try { scope = await scopeOf(c, id, viewer.sub); } finally { c.release(); }
     }
     const stream = !!jobMatch[2];
     const getJob = async () => {
@@ -1461,7 +1466,9 @@ Deno.serve({ port: PORT }, async (req) => {
                                    - extract(epoch FROM (now() - j.started_at))))::int
              END AS eta_seconds
            FROM research_jobs j WHERE j.id=$1`, [id]);
-        return r.rows[0] ? omitPrompts(r.rows[0], foreign) : null;
+        const row = r.rows[0] as Record<string, unknown> | undefined;
+        if (!row) return null;
+        return scope.foreign ? omitPrompts(sharedJobView(row), scope.prompts) : row;
       } finally { c.release(); }
     };
     if (!stream) {

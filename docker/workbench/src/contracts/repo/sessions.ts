@@ -77,7 +77,11 @@ export async function session(db: Db, id: string, who: Viewer) {
             CASE WHEN o.others THEN NULL ELSE j.inlet_ref END AS inlet_ref,
             CASE WHEN o.others THEN NULL ELSE j.refinery_id END AS refinery_id,
             CASE WHEN o.others THEN '' ELSE j.query END AS query,
-            CASE WHEN o.others THEN j.progress - 'message' ELSE j.progress END AS progress, j.result, j.session_id,
+            CASE WHEN o.others THEN jsonb_build_object('phase', j.progress -> 'phase') ELSE j.progress END AS progress,
+            -- round 4 (tester attempt 1, Case 7): ALLOW-LIST for anyone but the owner - the counts of the
+            -- shared output only (claims, cited sources); no gaps, needs, queries or prose
+            CASE WHEN o.others THEN jsonb_build_object('claims', j.result -> 'claims', 'cited_sources', j.result -> 'cited_sources') ELSE j.result END AS result,
+            j.session_id,
             CASE WHEN o.others THEN NULL ELSE j.thread_id END AS thread_id,
             j.created_at, j.started_at, j.finished_at, CASE WHEN o.others THEN NULL ELSE j.error END AS error
        FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3", adminSeesOwnerless(who))} AS others) o
