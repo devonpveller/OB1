@@ -25,9 +25,13 @@
 //   /workbench/documents   — research-workbench P2b: user documents (D12) - the documents tree,
 //                            the listing record, references, the refinery from the document
 //   /workbench/workspace   — research-workbench P2b: the title bar bell's acknowledgement
+//   /workbench/auth        — rw-identity: sign-in with Authentik (OIDC), sign-out, admin
+//                            impersonation and its audit log (inert without WORKSPACE_OIDC_*)
 import { Hono } from "hono";
-import { requireBrainKey } from "./middleware/auth.ts";
-import { identitySeam } from "./middleware/identity.ts";
+import { requireKey } from "./middleware/auth.ts";
+import { identitySeam, seamDeps } from "./middleware/identity.ts";
+import { authRouter } from "./routes/auth.ts";
+import { Provider } from "./identity/oidc.ts";
 import { ownerScope } from "./middleware/owner-scope.ts";
 import { health } from "./routes/health.ts";
 import { notebooks } from "./routes/notebooks.ts";
@@ -73,12 +77,18 @@ export const docDeps = { db: cdeps.db, reg: cdeps.registry, embed: cdeps.embed, 
 const contractDoc = openApiDocument(contract);
 app.get("/openapi.json", (c) => c.json(contractDoc));
 
-// Everything else requires the Caddy-injected secret (G7). The gate is
+// rw-identity: which keys open the door, and the sign-in (both from the environment; a half-configured
+// sign-in, or one without its own door key, refuses to start - src/identity/oidc.ts, keys.ts)
+export const seam = seamDeps(cdeps.db);
+
+// Everything else requires the door-injected secret (G7). The gate is
 // registered before the resource routers so it runs first in the chain.
-app.use("/workbench/*", requireBrainKey);
+app.use("/workbench/*", requireKey(seam.ring));
 // research-workbench P2b: the identity seam - the ONE place that resolves who the request's user is
 // (src/middleware/identity.ts); user front-end state is read and written for that identity only.
-app.use("/workbench/*", identitySeam());
+// rw-identity: with sign-in configured the identity is the session's (a browser with no session gets
+// 401 outside /workbench/auth), and an admin's impersonating requests are audited before they run.
+app.use("/workbench/*", identitySeam(seam));
 // round 2 (tester attempt 1 F1-F6): the owner scope - every request naming a documents/ path must be
 // the caller's own, and every JSON response is walked for another user's document or refinery id
 // (src/middleware/owner-scope.ts). Before every router, so no route can skip it.
@@ -102,6 +112,10 @@ app.route("/workbench/nav", nav); // research-workbench P1b — the explorer, on
 app.route("/workbench/documents", documentsRouter(docDeps)); // research-workbench P2b — user documents (D12)
 app.route("/workbench/workspace", workspaceRouter(cdeps.db)); // research-workbench P2b — the bell's acknowledgement
 app.route("/workbench/idea-schedule", ideaScheduleRouter(cdeps.db)); // rw-idea-schedule - when research on my ideas starts; research now
+app.route("/workbench/auth", authRouter({ // rw-identity — sign-in, sign-out, impersonation, the audit log
+  db: cdeps.db, oidc: seam.oidc, provider: seam.oidc ? new Provider(seam.oidc) : null,
+  mode: seam.oidc ? "oidc" : seam.cfg.header ? "header" : "default",
+}));
 app.get("/workbench/openapi.json", (c) => c.json(contractDoc)); // research-workbench P0
 app.route("/", contract); // research-workbench P0 — /workbench/contract/* (paths are absolute)
 

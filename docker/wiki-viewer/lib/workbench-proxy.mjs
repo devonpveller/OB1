@@ -13,6 +13,13 @@
 // (403 otherwise; a missing or "null" Origin is refused; a Referer, when sent, must agree).
 // WIKI_VIEWER_ALLOWED_HOSTS: extra host names (no port) beyond loopback and the container's names;
 // WIKI_VIEWER_ALLOWED_ORIGINS: extra origins (scheme://host[:port]) - the edge's public origin.
+//
+// rw-identity: the key injected is WORKSPACE_DOOR_KEY when set (the browser door's own key - required
+// once the workbench signs users in, so that WORKBENCH_KEY marks an internal service, never a browser),
+// else WORKBENCH_KEY as before. And no client may name its own identity: the identity header the
+// workbench may be configured to trust (WORKSPACE_IDENTITY_HEADER, WORKSPACE_IDENTITY_NAME_HEADER) is
+// DROPPED from every forwarded request, whatever its value; the workbench ignores it anyway while
+// sign-in is configured. Cookies pass (the sign-in session), as does the provider's Set-Cookie back.
 import http from "node:http";
 import https from "node:https";
 import { hostname as osHostname } from "node:os";
@@ -26,12 +33,15 @@ const list = (v) => String(v || "").split(/[\s,]+/).map((x) => x.trim().toLowerC
 
 export function proxyConfig(env = process.env) {
   const url = String(env.WORKBENCH_URL || "").replace(/\/+$/, "");
-  const key = String(env.WORKBENCH_KEY || "");
+  const key = String(env.WORKSPACE_DOOR_KEY || "").trim() || String(env.WORKBENCH_KEY || "");
   if (!(url && key)) return null;
+  // never forwarded from a client: the identity header(s) the workbench may trust
+  const strip = new Set([env.WORKSPACE_IDENTITY_HEADER, env.WORKSPACE_IDENTITY_NAME_HEADER]
+    .map((h) => String(h || "").trim().toLowerCase()).filter(Boolean));
   const hosts = new Set(["localhost", "127.0.0.1", "[::1]", "openbrain-wiki-viewer", osHostname().toLowerCase(),
     ...list(env.WIKI_VIEWER_ALLOWED_HOSTS)]);
   const origins = new Set(list(env.WIKI_VIEWER_ALLOWED_ORIGINS).map((o) => o.replace(/\/+$/, "")));
-  return { url, key, hosts, origins };
+  return { url, key, hosts, origins, strip };
 }
 
 // the host name of a Host header value ("name:port", "[v6]:port"), lower-cased; "" if unusable
@@ -87,7 +97,7 @@ export function proxyWorkbench(req, res, cfg) {
   }
   const target = new URL(cfg.url + req.url);
   const headers = {};
-  for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k)) headers[k] = v;
+  for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !cfg.strip?.has(k)) headers[k] = v;
   headers["x-brain-key"] = cfg.key;
   headers["x-forwarded-proto"] = headers["x-forwarded-proto"] || "https";
   const lib = target.protocol === "https:" ? https : http;

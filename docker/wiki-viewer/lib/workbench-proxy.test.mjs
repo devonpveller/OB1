@@ -152,3 +152,37 @@ test("the viewer's own origin and an allow-listed edge origin may write; reads n
     assert.equal(g.seen.length, 4);
   } finally { g.close(); }
 });
+
+// rw-identity: a client never names its own identity, and the door injects the door key.
+test("rw-identity: the identity header is dropped from every client request; cookies pass; the door key is injected", async () => {
+  const seen = [];
+  const up = await serve(async (req, res) => {
+    for await (const _ of req);
+    seen.push({ sub: req.headers["x-auth-sub"], name: req.headers["x-auth-name"], cookie: req.headers.cookie, key: req.headers["x-brain-key"] });
+    res.writeHead(200, { "content-type": "application/json", "set-cookie": "__Host-ob-ws-session=t; Path=/; Secure; HttpOnly; SameSite=Strict" });
+    res.end("{}");
+  });
+  const cfg = proxyConfig({ WORKBENCH_URL: up.url, WORKBENCH_KEY: "internal-service-key", WORKSPACE_DOOR_KEY: "the-door-key-0123456789",
+    WORKSPACE_IDENTITY_HEADER: "X-Auth-Sub", WORKSPACE_IDENTITY_NAME_HEADER: "X-Auth-Name" });
+  const front = await serve((req, res) => proxyWorkbench(req, res, cfg));
+  try {
+    const r = await fetch(`${front.url}/workbench/contract/documents`, { headers: { "x-auth-sub": "someone-else", "X-Auth-Name": "Mallory", cookie: "__Host-ob-ws-session=abc" } });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get("set-cookie") ?? "", /HttpOnly/);
+    const w = await fetch(`${front.url}/workbench/auth/logout`, { method: "POST", headers: { origin: front.url, "x-auth-sub": "someone-else" } });
+    assert.equal(w.status, 200);
+    assert.deepEqual(seen, [
+      { sub: undefined, name: undefined, cookie: "__Host-ob-ws-session=abc", key: "the-door-key-0123456789" },
+      { sub: undefined, name: undefined, cookie: undefined, key: "the-door-key-0123456789" },
+    ]);
+  } finally {
+    up.server.close(); front.server.close();
+  }
+});
+
+test("rw-identity: without WORKSPACE_DOOR_KEY the door injects WORKBENCH_KEY, and nothing is stripped unless named", () => {
+  const c = proxyConfig({ WORKBENCH_URL: "http://wb:8000", WORKBENCH_KEY: "k" });
+  assert.equal(c.key, "k");
+  assert.equal(c.strip.size, 0);
+  assert.equal(proxyConfig({ WORKBENCH_URL: "http://wb:8000", WORKBENCH_KEY: "k", WORKSPACE_DOOR_KEY: "  d  " }).key, "d");
+});

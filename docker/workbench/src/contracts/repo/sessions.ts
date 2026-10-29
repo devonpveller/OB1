@@ -1,7 +1,7 @@
 // session(id), the jobs queue view, and the snapshot the stream emits. Research jobs carry no
 // metadata, so a metadata filter returns nothing (fail closed).
 import type { Db } from "../db.ts";
-import { FOREIGN_IDEA, FOREIGN_JOB, type Viewer } from "../../documents/ownership.ts";
+import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB, OWNERLESS_FOREIGN, type Viewer } from "../../documents/ownership.ts";
 
 interface JobRow {
   id: string;
@@ -63,7 +63,9 @@ export function shapeSession(r: JobRow) {
 // (research_prompts); the job and everything it produces are shared. A job started from the workspace
 // shows its query to its owner only - to anyone else the query reads as empty.
 export const OWN_QUERY = (alias: string, ownerParam: string) =>
-  `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = ${alias}.id AND p.owner_sub <> ${ownerParam})
+  `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id IN (${alias}.id, coalesce(${alias}.root_job_id, ${alias}.id))
+                     AND p.owner_sub <> ${ownerParam} AND p.owner_sub NOT LIKE 'service:%')
+              OR ${OWNERLESS_FOREIGN(alias, ownerParam)}
         THEN '' ELSE ${alias}.query END`;
 
 // A job is shared research output; its private fields (the original prompt, inlet_ref, refinery_id,
@@ -75,10 +77,14 @@ export async function session(db: Db, id: string, who: Viewer) {
             CASE WHEN o.others THEN NULL ELSE j.inlet_ref END AS inlet_ref,
             CASE WHEN o.others THEN NULL ELSE j.refinery_id END AS refinery_id,
             CASE WHEN o.others THEN '' ELSE j.query END AS query,
-            j.progress, j.result, j.session_id,
+            CASE WHEN o.others THEN jsonb_build_object('phase', j.progress -> 'phase') ELSE j.progress END AS progress,
+            -- round 4 (tester attempt 1, Case 7): ALLOW-LIST for anyone but the owner - the counts of the
+            -- shared output only (claims, cited sources); no gaps, needs, queries or prose
+            CASE WHEN o.others THEN jsonb_build_object('claims', j.result -> 'claims', 'cited_sources', j.result -> 'cited_sources') ELSE j.result END AS result,
+            j.session_id,
             CASE WHEN o.others THEN NULL ELSE j.thread_id END AS thread_id,
-            j.created_at, j.started_at, j.finished_at, j.error
-       FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3")} AS others) o
+            j.created_at, j.started_at, j.finished_at, CASE WHEN o.others THEN NULL ELSE j.error END AS error
+       FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3", adminSeesOwnerless(who))} AS others) o
       WHERE j.id = $1`,
     [id, who.sub, who.key],
   );
@@ -110,8 +116,8 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
               jsonb_build_object('origin', origin,
                                  'query', CASE WHEN o.others THEN '' ELSE left(j.query, 200) END,
                                  'refinery_id', CASE WHEN o.others THEN NULL ELSE j.refinery_id END,
-                                 'phase', progress ->> 'phase', 'error', error) AS detail
-         FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4")} AS others) o
+                                 'phase', progress ->> 'phase', 'error', CASE WHEN o.others THEN NULL ELSE error END) AS detail
+         FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4", adminSeesOwnerless(who))} AS others) o
         WHERE ($1::text IS NULL OR j.status = $1) ORDER BY j.created_at DESC LIMIT $2`,
       [state, limit, who.sub, who.key],
     );

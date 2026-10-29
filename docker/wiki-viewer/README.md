@@ -60,6 +60,10 @@ viewer (openbrain-wiki-viewer, node:22; NO Quartz in the image since P1c -
   (WIKI_VIEWER_ALLOWED_HOSTS; 421 otherwise), and a write only from the
   viewer's own origin or an allow-listed edge origin
   (WIKI_VIEWER_ALLOWED_ORIGINS; 403 otherwise) - CSRF and DNS-rebinding guard.
+  rw-identity: the key injected is WORKSPACE_DOOR_KEY when set (required once
+  the workbench signs users in), and WORKSPACE_IDENTITY_HEADER /
+  WORKSPACE_IDENTITY_NAME_HEADER are dropped from every client request; the
+  sign-in's cookies pass both ways (workbench/README.md "Sign-in").
   explorer: /__nav?folder= - ONE folder at a time, sorted (lib/nav-tree.mjs),
   served by the NAV WORKER (lib/nav-worker.mjs: own thread + heap, port 8082,
   so the page thread's GC never delays it); the browser reaches it as

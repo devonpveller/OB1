@@ -31,7 +31,8 @@ import { screenSources } from "./injection.ts";
 import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
-import { type Caller, callerFor, inletRef, MismatchLog, parseCallers, resolveOrigin } from "./origin.ts";
+import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, promptOwner, resolveOrigin } from "./origin.ts";
+import { FOREIGN_PROMPTS_SQL, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
@@ -1099,6 +1100,26 @@ function callerOf(req: Request, url: URL): Caller | null {
 function authed(req: Request, url: URL): boolean {
   return callerOf(req, url) !== null;
 }
+// rw-identity round 2: who a READ is for (viewer.ts) - a Response when the caller may not name that user
+function viewerOf(req: Request, url: URL): { sub: string } | Response {
+  const caller = callerOf(req, url);
+  if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const v = readViewer(caller, req.headers.get("x-on-behalf-of"));
+  return "error" in v ? Response.json({ error: v.error }, { status: v.status }) : v;
+}
+// rw-identity round 3: who owns a job that predates rw-identity (no research_prompts row) - the one
+// operator (07-MULTI-USER); blank = nobody (its prompt is read by no caller)
+const DEFAULT_SUB = (Deno.env.get("WORKSPACE_DEFAULT_SUB") ?? "").trim();
+// round 5 (tester attempt 2): only the job's owner may act on it (steer, cancel) - viewer.ts MAY_ACT_SQL
+async function mayAct(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<boolean> {
+  return !!(await c.queryObject<{ ok: boolean }>(MAY_ACT_SQL, [id, viewer, DEFAULT_SUB])).rows[0]?.ok;
+}
+// whether job `id`'s tree belongs to another user than the viewer, and its texts (round 4: a foreign
+// viewer reads the allow-list of viewer.ts, the texts omitted from what is left)
+async function scopeOf(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<{ foreign: boolean; prompts: string[] }> {
+  const row = (await c.queryObject<{ foreign_: boolean; prompts: string[] }>(FOREIGN_PROMPTS_SQL, [id, viewer, DEFAULT_SUB])).rows[0];
+  return { foreign: !!row?.foreign_, prompts: row?.prompts ?? [] };
+}
 
 Deno.serve({ port: PORT }, async (req) => {
   const url = new URL(req.url);
@@ -1261,6 +1282,10 @@ Deno.serve({ port: PORT }, async (req) => {
     const resolved = resolveOrigin(caller, body.origin, QUEUE_USER_BY_ORIGIN);
     originMismatch.note(caller, resolved.claimed, resolved.origin);
     const inlet = inletRef(body as Record<string, unknown>);
+    // rw-identity: a user named by the caller - accepted from Open WebUI's key only (origin.ts)
+    const onBehalf = onBehalfOf(caller, body as Record<string, unknown>);
+    if ("error" in onBehalf) return Response.json({ error: onBehalf.error }, { status: onBehalf.status });
+    const owner = promptOwner(caller, onBehalf.sub);
     const options = {
       ...callerOptions,
       ...(deadlineAt ? { deadline_at: deadlineAt } : {}),
@@ -1276,6 +1301,7 @@ Deno.serve({ port: PORT }, async (req) => {
     const c = await pool.connect();
     let jobId: string;
     try {
+      await c.queryObject("BEGIN");
       const r = await c.queryObject<{ id: string }>(
         `INSERT INTO research_jobs (status, origin, query, thread_id, options, caller, origin_claimed, inlet_ref)
          VALUES ('queued', $1, $2, $3, $4::jsonb, $5, $6, $7::jsonb) RETURNING id`,
@@ -1283,6 +1309,18 @@ Deno.serve({ port: PORT }, async (req) => {
          inlet ? JSON.stringify(inlet) : null],
       );
       jobId = r.rows[0].id;
+      // rw-identity: whose original prompt this is (research_prompts, init-documents.sql), in the
+      // job's own transaction - a user's job is never stored without its owner (it would read as shared)
+      if (owner) {
+        await c.queryObject(
+          `INSERT INTO research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1, $2, $3, $4) ON CONFLICT (job_id) DO NOTHING`,
+          [jobId, owner.owner_sub, owner.actor_sub, query],
+        );
+      }
+      await c.queryObject("COMMIT");
+    } catch (e) {
+      await c.queryObject("ROLLBACK").catch(() => {});
+      throw e;
     } finally { c.release(); }
     // Enqueue only — the background drain loop is the sole dispatcher (serializes
     // research fan-out so it can't flood LiteLLM). wake() lets it pick this up now.
@@ -1302,7 +1340,8 @@ Deno.serve({ port: PORT }, async (req) => {
   // research" and retrieve completed runs without holding the chat open. Optional
   // ?status= exact filter, ?limit= (1-50, default 10). Newest first.
   if (req.method === "GET" && url.pathname === "/research/jobs") {
-    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
     const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10) || 10));
     const statusFilter = url.searchParams.get("status");
     const c = await pool.connect();
@@ -1314,9 +1353,9 @@ Deno.serve({ port: PORT }, async (req) => {
               WHERE q.status='queued' AND q.created_at < j.created_at)::int
            END AS queue_position
          FROM research_jobs j
-         WHERE ($2::text IS NULL OR j.status = $2)
+         WHERE ($2::text IS NULL OR j.status = $2) AND ${LISTED_FOR("j", "$3", "$4")}
          ORDER BY j.created_at DESC LIMIT $1`,
-        [limit, statusFilter],
+        [limit, statusFilter, viewer.sub, DEFAULT_SUB],
       );
       return Response.json({ jobs: r.rows });
     } finally { c.release(); }
@@ -1327,8 +1366,16 @@ Deno.serve({ port: PORT }, async (req) => {
   // job is left as it is. The caller reads the outcome from GET /research/jobs/:id.
   const cancelMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})\/cancel$/i);
   if (req.method === "POST" && cancelMatch) {
-    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
     const id = cancelMatch[1];
+    {
+      const c0 = await pool.connect();
+      try {
+        // another user's job is answered as a missing one (the owner, or its service, alone may cancel)
+        if (!(await mayAct(c0, id, viewer.sub))) return Response.json({ error: "not found" }, { status: 404 });
+      } finally { c0.release(); }
+    }
     let reason = "cancel requested by the caller";
     try {
       const b = await req.json() as { reason?: unknown };
@@ -1363,6 +1410,15 @@ Deno.serve({ port: PORT }, async (req) => {
   if (req.method === "POST" && steerMatch) {
     const caller = callerOf(req, url);
     if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
+    {
+      const c0 = await pool.connect();
+      try {
+        // round 5: only the owner steers (a steer's answer carries the job's anchor and topic)
+        if (!(await mayAct(c0, steerMatch[1], viewer.sub))) return Response.json({ error: "not found" }, { status: 404 });
+      } finally { c0.release(); }
+    }
     let b: { step_id?: unknown; text?: unknown; contract?: unknown; context_snapshot?: unknown };
     try { b = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const c = await pool.connect();
@@ -1384,9 +1440,12 @@ Deno.serve({ port: PORT }, async (req) => {
   // they were made against), the cumulative report and one exploratory learning record per branch.
   const treeMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})\/(tree|events)$/i);
   if (req.method === "GET" && treeMatch) {
-    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
     const c = await pool.connect();
     try {
+      const scope = await scopeOf(c, treeMatch[1], viewer.sub);
+      const foreign = scope.prompts;
       if (treeMatch[2] === "events") {
         const after = parseInt(url.searchParams.get("after") ?? "0", 10) || 0;
         const r = await c.queryObject(
@@ -1394,22 +1453,30 @@ Deno.serve({ port: PORT }, async (req) => {
              FROM research_job_events
             WHERE root_job_id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid) AND id > $2
             ORDER BY id LIMIT 1000`, [treeMatch[1], after]);
-        return Response.json({ events: r.rows });
+        const rows = r.rows as Record<string, unknown>[];
+        return Response.json(scope.foreign ? omitPrompts({ events: sharedEvents(rows) }, foreign) : { events: rows });
       }
       const t = await loadTree(c, treeMatch[1]);
       if (!t) return Response.json({ error: "not found" }, { status: 404 });
-      return Response.json({
+      const tree: Record<string, unknown> = {
         root_job_id: t.root.id, topic_estimate: t.estimate, origin: t.root.query,
         branches: t.nodes.map((n) => ({ id: n.id, parent_job_id: n.parent_job_id, branch_kind: n.branch_kind, rooted_step_id: n.rooted_step_id, anchor: n.anchor, query: n.query, status: n.status })),
         steers: t.steers, report: buildTreeReport(t), learning_records: learningRecords(t),
-      });
+      };
+      return Response.json(scope.foreign ? omitPrompts(sharedTree(tree), foreign) : tree);
     } finally { c.release(); }
   }
 
   const jobMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})(\/stream)?$/i);
   if (req.method === "GET" && jobMatch) {
-    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
     const id = jobMatch[1];
+    let scope = { foreign: false, prompts: [] as string[] };
+    {
+      const c = await pool.connect();
+      try { scope = await scopeOf(c, id, viewer.sub); } finally { c.release(); }
+    }
     const stream = !!jobMatch[2];
     const getJob = async () => {
       const c = await pool.connect();
@@ -1443,7 +1510,9 @@ Deno.serve({ port: PORT }, async (req) => {
                                    - extract(epoch FROM (now() - j.started_at))))::int
              END AS eta_seconds
            FROM research_jobs j WHERE j.id=$1`, [id]);
-        return r.rows[0] ?? null;
+        const row = r.rows[0] as Record<string, unknown> | undefined;
+        if (!row) return null;
+        return scope.foreign ? omitPrompts(sharedJobView(row), scope.prompts) : row;
       } finally { c.release(); }
     };
     if (!stream) {

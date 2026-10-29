@@ -21,6 +21,7 @@ import {
   loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord, type ScoredClaim,
   weightFor,
 } from "./credibility.ts";
+import { derivedQuestion, scrubList, withoutPromptSpans } from "./prompt-private.ts";
 import { assess, type AdmissionContext, type Assessment, finalScore, subjectTokens, type TrailEntry, trailEntry } from "./admission.ts";
 import { linkedDois, type ScholarlyResolver } from "./scholarly.ts";
 import { type CuratorFilingOptions, deliverToCurator, type FiledRecord } from "./curator-filed.ts";
@@ -701,7 +702,9 @@ export async function runResearch(
   // Seed sources (e.g. a newsletter article the caller already fetched through
   // Tor) are staged directly — never re-fetched. In article mode they are THE
   // subject of the episode.
-  const sessionId = dryRun ? null : await createStagingSession(client, query, threadId, opts.origin || "owui");
+  // rw-identity round 5: the staging session is shared (public.sessions) - it names the run, never the
+  // prompt (private to its owner: research_jobs.query, research_prompts)
+  const sessionId = dryRun ? null : await createStagingSession(client, "research run (the question is private to its owner)", threadId, opts.origin || "owui");
   // Seeds the contract denied were dropped above (`keptSeeds`).
   // Pages staged before web gathering (seeds + KB recalls) are exempt from the
   // relevance gate below; everything after this index came from the open web.
@@ -2119,16 +2122,19 @@ export async function runResearch(
       research_key: `rs-${await sha1(query + (threadId || ""))}`,
       // rw-curator-filed: the curator's persist writes the typed 'filed' event for this job in the filing transaction
       ...(jobId ? { job_id: jobId } : {}),
-      query,
+      // rw-identity round 5: what the curator files is shared knowledge - the DERIVED question (the
+      // planner's needs), and no span of 5+ prompt words in needs, follow-ups or prose (prompt-private.ts).
+      // research_key above still hashes the prompt: a hash, the idempotency key of the resend.
+      query: derivedQuestion(needs, subjectEntity, query),
       claim: firstParagraph(curatorSynthesis).slice(0, 600),
       synthesis: curatorSynthesis,
       // P3a - the claim kind the weight table read for this run, stamped on every claim it files.
       claim_kind: claimKind.kind,
       credibility_model: model.modelVersion,
-      prose,                              // human-readable rendering (curator → sources.metadata)
+      prose: withoutPromptSpans(prose, query), // human-readable rendering (curator → sources.metadata)
       report_type: reportType || undefined, // template id (curator → sources.metadata → wiki)
-      needs,                             // the decomposed sub-questions (breadcrumbs)
-      followup_queries: followupQueries, // refined/deepen queries across rounds (breadcrumbs)
+      needs: scrubList(needs, query),    // the decomposed sub-questions (breadcrumbs)
+      followup_queries: scrubList(followupQueries, query), // refined/deepen queries across rounds (breadcrumbs)
       kind: "deep_research",
       topic_hint: opts.origin || "research",
       thread_id: threadId || undefined,

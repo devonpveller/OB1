@@ -70,7 +70,6 @@ Deno.test("the failure notice answers 'did it find anything?' in its first line"
   assertStringIncludes(first, "#");
   assertStringIncludes(text, "**Answer.**");
   assertStringIncludes(text, "search failure, not evidence of absence");
-  assertStringIncludes(text, "Dell OptiPlex 3050");
   // It must never be dressed up as a finding.
   assert(!/absence of evidence for/i.test(text), "must not read as a literature finding");
   assertStringIncludes(text, "## Search record");
@@ -94,4 +93,16 @@ Deno.test("failure notice stays short — it is a notice, not a report", () => {
   const text = failureNotice("q", "OptiPlex 3050", needs6, optiplexRecord, "search_degraded");
   const words = text.split(/\s+/).filter(Boolean).length;
   assert(words <= 600, `failure notice is ${words} words`);
+});
+
+// round 4 (tester attempt 1, Case 7): the notice states the reason generically - its heading and its
+// answer never quote the question or a subject taken from it (the owner sees the question in their view)
+Deno.test("the failure notice's heading and answer never quote the question or its subject", () => {
+  const q = "My lawyer Zq0123456789 Smith, should I sign the settlement?";
+  const subj = q.split(/[:,;]/)[0].trim();
+  const text = failureNotice(q, subj, needs6, optiplexRecord, "search_degraded");
+  const head = text.split("## ")[0];
+  assert(!head.includes("Zq0123456789") && !head.includes("lawyer"), head);
+  assertStringIncludes(head, "No sources were retrieved");
+  assertStringIncludes(head, "search failure, not evidence of absence");
 });
