@@ -46,7 +46,11 @@ param(
   [switch]$SkipSweeps,  # the integration test only (a targeted RED of one case)
   # round 4: a tester's probe test (deno, mounted into the test image as src/identity/t_probe_test.ts,
   # never part of the tree) run with the PROBE_* environment its author wrote it for
-  [string]$ExtraTest = ''
+  [string]$ExtraTest = '',
+  # round 4: with -Red against a RECENT base (one that already passes the older cases), the case-name
+  # prefixes that must FAIL there (comma list, e.g. 'C2d,C2e'); the base's own test stage runs this
+  # tree's integration test file, mounted over it (this tree's unit tests would stop that build)
+  [string]$RedCases = ''
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -190,7 +194,7 @@ function Wait-Http([string]$url, [int]$tries = 60) {
   }
   return $false
 }
-function Build-At([string]$sha, [string]$tag, [string]$ctxRel, [string]$what) {
+function Build-At([string]$sha, [string]$tag, [string]$ctxRel, [string]$what, [string]$target = '') {
   $tree = Join-Path $env:TEMP "$P-tree-$sha"
   if (-not (Test-Path $tree)) {
     New-Item -ItemType Directory -Force $tree | Out-Null
@@ -203,6 +207,7 @@ function Build-At([string]$sha, [string]$tag, [string]$ctxRel, [string]$what) {
   }
   $args2 = @('build', '--label', $label, '--build-arg', "OB1_SHA=$sha", '-t', $tag)
   if ($what -eq 'viewer') { $args2 += @('--build-context', "recipes=$(Join-Path $tree 'recipes')") }
+  if ($target) { $args2 += @('--target', $target) }
   return DkLong @args2 (Join-Path $tree $ctxRel)
 }
 
@@ -248,8 +253,14 @@ try {
     if ($script:rc -ne 0) { throw 'build research' }
     $script:made.images += $rsTag
   }
-  $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
-  Check ($script:rc -eq 0) "$wbTestTag (this tree's test stage) built"
+  if ($Red -and $RedCases) {
+    $o = Build-At $BaseSha $wbTestTag 'docker/workbench' 'workbench' 'test'; Save 'build-workbench-test.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
+    Check ($script:rc -eq 0) "$wbTestTag (the BASE's test stage; this tree's integration test is mounted over it) built"
+  } else {
+    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
+    Check ($script:rc -eq 0) "$wbTestTag (this tree's test stage) built"
+  }
+  $itMount = if ($Red -and $RedCases) { @('-v', "$(Join-Path $wb 'src/identity/identity_integration_test.ts'):/app/src/identity/identity_integration_test.ts:ro") } else { @() }
   $script:made.images += $wbTestTag
 
   # ---------------------------------------------------------------- 4. the lab CA
@@ -361,19 +372,24 @@ try {
   if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin 200 direct-forged-key 401') "the forwarder's CSRF / rebinding guard holds for the sign-in routes ($edge)" }
 
   Write-Host '[6b] the identity integration test (real sessions; the real research service)'
-  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
+  $o = Lab-Docker 900 (@('run', '--rm', '--label', $label, '--network', $net) + $itMount + @('-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
     '-e', "IDENTITY_TEST_VIEWER=http://$P-viewer:8080", '-e', "IDENTITY_TEST_WB=http://$P-wb:8000", '-e', "IDENTITY_TEST_WB_PLAIN=http://$P-wbplain:8000",
     '-e', "IDENTITY_TEST_WB_NODEF=http://$P-wbnodef:8000",
     '-e', 'IDENTITY_TEST_STUB=https://stub-oidc:8443', '-e', "IDENTITY_TEST_RESEARCH=http://$P-rs:8000",
     '-e', "IDENTITY_TEST_DOOR_KEY=$door", '-e', "IDENTITY_TEST_INTERNAL_KEY=$key", '-e', "IDENTITY_TEST_OWUI_KEY=$kOwui", '-e', "IDENTITY_TEST_AO_KEY=$kAo",
     '-e', "IDENTITY_TEST_WS_KEY=$wsKey", '-e', "IDENTITY_TEST_USERS=$usersJson", '-e', "IDENTITY_TEST_DEFAULT_SUB=$profSub", '-e', 'IDENTITY_TEST_SUB_HEADER=X-Test-Sub',
     '-e', "IDENTITY_TEST_APP_PASSWORD=$appPw", '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
-    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/identity/identity_integration_test.ts')
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/identity/identity_integration_test.ts'))
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save 'identity-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|=>|^\s*[-+]\s' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: every identity case fails on the base ($($sum.Value))" }
+  if ($Red -and $RedCases) {
+    foreach ($rc0 in ($RedCases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+      Check ($clean -match "(?m)^\s*$([regex]::Escape($rc0))\b.*\.\.\. FAILED") "RED: $rc0 fails on the base $BaseSha"
+    }
+  }
+  elseif ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: every identity case fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 18) "the identity integration test ($($sum.Value))" }
 
   if ($ExtraTest) {
@@ -438,15 +454,18 @@ try {
   Save 'viewer.log' (Dk logs --tail 40 "$P-viewer")
   # round 4 (tester F5): the revert takes the rows rw-identity wrote into research_prompts with it -
   # the back-fill's (actor system:backfill) and the service owners (service:<caller>) - and the tables
-  if (-not $Red) {
-    $null = Dk cp (Join-Path $dockerDir 'revert-identity.sql') "${db}:/tmp/revert-identity.sql"
+  if ((-not $Red) -or $RedCases) {
+    $revSrc = if ($Red) { Join-Path $env:TEMP "$P-tree-$BaseSha/docker/revert-identity.sql" } else { Join-Path $dockerDir 'revert-identity.sql' }
+    $null = Dk cp $revSrc "${db}:/tmp/revert-identity.sql"
     $bf = (Dk exec $db psql -U postgres -d openbrain -tAqc "select count(*) from research_prompts where actor_sub = 'system:backfill' or owner_sub like 'service:%'").Trim()
     $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/revert-identity.sql
     $rv = $script:rc
     $after = (Dk exec $db psql -U postgres -d openbrain -tAqc "select count(*) from research_prompts where actor_sub = 'system:backfill' or owner_sub like 'service:%'").Trim()
     $tbl = (Dk exec $db psql -U postgres -d openbrain -tAqc "select coalesce(to_regclass('public.admin_audit')::text, '-') || ' ' || coalesce(to_regclass('public.workspace_sessions')::text, '-')").Trim()
     Save 'revert.log' "rw-identity rows before the revert: $bf; after: $after; tables after: $tbl; exit $rv"
-    Check (($rv -eq 0) -and [int]$bf -gt 0 -and $after -eq '0' -and $tbl -eq '- -') "revert-identity.sql removes rw-identity's research_prompts rows ($bf -> $after) and its tables ($tbl)"
+    $revOk = ($rv -eq 0) -and [int]$bf -gt 0 -and $after -eq '0' -and $tbl -eq '- -'
+    if ($Red) { Check (-not $revOk) "RED: the base's revert-identity.sql leaves rw-identity's research_prompts rows ($bf -> $after)" }
+    else { Check $revOk "revert-identity.sql removes rw-identity's research_prompts rows ($bf -> $after) and its tables ($tbl)" }
   }
 } catch {
   Fail "the run stopped: $_"
