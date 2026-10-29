@@ -425,6 +425,40 @@ Deno.test({ name: "C2b the research service's job list, detail, stream, tree and
   assertEquals((await rsGet(K.shared, `/research/jobs/${job}`, sub("alice"))).status, 403);
 } });
 
+// C2c (coordinator 2026-10-29; 07-MULTI-USER "all existing private content is ProfNovice's"): a job
+// with no recorded owner (started before rw-identity) is WORKSPACE_DEFAULT_SUB's - its prompt (in the
+// query, the error, a progress message) reaches that subject only, through the workbench and the
+// research service alike. The lab's default subject is the lab user "prof".
+Deno.test({ name: "C2c an ownerless pre-rw-identity job is the default subject's: nobody else sees its prompt", ...opts, fn: async () => {
+  const mark = `OwnerlessPrompt${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const prompt = `${mark} a question asked before sign-in existed`;
+  const [{ id }] = await sql<{ id: string }>(
+    `INSERT INTO public.research_jobs (status, origin, query, caller, finished_at, error, progress)
+     VALUES ('error', 'manual', $1, 'shared-key', now(), 'failed on ' || $1, jsonb_build_object('message', 'planning ' || $1))
+     RETURNING id::text AS id`, [prompt]);
+  const prof = new Browser();
+  await prof.signIn("prof");
+  assertEquals((await prof.req("GET", "/workbench/auth/me")).json.subject_sub, E("IDENTITY_TEST_DEFAULT_SUB"), "prof is the default subject");
+  const ps = await prof.req("GET", `/workbench/contract/sessions/${id}`);
+  assertEquals(ps.json.query, prompt, "the default subject reads the old prompt");
+  assert((await rsGet(K.owui, `/research/jobs/${id}`, sub("prof"))).text.includes(mark), "and through Open WebUI");
+  assert((await rsGet(K.owui, `/research/jobs?limit=50`, sub("prof"))).text.includes(id), "and lists it");
+  for (const login of ["bob", "admin"]) {
+    const b = new Browser();
+    await b.signIn(login);
+    for (const p of [`/workbench/contract/sessions/${id}`, "/workbench/contract/jobs?kinds=research&limit=200", "/workbench/contract/timeline?limit=500", `/workbench/contract/sessions/${id}/stream`]) {
+      const r = await b.req("GET", p);
+      assert(!r.text.includes(mark), `${login} ${p} carries the old prompt: ${r.text.slice(0, 300)}`);
+    }
+  }
+  for (const [who, key, obo] of [["bob via owui", K.owui, sub("bob")], ["agent-org", K.ao, undefined], ["shared key", K.shared, undefined]] as const) {
+    for (const p of [`/research/jobs?limit=50`, `/research/jobs/${id}`, `/research/jobs/${id}/tree`, `/research/jobs/${id}/events`]) {
+      const r = await rsGet(key, p, obo);
+      assert(!r.text.includes(mark), `${who} ${p} carries the old prompt: ${r.text.slice(0, 300)}`);
+    }
+  }
+} });
+
 // ── C5: no sign-in configured = exactly the P2b behaviour ─────────────────────────────────────
 Deno.test({ name: "C5 a workbench with no WORKSPACE_OIDC_* behaves as before: one default identity, no sign-in", ...opts, ignore: ignore || !WB_PLAIN, fn: async () => {
   const h = { "x-brain-key": INTERNAL };

@@ -79,9 +79,12 @@ $users = @(
   @{ login = 'bob'; sub = (Rand 64); name = 'Bob Lab'; groups = @('lab-users') },
   @{ login = 'carol'; sub = (Rand 64); name = 'Carol Lab'; groups = @('lab-users') },
   @{ login = 'dave'; sub = (Rand 64); name = 'Dave Lab'; groups = @('lab-users') },
-  @{ login = 'admin'; sub = (Rand 64); name = 'Admin Lab'; groups = @('lab-users', 'research-admins') })
+  @{ login = 'admin'; sub = (Rand 64); name = 'Admin Lab'; groups = @('lab-users', 'research-admins') },
+  # the lab's WORKSPACE_DEFAULT_SUB (the ProfNovice analogue: owner of everything that predates sign-in)
+  @{ login = 'prof'; sub = (Rand 64); name = 'Prof Lab'; groups = @('lab-users') })
 $usersJson = (ConvertTo-Json -Compress -Depth 4 @($users | ForEach-Object { [pscustomobject]$_ }))
 $daveSub = ($users | Where-Object { $_.login -eq 'dave' }).sub
+$profSub = ($users | Where-Object { $_.login -eq 'prof' }).sub
 $issuer = 'https://stub-oidc:8443/application/o/lab/'
 $redirect = "http://$P-viewer:8080/workbench/auth/callback"
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
@@ -282,7 +285,7 @@ try {
       '-e', "STUB_USERS=$usersJson", '-e', 'STUB_CERT=/certs/srv.pem', '-e', 'STUB_KEY=/certs/srv.key',
       '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '--allow-env', '--allow-read', '/ct/stub-oidc.ts')
   $null = Run-Detached "$P-rs" @('-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', "MCP_ACCESS_KEY=$key",
-      '-e', "RESEARCH_CALLERS=owui-tool=owui:$kOwui;agent-org=mattermost:$kAo;workspace=workspace:$wsKey",
+      '-e', "RESEARCH_CALLERS=owui-tool=owui:$kOwui;agent-org=mattermost:$kAo;workspace=workspace:$wsKey", '-e', "WORKSPACE_DEFAULT_SUB=$profSub",
       '-e', 'CHAT_API_BASE=http://unreachable.invalid/v1', '-e', 'EMBEDDING_API_BASE=http://unreachable.invalid/v1',
       '-e', 'CURATOR_URL=http://unreachable.invalid', '-e', 'SEARCH_API_BASE=http://unreachable.invalid', $rsTag)
   $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'WIKI_NAV_MIN_ROWS=0',
@@ -294,7 +297,7 @@ try {
       '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid',
       '-e', 'WIKI_GIT_DIR=/wiki', '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', "RESEARCH_URL=http://$P-rs:8000",
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'FETCH_PROXY_URL=http://stub-proxy:3128', '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
-      '-e', 'WORKSPACE_DEFAULT_SUB=lab-default-sub', '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
+      '-e', "WORKSPACE_DEFAULT_SUB=$profSub", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   # the signed-in workbench ALSO has the identity header configured: it must be ignored there
   $wbArgs = @('--network-alias', 'openbrain-workbench') + $common + @('-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-v', "${vault}:/wiki", '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
       '-e', "WORKSPACE_DOOR_KEY=$door", '-e', "WORKSPACE_OIDC_ISSUER=$issuer", '-e', 'WORKSPACE_OIDC_CLIENT_ID=research-workspace-lab',
@@ -330,7 +333,7 @@ try {
     '-e', "IDENTITY_TEST_VIEWER=http://$P-viewer:8080", '-e', "IDENTITY_TEST_WB=http://$P-wb:8000", '-e', "IDENTITY_TEST_WB_PLAIN=http://$P-wbplain:8000",
     '-e', 'IDENTITY_TEST_STUB=https://stub-oidc:8443', '-e', "IDENTITY_TEST_RESEARCH=http://$P-rs:8000",
     '-e', "IDENTITY_TEST_DOOR_KEY=$door", '-e', "IDENTITY_TEST_INTERNAL_KEY=$key", '-e', "IDENTITY_TEST_OWUI_KEY=$kOwui", '-e', "IDENTITY_TEST_AO_KEY=$kAo",
-    '-e', "IDENTITY_TEST_WS_KEY=$wsKey", '-e', "IDENTITY_TEST_USERS=$usersJson", '-e', 'IDENTITY_TEST_DEFAULT_SUB=lab-default-sub', '-e', 'IDENTITY_TEST_SUB_HEADER=X-Test-Sub',
+    '-e', "IDENTITY_TEST_WS_KEY=$wsKey", '-e', "IDENTITY_TEST_USERS=$usersJson", '-e', "IDENTITY_TEST_DEFAULT_SUB=$profSub", '-e', 'IDENTITY_TEST_SUB_HEADER=X-Test-Sub',
     '-e', "IDENTITY_TEST_APP_PASSWORD=$appPw", '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/identity/identity_integration_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
@@ -340,6 +343,16 @@ try {
   if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: every identity case fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 14) "the identity integration test ($($sum.Value))" }
 
+  # init-identity.sql's back-fill (C2c): re-applied with workspace.default_sub set, an ownerless job
+  # becomes the default subject's, an ownerless AGENT job its service's; a job with an owner is untouched
+  if (-not $Red) {
+    $q = "insert into research_jobs (status, origin, query, caller) values ('error', 'manual', 'backfill probe user', 'shared-key'), ('error', 'mattermost', 'backfill probe agent', 'agent-org') returning id"
+    $ids = @(((Dk exec $db psql -U postgres -d openbrain -tAqc $q) -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $o = Dk exec -e "PGOPTIONS=-c workspace.default_sub=$profSub" $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/init-identity.sql
+    $owners = ((Dk exec $db psql -U postgres -d openbrain -tAqc "select coalesce((select owner_sub from research_prompts where job_id = '$($ids[0])'), '-') || ' ' || coalesce((select owner_sub from research_prompts where job_id = '$($ids[1])'), '-')") -replace [regex]::Escape($profSub), '<default-sub>').Trim()
+    Save 'backfill.log' "owners after the back-fill: $owners"
+    Check (($script:rc -eq 0) -and $owners -eq '<default-sub> service:agent-org') "init-identity.sql back-fills ownerless jobs: the default subject's, an agent's its service's ($owners)"
+  }
   $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('carol', 'dave', 'off'))
   if ($Red) { $sweeps = @(, @('carol', 'dave', 'on')) }
   if ($SkipSweeps) { $sweeps = @() }
