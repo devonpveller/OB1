@@ -82,7 +82,7 @@ Open WebUI signs its own users in (env-only provider settings; nothing in a data
 | `GET /workbench/auth/callback` | Authentik's answer: state, code + verifier, ID token (signature RS256/ES256/HS256, iss, aud, azp, exp, iat, nonce) |
 | `GET /workbench/auth/me` | who the request is (the workspace asks before it renders) |
 | `POST /workbench/auth/logout` | revokes the session server-side, clears the cookie; offers Authentik's end-session URL |
-| `POST /workbench/auth/impersonate {sub, reason}` / `.../impersonate/end` | admins only; a reason first (>= 8 visible characters with a letter or digit; zero-width and white space do not count) |
+| `POST /workbench/auth/impersonate {sub, reason}` / `.../impersonate/end` | admins only; a reason first (>= 8 letters or digits by Unicode category; nothing else counts) |
 | `GET /workbench/auth/users`, `GET /workbench/auth/audit?actor&subject&action&since&limit` | admins only: whom to impersonate; the audit log |
 
 - **Identity.** `subject_sub` = the Authentik `sub` of the signed-in user, `actor_sub` = the same user,
@@ -120,6 +120,12 @@ Open WebUI signs its own users in (env-only provider settings; nothing in a data
   research service's reads and the workbench's session views alike. The failure notice no longer quotes
   the question. The route scope is judged on the decoded path (`/workbench/%64ocuments` = documents).
   With sign-in on and `WORKSPACE_DEFAULT_SUB` blank, every admin read of the job views is audited.
+- **Acting on a job** (round 5): steering or cancelling a research job is its owner's alone - the user
+  its prompt belongs to (through Open WebUI's or the workspace's key naming them), or the service that
+  started it, or (no recorded owner) WORKSPACE_DEFAULT_SUB; anyone else gets 404, as for a missing job.
+  Shared knowledge never receives the verbatim prompt: the curator files the derived question (the
+  planner's needs) and no span of 5+ prompt words in needs, follow-ups or prose; the staging session
+  names the run. The prompt itself stays in research_jobs / research_prompts, owner-scoped.
 - **Egress.** The only new outbound calls: the issuer's discovery document, its keys and its token
   endpoint (https), only when `WORKSPACE_OIDC_ISSUER` is set. Nothing goes to a model provider.
 - **Storage.** `init-identity.sql` (slot 290): `workspace_users`, `workspace_login_pending`,

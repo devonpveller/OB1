@@ -57,9 +57,13 @@ export async function signOut(): Promise<string> {
 // or digit; zero-width characters and white space do not count.
 export const REASON_MIN = 8;
 const INVISIBLE = /[\s\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0]/gu;
+const FILLERS = new Set(["\u115f", "\u1160", "\u3164", "\uffa0"]);
+// round 5: letters and digits only, by Unicode category (the Hangul fillers excluded)
 export function reasonOk(reason: string): boolean {
-  const visible = reason.replace(INVISIBLE, "");
-  return [...visible].length >= REASON_MIN && /[\p{L}\p{N}]/u.test(visible);
+  void INVISIBLE;
+  let n = 0;
+  for (const ch of reason.normalize("NFC")) if (/[\p{L}\p{N}]/u.test(ch) && !FILLERS.has(ch)) n++;
+  return n >= REASON_MIN;
 }
 
 // The reason is required BEFORE anything is sent (the workbench refuses without one as well).

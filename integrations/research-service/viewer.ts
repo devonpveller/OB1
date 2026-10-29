@@ -91,14 +91,26 @@ export function sharedTree(t: Obj): Obj {
   const branches = Array.isArray(t.branches) ? t.branches as Obj[] : [];
   return {
     root_job_id: t.root_job_id,
-    branches: branches.map((b) => ({ id: b.id, parent_job_id: b.parent_job_id, branch_kind: b.branch_kind, rooted_step_id: b.rooted_step_id, status: b.status })),
+    // round 5: no step ids - they serve only the owner's steering
+    branches: branches.map((b) => ({ id: b.id, parent_job_id: b.parent_job_id, branch_kind: b.branch_kind, status: b.status })),
   };
 }
 
-/** The events as a non-owner reads them: which step, what kind, when - no trail, no payload. */
+/** The events as a non-owner reads them: what kind, when - no step id (it serves only the owner's
+ *  steering, round 5), no trail, no payload. */
 export function sharedEvents(rows: Obj[]): Obj[] {
-  return rows.map((e) => ({ id: e.id, job_id: e.job_id, root_job_id: e.root_job_id, step_id: e.step_id, type: e.type, kind: e.kind, created_at: e.created_at }));
+  return rows.map((e) => ({ id: e.id, job_id: e.job_id, root_job_id: e.root_job_id, type: e.type, kind: e.kind, created_at: e.created_at }));
 }
+
+/** SQL ($1 job, $2 viewer, $3 WORKSPACE_DEFAULT_SUB or ''): may the viewer ACT on the job - steer it,
+ *  cancel it (round 5, tester attempt 2)? Only its owner: the identity its root's research_prompts row
+ *  names (a user, or the service that started it), or - for a job with no recorded owner - the default
+ *  subject. Anyone else is answered as if the job did not exist. */
+export const MAY_ACT_SQL =
+  `WITH r AS (SELECT coalesce(root_job_id, id) AS root FROM research_jobs WHERE id = $1::uuid),
+        o AS (SELECT p.owner_sub FROM research_prompts p JOIN r ON p.job_id = r.root)
+   SELECT EXISTS (SELECT 1 FROM r) AND CASE WHEN EXISTS (SELECT 1 FROM o) THEN EXISTS (SELECT 1 FROM o WHERE o.owner_sub = $2)
+                                            ELSE ($3 <> '' AND $2 = $3) END AS ok`;
 
 function needles(prompts: string[]): string[] {
   const out = new Set<string>();

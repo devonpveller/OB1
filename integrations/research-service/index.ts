@@ -32,7 +32,7 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, promptOwner, resolveOrigin } from "./origin.ts";
-import { FOREIGN_PROMPTS_SQL, LISTED_FOR, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
+import { FOREIGN_PROMPTS_SQL, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
@@ -1110,6 +1110,10 @@ function viewerOf(req: Request, url: URL): { sub: string } | Response {
 // rw-identity round 3: who owns a job that predates rw-identity (no research_prompts row) - the one
 // operator (07-MULTI-USER); blank = nobody (its prompt is read by no caller)
 const DEFAULT_SUB = (Deno.env.get("WORKSPACE_DEFAULT_SUB") ?? "").trim();
+// round 5 (tester attempt 2): only the job's owner may act on it (steer, cancel) - viewer.ts MAY_ACT_SQL
+async function mayAct(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<boolean> {
+  return !!(await c.queryObject<{ ok: boolean }>(MAY_ACT_SQL, [id, viewer, DEFAULT_SUB])).rows[0]?.ok;
+}
 // whether job `id`'s tree belongs to another user than the viewer, and its texts (round 4: a foreign
 // viewer reads the allow-list of viewer.ts, the texts omitted from what is left)
 async function scopeOf(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<{ foreign: boolean; prompts: string[] }> {
@@ -1362,8 +1366,16 @@ Deno.serve({ port: PORT }, async (req) => {
   // job is left as it is. The caller reads the outcome from GET /research/jobs/:id.
   const cancelMatch = url.pathname.match(/^\/research\/jobs\/([0-9a-f-]{36})\/cancel$/i);
   if (req.method === "POST" && cancelMatch) {
-    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
     const id = cancelMatch[1];
+    {
+      const c0 = await pool.connect();
+      try {
+        // another user's job is answered as a missing one (the owner, or its service, alone may cancel)
+        if (!(await mayAct(c0, id, viewer.sub))) return Response.json({ error: "not found" }, { status: 404 });
+      } finally { c0.release(); }
+    }
     let reason = "cancel requested by the caller";
     try {
       const b = await req.json() as { reason?: unknown };
@@ -1398,6 +1410,15 @@ Deno.serve({ port: PORT }, async (req) => {
   if (req.method === "POST" && steerMatch) {
     const caller = callerOf(req, url);
     if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
+    {
+      const c0 = await pool.connect();
+      try {
+        // round 5: only the owner steers (a steer's answer carries the job's anchor and topic)
+        if (!(await mayAct(c0, steerMatch[1], viewer.sub))) return Response.json({ error: "not found" }, { status: 404 });
+      } finally { c0.release(); }
+    }
     let b: { step_id?: unknown; text?: unknown; contract?: unknown; context_snapshot?: unknown };
     try { b = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const c = await pool.connect();
