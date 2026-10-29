@@ -342,7 +342,7 @@ async function researchNow(): Promise<number> {
          SELECT i.id, i.current_revision, i.summary FROM ideas i
           WHERE i.metadata->>'research_now' = 'true' AND i.status <> 'archived'
           ORDER BY i.updated_at LIMIT $1)
-       SELECT f.id::text, public.research_idea_queue(f.id, f.current_revision, f.summary)::text AS job
+       SELECT f.id::text, public.idea_research_now(f.id)::text AS job
          FROM flagged f`,
       [RUN_MAX],
     );
@@ -369,9 +369,24 @@ async function deliverPending(): Promise<{ delivered: number; failed: number }> 
   return { delivered, failed };
 }
 
+/** rw-idea-schedule: queue the ideas of users on a daily/weekly schedule whose time has come. */
+async function runScheduled(): Promise<number> {
+  const c = await pool.connect();
+  try {
+    const r = await c.queryObject<{ n: number }>(`SELECT public.idea_schedule_drain(now()) AS n`);
+    return Number(r.rows[0]?.n ?? 0);
+  } catch (e) {
+    console.error(`schedule drain: ${(e as Error).message}`);
+    return 0;
+  } finally {
+    c.release();
+  }
+}
+
 async function runPass(): Promise<Summary> {
   const dormant = await ageIdeas();          // IR.5: fizzle BEFORE delivery, so fresh work isn't aged
   const research_now = await researchNow();
+  await runScheduled();                      // rw-idea-schedule: start each user's ideas at their chosen time
   const { delivered, failed } = await deliverPending();
   const s: Summary = { research_now, delivered, failed, dormant };
   if (research_now || delivered || failed || dormant) console.log(`pass: ${JSON.stringify(s)}`);

@@ -42,6 +42,7 @@ import { search } from "./routes/search.ts";
 import { graph } from "./routes/graph.ts";
 import { nav } from "./routes/nav.ts";
 import { documentsRouter, workspaceRouter } from "./routes/documents.ts";
+import { ideaScheduleRouter } from "./routes/idea-schedule.ts";
 import { refetchClient, researchClient } from "./documents/clients.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
 import { contractDeps } from "./contracts/wiring.ts";
@@ -100,6 +101,7 @@ app.route("/workbench/graph", graph); // wiki-dynamic-index — page-scoped grap
 app.route("/workbench/nav", nav); // research-workbench P1b — the explorer, one folder at a time (forwards to the viewer)
 app.route("/workbench/documents", documentsRouter(docDeps)); // research-workbench P2b — user documents (D12)
 app.route("/workbench/workspace", workspaceRouter(cdeps.db)); // research-workbench P2b — the bell's acknowledgement
+app.route("/workbench/idea-schedule", ideaScheduleRouter(cdeps.db)); // rw-idea-schedule - when research on my ideas starts; research now
 app.get("/workbench/openapi.json", (c) => c.json(contractDoc)); // research-workbench P0
 app.route("/", contract); // research-workbench P0 — /workbench/contract/* (paths are absolute)
 

@@ -172,6 +172,7 @@ services:
       # Revert: revert-documents.sql.
       - ./init-documents.sql:/docker-entrypoint-initdb.d/270-init-documents.sql:ro # research-workbench P2b
       - ./init-research-filed.sql:/docker-entrypoint-initdb.d/280-init-research-filed.sql:ro # research-workbench rw-curator-filed (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-research-filed.sql)
+      - ./init-idea-schedule.sql:/docker-entrypoint-initdb.d/300-init-idea-schedule.sql:ro # research-workbench rw-idea-schedule (fresh-volume only; live: psql -f; revert: revert-idea-schedule.sql)
     networks:
       - obnet
     restart: unless-stopped
