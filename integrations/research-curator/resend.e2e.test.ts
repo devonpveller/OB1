@@ -77,7 +77,7 @@ async function spawn(dir: string, args: string[], env: Record<string, string>, r
   return { base, svc, stop: async () => { try { child.kill("SIGTERM"); } catch { /* gone */ } await child.status.catch(() => {}); } };
 }
 
-async function lab(runTag: string) {
+async function lab(runTag: string, lockWaitMs = 240000) {
   const models = stubModels(runTag);
   const m = `http://127.0.0.1:${models.port}`;
   const k8s = await spawn(K8S_DIR, ["run", "--unstable-net", "--allow-net", "--allow-env", "--allow-read", "index.ts"], {
@@ -86,7 +86,7 @@ async function lab(runTag: string) {
   }, "/research/lookup?key=nope", (s) => s === 200);
   const cur = await spawn(CURATOR_DIR, ["run", "--no-lock", "--allow-net", "--allow-env", "--allow-read", "index.ts"], {
     DB_HOST, DB_PASSWORD, DB_NAME: "openbrain", DB_USER: "postgres", MCP_ACCESS_KEY: KEY, PERSIST_URL: k8s.base,
-    EMBEDDING_API_BASE: m, EMBEDDING_API_KEY: "x", CHAT_API_BASE: m, CHAT_API_KEY: "x", CHAT_MODEL: "stub",
+    EMBEDDING_API_BASE: m, EMBEDDING_API_KEY: "x", CHAT_API_BASE: m, CHAT_API_KEY: "x", CHAT_MODEL: "stub", CURATOR_FILE_LOCK_WAIT_MS: String(lockWaitMs),
   }, "/health", (s) => s === 200);
   return { cur, k8s, stop: async () => { await cur.stop(); await k8s.stop(); await models.stop(); delayMs = 0; }, log: () => `--- curator ---\n${cur.svc.log.slice(-1500)}\n--- persist ---\n${k8s.svc.log.slice(-1500)}` };
 }
@@ -169,5 +169,66 @@ Deno.test({ name: "round 2: different jobs are not serialised or merged by the l
     const [a, b] = await Promise.all([send(L.cur.base, pkgFor(`rs-${tag}-1`, j1, tag)), send(L.cur.base, pkgFor(`rs-${tag}-2`, j2, tag))]);
     assert(a.status === 200 && b.status === 200, `${a.status}/${b.status}\n${L.log()}`);
     eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM threads WHERE name LIKE $1`, [`${tag} T%`]))[0].n, 2, "two jobs -> two threads (the lock is per job)");
+  } finally { await L.stop(); }
+} });
+
+// ── rw-curator-filed3: the filing lock must never starve the curator's own pool (POOL_SIZE = 8) ──────────
+/** Poll /health while `work` runs; every answer must be 200 within 3 s (a deadlocked pool hangs it). */
+async function withHealth<T>(base: string, work: Promise<T>) {
+  let stop = false, bad = 0, ok = 0;
+  const poll = (async () => {
+    while (!stop) {
+      try { const r = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) }); await r.text(); if (r.status === 200) ok++; else bad++; } catch { bad++; }
+      await sleep(250);
+    }
+  })();
+  try { return { value: await work, ok, get bad() { return bad; } }; } finally { stop = true; await poll; }
+}
+const sendTimed = (base: string, body: unknown, ms: number) =>
+  fetch(`${base}/ingest/research-package`, { method: "POST", headers: { "x-brain-key": KEY, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(ms) })
+    .then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) as Record<string, unknown> }))
+    .catch((e) => ({ status: 0, json: { hung: String(e) } as Record<string, unknown> }));
+
+Deno.test({ name: "round 3: 10 concurrent attempts on ONE job with a slow resolver -> every answer 200 or 503, /health 200 throughout, 1 thread", ...opts, fn: async () => {
+  const tag = `C1${crypto.randomUUID().slice(0, 8)}`; const L = await lab(tag, 6000);
+  try {
+    const job = await mkJob(); const key = `rs-${tag}`;
+    delayMs = 300;
+    const h = await withHealth(L.cur.base, Promise.all(Array.from({ length: 10 }, () => sendTimed(L.cur.base, pkgFor(key, job, tag), 90_000))));
+    delayMs = 0;
+    const st = h.value.map((r) => r.status);
+    assert(st.every((s) => s === 200 || s === 503), `every attempt answered 200 or 503: ${JSON.stringify(st)}
+${L.log()}`);
+    assert(st.includes(200), `at least one filed: ${JSON.stringify(st)}`);
+    for (const r of h.value) if (r.status === 503) eq(r.json.error, "filing_in_progress");
+    eq(h.bad, 0, `/health stayed 200 (${h.ok} ok polls)`);
+    assert(h.ok >= 3, "the health poller really ran");
+    const s = await state(key, job, tag);
+    eq(s.threads, 1, "1 thread"); eq(s.syntheses, 1, "1 synthesis"); eq(s.linked, 1); eq(s.claims.t, 1); eq(s.claims.n, s.claims.h);
+    const after = await sendTimed(L.cur.base, pkgFor(key, job, tag), 30_000);
+    eq(after.status, 200, "the curator still serves after the burst");
+  } finally { await L.stop(); }
+} });
+
+Deno.test({ name: "round 3: 8 concurrent attempts on 8 DIFFERENT jobs with a slow resolver -> all answered, /health 200 throughout, 1 thread per job", ...opts, fn: async () => {
+  const tag = `C8${crypto.randomUUID().slice(0, 8)}`; const L = await lab(tag, 60_000);
+  try {
+    const jobs = await Promise.all(Array.from({ length: 8 }, () => mkJob()));
+    delayMs = 300;
+    const h = await withHealth(L.cur.base, Promise.all(jobs.map((j, i) => sendTimed(L.cur.base, pkgFor(`rs-${tag}-${i}`, j, tag), 90_000))));
+    delayMs = 0;
+    const st = h.value.map((r) => r.status);
+    assert(st.every((s) => s === 200 || s === 503), `every attempt answered 200 or 503: ${JSON.stringify(st)}
+${L.log()}`);
+    assert(st.filter((s) => s === 200).length >= 1, JSON.stringify(st));
+    eq(h.bad, 0, "/health stayed 200");
+    for (let i = 0; i < 8; i++) {
+      if (st[i] !== 200) continue;
+      const s = await state(`rs-${tag}-${i}`, jobs[i], tag);
+      eq(s.syntheses, 1, `job ${i} synthesis`); eq(s.linked, 1, `job ${i} linked once`); eq(s.claims.t, 1, `job ${i} claims in one thread`);
+    }
+    eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM threads WHERE name LIKE $1`, [`${tag} T%`]))[0].n, st.filter((s) => s === 200).length, "one thread per filed job");
+    const idle = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype='advisory'`);
+    eq(idle[0].n, 0, "no advisory lock leaked once idle");
   } finally { await L.stop(); }
 } });

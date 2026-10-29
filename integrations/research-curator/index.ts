@@ -34,7 +34,8 @@
  *      PERSIST_URL (default http://openbrain-mcp:8000), SHORTLIST_K (5),
  *      NEW_THREAD_MIN_CONFIDENCE (0.60), MERGE_FLOOR_DISTANCE (0.45), PORT (8000).
  */
-import { Pool } from "postgres";
+import { Client, Pool } from "postgres";
+import { FILING_LOCK_WAIT_MS_DEFAULT, FilingInProgress, FilingLock, type LockClient, lockWaitMsFromEnv } from "./filing-lock.ts";
 import { claimMetadataFor, writeClaims, detectConflicts, parseSynthesisClaims, META_JUDGE_SYS, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
 import { ResilientPool } from "./pool.ts";
 
@@ -68,6 +69,8 @@ const MERGE_FLOOR_DISTANCE = parseFloat(Deno.env.get("MERGE_FLOOR_DISTANCE") || 
 // thread claim (different synthesis) is judged for contradiction.
 const CONFLICT_DISTANCE = parseFloat(Deno.env.get("CONFLICT_DISTANCE") || "0.25");
 const PORT = parseInt(Deno.env.get("PORT") || "8000", 10);
+// rw-curator-filed3: how long a resend waits for the first attempt's filing lock before answering 503 filing_in_progress.
+const FILE_LOCK_WAIT_MS = lockWaitMsFromEnv(Deno.env.get("CURATOR_FILE_LOCK_WAIT_MS"), FILING_LOCK_WAIT_MS_DEFAULT);
 
 // A plain `new Pool(...)` here is what cost 244 research runs their entire
 // output between 2026-06-19 and 2026-08-31: deno-postgres hands out a pooled
@@ -495,7 +498,7 @@ async function conflictJudge(a: string, b: string): Promise<ConflictVerdict> {
 // now states which STAGE died, which research_key died with it, and exactly how
 // much went unwritten, in the log AND in the response body (which the research
 // service stores on the job row as result->'curator').
-type Stage = "embed" | "resolve" | "persist" | "claims";
+type Stage = "lock" | "embed" | "resolve" | "persist" | "claims";
 
 interface Loss {
   stage: Stage;
@@ -560,33 +563,31 @@ Deno.serve({ port: PORT }, async (req) => {
     const claim = (pkg.claim || "").trim();
     if (!claim) return Response.json({ error: "claim required" }, { status: 400 });
 
-    // rw-curator-filed2: ONE filing per job at a time, and a resend files into the SAME thread. A resend
+    // rw-curator-filed2/3: ONE filing per job at a time, and a resend files into the SAME thread. A resend
     // (the research service resends after a timeout) must not re-run resolve() against a first attempt
     // that is still working or already committed: that can createThread() a second thread, link the one
-    // synthesis into both and write every claim again under the new thread. The advisory lock is held on a
-    // dedicated connection from BEFORE resolve() to the end of the claims pass (a resend waits for the
-    // first attempt), then the job's 'filed' event, if any, names the thread to use (resolve() skipped).
+    // synthesis into both and write every claim again under the new thread. The advisory lock is held from
+    // BEFORE resolve() to the end of the claims pass, on its OWN connection OUTSIDE the request pool
+    // (filing-lock.ts: a lock that pins a pool connection deadlocks the curator at POOL_SIZE attempts),
+    // and the job's 'filed' event, once the lock is held, names the thread to use (resolve() skipped).
     const lockKey = (pkg.job_id || "").trim() || (pkg.research_key || "").trim();
-    let lockClient: PgClient | null = null;
-    if (lockKey) {
-      lockClient = await pool.connect();
-      await lockClient.queryArray("SELECT pg_advisory_lock(hashtext($1))", [`research-file:${lockKey}`]);
-      const jobId = (pkg.job_id || "").trim();
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
-        try {
-          const ev = await lockClient.queryObject<{ thread_id: string | null }>(
-            `SELECT e.payload ->> 'thread_id' AS thread_id FROM public.research_job_events e
-              WHERE e.job_id = $1 AND e.type = 'filed'`, [jobId]);
-          const tid = ev.rows[0]?.thread_id;
-          if (tid) { pkg.thread_id = tid; console.log(`ingest: job ${jobId} already filed into thread ${tid}; resend reuses it (resolve skipped)`); }
-        } catch (e) {
-          console.error(`ingest: filed-event lookup failed (migration 280 not applied?): ${(e as Error).message}`);
+    const lock = lockKey ? new FilingLock(() => new Client(DB_CONFIG) as unknown as LockClient, lockKey, FILE_LOCK_WAIT_MS) : null;
+    // Which step we are on, so a failure can say what died rather than just how.
+    let stage: Stage = "lock";
+    try {
+      if (lock) {
+        await lock.acquire(); // connect, SET lock_timeout, pg_advisory_lock - all inside the try, so release() always runs
+        const jobId = (pkg.job_id || "").trim();
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) {
+          try {
+            const tid = await lock.filedThread(jobId);
+            if (tid) { pkg.thread_id = tid; console.log(`ingest: job ${jobId} already filed into thread ${tid}; resend reuses it (resolve skipped)`); }
+          } catch (e) {
+            console.error(`ingest: filed-event lookup failed (migration 280 not applied?): ${(e as Error).message}`);
+          }
         }
       }
-    }
-    // Which step we are on, so a failure can say what died rather than just how.
-    let stage: Stage = "embed";
-    try {
+      stage = "embed";
       const claimEmb = await embed(claim.slice(0, 1600));
       stage = "resolve";
       const res = await resolve(pkg, claimEmb);
@@ -677,14 +678,16 @@ Deno.serve({ port: PORT }, async (req) => {
         claims_error: claimsError,
       });
     } catch (e) {
+      if (e instanceof FilingInProgress) {
+        // 503, never a 4xx: the research service keeps its settle / filed-event check for it.
+        console.error(`ingest: ${e.message} (research_key=${pkg.research_key || "(none)"})`);
+        return Response.json({ error: "filing_in_progress", detail: e.message }, { status: 503, headers: { "retry-after": "30" } });
+      }
       const loss = describeLoss(stage, pkg, e);
       console.error(lossLine(loss));
       return Response.json({ error: "ingest_failed", ...loss }, { status: 500 });
     } finally {
-      if (lockClient) {
-        await lockClient.queryArray("SELECT pg_advisory_unlock(hashtext($1))", [`research-file:${lockKey}`]).catch(() => {});
-        lockClient.release();
-      }
+      if (lock) await lock.release();
     }
   }
 

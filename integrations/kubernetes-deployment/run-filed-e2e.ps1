@@ -142,7 +142,7 @@ try {
     $testTag deno test --no-lock --unstable-net --allow-net --allow-env --allow-read --allow-run resend.e2e.test.ts
   Save 'resend-e2e.log' $o
   $sum = Summary $o
-  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 3) "resend e2e (real curator + real persist, always-new resolver): $($sum.Value)"
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 5) "resend e2e (real curator + real persist, always-new resolver): $($sum.Value)"
   $o = Dk exec $db psql -U postgres -d openbrain -X -A -F '|' -c "SELECT j.status, e.type, e.payload->>'research_key', (SELECT count(*) FROM sources s WHERE s.content_type='research_synthesis' AND s.research_key = e.payload->>'research_key') AS syntheses FROM research_job_events e JOIN research_jobs j ON j.id=e.job_id WHERE e.type='filed' ORDER BY e.id"
   Save 'events-after.txt' $o
 
