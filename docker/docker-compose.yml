@@ -171,6 +171,11 @@ services:
       # progress_indicators registry. Fresh-volume only; the live DB gets it by hand (psql -f).
       # Revert: revert-documents.sql.
       - ./init-documents.sql:/docker-entrypoint-initdb.d/270-init-documents.sql:ro # research-workbench P2b
+      # rw-identity: sign-in with Authentik - users, sign-ins in flight, sessions, and the APPEND-ONLY
+      # admin_audit log (impersonation + every request during it). Fresh-volume only; the live DB
+      # gets it by hand (psql -f). Revert: revert-identity.sql. NOTE: a new mount changes this
+      # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
+      - ./init-identity.sql:/docker-entrypoint-initdb.d/280-init-identity.sql:ro # rw-identity
     networks:
       - obnet
     restart: unless-stopped
@@ -1277,6 +1282,12 @@ services:
       # the LAN address if it is browsed by address), and a write must carry the viewer's own Origin or one of the listed origins.
       WIKI_VIEWER_ALLOWED_HOSTS: ${WIKI_VIEWER_ALLOWED_HOSTS:-}
       WIKI_VIEWER_ALLOWED_ORIGINS: ${WIKI_VIEWER_ALLOWED_ORIGINS:-}
+      # rw-identity: the forwarder injects WORKSPACE_DOOR_KEY when set (the browser's door key; required
+      # once the workbench signs users in), else WORKBENCH_KEY; and drops the identity header(s) below
+      # from every client request, so no browser can name its own identity.
+      WORKSPACE_DOOR_KEY: ${WORKSPACE_DOOR_KEY:-}
+      WORKSPACE_IDENTITY_HEADER: ${WORKSPACE_IDENTITY_HEADER:-}
+      WORKSPACE_IDENTITY_NAME_HEADER: ${WORKSPACE_IDENTITY_NAME_HEADER:-}
     volumes:
       - openbrain-wiki-data:/wiki:ro
       # Binary assets (images now, audio later) live on their own volume,
@@ -1360,6 +1371,25 @@ services:
       # read state these are) until sign-on lands - operator-set, see .env.example. Blank = "operator".
       WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
       WORKSPACE_DEFAULT_NAME: ${WORKSPACE_DEFAULT_NAME:-}
+      # rw-identity: sign-in with Authentik (OIDC code + PKCE), env-only and SHIPPED INERT - blank = no
+      # sign-in, the one default identity above, exactly as before. The workbench fetches the issuer's
+      # discovery document, keys and token endpoint (https) - its only new outbound call, and only when
+      # set. See .env.example and workbench/README.md "Sign-in" (the Authentik settings).
+      WORKSPACE_OIDC_ISSUER: ${WORKSPACE_OIDC_ISSUER:-}
+      WORKSPACE_OIDC_CLIENT_ID: ${WORKSPACE_OIDC_CLIENT_ID:-}
+      WORKSPACE_OIDC_CLIENT_SECRET: ${WORKSPACE_OIDC_CLIENT_SECRET:-}
+      WORKSPACE_OIDC_REDIRECT_URI: ${WORKSPACE_OIDC_REDIRECT_URI:-}
+      WORKSPACE_OIDC_ADMIN_GROUP: ${WORKSPACE_OIDC_ADMIN_GROUP:-}
+      WORKSPACE_OIDC_POST_LOGOUT_URI: ${WORKSPACE_OIDC_POST_LOGOUT_URI:-}
+      WORKSPACE_OIDC_SCOPES: ${WORKSPACE_OIDC_SCOPES:-}
+      WORKSPACE_SESSION_HOURS: ${WORKSPACE_SESSION_HOURS:-}
+      # the browser door's own key (required with sign-in; then WORKBENCH_KEY is an internal service)
+      WORKSPACE_DOOR_KEY: ${WORKSPACE_DOOR_KEY:-}
+      WORKSPACE_SERVICE_KEYS: ${WORKSPACE_SERVICE_KEYS:-}
+      # P2b's identity header (forward-auth edges): blank = off, ignored while sign-in is configured;
+      # set = the edge MUST strip a client-sent copy and set it itself (workbench/README.md "Sign-in")
+      WORKSPACE_IDENTITY_HEADER: ${WORKSPACE_IDENTITY_HEADER:-}
+      WORKSPACE_IDENTITY_NAME_HEADER: ${WORKSPACE_IDENTITY_NAME_HEADER:-}
       # Direct Postgres (atomic multi-row writes — G8).
       DB_HOST: openbrain-db
       DB_PORT: "5432"

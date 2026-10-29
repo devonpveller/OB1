@@ -85,3 +85,39 @@ export class MismatchLog {
     return true;
   }
 }
+
+/**
+ * On behalf of a user (rw-identity, 07-MULTI-USER; operator 2026-10-28: "research ... started from
+ * Open WebUI lands in the same user's research front end"). The Open WebUI deep-research tool sends
+ * its user's Authentik subject as `on_behalf_of`; it is accepted ONLY from a caller whose key is
+ * bound to the `owui` origin (P0's RESEARCH_CALLERS) - any other key naming a user is refused
+ * (403), so no other caller can file research under someone else's name, and the shared key never
+ * can. Without it: the workspace records its own signed-in user (the workbench writes that row),
+ * and every other caller's research is recorded under its service identity `service:<caller>`.
+ */
+export const ON_BEHALF_ORIGINS: ReadonlySet<string> = new Set(["owui"]);
+
+export type OnBehalf = { sub: string | null } | { error: string; status: 400 | 403 };
+
+export function onBehalfOf(caller: Caller, body: Record<string, unknown>): OnBehalf {
+  const raw = body.on_behalf_of;
+  if (raw === undefined || raw === null || raw === "") return { sub: null };
+  if (caller.shared || !ON_BEHALF_ORIGINS.has(caller.origin)) {
+    return { error: "on_behalf_of is accepted only from Open WebUI's caller key", status: 403 };
+  }
+  if (typeof raw !== "string") return { error: "on_behalf_of is the user's subject id (a string)", status: 400 };
+  const sub = raw.trim();
+  if (!sub || sub.length > 255 || /[\u0000-\u001f\u007f]/.test(sub) || /^(service|system|anonymous):/i.test(sub)) {
+    return { error: "on_behalf_of is not a usable subject id", status: 400 };
+  }
+  return { sub };
+}
+
+/** Who the job's original prompt belongs to (research_prompts), or null when the caller records
+ *  it itself (the workspace's own key: the workbench writes its signed-in user's row). */
+export function promptOwner(caller: Caller, onBehalf: string | null): { owner_sub: string; actor_sub: string } | null {
+  if (onBehalf) return { owner_sub: onBehalf, actor_sub: onBehalf };
+  if (caller.origin === "workspace" && !caller.shared) return null;
+  const svc = `service:${caller.name}`;
+  return { owner_sub: svc, actor_sub: svc };
+}

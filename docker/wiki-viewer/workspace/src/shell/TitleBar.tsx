@@ -6,6 +6,7 @@ import { Bell } from "./Bell";
 import { UniversalPlus } from "./Plus";
 import { clearLayout, defaultLayout } from "./dock";
 import { ownedKey } from "../lib/owner";
+import { AccountMenu } from "./Identity";
 
 const THEME_KEY = () => ownedKey("ws.theme"); // per user
 
@@ -38,6 +39,7 @@ export function TitleBar() {
       <span className="ws-spacer" />
       <UniversalPlus />
       <Bell />
+      <AccountMenu />
       <button type="button" className="ws-tb-btn" data-testid="theme" aria-label="theme" onClick={toggle}>
         {theme === "dark" ? "Light" : "Dark"}
       </button>

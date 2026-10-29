@@ -30,7 +30,7 @@ import { screenSources } from "./injection.ts";
 import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
-import { type Caller, callerFor, inletRef, MismatchLog, parseCallers, resolveOrigin } from "./origin.ts";
+import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, promptOwner, resolveOrigin } from "./origin.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
@@ -1238,6 +1238,10 @@ Deno.serve({ port: PORT }, async (req) => {
     const resolved = resolveOrigin(caller, body.origin, QUEUE_USER_BY_ORIGIN);
     originMismatch.note(caller, resolved.claimed, resolved.origin);
     const inlet = inletRef(body as Record<string, unknown>);
+    // rw-identity: a user named by the caller - accepted from Open WebUI's key only (origin.ts)
+    const onBehalf = onBehalfOf(caller, body as Record<string, unknown>);
+    if ("error" in onBehalf) return Response.json({ error: onBehalf.error }, { status: onBehalf.status });
+    const owner = promptOwner(caller, onBehalf.sub);
     const options = {
       ...callerOptions,
       ...(deadlineAt ? { deadline_at: deadlineAt } : {}),
@@ -1253,6 +1257,7 @@ Deno.serve({ port: PORT }, async (req) => {
     const c = await pool.connect();
     let jobId: string;
     try {
+      await c.queryObject("BEGIN");
       const r = await c.queryObject<{ id: string }>(
         `INSERT INTO research_jobs (status, origin, query, thread_id, options, caller, origin_claimed, inlet_ref)
          VALUES ('queued', $1, $2, $3, $4::jsonb, $5, $6, $7::jsonb) RETURNING id`,
@@ -1260,6 +1265,18 @@ Deno.serve({ port: PORT }, async (req) => {
          inlet ? JSON.stringify(inlet) : null],
       );
       jobId = r.rows[0].id;
+      // rw-identity: whose original prompt this is (research_prompts, init-documents.sql), in the
+      // job's own transaction - a user's job is never stored without its owner (it would read as shared)
+      if (owner) {
+        await c.queryObject(
+          `INSERT INTO research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1, $2, $3, $4) ON CONFLICT (job_id) DO NOTHING`,
+          [jobId, owner.owner_sub, owner.actor_sub, query],
+        );
+      }
+      await c.queryObject("COMMIT");
+    } catch (e) {
+      await c.queryObject("ROLLBACK").catch(() => {});
+      throw e;
     } finally { c.release(); }
     // Enqueue only — the background drain loop is the sole dispatcher (serializes
     // research fan-out so it can't flood LiteLLM). wake() lets it pick this up now.

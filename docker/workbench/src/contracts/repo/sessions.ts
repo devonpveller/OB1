@@ -63,7 +63,8 @@ export function shapeSession(r: JobRow) {
 // (research_prompts); the job and everything it produces are shared. A job started from the workspace
 // shows its query to its owner only - to anyone else the query reads as empty.
 export const OWN_QUERY = (alias: string, ownerParam: string) =>
-  `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = ${alias}.id AND p.owner_sub <> ${ownerParam})
+  `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = ${alias}.id AND p.owner_sub <> ${ownerParam}
+                     AND p.owner_sub NOT LIKE 'service:%')
         THEN '' ELSE ${alias}.query END`;
 
 // A job is shared research output; its private fields (the original prompt, inlet_ref, refinery_id,

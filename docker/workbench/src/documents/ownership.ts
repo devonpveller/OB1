@@ -13,6 +13,9 @@
 // it belongs to (refinery_id) and the chat thread (thread_id) - are answered to its owner only and
 // are absent (null / "") for anyone else. A job is another user's when that user's original prompt
 // is recorded for it (research_prompts), or its refinery or inlet document is another user's.
+// rw-identity: a job started from Open WebUI on behalf of a user carries that user's research_prompts
+// row (the research service writes it, origin owui only); agent-started research is recorded under a
+// service identity (owner_sub service:<caller>) - a service is not a user, so its prompt is shared.
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
 import { DOCUMENTS_ROOT } from "./paths.ts";
@@ -35,7 +38,8 @@ export const FOREIGN_IDEA = (id: string, sub: string) =>
 
 // research job `j` belongs to another user (see the header).
 export const FOREIGN_JOB = (j: string, sub: string, key: string) =>
-  `(EXISTS (SELECT 1 FROM public.research_prompts own_p WHERE own_p.job_id = ${j}.id AND own_p.owner_sub <> ${sub})
+  `(EXISTS (SELECT 1 FROM public.research_prompts own_p WHERE own_p.job_id = ${j}.id AND own_p.owner_sub <> ${sub}
+             AND own_p.owner_sub NOT LIKE 'service:%')
      OR ${FOREIGN_IDEA(`${j}.refinery_id`, sub)}
      OR (${j}.inlet_ref ->> 'kind' = 'refinery' AND ${FOREIGN_IDEA(`${j}.inlet_ref ->> 'id'`, sub)})
      OR ${FOREIGN_DOC(`${j}.inlet_ref ->> 'id'`, sub, key)})`;

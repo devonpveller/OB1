@@ -4,6 +4,8 @@ import "./panels";
 import { Shell } from "./shell/Shell";
 import { setState } from "./lib/store";
 import { loadOwner } from "./lib/owner";
+import { loadMe, needsSignIn } from "./lib/auth";
+import { SignIn } from "./shell/Identity";
 import { applyTheme, readTheme } from "./shell/TitleBar";
 import "./styles.css";
 
@@ -11,10 +13,17 @@ import "./styles.css";
 const doc = new URLSearchParams(location.search).get("doc");
 if (doc) setState({ documentPath: doc });
 
-// the user's own workspace: who it is first (the identity seam), then their layout and theme
-loadOwner().then(() => {
+// rw-identity: signed in first (with sign-in configured, nothing renders before it); then whose
+// workspace it is (the identity seam), then their layout and theme
+loadMe().then(async (me) => {
+  const root = createRoot(document.getElementById("root")!);
+  if (needsSignIn(me)) {
+    root.render(<SignIn here={location.pathname + location.search} />);
+    return;
+  }
+  await loadOwner();
   applyTheme(readTheme());
-  createRoot(document.getElementById("root")!).render(
+  root.render(
     <StrictMode>
       <Shell />
     </StrictMode>,
