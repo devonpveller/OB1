@@ -184,9 +184,12 @@ Deno.test("seam: a percent-encoded or doubled path is judged as the route it rea
 // round 4 (tester F3): a reason is visible characters - zero-width and white space do not count
 Deno.test("reason: at least REASON_MIN visible characters with a letter or digit", () => {
   assertEquals(REASON_MIN, 8);
-  for (const bad of ["", "   ", "\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b", " \u200b\u2060\ufeff\u00ad\u180e ", "a\u200bb\u200bc\u200bd", "abcdefg", "........", "--------!"]) {
+  for (const bad of ["", "   ", "\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b", " \u200b\u2060\ufeff\u00ad\u180e ", "a\u200bb\u200bc\u200bd", "abcdefg", "........", "--------!",
+    // round 5 (tester attempt 2, F3b): only letters and digits count
+    "a" + "\u{E0061}".repeat(7), "ab" + "\u2800".repeat(6), "a" + "\u{E0100}".repeat(7), "a" + "\u0300".repeat(7), "\u3164".repeat(8),
+    "\u115f\u1160".repeat(4), "\uffa0".repeat(8), "a" + "\u{1BCA0}".repeat(7), "a" + "\ufffc".repeat(7), "\u00a0".repeat(8), "........a", "e\u0301e\u0301e\u0301e\u0301", "\u{F0000}".repeat(8)]) {
     assert(reasonProblem(bad), JSON.stringify(bad));
   }
-  for (const ok of ["support ticket 42", "alice asked for help", "ticket#12"]) assertEquals(reasonProblem(ok), null, ok);
+  for (const ok of ["support ticket 42", "alice asked for help", "ticket#12", "\u00e9l\u00e8ve demande", "\u652f\u63f4\u8acb\u6c42\u7b2c\u5341\u4e8c\u53f7"]) assertEquals(reasonProblem(ok), null, ok);
   assert(reasonProblem("x".repeat(1001)));
 });

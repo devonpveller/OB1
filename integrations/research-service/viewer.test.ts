@@ -70,7 +70,7 @@ Deno.test("sharedTree / sharedEvents: ids, kinds, status and time only", () => {
   const t = sharedTree({ root_job_id: "r", topic_estimate: tok, origin: tok,
     branches: [{ id: "b", parent_job_id: "r", branch_kind: "steer", rooted_step_id: "s1", anchor: tok, query: tok, status: "done" }],
     steers: [{ text: tok }], report: tok, learning_records: [tok] });
-  assertEquals(t, { root_job_id: "r", branches: [{ id: "b", parent_job_id: "r", branch_kind: "steer", rooted_step_id: "s1", status: "done" }] });
+  assertEquals(t, { root_job_id: "r", branches: [{ id: "b", parent_job_id: "r", branch_kind: "steer", status: "done" }] });
   const e = sharedEvents([{ id: "1", job_id: "j", root_job_id: "r", step_id: "s1", type: "stage", kind: "due_process", trail: { q: tok }, payload: { note: tok }, created_at: "t" }]);
-  assertEquals(e, [{ id: "1", job_id: "j", root_job_id: "r", step_id: "s1", type: "stage", kind: "due_process", created_at: "t" }]);
+  assertEquals(e, [{ id: "1", job_id: "j", root_job_id: "r", type: "stage", kind: "due_process", created_at: "t" }]);
 });

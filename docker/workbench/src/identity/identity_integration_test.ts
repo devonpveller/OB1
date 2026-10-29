@@ -263,7 +263,11 @@ Deno.test({ name: "C3 an admin impersonates only after a reason; subject = the u
   // the admin, as themself, does not see alice's document
   assert(!(await ad.req("GET", "/workbench/contract/documents?limit=500")).text.includes(marker));
   // round 4 (tester F3): visible characters only - zero-width and white space do not count; 8 at least
-  for (const reason of [undefined, "", "   ", "ab", "\u200b\u200b\u200b\u200b", " \u200b\u2060\ufeff\u00ad ", "a\u200bb\u200bc\u200bd", "abcdefg", "........"]) {
+  for (const reason of [undefined, "", "   ", "ab", "\u200b\u200b\u200b\u200b", " \u200b\u2060\ufeff\u00ad ", "a\u200bb\u200bc\u200bd", "abcdefg", "........",
+      // round 5 (tester attempt 2, F3b): only letters and digits count - tag characters, braille blanks,
+      // variation selectors, combining marks, Hangul fillers, NBSP, U+FFFC do not
+      "a" + "\u{E0061}".repeat(7), "ab" + "\u2800".repeat(6), "a" + "\u{E0100}".repeat(7), "a" + "\u0300".repeat(7),
+      "\u3164".repeat(8), "a" + "\u{1BCA0}".repeat(7), "a" + "\ufffc".repeat(7), "\u00a0".repeat(8), "........a"]) {
     const r = await ad.req("POST", "/workbench/auth/impersonate", { sub: sub("alice"), ...(reason === undefined ? {} : { reason }) });
     assertEquals(r.status, 400, `reason ${JSON.stringify(reason)}: ${r.text}`);
   }
@@ -540,6 +544,47 @@ Deno.test({ name: "C2e default unset: ownerless prompts reach only a non-imperso
   assertEquals(await count(), before + 1, "the read is recorded");
   const last = await sql<{ route: string }>(`SELECT route FROM public.admin_audit WHERE actor_sub = $1 AND reason LIKE '%ownerless%' ORDER BY id DESC LIMIT 1`, [sub("admin")]);
   assertEquals(last[0].route, `/workbench/contract/sessions/${id}`);
+} });
+
+// C2f (tester attempt 2, Case 7 / P10): the research service's WRITE routes act for the owner only -
+// a steer or a cancel on another user's job is refused as if the job did not exist (404), changes
+// nothing, and carries nothing of the prompt; the owner's steer and cancel work. A non-owner's events
+// read no longer hands out the step ids a steer needs.
+Deno.test({ name: "C2f a non-owner cannot steer or cancel another user's job; the refusal carries nothing; the owner can", ...opts, fn: async () => {
+  const tok = `SteerVictim${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+  const prompt = `Find my neighbour ${tok} and their unpaid rent history`;
+  const r = await submit(K.owui, { query: prompt, origin: "owui", on_behalf_of: sub("alice") });
+  assertEquals(r.status, 202);
+  const job = r.json.job_id as string;
+  await sql(`UPDATE public.research_jobs SET status = 'done', finished_at = now(), result = '{"synthesis":"x","outcome":"complete"}'::jsonb WHERE id = $1::uuid`, [job]);
+  await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind) VALUES ($1::uuid, $1::uuid, 's98', 'stage', 'due_process')`, [job]);
+  const ev = await rsGet(K.ao, `/research/jobs/${job}/events`);
+  assert(!ev.text.includes("s98"), `a non-owner's events read carries no step id: ${ev.text.slice(0, 200)}`);
+  const kids = async () => (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.research_jobs WHERE parent_job_id = $1::uuid`, [job]))[0].n;
+  const post = async (key: string, path: string, body: unknown, obo?: string) => {
+    const x = await fetch(`${RS}${path}`, { method: "POST", headers: { "x-brain-key": key, "content-type": "application/json", ...(obo ? { "x-on-behalf-of": obo } : {}) }, body: JSON.stringify(body) });
+    return { status: x.status, text: await x.text() };
+  };
+  for (const [who, key, obo] of [["agent-org", K.ao, undefined], ["shared key", K.shared, undefined], ["owui as bob", K.owui, sub("bob")],
+      ["workspace as bob", K.ws, sub("bob")], ["owui, no user", K.owui, undefined]] as const) {
+    const s = await post(key, `/research/jobs/${job}/steer`, { step_id: "s98", text: `${who} narrows it` }, obo);
+    assertEquals(s.status, 404, `${who} steer: ${s.status} ${s.text.slice(0, 200)}`);
+    assert(!s.text.toLowerCase().includes(tok.toLowerCase()), `${who} steer answer carries the prompt`);
+    const c = await post(key, `/research/jobs/${job}/cancel`, { reason: "not mine" }, obo);
+    assertEquals(c.status, 404, `${who} cancel: ${c.status} ${c.text.slice(0, 200)}`);
+  }
+  assertEquals(await kids(), 0, "no branch was written into alice's tree");
+  // a queued job of alice's: a non-owner's cancel leaves it queued
+  const q = await submit(K.owui, { query: `CancelVictim${tok} my tax letter`, origin: "owui", on_behalf_of: sub("alice") });
+  await sql(`UPDATE public.research_jobs SET status = 'queued' WHERE id = $1::uuid`, [q.json.job_id]);
+  assertEquals((await post(K.ao, `/research/jobs/${q.json.job_id}/cancel`, {})).status, 404);
+  assertEquals((await sql<{ s: string }>(`SELECT status AS s FROM public.research_jobs WHERE id = $1::uuid`, [q.json.job_id]))[0].s, "queued");
+  // the owner (through Open WebUI naming alice) steers and cancels
+  const own = await post(K.owui, `/research/jobs/${job}/steer`, { step_id: "s98", text: "narrow it to the last year" }, sub("alice"));
+  assertEquals(own.status, 201, own.text.slice(0, 200));
+  assertEquals(await kids(), 1);
+  const oc = await post(K.owui, `/research/jobs/${q.json.job_id}/cancel`, {}, sub("alice"));
+  assert(oc.status === 200 || oc.status === 202, `${oc.status} ${oc.text.slice(0, 100)}`);
 } });
 
 // ── C5: no sign-in configured = exactly the P2b behaviour ─────────────────────────────────────

@@ -89,6 +89,10 @@ describe("rw-identity: impersonation", () => {
     expect(start.disabled).toBe(true);
     fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b\u200b" } });
     expect(start.disabled).toBe(true); // round 4: zero-width characters are not a reason
+    fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "a" + "\u{E0061}".repeat(7) } });
+    expect(start.disabled).toBe(true); // round 5: tag characters are not letters
+    fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "\u3164".repeat(8) } });
+    expect(start.disabled).toBe(true); // nor Hangul fillers
     fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "abcdefg" } });
     expect(start.disabled).toBe(true); // 8 visible characters at least
     fireEvent.change(screen.getByTestId("imp-reason"), { target: { value: "support ticket 42" } });
