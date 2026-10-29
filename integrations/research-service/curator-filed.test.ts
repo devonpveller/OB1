@@ -169,13 +169,14 @@ Deno.test("round 2: a curator 4xx is final BEFORE the settle wait (no 30 s wait)
 });
 
 Deno.test("round 2: the final error does not claim 'not retried' for a package that WAS resent", async () => {
-  const L = lab(["slow-then-commit"], 5000); // every attempt times out (300 ms) and never answers in time
+  const L = lab(["slow-then-commit"], 700); // every attempt times out (300 ms) and commits only afterwards
   try {
     const r = await deliverToCurator(L.handOff, () => Promise.resolve(null), JOB, pkg(), opts(2, 0));
     assertEquals(L.requests, 2);
     assert(String(r.error).includes("after 2 attempt(s)"), String(r.error));
     assert(!/not retried/i.test(String(r.error)), String(r.error));
     assert(String(r.error).includes("timed out after"), "the cause is still stated: " + String(r.error));
+    await sleep(900); // let the lab's late commits finish (no timers left for the leak sanitizer)
   } finally {
     await L.stop();
   }
