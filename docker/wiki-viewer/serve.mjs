@@ -49,7 +49,7 @@ import { renderLive, routeErrors, isKnownPageUrl } from "./lib/live-route.mjs";
 import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-classes.mjs";
 import { dbState, onConnect, startProbe, probe } from "./lib/wiki-db.mjs";
 import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
-import { proxyConfig, proxyWorkbench } from "./lib/workbench-proxy.mjs";
+import { isWorkbenchPath, proxyConfig, proxyWorkbench } from "./lib/workbench-proxy.mjs";
 
 const BUNDLE = process.env.WIKI_BUNDLE_DIR || "/viewer/bundle"; // the frozen bundle (committed, D7)
 const WORKSPACE = process.env.WIKI_WORKSPACE_DIR || "/viewer/workspace"; // the workspace app's build (Dockerfile stage `workspace`)
@@ -319,7 +319,8 @@ async function handle(req, res) {
   // The workspace (research-workbench P2b): the Vite + React app at /workspace. Its notifications
   // bell replaced the P1b strip and its /__notifications routes (D13, moved to the title bar 2026-09-25).
   if (path === "/workspace" || path.startsWith("/workspace/")) return serveWorkspace(req, res, path);
-  if (path === "/workbench" || path.startsWith("/workbench/")) return proxyWorkbench(req, res, WB_PROXY);
+  // rw-identity round 5: any spelling that decodes to /workbench is forwarded (the workbench judges it)
+  if (isWorkbenchPath(path)) return proxyWorkbench(req, res, WB_PROXY);
   // The full index, LIVE from wiki_pages, for its one remaining lazy reader
   // (the notes editor's link autocomplete, when the editor opens; the graph no
   // longer falls back to it - fix round 1). No file fallback (E3): the

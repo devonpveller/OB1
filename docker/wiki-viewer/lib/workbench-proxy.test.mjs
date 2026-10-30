@@ -186,3 +186,11 @@ test("rw-identity: without WORKSPACE_DOOR_KEY the door injects WORKBENCH_KEY, an
   assert.equal(c.strip.size, 0);
   assert.equal(proxyConfig({ WORKBENCH_URL: "http://wb:8000", WORKBENCH_KEY: "k", WORKSPACE_DOOR_KEY: "  d  " }).key, "d");
 });
+
+test("rw-identity round 5: a non-canonical spelling of /workbench is still the workbench's", async () => {
+  const { isWorkbenchPath } = await import("./workbench-proxy.mjs");
+  for (const p of ["/workbench/documents", "/workbench\\documents\\folders", "/%77orkbench/documents", "/WORKBENCH/x", "//workbench/x", "/workbench%5cdocuments", "/workbench;x"]) {
+    assert.equal(isWorkbenchPath(p), true, p);
+  }
+  for (const p of ["/workspace/", "/content/x", "/workbenchx", "/"]) assert.equal(isWorkbenchPath(p), false, p);
+});

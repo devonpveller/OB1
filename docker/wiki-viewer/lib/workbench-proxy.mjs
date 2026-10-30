@@ -132,3 +132,19 @@ export function proxyWorkbench(req, res, cfg) {
   req.on("end", () => up.end());
   req.on("aborted", () => up.destroy());
 }
+
+// round 5 (tester attempt 2, P11): a path that only BECOMES /workbench/... once it is decoded, its
+// backslashes read as slashes, its case folded or its doubled slashes collapsed is still the
+// workbench's - it is forwarded (the workbench judges it, so an anonymous browser gets 401), never
+// answered by the wiki renderer as a page.
+export function isWorkbenchPath(path) {
+  let p = String(path || "");
+  for (let i = 0; i < 4; i++) {
+    let d;
+    try { d = decodeURIComponent(p); } catch { break; }
+    if (d === p) break;
+    p = d;
+  }
+  p = p.replace(/\\/g, "/").replace(/\/{2,}/g, "/").toLowerCase();
+  return p === "/workbench" || p.startsWith("/workbench/") || p.startsWith("/workbench;");
+}
