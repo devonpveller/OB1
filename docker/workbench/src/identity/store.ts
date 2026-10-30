@@ -1,4 +1,4 @@
-// The sign-in's storage (rw-identity; tables in OB1/docker/init-identity.sql, slot 280):
+// The sign-in's storage (rw-identity; tables in OB1/docker/init-identity.sql, slot 290):
 //   workspace_login_pending  one row per sign-in in flight: the state (hashed), the browser binding
 //                            (hashed), the nonce, the PKCE verifier, where to land; single use, 10 min
 //   workspace_sessions       one row per signed-in browser: the token's SHA-256 (the token itself is

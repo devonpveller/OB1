@@ -140,6 +140,30 @@ export function routePath(raw: string): string {
   return "/" + out.join("/");
 }
 
+// rw-identity2 (review r-identity B1): the seam and the router must judge ONE string. Hono routes on
+// the path decoded once (decodeURI, which keeps %2F) and decodes params once more, so a spelling whose
+// segments become "/" or ".." only after a second decode (%252e%252e, ..%2F, %5c) was judged here as
+// one route (routePath: /workbench/health/..., OPEN) and routed as another (the notes handler). A
+// path is CANONICAL when no decoding can change its shape: no encoded "%", "/", "\" or "." (%25 %2F
+// %5C %2E, any case), no NUL, no backslash, valid percent-encoding, no empty, "." or ".." segment (a
+// ";param" suffix does not hide one) bar one trailing "/", and routePath of it is the path itself.
+// Returns the canonical path, or null - the seam answers null with 400 before it judges anything.
+const ENCODED_SHAPE = /%(25|2f|5c|2e|00)|\\/i;
+export function canonicalPath(raw: string): string | null {
+  if (!raw.startsWith("/") || ENCODED_SHAPE.test(raw)) return null;
+  let d: string;
+  try { d = decodeURIComponent(raw); } catch { return null; }
+  if (/[\x00-\x1f\x7f\\%]/.test(d)) return null;
+  const body = d.length > 1 && d.endsWith("/") ? d.slice(0, -1) : d;
+  if (body !== "/") {
+    for (const seg of body.slice(1).split("/")) {
+      const name = seg.split(";")[0];
+      if (name === "" || name === "." || name === "..") return null;
+    }
+  }
+  return routePath(raw) === body ? body : null;
+}
+
 export function seamDeps(db: Db | null, env = (k: string) => Deno.env.get(k)): SeamDeps {
   const oidc = oidcConfig(env);
   return { db, oidc, ring: keyRing(env, oidc !== null), cfg: identityConfig(env), defaultSet: !!(env("WORKSPACE_DEFAULT_SUB") ?? "").trim() };
@@ -156,14 +180,16 @@ const KEY = "identity";
 
 export function identitySeam(deps: SeamDeps = seamDeps(null)) {
   return async (c: Context, next: Next) => {
+    const url = new URL(c.req.url);
+    // B1: a path the router could read differently from this seam is refused before any decision
+    const path = canonicalPath(url.pathname);
+    if (path === null) return c.json({ error: "not a canonical path: no encoded '/', '\\', '.' or '%', and no empty, '.' or '..' segment" }, 400);
     const kk = keyKind(c.req.header("x-brain-key") ?? "", deps.ring, deps.oidc !== null);
     let who: Identity;
     if (kk?.kind === "service") who = await serviceIdentity(kk.name);
     else if (!deps.oidc) who = await resolveIdentity((n) => c.req.header(n), deps.cfg);
     else who = (deps.db && await sessionIdentity(deps.db, readCookie(c.req.header("cookie"), SESSION_COOKIE))) || ANONYMOUS;
     c.set(KEY as never, who as never);
-    const url = new URL(c.req.url);
-    const path = routePath(url.pathname);
     if (who.kind === "anonymous" && !OPEN.test(path)) {
       return c.json({ error: "sign in first", login: "/workbench/auth/login" }, 401);
     }

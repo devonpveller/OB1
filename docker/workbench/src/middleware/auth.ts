@@ -5,7 +5,6 @@
 // door key (WORKSPACE_DOOR_KEY, when set), WORKBENCH_KEY and any WORKSPACE_SERVICE_KEYS key; WHICH
 // one it is decides the identity (src/middleware/identity.ts), never this gate.
 import type { Context, Next } from "hono";
-import { config } from "../config.ts";
 import { keyKind, type KeyRing } from "../identity/keys.ts";
 
 export function requireKey(ring: KeyRing) {
@@ -15,13 +14,4 @@ export function requireKey(ring: KeyRing) {
     if (!keyKind(key, ring, true)) return c.json({ error: "unauthorized" }, 401);
     await next();
   };
-}
-
-// The pre-rw-identity gate, kept for a router mounted alone (WORKBENCH_KEY only).
-export async function requireBrainKey(c: Context, next: Next) {
-  const key = c.req.header("X-Brain-Key") || c.req.header("x-brain-key") || "";
-  if (!config.workbenchKey || key !== config.workbenchKey) {
-    return c.json({ error: "unauthorized" }, 401);
-  }
-  await next();
 }

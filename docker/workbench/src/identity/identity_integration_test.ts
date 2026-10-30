@@ -219,6 +219,54 @@ Deno.test({ name: "service key: WORKBENCH_KEY is service:internal - shared knowl
 const marker = `IdentitySecret${crypto.randomUUID().slice(0, 8)}`;
 let alicePath = "";
 
+// rw-identity2 (review r-identity B1): the seam judged a path decoded up to 4 times with ".." resolved,
+// the router one decoded once (keeping %2F) - so these reached the notes and repin handlers with no
+// session. Every spelling that decoding could reshape is now refused (400) before any decision, through
+// the viewer and direct with the door key; a service key gets no further.
+// (a single %2e%2e is not here: fetch resolves it before sending, as every WHATWG client does.)
+const B1_SPELLINGS: [string, string][] = [
+  ["GET", "/workbench/notes/%252e%252e/health/foo.md"], ["PUT", "/workbench/notes/%252e%252e/health/foo.md"],
+  ["DELETE", "/workbench/notes/%252e%252e/health/foo.md"], ["POST", "/workbench/notes/%252e%252e/health/foo.md/restore"],
+  ["POST", "/workbench/notes/%252e%252e/health/foo.md/recover"], ["GET", "/workbench/notes/%252E%252E/health/foo.md"],
+  ["GET", "/workbench/notes/%25252e%25252e/health/foo.md"], ["GET", "/workbench/notes/x/..%2F..%2Fhealth/foo.md"],
+  ["GET", "/workbench/notes/x/..%2f..%2fhealth/foo.md"], ["PUT", "/workbench/notes/x/..%2F..%2Fhealth/foo.md"],
+  ["GET", "/workbench/notes/x/..%5C..%5Chealth/foo.md"], ["GET", "/workbench/notes/x/..%255c..%255chealth/foo.md"],
+  ["GET", "/workbench/notes/x/%252e%252e%252f%252e%252e%252fhealth/foo.md"],
+  ["GET", "/workbench/notes/x/..;p/..;p/health/foo.md"], ["GET", "/workbench/notes/x%252fy.md"],
+  ["POST", "/workbench/documents/references/%252e%252e%252f%252e%252e%252fhealth/repin"],
+  ["POST", "/workbench/documents/references/..%2F..%2Fhealth/repin"],
+  ["DELETE", "/workbench/documents/references/%252e%252e%252f%252e%252e%252fhealth"],
+];
+Deno.test({ name: "B1 a spelling the router reads differently from the seam never reaches a handler: 400, no data, no write", ...opts, fn: async () => {
+  const anon = new Browser();
+  const body = { content: `B1 anonymous write ${marker}` };
+  for (const [m, p] of B1_SPELLINGS) {
+    const via = await anon.req(m, p, ["PUT", "POST"].includes(m) ? body : undefined);
+    assertEquals(via.status, 400, `through the viewer ${m} ${p}: ${via.status} ${via.text.slice(0, 120)}`);
+    const d = await direct(WB, m, p, { "x-brain-key": DOOR }, ["PUT", "POST"].includes(m) ? body : undefined);
+    assertEquals(d.status, 400, `direct, door key ${m} ${p}: ${d.status} ${d.text.slice(0, 120)}`);
+    const s = await direct(WB, m, p, { "x-brain-key": INTERNAL }, ["PUT", "POST"].includes(m) ? body : undefined);
+    assertEquals(s.status, 400, `direct, service key ${m} ${p}: ${s.status} ${s.text.slice(0, 120)}`);
+    for (const r of [via.text, d.text, s.text]) assert(!r.includes(marker) && !/"(content|notePath|path)"\s*:/.test(r), `${m} ${p} answered with data: ${r.slice(0, 160)}`);
+  }
+  // the mirror: a service key past USER_ONLY through a reshaping spelling of a documents :id route
+  for (const p of ["/workbench/health/..%2F..%2Fdocuments/references/x/repin", "/workbench/notes/%252e%252e/..%2Fdocuments/folders",
+    "/workbench/contract/%252e%252e/documents/folders"]) {
+    const s = await direct(WB, p.endsWith("repin") ? "POST" : "GET", p, { "x-brain-key": INTERNAL });
+    assertEquals(s.status, 400, `service ${p}: ${s.status} ${s.text.slice(0, 120)}`);
+  }
+  // the canonical spellings still answer as before: no session = 401, health open
+  assertEquals((await direct(WB, "GET", "/workbench/notes/a.md", { "x-brain-key": DOOR })).status, 401);
+  assertEquals((await direct(WB, "GET", "/workbench/health", { "x-brain-key": DOOR })).status, 200);
+  // a signed-in user is refused the same spellings: they are not a route for anyone
+  const alice = new Browser();
+  await alice.signIn("alice");
+  for (const p of ["/workbench/notes/%2525252e%2525252e/health/foo.md", "/workbench/notes/x/..%2F..%2Fhealth/foo.md"]) {
+    assertEquals((await alice.req("GET", p)).status, 400, `signed in, ${p}`);
+  }
+} });
+
+
 Deno.test({ name: "C1 two signed-in users: each sees only their own documents; shared knowledge alike", ...opts, fn: async () => {
   const a = new Browser();
   await a.signIn("alice");

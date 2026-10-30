@@ -8,9 +8,6 @@
 export const REASON_MIN = 8;
 export const REASON_MAX = 1000;
 
-// default-ignorable and invisible code points, plus white space
-const INVISIBLE = /[\s­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ]/gu;
-
 const COUNTED = /[\p{L}\p{N}]/u;
 const FILLERS = new Set(["\u115f", "\u1160", "\u3164", "\uffa0"]);
 
@@ -25,7 +22,6 @@ export function visibleLength(s: string): number {
 export function reasonProblem(raw: string): string | null {
   const s = raw.trim();
   if (s.length > REASON_MAX) return `the reason is longer than ${REASON_MAX} characters`;
-  void INVISIBLE;
   if (visibleLength(s) < REASON_MIN) return `a reason is required (at least ${REASON_MIN} letters or digits)`;
   return null;
 }

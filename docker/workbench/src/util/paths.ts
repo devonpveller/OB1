@@ -5,6 +5,8 @@
 
 // Control chars (NUL .. US, 0x00-0x1f) are disallowed in any path segment.
 const CONTROL_CHARS = /[\x00-\x1f]/;
+// a segment of only dots and percent-encoded dots (%2e, %252e, %25252e, ... any case)
+const ENCODED_DOTS = /^(?:\.|%(?:25)*2e){1,2}$/i;
 
 export function safeRelPath(rel: string): string {
   const parts = String(rel)
@@ -13,6 +15,8 @@ export function safeRelPath(rel: string): string {
     .filter((p) => p.length > 0 && p !== ".");
   if (parts.length === 0) throw new Error("empty path");
   if (parts.some((p) => p === "..")) throw new Error("path traversal rejected");
+  // rw-identity2 (review r-identity B1): nor one that decodes to "." or ".." (%2e, %252e, ...)
+  if (parts.some((p) => ENCODED_DOTS.test(p))) throw new Error("path traversal rejected");
   if (parts.some((p) => CONTROL_CHARS.test(p))) throw new Error("invalid path char");
   return parts.join("/");
 }

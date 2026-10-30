@@ -25,7 +25,7 @@ browser ──fetch('/workbench/…')──> portal Caddy (wiki.{$PUBLIC_DOMAIN}
 - `handle` (NOT `handle_path`) preserves the `/workbench` prefix, so routes are
   mounted prefix-inclusive (`/workbench/notebooks`, …).
 - Caddy **injects** the shared secret server-side (G7) — the browser never holds
-  it. `requireBrainKey` trusts the header on `app-net`; the service is never
+  it. `requireKey` (src/middleware/auth.ts) trusts the header on `app-net`; the service is never
   host-published except an optional `127.0.0.1` debug port.
 
 ## Architecture (G9)
@@ -100,6 +100,11 @@ Open WebUI signs its own users in (env-only provider settings; nothing in a data
   tools and openbrain-wiki send) becomes the internal service `service:internal`, which reads shared
   knowledge but has no user front end (403 on `/workbench/documents`, `/workbench/workspace`, the admin
   routes). `WORKSPACE_SERVICE_KEYS=name=key;...` adds named services.
+- **One path for the seam and the router (rw-identity2).** A `/workbench` path that further decoding
+  could reshape - an encoded `%`, `/`, `\` or `.` (`%25 %2F %5C %2E`), a backslash, an empty, `.` or
+  `..` segment - is answered 400 before any sign-in decision, with or without sign-in. Clients encode
+  path segments with `encodeURIComponent` per segment; an id or note name holding `/` or `%` is not
+  a path segment.
 - **The identity header cannot stand in for a sign-in.** While sign-in is configured
   `WORKSPACE_IDENTITY_HEADER` is ignored entirely. Without sign-in it is P2b's forward-auth hook, and
   then this **edge-strip rule** applies: every door in front of the workbench MUST remove any

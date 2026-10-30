@@ -9,7 +9,7 @@ import { Hono } from "hono";
 import { authorizeUrl, b64url, challengeOf, oidcConfig, pkcePair, type ProviderMeta, verifyIdToken } from "./oidc.ts";
 import { clearSessionCookie, loginCookie, readCookie, safeReturnTo, SESSION_COOKIE, sessionCookie } from "./cookies.ts";
 import { keyKind, keyRing } from "./keys.ts";
-import { identityConfig, identityOf, identitySeam, resolveIdentity, routePath, seamDeps } from "../middleware/identity.ts";
+import { canonicalPath, identityConfig, identityOf, identitySeam, resolveIdentity, routePath, seamDeps } from "../middleware/identity.ts";
 import { REASON_MIN, reasonProblem } from "./reason.ts";
 
 const env = (m: Record<string, string>) => (k: string) => m[k];
@@ -175,9 +175,76 @@ Deno.test("seam: a percent-encoded or doubled path is judged as the route it rea
   assertEquals(routePath("/workbench/%E0%A4%A"), "/workbench/%E0%A4%A");
   const on = { ...OIDC, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789" };
   const call = mount(on);
-  for (const p of ["/workbench/%64ocuments/folders", "/workbench//documents/folders", "/workbench/%2564ocuments/folders"]) {
+  assertEquals((await call("/workbench/%64ocuments/folders", { "x-brain-key": "internal-key-0123456789" })).status, 403);
+  // rw-identity2 (B1): a spelling that decoding could reshape is refused outright, before any decision
+  for (const p of ["/workbench//documents/folders", "/workbench/%2564ocuments/folders"]) {
     const r = await call(p, { "x-brain-key": "internal-key-0123456789" });
-    assertEquals(r.status, 403, `${p}: ${r.status}`);
+    assertEquals(r.status, 400, `${p}: ${r.status}`);
+  }
+});
+
+// rw-identity2 (review r-identity B1): the seam and the router judge ONE string. A path is canonical when
+// no further decoding can change its shape; anything else is null (the seam answers 400).
+Deno.test("canonicalPath: the canonical spellings pass unchanged; every reshaping spelling is null", () => {
+  for (const p of ["/workbench/notes/a.md", "/workbench/documents/folders", "/workbench/health", "/workbench/auth/login",
+    "/workbench/%64ocuments/folders", "/workbench/notes/my%20note.md", "/workbench/notes/caf%C3%A9.md",
+    "/workbench/contract/chunks/abc:3/context", "/workbench/contract/settings/podcast.archive", "/workbench/notes/a..b.md", "/"]) {
+    assertEquals(canonicalPath(p), routePath(p), p);
+  }
+  assertEquals(canonicalPath("/workbench/documents/"), "/workbench/documents", "one trailing slash is the same route's path");
+  for (const p of [
+    "/workbench/notes/%252e%252e/health/foo.md", "/workbench/notes/x/..%2F..%2Fhealth/foo.md",
+    "/workbench/documents/references/%252e%252e%252f%252e%252e%252fhealth/repin", "/workbench/notes/%2e%2e/health/foo.md",
+    "/workbench/notes/%2E%2E/health/foo.md", "/workbench/notes/x%2fy.md", "/workbench/notes/x%2Fy.md", "/workbench/notes/x%5cy.md",
+    "/workbench/notes/x%5Cy.md", "/workbench/notes/x%252fy.md", "/workbench/notes/x%25y.md", "/workbench/notes/x\\y.md",
+    "/workbench/notes/../health/x", "/workbench/notes/./a.md", "/workbench//notes/a.md", "/workbench/notes/a.md//",
+    "/workbench/notes/..;x/health/foo.md", "/workbench/notes/.;x/a.md", "/workbench/notes/;x/a.md", "/workbench/notes/x%00.md",
+    "/workbench/notes/%E0%A4%A", "/workbench/%2564ocuments", "/workbench/documents%2Ffolders", "workbench/notes",
+  ]) assertEquals(canonicalPath(p), null, p);
+});
+
+// The reviewer's probe (journal/evidence/rw-identity/review-r-identity-seam-probe.ts), as a test: the
+// router is Hono with the real seam in front, sign-in on, the door key, no session.
+Deno.test("seam (B1): an anonymous browser never reaches a handler through a spelling the router reads differently", async () => {
+  const on = { ...OIDC, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789" };
+  const app = new Hono();
+  app.use("/workbench/*", identitySeam(seamDeps(null, env(on))));
+  const notes = new Hono();
+  for (const m of ["get", "put", "delete"] as const) notes[m]("/:notePath{.+}", (c) => c.json({ reached: "notes", notePath: c.req.param("notePath") }));
+  notes.post("/:notePath{.+}/restore", (c) => c.json({ reached: "restore" }));
+  app.route("/workbench/notes", notes);
+  const docs = new Hono();
+  docs.post("/references/:id/repin", (c) => c.json({ reached: "repin", id: c.req.param("id") }));
+  docs.delete("/references/:id", (c) => c.json({ reached: "unref", id: c.req.param("id") }));
+  app.route("/workbench/documents", docs);
+  app.get("/workbench/health", (c) => c.json({ ok: true }));
+  const call = (method: string, p: string, key = "door-key-0123456789") => app.request("http://h" + p, { method, headers: { "x-brain-key": key } });
+  assertEquals((await call("GET", "/workbench/notes/a.md")).status, 401, "the canonical spelling: sign in first");
+  assertEquals((await call("GET", "/workbench/health")).status, 200, "health stays open");
+  const spellings: [string, string][] = [
+    ["GET", "/workbench/notes/%252e%252e/health/foo.md"], ["PUT", "/workbench/notes/%252e%252e/health/foo.md"],
+    ["DELETE", "/workbench/notes/%252e%252e/health/foo.md"], ["POST", "/workbench/notes/%252e%252e/health/foo.md/restore"],
+    ["GET", "/workbench/notes/x/..%2F..%2Fhealth/foo.md"], ["GET", "/workbench/notes/x/..%2f..%2fhealth/foo.md"],
+    ["GET", "/workbench/notes/%252E%252E/health/foo.md"], ["GET", "/workbench/notes/x/..%5C..%5Chealth/foo.md"],
+    ["GET", "/workbench/notes/x/..%255c..%255chealth/foo.md"], ["GET", "/workbench/notes/x/%252e%252e%252f%252e%252e%252fhealth/foo.md"],
+    ["GET", "/workbench/notes/%25252e%25252e/health/foo.md"], ["GET", "/workbench/notes/x/..;p/..;p/health/foo.md"],
+    ["POST", "/workbench/documents/references/%252e%252e%252f%252e%252e%252fhealth/repin"],
+    ["POST", "/workbench/documents/references/..%2F..%2Fhealth/repin"],
+    ["DELETE", "/workbench/documents/references/%252e%252e%252f%252e%252e%252fhealth"],
+  ];
+  for (const [m, p] of spellings) {
+    const r = await call(m, p);
+    const t = await r.text();
+    assert(!t.includes("reached"), `${m} ${p}: a handler ran (${r.status} ${t.slice(0, 120)})`);
+    assertEquals(r.status, 400, `${m} ${p}: ${r.status} ${t.slice(0, 120)}`);
+  }
+  // the mirror: a service key past USER_ONLY through a reshaping spelling of a documents route
+  for (const p of ["/workbench/health/..%2F..%2Fdocuments/references/x/repin", "/workbench/notes/%252e%252e/..%2Fdocuments/references/x/repin",
+    "/workbench/documents/references/%252e%252e%252f%252e%252e%252fhealth/repin"]) {
+    const r = await call("POST", p, "internal-key-0123456789");
+    const t = await r.text();
+    assert(!t.includes("reached"), `service POST ${p}: a handler ran (${r.status} ${t.slice(0, 120)})`);
+    assert(r.status === 400 || r.status === 403 || r.status === 404, `service POST ${p}: ${r.status}`);
   }
 });
 
