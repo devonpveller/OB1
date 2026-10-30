@@ -22,7 +22,7 @@
 //    is the net under all of them, nested fields included.
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
-import { identityOf, type Identity } from "./identity.ts";
+import { identityOf, type Identity, seamPath } from "./identity.ts";
 import { documentPathsIn, ownsDocumentPaths } from "../documents/ownership.ts";
 
 const OTHER = "(another user's document)";
@@ -51,9 +51,10 @@ class BodyRefused extends Error {
 const MUTATING = (m: string) => !["GET", "HEAD", "OPTIONS"].includes(m);
 
 async function requestStrings(c: Context): Promise<string[]> {
-  const url = new URL(c.req.url);
+  const url = new URL(c.req.url); // the query only - the path is the seam's (rw-identity3, B1b)
+  const route = seamPath(c);
   const out: string[] = [];
-  let path = url.pathname;
+  let path = route;
   try { path = decodeURIComponent(path); } catch { /* keep raw */ }
   out.push(path.replace(ROUTE_PREFIX, ""));
   for (const [, v] of url.searchParams) out.push(v);
@@ -64,7 +65,7 @@ async function requestStrings(c: Context): Promise<string[]> {
   const isJson = media === "application/json" || media.endsWith("+json");
   // the contract API takes JSON bodies only: any other type is refused here, never handed to a route
   // that would read it as no body (attempt 2: a 500 on application/vnd.x+json and text/plain)
-  if (url.pathname.startsWith("/workbench/contract/") && media !== "application/json") {
+  if (route.startsWith("/workbench/contract/") && media !== "application/json") {
     throw new BodyRefused(415, "the contract API takes application/json");
   }
   if (isJson) {
@@ -163,7 +164,8 @@ function scrubStream(db: Db, body: ReadableStream<Uint8Array>, who: Identity): R
 export function ownerScope(db: Db) {
   return async (c: Context, next: Next) => {
     const who = await identityOf(c);
-    const url0 = new URL(c.req.url);
+    // rw-identity3 (B1b): the path the seam judged and the router routed, never new URL(...).pathname
+    const route = seamPath(c);
     let strings: string[];
     try {
       strings = await requestStrings(c);
@@ -178,7 +180,7 @@ export function ownerScope(db: Db) {
     await next();
     // rw-identity: the sign-in routes answer the caller's own identity and, to an admin, the audit
     // log (whose routes may name any user's document - the log must show them as they were)
-    if (OFF() || url0.pathname.startsWith("/workbench/auth/")) return;
+    if (OFF() || route.startsWith("/workbench/auth/")) return;
     const type = c.res.headers.get("content-type") ?? "";
     if (type.includes("text/event-stream") && c.res.body) {
       const headers = new Headers(c.res.headers);

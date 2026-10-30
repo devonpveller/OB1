@@ -172,8 +172,8 @@ services:
       # Revert: revert-documents.sql.
       - ./init-documents.sql:/docker-entrypoint-initdb.d/270-init-documents.sql:ro # research-workbench P2b
       - ./init-research-filed.sql:/docker-entrypoint-initdb.d/280-init-research-filed.sql:ro # research-workbench rw-curator-filed (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-research-filed.sql)
-      # rw-identity: sign-in with Authentik - users, sign-ins in flight, sessions, and the APPEND-ONLY
-      # admin_audit log (impersonation + every request during it). Fresh-volume only; the live DB
+      # rw-identity: sign-in with Authentik forward-auth - users seen, admins' impersonations, and the
+      # APPEND-ONLY admin_audit log (impersonation + every request during it). Fresh-volume only; the live DB
       # gets it by hand (psql -f). Revert: revert-identity.sql. NOTE: a new mount changes this
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
       - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity

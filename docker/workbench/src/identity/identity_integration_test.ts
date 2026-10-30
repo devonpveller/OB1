@@ -107,6 +107,25 @@ const direct = async (base: string, method: string, path: string, headers: Recor
   return { status: r.status, json, text, setCookie: r.headers.getSetCookie() };
 };
 
+// rw-identity3 (review r-identity2 B1b): fetch (like every WHATWG client) resolves "." / ".." / "%2e"
+// segments and turns "\\" into "/" before sending, so the B1 cases above never sent a raw target. This
+// writes the request line itself over TCP: the bytes the workbench's router routes are the bytes sent.
+async function rawDirect(base: string, method: string, target: string, headers: Record<string, string>) {
+  const u = new URL(base);
+  const conn = await Deno.connect({ hostname: u.hostname, port: Number(u.port || 80) });
+  const CRLF = "\r\n";
+  const h = Object.entries(headers).map(([k, v]) => `${k}: ${v}${CRLF}`).join("");
+  const len = ["PUT", "POST"].includes(method) ? `content-type: application/json${CRLF}content-length: 2${CRLF}` : "";
+  await conn.write(new TextEncoder().encode(`${method} ${target} HTTP/1.1${CRLF}Host: ${u.host}${CRLF}${h}${len}Connection: close${CRLF}${CRLF}${len ? "{}" : ""}`));
+  const buf = new Uint8Array(65536);
+  let out = "";
+  let n: number | null;
+  while ((n = await conn.read(buf)) !== null) out += new TextDecoder().decode(buf.subarray(0, n));
+  conn.close();
+  const i = out.indexOf(CRLF + CRLF);
+  return { status: Number(out.slice(9, 12)), text: i === -1 ? "" : out.slice(i + 4) };
+}
+
 // ── C4: authentication ────────────────────────────────────────────────────────────────────────
 Deno.test({ name: "C4 sign-in: a valid Authentik token is the sign-in - who am I; no login route, no session, no cookie; sign-out is Authentik's", ...opts, fn: async () => {
   assert(FA.secret.length >= 32 && FA.iss && FA.aud, "the lab signer is configured");
@@ -289,6 +308,55 @@ Deno.test({ name: "B1 a spelling the router reads differently from the seam neve
   }
 } });
 
+
+// rw-identity3 (review r-identity2 B1b): RAW request targets, direct to the workbench with the door key
+// (no token, and with alice's token) and with the service key - every one is the SEAM's 400 ("not a
+// canonical path") before any decision: never a handler's answer (its own 400/404), never data.
+const B1B_RAW: [string, string][] = [
+  ["GET", "/workbench/notes/%2e%2e/health"], ["GET", "/workbench/notes/%2E%2E/health/x"], ["GET", "/workbench/notes/.%2e/health"],
+  ["GET", "/workbench/notes/%2e./health"], ["GET", "/workbench/notes/../health"], ["GET", "/workbench/notes/./../health"],
+  ["GET", "/workbench/notes/./a.md"], ["GET", "/workbench/notes/a//../../../health"], ["GET", "/workbench/notes/;/../../health"],
+  ["GET", "/workbench/notes/a;b.md"], ["GET", "/workbench/notes/x\\..\\..\\health"], ["PUT", "/workbench/notes/%2e%2e/health/b1b.md"],
+  ["DELETE", "/workbench/notes/../health/b1b.md"], ["POST", "/workbench/notes/.%2e/health/b1b.md/restore"],
+  ["GET", "/workbench/notes/%2e%2e/auth/audit"], ["POST", "/workbench/documents/references/%2e%2e/%2e%2e/health/repin"],
+  ["GET", "/workbench/%2e%2e/workbench/health"], ["GET", "/workbench/.%2e/workbench/notes/a.md"], ["GET", "/workbench/../workbench/health"],
+  ["GET", "/workbench/./health"], ["GET", "/workbench/./documents/folders"], ["GET", "/workbench//health"], ["GET", "/workbench/;/../health"],
+  ["GET", "/workbench/x\\..\\health"], ["GET", "/workbench/health/%2e%2e/documents/folders"], ["GET", "/workbench/health/../auth/audit"],
+];
+Deno.test({ name: "B1b a RAW request target (sent over a socket, not through fetch) is the seam's 400 before any decision, with and without keys and tokens", ...opts, fn: async () => {
+  const tok = await mint(claimsOf("alice"));
+  const fails: string[] = [];
+  let total = 0;
+  for (const [m, t] of B1B_RAW) {
+    for (const [label, base, h] of [["door, no token", WB, { "x-brain-key": DOOR }], ["door + alice", WB, { "x-brain-key": DOOR, [TOKEN]: tok }],
+      ["service key", WB, { "x-brain-key": INTERNAL }], ["sign-in off, service key", WB_PLAIN, { "x-brain-key": INTERNAL }]] as const) {
+      if (!base) continue;
+      total++;
+      const r = await rawDirect(base, m, t, h);
+      if (r.status !== 400 || !/not a canonical path/.test(r.text)) fails.push(`${m} ${t} [${label}]: ${r.status} ${r.text.slice(0, 120)}`);
+    }
+  }
+  // controls, raw too: the canonical spellings answer as the route they are
+  assertEquals((await rawDirect(WB, "GET", "/workbench/notes/a.md", { "x-brain-key": DOOR })).status, 401);
+  assertEquals((await rawDirect(WB, "GET", "/workbench/health", { "x-brain-key": DOOR })).status, 200);
+  console.log(`B1b raw targets: ${total - fails.length}/${total} were the seam's 400`);
+  assert(fails.length === 0, `${fails.length}/${total} raw targets were not the seam's 400:\n${fails.join("\n")}`);
+} });
+
+// rw-identity3 (F-b): forward-auth NOT configured, yet the request carries Authentik's headers - 503, never
+// the default user; without them, today's single-user behaviour.
+Deno.test({ name: "Fb with no WORKSPACE_FORWARD_AUTH_* a request carrying X-authentik-jwt or any X-authentik-* is refused 503, never served as the default user", ...opts, ignore: ignore || !WB_PLAIN, fn: async () => {
+  const tok = await mint(claimsOf("bob"));
+  const fails: string[] = [];
+  for (const extra of [{ [TOKEN]: tok }, { "X-authentik-uid": sub("bob") || "ak-bob" }, { "X-Authentik-Username": "bob" }, { "x-authentik-groups": "admins" }] as Record<string, string>[]) {
+    for (const p of ["/workbench/workspace/whoami", "/workbench/contract/documents", "/workbench/documents/folders", "/workbench/auth/me"]) {
+      const r = await direct(WB_PLAIN, "GET", p, { "x-brain-key": INTERNAL, ...extra });
+      if (r.status !== 503 || !/forward-auth is not configured/.test(r.text) || r.json.subject_sub !== undefined) fails.push(`${p} ${Object.keys(extra)[0]}: ${r.status} ${r.text.slice(0, 120)}`);
+    }
+  }
+  assertEquals((await direct(WB_PLAIN, "GET", "/workbench/workspace/whoami", { "x-brain-key": INTERNAL })).json.subject_sub, E("IDENTITY_TEST_DEFAULT_SUB") || "operator", "no Authentik header: as before");
+  assert(fails.length === 0, `${fails.length} requests with X-authentik-* were served while forward-auth is off:\n${fails.join("\n")}`);
+} });
 
 Deno.test({ name: "C1 two signed-in users: each sees only their own documents; shared knowledge alike", ...opts, fn: async () => {
   const a = new Browser();
@@ -670,7 +738,10 @@ Deno.test({ name: "C5 a workbench with no WORKSPACE_FORWARD_AUTH_* behaves as be
   assertEquals(me.json.logout, null, "no sign-out link");
   // a token sent anyway changes nothing there (no forward-auth configured = the token is not read)
   const tok = await mint(claimsOf("bob"));
+  // rw-identity3 (F-b, operator-agreed): a token sent anyway is REFUSED 503 - forward-auth is not
+  // configured, so it is never served as the default user (was: ignored, served as the default)
   const w2 = await direct(WB_PLAIN, "GET", "/workbench/workspace/whoami", { ...h, [TOKEN]: tok });
-  assertEquals(w2.json.subject_sub, E("IDENTITY_TEST_DEFAULT_SUB") || "operator");
+  assertEquals(w2.status, 503, `a token while forward-auth is off: ${w2.status} ${w2.text.slice(0, 120)}`);
+  assert(/forward-auth is not configured/.test(w2.text) && w2.json.subject_sub === undefined, w2.text.slice(0, 160));
   assertNotEquals((await direct(WB_PLAIN, "GET", "/workbench/contract/documents", h)).status, 401);
 } });

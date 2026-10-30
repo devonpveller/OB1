@@ -204,7 +204,7 @@ Deno.test("canonicalPath: the canonical spellings pass unchanged; every reshapin
     "/workbench/contract/chunks/abc:3/context", "/workbench/contract/settings/podcast.archive", "/workbench/notes/a..b.md", "/"]) {
     assertEquals(canonicalPath(p), routePath(p), p);
   }
-  assertEquals(canonicalPath("/workbench/documents/"), "/workbench/documents", "one trailing slash is the same route's path");
+  assertEquals(canonicalPath("/workbench/documents/"), "/workbench/documents/", "one trailing slash is kept: the router (strict) matches it as sent (rw-identity3)");
   for (const p of [
     "/workbench/notes/%252e%252e/health/foo.md", "/workbench/notes/x/..%2F..%2Fhealth/foo.md",
     "/workbench/documents/references/%252e%252e%252f%252e%252e%252fhealth/repin", "/workbench/notes/%2e%2e/health/foo.md",

@@ -113,8 +113,9 @@ RUN apt-get update \
 # CJK glyphs, process separation). parity_fixture.ts runs only in the parity stage.
 # research-workbench P2b adds src/documents/: the user document grammar and the hub clustering (pure);
 # its integration test is skipped here (no DOCS_TEST_BASE); run-workspace-tests.ps1 runs it.
-# rw-identity adds src/identity/: the sign-in config, PKCE, every ID-token check, the cookies, the key
-# ring and the seam's modes (pure); its integration test is skipped here (no IDENTITY_TEST_BASE).
+# rw-identity adds src/identity/: the forward-auth config, every check of the outpost's signed token
+# (HS256 only), the key ring and the seam's modes (pure), and (rw-identity3) the raw-request-target
+# cases over a loopback socket; its integration test is skipped here (no IDENTITY_TEST_BASE).
 RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ \
   && touch /app/.test-gate-passed
 

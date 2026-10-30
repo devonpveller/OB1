@@ -163,7 +163,11 @@ export function routePath(raw: string): string {
 // %5C %2E, any case), no NUL, no backslash, valid percent-encoding, no empty, "." or ".." segment (a
 // ";param" suffix does not hide one) bar one trailing "/", and routePath of it is the path itself.
 // Returns the canonical path, or null - the seam answers null with 400 before it judges anything.
-const ENCODED_SHAPE = /%(25|2f|5c|2e|00)|\\/i;
+// rw-identity3 (review r-identity2 B1b): a raw ";" is refused too - no client sends one (every client
+// encodes per segment, encodeURIComponent turns ";" into %3B), and it is how a dot segment hides.
+// The value returned is the path exactly as the router matches it (routerPath), so the seam's every
+// decision, the audit route and owner-scope judge the router's own string.
+const ENCODED_SHAPE = /%(25|2f|5c|2e|00)|[\\;]/i;
 export function canonicalPath(raw: string): string | null {
   if (!raw.startsWith("/") || ENCODED_SHAPE.test(raw)) return null;
   let d: string;
@@ -176,7 +180,37 @@ export function canonicalPath(raw: string): string | null {
       if (name === "" || name === "." || name === "..") return null;
     }
   }
-  return routePath(raw) === body ? body : null;
+  return routePath(raw) === body ? routerPath(raw) : null;
+}
+
+// rw-identity3 (review r-identity2 B1b): the RAW path of the request, taken exactly as Hono's router
+// takes it (hono/utils/url.ts getPath, pinned jsr:@hono/hono@4.13.5): the request URL from the first
+// "/" after the scheme's "://" up to the first "?" or "#". NEVER new URL(c.req.url).pathname - WHATWG
+// parsing resolves "." / ".." / "%2e" segments and turns "\" into "/" before the seam could see them,
+// while Deno.serve hands the router the request target as sent. Returns the raw path and the query
+// ("?..." up to any "#", or "").
+export function rawTarget(url: string): { path: string; query: string } {
+  const start = url.indexOf("/", url.indexOf(":") + 4);
+  if (start === -1) return { path: "", query: "" };
+  let i = start;
+  for (; i < url.length; i++) {
+    const ch = url.charCodeAt(i);
+    if (ch === 63 || ch === 35) break; // "?" or "#"
+  }
+  const rest = url.slice(i);
+  return { path: url.slice(start, i), query: rest.startsWith("?") ? rest.split("#")[0] : "" };
+}
+
+// The router's path for a raw path: getPath's decoding (tryDecodeURI, with its %25 -> %2525 guard), so
+// what the seam stores is byte for byte c.req.path.
+export function routerPath(raw: string): string {
+  if (!raw.includes("%")) return raw;
+  const p = raw.includes("%25") ? raw.replace(/%25/g, "%2525") : raw;
+  try {
+    return decodeURI(p);
+  } catch {
+    return p.replace(/(?:%[0-9A-Fa-f]{2})+/g, (m) => { try { return decodeURI(m); } catch { return m; } });
+  }
 }
 
 export function seamDeps(db: Db | null, env = (k: string) => Deno.env.get(k)): SeamDeps {
@@ -192,13 +226,39 @@ const USER_ONLY = /^\/workbench\/(documents|workspace|auth\/(impersonate|users|a
 const JOB_READS = /^\/workbench\/contract\/(sessions|jobs|timeline)(\/|$)/;
 
 const KEY = "identity";
+const PATH_KEY = "identityPath";
+
+// The path the seam judged - the router's own (canonical) path, computed once by the seam and kept on
+// the context, so nothing after it re-derives one. Without the seam (a router mounted alone in a test)
+// it is derived the same way, from the raw target.
+export function seamPath(c: Context): string {
+  const got = c.get(PATH_KEY as never) as string | undefined;
+  if (got !== undefined) return got;
+  const raw = rawTarget(c.req.url).path;
+  return canonicalPath(raw) ?? routerPath(raw);
+}
+
+// F-b (review r-identity2): an edge doing Authentik forward-auth in front of a workbench whose
+// WORKSPACE_FORWARD_AUTH_* are blank would have every user served as WORKSPACE_DEFAULT_SUB
+const AUTHENTIK_HEADER = /^x-authentik-/i;
 
 export function identitySeam(deps: SeamDeps = seamDeps(null)) {
   return async (c: Context, next: Next) => {
-    const url = new URL(c.req.url);
-    // B1: a path the router could read differently from this seam is refused before any decision
-    const path = canonicalPath(url.pathname);
-    if (path === null) return c.json({ error: "not a canonical path: no encoded '/', '\\', '.' or '%', and no empty, '.' or '..' segment" }, 400);
+    // B1/B1b: the RAW target (as the router routes it, never a WHATWG-normalised URL); a path the
+    // router could read differently from this seam is refused before any decision
+    const target = rawTarget(c.req.url);
+    const path = canonicalPath(target.path);
+    if (path === null) return c.json({ error: "not a canonical path: no encoded '/', '\\', '.' or '%', no ';' or '\\', and no empty, '.' or '..' segment" }, 400);
+    c.set(PATH_KEY as never, path as never);
+    const route = path + target.query;
+    if (!deps.fa) {
+      for (const [name] of c.req.raw.headers) {
+        if (AUTHENTIK_HEADER.test(name)) {
+          console.warn(`[identity] a request carries ${name} but forward-auth is not configured: refused (503)`);
+          return c.json({ error: "forward-auth is not configured on the workbench (WORKSPACE_FORWARD_AUTH_* are blank), but this request carries Authentik forward-auth headers (X-authentik-*); refused rather than served as the default user" }, 503);
+        }
+      }
+    }
     const kk = keyKind(c.req.header("x-brain-key") ?? "", deps.ring, deps.fa !== null);
     let who: Identity;
     if (kk?.kind === "service") who = await serviceIdentity(kk.name);
@@ -224,7 +284,7 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
         c.req.method === "GET" && JOB_READS.test(path)) {
       try {
         await audit(deps.db, {
-          actor_sub: who.actor, subject_sub: who.sub, action: "request", method: c.req.method, route: url.pathname + url.search,
+          actor_sub: who.actor, subject_sub: who.sub, action: "request", method: c.req.method, route,
           reason: "an admin read of research that may carry ownerless prompts (WORKSPACE_DEFAULT_SUB unset)", session_ref: who.session,
         });
       } catch (e) {
@@ -236,7 +296,7 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
       try {
         await audit(deps.db, {
           actor_sub: who.actor, subject_sub: who.sub, action: "request", method: c.req.method,
-          route: url.pathname + url.search, reason: who.impersonating.reason, session_ref: who.session,
+          route, reason: who.impersonating.reason, session_ref: who.session,
         });
       } catch (e) {
         console.error("[identity] admin_audit write failed, request refused:", (e as Error).message);

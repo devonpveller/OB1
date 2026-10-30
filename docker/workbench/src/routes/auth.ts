@@ -17,7 +17,7 @@ import type { Context } from "hono";
 import type { Db } from "../contracts/db.ts";
 import type { ForwardAuthConfig } from "../identity/forward_auth.ts";
 import * as store from "../identity/store.ts";
-import { identityOf, type Identity } from "../middleware/identity.ts";
+import { identityOf, type Identity, seamPath } from "../middleware/identity.ts";
 import { reasonProblem } from "../identity/reason.ts";
 
 export interface AuthDeps {
@@ -60,7 +60,7 @@ export function authRouter(deps: AuthDeps) {
     const who = await identityOf(c);
     if (who.kind !== "user" || !who.admin) {
       if (who.kind === "user") {
-        await store.audit(deps.db, { actor_sub: who.actor, subject_sub: who.sub, action: "impersonate.refused", reason: `not an admin: ${action}`, method: c.req.method, route: new URL(c.req.url).pathname, session_ref: who.session });
+        await store.audit(deps.db, { actor_sub: who.actor, subject_sub: who.sub, action: "impersonate.refused", reason: `not an admin: ${action}`, method: c.req.method, route: seamPath(c), session_ref: who.session });
       }
       return c.json({ error: "admins only" }, 403);
     }

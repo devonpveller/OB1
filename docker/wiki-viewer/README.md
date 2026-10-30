@@ -63,7 +63,8 @@ viewer (openbrain-wiki-viewer, node:22; NO Quartz in the image since P1c -
   rw-identity: the key injected is WORKSPACE_DOOR_KEY when set (required once
   the workbench signs users in), and WORKSPACE_IDENTITY_HEADER /
   WORKSPACE_IDENTITY_NAME_HEADER are dropped from every client request; the
-  sign-in's cookies pass both ways (workbench/README.md "Sign-in").
+  outpost's signed X-authentik-jwt passes to the workbench unchanged, which
+  verifies it (workbench/README.md "Sign-in (Authentik forward-auth)").
   explorer: /__nav?folder= - ONE folder at a time, sorted (lib/nav-tree.mjs),
   served by the NAV WORKER (lib/nav-worker.mjs: own thread + heap, port 8082,
   so the page thread's GC never delays it); the browser reaches it as

@@ -124,6 +124,13 @@ workbench verifies it **on every request** (`src/identity/forward_auth.ts`, with
 - **One path for the seam and the router (rw-identity2 round 6).** A `/workbench` path that further
   decoding could reshape - an encoded `%`, `/`, `\` or `.` (`%25 %2F %5C %2E`), a backslash, an
   empty, `.` or `..` segment - is answered 400 before any sign-in decision, with or without sign-in.
+  rw-identity3: the seam reads the RAW request target exactly as Hono's router does (from the first
+  `/` to `?`/`#`, never `new URL()`, which resolves dot segments first), a raw `;` is 400 too, and
+  that one path is what the scope checks, the audit `route` and owner-scope judge.
+- **Forward-auth headers while sign-in is off = 503.** With `WORKSPACE_FORWARD_AUTH_*` blank, a
+  request carrying `X-authentik-jwt` or any `X-authentik-*` header is refused 503 ("forward-auth
+  is not configured") - an edge doing forward-auth in front of an unconfigured workbench would
+  otherwise have every user served as `WORKSPACE_DEFAULT_SUB`.
 - **The identity header cannot stand in for a sign-in.** While forward-auth is configured
   `WORKSPACE_IDENTITY_HEADER` is ignored entirely. Without sign-in it is P2b's hook, and then this
   **edge-strip rule** applies: every door in front of the workbench MUST remove any client-sent copy
