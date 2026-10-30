@@ -1,122 +1,121 @@
-// deno test src/identity/identity_test.ts - rw-identity, the pure half (no network, no database): the
-// sign-in's configuration is inert unless set and refused when half set; PKCE S256; the authorize URL;
-// every ID-token check (signature RS256/ES256/HS256, alg none, issuer, audience, azp, expiry, nonce,
-// reserved subjects); the cookies' attributes; the return_to guard; the key ring; the seam's modes
-// (no sign-in = exactly the P2b seam; sign-in = the identity header ignored, no session = 401, a
-// service has no user front end). The image build runs this file (the test stage's gate).
-import { assert, assertEquals, assertMatch, assertRejects, assertThrows } from "jsr:@std/assert@1";
+// deno test src/identity/identity_test.ts - rw-identity, the pure half (no network, no database).
+// rw-identity2 (Authentik forward-auth): the forward-auth configuration is inert unless set, refused
+// when half set or with a retired WORKSPACE_OIDC_* variable; the outpost's token (X-authentik-jwt) is
+// verified HS256-only with the client secret - every other alg (none, RS256 incl. the RS256-with-the-
+// secret key confusion, HS384/512, ES256), a forged, tampered, expired, future, wrong-issuer,
+// wrong-audience or subject-less token is refused; admin is the token's group on every request; the
+// key ring; the seam's modes (no sign-in = exactly the P2b seam; forward-auth = the identity header and
+// the unsigned X-authentik-* headers ignored, no valid token = 401, a service has no user front end).
+// The image build runs this file (the test stage's gate).
+import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { Hono } from "hono";
-import { authorizeUrl, b64url, challengeOf, oidcConfig, pkcePair, type ProviderMeta, verifyIdToken } from "./oidc.ts";
-import { clearSessionCookie, loginCookie, readCookie, safeReturnTo, SESSION_COOKIE, sessionCookie } from "./cookies.ts";
+import { forwardAuthConfig, isAdmin, TOKEN_HEADER, verifyForwardToken } from "./forward_auth.ts";
 import { keyKind, keyRing } from "./keys.ts";
 import { canonicalPath, identityConfig, identityOf, identitySeam, resolveIdentity, routePath, seamDeps } from "../middleware/identity.ts";
 import { REASON_MIN, reasonProblem } from "./reason.ts";
 
 const env = (m: Record<string, string>) => (k: string) => m[k];
-const OIDC = {
-  WORKSPACE_OIDC_ISSUER: "https://auth.example/application/o/research/",
-  WORKSPACE_OIDC_CLIENT_ID: "research-workspace",
-  WORKSPACE_OIDC_REDIRECT_URI: "https://research.example/workbench/auth/callback",
+const SECRET = "lab-client-secret-0123456789abcdef0123456789abcdef";
+const FA = {
+  WORKSPACE_FORWARD_AUTH_ISSUER: "https://auth.example/application/o/research/",
+  WORKSPACE_FORWARD_AUTH_CLIENT_ID: "research-proxy",
+  WORKSPACE_FORWARD_AUTH_CLIENT_SECRET: SECRET,
 };
 
-Deno.test("config: no WORKSPACE_OIDC_* = no sign-in (inert as shipped)", () => {
-  assertEquals(oidcConfig(env({})), null);
+// ── a lab signer standing in for Authentik's outpost (WebCrypto only; jose is the product's) ────
+const b64url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const enc = (o: unknown) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+async function hmac(alg: "SHA-256" | "SHA-384" | "SHA-512", secret: string, data: string) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: alg }, false, ["sign"]);
+  return b64url(new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(data))));
+}
+async function hs(claims: Record<string, unknown>, o: { alg?: string; secret?: string; hash?: "SHA-256" | "SHA-384" | "SHA-512" } = {}) {
+  const data = `${enc({ alg: o.alg ?? "HS256", typ: "JWT" })}.${enc(claims)}`;
+  return `${data}.${await hmac(o.hash ?? "SHA-256", o.secret ?? SECRET, data)}`;
+}
+const now = () => Math.floor(Date.now() / 1000);
+const good = (extra: Record<string, unknown> = {}) => ({
+  iss: FA.WORKSPACE_FORWARD_AUTH_ISSUER, aud: "research-proxy", sub: "ak-sub-alice", exp: now() + 300, iat: now(),
+  name: "Alice", email: "alice@example", groups: ["users"], ...extra,
+});
+
+Deno.test("config: no WORKSPACE_FORWARD_AUTH_* = no sign-in (inert as shipped)", () => {
+  assertEquals(forwardAuthConfig(env({})), null);
   assertEquals(identityConfig(env({})).signIn, false);
 });
 
-Deno.test("config: a half-configured sign-in refuses to start; http issuer refused", () => {
-  assertThrows(() => oidcConfig(env({ WORKSPACE_OIDC_ISSUER: OIDC.WORKSPACE_OIDC_ISSUER })), Error, "half configured");
-  assertThrows(() => oidcConfig(env({ WORKSPACE_OIDC_CLIENT_SECRET: "s" })), Error, "half configured");
-  assertThrows(() => oidcConfig(env({ ...OIDC, WORKSPACE_OIDC_ISSUER: "http://auth.example/application/o/research/" })), Error, "https");
-  const c = oidcConfig(env({ ...OIDC, WORKSPACE_OIDC_ADMIN_GROUP: "research-admins" }))!;
-  assertEquals([c.clientId, c.adminGroup, c.scopes, c.sessionSeconds], ["research-workspace", "research-admins", "openid profile email", 12 * 3600]);
+Deno.test("config: half-configured, a short secret or a retired WORKSPACE_OIDC_* variable refuses to start", () => {
+  assertThrows(() => forwardAuthConfig(env({ WORKSPACE_FORWARD_AUTH_ISSUER: FA.WORKSPACE_FORWARD_AUTH_ISSUER })), Error, "half configured");
+  assertThrows(() => forwardAuthConfig(env({ WORKSPACE_FORWARD_AUTH_CLIENT_SECRET: SECRET })), Error, "half configured");
+  assertThrows(() => forwardAuthConfig(env({ WORKSPACE_FORWARD_AUTH_ADMIN_GROUP: "research-admins" })), Error, "half configured");
+  assertThrows(() => forwardAuthConfig(env({ ...FA, WORKSPACE_FORWARD_AUTH_CLIENT_SECRET: "short" })), Error, "32");
+  assertThrows(() => forwardAuthConfig(env({ ...FA, WORKSPACE_FORWARD_AUTH_ISSUER: "not a url" })), Error, "URL");
+  assertThrows(() => forwardAuthConfig(env({ ...FA, WORKSPACE_FORWARD_AUTH_SIGN_OUT_URL: "//evil.example/x" })), Error, "SIGN_OUT");
+  for (const k of ["WORKSPACE_OIDC_ISSUER", "WORKSPACE_OIDC_CLIENT_SECRET", "WORKSPACE_SESSION_HOURS"]) {
+    assertThrows(() => forwardAuthConfig(env({ [k]: "x" })), Error, "removed");
+  }
+  const c = forwardAuthConfig(env({ ...FA, WORKSPACE_FORWARD_AUTH_ADMIN_GROUP: "research-admins" }))!;
+  assertEquals([c.audience, c.adminGroup, c.signOutUrl, c.impersonationMinutes], ["research-proxy", "research-admins", "/outpost.goauthentik.io/sign_out", 60]);
+  assertEquals(TOKEN_HEADER, "x-authentik-jwt");
+  // the secret is never part of what the config prints
+  assert(!JSON.stringify({ ...c, secret: undefined }).includes(SECRET));
 });
 
-Deno.test("PKCE: S256 = base64url(SHA-256(verifier)) - the expected value computed independently with node:crypto; a fresh pair verifies", async () => {
-  assertEquals(await challengeOf("dBjftJeZ4CVP-mA92Q9TV7tY8TlVN4u3ZxLpv6IiPcg"), "pnU7jgjM1aidWemVYNPDCPBjQV6c1_x_pp__d9-cGF0");
-  const p = await pkcePair();
-  assert(p.verifier.length >= 43 && p.verifier.length <= 128);
-  assertEquals(await challengeOf(p.verifier), p.challenge);
+Deno.test("token: HS256 with the client secret verifies; admin is the token's group", async () => {
+  const c = forwardAuthConfig(env({ ...FA, WORKSPACE_FORWARD_AUTH_ADMIN_GROUP: "research-admins" }))!;
+  const v = await verifyForwardToken(await hs(good()), c);
+  assertEquals([v?.sub, v?.name, v?.email], ["ak-sub-alice", "Alice", "alice@example"]);
+  assertEquals(isAdmin(v!, c), false);
+  const a = await verifyForwardToken(await hs(good({ groups: ["users", "research-admins"] })), c);
+  assertEquals(isAdmin(a!, c), true);
+  // removed from the group: the next token says so, and that request is not an admin's
+  const b = await verifyForwardToken(await hs(good({ groups: ["users"] })), c);
+  assertEquals(isAdmin(b!, c), false);
+  // a 20 s clock skew is tolerated (exp just passed)
+  assert(await verifyForwardToken(await hs(good({ exp: now() - 20 })), c));
 });
 
-Deno.test("authorize URL: code flow, S256 challenge, state, nonce, redirect, openid scope", () => {
-  const meta: ProviderMeta = { issuer: OIDC.WORKSPACE_OIDC_ISSUER, authorization_endpoint: "https://auth.example/application/o/authorize/", token_endpoint: "https://auth.example/application/o/token/", jwks_uri: "https://auth.example/jwks" };
-  const u = new URL(authorizeUrl(meta, oidcConfig(env(OIDC))!, { state: "st", nonce: "no", challenge: "ch" }));
-  const q = Object.fromEntries(u.searchParams);
-  assertEquals(q, { response_type: "code", client_id: "research-workspace", redirect_uri: OIDC.WORKSPACE_OIDC_REDIRECT_URI, scope: "openid profile email", state: "st", nonce: "no", code_challenge: "ch", code_challenge_method: "S256" });
-});
-
-// ── ID tokens ────────────────────────────────────────────────────────────────────────────────
-const enc = (o: unknown) => b64url(new TextEncoder().encode(JSON.stringify(o)));
-async function rsa() {
-  const kp = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
-  const jwk = { ...(await crypto.subtle.exportKey("jwk", kp.publicKey)), kid: "k1", use: "sig", alg: "RS256" };
-  const sign = async (header: Record<string, unknown>, claims: Record<string, unknown>) => {
-    const data = `${enc(header)}.${enc(claims)}`;
-    const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", kp.privateKey, new TextEncoder().encode(data)));
-    return `${data}.${b64url(sig)}`;
+Deno.test("token: every forgery, other alg, and claim failure is refused (null)", async () => {
+  const c = forwardAuthConfig(env(FA))!;
+  const refused = async (t: string, what: string) => {
+    let why = "";
+    assertEquals(await verifyForwardToken(t, c, (w) => why = w), null, what);
+    assert(!why.includes(SECRET) && !(t.length >= 20 && why.includes(t.slice(0, 20))), `${what}: the reason names neither the secret nor the token (${why})`);
   };
-  return { jwk, sign };
-}
-const now = Math.floor(Date.now() / 1000);
-const good = { iss: OIDC.WORKSPACE_OIDC_ISSUER, aud: "research-workspace", sub: "ak-sub-alice", exp: now + 300, iat: now, nonce: "n-1", name: "Alice", groups: ["users"] };
-const input = (keys: unknown[], extra: Record<string, unknown> = {}) => ({ issuer: OIDC.WORKSPACE_OIDC_ISSUER, audience: "research-workspace", nonce: "n-1", keys: keys as never, ...extra });
-
-Deno.test("ID token: RS256 verifies; every claim check refuses", async () => {
-  const k = await rsa();
-  const h = { alg: "RS256", kid: "k1" };
-  assertEquals((await verifyIdToken(await k.sign(h, good), input([k.jwk]))).sub, "ak-sub-alice");
-  const refused = async (claims: Record<string, unknown>, msg: string, header: Record<string, unknown> = h) =>
-    await assertRejects(async () => await verifyIdToken(await k.sign(header, claims), input([k.jwk])), Error, msg);
-  await refused({ ...good, nonce: "n-other" }, "nonce");
-  await refused({ ...good, nonce: undefined }, "nonce");
-  await refused({ ...good, aud: "another-client" }, "not for this client");
-  await refused({ ...good, aud: ["research-workspace", "x"], azp: "x" }, "azp");
-  await refused({ ...good, iss: "https://evil.example/" }, "issuer");
-  await refused({ ...good, exp: now - 3600 }, "expired");
-  await refused({ ...good, iat: now + 3600 }, "future");
-  await refused({ ...good, sub: "service:internal" }, "subject");
-  await refused({ ...good, sub: "" }, "subject");
-  await refused(good, "kid", { alg: "RS256", kid: "unknown" });
-  // a valid token with one byte of its payload changed
-  const t = await k.sign(h, good);
-  const [a, b, c] = t.split(".");
-  const tampered = `${a}.${enc({ ...good, sub: "ak-sub-mallory" })}.${c}`;
-  void b;
-  await assertRejects(() => verifyIdToken(tampered, input([k.jwk])), Error, "signature");
-  // alg none: never
-  await assertRejects(() => verifyIdToken(`${enc({ alg: "none" })}.${enc(good)}.`, input([k.jwk])), Error, "not accepted");
-  // another key's signature
-  const other = await rsa();
-  await assertRejects(async () => verifyIdToken(await other.sign(h, good), input([k.jwk])), Error, "signature");
-});
-
-Deno.test("ID token: ES256 and HS256 (Authentik without a signing key signs with the client secret)", async () => {
-  const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
-  const jwk = { ...(await crypto.subtle.exportKey("jwk", kp.publicKey)), kid: "e1" };
-  const data = `${enc({ alg: "ES256", kid: "e1" })}.${enc(good)}`;
-  const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, kp.privateKey, new TextEncoder().encode(data)));
-  assertEquals((await verifyIdToken(`${data}.${b64url(sig)}`, input([jwk]))).sub, "ak-sub-alice");
-  const hk = await crypto.subtle.importKey("raw", new TextEncoder().encode("client-secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const hd = `${enc({ alg: "HS256" })}.${enc(good)}`;
-  const hs = b64url(new Uint8Array(await crypto.subtle.sign("HMAC", hk, new TextEncoder().encode(hd))));
-  assertEquals((await verifyIdToken(`${hd}.${hs}`, input([], { clientSecret: "client-secret" }))).sub, "ak-sub-alice");
-  await assertRejects(() => verifyIdToken(`${hd}.${hs}`, input([], { clientSecret: "wrong" })), Error, "signature");
-  await assertRejects(() => verifyIdToken(`${hd}.${hs}`, input([])), Error, "CLIENT_SECRET");
-});
-
-Deno.test("cookies: __Host- session is Secure, HttpOnly, SameSite=Strict, Path=/; the login binding is Lax", () => {
-  const s = sessionCookie("tok", 3600);
-  assertMatch(s, /^__Host-ob-ws-session=tok; Path=\/; Max-Age=3600; Secure; HttpOnly; SameSite=Strict$/);
-  assertMatch(loginCookie("b"), /^__Host-ob-ws-login=b; Path=\/; Max-Age=600; Secure; HttpOnly; SameSite=Lax$/);
-  assertMatch(clearSessionCookie(), /Max-Age=0/);
-  assertEquals(readCookie("a=1; __Host-ob-ws-session=xyz; b=2", SESSION_COOKIE), "xyz");
-  assertEquals(readCookie(undefined, SESSION_COOKIE), "");
-});
-
-Deno.test("return_to: a path on this origin only", () => {
-  assertEquals(safeReturnTo("/workspace/?doc=documents/x.md"), "/workspace/?doc=documents/x.md");
-  for (const bad of ["//evil.example/", "https://evil.example/", "javascript:alert(1)", "/\\evil", "", undefined]) assertEquals(safeReturnTo(bad), "/workspace/");
+  await refused("", "no token");
+  await refused("not.a.jwt", "garbage");
+  await refused(await hs(good(), { secret: "another-secret-0123456789abcdef0123456789" }), "another secret (forged)");
+  await refused(await hs(good({ exp: now() - 3600 })), "expired");
+  await refused(await hs(good({ exp: undefined })), "no exp");
+  await refused(await hs(good({ iat: undefined })), "no iat");
+  await refused(await hs(good({ iat: now() + 3600 })), "issued in the future");
+  await refused(await hs(good({ nbf: now() + 3600 })), "not yet valid");
+  await refused(await hs(good({ iss: "https://evil.example/application/o/research/" })), "wrong issuer");
+  await refused(await hs(good({ iss: undefined })), "no issuer");
+  await refused(await hs(good({ aud: "another-client" })), "wrong audience");
+  await refused(await hs(good({ aud: undefined })), "no audience");
+  for (const s of ["", "service:internal", "system:backfill", "anonymous:", "a\u0000b"]) await refused(await hs(good({ sub: s })), `subject ${JSON.stringify(s)}`);
+  await refused(await hs(good({ sub: undefined })), "no subject");
+  // one byte of the payload changed after signing
+  const [h, , sig] = (await hs(good())).split(".");
+  await refused(`${h}.${enc(good({ sub: "ak-sub-mallory" }))}.${sig}`, "tampered payload");
+  // alg none, with and without a signature part
+  await refused(`${enc({ alg: "none", typ: "JWT" })}.${enc(good())}.`, "alg none");
+  await refused(`${enc({ alg: "none" })}.${enc(good())}`, "alg none, two parts");
+  await refused(`${enc({ alg: "NONE" })}.${enc(good())}.`, "alg NONE");
+  // RS256 / ES256 headers signed with the secret as an HMAC key: the RS256-with-the-secret key confusion
+  await refused(await hs(good(), { alg: "RS256" }), "RS256 header, HMAC-signed with the secret");
+  await refused(await hs(good(), { alg: "ES256" }), "ES256 header, HMAC-signed with the secret");
+  await refused(await hs(good(), { alg: "PS256" }), "PS256 header");
+  // other HMAC strengths, correctly signed with the secret: still not HS256
+  await refused(await hs(good(), { alg: "HS384", hash: "SHA-384" }), "HS384");
+  await refused(await hs(good(), { alg: "HS512", hash: "SHA-512" }), "HS512");
+  // a real RS256 token from another key
+  const kp = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+  const data = `${enc({ alg: "RS256", kid: "k1" })}.${enc(good())}`;
+  const rs = b64url(new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", kp.privateKey, new TextEncoder().encode(data))));
+  await refused(`${data}.${rs}`, "RS256 from another key");
+  await refused("a".repeat(20000), "oversized");
 });
 
 Deno.test("keys: sign-in needs its own door key; which key decides door or service", () => {
@@ -152,13 +151,27 @@ Deno.test("seam without sign-in: exactly the P2b seam (default identity; the hea
   assertEquals((await resolveIdentity(() => "bob", identityConfig(env({})))).sub, "operator");
 });
 
-Deno.test("seam with sign-in: the identity header is ignored, no session = 401, a service has no user front end", async () => {
-  const on = { ...OIDC, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789", WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" };
+Deno.test("seam with forward-auth: the token is the sign-in; the identity header and bare X-authentik-* are ignored; a service has no user front end", async () => {
+  const on = { ...FA, WORKSPACE_FORWARD_AUTH_ADMIN_GROUP: "research-admins", WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789", WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" };
   const call = mount(on);
   const door = { "x-brain-key": "door-key-0123456789" };
   const bypass = await call("/workbench/contract/documents", { ...door, "x-test-sub": "ak-sub-alice" });
   assertEquals(bypass.status, 401, "the header never stands in for a sign-in");
-  assertEquals((await call("/workbench/auth/me", door)).status, 200, "the sign-in routes stay open");
+  const bare = await call("/workbench/contract/documents", { ...door, "x-authentik-uid": "ak-sub-alice", "x-authentik-username": "alice", "x-authentik-groups": "research-admins", "x-authentik-meta-jwks": "https://evil.example/jwks" });
+  assertEquals(bare.status, 401, "unsigned X-authentik-* headers alone are never a sign-in");
+  for (const t of ["", "x", await hs(good(), { secret: "forged-secret-0123456789abcdef0123456789" }), await hs(good({ exp: now() - 3600 })),
+    await hs(good({ iss: "https://evil.example/" })), await hs(good({ aud: "other" })), `${enc({ alg: "none" })}.${enc(good())}.`, await hs(good(), { alg: "RS256" })]) {
+    assertEquals((await call("/workbench/contract/documents", { ...door, [TOKEN_HEADER]: t, "x-authentik-uid": "ak-sub-alice" })).status, 401, `token ${t.slice(0, 30)}`);
+  }
+  const ok = await call("/workbench/contract/documents", { ...door, [TOKEN_HEADER]: await hs(good()), "x-test-sub": "ak-sub-bob", "x-authentik-uid": "ak-sub-bob" });
+  assertEquals(ok.status, 200);
+  const who = await ok.json();
+  assertEquals([who.sub, who.actor, who.kind, who.admin], ["ak-sub-alice", "ak-sub-alice", "user", false], "the token's subject, never a header's");
+  const adm = await (await call("/workbench/contract/documents", { ...door, [TOKEN_HEADER]: await hs(good({ groups: ["research-admins"] })) })).json();
+  assertEquals(adm.admin, true);
+  const left = await (await call("/workbench/contract/documents", { ...door, [TOKEN_HEADER]: await hs(good({ groups: [] })) })).json();
+  assertEquals(left.admin, false, "removed from the group = not an admin on the next request");
+  assertEquals((await call("/workbench/auth/me", door)).status, 200, "who-am-I stays open");
   assertEquals(identityConfig(env(on)).header, "", "the header is off while sign-in is configured");
   const svc = { "x-brain-key": "internal-key-0123456789" };
   const s = await call("/workbench/contract/documents", { ...svc, "x-test-sub": "ak-sub-alice" });
@@ -173,7 +186,7 @@ Deno.test("seam: a percent-encoded or doubled path is judged as the route it rea
   assertEquals(routePath("/workbench/documents%2Ffolders"), "/workbench/documents/folders");
   assertEquals(routePath("/workbench//documents/./x/../folders"), "/workbench/documents/folders");
   assertEquals(routePath("/workbench/%E0%A4%A"), "/workbench/%E0%A4%A");
-  const on = { ...OIDC, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789" };
+  const on = { ...FA, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789" };
   const call = mount(on);
   assertEquals((await call("/workbench/%64ocuments/folders", { "x-brain-key": "internal-key-0123456789" })).status, 403);
   // rw-identity2 (B1): a spelling that decoding could reshape is refused outright, before any decision
@@ -186,7 +199,7 @@ Deno.test("seam: a percent-encoded or doubled path is judged as the route it rea
 // rw-identity2 (review r-identity B1): the seam and the router judge ONE string. A path is canonical when
 // no further decoding can change its shape; anything else is null (the seam answers 400).
 Deno.test("canonicalPath: the canonical spellings pass unchanged; every reshaping spelling is null", () => {
-  for (const p of ["/workbench/notes/a.md", "/workbench/documents/folders", "/workbench/health", "/workbench/auth/login",
+  for (const p of ["/workbench/notes/a.md", "/workbench/documents/folders", "/workbench/health", "/workbench/auth/me",
     "/workbench/%64ocuments/folders", "/workbench/notes/my%20note.md", "/workbench/notes/caf%C3%A9.md",
     "/workbench/contract/chunks/abc:3/context", "/workbench/contract/settings/podcast.archive", "/workbench/notes/a..b.md", "/"]) {
     assertEquals(canonicalPath(p), routePath(p), p);
@@ -206,7 +219,7 @@ Deno.test("canonicalPath: the canonical spellings pass unchanged; every reshapin
 // The reviewer's probe (journal/evidence/rw-identity/review-r-identity-seam-probe.ts), as a test: the
 // router is Hono with the real seam in front, sign-in on, the door key, no session.
 Deno.test("seam (B1): an anonymous browser never reaches a handler through a spelling the router reads differently", async () => {
-  const on = { ...OIDC, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789" };
+  const on = { ...FA, WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DOOR_KEY: "door-key-0123456789" };
   const app = new Hono();
   app.use("/workbench/*", identitySeam(seamDeps(null, env(on))));
   const notes = new Hono();

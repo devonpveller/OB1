@@ -1,18 +1,24 @@
-// deno test src/identity/identity_integration_test.ts - rw-identity end to end, with REAL sessions: a
-// browser (this test: a cookie jar, redirects followed by hand) signs in through the viewer's
-// /workbench forwarder against a lab OpenID provider (contract-test/stub-oidc.ts, over TLS), with two
-// users and an admin. Clauses (the anchor's acceptance):
-//   C4 session security: PKCE S256 + state + nonce checked, Secure/HttpOnly/SameSite cookies, logout
-//      ends the session; the identity header cannot stand in for a sign-in
-//   C1 isolation with real sessions (the basics; the route-wide sweep is isolation_sweep_test.ts)
+// deno test src/identity/identity_integration_test.ts - rw-identity end to end, signed in the way
+// Authentik forward-auth signs users in (rw-identity2): every request of a signed-in browser carries the
+// outpost's token, X-authentik-jwt, which Traefik copies onto the request. Here a LAB SIGNER stands in
+// for Authentik's outpost: it mints the same token shape (HS256 with the lab proxy provider's client
+// secret; iss, aud = the client id, sub, exp, iat, name, email, groups), and the test sends it through
+// the viewer's /workbench forwarder (as Traefik would) or direct with the door key. Clauses (the anchor's
+// acceptance):
+//   C4 authentication: no token, a forged / expired / wrong-issuer / wrong-audience / non-HS256 token
+//      (alg none, RS256-with-the-secret, HS512), or bare X-authentik-* headers = 401; no in-app login,
+//      session or cookie; admin re-read from the token on every request; the identity header cannot
+//      stand in for a sign-in
+//   C1 isolation (the basics; the route-wide sweep is isolation_sweep_test.ts)
 //   C3 admin impersonation: a reason first; the switch and every request in admin_audit; retrievable;
 //      append-only; a non-admin cannot impersonate
 //   C2 the Open WebUI hand-off: on_behalf_of accepted from Open WebUI's key only; agent research under
 //      a service identity
 //   C5 no sign-in configured = exactly the P2b behaviour (a second workbench on the same database)
 // SKIPPED unless IDENTITY_TEST_VIEWER is set: contract-test/run-identity-tests.ps1 runs it in its
-// disposable lab. Never point it at a live stack (it signs users in and writes audit rows).
-import { assert, assertEquals, assertMatch, assertNotEquals } from "jsr:@std/assert@1";
+// disposable lab. Never point it at a live stack (it writes audit rows), and never give it a real
+// Authentik client secret.
+import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
 
 const E = (k: string) => Deno.env.get(k) ?? "";
@@ -20,18 +26,19 @@ const VIEWER = E("IDENTITY_TEST_VIEWER").replace(/\/+$/, "");
 const WB = E("IDENTITY_TEST_WB").replace(/\/+$/, "");
 const WB_PLAIN = E("IDENTITY_TEST_WB_PLAIN").replace(/\/+$/, "");
 const WB_NODEF = E("IDENTITY_TEST_WB_NODEF").replace(/\/+$/, ""); // sign-in on, WORKSPACE_DEFAULT_SUB blank
-const STUB = E("IDENTITY_TEST_STUB").replace(/\/+$/, "");
 const RS = E("IDENTITY_TEST_RESEARCH").replace(/\/+$/, "");
 const DOOR = E("IDENTITY_TEST_DOOR_KEY");
 const INTERNAL = E("IDENTITY_TEST_INTERNAL_KEY");
 const K = { owui: E("IDENTITY_TEST_OWUI_KEY"), ao: E("IDENTITY_TEST_AO_KEY"), ws: E("IDENTITY_TEST_WS_KEY"), shared: INTERNAL };
 const USERS = (E("IDENTITY_TEST_USERS") ? JSON.parse(E("IDENTITY_TEST_USERS")) : []) as { login: string; sub: string; name: string; groups: string[] }[];
 const sub = (login: string) => USERS.find((u) => u.login === login)?.sub ?? "";
+// the lab proxy provider (the outpost's stand-in): issuer, client id, client secret, the admin group, sign-out
+const FA = { iss: E("IDENTITY_TEST_FA_ISSUER"), aud: E("IDENTITY_TEST_FA_CLIENT_ID"), secret: E("IDENTITY_TEST_FA_SECRET"), signOut: E("IDENTITY_TEST_FA_SIGN_OUT") };
 const ignore = !VIEWER;
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
 
 function pool(user: string, password: string) {
-  return new Pool({ hostname: E("CONTRACT_TEST_DB_HOST"), port: 5432, database: "openbrain", user, password }, 1, true);
+  return new Pool({ hostname: E("CONTRACT_TEST_DB_HOST"), port: 5432, user, password, database: "openbrain" }, 1, true);
 }
 async function sql<T = Record<string, any>>(text: string, args: unknown[] = [], as: "postgres" | "app" = "postgres"): Promise<T[]> {
   const p = as === "postgres" ? pool("postgres", E("CONTRACT_TEST_DB_PASSWORD")) : pool("ob_app_memory", E("IDENTITY_TEST_APP_PASSWORD"));
@@ -44,144 +51,160 @@ async function sql<T = Record<string, any>>(text: string, args: unknown[] = [], 
   }
 }
 
-// ── a browser: a cookie jar, redirects by hand, the viewer's Origin on every write ───────────────
+// ── the lab signer: Authentik's outpost token shape, HS256 with the lab client secret ────────────
+const b64url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const enc = (o: unknown) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+async function hmac(hash: "SHA-256" | "SHA-512", secret: string, data: string) {
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash }, false, ["sign"]);
+  return b64url(new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(data))));
+}
+const now = () => Math.floor(Date.now() / 1000);
+function claimsOf(login: string, extra: Record<string, unknown> = {}) {
+  const u = USERS.find((x) => x.login === login);
+  assert(u, `lab user ${login}`);
+  return { iss: FA.iss, aud: FA.aud, sub: u.sub, exp: now() + 1800, iat: now(), name: u.name, preferred_username: login, email: `${login}@lab.invalid`, groups: u.groups, ...extra };
+}
+async function mint(claims: Record<string, unknown>, o: { alg?: string; secret?: string; hash?: "SHA-256" | "SHA-512" } = {}) {
+  const data = `${enc({ alg: o.alg ?? "HS256", typ: "JWT" })}.${enc(claims)}`;
+  return `${data}.${await hmac(o.hash ?? "SHA-256", o.secret ?? FA.secret, data)}`;
+}
+const TOKEN = "x-authentik-jwt";
+
+// ── a browser behind the edge: the edge's token on every request, the viewer's Origin on every write
 class Browser {
-  jar = new Map<string, string>();
-  raw: Record<string, string> = {};
+  token = "";
   requests = 0;
   constructor(readonly base = VIEWER) {}
-  cookie() {
-    return [...this.jar].map(([k, v]) => `${k}=${v}`).join("; ");
-  }
-  take(r: Response) {
-    for (const sc of r.headers.getSetCookie()) {
-      const nv = sc.split(";")[0];
-      const i = nv.indexOf("=");
-      const n = nv.slice(0, i).trim();
-      const v = nv.slice(i + 1).trim();
-      this.raw[n] = sc;
-      if (/max-age=0/i.test(sc) || !v) this.jar.delete(n);
-      else this.jar.set(n, v);
-    }
+  auth(): Record<string, string> {
+    return this.token ? { [TOKEN]: this.token } : {};
   }
   async req(method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
     const url = path.startsWith("http") ? path : this.base + path;
-    const h: Record<string, string> = { ...headers };
-    if (url.startsWith(this.base) && this.jar.size && !("cookie" in h)) h.cookie = this.cookie();
+    const h: Record<string, string> = { ...(url.startsWith(this.base) ? this.auth() : {}), ...headers };
     if (!["GET", "HEAD"].includes(method)) {
       h.origin ??= this.base;
       if (body !== undefined) h["content-type"] ??= "application/json";
     }
     if (url.startsWith(this.base)) this.requests++;
     const r = await fetch(url, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), redirect: "manual" });
-    this.take(r);
     const text = await r.text();
     let json: any = {};
     try { json = JSON.parse(text); } catch { /* not json */ }
     return { status: r.status, json, text, location: r.headers.get("location") ?? "", setCookie: r.headers.getSetCookie() };
   }
-  // the provider's sign-in page answers for `login` (the lab provider takes login_hint)
-  async signIn(login: string) {
-    const start = await this.req("GET", "/workbench/auth/login?return_to=/workspace/");
-    assertEquals(start.status, 302, start.text);
-    const authz = new URL(start.location);
-    authz.searchParams.set("login_hint", login);
-    const at = await fetch(authz, { redirect: "manual" });
-    await at.body?.cancel();
-    const callback = at.headers.get("location") ?? "";
-    const done = await this.req("GET", callback);
-    return { start, authz, callback, done };
+  // signed in as `login` at the edge: from now on every request carries the outpost's token
+  async signIn(login: string, extra: Record<string, unknown> = {}) {
+    this.token = await mint(claimsOf(login, extra));
+    return this.token;
   }
 }
 
-const stubLog = async () => (await (await fetch(`${STUB}/__log`)).json()).events as Record<string, any>[];
-const stubMode = async (m: Record<string, unknown>) => await (await fetch(`${STUB}/__mode`, { method: "POST", body: JSON.stringify(m) })).body?.cancel();
 const direct = async (base: string, method: string, path: string, headers: Record<string, string>, body?: unknown) => {
   const r = await fetch(base + path, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body), redirect: "manual" });
   const text = await r.text();
   let json: any = {};
   try { json = JSON.parse(text); } catch { /* */ }
-  return { status: r.status, json, text };
+  return { status: r.status, json, text, setCookie: r.headers.getSetCookie() };
 };
 
-// ── C4: session security ──────────────────────────────────────────────────────────────────────
-Deno.test({ name: "C4 sign-in: code flow with PKCE S256, state and nonce; the cookies' attributes; who am I", ...opts, fn: async () => {
+// ── C4: authentication ────────────────────────────────────────────────────────────────────────
+Deno.test({ name: "C4 sign-in: a valid Authentik token is the sign-in - who am I; no login route, no session, no cookie; sign-out is Authentik's", ...opts, fn: async () => {
+  assert(FA.secret.length >= 32 && FA.iss && FA.aud, "the lab signer is configured");
   const b = new Browser();
-  const s = await b.signIn("alice");
-  const q = Object.fromEntries(s.authz.searchParams);
-  assertEquals([q.response_type, q.code_challenge_method], ["code", "S256"]);
-  assert(q.code_challenge && q.state && q.nonce, "challenge, state and nonce are sent");
-  assertMatch(b.raw["__Host-ob-ws-login"] ?? "", /Path=\/; Max-Age=0; Secure; HttpOnly; SameSite=Lax/, "the sign-in binding is cleared at the callback");
-  assertEquals(s.done.status, 302, s.done.text);
-  assertEquals(s.done.location, "/workspace/");
-  assertMatch(b.raw["__Host-ob-ws-session"] ?? "", /^__Host-ob-ws-session=[A-Za-z0-9_-]{40,}; Path=\/; Max-Age=\d+; Secure; HttpOnly; SameSite=Strict$/);
-  const log = await stubLog();
-  const tok = log.filter((e) => e.type === "token").at(-1)!;
-  assertEquals(tok.pkce, "ok", "the provider verified S256(code_verifier) == code_challenge");
+  await b.signIn("alice");
   const me = await b.req("GET", "/workbench/auth/me");
-  assertEquals([me.json.mode, me.json.signed_in, me.json.subject_sub, me.json.actor_sub, me.json.admin], ["oidc", true, sub("alice"), sub("alice"), false]);
-  // the token is never stored: only its SHA-256
-  const rows = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_sessions WHERE id_hash = $1`, [b.jar.get("__Host-ob-ws-session")]);
-  assertEquals(rows[0].n, 0, "the cookie's token is not a stored value");
+  assertEquals([me.json.mode, me.json.signed_in, me.json.subject_sub, me.json.actor_sub, me.json.admin], ["forward-auth", true, sub("alice"), sub("alice"), false]);
+  assertEquals(me.json.logout, FA.signOut, "Sign out = Authentik's outpost sign-out");
+  const docs = await b.req("GET", "/workbench/contract/documents");
+  assertEquals(docs.status, 200, docs.text);
+  assertEquals([...me.setCookie, ...docs.setCookie].filter((c) => /ob-ws|session/i.test(c)), [], "the workbench sets no session cookie");
+  // the in-app sign-in is gone: those routes are not routes (signed in = 404; anonymous = 401 like any user route)
+  for (const p of ["/workbench/auth/login", "/workbench/auth/callback?code=x&state=y"]) assertEquals((await b.req("GET", p)).status, 404, p);
+  assertEquals((await b.req("POST", "/workbench/auth/logout", {})).status, 404, "POST /workbench/auth/logout");
+  assertEquals((await new Browser().req("GET", "/workbench/auth/login")).status, 401);
+  // and so is their storage
+  const t = await sql<{ s: string | null; p: string | null; i: string | null }>(
+    `SELECT to_regclass('public.workspace_sessions')::text AS s, to_regclass('public.workspace_login_pending')::text AS p, to_regclass('public.workspace_impersonation')::text AS i`);
+  assertEquals([t[0].s, t[0].p, t[0].i], [null, null, "workspace_impersonation"]);
+  // anonymous who-am-I through the viewer: not signed in, the sign-out link still Authentik's
+  const anon = await new Browser().req("GET", "/workbench/auth/me");
+  assertEquals([anon.status, anon.json.mode, anon.json.signed_in, anon.json.subject_sub], [200, "forward-auth", false, null]);
 } });
 
-Deno.test({ name: "C4 state: tampered, replayed, or from another browser - refused, no session", ...opts, fn: async () => {
-  const b = new Browser();
-  const start = await b.req("GET", "/workbench/auth/login");
-  const authz = new URL(start.location);
-  authz.searchParams.set("login_hint", "alice");
-  const at = await fetch(authz, { redirect: "manual" });
-  await at.body?.cancel();
-  const cb = new URL(at.headers.get("location")!);
-  // another browser (no binding cookie) with the right state
-  const other = new Browser();
-  const stolen = await other.req("GET", cb.toString());
-  assertEquals(stolen.status, 400, stolen.text);
-  assert(!other.jar.has("__Host-ob-ws-session"));
-  // the state was consumed by that attempt: the right browser cannot replay it either
-  const replay = await b.req("GET", cb.toString());
-  assertEquals(replay.status, 400, replay.text);
-  // a tampered state on a fresh sign-in
-  const b2 = new Browser();
-  const s2 = await b2.req("GET", "/workbench/auth/login");
-  const a2 = new URL(s2.location);
-  a2.searchParams.set("login_hint", "alice");
-  const at2 = await fetch(a2, { redirect: "manual" });
-  await at2.body?.cancel();
-  const cb2 = new URL(at2.headers.get("location")!);
-  cb2.searchParams.set("state", cb2.searchParams.get("state")! + "x");
-  const tampered = await b2.req("GET", cb2.toString());
-  assertEquals(tampered.status, 400, tampered.text);
-  assert(!b2.jar.has("__Host-ob-ws-session"));
-  assertEquals((await b2.req("GET", "/workbench/contract/documents")).status, 401);
+// every user route the anchor names, through the viewer (as Traefik would hand it on) and direct (door key)
+const USER_ROUTES: [string, string, unknown?][] = [
+  ["GET", "/workbench/contract/documents"], ["GET", "/workbench/documents/folders"], ["GET", "/workbench/workspace/whoami"],
+  ["GET", "/workbench/auth/users"], ["GET", "/workbench/auth/audit"], ["GET", "/workbench/contract/sessions?limit=5"],
+  ["GET", "/workbench/notes/a.md"], ["POST", "/workbench/documents", { title: "a write without a valid token" }],
+  ["POST", "/workbench/auth/impersonate", { sub: "x", reason: "a write without a valid token" }],
+];
+Deno.test({ name: "C4 every request without a valid token is 401: none, forged, expired, wrong issuer, wrong audience, alg none, RS256-with-the-secret, HS512, bare X-authentik-* headers", ...opts, fn: async () => {
+  const alice = claimsOf("alice", { groups: ["lab-users", "research-admins"] });
+  const bare = { "x-authentik-uid": sub("alice"), "x-authentik-username": "alice", "x-authentik-groups": "lab-users|research-admins",
+    "x-authentik-email": "alice@lab.invalid", "x-authentik-name": "Alice Lab", "x-authentik-meta-jwks": "https://evil.invalid/jwks" };
+  const bad: [string, Record<string, string>][] = [
+    ["no token", {}],
+    ["bare X-authentik-* headers, no token", bare],
+    ["forged (another secret)", { [TOKEN]: await mint(alice, { secret: "a-forger-secret-0123456789abcdef0123456789" }), ...bare }],
+    ["expired", { [TOKEN]: await mint({ ...alice, exp: now() - 600, iat: now() - 900 }) }],
+    ["wrong issuer", { [TOKEN]: await mint({ ...alice, iss: "https://evil.invalid/application/o/lab/" }) }],
+    ["wrong audience", { [TOKEN]: await mint({ ...alice, aud: "another-provider" }) }],
+    ["no exp", { [TOKEN]: await mint({ ...alice, exp: undefined }) }],
+    ["alg none", { [TOKEN]: `${enc({ alg: "none", typ: "JWT" })}.${enc(alice)}.` }],
+    ["RS256 header signed with the secret (key confusion)", { [TOKEN]: await mint(alice, { alg: "RS256" }) }],
+    ["HS512 with the right secret", { [TOKEN]: await mint(alice, { alg: "HS512", hash: "SHA-512" }) }],
+    ["tampered payload", { [TOKEN]: (await mint(alice)).replace(/^([^.]+)\.[^.]+\./, (_m, h) => `${h}.${enc({ ...alice, sub: sub("bob") })}.`) }],
+    ["garbage", { [TOKEN]: "not-a-token" }],
+    ["a reserved subject", { [TOKEN]: await mint({ ...alice, sub: "service:internal" }) }],
+  ];
+  for (const [what, h] of bad) {
+    for (const [m, p, body] of USER_ROUTES) {
+      const via = await new Browser().req(m, p, body, h);
+      assertEquals(via.status, 401, `through the viewer, ${what}: ${m} ${p} -> ${via.status} ${via.text.slice(0, 100)}`);
+      const d = await direct(WB, m, p, { "x-brain-key": DOOR, ...h }, body);
+      assertEquals(d.status, 401, `direct with the door key, ${what}: ${m} ${p} -> ${d.status} ${d.text.slice(0, 100)}`);
+    }
+    const me = await new Browser().req("GET", "/workbench/auth/me", undefined, h);
+    assertEquals([me.json.signed_in, me.json.subject_sub], [false, null], `who am I, ${what}`);
+  }
+  // nothing was written by any of them
+  const n = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.user_document_listings WHERE title = 'a write without a valid token'`);
+  assertEquals(n[0].n, 0);
+  // the valid token on the same routes is not refused as unauthenticated
+  const ok = new Browser();
+  await ok.signIn("alice");
+  assertEquals((await ok.req("GET", "/workbench/contract/documents")).status, 200);
 } });
 
-Deno.test({ name: "C4 nonce: an ID token with another sign-in's nonce is refused", ...opts, fn: async () => {
-  await stubMode({ wrong_nonce: true });
-  const b = new Browser();
-  const s = await b.signIn("alice");
-  assertEquals(s.done.status, 400, s.done.text);
-  assertMatch(s.done.text, /nonce/);
-  assert(!b.jar.has("__Host-ob-ws-session"));
+Deno.test({ name: "C4 admin is read from the token on every request: removed from the group = not an admin, and an impersonation ends (recorded)", ...opts, fn: async () => {
+  const ad = new Browser();
+  await ad.signIn("admin");
+  assertEquals((await ad.req("GET", "/workbench/auth/me")).json.admin, true);
+  // dave has been seen signed in (the impersonation target must have been)
+  const dv = new Browser();
+  await dv.signIn("dave");
+  assertEquals((await dv.req("GET", "/workbench/auth/me")).status, 200);
+  const reason = `group-removal check ${crypto.randomUUID().slice(0, 6)}`;
+  const go = await ad.req("POST", "/workbench/auth/impersonate", { sub: sub("dave"), reason });
+  assertEquals(go.status, 200, go.text);
+  assertEquals((await ad.req("GET", "/workbench/auth/me")).json.subject_sub, sub("dave"));
+  // the operator removes the admin from research-admins in Authentik: the outpost's next token says so
+  await ad.signIn("admin", { groups: ["lab-users"] });
+  const me = await ad.req("GET", "/workbench/auth/me");
+  assertEquals([me.json.admin, me.json.subject_sub, me.json.impersonating], [false, sub("admin"), null], "the very next request");
+  assertEquals((await ad.req("GET", "/workbench/auth/users")).status, 403);
+  assertEquals((await ad.req("GET", "/workbench/auth/audit")).status, 403);
+  assertEquals((await ad.req("POST", "/workbench/auth/impersonate", { sub: sub("dave"), reason: "trying again after removal" })).status, 403);
+  const ended = await sql<{ reason: string }>(`SELECT reason FROM public.admin_audit WHERE actor_sub = $1 AND subject_sub = $2 AND action = 'impersonate.end' ORDER BY id DESC LIMIT 1`, [sub("admin"), sub("dave")]);
+  assertEquals(ended[0]?.reason, "no longer in the admin group");
+  assert(!(await ad.req("GET", "/workbench/contract/documents?limit=500")).text.includes(sub("dave")), "nothing of dave's");
+  // back in the group: admin again, NOT impersonating (the ended impersonation does not come back)
+  await ad.signIn("admin");
+  const back = await ad.req("GET", "/workbench/auth/me");
+  assertEquals([back.json.admin, back.json.impersonating], [true, null]);
 } });
 
-Deno.test({ name: "C4 logout ends the session (server-side): the old cookie is dead", ...opts, fn: async () => {
-  const b = new Browser();
-  await b.signIn("bob");
-  const token = b.jar.get("__Host-ob-ws-session")!;
-  assertEquals((await b.req("GET", "/workbench/contract/documents")).status, 200);
-  const out = await b.req("POST", "/workbench/auth/logout", {});
-  assertEquals(out.status, 200, out.text);
-  assertMatch(b.raw["__Host-ob-ws-session"], /Max-Age=0/);
-  assert(String(out.json.end_session ?? "").startsWith(STUB), "the provider's end-session URL is offered");
-  // the same token replayed (a copied cookie) no longer signs anyone in
-  const replay = await new Browser().req("GET", "/workbench/contract/documents", undefined, { cookie: `__Host-ob-ws-session=${token}` });
-  assertEquals(replay.status, 401);
-  const me = await new Browser().req("GET", "/workbench/auth/me", undefined, { cookie: `__Host-ob-ws-session=${token}` });
-  assertEquals(me.json.signed_in, false);
-} });
-
-Deno.test({ name: "C4 the identity header cannot bypass sign-in: through the viewer, direct with the door key, or beside a session", ...opts, fn: async () => {
+Deno.test({ name: "C4 the identity header cannot bypass sign-in: through the viewer, direct with the door key, or beside a token", ...opts, fn: async () => {
   const H = E("IDENTITY_TEST_SUB_HEADER") || "X-Test-Sub";
   const anon = new Browser();
   assertEquals((await anon.req("GET", "/workbench/contract/documents", undefined, { [H]: sub("alice") })).status, 401, "through the viewer");
@@ -189,9 +212,9 @@ Deno.test({ name: "C4 the identity header cannot bypass sign-in: through the vie
   assertEquals((await direct(WB, "GET", "/workbench/documents/folders", { "x-brain-key": DOOR, [H]: sub("alice") })).status, 401);
   const b = new Browser();
   await b.signIn("bob");
-  const me = await b.req("GET", "/workbench/auth/me", undefined, { [H]: sub("alice") });
-  assertEquals(me.json.subject_sub, sub("bob"), "a session plus the header is still the session's user");
-  const meDirect = await direct(WB, "GET", "/workbench/workspace/whoami", { "x-brain-key": DOOR, cookie: b.cookie(), [H]: sub("alice") });
+  const me = await b.req("GET", "/workbench/auth/me", undefined, { [H]: sub("alice"), "x-authentik-uid": sub("alice") });
+  assertEquals(me.json.subject_sub, sub("bob"), "a token plus the header is still the token's user");
+  const meDirect = await direct(WB, "GET", "/workbench/workspace/whoami", { "x-brain-key": DOOR, ...b.auth(), [H]: sub("alice") });
   assertEquals(meDirect.json.subject_sub, sub("bob"));
   // a forged key never reaches anything
   assertEquals((await direct(WB, "GET", "/workbench/auth/me", { "x-brain-key": "forged-forged-forged" })).status, 401);
@@ -583,7 +606,7 @@ Deno.test({ name: "C2e default unset: ownerless prompts reach only a non-imperso
   await ad.signIn("admin");
   const bo = new Browser();
   await bo.signIn("bob");
-  const as = (b: Browser) => ({ "x-brain-key": DOOR, cookie: b.cookie() });
+  const as = (b: Browser) => ({ "x-brain-key": DOOR, ...b.auth() });
   assert(!(await direct(WB_NODEF, "GET", `/workbench/contract/sessions/${id}`, as(bo))).text.includes(mark), "bob: nobody's prompt");
   const count = async () => (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE actor_sub = $1 AND reason LIKE '%ownerless%'`, [sub("admin")]))[0].n;
   const before = await count();
@@ -636,14 +659,18 @@ Deno.test({ name: "C2f a non-owner cannot steer or cancel another user's job; th
 } });
 
 // ── C5: no sign-in configured = exactly the P2b behaviour ─────────────────────────────────────
-Deno.test({ name: "C5 a workbench with no WORKSPACE_OIDC_* behaves as before: one default identity, no sign-in", ...opts, ignore: ignore || !WB_PLAIN, fn: async () => {
+Deno.test({ name: "C5 a workbench with no WORKSPACE_FORWARD_AUTH_* behaves as before: one default identity, no sign-in", ...opts, ignore: ignore || !WB_PLAIN, fn: async () => {
   const h = { "x-brain-key": INTERNAL };
   const me = await direct(WB_PLAIN, "GET", "/workbench/auth/me", h);
   assertEquals([me.json.mode, me.json.signed_in, me.json.subject_sub, me.json.kind], ["default", true, E("IDENTITY_TEST_DEFAULT_SUB") || "operator", "default"]);
   const who = await direct(WB_PLAIN, "GET", "/workbench/workspace/whoami", h);
   assertEquals(who.json.subject_sub, E("IDENTITY_TEST_DEFAULT_SUB") || "operator");
-  assertEquals((await direct(WB_PLAIN, "GET", "/workbench/contract/documents", h)).status, 200, "no cookie needed");
+  assertEquals((await direct(WB_PLAIN, "GET", "/workbench/contract/documents", h)).status, 200, "no token needed");
   assertEquals((await direct(WB_PLAIN, "GET", "/workbench/documents/folders", h)).status, 200, "WORKBENCH_KEY is the browser's door, as before");
-  assertEquals((await direct(WB_PLAIN, "GET", "/workbench/auth/login", h)).status, 404, "no sign-in to start");
+  assertEquals(me.json.logout, null, "no sign-out link");
+  // a token sent anyway changes nothing there (no forward-auth configured = the token is not read)
+  const tok = await mint(claimsOf("bob"));
+  const w2 = await direct(WB_PLAIN, "GET", "/workbench/workspace/whoami", { ...h, [TOKEN]: tok });
+  assertEquals(w2.json.subject_sub, E("IDENTITY_TEST_DEFAULT_SUB") || "operator");
   assertNotEquals((await direct(WB_PLAIN, "GET", "/workbench/contract/documents", h)).status, 401);
 } });

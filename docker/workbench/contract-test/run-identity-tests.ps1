@@ -1,14 +1,17 @@
-# run-identity-tests.ps1 - the disposable lab run for rw-identity: sign-in with an OpenID provider
-# (a LAB provider, stub-oidc.ts, over TLS, with five users: alice, bob, carol, dave and an admin),
-# real sessions through the viewer's /workbench forwarder, admin impersonation with its audit log,
-# the Open WebUI on-behalf-of hand-off on the REAL research service image, and P2b's route-wide
-# isolation sweep re-run with real sessions.
+# run-identity-tests.ps1 - the disposable lab run for rw-identity: sign-in by Authentik forward-auth
+# (rw-identity2). A LAB SIGNER stands in for Authentik's outpost: the tests mint the outpost's token
+# (X-authentik-jwt, HS256 with a run-made lab proxy-provider client secret; users alice, bob, carol, dave,
+# an admin and more) and send it through the viewer's /workbench forwarder as Traefik would, or direct;
+# admin impersonation with its audit log, the Open WebUI on-behalf-of hand-off on the REAL research
+# service image, and P2b's route-wide isolation sweep re-run signed in. There is no OpenID provider,
+# no TLS and no CA in the lab any more: forward-auth verification makes no call (HS256 with the secret).
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-identity-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red]
 #
 # -Subnet is REQUIRED (harness-subnet.ps1); -Evidence must be absent or empty. -Red runs the SAME tests
-# against the workbench, viewer and research images built from -BaseSha (the development pin before
-# rw-identity): every case must FAIL there.
+# against the workbench, viewer and research images built from -BaseSha (rw-identity2: 3215724, the
+# in-app OIDC head; it does not know WORKSPACE_FORWARD_AUTH_* and so runs single-user): the cases must
+# FAIL there.
 #
 # LAB DOCKER SHIM (as run-workspace-tests.ps1): every docker call goes through Lab-Docker, which
 # REFUSES (exit 2, nothing run) a published port, a network other than this run's (and `none`), a
@@ -23,13 +26,13 @@
 #   2. one internal network on the pinned /25
 #   3. builds openbrain-workbench:wt-<id> (+ its test stage: the identity unit tests are in its gate),
 #      openbrain-wiki-viewer:wt-<id>, openbrain-research:wt-<id>; with -Red the three from -BaseSha
-#   4. a lab CA and the provider's certificate (openssl in the postgres image, no network)
+#   4. (rw-identity2: no lab CA any more - nothing is fetched over TLS)
 #   5. the lab: database (chain + fixtures.sql, ob_app_memory non-superuser), stub embedder, stub egress
-#      proxy, PostgREST + the OB1 rest Caddy, the lab provider, the research service (three caller
-#      keys: owui, agent-org, workspace), the viewer (door key, identity header stripped), the workbench
-#      WITH sign-in, and a second workbench with NO sign-in configured (clause 5)
+#      proxy, PostgREST + the OB1 rest Caddy, the research service (three caller keys: owui, agent-org,
+#      workspace), the viewer (door key, identity header stripped), the workbench WITH forward-auth
+#      (the lab secret, issuer, client id, admin group), and a second workbench with NO sign-in (clause 5)
 #   6. the forwarder guard (CSRF 403 / rebind 421 / own origin reaches); the identity integration test
-#      (src/identity/identity_integration_test.ts); the isolation sweep with real sessions: carol vs
+#      (src/identity/identity_integration_test.ts); the isolation sweep signed in (tokens): carol vs
 #      dave (walk on), the admin (not impersonating) vs dave (walk on), carol vs dave (walk off)
 #   7. the evidence gate, then teardown and the leftover checks
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
@@ -40,7 +43,7 @@ param(
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$CaddyImage = 'caddy:2-alpine',
-  [string]$BaseSha = '655bfd1',
+  [string]$BaseSha = '3215724',
   [switch]$Red,
   [switch]$KeepImages,
   [switch]$SkipSweeps,  # the integration test only (a targeted RED of one case)
@@ -79,8 +82,8 @@ $sfx = if ($Red) { '-base' } else { '' }
 $wbTag = "openbrain-workbench:wt-$short$sfx"; $wbTestTag = "openbrain-workbench:wt-$short-test"
 $viewerTag = "openbrain-wiki-viewer:wt-$short$sfx"; $rsTag = "openbrain-research:wt-$short$sfx"
 $pw = Rand 24 'alnum'; $appPw = Rand 24 'alnum'
-$key = Rand 32; $door = Rand 32; $wsKey = Rand 32; $kOwui = Rand 32; $kAo = Rand 32; $clientSecret = Rand 40 'alnum'
-$secrets = @($pw, $appPw, $key, $door, $wsKey, $kOwui, $kAo, $clientSecret)
+$key = Rand 32; $door = Rand 32; $wsKey = Rand 32; $kOwui = Rand 32; $kAo = Rand 32; $faSecret = Rand 64 'alnum'
+$secrets = @($pw, $appPw, $key, $door, $wsKey, $kOwui, $kAo, $faSecret)
 $users = @(
   @{ login = 'alice'; sub = (Rand 64); name = 'Alice Lab'; groups = @('lab-users') },
   @{ login = 'bob'; sub = (Rand 64); name = 'Bob Lab'; groups = @('lab-users') },
@@ -97,15 +100,16 @@ $usersJson = (ConvertTo-Json -Compress -Depth 4 @($users | ForEach-Object { [psc
 $daveSub = ($users | Where-Object { $_.login -eq 'dave' }).sub
 $profSub = ($users | Where-Object { $_.login -eq 'prof' }).sub
 $umaSub = ($users | Where-Object { $_.login -eq 'uma' }).sub
-$issuer = 'https://stub-oidc:8443/application/o/lab/'
-$redirect = "http://$P-viewer:8080/workbench/auth/callback"
+# the lab proxy provider (Authentik's stand-in): the token's iss and aud, the sign-out the workspace links to
+$issuer = 'https://authentik.lab.invalid/application/o/research-lab/'
+$faClient = 'research-proxy-lab'
+$signOut = "http://$P-viewer:8080/outpost.goauthentik.io/sign_out"
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
 $stage = Join-Path $env:TEMP "$P-initdb"
 $vault = Join-Path $env:TEMP "$P-vault"; New-Item -ItemType Directory -Force $vault | Out-Null
 $vault2 = Join-Path $env:TEMP "$P-vault-plain"; New-Item -ItemType Directory -Force $vault2 | Out-Null
 $vault3 = Join-Path $env:TEMP "$P-vault-nodef"; New-Item -ItemType Directory -Force $vault3 | Out-Null
-$certs = Join-Path $env:TEMP "$P-certs"; New-Item -ItemType Directory -Force $certs | Out-Null
 foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page about contract retrieval fixtures.'),
     @('content/source/11111111-1111-4111-8111-111111111111', 'Active fixture source', 'Leaf.'),
     @('content/source/22222222-2222-4222-8222-222222222222', 'Suppressed fixture source', 'Leaf.'))) {
@@ -116,11 +120,11 @@ foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page
 . (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 
 $script:fail = 0
-$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $vault2, $vault3, $certs) }
+$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $vault2, $vault3) }
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
-function Redact([string]$t) { foreach ($s in $secrets) { if ($s) { $t = $t -replace [regex]::Escape($s), '<redacted>' } }; return ($t -replace '__Host-ob-ws-(session|login)=[A-Za-z0-9_-]+', '__Host-ob-ws-$1=<token>') }
+function Redact([string]$t) { foreach ($s in $secrets) { if ($s) { $t = $t -replace [regex]::Escape($s), '<redacted>' } }; return ($t -replace 'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', '<jwt>') }
 function Save([string]$name, [string]$text) { [System.IO.File]::WriteAllText((Join-Path $evStage $name), (Redact $text), (New-Object System.Text.UTF8Encoding $false)) }
 
 # -- the lab docker shim (the run-workspace-tests.ps1 rules) --------------------------------
@@ -263,16 +267,6 @@ try {
   $itMount = if ($Red -and $RedCases) { @('-v', "$(Join-Path $wb 'src/identity/identity_integration_test.ts'):/app/src/identity/identity_integration_test.ts:ro") } else { @() }
   $script:made.images += $wbTestTag
 
-  # ---------------------------------------------------------------- 4. the lab CA
-  Write-Host '[4] a lab CA and the provider certificate (no network)'
-  $mk = 'set -e; cd /c; ' +
-    'openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 2 -subj /CN=rw-identity-lab-ca -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign 2>/dev/null; ' +
-    'openssl req -newkey rsa:2048 -nodes -keyout srv.key -out srv.csr -subj /CN=stub-oidc 2>/dev/null; ' +
-    'printf "subjectAltName=DNS:stub-oidc\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n" > ext; ' +
-    'openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out srv.pem -days 2 -extfile ext 2>/dev/null; rm -f ca.key srv.csr ext ca.srl; chmod 644 *; ls'
-  $o = Dk run --rm --label $label --network none -v "${certs}:/c" --entrypoint sh $PgImage -c $mk
-  Check (($script:rc -eq 0) -and ($o -match 'srv.pem') -and ($o -match 'ca.pem')) "lab CA + stub-oidc certificate ($($o -replace "`n", ' '))"
-
   # ---------------------------------------------------------------- 5. the lab
   Write-Host '[5] the lab'
   $db = "$P-db"
@@ -300,10 +294,6 @@ try {
   $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
       '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
   $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
-  $null = Run-Detached "$P-oidc" @('--network-alias', 'stub-oidc', '-v', $ctMount, '-v', "${certs}:/certs:ro", '-e', "STUB_ISSUER=$issuer",
-      '-e', 'STUB_CLIENT_ID=research-workspace-lab', '-e', "STUB_CLIENT_SECRET=$clientSecret", '-e', "STUB_REDIRECT_URIS=$redirect",
-      '-e', "STUB_USERS=$usersJson", '-e', 'STUB_CERT=/certs/srv.pem', '-e', 'STUB_KEY=/certs/srv.key',
-      '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '--allow-env', '--allow-read', '/ct/stub-oidc.ts')
   $null = Run-Detached "$P-rs" @('-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', "MCP_ACCESS_KEY=$key",
       '-e', "RESEARCH_CALLERS=owui-tool=owui:$kOwui;agent-org=mattermost:$kAo;workspace=workspace:$wsKey", '-e', "WORKSPACE_DEFAULT_SUB=$profSub",
       '-e', 'CHAT_API_BASE=http://unreachable.invalid/v1', '-e', 'EMBEDDING_API_BASE=http://unreachable.invalid/v1',
@@ -319,10 +309,10 @@ try {
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'FETCH_PROXY_URL=http://stub-proxy:3128', '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
       '-e', "WORKSPACE_DEFAULT_SUB=$profSub", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   # the signed-in workbench ALSO has the identity header configured: it must be ignored there
-  $wbArgs = @('--network-alias', 'openbrain-workbench') + $common + @('-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-v', "${vault}:/wiki", '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
-      '-e', "WORKSPACE_DOOR_KEY=$door", '-e', "WORKSPACE_OIDC_ISSUER=$issuer", '-e', 'WORKSPACE_OIDC_CLIENT_ID=research-workspace-lab',
-      '-e', "WORKSPACE_OIDC_CLIENT_SECRET=$clientSecret", '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect", '-e', 'WORKSPACE_OIDC_ADMIN_GROUP=research-admins',
-      '-e', "WORKSPACE_OIDC_POST_LOGOUT_URI=http://$P-viewer:8080/workspace/")
+  $wbArgs = @('--network-alias', 'openbrain-workbench') + $common + @('-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-v', "${vault}:/wiki",
+      '-e', "WORKSPACE_DOOR_KEY=$door", '-e', "WORKSPACE_FORWARD_AUTH_ISSUER=$issuer", '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_ID=$faClient",
+      '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_SECRET=$faSecret", '-e', 'WORKSPACE_FORWARD_AUTH_ADMIN_GROUP=research-admins',
+      '-e', "WORKSPACE_FORWARD_AUTH_SIGN_OUT_URL=$signOut")
   $null = Run-Detached "$P-wb" ($wbArgs + @($wbTag))
   # clause 5: the same image, NO sign-in configured, nothing rw-identity adds set (as shipped; its own vault; the same database)
   $null = Run-Detached "$P-wbplain" ($common + @('-v', "${vault2}:/wiki", $wbTag))
@@ -331,14 +321,17 @@ try {
   $null = Run-Detached "$P-wbnodef" ($nd + @($wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench (sign-in configured) is up'
   Check (Wait-Http "http://$P-wbnodef:8000/health" 90) 'the workbench (sign-in, WORKSPACE_DEFAULT_SUB blank) is up'
-  # round 4 (tester Case 5 probe): a half-configured or unsafe sign-in refuses to start
+  # round 4 (tester Case 5 probe): a half-configured or unsafe sign-in refuses to start (rw-identity2:
+  # the forward-auth variables; and any retired WORKSPACE_OIDC_* / WORKSPACE_SESSION_HOURS value)
+  $faAll = @('-e', "WORKSPACE_FORWARD_AUTH_ISSUER=$issuer", '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_ID=$faClient", '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_SECRET=$faSecret")
   $half = @(
-    @('only-issuer', @('-e', "WORKSPACE_OIDC_ISSUER=$issuer")),
-    @('only-secret', @('-e', 'WORKSPACE_OIDC_CLIENT_SECRET=abcdefabcdefabcdef')),
-    @('only-admin-group', @('-e', 'WORKSPACE_OIDC_ADMIN_GROUP=research-admins')),
-    @('http-issuer', @('-e', 'WORKSPACE_OIDC_ISSUER=http://stub-oidc:8443/application/o/lab/', '-e', 'WORKSPACE_OIDC_CLIENT_ID=c', '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect", '-e', "WORKSPACE_DOOR_KEY=$door")),
-    @('no-door-key', @('-e', "WORKSPACE_OIDC_ISSUER=$issuer", '-e', 'WORKSPACE_OIDC_CLIENT_ID=c', '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect")),
-    @('door-equals-internal', @('-e', "WORKSPACE_OIDC_ISSUER=$issuer", '-e', 'WORKSPACE_OIDC_CLIENT_ID=c', '-e', "WORKSPACE_OIDC_REDIRECT_URI=$redirect", '-e', "WORKSPACE_DOOR_KEY=$key")),
+    @('only-issuer', @('-e', "WORKSPACE_FORWARD_AUTH_ISSUER=$issuer", '-e', "WORKSPACE_DOOR_KEY=$door")),
+    @('only-secret', @('-e', "WORKSPACE_FORWARD_AUTH_CLIENT_SECRET=$faSecret", '-e', "WORKSPACE_DOOR_KEY=$door")),
+    @('only-admin-group', @('-e', 'WORKSPACE_FORWARD_AUTH_ADMIN_GROUP=research-admins')),
+    @('short-secret', @('-e', "WORKSPACE_FORWARD_AUTH_ISSUER=$issuer", '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_ID=$faClient", '-e', 'WORKSPACE_FORWARD_AUTH_CLIENT_SECRET=only-twenty-chars-xx', '-e', "WORKSPACE_DOOR_KEY=$door")),
+    @('retired-oidc-variable', ($faAll + @('-e', "WORKSPACE_DOOR_KEY=$door", '-e', "WORKSPACE_OIDC_ISSUER=$issuer"))),
+    @('no-door-key', $faAll),
+    @('door-equals-internal', ($faAll + @('-e', "WORKSPACE_DOOR_KEY=$key"))),
     @('short-door-key', @('-e', 'WORKSPACE_DOOR_KEY=short')))
   if (-not $Red) {
     foreach ($h in $half) {
@@ -353,29 +346,29 @@ try {
   Check (Wait-Http "http://$P-wbplain:8000/health" 90) 'the workbench (no sign-in) is up'
   Check (Wait-Http "http://$P-rs:8000/health" 60) 'the research service is up'
   Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the viewer is up'
-  $o = Dk run --rm --label $label --network $net -v "${certs}:/certs:ro" -e 'DENO_CERT=/certs/ca.pem' --entrypoint deno $wbTag eval "const r = await fetch('${issuer}.well-known/openid-configuration'); console.log('discovery', r.status, (await r.json()).issuer)"
-  Check ($o -match "discovery 200 $([regex]::Escape($issuer))") "the lab provider answers over TLS, trusted through the lab CA only ($o)"
   Save 'workbench-start.log' (Dk logs "$P-wb")
 
   # ---------------------------------------------------------------- 6. the tests
   Write-Host '[6a] the forwarder guard (unchanged by rw-identity)'
   $edge = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
     const v = 'http://$P-viewer:8080';
-    const csrf = await fetch(v + '/workbench/auth/logout', { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'text/plain' }, body: '{}' });
+    const csrf = await fetch(v + '/workbench/auth/impersonate/end', { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'text/plain' }, body: '{}' });
     const noOrigin = await fetch(v + '/workbench/auth/impersonate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     const http = await import('node:http');
     const rebind = await new Promise((ok) => { const q = http.request({ host: '$P-viewer', port: 8080, path: '/workbench/auth/me', headers: { host: 'rebound.example:8080' } }, (r) => { r.resume(); ok(r.statusCode); }); q.on('error', () => ok(0)); q.end(); });
-    const own = await fetch(v + '/workbench/auth/logout', { method: 'POST', headers: { origin: v, 'content-type': 'application/json' }, body: '{}' });
+    const own = await fetch(v + '/workbench/auth/impersonate/end', { method: 'POST', headers: { origin: v, 'content-type': 'application/json' }, body: '{}' });
     const forged = await fetch('http://$P-wb:8000/workbench/auth/me', { headers: { 'x-brain-key': 'forged-by-the-client' } });
     console.log('guard csrf', csrf.status, 'no-origin', noOrigin.status, 'rebind', rebind, 'own-origin', own.status, 'direct-forged-key', forged.status);"
   Save 'edge-guard.log' $edge
-  if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin 200 direct-forged-key 401') "the forwarder's CSRF / rebinding guard holds for the sign-in routes ($edge)" }
+  # own-origin: forwarded (the workbench answers 401 for want of a token; the guard would have said 403)
+  if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin 401 direct-forged-key 401') "the forwarder's CSRF / rebinding guard holds for the auth routes ($edge)" }
 
-  Write-Host '[6b] the identity integration test (real sessions; the real research service)'
-  $o = Lab-Docker 900 (@('run', '--rm', '--label', $label, '--network', $net) + $itMount + @('-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
+  Write-Host '[6b] the identity integration test (forward-auth tokens from the lab signer; the real research service)'
+  $o = Lab-Docker 900 (@('run', '--rm', '--label', $label, '--network', $net) + $itMount + @(
+    '-e', "IDENTITY_TEST_FA_ISSUER=$issuer", '-e', "IDENTITY_TEST_FA_CLIENT_ID=$faClient", '-e', "IDENTITY_TEST_FA_SECRET=$faSecret", '-e', "IDENTITY_TEST_FA_SIGN_OUT=$signOut",
     '-e', "IDENTITY_TEST_VIEWER=http://$P-viewer:8080", '-e', "IDENTITY_TEST_WB=http://$P-wb:8000", '-e', "IDENTITY_TEST_WB_PLAIN=http://$P-wbplain:8000",
     '-e', "IDENTITY_TEST_WB_NODEF=http://$P-wbnodef:8000",
-    '-e', 'IDENTITY_TEST_STUB=https://stub-oidc:8443', '-e', "IDENTITY_TEST_RESEARCH=http://$P-rs:8000",
+    '-e', "IDENTITY_TEST_RESEARCH=http://$P-rs:8000",
     '-e', "IDENTITY_TEST_DOOR_KEY=$door", '-e', "IDENTITY_TEST_INTERNAL_KEY=$key", '-e', "IDENTITY_TEST_OWUI_KEY=$kOwui", '-e', "IDENTITY_TEST_AO_KEY=$kAo",
     '-e', "IDENTITY_TEST_WS_KEY=$wsKey", '-e', "IDENTITY_TEST_USERS=$usersJson", '-e', "IDENTITY_TEST_DEFAULT_SUB=$profSub", '-e', 'IDENTITY_TEST_SUB_HEADER=X-Test-Sub',
     '-e', "IDENTITY_TEST_APP_PASSWORD=$appPw", '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
@@ -394,10 +387,11 @@ try {
 
   if ($ExtraTest) {
     Write-Host "[6b'] the extra (tester's) probe test: $ExtraTest"
-    $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
+    $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net,
+      '-e', "PROBE_FA_ISSUER=$issuer", '-e', "PROBE_FA_CLIENT_ID=$faClient", '-e', "PROBE_FA_SECRET=$faSecret", '-e', "PROBE_FA_SIGN_OUT=$signOut",
       '-v', "${ExtraTest}:/app/src/identity/t_probe_test.ts:ro",
       '-e', "PROBE_VIEWER=http://$P-viewer:8080", '-e', "PROBE_WB=http://$P-wb:8000", '-e', "PROBE_WB_NODEF=http://$P-wbnodef:8000",
-      '-e', 'PROBE_STUB=https://stub-oidc:8443', '-e', "PROBE_RESEARCH=http://$P-rs:8000",
+      '-e', "PROBE_RESEARCH=http://$P-rs:8000",
       '-e', "PROBE_DOOR_KEY=$door", '-e', "PROBE_INTERNAL_KEY=$key", '-e', "PROBE_OWUI_KEY=$kOwui", '-e', "PROBE_AO_KEY=$kAo",
       '-e', "PROBE_WS_KEY=$wsKey", '-e', "PROBE_USERS=$usersJson", '-e', "PROBE_APP_PASSWORD=$appPw", '-e', "PROBE_DB_HOST=$db", '-e', "PROBE_DB_PASSWORD=$pw",
       $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/identity/t_probe_test.ts')
@@ -428,11 +422,11 @@ try {
       $null = Dk run -d --name "$P-wb" --label $label --network $net @restart
       Check (($script:rc -eq 0) -and (Wait-Http "http://$P-wb:8000/health" 90)) 'the workbench restarted with the response walk off'
     }
-    Write-Host "[6c] the isolation sweep with REAL sessions: A=$($sw[0]) B=$($sw[1]), response walk $($sw[2])"
+    Write-Host "[6c] the isolation sweep signed in (forward-auth tokens): A=$($sw[0]) B=$($sw[1]), response walk $($sw[2])"
     $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
-      '-v', "${certs}:/certs:ro", '-e', 'DENO_CERT=/certs/ca.pem',
+      '-e', "SWEEP_FA_ISSUER=$issuer", '-e', "SWEEP_FA_CLIENT_ID=$faClient", '-e', "SWEEP_FA_SECRET=$faSecret", '-e', "SWEEP_USERS=$usersJson",
       '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$door", '-e', 'DOCS_TEST_VAULT=/vault',
-      '-e', "SWEEP_OIDC_A=$($sw[0])", '-e', "SWEEP_OIDC_B=$($sw[1])", '-e', "SWEEP_OIDC_B_SUB=$(if ($sw[1] -eq 'uma') { $umaSub } else { $daveSub })", '-e', 'DOCS_TEST_SUB_HEADER=X-Test-Sub',
+      '-e', "SWEEP_USER_A=$($sw[0])", '-e', "SWEEP_USER_B=$($sw[1])", '-e', "SWEEP_USER_B_SUB=$(if ($sw[1] -eq 'uma') { $umaSub } else { $daveSub })", '-e', 'DOCS_TEST_SUB_HEADER=X-Test-Sub',
       '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
       '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/isolation_sweep_test.ts')
@@ -440,7 +434,7 @@ try {
     Save "isolation-sweep-$($sw[0])-walk-$($sw[2]).log" ((($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:|AssertionError' }) -join "`n")
     foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT ' } | Select-Object -First 40) { Write-Host "    $l" }
     $r = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-    if ($Red) { Check ($r.Success -and $r.Groups[1].Value -eq 'FAILED') "RED: the real-session sweep cannot run on the base (no sign-in there) ($($r.Value))" }
+    if ($Red) { Check ($r.Success -and $r.Groups[1].Value -eq 'FAILED') "RED: the signed-in sweep fails on the base (it does not read the forward-auth token) ($($r.Value))" }
     else { Check ($r.Success -and $r.Groups[1].Value -eq 'ok' -and [int]$r.Groups[3].Value -eq 0 -and $clean -match 'sweep: \d+ routes' -and $clean -match 'sweep: real sessions') "the isolation sweep, real sessions, A=$($sw[0]), walk $($sw[2]) ($($r.Value))" }
   }
 
@@ -461,9 +455,9 @@ try {
     $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/revert-identity.sql
     $rv = $script:rc
     $after = (Dk exec $db psql -U postgres -d openbrain -tAqc "select count(*) from research_prompts where actor_sub = 'system:backfill' or owner_sub like 'service:%'").Trim()
-    $tbl = (Dk exec $db psql -U postgres -d openbrain -tAqc "select coalesce(to_regclass('public.admin_audit')::text, '-') || ' ' || coalesce(to_regclass('public.workspace_sessions')::text, '-')").Trim()
+    $tbl = (Dk exec $db psql -U postgres -d openbrain -tAqc "select coalesce(to_regclass('public.admin_audit')::text, '-') || ' ' || coalesce(to_regclass('public.workspace_impersonation')::text, '-') || ' ' || coalesce(to_regclass('public.workspace_users')::text, '-')").Trim()
     Save 'revert.log' "rw-identity rows before the revert: $bf; after: $after; tables after: $tbl; exit $rv"
-    $revOk = ($rv -eq 0) -and [int]$bf -gt 0 -and $after -eq '0' -and $tbl -eq '- -'
+    $revOk = ($rv -eq 0) -and [int]$bf -gt 0 -and $after -eq '0' -and $tbl -eq '- - -'
     if ($Red) { Check (-not $revOk) "RED: the base's revert-identity.sql leaves rw-identity's research_prompts rows ($bf -> $after)" }
     else { Check $revOk "revert-identity.sql removes rw-identity's research_prompts rows ($bf -> $after) and its tables ($tbl)" }
   }

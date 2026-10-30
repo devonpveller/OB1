@@ -1,96 +1,77 @@
-// The sign-in's storage (rw-identity; tables in OB1/docker/init-identity.sql, slot 290):
-//   workspace_login_pending  one row per sign-in in flight: the state (hashed), the browser binding
-//                            (hashed), the nonce, the PKCE verifier, where to land; single use, 10 min
-//   workspace_sessions       one row per signed-in browser: the token's SHA-256 (the token itself is
-//                            only in the browser's cookie), the user, admin or not, an impersonation
-//   workspace_users          the users who have signed in (an admin picks whom to impersonate here)
+// The identity's storage (rw-identity; tables in OB1/docker/init-identity.sql, slot 290). There is no
+// session here: Authentik keeps the sign-in (forward-auth, rw-identity2) and every request carries its
+// signed token (src/identity/forward_auth.ts).
+//   workspace_users          the users the workbench has seen signed in (an admin picks whom to
+//                            impersonate here); refreshed from the token at most every few minutes
+//   workspace_impersonation  one row per admin who is impersonating: whom, why, since, until (short-
+//                            lived, keyed by the admin's subject; ends by itself when it expires)
 //   admin_audit              APPEND-ONLY: every admin action and every request made while
 //                            impersonating (the table refuses UPDATE, DELETE and TRUNCATE)
 import type { Db } from "../contracts/db.ts";
-import { randomToken, sha256b64url } from "./oidc.ts";
 
-export interface Pending {
-  nonce: string;
-  verifier: string;
-  return_to: string;
-}
+const SEEN_REFRESH_MS = 5 * 60_000;
+const seen = new Map<string, { at: number; sig: string }>();
 
-export async function createPending(db: Db, p: Pending & { state: string; binding: string }): Promise<void> {
-  await db.query(`DELETE FROM public.workspace_login_pending WHERE expires_at < now()`);
-  await db.query(
-    `INSERT INTO public.workspace_login_pending (state_hash, binding_hash, nonce, verifier, return_to, expires_at)
-     VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes')`,
-    [await sha256b64url(p.state), await sha256b64url(p.binding), p.nonce, p.verifier, p.return_to],
-  );
-}
-
-// Single use: the row is deleted as it is read, whatever happens next. Null when the state is
-// unknown, used, expired, or was started by another browser (the binding cookie disagrees).
-export async function consumePending(db: Db, state: string, binding: string): Promise<Pending | null> {
-  // the state row is deleted even when the binding is missing (a state shown by another browser is
-  // burnt, never left for a replay)
-  if (!state) return null;
-  const rows = await db.query<Pending & { binding_hash: string; live: boolean }>(
-    `DELETE FROM public.workspace_login_pending WHERE state_hash = $1
-     RETURNING binding_hash, nonce, verifier, return_to, (expires_at > now()) AS live`,
-    [await sha256b64url(state)],
-  );
-  const r = rows[0];
-  if (!r || !r.live || !binding || r.binding_hash !== await sha256b64url(binding)) return null;
-  return { nonce: r.nonce, verifier: r.verifier, return_to: r.return_to };
-}
-
-export interface SessionRow {
-  id_hash: string;
-  sub: string;
-  name: string;
-  is_admin: boolean;
-  imp_sub: string | null;
-  imp_name: string | null;
-  imp_reason: string | null;
-  imp_started_at: string | null;
-}
-
-export async function upsertUser(db: Db, u: { sub: string; name: string; email: string; is_admin: boolean }): Promise<void> {
+// Record (or refresh) a signed-in user; at most one write per user per few minutes and per change.
+export async function seeUser(db: Db, u: { sub: string; name: string; email: string; is_admin: boolean }): Promise<void> {
+  const sig = `${u.name}\u0000${u.email}\u0000${u.is_admin}`;
+  const last = seen.get(u.sub);
+  if (last && last.sig === sig && Date.now() - last.at < SEEN_REFRESH_MS) return;
   await db.query(
     `INSERT INTO public.workspace_users (sub, name, email, is_admin) VALUES ($1, $2, $3, $4)
      ON CONFLICT (sub) DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email, is_admin = EXCLUDED.is_admin, last_seen = now()`,
     [u.sub, u.name, u.email, u.is_admin],
   );
+  if (seen.size > 10_000) seen.clear();
+  seen.set(u.sub, { at: Date.now(), sig });
 }
 
-export async function createSession(db: Db, u: { sub: string; name: string; is_admin: boolean }, seconds: number): Promise<string> {
-  const token = randomToken(32);
-  await db.query(`DELETE FROM public.workspace_sessions WHERE expires_at < now() - interval '1 day'`);
-  await db.query(
-    `INSERT INTO public.workspace_sessions (id_hash, sub, name, is_admin, expires_at)
-     VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))`,
-    [await sha256b64url(token), u.sub, u.name, u.is_admin, seconds],
+export interface Impersonation {
+  target_sub: string;
+  target_name: string;
+  reason: string;
+  ref: string; // what the audit rows of this impersonation carry as session_ref
+  started_at: string;
+  expires_at: string;
+}
+
+// The admin's live impersonation, or null. An expired one is removed here and its end recorded.
+export async function impersonationOf(db: Db, adminSub: string): Promise<Impersonation | null> {
+  const ended = await db.query<{ target_sub: string; reason: string; ref: string }>(
+    `DELETE FROM public.workspace_impersonation WHERE admin_sub = $1 AND expires_at <= now() RETURNING target_sub, reason, ref`,
+    [adminSub],
   );
-  return token;
-}
-
-export async function sessionOf(db: Db, token: string): Promise<SessionRow | null> {
-  if (!token || token.length > 200) return null;
-  const rows = await db.query<SessionRow>(
-    `SELECT s.id_hash, s.sub, s.name, s.is_admin, s.imp_sub, u.name AS imp_name, s.imp_reason, s.imp_started_at::text AS imp_started_at
-       FROM public.workspace_sessions s LEFT JOIN public.workspace_users u ON u.sub = s.imp_sub
-      WHERE s.id_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now()`,
-    [await sha256b64url(token)],
+  for (const e of ended) {
+    await audit(db, { actor_sub: adminSub, subject_sub: e.target_sub, action: "impersonate.end", reason: `expired (${e.reason.slice(0, 200)})`, session_ref: e.ref });
+  }
+  const rows = await db.query<Impersonation>(
+    `SELECT i.target_sub, coalesce(u.name, '') AS target_name, i.reason, i.ref,
+            i.started_at::text AS started_at, i.expires_at::text AS expires_at
+       FROM public.workspace_impersonation i LEFT JOIN public.workspace_users u ON u.sub = i.target_sub
+      WHERE i.admin_sub = $1 AND i.expires_at > now()`,
+    [adminSub],
   );
   return rows[0] ?? null;
 }
 
-export async function revokeSession(db: Db, idHash: string): Promise<void> {
-  await db.query(`UPDATE public.workspace_sessions SET revoked_at = now() WHERE id_hash = $1 AND revoked_at IS NULL`, [idHash]);
+// Starts an impersonation; null when the admin already has one (nesting is refused).
+export async function startImpersonation(db: Db, adminSub: string, target: string, reason: string, minutes: number, ref: string): Promise<Impersonation | null> {
+  const rows = await db.query<Impersonation>(
+    `INSERT INTO public.workspace_impersonation (admin_sub, target_sub, reason, ref, expires_at)
+     VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5))
+     ON CONFLICT (admin_sub) DO NOTHING
+     RETURNING target_sub, '' AS target_name, reason, ref, started_at::text AS started_at, expires_at::text AS expires_at`,
+    [adminSub, target, reason, ref, minutes],
+  );
+  return rows[0] ?? null;
 }
 
-export async function setImpersonation(db: Db, idHash: string, target: { sub: string; reason: string } | null): Promise<void> {
-  await db.query(
-    `UPDATE public.workspace_sessions SET imp_sub = $2, imp_reason = $3, imp_started_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END
-      WHERE id_hash = $1 AND revoked_at IS NULL`,
-    [idHash, target?.sub ?? null, target?.reason ?? null],
+export async function endImpersonation(db: Db, adminSub: string): Promise<{ target_sub: string; reason: string; ref: string } | null> {
+  const rows = await db.query<{ target_sub: string; reason: string; ref: string }>(
+    `DELETE FROM public.workspace_impersonation WHERE admin_sub = $1 RETURNING target_sub, reason, ref`,
+    [adminSub],
   );
+  return rows[0] ?? null;
 }
 
 export async function knownUser(db: Db, sub: string): Promise<{ sub: string; name: string } | null> {

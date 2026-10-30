@@ -5,7 +5,8 @@
 //   WORKSPACE_DOOR_KEY   blank as shipped = the door sends WORKBENCH_KEY, as before. REQUIRED once
 //                        sign-in is configured, and different from WORKBENCH_KEY: then a request with
 //                        WORKBENCH_KEY is a service (identity service:internal), never a browser, and
-//                        a request with the door key is a browser that must be signed in.
+//                        a request with the door key is a browser that must carry Authentik's signed
+//                        token (X-authentik-jwt; src/identity/forward_auth.ts).
 //   WORKSPACE_SERVICE_KEYS  extra named service keys, name=key;name=key (each its own identity,
 //                        service:<name>); blank as shipped.
 // A browser can never present a service key: the doors drop any key a client sends and inject theirs.
@@ -31,7 +32,7 @@ export function keyRing(env: (k: string) => string | undefined, signIn: boolean)
   }
   if (door && door.length < 16) throw new Error("WORKSPACE_DOOR_KEY must be at least 16 characters");
   if (signIn) {
-    if (!door) throw new Error("sign-in (WORKSPACE_OIDC_*) needs WORKSPACE_DOOR_KEY: the key the viewer's forwarder injects for browsers");
+    if (!door) throw new Error("forward-auth sign-in (WORKSPACE_FORWARD_AUTH_*) needs WORKSPACE_DOOR_KEY: the key the viewer's forwarder injects for browsers");
     if (door === internal) throw new Error("WORKSPACE_DOOR_KEY must differ from WORKBENCH_KEY");
   }
   return { door, internal, services };

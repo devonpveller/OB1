@@ -3,7 +3,7 @@
 // the audit log). Every decision is the workbench's (/workbench/auth); this only shows it.
 import { useEffect, useState } from "react";
 import {
-  type AuditEntry, auditLog, currentMe, endImpersonation, impersonate, reasonOk, signInHref, signOut, users,
+  type AuditEntry, auditLog, currentMe, endImpersonation, impersonate, reasonOk, signInHref, signOutHref, users,
 } from "../lib/auth";
 
 const reload = () => location.reload();
@@ -94,17 +94,14 @@ export function AdminPanel({ onSwitch = reload }: { onSwitch?: () => void }) {
 export function AccountMenu() {
   const me = currentMe();
   const [admin, setAdmin] = useState(false);
-  if (!me || me.mode !== "oidc" || !me.signed_in) return null;
-  const out = async () => {
-    try { location.href = await signOut(); } catch { location.href = "/workspace/"; }
-  };
+  if (!me || me.mode !== "forward-auth" || !me.signed_in) return null;
   return (
     <span className="ws-account">
       <span className="ws-muted" data-testid="account-name">{me.actor_name}</span>
       {me.admin && (
         <button type="button" className="ws-tb-btn" data-testid="admin" aria-expanded={admin} onClick={() => setAdmin(!admin)}>Admin</button>
       )}
-      <button type="button" className="ws-tb-btn" data-testid="sign-out" onClick={out}>Sign out</button>
+      <a className="ws-tb-btn" data-testid="sign-out" href={signOutHref(me)}>Sign out</a>
       {admin && <div className="ws-popover" role="dialog" aria-label="admin"><AdminPanel /></div>}
     </span>
   );

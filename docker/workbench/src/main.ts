@@ -40,4 +40,4 @@ reconcileOnStart(docDeps);
 
 Deno.serve({ port: config.port }, app.fetch);
 console.log(`[workbench] listening on :${config.port} (auth=${config.workbenchKey ? "on" : "OPEN — set WORKBENCH_KEY"}, ` +
-  `sign-in=${seam.oidc ? `oidc ${new URL(seam.oidc.issuer).host}` : seam.cfg.header ? "identity header" : "off (one default identity)"})`);
+  `sign-in=${seam.fa ? `forward-auth ${new URL(seam.fa.issuer).host}` : seam.cfg.header ? "identity header" : "off (one default identity)"})`);

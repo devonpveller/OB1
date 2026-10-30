@@ -22,6 +22,7 @@ pinned version's own metadata on 2026-10-17 (registry entry, LICENSE at the tag,
 | openapi3-ts | 4.6.2 | MIT | Metadev | https://github.com/metadevpro/openapi3-ts |
 | yaml | 2.9.1 | ISC | Eemeli Aro | https://github.com/eemeli/yaml |
 | zod | 4.6.5 | MIT | Colin McDonnell | https://github.com/colinhacks/zod |
+| jose (rw-identity2: verifies the Authentik forward-auth token; no dependencies; licence read from the 6.2.12 registry entry on 2026-10-30) | 6.2.12 | MIT | 2018 Filip Skokan | https://github.com/panva/jose |
 | deno-postgres (deno.land/x/postgres) | 0.19.3 | MIT | 2018-2022 Bartlomiej Iwanczuk and Steven Guerrero | https://github.com/denodrivers/postgres |
 | @std/assert (tests only) | 1.0.19 | MIT | 2018-2022 the Deno authors | https://jsr.io/@std/assert |
 | @std/internal (tests only) | 1.0.14 | MIT | 2018-2022 the Deno authors | https://jsr.io/@std/internal |

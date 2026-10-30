@@ -59,8 +59,8 @@ export's resolver goes out through, research-workbench P6a).
 
 ## Env
 
-`PORT`, `WORKBENCH_KEY` (= the `MCP_ACCESS_KEY` value), `DB_*`, the sign-in's `WORKSPACE_OIDC_*`,
-`WORKSPACE_DOOR_KEY`, `WORKSPACE_SERVICE_KEYS`, `WORKSPACE_IDENTITY_HEADER` (see "Sign-in" below),
+`PORT`, `WORKBENCH_KEY` (= the `MCP_ACCESS_KEY` value), `DB_*`, the sign-in's `WORKSPACE_FORWARD_AUTH_*`,
+`WORKSPACE_DOOR_KEY`, `WORKSPACE_SERVICE_KEYS`, `WORKSPACE_IDENTITY_HEADER` (see "Sign-in (Authentik forward-auth)" below),
 `OPEN_BRAIN_URL`, `EMBEDDING_*`, `EXTRACT_URL`, `WIKI_GIT_DIR`, `WIKI_OUT_DIR`,
 `WIKI_ASSETS_DIR`, `CONTRACT_MOUNTS_ROOT` (default `/mounts`: where named mounts such as
 `podcast-archive` live), `CONTRACT_STREAM_POLL_MS` (default `1000`).
@@ -68,90 +68,175 @@ The export's resolver (P6a): `OPENALEX_API_KEY`, `CROSSREF_MAILTO` (both blank =
 (blank = refused, never direct); `RESOLVER_OPENALEX_BASE` / `RESOLVER_CROSSREF_BASE` / `RESOLVER_TIMEOUT_MS`
 exist for the disposable test run's stub only.
 
-## Sign-in with Authentik (rw-identity)
+## Sign-in (Authentik forward-auth) (rw-identity, rw-identity2)
 
-Shipped **inert**: with no `WORKSPACE_OIDC_*` set there is no sign-in, and the workspace is the one
-`WORKSPACE_DEFAULT_SUB` user exactly as before. Configured, the research front end signs its users
-in itself with OpenID Connect - the authorization code flow with PKCE (S256), a state bound to the
-browser that started it (single use, 10 minutes) and a nonce checked in the ID token - the same way
-Open WebUI signs its own users in (env-only provider settings; nothing in a database or a UI).
+Shipped **inert**: with no `WORKSPACE_FORWARD_AUTH_*` set there is no sign-in, and the workspace is the
+one `WORKSPACE_DEFAULT_SUB` user exactly as before. Configured, **Authentik alone signs users in and
+out**: the operator's Traefik guards the research front end with Authentik's forward-auth middleware
+(a *proxy provider*), so the sign-in, its session, MFA and the sign-out are Authentik's. The
+workbench has no login, callback, logout, session or cookie of its own. On every request Traefik lets
+through, Authentik's outpost hands Traefik the signed-in user's ID token as `X-authentik-jwt`; Traefik
+copies it onto the request, the viewer's `/workbench` forwarder passes it on unchanged, and the
+workbench verifies it **on every request** (`src/identity/forward_auth.ts`, with `jose`):
+
+- **HS256 only, keyed by the proxy provider's client secret.** Authentik gives a proxy provider no
+  signing key (checked in Authentik 2026.8.5: `ProxyProvider.set_oauth_defaults()` clears it on every
+  save), so the token is HS256 with the provider's client secret and its JWKS is empty.
+  `WORKSPACE_FORWARD_AUTH_CLIENT_SECRET` is that secret - in `OB1/docker/.env` only, never logged.
+  Every other algorithm is refused before a signature is computed: `alg: none`, RS256/ES256/PS256
+  (so also an RS256 header signed with the secret - the key confusion), HS384/HS512.
+- **Claims:** `iss` = `WORKSPACE_FORWARD_AUTH_ISSUER` exactly, `aud` = `WORKSPACE_FORWARD_AUTH_CLIENT_ID`
+  (the proxy provider's client id), `exp` required (30 s clock skew), `iat` required and not in the
+  future, `sub` usable (never `service:` / `system:` / `anonymous:`). A request without a valid token
+  is 401 on every user route; only `GET /workbench/auth/me` and health stay open.
+- **The unsigned headers count for nothing.** `X-authentik-uid`, `-username`, `-groups`, `-email` and
+  the rest are never read: identity and groups come from the verified token alone.
+- **Admin** = `WORKSPACE_FORWARD_AUTH_ADMIN_GROUP` in the token's `groups`, read on every request. An
+  admin removed from that group in Authentik stops being an admin on the first request whose token
+  says so, and an impersonation they started ends then (recorded). **How long that takes is bounded by
+  the proxy provider's *Token validity*:** the outpost keeps the claims of the ID token it got at
+  sign-in until that token expires, so a removed admin keeps the old groups for at most that long. Keep
+  it short (e.g. `minutes=10`), or end the user's sessions in Authentik when removing an admin.
 
 | Route | What |
 |---|---|
-| `GET /workbench/auth/login?return_to=` | starts a sign-in (302 to Authentik) |
-| `GET /workbench/auth/callback` | Authentik's answer: state, code + verifier, ID token (signature RS256/ES256/HS256, iss, aud, azp, exp, iat, nonce) |
-| `GET /workbench/auth/me` | who the request is (the workspace asks before it renders) |
-| `POST /workbench/auth/logout` | revokes the session server-side, clears the cookie; offers Authentik's end-session URL |
+| `GET /workbench/auth/me` | who the request is, `mode` (`forward-auth` / `header` / `default`), `logout` = the sign-out URL (the workspace asks before it renders) |
 | `POST /workbench/auth/impersonate {sub, reason}` / `.../impersonate/end` | admins only; a reason first (>= 8 letters or digits by Unicode category; nothing else counts) |
-| `GET /workbench/auth/users`, `GET /workbench/auth/audit?actor&subject&action&since&limit` | admins only: whom to impersonate; the audit log |
+| `GET /workbench/auth/users`, `GET /workbench/auth/audit?actor&subject&action&since&limit` | admins only: whom to impersonate (users seen signed in); the audit log |
 
-- **Identity.** `subject_sub` = the Authentik `sub` of the signed-in user, `actor_sub` = the same user,
-  except while an admin impersonates: then `subject_sub` is the user and `actor_sub` the admin, a
-  banner shows it on every screen, and the switch plus **every request** of that session are written
-  to `admin_audit` (actor, subject, reason, method, route, time) **before** the request runs - a
-  request that cannot be recorded is refused (503). `admin_audit` is append-only: a trigger refuses
-  UPDATE, DELETE and TRUNCATE for every role; the workbench's role has SELECT + INSERT only.
-- **Cookies.** `__Host-ob-ws-session` (Secure, HttpOnly, SameSite=Strict, Path=/; the server keeps only
-  the SHA-256 of its random token) and the sign-in binding `__Host-ob-ws-login` (SameSite=Lax: the
-  provider's redirect back is a cross-site navigation; cleared at the callback).
+- **Identity.** `subject_sub` = the token's `sub`, `actor_sub` = the same user, except while an admin
+  impersonates: then `subject_sub` is the user and `actor_sub` the admin, a banner shows it on every
+  screen, and the switch plus **every request** made during it are written to `admin_audit` (actor,
+  subject, reason, method, route, time) **before** the request runs - a request that cannot be
+  recorded is refused (503). The impersonation is its own short-lived row keyed by the admin's subject
+  (`workspace_impersonation`; it ends by itself after `WORKSPACE_IMPERSONATION_MINUTES`, default 60,
+  recorded). `admin_audit` is append-only: a trigger refuses UPDATE, DELETE and TRUNCATE for every
+  role; the workbench's role has SELECT + INSERT only.
+- **Sign out** is a link to Authentik's outpost sign-out, `WORKSPACE_FORWARD_AUTH_SIGN_OUT_URL`
+  (blank = `/outpost.goauthentik.io/sign_out` on the same host, which is where Authentik serves it in
+  single-application forward-auth mode).
 - **Keys.** With sign-in on, `WORKSPACE_DOOR_KEY` is REQUIRED and must differ from `WORKBENCH_KEY`:
-  the viewer's `/workbench` forwarder injects it for browsers (a request with it and no session gets
-  401 outside `/workbench/auth`); `WORKBENCH_KEY` (= `MCP_ACCESS_KEY`, what openbrain-mcp's contract
-  tools and openbrain-wiki send) becomes the internal service `service:internal`, which reads shared
-  knowledge but has no user front end (403 on `/workbench/documents`, `/workbench/workspace`, the admin
-  routes). `WORKSPACE_SERVICE_KEYS=name=key;...` adds named services.
-- **One path for the seam and the router (rw-identity2).** A `/workbench` path that further decoding
-  could reshape - an encoded `%`, `/`, `\` or `.` (`%25 %2F %5C %2E`), a backslash, an empty, `.` or
-  `..` segment - is answered 400 before any sign-in decision, with or without sign-in. Clients encode
-  path segments with `encodeURIComponent` per segment; an id or note name holding `/` or `%` is not
-  a path segment.
-- **The identity header cannot stand in for a sign-in.** While sign-in is configured
-  `WORKSPACE_IDENTITY_HEADER` is ignored entirely. Without sign-in it is P2b's forward-auth hook, and
-  then this **edge-strip rule** applies: every door in front of the workbench MUST remove any
-  client-sent copy of that header (and of `WORKSPACE_IDENTITY_NAME_HEADER`) and set it itself, or any
-  client can claim any subject. The viewer's forwarder drops both from every client request; a
-  Traefik router in front of the viewer that sets the header needs a headers middleware that first
-  deletes it (`customRequestHeaders: {<header>: ""}`), as does any other proxy.
-- **Doors.** With sign-in on, browsers must reach the workbench only through the viewer (Traefik ->
-  viewer, `WIKI_VIEWER_ALLOWED_HOSTS` / `_ORIGINS` = the edge's public name). The portal Caddy's
-  `handle /workbench/*` route injects `MCP_ACCESS_KEY` - with sign-in on that would make a Caddy-path
-  browser the internal service (shared knowledge, no user front end, no sign-in): remove that route
-  or make it inject `WORKSPACE_DOOR_KEY` before turning sign-in on.
+  the viewer's `/workbench` forwarder injects it for browsers (a request with it and no valid token
+  gets 401); `WORKBENCH_KEY` (= `MCP_ACCESS_KEY`, what openbrain-mcp's contract tools and
+  openbrain-wiki send) becomes the internal service `service:internal`, which reads shared knowledge
+  but has no user front end (403 on `/workbench/documents`, `/workbench/workspace`, the admin routes).
+  `WORKSPACE_SERVICE_KEYS=name=key;...` adds named services.
+- **One path for the seam and the router (rw-identity2 round 6).** A `/workbench` path that further
+  decoding could reshape - an encoded `%`, `/`, `\` or `.` (`%25 %2F %5C %2E`), a backslash, an
+  empty, `.` or `..` segment - is answered 400 before any sign-in decision, with or without sign-in.
+- **The identity header cannot stand in for a sign-in.** While forward-auth is configured
+  `WORKSPACE_IDENTITY_HEADER` is ignored entirely. Without sign-in it is P2b's hook, and then this
+  **edge-strip rule** applies: every door in front of the workbench MUST remove any client-sent copy
+  of that header (and of `WORKSPACE_IDENTITY_NAME_HEADER`) and set it itself, or any client can claim
+  any subject. The viewer's forwarder drops both from every client request; a Traefik router that
+  sets the header needs a headers middleware that first deletes it (`customRequestHeaders:
+  {<header>: ""}`), as does any other proxy.
+- **Doors.** With sign-in on, browsers must reach the workbench only through Traefik -> the viewer
+  (`WIKI_VIEWER_ALLOWED_HOSTS` / `_ORIGINS` = the edge's public name). The portal Caddy's `handle
+  /workbench/*` route injects `MCP_ACCESS_KEY` - with sign-in on that would make a Caddy-path browser
+  the internal service (shared knowledge, no user front end): remove that route or make it inject
+  `WORKSPACE_DOOR_KEY` before turning sign-in on (and it carries no Authentik token, so its browsers
+  get 401).
 - **What another user (or an agent key) reads of a job** (round 4): an ALLOW-LIST - status, queue
   position, and of the result only the grounded report (synthesis, when the run found something), its
   cited sources (title, url), claims (id, text), outcome and report type; tree and events: ids, kinds,
   steps, status, time. The original prompt and everything derived from it (needs, follow-up queries,
   gaps, the failure notice, progress messages, errors, event payloads) are the owner's only - in the
-  research service's reads and the workbench's session views alike. The failure notice no longer quotes
-  the question. The route scope is judged on the decoded path (`/workbench/%64ocuments` = documents).
-  With sign-in on and `WORKSPACE_DEFAULT_SUB` blank, every admin read of the job views is audited.
+  research service's reads and the workbench's session views alike. With sign-in on and
+  `WORKSPACE_DEFAULT_SUB` blank, every admin read of the job views is audited.
 - **Acting on a job** (round 5): steering or cancelling a research job is its owner's alone - the user
   its prompt belongs to (through Open WebUI's or the workspace's key naming them), or the service that
   started it, or (no recorded owner) WORKSPACE_DEFAULT_SUB; anyone else gets 404, as for a missing job.
   Shared knowledge never receives the verbatim prompt: the curator files the derived question (the
-  planner's needs) and no span of 5+ prompt words in needs, follow-ups or prose; the staging session
-  names the run. The prompt itself stays in research_jobs / research_prompts, owner-scoped.
-- **Egress.** The only new outbound calls: the issuer's discovery document, its keys and its token
-  endpoint (https), only when `WORKSPACE_OIDC_ISSUER` is set. Nothing goes to a model provider.
-- **Storage.** `init-identity.sql` (slot 290): `workspace_users`, `workspace_login_pending`,
-  `workspace_sessions`, `admin_audit`. Revert: `revert-identity.sql` (discards the audit log - export it).
+  planner's needs) and no span of 5+ prompt words in needs, follow-ups or prose.
+- **Egress.** None: the token is verified with the configured secret, no call is made. (The in-app
+  OIDC client's discovery / keys / token calls are gone.)
+- **Storage.** `init-identity.sql` (slot 290): `workspace_users`, `workspace_impersonation`,
+  `admin_audit`. Revert: `revert-identity.sql` (discards the audit log - export it).
 
-**The Authentik side** (the operator creates it; nothing here builds Authentik):
-1. Providers -> Create -> *OAuth2/OpenID Provider*: name `research-workspace`; authorization flow
-   *default-provider-authorization-implicit-consent* (or explicit); client type **Confidential**;
-   redirect URI (strict) `https://<edge>/workbench/auth/callback`; signing key: the instance's
-   certificate (RS256; without one Authentik signs HS256 with the client secret, also accepted); scopes
-   `openid`, `email`, `profile` (Authentik's profile mapping carries the `groups` claim); subject mode
-   *Based on the User's hashed ID* (the default - the SAME mode as Open WebUI's provider, so one user
-   has one `sub` in both: 07-MULTI-USER "one user id everywhere"). Copy the client ID and secret.
-2. Applications -> Create: name `Research workspace`, slug `research-workspace`, provider the one
-   above; bind the users or group allowed to sign in. Issuer = `https://<authentik>/application/o/research-workspace/`.
-3. Directory -> Groups: a group (e.g. `research-admins`) whose members may impersonate =
-   `WORKSPACE_OIDC_ADMIN_GROUP`.
-4. Optional: the provider's post-logout redirect `https://<edge>/workspace/` = `WORKSPACE_OIDC_POST_LOGOUT_URI`.
+### Deploy: what the operator creates (nothing here builds Authentik or Traefik)
 
-The lab: `contract-test/run-identity-tests.ps1` (a TLS lab provider, `contract-test/stub-oidc.ts`, with
-two users, two more for the sweep and an admin; real sessions; the real research service image).
+**Authentik** (2026.8; Applications -> *Create with provider*):
+1. Provider type **Proxy Provider**, mode **Forward auth (single application)**; *External host*
+   `https://<the research front end's public name>`; authorization flow (implicit or explicit
+   consent); **Token validity** short (e.g. `minutes=10`: it bounds how long a removed admin keeps the
+   admin group, above). Under *Advanced protocol settings* the subject mode must be the **same as
+   Open WebUI's provider** (default *Based on the User's hashed ID*) - otherwise one person has two
+   subjects and research started from Open WebUI lands under a subject the workspace never sees.
+   Copy the provider's **Client ID** (= `WORKSPACE_FORWARD_AUTH_CLIENT_ID`) and **Client Secret**
+   (= `WORKSPACE_FORWARD_AUTH_CLIENT_SECRET`).
+2. The application: name `Research workspace`, slug e.g. `research-workspace`; bind the users or group
+   allowed in. The issuer is `https://<authentik>/application/o/<slug>/` (exactly, trailing slash) =
+   `WORKSPACE_FORWARD_AUTH_ISSUER`. It must equal the token's `iss`, which Authentik builds from the
+   host the outpost reaches it on: if sign-in fails with `forward-auth token refused: ... (iss)` in the
+   workbench log, set the issuer to that host's form.
+3. Add the application to an outpost (the embedded outpost is fine).
+4. Directory -> Groups: the group (e.g. `research-admins`) whose members may impersonate =
+   `WORKSPACE_FORWARD_AUTH_ADMIN_GROUP`.
+
+**Traefik** (the dynamic config the operator keeps; the shape of Authentik's own Traefik example):
+
+```yaml
+http:
+  middlewares:
+    strip-identity:            # FIRST: no client may send its own identity headers
+      headers:
+        customRequestHeaders:
+          X-authentik-jwt: ""
+          X-authentik-username: ""
+          X-authentik-groups: ""
+          X-authentik-entitlements: ""
+          X-authentik-email: ""
+          X-authentik-name: ""
+          X-authentik-uid: ""
+          X-authentik-meta-jwks: ""
+          X-authentik-meta-outpost: ""
+          X-authentik-meta-provider: ""
+          X-authentik-meta-app: ""
+          X-authentik-meta-version: ""
+          # and WORKSPACE_IDENTITY_HEADER / _NAME_HEADER if ever set
+    authentik:
+      forwardAuth:
+        address: http://<outpost>:9000/outpost.goauthentik.io/auth/traefik
+        trustForwardHeader: true
+        authResponseHeaders:   # X-authentik-jwt is the one the workbench reads
+          - X-authentik-jwt
+          - X-authentik-username
+          - X-authentik-groups
+          - X-authentik-uid
+  routers:
+    research:
+      rule: "Host(`<public name>`)"
+      middlewares: [strip-identity, authentik]
+      service: research-viewer      # the viewer (the plane's one front-end port), never the workbench
+    research-outpost:               # the outpost's own paths: its callback and /outpost.goauthentik.io/sign_out
+      rule: "Host(`<public name>`) && PathPrefix(`/outpost.goauthentik.io/`)"
+      priority: 15
+      service: authentik-outpost
+  services:
+    research-viewer:
+      loadBalancer: { servers: [ { url: "http://<WIKI_VIEWER_LAN_IP>:<viewer port>" } ] }
+```
+
+The router covers the whole host - `/workbench` and the viewer pages that serve the workspace.
+`authResponseHeaders` makes Traefik replace each listed header with the outpost's value; the
+`strip-identity` middleware additionally deletes every client-sent `X-authentik-*` header before the
+check, so a header the outpost does not answer with can never be a client's. The viewer is reached
+on its plane's opt-in `<SERVICE>_LAN_IP` binding (blank as shipped = not published); never `0.0.0.0`;
+this change publishes nothing new.
+
+**`OB1/docker/.env`:** `WORKSPACE_FORWARD_AUTH_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET` (together),
+`_ADMIN_GROUP`, optional `_SIGN_OUT_URL` (blank = `/outpost.goauthentik.io/sign_out`) and
+`WORKSPACE_IMPERSONATION_MINUTES`; `WORKSPACE_DOOR_KEY` (>= 16 chars, not `MCP_ACCESS_KEY`);
+`WIKI_VIEWER_ALLOWED_HOSTS` / `_ORIGINS` = the public name. Any retired `WORKSPACE_OIDC_*` /
+`WORKSPACE_SESSION_HOURS` value makes the workbench refuse to start - delete them.
+
+**Verify:** through the edge, `/workbench/auth/me` = `mode: forward-auth, signed_in: true` with your
+subject; direct to the viewer without Traefik = `signed_in: false`; Sign out lands on Authentik.
+
+The lab: `contract-test/run-identity-tests.ps1` - a lab signer stands in for the outpost (the tests
+mint HS256 tokens with a run-made secret: two users, two more for the sweep, admins; the real research
+service image); no provider, no TLS, nothing published.
 
 ## The retrieval contract (research-workbench P0)
 

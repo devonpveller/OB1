@@ -159,22 +159,52 @@ test("rw-identity: the identity header is dropped from every client request; coo
   const up = await serve(async (req, res) => {
     for await (const _ of req);
     seen.push({ sub: req.headers["x-auth-sub"], name: req.headers["x-auth-name"], cookie: req.headers.cookie, key: req.headers["x-brain-key"] });
-    res.writeHead(200, { "content-type": "application/json", "set-cookie": "__Host-ob-ws-session=t; Path=/; Secure; HttpOnly; SameSite=Strict" });
+    res.writeHead(200, { "content-type": "application/json", "set-cookie": "upstream=t; Path=/; Secure; HttpOnly; SameSite=Strict" });
     res.end("{}");
   });
   const cfg = proxyConfig({ WORKBENCH_URL: up.url, WORKBENCH_KEY: "internal-service-key", WORKSPACE_DOOR_KEY: "the-door-key-0123456789",
     WORKSPACE_IDENTITY_HEADER: "X-Auth-Sub", WORKSPACE_IDENTITY_NAME_HEADER: "X-Auth-Name" });
   const front = await serve((req, res) => proxyWorkbench(req, res, cfg));
   try {
-    const r = await fetch(`${front.url}/workbench/contract/documents`, { headers: { "x-auth-sub": "someone-else", "X-Auth-Name": "Mallory", cookie: "__Host-ob-ws-session=abc" } });
+    const r = await fetch(`${front.url}/workbench/contract/documents`, { headers: { "x-auth-sub": "someone-else", "X-Auth-Name": "Mallory", cookie: "authentik_proxy_x=abc" } });
     assert.equal(r.status, 200);
     assert.match(r.headers.get("set-cookie") ?? "", /HttpOnly/);
-    const w = await fetch(`${front.url}/workbench/auth/logout`, { method: "POST", headers: { origin: front.url, "x-auth-sub": "someone-else" } });
+    const w = await fetch(`${front.url}/workbench/auth/impersonate/end`, { method: "POST", headers: { origin: front.url, "x-auth-sub": "someone-else" } });
     assert.equal(w.status, 200);
     assert.deepEqual(seen, [
-      { sub: undefined, name: undefined, cookie: "__Host-ob-ws-session=abc", key: "the-door-key-0123456789" },
+      { sub: undefined, name: undefined, cookie: "authentik_proxy_x=abc", key: "the-door-key-0123456789" },
       { sub: undefined, name: undefined, cookie: undefined, key: "the-door-key-0123456789" },
     ]);
+  } finally {
+    up.server.close(); front.server.close();
+  }
+});
+
+// rw-identity2: Authentik forward-auth. Traefik puts the outpost's signed token (X-authentik-jwt) on the
+// request; the viewer passes it to the workbench UNCHANGED (the workbench verifies it) and never makes,
+// alters or judges one itself - a request without one reaches the workbench without one.
+test("rw-identity2: the Authentik token header is forwarded byte-for-byte; the viewer never mints or judges one", async () => {
+  const seen = [];
+  const up = await serve(async (req, res) => {
+    for await (const _ of req);
+    seen.push({ jwt: req.headers["x-authentik-jwt"], uid: req.headers["x-authentik-uid"], key: req.headers["x-brain-key"] });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const cfg = proxyConfig({ WORKBENCH_URL: up.url, WORKBENCH_KEY: "internal-service-key", WORKSPACE_DOOR_KEY: "the-door-key-0123456789",
+    WORKSPACE_IDENTITY_HEADER: "X-Auth-Sub" });
+  const front = await serve((req, res) => proxyWorkbench(req, res, cfg));
+  const token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.AAAA-_bb";
+  try {
+    assert.equal((await fetch(`${front.url}/workbench/contract/documents`, { headers: { "x-authentik-jwt": token, "x-authentik-uid": "u1" } })).status, 200);
+    assert.equal((await fetch(`${front.url}/workbench/contract/documents`, { headers: { "x-authentik-uid": "u1" } })).status, 200);
+    assert.equal((await fetch(`${front.url}/workbench/auth/impersonate/end`, { method: "POST", headers: { origin: front.url, "x-authentik-jwt": "not even a jwt" } })).status, 200);
+    assert.deepEqual(seen, [
+      { jwt: token, uid: "u1", key: "the-door-key-0123456789" },
+      { jwt: undefined, uid: "u1", key: "the-door-key-0123456789" },
+      { jwt: "not even a jwt", uid: undefined, key: "the-door-key-0123456789" },
+    ]);
+    assert.equal(cfg.strip.has("x-authentik-jwt"), false);
   } finally {
     up.server.close(); front.server.close();
   }

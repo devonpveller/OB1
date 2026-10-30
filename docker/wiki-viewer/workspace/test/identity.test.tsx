@@ -2,13 +2,13 @@
 // menu, the impersonation banner, the admin panel's reason-first rule and the audit view.
 import { afterEach, describe, expect, it } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { type Me, impersonate, loadMe, needsSignIn, setMe, signInHref } from "../src/lib/auth";
+import { type Me, impersonate, loadMe, needsSignIn, setMe, signInHref, signOutHref } from "../src/lib/auth";
 import { AccountMenu, AdminPanel, ImpersonationBanner, SignIn } from "../src/shell/Identity";
 import { fakeApi, settle } from "./helpers";
 
 const base: Me = {
-  mode: "oidc", signed_in: true, kind: "user", subject_sub: "ak-alice", actor_sub: "ak-alice", name: "Alice", actor_name: "Alice",
-  admin: false, impersonating: null, login: "/workbench/auth/login", logout: "/workbench/auth/logout",
+  mode: "forward-auth", signed_in: true, kind: "user", subject_sub: "ak-alice", actor_sub: "ak-alice", name: "Alice", actor_name: "Alice",
+  admin: false, impersonating: null, logout: "https://research.example/outpost.goauthentik.io/sign_out",
 };
 
 afterEach(() => {
@@ -17,13 +17,15 @@ afterEach(() => {
 });
 
 describe("rw-identity: signed in first", () => {
-  it("with sign-in on and no session the workspace shows only the sign-in link, returning to where the user was", async () => {
+  it("with forward-auth on and no valid token the workspace shows only the sign-in link: this page again, through the edge", async () => {
     fakeApi([["GET", "/workbench/auth/me", () => ({ ...base, signed_in: false, subject_sub: null })]]);
     const me = await loadMe();
     expect(needsSignIn(me)).toBe(true);
     render(<SignIn here="/workspace/?doc=documents/x.md" />);
     expect(screen.getByTestId("sign-in").getAttribute("href")).toBe(signInHref("/workspace/?doc=documents/x.md"));
-    expect(signInHref("/workspace/?doc=documents/x.md")).toBe("/workbench/auth/login?return_to=%2Fworkspace%2F%3Fdoc%3Ddocuments%2Fx.md");
+    expect(signInHref("/workspace/?doc=documents/x.md")).toBe("/workspace/?doc=documents/x.md");
+    expect(signInHref("//evil.example/x")).toBe("/workspace/");
+    expect(signInHref("https://evil.example/")).toBe("/workspace/");
   });
 
   it("no sign-in configured (or an older workbench without /workbench/auth) = the workspace as before", async () => {
@@ -36,11 +38,12 @@ describe("rw-identity: signed in first", () => {
     expect(screen.queryByTestId("sign-out")).toBeNull();
   });
 
-  it("the account menu: the user's name and sign out; Admin only for admins", () => {
+  it("the account menu: the user's name and sign out (a link to Authentik's sign-out); Admin only for admins", () => {
     setMe(base);
     const { unmount } = render(<AccountMenu />);
     expect(screen.getByTestId("account-name").textContent).toBe("Alice");
-    expect(screen.getByTestId("sign-out")).toBeTruthy();
+    expect(screen.getByTestId("sign-out").getAttribute("href")).toBe("https://research.example/outpost.goauthentik.io/sign_out");
+    expect(signOutHref({ ...base, logout: null })).toBe("/outpost.goauthentik.io/sign_out");
     expect(screen.queryByTestId("admin")).toBeNull();
     unmount();
     setMe({ ...base, admin: true });

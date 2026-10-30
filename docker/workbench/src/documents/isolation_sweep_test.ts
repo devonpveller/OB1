@@ -14,12 +14,14 @@
 // events with a timeout. Zero hits; shared knowledge still answers both users alike; B's document is
 // unchanged afterwards. The lab runs it with the response walk on AND off (WORKSPACE_RESPONSE_WALK).
 //
-// rw-identity: REAL SESSIONS. With SWEEP_OIDC_A / SWEEP_OIDC_B set (lab login names) the two users are
-// signed in through the viewer against the lab OpenID provider (contract-test/stub-oidc.ts) and every
-// call carries a session cookie instead of the identity header: A's on every call, B's on B's plants.
-// Every call of A's ALSO sends the identity header naming B (the header must be ignored once sign-in is
-// configured), A's sign-out route is not called (it would end the sweep's own session; the end checks
-// A is still signed in), and SWEEP_OIDC_B_SUB is B's subject (a marker).
+// rw-identity: REAL SIGN-INS. With SWEEP_USER_A / SWEEP_USER_B set (lab login names, SWEEP_USERS their
+// subjects and groups) the two users are signed in the way Authentik forward-auth signs them in
+// (rw-identity2): every call carries the outpost's token, X-authentik-jwt, minted by a lab signer
+// standing in for Authentik's outpost (HS256 with the lab proxy provider's client secret,
+// SWEEP_FA_SECRET; iss SWEEP_FA_ISSUER, aud SWEEP_FA_CLIENT_ID) - A's on every call, B's on B's plants -
+// instead of the identity header. Every call of A's ALSO sends the identity header naming B and B's
+// unsigned X-authentik-uid / -username (both must be ignored once sign-in is configured); the end
+// checks A is still signed in as A. SWEEP_USER_B_SUB is B's subject (a marker).
 // SKIPPED unless SWEEP_BASE is set. contract-test/run-workspace-tests.ps1 runs it LAST in its
 // disposable lab (it calls mutating routes with B's ids). Never point it at a live stack.
 // Environment: SWEEP_BASE (the workbench), SWEEP_VIEWER (the viewer), DOCS_TEST_KEY, DOCS_TEST_VAULT,
@@ -35,26 +37,25 @@ const VAULT = Deno.env.get("DOCS_TEST_VAULT") ?? "/vault";
 const HOST = Deno.env.get("CONTRACT_TEST_DB_HOST");
 const SUB_HEADER = Deno.env.get("DOCS_TEST_SUB_HEADER") ?? "X-Test-Sub";
 const ignore = !BASE || !VIEWER || !HOST;
-const OIDC_A = Deno.env.get("SWEEP_OIDC_A") ?? "";
-const OIDC_B = Deno.env.get("SWEEP_OIDC_B") ?? "";
+const OIDC_A = Deno.env.get("SWEEP_USER_A") ?? "";
+const OIDC_B = Deno.env.get("SWEEP_USER_B") ?? "";
 const OIDC = !!(OIDC_A && OIDC_B);
-// A's identity on every call (sign-in mode: A's session cookie, plus the header naming B - ignored)
+// A's identity on every call (sign-in mode: A's token, plus the header and B's bare X-authentik-* - ignored)
 let AS_A: Record<string, string> = {};
 
-// rw-identity: a real sign-in through the viewer (the lab provider signs in login_hint); the session cookie
-async function signIn(login: string): Promise<string> {
-  const start = await fetch(`${VIEWER}/workbench/auth/login?return_to=/workspace/`, { redirect: "manual" });
-  await start.body?.cancel();
-  const bind = start.headers.getSetCookie().map((c) => c.split(";")[0]).find((c) => c.startsWith("__Host-ob-ws-login=")) ?? "";
-  const authz = new URL(start.headers.get("location") ?? "");
-  authz.searchParams.set("login_hint", login);
-  const at = await fetch(authz, { redirect: "manual" });
-  await at.body?.cancel();
-  const done = await fetch(at.headers.get("location") ?? "", { redirect: "manual", headers: { cookie: bind } });
-  await done.body?.cancel();
-  const session = done.headers.getSetCookie().map((c) => c.split(";")[0]).find((c) => c.startsWith("__Host-ob-ws-session=")) ?? "";
-  assert(session, `${login} signed in (${start.status} -> ${at.status} -> ${done.status})`);
-  return session;
+// rw-identity2: the lab signer (Authentik's outpost token shape; WebCrypto, HS256 with the lab secret)
+const SWEEP_USERS = JSON.parse(Deno.env.get("SWEEP_USERS") || "[]") as { login: string; sub: string; name: string; groups: string[] }[];
+const b64u = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const encJ = (o: unknown) => b64u(new TextEncoder().encode(JSON.stringify(o)));
+async function signIn(login: string): Promise<Record<string, string>> {
+  const u = SWEEP_USERS.find((x) => x.login === login);
+  assert(u, `lab user ${login} (SWEEP_USERS)`);
+  const t = Math.floor(Date.now() / 1000);
+  const claims = { iss: Deno.env.get("SWEEP_FA_ISSUER"), aud: Deno.env.get("SWEEP_FA_CLIENT_ID"), sub: u.sub, iat: t, exp: t + 7200, name: u.name, preferred_username: login, groups: u.groups };
+  const data = `${encJ({ alg: "HS256", typ: "JWT" })}.${encJ(claims)}`;
+  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(Deno.env.get("SWEEP_FA_SECRET") ?? ""), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = b64u(new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(data))));
+  return { "x-authentik-jwt": `${data}.${sig}` };
 }
 const FX_ACTIVE = "11111111-1111-4111-8111-111111111111";
 
@@ -116,11 +117,11 @@ async function call(base: string, method: string, path: string, body?: unknown, 
 const rnd = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 
 Deno.test({ name: "isolation sweep: as user A, every route the app registers shows nothing of user B's private context", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => {
-  const B: Record<string, string> = OIDC ? { cookie: await signIn(OIDC_B) } : { [SUB_HEADER]: `sweep-bee-${rnd()}` };
-  const bSub = OIDC ? (Deno.env.get("SWEEP_OIDC_B_SUB") ?? "") : B[SUB_HEADER];
+  const B: Record<string, string> = OIDC ? await signIn(OIDC_B) : { [SUB_HEADER]: `sweep-bee-${rnd()}` };
+  const bSub = OIDC ? (Deno.env.get("SWEEP_USER_B_SUB") ?? "") : B[SUB_HEADER];
   if (OIDC) {
-    assert(bSub, "SWEEP_OIDC_B_SUB names B's subject");
-    AS_A = { cookie: await signIn(OIDC_A), [SUB_HEADER]: bSub };
+    assert(bSub, "SWEEP_USER_B_SUB names B's subject");
+    AS_A = { ...(await signIn(OIDC_A)), [SUB_HEADER]: bSub, "x-authentik-uid": bSub, "x-authentik-username": OIDC_B };
   }
   // an admin's own views list users and the audit log by design (whom to impersonate; what admins did):
   // there, and only there, B's subject is expected - nothing else of B's
@@ -204,9 +205,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const seen = new Set<string>();
   const routes = (app.routes as { method: string; path: string }[])
     .filter((r) => !r.path.endsWith("*") && r.method !== "ALL")
-    .filter((r) => { const k = `${r.method} ${r.path}`; if (seen.has(k)) return false; seen.add(k); return true; })
-    // A's own sign-out would end the sweep's session (every later call a vacuous 401)
-    .filter((r) => !(OIDC && r.path === "/workbench/auth/logout"));
+    .filter((r) => { const k = `${r.method} ${r.path}`; if (seen.has(k)) return false; seen.add(k); return true; });
   assert(routes.length > 50, `the router lists ${routes.length} routes`);
   const fill = (path: string, v: string) =>
     path.replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, _n, re) => (re && re.includes(".")) ? v : encodeURIComponent(v));
@@ -337,10 +336,10 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   await Deno.remove(`${VAULT}/${bDir}/${attachName}`).catch(() => {});
   await Deno.remove(`${VAULT}/${bDir}/${attachPng}`).catch(() => {});
   if (OIDC) {
-    // the sweep's calls were made as a signed-in A, never as a refused anonymous caller
+    // the sweep's calls were made as a signed-in A (A's token), never as a refused anonymous caller
     const me = await call(VIEWER, "GET", "/workbench/auth/me");
     assertEquals([me.json.signed_in, me.json.subject_sub === bSub], [true, false], `A is still signed in as A: ${me.text}`);
-    console.log(`sweep: real sessions (A=${OIDC_A}${me.json.admin ? ", an admin not impersonating" : ""}, B=${OIDC_B}); every call of A's also sent ${SUB_HEADER}: <B's subject>`);
+    console.log(`sweep: real sessions (forward-auth tokens; A=${OIDC_A}${me.json.admin ? ", an admin not impersonating" : ""}, B=${OIDC_B}); every call of A's also sent ${SUB_HEADER} and X-authentik-uid: <B's subject>`);
   }
   assertEquals([...new Set(hits)], [], "no response to user A carries anything of user B's private context");
 } });

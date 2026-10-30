@@ -1,22 +1,24 @@
 -- ============================================================
--- Research workbench - sign-in, sessions and the admin audit log (rw-identity).
+-- Research workbench - users, impersonation and the admin audit log (rw-identity).
 --
 -- Governing plan (private plan store): implementation-guide/research-workbench/07-MULTI-USER.md
 -- (operator 2026-10-28: one Authentik user id everywhere; an admin may impersonate a user after
 -- giving a reason; every admin action in an append-only, retrievable log).
 --
 -- What this file adds, and only this:
---   1. workspace_users          users who have signed in with Authentik (subject, name, admin flag)
---   2. workspace_login_pending  sign-ins in flight: state (hashed), browser binding (hashed), nonce,
---                               PKCE verifier, where to land; single use, expire after 10 minutes
---   3. workspace_sessions       signed-in browsers: the SHA-256 of the cookie's token (the token is
---                               never stored), the user, the admin flag, an impersonation
---                               (imp_sub + imp_reason + imp_started_at)
---   4. admin_audit              APPEND-ONLY: impersonate.start/end/refused, every request made
+--   1. workspace_users          users the workbench has seen signed in with Authentik (subject, name,
+--                               admin flag as of their last token)
+--   2. workspace_impersonation  rw-identity2: one row per admin who is impersonating - whom, the
+--                               reason, since, until (short-lived; keyed by the admin's subject). There
+--                               is no session table: Authentik forward-auth keeps the sign-in and every
+--                               request carries its signed token (amended in place before any deploy:
+--                               290 was never applied live - checked 2026-10-30 - so the earlier
+--                               workspace_login_pending / workspace_sessions tables are gone from it)
+--   3. admin_audit              APPEND-ONLY: impersonate.start/end/refused, every request made
 --                               while impersonating, users.read, audit.read. A trigger refuses
 --                               UPDATE and DELETE (and TRUNCATE) for every role; the workbench's
 --                               role is granted SELECT + INSERT only.
---   5. research_prompts gains nothing: an Open WebUI job started on behalf of a user writes that
+--   4. research_prompts gains nothing: an Open WebUI job started on behalf of a user writes that
 --      user's row (the research service, origin `owui`); agent-started research is recorded under
 --      the service identity `service:<caller>` (never private: a service is not a user).
 -- Idempotent (IF NOT EXISTS, CREATE OR REPLACE); re-running it changes nothing. Revert:
@@ -33,32 +35,16 @@ CREATE TABLE IF NOT EXISTS public.workspace_users (
     CHECK (sub !~* '^(service|system|anonymous):')
 );
 
-CREATE TABLE IF NOT EXISTS public.workspace_login_pending (
-    state_hash    TEXT PRIMARY KEY,
-    binding_hash  TEXT NOT NULL,
-    nonce         TEXT NOT NULL,
-    verifier      TEXT NOT NULL,
-    return_to     TEXT NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at    TIMESTAMPTZ NOT NULL
+CREATE TABLE IF NOT EXISTS public.workspace_impersonation (
+    admin_sub   TEXT PRIMARY KEY REFERENCES public.workspace_users(sub),
+    target_sub  TEXT NOT NULL REFERENCES public.workspace_users(sub),
+    reason      TEXT NOT NULL CHECK (length(btrim(reason)) >= 4),
+    ref         TEXT NOT NULL,
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    CHECK (admin_sub <> target_sub),
+    CHECK (expires_at > started_at)
 );
-CREATE INDEX IF NOT EXISTS idx_workspace_login_pending_expiry ON public.workspace_login_pending (expires_at);
-
-CREATE TABLE IF NOT EXISTS public.workspace_sessions (
-    id_hash         TEXT PRIMARY KEY,
-    sub             TEXT NOT NULL REFERENCES public.workspace_users(sub),
-    name            TEXT NOT NULL DEFAULT '',
-    is_admin        BOOLEAN NOT NULL DEFAULT false,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at      TIMESTAMPTZ NOT NULL,
-    revoked_at      TIMESTAMPTZ,
-    imp_sub         TEXT REFERENCES public.workspace_users(sub),
-    imp_reason      TEXT,
-    imp_started_at  TIMESTAMPTZ,
-    CHECK ((imp_sub IS NULL) = (imp_reason IS NULL)),
-    CHECK (imp_sub IS NULL OR (is_admin AND length(btrim(imp_reason)) >= 4))
-);
-CREATE INDEX IF NOT EXISTS idx_workspace_sessions_sub ON public.workspace_sessions (sub, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS public.admin_audit (
     id           BIGSERIAL PRIMARY KEY,
@@ -92,7 +78,7 @@ CREATE TRIGGER trg_admin_audit_no_truncate BEFORE TRUNCATE ON public.admin_audit
 DO $$
 DECLARE t TEXT;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['workspace_users', 'workspace_login_pending', 'workspace_sessions'] LOOP
+    FOREACH t IN ARRAY ARRAY['workspace_users', 'workspace_impersonation'] LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
         EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', t || '_service_role_all', t);
         EXECUTE format('CREATE POLICY %I ON public.%I FOR ALL TO service_role USING (true) WITH CHECK (true)',

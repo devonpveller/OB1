@@ -1,14 +1,16 @@
 // Who is signed in (rw-identity). The workbench answers GET /workbench/auth/me before the workspace
-// renders: with sign-in configured (mode "oidc") and no session, the workspace shows the sign-in
-// screen and nothing else; without sign-in (mode "default" / "header") it renders as before. An older
-// workbench without /workbench/auth answers 404: treated as no sign-in, exactly as before.
-// Nothing here decides who the user is - the workbench's identity seam does.
+// renders: with sign-in configured (mode "forward-auth", rw-identity2) and no valid Authentik token on
+// the request, the workspace shows the sign-in screen and nothing else; without sign-in (mode "default"
+// / "header") it renders as before. An older workbench without /workbench/auth answers 404: treated as
+// no sign-in, exactly as before. Authentik signs users in and out at the edge (Traefik forward-auth):
+// signing in is loading the page through the edge again; signing out is a link to Authentik's outpost
+// sign-out (`logout`). Nothing here decides who the user is - the workbench's identity seam does.
 import { get, post } from "./api";
 
 export const A = "/workbench/auth";
 
 export interface Me {
-  mode: "oidc" | "header" | "default";
+  mode: "forward-auth" | "header" | "default";
   signed_in: boolean;
   kind: string;
   subject_sub: string | null;
@@ -16,9 +18,8 @@ export interface Me {
   name: string;
   actor_name: string;
   admin: boolean;
-  impersonating: { sub: string; name: string; reason: string; since: string } | null;
-  login: string | null;
-  logout: string | null;
+  impersonating: { sub: string; name: string; reason: string; since: string; until?: string | null } | null;
+  logout: string | null; // Authentik's sign-out URL (forward-auth), else null
 }
 
 let me: Me | null = null;
@@ -41,16 +42,19 @@ export async function loadMe(): Promise<Me | null> {
 }
 
 export function needsSignIn(m: Me | null): boolean {
-  return !!m && m.mode === "oidc" && !m.signed_in;
+  return !!m && m.mode === "forward-auth" && !m.signed_in;
 }
 
+// Sign in = this page again, through the edge (Authentik's forward-auth sends an unsigned-in browser to
+// its own sign-in and back). Only a path on this origin.
 export function signInHref(here: string): string {
-  return `${A}/login?return_to=${encodeURIComponent(here || "/workspace/")}`;
+  const s = String(here || "");
+  return s.startsWith("/") && !s.startsWith("//") && !s.includes("\\") ? s : "/workspace/";
 }
 
-export async function signOut(): Promise<string> {
-  const r = await post<{ end_session: string | null }>(`${A}/logout`);
-  return r.end_session || "/workspace/";
+// Sign out = Authentik's (the outpost's sign-out ends the Authentik session for this application).
+export function signOutHref(m: Me | null): string {
+  return m?.logout || "/outpost.goauthentik.io/sign_out";
 }
 
 // The reason rule (the workbench's src/identity/reason.ts): REASON_MIN visible characters, one a letter

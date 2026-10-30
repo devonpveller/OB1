@@ -8,6 +8,7 @@
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "npm:@asteasolutions/zod-to-openapi@^9.1.0": "9.1.0_zod@4.6.5",
+    "npm:jose@6.2.12": "6.2.12",
     "npm:mdast-util-from-markdown@2.1.0": "2.1.0",
     "npm:mdast-util-gfm-footnote@2.1.0": "2.1.0",
     "npm:mdast-util-gfm-strikethrough@2.0.1": "2.0.1",
@@ -116,6 +117,9 @@
       "dependencies": [
         "dequal"
       ]
+    },
+    "jose@6.2.12": {
+      "integrity": "sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw=="
     },
     "katex@0.16.47": {
       "integrity": "sha512-Eeo8Ys1doU1z+x8AZsPpQu+p/QcZBI5PeOo7QGQdy2x2m0MU/hYagBbGOmXwr5KVbEfVuWv9LpnQWeehogurjg==",
@@ -641,6 +645,7 @@
     "dependencies": [
       "jsr:@hono/hono@4.13.5",
       "jsr:@hono/zod-openapi@1.6.3",
+      "npm:jose@6.2.12",
       "npm:mdast-util-from-markdown@2.1.0",
       "npm:mdast-util-gfm-footnote@2.1.0",
       "npm:mdast-util-gfm-strikethrough@2.0.1",

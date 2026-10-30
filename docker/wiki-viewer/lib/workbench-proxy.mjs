@@ -19,7 +19,10 @@
 // else WORKBENCH_KEY as before. And no client may name its own identity: the identity header the
 // workbench may be configured to trust (WORKSPACE_IDENTITY_HEADER, WORKSPACE_IDENTITY_NAME_HEADER) is
 // DROPPED from every forwarded request, whatever its value; the workbench ignores it anyway while
-// sign-in is configured. Cookies pass (the sign-in session), as does the provider's Set-Cookie back.
+// sign-in is configured. rw-identity2 (Authentik forward-auth): the outpost's signed token that Traefik
+// puts on the request (X-authentik-jwt) passes to the workbench UNCHANGED - the workbench verifies it on
+// every request; the viewer never makes, alters or judges one (the unsigned X-authentik-* headers pass
+// too and count for nothing). Cookies pass, as before.
 import http from "node:http";
 import https from "node:https";
 import { hostname as osHostname } from "node:os";
