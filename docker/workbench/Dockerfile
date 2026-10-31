@@ -118,7 +118,10 @@ RUN apt-get update \
 # cases over a loopback socket, and (rw-identity-harden, harden_test.ts) the Host check, the exact open routes,
 # the seam/owner-scope/audit differential fuzz, the error-body, key-compare and log-rate cases; its integration
 # test is skipped here (no IDENTITY_TEST_BASE).
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ \
+# rw-workbench-fetch-posture adds src/fetch-gate/: the search-gate client against a loopback stub gate
+# (every answer shape, fail-closed) and the static search of the fetcher files (no bare fetch, no
+# redirect: "follow", no FETCH_PROXY_URL); its integration test is skipped here (no FETCH_GATE_TEST_BASE).
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/fetch-gate/ \
   && touch /app/.test-gate-passed
 
 FROM test AS parity
@@ -153,5 +156,5 @@ EXPOSE 8000
 
 # --allow-read/write: vault notes + wiki-assets (P3/P5) + the export's scratch dir. --allow-run:
 # `git` commit in the vault repo (P3), `pandoc` for the export (P6a). --allow-net/env: DB, REST,
-# embeddings, extract, the export's resolver (through FETCH_PROXY_URL only).
+# embeddings, extract, the export's resolver (through FETCH_PROXY_URL only), the search gate's /v1/fetch.
 CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read", "--allow-write", "--allow-run", "src/main.ts"]
