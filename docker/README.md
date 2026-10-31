@@ -276,11 +276,11 @@ datastore it imports to.
 **Two of these are easy to get wrong, so they are stated exactly:**
 
 - Row 4 reaches Open Notebook **directly** but reaches the wiki **through portal
-  Caddy**: `frontend/docker-compose.yml:366` sets `QUARTZ_HOST=${QUARTZ_HOST:-caddy}`
+  Caddy**: `frontend/docker-compose.yml:419` sets `QUARTZ_HOST=${QUARTZ_HOST:-caddy}`
   and the deployed value is `caddy:8446`. `entrypoint.sh:66`'s own fallback is
   `openbrain-wiki-viewer`, but the compose always supplies a value, so that
   fallback does not apply on this stack — the comment at
-  `frontend/docker-compose.yml:361-364` records why it was moved behind Caddy.
+  `frontend/docker-compose.yml:408-418` records why it was moved behind Caddy (and that the portal is retired: `/workbench` answers 421 there since rw-identity-harden).
   So turning `wiki` off breaks the tailnet wiki route *via* row 2, not as a
   seventh direct edge.
 - Row 7 is **two files, not one**. An earlier version of this table named only

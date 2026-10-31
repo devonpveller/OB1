@@ -17,7 +17,7 @@
 //                                         log. Exit 1 unless every run answers 200 with
 //                                         $EXPECT results, all out of date, in under 200 ms, and
 //                                         no response byte contains $SENTINEL (the chunk text).
-// The key is read from $WB_KEY and sent as X-Brain-Key, as Caddy does.
+// The key is read from $WB_KEY and sent as X-Brain-Key, as the viewer's forwarder does.
 const [mode, a, b, c] = Deno.args;
 const key = Deno.env.get("WB_KEY") ?? "";
 const headers = { "x-brain-key": key, "content-type": "application/json" };

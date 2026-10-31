@@ -22,7 +22,7 @@ import { syncListing } from "../documents/listing.ts";
 import { chipText, transclusionText } from "../documents/grammar.ts";
 import { HOLDER_KIND } from "../documents/paths.ts";
 import { acknowledge, acknowledged } from "../documents/workspace.ts";
-import { vaultExists, vaultRead } from "../util/vault.ts";
+import { vaultExists, vaultRead } from "../util/vault.ts";
 import { isValidatorMessage } from "../util/public-error.ts";
 
 export type DocumentsDeps = refinery.RefineryDeps;
