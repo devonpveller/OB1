@@ -13,7 +13,7 @@
 # network and every image is labelled ai-stack.harness.owner=<Id> and removed at the end.
 #
 # What it does:
-#   1. stages the REAL initdb chain from OB1/docker/docker-compose.yml (310-init-podcasts.sql included)
+#   1. stages the REAL initdb chain from OB1/docker/docker-compose.yml (330-init-podcasts.sql included)
 #   2. one internal network
 #   3. builds openbrain-workbench:wt-<id> and openbrain-podcast:wt-<id> (+ its test stage: the unit
 #      tests, the notices check and the chain e2e run in the build); tags the gateway's pinned LiteLLM
@@ -194,7 +194,7 @@ try {
   New-Item -ItemType Directory -Force $stage | Out-Null
   $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
   foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
-  Check (@($chain | Where-Object { $_[1] -eq '310-init-podcasts.sql' }).Count -eq 1) "the chain mounts 310-init-podcasts.sql ($($chain.Count) migrations)"
+  Check (@($chain | Where-Object { $_[1] -eq '330-init-podcasts.sql' }).Count -eq 1) "the chain mounts 330-init-podcasts.sql ($($chain.Count) migrations)"
 
   # ------------------------------------------------------------------ 2. network
   Write-Host '[2] the internal network'

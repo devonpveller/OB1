@@ -19,7 +19,7 @@
 -- captured from Open Notebook are owned by WORKSPACE_DEFAULT_SUB). `origin` records where a row
 -- came from ('operator' configured it, 'on-capture' mapped it from an ON profile; origin_ref then
 -- names the ON record id).
--- Idempotent (IF NOT EXISTS); re-running it changes nothing. Fresh-volume slot 310; the live DB
+-- Idempotent (IF NOT EXISTS); re-running it changes nothing. Fresh-volume slot 330; the live DB
 -- gets it by hand (psql -f, before the new images). Revert: revert-podcasts.sql.
 -- ============================================================
 

@@ -178,7 +178,7 @@ services:
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
       - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity
       - ./init-idea-schedule.sql:/docker-entrypoint-initdb.d/300-init-idea-schedule.sql:ro # research-workbench rw-idea-schedule (fresh-volume only; live: psql -f; revert: revert-idea-schedule.sql)
-      - ./init-podcasts.sql:/docker-entrypoint-initdb.d/310-init-podcasts.sql:ro # research-workbench rw-p7a-tts: presenter model + render requests (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-podcasts.sql)
+      - ./init-podcasts.sql:/docker-entrypoint-initdb.d/330-init-podcasts.sql:ro # research-workbench rw-p7a-tts: presenter model + render requests (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-podcasts.sql)
     networks:
       - obnet
     restart: unless-stopped
