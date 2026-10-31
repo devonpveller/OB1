@@ -1498,6 +1498,16 @@ services:
       EXPORT_VISION_URL: ${EXPORT_VISION_URL:-http://llama-cpp:8080/v1}
       EXPORT_VISION_KEY: ${OB_EXPORT_VISION_LLM_KEY:-}
       EXPORT_VISION_MODEL: ${EXPORT_VISION_MODEL:-}
+      # rw-workbench-fetch-posture: every fetch of a user-supplied URL (the URL import, the source
+      # re-fetch, a held link's replace) is ONE call to the search gate's POST /v1/fetch with the
+      # workbench's own per-caller key (the line `workbench=<key>` in the gate's
+      # search/secrets/gate/caller_keys). SHIPPED INERT: a blank WORKBENCH_GATE_KEY answers the stated
+      # 503 "fetch gate not configured" and fetches nothing - there is no direct mode. A blank
+      # WORKBENCH_GATE_URL in .env still means the default below (compose's :-). search-gateway listens
+      # on ai-stack_default (search-gw-net below). The client waits up to 90 s for the gate's answer
+      # (its 20 s fetch + 60 s intake budget; WORKBENCH_GATE_TIMEOUT_MS overrides, not set here).
+      WORKBENCH_GATE_URL: ${WORKBENCH_GATE_URL:-http://search-gateway:8080}
+      WORKBENCH_GATE_KEY: ${WORKBENCH_GATE_KEY:-}
     volumes:
       # rw: the workbench is the asset writer and the notes/Changes-log writer.
       - openbrain-wiki-data:/wiki
@@ -1519,7 +1529,7 @@ services:
       - obnet
       - llm-net
       - app-net
-      - search-gw-net   # reach the `vpn` proxy (ai-stack_default) for the export's resolver (P6a)
+      - search-gw-net   # ai-stack_default: the `vpn` proxy for the export's resolver (P6a), search-gateway's /v1/fetch
     healthcheck:
       test: ["CMD", "deno", "eval", "const r=await fetch('http://localhost:8000/health');Deno.exit(r.ok?0:1)"]
       interval: 30s

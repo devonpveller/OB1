@@ -55,7 +55,8 @@ src/
 
 `obnet` (PostgREST) + `llm-net` (embeddings; the export gate's vision pass, P6b - the LiteLLM alias only) + `app-net` (portal-Caddy name
 resolution — required, §2.3) + `search-gw-net` (= `ai-stack_default`: the `vpn` proxy the
-export's resolver goes out through, research-workbench P6a).
+export's resolver goes out through, research-workbench P6a; and `search-gateway:8080`'s `POST /v1/fetch`,
+the only path by which the workbench fetches a user-supplied URL, rw-workbench-fetch-posture).
 
 ## Env
 
@@ -71,6 +72,18 @@ The export's verification gate (P6b): `EXPORT_VISION_URL` (default `http://llama
 alias - any other host is refused), `EXPORT_VISION_KEY` (the export's OWN LiteLLM virtual key) and
 `EXPORT_VISION_MODEL` (both blank = no vision pass), `EXPORT_VISION_TIMEOUT_MS` (120 s), `EXPORT_GATE_DPI`
 (72), `EXPORT_GATE_TIMEOUT_MS` (120 s), `EXPORT_GATE_PYTHON` (`/opt/export-gate/bin/python`).
+The fetchers of a user-supplied URL (rw-workbench-fetch-posture) - the URL import (`POST /workbench/import`
+with a `url`), the source re-fetch (`POST /workbench/sources/:id/refetch`) and a held link's replace
+(`POST /workbench/documents/user-sources/:id/replace`) - each make ONE call to the search gate's
+`POST <WORKBENCH_GATE_URL>/v1/fetch {url}` with `Authorization: Bearer <WORKBENCH_GATE_KEY>`
+(`src/fetch-gate/client.ts`). `WORKBENCH_GATE_URL` defaults to `http://search-gateway:8080`;
+`WORKBENCH_GATE_KEY` is the workbench's per-caller key, the same value as the line `workbench=<key>` in the
+gate's `search/secrets/gate/caller_keys`; `WORKBENCH_GATE_TIMEOUT_MS` (default 90000: the gate's 20 s fetch +
+60 s intake budget) is optional. **Until the gate is deployed and the key is set, all three answer 503**
+(`fetch gate not configured`, or `fetch gate unavailable` / `fetch gate refused the workbench's key`) and
+fetch nothing: there is no direct mode, so the first rebuild of this image after rw-workbench-fetch-posture
+turns them off until the gate deploy. A refusal from the gate is answered with its reason unchanged
+(422 refused / withheld, 502 error) and nothing is stored.
 
 ## Sign-in (Authentik forward-auth) (rw-identity, rw-identity2)
 
