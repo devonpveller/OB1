@@ -28,8 +28,10 @@ export function assertReadOnly(q: string): void {
   // INFO FOR DB / NS, and INFO FOR TABLE <one plain table name> (the schema the quiesce check fingerprints)
   if (/^INFO\s+FOR\s+(DB|NS)$/i.test(c) || /^INFO\s+FOR\s+TABLE\s+[a-z_][a-z0-9_]*$/i.test(c)) return;
   if (!/^SELECT\b/i.test(c)) throw new Error("read-only client: only SELECT or INFO FOR DB / NS / TABLE");
-  // round 2: no function call of any kind - a fn:: (user-defined) function can write, http:: can reach out
-  if (c.includes("::")) throw new Error("read-only client: no function calls ('::')");
+  // round 2: no function call - a fn:: (user-defined) function can write, http:: can reach out. The ONE
+  // exception (capture-fix): the built-in, side-effect-free crypto::sha256( that the fingerprint uses to
+  // hash rows on the server.
+  if (c.replaceAll("crypto::sha256(", "").includes("::")) throw new Error("read-only client: no function calls ('::')");
   const m = WRITE.exec(c);
   if (m) throw new Error(`read-only client: '${m[1]}' is not allowed`);
 }
@@ -55,7 +57,7 @@ export class SurrealReader {
       signal: AbortSignal.timeout(120_000),
     });
     const text = await res.text();
-    if (!res.ok) throw new Error(`surreal ${res.status}: ${text.slice(0, 200)}`);
+    if (!res.ok) throw new Error(`surreal ${res.status}: ${text.slice(0, 600)}`);
     const out = JSON.parse(text) as { status: string; result: unknown }[];
     if (out.length !== 1 || out[0].status !== "OK") throw new Error(`surreal query failed: ${text.slice(0, 300)}`);
     return out[0].result as T[];

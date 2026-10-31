@@ -318,6 +318,10 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   Check (($script:rc -eq 0) -and $o -match 'imported successfully') 'the ON export imported into the lab SurrealDB'
   $capEnv = @('-e', 'SURREAL_URL=http://lab-surreal:8000', '-e', 'SURREAL_USER=root', '-e', "SURREAL_PASSWORD=$surrealPw", '-e', "WORKSPACE_DEFAULT_SUB=$labSub",
     '-e', 'ON_DATA_DIR=/on-data', '-v', "${OnData}:/on-data:ro")
+  # capture-fix (2026-10-31): the live datastore holds a source row whose text has a NUL byte, which the
+  # lab copy lost on import; put that shape back (CBOR over /rpc) so the capture meets what it meets live
+  $o = Pod 300 $capEnv @('run', '-A', 'lab/lab-probe.ts', 'nul-row'); $pr = Probe $o; Save 'capture-fix-nul-row.log' $o
+  Check ($pr -and $pr.rpc -eq 200 -and $pr.select_star -eq 400 -and $pr.null_byte_refused) 'capture-fix: the copy holds the live shape - a source row with a NUL byte that SELECT * cannot return (400)'
   $o = Pod 3600 $capEnv @('run', '-A', 'on-capture.ts', 'capture'); Save 'c8-c9-capture.log' $o
   Check ($script:rc -eq 0) 'on-capture.ts capture exited 0'
   $man = Get-ChildItem (Join-Path $archive 'on-archive') -Filter 'CAPTURE-*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
