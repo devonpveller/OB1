@@ -72,10 +72,10 @@ function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 # -Red: a clause check that must FAIL on the base is recorded as RED-confirmed when it fails
-$script:red = @{}
+$script:redHits = @{}
 function Clause([string]$t, [bool]$ok, [string]$m) {
   if ($Red) {
-    if (-not $ok) { $script:red[$t] = $true; Write-Host "  RED   $t $m (fails on the base, as it must)" }
+    if (-not $ok) { $script:redHits[$t] = $true; Write-Host "  RED   $t $m (fails on the base, as it must)" }
     else { Write-Host "  base  $t $m (holds on the base)" }
   } else { Check $ok "$t $m" }
 }
@@ -482,8 +482,8 @@ done
 }
 if ($Red) {
   $want = @('T1', 'T2', 'T3', 'T4', 'T5', 'T6')
-  $missing = @($want | Where-Object { -not $script:red[$_] })
-  Write-Host "== RED: clauses failing on the base: $(@($want | Where-Object { $script:red[$_] }) -join ', ')$(if ($missing.Count) { "; NOT failing: $($missing -join ', ')" })"
+  $missing = @($want | Where-Object { -not $script:redHits[$_] })
+  Write-Host "== RED: clauses failing on the base: $(@($want | Where-Object { $script:redHits[$_] }) -join ', ')$(if ($missing.Count) { "; NOT failing: $($missing -join ', ')" })"
   exit $(if ($missing.Count -or $script:fail) { 1 } else { 0 })
 }
 Write-Host "== $(if ($script:fail) { "FAILED ($($script:fail))" } else { 'ALL PASSED' })"
