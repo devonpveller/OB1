@@ -26,7 +26,7 @@
 #      `workspace` stage runs the workspace's type check, unit tests (vitest) and D9 notices check)
 #      and the e2e runner image; with -Red the workbench and viewer come from -BaseSha instead
 #   4. the lab: database (chain + fixtures.sql, ob_app_memory non-superuser), stub embedder, stub
-#      research service (origin by key), stub egress proxy, PostgREST + the OB1 rest Caddy, the
+#      research service (origin by key), the lab target + stub search gate (a held link's replace), PostgREST + the OB1 rest Caddy, the
 #      viewer (WIKI_BUILDER=0), the workbench (vault = a temp dir), the portal's real (wiki_app)
 #      Caddy snippet as the front door, a headless Chromium
 #   5. the documents API integration test (src/documents/documents_integration_test.ts) as
@@ -75,6 +75,7 @@ $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $wsKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+$gateKey = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
 $shots = Join-Path $env:TEMP "$P-shots"; New-Item -ItemType Directory -Force $shots | Out-Null
@@ -269,7 +270,11 @@ try {
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-embed.ts')
   $null = Run-Detached "$P-research" @('--network-alias', 'stub-research', '-v', $ctMount, '-e', "DB_HOST=$db", '-e', "DB_PASSWORD=$pw",
       '-e', "STUB_CALLERS=workspace=workspace:$wsKey", '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '--allow-env', '--allow-read', '--config', '/app/deno.json', '/ct/stub-research.ts')
-  $null = Run-Detached "$P-proxy" @('--network-alias', 'stub-proxy', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-proxy.ts')
+  # rw-workbench-fetch-posture: a held link's replace goes through the search gate's /v1/fetch (a stub
+  # here, stub-gate.ts) to the lab target site (stub-target.ts) - never the egress proxy, never direct
+  $null = Run-Detached "$P-target" @('--network-alias', 'stub-target', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-target.ts')
+  $null = Run-Detached "$P-gate" @('--network-alias', 'stub-gate', '-v', $ctMount, '-e', "STUB_GATE_KEY=$gateKey", '-e', 'STUB_GATE_ALLOW=stub-target:8080',
+      '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '--allow-env', '/ct/stub-gate.ts')
   $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
       '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
   $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
@@ -281,7 +286,7 @@ try {
       '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
-      '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'FETCH_PROXY_URL=http://stub-proxy:3128', '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
+      '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'WORKBENCH_GATE_URL=http://stub-gate:8080', '-e', "WORKBENCH_GATE_KEY=$gateKey", '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
       '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
       '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   $walkEnv = if ($WalkOff) { @('-e', 'WORKSPACE_RESPONSE_WALK=off') } else { @() }
@@ -323,7 +328,7 @@ try {
   # ---------------------------------------------------------------- 5. the tests
   Write-Host '[5a] the documents API integration test (as ob_app_memory? no: the fault trigger needs the superuser; the workbench itself runs as ob_app_memory)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
-    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'DOCS_TEST_PROXY_HOST=stub-proxy',
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'DOCS_TEST_PROXY_HOST=stub-target:8080',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/documents/documents_integration_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
@@ -380,7 +385,7 @@ try {
   $rows = (Dk exec $db psql -U postgres -d openbrain -tAc "select count(*) from wiki_pages where slug like 'documents/%'").Trim()
   if (-not $Red) { Check ($rows -eq '0') "no wiki_pages row for any user document ($rows)" }
   Save 'viewer.log' ((Dk logs --tail 60 "$P-viewer") -replace [regex]::Escape($key), '<key>')
-  Save 'workbench.log' ((Dk logs --tail 120 "$P-wb") -replace [regex]::Escape($key), '<key>')
+  Save 'workbench.log' (((Dk logs --tail 120 "$P-wb") -replace [regex]::Escape($key), '<key>') -replace [regex]::Escape($gateKey), '<gate-key>')
 } catch {
   Fail "the run stopped: $_"
 } finally {

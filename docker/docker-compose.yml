@@ -1425,6 +1425,14 @@ services:
       # Every resolver request goes out through the search plane's Mullvad proxy, FAIL-CLOSED:
       # blank, or a client that cannot be built, refuses the request - there is no direct mode.
       FETCH_PROXY_URL: ${WORKBENCH_FETCH_PROXY_URL:-http://vpn:8888}
+      # rw-workbench-fetch-posture: every fetch of a user-supplied URL (the URL import, the source
+      # re-fetch, a held link's replace) is ONE call to the search gate's POST /v1/fetch with the
+      # workbench's own per-caller key (the line `openbrain-workbench=<key>` in the gate's
+      # search/secrets/gate/caller_keys). SHIPPED INERT: a blank key (or URL) answers the stated 503
+      # "fetch gate not configured" and fetches nothing - there is no direct mode. search-gateway
+      # listens on ai-stack_default (search-gw-net below).
+      WORKBENCH_GATE_URL: ${WORKBENCH_GATE_URL:-http://search-gateway:8080}
+      WORKBENCH_GATE_KEY: ${WORKBENCH_GATE_KEY:-}
     volumes:
       # rw: the workbench is the asset writer and the notes/Changes-log writer.
       - openbrain-wiki-data:/wiki
@@ -1444,7 +1452,7 @@ services:
       - obnet
       - llm-net
       - app-net
-      - search-gw-net   # reach the `vpn` proxy (ai-stack_default) for the export's resolver (P6a)
+      - search-gw-net   # ai-stack_default: the `vpn` proxy for the export's resolver (P6a), search-gateway's /v1/fetch
     healthcheck:
       test: ["CMD", "deno", "eval", "const r=await fetch('http://localhost:8000/health');Deno.exit(r.ok?0:1)"]
       interval: 30s

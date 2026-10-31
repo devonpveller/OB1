@@ -4,6 +4,10 @@
 // (src/contracts/repo/lifecycle.ts; rw-p0b-purge-door).
 import { query, withTransaction } from "../db/pool.ts";
 import type { Source, SourceRevision } from "../types.ts";
+import { type GateFetch, gateClient } from "../fetch-gate/client.ts";
+
+// the search gate's /v1/fetch (WORKBENCH_GATE_URL, WORKBENCH_GATE_KEY): the re-fetch's only path to a URL
+const fetchViaGate = gateClient();
 
 const COLS =
   "id, url, title, content, content_type, notebook, retracted_at, retracted_by, " +
@@ -96,6 +100,7 @@ export async function updateSource(
   content: string | null,
   title: string | null,
   editedBy = "operator",
+  metadataPatch: Record<string, unknown> | null = null,
 ): Promise<{ source: Source } | null> {
   return await withTransaction(async (c) => {
     const exists = await c.queryObject<{ id: string }>(
@@ -118,10 +123,11 @@ export async function updateSource(
     const upd = await c.queryObject<Source>(
       `UPDATE public.sources
           SET content = COALESCE($2, content), title = COALESCE($3, title),
-              last_edited_by = $4, last_edited_at = now()
+              last_edited_by = $4, last_edited_at = now(),
+              metadata = CASE WHEN $5::jsonb IS NULL THEN metadata ELSE COALESCE(metadata, '{}'::jsonb) || $5::jsonb END
         WHERE id = $1
         RETURNING ${COLS}`,
-      [id, content, title, editedBy],
+      [id, content, title, editedBy, metadataPatch === null ? null : JSON.stringify(metadataPatch)],
     );
     return { source: upd.rows[0] };
   });
@@ -308,16 +314,15 @@ export async function unlinkFromNotebook(threadId: string, sourceId: string): Pr
   return rows[0];
 }
 
-// URL re-fetch → NEW revision (never head overwrite, never a duplicate). A
-// real deployment would route the fetched HTML through openbrain-extract; this
-// stores the fetched text and appends it as a revision via updateSource.
-export async function refetch(id: string): Promise<{ source: Source } | null> {
+// URL re-fetch → NEW revision (never head overwrite, never a duplicate). The page comes from the
+// search gate (rw-workbench-fetch-posture): ONE /v1/fetch call; its `ok` answer's clean text becomes
+// the working head (the new revision commits at the next compile) with the media type and the
+// provenance merged into the source's metadata. Not configured / unreachable (GateUnavailable) and
+// refused / withheld / error (GateRefusal, the gate's reason unchanged) are thrown BEFORE any write.
+export async function refetch(id: string, fetchPage: GateFetch = fetchViaGate): Promise<{ source: Source } | null> {
   const src = await getSource(id);
   if (!src) return null;
   if (!src.url) throw new Error("source has no URL to re-fetch");
-  const r = await fetch(src.url, { redirect: "follow" });
-  if (!r.ok) throw new Error(`re-fetch HTTP ${r.status}`);
-  const text = await r.text();
-  // Re-fetch updates the working head; the new revision commits at the next compile.
-  return await updateSource(id, text, null, "refetch");
+  const page = await fetchPage(src.url);
+  return await updateSource(id, page.text, null, "refetch", { media_type: page.mediaType, fetch: page.provenance });
 }

@@ -7,6 +7,7 @@ import type { Context, Next } from "hono";
 import * as repo from "../repositories/sources.ts";
 import { config } from "../config.ts";
 import { logChange } from "../util/changeslog.ts";
+import { gateErrorBody, isGateError } from "../fetch-gate/client.ts";
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
 import { RegistryReader } from "../contracts/registry.ts";
@@ -153,13 +154,16 @@ sources.post("/:id/replace-from-upload", async (c) => {
   }
 });
 
-// POST /workbench/sources/:id/refetch — URL re-fetch → new revision.
+// POST /workbench/sources/:id/refetch — URL re-fetch → new revision, through the search gate only.
+// A gate failure answers its own status (503 not configured / unavailable; 422 refused / withheld,
+// 502 error, with the gate's reason unchanged) and nothing is written.
 sources.post("/:id/refetch", async (c) => {
   try {
     const res = await repo.refetch(c.req.param("id"));
     if (!res) return c.json({ error: "not found" }, 404);
     return c.json(res);
   } catch (e) {
+    if (isGateError(e)) return c.json(gateErrorBody(e), e.httpStatus as 422 | 502 | 503);
     return c.json({ error: String((e as Error).message) }, 400);
   }
 });
