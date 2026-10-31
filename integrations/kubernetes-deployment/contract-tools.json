@@ -406,14 +406,22 @@
     "operationId": "podcasts",
     "method": "GET",
     "path": "/workbench/contract/podcasts",
-    "description": "podcasts() - backing lands in P7a/P7b [retrieval contract GET /workbench/contract/podcasts]",
+    "description": "podcasts() - the caller's renders and renders shared with everyone (never an archived Open Notebook episode) [retrieval contract GET /workbench/contract/podcasts]",
     "input": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "limit": {
+          "type": "string",
+          "pattern": "^[0-9]{1,4}$",
+          "description": "1-200, default 50"
+        }
+      },
       "required": []
     },
     "path_params": [],
-    "query_params": [],
+    "query_params": [
+      "limit"
+    ],
     "json_params": [],
     "body_params": []
   },
@@ -422,7 +430,7 @@
     "operationId": "presenters",
     "method": "GET",
     "path": "/workbench/contract/presenters",
-    "description": "presenters() - backing lands in P7a [retrieval contract GET /workbench/contract/presenters]",
+    "description": "presenters() - the caller's presenters with their voice links [retrieval contract GET /workbench/contract/presenters]",
     "input": {
       "type": "object",
       "properties": {},
@@ -699,7 +707,7 @@
     "operationId": "teams",
     "method": "GET",
     "path": "/workbench/contract/teams",
-    "description": "teams() - backing lands in P7a [retrieval contract GET /workbench/contract/teams]",
+    "description": "teams() - the caller's teams: the cast in speaking order and the formats [retrieval contract GET /workbench/contract/teams]",
     "input": {
       "type": "object",
       "properties": {},

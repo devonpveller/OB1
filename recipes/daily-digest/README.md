@@ -228,3 +228,29 @@ copy is dated today - see first boot), start it again. State for today:
 **Podcast restart.** The run lock is in memory plus a run record with a heartbeat
 (`<date>.podcast.json`); after a restart mid-run the run is closed as interrupted and resumed ONCE.
 Runs are killed after `PODCAST_RUN_MAX_MS` (16 h).
+
+## Podcast audio (research-workbench P7a)
+
+The episode's voices no longer come from Open Notebook. `link-enrich.ts --audio` turns the script's
+`HOST A:` / `HOST B:` lines into turns of the team `PODCAST_TEAM` (a team of `PODCAST_OWNER_SUB` in the
+presenter model, `OB1/docker/init-podcasts.sql`; the cast's names, backstories and personalities go into
+the script prompt), and `src/podcast/`:
+
+- `tts-client.ts` - one `POST <CHAT_API_BASE>/audio/speech` per turn through LiteLLM (route = the
+  presenter's voice link, e.g. `local-tts`; key `PODCAST_TTS_KEY`, blank = nothing is voiced). LiteLLM
+  forwards to Kokoro-FastAPI, its own container on the inference plane; nothing here imports a speech engine.
+- `segment-cache.ts` - SHA-256 of route + voice + speed + text per turn, on disk
+  (`PODCAST_SEGMENT_CACHE_DIR`), with in-flight coalescing: re-voicing one presenter re-synthesises only
+  that presenter's turns.
+- `renderer.ts` - the turns under a semaphore (`PODCAST_TTS_CONCURRENCY`, default 2), joined in order.
+- `ffmpeg.ts` - ffmpeg as a SEPARATE process (the image's Alpine package): the native mp3, and the fixed
+  transcode menu (mp3, opus, m4a, flac, wav).
+- `archive.ts` - every render is archived on generation where the configuration store's
+  `podcast.archive_destination` says, read from the workbench on every render (default: the mounted
+  podcast folder under the host's backups folder, which the weekly NAS sync mirrors).
+- `render-service.ts` - openbrain-podcast's internal `POST /render {request_id}` (a workbench render
+  request) and `POST /transcode {episode_id | archive_path, format}`.
+
+`on-capture.ts` captured Open Notebook's profiles and episodes before its removal (read-only against ON;
+see the file header). `lab/run-podcast-lab.ps1` is the disposable lab run. Notices:
+`THIRD-PARTY-NOTICES.md`.

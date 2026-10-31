@@ -365,6 +365,93 @@ export type Notifications = {
   notifications: Array<Notification>;
 };
 
+export type PodcastEpisode = {
+  id: string;
+  title: string;
+  team_id: string | null;
+  audio_format: string;
+  seconds: number | null;
+  shared: boolean;
+  mine: boolean;
+  created_at: string;
+};
+
+export type PodcastPresenter = {
+  id: string;
+  name: string;
+  personality: string;
+  backstory: string;
+  language: string;
+  origin: string;
+  voice: PodcastVoiceLink;
+};
+
+export type PodcastPresenters = {
+  presenters: Array<PodcastPresenter>;
+};
+
+export type PodcastRenderRequest = {
+  id: string;
+  team_id: string;
+  title: string;
+  state: string;
+  episode_id: string | null;
+  error: string | null;
+  turns: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PodcastRenderRequestBody = {
+  team_id: string;
+  title: string;
+  transcript: {
+    title: string;
+    turns: Array<{
+      presenterId: string;
+      text: string;
+    }>;
+  };
+};
+
+export type PodcastRenderRequests = {
+  requests: Array<PodcastRenderRequest>;
+};
+
+export type PodcastTeam = {
+  id: string;
+  name: string;
+  description: string;
+  origin: string;
+  presenters: Array<{
+    position: number;
+    presenter_id: string;
+    name: string;
+  }>;
+  formats: Array<{
+    id: string;
+    name: string;
+    segments: number;
+    language: string;
+    script_route: string;
+  }>;
+};
+
+export type PodcastTeams = {
+  teams: Array<PodcastTeam>;
+};
+
+export type PodcastVoiceLink = {
+  id: string;
+  route: string;
+  voice: string;
+  speed: number;
+};
+
+export type Podcasts = {
+  podcasts: Array<PodcastEpisode>;
+};
+
 export type Quality = {
   source_id: string;
   state: string; /** registry: record_states */

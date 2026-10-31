@@ -25,5 +25,8 @@ export function contractDeps(): ContractDeps {
     mountsRoot: Deno.env.get("CONTRACT_MOUNTS_ROOT") || "/mounts",
     streamPollMs: parseInt(Deno.env.get("CONTRACT_STREAM_POLL_MS") || "1000", 10),
     log: (m) => console.log(`[contract] ${m}`),
+    // P7a: blank as shipped = a render request stays queued (nothing is rendered)
+    podcastRenderUrl: (Deno.env.get("PODCAST_RENDER_URL") ?? "").trim(),
+    podcastRenderKey: (Deno.env.get("WORKBENCH_KEY") || Deno.env.get("MCP_ACCESS_KEY") || "").trim(),
   };
 }

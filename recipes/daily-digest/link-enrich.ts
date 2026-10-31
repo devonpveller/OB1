@@ -23,8 +23,9 @@
  * research timeout → `email-only`, logged, never fatal.
  *
  * Output: a link-enrichment report (JSON+MD) AND the day's episode SCRIPT
- * `[###]-daily-[primary-poi-topic].md` (S4a) — both in /reports. Audio (S4b via
- * Open Notebook) is a separate step gated on the one-time voice-profile setup.
+ * `[###]-daily-[primary-poi-topic].md` (S4a) — both in /reports. Audio (S4b, --audio) is
+ * voiced by the P7a renderer: the script's HOST lines -> the configured team's presenters ->
+ * Kokoro through LiteLLM -> the podcast archive (src/podcast/episode-audio.ts).
  *
  * Egress: external article fetches go through Tor (socks5h://tor:9050,
  * privacy-by-default + fail-closed). The research service does its own Tor-routed
@@ -68,7 +69,12 @@ import {
   Segment,
   SegmentItem,
 } from "./src/podcast/script-renderer.ts";
-import { OnClient, OnEpisode } from "./src/podcast/on-client.ts";
+import { castBlock, turnsFromHostScript, type Team } from "./src/podcast/presenters.ts";
+import { PresenterStore } from "./src/podcast/presenter-store.ts";
+import { SegmentCache } from "./src/podcast/segment-cache.ts";
+import { gatewaySpeech } from "./src/podcast/tts-client.ts";
+import { ArchiveWriter, storeDestination } from "./src/podcast/archive.ts";
+import { voiceAndArchive, type Voiced } from "./src/podcast/episode-audio.ts";
 import { EmailEnrichment, EnrichedSegment, parseSynthesisForEmail, ResolvedFollowUp } from "./src/podcast/enrichment.ts";
 import {
   GapCandidate,
@@ -167,22 +173,26 @@ const gapTriageChat = makeScriptChat({
   label: "gap-triage",
 });
 
-// S4b — audio via Open Notebook (D5: content-only renderer; D12: accept ON's
-// style). Opt-in with --audio; works in dry-run too (audio is an ON artifact,
-// not a brain write). ON reachable via open-brain_obnet.
+// S4b — audio (research-workbench P7a). Opt-in with --audio. The script's HOST lines are voiced
+// by the team PODCAST_TEAM (a team id or name of PODCAST_OWNER_SUB in the presenter model,
+// init-podcasts.sql) through LiteLLM's /v1/audio/speech (route = each presenter's voice link,
+// key = PODCAST_TTS_KEY, this service's own virtual key) and archived on generation where the
+// configuration store's podcast.archive_destination says (read on every render from the
+// workbench). Nothing here talks to Open Notebook.
 const AUDIO = args.has("--audio");
-const ON_BASE = env("ON_BASE", "http://open_notebook:5055"); // internal — used to GENERATE audio
-// User-facing base for the EMAIL links — external + Authelia-gated (NOT tailnet,
-// NOT the internal docker host). On notebook.<domain>: everything → Next.js UI,
-// /api/* → FastAPI. So /podcasts opens the episode in ON; /api/podcasts/episodes/
-// {id}/audio downloads it. Both behind Authelia (user signs in once).
-// No default: a shipped domain would be someone else's. Blank = no public links, internal audio URL only (buildEpisodeUrls).
-const ON_PUBLIC_BASE = env("ON_PUBLIC_BASE", "").replace(/\/$/, "");
-const onClient = new OnClient({ baseUrl: ON_BASE });
-// ON TTS terminal-wait deadline. Generous (default 2h) so a slow-but-working
-// render is never cut off as an "early timeout" — the email waits for ON's
-// genuine terminal state. A real 'failed' returns immediately regardless.
-const ON_JOB_WAIT_MS = num("ON_JOB_WAIT_MS", 7_200_000);
+const PODCAST_OWNER_SUB = env("PODCAST_OWNER_SUB", "").trim() || "operator"; // = WORKSPACE_DEFAULT_SUB (the workbench's fallback when blank)
+const PODCAST_TEAM = env("PODCAST_TEAM", "").trim();
+const presenterStore = new PresenterStore(env("BRAIN_REST_URL", "http://openbrain-rest"));
+const segmentCache = new SegmentCache(
+  env("PODCAST_SEGMENT_CACHE_DIR", `${REPORTS_DIR}/podcast-segment-cache`),
+  gatewaySpeech({ apiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"), apiKey: env("PODCAST_TTS_KEY") }),
+);
+const archiveWriter = new ArchiveWriter(storeDestination({
+  workbenchUrl: env("WORKBENCH_URL", "http://openbrain-workbench:8000"),
+  key: env("MCP_ACCESS_KEY"),
+}));
+const TTS_CONCURRENCY = num("PODCAST_TTS_CONCURRENCY", 2);
+const FFMPEG_BIN = env("FFMPEG_BIN", "ffmpeg");
 // Raw-Gmail reader (readonly token) — re-fetch original HTML so every link
 // survives (the stored body lost hrefs), then POI-select the interesting ones.
 const gmailReader = new GmailReader(new GoogleOAuth({
@@ -207,12 +217,6 @@ const bodyClassifyChat = makeScriptChat({
   apiKey: CHAT_API_KEY,
   label: "body-classify",
 });
-const ON_EPISODE_PROFILE = env("ON_EPISODE_PROFILE", "tech_discussion");
-const ON_SPEAKER_PROFILE = env("ON_SPEAKER_PROFILE", "tech_experts");
-const ON_BRIEFING = env(
-  "ON_BRIEFING",
-  "Base the discussion STRICTLY on the provided grounded material. Do NOT introduce any fact, number, company, name, or claim that is not present in it. Keep anything marked 'preliminary' explicitly tentative, and present any open question as unresolved. Cover one segment per labeled topic.",
-);
 
 // ── model gate (mr-routine-outage) ───────────────────────────────────────────
 // Before each stage that does model work, check the model is reachable through
@@ -531,10 +535,14 @@ async function main() {
 
   await writeReport();
   if (segments.size) await gateModel("script");
-  const ep = await maybeRenderEpisode();
-  let onEp: OnEpisode | null = null;
-  if (ep && AUDIO) onEp = await generateAudio(ep);
-  const urls = buildEpisodeUrls(onEp);
+  const team = await loadTeam();
+  const ep = await maybeRenderEpisode(team);
+  let voiced: Voiced | null = null;
+  if (ep && AUDIO) voiced = await generateAudio(ep, team);
+  // The new system's library (P7b) is not built yet: no listener-facing link exists to put in the
+  // email. The episode is in the archive (voiced.dir); the email says so without a link.
+  const urls = { viewUrl: null, downloadUrl: null };
+  if (voiced) console.log(`[link-enrich] 🎧 episode archived at ${voiced.dir}`);
   if (COMMIT && ep && threadIds.size) await closeLoop(ep, urls.downloadUrl);
   if (ep) await writeEnrichment(ep, urls);
   await writeResult(ep ? "produced" : "nothing-to-do", ep ? undefined : "no segments");
@@ -924,7 +932,7 @@ async function nextEpisodeNumber(): Promise<number> {
 }
 
 /** S4a — render the day's episode SCRIPT from the collected grounded segments. */
-async function maybeRenderEpisode(): Promise<Episode | null> {
+async function maybeRenderEpisode(team: Team | null): Promise<Episode | null> {
   if (segments.size === 0) { console.log("[link-enrich] no segments → no episode."); return null; }
   const epNum = await nextEpisodeNumber();
   const input: EpisodeInput = {
@@ -933,7 +941,7 @@ async function maybeRenderEpisode(): Promise<Episode | null> {
     segments: [...segments.entries()].map(([label, items]): Segment => ({ label, items })),
   };
   console.log(`[link-enrich] rendering episode #${pad3(epNum)} from ${segments.size} segment(s)…`);
-  const ep = await renderEpisode(input, scriptChat);
+  const ep = await renderEpisode(input, scriptChat, team ? castBlock(team) : "");
   const stem = `${ep.name}${COMMIT ? "" : "-dryrun"}`;
   const md = `# ${ep.title}\n\n> Episode \`${ep.name}\` · ${input.date} · ${COMMIT ? "COMMIT" : "DRY-RUN"}\n\n${ep.script}\n`;
   const path = `${REPORTS_DIR}/${stem}.md`;
@@ -948,61 +956,50 @@ async function maybeRenderEpisode(): Promise<Episode | null> {
   return ep;
 }
 
-/** S4b — hand the grounded script to Open Notebook for transcript + audio.
- *  Returns the absolute audio URL, or null. */
-// ON transcript generation re-samples an LLM per segment, so a failure is often
-// a one-off rather than a property of the material - on 2026-08-29 a single
-// segment overran its token cap, ON returned "failed", and the day shipped with
-// no podcast even though an immediate resubmit succeeded first try. Try again
-// before accepting silence.
-const ON_AUDIO_ATTEMPTS = num("ON_AUDIO_ATTEMPTS", 2);
-
-// The loop body is unchanged; the retry POLICY moved to retryUntil() in
-// script-renderer.ts so it can be unit-tested - generateAudio is not exported and
-// this module runs work at import, so the "retried once" criterion had no way to
-// be proven (found in test 2026-09-04). Semantics are identical: a COMPLETED job
-// returns its episode (even if the lookup yields null), and only a non-completed
-// status or a throw re-submits.
-async function generateAudio(ep: Episode): Promise<OnEpisode | null> {
-  return await retryUntil<OnEpisode>(
-    ON_AUDIO_ATTEMPTS,
-    async (attempt, last) => {
-      const suffix = attempt > 1 ? ` (attempt ${attempt}/${ON_AUDIO_ATTEMPTS})` : "";
-      console.log(`[link-enrich] 🔊 generating audio via ON (profile=${ON_EPISODE_PROFILE}/${ON_SPEAKER_PROFILE}, episode ${ep.name})${suffix}… this takes minutes.`);
-      const jobId = await onClient.generate({
-        episodeProfile: ON_EPISODE_PROFILE,
-        speakerProfile: ON_SPEAKER_PROFILE,
-        episodeName: ep.name,
-        content: ep.script,
-        briefingSuffix: ON_BRIEFING,
-      });
-      const status = await onClient.waitForJob(jobId, { timeoutMs: ON_JOB_WAIT_MS });
-      if (status === "completed") {
-        const episode = await onClient.episodeByName(ep.name);
-        console.log(`[link-enrich] 🎧 episode audio ready (id ${episode?.id ?? "?"}).`);
-        return { done: true, value: episode };
-      }
-      console.log(`[link-enrich] ON job ended '${status}'${last ? " — no audio." : " — resubmitting."}`);
-      return { done: false };
-    },
-    (err, _attempt, last) => {
-      console.warn(`[link-enrich] audio generation failed${last ? " (best-effort)" : " - resubmitting"}: ${err}`);
-    },
-  );
+/** The team that voices the daily episode (PODCAST_TEAM of PODCAST_OWNER_SUB), or null. */
+async function loadTeam(): Promise<Team | null> {
+  if (!PODCAST_TEAM) {
+    if (AUDIO) console.warn("[link-enrich] PODCAST_TEAM is not set: the script is written for unnamed hosts and no audio is voiced.");
+    return null;
+  }
+  try {
+    const t = await presenterStore.team(PODCAST_OWNER_SUB, PODCAST_TEAM);
+    if (!t) console.warn(`[link-enrich] no team "${PODCAST_TEAM}" in the presenter model: no audio is voiced.`);
+    return t;
+  } catch (err) {
+    console.warn(`[link-enrich] the presenter model is unreachable (${err}): no audio is voiced.`);
+    return null;
+  }
 }
 
-/** User-facing email links — external + Authelia-gated (notebook.<domain>):
- *  view opens the episode in ON's UI, download streams the mp3. */
-function buildEpisodeUrls(onEp: OnEpisode | null): { viewUrl: string | null; downloadUrl: string | null } {
-  if (!onEp) return { viewUrl: null, downloadUrl: null };
-  if (ON_PUBLIC_BASE) {
-    return {
-      viewUrl: `${ON_PUBLIC_BASE}/podcasts`,
-      downloadUrl: `${ON_PUBLIC_BASE}/api/podcasts/episodes/${encodeURIComponent(onEp.id)}/audio`,
-    };
+/** S4b (P7a) — voice the script's HOST lines with the team and archive the episode. A failed
+ *  voice step is retried once (retryUntil); the cache keeps every turn already voiced. */
+const AUDIO_ATTEMPTS = num("PODCAST_AUDIO_ATTEMPTS", 2);
+
+async function generateAudio(ep: Episode, team: Team | null): Promise<Voiced | null> {
+  if (!team) return null;
+  let transcript;
+  try {
+    transcript = turnsFromHostScript(ep.title, ep.script, team);
+  } catch (err) {
+    console.warn(`[link-enrich] the script cannot be voiced by team "${team.name}": ${err}`);
+    return null;
   }
-  // No public base → internal audio only (dev/testing); no UI link.
-  return { viewUrl: null, downloadUrl: onEp.audioUrl ? `${ON_BASE}${onEp.audioUrl}` : null };
+  return await retryUntil<Voiced>(
+    AUDIO_ATTEMPTS,
+    async (attempt) => {
+      const suffix = attempt > 1 ? ` (attempt ${attempt}/${AUDIO_ATTEMPTS})` : "";
+      console.log(`[link-enrich] 🔊 voicing ${transcript.turns.length} turn(s) with team "${team.name}" (episode ${ep.name})${suffix}…`);
+      const v = await voiceAndArchive(transcript, team, {
+        ownerSub: PODCAST_OWNER_SUB, requesterSub: PODCAST_OWNER_SUB, shared: false, slug: ep.name,
+        meta: { source: "daily-digest", episode: ep.name, episode_number: ep.number, commit: COMMIT },
+      }, { cache: segmentCache, concurrency: TTS_CONCURRENCY, ffmpeg: { bin: FFMPEG_BIN }, archive: archiveWriter, store: presenterStore });
+      return { done: true, value: v };
+    },
+    (err, _attempt, last) => {
+      console.warn(`[link-enrich] audio failed${last ? " (best-effort)" : " - retrying"}: ${err}`);
+    },
+  );
 }
 
 /** Loop-close (commit only) — ingest the episode as a `podcast_transcript`
