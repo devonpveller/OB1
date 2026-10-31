@@ -249,56 +249,96 @@ t("T6 two users: shared knowledge reads the same; per-user coverage of another u
   assert(!spoof.text.includes(M.promptB));
 });
 
-// rw-p3b-trust2 (review F1): the verdict join reads claims by their PRIMARY KEY, and reportCredibility reads no
-// claim at all. EXPLAIN on the lab database with sequential scans disabled (so a usable index is always chosen):
-// no "Seq Scan on claims" node may remain. The round-2 query text (the cast join c.id::text = f.cid) is EXPLAINed
-// beside it as the before, and both plans are printed for the evidence.
-
-async function plan(text: string, args: unknown[]): Promise<string> {
-  const c = await pool!.connect();
+// rw-p3b-trust2 round 4 (tester t-p3b-trust3 D1): T7 measures the code UNDER TEST at realistic width with the
+// DEFAULT planner settings. It seeds the tester's recipe (16k claims of ~200 chars, 2k jobs with ~11 KB of result,
+// 8 filed claims each), asks the workbench for 25 / 50 / 200 claims of one synthesis, reads the verdict query the
+// workbench actually ran from pg_stat_statements (the lab database preloads it; run-trust-tests.ps1), and EXPLAIN
+// ANALYZEs THAT text against round 2's query (copied verbatim below) on the same ids. Bar per size: no full claims
+// scan in any run of the code under test, and its median no slower than round 2's (25% / 25 ms slack for lab noise).
+// Against a base whose workbench runs round 2's or round 3's query the captured plan scans claims, so the RED fails.
+const ROUND2_VERDICTS_SQL = `SELECT f.cid AS claim_id, lc.v ->> 'verdict' AS verdict
+       FROM public.research_jobs j
+       CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'claims' -> 'filed') = 'array'
+                                                         THEN j.result -> 'curator' -> 'claims' -> 'filed' ELSE '[]'::jsonb END)
+                          WITH ORDINALITY f(cid, ord)
+       CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'line_credibility') = 'array'
+                                                    THEN j.result -> 'line_credibility' ELSE '[]'::jsonb END)
+                          WITH ORDINALITY lc(v, lord)
+       JOIN public.claims c ON c.id::text = f.cid
+      WHERE j.result -> 'curator' -> 'claims' -> 'filed' ?| $1::text[]
+        AND f.cid = ANY($1::text[])
+        AND jsonb_typeof(lc.v -> 'verdict') = 'string' AND jsonb_typeof(lc.v -> 'text') = 'string'
+        AND lower(btrim(c.text)) = lower(btrim(lc.v ->> 'text'))
+      ORDER BY j.finished_at ASC NULLS FIRST, j.created_at ASC, j.id ASC,
+               ((lc.v ->> 'claim') IS NOT DISTINCT FROM (f.ord - 1)::text) ASC, lc.lord ASC`;
+const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+t("T7 F1: the verdict query the workbench runs has a stable, fast plan at realistic width (default planner, 25/50/200 ids)", async () => {
+  const S = u();
+  const W = 200;
+  const txt = (n: string) => `left('f1t7 claim ' || ${n} || ' ' || repeat(md5((${n})::text), 20), ${W})`;
+  await sql(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
+  await sql(`INSERT INTO public.sources (id, title, content, content_type, metadata) VALUES ($1, 'T7 report', 's', 'research_synthesis', '{}')`, [S]);
   try {
-    await c.queryObject("BEGIN");
-    await c.queryObject("SET LOCAL enable_seqscan = off");
-    const rows = (await c.queryObject<{ "QUERY PLAN": string }>(`EXPLAIN ${text}`, args)).rows;
-    await c.queryObject("ROLLBACK");
-    return rows.map((r) => r["QUERY PLAN"]).join(String.fromCharCode(10));
+    await sql(`INSERT INTO public.claims (id, text, epistemic_tag, metadata, synthesis_id, content_hash)
+      SELECT md5('t7' || g)::uuid, ${txt("g")}, 'sourced', '{"claim_kind":"general_theory","f1t7":1}'::jsonb,
+             CASE WHEN g <= 200 THEN $1::uuid END, md5('t7' || g) FROM generate_series(1, 16000) g`, [S]);
+    await sql(`INSERT INTO public.research_jobs (id, status, origin, query, result, caller, finished_at)
+      SELECT gen_random_uuid(), 'done', 'workspace', 'f1t7 job ' || j,
+        jsonb_build_object('pad', (SELECT string_agg(md5(random()::text || j || g), '') FROM generate_series(1, 350) g),
+          'curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', gen_random_uuid()::text),
+            'claims', jsonb_build_object('filed', (SELECT jsonb_agg(md5('t7' || ((j - 1) * 8 + k))::uuid::text ORDER BY k) FROM generate_series(1, 8) k))),
+          'line_credibility', (SELECT jsonb_agg(jsonb_build_object('claim', k - 1, 'text', ${txt("(j - 1) * 8 + k")}, 'verdict', 'supports') ORDER BY k) FROM generate_series(1, 8) k)),
+        'workspace', now() - (j || ' minutes')::interval
+      FROM generate_series(1, 2000) j`);
+    await sql(`ANALYZE public.claims`);
+    await sql(`ANALYZE public.research_jobs`);
+    await sql(`SELECT pg_stat_statements_reset()`);
+    const idsBy = new Map<number, string[]>();
+    for (const n of [25, 50, 200]) {
+      const r = await call("GET", `/workbench/contract/claims?synthesis_id=${S}&limit=${n}`, A);
+      assertEquals(r.status, 200, r.text);
+      const ids = (r.json.claims as any[]).map((c) => c.id);
+      assertEquals(ids.length, n);
+      assert((r.json.claims as any[]).every((c) => c.verdict === "supports"), "every seeded claim reads its job's verdict");
+      idsBy.set(n, ids);
+    }
+    const ran = await sql<{ query: string }>(
+      `SELECT query FROM pg_stat_statements WHERE query ILIKE '%line_credibility%' AND query ILIKE '%filed%' ORDER BY calls DESC LIMIT 1`);
+    assert(ran.length, "the workbench's verdict query is in pg_stat_statements");
+    const underTest = ran[0].query;
+    const c = await pool!.connect();
+    const rows: string[] = [];
+    try {
+      await c.queryObject(`PREPARE t7_test(text[]) AS ${underTest}`);
+      await c.queryObject(`PREPARE t7_round2(text[]) AS ${ROUND2_VERDICTS_SQL}`);
+      const run = async (stmt: string, ids: string[]) => {
+        const p = (await c.queryObject<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS OFF) EXECUTE ${stmt}($1::text[])`, [ids])).rows.map((x) => x["QUERY PLAN"]).join("\n");
+        return { ms: Number(/Execution Time: ([\d.]+) ms/.exec(p)?.[1] ?? NaN), seq: /Seq Scan on claims/.test(p), plan: p };
+      };
+      for (const n of [25, 50, 200]) {
+        const ids = idsBy.get(n)!;
+        const tests: { ms: number; seq: boolean; plan: string }[] = [];
+        const bases: number[] = [];
+        for (let i = 0; i < 5; i++) {
+          tests.push(await run("t7_test", ids));
+          bases.push((await run("t7_round2", ids)).ms);
+        }
+        const mt = median(tests.map((x) => x.ms)), mb = median(bases);
+        rows.push(`PLAN T7 ${n} ids: under test median ${mt.toFixed(1)} ms (runs ${tests.map((x) => x.ms.toFixed(1)).join(", ")}), full claims scans ${tests.filter((x) => x.seq).length}/5; round 2 median ${mb.toFixed(1)} ms`);
+        if (n === 200) rows.push(`PLAN T7 200 ids, under test:\n${tests[tests.length - 1].plan}`);
+        assertEquals(tests.filter((x) => x.seq).length, 0, `${n} ids: the code under test scans claims in full:\n${tests.find((x) => x.seq)?.plan}`);
+        assert(mt <= Math.max(mb * 1.25, mb + 25), `${n} ids: under test ${mt} ms slower than round 2 ${mb} ms`);
+      }
+    } finally {
+      console.log(`PLAN T7 the query under test (from pg_stat_statements):\n${underTest}\n${rows.join("\n")}`);
+      await c.queryObject(`DEALLOCATE ALL`).catch(() => {});
+      c.release();
+    }
   } finally {
-    c.release();
+    await sql(`DELETE FROM public.research_jobs WHERE query LIKE 'f1t7 job %'`);
+    await sql(`DELETE FROM public.claims WHERE metadata ? 'f1t7'`);
+    await sql(`DELETE FROM public.sources WHERE id = $1`, [S]);
   }
-}
-t("T7 F1: the verdict join reads claims by primary key; the roll-up reads no claim (EXPLAIN, seq scans off)", async () => {
-  // imported here, not at the top, so on a base without them only this case fails (the RED run)
-  const { VERDICTS_SQL } = await import("./repo/knowledge.ts") as { VERDICTS_SQL?: string };
-  const { REPORT_JOB_SQL, REPORT_SOURCE_SQL } = await import("./repo/trust.ts") as { REPORT_JOB_SQL?: string; REPORT_SOURCE_SQL?: string };
-  assert(VERDICTS_SQL && REPORT_JOB_SQL && REPORT_SOURCE_SQL, "the queries are exported for the plan check");
-  const VERDICTS_SQL_ROUND2 = VERDICTS_SQL.replace("JOIN public.claims c ON c.id = ANY($1::uuid[]) AND c.id::text = f.cid",
-    "JOIN public.claims c ON c.id::text = f.cid");
-  const ids = [ID.c1, ID.c2, ID.c4];
-  assert(VERDICTS_SQL_ROUND2 !== VERDICTS_SQL, "the before text was derived");
-  const before = await plan(VERDICTS_SQL_ROUND2, [ids]);
-  const after = await plan(VERDICTS_SQL, [ids]);
-  const src = await plan(REPORT_SOURCE_SQL, [ID.report]);
-  const job = await plan(REPORT_JOB_SQL, [ID.report]);
-  console.log(`PLAN verdicts BEFORE (round 2, cast join):
-${before}
-PLAN verdicts AFTER:
-${after}
-PLAN report source:
-${src}
-PLAN report job:
-${job}`);
-  assert(/Seq Scan on claims/.test(before), "the before plan scans claims (the defect the review measured)");
-  assert(!/Seq Scan on claims/.test(after), `the verdict join must not scan claims:
-${after}`);
-  assert(/(Bitmap Index Scan on claims_pkey|Index (Only )?Scan using claims_pkey on claims)/.test(after), `the claims pkey is used:
-${after}`);
-  assert(!/ on claims/.test(src) && !/ on claims/.test(job), "the roll-up reads no claim");
-  assert(!/Seq Scan on sources/.test(src) && /Index (Only )?Scan|Bitmap Index Scan/.test(src), `the report is found by an index on sources (the planner picks pkey or the synthesis index):
-${src}`);
-  // and the answers are unchanged
-  const r = await call("GET", `/workbench/contract/claims?synthesis_id=${ID.report}&limit=50`, A);
-  const by = new Map((r.json.claims as any[]).map((c) => [c.id, c.verdict]));
-  assertEquals([by.get(ID.c1), by.get(ID.c2)], ["supports", "partial"]);
 });
 
 // rw-p3b-trust2 (review B1): under a metadata filter (the cloud door) the verdict is null - research_jobs carry no

@@ -24,7 +24,9 @@ const claimOf = (id: string, syn: string) => ({
   verdict: "supports", corroborations: 0, contradicted_by_newer: false,
 });
 const quality = (id: string) => ({
-  source_id: id, state: "active", family: "general", claim_kind: null, signals: {}, corroborated_by: [], contradicted_by: [], history: [],
+  source_id: id, state: "active", family: "general", claim_kind: null, signals: {}, contradicted_by: [], history: [],
+  // a report is corroborated by W, so its quality panel offers "Show its quality" on W
+  corroborated_by: id === W ? [] : [{ source_id: W, title: "Web page W", family: "general", relation: "co-grounds a claim", amount: null, claim: "c" }],
   score: { value: 0.4, refinery_scoped: null, version: "v", computed_from: "x" }, factors: [{ name: "general_family_score", value: 0.4, reason: "r" }],
 });
 
@@ -80,10 +82,21 @@ describe("B2: the trust focus follows the workspace selection", () => {
     await act(async () => settle(15));
     // left over from the previous test? the store reset changed the selection, so the trust focus was cleared
     expect(getTrust().source).toBeNull();
+    expect(qual.container.querySelector("[data-source]")?.getAttribute("data-source")).toBe(R1);
+    // the quality panel's corroborating source W: select its leaf, click "Show its quality"
+    await act(async () => { fireEvent.click(qual.container.querySelector(`[data-leaf="src:${W}:c"] .ws-leaf-label`)!); await settle(); });
+    await act(async () => { fireEvent.click(qual.container.querySelector("[data-action=focus-source]")!); await settle(15); });
+    expect(getTrust().source).toBe(W);
+    expect(qual.container.querySelector("[data-source]")?.getAttribute("data-source"), "the quality panel moved to W").toBe(W);
+    expect(led.container.querySelector('[data-claim="r1c"]'), "the ledger stays on the selected report").toBeTruthy();
+    expect(led.container.querySelector("[data-scope]")?.getAttribute("data-scope")).toBe("synthesis_id");
+    // a new selection in the reference panel wins over the earlier pick
+    await act(async () => { setState({ reference: { reference_id: null, source_id: R2, chunk_idx: 0 } }); await settle(15); });
+    expect(getTrust().source).toBeNull();
+    expect(qual.container.querySelector("[data-source]")?.getAttribute("data-source")).toBe(R2);
+    expect(led.container.querySelector('[data-claim="r2c"]')).toBeTruthy();
+    // and a plain web page selected scopes the ledger by source_id
     await act(async () => { setState({ reference: { reference_id: null, source_id: W, chunk_idx: 0 } }); await settle(15); });
     expect(led.container.querySelector("[data-scope]")?.getAttribute("data-scope"), "a plain source scopes by source_id").toBe("source_id");
-    await act(async () => { setState({ reference: { reference_id: null, source_id: R1, chunk_idx: 0 } }); await settle(15); });
-    expect(led.container.querySelector('[data-claim="r1c"]')).toBeTruthy();
-    expect(qual.container.querySelector("[data-source]")?.getAttribute("data-source")).toBe(R1);
   });
 });

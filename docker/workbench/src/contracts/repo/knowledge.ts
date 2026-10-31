@@ -171,23 +171,40 @@ export async function claims(db: Db, q: ClaimsQuery) {
 // curator's own dedup key (lower(btrim(text)), find_or_create_claim's); the entry at the claim's own index wins
 // inside a job, the latest job wins across jobs. null = no job recorded one (filed before P3a, on no judged line,
 // or its text was edited since).
-// rw-p3b-trust2 (review F1): the claim side is read by its PRIMARY KEY (c.id = ANY($1::uuid[])), never a cast
-// join over every claim; the jobs side still scans research_jobs (no index on the filed list - a schema change,
-// recorded in the findings). Exported so the lab can EXPLAIN it (trust_integration_test.ts T7).
-export const VERDICTS_SQL = `SELECT f.cid AS claim_id, lc.v ->> 'verdict' AS verdict
-       FROM public.research_jobs j
-       CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'claims' -> 'filed') = 'array'
-                                                         THEN j.result -> 'curator' -> 'claims' -> 'filed' ELSE '[]'::jsonb END)
-                          WITH ORDINALITY f(cid, ord)
-       CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'line_credibility') = 'array'
-                                                    THEN j.result -> 'line_credibility' ELSE '[]'::jsonb END)
-                          WITH ORDINALITY lc(v, lord)
-       JOIN public.claims c ON c.id = ANY($1::uuid[]) AND c.id::text = f.cid
-      WHERE j.result -> 'curator' -> 'claims' -> 'filed' ?| $1::text[]
-        AND jsonb_typeof(lc.v -> 'verdict') = 'string' AND jsonb_typeof(lc.v -> 'text') = 'string'
-        AND lower(btrim(c.text)) = lower(btrim(lc.v ->> 'text'))
-      ORDER BY j.finished_at ASC NULLS FIRST, j.created_at ASC, j.id ASC,
-               ((lc.v ->> 'claim') IS NOT DISTINCT FROM (f.ord - 1)::text) ASC, lc.lord ASC`;
+// rw-p3b-trust2 (review F1; tester t-p3b-trust3 D1): a plan that is STABLE under the default planner settings. The
+// two sides are restricted first and materialized, then joined once on text keys:
+//   want - the claim rows asked for, by PRIMARY KEY (c.id = ANY($1::uuid[])), with their dedup key;
+//   jobs - the jobs whose filed list names one of them (the ?| filter: research_jobs is still scanned - no index on
+//          the filed list, a schema change recorded in the findings), each job's large result read ONCE;
+//   hits - their filed entries restricted to the asked ids (f.cid = ANY($1::text[])) BEFORE the line_credibility
+//          lateral is expanded;
+// then a hash join of two small sets on (claim id text, dedup key). Round 3 joined claims inside the laterals on
+// the un-indexable c.id::text = f.cid, which the planner turned into a re-scanned inner side (3.5-6.4 s at 200 ids).
+// Exported so the lab can EXPLAIN it (trust_integration_test.ts T7 EXPLAINs what the workbench actually ran).
+export const VERDICTS_SQL = `WITH want AS MATERIALIZED (
+         SELECT c.id::text AS cid, lower(btrim(c.text)) AS dkey FROM public.claims c WHERE c.id = ANY($1::uuid[])
+       ), jobs AS MATERIALIZED (
+         SELECT j.id AS job_id, j.finished_at, j.created_at,
+                j.result -> 'curator' -> 'claims' -> 'filed' AS filed, j.result -> 'line_credibility' AS lines
+           FROM public.research_jobs j
+          WHERE j.result -> 'curator' -> 'claims' -> 'filed' ?| $1::text[]
+       ), hits AS MATERIALIZED (
+         SELECT jb.job_id, jb.finished_at, jb.created_at, f.cid, f.ord, lc.v, lc.lord
+           FROM jobs jb
+           CROSS JOIN LATERAL (
+             SELECT e.cid, e.ord
+               FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(jb.filed) = 'array' THEN jb.filed ELSE '[]'::jsonb END)
+                    WITH ORDINALITY e(cid, ord)
+              WHERE e.cid = ANY($1::text[])
+           ) f
+           CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(jb.lines) = 'array' THEN jb.lines ELSE '[]'::jsonb END)
+                              WITH ORDINALITY lc(v, lord)
+          WHERE jsonb_typeof(lc.v -> 'verdict') = 'string' AND jsonb_typeof(lc.v -> 'text') = 'string'
+       )
+     SELECT h.cid AS claim_id, h.v ->> 'verdict' AS verdict
+       FROM hits h JOIN want w ON w.cid = h.cid AND w.dkey = lower(btrim(h.v ->> 'text'))
+      ORDER BY h.finished_at ASC NULLS FIRST, h.created_at ASC, h.job_id ASC,
+               ((h.v ->> 'claim') IS NOT DISTINCT FROM (h.ord - 1)::text) ASC, h.lord ASC`;
 
 export async function verdictsOf(db: Db, rows: { id: string }[]): Promise<Map<string, string>> {
   const ids = [...new Set(rows.map((r) => r.id.toLowerCase()))];
