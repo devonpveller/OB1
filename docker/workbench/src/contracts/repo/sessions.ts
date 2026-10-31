@@ -2,6 +2,9 @@
 // metadata, so a metadata filter returns nothing (fail closed).
 import type { Db } from "../db.ts";
 import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB, OWNERLESS_FOREIGN, type Viewer } from "../../documents/ownership.ts";
+// rw-p4b-sessions round 2: a steer branch's text (a person's words) reads as another user's for anyone
+// who may not act on its session and did not make the steer (sessions/repo.ts)
+import { STEER_TEXT_HIDDEN, type Who } from "../../sessions/repo.ts";
 
 interface JobRow {
   id: string;
@@ -62,10 +65,15 @@ export function shapeSession(r: JobRow) {
 // rw-p2b-workspace (operator 2026-10-28): the text a user typed to start research is the user's own
 // (research_prompts); the job and everything it produces are shared. A job started from the workspace
 // shows its query to its owner only - to anyone else the query reads as empty.
-export const OWN_QUERY = (alias: string, ownerParam: string) =>
+// rw-p4b-sessions round 3 (tester t-p4b-sessions2: the timeline gave every user an admin's steer text):
+// THE one rule for a research job's question - the owner rule above AND the steer-text rule (a steer's
+// text is its actor's and of who may act on the session: sessions/repo.ts STEER_TEXT_HIDDEN). `who` is the
+// request's identity (its admin flag), `actorParam` the SQL parameter holding who.actor.
+export const OWN_QUERY = (alias: string, ownerParam: string, who: Who, actorParam: string) =>
   `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id IN (${alias}.id, coalesce(${alias}.root_job_id, ${alias}.id))
                      AND p.owner_sub <> ${ownerParam} AND p.owner_sub NOT LIKE 'service:%')
               OR ${OWNERLESS_FOREIGN(alias, ownerParam)}
+              OR ${STEER_TEXT_HIDDEN(alias, ownerParam, actorParam, who)}
         THEN '' ELSE ${alias}.query END`;
 
 // A job is shared research output; its private fields (the original prompt, inlet_ref, refinery_id,
@@ -84,9 +92,10 @@ export async function session(db: Db, id: string, who: Viewer) {
             j.session_id,
             CASE WHEN o.others THEN NULL ELSE j.thread_id END AS thread_id,
             j.created_at, j.started_at, j.finished_at, CASE WHEN o.others THEN NULL ELSE j.error END AS error
-       FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3", adminSeesOwnerless(who))} AS others) o
+       FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3", adminSeesOwnerless(who))}
+                                                              OR ${STEER_TEXT_HIDDEN("j", "$2", "$4", who)} AS others) o
       WHERE j.id = $1`,
-    [id, who.sub, who.key],
+    [id, who.sub, who.key, (who as Who).actor ?? who.sub],
   );
   return rows[0] ? shapeSession(rows[0]) : null;
 }
@@ -117,9 +126,10 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
                                  'query', CASE WHEN o.others THEN '' ELSE left(j.query, 200) END,
                                  'refinery_id', CASE WHEN o.others THEN NULL ELSE j.refinery_id END,
                                  'phase', progress ->> 'phase', 'error', CASE WHEN o.others THEN NULL ELSE error END) AS detail
-         FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4", adminSeesOwnerless(who))} AS others) o
+         FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4", adminSeesOwnerless(who))}
+                                                                OR ${STEER_TEXT_HIDDEN("j", "$3", "$5", who)} AS others) o
         WHERE ($1::text IS NULL OR j.status = $1) ORDER BY j.created_at DESC LIMIT $2`,
-      [state, limit, who.sub, who.key],
+      [state, limit, who.sub, who.key, (who as Who).actor ?? who.sub],
     );
     out.push(...rows.map((r) => ({ kind: "research", state: isTerminal(r.status) ? "current" : "loading", ...r })));
   }

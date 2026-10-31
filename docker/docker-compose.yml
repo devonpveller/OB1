@@ -180,6 +180,7 @@ services:
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
       - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity
       - ./init-idea-schedule.sql:/docker-entrypoint-initdb.d/300-init-idea-schedule.sql:ro # research-workbench rw-idea-schedule (fresh-volume only; live: psql -f; revert: revert-idea-schedule.sql)
+      - ./init-research-sessions.sql:/docker-entrypoint-initdb.d/320-init-research-sessions.sql:ro # research-workbench rw-p4b-sessions: research_steers.actor_sub (fresh-volume only; live: psql -f WITH the new research image; revert: revert-research-sessions.sql)
       - ./init-podcasts.sql:/docker-entrypoint-initdb.d/330-init-podcasts.sql:ro # research-workbench rw-p7a-tts: presenter model + render requests (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-podcasts.sql)
     networks:
       - obnet
@@ -1438,6 +1439,9 @@ services:
       # openbrain-podcast here (http://openbrain-podcast:8080/render). BLANK AS SHIPPED = inert: a
       # request is recorded (owned by its requester) and stays queued.
       PODCAST_RENDER_URL: ${WORKBENCH_PODCAST_RENDER_URL:-}
+      # research-workbench P4b: the running-session card of an Open WebUI job links back to its chat at
+      # <this>/c/<chat id>. SHIPPED BLANK = no link (the card keeps its OWUI badge). http(s) only.
+      WORKSPACE_OWUI_BASE_URL: ${WORKSPACE_OWUI_BASE_URL:-}
       # rw-identity2: sign-in is Authentik FORWARD-AUTH at the operator's Traefik; the workbench only
       # verifies the outpost's signed token (X-authentik-jwt, HS256 with the proxy provider's client
       # secret) on every request - no outbound call, no session. Env-only, SHIPPED INERT: blank = no
