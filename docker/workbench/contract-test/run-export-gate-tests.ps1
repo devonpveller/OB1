@@ -314,7 +314,13 @@ try {
   }
   $null = Vision '/_mode?m=clean' 'POST'
   # round 2 (tester D1, D2): realistic clean pages pass; a spill over a cell in another font is blocked
-  foreach ($pair in @(@('e-wdot.md', 'passed'), @('e-prose.md', 'passed'), @('c1-clean-rich.md', 'passed'), @('c1-left-code22.md', 'blocked'), @('c1-left-text22.md', 'blocked'))) {
+  # round 3 (tester t-p6b-gate2 D8, D9): a one-glyph overlap between table cells is blocked; clean math,
+  # CJK punctuation runs and RTL text pass; a formula spilling over a neighbouring cell is blocked
+  $t1 = @(@('e-wdot.md', 'passed'), @('e-prose.md', 'passed'), @('c1-clean-rich.md', 'passed'), @('c1-left-code22.md', 'blocked'), @('c1-left-text22.md', 'blocked'),
+    @('s-text-01.md', 'blocked'), @('s-text-02.md', 'blocked'), @('s-code-01.md', 'blocked'), @('s-code-02.md', 'blocked'), @('s-1row-text-02.md', 'blocked'),
+    @('s-1row-text-03.md', 'blocked'), @('s-math-22.md', 'blocked'), @('s-lower-22.md', 'passed'), @('n-math.md', 'passed'), @('n-math-accents.md', 'passed'),
+    @('n-math-vector.md', 'passed'), @('n-math-brace.md', 'passed'), @('n-cjk-long.md', 'passed'), @('n-arabic-hebrew2.md', 'passed'))
+  foreach ($pair in $t1) {
     $x = Req GET $wbName "/workbench/export?path=notes/p6b/$($pair[0])&format=pdf" "t1-$($pair[0]).out"
     $xb = if ($x.status -eq 422) { BodyJson "t1-$($pair[0]).out" } else { $null }
     $codes = @($xb.blocking_findings | ForEach-Object { $_.code }) -join ','
@@ -382,10 +388,12 @@ try {
     $null = Req POST $wbName '/workbench/documents/references' "t2r-$tag.json" 'lab-user-a' (@{ path = $dp; source_id = $sid; exact = $exact; form = 'chip' } | ConvertTo-Json -Compress)
     return [string](BodyJson "t2r-$tag.json").record.id
   }
-  function ParityOf([string]$dp, [string]$tag) {
-    $ex = Req GET $wbName "/workbench/export?path=$([uri]::EscapeDataString($dp))&format=pdf" "t2r-$tag.pdf"
-    $null = Req GET $wbName "/workbench/documents/references?path=$([uri]::EscapeDataString($dp))" "t2r-$tag-panel.json"
-    $pr = Client @('parity', "/ev/files/t2r-$tag-panel.json", "/ev/files/t2r-$tag.pdf")
+  function ParityOf([string]$dp, [string]$tag, [string]$styleQ = '', [string]$mode = '') {
+    $ex = Req GET $wbName "/workbench/export?path=$([uri]::EscapeDataString($dp))&format=pdf$styleQ" "t2r-$tag.pdf"
+    $null = Req GET $wbName "/workbench/documents/references?path=$([uri]::EscapeDataString($dp))$styleQ" "t2r-$tag-panel.json"
+    $pargs = @('parity', "/ev/files/t2r-$tag-panel.json", "/ev/files/t2r-$tag.pdf")
+    if ($mode) { $pargs += $mode }
+    $pr = Client $pargs
     $okp = ($script:rc -eq 0) -and ($pr -match 'PARITY PASS') -and ($ex.status -eq 200)
     Save "t2r-$tag-parity.log" "export $($ex.status) gate=$($ex.gate)`n$pr"
     foreach ($l in ($pr -split "`n")) { Write-Host "      $l" }
@@ -415,6 +423,26 @@ try {
   PutDoc $d2 'g' "Cites page two [[source:$($G[2])|page two]] and page three [[source:$($G[3])|three]]."
   $null = Psql "INSERT INTO public.reference_resolutions (reference_id, identifier, pinned_revision, csl, via) SELECT r.id, 'doi:10.9999/p6b-probe', r.pinned_revision, '{""type"":""article-journal"",""title"":""A resolved title the export never prints""}'::jsonb, 'crossref' FROM public.reference_holders h JOIN public.reference_records r ON r.id = h.reference_id WHERE h.holder_kind = 'user_document' AND h.holder_ref = '$d2' AND r.source_id = '$($G[2])'"
   ParityOf $d2 '2g-stale-resolution'
+  # round 3 (tester t-p6b-gate2 D10, D11, D12)
+  $d2 = NewDoc 'Parity author-date'
+  PutDoc $d2 'h' "Cites two [[source:$($G[2])|two]], then one [[source:$($G[1])|one]], then three [[source:$($G[3])|three]]."
+  ParityOf $d2 '2h-ieee'
+  ParityOf $d2 '2h-apa' '&style=apa' 'author-date'
+  ParityOf $d2 '2h-vancouver' '&style=elsevier-vancouver'
+  $d2 = NewDoc 'Parity footnote later def'
+  PutDoc $d2 'i1' "Lead sentence.[^n] Then page two [[source:$($G[2])|page two]].`n`n[^n]: The note cites page one [[source:$($G[1])|page one]]."
+  ParityOf $d2 '2i-footnote-later-def'
+  $d2 = NewDoc 'Parity footnote def first'
+  PutDoc $d2 'i2' "[^m]: The note cites page one [[source:$($G[1])|page one]].`n`nThen page two [[source:$($G[2])|page two]], and the note at last.[^m]"
+  ParityOf $d2 '2i-footnote-def-first'
+  $d2 = NewDoc 'Parity code span citation'
+  $bt = [string][char]96; $fence = $bt * 3
+  PutDoc $d2 'l' ("A citation inside code: " + $bt + "[[source:$($G[2])|two]]" + $bt + " and a real one [[source:$($G[1])|one]].`n`n" + $fence + "`n[[source:$($G[3])|three]]`n" + $fence)
+  ParityOf $d2 '2l-citation-in-code'
+  $null = Psql "INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata) VALUES ('f6b00000-0000-4000-8000-000000000007', 'https://example.org/p6b/rtl', E'Gate seven \u0627\u0644\u0639\u0631\u0628\u064a\u0629 \u05e9\u05dc\u05d5\u05dd unicode', 'Seven.', 'web_article', 'example.org', '{}') ON CONFLICT DO NOTHING"
+  $d2 = NewDoc 'Parity rtl title'
+  PutDoc $d2 't' "Cites seven [[source:f6b00000-0000-4000-8000-000000000007|seven]] and page one [[source:$($G[1])|page one]]."
+  ParityOf $d2 '2t-rtl-title'
 
   Write-Host '[T3] acceptance 3: the vision calls go through the LiteLLM alias under the export key; a direct route is refused'
   $log = (Vision '/_log') | ConvertFrom-Json

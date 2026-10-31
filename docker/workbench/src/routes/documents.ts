@@ -24,9 +24,15 @@ import { HOLDER_KIND } from "../documents/paths.ts";
 import { acknowledge, acknowledged } from "../documents/workspace.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 import { documentExportMarkdown, documentExportRefs } from "../export/repo.ts";
-import { kindsOf, listedTitle } from "../export/exporter.ts";
+import { kindsOf, listedCsl } from "../export/exporter.ts";
+import { printedTitle } from "../export/csl.ts";
+import { citeKey, type StyleDef } from "../export/render.ts";
+import { bibliographyOrder } from "../export/biborder.ts";
 
 export type DocumentsDeps = refinery.RefineryDeps;
+
+// the CSL styles directory (the export's: EXPORT_CSL_DIR, else the image's csl/)
+const cslDirOf = () => Deno.env.get("EXPORT_CSL_DIR") || new URL("../../csl", import.meta.url).pathname;
 
 async function body(c: Context): Promise<Record<string, unknown>> {
   return await c.req.json().catch(() => ({})) as Record<string, unknown>;
@@ -167,11 +173,24 @@ export function documentsRouter(rdeps: DocumentsDeps) {
     // reference record) its per-reference actions use.
     const md = await vaultExists(rel) ? await documentExportMarkdown(db, await vaultRead(rel)) : "";
     const kinds = kindsOf(await reg.entries("reference_identifier_kinds"));
-    const listed = (await documentExportRefs(db, rel, md)).map((x) => ({
-      number: x.number, source_id: x.source_id ?? x.cited_ref, title: listedTitle(x, kinds),
+    const refs = await documentExportRefs(db, rel, md);
+    // round 3 (tester t-p6b-gate2 D10): the list is in the order of the style being exported (?style=,
+    // default the registry's default - IEEE, numbered by citation): an author-date style's list is
+    // citeproc's sorted order (biborder.ts), numbered by position
+    const styles = (await reg.entries("citation_styles")).filter((e) => !e.retired_at);
+    const styleKey = str(c.req.query("style"));
+    const styleEntry = styleKey ? styles.find((e) => e.key === styleKey) : styles.find((e) => e.definition.default === true);
+    if (!styleEntry) return c.json({ error: `unsupported citation style: ${styleKey}` }, 400);
+    let items = refs.map((x) => ({ key: citeKey(x.cited_ref), number: x.number, csl: listedCsl(x, kinds), ref: x }));
+    if (styleEntry.definition.citation_format !== "numeric") {
+      const ordered = await bibliographyOrder(items, { key: styleEntry.key, ...(styleEntry.definition as Omit<StyleDef, "key">) }, cslDirOf());
+      items = ordered.map((it, i) => ({ ...(it as typeof items[number]), number: i + 1 }));
+    }
+    const listed = items.map(({ number, csl, ref: x }) => ({
+      number, source_id: x.source_id ?? x.cited_ref, title: printedTitle(csl as unknown as Record<string, unknown>),
       reference_ids: (rows as { source_id: string; reference_id: string }[]).filter((h) => h.source_id === (x.source_id ?? x.cited_ref)).map((h) => h.reference_id),
     }));
-    return c.json({ path: rel, references: rows, listed });
+    return c.json({ path: rel, style: styleEntry.key, references: rows, listed });
   }));
 
   r.delete("/references/:id", wrap(async (c, who) => {

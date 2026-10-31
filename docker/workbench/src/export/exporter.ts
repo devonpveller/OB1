@@ -38,6 +38,7 @@ import { citeKey, type FormatDef, type RefItem, render as realRender, RenderFail
 import { aboutExport } from "./about.ts";
 import type { Limits } from "./markdown.ts";
 import { judgeSecret } from "./credentials.ts";
+import { bibliographyOrder } from "./biborder.ts";
 import { frontmatterOf, type GateInput, type GateResult, type RequiredSection } from "./gate.ts";
 import type { RunStore } from "./runs.ts";
 import type { Context } from "hono";
@@ -151,21 +152,22 @@ export async function referenceItems(
 // the record (its title at the pin, or its URL when it has none) - through printedTitle. The same
 // choice referenceItems makes, without the resolver (a reference not yet resolved shows its record
 // title until the first export caches the resolution).
-export function listedTitle(r: ExportRef, kinds: IdentifierKind[]): string {
+export function listedCsl(r: ExportRef, kinds: IdentifierKind[]): CslItem {
   if (r.source_id && !r.suppressed) {
     let id = null;
     try {
       id = sourceIdentifier(kinds, r);
     } catch { /* a malformed identifier: the export refuses it; the panel shows the record */ }
     const hit = id ? r.cached.find((c) => c.identifier === id!.citekey) : undefined;
-    if (hit) return printedTitle(hit.csl);
+    if (hit) return hit.csl;
   }
   try {
-    return printedTitle(recordToCsl(r));
+    return recordToCsl(r);
   } catch {
-    return r.title ?? "";
+    return { type: "document", title: r.title ?? "" } as CslItem;
   }
 }
+export const listedTitle = (r: ExportRef, kinds: IdentifierKind[]): string => printedTitle(listedCsl(r, kinds));
 
 // The copy view's item for a reference it could not resolve: the marker first, then what the record
 // says (never a suppressed source's title).
@@ -305,7 +307,9 @@ export function createExporter(deps: ExporterDeps): Hono {
         try {
           result = await g.gate({
             pdf: out.bytes, format, numeric: styleEntry.definition.citation_format === "numeric",
-            refs: refItems.map((r) => ({ number: r.number, title: printedTitle(r.csl) })),
+            // round 3 (D10): an author-date style SORTS its list - the expected order is citeproc's
+            refs: (styleEntry.definition.citation_format === "numeric" ? refItems : await bibliographyOrder(refItems, styleOf(styleEntry), deps.cslDir))
+              .map((r) => ({ number: r.number, title: printedTitle(r.csl) })),
             frontmatter: frontmatterOf(md),
             required: (await live("export_required_sections")).map((e) => ({ key: e.key, ...(e.definition as Omit<RequiredSection, "key">) })),
           });

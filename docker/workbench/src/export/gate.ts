@@ -101,7 +101,14 @@ export function textArea(metadata: Record<string, unknown> | undefined): { left:
 
 // Letters and digits only, lower case: a hyphenated line break, quotes, CSL punctuation and case
 // changes do not count as a difference; anything else does.
-export const norm = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+// round 3 (tester t-p6b-gate2 D11): a PDF's text comes back in VISUAL order, so a right-to-left run (Hebrew,
+// Arabic, and the spaces between their words) reads reversed, character by character and word by word. The
+// comparisons fold each RTL run to its letters in a fixed (sorted) order, on both sides, so the logical title
+// and the visual text compare equal; presentation forms are folded to base letters by NFKC first.
+export const bidiFold = (s: string) =>
+  s.normalize("NFKC").replace(/[\p{Script=Hebrew}\p{Script=Arabic}][\p{Script=Hebrew}\p{Script=Arabic}\p{M}\s]*/gu,
+    (run) => ` ${[...run.replace(/[\s\p{M}]/gu, "")].sort().join("")} `);
+export const norm = (s: string) => bidiFold(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 
 // The reference list region of the file's text: after the LAST line that is exactly "References"
 // (prepare.ts sets reference-section-title), page-number-only lines removed.
@@ -154,9 +161,11 @@ export function referenceParity(texts: string[], refs: { number: number; title: 
     return out;
   }
   // author-date: entries by the file's line layout - an entry starts at the list's left edge (the
-  // hanging indent); without the layout, the region is one text. Every reference's title must be in
-  // exactly one entry, as whole words ("number 1" is not in "number 10"), and with the layout there are
-  // exactly as many entries as references.
+  // hanging indent / the paragraph gap); without the layout, the region is one text. Round 3 (tester
+  // t-p6b-gate2 D10): with the layout the comparison is POSITIONAL, as for a numbered style - `refs` come in
+  // the style's own bibliography order (biborder.ts: citeproc's sort), there are exactly as many entries as
+  // references, and entry i holds reference i's title as whole words. Without the layout: every title in
+  // exactly one place.
   let entries: string[];
   if (lines) {
     let at = -1;
@@ -167,6 +176,15 @@ export function referenceParity(texts: string[], refs: { number: number; title: 
     }
   } else {
     entries = [region];
+  }
+  if (lines && entries.length === refs.length) {
+    refs.forEach((r, i) => {
+      const t = words(r.title);
+      if (!t.trim() || occurrences(entries[i], t) < 1) {
+        out.push({ code: "reference-mismatch", detail: `entry ${i + 1} of the file's reference list is not "${r.title.slice(0, 120)}" (the style's order)`, sample: entries[i].trim().slice(0, 120), stage: "references" });
+      }
+    });
+    return out;
   }
   for (const r of refs) {
     const t = words(r.title);
@@ -209,7 +227,7 @@ export function splitEntries(rl: TextLine[]): string[] {
 
 // Whole-word forms: lower-case letter/digit words separated by one space, padded; a line-break hyphen
 // is read both ways (joined, "re-<newline>view" = "review", and as a break, "claim-<newline>kind" = "claim kind").
-const words = (s: string) => ` ${s.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
+const words = (s: string) => ` ${bidiFold(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
 function occurrences(entry: string, t: string): number {
   const count = (hay: string) => hay.split(t).length - 1;
   return Math.max(count(words(entry.replace(/-\s*\n\s*/g, ""))), count(words(entry)));
@@ -362,7 +380,7 @@ export async function runGate(deps: GateDeps, input: GateInput): Promise<GateRes
     // 2. structure
     const ta = textArea(input.format.metadata);
     const s = await run(deps.python ?? "/opt/export-gate/bin/python",
-      ["-I", deps.script ?? new URL("../../gate/structure.py", import.meta.url).pathname, pdfPath, JSON.stringify({ text_area: ta, tolerance: 2, min_overlaps: 3, max_pages: 500 })],
+      ["-I", deps.script ?? new URL("../../gate/structure.py", import.meta.url).pathname, pdfPath, JSON.stringify({ text_area: ta, tolerance: 2, min_overlaps: 1, max_pages: 500 })],
       timeout);
     let texts: string[] = [];
     let lines: TextLine[] = [];
