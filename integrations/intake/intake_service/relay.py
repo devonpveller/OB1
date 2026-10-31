@@ -1,7 +1,7 @@
-"""The fixed-target TCP relay: the intake service's ONLY routes out of its network (I5).
+"""The fixed-target TCP relay: the intake service's ONLY routes out of (and into) its network (I5).
 
 The service must have no outbound network except the database and the LiteLLM gateway. It sits
-on its own INTERNAL network (`intake-net`, no gateway) and NOTHING else; two instances of this
+on its own INTERNAL network (`intake-net`, no gateway) and NOTHING else; three instances of this
 relay - the same image, `relay` command - each forward one port to one fixed target:
   openbrain-intake-dbrelay   obnet + intake-net      :5432 -> openbrain-db:5432
       (openbrain-db lives on `obnet`, an ordinary bridge with a route to the internet, so the
@@ -11,6 +11,12 @@ relay - the same image, `relay` command - each forward one port to one fixed tar
       `llama-cpp` on intake-net (the service must not join ai-stack_llm-net itself: ~30 callers
       are reachable there, intake-i5 attempt 1; the target is the gateway's container name, not
       `llama-cpp`, which on intake-net is this relay)
+  openbrain-intake-callrelay intake-callers + intake-net  :8000 -> openbrain-intake:8000
+      (intake-gate-relay: the search gate's way IN; intake-callers is an internal network the
+      search plane owns whose only other member is search-gateway, so the service gains no
+      second network and the gateway reaches this one port and nothing else on intake-net). NO
+      alias `openbrain-intake` on intake-callers: it would answer this relay's own lookup of its
+      target (measured), so the gate's INTAKE_URL names openbrain-intake-callrelay
 A relay forwards bytes and nothing else: no parsing, no other destination; the database and
 LiteLLM still authenticate intake themselves (the role's password, the virtual key).
 
@@ -29,7 +35,7 @@ HALF-CLOSE (R-6): when one side finishes sending (EOF), the relay passes that on
 keeps carrying the other direction until it ends too, so a client that shuts down its sending
 half after its request still gets the reply. A reset or error on either side closes both.
 NO FORWARDING: compose sets net.ipv4.ip_forward=0 in each relay's namespace (R2-F2), so a peer
-with NET_ADMIN on llm-net or obnet cannot route through a relay into intake-net.
+with NET_ADMIN on llm-net, obnet or intake-callers cannot route through a relay into intake-net.
 """
 from __future__ import annotations
 

@@ -561,6 +561,61 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # The search gate's ONLY way IN to the service (intake-gate-relay; DESIGN-intake section 12
+  # item 10, R2-F4, for the first caller). A byte relay (python -m intake_service relay) on
+  # intake-net and on `intake-callers` - an INTERNAL network the SEARCH plane declares
+  # (search/docker-compose.yml, `search_intake-callers`, 10.243.51.0/24) and this plane joins as
+  # external; its only other member is search-gateway. It forwards :8000 to openbrain-intake:8000
+  # and nothing else. NO ALIAS: an alias `openbrain-intake` on intake-callers would also answer
+  # the relay's OWN lookup of its target (measured in the compose lab: 20/20 lookups returned the
+  # relay itself, which then dialled itself), so the search plane sets
+  # INTAKE_URL=http://openbrain-intake-callrelay:8000/v1/intake instead (the gate's code default
+  # is unchanged). So the service gains no second network, intake-net gains no caller, and the gateway
+  # reaches this one port and nothing else on intake-net. Same image and hardening as the two
+  # relays above (ip_forward 0, idle close, half-close, read-only, cap_drop ALL); no secret (the
+  # service authenticates the gate's own caller key). Profile `intake`, OFF by default: a host
+  # that never enables intake never starts it, and the search plane starts either way (it OWNS
+  # intake-callers). With intake enabled, the search plane must be up first (ob1 requires search
+  # in stack.manifest.toml; a hand-run `--profile intake up` without it fails "declared as
+  # external, but could not be found" - a bare `up` is unaffected, measured compose v5.3.0).
+  openbrain-intake-callrelay:
+    profiles: ["intake"]
+    image: openbrain-intake:local
+    container_name: openbrain-intake-callrelay
+    command: ["relay"]
+    environment:
+      INTAKE_RELAY_TARGET_HOST: openbrain-intake
+      INTAKE_RELAY_TARGET_PORT: "8000"
+      INTAKE_RELAY_LISTEN_PORT: "8000"
+      INTAKE_RELAY_MAX_CONNECTIONS: "16"
+      # above the gate's intake request timeout (INTAKE_TIMEOUT_SECONDS, 60 s)
+      INTAKE_RELAY_IDLE_SECONDS: "600"
+    networks:
+      - intake-net
+      - intake-callers
+    # no routing through the relay into intake-net (intake-i5b R2-F2)
+    sysctls:
+      net.ipv4.ip_forward: 0
+    user: "10030:10030"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+          pids: 32
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
   # Privacy-enforcing MCP proxy for CLOUD services (Claude Code, ChatGPT,
   # etc). Only host-published openbrain door. Holds the real x-brain-key;
   # cloud clients use OPENBRAIN_GATEWAY_KEY and never see the upstream
@@ -1872,15 +1927,23 @@ networks:
   # intake I5: the intake service's own network - INTERNAL (no gateway, no route out) with an
   # explicit subnet outside 192.168.0.0/16 and outside the daemon's default address pools
   # (172.16.0.0/12, 10.240.0.0/16; incident 2026-10-17, the home LAN is 192.168.1.x). Its only
-  # members are openbrain-intake and its two relays (openbrain-intake-dbrelay,
-  # openbrain-intake-llmrelay), all profile `intake`, so a host that never enables intake
-  # never creates it.
+  # members are openbrain-intake and its three relays (openbrain-intake-dbrelay,
+  # openbrain-intake-llmrelay, openbrain-intake-callrelay), all profile `intake`, so a host that
+  # never enables intake never creates it.
   intake-net:
     driver: bridge
     internal: true
     ipam:
       config:
         - subnet: 10.243.50.0/24
+  # intake-gate-relay: the search gate's side of intake. OWNED by the search plane
+  # (search/docker-compose.yml: internal, 10.243.51.0/24), so the search plane starts on a host
+  # without intake; joined here by openbrain-intake-callrelay ONLY. Its two members are that relay
+  # and search-gateway (ai-stack scripts/checks/check_intake_isolation.py renders both planes and
+  # refuses anything else).
+  intake-callers:
+    external: true
+    name: search_intake-callers
   # The internal-only network defined by the ai-stack compose project.
   # Gives openbrain-mcp access to llama-cpp / llama-cpp-embed by name.
   llm-net:
