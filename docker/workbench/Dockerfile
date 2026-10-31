@@ -86,7 +86,7 @@ COPY src ./src
 RUN deno cache src/main.ts || true
 # The retrieval contract and its tests import nothing from the runtime mount, so they cache
 # FROZEN: a dependency that drifted from deno.lock fails the build.
-RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/documents/documents_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/routes/documents.ts src/export/render_test.ts src/export/prepare_worker.ts
+RUN deno cache --frozen src/contracts/app.ts src/contracts/gen.ts src/contracts/integration_test.ts   src/contracts/references_integration_test.ts src/documents/documents_integration_test.ts src/sessions/sessions_integration_test.ts src/contracts/migrate-references.ts src/routes/export.ts src/routes/documents.ts src/export/render_test.ts src/export/prepare_worker.ts
 
 # The tests (every *_test.ts) and the test oracle (src/export/credentials_oracle.ts, imported only by
 # resolve2_cost_test.ts) are the test stage's; the runtime copies the source tree from here, so no layer
@@ -116,7 +116,10 @@ RUN apt-get update \
 # rw-identity adds src/identity/: the forward-auth config, every check of the outpost's signed token
 # (HS256 only), the key ring and the seam's modes (pure), and (rw-identity3) the raw-request-target
 # cases over a loopback socket; its integration test is skipped here (no IDENTITY_TEST_BASE).
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ \
+# research-workbench P4b adds src/sessions/: the running-session card (badge, link back, waiting-on, next
+# steering point, tree, who may act) - pure; its integration test is skipped here (no SESSIONS_TEST_WB);
+# contract-test/run-sessions-tests.ps1 runs it.
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/sessions/ \
   && touch /app/.test-gate-passed
 
 FROM test AS parity

@@ -5,6 +5,16 @@
 // Re-record (run-contract-tests.ps1 -RecordExamples) instead of hand-editing one key.
 // deno-lint-ignore-file
 
+// research-workbench P4b: one running-session card (a Mattermost-started job; hand-written, see below)
+const P4B_CARD = {
+  id: "99999999-9999-4999-8999-999999999999", status: "running", state: "loading", origin: "mattermost",
+  badge: { key: "mattermost", label: "Mattermost" }, link: null, caller: "agent-org", query: "fixture question",
+  phase: "plan", current_artifact: { kind: "stage", label: "plan" }, waiting_on: { kind: "stage", detail: "plan" },
+  next_steering_point: { step_id: "s2", phase: "plan" },
+  tree: [{ id: "99999999-9999-4999-8999-999999999999", parent_job_id: null, branch_kind: "root", status: "running", open: true, pending: false, rooted_step_id: null, query: "fixture question", created_at: "2026-10-17T12:00:00.000Z" }],
+  can_act: true, created_at: "2026-10-17T12:00:00.000Z", started_at: "2026-10-17T12:00:00.000Z", finished_at: null,
+};
+
 export const EX = {
   reference: {"id":"11111111-1111-4111-8111-111111111111","kind":"source","state":"active","state_detail":{},"lifecycle":"active","version":2,"requested_version":2,"source":{"title":"Active fixture source","url":"https://example.org/active","content_type":"web_article","domain":"example.org","family":"general","excerpt":"Alpha fixture text about contract retrieval. Beta sentence two. Gamma sentence three.","created_at":"2026-10-17T12:00:00.000Z","updated_at":"2026-10-17T12:00:00.000Z"},"tombstone":null,"held":null,"record":null},
   referenceSuppressed: {"id":"22222222-2222-4222-8222-222222222222","kind":"source","state":"suppressed","state_detail":{"reason":"misattributed quote","context":{"url":"https://example.org/suppressed","title":"Suppressed fixture source","score_at_removal":{"value":0.6,"version":"claim-confidence-mean-v1"}}},"lifecycle":"suppressed","version":1,"requested_version":null,"source":{"title":"Suppressed fixture source","url":"https://example.org/suppressed","content_type":"web_article","domain":"example.org","family":"general","excerpt":"A misattributed quote about contract retrieval.","created_at":"2026-10-17T12:00:00.000Z","updated_at":"2026-10-17T12:00:00.000Z"},"tombstone":null,"held":null,"record":null},
@@ -52,6 +62,21 @@ export const EX = {
   steerRequest: {"step_id":"s1","text":"narrow to erasure"},
   diffCheckRequest: {"references":[{"reference_id":"f2000000-0000-4000-8000-000000000001"},{"source_id":"11111111-1111-4111-8111-111111111111","revision":1,"chunk_idx":1}]},
   referenceCreateRequest: {"source_id":"f1000000-0000-4000-8000-000000000001","provenance":"user","scope":"span","selectors":{"quote":{"exact":"Opening line of the reference fixture.","prefix":"","suffix":" The quoted span about pinned an"},"position":{"start":0,"end":38}},"holder":{"kind":"user_document","ref":"documents/fixture-refinery.md","origin":"cited"},"by":"dredd"},
+  // research-workbench P4b (rw-p4b-sessions): written by hand in the recorded shape (the Dredd lab does not
+  // run the research service, so steer and cancel are exercised by contract-test/run-sessions-tests.ps1)
+  sessions: { sessions: [P4B_CARD] },
+  flow: {
+    session_id: "99999999-9999-4999-8999-999999999999", running: true, withheld: false,
+    sources: [{ url: "https://example.org/a", job_id: "99999999-9999-4999-8999-999999999999", stages: [
+      { kind: "admitted", at: "2026-10-17T12:00:00.000Z", trail: { id: "t1", url: "https://example.org/a", kind: "admitted", claim_kind: "general", family: "general", score: 0.7, total: 0.7, floor: 0.4, model_version: "d15", signals: {}, reasons: ["family general"], found_via: null, path: [], source_url: null } },
+    ] }],
+  },
+  steerResult: {
+    steer: { steer_id: "f3000000-0000-4000-8000-000000000001", child_job_id: "f3000000-0000-4000-8000-000000000002", root_job_id: "99999999-9999-4999-8999-999999999999", parent_job_id: "99999999-9999-4999-8999-999999999999", step_id: "s2", steer_kind: "human" },
+    card: { ...P4B_CARD, tree: [...P4B_CARD.tree, { id: "f3000000-0000-4000-8000-000000000002", parent_job_id: "99999999-9999-4999-8999-999999999999", branch_kind: "steer", status: "queued", open: true, pending: true, rooted_step_id: "s2", query: "narrow to erasure", created_at: "2026-10-17T12:00:00.000Z" }] },
+  },
+  cancelRequest: { reason: "no longer needed" },
+  cancel: { job_id: "99999999-9999-4999-8999-999999999999", status: "cancelling" },
   notImplemented: (operation: string, landsIn: string) => ({
     status: "not_implemented", operation, lands_in: landsIn,
     message: `${operation} is part of the contract; its backing lands in ${landsIn}`,

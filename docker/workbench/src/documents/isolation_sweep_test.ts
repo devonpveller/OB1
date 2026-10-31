@@ -129,6 +129,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const ADMIN_VIEW = /^(GET|HEAD) \/workbench\/auth\/(users|audit)[ ?]/;
   const M = {
     title: `TitleSecret${rnd()}X`, body: `BodySecret${rnd()}`, idea: `IdeaSecret${rnd()}`, prompt: `PromptSecret${rnd()}`,
+    steer: `SteerSecret${rnd()}`,
   };
   const wb = (m: string, p: string, b?: unknown, h: Record<string, string> = {}) => call(BASE, m, p, b, h);
   // ── B plants ─────────────────────────────────────────────────────────────────────────────────
@@ -149,6 +150,20 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const research = await wb("POST", "/workbench/documents/research", { path: bPath, query: M.prompt, kind: "research" }, B);
   assertEquals(research.status, 202, research.text);
   const bJob: string = research.json.job_id;
+  // rw-p4b-sessions: B steers B's own session from its card (a steering stage planted as the harness
+  // writes one), so B's steer text, its branch and its step ids are in the tree every route can reach.
+  // Only where the lab runs the real research service (run-sessions-tests.ps1); elsewhere it is skipped.
+  let steerPlanted = false;
+  {
+    const root = (await sql<{ r: string }>(`SELECT coalesce(root_job_id, id)::text AS r FROM public.research_jobs WHERE id = $1`, [bJob]))[0]?.r;
+    if (root) {
+      await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload)
+                 VALUES ($1, $2, 'sweepstep', 'stage', 'steering', '{"phase":"plan"}')`, [bJob, root]).catch(() => {});
+      const st = await wb("POST", `/workbench/contract/sessions/${bJob}/steer`, { step_id: "sweepstep", text: M.steer }, B);
+      steerPlanted = st.status === 201;
+      console.log(`sweep: B steered B's session from its card: ${steerPlanted ? "201" : `skipped (${st.status})`}`);
+    }
+  }
   const held = await wb("POST", "/workbench/documents/user-sources", { refinery_id: bRefinery, title: "sweep held source", content: "shared held text for the sweep" }, B);
   assert(held.status < 300, held.text);
   const bHeld: string = held.json.source_id ?? held.json.id ?? held.json.held?.id ?? "";
@@ -177,7 +192,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const attachPng = attachName.replace(/\.txt$/, ".png");
   await Deno.writeTextFile(`${VAULT}/${bDir}/${attachName}`, `${attachSecret}\n`);
   await Deno.writeFile(`${VAULT}/${bDir}/${attachPng}`, new TextEncoder().encode(`\x89PNG ${attachSecret}`));
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret };
+  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, ...(steerPlanted ? { step: "sweepstep" } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;

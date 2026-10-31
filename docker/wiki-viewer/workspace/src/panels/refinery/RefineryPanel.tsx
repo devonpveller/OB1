@@ -152,6 +152,9 @@ export function RefineryPanel(p: PanelProps) {
           : <span>no refinery for this document</span>}
         leaves={leaves}
         actions={actions}
+        /* P4b: a session card's link back to an idea opens its room (focus: "room") */
+        open={p.params.focus === "room"}
+        selected={p.params.focus === "room" ? "room" : null}
         empty="nothing in the refinery yet"
       />
       {flags.length > 0 && (

@@ -6,8 +6,9 @@ import { registerLifecycle } from "./routes/lifecycle.ts";
 import { registerRefinery } from "./routes/refinery.ts";
 import { registerReferences } from "./routes/references.ts";
 import { registerSystem } from "./routes/system.ts";
+import { registerSessions } from "./routes/sessions.ts";
 
-export const CONTRACT_VERSION = "0.2.0"; // 0.2.0: P2a reference records (additive)
+export const CONTRACT_VERSION = "0.3.0"; // 0.2.0: P2a reference records; 0.3.0: P4b running sessions (additive)
 
 export function createContractApp(deps: ContractDeps) {
   const app = newApp();
@@ -16,6 +17,7 @@ export function createContractApp(deps: ContractDeps) {
   registerRefinery(app, deps);
   registerReferences(app, deps);
   registerSystem(app, deps);
+  registerSessions(app, deps);
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",
     description: "the shared secret Caddy injects (G7); the browser never holds it",

@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Open Brain retrieval contract",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "The typed retrieval contract every panel and MCP client reads the knowledge base through (research-workbench P0). The API owns record states; every enumerated kind is a registry (x-registry), never a closed list."
   },
   "security": [
@@ -1570,59 +1570,6 @@
           "result_summary"
         ]
       },
-      "NotImplemented": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "example": "not_implemented",
-            "description": "always not_implemented"
-          },
-          "operation": {
-            "type": "string",
-            "minLength": 1,
-            "x-registry": "implementation_states",
-            "example": "watches",
-            "description": "A key of the `implementation_states` registry (GET /workbench/contract/registries/implementation_states)."
-          },
-          "lands_in": {
-            "type": "string",
-            "example": "P5b"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "status",
-          "operation",
-          "lands_in",
-          "message"
-        ]
-      },
-      "SteerRequest": {
-        "type": "object",
-        "properties": {
-          "step_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "text": {
-            "type": "string",
-            "minLength": 1
-          },
-          "context_snapshot": {
-            "type": "object",
-            "additionalProperties": {
-              "nullable": true
-            }
-          }
-        },
-        "required": [
-          "step_id",
-          "text"
-        ]
-      },
       "Jobs": {
         "type": "object",
         "properties": {
@@ -1692,6 +1639,36 @@
           "created_at",
           "updated_at",
           "detail"
+        ]
+      },
+      "NotImplemented": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "not_implemented",
+            "description": "always not_implemented"
+          },
+          "operation": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "implementation_states",
+            "example": "watches",
+            "description": "A key of the `implementation_states` registry (GET /workbench/contract/registries/implementation_states)."
+          },
+          "lands_in": {
+            "type": "string",
+            "example": "P5b"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "operation",
+          "lands_in",
+          "message"
         ]
       },
       "Dependence": {
@@ -3952,6 +3929,473 @@
           "retired_at",
           "superseded_by"
         ]
+      },
+      "Sessions": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionCard"
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ]
+      },
+      "SessionCard": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "job_states",
+            "example": "running",
+            "description": "A key of the `job_states` registry (GET /workbench/contract/registries/job_states)."
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "record_states",
+            "example": "loading",
+            "description": "A key of the `record_states` registry (GET /workbench/contract/registries/record_states)."
+          },
+          "origin": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "origins",
+            "example": "mattermost",
+            "description": "A key of the `origins` registry (GET /workbench/contract/registries/origins)."
+          },
+          "badge": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "label"
+            ],
+            "description": "the origin badge (an idea's job: idea_refinery)"
+          },
+          "link": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "external (href) or panel (panel + params)"
+              },
+              "href": {
+                "type": "string",
+                "nullable": true
+              },
+              "panel": {
+                "type": "string",
+                "nullable": true
+              },
+              "params": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "href",
+              "panel",
+              "params"
+            ],
+            "description": "the link back to the inlet; null when the job carries no reference to one"
+          },
+          "caller": {
+            "type": "string",
+            "nullable": true
+          },
+          "query": {
+            "type": "string",
+            "description": "the session's question; empty on another user's session (07-MULTI-USER)"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "current_artifact": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "label"
+            ]
+          },
+          "waiting_on": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ]
+          },
+          "next_steering_point": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "nullable": true
+              },
+              "phase": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "step_id",
+              "phase"
+            ],
+            "description": "where a steer sent now lands: the latest steering stage (step id for a viewer who may act)"
+          },
+          "tree": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CardBranch"
+            }
+          },
+          "can_act": {
+            "type": "boolean",
+            "description": "the viewer may steer and cancel from the card"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "started_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "finished_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "state",
+          "origin",
+          "badge",
+          "link",
+          "caller",
+          "query",
+          "phase",
+          "current_artifact",
+          "waiting_on",
+          "next_steering_point",
+          "tree",
+          "can_act",
+          "created_at",
+          "started_at",
+          "finished_at"
+        ]
+      },
+      "CardBranch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "parent_job_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "branch_kind": {
+            "type": "string",
+            "example": "root",
+            "description": "root | steer | gap | interhub | idea (P4a)"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "job_states",
+            "example": "running",
+            "description": "A key of the `job_states` registry (GET /workbench/contract/registries/job_states)."
+          },
+          "open": {
+            "type": "boolean",
+            "description": "queued or running"
+          },
+          "pending": {
+            "type": "boolean",
+            "description": "a branch (not the root) that has not started yet - a steer just accepted"
+          },
+          "rooted_step_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "the step it was steered at; only for a viewer who may act"
+          },
+          "query": {
+            "type": "string",
+            "description": "the branch's question; empty on another user's session"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "parent_job_id",
+          "branch_kind",
+          "status",
+          "open",
+          "pending",
+          "rooted_step_id",
+          "query",
+          "created_at"
+        ]
+      },
+      "Flow": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "withheld": {
+            "type": "boolean",
+            "description": "another user's session: its per-source flow is theirs"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "job_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                  "example": "99999999-9999-4999-8999-999999999999",
+                  "description": "uuid"
+                },
+                "stages": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string"
+                      },
+                      "at": {
+                        "type": "string",
+                        "example": "2026-10-17T12:00:00.000Z",
+                        "description": "ISO-8601 timestamp"
+                      },
+                      "trail": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "nullable": true
+                        }
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "at",
+                      "trail"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "url",
+                "job_id",
+                "stages"
+              ]
+            }
+          }
+        },
+        "required": [
+          "session_id",
+          "running",
+          "withheld",
+          "sources"
+        ]
+      },
+      "SteerResult": {
+        "type": "object",
+        "properties": {
+          "steer": {
+            "type": "object",
+            "properties": {
+              "steer_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "99999999-9999-4999-8999-999999999999",
+                "description": "uuid"
+              },
+              "child_job_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "99999999-9999-4999-8999-999999999999",
+                "description": "uuid"
+              },
+              "root_job_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "99999999-9999-4999-8999-999999999999",
+                "description": "uuid"
+              },
+              "parent_job_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "99999999-9999-4999-8999-999999999999",
+                "description": "uuid"
+              },
+              "step_id": {
+                "type": "string"
+              },
+              "steer_kind": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "steer_id",
+              "child_job_id",
+              "root_job_id",
+              "parent_job_id",
+              "step_id",
+              "steer_kind"
+            ]
+          },
+          "card": {
+            "$ref": "#/components/schemas/SessionCard"
+          }
+        },
+        "required": [
+          "steer",
+          "card"
+        ]
+      },
+      "SteerRequest": {
+        "type": "object",
+        "properties": {
+          "step_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "context_snapshot": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "contract": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "add_source": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "url"
+            ],
+            "description": "add a source: its text, or (blank) fetched through the egress proxy"
+          }
+        },
+        "required": [
+          "step_id",
+          "text"
+        ]
+      },
+      "CancelResult": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "status": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "status"
+        ]
+      },
+      "CancelRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
       }
     },
     "parameters": {}
@@ -5502,7 +5946,7 @@
           "retrieval contract (appendix)"
         ],
         "summary": "stream(sessionId) - server-sent session snapshots until the session ends",
-        "description": "text/event-stream. Each event is `event: snapshot` (or `end` for the last) with a JSON `data:` line shaped as the StreamEvent component. A terminal session yields one snapshot and an end event.",
+        "description": "text/event-stream. Each event is `event: snapshot` (or `end` for the last) with a JSON `data:` line shaped as the StreamEvent component. A terminal session yields one snapshot and an end event. P4b: while the session or a branch of its tree is open, an `event: card` carries the running-session card and the tree's events since the last one; the stream ends when nothing in the tree is open.",
         "x-appendix-call": "stream",
         "x-event-schema": "#/components/schemas/StreamEvent",
         "parameters": [
@@ -5577,112 +6021,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/workbench/contract/sessions/{id}/steer": {
-      "post": {
-        "operationId": "steer",
-        "tags": [
-          "retrieval contract (appendix)"
-        ],
-        "summary": "steer(sessionId, stepId, text, contextSnapshot) - lands with the job tree in P4a",
-        "x-appendix-call": "steer",
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "description": "research job id"
-            },
-            "required": true,
-            "description": "research job id",
-            "name": "id",
-            "in": "path",
-            "example": "99999999-9999-4999-8999-999999999999"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "example": {
-                "step_id": "s1",
-                "text": "narrow to erasure"
-              },
-              "schema": {
-                "$ref": "#/components/schemas/SteerRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "400": {
-            "description": "invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "refused by the lifecycle (the body says why)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "internal error or a response that violated its schema",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "typed not_implemented",
-            "content": {
-              "application/json": {
-                "example": {
-                  "status": "not_implemented",
-                  "operation": "steer",
-                  "lands_in": "P4a",
-                  "message": "steer is part of the contract; its backing lands in P4a"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplemented"
                 }
               }
             }
@@ -9068,6 +9406,580 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/sessions": {
+      "get": {
+        "operationId": "sessions",
+        "tags": [
+          "running sessions (P4b)"
+        ],
+        "summary": "sessions(state) - every running session as one card (any origin), newest first",
+        "description": "state=running (default): queued or running, or a finished root with an open branch; state=recent adds those finished in the last day. Another user's card carries no original prompt, inlet, branch text or step id (07-MULTI-USER).",
+        "x-appendix-call": "sessions",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "running | recent"
+            },
+            "required": false,
+            "description": "running | recent",
+            "name": "state",
+            "in": "query",
+            "example": "running"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-200, default 50"
+            },
+            "required": false,
+            "description": "1-200, default 50",
+            "name": "limit",
+            "in": "query",
+            "example": "50"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the cards",
+            "content": {
+              "application/json": {
+                "example": {
+                  "sessions": [
+                    {
+                      "id": "99999999-9999-4999-8999-999999999999",
+                      "status": "running",
+                      "state": "loading",
+                      "origin": "mattermost",
+                      "badge": {
+                        "key": "mattermost",
+                        "label": "Mattermost"
+                      },
+                      "link": null,
+                      "caller": "agent-org",
+                      "query": "fixture question",
+                      "phase": "plan",
+                      "current_artifact": {
+                        "kind": "stage",
+                        "label": "plan"
+                      },
+                      "waiting_on": {
+                        "kind": "stage",
+                        "detail": "plan"
+                      },
+                      "next_steering_point": {
+                        "step_id": "s2",
+                        "phase": "plan"
+                      },
+                      "tree": [
+                        {
+                          "id": "99999999-9999-4999-8999-999999999999",
+                          "parent_job_id": null,
+                          "branch_kind": "root",
+                          "status": "running",
+                          "open": true,
+                          "pending": false,
+                          "rooted_step_id": null,
+                          "query": "fixture question",
+                          "created_at": "2026-10-17T12:00:00.000Z"
+                        }
+                      ],
+                      "can_act": true,
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "started_at": "2026-10-17T12:00:00.000Z",
+                      "finished_at": null
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Sessions"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/sessions/{id}/flow": {
+      "get": {
+        "operationId": "flow",
+        "tags": [
+          "running sessions (P4b)"
+        ],
+        "summary": "flow(sessionId) - every source the session's tree met, with its stages and their trail",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "research job id"
+            },
+            "required": true,
+            "description": "research job id",
+            "name": "id",
+            "in": "path",
+            "example": "99999999-9999-4999-8999-999999999999"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the per-source flow",
+            "content": {
+              "application/json": {
+                "example": {
+                  "session_id": "99999999-9999-4999-8999-999999999999",
+                  "running": true,
+                  "withheld": false,
+                  "sources": [
+                    {
+                      "url": "https://example.org/a",
+                      "job_id": "99999999-9999-4999-8999-999999999999",
+                      "stages": [
+                        {
+                          "kind": "admitted",
+                          "at": "2026-10-17T12:00:00.000Z",
+                          "trail": {
+                            "id": "t1",
+                            "url": "https://example.org/a",
+                            "kind": "admitted",
+                            "claim_kind": "general",
+                            "family": "general",
+                            "score": 0.7,
+                            "total": 0.7,
+                            "floor": 0.4,
+                            "model_version": "d15",
+                            "signals": {},
+                            "reasons": [
+                              "family general"
+                            ],
+                            "found_via": null,
+                            "path": [],
+                            "source_url": null
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Flow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/sessions/{id}/steer": {
+      "post": {
+        "operationId": "steer",
+        "tags": [
+          "running sessions (P4b)"
+        ],
+        "summary": "steer(sessionId, stepId, text, contextSnapshot) - a branch at a steering point; narrow and add-source too",
+        "description": "Opens a P4a branch rooted at the step (a STEERING stage only: a due-process step is 409). The answer carries the card with the new branch pending. `contract` narrows (never widens) the parent's; `add_source` seeds the branch with a source (its text, or fetched through the egress proxy). The research service records the actor (research_steers.actor_sub). 404 when the viewer may not act on the job.",
+        "x-appendix-call": "steer",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "research job id"
+            },
+            "required": true,
+            "description": "research job id",
+            "name": "id",
+            "in": "path",
+            "example": "99999999-9999-4999-8999-999999999999"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "step_id": "s1",
+                "text": "narrow to erasure"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/SteerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the branch, and the card with it pending",
+            "content": {
+              "application/json": {
+                "example": {
+                  "steer": {
+                    "steer_id": "f3000000-0000-4000-8000-000000000001",
+                    "child_job_id": "f3000000-0000-4000-8000-000000000002",
+                    "root_job_id": "99999999-9999-4999-8999-999999999999",
+                    "parent_job_id": "99999999-9999-4999-8999-999999999999",
+                    "step_id": "s2",
+                    "steer_kind": "human"
+                  },
+                  "card": {
+                    "id": "99999999-9999-4999-8999-999999999999",
+                    "status": "running",
+                    "state": "loading",
+                    "origin": "mattermost",
+                    "badge": {
+                      "key": "mattermost",
+                      "label": "Mattermost"
+                    },
+                    "link": null,
+                    "caller": "agent-org",
+                    "query": "fixture question",
+                    "phase": "plan",
+                    "current_artifact": {
+                      "kind": "stage",
+                      "label": "plan"
+                    },
+                    "waiting_on": {
+                      "kind": "stage",
+                      "detail": "plan"
+                    },
+                    "next_steering_point": {
+                      "step_id": "s2",
+                      "phase": "plan"
+                    },
+                    "tree": [
+                      {
+                        "id": "99999999-9999-4999-8999-999999999999",
+                        "parent_job_id": null,
+                        "branch_kind": "root",
+                        "status": "running",
+                        "open": true,
+                        "pending": false,
+                        "rooted_step_id": null,
+                        "query": "fixture question",
+                        "created_at": "2026-10-17T12:00:00.000Z"
+                      },
+                      {
+                        "id": "f3000000-0000-4000-8000-000000000002",
+                        "parent_job_id": "99999999-9999-4999-8999-999999999999",
+                        "branch_kind": "steer",
+                        "status": "queued",
+                        "open": true,
+                        "pending": true,
+                        "rooted_step_id": "s2",
+                        "query": "narrow to erasure",
+                        "created_at": "2026-10-17T12:00:00.000Z"
+                      }
+                    ],
+                    "can_act": true,
+                    "created_at": "2026-10-17T12:00:00.000Z",
+                    "started_at": "2026-10-17T12:00:00.000Z",
+                    "finished_at": null
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SteerResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the research service is not configured",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "the research service is not configured for the workspace (RESEARCH_URL, RESEARCH_WORKSPACE_KEY)"
+                },
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/sessions/{id}/cancel": {
+      "post": {
+        "operationId": "cancelSession",
+        "tags": [
+          "running sessions (P4b)"
+        ],
+        "summary": "cancel a session (or one branch): a queued one at once, a running one within moments",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "research job id"
+            },
+            "required": true,
+            "description": "research job id",
+            "name": "id",
+            "in": "path",
+            "example": "99999999-9999-4999-8999-999999999999"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "reason": "no longer needed"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CancelRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the outcome (cancelled, cancelling, or already terminal)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "job_id": "99999999-9999-4999-8999-999999999999",
+                  "status": "cancelling"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the research service is not configured",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "the research service is not configured for the workspace (RESEARCH_URL, RESEARCH_WORKSPACE_KEY)"
+                },
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }

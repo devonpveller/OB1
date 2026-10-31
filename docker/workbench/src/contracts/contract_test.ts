@@ -151,10 +151,13 @@ Deno.test("calls whose backing lands later answer a typed not_implemented that v
     assert(NotImplemented.safeParse(b).success, `${path}: ${JSON.stringify(b)}`);
     assertEquals(b.status, "not_implemented");
   }
+  // P4b: steer has its backing now (the P4a door) - it is no longer a typed stub; with no database it
+  // answers an error, never 501
   const steer = await a.request("/workbench/contract/sessions/99999999-9999-4999-8999-999999999999/steer", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ step_id: "s", text: "t" }),
   });
-  assertEquals(steer.status, 501);
+  assert(steer.status !== 501, `steer still answers ${steer.status}`);
+  assert(!ops().some((o) => o.op.operationId === "steer" && (o.op.responses as J)["501"]), "steer documents no 501");
 });
 
 Deno.test("D12: the document listing is exactly title, path, updated, outbound links - a body cannot pass", () => {

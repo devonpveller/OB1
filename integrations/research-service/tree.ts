@@ -210,16 +210,27 @@ export async function treeEstimate(c: Q, rootId: string): Promise<{ estimate: st
   return { estimate: (row.topic_estimate ?? "").trim() || row.query, origin: row.query };
 }
 
+/** rw-p4b-sessions: the actor_sub a system-opened branch (a D15 gap, a D1 inter-hub gap) records. */
+export const GAP_ACTOR = "system:research";
+
+/** An add-source steer's sources (the card's "add a source"): url + title + the text to seed. */
+export interface SeedSource { url: string; title: string; content: string }
+export const MAX_STEER_SEEDS = 5;
+const MAX_SEED_CHARS = 200_000;
+
 async function insertBranch(
   c: Q, parent: JobRow, o: {
     kind: "steer" | "gap" | "interhub"; text: string; query: string; stepId: string; contract: ResearchContract | null;
     gapRef?: string | null; gap?: Record<string, unknown> | null; caller?: string | null; context?: unknown;
+    actorSub: string; seedSources?: SeedSource[] | null;
   },
 ): Promise<BranchOpened | null> {
   const rootId = parent.root_job_id ?? parent.id;
   const { estimate } = await treeEstimate(c, rootId);
   const anchor = parent.query; // the child's anchor IS the parent's research_jobs.query (never a fresh one)
-  const options = inheritOptions(parent.options ?? {}, o.contract, { lane: "research-branch" });
+  const options = inheritOptions(parent.options ?? {}, o.contract, {
+    lane: "research-branch", ...(o.seedSources?.length ? { seed_sources: o.seedSources } : {}),
+  });
   const ins = await c.queryObject<{ id: string }>(
     `INSERT INTO public.research_jobs
        (status, origin, query, thread_id, options, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor, gap_ref)
@@ -233,11 +244,11 @@ async function insertBranch(
   const steerKind = STEER_KIND_OF[o.kind];
   const st = await c.queryObject<{ id: string }>(
     `INSERT INTO public.research_steers
-       (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, gap, caller, context_snapshot)
-     VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb)
+       (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, gap, caller, context_snapshot, actor_sub)
+     VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb, $12)
      RETURNING id::text`,
     [rootId, parent.id, childId, steerKind, o.stepId, o.text, estimate, anchor,
-     o.gap ? JSON.stringify(o.gap) : null, o.caller ?? null, o.context === undefined ? null : JSON.stringify(o.context)],
+     o.gap ? JSON.stringify(o.gap) : null, o.caller ?? null, o.context === undefined ? null : JSON.stringify(o.context), o.actorSub],
   );
   const steerId = st.rows[0].id;
   if (o.kind === "steer") {
@@ -254,6 +265,21 @@ async function insertBranch(
   return { child_job_id: childId, steer_id: steerId, root_job_id: rootId, parent_job_id: parent.id, step_id: o.stepId, steer_kind: steerKind, topic_estimate: estimate, anchor };
 }
 
+/** An add-source steer's seeds, validated: 1..MAX_STEER_SEEDS of {url, title, content} with text. */
+export function seedSourcesOf(v: unknown): SeedSource[] | null {
+  if (v === undefined || v === null) return null;
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_STEER_SEEDS) {
+    throw new SteerError(400, "bad_request", `seed_sources is a list of 1..${MAX_STEER_SEEDS} sources`);
+  }
+  return v.map((s) => {
+    const o = (s ?? {}) as Record<string, unknown>;
+    const url = String(o.url ?? "").trim(), title = String(o.title ?? "").trim(), content = String(o.content ?? "");
+    if (!url || !content.trim()) throw new SteerError(400, "bad_request", "an added source needs its url and its text");
+    if (content.length > MAX_SEED_CHARS) throw new SteerError(400, "bad_request", `an added source is at most ${MAX_SEED_CHARS} characters`);
+    return { url: url.slice(0, 2000), title: (title || url).slice(0, 500), content };
+  });
+}
+
 /** States a steer may branch from. A cancelled or failed line is not steered (re-run it instead). */
 export const STEERABLE = new Set(["queued", "running", "done"]);
 
@@ -264,12 +290,21 @@ export const STEERABLE = new Set(["queued", "running", "done"]);
  * not change.
  */
 export async function createSteer(
-  c: Q, req: { parentId: string; stepId: string; text: string; contract?: unknown; caller?: string | null; contextSnapshot?: unknown },
+  c: Q, req: {
+    parentId: string; stepId: string; text: string; contract?: unknown; caller?: string | null; contextSnapshot?: unknown;
+    /** rw-p4b-sessions: who acted (research_steers.actor_sub) - required */
+    actorSub?: string | null;
+    /** rw-p4b-sessions: add-source - the child is seeded with these (the parent's seeds are not inherited) */
+    seedSources?: unknown;
+  },
   resolve: (options: Record<string, unknown> | null) => ResolvedContract | null,
 ): Promise<BranchOpened> {
   const text = (req.text ?? "").trim();
   if (!text) throw new SteerError(400, "bad_request", "steer text is required");
   if (!req.stepId?.trim()) throw new SteerError(400, "bad_request", "step_id is required");
+  const actorSub = (req.actorSub ?? "").trim();
+  if (!actorSub) throw new SteerError(400, "bad_request", "a steer records who acted (actor_sub)");
+  const seeds = seedSourcesOf(req.seedSources);
   await c.queryObject("BEGIN");
   try {
     const p = await c.queryObject<JobRow>(`SELECT ${JOB_COLS} FROM public.research_jobs WHERE id = $1::uuid FOR UPDATE`, [req.parentId]);
@@ -284,6 +319,7 @@ export async function createSteer(
     catch (e) { if (e instanceof ContractError) throw new SteerError(400, "contract", e.message); throw e; }
     const opened = await insertBranch(c, parent, {
       kind: "steer", text, query: text, stepId: req.stepId.trim(), contract, caller: req.caller ?? null, context: req.contextSnapshot,
+      actorSub, seedSources: seeds,
     });
     await c.queryObject("COMMIT");
     return opened!;
@@ -429,7 +465,7 @@ export async function openGapBranches(
       `SELECT count(*)::int AS n FROM public.research_jobs WHERE root_job_id = $1::uuid AND branch_kind IN ('gap','interhub')`, [rootId]);
     if (Number(n.rows[0]?.n ?? 0) >= maxPerTree) break;
     const contract = narrowContract(resolve(parent.options), undefined); // a gap branch keeps the parent's contract
-    const opened = await insertBranch(c, parent, { kind: g.kind, text: g.text, query: g.query, stepId, contract, gapRef: g.ref, gap: g.gap });
+    const opened = await insertBranch(c, parent, { kind: g.kind, text: g.text, query: g.query, stepId, contract, gapRef: g.ref, gap: g.gap, actorSub: GAP_ACTOR });
     if (opened) out.push(opened);
   }
   return out;

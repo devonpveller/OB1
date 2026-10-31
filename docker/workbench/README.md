@@ -288,6 +288,22 @@ records a `suppressed` trail event, re-scores the source's claims, and `POST
 The integration test (`src/contracts/integration_test.ts`) runs only against the disposable
 database `contract-test/run-contract-tests.ps1` creates; it suppresses, severs and erases rows.
 
+## Running sessions (research-workbench P4b)
+
+`GET /workbench/contract/sessions` lists every running research session as one card of one shape,
+whatever started it (D17): origin badge, link back to the inlet where the job carries a reference
+(OWUI chat under `WORKSPACE_OWUI_BASE_URL`, shipped blank = no link; the workspace document; an idea's
+refinery room; a manual job its own session; Mattermost and notebook: badge only), phase, current
+artifact, waiting-on, the next steering point and the branch tree. `POST .../sessions/{id}/steer`
+(with `contract` = narrow, `add_source` = add a source) and `.../cancel` go to the research service's
+P4a door under `RESEARCH_WORKSPACE_KEY`, naming the seam's subject, actor and admin flag; only a
+steering stage is a steering point (a due-process step is 409). Who may act: a user's job its owner;
+a service's job an admin (in single-user mode `WORKSPACE_DEFAULT_SUB` counts as admin).
+`.../sessions/{id}/flow` is the per-source flow with each stage's trail. The session stream adds an
+`event: card` while anything in the tree is open. Another user's card carries no original prompt, inlet,
+branch text, step id or per-source flow (07-MULTI-USER). Code: `src/sessions/`,
+`src/contracts/routes/sessions.ts`; lab: `contract-test/run-sessions-tests.ps1`.
+
 ## References as first-class records (research-workbench P2a)
 
 A reference is held once, in `reference_records` (`../init-references.sql`, initdb slot 240;

@@ -53,6 +53,28 @@ export type AdmissionRequest = {
   candidate?: AdmissionCandidate;
 };
 
+export type CancelRequest = {
+  reason?: string;
+};
+
+export type CancelResult = {
+  job_id: string;
+  status: string;
+  note?: string;
+};
+
+export type CardBranch = {
+  id: string;
+  parent_job_id: string | null;
+  branch_kind: string;
+  status: string; /** registry: job_states */
+  open: boolean;
+  pending: boolean;
+  rooted_step_id: string | null;
+  query: string;
+  created_at: string;
+};
+
 export type ChunkContext = {
   chunk_id: string;
   source_id: string;
@@ -210,6 +232,21 @@ export type External = {
   state: string; /** registry: record_states */
   location: string | null;
   note: string;
+};
+
+export type Flow = {
+  session_id: string;
+  running: boolean;
+  withheld: boolean;
+  sources: Array<{
+    url: string;
+    job_id: string;
+    stages: Array<{
+      kind: string;
+      at: string;
+      trail: Record<string, unknown>;
+    }>;
+  }>;
 };
 
 export type GraphLink = {
@@ -655,6 +692,43 @@ export type Session = {
   };
 };
 
+export type SessionCard = {
+  id: string;
+  status: string; /** registry: job_states */
+  state: string; /** registry: record_states */
+  origin: string; /** registry: origins */
+  badge: {
+    key: string;
+    label: string;
+  };
+  link: {
+    kind: string;
+    href: string | null;
+    panel: string | null;
+    params: Record<string, string>;
+  } | null;
+  caller: string | null;
+  query: string;
+  phase: string;
+  current_artifact: {
+    kind: string;
+    label: string;
+  };
+  waiting_on: {
+    kind: string;
+    detail: string;
+  };
+  next_steering_point: {
+    step_id: string | null;
+    phase: string;
+  } | null;
+  tree: Array<CardBranch>;
+  can_act: boolean;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
 export type SessionSummary = {
   id: string;
   status: string; /** registry: job_states */
@@ -663,6 +737,10 @@ export type SessionSummary = {
   refinery_id: string | null;
   created_at: string;
   finished_at: string | null;
+};
+
+export type Sessions = {
+  sessions: Array<SessionCard>;
 };
 
 export type Setting = {
@@ -711,6 +789,24 @@ export type SteerRequest = {
   step_id: string;
   text: string;
   context_snapshot?: Record<string, unknown>;
+  contract?: Record<string, unknown>;
+  add_source?: {
+    url: string;
+    title?: string;
+    content?: string;
+  };
+};
+
+export type SteerResult = {
+  steer: {
+    steer_id: string;
+    child_job_id: string;
+    root_job_id: string;
+    parent_job_id: string;
+    step_id: string;
+    steer_kind: string;
+  };
+  card: SessionCard;
 };
 
 export type SuppressRequest = {

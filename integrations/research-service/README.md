@@ -122,6 +122,13 @@ GET  /health                     -> { ok, db, model }   (`ok` is DB-only)
   llm-queue's research-branch lane read back from `/observe/queue/estimate` (no
   `RESEARCH_MAX_CONCURRENCY`). Branch jobs use `RESEARCH_BRANCH_LLM_KEY` (operator-provisioned
   LiteLLM virtual key, `metadata.lane=research-branch`). Lab test: `run-trees-e2e.ps1`.
+- Who may steer or cancel (rw-identity round 5; P4b, operator 2026-10-30): a user's job its owner
+  only; a job a service started (owner `service:<caller>`, e.g. agent-org) its service AND an admin;
+  a job with no recorded owner `WORKSPACE_DEFAULT_SUB`. Anyone else: 404. Only the workspace's own key
+  may say who acted (`x-actor-sub`) and that the actor is an admin (`x-actor-admin: 1`), and only with
+  `x-on-behalf-of`; any other key naming either is 403 (`viewer.ts` `actorOf`). Every steer records
+  `research_steers.actor_sub` (a gap / inter-hub branch: `system:research`). A steer may carry
+  `seed_sources` (`[{url, title, content}]`, 1-5): the branch is seeded with them (add-source).
 
 ## Inlets
 

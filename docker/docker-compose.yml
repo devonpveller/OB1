@@ -178,6 +178,7 @@ services:
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
       - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity
       - ./init-idea-schedule.sql:/docker-entrypoint-initdb.d/300-init-idea-schedule.sql:ro # research-workbench rw-idea-schedule (fresh-volume only; live: psql -f; revert: revert-idea-schedule.sql)
+      - ./init-research-sessions.sql:/docker-entrypoint-initdb.d/320-init-research-sessions.sql:ro # research-workbench rw-p4b-sessions: research_steers.actor_sub (fresh-volume only; live: psql -f WITH the new research image; revert: revert-research-sessions.sql)
     networks:
       - obnet
     restart: unless-stopped
@@ -1376,6 +1377,9 @@ services:
       # read state these are) until sign-on lands - operator-set, see .env.example. Blank = "operator".
       WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
       WORKSPACE_DEFAULT_NAME: ${WORKSPACE_DEFAULT_NAME:-}
+      # research-workbench P4b: the running-session card of an Open WebUI job links back to its chat at
+      # <this>/c/<chat id>. SHIPPED BLANK = no link (the card keeps its OWUI badge). http(s) only.
+      WORKSPACE_OWUI_BASE_URL: ${WORKSPACE_OWUI_BASE_URL:-}
       # rw-identity2: sign-in is Authentik FORWARD-AUTH at the operator's Traefik; the workbench only
       # verifies the outpost's signed token (X-authentik-jwt, HS256 with the proxy provider's client
       # secret) on every request - no outbound call, no session. Env-only, SHIPPED INERT: blank = no

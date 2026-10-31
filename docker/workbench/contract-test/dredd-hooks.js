@@ -12,9 +12,13 @@ const hooks = require('hooks');
 
 const ISO = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})/g;
 
+// 4. P4b (rw-p4b-sessions): steer and cancel act through the research service, which the Dredd lab
+//    does not run; contract-test/run-sessions-tests.ps1 exercises them against the real one.
+const NEEDS_RESEARCH = /\/sessions\/\{id\}\/(steer|cancel)/;
+
 hooks.beforeEach((transaction, done) => {
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501');
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || ''));
   done();
 });
 

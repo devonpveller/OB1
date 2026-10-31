@@ -15,7 +15,9 @@ import {
 } from "../schemas/common.ts";
 import { ChunkContext, DiffCheck, DiffCheckRequest, Quality, Reference } from "../schemas/sources.ts";
 import { Claims, Neighbours, Search, Timeline, Trail } from "../schemas/knowledge.ts";
-import { Jobs, Session, SteerRequest, StreamEvent } from "../schemas/sessions.ts";
+import { Jobs, Session, StreamEvent } from "../schemas/sessions.ts";
+import { card as sessionCard, events as sessionEvents } from "../../sessions/repo.ts";
+import { owuiBase } from "../../sessions/cards.ts";
 import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
 import { body, type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send, wire } from "./http.ts";
@@ -269,7 +271,9 @@ function registerSessionReads(app: ContractApp, deps: ContractDeps) {
     method: "get", path: `${PREFIX}/sessions/{id}/stream`, operationId: "stream", tags: T,
     summary: "stream(sessionId) - server-sent session snapshots until the session ends",
     description: "text/event-stream. Each event is `event: snapshot` (or `end` for the last) with a JSON `data:` " +
-      "line shaped as the StreamEvent component. A terminal session yields one snapshot and an end event.",
+      "line shaped as the StreamEvent component. A terminal session yields one snapshot and an end event. " +
+      "P4b: while the session or a branch of its tree is open, an `event: card` carries the running-session card " +
+      "and the tree's events since the last one; the stream ends when nothing in the tree is open.",
     "x-appendix-call": "stream", "x-event-schema": "#/components/schemas/StreamEvent",
     request: { params: z.object({ id: pathParam("id", FX.job, "research job id") }) },
     responses: {
@@ -281,28 +285,31 @@ function registerSessionReads(app: ContractApp, deps: ContractDeps) {
     const owner = await identityOf(c);
     const first = await ses.session(deps.db, id, owner).catch(() => null);
     if (!first) return c.json({ error: "no session with this id" }, 404);
+    const owui = owuiBase();
     return streamSSE(c, async (s) => {
-      let last = "";
+      let last = "", lastCard = "", after = 0;
       let snap: Awaited<ReturnType<typeof ses.session>> = first;
       while (snap) {
         const data = JSON.stringify(StreamEvent.parse(wire({ event: "snapshot", session: snap })));
         if (data !== last) await s.writeSSE({ event: "snapshot", data });
         last = data;
-        if (ses.isTerminal(snap.status)) break;
+        // P4b: the card, while anything in the tree is open (a finished session with nothing open sends none)
+        const l = await sessionCard(deps.db, id, owner, owui);
+        const open = !!l && (l.card.state === "loading");
+        if (l && (open || lastCard)) {
+          const evs = await sessionEvents(deps.db, l.rootId, l.foreign, after);
+          if (evs.length) after = Number(evs[evs.length - 1].id);
+          const cd = JSON.stringify(StreamEvent.parse(wire({ event: "card", session: snap, card: l.card, events: evs })));
+          if (cd !== lastCard || evs.length) await s.writeSSE({ event: "card", data: cd });
+          lastCard = cd;
+        }
+        if (ses.isTerminal(snap.status) && !open) break;
         await s.sleep(deps.streamPollMs);
         snap = await ses.session(deps.db, id, owner);
       }
       await s.writeSSE({ event: "end", data: JSON.stringify({ event: "end", session_id: id }) });
     }) as never;
   });
-
-  op(app, createRoute({
-    method: "post", path: `${PREFIX}/sessions/{id}/steer`, operationId: "steer", tags: T,
-    summary: "steer(sessionId, stepId, text, contextSnapshot) - lands with the job tree in P4a",
-    "x-appendix-call": "steer",
-    request: { params: z.object({ id: pathParam("id", FX.job, "research job id") }), body: body(SteerRequest, EX.steerRequest) },
-    responses: { 501: json(NotImplemented, EX.notImplemented("steer", "P4a"), "typed not_implemented"), ...errors },
-  }), (c) => c.json(notImplemented("steer", "P4a"), 501));
 
   op(app, createRoute({
     method: "get", path: `${PREFIX}/jobs`, operationId: "jobs", tags: T,
