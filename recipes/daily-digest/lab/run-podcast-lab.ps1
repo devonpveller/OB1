@@ -324,12 +324,13 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   # ------------------------------------------------------------------ 5c. quiesce detection
   Write-Host '[5c] C12: verify-quiesced detects a write to ON'
   $manIn = "/mounts/podcast-archive/on-archive/$($man.Name)"
-  $o = Pod 900 $capEnv @('run', '-A', 'on-capture.ts', 'verify-quiesced', "--manifest=$manIn"); Save 'c12-quiesced-clean.log' ($o -split "`n" | Select-Object -First 4 | Out-String)
+  $o = Pod 900 $capEnv @('run', '-A', 'on-capture.ts', 'verify-quiesced', "--manifest=$manIn"); Save 'c12-quiesced-clean.log' $o
   Check ($script:rc -eq 0) 'verify-quiesced on the untouched copy: quiesced (exit 0)'
   # the lab write ON is never allowed live: one CREATE over SurrealDB's HTTP /sql, on the COPY
   $wjs = "const r = await fetch('http://lab-surreal:8000/sql', { method: 'POST', headers: { accept: 'application/json', 'surreal-ns': 'open_notebook', 'surreal-db': 'open_notebook', authorization: 'Basic ' + btoa('root:$surrealPw') }, body: `"CREATE episode SET name = 'a write after the capture', episode_profile = {}, speaker_profile = {};`" }); console.log('WRITE ' + r.status + ' ' + (await r.text()).slice(0, 200));"
   $wo = Dk run --rm --label $label --network $net --entrypoint deno $podTag eval $wjs
-  Check ($wo -match 'WRITE 200 .*"status":"OK"') "a lab write to the ON copy ($((Redact $wo).Substring(0, [Math]::Min(80, $wo.Length))))"  $o = Pod 900 $capEnv @('run', '-A', 'on-capture.ts', 'verify-quiesced', "--manifest=$manIn"); Save 'c12-quiesced-after-write.log' ($o -split "`n" | Select-Object -First 6 | Out-String)
+  Check ($wo -match 'WRITE 200 .*"created"') "a lab write to the ON copy ($((Redact $wo).Substring(0, [Math]::Min(80, $wo.Length))))"
+  $o = Pod 900 $capEnv @('run', '-A', 'on-capture.ts', 'verify-quiesced', "--manifest=$manIn"); Save 'c12-quiesced-after-write.log' ($o -split "`n" | Select-Object -First 6 | Out-String)
   Check ($script:rc -eq 1 -and $o -match '"changed_tables":\s*\[\s*"episode"') 'verify-quiesced after a lab write to ON: NOT quiesced, names the episode table (exit 1)'
 
   # ------------------------------------------------------------------ 5e. the front end never offers an archived episode

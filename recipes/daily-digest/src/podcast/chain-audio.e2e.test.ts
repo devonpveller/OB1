@@ -18,7 +18,8 @@ import { dirOf } from "./podcast-service.ts";
 
 guardNetwork();
 const RECIPE = dirOf(new URL("../../link-enrich.ts", import.meta.url).href);
-const DATE = "2026-10-30";
+// today (UTC): the runner reads a 24 h window, so a fixed date ages out of it
+const DATE = new Date().toISOString().slice(0, 10);
 
 async function hasFfmpeg(): Promise<boolean> {
   try {
@@ -73,8 +74,8 @@ Deno.test({
     });
     const thought = {
       id: "t1", content: `[Email from Test Letter <letter@example.test> | Subject: Routing notes | Date: ${DATE}]\n${NEWSLETTER_BODY}`,
-      metadata: { gmail_id: "g1", gmail_thread_id: "g1", gmail_labels: ["brain/test"], chunk_index: 0, chunk_count: 1, email_date: `${DATE}T04:00:00Z`, topics: ["inference"] },
-      created_at: `${DATE}T04:00:00Z`,
+      metadata: { gmail_id: "g1", gmail_thread_id: "g1", gmail_labels: ["brain/test"], chunk_index: 0, chunk_count: 1, email_date: `${new Date(Date.now() - 3600_000).toISOString()}`, topics: ["inference"] },
+      created_at: `${new Date(Date.now() - 3600_000).toISOString()}`,
     };
     const brain = stubServer(async (req, path) => {
       const u = new URL(req.url);
