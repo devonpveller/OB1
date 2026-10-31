@@ -271,6 +271,16 @@ try {
       $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', "src/contracts/$file5")
     $clean = ($o -replace '\x1b\[[0-9;]*m', '')
     Save "$log5.log" ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|^error|AssertionError|Values are not equal|actual|expected|^PROBE V1|^PROBE N1' } | Select-Object -First 140) -join "`n")
+    # rw-p3b-trust2 F1: the query plans T7 prints (EXPLAIN, seq scans off) - the before / after record
+    if ($tag5 -eq '5a') {
+      $inPlan = $false
+      $plans = foreach ($l in ($clean -split "`n")) {
+        if ($l -match '^PLAN ') { $inPlan = $true }
+        elseif ($inPlan -and ($l -match '^-+ (output|post-test output) end' -or $l -match '\.\.\. (ok|FAILED)')) { $inPlan = $false }
+        if ($inPlan) { $l }
+      }
+      Save 'trust-plans.log' (@($plans) -join "`n")
+    }
     foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
     $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
     if ($Red) {
