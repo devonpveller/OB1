@@ -68,7 +68,7 @@ export interface GatePage {
   text: string;          // intake's clean text (never the raw page)
   title: string | null;  // intake's title, if any
   mediaType: string;     // the allow-listed media type, no parameters
-  provenance: { via: "search-gate"; origin_url: string; final_url: string; redirects: string[]; http_status: number | null; label: string | null };
+  provenance: { via: "search-gate"; origin_url: string; final_url: string; redirects: string[]; http_status: number | null; label: "clean" };
 }
 
 export type GateFetch = (url: string) => Promise<GatePage>;
@@ -98,6 +98,9 @@ export function readAnswer(url: string, j: unknown): GatePage {
     throw new GateRefusal(a.status, a.reason, hs);
   }
   if (a.status !== "ok") throw new GateUnavailable(OFF_SHAPE);
+  // the gate returns a page ONLY when intake labelled it clean (gate.py fetch_and_screen); an ok answer
+  // carrying any other label, or none, is not that answer
+  if (a.label !== "clean") throw new GateUnavailable(OFF_SHAPE);
   if (!str(a.text) || !str(a.content_type) || !MEDIA_TYPES.has(a.content_type)) throw new GateUnavailable(OFF_SHAPE);
   const redirects = Array.isArray(a.redirects) ? a.redirects : [];
   if (!redirects.every(str)) throw new GateUnavailable(OFF_SHAPE);
@@ -106,7 +109,7 @@ export function readAnswer(url: string, j: unknown): GatePage {
     text: a.text,
     title: str(a.title) && a.title.trim() ? a.title.trim() : null,
     mediaType: a.content_type,
-    provenance: { via: "search-gate", origin_url: url, final_url: finalUrl, redirects: redirects as string[], http_status: hs, label: str(a.label) ? a.label : null },
+    provenance: { via: "search-gate", origin_url: url, final_url: finalUrl, redirects: redirects as string[], http_status: hs, label: "clean" },
   };
 }
 

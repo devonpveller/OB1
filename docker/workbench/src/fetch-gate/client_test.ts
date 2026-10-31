@@ -111,6 +111,18 @@ Deno.test("A3: a reason outside the gate's allow-list, an unknown status or a fo
   }
 });
 
+Deno.test("A3/A5 (F1): an ok answer not labelled clean - another label, or none - is off-shape (503); nothing is stored", () => {
+  const url = "http://target.example/a";
+  const base = { status: "ok", url, final_url: url, redirects: [], http_status: 200, content_type: "text/html", text: "x" };
+  for (const a of [{ ...base, label: "suspicious" }, { ...base, label: "Clean" }, { ...base, label: null }, base]) {
+    let e: unknown = null;
+    try { readAnswer(url, a); } catch (x) { e = x; }
+    assert(e instanceof GateUnavailable, JSON.stringify(a));
+    assertEquals((e as GateUnavailable).message, OFF_SHAPE);
+  }
+  assertEquals(readAnswer(url, { ...base, label: "clean" }).text, "x");
+});
+
 Deno.test("A4: the gate unreachable, answering 401/403/503, or answering junk = the stated 503", async () => {
   const unreachable = await assertRejects(() => gateClient(env({ WORKBENCH_GATE_URL: "http://127.0.0.1:9", WORKBENCH_GATE_KEY: KEY }))("http://target.example/a"), GateUnavailable);
   assertEquals([unreachable.httpStatus, unreachable.message], [503, UNAVAILABLE]);
@@ -129,7 +141,7 @@ Deno.test("A4: the gate unreachable, answering 401/403/503, or answering junk = 
 
 Deno.test("A8: the held-link refetch is the same gate client: clean text + the gate's title, or the gate's error", async () => {
   const url = "http://target.example/held";
-  await withGate(() => json({ status: "ok", url, final_url: url, content_type: "text/html", title: "Held", text: "clean held text" }), async (base, seen) => {
+  await withGate(() => json({ status: "ok", url, final_url: url, content_type: "text/html", title: "Held", text: "clean held text", label: "clean" }), async (base, seen) => {
     const r = await refetchClient(gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY })))(url);
     assertEquals(r, { title: "Held", content: "clean held text" });
     assertEquals(seen.length, 1);
