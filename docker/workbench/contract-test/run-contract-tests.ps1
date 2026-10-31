@@ -401,7 +401,10 @@ try {
   $ops = 0
   $docJson = Get-Content -Raw (Join-Path $gen 'openapi.json') | ConvertFrom-Json
   foreach ($p in $docJson.paths.PSObject.Properties) { $ops += @($p.Value.PSObject.Properties).Count }
-  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq $ops) "Dredd: $($dm.Value) (operations in the document: $ops)"
+  # rw-p4b-sessions: dredd-hooks.js skips steer and cancel (they act through the research service, which this
+  # lab does not run; contract-test/run-sessions-tests.ps1 exercises them) - every OTHER operation must pass
+  $hookSkipped = @($docJson.paths.PSObject.Properties | Where-Object { $_.Name -match '/sessions/\{id\}/(steer|cancel)$' }).Count
+  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq ($ops - $hookSkipped)) "Dredd: $($dm.Value) (operations in the document: $ops; skipped by the hooks: $hookSkipped)"
 
   # ---------------------------------------------------------------- 6. eleven-router smoke
   Write-Host '[6] the eleven-router smoke against the :wt workbench (capture twice, compare)'
