@@ -16,6 +16,7 @@ import type { Db } from "../db.ts";
 import { adminSeesOwnerless, FOREIGN_JOB, type Viewer } from "../../documents/ownership.ts";
 import { hubContext } from "../../documents/hub.ts";
 import type { OutboundLink } from "../../documents/listing.ts";
+import { docRel, rootOf } from "../../documents/paths.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -252,6 +253,19 @@ export async function sessionCoverage(db: Db, id: string, who: Viewer & { admin?
     credibility: shapeRollup(j.credibility, reportId, j.id),
     hubs,
   };
+}
+
+// The signed-in subject's document at `path`, or null (404): documents/repo.ts ownedPath's rule - its
+// listing row is the subject's, or (no row yet) it lies in the subject's own documents/<key>/ directory.
+// Re-stated here, not imported: documents/repo.ts pulls config.ts (and the vault) into the contract's
+// module graph, which reads DB_* at import time (integration_test.ts sets them before its legacy import).
+export async function ownedDocument(db: Db, path: string, who: Viewer): Promise<string | null> {
+  const rel = docRel(path, who as Parameters<typeof docRel>[1]);
+  const row = (await db.query<{ owner_sub: string }>(
+    `SELECT owner_sub FROM public.user_document_listings WHERE path = $1`, [rel],
+  ))[0];
+  if (row) return row.owner_sub === who.sub ? rel : null;
+  return rel.startsWith(`${rootOf(who as Parameters<typeof rootOf>[0])}/`) ? rel : null;
 }
 
 // A user document's coverage (the signed-in subject's own document - ownedPath has already refused

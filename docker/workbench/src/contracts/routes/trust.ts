@@ -15,7 +15,6 @@ import { TRUST_EX } from "../schemas/trust_examples.ts";
 import { parseMetadataFilter } from "../logic/scope.ts";
 import * as trust from "../repo/trust.ts";
 import { identityOf } from "../../middleware/identity.ts";
-import { DocError, ownedPath } from "../../documents/repo.ts";
 import { type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send } from "./http.ts";
 
 const T = ["trust panels (P3b)"];
@@ -69,10 +68,10 @@ export function registerTrust(app: ContractApp, deps: ContractDeps) {
       if (parseMetadataFilter(q.metadata_filter)) return c.json({ error: "not found in scope" }, 404);
       if (!q.path) return c.json({ error: "path (the document's vault path) is required" }, 400);
       const who = await identityOf(c);
-      const rel = await ownedPath(deps.db, q.path, who);
+      const rel = await trust.ownedDocument(deps.db, q.path, who);
+      if (!rel) return c.json({ error: "no such document" }, 404);
       return send(c, DocumentCoverage, await trust.documentCoverage(deps.db, rel, who));
     } catch (e) {
-      if (e instanceof DocError) return c.json({ error: e.status === 404 ? "no such document" : e.message }, e.status as 400);
       const msg = String((e as Error)?.message ?? e);
       if (/path traversal|empty path|invalid path|a user document is a \.md|invalid folder/.test(msg)) return c.json({ error: msg }, 400);
       return fail(c, e);
