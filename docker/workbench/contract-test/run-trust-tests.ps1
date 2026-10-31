@@ -261,8 +261,8 @@ try {
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
   Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the viewer is up'
 
-  # [5a] the item's cases (6); [5c] the tester's round-1 probes kept as regressions (12, round 2)
-  foreach ($suite in @(@('5a', 'trust_integration_test.ts', 6, 'trust-integration'), @('5c', 'trust_probe_integration_test.ts', 12, 'trust-probes'))) {
+  # [5a] the item's cases (8); [5c] the tester's round-1 probes kept as regressions (12, round 2)
+  foreach ($suite in @(@('5a', 'trust_integration_test.ts', 8, 'trust-integration'), @('5c', 'trust_probe_integration_test.ts', 12, 'trust-probes'))) {
     $tag5 = $suite[0]; $file5 = $suite[1]; $n5 = [int]$suite[2]; $log5 = $suite[3]
     Write-Host "[$tag5] src/contracts/$file5 (THIS tree, against the lab workbench)"
     $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",

@@ -318,8 +318,11 @@ powershell -NoProfile -File contract-test/run-references-tests.ps1 -Subnet <x.y.
 The workspace's claims ledger, coverage and source quality panels read the contract (`src/contracts/routes/trust.ts`,
 `repo/trust.ts`; wiring over what P3a and P4a record, nothing is scored here):
 
-- `claims()` carries per claim `verdict` (the entailment verdict on the line it was filed from, read from the job
-  that filed its synthesis; null = not judged), `corroborations` (claim_confidence's count) and `contradicted_by_newer`.
+- `claims()` carries per claim `verdict` (the entailment verdict on the line it was filed from, joined by CLAIM ID:
+  the latest research job whose curator filing answer `result.curator.claims.filed[]` names the claim, its
+  `result.line_credibility[]` entry under the curator's dedup key; null = not judged, and always null under a
+  metadata filter - research_jobs carry no metadata), `corroborations` (claim_confidence's count) and
+  `contradicted_by_newer` (an active newer claim or a non-suppressed newer source contradicts it).
 - `GET /workbench/contract/reports/{id}/credibility` - the report credibility roll-up (`research_jobs.metrics.credibility`)
   with the claim-kind weights it used; shared. A report with none answers `recorded: false` and says so.
 - `GET /workbench/contract/sessions/{id}/coverage` and `GET /workbench/contract/documents/coverage?path=` - needs by

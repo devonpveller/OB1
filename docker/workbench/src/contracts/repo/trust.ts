@@ -95,21 +95,22 @@ export function shapeRollup(rec: RollupRecord | null | undefined, reportId: stri
 
 export type Rollup = ReturnType<typeof shapeRollup>;
 
-// The roll-up of a report (shared knowledge): the latest finished job that filed it.
-export async function reportCredibility(db: Db, reportId: string): Promise<Rollup | null> {
-  if (!UUID.test(reportId)) return null;
-  const src = await db.query<{ id: string }>(
-    `SELECT id::text AS id FROM public.sources WHERE id = $1::uuid AND content_type = 'research_synthesis'`, [reportId],
-  );
-  if (!src.length) return null;
-  const jobs = await db.query<{ id: string; credibility: RollupRecord | null }>(
-    `SELECT j.id::text AS id, j.metrics -> 'credibility' AS credibility
+// rw-p3b-trust2 (review F1): the report is found by the sources primary key (REPORT_SOURCE_SQL); no claim is
+// read. The job that filed it is found by scanning research_jobs (no index on result->curator->persist - a schema
+// change, recorded in the findings). Exported so the lab can EXPLAIN both (trust_integration_test.ts T7).
+export const REPORT_SOURCE_SQL = `SELECT id::text AS id FROM public.sources WHERE id = $1::uuid AND content_type = 'research_synthesis'`;
+export const REPORT_JOB_SQL = `SELECT j.id::text AS id, j.metrics -> 'credibility' AS credibility
        FROM public.research_jobs j
       WHERE ${JOB_OF_REPORT} = $1
       ORDER BY (j.metrics -> 'credibility') IS NOT NULL DESC, j.finished_at DESC NULLS LAST, j.created_at DESC
-      LIMIT 1`,
-    [reportId.toLowerCase()],
-  );
+      LIMIT 1`;
+
+// The roll-up of a report (shared knowledge): the latest finished job that filed it.
+export async function reportCredibility(db: Db, reportId: string): Promise<Rollup | null> {
+  if (!UUID.test(reportId)) return null;
+  const src = await db.query<{ id: string }>(REPORT_SOURCE_SQL, [reportId]);
+  if (!src.length) return null;
+  const jobs = await db.query<{ id: string; credibility: RollupRecord | null }>(REPORT_JOB_SQL, [reportId.toLowerCase()]);
   return shapeRollup(jobs[0]?.credibility ?? null, reportId.toLowerCase(), jobs[0]?.id ?? null);
 }
 
@@ -140,7 +141,7 @@ export function withRollupSection(md: string, section: string): string {
   let rest = md;
   // YAML frontmatter in every shape a vault page can carry it (round 2, tester D4): an optional BOM, an empty
   // block (---/---), a `...` terminator, a closing line at the end of the file without a newline
-  const fm = /^﻿?---[ \t]*\r?\n(?:[\s\S]*?\r?\n)??(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(rest);
+  const fm = /^\uFEFF?---[ \t]*\r?\n(?:[\s\S]*?\r?\n)??(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(rest);
   if (fm) {
     head = fm[0];
     rest = rest.slice(fm[0].length);

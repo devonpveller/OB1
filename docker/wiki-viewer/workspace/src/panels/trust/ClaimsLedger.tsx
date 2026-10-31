@@ -69,9 +69,10 @@ function Row({ c }: { c: LedgerClaim }) {
 
 export function ClaimsLedger(_p: PanelProps) {
   const report = useTrust((s) => s.report);
-  const pickedSource = useTrust((s) => s.source);
   const selected = useWorkspace((s) => s.reference);
-  const source = pickedSource ?? selected?.source_id ?? null;
+  // the workspace's selection only (rw-p3b-trust2 B2): the trust `source` focus is the quality panel's, so the
+  // ledger's own "Quality of ..." action never re-scopes the ledger
+  const source = selected?.source_id ?? null;
   // a selected source that IS a research report (content_type research_synthesis) scopes the ledger to the
   // report's OWN claims (synthesis_id), not the claims that cite it; it wins over a focused session's report
   const sourceKind = useSourceKind(source);

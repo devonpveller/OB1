@@ -248,3 +248,74 @@ t("T6 two users: shared knowledge reads the same; per-user coverage of another u
   assert(spoof.status === 404 || spoof.status === 400, `a user named in the query is ignored: ${spoof.status} ${spoof.text}`);
   assert(!spoof.text.includes(M.promptB));
 });
+
+// rw-p3b-trust2 (review F1): the verdict join reads claims by their PRIMARY KEY, and reportCredibility reads no
+// claim at all. EXPLAIN on the lab database with sequential scans disabled (so a usable index is always chosen):
+// no "Seq Scan on claims" node may remain. The round-2 query text (the cast join c.id::text = f.cid) is EXPLAINed
+// beside it as the before, and both plans are printed for the evidence.
+
+async function plan(text: string, args: unknown[]): Promise<string> {
+  const c = await pool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject("SET LOCAL enable_seqscan = off");
+    const rows = (await c.queryObject<{ "QUERY PLAN": string }>(`EXPLAIN ${text}`, args)).rows;
+    await c.queryObject("ROLLBACK");
+    return rows.map((r) => r["QUERY PLAN"]).join(String.fromCharCode(10));
+  } finally {
+    c.release();
+  }
+}
+t("T7 F1: the verdict join reads claims by primary key; the roll-up reads no claim (EXPLAIN, seq scans off)", async () => {
+  // imported here, not at the top, so on a base without them only this case fails (the RED run)
+  const { VERDICTS_SQL } = await import("./repo/knowledge.ts") as { VERDICTS_SQL?: string };
+  const { REPORT_JOB_SQL, REPORT_SOURCE_SQL } = await import("./repo/trust.ts") as { REPORT_JOB_SQL?: string; REPORT_SOURCE_SQL?: string };
+  assert(VERDICTS_SQL && REPORT_JOB_SQL && REPORT_SOURCE_SQL, "the queries are exported for the plan check");
+  const VERDICTS_SQL_ROUND2 = VERDICTS_SQL.replace("JOIN public.claims c ON c.id = ANY($1::uuid[]) AND c.id::text = f.cid",
+    "JOIN public.claims c ON c.id::text = f.cid");
+  const ids = [ID.c1, ID.c2, ID.c4];
+  assert(VERDICTS_SQL_ROUND2 !== VERDICTS_SQL, "the before text was derived");
+  const before = await plan(VERDICTS_SQL_ROUND2, [ids]);
+  const after = await plan(VERDICTS_SQL, [ids]);
+  const src = await plan(REPORT_SOURCE_SQL, [ID.report]);
+  const job = await plan(REPORT_JOB_SQL, [ID.report]);
+  console.log(`PLAN verdicts BEFORE (round 2, cast join):
+${before}
+PLAN verdicts AFTER:
+${after}
+PLAN report source:
+${src}
+PLAN report job:
+${job}`);
+  assert(/Seq Scan on claims/.test(before), "the before plan scans claims (the defect the review measured)");
+  assert(!/Seq Scan on claims/.test(after), `the verdict join must not scan claims:
+${after}`);
+  assert(/Index (Only )?Scan using \w+ on claims/.test(after), `the claims pkey is used:
+${after}`);
+  assert(!/ on claims/.test(src) && !/ on claims/.test(job), "the roll-up reads no claim");
+  assert(/Index (Only )?Scan using \w+ on sources/.test(src), `the report is found by the sources pkey:
+${src}`);
+  // and the answers are unchanged
+  const r = await call("GET", `/workbench/contract/claims?synthesis_id=${ID.report}&limit=50`, A);
+  const by = new Map((r.json.claims as any[]).map((c) => [c.id, c.verdict]));
+  assertEquals([by.get(ID.c1), by.get(ID.c2)], ["supports", "partial"]);
+});
+
+// rw-p3b-trust2 (review B1): under a metadata filter (the cloud door) the verdict is null - research_jobs carry no
+// metadata and are not read. A claim inside the cloud scope, filed by a job that judged it: the local door reads
+// the verdict, the filtered read answers null. (The contract-scope e2e has the same case through the MCP adapter.)
+t("T8 B1: claims() under a metadata filter answers verdict null; without one the job's verdict", async () => {
+  const claim = u(), syn = u(), job = u();
+  const text = `Trust cloud claim ${rnd()}`;
+  await sql(`INSERT INTO public.sources (id, title, content, content_type, metadata) VALUES ($1, 'cloud report', 's', 'research_synthesis', '{"share":"cloud"}')`, [syn]);
+  await sql(`INSERT INTO public.claims (id, text, synthesis_id, epistemic_tag, metadata) VALUES ($1, $2, $3, 'sourced', '{"share":"cloud","claim_kind":"general_theory"}')`, [claim, text, syn]);
+  await sql(`INSERT INTO public.research_jobs (id, status, origin, query, result, caller, finished_at) VALUES ($1, 'done', 'workspace', 'cloud probe', $2::jsonb, 'workspace', now())`,
+    [job, JSON.stringify({ curator: { persist: { synthesis_id: syn }, claims: { filed: [claim] } }, line_credibility: [{ claim: 0, text, verdict: "supports" }] })]);
+  const local = await call("GET", `/workbench/contract/claims?synthesis_id=${syn}`, A);
+  assertEquals((local.json.claims as any[]).find((c) => c.id === claim)?.verdict, "supports", local.text);
+  const cloud = await call("GET", `/workbench/contract/claims?synthesis_id=${syn}&metadata_filter=${encodeURIComponent('{"share":"cloud"}')}`, A);
+  assertEquals(cloud.status, 200, cloud.text);
+  const c = (cloud.json.claims as any[]).find((x) => x.id === claim);
+  assert(c, `the in-scope claim is listed under the filter: ${cloud.text}`);
+  assertEquals(c.verdict, null, "under a filter the verdict is null (no research_jobs read)");
+});

@@ -103,6 +103,7 @@ interface ClaimRow {
 //     claim is not followed, so it can only under-report - fail closed);
 //   - synthesis_id: the synthesis is a source row, kept only when it is in scope, else null;
 //   - thread_id: threads carry no metadata, so it is null;
+//   - verdict (P3b): research_jobs carry no metadata, so it is null (rw-p3b-trust2, review B1: no jobs read);
 //   - selectors: source_id / synthesis_id name a row that must itself be in scope, else the answer
 //     is empty (an out-of-scope id is never a selector over in-scope rows - the oracle); thread_id
 //     names a metadata-less row, so under a filter it selects nothing.
@@ -154,7 +155,9 @@ export async function claims(db: Db, q: ClaimsQuery) {
       LIMIT $7`,
     [q.thread_id, q.source_id, q.synthesis_id, q.status, q.q, mf, q.limit],
   );
-  const verdicts = await verdictsOf(db, rows);
+  // rw-p3b-trust2 (review B1): research_jobs carry no metadata, so under a filter the verdict is null - no
+  // research_jobs read (the verdict rests on the cited text, which may lie outside the scope)
+  const verdicts = mf ? new Map<string, string>() : await verdictsOf(db, rows);
   const out = rows.map((r) => shapeClaim(r, q.evidenceOnly, verdicts)).filter((c) => c !== null);
   return { count: out.length, claims: out };
 }
@@ -168,12 +171,10 @@ export async function claims(db: Db, q: ClaimsQuery) {
 // curator's own dedup key (lower(btrim(text)), find_or_create_claim's); the entry at the claim's own index wins
 // inside a job, the latest job wins across jobs. null = no job recorded one (filed before P3a, on no judged line,
 // or its text was edited since).
-export async function verdictsOf(db: Db, rows: { id: string }[]): Promise<Map<string, string>> {
-  const ids = [...new Set(rows.map((r) => r.id.toLowerCase()))];
-  const out = new Map<string, string>();
-  if (!ids.length) return out;
-  const found = await db.query<{ claim_id: string; verdict: string }>(
-    `SELECT f.cid AS claim_id, lc.v ->> 'verdict' AS verdict
+// rw-p3b-trust2 (review F1): the claim side is read by its PRIMARY KEY (c.id = ANY($1::uuid[])), never a cast
+// join over every claim; the jobs side still scans research_jobs (no index on the filed list - a schema change,
+// recorded in the findings). Exported so the lab can EXPLAIN it (trust_integration_test.ts T7).
+export const VERDICTS_SQL = `SELECT f.cid AS claim_id, lc.v ->> 'verdict' AS verdict
        FROM public.research_jobs j
        CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'claims' -> 'filed') = 'array'
                                                          THEN j.result -> 'curator' -> 'claims' -> 'filed' ELSE '[]'::jsonb END)
@@ -181,15 +182,18 @@ export async function verdictsOf(db: Db, rows: { id: string }[]): Promise<Map<st
        CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'line_credibility') = 'array'
                                                     THEN j.result -> 'line_credibility' ELSE '[]'::jsonb END)
                           WITH ORDINALITY lc(v, lord)
-       JOIN public.claims c ON c.id::text = f.cid
+       JOIN public.claims c ON c.id = ANY($1::uuid[]) AND c.id::text = f.cid
       WHERE j.result -> 'curator' -> 'claims' -> 'filed' ?| $1::text[]
-        AND f.cid = ANY($1::text[])
         AND jsonb_typeof(lc.v -> 'verdict') = 'string' AND jsonb_typeof(lc.v -> 'text') = 'string'
         AND lower(btrim(c.text)) = lower(btrim(lc.v ->> 'text'))
       ORDER BY j.finished_at ASC NULLS FIRST, j.created_at ASC, j.id ASC,
-               ((lc.v ->> 'claim') IS NOT DISTINCT FROM (f.ord - 1)::text) ASC, lc.lord ASC`,
-    [ids],
-  );
+               ((lc.v ->> 'claim') IS NOT DISTINCT FROM (f.ord - 1)::text) ASC, lc.lord ASC`;
+
+export async function verdictsOf(db: Db, rows: { id: string }[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.map((r) => r.id.toLowerCase()))];
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const found = await db.query<{ claim_id: string; verdict: string }>(VERDICTS_SQL, [ids]);
   // the last row per claim wins (see the order); a verdict is served only as a registry-shaped key (never free text)
   for (const f of found) if (/^[a-z][a-z0-9_]{0,40}$/.test(f.verdict)) out.set(f.claim_id, f.verdict);
   return out;

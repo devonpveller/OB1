@@ -207,6 +207,38 @@ Deno.test({
   },
 });
 
+// rw-p3b-trust2 (review r-p3b-trust B1): the claims ledger's `verdict` is read from research_jobs, which carry
+// no metadata - so under the cloud door's filter it is null (no research_jobs read), as every metadata-less part
+// of a scoped answer is. The control: the same claim with no filter carries the job's verdict.
+Deno.test({
+  name: "contract_claims under the forced cloud filter answers verdict null; the local door reads the job's verdict",
+  ignore,
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const claim = id(), job = id(), syn = id();
+    try {
+      await sql(`INSERT INTO public.sources (id, title, content, content_type, metadata) VALUES ($1, $2, 's', 'research_synthesis', '{"share":"cloud"}')`,
+        [syn, `verdict scope synthesis ${run}`]);
+      await sql(`INSERT INTO public.claims (id, text, synthesis_id, metadata) VALUES ($1, $2, $3, '{"share":"cloud"}')`, [claim, `verdict scope claim ${run}`, syn]);
+      await sql(`INSERT INTO public.research_jobs (id, status, origin, query, result, finished_at) VALUES ($1, 'done', 'manual', 'verdict scope', $2::jsonb, now())`,
+        [job, JSON.stringify({ curator: { persist: { synthesis_id: syn }, claims: { filed: [claim] } }, line_credibility: [{ claim: 0, text: `verdict scope claim ${run}`, verdict: "supports" }] })]);
+      const cloud = await tool("contract_claims", { synthesis_id: syn, metadata_filter: CLOUD });
+      assert(!cloud.isError, cloud.text);
+      const c = (cloud.json.claims as { id: string; verdict: unknown }[]).find((x) => x.id === claim);
+      assert(c, `the in-scope claim is listed: ${cloud.text}`);
+      assertEquals(c.verdict, null, "under the cloud filter the verdict (a research_jobs read) is null");
+      const local = await tool("contract_claims", { synthesis_id: syn });
+      assertEquals((local.json.claims as { id: string; verdict: unknown }[]).find((x) => x.id === claim)?.verdict, "supports", `control: ${local.text}`);
+    } finally {
+      await sql(`DELETE FROM public.research_jobs WHERE id = $1`, [job]);
+      await sql(`DELETE FROM public.claims WHERE id = $1`, [claim]);
+      await sql(`DELETE FROM public.sources WHERE id = $1`, [syn]);
+      await endPool();
+    }
+  },
+});
+
 // ── every cloud tool, every argument shape the real gateway forwards (rw-p0-contract2 attempt 2) ──
 //
 // Tester t-rw-p0 (attempt 1, Case 23) found contract_claims returning an OUT-OF-SCOPE source's id,

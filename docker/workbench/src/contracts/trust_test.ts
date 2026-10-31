@@ -72,7 +72,7 @@ Deno.test("the trust operations are in the contract document; claims carry the l
 const PLACEMENT: [string, string, string][] = [
   ["normal", "---\ntitle: x\n---\n\n# T\n\nBODY\n", "---\ntitle: x\n---\n"],
   ["CRLF", "---\r\ntitle: x\r\n---\r\n\r\n# T\r\n\r\nBODY\r\n", "---\r\ntitle: x\r\n---\r\n"],
-  ["BOM", "﻿---\ntitle: x\n---\n\n# T\n\nBODY\n", "﻿---\ntitle: x\n---\n"],
+  ["BOM", "\uFEFF---\ntitle: x\n---\n\n# T\n\nBODY\n", "\uFEFF---\ntitle: x\n---\n"],
   ["empty frontmatter", "---\n---\n\n# T\n\nBODY\n", "---\n---\n"],
   ["fm at EOF no newline", "---\ntitle: x\n---", "---\ntitle: x\n---"],
   ["fm then body no blank", "---\ntitle: x\n---\nBODY\n", "---\ntitle: x\n---\n"],
@@ -89,6 +89,14 @@ for (const [name, md, fm] of PLACEMENT) {
     if (fm) assert(out.startsWith(fm), `frontmatter first and intact: ${JSON.stringify(out.slice(0, 90))}`);
     const at = out.indexOf(`## ${ROLLUP_HEADING}`);
     if (md.includes("BODY")) assert(at < out.indexOf("BODY"), "section before the body");
-    if (/^﻿?---/.test(md)) assert(at > out.indexOf("---") && at >= fm.length, "section after the frontmatter");
+    if (/^\uFEFF?---/.test(md)) assert(at > out.indexOf("---") && at >= fm.length, "section after the frontmatter");
   });
 }
+
+// rw-p3b-trust2 (review F2): no invisible character in the trust sources - the BOM the frontmatter pattern accepts
+// is written as an escape, which an editor or formatter cannot strip silently
+Deno.test("repo/trust.ts carries no literal U+FEFF (the BOM is written as an escape)", async () => {
+  const src = await Deno.readTextFile(new URL("./repo/trust.ts", import.meta.url));
+  assertEquals([...src].filter((ch) => ch.codePointAt(0) === 0xfeff).length, 0);
+  assert(src.includes(String.raw`/^\uFEFF?---`), "the frontmatter pattern still accepts a BOM (written as an escape)");
+});
