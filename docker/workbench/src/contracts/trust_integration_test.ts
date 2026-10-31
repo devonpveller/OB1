@@ -339,8 +339,12 @@ ${blocks[0].slice(0, 4000)}`);
       for (const [k, n] of SIZES.entries()) {
         const mine = blocks.slice(k * REPS, (k + 1) * REPS).map((x) => ({ ms: Number(/duration: ([\d.]+) ms/.exec(x)![1]), seq: /Seq Scan on claims/.test(x), plan: x }));
         const bases: number[] = [];
+        // EXPLAIN of EXECUTE takes no bind parameter: the ids (uuids from the answer, checked) go in as a literal
+        const ids = idsBy.get(n)!;
+        assert(ids.every((x) => /^[0-9a-f-]{36}$/.test(x)), "the ids are uuids");
+        const lit = `'{${ids.join(",")}}'::text[]`;
         for (let i = 0; i < REPS; i++) {
-          const p = (await c.queryObject<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS OFF) EXECUTE t7_round2($1::text[])`, [idsBy.get(n)!])).rows.map((x) => x["QUERY PLAN"]).join(NL);
+          const p = (await c.queryObject<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS OFF) EXECUTE t7_round2(${lit})`)).rows.map((x) => x["QUERY PLAN"]).join(NL);
           bases.push(Number(/Execution Time: ([\d.]+) ms/.exec(p)?.[1] ?? NaN));
         }
         const mt = median(mine.map((x) => x.ms)), mb = median(bases);
