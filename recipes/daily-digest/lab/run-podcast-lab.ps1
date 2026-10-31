@@ -232,6 +232,9 @@ try {
   Check $built "$podTag built"
   $script:made.images += $podTag
   if (-not $built) { throw 'build podcast' }
+  # the Kokoro image is 5.6 GB: pull it here with the long timeout (a cold host would time a plain run out)
+  $o = DkLong pull $kokoroImage
+  Check ($script:rc -eq 0) "the pinned Kokoro image is present ($kokoroImage)"
   $null = Dk tag $llmDigest $llmTag
   Check ($script:rc -eq 0) "$llmTag = the gateway's pinned LiteLLM digest"
   $script:made.tags += $llmTag
@@ -349,7 +352,7 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   # round 2 (tester D4): every write the tester used, each on top of the last, each detected by a fresh
   # verify against the ORIGINAL manifest naming the part it changed
   $d4 = @(
-    @('UPDATE source_embedding SET embedding (in place)', "UPDATE source_embedding SET embedding = [0.25, 0.5] WHERE id = (SELECT VALUE id FROM source_embedding ORDER BY id LIMIT 1 START 1500)[0];", 'source_embedding'),
+    @('UPDATE source_embedding SET embedding (in place)', "LET `$id = (SELECT VALUE id FROM source_embedding ORDER BY id LIMIT 1 START 1500)[0]; UPDATE `$id SET embedding = [0.25, 0.5];", 'source_embedding'),
     @('DEFINE INDEX', "DEFINE INDEX lab_idx ON episode FIELDS name;", '__table__:episode'),
     @('DEFINE FIELD', "DEFINE FIELD lab_field ON note TYPE option<string>;", '__table__:note'),
     @('DEFINE FUNCTION', "DEFINE FUNCTION fn::lab_w() { RETURN 1; };", '__db__'),
