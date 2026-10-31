@@ -745,3 +745,136 @@ Deno.test({ name: "C5 a workbench with no WORKSPACE_FORWARD_AUTH_* behaves as be
   assert(/forward-auth is not configured/.test(w2.text) && w2.json.subject_sub === undefined, w2.text.slice(0, 160));
   assertNotEquals((await direct(WB_PLAIN, "GET", "/workbench/contract/documents", h)).status, 401);
 } });
+
+// ── rw-identity-harden (the r-identity2 / r-identity3 follow-ups), against the real workbench ─────
+// A raw request with a Host line of the test's choosing (fetch always sends the URL's own host).
+async function rawHost(base: string, method: string, target: string, host: string, headers: Record<string, string>) {
+  const u = new URL(base);
+  const conn = await Deno.connect({ hostname: u.hostname, port: Number(u.port || 80) });
+  const h = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join("");
+  await conn.write(new TextEncoder().encode(`${method} ${target} HTTP/1.1\r\nHost: ${host}\r\n${h}Connection: close\r\n\r\n`));
+  const buf = new Uint8Array(65536);
+  let out = "";
+  let n: number | null;
+  try {
+    while ((n = await conn.read(buf)) !== null) out += new TextDecoder().decode(buf.subarray(0, n));
+  } catch { /* reset */ }
+  conn.close();
+  const i = out.indexOf("\r\n\r\n");
+  return { status: Number(out.slice(9, 12)), text: i === -1 ? "" : out.slice(i + 4) };
+}
+
+Deno.test({ name: "Fg only the exact open routes skip identity: /workbench/health/<x> and /workbench/auth/me/<x> without a token are 401", ...opts, fn: async () => {
+  const fails: string[] = [];
+  for (const t of ["/workbench/health/x", "/workbench/health/", "/workbench/health/documents/folders", "/workbench/auth/me/", "/workbench/auth/me/x"]) {
+    for (const m of ["GET", "POST"]) {
+      const r = await rawDirect(WB, m, t, { "x-brain-key": DOOR });
+      if (r.status !== 401) fails.push(`${m} ${t}: ${r.status} ${r.text.slice(0, 100)}`);
+    }
+  }
+  assertEquals((await rawDirect(WB, "GET", "/workbench/health", { "x-brain-key": DOOR })).status, 200, "health stays open");
+  assertEquals((await rawDirect(WB, "GET", "/workbench/auth/me", { "x-brain-key": DOOR })).status, 200, "who-am-I stays open");
+  assert(fails.length === 0, `${fails.length} requests under an open route's prefix skipped the identity decision:\n${fails.join("\n")}`);
+} });
+
+Deno.test({ name: "Fh a Host that is not host[:port] is the seam's 400 before any decision, and no error body echoes the request", ...opts, fn: async () => {
+  const tok = await mint(claimsOf("alice"));
+  const own = new URL(WB).host;
+  const fails: string[] = [];
+  const hosts = [`${own}/workbench/notes`, `${own}?a=1`, `${own}#f`, `u@${own}`, `${own} x`, `${own}\tx`, "h:abc", "h:", "", `${own}%2f..`, "h?path=documents/x/a.md&"];
+  for (const host of hosts) {
+    for (const [label, base, h] of [["door, no token", WB, { "x-brain-key": DOOR }], ["door + alice", WB, { "x-brain-key": DOOR, [TOKEN]: tok }],
+        ["sign-in off, service key", WB_PLAIN, { "x-brain-key": INTERNAL }]] as const) {
+      if (!base) continue;
+      const target = host.endsWith("/workbench/notes") ? "/a.md?q=probe-q" : "/workbench/notes/a.md?q=probe-q";
+      const r = await rawHost(base, "GET", target, host, h);
+      const leaks = ["probe-q", "Invalid URL", "TypeError", "    at ", "file:///", host.length > 2 ? host : ""].filter((s) => s && r.text.includes(s));
+      if (r.status !== 400 || leaks.length) fails.push(`Host ${JSON.stringify(host)} [${label}]: ${r.status} ${r.text.slice(0, 140)}${leaks.length ? ` (echoes ${leaks.join(", ")})` : ""}`);
+    }
+  }
+  // control: the workbench's own host is judged as before
+  assertEquals((await rawHost(WB, "GET", "/workbench/notes/a.md", own, { "x-brain-key": DOOR })).status, 401);
+  assert(fails.length === 0, `${fails.length} cases:\n${fails.join("\n")}`);
+} });
+
+Deno.test({ name: "Fc an impersonation past its expiry is ended and audited without any request from that admin", ...opts, fn: async () => {
+  // boss (an admin) and uma have been seen signed in; then boss makes no request at all
+  for (const login of ["boss", "uma"]) {
+    const b = new Browser();
+    await b.signIn(login);
+    assertEquals((await b.req("GET", "/workbench/auth/me")).status, 200);
+  }
+  const ref = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  // the row /impersonate writes, but already past its expiry (started two hours ago, ended a minute ago)
+  await sql(`INSERT INTO public.workspace_impersonation (admin_sub, target_sub, reason, ref, started_at, expires_at)
+             VALUES ($1, $2, 'Fc sweeper check', $3, now() - interval '2 hours', now() - interval '1 minute')`, [sub("boss"), sub("uma"), ref]);
+  let open = 1, ended: { actor_sub: string; subject_sub: string; reason: string }[] = [];
+  const t0 = Date.now();
+  while (Date.now() - t0 < 100_000) {
+    open = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_impersonation WHERE ref = $1`, [ref]))[0].n;
+    ended = await sql(`SELECT actor_sub, subject_sub, reason FROM public.admin_audit WHERE action = 'impersonate.end' AND session_ref = $1`, [ref]);
+    if (!open && ended.length) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  console.log(`Fc: after ${Math.round((Date.now() - t0) / 1000)} s the expired impersonation is ${open ? "STILL OPEN" : "ended"}; end rows ${ended.length}`);
+  assertEquals(open, 0, "the expired impersonation was not ended without a request from its admin");
+  assertEquals(ended.length, 1, "its end is recorded once");
+  assertEquals([ended[0].actor_sub, ended[0].subject_sub], [sub("boss"), sub("uma")]);
+  assert(/^expired/.test(ended[0].reason), ended[0].reason);
+} });
+
+Deno.test({ name: "Fd ending an impersonation writes its audit row in the same transaction: a failed audit insert leaves it open, a failed end writes no audit row", ...opts, fn: async () => {
+  // the store as built (a dynamic import: the RED run mounts this file over the base's tree)
+  // deno-lint-ignore no-explicit-any
+  const store = await import("./store.ts") as any;
+  const { poolDb } = await import("../contracts/db.ts");
+  type Db = ReturnType<typeof poolDb>;
+  const p = new Pool({ hostname: E("CONTRACT_TEST_DB_HOST"), port: 5432, user: "ob_app_memory", password: E("IDENTITY_TEST_APP_PASSWORD"), database: "openbrain" }, 2, true);
+  const db = poolDb(p);
+  // a Db on which a matching statement RUNS and then fails: the write happened, the step after it did not
+  const failing = (d: Db, when: RegExp): Db => ({
+    query: async <T>(s: string, a?: unknown[]) => {
+      const r = await d.query<T>(s, a);
+      if (when.test(s)) throw new Error(`forced failure after ${s.trim().slice(0, 40)}`);
+      return r;
+    },
+    tx: <T>(fn: (t: Db) => Promise<T>) => d.tx((t) => fn(failing(t, when))),
+  });
+  for (const login of ["admin", "carol"]) {
+    const b = new Browser();
+    await b.signIn(login);
+    assertEquals((await b.req("GET", "/workbench/auth/me")).status, 200);
+  }
+  const admin = sub("admin"), target = sub("carol");
+  const fresh = async () => {
+    const ref = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    await sql(`DELETE FROM public.workspace_impersonation WHERE admin_sub = $1`, [admin]); // set-up only
+    await sql(`INSERT INTO public.workspace_impersonation (admin_sub, target_sub, reason, ref, expires_at) VALUES ($1, $2, 'Fd transaction check', $3, now() + interval '10 minutes')`, [admin, target, ref]);
+    return ref;
+  };
+  const state = async (ref: string) => ({
+    open: (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_impersonation WHERE ref = $1`, [ref]))[0].n,
+    audited: (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE action = 'impersonate.end' AND session_ref = $1`, [ref]))[0].n,
+  });
+  const fails: string[] = [];
+  try {
+    const cases: [string, Db, { open: number; audited: number }][] = [
+      ["the audit insert fails", failing(db, /INSERT INTO public\.admin_audit/), { open: 1, audited: 0 }],
+      ["the end (delete) fails", failing(db, /DELETE FROM public\.workspace_impersonation/), { open: 1, audited: 0 }],
+      ["nothing fails", db, { open: 0, audited: 1 }],
+    ];
+    for (const [label, d, expect] of cases) {
+      const ref = await fresh();
+      let threw = false;
+      try { await store.endImpersonation(d, admin, "Fd ended by the test"); } catch { threw = true; }
+      const s = await state(ref);
+      if (s.open !== expect.open || s.audited !== expect.audited || threw !== (label !== "nothing fails")) {
+        fails.push(`${label}: open ${s.open}, end rows ${s.audited}, threw ${threw} (want open ${expect.open}, end rows ${expect.audited})`);
+      }
+    }
+  } finally {
+    await sql(`DELETE FROM public.workspace_impersonation WHERE admin_sub = $1`, [admin]);
+    await p.end();
+  }
+  assert(fails.length === 0, `an impersonation's end and its audit row are not one transaction:\n${fails.join("\n")}`);
+} });

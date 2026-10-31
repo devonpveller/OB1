@@ -131,8 +131,8 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
    database screen, not-available). A transient state cached by CF/browser
    pins itself over the real page.
 6. **All inference through the LiteLLM gateway** (repo-wide rule) and all
-   client → workbench calls through caddy's `/workbench/*` (key injected
-   server-side; keys never appear in client JS).
+   client → workbench calls through the viewer's own `/workbench/*` forwarder
+   (key injected server-side; keys never appear in client JS).
 7. **Graph endpoint** (`/workbench/graph?slug=&depth=&limit=`): breadth-first
    BOTH directions in Postgres (outgoing links + backlinks via the
    `idx_wiki_pages_links_gin` index), distance-ordered so the cap keeps the

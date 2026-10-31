@@ -36,6 +36,9 @@ import type { Db } from "../contracts/db.ts";
 import { type ForwardAuthConfig, forwardAuthConfig, isAdmin, TOKEN_HEADER, verifyForwardToken } from "../identity/forward_auth.ts";
 import { keyKind, keyRing, type KeyRing } from "../identity/keys.ts";
 import { audit, endImpersonation, impersonationOf, seeUser } from "../identity/store.ts";
+import { logRefusal } from "../identity/refusal_log.ts";
+
+export { flushRefusalLog } from "../identity/refusal_log.ts";
 
 // TWO subjects (operator 2026-10-28): `sub` is subject_sub - whose data is shown and written (every
 // read of user state filters by it); `actor` is actor_sub - who is acting. They are equal except while
@@ -102,7 +105,8 @@ const ANONYMOUS: Identity = { sub: "anonymous:", actor: "anonymous:", name: "", 
 // The signed-in user's identity, from the request's Authentik token; null when there is no valid
 // token. The admin flag is the token's (this request's); an impersonation is the admin's stored row.
 export async function tokenIdentity(db: Db | null, token: string, fa: ForwardAuthConfig): Promise<Identity | null> {
-  const claims = await verifyForwardToken(token, fa, (why) => console.warn(`[identity] forward-auth token refused: ${why}`));
+  // N2: the first refusal per reason is logged, the rest counted (src/identity/refusal_log.ts)
+  const claims = await verifyForwardToken(token, fa, (why) => logRefusal(`forward-auth token refused: ${why}`, `[identity] forward-auth token refused: ${why}`));
   if (!claims) return null;
   const admin = isAdmin(claims, fa);
   if (db) await seeUser(db, { sub: claims.sub, name: claims.name, email: claims.email, is_admin: admin });
@@ -112,11 +116,8 @@ export async function tokenIdentity(db: Db | null, token: string, fa: ForwardAut
   };
   if (!db) return self;
   if (!admin) {
-    // left the admin group (or never in it): an impersonation it started ends now, recorded
-    const ended = await endImpersonation(db, claims.sub);
-    if (ended) {
-      await audit(db, { actor_sub: claims.sub, subject_sub: ended.target_sub, action: "impersonate.end", reason: "no longer in the admin group", session_ref: ended.ref });
-    }
+    // left the admin group (or never in it): an impersonation it started ends now, recorded (one transaction)
+    await endImpersonation(db, claims.sub, "no longer in the admin group");
     return self;
   }
   const imp = await impersonationOf(db, claims.sub);
@@ -213,13 +214,31 @@ export function routerPath(raw: string): string {
   }
 }
 
+// rw-identity-harden (review r-identity3 N11 / F-g, F-i): Deno.serve builds the request URL as
+// "http://" + the Host line + the target and does not check the Host. rawTarget, like Hono's getPath,
+// starts the path at the first "/" after "://", and Hono's query parser at the first "?" after it - so a
+// Host holding "/", "?" or "#" moves where both begin, and one holding "@", white space or a port that
+// is not a number is no host at all. A request whose Host line, or whose URL's authority (an
+// absolute-form target names its own), is not host[:port] is refused before any decision. No Host line
+// (HTTP/1.0) is allowed: Deno then puts its own listening address in the URL.
+const HOST_PORT = /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::[0-9]{1,5})?$/;
+export function badHost(url: string, host: string | undefined): boolean {
+  if (host !== undefined && !HOST_PORT.test(host)) return true;
+  const s = url.indexOf("://");
+  if (s === -1) return true;
+  const start = url.indexOf("/", url.indexOf(":") + 4);
+  return !HOST_PORT.test(url.slice(s + 3, start === -1 ? url.length : start));
+}
+
 export function seamDeps(db: Db | null, env = (k: string) => Deno.env.get(k)): SeamDeps {
   const fa = forwardAuthConfig(env);
   return { db, fa, ring: keyRing(env, fa !== null), cfg: identityConfig(env), defaultSet: !!(env("WORKSPACE_DEFAULT_SUB") ?? "").trim() };
 }
 
-// what a browser without a valid token may still reach: health, and who-am-I (the page asks first)
-const OPEN = /^\/workbench\/(health(\/|$)|auth\/me$)/;
+// what a browser without a valid token may still reach: health, and who-am-I (the page asks first) -
+// exactly these two paths (rw-identity-harden F-g: no prefix, so a route added under either later
+// still meets the identity decision)
+const OPEN = /^\/workbench\/(health|auth\/me)$/;
 // a user's front end: never a service's
 const USER_ONLY = /^\/workbench\/(documents|workspace|auth\/(impersonate|users|audit))(\/|$)/;
 // the reads that can carry a research job's original prompt (round 4, F4)
@@ -245,7 +264,9 @@ const AUTHENTIK_HEADER = /^x-authentik-/i;
 export function identitySeam(deps: SeamDeps = seamDeps(null)) {
   return async (c: Context, next: Next) => {
     // B1/B1b: the RAW target (as the router routes it, never a WHATWG-normalised URL); a path the
-    // router could read differently from this seam is refused before any decision
+    // router could read differently from this seam is refused before any decision - and so is a Host
+    // that would move where the router's path and query begin (rw-identity-harden F-g/F-i)
+    if (badHost(c.req.url, c.req.header("host"))) return c.json({ error: "not a host[:port] Host: no '/', '?', '#', '@' or white space, and a numeric port" }, 400);
     const target = rawTarget(c.req.url);
     const path = canonicalPath(target.path);
     if (path === null) return c.json({ error: "not a canonical path: no encoded '/', '\\', '.' or '%', no ';' or '\\', and no empty, '.' or '..' segment" }, 400);
@@ -254,7 +275,7 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
     if (!deps.fa) {
       for (const [name] of c.req.raw.headers) {
         if (AUTHENTIK_HEADER.test(name)) {
-          console.warn(`[identity] a request carries ${name} but forward-auth is not configured: refused (503)`);
+          logRefusal("X-authentik-* while forward-auth is not configured", `[identity] a request carries ${name} but forward-auth is not configured: refused (503)`);
           return c.json({ error: "forward-auth is not configured on the workbench (WORKSPACE_FORWARD_AUTH_* are blank), but this request carries Authentik forward-auth headers (X-authentik-*); refused rather than served as the default user" }, 503);
         }
       }

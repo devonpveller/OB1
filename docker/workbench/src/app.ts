@@ -1,13 +1,14 @@
 // The app itself (every router, every middleware), importable without serving: main.ts serves it;
 // the lab isolation sweep (src/documents/isolation_sweep_test.ts) enumerates its routes from here.
 // openbrain-workbench — the browser-facing read/write API behind the Quartz
-// viewer (D-A). Deno + Hono, internal PORT=8000, reached same-origin via the
-// portal Caddy `handle /workbench/* { reverse_proxy openbrain-workbench:8000 }`
-// (prefix-PRESERVING — §2.3), which injects the shared secret as X-Brain-Key.
+// viewer (D-A). Deno + Hono, internal PORT=8000, reached same-origin through the
+// wiki viewer's /workbench/* forwarder (prefix-PRESERVING — §2.3), which injects
+// the door key as X-Brain-Key (rw-identity-harden: the portal Caddy route that
+// once did this is removed).
 //
 // Architecture (G9): Hono SUB-ROUTERS per resource over a thin
 // service → repository layering. Routes are PREFIX-INCLUSIVE (mounted under
-// /workbench) to match the prefix-preserving `handle` proxy. DB writes go
+// /workbench) to match the prefix-preserving forwarder. DB writes go
 // through withTransaction (repository, G8); reads may use PostgREST.
 //
 // Kept OFF the MCP server + cloud-gateway (8-tool contract) so the
@@ -32,6 +33,7 @@ import { requireKey } from "./middleware/auth.ts";
 import { identitySeam, seamDeps } from "./middleware/identity.ts";
 import { authRouter } from "./routes/auth.ts";
 import { ownerScope } from "./middleware/owner-scope.ts";
+import { internalError } from "./middleware/errors.ts";
 import { health } from "./routes/health.ts";
 import { notebooks } from "./routes/notebooks.ts";
 import { notes } from "./routes/notes.ts";
@@ -62,13 +64,13 @@ export const app = new Hono();
 
 // Health is unauthenticated (Docker healthcheck + overlay connectivity proof).
 // Exposed both at the bare path (internal healthcheck) and the prefix-inclusive
-// path (what the browser reaches through Caddy).
+// path (what the browser reaches through the viewer).
 app.route("/health", health);
 app.route("/workbench/health", health);
 
 // The retrieval contract's OpenAPI document. Bare path unauthenticated like /health (internal
 // only: the service is never host-published except the loopback debug port); the
-// prefix-inclusive path is what Caddy forwards, behind the key gate below.
+// prefix-inclusive path is what the viewer forwards, behind the key gate below.
 const cdeps = contractDeps();
 const contract = createContractApp(cdeps);
 // research-workbench P2b: the documents API shares the contract's database seam and registry reader.
@@ -119,8 +121,6 @@ app.get("/workbench/openapi.json", (c) => c.json(contractDoc)); // research-work
 app.route("/", contract); // research-workbench P0 — /workbench/contract/* (paths are absolute)
 
 app.notFound((c) => c.json({ error: "not found" }, 404));
-app.onError((err, c) => {
-  console.error("[workbench] error:", err?.message || err);
-  return c.json({ error: "internal", detail: String(err?.message || err) }, 500);
-});
+// rw-identity-harden (F-h): the answer carries no request URL, exception message or stack
+app.onError(internalError);
 

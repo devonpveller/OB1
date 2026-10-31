@@ -31,6 +31,7 @@
 import { type CslItem, crossrefToCsl, MetadataIncomplete, openalexToCsl } from "./csl.ts";
 import { accessionOk, fill, type Identifier, type IdentifierKind } from "./identifiers.ts";
 import { credentialShaped, secretForms, secretIn } from "./credentials.ts";
+import { sameKey } from "../identity/keys.ts";
 
 export interface ResolverConfig {
   openalexKey: string;
@@ -151,7 +152,7 @@ export function createResolver(
     }
     const headers: Record<string, string> = { accept: "application/json" };
     if (service === "openalex") {
-      if (!cfg.openalexKey || u.searchParams.get("api_key") !== cfg.openalexKey) {
+      if (!cfg.openalexKey || !sameKey(u.searchParams.get("api_key") ?? "", cfg.openalexKey)) {
         throw new RequestRefused("refused before sending: an OpenAlex request must carry the API key");
       }
     } else {

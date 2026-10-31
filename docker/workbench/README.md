@@ -16,17 +16,17 @@ multipart/upload/auth surface stays isolated.
 ## How it's reached (§2.3)
 
 ```
-browser ──fetch('/workbench/…')──> portal Caddy (wiki.{$PUBLIC_DOMAIN})
-   Authelia forward_auth gate ─┐
-   handle /workbench/*  ───────┴─> reverse_proxy openbrain-workbench:8000
-                                   + header_up X-Brain-Key {$WORKBENCH_KEY}
+browser ──fetch('/workbench/…')──> openbrain-wiki-viewer (its /workbench/* forwarder;
+                                   later behind Traefik + Authentik forward-auth)
+                                   ──> openbrain-workbench:8000 + X-Brain-Key (the door key)
 ```
 
-- `handle` (NOT `handle_path`) preserves the `/workbench` prefix, so routes are
-  mounted prefix-inclusive (`/workbench/notebooks`, …).
-- Caddy **injects** the shared secret server-side (G7) — the browser never holds
-  it. `requireKey` (src/middleware/auth.ts) trusts the header on `app-net`; the service is never
-  host-published except an optional `127.0.0.1` debug port.
+- The forwarder preserves the `/workbench` prefix, so routes are mounted prefix-inclusive
+  (`/workbench/notebooks`, …).
+- The viewer **injects** the key server-side (G7) — the browser never holds it. `requireKey`
+  (src/middleware/auth.ts) checks it; the service is never host-published except an optional
+  `127.0.0.1` debug port. The viewer is the only browser door: the portal Caddy's own
+  `handle /workbench/*` route (Authelia, `WORKBENCH_KEY` injected) was removed in rw-identity-harden.
 
 ## Architecture (G9)
 
@@ -110,7 +110,8 @@ workbench verifies it **on every request** (`src/identity/forward_auth.ts`, with
   subject, reason, method, route, time) **before** the request runs - a request that cannot be
   recorded is refused (503). The impersonation is its own short-lived row keyed by the admin's subject
   (`workspace_impersonation`; it ends by itself after `WORKSPACE_IMPERSONATION_MINUTES`, default 60,
-  recorded). `admin_audit` is append-only: a trigger refuses UPDATE, DELETE and TRUNCATE for every
+  recorded: rw-identity-harden sweeps expired ones every 30 s and on every admin request, whether or
+  not that admin returns, and an end and its `admin_audit` row are one transaction). `admin_audit` is append-only: a trigger refuses UPDATE, DELETE and TRUNCATE for every
   role; the workbench's role has SELECT + INSERT only.
 - **Sign out** is a link to Authentik's outpost sign-out, `WORKSPACE_FORWARD_AUTH_SIGN_OUT_URL`
   (blank = `/outpost.goauthentik.io/sign_out` on the same host, which is where Authentik serves it in
@@ -127,6 +128,21 @@ workbench verifies it **on every request** (`src/identity/forward_auth.ts`, with
   rw-identity3: the seam reads the RAW request target exactly as Hono's router does (from the first
   `/` to `?`/`#`, never `new URL()`, which resolves dot segments first), a raw `;` is 400 too, and
   that one path is what the scope checks, the audit `route` and owner-scope judge.
+  rw-identity-harden: a request whose `Host` (or an absolute-form target's authority) is not
+  `host[:port]` - a `/`, `?`, `#`, `@`, white space or a non-numeric port, which would move where the
+  router's path and query begin - is 400 before any decision too; owner-scope reads the query with
+  Hono's own parse (`c.req.queries()`, as every handler does), and the audit `route` records the path
+  and query as Hono reads them. A target outside `/workbench/*` never meets the seam, and no route
+  matches it (404), bar the internal `/health` and `/openapi.json` (N10).
+- **Only the exact open routes skip sign-in.** Without a valid token a browser reaches
+  `/workbench/health` and `/workbench/auth/me` and nothing else - no prefix: `/workbench/health/<x>`
+  and `/workbench/auth/me/<x>` get the full identity decision (401), so a route added under either
+  later is not open by accident.
+- **Errors and refusals.** An error no route answers itself is 500 `{"error":"internal"}` - never the
+  request URL, an exception message or a stack (those go to the log). A refusal a client can repeat
+  at will (a refused token, `X-authentik-*` while sign-in is off) is logged the first time per reason;
+  the rest of that minute is one counted line (`... N more in the last 60 s`), so a probe cannot
+  flood the log and none is dropped unseen.
 - **Forward-auth headers while sign-in is off = 503.** With `WORKSPACE_FORWARD_AUTH_*` blank, a
   request carrying `X-authentik-jwt` or any `X-authentik-*` header is refused 503 ("forward-auth
   is not configured") - an edge doing forward-auth in front of an unconfigured workbench would
@@ -139,11 +155,9 @@ workbench verifies it **on every request** (`src/identity/forward_auth.ts`, with
   sets the header needs a headers middleware that first deletes it (`customRequestHeaders:
   {<header>: ""}`), as does any other proxy.
 - **Doors.** With sign-in on, browsers must reach the workbench only through Traefik -> the viewer
-  (`WIKI_VIEWER_ALLOWED_HOSTS` / `_ORIGINS` = the edge's public name). The portal Caddy's `handle
-  /workbench/*` route injects `MCP_ACCESS_KEY` - with sign-in on that would make a Caddy-path browser
-  the internal service (shared knowledge, no user front end): remove that route or make it inject
-  `WORKSPACE_DOOR_KEY` before turning sign-in on (and it carries no Authentik token, so its browsers
-  get 401).
+  (`WIKI_VIEWER_ALLOWED_HOSTS` / `_ORIGINS` = the edge's public name). The portal Caddy's former
+  `handle /workbench/*` route (it injected `MCP_ACCESS_KEY`, which with sign-in on is the internal
+  service) is gone (rw-identity-harden), so nothing else forwards a browser to `/workbench`.
 - **What another user (or an agent key) reads of a job** (round 4): an ALLOW-LIST - status, queue
   position, and of the result only the grounded report (synthesis, when the run found something), its
   cited sources (title, url), claims (id, text), outcome and report type; tree and events: ids, kinds,

@@ -1,8 +1,8 @@
 // /workbench/nav (research-workbench P1b) - the explorer's data, one folder at
 // a time: ?folder=<path>&offset=<n>&limit=<n>&focus=<slug>.
 //
-// The browser reaches it here (same origin, through Caddy's /workbench/* with
-// the injected key). The ANSWER is computed by the wiki viewer's nav worker
+// The browser reaches it here (same origin, through the viewer's /workbench/*
+// forwarder with the injected key). The ANSWER is computed by the wiki viewer's nav worker
 // (its /__nav on :8082, docker/wiki-viewer/lib/nav-worker.mjs + nav-tree.mjs), because the explorer has to agree with
 // the page chrome on Quartz's URL slugs, which paths are pages, folder display
 // names and the explorer's sort - rules the viewer already holds over the rows

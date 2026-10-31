@@ -17,7 +17,7 @@ import type { Context } from "hono";
 import type { Db } from "../contracts/db.ts";
 import type { ForwardAuthConfig } from "../identity/forward_auth.ts";
 import * as store from "../identity/store.ts";
-import { identityOf, type Identity, seamPath } from "../middleware/identity.ts";
+import { identityOf, type Identity, rawTarget, seamPath } from "../middleware/identity.ts";
 import { reasonProblem } from "../identity/reason.ts";
 
 export interface AuthDeps {
@@ -97,8 +97,8 @@ export function authRouter(deps: AuthDeps) {
     const who = await adminOnly(c, "impersonate/end");
     if (who instanceof Response) return who;
     if (!who.impersonating) return c.json({ error: "not impersonating" }, 409);
-    const ended = await store.endImpersonation(deps.db, who.actor);
-    if (ended) await store.audit(deps.db, { actor_sub: who.actor, subject_sub: ended.target_sub, action: "impersonate.end", reason: ended.reason, session_ref: ended.ref });
+    // the end and its audit row: one transaction (rw-identity-harden F-d)
+    await store.endImpersonation(deps.db, who.actor, (e) => e.reason);
     return c.json({ impersonating: null });
   });
 
@@ -116,7 +116,7 @@ export function authRouter(deps: AuthDeps) {
     const limit = Math.min(1000, Math.max(1, Number(q("limit") ?? 200) || 200));
     const since = q("since");
     if (since && Number.isNaN(Date.parse(since))) return c.json({ error: "since is not a time" }, 400);
-    await store.audit(deps.db, { actor_sub: who.actor, subject_sub: who.sub, action: "audit.read", route: new URL(c.req.url).search, session_ref: who.session });
+    await store.audit(deps.db, { actor_sub: who.actor, subject_sub: who.sub, action: "audit.read", route: rawTarget(c.req.url).query, session_ref: who.session });
     return c.json({ entries: await store.auditLog(deps.db, { actor: q("actor"), subject: q("subject"), action: q("action"), since, limit }) });
   });
 

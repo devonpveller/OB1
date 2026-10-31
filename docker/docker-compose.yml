@@ -1335,16 +1335,16 @@ services:
     restart: unless-stopped
 
   # Browser-facing read/write API behind the Quartz viewer (D-A). Deno+Hono,
-  # internal :8000. Reached SAME-ORIGIN via the portal Caddy
-  # `handle /workbench/* { reverse_proxy openbrain-workbench:8000 }`, which
-  # injects the shared secret as X-Brain-Key — the browser never holds it (G7).
+  # internal :8000. Reached SAME-ORIGIN through the viewer's /workbench/*
+  # forwarder, which injects the key as X-Brain-Key — the browser never holds it
+  # (G7). (The portal Caddy route that once did this is gone: rw-identity-harden.)
   # Talks to openbrain-db DIRECTLY (deno-postgres) for atomic writes (G8) and to
   # PostgREST (openbrain-rest) for reads. NOT host-published except an optional
-  # loopback debug port. Networks: obnet + llm-net + app-net (app-net is
-  # REQUIRED so the portal Caddy can resolve this name by DNS — §2.3).
+  # loopback debug port. Networks: obnet + llm-net + app-net (app-net was for
+  # the portal Caddy's former /workbench route — §2.3; left as is).
   openbrain-workbench:
     # wiki group (sl-ob1-profiles). The read/write half of the wiki surface,
-    # reached same-origin behind the viewer via the portal Caddy /workbench/*.
+    # reached same-origin behind the viewer via the viewer's /workbench/* forwarder.
     # Its only in-project caller is openbrain-wiki (WORKBENCH_URL) - also wiki.
     profiles: ["wiki"]
     build:
@@ -1437,7 +1437,7 @@ services:
       # only place the archive path appears; the destination itself is a front-end setting.
       # Read-only: the workbench reports the destination, the P7a renderer writes it.
       - ${BACKUPS_DIR:-../../backups}/podcasts:/mounts/podcast-archive:ro
-    # Optional loopback debug publish ONLY (same-origin path is via Caddy).
+    # Optional loopback debug publish ONLY (same-origin path is via the viewer).
     ports:
       - "127.0.0.1:8814:8000"
     networks:
