@@ -385,6 +385,17 @@ Deno.test("keys: every key comparison goes through one constant-time compare (no
   assertEquals(keyKind("service-key-abcdefghij", ring, true), { kind: "service", name: "wiki" });
   assertEquals(keyKind("service-key-0123456789", ring, true), { kind: "service", name: "mcp" });
   for (const wrong of ["", "x", DOOR + "x", DOOR.slice(0, -1), SVC.toUpperCase(), "service-key-012345678", " " + DOOR]) assertEquals(keyKind(wrong, ring, true), null, JSON.stringify(wrong));
+  // the digest under the compare is SHA-256 (checked against WebCrypto, every length across block edges)
+  const mod = await import("./keys.ts") as Record<string, unknown>;
+  const sha = mod.sha256 as ((s: string) => Uint8Array) | undefined;
+  if (sha) {
+    const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    for (let len = 0; len < 200; len++) {
+      const s = Array.from({ length: len }, (_, i) => String.fromCharCode(32 + ((i * 7 + len) % 95))).join("") + (len % 5 === 0 ? "é\u{1F511}" : "");
+      const want = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))));
+      assertEquals(hex(sha(s)), want, `sha256 of a ${len}-char string`);
+    }
+  }
 });
 
 // ── N2: refusals do not flood the log ───────────────────────────────────────────────────────────

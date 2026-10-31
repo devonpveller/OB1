@@ -6,7 +6,7 @@ import { emptyDocumentsTrash, reconcileOnStart } from "./routes/documents.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
 import { emptyTrash } from "./repositories/notes.ts";
 import { sweepExpiredImpersonations } from "./identity/store.ts";
-import { logRefusal } from "./identity/refusal_log.ts";
+import { flushExpiredRefusals, logRefusal } from "./identity/refusal_log.ts";
 
 // Make sure we can commit notes / the Changes log into the vault (best-effort).
 await ensureVaultRepo();
@@ -56,6 +56,8 @@ if (seam.fa && seam.db) {
   sweep();
   setInterval(sweep, SWEEP_MS);
 }
+// N2: the counted refusals of each ended minute get their one line, even if no refusal follows
+setInterval(() => flushExpiredRefusals(), 60_000);
 
 Deno.serve({ port: config.port }, app.fetch);
 console.log(`[workbench] listening on :${config.port} (auth=${config.workbenchKey ? "on" : "OPEN — set WORKBENCH_KEY"}, ` +
