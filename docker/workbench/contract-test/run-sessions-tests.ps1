@@ -217,7 +217,8 @@ try {
   New-Item -ItemType Directory -Force $stage | Out-Null
   $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
   foreach ($m in $chain) { Copy-Item (Join-Path $composeDir $m[0]) (Join-Path $stage $m[1]) }
-  if ($Red) { Check (@($chain | Where-Object { $_[1] -eq '320-init-research-sessions.sql' }).Count -eq 0) "RED: the base chain has no 320 slot ($($chain.Count) migrations)" }
+  if ($Red -and $RedCases) { Write-Host "    the base chain: $($chain.Count) migrations (a round-1 base already has the 320 slot)" }
+  elseif ($Red) { Check (@($chain | Where-Object { $_[1] -eq '320-init-research-sessions.sql' }).Count -eq 0) "RED: the base chain has no 320 slot ($($chain.Count) migrations)" }
   else { Check (@($chain | Where-Object { $_[1] -eq '320-init-research-sessions.sql' }).Count -eq 1) "the chain mounts 320-init-research-sessions.sql ($($chain.Count) migrations)" }
 
   # ---------------------------------------------------------------- 2. network
