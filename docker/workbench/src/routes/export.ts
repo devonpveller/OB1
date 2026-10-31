@@ -20,6 +20,7 @@ import { createResolver, resolverConfigFromEnv } from "../export/resolver.ts";
 import { cacheResolution, documentExportMarkdown, documentExportRefs, noteExportRefs, pageExportRefs } from "../export/repo.ts";
 import { createExporter } from "../export/exporter.ts";
 import { limitsFromEnv } from "../export/markdown.ts";
+import { exportWithRollup } from "../contracts/repo/trust.ts";
 
 const db = poolDb(pool);
 const exportApp = createExporter({
@@ -32,7 +33,8 @@ const exportApp = createExporter({
   readNote: async (rel) => {
     if (!(await vaultExists(rel))) return null;
     const md = await vaultRead(rel);
-    return rel.startsWith("documents/") ? await documentExportMarkdown(db, md) : md;
+    // research-workbench P3b: a research report's page carries its credibility roll-up at its head
+    return rel.startsWith("documents/") ? await documentExportMarkdown(db, md) : await exportWithRollup(db, rel, md);
   },
   loadRefs: async (rel, md) => {
     if (rel.startsWith("documents/")) return await documentExportRefs(db, rel, md);

@@ -1130,6 +1130,20 @@
             "items": {
               "$ref": "#/components/schemas/ClaimSourceEdge"
             }
+          },
+          "verdict": {
+            "type": "string",
+            "nullable": true,
+            "example": "supports",
+            "description": "the entailment verdict (D10) on the cited line the claim was filed from - an entailment_verdicts key, read from the job that filed the claim's synthesis; null = not judged (filed before P3a, or on no judged line)"
+          },
+          "corroborations": {
+            "type": "integer",
+            "description": "independent further sources that state or corroborate it (claim_confidence's count: distinct non-suppressed sources with a states / corroborates edge, minus one)"
+          },
+          "contradicted_by_newer": {
+            "type": "boolean",
+            "description": "a claim or source created after this claim contradicts it"
           }
         },
         "required": [
@@ -1145,7 +1159,10 @@
           "thread_id",
           "synthesis_id",
           "edges_by_type",
-          "sources"
+          "sources",
+          "verdict",
+          "corroborations",
+          "contradicted_by_newer"
         ]
       },
       "ClaimSourceEdge": {
@@ -3952,6 +3969,381 @@
           "retired_at",
           "superseded_by"
         ]
+      },
+      "ReportCredibility": {
+        "type": "object",
+        "properties": {
+          "report_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "77777777-7777-4777-8777-777777777777",
+            "description": "the research synthesis (report) source"
+          },
+          "job_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "the research job that wrote the roll-up"
+          },
+          "recorded": {
+            "type": "boolean",
+            "description": "false: no roll-up was recorded for this report (a run before P3a, or no job found)"
+          },
+          "value": {
+            "type": "number",
+            "nullable": true,
+            "description": "the mean of the filed claims' D15 totals; null when nothing was filed or judged"
+          },
+          "claims": {
+            "type": "integer"
+          },
+          "below_floor": {
+            "type": "integer"
+          },
+          "judged_lines": {
+            "type": "integer"
+          },
+          "judged_not_filed": {
+            "type": "integer"
+          },
+          "claim_kind": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "claim_kinds",
+            "example": "general_theory",
+            "description": "A key of the `claim_kinds` registry (GET /workbench/contract/registries/claim_kinds)."
+          },
+          "model_version": {
+            "type": "string",
+            "nullable": true
+          },
+          "weights": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RollupWeight"
+            },
+            "description": "the claim-kind weights the roll-up used, one per scored family"
+          },
+          "filed": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "not_filed": {
+            "type": "string",
+            "nullable": true
+          },
+          "basis": {
+            "type": "string",
+            "nullable": true
+          },
+          "statement": {
+            "type": "string",
+            "description": "the roll-up as one line, the weights named in it - never a bare number"
+          }
+        },
+        "required": [
+          "report_id",
+          "job_id",
+          "recorded",
+          "value",
+          "claims",
+          "below_floor",
+          "judged_lines",
+          "judged_not_filed",
+          "claim_kind",
+          "model_version",
+          "weights",
+          "filed",
+          "not_filed",
+          "basis",
+          "statement"
+        ]
+      },
+      "RollupWeight": {
+        "type": "object",
+        "properties": {
+          "family": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "source_families",
+            "example": "scholarly",
+            "description": "A key of the `source_families` registry (GET /workbench/contract/registries/source_families)."
+          },
+          "weight": {
+            "type": "number",
+            "description": "the weight row's weight for the report's claim kind and this source family"
+          }
+        },
+        "required": [
+          "family",
+          "weight"
+        ]
+      },
+      "SessionCoverage": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "research job id"
+          },
+          "status": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "needs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Need"
+            }
+          },
+          "by_status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "needs counted by status; never a percent"
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "topic_estimate": {
+            "type": "string",
+            "nullable": true,
+            "description": "the tree's live topic estimate (P4a); null for a run before P4a"
+          },
+          "anchor": {
+            "type": "string",
+            "nullable": true,
+            "description": "what the estimate is read against: the branch's anchor, or the root's own question"
+          },
+          "anchor_basis": {
+            "type": "string"
+          },
+          "report_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "77777777-7777-4777-8777-777777777777",
+            "description": "the run's report (research synthesis source)"
+          },
+          "credibility": {
+            "$ref": "#/components/schemas/ReportCredibility"
+          },
+          "hubs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HubMarker"
+            },
+            "description": "the hubs the session's sources fall into - the P2b hub-context computation"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "created_at",
+          "needs",
+          "by_status",
+          "gaps",
+          "topic_estimate",
+          "anchor",
+          "anchor_basis",
+          "report_id",
+          "credibility",
+          "hubs"
+        ]
+      },
+      "Need": {
+        "type": "object",
+        "properties": {
+          "need": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "example": "answered",
+            "description": "answered | partial | open | search_failed (as the research service wrote it)"
+          }
+        },
+        "required": [
+          "need",
+          "status"
+        ]
+      },
+      "HubMarker": {
+        "type": "object",
+        "properties": {
+          "centre": {
+            "type": "object",
+            "properties": {
+              "slug": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "page_class": {
+                "type": "string",
+                "nullable": true
+              },
+              "in_degree": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "slug",
+              "title",
+              "page_class",
+              "in_degree"
+            ]
+          },
+          "seeds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ]
+            }
+          },
+          "sources": {
+            "type": "integer"
+          },
+          "thin": {
+            "type": "boolean"
+          },
+          "contested": {
+            "type": "boolean"
+          },
+          "contested_claims": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "claim_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "claim_id",
+                "text"
+              ]
+            }
+          },
+          "why": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "centre",
+          "seeds",
+          "links",
+          "sources",
+          "thin",
+          "contested",
+          "contested_claims",
+          "why"
+        ]
+      },
+      "DocumentCoverage": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "computed_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "hubs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HubMarker"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentSession"
+            },
+            "description": "the signed-in user's sessions started from this document or its refinery"
+          }
+        },
+        "required": [
+          "path",
+          "computed_at",
+          "hubs",
+          "sessions"
+        ]
+      },
+      "DocumentSession": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "research job id"
+          },
+          "status": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "by_status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "credibility": {
+            "type": "string",
+            "description": "the session's report credibility statement"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "created_at",
+          "by_status",
+          "credibility"
+        ]
       }
     },
     "parameters": {}
@@ -4821,7 +5213,10 @@
                           "title": "Suppressed fixture source",
                           "url": "https://example.org/suppressed"
                         }
-                      ]
+                      ],
+                      "verdict": null,
+                      "corroborations": 0,
+                      "contradicted_by_newer": false
                     }
                   ]
                 },
@@ -9018,6 +9413,379 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/RegistryDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/reports/{id}/credibility": {
+      "get": {
+        "operationId": "reportCredibility",
+        "tags": [
+          "trust panels (P3b)"
+        ],
+        "summary": "the report credibility roll-up of a research report, with the claim-kind weights it used (D15 item 5)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the report's research synthesis source id"
+            },
+            "required": true,
+            "description": "the report's research synthesis source id",
+            "name": "id",
+            "in": "path",
+            "example": "77777777-7777-4777-8777-777777777777"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the roll-up; recorded false when none was",
+            "content": {
+              "application/json": {
+                "example": {
+                  "report_id": "77777777-7777-4777-8777-777777777777",
+                  "job_id": null,
+                  "recorded": false,
+                  "value": null,
+                  "claims": 0,
+                  "below_floor": 0,
+                  "judged_lines": 0,
+                  "judged_not_filed": 0,
+                  "claim_kind": null,
+                  "model_version": null,
+                  "weights": [],
+                  "filed": null,
+                  "not_filed": null,
+                  "basis": null,
+                  "statement": "Report credibility: not recorded for this report (its run predates the D15 roll-up, or no research job filed it)"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ReportCredibility"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/sessions/{id}/coverage": {
+      "get": {
+        "operationId": "coverage",
+        "tags": [
+          "trust panels (P3b)"
+        ],
+        "summary": "coverage(session) - needs by status (never a percent), the topic estimate beside the anchor, the hubs the session touches and its report credibility; the signed-in user's own sessions only",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "research job id"
+            },
+            "required": true,
+            "description": "research job id",
+            "name": "id",
+            "in": "path",
+            "example": "99999999-9999-4999-8999-999999999999"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the session's coverage",
+            "content": {
+              "application/json": {
+                "example": {
+                  "session_id": "99999999-9999-4999-8999-999999999999",
+                  "status": "done",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "needs": [],
+                  "by_status": {
+                    "answered": 0,
+                    "partial": 0,
+                    "open": 0,
+                    "search_failed": 0
+                  },
+                  "gaps": [
+                    "what about erasure?"
+                  ],
+                  "topic_estimate": null,
+                  "anchor": "fixture question",
+                  "anchor_basis": "the session's own question (a root has no other anchor)",
+                  "report_id": null,
+                  "credibility": {
+                    "report_id": null,
+                    "job_id": "99999999-9999-4999-8999-999999999999",
+                    "recorded": false,
+                    "value": null,
+                    "claims": 0,
+                    "below_floor": 0,
+                    "judged_lines": 0,
+                    "judged_not_filed": 0,
+                    "claim_kind": null,
+                    "model_version": null,
+                    "weights": [],
+                    "filed": null,
+                    "not_filed": null,
+                    "basis": null,
+                    "statement": "Report credibility: not recorded for this report (its run predates the D15 roll-up, or no research job filed it)"
+                  },
+                  "hubs": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCoverage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/documents/coverage": {
+      "get": {
+        "operationId": "documentCoverage",
+        "tags": [
+          "trust panels (P3b)"
+        ],
+        "summary": "coverage(document) - the hubs a user document touches (the P2b hub context) and the user's own sessions started from it or its refinery",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "the user document's vault path"
+            },
+            "required": false,
+            "description": "the user document's vault path",
+            "name": "path",
+            "in": "query",
+            "example": "documents/fixture-refinery.md"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the document's coverage",
+            "content": {
+              "application/json": {
+                "example": {
+                  "path": "documents/fixture-refinery.md",
+                  "computed_at": "2026-10-17T12:00:00.000Z",
+                  "hubs": [
+                    {
+                      "centre": {
+                        "slug": "content/tool/tool-fixture",
+                        "title": "Tool Fixture",
+                        "page_class": "entity",
+                        "in_degree": 0
+                      },
+                      "seeds": [
+                        "content/source/11111111-1111-4111-8111-111111111111"
+                      ],
+                      "links": [
+                        {
+                          "kind": "source",
+                          "id": "11111111-1111-4111-8111-111111111111"
+                        }
+                      ],
+                      "sources": 2,
+                      "thin": true,
+                      "contested": false,
+                      "contested_claims": [],
+                      "why": [
+                        "2 source page(s) around the centre (thin below 3)",
+                        "no contradicted claim grounded here"
+                      ]
+                    }
+                  ],
+                  "sessions": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentCoverage"
                 }
               }
             }

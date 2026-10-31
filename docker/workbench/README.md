@@ -313,6 +313,25 @@ A database trigger refuses any reference without a quote, so the rule holds for 
 powershell -NoProfile -File contract-test/run-references-tests.ps1 -Subnet <x.y.z.0/24>   # disposable P2a run (same -Subnet / evidence gate as P0)
 ```
 
+## The trust panels' reads (research-workbench P3b)
+
+The workspace's claims ledger, coverage and source quality panels read the contract (`src/contracts/routes/trust.ts`,
+`repo/trust.ts`; wiring over what P3a and P4a record, nothing is scored here):
+
+- `claims()` carries per claim `verdict` (the entailment verdict on the line it was filed from, read from the job
+  that filed its synthesis; null = not judged), `corroborations` (claim_confidence's count) and `contradicted_by_newer`.
+- `GET /workbench/contract/reports/{id}/credibility` - the report credibility roll-up (`research_jobs.metrics.credibility`)
+  with the claim-kind weights it used; shared. A report with none answers `recorded: false` and says so.
+- `GET /workbench/contract/sessions/{id}/coverage` and `GET /workbench/contract/documents/coverage?path=` - needs by
+  status (counted, never a percent), the topic estimate beside the anchor, the hubs (the P2b hub-context computation),
+  the roll-up; the signed-in user's own sessions and documents only (anyone else: 404).
+- The export of a research report's page (`content/source/<synthesis id>.md`) carries a `## Report credibility`
+  section at its head (`exportWithRollup`, wired in `routes/export.ts`).
+
+```
+powershell -NoProfile -File contract-test/run-trust-tests.ps1 -Subnet <x.y.z.0/24> [-Red]   # disposable P3b run + the isolation sweep
+```
+
 ## Export with resolved references (research-workbench P6a)
 
 `GET /workbench/export?path=<vault .md>&format=<key>&style=<key>[&wrap=none][&mode=copy]` renders a page with its

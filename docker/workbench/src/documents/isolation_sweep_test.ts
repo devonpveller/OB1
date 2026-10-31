@@ -149,6 +149,11 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const research = await wb("POST", "/workbench/documents/research", { path: bPath, query: M.prompt, kind: "research" }, B);
   assertEquals(research.status, 202, research.text);
   const bJob: string = research.json.job_id;
+  // rw-p3b-trustpanels: B's job as a finished run records it - needs, gaps and an anchor carrying B's
+  // prompt marker - so the coverage read (GET /contract/sessions/:id/coverage) has B's text to leak
+  await sql(`UPDATE public.research_jobs SET anchor = $2, result = COALESCE(result, '{}'::jsonb) || jsonb_build_object(
+      'needs_status', jsonb_build_array(jsonb_build_object('need', $2::text, 'status', 'open')), 'gaps', jsonb_build_array($2::text))
+    WHERE id = $1::uuid`, [bJob, M.prompt]);
   const held = await wb("POST", "/workbench/documents/user-sources", { refinery_id: bRefinery, title: "sweep held source", content: "shared held text for the sweep" }, B);
   assert(held.status < 300, held.text);
   const bHeld: string = held.json.source_id ?? held.json.id ?? held.json.held?.id ?? "";

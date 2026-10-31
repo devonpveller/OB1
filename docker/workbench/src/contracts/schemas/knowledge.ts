@@ -49,6 +49,19 @@ export const Claim = z.object({
   synthesis_id: uuid(FX.synthesis).nullable(),
   edges_by_type: z.record(z.string(), z.number().int()),
   sources: z.array(ClaimSourceEdge),
+  // research-workbench P3b (the claims ledger)
+  verdict: z.string().nullable().openapi({
+    example: "supports",
+    description: "the entailment verdict (D10) on the cited line the claim was filed from - an entailment_verdicts key, " +
+      "read from the job that filed the claim's synthesis; null = not judged (filed before P3a, or on no judged line)",
+  }),
+  corroborations: z.number().int().openapi({
+    description: "independent further sources that state or corroborate it (claim_confidence's count: distinct " +
+      "non-suppressed sources with a states / corroborates edge, minus one)",
+  }),
+  contradicted_by_newer: z.boolean().openapi({
+    description: "a claim or source created after this claim contradicts it",
+  }),
 }).openapi("Claim");
 
 export const Claims = z.object({

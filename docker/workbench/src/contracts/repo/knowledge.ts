@@ -87,6 +87,8 @@ interface ClaimRow {
   thread_id: string | null;
   synthesis_id: string | null;
   edges: { edge_id: number; source_id: string; edge_type: string; lifecycle: string; title: string; url: string | null }[];
+  corroborations: number;
+  contradicted_by_newer: boolean;
 }
 
 // claims(scope, filter). An evidence-only caller sees only edges whose source is active; a claim
@@ -123,7 +125,20 @@ export async function claims(db: Db, q: ClaimsQuery) {
                         'lifecycle', public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at),
                         'title', s.title, 'url', s.url) ORDER BY cs.id)
                         FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
-                       WHERE cs.claim_id = c.id AND ($6::jsonb IS NULL OR s.metadata @> $6::jsonb)), '[]'::jsonb) AS edges
+                       WHERE cs.claim_id = c.id AND ($6::jsonb IS NULL OR s.metadata @> $6::jsonb)), '[]'::jsonb) AS edges,
+            -- P3b (the claims ledger): claim_confidence's corroborator count, over the in-scope edges
+            (SELECT GREATEST(count(DISTINCT e.source_id) - 1, 0)::int
+               FROM public.claim_sources e JOIN public.sources es ON es.id = e.source_id
+              WHERE e.claim_id = c.id AND e.edge_type IN ('states', 'corroborates') AND es.retraction_committed_at IS NULL
+                AND ($6::jsonb IS NULL OR es.metadata @> $6::jsonb)) AS corroborations,
+            -- P3b: contradicted by something NEWER than the claim - a claim, or a (non-suppressed) source
+            EXISTS (SELECT 1 FROM public.claim_sources x
+                      LEFT JOIN public.claims n ON n.id = x.parent_claim_id
+                      LEFT JOIN public.sources xs ON xs.id = x.source_id
+                     WHERE x.claim_id = c.id AND x.edge_type = 'contradicts'
+                       AND ((n.id IS NOT NULL AND n.created_at > c.created_at AND ($6::jsonb IS NULL OR n.metadata @> $6::jsonb))
+                         OR (xs.id IS NOT NULL AND xs.retraction_committed_at IS NULL AND xs.created_at > c.created_at
+                             AND ($6::jsonb IS NULL OR xs.metadata @> $6::jsonb)))) AS contradicted_by_newer
        FROM public.claims c
       WHERE ($1::uuid IS NULL OR (c.thread_id = $1 AND $6::jsonb IS NULL))
         AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM public.claim_sources x JOIN public.sources xs ON xs.id = x.source_id
@@ -138,11 +153,37 @@ export async function claims(db: Db, q: ClaimsQuery) {
       LIMIT $7`,
     [q.thread_id, q.source_id, q.synthesis_id, q.status, q.q, mf, q.limit],
   );
-  const out = rows.map((r) => shapeClaim(r, q.evidenceOnly)).filter((c) => c !== null);
+  const verdicts = await verdictsOf(db, rows);
+  const out = rows.map((r) => shapeClaim(r, q.evidenceOnly, verdicts)).filter((c) => c !== null);
   return { count: out.length, claims: out };
 }
 
-function shapeClaim(r: ClaimRow, evidenceOnly: boolean) {
+// research-workbench P3b - each claim's entailment verdict (D10), as the research service recorded it:
+// the job whose curator filed the claim's synthesis (result.curator.persist.synthesis_id) lists the
+// claims it scored (result.line_credibility: text + verdict, the curator's own claim list). Matched on
+// the claim text; null when no job recorded one (a claim filed before P3a, or on no judged line).
+// Only a synthesis the answer already shows is looked up (under a metadata filter an out-of-scope
+// synthesis is null, so it is never read).
+export async function verdictsOf(db: Db, rows: { synthesis_id: string | null }[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.map((r) => r.synthesis_id).filter((x): x is string => !!x))];
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const found = await db.query<{ synthesis_id: string; text: string; verdict: string }>(
+    `SELECT j.result -> 'curator' -> 'persist' ->> 'synthesis_id' AS synthesis_id, lc ->> 'text' AS text, lc ->> 'verdict' AS verdict
+       FROM public.research_jobs j
+       CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'line_credibility') = 'array'
+                                                    THEN j.result -> 'line_credibility' ELSE '[]'::jsonb END) lc
+      WHERE j.result -> 'curator' -> 'persist' ->> 'synthesis_id' = ANY($1::text[])
+        AND jsonb_typeof(lc -> 'verdict') = 'string' AND jsonb_typeof(lc -> 'text') = 'string'
+      ORDER BY j.finished_at ASC NULLS FIRST, j.created_at ASC`,
+    [ids.map((x) => x.toLowerCase())],
+  );
+  // the latest run wins; a verdict is served only as a registry-shaped key (never free text)
+  for (const f of found) if (/^[a-z][a-z0-9_]{0,40}$/.test(f.verdict)) out.set(`${f.synthesis_id}|${f.text.trim()}`, f.verdict);
+  return out;
+}
+
+function shapeClaim(r: ClaimRow, evidenceOnly: boolean, verdicts: Map<string, string> = new Map()) {
   const edges = evidenceOnly ? r.edges.filter((e) => e.lifecycle === "active") : r.edges;
   if (evidenceOnly && edges.length === 0) return null;
   const byType: Record<string, number> = {};
@@ -155,6 +196,9 @@ function shapeClaim(r: ClaimRow, evidenceOnly: boolean) {
     state_detail: suppressedEdges ? { suppressed_edges: suppressedEdges, note: "suppressed sources lend no credit (D5 stage 1)" } : {},
     edges_by_type: byType,
     sources: edges.map((e) => ({ ...e, edge_id: Number(e.edge_id) })),
+    verdict: r.synthesis_id ? verdicts.get(`${r.synthesis_id.toLowerCase()}|${r.text.trim()}`) ?? null : null,
+    corroborations: Number(r.corroborations ?? 0),
+    contradicted_by_newer: !!r.contradicted_by_newer,
   };
 }
 

@@ -39,6 +39,15 @@ a byte-identical copy of `OB1/docker/workbench/src/documents/grammar.ts`):
 | `[@ref:<reference id>]` | a citation chip: a P2a reference record, frozen to its pin |
 | `{{ref:<reference id>}}text{{/ref}}` | a protected transclusion (atomic in the editor); the deliberate break (Mod-Shift-B, or the toolbar) turns it into `text [@ref:<id>]` |
 
+## The trust panels (research-workbench P3b)
+
+`src/panels/trust/`: the **claims ledger** (tag, verdict, stance bar from the edge types, corroboration count,
+contradicted-by-newer, confidence; sortable by confidence and by needs-a-look), the **coverage** panel (a session's
+needs by status with the topic estimate beside the anchor, the hubs it touches, the report header with the
+credibility roll-up and its claim-kind weights; on a document, its hubs and its sessions) and the **source quality**
+panel (the legitimacy and relevance-for-run axes, the rolling total with its reasons and history). Their focus
+(session, report, source) lives in `src/panels/trust/focus.ts`, not in the shared store.
+
 ## Per-user state
 
 The front-end context is the user's own (operator 2026-10-28): the workbench's identity seam decides

@@ -84,6 +84,9 @@ export type Claim = {
   synthesis_id: string | null;
   edges_by_type: Record<string, number>;
   sources: Array<ClaimSourceEdge>;
+  verdict: string | null;
+  corroborations: number;
+  contradicted_by_newer: boolean;
 };
 
 export type ClaimSourceEdge = {
@@ -166,6 +169,13 @@ export type DiffCheckResult = {
   lifecycle: string | null; /** registry: source_states */
 };
 
+export type DocumentCoverage = {
+  path: string;
+  computed_at: string;
+  hubs: Array<HubMarker>;
+  sessions: Array<DocumentSession>;
+};
+
 export type DocumentLink = {
   kind: string; /** registry: node_kinds */
   id: string;
@@ -178,6 +188,14 @@ export type DocumentListing = {
   path: string;
   updated: string;
   outbound_links: Array<DocumentLink>;
+};
+
+export type DocumentSession = {
+  id: string;
+  status: string;
+  created_at: string;
+  by_status: Record<string, number>;
+  credibility: string;
 };
 
 export type Documents = {
@@ -258,6 +276,28 @@ export type HolderReferences = {
   }>;
 };
 
+export type HubMarker = {
+  centre: {
+    slug: string;
+    title: string;
+    page_class: string | null;
+    in_degree: number;
+  };
+  seeds: Array<string>;
+  links: Array<{
+    kind: string;
+    id: string;
+  }>;
+  sources: number;
+  thin: boolean;
+  contested: boolean;
+  contested_claims: Array<{
+    claim_id: string;
+    text: string;
+  }>;
+  why: Array<string>;
+};
+
 export type Idea = {
   id: string;
   title: string;
@@ -331,6 +371,11 @@ export type Jobs = {
 export type LiftRequest = {
   by: string;
   note?: string;
+};
+
+export type Need = {
+  need: string;
+  status: string;
 };
 
 export type Neighbours = {
@@ -611,6 +656,29 @@ export type RegistrySummary = {
   entries: number;
 };
 
+export type ReportCredibility = {
+  report_id: string | null;
+  job_id: string | null;
+  recorded: boolean;
+  value: number | null;
+  claims: number;
+  below_floor: number;
+  judged_lines: number;
+  judged_not_filed: number;
+  claim_kind: string | null; /** registry: claim_kinds */
+  model_version: string | null;
+  weights: Array<RollupWeight>;
+  filed: boolean | null;
+  not_filed: string | null;
+  basis: string | null;
+  statement: string;
+};
+
+export type RollupWeight = {
+  family: string; /** registry: source_families */
+  weight: number;
+};
+
 export type Search = {
   query: string;
   kinds: Array<string>;
@@ -653,6 +721,21 @@ export type Session = {
     cited_sources: number;
     gaps: Array<string>;
   };
+};
+
+export type SessionCoverage = {
+  session_id: string;
+  status: string;
+  created_at: string;
+  needs: Array<Need>;
+  by_status: Record<string, number>;
+  gaps: Array<string>;
+  topic_estimate: string | null;
+  anchor: string | null;
+  anchor_basis: string;
+  report_id: string | null;
+  credibility: ReportCredibility;
+  hubs: Array<HubMarker>;
 };
 
 export type SessionSummary = {
