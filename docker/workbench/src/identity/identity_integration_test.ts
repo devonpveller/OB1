@@ -881,3 +881,28 @@ Deno.test({ name: "Fd ending an impersonation writes its audit row in the same t
   }
   assert(fails.length === 0, `an impersonation's end and its audit row are not one transaction:\n${fails.join("\n")}`);
 } });
+
+// rw-identity-harden round 2 (tester t-id-harden D1): the tester's forced repros against the real
+// workbench - a folder named like a note, a write under a file, an unreachable extractor. No body may
+// carry the OS error, the vault path or the upstream URL.
+Deno.test({ name: "D1 a route's own error answer carries no exception text (no OS error, vault path or upstream URL)", ...opts, fn: async () => {
+  const tok = await mint(claimsOf("alice"));
+  const h = { "x-brain-key": DOOR, [TOKEN]: tok };
+  const n = crypto.randomUUID().slice(0, 6);
+  assert((await direct(WB, "POST", "/workbench/notes/folders", h, { path: `tprobe-dir-${n}.md` })).status < 300, "set-up: a folder named like a note");
+  const put = await direct(WB, "PUT", `/workbench/notes/tprobe-file-${n}.md`, h, { content: "x" });
+  assert(put.status < 300, `set-up: a note ${put.status} ${put.text.slice(0, 80)}`);
+  const leak = /os error|is a directory|not a directory|file exists|\/wiki\/|unreachable\.invalid|error sending request|dns error|readfile|mkdir/i;
+  const fails: string[] = [];
+  for (const [m, p, body] of [["GET", `/workbench/notes/tprobe-dir-${n}.md`, undefined], ["DELETE", `/workbench/notes/tprobe-dir-${n}.md`, undefined],
+      ["PUT", `/workbench/notes/tprobe-file-${n}.md/child.md`, { content: "x" }], ["POST", "/workbench/notes/folders", { path: `tprobe-file-${n}.md/sub` }]] as const) {
+    const r = await direct(WB, m, p, h, body);
+    if (r.status < 400 || leak.test(r.text)) fails.push(`${m} ${p}: ${r.status} ${r.text.slice(0, 160)}`);
+  }
+  const fd = new FormData();
+  fd.append("file", new Blob([new TextEncoder().encode("hello")]), "a.txt");
+  const up = await fetch(`${WB}/workbench/sources/11111111-1111-4111-8111-111111111111/replace-from-upload`, { method: "POST", headers: h, body: fd });
+  const upText = await up.text();
+  if (up.status < 400 || leak.test(upText)) fails.push(`replace-from-upload (extractor unreachable): ${up.status} ${upText.slice(0, 160)}`);
+  assert(fails.length === 0, `${fails.length} error bodies carry an exception's text:\n${fails.join("\n")}`);
+} });

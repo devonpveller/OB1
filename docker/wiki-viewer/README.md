@@ -74,9 +74,10 @@ viewer (openbrain-wiki-viewer, node:22; NO Quartz in the image since P1c -
   the editor opens; the graph never falls back to it (a page without a graph
   answer - a folder or tag page - draws itself alone).
 
-ingress: CF/Authelia or tailnet → caddy (wiki_app block)
-  /workbench/* → openbrain-workbench:8000 (X-Brain-Key injected server-side)
-  everything else → openbrain-wiki-viewer:8080
+ingress: the edge (Traefik + Authentik, later) → openbrain-wiki-viewer:8080
+  /workbench/* → the viewer's forwarder → openbrain-workbench:8000 (X-Brain-Key injected server-side)
+  everything else → the viewer itself
+  (the retired portal: CF/Authelia or tailnet → caddy (wiki_app) → the viewer; no /workbench route)
 ```
 
 ## Invariants (violating any of these re-ships a known bug)
@@ -173,8 +174,8 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   imports `@shared/*` from the `/recipes` bind-mount, which does not exist at
   build time. `extractLinks` is deliberately mirrored there and in
   `recipes/_shared/links.mjs` (two runtimes, one contract, tests on both).
-- **Verification enters through the user's door.** Drive caddy
-  (`http://caddy:8446` from any obnet container), not the container ports,
+- **Verification enters through the user's door.** Drive the viewer
+  (`http://openbrain-wiki-viewer:8080` from any obnet container; it forwards `/workbench/*`), not the workbench's port,
   and create notes via the workbench API the way the UI does (UI-created
   notes have rows; a disk-written test file with no row is `pending` - there
   is no file-render path any more). RED before the fix, GREEN after, in the
@@ -188,7 +189,8 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   parameters: `P1A_PREFIX`, `P1A_TAG`, `P1A_SUBNET`, `P1A_PORT`).
 - **P1b adds** (`test/p1b-env.sh`, `test/run-p1b.sh`): a contract database
   built from the REAL initdb chain (docker-compose.yml order), the workbench
-  on it, the portal Caddyfile's own `(wiki_app)` snippet as the front door,
+  on it, the portal Caddyfile's own `(wiki_app)` snippet as the front door (no /workbench route since
+  rw-identity-harden: the viewer forwards it, so run-p1b.sh turns the viewer's forwarder on),
   headless Chromium for the perf floor (`test/perf-nav.mjs`: explorer per
   navigation, nav TTFB, nav payload; unthrottled, DevTools "Slow 4G" + 4x CPU,
   mobile), synthetic vaults shaped like the live table (`p1b-env.sh
@@ -215,9 +217,10 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
   #    (test/p1a-env.sh), never the live container; a drill may bind-mount
   #    a candidate file over /viewer/bundle/postscript.js.
 
-  # 3. verify THROUGH CADDY, not the container port (the explorer's nav too)
-  docker exec openbrain-wiki-viewer node -e 'fetch("http://caddy:8446/postscript.js").then(r=>r.text()).then(j=>console.log(j.length, /<marker>/.test(j)))'
-  docker exec openbrain-wiki-viewer node -e 'fetch("http://caddy:8446/workbench/nav?folder=").then(r=>console.log(r.status, r.headers.get("x-wiki-nav")))'
+  # 3. verify through the viewer's own door (the explorer's nav too: /workbench/* is forwarded by the
+  #    viewer; the retired portal Caddy has no /workbench route since rw-identity-harden)
+  docker exec openbrain-wiki-viewer node -e 'fetch("http://openbrain-wiki-viewer:8080/postscript.js").then(r=>r.text()).then(j=>console.log(j.length, /<marker>/.test(j)))'
+  docker exec openbrain-wiki-viewer node -e 'fetch("http://openbrain-wiki-viewer:8080/workbench/nav?folder=").then(r=>console.log(r.status, r.headers.get("x-wiki-nav")))'
   ```
 
   The ETag is size+mtime and the bundle is served `no-cache, must-revalidate`,
@@ -232,7 +235,7 @@ ingress: CF/Authelia or tailnet → caddy (wiki_app block)
 
 - **Sidecar, not live iteration**: the viewer is the image on a vault
   (read-only) and a database; there is nothing to switch off (P1c: no builder).
-  Its explorer and search call `/workbench/*`, which only exists behind caddy.
+  Its explorer and search call `/workbench/*`, which the viewer forwards to the workbench itself.
   Batch changes; deploy ONCE.
 - **Quartz sources**: the overlay forks the frozen bundle was built from live
   in `quartz-overlay/` (a record only - nothing builds them since

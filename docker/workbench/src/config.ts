@@ -4,7 +4,7 @@
 export const config = {
   port: parseInt(Deno.env.get("PORT") || "8000", 10),
 
-  // Shared secret Caddy injects as `X-Brain-Key` when proxying to us (G7).
+  // Shared secret the viewer's /workbench forwarder injects as `X-Brain-Key` (G7).
   // The browser never holds it; we only trust the header on app-net. Reuses
   // the MCP_ACCESS_KEY value (plan §2.3) — supplied here as WORKBENCH_KEY.
   workbenchKey: Deno.env.get("WORKBENCH_KEY") || Deno.env.get("MCP_ACCESS_KEY") || "",

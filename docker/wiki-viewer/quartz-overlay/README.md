@@ -25,7 +25,7 @@ quartz-overlay/
 Each interactive component is a Quartz constructor component (`.tsx`, built at
 compile time, thin) plus an optional `.inline.ts` client script (where the heavy
 logic lives — D-A static-build friction). Client scripts call the workbench
-same-origin at `/workbench/*`; the secret is injected by Caddy server-side (G7),
+same-origin at `/workbench/*`; the secret is injected server-side by the viewer's forwarder (G7),
 so **no bearer is ever embedded here**.
 
 ## Hydration id contract (G12 / P0.6)

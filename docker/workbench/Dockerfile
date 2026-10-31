@@ -118,7 +118,7 @@ RUN apt-get update \
 # cases over a loopback socket, and (rw-identity-harden, harden_test.ts) the Host check, the exact open routes,
 # the seam/owner-scope/audit differential fuzz, the error-body, key-compare and log-rate cases; its integration
 # test is skipped here (no IDENTITY_TEST_BASE).
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ \
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ \
   && touch /app/.test-gate-passed
 
 FROM test AS parity

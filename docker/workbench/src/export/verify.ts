@@ -219,7 +219,8 @@ async function docxChecked(docx: Uint8Array, secrets: string[], format: string, 
   try {
     parts = await zipEntries(docx);
   } catch (e) {
-    throw new OutputRejected("output-verification", format, `a file that cannot be read back (${(e as Error).message})`);
+    console.error("[export] output read-back failed:", (e as Error)?.message ?? e);
+    throw new OutputRejected("output-verification", format, "a file that cannot be read back");
   }
   const dec = new TextDecoder();
   let words = "";
@@ -275,7 +276,8 @@ async function pdfChecked(pdf: Uint8Array, secrets: string[], format: string, bu
     doc = await PdfDocument.read(pdf);
     layer = await doc.glyphs();
   } catch (e) {
-    throw new OutputRejected("output-verification", format, `a file that cannot be read back (${(e as Error).message})`);
+    console.error("[export] output read-back failed:", (e as Error)?.message ?? e);
+    throw new OutputRejected("output-verification", format, "a file that cannot be read back");
   }
   for (const a of doc.actions()) {
     if (a.kind === "URI") {

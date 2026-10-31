@@ -73,17 +73,22 @@ export const FOREIGN_JOB = (j: string, sub: string, key: string, adminSees = fal
 // The same rule in code, for a path a route is handed (holders, diff-check, export, note-history).
 // Every path must be the viewer's own directory, or a pre-P2b documents/<file> (also its .trash /
 // .archive form) whose listing row the viewer owns. A path outside documents/ is not per-user.
+// rw-identity-harden round 2 (tester F-T1): `documents/` in ANY letter case - on a case-insensitive
+// vault mount (a Windows or macOS bind) `Documents/<other>/x.md` opens the same file, so it is judged as
+// a documents path; another user's key in any case is not the caller's own (only the exact key is).
+const isDocumentsPath = (p: string) => p.slice(0, DOCUMENTS_ROOT.length + 1).toLowerCase() === `${DOCUMENTS_ROOT}/`;
+
 export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): Promise<boolean> {
   const legacy: string[] = [];
   for (const p of paths) {
-    if (!p.startsWith(`${DOCUMENTS_ROOT}/`)) continue;
+    if (!isDocumentsPath(p)) continue;
     const seg = p.split("/")[1] ?? "";
     if (seg === who.key) continue;
     if (seg.endsWith(".md") || seg.startsWith(".")) legacy.push(p);
     else return false;
   }
   if (!legacy.length) return true;
-  const live = legacy.map((p) => p.replace(/^documents\/\.(?:trash|archive)\//, "documents/"));
+  const live = legacy.map((p) => p.replace(/^documents\/\.(?:trash|archive)\//i, "documents/"));
   const rows = await db.query<{ path: string }>(
     `SELECT path FROM public.user_document_listings WHERE owner_sub = $2 AND (path = ANY($1) OR path = ANY($3))`,
     [legacy, who.sub, live],
@@ -106,14 +111,14 @@ function normalize(p: string): string {
 export function documentPathsIn(s: string): string[] {
   const found: string[] = [];
   const t = s.replace(/\\/g, "/");
-  const re = /(^|[\/\s"'=:(,])((?:\.{1,2}\/)*documents\/[^\s"'?&#,)]*)/g;
+  const re = /(^|[\/\s"'=:(,])((?:\.{1,2}\/)*documents\/[^\s"'?&#,)]*)/gi;
   for (const m of t.matchAll(re)) found.push(m[2]);
   // a path that only becomes documents/ once its `..` segments are resolved
   for (const m of t.matchAll(/[^\s"'?&#,]*\.\.[^\s"'?&#,]*/g)) {
     const n = normalize(m[0]);
-    if (n.startsWith("documents/")) found.push(n);
+    if (isDocumentsPath(n)) found.push(n);
   }
-  return [...new Set(found.map(normalize).filter((p) => p.startsWith("documents/") && p.length > "documents/".length))];
+  return [...new Set(found.map(normalize).filter((p) => isDocumentsPath(p) && p.length > "documents/".length))];
 }
 
 

@@ -4,6 +4,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import * as repo from "../repositories/notes.ts";
+import { publicError } from "../util/public-error.ts";
 
 export const notes = new Hono();
 
@@ -66,7 +67,7 @@ notes.post("/folders", async (c) => {
     const res = await repo.createFolder(path, authorOf(c));
     return c.json(res, res.created ? 201 : 200);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the folder could not be created", "notes") }, 400);
   }
 });
 
@@ -84,7 +85,7 @@ notes.post("/move", async (c) => {
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note could not be moved", "notes") }, 400);
   }
 });
 
@@ -100,7 +101,7 @@ notes.delete("/folders", async (c) => {
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the folder could not be trashed", "notes") }, 400);
   }
 });
 
@@ -110,7 +111,7 @@ notes.post("/empty-trash", async (c) => {
   try {
     return c.json(await repo.emptyTrash(authorOf(c)));
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the trash could not be emptied", "notes") }, 400);
   }
 });
 
@@ -125,7 +126,7 @@ notes.post("/folders/restore", async (c) => {
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the folder could not be restored", "notes") }, 400);
   }
 });
 
@@ -137,7 +138,7 @@ notes.delete("/:notePath{.+}", async (c) => {
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note could not be trashed", "notes") }, 400);
   }
 });
 
@@ -148,7 +149,7 @@ notes.post("/:notePath{.+}/restore", async (c) => {
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note could not be restored", "notes") }, 400);
   }
 });
 
@@ -163,7 +164,7 @@ notes.post("/:notePath{.+}/recover", async (c) => {
     if ("error" in res) return c.json({ error: res.error }, res.code);
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note could not be recovered", "notes") }, 400);
   }
 });
 
@@ -174,7 +175,7 @@ notes.get("/:notePath{.+}", async (c) => {
     if (!res) return c.json({ error: "not found" }, 404);
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note could not be read", "notes") }, 400);
   }
 });
 
@@ -203,6 +204,6 @@ notes.put("/:notePath{.+}", async (c) => {
     }
     return c.json(res);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note could not be written", "notes") }, 400);
   }
 });

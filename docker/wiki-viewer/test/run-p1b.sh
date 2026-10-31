@@ -32,6 +32,9 @@ hdr() { echo; echo "################ $1"; }
 want() { [ -z "${ONLY:-}" ] || [[ " $ONLY " == *" $1 "* ]]; }
 T() { timeout "${1}" "${@:2}"; }
 FRONT="http://$P-front:8080"
+# rw-identity-harden: the front door (the portal's (wiki_app) snippet) no longer routes /workbench/*; it reaches
+# the viewer, whose forwarder is the only /workbench door - on, and answering the front door's Host
+export P1B_VIEWER_ENV="${P1B_VIEWER_ENV:--e WORKBENCH_URL=http://openbrain-workbench:8000 -e WIKI_VIEWER_ALLOWED_HOSTS=$P-front}"
 chk() { timeout 900 docker run --rm -i --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/p1b-checks.mjs "$@"; }
 psqlq() { docker exec -i "$P-db" psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA "$@"; }
 churn() { # round 2: a new thought on an entity + the entity bumped, so the next compile REGENERATES its page

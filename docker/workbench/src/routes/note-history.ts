@@ -6,6 +6,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { safeRelPath } from "../util/paths.ts";
+import { publicError } from "../util/public-error.ts";
 import { ownedPathParam } from "../documents/ownership.ts";
 import { identityOf } from "../middleware/identity.ts";
 import { pool } from "../db/pool.ts";
@@ -61,7 +62,7 @@ noteHistory.get("/", async (c) => {
   try {
     rel = readPath(c);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note history could not be read", "note-history") }, 400);
   }
   if (!(await vaultExists(rel))) return c.json({ error: "note not found" }, 404);
   const revisions = await vaultFileHistory(rel, 20);
@@ -80,7 +81,7 @@ noteCommit.post("/", async (c) => {
     try {
       rel = notePath(c);
     } catch (e) {
-      return c.json({ error: String((e as Error).message) }, 400);
+      return c.json({ error: publicError(e, "the note history could not be read", "note-history") }, 400);
     }
     const res = await vaultCommitPath(rel, `notes: commit ${rel}`, authorOf(c));
     return c.json(res);
@@ -96,7 +97,7 @@ noteCommit.post("/revert", async (c) => {
   try {
     rel = notePath(c);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note history could not be read", "note-history") }, 400);
   }
   const hash = (c.req.query("hash") || "").toString();
   if (!hash) return c.json({ error: "hash is required" }, 400);
@@ -114,7 +115,7 @@ noteCommit.post("/discard", async (c) => {
   try {
     rel = notePath(c);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note history could not be read", "note-history") }, 400);
   }
   if (!(await vaultExists(rel))) return c.json({ error: "note not found" }, 404);
   await vaultDiscard(rel);

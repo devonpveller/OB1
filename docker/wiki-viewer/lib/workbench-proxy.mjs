@@ -3,8 +3,8 @@
 // forwards the request to the workbench with the shared key injected SERVER-SIDE; a key the client
 // sent is dropped, so the browser can never hold or forge one. Request bodies are capped as the
 // portal's (wiki_app) Caddy snippet capped them: 100 MB on the upload paths, 1 MB elsewhere.
-// Off (404) unless WORKBENCH_URL and WORKBENCH_KEY are both set. While Caddy still fronts the plane
-// it routes /workbench/* to the workbench itself, and none of it reaches the viewer.
+// Off (404) unless WORKBENCH_URL and WORKBENCH_KEY are both set. This is the only browser door to
+// /workbench: the portal Caddy's own route is gone (rw-identity-harden; the portal is retired).
 //
 // CSRF + DNS-rebinding guard (review r-p2b finding 4): because the key is added for whoever reaches
 // the viewer, every forwarded request must name an allow-listed Host (421 otherwise: a rebound name

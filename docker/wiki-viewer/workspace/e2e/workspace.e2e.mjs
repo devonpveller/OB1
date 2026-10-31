@@ -1,6 +1,6 @@
 // The workspace end to end (research-workbench P2b), in a real headless Chromium, through the lab's
-// front door (the portal's (wiki_app) Caddy snippet: /workbench/* -> the :wt workbench with the key
-// injected, everything else -> the :wt viewer, which serves /workspace).
+// front door: the :wt viewer itself (it serves /workspace and forwards /workbench/* to the :wt workbench
+// with the key injected; rw-identity-harden: the portal Caddy snippet no longer routes /workbench).
 //
 // Run by OB1/docker/workbench/contract-test/run-workspace-tests.ps1 in a container on the lab's
 // INTERNAL network only. Environment: FRONT (the front door), CDP (the headless shell's CDP endpoint),

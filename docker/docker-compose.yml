@@ -1278,8 +1278,8 @@ services:
       NODE_OPTIONS: "--max-old-space-size=${WIKI_VIEWER_HEAP_MB:-20480}"
       # research-workbench P2b: the viewer forwards /workbench/* (the workspace's and the wiki pages'
       # API calls, same-origin) to the workbench with the key, SERVER-SIDE - the browser never holds
-      # it. This is what lets the edge (Traefik, Authentik in front) target the viewer alone; while
-      # Caddy still fronts the plane it routes /workbench/* itself and the viewer never sees them.
+      # it. This is what lets the edge (Traefik, Authentik in front) target the viewer alone; it is
+      # the only browser door to /workbench (the portal Caddy's route is gone: rw-identity-harden).
       WORKBENCH_URL: http://openbrain-workbench:8000
       WORKBENCH_KEY: ${MCP_ACCESS_KEY}
       # The forwarder's CSRF / DNS-rebinding guard (review r-p2b): a forwarded request must name an
@@ -1359,7 +1359,7 @@ services:
         condition: service_started
     environment:
       PORT: "8000"
-      # Caddy injects this as X-Brain-Key when proxying; reuse MCP_ACCESS_KEY.
+      # the viewer's /workbench forwarder injects this as X-Brain-Key; reuse MCP_ACCESS_KEY.
       WORKBENCH_KEY: ${MCP_ACCESS_KEY}
       # research-workbench P3a: the D5 admission gate's debunked / credibility reopen paths score
       # a returning URL with the research service's D15 model (one implementation). Unset or
