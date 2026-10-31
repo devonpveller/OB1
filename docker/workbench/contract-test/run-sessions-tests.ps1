@@ -325,7 +325,7 @@ try {
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = Summary $clean
   if ($Red -and $RedCases) {
-    foreach ($rc0 in ($RedCases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne 'TM3' })) {
+    foreach ($rc0 in ($RedCases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notin @('TM3', 'SWEEP') })) {
       Check ($clean -match "(?m)^\s*$([regex]::Escape($rc0))\b.*\.\.\. FAILED") "RED: $rc0 fails on the base $BaseSha"
     }
   }
@@ -382,7 +382,7 @@ try {
   $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('carol', 'dave', 'off'))
   # round 3: under -RedCases one sweep runs on the base with THIS tree's sweep mounted (the admin's steer
   # on a service job): it must find the leak there
-  if ($Red -and $RedCases) { $sweeps = @(, @('carol', 'dave', 'on')) }
+  if ($Red -and ($RedCases -match 'SWEEP')) { $sweeps = @(, @('carol', 'dave', 'on')) }  # -RedCases '...,SWEEP': on a pre-round-3 base
   elseif ($Red -or $SkipSweeps) { $sweeps = @() }
   $swMount = if ($Red) { @('-v', "$(Join-Path $wb 'src/documents/isolation_sweep_test.ts'):/app/src/documents/isolation_sweep_test.ts:ro") } else { @() }
   foreach ($sw in $sweeps) {

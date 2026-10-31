@@ -13,7 +13,7 @@
  * (OB1/docker/workbench/contract-test/run-sessions-tests.ps1).
  */
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { actorOf, HIDDEN_STEER_TEXTS_SQL, MAY_ACT_SQL, nonActorView } from "./viewer.ts";
+import { actorOf, HIDDEN_STEER_TEXTS_SQL, MAY_ACT_SQL, nonActorView, TREE_STEP_IDS_SQL } from "./viewer.ts";
 import { createSteer, GAP_ACTOR, openGapBranches, recordCancel, SteerError, type Q } from "./tree.ts";
 import type { Caller } from "./origin.ts";
 
@@ -170,4 +170,32 @@ Deno.test("P4b round 3: the tree, events and job-detail routes apply the non-act
   for (const [name, part] of [["tree/events", tree], ["job detail/stream", job]] as const) {
     assert(part.includes("steerScopeOf(") && part.includes("nonActorView("), `${name} applies the non-actor view`);
   }
+});
+
+// ── round 4 (tester t-p4b-sessions3): a step id in PROSE (learning_records deviation / steer) ─────
+Deno.test("P4b round 4 nonActorView: the tree's step ids are redacted from every string value, not only their keys", () => {
+  const tree = {
+    learning_records: [
+      { deviation: "a human steer answered it at p2 (branch c1)", steer: "question: service question" },
+      { deviation: "no steer answered it", steer: "gap gap steer at s7: claim 12 is weak" },
+      { steer: "interhub gap steer at s7; also see p2." },
+    ],
+    report: { sections: [{ title: "s2x and ps2 and p22 stay; p2 goes", summary: "p2" }] },
+    origin: "service question",
+  };
+  const v = nonActorView(tree, [], ["p2", "s7"]);
+  const s = JSON.stringify(v);
+  for (const step of ["p2", "s7"]) assert(!new RegExp(`(^|[^A-Za-z0-9_-])${step}([^A-Za-z0-9_-]|$)`).test(s), `${step} survives: ${s}`);
+  assert(s.includes("s2x") && s.includes("ps2") && s.includes("p22"), `look-alike words stay: ${s}`);
+  assert(s.includes("a human steer answered it at") && s.includes("claim 12 is weak"), `the rest of the sentence stays: ${s}`);
+});
+
+Deno.test("P4b round 4: the tree's step ids come from its stage events, its branches and its steers", () => {
+  const q = TREE_STEP_IDS_SQL.replace(/\s+/g, " ");
+  assert(q.includes("research_job_events") && q.includes("rooted_step_id") && q.includes("research_steers"), q);
+});
+
+Deno.test("P4b round 4: the reads pass the tree's step ids to nonActorView", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url)).replace(/\s+/g, " ");
+  assert((src.match(/nonActorView\([^)]*steer\.steps\)/g) ?? []).length >= 2, "tree/events and job detail redact the step ids by value");
 });

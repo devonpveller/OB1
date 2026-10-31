@@ -564,6 +564,33 @@ Deno.test({ name: "S14 an admin's steer on a service job: its text and step ids 
       assert(!/"(rooted_)?step_id":"[^"]+"/.test(r.text) && !r.text.includes('"p2"'), `${who} on behalf of carol: a step id at ${p}: ${r.text.slice(0, 300)}`);
     }
   }
+  // round 4 (tester t-p4b-sessions3): every step id of the tree, searched UNQUOTED in the whole body (a step
+  // id in prose - learning_records' deviation / steer - is a step id too), at the tester's seven doors
+  const steps = (await sql<{ s: string }>(
+    `SELECT DISTINCT s FROM (
+       SELECT step_id AS s FROM public.research_job_events WHERE root_job_id = $1::uuid
+       UNION SELECT rooted_step_id FROM public.research_jobs WHERE coalesce(root_job_id, id) = $1::uuid
+       UNION SELECT step_id FROM public.research_steers WHERE root_job_id = $1::uuid) x WHERE s IS NOT NULL`, [job])).map((r) => r.s);
+  assert(steps.includes("p2"), `the tree's step ids: ${steps}`);
+  const stepIn = (text: string) => steps.filter((s) => new RegExp(`(^|[^A-Za-z0-9_-])${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_-]|$)`).test(text));
+  const doors: [string, string, Record<string, string>][] = [
+    ["owui on behalf of carol", K.owui, { "x-on-behalf-of": sub("carol") }],
+    ["workspace on behalf of carol", K.ws, { "x-on-behalf-of": sub("carol") }],
+    ["workspace on behalf of dave", K.ws, { "x-on-behalf-of": sub("dave") }],
+    ["workspace on behalf of the admin, no admin flag", K.ws, { "x-on-behalf-of": sub("admin") }],
+    ["owui, no user", K.owui, {}],
+    ["notebook key", K.nb, {}],
+    ["shared key", K.shared, {}],
+  ];
+  for (const [who, key, h] of doors) {
+    for (const p of reads) {
+      const r = await rs("GET", p, key, h);
+      assertEquals(r.status, 200, `${who} ${p}: ${r.status}`);
+      const hit = stepIn(r.text);
+      assertEquals(hit, [], `${who} ${p}: step id(s) ${hit} in the body: ${r.text.slice(0, 400)}`);
+      if (who !== "workspace on behalf of the admin, no admin flag") assert(!r.text.includes(words), `${who} ${p}: the steer text`);
+    }
+  }
   // who may see it: the service that owns the job, and an admin (asserted by the workspace key only)
   const own = await rs("GET", `/research/jobs/${job}/tree`, K.ao);
   assert(own.text.includes(words), "the owning service reads its tree's steer");
