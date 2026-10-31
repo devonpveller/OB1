@@ -225,8 +225,9 @@ try {
   Write-Host '[4] the lab'
   $db = "$P-db"
   if (-not (Run-Detached $db @('--network-alias', 'openbrain-db', '-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stage}:/docker-entrypoint-initdb.d:ro", $PgImage,
-      # rw-p3b-trust2 round 4: T7 reads the verdict query the workbench ACTUALLY ran from pg_stat_statements
-      'postgres', '-c', 'shared_preload_libraries=pg_stat_statements', '-c', 'pg_stat_statements.track=all'))) { throw 'db' }
+      # rw-p3b-trust2 round 4: T7 records the plans of the verdict query the workbench ITSELF runs (auto_explain,
+      # switched on by T7 for its own calls only; the log is read back with pg_read_file)
+      'postgres', '-c', 'shared_preload_libraries=auto_explain', '-c', 'logging_collector=on', '-c', 'log_directory=log', '-c', 'log_filename=pg.log'))) { throw 'db' }
   for ($i = 0; $i -lt 150; $i++) { if ((Dk logs $db) -match 'PostgreSQL init process complete') { break }; Start-Sleep -Seconds 2 }
   for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
   $logs = Dk logs $db

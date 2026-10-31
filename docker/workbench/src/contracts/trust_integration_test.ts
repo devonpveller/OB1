@@ -251,11 +251,12 @@ t("T6 two users: shared knowledge reads the same; per-user coverage of another u
 
 // rw-p3b-trust2 round 4 (tester t-p3b-trust3 D1): T7 measures the code UNDER TEST at realistic width with the
 // DEFAULT planner settings. It seeds the tester's recipe (16k claims of ~200 chars, 2k jobs with ~11 KB of result,
-// 8 filed claims each), asks the workbench for 25 / 50 / 200 claims of one synthesis, reads the verdict query the
-// workbench actually ran from pg_stat_statements (the lab database preloads it; run-trust-tests.ps1), and EXPLAIN
-// ANALYZEs THAT text against round 2's query (copied verbatim below) on the same ids. Bar per size: no full claims
-// scan in any run of the code under test, and its median no slower than round 2's (25% / 25 ms slack for lab noise).
-// Against a base whose workbench runs round 2's or round 3's query the captured plan scans claims, so the RED fails.
+// 8 filed claims each) and asks the workbench for 25 / 50 / 200 claims of one synthesis, 5 times each, with
+// auto_explain on (the lab database preloads it; run-trust-tests.ps1): the plans and times recorded are those of the
+// verdict query the workbench ITSELF ran (whatever its tree is). Then round 2's query (copied verbatim below) is
+// EXPLAIN ANALYZEd on the same ids, 5 times. Bar per size: no full claims scan in any run of the workbench's query, and
+// its median no slower than round 2's (25% / 25 ms slack for lab noise). Against a base workbench running round 2's
+// or round 3's query, the recorded plans scan claims / run slow, so the RED fails on the code, not on the test.
 const ROUND2_VERDICTS_SQL = `SELECT f.cid AS claim_id, lc.v ->> 'verdict' AS verdict
        FROM public.research_jobs j
        CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'claims' -> 'filed') = 'array'
@@ -276,7 +277,6 @@ t("T7 F1: the verdict query the workbench runs has a stable, fast plan at realis
   const S = u();
   const W = 200;
   const txt = (n: string) => `left('f1t7 claim ' || ${n} || ' ' || repeat(md5((${n})::text), 20), ${W})`;
-  await sql(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
   await sql(`INSERT INTO public.sources (id, title, content, content_type, metadata) VALUES ($1, 'T7 report', 's', 'research_synthesis', '{}')`, [S]);
   try {
     await sql(`INSERT INTO public.claims (id, text, epistemic_tag, metadata, synthesis_id, content_hash)
@@ -292,45 +292,67 @@ t("T7 F1: the verdict query the workbench runs has a stable, fast plan at realis
       FROM generate_series(1, 2000) j`);
     await sql(`ANALYZE public.claims`);
     await sql(`ANALYZE public.research_jobs`);
-    await sql(`SELECT pg_stat_statements_reset()`);
+    const logLen = async () => Number((await sql<{ n: number }>(`SELECT length(pg_read_file('log/pg.log'))::int AS n`))[0].n);
+    const setExplain = async (on: boolean) => {
+      if (on) {
+        await sql(`ALTER SYSTEM SET auto_explain.log_min_duration = 0`);
+        await sql(`ALTER SYSTEM SET auto_explain.log_analyze = on`);
+      } else {
+        await sql(`ALTER SYSTEM RESET auto_explain.log_min_duration`);
+        await sql(`ALTER SYSTEM RESET auto_explain.log_analyze`);
+      }
+      await sql(`SELECT pg_reload_conf()`);
+      await new Promise((r) => setTimeout(r, 1500));
+    };
+    const SIZES = [25, 50, 200], REPS = 5;
     const idsBy = new Map<number, string[]>();
-    for (const n of [25, 50, 200]) {
-      const r = await call("GET", `/workbench/contract/claims?synthesis_id=${S}&limit=${n}`, A);
-      assertEquals(r.status, 200, r.text);
-      const ids = (r.json.claims as any[]).map((c) => c.id);
-      assertEquals(ids.length, n);
-      assert((r.json.claims as any[]).every((c) => c.verdict === "supports"), "every seeded claim reads its job's verdict");
-      idsBy.set(n, ids);
-    }
-    const ran = await sql<{ query: string }>(
-      `SELECT query FROM pg_stat_statements WHERE query ILIKE '%line_credibility%' AND query ILIKE '%filed%' ORDER BY calls DESC LIMIT 1`);
-    assert(ran.length, "the workbench's verdict query is in pg_stat_statements");
-    const underTest = ran[0].query;
-    const c = await pool!.connect();
-    const rows: string[] = [];
+    const from = await logLen();
+    await setExplain(true);
     try {
-      await c.queryObject(`PREPARE t7_test(text[]) AS ${underTest}`);
-      await c.queryObject(`PREPARE t7_round2(text[]) AS ${ROUND2_VERDICTS_SQL}`);
-      const run = async (stmt: string, ids: string[]) => {
-        const p = (await c.queryObject<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS OFF) EXECUTE ${stmt}($1::text[])`, [ids])).rows.map((x) => x["QUERY PLAN"]).join("\n");
-        return { ms: Number(/Execution Time: ([\d.]+) ms/.exec(p)?.[1] ?? NaN), seq: /Seq Scan on claims/.test(p), plan: p };
-      };
-      for (const n of [25, 50, 200]) {
-        const ids = idsBy.get(n)!;
-        const tests: { ms: number; seq: boolean; plan: string }[] = [];
-        const bases: number[] = [];
-        for (let i = 0; i < 5; i++) {
-          tests.push(await run("t7_test", ids));
-          bases.push((await run("t7_round2", ids)).ms);
+      for (const n of SIZES) {
+        for (let i = 0; i < REPS; i++) {
+          const r = await call("GET", `/workbench/contract/claims?synthesis_id=${S}&limit=${n}`, A);
+          assertEquals(r.status, 200, r.text);
+          const ids = (r.json.claims as any[]).map((c) => c.id);
+          assertEquals(ids.length, n);
+          assert((r.json.claims as any[]).every((c) => c.verdict === "supports"), "every seeded claim reads its job's verdict");
+          idsBy.set(n, ids);
         }
-        const mt = median(tests.map((x) => x.ms)), mb = median(bases);
-        rows.push(`PLAN T7 ${n} ids: under test median ${mt.toFixed(1)} ms (runs ${tests.map((x) => x.ms.toFixed(1)).join(", ")}), full claims scans ${tests.filter((x) => x.seq).length}/5; round 2 median ${mb.toFixed(1)} ms`);
-        if (n === 200) rows.push(`PLAN T7 200 ids, under test:\n${tests[tests.length - 1].plan}`);
-        assertEquals(tests.filter((x) => x.seq).length, 0, `${n} ids: the code under test scans claims in full:\n${tests.find((x) => x.seq)?.plan}`);
-        assert(mt <= Math.max(mb * 1.25, mb + 25), `${n} ids: under test ${mt} ms slower than round 2 ${mb} ms`);
       }
     } finally {
-      console.log(`PLAN T7 the query under test (from pg_stat_statements):\n${underTest}\n${rows.join("\n")}`);
+      await setExplain(false);
+    }
+    const log = String((await sql<{ t: string }>(`SELECT pg_read_file('log/pg.log', $1::bigint, $2::bigint) AS t`, [from, (await logLen()) - from]))[0].t);
+    // one auto_explain block per statement; the verdict query is the one over research_jobs' filed lists
+    const NL = String.fromCharCode(10);
+    const blocks = log.split(new RegExp(NL + "(?=\\S+ \\S+ \\S+ \\[\\d+\\] )")).filter((x) => /LOG:\s+duration: [\d.]+ ms\s+plan:/.test(x))
+      .filter((x) => /jsonb_array_elements_text/.test(x) && /research_jobs/.test(x) && /line_credibility/.test(x));
+    assertEquals(blocks.length, SIZES.length * REPS, `one recorded verdict plan per claims() call:
+${log.slice(0, 3000)}`);
+    const rows: string[] = [];
+    rows.push(`PLAN T7 the verdict query the workbench ran:
+${blocks[0].slice(0, 4000)}`);
+    const c = await pool!.connect();
+    try {
+      await c.queryObject(`PREPARE t7_round2(text[]) AS ${ROUND2_VERDICTS_SQL}`);
+
+      for (const [k, n] of SIZES.entries()) {
+        const mine = blocks.slice(k * REPS, (k + 1) * REPS).map((x) => ({ ms: Number(/duration: ([\d.]+) ms/.exec(x)![1]), seq: /Seq Scan on claims/.test(x), plan: x }));
+        const bases: number[] = [];
+        for (let i = 0; i < REPS; i++) {
+          const p = (await c.queryObject<{ "QUERY PLAN": string }>(`EXPLAIN (ANALYZE, BUFFERS OFF) EXECUTE t7_round2($1::text[])`, [idsBy.get(n)!])).rows.map((x) => x["QUERY PLAN"]).join(NL);
+          bases.push(Number(/Execution Time: ([\d.]+) ms/.exec(p)?.[1] ?? NaN));
+        }
+        const mt = median(mine.map((x) => x.ms)), mb = median(bases);
+        rows.push(`PLAN T7 ${n} ids: workbench median ${mt.toFixed(1)} ms (runs ${mine.map((x) => x.ms.toFixed(1)).join(", ")}), full claims scans ${mine.filter((x) => x.seq).length}/${REPS}; round 2 median ${mb.toFixed(1)} ms (runs ${bases.map((x) => x.toFixed(1)).join(", ")})`);
+        if (n === 200) rows.push(`PLAN T7 200 ids, the workbench's last plan:
+${mine[mine.length - 1].plan}`);
+        assertEquals(mine.filter((x) => x.seq).length, 0, `${n} ids: the workbench's verdict query scans claims in full:
+${mine.find((x) => x.seq)?.plan}`);
+        assert(mt <= Math.max(mb * 1.25, mb + 25), `${n} ids: the workbench's verdict query (median ${mt} ms) is slower than round 2's (${mb} ms)`);
+      }
+    } finally {
+      console.log(rows.join(NL));
       await c.queryObject(`DEALLOCATE ALL`).catch(() => {});
       c.release();
     }
