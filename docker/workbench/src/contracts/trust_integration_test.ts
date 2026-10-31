@@ -293,7 +293,7 @@ ${after}`);
   assert(/(Bitmap Index Scan on claims_pkey|Index (Only )?Scan using claims_pkey on claims)/.test(after), `the claims pkey is used:
 ${after}`);
   assert(!/ on claims/.test(src) && !/ on claims/.test(job), "the roll-up reads no claim");
-  assert(/(Bitmap Index Scan on sources_pkey|Index (Only )?Scan using sources_pkey on sources)/.test(src), `the report is found by the sources pkey:
+  assert(!/Seq Scan on sources/.test(src) && /Index (Only )?Scan|Bitmap Index Scan/.test(src), `the report is found by an index on sources (the planner picks pkey or the synthesis index):
 ${src}`);
   // and the answers are unchanged
   const r = await call("GET", `/workbench/contract/claims?synthesis_id=${ID.report}&limit=50`, A);
