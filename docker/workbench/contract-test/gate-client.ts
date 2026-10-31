@@ -24,6 +24,26 @@ const bidiFold = (s: string) =>
     (run) => ` ${[...run.replace(/[\s\p{M}]/gu, "")].sort().join("")} `);
 const words = (s: string) => ` ${bidiFold(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
 
+// round 4 (tester t-p6b-gate3 D13, D14; F9): the comparator reads the file as the gate does, written here on
+// its own - a title as whole words with the entry's line breaks read three ways (a soft/hard hyphen + break
+// joined, every break joined, every break a space); a Hebrew/Arabic title as the exact multiset of its words
+// (an RTL word by its letters in a fixed order: the text comes back in visual order).
+const RTL = /[\p{Script=Hebrew}\p{Script=Arabic}]/u;
+function holds(entry: string, title: string): boolean {
+  if (!RTL.test(title)) {
+    const w = words(title);
+    const e = entry.normalize("NFKC");
+    return [e.replace(/[\u00AD-]\s*\n\s*/g, ""), e.replace(/\u00AD?\s*\n\s*/g, ""), e.replace(/\u00AD/g, "")].some((v) => words(v).includes(w));
+  }
+  const toks = (s: string) => s.normalize("NFKC").replace(/\u00AD\s*\n\s*/g, "").replace(/[\u00AD\p{M}]/gu, "").toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((t) => (RTL.test(t) ? [...t].sort().join("") : t));
+  const have = new Map<string, number>();
+  for (const t of toks(entry)) have.set(t, (have.get(t) ?? 0) + 1);
+  const want = new Map<string, number>();
+  for (const t of toks(title)) want.set(t, (want.get(t) ?? 0) + 1);
+  return want.size > 0 && [...want].every(([t, n]) => (have.get(t) ?? 0) >= n);
+}
+
 if (mode === "req") {
   const [method, url, out, sub, bodyArg] = args;
   const body = bodyArg?.startsWith("@") ? await Deno.readTextFile(bodyArg.slice(1)) : bodyArg; // @file: the body from a file
@@ -75,7 +95,7 @@ if (mode === "req") {
     const p = listed[i], e = entries[i];
     if (!p || !e) continue;
     if (p.number !== e.n) fails.push(`position ${i + 1}: panel [${p.number}], PDF [${e.n}]`);
-    if (!p.title || !words(e.text).includes(words(p.title))) fails.push(`position ${i + 1}: panel "${p.title}" is not PDF entry ${e.text.trim().replace(/\s+/g, " ").slice(0, 120)}`);
+    if (!p.title || !holds(e.text, p.title)) fails.push(`position ${i + 1}: panel "${p.title}" is not PDF entry ${e.text.trim().replace(/\s+/g, " ").slice(0, 120)}`);
   }
   console.log(`panel: ${listed.map((t) => `[${t.number}] ${JSON.stringify(t.title)}`).join(", ")}`);
   console.log(`pdf:   ${entries.map((e) => JSON.stringify(e.text.trim().replace(/\s+/g, " ").slice(0, 100))).join(", ")}`);

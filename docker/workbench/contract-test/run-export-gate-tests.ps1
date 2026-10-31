@@ -265,7 +265,7 @@ try {
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
   $null = Dk exec "$P-db" psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role member) - the production shape'
-  foreach ($f in @('export-fixtures.sql', 'gate-fixtures.sql')) {
+  foreach ($f in @('export-fixtures.sql', 'gate-fixtures.sql', 'gate-fixtures-r4.sql')) {
     $null = Dk cp (Join-Path $ct $f) "$P-db:/tmp/$f"
     $o = Dk exec "$P-db" psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f "/tmp/$f"
     Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "$f applied"
@@ -443,6 +443,26 @@ try {
   $d2 = NewDoc 'Parity rtl title'
   PutDoc $d2 't' "Cites seven [[source:f6b00000-0000-4000-8000-000000000007|seven]] and page one [[source:$($G[1])|page one]]."
   ParityOf $d2 '2t-rtl-title'
+  # round 4 (tester t-p6b-gate3 D13, D14; sources from gate-fixtures-r4.sql)
+  $real = @(0..5 | ForEach-Object { 'f6b00000-0000-4000-8000-0000000004{0:d2}' -f $_ })
+  $d2 = NewDoc 'Parity realistic titles'
+  PutDoc $d2 'y' ((@($real) | ForEach-Object -Begin { $k = 0 } -Process { $k++; "Finding $k is supported [[source:$_|r$k]]." }) -join ' ')
+  ParityOf $d2 '2y-real-apa' '&style=apa' 'author-date'
+  ParityOf $d2 '2y-real-ieee'
+  $many = @(1..40 | ForEach-Object { 'f6b00000-0000-4000-8000-000000000{0:d3}' -f (300 + $_) })
+  $d2 = NewDoc 'Parity forty references'
+  PutDoc $d2 'x40' ((@($many) | ForEach-Object -Begin { $k = 0 } -Process { $k++; "Finding $k is supported [[source:$_|s$k]]." }) -join ' ')
+  ParityOf $d2 '2x-many-ieee'
+  ParityOf $d2 '2x-many-apa' '&style=apa' 'author-date'
+  ParityOf $d2 '2x-many-vancouver' '&style=elsevier-vancouver'
+  $rtl = [ordered]@{ 'he-colon' = 201; 'he-year' = 202; 'ar-comma' = 203; 'he-paren' = 205; 'he-latin' = 206; 'he-plain' = 207; 'lat-colon-he' = 208; 'ar-hyphen' = 209; 'he-quote' = 210 }
+  foreach ($rk in $rtl.Keys) {
+    $sid = 'f6b00000-0000-4000-8000-000000000{0:d3}' -f $rtl[$rk]
+    $d2 = NewDoc "Parity rtl $rk"
+    PutDoc $d2 "rtl-$rk" "Cites the source [[source:$sid|rtl]] and page one [[source:$($G[1])|one]]."
+    ParityOf $d2 "2x-rtl-$rk"
+    if ($rk -in @('he-colon', 'he-year')) { ParityOf $d2 "2x-rtl-$rk-apa" '&style=apa' 'author-date' }
+  }
 
   Write-Host '[T3] acceptance 3: the vision calls go through the LiteLLM alias under the export key; a direct route is refused'
   $log = (Vision '/_log') | ConvertFrom-Json

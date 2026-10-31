@@ -154,7 +154,7 @@ export function referenceParity(texts: string[], refs: { number: number; title: 
     for (let i = 0; i < labels.length; i++) {
       const entry = region.slice(labels[i].index!, i + 1 < labels.length ? labels[i + 1].index! : undefined);
       const r = refs[i];
-      if (!norm(entry).includes(norm(r.title))) {
+      if (!holdsTitle(entry, r.title)) {
         out.push({ code: "reference-mismatch", detail: `entry [${r.number}] in the file is not "${r.title.slice(0, 120)}"`, sample: entry.trim().slice(0, 120), stage: "references" });
       }
     }
@@ -180,7 +180,7 @@ export function referenceParity(texts: string[], refs: { number: number; title: 
   if (lines && entries.length === refs.length) {
     refs.forEach((r, i) => {
       const t = words(r.title);
-      if (!t.trim() || occurrences(entries[i], t) < 1) {
+      if (!t.trim() || !holdsTitle(entries[i], r.title)) {
         out.push({ code: "reference-mismatch", detail: `entry ${i + 1} of the file's reference list is not "${r.title.slice(0, 120)}" (the style's order)`, sample: entries[i].trim().slice(0, 120), stage: "references" });
       }
     });
@@ -227,6 +227,41 @@ export function splitEntries(rl: TextLine[]): string[] {
 
 // Whole-word forms: lower-case letter/digit words separated by one space, padded; a line-break hyphen
 // is read both ways (joined, "re-<newline>view" = "review", and as a break, "claim-<newline>kind" = "claim kind").
+// Does an entry of the file's reference list hold this title? (round 4, tester t-p6b-gate3 D13, D14)
+//   - Typst hyphenates a long title at a line break with a SOFT hyphen (U+00AD) + newline, and breaks other
+//     lines plainly: the title must be in the entry as whole words with the entry's line breaks read three
+//     ways - a soft/hard hyphen + break joined, every break joined, every break a space (D13 - round 3 joined
+//     only an ASCII hyphen, so "chal<U+00AD><newline>lenges" read as two words).
+//   - A title with Hebrew or Arabic in it: the file's text is in VISUAL order, and a neutral (":", ",", "(",
+//     " - ", quotes) or European digits between two RTL words join them into one reversed run, so no
+//     per-run reordering recovers the logical order exactly (D14). Such a title is compared as an exact
+//     MULTISET of its words: every word of the title (an RTL word by its letters in a fixed order, as the
+//     visual text spells it backwards) must be in the entry as many times as in the title. Word ORDER inside an
+//     RTL title is therefore not checked (recorded in the findings); a different, missing or extra-repeated
+//     word still is.
+const RTL_CHAR = /[\p{Script=Hebrew}\p{Script=Arabic}]/u;
+function titleTokens(s: string): string[] {
+  return s.normalize("NFKC").replace(/\u00AD\s*\n\s*/g, "").replace(/[\u00AD\p{M}]/gu, "").toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((t) => (RTL_CHAR.test(t) ? [...t].sort().join("") : t));
+}
+export function holdsTitle(entry: string, title: string): boolean {
+  if (!RTL_CHAR.test(title)) {
+    // whole words first, with the file's line breaks read three ways (a soft or hard hyphen + break joined;
+    // every break joined; every break a space)
+    const w = words(title);
+    if (!w.trim()) return false;
+    const e = entry.normalize("NFKC");
+    const variants = [e.replace(/[\u00AD-]\s*\n\s*/g, ""), e.replace(/\u00AD?\s*\n\s*/g, ""), e.replace(/\u00AD/g, "")];
+    // (no letters-only fallback: "number 1" would be found inside "number 10" - fail closed instead)
+    return variants.some((v) => words(v).includes(w));
+  }
+  const have = new Map<string, number>();
+  for (const t of titleTokens(entry)) have.set(t, (have.get(t) ?? 0) + 1);
+  const want = new Map<string, number>();
+  for (const t of titleTokens(title)) want.set(t, (want.get(t) ?? 0) + 1);
+  return want.size > 0 && [...want].every(([t, n]) => (have.get(t) ?? 0) >= n);
+}
+
 const words = (s: string) => ` ${bidiFold(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
 function occurrences(entry: string, t: string): number {
   const count = (hay: string) => hay.split(t).length - 1;
