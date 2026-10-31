@@ -215,8 +215,10 @@ t("T5 the export of a research report carries the roll-up section at its head; a
   const at = md.indexOf("Report credibility");
   assert(at >= 0, `the exported report has the roll-up section: ${md.slice(0, 600)}`);
   assert(at < md.indexOf("TrustBodyMarker"), "the roll-up is at the head of the report, before its body");
-  assertStringIncludes(md, "weights scholarly 1.00, general 0.40");
-  assert(/\|\s*scholarly\s*\|\s*1\.00\s*\|/.test(md) && /\|\s*general\s*\|\s*0\.40\s*\|/.test(md), `the weights table: ${md.slice(0, 800)}`);
+  assertStringIncludes(md.replace(/\s+/g, " "), "weights scholarly 1.00, general 0.40"); // pandoc re-wraps the line
+  // the weights table, as pandoc's markdown writer renders it (a pipe or a simple table: one row per family)
+  assert(/^\s*\|?\s*scholarly\s*\|?\s+1\.00\s*\|?\s*$/m.test(md) && /^\s*\|?\s*general\s*\|?\s+0\.40\s*\|?\s*$/m.test(md), `the weights table: ${md.slice(0, 800)}`);
+  assert(/^#{1,6} Report credibility\s*$/m.test(md), "the section heading P6b keys on");
   const other = await fetch(`${BASE}/workbench/export?path=${encodeURIComponent(`content/source/${ID.general}.md`)}&format=md&style=ieee`,
     { headers: { "x-brain-key": KEY, ...A } });
   const otherMd = await other.text();
