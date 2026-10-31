@@ -27,8 +27,9 @@
 #      and the e2e runner image; with -Red the workbench and viewer come from -BaseSha instead
 #   4. the lab: database (chain + fixtures.sql, ob_app_memory non-superuser), stub embedder, stub
 #      research service (origin by key), stub egress proxy, PostgREST + the OB1 rest Caddy, the
-#      viewer (WIKI_BUILDER=0), the workbench (vault = a temp dir), the portal's real (wiki_app)
-#      Caddy snippet as the front door, a headless Chromium
+#      viewer (WIKI_BUILDER=0) as the front door (rw-identity-harden: the portal Caddy's /workbench
+#      route is gone, so the viewer's own forwarder is the only door), the workbench (vault = a temp
+#      dir), a headless Chromium
 #   5. the documents API integration test (src/documents/documents_integration_test.ts) as
 #      ob_app_memory against the :wt workbench; the workspace e2e (workspace.e2e.mjs) through the
 #      front door in the headless Chromium; the grammar copy byte-identity check
@@ -89,11 +90,10 @@ foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page
   New-Item -ItemType Directory -Force (Split-Path -Parent $fxPath) | Out-Null
   [System.IO.File]::WriteAllText($fxPath, "---`ntitle: $($fx[1])`n---`n$($fx[2])`n", (New-Object System.Text.UTF8Encoding $false))
 }
-$frontCfg = Join-Path $env:TEMP "$P-front"; New-Item -ItemType Directory -Force $frontCfg | Out-Null
 . (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 
 $script:fail = 0
-$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $frontCfg, $shots) }
+$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $shots) }
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
@@ -286,16 +286,13 @@ try {
       '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   $walkEnv = if ($WalkOff) { @('-e', 'WORKSPACE_RESPONSE_WALK=off') } else { @() }
   $null = Run-Detached "$P-wb" ($wbArgs + $walkEnv + @($wbTag))
-  # the portal's REAL (wiki_app) snippet as the front door
-  $cf = Get-Content -Raw (Join-Path $repo 'portal/config/caddy/Caddyfile')
-  $snip = ([regex]'(?ms)^\(wiki_app\) \{.*?^\}').Match($cf).Value
-  Check ([bool]$snip) 'the portal Caddyfile has its (wiki_app) snippet'
-  [System.IO.File]::WriteAllText((Join-Path $frontCfg 'Caddyfile'), "{`n`tadmin off`n`tauto_https off`n}`n$snip`n:8080 {`n`timport wiki_app`n}`n", (New-Object System.Text.UTF8Encoding $false))
-  $null = Run-Detached "$P-front" @('-e', "WORKBENCH_KEY=$key", '-v', "${frontCfg}:/etc/caddy:ro", '-v', "$(Join-Path $repo 'portal/config/caddy/site'):/srv/site:ro", $CaddyImage)
+  # the front door is the viewer itself (rw-identity-harden): the portal Caddy's (wiki_app) snippet no
+  # longer has a /workbench/* route, and the edge (Traefik) targets the viewer alone
+  $front = "http://${P}-viewer:8080"
   $null = Run-Detached "$P-chrome" @('--shm-size=1g', $ChromeImage)
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
   # /workspace/, not /__health: the viewer's health reports the lab wiki's reconcile state, not the door
-  Check (Wait-Http "http://$P-front:8080/workspace/" 90) 'the front door answers'
+  Check (Wait-Http "$front/workspace/" 90) 'the front door (the viewer) answers'
   # the new edge (operator 2026-10-28): Traefik targets the VIEWER alone - it serves /workspace and
   # forwards /workbench/* with the key server-side, dropping any key a client sends
   $edge = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
@@ -334,7 +331,7 @@ try {
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the documents API integration test ($($sum.Value))" }
 
   Write-Host '[5b] the workspace e2e in a headless Chromium, through the front door'
-  $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shots}:/ev", '-e', "FRONT=http://$P-front:8080",
+  $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shots}:/ev", '-e', "FRONT=$front",
     '-e', "CDP=http://${chromeIp}:9222", '-e', "PGHOST=$db", '-e', "PGPASSWORD=$pw", '-e', "CASES=$Cases", $e2eTag)
   Save 'workspace-e2e.log' ((($o -replace '\x1b\[[0-9;]*m', '') -split "`n" | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:' }) -join "`n")
   foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:' }) { Write-Host "    $l" }

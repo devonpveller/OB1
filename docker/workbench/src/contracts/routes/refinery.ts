@@ -83,7 +83,8 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
           if (String((e as Error)?.message ?? "").startsWith("embedding")) return { embedFailed: String((e as Error).message) };
           throw e;
         });
-      if ("embedFailed" in r) return c.json({ error: `embedding unavailable: ${r.embedFailed}` }, 502);
+      // the embedder's error text is logged, never answered (rw-identity-harden round 2, D1)
+      if ("embedFailed" in r) { console.error("[refinery] embedding unavailable:", r.embedFailed); return c.json({ error: "embedding unavailable" }, 502); }
       return send(c, UserSourceAdded, r);
     } catch (e) {
       return fail(c, e);

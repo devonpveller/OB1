@@ -1,6 +1,6 @@
 // The workspace end to end (research-workbench P2b), in a real headless Chromium, through the lab's
-// front door (the portal's (wiki_app) Caddy snippet: /workbench/* -> the :wt workbench with the key
-// injected, everything else -> the :wt viewer, which serves /workspace).
+// front door: the :wt viewer itself (it serves /workspace and forwards /workbench/* to the :wt workbench
+// with the key injected; rw-identity-harden: the portal Caddy snippet no longer routes /workbench).
 //
 // Run by OB1/docker/workbench/contract-test/run-workspace-tests.ps1 in a container on the lab's
 // INTERNAL network only. Environment: FRONT (the front door), CDP (the headless shell's CDP endpoint),
@@ -31,7 +31,10 @@ async function step(name, fn) {
 }
 const ok = (cond, msg) => { if (!cond) throw new Error(msg); };
 const api = async (method, path, body) => {
-  const r = await fetch(FRONT + path, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  // a write carries the front door's own Origin, as the page's would: the front door is the viewer, whose
+  // forwarder refuses an Origin-less write (rw-identity-harden: no Caddy /workbench route in front any more)
+  const headers = { "content-type": "application/json", ...(["GET", "HEAD"].includes(method) ? {} : { origin: FRONT }) };
+  const r = await fetch(FRONT + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const t = await r.text();
   let j = {};
   try { j = JSON.parse(t); } catch { /* not json */ }

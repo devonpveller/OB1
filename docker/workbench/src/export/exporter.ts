@@ -30,6 +30,7 @@ import { Hono } from "hono";
 import type { RegistryEntry } from "../contracts/registry.ts";
 import { MigrationRefused } from "../contracts/repo/references.ts";
 import { safeJoin, safeRelPath } from "../util/paths.ts";
+import { publicError } from "../util/public-error.ts";
 import { type CslItem, recordToCsl } from "./csl.ts";
 import { IdentifierError, type IdentifierKind, sourceIdentifier } from "./identifiers.ts";
 import { RequestRefused, ResolutionFailed, type Resolver } from "./resolver.ts";
@@ -218,7 +219,7 @@ export function createExporter(deps: ExporterDeps): Hono {
     try {
       rel = safeRelPath(path);
     } catch (e) {
-      return json({ error: String((e as Error).message) }, 400);
+      return json({ error: publicError(e, "not a valid note path", "export") }, 400);
     }
     if (!rel.endsWith(".md")) return json({ error: "only .md notes can be exported" }, 400);
     const md = await deps.readNote(rel);

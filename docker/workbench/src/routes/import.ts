@@ -79,7 +79,9 @@ async function runPipeline(
     }
   } catch (e) {
     // Failure handling (P6.6): record durably; do NOT regenerate.
-    await repo.updateJob(jobId, { status: "failed", error: String((e as Error).message).slice(0, 500) });
+    // the job row is read back by GET /workbench/jobs/:id: a fixed text, the real one in the log (round 2, D1)
+    console.error(`[import] job ${jobId} failed:`, String((e as Error)?.message ?? e).slice(0, 500));
+    await repo.updateJob(jobId, { status: "failed", error: "the import failed (see the workbench log)" });
   }
 }
 
@@ -112,7 +114,9 @@ async function runUrlPipeline(
       await logChange({ action: "grounding (staged)", detail: `URL ${url}`, affected: `${targetEntityIds.length} entity page(s)` });
     }
   } catch (e) {
-    await repo.updateJob(jobId, { status: "failed", error: String((e as Error).message).slice(0, 500) });
+    // the job row is read back by GET /workbench/jobs/:id: a fixed text, the real one in the log (round 2, D1)
+    console.error(`[import] job ${jobId} failed:`, String((e as Error)?.message ?? e).slice(0, 500));
+    await repo.updateJob(jobId, { status: "failed", error: "the import failed (see the workbench log)" });
   }
 }
 
