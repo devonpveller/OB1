@@ -30,7 +30,7 @@ import { Hono } from "hono";
 import type { RegistryEntry } from "../contracts/registry.ts";
 import { MigrationRefused } from "../contracts/repo/references.ts";
 import { safeJoin, safeRelPath } from "../util/paths.ts";
-import { type CslItem, recordToCsl } from "./csl.ts";
+import { type CslItem, printedTitle, recordToCsl } from "./csl.ts";
 import { IdentifierError, type IdentifierKind, sourceIdentifier } from "./identifiers.ts";
 import { RequestRefused, ResolutionFailed, type Resolver } from "./resolver.ts";
 import type { ExportRef } from "./repo.ts";
@@ -144,6 +144,27 @@ export async function referenceItems(
   items.sort((a, b) => a.number - b.number);
   unresolved.sort((a, b) => a.number - b.number);
   return { items, unresolved };
+}
+
+// What the reference PANEL lists for one numbered reference (rw-p6b-gate round 2, tester D3/D4): the
+// title the export will print - the cached resolution for the identifier the source declares NOW, else
+// the record (its title at the pin, or its URL when it has none) - through printedTitle. The same
+// choice referenceItems makes, without the resolver (a reference not yet resolved shows its record
+// title until the first export caches the resolution).
+export function listedTitle(r: ExportRef, kinds: IdentifierKind[]): string {
+  if (r.source_id && !r.suppressed) {
+    let id = null;
+    try {
+      id = sourceIdentifier(kinds, r);
+    } catch { /* a malformed identifier: the export refuses it; the panel shows the record */ }
+    const hit = id ? r.cached.find((c) => c.identifier === id!.citekey) : undefined;
+    if (hit) return printedTitle(hit.csl);
+  }
+  try {
+    return printedTitle(recordToCsl(r));
+  } catch {
+    return r.title ?? "";
+  }
 }
 
 // The copy view's item for a reference it could not resolve: the marker first, then what the record
@@ -284,7 +305,7 @@ export function createExporter(deps: ExporterDeps): Hono {
         try {
           result = await g.gate({
             pdf: out.bytes, format, numeric: styleEntry.definition.citation_format === "numeric",
-            refs: refItems.map((r) => ({ number: r.number, title: String(r.csl.title ?? "") })),
+            refs: refItems.map((r) => ({ number: r.number, title: printedTitle(r.csl) })),
             frontmatter: frontmatterOf(md),
             required: (await live("export_required_sections")).map((e) => ({ key: e.key, ...(e.definition as Omit<RequiredSection, "key">) })),
           });

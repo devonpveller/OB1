@@ -87,3 +87,38 @@ describe("P6b: the export panel", () => {
     expect(screen.getByTestId("export-msg").textContent).toContain("the file was not served");
   });
 });
+
+describe("P6b round 2 (tester D4): the reference panel lists what the export's reference list holds", () => {
+  it("one entry per source, in citation order, numbered and titled as the file prints it; Copy the list equals the file's list", async () => {
+    const { DocReferencesPanel } = await import("../src/panels/docrefs/DocReferencesPanel");
+    const S = (n: number) => `c1000000-0000-4000-8000-00000000000${n}`;
+    const R = (n: number) => `d1000000-0000-4000-8000-00000000000${n}`;
+    fakeApi([
+      ["GET", "/workbench/documents/references", () => ({
+        path: MINE,
+        // holder rows: two chips on source 2, source 1 cited AND added, first seen in another order
+        references: [
+          { origin: "cited", reference_id: R(1), source_id: S(2), pinned_revision: 1, scope: "span", title: "Two" },
+          { origin: "cited", reference_id: R(2), source_id: S(2), pinned_revision: 1, scope: "span", title: "Two" },
+          { origin: "cited", reference_id: R(3), source_id: S(1), pinned_revision: 1, scope: "source", title: "One" },
+          { origin: "added", reference_id: R(4), source_id: S(1), pinned_revision: 1, scope: "source", title: "One" },
+        ],
+        listed: [
+          { number: 1, source_id: S(1), title: "One printed", reference_ids: [R(3), R(4)] },
+          { number: 2, source_id: S(2), title: "Two printed", reference_ids: [R(1), R(2)] },
+        ],
+      })],
+    ] as any);
+    setState({ documentPath: MINE });
+    let copied = "";
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t: string) => { copied = t; return Promise.resolve(); } } });
+    const { container } = render(<DocReferencesPanel params={{}} />);
+    await act(async () => settle(10));
+    await act(async () => { fireEvent.click(container.querySelector(".ws-summary") as HTMLElement); await settle(); });
+    const rows = [...container.querySelectorAll("[data-source]")].map((e) => e.textContent);
+    expect(rows).toEqual(["One printed", "Two printed"]);
+    await act(async () => { fireEvent.click(container.querySelector("[data-source] ")!.closest(".ws-leaf-label") as HTMLElement); await settle(); });
+    await act(async () => { fireEvent.click(container.querySelector('[data-action="copy-list"]') as HTMLElement); await settle(); });
+    expect(copied).toBe("[1] One printed\n[2] Two printed");
+  });
+});

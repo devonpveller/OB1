@@ -15,8 +15,9 @@ What it reports (codes are the gate's closed vocabulary; the workbench owns the 
             overflow            a letter or digit outside the page's TEXT AREA horizontally (the format's margins,
                                 passed in the options): a table or line wider than the page - a
                                 clipped table, a long unbreakable cell, a run-off line
-            overlapping-text    glyphs drawn over each other on one line (cells running into their
-                                neighbours), at least `min_overlaps` times on a page
+            overlapping-text    glyphs of different text runs drawn over each other (a cell running
+                                into its neighbour, in any font), at least `min_overlaps` times on a
+                                page; kerning and combining marks are not collisions (collisions())
             too-many-pages      more pages than `max_pages`: not checked, so not passed
   warning   qpdf                what qpdf's own structure check reports (pikepdf Pdf.check)
 and the text of every page and its lines with their left edges (pdfplumber), for the reference-list
@@ -100,20 +101,50 @@ def layout(page, opts):
         out.append({"code": "overflow", "page": page.page_number, "count": len(over),
                     "detail": f"{len(over)} glyph(s) outside the text area (x {min(xs):.1f}..{max(xs):.1f} pt; text area {x_min + left:.1f}..{x_min + right:.1f} pt)",
                     "sample": sample(over)})
-    rows = {}
-    for c in chars:
-        rows.setdefault(round(c["top"], 1), []).append(c)
-    hits = []
-    for r in rows.values():
-        r.sort(key=lambda c: c["x0"])
-        for a, b in zip(r, r[1:]):
-            w = min(a["x1"] - a["x0"], b["x1"] - b["x0"])
-            if w > 0 and (a["x1"] - b["x0"]) > 0.3 * w:
-                hits.extend([a, b])
-    if len(hits) // 2 >= int(opts.get("min_overlaps", 3)):
-        out.append({"code": "overlapping-text", "page": page.page_number, "count": len(hits) // 2,
-                    "detail": f"{len(hits) // 2} place(s) where glyphs are drawn over each other", "sample": sample(hits)})
+    pairs = collisions(page.chars)
+    if len(pairs) >= int(opts.get("min_overlaps", 3)):
+        hit = [c for p in pairs for c in p]
+        out.append({"code": "overlapping-text", "page": page.page_number, "count": len(pairs),
+                    "detail": f"{len(pairs)} place(s) where glyphs of different text runs are drawn over each other", "sample": sample(hit)})
     return out
+
+
+def collisions(all_chars):
+    """Pairs of glyphs drawn over each other that are NOT neighbours in the drawing order.
+
+    rw-p6b-gate round 2 (tester D1, D2). Round 1 compared horizontally adjacent glyphs on one rounded
+    `top`: it counted KERNING (Typst pulls "." and "," under a preceding "w"/"y" by 1.1 pt - more than
+    0.3 of a period's advance - so ordinary prose was blocked), and it missed a collision between two
+    fonts (a table cell spilling over an inline-code cell: different `top`s, different rows).
+    Now: kerning and mark placement only ever move a glyph against its NEIGHBOUR in the content
+    stream (the same shaped run), so a pair of glyphs adjacent in drawing order is never a collision,
+    and combining marks (Unicode category M*) are skipped. Any other pair whose boxes overlap by more
+    than 30% of the narrower advance (and at least 1.5 pt) AND by more than half the shorter height is
+    two pieces of text printed over each other, whatever their fonts and baselines.
+    """
+    import unicodedata
+
+    def is_mark(c):
+        t = c.get("text", "")
+        return len(t) == 1 and unicodedata.category(t).startswith("M")
+
+    chars = [(i, c) for i, c in enumerate(all_chars) if c.get("text", "").strip() and not is_mark(c)]
+    chars.sort(key=lambda ic: ic[1]["x0"])
+    active = []
+    pairs = []
+    for i, c in chars:
+        active = [(j, a) for j, a in active if a["x1"] > c["x0"]]
+        for j, a in active:
+            if abs(i - j) <= 1:
+                continue
+            w = min(a["x1"] - a["x0"], c["x1"] - c["x0"])
+            h = min(a["bottom"] - a["top"], c["bottom"] - c["top"])
+            ox = min(a["x1"], c["x1"]) - max(a["x0"], c["x0"])
+            oy = min(a["bottom"], c["bottom"]) - max(a["top"], c["top"])
+            if w > 0 and h > 0 and ox > max(0.3 * w, 1.5) and oy > 0.5 * h:
+                pairs.append((a, c))
+        active.append((i, c))
+    return pairs
 
 
 def main(argv):
@@ -147,7 +178,9 @@ def main(argv):
                     # every text line with its left edge (the reference list's entries: an author-date
                     # entry starts at the list's left edge, its continuation lines are indented)
                     result["lines"].append([{"text": ln["text"], "page": page.page_number, "x0": round(float(ln["x0"]), 2), "x1": round(float(ln["x1"]), 2),
-                                             "top": round(float(ln["top"]), 2), "bottom": round(float(ln["bottom"]), 2)} for ln in page.extract_text_lines()])
+                                             "top": round(float(ln["top"]), 2), "bottom": round(float(ln["bottom"]), 2),
+                                             "size": round(max((float(ch.get("size", 0)) for ch in ln.get("chars", [])), default=0.0), 2)}
+                                            for ln in page.extract_text_lines()])
                     page.close()
     except Exception as e:  # unreadable: the caller fails closed
         result["error"] = f"{type(e).__name__}: {str(e)[:300]}"

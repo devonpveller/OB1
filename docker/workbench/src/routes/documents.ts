@@ -23,6 +23,8 @@ import { chipText, transclusionText } from "../documents/grammar.ts";
 import { HOLDER_KIND } from "../documents/paths.ts";
 import { acknowledge, acknowledged } from "../documents/workspace.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
+import { documentExportMarkdown, documentExportRefs } from "../export/repo.ts";
+import { kindsOf, listedTitle } from "../export/exporter.ts";
 
 export type DocumentsDeps = refinery.RefineryDeps;
 
@@ -158,7 +160,18 @@ export function documentsRouter(rdeps: DocumentsDeps) {
         WHERE h.holder_kind = $1 AND h.holder_ref = $2 ORDER BY h.seq`,
       [HOLDER_KIND, rel],
     );
-    return c.json({ path: rel, references: rows });
+    // research-workbench P6b round 2 (tester D4, coordinator ruling): `listed` is what the export's
+    // reference list will hold - ONE entry per source, in the document's citation order (cited first, by
+    // first appearance, then added), numbered as the export numbers it, titled as the file prints it
+    // (listedTitle). The panel shows and copies `listed`; `references` stays the holder rows (one per
+    // reference record) its per-reference actions use.
+    const md = await vaultExists(rel) ? await documentExportMarkdown(db, await vaultRead(rel)) : "";
+    const kinds = kindsOf(await reg.entries("reference_identifier_kinds"));
+    const listed = (await documentExportRefs(db, rel, md)).map((x) => ({
+      number: x.number, source_id: x.source_id ?? x.cited_ref, title: listedTitle(x, kinds),
+      reference_ids: (rows as { source_id: string; reference_id: string }[]).filter((h) => h.source_id === (x.source_id ?? x.cited_ref)).map((h) => h.reference_id),
+    }));
+    return c.json({ path: rel, references: rows, listed });
   }));
 
   r.delete("/references/:id", wrap(async (c, who) => {

@@ -6,11 +6,11 @@
 //        X-Brain-Key from $WB_KEY, X-Test-Sub: <subject> (the lab's identity header); writes the body;
 //        prints one JSON line {status, bytes, export_id, gate, type}
 //   parity <panel.json> <pdf>
-//        acceptance 2, written independently of the gate: the reference PANEL's list (GET
-//        /workbench/documents/references, one entry per source - the export folds a source's references
-//        into one) against the PDF's reference list read back with pdftotext. One-to-one: as many
-//        entries as panel sources, every panel title (whole words, case and punctuation aside) in
-//        exactly one entry. Prints PARITY PASS / PARITY FAIL lines; exit 1 on a mismatch.
+//        acceptance 2, written independently of the gate: the reference PANEL's list (`listed` of GET
+//        /workbench/documents/references - what the panel shows and copies) against the PDF's numbered
+//        reference list read back with pdftotext, position by position: the same count, the same
+//        numbers, entry i holding panel title i as whole words. PARITY PASS / PARITY FAIL; exit 1 on a
+//        mismatch.
 //   text <pdf>   the PDF's text (pdftotext -layout)
 import { pdfText } from "/app/src/export/pdf_tools.ts";
 
@@ -31,33 +31,36 @@ if (mode === "req") {
   await Deno.writeFile(out, bytes);
   console.log(JSON.stringify({ status: r.status, bytes: bytes.byteLength, export_id: r.headers.get("x-export-id"), gate: r.headers.get("x-export-gate"), type: r.headers.get("content-type") }));
 } else if (mode === "parity") {
-  const panel = JSON.parse(await Deno.readTextFile(args[0])) as { references: { source_id: string; title: string }[] };
-  const seen = new Map<string, string>();
-  for (const r of panel.references) if (!seen.has(r.source_id)) seen.set(r.source_id, r.title);
+  // round 2 (tester D4, coordinator ruling): parity is one entry per SOURCE in the PDF's citation order on
+  // BOTH sides - the panel's `listed` (what it shows and what "Copy the list" copies) against the PDF's
+  // entries, position by position: same count, entry i is panel item i (its number and its title as whole
+  // words), so a duplicate, a missing entry or another order FAILS.
+  const panel = JSON.parse(await Deno.readTextFile(args[0])) as { listed?: { number: number; source_id: string; title: string }[] };
+  const listed = panel.listed ?? [];
   const text = (await pdfText(await Deno.readFile(args[1]), true)).replace(/-\n\s*/g, "");
   const lines = text.split("\n");
   let at = -1;
   lines.forEach((l, i) => { if (l.trim() === "References") at = i; });
   const region = at < 0 ? "" : lines.slice(at + 1).filter((l) => !/^\s*\d+\s*$/.test(l)).join("\n");
   const labels = [...region.matchAll(/^\s*\[(\d+)\]/gm)];
-  const entries = labels.map((m, i) => region.slice(m.index!, i + 1 < labels.length ? labels[i + 1].index! : undefined));
+  const entries = labels.map((m, i) => ({ n: Number(m[1]), text: region.slice(m.index!, i + 1 < labels.length ? labels[i + 1].index! : undefined) }));
   const fails: string[] = [];
-  if (at < 0) fails.push("the PDF has no References list");
-  if (entries.length !== seen.size) fails.push(`the PDF lists ${entries.length} entries; the panel shows ${seen.size} source(s)`);
-  for (const [sid, title] of seen) {
-    const n = entries.filter((e) => words(e).includes(words(title))).length;
-    if (n !== 1) fails.push(`panel "${title}" (${sid}) is in ${n} PDF entries`);
+  if (!panel.listed) fails.push("the panel answer carries no `listed` reference list");
+  if (at < 0 && listed.length) fails.push("the PDF has no References list");
+  if (entries.length !== listed.length) fails.push(`the PDF lists ${entries.length} entries; the panel lists ${listed.length}`);
+  for (let i = 0; i < Math.max(entries.length, listed.length); i++) {
+    const p = listed[i], e = entries[i];
+    if (!p || !e) continue;
+    if (p.number !== e.n) fails.push(`position ${i + 1}: panel [${p.number}], PDF [${e.n}]`);
+    if (!p.title || !words(e.text).includes(words(p.title))) fails.push(`position ${i + 1}: panel "${p.title}" is not PDF entry ${e.text.trim().replace(/\s+/g, " ").slice(0, 120)}`);
   }
-  for (const e of entries) {
-    if (![...seen.values()].some((t) => words(e).includes(words(t)))) fails.push(`PDF entry not on the panel: ${e.trim().replace(/\s+/g, " ").slice(0, 140)}`);
-  }
-  console.log(`panel: ${[...seen.values()].map((t) => JSON.stringify(t)).join(", ")}`);
-  console.log(`pdf:   ${entries.map((e) => JSON.stringify(e.trim().replace(/\s+/g, " ").slice(0, 100))).join(", ")}`);
+  console.log(`panel: ${listed.map((t) => `[${t.number}] ${JSON.stringify(t.title)}`).join(", ")}`);
+  console.log(`pdf:   ${entries.map((e) => JSON.stringify(e.text.trim().replace(/\s+/g, " ").slice(0, 100))).join(", ")}`);
   if (fails.length) {
     for (const f of fails) console.log(`PARITY FAIL ${f}`);
     Deno.exit(1);
   }
-  console.log(`PARITY PASS ${seen.size} panel source(s) = ${entries.length} PDF entries, one to one`);
+  console.log(`PARITY PASS ${listed.length} panel entr${listed.length === 1 ? "y" : "ies"} = ${entries.length} PDF entries, same order, one to one`);
 } else if (mode === "text") {
   console.log(await pdfText(await Deno.readFile(args[0]), true));
 } else {

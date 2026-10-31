@@ -274,12 +274,15 @@ try {
     $o = Psql "SELECT (SELECT definition->>'gate' FROM contract_registry_entries WHERE registry='export_formats' AND key='pdf') || ' ' || (SELECT count(*) FROM contract_registry_entries WHERE registry='export_required_sections')"
     Check ($o.Trim() -eq 'true 1') "the P6b registry rows: pdf gate flag + the roll-up section ($($o.Trim()))"
   }
-  # the vault: the authored notes, LF
+  # the vault: the authored notes, LF whatever the checkout's line endings - except *-crlf.md, written CRLF
+  # on purpose (round 2, tester D5: a CRLF frontmatter must still be read)
   $src = Join-Path $ct 'export-gate-vault'
   Get-ChildItem -Recurse -File -Force $src | ForEach-Object {
     $dest = Join-Path $vault $_.FullName.Substring($src.Length).TrimStart('\', '/')
     New-Item -ItemType Directory -Force (Split-Path -Parent $dest) | Out-Null
-    [System.IO.File]::WriteAllText($dest, ([System.IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
+    $t = [System.IO.File]::ReadAllText($_.FullName) -replace "`r`n", "`n"
+    if ($_.Name -like '*-crlf.md') { $t = $t -replace "`n", "`r`n" }
+    [System.IO.File]::WriteAllText($dest, $t, (New-Object System.Text.UTF8Encoding $false))
   }
   $ctMount = "${ct}:/ct:ro"
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $testTag, 'run', '--allow-net', '/ct/stub-embed.ts')
@@ -310,6 +313,14 @@ try {
     Clause 'T1' (($g.status -eq 422) -and (@($gb.blocking_findings | Where-Object { $_.code -in @('vision-unreadable', 'vision-unavailable') }).Count -eq 1)) "the vision pass fails closed on a '$m' answer ($($g.status) $(@($gb.blocking_findings | ForEach-Object code) -join ','))"
   }
   $null = Vision '/_mode?m=clean' 'POST'
+  # round 2 (tester D1, D2): realistic clean pages pass; a spill over a cell in another font is blocked
+  foreach ($pair in @(@('e-wdot.md', 'passed'), @('e-prose.md', 'passed'), @('c1-clean-rich.md', 'passed'), @('c1-left-code22.md', 'blocked'), @('c1-left-text22.md', 'blocked'))) {
+    $x = Req GET $wbName "/workbench/export?path=notes/p6b/$($pair[0])&format=pdf" "t1-$($pair[0]).out"
+    $xb = if ($x.status -eq 422) { BodyJson "t1-$($pair[0]).out" } else { $null }
+    $codes = @($xb.blocking_findings | ForEach-Object { $_.code }) -join ','
+    $ok = if ($pair[1] -eq 'passed') { ($x.status -eq 200) -and ($x.gate -eq 'passed') } else { ($x.status -eq 422) -and ($codes -match 'overlapping-text|overflow|clipped') }
+    Clause 'T1' $ok "$($pair[0]) is $($pair[1]) ($($x.status) gate=$($x.gate) $codes)"
+  }
 
   Write-Host '[T5] acceptance 5: a research report without the roll-up section is blocked'
   $r1 = Req GET $wbName '/workbench/export?path=notes/p6b/report-rollup.md&format=pdf' 't5-rollup.pdf'
@@ -317,6 +328,16 @@ try {
   $r0 = Req GET $wbName '/workbench/export?path=notes/p6b/report-no-rollup.md&format=pdf' 't5-no-rollup.out'
   $r0b = BodyJson 't5-no-rollup.out'
   Clause 'T5' (($r0.status -eq 422) -and (@($r0b.blocking_findings | Where-Object { $_.code -eq 'required-section-missing' }).Count -eq 1)) "the report WITHOUT it is BLOCKED ($($r0.status) $(@($r0b.blocking_findings | ForEach-Object code) -join ','))"
+  # round 2 (tester D5): YAML frontmatter variants are reports too; the weights must be inside the section;
+  # the roll-up as P3b prints it (`## Report credibility`, contracts/repo/trust.ts) passes
+  foreach ($pair in @(@('r-none-yaml-comment.md', 'blocked'), @('r-none-quoted-key.md', 'blocked'), @('r-none-single-quoted.md', 'blocked'), @('r-none-crlf.md', 'blocked'),
+      @('r-bare-number-later-weights.md', 'blocked'), @('report-p3b-rollup.md', 'passed'), @('r-bold-para.md', 'passed'), @('r-h3-spaces.md', 'passed'))) {
+    $x = Req GET $wbName "/workbench/export?path=notes/p6b/$($pair[0])&format=pdf" "t5-$($pair[0]).out"
+    $xb = if ($x.status -eq 422) { BodyJson "t5-$($pair[0]).out" } else { $null }
+    $codes = @($xb.blocking_findings | ForEach-Object { $_.code }) -join ','
+    $ok = if ($pair[1] -eq 'passed') { ($x.status -eq 200) -and ($x.gate -eq 'passed') } else { ($x.status -eq 422) -and ($codes -eq 'required-section-missing') }
+    Clause 'T5' $ok "$($pair[0]) is $($pair[1]) ($($x.status) gate=$($x.gate) $codes)"
+  }
 
   Write-Host '[T2] acceptance 2: the reference panel and the exported PDF, one to one'
   $mk = Req POST $wbName '/workbench/documents' 't2-doc.json' 'lab-user-a' '{"title":"Gate parity document"}'
@@ -344,6 +365,56 @@ try {
   $neg = Client @('parity', '/ev/files/t2-panel.json', '/ev/files/t1-clean.pdf')
   Save 't2-parity-negative.log' $neg
   if (-not $Red) { Check (($script:rc -ne 0) -and ($neg -match 'PARITY FAIL')) 'the parity check FAILS a mismatched pair (the panel against another PDF)' }
+  # round 2 (tester D3, D4; coordinator ruling: one entry per SOURCE in the PDF's citation order, both sides)
+  $null = Psql "INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata) VALUES ('f6b00000-0000-4000-8000-000000000005', 'https://example.org/p6b/untitled-five', '', 'Five.', 'web_article', 'example.org', '{}'), ('f6b00000-0000-4000-8000-000000000006', 'https://example.org/p6b/g6', 'Gate *six* <b>bold</b> &amp; co', 'Six.', 'web_article', 'example.org', '{}') ON CONFLICT DO NOTHING"
+  $G = @{ 1 = 'f6b00000-0000-4000-8000-000000000001'; 2 = 'f6b00000-0000-4000-8000-000000000002'; 3 = 'f6b00000-0000-4000-8000-000000000003'; 5 = 'f6b00000-0000-4000-8000-000000000005'; 6 = 'f6b00000-0000-4000-8000-000000000006' }
+  function NewDoc([string]$title) {
+    $null = Req POST $wbName '/workbench/documents' "t2r-$title.json" 'lab-user-a' (@{ title = $title } | ConvertTo-Json -Compress)
+    return [string](BodyJson "t2r-$title.json").path
+  }
+  function PutDoc([string]$dp, [string]$tag, [string]$text) {
+    $null = Req GET $wbName "/workbench/documents/file?path=$([uri]::EscapeDataString($dp))" "t2r-$tag-get.json"
+    $fj2 = BodyJson "t2r-$tag-get.json"
+    $base = ([string]$fj2.content) -replace '(?s)\n## Probe body\n.*$', ''
+    $null = Req PUT $wbName "/workbench/documents/file?path=$([uri]::EscapeDataString($dp))&commit=1" "t2r-$tag-put.json" 'lab-user-a' (@{ content = "$base`n## Probe body`n`n$text`n"; if_match = $fj2.hash } | ConvertTo-Json -Compress)
+  }
+  function Chip([string]$dp, [string]$sid, [string]$exact, [string]$tag) {
+    $null = Req POST $wbName '/workbench/documents/references' "t2r-$tag.json" 'lab-user-a' (@{ path = $dp; source_id = $sid; exact = $exact; form = 'chip' } | ConvertTo-Json -Compress)
+    return [string](BodyJson "t2r-$tag.json").record.id
+  }
+  function ParityOf([string]$dp, [string]$tag) {
+    $ex = Req GET $wbName "/workbench/export?path=$([uri]::EscapeDataString($dp))&format=pdf" "t2r-$tag.pdf"
+    $null = Req GET $wbName "/workbench/documents/references?path=$([uri]::EscapeDataString($dp))" "t2r-$tag-panel.json"
+    $pr = Client @('parity', "/ev/files/t2r-$tag-panel.json", "/ev/files/t2r-$tag.pdf")
+    $okp = ($script:rc -eq 0) -and ($pr -match 'PARITY PASS') -and ($ex.status -eq 200)
+    Save "t2r-$tag-parity.log" "export $($ex.status) gate=$($ex.gate)`n$pr"
+    foreach ($l in ($pr -split "`n")) { Write-Host "      $l" }
+    Clause 'T2' $okp "$tag - panel and PDF agree entry for entry (export $($ex.status))"
+  }
+  $d2 = NewDoc 'Parity dup chips'
+  $c1 = Chip $d2 $G[1] 'layout checks' 'a-c1'
+  $c2 = Chip $d2 $G[1] 'an authored page' 'a-c2'
+  PutDoc $d2 'a' "First quote [@ref:$c1] and a second quote of the same page [@ref:$c2], and page two [[source:$($G[2])|page two]]."
+  ParityOf $d2 '2a-dup-chips'
+  $d2 = NewDoc 'Parity cited and added'
+  PutDoc $d2 'b' "Cites page one [[source:$($G[1])|page one]] and page two [[source:$($G[2])|page two]]."
+  $null = Req POST $wbName '/workbench/documents/references' 't2r-b-add.json' 'lab-user-a' (@{ path = $d2; source_id = $G[1]; form = 'added' } | ConvertTo-Json -Compress)
+  ParityOf $d2 '2b-cited-and-added'
+  $d2 = NewDoc 'Parity order'
+  PutDoc $d2 'd1' "Page two first [[source:$($G[2])|page two]], then page one [[source:$($G[1])|page one]]."
+  ParityOf $d2 '2d-order-1'
+  PutDoc $d2 'd2' "Now page one first [[source:$($G[1])|page one]], then page two [[source:$($G[2])|page two]], then three [[source:$($G[3])|three]]."
+  ParityOf $d2 '2d-order-2'
+  $d2 = NewDoc 'Parity untitled'
+  PutDoc $d2 'e' "Cites the untitled page [[source:$($G[5])|five]] and page one [[source:$($G[1])|page one]]."
+  ParityOf $d2 '2e-untitled'
+  $d2 = NewDoc 'Parity markup title'
+  PutDoc $d2 'f' "Cites six [[source:$($G[6])|six]] and page one [[source:$($G[1])|page one]]."
+  ParityOf $d2 '2f-markup'
+  $d2 = NewDoc 'Parity stale resolution'
+  PutDoc $d2 'g' "Cites page two [[source:$($G[2])|page two]] and page three [[source:$($G[3])|three]]."
+  $null = Psql "INSERT INTO public.reference_resolutions (reference_id, identifier, pinned_revision, csl, via) SELECT r.id, 'doi:10.9999/p6b-probe', r.pinned_revision, '{""type"":""article-journal"",""title"":""A resolved title the export never prints""}'::jsonb, 'crossref' FROM public.reference_holders h JOIN public.reference_records r ON r.id = h.reference_id WHERE h.holder_kind = 'user_document' AND h.holder_ref = '$d2' AND r.source_id = '$($G[2])'"
+  ParityOf $d2 '2g-stale-resolution'
 
   Write-Host '[T3] acceptance 3: the vision calls go through the LiteLLM alias under the export key; a direct route is refused'
   $log = (Vision '/_log') | ConvertFrom-Json
@@ -408,7 +479,9 @@ try {
 
   # ---------------------------------------------------------------- the runtime image
   Write-Host '[T4] acceptance 4: pdftoppm is a separate, unmodified program; nothing links or imports poppler; the notices list it'
-  $o = Dk run --rm --label $label --network none --entrypoint sh $wbTag -c @'
+  # round 2 (tester D6): the script reaches sh as an LF file mounted into the container, never as a
+  # here-string argument (a core.autocrlf=true checkout turned it into CRLF and `head -1` failed)
+  $t4 = @'
 pdftoppm -v 2>&1 | head -1
 dpkg -s poppler-utils 2>/dev/null | grep '^Version'
 echo "deno-links: $(ldd "$(command -v deno)" 2>/dev/null | grep -ci poppler)"
@@ -418,6 +491,9 @@ echo "imports: $(/opt/export-gate/bin/python -I -c 'import sys, pikepdf, pdfplum
 echo "src-bindings: $(grep -rlE 'pdf2image|python-poppler|libpoppler|Deno\.dlopen|import +poppler|from +poppler' /app/src /app/gate 2>/dev/null | wc -l)"
 grep '^| poppler-utils' /app/THIRD-PARTY-NOTICES.md | cut -d'|' -f2-5 | cut -c1-260
 '@
+  $t4Dir = Join-Path $env:TEMP "$P-t4"; New-Item -ItemType Directory -Force $t4Dir | Out-Null; $script:made.dirs += $t4Dir
+  [System.IO.File]::WriteAllText((Join-Path $t4Dir 't4.sh'), ($t4 -replace "`r`n", "`n" -replace "`r", ''), (New-Object System.Text.UTF8Encoding $false))
+  $o = Dk run --rm --label $label --network none -v "${t4Dir}:/t4:ro" --entrypoint sh $wbTag /t4/t4.sh
   Save 't4-runtime.txt' $o
   foreach ($l in ($o -split "`n")) { Write-Host "    $l" }
   $ver = ([regex]'pdftoppm version ([0-9.]+)').Match($o).Groups[1].Value
@@ -445,8 +521,8 @@ for p in /proc/[0-9]*; do
   case "$c" in deno\ run*src/main.ts*) echo "${p#/proc/}";; esac
 done
 '@
-    [System.IO.File]::WriteAllText((Join-Path $vault 'p6b-sampler.sh'), ($sampler -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
-    [System.IO.File]::WriteAllText((Join-Path $vault 'p6b-mainpid.sh'), ($mainpid -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText((Join-Path $vault 'p6b-sampler.sh'), ($sampler -replace "`r`n", "`n" -replace "`r", ''), (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText((Join-Path $vault 'p6b-mainpid.sh'), ($mainpid -replace "`r`n", "`n" -replace "`r", ''), (New-Object System.Text.UTF8Encoding $false))
     $job = Start-Job -ScriptBlock { param($c) & docker exec $c sh /wiki/p6b-sampler.sh } -ArgumentList $wbName
     $ready = Join-Path $vault 'p6b-sampler.ready'
     for ($i = 0; $i -lt 100 -and -not (Test-Path $ready); $i++) { Start-Sleep -Milliseconds 200 }

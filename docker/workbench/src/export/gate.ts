@@ -122,6 +122,7 @@ export interface TextLine {
   top?: number;
   bottom?: number;
   page?: number;
+  size?: number; // the line's largest glyph size (pt): a heading is set larger than the body
 }
 export function referenceParity(texts: string[], refs: { number: number; title: string }[], numeric: boolean, lines?: TextLine[]): Finding[] {
   const out: Finding[] = [];
@@ -220,22 +221,74 @@ export function frontmatterOf(md: string): string {
   return m ? m[1] : "";
 }
 
-// The frontmatter's `key: value` (scalar, or a [list] / block list) - enough for a registry `when`.
-export function frontmatterValues(fm: string, key: string): string[] {
-  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const m = new RegExp(`^${esc}:[ \\t]*(.*)$`, "m").exec(fm);
-  if (!m) return [];
-  const v = m[1].trim();
-  const unq = (s: string) => s.trim().replace(/^(["'])(.*)\1$/, "$2").trim();
-  if (v.startsWith("[")) return v.replace(/^\[|\]$/g, "").split(",").map(unq).filter(Boolean);
-  if (v) return [unq(v)];
-  const block: string[] = [];
-  for (const l of fm.slice(m.index + m[0].length).split("\n").slice(1)) {
-    const b = /^\s+-\s+(.*)$/.exec(l);
-    if (!b) break;
-    block.push(unq(b[1]));
+// The frontmatter's top-level keys, read as YAML reads them (rw-p6b-gate round 2, tester D5: a trailing
+// `# comment`, a quoted KEY and a quoted value are all valid YAML for the same value, and round 1 missed
+// the first two). Handled: plain, single- and double-quoted keys and scalars; a comment after
+// whitespace outside quotes; a `!!str` / `!tag` prefix; flow lists `[a, "b"]`; block lists (`- x`);
+// block scalars (`|` / `>`). Keys compare exactly (YAML keys are case-sensitive). Anything nested deeper
+// than the top level is not a `when` key and is skipped.
+function stripComment(v: string): string {
+  let q: string | null = null;
+  for (let i = 0; i < v.length; i++) {
+    const ch = v[i];
+    if (q) {
+      if (q === '"' && ch === "\\") { i++; continue; }
+      if (ch === q) q = null;
+    } else if (ch === '"' || ch === "'") {
+      if (i === 0 || /[\s,\[]/.test(v[i - 1])) q = ch;
+    } else if (ch === "#" && (i === 0 || /\s/.test(v[i - 1]))) {
+      return v.slice(0, i);
+    }
   }
-  return block;
+  return v;
+}
+function scalar(raw: string): string {
+  let v = raw.trim().replace(/^!!?[A-Za-z]*\s+/, "").trim();
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    v = v.slice(1, -1).replace(/\\(["\\\/])/g, "$1").replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+  } else if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) {
+    v = v.slice(1, -1).replace(/''/g, "'");
+  }
+  return v.trim();
+}
+function flowList(v: string): string[] {
+  const inner = v.trim().replace(/^\[/, "").replace(/\]$/, "");
+  const out: string[] = [];
+  let cur = "", q: string | null = null;
+  for (const ch of inner) {
+    if (q) { cur += ch; if (ch === q) q = null; continue; }
+    if (ch === '"' || ch === "'") { q = ch; cur += ch; continue; }
+    if (ch === ",") { out.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map(scalar).filter(Boolean);
+}
+export function parseFrontmatter(fm: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const lines = fm.replace(/\r\n?/g, "\n").split("\n");
+  const KEY = /^(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\s#"'\-?:][^:]*?|-[^\s:][^:]*?))[ \t]*:(?:[ \t]+(.*))?$/;
+  for (let i = 0; i < lines.length; i++) {
+    const m = KEY.exec(lines[i]);
+    if (!m) continue;
+    const key = m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2] !== undefined ? m[2].replace(/''/g, "'") : m[3].trim();
+    const v = stripComment(m[4] ?? "").trim();
+    if (v.startsWith("[")) out.set(key, flowList(v));
+    else if (/^[|>][+-]?\d*$/.test(v)) {
+      const body: string[] = [];
+      while (i + 1 < lines.length && (/^\s+\S/.test(lines[i + 1]) || lines[i + 1].trim() === "")) body.push(lines[++i].trim());
+      out.set(key, [body.filter(Boolean).join(v.startsWith(">") ? " " : "\n")]);
+    } else if (v) out.set(key, [scalar(v)]);
+    else {
+      const block: string[] = [];
+      while (i + 1 < lines.length && /^\s*-\s+/.test(lines[i + 1])) block.push(scalar(stripComment(lines[++i].replace(/^\s*-\s+/, ""))));
+      out.set(key, block);
+    }
+  }
+  return out;
+}
+export function frontmatterValues(fm: string, key: string): string[] {
+  return parseFrontmatter(fm).get(key) ?? [];
 }
 
 export function sectionApplies(s: RequiredSection, fm: string, format: string): boolean {
@@ -249,20 +302,32 @@ export function sectionApplies(s: RequiredSection, fm: string, format: string): 
 
 // Acceptance 5: a required section (the roll-up) is in the file: its heading as a line, then each
 // must_include text after it.
-export function requiredSections(texts: string[], sections: RequiredSection[], fm: string, format: string): Finding[] {
+// Acceptance 5 (round 2, tester D5): a required section (the roll-up) is in the file - its heading as a
+// line, and each must_include text INSIDE that section: from the heading to the next heading. With the
+// file's line layout a heading is a line set larger than the body text (the size most lines are set in); without
+// it (the unit cases), a line equal to another known heading of the page ends nothing, so the section
+// runs to the end - the caller always passes the layout for a real PDF.
+export function requiredSections(texts: string[], sections: RequiredSection[], fm: string, format: string, layout?: TextLine[]): Finding[] {
   const out: Finding[] = [];
-  const lines = texts.join("\n").split(/\r?\n/);
+  const lines: { text: string; size?: number }[] = layout?.length ? layout : texts.join("\n").split(/\r?\n/).map((text) => ({ text }));
+  // the body size: the size most lines are set in (ties: the smaller)
+  const counts = new Map<number, number>();
+  for (const l of lines) if (typeof l.size === "number" && l.size > 0) counts.set(Math.round(l.size * 2) / 2, (counts.get(Math.round(l.size * 2) / 2) ?? 0) + 1);
+  const body = [...counts].sort((p, q) => q[1] - p[1] || p[0] - q[0])[0]?.[0] ?? 0;
+  const isHeading = (l: { size?: number }) => body > 0 && typeof l.size === "number" && l.size > body + 0.5;
   for (const s of sections) {
     if (!sectionApplies(s, fm, format)) continue;
-    const at = lines.findIndex((l) => norm(l) === norm(s.heading));
+    const at = lines.findIndex((l) => norm(l.text) === norm(s.heading));
     if (at < 0) {
       out.push({ code: "required-section-missing", detail: `the export has no "${s.heading}" section (${s.key}), which this kind of page must carry`, stage: "sections" });
       continue;
     }
-    const after = norm(lines.slice(at + 1).join("\n"));
-    const missing = (s.must_include ?? []).filter((t) => !after.includes(norm(t)));
+    let end = at + 1;
+    while (end < lines.length && !isHeading(lines[end])) end++;
+    const inside = norm(lines.slice(at + 1, end).map((l) => l.text).join("\n"));
+    const missing = (s.must_include ?? []).filter((t) => !inside.includes(norm(t)));
     if (missing.length) {
-      out.push({ code: "required-section-missing", detail: `the "${s.heading}" section (${s.key}) lacks: ${missing.join(", ")}`, stage: "sections" });
+      out.push({ code: "required-section-missing", detail: `the "${s.heading}" section (${s.key}) lacks, before the next heading: ${missing.join(", ")}`, stage: "sections" });
     }
   }
   return out;
@@ -317,7 +382,7 @@ export async function runGate(deps: GateDeps, input: GateInput): Promise<GateRes
     // 3 + 4. references and required sections (only on a text the structure check read)
     if (structure && s.code === 0) {
       blocking.push(...referenceParity(texts, input.refs, input.numeric, lines.length ? lines : undefined));
-      blocking.push(...requiredSections(texts, input.required, input.frontmatter, input.format.key));
+      blocking.push(...requiredSections(texts, input.required, input.frontmatter, input.format.key, lines.length ? lines : undefined));
     }
     checks.references = { expected: input.refs.length, numeric: input.numeric };
     checks.sections = input.required.filter((x) => sectionApplies(x, input.frontmatter, input.format.key)).map((x) => x.key);

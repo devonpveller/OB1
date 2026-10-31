@@ -27,8 +27,13 @@ export function exportsRouter(runs: RunStore, whoOf: (c: Context) => Promise<{ s
         return c.json({ error: String((e as Error).message) }, 400);
       }
     }
-    const limit = Number(c.req.query("limit") || 50);
-    return c.json({ exports: await runs.list(who.sub, Number.isFinite(limit) ? limit : 50, path) });
+    // round 2 (tester D7): a limit is a whole number 1..200, else 400 (1.5 reached SQL as LIMIT 1.5: 500)
+    const rawLimit = c.req.query("limit");
+    if (rawLimit !== undefined && rawLimit !== "" && !/^(?:[1-9]|[1-9][0-9]|1[0-9][0-9]|200)$/.test(rawLimit)) {
+      return c.json({ error: "limit must be a whole number from 1 to 200" }, 400);
+    }
+    const limit = rawLimit ? Number(rawLimit) : 50;
+    return c.json({ exports: await runs.list(who.sub, limit, path) });
   });
   r.get("/:id", async (c) => {
     const run = await runs.get((await whoOf(c)).sub, c.req.param("id"));
