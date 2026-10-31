@@ -59,3 +59,14 @@ Deno.test("D11: a title with Arabic and Hebrew words matches the file's visual-o
   assertEquals([r.status, r.codes], ["passed", []], JSON.stringify(r.g.blocking_findings));
 });
 
+
+Deno.test("round 3 (real): a reference label's ']' before a CJK-face opening quote is not overlapping text (the lab's T2 document)", async () => {
+  const titles = ["Gate fixture page one on layout checks", "Gate fixture page two on reference lists", "Gate fixture page four as first pinned", "Gate fixture page three added by hand"];
+  const refs: RefItem[] = titles.map((t, i) => ({
+    key: `src-${fixtureId(i + 1)}`, number: i + 1,
+    csl: { type: "webpage", title: t, URL: `https://example.org/p6b/g${i + 1}`, accessed: { "date-parts": [[2026, 10, 31]] } } as never,
+  }));
+  const md = `# Gate parity document\n\nThe layout checks [[source/${fixtureId(1)}|page one]] and the reference lists [[source/${fixtureId(2)}|page two]], and again [[source/${fixtureId(3)}|page four]] and [[source/${fixtureId(4)}|three]].\n`;
+  const r = await gate(md, refs);
+  assertEquals([r.status, r.codes], ["passed", []], JSON.stringify(r.g.blocking_findings));
+});

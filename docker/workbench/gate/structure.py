@@ -166,11 +166,17 @@ def collisions(all_chars):
             oy = min(a["bottom"], c["bottom"]) - max(a["top"], c["top"])
             if not (w > 0 and h > 0 and oy > 0.5 * h):
                 continue
-            if abs(i - j) <= 1:
-                size = max(float(a.get("size", 0) or 0), float(c.get("size", 0) or 0))
-                wa, wc = wide_punct(a), wide_punct(c)
-                limit = (CJK_PUNCT_PAIR_EM if wa and wc else CJK_PUNCT_EM if wa or wc else KERN_EM) * size
-                if ox > limit and ox > 1.5:
+            size = max(float(a.get("size", 0) or 0), float(c.get("size", 0) or 0))
+            wa, wc = wide_punct(a), wide_punct(c)
+            if wa or wc:
+                # a full-width punctuation mark inks only half its em box (an opening quote the right
+                # half, a closing one the left): its box overlapping a neighbour's - a reference label's
+                # "]" before a CJK-face quote, adjacent or not - is not ink over ink until it passes the
+                # compression limit
+                if ox > (CJK_PUNCT_PAIR_EM if wa and wc else CJK_PUNCT_EM) * size and ox > 1.5:
+                    pairs.append((a, c))
+            elif abs(i - j) <= 1:
+                if ox > KERN_EM * size and ox > 1.5:
                     pairs.append((a, c))
             elif ox > max(0.3 * w, 1.5):
                 pairs.append((a, c))
