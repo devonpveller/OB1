@@ -1,7 +1,8 @@
 // Notifications (D13 item 7), the configuration store (D6 item 5), the registries (D18).
 import type { Db } from "../db.ts";
 import type { RegistryReader } from "../registry.ts";
-import { Conflict, NotFound } from "./lifecycle.ts";
+import { NotFound } from "./lifecycle.ts";
+import { BadRequest } from "../logic/scope.ts";
 
 export interface NotificationInput {
   class: string;
@@ -65,13 +66,38 @@ async function isDir(p: string | null): Promise<boolean> {
   }
 }
 
-export function validateDestination(v: unknown): Destination {
+// rw-p7a-tts round 2 (tester D3): a destination is one of the ALLOWED archive mounts - by name, or a
+// directory inside one (<mountsRoot>/<mount>[/sub/dir]). The allow-list is the registry entry's
+// definition.allowed_mounts (default: its default mount only), so pointing the archive at another
+// store (the media server) = mount it at <mountsRoot>/<name> and add the name to the entry - never a
+// free path: no /tmp (the container's ephemeral fs), no /app (the recipe mount), no unknown mount.
+const SHAPE = "a destination is exactly one of {\"mount\": <allowed mount>} or {\"path\": <a directory inside an allowed mount>}";
+
+export function allowedMounts(def: Record<string, unknown>): string[] {
+  const listed = Array.isArray(def.allowed_mounts) ? def.allowed_mounts.filter((m): m is string => typeof m === "string") : null;
+  const dflt = (def.default as Destination | undefined)?.mount;
+  return listed ?? (typeof dflt === "string" ? [dflt] : []);
+}
+
+export function validateDestination(v: unknown, mountsRoot: string, allowed: string[]): Destination {
   const o = (v ?? {}) as Record<string, unknown>;
   const keys = Object.keys(o);
-  if (keys.length !== 1) throw new Conflict("a destination is exactly one of {\"mount\": <name>} or {\"path\": <absolute dir>}");
-  if (keys[0] === "mount" && typeof o.mount === "string" && /^[a-z0-9][a-z0-9-]*$/.test(o.mount)) return { mount: o.mount };
-  if (keys[0] === "path" && typeof o.path === "string" && o.path.startsWith("/") && !o.path.includes("..")) return { path: o.path };
-  throw new Conflict("a destination is exactly one of {\"mount\": <name>} or {\"path\": <absolute dir>}");
+  if (keys.length !== 1) throw new BadRequest(SHAPE);
+  if (keys[0] === "mount" && typeof o.mount === "string") {
+    if (!allowed.includes(o.mount)) throw new BadRequest(`'${o.mount}' is not an allowed archive mount (${allowed.join(", ")})`);
+    return { mount: o.mount };
+  }
+  if (keys[0] === "path" && typeof o.path === "string") {
+    const p = o.path.replace(/\/+$/, "");
+    const segs = p.split("/");
+    if (!p.startsWith("/") || segs.slice(1).some((x) => x === "" || x === "." || x === "..") || /[\\\0]/.test(p)) throw new BadRequest(SHAPE);
+    const root = mountsRoot.replace(/\/+$/, "");
+    if (!allowed.some((m) => p === `${root}/${m}` || p.startsWith(`${root}/${m}/`))) {
+      throw new BadRequest(`'${p}' is not inside an allowed archive mount (${allowed.map((m) => `${root}/${m}`).join(", ")})`);
+    }
+    return { path: p };
+  }
+  throw new BadRequest(SHAPE);
 }
 
 async function settingOut(key: string, def: Record<string, unknown>, stored: StoredSetting | undefined, mountsRoot: string) {
@@ -110,7 +136,7 @@ export async function setting(db: Db, reg: RegistryReader, key: string, mountsRo
 export async function writeSetting(db: Db, reg: RegistryReader, key: string, value: unknown, by: string | null, mountsRoot: string) {
   const e = await reg.entry("settings", key);
   if (!e) throw new NotFound(`'${key}' is not a key of the settings registry`);
-  const v = e.definition.type === "destination" ? validateDestination(value) : value;
+  const v = e.definition.type === "destination" ? validateDestination(value, mountsRoot, allowedMounts(e.definition)) : value;
   await db.query(
     `INSERT INTO public.contract_settings (key, value, updated_by) VALUES ($1, $2::jsonb, $3)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, version = public.contract_settings.version + 1,

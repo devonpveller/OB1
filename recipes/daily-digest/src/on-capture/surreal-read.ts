@@ -25,8 +25,11 @@ function code(q: string): string {
 export function assertReadOnly(q: string): void {
   const c = code(q).trim().replace(/;\s*$/, "");
   if (c.includes(";")) throw new Error("read-only client: one statement per query");
-  if (/^INFO\s+FOR\s+DB$/i.test(c)) return;
-  if (!/^SELECT\b/i.test(c)) throw new Error("read-only client: only SELECT or INFO FOR DB");
+  // INFO FOR DB / NS, and INFO FOR TABLE <one plain table name> (the schema the quiesce check fingerprints)
+  if (/^INFO\s+FOR\s+(DB|NS)$/i.test(c) || /^INFO\s+FOR\s+TABLE\s+[a-z_][a-z0-9_]*$/i.test(c)) return;
+  if (!/^SELECT\b/i.test(c)) throw new Error("read-only client: only SELECT or INFO FOR DB / NS / TABLE");
+  // round 2: no function call of any kind - a fn:: (user-defined) function can write, http:: can reach out
+  if (c.includes("::")) throw new Error("read-only client: no function calls ('::')");
   const m = WRITE.exec(c);
   if (m) throw new Error(`read-only client: '${m[1]}' is not allowed`);
 }

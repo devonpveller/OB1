@@ -22,6 +22,7 @@ export interface ContractDeps {
   log: (msg: string) => void;
   // P7a: where a render request is handed to openbrain-podcast (POST {"request_id"}); "" = inert
   podcastRenderUrl?: string;
+  podcastRenderKey?: string; // sent as X-Brain-Key to the render service (WORKBENCH_KEY)
 }
 
 export const PREFIX = "/workbench/contract";

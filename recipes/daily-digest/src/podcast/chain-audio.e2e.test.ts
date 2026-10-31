@@ -48,7 +48,7 @@ Deno.test({
   async fn() {
     assert(ffmpeg, "PODCAST_REQUIRE_FFMPEG=1 and no ffmpeg");
     const dir = await Deno.makeTempDir({ prefix: "chain-audio-e2e-" });
-    const archive = `${dir}/archive`;
+    const archive = `${dir}/mounts/podcast-archive`; // inside the mounts root, as in compose
     await Deno.mkdir(archive, { recursive: true });
     const on: string[] = [];
     const speech: { voice: string; model: string; auth: string }[] = [];
@@ -65,6 +65,8 @@ Deno.test({
       const body = await req.json().catch(() => ({})) as Record<string, any>;
       if (path === "/v1/audio/speech") {
         speech.push({ voice: body.voice, model: body.model, auth: req.headers.get("authorization") ?? "" });
+        // one voice answers slower, so the syntheses FINISH out of script order (the join must not care)
+        if (body.voice === "bm_george") await new Promise((ok) => setTimeout(ok, 150));
         return new Response(new Uint8Array(24_000)); // 0.5 s of PCM silence
       }
       const sys = (body.messages ?? [])[0]?.content ?? "";
@@ -117,7 +119,7 @@ Deno.test({
         cwd: RECIPE,
         env: {
           MCP_ACCESS_KEY: "test", BRAIN_REST_URL: brain.url, RESEARCH_URL: engine.url, CHAT_API_BASE: `${gw.url}/v1`, CHAT_API_KEY: "sk-chat",
-          PODCAST_TTS_KEY: "sk-podcast-tts", PODCAST_TEAM: "tech_experts", PODCAST_OWNER_SUB: "e2e-owner", WORKBENCH_URL: workbench.url,
+          PODCAST_TTS_KEY: "sk-podcast-tts", PODCAST_TEAM: "tech_experts", PODCAST_OWNER_SUB: "e2e-owner", WORKBENCH_URL: workbench.url, CONTRACT_MOUNTS_ROOT: `${dir}/mounts`,
           PODCAST_SEGMENT_CACHE_DIR: `${dir}/cache`, REPORTS_DIR: `${dir}/reports`, FETCH_PROXY_URL: "", GAP_DIVE_ENABLED: "0",
           GMAIL_READ_CREDENTIALS: `${dir}/absent-credentials.json`, GMAIL_READ_TOKEN: `${dir}/absent-token.json`,
           ROUTINE_DATE: DATE, ROUTINE_STATE_DIR: `${dir}/reports/routine`, MODEL_WAIT_UNTIL_MS: String(Date.now() + 60_000),
@@ -132,7 +134,10 @@ Deno.test({
       assertEquals(out.code, 0, log.slice(-3000));
       assertEquals(on, [], "no request reached the Open Notebook sinkhole");
       assertEquals(speech.length, 4, `every turn voiced through the gateway: ${log.slice(-1500)}`);
-      assertEquals(speech.map((s) => s.voice), ["bm_george", "bf_emma", "bm_george", "bf_emma"]);
+      // round 2 (tester D1): the turns are voiced CONCURRENTLY (PODCAST_TTS_CONCURRENCY), so the order the
+      // requests ARRIVE in is not the episode's order - compare the voices as a multiset here, and check the
+      // episode's own turn order in render.json below.
+      assertEquals(speech.map((s) => s.voice).sort(), ["bf_emma", "bf_emma", "bm_george", "bm_george"]);
       assert(speech.every((s) => s.model === "local-tts" && s.auth === "Bearer sk-podcast-tts"), "route local-tts, this service's own key");
       assert(prompts.some((p) => p.includes("HOST A is Alex.") && p.includes("HOST B is Jamie.")), "the script prompt carries the cast");
       assert(settingReads >= 1, "the archive destination was read from the configuration store");
@@ -142,6 +147,10 @@ Deno.test({
       const sc = JSON.parse(await Deno.readTextFile(`${epDir}/sidecar.json`));
       assertEquals([sc.origin, sc.owner_sub, sc.destination.path, sc.destination.version, sc.audio.format], ["render", "e2e-owner", archive, 3, "mp3"]);
       assert((await Deno.stat(`${epDir}/audio.mp3`)).size > 0 && (await Deno.stat(`${epDir}/transcript.json`)).isFile);
+      // the episode is joined in SCRIPT order whatever order the syntheses finished in
+      const render = JSON.parse(await Deno.readTextFile(`${epDir}/render.json`));
+      assertEquals(render.turns.map((t: { index: number; voice: string }) => [t.index, t.voice]),
+        [[0, "bm_george"], [1, "bf_emma"], [2, "bm_george"], [3, "bf_emma"]]);
       assertEquals(episodes.length, 1);
       assertEquals([episodes[0].owner_sub, episodes[0].origin, episodes[0].archive_dir], ["e2e-owner", "render", epDir]);
     } finally {

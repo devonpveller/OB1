@@ -235,7 +235,7 @@ export class PodcastService {
 
 export function servePodcast(
   svc: PodcastService,
-  o: { port: number; hostname?: string; signal?: AbortSignal; onListen?: (a: Deno.NetAddr) => void; render?: RenderService },
+  o: { port: number; hostname?: string; signal?: AbortSignal; onListen?: (a: Deno.NetAddr) => void; render?: RenderService; renderKey?: string },
 ): Deno.HttpServer<Deno.NetAddr> {
   return Deno.serve({ port: o.port, hostname: o.hostname ?? "0.0.0.0", signal: o.signal, onListen: o.onListen }, async (req) => {
     const url = new URL(req.url);
@@ -253,6 +253,11 @@ export function servePodcast(
     }
     // P7a: render a request / transcode an archived episode (render-service.ts)
     if (o.render && req.method === "POST" && (url.pathname === "/render" || url.pathname === "/transcode")) {
+      // round 2: these WRITE (renders, files) - only a caller holding the key (the workbench's
+      // WORKBENCH_KEY = this service's MCP_ACCESS_KEY). No key configured = both refused (inert).
+      if (!o.renderKey || !keyEquals(req.headers.get("x-brain-key") ?? "", o.renderKey)) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
       let body: Record<string, unknown>;
       try {
         body = JSON.parse((await req.text().catch(() => "")) || "{}");
@@ -268,6 +273,14 @@ export function servePodcast(
     }
     return new Response("not found", { status: 404 });
   });
+}
+
+/** Constant-time comparison of two keys. */
+export function keyEquals(a: string, b: string): boolean {
+  const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b);
+  let d = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return d === 0;
 }
 
 /** A file: URL's directory as an OS path (Linux in the container, drive paths on Windows). */

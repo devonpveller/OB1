@@ -53,7 +53,7 @@ const writes: Req[] = [
   ["hidden", "POST", `/ideas/${F.idea}/hidden`, { node_kind: "source", node_ref: F.a, hidden: true }],
   ["userSourceAdded", "POST", `/ideas/${F.idea}/user-sources`, { title: "A user-provided note on retrieval", content: "User provided text. Second sentence.", url: "https://example.org/user-added" }],
   ["userSourceRemoved", "DELETE", `/ideas/${F.idea}/user-sources/cccccccc-cccc-4ccc-8ccc-ccccccccccc2`],
-  ["settingWritten", "PUT", `/settings/podcast.archive_destination`, { value: { path: "/mounts/podcast-archive-alt" }, by: "dredd" }],
+  ["settingWritten", "PUT", `/settings/podcast.archive_destination`, { value: { path: "/mounts/podcast-archive/alt" }, by: "dredd" }],
   ["steer", "POST", `/sessions/${F.job}/steer`, { step_id: "s1", text: "narrow to erasure" }],
   // P7a: a render request by the fixture team (PODCAST_RENDER_URL blank in the lab: it stays queued)
   ["podcastRequest", "POST", `/podcasts/requests`, {

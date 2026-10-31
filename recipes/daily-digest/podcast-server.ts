@@ -76,6 +76,7 @@ const render = new RenderService({
 
 servePodcast(svc, {
   render,
+  renderKey: env("MCP_ACCESS_KEY"), // /render and /transcode need it (the workbench sends its WORKBENCH_KEY)
   port: parseInt(env("PORT", "8080"), 10),
   onListen: (a) => console.log(`openbrain-podcast listening on :${a.port} (args: ${RUN_ARGS.join(" ") || "(none)"})`),
 });

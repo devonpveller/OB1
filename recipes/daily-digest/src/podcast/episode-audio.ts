@@ -42,6 +42,9 @@ function slugOf(s: string): string {
 
 export async function voiceAndArchive(t: RoomTranscript, team: Team, req: VoiceRequest, d: VoiceDeps): Promise<Voiced> {
   const log = d.log ?? ((m: string) => console.log(m));
+  // round 2 (tester D3): a destination that is not usable refuses the render up front (no synthesis, no
+  // file, no row); it is read again at the write itself, so a change in between is honoured too.
+  await d.archive.destination();
   const rendered = await renderTranscript(t, team, { cache: d.cache, concurrency: d.concurrency });
   log(`[podcast-audio] "${t.title}": ${rendered.stats.turns} turns, ${rendered.stats.hits} cached, ${rendered.stats.misses} synthesised, ` +
     `${rendered.stats.coalesced} coalesced, peak ${rendered.stats.peakConcurrency} at once, ${rendered.seconds.toFixed(1)} s`);

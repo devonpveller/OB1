@@ -5,9 +5,11 @@
 #
 #   docker build -t openbrain-podcast:<tag> --build-arg OB1_SHA=$(git -C OB1 rev-parse HEAD) OB1/recipes/daily-digest
 #
-# The build gate (stage `test`) runs the podcast unit tests and the notices check: an ffmpeg build
-# configured with --enable-nonfree, or a notices file without the ffmpeg / Kokoro-FastAPI rows,
-# fails the build.
+# The build gate (stage `test`) runs the podcast unit tests, the notices check and the chain e2e: an
+# ffmpeg build configured with --enable-nonfree, a notices file without the ffmpeg / Kokoro-FastAPI rows,
+# or a red test fails the build. The FINAL stage copies the gate's marker out of `test`, so EVERY build
+# of the default target - `docker compose build`, ob1-deploy.ps1 - runs the gate (round 2, tester D2;
+# the workbench's pattern).
 ARG DENO_IMAGE=denoland/deno:alpine-2.9.5
 FROM ${DENO_IMAGE} AS runtime
 # Alpine 3.24's ffmpeg 8.1.3-r0 (a GPL build: --enable-gpl --enable-version3; no nonfree). Pinned here and in
@@ -22,7 +24,9 @@ WORKDIR /app
 FROM runtime AS test
 COPY . /app
 RUN PODCAST_REQUIRE_FFMPEG=1 deno test --allow-read --allow-write --allow-env --allow-run --allow-net=127.0.0.1 \
-      src/podcast/podcast-audio.test.ts src/podcast/notices_test.ts src/on-capture/on-capture.test.ts \
- && PODCAST_REQUIRE_FFMPEG=1 deno test --allow-all src/podcast/chain-audio.e2e.test.ts  && echo "podcast image gate: OK"
+      src/podcast/podcast-audio.test.ts src/podcast/round2.test.ts src/podcast/notices_test.ts src/on-capture/on-capture.test.ts \
+ && PODCAST_REQUIRE_FFMPEG=1 deno test --allow-all src/podcast/chain-audio.e2e.test.ts  && touch /podcast-test-gate-passed && echo "podcast image gate: OK"
 
 FROM runtime
+# the default target depends on the gate: no marker, no image
+COPY --from=test /podcast-test-gate-passed /podcast-test-gate-passed

@@ -80,7 +80,11 @@ export function registerPodcasts(app: ContractApp, deps: ContractDeps) {
       const url = deps.podcastRenderUrl ?? "";
       if (url) {
         // best-effort: a render service that is down leaves the request queued (the row says so)
-        fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request_id: row.id }), signal: AbortSignal.timeout(10_000) })
+        // the render service takes only a caller holding the key (round 2): this workbench's WORKBENCH_KEY
+        fetch(url, {
+          method: "POST", headers: { "content-type": "application/json", "x-brain-key": deps.podcastRenderKey ?? "" },
+          body: JSON.stringify({ request_id: row.id }), signal: AbortSignal.timeout(10_000),
+        })
           .then((r) => r.body?.cancel())
           .catch((e) => deps.log(`podcast render hand-off failed: ${e}`));
       }

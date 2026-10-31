@@ -13,10 +13,11 @@
 import type { SpeechFn, SpeechRequest } from "./tts-client.ts";
 
 // Bump when the bytes a key maps to would change for the same inputs (a new audio format).
-export const CACHE_KEY_VERSION = "p7a-1:pcm_s16le_24k_mono";
+// p7a-2 (round 2): the speed in the key is EXACTLY the speed sent to Kokoro (no rounding)
+export const CACHE_KEY_VERSION = "p7a-2:pcm_s16le_24k_mono";
 
 export async function segmentKey(r: SpeechRequest): Promise<string> {
-  const canon = JSON.stringify({ v: CACHE_KEY_VERSION, route: r.route, voice: r.voice, speed: Number(r.speed.toFixed(3)), text: r.text });
+  const canon = JSON.stringify({ v: CACHE_KEY_VERSION, route: r.route, voice: r.voice, speed: r.speed, text: r.text });
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canon));
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

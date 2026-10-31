@@ -215,9 +215,23 @@ try {
   Check (($script:rc -eq 0) -and $clean -match 'podcast image gate: OK') "${podTestTag}: the image gate (unit tests, notices, the chain e2e C2) passed"
   $script:made.images += $podTestTag
   $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $podTag $recipe
-  Check ($script:rc -eq 0) "$podTag built"
-  if ($script:rc -ne 0) { throw 'build podcast' }
+  $built = ($script:rc -eq 0)
+  $null = Dk run --rm --network none --entrypoint test $podTag -f /podcast-test-gate-passed
+  Check ($built -and $script:rc -eq 0) "D2: the DEFAULT target carries the test gate's marker (compose build / ob1-deploy run the gate)"
+  # round 2 (tester D2): the default target of a tree whose notices lack the ffmpeg row must FAIL to build
+  $bad = Join-Path $env:TEMP "$P-recipe-nonotice"
+  New-Item -ItemType Directory -Force $bad | Out-Null
+  $script:made.dirs += $bad
+  & robocopy $recipe $bad /E /XD lab .eyeball /XF .env /NFL /NDL /NJH /NJS /NP | Out-Null
+  $nf = Join-Path $bad 'THIRD-PARTY-NOTICES.md'
+  [System.IO.File]::WriteAllLines($nf, @((Get-Content $nf) | Where-Object { $_ -notmatch '^\| ffmpeg \(Alpine' }), (New-Object System.Text.UTF8Encoding $false))
+  $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t "openbrain-podcast:wt-$short-nonotice" $bad
+  Save 'd2-default-build-without-ffmpeg-notice.log' (($o -replace '\x1b\[[0-9;]*m', '') -split "`n" | Select-String -Pattern 'FAILED|error|not the noticed|gate' | Out-String)
+  Check ($script:rc -ne 0 -and $o -match 'not the noticed version') "D2: the default build of a tree without the ffmpeg notices row FAILS (rc $($script:rc))"
+  if ($script:rc -eq 0) { $script:made.images += "openbrain-podcast:wt-$short-nonotice" }
+  Check $built "$podTag built"
   $script:made.images += $podTag
+  if (-not $built) { throw 'build podcast' }
   $null = Dk tag $llmDigest $llmTag
   Check ($script:rc -eq 0) "$llmTag = the gateway's pinned LiteLLM digest"
   $script:made.tags += $llmTag
@@ -332,6 +346,25 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   Check ($wo -match 'WRITE 200 .*"created"') "a lab write to the ON copy ($((Redact $wo).Substring(0, [Math]::Min(80, $wo.Length))))"
   $o = Pod 900 $capEnv @('run', '-A', 'on-capture.ts', 'verify-quiesced', "--manifest=$manIn"); Save 'c12-quiesced-after-write.log' ($o -split "`n" | Select-Object -First 6 | Out-String)
   Check ($script:rc -eq 1 -and $o -match '"changed_tables":\s*\[\s*"episode"') 'verify-quiesced after a lab write to ON: NOT quiesced, names the episode table (exit 1)'
+  # round 2 (tester D4): every write the tester used, each on top of the last, each detected by a fresh
+  # verify against the ORIGINAL manifest naming the part it changed
+  $d4 = @(
+    @('UPDATE source_embedding SET embedding (in place)', "UPDATE source_embedding SET embedding = [0.25, 0.5] WHERE id = (SELECT VALUE id FROM source_embedding ORDER BY id LIMIT 1 START 1500)[0];", 'source_embedding'),
+    @('DEFINE INDEX', "DEFINE INDEX lab_idx ON episode FIELDS name;", '__table__:episode'),
+    @('DEFINE FIELD', "DEFINE FIELD lab_field ON note TYPE option<string>;", '__table__:note'),
+    @('DEFINE FUNCTION', "DEFINE FUNCTION fn::lab_w() { RETURN 1; };", '__db__'),
+    @('DEFINE PARAM', "DEFINE PARAM `$lab_p VALUE 1;", '__db__'))
+  $d4log = @()
+  foreach ($w in $d4) {
+    $q = $w[1].Replace("'", "\'")
+    $js = "const r = await fetch('http://lab-surreal:8000/sql', { method: 'POST', headers: { accept: 'application/json', 'surreal-ns': 'open_notebook', 'surreal-db': 'open_notebook', authorization: 'Basic ' + btoa('root:$surrealPw') }, body: '$q' }); const t = await r.text(); console.log('WRITE ' + r.status + ' ' + (JSON.parse(t).every((x) => x.status === 'OK') ? 'OK' : t.slice(0, 200)));"
+    $wo = Dk run --rm --label $label --network $net --entrypoint deno $podTag eval $js
+    $o = Pod 900 $capEnv @('run', '-A', 'on-capture.ts', 'verify-quiesced', "--manifest=$manIn")
+    $ch = (([regex]'"changed_tables":\s*\[([^\]]*)\]').Match($o)).Groups[1].Value -replace '\s', ''
+    $d4log += "$($w[0]): $wo -> exit $($script:rc), changed [$ch]"
+    Check ($wo -match 'WRITE 200 OK' -and $script:rc -eq 1 -and $ch -match [regex]::Escape('"' + $w[2] + '"')) "D4: $($w[0]) on the copy -> verify-quiesced exit 1 naming $($w[2])"
+  }
+  Save 'd4-quiesce-writes.log' ($d4log -join "`n")
 
   # ------------------------------------------------------------------ 5e. the front end never offers an archived episode
   Write-Host '[5e] C9: no archived episode in the library, the presenters panel or search (checked BEFORE any re-render, which is a new episode)'
@@ -373,6 +406,25 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   Check ($p2 -and $p2.dir -like '/mounts/podcast-archive/alt/renders/*' -and $p2.destination.version -ge 1) "C13: after the setting changed, the NEXT render lands at the new destination ($($p2.dir), version $($p2.destination.version))"
   Check ((Test-Path (Join-Path $archive ("renders/" + ($p1.dir -split '/')[-1] + '/audio.mp3')))) 'C13: the earlier render did not move'
   $null = Wb 'PUT' '/workbench/contract/settings/podcast.archive_destination' "{ value: { mount: 'podcast-archive' }, by: 'lab' }"
+  # round 2 (tester D3)
+  $d3 = @()
+  foreach ($v in @("{ path: '/tmp/tester-ephemeral' }", "{ mount: 'other-mount' }", "{ path: '/app' }", "{ path: '/mounts/podcast-archive/../x' }", "{ path: '/mounts' }")) {
+    $r = Wb 'PUT' '/workbench/contract/settings/podcast.archive_destination' "{ value: $v, by: 'lab' }"
+    $d3 += "PUT $v -> $(([regex]'STATUS (\d+)').Match($r).Groups[1].Value)"
+    Check ($r -match 'STATUS 400') "D3: PUT $v -> 400 (not an allowed archive mount)"
+  }
+  $rb = Wb 'PUT' '/workbench/contract/settings/podcast.archive_destination' "{ value: { path: '/mounts/podcast-archive/alt' }, by: 'bee' }" "lab-bee-$rand"
+  $d3 += "PUT as a second user -> $(([regex]'STATUS (\d+)').Match($rb).Groups[1].Value)"
+  Check ($rb -match 'STATUS 403') 'D3: a second (non-admin) user may not change the global destination (403)'
+  $rowsBefore = Sql "select count(*) from podcast_episodes"
+  $w2 = Wb 'PUT' '/workbench/contract/settings/podcast.archive_destination' "{ value: { path: '/mounts/podcast-archive/not-made' }, by: 'lab' }"
+  Check ($w2 -match 'STATUS 200' -and $w2 -match '"reachable":false') 'D3: a directory inside the mount that does not exist is accepted as a value and reported unreachable'
+  $o = Pod 900 @() @('run', '-A', 'lab/lab-probe.ts', 'render', $tech, 'd3-unreachable')
+  $d3 += "render with an unreachable destination: $((($o -split "`n") | Where-Object { $_ -match 'refused|error' } | Select-Object -First 2) -join ' | ')"
+  $rowsAfter = Sql "select count(*) from podcast_episodes"
+  Check (($o -match 'unreachable: render refused') -and $rowsAfter -eq $rowsBefore -and -not (Test-Path (Join-Path $archive 'not-made'))) "D3: a render to an unreachable destination is REFUSED with a stated error; no file, no episode row ($rowsBefore -> $rowsAfter)"
+  $null = Wb 'PUT' '/workbench/contract/settings/podcast.archive_destination' "{ value: { mount: 'podcast-archive' }, by: 'lab' }"
+  Save 'd3-destination.log' ($d3 -join "`n")
   $grep = (& git -C $ob1 grep -n -E 'backups.?/podcasts' -- '*.ts' '*.yml' '*.json' | Out-String).Trim()
   Save 'c13-no-hardcoded-path.log' $grep
   Check ((@($grep -split "`n" | Where-Object { $_ }).Count -eq 2) -and $grep -match 'docker-compose.yml' -and $grep -match 'docker-compose.scheduled.yml') 'C13: the archive path appears only in the two compose mounts (no code, no .env)'
@@ -383,7 +435,7 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   $before = (Get-FileHash (Join-Path $onDir.FullName 'audio.mp3') -Algorithm SHA256).Hash
   $tc = @()
   foreach ($fmt in @('mp3', 'opus', 'm4a', 'flac', 'wav', 'aac')) {
-    $js = "const r = await fetch('http://openbrain-podcast:8080/transcode', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ archive_path: 'on-archive/$($onDir.Name)', format: '$fmt' }) }); console.log('TC $fmt ' + r.status + ' ' + (await r.text()).slice(0, 300));"
+    $js = "const r = await fetch('http://openbrain-podcast:8080/transcode', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': '$key' }, body: JSON.stringify({ archive_path: 'on-archive/$($onDir.Name)', format: '$fmt' }) }); console.log('TC $fmt ' + r.status + ' ' + (await r.text()).slice(0, 300));"
     $tc += (Dk run --rm --label $label --network $net --entrypoint deno $podTag eval $js)
   }
   Save 'c14-transcode.log' ($tc -join "`n")
@@ -395,6 +447,15 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   Check (@($sc.transcodes).Count -eq 5 -and @($sc.transcodes | Where-Object { $_.source_format -ne 'mp3' }).Count -eq 0) "C14: the sidecar records source (mp3) and target for each ($(@($sc.transcodes | ForEach-Object { $_.target_format }) -join ','))"
 
   # ------------------------------------------------------------------ 5i. C15 requests through the workbench, two users; C2 with the sinkhole
+  $nk = @()
+  foreach ($pth in @('/render', '/transcode')) {
+    foreach ($hk in @('', 'wrong-key-0123456789')) {
+      $hdr = if ($hk) { ", 'x-brain-key': '$hk'" } else { '' }
+      $nk += (Dk run --rm --label $label --network $net --entrypoint deno $podTag eval "const r = await fetch('http://openbrain-podcast:8080$pth', { method: 'POST', headers: { 'content-type': 'application/json'$hdr }, body: '{}' }); console.log('$pth ' + r.status);")
+    }
+  }
+  Save 'minor-render-transcode-keys.log' ($nk -join "`n")
+  Check (@($nk | Where-Object { $_ -match ' 401$' }).Count -eq 4) "minor: /render and /transcode without the key, or with a wrong one -> 401 ($($nk -join ', '))"
   Write-Host '[5i] C15: a render request through the workbench is the requester''s; another user sees none of it'
   $turnText = "PrivateLabTurn$rand"
   $body = "{ team_id: '$tech', title: 'Lab request $rand', transcript: { title: 'Lab request $rand', turns: [{ presenterId: 'on-presenter-' + '$tech'.replace('on-team-', '') + '-0', text: '$turnText' }] } }"

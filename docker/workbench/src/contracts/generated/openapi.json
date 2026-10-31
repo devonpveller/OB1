@@ -8858,7 +8858,7 @@
         "tags": [
           "configuration store (D6)"
         ],
-        "summary": "write a setting; the next read returns the new value",
+        "summary": "write a setting (admin only); the next read returns the new value",
         "parameters": [
           {
             "schema": {
@@ -8879,7 +8879,7 @@
             "application/json": {
               "example": {
                 "value": {
-                  "path": "/mounts/podcast-archive-alt"
+                  "path": "/mounts/podcast-archive/alt"
                 },
                 "by": "dredd"
               },
@@ -8897,14 +8897,14 @@
                 "example": {
                   "key": "podcast.archive_destination",
                   "value": {
-                    "path": "/mounts/podcast-archive-alt"
+                    "path": "/mounts/podcast-archive/alt"
                   },
                   "is_default": false,
                   "version": 1,
                   "updated_at": "2026-10-17T12:00:00.000Z",
                   "updated_by": "dredd",
                   "resolved": {
-                    "path": "/mounts/podcast-archive-alt",
+                    "path": "/mounts/podcast-archive/alt",
                     "reachable": false,
                     "via": "path"
                   }
@@ -8917,6 +8917,16 @@
           },
           "400": {
             "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not an admin (a setting is global)",
             "content": {
               "application/json": {
                 "schema": {

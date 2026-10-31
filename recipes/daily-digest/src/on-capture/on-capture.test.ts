@@ -9,6 +9,7 @@ import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { mapOn, type OnInput, PIPER_TO_KOKORO, profileCounts } from "./on-mapping.ts";
 import { assertReadOnly } from "./surreal-read.ts";
 import { byClass, classify } from "./migration.ts";
+import { changed, fingerprint, PAGE, type Reader } from "./fingerprint.ts";
 
 const speaker = (id: string, name: string, voices: [string, string, string][]) => ({
   id: `speaker_profile:${id}`, name, description: `${name} desc`, voice_model: "model:amy", tts_provider: null, tts_model: null,
@@ -104,4 +105,58 @@ Deno.test("C10: migration - one outcome per episode class with a reason; a migra
   const classes = byClass([ok, failed, stranger]);
   assertEquals(classes.length, 3);
   assert(classes.every((c) => c.reason.length > 20));
+});
+
+Deno.test("round 2: the read-only guard admits INFO FOR NS / TABLE <name>, and refuses every function call", () => {
+  for (const ok of ["INFO FOR NS", "INFO FOR TABLE source_embedding", "SELECT * FROM episode ORDER BY id LIMIT 200 START 400"]) assertReadOnly(ok);
+  for (const bad of ["SELECT fn::text_search('x', 1, true, true) FROM episode", "SELECT * FROM http::get('https://x')", "INFO FOR TABLE a b",
+    "INFO FOR TABLE a; DELETE a", "SELECT * FROM a WHERE x = fn::w()", "INFO FOR ROOT", "INFO FOR USER root"]) {
+    assertThrows(() => assertReadOnly(bad), Error, "read-only client", bad);
+  }
+});
+
+// A fake datastore answering the fingerprint's queries, so each kind of write can be applied to it.
+function fakeStore() {
+  const st = {
+    ns: { users: { root: "DEFINE USER root ..." } } as Record<string, unknown>,
+    db: { tables: { episode: "DEFINE TABLE episode", source_embedding: "DEFINE TABLE source_embedding" }, functions: {}, params: {} } as Record<string, any>,
+    table: { episode: { fields: {}, indexes: {} }, source_embedding: { fields: { embedding: "array<float>" }, indexes: {} } } as Record<string, any>,
+    rows: {
+      episode: [{ id: "episode:a", name: "one" }],
+      source_embedding: Array.from({ length: PAGE + 5 }, (_, i) => ({ id: `source_embedding:${String(i).padStart(4, "0")}`, embedding: [i, 0.5] })),
+    } as Record<string, Record<string, unknown>[]>,
+  };
+  const r: Reader = {
+    // deno-lint-ignore require-await
+    async query<T>(q: string): Promise<T[]> {
+      if (q === "INFO FOR NS") return st.ns as unknown as T[];
+      if (q === "INFO FOR DB") return st.db as unknown as T[];
+      let m = /^INFO FOR TABLE (\w+)$/.exec(q);
+      if (m) return st.table[m[1]] as unknown as T[];
+      m = /^SELECT \* FROM (\w+) ORDER BY id LIMIT (\d+) START (\d+)$/.exec(q);
+      if (m) return (st.rows[m[1]] ?? []).slice(Number(m[3]), Number(m[3]) + Number(m[2])) as unknown as T[];
+      throw new Error(`unexpected query ${q}`);
+    },
+  };
+  return { st, r };
+}
+
+Deno.test("round 2 (tester D4): verify-quiesced sees an in-place embedding update and every schema DEFINE", async () => {
+  const writes: [string, (st: ReturnType<typeof fakeStore>["st"]) => void, string][] = [
+    ["UPDATE source_embedding SET embedding (in place, past the first page)", (st) => (st.rows.source_embedding[PAGE + 2].embedding = [9, 9]), "source_embedding"],
+    ["DEFINE INDEX", (st) => (st.table.episode.indexes.idx_x = "DEFINE INDEX idx_x ON episode FIELDS name"), "__table__:episode"],
+    ["DEFINE FIELD", (st) => (st.table.episode.fields.extra = "DEFINE FIELD extra ON episode TYPE string"), "__table__:episode"],
+    ["DEFINE FUNCTION", (st) => (st.db.functions["fn::w"] = "DEFINE FUNCTION fn::w() { CREATE x }"), "__db__"],
+    ["DEFINE PARAM", (st) => (st.db.params.p = "DEFINE PARAM $p VALUE 1"), "__db__"],
+    ["DEFINE USER on the namespace", (st) => (st.ns.users = { ...(st.ns.users as object), eve: "DEFINE USER eve" }), "__ns__"],
+    ["CREATE episode", (st) => st.rows.episode.push({ id: "episode:b", name: "two" }), "episode"],
+  ];
+  for (const [what, write, key] of writes) {
+    const { st, r } = fakeStore();
+    const before = await fingerprint(r);
+    assertEquals(changed(before, await fingerprint(r)), [], `${what}: an untouched store is quiesced`);
+    write(st);
+    const diff = changed(before, await fingerprint(r));
+    assert(diff.includes(key), `${what}: expected ${key} in ${JSON.stringify(diff)}`);
+  }
 });

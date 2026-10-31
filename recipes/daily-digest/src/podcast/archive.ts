@@ -30,15 +30,41 @@ export interface Destination {
 
 export type DestinationFn = () => Promise<Destination>;
 
-/** The destination from the workbench's configuration store, read fresh on every call. */
-export function storeDestination(o: { workbenchUrl: string; key: string; fetchFn?: typeof fetch }): DestinationFn {
+/** Refused before anything is written (no file, no episode row): the destination is not a usable archive. */
+export class DestinationRefused extends Error {}
+
+/**
+ * The destination from the workbench's configuration store, read fresh on every call.
+ *
+ * Round 2 (tester D3): the destination must be USABLE HERE, or the render is refused with a stated
+ * error - never written somewhere else. It must (1) be reported reachable by the workbench (which
+ * stats it through its read-only view of the same mounts), (2) lie inside this process's mounts root
+ * (CONTRACT_MOUNTS_ROOT, /mounts: the bind mounts of the archive - never the container's own
+ * ephemeral filesystem), and (3) be an existing directory here. The workbench validates the value
+ * against its allow-list of archive mounts on write; this is the reader's own check.
+ */
+export function storeDestination(o: { workbenchUrl: string; key: string; mountsRoot?: string; fetchFn?: typeof fetch }): DestinationFn {
   const url = `${o.workbenchUrl.replace(/\/+$/, "")}/workbench/contract/settings/${SETTING_KEY}`;
+  const root = (o.mountsRoot ?? Deno.env.get("CONTRACT_MOUNTS_ROOT") ?? "/mounts").replace(/\/+$/, "");
   return async () => {
     const res = await (o.fetchFn ?? fetch)(url, { headers: { "X-Brain-Key": o.key }, signal: AbortSignal.timeout(30_000) });
-    if (!res.ok) throw new Error(`the configuration store answered ${res.status} for ${SETTING_KEY}`);
-    const s = await res.json() as { value: Record<string, unknown>; version: number; resolved: { path: string | null; via: string } };
-    if (!s.resolved?.path) throw new Error(`${SETTING_KEY} does not resolve to a directory (${s.resolved?.via})`);
-    return { path: s.resolved.path, value: s.value, version: s.version, via: s.resolved.via };
+    if (!res.ok) throw new DestinationRefused(`the configuration store answered ${res.status} for ${SETTING_KEY}`);
+    const s = await res.json() as { value: Record<string, unknown>; version: number; resolved: { path: string | null; reachable?: boolean; via: string } };
+    const path = s.resolved?.path ?? "";
+    if (!path) throw new DestinationRefused(`${SETTING_KEY} does not resolve to a directory (${s.resolved?.via})`);
+    if (s.resolved.reachable !== true) {
+      throw new DestinationRefused(`${SETTING_KEY} = ${JSON.stringify(s.value)} resolves to ${path}, which the workbench reports unreachable: render refused`);
+    }
+    const segs = path.split("/");
+    if (!path.startsWith(`${root}/`) || segs.slice(1).some((x) => x === "" || x === "." || x === "..")) {
+      throw new DestinationRefused(`${SETTING_KEY} resolves to ${path}, outside the archive mounts (${root}/...): render refused`);
+    }
+    let isDir = false;
+    try {
+      isDir = (await Deno.stat(path)).isDirectory;
+    } catch { /* not here */ }
+    if (!isDir) throw new DestinationRefused(`${SETTING_KEY} resolves to ${path}, which is not a directory in this container: render refused`);
+    return { path, value: s.value, version: s.version, via: s.resolved.via };
   };
 }
 

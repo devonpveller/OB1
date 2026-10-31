@@ -1,10 +1,16 @@
 // Notifications (D13 item 7: a READ endpoint for the research front end only - no tool, no
 // webhook, no post anywhere), the configuration store (D6 item 5), the registries (D18).
-import { identityOf } from "../../middleware/identity.ts";
+import { type Identity, identityConfig, identityOf } from "../../middleware/identity.ts";
+
+export function settingsAdmin(who: Identity, cfg = identityConfig()): boolean {
+  if (who.kind === "service" || who.kind === "anonymous") return false;
+  if (who.admin === true) return true;
+  return !cfg.signIn && who.sub === cfg.defaultSub;
+}
 import { createRoute, z } from "../deps.ts";
 import * as sys from "../repo/system.ts";
 import { parseLimit } from "../logic/scope.ts";
-import { limit, pathParam, queryParam } from "../schemas/common.ts";
+import { ErrorBody, limit, pathParam, queryParam } from "../schemas/common.ts";
 import { Notifications, Registries, RegistryDetail, Setting, Settings, SettingWrite } from "../schemas/system.ts";
 import { EX } from "../schemas/examples.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
@@ -60,11 +66,15 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
 
   op(app, createRoute({
     method: "put", path: `${PREFIX}/settings/{key}`, operationId: "writeSetting", tags: ST,
-    summary: "write a setting; the next read returns the new value",
+    summary: "write a setting (admin only); the next read returns the new value",
     request: { params: keyParam, body: body(SettingWrite, EX.settingWrite) },
-    responses: { 200: json(Setting, EX.settingWritten, "the setting as stored"), ...errors },
+    responses: { 200: json(Setting, EX.settingWritten, "the setting as stored"), 403: { content: { "application/json": { schema: ErrorBody } }, description: "not an admin (a setting is global)" }, ...errors },
   }), async (c) => {
     try {
+      // rw-p7a-tts round 2 (tester D3): a setting is GLOBAL (it redirects every user's next render), so
+      // only an admin writes it: a signed-in member of the admin group, or - without sign-in, the
+      // single-user mode - the default subject itself. A service, another header user: 403.
+      if (!settingsAdmin(await identityOf(c))) return c.json({ error: "only an admin may change a setting" }, 403);
       const b = c.req.valid("json");
       return send(c, Setting, await sys.writeSetting(deps.db, deps.registry, c.req.valid("param").key, b.value,
         b.by ?? authorOf(c), deps.mountsRoot));

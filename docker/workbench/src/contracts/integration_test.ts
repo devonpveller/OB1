@@ -516,11 +516,19 @@ t("the archive destination: defaults to the named mount, a write is read back", 
   assert(Setting.safeParse(d.json).success);
   assertEquals([d.json.is_default, d.json.value, d.json.resolved.via], [true, { mount: "podcast-archive" }, "mount:podcast-archive"]);
   assertEquals(d.json.resolved.path, "/tmp/contract-mounts/podcast-archive");
-  const w = await call("PUT", `/settings/podcast.archive_destination`, { value: { path: "/srv/optiplex/podcasts" }, by: "t" });
-  assertEquals(w.status, 200);
+  const w = await call("PUT", `/settings/podcast.archive_destination`, { value: { path: "/tmp/contract-mounts/podcast-archive/alt" }, by: "t" });
+  assertEquals(w.status, 200, w.text);
   const back = await call("GET", `/settings/podcast.archive_destination`);
-  assertEquals([back.json.is_default, back.json.value.path, back.json.version], [false, "/srv/optiplex/podcasts", 1]);
-  assertEquals((await call("PUT", `/settings/podcast.archive_destination`, { value: { path: "relative/dir" } })).status, 409);
+  assertEquals([back.json.is_default, back.json.value.path, back.json.version], [false, "/tmp/contract-mounts/podcast-archive/alt", 1]);
+  assertEquals((await call("PUT", `/settings/podcast.archive_destination`, { value: { path: "relative/dir" } })).status, 400);
+  // rw-p7a-tts round 2 (tester D3): only a directory inside an ALLOWED archive mount - no free path
+  for (const bad of [{ path: "/srv/optiplex/podcasts" }, { path: "/tmp/tester-ephemeral" }, { path: "/app" }, { mount: "other-mount" },
+    { path: "/tmp/contract-mounts/podcast-archive/../../etc" }, { path: "/tmp/contract-mounts/podcast-archive-alt" }, { path: "/tmp/contract-mounts" },
+    { mount: "podcast-archive", path: "/x" }, { mount: "../podcast-archive" }]) {
+    const r = await call("PUT", `/settings/podcast.archive_destination`, { value: bad, by: "t" });
+    assertEquals(r.status, 400, `${JSON.stringify(bad)} -> ${r.status} ${r.text}`);
+  }
+  assertEquals((await call("GET", `/settings/podcast.archive_destination`)).json.version, 1, "a refused write changes nothing");
   assertEquals((await call("PUT", `/settings/not.a.setting`, { value: { path: "/x" } })).status, 404);
   await sql(`DELETE FROM public.contract_settings WHERE key = 'podcast.archive_destination'`);
 });

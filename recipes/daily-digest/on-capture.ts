@@ -32,6 +32,7 @@ import { gatewaySpeech } from "./src/podcast/tts-client.ts";
 import { mapOn, type OnRecord, profileCounts } from "./src/on-capture/on-mapping.ts";
 import { byClass, classify, CLEAN_MIGRATION_TEST } from "./src/on-capture/migration.ts";
 import { SurrealReader } from "./src/on-capture/surreal-read.ts";
+import { canon, changed, fingerprint as fp } from "./src/on-capture/fingerprint.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const arg = (n: string) => Deno.args.find((a) => a.startsWith(`--${n}=`))?.slice(n.length + 3);
@@ -47,29 +48,8 @@ const destination = storeDestination({ workbenchUrl: env("WORKBENCH_URL", "http:
 const archive = new ArchiveWriter(destination);
 const store = new PresenterStore(env("BRAIN_REST_URL", "http://openbrain-rest"));
 
-// ── ON's datastore fingerprint (what verify-quiesced compares) ─────────────────────────────────
-async function tables(): Promise<string[]> {
-  const info = await surreal.query<unknown>("INFO FOR DB") as unknown as { tables?: Record<string, string> };
-  return Object.keys(info.tables ?? {}).sort();
-}
-
-function canon(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
-  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(",")}}`;
-  return JSON.stringify(v);
-}
-
-async function fingerprint(): Promise<Record<string, { rows: number; sha256: string }>> {
-  const out: Record<string, { rows: number; sha256: string }> = {};
-  for (const t of await tables()) {
-    if (!/^[a-z_][a-z0-9_]*$/.test(t)) throw new Error(`unexpected table name ${t}`);
-    // the embedding vectors are omitted (size); their rows, ids and every other field are hashed
-    const rows = await surreal.query<OnRecord>(t === "source_embedding" ? `SELECT * OMIT embedding FROM ${t}` : `SELECT * FROM ${t}`);
-    rows.sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    out[t] = { rows: rows.length, sha256: await sha256Hex(new TextEncoder().encode(canon(rows))) };
-  }
-  return out;
-}
+// ── ON's datastore fingerprint (what verify-quiesced compares): src/on-capture/fingerprint.ts ──
+const fingerprint = () => fp(surreal);
 
 // ── capture ────────────────────────────────────────────────────────────────────────────────────
 async function readOn() {
@@ -167,9 +147,9 @@ async function capture() {
 async function verifyQuiesced() {
   const m = JSON.parse(await Deno.readTextFile(arg("manifest") ?? "")) as { fingerprint: Record<string, { rows: number; sha256: string }> };
   const now = await fingerprint();
-  const changed = Object.keys({ ...m.fingerprint, ...now }).filter((t) => canon(m.fingerprint[t]) !== canon(now[t]));
-  console.log(JSON.stringify({ quiesced: changed.length === 0, changed_tables: changed, now }, null, 2));
-  Deno.exit(changed.length ? 1 : 0);
+  const diff = changed(m.fingerprint, now);
+  console.log(JSON.stringify({ quiesced: diff.length === 0, changed_tables: diff, now }, null, 2));
+  Deno.exit(diff.length ? 1 : 0);
 }
 
 async function rerender() {

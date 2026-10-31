@@ -27,5 +27,6 @@ export function contractDeps(): ContractDeps {
     log: (m) => console.log(`[contract] ${m}`),
     // P7a: blank as shipped = a render request stays queued (nothing is rendered)
     podcastRenderUrl: (Deno.env.get("PODCAST_RENDER_URL") ?? "").trim(),
+    podcastRenderKey: (Deno.env.get("WORKBENCH_KEY") || Deno.env.get("MCP_ACCESS_KEY") || "").trim(),
   };
 }
