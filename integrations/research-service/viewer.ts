@@ -172,3 +172,31 @@ export function omitPrompts<T>(value: T, prompts: string[]): T {
   };
   return walk(value) as T;
 }
+
+/**
+ * rw-p4b-sessions round 3 (tester t-p4b-sessions2 defect 2): a viewer who is not the job's owner and may
+ * not act on it - another user reading a SERVICE's job, through Open WebUI's or the workspace's key on
+ * their behalf - reads the shared research, but not a steer's text (a person's own words, 07-MULTI-USER)
+ * other than their own, and no step id (rw-identity round 5: step ids serve only who may steer). The owner,
+ * an admin (asserted by the workspace key only: actorOf) and the steer's actor read everything.
+ * SQL ($1 job, $2 viewer, $3 actor): the human steer texts of the job's tree made by anyone else.
+ */
+export const HIDDEN_STEER_TEXTS_SQL =
+  `SELECT coalesce(array_agg(s.text), '{}') AS texts FROM research_steers s
+    WHERE s.root_job_id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid)
+      AND s.steer_kind = 'human' AND s.actor_sub NOT IN ($2, $3)`;
+
+const STEP_KEYS = new Set(["step_id", "rooted_step_id"]);
+/** The value as a non-actor reads it: every step id key dropped, every string carrying a hidden text omitted. */
+export function nonActorView<T>(value: T, hiddenTexts: string[]): T {
+  const strip = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(strip);
+    if (v && typeof v === "object" && !(v instanceof Date)) {
+      const o: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v)) if (!STEP_KEYS.has(k)) o[k] = strip(x);
+      return o;
+    }
+    return v;
+  };
+  return omitPrompts(strip(value) as T, hiddenTexts);
+}

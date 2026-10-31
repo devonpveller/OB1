@@ -65,10 +65,15 @@ export function shapeSession(r: JobRow) {
 // rw-p2b-workspace (operator 2026-10-28): the text a user typed to start research is the user's own
 // (research_prompts); the job and everything it produces are shared. A job started from the workspace
 // shows its query to its owner only - to anyone else the query reads as empty.
-export const OWN_QUERY = (alias: string, ownerParam: string) =>
+// rw-p4b-sessions round 3 (tester t-p4b-sessions2: the timeline gave every user an admin's steer text):
+// THE one rule for a research job's question - the owner rule above AND the steer-text rule (a steer's
+// text is its actor's and of who may act on the session: sessions/repo.ts STEER_TEXT_HIDDEN). `who` is the
+// request's identity (its admin flag), `actorParam` the SQL parameter holding who.actor.
+export const OWN_QUERY = (alias: string, ownerParam: string, who: Who, actorParam: string) =>
   `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id IN (${alias}.id, coalesce(${alias}.root_job_id, ${alias}.id))
                      AND p.owner_sub <> ${ownerParam} AND p.owner_sub NOT LIKE 'service:%')
               OR ${OWNERLESS_FOREIGN(alias, ownerParam)}
+              OR ${STEER_TEXT_HIDDEN(alias, ownerParam, actorParam, who)}
         THEN '' ELSE ${alias}.query END`;
 
 // A job is shared research output; its private fields (the original prompt, inlet_ref, refinery_id,

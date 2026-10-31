@@ -117,11 +117,17 @@ CREATE TRIGGER trg_research_cancels_no_truncate BEFORE TRUNCATE ON public.resear
 ALTER TABLE public.research_cancels ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS research_cancels_service_role_all ON public.research_cancels;
 CREATE POLICY research_cancels_service_role_all ON public.research_cancels FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- round 3 (tester t-p4b-sessions2): as admin_audit - the grants close the writes too, not only the trigger
+-- (default privileges may hand service_role UPDATE / DELETE / TRUNCATE on a new table)
+REVOKE ALL ON public.research_cancels FROM PUBLIC;
+REVOKE UPDATE, DELETE, TRUNCATE ON public.research_cancels FROM service_role;
 GRANT SELECT, INSERT ON public.research_cancels TO service_role;
 GRANT USAGE, SELECT ON SEQUENCE public.research_cancels_id_seq TO service_role;
 ALTER TABLE public.research_prompt_moves ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS research_prompt_moves_service_role_all ON public.research_prompt_moves;
 CREATE POLICY research_prompt_moves_service_role_all ON public.research_prompt_moves FOR ALL TO service_role USING (true) WITH CHECK (true);
+REVOKE ALL ON public.research_prompt_moves FROM PUBLIC;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.research_prompt_moves FROM service_role;
 GRANT SELECT ON public.research_prompt_moves TO service_role;
 
 -- 5 (round 2, 07-MULTI-USER "every admin action goes to an append-only audit log"): an admin's steer or

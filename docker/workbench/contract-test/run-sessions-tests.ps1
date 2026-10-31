@@ -325,7 +325,7 @@ try {
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = Summary $clean
   if ($Red -and $RedCases) {
-    foreach ($rc0 in ($RedCases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    foreach ($rc0 in ($RedCases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne 'TM3' })) {
       Check ($clean -match "(?m)^\s*$([regex]::Escape($rc0))\b.*\.\.\. FAILED") "RED: $rc0 fails on the base $BaseSha"
     }
   }
@@ -343,7 +343,7 @@ try {
   # round 2 (tester T-M3): an idea job from before 320 that 290's back-fill gave to service:idea-engagement
   # becomes its idea owner's when 320 is applied; the revert gives it back to 290's owner (the tester's
   # repro: revert 320, engage an idea, back-fill with 290, re-apply 320). The base's own files under -Red.
-  if ((-not $Red) -or $RedCases) {
+  if ((-not $Red) -or ($RedCases -match 'TM3')) {  # -RedCases 'S10,...,TM3': the probe is RED only on a pre-round-2 base
     Write-Host '[5c] migration 320 over 290-back-filled idea jobs (T-M3)'
     function Q([string]$s) { return ((Dk exec $db psql -U postgres -d openbrain -tAc $s) | Out-String).Trim() }
     function F([string]$file, [string]$pgopt = '') {
@@ -380,7 +380,11 @@ try {
   }
 
   $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('carol', 'dave', 'off'))
-  if ($Red -or $SkipSweeps) { $sweeps = @() }
+  # round 3: under -RedCases one sweep runs on the base with THIS tree's sweep mounted (the admin's steer
+  # on a service job): it must find the leak there
+  if ($Red -and $RedCases) { $sweeps = @(, @('carol', 'dave', 'on')) }
+  elseif ($Red -or $SkipSweeps) { $sweeps = @() }
+  $swMount = if ($Red) { @('-v', "$(Join-Path $wb 'src/documents/isolation_sweep_test.ts'):/app/src/documents/isolation_sweep_test.ts:ro") } else { @() }
   foreach ($sw in $sweeps) {
     if ($sw[2] -eq 'off') {
       $null = Dk rm -f "$P-wb"
@@ -389,18 +393,20 @@ try {
       Check (($script:rc -eq 0) -and (Wait-Http "http://$P-wb:8000/health" 90)) 'the workbench restarted with the response walk off'
     }
     Write-Host "[5b] the isolation sweep signed in: A=$($sw[0]) B=$($sw[1]), response walk $($sw[2])"
-    $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
+    $o = Lab-Docker 1800 (@('run', '--rm', '--label', $label, '--network', $net) + $swMount + @('-v', "${vault}:/vault", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
       '-e', "SWEEP_FA_ISSUER=$issuer", '-e', "SWEEP_FA_CLIENT_ID=$faClient", '-e', "SWEEP_FA_SECRET=$faSecret", '-e', "SWEEP_USERS=$usersJson",
       '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$door", '-e', 'DOCS_TEST_VAULT=/vault',
-      '-e', "SWEEP_USER_A=$($sw[0])", '-e', "SWEEP_USER_B=$($sw[1])", '-e', "SWEEP_USER_B_SUB=$daveSub", '-e', 'DOCS_TEST_SUB_HEADER=X-Test-Sub',
+      '-e', "SWEEP_USER_A=$($sw[0])", '-e', "SWEEP_USER_B=$($sw[1])", '-e', "SWEEP_USER_B_SUB=$daveSub", '-e', 'DOCS_TEST_SUB_HEADER=X-Test-Sub', '-e', "SWEEP_SERVICE_KEY=$kAo", '-e', "SWEEP_RESEARCH=http://$P-rs:8000", '-e', 'SWEEP_ADMIN=admin',
       '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
       '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
-      $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/isolation_sweep_test.ts')
+      $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/isolation_sweep_test.ts'))
     $clean = ($o -replace '\x1b\[[0-9;]*m', '')
     Save "isolation-sweep-$($sw[0])-walk-$($sw[2]).log" ((($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:|AssertionError' }) -join "`n")
     foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT ' } | Select-Object -First 40) { Write-Host "    $l" }
     $r = Summary $clean
     Check ($clean -match 'sweep: B steered B''s session from its card: 201') "the sweep planted B's steer (A=$($sw[0]), walk $($sw[2]))"
+    Check ($clean -match 'sweep: an admin steered a service''s session: 201') "the sweep planted an admin's steer on a service job (A=$($sw[0]), walk $($sw[2]))"
+    if ($Red) { Check ($r.Success -and $r.Groups[1].Value -eq 'FAILED' -and $clean -match 'HIT adminSteer') "RED: the sweep finds the admin's steer text on the base $BaseSha ($($r.Value))"; continue }
     Check ($r.Success -and $r.Groups[1].Value -eq 'ok' -and [int]$r.Groups[3].Value -eq 0 -and $clean -match 'sweep: \d+ routes' -and $clean -match 'sweep: real sessions') "the isolation sweep, real sessions, A=$($sw[0]), walk $($sw[2]) ($($r.Value))"
   }
 

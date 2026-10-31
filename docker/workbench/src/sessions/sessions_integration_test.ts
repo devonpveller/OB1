@@ -535,3 +535,46 @@ Deno.test({ name: "S13 a cancelled or failed session's card offers no steer", ..
   const s = await ad.req("POST", `${C}/sessions/${job}/steer`, { step_id: "p2", text: "steer a failed job" });
   assertEquals(s.status, 409, s.text);
 } });
+
+// ── round 3 (tester t-p4b-sessions2: the timeline, and the research service's own reads) ────────
+Deno.test({ name: "S14 an admin's steer on a service job: its text and step ids reach no non-actor - timeline, every read, the research service on behalf of a user", ...opts, fn: async () => {
+  const job = await serviceJob(`S14Service${rnd()}`);
+  const words = `S14AdminSteer${rnd()}`;
+  const ad = await new Browser().signIn("admin");
+  const st = await ad.req("POST", `${C}/sessions/${job}/steer`, { step_id: "p2", text: words });
+  assertEquals(st.status, 201, st.text);
+  const child = st.json.steer.child_job_id;
+  // the workbench: carol's timeline (the tester's repro) and the contract reads naming either job
+  const ca = await new Browser().signIn("carol");
+  for (const p of [`${C}/timeline?limit=500`, `${C}/sessions/${child}`, `${C}/jobs?limit=200&kinds=research`]) {
+    const r = await ca.req("GET", p);
+    assertEquals(r.status, 200, `${p}: ${r.text.slice(0, 200)}`);
+    assert(!r.text.includes(words), `carol reads the admin's steer text at ${p}`);
+  }
+  const adt = await ad.req("GET", `${C}/timeline?limit=500`);
+  assert(adt.text.includes(words), "the admin (who may act on the service job) reads it in the timeline");
+  // the research service's own reads, on behalf of carol (OWUI's key and the workspace's key)
+  const reads = [`/research/jobs/${job}/tree`, `/research/jobs/${job}/events`, `/research/jobs/${job}`, `/research/jobs/${child}`,
+    `/research/jobs/${child}/tree`, `/research/jobs/${child}/events`];
+  for (const [who, key] of [["owui", K.owui], ["workspace", K.ws]] as const) {
+    for (const p of reads) {
+      const r = await rs("GET", p, key, { "x-on-behalf-of": sub("carol") });
+      assertEquals(r.status, 200, `${who} ${p}: ${r.status}`);
+      assert(!r.text.includes(words), `${who} on behalf of carol: the steer text at ${p}`);
+      assert(!/"(rooted_)?step_id":"[^"]+"/.test(r.text) && !r.text.includes('"p2"'), `${who} on behalf of carol: a step id at ${p}: ${r.text.slice(0, 300)}`);
+    }
+  }
+  // who may see it: the service that owns the job, and an admin (asserted by the workspace key only)
+  const own = await rs("GET", `/research/jobs/${job}/tree`, K.ao);
+  assert(own.text.includes(words), "the owning service reads its tree's steer");
+  const adm = await rs("GET", `/research/jobs/${job}/tree`, K.ws, { "x-on-behalf-of": sub("admin"), "x-actor-admin": "1" });
+  assert(adm.text.includes(words), "an admin (the workspace key asserting it) reads it");
+  const forged = await rs("GET", `/research/jobs/${job}/tree`, K.owui, { "x-on-behalf-of": sub("carol"), "x-actor-admin": "1" });
+  assertEquals(forged.status, 403, "no key but the workspace's asserts an admin on a read either");
+} });
+
+Deno.test({ name: "S15 research_cancels: the grants refuse UPDATE / DELETE / TRUNCATE to service_role (not only the trigger)", ...opts, fn: async () => {
+  const g = await sql<{ p: string; ok: boolean }>(
+    `SELECT p, has_table_privilege('service_role', 'public.research_cancels', p) AS ok FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) p`);
+  assertEquals(Object.fromEntries(g.map((r) => [r.p, r.ok])), { SELECT: true, INSERT: true, UPDATE: false, DELETE: false, TRUNCATE: false });
+} });

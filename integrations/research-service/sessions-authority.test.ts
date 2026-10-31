@@ -13,7 +13,7 @@
  * (OB1/docker/workbench/contract-test/run-sessions-tests.ps1).
  */
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { actorOf, MAY_ACT_SQL } from "./viewer.ts";
+import { actorOf, HIDDEN_STEER_TEXTS_SQL, MAY_ACT_SQL, nonActorView } from "./viewer.ts";
 import { createSteer, GAP_ACTOR, openGapBranches, recordCancel, SteerError, type Q } from "./tree.ts";
 import type { Caller } from "./origin.ts";
 
@@ -134,4 +134,40 @@ Deno.test("P4b round 2: the cancel route records the actor it computed (index.ts
   const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url));
   const cancel = src.slice(src.indexOf("const cancelMatch"), src.indexOf("const steerMatch"));
   assert(/recordCancel\([^)]*acting\.actor/.test(cancel.replace(/\s+/g, " ")), "the cancel route stores acting.actor");
+});
+
+// ── round 3 (tester t-p4b-sessions2 defect 2): the service's own reads keep a steer's text and the
+// step ids from a viewer who may not act (actor / may-act / admin see them; others do not) ──────────
+Deno.test("P4b round 3 nonActorView: no step id anywhere, no steer text but the viewer's own", () => {
+  const tree = {
+    root_job_id: "r", topic_estimate: "t", origin: "service question",
+    branches: [{ id: "r", branch_kind: "root", rooted_step_id: null, query: "service question" },
+               { id: "c1", branch_kind: "steer", rooted_step_id: "s2", query: "AdminWords secret steer", anchor: "service question" }],
+    steers: [{ id: "st1", step_id: "s2", text: "AdminWords secret steer", steer_kind: "human" }],
+    report: { heading: "t", sections: [{ title: "AdminWords secret steer", summary: "found x" }] },
+    learning_records: [{ steer: "AdminWords secret steer", red: "gap" }],
+  };
+  const v = nonActorView(tree, ["AdminWords secret steer"]);
+  const s = JSON.stringify(v);
+  assert(!s.includes("AdminWords") && !s.includes('"s2"') && !s.includes("step_id"), s);
+  assert(s.includes("service question") && s.includes("found x"), "the shared research stays");
+  const ev = nonActorView({ events: [{ id: "1", step_id: "s2", type: "human_steer", payload: { step_id: "s2", text: "AdminWords secret steer", steer_id: "st1" } },
+    { id: "2", step_id: null, type: "source", trail: { url: "u", kind: "admitted" }, payload: { url: "u" } }] }, ["AdminWords secret steer"]);
+  const se = JSON.stringify(ev);
+  assert(!se.includes("AdminWords") && !se.includes('"s2"'), se);
+  assert(se.includes('"admitted"'), "a source's trail stays");
+});
+
+Deno.test("P4b round 3: the hidden texts are the tree's human steers by anyone but the viewer", () => {
+  const q = HIDDEN_STEER_TEXTS_SQL.replace(/\s+/g, " ");
+  assert(q.includes("research_steers") && q.includes("steer_kind = 'human'") && q.includes("actor_sub NOT IN ($2, $3)"), q);
+});
+
+Deno.test("P4b round 3: the tree, events and job-detail routes apply the non-actor view", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url));
+  const tree = src.slice(src.indexOf("const treeMatch"), src.indexOf("const jobMatch"));
+  const job = src.slice(src.indexOf("const jobMatch"), src.indexOf("return new Response(\"not found\""));
+  for (const [name, part] of [["tree/events", tree], ["job detail/stream", job]] as const) {
+    assert(part.includes("steerScopeOf(") && part.includes("nonActorView("), `${name} applies the non-actor view`);
+  }
 });
