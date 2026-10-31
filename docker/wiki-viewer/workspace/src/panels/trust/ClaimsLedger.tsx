@@ -23,6 +23,21 @@ function asClaim(c: any): LedgerClaim {
   };
 }
 
+// The content type of a source (the reference read every user may make: sources are shared). null = unknown yet.
+export function useSourceKind(id: string | null): string | null {
+  const [kind, setKind] = useState<{ id: string; kind: string | null } | null>(null);
+  useEffect(() => {
+    if (!id) return;
+    let live = true;
+    get(`${C}/references/${q(id)}`).then((r) => live && setKind({ id, kind: r?.source?.content_type ?? null }))
+      .catch(() => live && setKind({ id, kind: null }));
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  return kind && kind.id === id ? kind.kind : null;
+}
+
 export const LEDGER_COLUMNS = ["tag", "verdict", "stance", "corroboration", "contradicted by newer", "confidence"] as const;
 
 export function StanceBar({ edges }: { edges: Record<string, number> }) {
@@ -57,7 +72,12 @@ export function ClaimsLedger(_p: PanelProps) {
   const pickedSource = useTrust((s) => s.source);
   const selected = useWorkspace((s) => s.reference);
   const source = pickedSource ?? selected?.source_id ?? null;
-  const scope = report ? { key: "synthesis_id", id: report, label: "the focused session's report" }
+  // a selected source that IS a research report (content_type research_synthesis) scopes the ledger to the
+  // report's OWN claims (synthesis_id), not the claims that cite it; it wins over a focused session's report
+  const sourceKind = useSourceKind(source);
+  const sourceReport = source && sourceKind === "research_synthesis" ? source : null;
+  const shownReport = sourceReport ?? report;
+  const scope = shownReport ? { key: "synthesis_id", id: shownReport, label: sourceReport ? "the selected report's own claims" : "the focused session's report" }
     : source ? { key: "source_id", id: source, label: "the claims this source grounds" } : null;
   const [claims, setClaims] = useState<LedgerClaim[]>([]);
   const [by, setBy] = useState<SortKey>("needs-a-look");
@@ -98,7 +118,7 @@ export function ClaimsLedger(_p: PanelProps) {
   if (!scope) return <div className="ws-side ws-muted">Focus a session in Coverage, or select a source, to list its claims.</div>;
   return (
     <div className="ws-side ws-ledger" data-scope={scope.key}>
-      {report && <ReportHeaderById reportId={report} />}
+      {shownReport && <ReportHeaderById reportId={shownReport} />}
       <div className="ws-controls" aria-label="sort">
         sort by
         <button type="button" data-sort="confidence" aria-pressed={by === "confidence"} onClick={() => sortBy("confidence")}>
@@ -113,7 +133,7 @@ export function ClaimsLedger(_p: PanelProps) {
       </div>
       <Disclosure
         testId="ledger-disclosure"
-        open={!!report}
+        open={!!shownReport}
         summary={<span>{claims.length} claim{claims.length === 1 ? "" : "s"} - {scope.label}</span>}
         leaves={leaves}
         actions={(l) => {

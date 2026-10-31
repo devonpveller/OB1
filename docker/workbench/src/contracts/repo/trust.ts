@@ -138,7 +138,9 @@ export function rollupMarkdown(r: Rollup): string {
 export function withRollupSection(md: string, section: string): string {
   let head = "";
   let rest = md;
-  const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(rest);
+  // YAML frontmatter in every shape a vault page can carry it (round 2, tester D4): an optional BOM, an empty
+  // block (---/---), a `...` terminator, a closing line at the end of the file without a newline
+  const fm = /^﻿?---[ \t]*\r?\n(?:[\s\S]*?\r?\n)??(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/.exec(rest);
   if (fm) {
     head = fm[0];
     rest = rest.slice(fm[0].length);

@@ -231,3 +231,60 @@ describe("registration", () => {
     expect(ids).toEqual(expect.arrayContaining(["claims-ledger", "coverage", "source-quality"]));
   });
 });
+
+// round 2 (tester t-p3b-trust D1, probe-report-header.test.tsx): a report AS THE WORKSPACE SHOWS IT - opened in the
+// reference panel (search -> "Open in the reference panel" sets reference.source_id = the report) - carries its
+// credibility roll-up header, for any user (the roll-up is shared; no session of the viewer's is involved), and
+// the ledger then lists the report's OWN claims (synthesis_id), not claims citing it.
+describe("D1: the report header on the report, where the workspace shows one", () => {
+  const RPT = "d1000000-0000-4000-8000-0000000000aa";
+  const OTHER_JOB = "c1000000-0000-4000-8000-0000000000bb";
+  const RPT_ROLLUP = { ...ROLLUP, report_id: RPT, job_id: OTHER_JOB };
+  function reportBackend() {
+    return fakeApi([
+      ["GET", `/workbench/contract/reports/${RPT}/credibility`, () => RPT_ROLLUP],
+      ["GET", `/workbench/contract/references/${RPT}`, () => ({ state: "active", source: { title: "A research report", content_type: "research_synthesis" }, version: 1 })],
+      ["GET", /\/workbench\/contract\/claims\?synthesis_id=/, () => ({ count: 1, claims: [claim("own1", { synthesis_id: RPT })] })],
+      ["GET", /\/workbench\/contract\/claims\?source_id=/, () => ({ count: 1, claims: [claim("citing1", { synthesis_id: "e1000000-0000-4000-8000-000000000009" })] })],
+      ["GET", `/workbench/contract/sources/${RPT}/quality`, () => ({ ...QUALITY, source_id: RPT })],
+      ["GET", `/workbench/contract/sessions/${OTHER_JOB}/coverage`, () => ({ error: "no session with this id" }), 404],
+      ["GET", /\/neighbours\?/, () => ({ nodes: [] })],
+      ["GET", /\/citations\?/, () => ({ documents: [] })],
+      ["GET", /\/chunks\//, () => ({ chunks: [{ idx: 0, content: "Report body text", is_target: true }] })],
+    ]);
+  }
+  it("the reference panel, the ledger and the quality panel each show the report's roll-up header, read from /credibility", async () => {
+    const { ReferencePanel } = await import("../src/panels/reference/ReferencePanel");
+    const api = reportBackend();
+    setState({ reference: { reference_id: null, source_id: RPT, chunk_idx: 0 } });
+    const ref = render(<ReferencePanel params={{}} />);
+    const led = render(<ClaimsLedger params={{}} />);
+    const qual = render(<SourceQualityPanel params={{}} />);
+    await act(async () => settle(15));
+    for (const [name, r] of [["reference", ref], ["ledger", led], ["quality", qual]] as const) {
+      const h = r.container.querySelector("[data-testid=report-header]");
+      expect(h, `${name}: the report's header`).toBeTruthy();
+      expect(h!.textContent).toContain("weights scholarly 1.00, general 0.40");
+      expect(h!.querySelectorAll("[data-family]").length).toBe(2);
+    }
+    expect(api.log.some((r) => r.url === `/workbench/contract/reports/${RPT}/credibility`)).toBe(true);
+    // the ledger lists the report's own claims, never the claims citing it
+    expect(api.log.some((r) => r.url.startsWith(`/workbench/contract/claims?synthesis_id=${RPT}`))).toBe(true);
+    expect(led.container.querySelector('[data-claim="own1"]')).toBeTruthy();
+    expect(led.container.querySelector('[data-claim="citing1"]')).toBeNull();
+    for (const r of api.log) expect(r.url, "no user is named").not.toMatch(/[?&](sub|user|owner|subject|owner_sub)=/i);
+  });
+  it("a source that is not a report shows no report header and keeps the citing-claims scope", async () => {
+    const { ReferencePanel } = await import("../src/panels/reference/ReferencePanel");
+    const api = backend([["GET", `/workbench/contract/references/${S1}`, () => ({ state: "active", source: { title: "Source one", content_type: "paper" }, version: 1 })],
+      ["GET", /\/neighbours\?/, () => ({ nodes: [] })], ["GET", /\/citations\?/, () => ({ documents: [] })], ["GET", /\/chunks\//, () => ({ chunks: [] })]]);
+    setState({ reference: { reference_id: null, source_id: S1, chunk_idx: 0 } });
+    const ref = render(<ReferencePanel params={{}} />);
+    const led = render(<ClaimsLedger params={{}} />);
+    await act(async () => settle(15));
+    expect(ref.container.querySelector("[data-testid=report-header]")).toBeNull();
+    expect(led.container.querySelector("[data-testid=report-header]")).toBeNull();
+    expect(api.log.some((r) => r.url.startsWith(`/workbench/contract/claims?source_id=${S1}`))).toBe(true);
+    expect(api.log.some((r) => r.url.includes("/credibility"))).toBe(false);
+  });
+});

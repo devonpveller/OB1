@@ -66,3 +66,29 @@ Deno.test("the trust operations are in the contract document; claims carry the l
   const { verdict: _v, ...without } = EX.claims.claims[0] as Record<string, unknown>;
   assertEquals(Claim.safeParse(without).success, false, "a claim without its verdict column does not validate");
 });
+
+// round 2 (tester t-p3b-trust D4, pure_probe_test.ts): the frontmatter stays first and intact in every shape a vault
+// page can have; the section sits after it (and after the first H1) and before the body.
+const PLACEMENT: [string, string, string][] = [
+  ["normal", "---\ntitle: x\n---\n\n# T\n\nBODY\n", "---\ntitle: x\n---\n"],
+  ["CRLF", "---\r\ntitle: x\r\n---\r\n\r\n# T\r\n\r\nBODY\r\n", "---\r\ntitle: x\r\n---\r\n"],
+  ["BOM", "﻿---\ntitle: x\n---\n\n# T\n\nBODY\n", "﻿---\ntitle: x\n---\n"],
+  ["empty frontmatter", "---\n---\n\n# T\n\nBODY\n", "---\n---\n"],
+  ["fm at EOF no newline", "---\ntitle: x\n---", "---\ntitle: x\n---"],
+  ["fm then body no blank", "---\ntitle: x\n---\nBODY\n", "---\ntitle: x\n---\n"],
+  ["fm with ... terminator", "---\ntitle: x\n...\n\nBODY\n", "---\ntitle: x\n...\n"],
+  ["fm containing --- in value", "---\ntitle: \"a --- b\"\nnote: |\n  ---\n---\n\n# T\n\nBODY\n", "---\ntitle: \"a --- b\"\nnote: |\n  ---\n---\n"],
+  ["no fm, H1 only", "# T\n\nBODY\n", ""],
+  ["H1 last line no newline", "---\ntitle: x\n---\n\n# T", "---\ntitle: x\n---\n"],
+  ["H2 first (no H1)", "---\ntitle: x\n---\n\n## Sub\n\nBODY\n", "---\ntitle: x\n---\n"],
+];
+for (const [name, md, fm] of PLACEMENT) {
+  Deno.test(`export placement keeps the frontmatter intact: ${name}`, () => {
+    const out = withRollupSection(md, rollupMarkdown(shapeRollup(REC, "r", "j")));
+    assert(out.includes(`## ${ROLLUP_HEADING}`), "section present");
+    if (fm) assert(out.startsWith(fm), `frontmatter first and intact: ${JSON.stringify(out.slice(0, 90))}`);
+    const at = out.indexOf(`## ${ROLLUP_HEADING}`);
+    if (md.includes("BODY")) assert(at < out.indexOf("BODY"), "section before the body");
+    if (/^﻿?---/.test(md)) assert(at > out.indexOf("---") && at >= fm.length, "section after the frontmatter");
+  });
+}

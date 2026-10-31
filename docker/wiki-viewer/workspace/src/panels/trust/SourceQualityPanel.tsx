@@ -11,6 +11,7 @@ import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import type { PanelProps } from "../../shell/registry";
 import { setTrust, useTrust } from "./focus";
 import { type LedgerClaim, relevanceOf } from "./logic";
+import { ReportHeaderById } from "./ReportHeader";
 
 interface QSource { source_id: string; title: string; family: string | null; relation: string; amount: number | null; claim: string | null }
 interface Quality {
@@ -45,6 +46,7 @@ export function SourceQualityPanel(_p: PanelProps) {
   const source = picked ?? selected?.source_id ?? null;
   const [qual, setQual] = useState<Quality | null>(null);
   const [title, setTitle] = useState("");
+  const [kind, setKind] = useState<string | null>(null);
   const [mine, setMine] = useState<LedgerClaim[]>([]);
   const [runClaims, setRunClaims] = useState<number | null>(null);
   const [msg, setMsg] = useState("");
@@ -54,8 +56,9 @@ export function SourceQualityPanel(_p: PanelProps) {
     let live = true;
     setMsg("");
     setQual(null);
+    setKind(null);
     get(`${C}/sources/${q(source)}/quality`).then((r) => live && setQual(asQuality(r))).catch((e) => live && setMsg(String((e as Error).message)));
-    get(`${C}/references/${q(source)}`).then((r) => live && setTitle(r.source?.title ?? r.held?.title ?? "")).catch(() => live && setTitle(""));
+    get(`${C}/references/${q(source)}`).then((r) => live && (setTitle(r.source?.title ?? r.held?.title ?? ""), setKind(r.source?.content_type ?? null))).catch(() => live && setTitle(""));
     get(`${C}/claims?source_id=${q(source)}&limit=200`).then((r) => live && setMine(arr(r?.claims))).catch(() => live && setMine([]));
     return () => {
       live = false;
@@ -117,6 +120,7 @@ export function SourceQualityPanel(_p: PanelProps) {
   return (
     <div className="ws-side ws-quality" data-source={qual.source_id}>
       <h4 className="ws-quality-title">{title || qual.source_id}</h4>
+      {kind === "research_synthesis" && <ReportHeaderById reportId={qual.source_id} />}
       <dl className="ws-axes">
         <div data-testid="axis-legitimacy">
           <dt>legitimacy</dt>

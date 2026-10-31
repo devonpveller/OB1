@@ -52,8 +52,9 @@ export const Claim = z.object({
   // research-workbench P3b (the claims ledger)
   verdict: z.string().nullable().openapi({
     example: "supports",
-    description: "the entailment verdict (D10) on the cited line the claim was filed from - an entailment_verdicts key, " +
-      "read from the job that filed the claim's synthesis; null = not judged (filed before P3a, or on no judged line)",
+    description: "the entailment verdict (D10) on the line the claim was filed from - an entailment_verdicts key, read from " +
+      "the latest research job that filed THIS claim id (its curator's filed[] list); null = not judged (filed before P3a, " +
+      "on no judged line, or its text edited since)",
   }),
   corroborations: z.number().int().openapi({
     description: "independent further sources that state or corroborate it (claim_confidence's count: distinct " +

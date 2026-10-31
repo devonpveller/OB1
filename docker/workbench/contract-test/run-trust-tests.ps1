@@ -24,7 +24,8 @@
 #   4. the lab: database (chain + fixtures.sql, ob_app_memory non-superuser), stub embedder, stub research
 #      service, stub egress proxy, PostgREST + the OB1 rest Caddy, the viewer, the workbench (vault = a temp
 #      dir, WORKSPACE_IDENTITY_HEADER=X-Test-Sub for the two users)
-#   5. src/contracts/trust_integration_test.ts against the workbench; then the route-wide isolation sweep
+#   5. src/contracts/trust_integration_test.ts and trust_probe_integration_test.ts (the tester's round-1 probes)
+#      against the workbench; then the route-wide isolation sweep
 #      (src/documents/isolation_sweep_test.ts) with the response walk on, then off
 #   6. the evidence gate (evidence-gate.ps1), teardown and the leftover checks
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every trust case FAILED).
@@ -37,6 +38,7 @@ param(
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$BaseSha = 'bc6d3a6',
   [switch]$Red,
+  [string]$RedCases = '',
   [switch]$SkipSweep,
   [switch]$KeepImages
 )
@@ -259,18 +261,30 @@ try {
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
   Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the viewer is up'
 
-  Write-Host '[5a] the trust integration test (THIS tree, against the lab workbench)'
-  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
-    '-e', "TRUST_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault',
-    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
-    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', 'src/contracts/trust_integration_test.ts')
-  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
-  Save 'trust-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|^error|AssertionError|Values are not equal|actual|expected' } | Select-Object -First 120) -join "`n")
-  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
-  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0 -and [int]$sum.Groups[3].Value -eq 6) "RED: every trust case fails on the base ($($sum.Value))" }
-  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[2].Value -eq 6 -and [int]$sum.Groups[3].Value -eq 0) "the trust integration test ($($sum.Value))" }
-  if (-not $sum.Success -or [int]$sum.Groups[3].Value -gt 0) { Save 'trust-integration-tail.log' (($clean -split "`n" | Select-Object -Last 80) -join "`n") }
+  # [5a] the item's cases (6); [5c] the tester's round-1 probes kept as regressions (13, round 2)
+  foreach ($suite in @(@('5a', 'trust_integration_test.ts', 6, 'trust-integration'), @('5c', 'trust_probe_integration_test.ts', 13, 'trust-probes'))) {
+    $tag5 = $suite[0]; $file5 = $suite[1]; $n5 = [int]$suite[2]; $log5 = $suite[3]
+    Write-Host "[$tag5] src/contracts/$file5 (THIS tree, against the lab workbench)"
+    $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+      '-e', "TRUST_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault',
+      '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+      $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', "src/contracts/$file5")
+    $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+    Save "$log5.log" ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|^error|AssertionError|Values are not equal|actual|expected|^PROBE V1|^PROBE N1' } | Select-Object -First 140) -join "`n")
+    foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+    $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+    if ($Red) {
+      # -RedCases names the cases that must FAIL on -BaseSha (e.g. 'T1,V1,N1' on the round-1 commit); empty = every case of [5a]
+      if ($RedCases) {
+        foreach ($rc in ($RedCases -split ',' | Where-Object { $_ })) {
+          $line = @(($clean -split "`n") | Where-Object { $_ -match "^$([regex]::Escape($rc)) .*\.\.\. (ok|FAILED)" })
+          if ($line.Count) { Check ($line[0] -match 'FAILED') "RED: $rc fails on the base ($($line[0].Trim()))" }
+        }
+      } elseif ($tag5 -eq '5a') { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0 -and [int]$sum.Groups[3].Value -eq $n5) "RED: every trust case fails on the base ($($sum.Value))" }
+    }
+    else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[2].Value -eq $n5 -and [int]$sum.Groups[3].Value -eq 0) "$file5 ($($sum.Value))" }
+    if (-not $sum.Success -or [int]$sum.Groups[3].Value -gt 0) { Save "$log5-tail.log" (($clean -split "`n" | Select-Object -Last 80) -join "`n") }
+  }
 
   if (-not $SkipSweep) {
     foreach ($walk in @('on', 'off')) {

@@ -131,12 +131,13 @@ export async function claims(db: Db, q: ClaimsQuery) {
                FROM public.claim_sources e JOIN public.sources es ON es.id = e.source_id
               WHERE e.claim_id = c.id AND e.edge_type IN ('states', 'corroborates') AND es.retraction_committed_at IS NULL
                 AND ($6::jsonb IS NULL OR es.metadata @> $6::jsonb)) AS corroborations,
-            -- P3b: contradicted by something NEWER than the claim - a claim, or a (non-suppressed) source
+            -- P3b: contradicted by something NEWER than the claim - an active claim (round 2, D3: a retracted one no
+            -- longer counts, as a suppressed source does not), or a (non-suppressed) source
             EXISTS (SELECT 1 FROM public.claim_sources x
                       LEFT JOIN public.claims n ON n.id = x.parent_claim_id
                       LEFT JOIN public.sources xs ON xs.id = x.source_id
                      WHERE x.claim_id = c.id AND x.edge_type = 'contradicts'
-                       AND ((n.id IS NOT NULL AND n.created_at > c.created_at AND ($6::jsonb IS NULL OR n.metadata @> $6::jsonb))
+                       AND ((n.id IS NOT NULL AND n.status = 'active' AND n.created_at > c.created_at AND ($6::jsonb IS NULL OR n.metadata @> $6::jsonb))
                          OR (xs.id IS NOT NULL AND xs.retraction_committed_at IS NULL AND xs.created_at > c.created_at
                              AND ($6::jsonb IS NULL OR xs.metadata @> $6::jsonb)))) AS contradicted_by_newer
        FROM public.claims c
@@ -158,28 +159,39 @@ export async function claims(db: Db, q: ClaimsQuery) {
   return { count: out.length, claims: out };
 }
 
-// research-workbench P3b - each claim's entailment verdict (D10), as the research service recorded it:
-// the job whose curator filed the claim's synthesis (result.curator.persist.synthesis_id) lists the
-// claims it scored (result.line_credibility: text + verdict, the curator's own claim list). Matched on
-// the claim text; null when no job recorded one (a claim filed before P3a, or on no judged line).
-// Only a synthesis the answer already shows is looked up (under a metadata filter an out-of-scope
-// synthesis is null, so it is never read).
-export async function verdictsOf(db: Db, rows: { synthesis_id: string | null }[]): Promise<Map<string, string>> {
-  const ids = [...new Set(rows.map((r) => r.synthesis_id).filter((x): x is string => !!x))];
+// research-workbench P3b - each claim's entailment verdict (D10), joined by CLAIM ID (round 2, tester D2:
+// the text join lost the verdict on the curator's fold path, where find_or_create_claim moves synthesis_id to
+// the new synthesis but keeps the old text). The research job row carries the exact link: the curator's filing
+// answer result.curator.claims.filed[k] is the claim row filed from claim-list index k, and
+// result.line_credibility[] (the scored claim list) carries each claim's index (`claim`), text and verdict. A
+// verdict is this claim's when the job FILED this claim id and the scored entry is the same claim under the
+// curator's own dedup key (lower(btrim(text)), find_or_create_claim's); the entry at the claim's own index wins
+// inside a job, the latest job wins across jobs. null = no job recorded one (filed before P3a, on no judged line,
+// or its text was edited since).
+export async function verdictsOf(db: Db, rows: { id: string }[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.map((r) => r.id.toLowerCase()))];
   const out = new Map<string, string>();
   if (!ids.length) return out;
-  const found = await db.query<{ synthesis_id: string; text: string; verdict: string }>(
-    `SELECT j.result -> 'curator' -> 'persist' ->> 'synthesis_id' AS synthesis_id, lc ->> 'text' AS text, lc ->> 'verdict' AS verdict
+  const found = await db.query<{ claim_id: string; verdict: string }>(
+    `SELECT f.cid AS claim_id, lc.v ->> 'verdict' AS verdict
        FROM public.research_jobs j
+       CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'claims' -> 'filed') = 'array'
+                                                         THEN j.result -> 'curator' -> 'claims' -> 'filed' ELSE '[]'::jsonb END)
+                          WITH ORDINALITY f(cid, ord)
        CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'line_credibility') = 'array'
-                                                    THEN j.result -> 'line_credibility' ELSE '[]'::jsonb END) lc
-      WHERE j.result -> 'curator' -> 'persist' ->> 'synthesis_id' = ANY($1::text[])
-        AND jsonb_typeof(lc -> 'verdict') = 'string' AND jsonb_typeof(lc -> 'text') = 'string'
-      ORDER BY j.finished_at ASC NULLS FIRST, j.created_at ASC`,
-    [ids.map((x) => x.toLowerCase())],
+                                                    THEN j.result -> 'line_credibility' ELSE '[]'::jsonb END)
+                          WITH ORDINALITY lc(v, lord)
+       JOIN public.claims c ON c.id::text = f.cid
+      WHERE j.result -> 'curator' -> 'claims' -> 'filed' ?| $1::text[]
+        AND f.cid = ANY($1::text[])
+        AND jsonb_typeof(lc.v -> 'verdict') = 'string' AND jsonb_typeof(lc.v -> 'text') = 'string'
+        AND lower(btrim(c.text)) = lower(btrim(lc.v ->> 'text'))
+      ORDER BY j.finished_at ASC NULLS FIRST, j.created_at ASC, j.id ASC,
+               ((lc.v ->> 'claim') IS NOT DISTINCT FROM (f.ord - 1)::text) ASC, lc.lord ASC`,
+    [ids],
   );
-  // the latest run wins; a verdict is served only as a registry-shaped key (never free text)
-  for (const f of found) if (/^[a-z][a-z0-9_]{0,40}$/.test(f.verdict)) out.set(`${f.synthesis_id}|${f.text.trim()}`, f.verdict);
+  // the last row per claim wins (see the order); a verdict is served only as a registry-shaped key (never free text)
+  for (const f of found) if (/^[a-z][a-z0-9_]{0,40}$/.test(f.verdict)) out.set(f.claim_id, f.verdict);
   return out;
 }
 
@@ -196,7 +208,7 @@ function shapeClaim(r: ClaimRow, evidenceOnly: boolean, verdicts: Map<string, st
     state_detail: suppressedEdges ? { suppressed_edges: suppressedEdges, note: "suppressed sources lend no credit (D5 stage 1)" } : {},
     edges_by_type: byType,
     sources: edges.map((e) => ({ ...e, edge_id: Number(e.edge_id) })),
-    verdict: r.synthesis_id ? verdicts.get(`${r.synthesis_id.toLowerCase()}|${r.text.trim()}`) ?? null : null,
+    verdict: verdicts.get(r.id.toLowerCase()) ?? null,
     corroborations: Number(r.corroborations ?? 0),
     contradicted_by_newer: !!r.contradicted_by_newer,
   };

@@ -105,7 +105,8 @@ async function plant() {
     ON CONFLICT (slug) DO NOTHING`, [HUB, ID.paper, ID.general]);
   const result = (report: string, needs: unknown[], extra: Record<string, unknown> = {}) => JSON.stringify({
     needs_status: needs, gaps: needs.filter((n: any) => n.status !== "answered").map((n: any) => n.need),
-    curator: { persist: { synthesis_id: report, source_ids: [ID.paper, ID.general, null] } },
+    // the curator's filing answer: filed[k] is the claim row filed from claim-list index k (the verdict's id join)
+    curator: { persist: { synthesis_id: report, source_ids: [ID.paper, ID.general, null] }, claims: { filed: [ID.c1, ID.c2, ID.c4] } },
     line_credibility: [{ claim: 0, text: TXT.c1, verdict: "supports" }, { claim: 1, text: TXT.c2, verdict: "partial" }, { claim: 2, text: TXT.c4, verdict: "Not A Key!" }],
     ...extra,
   });
