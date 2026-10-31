@@ -1,9 +1,59 @@
 // The export's database side (research-workbench P6a): the numbered references a document holds,
 // with what each needs to become a CSL item, and the resolution cache on the reference record.
 import type { Db } from "../contracts/db.ts";
-import { exportOrder } from "../contracts/logic/citations.ts";
+import { EXPORT_LINK_RE, exportOrder } from "../contracts/logic/citations.ts";
+import { type MdNode, parseMarkdown } from "./markdown.ts";
 import { LEGACY_NOTE } from "../contracts/repo/references.ts";
 import type { CslItem } from "./csl.ts";
+
+// The order citeproc NUMBERS the cited sources in (rw-p6b-gate round 3, tester t-p6b-gate2 D12): the
+// READING order of the parsed document - a citation inside a footnote counts where the footnote's marker
+// is, a footnote definition is not read where it is written, and a link inside code (a code span or block)
+// is not a citation. Sources the text links only from code are listed after the cited ones (pandoc lists
+// them as nocite, after every cited item), then the deliberately added ones. exportOrder (the raw text
+// position) stays the P2a holder rule; the export and the reference panel number by this.
+export function readingOrder(content: string, added: string[]): string[] {
+  const n = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const ids: string[] = [];
+  const src = content.replace(new RegExp(EXPORT_LINK_RE.source, "g"), (_m, _t, uuid) => `zwr${n}q${ids.push(String(uuid).toLowerCase()) - 1}z`);
+  const tree = parseMarkdown(src);
+  const defs = new Map<string, MdNode>();
+  const collect = (node: MdNode) => {
+    if (node.type === "footnoteDefinition" && typeof node.identifier === "string") defs.set(node.identifier, node);
+    for (const c of node.children ?? []) collect(c);
+  };
+  collect(tree);
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const marker = new RegExp(`zwr${n}q(\\d+)z`, "g");
+  const visiting = new Set<string>();
+  const walk = (node: MdNode) => {
+    if (node.type === "code" || node.type === "inlineCode" || node.type === "footnoteDefinition") return;
+    if (node.type === "footnoteReference" && typeof node.identifier === "string") {
+      const d = defs.get(node.identifier);
+      if (d && !visiting.has(node.identifier)) {
+        visiting.add(node.identifier);
+        for (const c of d.children ?? []) walk(c);
+        visiting.delete(node.identifier);
+      }
+      return;
+    }
+    for (const v of [node.value, node.url, node.title, node.alt]) {
+      if (typeof v !== "string") continue;
+      for (const m of v.matchAll(marker)) {
+        const id = ids[Number(m[1])];
+        if (id && !seen.has(id)) { seen.add(id); order.push(id); }
+      }
+    }
+    for (const c of node.children ?? []) walk(c);
+  };
+  walk(tree);
+  for (const raw of exportOrder(content, added)) {
+    const id = raw.toLowerCase();
+    if (!seen.has(id)) { seen.add(id); order.push(id); }
+  }
+  return order;
+}
 
 export interface ExportRef {
   number: number;
@@ -44,7 +94,7 @@ export async function noteExportRefs(db: Db, rel: string): Promise<ExportRef[]> 
 // appearance, each read from the source as it stands. Nothing is cached for it - there is no
 // reference record to cache on.
 export async function pageExportRefs(db: Db, md: string): Promise<ExportRef[]> {
-  const order = exportOrder(md, []);
+  const order = readingOrder(md, []);
   if (!order.length) return [];
   const rows = await db.query<Omit<ExportRef, "number" | "cited_ref" | "reference_id" | "pinned_revision" | "cached">>(
     `SELECT ${SOURCE_COLS}, s.title FROM public.sources s WHERE s.id::text = ANY($1::text[])`,
@@ -71,7 +121,7 @@ export async function documentExportRefs(db: Db, rel: string, md: string): Promi
       WHERE h.holder_kind = 'user_document' AND h.holder_ref = $1 AND h.origin = 'added' ORDER BY h.seq`,
     [rel],
   )).map((r) => r.source_id);
-  const order = exportOrder(md, added);
+  const order = readingOrder(md, added);
   if (!order.length) return [];
   const rows = await db.query<Omit<ExportRef, "number">>(
     `SELECT DISTINCT ON (r.source_id) r.source_id::text AS cited_ref, r.id::text AS reference_id, r.pinned_revision, ${SOURCE_COLS},

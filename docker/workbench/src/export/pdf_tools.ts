@@ -1,6 +1,7 @@
 // Reading a rendered PDF back, for the export's tests (research-workbench P6a). poppler-utils is
 // GPL: pdftotext, pdffonts, pdfinfo and pdftoppm run here as SEPARATE PROCESSES over files, never
-// linked (D9). poppler is installed in the image's test and parity stages only, never at runtime.
+// linked (D9). These readers are the tests'; since P6b poppler is also in the runtime image, where only the
+// verification gate (gate.ts) runs pdftoppm.
 
 async function run(cmd: string, args: string[]): Promise<string> {
   const { code, stdout, stderr } = await new Deno.Command(cmd, { args, stdin: "null", stdout: "piped", stderr: "piped" }).output();

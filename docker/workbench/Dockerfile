@@ -4,8 +4,8 @@
 #   app      base + the whole source tree (tests included) and its dependency cache
 #   app-src  the source tree the service runs: app's src without *_test.ts and the test oracle
 #            (rw-p6a-followups: the runtime image ships no test and no oracle)
-#   test     app + poppler-utils (pdftoppm/pdftotext/pdffonts/pdfinfo): the build test gate. The
-#            runtime stage copies its marker, so the gate cannot be skipped; poppler never ships.
+#   test     app: the build test gate (poppler-utils - pdftoppm/pdftotext/pdffonts/pdfinfo - comes from
+#            base since P6b). The runtime stage copies its marker, so the gate cannot be skipped.
 #   parity   test + WeasyPrint: the P6a parity fixture (Typst vs the retired WeasyPrint path). Built
 #            only on request (`docker build --target parity`), never shipped.
 #   runtime-deps  base + app-src, and the dependency cache of the RUNTIME module graph only (round 2:
@@ -54,9 +54,25 @@ LABEL org.opencontainers.image.revision="$OB1_SHA"
 # The export (P6a) converts markdown to PDF/DOCX/MD/TXT with pandoc --citeproc, locally (no
 # network); Typst is pandoc's PDF engine. WeasyPrint, the PDF engine before P6a, is removed: the
 # parity fixture passed (see the parity stage).
+# research-workbench P6b (rw-p6b-gate): the export verification gate runs on every PDF before it is
+# served (src/export/gate.ts), so its programs are in the RUNTIME image:
+#   poppler-utils (GPL-2.0-only OR GPL-3.0-only): pdftoppm rasterises the PDF - a SEPARATE, unmodified
+#     program run over files, never linked or imported (D9 rule 4); the notices list it with its version.
+#   python3 + python3-venv (PSF-2.0): the interpreter of gate/structure.py, a separate process; its
+#     libraries, pikepdf (MPL-2.0, unmodified) and pdfplumber (MIT) with their dependencies, go in their
+#     own environment /opt/export-gate from gate/requirements.txt - every wheel pinned by version AND
+#     hash, binary only, no dependency resolution (--no-deps); pip itself is removed afterwards.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu-core \
+     poppler-utils python3 python3-venv \
   && rm -rf /var/lib/apt/lists/*
+COPY gate/requirements.txt /tmp/export-gate-requirements.txt
+RUN python3 -m venv /opt/export-gate \
+  && /opt/export-gate/bin/pip install --no-cache-dir --disable-pip-version-check --require-hashes --only-binary=:all: --no-deps \
+     -r /tmp/export-gate-requirements.txt \
+  && /opt/export-gate/bin/pip uninstall -y --disable-pip-version-check pip \
+  && rm /tmp/export-gate-requirements.txt \
+  && /opt/export-gate/bin/python -I -c "import pikepdf, pdfplumber; print('export gate:', pikepdf.__version__, pdfplumber.__version__)"
 COPY --from=tools /out/bin/pandoc /out/bin/typst /usr/local/bin/
 # Typst's LICENSE and NOTICE carried through (Apache-2.0 section 4).
 COPY --from=tools /out/doc/typst /usr/local/share/doc/typst
@@ -70,6 +86,8 @@ WORKDIR /app
 # every jsr/npm/remote module to the version its licence was verified at (D9 rule 6).
 COPY deno.json deno.lock ./
 COPY THIRD-PARTY-NOTICES.md ./
+# the export gate's structure checks (P6b): one Python file, run by the workbench as a separate process
+COPY gate ./gate
 # The CSL styles, upstream files used unmodified (CC BY-SA 3.0; their sha256 is in the
 # citation_styles registry and checked by src/export/export_test.ts).
 COPY csl ./csl
@@ -96,10 +114,9 @@ RUN find src -name '*_test.ts' -delete && rm src/export/credentials_oracle.ts
 
 FROM app AS test
 # poppler-utils (GPL): pdftoppm, pdftotext, pdffonts and pdfinfo, run as SEPARATE PROCESSES by the
-# export tests to read the PDFs back (glyph coverage, numbering, parity). Test stage only.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends poppler-utils \
-  && rm -rf /var/lib/apt/lists/*
+# export tests to read the PDFs back (glyph coverage, numbering, parity) - installed in base since P6b
+# (the verification gate rasterises with pdftoppm at runtime), so the test and runtime stages carry
+# the same poppler and the same fonts.
 # Build gate (wiki-dynamic-index P3): pure-logic tests run at image build so a
 # regression cannot ship silently - mirrors the wiki-service image, which runs
 # lib/entity-links.test.mjs. Only tests that need no DB/network AND no
@@ -111,6 +128,10 @@ RUN apt-get update \
 # research-workbench P6a adds src/export/: the resolver (keys, egress, hard failure), the CSL
 # styles unmodified, and real renders through pandoc + Typst read back with poppler (numbering,
 # CJK glyphs, process separation). parity_fixture.ts runs only in the parity stage.
+# research-workbench P6b adds src/export/gate_test.ts: the verification gate over real renders (the
+# clipped-table and clean fixtures, the reference list, the roll-up section, pdftoppm as a separate
+# program) and the vision pass's routing and schema; src/contracts/notices_test.ts checks the gate's
+# Python environment and pdftoppm's version against the notices.
 # research-workbench P2b adds src/documents/: the user document grammar and the hub clustering (pure);
 # its integration test is skipped here (no DOCS_TEST_BASE); run-workspace-tests.ps1 runs it.
 # rw-identity adds src/identity/: the forward-auth config, every check of the outpost's signed token
@@ -150,6 +171,7 @@ COPY --from=test /app/.test-gate-passed /app/.test-gate-passed
 EXPOSE 8000
 
 # --allow-read/write: vault notes + wiki-assets (P3/P5) + the export's scratch dir. --allow-run:
-# `git` commit in the vault repo (P3), `pandoc` for the export (P6a). --allow-net/env: DB, REST,
-# embeddings, extract, the export's resolver (through FETCH_PROXY_URL only).
+# `git` commit in the vault repo (P3), `pandoc` for the export (P6a), `pdftoppm` and the gate's Python
+# for the verification gate (P6b). --allow-net/env: DB, REST, embeddings, extract, the export's resolver
+# (through FETCH_PROXY_URL only), the gate's vision pass (through the LiteLLM alias only).
 CMD ["deno", "run", "--allow-net", "--allow-env", "--allow-read", "--allow-write", "--allow-run", "src/main.ts"]

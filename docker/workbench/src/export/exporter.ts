@@ -30,7 +30,7 @@ import { Hono } from "hono";
 import type { RegistryEntry } from "../contracts/registry.ts";
 import { MigrationRefused } from "../contracts/repo/references.ts";
 import { safeJoin, safeRelPath } from "../util/paths.ts";
-import { type CslItem, recordToCsl } from "./csl.ts";
+import { type CslItem, printedTitle, recordToCsl } from "./csl.ts";
 import { IdentifierError, type IdentifierKind, sourceIdentifier } from "./identifiers.ts";
 import { RequestRefused, ResolutionFailed, type Resolver } from "./resolver.ts";
 import type { ExportRef } from "./repo.ts";
@@ -38,6 +38,21 @@ import { citeKey, type FormatDef, type RefItem, render as realRender, RenderFail
 import { aboutExport } from "./about.ts";
 import type { Limits } from "./markdown.ts";
 import { judgeSecret } from "./credentials.ts";
+import { bibliographyOrder } from "./biborder.ts";
+import { frontmatterOf, type GateInput, type GateResult, type RequiredSection } from "./gate.ts";
+import type { RunStore } from "./runs.ts";
+import type { Context } from "hono";
+
+// research-workbench P6b (rw-p6b-gate): a format whose registry row says `gate: true` (the PDF) is
+// checked by the verification gate (gate.ts) after it renders and BEFORE it is served; the run is
+// recorded for the caller's subject (runs.ts). Passed: the file, with x-export-id. Blocked: 422
+// `layout-gate` with the blocking findings and warnings - the file never leaves. A gated format with
+// no gate or no run store wired, or a gate that throws, is 503 `gate`: never an unchecked file.
+export interface GateWiring {
+  gate(input: GateInput): Promise<GateResult>;
+  runs: RunStore;
+  whoOf(c: Context): Promise<{ sub: string; actor: string }>;
+}
 
 export interface ExporterDeps {
   reg: { entries(registry: string): Promise<RegistryEntry[]> };
@@ -50,6 +65,7 @@ export interface ExporterDeps {
   render?: typeof realRender;
   log?: (m: string) => void;
   limits?: Limits; // the document limits before pandoc (markdown.ts; default from the environment)
+  gated?: GateWiring; // P6b: the verification gate and the run store (required by a `gate: true` format)
 }
 
 export interface Unresolved {
@@ -130,6 +146,28 @@ export async function referenceItems(
   unresolved.sort((a, b) => a.number - b.number);
   return { items, unresolved };
 }
+
+// What the reference PANEL lists for one numbered reference (rw-p6b-gate round 2, tester D3/D4): the
+// title the export will print - the cached resolution for the identifier the source declares NOW, else
+// the record (its title at the pin, or its URL when it has none) - through printedTitle. The same
+// choice referenceItems makes, without the resolver (a reference not yet resolved shows its record
+// title until the first export caches the resolution).
+export function listedCsl(r: ExportRef, kinds: IdentifierKind[]): CslItem {
+  if (r.source_id && !r.suppressed) {
+    let id = null;
+    try {
+      id = sourceIdentifier(kinds, r);
+    } catch { /* a malformed identifier: the export refuses it; the panel shows the record */ }
+    const hit = id ? r.cached.find((c) => c.identifier === id!.citekey) : undefined;
+    if (hit) return hit.csl;
+  }
+  try {
+    return recordToCsl(r);
+  } catch {
+    return { type: "document", title: r.title ?? "" } as CslItem;
+  }
+}
+export const listedTitle = (r: ExportRef, kinds: IdentifierKind[]): string => printedTitle(listedCsl(r, kinds));
 
 // The copy view's item for a reference it could not resolve: the marker first, then what the record
 // says (never a suppressed source's title).
@@ -251,17 +289,54 @@ export function createExporter(deps: ExporterDeps): Hono {
     // cwd is a scratch directory, never the vault).
     const resourcePath = [deps.vaultDir, noteDir ? safeJoin(deps.vaultDir, noteDir) : deps.vaultDir].join(":");
     const format = formatOf(fmtEntry);
+    const gated = !copy && fmtEntry.definition.gate === true;
+    if (gated && !deps.gated) {
+      return json({ error: `the ${format.key} export is not served: its verification gate is not configured`, code: "gate" }, 503);
+    }
     try {
       const out = await render({
         md, refs: refItems, format, style: styleOf(styleEntry), cslDir: deps.cslDir, wrapNone: noWrap, resourcePath,
         secrets: deps.resolver.secrets, limits: deps.limits,
       });
+      let gateHeaders: Record<string, string> = {};
+      if (gated) {
+        const g = deps.gated!;
+        const who = await g.whoOf(c);
+        const filename = `${base}.${format.ext}`;
+        let result: GateResult;
+        try {
+          result = await g.gate({
+            pdf: out.bytes, format, numeric: styleEntry.definition.citation_format === "numeric",
+            // round 3 (D10): an author-date style SORTS its list - the expected order is citeproc's
+            refs: (styleEntry.definition.citation_format === "numeric" ? refItems : await bibliographyOrder(refItems, styleOf(styleEntry), deps.cslDir))
+              .map((r) => ({ number: r.number, title: printedTitle(r.csl) })),
+            frontmatter: frontmatterOf(md),
+            required: (await live("export_required_sections")).map((e) => ({ key: e.key, ...(e.definition as Omit<RequiredSection, "key">) })),
+          });
+        } catch (e) {
+          log(`[export] ${rel} (${format.key}): the verification gate failed: ${(e as Error)?.message ?? e}`);
+          result = { status: "blocked", blocking_findings: [{ code: "gate-error", detail: "the verification gate could not complete", stage: "gate" }], warnings: [], checks: {} };
+        }
+        const id = await g.runs.record({
+          owner_sub: who.sub, actor_sub: who.actor, path: rel, format: format.key, style: styleEntry.key, status: result.status,
+          blocking_findings: result.blocking_findings, warnings: result.warnings, checks: result.checks,
+          filename, mime: format.mime, file: result.status === "passed" ? out.bytes : null,
+        });
+        if (result.status === "blocked") {
+          return json({
+            error: `export blocked by the verification gate: ${result.blocking_findings.length} blocking finding(s)`,
+            code: "layout-gate", export_id: id, blocking_findings: result.blocking_findings, warnings: result.warnings,
+          }, 422);
+        }
+        gateHeaders = { "x-export-id": id, "x-export-gate": "passed", "x-export-warnings": String(result.warnings.length) };
+      }
       return new Response(out.bytes as unknown as BodyInit, {
         headers: {
           "content-type": format.mime,
           "content-disposition": copy ? "inline" : `attachment; filename="${base}.${format.ext}"`,
           "content-length": String(out.bytes.byteLength),
           "x-citation-style": styleEntry.key,
+          ...gateHeaders,
           ...(copy ? { "x-export-mode": "copy", "x-export-unresolved": String(unresolved.length) } : {}),
         },
       });

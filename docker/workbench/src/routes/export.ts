@@ -2,6 +2,8 @@
 //
 //   GET /workbench/export?path=<vault .md>&format=<export_formats key>&style=<citation_styles key>[&wrap=none][&mode=copy]
 //   GET /workbench/export/about      the CSL attribution, the styles, the programs and their licences
+// research-workbench P6b: a PDF passes the verification gate before it is served (src/export/gate.ts);
+// GET /workbench/exports (routes/exports.ts) lists the caller's own runs.
 //
 // The route's logic is src/export/exporter.ts (dependencies injected, so the build gate drives it:
 // exporter_test.ts); this file wires the live ones - the database, the registry reader, the resolver
@@ -20,8 +22,14 @@ import { createResolver, resolverConfigFromEnv } from "../export/resolver.ts";
 import { cacheResolution, documentExportMarkdown, documentExportRefs, noteExportRefs, pageExportRefs } from "../export/repo.ts";
 import { createExporter } from "../export/exporter.ts";
 import { limitsFromEnv } from "../export/markdown.ts";
+import { gateDepsFromEnv, runGate } from "../export/gate.ts";
+import { visionConfigFromEnv } from "../export/vision.ts";
+import { runStore } from "../export/runs.ts";
 
 const db = poolDb(pool);
+const vision = visionConfigFromEnv();
+if (vision.state === "refused") console.error(`[export] the vision pass is REFUSED (${vision.code}): ${vision.reason} - every PDF export is blocked until it is fixed`);
+const gate = gateDepsFromEnv(vision);
 const exportApp = createExporter({
   reg: new RegistryReader(db),
   resolver: createResolver(resolverConfigFromEnv()),
@@ -42,6 +50,17 @@ const exportApp = createExporter({
   },
   cache: (referenceId, identifier, csl, via) => cacheResolution(db, referenceId, identifier, csl, via),
   limits: limitsFromEnv(), // EXPORT_MAX_NOTE_BYTES, EXPORT_MAX_BRACKET_DEPTH, EXPORT_MAX_DEPTH, EXPORT_MAX_LIST_DEPTH
+  // research-workbench P6b: the verification gate on a `gate: true` format (the PDF) - pdftoppm, the
+  // structure checks, the reference list, the required sections, the vision pass (EXPORT_VISION_*,
+  // inert when blank) - and the run, recorded for the identity seam's subject (export_runs)
+  gated: {
+    gate: (input) => runGate(gate, input),
+    runs: runStore(db),
+    whoOf: async (c) => {
+      const who = await identityOf(c);
+      return { sub: who.sub, actor: who.actor };
+    },
+  },
 });
 
 // rw-p2b-workspace round 3: another user's document is never exported (checked here as well as at the gate)
