@@ -290,10 +290,10 @@ ${job}`);
   assert(/Seq Scan on claims/.test(before), "the before plan scans claims (the defect the review measured)");
   assert(!/Seq Scan on claims/.test(after), `the verdict join must not scan claims:
 ${after}`);
-  assert(/Index (Only )?Scan using \w+ on claims/.test(after), `the claims pkey is used:
+  assert(/(Bitmap Index Scan on claims_pkey|Index (Only )?Scan using claims_pkey on claims)/.test(after), `the claims pkey is used:
 ${after}`);
   assert(!/ on claims/.test(src) && !/ on claims/.test(job), "the roll-up reads no claim");
-  assert(/Index (Only )?Scan using \w+ on sources/.test(src), `the report is found by the sources pkey:
+  assert(/(Bitmap Index Scan on sources_pkey|Index (Only )?Scan using sources_pkey on sources)/.test(src), `the report is found by the sources pkey:
 ${src}`);
   // and the answers are unchanged
   const r = await call("GET", `/workbench/contract/claims?synthesis_id=${ID.report}&limit=50`, A);
