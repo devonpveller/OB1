@@ -4,6 +4,7 @@
 //   no gate URL or no key       -> GateUnavailable 503 "fetch gate not configured ..." (no request)
 //   the gate unreachable, slow,
 //   3xx, non-200, or off-shape  -> GateUnavailable 503 (one request to the gate, never a retry, never direct)
+//   401 / 403 (the key refused) -> GateUnavailable 503 with its own text (KEY_REFUSED)
 //   refused / withheld / error  -> GateRefusal with the gate's reason UNCHANGED (from the allow-listed
 //                                  set below; any other text is off-shape -> 503, so a site-chosen
 //                                  string never reaches the caller)
@@ -15,9 +16,17 @@
 // max 5); an ok answer reports them in `redirects` and the final URL in `final_url`.
 
 export const GATE_ROUTE = "/v1/fetch";
-// The gate's own deadline is 20 s over resolution, every hop and the body (GATE_FETCH_TIMEOUT_SECONDS);
-// this is that plus the intake hand-off and a margin.
-export const GATE_TIMEOUT_MS = 30_000;
+// The gate's own worst case before it answers: the fetch leg's one deadline over resolution, every hop
+// and the body (search/gateway config.py GATE_FETCH_TIMEOUT_SECONDS, 20 s) plus the intake hand-off
+// (config.py INTAKE_TIMEOUT_SECONDS, 60 s, which screen/connector.py gate_retry() makes the budget of
+// its 2 attempts) = 80 s; the default is that plus a margin. WORKBENCH_GATE_TIMEOUT_MS overrides it (a
+// positive integer; anything else keeps the default).
+export const GATE_TIMEOUT_DEFAULT_MS = 90_000;
+export function gateTimeoutMs(env = (k: string) => Deno.env.get(k)): number {
+  const raw = (env("WORKBENCH_GATE_TIMEOUT_MS") ?? "").trim();
+  const n = /^[0-9]+$/.test(raw) ? parseInt(raw, 10) : NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : GATE_TIMEOUT_DEFAULT_MS;
+}
 // The gate caps the page at 2 MiB; its JSON answer carries intake's text plus the fence and labels.
 const MAX_ANSWER_BYTES = 8 * 1024 * 1024;
 
@@ -44,6 +53,7 @@ const MEDIA_TYPES: ReadonlySet<string> = new Set([
 
 export const NOT_CONFIGURED = "fetch gate not configured: WORKBENCH_GATE_URL and WORKBENCH_GATE_KEY are both required; the workbench never fetches a URL itself";
 export const UNAVAILABLE = "fetch gate unavailable: the search gate did not answer /v1/fetch; nothing was fetched or stored";
+export const KEY_REFUSED = "fetch gate refused the workbench's key: WORKBENCH_GATE_KEY is not a per-caller key in the gate's caller_keys (the line workbench=<key>); nothing was fetched or stored";
 export const OFF_SHAPE = "fetch gate unavailable: the search gate's answer was not a /v1/fetch answer; nothing was stored";
 
 export class GateUnavailable extends Error {
@@ -139,6 +149,7 @@ async function readCapped(r: Response): Promise<string> {
 export function gateClient(env = (k: string) => Deno.env.get(k)): GateFetch {
   const base = (env("WORKBENCH_GATE_URL") ?? "").trim().replace(/\/+$/, "");
   const key = (env("WORKBENCH_GATE_KEY") ?? "").trim();
+  const timeoutMs = gateTimeoutMs(env);
   let endpoint = "";
   try {
     if (base) {
@@ -158,13 +169,15 @@ export function gateClient(env = (k: string) => Deno.env.get(k)): GateFetch {
         headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
         body: JSON.stringify({ url }),
         redirect: "error",
-        signal: AbortSignal.timeout(GATE_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch {
       throw new GateUnavailable(UNAVAILABLE);
     }
     if (r.status !== 200) {
       await r.body?.cancel().catch(() => {});
+      // 401 / 403: the gate is up and refused the key (deps.py) - misprovisioned, not an outage
+      if (r.status === 401 || r.status === 403) throw new GateUnavailable(`${KEY_REFUSED} (gate HTTP ${r.status})`);
       throw new GateUnavailable(`${UNAVAILABLE} (gate HTTP ${r.status})`);
     }
     let j: unknown;

@@ -5,6 +5,7 @@
 // FETCH_POSTURE_SRC=<a tree's src dir> runs the static search against another tree (the RED on bc6d3a6).
 // GATE_SRC=<ai-stack search/gateway/src/gateway> also checks the reason allow-list against the gate's code.
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
+import * as gate from "./client.ts";
 import {
   GATE_REASONS, GATE_ROUTE, GateRefusal, GateUnavailable, NOT_CONFIGURED, OFF_SHAPE, UNAVAILABLE, gateClient,
   gateErrorBody, readAnswer,
@@ -19,7 +20,7 @@ const ERROR_HTTP = "error: the site answered with an HTTP error status";
 type Seen = { method: string; path: string; auth: string | null; body: unknown };
 
 // A stub gate on a loopback port: `answer` decides the response for each request.
-async function withGate(answer: (s: Seen) => Response, run: (base: string, seen: Seen[]) => Promise<void>) {
+async function withGate(answer: (s: Seen) => Response | Promise<Response>, run: (base: string, seen: Seen[]) => Promise<void>) {
   const seen: Seen[] = [];
   const ac = new AbortController();
   const srv = Deno.serve({ hostname: "127.0.0.1", port: 0, signal: ac.signal, onListen() {} }, async (req) => {
@@ -123,10 +124,10 @@ Deno.test("A3/A5 (F1): an ok answer not labelled clean - another label, or none 
   assertEquals(readAnswer(url, { ...base, label: "clean" }).text, "x");
 });
 
-Deno.test("A4: the gate unreachable, answering 401/403/503, or answering junk = the stated 503", async () => {
+Deno.test("A4: the gate unreachable, answering 422/500/503, or answering junk = the stated 503", async () => {
   const unreachable = await assertRejects(() => gateClient(env({ WORKBENCH_GATE_URL: "http://127.0.0.1:9", WORKBENCH_GATE_KEY: KEY }))("http://target.example/a"), GateUnavailable);
   assertEquals([unreachable.httpStatus, unreachable.message], [503, UNAVAILABLE]);
-  for (const code of [401, 403, 422, 500, 503]) {
+  for (const code of [422, 500, 503]) {
     await withGate(() => json({ detail: "x" }, code), async (base) => {
       const err = await assertRejects(() => gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY }))("http://target.example/a"), GateUnavailable);
       assertEquals(err.httpStatus, 503);
@@ -137,6 +138,40 @@ Deno.test("A4: the gate unreachable, answering 401/403/503, or answering junk = 
     const err = await assertRejects(() => gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY }))("http://target.example/a"), GateUnavailable);
     assertEquals(err.message, OFF_SHAPE);
   });
+});
+
+Deno.test("B2: the client's deadline covers the gate's own budget - 20 s fetch + 60 s intake = about 90 s by default; WORKBENCH_GATE_TIMEOUT_MS overrides it", async () => {
+  const g = gate as Record<string, unknown>;
+  assertEquals(g.GATE_TIMEOUT_DEFAULT_MS, 90_000, "the default deadline");
+  assert((g.GATE_TIMEOUT_DEFAULT_MS as number) >= (20 + 60) * 1000, "never shorter than the gate's fetch + intake budget");
+  assertEquals((g.gateTimeoutMs as (e: (k: string) => string | undefined) => number)(env({})), 90_000);
+  assertEquals((g.gateTimeoutMs as (e: (k: string) => string | undefined) => number)(env({ WORKBENCH_GATE_TIMEOUT_MS: "1500" })), 1500);
+  for (const bad of ["", "0", "-5", "abc"]) {
+    assertEquals((g.gateTimeoutMs as (e: (k: string) => string | undefined) => number)(env({ WORKBENCH_GATE_TIMEOUT_MS: bad })), 90_000, `'${bad}' keeps the default`);
+  }
+  const url = "http://target.example/slow";
+  const ok = { status: "ok", url, final_url: url, redirects: [], http_status: 200, content_type: "text/plain", text: "late", label: "clean" };
+  const slow = (ms: number) => () => new Promise<Response>((r) => setTimeout(() => r(json(ok)), ms));
+  // a gate that answers within the deadline is waited for; one that answers after it is the stated 503
+  await withGate(slow(700), async (base) => {
+    const p = await gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY, WORKBENCH_GATE_TIMEOUT_MS: "3000" }))(url);
+    assertEquals(p.text, "late");
+  });
+  await withGate(slow(1500), async (base) => {
+    const err = await assertRejects(() => gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY, WORKBENCH_GATE_TIMEOUT_MS: "300" }))(url), GateUnavailable);
+    assertEquals([err.httpStatus, err.message], [503, UNAVAILABLE]);
+  });
+});
+
+Deno.test("F-d: the gate refusing the workbench's key (401/403) is its own stated 503, not an outage", async () => {
+  for (const code of [401, 403]) {
+    await withGate(() => json({ detail: "missing or invalid bearer token" }, code), async (base) => {
+      const err = await assertRejects(() => gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY }))("http://target.example/a"), GateUnavailable);
+      assertEquals(err.httpStatus, 503);
+      assertEquals(err.message, `${(gate as Record<string, unknown>).KEY_REFUSED} (gate HTTP ${code})`);
+      assert(!err.message.startsWith(UNAVAILABLE));
+    });
+  }
 });
 
 Deno.test("A8: the held-link refetch is the same gate client: clean text + the gate's title, or the gate's error", async () => {
