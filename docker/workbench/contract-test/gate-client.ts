@@ -33,7 +33,8 @@ function holds(entry: string, title: string): boolean {
   if (!RTL.test(title)) {
     const w = words(title);
     const e = entry.normalize("NFKC");
-    return [e.replace(/[\u00AD-]\s*\n\s*/g, ""), e.replace(/\u00AD?\s*\n\s*/g, ""), e.replace(/\u00AD/g, "")].some((v) => words(v).includes(w));
+    // (poppler's -bbox-layout words come joined by spaces, not newlines: a soft hyphen joins whatever follows)
+    return [e.replace(/\u00AD\s*/g, "").replace(/-\s*\n\s*/g, ""), e.replace(/\u00AD?\s*\n\s*/g, ""), e.replace(/\u00AD/g, "")].some((v) => words(v).includes(w));
   }
   const toks = (s: string) => s.normalize("NFKC").replace(/\u00AD\s*\n\s*/g, "").replace(/[\u00AD\p{M}]/gu, "").toLowerCase()
     .split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((t) => (RTL.test(t) ? [...t].sort().join("") : t));
@@ -83,9 +84,25 @@ if (mode === "req") {
     const html = await Deno.readTextFile(`${dir}/d.html`);
     await Deno.remove(dir, { recursive: true });
     const unesc = (t: string) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
-    const blocks = [...html.matchAll(/<block[^>]*>([\s\S]*?)<\/block>/g)].map((b) => [...b[1].matchAll(/<word[^>]*>([\s\S]*?)<\/word>/g)].map((w) => unesc(w[1])).join(" ").replace(/-\s+/g, "-"));
-    blocks.forEach((b, i) => { if (b.trim() === "References") at = i; });
-    entries = (at < 0 ? [] : blocks.slice(at + 1).filter((b) => b.trim() && !/^\s*\d+\s*$/.test(b))).map((text, i) => ({ n: i + 1, text }));
+    // blocks with their page; round 4: an entry that runs over a page break is two blocks - the first block on
+    // a page continues the last entry of the previous page when that entry did not end (no final "." and no
+    // trailing URL)
+    const blocks: { page: number; text: string }[] = [];
+    [...html.matchAll(/<page[^>]*>([\s\S]*?)<\/page>/g)].forEach((pg, pi) => {
+      for (const b of pg[1].matchAll(/<block[^>]*>([\s\S]*?)<\/block>/g)) {
+        blocks.push({ page: pi, text: [...b[1].matchAll(/<word[^>]*>([\s\S]*?)<\/word>/g)].map((w) => unesc(w[1])).join(" ").replace(/-\s+/g, "-") });
+      }
+    });
+    blocks.forEach((b, i) => { if (b.text.trim() === "References") at = i; });
+    const listed2: { page: number; text: string }[] = [];
+    for (const b of at < 0 ? [] : blocks.slice(at + 1)) {
+      if (!b.text.trim() || /^\s*\d+\s*$/.test(b.text)) continue;
+      const prev = listed2[listed2.length - 1];
+      const open = prev && !/(\.|https?:\/\/\S+|\S+\/\S*)\s*$/.test(prev.text.trim());
+      if (prev && b.page !== prev.page && open) prev.text += " " + b.text;
+      else listed2.push({ ...b });
+    }
+    entries = listed2.map((b, i) => ({ n: i + 1, text: b.text }));
   }
   const fails: string[] = [];
   if (!panel.listed) fails.push("the panel answer carries no `listed` reference list");
