@@ -14,7 +14,7 @@
  */
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { actorOf, MAY_ACT_SQL } from "./viewer.ts";
-import { createSteer, GAP_ACTOR, openGapBranches, SteerError, type Q } from "./tree.ts";
+import { createSteer, GAP_ACTOR, openGapBranches, recordCancel, SteerError, type Q } from "./tree.ts";
 import type { Caller } from "./origin.ts";
 
 const ws: Caller = { name: "workspace", origin: "workspace", key: "k".repeat(32), shared: false };
@@ -113,4 +113,25 @@ Deno.test("P4b createSteer: add-source seeds land on the child; the parent is ne
     const e = await assertRejects(() => createSteer(fakeQ().q, { parentId: "p1", stepId: "s2", text: "x", actorSub: "a", seedSources: bad }, noContract), SteerError);
     assertEquals((e as SteerError).status, 400);
   }
+});
+
+// ── round 2 (tester t-p4b-sessions F-cancel-actor-recorded): a cancel records who cancelled ─────
+Deno.test("P4b round 2 recordCancel: every cancel is recorded with its actor (research_cancels); none without one", async () => {
+  const { q, writes } = fakeQ();
+  await recordCancel(q, { jobId: "p1", actorSub: "admin-1", caller: "workspace", reason: "no longer needed", outcome: "cancelled" });
+  const w = writes.find((x) => x.sql.startsWith("INSERT INTO public.research_cancels"))!;
+  assert(w, "a research_cancels row is written");
+  assert(w.sql.includes("actor_sub"), w.sql);
+  assertEquals(w.args.slice(0, 2), ["p1", "admin-1"]);
+  assert(w.args.includes("cancelled"), JSON.stringify(w.args));
+  for (const blank of ["", "  ", null]) {
+    const e = await assertRejects(() => recordCancel(fakeQ().q, { jobId: "p1", actorSub: blank as string, caller: "x", reason: "r", outcome: "cancelled" }), SteerError);
+    assertEquals((e as SteerError).status, 400);
+  }
+});
+
+Deno.test("P4b round 2: the cancel route records the actor it computed (index.ts calls recordCancel with acting.actor)", () => {
+  const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url));
+  const cancel = src.slice(src.indexOf("const cancelMatch"), src.indexOf("const steerMatch"));
+  assert(/recordCancel\([^)]*acting\.actor/.test(cancel.replace(/\s+/g, " ")), "the cancel route stores acting.actor");
 });

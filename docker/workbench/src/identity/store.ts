@@ -89,7 +89,8 @@ export async function users(db: Db, limit = 500) {
 export interface AuditEntry {
   actor_sub: string;
   subject_sub: string;
-  action: "impersonate.start" | "impersonate.end" | "impersonate.refused" | "request" | "audit.read" | "users.read";
+  action: "impersonate.start" | "impersonate.end" | "impersonate.refused" | "request" | "audit.read" | "users.read"
+    | "session.steer" | "session.cancel"; // rw-p4b-sessions round 2: an admin acting on a service's session
   reason?: string | null;
   method?: string | null;
   route?: string | null;

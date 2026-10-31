@@ -434,3 +434,104 @@ Deno.test({ name: "S9 the OWUI link only under WORKSPACE_OWUI_BASE_URL; Mattermo
   assertEquals(d.link?.href, `${OWUI_BASE}/c/chat-prof-p4b`);
   for (const k of ["ao", "nb"]) assertEquals((await cardsOf(pr)).get(L.jobs[k])?.link ?? null, null, `${k}: no link invented`);
 } });
+
+// ── round 2 (tester t-p4b-sessions attempt 1: F-cancel-actor-recorded, C2-service-step-ids-in-stream,
+// the admin's steer text, a terminal session's steer) ────────────────────────────────────────────
+async function serviceJob(prompt: string) {
+  const id = await submit(K.ao, { query: prompt, origin: "agent-org-advisory" });
+  await plantEvents(id, 1);
+  return id;
+}
+
+Deno.test({ name: "S10 a cancel records its actor; an admin's steer or cancel of a service job is in admin_audit", ...opts, fn: async () => {
+  const job = await serviceJob(`CancelMe${rnd()}`);
+  const ad = await new Browser().signIn("admin");
+  const audit0 = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE actor_sub = $1 AND action IN ('session.steer', 'session.cancel')`, [sub("admin")]))[0].n;
+  const st = await ad.req("POST", `${C}/sessions/${job}/steer`, { step_id: "p2", text: `admin steer to audit ${rnd()}` });
+  assertEquals(st.status, 201, st.text);
+  const can = await ad.req("POST", `${C}/sessions/${job}/cancel`, { reason: "tester repro: the admin cancels a service job" });
+  assertEquals(can.status, 200, can.text);
+  const rec = await sql<{ actor_sub: string; caller: string; outcome: string; reason: string }>(
+    `SELECT actor_sub, caller, outcome, reason FROM public.research_cancels WHERE job_id = $1`, [job]);
+  assertEquals(rec.length, 1, `the cancel is recorded: ${JSON.stringify(rec)}`);
+  assertEquals([rec[0].actor_sub, rec[0].caller], [sub("admin"), "workspace"]);
+  assert(["cancelled", "cancelling"].includes(rec[0].outcome), rec[0].outcome);
+  const aud = await sql<{ action: string; subject_sub: string; route: string }>(
+    `SELECT action, subject_sub, route FROM public.admin_audit WHERE actor_sub = $1 AND action IN ('session.steer', 'session.cancel') ORDER BY id DESC LIMIT 2`, [sub("admin")]);
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE actor_sub = $1 AND action IN ('session.steer', 'session.cancel')`, [sub("admin")]))[0].n, audit0 + 2);
+  assertEquals(aud.map((a) => a.action).sort(), ["session.cancel", "session.steer"]);
+  assert(aud.every((a) => a.subject_sub === "service:agent-org" && a.route.includes(job)), JSON.stringify(aud));
+  // append-only, like steers
+  let refused = "";
+  try { await sql(`UPDATE public.research_cancels SET actor_sub = 'x' WHERE job_id = $1`, [job]); } catch (e) { refused = String(e); }
+  assert(/append-only/.test(refused), `research_cancels is append-only: ${refused}`);
+  let nn = "";
+  try { await sql(`INSERT INTO public.research_cancels (job_id, actor_sub, outcome) VALUES ($1, NULL, 'cancelled')`, [job]); } catch (e) { nn = String(e); }
+  assert(/null value|not-null|violates/.test(nn), `no cancel without an actor: ${nn}`);
+  // a user cancelling their own job is recorded too, and is no admin action
+  const a = await new Browser().signIn("alice");
+  const own = await submit(K.owui, { query: `AliceCancels${rnd()}`, origin: "owui", on_behalf_of: sub("alice") });
+  assertEquals((await a.req("POST", `${C}/sessions/${own}/cancel`, {})).status, 200);
+  assertEquals((await sql(`SELECT actor_sub FROM public.research_cancels WHERE job_id = $1`, [own]))[0]?.actor_sub, sub("alice"));
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE route LIKE $1`, [`%${own}%`]))[0].n, 0);
+} });
+
+Deno.test({ name: "S11 the stream equals the card: a viewer who may not act gets no step id and no steer text of a service job", ...opts, fn: async () => {
+  const job = await serviceJob(`StreamEqCard${rnd()}`);
+  const words = `AdminSteerWords${rnd()}`;
+  const ad = await new Browser().signIn("admin");
+  assertEquals((await ad.req("POST", `${C}/sessions/${job}/steer`, { step_id: "p2", text: words })).status, 201);
+  const ca = await new Browser().signIn("carol");
+  const card = (await cardsOf(ca)).get(job);
+  assertEquals([card.can_act, card.next_steering_point.step_id], [false, null]);
+  const s = ca.stream(`${C}/sessions/${job}/stream`);
+  await sleep(2500);
+  await s.stop();
+  const cards = s.got.filter((e) => e.event === "card");
+  assert(cards.length > 0, "carol's stream sends the card");
+  const text = JSON.stringify(s.got);
+  assert(!text.includes('"p2"') && !text.includes('"p1"') && !text.includes('"p3"'), "no step id in carol's stream");
+  assert(!text.includes(words), "no steer text in carol's stream");
+  for (const e of cards) assertEquals(e.data.card.next_steering_point?.step_id ?? null, null);
+  // the shared research stays in it: the source and its trail
+  assert(cards.some((e) => (e.data.events ?? []).some((x: any) => x.type === "source" && x.trail)), "carol still sees the shared sources");
+  // the admin (who may act) gets the step ids and the text
+  const sa = ad.stream(`${C}/sessions/${job}/stream`);
+  await sleep(2500);
+  await sa.stop();
+  const ta = JSON.stringify(sa.got);
+  assert(ta.includes('"p2"') && ta.includes(words), "the admin's stream keeps step ids and the steer text");
+} });
+
+Deno.test({ name: "S12 an admin's steer text on a service job is the admin's (and the admins'): no other user reads it anywhere", ...opts, fn: async () => {
+  const job = await serviceJob(`SteerTextPrivate${rnd()}`);
+  const words = `AdminPrivateSteer${rnd()}`;
+  const ad = await new Browser().signIn("admin");
+  const st = await ad.req("POST", `${C}/sessions/${job}/steer`, { step_id: "p2", text: words });
+  assertEquals(st.status, 201, st.text);
+  const child = st.json.steer.child_job_id;
+  const ca = await new Browser().signIn("carol");
+  for (const p of [`${C}/sessions?limit=200`, `${C}/sessions?state=recent&limit=200`, `${C}/sessions/${job}`, `${C}/sessions/${child}`,
+    `${C}/sessions/${job}/flow`, `${C}/sessions/${child}/flow`, `${C}/jobs?kinds=research&limit=200`]) {
+    const r = await ca.req("GET", p);
+    assert(r.status < 500, `${p}: ${r.status}`);
+    assert(!r.text.includes(words), `carol reads the admin's steer text at ${p}`);
+  }
+  // the service's own question stays shared
+  assert((await ca.req("GET", `${C}/sessions/${job}`)).json.query.startsWith("SteerTextPrivate"), "the service job's question is shared");
+  // the admin and another admin read it
+  const tree = (await cardsOf(ad)).get(job).tree as any[];
+  assertEquals(tree.find((b) => b.id === child)?.query, words);
+} });
+
+Deno.test({ name: "S13 a cancelled or failed session's card offers no steer", ...opts, fn: async () => {
+  const job = await serviceJob(`TerminalNoSteer${rnd()}`);
+  await sql(`UPDATE public.research_jobs SET status = 'error', finished_at = now(), error = 'lab: failed' WHERE id = $1`, [job]);
+  const ad = await new Browser().signIn("admin");
+  const r = await ad.req("GET", `${C}/sessions?state=recent&limit=200`);
+  const c = (r.json.sessions as any[]).find((x) => x.id === job);
+  assert(c, "the failed session is listed (recent)");
+  assertEquals(c.next_steering_point, null);
+  const s = await ad.req("POST", `${C}/sessions/${job}/steer`, { step_id: "p2", text: "steer a failed job" });
+  assertEquals(s.status, 409, s.text);
+} });

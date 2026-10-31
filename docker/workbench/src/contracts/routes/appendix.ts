@@ -297,7 +297,7 @@ function registerSessionReads(app: ContractApp, deps: ContractDeps) {
         const l = await sessionCard(deps.db, id, owner, owui);
         const open = !!l && (l.card.state === "loading");
         if (l && (open || lastCard)) {
-          const evs = await sessionEvents(deps.db, l.rootId, l.foreign, after);
+          const evs = await sessionEvents(deps.db, l.rootId, l.view, l.own, after); // round 2: as the card shows it
           if (evs.length) after = Number(evs[evs.length - 1].id);
           const cd = JSON.stringify(StreamEvent.parse(wire({ event: "card", session: snap, card: l.card, events: evs })));
           if (cd !== lastCard || evs.length) await s.writeSSE({ event: "card", data: cd });

@@ -2,6 +2,9 @@
 // metadata, so a metadata filter returns nothing (fail closed).
 import type { Db } from "../db.ts";
 import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB, OWNERLESS_FOREIGN, type Viewer } from "../../documents/ownership.ts";
+// rw-p4b-sessions round 2: a steer branch's text (a person's words) reads as another user's for anyone
+// who may not act on its session and did not make the steer (sessions/repo.ts)
+import { STEER_TEXT_HIDDEN, type Who } from "../../sessions/repo.ts";
 
 interface JobRow {
   id: string;
@@ -84,9 +87,10 @@ export async function session(db: Db, id: string, who: Viewer) {
             j.session_id,
             CASE WHEN o.others THEN NULL ELSE j.thread_id END AS thread_id,
             j.created_at, j.started_at, j.finished_at, CASE WHEN o.others THEN NULL ELSE j.error END AS error
-       FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3", adminSeesOwnerless(who))} AS others) o
+       FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3", adminSeesOwnerless(who))}
+                                                              OR ${STEER_TEXT_HIDDEN("j", "$2", "$4", who)} AS others) o
       WHERE j.id = $1`,
-    [id, who.sub, who.key],
+    [id, who.sub, who.key, (who as Who).actor ?? who.sub],
   );
   return rows[0] ? shapeSession(rows[0]) : null;
 }
@@ -117,9 +121,10 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
                                  'query', CASE WHEN o.others THEN '' ELSE left(j.query, 200) END,
                                  'refinery_id', CASE WHEN o.others THEN NULL ELSE j.refinery_id END,
                                  'phase', progress ->> 'phase', 'error', CASE WHEN o.others THEN NULL ELSE error END) AS detail
-         FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4", adminSeesOwnerless(who))} AS others) o
+         FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4", adminSeesOwnerless(who))}
+                                                                OR ${STEER_TEXT_HIDDEN("j", "$3", "$5", who)} AS others) o
         WHERE ($1::text IS NULL OR j.status = $1) ORDER BY j.created_at DESC LIMIT $2`,
-      [state, limit, who.sub, who.key],
+      [state, limit, who.sub, who.key, (who as Who).actor ?? who.sub],
     );
     out.push(...rows.map((r) => ({ kind: "research", state: isTerminal(r.status) ? "current" : "loading", ...r })));
   }

@@ -10,7 +10,10 @@
 --      system:research.
 --   2. implementation_states.steer: retired - steer(sessionId, ...) has its backing (P4b wires the
 --      workbench's contract call to the P4a door), so it no longer answers not_implemented.
---   3. an idea's research job gets its idea owner's research_prompts row (see section 3 below).
+--   3. an idea's research job gets its idea owner's research_prompts row (see section 3 below), and
+--      (round 2) idea jobs 290 back-filled to service:idea-engagement move to their idea's owner.
+--   4. research_cancels: every cancel with its actor (append-only).
+--   5. admin_audit accepts session.steer / session.cancel (an admin acting on a service's job).
 -- Additive and idempotent; no table is dropped, no row deleted. Fresh-volume slot 320; live: psql -f
 -- WITH the new openbrain-research image (it writes actor_sub; the pre-P4b image would be refused by
 -- the NOT NULL). Revert: revert-research-sessions.sql.
@@ -65,5 +68,67 @@ SELECT j.id, i.owner_sub, 'system:idea-engagement', j.query
  WHERE j.branch_kind = 'idea' AND j.parent_job_id IS NULL AND i.owner_sub IS NOT NULL AND btrim(i.owner_sub) <> ''
    AND NOT EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = j.id)
 ON CONFLICT (job_id) DO NOTHING;
+
+-- 3b (round 2, tester T-M3): idea jobs that 290's back-fill already gave to `service:idea-engagement`
+--    (origin mattermost, caller idea-engagement: init-identity.sql's agent rule) move to their idea's
+--    owner too. What each moved row was is kept in research_prompt_moves, so the revert can put back
+--    exactly what 290 wrote (a re-apply moves it again; a row is recorded once).
+CREATE TABLE IF NOT EXISTS public.research_prompt_moves (
+    job_id         UUID PRIMARY KEY REFERENCES public.research_jobs(id) ON DELETE CASCADE,
+    prev_owner_sub TEXT NOT NULL,
+    prev_actor_sub TEXT NOT NULL,
+    moved_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO public.research_prompt_moves (job_id, prev_owner_sub, prev_actor_sub)
+SELECT p.job_id, p.owner_sub, p.actor_sub
+  FROM public.research_prompts p JOIN public.research_jobs j ON j.id = p.job_id JOIN public.ideas i ON i.id = j.refinery_id
+ WHERE j.branch_kind = 'idea' AND j.parent_job_id IS NULL AND p.owner_sub = 'service:idea-engagement'
+   AND i.owner_sub IS NOT NULL AND btrim(i.owner_sub) <> '' AND i.owner_sub <> p.owner_sub
+ON CONFLICT (job_id) DO NOTHING;
+UPDATE public.research_prompts p
+   SET owner_sub = i.owner_sub, actor_sub = 'system:idea-engagement'
+  FROM public.research_jobs j JOIN public.ideas i ON i.id = j.refinery_id
+ WHERE p.job_id = j.id AND j.branch_kind = 'idea' AND j.parent_job_id IS NULL AND p.owner_sub = 'service:idea-engagement'
+   AND i.owner_sub IS NOT NULL AND btrim(i.owner_sub) <> '' AND i.owner_sub <> p.owner_sub;
+
+-- 4 (round 2, tester F-cancel-actor-recorded): every cancel is recorded with its actor, as a steer is
+--    (research_cancels: APPEND-ONLY - a trigger refuses UPDATE, DELETE and TRUNCATE for every role).
+CREATE TABLE IF NOT EXISTS public.research_cancels (
+    id         BIGSERIAL PRIMARY KEY,
+    job_id     UUID NOT NULL REFERENCES public.research_jobs(id),
+    actor_sub  TEXT NOT NULL CHECK (btrim(actor_sub) <> ''),
+    caller     TEXT,
+    reason     TEXT,
+    outcome    TEXT NOT NULL CHECK (outcome IN ('cancelled', 'cancelling', 'already_terminal', 'refused_filing')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_research_cancels_job   ON public.research_cancels (job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_research_cancels_actor ON public.research_cancels (actor_sub, created_at);
+CREATE OR REPLACE FUNCTION public.research_cancels_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'research_cancels is append-only (% refused)', TG_OP USING ERRCODE = 'insufficient_privilege';
+END $$;
+DROP TRIGGER IF EXISTS trg_research_cancels_append_only ON public.research_cancels;
+CREATE TRIGGER trg_research_cancels_append_only BEFORE UPDATE OR DELETE ON public.research_cancels
+    FOR EACH ROW EXECUTE FUNCTION public.research_cancels_append_only();
+DROP TRIGGER IF EXISTS trg_research_cancels_no_truncate ON public.research_cancels;
+CREATE TRIGGER trg_research_cancels_no_truncate BEFORE TRUNCATE ON public.research_cancels
+    FOR EACH STATEMENT EXECUTE FUNCTION public.research_cancels_append_only();
+ALTER TABLE public.research_cancels ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS research_cancels_service_role_all ON public.research_cancels;
+CREATE POLICY research_cancels_service_role_all ON public.research_cancels FOR ALL TO service_role USING (true) WITH CHECK (true);
+GRANT SELECT, INSERT ON public.research_cancels TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.research_cancels_id_seq TO service_role;
+ALTER TABLE public.research_prompt_moves ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS research_prompt_moves_service_role_all ON public.research_prompt_moves;
+CREATE POLICY research_prompt_moves_service_role_all ON public.research_prompt_moves FOR ALL TO service_role USING (true) WITH CHECK (true);
+GRANT SELECT ON public.research_prompt_moves TO service_role;
+
+-- 5 (round 2, 07-MULTI-USER "every admin action goes to an append-only audit log"): an admin's steer or
+--    cancel of a service's job is an admin_audit row (the workbench writes it before it acts).
+ALTER TABLE public.admin_audit DROP CONSTRAINT IF EXISTS admin_audit_action_check;
+ALTER TABLE public.admin_audit ADD CONSTRAINT admin_audit_action_check CHECK (action IN (
+    'impersonate.start', 'impersonate.end', 'impersonate.refused', 'request', 'users.read', 'audit.read',
+    'session.steer', 'session.cancel'));
 
 COMMIT;

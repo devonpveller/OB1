@@ -37,7 +37,7 @@ import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from ".
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
 import {
-  appendEvent, buildTreeReport, closeBranch, createSteer, interHubEvent, interHubGaps, interHubRef, LANE_DEFAULT, LANE_KINDS,
+  appendEvent, buildTreeReport, closeBranch, createSteer, recordCancel, interHubEvent, interHubGaps, interHubRef, LANE_DEFAULT, LANE_KINDS,
   learningRecords, loadClaimGraph, loadTree, openGapBranches, readLaneConcurrency, stageEvent, SteerError, treeEstimate,
 } from "./tree.ts";
 
@@ -1393,14 +1393,19 @@ Deno.serve({ port: PORT }, async (req) => {
       if (typeof b?.reason === "string" && b.reason.trim()) reason = b.reason.trim().slice(0, 200);
     } catch { /* no body is fine */ }
     const c = await pool.connect();
+    // rw-p4b-sessions round 2: every cancel the owner (or an admin) asked for is recorded with its actor
+    const callerName = callerOf(req, url)?.name ?? null;
+    const record = (outcome: string) => recordCancel(c, { jobId: id, actorSub: acting.actor, caller: callerName, reason, outcome });
     try {
       if (await cancelQueued(c, id, reason)) {
+        await record("cancelled");
         console.log(`[job ${id}] cancelled while queued: ${reason}`);
         return Response.json({ job_id: id, status: "cancelled" });
       }
       const st = await jobStatus(c, id);
       if (st === null) return Response.json({ error: "not found" }, { status: 404 });
       if (st === "running" && filingJobs.has(id)) {
+        await record("refused_filing");
         // Past the point of no return: the curator is filing this run. The job will
         // end with its real outcome; say so instead of promising a cancel.
         return Response.json({
@@ -1409,9 +1414,11 @@ Deno.serve({ port: PORT }, async (req) => {
         }, { status: 409 });
       }
       if (st === "running") {
+        await record("cancelling");
         dispatcher.cancelRunning(id, reason);
         return Response.json({ job_id: id, status: "cancelling" }, { status: 202 });
       }
+      await record("already_terminal");
       return Response.json({ job_id: id, status: st, note: "already terminal" });
     } finally { c.release(); }
   }

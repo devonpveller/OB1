@@ -233,3 +233,21 @@ describe("P4: the research flow panel", () => {
     expect(container.querySelector(".ws-summary")!.textContent).toContain("another user's session");
   });
 });
+
+describe("round 2: a cancelled or failed session's card offers no steer", () => {
+  it("no 'steer here' on its steering stage, and the steer buttons are disabled", async () => {
+    const failed = card(8, { status: "error", state: "current", next_steering_point: null });
+    fakeApi([["GET", "/workbench/contract/sessions", () => ({ sessions: [failed] })]]);
+    const { container } = render(<SessionsPanel params={{}} />);
+    await act(async () => settle(10));
+    const li = await openCard(container, id(8));
+    await act(async () => {
+      streams[0].on({ event: "card", data: { card: failed, events: [{ id: 1, job_id: id(8), step_id: "s2", type: "stage", kind: "steering", payload: { phase: "plan" }, trail: null }] } });
+      await settle();
+    });
+    expect(li.querySelector("[data-action=steer-at]")).toBeNull();
+    fireEvent.change(li.querySelector("[data-input=text]")!, { target: { value: "x" } });
+    expect((li.querySelector("[data-action=steer]") as HTMLButtonElement).disabled).toBe(true);
+    expect(li.querySelector("[data-field=next-steer]")!.textContent).toContain("none yet");
+  });
+});

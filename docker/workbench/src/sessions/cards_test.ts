@@ -3,7 +3,7 @@
 // interjection lands, the branch tree, and who may steer or cancel from it.
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
-  adminOf, badgeOf, cardOf, CARD_KEYS, type CardInput, linkOf, mayActOn, nextSteeringPoint, owuiBase, treeOf, waitingOn,
+  adminOf, badgeOf, cardOf, CARD_KEYS, type CardInput, linkOf, mayActOn, nextSteeringPoint, owuiBase, redactEvents, treeOf, waitingOn,
 } from "./cards.ts";
 
 const J = "99999999-9999-4999-8999-999999999999";
@@ -130,4 +130,47 @@ Deno.test("P4b current artifact: the latest source when one arrived, else the st
   ];
   assertEquals(cardOf(base({ events: ev }), "").current_artifact, { kind: "source", label: "https://ex.org/a" });
   assertEquals(cardOf(base({ events: ev.slice(0, 1) }), "").current_artifact, { kind: "stage", label: "gather" });
+});
+
+// ── round 2 (tester t-p4b-sessions) ─────────────────────────────────────────────────────────────
+const EV = [
+  { id: 1, job_id: J, step_id: "s2", type: "stage", kind: "steering", payload: { phase: "plan", message: "planning" }, trail: null, created_at: "t" },
+  { id: 2, job_id: J, step_id: "s2", type: "human_steer", kind: "steering", payload: { steer_id: "st1", child_job_id: "c1", step_id: "s2", text: "the admin's own words", topic_estimate: "t", anchor: "a" }, trail: null, created_at: "t" },
+  { id: 3, job_id: "c1", step_id: null, type: "branch_open", kind: "steering", payload: { steer_id: "st1", steer_kind: "human", parent_job_id: J, step_id: "s2", topic_estimate: "t", anchor: "a" }, trail: null, created_at: "t" },
+  { id: 4, job_id: J, step_id: null, type: "source", kind: "due_process", payload: { url: "https://ex.org/a", outcome: "admitted" }, trail: { kind: "admitted", url: "https://ex.org/a" }, created_at: "t" },
+];
+
+Deno.test("P4b round 2 stream = card: a viewer who may not act gets no step id and no steer text (C2-service-step-ids-in-stream)", () => {
+  const r = redactEvents(EV, "nonactor", new Set());
+  assert(r.every((e) => e.step_id === null && (e.payload as Record<string, unknown> | null)?.step_id === undefined), JSON.stringify(r));
+  const s = JSON.stringify(r);
+  assert(!s.includes("the admin's own words") && !s.includes('"s2"'), s);
+  // shared research stays: the stage phase and the source with its trail
+  assertEquals(r.find((e) => e.type === "source")?.trail, { kind: "admitted", url: "https://ex.org/a" });
+  assertEquals(r.find((e) => e.type === "stage")?.payload?.phase, "plan");
+  // the actor of that steer keeps its own text; one who may act keeps everything
+  assert(JSON.stringify(redactEvents(EV, "nonactor", new Set(["st1"]))).includes("the admin's own words"));
+  assertEquals(redactEvents(EV, "none", new Set()), EV);
+  // another user's session: stages only, phase only (as before)
+  const f = redactEvents(EV, "foreign", new Set());
+  assertEquals(f.map((e) => [e.type, e.step_id, e.payload]), [["stage", null, { phase: "plan" }]]);
+});
+
+Deno.test("P4b round 2: a steer's text is its actor's and the admins' (07: a person's prompt) - the tree shows it to no one else", () => {
+  const rows = [
+    { id: J, parent_job_id: null, branch_kind: "root", rooted_step_id: null, status: "running", query: "service question", created_at: "t" },
+    { id: "c1", parent_job_id: J, branch_kind: "steer", rooted_step_id: "s2", status: "queued", query: "the admin's own words", created_at: "t" },
+  ];
+  const carol = treeOf(rows, false, false, new Set());
+  assertEquals(carol.map((b) => b.query), ["service question", ""], "a non-actor: the service's question yes, the steer text no");
+  assertEquals(treeOf(rows, false, true, new Set()).map((b) => b.query), ["service question", "the admin's own words"]);
+  assertEquals(treeOf(rows, false, false, new Set(["c1"])).map((b) => b.query), ["service question", "the admin's own words"], "its actor");
+});
+
+Deno.test("P4b round 2: a cancelled or failed session's card offers no steer", () => {
+  const ev = [{ id: 1, job_id: J, step_id: "s2", type: "stage", kind: "steering", payload: { phase: "plan" }, trail: null, created_at: "t" }];
+  for (const status of ["cancelled", "error"]) {
+    assertEquals(cardOf(base({ status, events: ev }), "").next_steering_point, null, status);
+  }
+  assertEquals(cardOf(base({ status: "done", events: ev }), "").next_steering_point?.step_id, "s2", "a done session is still steered (P4a STEERABLE)");
 });

@@ -177,7 +177,7 @@ export function SessionsPanel(p: PanelProps) {
           {(events[c.id] ?? []).map((e) => (
             <li key={e.id} data-event={e.id} data-kind={e.kind} data-type={e.type}>
               <span className={`ws-event-kind ws-event-${e.kind}`}>{e.kind === "steering" ? "steering" : "due process"}</span> {eventLabel(e)}
-              {c.can_act && steerable(e) && (
+              {c.can_act && c.status !== "cancelled" && c.status !== "error" && steerable(e) && (
                 <button type="button" data-action="steer-at" data-step={e.step_id ?? ""} onClick={() => setForm((f) => ({ ...f, step: e.step_id ?? "" }))}>
                   steer here
                 </button>

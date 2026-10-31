@@ -18,6 +18,22 @@ import { card, flow, isAdmin, sessions, stepKind } from "../../sessions/repo.ts"
 import { owuiBase } from "../../sessions/cards.ts";
 import { type ResearchActions, researchActions } from "../../sessions/client.ts";
 import { refetchClient } from "../../documents/clients.ts";
+import { audit } from "../../identity/store.ts";
+import type { Loaded, Who } from "../../sessions/repo.ts";
+
+// Round 2 (07-MULTI-USER: every admin action goes to the append-only audit log): an admin acting on a
+// service's session is an admin_audit row, written BEFORE the act; a failed write refuses the act.
+async function auditAdminAct(deps: ContractDeps, who: Who & { actor: string }, l: Loaded, action: "session.steer" | "session.cancel", route: string) {
+  if (!isAdmin(who) || !l.owner || !l.owner.startsWith("service:") || l.owner === who.sub) return true;
+  try {
+    await audit(deps.db, { actor_sub: who.actor, subject_sub: l.owner, action, method: "POST", route });
+    return true;
+  } catch (e) {
+    console.error("[sessions] admin_audit write failed, the act was refused:", (e as Error).message);
+    return false;
+  }
+}
+const AUDIT_FAILED = "this admin action could not be recorded in the admin audit log, so it was not run";
 
 const T = ["running sessions (P4b)"];
 const idParam = z.object({ id: pathParam("id", FX.job, "research job id") });
@@ -87,6 +103,9 @@ export function registerSessions(app: ContractApp, deps: ContractDeps, s: Sessio
       const before = await card(deps.db, id, who, s.owui);
       if (!before || !before.card.can_act) return c.json({ error: "no session with this id" }, 404);
       if (!s.research) return c.json({ error: UNCONFIGURED }, 503);
+      if (before.card.status === "cancelled" || before.card.status === "error") {
+        return c.json({ error: `a ${before.card.status} session is not steered` }, 409);
+      }
       const kind = await stepKind(deps.db, id, b.step_id);
       if (kind === null) return c.json({ error: "this session has no such step" }, 400);
       if (kind !== "steering") return c.json({ error: "not a steering point: a due-process stage is not steered", detail: { step_id: b.step_id, kind } }, 409);
@@ -103,6 +122,7 @@ export function registerSessions(app: ContractApp, deps: ContractDeps, s: Sessio
         }
         seeds = [{ url: b.add_source.url, title: title || b.add_source.url, content }];
       }
+      if (!(await auditAdminAct(deps, who, before, "session.steer", `${PREFIX}/sessions/${id}/steer`))) return c.json({ error: AUDIT_FAILED }, 503);
       const r = await s.research.steer(id, {
         step_id: b.step_id, text: b.text, ...(b.contract ? { contract: b.contract } : {}),
         ...(b.context_snapshot ? { context_snapshot: b.context_snapshot } : {}), ...(seeds ? { seed_sources: seeds } : {}),
@@ -136,6 +156,7 @@ export function registerSessions(app: ContractApp, deps: ContractDeps, s: Sessio
       const l = await card(deps.db, id, who, s.owui);
       if (!l || !l.card.can_act) return c.json({ error: "no session with this id" }, 404);
       if (!s.research) return c.json({ error: UNCONFIGURED }, 503);
+      if (!(await auditAdminAct(deps, who, l, "session.cancel", `${PREFIX}/sessions/${id}/cancel`))) return c.json({ error: AUDIT_FAILED }, 503);
       const r = await s.research.cancel(id, c.req.valid("json").reason ?? null, { sub: who.sub, actor: who.actor, admin: isAdmin(who) });
       if (r.status === 404) return c.json({ error: "no session with this id" }, 404);
       if (r.status >= 500 || r.status === 401 || r.status === 403) return c.json({ error: `the research service answered ${r.status}` }, 502);

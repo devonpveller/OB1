@@ -45,7 +45,10 @@ param(
   [string]$BaseSha = 'bc6d3a6',
   [switch]$Red,
   [switch]$KeepImages,
-  [switch]$SkipSweeps
+  [switch]$SkipSweeps,
+  # round 2: with -Red against a RECENT base that already passes the older cases, the case-name prefixes
+  # that must FAIL there (comma list, e.g. 'S10,S11,S12,S13'); the T-M3 migration probe must fail too
+  [string]$RedCases = ''
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -320,7 +323,12 @@ try {
   Save 'sessions-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|=>|^\s*[-+]\s|Values|Expected|Actual' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = Summary $clean
-  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0 -and [int]$sum.Groups[3].Value -ge 9) "RED: every sessions case fails on the base ($($sum.Value))" }
+  if ($Red -and $RedCases) {
+    foreach ($rc0 in ($RedCases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+      Check ($clean -match "(?m)^\s*$([regex]::Escape($rc0))\b.*\.\.\. FAILED") "RED: $rc0 fails on the base $BaseSha"
+    }
+  }
+  elseif ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0 -and [int]$sum.Groups[3].Value -ge 9) "RED: every sessions case fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 9) "the sessions integration test ($($sum.Value))" }
 
   if (-not $Red) {
@@ -329,6 +337,45 @@ try {
     $nul = (Dk exec $db psql -U postgres -d openbrain -tAc "select count(*) from research_steers where actor_sub is null or btrim(actor_sub) = ''").Trim()
     Save 'steer-actors.log' "actors: $act`nunrecorded: $nul"
     Check ($nul -eq '0') "every steer records actor_sub ($act)"
+  }
+
+  # round 2 (tester T-M3): an idea job from before 320 that 290's back-fill gave to service:idea-engagement
+  # becomes its idea owner's when 320 is applied; the revert gives it back to 290's owner (the tester's
+  # repro: revert 320, engage an idea, back-fill with 290, re-apply 320). The base's own files under -Red.
+  if ((-not $Red) -or $RedCases) {
+    Write-Host '[5c] migration 320 over 290-back-filled idea jobs (T-M3)'
+    function Q([string]$s) { return ((Dk exec $db psql -U postgres -d openbrain -tAc $s) | Out-String).Trim() }
+    function F([string]$file, [string]$pgopt = '') {
+      $null = Dk cp (Join-Path $composeDir $file) "${db}:/tmp/$file"
+      if ($pgopt) { return Dk exec -e "PGOPTIONS=$pgopt" $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f "/tmp/$file" }
+      return Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f "/tmp/$file"
+    }
+    $null = F 'revert-research-sessions.sql'
+    $tmIdea = ((Q "insert into ideas (title, summary, status, owner_sub, thread_root) values ('TM3 idea', 'pre 320', 'new', 'tm3-idea-owner', 'mm-tm3') returning id") -split "`n")[0].Trim()
+    $null = Q "insert into idea_revisions (idea_id, revision, summary) values ('$tmIdea', 1, 'pre 320')"
+    $tmJob = Q "select id from research_jobs where refinery_id = '$tmIdea' and branch_kind = 'idea' order by created_at desc limit 1"
+    $null = F 'init-identity.sql' '-c workspace.default_sub=tm3-default-sub'
+    $a290 = Q "select owner_sub || ' ' || actor_sub from research_prompts where job_id = '$tmJob'"
+    $null = F 'init-research-sessions.sql'; $ra = $script:rc
+    $a320 = Q "select owner_sub || ' ' || actor_sub from research_prompts where job_id = '$tmJob'"
+    $left = Q "select count(*) from research_prompts p join research_jobs j on j.id = p.job_id join ideas i on i.id = j.refinery_id where j.branch_kind = 'idea' and p.owner_sub = 'service:idea-engagement' and btrim(coalesce(i.owner_sub, '')) <> ''"
+    $tm = "after 290: $a290; after 320 (exit $ra): $a320; service:idea-engagement idea jobs with an owned idea left: $left"
+    Write-Host "    $tm"
+    $ok = ($ra -eq 0) -and $a290 -eq 'service:idea-engagement system:backfill' -and $a320 -like 'tm3-idea-owner *' -and $left -eq '0'
+    if ($Red) { Check (-not $ok) "RED: T-M3 on the base: the 290-back-filled idea job stays service-owned ($tm)" }
+    else {
+      Check $ok "T-M3 a 290-back-filled idea job becomes its idea owner's after 320, none left ($tm)"
+      # the revert gives it back to exactly what 290 wrote; 320 then moves it again
+      $null = F 'revert-research-sessions.sql'; $rr = $script:rc
+      $aRev = Q "select owner_sub || ' ' || actor_sub from research_prompts where job_id = '$tmJob'"
+      $null = F 'init-research-sessions.sql'
+      $aRe = Q "select owner_sub || ' ' || actor_sub from research_prompts where job_id = '$tmJob'"
+      $tm2 = "after revert (exit $rr): $aRev; after re-apply: $aRe"
+      Write-Host "    $tm2"
+      Check (($rr -eq 0) -and $aRev -eq 'service:idea-engagement system:backfill' -and $aRe -like 'tm3-idea-owner *') "T-M3 the revert restores 290's owner; 320 moves it again ($tm2)"
+      $tm += "`n$tm2"
+    }
+    Save 'migration-tm3.log' $tm
   }
 
   $sweeps = @(@('carol', 'dave', 'on'), @('admin', 'dave', 'on'), @('carol', 'dave', 'off'))

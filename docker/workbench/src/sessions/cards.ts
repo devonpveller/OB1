@@ -57,6 +57,8 @@ export interface CardInput {
   // the job came from an idea (inlet kind idea): not private - it decides the badge for every viewer
   idea_inlet?: boolean;
   can_act: boolean;
+  // round 2: the branch ids of the viewer's own steers - their text stays theirs
+  own_steers?: ReadonlySet<string>;
   branches: BranchRow[];
   events: EventRow[];
 }
@@ -129,7 +131,11 @@ export function nextSteeringPoint(jobId: string, events: EventRow[], canAct: boo
 }
 
 // ── the branch tree ────────────────────────────────────────────────────────────────────────────
-export function treeOf(rows: BranchRow[], foreign: boolean, canAct: boolean) {
+// A steer branch's question IS the steer's text - the words a person typed (07-MULTI-USER: original
+// prompts are private). Round 2 (operator 2026-10-31): it is shown to who may act on the session (its
+// owner; a service's session: the admins) and to the steer's own actor (ownSteers: the viewer's branch
+// ids), never to every user. Any other branch's question is the session's, shared unless foreign.
+export function treeOf(rows: BranchRow[], foreign: boolean, canAct: boolean, ownSteers: ReadonlySet<string> = new Set()) {
   return rows.map((b) => ({
     id: b.id,
     parent_job_id: b.parent_job_id,
@@ -139,9 +145,31 @@ export function treeOf(rows: BranchRow[], foreign: boolean, canAct: boolean) {
     // a steer's branch that has not started yet: what the card shows the moment a steer is accepted
     pending: b.branch_kind !== "root" && b.status === "queued",
     rooted_step_id: canAct ? b.rooted_step_id : null,
-    query: foreign ? "" : b.query,
+    query: foreign || (b.branch_kind === "steer" && !canAct && !ownSteers.has(b.id)) ? "" : b.query,
     created_at: b.created_at,
   }));
+}
+
+// ── what the events of a session carry for one viewer (round 2: the stream = the card) ─────────
+// "none": one who may act - everything. "nonactor": shared research, yet a viewer who may not act gets
+// no step id (rw-identity round 5: step ids serve only who may steer) and no steer text but their own
+// (ownSteers: the viewer's steer ids). "foreign": another user's session - stage phases only (round 4).
+export type EventView = "none" | "nonactor" | "foreign";
+const STEP_FREE = (p: Record<string, unknown> | null, keep: string[]) =>
+  p ? Object.fromEntries(Object.entries(p).filter(([k]) => keep.includes(k))) : p;
+export function redactEvents(rows: EventRow[], view: EventView, ownSteers: ReadonlySet<string>): EventRow[] {
+  if (view === "none") return rows;
+  if (view === "foreign") {
+    return rows.filter((e) => e.type === "stage").map((e) => ({ ...e, step_id: null, trail: null, payload: { phase: e.payload?.phase ?? null } }));
+  }
+  return rows.map((e) => {
+    const own = typeof e.payload?.steer_id === "string" && ownSteers.has(e.payload.steer_id as string);
+    let payload = e.payload;
+    if (e.type === "human_steer") payload = own ? STEP_FREE(e.payload, ["steer_id", "child_job_id", "text"]) : STEP_FREE(e.payload, ["steer_id", "child_job_id"]);
+    else if (e.type === "branch_open" || e.type === "branch_close") payload = STEP_FREE(e.payload, ["steer_id", "steer_kind", "parent_job_id"]);
+    else if (payload && "step_id" in payload) payload = STEP_FREE(payload, Object.keys(payload).filter((k) => k !== "step_id"));
+    return { ...e, step_id: null, payload };
+  });
 }
 
 // ── authority ──────────────────────────────────────────────────────────────────────────────────
@@ -188,7 +216,7 @@ export function flatLink(l: Link | null) {
 
 export function cardOf(r: CardInput, owui: string) {
   const phase = String(r.progress?.phase ?? r.status);
-  const tree = treeOf(r.branches, r.foreign, r.can_act);
+  const tree = treeOf(r.branches, r.foreign, r.can_act, r.own_steers);
   const openChildren = tree.filter((b) => b.id !== r.id && b.open).length;
   return {
     id: r.id,
@@ -202,7 +230,8 @@ export function cardOf(r: CardInput, owui: string) {
     phase,
     current_artifact: currentArtifact(r.id, r.events, phase),
     waiting_on: waitingOn(r.status, phase, openChildren, r.queue_position),
-    next_steering_point: nextSteeringPoint(r.id, r.events, r.can_act),
+    // a cancelled or failed line is not steered (P4a STEERABLE): its card offers no steering point
+    next_steering_point: r.status === "cancelled" || r.status === "error" ? null : nextSteeringPoint(r.id, r.events, r.can_act),
     tree,
     can_act: r.can_act,
     created_at: r.created_at,

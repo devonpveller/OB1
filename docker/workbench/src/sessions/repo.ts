@@ -2,11 +2,16 @@
 // subject (subject_sub) where it is read - FOREIGN_JOB (documents/ownership.ts) - so a card, a stream
 // event and a flow row of another user's job never carry its original prompt, its inlet, its branch
 // texts, its step ids or its per-source events (07-MULTI-USER; rw-identity round 4-5 allow-list).
+// Round 2 (tester t-p4b-sessions): a viewer who may NOT act on a shared session reads its stream as its
+// card shows it - no step ids, no steer text but their own (cards.ts redactEvents) - and a steer's text
+// (a person's own words) is read only by who may act and by the steer's actor (STEER_TEXT_HIDDEN).
 // The owner's subject is read to decide who may act and never leaves this module.
 import type { Db } from "../contracts/db.ts";
 import { adminSeesOwnerless, FOREIGN_JOB, ownerlessOwner, type Viewer } from "../documents/ownership.ts";
 import { identityConfig } from "../middleware/identity.ts";
-import { adminOf, type BranchRow, cardOf, type Card, type EventRow, type InletRef, isOpen, mayActOn } from "./cards.ts";
+import {
+  adminOf, type BranchRow, cardOf, type Card, type EventRow, type EventView, type InletRef, isOpen, mayActOn, redactEvents,
+} from "./cards.ts";
 
 export interface Who extends Viewer {
   actor?: string;
@@ -17,6 +22,7 @@ export interface Who extends Viewer {
 interface JobRow {
   id: string;
   root_id: string;
+  branch_kind: string;
   status: string;
   origin: string;
   caller: string | null;
@@ -37,12 +43,29 @@ export function isAdmin(who: Who): boolean {
   return adminOf(who, identityConfig());
 }
 
+const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+// SQL: job `j` is a steer branch whose text the viewer may not read - they may not act on its session
+// (the viewer.ts MAY_ACT rule, with the request's admin flag) and they did not make that steer.
+// `sub` / `actor` are SQL expressions (bound parameters).
+export function STEER_TEXT_HIDDEN(j: string, sub: string, actor: string, who: Who): string {
+  const admin = isAdmin(who) ? "true" : "false";
+  const o = ownerlessOwner();
+  const root = `coalesce(${j}.root_job_id, ${j}.id)`;
+  return `(${j}.branch_kind = 'steer'
+     AND NOT EXISTS (SELECT 1 FROM public.research_steers st_h WHERE st_h.child_job_id = ${j}.id AND st_h.actor_sub IN (${sub}, ${actor}))
+     AND NOT (CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts rp_h WHERE rp_h.job_id = ${root})
+                   THEN EXISTS (SELECT 1 FROM public.research_prompts rp_h WHERE rp_h.job_id = ${root}
+                                  AND (rp_h.owner_sub = ${sub} OR (${admin} AND rp_h.owner_sub LIKE 'service:%')))
+                   ELSE ${o === null ? "false" : `${sub} = ${lit(o)}`} END))`;
+}
+
 async function job(db: Db, id: string, who: Who): Promise<JobRow | null> {
   const rows = await db.query<JobRow>(
-    `SELECT j.id::text, coalesce(j.root_job_id, j.id)::text AS root_id, j.status, j.origin, j.caller,
+    `SELECT j.id::text, coalesce(j.root_job_id, j.id)::text AS root_id, j.branch_kind, j.status, j.origin, j.caller,
             CASE WHEN o.others THEN NULL ELSE j.inlet_ref END AS inlet_ref,
             CASE WHEN o.others THEN NULL ELSE j.refinery_id::text END AS refinery_id,
-            CASE WHEN o.others THEN '' ELSE j.query END AS query,
+            CASE WHEN o.others OR ${STEER_TEXT_HIDDEN("j", "$2", "$4", who)} THEN '' ELSE j.query END AS query,
             j.progress ->> 'phase' AS phase, j.created_at, j.started_at, j.finished_at,
             coalesce(j.inlet_ref ->> 'kind' = 'idea', false) AS idea_inlet,
             CASE WHEN j.status = 'queued' THEN (SELECT count(*) + 1 FROM public.research_jobs q
@@ -52,7 +75,7 @@ async function job(db: Db, id: string, who: Who): Promise<JobRow | null> {
        FROM public.research_jobs j
        CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$2", "$3", adminSeesOwnerless(who))} AS others) o
       WHERE j.id = $1`,
-    [id, who.sub, who.key],
+    [id, who.sub, who.key, who.actor ?? who.sub],
   );
   return rows[0] ?? null;
 }
@@ -65,33 +88,38 @@ async function branches(db: Db, rootId: string): Promise<BranchRow[]> {
   );
 }
 
-// The tree's events after `after` (oldest first). Another user's tree: its stage events only, each
-// reduced to its phase and marker - no step id, no message, no trail, no source, no steer text.
-export async function events(db: Db, rootId: string, foreign: boolean, after = 0, limit = 500): Promise<EventRow[]> {
+// The viewer's own steers in a tree: their steer ids and their branch ids (the text stays theirs).
+async function ownSteers(db: Db, rootId: string, who: Who): Promise<Set<string>> {
+  const rows = await db.query<{ id: string; child: string }>(
+    `SELECT id::text, child_job_id::text AS child FROM public.research_steers WHERE root_job_id = $1::uuid AND actor_sub IN ($2, $3)`,
+    [rootId, who.sub, who.actor ?? who.sub],
+  );
+  return new Set(rows.flatMap((r) => [r.id, r.child]));
+}
+
+// The tree's events after `after` (oldest first), as `view` may read them (cards.ts redactEvents).
+// Another user's tree: stage events only, read so in SQL too (nothing else is fetched).
+export async function events(db: Db, rootId: string, view: EventView, own: ReadonlySet<string>, after = 0, limit = 500): Promise<EventRow[]> {
   const rows = await db.query<EventRow>(
     `SELECT id, job_id::text, step_id, type, kind, payload, trail, created_at
        FROM public.research_job_events
       WHERE root_job_id = $1::uuid AND id > $2 AND ($3::boolean = false OR type = 'stage')
       ORDER BY id LIMIT $4`,
-    [rootId, after, foreign, limit],
+    [rootId, after, view === "foreign", limit],
   );
-  return rows.map((e) => ({
-    ...e,
-    id: Number(e.id),
-    ...(foreign ? { step_id: null, trail: null, payload: { phase: e.payload?.phase ?? null } } : {}),
-  }));
+  return redactEvents(rows.map((e) => ({ ...e, id: Number(e.id) })), view, own);
 }
 
-// The last `n` events of the tree plus the job's latest steering stage (where an interjection lands).
-async function recentEvents(db: Db, jobId: string, rootId: string, foreign: boolean): Promise<EventRow[]> {
+// The last events of the tree plus the job's latest steering stage (where an interjection lands).
+async function recentEvents(db: Db, jobId: string, rootId: string, view: EventView, own: ReadonlySet<string>): Promise<EventRow[]> {
   const last = await db.query<{ id: number }>(
     `SELECT coalesce(max(id), 0) AS id FROM public.research_job_events WHERE root_job_id = $1::uuid`, [rootId]);
   const from = Math.max(0, Number(last[0]?.id ?? 0) - 200);
-  const tail = await events(db, rootId, foreign, from, 200);
+  const tail = await events(db, rootId, view, own, from, 200);
   const steering = await db.query<EventRow>(
     `SELECT id, job_id::text, step_id, type, kind, payload, trail, created_at FROM public.research_job_events
       WHERE job_id = $1::uuid AND type = 'stage' AND kind = 'steering' ORDER BY id DESC LIMIT 1`, [jobId]);
-  const s = steering.map((e) => ({ ...e, id: Number(e.id), ...(foreign ? { step_id: null, trail: null, payload: { phase: e.payload?.phase ?? null } } : {}) }));
+  const s = redactEvents(steering.map((e) => ({ ...e, id: Number(e.id) })), view, own);
   const ids = new Set(tail.map((e) => e.id));
   return [...s.filter((e) => !ids.has(e.id)), ...tail].sort((a, b) => Number(a.id) - Number(b.id));
 }
@@ -100,6 +128,10 @@ export interface Loaded {
   card: Card;
   rootId: string;
   foreign: boolean;
+  view: EventView;
+  own: ReadonlySet<string>;
+  // the root's recorded owner (null = none) - for the route's audit of an admin's act; never sent
+  owner: string | null;
 }
 
 // One job's card, as `who` may see it; null = no such job.
@@ -107,15 +139,17 @@ export async function card(db: Db, id: string, who: Who, owui: string): Promise<
   const j = await job(db, id, who);
   if (!j) return null;
   const canAct = mayActOn(j.owner_sub, who, ownerlessOwner(), isAdmin(who));
+  const view: EventView = j.foreign_ ? "foreign" : canAct ? "none" : "nonactor";
+  const own = j.foreign_ ? new Set<string>() : await ownSteers(db, j.root_id, who);
   const tree = await branches(db, j.root_id);
-  const ev = await recentEvents(db, j.id, j.root_id, j.foreign_);
+  const ev = await recentEvents(db, j.id, j.root_id, view, own);
   const c = cardOf({
     id: j.id, status: j.status, origin: j.origin, caller: j.caller, inlet_ref: j.inlet_ref, refinery_id: j.refinery_id,
     query: j.query, progress: { phase: j.phase ?? j.status }, created_at: j.created_at, started_at: j.started_at,
     finished_at: j.finished_at, queue_position: j.queue_position, foreign: j.foreign_, idea_inlet: j.idea_inlet,
-    can_act: canAct, branches: tree, events: ev,
+    can_act: canAct, own_steers: own, branches: tree, events: ev,
   }, owui);
-  return { card: c, rootId: j.root_id, foreign: j.foreign_ };
+  return { card: c, rootId: j.root_id, foreign: j.foreign_, view, own, owner: j.owner_sub };
 }
 
 // sessions(state): the root sessions that are running (queued or running, or with an open branch) -
@@ -140,13 +174,14 @@ export async function sessions(db: Db, state: string, limit: number, who: Who, o
 
 // The research flow: every source the tree met, in order, each with its stages (the trail entries the
 // pre-ingestion stage recorded for it) - another user's tree withholds them (the round-4 allow-list).
+// A source carries no step id and no steer text: shared research, the same for whoever may read it.
 export async function flow(db: Db, id: string, who: Who) {
   const j = await job(db, id, who);
   if (!j) return null;
   const tree = await branches(db, j.root_id);
   const running = tree.some((b) => isOpen(b.status));
   if (j.foreign_) return { session_id: j.id, running, withheld: true, sources: [] };
-  const ev = (await events(db, j.root_id, false, 0, 2000)).filter((e) => e.type === "source");
+  const ev = (await events(db, j.root_id, "none", new Set(), 0, 2000)).filter((e) => e.type === "source");
   const byUrl = new Map<string, { url: string; job_id: string; stages: { kind: string; at: string; trail: Record<string, unknown> }[] }>();
   for (const e of ev) {
     const url = String(e.payload?.url ?? e.trail?.url ?? "");

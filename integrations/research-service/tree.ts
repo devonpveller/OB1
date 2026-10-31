@@ -280,6 +280,21 @@ export function seedSourcesOf(v: unknown): SeedSource[] | null {
   });
 }
 
+/**
+ * rw-p4b-sessions round 2: a cancel is recorded like a steer - who acted (actor_sub, required), the
+ * caller key, the reason and what the cancel did - in research_cancels (append-only, migration 320).
+ */
+export async function recordCancel(
+  c: Q, r: { jobId: string; actorSub: string | null; caller: string | null; reason: string | null; outcome: string },
+): Promise<void> {
+  const actor = (r.actorSub ?? "").trim();
+  if (!actor) throw new SteerError(400, "bad_request", "a cancel records who acted (actor_sub)");
+  await c.queryObject(
+    `INSERT INTO public.research_cancels (job_id, actor_sub, caller, reason, outcome) VALUES ($1::uuid, $2, $3, $4, $5)`,
+    [r.jobId, actor, r.caller ?? null, r.reason ?? null, r.outcome],
+  );
+}
+
 /** States a steer may branch from. A cancelled or failed line is not steered (re-run it instead). */
 export const STEERABLE = new Set(["queued", "running", "done"]);
 
