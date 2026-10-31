@@ -23,7 +23,9 @@ include:
 #
 #   --profile research   openbrain-curator, openbrain-research
 #   --profile wiki       openbrain-wiki, -wiki-viewer, -workbench, -wiki-backup
-#   --profile notebook   surrealdb, open_notebook, open-notebook-backup
+#   --profile notebook   surrealdb, open-notebook-backup (the Open Notebook DATA side)
+#   --profile notebook-app   open_notebook, the app alone (intake-gate-relay round 2: the operator
+#                        retired it 2026-10-31 - OFF unless enabled; see open_notebook below)
 #   --profile idea-refinery   openbrain-idea-refinery (scheduled slice; pre-existing)
 #   --profile pantry     openbrain-pantry (household pantry / meal-planner HTTP service)
 #   --profile intake     openbrain-intake + its dbrelay and llmrelay (the content screen, I5;
@@ -1758,7 +1760,12 @@ services:
   open_notebook:
     # notebook group (sl-ob1-profiles). The Open Notebook UI/API - a SURFACE
     # onto openbrain-db, not an engine: the knowledge core is complete without it.
-    profiles: ["notebook"]
+    profiles: ["notebook-app"]
+    # ^ its OWN profile since intake-gate-relay round 2 (operator 2026-10-31: the app is stopped
+    # before intake writes bronze, DESIGN-intake section 12 item 1). `notebook-app` off = retired:
+    # no driver `up`, recovery `up` or watchdog repair starts it, and surrealdb +
+    # open-notebook-backup (profile `notebook`) keep running. Enable it to run the app again:
+    # `stack.py enable notebook-app` or COMPOSE_PROFILES in OB1/docker/.env.
     # IKS fork (open-notebook repo, Dockerfile.single) — OB1 Postgres is the
     # canonical source-of-truth. Locally built + tagged; never pulled.
     # Build/tag at promotion: docker build -t open_notebook:iks ...; see
@@ -1835,7 +1842,9 @@ services:
       - openbrain-wiki-data:/wiki:ro
     depends_on:
       - surrealdb
-    restart: always
+    # unless-stopped, not always: `always` brings a deliberately stopped app back on the next
+    # daemon restart (Docker Desktop restarts every Saturday 03:15); a `compose stop` must hold.
+    restart: unless-stopped
     pull_policy: never
 
   open-notebook-backup:
