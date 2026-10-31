@@ -7,9 +7,12 @@ import { Hono } from "hono";
 import { config } from "../config.ts";
 import * as repo from "../repositories/import.ts";
 import { logChange } from "../util/changeslog.ts";
+import { gateClient, gateErrorBody, type GatePage, isGateError } from "../fetch-gate/client.ts";
 
 export const imports = new Hono();
 export const jobs = new Hono();
+// the search gate's /v1/fetch, from the environment once (WORKBENCH_GATE_URL, WORKBENCH_GATE_KEY)
+const fetchViaGate = gateClient();
 
 async function callExtract(bytes: Uint8Array, filename: string): Promise<{
   markdown: string;
@@ -83,29 +86,22 @@ async function runPipeline(
   }
 }
 
-// URL-ingest pipeline (P6.2: ground with a document OR a URL). Fetches the URL
-// server-side and stores a crude HTML→text web_article source (an extractor for
-// rich HTML is a future registry entry; this covers the common case).
+// URL-ingest pipeline (P6.2: ground with a document OR a URL). The page comes from the search gate
+// (rw-workbench-fetch-posture): `page` is the gate's `ok` answer - intake's clean text, never the raw
+// page - fetched BEFORE the job exists (the route below), so this stage only stores it. The media type
+// and the provenance (origin URL, every redirect hop the gate judged, the final URL) go on the source.
 async function runUrlPipeline(
   jobId: string,
   url: string,
+  page: GatePage,
   targetNotebook: string | null,
   targetEntityIds: number[],
 ) {
   try {
-    await repo.updateJob(jobId, { status: "extracting" });
-    const r = await fetch(url, { redirect: "follow" });
-    if (!r.ok) throw new Error(`fetch ${r.status}`);
-    const raw = await r.text();
-    const md = raw
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
     await repo.updateJob(jobId, { status: "embedding" });
     const { sourceId, wasDuplicate } = await repo.ingestSource({
-      markdown: md, title: url, contentType: "web_article", url, targetNotebook, targetEntityIds,
+      markdown: page.text, title: url, contentType: "web_article", url, targetNotebook, targetEntityIds,
+      metadata: { media_type: page.mediaType, fetch: page.provenance },
     });
     await repo.updateJob(jobId, { status: "done", source_id: sourceId, duplicate: wasDuplicate });
     if (targetEntityIds.length) {
@@ -125,13 +121,24 @@ imports.post("/", async (c) => {
   const targetNotebook = (body["target_notebook"] as string) || null;
   const targetEntityIds = parseEntityIds(body["target_entity_ids"]);
 
+  // A URL: ONE call to the search gate, before any job exists. Not configured / unreachable = 503;
+  // refused / withheld / error = the gate's reason unchanged; nothing is stored either way.
+  let page: GatePage | null = null;
+  if (!(file instanceof File)) {
+    try {
+      page = await fetchViaGate(url);
+    } catch (e) {
+      if (isGateError(e)) return c.json(gateErrorBody(e), e.httpStatus as 422 | 502 | 503);
+      throw e;
+    }
+  }
   const job = await repo.createJob(targetEntityIds, targetNotebook, targetEntityIds.length > 0);
   // Fire-and-forget; state is durable in import_jobs.
   if (file instanceof File) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     runPipeline(job.id, bytes, file.name, targetNotebook, targetEntityIds);
   } else {
-    runUrlPipeline(job.id, url, targetNotebook, targetEntityIds);
+    runUrlPipeline(job.id, url, page!, targetNotebook, targetEntityIds);
   }
   return c.json({ job_id: job.id, status: job.status }, 202);
 });

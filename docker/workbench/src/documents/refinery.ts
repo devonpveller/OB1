@@ -30,13 +30,14 @@ import { parseDocument } from "./grammar.ts";
 import { listingRow, type OutboundLink, syncListing } from "./listing.ts";
 import { DocError, ownedPath, readDocument } from "./repo.ts";
 import { HOLDER_KIND } from "./paths.ts";
+import { gateErrorBody, isGateError } from "../fetch-gate/client.ts";
 
 export interface RefineryDeps {
   db: Db;
   reg: RegistryReader;
   embed: (t: string) => Promise<number[]>;
   chunk: (t: string) => string[];
-  // a link's new contents (replace on a held source with a URL); null when no fetch path is configured
+  // a link's new contents (replace on a held source with a URL), through the search gate only; null = none
   refetch: ((url: string) => Promise<{ title: string; content: string }>) | null;
   // the research service, with the workspace's own caller key (origin `workspace`, D17 item 1)
   research: ((body: Record<string, unknown>) => Promise<{ job_id: string }>) | null;
@@ -269,7 +270,10 @@ export async function replaceUserSource(
   if (!h) throw new DocError("replace is offered for a held user source only (a folded source cannot be replaced yet)", 409);
   if (h.url) {
     if (!deps.refetch) throw new DocError("no fetch path is configured for a refetch", 503);
+    // the search gate's answer (rw-workbench-fetch-posture): a refusal or an unavailable gate is the
+    // stated failure with the gate's reason unchanged, and nothing below runs (nothing is overwritten)
     const fresh = await deps.refetch(h.url).catch((e) => {
+      if (isGateError(e)) throw new DocError(e.message, e.httpStatus as 422 | 502 | 503, { gate: gateErrorBody(e).gate });
       throw new DocError(`the link could not be refetched: ${String((e as Error).message).slice(0, 120)}`, 502);
     });
     const same = (await deps.db.query<{ same: boolean }>(`SELECT md5($1) = $2 AS same`, [fresh.content, h.content_hash]))[0].same;

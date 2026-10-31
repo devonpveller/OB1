@@ -3,12 +3,13 @@
 //
 // SKIPPED unless DOCS_TEST_BASE is set. contract-test/run-workspace-tests.ps1 sets it to the :wt
 // workbench it runs on a DISPOSABLE internal network (the real initdb chain, contract-test/fixtures.sql,
-// a temp vault, a stub embedder, a stub research service, a stub egress proxy). Never point it at a
+// a temp vault, a stub embedder, a stub research service, a stub search gate + a lab target). Never point it at a
 // live stack: the tests write documents, suppress sources and install a fault trigger.
 //
 // Environment: DOCS_TEST_BASE, DOCS_TEST_KEY (the X-Brain-Key), DOCS_TEST_VAULT (the vault the
 // workbench writes, mounted here too), CONTRACT_TEST_DB_HOST/_PORT/_USER/_PASSWORD (superuser - the
-// fault trigger needs it), DOCS_TEST_PROXY_HOST (the stub proxy's name, for a held link's URL).
+// fault trigger needs it), DOCS_TEST_PROXY_HOST (the lab target's host:port, for a held link's URL; the
+// workbench fetches it through the stub search gate - rw-workbench-fetch-posture).
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
 import { parseDocument } from "./grammar.ts";
@@ -488,7 +489,7 @@ t("C20: a held source is citable from day one; removing it is blocked and flagge
 });
 
 t("C20: replace is type-conditional; pins are per document (doc 1 keeps v1 when doc 2 adds v2)", async () => {
-  // a LINK: refetch through the egress proxy into a new revision; this document's pin moves
+  // a LINK: refetch through the search gate's /v1/fetch into a new revision; this document's pin moves
   const p1 = await newDoc(`Replace link ${uid()}`, "", "replace idea");
   await call("POST", `${D}/refinery/start`, { path: p1 });
   const url = `http://${PROXY_HOST}/held/${uid()}`;
