@@ -789,7 +789,10 @@ Deno.test({ name: "Fh a Host that is not host[:port] is the seam's 400 before an
       const target = host.endsWith("/workbench/notes") ? "/a.md?q=probe-q" : "/workbench/notes/a.md?q=probe-q";
       const r = await rawHost(base, "GET", target, host, h);
       const leaks = ["probe-q", "Invalid URL", "TypeError", "    at ", "file:///", host.length > 2 ? host : ""].filter((s) => s && r.text.includes(s));
-      if (r.status !== 400 || leaks.length) fails.push(`Host ${JSON.stringify(host)} [${label}]: ${r.status} ${r.text.slice(0, 140)}${leaks.length ? ` (echoes ${leaks.join(", ")})` : ""}`);
+      // or the app's own 404 when the Host moved the router's path outside /workbench/* (no route, no seam:
+      // a Host holding "/", or an empty Host on Deno 2.3.3, whose URL is then "http:///...")
+      const outside = r.status === 404 && /^\{"error":"not found"\}$/.test(r.text.trim());
+      if ((r.status !== 400 && !outside) || leaks.length) fails.push(`Host ${JSON.stringify(host)} [${label}]: ${r.status} ${r.text.slice(0, 140)}${leaks.length ? ` (echoes ${leaks.join(", ")})` : ""}`);
     }
   }
   // control: the workbench's own host is judged as before
