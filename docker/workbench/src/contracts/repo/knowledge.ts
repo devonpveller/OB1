@@ -87,6 +87,8 @@ interface ClaimRow {
   thread_id: string | null;
   synthesis_id: string | null;
   edges: { edge_id: number; source_id: string; edge_type: string; lifecycle: string; title: string; url: string | null }[];
+  corroborations: number;
+  contradicted_by_newer: boolean;
 }
 
 // claims(scope, filter). An evidence-only caller sees only edges whose source is active; a claim
@@ -101,6 +103,7 @@ interface ClaimRow {
 //     claim is not followed, so it can only under-report - fail closed);
 //   - synthesis_id: the synthesis is a source row, kept only when it is in scope, else null;
 //   - thread_id: threads carry no metadata, so it is null;
+//   - verdict (P3b): research_jobs carry no metadata, so it is null (rw-p3b-trust2, review B1: no jobs read);
 //   - selectors: source_id / synthesis_id name a row that must itself be in scope, else the answer
 //     is empty (an out-of-scope id is never a selector over in-scope rows - the oracle); thread_id
 //     names a metadata-less row, so under a filter it selects nothing.
@@ -123,7 +126,21 @@ export async function claims(db: Db, q: ClaimsQuery) {
                         'lifecycle', public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at),
                         'title', s.title, 'url', s.url) ORDER BY cs.id)
                         FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
-                       WHERE cs.claim_id = c.id AND ($6::jsonb IS NULL OR s.metadata @> $6::jsonb)), '[]'::jsonb) AS edges
+                       WHERE cs.claim_id = c.id AND ($6::jsonb IS NULL OR s.metadata @> $6::jsonb)), '[]'::jsonb) AS edges,
+            -- P3b (the claims ledger): claim_confidence's corroborator count, over the in-scope edges
+            (SELECT GREATEST(count(DISTINCT e.source_id) - 1, 0)::int
+               FROM public.claim_sources e JOIN public.sources es ON es.id = e.source_id
+              WHERE e.claim_id = c.id AND e.edge_type IN ('states', 'corroborates') AND es.retraction_committed_at IS NULL
+                AND ($6::jsonb IS NULL OR es.metadata @> $6::jsonb)) AS corroborations,
+            -- P3b: contradicted by something NEWER than the claim - an active claim (round 2, D3: a retracted one no
+            -- longer counts, as a suppressed source does not), or a (non-suppressed) source
+            EXISTS (SELECT 1 FROM public.claim_sources x
+                      LEFT JOIN public.claims n ON n.id = x.parent_claim_id
+                      LEFT JOIN public.sources xs ON xs.id = x.source_id
+                     WHERE x.claim_id = c.id AND x.edge_type = 'contradicts'
+                       AND ((n.id IS NOT NULL AND n.status = 'active' AND n.created_at > c.created_at AND ($6::jsonb IS NULL OR n.metadata @> $6::jsonb))
+                         OR (xs.id IS NOT NULL AND xs.retraction_committed_at IS NULL AND xs.created_at > c.created_at
+                             AND ($6::jsonb IS NULL OR xs.metadata @> $6::jsonb)))) AS contradicted_by_newer
        FROM public.claims c
       WHERE ($1::uuid IS NULL OR (c.thread_id = $1 AND $6::jsonb IS NULL))
         AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM public.claim_sources x JOIN public.sources xs ON xs.id = x.source_id
@@ -138,11 +155,68 @@ export async function claims(db: Db, q: ClaimsQuery) {
       LIMIT $7`,
     [q.thread_id, q.source_id, q.synthesis_id, q.status, q.q, mf, q.limit],
   );
-  const out = rows.map((r) => shapeClaim(r, q.evidenceOnly)).filter((c) => c !== null);
+  // rw-p3b-trust2 (review B1): research_jobs carry no metadata, so under a filter the verdict is null - no
+  // research_jobs read (the verdict rests on the cited text, which may lie outside the scope)
+  const verdicts = mf ? new Map<string, string>() : await verdictsOf(db, rows);
+  const out = rows.map((r) => shapeClaim(r, q.evidenceOnly, verdicts)).filter((c) => c !== null);
   return { count: out.length, claims: out };
 }
 
-function shapeClaim(r: ClaimRow, evidenceOnly: boolean) {
+// research-workbench P3b - each claim's entailment verdict (D10), joined by CLAIM ID (round 2, tester D2:
+// the text join lost the verdict on the curator's fold path, where find_or_create_claim moves synthesis_id to
+// the new synthesis but keeps the old text). The research job row carries the exact link: the curator's filing
+// answer result.curator.claims.filed[k] is the claim row filed from claim-list index k, and
+// result.line_credibility[] (the scored claim list) carries each claim's index (`claim`), text and verdict. A
+// verdict is this claim's when the job FILED this claim id and the scored entry is the same claim under the
+// curator's own dedup key (lower(btrim(text)), find_or_create_claim's); the entry at the claim's own index wins
+// inside a job, the latest job wins across jobs. null = no job recorded one (filed before P3a, on no judged line,
+// or its text was edited since).
+// rw-p3b-trust2 (review F1; tester t-p3b-trust3 D1): a plan that is STABLE under the default planner settings. The
+// two sides are restricted first and materialized, then joined once on text keys:
+//   want - the claim rows asked for, by PRIMARY KEY (c.id = ANY($1::uuid[])), with their dedup key;
+//   jobs - the jobs whose filed list names one of them (the ?| filter: research_jobs is still scanned - no index on
+//          the filed list, a schema change recorded in the findings), each job's large result read ONCE;
+//   hits - their filed entries restricted to the asked ids (f.cid = ANY($1::text[])) BEFORE the line_credibility
+//          lateral is expanded;
+// then a hash join of two small sets on (claim id text, dedup key). Round 3 joined claims inside the laterals on
+// the un-indexable c.id::text = f.cid, which the planner turned into a re-scanned inner side (3.5-6.4 s at 200 ids).
+// Exported so the lab can EXPLAIN it (trust_integration_test.ts T7 EXPLAINs what the workbench actually ran).
+export const VERDICTS_SQL = `WITH want AS MATERIALIZED (
+         SELECT c.id::text AS cid, lower(btrim(c.text)) AS dkey FROM public.claims c WHERE c.id = ANY($1::uuid[])
+       ), jobs AS MATERIALIZED (
+         SELECT j.id AS job_id, j.finished_at, j.created_at,
+                j.result -> 'curator' -> 'claims' -> 'filed' AS filed, j.result -> 'line_credibility' AS lines
+           FROM public.research_jobs j
+          WHERE j.result -> 'curator' -> 'claims' -> 'filed' ?| $1::text[]
+       ), hits AS MATERIALIZED (
+         SELECT jb.job_id, jb.finished_at, jb.created_at, f.cid, f.ord, lc.v, lc.lord
+           FROM jobs jb
+           CROSS JOIN LATERAL (
+             SELECT e.cid, e.ord
+               FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(jb.filed) = 'array' THEN jb.filed ELSE '[]'::jsonb END)
+                    WITH ORDINALITY e(cid, ord)
+              WHERE e.cid = ANY($1::text[])
+           ) f
+           CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(jb.lines) = 'array' THEN jb.lines ELSE '[]'::jsonb END)
+                              WITH ORDINALITY lc(v, lord)
+          WHERE jsonb_typeof(lc.v -> 'verdict') = 'string' AND jsonb_typeof(lc.v -> 'text') = 'string'
+       )
+     SELECT h.cid AS claim_id, h.v ->> 'verdict' AS verdict
+       FROM hits h JOIN want w ON w.cid = h.cid AND w.dkey = lower(btrim(h.v ->> 'text'))
+      ORDER BY h.finished_at ASC NULLS FIRST, h.created_at ASC, h.job_id ASC,
+               ((h.v ->> 'claim') IS NOT DISTINCT FROM (h.ord - 1)::text) ASC, h.lord ASC`;
+
+export async function verdictsOf(db: Db, rows: { id: string }[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.map((r) => r.id.toLowerCase()))];
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const found = await db.query<{ claim_id: string; verdict: string }>(VERDICTS_SQL, [ids]);
+  // the last row per claim wins (see the order); a verdict is served only as a registry-shaped key (never free text)
+  for (const f of found) if (/^[a-z][a-z0-9_]{0,40}$/.test(f.verdict)) out.set(f.claim_id, f.verdict);
+  return out;
+}
+
+function shapeClaim(r: ClaimRow, evidenceOnly: boolean, verdicts: Map<string, string> = new Map()) {
   const edges = evidenceOnly ? r.edges.filter((e) => e.lifecycle === "active") : r.edges;
   if (evidenceOnly && edges.length === 0) return null;
   const byType: Record<string, number> = {};
@@ -155,6 +229,9 @@ function shapeClaim(r: ClaimRow, evidenceOnly: boolean) {
     state_detail: suppressedEdges ? { suppressed_edges: suppressedEdges, note: "suppressed sources lend no credit (D5 stage 1)" } : {},
     edges_by_type: byType,
     sources: edges.map((e) => ({ ...e, edge_id: Number(e.edge_id) })),
+    verdict: verdicts.get(r.id.toLowerCase()) ?? null,
+    corroborations: Number(r.corroborations ?? 0),
+    contradicted_by_newer: !!r.contradicted_by_newer,
   };
 }
 

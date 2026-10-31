@@ -381,7 +381,7 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed( \(\d+ steps?\))? \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   $line = @(($o -split "`n") | Where-Object { $_ -match 'SUMMARY calls=' }) | Select-Object -First 1
   Check ($line -match 'leaking_calls=0 ') "cloud scoping probe: $(([string]$line).Trim() -replace ' control_hits_by_tool=.*$', '')"
-  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[2].Value -eq '2' -and $sum.Groups[4].Value -eq '0') "cloud scoping e2e: $($sum.Value)"
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[2].Value -eq '3' -and $sum.Groups[4].Value -eq '0') "cloud scoping e2e (3 tests; rw-p3b-trust2 adds the verdict case): $($sum.Value)"
 
   $null = Dk image inspect $dreddTag
   if ($script:rc -ne 0) {
