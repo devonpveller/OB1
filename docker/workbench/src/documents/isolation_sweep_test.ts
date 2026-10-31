@@ -177,7 +177,17 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const attachPng = attachName.replace(/\.txt$/, ".png");
   await Deno.writeTextFile(`${VAULT}/${bDir}/${attachName}`, `${attachSecret}\n`);
   await Deno.writeFile(`${VAULT}/${bDir}/${attachPng}`, new TextEncoder().encode(`\x89PNG ${attachSecret}`));
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret };
+  // rw-p7a-tts: B's presenter model and a render request (private podcast prompting, 07-MULTI-USER)
+  const pod = { presenter: `PresenterSecret${rnd()}`, request: `PodRequestSecret${rnd()}`, turn: `PodTurnSecret${rnd()}`, team: `pod-sweep-${rnd()}` };
+  await sql(`INSERT INTO public.podcast_voice_links (id, owner_sub, route, voice) VALUES ($1, $2, 'local-tts', 'af_bella')`, [`${pod.team}-v`, bSub]);
+  await sql(`INSERT INTO public.podcast_presenters (id, owner_sub, name, voice_link_id) VALUES ($1, $2, $3, $4)`, [`${pod.team}-p`, bSub, pod.presenter, `${pod.team}-v`]);
+  await sql(`INSERT INTO public.podcast_teams (id, owner_sub, name) VALUES ($1, $2, $3)`, [pod.team, bSub, `${pod.presenter}-team`]);
+  await sql(`INSERT INTO public.podcast_team_members (team_id, position, presenter_id) VALUES ($1, 0, $2)`, [pod.team, `${pod.team}-p`]);
+  const podReq = await wb("POST", "/workbench/contract/podcasts/requests",
+    { team_id: pod.team, title: pod.request, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
+  assertEquals(podReq.status, 202, podReq.text);
+  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret,
+    podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;

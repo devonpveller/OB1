@@ -20,6 +20,8 @@ export interface ContractDeps {
   mountsRoot: string;
   streamPollMs: number;
   log: (msg: string) => void;
+  // P7a: where a render request is handed to openbrain-podcast (POST {"request_id"}); "" = inert
+  podcastRenderUrl?: string;
 }
 
 export const PREFIX = "/workbench/contract";

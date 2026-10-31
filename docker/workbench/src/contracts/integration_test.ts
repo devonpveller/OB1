@@ -1064,6 +1064,60 @@ t("the purge's trail actor is the authenticated user; a body 'by' is a note, nev
   assertEquals(ev[0].detail.claimed_by, "body-actor", "the body's 'by' is recorded as a note");
 });
 
+// ── rw-p7a-tts: podcasts, presenters, teams, render requests (the caller is the default identity) ──
+t("P7a presenters() and teams() are the caller's presenter model; podcasts() never lists an archived ON episode", async () => {
+  const pres = await call("GET", `/presenters`);
+  assertEquals(pres.status, 200, pres.text);
+  assertEquals(pres.json.presenters.map((p: any) => [p.id, p.voice.voice]), [["pod-fx-presenter-a", "bm_george"], ["pod-fx-presenter-b", "bf_emma"]]);
+  const teams = await call("GET", `/teams`);
+  assertEquals(teams.json.teams[0].presenters.map((p: any) => p.presenter_id), ["pod-fx-presenter-a", "pod-fx-presenter-b"]);
+  // another user's presenter model is invisible
+  await sql(`INSERT INTO public.podcast_voice_links (id, owner_sub, route, voice) VALUES ('p7a-int-v', 'p7a-other', 'local-tts', 'af_bella') ON CONFLICT DO NOTHING`);
+  await sql(`INSERT INTO public.podcast_presenters (id, owner_sub, name, voice_link_id) VALUES ('p7a-int-p', 'p7a-other', 'OtherUsersPresenter', 'p7a-int-v') ON CONFLICT DO NOTHING`);
+  assert(!(await call("GET", `/presenters`)).text.includes("OtherUsersPresenter"));
+  const pods = await call("GET", `/podcasts`);
+  assertEquals(pods.json.podcasts.map((p: any) => [p.id, p.mine]), [["e7000000-0000-4000-8000-000000000001", true], ["e7000000-0000-4000-8000-000000000002", false]]);
+  assertEquals(pods.json.podcasts[1].team_id, null, "a shared render does not name its owner's team");
+  // an ON archive item can never be a row: the table admits origin 'render' only
+  let refused = false;
+  try {
+    await sql(`INSERT INTO public.podcast_episodes (owner_sub, origin, title, audio_format, archive_dir) VALUES ('operator', 'on-archive', 'x', 'mp3', '/x')`);
+  } catch {
+    refused = true;
+  }
+  assert(refused, "podcast_episodes refuses origin on-archive");
+});
+
+t("P7a a render request records the CALLER as requester; another user's team or a stray presenter is not found; only the requester lists it", async () => {
+  const body = { team_id: "pod-fx-team", title: "p7a integration", transcript: { title: "p7a integration", turns: [{ presenterId: "pod-fx-presenter-a", text: "PrivatePromptP7a" }] } };
+  const r = await call("POST", `/podcasts/requests`, body);
+  assertEquals(r.status, 202, r.text);
+  assertEquals([r.json.state, r.json.turns], ["queued", 1]);
+  const row = (await sql<{ requester_sub: string; actor_sub: string }>(`SELECT requester_sub, actor_sub FROM public.podcast_render_requests WHERE id = $1`, [r.json.id]))[0];
+  assertEquals([row.requester_sub, row.actor_sub], ["operator", "operator"]);
+  // a body cannot name a requester: unknown keys are not stored anywhere
+  const spoof = await call("POST", `/podcasts/requests`, { ...body, requester_sub: "p7a-other", owner_sub: "p7a-other" });
+  assert(spoof.status === 202 || spoof.status === 400, spoof.text);
+  if (spoof.status === 202) {
+    assertEquals((await sql<{ requester_sub: string }>(`SELECT requester_sub FROM public.podcast_render_requests WHERE id = $1`, [spoof.json.id]))[0].requester_sub, "operator");
+  }
+  await sql(`INSERT INTO public.podcast_teams (id, owner_sub, name) VALUES ('p7a-int-team', 'p7a-other', 'others') ON CONFLICT DO NOTHING`);
+  assertEquals((await call("POST", `/podcasts/requests`, { ...body, team_id: "p7a-int-team" })).status, 404);
+  assertEquals((await call("POST", `/podcasts/requests`, { ...body, transcript: { title: "x", turns: [{ presenterId: "p7a-int-p", text: "x" }] } })).status, 404);
+  await sql(`INSERT INTO public.podcast_render_requests (requester_sub, actor_sub, team_id, title, input) VALUES ('p7a-other', 'p7a-other', 'p7a-int-team', 'OthersRequestTitle', '{"transcript":{"title":"t","turns":[]}}')`);
+  const mine = await call("GET", `/podcasts/requests`);
+  assert(mine.json.requests.some((x: any) => x.id === r.json.id));
+  assert(!mine.text.includes("OthersRequestTitle"), "another user's request is not listed");
+  assertEquals((await call("POST", `/podcasts/requests`, { team_id: "pod-fx-team", title: "x", transcript: { title: "x", turns: [] } })).status, 400);
+});
+
+t("P7a the three appendix stubs are backed: their not_implemented registry entries are retired", async () => {
+  const rows = await sql<{ key: string; retired: boolean }>(
+    `SELECT key, retired_at IS NOT NULL AS retired FROM public.contract_registry_entries WHERE registry = 'implementation_states' AND key IN ('podcasts','presenters','teams') ORDER BY key`);
+  assertEquals(rows.map((x) => [x.key, x.retired]), [["podcasts", true], ["presenters", true], ["teams", true]]);
+  for (const p of ["/podcasts", "/presenters", "/teams"]) assertEquals((await call("GET", p)).status, 200, p);
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();

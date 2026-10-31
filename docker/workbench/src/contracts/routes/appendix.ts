@@ -335,14 +335,12 @@ export function notImplemented(operation: string, landsIn: string) {
 
 // Calls whose backing lands in a later phase answer a typed not_implemented that validates
 // against its schema, so Dredd passes on P0 alone and every later phase reads a real edge.
+// (P7a: podcasts, presenters and teams are backed now - routes/podcasts.ts.)
 function registerStubs(app: ContractApp) {
   const stubs: { op: string; reg: string; path: string; lands: string; tool: string; params?: [string, string][] }[] = [
     { op: "watches", reg: "watches", path: "/watches", lands: "P5b", tool: "contract_watches" },
     { op: "proposals", reg: "proposals", path: "/watches/{watchId}/proposals", lands: "P5b", tool: "contract_proposals", params: [["watchId", FX.watch]] },
     { op: "stanceMap", reg: "stance_map", path: "/stance-maps/{id}", lands: "P7b", tool: "contract_stance_map", params: [["id", FX.job]] },
-    { op: "podcasts", reg: "podcasts", path: "/podcasts", lands: "P7a/P7b", tool: "contract_podcasts" },
-    { op: "presenters", reg: "presenters", path: "/presenters", lands: "P7a", tool: "contract_presenters" },
-    { op: "teams", reg: "teams", path: "/teams", lands: "P7a", tool: "contract_teams" },
   ];
   for (const s of stubs) {
     const params = s.params

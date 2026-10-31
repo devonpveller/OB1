@@ -127,7 +127,7 @@ producing output.
 | `openbrain-gmail-prune` | **core** | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | The **nightly prune completes and never recompiles the vault** — `prune-short-term.ts:153` POSTs inside a `try/catch`, so it logs a connection error and exits 0. Nothing alerts. |
 | `openbrain-gmail-pull` | **core** | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | Nothing: the key is inherited from the shared `env_file` and `openbrain-gmail-pull`'s code never reads it. Listed because it is in the render and the next reader deserves to know it is inert rather than rediscover it. |
 | `openbrain-podcast` | core | `RESEARCH_URL` | `openbrain-research` | `research` | The podcast's link-enrichment research step dies; the episode degrades to email-only. |
-| `openbrain-podcast` | core | `ON_BASE` | `open_notebook` | `notebook` | **No audio is rendered** — the chain runs to the end and produces no episode. |
+| `openbrain-podcast` | core | `WORKBENCH_URL` | `openbrain-workbench` | `research` | **No audio is archived** (research-workbench P7a): the archive destination is read from the workbench's configuration store on every render, so with the workbench absent the render is refused and the email goes out without an episode. The podcast no longer calls `open_notebook`. |
 | `openbrain-idea-refinery` | `idea-refinery` | `RESEARCH_URL` | `openbrain-research` | `research` | The drain starts, walks the owed-idea queue and **can never research anything** (`index.ts:268` submits, `:295` polls). Its only engine. |
 
 Two of those are the same shape the digest chain already taught us: run the

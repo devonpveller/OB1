@@ -3952,6 +3952,359 @@
           "retired_at",
           "superseded_by"
         ]
+      },
+      "Podcasts": {
+        "type": "object",
+        "properties": {
+          "podcasts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PodcastEpisode"
+            }
+          }
+        },
+        "required": [
+          "podcasts"
+        ]
+      },
+      "PodcastEpisode": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "e7000000-0000-4000-8000-000000000001",
+            "description": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "audio_format": {
+            "type": "string"
+          },
+          "seconds": {
+            "type": "number",
+            "nullable": true
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "mine": {
+            "type": "boolean",
+            "description": "the caller requested it (else it is a shared render)"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "team_id",
+          "audio_format",
+          "seconds",
+          "shared",
+          "mine",
+          "created_at"
+        ]
+      },
+      "PodcastPresenters": {
+        "type": "object",
+        "properties": {
+          "presenters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PodcastPresenter"
+            }
+          }
+        },
+        "required": [
+          "presenters"
+        ]
+      },
+      "PodcastPresenter": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "pod-fx-presenter-a"
+          },
+          "name": {
+            "type": "string"
+          },
+          "personality": {
+            "type": "string"
+          },
+          "backstory": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "description": "operator | on-capture"
+          },
+          "voice": {
+            "$ref": "#/components/schemas/PodcastVoiceLink"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "personality",
+          "backstory",
+          "language",
+          "origin",
+          "voice"
+        ]
+      },
+      "PodcastVoiceLink": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string",
+            "example": "local-tts",
+            "description": "the LiteLLM route (gateway model name) that voices it"
+          },
+          "voice": {
+            "type": "string",
+            "example": "bm_george"
+          },
+          "speed": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "route",
+          "voice",
+          "speed"
+        ]
+      },
+      "PodcastTeams": {
+        "type": "object",
+        "properties": {
+          "teams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PodcastTeam"
+            }
+          }
+        },
+        "required": [
+          "teams"
+        ]
+      },
+      "PodcastTeam": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "pod-fx-team"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "presenters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "position": {
+                  "type": "integer"
+                },
+                "presenter_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "position",
+                "presenter_id",
+                "name"
+              ]
+            }
+          },
+          "formats": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "segments": {
+                  "type": "integer"
+                },
+                "language": {
+                  "type": "string"
+                },
+                "script_route": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "segments",
+                "language",
+                "script_route"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "origin",
+          "presenters",
+          "formats"
+        ]
+      },
+      "PodcastRenderRequests": {
+        "type": "object",
+        "properties": {
+          "requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PodcastRenderRequest"
+            }
+          }
+        },
+        "required": [
+          "requests"
+        ]
+      },
+      "PodcastRenderRequest": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "e8000000-0000-4000-8000-000000000001",
+            "description": "uuid"
+          },
+          "team_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "queued | rendering | done | failed"
+          },
+          "episode_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "turns": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "team_id",
+          "title",
+          "state",
+          "episode_id",
+          "error",
+          "turns",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "PodcastRenderRequestBody": {
+        "type": "object",
+        "properties": {
+          "team_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "transcript": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "turns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "presenterId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4000
+                    }
+                  },
+                  "required": [
+                    "presenterId",
+                    "text"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 2000
+              }
+            },
+            "required": [
+              "title",
+              "turns"
+            ]
+          }
+        },
+        "required": [
+          "team_id",
+          "title",
+          "transcript"
+        ]
       }
     },
     "parameters": {}
@@ -6098,243 +6451,6 @@
                   "operation": "stance_map",
                   "lands_in": "P7b",
                   "message": "stance_map is part of the contract; its backing lands in P7b"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplemented"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/workbench/contract/podcasts": {
-      "get": {
-        "operationId": "podcasts",
-        "tags": [
-          "retrieval contract (appendix)"
-        ],
-        "summary": "podcasts() - backing lands in P7a/P7b",
-        "x-appendix-call": "podcasts",
-        "x-mcp-tool": "contract_podcasts",
-        "responses": {
-          "400": {
-            "description": "invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "refused by the lifecycle (the body says why)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "internal error or a response that violated its schema",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "typed not_implemented",
-            "content": {
-              "application/json": {
-                "example": {
-                  "status": "not_implemented",
-                  "operation": "podcasts",
-                  "lands_in": "P7a/P7b",
-                  "message": "podcasts is part of the contract; its backing lands in P7a/P7b"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplemented"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/workbench/contract/presenters": {
-      "get": {
-        "operationId": "presenters",
-        "tags": [
-          "retrieval contract (appendix)"
-        ],
-        "summary": "presenters() - backing lands in P7a",
-        "x-appendix-call": "presenters",
-        "x-mcp-tool": "contract_presenters",
-        "responses": {
-          "400": {
-            "description": "invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "refused by the lifecycle (the body says why)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "internal error or a response that violated its schema",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "typed not_implemented",
-            "content": {
-              "application/json": {
-                "example": {
-                  "status": "not_implemented",
-                  "operation": "presenters",
-                  "lands_in": "P7a",
-                  "message": "presenters is part of the contract; its backing lands in P7a"
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/NotImplemented"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/workbench/contract/teams": {
-      "get": {
-        "operationId": "teams",
-        "tags": [
-          "retrieval contract (appendix)"
-        ],
-        "summary": "teams() - backing lands in P7a",
-        "x-appendix-call": "teams",
-        "x-mcp-tool": "contract_teams",
-        "responses": {
-          "400": {
-            "description": "invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "refused by the lifecycle (the body says why)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "internal error or a response that violated its schema",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "typed not_implemented",
-            "content": {
-              "application/json": {
-                "example": {
-                  "status": "not_implemented",
-                  "operation": "teams",
-                  "lands_in": "P7a",
-                  "message": "teams is part of the contract; its backing lands in P7a"
                 },
                 "schema": {
                   "$ref": "#/components/schemas/NotImplemented"
@@ -9018,6 +9134,533 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/RegistryDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/podcasts": {
+      "get": {
+        "operationId": "podcasts",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "podcasts() - the caller's renders and renders shared with everyone (never an archived Open Notebook episode)",
+        "x-appendix-call": "podcasts",
+        "x-mcp-tool": "contract_podcasts",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-200, default 50"
+            },
+            "required": false,
+            "description": "1-200, default 50",
+            "name": "limit",
+            "in": "query",
+            "example": "50"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "newest first",
+            "content": {
+              "application/json": {
+                "example": {
+                  "podcasts": [
+                    {
+                      "id": "e7000000-0000-4000-8000-000000000001",
+                      "title": "Fixture episode",
+                      "team_id": "pod-fx-team",
+                      "audio_format": "mp3",
+                      "seconds": 12.5,
+                      "shared": false,
+                      "mine": true,
+                      "created_at": "2026-10-17T12:00:00.000Z"
+                    },
+                    {
+                      "id": "e7000000-0000-4000-8000-000000000002",
+                      "title": "Shared fixture episode",
+                      "team_id": null,
+                      "audio_format": "mp3",
+                      "seconds": 3.25,
+                      "shared": true,
+                      "mine": false,
+                      "created_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Podcasts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/presenters": {
+      "get": {
+        "operationId": "presenters",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "presenters() - the caller's presenters with their voice links",
+        "x-appendix-call": "presenters",
+        "x-mcp-tool": "contract_presenters",
+        "responses": {
+          "200": {
+            "description": "by name",
+            "content": {
+              "application/json": {
+                "example": {
+                  "presenters": [
+                    {
+                      "id": "pod-fx-presenter-a",
+                      "name": "Fixture Alex",
+                      "personality": "Analytical, asks probing questions",
+                      "backstory": "A researcher",
+                      "language": "en-US",
+                      "origin": "operator",
+                      "voice": {
+                        "id": "pod-fx-voice-a",
+                        "route": "local-tts",
+                        "voice": "bm_george",
+                        "speed": 1
+                      }
+                    },
+                    {
+                      "id": "pod-fx-presenter-b",
+                      "name": "Fixture Jamie",
+                      "personality": "Enthusiastic and practical",
+                      "backstory": "An engineer",
+                      "language": "en-US",
+                      "origin": "operator",
+                      "voice": {
+                        "id": "pod-fx-voice-b",
+                        "route": "local-tts",
+                        "voice": "bf_emma",
+                        "speed": 1
+                      }
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PodcastPresenters"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/teams": {
+      "get": {
+        "operationId": "teams",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "teams() - the caller's teams: the cast in speaking order and the formats",
+        "x-appendix-call": "teams",
+        "x-mcp-tool": "contract_teams",
+        "responses": {
+          "200": {
+            "description": "by name",
+            "content": {
+              "application/json": {
+                "example": {
+                  "teams": [
+                    {
+                      "id": "pod-fx-team",
+                      "name": "fixture_team",
+                      "description": "Two fixture presenters",
+                      "origin": "operator",
+                      "presenters": [
+                        {
+                          "position": 0,
+                          "presenter_id": "pod-fx-presenter-a",
+                          "name": "Fixture Alex"
+                        },
+                        {
+                          "position": 1,
+                          "presenter_id": "pod-fx-presenter-b",
+                          "name": "Fixture Jamie"
+                        }
+                      ],
+                      "formats": [
+                        {
+                          "id": "pod-fx-format",
+                          "name": "fixture_format",
+                          "segments": 3,
+                          "language": "en-US",
+                          "script_route": "local-large:nothink"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PodcastTeams"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/podcasts/requests": {
+      "get": {
+        "operationId": "podcastRequests",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "the caller's own render requests (no one else's, ever)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-200, default 50"
+            },
+            "required": false,
+            "description": "1-200, default 50",
+            "name": "limit",
+            "in": "query",
+            "example": "50"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "newest first",
+            "content": {
+              "application/json": {
+                "example": {
+                  "requests": [
+                    {
+                      "id": "e8000000-0000-4000-8000-000000000001",
+                      "team_id": "pod-fx-team",
+                      "title": "Fixture request",
+                      "state": "queued",
+                      "episode_id": null,
+                      "error": null,
+                      "turns": 2,
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PodcastRenderRequests"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "podcastRequest",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "ask for a render of a room transcript by one of the caller's teams; the requester is the caller",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "team_id": "pod-fx-team",
+                "title": "A recorded request",
+                "transcript": {
+                  "title": "A recorded request",
+                  "turns": [
+                    {
+                      "presenterId": "pod-fx-presenter-a",
+                      "text": "Good morning."
+                    },
+                    {
+                      "presenterId": "pod-fx-presenter-b",
+                      "text": "Morning!"
+                    }
+                  ]
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/PodcastRenderRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "recorded (and handed to the renderer when configured)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "e8000000-0000-4000-8000-0000000000c1",
+                  "team_id": "pod-fx-team",
+                  "title": "A recorded request",
+                  "state": "queued",
+                  "episode_id": null,
+                  "error": null,
+                  "turns": 2,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PodcastRenderRequest"
                 }
               }
             }

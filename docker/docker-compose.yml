@@ -43,7 +43,7 @@ include:
 #   openbrain-gmail-pull   WIKI_RECOMPILE_URL -> openbrain-wiki            [wiki]
 #   openbrain-gmail-prune  WIKI_RECOMPILE_URL -> openbrain-wiki            [wiki]
 #   openbrain-podcast      RESEARCH_URL       -> openbrain-research    [research]
-#   openbrain-podcast      ON_BASE            -> open_notebook         [notebook]
+#   openbrain-podcast      WORKBENCH_URL      -> openbrain-workbench   [research]
 #   openbrain-idea-refinery RESEARCH_URL      -> openbrain-research    [research]
 # (the last four are in docker-compose.scheduled.yml)
 #
@@ -178,6 +178,7 @@ services:
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
       - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity
       - ./init-idea-schedule.sql:/docker-entrypoint-initdb.d/300-init-idea-schedule.sql:ro # research-workbench rw-idea-schedule (fresh-volume only; live: psql -f; revert: revert-idea-schedule.sql)
+      - ./init-podcasts.sql:/docker-entrypoint-initdb.d/310-init-podcasts.sql:ro # research-workbench rw-p7a-tts: presenter model + render requests (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-podcasts.sql)
     networks:
       - obnet
     restart: unless-stopped
@@ -1376,6 +1377,10 @@ services:
       # read state these are) until sign-on lands - operator-set, see .env.example. Blank = "operator".
       WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
       WORKSPACE_DEFAULT_NAME: ${WORKSPACE_DEFAULT_NAME:-}
+      # research-workbench P7a: POST /workbench/contract/podcasts/requests hands the request to
+      # openbrain-podcast here (http://openbrain-podcast:8080/render). BLANK AS SHIPPED = inert: a
+      # request is recorded (owned by its requester) and stays queued.
+      PODCAST_RENDER_URL: ${WORKBENCH_PODCAST_RENDER_URL:-}
       # rw-identity2: sign-in is Authentik FORWARD-AUTH at the operator's Traefik; the workbench only
       # verifies the outpost's signed token (X-authentik-jwt, HS256 with the proxy provider's client
       # secret) on every request - no outbound call, no session. Env-only, SHIPPED INERT: blank = no
@@ -1433,8 +1438,10 @@ services:
       - ../recipes:/recipes:ro
       # research-workbench P0 (D6 item 5): the podcast archive's DEFAULT destination is this
       # mount, named podcast-archive (the settings registry declares {"mount": "podcast-archive"};
-      # the workbench resolves named mounts under CONTRACT_MOUNTS_ROOT=/mounts). This line is the
-      # only place the archive path appears; the destination itself is a front-end setting.
+      # the workbench resolves named mounts under CONTRACT_MOUNTS_ROOT=/mounts). This line and
+      # openbrain-podcast's read-write mount of the same folder at the same path
+      # (docker-compose.scheduled.yml) are the only places the archive path appears; the
+      # destination itself is a front-end setting.
       # Read-only: the workbench reports the destination, the P7a renderer writes it.
       - ${BACKUPS_DIR:-../../backups}/podcasts:/mounts/podcast-archive:ro
     # Optional loopback debug publish ONLY (same-origin path is via Caddy).
@@ -1703,6 +1710,10 @@ services:
   open_notebook:
     # notebook group (sl-ob1-profiles). The Open Notebook UI/API - a SURFACE
     # onto openbrain-db, not an engine: the knowledge core is complete without it.
+    # QUIESCED pending P7b (research-workbench P7a, D6): its podcasts were captured into the
+    # podcast archive (on-capture.ts), the daily chain no longer calls it, and its periodic
+    # notebook-folder sync is OFF below (NOTEBOOK_SYNC_INTERVAL_S=0) so nothing writes to
+    # surrealdb on a timer. P7b removes it with surrealdb and open-notebook-backup.
     profiles: ["notebook"]
     # IKS fork (open-notebook repo, Dockerfile.single) — OB1 Postgres is the
     # canonical source-of-truth. Locally built + tagged; never pulled.
@@ -1721,7 +1732,7 @@ services:
       - default               # OB1 project bridge: surrealdb + open-notebook-backup live here
       - llm-net               # external ai-stack_llm-net — llama-cpp-embed alias
       - app-net               # external ai-stack_app-net — portal Caddy + tailscale serves reach :8502 / :5055
-      - obnet                 # native since the K.5b move — openbrain-db (canonical store) + podcast (ON_BASE)
+      - obnet                 # native since the K.5b move — openbrain-db (canonical store); the podcast no longer calls it (P7a)
     ports:
       - "127.0.0.1:8503:8502" # pre-flight §6.1 — was "8503:8502" (LAN-exposed)
       - "127.0.0.1:5055:5055" # pre-flight §6.1 — was "5055:5055" (LAN-exposed)
@@ -1769,7 +1780,8 @@ services:
       - EMBEDDING_MODEL=local-embed
       # Wiki notebooks/ folder = the notebook registry (B1 folder sync), RO.
       - WIKI_NOTEBOOKS_DIR=/wiki/content/notebooks
-      - NOTEBOOK_SYNC_INTERVAL_S=900
+      # P7a quiesce: 0 = the periodic sync is off (it wrote to surrealdb every 900 s)
+      - NOTEBOOK_SYNC_INTERVAL_S=0
     # Supplies POSTGRES_PASSWORD (+ SURREAL_*/encryption keys since K.5b).
     env_file:
       - ./.env

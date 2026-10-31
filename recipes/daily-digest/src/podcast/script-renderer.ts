@@ -6,7 +6,7 @@
  * Turns the day's GROUNDED research (one article-mode synthesis per newsletter
  * link, grouped into segments per `brain/*` label) into a short two-host (D2)
  * conversational morning-show SCRIPT, one segment per label (D3). The script is
- * the dry-run artifact; audio (ON) is the separate S4b step.
+ * the dry-run artifact; audio is the separate S4b step (P7a: the renderer, renderer.ts).
  *
  * Grounding discipline carried into the audio (per D5/D11):
  *  - narrate ONLY what the grounded synthesis supports,
@@ -149,7 +149,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFnWithReason {
   const baseTokens = cfg.maxTokens ?? 2200;
   const ceiling = Math.max(baseTokens, cfg.maxTokensCeiling ?? baseTokens * 2);
   const salvage = cfg.salvageTruncated === true;
-  // Cut-off text becomes the ON transcript prompt downstream, and an unterminated
+  // Cut-off text becomes the voiced script downstream, and an unterminated
   // segment is what aborted the 2026-08-29 episode. Trimming back to the last
   // sentence that actually ends removes that hazard for free; if nothing ends
   // cleanly the original is returned rather than emptying the script.
@@ -299,16 +299,11 @@ export type RetryOutcome<T> = { done: true; value: T | null } | { done: false };
 /** Run `step` until it reports done or `attempts` is exhausted; a throw counts as
  *  a failed attempt and is passed to `onError`.
  *
- *  WHY THIS IS EXPORTED AND NOT INLINE: the Open Notebook audio retry lives in
- *  generateAudio() inside link-enrich.ts, which is a top-level script with
- *  import-time side effects and therefore has NO test harness - so the anchor's
- *  "a failed ON job is retried once" criterion was UNVERIFIABLE in test
- *  (2026-09-04). The POLICY lives here where it can be proven; generateAudio
- *  supplies the ON-specific body. The done/not-done split keeps that body's
- *  original semantics exactly: a completed job returns its episode even when the
- *  lookup yields null, and only a NON-completed job or a throw re-submits (a
- *  blind "retry while null" would re-run a minutes-long audio job whenever ON's
- *  listing merely lagged). */
+ *  WHY THIS IS EXPORTED AND NOT INLINE: the audio retry lives in generateAudio()
+ *  inside link-enrich.ts, a top-level script with import-time side effects and no
+ *  test harness, so the retry POLICY lives here where it can be proven (2026-09-04).
+ *  Since P7a the body voices the script through the renderer; a done step returns
+ *  its value even when null, and only a throw or a not-done step tries again. */
 export async function retryUntil<T>(
   attempts: number,
   step: (attempt: number, isLast: boolean) => Promise<RetryOutcome<T>>,
@@ -439,7 +434,9 @@ export async function primaryTopic(input: EpisodeInput, chat: ChatFn): Promise<s
 export const SCRIPT_UNAVAILABLE = "(script generation unavailable — grounded material follows)";
 
 // ── render ───────────────────────────────────────────────────────────────────
-export async function renderEpisode(input: EpisodeInput, chat: ChatFn): Promise<Episode> {
+/** `cast` (P7a): the team's cast block (presenters.ts castBlock) - who each HOST label is and how
+ *  they talk - appended to the writer's instructions so two presenters read as two people. */
+export async function renderEpisode(input: EpisodeInput, chat: ChatFn, cast = ""): Promise<Episode> {
   const topicSlug = await primaryTopic(input, chat);
   const name = `${pad3(input.episodeNumber)}-daily-${topicSlug}`;
   const title = `Daily #${pad3(input.episodeNumber)} — ${topicSlug.replace(/-/g, " ")}`;
@@ -447,22 +444,24 @@ export async function renderEpisode(input: EpisodeInput, chat: ChatFn): Promise<
   const segmentsBlock = input.segments.map(renderSegmentForPrompt).join("\n\n");
   const user =
     `DATE: ${input.date}\nEPISODE: ${title}\n\nSEGMENTS (one per label):\n\n${segmentsBlock}`;
-  const written = await chat(SCRIPT_SYS, user);
+  const written = await chat(cast ? `${SCRIPT_SYS}
+
+${cast}` : SCRIPT_SYS, user);
   // THE DEGRADE. Shipping the raw grounded material is still deliberate - a degraded
   // episode is better than no episode - but it must never again be SILENT. Episodes
   // 076-089 (2026-08-22..2026-09-04) took this branch on fourteen consecutive nights
   // and the log said only `[script] HTTP 401 ...`, a line a reader has to already
   // know to connect to a missing episode.
   //
-  // The dump becomes the Open Notebook transcript prompt downstream, so its SIZE is
-  // the number that matters: episode 083's 47,296 chars reached podcast_creator's
-  // 5,000-token cap and aborted the episode outright.
+  // Before P7a the dump became Open Notebook's transcript prompt (episode 083's 47,296
+  // chars hit podcast_creator's 5,000-token cap and aborted the episode). Since P7a the
+  // script's HOST lines are voiced directly; a dump has no HOST labels, so audio refuses it.
   const script = written ?? (() => {
     const dump = `${SCRIPT_UNAVAILABLE}\n\n${segmentsBlock}`;
     console.warn(
       `[script] DEGRADED: episode ${pad3(input.episodeNumber)} "${title}" is shipping RAW ` +
-        `GROUNDED MATERIAL instead of a written script (${dump.length} chars, which becomes ` +
-        `the transcript prompt downstream). Stage: script generation (renderEpisode/S4a). ` +
+        `GROUNDED MATERIAL instead of a written script (${dump.length} chars, no HOST lines, so no ` +
+        `audio is voiced from it). Stage: script generation (renderEpisode/S4a). ` +
         `Cause: ${failureReason(chat)}`,
     );
     return dump;

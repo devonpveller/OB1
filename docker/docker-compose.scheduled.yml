@@ -220,17 +220,29 @@ services:
   # morning email is sent. On /run it spawns the link-enrich pipeline:
   # follow newsletter links (via Tor) → grounded research through
   # openbrain-research (article mode: seed + OB-claim corroboration +
-  # bounded preliminary gaps) → two-host script → Open Notebook audio →
-  # loop-close (episode linked to the day's threads). Best-effort; the
-  # email never waits on it.
+  # bounded preliminary gaps) → two-host script → audio (research-workbench
+  # P7a: the script's HOST lines voiced by the configured team through
+  # LiteLLM's /v1/audio/speech -> Kokoro-FastAPI, encoded by ffmpeg as a
+  # separate process, archived on generation where the configuration store's
+  # podcast.archive_destination says) → loop-close (episode linked to the
+  # day's threads). Best-effort; the email never waits on it. Open Notebook
+  # is no longer called (it is quiesced pending its removal in P7b).
   #
-  # Networks: obnet (openbrain-rest / -research / open_notebook), llm-net
-  # (llama-cpp for the script pass), search-gw-net (= ai-stack_default, where
+  # IMAGE (P7a): openbrain-podcast:local = the pinned Deno runtime + Alpine's
+  # ffmpeg (../recipes/daily-digest/Dockerfile). The recipe is still mounted.
+  #
+  # Networks: obnet (openbrain-rest / -research / -workbench), llm-net
+  # (llama-cpp: the script pass AND speech), search-gw-net (= ai-stack_default, where
   # the Mullvad `vpn` proxy lives since the ai-stack K.3 split — same seam
   # openbrain-research uses).
   # Needs --unstable-net (Tor proxy) + --allow-run (spawns link-enrich.ts).
   openbrain-podcast:
-    image: denoland/deno:alpine
+    build:
+      context: ../recipes/daily-digest
+      dockerfile: Dockerfile
+      args:
+        OB1_SHA: ${OB1_SHA:-unknown}
+    image: openbrain-podcast:local
     container_name: openbrain-podcast
     restart: unless-stopped
     working_dir: /app
@@ -264,15 +276,20 @@ services:
       # it was still queued/running. (research-service itself rides out llm-queue
       # 429 backpressure now, so "running" means real progress.)
       RESEARCH_WAIT_MS: ${RESEARCH_WAIT_MS:-7200000}   # 2h per job
-      # ON audio (TTS) terminal-wait — generous so a slow-but-working render is not
-      # cut off mid-generation. A genuine 'failed' still returns immediately.
-      ON_JOB_WAIT_MS: ${ON_JOB_WAIT_MS:-7200000}       # 2h
-      ON_BASE: http://open_notebook:5055
-      # User-facing base for the EMAIL episode links — external + Authelia-gated.
-      # e.g. https://notebook.<your domain>, set in OB1/docker/.env. No default:
-      # blank means no public episode links, only the internal audio URL
-      # (buildEpisodeUrls in recipes/daily-digest/link-enrich.ts).
-      ON_PUBLIC_BASE: ${ON_PUBLIC_BASE:-}
+      # ── Audio (research-workbench P7a) ──────────────────────────────────────
+      # This service's OWN LiteLLM virtual key for /v1/audio/speech (route local-tts).
+      # BLANK AS SHIPPED = inert: the gateway refuses every speech call, nothing is
+      # voiced, the email still goes out. Issue it in the LiteLLM UI (one key per
+      # consumer), put it in OB1/docker/.env as OB_PODCAST_TTS_KEY.
+      PODCAST_TTS_KEY: ${OB_PODCAST_TTS_KEY:-}
+      # The team that voices the daily episode (a team id or name in the presenter
+      # model, init-podcasts.sql) and whose it is (= the workbench's WORKSPACE_DEFAULT_SUB).
+      # Blank team = the script is still written, no audio is voiced.
+      PODCAST_TEAM: ${PODCAST_TEAM:-}
+      PODCAST_OWNER_SUB: ${WORKSPACE_DEFAULT_SUB:-}
+      # The configuration store is read here on every render (podcast.archive_destination).
+      WORKBENCH_URL: http://openbrain-workbench:8000
+      PODCAST_TTS_CONCURRENCY: ${PODCAST_TTS_CONCURRENCY:-2}
       CHAT_API_BASE: http://llama-cpp:8080/v1
       # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
       CHAT_API_KEY: ${OB_PODCAST_LLM_KEY:-not-needed}
@@ -302,12 +319,24 @@ services:
       - ../secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/gmail-read-credentials.json:ro
       - ../secrets/google/open-brain-email/token.json:/app/gmail-read-token.json
       - D:\_data:/reports
+      # P7a: the podcast archive's DEFAULT destination, read-write (the archive writer). The
+      # same host folder the workbench mounts read-only at the same path, so the destination the
+      # configuration store resolves ({"mount": "podcast-archive"} -> /mounts/podcast-archive)
+      # is this directory here too. A destination set to another path needs that path mounted.
+      - ${BACKUPS_DIR:-../../backups}/podcasts:/mounts/podcast-archive
     networks:
       - obnet
       - llm-net
       - search-gw-net
     entrypoint: ["deno", "run", "--unstable-net", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "--allow-run", "podcast-server.ts"]
     command: []
+    # P7a: the deploy door (ob1-deploy.ps1) waits for healthy, not just running
+    healthcheck:
+      test: ["CMD", "deno", "eval", "const r = await fetch('http://127.0.0.1:8080/health'); Deno.exit(r.ok ? 0 : 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ── Idea Refinery drain (IR.1, HTTP-triggered) ──────────────────────
   # Long-running Deno HTTP service. POST /run walks the owed-research queue

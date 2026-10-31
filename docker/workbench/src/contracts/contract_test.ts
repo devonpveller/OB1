@@ -140,9 +140,6 @@ Deno.test("calls whose backing lands later answer a typed not_implemented that v
     ["GET", "/workbench/contract/watches"],
     ["GET", "/workbench/contract/watches/f0000000-0000-4000-8000-0000000000f2/proposals"],
     ["GET", "/workbench/contract/stance-maps/99999999-9999-4999-8999-999999999999"],
-    ["GET", "/workbench/contract/podcasts"],
-    ["GET", "/workbench/contract/presenters"],
-    ["GET", "/workbench/contract/teams"],
   ];
   for (const [method, path] of stubs) {
     const r = await a.request(path, { method });
@@ -225,7 +222,11 @@ Deno.test("the podcast archive path appears only in the compose mount (D6 item 5
       if (/backups}?[\/]+podcasts/i.test(l)) hits.push(`${u.pathname.split("/OB1/")[1]}:${i + 1}: ${l.trim()}`);
     });
   }
+  // P7a: two mounts of the same default folder - the workbench's (read-only: it resolves and reports
+  // the destination) and openbrain-podcast's (read-write: the archive writer). Nothing else names it.
   const mounts = hits.filter((h) => h.startsWith("docker/docker-compose.yml") && /:\/mounts\/podcast-archive:ro\s*$/.test(h));
-  assertEquals(mounts.length, 1, `expected exactly one compose mount line, got: ${hits.join(" | ")}`);
-  assertEquals(hits.length, 1, `the archive path appears outside the mount: ${hits.join(" | ")}`);
+  const writer = hits.filter((h) => h.startsWith("docker/docker-compose.scheduled.yml") && /:\/mounts\/podcast-archive\s*$/.test(h));
+  assertEquals(mounts.length, 1, `expected exactly one workbench mount line, got: ${hits.join(" | ")}`);
+  assertEquals(writer.length, 1, `expected exactly one openbrain-podcast mount line, got: ${hits.join(" | ")}`);
+  assertEquals(hits.length, 2, `the archive path appears outside the two mounts: ${hits.join(" | ")}`);
 });

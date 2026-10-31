@@ -40,6 +40,9 @@ const reads: Req[] = [
   ["registry", "GET", `/registries/notification_classes`],
   // before the PUT below, as Dredd runs it: the default (the named mount)
   ["setting", "GET", `/settings/podcast.archive_destination`],
+  // P7a
+  ["podcasts", "GET", `/podcasts`], ["presenters", "GET", `/presenters`], ["teams", "GET", `/teams`],
+  ["podcastRequests", "GET", `/podcasts/requests`],
 ];
 const writes: Req[] = [
   ["suppress", "POST", `/sources/d0000000-0000-4000-8000-0000000000d1/suppress`, { reason: "superseded by a better source", by: "dredd" }],
@@ -52,6 +55,11 @@ const writes: Req[] = [
   ["userSourceRemoved", "DELETE", `/ideas/${F.idea}/user-sources/cccccccc-cccc-4ccc-8ccc-ccccccccccc2`],
   ["settingWritten", "PUT", `/settings/podcast.archive_destination`, { value: { path: "/mounts/podcast-archive-alt" }, by: "dredd" }],
   ["steer", "POST", `/sessions/${F.job}/steer`, { step_id: "s1", text: "narrow to erasure" }],
+  // P7a: a render request by the fixture team (PODCAST_RENDER_URL blank in the lab: it stays queued)
+  ["podcastRequest", "POST", `/podcasts/requests`, {
+    team_id: "pod-fx-team", title: "A recorded request",
+    transcript: { title: "A recorded request", turns: [{ presenterId: "pod-fx-presenter-a", text: "Good morning." }, { presenterId: "pod-fx-presenter-b", text: "Morning!" }] },
+  }],
   // P2a: place a reference held by the fixture user document
   ["referenceCreated", "POST", `/references`, {
     source_id: F.refSrc, provenance: "user", scope: "span",
@@ -83,6 +91,7 @@ const stream = (await (await fetch(`${B}/sessions/${F.job}/stream`, { headers: {
 ex.erase.tombstone.id = "66666666-6666-4666-8666-666666666668";
 ex.userSourceAdded.source.source_id = "cccccccc-cccc-4ccc-8ccc-ccccccccccc3";
 ex.referenceCreated.record.id = "f2000000-0000-4000-8000-0000000000c1";
+ex.podcastRequest.id = "e8000000-0000-4000-8000-0000000000c1";
 if (ex.referenceCreated.held) ex.referenceCreated.held.reference_id = "f2000000-0000-4000-8000-0000000000c1";
 for (const [k, f] of [["timeline", "events"], ["trail", "entries"], ["jobs", "jobs"], ["notifications", "notifications"], ["registries", "registries"], ["ideas", "ideas"]]) {
   ex[k][f] = ex[k][f].slice(0, 3);
@@ -110,6 +119,7 @@ const lines = [
   `  steerRequest: ${JSON.stringify(reqs.steer)},`,
   `  diffCheckRequest: ${JSON.stringify(reqs.diffCheck)},`,
   `  referenceCreateRequest: ${JSON.stringify(reqs.referenceCreated)},`,
+  `  podcastRequestBody: ${JSON.stringify(reqs.podcastRequest)},`,
   "  notImplemented: (operation: string, landsIn: string) => ({",
   "    status: \"not_implemented\", operation, lands_in: landsIn,",
   "    message: `${operation} is part of the contract; its backing lands in ${landsIn}`,",

@@ -25,6 +25,7 @@
 
 import { Clock, localDate, zonedEpoch } from "../routine/clock.ts";
 import { DayRecord, PodcastRecord, readJson, RoutineStore } from "../routine/store.ts";
+import type { RenderService } from "./render-service.ts";
 
 export interface PodcastServiceDeps {
   clock: Clock;
@@ -234,7 +235,7 @@ export class PodcastService {
 
 export function servePodcast(
   svc: PodcastService,
-  o: { port: number; hostname?: string; signal?: AbortSignal; onListen?: (a: Deno.NetAddr) => void },
+  o: { port: number; hostname?: string; signal?: AbortSignal; onListen?: (a: Deno.NetAddr) => void; render?: RenderService },
 ): Deno.HttpServer<Deno.NetAddr> {
   return Deno.serve({ port: o.port, hostname: o.hostname ?? "0.0.0.0", signal: o.signal, onListen: o.onListen }, async (req) => {
     const url = new URL(req.url);
@@ -249,6 +250,21 @@ export function servePodcast(
       }
       const r = await svc.handleRun({ force: body?.force === true });
       return Response.json(r.body, { status: r.status });
+    }
+    // P7a: render a request / transcode an archived episode (render-service.ts)
+    if (o.render && req.method === "POST" && (url.pathname === "/render" || url.pathname === "/transcode")) {
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse((await req.text().catch(() => "")) || "{}");
+      } catch {
+        return Response.json({ error: "bad JSON body" }, { status: 400 });
+      }
+      try {
+        const r = url.pathname === "/render" ? await o.render.render(body) : await o.render.transcode(body);
+        return Response.json(r.body, { status: r.status });
+      } catch (e) {
+        return Response.json({ error: String(e).slice(0, 300) }, { status: 502 });
+      }
     }
     return new Response("not found", { status: 404 });
   });
