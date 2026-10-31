@@ -151,7 +151,15 @@ Deno.test("B2: the client's deadline covers the gate's own budget - 20 s fetch +
   }
   const url = "http://target.example/slow";
   const ok = { status: "ok", url, final_url: url, redirects: [], http_status: 200, content_type: "text/plain", text: "late", label: "clean" };
-  const slow = (ms: number) => () => new Promise<Response>((r) => setTimeout(() => r(json(ok)), ms));
+  // every delayed answer is settled (and its timer cleared) before the test ends: no leaked timer
+  const pending: { id: ReturnType<typeof setTimeout> | undefined; done: () => void }[] = [];
+  const slow = (ms: number) => () =>
+    new Promise<Response>((r) => {
+      const entry: (typeof pending)[number] = { id: undefined, done: () => r(json(ok)) };
+      entry.id = setTimeout(() => { pending.splice(pending.indexOf(entry), 1); entry.done(); }, ms);
+      pending.push(entry);
+    });
+  const settle = () => { for (const e of pending.splice(0)) { clearTimeout(e.id); e.done(); } };
   // a gate that answers within the deadline is waited for; one that answers after it is the stated 503
   await withGate(slow(700), async (base) => {
     const p = await gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY, WORKBENCH_GATE_TIMEOUT_MS: "3000" }))(url);
@@ -160,6 +168,7 @@ Deno.test("B2: the client's deadline covers the gate's own budget - 20 s fetch +
   await withGate(slow(1500), async (base) => {
     const err = await assertRejects(() => gateClient(env({ WORKBENCH_GATE_URL: base, WORKBENCH_GATE_KEY: KEY, WORKBENCH_GATE_TIMEOUT_MS: "300" }))(url), GateUnavailable);
     assertEquals([err.httpStatus, err.message], [503, UNAVAILABLE]);
+    settle();
   });
 });
 
