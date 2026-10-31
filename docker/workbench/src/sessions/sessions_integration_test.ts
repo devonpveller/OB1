@@ -582,14 +582,30 @@ Deno.test({ name: "S14 an admin's steer on a service job: its text and step ids 
     ["notebook key", K.nb, {}],
     ["shared key", K.shared, {}],
   ];
+  // round 5 (review r-p4b-sessions B1): SHARED output is never rewritten - plant step-id-looking words and an
+  // s3 URL in the job's own research output; a non-actor reads it byte-identical to the owner
+  const shared = { synthesis: `Per ${steps[0]} guidance see https://s3.amazonaws.com/b/p2.pdf and the s1 appendix (p2 tier).`, outcome: "answered",
+    cited_sources: [{ title: "s1 appendix p2", url: "https://s3.us-east-1.amazonaws.com/p2/x.pdf" }], reuse_claims: [{ id: "c-s14", text: "AWS s3 buckets are p2-tier" }] };
+  await sql(`UPDATE public.research_jobs SET result = $2::jsonb WHERE id = $1`, [job, JSON.stringify(shared)]);
+  const ownerRead = await rs("GET", `/research/jobs/${job}`, K.ao);
   for (const [who, key, h] of doors) {
     for (const p of reads) {
       const r = await rs("GET", p, key, h);
       assertEquals(r.status, 200, `${who} ${p}: ${r.status}`);
-      const hit = stepIn(r.text);
-      assertEquals(hit, [], `${who} ${p}: step id(s) ${hit} in the body: ${r.text.slice(0, 400)}`);
+      // step ids: no step_id / rooted_step_id key at all, and none in the only prose that names a step
+      assert(!/"(rooted_)?step_id"\s*:/.test(r.text), `${who} ${p}: a step id key: ${r.text.slice(0, 300)}`);
+      for (const rec of (r.json.learning_records ?? []) as { deviation?: string; steer?: string }[]) {
+        const hit = [...stepIn(rec.deviation ?? ""), ...stepIn(rec.steer ?? "")];
+        assertEquals(hit, [], `${who} ${p}: step id(s) ${hit} in learning_records prose: ${JSON.stringify(rec).slice(0, 300)}`);
+      }
       if (who !== "workspace on behalf of the admin, no admin flag") assert(!r.text.includes(words), `${who} ${p}: the steer text`);
     }
+    // the positive control: the shared result reads exactly as its owner reads it
+    const d = await rs("GET", `/research/jobs/${job}`, key, h);
+    for (const k of ["synthesis", "cited_sources", "reuse_claims"] as const) {
+      assertEquals(d.json.result?.[k], ownerRead.json.result?.[k], `${who}: the shared ${k} was rewritten`);
+    }
+    assert(d.text.includes("https://s3.amazonaws.com/b/p2.pdf"), `${who}: the cited URL reads as written`);
   }
   // who may see it: the service that owns the job, and an admin (asserted by the workspace key only)
   const own = await rs("GET", `/research/jobs/${job}/tree`, K.ao);

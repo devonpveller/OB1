@@ -121,3 +121,33 @@ Deno.test("round 4: the guard goes red on a dropped rule and on a new reader (mu
     assert(offendersIn(rel, src).length > 0, `mutant ${i} (${rel}) stays green`);
   });
 });
+
+// ── round 5 (review r-p4b-sessions F1; tester attempt 4 finding 1): round 3's timeline check, restored.
+// The per-function guard above lets the timeline through as soon as ONE of its OWN_QUERY calls carries the
+// viewer; a second call reading `j.query` raw (M1) or OWN_QUERY without the viewer (M2) stayed green.
+export function timelineOffences(src: string): string[] {
+  const s = spans(src).find((x) => x.name === "function timeline");
+  if (!s) return ["no timeline()"];
+  const body = src.slice(s.from, s.to);
+  const out: string[] = [];
+  const calls = body.match(/OWN_QUERY\([^)]*\)/g) ?? [];
+  if (calls.length < 2) out.push(`the timeline's two job selects go through OWN_QUERY (found ${calls.length})`);
+  for (const c of calls) if (!/who/.test(c)) out.push(`OWN_QUERY without the viewer: ${c}`);
+  for (const m of body.matchAll(READ)) out.push(`the timeline reads a job's question raw: ${m[0]}`);
+  return out;
+}
+
+Deno.test("round 5: every timeline select of a job's question goes through OWN_QUERY with the viewer", async () => {
+  const src = await Deno.readTextFile(new URL("../contracts/repo/knowledge.ts", import.meta.url));
+  assertEquals(timelineOffences(src), []);
+});
+
+Deno.test("round 5: the timeline mutants M1 (a raw j.query) and M2 (OWN_QUERY without the viewer) go red", async () => {
+  const src = await Deno.readTextFile(new URL("../contracts/repo/knowledge.ts", import.meta.url));
+  const m1 = src.replace(/left\(\$\{OWN_QUERY\("j", "\$5", who, "\$6"\)\}, 120\)/, "left(j.query, 120)");
+  const m2 = src.replace(/OWN_QUERY\("j", "\$5", who, "\$6"\)\}, 100\)/, 'OWN_QUERY("j", "$5")}, 100)');
+  for (const [name, m] of [["M1", m1], ["M2", m2]] as const) {
+    assert(m !== src, `${name} changed nothing`);
+    assert(timelineOffences(m).length > 0, `${name} stays green`);
+  }
+});

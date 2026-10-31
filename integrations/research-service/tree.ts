@@ -574,7 +574,10 @@ export interface ExploratoryRecord {
   outcome: { kind: "found" | "gap-remains"; summary: string; evidence: string[] };
   deviation: string; created_at: string;
 }
-export function learningRecords(t: Tree): ExploratoryRecord[] {
+/** rw-p4b-sessions round 5 (review r-p4b-sessions B1): `hideSteps` - the record for a viewer who may not act
+ *  on the session: the two sentences that name a step (deviation, steer) name none; nothing else changes. */
+export function learningRecords(t: Tree, o: { hideSteps?: boolean } = {}): ExploratoryRecord[] {
+  const at = (step: string) => (o.hideSteps ? "(a step)" : step);
   const steerOf = new Map(t.steers.map((s) => [s.child_job_id, s]));
   return t.nodes.map((n) => {
     const opened = steerOf.get(n.id);
@@ -583,13 +586,13 @@ export function learningRecords(t: Tree): ExploratoryRecord[] {
     const cred = credibility(n.metrics), cov = coverage(n.result);
     const summary = firstPara(String((n.result?.synthesis as string) ?? "")) || (n.status === "done" ? "nothing citable was found" : `branch ${n.status}`);
     const deviation = answeredBy.length
-      ? answeredBy.map((s) => `${s.steer_kind === "human" ? "a human steer" : `a ${s.steer_kind} gap steer`} answered it at ${s.step_id} (branch ${s.child_job_id})`).join("; ")
+      ? answeredBy.map((s) => `${s.steer_kind === "human" ? "a human steer" : `a ${s.steer_kind} gap steer`} answered it at ${at(s.step_id)} (branch ${s.child_job_id})`).join("; ")
       : "no steer answered it";
     return {
       schema_version: 1, fidelity: "exploratory", producer: "job-tree",
       source_ref: { session_id: t.root.id, branch_id: n.id },
       domains: [t.estimate],
-      steer: opened ? `${opened.steer_kind === "human" ? "human steer" : `${opened.steer_kind} gap steer`} at ${opened.step_id}: ${opened.text}` : `question: ${n.query}`,
+      steer: opened ? `${opened.steer_kind === "human" ? "human steer" : `${opened.steer_kind} gap steer`} at ${at(opened.step_id)}: ${opened.text}` : `question: ${n.query}`,
       red: gaps.length ? gaps.join("; ") : "no gap remained",
       outcome: {
         kind: gaps.length ? "gap-remains" : "found", summary,

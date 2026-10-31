@@ -13,8 +13,8 @@
  * (OB1/docker/workbench/contract-test/run-sessions-tests.ps1).
  */
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { actorOf, HIDDEN_STEER_TEXTS_SQL, MAY_ACT_SQL, nonActorView, TREE_STEP_IDS_SQL } from "./viewer.ts";
-import { createSteer, GAP_ACTOR, openGapBranches, recordCancel, SteerError, type Q } from "./tree.ts";
+import { actorOf, HIDDEN_STEER_TEXTS_SQL, MAY_ACT_SQL, nonActorView } from "./viewer.ts";
+import { createSteer, GAP_ACTOR, learningRecords, openGapBranches, recordCancel, SteerError, type Q, type Tree, type TreeNode } from "./tree.ts";
 import type { Caller } from "./origin.ts";
 
 const ws: Caller = { name: "workspace", origin: "workspace", key: "k".repeat(32), shared: false };
@@ -172,30 +172,67 @@ Deno.test("P4b round 3: the tree, events and job-detail routes apply the non-act
   }
 });
 
-// ── round 4 (tester t-p4b-sessions3): a step id in PROSE (learning_records deviation / steer) ─────
-Deno.test("P4b round 4 nonActorView: the tree's step ids are redacted from every string value, not only their keys", () => {
-  const tree = {
-    learning_records: [
-      { deviation: "a human steer answered it at p2 (branch c1)", steer: "question: service question" },
-      { deviation: "no steer answered it", steer: "gap gap steer at s7: claim 12 is weak" },
-      { steer: "interhub gap steer at s7; also see p2." },
-    ],
-    report: { sections: [{ title: "s2x and ps2 and p22 stay; p2 goes", summary: "p2" }] },
-    origin: "service question",
-  };
-  const v = nonActorView(tree, [], ["p2", "s7"]);
-  const s = JSON.stringify(v);
-  for (const step of ["p2", "s7"]) assert(!new RegExp(`(^|[^A-Za-z0-9_-])${step}([^A-Za-z0-9_-]|$)`).test(s), `${step} survives: ${s}`);
-  assert(s.includes("s2x") && s.includes("ps2") && s.includes("p22"), `look-alike words stay: ${s}`);
-  assert(s.includes("a human steer answered it at") && s.includes("claim 12 is weak"), `the rest of the sentence stays: ${s}`);
+// ── round 5 (review r-p4b-sessions B1): step ids are kept out at their PRODUCER, not by a value regex ─────
+// Round 4's value regex redacted every token equal to a step id (s1..sN) from SHARED output too:
+// "https://s3.amazonaws.com/b/s2.pdf" read "https://(a step).amazonaws.com/b/(a step).pdf". The only prose
+// that names a step is learningRecords' deviation and steer: they are written without it for a non-actor.
+function tree(): Tree {
+  const n = (o: Partial<TreeNode>): TreeNode => ({
+    id: "", parent_job_id: null, branch_kind: "root", query: "", anchor: null, rooted_step_id: null, status: "done",
+    result: null, metrics: null, created_at: "2026-10-31T10:00:00Z", finished_at: "2026-10-31T10:05:00Z", ...o,
+  });
+  const root = n({ id: "r", query: "service question about AWS s3 buckets", result: {
+    synthesis: "Per s3 guidance, see https://s3.amazonaws.com/b/s2.pdf and the s1 appendix. [Source 1]", gaps: ["what about s4 tiers"],
+    cited_sources: [{ title: "s1 appendix", url: "https://s3.us-east-1.amazonaws.com/x.pdf" }],
+    reuse_claims: [{ id: "c1", text: "AWS s3 buckets are regional" }] } });
+  const steer = n({ id: "c", parent_job_id: "r", branch_kind: "steer", query: "AdminWords secret steer", anchor: root.query, rooted_step_id: "s2",
+    result: { synthesis: "Use s3 lifecycle rules (s2 class)." } });
+  const gap = n({ id: "g", parent_job_id: "r", branch_kind: "gap", query: "Verify: s3 is regional", anchor: root.query, rooted_step_id: "s3" });
+  const steers = [
+    { id: "st1", parent_job_id: "r", child_job_id: "c", steer_kind: "human" as const, step_id: "s2", text: "AdminWords secret steer", topic_estimate: root.query, anchor: root.query, gap: null, created_at: "t" },
+    { id: "st2", parent_job_id: "r", child_job_id: "g", steer_kind: "gap" as const, step_id: "s3", text: "s3 is regional", topic_estimate: root.query, anchor: root.query, gap: { claim_id: "c1" }, created_at: "t" },
+  ];
+  return { root, nodes: [root, steer, gap], steers, estimate: "AWS s3 storage" };
+}
+const STEP = (s: string) => new RegExp(`(^|[^A-Za-z0-9])${s}([^A-Za-z0-9]|$)`);
+
+Deno.test("P4b round 5 learningRecords hideSteps: deviation and steer name no step; everything else is the owner's text", () => {
+  const t = tree();
+  const own = learningRecords(t), hid = learningRecords(t, { hideSteps: true });
+  assert(own.find((r) => r.source_ref.branch_id === "r")!.deviation.includes("answered it at s2"), "the owner's record names the step");
+  for (const r of hid) {
+    for (const st of ["s2", "s3"]) {
+      assert(!STEP(st).test(r.deviation.replace(/\(branch [^)]*\)/g, "")), `deviation names ${st}: ${r.deviation}`);
+      assert(!new RegExp(`steer at ${st}`).test(r.steer), `steer names ${st}: ${r.steer}`);
+    }
+  }
+  // every other field reads identically
+  const strip = (r: object) => { const { deviation: _d, steer: _s, ...rest } = r as Record<string, unknown>; return rest; };
+  assertEquals(hid.map(strip), own.map(strip));
+  assert(hid.find((r) => r.source_ref.branch_id === "g")!.steer.startsWith("gap gap steer at (a step): s3 is regional"),
+    "the step is replaced, the gap's own text (shared research) stays");
 });
 
-Deno.test("P4b round 4: the tree's step ids come from its stage events, its branches and its steers", () => {
-  const q = TREE_STEP_IDS_SQL.replace(/\s+/g, " ");
-  assert(q.includes("research_job_events") && q.includes("rooted_step_id") && q.includes("research_steers"), q);
+Deno.test("P4b round 5 nonActorView: SHARED fields read byte-identical for a non-actor and the owner; only step keys and hidden steer texts go", () => {
+  const t = tree();
+  const job = { id: "r", status: "done", progress: { phase: "done", step_id: "s5" }, result: t.root.result };
+  // the route used to pass the tree's step ids too (round 4); whatever it passes, shared text must not change
+  const nav = nonActorView as unknown as (v: unknown, texts: string[], extra?: unknown) => any;
+  const read = nav(job, ["AdminWords secret steer"], ["s1", "s2", "s3", "s5"]);
+  assertEquals(read.result, job.result, "synthesis, cited_sources url/title and reuse_claims text are untouched");
+  assertEquals(read.progress, { phase: "done" }, "the step_id key is dropped");
+  const view = nav({ branches: t.nodes.map((n) => ({ id: n.id, rooted_step_id: n.rooted_step_id, query: n.query, synthesis: (n.result as Record<string, unknown> | null)?.synthesis ?? null })),
+    learning_records: learningRecords(t, { hideSteps: true }) }, ["AdminWords secret steer"], ["s1", "s2", "s3"]);
+  const s = JSON.stringify(view);
+  assert(!s.includes("AdminWords") && !s.includes("rooted_step_id"), s);
+  assert(s.includes("https://s3.amazonaws.com/b/s2.pdf") || JSON.stringify(read).includes("https://s3.amazonaws.com/b/s2.pdf"), "the URL reads as written");
+  assert(s.includes("Use s3 lifecycle rules (s2 class)."), "a branch's shared synthesis reads as written");
+  assert(!s.includes("(a step).amazonaws"), "no value regex");
 });
 
-Deno.test("P4b round 4: the reads pass the tree's step ids to nonActorView", () => {
+Deno.test("P4b round 5: the tree route asks learningRecords for the non-actor's form; no value regex is left", () => {
   const src = Deno.readTextFileSync(new URL("./index.ts", import.meta.url)).replace(/\s+/g, " ");
-  assert((src.match(/nonActorView\([^)]*steer\.steps\)/g) ?? []).length >= 2, "tree/events and job detail redact the step ids by value");
+  assert(/learningRecords\(t, \{ hideSteps: steer\.hide \}\)/.test(src), "learning_records: learningRecords(t, { hideSteps: steer.hide })");
+  const v = Deno.readTextFileSync(new URL("./viewer.ts", import.meta.url));
+  assert(!/TREE_STEP_IDS_SQL|\(a step\)/.test(v), "viewer.ts carries no value regex for step ids");
 });

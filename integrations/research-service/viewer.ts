@@ -186,26 +186,13 @@ export const HIDDEN_STEER_TEXTS_SQL =
     WHERE s.root_job_id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid)
       AND s.steer_kind = 'human' AND s.actor_sub NOT IN ($2, $3)`;
 
-/** SQL ($1 job): every step id of the job's tree - its stage events, its branches' rooted steps, its steers.
- *  Round 4 (tester t-p4b-sessions3): a step id also sits in PROSE (tree.ts learningRecords: "answered it at
- *  s2", "gap steer at s7: ..."), so a non-actor's view redacts these values from every string. */
-export const TREE_STEP_IDS_SQL =
-  `WITH r AS (SELECT coalesce(root_job_id, id) AS root FROM research_jobs WHERE id = $1::uuid)
-   SELECT coalesce(array_agg(DISTINCT s), '{}') AS steps FROM (
-     SELECT e.step_id AS s FROM research_job_events e JOIN r ON e.root_job_id = r.root
-     UNION SELECT j.rooted_step_id FROM research_jobs j JOIN r ON coalesce(j.root_job_id, j.id) = r.root
-     UNION SELECT st.step_id FROM research_steers st JOIN r ON st.root_job_id = r.root) x
-   WHERE s IS NOT NULL AND btrim(s) <> ''`;
-
 const STEP_KEYS = new Set(["step_id", "rooted_step_id"]);
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/** The value as a non-actor reads it: every step id key dropped, every known step id (`stepIds`) redacted
- *  from every string value as a whole token, and every string carrying a hidden text omitted. */
-export function nonActorView<T>(value: T, hiddenTexts: string[], stepIds: string[] = []): T {
-  const ids = [...new Set(stepIds.map((x) => x.trim()).filter(Boolean))];
-  const token = ids.length ? new RegExp(`(^|[^A-Za-z0-9_-])(?:${ids.map(escapeRe).join("|")})(?=[^A-Za-z0-9_-]|$)`, "g") : null;
+/** The value as a non-actor reads it: every step id KEY dropped and every string carrying a hidden steer text
+ *  omitted. Shared research output is never rewritten (round 5, review r-p4b-sessions B1: a value regex turned
+ *  https://s3.amazonaws.com/... into a redaction marker); the one prose that names a step - learning_records'
+ *  deviation and steer - is written without it at its producer (tree.ts learningRecords hideSteps). */
+export function nonActorView<T>(value: T, hiddenTexts: string[]): T {
   const strip = (v: unknown): unknown => {
-    if (typeof v === "string") return token ? v.replace(token, "$1(a step)") : v;
     if (Array.isArray(v)) return v.map(strip);
     if (v && typeof v === "object" && !(v instanceof Date)) {
       const o: Record<string, unknown> = {};
@@ -214,6 +201,5 @@ export function nonActorView<T>(value: T, hiddenTexts: string[], stepIds: string
     }
     return v;
   };
-  // the hidden texts first (a steer text may itself name a step id), then the step ids and their keys
   return strip(omitPrompts(value, hiddenTexts)) as T;
 }
