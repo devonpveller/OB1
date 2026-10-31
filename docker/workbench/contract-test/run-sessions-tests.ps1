@@ -155,7 +155,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function DkLong { Lab-Docker 5400 ([string[]]$args) }  # image builds: the shared Docker host may be busy with other labs
 
 $shimCases = @(
   @('run', '-p', '8080:8080', 'x'), @('run', '--network', 'ai-stack_app-net', 'x'), @('network', 'create', '--driver', 'macvlan', 'n'),
@@ -325,7 +325,7 @@ try {
 
   if (-not $Red) {
     # every steer the run recorded has its actor; what the actors were
-    $act = (Dk exec $db psql -U postgres -d openbrain -tAc "select steer_kind || ':' || case when actor_sub like 'system:%' or actor_sub like 'service:%' then actor_sub else '<user>' end || ' ' || count(*) from research_steers group by 1 order by 1") -join '; '
+    $act = (Dk exec $db psql -U postgres -d openbrain -tAc "select k || ' ' || n from (select steer_kind || ':' || case when actor_sub like 'system:%' or actor_sub like 'service:%' then actor_sub else '<user>' end as k, count(*) as n from research_steers group by 1) x order by 1") -join '; '
     $nul = (Dk exec $db psql -U postgres -d openbrain -tAc "select count(*) from research_steers where actor_sub is null or btrim(actor_sub) = ''").Trim()
     Save 'steer-actors.log' "actors: $act`nunrecorded: $nul"
     Check ($nul -eq '0') "every steer records actor_sub ($act)"
@@ -336,7 +336,8 @@ try {
   foreach ($sw in $sweeps) {
     if ($sw[2] -eq 'off') {
       $null = Dk rm -f "$P-wb"
-      $null = Dk run -d --name "$P-wb" --label $label --network $net @($wbArgs + @('-e', 'WORKSPACE_RESPONSE_WALK=off', $wbTag))
+      $restart = $wbArgs + @('-e', 'WORKSPACE_RESPONSE_WALK=off', $wbTag)
+      $null = Dk run -d --name "$P-wb" --label $label --network $net @restart
       Check (($script:rc -eq 0) -and (Wait-Http "http://$P-wb:8000/health" 90)) 'the workbench restarted with the response walk off'
     }
     Write-Host "[5b] the isolation sweep signed in: A=$($sw[0]) B=$($sw[1]), response walk $($sw[2])"
