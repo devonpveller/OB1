@@ -246,7 +246,8 @@ class R2F1SealLinux(unittest.TestCase):
 class R2F2RelaysDoNotForward(unittest.TestCase):
     def test_both_relays_set_ip_forward_0(self):
         d = _compose()
-        for name in ("openbrain-intake-dbrelay", "openbrain-intake-llmrelay"):
+        # intake-gate-relay: the third relay (the search gate's way in) is held to the same line
+        for name in ("openbrain-intake-dbrelay", "openbrain-intake-llmrelay", "openbrain-intake-callrelay"):
             with self.subTest(relay=name):
                 sc = d["services"][name].get("sysctls") or {}
                 self.assertEqual(str(sc.get("net.ipv4.ip_forward")), "0", sc)
@@ -263,7 +264,8 @@ class R2F3Docs(unittest.TestCase):
         text = (DOCKER / "README.md").read_text(encoding="utf-8")
         section = text[text.index("## Compose profiles"):text.index("### The invariant")]
         for svc, prof in (("openbrain-pantry", "pantry"), ("openbrain-intake", "intake"),
-                          ("openbrain-intake-dbrelay", "intake"), ("openbrain-intake-llmrelay", "intake")):
+                          ("openbrain-intake-dbrelay", "intake"), ("openbrain-intake-llmrelay", "intake"),
+                          ("openbrain-intake-callrelay", "intake")):
             with self.subTest(svc=svc):
                 self.assertRegex(section, rf"\| `{re.escape(svc)}` \| `{prof}` \|")
 
