@@ -71,6 +71,8 @@ Deno.test("P4b next steering point: the latest steering stage; due-process stage
   // one who may not act never gets a step id (rw-identity round 5)
   assertEquals(nextSteeringPoint(J, ev, false), { step_id: null, phase: "plan" });
   assertEquals(nextSteeringPoint(J, ev.filter((e) => e.kind === "due_process"), true), null);
+  // another user's events carry no step id (repo.ts): the point is still shown, by its phase (lab run 1, S1)
+  assertEquals(nextSteeringPoint(J, ev.map((e) => ({ ...e, step_id: null })), false), { step_id: null, phase: "plan" });
 });
 
 Deno.test("P4b tree: every branch open or closed; a foreign viewer gets no branch text and no step", () => {

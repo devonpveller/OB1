@@ -326,6 +326,10 @@ Deno.test({ name: "S6 an idea's session names the idea and links to its refinery
   assertEquals(idea.id, L.idea);
   assertEquals([idea.room?.location, idea.refinery?.members?.room], ["mattermost:thread:mm-room-p4b", "mm-room-p4b"]);
   assertEquals(idea.refinery.members.sessions.includes(L.jobs.idea), true, "the idea lists the session it triggered");
+  // 320's trigger: the idea's session is its owner's (not the default subject's), so alice may steer it
+  const own = await sql<{ owner_sub: string; actor_sub: string }>(`SELECT owner_sub, actor_sub FROM public.research_prompts WHERE job_id = $1`, [L.jobs.idea]);
+  assertEquals(own[0], { owner_sub: sub("alice"), actor_sub: "system:idea-engagement" });
+  assertEquals(c.can_act, true, "the idea's owner may act on its session");
 } });
 
 Deno.test({ name: "S7 another user's card carries no prompt, inlet, branch text or step id; every steer records actor_sub", ...opts, fn: async () => {

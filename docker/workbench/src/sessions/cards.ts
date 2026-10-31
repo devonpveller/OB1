@@ -121,7 +121,8 @@ export function waitingOn(status: string, phase: string, openBranches: number, q
 // A due-process stage (recall, screening, fetching, judging, filing) is never a steering point.
 // Only a viewer who may act gets the step id (rw-identity round 5: step ids serve the owner's steering).
 export function nextSteeringPoint(jobId: string, events: EventRow[], canAct: boolean): { step_id: string | null; phase: string } | null {
-  const st = events.filter((e) => e.job_id === jobId && e.type === "stage" && e.kind === "steering" && e.step_id);
+  // (another user's events arrive without step ids: the point is still shown, by its phase)
+  const st = events.filter((e) => e.job_id === jobId && e.type === "stage" && e.kind === "steering");
   const last = st[st.length - 1];
   if (!last) return null;
   return { step_id: canAct ? last.step_id : null, phase: String(last.payload?.phase ?? "") };
