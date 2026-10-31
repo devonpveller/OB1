@@ -35,6 +35,8 @@ docker/.env
 docker/intake.env
 # intake-i5b R2-F1: the intake service's secrets, one file each (compose secrets; intake.env.example says how)
 docker/intake-secrets/
+# intake-notebook-role: open_notebook's ob_notebook DB password (a compose secret file)
+docker/notebook-secrets/
 open-brain-wiki-data.ssh
 /recipes/brain-backup
 /secrets

@@ -1,2 +1,5 @@
 # pantry-core: psql meta-commands and Dockerfile builds must not see CR line endings
 init-pantry.sql text eol=lf
+# intake-notebook-role: same for its migration and revert
+init-notebook-role.sql text eol=lf
+revert-notebook-role.sql text eol=lf

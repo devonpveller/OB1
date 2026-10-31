@@ -1,0 +1,55 @@
+{
+  "_what": "intake-notebook-role: every OB1 object open_notebook's OB1 code touches, and the privilege ob_notebook holds for it. init-notebook-role.sql grants exactly `grants` + `policies` (test_static.py compares them); run_lab.py proves every entry necessary (revoke it alone -> a flow fails) and the set sufficient (every flow passes with only these). `sites` are functions of the fork's open_notebook/database/ob1_repository.py; `via` says how the privilege is reached when it is not the function's own SQL. The file:line list is in the item's findings (plan store).",
+  "role": "ob_notebook",
+  "fork_file": "open_notebook/database/ob1_repository.py",
+  "reachable": [
+    "test_connection", "create_thread", "get_thread", "get_thread_sources", "count_thread_sources",
+    "list_sources", "get_source", "link_source_to_thread", "get_thread_notes",
+    "unlink_source_all_threads", "set_thread_source_status", "capture_source_into_thread",
+    "sync_extracted_source", "get_suggestions", "get_hidden_suggestions", "get_source_suggestions",
+    "get_source_hidden_suggestions", "get_source_suggestion_counts", "explain_suggestion",
+    "accept_suggestion", "hide_suggestion", "restore_suggestion", "search_source_chunks",
+    "source_chunk_spread", "search_all_chunks", "search_thread_chunks"
+  ],
+  "unreachable": {
+    "find_or_create_source": "no caller outside the module and none inside (the SQL function of the same name is reached through capture_source_into_thread / sync_extracted_source)",
+    "soft_delete_source": "no caller",
+    "update_source": "no caller (api/sources_service.py's update_source is the API client's, not this module's)",
+    "search_sources": "no caller; its SQL is the only use of match_sources(), which is therefore NOT granted"
+  },
+  "grants": [
+    {"privilege": "USAGE", "object": "schema:public", "sites": ["*"], "via": "every statement"},
+    {"privilege": "SELECT", "object": "table:public.sources", "sites": ["test_connection", "list_sources", "get_source", "get_thread_sources", "get_thread_notes", "get_suggestions", "get_hidden_suggestions", "explain_suggestion", "unlink_source_all_threads", "search_source_chunks", "search_all_chunks", "search_thread_chunks", "capture_source_into_thread", "sync_extracted_source"], "via": "direct; find_or_create_source() lookup"},
+    {"privilege": "SELECT", "object": "table:public.threads", "sites": ["create_thread", "get_thread", "get_suggestions", "get_hidden_suggestions", "get_source_suggestions", "get_source_hidden_suggestions"], "via": "direct (create_thread: RETURNING)"},
+    {"privilege": "SELECT", "object": "table:public.thread_sources", "sites": ["get_thread_sources", "count_thread_sources", "get_thread_notes", "unlink_source_all_threads", "get_suggestions", "get_hidden_suggestions", "get_source_suggestions", "get_source_hidden_suggestions", "get_source_suggestion_counts", "explain_suggestion", "search_thread_chunks", "link_source_to_thread", "set_thread_source_status", "capture_source_into_thread", "sync_extracted_source"], "via": "direct; link_source_to_thread() / set_thread_source_status() RETURNING *"},
+    {"privilege": "SELECT", "object": "table:public.source_chunks", "sites": ["search_source_chunks", "source_chunk_spread", "search_all_chunks", "search_thread_chunks"], "via": "direct"},
+    {"privilege": "SELECT", "object": "table:public.source_tombstones", "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "trigger trg_sources_tombstone_gate (BEFORE INSERT OR UPDATE OF url ON sources, SECURITY INVOKER) -> contract_tombstone_for()"},
+    {"privilege": "INSERT", "object": "table:public.sources", "columns": ["content", "content_hash", "content_type", "domain", "embedding", "metadata", "notebook", "title", "url"], "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "find_or_create_source() (SECURITY INVOKER) INSERT"},
+    {"privilege": "UPDATE", "object": "table:public.sources", "columns": ["content", "content_hash", "content_type", "domain", "embedding", "metadata", "title"], "sites": ["sync_extracted_source"], "via": "direct UPDATE; content_hash also find_or_create_source()'s back-fill"},
+    {"privilege": "INSERT", "object": "table:public.threads", "columns": ["description", "name"], "sites": ["create_thread"], "via": "direct"},
+    {"privilege": "INSERT", "object": "table:public.thread_sources", "columns": ["confirmed_at", "link_type", "source_id", "status", "suggestion_reason", "thread_id"], "sites": ["link_source_to_thread", "capture_source_into_thread", "sync_extracted_source"], "via": "link_source_to_thread() (SECURITY INVOKER) INSERT"},
+    {"privilege": "UPDATE", "object": "table:public.thread_sources", "columns": ["confirmed_at", "link_type", "status", "suggestion_reason"], "sites": ["link_source_to_thread", "capture_source_into_thread", "sync_extracted_source", "set_thread_source_status", "accept_suggestion", "hide_suggestion", "restore_suggestion", "unlink_source_all_threads"], "via": "link_source_to_thread() ON CONFLICT DO UPDATE (all four); set_thread_source_status() (status, confirmed_at); direct UPDATE in unlink_source_all_threads (status)"},
+    {"privilege": "EXECUTE", "object": "function:public.find_or_create_source(text, text, text, text, text, text, text, public.vector, jsonb)", "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "direct"},
+    {"privilege": "EXECUTE", "object": "function:public.link_source_to_thread(uuid, uuid, text, text, text)", "sites": ["link_source_to_thread", "capture_source_into_thread", "sync_extracted_source"], "via": "direct"},
+    {"privilege": "EXECUTE", "object": "function:public.set_thread_source_status(uuid, uuid, text)", "sites": ["set_thread_source_status", "accept_suggestion", "hide_suggestion", "restore_suggestion"], "via": "direct"},
+    {"privilege": "EXECUTE", "object": "function:public.contract_tombstone_for(text)", "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "trigger trg_sources_tombstone_gate"},
+    {"privilege": "EXECUTE", "object": "function:public.contract_url_key(text)", "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "trigger trg_sources_tombstone_gate / contract_tombstone_for()"},
+    {"privilege": "EXECUTE", "object": "function:public.contract_url_norm(text)", "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "contract_url_key()"},
+    {"privilege": "EXECUTE", "object": "function:public.credibility_stamp_ok(jsonb)", "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "CHECK sources_credibility_stamp_ok on every sources INSERT/UPDATE"},
+    {"privilege": "EXECUTE", "object": "function:public.credibility_is_unit(jsonb)", "sites": ["capture_source_into_thread", "sync_extracted_source"], "via": "credibility_stamp_ok()"}
+  ],
+  "policies": [
+    {"table": "public.threads", "name": "ob_notebook_select", "command": "SELECT", "sites": ["create_thread", "get_thread", "get_suggestions", "get_hidden_suggestions", "get_source_suggestions", "get_source_hidden_suggestions"]},
+    {"table": "public.threads", "name": "ob_notebook_insert", "command": "INSERT", "sites": ["create_thread"]},
+    {"table": "public.thread_sources", "name": "ob_notebook_select", "command": "SELECT", "sites": ["get_thread_sources", "count_thread_sources", "get_thread_notes", "get_suggestions", "get_source_suggestion_counts", "search_thread_chunks", "set_thread_source_status", "unlink_source_all_threads"]},
+    {"table": "public.thread_sources", "name": "ob_notebook_insert", "command": "INSERT", "sites": ["link_source_to_thread", "capture_source_into_thread", "sync_extracted_source"]},
+    {"table": "public.thread_sources", "name": "ob_notebook_update", "command": "UPDATE", "sites": ["set_thread_source_status", "unlink_source_all_threads", "link_source_to_thread"]},
+    {"table": "public.source_tombstones", "name": "ob_notebook_select", "command": "SELECT", "sites": ["capture_source_into_thread", "sync_extracted_source"], "why": "RLS is on; without it the url gate sees no tombstone and readmits an erased url"}
+  ],
+  "not_granted": [
+    {"object": "table:public.session_sources", "privilege": "INSERT", "why": "capture_source_into_thread writes it only when session_id is passed; its one caller (open_notebook/domain/notebook.py, add_to_notebook) passes none - test_static.py asserts that"},
+    {"object": "function:public.match_sources(public.vector, double precision, integer, jsonb)", "privilege": "EXECUTE", "why": "only search_sources (unreachable) calls it"},
+    {"object": "table:public.content_types", "privilege": "SELECT", "why": "reached only by the sources.content_type foreign-key check, which runs as the table owner"},
+    {"object": "table:public.source_extraction_queue", "privilege": "INSERT/UPDATE", "why": "reached only by trigger trg_queue_source_extraction, whose function is SECURITY DEFINER (owner postgres)"}
+  ]
+}

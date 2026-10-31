@@ -1,0 +1,12 @@
+# Lab image for intake-notebook-role (never deployed; tag :wt-*). The DEPLOYED open_notebook image
+# plus, for the patched variant, the fork's changed ob1_repository.py and its unit test; flows.py
+# drives every reachable OB1 flow through that module. run_lab.py stages the build context.
+FROM open_notebook:iks
+RUN uv pip install --python /app/.venv/bin/python pytest==8.3.3
+COPY stage/ /stage/
+RUN if [ -f /stage/ob1_repository.py ]; then cp /stage/ob1_repository.py /app/open_notebook/database/ob1_repository.py; fi \
+ && mkdir -p /app/tests /lab && if [ -f /stage/test_ob1_password_file.py ]; then cp /stage/test_ob1_password_file.py /app/tests/; fi \
+ && cp /stage/flows.py /lab/flows.py && rm -rf /stage
+WORKDIR /app
+ENV PYTHONPATH=/app
+ENTRYPOINT ["/app/.venv/bin/python"]

@@ -178,6 +178,12 @@ services:
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
       - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity
       - ./init-idea-schedule.sql:/docker-entrypoint-initdb.d/300-init-idea-schedule.sql:ro # research-workbench rw-idea-schedule (fresh-volume only; live: psql -f; revert: revert-idea-schedule.sql)
+      # intake-notebook-role (security-hardening-2026-10): open_notebook's least-privilege role
+      # ob_notebook, the grants its OB1 code needs (notebook-role/inventory.json) and six RLS
+      # policies for it (threads, thread_sources, source_tombstones). No password here (set it from the secret
+      # file with notebook-role/scram_verifier.py). Fresh-volume only; the live DB gets it by hand
+      # (psql -f). Revert: revert-notebook-role.sql.
+      - ./init-notebook-role.sql:/docker-entrypoint-initdb.d/310-init-notebook-role.sql:ro # intake-notebook-role
     networks:
       - obnet
     restart: unless-stopped
@@ -1754,15 +1760,19 @@ services:
       # ----- IKS: OpenBrain (OB1) is the canonical source-of-truth ---------
       # SurrealDB above stays as the local UI/queue/chat/cache store (D1, a
       # thin regenerable mirror). Sources/threads live in openbrain-db.
-      # The OB1 password is NOT set here: it is injected as POSTGRES_PASSWORD
-      # via the `env_file: OB1/docker/.env` directive below (read automatically
-      # by `docker compose up` — no --env-file flag, no secret duplicated into
-      # ai-stack/.env). ob1_repository._cfg() falls back OB1_DB_PASSWORD →
-      # POSTGRES_PASSWORD, so the env_file value is what's used.
+      # intake-notebook-role: it connects as the least-privilege role
+      # ob_notebook (init-notebook-role.sql), never the postgres superuser.
+      # The password is a FILE - the compose secret ob_notebook_db_password
+      # (docker/notebook-secrets/, gitignored), mounted read-only at /run/secrets -
+      # NEVER an environment value (every `docker exec` process inherits those)
+      # and never docker/.env (loaded whole below). ob1_repository reads
+      # OB1_DB_PASSWORD_FILE and, when it is set, nothing else: no fallback to
+      # POSTGRES_PASSWORD (the superuser's, still in the env_file).
       - OB1_DB_HOST=openbrain-db
       - OB1_DB_PORT=5432
       - OB1_DB_NAME=openbrain
-      - OB1_DB_USER=postgres
+      - OB1_DB_USER=ob_notebook
+      - OB1_DB_PASSWORD_FILE=/run/secrets/ob_notebook_db_password
       # bge-m3 (1024-dim) so OB1 source embeddings match every other writer.
       - EMBEDDING_API_BASE=http://llama-cpp-embed:8080/v1
       - EMBEDDING_API_KEY=${OPEN_NOTEBOOK_LLM_API_KEY:-not-needed}
@@ -1770,9 +1780,15 @@ services:
       # Wiki notebooks/ folder = the notebook registry (B1 folder sync), RO.
       - WIKI_NOTEBOOKS_DIR=/wiki/content/notebooks
       - NOTEBOOK_SYNC_INTERVAL_S=900
-    # Supplies POSTGRES_PASSWORD (+ SURREAL_*/encryption keys since K.5b).
+    # Supplies SURREAL_*/encryption keys since K.5b (and still POSTGRES_PASSWORD,
+    # which the OB1 connection no longer uses: OB1_DB_PASSWORD_FILE above).
     env_file:
       - ./.env
+    # ob_notebook's password, as a file under /run/secrets (top-level `secrets:` at the end).
+    # A missing file fails the `up` of this service only: create it first (README).
+    secrets:
+      - source: ob_notebook_db_password
+        target: ob_notebook_db_password
     volumes:
       - ${OPEN_NOTEBOOK_DIR:-../../../open-notebook}/notebook_data:/app/data
       # Read-only view of the live wiki tree so ON reconciles the notebooks
@@ -1851,6 +1867,9 @@ secrets:
     file: ./intake-secrets/intake_db_password
   intake_second_opinion_key:
     file: ./intake-secrets/intake_second_opinion_key
+  # intake-notebook-role: open_notebook's ob_notebook password (gitignored directory)
+  ob_notebook_db_password:
+    file: ./notebook-secrets/ob_notebook_db_password
 
 volumes:
   openbrain-db-data:
