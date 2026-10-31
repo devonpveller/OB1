@@ -11,6 +11,7 @@ import { fxEntries } from "./registry_fixtures.ts";
 import { fixtureRefs, numberedDocument } from "./test_fixtures.ts";
 import { createExporter, type ExporterDeps } from "./exporter.ts";
 import { createResolver } from "./resolver.ts";
+import { bibliographyOrder } from "./biborder.ts";
 import type { ExportRunInput, RunStore } from "./runs.ts";
 import type { ExportRef } from "./repo.ts";
 
@@ -156,9 +157,12 @@ Deno.test("acceptance 2 (real): the PDF's reference list matches the numbered re
     const g = await runGate({ vision: OFF }, input(pdf, { refs: [...wrong] }));
     assertEquals([g.status, codes(g.blocking_findings)], ["blocked", ["reference-mismatch"]], why);
   }
-  // author-date (APA): the titles, each exactly once
+  // author-date (APA): in the STYLE's order (round 3, D10: citeproc sorts - Author1, Author10, Author11, ...),
+  // compared by position; the citation order is not that order
   const apa = await pdfOf(md, refs, "apa");
-  assertEquals((await runGate({ vision: OFF }, input(apa, { refs: want, numeric: false }))).blocking_findings, []);
+  const apaOrder = (await bibliographyOrder(refs, style("apa"), CSL_DIR)).map((r) => ({ number: r.number, title: String(r.csl.title) }));
+  assertEquals((await runGate({ vision: OFF }, input(apa, { refs: apaOrder, numeric: false }))).blocking_findings, []);
+  assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: want, numeric: false }))).blocking_findings), ["reference-mismatch"], "author-date: the citation order");
   assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: want.slice(1), numeric: false }))).blocking_findings), ["reference-mismatch"], "author-date: an extra entry (the entries are counted by the hanging indent)");
   assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: [...want, { number: 13, title: "Fixture paper number 13" }], numeric: false }))).blocking_findings), ["reference-mismatch"], "author-date: a missing one");
 });
