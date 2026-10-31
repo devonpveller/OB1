@@ -31,7 +31,10 @@ async function step(name, fn) {
 }
 const ok = (cond, msg) => { if (!cond) throw new Error(msg); };
 const api = async (method, path, body) => {
-  const r = await fetch(FRONT + path, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  // a write carries the front door's own Origin, as the page's would: the front door is the viewer, whose
+  // forwarder refuses an Origin-less write (rw-identity-harden: no Caddy /workbench route in front any more)
+  const headers = { "content-type": "application/json", ...(["GET", "HEAD"].includes(method) ? {} : { origin: FRONT }) };
+  const r = await fetch(FRONT + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const t = await r.text();
   let j = {};
   try { j = JSON.parse(t); } catch { /* not json */ }
