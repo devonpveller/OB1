@@ -53,7 +53,7 @@ src/
 
 ## Networks
 
-`obnet` (PostgREST) + `llm-net` (embeddings) + `app-net` (portal-Caddy name
+`obnet` (PostgREST) + `llm-net` (embeddings; the export gate's vision pass, P6b - the LiteLLM alias only) + `app-net` (portal-Caddy name
 resolution — required, §2.3) + `search-gw-net` (= `ai-stack_default`: the `vpn` proxy the
 export's resolver goes out through, research-workbench P6a).
 
@@ -67,6 +67,10 @@ export's resolver goes out through, research-workbench P6a).
 The export's resolver (P6a): `OPENALEX_API_KEY`, `CROSSREF_MAILTO` (both blank = off), `FETCH_PROXY_URL`
 (blank = refused, never direct); `RESOLVER_OPENALEX_BASE` / `RESOLVER_CROSSREF_BASE` / `RESOLVER_TIMEOUT_MS`
 exist for the disposable test run's stub only.
+The export's verification gate (P6b): `EXPORT_VISION_URL` (default `http://llama-cpp:8080/v1`, the LiteLLM
+alias - any other host is refused), `EXPORT_VISION_KEY` (the export's OWN LiteLLM virtual key) and
+`EXPORT_VISION_MODEL` (both blank = no vision pass), `EXPORT_VISION_TIMEOUT_MS` (120 s), `EXPORT_GATE_DPI`
+(72), `EXPORT_GATE_TIMEOUT_MS` (120 s), `EXPORT_GATE_PYTHON` (`/opt/export-gate/bin/python`).
 
 ## Sign-in (Authentik forward-auth) (rw-identity, rw-identity2)
 
@@ -384,4 +388,40 @@ GPL source offer.
 
 ```
 powershell -NoProfile -File contract-test/run-export-tests.ps1 [-Subnet a.b.c.0/24]   # disposable P6a run (stub APIs)
+```
+
+## The export verification gate (research-workbench P6b)
+
+A PDF export (`export_formats` row with `definition.gate: true`) is checked after it renders and BEFORE
+it is served (`src/export/gate.ts`); a blocked export never leaves the workbench.
+
+1. **Rasterise** - `pdftoppm` (poppler-utils, GPL) as a separate, unmodified program over files: one PNG
+   per page. Not renderable = blocked (`unrenderable`).
+2. **Structure** - `gate/structure.py` in its own Python process (`/opt/export-gate`: pikepdf MPL-2.0 and
+   pdfplumber MIT, pinned by hash in `gate/requirements.txt`): fonts embedded (`font-not-embedded`), no
+   glyph outside the page box (`clipped`) or the format's text area (`overflow`: a clipped or over-wide
+   table), no glyphs drawn over each other (`overlapping-text`), at most 500 pages (`too-many-pages`).
+3. **References** - the file's reference list against the references the export numbered, one to one
+   (`reference-mismatch`): numbered styles by label and title, author-date styles by entry (hanging
+   indent) and title. The reference panel (`GET /workbench/documents/references`) titles each reference as
+   the export prints it (the resolved metadata, else the title at the pinned revision), so screen and
+   file agree.
+4. **Required sections** - registry `export_required_sections` (`init-export-gate.sql`): a research report
+   (`content_type: research_synthesis`) must carry the "Report credibility" roll-up with its claim-kind
+   weights (`required-section-missing`). The row, not code, names the heading P3b writes.
+5. **Vision** - `src/export/vision.ts`: the page images (at most 20 per call) to a vision model through
+   LiteLLM ONLY (`EXPORT_VISION_URL` must be the `llama-cpp` alias; an `*-upstream` or other host is
+   `vision-misrouted`) under the export's own key (a key equal to another the workbench holds is
+   `vision-key-shared`), answering `{blocking_findings, warnings}` in a strict JSON schema. Shipped inert
+   (blank key or model: warning `vision-not-configured`); configured, it fails closed (`vision-unavailable`,
+   `vision-unreadable`).
+
+Every gated export is recorded for the caller's subject (`export_runs`): passed = the file is served
+with `x-export-id` and kept; blocked = 422 `layout-gate` with the findings and warnings, no file.
+`GET /workbench/exports[?path=]`, `GET /workbench/exports/:id` and `GET /workbench/exports/:id/file` read
+the CALLER's runs only (owner_sub in SQL; another user's id is 404). The workspace's **Export** panel
+lists my documents and my runs, exports the open document and shows a blocked export's findings.
+
+```
+powershell -NoProfile -File contract-test/run-export-gate-tests.ps1 -Subnet a.b.c.0/24 [-Red]   # disposable P6b run (vision stand-in)
 ```

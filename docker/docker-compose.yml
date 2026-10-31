@@ -178,6 +178,7 @@ services:
       # service's config hash - the deploy that adds it recreates openbrain-db (plan that restart).
       - ./init-identity.sql:/docker-entrypoint-initdb.d/290-init-identity.sql:ro # rw-identity
       - ./init-idea-schedule.sql:/docker-entrypoint-initdb.d/300-init-idea-schedule.sql:ro # research-workbench rw-idea-schedule (fresh-volume only; live: psql -f; revert: revert-idea-schedule.sql)
+      - ./init-export-gate.sql:/docker-entrypoint-initdb.d/310-init-export-gate.sql:ro # research-workbench P6b rw-p6b-gate: export_runs, the required-sections registry, the pdf gate flag (fresh-volume only; live: psql -f BEFORE the new image; revert: revert-export-gate.sql)
     networks:
       - obnet
     restart: unless-stopped
@@ -1425,6 +1426,16 @@ services:
       # Every resolver request goes out through the search plane's Mullvad proxy, FAIL-CLOSED:
       # blank, or a client that cannot be built, refuses the request - there is no direct mode.
       FETCH_PROXY_URL: ${WORKBENCH_FETCH_PROXY_URL:-http://vpn:8888}
+      # research-workbench P6b: the export gate's VISION pass (src/export/vision.ts) - the PDF's pages,
+      # rasterised by pdftoppm, looked at by a vision model for layout faults. Through LiteLLM ONLY
+      # (the llama-cpp alias on llm-net; any other host, an *-upstream name included, is refused) and
+      # under the export's OWN virtual key - never another consumer's. SHIPPED INERT: a blank key or
+      # model = no vision pass (the structure checks still gate every PDF; the run records "vision: not
+      # configured"). Configured, it FAILS CLOSED: an unreachable gateway or an unreadable answer
+      # blocks the export.
+      EXPORT_VISION_URL: ${EXPORT_VISION_URL:-http://llama-cpp:8080/v1}
+      EXPORT_VISION_KEY: ${OB_EXPORT_VISION_LLM_KEY:-}
+      EXPORT_VISION_MODEL: ${EXPORT_VISION_MODEL:-}
     volumes:
       # rw: the workbench is the asset writer and the notes/Changes-log writer.
       - openbrain-wiki-data:/wiki

@@ -166,6 +166,24 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // a reference row held by B's document (for the holder check below)
   const bRef = await wb("POST", "/workbench/documents/references", { path: bPath, source_id: FX_ACTIVE, exact: "", form: "chip" }, B);
   const bRefId: string = bRef.json.record?.id ?? "";
+  // research-workbench P6b (rw-p6b-gate): B's export runs. B exports the document to PDF through the
+  // route (the verification gate records the run for B, passed or blocked); a run that never reached
+  // the gate (the export refused earlier) is planted by SQL instead. Plus one PASSED run and one
+  // BLOCKED run planted for B, each carrying a marker in its findings and its file: A must see neither
+  // in the list, by id, nor as a file.
+  const exportSecret = `ExportSecret${rnd()}`;
+  const viaRoute = await wb("GET", `/workbench/export?path=${encodeURIComponent(bPath)}&format=pdf`, undefined, B);
+  console.log(`sweep: B's PDF export through the gate -> ${viaRoute.status}${viaRoute.json.code ? ` (${viaRoute.json.code})` : ""}`);
+  const planted = await sql<{ id: string }>(
+    `INSERT INTO public.export_runs (owner_sub, actor_sub, path, format, style, status, blocking_findings, warnings, checks, filename, mime, sha256, bytes, file)
+     VALUES ($1, $1, $2, 'pdf', 'ieee', 'passed', '[]'::jsonb, jsonb_build_array(jsonb_build_object('code', 'note', 'detail', $3::text)), '{}'::jsonb,
+             'b.pdf', 'application/pdf', 'x', 32, convert_to($3::text || ' file', 'UTF8')),
+            ($1, $1, $2, 'pdf', 'ieee', 'blocked', jsonb_build_array(jsonb_build_object('code', 'overflow', 'detail', $3::text)), '[]'::jsonb, '{}'::jsonb,
+             'b.pdf', 'application/pdf', NULL, NULL, NULL)
+     RETURNING id::text AS id`, [bSub, bPath, exportSecret]);
+  const bExports = (await sql<{ id: string }>(`SELECT id::text AS id FROM public.export_runs WHERE owner_sub = $1 ORDER BY created_at`, [bSub])).map((r) => r.id);
+  assert(planted.length === 2 && bExports.length >= 2, `B's export runs: ${bExports.join(", ")}`);
+  const bExport = planted[0].id;
   // the reconcile repairs B's listing when B's workspace next connects; B's file as it now stands
   await wb("GET", `/workbench/contract/documents`, undefined, B);
   const before = await Deno.readTextFile(`${VAULT}/${bPath}`);
@@ -177,7 +195,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const attachPng = attachName.replace(/\.txt$/, ".png");
   await Deno.writeTextFile(`${VAULT}/${bDir}/${attachName}`, `${attachSecret}\n`);
   await Deno.writeFile(`${VAULT}/${bDir}/${attachPng}`, new TextEncoder().encode(`\x89PNG ${attachSecret}`));
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret };
+  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, exportSecret,
+    ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;
@@ -212,7 +231,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
 
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
-  const ids = [bPath, bRefinery, bJob, bHeld, bRefId].filter(Boolean);
+  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -258,8 +277,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 3. ID-ONLY: every read route with a path parameter, filled with each REAL id (harvested, plus B's
   // own ids handed to A directly) and nothing else of B's in the request
   const named = (v: string) =>
-    v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : v;
-  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+    v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>" : v;
+  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
     .slice(0, 40);
   for (const r of reads.filter((x) => x.path.includes(":"))) {
     for (const v of realIds) {
@@ -333,6 +352,10 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);
+  const bList = await wb("GET", "/workbench/exports", undefined, B);
+  assert(bExports.every((id) => bList.text.includes(id)), `B lists its own export runs: ${bList.status}`);
+  assertEquals((await wb("GET", `/workbench/exports/${bExport}/file`, undefined, B)).status, 200, "B downloads its own passed export");
+  console.log(`sweep: B's export runs ${bExports.length} (A saw none of them: see the hits below); B still lists and downloads its own`);
   await Deno.remove(`${VAULT}/${bDir}/${attachName}`).catch(() => {});
   await Deno.remove(`${VAULT}/${bDir}/${attachPng}`).catch(() => {});
   if (OIDC) {

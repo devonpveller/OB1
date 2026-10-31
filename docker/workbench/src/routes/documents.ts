@@ -142,11 +142,19 @@ export function documentsRouter(rdeps: DocumentsDeps) {
 
   r.get("/references", wrap(async (c, who) => {
     const rel = await docs.ownedPath(db, str(c.req.query("path")), who);
+    // research-workbench P6b (rw-p6b-gate, acceptance 2: the export's reference list matches this panel
+    // one-to-one): a reference is titled as the EXPORT prints it - the metadata its identifier resolved
+    // to (P6a's cache on the reference record), else the source's title at the PINNED revision, else the
+    // source's (or held source's) current title. Before P6b the panel showed the current title, so a
+    // source retitled after the pin read differently on screen and in the file.
     const rows = await db.query(
       `SELECT h.origin, h.seq, r.id::text AS reference_id, r.source_id::text AS source_id, r.pinned_revision, r.scope,
-              COALESCE(s.title, hs.title, '') AS title
+              COALESCE(NULLIF(rr.csl ->> 'title', ''), NULLIF(rv.title, ''), s.title, hs.title, '') AS title
          FROM public.reference_holders h JOIN public.reference_records r ON r.id = h.reference_id
          LEFT JOIN public.sources s ON s.id = r.source_id LEFT JOIN public.held_sources hs ON hs.id = r.source_id
+         LEFT JOIN public.source_revisions rv ON rv.source_id = s.id AND rv.revision = r.pinned_revision
+         LEFT JOIN LATERAL (SELECT x.csl FROM public.reference_resolutions x WHERE x.reference_id = r.id
+                             ORDER BY x.resolved_at DESC LIMIT 1) rr ON true
         WHERE h.holder_kind = $1 AND h.holder_ref = $2 ORDER BY h.seq`,
       [HOLDER_KIND, rel],
     );

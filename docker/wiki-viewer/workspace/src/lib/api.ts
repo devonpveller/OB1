@@ -42,6 +42,13 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
   return { status: r.status, data };
 }
 
+// A GET whose answer may be a FILE (research-workbench P6b: the export): the raw response, through the
+// same door and the same request log.
+export async function raw(url: string): Promise<Response> {
+  log.push({ method: "GET", url });
+  return await fetcher(url, { method: "GET", credentials: "same-origin" });
+}
+
 export const get = <T = any>(url: string) => api<T>("GET", url).then((r) => r.data);
 export const post = <T = any>(url: string, body?: unknown) => api<T>("POST", url, body ?? {}).then((r) => r.data);
 export const q = encodeURIComponent;
