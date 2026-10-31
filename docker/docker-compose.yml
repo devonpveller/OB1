@@ -183,7 +183,7 @@ services:
       # policies for it (threads, thread_sources, source_tombstones). No password here (set it from the secret
       # file with notebook-role/scram_verifier.py). Fresh-volume only; the live DB gets it by hand
       # (psql -f). Revert: revert-notebook-role.sql.
-      - ./init-notebook-role.sql:/docker-entrypoint-initdb.d/310-init-notebook-role.sql:ro # intake-notebook-role
+      - ./init-notebook-role.sql:/docker-entrypoint-initdb.d/340-init-notebook-role.sql:ro # intake-notebook-role
     networks:
       - obnet
     restart: unless-stopped

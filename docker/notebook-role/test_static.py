@@ -9,7 +9,7 @@
    a missing one fails), sets no password, revokes before it grants; the revert removes each.
 2. compose: open_notebook connects as ob_notebook with OB1_DB_PASSWORD_FILE from a compose secret
    in the gitignored docker/notebook-secrets/, no OB1_DB_PASSWORD entry; openbrain-db mounts the
-   migration at slot 310 (the next after the current head 300).
+   migration at slot 340 (310-330 are taken by rw-p6b-gate, rw-p4b-sessions, rw-p7a-tts).
 3. with the fork: every function of open_notebook/database/ob1_repository.py that runs SQL is
    classified reachable / unreachable correctly (callers measured with ast), every OB1 table and
    function a reachable function's SQL names has an inventory grant citing that function, and
@@ -165,12 +165,12 @@ class Compose(unittest.TestCase):
         names = [ln.split("=", 1)[0].strip() for ln in ex.splitlines() if "=" in ln and not ln.lstrip().startswith("#")]
         self.assertFalse([n for n in names if re.search(r"NOTEBOOK.*PASSWORD|OB1_DB_PASSWORD", n)], names)
 
-    def test_openbrain_db_mounts_slot_310_after_the_head(self):
+    def test_openbrain_db_mounts_slot_340_and_nothing_else_uses_it(self):
         slots = re.findall(r"/docker-entrypoint-initdb\.d/(\d{3})-", service("openbrain-db"))
-        self.assertIn("310", slots)
-        self.assertEqual(max(slots), "310")
-        self.assertEqual(slots.count("310"), 1)
-        self.assertIn("./init-notebook-role.sql:/docker-entrypoint-initdb.d/310-init-notebook-role.sql:ro", COMPOSE)
+        self.assertEqual(slots.count("340"), 1)
+        self.assertNotIn("init-notebook-role.sql", " ".join(
+            l for l in COMPOSE.splitlines() if "docker-entrypoint-initdb.d/" in l and "/340-" not in l))
+        self.assertIn("./init-notebook-role.sql:/docker-entrypoint-initdb.d/340-init-notebook-role.sql:ro", COMPOSE)
 
 
 SKIP_FUNCS = {"embed", "get_pool", "close_current_pool", "close_pool", "apply_settings"}

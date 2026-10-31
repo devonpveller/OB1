@@ -17,7 +17,7 @@
 -- foreign-key checks (content_types, threads, sources) run as the table owner and need no grant.
 --
 -- IDEMPOTENT: every run re-asserts the role's attributes, revokes everything it holds, and
--- grants the list again. Fresh volume: mounted as 310-init-notebook-role.sql. Live DB: by hand,
+-- grants the list again. Fresh volume: mounted as 340-init-notebook-role.sql. Live DB: by hand,
 -- the operator's gated deploy:
 --     psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f init-notebook-role.sql
 -- The role is created WITHOUT a password (it cannot log in). The password is a FILE,
