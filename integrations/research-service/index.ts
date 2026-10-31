@@ -32,12 +32,12 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, promptOwner, resolveOrigin } from "./origin.ts";
-import { FOREIGN_PROMPTS_SQL, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
+import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
 import {
-  appendEvent, buildTreeReport, closeBranch, createSteer, interHubEvent, interHubGaps, interHubRef, LANE_DEFAULT, LANE_KINDS,
+  appendEvent, buildTreeReport, closeBranch, createSteer, recordCancel, interHubEvent, interHubGaps, interHubRef, LANE_DEFAULT, LANE_KINDS,
   learningRecords, loadClaimGraph, loadTree, openGapBranches, readLaneConcurrency, stageEvent, SteerError, treeEstimate,
 } from "./tree.ts";
 
@@ -1110,15 +1110,33 @@ function viewerOf(req: Request, url: URL): { sub: string } | Response {
 // rw-identity round 3: who owns a job that predates rw-identity (no research_prompts row) - the one
 // operator (07-MULTI-USER); blank = nobody (its prompt is read by no caller)
 const DEFAULT_SUB = (Deno.env.get("WORKSPACE_DEFAULT_SUB") ?? "").trim();
-// round 5 (tester attempt 2): only the job's owner may act on it (steer, cancel) - viewer.ts MAY_ACT_SQL
-async function mayAct(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<boolean> {
-  return !!(await c.queryObject<{ ok: boolean }>(MAY_ACT_SQL, [id, viewer, DEFAULT_SUB])).rows[0]?.ok;
+// round 5 (tester attempt 2): only the job's owner may act on it (steer, cancel) - viewer.ts MAY_ACT_SQL;
+// rw-p4b-sessions: and an admin (asserted by the workspace's key only, actorOf) on a service's job
+async function mayAct(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string, admin = false): Promise<boolean> {
+  return !!(await c.queryObject<{ ok: boolean }>(MAY_ACT_SQL, [id, viewer, DEFAULT_SUB, admin])).rows[0]?.ok;
+}
+// rw-p4b-sessions: who acts on a write (viewer.ts actorOf) - a Response when the caller may not say so
+function actingOf(req: Request, url: URL, viewer: { sub: string }): { actor: string; admin: boolean } | Response {
+  const caller = callerOf(req, url);
+  if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const a = actorOf(caller, (k) => req.headers.get(k), viewer.sub);
+  return "error" in a ? Response.json({ error: a.error }, { status: a.status }) : a;
 }
 // whether job `id`'s tree belongs to another user than the viewer, and its texts (round 4: a foreign
 // viewer reads the allow-list of viewer.ts, the texts omitted from what is left)
 async function scopeOf(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<{ foreign: boolean; prompts: string[] }> {
   const row = (await c.queryObject<{ foreign_: boolean; prompts: string[] }>(FOREIGN_PROMPTS_SQL, [id, viewer, DEFAULT_SUB])).rows[0];
   return { foreign: !!row?.foreign_, prompts: row?.prompts ?? [] };
+}
+
+// rw-p4b-sessions round 3: a viewer who may not act on a (shared) job reads it without the step ids and
+// without any steer text but their own (viewer.ts nonActorView); the owner, an admin and the actor read all.
+async function steerScopeOf(
+  c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: { sub: string }, acting: { actor: string; admin: boolean },
+): Promise<{ hide: boolean; texts: string[] }> {
+  if (await mayAct(c, id, viewer.sub, acting.admin)) return { hide: false, texts: [] };
+  const r = (await c.queryObject<{ texts: string[] }>(HIDDEN_STEER_TEXTS_SQL, [id, viewer.sub, acting.actor])).rows[0];
+  return { hide: true, texts: r?.texts ?? [] };
 }
 
 Deno.serve({ port: PORT }, async (req) => {
@@ -1369,11 +1387,14 @@ Deno.serve({ port: PORT }, async (req) => {
     const viewer = viewerOf(req, url);
     if (viewer instanceof Response) return viewer;
     const id = cancelMatch[1];
+    const acting = actingOf(req, url, viewer);
+    if (acting instanceof Response) return acting;
     {
       const c0 = await pool.connect();
       try {
-        // another user's job is answered as a missing one (the owner, or its service, alone may cancel)
-        if (!(await mayAct(c0, id, viewer.sub))) return Response.json({ error: "not found" }, { status: 404 });
+        // another user's job is answered as a missing one (the owner, or its service, alone may cancel;
+        // rw-p4b-sessions: and an admin, a service's job)
+        if (!(await mayAct(c0, id, viewer.sub, acting.admin))) return Response.json({ error: "not found" }, { status: 404 });
       } finally { c0.release(); }
     }
     let reason = "cancel requested by the caller";
@@ -1382,14 +1403,19 @@ Deno.serve({ port: PORT }, async (req) => {
       if (typeof b?.reason === "string" && b.reason.trim()) reason = b.reason.trim().slice(0, 200);
     } catch { /* no body is fine */ }
     const c = await pool.connect();
+    // rw-p4b-sessions round 2: every cancel the owner (or an admin) asked for is recorded with its actor
+    const callerName = callerOf(req, url)?.name ?? null;
+    const record = (outcome: string) => recordCancel(c, { jobId: id, actorSub: acting.actor, caller: callerName, reason, outcome });
     try {
       if (await cancelQueued(c, id, reason)) {
+        await record("cancelled");
         console.log(`[job ${id}] cancelled while queued: ${reason}`);
         return Response.json({ job_id: id, status: "cancelled" });
       }
       const st = await jobStatus(c, id);
       if (st === null) return Response.json({ error: "not found" }, { status: 404 });
       if (st === "running" && filingJobs.has(id)) {
+        await record("refused_filing");
         // Past the point of no return: the curator is filing this run. The job will
         // end with its real outcome; say so instead of promising a cancel.
         return Response.json({
@@ -1398,9 +1424,11 @@ Deno.serve({ port: PORT }, async (req) => {
         }, { status: 409 });
       }
       if (st === "running") {
+        await record("cancelling");
         dispatcher.cancelRunning(id, reason);
         return Response.json({ job_id: id, status: "cancelling" }, { status: 202 });
       }
+      await record("already_terminal");
       return Response.json({ job_id: id, status: st, note: "already terminal" });
     } finally { c.release(); }
   }
@@ -1412,22 +1440,25 @@ Deno.serve({ port: PORT }, async (req) => {
     if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
     const viewer = viewerOf(req, url);
     if (viewer instanceof Response) return viewer;
+    const acting = actingOf(req, url, viewer);
+    if (acting instanceof Response) return acting;
     {
       const c0 = await pool.connect();
       try {
-        // round 5: only the owner steers (a steer's answer carries the job's anchor and topic)
-        if (!(await mayAct(c0, steerMatch[1], viewer.sub))) return Response.json({ error: "not found" }, { status: 404 });
+        // round 5: only the owner steers (a steer's answer carries the job's anchor and topic);
+        // rw-p4b-sessions: an admin steers a service's job (the operator, 2026-10-30)
+        if (!(await mayAct(c0, steerMatch[1], viewer.sub, acting.admin))) return Response.json({ error: "not found" }, { status: 404 });
       } finally { c0.release(); }
     }
-    let b: { step_id?: unknown; text?: unknown; contract?: unknown; context_snapshot?: unknown };
+    let b: { step_id?: unknown; text?: unknown; contract?: unknown; context_snapshot?: unknown; seed_sources?: unknown };
     try { b = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const c = await pool.connect();
     try {
       const opened = await createSteer(c, {
         parentId: steerMatch[1], stepId: String(b.step_id ?? ""), text: String(b.text ?? ""), contract: b.contract,
-        caller: caller.name, contextSnapshot: b.context_snapshot,
+        caller: caller.name, contextSnapshot: b.context_snapshot, actorSub: acting.actor, seedSources: b.seed_sources,
       }, resolveContract);
-      console.log(`[job ${steerMatch[1]}] steered at ${opened.step_id} -> branch ${opened.child_job_id}`);
+      console.log(`[job ${steerMatch[1]}] steered at ${opened.step_id} -> branch ${opened.child_job_id}${acting.admin ? " (an admin)" : ""}`);
       wake();
       return Response.json(opened, { status: 201 });
     } catch (e) {
@@ -1442,10 +1473,14 @@ Deno.serve({ port: PORT }, async (req) => {
   if (req.method === "GET" && treeMatch) {
     const viewer = viewerOf(req, url);
     if (viewer instanceof Response) return viewer;
+    const acting = actingOf(req, url, viewer);
+    if (acting instanceof Response) return acting;
     const c = await pool.connect();
     try {
       const scope = await scopeOf(c, treeMatch[1], viewer.sub);
       const foreign = scope.prompts;
+      const steer = scope.foreign ? { hide: false, texts: [] as string[] } : await steerScopeOf(c, treeMatch[1], viewer, acting);
+      const asRead = <T>(v: T): T => (steer.hide ? nonActorView(v, steer.texts) : v);
       if (treeMatch[2] === "events") {
         const after = parseInt(url.searchParams.get("after") ?? "0", 10) || 0;
         const r = await c.queryObject(
@@ -1454,16 +1489,16 @@ Deno.serve({ port: PORT }, async (req) => {
             WHERE root_job_id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid) AND id > $2
             ORDER BY id LIMIT 1000`, [treeMatch[1], after]);
         const rows = r.rows as Record<string, unknown>[];
-        return Response.json(scope.foreign ? omitPrompts({ events: sharedEvents(rows) }, foreign) : { events: rows });
+        return Response.json(scope.foreign ? omitPrompts({ events: sharedEvents(rows) }, foreign) : asRead({ events: rows }));
       }
       const t = await loadTree(c, treeMatch[1]);
       if (!t) return Response.json({ error: "not found" }, { status: 404 });
       const tree: Record<string, unknown> = {
         root_job_id: t.root.id, topic_estimate: t.estimate, origin: t.root.query,
         branches: t.nodes.map((n) => ({ id: n.id, parent_job_id: n.parent_job_id, branch_kind: n.branch_kind, rooted_step_id: n.rooted_step_id, anchor: n.anchor, query: n.query, status: n.status })),
-        steers: t.steers, report: buildTreeReport(t), learning_records: learningRecords(t),
+        steers: t.steers, report: buildTreeReport(t), learning_records: learningRecords(t, { hideSteps: steer.hide }),
       };
-      return Response.json(scope.foreign ? omitPrompts(sharedTree(tree), foreign) : tree);
+      return Response.json(scope.foreign ? omitPrompts(sharedTree(tree), foreign) : asRead(tree));
     } finally { c.release(); }
   }
 
@@ -1472,10 +1507,16 @@ Deno.serve({ port: PORT }, async (req) => {
     const viewer = viewerOf(req, url);
     if (viewer instanceof Response) return viewer;
     const id = jobMatch[1];
+    const acting = actingOf(req, url, viewer);
+    if (acting instanceof Response) return acting;
     let scope = { foreign: false, prompts: [] as string[] };
+    let steer = { hide: false, texts: [] as string[] };
     {
       const c = await pool.connect();
-      try { scope = await scopeOf(c, id, viewer.sub); } finally { c.release(); }
+      try {
+        scope = await scopeOf(c, id, viewer.sub);
+        if (!scope.foreign) steer = await steerScopeOf(c, id, viewer, acting);
+      } finally { c.release(); }
     }
     const stream = !!jobMatch[2];
     const getJob = async () => {
@@ -1512,7 +1553,7 @@ Deno.serve({ port: PORT }, async (req) => {
            FROM research_jobs j WHERE j.id=$1`, [id]);
         const row = r.rows[0] as Record<string, unknown> | undefined;
         if (!row) return null;
-        return scope.foreign ? omitPrompts(sharedJobView(row), scope.prompts) : row;
+        return scope.foreign ? omitPrompts(sharedJobView(row), scope.prompts) : steer.hide ? nonActorView(row, steer.texts) : row;
       } finally { c.release(); }
     };
     if (!stream) {

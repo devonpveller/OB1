@@ -106,11 +106,40 @@ export function sharedEvents(rows: Obj[]): Obj[] {
  *  cancel it (round 5, tester attempt 2)? Only its owner: the identity its root's research_prompts row
  *  names (a user, or the service that started it), or - for a job with no recorded owner - the default
  *  subject. Anyone else is answered as if the job did not exist. */
+/* rw-p4b-sessions (operator 2026-10-30, option "Admins"): $4 = the actor is an admin, which only the
+ *  workspace's key may assert (actorOf). An admin may act on a job a SERVICE owns (service:<caller>,
+ *  e.g. a Mattermost / agent-org job); a USER's job stays its owner's alone, admin or not. */
 export const MAY_ACT_SQL =
   `WITH r AS (SELECT coalesce(root_job_id, id) AS root FROM research_jobs WHERE id = $1::uuid),
         o AS (SELECT p.owner_sub FROM research_prompts p JOIN r ON p.job_id = r.root)
-   SELECT EXISTS (SELECT 1 FROM r) AND CASE WHEN EXISTS (SELECT 1 FROM o) THEN EXISTS (SELECT 1 FROM o WHERE o.owner_sub = $2)
+   SELECT EXISTS (SELECT 1 FROM r) AND CASE WHEN EXISTS (SELECT 1 FROM o)
+                                            THEN EXISTS (SELECT 1 FROM o WHERE o.owner_sub = $2 OR ($4::boolean AND o.owner_sub LIKE 'service:%'))
                                             ELSE ($3 <> '' AND $2 = $3) END AS ok`;
+
+/**
+ * Who ACTS on a job (rw-p4b-sessions): steer and cancel record their actor (research_steers.actor_sub).
+ * By default the actor is the viewer (the user named by x-on-behalf-of, or the caller's service).
+ * Only the workspace's own key (origin workspace, not the shared key) may say more, and only together
+ * with the user it acts for: `x-actor-sub` (who acted: an admin while impersonating differs from the
+ * subject) and `x-actor-admin: 1` (the actor is an admin - the workbench reads it from the signed-in
+ * token on every request). Any other key naming either is refused (403); a malformed value is 400.
+ */
+export type Actor = { actor: string; admin: boolean } | { error: string; status: 400 | 403 };
+
+export function actorOf(caller: Caller, header: (name: string) => string | null, viewerSub: string): Actor {
+  const sub = (header("x-actor-sub") ?? "").trim();
+  const adm = header("x-actor-admin");
+  if (!sub && adm === null) return { actor: viewerSub, admin: false };
+  if (caller.shared || caller.origin !== "workspace") {
+    return { error: "x-actor-sub / x-actor-admin are accepted only from the workspace's caller key", status: 403 };
+  }
+  if (!(header("x-on-behalf-of") ?? "").trim()) return { error: "x-actor-* needs the user it acts for (x-on-behalf-of)", status: 400 };
+  if (adm !== null && adm !== "1") return { error: "x-actor-admin is 1 or absent", status: 400 };
+  if (sub && (sub.length > 255 || /[\u0000-\u001f\u007f]/.test(sub) || /^(service|system|anonymous):/i.test(sub))) {
+    return { error: "x-actor-sub is not a usable subject id", status: 400 };
+  }
+  return { actor: sub || viewerSub, admin: adm === "1" };
+}
 
 function needles(prompts: string[]): string[] {
   const out = new Set<string>();
@@ -142,4 +171,35 @@ export function omitPrompts<T>(value: T, prompts: string[]): T {
     return v;
   };
   return walk(value) as T;
+}
+
+/**
+ * rw-p4b-sessions round 3 (tester t-p4b-sessions2 defect 2): a viewer who is not the job's owner and may
+ * not act on it - another user reading a SERVICE's job, through Open WebUI's or the workspace's key on
+ * their behalf - reads the shared research, but not a steer's text (a person's own words, 07-MULTI-USER)
+ * other than their own, and no step id (rw-identity round 5: step ids serve only who may steer). The owner,
+ * an admin (asserted by the workspace key only: actorOf) and the steer's actor read everything.
+ * SQL ($1 job, $2 viewer, $3 actor): the human steer texts of the job's tree made by anyone else.
+ */
+export const HIDDEN_STEER_TEXTS_SQL =
+  `SELECT coalesce(array_agg(s.text), '{}') AS texts FROM research_steers s
+    WHERE s.root_job_id = (SELECT coalesce(root_job_id, id) FROM research_jobs WHERE id = $1::uuid)
+      AND s.steer_kind = 'human' AND s.actor_sub NOT IN ($2, $3)`;
+
+const STEP_KEYS = new Set(["step_id", "rooted_step_id"]);
+/** The value as a non-actor reads it: every step id KEY dropped and every string carrying a hidden steer text
+ *  omitted. Shared research output is never rewritten (round 5, review r-p4b-sessions B1: a value regex turned
+ *  https://s3.amazonaws.com/... into a redaction marker); the one prose that names a step - learning_records'
+ *  deviation and steer - is written without it at its producer (tree.ts learningRecords hideSteps). */
+export function nonActorView<T>(value: T, hiddenTexts: string[]): T {
+  const strip = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(strip);
+    if (v && typeof v === "object" && !(v instanceof Date)) {
+      const o: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v)) if (!STEP_KEYS.has(k)) o[k] = strip(x);
+      return o;
+    }
+    return v;
+  };
+  return strip(omitPrompts(value, hiddenTexts)) as T;
 }

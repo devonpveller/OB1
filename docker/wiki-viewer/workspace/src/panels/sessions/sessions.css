@@ -1,0 +1,23 @@
+/* research-workbench P4b: the running-session cards and the research flow (panel-local styles) */
+.ws-card { display: flex; flex-direction: column; gap: 2px; text-align: left; }
+.ws-card-row, .ws-branch { display: block; font-size: 12px; }
+.ws-card-query { font-weight: 600; }
+.ws-origin-badge { align-self: flex-start; padding: 0 6px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 11px; }
+.ws-origin-badge[data-badge="idea_refinery"] { background: var(--warn-soft); color: var(--warn); }
+.ws-tree { display: block; margin-top: 2px; border-left: 2px solid var(--chip); padding-left: 4px; }
+.ws-branch-closed { color: var(--muted); }
+.ws-branch-pending { font-style: italic; }
+.ws-events { margin: 4px 0; padding-left: 18px; font-size: 12px; }
+.ws-event-kind { font-size: 10px; text-transform: uppercase; color: var(--muted); }
+.ws-event-steering { color: var(--accent); }
+.ws-card-actions input { margin-right: 4px; }
+.ws-flow-source { display: flex; flex-direction: column; gap: 2px; text-align: left; }
+.ws-flow-url { font-size: 12px; word-break: break-all; }
+.ws-flow-stages { display: flex; flex-wrap: wrap; gap: 4px; }
+.ws-flow-stage { display: inline-block; padding: 1px 6px; border-radius: 8px; background: var(--chip); font-size: 11px; }
+.ws-trail { margin-left: 4px; color: var(--muted); }
+.ws-flow-enter { animation: ws-flow-in 0.5s ease-out; }
+.ws-flow-current { animation: ws-flow-pulse 1.4s ease-in-out infinite; }
+@keyframes ws-flow-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+@keyframes ws-flow-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--accent-soft); } 50% { box-shadow: 0 0 0 3px var(--accent-soft); } }
+@media (prefers-reduced-motion: reduce) { .ws-flow-enter, .ws-flow-current { animation: none; } }
