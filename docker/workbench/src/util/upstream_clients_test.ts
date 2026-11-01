@@ -1,4 +1,4 @@
-// deno test --allow-all src/upstream_clients_test.ts - rw-identity-harden2 round 2 (tester t-id-harden2 D8).
+// deno test --allow-all src/util/upstream_clients_test.ts - rw-identity-harden2 round 2 (tester t-id-harden2 D8).
 // The rule is structural, not a spelling: a workbench client of another service never hands its caller that
 // service's error text. EVERY place the workbench calls a sibling service (every `fetch(` under src/, outside
 // tests) is in CLIENTS below. Each is driven against a stub whose answer to anything is HTTP 500 with a marker
@@ -6,21 +6,21 @@
 // path / credential words that ride with it) is nowhere in what the client returns or throws - message,
 // cause and stack included. A guard test fails when a `fetch(` call site appears that is not in the table.
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { researchActions } from "./sessions/client.ts";
-import { researchClient } from "./documents/clients.ts";
-import { gateClient } from "./fetch-gate/client.ts";
-import { httpScorer } from "./contracts/logic/reopen.ts";
-import { createResolver } from "./export/resolver.ts";
-import { parseCitekey } from "./export/identifiers.ts";
-import type { IdentifierKind } from "./export/identifiers.ts";
-import { fxEntries } from "./export/registry_fixtures.ts";
-import { visionPass } from "./export/vision.ts";
-import { embed } from "./util/embed.ts";
-import { rest } from "./db/rest.ts";
-import { callExtract } from "./routes/import.ts";
-import { nav } from "./routes/nav.ts";
-import { sources } from "./routes/sources.ts";
-import { steerFailure } from "./contracts/routes/sessions.ts";
+import { researchActions } from "../sessions/client.ts";
+import { researchClient } from "../documents/clients.ts";
+import { gateClient } from "../fetch-gate/client.ts";
+import { httpScorer } from "../contracts/logic/reopen.ts";
+import { createResolver } from "../export/resolver.ts";
+import { parseCitekey } from "../export/identifiers.ts";
+import type { IdentifierKind } from "../export/identifiers.ts";
+import { fxEntries } from "../export/registry_fixtures.ts";
+import { visionPass } from "../export/vision.ts";
+import { embed } from "../util/embed.ts";
+import { rest } from "../db/rest.ts";
+import { callExtract } from "../routes/import.ts";
+import { nav } from "../routes/nav.ts";
+import { sources } from "../routes/sources.ts";
+import { steerFailure } from "../contracts/routes/sessions.ts";
 
 const MARK = "MARKER-5xx-detail /var/lib/service/x.sql password=hunter2";
 const HIDDEN = ["MARKER-5xx", "/var/lib/service", "hunter2"];
@@ -122,13 +122,13 @@ Deno.test("D8 client table: the D15 scorer (injected fetch) and the podcast hand
       .score({ url: "u", title: "t", content: "c", content_type: "web" })
   );
   for (const h of HIDDEN) assert(!out.includes(h), out);
-  const src = await Deno.readTextFile(new URL("./contracts/routes/podcasts.ts", import.meta.url));
+  const src = await Deno.readTextFile(new URL("../contracts/routes/podcasts.ts", import.meta.url));
   const call = /fetch\(url,[\s\S]*?\.catch\(/.exec(src)?.[0] ?? "";
   assert(/\.then\(\(r\) => r\.body\?\.cancel\(\)\)/.test(call), "podcast hand-off: the answer is read somewhere");
 });
 
 Deno.test("D8 guard: every `fetch(` call site under src/ is in the client table (a new one fails here until it is added and driven)", async () => {
-  const root = new URL("./", import.meta.url);
+  const root = new URL("../", import.meta.url);
   const found = new Map<string, number>();
   const walk = async (dir: URL) => {
     for await (const e of Deno.readDir(dir)) {
