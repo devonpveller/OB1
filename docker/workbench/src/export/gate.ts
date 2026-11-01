@@ -18,6 +18,7 @@
 //                 `required-section-missing`.
 //   5. VISION     vision.ts, through LiteLLM only, under the export's own key; inert when unconfigured.
 // Every stage's codes are a closed vocabulary; a stage that cannot run blocks (fail closed).
+import { logRefusal } from "../identity/refusal_log.ts";
 import { type Finding, type PageImage, type VisionConfig, visionPass, type Fetch } from "./vision.ts";
 
 export type { Finding } from "./vision.ts";
@@ -456,10 +457,18 @@ export async function runGate(deps: GateDeps, input: GateInput): Promise<GateRes
     let structure: { pages?: number; blocking?: Finding[]; warnings?: Finding[]; texts?: string[]; lines?: TextLine[][]; tools?: Record<string, string>; error?: string } | null = null;
     try { structure = JSON.parse(dec(s.stdout)); } catch { structure = null; }
     if (!structure || s.code !== 0 || !Array.isArray(structure.texts)) {
-      blocking.push({ code: "structure-unreadable", detail: `the structure check could not read the PDF${structure?.error ? ` (${String(structure.error).slice(0, 200)})` : ""}`, stage: "structure" });
+      // rw-identity-harden round 4 (D6): the program's own error text names the server's temp path; it goes to the log only
+      if (structure?.error) logRefusal("export-gate: structure-unreadable", `[export-gate] structure check error: ${String(structure.error).slice(0, 300)}`);
+      blocking.push({ code: "structure-unreadable", detail: "the structure check could not read the PDF", stage: "structure" });
     } else {
       for (const f of structure.blocking ?? []) blocking.push({ ...f, stage: "structure" });
-      for (const f of structure.warnings ?? []) warnings.push({ ...f, stage: "structure" });
+      for (const f of structure.warnings ?? []) {
+        // qpdf's syntax warnings carry the temp file's path: one fixed text on the run, the original in the log
+        if (f.code === "qpdf") {
+          logRefusal("export-gate: qpdf", `[export-gate] qpdf: ${String(f.detail).slice(0, 300)}`);
+          warnings.push({ code: "qpdf", detail: "qpdf reported a syntax warning in the PDF", stage: "structure" });
+        } else warnings.push({ ...f, stage: "structure" });
+      }
       texts = structure.texts;
       lines = (structure.lines ?? []).flat();
       texts.forEach((t, i) => { if (!t.trim()) warnings.push({ code: "empty-page", page: i + 1, detail: `page ${i + 1} carries no text`, stage: "structure" }); });

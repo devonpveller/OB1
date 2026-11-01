@@ -38,8 +38,21 @@ Deno.test("D1: no route file puts a caught exception's message into a response",
     if (!f.name.endsWith(".ts") || f.name.endsWith("_test.ts")) continue;
     (await Deno.readTextFile(new URL(f.name, dir))).split("\n").forEach((l, i) => { if (echo.test(l)) hits.push(`routes/${f.name}:${i + 1}: ${l.trim()}`); });
   }
-  for (const f of ["../export/exporter.ts", "../contracts/routes/refinery.ts"]) {
+  // round 4 (t-id-harden3 D5/D6): the export gate's files too - a finding's detail is never an exception's text
+  for (const f of ["../export/exporter.ts", "../contracts/routes/refinery.ts", "../export/gate.ts", "../export/vision.ts", "../export/runs.ts"]) {
     (await Deno.readTextFile(new URL(f, dir))).split("\n").forEach((l, i) => { if (echo.test(l)) hits.push(`${f.slice(3)}:${i + 1}: ${l.trim()}`); });
   }
   assert(hits.length === 0, `${hits.length} responses carry a caught exception's message:\n${hits.join("\n")}`);
+});
+
+// round 4 (t-id-harden3 D6): the export gate's findings carry no exception text: a finding detail is a fixed
+// sentence, never `${structure.error}` / `String(e.message)` / a program's stderr.
+Deno.test("D6: no export gate finding is built from an exception's or a program's own text", async () => {
+  const dir = new URL("../export/", import.meta.url);
+  const hits: string[] = [];
+  const leak = /detail:[^\n]*(?:structure\??\.error|\.error\b|\(e as Error\)|String\(\s*e\b|\.stderr|dec\()/;
+  for (const f of ["gate.ts", "vision.ts", "runs.ts"]) {
+    (await Deno.readTextFile(new URL(f, dir))).split("\n").forEach((l, i) => { if (leak.test(l.replace(/\/\/.*$/, ""))) hits.push(`export/${f}:${i + 1}: ${l.trim()}`); });
+  }
+  assert(hits.length === 0, `${hits.length} finding details carry an exception's text:\n${hits.join("\n")}`);
 });
