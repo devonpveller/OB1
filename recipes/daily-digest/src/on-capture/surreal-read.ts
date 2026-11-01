@@ -17,14 +17,47 @@ export interface SurrealConfig {
 
 const WRITE = /\b(CREATE|UPDATE|UPSERT|DELETE|INSERT|RELATE|REMOVE|DEFINE|ALTER|KILL|LIVE|BEGIN|COMMIT|CANCEL|USE|SLEEP|REBUILD|LET|THROW|RETURN|FOR|IF)\b/i;
 
-/** The statement with string literals blanked, so a keyword inside a literal does not count. */
-function code(q: string): string {
-  return q.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "''");
+/**
+ * The statement with its string literals blanked to '' - by a SCANNER, not a regex (capture-fix round 2,
+ * tester t-p7a-capture D1): a quote that is not inside a literal used to open a fake literal and hide real
+ * code (`SELECT x /* ' *\/, fn::w() AS q /* ' *\/ FROM a` ran a writing function). FAIL CLOSED: outside a
+ * literal, every comment marker (`/*`, `*\/`, `--`, `#`, `//`), every quoted-identifier delimiter (backtick,
+ * U+27E8 / U+27E9 angle brackets), every `;` and every non-ASCII character (homoglyphs of `:`, zero-width joiners) REFUSE the
+ * statement; an unterminated literal refuses. The capture sends only its own fixed queries, none of which
+ * uses any of them. A literal is '...' or "..." with backslash escapes.
+ */
+export function code(q: string): string {
+  let out = "";
+  for (let i = 0; i < q.length; i++) {
+    const ch = q[i];
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      for (; j < q.length; j++) {
+        if (q[j] === "\\") {
+          j++;
+          continue;
+        }
+        if (q[j] === ch) break;
+      }
+      if (j >= q.length) throw new Error("read-only client: an unterminated string literal");
+      out += "''";
+      i = j;
+      continue;
+    }
+    const two = q.slice(i, i + 2);
+    if (two === "/*" || two === "*/" || two === "--" || two === "//" || ch === "#") throw new Error("read-only client: no comments");
+    if (ch === "`" || ch === "\u27e8" || ch === "\u27e9") throw new Error("read-only client: no quoted identifiers");
+    if (ch === ";") throw new Error("read-only client: one statement per query, no ';'");
+    if (ch.charCodeAt(0) > 0x7e || (ch.charCodeAt(0) < 0x20 && ch !== "\n" && ch !== "\r" && ch !== "\t")) {
+      throw new Error("read-only client: only printable ASCII outside a string literal");
+    }
+    out += ch;
+  }
+  return out;
 }
 
 export function assertReadOnly(q: string): void {
-  const c = code(q).trim().replace(/;\s*$/, "");
-  if (c.includes(";")) throw new Error("read-only client: one statement per query");
+  const c = code(q).trim();
   // INFO FOR DB / NS, and INFO FOR TABLE <one plain table name> (the schema the quiesce check fingerprints)
   if (/^INFO\s+FOR\s+(DB|NS)$/i.test(c) || /^INFO\s+FOR\s+TABLE\s+[a-z_][a-z0-9_]*$/i.test(c)) return;
   if (!/^SELECT\b/i.test(c)) throw new Error("read-only client: only SELECT or INFO FOR DB / NS / TABLE");

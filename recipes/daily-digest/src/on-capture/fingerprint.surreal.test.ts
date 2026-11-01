@@ -119,7 +119,7 @@ Deno.test({
       ["DEFINE ANALYZER", "DEFINE ANALYZER an TOKENIZERS blank FILTERS lowercase;", "__db__"],
       ["DEFINE USER (database)", "DEFINE USER u2 ON DATABASE PASSWORD 'lab-only-pw' ROLES VIEWER;", "__db__"],
       ["DEFINE ACCESS (database)", "DEFINE ACCESS ac ON DATABASE TYPE JWT ALGORITHM HS512 KEY 'lab-only-key-0123456789';", "__db__"],
-      ["DEFINE USER (namespace)", `DEFINE USER u3 ON NAMESPACE PASSWORD 'lab-only-pw' ROLES VIEWER;`, "__ns__"],
+      ["DEFINE USER (namespace)", `DEFINE USER u3_${db} ON NAMESPACE PASSWORD 'lab-only-pw' ROLES VIEWER;`, "__ns__"],
       ["deep UPDATE", "UPDATE source:a SET meta.deep.tags[0] = 'y';", "source"],
       ["deep UPDATE (number)", "UPDATE source:a SET meta.deep.level = 2;", "source"],
       ["DELETE a row", "DELETE source:b;", "source"],
@@ -134,5 +134,42 @@ Deno.test({
       last = now;
     }
     assertEquals(changed(last, await fingerprint(reader)), [], "after the writes, an untouched read is quiesced again");
+  },
+});
+
+// capture-fix round 2 (tester D1): each bypass attempt is sent THROUGH the guarded client to a store where
+// fn::w() writes; whatever the guard admits runs, and the write probe must stay at 0 rows. Then the
+// capture's own queries all run.
+Deno.test({
+  name: "capture-fix round 2: no bypass attempt lands a write through SurrealReader; the capture's own queries run",
+  ignore: !URL_,
+  sanitizeOps: false, sanitizeResources: false,
+  async fn() {
+    const { BYPASS_CASES, CAPTURE_QUERIES } = await import("./guard-cases.ts");
+    const db = `fpg_${crypto.randomUUID().slice(0, 8)}`;
+    const h = { ...H, "surreal-db": db, accept: "application/json" };
+    const raw = async (q: string) => {
+      const r = await fetch(`${URL_}/sql`, { method: "POST", headers: h, body: q });
+      return JSON.parse(await r.text());
+    };
+    await raw(`DEFINE NAMESPACE IF NOT EXISTS ${NS}; USE NS ${NS}; DEFINE DATABASE ${db};`);
+    await raw(`DEFINE TABLE a SCHEMALESS; CREATE a:1 SET x = 1; DEFINE TABLE pwned SCHEMALESS;
+      DEFINE FUNCTION fn::w() { CREATE pwned SET at = time::now(); RETURN 1; };
+      DEFINE TABLE speaker_profile SCHEMALESS; DEFINE TABLE episode_profile SCHEMALESS; DEFINE TABLE podcast_config SCHEMALESS; DEFINE TABLE model SCHEMALESS; DEFINE TABLE episode SCHEMALESS; DEFINE TABLE command SCHEMALESS; DEFINE TABLE source SCHEMALESS; DEFINE TABLE source_embedding SCHEMALESS;`);
+    const pwned = async () => (await raw("SELECT count() AS n FROM pwned GROUP ALL"))[0].result[0]?.n ?? 0;
+    // the probe works: an unguarded call writes
+    await raw("SELECT fn::w() FROM a");
+    assertEquals(await pwned(), 1, "the probe function writes when called unguarded");
+    const reader = new SurrealReader({ url: URL_, ns: NS, db, user: "root", pass: PASS });
+    const ran: string[] = [];
+    for (const [name, q] of BYPASS_CASES) {
+      try {
+        await reader.query(q);
+        ran.push(name);
+      } catch { /* refused, or the server rejected it */ }
+    }
+    assertEquals(await pwned(), 1, `no write landed through the guarded client (ran: ${ran.join("; ") || "none"})`);
+    assertEquals(ran, [], "no bypass statement reached the server and succeeded");
+    for (const q of CAPTURE_QUERIES) await reader.query(q);
   },
 });

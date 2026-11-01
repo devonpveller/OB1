@@ -10,6 +10,7 @@ import { mapOn, type OnInput, PIPER_TO_KOKORO, profileCounts } from "./on-mappin
 import { assertReadOnly } from "./surreal-read.ts";
 import { byClass, classify } from "./migration.ts";
 import { changed, fingerprint, PAGE, type Reader } from "./fingerprint.ts";
+import { BYPASS_CASES, CAPTURE_QUERIES } from "./guard-cases.ts";
 
 const speaker = (id: string, name: string, voices: [string, string, string][]) => ({
   id: `speaker_profile:${id}`, name, description: `${name} desc`, voice_model: "model:amy", tts_provider: null, tts_model: null,
@@ -80,7 +81,7 @@ Deno.test("C8: a podcast_config row, an unknown Piper voice or an unmapped trans
 });
 
 Deno.test("the SurrealDB client is read-only: only one SELECT / INFO FOR DB, no write keyword", () => {
-  for (const ok of ["SELECT * FROM episode", "SELECT id, name FROM command WHERE name = 'generate_podcast'", "INFO FOR DB", "SELECT * OMIT embedding FROM source_embedding;",
+  for (const ok of ["SELECT * FROM episode", "SELECT id, name FROM command WHERE name = 'generate_podcast'", "INFO FOR DB", "SELECT * OMIT embedding FROM source_embedding",
     "SELECT * FROM note WHERE content = 'please DELETE this'"]) assertReadOnly(ok);
   for (const bad of ["DELETE episode", "SELECT * FROM a; DELETE b", "UPDATE episode SET x = 1", "CREATE x", "SELECT * FROM (DELETE x)", "LET $a = 1",
     "SELECT * FROM a WHERE x = (INSERT INTO b {})", "RELATE a->b->c", "DEFINE TABLE x", "REMOVE TABLE x", "BEGIN", "select * from a;delete b"]) {
@@ -172,4 +173,17 @@ Deno.test("round 2 (tester D4): verify-quiesced sees an in-place embedding updat
     const diff = changed(before, await fingerprint(r));
     assert(diff.includes(key), `${what}: expected ${key} in ${JSON.stringify(diff)}`);
   }
+});
+
+Deno.test("capture-fix round 2 (tester D1): every bypass attempt is refused; every query the capture sends is admitted", () => {
+  const admitted = BYPASS_CASES.filter(([, q]) => {
+    try {
+      assertReadOnly(q);
+      return true;
+    } catch {
+      return false;
+    }
+  }).map(([name]) => name);
+  assertEquals(admitted, [], "admitted bypass attempts");
+  for (const q of CAPTURE_QUERIES) assertReadOnly(q);
 });
