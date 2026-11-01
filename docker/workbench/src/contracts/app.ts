@@ -8,6 +8,7 @@ import { registerReferences } from "./routes/references.ts";
 import { registerSystem } from "./routes/system.ts";
 import { registerPodcasts } from "./routes/podcasts.ts";
 import { registerSessions } from "./routes/sessions.ts";
+import { registerTrust } from "./routes/trust.ts";
 
 export const CONTRACT_VERSION = "0.3.0"; // 0.2.0: P2a reference records; 0.3.0: P4b running sessions + P7a podcasts (additive)
 
@@ -20,6 +21,7 @@ export function createContractApp(deps: ContractDeps) {
   registerSystem(app, deps);
   registerPodcasts(app, deps);
   registerSessions(app, deps);
+  registerTrust(app, deps); // P3b: the trust panels' reads
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",
     description: "the shared secret Caddy injects (G7); the browser never holds it",
