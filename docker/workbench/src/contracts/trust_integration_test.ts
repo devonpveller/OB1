@@ -251,9 +251,11 @@ t("T6 two users: shared knowledge reads the same; per-user coverage of another u
 
 // rw-p3b-trust2 round 4 (tester t-p3b-trust3 D1): T7 measures the code UNDER TEST at realistic width with the
 // DEFAULT planner settings. It seeds the tester's recipe (16k claims of ~200 chars, 2k jobs with ~11 KB of result,
-// 8 filed claims each) and asks the workbench for 25 / 50 / 200 claims of one synthesis, 5 times each, with
+// 8 filed claims each; the synthesis' 200 claims are spread over 200 jobs, as random ids are) and asks the
+// workbench for 25 / 50 / 200 claims of one synthesis, 5 times each, with
 // auto_explain on (the lab database preloads it; run-trust-tests.ps1): the plans and times recorded are those of the
-// verdict query the workbench ITSELF ran (whatever its tree is). Then round 2's query (copied verbatim below) is
+// verdict query the workbench ITSELF ran (whatever its tree is). No claims node may run in a loop (loops > 1: round 3's
+// re-scanned inner side) and none may be a full scan. Then round 2's query (copied verbatim below) is
 // EXPLAIN ANALYZEd on the same ids, 5 times. Bar per size: no full claims scan in any run of the workbench's query, and
 // its median no slower than round 2's (25% / 25 ms slack for lab noise). Against a base workbench running round 2's
 // or round 3's query, the recorded plans scan claims / run slow, so the RED fails on the code, not on the test.
@@ -281,7 +283,7 @@ t("T7 F1: the verdict query the workbench runs has a stable, fast plan at realis
   try {
     await sql(`INSERT INTO public.claims (id, text, epistemic_tag, metadata, synthesis_id, content_hash)
       SELECT md5('t7' || g)::uuid, ${txt("g")}, 'sourced', '{"claim_kind":"general_theory","f1t7":1}'::jsonb,
-             CASE WHEN g <= 200 THEN $1::uuid END, md5('t7' || g) FROM generate_series(1, 16000) g`, [S]);
+             CASE WHEN g % 80 = 0 THEN $1::uuid END, md5('t7' || g) FROM generate_series(1, 16000) g`, [S]);
     await sql(`INSERT INTO public.research_jobs (id, status, origin, query, result, caller, finished_at)
       SELECT gen_random_uuid(), 'done', 'workspace', 'f1t7 job ' || j,
         jsonb_build_object('pad', (SELECT string_agg(md5(random()::text || j || g), '') FROM generate_series(1, 350) g),
@@ -331,13 +333,13 @@ t("T7 F1: the verdict query the workbench runs has a stable, fast plan at realis
 ${log.slice(0, 3000)}`);
     const rows: string[] = [];
     rows.push(`PLAN T7 the verdict query the workbench ran:
-${blocks[0].slice(0, 4000)}`);
+${blocks[0].slice(0, 2500)}`);
     const c = await pool!.connect();
     try {
       await c.queryObject(`PREPARE t7_round2(text[]) AS ${ROUND2_VERDICTS_SQL}`);
 
       for (const [k, n] of SIZES.entries()) {
-        const mine = blocks.slice(k * REPS, (k + 1) * REPS).map((x) => ({ ms: Number(/duration: ([\d.]+) ms/.exec(x)![1]), seq: /Seq Scan on claims/.test(x), plan: x }));
+        const mine = blocks.slice(k * REPS, (k + 1) * REPS).map((x) => ({ ms: Number(/duration: ([\d.]+) ms/.exec(x)![1]), seq: /Seq Scan on claims/.test(x), rescans: (x.match(/ on claims [^\r\n]*loops=(\d+)/g) ?? []).map((m) => Number(/loops=(\d+)/.exec(m)![1])).filter((l) => l > 1).length, plan: x }));
         const bases: number[] = [];
         // EXPLAIN of EXECUTE takes no bind parameter: the ids (uuids from the answer, checked) go in as a literal
         const ids = idsBy.get(n)!;
@@ -348,11 +350,13 @@ ${blocks[0].slice(0, 4000)}`);
           bases.push(Number(/Execution Time: ([\d.]+) ms/.exec(p)?.[1] ?? NaN));
         }
         const mt = median(mine.map((x) => x.ms)), mb = median(bases);
-        rows.push(`PLAN T7 ${n} ids: workbench median ${mt.toFixed(1)} ms (runs ${mine.map((x) => x.ms.toFixed(1)).join(", ")}), full claims scans ${mine.filter((x) => x.seq).length}/${REPS}; round 2 median ${mb.toFixed(1)} ms (runs ${bases.map((x) => x.toFixed(1)).join(", ")})`);
+        rows.push(`PLAN T7 ${n} ids: workbench median ${mt.toFixed(1)} ms (runs ${mine.map((x) => x.ms.toFixed(1)).join(", ")}), full claims scans ${mine.filter((x) => x.seq).length}/${REPS}, claims re-scanned in a loop ${mine.filter((x) => x.rescans).length}/${REPS}; round 2 median ${mb.toFixed(1)} ms (runs ${bases.map((x) => x.toFixed(1)).join(", ")})`);
         if (n === 200) rows.push(`PLAN T7 200 ids, the workbench's last plan:
-${mine[mine.length - 1].plan}`);
+${mine[mine.length - 1].plan.slice(0, 3000)}`);
+        assertEquals(mine.filter((x) => x.rescans).length, 0, `${n} ids: the workbench's verdict query re-scans claims inside a loop (round 3's pathology):
+${mine.find((x) => x.rescans)?.plan.slice(0, 3000)}`);
         assertEquals(mine.filter((x) => x.seq).length, 0, `${n} ids: the workbench's verdict query scans claims in full:
-${mine.find((x) => x.seq)?.plan}`);
+${mine.find((x) => x.seq)?.plan.slice(0, 3000)}`);
         assert(mt <= Math.max(mb * 1.25, mb + 25), `${n} ids: the workbench's verdict query (median ${mt} ms) is slower than round 2's (${mb} ms)`);
       }
     } finally {
