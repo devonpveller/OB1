@@ -286,7 +286,7 @@ try {
       '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
-      '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'WORKBENCH_GATE_URL=http://stub-gate:8080', '-e', "WORKBENCH_GATE_KEY=$gateKey", '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
+      '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'RESEARCH_SCORER_URL=http://stub-research:8000', '-e', "RESEARCH_SCORER_KEY=$wsKey", '-e', 'WORKBENCH_GATE_URL=http://stub-gate:8080', '-e', "WORKBENCH_GATE_KEY=$gateKey", '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
       '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
       '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   $walkEnv = if ($WalkOff) { @('-e', 'WORKSPACE_RESPONSE_WALK=off') } else { @() }
@@ -334,6 +334,20 @@ try {
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: the integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the documents API integration test ($($sum.Value))" }
+
+  # rw-p8a2-cleanup: the cleanup view's routes as two users (D5 items 4-7; 07-MULTI-USER), on sources of its own
+  Write-Host '[5a2] the cleanup view integration test (two users through the identity header)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/contracts/cleanup_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'cleanup-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|AssertionError|error:' }) -join "`n")
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  if ($Red) { Check (-not ($sum.Success -and $sum.Groups[1].Value -eq 'ok')) "RED: the cleanup integration test does not pass on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the cleanup view integration test ($($sum.Value))" }
+  if ($sum.Success -and [int]$sum.Groups[3].Value -gt 0) { Save 'cleanup-integration-tail.log' (($clean -split "`n" | Select-Object -Last 60) -join "`n") }
 
   Write-Host '[5b] the workspace e2e in a headless Chromium, through the front door'
   $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shots}:/ev", '-e', "FRONT=$front",

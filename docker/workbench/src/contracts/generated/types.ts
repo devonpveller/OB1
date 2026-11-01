@@ -63,6 +63,22 @@ export type CancelResult = {
   note?: string;
 };
 
+export type CandidateEvidence = {
+  path: string; /** registry: admission_paths */
+  outcome: string; /** registry: admission_outcomes */
+  session_id: string | null;
+  note: string | null;
+  attempted_at: string;
+  reason: string | null;
+  score: {
+    available?: boolean;
+    value?: number | null;
+    floor?: number | null;
+    version?: string | null;
+    reason?: string;
+  } | null;
+};
+
 export type CardBranch = {
   id: string;
   parent_job_id: string | null;
@@ -123,6 +139,81 @@ export type ClaimSourceEdge = {
 export type Claims = {
   count: number;
   claims: Array<Claim>;
+};
+
+export type CleanupAction = {
+  id: string;
+  kind: string;
+  reason_type: string | null;
+  source_id: string | null;
+  tombstone_id: string | null;
+  detail: Record<string, unknown>;
+  created_at: string;
+  finished_at: string | null;
+};
+
+export type CleanupActions = {
+  actions: Array<CleanupAction>;
+};
+
+export type CleanupEraseRequest = {
+  reason_type: string; /** registry: erasure_reasons */
+  note?: string;
+};
+
+export type CleanupErased = {
+  action: CleanupAction;
+  tombstone_id: string;
+  reason_type: string;
+  note: string | null;
+};
+
+export type CleanupLiftRequest = {
+  note?: string;
+};
+
+export type CleanupLifted = {
+  action: CleanupAction;
+  tombstone_id: string;
+  lifted_at: string | null;
+};
+
+export type CleanupSeverRequest = {
+  kind?: string; /** registry: dependence_kinds */
+  ref?: string;
+  all?: boolean;
+};
+
+export type CleanupSevered = {
+  action: CleanupAction;
+  severed: Array<{
+    kind: string;
+    ref: string;
+  }>;
+  rescored_claims: number;
+  pending_compile: Array<string>;
+  lifecycle: string | null;
+  blocking: number;
+};
+
+export type CleanupSource = {
+  id: string;
+  title: string;
+  url: string | null;
+  lifecycle: string; /** registry: source_states */
+  reason: string | null;
+  suppressed_at: string;
+  unlinked_at: string | null;
+  counts: Record<string, number>;
+  blocking: number;
+  severable: number;
+  total: number;
+  erase_allowed: boolean;
+};
+
+export type CleanupSources = {
+  sources: Array<CleanupSource>;
+  total: number;
 };
 
 export type Connection = {
@@ -534,6 +625,27 @@ export type Podcasts = {
   podcasts: Array<PodcastEpisode>;
 };
 
+export type ProcessAllItem = {
+  source_id: string;
+  outcome: string;
+  severed: number;
+  blocking: number;
+  tombstone_id: string | null;
+  detail: string | null;
+};
+
+export type ProcessAllRequest = {
+  reason_type: string; /** registry: erasure_reasons */
+  source_ids: Array<string>;
+};
+
+export type ProcessAllResult = {
+  action: CleanupAction;
+  reason_type: string;
+  items: Array<ProcessAllItem>;
+  erased: number;
+};
+
 export type Quality = {
   source_id: string;
   state: string; /** registry: record_states */
@@ -778,6 +890,43 @@ export type RegistrySummary = {
   owner: string;
   description: string;
   entries: number;
+};
+
+export type ReopenCandidate = {
+  kind: string;
+  tombstone: {
+    id: string;
+    source_id: string;
+    url: string;
+    title: string;
+    reason_type: string; /** registry: erasure_reasons */
+    note: string | null;
+    eraser_kind: string; /** registry: erasers */
+    erased_by_you: boolean;
+    erased_at: string;
+    confidence: number | null;
+    score_version: string | null;
+  };
+  evidence: Array<CandidateEvidence>;
+  dispute_preview: {
+    criticism: {
+      tombstone_id: string;
+      reason_type: string;
+      note: string | null;
+      erased_at: string;
+    };
+    score: {
+      available?: boolean;
+      value?: number | null;
+      floor?: number | null;
+      version?: string | null;
+      reason?: string;
+    };
+  } | null;
+};
+
+export type ReopenCandidates = {
+  candidates: Array<ReopenCandidate>;
 };
 
 export type ReportCredibility = {

@@ -9,6 +9,7 @@ import { registerSystem } from "./routes/system.ts";
 import { registerPodcasts } from "./routes/podcasts.ts";
 import { registerSessions } from "./routes/sessions.ts";
 import { registerTrust } from "./routes/trust.ts";
+import { registerCleanup } from "./routes/cleanup.ts";
 
 export const CONTRACT_VERSION = "0.3.0"; // 0.2.0: P2a reference records; 0.3.0: P4b running sessions + P7a podcasts (additive)
 
@@ -22,6 +23,7 @@ export function createContractApp(deps: ContractDeps) {
   registerPodcasts(app, deps);
   registerSessions(app, deps);
   registerTrust(app, deps); // P3b: the trust panels' reads
+  registerCleanup(app, deps); // P8a (rw-p8a2-cleanup): the cleanup view
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",
     description: "the shared secret the door injects (the viewer's /workbench forwarder; G7); the browser never holds it",
