@@ -240,7 +240,7 @@ t("T6 two users: shared knowledge reads the same; per-user coverage of another u
   for (const m of [M.promptB, M.needB, M.anchorB]) assert(!foreign.text.includes(m), `B's ${m} reached A`);
   const own = await call("GET", `/workbench/contract/sessions/${ID.jobB}/coverage`, B);
   assertEquals(own.status, 200, own.text);
-  assertEquals(own.json.anchor, M.anchorB, "B reads B's own anchor");
+  assertEquals(own.json.anchor, M.promptB, "B reads B's own anchor - a root's anchor is its own question, read through OWN_QUERY");
   const doc = await call("GET", `/workbench/contract/documents/coverage?path=${encodeURIComponent(docPath)}`, B);
   assertEquals(doc.status, 404, `B reading A's document coverage: ${doc.text}`);
   // a caller-supplied user is never read: a query naming B changes nothing for A
