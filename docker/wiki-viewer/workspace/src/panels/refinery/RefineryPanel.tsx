@@ -17,7 +17,34 @@ interface Flag {
   text: string;
 }
 
+// The room focus is a ONE-SHOT request (refinery-fix): a session card's link asks for it, the panel uses it
+// once. It is never a stored param: dockview keeps a panel's params across visits and reloads, and the
+// toolbar's Room button has always sent { focus: "room" } - read as a param, every later visit opened
+// expanded with the room's actions showing (the P2b lab's C18 / C21).
+let roomRequested = 0;
+const roomSubs = new Set<() => void>();
+export function requestRoomFocus() {
+  roomRequested++;
+  roomSubs.forEach((f) => f());
+}
+
 export function RefineryPanel(p: PanelProps) {
+  // the request this panel has used (one per request: a remount does not reopen on an old one)
+  // (the initializer reads, the effect consumes - no side effect in render, StrictMode-safe)
+  const [roomFocus, setRoomFocus] = useState(() => (roomRequested > 0 ? 1 : 0));
+  useEffect(() => {
+    roomRequested = 0;
+    const f = () => {
+      if (roomRequested > 0) {
+        roomRequested = 0;
+        setRoomFocus((n) => n + 1);
+      }
+    };
+    roomSubs.add(f);
+    return () => {
+      roomSubs.delete(f);
+    };
+  }, []);
   const path = useWorkspace((s) => s.documentPath);
   // the document changed on the server (the toolbar started / reopened its refinery): re-read, since
   // an open panel is not remounted by openPanel
@@ -152,9 +179,10 @@ export function RefineryPanel(p: PanelProps) {
           : <span>no refinery for this document</span>}
         leaves={leaves}
         actions={actions}
-        /* P4b: a session card's link back to an idea opens its room (focus: "room") */
-        open={p.params.focus === "room"}
-        selected={p.params.focus === "room" ? "room" : null}
+        /* P4b: a session card's link back to an idea opens its room - once per request (requestRoomFocus) */
+        key={`room-${roomFocus}`}
+        open={roomFocus > 0 || undefined}
+        selected={roomFocus > 0 ? "room" : undefined}
         empty="nothing in the refinery yet"
       />
       {flags.length > 0 && (
