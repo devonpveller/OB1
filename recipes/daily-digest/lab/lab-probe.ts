@@ -164,6 +164,33 @@ if (verb === "speech") {
   };
   await Promise.all([0, 1].map(worker));
   out({ verb, syntheses: n });
+} else if (verb === "nul-row") {
+  // LAB COPY ONLY (capture-fix): put the live shape back - a source row whose text holds a NUL byte.
+  // The importer cannot load one from SurrealQL text (fix-surreal-export.py drops it), and that is
+  // exactly what hid the live capture's 400; a binary protocol can, so this writes it with CBOR over /rpc.
+  const head = (major: number, n: number): number[] =>
+    n < 24 ? [(major << 5) | n] : n < 256 ? [(major << 5) | 24, n] : n < 65536 ? [(major << 5) | 25, n >> 8, n & 255]
+    : [(major << 5) | 26, (n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+  const cbor = (v: unknown): number[] => {
+    if (typeof v === "number") return head(0, v);
+    if (typeof v === "string") {
+      const b = [...new TextEncoder().encode(v)];
+      return [...head(3, b.length), ...b];
+    }
+    if (Array.isArray(v)) return [...head(4, v.length), ...v.flatMap(cbor)];
+    const e = Object.entries(v as Record<string, unknown>);
+    return [...head(5, e.length), ...e.flatMap(([k, x]) => [...cbor(k), ...cbor(x)])];
+  };
+  const url = env("SURREAL_URL").replace(/\/+$/, "");
+  const H = { "surreal-ns": "open_notebook", "surreal-db": "open_notebook", authorization: `Basic ${btoa(`${env("SURREAL_USER")}:${env("SURREAL_PASSWORD")}`)}` };
+  const r = await fetch(`${url}/rpc`, {
+    method: "POST", headers: { ...H, "content-type": "application/cbor", accept: "application/cbor" },
+    body: new Uint8Array(cbor({ id: 1, method: "query", params: ["CREATE source:lab_nul_row SET title = 'lab NUL row', full_text = $t", { t: "URL Source: lab\u0000NUL" }] })),
+  });
+  await r.arrayBuffer();
+  const sel = await fetch(`${url}/sql`, { method: "POST", headers: { ...H, accept: "application/json" }, body: "SELECT * FROM source:lab_nul_row" });
+  const selText = await sel.text();
+  out({ verb, rpc: r.status, select_star: sel.status, null_byte_refused: selText.includes("null byte") });
 } else {
   console.error("usage: lab-probe.ts speech | c3 <team> | c5 <team> [evdir] | render <team> <slug> | archive-check | load <seconds>");
   Deno.exit(2);

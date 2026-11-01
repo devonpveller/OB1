@@ -45,7 +45,12 @@ export async function fingerprint(r: Reader): Promise<Fingerprint> {
     const pages: string[] = [];
     let rows = 0;
     for (let start = 0;; start += PAGE) {
-      const page = await r.query<Record<string, unknown>>(`SELECT * FROM ${t} ORDER BY id LIMIT ${PAGE} START ${start}`);
+      // capture-fix (2026-10-31, the live capture's 400): each row is hashed BY THE SERVER over its whole
+      // value (`<string> $this`: every field, embeddings included) and only the id and the hash travel.
+      // `SELECT *` cannot be used: a live `source` row's full_text holds a NUL byte, which SurrealDB 2.6's
+      // JSON responder refuses to serialise ("to be serialized string contained a null byte", HTTP 400) -
+      // the whole page fails. The hash is the record's SurrealQL text, deterministic (ordered fields).
+      const page = await r.query<Record<string, unknown>>(`SELECT id, crypto::sha256(<string> $this) AS h FROM ${t} ORDER BY id LIMIT ${PAGE} START ${start}`);
       if (!page.length) break;
       rows += page.length;
       pages.push(await sha(page));

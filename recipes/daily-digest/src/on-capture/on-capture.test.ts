@@ -108,7 +108,16 @@ Deno.test("C10: migration - one outcome per episode class with a reason; a migra
 });
 
 Deno.test("round 2: the read-only guard admits INFO FOR NS / TABLE <name>, and refuses every function call", () => {
-  for (const ok of ["INFO FOR NS", "INFO FOR TABLE source_embedding", "SELECT * FROM episode ORDER BY id LIMIT 200 START 400"]) assertReadOnly(ok);
+  for (const ok of ["INFO FOR NS", "INFO FOR TABLE source_embedding", "SELECT * FROM episode ORDER BY id LIMIT 200 START 400",
+    "SELECT id, crypto::sha256(<string> $this) AS h FROM source ORDER BY id LIMIT 200 START 0"]) assertReadOnly(ok);
+  // capture-fix: crypto::sha256( is the one admitted function; anything around or inside it still refuses
+  for (const bad of ["SELECT crypto::sha256(fn::w()) FROM a", "SELECT crypto::md5(x) FROM a", "SELECT crypto::sha256(x), http::get('u') FROM a",
+    "SELECT crypto::sha256 (x) FROM a::b", "SELECT crypto::sha256x(x) FROM a", "SELECT xcrypto::sha256(x) FROM a", "SELECT CRYPTO::SHA256(x) FROM a",
+    "SELECT Crypto::sha256(x) FROM a", "SELECT crypto::sha256 (x) FROM a", "SELECT crypto :: sha256(x) FROM a", "SELECT crypto::sha512(x) FROM a",
+    "SELECT fn::crypto::sha256(x) FROM a", "SELECT crypto::sha256(x) FROM a; DELETE a", "UPDATE a SET h = crypto::sha256('x')",
+    "CREATE a SET h = crypto::sha256('x')", "INFO FOR TABLE a WHERE crypto::sha256(x)"]) {
+    assertThrows(() => assertReadOnly(bad), Error, "read-only client", bad);
+  }
   for (const bad of ["SELECT fn::text_search('x', 1, true, true) FROM episode", "SELECT * FROM http::get('https://x')", "INFO FOR TABLE a b",
     "INFO FOR TABLE a; DELETE a", "SELECT * FROM a WHERE x = fn::w()", "INFO FOR ROOT", "INFO FOR USER root"]) {
     assertThrows(() => assertReadOnly(bad), Error, "read-only client", bad);
@@ -133,8 +142,12 @@ function fakeStore() {
       if (q === "INFO FOR DB") return st.db as unknown as T[];
       let m = /^INFO FOR TABLE (\w+)$/.exec(q);
       if (m) return st.table[m[1]] as unknown as T[];
-      m = /^SELECT \* FROM (\w+) ORDER BY id LIMIT (\d+) START (\d+)$/.exec(q);
-      if (m) return (st.rows[m[1]] ?? []).slice(Number(m[3]), Number(m[3]) + Number(m[2])) as unknown as T[];
+      // the server-side row hash (capture-fix): id + the hash of the whole record
+      m = /^SELECT id, crypto::sha256\(<string> \$this\) AS h FROM (\w+) ORDER BY id LIMIT (\d+) START (\d+)$/.exec(q);
+      if (m) {
+        return (st.rows[m[1]] ?? []).slice(Number(m[3]), Number(m[3]) + Number(m[2]))
+          .map((row) => ({ id: row.id, h: JSON.stringify(row) })) as unknown as T[];
+      }
       throw new Error(`unexpected query ${q}`);
     },
   };
