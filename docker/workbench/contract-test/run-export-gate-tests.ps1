@@ -345,6 +345,23 @@ try {
     Clause 'T5' $ok "$($pair[0]) is $($pair[1]) ($($x.status) gate=$($x.gate) $codes)"
   }
 
+  # round 5 (coordinator, after P3b landed): a REAL P3b research report - a research_synthesis source filed by a
+  # finished job whose metrics carry the D15 roll-up, its wiki page in the vault - exported through the route:
+  # P3b's exportWithRollup writes `## Report credibility` at its head and the gate passes it (no fixture section)
+  $rep = 'f6b50000-0000-4000-8000-000000000900'
+  $null = Psql ("INSERT INTO public.sources (id, url, title, content, content_type, domain, metadata) VALUES ('$rep', 'https://example.org/p6b5/report', 'Research: groundwater policy', 'Groundwater withdrawals fell where metering was enforced.', 'research_synthesis', 'example.org', '{}') ON CONFLICT DO NOTHING; " +
+    "INSERT INTO public.research_jobs (status, origin, query, result, metrics, finished_at) VALUES ('done', 'manual', 'groundwater policy', " +
+    "jsonb_build_object('curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', '$rep'))), " +
+    "jsonb_build_object('credibility', jsonb_build_object('value', 0.41, 'claims', 5, 'below_floor', 1, 'judged_lines', 7, 'kind', 'general_theory', 'model_version', 'd15 weights v1', 'weights', jsonb_build_object('paper', 1, 'web_article', 0.6), 'filed', true)), now())")
+  $repPage = Join-Path $vault "content\source\$rep.md"
+  New-Item -ItemType Directory -Force (Split-Path -Parent $repPage) | Out-Null
+  [System.IO.File]::WriteAllText($repPage, "---`ntitle: `"Research: groundwater policy`"`ntype: source`ncontent_type: `"research_synthesis`"`nreport_type: `"deep_research`"`n---`n`n# Research: groundwater policy`n`n## Findings`n`nGroundwater withdrawals fell where metering was enforced.`n", (New-Object System.Text.UTF8Encoding $false))
+  $rp = Req GET $wbName "/workbench/export?path=content/source/$rep.md&format=pdf" 't5-real-p3b-report.pdf'
+  $rpb = if ($rp.status -ne 200) { BodyJson 't5-real-p3b-report.pdf' } else { $null }
+  $rtxt = if ($rp.status -eq 200) { Client @('text', '/ev/files/t5-real-p3b-report.pdf') } else { '' }
+  Save 't5-real-p3b-report.txt' "export $($rp.status) gate=$($rp.gate)`n$(@($rpb.blocking_findings | ForEach-Object { $_.code }) -join ',')`n$rtxt"
+  Clause 'T5' (($rp.status -eq 200) -and ($rp.gate -eq 'passed') -and ($rtxt -match 'Report credibility') -and ($rtxt -match 'weights')) "a REAL P3b research report (exportWithRollup's section) passes the roll-up check ($($rp.status) gate=$($rp.gate))"
+
   Write-Host '[T2] acceptance 2: the reference panel and the exported PDF, one to one'
   $mk = Req POST $wbName '/workbench/documents' 't2-doc.json' 'lab-user-a' '{"title":"Gate parity document"}'
   $doc = BodyJson 't2-doc.json'
