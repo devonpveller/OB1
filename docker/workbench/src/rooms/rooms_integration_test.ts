@@ -59,7 +59,7 @@ const reset = async (u: string) => void (await (await fetch(`${u}/_reset`, { met
 
 // ── the fixture: A's idea (a refinery) with a hidden source, a shared source, a held source; A's session
 // started from a Mattermost thread ───────────────────────────────────────────────────────────────────
-const M = { hidden: `HiddenPassage${rnd()}`, shared: `SharedPassage${rnd()}`, held: `HeldPassage${rnd()}`, permalink: `https://chat.lab.invalid/team/pl/${rnd()}` };
+const M = { hidden: `HiddenPassage${rnd()}`, shared: `SharedPassage${rnd()}`, held: `HeldPassage${rnd()}`, upper: `UpperHiddenPassage${rnd()}`, permalink: `https://chat.lab.invalid/team/pl/${rnd()}` };
 let idea = "", hiddenSrc = "", sharedSrc = "", heldSrc = "", session = "";
 async function fixture() {
   if (idea) return;
@@ -190,6 +190,26 @@ T("R4 the refinery chat leaves out the refinery's hidden sources and keeps the r
   const f = await call(BASE, A, "POST", `/workbench/rooms/${ir}/chat`, { text: "filtered refinery chat" });
   assertEquals([...new Set(f.json.entries[1].context.map((c: any) => c.source_id))], [sharedSrc]);
   await call(BASE, A, "PUT", `/workbench/rooms/${ir}/scope`, { enabled: false, sources: [] });
+  // round 2 (tester N3): a hide typed in UPPER CASE through the contract's hide route still leaves the
+  // source out of the refinery chat (setHidden normalises the id; the context rule compares case-blind)
+  const upper = (await sql<{ id: string }>(`INSERT INTO public.sources (title, content) VALUES ('room upper-hidden source', $1) RETURNING id::text`, [M.upper]))[0].id;
+  await sql(`INSERT INTO public.source_chunks (source_id, idx, content, embedding) VALUES ($1, 0, $2, $3::vector)`, [upper, M.upper, VEC]);
+  const hid = await call(BASE, A, "POST", `/workbench/contract/ideas/${idea}/hidden`, { node_kind: "source", node_ref: upper.toUpperCase(), hidden: true });
+  assertEquals(hid.status, 200, hid.text);
+  const stored = await sql<{ r: string }>(`SELECT node_ref AS r FROM public.refinery_hidden WHERE refinery_id = $1 AND lower(node_ref) = $2`, [idea, upper]);
+  assertEquals(stored.map((x) => x.r), [upper], "the hide is stored as the canonical (lower-case) id");
+  // and a row written in upper case by anything else (an older writer) is matched too
+  await sql(`INSERT INTO public.refinery_hidden (refinery_id, node_kind, node_ref) VALUES ($1, 'source', $2) ON CONFLICT DO NOTHING`, [idea, sharedSrc.toUpperCase()]);
+  await reset(STUB);
+  const up = await call(BASE, A, "POST", `/workbench/rooms/${ir}/chat`, { text: "refinery chat after an upper-case hide" });
+  const uids = new Set(up.json.entries[1].context.map((c: any) => c.source_id));
+  assert(!uids.has(upper), "an upper-case hide through the route left the source in the refinery chat");
+  assert(!uids.has(sharedSrc), "an upper-case refinery_hidden row left the source in the refinery chat");
+  assert(uids.has(heldSrc), "the rest is kept");
+  const usys = String((await stubLog(STUB))[0]?.system ?? "");
+  assert(!usys.includes(M.upper) && !usys.includes(M.shared), "the model saw an upper-case-hidden passage");
+  await sql(`DELETE FROM public.refinery_hidden WHERE refinery_id = $1 AND node_ref = $2`, [idea, sharedSrc.toUpperCase()]);
+  console.log(`R4 round 2: upper-case hides (route + raw row) leave both sources out of the refinery chat (${uids.size} sources)`);
   // outside the refinery (A's room on a session), the same hide narrows nothing
   const sr = (await open(BASE, A, "session", session)).json.room.id;
   await call(BASE, A, "PUT", `/workbench/rooms/${sr}/scope`, { enabled: false, sources: [] });

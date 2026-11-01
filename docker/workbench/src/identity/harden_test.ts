@@ -363,7 +363,7 @@ Deno.test("keys: every key comparison goes through one constant-time compare (no
   const NAMES = String.raw`(?:ring\.(?:door|internal)|door|internal|openalexKey|workbenchKey|get\("api_key"\))`;
   const anywhere = new RegExp(String.raw`\b${NAMES}\s*${CMP}|${CMP}\s*(?:cfg\.|config\.)?${NAMES}\b`);
   // in the files that hold presented keys: the key itself, and a Map lookup by key (a hash, not constant time)
-  const keyFiles = /[\\/](identity[\\/]keys|middleware[\\/]auth|export[\\/]vision)\.ts$/;
+  const keyFiles = /[\\/](identity[\\/]keys|middleware[\\/]auth|export[\\/]vision|rooms[\\/]chat)\.ts$/; // rw-p8a3-room: the chat key too
   const local = new RegExp(String.raw`\b(?:key|k)\s*${CMP}|${CMP}\s*(?:key|k)\b|services\.(?:get|has)\(`);
   const hits: string[] = [];
   for (const u of files) {

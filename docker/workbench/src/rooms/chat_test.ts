@@ -8,6 +8,8 @@ import {
 import { CONTEXT_SQL, contextFor, NOTHING_IN_SCOPE, refineryOf } from "./context.ts";
 import { parseQuestion, parseScope, parseSubject, RoomError } from "./repo.ts";
 import type { Db } from "../contracts/db.ts";
+import { visionConfigFromEnv } from "../export/vision.ts";
+import { keyRing, serviceKeys } from "../identity/keys.ts";
 
 const env = (m: Record<string, string>) => (k: string) => m[k];
 const ON = { WORKBENCH_CHAT_KEY: "sk-chat-own", WORKBENCH_CHAT_MODEL: "local-chat" };
@@ -39,8 +41,36 @@ Deno.test("R5 chat config: a key shared with another consumer the workbench hold
     assertEquals([c.state, c.code], ["refused", "chat-key-shared"], n);
     assert(!JSON.stringify(c).includes("sk-chat-own"), "the refusal names variables, never values");
   }
-  const s = chatConfigFromEnv(env({ ...ON, WORKSPACE_SERVICE_KEYS: "owui=x,agent=sk-chat-own" }));
-  assertEquals(s.code, "chat-key-shared");
+});
+
+// Round 2 (tester t-p8a3-room D1): WORKSPACE_SERVICE_KEYS is read by keys.ts as name=key entries separated by
+// `;` or newlines. The chat and the vision pass compare against exactly those keys (the one shared parser):
+// first, middle and last entry, a newline list, and a key that itself contains `=`.
+const SVC_K = "sk-svc-shared-0123456789";
+const EQ_K = "sk=with=equals-0123456789";
+const SVC_CASES: [string, string, string][] = [
+  ["first", `svc1=${SVC_K};svc2=other-key-0123456789;svc3=third-key-0123456789`, SVC_K],
+  ["middle", `svc1=first-key-0123456789;svc2=${SVC_K};svc3=third-key-0123456789`, SVC_K],
+  ["last", `svc1=first-key-0123456789;svc2=other-key-0123456789;svc3=${SVC_K}`, SVC_K],
+  ["newline-separated", `svc1=first-key-0123456789
+svc2=${SVC_K}
+`, SVC_K],
+  ["a key containing =", `svc1=first-key-0123456789;svc2=${EQ_K}`, EQ_K],
+];
+Deno.test("R5 round 2: a key equal to ANY WORKSPACE_SERVICE_KEYS entry (keys.ts format) is refused - chat and vision alike", () => {
+  for (const [name, list, k] of SVC_CASES) {
+    const c = chatConfigFromEnv(env({ WORKBENCH_CHAT_KEY: k, WORKBENCH_CHAT_MODEL: "m", WORKSPACE_SERVICE_KEYS: list }));
+    assertEquals([c.state, c.code], ["refused", "chat-key-shared"], `chat: ${name}`);
+    const v = visionConfigFromEnv(env({ EXPORT_VISION_KEY: k, EXPORT_VISION_MODEL: "m", WORKSPACE_SERVICE_KEYS: list }));
+    assertEquals([v.state, v.code], ["refused", "vision-key-shared"], `vision: ${name}`);
+  }
+  // a key that is in no entry is still accepted
+  const ok = chatConfigFromEnv(env({ WORKBENCH_CHAT_KEY: "sk-chat-own-0123456789", WORKBENCH_CHAT_MODEL: "m", WORKSPACE_SERVICE_KEYS: SVC_CASES[0][1] }));
+  assertEquals(ok.state, "on");
+  // the parser is keys.ts's: the ring built from the same list holds exactly the keys refused here
+  const ring = keyRing(env({ WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_SERVICE_KEYS: SVC_CASES[4][1] }), false);
+  assert(ring.services.has(EQ_K));
+  assertEquals(serviceKeys(SVC_CASES[4][1]).map((e) => e.key), ["first-key-0123456789", EQ_K]);
 });
 
 Deno.test("R5 chat request: POST <alias>/chat/completions, the chat's own bearer, no redirect, the context in the system turn", () => {
@@ -118,6 +148,7 @@ Deno.test("R4 the refinery's hidden set applies to an idea's room only; it hides
   assertEquals(refineryOf({ subject_kind: "idea", subject_id: "i" }), "i");
   assertEquals(refineryOf({ subject_kind: "session", subject_id: "s" }), null);
   assert(/refinery_hidden x\s+WHERE x\.refinery_id = \$4::uuid AND x\.node_kind = 'source'/.test(CONTEXT_SQL), CONTEXT_SQL);
+  assert(CONTEXT_SQL.includes("lower(x.node_ref) ="), "the hidden rule compares the id case-blind (round 2, N3)");
   assert(CONTEXT_SQL.includes("s.retraction_committed_at IS NULL"), "a suppressed source lends no context");
   assert(CONTEXT_SQL.includes("NOT $2::boolean OR c.source_id = ANY($3::uuid[])"), "scope off reads the whole knowledge database");
 });

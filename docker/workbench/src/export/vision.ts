@@ -23,7 +23,7 @@ export const MAX_IMAGES_PER_CALL = 20;
 const MAX_TEXT = 300;
 const MAX_FINDINGS = 50;
 
-import { sameKey } from "../identity/keys.ts";
+import { isServiceKey, sameKey } from "../identity/keys.ts";
 
 export interface VisionConfig {
   state: "off" | "on" | "refused";
@@ -68,9 +68,8 @@ export function visionConfigFromEnv(env = (k: string) => Deno.env.get(k)): Visio
   }
   const others = ["EMBEDDING_API_KEY", "WORKBENCH_KEY", "WORKSPACE_DOOR_KEY", "RESEARCH_SCORER_KEY", "RESEARCH_WORKSPACE_KEY"]
     .filter((n) => sameKey((env(n) ?? "").trim(), key));
-  for (const n of (env("WORKSPACE_SERVICE_KEYS") ?? "").split(",")) {
-    if (sameKey(n.split("=").pop()?.trim() ?? "", key)) others.push("WORKSPACE_SERVICE_KEYS");
-  }
+  // the same parser as the key ring (keys.ts serviceKeys: `;` / newline entries, the key after the first `=`)
+  if (isServiceKey(env("WORKSPACE_SERVICE_KEYS"), key)) others.push("WORKSPACE_SERVICE_KEYS");
   if (others.length) {
     return {
       state: "refused", timeoutMs, code: "vision-key-shared",

@@ -8,7 +8,7 @@
 //   an idea's room     is the refinery chat: the refinery's own held sources join the knowledge database,
 //                      and the refinery's HIDDEN sources are left out (refinery_hidden, node_kind 'source' -
 //                      the rule the research service applies to a refinery session's context, kb.ts
-//                      loadHeldSources / loadRefineryContext). A hide narrows that refinery's chat only:
+//                      loadHeldSources / loadRefineryContext; compared case-blind, round 2). A hide narrows that refinery's chat only:
 //                      a session's room reads the knowledge database whatever any refinery hides.
 // Only ids, chunk indexes and the passage text (cut to MAX_PASSAGE) leave this module; the room stores the
 // ids and indexes, never the text.
@@ -33,7 +33,7 @@ export const NOTHING_IN_SCOPE = (s: Scope) => s.enabled && s.sources.length === 
 
 const HIDDEN = (ref: string, refinery: string) =>
   `(${refinery}::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM public.refinery_hidden x
-       WHERE x.refinery_id = ${refinery}::uuid AND x.node_kind = 'source' AND x.node_ref = (${ref})::text))`;
+       WHERE x.refinery_id = ${refinery}::uuid AND x.node_kind = 'source' AND lower(x.node_ref) = (${ref})::text))`;
 
 export const CONTEXT_SQL = `
   SELECT * FROM (
