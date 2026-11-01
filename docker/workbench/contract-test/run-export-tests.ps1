@@ -242,7 +242,9 @@ try {
   # what left the runtime image (take what we need, remove what is no longer needed)
   $o = Dk run --rm --label $label --network none --entrypoint sh $tag -c 'dpkg -s weasyprint >/dev/null 2>&1 && echo weasyprint-present; command -v weasyprint pdftoppm pdftotext || true; dpkg -s poppler-utils >/dev/null 2>&1 && echo poppler-present; pandoc --version | head -1; typst --version; ls /usr/local/share/doc/typst; test -f /app/.test-gate-passed && echo gate-marker'
   Save 'runtime-image.txt' $o
-  Check (($o -notmatch 'weasyprint') -and ($o -notmatch 'pdftoppm|pdftotext|poppler-present')) "the runtime image carries no WeasyPrint and no poppler"
+  # research-workbench P6b: poppler-utils is in the runtime image since the verification gate (pdftoppm, a
+  # separate program; run-export-gate-tests.ps1 T4 checks nothing links or imports it) - WeasyPrint stays out
+  Check (($o -notmatch 'weasyprint') -and ($o -match 'poppler-present')) "the runtime image carries no WeasyPrint (poppler-utils is there for the P6b gate)"
   # rw-p6a-followups: no test file and no test oracle in the runtime image - nowhere in it, the dependency
   # cache included (round 2: DENO_DIR held gen/.../*_test.ts.js); the test stage keeps them
   $find = "find / \( -path /proc -o -path /sys -o -path /dev \) -prune -o \( -name '*_test.ts*' -o -name '*_test.js*' -o -name '*credentials_oracle*' \) -print"

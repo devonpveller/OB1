@@ -52,6 +52,7 @@ textarea { width: 100%; min-height: 4em; }
 .ws-class-structural, .ws-badge-contested { background: var(--warn-soft); color: var(--warn); }
 .ws-class-transient, .ws-badge-thin { background: var(--chip); color: var(--muted); }
 .ws-muted { color: var(--muted); }
+.ws-warning { margin: 4px 0; padding: 2px 6px; border-radius: 4px; background: var(--warn-soft); color: var(--warn); } /* P6b round 5: an advisory warning (reference list may differ) */
 .ws-body { flex: 1; display: flex; min-height: 0; }
 .ws-nav { width: 120px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 8px 6px; border-right: 1px solid var(--line); background: var(--panel); }
 .ws-nav-entry { text-align: left; border-color: transparent; }
