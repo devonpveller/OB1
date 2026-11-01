@@ -15,6 +15,8 @@
 import type { Db } from "../db.ts";
 import { adminSeesOwnerless, FOREIGN_JOB, type Viewer } from "../../documents/ownership.ts";
 import { hubContext } from "../../documents/hub.ts";
+import { OWN_QUERY } from "./sessions.ts";
+import type { Who } from "../../sessions/repo.ts";
 import type { OutboundLink } from "../../documents/listing.ts";
 import { docRel, rootOf } from "../../documents/paths.ts";
 
@@ -175,10 +177,9 @@ interface JobRow {
   needs_status: unknown;
   gaps: unknown;
   topic_estimate: string | null;
-  anchor: string | null;
-  root_query: string | null;
-  query: string;
-  is_root: boolean;
+  is_branch: boolean;
+  own_question: string;
+  parent_question: string | null;
   report_id: string | null;
   source_ids: unknown;
   credibility: RollupRecord | null;
@@ -207,12 +208,17 @@ function gapsOf(v: unknown): string[] {
     .filter(Boolean).slice(0, 50);
 }
 
-const JOB_COLS = (who: string, key: string, admin: boolean) => `
+// rw-p3b-trust2 x rw-p4b-sessions: the anchor is a job's QUESTION (the parent's for a branch, the job's own for a
+// root), so it is read only through the one rule for a question (contracts/repo/sessions.ts OWN_QUERY: the owner
+// rule and the steer-text rule) - never the stored j.anchor copy and never a raw .query column.
+const JOB_COLS = (who: string, key: string, admin: boolean, viewer: Who, actor: string) => `
   j.id::text AS id, j.status, j.created_at,
   ${FOREIGN_JOB("j", who, key, admin)} AS others,
   j.result -> 'needs_status' AS needs_status, j.result -> 'gaps' AS gaps,
-  COALESCE(j.topic_estimate, r.topic_estimate) AS topic_estimate, j.anchor, r.query AS root_query, j.query,
-  (j.root_job_id IS NULL OR j.root_job_id = j.id) AS is_root,
+  COALESCE(j.topic_estimate, r.topic_estimate) AS topic_estimate,
+  (j.parent_job_id IS NOT NULL) AS is_branch,
+  ${OWN_QUERY("j", who, viewer, actor)} AS own_question,
+  CASE WHEN pj.id IS NULL THEN NULL ELSE ${OWN_QUERY("pj", who, viewer, actor)} END AS parent_question,
   ${JOB_OF_REPORT} AS report_id, j.result -> 'curator' -> 'persist' -> 'source_ids' AS source_ids,
   j.metrics -> 'credibility' AS credibility`;
 
@@ -235,23 +241,24 @@ async function sessionLinks(db: Db, reportId: string | null, sourceIds: unknown)
 export async function sessionCoverage(db: Db, id: string, who: Viewer & { admin?: boolean; impersonating?: unknown }) {
   if (!UUID.test(id)) return null;
   const rows = await db.query<JobRow>(
-    `SELECT ${JOB_COLS("$2", "$3", adminSeesOwnerless(who))}
+    `SELECT ${JOB_COLS("$2", "$3", adminSeesOwnerless(who), who as unknown as Who, "$4")}
        FROM public.research_jobs j LEFT JOIN public.research_jobs r ON r.id = COALESCE(j.root_job_id, j.id)
+       LEFT JOIN public.research_jobs pj ON pj.id = j.parent_job_id
       WHERE j.id = $1::uuid`,
-    [id, who.sub, who.key],
+    [id, who.sub, who.key, (who as { actor?: string }).actor ?? who.sub],
   );
   const j = rows[0];
   if (!j || j.others) return null;
   const needs = needsOf(j.needs_status);
   const reportId = j.report_id && UUID.test(j.report_id) ? j.report_id.toLowerCase() : null;
   const hubs = (await hubContext(db, `session:${j.id}`, await sessionLinks(db, reportId, j.source_ids))).hubs;
-  const anchor = j.anchor ?? (j.is_root ? j.query : j.root_query) ?? null;
+  const anchor = j.is_branch ? j.parent_question : j.own_question;
   return {
     session_id: j.id, status: j.status, created_at: new Date(j.created_at).toISOString(),
     needs, by_status: countByStatus(needs), gaps: gapsOf(j.gaps),
     topic_estimate: j.topic_estimate ?? null,
     anchor: anchor && anchor.trim() ? anchor : null,
-    anchor_basis: j.anchor ? "the branch's anchor (its parent's question)" : j.is_root ? "the session's own question (a root has no other anchor)" : "the tree root's question",
+    anchor_basis: j.is_branch ? "the branch's anchor (its parent's question)" : "the session's own question (a root has no other anchor)",
     report_id: reportId,
     credibility: shapeRollup(j.credibility, reportId, j.id),
     hubs,
@@ -281,15 +288,16 @@ export async function documentCoverage(db: Db, rel: string, who: Viewer & { admi
   ))[0]?.outbound_links ?? [];
   const hub = await hubContext(db, rel, links);
   const rows = await db.query<JobRow>(
-    `SELECT ${JOB_COLS("$2", "$3", adminSeesOwnerless(who))}
+    `SELECT ${JOB_COLS("$2", "$3", adminSeesOwnerless(who), who as unknown as Who, "$4")}
        FROM public.research_jobs j LEFT JOIN public.research_jobs r ON r.id = COALESCE(j.root_job_id, j.id)
+       LEFT JOIN public.research_jobs pj ON pj.id = j.parent_job_id
        LEFT JOIN public.user_document_listings l ON l.path = $1
       WHERE (j.inlet_ref ->> 'kind' = 'document' AND j.inlet_ref ->> 'id' = $1)
          OR (l.refinery_id IS NOT NULL AND (j.refinery_id = l.refinery_id
               OR (j.inlet_ref ->> 'kind' = 'refinery' AND j.inlet_ref ->> 'id' = l.refinery_id::text)))
       ORDER BY j.created_at DESC
       LIMIT 50`,
-    [rel, who.sub, who.key],
+    [rel, who.sub, who.key, (who as { actor?: string }).actor ?? who.sub],
   );
   const sessions = rows.filter((j) => !j.others).map((j) => {
     const needs = needsOf(j.needs_status);
