@@ -39,7 +39,7 @@ async function auditAdminAct(deps: ContractDeps, who: Who & { actor: string }, l
 // exception message - a fixed text here, the real one in the log (rate-limited per route).
 export function steerFailure(r: { status: number; body: Record<string, unknown> }): { status: number; error: string } {
   if (r.status === 400 || r.status === 409) {
-    return { status: r.status, error: String(r.body.detail ?? r.body.error ?? `the research service answered ${r.status}`) }; // upstream-typed-ok: SteerError 400/409
+    return { status: r.status, error: String(r.body.detail ?? r.body.error ?? `the research service answered ${r.status}`) };
   }
   logRefusal("sessions.steer: upstream", `[sessions.steer] the research service answered ${r.status}: ${String(r.body.detail ?? r.body.error ?? "").slice(0, 300)}`);
   return { status: 502, error: `the research service could not steer this session (it answered ${r.status})` };

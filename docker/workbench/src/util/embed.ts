@@ -8,6 +8,7 @@
 // without over-truncating English. (Operators wanting fuller embeddings can
 // raise the embed server's ubatch/batch size; this just stops it from erroring.)
 import { config } from "../config.ts";
+import { logRefusal } from "../identity/refusal_log.ts";
 
 export async function embed(text: string): Promise<number[]> {
   let input = String(text || "").slice(0, config.embedding.maxChars);
@@ -28,7 +29,9 @@ export async function embed(text: string): Promise<number[]> {
       input = input.slice(0, Math.floor(input.length / 2));
       continue;
     }
-    throw new Error(`embedding ${r.status}: ${body}`);
+    // rw-identity-harden2 round 2: the endpoint's body is logged, never carried in the error
+    logRefusal("embed: upstream", `[embed] embedding ${r.status}: ${body}`);
+    throw new Error(`embedding ${r.status}`);
   }
   throw new Error("embedding failed: input still too large after shrinking");
 }

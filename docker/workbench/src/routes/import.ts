@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import { config } from "../config.ts";
 import * as repo from "../repositories/import.ts";
 import { logChange } from "../util/changeslog.ts";
+import { logRefusal } from "../identity/refusal_log.ts";
 import { gateClient, gateErrorBody, type GatePage, isGateError } from "../fetch-gate/client.ts";
 
 export const imports = new Hono();
@@ -14,7 +15,7 @@ export const jobs = new Hono();
 // the search gate's /v1/fetch, from the environment once (WORKBENCH_GATE_URL, WORKBENCH_GATE_KEY)
 const fetchViaGate = gateClient();
 
-async function callExtract(bytes: Uint8Array, filename: string): Promise<{
+export async function callExtract(bytes: Uint8Array, filename: string): Promise<{
   markdown: string;
   title: string;
   images?: { name: string; b64: string; mime?: string }[];
@@ -23,7 +24,11 @@ async function callExtract(bytes: Uint8Array, filename: string): Promise<{
   const fd = new FormData();
   fd.append("file", new Blob([bytes]), filename);
   const r = await fetch(`${config.extractUrl}/extract`, { method: "POST", body: fd });
-  if (!r.ok) throw new Error(`extract ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  if (!r.ok) {
+    // rw-identity-harden2 round 2: the extractor's body is logged, never carried in the error
+    logRefusal("import: extractor upstream", `[import] extract ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    throw new Error(`extract ${r.status}`);
+  }
   return await r.json();
 }
 

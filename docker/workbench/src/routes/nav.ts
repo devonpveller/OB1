@@ -52,6 +52,11 @@ nav.get("/", async (c) => {
       if (v) out.set(h, v);
     }
     if (r.status === 304) return new Response(null, { status: 304, headers: out });
+    // rw-identity-harden2 round 2: the viewer's error body is not forwarded; a non-2xx answer is a fixed code
+    if (!r.ok) {
+      console.error(`[nav] the viewer answered ${r.status}:`, (await r.text()).slice(0, 200));
+      return c.json({ error: "nav_unavailable" }, r.status >= 500 ? 502 : (r.status as 400));
+    }
     return new Response(await r.arrayBuffer(), { status: r.status, headers: out });
   } catch (err) {
     console.error("[nav] viewer unreachable:", (err as Error).message);

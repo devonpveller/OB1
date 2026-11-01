@@ -3,6 +3,7 @@
 // strips auth and runs PostgREST as anon=service_role. Writes do NOT go here —
 // they go through withTransaction (pool.ts) so they stay atomic.
 import { config } from "../config.ts";
+import { logRefusal } from "../identity/refusal_log.ts";
 
 async function request(
   method: string,
@@ -24,7 +25,9 @@ async function request(
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
   });
   if (!res.ok) {
-    throw new Error(`REST ${method} ${resource} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    // rw-identity-harden2 round 2: the upstream's body is logged here, never carried in the error
+    logRefusal("rest: upstream", `[rest] ${method} ${resource} -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    throw new Error(`REST ${method} ${resource.split("?")[0]} -> ${res.status}`);
   }
   if (res.status === 204) return null;
   const text = await res.text();

@@ -7,6 +7,8 @@
 // (x-actor-sub = actor_sub; an admin while impersonating differs from the subject) and, when the actor
 // is an admin, x-actor-admin: 1. The research service accepts the last two from this key alone
 // (viewer.ts actorOf) and records the actor on the steer (research_steers.actor_sub).
+import { logRefusal } from "../identity/refusal_log.ts";
+
 export interface Acting {
   sub: string;
   actor: string;
@@ -33,6 +35,14 @@ export function researchActions(env = (k: string) => Deno.env.get(k)): ResearchA
       body: JSON.stringify(body ?? {}), signal: AbortSignal.timeout(15_000),
     });
     const j = await r.json().catch(() => ({}));
+    // rw-identity-harden2 round 2 (tester D8): a client of another service never hands its caller that service's
+    // error text. The typed refusals the user can act on (400 / 404 / 409 / 422: SteerError and the like) keep
+    // their body; any other non-2xx (a 5xx's detail is an exception message) becomes a fixed code, the real
+    // answer goes to the log here.
+    if (!r.ok && ![400, 404, 409, 422].includes(r.status)) {
+      logRefusal("research: upstream", `[research ${path.split("/").pop()}] the research service answered ${r.status}: ${JSON.stringify(j).slice(0, 300)}`);
+      return { status: r.status, body: { error: "upstream_error" } };
+    }
     return { status: r.status, body: (j ?? {}) as Record<string, unknown> };
   };
   return {

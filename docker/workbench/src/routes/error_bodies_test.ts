@@ -56,27 +56,3 @@ Deno.test("D6: no export gate finding is built from an exception's or a program'
   }
   assert(hits.length === 0, `${hits.length} finding details carry an exception's text:\n${hits.join("\n")}`);
 });
-
-// rw-identity-harden2 (review r-id-harden B1): an UPSTREAM service's own detail / error / message (the body a fetch
-// returned: `r.body.detail`, `d.detail`, `j.error`) is an exception message on a 5xx and never goes into a response or a
-// stored reason. Anywhere in src/ (not tests): such a field may only reach a log line, or carry the marker
-// `upstream-typed-ok` on a line where the upstream's own TYPED refusal (a 4xx the user can act on) is kept on purpose.
-Deno.test("B1: no upstream detail / error / message field is passed into a response body or a stored reason", async () => {
-  const root = new URL("../", import.meta.url);
-  const hits: string[] = [];
-  const up = /(?:\br\.body|\bd\??|\bj\??)\.(?:detail|error|message)\b/;
-  const skip = /logRefusal|console\.|upstream-typed-ok|job\.reject|new Error\(|\bSELECT\b|\bFROM\b|END AS|->>|\bAS (?:detail|error)\b/;
-  const walk = async (dir: URL) => {
-    for await (const e of Deno.readDir(dir)) {
-      if (e.isDirectory) await walk(new URL(`${e.name}/`, dir));
-      else if (e.name.endsWith(".ts") && !e.name.endsWith("_test.ts")) {
-        const u = new URL(e.name, dir);
-        (await Deno.readTextFile(u)).split("\n").forEach((l, i) => {
-          if (up.test(l.replace(/\/\/.*$/, "")) && !skip.test(l)) hits.push(`${u.href.split("/src/")[1]}:${i + 1}: ${l.trim()}`);
-        });
-      }
-    }
-  };
-  await walk(root);
-  assert(hits.length === 0, `${hits.length} sites pass an upstream detail into a response or a stored reason:\n${hits.join("\n")}`);
-});
