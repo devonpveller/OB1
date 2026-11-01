@@ -45,6 +45,16 @@ Deno.test("P4b link back: OWUI under the base-URL setting only; workspace, refin
   assertEquals(linkOf("owui", null, J, "https://chat.example"), null);
 });
 
+Deno.test("rw-p8a3-room: a session started from a Mattermost thread links back to the thread (http(s) permalink only)", () => {
+  assertEquals(linkOf("mattermost", { kind: "mattermost_permalink", id: "https://chat.example/team/pl/abc123" }, J, ""),
+    { kind: "external", href: "https://chat.example/team/pl/abc123" });
+  for (const bad of ["javascript:alert(1)", "ftp://chat.example/pl/x", "https://u:p@chat.example/pl/x", "/team/pl/x", "not a url", ""]) {
+    assertEquals(linkOf("mattermost", { kind: "mattermost_permalink", id: bad }, J, ""), null, bad);
+  }
+  // another user's session carries no inlet (owner-only), so no link
+  assertEquals(linkOf("mattermost", null, J, ""), null);
+});
+
 Deno.test("P4b the OWUI base URL: http(s) only, else blank", () => {
   assertEquals(owuiBase((k) => ({ WORKSPACE_OWUI_BASE_URL: "https://chat.example/" } as Record<string, string>)[k]), "https://chat.example");
   for (const bad of ["", "javascript:alert(1)", "ftp://x", "not a url"]) {

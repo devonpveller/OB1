@@ -85,7 +85,8 @@ export function badgeOf(origin: string, inlet: InletRef | null): { key: string; 
 // ── the link back to the inlet (operator 2026-10-30, option "Badge now, links later") ───────────
 // OWUI: the chat, under WORKSPACE_OWUI_BASE_URL (shipped blank = no link). Workspace: the document or
 // the refinery room. Idea Refinery: the idea's refinery room (its ideas-panel entry lands with P8a).
-// Manual: its own session. Mattermost and notebook: the badge only - agent-org sends no thread
+// Manual: its own session. Mattermost: the thread's permalink when the caller recorded one (rw-p8a3-room);
+// otherwise, and notebook: the badge only - agent-org sends no thread
 // permalink and the digest no run id today, and no link is invented for a reference that is absent.
 export function linkOf(origin: string, inlet: InletRef | null, sessionId: string, owui: string): Link | null {
   const kind = inlet?.kind ?? "";
@@ -93,8 +94,27 @@ export function linkOf(origin: string, inlet: InletRef | null, sessionId: string
   if (kind === "chat_id" && id) return owui ? { kind: "external", href: `${owui.replace(/\/+$/, "")}/c/${encodeURIComponent(id)}` } : null;
   if (kind === "document" && id) return { kind: "panel", panel: "document", params: { path: id } };
   if ((kind === "refinery" || kind === "idea") && id) return { kind: "panel", panel: "refinery", params: { idea_id: id, focus: "room" } };
+  // rw-p8a3-room (D2 / D17 item 3): a session started from a Mattermost thread links back to the thread -
+  // the inlet's permalink as the caller recorded it (inlet_ref {kind: mattermost_permalink, id: <url>}),
+  // http(s) only, no credentials in it. The room in the workspace is the record; the thread is never read
+  // or written from here.
+  if (kind === "mattermost_permalink" && id) {
+    const href = permalink(id);
+    if (href) return { kind: "external", href };
+  }
   if (origin === "manual") return { kind: "panel", panel: "sessions", params: { session: sessionId } };
   return null;
+}
+
+// A Mattermost permalink as a link: an absolute http(s) URL with no user or password; else none.
+export function permalink(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password) return null;
+    return u.href;
+  } catch {
+    return null;
+  }
 }
 
 // WORKSPACE_OWUI_BASE_URL, an http(s) URL without its trailing slash, or "" (no link).

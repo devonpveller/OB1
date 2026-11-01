@@ -15,6 +15,7 @@ import { parseCitekey } from "../export/identifiers.ts";
 import type { IdentifierKind } from "../export/identifiers.ts";
 import { fxEntries } from "../export/registry_fixtures.ts";
 import { visionPass } from "../export/vision.ts";
+import { chatCall } from "../rooms/chat.ts";
 import { embed } from "../util/embed.ts";
 import { rest } from "../db/rest.ts";
 import { callExtract } from "../routes/import.ts";
@@ -80,6 +81,11 @@ export const CLIENTS: Record<string, { sites: number; drive: { name: string; run
   "export/vision.ts": {
     sites: 1, drive: [{
       name: "export vision pass", run: () => visionPass({ state: "on", url: "http://llama-cpp:8080/v1", key: "k", model: "m", timeoutMs: 2000 } as never, [{ page: 1, png }]),
+    }],
+  },
+  "rooms/chat.ts": {
+    sites: 1, drive: [{
+      name: "room scoped chat", run: () => chatCall({ state: "on", url: "http://llama-cpp:8080/v1", key: "k", model: "m", timeoutMs: 2000 }, [], "q", []),
     }],
   },
   "util/embed.ts": { sites: 1, drive: [{ name: "embedding endpoint", run: () => embed("hello") }] },

@@ -9,6 +9,7 @@ import { api, C, D, get, post, q } from "../../lib/api";
 import { setState, useWorkspace } from "../../lib/store";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
+import { openRoom } from "../room/RoomPanels";
 
 interface Flag {
   path: string;
@@ -107,7 +108,8 @@ export function RefineryPanel(p: PanelProps) {
         </>
       );
     }
-    if (l.key === "room") return idea.room.location ? <span className="ws-muted">the room opens in the workspace with P8a</span> : null;
+    // rw-p8a3-room: the room is in the workspace (D2); the Mattermost thread, where there is one, stays an inlet
+    if (l.key === "room") return <button type="button" data-action="open-room" onClick={() => openRoom("idea", idea.id)}>Open the room</button>;
     if (l.key.startsWith("user:")) {
       const sid = l.key.slice(5);
       const u = idea.refinery.user_sources.find((x: any) => x.source_id === sid);
