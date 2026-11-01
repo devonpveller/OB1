@@ -19,7 +19,7 @@ ALTER TABLE public.import_jobs ADD CONSTRAINT import_jobs_status_check
 DROP INDEX IF EXISTS public.idx_import_jobs_owner;
 DROP INDEX IF EXISTS public.idx_import_jobs_source;
 ALTER TABLE public.import_jobs
-    DROP COLUMN IF EXISTS owner_sub, DROP COLUMN IF EXISTS actor_sub, DROP COLUMN IF EXISTS origin,
+    DROP COLUMN IF EXISTS owner_sub, DROP COLUMN IF EXISTS actor_sub, DROP COLUMN IF EXISTS actor_name, DROP COLUMN IF EXISTS origin,
     DROP COLUMN IF EXISTS mode, DROP COLUMN IF EXISTS url, DROP COLUMN IF EXISTS filename,
     DROP COLUMN IF EXISTS refinery_id, DROP COLUMN IF EXISTS doc_path, DROP COLUMN IF EXISTS content_type,
     DROP COLUMN IF EXISTS held_source_id, DROP COLUMN IF EXISTS attempts;

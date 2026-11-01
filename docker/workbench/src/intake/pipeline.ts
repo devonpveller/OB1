@@ -57,6 +57,7 @@ export interface AddJobRow {
   status: string;
   owner_sub: string | null;
   actor_sub: string | null;
+  actor_name: string | null;
   url: string | null;
   filename: string | null;
   refinery_id: string | null;
@@ -69,7 +70,8 @@ export interface AddJobRow {
 // check uses the directory key) - rebuilt from the job row the route wrote from the identity seam
 async function actingFor(job: AddJobRow): Promise<Identity> {
   const sub = job.owner_sub ?? "";
-  return { sub, actor: job.actor_sub ?? sub, name: sub, key: await ownerKey(sub), kind: "user", admin: false, impersonating: null };
+  // the display name the route recorded (held_sources.added_by takes it, as the P2b add does) - never the subject id
+  return { sub, actor: job.actor_sub ?? sub, name: job.actor_name ?? "", key: await ownerKey(sub), kind: "user", admin: false, impersonating: null };
 }
 
 // a status move that happens only while the job is still wanted (a cancel landed meanwhile = no row)
@@ -88,7 +90,7 @@ function b64bytes(s: string): Uint8Array {
 export async function runAdd(deps: AddDeps, jobId: string): Promise<void> {
   const db = deps.db;
   const job = (await db.query<AddJobRow>(
-    `SELECT id::text AS id, status, owner_sub, actor_sub, url, filename, refinery_id::text AS refinery_id, doc_path, content_type, origin
+    `SELECT id::text AS id, status, owner_sub, actor_sub, actor_name, url, filename, refinery_id::text AS refinery_id, doc_path, content_type, origin
        FROM public.import_jobs WHERE id = $1 AND mode = 'add'`, [jobId],
   ))[0];
   if (!job || job.status !== "queued") return;

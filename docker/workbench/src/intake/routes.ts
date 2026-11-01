@@ -176,9 +176,9 @@ export function intakeRouter(deps: IntakeDeps) {
     }
     const job = await db.tx(async (t) => {
       const row = (await t.query<{ id: string; status: string }>(
-        `INSERT INTO public.import_jobs (status, mode, origin, owner_sub, actor_sub, url, filename, refinery_id, doc_path, content_type)
-         VALUES ('queued', 'add', $1, $2, $3, $4, $5, $6::uuid, $7, $8) RETURNING id::text AS id, status`,
-        [originOf(who), who.sub, who.actor, url || null, file?.name ?? null, refineryId ? refineryId.toLowerCase() : null, docPath, declared || null],
+        `INSERT INTO public.import_jobs (status, mode, origin, owner_sub, actor_sub, actor_name, url, filename, refinery_id, doc_path, content_type)
+         VALUES ('queued', 'add', $1, $2, $3, $4, $5, $6, $7::uuid, $8, $9) RETURNING id::text AS id, status`,
+        [originOf(who), who.sub, who.actor, who.name, url || null, file?.name ?? null, refineryId ? refineryId.toLowerCase() : null, docPath, declared || null],
       ))[0];
       if (file && bytes) await t.query(`INSERT INTO public.import_job_payloads (job_id, filename, bytes) VALUES ($1, $2, $3)`, [row.id, file.name, bytes]);
       return row;

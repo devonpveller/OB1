@@ -163,7 +163,9 @@ export async function listJobs(db: Db, who: Who, kinds: string[], state: string 
   if (want("chunk")) out.push(...await chunkRows(db, who, state, limit));
   if (want("extract")) out.push(...await extractRows(db, who, state, limit));
   if (want("entity")) out.push(...await entityRows(db, who, state, limit));
-  out.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+  // newest first (the driver hands timestamps back as Date objects; compare the instants, never their text)
+  const at = (j: IntakeJob) => new Date(j.updated_at as unknown as string).getTime() || 0;
+  out.sort((a, b) => at(b) - at(a));
   return { jobs: out };
 }
 

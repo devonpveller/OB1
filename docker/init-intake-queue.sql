@@ -30,6 +30,7 @@
 
 ALTER TABLE public.import_jobs ADD COLUMN IF NOT EXISTS owner_sub      TEXT;
 ALTER TABLE public.import_jobs ADD COLUMN IF NOT EXISTS actor_sub      TEXT;
+ALTER TABLE public.import_jobs ADD COLUMN IF NOT EXISTS actor_name     TEXT; -- the display name an add records as added_by (as the P2b add does)
 ALTER TABLE public.import_jobs ADD COLUMN IF NOT EXISTS origin         TEXT NOT NULL DEFAULT 'workspace';
 ALTER TABLE public.import_jobs ADD COLUMN IF NOT EXISTS mode           TEXT NOT NULL DEFAULT 'import';
 ALTER TABLE public.import_jobs ADD COLUMN IF NOT EXISTS url            TEXT;
