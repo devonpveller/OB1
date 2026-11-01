@@ -14,6 +14,7 @@ import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { openPanel } from "../../shell/dock";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
 import { openStream } from "./stream";
+import { requestRoomFocus } from "../refinery/RefineryPanel";
 import "./sessions.css";
 
 export interface Branch {
@@ -74,7 +75,12 @@ export function LinkBack(props: { card: Card; onSession: (id: string) => void })
       setState({ documentPath: l.params.path });
       openPanel("document");
     } else if (l.panel === "sessions" && l.params.session) props.onSession(l.params.session);
-    else if (l.panel) openPanel(l.panel, l.params);
+    else if (l.panel === "refinery") {
+      // the room, once: a request, not a param the panel would keep (refinery-fix)
+      const { focus, ...rest } = l.params;
+      if (focus === "room") requestRoomFocus();
+      openPanel("refinery", rest);
+    } else if (l.panel) openPanel(l.panel, l.params);
   };
   const label = l.panel === "refinery" ? "open the refinery room" : l.panel === "document" ? "open the document" : "open this session";
   return <button type="button" data-link={l.panel ?? ""} onClick={go}>{label}</button>;

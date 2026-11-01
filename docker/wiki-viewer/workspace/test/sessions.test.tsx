@@ -251,3 +251,41 @@ describe("round 2: a cancelled or failed session's card offers no steer", () => 
     expect(li.querySelector("[data-field=next-steer]")!.textContent).toContain("none yet");
   });
 });
+
+// ── refinery-fix (rw-identity-harden's P2b lab: C18 / C21 failed after P4b) ─────────────────────
+// The document toolbar's "Room" button has always opened the refinery panel with { focus: "room" }; dockview
+// keeps a panel's params, also across a reload. P4b made that param open the panel expanded on the room, so
+// every later visit opened expanded with the room's actions showing (C21) and the summary click CLOSED it
+// (C18). The room focus is now a one-shot request from a session card's link, never a stored param.
+import { RefineryPanel, requestRoomFocus } from "../src/panels/refinery/RefineryPanel";
+
+describe("refinery-fix: the refinery panel at rest whatever its stored params say", () => {
+  const ideaFake = () => fakeApi([
+    ["GET", "/workbench/documents/state", () => ({ path: "documents/a.md", listed: true, carries_idea: true, refinery: { id: "i1", archived: false }, tags: [] })],
+    ["GET", "/workbench/contract/ideas/", () => ({ id: "i1", title: "Idea", status: "new", room: { state: "external", note: "the room", location: "mattermost:thread:x" },
+      refinery: { members: { sessions: [] }, user_sources: [] } })],
+  ]);
+
+  it("a stored { focus: 'room' } param (the toolbar's Room button, a restored layout) opens on the summary, no leaves, no actions", async () => {
+    ideaFake();
+    const { container } = render(<RefineryPanel params={{ focus: "room", idea_id: "i1" }} />);
+    await act(async () => settle(10));
+    expect(container.querySelector(".ws-leaves"), "opened expanded").toBeNull();
+    expect(container.querySelector("[data-action], .ws-actions"), "an action at rest").toBeNull();
+    // and the summary click OPENS it (C18), it does not close it
+    await act(async () => { fireEvent.click(container.querySelector(".ws-summary")!); await settle(); });
+    expect(container.querySelector(".ws-leaves")).toBeTruthy();
+  });
+
+  it("a session card's link asks once: the room is selected; the next plain visit is at rest", async () => {
+    ideaFake();
+    requestRoomFocus();
+    const first = render(<RefineryPanel params={{ idea_id: "i1" }} />);
+    await act(async () => settle(10));
+    expect(first.container.querySelector('[data-leaf="room"].ws-selected'), "the room is selected").toBeTruthy();
+    first.unmount();
+    const again = render(<RefineryPanel params={{ idea_id: "i1" }} />);
+    await act(async () => settle(10));
+    expect(again.container.querySelector(".ws-leaves"), "the request was used once").toBeNull();
+  });
+});
