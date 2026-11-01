@@ -274,7 +274,7 @@ Deno.test({ name: "I8 the worker queues: chunk, extract and entity jobs appear w
   await sql(`INSERT INTO public.import_jobs (status, source_id, owner_sub, actor_sub) VALUES ('done', $1::uuid, $2, $2)`, [src, A]);
   await sql(`INSERT INTO public.source_extraction_queue (source_id, status, attempt_count, last_error) VALUES ($1::uuid, 'failed', 3, 'lab: the model answered nothing')
              ON CONFLICT (source_id) DO UPDATE SET status = 'failed', attempt_count = 3`, [src]);
-  const th = (await sql<{ id: string }>(`INSERT INTO public.thoughts (content) VALUES ($1) RETURNING id::text AS id`, [`a thought ${rnd()}`]))[0].id;
+  const th = (await sql<{ id: string }>(`INSERT INTO public.thoughts (content, exposure) VALUES ($1, 'personal') RETURNING id::text AS id`, [`a thought ${rnd()}`]))[0].id;
   await sql(`INSERT INTO public.entity_extraction_queue (thought_id, status) VALUES ($1::bigint, 'pending') ON CONFLICT (thought_id) DO UPDATE SET status = 'pending'`, [th]);
   const listA = (await call("GET", "/workbench/intake/jobs?limit=200", { as: A })).json.jobs as any[];
   const chunk = listA.find((j) => j.kind === "chunk" && j.id === src);

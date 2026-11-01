@@ -511,7 +511,8 @@ await step("C20 the title bar: Settings, Theme, the bell, the universal + naming
   await page.selectOption("[data-testid=plus-refinery]", FX.idea);
   await page.fill('.ws-plus input[placeholder=title]', `E2E universal ${uid()}`);
   await page.fill('.ws-plus textarea', "universal plus text");
-  await page.click('.ws-plus button[type=submit]');
+  // rw-p5a-intake: the + carries the intake's link add above this paste form - press the paste form's own button
+  await page.click('.ws-plus [data-testid=plus-paste] button[type=submit]');
   await page.waitForSelector("[data-testid=plus-msg]");
   ok((await page.locator("[data-testid=plus-msg]").innerText()).includes("held in the refinery"), "held");
   ok((await sql(`SELECT count(*)::int AS n FROM public.ideas`))[0].n === n0, "no refinery created");
@@ -519,6 +520,34 @@ await step("C20 the title bar: Settings, Theme, the bell, the universal + naming
   ok(await page.evaluate(() => document.documentElement.dataset.theme) === "dark", "theme");
   await page.click("[data-testid=settings]");
   ok(await page.locator(".ws-settings").count() === 1, "settings");
+});
+
+// rw-p5a-intake: the title bar's + adds a LINK (nothing else typed) to a named refinery; the Intake panel shows the
+// add with its phase, and it ends held in that refinery (never in sources)
+await step("P5a the title bar's + adds a link, and the Intake panel shows the job with its phase until it is held", async () => {
+  await openWorkspace(P1);
+  const link = `https://lab.example.org/e2e-intake-${uid()}`;
+  await page.click("[data-testid=plus]");
+  await page.waitForSelector("[data-testid=intake-add-refinery]");
+  await page.selectOption("[data-testid=intake-add-refinery]", FX.idea);
+  await page.fill("[data-testid=intake-add-url]", link);
+  await page.click("[data-testid=intake-add] button[type=submit]");
+  await page.waitForSelector("[data-testid=intake-add-msg]");
+  ok((await page.locator("[data-testid=intake-add-msg]").innerText()).includes("added"), "the add was accepted");
+  await page.click("[data-testid=plus]");
+  await page.click(".ws-nav [data-nav=intake]");
+  await page.waitForSelector("[data-testid=intake-disclosure]");
+  let held = 0;
+  for (let i = 0; i < 40 && !held; i++) {
+    held = (await sql(`SELECT count(*)::int AS n FROM public.held_sources WHERE url = $1 AND refinery_id = $2`, [link, FX.idea]))[0].n;
+    if (!held) await page.waitForTimeout(250);
+  }
+  ok(held === 1, "held in the named refinery");
+  ok((await sql(`SELECT count(*)::int AS n FROM public.sources WHERE url = $1`, [link]))[0].n === 0, "not admitted on arrival");
+  await page.click("[data-testid=intake-disclosure] .ws-summary");
+  await page.waitForSelector(`[data-testid=intake-disclosure] [data-phase]`);
+  const phases = await page.$$eval("[data-testid=intake-disclosure] [data-job^='add:']", (es) => es.map((e) => e.getAttribute("data-phase")));
+  ok(phases.length >= 1 && phases.every(Boolean), `the add is listed with its phase (${phases.join(",")})`);
 });
 
 await step("C21 side panels at rest: summary first, no leaves, no actions", async () => {
