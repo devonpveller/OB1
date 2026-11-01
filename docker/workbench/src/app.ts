@@ -27,6 +27,7 @@
 //                            the listing record, references, the refinery from the document
 //   /workbench/workspace   — research-workbench P2b: the title bar bell's acknowledgement
 //   /workbench/exports     — research-workbench P6b: the caller's own gated export runs (the export panel)
+//   /workbench/intake      — research-workbench P5a: the intake and queue panel (rw-p5a-intake)
 //   /workbench/auth        — rw-identity: who am I, admin impersonation and its audit log (sign-in
 //                            is Authentik forward-auth at the edge; inert without WORKSPACE_FORWARD_AUTH_*)
 import { Hono } from "hono";
@@ -39,7 +40,9 @@ import { health } from "./routes/health.ts";
 import { notebooks } from "./routes/notebooks.ts";
 import { notes } from "./routes/notes.ts";
 import { sources, sourceCommit } from "./routes/sources.ts";
-import { imports, jobs } from "./routes/import.ts";
+import { imports, jobsRouter, retryImport, callExtract } from "./routes/import.ts";
+import { intakeRouter } from "./intake/routes.ts";
+import { researchIntakeFetch } from "./intake/research_fetch.ts";
 import { grounding } from "./routes/grounding.ts";
 import { exporter } from "./routes/export.ts";
 import { exportsRouter } from "./routes/exports.ts";
@@ -106,7 +109,17 @@ app.route("/workbench/notes", notes); // P3
 app.route("/workbench/sources", sources); // P4
 app.route("/workbench/source-commit", sourceCommit); // P4.7 — compile-time revision commit
 app.route("/workbench/import", imports); // P5 (single upload route; P6 grounding too)
-app.route("/workbench/jobs", jobs); // P5
+app.route("/workbench/jobs", jobsRouter(cdeps.db)); // P5 (rw-p5a-intake: the subject's own jobs only)
+// research-workbench P5a (rw-p5a-intake): the intake and queue panel - the import, add, chunk, extract and
+// entity queues, their retry and cancel, and the one add path (the panel's general and contextual adds and
+// the OWUI inlet); a link is fetched through the research service's proxy-bound fetch only
+app.route("/workbench/intake", intakeRouter({
+  db: cdeps.db, rdeps: docDeps, fetch: researchIntakeFetch(), retryImport,
+  extract: async (bytes, filename) => {
+    const ex = await callExtract(bytes, filename);
+    return { markdown: ex.markdown, title: ex.title };
+  },
+}));
 app.route("/workbench/grounding", grounding); // P6
 app.route("/workbench/export", exporter); // P3.5 — pandoc note export
 app.route("/workbench/exports", exportsRouter(runStore(cdeps.db), identityOf)); // research-workbench P6b — the caller's own gated export runs

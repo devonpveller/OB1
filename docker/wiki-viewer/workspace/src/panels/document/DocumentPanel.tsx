@@ -7,6 +7,7 @@
 // From an open document, without leaving it (D1): the references panel, queue new research, open a
 // gap session, the room, search what is already collected, and the hub context - each opens a panel
 // beside the document, which stays open.
+import { IntakeAdd } from "../intake/IntakeAdd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EditorView } from "@codemirror/view";
 import { api, ApiError, C, D, get, post, q } from "../../lib/api";
@@ -279,6 +280,9 @@ function ToolForm(props: { kind: "research" | "gap" | "source"; path: string; on
     }
   };
   return (
+    <>
+    {/* rw-p5a-intake: the contextual add from the document - a link or a file, held in its refinery */}
+    {props.kind === "source" && <IntakeAdd path={props.path} onAdded={() => props.onDone("added: fetching, then held in this document's refinery (see Intake)")} />}
     <form className="ws-toolform" data-testid={`toolform-${props.kind}`} onSubmit={(e) => { e.preventDefault(); submit(); }}>
       {props.kind === "source" && <input placeholder="title" value={title} onChange={(e) => setTitle(e.target.value)} required />}
       {props.kind === "source" && <input placeholder="link (optional)" value={url} onChange={(e) => setUrl(e.target.value)} />}
@@ -290,6 +294,7 @@ function ToolForm(props: { kind: "research" | "gap" | "source"; path: string; on
       />
       <button type="submit">{props.kind === "source" ? "Hold it" : "Queue"}</button>
     </form>
+    </>
   );
 }
 

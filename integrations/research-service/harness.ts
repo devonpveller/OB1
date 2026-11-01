@@ -156,7 +156,9 @@ export type AdmissionClient = (req: {
 export interface Deps {
   embed(text: string): Promise<number[]>;
   chat(system: string, user: string, opts?: { json?: boolean; nothink?: boolean }): Promise<string>;
-  searchWeb(query: string, k: number): Promise<SearchHit[]>;
+  /** rw-p5a-intake: `opts.categories` = the SearXNG categories a contract class routes the search to
+   *  (contract.ts CLASS_SEARCH_CATEGORIES; absent = the gateway's default). */
+  searchWeb(query: string, k: number, opts?: { categories?: string[] }): Promise<SearchHit[]>;
   fetchPage(url: string): Promise<FetchResult>;
   delegateToCurator(pkg: Record<string, unknown>): Promise<Record<string, unknown>>;
   /** rw-curator-filed - the typed 'filed' event of a job (written by the curator's persist in the filing
@@ -315,9 +317,12 @@ export function withContract(deps: Deps, rc: ResolvedContract, drops: ContractDr
   const refused: FetchResult = { page: null, outcome: "error" };
   return {
     ...deps,
-    searchWeb: async (q: string, k: number): Promise<SearchHit[]> => {
+    searchWeb: async (q: string, k: number, opts?: { categories?: string[] }): Promise<SearchHit[]> => {
       if (!permitsQuery(rc, q)) return [];
-      const hits = await deps.searchWeb(q, k);
+      // rw-p5a-intake: a class that routes searches (academic -> general + science) says so here, the
+      // one enforcement point; a caller's own categories are kept when the contract names none
+      const categories = rc.searchCategories?.length ? rc.searchCategories : opts?.categories;
+      const hits = await deps.searchWeb(q, k, categories?.length ? { categories } : undefined);
       return hits.filter((h) => {
         if (permitsUrl(rc, h.url)) return true;
         recordDrop(drops, "search", h.url);

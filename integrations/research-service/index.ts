@@ -24,7 +24,7 @@
  */
 import { Pool } from "postgres";
 import { curatorFileAttemptsFromEnv, curatorSettleMsFromEnv, type FiledRecord } from "./curator-filed.ts";
-import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, engineBlock, ENGINE_BLOCK_START, extractLinks, extractTextFromHtml, extractTitle, HANDOFF_WAIT_LINE, proxyPolicy, renderResult, rewriteChatBody, selectRepoFiles } from "./lib.ts";
+import { classifyCuratorOutcome, curatorRetriesFromEnv, curatorTimeoutMsFromEnv, delegateCuratorWithRetry, domainOf, engineBlock, ENGINE_BLOCK_START, extractLinks, extractTextFromHtml, extractTitle, HANDOFF_WAIT_LINE, proxyPolicy, renderResult, rewriteChatBody, searchUrl, selectRepoFiles } from "./lib.ts";
 import { runResearch, type Deps, type SearchHit, type Page, type Progress, type FetchResult } from "./harness.ts";
 import { createStagingSession, stageSource } from "./kb.ts";
 import { screenSources } from "./injection.ts";
@@ -36,6 +36,7 @@ import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LIS
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
+import { INTAKE_CONTENT_TYPES, type IntakeContentType, IntakeRefused, intakeFetch, mayIntakeFetch } from "./intake-fetch.ts";
 import {
   appendEvent, buildTreeReport, closeBranch, createSteer, recordCancel, interHubEvent, interHubGaps, interHubRef, LANE_DEFAULT, LANE_KINDS,
   learningRecords, loadClaimGraph, loadTree, openGapBranches, readLaneConcurrency, stageEvent, SteerError, treeEstimate,
@@ -258,6 +259,15 @@ if (SCHOLARLY_MAILTO) {
 } else {
   console.log("scholarly resolver OFF: SCHOLARLY_MAILTO is unset (identifiers are recorded unresolved)");
 }
+// rw-p5a-intake: the fetch of a USER'S ADD (POST /intake/fetch, intake-fetch.ts) - the same egress as the
+// page fetcher above (FETCH_PROXY_URL's client; proxiedFetch refuses a missing one unless the operator
+// emptied FETCH_PROXY_URL on purpose). The workbench's one add path (panel + OWUI inlet) calls it.
+const intakeProxiedFetch = (() => {
+  const client = fetchClient();
+  return proxiedFetch((u, i) => fetch(u, i as RequestInit), client, { direct: client === null && FETCH_PROXY_URL.trim() === "" });
+})();
+const INTAKE_TIMEOUT_MS = parseInt(env("INTAKE_FETCH_TIMEOUT_MS", "30000"), 10);
+const INTAKE_MAX_BYTES = parseInt(env("INTAKE_FETCH_MAX_BYTES", String(20 * 1024 * 1024)), 10);
 // The D5 admission gate lives in the workbench; the fold calls it for a tombstoned held source.
 const WORKBENCH_URL = env("WORKBENCH_URL", "").replace(/\/+$/, "");
 const WORKBENCH_KEY = env("WORKBENCH_KEY", "");
@@ -387,8 +397,9 @@ async function refreshLane(): Promise<void> {
   }
 }
 
-async function searchWeb(query: string, k: number): Promise<SearchHit[]> {
-  const u = `${SEARCH_API_BASE}/search?q=${encodeURIComponent(query)}&format=json`;
+async function searchWeb(query: string, k: number, opts?: { categories?: string[] }): Promise<SearchHit[]> {
+  // rw-p5a-intake: a contract class's categories (academic -> general,science: the scholarly engines)
+  const u = searchUrl(SEARCH_API_BASE, query, opts?.categories);
   const r = await fetch(u, { headers: { accept: "application/json" } });
   if (!r.ok) throw new Error(`search ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const d = await r.json().catch(() => ({}));
@@ -752,7 +763,7 @@ function jobSeams(base: Deps, signal: AbortSignal, state: SeamState, jobId: stri
         throw e;
       }
     },
-    searchWeb: (q, k) => { guard(); return base.searchWeb(q, k); },
+    searchWeb: (q, k, o) => { guard(); return base.searchWeb(q, k, o); }, // o: the contract class's categories (rw-p5a-intake)
     fetchPage: (u) => { guard(); return base.fetchPage(u); },
     findFiled: base.findFiled,
     curatorFiling: base.curatorFiling,
@@ -1167,6 +1178,31 @@ Deno.serve({ port: PORT }, async (req) => {
       if (e instanceof CredibilityGateError) return Response.json({ error: "credibility_gate", detail: e.message }, { status: 422 });
       return Response.json({ error: "score_failed", detail: (e as Error).message }, { status: 500 });
     } finally { c.release(); }
+  }
+
+  // rw-p5a-intake: the proxy-bound fetch of a user's add, for the workbench's one add path (the panel's
+  // general and contextual adds, the OWUI inlet). The workspace's caller key only; nothing is stored here.
+  // A refusal or failure is a fixed code (IntakeRefused) - the page's own text never comes back in it.
+  if (req.method === "POST" && url.pathname === "/intake/fetch") {
+    const caller = callerOf(req, url);
+    if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (!mayIntakeFetch(caller)) return Response.json({ error: "the intake fetch is the workspace's (its caller key)" }, { status: 403 });
+    let body: { url?: unknown; content_type?: unknown };
+    try { body = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    const link = typeof body.url === "string" ? body.url.trim() : "";
+    if (!link) return Response.json({ error: "url required" }, { status: 400 });
+    const declared = typeof body.content_type === "string" && body.content_type ? body.content_type : null;
+    if (declared && !(INTAKE_CONTENT_TYPES as readonly string[]).includes(declared)) {
+      return Response.json({ error: "unsupported_type", detail: `declared content types: ${INTAKE_CONTENT_TYPES.join(", ")}` }, { status: 422 });
+    }
+    try {
+      const got = await intakeFetch(link, { fetch: intakeProxiedFetch, timeoutMs: INTAKE_TIMEOUT_MS, maxBytes: INTAKE_MAX_BYTES }, declared as IntakeContentType | null);
+      return Response.json({ ok: true, ...got });
+    } catch (e) {
+      if (e instanceof IntakeRefused) return Response.json({ error: e.code, detail: e.message }, { status: e.status });
+      console.error("[intake] fetch failed:", (e as Error).message);
+      return Response.json({ error: "fetch_failed" }, { status: 502 });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/health") {

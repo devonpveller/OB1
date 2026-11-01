@@ -234,6 +234,12 @@ export function proxiedFetch(
   return f;
 }
 
+/** rw-p5a-intake: whether `f` was built by proxiedFetch() (the FETCH_PROXY_URL egress) - the intake
+ *  fetch refuses any other fetch, as the resolver below does. */
+export function isProxiedFetch(f: unknown): f is ProxiedFetch {
+  return typeof f === "function" && (f as ProxiedFetch)[PROXIED] === true;
+}
+
 export interface ResolverConfig {
   fetch: ProxiedFetch;
   openalexKey: string;

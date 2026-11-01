@@ -48,7 +48,7 @@ export interface Identity {
   actor: string; // actor_sub: who acted - what actor_sub stores
   name: string; // display name
   key: string; // a filesystem-safe form of sub: the user's directory in the documents tree
-  kind?: "default" | "header" | "user" | "service" | "anonymous";
+  kind?: "default" | "header" | "user" | "service" | "anonymous" | "on-behalf";
   admin?: boolean; // the signed-in user's token names WORKSPACE_FORWARD_AUTH_ADMIN_GROUP (this request)
   actorName?: string;
   impersonating?: { reason: string; since: string; until?: string } | null;
@@ -241,8 +241,24 @@ export function seamDeps(db: Db | null, env = (k: string) => Deno.env.get(k)): S
 const OPEN = /^\/workbench\/(health|auth\/me)$/;
 // a user's front end: never a service's
 const USER_ONLY = /^\/workbench\/(documents|workspace|auth\/(impersonate|users|audit))(\/|$)/;
-// the reads that can carry a research job's original prompt (round 4, F4)
-const JOB_READS = /^\/workbench\/contract\/(sessions|jobs|timeline)(\/|$)/;
+// the reads that can carry a research job's original prompt (round 4, F4); rw-p5a-intake: and the intake
+// panel's reads, whose ownerless jobs an admin who is not impersonating reads when WORKSPACE_DEFAULT_SUB is unset
+const JOB_READS = /^\/workbench\/(contract\/(sessions|jobs|timeline)|intake\/jobs|jobs)(\/|$)/;
+
+// rw-p5a-intake: the OWUI inlet (07-MULTI-USER: "research, ideas and context started from Open WebUI land in
+// that user's research front end"). Open WebUI's OWN service key (WORKSPACE_SERVICE_KEYS owui=<key>) - and no
+// other key - may name the Authentik subject it acts for in `x-on-behalf-of` (the OWUI tool reads it from its
+// chatting user's record, as deep_research.py does for the research service), on the intake's add and that
+// add's own job only. The request is then the subject's (subject_sub) with actor service:owui; anywhere else,
+// or from any other key, the header is refused (403) - a browser never names a user.
+export const ON_BEHALF_SERVICES: ReadonlySet<string> = new Set(["owui"]);
+const ON_BEHALF_ROUTES = /^\/workbench\/intake\/(add|jobs\/add\/[0-9a-fA-F-]{36})$/;
+const ON_BEHALF_HEADER = "x-on-behalf-of";
+export function onBehalfSubject(raw: string): string | null {
+  const s = raw.trim();
+  if (!s || s.length > 256 || /[\x00-\x1f\x7f]/.test(s) || /^(service|system|anonymous):/i.test(s)) return null;
+  return s;
+}
 
 const KEY = "identity";
 const PATH_KEY = "identityPath";
@@ -291,6 +307,16 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
         console.error("[identity] the identity store failed, request refused:", (e as Error).message);
         return c.json({ error: "the identity store is not answering" }, 503);
       }
+    }
+    const onBehalf = c.req.header(ON_BEHALF_HEADER);
+    if (onBehalf !== undefined) {
+      const svc = who.kind === "service" ? who.sub.slice("service:".length) : "";
+      if (!ON_BEHALF_SERVICES.has(svc) || !ON_BEHALF_ROUTES.test(path)) {
+        return c.json({ error: "x-on-behalf-of is accepted only from Open WebUI's service key, on the intake's add" }, 403);
+      }
+      const sub = onBehalfSubject(onBehalf);
+      if (!sub) return c.json({ error: "x-on-behalf-of is not a usable subject id" }, 400);
+      who = { sub, actor: who.sub, name: sub, key: await ownerKey(sub), kind: "on-behalf", admin: false, impersonating: null };
     }
     c.set(KEY as never, who as never);
     if (who.kind === "anonymous" && !OPEN.test(path)) {

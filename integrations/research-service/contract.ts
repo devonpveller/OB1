@@ -51,6 +51,9 @@ export interface ResolvedContract {
   denyDomains: string[];  // deny always wins over allow; red-line hosts merged in
   budget: { maxFetch?: number; wallMs?: number; rounds?: number };
   redlines: string[];
+  // rw-p5a-intake: the SearXNG categories the job's searches ask the search gateway for, when a
+  // class routes them (CLASS_SEARCH_CATEGORIES); absent = the gateway's default (general), as before.
+  searchCategories?: string[];
 }
 
 export class ContractError extends Error {
@@ -67,7 +70,10 @@ export const CLASS_REGISTRY: Record<string, string[]> = {
     "cert.org", "first.org", "msrc.microsoft.com", "security.apple.com",
     "security.paloaltonetworks.com", "tools.cisco.com",
   ],
-  academic: ["arxiv.org", "acm.org", "ieee.org", "usenix.org", "*.edu"],
+  // rw-p5a-intake: + PubMed / NCBI (filtering.ts already ranked them academic; this list lacked them, so
+  // the class refused the PubMed source the 2026-09-11 audit missed - www.ncbi.nlm.nih.gov/pubmed/<pmid>
+  // is the URL SearXNG's pubmed engine answers with, pubmed.ncbi.nlm.nih.gov the site's own)
+  academic: ["arxiv.org", "acm.org", "ieee.org", "usenix.org", "*.edu", "ncbi.nlm.nih.gov", "pubmed.gov"],
   "vendor-psirt": [
     "msrc.microsoft.com", "security.apple.com", "security.paloaltonetworks.com",
     "tools.cisco.com", "psirt.global.sonicwall.com",
@@ -86,6 +92,13 @@ export const CLASS_REGISTRY: Record<string, string[]> = {
     "learn.microsoft.com/en-us/dotnet/standard", "learn.microsoft.com/en-us/dotnet/core",
     "docs.docker.com", "git-scm.com/docs", "www.postgresql.org/docs",
   ],
+};
+
+/** rw-p5a-intake: a class that routes the job's searches to SearXNG categories. `academic` asks the
+ *  search gateway for general + science: the scholarly engines (pubmed, europepmc, semantic scholar,
+ *  crossref, openalex, arxiv, google scholar) are science-category engines and answer nothing else. */
+export const CLASS_SEARCH_CATEGORIES: Record<string, string[]> = {
+  academic: ["general", "science"],
 };
 
 /** Known red lines. Extend the union in ResearchContract + the switch as they grow. */
@@ -168,11 +181,13 @@ export function resolveContract(options: Record<string, unknown> | null | undefi
   if (wallMs !== undefined) budget.wallMs = wallMs;
   if (rounds !== undefined) budget.rounds = rounds;
 
+  const categories = uniq(classes.flatMap((cls) => CLASS_SEARCH_CATEGORIES[cls] ?? []));
   return {
     allowDomains: uniq(allow),
     denyDomains: uniq(deny),
     budget,
     redlines: uniq(redlines),
+    ...(categories.length ? { searchCategories: categories } : {}),
   };
 }
 

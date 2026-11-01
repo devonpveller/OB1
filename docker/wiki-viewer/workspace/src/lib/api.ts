@@ -49,6 +49,21 @@ export async function raw(url: string): Promise<Response> {
   return await fetcher(url, { method: "GET", credentials: "same-origin" });
 }
 
+// A multipart POST (rw-p5a-intake: the panel's add with a picked or dropped file) through the same door and log.
+export async function postForm<T = any>(url: string, form: FormData): Promise<T> {
+  log.push({ method: "POST", url });
+  const r = await fetcher(url, { method: "POST", body: form, credentials: "same-origin" });
+  const text = await r.text();
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { text };
+  }
+  if (!r.ok) throw new ApiError(r.status, data);
+  return data as T;
+}
+
 export const get = <T = any>(url: string) => api<T>("GET", url).then((r) => r.data);
 export const post = <T = any>(url: string, body?: unknown) => api<T>("POST", url, body ?? {}).then((r) => r.data);
 export const q = encodeURIComponent;
