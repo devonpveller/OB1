@@ -1,0 +1,21 @@
+/* research-workbench P3b - the trust panels (uses the workspace tokens of styles.css). */
+.ws-report-header { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; background: var(--panel); }
+.ws-rollup { margin: 0 0 4px; font-weight: 600; }
+.ws-weights { border-collapse: collapse; font-size: 12px; }
+.ws-weights caption { text-align: left; color: var(--muted); }
+.ws-weights th, .ws-weights td { border: 1px solid var(--line); padding: 1px 6px; text-align: left; }
+.ws-ledger-head, .ws-ledger-row { display: grid; grid-template-columns: 6em 7em 6em 4em 9em 4em; gap: 4px; align-items: center; font-size: 12px; }
+.ws-ledger-head { color: var(--muted); padding: 0 8px 2px; }
+.ws-ledger-row .ws-claim-text { grid-column: 1 / -1; font-size: 13px; }
+.ws-stance { display: inline-flex; width: 5em; height: 8px; border-radius: 4px; overflow: hidden; background: var(--chip); }
+.ws-stance-sup { background: var(--accent); }
+.ws-stance-con { background: var(--danger); }
+.ws-stance-men { background: var(--muted); }
+.ws-estimate { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 4px; font-size: 12px; }
+.ws-estimate dt { color: var(--muted); }
+.ws-estimate dd { margin: 0; }
+.ws-status-line { margin: 0 0 6px; font-size: 12px; }
+.ws-axes { margin: 0 0 6px; font-size: 12px; }
+.ws-axes dt { color: var(--muted); }
+.ws-axes dd { margin: 0 0 4px; }
+.ws-quality-title { margin: 0 0 4px; }

@@ -25,6 +25,7 @@ import { limitsFromEnv } from "../export/markdown.ts";
 import { gateDepsFromEnv, runGate } from "../export/gate.ts";
 import { visionConfigFromEnv } from "../export/vision.ts";
 import { runStore } from "../export/runs.ts";
+import { exportWithRollup } from "../contracts/repo/trust.ts";
 
 const db = poolDb(pool);
 const vision = visionConfigFromEnv();
@@ -40,7 +41,8 @@ const exportApp = createExporter({
   readNote: async (rel) => {
     if (!(await vaultExists(rel))) return null;
     const md = await vaultRead(rel);
-    return rel.startsWith("documents/") ? await documentExportMarkdown(db, md) : md;
+    // research-workbench P3b: a research report's page carries its credibility roll-up at its head
+    return rel.startsWith("documents/") ? await documentExportMarkdown(db, md) : await exportWithRollup(db, rel, md);
   },
   loadRefs: async (rel, md) => {
     if (rel.startsWith("documents/")) return await documentExportRefs(db, rel, md);
