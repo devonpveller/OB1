@@ -29,6 +29,19 @@ import { hostname as osHostname } from "node:os";
 
 const HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
   "transfer-encoding", "upgrade", "host", "x-brain-key", "content-length"]);
+// edge-b5-portal-retire (tester t-edge-b5 D1): what a CLIENT claims about who or where it is never
+// reaches the workbench. The retired portal Caddy stripped Remote-* and X-Forwarded-Host / X-Real-IP
+// before anything else; the tailnet route now reaches the viewer directly, so the viewer drops, from
+// EVERY forwarded request and whatever door it came through, every unsigned identity header (Remote-*,
+// X-Remote-*, X-Forwarded-User / -Email / -Groups / -Preferred-Username, X-Auth-Request-*) and every
+// proxy-chain header (X-Forwarded-*, X-Real-IP, Forwarded, X-Original-*); X-Forwarded-Proto is the
+// viewer's own ("https": both doors in front of it are TLS). The doors cannot be told apart from here
+// (Docker publishes the LAN and loopback ports from the same gateway address), and they need not be:
+// the only identity the trusted LAN door (Traefik + Authentik) brings is the outpost's SIGNED token,
+// X-authentik-jwt, which the workbench verifies on every request - so it passes from any door, and an
+// unsigned header from any door counts for nothing. WORKSPACE_IDENTITY_HEADER (and its name header)
+// stays dropped as before (cfg.strip).
+const FORGEABLE = /^(remote-|x-remote-|x-forwarded-|x-real-ip$|forwarded$|x-original-|x-auth-request-)/;
 const UPLOAD = /^\/workbench\/(import(\/|$|\?)|sources\/[^/]+\/replace-from-upload)/;
 const MB = 1024 * 1024;
 
@@ -100,9 +113,9 @@ export function proxyWorkbench(req, res, cfg) {
   }
   const target = new URL(cfg.url + req.url);
   const headers = {};
-  for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !cfg.strip?.has(k)) headers[k] = v;
+  for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !cfg.strip?.has(k) && !FORGEABLE.test(k)) headers[k] = v;
   headers["x-brain-key"] = cfg.key;
-  headers["x-forwarded-proto"] = headers["x-forwarded-proto"] || "https";
+  headers["x-forwarded-proto"] = "https";
   const lib = target.protocol === "https:" ? https : http;
   const up = lib.request(target, { method: req.method, headers, timeout: 600_000 }, (r) => {
     const out = {};

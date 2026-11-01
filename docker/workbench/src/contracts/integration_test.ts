@@ -1060,15 +1060,18 @@ t("a RETIRED erasure reason is refused at the purge door (400 naming it) and at 
 });
 
 // rw-p0b-purge-door attempt 2, tester finding F3: body.by named the trail actor ahead of the
-// authenticated Remote-User. The actor is the authenticated user; a body 'by' is kept as a note.
-t("the purge's trail actor is the authenticated user; a body 'by' is a note, never the actor", async () => {
+// authenticated user. The actor is the authenticated user; a body 'by' is kept as a note.
+// edge-b5-portal-retire (tester t-edge-b5 D1): the authenticated user is the identity seam's, never a
+// client-sent Remote-User - this router is mounted without the seam, so the actor is the route's
+// fallback ("operator") and the Remote-User legacyDelete sends ("purge-tester") is ignored.
+t("the purge's trail actor is the authenticated user; a body 'by' is a note and a Remote-User nothing", async () => {
   const { s } = await activeWithClaim();
   const r = await legacyDelete(`/${s}`, { confirm: true, reason_type: "deliberate", by: "body-actor" }, "purge-tester");
   assertEquals(r.status, 200, JSON.stringify(r.json));
   const ev = await sql<{ kind: string; detail: Record<string, unknown>; actor: string | null }>(
     `SELECT kind, detail, actor FROM public.source_trail_events WHERE source_id = $1 ORDER BY created_at, id`, [s]);
   assertEquals(ev.length, 1);
-  assertEquals([ev[0].kind, ev[0].actor], ["suppressed", "purge-tester"], "the trail actor is the Remote-User, not body.by");
+  assertEquals([ev[0].kind, ev[0].actor], ["suppressed", "operator"], "the trail actor is the seam's (here the fallback), not body.by and not the Remote-User");
   assertEquals(ev[0].detail.claimed_by, "body-actor", "the body's 'by' is recorded as a note");
 });
 

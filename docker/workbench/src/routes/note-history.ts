@@ -9,6 +9,7 @@ import { safeRelPath } from "../util/paths.ts";
 import { publicError } from "../util/public-error.ts";
 import { ownedPathParam } from "../documents/ownership.ts";
 import { identityOf } from "../middleware/identity.ts";
+import { changeAuthor } from "../identity/author.ts";
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
 import {
@@ -21,13 +22,10 @@ import {
   vaultWrite,
 } from "../util/vault.ts";
 
+// Change author = the seam's signed-in user or edge identity, else "operator" (src/identity/author.ts;
+// edge-b5-portal-retire: never a client-sent Remote-User / X-Forwarded-User).
 function authorOf(c: Context): string {
-  return (
-    c.req.header("Remote-User") ||
-    c.req.header("X-Forwarded-User") ||
-    c.req.header("X-Remote-User") ||
-    "operator"
-  ).toString();
+  return changeAuthor(c, "operator");
 }
 
 // `path` is the FULL vault-relative note path (notes/…/x.md) — for the WRITE

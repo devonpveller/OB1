@@ -50,6 +50,7 @@ import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-cla
 import { dbState, onConnect, startProbe, probe } from "./lib/wiki-db.mjs";
 import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
 import { isWorkbenchPath, proxyConfig, proxyWorkbench } from "./lib/workbench-proxy.mjs";
+import { withSecurityHeaders } from "./lib/security-headers.mjs";
 
 const BUNDLE = process.env.WIKI_BUNDLE_DIR || "/viewer/bundle"; // the frozen bundle (committed, D7)
 const WORKSPACE = process.env.WIKI_WORKSPACE_DIR || "/viewer/workspace"; // the workspace app's build (Dockerfile stage `workspace`)
@@ -374,6 +375,9 @@ async function handle(req, res) {
   if (hit) {
     const { file, st } = hit;
     const ext = extname(file);
+    // the wiki embeds its own PDF attachments in an <iframe> (render-page.mjs): those may be framed
+    // by the viewer's own pages, nothing else does (edge-b5: every other response is DENY)
+    if (ext === ".pdf") res.setHeader("x-frame-options", "SAMEORIGIN");
     if (notModified(req, st)) {
       res.writeHead(304, baseHeaders(st, ext));
       res.end();
@@ -411,14 +415,10 @@ onConnect((why) => runReconcile(why, REPAIR));
 startProbe();
 setInterval(() => { if (dbState().state === "up") runReconcile("periodic", false); }, RECONCILE_MS).unref();
 
+// edge-b5-portal-retire: the security response headers the retired portal Caddy set, on every
+// response (lib/security-headers.mjs); a thrown handler still answers 500 with them.
 http
-  .createServer((req, res) => {
-    handle(req, res).catch((e) => {
-      console.error("[wiki-viewer] request failed:", e?.stack || e?.message || e);
-      if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain" });
-      res.end("internal error");
-    });
-  })
+  .createServer(withSecurityHeaders(handle))
   .listen(PORT, () => console.log(`[wiki-viewer] live renderer on :${PORT} (frozen bundle ${BUNDLE}; no builder)`));
 
 // node is PID 1 (no shell entrypoint since P1c): exit on a stop signal

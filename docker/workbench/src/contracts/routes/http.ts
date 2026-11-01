@@ -1,6 +1,7 @@
 // Route plumbing shared by every contract operation: the dependency bag, response validation
 // (a handler cannot send a shape its schema does not describe), and one error mapping.
 import type { Context } from "hono";
+import { changeAuthor } from "../../identity/author.ts";
 import { OpenAPIHono, type RouteConfig, z } from "../deps.ts";
 import type { Db } from "../db.ts";
 import type { RegistryReader } from "../registry.ts";
@@ -109,6 +110,8 @@ export function body<S extends z.ZodTypeAny>(schema: S, example: unknown) {
   return { content: { "application/json": { schema, example } }, required: true };
 }
 
+// The actor of a contract write: the seam's signed-in user or edge identity, else the fallback
+// (src/identity/author.ts; edge-b5-portal-retire: never a client-sent Remote-User / X-Forwarded-User).
 export function authorOf(c: Context, fallback?: string): string | null {
-  return c.req.header("Remote-User") || c.req.header("X-Forwarded-User") || fallback || null;
+  return changeAuthor(c, fallback || null);
 }

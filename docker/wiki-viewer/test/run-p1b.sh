@@ -366,7 +366,7 @@ base="${P1B_BASE:-development}"
 for f in OB1/docker/wiki-service/wiki-service.mjs scripts/checks/wiki-latency-probe.ps1 scripts/checks/test-quartz4-offline.ps1 \
          scripts/checks/check-openbrain-health.ps1 scripts/recovery/emergency-recovery.ps1 scripts/lib/stack-services.json \
          OB1/docker/wiki-viewer/README.md OB1/docker/docker-compose.preview.yml frontend/status-pipe .claude/skills/stack-map/SKILL.md \
-         .claude/skills/stack-map/references/workspace-stacks.md portal/config/caddy/Caddyfile; do
+         .claude/skills/stack-map/references/workspace-stacks.md scripts/archive/portal-caddy-authelia/portal/config/caddy/Caddyfile; do  # (archived by edge-b5-portal-retire)
   mb="$(git -C "$REPO" merge-base "$base" HEAD)"   # the branch point: a development that moved since is not this item's change
   case "$f" in OB1/*) ch="$(git -C "$OB1" diff --stat "$(git -C "$REPO" rev-parse "$mb:OB1" 2>/dev/null || echo d79b7db)" -- "${f#OB1/}" | tail -1)" ;;
                *) ch="$(git -C "$REPO" diff --stat "$mb" -- "$f" | tail -1)" ;; esac

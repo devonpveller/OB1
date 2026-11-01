@@ -32,13 +32,13 @@ async function lab() {
   return { seen, up, front, origin: front.url, close: () => { up.server.close(); front.server.close(); } };
 }
 
-test("forwards /workbench/* with the key injected and the client's key dropped", async () => {
+test("forwards /workbench/* with the key injected and the client's key and Remote-User dropped", async () => {
   const l = await lab();
   try {
     const r = await fetch(`${l.front.url}/workbench/documents/file?path=x`, { method: "PUT", headers: { "x-brain-key": "forged", "remote-user": "alice", "content-type": "application/json", origin: l.origin }, body: "{}" });
     assert.equal(r.status, 201);
     assert.equal(r.headers.get("x-up"), "1");
-    assert.deepEqual(l.seen[0], { method: "PUT", url: "/workbench/documents/file?path=x", key: "server-side-key", user: "alice", bytes: 2 });
+    assert.deepEqual(l.seen[0], { method: "PUT", url: "/workbench/documents/file?path=x", key: "server-side-key", user: undefined, bytes: 2 }); // edge-b5: a client-sent Remote-User never passes
   } finally {
     l.close();
   }
@@ -151,6 +151,51 @@ test("the viewer's own origin and an allow-listed edge origin may write; reads n
     assert.equal(await g.send("GET", { host: `127.0.0.1:${g.port}` }), 201);
     assert.equal(g.seen.length, 4);
   } finally { g.close(); }
+});
+
+
+// edge-b5-portal-retire (tester t-edge-b5 D1): with the portal Caddy retired, the tailnet route reaches
+// the viewer directly, and nothing in front of it strips what a client claims about who or where it is.
+// The viewer does it: every unsigned identity or proxy-chain header a client sends is dropped from every
+// forwarded request, whatever door it came through and whatever WORKSPACE_IDENTITY_HEADER says. Only the
+// SIGNED Authentik token passes (the workbench verifies it); X-Forwarded-Proto is the viewer's own.
+const FORGED = {
+  "remote-user": "forged-author", "remote-groups": "admins", "remote-name": "Forged", "remote-email": "f@x.example",
+  "x-remote-user": "forged-author", "x-forwarded-user": "forged-author", "x-forwarded-preferred-username": "forged-author",
+  "x-forwarded-email": "f@x.example", "x-forwarded-groups": "admins", "x-forwarded-host": "evil.example",
+  "x-forwarded-for": "203.0.113.9", "x-forwarded-port": "443", "x-forwarded-prefix": "/evil", "x-real-ip": "203.0.113.9",
+  forwarded: "for=203.0.113.9;host=evil.example", "x-original-url": "/evil", "x-auth-request-user": "forged-author",
+};
+
+test("edge-b5: no client-sent identity or proxy-chain header reaches the workbench, on any Host the viewer answers", async () => {
+  const seen = [];
+  const up = await serve(async (req, res) => {
+    for await (const _ of req);
+    seen.push(Object.fromEntries(Object.entries(req.headers).filter(([k]) => k in FORGED || k === "x-forwarded-proto" || k === "x-authentik-jwt")));
+    res.writeHead(201, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const cfg = proxyConfig({ WORKBENCH_URL: up.url, WORKBENCH_KEY: "server-side-key", WIKI_VIEWER_ALLOWED_HOSTS: "lab-tailnet.example" });
+  const front = await serve((req, res) => proxyWorkbench(req, res, cfg));
+  const port = front.server.address().port;
+  const send = (host, origin, extra = {}) => new Promise((resolve, reject) => {
+    const r = http.request({ host: "127.0.0.1", port, method: "POST", path: "/workbench/notes",
+      headers: { host, origin, "content-type": "application/json", "x-forwarded-proto": "http", ...FORGED, ...extra } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode)); });
+    r.on("error", reject); r.end("{}");
+  });
+  const token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.AAAA-_bb";
+  try {
+    assert.equal(await send("lab-tailnet.example:8444", "https://lab-tailnet.example:8444"), 201); // the tailnet name
+    assert.equal(await send("localhost", "http://localhost"), 201); // the always-allowed loopback name (tester's case)
+    assert.equal(await send("lab-tailnet.example:8444", "https://lab-tailnet.example:8444", { "x-authentik-jwt": token }), 201); // the LAN door's token
+    assert.deepEqual(seen, [
+      { "x-forwarded-proto": "https" },
+      { "x-forwarded-proto": "https" },
+      { "x-forwarded-proto": "https", "x-authentik-jwt": token },
+    ]);
+  } finally {
+    up.server.close(); front.server.close();
+  }
 });
 
 // rw-identity: a client never names its own identity, and the door injects the door key.

@@ -7,6 +7,7 @@ import type { Context, Next } from "hono";
 import * as repo from "../repositories/sources.ts";
 import { config } from "../config.ts";
 import { publicError } from "../util/public-error.ts";
+import { changeAuthor } from "../identity/author.ts";
 import { logChange } from "../util/changeslog.ts";
 import { gateErrorBody, isGateError } from "../fetch-gate/client.ts";
 import { pool } from "../db/pool.ts";
@@ -22,17 +23,11 @@ export const purgeRegistry = registry;
 
 export const sources = new Hono();
 
-// Change author = the Authelia-forwarded user (P4.7). Caddy/Authelia inject one
-// of these on the authenticated request; the preview has no auth → "operator".
-// The id can later be mapped to a display name.
+// Change author (P4.7) = the seam's signed-in user or edge identity, else "operator"
+// (src/identity/author.ts). It was the Authelia-forwarded user behind the retired portal Caddy;
+// edge-b5-portal-retire: a client-sent Remote-User / X-Forwarded-* never names it.
 function authorOf(c: Context): string {
-  return (
-    c.req.header("Remote-User") ||
-    c.req.header("X-Forwarded-User") ||
-    c.req.header("X-Remote-User") ||
-    c.req.header("X-Forwarded-Preferred-Username") ||
-    "operator"
-  ).toString();
+  return changeAuthor(c, "operator");
 }
 
 // Reject a non-UUID :id with a clean 400 up front, instead of letting Postgres

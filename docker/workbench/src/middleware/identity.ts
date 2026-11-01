@@ -328,6 +328,12 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
   };
 }
 
+// The identity the seam set on this request, or undefined when no seam ran (synchronous; for the change
+// author, src/identity/author.ts, which must never fall back to a header).
+export function seamIdentity(c: Context): Identity | undefined {
+  return c.get(KEY as never) as Identity | undefined;
+}
+
 // The request's identity, as the seam resolved it. A route that runs without the seam (a test that
 // mounts a router alone) gets the default identity.
 export async function identityOf(c: Context): Promise<Identity> {

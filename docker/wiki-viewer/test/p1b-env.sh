@@ -78,8 +78,12 @@ cmd_wb() {
 }
 
 cmd_front() { # the portal Caddyfile's (wiki_app) snippet, verbatim, as the env's front door
+  # edge-b5-portal-retire: the portal plane is retired and archived; this P1b acceptance env keeps
+  # emulating the front door it was measured behind, from the archived copy (the live tailnet route
+  # now reaches the viewer directly - the viewer's own forwarder and security headers are the door).
   docker rm -f -v "$P-front" >/dev/null 2>&1 || true
-  local cf="$REPO/portal/config/caddy/Caddyfile"
+  local portal="$REPO/scripts/archive/portal-caddy-authelia/portal"
+  local cf="$portal/config/caddy/Caddyfile"
   local snip
   snip="$(awk '/^\(wiki_app\) \{/{f=1} f{print} f&&/^\}/{exit}' "$cf")"
   [ -n "$snip" ] || { log "no (wiki_app) snippet in $cf"; return 1; }
@@ -88,7 +92,7 @@ cmd_front() { # the portal Caddyfile's (wiki_app) snippet, verbatim, as the env'
   printf '{\n\tadmin off\n\tauto_https off\n}\n%s\n:8080 {\n\timport wiki_app\n}\n' "$snip" |
     docker run --rm -i -v "$P-frontcfg:/c" --entrypoint sh "$IMG" -c 'cat > /c/Caddyfile'
   docker run -d --name "$P-front" --network "$NET" -e WORKBENCH_KEY=fixture-key \
-    -v "$P-frontcfg:/etc/caddy:ro" -v "$REPO/portal/config/caddy/site:/srv/site:ro" caddy:2-alpine >/dev/null
+    -v "$P-frontcfg:/etc/caddy:ro" -v "$portal/config/caddy/site:/srv/site:ro" caddy:2-alpine >/dev/null
   local i=0
   until nodeq "const r = await fetch('http://$P-front:8080/__health').catch(() => null); process.exit(r ? 0 : 1)" >/dev/null 2>&1; do
     i=$((i + 1)); [ "$i" -gt 60 ] && { log "front door not answering"; docker logs --tail 30 "$P-front"; return 1; }; sleep 1
