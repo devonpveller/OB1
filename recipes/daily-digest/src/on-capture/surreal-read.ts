@@ -31,7 +31,9 @@ export function assertReadOnly(q: string): void {
   // round 2: no function call - a fn:: (user-defined) function can write, http:: can reach out. The ONE
   // exception (capture-fix): the built-in, side-effect-free crypto::sha256( that the fingerprint uses to
   // hash rows on the server.
-  if (c.replaceAll("crypto::sha256(", "").includes("::")) throw new Error("read-only client: no function calls ('::')");
+  // (exact spelling, case-sensitive, not glued to a longer name: `xcrypto::sha256(`, `crypto::sha256x(`,
+  // `CRYPTO::SHA256(`, `crypto::sha256 (` all keep their `::` and refuse)
+  if (c.replace(/(?<![A-Za-z0-9_:])crypto::sha256\(/g, "").includes("::")) throw new Error("read-only client: no function calls ('::')");
   const m = WRITE.exec(c);
   if (m) throw new Error(`read-only client: '${m[1]}' is not allowed`);
 }

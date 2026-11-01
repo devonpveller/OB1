@@ -112,7 +112,10 @@ Deno.test("round 2: the read-only guard admits INFO FOR NS / TABLE <name>, and r
     "SELECT id, crypto::sha256(<string> $this) AS h FROM source ORDER BY id LIMIT 200 START 0"]) assertReadOnly(ok);
   // capture-fix: crypto::sha256( is the one admitted function; anything around or inside it still refuses
   for (const bad of ["SELECT crypto::sha256(fn::w()) FROM a", "SELECT crypto::md5(x) FROM a", "SELECT crypto::sha256(x), http::get('u') FROM a",
-    "SELECT crypto::sha256 (x) FROM a::b"]) {
+    "SELECT crypto::sha256 (x) FROM a::b", "SELECT crypto::sha256x(x) FROM a", "SELECT xcrypto::sha256(x) FROM a", "SELECT CRYPTO::SHA256(x) FROM a",
+    "SELECT Crypto::sha256(x) FROM a", "SELECT crypto::sha256 (x) FROM a", "SELECT crypto :: sha256(x) FROM a", "SELECT crypto::sha512(x) FROM a",
+    "SELECT fn::crypto::sha256(x) FROM a", "SELECT crypto::sha256(x) FROM a; DELETE a", "UPDATE a SET h = crypto::sha256('x')",
+    "CREATE a SET h = crypto::sha256('x')", "INFO FOR TABLE a WHERE crypto::sha256(x)"]) {
     assertThrows(() => assertReadOnly(bad), Error, "read-only client", bad);
   }
   for (const bad of ["SELECT fn::text_search('x', 1, true, true) FROM episode", "SELECT * FROM http::get('https://x')", "INFO FOR TABLE a b",

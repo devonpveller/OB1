@@ -76,3 +76,63 @@ Deno.test({
     assertEquals(changed(afterText, await fingerprint(reader)), ["source_embedding"]);
   },
 });
+
+// rw-p7a-capture-fix clause 2: every kind of write is still seen with the server-side row hash, on a
+// store holding the NUL row, and an untouched store is quiesced on two consecutive reads.
+Deno.test({
+  name: "capture-fix: every write kind is seen (schema, rows, deep fields, edges); an untouched store reads quiesced twice",
+  ignore: !URL_,
+  sanitizeOps: false, sanitizeResources: false,
+  async fn() {
+    const db = `fpk_${crypto.randomUUID().slice(0, 8)}`;
+    const h = { ...H, "surreal-db": db };
+    const sql = async (q: string) => {
+      const r = await fetch(`${URL_}/sql`, { method: "POST", headers: { ...h, accept: "application/json" }, body: q });
+      const t = await r.text();
+      assert(r.ok && JSON.parse(t).every((x: { status: string }) => x.status === "OK"), `${q}: ${t.slice(0, 300)}`);
+    };
+    await sql(`DEFINE NAMESPACE IF NOT EXISTS ${NS}; USE NS ${NS}; DEFINE DATABASE ${db};`);
+    await sql(`DEFINE TABLE source SCHEMALESS; DEFINE TABLE note SCHEMALESS; DEFINE TABLE notebook SCHEMALESS;
+      DEFINE TABLE refers_to TYPE RELATION IN note OUT notebook SCHEMALESS;
+      CREATE source:a SET full_text = 'plain', meta = { deep: { level: 1, tags: ['x'] } };
+      CREATE source:b SET full_text = 'to delete';
+      CREATE note:n1 SET title = 't'; CREATE notebook:nb1 SET name = 'n';
+      DEFINE TABLE source_embedding SCHEMALESS; CREATE source_embedding:e1 SET embedding = [0.25, 0.5];`);
+    // the live shape: a NUL row (binary protocol only)
+    const rpc = await fetch(`${URL_}/rpc`, {
+      method: "POST", headers: { ...h, "content-type": "application/cbor", accept: "application/cbor" },
+      body: new Uint8Array(cbor({ id: 1, method: "query", params: ["CREATE source:nul SET full_text = $t", { t: "x\u0000y" }] })),
+    });
+    await rpc.arrayBuffer();
+    assertEquals(rpc.status, 200);
+    const reader = new SurrealReader({ url: URL_, ns: NS, db, user: "root", pass: PASS });
+    let last = await fingerprint(reader);
+    assertEquals(changed(last, await fingerprint(reader)), [], "untouched: quiesced (read 1)");
+    assertEquals(changed(last, await fingerprint(reader)), [], "untouched: quiesced (read 2)");
+    const writes: [string, string, string][] = [
+      ["DEFINE INDEX", "DEFINE INDEX ix ON note FIELDS title;", "__table__:note"],
+      ["DEFINE FIELD", "DEFINE FIELD f2 ON note TYPE option<string>;", "__table__:note"],
+      ["REMOVE FIELD", "REMOVE FIELD f2 ON note;", "__table__:note"],
+      ["DEFINE FUNCTION", "DEFINE FUNCTION fn::w() { RETURN 1; };", "__db__"],
+      ["DEFINE PARAM", "DEFINE PARAM $p VALUE 1;", "__db__"],
+      ["DEFINE EVENT", "DEFINE EVENT ev ON source WHEN $event = 'CREATE' THEN (CREATE note SET title = 'ev');", "__table__:source"],
+      ["DEFINE ANALYZER", "DEFINE ANALYZER an TOKENIZERS blank FILTERS lowercase;", "__db__"],
+      ["DEFINE USER (database)", "DEFINE USER u2 ON DATABASE PASSWORD 'lab-only-pw' ROLES VIEWER;", "__db__"],
+      ["DEFINE ACCESS (database)", "DEFINE ACCESS ac ON DATABASE TYPE JWT ALGORITHM HS512 KEY 'lab-only-key-0123456789';", "__db__"],
+      ["DEFINE USER (namespace)", `DEFINE USER u3 ON NAMESPACE PASSWORD 'lab-only-pw' ROLES VIEWER;`, "__ns__"],
+      ["deep UPDATE", "UPDATE source:a SET meta.deep.tags[0] = 'y';", "source"],
+      ["deep UPDATE (number)", "UPDATE source:a SET meta.deep.level = 2;", "source"],
+      ["DELETE a row", "DELETE source:b;", "source"],
+      ["RELATE (an edge)", "RELATE note:n1->refers_to->notebook:nb1;", "refers_to"],
+      ["embedding update", "UPDATE source_embedding:e1 SET embedding = [0.25, 0.75];", "source_embedding"],
+    ];
+    for (const [what, q, key] of writes) {
+      await sql(q);
+      const now = await fingerprint(reader);
+      const diff = changed(last, now);
+      assert(diff.includes(key), `${what}: expected ${key} in ${JSON.stringify(diff)}`);
+      last = now;
+    }
+    assertEquals(changed(last, await fingerprint(reader)), [], "after the writes, an untouched read is quiesced again");
+  },
+});
