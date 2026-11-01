@@ -59,6 +59,9 @@ try {
     JSON.stringify([{ kind: "lead", url: W.urlLead }, { kind: "lead_path", url: W.urlTarget }]), FX.active]);
   await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, trail, payload) VALUES ($1, $1, 'source', 'due_process', $2::jsonb, $3::jsonb)`,
     [W.job, JSON.stringify({ id: W.path, url: W.urlTarget, kind: "lead_path", score: 0.7, floor: 0.4, family: "general", reasons: ["reached through a lead"], found_via: W.lead, path: [] }), JSON.stringify({ url: W.urlTarget, outcome: "lead_path" })]);
+  // a fresh revision of the suppressed fixture source: the newest timeline event is about it
+  await sql(`INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by)
+             SELECT $1, COALESCE(max(revision), 1) + 1, 'e2e revision', 'Suppressed fixture source', 'e2e' FROM public.source_revisions WHERE source_id = $1`, [FX.suppressed]);
   // a tombstone to lift
   await sql(`INSERT INTO public.source_tombstones (id, source_id, url, url_key, title, reason_type, note, eraser_kind, eraser_user)
              VALUES ($1, $2, $3, public.contract_url_key($3), 'E2E erased', 'deliberate', 'e2e tombstone note', 'user', 'e2e')`,

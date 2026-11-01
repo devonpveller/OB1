@@ -72,8 +72,9 @@ async function plant() {
                ($1, 'entity', 'tool', 'P8a1 root', 'root', $2::jsonb), ($3, 'source', NULL, 'P8a1 active leaf', 'leaf', '[]'),
                ($4, 'source', NULL, 'P8a1 suppressed leaf', 'leaf', '[]')`,
     [W.root, JSON.stringify([`content/source/${W.active}`, `content/source/${W.suppressed}`]), `content/source/${W.active}`, `content/source/${W.suppressed}`]);
-  await sql(`INSERT INTO public.claims (id, text, epistemic_tag, contradicted) VALUES ($1, 'P8a1 contested claim', 'sourced', true)`, [W.claim]);
-  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $2, 'states')`, [W.claim, W.active]);
+  // contested by a contradicts edge (claims.contradicted itself is recomputed from the edges by claim_confidence)
+  await sql(`INSERT INTO public.claims (id, text, epistemic_tag) VALUES ($1, 'P8a1 contested claim', 'sourced')`, [W.claim]);
+  await sql(`INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES ($1, $2, 'contradicts')`, [W.claim, W.active]);
   // two users' research jobs (their original prompts record the owner)
   for (const [job, sub] of [[W.jobA, W.subA], [W.jobB, W.subB]]) {
     await sql(`INSERT INTO public.research_jobs (id, status, origin, query) VALUES ($1, 'done', 'workspace', 'p8a1 question')`, [job]);
@@ -151,20 +152,20 @@ t("T4 states: trail, timeline, neighbours and source-states carry the lifecycle 
   await plant();
   const tr = await call("GET", `/trail?source_id=${W.suppressed}`, W.subA);
   const sup = (tr.json.entries as any[]).find((x) => x.kind === "suppressed");
-  assertEquals(sup?.lifecycle, "suppressed", tr.text);
+  assertEquals(sup?.lifecycle, "suppressed", `trail: ${tr.text.slice(0, 600)}`);
   await sql(`INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by) VALUES ($1, 1, 'y', 'P8a1 suppressed', 'p8a1')
              ON CONFLICT DO NOTHING`, [W.suppressed]);
   const tl = await call("GET", `/timeline?source_id=${W.suppressed}&limit=50`, W.subA);
   assertEquals(tl.status, 200, tl.text);
   assert(K.Timeline.safeParse(tl.json).success);
   const ev = (tl.json.events as any[]).find((x) => x.kind === "source_revision");
-  assertEquals([ev?.source_id, ev?.lifecycle], [W.suppressed, "suppressed"], tl.text);
+  assertEquals([ev?.source_id, ev?.lifecycle], [W.suppressed, "suppressed"], `timeline: ${tl.text.slice(0, 600)}`);
   const nb = await call("GET", `/neighbours?id=${encodeURIComponent(W.root)}&depth=1`, W.subA);
   assertEquals(nb.status, 200, nb.text);
   assert(K.Neighbours.safeParse(nb.json).success);
   const node = (id: string) => (nb.json.nodes as any[]).find((n) => n.id === `content/source/${id}`);
-  assertEquals([node(W.active)?.lifecycle, node(W.active)?.contested], ["active", true]);
-  assertEquals([node(W.suppressed)?.lifecycle, node(W.suppressed)?.contested], ["suppressed", false]);
+  assertEquals([node(W.active)?.lifecycle, node(W.active)?.contested], ["active", true], `neighbours: ${nb.text.slice(0, 800)}`);
+  assertEquals([node(W.suppressed)?.lifecycle, node(W.suppressed)?.contested], ["suppressed", false], `neighbours: ${nb.text.slice(0, 800)}`);
   assertEquals((nb.json.nodes as any[]).find((n) => n.id === W.root)?.lifecycle, null, "a page that is no source has none");
   const st = await call("POST", `/source-states`, W.subA, { ids: [W.active, W.suppressed, W.erased, uuid()], urls: [W.urlSuppressed, W.urlErased, "https://example.org/never"] });
   assertEquals(st.status, 200, st.text);
