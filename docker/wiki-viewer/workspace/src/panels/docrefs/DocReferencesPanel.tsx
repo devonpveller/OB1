@@ -11,6 +11,7 @@ import { setState, useWorkspace } from "../../lib/store";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { openPanel } from "../../shell/dock";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
+import { statusBadges, useSourceStates } from "../../lib/sourceStatus";
 
 interface Listed {
   number: number;
@@ -48,17 +49,19 @@ export function DocReferencesPanel(_p: PanelProps) {
       });
     }
   }, [path, rev, tick]);
+  // P8a-1 (D5): each listed source with its lifecycle state
+  const states = useSourceStates(listed.map((l) => l.source_id));
   const leaves = useMemo<Leaf[]>(() => [
     ...listed.map((l) => {
       const held = refs.filter((r) => l.reference_ids.includes(r.reference_id));
       return {
         key: `src:${l.source_id}`,
-        badges: [`[${l.number}]`, ...[...new Set(held.map((r) => r.origin))], ...[...new Set(held.map((r) => `rev ${r.pinned_revision}`))]],
+        badges: [`[${l.number}]`, ...statusBadges(states.byId[l.source_id]?.lifecycle), ...[...new Set(held.map((r) => r.origin))], ...[...new Set(held.map((r) => `rev ${r.pinned_revision}`))]],
         label: <span data-ref-row={l.reference_ids[0] ?? l.source_id} data-source={l.source_id}>{l.title || l.source_id}</span>,
       };
     }),
     { key: "add", label: <span>add a reference by searching sources</span> },
-  ], [refs, listed]);
+  ], [refs, listed, states]);
   const listText = () => listed.map((l) => `[${l.number}] ${l.title || l.source_id}`).join("\n");
   const actions = (l: Leaf) => {
     if (l.key === "add") {

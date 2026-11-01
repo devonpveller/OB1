@@ -1,0 +1,7 @@
+/* research-workbench P8a-1: the trail panel and the tombstone view */
+.ws-trail-row { font-size: 13px; word-break: break-all; }
+.ws-found-via { margin: 2px 0; padding-left: 18px; font-size: 12px; }
+.ws-tombstone-host { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; }
+.ws-tombstone dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 8px; margin: 0 0 6px; font-size: 13px; }
+.ws-tombstone dt { font-weight: 600; }
+.ws-tombstone dd { margin: 0; word-break: break-all; }

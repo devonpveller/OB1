@@ -12,6 +12,7 @@ import type { PanelProps } from "../../shell/registry";
 import { setTrust, useTrust } from "./focus";
 import { type LedgerClaim, relevanceOf } from "./logic";
 import { ReportHeaderById } from "./ReportHeader";
+import { SourceStatus, statusBadges, useSourceStates } from "../../lib/sourceStatus";
 
 interface QSource { source_id: string; title: string; family: string | null; relation: string; amount: number | null; claim: string | null }
 interface Quality {
@@ -77,6 +78,8 @@ export function SourceQualityPanel(_p: PanelProps) {
   const relevance = relevanceOf(mine, report && runClaims !== null ? { report_id: report, claims: runClaims } : null);
   const familyFactor = qual?.factors.find((f) => f.name === `${qual.family}_family_score`) ?? null;
 
+  // P8a-1 (D5): every source listed here - and the focus - with its lifecycle state
+  const states = useSourceStates([...(qual ? [qual.source_id] : []), ...(qual?.corroborated_by ?? []).map((s) => s.source_id), ...(qual?.contradicted_by ?? []).map((s) => s.source_id)]);
   const leaves = useMemo<Leaf[]>(() => {
     if (!qual) return [];
     return [
@@ -106,20 +109,20 @@ export function SourceQualityPanel(_p: PanelProps) {
       },
       ...qual.corroborated_by.map((s) => ({
         key: `src:${s.source_id}:c`, label: <span>{s.title || s.source_id} - {s.relation}{s.amount !== null ? ` (+${fmt(s.amount)})` : ""}</span>,
-        badges: ["corroborates"], detail: s.claim ? <p className="ws-muted">on: {s.claim}</p> : undefined,
+        badges: ["corroborates", ...statusBadges(states.byId[s.source_id]?.lifecycle)], detail: s.claim ? <p className="ws-muted">on: {s.claim}</p> : undefined,
       })),
       ...qual.contradicted_by.map((s) => ({
         key: `src:${s.source_id}:x`, label: <span>{s.title || s.source_id} - {s.relation}</span>,
-        badges: ["contested"], detail: s.claim ? <p className="ws-muted">on: {s.claim}</p> : undefined,
+        badges: ["contested", ...statusBadges(states.byId[s.source_id]?.lifecycle)], detail: s.claim ? <p className="ws-muted">on: {s.claim}</p> : undefined,
       })),
     ];
-  }, [qual]);
+  }, [qual, states]);
 
   if (!source) return <div className="ws-side ws-muted">Select a source (a reference, or a source in the claims ledger) to see why it is rated as it is.</div>;
   if (!qual) return <div className="ws-side ws-muted">{msg ? `quality unavailable: ${msg}` : "loading quality ..."}</div>;
   return (
     <div className="ws-side ws-quality" data-source={qual.source_id}>
-      <h4 className="ws-quality-title">{title || qual.source_id}</h4>
+      <h4 className="ws-quality-title">{title || qual.source_id} <SourceStatus lifecycle={states.byId[qual.source_id]?.lifecycle ?? qual.state} /></h4>
       {kind === "research_synthesis" && <ReportHeaderById reportId={qual.source_id} />}
       <dl className="ws-axes">
         <div data-testid="axis-legitimacy">

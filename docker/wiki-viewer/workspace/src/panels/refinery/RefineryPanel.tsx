@@ -9,6 +9,7 @@ import { api, C, D, get, post, q } from "../../lib/api";
 import { setState, useWorkspace } from "../../lib/store";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
+import { statusBadges } from "../../lib/sourceStatus";
 
 interface Flag {
   path: string;
@@ -84,7 +85,8 @@ export function RefineryPanel(p: PanelProps) {
       { key: "room", label: <span>the room</span>, badges: [room.state], detail: <span>{room.note}{room.location ? ` (${room.location})` : ""}</span> },
       ...idea.refinery.members.sessions.map((s: string) => ({ key: `session:${s}`, label: <span>session {s.slice(0, 8)}</span>, badges: ["session"] })),
       ...idea.refinery.user_sources.map((u: any) => ({
-        key: `user:${u.source_id}`, label: <span data-user-source={u.source_id}>{u.title}</span>, badges: [u.status, `rev ${u.revision}`, u.url ? "link" : "file"],
+        key: `user:${u.source_id}`, label: <span data-user-source={u.source_id}>{u.title}</span>, // P8a-1 (D5): the fold status AND the lifecycle state (a folded-in source may be suppressed since)
+        badges: [u.status, ...statusBadges(u.state === u.status ? null : u.state), `rev ${u.revision}`, u.url ? "link" : "file"],
       })),
     ];
   }, [idea, dstate, path]);

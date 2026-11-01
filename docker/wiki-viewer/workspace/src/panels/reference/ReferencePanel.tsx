@@ -14,6 +14,7 @@ import { getState, setState, useWorkspace, type SelectedReference } from "../../
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
 import { ReportHeaderById } from "../trust/ReportHeader";
+import { SourceStatus } from "../../lib/sourceStatus";
 
 interface Focus {
   title: string;
@@ -25,6 +26,7 @@ interface Focus {
   chunk_idx: number | null;
   quote: string;
   content_type?: string; // P3b: a research report (research_synthesis) shows its credibility header
+  lifecycle?: string | null; // P8a-1 (D5): the source's lifecycle state
 }
 
 type Crumb = { kind: "reference"; ref: SelectedReference; label: string } | { kind: "page"; slug: string; label: string };
@@ -37,12 +39,14 @@ async function focusOf(r: SelectedReference): Promise<Focus> {
       title: x.source?.title ?? x.held?.title ?? "reference", state: x.state, source_id: rec.source_id,
       reference_id: rec.id, pinned: rec.pinned_revision ?? null, current: x.version ?? null,
       chunk_idx: rec.chunk_idx ?? null, quote: rec.selectors?.quote?.exact ?? "", content_type: x.source?.content_type,
+      lifecycle: x.lifecycle ?? null,
     };
   }
   const x = await get(`${C}/references/${q(r.source_id)}`);
   return {
     title: x.source?.title ?? x.held?.title ?? r.source_id, state: x.state, source_id: r.source_id, reference_id: null,
     pinned: null, current: x.version ?? null, chunk_idx: r.chunk_idx ?? 0, quote: "", content_type: x.source?.content_type,
+    lifecycle: x.lifecycle ?? null,
   };
 }
 
@@ -197,7 +201,7 @@ export function ReferencePanel(_p: PanelProps) {
         testId="reference-disclosure"
         open
         summary={focus
-          ? <span><strong>{focus.title}</strong> {focus.pinned !== null ? `- pinned at revision ${focus.pinned}` : ""} {focus.state === "updated" ? <span className="ws-badge">updated</span> : null}</span>
+          ? <span><strong>{focus.title}</strong> {focus.pinned !== null ? `- pinned at revision ${focus.pinned}` : ""} {focus.state === "updated" ? <span className="ws-badge">updated</span> : null} <SourceStatus lifecycle={focus.lifecycle} /></span>
           : "loading ..."}
         leaves={leaves}
         actions={actions}

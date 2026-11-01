@@ -8,6 +8,7 @@ import { C, get, q } from "../../lib/api";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { registerPanel, type PanelProps } from "../../shell/registry";
 import "../sessions/sessions.css";
+import { statusBadges, useSourceStates } from "../../lib/sourceStatus";
 
 interface Stage {
   kind: string;
@@ -65,6 +66,8 @@ export function ResearchFlowPanel(p: PanelProps) {
     return () => clearTimeout(t);
   }, [flow]);
 
+  // P8a-1 (D5): a hit that is a source shows its lifecycle state (looked up by URL - shared knowledge)
+  const states = useSourceStates([], (flow?.sources ?? []).map((s) => s.url));
   const leaves = useMemo<Leaf[]>(() => (flow?.sources ?? []).map((s) => ({
     key: s.url,
     label: (
@@ -84,13 +87,13 @@ export function ResearchFlowPanel(p: PanelProps) {
         </span>
       </span>
     ),
-    badges: [`${s.stages.length} stage${s.stages.length === 1 ? "" : "s"}`],
+    badges: [`${s.stages.length} stage${s.stages.length === 1 ? "" : "s"}`, ...statusBadges(states.byUrl[s.url]?.lifecycle)],
     detail: (
       <ol className="ws-flow-trail">
         {s.stages.map((st, i) => <li key={i}>{new Date(st.at).toLocaleTimeString()} <TrailLine t={st.trail} /></li>)}
       </ol>
     ),
-  })), [flow, seen]);
+  })), [flow, seen, states]);
 
   const summary = !id ? <span>research flow: no session selected</span>
     : flow?.withheld ? <span>research flow: another user's session (its flow is theirs)</span>
