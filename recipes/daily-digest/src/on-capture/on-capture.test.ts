@@ -7,7 +7,7 @@
 // Run: deno test --allow-read --allow-env src/on-capture/on-capture.test.ts
 import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { mapOn, type OnInput, PIPER_TO_KOKORO, profileCounts } from "./on-mapping.ts";
-import { assertReadOnly } from "./surreal-read.ts";
+import { ALLOWED_OUTSIDE, assertReadOnly } from "./surreal-read.ts";
 import { byClass, classify } from "./migration.ts";
 import { changed, fingerprint, PAGE, type Reader } from "./fingerprint.ts";
 import { BYPASS_CASES, CAPTURE_QUERIES } from "./guard-cases.ts";
@@ -186,4 +186,29 @@ Deno.test("capture-fix round 2 (tester D1): every bypass attempt is refused; eve
   }).map(([name]) => name);
   assertEquals(admitted, [], "admitted bypass attempts");
   for (const q of CAPTURE_QUERIES) assertReadOnly(q);
+});
+
+Deno.test("capture-fix round 3: the allow-list is exactly what the capture's queries use; every other printable ASCII character refuses", () => {
+  // derived from CAPTURE_QUERIES (literals removed): the allow-list holds nothing they do not use
+  const used = new Set<string>();
+  for (const q of CAPTURE_QUERIES) for (const ch of q.replace(/'[^']*'/g, "")) used.add(ch);
+  assertEquals([...ALLOWED_OUTSIDE].filter((ch) => !used.has(ch) && !/[A-Za-z0-9]/.test(ch)), [], "allowed punctuation no capture query uses");
+  assertEquals([...used].filter((ch) => !ALLOWED_OUTSIDE.has(ch)), [], "a capture query uses a character outside the allow-list");
+  // property: each printable ASCII character NOT in the allow-list, inserted outside a literal into every
+  // capture query (at its start, after its first word, before its end), refuses that query
+  const outside = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i)).filter((ch) => !ALLOWED_OUTSIDE.has(ch) && ch !== "'");
+  assert(outside.length >= 20, `${outside.length} characters outside`);
+  const admitted: string[] = [];
+  for (const ch of [...outside, "\t", "\n", "\r", "\u0000", " ", "∶", "⟨"]) {
+    for (const q of CAPTURE_QUERIES) {
+      const sp = q.indexOf(" ");
+      for (const variant of [ch + q, q.slice(0, sp) + ch + q.slice(sp), q + ch, q.slice(0, sp + 1) + ch + " " + q.slice(sp + 1)]) {
+        try {
+          assertReadOnly(variant);
+          admitted.push(JSON.stringify(variant));
+        } catch { /* refused */ }
+      }
+    }
+  }
+  assertEquals(admitted, [], "a character outside the allow-list was admitted");
 });

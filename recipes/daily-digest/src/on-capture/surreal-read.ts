@@ -15,41 +15,48 @@ export interface SurrealConfig {
   fetchFn?: typeof fetch;
 }
 
-const WRITE = /\b(CREATE|UPDATE|UPSERT|DELETE|INSERT|RELATE|REMOVE|DEFINE|ALTER|KILL|LIVE|BEGIN|COMMIT|CANCEL|USE|SLEEP|REBUILD|LET|THROW|RETURN|FOR|IF)\b/i;
+// The write and control keywords no capture SELECT contains (whole word, case-insensitive, outside literals):
+// a second, independent check under the character allow-list.
+const WRITE = /\b(CREATE|UPDATE|UPSERT|DELETE|INSERT|RELATE|REMOVE|DEFINE|ALTER|KILL|LIVE|BEGIN|COMMIT|CANCEL|USE|SLEEP|REBUILD|LET|THROW|RETURN|FOR|IF|INFO)\b/i;
 
 /**
- * The statement with its string literals blanked to '' - by a SCANNER, not a regex (capture-fix round 2,
- * tester t-p7a-capture D1): a quote that is not inside a literal used to open a fake literal and hide real
- * code (`SELECT x /* ' *\/, fn::w() AS q /* ' *\/ FROM a` ran a writing function). FAIL CLOSED: outside a
- * literal, every comment marker (`/*`, `*\/`, `--`, `#`, `//`), every quoted-identifier delimiter (backtick,
- * U+27E8 / U+27E9 angle brackets), every `;` and every non-ASCII character (homoglyphs of `:`, zero-width joiners) REFUSE the
- * statement; an unterminated literal refuses. The capture sends only its own fixed queries, none of which
- * uses any of them. A literal is '...' or "..." with backslash escapes.
+ * Round 3 (tester t-p7a-capture attempts 1-2: D1 comments / quoted identifiers, D2 regex literals - each a
+ * token kind whose delimiters let a quote open a fake literal): an ALLOW-LIST, not a deny-list. Outside a
+ * string literal only these characters may appear - exactly what the capture's own queries use
+ * (guard-cases.ts CAPTURE_QUERIES: on-capture.ts readOn + src/on-capture/fingerprint.ts):
+ *   A-Z a-z 0-9, space, and   , ( ) * < = > _
+ *   plus  $ and :  ONLY inside the two exact tokens  $this  and  crypto::sha256(  (checked in assertReadOnly)
+ *   and   '  which opens a single-quoted literal: only after a space or ( , = < >, no backslash inside, never
+ *         followed straight by another quote (the capture's one literal is  = 'generate_podcast').
+ * Everything else refuses: / " ` ; # - . | @ ? ! & + % ^ ~ [ ] { } \ U+27E8 U+27E9, tab, CR, LF, any
+ * non-ASCII character - so no comment, regex, quoted identifier, block, closure, graph arrow, parameter other
+ * than $this, second statement or record id can be written outside a literal at all.
  */
+export const ALLOWED_OUTSIDE: ReadonlySet<string> = new Set(
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ,()*<=>_$:".split(""),
+);
+
+/** The statement with its single-quoted literals blanked to '' (a scanner); any character outside a literal
+ *  that is not in ALLOWED_OUTSIDE refuses it; so does an unterminated, prefixed, escaped or doubled literal. */
 export function code(q: string): string {
   let out = "";
   for (let i = 0; i < q.length; i++) {
     const ch = q[i];
-    if (ch === "'" || ch === '"') {
-      let j = i + 1;
-      for (; j < q.length; j++) {
-        if (q[j] === "\\") {
-          j++;
-          continue;
-        }
-        if (q[j] === ch) break;
-      }
-      if (j >= q.length) throw new Error("read-only client: an unterminated string literal");
+    if (ch === "'") {
+      // a literal may open only after a separator (no prefixed r'' s'' d'' u'' b'' f'' or unknown prefix,
+      // whose escaping the server may judge differently), holds no backslash (no escape the server could
+      // read differently), and is not followed straight by another quote (no doubled-quote ambiguity)
+      if (i > 0 && !" (,=<>".includes(q[i - 1])) throw new Error("read-only client: a string literal must follow a space or ( , = < >");
+      const j = q.indexOf("'", i + 1);
+      if (j < 0) throw new Error("read-only client: an unterminated string literal");
+      if (q.slice(i + 1, j).includes("\\")) throw new Error("read-only client: no backslash in a string literal");
+      if (q[j + 1] === "'") throw new Error("read-only client: no doubled quotes");
       out += "''";
       i = j;
       continue;
     }
-    const two = q.slice(i, i + 2);
-    if (two === "/*" || two === "*/" || two === "--" || two === "//" || ch === "#") throw new Error("read-only client: no comments");
-    if (ch === "`" || ch === "\u27e8" || ch === "\u27e9") throw new Error("read-only client: no quoted identifiers");
-    if (ch === ";") throw new Error("read-only client: one statement per query, no ';'");
-    if (ch.charCodeAt(0) > 0x7e || (ch.charCodeAt(0) < 0x20 && ch !== "\n" && ch !== "\r" && ch !== "\t")) {
-      throw new Error("read-only client: only printable ASCII outside a string literal");
+    if (!ALLOWED_OUTSIDE.has(ch)) {
+      throw new Error(`read-only client: character U+${ch.charCodeAt(0).toString(16).padStart(4, "0")} is not allowed outside a string literal`);
     }
     out += ch;
   }
@@ -59,15 +66,15 @@ export function code(q: string): string {
 export function assertReadOnly(q: string): void {
   const c = code(q).trim();
   // INFO FOR DB / NS, and INFO FOR TABLE <one plain table name> (the schema the quiesce check fingerprints)
-  if (/^INFO\s+FOR\s+(DB|NS)$/i.test(c) || /^INFO\s+FOR\s+TABLE\s+[a-z_][a-z0-9_]*$/i.test(c)) return;
-  if (!/^SELECT\b/i.test(c)) throw new Error("read-only client: only SELECT or INFO FOR DB / NS / TABLE");
-  // round 2: no function call - a fn:: (user-defined) function can write, http:: can reach out. The ONE
-  // exception (capture-fix): the built-in, side-effect-free crypto::sha256( that the fingerprint uses to
-  // hash rows on the server.
-  // (exact spelling, case-sensitive, not glued to a longer name: `xcrypto::sha256(`, `crypto::sha256x(`,
-  // `CRYPTO::SHA256(`, `crypto::sha256 (` all keep their `::` and refuse)
-  if (c.replace(/(?<![A-Za-z0-9_:])crypto::sha256\(/g, "").includes("::")) throw new Error("read-only client: no function calls ('::')");
-  const m = WRITE.exec(c);
+  if (/^INFO FOR (DB|NS)$/.test(c) || /^INFO FOR TABLE [a-z_][a-z0-9_]*$/.test(c)) return;
+  if (!/^SELECT /.test(c)) throw new Error("read-only client: only SELECT or INFO FOR DB / NS / TABLE");
+  // `:` and `$` exist ONLY as the exact, unglued tokens crypto::sha256( (the one admitted function: built-in,
+  // side-effect-free, the fingerprint's server-side row hash) and $this (the row it hashes). Anything else
+  // with a ':' (fn::, http::, a record id) or a '$' (any other parameter) refuses.
+  const rest = c.replace(/(?<![A-Za-z0-9_:$])crypto::sha256\(/g, " ( ").replace(/(?<![A-Za-z0-9_:$])\$this(?![A-Za-z0-9_])/g, " ");
+  if (rest.includes(":")) throw new Error("read-only client: no ':' outside the exact token crypto::sha256(");
+  if (rest.includes("$")) throw new Error("read-only client: no '$' outside the exact token $this");
+  const m = WRITE.exec(rest);
   if (m) throw new Error(`read-only client: '${m[1]}' is not allowed`);
 }
 

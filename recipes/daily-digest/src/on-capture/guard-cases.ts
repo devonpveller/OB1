@@ -37,6 +37,27 @@ export const BYPASS_CASES: [string, string][] = [
   ["sha256x", "SELECT crypto::sha256x(x) FROM a"],
   ["sha256 over (CREATE ...)", "SELECT crypto::sha256(<string> (CREATE pwned SET via = 'x')) FROM a"],
   ["literal holding crypto::sha256( then fn::", "SELECT 'crypto::sha256(' , fn::w() FROM a"],
+  // round 3 (tester t-p7a-capture attempt 2, D2): a regex literal /.../ is a value; a quote inside it opened
+  // a fake string that hid code (guard-probe2.ts)
+  ["regex literal /'/ hides fn", "SELECT x, /'/ AS r1, fn::w() AS q, /'/ AS r2 FROM a"],
+  ["regex literal in WHERE hides fn", "SELECT x FROM a WHERE name = /'/ OR fn::w() = 1 OR name = /'/"],
+  ['regex literal /"/ hides fn', 'SELECT x, /"/ AS r1, fn::w() AS q, /"/ AS r2 FROM a'],
+  ["regex hides a CREATE subquery", "SELECT x, /'/ AS r1, (CREATE pwned SET via = 'rx') AS q, /'/ AS r2 FROM a"],
+  ["regex hides DELETE in WHERE", "SELECT x FROM a WHERE name = /'/ OR (DELETE pwned) OR name = /'/"],
+  // round 3: literals the server might end where the scanner does not - prefixed strings, a backslash,
+  // doubled quotes - are all refused outright
+  ...["r", "s", "d", "u", "b", "f"].map((p): [string, string] => [`prefix ${p}'..\\' hides fn`, `SELECT ${p}'a\\' , fn::w() AS q, ${p}'' FROM a'`]),
+  ["backslash in a literal", "SELECT 'a\\'' , fn::w() AS q FROM a"],
+  ["doubled quote", "SELECT 'a'' , fn::w() AS q, '' FROM a"],
+  ["literal glued to a word (an unknown prefix)", "SELECT x FROM a WHERE name = x'y'"],
+  // round 3: other parameters, graph arrows, blocks, record ids, dotted paths
+  ["another parameter", "SELECT $wp(1) AS q FROM a"],
+  ["$thisx", "SELECT crypto::sha256(<string> $thisx) AS h FROM a"],
+  ["a block", "SELECT { 1 } AS q FROM a"],
+  ["graph arrow", "SELECT ->refers_to->notebook AS q FROM note"],
+  ["a record id", "SELECT * FROM source:abc"],
+  ["a dotted path", "SELECT meta.deep FROM a"],
+  ["INFO inside a SELECT", "SELECT (INFO FOR DB) AS q FROM a"],
 ];
 
 /** Statements the capture itself sends - each must be ADMITTED. */
