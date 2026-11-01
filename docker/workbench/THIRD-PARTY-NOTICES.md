@@ -118,12 +118,49 @@ micromark).
 | Noto CJK fonts (fonts-noto-cjk) | Debian 1:20240730+repack1-1 | OFL-1.1 (Debian copyright: SIL-1.1, Copyright 2010-2012 Google Corporation) | font data: Noto Serif CJK SC is the PDF's main face (CJK glyphs, acceptance 4) | https://github.com/notofonts/noto-cjk |
 | Noto Color Emoji (fonts-noto-color-emoji) | Debian 2.051-0+deb13u1 | OFL-1.1 for the font (Debian copyright: `Files: fonts/*`, SIL-1.1, Copyright 2013-2017 Google Inc.; the build tooling is Apache-2.0 and not shipped) | font data: the face Typst falls back to for emoji (rw-p6a-resolve attempt 2) | https://github.com/googlefonts/noto-emoji |
 | DejaVu fonts (fonts-dejavu-core) | Debian 2.37-8 | Bitstream-Vera (Debian copyright: `License: bitstream-vera`, Copyright (c) 2003 Bitstream, Inc.; DejaVu changes in the public domain) | font data: Hebrew, Arabic and other scripts in the PDF, the same coverage as Typst's embedded DejaVu Sans Mono (rw-p6a-resolve attempt 2) | https://dejavu-fonts.github.io/ |
-| poppler-utils (pdftoppm, pdftotext, pdffonts, pdfinfo) | 25.03.0 (Debian 25.03.0-5+deb13u4) | GPL-2.0-only OR GPL-3.0-only (Debian copyright: GPL-2 or GPL-3) | SEPARATE PROCESS only, over files: reads the export's PDFs back in the image's TEST and PARITY stages; not in the runtime image | https://poppler.freedesktop.org |
+| poppler-utils (pdftoppm, pdftotext, pdffonts, pdfinfo) | 25.03.0 (Debian 25.03.0-5+deb13u4) | GPL-2.0-only OR GPL-3.0-only (Debian copyright: GPL-2 or GPL-3) | SEPARATE PROCESS only, over files, unmodified Debian package: in the RUNTIME image since research-workbench P6b - pdftoppm rasterises every PDF export for the verification gate (src/export/gate.ts runs the program over a file; no poppler library is linked, loaded or imported by the workbench or the gate's Python); in the TEST and PARITY stages the four programs read the export's PDFs back. If the image ships, its source is offered as Debian's (source package poppler 25.03.0-5+deb13u4) | https://poppler.freedesktop.org |
 | WeasyPrint (parity stage only, never shipped) | 62.3 (Debian 62.3-1) | BSD-3-Clause | the PDF engine before P6a; kept ONLY in the image's parity stage to render the parity fixture through the retired path (acceptance 6); removed from the runtime image | https://weasyprint.org |
 | git | 2.47.3 (Debian 1:2.47.3-0+deb13u1) | GPL-2.0-only | SEPARATE PROCESS only (vault commits) | https://git-scm.com |
+| Python (python3, python3-venv) | 3.13.5 (Debian 3.13.5-2+deb13u5) | PSF-2.0 | the interpreter of the export gate's structure checks (gate/structure.py), run as its own process with -I; research-workbench P6b | https://www.python.org |
 | PostgreSQL + pgvector (image pgvector/pgvector:pg16@sha256:ccc6e83d...4d6b) | 16.15 / pgvector library 0.8.6 (extension catalog 0.8.2 on the live volume) | PostgreSQL | separate service | https://github.com/pgvector/pgvector |
 | Dredd (contract test tool, never shipped) | 14.1.0 | MIT | contract-test/run-contract-tests.ps1 | https://github.com/apiaryio/dredd |
 | Node.js (Dredd's runtime, test image only) | 20 (node:20-alpine) | MIT | contract test image only | https://nodejs.org |
+
+## The export verification gate's Python environment (research-workbench P6b)
+
+`/opt/export-gate` in the workbench image: the libraries `gate/structure.py` imports - pikepdf and
+pdfplumber - and what they pull in, installed UNMODIFIED from `gate/requirements.txt` (each wheel
+pinned by version and sha256, binary only, `--no-deps`; pip is removed after the install). It runs as a
+separate process the workbench starts over a file. Each licence was read on 2026-10-30 from the
+installed wheel's own metadata (`License-Expression` / classifier) and its `licenses/` files at the
+pinned version. `src/contracts/notices_test.ts` checks, at every image build, that every distribution
+installed there has a row here at its installed version.
+
+| Name | Version | Licence | Copyright | URL |
+|---|---|---|---|---|
+| pikepdf (python) | 10.17.0 | MPL-2.0 (used unmodified; a modified file would be published under MPL-2.0) | James R. Barlow and contributors | https://github.com/pikepdf/pikepdf |
+| pdfplumber (python) | 0.11.10 | MIT | 2015, Jeremy Singer-Vine | https://github.com/jsvine/pdfplumber |
+| pdfminer.six (python) | 20260107 | MIT | 2004-2016 Yusuke Shinyama | https://github.com/pdfminer/pdfminer.six |
+| pypdfium2 (python) | 5.14.0 | Apache-2.0 OR BSD-3-Clause (the bindings; its bundled PDFium build below) | pypdfium2-team | https://github.com/pypdfium2-team/pypdfium2 |
+| pillow (python) | 13.0.0 | MIT-CMU (HPND) | 1997-2011 Secret Labs AB; 1995-2011 Fredrik Lundh and contributors; 2010 Jeffrey A. Clark and contributors | https://python-pillow.github.io |
+| lxml (python) | 6.1.3 | BSD-3-Clause | 2004 Infrae; lxml dev team | https://lxml.de |
+| cryptography (python) | 50.0.2 | Apache-2.0 OR BSD-3-Clause (elected: Apache-2.0) | The Python Cryptographic Authority and individual contributors | https://github.com/pyca/cryptography |
+| cffi (python) | 2.1.1 | MIT-0 | Armin Rigo, Maciej Fijalkowski | https://github.com/python-cffi/cffi |
+| pycparser (python) | 3.12 | BSD-3-Clause | 2008-2027 Eli Bendersky | https://github.com/eliben/pycparser |
+| charset-normalizer (python) | 3.5.2 | MIT | 2025 TAHRI Ahmed R. | https://github.com/jawah/charset_normalizer |
+| packaging (python) | 26.3 | Apache-2.0 OR BSD-2-Clause (elected: Apache-2.0) | Donald Stufft and individual contributors | https://github.com/pypa/packaging |
+
+Native libraries the wheels bundle (from each wheel's own third-party licence files):
+
+| Bundled in | Library | Licence |
+|---|---|---|
+| pikepdf | qpdf 12.4.1 (libqpdf) | Apache-2.0 |
+| pikepdf | libjpeg-turbo 1.5.3 (manylinux build) | IJG + BSD-3-Clause + Zlib (its README.ijg is carried in the wheel) |
+| pypdfium2 | PDFium (the PDFium Authors, 2014) and its build dependencies: abseil, agg23, fast_float, FreeType, ICU, lcms, libjpeg-turbo, OpenJPEG, libpng, libtiff, llvm-libc, simdutf, zlib | BSD-3-Clause / Apache-2.0 / permissive per library (BUILD_LICENSES in the wheel); FreeType under the FreeType License (FTL, elected over its General Public License alternative); ICU's licence file quotes General Public License text only for ICU's autoconf build files, which are not in the library |
+| pillow | FreeType, HarfBuzz, lcms2, libjpeg-turbo, OpenJPEG, libpng, libtiff, libwebp, libavif, brotli, xz (liblzma), zstd, libxcb, libXau | permissive per library (Pillow's LICENSE carries each text); FreeType under the FTL (elected over its General Public License alternative) |
+
+pikepdf's manylinux wheel bundles no GCC runtime and no OpenSSL (its third-party README: those are in
+the musllinux and Windows wheels only, which are not installed here).
 
 ## Data services queried by the research service (research-workbench P3a; no code used)
 

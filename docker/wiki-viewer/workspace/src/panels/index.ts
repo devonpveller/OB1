@@ -10,4 +10,5 @@ import "./refinery/RefineryPanel";
 import "./docmeta/DocMetaPanels";
 import "./sessions/SessionsPanel";
 import "./flow/ResearchFlowPanel";
+import "./export/ExportPanel";
 import "./trust/TrustPanels";

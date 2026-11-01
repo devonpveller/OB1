@@ -53,7 +53,7 @@ src/
 
 ## Networks
 
-`obnet` (PostgREST) + `llm-net` (embeddings) + `app-net` (portal-Caddy name
+`obnet` (PostgREST) + `llm-net` (embeddings; the export gate's vision pass, P6b - the LiteLLM alias only) + `app-net` (portal-Caddy name
 resolution — required, §2.3) + `search-gw-net` (= `ai-stack_default`: the `vpn` proxy the
 export's resolver goes out through, research-workbench P6a; and `search-gateway:8080`'s `POST /v1/fetch`,
 the only path by which the workbench fetches a user-supplied URL, rw-workbench-fetch-posture).
@@ -80,6 +80,10 @@ gate's `search/secrets/gate/caller_keys`; `WORKBENCH_GATE_TIMEOUT_MS` (default 9
 fetch nothing: there is no direct mode, so the first rebuild of this image after rw-workbench-fetch-posture
 turns them off until the gate deploy. A refusal from the gate is answered with its reason unchanged
 (422 refused / withheld, 502 error) and nothing is stored.
+The export's verification gate (P6b): `EXPORT_VISION_URL` (default `http://llama-cpp:8080/v1`, the LiteLLM
+alias - any other host is refused), `EXPORT_VISION_KEY` (the export's OWN LiteLLM virtual key) and
+`EXPORT_VISION_MODEL` (both blank = no vision pass), `EXPORT_VISION_TIMEOUT_MS` (120 s), `EXPORT_GATE_DPI`
+(72), `EXPORT_GATE_TIMEOUT_MS` (120 s), `EXPORT_GATE_PYTHON` (`/opt/export-gate/bin/python`).
 
 ## Sign-in (Authentik forward-auth) (rw-identity, rw-identity2)
 
@@ -435,4 +439,46 @@ GPL source offer.
 
 ```
 powershell -NoProfile -File contract-test/run-export-tests.ps1 [-Subnet a.b.c.0/24]   # disposable P6a run (stub APIs)
+```
+
+## The export verification gate (research-workbench P6b)
+
+A PDF export (`export_formats` row with `definition.gate: true`) is checked after it renders and BEFORE
+it is served (`src/export/gate.ts`); a blocked export never leaves the workbench.
+
+1. **Rasterise** - `pdftoppm` (poppler-utils, GPL) as a separate, unmodified program over files: one PNG
+   per page. Not renderable = blocked (`unrenderable`).
+2. **Structure** - `gate/structure.py` in its own Python process (`/opt/export-gate`: pikepdf MPL-2.0 and
+   pdfplumber MIT, pinned by hash in `gate/requirements.txt`): fonts embedded (`font-not-embedded`), no
+   glyph outside the page box (`clipped`) or the format's text area (`overflow`: a clipped or over-wide
+   table), no glyphs drawn over each other (`overlapping-text`), at most 500 pages (`too-many-pages`).
+3. **References - ADVISORY** (operator decision 2026-10-31, "simpler check + advisory") - the file's reference
+   list against the references the export numbered: the same entries in the style's order (numbered styles by
+   label, author-date by entry), each entry compared as a SKELETON with the entry citeproc renders for it
+   (`src/export/biborder.ts` bibliographyEntries): NFKC, case-folded, Unicode letters and digits only (every
+   hyphen variant, format character, punctuation and space dropped); equal for left-to-right text, an equal
+   character multiset when the entry holds Hebrew or Arabic (the PDF's text is in visual order). A mismatch
+   does NOT block: the PDF is served, the run records a `reference-mismatch` warning, the response carries
+   `x-export-reference-parity: mismatch`, and the Export panel shows "reference list may differ from the panel".
+   The reference panel (`GET /workbench/documents/references[?style=]`) lists one entry per source in the
+   style's order, titled as the export prints it.
+4. **Required sections** - registry `export_required_sections` (`init-export-gate.sql`): a research report
+   (`content_type: research_synthesis`) must carry the "Report credibility" roll-up with its claim-kind
+   weights (`required-section-missing`). The row, not code, names the heading P3b writes.
+5. **Vision** - `src/export/vision.ts`: the page images (at most 20 per call) to a vision model through
+   LiteLLM ONLY (`EXPORT_VISION_URL` must be the `llama-cpp` alias; an `*-upstream` or other host is
+   `vision-misrouted`) under the export's own key (a key equal to another the workbench holds is
+   `vision-key-shared`), answering `{blocking_findings, warnings}` in a strict JSON schema. Shipped inert
+   (blank key or model: warning `vision-not-configured`); configured, it fails closed (`vision-unavailable`,
+   `vision-unreadable`).
+
+Every gated export is recorded for the caller's subject (`export_runs`): passed = the file is served
+with `x-export-id` and kept (warnings - the advisory reference parity among them - recorded on the run);
+blocked (layout, a required section, vision) = 422 `layout-gate` with the findings and warnings, no file.
+`GET /workbench/exports[?path=]`, `GET /workbench/exports/:id` and `GET /workbench/exports/:id/file` read
+the CALLER's runs only (owner_sub in SQL; another user's id is 404). The workspace's **Export** panel
+lists my documents and my runs, exports the open document and shows a blocked export's findings.
+
+```
+powershell -NoProfile -File contract-test/run-export-gate-tests.ps1 -Subnet a.b.c.0/24 [-Red]   # disposable P6b run (vision stand-in)
 ```

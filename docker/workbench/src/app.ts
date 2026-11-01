@@ -25,6 +25,7 @@
 //   /workbench/documents   — research-workbench P2b: user documents (D12) - the documents tree,
 //                            the listing record, references, the refinery from the document
 //   /workbench/workspace   — research-workbench P2b: the title bar bell's acknowledgement
+//   /workbench/exports     — research-workbench P6b: the caller's own gated export runs (the export panel)
 //   /workbench/auth        — rw-identity: who am I, admin impersonation and its audit log (sign-in
 //                            is Authentik forward-auth at the edge; inert without WORKSPACE_FORWARD_AUTH_*)
 import { Hono } from "hono";
@@ -39,6 +40,9 @@ import { sources, sourceCommit } from "./routes/sources.ts";
 import { imports, jobs } from "./routes/import.ts";
 import { grounding } from "./routes/grounding.ts";
 import { exporter } from "./routes/export.ts";
+import { exportsRouter } from "./routes/exports.ts";
+import { runStore } from "./export/runs.ts";
+import { identityOf } from "./middleware/identity.ts";
 import { noteRefs } from "./routes/note-refs.ts";
 import { noteHistory, noteCommit } from "./routes/note-history.ts";
 import { search } from "./routes/search.ts";
@@ -103,6 +107,7 @@ app.route("/workbench/import", imports); // P5 (single upload route; P6 groundin
 app.route("/workbench/jobs", jobs); // P5
 app.route("/workbench/grounding", grounding); // P6
 app.route("/workbench/export", exporter); // P3.5 — pandoc note export
+app.route("/workbench/exports", exportsRouter(runStore(cdeps.db), identityOf)); // research-workbench P6b — the caller's own gated export runs
 app.route("/workbench/note-refs", noteRefs); // P3.5 — note reference list
 app.route("/workbench/note-history", noteHistory); // P4.7 — note git revisions
 app.route("/workbench/note-commit", noteCommit); // P4.7 — commit-now / compile-catch

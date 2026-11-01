@@ -129,3 +129,46 @@ Deno.test("P6a: manubot is noticed at its pinned commit with its licence text an
   assert(/BSD-2-Clause Plus Patent License/.test(ported) && /Recorded mismatch/.test(ported) && /BSD 3-Clause License/.test(ported));
   assert(ported.includes("Redistributions of source code must retain the above copyright notice"), "the licence text is carried");
 });
+
+// research-workbench P6b (rw-p6b-gate; anchor acceptance 4, D9 rules 4-5): pdftoppm is in the runtime
+// image as a separate program, listed with the version the image really runs; the gate's Python
+// environment holds only noticed distributions, each at its installed version.
+Deno.test("P6b: poppler (pdftoppm) is noticed as a separate process at the version the image runs", async () => {
+  const r = programRow("poppler-utils")!;
+  assert(/SEPARATE PROCESS only/.test(r) && /RUNTIME image/.test(r) && /pdftoppm rasterises/.test(r), `the poppler row: ${r}`);
+  let out = "";
+  try {
+    const o = await new Deno.Command("pdftoppm", { args: ["-v"], stdout: "piped", stderr: "piped" }).output();
+    out = new TextDecoder().decode(o.stderr) + new TextDecoder().decode(o.stdout);
+  } catch {
+    return; // not in the image (the repo): the image's build gate checks it
+  }
+  const v = /pdftoppm version ([0-9.]+)/.exec(out)?.[1];
+  assert(v, `pdftoppm -v: ${out}`);
+  assert(r.split("|")[2].includes(v), `pdftoppm runs ${v}, the notices row says ${r.split("|")[2].trim()}`);
+});
+
+Deno.test("P6b: every distribution in the export gate's Python environment has a notices row at its installed version", async () => {
+  const env = "/opt/export-gate/lib";
+  let site = "";
+  try {
+    for (const e of Deno.readDirSync(env)) if (e.name.startsWith("python3")) site = `${env}/${e.name}/site-packages`;
+  } catch {
+    return; // not in the image
+  }
+  const gate = section("The export verification gate's Python environment (research-workbench P6b)");
+  const grows = gate.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("|---"));
+  const found: string[] = [];
+  for (const e of Deno.readDirSync(site)) {
+    const m = /^(.+)-([^-]+)\.dist-info$/.exec(e.name);
+    if (!m) continue;
+    const meta = await Deno.readTextFile(`${site}/${e.name}/METADATA`);
+    const name = /^Name: (.+)$/m.exec(meta)![1].trim();
+    const version = /^Version: (.+)$/m.exec(meta)![1].trim();
+    found.push(`${name}@${version}`);
+    const row = grows.find((r) => r.split("|")[1].trim().toLowerCase().startsWith(`${name.toLowerCase()} `) && r.split("|")[2].trim() === version);
+    assert(row, `${name} ${version} is installed in ${site} but has no notices row`);
+  }
+  assert(found.length >= 11, `the environment holds ${found.join(", ")}`);
+  assert(!found.some((f) => /^pip@/i.test(f)), "pip is removed from the environment after the install");
+});

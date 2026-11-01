@@ -194,3 +194,13 @@ export function recordToCsl(r: { title: string | null; url: string | null; acces
     accessed: dp ? { "date-parts": [dp] } : undefined,
   }, "the source record");
 }
+
+// The title as the exported file PRINTS it (rw-p6b-gate round 2, tester D3): the CSL item made safe
+// for rendering (renderSafeCsl - every non-citeproc tag and comment removed, unsafe schemes defanged),
+// then citeproc's own rich-text tags (<i>, <b>, <sup>, <sub>, <sc>, the nocase / small-caps spans)
+// dropped, as the renderer turns them into styling and keeps only their text. Everything else - `*`,
+// `&amp;` - prints as written. The reference panel shows this string, and the gate looks for it.
+export function printedTitle(csl: Record<string, unknown>): string {
+  const t = renderSafeCsl({ title: csl.title ?? "" }).title;
+  return String(t ?? "").replace(/<\/?(?:i|b|sup|sub|sc)>|<span [^>]*>|<\/span>/gi, "").replace(/\s+/g, " ").trim();
+}
