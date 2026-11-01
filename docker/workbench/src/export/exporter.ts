@@ -38,7 +38,7 @@ import { citeKey, type FormatDef, type RefItem, render as realRender, RenderFail
 import { aboutExport } from "./about.ts";
 import type { Limits } from "./markdown.ts";
 import { judgeSecret } from "./credentials.ts";
-import { bibliographyOrder } from "./biborder.ts";
+import { bibliographyEntries } from "./biborder.ts";
 import { frontmatterOf, type GateInput, type GateResult, type RequiredSection } from "./gate.ts";
 import type { RunStore } from "./runs.ts";
 import type { Context } from "hono";
@@ -307,9 +307,10 @@ export function createExporter(deps: ExporterDeps): Hono {
         try {
           result = await g.gate({
             pdf: out.bytes, format, numeric: styleEntry.definition.citation_format === "numeric",
-            // round 3 (D10): an author-date style SORTS its list - the expected order is citeproc's
-            refs: (styleEntry.definition.citation_format === "numeric" ? refItems : await bibliographyOrder(refItems, styleOf(styleEntry), deps.cslDir))
-              .map((r) => ({ number: r.number, title: printedTitle(r.csl) })),
+            // round 3 (D10): an author-date style SORTS its list - the expected order is citeproc's; round 5: each
+            // with the entry citeproc renders for it (the advisory parity check compares skeletons)
+            refs: (await bibliographyEntries(refItems, styleOf(styleEntry), deps.cslDir))
+              .map(({ item: r, text }) => ({ number: r.number, title: printedTitle(r.csl), ...(text ? { entry: text } : {}) })),
             frontmatter: frontmatterOf(md),
             required: (await live("export_required_sections")).map((e) => ({ key: e.key, ...(e.definition as Omit<RequiredSection, "key">) })),
           });
@@ -328,7 +329,9 @@ export function createExporter(deps: ExporterDeps): Hono {
             code: "layout-gate", export_id: id, blocking_findings: result.blocking_findings, warnings: result.warnings,
           }, 422);
         }
-        gateHeaders = { "x-export-id": id, "x-export-gate": "passed", "x-export-warnings": String(result.warnings.length) };
+        // round 5: the reference list's parity is advisory - a mismatch is served, and said so
+        const parity = result.warnings.some((w) => w.code === "reference-mismatch") ? "mismatch" : "ok";
+        gateHeaders = { "x-export-id": id, "x-export-gate": "passed", "x-export-warnings": String(result.warnings.length), "x-export-reference-parity": parity };
       }
       return new Response(out.bytes as unknown as BodyInit, {
         headers: {

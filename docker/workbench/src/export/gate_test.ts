@@ -155,16 +155,17 @@ Deno.test("acceptance 2 (real): the PDF's reference list matches the numbered re
     ["renamed", want.map((r) => r.number === 5 ? { ...r, title: "Some other paper entirely" } : r)],
   ] as const) {
     const g = await runGate({ vision: OFF }, input(pdf, { refs: [...wrong] }));
-    assertEquals([g.status, codes(g.blocking_findings)], ["blocked", ["reference-mismatch"]], why);
+    // round 5 (operator 2026-10-31): a parity mismatch is ADVISORY - served, recorded as a warning
+    assertEquals([g.status, codes(g.blocking_findings), codes(g.warnings).includes("reference-mismatch")], ["passed", [], true], why);
   }
   // author-date (APA): in the STYLE's order (round 3, D10: citeproc sorts - Author1, Author10, Author11, ...),
   // compared by position; the citation order is not that order
   const apa = await pdfOf(md, refs, "apa");
   const apaOrder = (await bibliographyOrder(refs, style("apa"), CSL_DIR)).map((r) => ({ number: r.number, title: String(r.csl.title) }));
   assertEquals((await runGate({ vision: OFF }, input(apa, { refs: apaOrder, numeric: false }))).blocking_findings, []);
-  assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: want, numeric: false }))).blocking_findings), ["reference-mismatch"], "author-date: the citation order");
-  assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: want.slice(1), numeric: false }))).blocking_findings), ["reference-mismatch"], "author-date: an extra entry (the entries are counted by the hanging indent)");
-  assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: [...want, { number: 13, title: "Fixture paper number 13" }], numeric: false }))).blocking_findings), ["reference-mismatch"], "author-date: a missing one");
+  assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: want, numeric: false }))).warnings).filter((c) => c === "reference-mismatch"), ["reference-mismatch"], "author-date: the citation order (advisory)");
+  assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: want.slice(1), numeric: false }))).warnings).filter((c) => c === "reference-mismatch"), ["reference-mismatch"], "author-date: an extra entry (advisory)");
+  assertEquals(codes((await runGate({ vision: OFF }, input(apa, { refs: [...want, { number: 13, title: "Fixture paper number 13" }], numeric: false }))).warnings).filter((c) => c === "reference-mismatch"), ["reference-mismatch"], "author-date: a missing one (advisory)");
 });
 
 Deno.test("acceptance 5 (real): a research report's export without the roll-up section is BLOCKED; with it, it passes", async () => {

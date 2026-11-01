@@ -401,11 +401,16 @@ it is served (`src/export/gate.ts`); a blocked export never leaves the workbench
    pdfplumber MIT, pinned by hash in `gate/requirements.txt`): fonts embedded (`font-not-embedded`), no
    glyph outside the page box (`clipped`) or the format's text area (`overflow`: a clipped or over-wide
    table), no glyphs drawn over each other (`overlapping-text`), at most 500 pages (`too-many-pages`).
-3. **References** - the file's reference list against the references the export numbered, one to one
-   (`reference-mismatch`): numbered styles by label and title, author-date styles by entry (hanging
-   indent) and title. The reference panel (`GET /workbench/documents/references`) titles each reference as
-   the export prints it (the resolved metadata, else the title at the pinned revision), so screen and
-   file agree.
+3. **References - ADVISORY** (operator decision 2026-10-31, "simpler check + advisory") - the file's reference
+   list against the references the export numbered: the same entries in the style's order (numbered styles by
+   label, author-date by entry), each entry compared as a SKELETON with the entry citeproc renders for it
+   (`src/export/biborder.ts` bibliographyEntries): NFKC, case-folded, Unicode letters and digits only (every
+   hyphen variant, format character, punctuation and space dropped); equal for left-to-right text, an equal
+   character multiset when the entry holds Hebrew or Arabic (the PDF's text is in visual order). A mismatch
+   does NOT block: the PDF is served, the run records a `reference-mismatch` warning, the response carries
+   `x-export-reference-parity: mismatch`, and the Export panel shows "reference list may differ from the panel".
+   The reference panel (`GET /workbench/documents/references[?style=]`) lists one entry per source in the
+   style's order, titled as the export prints it.
 4. **Required sections** - registry `export_required_sections` (`init-export-gate.sql`): a research report
    (`content_type: research_synthesis`) must carry the "Report credibility" roll-up with its claim-kind
    weights (`required-section-missing`). The row, not code, names the heading P3b writes.
@@ -417,7 +422,8 @@ it is served (`src/export/gate.ts`); a blocked export never leaves the workbench
    `vision-unreadable`).
 
 Every gated export is recorded for the caller's subject (`export_runs`): passed = the file is served
-with `x-export-id` and kept; blocked = 422 `layout-gate` with the findings and warnings, no file.
+with `x-export-id` and kept (warnings - the advisory reference parity among them - recorded on the run);
+blocked (layout, a required section, vision) = 422 `layout-gate` with the findings and warnings, no file.
 `GET /workbench/exports[?path=]`, `GET /workbench/exports/:id` and `GET /workbench/exports/:id/file` read
 the CALLER's runs only (owner_sub in SQL; another user's id is 404). The workspace's **Export** panel
 lists my documents and my runs, exports the open document and shows a blocked export's findings.

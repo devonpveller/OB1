@@ -25,7 +25,7 @@ async function gate(md: string, refs: RefItem[] = fixtureRefs(0), s = "ieee", ex
     pdf, format: fmt, numeric: style(s).citation_format === "numeric", frontmatter: frontmatterOf(md), required: SECTIONS,
     refs: (expected ?? refs).map((r) => ({ number: r.number, title: printedTitle(r.csl) })),
   } as GateInput);
-  return { status: g.status, codes: [...new Set(g.blocking_findings.map((f) => f.code))].sort(), g };
+  return { status: g.status, codes: [...new Set([...g.blocking_findings, ...g.warnings.filter((w) => w.code === "reference-mismatch")].map((f) => f.code))].sort(), g }; // round 5: parity is advisory (a warning)
 }
 
 Deno.test("D10 (real): an author-date (APA) export lists in the style's order; the gate compares by position in that order", async () => {

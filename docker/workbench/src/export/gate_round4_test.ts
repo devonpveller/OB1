@@ -28,7 +28,7 @@ async function gate(refs: RefItem[], s: string, expectedTitles?: string[]) {
   const g = await runGate({ vision: OFF }, {
     pdf, format: fmt, numeric: st.citation_format === "numeric", frontmatter: frontmatterOf(""), required: sectionsOf(GATE_SECTION_ROWS), refs: want,
   } as GateInput);
-  return { status: g.status, codes: [...new Set(g.blocking_findings.map((f) => f.code))].sort(), g };
+  return { status: g.status, codes: [...new Set([...g.blocking_findings, ...g.warnings.filter((w) => w.code === "reference-mismatch")].map((f) => f.code))].sort(), g }; // round 5: parity is advisory (a warning)
 }
 
 Deno.test("D13 (real): the tester's six-title and 40-reference documents export in APA (and still in IEEE)", async () => {

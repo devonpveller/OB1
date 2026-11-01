@@ -122,3 +122,33 @@ describe("P6b round 2 (tester D4): the reference panel lists what the export's r
     expect(copied).toBe("[1] One printed\n[2] Two printed");
   });
 });
+
+describe("P6b round 5 (operator 2026-10-31): a reference-list mismatch is advisory", () => {
+  it("a served export whose run carries a reference-mismatch warning shows 'reference list may differ from the panel'", async () => {
+    resetState();
+    setState({ documentPath: MINE });
+    const RUN = { ...RUNS[1], id: "e1000000-0000-4000-8000-000000000009", warnings: [{ code: "reference-mismatch", detail: "entry [2] in the file differs", stage: "references" }] };
+    setFetcher(async (url) => {
+      if (url.startsWith("/workbench/export?")) {
+        return new Response(new Uint8Array([37, 80, 68, 70]), { status: 200, headers: { "content-type": "application/pdf", "x-export-id": RUN.id, "x-export-gate": "passed", "x-export-warnings": "1", "x-export-reference-parity": "mismatch" } });
+      }
+      if (url.startsWith(`/workbench/exports/${RUN.id}`)) return Response.json(RUN);
+      if (url.startsWith("/workbench/exports")) return Response.json({ exports: [RUN] });
+      if (url.startsWith("/workbench/contract/documents")) return Response.json({ documents: [{ title: "My report", path: MINE, updated: "", outbound_links: [] }] });
+      return new Response("{}", { status: 404 });
+    });
+    const { container } = render(<ExportPanel params={{}} />);
+    await act(async () => settle(10));
+    await openLeaf(container, "[data-leaf-new]");
+    await act(async () => { fireEvent.click(container.querySelector('[data-action="export-pdf"]') as HTMLElement); await settle(10); });
+    expect(screen.getByTestId("export-verdict").dataset.status).toBe("passed");
+    expect(screen.getByTestId("export-parity-warning").textContent).toBe("reference list may differ from the panel");
+    expect(screen.getByTestId("export-msg").textContent).toContain("reference list may differ from the panel");
+    cleanup();
+    const again = render(<ExportPanel params={{}} />);
+    await act(async () => settle(10));
+    await openLeaf(again.container, `[data-export="${RUN.id}"]`);
+    expect(again.container.querySelector('[data-testid="run-parity-warning"]')?.textContent).toBe("reference list may differ from the panel");
+    expect(again.container.querySelector('[data-action="download"]')).toBeTruthy();
+  });
+});

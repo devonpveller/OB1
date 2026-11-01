@@ -22,7 +22,7 @@ const SECTIONS = sectionsOf(GATE_SECTION_ROWS);
 const gate = async (md: string) => {
   const pdf = (await render({ md, refs: fixtureRefs(0), format: fmt, style, cslDir: CSL_DIR })).bytes;
   const g = await runGate({ vision: OFF }, { pdf, format: fmt, refs: [], numeric: true, frontmatter: frontmatterOf(md), required: SECTIONS } as GateInput);
-  return { status: g.status, codes: [...new Set(g.blocking_findings.map((f) => f.code))].sort(), g };
+  return { status: g.status, codes: [...new Set([...g.blocking_findings, ...g.warnings.filter((w) => w.code === "reference-mismatch")].map((f) => f.code))].sort(), g }; // round 5: parity is advisory (a warning)
 };
 
 Deno.test("D1 (real): ordinary prose, kerned 'w.' / 'y.' and a rich clean page PASS - kerning is not overlapping text", async () => {

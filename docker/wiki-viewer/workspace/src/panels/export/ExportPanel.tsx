@@ -33,6 +33,11 @@ interface Doc {
   path: string;
 }
 
+// round 5 (operator 2026-10-31): the reference list's parity with the panel is ADVISORY - a mismatch does not
+// block the export; it is recorded on the run and shown here as a visible warning.
+export const PARITY_WARNING = "reference list may differ from the panel";
+const parityOf = (ws: Finding[]) => ws.some((w) => w.code === "reference-mismatch");
+
 const findingText = (f: Finding) => `${f.code}${f.page ? ` (page ${f.page})` : ""}: ${f.detail}`;
 
 function save(blob: Blob, name: string) {
@@ -78,8 +83,14 @@ export function ExportPanel(_p: PanelProps) {
       if (r.ok) {
         const name = /filename="([^"]+)"/.exec(r.headers.get("content-disposition") ?? "")?.[1] ?? "export.pdf";
         save(await r.blob(), name);
-        setLast({ status: "passed", blocking: [], warnings: [] });
-        setMsg(`passed the verification gate (${r.headers.get("x-export-warnings") ?? "0"} warning(s)); downloaded`);
+        const id = r.headers.get("x-export-id");
+        let warnings: Finding[] = [];
+        if (id) {
+          try { warnings = (await get(`${X}/${encodeURIComponent(id)}`)).warnings ?? []; } catch { /* the list below still shows the run */ }
+        }
+        setLast({ status: "passed", blocking: [], warnings });
+        const differs = parityOf(warnings) || r.headers.get("x-export-reference-parity") === "mismatch";
+        setMsg(`passed the verification gate (${r.headers.get("x-export-warnings") ?? "0"} warning(s)); downloaded${differs ? ` - ${PARITY_WARNING}` : ""}`);
       } else {
         let b: any = {};
         try { b = await r.json(); } catch { /* not json */ }
@@ -102,7 +113,7 @@ export function ExportPanel(_p: PanelProps) {
     { key: "new", label: <span data-leaf-new="1">export a document to PDF</span> },
     ...runs.map((r) => ({
       key: r.id,
-      badges: [r.status, r.format],
+      badges: [r.status, r.format, ...(parityOf(r.warnings) ? ["references may differ"] : [])],
       label: <span data-export={r.id} data-status={r.status}>{r.path.split("/").pop()}</span>,
       detail: <span className="ws-muted">{new Date(r.created_at).toLocaleString()} - {r.blocking_findings.length} blocking, {r.warnings.length} warning(s)</span>,
     })),
@@ -118,6 +129,7 @@ export function ExportPanel(_p: PanelProps) {
           <button type="button" data-action="export-pdf" disabled={busy || !chosen} onClick={exportPdf}>{busy ? "Checking..." : "Export PDF"}</button>
           {last && (
             <div data-testid="export-verdict" data-status={last.status}>
+              {parityOf(last.warnings) && <p className="ws-warning" data-testid="export-parity-warning">{PARITY_WARNING}</p>}
               {last.blocking.length > 0 && <ul data-testid="export-blocking">{last.blocking.map((f, i) => <li key={i}>{findingText(f)}</li>)}</ul>}
               {last.warnings.length > 0 && <ul data-testid="export-warnings" className="ws-muted">{last.warnings.map((f, i) => <li key={i}>{findingText(f)}</li>)}</ul>}
             </div>
@@ -131,6 +143,7 @@ export function ExportPanel(_p: PanelProps) {
         <p className="ws-muted">{r.path} - {r.style}</p>
         {r.blocking_findings.length > 0 && <ul data-testid="run-blocking">{r.blocking_findings.map((f, i) => <li key={i}>{findingText(f)}</li>)}</ul>}
         {r.warnings.length > 0 && <ul data-testid="run-warnings" className="ws-muted">{r.warnings.map((f, i) => <li key={i}>{findingText(f)}</li>)}</ul>}
+        {parityOf(r.warnings) && <p className="ws-warning" data-testid="run-parity-warning">{PARITY_WARNING}</p>}
         {r.status === "passed" && <a data-action="download" href={`${X}/${encodeURIComponent(r.id)}/file`} download={r.filename}>Download</a>}
         {r.status === "blocked" && <span className="ws-muted">blocked: the file was not served</span>}
       </div>

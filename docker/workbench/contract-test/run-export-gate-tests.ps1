@@ -265,7 +265,7 @@ try {
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
   $null = Dk exec "$P-db" psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role member) - the production shape'
-  foreach ($f in @('export-fixtures.sql', 'gate-fixtures.sql', 'gate-fixtures-r4.sql')) {
+  foreach ($f in @('export-fixtures.sql', 'gate-fixtures.sql', 'gate-fixtures-r4.sql', 'gate-fixtures-r5.sql')) {
     $null = Dk cp (Join-Path $ct $f) "$P-db:/tmp/$f"
     $o = Dk exec "$P-db" psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f "/tmp/$f"
     Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "$f applied"
@@ -462,6 +462,29 @@ try {
     PutDoc $d2 "rtl-$rk" "Cites the source [[source:$sid|rtl]] and page one [[source:$($G[1])|one]]."
     ParityOf $d2 "2x-rtl-$rk"
     if ($rk -in @('he-colon', 'he-year')) { ParityOf $d2 "2x-rtl-$rk-apa" '&style=apa' 'author-date' }
+  }
+  # round 5 (operator 2026-10-31: parity is ADVISORY; tester t-p6b-gate4 D15-D17; gate-fixtures-r5.sql): the
+  # gate's OWN verdict on the run - served 200 and NO reference-mismatch warning recorded
+  function GateParity([string]$dp, [string]$tag, [string]$styleQ = '') {
+    $ex = Req GET $wbName "/workbench/export?path=$([uri]::EscapeDataString($dp))&format=pdf$styleQ" "t2g-$tag.pdf"
+    $run = $null
+    if ($ex.export_id) { $null = Req GET $wbName "/workbench/exports/$($ex.export_id)" "t2g-$tag-run.json"; $run = BodyJson "t2g-$tag-run.json" }
+    $mm = @($run.warnings | Where-Object { $_.code -eq 'reference-mismatch' })
+    Save "t2g-$tag.txt" ("export $($ex.status) gate=$($ex.gate) run=$($ex.export_id)`n" + (($mm | ForEach-Object { $_.detail }) -join "`n"))
+    Clause 'T2' (($ex.status -eq 200) -and ($ex.gate -eq 'passed') -and $run -and ($mm.Count -eq 0)) "$tag - served, no reference-mismatch on the run ($($ex.status), $($mm.Count) mismatch warning(s))"
+  }
+  $r36 = @(0..35 | ForEach-Object { 'f6b40000-0000-4000-8000-000000000{0:d3}' -f (700 + $_) })
+  $d2 = NewDoc 'Gate real24'
+  PutDoc $d2 'z24' ((@($r36[12..35]) | ForEach-Object -Begin { $k = 0 } -Process { $k++; "Finding $k is supported [[source:$_|s$k]]." }) -join ' ')
+  GateParity $d2 '2z-real24-apa' '&style=apa'
+  GateParity $d2 '2z-real24-ieee'
+  foreach ($zk in @(@('2z-rtl-fa-zwnj', 'f6b40000-0000-4000-8000-000000000614'), @('2z-rtl-fa-zwnj2', 'f6b40000-0000-4000-8000-000000000615'),
+      @('2t-zw', 'f6b50000-0000-4000-8000-000000000800'), @('2t-shy', 'f6b50000-0000-4000-8000-000000000801'),
+      @('2t-zwsp', 'f6b50000-0000-4000-8000-000000000802'), @('2t-wj', 'f6b50000-0000-4000-8000-000000000803'))) {
+    $d2 = NewDoc "Gate $($zk[0])"
+    PutDoc $d2 $zk[0] "Cites the source [[source:$($zk[1])|z]] and page one [[source:$($G[1])|one]]."
+    GateParity $d2 $zk[0]
+    GateParity $d2 "$($zk[0])-apa" '&style=apa'
   }
 
   Write-Host '[T3] acceptance 3: the vision calls go through the LiteLLM alias under the export key; a direct route is refused'

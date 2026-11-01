@@ -33,7 +33,7 @@ export interface RequiredSection {
 export interface GateInput {
   pdf: Uint8Array;
   format: { key: string; metadata?: Record<string, unknown> };
-  refs: { number: number; title: string }[]; // the references the export numbered, in number order
+  refs: { number: number; title: string; entry?: string }[]; // the references in the style's order; entry: citeproc's text for it
   numeric: boolean; // the style labels entries [n]
   frontmatter: string; // the page's YAML frontmatter text ("" when none)
   required: RequiredSection[]; // export_required_sections rows (live)
@@ -112,13 +112,28 @@ export const norm = (s: string) => bidiFold(s).toLowerCase().replace(/[^\p{L}\p{
 
 // The reference list region of the file's text: after the LAST line that is exactly "References"
 // (prepare.ts sets reference-section-title), page-number-only lines removed.
+// round 5: a page's FOOTER (its page number) is the only digits-only line dropped - the page's last non-empty
+// line; a digits-only line inside the list (the tail of a URL broken at a line end, "522") is entry text.
+const dropFooter = (pageText: string) => {
+  const ls = pageText.split(/\r?\n/);
+  let k = ls.length - 1;
+  while (k >= 0 && !ls[k].trim()) k--;
+  if (k >= 0 && /^\s*\d+\s*$/.test(ls[k])) ls.splice(k, 1);
+  return ls.join("\n");
+};
 export function referenceRegion(texts: string[]): string | null {
-  const all = texts.join("\n");
+  const all = texts.map(dropFooter).join("\n");
   const lines = all.split(/\r?\n/);
   let at = -1;
   for (let i = 0; i < lines.length; i++) if (lines[i].trim() === "References") at = i;
   if (at < 0) return null;
-  return lines.slice(at + 1).filter((l) => !/^\s*\d+\s*$/.test(l)).join("\n");
+  return lines.slice(at + 1).join("\n");
+}
+// the same for positioned lines: a digits-only line that is the last line of its page
+function withoutFooters(ls: TextLine[]): TextLine[] {
+  const last = new Map<number | undefined, number>();
+  ls.forEach((l, i) => { if (l.text.trim()) last.set(l.page, i); });
+  return ls.filter((l, i) => l.text.trim() && !(/^\s*\d+\s*$/.test(l.text) && last.get(l.page) === i));
 }
 
 // The file's reference list against the expected one (acceptance 2: one-to-one).
@@ -131,7 +146,27 @@ export interface TextLine {
   page?: number;
   size?: number; // the line's largest glyph size (pt): a heading is set larger than the body
 }
-export function referenceParity(texts: string[], refs: { number: number; title: string }[], numeric: boolean, lines?: TextLine[]): Finding[] {
+// round 5 (operator 2026-10-31, "simpler check + advisory"; tester t-p6b-gate4 D15-D18): an entry is compared
+// as a SKELETON - NFKC, case-folded, Unicode letters and digits only (every hyphen variant incl. U+00AD, every
+// format character incl. ZWNJ/ZWSP/WJ, punctuation and whitespace dropped). With the entry citeproc renders for
+// the reference (`entry`, biborder.ts bibliographyEntries - the same program and items as the export), the
+// file's entry skeleton must EQUAL it; when the entry holds Hebrew/Arabic letters (visual order in the file),
+// the two skeletons must be the same MULTISET of characters (equal counts both ways). Without `entry` (a
+// caller that only knows the title) the title must be in the entry (holdsTitle). Order and count checks are
+// unchanged. The result is ADVISORY: the gate reports it as a warning, it does not block (runGate).
+export const skeleton = (s: string) => s.normalize("NFKC").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "");
+const RTL_IN = /[\p{Script=Hebrew}\p{Script=Arabic}]/u;
+export function sameEntry(file: string, expected: string): boolean {
+  const a = skeleton(file), b = skeleton(expected);
+  if (!b) return false;
+  if (!RTL_IN.test(expected)) return a === b;
+  if (a.length !== b.length) return false;
+  return [...a].sort().join("") === [...b].sort().join("");
+}
+const entryMatches = (fileEntry: string, r: { title: string; entry?: string }, stripLabel: boolean) =>
+  r.entry !== undefined ? sameEntry(stripLabel ? fileEntry.replace(/^\s*\[\d+\]/, "") : fileEntry, r.entry) : holdsTitle(fileEntry, r.title);
+
+export function referenceParity(texts: string[], refs: { number: number; title: string; entry?: string }[], numeric: boolean, lines?: TextLine[]): Finding[] {
   const out: Finding[] = [];
   const region = referenceRegion(texts);
   if (!refs.length) {
@@ -154,7 +189,7 @@ export function referenceParity(texts: string[], refs: { number: number; title: 
     for (let i = 0; i < labels.length; i++) {
       const entry = region.slice(labels[i].index!, i + 1 < labels.length ? labels[i + 1].index! : undefined);
       const r = refs[i];
-      if (!holdsTitle(entry, r.title)) {
+      if (!entryMatches(entry, r, true)) {
         out.push({ code: "reference-mismatch", detail: `entry [${r.number}] in the file is not "${r.title.slice(0, 120)}"`, sample: entry.trim().slice(0, 120), stage: "references" });
       }
     }
@@ -170,7 +205,7 @@ export function referenceParity(texts: string[], refs: { number: number; title: 
   if (lines) {
     let at = -1;
     for (let i = 0; i < lines.length; i++) if (lines[i].text.trim() === "References") at = i;
-    entries = splitEntries(lines.slice(at + 1).filter((l) => !/^\s*\d+\s*$/.test(l.text) && l.text.trim()));
+    entries = splitEntries(withoutFooters(lines.slice(at + 1)));
     if (entries.length !== refs.length) {
       out.push({ code: "reference-mismatch", detail: `the file lists ${entries.length} entr${entries.length === 1 ? "y" : "ies"}; the document holds ${refs.length} reference(s)`, stage: "references" });
     }
@@ -179,8 +214,7 @@ export function referenceParity(texts: string[], refs: { number: number; title: 
   }
   if (lines && entries.length === refs.length) {
     refs.forEach((r, i) => {
-      const t = words(r.title);
-      if (!t.trim() || !holdsTitle(entries[i], r.title)) {
+      if (!entryMatches(entries[i], r, false)) {
         out.push({ code: "reference-mismatch", detail: `entry ${i + 1} of the file's reference list is not "${r.title.slice(0, 120)}" (the style's order)`, sample: entries[i].trim().slice(0, 120), stage: "references" });
       }
     });
@@ -434,7 +468,9 @@ export async function runGate(deps: GateDeps, input: GateInput): Promise<GateRes
 
     // 3 + 4. references and required sections (only on a text the structure check read)
     if (structure && s.code === 0) {
-      blocking.push(...referenceParity(texts, input.refs, input.numeric, lines.length ? lines : undefined));
+      // round 5 (operator 2026-10-31): the reference list's parity is ADVISORY - a mismatch is a warning on
+      // the run (the export panel shows "reference list may differ from the panel"), never a block
+      warnings.push(...referenceParity(texts, input.refs, input.numeric, lines.length ? lines : undefined));
       blocking.push(...requiredSections(texts, input.required, input.frontmatter, input.format.key, lines.length ? lines : undefined));
     }
     checks.references = { expected: input.refs.length, numeric: input.numeric };
