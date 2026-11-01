@@ -7,6 +7,8 @@
 # -Subnet is REQUIRED (harness-subnet.ps1: exactly a /24 outside Docker's default pools and 192.168.0.0/16);
 # -Evidence must be absent or empty. -Red runs THIS tree's room integration test against a workbench built
 # from -BaseSha (the development pin before rw-p8a3-room): every case must FAIL there.
+# -RedCases R4[,R1..] (with -Red against a LATER base, e.g. -BaseSha 29fba20 for round 2): only the named
+# integration cases must FAIL there (each test whose name starts with the code); the others may pass.
 # -Prebuilt uses images already built under this run's :wt-<id> tags (so a plane lease is held only while
 # the lab runs, never while building): openbrain-workbench:wt-<id> (or -base with -Red), its -test tag and,
 # without -Red, openbrain-wiki-viewer:wt-<id>. They are removed at the end unless -KeepImages.
@@ -44,6 +46,7 @@ param(
   [string]$BaseSha = 'deb9053',
   [switch]$Red,
   [switch]$Prebuilt,
+  [string]$RedCases = '',
   [switch]$KeepImages
 )
 $ErrorActionPreference = 'Continue'
@@ -287,7 +290,12 @@ try {
   Save 'rooms-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||^R\d:|error:|Assertion|=> ' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^R\d:' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -le 1) "RED: every room case fails on the base ($($sum.Value); the one pass is the pool close)" }
+  if ($Red -and $RedCases) {
+    foreach ($rc in ($RedCases -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+      $named = @(($clean -split "`n") | Where-Object { $_ -match "^$([regex]::Escape($rc)) .*\.\.\. (ok|FAILED)" })
+      Check ($named.Count -ge 1 -and @($named | Where-Object { $_ -match '\.\.\. FAILED' }).Count -ge 1) "RED: case $rc fails on the base $BaseSha ($($named.Count) test(s): $((@($named | ForEach-Object { if ($_ -match 'FAILED') { 'FAILED' } else { 'ok' } })) -join ', '))"
+    }
+  } elseif ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -le 1) "RED: every room case fails on the base ($($sum.Value); the one pass is the pool close)" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 9) "the room integration test ($($sum.Value))" }
   $mmLog = Dk run --rm --label $label --network $net --entrypoint deno $wbTestTag eval "console.log(JSON.stringify(await (await fetch('http://$P-mm:8080/_log')).json()))"
   Save 'mattermost-standin.log' $mmLog
