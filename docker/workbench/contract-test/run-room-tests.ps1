@@ -297,7 +297,8 @@ try {
     foreach ($walk in @('on', 'off')) {
       if ($walk -eq 'off') {
         $null = Dk rm -f "$P-wb"
-        $null = Dk run -d --name "$P-wb" --label $label --network $net @($onEnv + $wbArgs + @('-e', 'WORKSPACE_RESPONSE_WALK=off', $wbTag))
+        $restart = $onEnv + $wbArgs + @('-e', 'WORKSPACE_RESPONSE_WALK=off', $wbTag)
+        $null = Dk run -d --name "$P-wb" --label $label --network $net @restart
         Check (($script:rc -eq 0) -and (Wait-Http "http://$P-wb:8000/health" 90)) 'the workbench restarted with the response walk off'
       }
       Write-Host "[5b] the route-wide isolation sweep (as user A, every registered route, both doors; B's rooms planted; response walk $walk)"

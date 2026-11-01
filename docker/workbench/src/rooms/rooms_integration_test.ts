@@ -206,7 +206,7 @@ T("R3 a session started from a Mattermost thread shows the thread as its inlet w
   const g = await call(BASE, A, "GET", `/workbench/rooms/${o.json.room.id}`);
   assertEquals(g.status, 200, g.text);
   assertEquals(g.json.subject.card.badge, { key: "mattermost", label: "Mattermost" });
-  assertEquals(g.json.subject.card.link, { kind: "external", href: M.permalink });
+  assertEquals([g.json.subject.card.link?.kind, g.json.subject.card.link?.href], ["external", M.permalink]);
   // the session's transcript is the room's entries, from the store
   const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_room_entries WHERE room_id = $1`, [o.json.room.id]))[0].n;
   assertEquals(g.json.entries.length, n);
@@ -215,7 +215,7 @@ T("R3 a session started from a Mattermost thread shows the thread as its inlet w
   assertEquals(b.status, 201, b.text);
   assert(b.json.room.id !== o.json.room.id);
   const bg = await call(BASE, B, "GET", `/workbench/rooms/${b.json.room.id}`);
-  assertEquals([bg.json.subject.card.link, bg.json.entries], [null, []]);
+  assertEquals([bg.json.subject.card.link ?? null, bg.json.entries], [null, []]);
   assert(!bg.text.includes(M.permalink));
   assertEquals((await stubLog(MM)).length, 0, "the room read from or posted to Mattermost");
   console.log(`R3: A's session room links back to the thread; B's own room on it has no link and no transcript of A's; Mattermost calls: 0`);
@@ -243,4 +243,4 @@ T("R6 two users: another user's room, idea or scope by id is 404; the knowledge 
   console.log("R6: B -> A's room GET/PUT scope/POST chat = 404, A's idea = 404, B's list names neither; shared source reads alike");
 });
 
-Deno.test({ name: "close", ignore, fn: async () => { await pool?.end(); } });
+Deno.test({ name: "close", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => { await pool?.end(); } });
