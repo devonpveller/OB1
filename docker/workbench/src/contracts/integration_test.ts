@@ -998,7 +998,9 @@ t("the legacy purge with a reason type is a recorded D5 suppression: one trail e
     `SELECT kind, detail, actor FROM public.source_trail_events WHERE source_id = $1 ORDER BY created_at, id`, [s]);
   assertEquals(ev.length, 1, "exactly one trail event");
   assertEquals([ev[0].kind, ev[0].detail.from, ev[0].detail.to, ev[0].detail.reason, ev[0].actor],
-    ["suppressed", "active", "suppressed", "deliberate", "purge-tester"]);
+    // edge-b5-portal-retire: the actor is the seam's - here (no seam mounted) the fallback - never the
+    // Remote-User legacyDelete sends
+    ["suppressed", "active", "suppressed", "deliberate", "operator"]);
   assertEquals(ev[0].detail.door, "DELETE /workbench/sources/:id");
   const k = await confidences(c);
   assertEquals(Number(k.cached), Number(k.live), "claims.confidence equals the live claim_confidence after the purge");

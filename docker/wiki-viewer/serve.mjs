@@ -50,7 +50,7 @@ import { loadPageClassDir, pageClasses, brokenPageClasses } from "./lib/page-cla
 import { dbState, onConnect, startProbe, probe } from "./lib/wiki-db.mjs";
 import { reconcile, formatReport } from "./lib/shared/reconcile-wiki-pages.mjs";
 import { isWorkbenchPath, proxyConfig, proxyWorkbench } from "./lib/workbench-proxy.mjs";
-import { withSecurityHeaders } from "./lib/security-headers.mjs";
+import { allowSameOriginFraming, withSecurityHeaders } from "./lib/security-headers.mjs";
 
 const BUNDLE = process.env.WIKI_BUNDLE_DIR || "/viewer/bundle"; // the frozen bundle (committed, D7)
 const WORKSPACE = process.env.WIKI_WORKSPACE_DIR || "/viewer/workspace"; // the workspace app's build (Dockerfile stage `workspace`)
@@ -377,7 +377,7 @@ async function handle(req, res) {
     const ext = extname(file);
     // the wiki embeds its own PDF attachments in an <iframe> (render-page.mjs): those may be framed
     // by the viewer's own pages, nothing else does (edge-b5: every other response is DENY)
-    if (ext === ".pdf") res.setHeader("x-frame-options", "SAMEORIGIN");
+    if (ext === ".pdf") allowSameOriginFraming(res);
     if (notModified(req, st)) {
       res.writeHead(304, baseHeaders(st, ext));
       res.end();
