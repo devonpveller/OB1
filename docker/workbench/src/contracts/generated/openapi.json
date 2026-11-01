@@ -1019,6 +1019,18 @@
           },
           "distance": {
             "type": "integer"
+          },
+          "lifecycle": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "source_states",
+            "example": "active",
+            "description": "a source or report leaf page (content/source/<id>): its source's lifecycle state (erased when only its tombstone is left); null for every other page"
+          },
+          "contested": {
+            "type": "boolean",
+            "description": "a source leaf page whose source grounds a contradicted claim, or a claim through a contradicts edge (the hub context's contested rule, documents/hub.ts); false for every other page"
           }
         },
         "required": [
@@ -1027,7 +1039,9 @@
           "title",
           "page_class",
           "state",
-          "distance"
+          "distance",
+          "lifecycle",
+          "contested"
         ]
       },
       "GraphLink": {
@@ -1358,13 +1372,30 @@
           },
           "summary": {
             "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "the source a source_revision or trail event is about; null otherwise"
+          },
+          "lifecycle": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "source_states",
+            "example": "active",
+            "description": "that source's lifecycle state now (erased when only its tombstone is left); null when the event is about no source"
           }
         },
         "required": [
           "at",
           "kind",
           "ref",
-          "summary"
+          "summary",
+          "source_id",
+          "lifecycle"
         ]
       },
       "Trail": {
@@ -1375,10 +1406,18 @@
             "items": {
               "$ref": "#/components/schemas/TrailEntry"
             }
+          },
+          "leads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeadTrailEntry"
+            },
+            "description": "P8a-1: the admission trail's lead entries and found_via paths (origin admission) and the research sessions' per-source trail events (origin session), newest first; empty under a metadata filter"
           }
         },
         "required": [
-          "entries"
+          "entries",
+          "leads"
         ]
       },
       "TrailEntry": {
@@ -1429,6 +1468,13 @@
           "counts_as_evidence": {
             "type": "boolean",
             "description": "always false: nothing on the trail is evidence"
+          },
+          "lifecycle": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "source_states",
+            "example": "suppressed",
+            "description": "the entry's source's lifecycle state now (erased when only its tombstone is left)"
           }
         },
         "required": [
@@ -1439,8 +1485,189 @@
           "reason",
           "context",
           "at",
+          "counts_as_evidence",
+          "lifecycle"
+        ]
+      },
+      "LeadTrailEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "the admission trail entry id (a session event carries the same id in its trail)"
+          },
+          "origin": {
+            "type": "string",
+            "example": "admission",
+            "description": "admission (P3a research_admission_trail) or session (P4a research_job_events)"
+          },
+          "stage": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "admission_trail_kinds",
+            "example": "lead",
+            "description": "A key of the `admission_trail_kinds` registry (GET /workbench/contract/registries/admission_trail_kinds)."
+          },
+          "url": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "the source the hit is (or became), when there is one"
+          },
+          "lifecycle": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "source_states",
+            "example": "active",
+            "description": "that source's lifecycle state now (erased when only its tombstone is left); null when no source"
+          },
+          "found_via": {
+            "type": "string",
+            "nullable": true,
+            "description": "the lead's trail id (or a held source id) this hit was reached through"
+          },
+          "path": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "nullable": true
+              }
+            },
+            "description": "the found_via path P3a recorded (empty when none)"
+          },
+          "score": {
+            "type": "number",
+            "nullable": true
+          },
+          "floor": {
+            "type": "number",
+            "nullable": true
+          },
+          "family": {
+            "type": "string",
+            "nullable": true
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "job_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "counts_as_evidence": {
+            "type": "boolean",
+            "description": "always false: nothing on the trail is evidence"
+          }
+        },
+        "required": [
+          "id",
+          "origin",
+          "stage",
+          "url",
+          "source_id",
+          "lifecycle",
+          "found_via",
+          "path",
+          "score",
+          "floor",
+          "family",
+          "reasons",
+          "job_id",
+          "at",
           "counts_as_evidence"
         ]
+      },
+      "SourceStates": {
+        "type": "object",
+        "properties": {
+          "by_id": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceStateRow"
+            }
+          },
+          "by_url": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceStateRow"
+            }
+          }
+        },
+        "required": [
+          "by_id",
+          "by_url"
+        ]
+      },
+      "SourceStateRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "22222222-2222-4222-8222-222222222222",
+            "description": "uuid"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true
+          },
+          "lifecycle": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "source_states",
+            "example": "suppressed",
+            "description": "A key of the `source_states` registry (GET /workbench/contract/registries/source_states)."
+          },
+          "tombstone_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "uuid"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "lifecycle",
+          "tombstone_id"
+        ]
+      },
+      "SourceStatesRequest": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200
+          }
+        }
       },
       "Session": {
         "type": "object",
@@ -5781,7 +6008,9 @@
                       "title": "Tool Fixture",
                       "page_class": "entity",
                       "state": "current",
-                      "distance": 0
+                      "distance": 0,
+                      "lifecycle": null,
+                      "contested": false
                     },
                     {
                       "kind": "page",
@@ -5789,7 +6018,9 @@
                       "title": "Active fixture source",
                       "page_class": "source",
                       "state": "current",
-                      "distance": 1
+                      "distance": 1,
+                      "lifecycle": "active",
+                      "contested": false
                     },
                     {
                       "kind": "page",
@@ -5797,7 +6028,9 @@
                       "title": "Suppressed fixture source",
                       "page_class": "source",
                       "state": "current",
-                      "distance": 1
+                      "distance": 1,
+                      "lifecycle": "suppressed",
+                      "contested": false
                     }
                   ],
                   "links": [
@@ -6354,19 +6587,25 @@
                       "at": "2026-10-17T12:00:00.000Z",
                       "kind": "source_revision",
                       "ref": "11111111-1111-4111-8111-111111111111@1",
-                      "summary": "revision 1 by original"
+                      "summary": "revision 1 by original",
+                      "source_id": "11111111-1111-4111-8111-111111111111",
+                      "lifecycle": "active"
                     },
                     {
                       "at": "2026-10-17T12:00:00.000Z",
                       "kind": "source_revision",
                       "ref": "11111111-1111-4111-8111-111111111111@2",
-                      "summary": "revision 2 by operator"
+                      "summary": "revision 2 by operator",
+                      "source_id": "11111111-1111-4111-8111-111111111111",
+                      "lifecycle": "active"
                     },
                     {
                       "at": "2026-10-17T12:00:00.000Z",
                       "kind": "source_revision",
                       "ref": "f1000000-0000-4000-8000-000000000001@1",
-                      "summary": "revision 1 by original"
+                      "summary": "revision 1 by original",
+                      "source_id": "f1000000-0000-4000-8000-000000000001",
+                      "lifecycle": "active"
                     }
                   ]
                 },
@@ -6495,12 +6734,167 @@
                         }
                       },
                       "at": "2026-10-17T12:00:00.000Z",
+                      "counts_as_evidence": false,
+                      "lifecycle": "suppressed"
+                    }
+                  ],
+                  "leads": [
+                    {
+                      "id": "f4000000-0000-4000-8000-000000000002",
+                      "origin": "admission",
+                      "stage": "lead_path",
+                      "url": "https://example.org/lead-target",
+                      "source_id": "11111111-1111-4111-8111-111111111111",
+                      "lifecycle": "active",
+                      "found_via": "f4000000-0000-4000-8000-000000000001",
+                      "path": [
+                        {
+                          "url": "https://example.org/lead",
+                          "kind": "lead"
+                        }
+                      ],
+                      "score": 0.71,
+                      "floor": 0.4,
+                      "family": "general",
+                      "reasons": [
+                        "reached through a lead"
+                      ],
+                      "job_id": "99999999-9999-4999-8999-999999999999",
+                      "at": "2026-10-17T12:00:00.000Z",
                       "counts_as_evidence": false
                     }
                   ]
                 },
                 "schema": {
                   "$ref": "#/components/schemas/Trail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/source-states": {
+      "post": {
+        "operationId": "sourceStates",
+        "tags": [
+          "retrieval contract (appendix)"
+        ],
+        "summary": "sourceStates(ids[], urls[]) - the lifecycle state of up to 200 sources by id and by URL (shared knowledge only)",
+        "description": "A sources row or a tombstone (erased). A held source, an unknown id or URL is absent from the answer - never a hint. Under metadata_filter nothing is answered (sources outside the filter are not found; fail closed).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "ids": [
+                  "22222222-2222-4222-8222-222222222222",
+                  "55555555-5555-4555-8555-555555555555"
+                ],
+                "urls": [
+                  "https://example.org/suppressed"
+                ]
+              },
+              "schema": {
+                "$ref": "#/components/schemas/SourceStatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "states by id and by URL",
+            "content": {
+              "application/json": {
+                "example": {
+                  "by_id": {
+                    "22222222-2222-4222-8222-222222222222": {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "url": "https://example.org/suppressed",
+                      "lifecycle": "suppressed",
+                      "tombstone_id": null
+                    },
+                    "55555555-5555-4555-8555-555555555555": {
+                      "id": "55555555-5555-4555-8555-555555555555",
+                      "url": "https://example.org/erased",
+                      "lifecycle": "erased",
+                      "tombstone_id": "66666666-6666-4666-8666-666666666666"
+                    }
+                  },
+                  "by_url": {
+                    "https://example.org/suppressed": {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "url": "https://example.org/suppressed",
+                      "lifecycle": "suppressed",
+                      "tombstone_id": null
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SourceStates"
                 }
               }
             }

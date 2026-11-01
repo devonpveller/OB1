@@ -7,6 +7,16 @@ import type { Db } from "../db.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 import { OWN_QUERY } from "./sessions.ts";
 import type { Who } from "../../sessions/repo.ts";
+import { adminSeesOwnerless, FOREIGN_JOB } from "../../documents/ownership.ts";
+
+// research-workbench P8a-1 (D5): a source's lifecycle state NOW, from its row - or 'erased' when only its
+// tombstone is left; NULL when the id names neither. `id` is a uuid expression.
+export const LIFECYCLE_OF = (id: string) => `COALESCE(
+    (SELECT public.source_lifecycle_state(ls.retraction_committed_at, ls.unlinked_at) FROM public.sources ls WHERE ls.id = (${id})),
+    (SELECT 'erased'::text FROM public.source_tombstones lt WHERE lt.source_id = (${id})))`;
+// a source (or report) leaf page: content/source/<uuid>
+const LEAF_RX = `'^content/source/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'`;
+const LEAF_ID = (slug: string) => `substr(${slug}, 16)::uuid`;
 
 const STATEMENT_TIMEOUT_MS = 3000;
 
@@ -25,7 +35,7 @@ const PAGE_STATE = `CASE WHEN EXISTS (SELECT 1 FROM public.page_compile_marks m
 export async function neighbours(db: Db, slug: string, depth: number, limit: number, classes: string[], f: MetadataFilter) {
   if (f) return { root: slug, depth, truncated: false, nodes: [], links: [] };
   const rows = await bounded(db, (t) =>
-    t.query<{ slug: string; title: string; page_class: string; links: unknown; d: number; state: string }>(
+    t.query<{ slug: string; title: string; page_class: string; links: unknown; d: number; state: string; lifecycle: string | null; contested: boolean }>(
       `WITH RECURSIVE nbr(slug, d) AS (
          SELECT $1::text, 0
          UNION
@@ -38,7 +48,12 @@ export async function neighbours(db: Db, slug: string, depth: number, limit: num
              SELECT b.slug FROM public.wiki_pages b WHERE b.links @> to_jsonb(n.slug) LIMIT 200
            ) e
           WHERE n.d < $2)
-       SELECT w.slug, w.title, w.page_class, w.links, k.d, ${PAGE_STATE} AS state
+       SELECT w.slug, w.title, w.page_class, w.links, k.d, ${PAGE_STATE} AS state,
+              CASE WHEN w.slug ~ ${LEAF_RX} THEN ${LIFECYCLE_OF(LEAF_ID("w.slug"))} END AS lifecycle,
+              CASE WHEN w.slug ~ ${LEAF_RX} THEN EXISTS (
+                SELECT 1 FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
+                 WHERE cs.source_id = ${LEAF_ID("w.slug")} AND (c.contradicted OR cs.edge_type = 'contradicts'))
+                   ELSE false END AS contested
          FROM public.wiki_pages w
          JOIN (SELECT slug, min(d) AS d FROM nbr GROUP BY slug) k ON k.slug = w.slug
         WHERE (cardinality($4::text[]) = 0 OR w.page_class = ANY($4::text[]) OR w.slug = $1)
@@ -62,6 +77,7 @@ export async function neighbours(db: Db, slug: string, depth: number, limit: num
     nodes: rows.map((r) => ({
       kind: "page", id: r.slug, title: r.title || r.slug.split("/").pop() || r.slug,
       page_class: r.page_class, state: r.state, distance: Number(r.d),
+      lifecycle: r.lifecycle ?? null, contested: !!r.contested,
     })),
   };
 }
@@ -317,8 +333,8 @@ async function searchHeld(db: Db, q: string, refineryId: string, limit: number, 
 // its actor and to who may act on the session (OWN_QUERY's one rule, contracts/repo/sessions.ts).
 export async function timeline(db: Db, from: string | null, to: string | null, sourceId: string | null, limit: number, f: MetadataFilter, who: Who = { sub: "", key: "" }) {
   if (f) return { from, to, events: [] };
-  const events = await db.query<{ at: string; kind: string; ref: string; summary: string }>(
-    `SELECT * FROM (
+  const events = await db.query<{ at: string; kind: string; ref: string; summary: string; sid: string | null; lifecycle: string | null }>(
+    `SELECT e.*, CASE WHEN e.sid IS NOT NULL THEN ${LIFECYCLE_OF("e.sid")} END AS lifecycle FROM (
        SELECT r.edited_at AS at, 'source_revision' AS kind, r.source_id::text || '@' || r.revision AS ref,
               'revision ' || r.revision || ' by ' || r.edited_by AS summary, r.source_id AS sid
          FROM public.source_revisions r
@@ -337,15 +353,25 @@ export async function timeline(db: Db, from: string | null, to: string | null, s
      ORDER BY e.at DESC LIMIT $4`,
     [from, to, sourceId, limit, who.sub, who.actor ?? who.sub],
   );
-  return { from, to, events: events.map(({ ...e }) => ({ at: e.at, kind: e.kind, ref: e.ref, summary: e.summary })) };
+  return {
+    from, to,
+    events: events.map((e) => ({
+      at: e.at, kind: e.kind, ref: e.ref, summary: e.summary, source_id: e.sid ?? null,
+      // an event about a source names its state now; a source with neither a row nor a tombstone reads erased
+      lifecycle: e.sid ? e.lifecycle ?? "erased" : null,
+    })),
+  };
 }
 
-// trail(scope): what was removed or excluded, and why. Nothing on it counts as evidence.
-export async function trail(db: Db, sourceId: string | null, limit: number, f: MetadataFilter) {
-  if (f) return { entries: [] };
+// trail(scope): what was removed or excluded, and why - and (P8a-1) the leads: what the pre-ingestion stage
+// recorded about the hits a research run met. Nothing on it counts as evidence.
+// `who`: the caller. The removal entries are shared knowledge; a lead entry of another user's research tree is
+// withheld (FOREIGN_JOB, the research flow's rule - 07-MULTI-USER).
+export async function trail(db: Db, sourceId: string | null, limit: number, f: MetadataFilter, who: Who = { sub: "", key: "" }) {
+  if (f) return { entries: [], leads: [] };
   const rows = await db.query<{ kind: string; source_id: string; tombstone_id: string | null; state: string;
-    reason: string | null; context: Record<string, unknown>; at: string }>(
-    `SELECT * FROM (
+    reason: string | null; context: Record<string, unknown>; at: string; lifecycle: string | null }>(
+    `SELECT x.*, ${LIFECYCLE_OF("x.source_id")} AS lifecycle FROM (
        SELECT 'suppressed' AS kind, s.id AS source_id, NULL::uuid AS tombstone_id,
               public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at) AS state,
               COALESCE(s.suppression_reason, 'retracted (legacy, no reason recorded)') AS reason,
@@ -369,5 +395,128 @@ export async function trail(db: Db, sourceId: string | null, limit: number, f: M
      ORDER BY x.at DESC LIMIT $2`,
     [sourceId, limit],
   );
-  return { entries: rows.map((r) => ({ ...r, counts_as_evidence: false })) };
+  return {
+    entries: rows.map((r) => ({ ...r, lifecycle: r.lifecycle ?? "erased", counts_as_evidence: false })),
+    leads: await leads(db, sourceId, limit, who),
+  };
+}
+
+interface LeadRow {
+  id: string;
+  origin: string;
+  stage: string;
+  url: string;
+  source_id: string | null;
+  lifecycle: string | null;
+  found_via: string | null;
+  path: unknown;
+  score: number | null;
+  floor: number | null;
+  family: string | null;
+  reasons: unknown;
+  job_id: string | null;
+  at: string;
+}
+
+const NUM = (e: string) => `CASE WHEN jsonb_typeof(${e}) = 'number' THEN (${e} #>> '{}')::float8 END`;
+
+// The leads (P8a-1): P3a's admission trail entries that are leads or on a found_via path, and P4a's per-source
+// events of research sessions (every judged hit). Each branch is bounded by the limit on its own; a job another
+// user owns is skipped where it is read (FOREIGN_JOB); an entry whose job row is gone is skipped (fail closed).
+// Scoped to a source: entries about it (its id, or its URL's key) and the leads it was found via.
+export async function leads(db: Db, sourceId: string | null, limit: number, who: Who) {
+  const admin = adminSeesOwnerless(who);
+  const notForeign = (jobCol: string) => `(${jobCol} IS NULL OR EXISTS (SELECT 1 FROM public.research_jobs j
+      WHERE j.id = ${jobCol} AND NOT ${FOREIGN_JOB("j", "$3", "$4", admin)}))`;
+  const rows = await bounded(db, (t) =>
+    t.query<LeadRow>(
+      `WITH scope AS (
+         SELECT public.contract_url_key(s.url) AS k FROM public.sources s WHERE s.id = $1::uuid AND s.url IS NOT NULL
+         UNION SELECT t.url_key FROM public.source_tombstones t WHERE t.source_id = $1::uuid
+       ), vias AS (
+         SELECT a.found_via::text AS id FROM public.research_admission_trail a
+          WHERE a.found_via IS NOT NULL AND (a.source_id = $1::uuid OR a.url_key IN (SELECT k FROM scope))
+       ), adm AS (
+         SELECT a.id::text AS id, 'admission'::text AS origin, a.kind AS stage, a.url, a.source_id, a.found_via::text AS found_via,
+                a.path, a.score, a.floor, a.family, a.reasons, a.job_id, a.created_at AS at
+           FROM public.research_admission_trail a
+          WHERE (a.kind IN ('lead', 'lead_path', 'lead_dropped') OR a.found_via IS NOT NULL)
+            AND ($1::uuid IS NULL OR a.source_id = $1::uuid OR a.url_key IN (SELECT k FROM scope) OR a.id::text IN (SELECT id FROM vias))
+            AND ${notForeign("a.job_id")}
+          ORDER BY a.created_at DESC LIMIT $2
+       ), ses AS (
+         SELECT COALESCE(e.trail ->> 'id', 'event:' || e.id) AS id, 'session'::text AS origin,
+                COALESCE(e.trail ->> 'kind', e.payload ->> 'outcome', '') AS stage,
+                COALESCE(e.trail ->> 'url', e.payload ->> 'url', '') AS url,
+                ar.source_id, e.trail ->> 'found_via' AS found_via,
+                CASE WHEN jsonb_typeof(e.trail -> 'path') = 'array' THEN e.trail -> 'path' ELSE '[]'::jsonb END AS path,
+                ${NUM("e.trail -> 'score'")} AS score, ${NUM("e.trail -> 'floor'")} AS floor, e.trail ->> 'family' AS family,
+                e.trail -> 'reasons' AS reasons, e.job_id, e.created_at AS at
+           FROM public.research_job_events e
+           LEFT JOIN public.research_admission_trail ar ON ar.id::text = e.trail ->> 'id'
+          WHERE e.type = 'source' AND ${notForeign("e.job_id")}
+            -- scoped: through the admission trail's indexed source id / URL key (a session event carries its entry's id)
+            AND ($1::uuid IS NULL OR (e.trail ->> 'id') IN (
+                   SELECT a2.id::text FROM public.research_admission_trail a2 WHERE a2.source_id = $1::uuid OR a2.url_key IN (SELECT k FROM scope)
+                   UNION SELECT id FROM vias))
+          ORDER BY e.id DESC LIMIT $2
+       )
+       SELECT y.*, CASE WHEN y.source_id IS NOT NULL THEN ${LIFECYCLE_OF("y.source_id")} END AS lifecycle
+         FROM (SELECT * FROM adm UNION ALL SELECT * FROM ses) y
+        ORDER BY y.at DESC, y.origin, y.id LIMIT $2`,
+      [sourceId, limit, who.sub, who.key],
+    )
+  );
+  return rows.map((r) => ({
+    id: r.id, origin: r.origin, stage: r.stage, url: r.url, source_id: r.source_id ?? null,
+    lifecycle: r.source_id ? r.lifecycle ?? "erased" : null,
+    found_via: r.found_via ?? null, path: Array.isArray(r.path) ? r.path : [],
+    score: r.score === null || r.score === undefined ? null : Number(r.score),
+    floor: r.floor === null || r.floor === undefined ? null : Number(r.floor),
+    family: r.family ?? null,
+    reasons: Array.isArray(r.reasons) ? (r.reasons as unknown[]).filter((x): x is string => typeof x === "string") : [],
+    job_id: r.job_id ?? null, at: new Date(r.at).toISOString(), counts_as_evidence: false,
+  }));
+}
+
+const UUIDRX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// research-workbench P8a-1 (D5): the lifecycle state of a batch of sources by id and by URL - shared knowledge
+// only (sources rows and tombstones). A held source, another user's anything, an unknown id or URL: absent.
+export async function sourceStates(db: Db, ids: string[], urls: string[]) {
+  const okIds = [...new Set(ids.filter((x) => typeof x === "string" && UUIDRX.test(x)).map((x) => x.toLowerCase()))].slice(0, 200);
+  const okUrls = [...new Set(urls.filter((x) => typeof x === "string" && x.length > 0 && x.length < 4096))].slice(0, 200);
+  if (!okIds.length && !okUrls.length) return { by_id: {}, by_url: {} };
+  const rows = await db.query<{ q: string; by: string; id: string; url: string | null; lifecycle: string; tombstone_id: string | null }>(
+    `WITH qi AS (SELECT DISTINCT unnest($1::text[]) AS q),
+          qu AS (SELECT q, public.contract_url_key(q) AS k FROM (SELECT DISTINCT unnest($2::text[]) AS q) u)
+     SELECT qi.q, 'id' AS by, s.id::text AS id, s.url,
+            public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at) AS lifecycle, NULL::text AS tombstone_id
+       FROM qi JOIN public.sources s ON s.id = qi.q::uuid
+     UNION ALL
+     SELECT qi.q, 'id', t.source_id::text, t.url, 'erased', t.id::text
+       FROM qi JOIN public.source_tombstones t ON t.source_id = qi.q::uuid
+      WHERE NOT EXISTS (SELECT 1 FROM public.sources s2 WHERE s2.id = t.source_id)
+     UNION ALL
+     SELECT qu.q, 'url', t.source_id::text, t.url, 'erased', t.id::text
+       FROM qu JOIN public.source_tombstones t ON t.url_key = qu.k
+     UNION ALL
+     SELECT qu.q, 'url', s.id::text, s.url, public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at), NULL
+       FROM qu CROSS JOIN LATERAL (
+         -- indexed only: the exact URL (idx_sources_url), or the source the admission trail recorded for the URL's key
+         SELECT * FROM public.sources s WHERE s.id IN (
+           SELECT s1.id FROM public.sources s1 WHERE s1.url = qu.q
+           UNION SELECT a.source_id FROM public.research_admission_trail a WHERE a.url_key = qu.k AND a.source_id IS NOT NULL)
+          ORDER BY s.created_at LIMIT 1) s`,
+    [okIds, okUrls],
+  );
+  const by_id: Record<string, { id: string; url: string | null; lifecycle: string; tombstone_id: string | null }> = {};
+  const by_url: Record<string, { id: string; url: string | null; lifecycle: string; tombstone_id: string | null }> = {};
+  for (const r of rows) {
+    const v = { id: r.id, url: r.url ?? null, lifecycle: r.lifecycle, tombstone_id: r.tombstone_id ?? null };
+    if (r.by === "id") by_id[r.q] = v;
+    // a live row wins over a tombstone of the same URL (a lifted, readmitted URL)
+    else if (!by_url[r.q] || by_url[r.q].lifecycle === "erased") by_url[r.q] = v;
+  }
+  return { by_id, by_url };
 }

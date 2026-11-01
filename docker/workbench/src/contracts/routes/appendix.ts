@@ -14,7 +14,7 @@ import {
   evidenceOnly, limit, metadataFilter, NotImplemented, pathParam, queryParam,
 } from "../schemas/common.ts";
 import { ChunkContext, DiffCheck, DiffCheckRequest, Quality, Reference } from "../schemas/sources.ts";
-import { Claims, Neighbours, Search, Timeline, Trail } from "../schemas/knowledge.ts";
+import { Claims, Neighbours, Search, SourceStates, SourceStatesRequest, Timeline, Trail } from "../schemas/knowledge.ts";
 import { Jobs, Session, StreamEvent } from "../schemas/sessions.ts";
 import { card as sessionCard, events as sessionEvents } from "../../sessions/repo.ts";
 import { owuiBase } from "../../sessions/cards.ts";
@@ -242,7 +242,26 @@ function registerKnowledgeReads(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const q = c.req.valid("query");
-      return send(c, Trail, await kn.trail(deps.db, q.source_id || null, parseLimit(q.limit, 100, 500), parseMetadataFilter(q.metadata_filter)));
+      // P8a-1: the leads are read for the caller (another user's research tree withholds its own)
+      return send(c, Trail, await kn.trail(deps.db, q.source_id || null, parseLimit(q.limit, 100, 500), parseMetadataFilter(q.metadata_filter),
+        await identityOf(c)));
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+  // research-workbench P8a-1 (D5): every panel that lists a source shows its suppression status
+  op(app, createRoute({
+    method: "post", path: `${PREFIX}/source-states`, operationId: "sourceStates", tags: T,
+    summary: "sourceStates(ids[], urls[]) - the lifecycle state of up to 200 sources by id and by URL (shared knowledge only)",
+    description: "A sources row or a tombstone (erased). A held source, an unknown id or URL is absent from the answer - " +
+      "never a hint. Under metadata_filter nothing is answered (sources outside the filter are not found; fail closed).",
+    request: { body: body(SourceStatesRequest, EX.sourceStatesRequest), query: z.object({ metadata_filter: metadataFilter }) },
+    responses: { 200: json(SourceStates, EX.sourceStates, "states by id and by URL"), ...errors },
+  }), async (c) => {
+    try {
+      if (parseMetadataFilter(c.req.valid("query").metadata_filter)) return send(c, SourceStates, { by_id: {}, by_url: {} });
+      const b = c.req.valid("json");
+      return send(c, SourceStates, await kn.sourceStates(deps.db, b.ids ?? [], b.urls ?? []));
     } catch (e) {
       return fail(c, e);
     }
