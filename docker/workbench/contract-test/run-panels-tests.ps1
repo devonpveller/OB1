@@ -28,6 +28,8 @@
 #         (src/documents/isolation_sweep_test.ts, B's leads planted), response walk on and off
 #   6. the evidence gate (evidence-gate.ps1), then teardown and the leftover checks
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
+# Lease discipline: build with -BuildOnly (no lease), then acquire the open-brain lease, run with -Prebuilt,
+# release it.
 param(
   [string]$Id = 'wt-rw-p8a1-core',
   [string]$Subnet = '',
@@ -40,7 +42,12 @@ param(
   [switch]$Red,
   [switch]$WalkOff,
   [string]$Cases = '',
-  [switch]$KeepImages
+  [switch]$KeepImages,
+  # rw-p8a1-core: the open-brain lease is held only while the lab RUNS, never while building. -BuildOnly builds
+  # this run's images and stops (they are kept); -Prebuilt runs the lab on images a -BuildOnly run left (same
+  # -Id and -Red), and removes them at the end unless -KeepImages.
+  [switch]$BuildOnly,
+  [switch]$Prebuilt
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -214,33 +221,44 @@ try {
 
   # ---------------------------------------------------------------- 3. images
   Write-Host '[3] images'
-  if ($Red) {
-    $o = Build-At $BaseSha $wbTag '' 'workbench'; Save 'build-workbench-base.log' $o
-    Check ($script:rc -eq 0) "RED: $wbTag built from OB1 $BaseSha"
-    $script:made.images += $wbTag
-    $o = Build-At $BaseSha $viewerTag '' 'viewer'; Save 'build-viewer-base.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
-    Check ($script:rc -eq 0) "RED: $viewerTag built from OB1 $BaseSha"
-    $script:made.images += $viewerTag
+  if ($Prebuilt) {
+    foreach ($img in @($wbTag, $viewerTag, $wbTestTag, $e2eTag)) {
+      $null = Dk image inspect $img
+      Check ($script:rc -eq 0) "prebuilt $img is present"
+      if ($script:rc -ne 0) { throw "prebuilt $img missing (run -BuildOnly first)" }
+      $script:made.images += $img
+    }
   } else {
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $wbTag $wb; Save 'build-workbench.log' ($o -split "`n" | Select-Object -Last 80 | Out-String)
-    Check ($script:rc -eq 0) "$wbTag built at OB1 $($sha.Substring(0, 7)) (its test gate passed: grammar, hub clustering, contracts, export)"
-    if ($script:rc -ne 0) { throw 'build workbench' }
-    $script:made.images += $wbTag
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
-    Save 'build-viewer.log' ($o -split "`n" | Select-Object -Last 120 | Out-String)
-    Check ($script:rc -eq 0) "$viewerTag built (its workspace stage: vitest, the D9 notices check, tsc + vite build)"
-    if ($script:rc -ne 0) { throw 'build viewer' }
-    $script:made.images += $viewerTag
-    $vt = ([regex]'Tests\s+(\d+) passed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
-    if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
+    if ($Red) {
+      $o = Build-At $BaseSha $wbTag '' 'workbench'; Save 'build-workbench-base.log' $o
+      Check ($script:rc -eq 0) "RED: $wbTag built from OB1 $BaseSha"
+      $script:made.images += $wbTag
+      $o = Build-At $BaseSha $viewerTag '' 'viewer'; Save 'build-viewer-base.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
+      Check ($script:rc -eq 0) "RED: $viewerTag built from OB1 $BaseSha"
+      $script:made.images += $viewerTag
+    } else {
+      $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $wbTag $wb; Save 'build-workbench.log' ($o -split "`n" | Select-Object -Last 80 | Out-String)
+      Check ($script:rc -eq 0) "$wbTag built at OB1 $($sha.Substring(0, 7)) (its test gate passed: grammar, hub clustering, contracts, export)"
+      if ($script:rc -ne 0) { throw 'build workbench' }
+      $script:made.images += $wbTag
+      $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
+      Save 'build-viewer.log' ($o -split "`n" | Select-Object -Last 120 | Out-String)
+      Check ($script:rc -eq 0) "$viewerTag built (its workspace stage: vitest, the D9 notices check, tsc + vite build)"
+      if ($script:rc -ne 0) { throw 'build viewer' }
+      $script:made.images += $viewerTag
+      $vt = ([regex]'Tests\s+(\d+) passed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
+      if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
+    }
+    # the integration test runs from THIS tree's test stage in both modes (RED: against the base workbench)
+    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
+    Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
+    $script:made.images += $wbTestTag
+    $o = DkLong build --label $label -t $e2eTag (Join-Path $wsDir 'e2e'); Save 'build-e2e.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
+    Check ($script:rc -eq 0) "$e2eTag (playwright-core + pg, lab only) built"
+    $script:made.images += $e2eTag
+
   }
-  # the integration test runs from THIS tree's test stage in both modes (RED: against the base workbench)
-  $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
-  Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
-  $script:made.images += $wbTestTag
-  $o = DkLong build --label $label -t $e2eTag (Join-Path $wsDir 'e2e'); Save 'build-e2e.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
-  Check ($script:rc -eq 0) "$e2eTag (playwright-core + pg, lab only) built"
-  $script:made.images += $e2eTag
+  if ($BuildOnly) { $KeepImages = $true; Write-Host '  -BuildOnly: images built and kept; no lab ran'; throw 'BUILD-ONLY' }
 
   # ---------------------------------------------------------------- 4. the lab
   Write-Host '[4] the lab'
@@ -375,7 +393,7 @@ try {
   Save 'viewer.log' ((Dk logs --tail 60 "$P-viewer") -replace [regex]::Escape($key), '<key>')
   Save 'workbench.log' (((Dk logs --tail 120 "$P-wb") -replace [regex]::Escape($key), '<key>') -replace [regex]::Escape($gateKey), '<gate-key>')
 } catch {
-  Fail "the run stopped: $_"
+  if ("$_" -ne 'BUILD-ONLY') { Fail "the run stopped: $_" }
 } finally {
   Write-Host '[6] teardown'
   foreach ($c in $script:made.containers) { $null = Dk rm -f -v $c }
