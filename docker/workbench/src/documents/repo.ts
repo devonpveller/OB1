@@ -84,7 +84,7 @@ async function afterWrite(deps: DocDeps, rel: string, content: string, who: Iden
         error: "the file is saved; the listing is repaired when the workspace reconnects",
       });
     } catch { /* the database is what failed; the response still reports it */ }
-    return { ok: false, error };
+    return { ok: false, error: "the listing could not be updated (the file is saved; the reconcile pass repairs it)" };
   }
 }
 
@@ -295,7 +295,8 @@ export async function reconcile(deps: DocDeps, who: Identity, opts: { legacyRoot
       await syncListing(deps.db, deps.reg, f, await vaultRead(f), who, "reconcile");
       repaired.push(f);
     } catch (e) {
-      failed.push({ path: f, error: String((e as Error).message).slice(0, 200) });
+      console.error(`[documents] reconcile of ${f} failed:`, String((e as Error)?.message ?? e).slice(0, 200));
+      failed.push({ path: f, error: "the listing could not be repaired" });
     }
   }
   const removed: string[] = [];

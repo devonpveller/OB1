@@ -22,8 +22,8 @@ node scripts/notices.mjs                 # after a dependency change: regenerate
 
 Only same-origin `/workbench/*` (`src/lib/api.ts`, the one fetch door): the retrieval contract
 (`/workbench/contract/*`), the documents API (`/workbench/documents/*`) and `/workbench/workspace/*`
-(who the user is, the bell's read state). The key is injected server-side - by the portal Caddy, or
-by the viewer itself for an edge that targets the viewer alone (`lib/workbench-proxy.mjs`).
+(who the user is, the bell's read state). The key is injected server-side by the viewer itself
+(`lib/workbench-proxy.mjs`; the portal Caddy route that also did is gone).
 
 ## User documents
 

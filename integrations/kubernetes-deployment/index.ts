@@ -1999,7 +1999,7 @@ server.registerTool(
 // One tool per read operation of the workbench's typed retrieval contract, registered through
 // server.registerTool so both lanes get them and every result is size-capped like any tool.
 // The schemas come from the workbench (contract-tools.json, generated); each call goes to the
-// workbench over HTTP with the same shared key Caddy injects (WORKBENCH_KEY = MCP_ACCESS_KEY).
+// workbench over HTTP with the same shared key the viewer's forwarder injects (WORKBENCH_KEY = MCP_ACCESS_KEY).
 registerContractTools(server, {
   workbenchUrl: Deno.env.get("CONTRACT_WORKBENCH_URL") || "http://openbrain-workbench:8000",
   key: MCP_ACCESS_KEY,

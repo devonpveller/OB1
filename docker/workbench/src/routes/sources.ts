@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import * as repo from "../repositories/sources.ts";
 import { config } from "../config.ts";
+import { publicError } from "../util/public-error.ts";
 import { logChange } from "../util/changeslog.ts";
 import { gateErrorBody, isGateError } from "../fetch-gate/client.ts";
 import { pool } from "../db/pool.ts";
@@ -143,14 +144,16 @@ sources.post("/:id/replace-from-upload", async (c) => {
     fd.append("file", new Blob([bytes]), file.name);
     const er = await fetch(`${config.extractUrl}/extract`, { method: "POST", body: fd });
     if (!er.ok) {
-      return c.json({ error: `extract failed (${er.status}): ${(await er.text()).slice(0, 200)}` }, 422);
+      // the extractor's own answer is logged, never echoed (rw-identity-harden round 2, D1)
+      console.error(`[sources] extract failed (${er.status}):`, (await er.text()).slice(0, 200));
+      return c.json({ error: `extract failed (${er.status})` }, 422);
     }
     const ex = await er.json();
     const res = await repo.updateSource(c.req.param("id"), ex.markdown ?? "", null, authorOf(c));
     if (!res) return c.json({ error: "not found" }, 404);
     return c.json({ source: res.source, extracted_title: ex.title ?? null, from: file.name });
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 500);
+    return c.json({ error: publicError(e, "the upload could not be extracted or saved", "sources") }, 500);
   }
 });
 
@@ -164,7 +167,7 @@ sources.post("/:id/refetch", async (c) => {
     return c.json(res);
   } catch (e) {
     if (isGateError(e)) return c.json(gateErrorBody(e), e.httpStatus as 422 | 502 | 503);
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the source could not be re-fetched", "sources") }, 400);
   }
 });
 

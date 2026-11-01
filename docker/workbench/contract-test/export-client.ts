@@ -28,7 +28,7 @@
 //   secret   <file> <secret>...            the file (PDF text + objects, DOCX XML, text) carries no secret,
 //                                          as written or with tags and whitespace removed; attempt 5: nor to
 //                                          a reader (NFKD, marks and invisibles stripped, letters and digits)
-// The key is read from $WB_KEY and sent as X-Brain-Key, as Caddy does.
+// The key is read from $WB_KEY and sent as X-Brain-Key, as the viewer's forwarder does.
 import { pdfFonts, pdfText } from "/app/src/export/pdf_tools.ts";
 import { docxXml } from "/app/src/export/zip_read.ts";
 

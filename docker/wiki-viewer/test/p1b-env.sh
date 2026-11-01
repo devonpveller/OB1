@@ -9,6 +9,9 @@
 #   bash OB1/docker/wiki-viewer/test/p1b-env.sh cdb            # $P-cdb: the REAL initdb chain (docker-compose.yml order) -> the P0 contract
 #   bash OB1/docker/wiki-viewer/test/p1b-env.sh wb             # $P-wb: the workbench on $P-cdb (alias openbrain-workbench), VIEWER_NAV_URL -> the viewer's nav worker
 #   bash OB1/docker/wiki-viewer/test/p1b-env.sh front          # $P-front: caddy running the portal Caddyfile's REAL (wiki_app) snippet
+#     (since rw-identity-harden it has no /workbench/* route: everything goes to the viewer, whose own
+#      forwarder is the only /workbench door - start the P1a viewer with
+#      P1B_VIEWER_ENV='-e WORKBENCH_URL=http://openbrain-workbench:8000 -e WIKI_VIEWER_ALLOWED_HOSTS=<P>-front'; run-p1b.sh does)
 #   bash OB1/docker/wiki-viewer/test/p1b-env.sh post <class> <subject> [slug] [entity]   # post_research_notification on $P-cdb
 #   bash OB1/docker/wiki-viewer/test/p1b-env.sh copyrows       # copy the fixture db's wiki_pages rows into $P-cdb (the workbench's search reads its own db)
 #   bash OB1/docker/wiki-viewer/test/p1b-env.sh fget <path> [hdr...]  # GET through the front door: status, x-wiki-render, etag, server-timing, bytes
@@ -90,7 +93,7 @@ cmd_front() { # the portal Caddyfile's (wiki_app) snippet, verbatim, as the env'
   until nodeq "const r = await fetch('http://$P-front:8080/__health').catch(() => null); process.exit(r ? 0 : 1)" >/dev/null 2>&1; do
     i=$((i + 1)); [ "$i" -gt 60 ] && { log "front door not answering"; docker logs --tail 30 "$P-front"; return 1; }; sleep 1
   done
-  log "front door up: http://$P-front:8080 (the portal's (wiki_app): /workbench/* -> openbrain-workbench:8000, else -> openbrain-wiki-viewer:8080, handle_errors)"
+  log "front door up: http://$P-front:8080 (the portal's (wiki_app): everything -> openbrain-wiki-viewer:8080, whose forwarder takes /workbench/*; handle_errors)"
 }
 
 cmd_post() { # class subject [slug] [entity]: through the contract's producer API (psql variables: never spliced into SQL)

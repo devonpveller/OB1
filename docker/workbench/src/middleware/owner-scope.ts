@@ -51,13 +51,14 @@ class BodyRefused extends Error {
 const MUTATING = (m: string) => !["GET", "HEAD", "OPTIONS"].includes(m);
 
 async function requestStrings(c: Context): Promise<string[]> {
-  const url = new URL(c.req.url); // the query only - the path is the seam's (rw-identity3, B1b)
-  const route = seamPath(c);
+  const route = seamPath(c); // the path the seam judged and the router routed (rw-identity3, B1b)
   const out: string[] = [];
   let path = route;
   try { path = decodeURIComponent(path); } catch { /* keep raw */ }
   out.push(path.replace(ROUTE_PREFIX, ""));
-  for (const [, v] of url.searchParams) out.push(v);
+  // the query as every handler reads it - Hono's own parse (c.req.query / c.req.queries), never a
+  // WHATWG new URL(), which parses some requests differently and throws on others (rw-identity-harden F-h)
+  for (const vs of Object.values(c.req.queries())) out.push(...vs);
   if (!MUTATING(c.req.method)) return out;
   const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
   const raw = await c.req.raw.clone().text();

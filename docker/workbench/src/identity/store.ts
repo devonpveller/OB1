@@ -35,15 +35,38 @@ export interface Impersonation {
   expires_at: string;
 }
 
-// The admin's live impersonation, or null. An expired one is removed here and its end recorded.
+export interface Ended {
+  admin_sub: string;
+  target_sub: string;
+  reason: string;
+  ref: string;
+}
+
+// rw-identity-harden F-d: an impersonation ends together with its impersonate.end row in admin_audit -
+// ONE transaction, so it never ends unrecorded and is never recorded as ended while it runs on.
+async function endWhere(db: Db, where: string, args: unknown[], reason: (e: Ended) => string): Promise<Ended[]> {
+  return await db.tx(async (t) => {
+    const ended = await t.query<Ended>(
+      `DELETE FROM public.workspace_impersonation WHERE ${where} RETURNING admin_sub, target_sub, reason, ref`,
+      args,
+    );
+    for (const e of ended) {
+      await audit(t, { actor_sub: e.admin_sub, subject_sub: e.target_sub, action: "impersonate.end", reason: reason(e), session_ref: e.ref });
+    }
+    return ended;
+  });
+}
+
+// rw-identity-harden F-c: every impersonation past its expiry ends, recorded - whichever admin it is
+// and whether or not that admin ever sends another request. Run on every read of an impersonation
+// (impersonationOf) and periodically (main.ts). Returns how many ended.
+export async function sweepExpiredImpersonations(db: Db): Promise<number> {
+  return (await endWhere(db, "expires_at <= now()", [], (e) => `expired (${e.reason.slice(0, 200)})`)).length;
+}
+
+// The admin's live impersonation, or null. Expired ones (anyone's) are ended here and recorded.
 export async function impersonationOf(db: Db, adminSub: string): Promise<Impersonation | null> {
-  const ended = await db.query<{ target_sub: string; reason: string; ref: string }>(
-    `DELETE FROM public.workspace_impersonation WHERE admin_sub = $1 AND expires_at <= now() RETURNING target_sub, reason, ref`,
-    [adminSub],
-  );
-  for (const e of ended) {
-    await audit(db, { actor_sub: adminSub, subject_sub: e.target_sub, action: "impersonate.end", reason: `expired (${e.reason.slice(0, 200)})`, session_ref: e.ref });
-  }
+  await sweepExpiredImpersonations(db);
   const rows = await db.query<Impersonation>(
     `SELECT i.target_sub, coalesce(u.name, '') AS target_name, i.reason, i.ref,
             i.started_at::text AS started_at, i.expires_at::text AS expires_at
@@ -66,12 +89,11 @@ export async function startImpersonation(db: Db, adminSub: string, target: strin
   return rows[0] ?? null;
 }
 
-export async function endImpersonation(db: Db, adminSub: string): Promise<{ target_sub: string; reason: string; ref: string } | null> {
-  const rows = await db.query<{ target_sub: string; reason: string; ref: string }>(
-    `DELETE FROM public.workspace_impersonation WHERE admin_sub = $1 RETURNING target_sub, reason, ref`,
-    [adminSub],
-  );
-  return rows[0] ?? null;
+// Ends the admin's impersonation (if any) and records the end with `reason` (a string, or one made from
+// the ended row) - in one transaction (F-d). Returns what ended, or null.
+export async function endImpersonation(db: Db, adminSub: string, reason: string | ((e: Ended) => string)): Promise<Ended | null> {
+  const ended = await endWhere(db, "admin_sub = $1", [adminSub], typeof reason === "string" ? () => reason : reason);
+  return ended[0] ?? null;
 }
 
 export async function knownUser(db: Db, sub: string): Promise<{ sub: string; name: string } | null> {

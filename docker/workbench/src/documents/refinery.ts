@@ -274,7 +274,9 @@ export async function replaceUserSource(
     // stated failure with the gate's reason unchanged, and nothing below runs (nothing is overwritten)
     const fresh = await deps.refetch(h.url).catch((e) => {
       if (isGateError(e)) throw new DocError(e.message, e.httpStatus as 422 | 502 | 503, { gate: gateErrorBody(e).gate });
-      throw new DocError(`the link could not be refetched: ${String((e as Error).message).slice(0, 120)}`, 502);
+      // the fetch error is logged, never answered (it names the upstream; rw-identity-harden round 2, D1)
+      console.error("[documents] refetch failed:", String((e as Error)?.message ?? e).slice(0, 300));
+      throw new DocError("the link could not be refetched", 502);
     });
     const same = (await deps.db.query<{ same: boolean }>(`SELECT md5($1) = $2 AS same`, [fresh.content, h.content_hash]))[0].same;
     const revision = same ? h.revision : await reviseHeld(deps.db, h.id, fresh.title || h.title, fresh.content, deps.chunk, deps.embed);
