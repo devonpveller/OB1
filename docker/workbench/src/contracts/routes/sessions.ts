@@ -7,6 +7,7 @@
 // with no recorded owner the default subject. Anyone else is answered as if the job did not exist
 // (404) - the card hides the actions, the route refuses them, and the research service checks again.
 import { createRoute, z } from "../deps.ts";
+import { logRefusal } from "../../identity/refusal_log.ts";
 import { CancelRequest, CancelResult, Flow, Sessions, SteerRequest, SteerResult } from "../schemas/sessions.ts";
 import { limit, pathParam, queryParam } from "../schemas/common.ts";
 import { parseLimit } from "../logic/scope.ts";
@@ -32,6 +33,16 @@ async function auditAdminAct(deps: ContractDeps, who: Who & { actor: string }, l
     console.error("[sessions] admin_audit write failed, the act was refused:", (e as Error).message);
     return false;
   }
+}
+// rw-identity-harden2 (review B1): what a steer the research service did not accept is answered with. Only its
+// typed 400/409 refusals (SteerError: the user can act on them) keep their own text; a 5xx's detail is an
+// exception message - a fixed text here, the real one in the log (rate-limited per route).
+export function steerFailure(r: { status: number; body: Record<string, unknown> }): { status: number; error: string } {
+  if (r.status === 400 || r.status === 409) {
+    return { status: r.status, error: String(r.body.detail ?? r.body.error ?? `the research service answered ${r.status}`) }; // upstream-typed-ok: SteerError 400/409
+  }
+  logRefusal("sessions.steer: upstream", `[sessions.steer] the research service answered ${r.status}: ${String(r.body.detail ?? r.body.error ?? "").slice(0, 300)}`);
+  return { status: 502, error: `the research service could not steer this session (it answered ${r.status})` };
 }
 const AUDIT_FAILED = "this admin action could not be recorded in the admin audit log, so it was not run";
 
@@ -129,8 +140,8 @@ export function registerSessions(app: ContractApp, deps: ContractDeps, s: Sessio
       }, { sub: who.sub, actor: who.actor, admin: isAdmin(who) });
       if (r.status === 404) return c.json({ error: "no session with this id" }, 404);
       if (r.status !== 201) {
-        const status = [400, 409].includes(r.status) ? r.status : 502;
-        return c.json({ error: String(r.body.detail ?? r.body.error ?? `the research service answered ${r.status}`) }, status as 400);
+        const f = steerFailure(r);
+        return c.json({ error: f.error }, f.status as 400);
       }
       const after = await card(deps.db, id, who, s.owui);
       const o = r.body as Record<string, string>;

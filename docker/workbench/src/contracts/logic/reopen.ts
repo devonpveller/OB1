@@ -1,3 +1,4 @@
+import { logRefusal } from "../../identity/refusal_log.ts";
 // D5 items 6-7: what happens when a tombstoned URL comes back. PURE.
 //
 // The tombstone's reason type picks the PATH (declared per reason in the erasure_reasons
@@ -127,7 +128,13 @@ export function httpScorer(
         return off("the D15 scorer is unreachable");
       }
       const d = await r.json().catch(() => null) as Record<string, unknown> | null;
-      if (!r.ok || !d) return off(`the D15 scorer answered ${r.status}: ${String(d?.detail ?? d?.error ?? "no body")}`);
+      if (!r.ok || !d) {
+        // rw-identity-harden2 (review B1): the scorer's own detail on a failure is an exception message and this
+        // reason is stored; only its typed 422 gate refusal (names the claim kind) is kept. The rest: the log.
+        const typed = r.status === 422 && d?.error === "credibility_gate" && typeof d.detail === "string"; // upstream-typed-ok
+        if (!typed) logRefusal("reopen: scorer upstream", `[reopen] the D15 scorer answered ${r.status}: ${String(d?.detail ?? d?.error ?? "no body").slice(0, 300)}`);
+        return off(typed ? `the D15 scorer refused: ${String(d?.detail).slice(0, 300)}` : `the D15 scorer answered ${r.status}`); // upstream-typed-ok: CredibilityGateError 422
+      }
       const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
       if (d.available !== true || num(d.value) === null || num(d.floor) === null) return off(`the D15 scorer gave no score: ${String(d.reason ?? "")}`);
       return { available: true, value: num(d.value), floor: num(d.floor), version: String(d.version ?? ""), reason: String(d.reason ?? "") };
