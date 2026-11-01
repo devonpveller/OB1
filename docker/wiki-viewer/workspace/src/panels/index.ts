@@ -8,3 +8,5 @@ import "./search/SearchPanel";
 import "./hubs/HubsPanel";
 import "./refinery/RefineryPanel";
 import "./docmeta/DocMetaPanels";
+import "./sessions/SessionsPanel";
+import "./flow/ResearchFlowPanel";

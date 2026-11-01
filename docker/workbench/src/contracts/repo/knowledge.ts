@@ -6,6 +6,7 @@
 import type { Db } from "../db.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 import { OWN_QUERY } from "./sessions.ts";
+import type { Who } from "../../sessions/repo.ts";
 
 const STATEMENT_TIMEOUT_MS = 3000;
 
@@ -234,9 +235,10 @@ async function searchHeld(db: Db, q: string, refineryId: string, limit: number, 
 }
 
 // timeline(scope, range): revisions, sessions, claims and trail events in one ordered list.
-// `owner`: the caller (rw-p2b-workspace round 2, F3): a session started from the workspace shows its
-// typed prompt to its owner only, as sessions() does.
-export async function timeline(db: Db, from: string | null, to: string | null, sourceId: string | null, limit: number, f: MetadataFilter, owner = "") {
+// `who`: the caller (rw-p2b-workspace round 2, F3): a session started from the workspace shows its
+// typed prompt to its owner only, as sessions() does; rw-p4b-sessions round 3: and a steer's text only to
+// its actor and to who may act on the session (OWN_QUERY's one rule, contracts/repo/sessions.ts).
+export async function timeline(db: Db, from: string | null, to: string | null, sourceId: string | null, limit: number, f: MetadataFilter, who: Who = { sub: "", key: "" }) {
   if (f) return { from, to, events: [] };
   const events = await db.query<{ at: string; kind: string; ref: string; summary: string }>(
     `SELECT * FROM (
@@ -244,9 +246,9 @@ export async function timeline(db: Db, from: string | null, to: string | null, s
               'revision ' || r.revision || ' by ' || r.edited_by AS summary, r.source_id AS sid
          FROM public.source_revisions r
        UNION ALL
-       SELECT j.created_at, 'session_started', j.id::text, left(${OWN_QUERY("j", "$5")}, 120), NULL FROM public.research_jobs j
+       SELECT j.created_at, 'session_started', j.id::text, left(${OWN_QUERY("j", "$5", who, "$6")}, 120), NULL FROM public.research_jobs j
        UNION ALL
-       SELECT j.finished_at, 'session_finished', j.id::text, j.status || ': ' || left(${OWN_QUERY("j", "$5")}, 100), NULL
+       SELECT j.finished_at, 'session_finished', j.id::text, j.status || ': ' || left(${OWN_QUERY("j", "$5", who, "$6")}, 100), NULL
          FROM public.research_jobs j WHERE j.finished_at IS NOT NULL
        UNION ALL
        SELECT c.created_at, 'claim_created', c.id::text, left(c.text, 120), NULL FROM public.claims c
@@ -256,7 +258,7 @@ export async function timeline(db: Db, from: string | null, to: string | null, s
      WHERE ($1::timestamptz IS NULL OR e.at >= $1) AND ($2::timestamptz IS NULL OR e.at <= $2)
        AND ($3::uuid IS NULL OR e.sid = $3)
      ORDER BY e.at DESC LIMIT $4`,
-    [from, to, sourceId, limit, owner],
+    [from, to, sourceId, limit, who.sub, who.actor ?? who.sub],
   );
   return { from, to, events: events.map(({ ...e }) => ({ at: e.at, kind: e.kind, ref: e.ref, summary: e.summary })) };
 }

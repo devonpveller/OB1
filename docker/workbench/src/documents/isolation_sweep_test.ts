@@ -129,6 +129,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const ADMIN_VIEW = /^(GET|HEAD) \/workbench\/auth\/(users|audit)[ ?]/;
   const M = {
     title: `TitleSecret${rnd()}X`, body: `BodySecret${rnd()}`, idea: `IdeaSecret${rnd()}`, prompt: `PromptSecret${rnd()}`,
+    steer: `SteerSecret${rnd()}`,
   };
   const wb = (m: string, p: string, b?: unknown, h: Record<string, string> = {}) => call(BASE, m, p, b, h);
   // ── B plants ─────────────────────────────────────────────────────────────────────────────────
@@ -149,6 +150,20 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const research = await wb("POST", "/workbench/documents/research", { path: bPath, query: M.prompt, kind: "research" }, B);
   assertEquals(research.status, 202, research.text);
   const bJob: string = research.json.job_id;
+  // rw-p4b-sessions: B steers B's own session from its card (a steering stage planted as the harness
+  // writes one), so B's steer text, its branch and its step ids are in the tree every route can reach.
+  // Only where the lab runs the real research service (run-sessions-tests.ps1); elsewhere it is skipped.
+  let steerPlanted = false;
+  {
+    const root = (await sql<{ r: string }>(`SELECT coalesce(root_job_id, id)::text AS r FROM public.research_jobs WHERE id = $1`, [bJob]))[0]?.r;
+    if (root) {
+      await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload)
+                 VALUES ($1, $2, 'sweepstep', 'stage', 'steering', '{"phase":"plan"}')`, [bJob, root]).catch(() => {});
+      const st = await wb("POST", `/workbench/contract/sessions/${bJob}/steer`, { step_id: "sweepstep", text: M.steer }, B);
+      steerPlanted = st.status === 201;
+      console.log(`sweep: B steered B's session from its card: ${steerPlanted ? "201" : `skipped (${st.status})`}`);
+    }
+  }
   const held = await wb("POST", "/workbench/documents/user-sources", { refinery_id: bRefinery, title: "sweep held source", content: "shared held text for the sweep" }, B);
   assert(held.status < 300, held.text);
   const bHeld: string = held.json.source_id ?? held.json.id ?? held.json.held?.id ?? "";
@@ -169,6 +184,24 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // the reconcile repairs B's listing when B's workspace next connects; B's file as it now stands
   await wb("GET", `/workbench/contract/documents`, undefined, B);
   const before = await Deno.readTextFile(`${VAULT}/${bPath}`);
+  // rw-p4b-sessions round 3 (tester t-p4b-sessions2): an ADMIN steers a SERVICE's job with a marker. The
+  // service's job is shared, but the steer's text is the admin's (and who may act's): for a non-admin A every
+  // route below must carry none of it (the timeline leaked it in attempt 2). Only where the lab passes the
+  // research service and a service key (run-sessions-tests.ps1).
+  const SVC_KEY = Deno.env.get("SWEEP_SERVICE_KEY") ?? "", RS_URL = (Deno.env.get("SWEEP_RESEARCH") ?? "").replace(/\/+$/, "");
+  const ADMIN_LOGIN = Deno.env.get("SWEEP_ADMIN") ?? "";
+  let adminSteer = "";
+  if (SVC_KEY && RS_URL && ADMIN_LOGIN && OIDC) {
+    const sr = await fetch(`${RS_URL}/research`, { method: "POST", headers: { "content-type": "application/json", "x-brain-key": SVC_KEY }, body: JSON.stringify({ query: `sweep service question ${rnd()}` }) });
+    const svcJob = String((await sr.json().catch(() => ({}))).job_id ?? "");
+    if (svcJob) {
+      await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload) VALUES ($1, $1, 'sweepsvc', 'stage', 'steering', '{"phase":"plan"}')`, [svcJob]);
+      const words = `AdminSteerSecret${rnd()}`;
+      const as = await call(BASE, "POST", `/workbench/contract/sessions/${svcJob}/steer`, { step_id: "sweepsvc", text: words }, await signIn(ADMIN_LOGIN));
+      if (as.status === 201) adminSteer = words;
+      console.log(`sweep: an admin steered a service's session: ${as.status === 201 ? "201" : `skipped (${as.status})`}`);
+    }
+  }
   // a NON-.md attachment in B's documents/<key>/ (integration onto P1c: with Quartz's ignorePatterns
   // gone, "documents" in QUARTZ_IGNORED_ROOTS is what keeps the viewer from serving it)
   const bDir = bPath.slice(0, bPath.lastIndexOf("/"));
@@ -187,7 +220,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     { team_id: pod.team, title: pod.request, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
   assertEquals(podReq.status, 202, podReq.text);
   const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret,
-    podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id };
+    podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
+    ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;
