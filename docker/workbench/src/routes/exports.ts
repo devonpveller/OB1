@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { RunStore } from "../export/runs.ts";
 import { safeRelPath } from "../util/paths.ts";
+import { publicError } from "../util/public-error.ts";
 
 export function exportsRouter(runs: RunStore, whoOf: (c: Context) => Promise<{ sub: string }>): Hono {
   const r = new Hono();
@@ -24,7 +25,7 @@ export function exportsRouter(runs: RunStore, whoOf: (c: Context) => Promise<{ s
       try {
         path = safeRelPath(raw);
       } catch (e) {
-        return c.json({ error: String((e as Error).message) }, 400);
+        return c.json({ error: publicError(e, "path is not a valid vault path", "exports") }, 400);
       }
     }
     // round 2 (tester D7): a limit is a whole number 1..200, else 400 (1.5 reached SQL as LIMIT 1.5: 500)

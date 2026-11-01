@@ -1,6 +1,6 @@
 // /workbench/notebooks sub-router (P2.5). Hono resource router over the
 // notebooks repository (G9). Prefix-inclusive routes (mounted at
-// /workbench/notebooks) to match the prefix-preserving Caddy `handle`.
+// /workbench/notebooks) to match the prefix-preserving /workbench forwarder.
 import { Hono } from "hono";
 import * as repo from "../repositories/notebooks.ts";
 

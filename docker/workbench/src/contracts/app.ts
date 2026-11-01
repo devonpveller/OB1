@@ -24,7 +24,7 @@ export function createContractApp(deps: ContractDeps) {
   registerTrust(app, deps); // P3b: the trust panels' reads
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",
-    description: "the shared secret Caddy injects (G7); the browser never holds it",
+    description: "the shared secret the door injects (the viewer's /workbench forwarder; G7); the browser never holds it",
   });
   return app;
 }

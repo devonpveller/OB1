@@ -28,6 +28,7 @@ import { kindsOf, listedCsl } from "../export/exporter.ts";
 import { printedTitle } from "../export/csl.ts";
 import { citeKey, type StyleDef } from "../export/render.ts";
 import { bibliographyOrder } from "../export/biborder.ts";
+import { isValidatorMessage } from "../util/public-error.ts";
 
 export type DocumentsDeps = refinery.RefineryDeps;
 
@@ -46,7 +47,8 @@ function fail(c: Context, e: unknown) {
   if (e instanceof Conflict) return c.json({ error: e.message, ...(e.detail as Record<string, unknown> ?? {}) }, 409);
   if (e instanceof SelectorRefused) return c.json({ error: e.message }, 422);
   const msg = String((e as Error)?.message ?? e);
-  if (/path traversal|empty path|invalid path|a user document is a \.md|invalid folder/.test(msg)) return c.json({ error: msg }, 400);
+  // only a path validator's own fixed text is answered as it is (rw-identity-harden round 2, D1)
+  if (isValidatorMessage(e)) return c.json({ error: msg }, 400);
   console.error("[documents] error:", msg);
   return c.json({ error: "internal" }, 500);
 }

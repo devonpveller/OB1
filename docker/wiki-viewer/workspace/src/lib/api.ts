@@ -1,4 +1,4 @@
-// The workspace's one door to the back end: same-origin /workbench/* (Caddy injects the key, the
+// The workspace's one door to the back end: same-origin /workbench/* (the viewer injects the key, the
 // browser never holds it). Every request goes through here, so a test can see exactly what a
 // screen fetched (D12: a document opens without a page-route, render-module or contract page call;
 // opening fetches no reference text until one is opened).

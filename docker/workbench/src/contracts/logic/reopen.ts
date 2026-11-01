@@ -123,7 +123,8 @@ export function httpScorer(
           body: JSON.stringify(input), signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (e) {
-        return off(`the D15 scorer is unreachable: ${(e as Error).message}`);
+        console.error("[reopen] the D15 scorer is unreachable:", (e as Error)?.message ?? e);
+        return off("the D15 scorer is unreachable");
       }
       const d = await r.json().catch(() => null) as Record<string, unknown> | null;
       if (!r.ok || !d) return off(`the D15 scorer answered ${r.status}: ${String(d?.detail ?? d?.error ?? "no body")}`);

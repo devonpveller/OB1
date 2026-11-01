@@ -32,6 +32,14 @@ hdr() { echo; echo "################ $1"; }
 want() { [ -z "${ONLY:-}" ] || [[ " $ONLY " == *" $1 "* ]]; }
 T() { timeout "${1}" "${@:2}"; }
 FRONT="http://$P-front:8080"
+# rw-identity-harden: the front door (the portal's (wiki_app) snippet) no longer routes /workbench/*; it reaches
+# the viewer, whose forwarder is the only /workbench door - on, and answering the front door's Host
+# the viewer's environment for the CURRENT prefix: set here and again whenever $P changes (B3 rebuilds
+# the env under $P-p, whose front door is $P-p-front - round 3, tester t-id-harden2 D4); a caller's own
+# P1B_VIEWER_ENV wins
+USER_VIEWER_ENV="${P1B_VIEWER_ENV:-}"
+viewer_env() { export P1B_VIEWER_ENV="${USER_VIEWER_ENV:--e WORKBENCH_URL=http://openbrain-workbench:8000 -e WIKI_VIEWER_ALLOWED_HOSTS=$P-front}"; }
+viewer_env
 chk() { timeout 900 docker run --rm -i --network "$NET" -v "$OB1:/ob1:ro" --entrypoint node "$IMG" /ob1/docker/wiki-viewer/test/p1b-checks.mjs "$@"; }
 psqlq() { docker exec -i "$P-db" psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA "$@"; }
 churn() { # round 2: a new thought on an entity + the entity bumped, so the next compile REGENERATES its page
@@ -443,7 +451,7 @@ if want B3; then
 hdr "B3 (acceptance 3): explorer per navigation, nav TTFB, nav payload - the current vault's size, five times it, and through Slow 4G"
 b3=1
 PP="$P-p"; export P1A_PREFIX="$PP" P1A_SUBNET="${P1B_PERF_SUBNET:-10.198.183.0/24}"
-eval "$(bash "$E" vars)"; FRONT="http://$P-front:8080"
+eval "$(bash "$E" vars)"; FRONT="http://$P-front:8080"; viewer_env
 bash "$B" down >/dev/null 2>&1; bash "$E" down >/dev/null 2>&1
 WIKI_BUILDER=0 WIKI_RECONCILE_INTERVAL_MS=600000 P1A_HEAP_MB=6144 T 600 bash "$E" up 2>&1 | tail -2
 T 600 bash "$B" cdb >/dev/null 2>&1; T 300 bash "$B" wb 2>&1 | tail -1; T 120 bash "$B" front 2>&1 | tail -1; T 120 bash "$B" chrome 2>&1 | tail -1
@@ -511,7 +519,7 @@ docker run --rm -i -v "$RUNDIR_W:/r:ro" --entrypoint node "$IMG" --input-type=mo
   process.exit(fail ? 1 : 0);" || b3=0
 cp "$RUNDIR"/perf-*.json "${P1B_PERF_OUT:-$RUNDIR}/" 2>/dev/null || true
 bash "$B" down >/dev/null 2>&1; bash "$E" down >/dev/null 2>&1
-export P1A_PREFIX="${P%-p}" P1A_SUBNET="$SUBNET_MAIN"; eval "$(bash "$E" vars)"
+export P1A_PREFIX="${P%-p}" P1A_SUBNET="$SUBNET_MAIN"; eval "$(bash "$E" vars)"; viewer_env
 [ "$b3" = 1 ] && pass B3 || fail B3 "a perf floor exceeded (see the judge above)"
 fi
 

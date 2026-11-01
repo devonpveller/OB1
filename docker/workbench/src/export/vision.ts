@@ -23,6 +23,8 @@ export const MAX_IMAGES_PER_CALL = 20;
 const MAX_TEXT = 300;
 const MAX_FINDINGS = 50;
 
+import { sameKey } from "../identity/keys.ts";
+
 export interface VisionConfig {
   state: "off" | "on" | "refused";
   url?: string; // .../v1 (chat/completions is appended)
@@ -65,9 +67,9 @@ export function visionConfigFromEnv(env = (k: string) => Deno.env.get(k)): Visio
     };
   }
   const others = ["EMBEDDING_API_KEY", "WORKBENCH_KEY", "WORKSPACE_DOOR_KEY", "RESEARCH_SCORER_KEY", "RESEARCH_WORKSPACE_KEY"]
-    .filter((n) => (env(n) ?? "").trim() === key);
+    .filter((n) => sameKey((env(n) ?? "").trim(), key));
   for (const n of (env("WORKSPACE_SERVICE_KEYS") ?? "").split(",")) {
-    if (n.split("=").pop()?.trim() === key) others.push("WORKSPACE_SERVICE_KEYS");
+    if (sameKey(n.split("=").pop()?.trim() ?? "", key)) others.push("WORKSPACE_SERVICE_KEYS");
   }
   if (others.length) {
     return {

@@ -91,7 +91,7 @@ Core is everything NOT listed below: `openbrain-db`, `-mcp`, `-ext`,
 | `openbrain-research` | `research` | The research harness itself — search, fetch, synthesis, grounding. An engine, not part of the store: the brain captures, embeds, chunks and serves without it. |
 | `openbrain-wiki` | `wiki` | The vault compiler. It *produces* the wiki surface from the store; the store is complete and queryable with no vault compiled. |
 | `openbrain-wiki-viewer` | `wiki` | The Quartz renderer of the vault the compiler writes. `depends_on: openbrain-wiki`, so it belongs to the same group by construction — it has nothing to render otherwise. |
-| `openbrain-workbench` | `wiki` | The read/write half of the wiki surface, reached same-origin behind the viewer through the portal Caddy `handle /workbench/*`. Its only in-project caller is `openbrain-wiki` (`WORKBENCH_URL`, revision commits). Nothing core calls it. |
+| `openbrain-workbench` | `wiki` | The read/write half of the wiki surface, reached same-origin behind the viewer through the viewer's own `/workbench/*` forwarder (the portal Caddy route is gone since rw-identity-harden). Its only in-project caller is `openbrain-wiki` (`WORKBENCH_URL`, revision commits). Nothing core calls it. |
 | `openbrain-wiki-backup` | `wiki` | Tars `openbrain-wiki-data` + `wiki-assets` — the two volumes only the wiki group writes. With the group off there is no new vault state to protect. |
 | `surrealdb` | `notebook` | Open Notebook's local UI/queue/chat store and nothing else's; no other service in this project speaks to it. |
 | `open_notebook` | `notebook-app` | A surface onto `openbrain-db` (the canonical store since IKS), not an engine. `depends_on: surrealdb` (profile `notebook`, which `notebook-app` needs). Its OWN profile since intake-gate-relay round 2: the operator retired the app 2026-10-31 (stopped before intake writes bronze), so it is off unless `notebook-app` is enabled; `restart: unless-stopped`, so a stop holds across daemon restarts. |
@@ -259,9 +259,9 @@ separately below.
 
 | # | Consumer | File:line (ai-stack) | Reaches | Profile | What the user sees |
 |---|---|---|---|---|---|
-| 1 | portal Caddy | `portal/config/caddy/Caddyfile:136` | `openbrain-workbench:8000` | `wiki` | the `/workbench/*` route 502s |
-| 2 | portal Caddy | `portal/config/caddy/Caddyfile:143` | `openbrain-wiki-viewer:8080` | `wiki` | the published wiki 502s |
-| 3 | portal Caddy | `portal/config/caddy/Caddyfile:242`, `:250` | `open_notebook:5055`, `:8502` | `notebook` | the Open Notebook routes 502 |
+| 1 | (removed) portal Caddy | none since rw-identity-harden: its `handle /workbench/*` route is gone; `/workbench/*` reaches the workbench only through the viewer's forwarder (row 2) | - | `wiki` | - |
+| 2 | portal Caddy | `portal/config/caddy/Caddyfile:131` | `openbrain-wiki-viewer:8080` | `wiki` | the published wiki 502s (and with it the viewer's `/workbench/*`) |
+| 3 | portal Caddy | `portal/config/caddy/Caddyfile:235`, `:243` | `open_notebook:5055`, `:8502` | `notebook` | the Open Notebook routes 502 |
 | 4 | the `frontend` plane's `tailscale` companion | `frontend/entrypoint.sh:60`, route table `:97`, `:99` | `open_notebook:8502` and `:5055/api/config` | `notebook` | the tailnet Open Notebook UI (`:8443`) and API (`:5055`) serve routes fail their probes |
 | 5 | `agent-org`'s `agent-bridge` | `agent-org/docker/docker-compose.yml:208` → `agent-bridge/app/config.py:373`, `app/modules/grounding.py:12` | `openbrain-research:8000` | `research` | effort grounding (P4.0a) and the Tier-2 advisor stop producing, in a third compose project |
 | 6 | the deployed OWUI **Deep Research** tool | `owui/tools/deep_research.py:47` (deployed per `owui/manifest.csv:10`) | `openbrain-research:8000` | `research` | the tool errors at call time; its own message asks whether `openbrain-research` is reachable |
@@ -277,11 +277,11 @@ datastore it imports to.
 **Two of these are easy to get wrong, so they are stated exactly:**
 
 - Row 4 reaches Open Notebook **directly** but reaches the wiki **through portal
-  Caddy**: `frontend/docker-compose.yml:366` sets `QUARTZ_HOST=${QUARTZ_HOST:-caddy}`
+  Caddy**: `frontend/docker-compose.yml:419` sets `QUARTZ_HOST=${QUARTZ_HOST:-caddy}`
   and the deployed value is `caddy:8446`. `entrypoint.sh:66`'s own fallback is
   `openbrain-wiki-viewer`, but the compose always supplies a value, so that
   fallback does not apply on this stack — the comment at
-  `frontend/docker-compose.yml:361-364` records why it was moved behind Caddy.
+  `frontend/docker-compose.yml:408-418` records why it was moved behind Caddy (and that the portal is retired: `/workbench` answers 421 there since rw-identity-harden).
   So turning `wiki` off breaks the tailnet wiki route *via* row 2, not as a
   seventh direct edge.
 - Row 7 is **two files, not one**. An earlier version of this table named only

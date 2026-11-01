@@ -14,6 +14,7 @@ import { poolDb } from "../contracts/db.ts";
 import { ensureLegacyNote, MigrationRefused, noteRefsView, syncLegacyNote } from "../contracts/repo/references.ts";
 import { UUID_STRICT } from "../contracts/logic/citations.ts";
 import { safeRelPath } from "../util/paths.ts";
+import { publicError } from "../util/public-error.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 
 export const noteRefs = new Hono();
@@ -38,7 +39,7 @@ noteRefs.get("/", async (c) => {
   try {
     rel = notePath(c);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note references could not be read", "note-refs") }, 400);
   }
   if (!(await vaultExists(rel))) return c.json({ error: "note not found" }, 404);
   try {
@@ -58,7 +59,7 @@ noteRefs.post("/", async (c) => {
   try {
     rel = notePath(c);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note references could not be read", "note-refs") }, 400);
   }
   const body = await c.req.json().catch(() => ({}));
   const sourceId = (body?.source_id ?? "").toString();
@@ -83,7 +84,7 @@ noteRefs.delete("/", async (c) => {
   try {
     rel = notePath(c);
   } catch (e) {
-    return c.json({ error: String((e as Error).message) }, 400);
+    return c.json({ error: publicError(e, "the note references could not be read", "note-refs") }, 400);
   }
   const sourceId = (c.req.query("source_id") || "").toString();
   if (!(await vaultExists(rel))) return c.json({ error: "note not found" }, 404);
