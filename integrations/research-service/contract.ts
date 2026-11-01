@@ -95,7 +95,7 @@ export const CLASS_REGISTRY: Record<string, string[]> = {
 };
 
 /** rw-p5a-intake: a class that routes the job's searches to SearXNG categories. `academic` asks the
- *  search gateway for general + science: the scholarly engines (pubmed, europepmc, semantic scholar,
+ *  search gateway for general + science: the scholarly engines (pubmed, europepmc,
  *  crossref, openalex, arxiv, google scholar) are science-category engines and answer nothing else. */
 export const CLASS_SEARCH_CATEGORIES: Record<string, string[]> = {
   academic: ["general", "science"],
