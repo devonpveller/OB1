@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { C, D, get, post } from "../lib/api";
 import { setState } from "../lib/store";
+import { IntakeAdd } from "../panels/intake/IntakeAdd";
 
 interface Refinery {
   id: string;
@@ -54,8 +55,11 @@ export function UniversalPlus() {
               <button type="button" onClick={newDoc}>New document</button>
             </div>
           )}
+          {/* rw-p5a-intake: the general add - a link, a file or a drop; it asks which refinery (the panel's add) */}
+          {refineries && refineries.length > 0 && <IntakeAdd />}
           {refineries && refineries.length > 0 && (
-            <form onSubmit={(e) => { e.preventDefault(); add(); }}>
+            <form onSubmit={(e) => { e.preventDefault(); add(); }} data-testid="plus-paste">
+              <p className="ws-muted">or paste a source by hand</p>
               <label>
                 Which refinery does it join?
                 <select value={rid} onChange={(e) => setRid(e.target.value)} required data-testid="plus-refinery">

@@ -250,6 +250,9 @@ export interface HeldInput {
   url?: string;
   content_type?: string;
   by?: string;
+  // rw-p5a-intake: provenance the intake records on the held source (metadata.intake: the add job, its
+  // origin, the research service's fetch and egress); user_provided stays true whatever is passed
+  metadata?: Record<string, unknown>;
 }
 
 // Add a user-provided source: stored, chunked and embedded, state held, revision 1, owned by
@@ -284,7 +287,7 @@ export async function addHeld(
       `INSERT INTO public.held_sources (refinery_id, url, title, content, content_type, content_hash, embedding, metadata, added_by)
        VALUES ($1, $2, $3, $4, $5, md5($4), $6::vector, $7::jsonb, $8) RETURNING id`,
       [refineryId, req.url ?? null, req.title, req.content, req.content_type ?? "manual", docVec,
-        JSON.stringify({ user_provided: true }), req.by ?? null],
+        JSON.stringify({ ...(req.metadata ?? {}), user_provided: true }), req.by ?? null],
     ))[0].id;
     for (let i = 0; i < chunks.length; i++) {
       await t.query(

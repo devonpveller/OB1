@@ -11,6 +11,7 @@ import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
 import { openRoom } from "../room/RoomPanels";
 import { statusBadges } from "../../lib/sourceStatus";
+import { IntakeAdd } from "../intake/IntakeAdd";
 
 interface Flag {
   path: string;
@@ -199,6 +200,8 @@ export function RefineryPanel(p: PanelProps) {
         </ul>
       )}
       {msg && <p className="ws-muted" data-testid="refinery-msg">{msg}</p>}
+      {/* rw-p5a-intake: the contextual add - from inside this refinery (its id), held here; nothing to choose */}
+      {idea && !ref?.archived && <IntakeAdd refineryId={idea.id} onAdded={refresh} />}
     </div>
   );
 }

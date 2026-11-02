@@ -1,5 +1,6 @@
 // session(id), the jobs queue view, and the snapshot the stream emits. Research jobs carry no
 // metadata, so a metadata filter returns nothing (fail closed).
+import { importRows } from "../../intake/repo.ts";
 import type { Db } from "../db.ts";
 import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB, OWNERLESS_FOREIGN, type Viewer } from "../../documents/ownership.ts";
 // rw-p4b-sessions round 2: a steer branch's text (a person's words) reads as another user's for anyone
@@ -110,14 +111,14 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
   const want = (k: string) => kinds.length === 0 ? DEFAULT_KINDS.has(k) : kinds.includes(k);
   const out: unknown[] = [];
   if (want("import")) {
-    const rows = await db.query<{ id: string; status: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
-      `SELECT id, status, created_at, updated_at,
-              jsonb_build_object('source_id', source_id, 'target_notebook', target_notebook, 'error', error,
-                                 'staged', staged, 'committed', committed, 'duplicate', duplicate) AS detail
-         FROM public.import_jobs WHERE ($1::text IS NULL OR status = $1) ORDER BY created_at DESC LIMIT $2`,
-      [state, limit],
-    );
-    out.push(...rows.map((r) => ({ kind: "import", state: ["done", "failed"].includes(r.status) ? "current" : "loading", ...r })));
+    // rw-p5a-intake (07-MULTI-USER): an import is its subject's front-end history - the subject's own only
+    // (intake/repo.ts, the intake panel's one owner rule); job ids of other users' imports are not listed
+    const rows = await importRows(db, who as unknown as { sub: string }, "import", state, limit);
+    out.push(...rows.map((r) => ({
+      kind: "import", id: r.id, status: r.status, state: r.state, created_at: r.created_at, updated_at: r.updated_at,
+      detail: { source_id: r.detail.source_id ?? null, target_notebook: r.detail.target_notebook ?? null, error: r.detail.error ?? null,
+                staged: r.detail.staged ?? false, committed: r.detail.committed ?? false, duplicate: r.detail.duplicate ?? false },
+    })));
   }
   if (want("research")) {
     const rows = await db.query<{ id: string; status: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(

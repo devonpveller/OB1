@@ -18,3 +18,4 @@ import "./timeline/TimelinePanel";
 import "./trail/TrailPanel";
 import "./graph/PageGraphPanel";
 import "./cleanup/CleanupPanel";
+import "./intake/IntakePanel";

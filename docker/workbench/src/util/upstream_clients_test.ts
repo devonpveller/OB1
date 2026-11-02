@@ -22,6 +22,7 @@ import { callExtract } from "../routes/import.ts";
 import { nav } from "../routes/nav.ts";
 import { sources } from "../routes/sources.ts";
 import { steerFailure } from "../contracts/routes/sessions.ts";
+import { researchIntakeFetch } from "../intake/research_fetch.ts";
 
 const MARK = "MARKER-5xx-detail /var/lib/service/x.sql password=hunter2";
 const HIDDEN = ["MARKER-5xx", "/var/lib/service", "hunter2"];
@@ -65,6 +66,8 @@ export const CLIENTS: Record<string, { sites: number; drive: { name: string; run
     ],
   },
   "documents/clients.ts": { sites: 1, drive: [{ name: "research enqueue", run: () => researchClient(RS)!({ query: "q" }) }] },
+  // rw-p5a-intake: a user add's one fetch - the research service's proxy-bound /intake/fetch
+  "intake/research_fetch.ts": { sites: 1, drive: [{ name: "research intake fetch", run: () => researchIntakeFetch(RS)!("https://e.org/a", null) }] },
   "fetch-gate/client.ts": {
     sites: 1, drive: [{ name: "search gate /v1/fetch", run: () => gateClient(env({ WORKBENCH_GATE_URL: "http://g.stub", WORKBENCH_GATE_KEY: "k" }))("https://e.org/a") }],
   },
