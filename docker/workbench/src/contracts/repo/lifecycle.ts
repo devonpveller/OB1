@@ -10,6 +10,8 @@ import type { MetadataFilter } from "../logic/scope.ts";
 import type { RegistryReader } from "../registry.ts";
 import { tombstoneById, tombstoneForUrl, tombstoneOut } from "./sources.ts";
 import { FOREIGN_DOC, type Viewer } from "../../documents/ownership.ts";
+import { mayLiftTombstone } from "../logic/lift.ts";
+import type { Identity } from "../../middleware/identity.ts";
 
 export class Conflict extends Error {
   constructor(message: string, public detail: Record<string, unknown> = {}) {
@@ -17,6 +19,8 @@ export class Conflict extends Error {
   }
 }
 export class NotFound extends Error {}
+// round 3 (rw-p8a1-core): the caller may not do this (the lift rule) - 403
+export class Forbidden extends Error {}
 
 async function lockSource(db: Db, id: string) {
   const rows = await db.query<{ id: string; lifecycle: string; url: string | null; title: string; content: string }>(
@@ -301,7 +305,19 @@ export async function erase(db: Db, reg: RegistryReader, id: string, req: EraseI
   });
 }
 
-export async function lift(db: Db, tombstoneId: string, by: string, note: string | null) {
+// THE shared lift (operator decision 2026-11-02): the caller lifts only under mayLiftTombstone (logic/lift.ts) -
+// the user who erased it, or an admin. `author` is the identity seam's (changeAuthor), never a request field.
+// The trail's lift route and the cleanup view's lift (rw-p8a2-cleanup) both call this.
+export async function liftTombstoneAs(db: Db, tombstoneId: string, who: Identity, author: string, note: string | null) {
+  const tb = await tombstoneById(db, tombstoneId);
+  if (!tb) throw new NotFound("tombstone not found");
+  if (!mayLiftTombstone({ eraser_kind: String(tb.eraser_kind ?? ""), eraser_user: (tb.eraser_user as string | null) ?? null }, who)) {
+    throw new Forbidden("only the user who erased this tombstone, or an admin, may lift it");
+  }
+  return await lift(db, tombstoneId, author, note);
+}
+
+async function lift(db: Db, tombstoneId: string, by: string, note: string | null) {
   return await db.tx(async (t) => {
     const rows = await t.query<{ source_id: string }>(
       `UPDATE public.source_tombstones SET lifted_at = now(), lifted_by = $2, lift_note = $3

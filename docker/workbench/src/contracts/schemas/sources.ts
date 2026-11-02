@@ -35,6 +35,8 @@ const TombstoneShape = z.object({
   lifted_by: z.string().nullable(),
   readmitted_source_id: uuid().nullable(),
   attempts: z.array(TombstoneAttempt),
+  // round 3 (rw-p8a1-core): on a tombstone read, whether THIS caller may lift it (the eraser, or an admin)
+  may_lift: z.boolean().optional().openapi({ description: "the tombstone read answers it for the caller; absent elsewhere" }),
 });
 export const Tombstone = TombstoneShape.openapi("Tombstone");
 
@@ -253,7 +255,7 @@ export const EraseRequest = z.object({
 export const EraseResult = z.object({ tombstone: Tombstone }).openapi("EraseResult");
 
 export const LiftRequest = z.object({
-  by: z.string().min(1),
+  by: z.string().optional().openapi({ description: "IGNORED (round 3): the identity seam names the actor; kept so older callers still validate" }),
   note: z.string().optional(),
 }).openapi("LiftRequest");
 

@@ -8,7 +8,7 @@ import type { RegistryReader } from "../registry.ts";
 import { UnregisteredValue } from "../registry.ts";
 import type { AdmissionScorer } from "../logic/reopen.ts";
 import { BadRequest } from "../logic/scope.ts";
-import { Conflict, NotFound } from "../repo/lifecycle.ts";
+import { Conflict, Forbidden, NotFound } from "../repo/lifecycle.ts";
 import { SelectorRefused } from "../repo/references.ts";
 import { ErrorBody } from "../schemas/common.ts";
 
@@ -69,6 +69,7 @@ export function send<S extends z.ZodTypeAny>(c: Context, schema: S, data: unknow
 
 export function fail(c: Context, err: unknown) {
   if (err instanceof NotFound) return c.json({ error: err.message }, 404);
+  if (err instanceof Forbidden) return c.json({ error: err.message }, 403);
   if (err instanceof Conflict) return c.json({ error: err.message, detail: err.detail }, 409);
   if (err instanceof BadRequest) return c.json({ error: err.message }, 400);
   if (err instanceof UnregisteredValue) {

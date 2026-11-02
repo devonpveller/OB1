@@ -35,7 +35,7 @@ const TRAIL = {
 const TOMBSTONE = {
   id: TOMB, source_id: ERA, url: "https://ex.org/e", title: "Erased one", reason_type: "deliberate", note: "removed on purpose",
   batch_run_id: null, eraser_kind: "user", eraser_run_id: null, eraser_user: "op", confidence: null, score_version: null, fingerprint: null,
-  erased_at: "2026-10-30T09:00:00Z", lifted_at: null, lifted_by: null, readmitted_source_id: null, attempts: [],
+  erased_at: "2026-10-30T09:00:00Z", lifted_at: null, lifted_by: null, readmitted_source_id: null, attempts: [], may_lift: true,
 };
 
 beforeEach(() => {
@@ -100,7 +100,22 @@ describe("T2/T3: the trail", () => {
     await act(async () => { fireEvent.click(t.querySelector('[data-action="lift"]')!); await settle(); });
     const lift = bodies.find((b) => b.method === "POST" && b.url.endsWith("/lift"));
     expect(lift?.body.note).toBe("reconsidered");
-    expect(typeof lift?.body.by).toBe("string");
+    // round 3: the actor is the identity seam's - the panel sends no `by`
+    expect(lift?.body.by).toBeUndefined();
+  });
+
+  it("round 3: the lift action shows only when the viewer may lift (the eraser, or an admin)", async () => {
+    fakeApi([
+      ["GET", "/workbench/contract/trail", () => TRAIL],
+      ["GET", `/workbench/contract/tombstones/${TOMB}`, () => ({ ...TOMBSTONE, may_lift: false })],
+    ]);
+    const P = panel("trail")!.component;
+    const { container } = render(<P params={{ tombstone: TOMB }} />);
+    await act(async () => { await settle(); });
+    const t = container.querySelector('[data-testid="tombstone"]')!;
+    expect(t).toBeTruthy();
+    expect(t.querySelector('[data-action="lift"]')).toBeNull();
+    expect(t.querySelector('[data-testid="tombstone-lift-who"]')?.textContent).toContain("only the user who erased it, or an admin");
   });
 });
 

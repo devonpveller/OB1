@@ -50,8 +50,9 @@ describe("rw-p8a3-room panels", () => {
     fireEvent.click(screen.getByTestId("room-disclosure").querySelector(".ws-summary")!);
     expect(document.querySelectorAll("[data-entry]").length).toBe(2);
     expect(document.querySelector("[data-actions]")).toBeNull();
-    // every request went to the room store - nothing to Mattermost, nothing else
-    expect(b.log.every((l) => l.url.startsWith("/workbench/rooms"))).toBe(true);
+    // every request went to the room store - nothing to Mattermost, nothing else (rw-p8a1-core, after the merge:
+    // but the shared knowledge base's lifecycle lookup for the answer's sources, D5 - POST /contract/source-states)
+    expect(b.log.every((l) => l.url.startsWith("/workbench/rooms") || l.url === "/workbench/contract/source-states")).toBe(true);
   });
 
   it("V2: a session started from a Mattermost thread shows the thread as its inlet with a link back", async () => {

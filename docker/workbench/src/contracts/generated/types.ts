@@ -33,6 +33,7 @@ export type AdmissionDecision = {
     lifted_by: string | null;
     readmitted_source_id: string | null;
     attempts: Array<TombstoneAttempt>;
+    may_lift?: boolean;
   } | null;
   source_id: string | null;
   dispute_id: string | null;
@@ -427,7 +428,7 @@ export type LeadTrailEntry = {
 };
 
 export type LiftRequest = {
-  by: string;
+  by?: string;
   note?: string;
 };
 
@@ -636,6 +637,7 @@ export type Reference = {
     lifted_by: string | null;
     readmitted_source_id: string | null;
     attempts: Array<TombstoneAttempt>;
+    may_lift?: boolean;
   } | null;
   held: {
     refinery_id: string;
@@ -1065,6 +1067,7 @@ export type Tombstone = {
   lifted_by: string | null;
   readmitted_source_id: string | null;
   attempts: Array<TombstoneAttempt>;
+  may_lift?: boolean;
 };
 
 export type TombstoneAttempt = {

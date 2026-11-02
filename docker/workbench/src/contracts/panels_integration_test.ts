@@ -65,8 +65,8 @@ async function plant() {
   await sql(`UPDATE public.sources SET retracted_at = now(), retraction_committed_at = now(), retracted_by = 'p8a1',
                suppression_reason = 'p8a1 suppressed on purpose' WHERE id = $1`, [W.suppressed]);
   await sql(`INSERT INTO public.source_tombstones (id, source_id, url, url_key, title, reason_type, note, eraser_kind, eraser_user)
-             VALUES ($1, $2, $3, public.contract_url_key($3), 'P8a1 erased', 'deliberate', 'p8a1 tombstone note', 'user', 'p8a1')`,
-    [W.tomb, W.erased, W.urlErased]);
+             VALUES ($1, $2, $3, public.contract_url_key($3), 'P8a1 erased', 'deliberate', 'p8a1 tombstone note', 'user', $4)`,
+    [W.tomb, W.erased, W.urlErased, W.subA]); // round 3: user A erased it (the lift rule)
   // the page graph: a root linking both leaf pages; a contradicted claim grounded in the active source
   await sql(`INSERT INTO public.wiki_pages (slug, page_class, entity_type, title, body, links) VALUES
                ($1, 'entity', 'tool', 'P8a1 root', 'root', $2::jsonb), ($3, 'source', NULL, 'P8a1 active leaf', 'leaf', '[]'),
@@ -207,4 +207,44 @@ t("T4 states: search answers a source's leaf page with its source's lifecycle (p
   assertEquals(hit?.lifecycle, "suppressed", r.text.slice(0, 600));
   const root = await call("GET", `/search?q=${encodeURIComponent("P8a1 root")}&kinds=page&limit=50`, W.subA);
   assertEquals((root.json.results as any[]).find((h) => h.id === W.root)?.lifecycle, null, root.text.slice(0, 600));
+});
+
+// ── T8 (round 3, operator decision 2026-11-02): only the user who erased a tombstone, or an admin, lifts it ──
+t("T8 lift: the eraser lifts (the actor is the identity seam's, never the body's `by`); another user gets 403; an automation's needs an admin", async () => {
+  await plant();
+  const mine = uuid(), auto = uuid();
+  const ins = `INSERT INTO public.source_tombstones (id, source_id, url, url_key, title, reason_type, eraser_kind, eraser_user)
+               VALUES ($1, $2, $3, public.contract_url_key($3), 'P8a1 lift probe', 'deliberate', $4, $5)`;
+  await sql(ins, [mine, uuid(), `https://example.org/p8a1/${W.r}/lift-mine`, "user", W.subA]);
+  await sql(ins, [auto, uuid(), `https://example.org/p8a1/${W.r}/lift-auto`, "automation", null]);
+  // the read says who may lift
+  assertEquals((await call("GET", `/tombstones/${mine}`, W.subA)).json.may_lift, true);
+  assertEquals((await call("GET", `/tombstones/${mine}`, W.subB)).json.may_lift, false);
+  // another user: 403, nothing lifted - even naming the eraser in `by`
+  const b = await call("POST", `/tombstones/${mine}/lift`, W.subB, { by: W.subA, note: "not mine" });
+  assertEquals(b.status, 403, b.text);
+  assertEquals((await sql<{ l: string | null }>(`SELECT lifted_at::text AS l FROM public.source_tombstones WHERE id = $1`, [mine]))[0].l, null);
+  // the eraser: lifted, and lifted_by is the seam's actor, not the body's
+  const a = await call("POST", `/tombstones/${mine}/lift`, W.subA, { by: "ForgedLifter", note: "mine" });
+  assertEquals(a.status, 200, a.text);
+  assertEquals(a.json.lifted_by, W.subA);
+  assert(!a.text.includes("ForgedLifter"));
+  const ev = await sql<{ actor: string }>(`SELECT actor FROM public.source_trail_events WHERE kind = 'lifted' AND detail ->> 'tombstone_id' = $1`, [mine]);
+  assertEquals(ev.map((e) => e.actor), [W.subA]);
+  // without `by` at all: still fine (it is ignored); an automation's tombstone is an admin's to lift
+  const au = await call("POST", `/tombstones/${auto}/lift`, W.subA, {});
+  assertEquals(au.status, 403, au.text);
+});
+
+t("T8 erase: a user's erasure records the identity seam's subject as its eraser, never the body's user", async () => {
+  await plant();
+  const id = uuid();
+  await sql(`INSERT INTO public.sources (id, url, title, content, retracted_at, retraction_committed_at, unlinked_at, retracted_by)
+             VALUES ($1, $2, 'P8a1 erase probe', 'e', now(), now(), now(), 'p8a1')`, [id, `https://example.org/p8a1/${W.r}/erase-probe`]);
+  const r = await call("POST", `/sources/${id}/erase`, W.subA, { reason_type: "deliberate", eraser: { kind: "user", user: "SomeoneElse" } });
+  assertEquals(r.status, 200, r.text);
+  assertEquals(r.json.tombstone.eraser_user, W.subA);
+  // so the eraser may lift it, and user B may not
+  assertEquals((await call("POST", `/tombstones/${r.json.tombstone.id}/lift`, W.subB, {})).status, 403);
+  assertEquals((await call("POST", `/tombstones/${r.json.tombstone.id}/lift`, W.subA, {})).status, 200);
 });

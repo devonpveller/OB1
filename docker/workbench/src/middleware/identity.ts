@@ -242,7 +242,8 @@ const OPEN = /^\/workbench\/(health|auth\/me)$/;
 // a user's front end: never a service's
 const USER_ONLY = /^\/workbench\/(documents|workspace|auth\/(impersonate|users|audit))(\/|$)/;
 // the reads that can carry a research job's original prompt (round 4, F4)
-const JOB_READS = /^\/workbench\/contract\/(sessions|jobs|timeline)(\/|$)/;
+// rw-p8a1-core round 3 (reviewer RF1): the trail's leads too - an admin may read an ownerless tree's
+export const JOB_READS = /^\/workbench\/contract\/(sessions|jobs|timeline|trail)(\/|$)/;
 
 const KEY = "identity";
 const PATH_KEY = "identityPath";

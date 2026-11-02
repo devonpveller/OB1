@@ -8,8 +8,6 @@
 // or the selected reference) or everything.
 import { useEffect, useMemo, useState } from "react";
 import { C, get, post, q } from "../../lib/api";
-import { currentMe } from "../../lib/auth";
-import { owner } from "../../lib/owner";
 import { setState, useWorkspace } from "../../lib/store";
 import { SourceStatus, statusBadges } from "../../lib/sourceStatus";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
@@ -57,6 +55,7 @@ interface Tomb {
   lifted_at: string | null;
   lifted_by: string | null;
   attempts: { path: string; outcome: string; note: string | null; attempted_at: string }[];
+  may_lift?: boolean; // round 3: the read answers it for the viewer (the eraser, or an admin)
 }
 
 type Row = { key: string; at: string; removal?: RemovalEntry; lead?: LeadEntry };
@@ -88,7 +87,8 @@ export function TombstoneView({ id, onLifted }: { id: string; onLifted?: () => v
   const lift = async () => {
     const note = window.prompt("Why lift it? (optional - the URL may be intaken again)") ?? undefined;
     try {
-      await post(`${C}/tombstones/${q(id)}/lift`, { by: currentMe()?.name || owner() || "workspace", ...(note ? { note } : {}) });
+      // round 3: the actor is the identity seam's - nothing about who lifts is sent
+      await post(`${C}/tombstones/${q(id)}/lift`, note ? { note } : {});
       setMsg("lifted: its URL may be intaken again");
       setTick((x) => x + 1);
       onLifted?.();
@@ -111,7 +111,8 @@ export function TombstoneView({ id, onLifted }: { id: string; onLifted?: () => v
           {t.attempts.map((a, i) => <li key={i}>{when(a.attempted_at)}: {a.path} - {a.outcome}{a.note ? ` (${a.note})` : ""}</li>)}
         </ol>
       )}
-      {!t.lifted_at && <button type="button" data-action="lift" onClick={lift}>Lift the tombstone</button>}
+      {!t.lifted_at && t.may_lift && <button type="button" data-action="lift" onClick={lift}>Lift the tombstone</button>}
+      {!t.lifted_at && !t.may_lift && <p className="ws-muted" data-testid="tombstone-lift-who">only the user who erased it, or an admin, may lift it</p>}
       {msg && <p className="ws-muted" data-testid="tombstone-msg">{msg}</p>}
     </div>
   );

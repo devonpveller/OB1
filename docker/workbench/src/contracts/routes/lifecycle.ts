@@ -12,6 +12,7 @@ import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
 import { identityOf } from "../../middleware/identity.ts";
+import { mayLiftTombstone } from "../logic/lift.ts";
 
 const T = ["source lifecycle (D5)"];
 const idParam = (example: string) => z.object({ id: pathParam("id", example, "source id") });
@@ -75,7 +76,11 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
     responses: { 200: json(EraseResult, EX.erase, "erased; the tombstone"), ...errors },
   }), async (c) => {
     try {
-      return send(c, EraseResult, await lc.erase(deps.db, deps.registry, c.req.valid("param").id, c.req.valid("json")));
+      // round 3: a user's erasure records the identity seam's subject as its eraser (the lift rule reads it) - the
+      // body's eraser.user is never trusted for that
+      const b = c.req.valid("json");
+      const eraser = b.eraser.kind === "user" ? { ...b.eraser, user: (await identityOf(c)).sub } : b.eraser;
+      return send(c, EraseResult, await lc.erase(deps.db, deps.registry, c.req.valid("param").id, { ...b, eraser }));
     } catch (e) {
       return fail(c, e);
     }
@@ -96,7 +101,9 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
       const f = parseMetadataFilter(c.req.valid("query").metadata_filter);
       const t = await src.tombstoneById(deps.db, c.req.valid("param").id, f);
       if (!t) return c.json({ error: f ? "not found in scope" : "no tombstone with this id" }, 404);
-      return send(c, Tombstone, src.tombstoneOut(t));
+      // round 3: whether THIS caller may lift it (the one rule, logic/lift.ts)
+      const may_lift = mayLiftTombstone({ eraser_kind: String(t.eraser_kind ?? ""), eraser_user: (t.eraser_user as string | null) ?? null }, await identityOf(c));
+      return send(c, Tombstone, { ...src.tombstoneOut(t), may_lift });
     } catch (e) {
       return fail(c, e);
     }
@@ -104,13 +111,21 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
 
   op(app, createRoute({
     method: "post", path: `${PREFIX}/tombstones/{id}/lift`, operationId: "liftTombstone", tags: T,
-    summary: "the operator lifts a tombstone: its URL may be intaken again",
+    summary: "lift a tombstone: its URL may be intaken again - only the user who erased it, or an admin",
+    description: "Operator decision 2026-11-02 (rw-p8a1-core round 3): the caller must be the user who erased it (the " +
+      "identity seam's subject the erase recorded) or an admin; anyone else gets 403. The actor recorded as lifted_by is " +
+      "the identity seam's; the request's `by` is ignored. The rule: mayLiftTombstone (logic/lift.ts), via liftTombstoneAs.",
     request: { params: z.object({ id: pathParam("id", FX.tombstoneToLift, "tombstone id") }), body: body(LiftRequest, EX.liftRequest) },
-    responses: { 200: json(Tombstone, EX.lifted, "the lifted tombstone"), ...errors },
+    responses: {
+      200: json(Tombstone, EX.lifted, "the lifted tombstone"),
+      403: json(z.object({ error: z.string() }), { error: "only the user who erased this tombstone, or an admin, may lift it" }, "not the eraser, not an admin"),
+      ...errors,
+    },
   }), async (c) => {
     try {
       const b = c.req.valid("json");
-      return send(c, Tombstone, await lc.lift(deps.db, c.req.valid("param").id, b.by, b.note ?? null));
+      const who = await identityOf(c);
+      return send(c, Tombstone, await lc.liftTombstoneAs(deps.db, c.req.valid("param").id, who, authorOf(c, who.name || who.sub) ?? who.sub, b.note ?? null));
     } catch (e) {
       return fail(c, e);
     }

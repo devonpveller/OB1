@@ -216,6 +216,10 @@
                 "items": {
                   "$ref": "#/components/schemas/TombstoneAttempt"
                 }
+              },
+              "may_lift": {
+                "type": "boolean",
+                "description": "the tombstone read answers it for the caller; absent elsewhere"
               }
             },
             "required": [
@@ -2244,6 +2248,10 @@
             "items": {
               "$ref": "#/components/schemas/TombstoneAttempt"
             }
+          },
+          "may_lift": {
+            "type": "boolean",
+            "description": "the tombstone read answers it for the caller; absent elsewhere"
           }
         },
         "required": [
@@ -2318,15 +2326,12 @@
         "properties": {
           "by": {
             "type": "string",
-            "minLength": 1
+            "description": "IGNORED (round 3): the identity seam names the actor; kept so older callers still validate"
           },
           "note": {
             "type": "string"
           }
-        },
-        "required": [
-          "by"
-        ]
+        }
       },
       "AdmissionDecision": {
         "type": "object",
@@ -2447,6 +2452,10 @@
                 "items": {
                   "$ref": "#/components/schemas/TombstoneAttempt"
                 }
+              },
+              "may_lift": {
+                "type": "boolean",
+                "description": "the tombstone read answers it for the caller; absent elsewhere"
               }
             },
             "required": [
@@ -8264,7 +8273,8 @@
         "tags": [
           "source lifecycle (D5)"
         ],
-        "summary": "the operator lifts a tombstone: its URL may be intaken again",
+        "summary": "lift a tombstone: its URL may be intaken again - only the user who erased it, or an admin",
+        "description": "Operator decision 2026-11-02 (rw-p8a1-core round 3): the caller must be the user who erased it (the identity seam's subject the erase recorded) or an admin; anyone else gets 403. The actor recorded as lifted_by is the identity seam's; the request's `by` is ignored. The rule: mayLiftTombstone (logic/lift.ts), via liftTombstoneAs.",
         "parameters": [
           {
             "schema": {
@@ -8330,6 +8340,27 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not the eraser, not an admin",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "only the user who erased this tombstone, or an admin, may lift it"
+                },
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }
