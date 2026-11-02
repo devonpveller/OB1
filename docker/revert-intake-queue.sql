@@ -29,6 +29,7 @@ UPDATE public.sources SET metadata = metadata - 'chunked_hash' - 'chunk_cancelle
  WHERE (metadata ->> 'chunk_cancelled')::boolean IS TRUE;
 DELETE FROM public.contract_registry_entries
  WHERE (registry = 'job_kinds' AND key IN ('add','chunk','extract','entity'))
-    OR (registry = 'job_states' AND key IN ('pending','processing','fetching','holding','held'));
+    -- only the job_states this file's init added: pending and held are P2b's (init-documents.sql) and stay
+    OR (registry = 'job_states' AND key IN ('processing','fetching','holding'));
 COMMIT;
 NOTIFY pgrst, 'reload schema';

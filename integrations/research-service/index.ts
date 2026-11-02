@@ -36,7 +36,7 @@ import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LIS
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
-import { INTAKE_CONTENT_TYPES, type IntakeContentType, IntakeRefused, intakeFetch, mayIntakeFetch } from "./intake-fetch.ts";
+import { dohResolver, INTAKE_CONTENT_TYPES, type IntakeContentType, IntakeRefused, intakeFetch, mayIntakeFetch } from "./intake-fetch.ts";
 import {
   appendEvent, buildTreeReport, closeBranch, createSteer, recordCancel, interHubEvent, interHubGaps, interHubRef, LANE_DEFAULT, LANE_KINDS,
   learningRecords, loadClaimGraph, loadTree, openGapBranches, readLaneConcurrency, stageEvent, SteerError, treeEstimate,
@@ -267,6 +267,17 @@ const intakeProxiedFetch = (() => {
   return proxiedFetch((u, i) => fetch(u, i as RequestInit), client, { direct: client === null && FETCH_PROXY_URL.trim() === "" });
 })();
 const INTAKE_TIMEOUT_MS = parseInt(env("INTAKE_FETCH_TIMEOUT_MS", "30000"), 10);
+// round 2 (tester T-F2): every hop's name is resolved and judged first - by DNS-over-HTTPS THROUGH the proxy (no
+// lookup leaves outside the tunnel; the search gate's resolver and endpoint), or, only when the operator chose
+// direct egress (FETCH_PROXY_URL=""), by the system resolver
+const INTAKE_DOH_URL = env("INTAKE_DOH_URL", "https://dns.mullvad.net/dns-query");
+const intakeResolve = intakeProxiedFetch.egress === "proxy"
+  ? dohResolver(intakeProxiedFetch, INTAKE_DOH_URL)
+  : async (host: string) => {
+    const out: string[] = [];
+    for (const t of ["A", "AAAA"] as const) out.push(...await Deno.resolveDns(host, t).catch(() => [] as string[]));
+    return out;
+  };
 const INTAKE_MAX_BYTES = parseInt(env("INTAKE_FETCH_MAX_BYTES", String(20 * 1024 * 1024)), 10);
 // The D5 admission gate lives in the workbench; the fold calls it for a tombstoned held source.
 const WORKBENCH_URL = env("WORKBENCH_URL", "").replace(/\/+$/, "");
@@ -1196,7 +1207,7 @@ Deno.serve({ port: PORT }, async (req) => {
       return Response.json({ error: "unsupported_type", detail: `declared content types: ${INTAKE_CONTENT_TYPES.join(", ")}` }, { status: 422 });
     }
     try {
-      const got = await intakeFetch(link, { fetch: intakeProxiedFetch, timeoutMs: INTAKE_TIMEOUT_MS, maxBytes: INTAKE_MAX_BYTES }, declared as IntakeContentType | null);
+      const got = await intakeFetch(link, { fetch: intakeProxiedFetch, resolve: intakeResolve, timeoutMs: INTAKE_TIMEOUT_MS, maxBytes: INTAKE_MAX_BYTES }, declared as IntakeContentType | null);
       return Response.json({ ok: true, ...got });
     } catch (e) {
       if (e instanceof IntakeRefused) return Response.json({ error: e.code, detail: e.message }, { status: e.status });

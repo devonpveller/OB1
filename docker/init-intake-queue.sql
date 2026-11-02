@@ -18,7 +18,8 @@
 --      and its status set gains fetching, holding, held, cancelled.
 --   2. import_job_payloads     a file add's / file import's bytes, kept until the job ends well, so a
 --                               failed one can be retried without the user re-sending the file.
---   3. job_kinds add / chunk / extract / entity and their job_states - the registry the intake panel
+--   3. job_kinds add / chunk / extract / entity and the job_states processing / fetching / holding (pending and
+--      held are P2b's, init-documents.sql - not added here, so the revert never removes them) - the registry the intake panel
 --      reads (jobs(state): "the queues the intake panel shows"). chunk = sources waiting for the chunk
 --      worker (md5(content) vs metadata.chunked_hash), extract = source_extraction_queue, entity =
 --      entity_extraction_queue (both drained by the entity worker; it claims status 'pending' only).
@@ -68,11 +69,9 @@ INSERT INTO public.contract_registry_entries (registry, key, label, definition) 
     ('job_kinds', 'chunk',   'chunking',                      '{"table":"sources","meaning":"a source waiting for the chunk worker (md5(content) vs metadata.chunked_hash)"}'),
     ('job_kinds', 'extract', 'entity extraction (sources)',   '{"table":"source_extraction_queue"}'),
     ('job_kinds', 'entity',  'entity extraction (thoughts)',  '{"table":"entity_extraction_queue"}'),
-    ('job_states', 'pending',    'pending',    '{}'),
     ('job_states', 'processing', 'processing', '{}'),
     ('job_states', 'fetching',   'fetching',   '{}'),
-    ('job_states', 'holding',    'holding',    '{}'),
-    ('job_states', 'held',       'held',       '{}')
+    ('job_states', 'holding',    'holding',    '{}')
 ON CONFLICT (registry, key) DO NOTHING;
 
 -- ── RLS + grants (the P0 shape) ─────────────────────────────────────────

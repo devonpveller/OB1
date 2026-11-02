@@ -397,6 +397,24 @@ try {
 
   }
 
+  # rw-p5a-intake round 2 (tester T-F1): on this database (the whole chain ran), the slot-340 revert removes only
+  # what init-intake-queue.sql added (revert-intake-queue-check.sql), and init + revert re-run cleanly. LAST: it
+  # drops the intake queue's columns, so nothing may run against the workbench after it.
+  if (-not $Red) {
+    Write-Host '[5f] revert-intake-queue.sql removes only what init-intake-queue.sql added (twice: revert, init, revert)'
+    $rv = @()
+    foreach ($f in @(@('revert-intake-queue.sql', 'revert'), @('workbench/contract-test/revert-intake-queue-check.sql', 'check'), @('init-intake-queue.sql', 'init'),
+        @('revert-intake-queue.sql', 'revert again'), @('workbench/contract-test/revert-intake-queue-check.sql', 'check again'))) {
+      $null = Dk cp (Join-Path $dockerDir $f[0]) "${db}:/tmp/rv.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv.sql
+      $rv += "[$($f[1])] exit $($script:rc): $(($o -split "`n" | Where-Object { $_ -match 'REVERT-CHECK|ERROR' }) -join ' ')"
+      if ($script:rc -ne 0) { break }
+    }
+    Save 'revert-intake-queue.log' ($rv -join "`n")
+    foreach ($l in $rv) { Write-Host "    $l" }
+    Check ($rv.Count -eq 5 -and @($rv | Where-Object { $_ -match 'REVERT-CHECK OK' }).Count -eq 2 -and @($rv | Where-Object { $_ -notmatch 'exit 0' }).Count -eq 0) 'the intake revert removes only its own rows, and init + revert re-run cleanly'
+  }
+
   Write-Host '[5c] the grammar copy'
   $a = [System.IO.File]::ReadAllBytes((Join-Path $wb 'src/documents/grammar.ts'))
   $b = [System.IO.File]::ReadAllBytes((Join-Path $wsDir 'src/lib/grammar.ts'))
