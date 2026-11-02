@@ -34,6 +34,10 @@
 #      ob_app_memory against the :wt workbench; the workspace e2e (workspace.e2e.mjs) through the
 #      front door in the headless Chromium; the grammar copy byte-identity check
 #   6. the evidence gate (evidence-gate.ps1), then teardown and the leftover checks
+# rw-p5a-intake adds [5e]: the intake and queue panel's integration test (src/intake/intake_integration_test.ts)
+# with a stub extractor (stub-extract.ts), the stub research service's POST /intake/fetch and Open WebUI's
+# service key (WORKSPACE_SERVICE_KEYS owui=<key>); the isolation sweep plants B's intake jobs. -IntakeOnly runs
+# [5e] and the sweep alone (skips [5a]/[5b]: their RED expectations are P2b's, against a pre-P2b -BaseSha).
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
 param(
   [string]$Id = 'wt-rw-p2b-workspace',
@@ -47,7 +51,8 @@ param(
   [switch]$Red,
   [switch]$WalkOff,
   [string]$Cases = '',
-  [switch]$KeepImages
+  [switch]$KeepImages,
+  [switch]$IntakeOnly
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -77,6 +82,7 @@ $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [ch
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $wsKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $gateKey = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
+$owuiKey = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
 $shots = Join-Path $env:TEMP "$P-shots"; New-Item -ItemType Directory -Force $shots | Out-Null
@@ -272,6 +278,8 @@ try {
       '-e', "STUB_CALLERS=workspace=workspace:$wsKey", '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '--allow-env', '--allow-read', '--config', '/app/deno.json', '/ct/stub-research.ts')
   # rw-workbench-fetch-posture: a held link's replace goes through the search gate's /v1/fetch (a stub
   # here, stub-gate.ts) to the lab target site (stub-target.ts) - never the egress proxy, never direct
+  # rw-p5a-intake: the extractor a PDF / saved page goes through (stub-extract.ts)
+  $null = Run-Detached "$P-extract" @('--network-alias', 'stub-extract', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-extract.ts')
   $null = Run-Detached "$P-target" @('--network-alias', 'stub-target', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-target.ts')
   $null = Run-Detached "$P-gate" @('--network-alias', 'stub-gate', '-v', $ctMount, '-e', "STUB_GATE_KEY=$gateKey", '-e', 'STUB_GATE_ALLOW=stub-target:8080',
       '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '--allow-env', '/ct/stub-gate.ts')
@@ -284,10 +292,10 @@ try {
       '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
   $wbArgs = @('--network-alias', 'openbrain-workbench', '-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
-      '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
+      '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://stub-extract:8000', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'WORKBENCH_GATE_URL=http://stub-gate:8080', '-e', "WORKBENCH_GATE_KEY=$gateKey", '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
-      '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
+      '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-e', "WORKSPACE_SERVICE_KEYS=owui=$owuiKey",
       '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   $walkEnv = if ($WalkOff) { @('-e', 'WORKSPACE_RESPONSE_WALK=off') } else { @() }
   $null = Run-Detached "$P-wb" ($wbArgs + $walkEnv + @($wbTag))
@@ -323,6 +331,7 @@ try {
   Check ($chromeIp -match '^\d+\.\d+\.\d+\.\d+$') 'the headless Chromium is on the network'
 
   # ---------------------------------------------------------------- 5. the tests
+  if (-not $IntakeOnly) {
   Write-Host '[5a] the documents API integration test (as ob_app_memory? no: the fault trigger needs the superuser; the workbench itself runs as ob_app_memory)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'DOCS_TEST_PROXY_HOST=stub-target:8080',
@@ -344,6 +353,21 @@ try {
   if ($Red) { Check ($e2e.Success -and [int]$e2e.Groups[1].Value -eq 0) "RED: every e2e case fails on the base ($($e2e.Value))" }
   else { Check ($e2e.Success -and [int]$e2e.Groups[2].Value -eq 0) "the workspace e2e ($($e2e.Value))" }
   if (-not $e2e.Success) { Save 'workspace-e2e-tail.log' (($o -split "`n" | Select-Object -Last 40) -join "`n") }
+  }
+
+  # rw-p5a-intake: the intake and queue panel over the real workbench and database, two users and OWUI's key
+  Write-Host '[5e] the intake and queue panel integration test (two users, the OWUI inlet, every queue)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "INTAKE_TEST_BASE=http://$P-wb:8000", '-e', "INTAKE_TEST_KEY=$key", '-e', "INTAKE_TEST_OWUI_KEY=$owuiKey",
+    '-e', 'INTAKE_TEST_RESEARCH=http://stub-research:8000', '-e', 'INTAKE_TEST_GATE=http://stub-gate:8080',
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/intake/intake_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'intake-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: the intake integration test fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the intake integration test ($($sum.Value))" }
 
   # round 2 (tester attempt 1 F1-F6): the route-wide isolation sweep, LAST (it calls mutating routes
   # with user B's ids as user A). Its route table is the router's own (src/app.ts, imported in the test
@@ -373,6 +397,24 @@ try {
 
   }
 
+  # rw-p5a-intake round 2 (tester T-F1): on this database (the whole chain ran), the slot-360 revert removes only
+  # what init-intake-queue.sql added (revert-intake-queue-check.sql), and init + revert re-run cleanly. LAST: it
+  # drops the intake queue's columns, so nothing may run against the workbench after it.
+  if (-not $Red) {
+    Write-Host '[5f] revert-intake-queue.sql removes only what init-intake-queue.sql added (twice: revert, init, revert)'
+    $rv = @()
+    foreach ($f in @(@('revert-intake-queue.sql', 'revert'), @('workbench/contract-test/revert-intake-queue-check.sql', 'check'), @('init-intake-queue.sql', 'init'),
+        @('revert-intake-queue.sql', 'revert again'), @('workbench/contract-test/revert-intake-queue-check.sql', 'check again'))) {
+      $null = Dk cp (Join-Path $dockerDir $f[0]) "${db}:/tmp/rv.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv.sql
+      $rv += "[$($f[1])] exit $($script:rc): $(($o -split "`n" | Where-Object { $_ -match 'REVERT-CHECK|ERROR' }) -join ' ')"
+      if ($script:rc -ne 0) { break }
+    }
+    Save 'revert-intake-queue.log' ($rv -join "`n")
+    foreach ($l in $rv) { Write-Host "    $l" }
+    Check ($rv.Count -eq 5 -and @($rv | Where-Object { $_ -match 'REVERT-CHECK OK' }).Count -eq 2 -and @($rv | Where-Object { $_ -notmatch 'exit 0' }).Count -eq 0) 'the intake revert removes only its own rows, and init + revert re-run cleanly'
+  }
+
   Write-Host '[5c] the grammar copy'
   $a = [System.IO.File]::ReadAllBytes((Join-Path $wb 'src/documents/grammar.ts'))
   $b = [System.IO.File]::ReadAllBytes((Join-Path $wsDir 'src/lib/grammar.ts'))
@@ -382,7 +424,7 @@ try {
   $rows = (Dk exec $db psql -U postgres -d openbrain -tAc "select count(*) from wiki_pages where slug like 'documents/%'").Trim()
   if (-not $Red) { Check ($rows -eq '0') "no wiki_pages row for any user document ($rows)" }
   Save 'viewer.log' ((Dk logs --tail 60 "$P-viewer") -replace [regex]::Escape($key), '<key>')
-  Save 'workbench.log' (((Dk logs --tail 120 "$P-wb") -replace [regex]::Escape($key), '<key>') -replace [regex]::Escape($gateKey), '<gate-key>')
+  Save 'workbench.log' ((((Dk logs --tail 120 "$P-wb") -replace [regex]::Escape($key), '<key>') -replace [regex]::Escape($gateKey), '<gate-key>') -replace [regex]::Escape($owuiKey), '<owui-key>')
 } catch {
   Fail "the run stopped: $_"
 } finally {

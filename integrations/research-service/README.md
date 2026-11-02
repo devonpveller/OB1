@@ -73,6 +73,23 @@ GET  /research/jobs/:id/stream   -> SSE: one `data:` event per poll until termin
 GET  /health                     -> { ok, db, model }   (`ok` is DB-only)
 ```
 
+### The intake fetch (research-workbench P5a, rw-p5a-intake)
+
+`POST /intake/fetch {url, content_type?}` - the workspace's caller key only (origin `workspace`; 403 for any other
+caller) - fetches ONE link a user added, for the workbench's one add path (the intake panel's adds and the Open
+WebUI inlet), through this service's `FETCH_PROXY_URL` client (`proxiedFetch`, the page fetcher's egress). The
+target is judged before any byte leaves (http/https, no credentials, no loopback / private / link-local / CGNAT /
+reserved address, no internal-looking name); redirects are followed by hand, every hop judged (max 5). It answers
+`{ok, content_type, title, text | bytes_b64, final_url, redirects, egress}` for a web page (`web_article`), a PDF
+(`pdf`: the bytes, which the workbench extracts) or a YouTube video (`youtube_transcript`: the watch page's caption
+track), or a fixed code (`refused_target`, `unsupported_type`, `type_mismatch`, `too_large`, `no_transcript`,
+`empty_extract`, `upstream_status`, `network`, `timeout`, `too_many_redirects`) - never the page's own text.
+`INTAKE_FETCH_TIMEOUT_MS` (30000) and `INTAKE_FETCH_MAX_BYTES` (20 MiB) bound it. Nothing is stored here.
+
+**The academic class (P5a).** A job whose contract names `sources.classes: ["academic"]` allows PubMed / NCBI
+(`ncbi.nlm.nih.gov`, `pubmed.gov`) besides the class's earlier domains, and its searches ask the search gateway
+for `categories=general,science` - the category the scholarly engines answer (search/searxng/settings.yml).
+
 ### Deadlines, cancel, and the model-down signal (2026-10-13)
 
 - **Caller deadline.** A job still `queued` past `deadline_at` is never started: it

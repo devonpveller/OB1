@@ -14,13 +14,34 @@ export async function createJob(
   targetEntityIds: number[],
   targetNotebook: string | null,
   staged: boolean,
+  // rw-p5a-intake: the identity seam's subject (owner) and actor, and what the import fetches or reads
+  who: { owner: string; actor: string; url?: string | null; filename?: string | null } | null = null,
 ): Promise<ImportJob> {
   const rows = await query<ImportJob>(
-    `INSERT INTO public.import_jobs (status, target_entity_ids, target_notebook, staged)
-     VALUES ('queued', $1, $2, $3) RETURNING *`,
-    [targetEntityIds, targetNotebook, staged],
+    `INSERT INTO public.import_jobs (status, target_entity_ids, target_notebook, staged, owner_sub, actor_sub, url, filename)
+     VALUES ('queued', $1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [targetEntityIds, targetNotebook, staged, who?.owner ?? null, who?.actor ?? null, who?.url ?? null, who?.filename ?? null],
   );
   return rows[0];
+}
+
+// rw-p5a-intake: a status move made only while the job is still wanted - a job cancelled from the intake
+// panel meanwhile is left as it is (false: the pipeline stops)
+export async function advanceJob(id: string, to: string, from: string[]): Promise<boolean> {
+  const rows = await query<{ id: string }>(`UPDATE public.import_jobs SET status = $2 WHERE id = $1 AND status = ANY($3) RETURNING id`, [id, to, from]);
+  return rows.length > 0;
+}
+export async function failJob(id: string, error: string): Promise<void> {
+  await query(`UPDATE public.import_jobs SET status = 'failed', error = $2 WHERE id = $1 AND status <> 'cancelled'`, [id, error]);
+}
+export async function storePayload(id: string, filename: string, bytes: Uint8Array): Promise<void> {
+  await query(`INSERT INTO public.import_job_payloads (job_id, filename, bytes) VALUES ($1, $2, $3) ON CONFLICT (job_id) DO NOTHING`, [id, filename, bytes]);
+}
+export async function getPayload(id: string): Promise<{ filename: string; bytes: Uint8Array } | null> {
+  return (await query<{ filename: string; bytes: Uint8Array }>(`SELECT filename, bytes FROM public.import_job_payloads WHERE job_id = $1`, [id]))[0] ?? null;
+}
+export async function dropPayload(id: string): Promise<void> {
+  await query(`DELETE FROM public.import_job_payloads WHERE job_id = $1`, [id]);
 }
 
 export async function updateJob(id: string, fields: Partial<ImportJob>): Promise<void> {

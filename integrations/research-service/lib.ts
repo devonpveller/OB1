@@ -66,6 +66,14 @@ export function extractTitle(html: string): string {
   return m ? decodeEntities(m[1]).replace(/\s+/g, " ").trim() : "";
 }
 
+/** rw-p5a-intake: the search gateway's GET /search URL for one query; `categories` (a contract class's
+ *  routing, contract.ts CLASS_SEARCH_CATEGORIES) is sent only when asked - none = today's request. */
+export function searchUrl(base: string, query: string, categories?: string[]): string {
+  const cats = (categories ?? []).filter(Boolean);
+  return `${base}/search?q=${encodeURIComponent(query)}&format=json` +
+    (cats.length ? `&categories=${encodeURIComponent(cats.join(","))}` : "");
+}
+
 export function domainOf(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; }
 }

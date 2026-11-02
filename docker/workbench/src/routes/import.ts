@@ -9,9 +9,11 @@ import * as repo from "../repositories/import.ts";
 import { logChange } from "../util/changeslog.ts";
 import { logRefusal } from "../identity/refusal_log.ts";
 import { gateClient, gateErrorBody, type GatePage, isGateError } from "../fetch-gate/client.ts";
+import { type Identity, identityOf } from "../middleware/identity.ts";
+import { importRows } from "../intake/repo.ts";
+import type { Db } from "../contracts/db.ts";
 
 export const imports = new Hono();
-export const jobs = new Hono();
 // the search gate's /v1/fetch, from the environment once (WORKBENCH_GATE_URL, WORKBENCH_GATE_KEY)
 const fetchViaGate = gateClient();
 
@@ -52,9 +54,10 @@ async function runPipeline(
   targetEntityIds: number[],
 ) {
   try {
-    await repo.updateJob(jobId, { status: "extracting" });
+    // rw-p5a-intake: a job cancelled from the intake panel (while queued or extracting) stops here
+    if (!(await repo.advanceJob(jobId, "extracting", ["queued"]))) return;
     const ex = await callExtract(bytes, filename);
-    await repo.updateJob(jobId, { status: "embedding" });
+    if (!(await repo.advanceJob(jobId, "embedding", ["extracting"]))) return;
     const { sourceId, wasDuplicate } = await repo.ingestSource({
       markdown: ex.markdown,
       title: ex.title || filename,
@@ -78,6 +81,7 @@ async function runPipeline(
     // committed stays false until the compile that regenerates the grounded
     // page completes (the wiki-service flips it); the badge reads that.
     await repo.updateJob(jobId, { status: "done" });
+    await repo.dropPayload(jobId);
     if (targetEntityIds.length) {
       await logChange({
         action: "grounding (staged)",
@@ -89,7 +93,7 @@ async function runPipeline(
     // Failure handling (P6.6): record durably; do NOT regenerate.
     // the job row is read back by GET /workbench/jobs/:id: a fixed text, the real one in the log (round 2, D1)
     console.error(`[import] job ${jobId} failed:`, String((e as Error)?.message ?? e).slice(0, 500));
-    await repo.updateJob(jobId, { status: "failed", error: "the import failed (see the workbench log)" });
+    await repo.failJob(jobId, "the import failed (see the workbench log)");
   }
 }
 
@@ -105,7 +109,7 @@ async function runUrlPipeline(
   targetEntityIds: number[],
 ) {
   try {
-    await repo.updateJob(jobId, { status: "embedding" });
+    if (!(await repo.advanceJob(jobId, "embedding", ["queued"]))) return;
     const { sourceId, wasDuplicate } = await repo.ingestSource({
       markdown: page.text, title: url, contentType: "web_article", url, targetNotebook, targetEntityIds,
       metadata: { media_type: page.mediaType, fetch: page.provenance },
@@ -117,7 +121,7 @@ async function runUrlPipeline(
   } catch (e) {
     // the job row is read back by GET /workbench/jobs/:id: a fixed text, the real one in the log (round 2, D1)
     console.error(`[import] job ${jobId} failed:`, String((e as Error)?.message ?? e).slice(0, 500));
-    await repo.updateJob(jobId, { status: "failed", error: "the import failed (see the workbench log)" });
+    await repo.failJob(jobId, "the import failed (see the workbench log)");
   }
 }
 
@@ -141,10 +145,16 @@ imports.post("/", async (c) => {
       throw e;
     }
   }
-  const job = await repo.createJob(targetEntityIds, targetNotebook, targetEntityIds.length > 0);
+  // rw-p5a-intake: the job is the identity seam's subject's (its intake panel lists, retries and cancels it);
+  // a file's bytes are kept until the import ends well, so a failed one can be retried from the panel
+  const who = await identityOf(c);
+  const job = await repo.createJob(targetEntityIds, targetNotebook, targetEntityIds.length > 0, {
+    owner: who.sub, actor: who.actor, url: file instanceof File ? null : url, filename: file instanceof File ? file.name : null,
+  });
   // Fire-and-forget; state is durable in import_jobs.
   if (file instanceof File) {
     const bytes = new Uint8Array(await file.arrayBuffer());
+    await repo.storePayload(job.id, file.name, bytes);
     runPipeline(job.id, bytes, file.name, targetNotebook, targetEntityIds);
   } else {
     runUrlPipeline(job.id, url, page!, targetNotebook, targetEntityIds);
@@ -152,14 +162,52 @@ imports.post("/", async (c) => {
   return c.json({ job_id: job.id, status: job.status }, 202);
 });
 
-// GET /workbench/jobs/:id — progress (ImportStatus polls this).
-jobs.get("/:id", async (c) => {
-  const job = await repo.getJob(c.req.param("id"));
-  if (!job) return c.json({ error: "not found" }, 404);
-  return c.json({ job });
-});
+// rw-p5a-intake: an import's retry from the intake panel (the route set it back to queued): the same
+// pipeline again - a file from its kept bytes, a URL through the search gate again (one /v1/fetch call,
+// its refusal recorded as the import's failure; never a direct fetch)
+export async function retryImport(jobId: string, _who: Identity): Promise<void> {
+  const job = await repo.getJob(jobId);
+  if (!job || job.status !== "queued") return;
+  const targetEntityIds = (job.target_entity_ids ?? []).map(Number);
+  const jobUrl = (job as unknown as { url?: string | null }).url;
+  if (jobUrl) {
+    let page: GatePage;
+    try {
+      page = await fetchViaGate(jobUrl);
+    } catch (e) {
+      const why = isGateError(e) ? String((gateErrorBody(e) as { error?: unknown }).error ?? "the search gate refused the link") : "the import failed (see the workbench log)";
+      if (!isGateError(e)) console.error(`[import] retry ${jobId} failed:`, String((e as Error)?.message ?? e).slice(0, 500));
+      await repo.failJob(jobId, why.slice(0, 300));
+      return;
+    }
+    await runUrlPipeline(jobId, jobUrl, page, job.target_notebook ?? null, targetEntityIds);
+    return;
+  }
+  const p = await repo.getPayload(jobId);
+  if (!p) return void await repo.failJob(jobId, "the file is gone; import it again");
+  await runPipeline(jobId, p.bytes, p.filename, job.target_notebook ?? null, targetEntityIds);
+}
 
-// GET /workbench/jobs — recent history.
-jobs.get("/", async (c) => {
-  return c.json({ jobs: await repo.recentJobs() });
-});
+// GET /workbench/jobs/:id — progress (ImportStatus polls this). rw-p5a-intake: the subject's own job
+// only (another user's is 404, as on the intake panel), through the intake panel's one owner rule.
+export function jobsRouter(db: Db) {
+  const jobs = new Hono();
+  jobs.get("/:id", async (c) => {
+    const id = c.req.param("id");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return c.json({ error: "not found" }, 404);
+    const who = await identityOf(c);
+    const mine = (await importRows(db, who, "import", null, 1, id.toLowerCase()))[0] ?? (await importRows(db, who, "add", null, 1, id.toLowerCase()))[0];
+    if (!mine) return c.json({ error: "not found" }, 404);
+    const job = await repo.getJob(id);
+    if (!job) return c.json({ error: "not found" }, 404);
+    return c.json({ job });
+  });
+
+  // GET /workbench/jobs — recent history (the subject's own).
+  jobs.get("/", async (c) => {
+    const who = await identityOf(c);
+    const ids = new Set([...(await importRows(db, who, "import", null, 50)), ...(await importRows(db, who, "add", null, 50))].map((j) => j.id));
+    return c.json({ jobs: (await repo.recentJobs(200)).filter((j) => ids.has(String(j.id))).slice(0, 50) });
+  });
+  return jobs;
+}

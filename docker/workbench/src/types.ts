@@ -82,11 +82,15 @@ export interface SourceRevision {
 // staged/committed pair drives the P6 grounding badge (G11).
 export type ImportStatus =
   | "queued"
+  | "fetching" // rw-p5a-intake: a user add, through the research service's fetch
   | "extracting"
   | "embedding"
   | "linking"
+  | "holding" // rw-p5a-intake: a user add, held in its refinery
   | "done"
-  | "failed";
+  | "held" // rw-p5a-intake: a user add's end
+  | "failed"
+  | "cancelled"; // rw-p5a-intake: from the intake panel
 
 export interface ImportJob {
   id: Uuid;
@@ -100,6 +104,10 @@ export interface ImportJob {
   duplicate: boolean;
   created_at: string;
   updated_at: string;
+  // rw-p5a-intake (init-intake-queue.sql)
+  owner_sub?: string | null;
+  url?: string | null;
+  filename?: string | null;
 }
 
 // Provenance leaf reference (P1) — a cited record's viewable address.

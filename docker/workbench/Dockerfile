@@ -148,7 +148,10 @@ FROM app AS test
 # rw-p8a3-room adds src/rooms/: the room's scoped chat - its routing (the LiteLLM alias only, its own key,
 # off when blank with the fixed refusal), the empty-scope rule, the refinery's hidden set (pure); its integration
 # test is skipped here (no ROOMS_TEST_BASE); contract-test/run-room-tests.ps1 runs it.
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/fetch-gate/ src/sessions/ src/rooms/ \
+# research-workbench P5a (rw-p5a-intake) adds src/intake/: the five queues' state machines, the declared content
+# types, the research service's intake fetch client against a loopback stub and the seam's OWUI inlet rule (pure);
+# its integration test is skipped here (no INTAKE_TEST_BASE); contract-test/run-workspace-tests.ps1 runs it.
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/fetch-gate/ src/sessions/ src/rooms/ src/intake/ \
   && touch /app/.test-gate-passed
 
 FROM test AS parity

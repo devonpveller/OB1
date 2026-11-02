@@ -268,7 +268,30 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   console.log(`sweep: B's scoped chat in B's room -> ${bChat.status}${bChat.json.code ? ` (${bChat.json.code})` : ""}`);
   await sql(`INSERT INTO public.workspace_room_entries (room_id, actor_sub, kind, body) VALUES ($1::uuid, $2, 'dossier', $3), ($4::uuid, $2, 'user', $3)`, [bRoom, bSub, room.entry, bSessRoom]);
   await sql(`UPDATE public.workspace_rooms SET draft = $2 WHERE id = $1::uuid`, [bRoom, room.draft]);
+  // rw-p5a-intake: B's intake history (07-MULTI-USER: a user's adds and imports are private) - an add whose link
+  // the fetch refuses and an import whose file the extractor refuses, so neither leaves a (shared) held source
+  // or source behind: the link, the file name and both job ids are B's alone. Skipped where the lab's workbench
+  // has no research service for the add (503).
+  const intakeMk = { url: `https://lab.example.org/refuse/IntakeSecret${rnd()}`, file: `ImportSecret${rnd()}-fail-extract.pdf` };
+  const bIntake: Record<string, string> = {};
+  {
+    const add = await wb("POST", "/workbench/intake/add", { url: intakeMk.url, refinery_id: bRefinery }, B);
+    if (add.status === 202) bIntake.add = String(add.json.job_id);
+    const fd = new FormData();
+    fd.append("file", new File([new TextEncoder().encode("%PDF-1.4\n% sweep\n")], intakeMk.file, { type: "application/pdf" }));
+    const imp = await fetch(`${BASE}/workbench/import`, { method: "POST", headers: { "x-brain-key": KEY, ...B }, body: fd });
+    const impJson = await imp.json().catch(() => ({}));
+    if (imp.status === 202) bIntake.import = String(impJson.job_id);
+    for (let i = 0; i < 60; i++) {
+      const open = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.import_jobs WHERE id::text = ANY($1) AND status NOT IN ('failed', 'held', 'done', 'cancelled')`, [Object.values(bIntake)]);
+      if (!open[0].n) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    console.log(`sweep: B's intake add ${add.status}, B's import ${imp.status}`);
+  }
+  const bIntakeBefore = await sql(`SELECT id::text AS id, status, attempts FROM public.import_jobs WHERE id::text = ANY($1) ORDER BY id`, [Object.values(bIntake)]);
   const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret,
+    ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
@@ -307,7 +330,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
 
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
-  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom].filter(Boolean);
+  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...Object.values(bIntake)].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -338,6 +361,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const bareUrls = [
     ...reads.filter((x) => !x.path.includes(":")).map((x) => ({ m: x.method, url: `${x.path}?limit=500&q=fixture` })),
     ...["research", "held", "compile", "import"].map((k) => ({ m: "GET", url: `/workbench/contract/jobs?kinds=${k}&limit=200` })),
+    // rw-p5a-intake: the intake panel's every queue, one at a time
+    ...["import", "add", "chunk", "extract", "entity"].map((k) => ({ m: "GET", url: `/workbench/intake/jobs?kinds=${k}&limit=200` })),
   ];
   for (const { m, url } of bareUrls) {
     for (const door of [BASE, VIEWER]) {
@@ -379,6 +404,28 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     }
   }
   assert(streamed >= 2, `B's job streamed to A on both doors (${streamed} streams read)`);
+
+  // rw-p5a-intake: B's intake jobs by kind and id, and their retry and cancel, as A on both doors - each one
+  // "no such job" (404); and B's jobs are as they were afterwards (A's calls changed nothing of B's)
+  for (const [kind, id] of Object.entries(bIntake)) {
+    for (const [m, sfx] of [["GET", ""], ["POST", "/retry"], ["POST", "/cancel"]]) {
+      for (const door of [BASE, VIEWER]) {
+        calls++;
+        const url = `/workbench/intake/jobs/${kind}/${id}${sfx}`;
+        const res = await call(door, m, url, m === "POST" ? {} : undefined);
+        judge(`${m} /workbench/intake/jobs/${kind}/<B ${kind}>${sfx} (${doorName(door)})`, url, res);
+        if (res.status !== 404) hits.push(`HIT intake-${kind}${sfx || "-read"} ${m} ${url} (${doorName(door)}) -> ${res.status} (want 404)`);
+      }
+    }
+    for (const door of [BASE, VIEWER]) {
+      calls++;
+      const res = await call(door, "GET", `/workbench/jobs/${id}`);
+      if (res.status !== 404) hits.push(`HIT legacy-job GET /workbench/jobs/<B ${kind}> (${doorName(door)}) -> ${res.status} (want 404)`);
+    }
+  }
+  const bIntakeAfter = await sql(`SELECT id::text AS id, status, attempts FROM public.import_jobs WHERE id::text = ANY($1) ORDER BY id`, [Object.values(bIntake)]);
+  assertEquals(bIntakeAfter, bIntakeBefore, "user A's calls left B's intake jobs as they were");
+  console.log(`sweep: B's intake jobs ${JSON.stringify(Object.keys(bIntake))} (A: 404 on each, by id, retry and cancel)`);
 
   // what a marker cannot show: WHICH references B's document holds (reference rows are shared
   // knowledge; the holder -> references mapping of a user document is its owner's). A asks for it.

@@ -280,6 +280,50 @@ The lab: `contract-test/run-identity-tests.ps1` - a lab signer stands in for the
 mint HS256 tokens with a run-made secret: two users, two more for the sweep, admins; the real research
 service image); no provider, no TLS, nothing published.
 
+## The intake and queue panel (research-workbench P5a, rw-p5a-intake)
+
+`/workbench/intake` serves the workspace's Intake panel: every import, add, chunking, extraction and entity
+job as one job shape (`kind`, `id`, `status`, `state`, `detail.phase`, `detail.actions`, `detail.primary`), each a
+state machine with ONE primary action (cancel while it waits, retry once it failed or was cancelled, open once
+it ended well). Source: `src/intake/`.
+
+| Route | What |
+|---|---|
+| `GET /workbench/intake/jobs?kinds=import,add,chunk,extract,entity&state=&limit=` | the panel's list |
+| `GET /workbench/intake/jobs/:kind/:id` | one job; another user's is 404 |
+| `POST /workbench/intake/jobs/:kind/:id/retry`, `/cancel` | its actions (409 when the phase offers neither) |
+| `POST /workbench/intake/add` | a user add: JSON `{url, refinery_id \| path, content_type?}` or multipart with `file` |
+| `GET /workbench/intake/content-types` | the declared three: web page, PDF, YouTube transcript |
+
+The queues: `import` and `add` are `import_jobs` (`mode`), `chunk` the sources the chunk worker has not chunked
+(`md5(content)` vs `metadata.chunked_hash`; a cancel stamps it, a retry clears the stamp), `extract` the
+`source_extraction_queue` and `entity` the `entity_extraction_queue` (a cancel sets `cancelled`, which the entity
+worker never claims; a retry sets `pending` with a fresh attempt count). No worker changed.
+
+**The one add path.** The panel's general add (the title bar's "+": it names an existing refinery, the route
+answers 400 with the user's refineries when none is named) and its contextual add (from a refinery: its id;
+from a document: its path, whose refinery it is) and the Open WebUI inlet are the same route. A link is fetched
+ONLY by the research service's proxy-bound fetch: ONE `POST <RESEARCH_URL>/intake/fetch {url}` with
+`RESEARCH_WORKSPACE_KEY` (`src/intake/research_fetch.ts`; blank = a link add answers 503 and fetches nothing). A
+PDF (fetched or added as a file) and a saved page go through `openbrain-extract`. The source lands HELD in the
+refinery through `addHeld` - never admitted to `sources` on arrival, never a watch proposal (P5b's). A file's
+bytes are kept in `import_job_payloads` until the job ends well, so a failed one is retried without re-sending it.
+
+**Whose (07-MULTI-USER).** An import or add is its subject's (`import_jobs.owner_sub`, from the identity seam);
+a job made before rw-p5a-intake, a source no import made, and every thought (the entity queue) belong to
+`WORKSPACE_DEFAULT_SUB` (with sign-in and no default: an admin who is not impersonating, audited). `jobs()`'s
+import rows and `GET /workbench/jobs[/:id]` follow the same rule.
+
+**The OWUI inlet.** Open WebUI's own key in `WORKSPACE_SERVICE_KEYS` (`owui=<key>`) - and no other key - may
+send `x-on-behalf-of: <Authentik subject>` on `POST /workbench/intake/add` and `GET /workbench/intake/jobs/add/:id`;
+the request is then that user's (actor `service:owui`, origin `owui`). Anywhere else, or from any other key, the
+header is 403. The OWUI tool is `frontend/owui/tools/research_intake.py`.
+
+Deploy: `psql -f init-intake-queue.sql` BEFORE the new image (revert: `revert-intake-queue.sql`);
+`RESEARCH_WORKSPACE_KEY` set (already, if the documents API's research client is on) and the research service
+image with `POST /intake/fetch`; for the OWUI inlet, `owui=<key>` in `WORKSPACE_SERVICE_KEYS` and that key in the
+tool's `service_key` valve.
+
 ## The retrieval contract (research-workbench P0)
 
 `src/contracts/` is the typed retrieval contract every panel and MCP client reads the

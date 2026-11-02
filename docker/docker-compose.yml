@@ -184,6 +184,7 @@ services:
       - ./init-research-sessions.sql:/docker-entrypoint-initdb.d/320-init-research-sessions.sql:ro # research-workbench rw-p4b-sessions: research_steers.actor_sub (fresh-volume only; live: psql -f WITH the new research image; revert: revert-research-sessions.sql)
       - ./init-podcasts.sql:/docker-entrypoint-initdb.d/330-init-podcasts.sql:ro # research-workbench rw-p7a-tts: presenter model + render requests (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-podcasts.sql)
       - ./init-rooms.sql:/docker-entrypoint-initdb.d/340-init-rooms.sql:ro # research-workbench rw-p8a3-room: the room store (rooms + transcript entries, per user) (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-rooms.sql)
+      - ./init-intake-queue.sql:/docker-entrypoint-initdb.d/360-init-intake-queue.sql:ro # research-workbench rw-p5a-intake: import_jobs owner + the user add, file payloads, the intake panel's job kinds (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-intake-queue.sql)
     networks:
       - obnet
     restart: unless-stopped
