@@ -34,6 +34,8 @@ export const REGISTRY = {
   ideaStates: "idea_states",
   credibilityTerms: "credibility_terms",
   claimKinds: "claim_kinds",
+  // research-workbench P3a (init-research-credibility.sql), referenced by the P8a-1 trail
+  admissionTrailKinds: "admission_trail_kinds",
   trailEventKinds: "trail_event_kinds",
   timelineEventKinds: "timeline_event_kinds",
   settings: "settings",

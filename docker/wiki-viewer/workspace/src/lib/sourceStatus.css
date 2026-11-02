@@ -1,0 +1,4 @@
+/* research-workbench P8a-1 (D5): a listed source's lifecycle state */
+.ws-status { margin-left: 4px; }
+.ws-badge-suppressed, .ws-badge-unlinked, .ws-badge-erased { border: 1px solid var(--warn); color: var(--warn); }
+.ws-badge-held { border: 1px dashed var(--line); }

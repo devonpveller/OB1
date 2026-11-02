@@ -11,6 +11,15 @@ export const GraphNode = z.object({
   page_class: registryValue(REGISTRY.pageClasses, "entity").nullable(),
   state: recordState("current"),
   distance: z.number().int(),
+  // research-workbench P8a-1 (D5: suppression status shows wherever a source is listed; D1: contested marks)
+  lifecycle: registryValue(REGISTRY.sourceStates, "active").nullable().openapi({
+    description: "a source or report leaf page (content/source/<id>): its source's lifecycle state (erased when only " +
+      "its tombstone is left); null for every other page",
+  }),
+  contested: z.boolean().openapi({
+    description: "a source leaf page whose source grounds a contradicted claim, or a claim through a contradicts edge " +
+      "(the hub context's contested rule, documents/hub.ts); false for every other page",
+  }),
 }).openapi("GraphNode");
 
 export const GraphLink = z.object({
@@ -93,6 +102,11 @@ export const TimelineEvent = z.object({
   kind: registryValue(REGISTRY.timelineEventKinds, "source_revision"),
   ref: z.string(),
   summary: z.string(),
+  // research-workbench P8a-1: the source an event is about, and its lifecycle state NOW (D5)
+  source_id: uuid().nullable().openapi({ description: "the source a source_revision or trail event is about; null otherwise" }),
+  lifecycle: registryValue(REGISTRY.sourceStates, "active").nullable().openapi({
+    description: "that source's lifecycle state now (erased when only its tombstone is left); null when the event is about no source",
+  }),
 }).openapi("TimelineEvent");
 
 export const Timeline = z.object({
@@ -110,8 +124,60 @@ export const TrailEntry = z.object({
   context: Json,
   at: Iso,
   counts_as_evidence: z.boolean().openapi({ description: "always false: nothing on the trail is evidence" }),
+  // research-workbench P8a-1 (D5): the source's lifecycle state NOW, so the trail panel shows its status
+  lifecycle: registryValue(REGISTRY.sourceStates, "suppressed").openapi({
+    description: "the entry's source's lifecycle state now (erased when only its tombstone is left)",
+  }),
 }).openapi("TrailEntry");
+
+// research-workbench P8a-1: what the pre-ingestion stage recorded about a hit, from both of its records -
+// P3a's admission trail (origin "admission": the leads and the found_via paths they opened) and P4a's
+// per-source events of a research session (origin "session"). Shared research, but an entry of another
+// user's research tree is withheld, as the research flow withholds it (07-MULTI-USER).
+export const LeadTrailEntry = z.object({
+  id: z.string().openapi({ description: "the admission trail entry id (a session event carries the same id in its trail)" }),
+  origin: z.string().openapi({ example: "admission", description: "admission (P3a research_admission_trail) or session (P4a research_job_events)" }),
+  stage: registryValue(REGISTRY.admissionTrailKinds, "lead"),
+  url: z.string(),
+  source_id: uuid().nullable().openapi({ description: "the source the hit is (or became), when there is one" }),
+  lifecycle: registryValue(REGISTRY.sourceStates, "active").nullable().openapi({
+    description: "that source's lifecycle state now (erased when only its tombstone is left); null when no source",
+  }),
+  found_via: z.string().nullable().openapi({ description: "the lead's trail id (or a held source id) this hit was reached through" }),
+  path: z.array(Json).openapi({ description: "the found_via path P3a recorded (empty when none)" }),
+  score: z.number().nullable(),
+  floor: z.number().nullable(),
+  family: z.string().nullable(),
+  reasons: z.array(z.string()),
+  job_id: uuid(FX.job).nullable(),
+  at: Iso,
+  counts_as_evidence: z.boolean().openapi({ description: "always false: nothing on the trail is evidence" }),
+}).openapi("LeadTrailEntry");
 
 export const Trail = z.object({
   entries: z.array(TrailEntry),
+  leads: z.array(LeadTrailEntry).openapi({
+    description: "P8a-1: the admission trail's lead entries and found_via paths (origin admission) and the research " +
+      "sessions' per-source trail events (origin session), newest first; empty under a metadata filter",
+  }),
 }).openapi("Trail");
+
+// research-workbench P8a-1 (D5): the lifecycle state of a batch of sources, so every panel that lists a
+// source shows its suppression status. Shared knowledge only: a sources row or a tombstone. A held source
+// (per refinery) and an unknown id or URL are simply absent - never a hint that something exists.
+export const SourceStatesRequest = z.object({
+  ids: z.array(z.string()).max(200).optional(),
+  urls: z.array(z.string()).max(200).optional(),
+}).openapi("SourceStatesRequest");
+
+export const SourceStateRow = z.object({
+  id: uuid(FX.sourceSuppressed),
+  url: z.string().nullable(),
+  lifecycle: registryValue(REGISTRY.sourceStates, "suppressed"),
+  tombstone_id: uuid().nullable(),
+}).openapi("SourceStateRow");
+
+export const SourceStates = z.object({
+  by_id: z.record(z.string(), SourceStateRow),
+  by_url: z.record(z.string(), SourceStateRow),
+}).openapi("SourceStates");

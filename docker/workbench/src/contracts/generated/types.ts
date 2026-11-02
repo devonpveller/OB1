@@ -279,6 +279,8 @@ export type GraphNode = {
   page_class: string | null; /** registry: page_classes */
   state: string; /** registry: record_states */
   distance: number;
+  lifecycle: string | null; /** registry: source_states */
+  contested: boolean;
 };
 
 export type HiddenRequest = {
@@ -319,6 +321,7 @@ export type HubMarker = {
     title: string;
     page_class: string | null;
     in_degree: number;
+    lifecycle: string | null; /** registry: source_states */
   };
   seeds: Array<string>;
   links: Array<{
@@ -403,6 +406,24 @@ export type Job = {
 
 export type Jobs = {
   jobs: Array<Job>;
+};
+
+export type LeadTrailEntry = {
+  id: string;
+  origin: string;
+  stage: string; /** registry: admission_trail_kinds */
+  url: string;
+  source_id: string | null;
+  lifecycle: string | null; /** registry: source_states */
+  found_via: string | null;
+  path: Array<Record<string, unknown>>;
+  score: number | null;
+  floor: number | null;
+  family: string | null;
+  reasons: Array<string>;
+  job_id: string | null;
+  at: string;
+  counts_as_evidence: boolean;
 };
 
 export type LiftRequest = {
@@ -955,6 +976,23 @@ export type SeverResult = {
   blocking: number;
 };
 
+export type SourceStateRow = {
+  id: string;
+  url: string | null;
+  lifecycle: string; /** registry: source_states */
+  tombstone_id: string | null;
+};
+
+export type SourceStates = {
+  by_id: Record<string, unknown>;
+  by_url: Record<string, unknown>;
+};
+
+export type SourceStatesRequest = {
+  ids?: Array<string>;
+  urls?: Array<string>;
+};
+
 export type SteerRequest = {
   step_id: string;
   text: string;
@@ -1004,6 +1042,8 @@ export type TimelineEvent = {
   kind: string; /** registry: timeline_event_kinds */
   ref: string;
   summary: string;
+  source_id: string | null;
+  lifecycle: string | null; /** registry: source_states */
 };
 
 export type Tombstone = {
@@ -1037,6 +1077,7 @@ export type TombstoneAttempt = {
 
 export type Trail = {
   entries: Array<TrailEntry>;
+  leads: Array<LeadTrailEntry>;
 };
 
 export type TrailEntry = {
@@ -1048,6 +1089,7 @@ export type TrailEntry = {
   context: Record<string, unknown>;
   at: string;
   counts_as_evidence: boolean;
+  lifecycle: string; /** registry: source_states */
 };
 
 export type UserSource = {

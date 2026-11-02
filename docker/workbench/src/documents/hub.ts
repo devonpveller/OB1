@@ -15,6 +15,7 @@
 // centre; contested = a claim grounded in the hub's sources is contradicted.
 import type { Db } from "../contracts/db.ts";
 import type { OutboundLink } from "./listing.ts";
+import { LEAF_LIFECYCLE } from "../contracts/repo/knowledge.ts";
 
 export const THIN_SOURCES = 3;
 export const SOURCE_PREFIX = "content/source/";
@@ -132,11 +133,16 @@ export async function hubContext(db: Db, path: string, links: OutboundLink[]) {
   const seeds = await seedsOf(db, links);
   const seedSlugs = [...seeds.keys()];
   const clusters = clusterSeeds(seedSlugs, await neighboursOf(db, seedSlugs));
+  // P8a-1 round 2 (tester D1): a centre that is a source's leaf page carries its source's lifecycle (D5)
+  const centres = [...new Set(clusters.map((c) => c.centre.slug))];
+  const life = new Map((centres.length ? await db.query<{ slug: string; lifecycle: string | null }>(
+    `SELECT s.slug, ${LEAF_LIFECYCLE("s.slug")} AS lifecycle FROM unnest($1::text[]) AS s(slug)`, [centres],
+  ) : []).map((r) => [r.slug, r.lifecycle ?? null]));
   const hubs = [];
   for (const c of clusters) {
     const m = await markers(db, c.centre.slug, c.seeds);
     hubs.push({
-      centre: { slug: c.centre.slug, title: c.centre.title, page_class: c.centre.page_class, in_degree: c.centre.in_degree },
+      centre: { slug: c.centre.slug, title: c.centre.title, page_class: c.centre.page_class, in_degree: c.centre.in_degree, lifecycle: life.get(c.centre.slug) ?? null },
       seeds: c.seeds,
       links: c.seeds.flatMap((s) => seeds.get(s) ?? []),
       ...m,

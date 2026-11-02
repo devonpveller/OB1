@@ -164,6 +164,18 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
       console.log(`sweep: B steered B's session from its card: ${steerPlanted ? "201" : `skipped (${st.status})`}`);
     }
   }
+  // rw-p8a1-core: B's research tree recorded leads - a P3a admission trail lead and a P4a per-source event, each
+  // with a marker URL - so the trail read (GET /contract/trail, its `leads`) and source-states have B's to leak
+  const leadSecret = `LeadSecret${rnd()}`;
+  {
+    const root = (await sql<{ r: string }>(`SELECT coalesce(root_job_id, id)::text AS r FROM public.research_jobs WHERE id = $1`, [bJob]))[0]?.r ?? bJob;
+    const leadUrl = `https://example.org/sweep/${leadSecret}`;
+    await sql(`INSERT INTO public.research_admission_trail (job_id, url, url_key, kind, claim_kind, family, score, floor, model_version, reasons, path)
+               VALUES ($1, $2, public.contract_url_key($2), 'lead', 'general', 'general', 0.1, 0.4, 'd15', '[]'::jsonb, '[]'::jsonb)`, [bJob, leadUrl]);
+    await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, trail, payload)
+               VALUES ($1, $2, 'source', 'due_process', $3::jsonb, $4::jsonb)`,
+      [bJob, root, JSON.stringify({ id: `ev-${leadSecret}`, url: `${leadUrl}/event`, kind: "lead", reasons: [], path: [] }), JSON.stringify({ url: `${leadUrl}/event`, outcome: "lead" })]);
+  }
   // rw-p3b-trustpanels: B's job as a finished run records it - needs, gaps and an anchor carrying B's
   // prompt marker - so the coverage read (GET /contract/sessions/:id/coverage) has B's text to leak
   await sql(`UPDATE public.research_jobs SET anchor = $2, result = COALESCE(result, '{}'::jsonb) || jsonb_build_object(
@@ -259,7 +271,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret,
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
-    exportSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
+    exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
     roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];

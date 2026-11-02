@@ -13,3 +13,7 @@ import "./flow/ResearchFlowPanel";
 import "./export/ExportPanel";
 import "./trust/TrustPanels";
 import "./room/RoomPanels";
+// research-workbench P8a-1: the timeline, the trail and the page graph
+import "./timeline/TimelinePanel";
+import "./trail/TrailPanel";
+import "./graph/PageGraphPanel";

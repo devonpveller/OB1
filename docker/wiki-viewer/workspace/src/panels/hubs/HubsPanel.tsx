@@ -7,9 +7,10 @@ import { D, get, post, q } from "../../lib/api";
 import { useWorkspace } from "../../lib/store";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
+import { statusBadges } from "../../lib/sourceStatus";
 
 interface Hub {
-  centre: { slug: string; title: string; page_class: string | null };
+  centre: { slug: string; title: string; page_class: string | null; lifecycle?: string | null };
   seeds: string[];
   links: { kind: string; id: string }[];
   sources: number;
@@ -30,7 +31,8 @@ export function HubsPanel(_p: PanelProps) {
   const leaves = useMemo<Leaf[]>(() => hubs.map((h) => ({
     key: h.centre.slug,
     label: <span data-hub={h.centre.slug}>{h.centre.title}</span>,
-    badges: [...(h.thin ? ["thin"] : []), ...(h.contested ? ["contested"] : [])],
+    // P8a-1 round 2 (D5): a centre that is a source's leaf page shows its source's state
+    badges: [...statusBadges(h.centre.lifecycle), ...(h.thin ? ["thin"] : []), ...(h.contested ? ["contested"] : [])],
     detail: <ul className="ws-why">{h.why.map((w) => <li key={w}>{w}</li>)}<li>{h.links.length} of the document's links fall here</li></ul>,
   })), [hubs]);
   const queue = async (h: Hub, kind: "research" | "gap") => {

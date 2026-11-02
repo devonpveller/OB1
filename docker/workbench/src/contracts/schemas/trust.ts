@@ -40,7 +40,11 @@ export const Need = z.object({
 }).openapi("Need");
 
 export const HubMarker = z.object({
-  centre: z.object({ slug: z.string(), title: z.string(), page_class: z.string().nullable(), in_degree: z.number().int() }),
+  centre: z.object({
+    slug: z.string(), title: z.string(), page_class: z.string().nullable(), in_degree: z.number().int(),
+    // P8a-1 round 2 (D5): a centre that is a source's leaf page carries its source's lifecycle; null otherwise
+    lifecycle: z.string().nullable().openapi({ "x-registry": "source_states", description: "the source's lifecycle state when the centre is its leaf page (content/source/<id>); null otherwise" } as Record<string, unknown>),
+  }),
   seeds: z.array(z.string()),
   links: z.array(z.object({ kind: z.string(), id: z.string() })),
   sources: z.number().int(),

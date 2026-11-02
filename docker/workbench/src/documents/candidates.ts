@@ -19,6 +19,7 @@ export interface Candidate {
   title: string;
   snippet: string;
   state: string;
+  lifecycle?: string | null; // P8a-1 round 2: a source's (or a source leaf page's) lifecycle state
   insert: string; // the link text the editor inserts
   tags: string[];
 }
@@ -44,7 +45,8 @@ export async function candidates(db: Db, q: string, path: string | null, who: Id
     )).map((x) => x.id));
     for (const h of r.results) {
       const kind = h.kind === "source" && reports.has(h.id) ? "report" : h.kind;
-      out.push({ kind, id: h.id, title: h.title || h.id, snippet: h.snippet ?? "", state: h.state, insert: linkFor(kind, h.id, h.title || h.id), tags: [] });
+      // P8a-1 round 2: the source lifecycle rides with the hit - a source's, or a source leaf page's (D5)
+      out.push({ kind, id: h.id, title: h.title || h.id, snippet: h.snippet ?? "", state: h.state, lifecycle: h.lifecycle ?? null, insert: linkFor(kind, h.id, h.title || h.id), tags: [] });
     }
   }
   const docs = await db.query<{ path: string; title: string }>(

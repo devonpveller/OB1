@@ -1,0 +1,25 @@
+/* research-workbench P8a-1: the page graph */
+.ws-graph-canvas { width: 100%; height: 60vh; min-height: 320px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; touch-action: none; cursor: grab; }
+.ws-graph-canvas.ws-g-moving { cursor: grabbing; }
+/* while panning, the blurred clouds are not re-rasterised every frame */
+.ws-graph-canvas.ws-g-moving .ws-g-density { display: none; }
+.ws-g-edge { stroke: var(--muted); stroke-opacity: 0.35; stroke-width: 1; }
+.ws-g-bridge { stroke-opacity: 0.7; }
+.ws-g-thin { stroke: var(--warn); stroke-dasharray: 5 4; stroke-width: 1.6; stroke-opacity: 0.95; }
+.ws-g-contested { stroke: #dc2626; stroke-width: 2; stroke-opacity: 0.95; }
+.ws-g-doclink { stroke: var(--accent); stroke-opacity: 0.8; }
+.ws-g-arrowhead { fill: var(--accent); }
+.ws-g-node circle { fill: var(--fg); stroke: var(--panel); stroke-width: 1.5; cursor: pointer; }
+.ws-g-node rect { fill: var(--accent); cursor: pointer; }
+.ws-g-node text { font-size: 11px; fill: var(--fg); pointer-events: none; }
+.ws-g-root circle { fill: var(--accent); }
+.ws-g-picked circle, .ws-g-picked rect { stroke: var(--accent); stroke-width: 3; }
+.ws-g-contested-node circle { stroke: #dc2626; stroke-width: 2; }
+.ws-g-status-suppressed circle, .ws-g-status-unlinked circle, .ws-g-status-erased circle { fill: var(--panel); stroke: var(--warn); stroke-width: 2; stroke-dasharray: 2 2; }
+.ws-g-status-suppressed text, .ws-g-status-unlinked text, .ws-g-status-erased text { fill: var(--warn); }
+.ws-g-legend { font-size: 11px; margin: 4px 0; }
+.ws-g-key { padding: 0 4px; border-radius: 3px; border: 1px solid var(--line); }
+.ws-g-key-thin { border-style: dashed; border-color: var(--warn); }
+.ws-g-key-contested { border-color: #dc2626; }
+.ws-g-key-doc { border-color: var(--accent); }
+.ws-g-picked-box { margin: 4px 0 8px; font-size: 13px; }
