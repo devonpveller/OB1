@@ -274,7 +274,9 @@ Deno.test({ name: "I8 the worker queues: chunk, extract and entity jobs appear w
   await sql(`INSERT INTO public.import_jobs (status, source_id, owner_sub, actor_sub) VALUES ('done', $1::uuid, $2, $2)`, [src, A]);
   await sql(`INSERT INTO public.source_extraction_queue (source_id, status, attempt_count, last_error) VALUES ($1::uuid, 'failed', 3, 'lab: the model answered nothing')
              ON CONFLICT (source_id) DO UPDATE SET status = 'failed', attempt_count = 3`, [src]);
-  const th = (await sql<{ id: string }>(`INSERT INTO public.thoughts (content, exposure) VALUES ($1, 'personal') RETURNING id::text AS id`, [`a thought ${rnd()}`]))[0].id;
+  // an OPS-plane thought: the graph-plane RLS (init-graph-plane-rls.sql) lets the workbench's role
+  // (ob_app_memory, service_role) see entity_extraction_queue rows only for thoughts its plane can see
+  const th = (await sql<{ id: string }>(`INSERT INTO public.thoughts (content, exposure) VALUES ($1, 'ops') RETURNING id::text AS id`, [`a thought ${rnd()}`]))[0].id;
   await sql(`INSERT INTO public.entity_extraction_queue (thought_id, status) VALUES ($1::bigint, 'pending') ON CONFLICT (thought_id) DO UPDATE SET status = 'pending'`, [th]);
   const listA = (await call("GET", "/workbench/intake/jobs?limit=200", { as: A })).json.jobs as any[];
   const chunk = listA.find((j) => j.kind === "chunk" && j.id === src);
@@ -282,8 +284,10 @@ Deno.test({ name: "I8 the worker queues: chunk, extract and entity jobs appear w
   assertEquals([chunk?.detail.phase, chunk?.detail.primary], ["pending", "cancel"]);
   assertEquals([extract?.detail.phase, extract?.detail.primary], ["failed", "retry"]);
   assert(!listA.some((j) => j.kind === "entity" && j.id === th), "a thought is not A's");
-  const listOp = (await call("GET", "/workbench/intake/jobs?kinds=entity&limit=200", { as: null })).json.jobs as any[];
-  assertEquals(listOp.find((j) => j.id === th)?.detail.phase, "pending", "the operator (who owns the ownerless) sees the entity queue");
+  const opRes = await call("GET", "/workbench/intake/jobs?kinds=entity&limit=200", { as: null });
+  const listOp = (opRes.json.jobs ?? []) as any[];
+  assertEquals(listOp.find((j) => String(j.id) === String(th))?.detail.phase, "pending",
+    `the operator (who owns the ownerless) sees the entity queue: ${opRes.status} ${opRes.text.slice(0, 600)} (thought ${th})`);
   const listB = (await call("GET", "/workbench/intake/jobs?limit=200", { as: Bsub })).text;
   assert(!listB.includes(src) && !listB.includes(`"${th}"`), "B sees none of them");
   for (const [k, id] of [["chunk", src], ["extract", src], ["entity", th]]) {
