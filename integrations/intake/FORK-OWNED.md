@@ -79,4 +79,8 @@ pattern: \bAUTHORIZATION\s+"?intake"?\b
 # work/rw-p5a-intake-int (the merge's second parent). The hit is metadata.intake.fetched_by in the workbench's intake panel
 # test: the held source's provenance key, not the intake schema, role or service; nothing of the list above changes.
 reviewed-upstream: e90f78649567389b6804690b7158a0ce33be76a6
+# rw-p5a-intake round 4 (2026-11-02): reviewed. Not upstream either - the same fork branch (round 4, 63fd32f) merged
+# onto a8b65b9 (rw-p8a2-cleanup landed) as work/rw-p5a-intake-int2. The hits are the same metadata.intake.fetched_by
+# test line and this file's own round-3 entry above; nothing of the list above changes.
+reviewed-upstream: 63fd32f338f417e3c2200fbc83c84ef6b8f22339
 ```
