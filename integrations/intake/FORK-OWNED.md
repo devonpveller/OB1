@@ -75,4 +75,8 @@ pattern: \bGRANT\s+"?intake"?\s*(,|\bTO\b)
 pattern: \bREVOKE\s+"?intake"?\s*(,|\bFROM\b)
 pattern: \bOWNED\s+BY\s+"?intake"?\b
 pattern: \bAUTHORIZATION\s+"?intake"?\b
+# rw-p5a-intake (2026-11-02): reviewed. Not upstream - the fork's own work/rw-p5a-intake, merged onto development as
+# work/rw-p5a-intake-int (the merge's second parent). The hit is metadata.intake.fetched_by in the workbench's intake panel
+# test: the held source's provenance key, not the intake schema, role or service; nothing of the list above changes.
+reviewed-upstream: e90f78649567389b6804690b7158a0ce33be76a6
 ```
