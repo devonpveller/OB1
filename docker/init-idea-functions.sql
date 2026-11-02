@@ -20,7 +20,8 @@
 --       cross-link, IR §8); each is stamped metadata.resurfaced so the ideas panel can list it as resurfaced.
 --   * refinery_engage(refinery, owner, kind, ref)  record a member engaged from inside a refinery (a podcast);
 --       an archived refinery is 'archived' and records nothing.
---   * trg_ideas_write_guard: an UPDATE of ideas.title / summary / current_revision, a move to `promoted`, or a
+--   * trg_ideas_write_guard: an UPDATE of ideas.title / summary / current_revision / owner_sub or of the promotion
+--       pointer (metadata.promoted), a move to `promoted`, an INSERT promoted or carrying a pointer, or a
 --       revision after the first, is REFUSED unless it runs inside one of these functions (their owner: the
 --       migration's role). An app role (service_role, ob_app_memory) writing them directly fails - an edit that
 --       bypasses the shared function, or a promotion the refinery performs on its own, cannot happen.
@@ -45,20 +46,40 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF public.ideas_door_open() THEN RETURN NEW; END IF;
+    -- round 2 (tester F2): the promotion and its pointer are idea_promote()'s alone, whatever the order of steps:
+    -- an app role can neither INSERT an idea promoted (or carrying a pointer) nor write the pointer, so no sequence
+    -- of its own statements can forge one and then "reopen" into promoted.
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status = 'promoted' OR coalesce(NEW.metadata, '{}'::jsonb) ? 'promoted' THEN
+            RAISE EXCEPTION 'ideas: an idea is promoted only through idea_promote()' USING ERRCODE = '42501';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF NEW.title IS DISTINCT FROM OLD.title OR NEW.summary IS DISTINCT FROM OLD.summary
        OR NEW.current_revision IS DISTINCT FROM OLD.current_revision THEN
         RAISE EXCEPTION 'ideas: an idea is edited only through idea_edit()' USING ERRCODE = '42501';
     END IF;
-    -- a promotion is idea_promote()'s alone; reopening an archived refinery may restore a promotion it had
+    -- an idea moves between users only through the identity seam's own writers (never an app role's UPDATE)
+    IF NEW.owner_sub IS DISTINCT FROM OLD.owner_sub THEN
+        RAISE EXCEPTION 'ideas: an idea''s owner is not rewritten' USING ERRCODE = '42501';
+    END IF;
+    IF (coalesce(NEW.metadata, '{}'::jsonb) -> 'promoted') IS DISTINCT FROM (coalesce(OLD.metadata, '{}'::jsonb) -> 'promoted') THEN
+        RAISE EXCEPTION 'ideas: the promotion pointer is written only by idea_promote()' USING ERRCODE = '42501';
+    END IF;
+    -- reopening an archived refinery may restore the promotion idea_promote() recorded, while its document is
+    -- still the refinery's (the pointer is unforgeable above)
     IF NEW.status = 'promoted' AND OLD.status IS DISTINCT FROM 'promoted'
-       AND NOT (OLD.status = 'archived' AND OLD.metadata ? 'promoted') THEN
+       AND NOT (coalesce(OLD.status = 'archived' AND coalesce(OLD.metadata, '{}'::jsonb) ? 'promoted', false)
+                AND EXISTS (SELECT 1 FROM public.user_document_listings d
+                             WHERE d.refinery_id = OLD.id AND d.owner_sub = OLD.owner_sub
+                               AND d.path = OLD.metadata -> 'promoted' ->> 'document_path')) THEN
         RAISE EXCEPTION 'ideas: an idea is promoted only through idea_promote()' USING ERRCODE = '42501';
     END IF;
     RETURN NEW;
 END;
 $$;
 DROP TRIGGER IF EXISTS trg_ideas_write_guard ON public.ideas;
-CREATE TRIGGER trg_ideas_write_guard BEFORE UPDATE ON public.ideas
+CREATE TRIGGER trg_ideas_write_guard BEFORE INSERT OR UPDATE ON public.ideas
     FOR EACH ROW EXECUTE FUNCTION public.trg_ideas_write_guard();
 
 -- revision 1 is the capture's (capture_idea); every later revision is an edit

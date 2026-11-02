@@ -113,6 +113,8 @@ export async function engageRefinery(db: Db, id: string, kind: string, ref: stri
 export async function setDraft(db: Db, id: string, text: string, who: Identity) {
   const own = await db.query<{ status: string }>(`SELECT status FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2`, [id, who.sub]);
   if (!own.length) throw new IdeaError(404, NOT_FOUND);
+  // round 2 (tester A6): a resting refinery takes no write - its draft too (D17 archive)
+  if (own[0].status === "archived") throw new IdeaError(409, ARCHIVED, { code: "refinery-archived" });
   const room = (await db.query<{ r: string | null }>(`SELECT public.idea_room($1::uuid)::text AS r`, [id]))[0]?.r;
   if (!room) throw new IdeaError(404, NOT_FOUND);
   const rows = await db.query<{ id: string; draft_updated_at: string }>(

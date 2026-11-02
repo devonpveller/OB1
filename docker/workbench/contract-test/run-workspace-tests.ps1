@@ -196,7 +196,7 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
     $script:made.dirs += $tree
     $tar = Join-Path $env:TEMP "$P-$sha.tar"
     & git -C $ob1 archive --format=tar -o $tar $sha
-    & tar -xf $tar -C $tree
+    & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $tar -C $tree  # the Windows tar (rw-p8a4-ideas: a GNU tar on PATH reads C: as a host)
     Remove-Item -Force $tar
     if ($WalkOff) {
       # the base predates the switch: one line after the route runs, so the walk can be turned off
@@ -227,7 +227,7 @@ try {
     $script:made.dirs += $baseTree
     $tarC = Join-Path $env:TEMP "$P-chain.tar"
     & git -C $ob1 archive --format=tar -o $tarC $BaseSha docker integrations/intake
-    & tar -xf $tarC -C $baseTree
+    & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $tarC -C $baseTree  # the Windows tar: a GNU tar on PATH reads C: as a host
     Remove-Item -Force $tarC
     $chainDir = Join-Path $baseTree 'docker'
   }
@@ -392,7 +392,7 @@ try {
 
   # rw-p8a4-ideas: the ideas panel and the refinery view over the real workbench and database (two users + the app role)
   Write-Host '[5h] the ideas and refinery view integration test (owner-checked idea functions, the dossier into the room, archive, user sources)'
-  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault", '-e', 'DOCS_TEST_VAULT=/vault',
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/ideas/ideas_integration_test.ts')
@@ -465,9 +465,9 @@ try {
   # drops the intake queue's columns, so nothing may run against the workbench after it.
   if (-not $Red) {
     # rw-p8a4-ideas: the slot-370 revert runs cleanly twice and leaves the slot-230 notification trigger as it was
-    Write-Host '[5i] revert-idea-functions.sql (twice) then init-idea-functions.sql again'
+    Write-Host '[5i] init-idea-functions.sql twice more (3 runs with the chain''s), revert-idea-functions.sql twice, then init again'
     $rv3 = @()
-    foreach ($f in @('revert-idea-functions.sql', 'revert-idea-functions.sql', 'init-idea-functions.sql')) {
+    foreach ($f in @('init-idea-functions.sql', 'init-idea-functions.sql', 'revert-idea-functions.sql', 'revert-idea-functions.sql', 'init-idea-functions.sql')) {
       $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv370.sql"
       $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv370.sql
       $rv3 += "[$f] exit $($script:rc)$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') })"
@@ -476,7 +476,7 @@ try {
     $rv3 += "functions after init again: $fns"
     Save 'revert-idea-functions.log' ($rv3 -join "`n")
     foreach ($l in $rv3) { Write-Host "    $l" }
-    Check (@($rv3 | Where-Object { $_ -match 'exit 0$' }).Count -eq 3 -and $fns -eq '6') 'the slot-370 revert re-runs cleanly and init restores the six functions'
+    Check (@($rv3 | Where-Object { $_ -match 'exit 0$' }).Count -eq 5 -and $fns -eq '6') 'slot 370: init runs 3 times, revert twice, and init again restores the six functions'
   }
   if (-not $Red -and -not $IdeasOnly) {
     Write-Host '[5f] revert-intake-queue.sql removes only what init-intake-queue.sql added (twice: revert, init, revert)'

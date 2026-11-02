@@ -23,7 +23,7 @@ import { syncListing } from "./listing.ts";
 import { createDocument, DocError } from "./repo.ts";
 import { HOLDER_KIND } from "./paths.ts";
 import type { Identity } from "../middleware/identity.ts";
-import { vaultRead, vaultWrite, vaultCommitPath } from "../util/vault.ts";
+import { vaultCommitPath, vaultDelete, vaultRead, vaultWrite } from "../util/vault.ts";
 
 const DOSSIER_OPENING = 600;
 
@@ -36,8 +36,32 @@ function opening(text: string): string {
 
 const esc = (s: string) => s.replace(/[\]|\n]/g, " ").trim();
 
+// rw-p8a4-ideas round 2 (tester F1): `create document` is ONCE, also under concurrent requests. The seed runs inside one
+// transaction that first takes the refinery's claim (an advisory transaction lock on the idea) and re-reads the idea
+// under it: a second request waits, then sees the one document and answers 409 "go to document" with its path. Every
+// write of the seed (the document's listing, its references, the tether, the promotion) is in that transaction; if it
+// fails, the vault file it wrote is removed again, so no orphan document is left.
 export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, who: Identity, opts: { folder?: string } = {}) {
-  const idea = await readIdea(db, ideaId, who.sub); // another user's idea answers like none
+  if (!(await readIdea(db, ideaId, who.sub))) throw new DocError("no idea with this id", 404); // another user's idea answers like none
+  const made: { path?: string } = {};
+  try {
+    return await db.tx(async (t) => {
+      await t.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`idea-seed:${ideaId}`]);
+      return await seedUnderClaim(t, reg, ideaId, who, opts, made);
+    });
+  } catch (e) {
+    if (made.path) {
+      await vaultDelete(made.path).catch(() => {});
+      await vaultCommitPath(made.path, `documents: seed of ${made.path} rolled back`, who.name).catch(() => {});
+    }
+    throw e;
+  }
+}
+
+async function seedUnderClaim(
+  db: Db, reg: RegistryReader, ideaId: string, who: Identity, opts: { folder?: string }, made: { path?: string },
+) {
+  const idea = await readIdea(db, ideaId, who.sub); // re-read under the claim
   if (!idea) throw new DocError("no idea with this id", 404);
   if (idea.refinery.members.document) {
     throw new DocError("this refinery already has its document - go to document", 409, { path: idea.refinery.members.document.path });
@@ -52,6 +76,7 @@ export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, 
     body: "_Seeded from the idea's accreted work (create document); it is yours to edit._\n\n",
   }, who);
   const rel = created.path;
+  made.path = rel;
   const holder = { kind: HOLDER_KIND, ref: rel, origin: "cited" };
   const parts: string[] = [];
   parts.push("## The idea\n", idea.summary || "(no statement yet)", "");

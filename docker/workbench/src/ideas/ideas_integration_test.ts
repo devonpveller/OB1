@@ -15,6 +15,7 @@ const BASE = (Deno.env.get("DOCS_TEST_BASE") ?? "").replace(/\/+$/, "");
 const KEY = Deno.env.get("DOCS_TEST_KEY") ?? "";
 const HOST = Deno.env.get("CONTRACT_TEST_DB_HOST");
 const APP_ROLE = Deno.env.get("IDEAS_TEST_APP_ROLE") ?? "ob_app_memory";
+const VAULT = Deno.env.get("DOCS_TEST_VAULT") ?? "";
 const ignore = !BASE || !HOST;
 const pool = !ignore
   ? new Pool({
@@ -51,6 +52,22 @@ async function asApp<T = Record<string, any>>(text: string, args: unknown[] = []
   } catch (e) {
     try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
     throw e;
+  } finally {
+    c.release();
+  }
+}
+// several statements in ONE app-role transaction (the tester's G4b shape); "" = all accepted, else the refusal code
+async function refusedAsAppTx(steps: [string, unknown[]][]): Promise<string> {
+  const c = await pool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject(`SET LOCAL ROLE ${APP_ROLE}`);
+    for (const [text, args] of steps) await c.queryObject(text, args);
+    await c.queryObject("COMMIT");
+    return "";
+  } catch (e) {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    return String((e as { fields?: { code?: string } }).fields?.code ?? (e as Error).message);
   } finally {
     c.release();
   }
@@ -297,6 +314,9 @@ t("I9: archive deletes nothing; engagement skips it and no notification lands; o
   assertEquals((await call("POST", `/workbench/ideas/${id}/edit`, { summary: "while resting" })).status, 409);
   assertEquals((await call("POST", `/workbench/ideas/${id}/research-now`, {})).status, 409);
   assertEquals((await call("POST", `/workbench/rooms/${roomId}/chat`, { text: "hello?" })).status, 409);
+  // round 2 (tester A6): the draft is a write too
+  const dr = await call("PUT", `/workbench/ideas/${id}/draft`, { text: "while resting" });
+  assertEquals([dr.status, dr.json.code], [409, "refinery-archived"], "the draft of an archived refinery is refused");
   const notesBefore = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.research_notifications WHERE entity LIKE $1`, [`idea:${id}%`]))[0].n;
   const d = await asApp<{ o: any }>(`SELECT public.idea_deliver_dossier($1::uuid, $2, 'late dossier', '{}'::jsonb) AS o`, [id, crypto.randomUUID()]);
   assertEquals(d[0].o.outcome, "archived", "an engagement run on an archived refinery FAILS");
@@ -379,4 +399,75 @@ t("I11: another user's idea, refinery, room and draft by id are 404 on every new
   const after = await ideaRow(id);
   assertEquals([after.summary, after.current_revision, after.status], [before.summary, before.current_revision, before.status]);
   assertEquals((await idea(id, B)).json.draft.text, "BeeDraft");
+});
+
+
+// ── round 2 (tester attempt 1): F2 - the write guard, whatever the order of steps; F1 - create document under concurrency ──
+t("I12: the guard: no app-role sequence promotes or forges the pointer (G4, G4b), no idea is born promoted (G5); owner_sub and the pointer are not rewritten", async () => {
+  const forged = '{"promoted":{"document_path":"documents/forged.md"}}';
+  // G4: archive with a forged pointer, then "reopen" into promoted - two transactions
+  const g4 = await captured(sub(A), `twostep ${rnd()}`);
+  assertEquals(await refusedAsApp(`UPDATE public.ideas SET status = 'archived', metadata = metadata || $2::jsonb WHERE id = $1`, [g4, forged]), "42501", "G4 step 1: the forged pointer");
+  assertEquals(await refusedAsApp(`UPDATE public.ideas SET status = 'promoted' WHERE id = $1`, [g4]), "42501", "G4 step 2");
+  assertEquals((await ideaRow(g4)).status, "new");
+  // G4b: the same two steps in ONE transaction (also with an empty pointer object)
+  const g4b = await captured(sub(A), `twostep1tx ${rnd()}`);
+  for (const m of [forged, '{"promoted":{}}']) {
+    assertEquals(await refusedAsAppTx([
+      [`UPDATE public.ideas SET status = 'archived', metadata = metadata || $2::jsonb WHERE id = $1`, [g4b, m]],
+      [`UPDATE public.ideas SET status = 'promoted' WHERE id = $1`, [g4b]],
+    ]), "42501", `G4b ${m}`);
+  }
+  const r4b = await ideaRow(g4b);
+  assertEquals([r4b.status, r4b.metadata?.promoted ?? null], ["new", null], "G4b: nothing was written");
+  // archive alone (no pointer), then promoted: refused too
+  assertEquals(await refusedAsAppTx([[`UPDATE public.ideas SET status = 'archived' WHERE id = $1`, [g4b]], [`UPDATE public.ideas SET status = 'promoted' WHERE id = $1`, [g4b]]]), "42501", "archive then promoted");
+  // G5: an idea INSERTED promoted, or carrying a pointer
+  assertEquals(await refusedAsApp(`INSERT INTO public.ideas (id, title, summary, owner_sub, status) VALUES ($1, 'born promoted', 'x', $2, 'promoted')`, [crypto.randomUUID(), sub(A)]), "42501", "G5 status promoted");
+  assertEquals(await refusedAsApp(`INSERT INTO public.ideas (id, title, summary, owner_sub, metadata) VALUES ($1, 'born with a pointer', 'x', $2, $3::jsonb)`, [crypto.randomUUID(), sub(A), forged]), "42501", "G5 pointer");
+  assertEquals(await refusedAsApp(`INSERT INTO public.ideas (id, title, summary, owner_sub) VALUES ($1, 'an ordinary capture', 'x', $2)`, [crypto.randomUUID(), sub(A)]), "", "an ordinary insert still works");
+  // G6: owner_sub is not rewritten by the app role (moving an idea between users)
+  const g6 = await captured(sub(B), `owned by B ${rnd()}`);
+  assertEquals(await refusedAsApp(`UPDATE public.ideas SET owner_sub = $2 WHERE id = $1`, [g6, sub(A)]), "42501", "G6 owner_sub");
+  assertEquals((await sql<{ o: string }>(`SELECT owner_sub AS o FROM public.ideas WHERE id = $1`, [g6]))[0].o, sub(B));
+  // G7: a real promotion's pointer is neither rewritten nor dropped by the app role
+  const s7 = await call("POST", "/workbench/documents/seed", { idea_id: await captured(sub(A), `ptr ${rnd()}`) });
+  assertEquals(s7.status, 201, s7.text);
+  const g7 = s7.json.refinery_id as string;
+  assertEquals(await refusedAsApp(`UPDATE public.ideas SET metadata = jsonb_set(metadata, '{promoted,document_path}', '"documents/evil.md"') WHERE id = $1`, [g7]), "42501", "G7 rewrite");
+  assertEquals(await refusedAsApp(`UPDATE public.ideas SET metadata = metadata - 'promoted' WHERE id = $1`, [g7]), "42501", "G7 drop");
+  assertEquals((await ideaRow(g7)).metadata?.promoted?.document_path, s7.json.path);
+  // the refinery's own lifecycle writes still work (status, the research flag)
+  assertEquals(await refusedAsApp(`UPDATE public.ideas SET metadata = metadata || '{"research_now": true}'::jsonb, status = 'researched' WHERE id = $1`, [g4]), "");
+});
+
+async function seededFiles(id: string): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(dir: string) {
+    for await (const e of Deno.readDir(dir)) {
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory && e.name !== ".git") await walk(p);
+      else if (e.isFile && e.name.endsWith(".md") && (await Deno.readTextFile(p)).includes(`seeded_from: "${id}"`)) out.push(p.slice(VAULT.length + 1));
+    }
+  }
+  await walk(`${VAULT}/documents`).catch(() => {});
+  return out;
+}
+
+t("I13: create document under concurrent requests (tester S): exactly one document; every other request 409 go to document; no orphan", async () => {
+  for (const n of [2, 6]) {
+    const id = await captured(sub(A), `seedrace${n} ${rnd()}`);
+    const before = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.user_document_listings WHERE owner_sub = $1`, [sub(A)]))[0].n;
+    const res = await Promise.all(Array.from({ length: n }, () => call("POST", "/workbench/documents/seed", { idea_id: id })));
+    const won = res.filter((r) => r.status === 201);
+    assertEquals(won.length, 1, `S${n}: one 201 (codes ${res.map((r) => r.status).join(",")})`);
+    for (const r of res.filter((x) => x.status !== 201)) {
+      assertEquals([r.status, r.json.path], [409, won[0].json.path], `S${n}: a losing request is 409 go to document: ${r.text.slice(0, 160)}`);
+    }
+    const after = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.user_document_listings WHERE owner_sub = $1`, [sub(A)]))[0].n;
+    assertEquals(after - before, 1, `S${n}: one new listing`);
+    assertEquals((await sql(`SELECT 1 FROM public.user_document_listings WHERE refinery_id = $1`, [id])).length, 1, `S${n}: one tethered`);
+    assert(VAULT, "the lab mounts the vault (DOCS_TEST_VAULT)");
+    assertEquals(await seededFiles(id), [won[0].json.path], `S${n}: one vault file seeded from the idea`);
+  }
 });

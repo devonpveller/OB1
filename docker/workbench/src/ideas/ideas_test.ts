@@ -118,3 +118,18 @@ Deno.test("rw-p8a4-ideas: the draft is a field on the idea's room (idea_room), w
   assert(/owner_sub = \$2/.test(up.sql));
   assertEquals(up.args.slice(1, 3), ["operator", "accreting"]);
 });
+
+Deno.test("rw-p8a4-ideas round 2: the draft of an archived refinery is refused (409), nothing written", async () => {
+  const seen: string[] = [];
+  const db: Db = {
+    query: (sql: string) => {
+      seen.push(sql);
+      if (/SELECT status FROM public\.ideas/.test(sql)) return Promise.resolve([{ status: "archived" }] as never);
+      return Promise.resolve([] as never);
+    },
+    tx: (fn: (d: Db) => Promise<unknown>) => fn(db),
+  } as never;
+  const r = await app(db).request(`/i/${ID}/draft`, { ...json({ text: "while resting" }), method: "PUT" });
+  assertEquals([r.status, (await r.json()).code], [409, "refinery-archived"]);
+  assertEquals(seen.filter((s) => /UPDATE public\.workspace_rooms|idea_room\(/.test(s)).length, 0);
+});
