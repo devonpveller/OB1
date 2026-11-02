@@ -1474,7 +1474,8 @@ services:
       OPEN_BRAIN_URL: http://openbrain-rest
       # Local embeddings (bge-m3, 1024-dim) for chunk/source embedding (P5/P6).
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
-      EMBEDDING_API_KEY: ${OB_MCP_LLM_KEY:-not-needed}
+      # Own virtual key 'workbench-embed'; blank/unset falls back to the MCP key, then not-needed.
+      EMBEDDING_API_KEY: ${OB_WORKBENCH_EMBED_LLM_KEY:-${OB_MCP_LLM_KEY:-not-needed}}
       EMBEDDING_MODEL: local-embed
       EMBEDDING_DIMENSION: "1024"
       # Extraction sidecar (P5).
