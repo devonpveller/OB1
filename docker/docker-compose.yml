@@ -183,6 +183,7 @@ services:
       - ./init-export-gate.sql:/docker-entrypoint-initdb.d/310-init-export-gate.sql:ro # research-workbench P6b rw-p6b-gate: export_runs, the required-sections registry, the pdf gate flag (fresh-volume only; live: psql -f BEFORE the new image; revert: revert-export-gate.sql)
       - ./init-research-sessions.sql:/docker-entrypoint-initdb.d/320-init-research-sessions.sql:ro # research-workbench rw-p4b-sessions: research_steers.actor_sub (fresh-volume only; live: psql -f WITH the new research image; revert: revert-research-sessions.sql)
       - ./init-podcasts.sql:/docker-entrypoint-initdb.d/330-init-podcasts.sql:ro # research-workbench rw-p7a-tts: presenter model + render requests (fresh-volume only; live: psql -f BEFORE the new images; revert: revert-podcasts.sql)
+      - ./init-rooms.sql:/docker-entrypoint-initdb.d/340-init-rooms.sql:ro # research-workbench rw-p8a3-room: the room store (rooms + transcript entries, per user) (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-rooms.sql)
     networks:
       - obnet
     restart: unless-stopped
@@ -1512,6 +1513,15 @@ services:
       EXPORT_VISION_URL: ${EXPORT_VISION_URL:-http://llama-cpp:8080/v1}
       EXPORT_VISION_KEY: ${OB_EXPORT_VISION_LLM_KEY:-}
       EXPORT_VISION_MODEL: ${EXPORT_VISION_MODEL:-}
+      # research-workbench rw-p8a3-room: the room's SCOPED CHAT (src/rooms/chat.ts) - a question in a room
+      # answered by the local model over the room's chat scope. Through LiteLLM ONLY (the llama-cpp alias on
+      # llm-net; any other host, an *-upstream name included, is refused) and under the chat's OWN virtual
+      # key 'workbench-chat' - never another consumer's (one equal to the embedding, vision or door key is
+      # refused). SHIPPED INERT: a blank key or model = chat OFF - a chat message is refused with a fixed
+      # message and nothing is written; the room itself still reads.
+      WORKBENCH_CHAT_URL: ${WORKBENCH_CHAT_URL:-http://llama-cpp:8080/v1}
+      WORKBENCH_CHAT_KEY: ${OB_WORKBENCH_CHAT_LLM_KEY:-}
+      WORKBENCH_CHAT_MODEL: ${WORKBENCH_CHAT_MODEL:-}
     volumes:
       # rw: the workbench is the asset writer and the notes/Changes-log writer.
       - openbrain-wiki-data:/wiki

@@ -228,8 +228,11 @@ export async function requireIdea(db: Db, id: string, owner: string) {
   if (!r[0]) throw new NotFound("refinery not found (a user source needs a pre-existing refinery)");
 }
 
-export async function setHidden(db: Db, refineryId: string, kind: string, ref: string, hidden: boolean, owner: string) {
+export async function setHidden(db: Db, refineryId: string, kind: string, refIn: string, hidden: boolean, owner: string) {
   await requireIdea(db, refineryId, owner);
+  // rw-p8a3-room round 2 (tester N3): a uuid ref is stored in its canonical lower-case form, so a hide typed in
+  // any case matches the readers' rule (node_ref = <uuid>::text: kb.ts and the room's chat context)
+  const ref = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(refIn.trim()) ? refIn.trim().toLowerCase() : refIn;
   if (hidden) {
     await db.query(
       `INSERT INTO public.refinery_hidden (refinery_id, node_kind, node_ref) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,

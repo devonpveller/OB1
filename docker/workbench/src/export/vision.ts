@@ -23,7 +23,7 @@ export const MAX_IMAGES_PER_CALL = 20;
 const MAX_TEXT = 300;
 const MAX_FINDINGS = 50;
 
-import { sameKey } from "../identity/keys.ts";
+import { secretsEqualTo } from "../identity/secrets.ts";
 
 export interface VisionConfig {
   state: "off" | "on" | "refused";
@@ -66,11 +66,9 @@ export function visionConfigFromEnv(env = (k: string) => Deno.env.get(k)): Visio
       reason: `EXPORT_VISION_URL's host is not the LiteLLM gateway alias (${[...GATEWAY_HOSTS].join(", ")}); a model is never called directly`,
     };
   }
-  const others = ["EMBEDDING_API_KEY", "WORKBENCH_KEY", "WORKSPACE_DOOR_KEY", "RESEARCH_SCORER_KEY", "RESEARCH_WORKSPACE_KEY"]
-    .filter((n) => sameKey((env(n) ?? "").trim(), key));
-  for (const n of (env("WORKSPACE_SERVICE_KEYS") ?? "").split(",")) {
-    if (sameKey(n.split("=").pop()?.trim() ?? "", key)) others.push("WORKSPACE_SERVICE_KEYS");
-  }
+  // every secret the workbench holds (src/identity/secrets.ts: the one list, checked against the compose
+  // environment block), in constant time - the chat and the vision key refuse each other too (round 3, D2)
+  const others = secretsEqualTo(env, key, "EXPORT_VISION_KEY");
   if (others.length) {
     return {
       state: "refused", timeoutMs, code: "vision-key-shared",

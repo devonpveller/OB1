@@ -84,6 +84,10 @@ The export's verification gate (P6b): `EXPORT_VISION_URL` (default `http://llama
 alias - any other host is refused), `EXPORT_VISION_KEY` (the export's OWN LiteLLM virtual key) and
 `EXPORT_VISION_MODEL` (both blank = no vision pass), `EXPORT_VISION_TIMEOUT_MS` (120 s), `EXPORT_GATE_DPI`
 (72), `EXPORT_GATE_TIMEOUT_MS` (120 s), `EXPORT_GATE_PYTHON` (`/opt/export-gate/bin/python`).
+The room's scoped chat (rw-p8a3-room): `WORKBENCH_CHAT_URL` (default `http://llama-cpp:8080/v1`, the LiteLLM
+alias - any other host is refused), `WORKBENCH_CHAT_KEY` (the chat's OWN LiteLLM virtual key, `workbench-chat`;
+compose reads `OB_WORKBENCH_CHAT_LLM_KEY`), `WORKBENCH_CHAT_MODEL` (either blank = chat off: a chat message is
+refused with one fixed message and nothing is written), `WORKBENCH_CHAT_TIMEOUT_MS` (120 s).
 
 ## Sign-in (Authentik forward-auth) (rw-identity, rw-identity2)
 
@@ -496,3 +500,29 @@ lists my documents and my runs, exports the open document and shows a blocked ex
 ```
 powershell -NoProfile -File contract-test/run-export-gate-tests.ps1 -Subnet a.b.c.0/24 [-Red]   # disposable P6b run (vision stand-in)
 ```
+
+## The research room and its scoped chat (rw-p8a3-room)
+
+Chat IS the room (operator 2026-11-01): one per-user room store, `workspace_rooms` + `workspace_room_entries`
+(`init-rooms.sql`, slot 340; revert `revert-rooms.sql`). A room is the conversation record of an idea (its
+refinery; one room per idea, its owner's) or of a research session (shared knowledge: each user keeps their
+own room on it). Routes, all for the identity seam's subject (another user's room is 404):
+`GET /workbench/rooms`, `POST /workbench/rooms` `{subject_kind: idea|session, subject_id}` (201 made / 200
+already there), `GET /workbench/rooms/:id` (subject - a session's card with its origin badge and link back,
+a Mattermost thread's permalink included - the chat scope, the draft, whether chat is on, the transcript),
+`PUT /workbench/rooms/:id/scope` `{enabled, sources[]}` and `POST /workbench/rooms/:id/chat` `{text}`.
+
+- **Scope**: off = the whole knowledge database (active sources); on = only the listed sources; **on and
+  empty = no context at all** (not even the question's embedding is asked for).
+- **The refinery chat** (an idea's room) adds the refinery's held sources and leaves out the refinery's
+  hidden sources (`refinery_hidden`, node kind `source` - the research service's rule for a refinery
+  session); a hide narrows nothing outside that refinery.
+- **Inference** goes to the LiteLLM alias only, under `WORKBENCH_CHAT_KEY`; the question and the answer are
+  written together, the answer with the source ids and chunk indexes it was given (never their text). A
+  gateway failure is a fixed 502 `chat-unavailable` (its text is logged, never answered).
+- **Mattermost** is never read or written from here; a thread that started a session is that session's
+  inlet. `idea_room(idea)` gives the idea's room for a dossier delivered into it (entry kind `dossier`);
+  the accreting draft is the room's `draft` field.
+
+Lab: `contract-test/run-room-tests.ps1 -Subnet <x.y.z.0/24>` (a stub gateway named `llama-cpp`, chat on /
+off / misrouted, the two-user sweep).

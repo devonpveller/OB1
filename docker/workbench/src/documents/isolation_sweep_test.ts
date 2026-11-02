@@ -242,10 +242,25 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const podReq = await wb("POST", "/workbench/contract/podcasts/requests",
     { team_id: pod.team, title: pod.request, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
   assertEquals(podReq.status, 202, podReq.text);
+  // rw-p8a3-room: B's research room on B's refinery and B's own room on B's session - a transcript entry
+  // (B's question through the scoped chat where the lab turns chat on, and one planted), B's chat scope and the
+  // accreting draft, each carrying a marker. A must see none of it, by id or in any list.
+  const room = { entry: `RoomEntrySecret${rnd()}`, draft: `RoomDraftSecret${rnd()}`, chat: `RoomChatSecret${rnd()}` };
+  const bRoomRes = await wb("POST", "/workbench/rooms", { subject_kind: "idea", subject_id: bRefinery }, B);
+  assert(bRoomRes.status === 201 || bRoomRes.status === 200, bRoomRes.text);
+  const bRoom: string = bRoomRes.json.room.id;
+  const bSessRoom: string = (await wb("POST", "/workbench/rooms", { subject_kind: "session", subject_id: bJob }, B)).json.room?.id ?? "";
+  assert(bSessRoom, "B's room on B's session");
+  await wb("PUT", `/workbench/rooms/${bRoom}/scope`, { enabled: true, sources: [FX_ACTIVE] }, B);
+  const bChat = await wb("POST", `/workbench/rooms/${bRoom}/chat`, { text: room.chat }, B);
+  console.log(`sweep: B's scoped chat in B's room -> ${bChat.status}${bChat.json.code ? ` (${bChat.json.code})` : ""}`);
+  await sql(`INSERT INTO public.workspace_room_entries (room_id, actor_sub, kind, body) VALUES ($1::uuid, $2, 'dossier', $3), ($4::uuid, $2, 'user', $3)`, [bRoom, bSub, room.entry, bSessRoom]);
+  await sql(`UPDATE public.workspace_rooms SET draft = $2 WHERE id = $1::uuid`, [bRoom, room.draft]);
   const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret,
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
-    exportSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])) };
+    exportSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
+    roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;
@@ -280,7 +295,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
 
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
-  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports].filter(Boolean);
+  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -326,8 +341,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 3. ID-ONLY: every read route with a path parameter, filled with each REAL id (harvested, plus B's
   // own ids handed to A directly) and nothing else of B's in the request
   const named = (v: string) =>
-    v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>" : v;
-  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+    v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>"
+      : v === bRoom ? "<B room>" : v === bSessRoom ? "<B session room>" : v;
+  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
     .slice(0, 40);
   for (const r of reads.filter((x) => x.path.includes(":"))) {
     for (const v of realIds) {
@@ -401,6 +417,15 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);
+  // rw-p8a3-room: B's room is B's - B still reads its transcript and draft, and A's calls added nothing to it
+  const bRoomRead = await wb("GET", `/workbench/rooms/${bRoom}`, undefined, B);
+  assertEquals(bRoomRead.status, 200, bRoomRead.text);
+  assert(bRoomRead.text.includes(room.entry) && bRoomRead.text.includes(room.draft), "B reads B's own room");
+  const roomWrites = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_room_entries WHERE room_id IN ($1::uuid, $2::uuid) AND actor_sub <> $3`, [bRoom, bSessRoom, bSub]);
+  assertEquals(roomWrites[0].n, 0, "user A's calls wrote nothing into B's rooms");
+  const bScope = bRoomRead.json.room?.scope;
+  assertEquals(bScope, { enabled: true, sources: [FX_ACTIVE] }, "user A's calls left B's chat scope unchanged");
+  console.log(`sweep: B's rooms (idea + session) unchanged by A; B still reads them`);
   const bList = await wb("GET", "/workbench/exports", undefined, B);
   assert(bExports.every((id) => bList.text.includes(id)), `B lists its own export runs: ${bList.status}`);
   assertEquals((await wb("GET", `/workbench/exports/${bExport}/file`, undefined, B)).status, 200, "B downloads its own passed export");

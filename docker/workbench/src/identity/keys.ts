@@ -76,16 +76,30 @@ export function sameKey(a: string, b: string): boolean {
   return timingSafeEqual(sha256(a), sha256(b));
 }
 
+// WORKSPACE_SERVICE_KEYS as written: name=key entries separated by `;` or newlines; the key is everything
+// after the FIRST `=` (a key may itself contain `=`). The ONE parser: keyRing builds the ring from it, and
+// every consumer that must not share a key with a service (the export's vision pass, the room's chat)
+// compares against exactly these keys (rw-p8a3-room round 2, tester D1). Unvalidated: keyRing validates.
+export function serviceKeys(raw: string | undefined): { name: string; key: string; entry: string }[] {
+  return (raw ?? "").split(/[;\n]/).map((e) => e.trim()).filter(Boolean).map((entry) => {
+    const m = /^([^=]+)=(.+)$/.exec(entry);
+    return { name: m ? m[1].trim() : "", key: m ? m[2].trim() : "", entry };
+  });
+}
+
+// True when `key` equals a WORKSPACE_SERVICE_KEYS key (constant time per entry).
+export function isServiceKey(raw: string | undefined, key: string): boolean {
+  return serviceKeys(raw).some((e) => e.key.length > 0 && sameKey(e.key, key));
+}
+
 export function keyRing(env: (k: string) => string | undefined, signIn: boolean): KeyRing {
   const internal = (env("WORKBENCH_KEY") || env("MCP_ACCESS_KEY") || "").trim(); // as config.workbenchKey
   const door = (env("WORKSPACE_DOOR_KEY") ?? "").trim();
   const services = new Map<string, string>();
-  for (const entry of (env("WORKSPACE_SERVICE_KEYS") ?? "").split(/[;\n]/).map((e) => e.trim()).filter(Boolean)) {
-    const m = /^([^=]+)=(.+)$/.exec(entry);
-    if (!m || !NAME.test(m[1].trim()) || m[2].trim().length < 16) throw new Error("WORKSPACE_SERVICE_KEYS entry is not name=key (key >= 16 chars)");
-    const k = m[2].trim();
+  for (const { name, key: k } of serviceKeys(env("WORKSPACE_SERVICE_KEYS"))) {
+    if (!name || !NAME.test(name) || k.length < 16) throw new Error("WORKSPACE_SERVICE_KEYS entry is not name=key (key >= 16 chars)");
     if (sameKey(k, internal) || sameKey(k, door) || [...services.keys()].some((s) => sameKey(s, k))) throw new Error("WORKSPACE_SERVICE_KEYS: a key is reused");
-    services.set(k, m[1].trim());
+    services.set(k, name);
   }
   if (door && door.length < 16) throw new Error("WORKSPACE_DOOR_KEY must be at least 16 characters");
   if (signIn) {

@@ -15,6 +15,7 @@ import { openPanel } from "../../shell/dock";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
 import { openStream } from "./stream";
 import { requestRoomFocus } from "../refinery/RefineryPanel";
+import { openRoom } from "../room/RoomPanels";
 import "./sessions.css";
 
 export interface Branch {
@@ -178,6 +179,7 @@ export function SessionsPanel(p: PanelProps) {
         <div className="ws-card-links">
           <LinkBack card={c} onSession={setSel} />{" "}
           <button type="button" data-open-flow={c.id} onClick={() => openPanel("flow", { session: c.id })}>research flow</button>
+          {" "}<button type="button" data-open-room={c.id} onClick={() => openRoom("session", c.id)}>room</button>
         </div>
         <ol className="ws-events" data-testid="events">
           {(events[c.id] ?? []).map((e) => (

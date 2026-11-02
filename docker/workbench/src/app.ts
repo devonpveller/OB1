@@ -27,6 +27,8 @@
 //                            the listing record, references, the refinery from the document
 //   /workbench/workspace   — research-workbench P2b: the title bar bell's acknowledgement
 //   /workbench/exports     — research-workbench P6b: the caller's own gated export runs (the export panel)
+//   /workbench/rooms       — research-workbench rw-p8a3-room: the caller's research rooms and their scoped chat
+//                            (chat IS the room; inference through LiteLLM under the 'workbench-chat' key, off when blank)
 //   /workbench/auth        — rw-identity: who am I, admin impersonation and its audit log (sign-in
 //                            is Authentik forward-auth at the edge; inert without WORKSPACE_FORWARD_AUTH_*)
 import { Hono } from "hono";
@@ -52,6 +54,7 @@ import { graph } from "./routes/graph.ts";
 import { nav } from "./routes/nav.ts";
 import { documentsRouter, workspaceRouter } from "./routes/documents.ts";
 import { ideaScheduleRouter } from "./routes/idea-schedule.ts";
+import { roomsRouter } from "./routes/rooms.ts";
 import { refetchClient, researchClient } from "./documents/clients.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
 import { contractDeps } from "./contracts/wiring.ts";
@@ -119,6 +122,7 @@ app.route("/workbench/nav", nav); // research-workbench P1b — the explorer, on
 app.route("/workbench/documents", documentsRouter(docDeps)); // research-workbench P2b — user documents (D12)
 app.route("/workbench/workspace", workspaceRouter(cdeps.db)); // research-workbench P2b — the bell's acknowledgement
 app.route("/workbench/idea-schedule", ideaScheduleRouter(cdeps.db)); // rw-idea-schedule - when research on my ideas starts; research now
+app.route("/workbench/rooms", roomsRouter({ db: cdeps.db, embed: cdeps.embed })); // rw-p8a3-room - the research room (per user) and its scoped chat
 app.route("/workbench/auth", authRouter({ // rw-identity — who am I, impersonation, the audit log
   db: cdeps.db, fa: seam.fa, mode: seam.fa ? "forward-auth" : seam.cfg.header ? "header" : "default",
 }));

@@ -145,7 +145,10 @@ FROM app AS test
 # research-workbench P4b adds src/sessions/: the running-session card (badge, link back, waiting-on, next
 # steering point, tree, who may act) - pure; its integration test is skipped here (no SESSIONS_TEST_WB);
 # contract-test/run-sessions-tests.ps1 runs it.
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/fetch-gate/ src/sessions/ \
+# rw-p8a3-room adds src/rooms/: the room's scoped chat - its routing (the LiteLLM alias only, its own key,
+# off when blank with the fixed refusal), the empty-scope rule, the refinery's hidden set (pure); its integration
+# test is skipped here (no ROOMS_TEST_BASE); contract-test/run-room-tests.ps1 runs it.
+RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/fetch-gate/ src/sessions/ src/rooms/ \
   && touch /app/.test-gate-passed
 
 FROM test AS parity
