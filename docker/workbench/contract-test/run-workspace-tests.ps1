@@ -376,10 +376,23 @@ try {
   foreach ($walk in $walks) {
   if ($walk -eq 'off' -and -not $WalkOff) {
     # the same lab, the workbench restarted with the response walk OFF: the routes alone must hold
+    # rw-p5a-intake round 3 (reviewer R2): jobs left in flight by the stopped process (a holding add, an embedding
+    # import) are marked failed by the start-up sweep of the new one, with the fixed reason, and are retryable
+    $stale = Dk exec $db psql -U postgres -d openbrain -X -tAc "INSERT INTO public.import_jobs (status, mode, owner_sub, refinery_id) VALUES ('holding', 'add', 'stale-owner', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1'), ('embedding', 'import', 'stale-owner', NULL) RETURNING id"
+    $staleIds = @(($stale -split "`n") | Where-Object { $_ -match '^[0-9a-f-]{36}$' })
     $null = Dk rm -f "$P-wb"
     $restart = $wbArgs + @('-e', 'WORKSPACE_RESPONSE_WALK=off', $wbTag)
     $null = Dk run -d --name "$P-wb" --label $label --network $net @restart
     Check (($script:rc -eq 0) -and (Wait-Http "http://$P-wb:8000/health" 90)) 'the workbench restarted with the response walk off'
+    $after = ''
+    for ($i = 0; $i -lt 20; $i++) {
+      $after = (Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT status || '|' || coalesce(error, '') FROM public.import_jobs WHERE id::text IN ('$($staleIds -join "','")') ORDER BY status").Trim()
+      if ($after -and $after -notmatch 'holding|embedding') { break }
+      Start-Sleep -Seconds 1
+    }
+    Save 'stale-sweep.log' "planted: $($staleIds -join ', ') (holding add, embedding import)`nafter the restart: $after"
+    Write-Host "    [5g] after the restart: $($after -replace "`n", ' ; ')"
+    Check ($staleIds.Count -eq 2 -and @(($after -split "`n") | Where-Object { $_ -match '^failed\|interrupted: the workbench restarted' }).Count -eq 2) '[5g] the start-up sweep marks the stale holding / embedding jobs failed (retryable)'
   }
   Write-Host "[5d] the route-wide isolation sweep (as user A, every registered route, both doors; response walk $walk)"
   $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",

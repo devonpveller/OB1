@@ -183,6 +183,19 @@ export async function getJob(db: Db, who: Who, kind: IntakeKind, id: string): Pr
   return rows[0] ?? null;
 }
 
+// ── round 3 (reviewer R2): the start-up sweep ────────────────────────────────────────────────────
+// The import and add pipelines run inside this process (fire-and-forget), so a restart leaves every job that was
+// in flight - queued, fetching, extracting, embedding, linking, holding - with no process behind it. At start they
+// are marked failed with a fixed reason, which the panel offers to retry; none is left "holding" for ever.
+export const STALE_REASON = "interrupted: the workbench restarted while this job ran; retry it";
+export async function sweepStaleJobs(db: Db): Promise<number> {
+  const rows = await db.query<{ id: string }>(
+    `UPDATE public.import_jobs SET status = 'failed', error = $2 WHERE status = ANY($1) RETURNING id::text AS id`,
+    [[...ACTIVE_IMPORT], STALE_REASON],
+  );
+  return rows.length;
+}
+
 // ── the writes (the caller checked the job is the subject's: getJob first) ───────────────────
 export class ActionRefused extends Error {
   constructor(msg: string) {

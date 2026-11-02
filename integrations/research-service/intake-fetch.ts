@@ -73,7 +73,10 @@ export function mayIntakeFetch(caller: Caller | null): boolean {
 }
 
 // ── the target (judged before any byte leaves) ───────────────────────────────
-const INTERNAL_SUFFIX = /\.(local|localhost|internal|intranet|lan|home|corp|docker|arpa|test|invalid|example)$/i;
+// round 3 (reviewer R1): + localdomain, private and ts.net - the search gate's INTERNAL_SUFFIXES (egress/guard.py)
+const INTERNAL_SUFFIX = /\.(local|localhost|localdomain|internal|intranet|lan|home|corp|private|docker|arpa|test|invalid|example|ts\.net)$/i;
+// round 3 (reviewer R1): only the web's ports, as the gate (its default 80, 443) - a link to :8080, :22 or :5432 is no page
+const ALLOWED_PORTS = new Set(["", "80", "443"]);
 
 // round 2 (tester T-F2): the wildcard-DNS services that turn a name into any IP (127.0.0.1.nip.io, *.sslip.io,
 // localtest.me ...) are refused by NAME - the search gate's list (search/gateway/src/gateway/egress/guard.py
@@ -99,6 +102,7 @@ export function intakeTarget(raw: string): { ok: true; url: URL } | { ok: false;
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, reason: "only http and https links" };
   if (u.username || u.password) return { ok: false, reason: "a link with credentials" };
+  if (!ALLOWED_PORTS.has(u.port)) return { ok: false, reason: "only ports 80 and 443" };
   const host = u.hostname.toLowerCase().replace(/\.$/, "");
   if (!host) return { ok: false, reason: "no host" };
   if (host.startsWith("[")) return { ok: false, reason: "an IP literal is not a public page" }; // IPv6 literal

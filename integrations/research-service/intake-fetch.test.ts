@@ -224,3 +224,19 @@ Deno.test("round 2: the DoH resolver asks A and AAAA over the proxy-bound fetch 
   assert(asked.every((a) => a.client === CLIENT && a.accept === "application/dns-message" && a.url.startsWith("https://dns.mullvad.net/dns-query?dns=")));
   assertEquals(dnsQuery("example.org", 1).length, 12 + 13 + 4);
 });
+
+// ── round 3 (reviewer R1): ports and the gate's remaining internal suffixes ─────────────────────────
+Deno.test("round 3: only ports 80 and 443; .localdomain, .private and .ts.net are internal names", async () => {
+  for (const u of ["http://example.org:8080/", "https://example.org:8443/", "http://example.org:22/", "http://example.org:5432/x",
+    "http://box.localdomain/", "http://db.private/", "http://node.tail1234.ts.net/", "http://a.b.ts.net:443/"]) {
+    assert(!intakeTarget(u).ok, `refused: ${u}`);
+  }
+  for (const u of ["http://example.org/", "https://example.org/", "http://example.org:80/", "https://example.org:443/a"]) {
+    assert(intakeTarget(u).ok, `allowed: ${u}`);
+  }
+  const w = fakeWeb({
+    "https://example.org/r": () => new Response(null, { status: 302, headers: { location: "https://example.org:8443/admin" } }),
+  });
+  assertEquals((await assertRejects(() => intakeFetch("https://example.org/r", { fetch: w.fetch, resolve: w.resolve }), IntakeRefused)).code, "refused_target");
+  assertEquals(w.calls.length, 1, "the hop to another port is never fetched");
+});

@@ -144,3 +144,23 @@ Deno.test("the intake's own files make no fetch of a user's link but the researc
   const rf = await Deno.readTextFile(new URL("./research_fetch.ts", import.meta.url));
   assert(rf.includes("${base}/intake/fetch") && rf.includes('"x-brain-key": key'));
 });
+
+// round 3 (reviewer R2): a restart orphans every in-flight import and add (the pipelines are fire-and-forget in
+// the process); at start they are marked failed - with a fixed reason, retryable from the panel - never left holding
+Deno.test("round 3: at start, stale in-flight imports and adds (holding, embedding, ...) are marked failed and retryable", async () => {
+  const { sweepStaleJobs, STALE_REASON } = await import("./repo.ts");
+  const seen: { sql: string; args: unknown[] }[] = [];
+  const db = {
+    query: (sql: string, args: unknown[] = []) => { seen.push({ sql, args }); return Promise.resolve([{ id: "a" }, { id: "b" }]); },
+    tx: (f: (d: unknown) => unknown) => f(db),
+  };
+  assertEquals(await sweepStaleJobs(db as never), 2);
+  assertEquals(seen.length, 1);
+  const states = seen[0].args.find(Array.isArray) as string[];
+  for (const st of ["holding", "embedding", "fetching", "extracting", "linking", "queued"]) assert(states.includes(st), `sweeps ${st}`);
+  for (const st of ["done", "held", "failed", "cancelled"]) assert(!states.includes(st), `leaves ${st}`);
+  assert(/SET status = 'failed'/.test(seen[0].sql) && seen[0].args.includes(STALE_REASON));
+  assert(actionsOf("import", "failed").actions.includes("retry"));
+  const main = await Deno.readTextFile(new URL("../main.ts", import.meta.url));
+  assert(/sweepStaleJobs\(/.test(main), "main.ts runs the sweep at start");
+});
