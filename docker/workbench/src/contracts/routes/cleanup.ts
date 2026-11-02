@@ -18,6 +18,24 @@ const P = `${PREFIX}/cleanup`;
 const UUIDISH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function registerCleanup(app: ContractApp, deps: ContractDeps) {
+  // rw-p8a2-cleanup round 2 (tester N2): a cleanup write whose JSON body is missing or does not parse is the
+  // caller's error - a 400 here, before the validator (whose malformed-JSON refusal escapes to the app's
+  // last-resort 500). The body is read once; Hono caches it for the validator.
+  app.use(`${P}/*`, async (c, next) => {
+    if (c.req.method === "POST" && (c.req.header("content-type") ?? "").toLowerCase().includes("json")) {
+      const text = await c.req.text();
+      let ok = text.trim() !== "";
+      if (ok) {
+        try {
+          JSON.parse(text);
+        } catch {
+          ok = false;
+        }
+      }
+      if (!ok) return c.json({ error: "invalid request: the body must be a JSON object" }, 400);
+    }
+    await next();
+  });
   op(app, createRoute({
     method: "get", path: `${P}/sources`, operationId: "cleanupSources", tags: T,
     summary: "every suppressed and unlinked source, with its status and dependence counts",

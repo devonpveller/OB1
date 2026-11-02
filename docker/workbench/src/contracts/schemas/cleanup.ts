@@ -7,6 +7,7 @@ import { z } from "../deps.ts";
 import { REGISTRY, registryValue } from "../registry.ts";
 import { Iso, Json, uuid } from "./common.ts";
 import { FX } from "./fixtures.ts";
+import { DEPENDENCE_KINDS, fullCounts } from "../logic/cleanup.ts";
 
 const ACTION = "c1ea0000-0000-4000-8000-000000000001";
 
@@ -18,7 +19,9 @@ export const CleanupSource = z.object({
   reason: z.string().nullable().openapi({ description: "why it was suppressed" }),
   suppressed_at: Iso,
   unlinked_at: Iso.nullable(),
-  counts: z.record(z.string(), z.number().int()).openapi({ description: "dependence connections per kind (dependence_kinds registry)" }),
+  counts: z.object(Object.fromEntries(DEPENDENCE_KINDS.map((k) => [k, z.number().int()])) as Record<(typeof DEPENDENCE_KINDS)[number], z.ZodNumber>)
+    .catchall(z.number().int())
+    .openapi("CleanupCounts", { description: "dependence connections per kind: every kind of the dependence_kinds registry, zero-filled (a kind added later appears beside them)" }),
   blocking: z.number().int().openapi({ description: "connections that block erasure" }),
   severable: z.number().int().openapi({ description: "connections the sever tool may remove" }),
   total: z.number().int(),
@@ -152,7 +155,7 @@ export const CX = {
   sources: {
     sources: [{
       id: FX.sourceSuppressed, title: "Suppressed fixture source", url: "https://example.org/suppressed", lifecycle: "suppressed",
-      reason: "misattributed quote", suppressed_at: FX.at, unlinked_at: null, counts: { chunk: 1, claim_edge: 1 }, blocking: 2,
+      reason: "misattributed quote", suppressed_at: FX.at, unlinked_at: null, counts: fullCounts({ chunk: 1, claim_edge: 1 }), blocking: 2,
       severable: 2, total: 2, erase_allowed: false,
     }],
     total: 1,

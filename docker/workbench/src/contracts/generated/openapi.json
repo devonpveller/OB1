@@ -5201,11 +5201,7 @@
             "description": "ISO-8601 timestamp"
           },
           "counts": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "integer"
-            },
-            "description": "dependence connections per kind (dependence_kinds registry)"
+            "$ref": "#/components/schemas/CleanupCounts"
           },
           "blocking": {
             "type": "integer",
@@ -5237,6 +5233,57 @@
           "total",
           "erase_allowed"
         ]
+      },
+      "CleanupCounts": {
+        "type": "object",
+        "properties": {
+          "chunk": {
+            "type": "integer"
+          },
+          "citing_page": {
+            "type": "integer"
+          },
+          "claim_edge": {
+            "type": "integer"
+          },
+          "document_link": {
+            "type": "integer"
+          },
+          "entity_grounding": {
+            "type": "integer"
+          },
+          "found_via_lead": {
+            "type": "integer"
+          },
+          "reference_record": {
+            "type": "integer"
+          },
+          "report_citation": {
+            "type": "integer"
+          },
+          "report_session": {
+            "type": "integer"
+          },
+          "trail_event": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chunk",
+          "citing_page",
+          "claim_edge",
+          "document_link",
+          "entity_grounding",
+          "found_via_lead",
+          "reference_record",
+          "report_citation",
+          "report_session",
+          "trail_event"
+        ],
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "description": "dependence connections per kind: every kind of the dependence_kinds registry, zero-filled (a kind added later appears beside them)"
       },
       "CleanupSevered": {
         "type": "object",
@@ -12105,7 +12152,15 @@
                       "unlinked_at": null,
                       "counts": {
                         "chunk": 1,
-                        "claim_edge": 1
+                        "citing_page": 0,
+                        "claim_edge": 1,
+                        "document_link": 0,
+                        "entity_grounding": 0,
+                        "found_via_lead": 0,
+                        "reference_record": 0,
+                        "report_citation": 0,
+                        "report_session": 0,
+                        "trail_event": 0
                       },
                       "blocking": 2,
                       "severable": 2,

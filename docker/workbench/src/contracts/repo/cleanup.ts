@@ -14,7 +14,7 @@
 // zero blocking connections, an unregistered reason type is refused.
 import type { Db } from "../db.ts";
 import { kindDefs } from "../logic/dependence.ts";
-import { ACTION_REF, type CandidateAttempt, candidateOf, eraseOffered, tallyCounts } from "../logic/cleanup.ts";
+import { ACTION_REF, type CandidateAttempt, candidateOf, eraseOffered, fullCounts, tallyCounts } from "../logic/cleanup.ts";
 import { type RegistryReader, requireRegistered, REGISTRY } from "../registry.ts";
 import { Conflict, erase, lift, NotFound, sever } from "./lifecycle.ts";
 import type { Identity } from "../../middleware/identity.ts";
@@ -52,7 +52,7 @@ export async function listSources(db: Db, reg: RegistryReader, limit: number) {
   return {
     total,
     sources: rows.map((r) => {
-      const t = tallyCounts(r.counts ?? {}, defs);
+      const t = tallyCounts(fullCounts(r.counts ?? {}), defs);
       return { ...r, ...t, erase_allowed: eraseOffered(r.lifecycle, t.blocking) };
     }),
   };
@@ -120,11 +120,20 @@ export async function eraseFor(db: Db, reg: RegistryReader, who: Identity, sourc
   return { action: a, tombstone_id: r.tombstone.id, reason_type: r.tombstone.reason_type, note: r.tombstone.note };
 }
 
+// rw-p8a2-cleanup round 2 (tester N3): a tombstone already lifted is a 409 and records no action - one
+// transaction that locks the tombstone row first, so two lifts at once give one action and one 409.
 export async function liftFor(db: Db, who: Identity, tombstoneId: string, note: string | undefined) {
-  const id = crypto.randomUUID();
-  const t = await lift(db, tombstoneId, ACTION_REF(id), note?.trim() ? note.trim() : null);
-  const a = await record(db, who, id, "lift", { tombstone_id: tombstoneId });
-  return { action: a, tombstone_id: tombstoneId, lifted_at: t.lifted_at };
+  return await db.tx(async (t) => {
+    const cur = (await t.query<{ id: string; lifted_at: string | null }>(
+      `SELECT id, lifted_at FROM public.source_tombstones WHERE id = $1 FOR UPDATE`, [tombstoneId],
+    ))[0];
+    if (!cur) throw new NotFound("tombstone not found");
+    if (cur.lifted_at) throw new Conflict("the tombstone is already lifted", { lifted_at: cur.lifted_at });
+    const id = crypto.randomUUID();
+    const tb = await lift(t, tombstoneId, ACTION_REF(id), note?.trim() ? note.trim() : null);
+    const a = await record(t, who, id, "lift", { tombstone_id: tombstoneId });
+    return { action: a, tombstone_id: tombstoneId, lifted_at: tb.lifted_at };
+  });
 }
 
 // D5 items 4-5: the process over everything marked. ONE reason type for the batch, no note; each

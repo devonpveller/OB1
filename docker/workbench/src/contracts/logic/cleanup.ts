@@ -12,6 +12,21 @@
 //    debunked / credibility paths (the gate readmits those itself; the trail records the readmission).
 import type { KindDef } from "./dependence.ts";
 
+// The listing's counts carry a FIXED key set (rw-p8a2-cleanup round 2, tester D1): every dependence kind the
+// migrations seed (init-research-contract.sql, init-references.sql), zero-filled, so every row has the same keys
+// whichever source comes first. A kind the registry gains later is kept beside them (the schema's catchall);
+// cleanup_round2_test.ts fails when the migrations seed a kind this list lacks.
+export const DEPENDENCE_KINDS = [
+  "chunk", "citing_page", "claim_edge", "document_link", "entity_grounding", "found_via_lead", "reference_record",
+  "report_citation", "report_session", "trail_event",
+] as const;
+
+export function fullCounts(counts: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = Object.fromEntries(DEPENDENCE_KINDS.map((k) => [k, 0]));
+  for (const [k, n] of Object.entries(counts ?? {})) out[k] = n;
+  return out;
+}
+
 export interface ListedCounts {
   counts: Record<string, number>;
   blocking: number;

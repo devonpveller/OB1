@@ -156,6 +156,19 @@ export type CleanupActions = {
   actions: Array<CleanupAction>;
 };
 
+export type CleanupCounts = {
+  chunk: number;
+  citing_page: number;
+  claim_edge: number;
+  document_link: number;
+  entity_grounding: number;
+  found_via_lead: number;
+  reference_record: number;
+  report_citation: number;
+  report_session: number;
+  trail_event: number;
+};
+
 export type CleanupEraseRequest = {
   reason_type: string; /** registry: erasure_reasons */
   note?: string;
@@ -204,7 +217,7 @@ export type CleanupSource = {
   reason: string | null;
   suppressed_at: string;
   unlinked_at: string | null;
-  counts: Record<string, number>;
+  counts: CleanupCounts;
   blocking: number;
   severable: number;
   total: number;

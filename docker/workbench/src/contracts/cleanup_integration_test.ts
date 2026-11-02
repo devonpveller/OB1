@@ -98,6 +98,11 @@ t("a manual erase is refused while dependence remains, needs a reason type, and 
   assertEquals((await sql(`SELECT 1 FROM public.source_tombstones WHERE source_id = $1`, [s])).length, 0);
   assertEquals((await call(A, "POST", `${CL}/sources/${s}/erase`, { note: "no reason" })).status, 400, "an erase without a reason type FAILS");
   assertEquals((await call(A, "POST", `${CL}/sources/${s}/erase`, { reason_type: "not-a-reason" })).status, 422);
+  // round 2 (tester N2): a JSON content type with no body, or a body that does not parse, is a 400 (was 500)
+  for (const raw of [undefined, "", "{"]) {
+    const r = await fetch(`${BASE}${CL}/sources/${s}/erase`, { method: "POST", headers: { "content-type": "application/json", "x-brain-key": KEY, [SUB_HEADER]: A }, body: raw });
+    assertEquals(r.status, 400, `body ${JSON.stringify(raw)}: ${await r.text()}`);
+  }
   assertEquals((await call(A, "POST", `${CL}/sources/${s}/erase`, { reason_type: "deliberate", eraser: { kind: "user", user: B } })).status, 400,
     "a caller-supplied eraser is refused");
   // sever one connection, then the rest
@@ -219,6 +224,13 @@ t("reopen candidates: user-erased returns that cleared their bar and deliberate 
   assertEquals([lifted.status, lifted.json.action.kind, !!lifted.json.lifted_at], [200, "lift", true], lifted.text);
   const [lt] = await sql<{ lifted_by: string }>(`SELECT lifted_by FROM public.source_tombstones WHERE id = $1`, [de.json.tombstone_id]);
   assertEquals(lt.lifted_by, `cleanup-action:${lifted.json.action.id}`);
+  // round 2 (tester N3): a second lift is a 409 and records no second action; lifted_by keeps the first
+  const liftActions = async () => (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.cleanup_actions WHERE kind = 'lift' AND tombstone_id = $1`, [de.json.tombstone_id]))[0].n;
+  assertEquals(await liftActions(), 1);
+  const twice = await call(A, "POST", `${CL}/tombstones/${de.json.tombstone_id}/lift`, {});
+  assertEquals(twice.status, 409, twice.text);
+  assertEquals((await call(B, "POST", `${CL}/tombstones/${de.json.tombstone_id}/lift`, {})).status, 409);
+  assertEquals(await liftActions(), 1, "no second lift action");
   const after = await call(A, "GET", `${CL}/reopen-candidates?limit=500`);
   assertEquals(after.json.candidates.some((c: any) => c.tombstone.source_id === deb), false);
   const again = await call(A, "POST", `${C}/admission`, { url: debUrl, path: "intake" });
