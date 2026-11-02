@@ -50,7 +50,10 @@ export const ProcessAllRequest = z.object({
   source_ids: z.array(uuid(FX.sourceUnlinked)).min(1).max(500).openapi({ description: "the marked sources (the view sends every listed one)" }),
 }).strict().openapi("ProcessAllRequest");
 
+// Round 3: as the trail's lift (LiftRequest), a `by` is accepted and IGNORED - the identity seam names the actor;
+// any other unknown field is refused.
 export const CleanupLiftRequest = z.object({
+  by: z.string().optional().openapi({ description: "IGNORED: the identity seam names the actor (as on the trail's lift)" }),
   note: z.string().max(2000).optional(),
 }).strict().openapi("CleanupLiftRequest");
 

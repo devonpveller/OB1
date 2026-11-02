@@ -102,35 +102,47 @@ export async function action(db: Db, who: Identity, id: string) {
 }
 
 // ── writes ─────────────────────────────────────────────────────────────────────────────────────
+// Round 3 (reviewer RF1): each write and its action record are ONE transaction, so an action that cannot be
+// recorded rolls the sever / erase back (both are irreversible). sever() and erase() run their own tx(), which
+// nests into this one (db.ts: a nested tx reuses the open transaction).
 export async function severFor(db: Db, reg: RegistryReader, who: Identity, sourceId: string, req: { kind?: string; ref?: string; all?: boolean }) {
-  const id = crypto.randomUUID();
-  const r = await sever(db, reg, sourceId, { ...req, by: ACTION_REF(id) });
-  const a = await record(db, who, id, "sever", {
-    source_id: sourceId, detail: { all: !!req.all, severed: r.severed.length, lifecycle: r.lifecycle, blocking: r.blocking },
+  return await db.tx(async (t) => {
+    const id = crypto.randomUUID();
+    const r = await sever(t, reg, sourceId, { ...req, by: ACTION_REF(id) });
+    const a = await record(t, who, id, "sever", {
+      source_id: sourceId, detail: { all: !!req.all, severed: r.severed.length, lifecycle: r.lifecycle, blocking: r.blocking },
+    });
+    return { action: a, severed: r.severed, rescored_claims: r.rescored_claims, pending_compile: r.pending_compile, lifecycle: r.lifecycle, blocking: r.blocking };
   });
-  return { action: a, severed: r.severed, rescored_claims: r.rescored_claims, pending_compile: r.pending_compile, lifecycle: r.lifecycle, blocking: r.blocking };
 }
 
+// Round 3 (operator decision 2026-11-02, with rw-p8a1-core): a user's erasure records the identity seam's
+// subject as eraser_user - the lift rule (logic/lift.ts) reads it. Reads name it only to that user
+// (routes/actor_mask.ts).
 export async function eraseFor(db: Db, reg: RegistryReader, who: Identity, sourceId: string, req: { reason_type: string; note?: string }) {
   await requireRegistered(reg, REGISTRY.erasureReasons, req.reason_type);
-  const id = crypto.randomUUID();
   const note = req.note?.trim() ? req.note.trim() : undefined;
-  const r = await erase(db, reg, sourceId, { reason_type: req.reason_type, note, eraser: { kind: "user", user: ACTION_REF(id) } });
-  const a = await record(db, who, id, "erase", { reason_type: req.reason_type, source_id: sourceId, tombstone_id: r.tombstone.id });
-  return { action: a, tombstone_id: r.tombstone.id, reason_type: r.tombstone.reason_type, note: r.tombstone.note };
+  return await db.tx(async (t) => {
+    const id = crypto.randomUUID();
+    const r = await erase(t, reg, sourceId, { reason_type: req.reason_type, note, eraser: { kind: "user", user: who.sub } });
+    const a = await record(t, who, id, "erase", { reason_type: req.reason_type, source_id: sourceId, tombstone_id: r.tombstone.id });
+    return { action: a, tombstone_id: r.tombstone.id, reason_type: r.tombstone.reason_type, note: r.tombstone.note };
+  });
 }
 
-// rw-p8a2-cleanup round 2 (tester N3): a tombstone already lifted is a 409 and records no action - one
-// transaction that locks the tombstone row first, so two lifts at once give one action and one 409.
+// The cleanup view's lift (round 3): the operator's rule through rw-p8a1-core's liftTombstoneAs - the eraser or an
+// admin, anyone else 403 (the request's `by` is ignored, as on the trail's lift). Round 2 (tester N3): a tombstone
+// already lifted is a 409 with no action. One transaction that locks the tombstone row first, so two lifts at once
+// give one action and one 409; liftTombstoneAs runs before the 409 so a caller who may not lift gets its 403.
 export async function liftFor(db: Db, who: Identity, tombstoneId: string, note: string | undefined) {
   return await db.tx(async (t) => {
     const cur = (await t.query<{ id: string; lifted_at: string | null }>(
       `SELECT id, lifted_at FROM public.source_tombstones WHERE id = $1 FOR UPDATE`, [tombstoneId],
     ))[0];
     if (!cur) throw new NotFound("tombstone not found");
-    if (cur.lifted_at) throw new Conflict("the tombstone is already lifted", { lifted_at: cur.lifted_at });
     const id = crypto.randomUUID();
     const tb = await liftTombstoneAs(t, tombstoneId, who, ACTION_REF(id), note?.trim() ? note.trim() : null);
+    if (cur.lifted_at) throw new Conflict("the tombstone is already lifted", { lifted_at: cur.lifted_at });
     const a = await record(t, who, id, "lift", { tombstone_id: tombstoneId });
     return { action: a, tombstone_id: tombstoneId, lifted_at: tb.lifted_at };
   });
@@ -173,7 +185,7 @@ export async function processAll(db: Db, reg: RegistryReader, who: Identity, rea
           continue;
         }
       }
-      const e = await erase(db, reg, sid, { reason_type: reasonType, batch_run_id: run, eraser: { kind: "user", user: run } });
+      const e = await erase(db, reg, sid, { reason_type: reasonType, batch_run_id: run, eraser: { kind: "user", user: who.sub } });
       item.outcome = "erased";
       item.tombstone_id = e.tombstone.id;
     } catch (err) {
@@ -219,10 +231,8 @@ interface CandRow {
 }
 
 export async function candidates(db: Db, reg: RegistryReader, who: Identity, limit: number) {
-  const rows = await db.query<CandRow>(
-    `SELECT t.id, t.source_id, t.url, t.title, t.reason_type, t.note, t.eraser_kind, t.eraser_user,
-            EXISTS (SELECT 1 FROM public.cleanup_actions ca
-                     WHERE ca.owner_sub = $1 AND 'cleanup-action:' || ca.id::text = t.eraser_user) AS erased_by_you,
+  const sql = `SELECT t.id, t.source_id, t.url, t.title, t.reason_type, t.note, t.eraser_kind, t.eraser_user,
+            (t.eraser_kind = 'user' AND t.eraser_user = $1) AS erased_by_you,
             t.erased_at, t.lifted_at, t.readmitted_source_id, t.confidence, t.score_version,
             COALESCE((SELECT jsonb_agg(jsonb_build_object(
                         'path', a.path, 'outcome', a.outcome, 'session_id', a.session_id, 'note', a.note,
@@ -235,30 +245,37 @@ export async function candidates(db: Db, reg: RegistryReader, who: Identity, lim
         AND EXISTS (SELECT 1 FROM public.source_tombstone_attempts a
                      WHERE a.tombstone_id = t.id AND a.outcome IN ('candidate', 'note_appended'))
       ORDER BY (SELECT max(a.attempted_at) FROM public.source_tombstone_attempts a WHERE a.tombstone_id = t.id) DESC, t.id
-      LIMIT $2`,
-    [who.sub, limit],
-  );
+      LIMIT $2 OFFSET $3`;
   const out = [];
-  for (const r of rows) {
-    const path = await reg.definitionOf<string>("erasure_reasons", r.reason_type, "reopen_path", "");
-    const gate = await reg.definitionOf<string>("erasers", r.eraser_kind, "gate", "");
-    const attempts = (r.attempts ?? []).map((a) => ({
-      path: a.path, outcome: a.outcome, attempted_at: a.attempted_at, reason: a.reason ?? null,
-      score: (a.score && typeof a.score === "object") ? a.score : null,
-      session_id: a.session_id, note: a.note,
-    }));
-    const c = candidateOf({ ...r, attempts }, path, gate);
-    if (!c) continue;
-    out.push({
-      kind: c.kind,
-      tombstone: {
-        id: r.id, source_id: r.source_id, url: r.url, title: r.title, reason_type: r.reason_type, note: r.note,
-        eraser_kind: r.eraser_kind, erased_by_you: r.erased_by_you, erased_at: r.erased_at,
-        confidence: r.confidence === null ? null : Number(r.confidence), score_version: r.score_version,
-      },
-      evidence: c.evidence,
-      dispute_preview: c.dispute_preview,
-    });
+  // Round 3 (reviewer RF2): the candidate rule (registry paths and gates, the stored score) is applied in code, so
+  // the read PAGES until it has `limit` candidates or the rows run out - a tombstone that is not a candidate can
+  // never push one off the page.
+  const page = Math.max(limit, 50);
+  for (let offset = 0; out.length < limit; offset += page) {
+    const rows = await db.query<CandRow>(sql, [who.sub, page, offset]);
+    for (const r of rows) {
+      if (out.length >= limit) break;
+      const path = await reg.definitionOf<string>("erasure_reasons", r.reason_type, "reopen_path", "");
+      const gate = await reg.definitionOf<string>("erasers", r.eraser_kind, "gate", "");
+      const attempts = (r.attempts ?? []).map((a) => ({
+        path: a.path, outcome: a.outcome, attempted_at: a.attempted_at, reason: a.reason ?? null,
+        score: (a.score && typeof a.score === "object") ? a.score : null,
+        session_id: a.session_id, note: a.note,
+      }));
+      const c = candidateOf({ ...r, attempts }, path, gate);
+      if (!c) continue;
+      out.push({
+        kind: c.kind,
+        tombstone: {
+          id: r.id, source_id: r.source_id, url: r.url, title: r.title, reason_type: r.reason_type, note: r.note,
+          eraser_kind: r.eraser_kind, erased_by_you: r.erased_by_you, erased_at: r.erased_at,
+          confidence: r.confidence === null ? null : Number(r.confidence), score_version: r.score_version,
+        },
+        evidence: c.evidence,
+        dispute_preview: c.dispute_preview,
+      });
+    }
+    if (rows.length < page) break; // the rows ran out
   }
   return { candidates: out };
 }

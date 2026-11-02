@@ -183,6 +183,7 @@ export type CleanupErased = {
 };
 
 export type CleanupLiftRequest = {
+  by?: string;
   note?: string;
 };
 

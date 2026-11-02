@@ -6070,6 +6070,10 @@
       "CleanupLiftRequest": {
         "type": "object",
         "properties": {
+          "by": {
+            "type": "string",
+            "description": "IGNORED: the identity seam names the actor (as on the trail's lift)"
+          },
           "note": {
             "type": "string",
             "maxLength": 2000

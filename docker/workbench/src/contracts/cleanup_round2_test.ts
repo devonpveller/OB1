@@ -80,14 +80,19 @@ Deno.test("N2: a cleanup write with a JSON content type and no (or broken) body 
 });
 
 Deno.test("N3: lifting an already-lifted tombstone is a 409 and records no cleanup action", async () => {
+  // round 3: the lift goes through liftTombstoneAs (it reads the tombstone; the default identity may lift)
+  const lifted = { id: TOMB, source_id: SRC, url: "u", title: "t", reason_type: "deliberate", note: null, batch_run_id: null, eraser_kind: "user",
+    eraser_run_id: null, eraser_user: "operator", confidence: null, score_version: null, fingerprint: null, erased_at: "2026-11-01T00:00:00.000Z",
+    lifted_at: "2026-11-01T00:00:00.000Z", lifted_by: "x", readmitted_source_id: null, attempts: [], readmitted_in_scope: false };
   const { app, seen } = stubApp((sql) => /FROM public\.source_tombstones/.test(sql) && /FOR UPDATE/.test(sql)
-    ? [{ id: TOMB, lifted_at: "2026-11-01T00:00:00.000Z" }] : []);
+    ? [{ id: TOMB, lifted_at: "2026-11-01T00:00:00.000Z" }] : /FROM public\.source_tombstones t/.test(sql) ? [lifted] : []);
   const r = await app.request(`/workbench/contract/cleanup/tombstones/${TOMB}/lift`, {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
   });
   assertEquals(r.status, 409, await r.text());
   assertEquals(seen.some((s) => /INSERT INTO public\.cleanup_actions/.test(s)), false, "no second lift action");
-  assertEquals(seen.some((s) => /UPDATE public\.source_tombstones/.test(s)), false);
+  // round 3: liftTombstoneAs's UPDATE ... WHERE lifted_at IS NULL may run, but it changes nothing and its transaction
+  // is rolled back by the 409 - no action is the check
 });
 
 Deno.test("N3: a tombstone that does not exist is 404 on lift, with no action recorded", async () => {

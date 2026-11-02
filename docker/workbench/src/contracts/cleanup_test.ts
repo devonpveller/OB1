@@ -91,7 +91,9 @@ Deno.test("07-MULTI-USER: no cleanup body takes a user - the actor is the identi
   assertEquals(CleanupEraseRequest.safeParse({ reason_type: "deliberate", by: "someone" }).success, false);
   assertEquals(ProcessAllRequest.safeParse({ reason_type: "deliberate", source_ids: [id], by: "someone" }).success, false);
   assertEquals(CleanupSeverRequest.safeParse({ all: true, by: "someone" }).success, false);
-  assertEquals(CleanupLiftRequest.safeParse({ by: "someone" }).success, false);
+  // round 3 (with rw-p8a1-core's trail lift): a lift's `by` is accepted and IGNORED - the route acts as the seam
+  assert(CleanupLiftRequest.safeParse({ by: "someone" }).success);
+  assertEquals(CleanupLiftRequest.safeParse({ lifted_by: "someone" }).success, false);
   // the document says the same: no cleanup request body has a user-shaped property
   const doc = buildDocument() as { paths: Record<string, Record<string, Record<string, any>>>; components: { schemas: Record<string, any> } };
   const cleanupOps = Object.entries(doc.paths).filter(([p]) => p.includes("/cleanup/")).flatMap(([, item]) => Object.values(item));
@@ -100,7 +102,10 @@ Deno.test("07-MULTI-USER: no cleanup body takes a user - the actor is the identi
     const ref = o.requestBody?.content?.["application/json"]?.schema?.$ref as string | undefined;
     if (!ref) continue;
     const props = Object.keys(doc.components.schemas[ref.split("/").pop()!].properties ?? {});
-    for (const bad of ["by", "user", "eraser", "owner_sub", "actor_sub", "sub"]) assert(!props.includes(bad), `${o.operationId} takes ${bad}`);
+    for (const bad of ["by", "user", "eraser", "owner_sub", "actor_sub", "sub"]) {
+      if (bad === "by" && o.operationId === "cleanupLift") continue; // accepted and ignored (round 3)
+      assert(!props.includes(bad), `${o.operationId} takes ${bad}`);
+    }
     if (o.operationId === "cleanupProcessAll") assertEquals(props.sort(), ["reason_type", "source_ids"]);
   }
 });
