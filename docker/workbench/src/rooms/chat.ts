@@ -15,7 +15,7 @@
 //   - On: a non-200, a timeout or an answer with no text is a fixed `chat-unavailable` (502); the
 //     gateway's own text is logged, never handed to the caller (rw-identity-harden2, D8).
 // The answer is untrusted text: control characters are stripped and it is cut to MAX_ANSWER.
-import { isServiceKey, sameKey } from "../identity/keys.ts";
+import { secretsEqualTo } from "../identity/secrets.ts";
 import { logRefusal } from "../identity/refusal_log.ts";
 import { GATEWAY_HOSTS } from "../export/vision.ts";
 
@@ -58,10 +58,9 @@ export function chatConfigFromEnv(env = (k: string) => Deno.env.get(k)): ChatCon
       reason: `WORKBENCH_CHAT_URL's host is not the LiteLLM gateway alias (${[...GATEWAY_HOSTS].join(", ")}); a model is never called directly`,
     };
   }
-  const others = ["EMBEDDING_API_KEY", "EXPORT_VISION_KEY", "WORKBENCH_KEY", "WORKSPACE_DOOR_KEY", "RESEARCH_SCORER_KEY", "RESEARCH_WORKSPACE_KEY", "WORKBENCH_GATE_KEY"]
-    .filter((n) => sameKey((env(n) ?? "").trim(), key));
-  // the same parser as the key ring (keys.ts serviceKeys: `;` / newline entries, the key after the first `=`)
-  if (isServiceKey(env("WORKSPACE_SERVICE_KEYS"), key)) others.push("WORKSPACE_SERVICE_KEYS");
+  // every secret the workbench holds (src/identity/secrets.ts: the one list, checked against the compose
+  // environment block), in constant time - the chat and the vision key refuse each other too (round 3, D2)
+  const others = secretsEqualTo(env, key, "WORKBENCH_CHAT_KEY");
   if (others.length) {
     return {
       state: "refused", timeoutMs, code: "chat-key-shared",

@@ -302,6 +302,16 @@ try {
   if (-not $Red) { Check ($mmLog.Trim() -eq '[]') "the Mattermost stand-in received nothing ($($mmLog.Trim()))" }
 
   if (-not $Red) {
+    # round 3 (tester D2): the secrets list against the workbench's compose environment block - the build gate has
+    # no compose file, so the test stage image runs it here with this tree's docker-compose.yml mounted
+    Write-Host '[5c] the workbench secrets list vs its compose environment (src/identity/secrets_test.ts)'
+    $o = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', 'none', '-v', "$(Join-Path $dockerDir 'docker-compose.yml'):/compose/docker-compose.yml:ro",
+      '-e', 'WORKBENCH_COMPOSE_FILE=/compose/docker-compose.yml', $wbTestTag, 'deno', 'test', '--allow-read', '--allow-env', 'src/identity/secrets_test.ts')
+    $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+    Save 'secrets-compose.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED|ignored)|^(ok|FAILED) \||D2 compose|error:' }) -join "`n")
+    foreach ($l in ($clean -split "`n") | Where-Object { $_ -match 'D2 compose|\.\.\. (ok|FAILED|ignored)' }) { Write-Host "    $l" }
+    $ss = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+    Check ($ss.Success -and $ss.Groups[1].Value -eq 'ok' -and [int]$ss.Groups[3].Value -eq 0 -and $clean -match 'D2 compose check: \d+ variables' -and $clean -notmatch 'ignored \(') "every secret-looking variable in the workbench's compose environment is on the secrets list, and the check RAN ($($ss.Value))"
     foreach ($walk in @('on', 'off')) {
       if ($walk -eq 'off') {
         $null = Dk rm -f "$P-wb"
