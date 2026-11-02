@@ -7,7 +7,14 @@
 \set ON_ERROR_STOP on
 BEGIN;
 DROP TABLE IF EXISTS public.import_job_payloads;
-DELETE FROM public.import_jobs WHERE mode = 'add';
+-- round 4 (reviewer N3): only while the column is there, so a second revert in a row runs clean
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'import_jobs' AND column_name = 'mode') THEN
+        DELETE FROM public.import_jobs WHERE mode = 'add';
+    END IF;
+END $$;
 UPDATE public.import_jobs SET status = 'failed', error = COALESCE(error, 'cancelled')
  WHERE status NOT IN ('queued','extracting','embedding','linking','done','failed');
 ALTER TABLE public.import_jobs DROP CONSTRAINT IF EXISTS import_jobs_add_target_check;

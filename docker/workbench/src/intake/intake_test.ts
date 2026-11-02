@@ -163,4 +163,7 @@ Deno.test("round 3: at start, stale in-flight imports and adds (holding, embeddi
   assert(actionsOf("import", "failed").actions.includes("retry"));
   const main = await Deno.readTextFile(new URL("../main.ts", import.meta.url));
   assert(/sweepStaleJobs\(/.test(main), "main.ts runs the sweep at start");
+  // round 4 (reviewer N4): awaited, and before the listener starts
+  const sweepAt = main.search(/await sweepStaleJobs\(/), serveAt = main.search(/Deno\.serve\(/);
+  assert(sweepAt >= 0 && serveAt > sweepAt, "main.ts awaits the sweep before Deno.serve");
 });

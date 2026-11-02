@@ -240,3 +240,20 @@ Deno.test("round 3: only ports 80 and 443; .localdomain, .private and .ts.net ar
   assertEquals((await assertRejects(() => intakeFetch("https://example.org/r", { fetch: w.fetch, resolve: w.resolve }), IntakeRefused)).code, "refused_target");
   assertEquals(w.calls.length, 1, "the hop to another port is never fetched");
 });
+
+// ── round 4 (reviewer N1): more than one trailing dot, or an empty label, never slips a name past the guard ─────
+Deno.test("round 4: every trailing dot is stripped and an empty label refused (x.ts.net.., box.private.., localhost.., 127.0.0.1.nip.io..)", async () => {
+  for (const u of ["http://x.ts.net../", "http://box.private../", "http://localhost../", "http://127.0.0.1.nip.io../",
+    "http://x.ts.net.../", "http://a..example.org/", "http://.example.org/"]) {
+    assert(!intakeTarget(u).ok, `refused: ${u}`);
+    const w = fakeWeb({ [u]: html("<p>internal</p>") });
+    const e = await assertRejects(() => intakeFetch(u, { fetch: w.fetch, resolve: w.resolve }), IntakeRefused);
+    assertEquals([e.code, w.calls.length, w.resolved.length], ["refused_target", 0, 0], u);
+  }
+  assert(intakeTarget("https://example.org./a").ok, "one trailing dot on a public name is still that name");
+  for (const loc of ["http://x.ts.net../", "http://127.0.0.1.nip.io../", "http://localhost../"]) {
+    const w = fakeWeb({ "https://example.org/r": () => new Response(null, { status: 302, headers: { location: loc } }) });
+    assertEquals((await assertRejects(() => intakeFetch("https://example.org/r", { fetch: w.fetch, resolve: w.resolve }), IntakeRefused)).code, "refused_target", loc);
+    assertEquals([w.calls.length, w.resolved], [1, ["example.org"]], `${loc}: the hop is neither resolved nor fetched`);
+  }
+});

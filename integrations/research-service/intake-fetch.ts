@@ -103,8 +103,10 @@ export function intakeTarget(raw: string): { ok: true; url: URL } | { ok: false;
   if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, reason: "only http and https links" };
   if (u.username || u.password) return { ok: false, reason: "a link with credentials" };
   if (!ALLOWED_PORTS.has(u.port)) return { ok: false, reason: "only ports 80 and 443" };
-  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  // round 4 (reviewer N1): EVERY trailing dot goes (x.ts.net.. is x.ts.net to a resolver), and an empty label is no name
+  const host = u.hostname.toLowerCase().replace(/\.+$/, "");
   if (!host) return { ok: false, reason: "no host" };
+  if (/(^|\.)\.|\.\./.test(host)) return { ok: false, reason: "a name with an empty label" };
   if (host.startsWith("[")) return { ok: false, reason: "an IP literal is not a public page" }; // IPv6 literal
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (v4) {
@@ -317,7 +319,7 @@ async function getHop(url: string, deps: Required<IntakeDeps>, signal: AbortSign
   for (let hop = 0; ; hop++) {
     const t = intakeTarget(current);
     if (!t.ok) throw new IntakeRefused("refused_target", `refused: ${t.reason}`);
-    await resolvedOk(t.url.hostname.toLowerCase().replace(/\.$/, ""), deps); // round 2: every hop's name, before the hop
+    await resolvedOk(t.url.hostname.toLowerCase().replace(/\.+$/, ""), deps); // round 2: every hop's name, before the hop
     let r: Response;
     try {
       r = await deps.fetch(t.url.href, { redirect: "manual", signal, headers: { "user-agent": UA, accept, "accept-language": "en" } });

@@ -41,8 +41,13 @@ scheduleEmptyTrash();
 // D12 truth and repair: the documents listing is rebuilt from the documents tree where it drifted.
 reconcileOnStart(docDeps);
 // rw-p5a-intake round 3 (R2): imports and adds that were in flight when the last process stopped are failed (retryable)
-sweepStaleJobs(docDeps.db).then((n) => n && console.log(`[intake] ${n} job(s) interrupted by the restart marked failed`))
-  .catch((e) => console.error("[intake] the start-up sweep failed:", (e as Error).message));
+// round 4 (reviewer N4): AWAITED, before the listener starts - no request can see (or retry) a job the sweep is about to fail
+try {
+  const n = await sweepStaleJobs(docDeps.db);
+  if (n) console.log(`[intake] ${n} job(s) interrupted by the restart marked failed`);
+} catch (e) {
+  console.error("[intake] the start-up sweep failed:", (e as Error).message);
+}
 
 // rw-identity-harden F-c: with sign-in configured, impersonations past their expiry end (recorded, one
 // transaction each) every 30 s - not only when that admin sends another request.
