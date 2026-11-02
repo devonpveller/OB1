@@ -176,6 +176,41 @@ describe("T4: a listed suppressed source shows its status in every panel", () =>
     expect(container.querySelector(`[data-hub="${leaf(SUP)}"]`)?.closest(".ws-leaf")?.querySelector(".ws-badge-suppressed")).toBeTruthy();
   });
 
+  // round 3 (after the rw-p8a3-room merge): the room's answers list the sources they were given, and the chat's
+  // scope lists its sources - each with its lifecycle state
+  const ROOM = "e5000000-0000-4000-8000-000000000001";
+  const roomView = (scope: { enabled: boolean; sources: string[] }) => ({
+    room: { id: ROOM, subject: { kind: "idea", id: "i1" }, scope, draft: "" },
+    subject: { kind: "idea", id: "i1", title: "Idea", status: "researched" }, chat: { state: "off" },
+    entries: [{ id: "en1", seq: 1, kind: "assistant", body: "an answer", context: [{ source_id: SUP, chunk: 0, held: false }, { source_id: A, chunk: 1, held: false }], created_at: "2026-11-02T00:00:00Z" }],
+  });
+  const roomApi = (scope: { enabled: boolean; sources: string[] }) => fakeApi([
+    ["POST", "/workbench/rooms", () => ({ room: { id: ROOM }, created: false })],
+    ["GET", `/workbench/rooms/${ROOM}`, () => roomView(scope)],
+    ["POST", "/workbench/contract/source-states", states],
+  ]);
+
+  it("the room (an answer's context sources)", async () => {
+    roomApi({ enabled: false, sources: [] });
+    const P = panel("room")!.component;
+    const { container } = render(<P params={{ subject_kind: "idea", subject_id: "i1" }} />);
+    await act(async () => { await settle(8); });
+    await openAll(container);
+    await pickLeaf(container, '[data-entry="en1"]');
+    expect(container.querySelector(`[data-open-source="${SUP}"] .ws-badge-suppressed`)).toBeTruthy();
+    expect(container.querySelector(`[data-open-source="${A}"] .ws-status`)).toBeNull(); // active: no badge
+  });
+
+  it("the chat (its listed scope sources)", async () => {
+    roomApi({ enabled: true, sources: [SUP, A] });
+    const P = panel("chat")!.component;
+    const { container } = render(<P params={{ subject_kind: "idea", subject_id: "i1" }} />);
+    await act(async () => { await settle(8); });
+    await openAll(container);
+    await pickLeaf(container, '[data-leaf="scope"] .ws-leaf-label');
+    expect(container.querySelector(`[data-scope-source="${SUP}"] .ws-badge-suppressed`)).toBeTruthy();
+  });
+
   it("page graph (the node, its label, and the flagged list)", async () => {
     fakeApi([
       ["GET", "/workbench/contract/neighbours", () => ({ root: "content/tool/r", depth: 2, truncated: false, nodes: [

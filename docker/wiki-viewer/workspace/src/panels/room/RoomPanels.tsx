@@ -18,6 +18,7 @@ import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { openPanel } from "../../shell/dock";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
 import { LinkBack, type Card } from "../sessions/SessionsPanel";
+import { SourceStatus, useSourceStates } from "../../lib/sourceStatus";
 
 export const R = "/workbench/rooms";
 
@@ -79,6 +80,8 @@ const subjectLabel = (v: RoomView) =>
 
 export function RoomPanel(p: PanelProps) {
   const { view, msg, kind } = useRoom(p);
+  // rw-p8a1-core (D5, after the p8a3 merge): every source an answer was given shows its lifecycle state
+  const states = useSourceStates((view?.entries ?? []).flatMap((e) => e.context.filter((c) => !c.held).map((c) => c.source_id)));
   const leaves = useMemo<Leaf[]>(() => {
     if (!view) return [];
     const out: Leaf[] = [{ key: "subject", label: <span>{subjectLabel(view)}</span>, badges: [view.subject.kind === "idea" ? view.subject.status ?? "" : view.subject.card?.badge.label ?? "session"].filter(Boolean) }];
@@ -110,7 +113,7 @@ export function RoomPanel(p: PanelProps) {
           {[...new Map(e.context.map((c) => [c.source_id, c])).values()].map((c) => (
             <button key={c.source_id} type="button" data-open-source={c.source_id}
               onClick={() => setState({ reference: { reference_id: null, source_id: c.source_id, chunk_idx: c.chunk } })}>
-              source {c.source_id.slice(0, 8)}{c.held ? " (held)" : ""}
+              source {c.source_id.slice(0, 8)}{c.held ? " (held)" : ""} <SourceStatus lifecycle={c.held ? null : states.byId[c.source_id]?.lifecycle} />
             </button>
           ))}
         </>
@@ -147,8 +150,18 @@ export function ChatPanel(p: PanelProps) {
   const scopeText = !view ? "" : !view.room.scope.enabled ? "the whole knowledge database"
     : view.room.scope.sources.length === 0 ? "no sources (no context)" : `${view.room.scope.sources.length} listed source${view.room.scope.sources.length === 1 ? "" : "s"}`;
   const off = view && view.chat.state !== "on";
+  // rw-p8a1-core (D5): the listed scope sources, each with its lifecycle state
+  const scoped = view?.room.scope.enabled ? view.room.scope.sources : [];
+  const states = useSourceStates(scoped);
   const leaves: Leaf[] = view ? [
-    { key: "scope", label: <span>scope: {scopeText}</span>, badges: [view.subject.kind === "idea" ? "refinery: hidden sources left out" : "knowledge database"] },
+    {
+      key: "scope", label: <span>scope: {scopeText}</span>, badges: [view.subject.kind === "idea" ? "refinery: hidden sources left out" : "knowledge database"],
+      detail: scoped.length ? (
+        <ul className="ws-why" data-testid="scope-sources">
+          {scoped.map((sid) => <li key={sid} data-scope-source={sid}>source {sid.slice(0, 8)} <SourceStatus lifecycle={states.byId[sid]?.lifecycle} /></li>)}
+        </ul>
+      ) : undefined,
+    },
     { key: "ask", label: <span>ask in this room</span>, badges: [off ? "chat off" : "chat on"] },
   ] : [];
   const saveScope = async () => {
