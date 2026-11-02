@@ -18,6 +18,7 @@ interface Cand {
   insert: string;
   tags: string[];
   state?: string;
+  lifecycle?: string | null;
 }
 
 export function SearchPanel(_p: PanelProps) {
@@ -41,7 +42,7 @@ export function SearchPanel(_p: PanelProps) {
 
   const leaves = useMemo<Leaf[]>(() => results.map((c) => ({
     // P8a-1 (D5): a source shows its lifecycle state (suppressed, unlinked, held ...)
-    key: `${c.kind}:${c.id}`, badges: [c.kind, ...(c.kind === "source" || c.kind === "report" ? statusBadges(c.state) : []), ...c.tags],
+    key: `${c.kind}:${c.id}`, badges: [c.kind, ...statusBadges(c.lifecycle ?? (c.kind === "source" || c.kind === "report" ? c.state : null)), ...c.tags],
     label: <span data-result={c.id}>{c.title}</span>, detail: <span className="ws-muted">{c.snippet.slice(0, 240)}</span>,
   })), [results]);
 

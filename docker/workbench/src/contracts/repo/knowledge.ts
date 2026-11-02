@@ -11,6 +11,8 @@ import { adminSeesOwnerless, FOREIGN_JOB } from "../../documents/ownership.ts";
 
 // research-workbench P8a-1 (D5): a source's lifecycle state NOW, from its row - or 'erased' when only its
 // tombstone is left; NULL when the id names neither. `id` is a uuid expression.
+// the lifecycle of the source a page slug is the leaf page of; NULL for every other page
+export const LEAF_LIFECYCLE = (slug: string) => `CASE WHEN ${slug} ~ ${LEAF_RX} THEN ${LIFECYCLE_OF(LEAF_ID(slug))} END`;
 export const LIFECYCLE_OF = (id: string) => `COALESCE(
     (SELECT public.source_lifecycle_state(ls.retraction_committed_at, ls.unlinked_at) FROM public.sources ls WHERE ls.id = (${id})),
     (SELECT 'erased'::text FROM public.source_tombstones lt WHERE lt.source_id = (${id})))`;
@@ -305,7 +307,9 @@ async function searchPages(db: Db, q: string, limit: number): Promise<Hit[]> {
       `SELECT 'page' AS kind, w.slug AS id, w.title,
               ts_headline('english', w.body, websearch_to_tsquery('english', $1),
                           'StartSel=<<HL>>, StopSel=<</HL>>, MaxWords=30, MinWords=12, ShortWord=3, MaxFragments=1') AS snippet,
-              ${PAGE_STATE} AS state, NULL::text AS lifecycle, w.page_class
+              ${PAGE_STATE} AS state,
+              -- P8a-1 round 2 (tester D1): a source's leaf page carries its source's lifecycle (as neighbours() does)
+              CASE WHEN w.slug ~ ${LEAF_RX} THEN ${LIFECYCLE_OF(LEAF_ID("w.slug"))} END AS lifecycle, w.page_class
          FROM public.wiki_pages w
         WHERE w.search_tsv @@ websearch_to_tsquery('english', $1)
         ORDER BY ts_rank(w.search_tsv, websearch_to_tsquery('english', $1)) DESC, w.updated_at DESC

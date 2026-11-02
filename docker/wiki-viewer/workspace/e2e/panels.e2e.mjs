@@ -174,6 +174,8 @@ await step("E4 the suppressed fixture source shows its status in the trail, the 
   await side("search").locator("[data-testid=search-summary]").waitFor();
   await expand("search");
   ok(await side("search").locator(`.ws-leaf:has([data-result="${FX.suppressed}"]) .ws-badge-suppressed`).count() === 1, "search");
+  // round 2 (tester D1): the source's LEAF PAGE hit carries the badge too, and every listed row naming it does
+  ok(await side("search").locator(`.ws-leaf:has([data-result="content/source/${FX.suppressed}"]) .ws-badge-suppressed`).count() === 1, "search: the leaf page hit");
   await openNav("graph");
   await side("graph").locator("[data-testid=graph-root]").fill(W.hubA[0]);
   await side("graph").locator("[data-testid=graph-root]").press("Enter");

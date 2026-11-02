@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { C, get, q } from "../../lib/api";
 import { useWorkspace } from "../../lib/store";
+import { statusBadges } from "../../lib/sourceStatus";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import type { PanelProps } from "../../shell/registry";
 import { openPanel } from "../../shell/dock";
@@ -16,7 +17,7 @@ import { STATUS_LABEL, statusLine } from "./logic";
 import { ReportHeader, type Rollup } from "./ReportHeader";
 
 interface Hub {
-  centre: { slug: string; title: string; page_class: string | null };
+  centre: { slug: string; title: string; page_class: string | null; lifecycle?: string | null };
   links: { kind: string; id: string }[];
   sources: number;
   thin: boolean;
@@ -46,7 +47,7 @@ const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? v as T[] : []);
 // what the contract answers, read defensively: a missing list is an empty one, never a crash
 function asHub(h: any): Hub {
   return {
-    centre: { slug: String(h?.centre?.slug ?? ""), title: String(h?.centre?.title ?? h?.centre?.slug ?? ""), page_class: h?.centre?.page_class ?? null },
+    centre: { slug: String(h?.centre?.slug ?? ""), title: String(h?.centre?.title ?? h?.centre?.slug ?? ""), page_class: h?.centre?.page_class ?? null, lifecycle: h?.centre?.lifecycle ?? null },
     links: arr(h?.links), sources: Number(h?.sources ?? 0), thin: !!h?.thin, contested: !!h?.contested,
     contested_claims: arr(h?.contested_claims), why: arr<string>(h?.why),
   };
@@ -63,7 +64,8 @@ function hubLeaf(h: Hub, prefix: string): Leaf {
   return {
     key: `${prefix}hub:${h.centre.slug}`,
     label: <span data-hub={h.centre.slug}>hub: {h.centre.title}</span>,
-    badges: [...(h.thin ? ["thin"] : []), ...(h.contested ? ["contested"] : [])],
+    // P8a-1 round 2 (D5): a centre that is a source's leaf page shows its source's state
+    badges: [...statusBadges(h.centre.lifecycle), ...(h.thin ? ["thin"] : []), ...(h.contested ? ["contested"] : [])],
     detail: (
       <ul className="ws-why">
         {h.why.map((w) => <li key={w}>{w}</li>)}

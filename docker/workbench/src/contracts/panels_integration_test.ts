@@ -185,8 +185,26 @@ t("T4 states: trail, timeline, neighbours and source-states carry the lifecycle 
 
 t("T4 states: a held source is never answered by source-states (per refinery; never a hint)", async () => {
   await plant();
-  const held = await sql<{ id: string }>(`SELECT id::text FROM public.held_sources LIMIT 1`);
-  if (!held.length) return; // the fixtures carry one; nothing to probe otherwise
-  const st = await call("POST", `/source-states`, W.subA, { ids: [held[0].id] });
-  assertEquals(st.json.by_id, {});
+  // round 2 (tester t-p8a1-core): the case plants its own held source - in its own refinery (an idea of user B) -
+  // instead of depending on the fixtures
+  const idea = uuid();
+  await sql(`INSERT INTO public.ideas (id, title, owner_sub) VALUES ($1, 'P8a1 held probe', $2)`, [idea, W.subB]);
+  await sql(`INSERT INTO public.held_sources (id, refinery_id, url, title, content, content_type) VALUES ($1, $2, $3, 'P8a1 held', 'held text', 'manual')`,
+    [W.held, idea, `https://example.org/p8a1/${W.r}/held`]);
+  for (const sub of [W.subA, W.subB]) {
+    const st = await call("POST", `/source-states`, sub, { ids: [W.held, W.held.toUpperCase()], urls: [`https://example.org/p8a1/${W.r}/held`] });
+    assertEquals(st.status, 200, st.text);
+    assertEquals([st.json.by_id, st.json.by_url], [{}, {}], `held answered for ${sub}: ${st.text}`);
+  }
+});
+
+// round 2 (tester t-p8a1-core D1): a source's leaf page is a page hit of search, with its source's state
+t("T4 states: search answers a source's leaf page with its source's lifecycle (pages that are no source: null)", async () => {
+  await plant();
+  const r = await call("GET", `/search?q=${encodeURIComponent("P8a1 suppressed leaf")}&kinds=page&limit=50`, W.subA);
+  assertEquals(r.status, 200, r.text);
+  const hit = (r.json.results as any[]).find((h) => h.id === `content/source/${W.suppressed}`);
+  assertEquals(hit?.lifecycle, "suppressed", r.text.slice(0, 600));
+  const root = await call("GET", `/search?q=${encodeURIComponent("P8a1 root")}&kinds=page&limit=50`, W.subA);
+  assertEquals((root.json.results as any[]).find((h) => h.id === W.root)?.lifecycle, null, root.text.slice(0, 600));
 });

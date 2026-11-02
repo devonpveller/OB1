@@ -321,6 +321,7 @@ export type HubMarker = {
     title: string;
     page_class: string | null;
     in_degree: number;
+    lifecycle: string | null; /** registry: source_states */
   };
   seeds: Array<string>;
   links: Array<{

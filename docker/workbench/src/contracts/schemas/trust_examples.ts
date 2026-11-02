@@ -23,7 +23,7 @@ export const TRUST_EX = {
   documentCoverage: {
     path: FX.documentPath, computed_at: FX.at,
     hubs: [{
-      centre: { slug: FX.pageEntity, title: "Tool Fixture", page_class: "entity", in_degree: 0 },
+      centre: { slug: FX.pageEntity, title: "Tool Fixture", page_class: "entity", in_degree: 0, lifecycle: null },
       seeds: [FX.pageLeafActive], links: [{ kind: "source", id: FX.sourceActive }], sources: 2, thin: true, contested: false,
       contested_claims: [], why: ["2 source page(s) around the centre (thin below 3)", "no contradicted claim grounded here"],
     }],

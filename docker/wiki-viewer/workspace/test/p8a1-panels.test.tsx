@@ -142,6 +142,40 @@ describe("T4: a listed suppressed source shows its status in every panel", () =>
     expect(badge(container)).toBeTruthy();
   });
 
+  // round 2 (tester t-p8a1-core D1): a source's LEAF PAGE is listed with its source's state too
+  it("search (a source's leaf page hit)", async () => {
+    fakeApi([["GET", "/workbench/documents/candidates", () => ({ candidates: [{ kind: "page", id: leaf(SUP), title: "Suppressed one", snippet: "", insert: "", tags: [], state: "current", lifecycle: "suppressed" }] })]]);
+    const P = panel("search")!.component;
+    const { container } = render(<P params={{}} />);
+    await act(async () => {
+      fireEvent.change(container.querySelector('[data-testid="search-input"]')!, { target: { value: "supp" } });
+      fireEvent.submit(container.querySelector("form")!);
+      await settle();
+    });
+    await openAll(container);
+    expect(container.querySelector(`[data-result="${leaf(SUP)}"]`)?.closest(".ws-leaf")?.querySelector(".ws-badge-suppressed")).toBeTruthy();
+  });
+
+  it("hubs (a hub centred on a source's leaf page)", async () => {
+    fakeApi([["GET", "/workbench/documents/hub-context", () => ({ hubs: [{ centre: { slug: leaf(SUP), title: "Suppressed one", page_class: "source", lifecycle: "unlinked" }, seeds: [], links: [], sources: 1, thin: true, contested: false, why: ["thin"] }] })]]);
+    setState({ documentPath: "documents/u/a.md" });
+    const P = panel("hubs")!.component;
+    const { container } = render(<P params={{}} />);
+    await act(async () => { await settle(); });
+    await openAll(container);
+    expect(container.querySelector(`[data-hub="${leaf(SUP)}"]`)?.closest(".ws-leaf")?.querySelector(".ws-badge-unlinked")).toBeTruthy();
+  });
+
+  it("coverage (a document's hub centred on a source's leaf page)", async () => {
+    fakeApi([["GET", "/workbench/contract/documents/coverage", () => ({ hubs: [{ centre: { slug: leaf(SUP), title: "Suppressed one", page_class: "source", in_degree: 0, lifecycle: "suppressed" }, seeds: [], links: [], sources: 1, thin: true, contested: false, contested_claims: [], why: [] }], sessions: [] })]]);
+    setState({ documentPath: "documents/u/a.md" });
+    const P = panel("coverage")!.component;
+    const { container } = render(<P params={{}} />);
+    await act(async () => { await settle(); });
+    await openAll(container);
+    expect(container.querySelector(`[data-hub="${leaf(SUP)}"]`)?.closest(".ws-leaf")?.querySelector(".ws-badge-suppressed")).toBeTruthy();
+  });
+
   it("page graph (the node, its label, and the flagged list)", async () => {
     fakeApi([
       ["GET", "/workbench/contract/neighbours", () => ({ root: "content/tool/r", depth: 2, truncated: false, nodes: [
