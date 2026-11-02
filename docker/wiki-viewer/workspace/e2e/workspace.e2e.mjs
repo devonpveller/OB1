@@ -561,6 +561,11 @@ await step("C21 side panels at rest: summary first, no leaves, no actions", asyn
     if (n === "reference" && await panel.locator("[data-focus]").count()) continue; // focused by an earlier selection
     ok(await panel.locator("[data-action], .ws-actions").count() === 0, `${n}: an action at rest`);
     ok(await panel.locator(".ws-leaves").count() === 0, `${n}: opened expanded`);
+    // rw-p5a-intake round 3: back to the default layout after each area - with every registered side panel open at
+    // once (P8a's and the Intake panel among them) the dock splits the viewport until a "below" panel gets no height
+    // and reads hidden; one at a time, each is judged at rest on its own
+    await page.click("[data-testid=settings]");
+    await page.click(".ws-settings button:has-text(\"Reset the layout\")");
   }
 });
 
