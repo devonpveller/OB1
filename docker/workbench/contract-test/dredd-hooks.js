@@ -15,10 +15,16 @@ const ISO = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})/g;
 // 4. P4b (rw-p4b-sessions): steer and cancel act through the research service, which the Dredd lab
 //    does not run; contract-test/run-sessions-tests.ps1 exercises them against the real one.
 const NEEDS_RESEARCH = /\/sessions\/\{id\}\/(steer|cancel)/;
+// 5. rw-p8a2-cleanup: the cleanup view's WRITES (sever / erase / process-all / lift) act on the same fixture
+//    rows as the D5 single-source examples (sever 44444444, erase 33333333), so whichever ran second would 409;
+//    src/contracts/cleanup_integration_test.ts exercises them on rows of its own (run-workspace-tests.ps1 [5a2]).
+//    One read is skipped too: GET /cleanup/actions/{id} is a per-user row the fixture does not seed (by id it
+//    is the caller's own or 404). The other cleanup READS are checked here.
+const CLEANUP_WRITE = /\/cleanup\/(sources\/\{id\}\/(sever|erase)|process-all|tombstones\/\{id\}\/lift|actions\/\{id\})/;
 
 hooks.beforeEach((transaction, done) => {
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || ''));
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || ''));
   done();
 });
 

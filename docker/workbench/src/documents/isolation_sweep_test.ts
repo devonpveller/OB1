@@ -268,6 +268,23 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   console.log(`sweep: B's scoped chat in B's room -> ${bChat.status}${bChat.json.code ? ` (${bChat.json.code})` : ""}`);
   await sql(`INSERT INTO public.workspace_room_entries (room_id, actor_sub, kind, body) VALUES ($1::uuid, $2, 'dossier', $3), ($4::uuid, $2, 'user', $3)`, [bRoom, bSub, room.entry, bSessRoom]);
   await sql(`UPDATE public.workspace_rooms SET draft = $2 WHERE id = $1::uuid`, [bRoom, room.draft]);
+  // rw-p8a2-cleanup: B's cleanup actions (D5; 07-MULTI-USER). B suppresses a source of the sweep's own,
+  // severs it from the cleanup view, erases it there, runs a process-all and lifts the tombstone. The
+  // shared rows those writes leave (trail, tombstone) name the ACTION (cleanup-action:<id>, an opaque id
+  // shared rows carry by design, like an automation's run id), never B: the `sub` marker covers every route
+  // for that. What is B's is the action itself: by id it is 404 to A (checked below), and A's own action
+  // list never holds it.
+  const cleanSrc = crypto.randomUUID();
+  await sql(`INSERT INTO public.sources (id, url, title, content) VALUES ($1, $2, 'sweep cleanup source', 'sweep cleanup text')`,
+    [cleanSrc, `https://example.org/sweep-cleanup/${cleanSrc}`]);
+  await sql(`INSERT INTO public.source_chunks (source_id, idx, content) VALUES ($1, 0, 'sweep cleanup chunk')`, [cleanSrc]);
+  assertEquals((await wb("POST", `/workbench/contract/sources/${cleanSrc}/suppress`, { reason: "sweep cleanup" }, B)).status, 200);
+  const cSever = await wb("POST", `/workbench/contract/cleanup/sources/${cleanSrc}/sever`, { all: true }, B);
+  const cErase = await wb("POST", `/workbench/contract/cleanup/sources/${cleanSrc}/erase`, { reason_type: "deliberate" }, B);
+  const cRun = await wb("POST", "/workbench/contract/cleanup/process-all", { reason_type: "deliberate", source_ids: [crypto.randomUUID()] }, B);
+  const cLift = await wb("POST", `/workbench/contract/cleanup/tombstones/${cErase.json.tombstone_id}/lift`, {}, B);
+  for (const r of [cSever, cErase, cRun, cLift]) assertEquals(r.status, 200, r.text);
+  const bCleanup: string[] = [cSever, cErase, cRun, cLift].map((r) => r.json.action.id);
   const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret,
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
@@ -307,7 +324,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
 
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
-  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom].filter(Boolean);
+  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -354,8 +371,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // own ids handed to A directly) and nothing else of B's in the request
   const named = (v: string) =>
     v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>"
-      : v === bRoom ? "<B room>" : v === bSessRoom ? "<B session room>" : v;
-  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+      : v === bRoom ? "<B room>" : v === bSessRoom ? "<B session room>" : bCleanup.includes(v) ? "<B cleanup action>" : v;
+  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
     .slice(0, 40);
   for (const r of reads.filter((x) => x.path.includes(":"))) {
     for (const v of realIds) {
@@ -442,6 +459,19 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   assert(bExports.every((id) => bList.text.includes(id)), `B lists its own export runs: ${bList.status}`);
   assertEquals((await wb("GET", `/workbench/exports/${bExport}/file`, undefined, B)).status, 200, "B downloads its own passed export");
   console.log(`sweep: B's export runs ${bExports.length} (A saw none of them: see the hits below); B still lists and downloads its own`);
+  // rw-p8a2-cleanup: B's cleanup actions are B's - 404 to A by id on both doors, absent from A's list, B reads them
+  for (const id of bCleanup) {
+    for (const door of [BASE, VIEWER]) {
+      calls++;
+      const res = await call(door, "GET", `/workbench/contract/cleanup/actions/${id}`);
+      if (res.status !== 404) hits.push(`HIT cleanup-action GET /workbench/contract/cleanup/actions/<B cleanup action> (${doorName(door)}) -> ${res.status}`);
+    }
+  }
+  const aActions = await call(VIEWER, "GET", "/workbench/contract/cleanup/actions?limit=200");
+  if (bCleanup.some((id) => aActions.text.includes(id))) hits.push("HIT cleanup-action A's GET /workbench/contract/cleanup/actions lists B's action");
+  const bActions = await wb("GET", "/workbench/contract/cleanup/actions?limit=200", undefined, B);
+  assert(bCleanup.every((id) => bActions.text.includes(id)), `B lists its own cleanup actions: ${bActions.status}`);
+  console.log(`sweep: B's cleanup actions ${bCleanup.length} (404 to A by id; B still lists its own)`);
   await Deno.remove(`${VAULT}/${bDir}/${attachName}`).catch(() => {});
   await Deno.remove(`${VAULT}/${bDir}/${attachPng}`).catch(() => {});
   if (OIDC) {

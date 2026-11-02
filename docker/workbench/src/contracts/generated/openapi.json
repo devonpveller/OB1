@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Open Brain retrieval contract",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "The typed retrieval contract every panel and MCP client reads the knowledge base through (research-workbench P0). The API owns record states; every enumerated kind is a registry (x-registry), never a closed list."
   },
   "security": [
@@ -5383,6 +5383,712 @@
           "created_at",
           "by_status",
           "credibility"
+        ]
+      },
+      "CleanupSources": {
+        "type": "object",
+        "properties": {
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CleanupSource"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "every suppressed or unlinked source, not only this page"
+          }
+        },
+        "required": [
+          "sources",
+          "total"
+        ]
+      },
+      "CleanupSource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "22222222-2222-4222-8222-222222222222",
+            "description": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true
+          },
+          "lifecycle": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "source_states",
+            "example": "suppressed",
+            "description": "suppressed or unlinked: the status every listed source carries"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "why it was suppressed"
+          },
+          "suppressed_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "unlinked_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/CleanupCounts"
+          },
+          "blocking": {
+            "type": "integer",
+            "description": "connections that block erasure"
+          },
+          "severable": {
+            "type": "integer",
+            "description": "connections the sever tool may remove"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "erase_allowed": {
+            "type": "boolean",
+            "description": "true only when unlinked with zero blocking connections (the erase gate)"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "url",
+          "lifecycle",
+          "reason",
+          "suppressed_at",
+          "unlinked_at",
+          "counts",
+          "blocking",
+          "severable",
+          "total",
+          "erase_allowed"
+        ]
+      },
+      "CleanupCounts": {
+        "type": "object",
+        "properties": {
+          "chunk": {
+            "type": "integer"
+          },
+          "citing_page": {
+            "type": "integer"
+          },
+          "claim_edge": {
+            "type": "integer"
+          },
+          "document_link": {
+            "type": "integer"
+          },
+          "entity_grounding": {
+            "type": "integer"
+          },
+          "found_via_lead": {
+            "type": "integer"
+          },
+          "reference_record": {
+            "type": "integer"
+          },
+          "report_citation": {
+            "type": "integer"
+          },
+          "report_session": {
+            "type": "integer"
+          },
+          "trail_event": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chunk",
+          "citing_page",
+          "claim_edge",
+          "document_link",
+          "entity_grounding",
+          "found_via_lead",
+          "reference_record",
+          "report_citation",
+          "report_session",
+          "trail_event"
+        ],
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "description": "dependence connections per kind: every kind of the dependence_kinds registry, zero-filled (a kind added later appears beside them)"
+      },
+      "CleanupSevered": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/CleanupAction"
+          },
+          "severed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "ref": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "ref"
+              ]
+            }
+          },
+          "rescored_claims": {
+            "type": "integer"
+          },
+          "pending_compile": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lifecycle": {
+            "type": "string",
+            "nullable": true
+          },
+          "blocking": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action",
+          "severed",
+          "rescored_claims",
+          "pending_compile",
+          "lifecycle",
+          "blocking"
+        ]
+      },
+      "CleanupAction": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "c1ea0000-0000-4000-8000-000000000001",
+            "description": "the action id; the shared rows it wrote name it as cleanup-action:<id>"
+          },
+          "kind": {
+            "type": "string",
+            "description": "sever | erase | lift | process_all"
+          },
+          "reason_type": {
+            "type": "string",
+            "nullable": true
+          },
+          "source_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "uuid"
+          },
+          "tombstone_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "uuid"
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "finished_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "reason_type",
+          "source_id",
+          "tombstone_id",
+          "detail",
+          "created_at",
+          "finished_at"
+        ]
+      },
+      "CleanupSeverRequest": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "dependence_kinds",
+            "example": "chunk",
+            "description": "A key of the `dependence_kinds` registry (GET /workbench/contract/registries/dependence_kinds)."
+          },
+          "ref": {
+            "type": "string"
+          },
+          "all": {
+            "type": "boolean",
+            "description": "sever every severable connection"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CleanupErased": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/CleanupAction"
+          },
+          "tombstone_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "uuid"
+          },
+          "reason_type": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "action",
+          "tombstone_id",
+          "reason_type",
+          "note"
+        ]
+      },
+      "CleanupEraseRequest": {
+        "type": "object",
+        "properties": {
+          "reason_type": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "erasure_reasons",
+            "example": "deliberate",
+            "description": "A key of the `erasure_reasons` registry (GET /workbench/contract/registries/erasure_reasons)."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "optional on a manual erase"
+          }
+        },
+        "required": [
+          "reason_type"
+        ],
+        "additionalProperties": false
+      },
+      "ProcessAllResult": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/CleanupAction"
+          },
+          "reason_type": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProcessAllItem"
+            }
+          },
+          "erased": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action",
+          "reason_type",
+          "items",
+          "erased"
+        ]
+      },
+      "ProcessAllItem": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "33333333-3333-4333-8333-333333333333",
+            "description": "uuid"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "erased | blocked (a connection the sever tool cannot remove) | skipped (not suppressed or unlinked) | failed"
+          },
+          "severed": {
+            "type": "integer"
+          },
+          "blocking": {
+            "type": "integer"
+          },
+          "tombstone_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "uuid"
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "source_id",
+          "outcome",
+          "severed",
+          "blocking",
+          "tombstone_id",
+          "detail"
+        ]
+      },
+      "ProcessAllRequest": {
+        "type": "object",
+        "properties": {
+          "reason_type": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "erasure_reasons",
+            "example": "deliberate",
+            "description": "A key of the `erasure_reasons` registry (GET /workbench/contract/registries/erasure_reasons)."
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "example": "33333333-3333-4333-8333-333333333333",
+              "description": "uuid"
+            },
+            "minItems": 1,
+            "maxItems": 500,
+            "description": "the marked sources (the view sends every listed one)"
+          }
+        },
+        "required": [
+          "reason_type",
+          "source_ids"
+        ],
+        "additionalProperties": false
+      },
+      "ReopenCandidates": {
+        "type": "object",
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReopenCandidate"
+            }
+          }
+        },
+        "required": [
+          "candidates"
+        ]
+      },
+      "ReopenCandidate": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "proposed_contesting (debunked) | credibility_cleared | reopen_note (deliberate)"
+          },
+          "tombstone": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "66666666-6666-4666-8666-666666666666",
+                "description": "uuid"
+              },
+              "source_id": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "55555555-5555-4555-8555-555555555555",
+                "description": "uuid"
+              },
+              "url": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "reason_type": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "erasure_reasons",
+                "example": "debunked",
+                "description": "A key of the `erasure_reasons` registry (GET /workbench/contract/registries/erasure_reasons)."
+              },
+              "note": {
+                "type": "string",
+                "nullable": true
+              },
+              "eraser_kind": {
+                "type": "string",
+                "minLength": 1,
+                "x-registry": "erasers",
+                "example": "user",
+                "description": "A key of the `erasers` registry (GET /workbench/contract/registries/erasers)."
+              },
+              "erased_by_you": {
+                "type": "boolean"
+              },
+              "erased_at": {
+                "type": "string",
+                "example": "2026-10-17T12:00:00.000Z",
+                "description": "ISO-8601 timestamp"
+              },
+              "confidence": {
+                "type": "number",
+                "nullable": true
+              },
+              "score_version": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "id",
+              "source_id",
+              "url",
+              "title",
+              "reason_type",
+              "note",
+              "eraser_kind",
+              "erased_by_you",
+              "erased_at",
+              "confidence",
+              "score_version"
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CandidateEvidence"
+            },
+            "minItems": 1
+          },
+          "dispute_preview": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "criticism": {
+                "type": "object",
+                "properties": {
+                  "tombstone_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "example": "11111111-1111-4111-8111-111111111111",
+                    "description": "uuid"
+                  },
+                  "reason_type": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "erased_at": {
+                    "type": "string",
+                    "example": "2026-10-17T12:00:00.000Z",
+                    "description": "ISO-8601 timestamp"
+                  }
+                },
+                "required": [
+                  "tombstone_id",
+                  "reason_type",
+                  "note",
+                  "erased_at"
+                ]
+              },
+              "score": {
+                "type": "object",
+                "properties": {
+                  "available": {
+                    "type": "boolean"
+                  },
+                  "value": {
+                    "type": "number",
+                    "nullable": true
+                  },
+                  "floor": {
+                    "type": "number",
+                    "nullable": true
+                  },
+                  "version": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "required": [
+              "criticism",
+              "score"
+            ],
+            "description": "debunked: what admitting it would attach - the debunking as criticism, the score that cleared the floor"
+          }
+        },
+        "required": [
+          "kind",
+          "tombstone",
+          "evidence",
+          "dispute_preview"
+        ]
+      },
+      "CandidateEvidence": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "admission_paths",
+            "example": "intake",
+            "description": "A key of the `admission_paths` registry (GET /workbench/contract/registries/admission_paths)."
+          },
+          "outcome": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "admission_outcomes",
+            "example": "candidate",
+            "description": "A key of the `admission_outcomes` registry (GET /workbench/contract/registries/admission_outcomes)."
+          },
+          "session_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "the session that returned it (shared, as on the trail)"
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "description": "the door's reopen note: what returned it, why it looks promising"
+          },
+          "attempted_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "what the admission gate decided, and why"
+          },
+          "score": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "available": {
+                "type": "boolean"
+              },
+              "value": {
+                "type": "number",
+                "nullable": true
+              },
+              "floor": {
+                "type": "number",
+                "nullable": true
+              },
+              "version": {
+                "type": "string",
+                "nullable": true
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "path",
+          "outcome",
+          "session_id",
+          "note",
+          "attempted_at",
+          "reason",
+          "score"
+        ]
+      },
+      "CleanupLifted": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/CleanupAction"
+          },
+          "tombstone_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "66666666-6666-4666-8666-666666666667",
+            "description": "uuid"
+          },
+          "lifted_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "action",
+          "tombstone_id",
+          "lifted_at"
+        ]
+      },
+      "CleanupLiftRequest": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "additionalProperties": false
+      },
+      "CleanupActions": {
+        "type": "object",
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CleanupAction"
+            }
+          }
+        },
+        "required": [
+          "actions"
         ]
       }
     },
@@ -11784,6 +12490,914 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/DocumentCoverage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/sources": {
+      "get": {
+        "operationId": "cleanupSources",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "every suppressed and unlinked source, with its status and dependence counts",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-500, default 200"
+            },
+            "required": false,
+            "description": "1-500, default 200",
+            "name": "limit",
+            "in": "query",
+            "example": "200"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the listing (shared knowledge: the same for every user)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "sources": [
+                    {
+                      "id": "22222222-2222-4222-8222-222222222222",
+                      "title": "Suppressed fixture source",
+                      "url": "https://example.org/suppressed",
+                      "lifecycle": "suppressed",
+                      "reason": "misattributed quote",
+                      "suppressed_at": "2026-10-17T12:00:00.000Z",
+                      "unlinked_at": null,
+                      "counts": {
+                        "chunk": 1,
+                        "citing_page": 0,
+                        "claim_edge": 1,
+                        "document_link": 0,
+                        "entity_grounding": 0,
+                        "found_via_lead": 0,
+                        "reference_record": 0,
+                        "report_citation": 0,
+                        "report_session": 0,
+                        "trail_event": 0
+                      },
+                      "blocking": 2,
+                      "severable": 2,
+                      "total": 2,
+                      "erase_allowed": false
+                    }
+                  ],
+                  "total": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupSources"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/sources/{id}/sever": {
+      "post": {
+        "operationId": "cleanupSever",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "sever one connection or all severable ones, recorded as the caller's cleanup action",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "source id"
+            },
+            "required": true,
+            "description": "source id",
+            "name": "id",
+            "in": "path",
+            "example": "44444444-4444-4444-8444-444444444444"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "all": true
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CleanupSeverRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "severed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "action": {
+                    "id": "c1ea0000-0000-4000-8000-000000000001",
+                    "kind": "sever",
+                    "reason_type": null,
+                    "source_id": "44444444-4444-4444-8444-444444444444",
+                    "tombstone_id": null,
+                    "detail": {},
+                    "created_at": "2026-10-17T12:00:00.000Z",
+                    "finished_at": "2026-10-17T12:00:00.000Z"
+                  },
+                  "severed": [
+                    {
+                      "kind": "chunk",
+                      "ref": "0"
+                    }
+                  ],
+                  "rescored_claims": 0,
+                  "pending_compile": [],
+                  "lifecycle": "unlinked",
+                  "blocking": 0
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupSevered"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/sources/{id}/erase": {
+      "post": {
+        "operationId": "cleanupErase",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "a manual erase: a reason type (required) and an optional note; refused unless unlinked with zero dependence",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "source id"
+            },
+            "required": true,
+            "description": "source id",
+            "name": "id",
+            "in": "path",
+            "example": "33333333-3333-4333-8333-333333333333"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "reason_type": "deliberate",
+                "note": "removed from the cleanup view"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CleanupEraseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "erased; the named tombstone",
+            "content": {
+              "application/json": {
+                "example": {
+                  "action": {
+                    "id": "c1ea0000-0000-4000-8000-000000000001",
+                    "kind": "erase",
+                    "reason_type": "deliberate",
+                    "source_id": "33333333-3333-4333-8333-333333333333",
+                    "tombstone_id": "66666666-6666-4666-8666-666666666667",
+                    "detail": {},
+                    "created_at": "2026-10-17T12:00:00.000Z",
+                    "finished_at": "2026-10-17T12:00:00.000Z"
+                  },
+                  "tombstone_id": "66666666-6666-4666-8666-666666666667",
+                  "reason_type": "deliberate",
+                  "note": "removed from the cleanup view"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupErased"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/process-all": {
+      "post": {
+        "operationId": "cleanupProcessAll",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "the bulk run over the marked sources: ONE reason type for the batch, no note (D5 item 4)",
+        "description": "Each source: every severable connection severed, then erased when that left it unlinked with zero blocking connections; one the sever tool cannot clear is reported blocked. Each tombstone records the run.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "reason_type": "deliberate",
+                "source_ids": [
+                  "11111111-1111-4111-8111-111111111111"
+                ]
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ProcessAllRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "what the run did, per source",
+            "content": {
+              "application/json": {
+                "example": {
+                  "action": {
+                    "id": "c1ea0000-0000-4000-8000-000000000001",
+                    "kind": "process_all",
+                    "reason_type": "deliberate",
+                    "source_id": null,
+                    "tombstone_id": null,
+                    "detail": {
+                      "sources": 1,
+                      "erased": 0
+                    },
+                    "created_at": "2026-10-17T12:00:00.000Z",
+                    "finished_at": "2026-10-17T12:00:00.000Z"
+                  },
+                  "reason_type": "deliberate",
+                  "erased": 0,
+                  "items": [
+                    {
+                      "source_id": "11111111-1111-4111-8111-111111111111",
+                      "outcome": "skipped",
+                      "severed": 0,
+                      "blocking": 0,
+                      "tombstone_id": null,
+                      "detail": "the source is active, not suppressed or unlinked"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessAllResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/reopen-candidates": {
+      "get": {
+        "operationId": "cleanupReopenCandidates",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "tombstones waiting for a person: user-erased debunked / credibility returns that cleared their bar, deliberate ones with a reopen note",
+        "description": "Each carries its evidence (the admission attempts that made it a candidate) and, on the debunked path, the dispute it would open. Automation-erased readmissions are trail events, never candidates (D5 item 7).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-500, default 100"
+            },
+            "required": false,
+            "description": "1-500, default 100",
+            "name": "limit",
+            "in": "query",
+            "example": "100"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the candidates",
+            "content": {
+              "application/json": {
+                "example": {
+                  "candidates": [
+                    {
+                      "kind": "proposed_contesting",
+                      "tombstone": {
+                        "id": "66666666-6666-4666-8666-666666666666",
+                        "source_id": "55555555-5555-4555-8555-555555555555",
+                        "url": "https://example.org/erased",
+                        "title": "Erased fixture source",
+                        "reason_type": "debunked",
+                        "note": null,
+                        "eraser_kind": "user",
+                        "erased_by_you": true,
+                        "erased_at": "2026-10-17T12:00:00.000Z",
+                        "confidence": 0.42,
+                        "score_version": "claim-confidence-mean-v1"
+                      },
+                      "evidence": [
+                        {
+                          "path": "intake",
+                          "outcome": "candidate",
+                          "session_id": null,
+                          "note": null,
+                          "attempted_at": "2026-10-17T12:00:00.000Z",
+                          "reason": "re-scored 0.8 >= floor 0.5; user-erased: awaits the operator",
+                          "score": {
+                            "available": true,
+                            "value": 0.8,
+                            "floor": 0.5,
+                            "version": "v2",
+                            "reason": "scored"
+                          }
+                        }
+                      ],
+                      "dispute_preview": {
+                        "criticism": {
+                          "tombstone_id": "66666666-6666-4666-8666-666666666666",
+                          "reason_type": "debunked",
+                          "note": null,
+                          "erased_at": "2026-10-17T12:00:00.000Z"
+                        },
+                        "score": {
+                          "available": true,
+                          "value": 0.8,
+                          "floor": 0.5,
+                          "version": "v2",
+                          "reason": "scored"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ReopenCandidates"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/tombstones/{id}/lift": {
+      "post": {
+        "operationId": "cleanupLift",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "lift a tombstone from the cleanup view, recorded as the caller's cleanup action",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "tombstone id"
+            },
+            "required": true,
+            "description": "tombstone id",
+            "name": "id",
+            "in": "path",
+            "example": "66666666-6666-4666-8666-666666666667"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "note": "reconsidered"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CleanupLiftRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "lifted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "action": {
+                    "id": "c1ea0000-0000-4000-8000-000000000001",
+                    "kind": "lift",
+                    "reason_type": null,
+                    "source_id": null,
+                    "tombstone_id": "66666666-6666-4666-8666-666666666667",
+                    "detail": {},
+                    "created_at": "2026-10-17T12:00:00.000Z",
+                    "finished_at": "2026-10-17T12:00:00.000Z"
+                  },
+                  "tombstone_id": "66666666-6666-4666-8666-666666666667",
+                  "lifted_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupLifted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/actions": {
+      "get": {
+        "operationId": "cleanupActions",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "the caller's own cleanup actions, newest first",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-200, default 50"
+            },
+            "required": false,
+            "description": "1-200, default 50",
+            "name": "limit",
+            "in": "query",
+            "example": "50"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the caller's actions",
+            "content": {
+              "application/json": {
+                "example": {
+                  "actions": [
+                    {
+                      "id": "c1ea0000-0000-4000-8000-000000000001",
+                      "kind": "lift",
+                      "reason_type": null,
+                      "source_id": null,
+                      "tombstone_id": "66666666-6666-4666-8666-666666666667",
+                      "detail": {},
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "finished_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupActions"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cleanup/actions/{id}": {
+      "get": {
+        "operationId": "cleanupAction",
+        "tags": [
+          "cleanup view (D5)"
+        ],
+        "summary": "one of the caller's cleanup actions; another user's is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "action id"
+            },
+            "required": true,
+            "description": "action id",
+            "name": "id",
+            "in": "path",
+            "example": "c1ea0000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the action",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "c1ea0000-0000-4000-8000-000000000001",
+                  "kind": "lift",
+                  "reason_type": null,
+                  "source_id": null,
+                  "tombstone_id": "66666666-6666-4666-8666-666666666667",
+                  "detail": {},
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "finished_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupAction"
                 }
               }
             }
