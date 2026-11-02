@@ -8828,6 +8828,27 @@
               }
             }
           },
+          "403": {
+            "description": "an automation / fixture eraser from a caller that is neither a service nor an admin",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "only a service or an admin may record an eraser other than a user"
+                },
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
           "404": {
             "description": "not found",
             "content": {

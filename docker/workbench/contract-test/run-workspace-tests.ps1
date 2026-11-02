@@ -77,6 +77,9 @@ $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [ch
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $wsKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $gateKey = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
+# rw-p8a2-cleanup2 (review M1): one service key, so the cleanup integration test can declare an automation eraser as a
+# service (a signed-in user may not)
+$svcKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
 $shots = Join-Path $env:TEMP "$P-shots"; New-Item -ItemType Directory -Force $shots | Out-Null
@@ -287,7 +290,7 @@ try {
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'RESEARCH_SCORER_URL=http://stub-research:8000', '-e', "RESEARCH_SCORER_KEY=$wsKey", '-e', 'WORKBENCH_GATE_URL=http://stub-gate:8080', '-e', "WORKBENCH_GATE_KEY=$gateKey", '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
-      '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
+      '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-e', "WORKSPACE_SERVICE_KEYS=cleanup-test=$svcKey",
       '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   $walkEnv = if ($WalkOff) { @('-e', 'WORKSPACE_RESPONSE_WALK=off') } else { @() }
   $null = Run-Detached "$P-wb" ($wbArgs + $walkEnv + @($wbTag))
@@ -338,7 +341,7 @@ try {
   # rw-p8a2-cleanup: the cleanup view's routes as two users (D5 items 4-7; 07-MULTI-USER), on sources of its own
   Write-Host '[5a2] the cleanup view integration test (two users through the identity header)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
-    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', "CLEANUP_TEST_SERVICE_KEY=$svcKey",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/contracts/cleanup_integration_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
@@ -396,7 +399,7 @@ try {
   $rows = (Dk exec $db psql -U postgres -d openbrain -tAc "select count(*) from wiki_pages where slug like 'documents/%'").Trim()
   if (-not $Red) { Check ($rows -eq '0') "no wiki_pages row for any user document ($rows)" }
   Save 'viewer.log' ((Dk logs --tail 60 "$P-viewer") -replace [regex]::Escape($key), '<key>')
-  Save 'workbench.log' (((Dk logs --tail 120 "$P-wb") -replace [regex]::Escape($key), '<key>') -replace [regex]::Escape($gateKey), '<gate-key>')
+  Save 'workbench.log' ((((Dk logs --tail 120 "$P-wb") -replace [regex]::Escape($key), '<key>') -replace [regex]::Escape($gateKey), '<gate-key>') -replace [regex]::Escape($svcKey), '<svc-key>')
 } catch {
   Fail "the run stopped: $_"
 } finally {

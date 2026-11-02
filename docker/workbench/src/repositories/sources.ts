@@ -239,7 +239,26 @@ export class LifecycleConflict extends Error {
 // staged; the compile tick commits it. Restore clears all three.
 // REFUSED on a suppressed / unlinked source: re-staging would null retraction_committed_at and
 // return it to generation until the next compile - the source is already retracted, harder.
-export async function retractStaged(id: string, by = "operator"): Promise<Source | null> {
+// rw-p8a2-cleanup2 (review M2 / N2): a signed-in caller is named in a shared row (retracted_by, a trail actor) only by
+// an action ref; its private cleanup_actions row (owner_sub = the identity seam's subject) is written HERE, in the same
+// transaction as the shared write (contracts/repo/actions.ts is the contract-side twin).
+export interface PrivateAction {
+  id: string; // the ref is cleanup-action:<id>
+  owner_sub: string;
+  actor_sub: string;
+  kind: string;
+  detail: Record<string, unknown>;
+}
+
+async function recordPrivate(c: { queryObject: (q: string, a: unknown[]) => Promise<unknown> }, a: PrivateAction, sourceId: string) {
+  await c.queryObject(
+    `INSERT INTO public.cleanup_actions (id, owner_sub, actor_sub, kind, source_id, detail, finished_at)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, now())`,
+    [a.id, a.owner_sub, a.actor_sub, a.kind, sourceId, JSON.stringify(a.detail)],
+  );
+}
+
+export async function retractStaged(id: string, by = "operator", action: PrivateAction | null = null): Promise<Source | null> {
   return await withTransaction(async (c) => {
     const cur = (await c.queryObject<{ lifecycle: string }>(
       `SELECT public.source_lifecycle_state(retraction_committed_at, unlinked_at) AS lifecycle
@@ -259,6 +278,7 @@ export async function retractStaged(id: string, by = "operator"): Promise<Source
         WHERE id = $1 RETURNING ${COLS}`,
       [id, by],
     );
+    if (rows.rows[0] && action) await recordPrivate(c, action, id);
     return rows.rows[0] ?? null;
   });
 }
@@ -271,6 +291,7 @@ export async function retractStaged(id: string, by = "operator"): Promise<Source
 export async function restore(
   id: string,
   by = "operator",
+  action: PrivateAction | null = null,
 ): Promise<{ source: Source; transition: { from: string; to: string } | null } | null> {
   // A source purged BEFORE rw-p0b-purge-door (metadata.purged, stamped by the removed direct
   // purge) stays a permanent suppression (OD-1) — restore refuses it. A purge made since is the
@@ -300,6 +321,7 @@ export async function restore(
        VALUES ($1, 'restored', $2::jsonb, $3)`,
       [id, JSON.stringify({ ...transition, reason: cur.reason, door: "POST /workbench/sources/:id/restore" }), by],
     );
+    if (action) await recordPrivate(c, action, id);
     await c.queryObject(`SELECT public.recompute_claims_for_source($1)`, [id]);
     return { source: rows.rows[0], transition };
   });

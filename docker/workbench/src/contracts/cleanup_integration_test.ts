@@ -36,9 +36,12 @@ async function sql<T = Record<string, any>>(text: string, args: unknown[] = []):
 const rnd = () => crypto.randomUUID().replace(/-/g, "").slice(0, 10);
 const A = `clean-a-${rnd()}`;
 const B = `clean-b-${rnd()}`;
+// rw-p8a2-cleanup2: who = "service" calls with the lab's service key (CLEANUP_TEST_SERVICE_KEY; the lab workbench's
+// WORKSPACE_SERVICE_KEYS) - a service, not a user
+const SERVICE_KEY = Deno.env.get("CLEANUP_TEST_SERVICE_KEY") ?? "";
 async function call(who: string, method: string, path: string, body?: unknown) {
   const r = await fetch(BASE + path, {
-    method, headers: { "content-type": "application/json", "x-brain-key": KEY, [SUB_HEADER]: who },
+    method, headers: { "content-type": "application/json", ...(who === "service" ? { "x-brain-key": SERVICE_KEY } : { "x-brain-key": KEY, [SUB_HEADER]: who }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
@@ -192,8 +195,17 @@ t("reopen candidates: user-erased returns that cleared their bar and deliberate 
   const autoUrl = `https://example.org/cleanup/reopen/${rnd()}?score=high`;
   const auto = await newSource("reopen-auto", { chunk: false, claim: false, url: autoUrl });
   await suppress(auto);
-  const ae = await call(A, "POST", `${C}/sources/${auto}/erase`, { reason_type: "debunked", eraser: { kind: "automation", run_id: "run-cleanup-test" } });
+  // rw-p8a2-cleanup2 (review M1): a signed-in user may not declare an automation eraser (403, nothing erased);
+  // a service may
+  const autoBody = { reason_type: "debunked", eraser: { kind: "automation", run_id: "run-cleanup-test" } };
+  const notMine = await call(A, "POST", `${C}/sources/${auto}/erase`, autoBody);
+  assertEquals(notMine.status, 403, notMine.text);
+  assertEquals((await sql(`SELECT 1 FROM public.source_tombstones WHERE source_id = $1`, [auto])).length, 0, "the user's automation erase wrote nothing");
+  assertEquals((await sql(`SELECT 1 FROM public.sources WHERE id = $1`, [auto])).length, 1);
+  assert(SERVICE_KEY, "the lab passes CLEANUP_TEST_SERVICE_KEY");
+  const ae = await call("service", "POST", `${C}/sources/${auto}/erase`, autoBody);
   assertEquals(ae.status, 200, ae.text);
+  assertEquals([ae.json.tombstone.eraser_kind, ae.json.tombstone.eraser_run_id, ae.json.tombstone.eraser_user], ["automation", "run-cleanup-test", null]);
   const ab = await call(A, "POST", `${C}/admission`, { url: autoUrl, path: "query", candidate: { content: "auto back" } });
   assertEquals([ab.json.outcome, ab.json.admits], ["admitted_contesting", true], ab.text);
 
@@ -249,6 +261,22 @@ t("reopen candidates: user-erased returns that cleared their bar and deliberate 
 t("07-MULTI-USER: cleanup actions are their owner's - another user's by id is 404, never listed, never named in a shared row", async () => {
   const s = await newSource("owner");
   await suppress(s);
+  // rw-p8a2-cleanup2 (review M2 / N2): B restores a source B suppressed, and B stages a retract (naming A in a body
+  // `by`, which is ignored) and restores it - the restore's trail actor and retracted_by are B's private refs
+  const sr = await newSource("owner-restore", { chunk: false, claim: false });
+  assertEquals((await call(B, "POST", `${C}/sources/${sr}/suppress`, { reason: "b suppresses" })).status, 200);
+  const rs = await call(B, "POST", `/workbench/sources/${sr}/restore`, {});
+  assertEquals([rs.status, rs.json.transition?.to], [200, "active"], rs.text);
+  const [restored] = await sql<{ actor: string }>(`SELECT actor FROM public.source_trail_events WHERE source_id = $1 AND kind = 'restored'`, [sr]);
+  assert(/^cleanup-action:/.test(restored.actor), `restore trail actor ${restored.actor}`);
+  assertEquals((await sql<{ o: string }>(`SELECT owner_sub AS o FROM public.cleanup_actions WHERE 'cleanup-action:' || id::text = $1`, [restored.actor]))[0]?.o, B,
+    "the restore's private row is B's");
+  const st = await newSource("owner-retract", { chunk: false, claim: false });
+  const rt = await call(B, "POST", `/workbench/sources/${st}/retract`, { scope: "global", by: A });
+  assertEquals(rt.status, 200, rt.text);
+  const [rb] = await sql<{ by: string }>(`SELECT retracted_by AS by FROM public.sources WHERE id = $1`, [st]);
+  assert(/^cleanup-action:/.test(rb.by), `retracted_by ${rb.by} (a body by naming A is ignored)`);
+  assertEquals((await call(B, "POST", `/workbench/sources/${st}/restore`, {})).status, 200);
   const bs = await call(B, "POST", `${CL}/sources/${s}/sever`, { all: true });
   assertEquals(bs.status, 200, bs.text);
   const be = await call(B, "POST", `${CL}/sources/${s}/erase`, { reason_type: "deliberate" });

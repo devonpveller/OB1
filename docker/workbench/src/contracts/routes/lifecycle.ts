@@ -94,15 +94,25 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
     method: "post", path: `${PREFIX}/sources/{id}/erase`, operationId: "erase", tags: T,
     summary: "stage 4: erase - refused unless unlinked with zero dependence; leaves a named tombstone",
     request: { params: idParam(FX.sourceUnlinked), body: body(EraseRequest, EX.eraseRequest) },
-    responses: { 200: json(EraseResult, EX.erase, "erased; the tombstone"), ...errors },
+    responses: {
+      200: json(EraseResult, EX.erase, "erased; the tombstone"),
+      403: json(z.object({ error: z.string() }), { error: "only a service or an admin may record an eraser other than a user" }, "an automation / fixture eraser from a caller that is neither a service nor an admin"),
+      ...errors,
+    },
   }), async (c) => {
     try {
       // a user's erasure records its eraser for the lift rule - round 3b: as a private action ref (the
       // cleanup_actions row maps it to the identity seam's subject), never the subject and never the body's user
       const b = c.req.valid("json");
       const id = c.req.valid("param").id;
-      if (b.eraser.kind !== "user") return send(c, EraseResult, await lc.erase(deps.db, deps.registry, id, b));
       const who = await identityOf(c);
+      if (b.eraser.kind !== "user") {
+        // rw-p8a2-cleanup2 (review M1): an eraser other than a user (an automation with its run id, a fixture) is a
+        // service's or an admin's to declare - from anyone else it would be an erasure with no private record that
+        // only an admin may lift and that readmits itself (D5 item 7)
+        if (who.kind !== "service" && !who.admin) throw new lc.Forbidden("only a service or an admin may record an eraser other than a user");
+        return send(c, EraseResult, await lc.erase(deps.db, deps.registry, id, b));
+      }
       return send(c, EraseResult, await deps.db.tx(async (t) => {
         const aid = crypto.randomUUID();
         const r = await lc.erase(t, deps.registry, id, { ...b, eraser: { kind: "user", user: ACTION_REF(aid) } });

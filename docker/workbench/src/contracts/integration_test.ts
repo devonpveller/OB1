@@ -18,6 +18,8 @@ import * as K from "./schemas/knowledge.ts";
 import * as I from "./schemas/ideas.ts";
 import { Notifications, Setting } from "./schemas/system.ts";
 import { FX } from "./schemas/fixtures.ts";
+import { Hono } from "hono";
+import { identitySeam, seamDeps } from "../middleware/identity.ts";
 
 const HOST = Deno.env.get("CONTRACT_TEST_DB_HOST");
 const ignore = !HOST;
@@ -45,9 +47,22 @@ const app = db
 const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore, fn, sanitizeOps: false, sanitizeResources: false });
 const sql = <T = Record<string, unknown>>(text: string, args: unknown[] = []) => db!.query<T>(text, args);
 const B = "/workbench/contract";
-async function call(method: string, path: string, body?: unknown) {
-  const r = await app!.request(B + path, {
-    method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+// rw-p8a2-cleanup2 (review M1): an eraser other than a user is a service's (or an admin's) to declare. The contract
+// is served here behind the identity seam with one service key, and a call whose body declares such an eraser sends
+// it - every other call is the seam's default identity, as before.
+const SERVICE_KEY = "contract-integration-service-key-0123";
+const front = app ? new Hono() : null;
+if (front) {
+  const env = (k: string) => ({ WORKSPACE_SERVICE_KEYS: `contract-test=${SERVICE_KEY}` } as Record<string, string>)[k];
+  front.use("*", identitySeam(seamDeps(null, env)));
+  front.route("/", app!);
+}
+async function call(method: string, path: string, body?: unknown, opts: { asDefault?: boolean } = {}) {
+  const eraser = (body as { eraser?: { kind?: string } } | undefined)?.eraser;
+  const service = !opts.asDefault && !!eraser && eraser.kind !== "user";
+  const r = await front!.request(B + path, {
+    method, headers: { "content-type": "application/json", ...(service ? { "x-brain-key": SERVICE_KEY } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
   let json: Record<string, any> = {};
@@ -221,6 +236,8 @@ t("erase validates its eraser: automation must name a run, a user must be named,
   const s = await newSource();
   await call("POST", `/sources/${s}/suppress`, { reason: "x" });
   assertEquals((await call("POST", `/sources/${s}/erase`, { reason_type: "debunked", eraser: { kind: "automation" } })).status, 409);
+  // rw-p8a2-cleanup2 (M1): the same automation eraser from the default identity (not a service, not an admin) is 403
+  assertEquals((await call("POST", `/sources/${s}/erase`, { reason_type: "debunked", eraser: { kind: "automation", run_id: "r" } }, { asDefault: true })).status, 403);
   assertEquals((await call("POST", `/sources/${s}/erase`, { reason_type: "nope", eraser: { kind: "user", user: "u" } })).status, 409);
 });
 
@@ -1074,7 +1091,9 @@ t("the purge's trail actor is the authenticated user; a body 'by' is a note and 
     `SELECT kind, detail, actor FROM public.source_trail_events WHERE source_id = $1 ORDER BY created_at, id`, [s]);
   assertEquals(ev.length, 1);
   assertEquals([ev[0].kind, ev[0].actor], ["suppressed", "operator"], "the trail actor is the seam's (here the fallback), not body.by and not the Remote-User");
-  assertEquals(ev[0].detail.claimed_by, "body-actor", "the body's 'by' is recorded as a note");
+  // rw-p8a2-cleanup2 (review N2): a body `by` is no longer copied into the shared trail at all
+  assertEquals(ev[0].detail.claimed_by, undefined, "the body's 'by' is not recorded");
+  assert(!JSON.stringify(ev[0].detail).includes("body-actor"));
 });
 
 // ── rw-p7a-tts: podcasts, presenters, teams, render requests (the caller is the default identity) ──

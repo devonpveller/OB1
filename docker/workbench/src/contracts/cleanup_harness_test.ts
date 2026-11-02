@@ -8,7 +8,7 @@ import { RegistryReader } from "./registry.ts";
 import { unavailableScorer } from "./logic/reopen.ts";
 import type { Db } from "./db.ts";
 import { internalError } from "../middleware/errors.ts";
-import { identitySeam, seamDeps } from "../middleware/identity.ts";
+import { type Identity, identitySeam, seamDeps } from "../middleware/identity.ts";
 
 export const SRC = "33333333-3333-4333-8333-333333333333";
 export const TOMB = "66666666-6666-4666-8666-666666666667";
@@ -29,7 +29,10 @@ export const tombRow = (over: Record<string, unknown> = {}) => ({
   erased_at: AT, lifted_at: null, lifted_by: null, readmitted_source_id: null, attempts: [], readmitted_in_scope: false, ...over,
 });
 
-export function harness(handlers: Handler[]) {
+// opts.env: extra seam settings (e.g. WORKSPACE_SERVICE_KEYS for a service caller, then send its key as x-brain-key);
+// opts.identity: a fixed identity set where the seam would (an admin - the lab cannot sign one in by header)
+export const SERVICE_KEY = "svc-key-for-the-harness-0123456789";
+export function harness(handlers: Handler[], opts: { identity?: Identity } = {}) {
   const seen: Stmt[] = [];
   const rolledBack = new Set<number>();
   let nextTx = 0;
@@ -56,13 +59,18 @@ export function harness(handlers: Handler[]) {
     db, registry: new RegistryReader(db, 0), scorer: unavailableScorer, embed: () => Promise.reject(new Error("x")),
     chunk: () => [], mountsRoot: "/mounts", streamPollMs: 10, log: () => {},
   });
-  const env = (k: string) => ({ WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" } as Record<string, string>)[k];
+  const env = (k: string) => ({ WORKSPACE_IDENTITY_HEADER: "X-Test-Sub", WORKSPACE_SERVICE_KEYS: `harness-svc=${SERVICE_KEY}` } as Record<string, string>)[k];
   const app = new Hono();
   app.onError(internalError);
-  app.use("*", identitySeam(seamDeps(null, env)));
+  if (opts.identity) app.use("*", async (c, next) => { c.set("identity" as never, opts.identity as never); await next(); });
+  else app.use("*", identitySeam(seamDeps(null, env)));
   app.route("/", contract);
+  // who: a header subject; "" = no identity header (the default identity); "service" = the harness service key
   const call = (who: string, method: string, path: string, body?: unknown) =>
-    app.request(path, { method, headers: { "content-type": "application/json", "x-test-sub": who }, body: body === undefined ? undefined : JSON.stringify(body) });
+    app.request(path, {
+      method, body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { "content-type": "application/json", ...(who === "service" ? { "x-brain-key": SERVICE_KEY } : who ? { "x-test-sub": who } : {}) },
+    });
   // a statement committed = it ran outside any transaction, or in one that was not rolled back
   const committed = (re: RegExp) => seen.filter((s) => re.test(s.sql) && (s.tx === 0 || !rolledBack.has(s.tx)));
   return { call, seen, committed };

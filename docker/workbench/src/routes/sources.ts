@@ -32,6 +32,16 @@ function authorOf(c: Context): string {
   return changeAuthor(c, "operator");
 }
 
+// rw-p8a2-cleanup2 (review M2 / N2): for a SIGNED-IN caller the actor written into a shared D5 row is a fresh action
+// ref, recorded privately in the same transaction (repositories/sources.ts recordPrivate); a body `by` is never the
+// actor. The single-user default and a service keep `fallback`.
+function signedInActor(c: Context, kind: string, detail: Record<string, unknown>, fallback: string) {
+  const who = seamIdentity(c);
+  if (!who || !signedIn(who)) return { by: fallback, action: null as repo.PrivateAction | null, ref: null as string | null };
+  const id = crypto.randomUUID();
+  return { by: ACTION_REF(id), ref: ACTION_REF(id), action: { id, owner_sub: who.sub, actor_sub: who.actor, kind, detail } as repo.PrivateAction };
+}
+
 // Reject a non-UUID :id with a clean 400 up front, instead of letting Postgres
 // 500 on "invalid input syntax for type uuid" (e.g. an entity id typed into a
 // source field). Guards every /:id and /:id/* route.
@@ -182,7 +192,9 @@ sources.post("/:id/retract", async (c) => {
   }
   let src;
   try {
-    src = await repo.retractStaged(id, body?.by ?? "operator");
+    // a signed-in caller's body `by` is ignored (review N2); the single-user default / a service keep it
+    const actor = signedInActor(c, "retract", { door: "POST /workbench/sources/:id/retract" }, typeof body?.by === "string" && body.by.trim() ? body.by.trim() : "operator");
+    src = await repo.retractStaged(id, actor.by, actor.action);
   } catch (e) {
     // D5 (rw-p0-contract attempt 2): never un-commit a suppression
     if (e instanceof repo.LifecycleConflict) return c.json({ error: e.message, lifecycle: e.lifecycle }, 409);
@@ -202,7 +214,8 @@ sources.post("/:id/retract", async (c) => {
 // suppressed / unlinked source is a recorded D5 transition (a 'restored' trail event; the
 // response carries `transition`); restoring an active one is unchanged (`transition: null`).
 sources.post("/:id/restore", async (c) => {
-  const res = await repo.restore(c.req.param("id"), authorOf(c));
+  const actor = signedInActor(c, "restore", { door: "POST /workbench/sources/:id/restore" }, "operator");
+  const res = await repo.restore(c.req.param("id"), actor.by, actor.action);
   if (!res) return c.json({ error: "not found" }, 404);
   await logChange({
     action: "restore",
@@ -243,21 +256,20 @@ sources.delete("/:id", async (c) => {
   }
   const note = typeof body?.note === "string" && body.note.trim() ? body.note.trim() : null;
   // The trail actor is the AUTHENTICATED user (rw-p0b-purge-door attempt 2, tester finding F3: a
-  // body 'by' named the actor ahead of Remote-User, so any caller could name anyone). A body 'by'
-  // that differs is kept in the event's detail as a note (claimed_by), never as the actor.
+  // body 'by' named the actor ahead of Remote-User, so any caller could name anyone). A body 'by' is
+  // never the actor, and since rw-p8a2-cleanup2 it is not recorded at all.
   // rw-p8a2-cleanup round 3b: a SIGNED-IN author is named in the shared rows (the trail actor, retracted_by,
   // suppressed_by) only by a private action ref (contracts/repo/actions.ts) - never by its subject or name; the
-  // single-user default and a service keep authorOf's fallback ("operator").
+  // single-user default and a service keep authorOf's fallback ("operator"). rw-p8a2-cleanup2 (review N2): a body
+  // `by` is no longer copied anywhere (it was kept as a "claimed_by" note in the shared trail).
   const who = seamIdentity(c);
   const aid = crypto.randomUUID();
   const by = who && signedIn(who) ? ACTION_REF(aid) : authorOf(c);
-  const claimedBy = typeof body?.by === "string" && body.by.trim() && body.by.trim() !== by ? body.by.trim() : null;
   let res;
   try {
     res = await contractDb.tx(async (t) => {
       const r = await lifecycle.suppress(t, id, reasonType, by, {
         door: "DELETE /workbench/sources/:id", reason_type: reasonType, note,
-        ...(claimedBy ? { claimed_by: claimedBy } : {}),
       });
       if (who && signedIn(who)) await recordAction(t, who, aid, "suppress", { source_id: id, detail: { door: "DELETE /workbench/sources/:id", reason_type: reasonType } });
       return r;
