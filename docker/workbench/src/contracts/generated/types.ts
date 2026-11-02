@@ -34,6 +34,7 @@ export type AdmissionDecision = {
     readmitted_source_id: string | null;
     attempts: Array<TombstoneAttempt>;
     may_lift?: boolean;
+    erased_by_you?: boolean;
   } | null;
   source_id: string | null;
   dispute_id: string | null;
@@ -764,6 +765,7 @@ export type Reference = {
     readmitted_source_id: string | null;
     attempts: Array<TombstoneAttempt>;
     may_lift?: boolean;
+    erased_by_you?: boolean;
   } | null;
   held: {
     refinery_id: string;
@@ -1231,6 +1233,7 @@ export type Tombstone = {
   readmitted_source_id: string | null;
   attempts: Array<TombstoneAttempt>;
   may_lift?: boolean;
+  erased_by_you?: boolean;
 };
 
 export type TombstoneAttempt = {

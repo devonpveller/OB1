@@ -37,6 +37,7 @@ const TombstoneShape = z.object({
   attempts: z.array(TombstoneAttempt),
   // round 3 (rw-p8a1-core): on a tombstone read, whether THIS caller may lift it (the eraser, or an admin)
   may_lift: z.boolean().optional().openapi({ description: "the tombstone read answers it for the caller; absent elsewhere" }),
+  erased_by_you: z.boolean().optional().openapi({ description: "the tombstone read answers it for the caller from the eraser's private record (rw-p8a2-cleanup round 3b); absent elsewhere" }),
 });
 export const Tombstone = TombstoneShape.openapi("Tombstone");
 

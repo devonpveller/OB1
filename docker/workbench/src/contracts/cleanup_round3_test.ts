@@ -11,77 +11,9 @@
 //       irreversible step
 //   RF2 the reopen-candidate read pages until it has `limit` candidates: non-candidates cannot push one off
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { Hono } from "hono";
-import { createContractApp } from "./app.ts";
-import { RegistryReader } from "./registry.ts";
-import { unavailableScorer } from "./logic/reopen.ts";
-import type { Db } from "./db.ts";
-import { internalError } from "../middleware/errors.ts";
-import { identitySeam, seamDeps } from "../middleware/identity.ts";
-
-const SRC = "33333333-3333-4333-8333-333333333333";
-const TOMB = "66666666-6666-4666-8666-666666666667";
-const AT = "2026-11-02T00:00:00.000Z";
-
-interface Stmt { sql: string; args: unknown[]; tx: number }
-type Handler = [RegExp, (args: unknown[]) => unknown[]];
-
-const REG = [
-  ["erasure_reasons", "deliberate", { reopen_path: "note_only" }], ["erasure_reasons", "debunked", { reopen_path: "rescore_contest" }],
-  ["erasers", "user", { gate: "candidate", requires: "user" }], ["erasers", "automation", { gate: "auto", requires: "run_id" }],
-  ["dependence_kinds", "chunk", { blocks_erase: true, severable: true }], ["dependence_kinds", "trail_event", { blocks_erase: false, severable: false }],
-].map(([registry, key, definition]) => ({ registry, key, version: 1, label: key, definition, retired_at: null, superseded_by: null }));
-
-const tombRow = (over: Record<string, unknown> = {}) => ({
-  id: TOMB, source_id: SRC, url: "https://example.org/x", title: "x", reason_type: "deliberate", note: null, batch_run_id: null,
-  eraser_kind: "user", eraser_user: "u-bee", eraser_run_id: null, confidence: null, score_version: null, fingerprint: null,
-  erased_at: AT, lifted_at: null, lifted_by: null, readmitted_source_id: null, attempts: [], readmitted_in_scope: false, ...over,
-});
-
-function harness(handlers: Handler[]) {
-  const seen: Stmt[] = [];
-  const rolledBack = new Set<number>();
-  let nextTx = 0;
-  const make = (tx: number): Db => ({
-    query: <T>(sql: string, args: unknown[] = []) => {
-      seen.push({ sql, args, tx });
-      if (/FROM public\.contract_registry_view/.test(sql)) return Promise.resolve(REG as T[]);
-      for (const [re, fn] of handlers) if (re.test(sql)) return Promise.resolve().then(() => fn(args) as T[]);
-      return Promise.resolve([] as T[]);
-    },
-    tx: async <T>(fn: (d: Db) => Promise<T>) => {
-      if (tx !== 0) return await fn(make(tx)); // nested: the same transaction
-      const id = ++nextTx;
-      try {
-        return await fn(make(id));
-      } catch (e) {
-        rolledBack.add(id);
-        throw e;
-      }
-    },
-  });
-  const db = make(0);
-  const contract = createContractApp({
-    db, registry: new RegistryReader(db, 0), scorer: unavailableScorer, embed: () => Promise.reject(new Error("x")),
-    chunk: () => [], mountsRoot: "/mounts", streamPollMs: 10, log: () => {},
-  });
-  const env = (k: string) => ({ WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" } as Record<string, string>)[k];
-  const app = new Hono();
-  app.onError(internalError);
-  app.use("*", identitySeam(seamDeps(null, env)));
-  app.route("/", contract);
-  const call = (who: string, method: string, path: string, body?: unknown) =>
-    app.request(path, { method, headers: { "content-type": "application/json", "x-test-sub": who }, body: body === undefined ? undefined : JSON.stringify(body) });
-  // a statement committed = it ran outside any transaction, or in one that was not rolled back
-  const committed = (re: RegExp) => seen.filter((s) => re.test(s.sql) && (s.tx === 0 || !rolledBack.has(s.tx)));
-  return { call, seen, committed };
-}
+import { AT, harness, type Handler, lifeUnlinked, lockUnlinked, SRC, TOMB, tombInsert, tombRow, tombSelect } from "./cleanup_harness_test.ts";
 
 const failingAction: Handler = [/INSERT INTO public\.cleanup_actions/, () => { throw new Error("action insert failed (planted)"); }];
-const lockUnlinked: Handler = [/FROM public\.sources WHERE id = \$1 FOR UPDATE/, () => [{ id: SRC, lifecycle: "unlinked", url: "https://example.org/x", title: "x", content: "c" }]];
-const lifeUnlinked: Handler = [/AS lifecycle FROM public\.sources\s+WHERE id = \$1 AND/, () => [{ lifecycle: "unlinked" }]];
-const tombInsert: Handler = [/INSERT INTO public\.source_tombstones/, () => [{ id: TOMB }]];
-const tombSelect = (over: Record<string, unknown> = {}): Handler => [/FROM public\.source_tombstones t/, () => [tombRow(over)]];
 
 Deno.test("RF1: a failed cleanup-action insert rolls back the erase - nothing is erased", async () => {
   const h = harness([failingAction, lockUnlinked, lifeUnlinked, tombInsert, tombSelect()]);
@@ -106,20 +38,24 @@ Deno.test("RF1: a failed cleanup-action insert rolls back the sever - no connect
   assertEquals(h.committed(/DELETE FROM public\.source_chunks|INSERT INTO public\.source_trail_events/).length, 0, "the sever is rolled back");
 });
 
-Deno.test("L2: the cleanup erase records eraser_user = the identity seam's subject (never an action ref, never the body)", async () => {
-  const h = harness([lockUnlinked, lifeUnlinked, tombInsert, tombSelect({ eraser_user: "u-ay" }),
+const REFB = "cleanup-action:11111111-1111-4111-8111-111111111111"; // an erase action whose private row u-bee owns
+const ownsB: Handler = [/FROM public\.cleanup_actions\s+WHERE 'cleanup-action:' \|\| id::text = \$1/, (a) => [{ owns: a[0] === REFB && a[1] === "u-bee" }]];
+
+Deno.test("L2 (round 3b): the cleanup erase records eraser_user = its action ref, whose private row is the caller's", async () => {
+  const h = harness([lockUnlinked, lifeUnlinked, tombInsert, tombSelect(),
     [/INSERT INTO public\.cleanup_actions/, (a) => [{ id: a[0], kind: a[3], reason_type: a[4], source_id: a[5], tombstone_id: a[6], detail: {}, created_at: AT, finished_at: AT }]]]);
   const r = await h.call("u-ay", "POST", `/workbench/contract/cleanup/sources/${SRC}/erase`, { reason_type: "deliberate" });
   assertEquals(r.status, 200, await r.text());
   const ins = h.seen.find((s) => /INSERT INTO public\.source_tombstones/.test(s.sql))!;
-  assertEquals([ins.args[4], ins.args[6]], ["user", "u-ay"], "eraser_kind user, eraser_user the seam's subject");
+  const own = h.seen.find((s) => /INSERT INTO public\.cleanup_actions/.test(s.sql))!;
+  assertEquals([ins.args[4], ins.args[6], own.args[1]], ["user", `cleanup-action:${own.args[0]}`, "u-ay"], "eraser_user is the ref; the private row is u-ay's");
 });
 
 Deno.test("L1: the cleanup lift is the operator's rule - another user is 403 with nothing written; `by` is ignored", async () => {
   const action: Handler = [/INSERT INTO public\.cleanup_actions/, (a) => [{ id: a[0], kind: a[3], reason_type: null, source_id: null, tombstone_id: a[6], detail: {}, created_at: AT, finished_at: AT }]];
   const lock: Handler = [/FROM public\.source_tombstones WHERE id = \$1 FOR UPDATE/, () => [{ id: TOMB, lifted_at: null }]];
-  // not the eraser
-  let h = harness([lock, tombSelect({ eraser_user: "u-bee" }), action]);
+  // not the eraser (u-bee's private row owns the ref)
+  let h = harness([ownsB, lock, tombSelect({ eraser_user: REFB }), action]);
   let r = await h.call("u-ay", "POST", `/workbench/contract/cleanup/tombstones/${TOMB}/lift`, {});
   assertEquals(r.status, 403, await r.text());
   assertEquals(h.committed(/UPDATE public\.source_tombstones|INSERT INTO public\.cleanup_actions/).length, 0);
@@ -127,25 +63,26 @@ Deno.test("L1: the cleanup lift is the operator's rule - another user is 403 wit
   r = await h.call("u-ay", "POST", `/workbench/contract/cleanup/tombstones/${TOMB}/lift`, { by: "u-bee" });
   assertEquals(r.status, 403, await r.text());
   // the eraser: lifted (with a `by` the route ignores, as the trail's lift does)
-  h = harness([lock, [/UPDATE public\.source_tombstones SET lifted_at/, () => [{ source_id: SRC }]],
-    tombSelect({ eraser_user: "u-bee", lifted_at: AT, lifted_by: "PLACEHOLDER" }), action]);
+  h = harness([ownsB, lock, [/UPDATE public\.source_tombstones SET lifted_at/, () => [{ source_id: SRC }]],
+    tombSelect({ eraser_user: REFB, lifted_at: AT, lifted_by: "PLACEHOLDER" }), action]);
   r = await h.call("u-bee", "POST", `/workbench/contract/cleanup/tombstones/${TOMB}/lift`, { by: "ForgedLifter", note: "ok" });
   assertEquals(r.status, 200, await r.text());
   const upd = h.seen.find((s) => /UPDATE public\.source_tombstones SET lifted_at/.test(s.sql))!;
   assert(!JSON.stringify(upd.args).includes("ForgedLifter"), "the body's `by` is never the lifter");
   // a repeat lift: 409, no action
-  h = harness([[/FROM public\.source_tombstones WHERE id = \$1 FOR UPDATE/, () => [{ id: TOMB, lifted_at: AT }]], tombSelect({ eraser_user: "u-bee", lifted_at: AT }), action]);
+  h = harness([ownsB, [/FROM public\.source_tombstones WHERE id = \$1 FOR UPDATE/, () => [{ id: TOMB, lifted_at: AT }]], tombSelect({ eraser_user: REFB, lifted_at: AT }), action]);
   r = await h.call("u-bee", "POST", `/workbench/contract/cleanup/tombstones/${TOMB}/lift`, {});
   assertEquals(r.status, 409, await r.text());
   assertEquals(h.committed(/INSERT INTO public\.cleanup_actions/).length, 0);
 });
 
-Deno.test("L3: a tombstone names its eraser and lifter only to that user", async () => {
-  const h = harness([tombSelect({ eraser_user: "u-bee", lifted_at: AT, lifted_by: "u-bee" })]);
+Deno.test("L3 (round 3b, the backstop): a subject that slipped into a shared row is answered as null to anyone else; a ref passes", async () => {
+  const h = harness([ownsB, tombSelect({ eraser_user: "u-bee", lifted_at: AT, lifted_by: REFB })]);
   const asA = await (await h.call("u-ay", "GET", `/workbench/contract/tombstones/${TOMB}`)).json();
-  assertEquals([asA.eraser_user, asA.lifted_by, asA.may_lift], [null, null, false], JSON.stringify(asA));
+  assertEquals([asA.eraser_user, asA.lifted_by, asA.may_lift, asA.erased_by_you], [null, REFB, false, false], JSON.stringify(asA));
   const asB = await (await h.call("u-bee", "GET", `/workbench/contract/tombstones/${TOMB}`)).json();
-  assertEquals([asB.eraser_user, asB.lifted_by, asB.may_lift], ["u-bee", "u-bee", true]);
+  // its own subject is not hidden from B - but it is NOT ownership either (no private row): may_lift false
+  assertEquals([asB.eraser_user, asB.may_lift, asB.erased_by_you], ["u-bee", false, false]);
 });
 
 Deno.test("RF2: non-candidate tombstones cannot push a candidate off the page", async () => {

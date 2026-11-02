@@ -56,6 +56,9 @@ interface Tomb {
   lifted_by: string | null;
   attempts: { path: string; outcome: string; note: string | null; attempted_at: string }[];
   may_lift?: boolean; // round 3: the read answers it for the viewer (the eraser, or an admin)
+  // rw-p8a2-cleanup round 3b: eraser_user / lifted_by hold opaque action refs, never a person - the read answers
+  // whether the viewer erased it; the panel never shows a ref
+  erased_by_you?: boolean;
 }
 
 type Row = { key: string; at: string; removal?: RemovalEntry; lead?: LeadEntry };
@@ -103,8 +106,8 @@ export function TombstoneView({ id, onLifted }: { id: string; onLifted?: () => v
         <dt>title</dt><dd>{t.title || "(none)"}</dd>
         <dt>reason</dt><dd data-testid="tombstone-reason">{t.reason_type}</dd>
         <dt>note</dt><dd data-testid="tombstone-note">{t.note ?? <span className="ws-muted">no note</span>}</dd>
-        <dt>erased</dt><dd>{when(t.erased_at)} by {t.eraser_kind}{t.eraser_user ? ` (${t.eraser_user})` : ""}{t.batch_run_id ? `, batch ${t.batch_run_id}` : ""}</dd>
-        <dt>lifted</dt><dd data-testid="tombstone-lifted">{t.lifted_at ? `${when(t.lifted_at)} by ${t.lifted_by ?? "?"}` : "no"}</dd>
+        <dt>erased</dt><dd>{when(t.erased_at)} by {t.eraser_kind}{t.erased_by_you ? " (you)" : ""}{t.batch_run_id ? `, batch ${t.batch_run_id}` : ""}</dd>
+        <dt>lifted</dt><dd data-testid="tombstone-lifted">{t.lifted_at ? when(t.lifted_at) : "no"}</dd>
       </dl>
       {t.attempts.length > 0 && (
         <ol className="ws-why" data-testid="tombstone-attempts">

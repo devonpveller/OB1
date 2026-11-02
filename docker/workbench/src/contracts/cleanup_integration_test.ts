@@ -117,9 +117,9 @@ t("a manual erase is refused while dependence remains, needs a reason type, and 
   const [tb] = await sql<{ reason_type: string; note: string; eraser_kind: string; eraser_user: string; batch_run_id: string | null }>(
     `SELECT reason_type, note, eraser_kind, eraser_user, batch_run_id FROM public.source_tombstones WHERE source_id = $1`, [s]);
   assertEquals([tb.reason_type, tb.note, tb.eraser_kind, tb.eraser_user, tb.batch_run_id],
-    ["credibility", "a manual note", "user", A, null]);
-  // round 3 (operator 2026-11-02): eraser_user is the identity seam's subject (the lift rule reads it); a sever
-  // still names its action. Reads name the eraser only to that user (the 07-MULTI-USER test below).
+    ["credibility", "a manual note", "user", `cleanup-action:${e.json.action.id}`, null]);
+  // round 3b: eraser_user is the erase action's ref; its private row is A's (the lift rule looks it up)
+  assertEquals((await sql<{ o: string }>(`SELECT owner_sub AS o FROM public.cleanup_actions WHERE id = $1`, [e.json.action.id]))[0].o, A);
   const sevActors = await sql<{ actor: string }>(`SELECT DISTINCT actor FROM public.source_trail_events WHERE source_id = $1 AND kind = 'severed'`, [s]);
   for (const r of sevActors) assert(r.actor?.startsWith("cleanup-action:"), `sever trail actor ${r.actor}`);
 });
@@ -147,7 +147,7 @@ t("process-all: one reason type, no note; severs and erases what it can, reports
   const tombs = await sql<{ source_id: string; reason_type: string; note: string | null; batch_run_id: string; eraser_user: string }>(
     `SELECT source_id, reason_type, note, batch_run_id, eraser_user FROM public.source_tombstones WHERE source_id = ANY($1::uuid[])`, [[sev, unl, linked]]);
   assertEquals(tombs.length, 2);
-  for (const tb of tombs) assertEquals([tb.reason_type, tb.note, tb.batch_run_id, tb.eraser_user], ["debunked", null, run, A]);
+  for (const tb of tombs) assertEquals([tb.reason_type, tb.note, tb.batch_run_id, tb.eraser_user], ["debunked", null, run, run]);
   assertEquals((await listed()).find((x) => x.id === linked)?.lifecycle, "suppressed", "the blocked source stays listed with its status");
   const act = await call(A, "GET", `${CL}/actions/${r.json.action.id}`);
   assertEquals([act.status, act.json.kind, act.json.reason_type, act.json.detail.erased, act.json.detail.blocked], [200, "process_all", "debunked", 2, 1]);
@@ -269,22 +269,23 @@ t("07-MULTI-USER: cleanup actions are their owner's - another user's by id is 40
   // the stored owner is the seam's subject
   const [own] = await sql<{ owner_sub: string; actor_sub: string }>(`SELECT owner_sub, actor_sub FROM public.cleanup_actions WHERE id = $1`, [be.json.action.id]);
   assertEquals([own.owner_sub, own.actor_sub], [B, B]);
-  // round 3 (operator 2026-11-02): B's subject is in the shared rows ONLY as the eraser the lift rule reads -
-  // the tombstone's eraser_user and the 'erased' trail event's actor - and no read names it to A
+  // round 3b: NO shared D5 row holds B's subject - every text of every row of the tombstone, trail, attempt and
+  // source tables (B suppressed through the contract, severed and erased through the cleanup view)
   const shared = await sql<{ n: number }>(
-    `SELECT (SELECT count(*) FROM public.source_trail_events WHERE (actor = $1 AND kind <> 'erased') OR detail::text LIKE '%' || $1 || '%')
-          + (SELECT count(*) FROM public.source_tombstones WHERE $1 IN (coalesce(lifted_by, ''), coalesce(batch_run_id, ''))
-                                                              OR original_context::text LIKE '%' || $1 || '%') AS n`, [B]);
-  assertEquals(Number(shared[0].n), 0, "B's subject is in no shared row but the eraser fields");
+    `SELECT (SELECT count(*) FROM public.source_trail_events x WHERE x::text LIKE '%' || $1 || '%')
+          + (SELECT count(*) FROM public.source_tombstones x WHERE x::text LIKE '%' || $1 || '%')
+          + (SELECT count(*) FROM public.source_tombstone_attempts x WHERE x::text LIKE '%' || $1 || '%')
+          + (SELECT count(*) FROM public.sources x WHERE x::text LIKE '%' || $1 || '%') AS n`, [B]);
+  assertEquals(Number(shared[0].n), 0, "B's subject is in no shared D5 row");
   const tid = be.json.tombstone_id;
   for (const path of [`${C}/tombstones/${tid}`, `${C}/references/${s}`, `${C}/trail?source_id=${s}&limit=50`, `${CL}/reopen-candidates?limit=500`, `${CL}/sources?limit=500`]) {
     const r = await call(A, "GET", path);
     assertEquals(r.text.includes(B), false, `A's ${path} names B: ${r.text.slice(0, 300)}`);
   }
   const mine = await call(B, "GET", `${C}/tombstones/${tid}`);
-  assertEquals([mine.json.eraser_user, mine.json.may_lift], [B, true], "B reads itself as the eraser");
+  assertEquals([mine.json.erased_by_you, mine.json.may_lift], [true, true], "B reads itself as the eraser (from its private row)");
   const theirs = await call(A, "GET", `${C}/tombstones/${tid}`);
-  assertEquals([theirs.status, theirs.json.eraser_user, theirs.json.may_lift], [200, null, false]);
+  assertEquals([theirs.status, theirs.json.erased_by_you, theirs.json.may_lift], [200, false, false]);
   // a non-uuid action id is a plain 404, not a database error
   assertEquals((await call(A, "GET", `${CL}/actions/not-an-id`)).status, 404);
 });

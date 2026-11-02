@@ -56,6 +56,16 @@ const W = (() => {
     urlB: `https://example.org/p8a1/${r}/LeadSecretB`, root: `content/tool/p8a1-${r}`, claim: uuid(),
   };
 })();
+// rw-p8a2-cleanup round 3b: a user's erasure is recorded as a private action ref (cleanup_actions maps it to
+// owner_sub); the shared eraser_user never holds the subject. A planted user tombstone does the same.
+async function erasedBy(sub: string) {
+  const id = uuid();
+  await sql(`INSERT INTO public.cleanup_actions (id, owner_sub, actor_sub, kind) VALUES ($1, $2, $2, 'erase')`, [id, sub]);
+  return `cleanup-action:${id}`;
+}
+const ACTION_REF = /^cleanup-action:[0-9a-f-]{36}$/;
+const ownerOf = async (ref: string) =>
+  (await sql<{ o: string }>(`SELECT owner_sub AS o FROM public.cleanup_actions WHERE 'cleanup-action:' || id::text = $1`, [ref]))[0]?.o ?? null;
 let planted = false;
 async function plant() {
   if (planted) return;
@@ -66,7 +76,7 @@ async function plant() {
                suppression_reason = 'p8a1 suppressed on purpose' WHERE id = $1`, [W.suppressed]);
   await sql(`INSERT INTO public.source_tombstones (id, source_id, url, url_key, title, reason_type, note, eraser_kind, eraser_user)
              VALUES ($1, $2, $3, public.contract_url_key($3), 'P8a1 erased', 'deliberate', 'p8a1 tombstone note', 'user', $4)`,
-    [W.tomb, W.erased, W.urlErased, W.subA]); // round 3: user A erased it (the lift rule)
+    [W.tomb, W.erased, W.urlErased, await erasedBy(W.subA)]); // round 3: user A erased it (the lift rule; rw-p8a2-cleanup 3b: by its private ref)
   // the page graph: a root linking both leaf pages; a contradicted claim grounded in the active source
   await sql(`INSERT INTO public.wiki_pages (slug, page_class, entity_type, title, body, links) VALUES
                ($1, 'entity', 'tool', 'P8a1 root', 'root', $2::jsonb), ($3, 'source', NULL, 'P8a1 active leaf', 'leaf', '[]'),
@@ -215,7 +225,7 @@ t("T8 lift: the eraser lifts (the actor is the identity seam's, never the body's
   const mine = uuid(), auto = uuid();
   const ins = `INSERT INTO public.source_tombstones (id, source_id, url, url_key, title, reason_type, eraser_kind, eraser_user)
                VALUES ($1, $2, $3, public.contract_url_key($3), 'P8a1 lift probe', 'deliberate', $4, $5)`;
-  await sql(ins, [mine, uuid(), `https://example.org/p8a1/${W.r}/lift-mine`, "user", W.subA]);
+  await sql(ins, [mine, uuid(), `https://example.org/p8a1/${W.r}/lift-mine`, "user", await erasedBy(W.subA)]);
   await sql(ins, [auto, uuid(), `https://example.org/p8a1/${W.r}/lift-auto`, "automation", null]);
   // the read says who may lift
   assertEquals((await call("GET", `/tombstones/${mine}`, W.subA)).json.may_lift, true);
@@ -227,10 +237,12 @@ t("T8 lift: the eraser lifts (the actor is the identity seam's, never the body's
   // the eraser: lifted, and lifted_by is the seam's actor, not the body's
   const a = await call("POST", `/tombstones/${mine}/lift`, W.subA, { by: "ForgedLifter", note: "mine" });
   assertEquals(a.status, 200, a.text);
-  assertEquals(a.json.lifted_by, W.subA);
+  // rw-p8a2-cleanup 3b: lifted_by is a private action ref, A's own
+  assert(ACTION_REF.test(a.json.lifted_by), a.json.lifted_by);
+  assertEquals(await ownerOf(a.json.lifted_by), W.subA);
   assert(!a.text.includes("ForgedLifter"));
   const ev = await sql<{ actor: string }>(`SELECT actor FROM public.source_trail_events WHERE kind = 'lifted' AND detail ->> 'tombstone_id' = $1`, [mine]);
-  assertEquals(ev.map((e) => e.actor), [W.subA]);
+  assertEquals(ev.map((e) => e.actor), [a.json.lifted_by]);
   // without `by` at all: still fine (it is ignored); an automation's tombstone is an admin's to lift
   const au = await call("POST", `/tombstones/${auto}/lift`, W.subA, {});
   assertEquals(au.status, 403, au.text);
@@ -243,7 +255,9 @@ t("T8 erase: a user's erasure records the identity seam's subject as its eraser,
              VALUES ($1, $2, 'P8a1 erase probe', 'e', now(), now(), now(), 'p8a1')`, [id, `https://example.org/p8a1/${W.r}/erase-probe`]);
   const r = await call("POST", `/sources/${id}/erase`, W.subA, { reason_type: "deliberate", eraser: { kind: "user", user: "SomeoneElse" } });
   assertEquals(r.status, 200, r.text);
-  assertEquals(r.json.tombstone.eraser_user, W.subA);
+  // rw-p8a2-cleanup 3b: the eraser is a private action ref that A owns - never A's subject, never the body's user
+  assert(ACTION_REF.test(r.json.tombstone.eraser_user), r.json.tombstone.eraser_user);
+  assertEquals(await ownerOf(r.json.tombstone.eraser_user), W.subA);
   // so the eraser may lift it, and user B may not
   assertEquals((await call("POST", `/tombstones/${r.json.tombstone.id}/lift`, W.subB, {})).status, 403);
   assertEquals((await call("POST", `/tombstones/${r.json.tombstone.id}/lift`, W.subA, {})).status, 200);

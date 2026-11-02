@@ -1,18 +1,22 @@
-// Who erased or lifted a tombstone is the user's own context (07-MULTI-USER), but since the operator's lift rule
-// (2026-11-02, rw-p8a1-core) a user's erasure records the identity seam's subject as eraser_user - the lift rule
-// compares it. So every contract response that carries a tombstone (an object with `eraser_kind` and
-// `eraser_user`: GET /tombstones/{id}, a reference to an erased source, an erase, a lift, an admission decision,
-// a refusal's detail) names its eraser and its lifter ONLY to that user (an admin impersonating a user sees that
-// user's), or to the single-user install's one default identity (the operator, who owns everything there). Anyone
-// else - an admin acting as themself included: they may still lift (may_lift) without being told whom - reads null.
-// rw-p8a2-cleanup round 3: one walk for the whole contract app, so no route can forget it.
+// A BACKSTOP only (rw-p8a2-cleanup round 3b; the reviewer: a mask fails open). The rule that keeps a signed-in
+// subject out of shared D5 rows is at the WRITE: every user erasure, lift, suppression and severance writes a private
+// action ref (cleanup-action:<id>, repo/actions.ts), and reads answer erased_by_you / may_lift for the viewer. This
+// walk only catches a value that slipped past that rule: on any tombstone-shaped object (one with `eraser_kind` and
+// `eraser_user`) an eraser_user / lifted_by that is neither an action ref, nor the viewer's own subject, nor read by
+// the single-user default identity, is answered as null.
+// WORKSPACE_RESPONSE_WALK=off (LAB ONLY, the switch that also turns off the owner-scope walk) turns this off too, so
+// the isolation sweep and cleanup_round3b_test.ts prove the routes need no net.
 import type { Context, Next } from "hono";
 import { type Identity, identityOf } from "../../middleware/identity.ts";
+import { ACTION_REF_RE } from "../logic/cleanup.ts";
+
+const OFF = () => (Deno.env.get("WORKSPACE_RESPONSE_WALK") ?? "").trim().toLowerCase() === "off";
 
 export function seesActor(value: unknown, who: Identity): boolean {
   if (value === null || value === undefined) return true;
+  if (typeof value === "string" && ACTION_REF_RE.test(value)) return true; // opaque: names an action, not a person
   if (who.kind === "default") return true;
-  return typeof value === "string" && value !== "" && (value === who.sub || value === who.name);
+  return typeof value === "string" && value !== "" && value === who.sub;
 }
 
 export function maskTombstoneActors(v: unknown, who: Identity): unknown {
@@ -35,7 +39,7 @@ export function maskTombstoneActors(v: unknown, who: Identity): unknown {
   const cur = out ?? o;
   if ("eraser_kind" in cur && "eraser_user" in cur) {
     for (const k of ["eraser_user", "lifted_by"]) {
-      if (k in cur && !seesActor(cur[k], who)) (out ??= { ...o }, out)[k] = null;
+      if (k in cur && !seesActor(cur[k], who)) (out ??= { ...o })[k] = null;
     }
   }
   return out ?? v;
@@ -44,6 +48,7 @@ export function maskTombstoneActors(v: unknown, who: Identity): unknown {
 export function tombstoneActorMask() {
   return async (c: Context, next: Next) => {
     await next();
+    if (OFF()) return;
     if (!(c.res.headers.get("content-type") ?? "").includes("application/json")) return;
     let body: unknown;
     try {

@@ -3,8 +3,10 @@
 // liftTombstoneAs (repo/lifecycle.ts), and a tombstone read answers it as `may_lift`.
 //
 //   - an admin (the signed-in token's admin group; while impersonating, the admin is who acts) may lift any;
-//   - a user may lift a tombstone a USER erased when they are that eraser: eraser_user is the identity seam's
-//     subject the erase recorded (the erase route takes it from the seam, never from the body);
+//   - a user may lift a tombstone a USER erased when they are that eraser. rw-p8a2-cleanup round 3b: ownership is
+//     the PRIVATE record - the shared eraser_user holds a ref (cleanup-action:<id>, never a subject) and the caller
+//     owns it when its cleanup_actions row's owner_sub is the caller's subject (repo/actions.ts ownsRef); the
+//     caller computes that as `erased_by_caller`. A subject sitting in the shared row proves nothing;
 //   - an automation's tombstone, or one with no recorded eraser, is an admin's to lift;
 //   - the single-user install (no sign-in, no identity header: the one default identity, who owns everything
 //     there) may lift - it is the operator. A service may not.
@@ -14,6 +16,7 @@ import type { Identity } from "../../middleware/identity.ts";
 export interface LiftFacts {
   eraser_kind: string;
   eraser_user: string | null;
+  erased_by_caller: boolean; // the eraser ref's private record is the caller's (repo/actions.ts ownsRef)
 }
 
 export function mayLiftTombstone(t: LiftFacts, who: Identity): boolean {
@@ -21,5 +24,5 @@ export function mayLiftTombstone(t: LiftFacts, who: Identity): boolean {
   if (who.kind === "default") return true;
   if (who.kind !== "user" && who.kind !== "header") return false;
   if (t.eraser_kind !== "user" || !t.eraser_user || !who.sub) return false;
-  return t.eraser_user === who.sub;
+  return t.erased_by_caller === true;
 }

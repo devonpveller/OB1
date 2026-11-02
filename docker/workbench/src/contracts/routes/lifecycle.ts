@@ -10,9 +10,10 @@ import { metadataFilter, pathParam } from "../schemas/common.ts";
 import { parseMetadataFilter } from "../logic/scope.ts";
 import { FX } from "../schemas/fixtures.ts";
 import { EX } from "../schemas/examples.ts";
-import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
+import { body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
 import { identityOf } from "../../middleware/identity.ts";
 import { mayLiftTombstone } from "../logic/lift.ts";
+import { ACTION_REF, recordAction, signedIn } from "../repo/actions.ts";
 
 const T = ["source lifecycle (D5)"];
 const idParam = (example: string) => z.object({ id: pathParam("id", example, "source id") });
@@ -48,7 +49,18 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
   }), async (c) => {
     try {
       const b = c.req.valid("json");
-      return send(c, SuppressResult, await lc.suppress(deps.db, c.req.valid("param").id, b.reason, b.by ?? authorOf(c)));
+      const id = c.req.valid("param").id;
+      const who = await identityOf(c);
+      // rw-p8a2-cleanup round 3b: a signed-in caller is named in the shared rows (retracted_by, the context's
+      // suppressed_by, the trail actor) only by a private action ref - never its subject, never a body `by`
+      // (not signed in - the single-user default or a service: authorOf's answer would be null; a body `by` is kept)
+      if (!signedIn(who)) return send(c, SuppressResult, await lc.suppress(deps.db, id, b.reason, b.by ?? null));
+      return send(c, SuppressResult, await deps.db.tx(async (t) => {
+        const aid = crypto.randomUUID();
+        const r = await lc.suppress(t, id, b.reason, ACTION_REF(aid));
+        await recordAction(t, who, aid, "suppress", { source_id: id, detail: { door: "contract" } });
+        return r;
+      }));
     } catch (e) {
       return fail(c, e);
     }
@@ -63,7 +75,16 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
     try {
       const b = c.req.valid("json");
       if (!b.all && !(b.kind && b.ref)) return c.json({ error: "give {kind, ref} or {all: true}" }, 400);
-      return send(c, SeverResult, await lc.sever(deps.db, deps.registry, c.req.valid("param").id, { ...b, by: b.by ?? authorOf(c) ?? undefined }));
+      const id = c.req.valid("param").id;
+      const who = await identityOf(c);
+      // round 3b: the trail actor of a signed-in caller's severance is a private action ref
+      if (!signedIn(who)) return send(c, SeverResult, await lc.sever(deps.db, deps.registry, id, { ...b, by: b.by ?? undefined }));
+      return send(c, SeverResult, await deps.db.tx(async (t) => {
+        const aid = crypto.randomUUID();
+        const r = await lc.sever(t, deps.registry, id, { ...b, by: ACTION_REF(aid) });
+        await recordAction(t, who, aid, "sever", { source_id: id, detail: { door: "contract", all: !!b.all, severed: r.severed.length } });
+        return r;
+      }));
     } catch (e) {
       return fail(c, e);
     }
@@ -76,11 +97,18 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
     responses: { 200: json(EraseResult, EX.erase, "erased; the tombstone"), ...errors },
   }), async (c) => {
     try {
-      // round 3: a user's erasure records the identity seam's subject as its eraser (the lift rule reads it) - the
-      // body's eraser.user is never trusted for that
+      // a user's erasure records its eraser for the lift rule - round 3b: as a private action ref (the
+      // cleanup_actions row maps it to the identity seam's subject), never the subject and never the body's user
       const b = c.req.valid("json");
-      const eraser = b.eraser.kind === "user" ? { ...b.eraser, user: (await identityOf(c)).sub } : b.eraser;
-      return send(c, EraseResult, await lc.erase(deps.db, deps.registry, c.req.valid("param").id, { ...b, eraser }));
+      const id = c.req.valid("param").id;
+      if (b.eraser.kind !== "user") return send(c, EraseResult, await lc.erase(deps.db, deps.registry, id, b));
+      const who = await identityOf(c);
+      return send(c, EraseResult, await deps.db.tx(async (t) => {
+        const aid = crypto.randomUUID();
+        const r = await lc.erase(t, deps.registry, id, { ...b, eraser: { kind: "user", user: ACTION_REF(aid) } });
+        await recordAction(t, who, aid, "erase", { reason_type: b.reason_type, source_id: id, tombstone_id: r.tombstone.id, detail: { door: "contract" } });
+        return r;
+      }));
     } catch (e) {
       return fail(c, e);
     }
@@ -102,8 +130,10 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
       const t = await src.tombstoneById(deps.db, c.req.valid("param").id, f);
       if (!t) return c.json({ error: f ? "not found in scope" : "no tombstone with this id" }, 404);
       // round 3: whether THIS caller may lift it (the one rule, logic/lift.ts)
-      const may_lift = mayLiftTombstone({ eraser_kind: String(t.eraser_kind ?? ""), eraser_user: (t.eraser_user as string | null) ?? null }, await identityOf(c));
-      return send(c, Tombstone, { ...src.tombstoneOut(t), may_lift });
+      // round 3b: answered for the viewer from the eraser ref's private record
+      const who = await identityOf(c);
+      const facts = await lc.liftFacts(deps.db, t, who);
+      return send(c, Tombstone, { ...src.tombstoneOut(t), may_lift: mayLiftTombstone(facts, who), erased_by_you: t.eraser_kind === "user" && facts.erased_by_caller });
     } catch (e) {
       return fail(c, e);
     }
@@ -125,7 +155,15 @@ export function registerLifecycle(app: ContractApp, deps: ContractDeps) {
     try {
       const b = c.req.valid("json");
       const who = await identityOf(c);
-      return send(c, Tombstone, await lc.liftTombstoneAs(deps.db, c.req.valid("param").id, who, authorOf(c, who.name || who.sub) ?? who.sub, b.note ?? null));
+      const tid = c.req.valid("param").id;
+      // round 3b: the lifter (lifted_by, the trail actor) is a private action ref; its row is recorded only when this
+      // call is what lifted it (a repeat lift stays 200 here and records nothing)
+      return send(c, Tombstone, await deps.db.tx(async (t) => {
+        const aid = crypto.randomUUID();
+        const tb = await lc.liftTombstoneAs(t, tid, who, ACTION_REF(aid), b.note ?? null);
+        if (tb.lifted_by === ACTION_REF(aid)) await recordAction(t, who, aid, "lift", { tombstone_id: tid, detail: { door: "contract" } });
+        return tb;
+      }));
     } catch (e) {
       return fail(c, e);
     }

@@ -12,6 +12,7 @@ import { tombstoneById, tombstoneForUrl, tombstoneOut } from "./sources.ts";
 import { FOREIGN_DOC, type Viewer } from "../../documents/ownership.ts";
 import { mayLiftTombstone } from "../logic/lift.ts";
 import type { Identity } from "../../middleware/identity.ts";
+import { ownsRef } from "./actions.ts";
 
 export class Conflict extends Error {
   constructor(message: string, public detail: Record<string, unknown> = {}) {
@@ -305,13 +306,19 @@ export async function erase(db: Db, reg: RegistryReader, id: string, req: EraseI
   });
 }
 
+// The lift rule's facts for a caller: the eraser ref's private record decides ownership (rw-p8a2-cleanup round 3b).
+export async function liftFacts(db: Db, tb: { eraser_kind: unknown; eraser_user: unknown }, who: Identity) {
+  const eraser_user = (tb.eraser_user as string | null) ?? null;
+  return { eraser_kind: String(tb.eraser_kind ?? ""), eraser_user, erased_by_caller: await ownsRef(db, eraser_user, who.sub) };
+}
+
 // THE shared lift (operator decision 2026-11-02): the caller lifts only under mayLiftTombstone (logic/lift.ts) -
-// the user who erased it, or an admin. `author` is the identity seam's (changeAuthor), never a request field.
-// The trail's lift route and the cleanup view's lift (rw-p8a2-cleanup) both call this.
+// the user who erased it, or an admin. `author` is an action ref the caller recorded (repo/actions.ts), never a
+// subject and never a request field. The trail's lift route and the cleanup view's lift (rw-p8a2-cleanup) both call this.
 export async function liftTombstoneAs(db: Db, tombstoneId: string, who: Identity, author: string, note: string | null) {
   const tb = await tombstoneById(db, tombstoneId);
   if (!tb) throw new NotFound("tombstone not found");
-  if (!mayLiftTombstone({ eraser_kind: String(tb.eraser_kind ?? ""), eraser_user: (tb.eraser_user as string | null) ?? null }, who)) {
+  if (!mayLiftTombstone(await liftFacts(db, tb, who), who)) {
     throw new Forbidden("only the user who erased this tombstone, or an admin, may lift it");
   }
   return await lift(db, tombstoneId, author, note);

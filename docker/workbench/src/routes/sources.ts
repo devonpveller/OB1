@@ -14,6 +14,8 @@ import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
 import { RegistryReader } from "../contracts/registry.ts";
 import * as lifecycle from "../contracts/repo/lifecycle.ts";
+import { ACTION_REF, recordAction, signedIn } from "../contracts/repo/actions.ts";
+import { seamIdentity } from "../middleware/identity.ts";
 
 // The contract's lifecycle over this router's pool (the same pool src/contracts/wiring.ts uses).
 const contractDb = poolDb(pool);
@@ -243,13 +245,22 @@ sources.delete("/:id", async (c) => {
   // The trail actor is the AUTHENTICATED user (rw-p0b-purge-door attempt 2, tester finding F3: a
   // body 'by' named the actor ahead of Remote-User, so any caller could name anyone). A body 'by'
   // that differs is kept in the event's detail as a note (claimed_by), never as the actor.
-  const by = authorOf(c);
+  // rw-p8a2-cleanup round 3b: a SIGNED-IN author is named in the shared rows (the trail actor, retracted_by,
+  // suppressed_by) only by a private action ref (contracts/repo/actions.ts) - never by its subject or name; the
+  // single-user default and a service keep authorOf's fallback ("operator").
+  const who = seamIdentity(c);
+  const aid = crypto.randomUUID();
+  const by = who && signedIn(who) ? ACTION_REF(aid) : authorOf(c);
   const claimedBy = typeof body?.by === "string" && body.by.trim() && body.by.trim() !== by ? body.by.trim() : null;
   let res;
   try {
-    res = await lifecycle.suppress(contractDb, id, reasonType, by, {
-      door: "DELETE /workbench/sources/:id", reason_type: reasonType, note,
-      ...(claimedBy ? { claimed_by: claimedBy } : {}),
+    res = await contractDb.tx(async (t) => {
+      const r = await lifecycle.suppress(t, id, reasonType, by, {
+        door: "DELETE /workbench/sources/:id", reason_type: reasonType, note,
+        ...(claimedBy ? { claimed_by: claimedBy } : {}),
+      });
+      if (who && signedIn(who)) await recordAction(t, who, aid, "suppress", { source_id: id, detail: { door: "DELETE /workbench/sources/:id", reason_type: reasonType } });
+      return r;
     });
   } catch (e) {
     if (e instanceof lifecycle.NotFound) return c.json({ error: "not found" }, 404);

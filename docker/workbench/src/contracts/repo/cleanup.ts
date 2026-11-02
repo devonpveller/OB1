@@ -14,7 +14,8 @@
 // zero blocking connections, an unregistered reason type is refused.
 import type { Db } from "../db.ts";
 import { kindDefs } from "../logic/dependence.ts";
-import { ACTION_REF, type CandidateAttempt, candidateOf, eraseOffered, fullCounts, tallyCounts } from "../logic/cleanup.ts";
+import { type CandidateAttempt, candidateOf, eraseOffered, fullCounts, tallyCounts } from "../logic/cleanup.ts";
+import { ACTION_COLS, ACTION_REF, type ActionRow, OWNS_REF, recordAction } from "./actions.ts";
 import { type RegistryReader, requireRegistered, REGISTRY } from "../registry.ts";
 import { Conflict, erase, liftTombstoneAs, NotFound, sever } from "./lifecycle.ts";
 import type { Identity } from "../../middleware/identity.ts";
@@ -58,31 +59,8 @@ export async function listSources(db: Db, reg: RegistryReader, limit: number) {
   };
 }
 
-// ── the action log (per user) ─────────────────────────────────────────────────────────────────
-interface ActionRow {
-  id: string;
-  kind: string;
-  reason_type: string | null;
-  source_id: string | null;
-  tombstone_id: string | null;
-  detail: Record<string, unknown>;
-  created_at: string;
-  finished_at: string | null;
-}
-const ACTION_COLS = `id, kind, reason_type, source_id, tombstone_id, detail, created_at, finished_at`;
-
-async function record(
-  db: Db, who: Identity, id: string, kind: string,
-  f: { reason_type?: string | null; source_id?: string | null; tombstone_id?: string | null; detail?: Record<string, unknown>; finished?: boolean },
-): Promise<ActionRow> {
-  return (await db.query<ActionRow>(
-    `INSERT INTO public.cleanup_actions (id, owner_sub, actor_sub, kind, reason_type, source_id, tombstone_id, detail, finished_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, CASE WHEN $9 THEN now() END)
-     RETURNING ${ACTION_COLS}`,
-    [id, who.sub, who.actor, kind, f.reason_type ?? null, f.source_id ?? null, f.tombstone_id ?? null,
-      JSON.stringify(f.detail ?? {}), f.finished !== false],
-  ))[0];
-}
+// ── the action log (per user): repo/actions.ts ──────────────────────────────────────────────────
+const record = recordAction;
 
 export async function actions(db: Db, who: Identity, limit: number) {
   return {
@@ -116,15 +94,14 @@ export async function severFor(db: Db, reg: RegistryReader, who: Identity, sourc
   });
 }
 
-// Round 3 (operator decision 2026-11-02, with rw-p8a1-core): a user's erasure records the identity seam's
-// subject as eraser_user - the lift rule (logic/lift.ts) reads it. Reads name it only to that user
-// (routes/actor_mask.ts).
+// Round 3b: a user's erasure records its action ref as eraser_user - the private row maps it to the caller, and the
+// lift rule (logic/lift.ts) looks that row up. No subject reaches the shared tombstone or trail.
 export async function eraseFor(db: Db, reg: RegistryReader, who: Identity, sourceId: string, req: { reason_type: string; note?: string }) {
   await requireRegistered(reg, REGISTRY.erasureReasons, req.reason_type);
   const note = req.note?.trim() ? req.note.trim() : undefined;
   return await db.tx(async (t) => {
     const id = crypto.randomUUID();
-    const r = await erase(t, reg, sourceId, { reason_type: req.reason_type, note, eraser: { kind: "user", user: who.sub } });
+    const r = await erase(t, reg, sourceId, { reason_type: req.reason_type, note, eraser: { kind: "user", user: ACTION_REF(id) } });
     const a = await record(t, who, id, "erase", { reason_type: req.reason_type, source_id: sourceId, tombstone_id: r.tombstone.id });
     return { action: a, tombstone_id: r.tombstone.id, reason_type: r.tombstone.reason_type, note: r.tombstone.note };
   });
@@ -185,7 +162,7 @@ export async function processAll(db: Db, reg: RegistryReader, who: Identity, rea
           continue;
         }
       }
-      const e = await erase(db, reg, sid, { reason_type: reasonType, batch_run_id: run, eraser: { kind: "user", user: who.sub } });
+      const e = await erase(db, reg, sid, { reason_type: reasonType, batch_run_id: run, eraser: { kind: "user", user: run } });
       item.outcome = "erased";
       item.tombstone_id = e.tombstone.id;
     } catch (err) {
@@ -232,7 +209,7 @@ interface CandRow {
 
 export async function candidates(db: Db, reg: RegistryReader, who: Identity, limit: number) {
   const sql = `SELECT t.id, t.source_id, t.url, t.title, t.reason_type, t.note, t.eraser_kind, t.eraser_user,
-            (t.eraser_kind = 'user' AND t.eraser_user = $1) AS erased_by_you,
+            (t.eraser_kind = 'user' AND ${OWNS_REF("t.eraser_user", "$1")}) AS erased_by_you,
             t.erased_at, t.lifted_at, t.readmitted_source_id, t.confidence, t.score_version,
             COALESCE((SELECT jsonb_agg(jsonb_build_object(
                         'path', a.path, 'outcome', a.outcome, 'session_id', a.session_id, 'note', a.note,
