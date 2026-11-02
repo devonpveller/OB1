@@ -19,3 +19,6 @@ import "./trail/TrailPanel";
 import "./graph/PageGraphPanel";
 import "./cleanup/CleanupPanel";
 import "./intake/IntakePanel";
+// research-workbench rw-p8a4-ideas: the ideas panel, the idea view (= the refinery view) and its context graph
+import "./ideas/IdeasPanel";
+import "./ideas/IdeaPanel";

@@ -53,6 +53,8 @@ export const RenderRequestBody = z.object({
   team_id: z.string().min(1),
   title: z.string().min(1).max(200),
   transcript: z.object({ title: z.string().min(1).max(200), turns: z.array(TurnIn).min(1).max(2000) }),
+  refinery_id: uuid("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+    "rw-p8a4-ideas: requested from inside this idea refinery (the caller's own): recorded as its member; an archived refinery refuses (409)").optional(),
 }).openapi("PodcastRenderRequestBody");
 
 export const RenderRequest = z.object({

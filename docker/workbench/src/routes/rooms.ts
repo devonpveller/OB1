@@ -25,6 +25,7 @@ import { owuiBase } from "../sessions/cards.ts";
 import { CHAT_OFF, CHAT_REFUSED, type ChatConfig, chatCall, chatConfigFromEnv, ChatRefused, type Fetch } from "../rooms/chat.ts";
 import { contextFor, refineryOf } from "../rooms/context.ts";
 import * as rooms from "../rooms/repo.ts";
+import { ARCHIVED, archivedState } from "../ideas/repo.ts";
 
 export interface RoomsDeps {
   db: Db;
@@ -108,6 +109,10 @@ export function roomsRouter(deps: RoomsDeps) {
 
   r.post("/:id/chat", wrap(async (c, who) => {
     const room = await rooms.roomOf(db, c.req.param("id") ?? "", who);
+    // rw-p8a4-ideas (D17 archive): engagement skips a resting refinery - its room still reads, nothing is added
+    if (room.subject_kind === "idea" && await archivedState(db, room.subject_id, who.sub)) {
+      return c.json({ error: ARCHIVED, code: "refinery-archived" }, 409);
+    }
     const question = rooms.parseQuestion(await body(c));
     const cfg = chatCfg();
     // chat off (as shipped) or misconfigured: the fixed refusal, before anything is read or written

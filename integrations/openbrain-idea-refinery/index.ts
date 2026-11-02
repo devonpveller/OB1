@@ -5,8 +5,9 @@
  * captured or changed queues its research at once - the database does it (trigger
  * trg_idea_revisions_engage -> research_idea_queue(), init-research-trees.sql) in the research
  * service's research-branch lane, coalescing so a change during a run queues exactly one follow-up
- * run. The nightly drain is gone; this service DELIVERS: a short delivery loop posts each finished
- * dossier to the idea's Mattermost thread, and POST /run stays as the explicit `research now`.
+ * run. The nightly drain is gone; this service DELIVERS: a short delivery loop writes each finished
+ * dossier into the idea's room in the research workspace (rw-p8a4-ideas, deliver.ts) and still posts it
+ * to the idea's Mattermost thread; POST /run stays as the explicit `research now`.
  *
  *   POST /run[?wait=1]  -> `research now` for flagged ideas + one delivery pass; wait=1 returns the summary
  *   GET  /health        -> {ok, db}
@@ -24,6 +25,7 @@
  *      MATTERMOST_SITE_URL, IDEA_REFINERY_CHANNEL, PORT, IDEA_* tunables.
  */
 import { Pool } from "postgres";
+import { deliverForIdea as deliverDossier, type JobResult } from "./deliver.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const num = (k: string, d: number) => {
@@ -86,7 +88,6 @@ type OwedIdea = {
   priority: boolean;
 };
 
-type JobResult = { synthesis?: string; cited_sources?: unknown[]; thread_id?: string | null; [k: string]: unknown };
 
 // The research frame (§3) moved to the database with on-demand engagement (P4a):
 // research_idea_queue() in init-research-trees.sql builds the query, IR.3 continuation included.
@@ -137,15 +138,6 @@ async function markFailed(idea: OwedIdea): Promise<void> {
   }
 }
 
-async function markDelivered(ideaId: string, threadRoot: string): Promise<void> {
-  const c = await pool.connect();
-  try {
-    await c.queryArray(`UPDATE ideas SET status='researched', thread_root=$2 WHERE id=$1`, [ideaId, threadRoot]);
-  } finally {
-    c.release();
-  }
-}
-
 // IR.5 fizzle — a researched idea with no engagement for DORMANCY_DAYS goes dormant,
 // silently (no nag). Run BEFORE the research passes so ideas delivered THIS run aren't
 // immediately aged. Editing an idea (update_idea -> 'dirty') revives it; resurfacing
@@ -161,28 +153,6 @@ async function ageIdeas(): Promise<number> {
       [DORMANCY_DAYS],
     );
     return r.rows.length;
-  } finally {
-    c.release();
-  }
-}
-
-// IR.5 resurface — dormant ideas semantically near this one, for a "you parked
-// something related" cross-link in the NEW idea's dossier (surfaced in the new
-// thread, never a cold ping on the old one).
-async function nearDormant(ideaId: string): Promise<string[]> {
-  const c = await pool.connect();
-  try {
-    const r = await c.queryObject<{ title: string }>(
-      `SELECT title FROM ideas
-        WHERE status='dormant' AND id <> $1 AND embedding IS NOT NULL
-          AND embedding <=> (SELECT embedding FROM ideas WHERE id=$1) <= $2
-        ORDER BY embedding <=> (SELECT embedding FROM ideas WHERE id=$1) ASC
-        LIMIT 2`,
-      [ideaId, RESURFACE_MAX_DIST],
-    );
-    return r.rows.map((x) => x.title);
-  } catch {
-    return [];
   } finally {
     c.release();
   }
@@ -293,41 +263,25 @@ function permalink(postId: string): string | null {
   return `${MM_SITE_URL}/${_mmTeamName}/pl/${postId}`;
 }
 
-// ── the gap-centered dossier (§3.1) ─────────────────────────────────────────────
-function renderDossier(idea: OwedIdea, result: JobResult, isUpdate: boolean, related: string[] = []): string {
-  const synthesis = String(result.synthesis ?? "").trim() || "_(the research returned no synthesis)_";
-  const sources = Array.isArray(result.cited_sources) ? result.cited_sources as Array<Record<string, unknown>> : [];
-  const srcLines = sources.slice(0, 8).map((s, i) => {
-    const title = String(s.title ?? s.url ?? `source ${i + 1}`);
-    return `${i + 1}. ${title}${s.url ? ` — ${s.url}` : ""}`;
-  });
-  const head = isUpdate
-    ? `↻ **Updated: ${idea.title}** — you changed this idea; here's fresh research.`
-    : `💡 **${idea.title}**\n\n${idea.summary}`;
-  const parts = [head, `**The landscape + what we already know**\n\n${synthesis}`];
-  if (srcLines.length) parts.push(`**Sources**\n${srcLines.join("\n")}`);
-  if (related.length) parts.push(`🔗 _This connects to ideas you parked earlier: ${related.join(", ")}. Worth revisiting?_`);
-  parts.push(`_The value call is yours. What would you want to explore? Reply here to hone this idea._`);
-  return parts.join("\n\n");
+// ── delivery (§7): the idea's room first, then Mattermost (rw-p8a4-ideas, deliver.ts) ─────────────
+async function sqlRows<T>(text: string, args: unknown[] = []): Promise<T[]> {
+  const c = await pool.connect();
+  try {
+    return (await c.queryObject<T>(text, args)).rows;
+  } finally {
+    c.release();
+  }
 }
 
-// Deliver the dossier to the idea's thread (create the root on first research, or
-// append an UPDATE on a dirty re-research). Sets thread_root + status on success.
-async function deliverForIdea(idea: OwedIdea, result: JobResult): Promise<void> {
-  const isUpdate = !!idea.thread_root;
-  const channelId = await ensureChannel(MM_CHANNEL);
-  const related = isUpdate ? [] : await nearDormant(idea.id); // resurface only on a new idea's first dossier
-  const msg = renderDossier(idea, result, isUpdate, related);
-  let rootId = idea.thread_root;
-  if (isUpdate) {
-    await mmPost(channelId, msg, rootId);
-  } else {
-    const post = await mmPost(channelId, msg, null);
-    rootId = post.id;
-  }
-  await markDelivered(idea.id, rootId!);
-  const link = permalink(rootId!);
-  console.log(`delivered idea ${idea.id} ("${idea.title}") -> thread ${rootId}${link ? " " + link : ""}`);
+async function deliverForIdea(idea: OwedIdea, result: JobResult): Promise<boolean> {
+  const out = await deliverDossier({
+    sql: sqlRows,
+    // Mattermost stays the bridge while a token is configured; without one the room alone is the delivery
+    mm: MM_TOKEN ? { channel: () => ensureChannel(MM_CHANNEL), post: mmPost, permalink } : null,
+    resurfaceMaxDist: RESURFACE_MAX_DIST,
+    log: (m) => console.log(m),
+  }, idea, result);
+  return out === "delivered";
 }
 
 // ── the pass: research-now + delivery (no nightly drain, P4a) ─────────────────────
@@ -360,7 +314,7 @@ async function deliverPending(): Promise<{ delivered: number; failed: number }> 
   for (const idea of await selectPending(RUN_MAX)) {
     const jr = await jobResult(idea.last_job_id!);
     if (jr.status === "done") {
-      try { await deliverForIdea(idea, jr.result ?? {}); delivered++; }
+      try { if (await deliverForIdea(idea, jr.result ?? {})) delivered++; }
       catch (e) { console.error(`deliver failed for ${idea.id}: ${(e as Error).message}`); } // retried next pass
     } else if (jr.status === "error" || jr.status === "cancelled") {
       await markFailed(idea); failed++;

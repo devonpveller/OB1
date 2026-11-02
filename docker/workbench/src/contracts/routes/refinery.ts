@@ -1,5 +1,6 @@
 // D17 items 5-6 (ideas, the idea refinery), held user sources, and D12 (the document listing).
-// No operation here writes `ideas`: the MCP idea tools stay its only writers.
+// No operation here writes `ideas`: capture_idea and the owner-checked SQL functions (rw-p8a4-ideas, slot 370) are its
+// only writers - the workspace reaches them through /workbench/ideas and the documents API's seed.
 import { createRoute, z } from "../deps.ts";
 import * as ideas from "../repo/ideas.ts";
 import { requireRegistered } from "../registry.ts";

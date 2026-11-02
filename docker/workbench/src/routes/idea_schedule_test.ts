@@ -17,6 +17,8 @@ Deno.test("the router reads and writes only the caller's subject, and research-n
     query: (sql: string, args: unknown[] = []) => {
       seen.push([sql, ...args]);
       if (/FROM public\.ideas WHERE id/.test(sql)) return Promise.resolve([]); // not the caller's idea
+      // rw-p8a4-ideas: research now is the owner-checked function; another owner's idea is not_found there
+      if (/idea_research\(/.test(sql)) return Promise.resolve([{ o: { outcome: "not_found" } }]);
       return Promise.resolve([{ mode: "immediate" }]);
     },
     tx: (fn: (d: Db) => Promise<unknown>) => fn(db),
@@ -27,6 +29,9 @@ Deno.test("the router reads and writes only the caller's subject, and research-n
   const r = await app.request("/s/research-now/11111111-1111-1111-1111-111111111111", { method: "POST" });
   assertEquals(r.status, 404);
   assertEquals(seen.some((s) => /idea_research_now/.test(String(s[0]))), false);
+  // the owner the function judges is the seam's subject, never a caller-supplied user (rw-p8a4-ideas)
+  const fnCall = seen.find((s) => /idea_research\(/.test(String(s[0])));
+  assertEquals(fnCall?.[2], "operator");
   const bad = await app.request("/s", { method: "PUT", body: JSON.stringify({ mode: "daily" }), headers: { "content-type": "application/json" } });
   assertEquals(bad.status, 400);
 });

@@ -29,6 +29,7 @@ import { registerAgentMemory } from "./agent-memory.ts";
 import { registerContractTools } from "./contract-tools.ts";
 import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
 import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
+import { ideaOwner, MCP_ACTOR, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
 import {
   buildEgress,
   dedupShareScope,
@@ -965,8 +966,12 @@ server.registerTool(
 // ============================================================
 // Idea Refinery — the idea inlet (IR.0c). Mirrors the thoughts-capture family
 // (capture_thought / search_thoughts) but writes the idea LIFECYCLE aggregate
-// (ideas / idea_revisions, init-ideas.sql). These MCP tools are the only
-// writers of `ideas`; the refinery service owns research + Mattermost delivery.
+// (ideas / idea_revisions, init-ideas.sql). capture_idea writes the row; every later write
+// (update_idea / research_idea / promote_idea) is a call of an owner-checked SQL function
+// (init-idea-functions.sql, rw-p8a4-ideas - the SAME functions the research workbench calls;
+// idea-tools.ts), for this server's ONE owner subject (WORKSPACE_DEFAULT_SUB). Another owner's
+// idea is "no idea with this id"; find_idea and the duplicate check read the owner's ideas only.
+// The refinery service owns research delivery (the idea's room + Mattermost).
 // Research is async and re-engages in Mattermost (a finished OWUI chat can't be
 // pushed to) — so these tools only ACKNOWLEDGE in OWUI, never return research.
 // Spec: documentation/implementation-guide/idea-refinery/DESIGN-idea-refinery.md
@@ -977,6 +982,8 @@ server.registerTool(
 // it never auto-merges. ~0.70 sim == ~0.30 distance.
 const IDEA_DEDUP_SIM = Number(Deno.env.get("IDEA_DEDUP_SIM") || "0.70");
 const IDEA_CHANNEL = Deno.env.get("IDEA_REFINERY_CHANNEL") || "#ideas";
+// rw-p8a4-ideas: whose ideas these tools read and write (never a tool argument)
+const IDEA_OWNER = ideaOwner();
 
 server.registerTool(
   "capture_idea",
@@ -1006,10 +1013,10 @@ server.registerTool(
           const dup = await client.queryObject<{ id: string; title: string; sim: number }>(
             `SELECT id, title, 1 - (embedding <=> $1::vector) AS sim
                FROM ideas
-              WHERE status <> 'archived' AND embedding IS NOT NULL
+              WHERE status <> 'archived' AND embedding IS NOT NULL AND owner_sub = $2
               ORDER BY embedding <=> $1::vector
               LIMIT 1`,
-            [embStr],
+            [embStr, IDEA_OWNER],
           );
           const top = dup.rows[0];
           if (top && top.sim >= IDEA_DEDUP_SIM) {
@@ -1025,10 +1032,10 @@ server.registerTool(
         await client.queryArray("BEGIN");
         try {
           const ins = await client.queryObject<{ id: string }>(
-            `INSERT INTO ideas (title, summary, domain, embedding, status, current_revision)
-             VALUES ($1, $2, COALESCE($3,'ai-stack'), $4::vector, 'new', 1)
+            `INSERT INTO ideas (title, summary, domain, embedding, status, current_revision, owner_sub, actor_sub)
+             VALUES ($1, $2, COALESCE($3,'ai-stack'), $4::vector, 'new', 1, $5, $6)
              RETURNING id`,
-            [ttl, body, domain ?? null, embStr],
+            [ttl, body, domain ?? null, embStr, IDEA_OWNER, MCP_ACTOR],
           );
           ideaId = ins.rows[0].id;
           const th = await client.queryObject<{ id: bigint }>(
@@ -1079,51 +1086,14 @@ server.registerTool(
     try {
       const body = idea.trim();
       if (!body) throw new Error("idea text is required");
+      // the embedding is computed first (outside the transaction); a no-op edit discards it with its thought
+      const embedding = await getEmbedding(`${(title?.trim() || "")}\n\n${body}`.trim());
       const client = await pool.connect();
       try {
-        const cur = await client.queryObject<{ current_revision: number; title: string; hash: string | null }>(
-          `SELECT i.current_revision, i.title,
-                  (SELECT content_hash FROM idea_revisions r
-                    WHERE r.idea_id = i.id AND r.revision = i.current_revision) AS hash
-             FROM ideas i WHERE i.id = $1`,
-          [idea_id],
-        );
-        if (!cur.rows.length) throw new Error(`no idea with id ${idea_id}`);
-        const newHash = await client.queryObject<{ h: string }>(`SELECT md5(lower(btrim($1))) AS h`, [body]);
-        if (newHash.rows[0].h === cur.rows[0].hash) {
-          return { content: [{ type: "text" as const, text:
-            `No change — the text is identical to the current version (idea_id: ${idea_id}); nothing re-queued.` }] };
-        }
-        const newTtl = (title?.trim() || cur.rows[0].title).slice(0, 120);
-        const embedding = await getEmbedding(`${newTtl}\n\n${body}`);
-        const embStr = `[${embedding.join(",")}]`;
-        const newRev = cur.rows[0].current_revision + 1;
-
-        await client.queryArray("BEGIN");
-        try {
-          const th = await client.queryObject<{ id: bigint }>(
-            `INSERT INTO thoughts (content, embedding, metadata, exposure)
-             VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id`,
-            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id, revision: newRev, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE],
-          );
-          await client.queryArray(
-            `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)
-             VALUES ($1, $2, $3, $4, md5(lower(btrim($3))))`,
-            [idea_id, newRev, body, th.rows[0].id],
-          );
-          await client.queryArray(
-            `UPDATE ideas SET summary=$2, title=$3, current_revision=$4, status='dirty', embedding=$5::vector
-              WHERE id=$1`,
-            [idea_id, body, newTtl, newRev, embStr],
-          );
-          await client.queryArray("COMMIT");
-        } catch (e) {
-          try { await client.queryArray("ROLLBACK"); } catch { /* connection already broken */ }
-          throw e;
-        }
-        return { content: [{ type: "text" as const, text:
-          `Updated idea "${newTtl}" (idea_id: ${idea_id}, revision ${newRev}). It will be re-researched in the background; ` +
-          `the refreshed findings will arrive as an update on its existing Mattermost ${IDEA_CHANNEL} thread.` }] };
+        const r = await updateIdea(client, IDEA_OWNER, {
+          idea_id, idea: body, title, embedding: `[${embedding.join(",")}]`, exposure: CORPUS_EXPOSURE, channel: IDEA_CHANNEL,
+        });
+        return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
       } finally {
         client.release();
       }
@@ -1156,11 +1126,11 @@ server.registerTool(
           `SELECT id, title, status, summary, updated_at,
                   1 - (embedding <=> $1::vector) AS sim
              FROM ideas
-            WHERE status <> 'archived' AND embedding IS NOT NULL
+            WHERE status <> 'archived' AND embedding IS NOT NULL AND owner_sub = $4
               AND 1 - (embedding <=> $1::vector) >= $2
             ORDER BY embedding <=> $1::vector
             LIMIT $3`,
-          [embStr, threshold, limit],
+          [embStr, threshold, limit, IDEA_OWNER],
         );
         if (!res.rows.length) {
           return { content: [{ type: "text" as const, text: `No matching ideas found for "${query}".` }] };
@@ -1184,7 +1154,7 @@ server.registerTool(
   {
     title: "Research Idea Now",
     description:
-      "Request IMMEDIATE background research on an existing idea (bypassing the nightly batch) — for when the user says 'look into this now'. Research is async; findings arrive in Mattermost, not here. Returns an acknowledgement.",
+      "Request IMMEDIATE background research on an existing idea — for when the user says 'look into this now'. Research is async; findings land in the idea's room in the research workspace and in Mattermost, not here. Returns an acknowledgement.",
     annotations: { readOnlyHint: false, idempotentHint: true },
     inputSchema: { idea_id: z.string().describe("The idea to research now (from find_idea).") },
   },
@@ -1192,18 +1162,37 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
-        const res = await client.queryObject<{ title: string }>(
-          `UPDATE ideas
-              SET metadata = COALESCE(metadata,'{}'::jsonb)
-                             || jsonb_build_object('research_now', true, 'research_requested_at', now()::text)
-            WHERE id = $1
-            RETURNING title`,
-          [idea_id],
-        );
-        if (!res.rows.length) throw new Error(`no idea with id ${idea_id}`);
-        return { content: [{ type: "text" as const, text:
-          `Queued "${res.rows[0].title}" for immediate research (idea_id: ${idea_id}). ` +
-          `Findings will arrive in Mattermost ${IDEA_CHANNEL} shortly — follow along there.` }] };
+        const r = await researchIdea(client, IDEA_OWNER, idea_id, IDEA_CHANNEL);
+        return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
+      } finally {
+        client.release();
+      }
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  },
+);
+
+// rw-p8a4-ideas (operator 2026-11-01: "promote added"): PROMOTE through the owner-checked idea_promote() - the same
+// function the workspace's `create document` calls after it seeds the refinery's one user document.
+server.registerTool(
+  "promote_idea",
+  {
+    title: "Promote Idea",
+    description:
+      "Mark an idea as PROMOTED to its user document - the idea refinery's one document in the research workspace (created there with 'create document'). Only the user's own idea and its own tethered document; returns an acknowledgement.",
+    annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      idea_id: z.string().describe("The idea to promote (from find_idea)."),
+      document_path: z.string().describe("The refinery's user document path (documents/...)."),
+    },
+  },
+  async ({ idea_id, document_path }) => {
+    try {
+      const client = await pool.connect();
+      try {
+        const r = await promoteIdea(client, IDEA_OWNER, idea_id, document_path);
+        return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
       } finally {
         client.release();
       }

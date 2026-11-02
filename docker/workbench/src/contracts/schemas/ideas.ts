@@ -37,6 +37,16 @@ export const UserSource = z.object({
   title: z.string(),
   url: z.string().nullable(),
   revision: z.number().int(),
+  // rw-p8a4-ideas (ingestion model 2026-09-25, agreed 19:59): the scoped corroboration result and the trail
+  corroboration: z.object({
+    state: z.string().openapi({ example: "not_run", description: "not_run | scoped (no closed list, P0). held: not run until the source is folded in; " +
+      "folded: the corroboration it received from the refinery's own sources (its sessions' and its user sources)" }),
+    givers: z.number().int(),
+    amount: z.number(),
+  }),
+  found_via: z.array(z.object({
+    trail_id: z.string(), url: z.string(), source_id: z.string().nullable(), at: Iso,
+  })).openapi({ description: "what the admission trail admitted found_via this source (directly or through its lead)" }),
 }).openapi("UserSource");
 
 export const UserSourceAddRequest = z.object({
@@ -107,7 +117,9 @@ export const Refinery = z.object({
     document: z.object({ path: z.string(), title: z.string() }).nullable(),
     podcasts: z.array(z.string()),
     exports: z.array(z.string()),
-    room: z.string().nullable(),
+    room: z.string().nullable().openapi({ description: "rw-p8a4-ideas: the idea's one workspace room" }),
+    chats: z.array(z.string()).openapi({ description: "rw-p8a4-ideas: the caller's rooms engaged from inside the " +
+      "refinery - its own room and the caller's rooms on the refinery's sessions" }),
   }),
   context_graph: z.object({
     nodes: z.array(ContextNode),
@@ -119,6 +131,7 @@ export const Refinery = z.object({
     hidden_at: Iso,
   })),
   user_sources: z.array(UserSource),
+  archived: z.boolean().openapi({ description: "D17 archive: the refinery rests (engagement skips it); nothing is deleted" }),
 }).openapi("Refinery");
 
 export const IdeaRevision = z.object({
@@ -128,11 +141,22 @@ export const IdeaRevision = z.object({
   created_at: Iso,
 }).openapi("IdeaRevision");
 
-export const External = z.object({
-  state: recordState("external"),
-  location: z.string().nullable().openapi({ description: "where the record lives today (the idea's Mattermost thread root)" }),
-  note: z.string(),
-}).openapi("External");
+// rw-p8a4-ideas (D17 item 5): the idea's ONE long-lived room in the workspace (the room store, rw-p8a3-room) and the
+// accreting draft, a field on that room. The Mattermost thread is the room's inlet (a link back), never its record.
+export const IdeaRoom = z.object({
+  state: z.string().openapi({ example: "current", description: "current | not_opened (the room is made on first open, or by the first dossier)" }),
+  room_id: z.string().nullable(),
+  thread_root: z.string().nullable().openapi({ description: "the Mattermost thread bound to this room (its inlet)" }),
+  inlet: z.string().nullable().openapi({ description: "mattermost:thread:<root>, when the idea has one" }),
+  entries: z.number().int(),
+  dossiers: z.number().int().openapi({ description: "refinery dossiers delivered into the room" }),
+}).openapi("IdeaRoom");
+
+export const IdeaDraft = z.object({
+  state: z.string().openapi({ example: "current", description: "current | empty" }),
+  text: z.string(),
+  updated_at: Iso.nullable(),
+}).openapi("IdeaDraft");
 
 export const IdeaSummary = z.object({
   id: uuid(FX.idea),
@@ -143,6 +167,10 @@ export const IdeaSummary = z.object({
   current_revision: z.number().int(),
   updated_at: Iso,
   document_path: z.string().nullable(),
+  // rw-p8a4-ideas: the ideas panel's columns
+  last_session_at: Iso.nullable().openapi({ description: "the newest session the idea spun off" }),
+  dossier_at: Iso.nullable().openapi({ description: "the latest dossier delivered into its room (else the dossier source's date)" }),
+  resurfaced_at: Iso.nullable().openapi({ description: "a dormant idea a newer idea's dossier cross-linked (IR section 8)" }),
 }).openapi("IdeaSummary");
 
 export const Ideas = z.object({ ideas: z.array(IdeaSummary) }).openapi("Ideas");
@@ -164,8 +192,8 @@ export const Idea = z.object({
     title: z.string(),
     lifecycle: registryValue(REGISTRY.sourceStates, "active"),
   }).nullable(),
-  draft: External,
-  room: External,
+  draft: IdeaDraft,
+  room: IdeaRoom,
   produced: z.object({
     sources: z.array(z.object({ id: uuid(), title: z.string(), lifecycle: registryValue(REGISTRY.sourceStates, "active") })),
     claims: z.array(z.object({ id: uuid(FX.claim), text: z.string(), confidence: z.number() })),

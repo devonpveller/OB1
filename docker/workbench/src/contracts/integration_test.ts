@@ -379,7 +379,8 @@ t("ideas() and idea(id) return the aggregate: revisions, sessions, dossier, draf
   assertEquals(r.json.revisions[0].research_job_id, FX.job);
   assertEquals(r.json.sessions[0].id, FX.job);
   assertEquals(r.json.dossier.source_id, FX.synthesis);
-  assertEquals([r.json.draft.state, r.json.room.state], ["external", "external"]);
+  // rw-p8a4-ideas: the room is the workspace room (none opened for the fixture yet), the draft a field on it
+  assertEquals([r.json.draft.state, r.json.room.state, r.json.room.room_id], ["empty", "not_opened", null]);
   assert(r.json.produced.sources.some((s: any) => s.id === FX.sourceActive));
   assert(r.json.produced.claims.some((c: any) => c.id === FX.claim));
 });

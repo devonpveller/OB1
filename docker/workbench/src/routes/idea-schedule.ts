@@ -61,11 +61,13 @@ export function ideaScheduleRouter(db: Db) {
     const who = await identityOf(c);
     const id = c.req.param("id") ?? "";
     if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ error: "not an idea id" }, 400);
-    const own = await db.query<{ id: string }>(`SELECT id::text FROM public.ideas WHERE id = $1 AND owner_sub = $2`, [id, who.sub]);
-    if (!own.length) return c.json({ error: "no idea with this id" }, 404);
-    const job = await db.query<{ job: string | null }>(`SELECT public.idea_research_now($1)::text AS job`, [id]);
-    if (!job[0]?.job) return c.json({ error: "the idea is archived" }, 409);
-    return c.json({ queued: true, job_id: job[0].job });
+    // rw-p8a4-ideas: the owner-checked function the research_idea MCP tool calls too (slot 370)
+    const o = (await db.query<{ o: { outcome: string; job_id?: string } }>(
+      `SELECT public.idea_research($1::uuid, $2, $3) AS o`, [id, who.sub, who.actor],
+    ))[0].o;
+    if (o.outcome === "not_found") return c.json({ error: "no idea with this id" }, 404);
+    if (o.outcome !== "queued") return c.json({ error: "the idea is archived" }, 409);
+    return c.json({ queued: true, job_id: o.job_id });
   });
   return r;
 }

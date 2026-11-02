@@ -186,6 +186,7 @@ services:
       - ./init-rooms.sql:/docker-entrypoint-initdb.d/340-init-rooms.sql:ro # research-workbench rw-p8a3-room: the room store (rooms + transcript entries, per user) (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-rooms.sql)
       - ./init-cleanup.sql:/docker-entrypoint-initdb.d/350-init-cleanup.sql:ro # research-workbench rw-p8a2-cleanup: the cleanup view's per-user action log (fresh-volume only; live: psql -f BEFORE the new image; revert: revert-cleanup.sql)
       - ./init-intake-queue.sql:/docker-entrypoint-initdb.d/360-init-intake-queue.sql:ro # research-workbench rw-p5a-intake: import_jobs owner + the user add, file payloads, the intake panel's job kinds (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-intake-queue.sql)
+      - ./init-idea-functions.sql:/docker-entrypoint-initdb.d/370-init-idea-functions.sql:ro # research-workbench rw-p8a4-ideas: idea edit / research-now / promote as owner-checked functions (workbench + openbrain-mcp), the refinery's dossier into the room, the ideas write guard (fresh-volume only; live: psql -f BEFORE the new workbench + openbrain-mcp images and the refinery restart; revert: revert-idea-functions.sql)
     networks:
       - obnet
     restart: unless-stopped
@@ -259,6 +260,10 @@ services:
       # contract routes here, with MCP_ACCESS_KEY (= the workbench's WORKBENCH_KEY). The workbench
       # runs under the wiki profile; with it off, every contract tool answers an error, no crash.
       CONTRACT_WORKBENCH_URL: http://openbrain-workbench:8000
+      # research-workbench rw-p8a4-ideas: the idea tools act for ONE owner subject - the workspace's default
+      # identity (the subject capture_idea files ideas under); update_idea / research_idea / promote_idea refuse
+      # any other owner's idea through the owner-checked SQL functions (slot 370). Blank = "operator", as the seam.
+      WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
     # obnet) talk to it directly. Two lanes by key: MCP_ACCESS_KEY = full

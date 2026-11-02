@@ -239,8 +239,9 @@ export function seamDeps(db: Db | null, env = (k: string) => Deno.env.get(k)): S
 // exactly these two paths (rw-identity-harden F-g: no prefix, so a route added under either later
 // still meets the identity decision)
 const OPEN = /^\/workbench\/(health|auth\/me)$/;
-// a user's front end: never a service's
-const USER_ONLY = /^\/workbench\/(documents|workspace|auth\/(impersonate|users|audit))(\/|$)/;
+// a user's front end: never a service's (rw-p8a4-ideas: the ideas writes too - openbrain-mcp's idea tools reach the
+// same owner-checked SQL functions directly, never through here)
+const USER_ONLY = /^\/workbench\/(documents|workspace|ideas|auth\/(impersonate|users|audit))(\/|$)/;
 // the reads that can carry a research job's original prompt (round 4, F4)
 // rw-p8a1-core round 3 (reviewer RF1): the trail's leads too - an admin may read an ownerless tree's
 // rw-p5a-intake: and the intake panel's reads (and the old /workbench/jobs), whose ownerless jobs an admin who is

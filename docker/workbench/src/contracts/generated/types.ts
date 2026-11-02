@@ -353,12 +353,6 @@ export type Error = {
   detail?: Record<string, unknown>;
 };
 
-export type External = {
-  state: string; /** registry: record_states */
-  location: string | null;
-  note: string;
-};
-
 export type Flow = {
   session_id: string;
   running: boolean;
@@ -462,8 +456,8 @@ export type Idea = {
     title: string;
     lifecycle: string; /** registry: source_states */
   } | null;
-  draft: External;
-  room: External;
+  draft: IdeaDraft;
+  room: IdeaRoom;
   produced: {
     sources: Array<{
       id: string;
@@ -479,11 +473,26 @@ export type Idea = {
   refinery: Refinery;
 };
 
+export type IdeaDraft = {
+  state: string;
+  text: string;
+  updated_at: string | null;
+};
+
 export type IdeaRevision = {
   revision: number;
   summary: string;
   research_job_id: string | null;
   created_at: string;
+};
+
+export type IdeaRoom = {
+  state: string;
+  room_id: string | null;
+  thread_root: string | null;
+  inlet: string | null;
+  entries: number;
+  dossiers: number;
 };
 
 export type IdeaSummary = {
@@ -495,6 +504,9 @@ export type IdeaSummary = {
   current_revision: number;
   updated_at: string;
   document_path: string | null;
+  last_session_at: string | null;
+  dossier_at: string | null;
+  resurfaced_at: string | null;
 };
 
 export type Ideas = {
@@ -622,6 +634,7 @@ export type PodcastRenderRequestBody = {
       text: string;
     }>;
   };
+  refinery_id?: string;
 };
 
 export type PodcastRenderRequests = {
@@ -889,6 +902,7 @@ export type Refinery = {
     podcasts: Array<string>;
     exports: Array<string>;
     room: string | null;
+    chats: Array<string>;
   };
   context_graph: {
     nodes: Array<ContextNode>;
@@ -900,6 +914,7 @@ export type Refinery = {
     hidden_at: string;
   }>;
   user_sources: Array<UserSource>;
+  archived: boolean;
 };
 
 export type Registries = {
@@ -1269,6 +1284,17 @@ export type UserSource = {
   title: string;
   url: string | null;
   revision: number;
+  corroboration: {
+    state: string;
+    givers: number;
+    amount: number;
+  };
+  found_via: Array<{
+    trail_id: string;
+    url: string;
+    source_id: string | null;
+    at: string;
+  }>;
 };
 
 export type UserSourceAddRequest = {

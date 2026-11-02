@@ -38,6 +38,10 @@
 # with a stub extractor (stub-extract.ts), the stub research service's POST /intake/fetch and Open WebUI's
 # service key (WORKSPACE_SERVICE_KEYS owui=<key>); the isolation sweep plants B's intake jobs. -IntakeOnly runs
 # [5e] and the sweep alone (skips [5a]/[5b]: their RED expectations are P2b's, against a pre-P2b -BaseSha).
+# rw-p8a4-ideas adds [5h]: the ideas panel's and the refinery view's integration test (src/ideas/ideas_integration_test.ts):
+# the owner-checked idea functions (slot 370) as two users and as the app role, the refinery's dossier into the room,
+# archive, the user source list. -IdeasOnly runs [5h] and the sweep alone; with -Red -IdeasOnly the initdb chain is
+# staged from -BaseSha too (the base has no slot 370), the sweep is skipped, and [5h] must fail.
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
 param(
   [string]$Id = 'wt-rw-p2b-workspace',
@@ -52,7 +56,8 @@ param(
   [switch]$WalkOff,
   [string]$Cases = '',
   [switch]$KeepImages,
-  [switch]$IntakeOnly
+  [switch]$IntakeOnly,
+  [switch]$IdeasOnly
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -214,12 +219,25 @@ try {
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
   # ---------------------------------------------------------------- 1. the initdb chain
   Write-Host '[1] the initdb chain, from docker-compose.yml'
-  $compose = Get-Content -Raw (Join-Path $dockerDir 'docker-compose.yml')
+  $chainDir = $dockerDir
+  if ($Red -and $IdeasOnly) {
+    # rw-p8a4-ideas: the base's own chain (no slot 370), from a pristine tree of -BaseSha
+    $baseTree = Join-Path $env:TEMP "$P-chain-$BaseSha"
+    New-Item -ItemType Directory -Force $baseTree | Out-Null
+    $script:made.dirs += $baseTree
+    $tarC = Join-Path $env:TEMP "$P-chain.tar"
+    & git -C $ob1 archive --format=tar -o $tarC $BaseSha docker integrations/intake
+    & tar -xf $tarC -C $baseTree
+    Remove-Item -Force $tarC
+    $chainDir = Join-Path $baseTree 'docker'
+  }
+  $compose = Get-Content -Raw (Join-Path $chainDir 'docker-compose.yml')
   $rx = [regex]'(\.{1,2}/[A-Za-z0-9_./-]+\.sql):/docker-entrypoint-initdb\.d/([0-9]{3}-[a-z0-9.-]+\.sql)'
   New-Item -ItemType Directory -Force $stage | Out-Null
   $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
-  foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
+  foreach ($m in $chain) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stage $m[1]) }
   Check (@($chain | Where-Object { $_[1] -eq '270-init-documents.sql' }).Count -eq 1) "the chain mounts 270-init-documents.sql ($($chain.Count) migrations)"
+  if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '370-init-idea-functions.sql' }).Count -eq 1) 'the chain mounts 370-init-idea-functions.sql (rw-p8a4-ideas)' }
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] the internal network'
@@ -326,7 +344,7 @@ try {
     const ownBody = await own.text();
     console.log('guard csrf', csrf.status, 'no-origin', noOrigin.status, 'rebind', rebind, 'own-origin', /viewer's own origin|answers for/.test(ownBody) ? 'GUARDED' : 'reached-workbench');"
   Save 'edge-viewer.log' $edge
-  if ($Red) { Check ($edge -match 'workspace \d+ ' -and $edge -notmatch 'workspace 200 workspace true') 'RED: the base viewer does not serve /workspace' }
+  if ($Red -and -not $IdeasOnly) { Check ($edge -match 'workspace \d+ ' -and $edge -notmatch 'workspace 200 workspace true') 'RED: the base viewer does not serve /workspace' }
   else { Check ($edge -match 'workspace 200 workspace true') 'the viewer serves /workspace (x-wiki-render: workspace)' }
   Check ($edge -match 'forwarded 200 direct-with-forged-key 401') 'the viewer forwards /workbench/* with the key injected server-side; a client key is never trusted'
   if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin reached-workbench') 'the forwarder refuses a cross-origin or Origin-less write (403) and a rebound Host (421); a write from the viewer''s own origin reaches the workbench' }
@@ -334,7 +352,7 @@ try {
   Check ($chromeIp -match '^\d+\.\d+\.\d+\.\d+$') 'the headless Chromium is on the network'
 
   # ---------------------------------------------------------------- 5. the tests
-  if (-not $IntakeOnly) {
+  if (-not $IntakeOnly -and -not $IdeasOnly) {
   Write-Host '[5a] the documents API integration test (as ob_app_memory? no: the fault trigger needs the superuser; the workbench itself runs as ob_app_memory)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'DOCS_TEST_PROXY_HOST=stub-target:8080',
@@ -372,6 +390,20 @@ try {
   if (-not $e2e.Success) { Save 'workspace-e2e-tail.log' (($o -split "`n" | Select-Object -Last 40) -join "`n") }
   }
 
+  # rw-p8a4-ideas: the ideas panel and the refinery view over the real workbench and database (two users + the app role)
+  Write-Host '[5h] the ideas and refinery view integration test (owner-checked idea functions, the dossier into the room, archive, user sources)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/ideas/ideas_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'ideas-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the ideas integration test fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the ideas integration test ($($sum.Value))" }
+
+  if (-not $IdeasOnly) {
   # rw-p5a-intake: the intake and queue panel over the real workbench and database, two users and OWUI's key
   Write-Host '[5e] the intake and queue panel integration test (two users, the OWUI inlet, every queue)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
@@ -385,11 +417,12 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: the intake integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the intake integration test ($($sum.Value))" }
+  }
 
   # round 2 (tester attempt 1 F1-F6): the route-wide isolation sweep, LAST (it calls mutating routes
   # with user B's ids as user A). Its route table is the router's own (src/app.ts, imported in the test
   # stage image with the workbench's DB_* / recipes so the import resolves; never served there).
-  $walks = if ($WalkOff -or $Red) { @($(if ($WalkOff) { 'off' } else { 'on' })) } else { @('on', 'off') }
+  $walks = if ($Red -and $IdeasOnly) { @() } elseif ($WalkOff -or $Red) { @($(if ($WalkOff) { 'off' } else { 'on' })) } else { @('on', 'off') }
   foreach ($walk in $walks) {
   if ($walk -eq 'off' -and -not $WalkOff) {
     # the same lab, the workbench restarted with the response walk OFF: the routes alone must hold
@@ -431,6 +464,21 @@ try {
   # what init-intake-queue.sql added (revert-intake-queue-check.sql), and init + revert re-run cleanly. LAST: it
   # drops the intake queue's columns, so nothing may run against the workbench after it.
   if (-not $Red) {
+    # rw-p8a4-ideas: the slot-370 revert runs cleanly twice and leaves the slot-230 notification trigger as it was
+    Write-Host '[5i] revert-idea-functions.sql (twice) then init-idea-functions.sql again'
+    $rv3 = @()
+    foreach ($f in @('revert-idea-functions.sql', 'revert-idea-functions.sql', 'init-idea-functions.sql')) {
+      $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv370.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv370.sql
+      $rv3 += "[$f] exit $($script:rc)$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') })"
+    }
+    $fns = (Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT count(*) FROM pg_proc WHERE proname IN ('idea_edit','idea_research','idea_promote','idea_deliver_dossier','idea_resurface','refinery_engage')").Trim()
+    $rv3 += "functions after init again: $fns"
+    Save 'revert-idea-functions.log' ($rv3 -join "`n")
+    foreach ($l in $rv3) { Write-Host "    $l" }
+    Check (@($rv3 | Where-Object { $_ -match 'exit 0$' }).Count -eq 3 -and $fns -eq '6') 'the slot-370 revert re-runs cleanly and init restores the six functions'
+  }
+  if (-not $Red -and -not $IdeasOnly) {
     Write-Host '[5f] revert-intake-queue.sql removes only what init-intake-queue.sql added (twice: revert, init, revert)'
     $rv = @()
     foreach ($f in @(@('revert-intake-queue.sql', 'revert'), @('workbench/contract-test/revert-intake-queue-check.sql', 'check'), @('init-intake-queue.sql', 'init'),

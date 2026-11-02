@@ -2,8 +2,9 @@
 // idea refinery (D17 items 5-6), plus the refinery's held user sources and hidden set, and the
 // user document listing (D12).
 //
-// WRITE PATHS: this module never writes `ideas` or `idea_revisions` - the MCP idea tools
-// (capture_idea / update_idea / find_idea / research_idea) stay their only writers. The
+// WRITE PATHS: this module never writes `ideas` or `idea_revisions` - capture_idea and the owner-checked SQL
+// functions (rw-p8a4-ideas, slot 370: idea_edit / idea_research / idea_promote, called by the MCP idea tools and
+// by src/ideas/) are their only writers, and the database refuses any other (trg_ideas_write_guard). The
 // refinery's own tables (refinery_hidden, refinery_user_sources, held_sources) are written
 // here; hiding a node touches refinery_hidden and nothing else.
 import type { Db } from "../db.ts";
@@ -15,6 +16,9 @@ const IDEA_COLS = `i.id, i.title, i.status, i.summary, i.current_revision, i.cre
 
 interface IdeaRow {
   id: string;
+  last_session_at?: string | null;
+  dossier_at?: string | null;
+  resurfaced_at?: string | null;
   title: string;
   status: string;
   summary: string;
@@ -30,8 +34,20 @@ interface IdeaRow {
 // rw-p2b-workspace (operator 2026-10-28): ideas and their refineries are the user's front-end
 // context - every read here is for the identity the seam resolved (owner_sub, the Authentik subject).
 export async function ideas(db: Db, limit: number, owner: string) {
+  // rw-p8a4-ideas: the ideas panel lists by state with the last session it spun off and its dossier's date (the
+  // latest dossier delivered into its room, else the dossier source's), and when a parked idea resurfaced
   const rows = await db.query<IdeaRow>(
-    `SELECT ${IDEA_COLS}, d.path AS document_path
+    `SELECT ${IDEA_COLS}, d.path AS document_path,
+            (SELECT max(j.created_at) FROM public.research_jobs j
+              WHERE j.refinery_id = i.id OR j.id::text = i.last_job_id
+                 OR j.id::text IN (SELECT r.research_job_id FROM public.idea_revisions r WHERE r.idea_id = i.id)) AS last_session_at,
+            COALESCE((SELECT max(e.created_at) FROM public.workspace_room_entries e
+                        JOIN public.workspace_rooms wr ON wr.id = e.room_id
+                       WHERE wr.subject_kind = 'idea' AND wr.subject_id = i.id AND wr.owner_sub = i.owner_sub AND e.kind = 'dossier'),
+                     (SELECT s.created_at FROM public.sources s WHERE s.id = i.dossier_source_id)) AS dossier_at,
+            CASE WHEN i.status = 'dormant' AND (i.metadata -> 'resurfaced' ->> 'at') IS NOT NULL
+                       AND (i.dormant_at IS NULL OR (i.metadata -> 'resurfaced' ->> 'at')::timestamptz >= i.dormant_at)
+                 THEN (i.metadata -> 'resurfaced' ->> 'at')::timestamptz END AS resurfaced_at
        FROM public.ideas i LEFT JOIN public.user_document_listings d ON d.refinery_id = i.id
       WHERE i.owner_sub = $2
       ORDER BY i.updated_at DESC LIMIT $1`,
@@ -41,6 +57,7 @@ export async function ideas(db: Db, limit: number, owner: string) {
     ideas: rows.map((r) => ({
       id: r.id, title: r.title, state: "current", status: r.status, summary: r.summary,
       current_revision: r.current_revision, updated_at: r.updated_at, document_path: r.document_path ?? null,
+      last_session_at: r.last_session_at ?? null, dossier_at: r.dossier_at ?? null, resurfaced_at: r.resurfaced_at ?? null,
     })),
   };
 }
@@ -82,21 +99,52 @@ async function producedOf(db: Db, sessionIds: string[], dossierId: string | null
   return { sources, claims: claims.map((c) => ({ ...c, confidence: Number(c.confidence) })) };
 }
 
+// rw-p8a4-ideas (ingestion model 2026-09-25, agreed 19:59): every source the user added, with its fold status, its
+// SCOPED corroboration result - what the refinery's own sources (its sessions' and its user sources) corroborate it
+// with; a held source has none until it is folded in - and the trail to what was admitted found_via it.
+interface UserSourceRow {
+  source_id: string; refinery_id: string; status: string; state: string; title: string; url: string | null; revision: number;
+  givers: number; amount: number;
+}
 export async function userSources(db: Db, refineryId: string) {
-  return await db.query<{ source_id: string; refinery_id: string; status: string; state: string;
-    title: string; url: string | null; revision: number }>(
+  const rows = await db.query<UserSourceRow>(
     `SELECT rus.source_id, rus.refinery_id, rus.status,
             COALESCE(CASE WHEN h.id IS NOT NULL THEN 'held' END,
                      public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at), 'erased') AS state,
             COALESCE(h.title, s.title, '') AS title, COALESCE(h.url, s.url) AS url,
-            COALESCE(h.revision, (SELECT max(r.revision) FROM public.source_revisions r WHERE r.source_id = s.id), 1) AS revision
+            COALESCE(h.revision, (SELECT max(r.revision) FROM public.source_revisions r WHERE r.source_id = s.id), 1) AS revision,
+            COALESCE(c.givers, 0)::int AS givers, COALESCE(c.amount, 0)::float8 AS amount
        FROM public.refinery_user_sources rus
        LEFT JOIN public.held_sources h ON h.id = rus.source_id
        LEFT JOIN public.sources s ON s.id = rus.source_id
+       LEFT JOIN LATERAL (
+         SELECT count(DISTINCT sc.from_source_id) AS givers, sum(sc.amount) AS amount
+           FROM public.source_corroborations sc
+          WHERE sc.to_source_id = rus.source_id
+            AND (sc.from_source_id IN (SELECT ss.source_id FROM public.session_sources ss
+                                         JOIN public.research_jobs j ON j.session_id = ss.session_id WHERE j.refinery_id = $1)
+                 OR sc.from_source_id IN (SELECT x.source_id FROM public.refinery_user_sources x WHERE x.refinery_id = $1))
+       ) c ON s.id IS NOT NULL
       WHERE rus.refinery_id = $1
       ORDER BY rus.added_at`,
     [refineryId],
   );
+  const ids = rows.map((r) => r.source_id);
+  const via = ids.length ? await db.query<{ from_id: string; trail_id: string; url: string; source_id: string | null; at: string }>(
+    `SELECT COALESCE(l.source_id, a.found_via)::text AS from_id, a.id::text AS trail_id, a.url, a.source_id::text AS source_id, a.created_at AS at
+       FROM public.research_admission_trail a
+       LEFT JOIN public.research_admission_trail l ON l.id = a.found_via
+      WHERE a.kind = 'admitted' AND (a.found_via::text = ANY($1::text[]) OR l.source_id::text = ANY($1::text[]))
+      ORDER BY a.created_at LIMIT 500`,
+    [ids],
+  ) : [];
+  return rows.map(({ givers, amount, ...r }) => ({
+    ...r,
+    corroboration: r.state === "held"
+      ? { state: "not_run" as const, givers: 0, amount: 0 }
+      : { state: "scoped" as const, givers: Number(givers), amount: Number(amount) },
+    found_via: via.filter((v) => v.from_id === r.source_id).map((v) => ({ trail_id: v.trail_id, url: v.url, source_id: v.source_id, at: v.at })),
+  }));
 }
 
 interface Link { kind: string; id: string; pin: number | null; reference_id?: string | null }
@@ -190,34 +238,53 @@ export async function idea(db: Db, id: string, owner: string) {
          FROM public.sources WHERE id = $1`, [row.dossier_source_id],
     ))[0] ?? null
     : null;
-  const external = (what: string) => ({
-    state: "external",
-    location: row.thread_root ? `mattermost:thread:${row.thread_root}` : null,
-    note: `the ${what} lives in the idea's Mattermost thread today; it moves into the workspace room in P8a (D17)`,
-  });
+  // rw-p8a4-ideas: the idea's ONE long-lived room (workspace_rooms, slot 340; owner = the idea's owner), its
+  // accreting draft a field on it; the Mattermost thread (thread_root) is the room's inlet, linked, never a mirror
+  const roomRow = (await db.query<{ id: string; draft: string; draft_updated_at: string | null; entries: number; dossiers: number }>(
+    `SELECT r.id::text AS id, r.draft, r.draft_updated_at,
+            (SELECT count(*)::int FROM public.workspace_room_entries e WHERE e.room_id = r.id) AS entries,
+            (SELECT count(*)::int FROM public.workspace_room_entries e WHERE e.room_id = r.id AND e.kind = 'dossier') AS dossiers
+       FROM public.workspace_rooms r WHERE r.subject_kind = 'idea' AND r.subject_id = $1::uuid AND r.owner_sub = $2`,
+    [id, owner],
+  ))[0] ?? null;
+  // every chat engaged from inside the refinery: its own room, and this user's rooms on the refinery's sessions
+  const chats = await db.query<{ id: string }>(
+    `SELECT r.id::text AS id FROM public.workspace_rooms r
+      WHERE r.owner_sub = $2 AND ((r.subject_kind = 'idea' AND r.subject_id = $1::uuid)
+         OR (r.subject_kind = 'session' AND r.subject_id = ANY($3::uuid[])))
+      ORDER BY r.created_at`,
+    [id, owner, sessions.map((s) => s.id)],
+  );
   return {
     id: row.id, title: row.title, state: "current", state_detail: {}, status: row.status, summary: row.summary,
     current_revision: row.current_revision, created_at: row.created_at, updated_at: row.updated_at,
     revisions,
     sessions: sessions.map(({ session_id: _s, ...rest }) => rest),
     dossier,
-    draft: external("accreting draft"),
-    room: external("room transcript"),
+    draft: { state: roomRow?.draft ? "current" : "empty", text: roomRow?.draft ?? "", updated_at: roomRow?.draft_updated_at ?? null },
+    room: {
+      state: roomRow ? "current" : "not_opened", room_id: roomRow?.id ?? null, thread_root: row.thread_root,
+      inlet: row.thread_root ? `mattermost:thread:${row.thread_root}` : null,
+      entries: roomRow?.entries ?? 0, dossiers: roomRow?.dossiers ?? 0,
+    },
     produced: await producedOf(db, sessionPoolIds, row.dossier_source_id),
     refinery: {
       origin: { kind: state?.origin_kind ?? "captured_idea", document_path: state?.path ?? null },
       members: {
         sessions: sessions.map((s) => s.id),
         document: doc ? { path: doc.path, title: doc.title } : null,
-        podcasts: members.filter((m) => m.member_kind === "podcast").map((m) => m.member_ref),
+        podcasts: members.filter((m) => m.member_kind === "podcast" || m.member_kind === "podcast_request").map((m) => m.member_ref),
         exports: members.filter((m) => m.member_kind === "export").map((m) => m.member_ref),
-        room: members.find((m) => m.member_kind === "room")?.member_ref ?? row.thread_root ?? null,
+        room: roomRow?.id ?? members.find((m) => m.member_kind === "room")?.member_ref ?? null,
+        chats: chats.map((c) => c.id),
       },
       context_graph: await contextGraph(db, id, sessionPoolIds, await pickedLinks(db, id, owner)),
       hidden: await db.query<{ node_kind: string; node_ref: string; hidden_at: string }>(
         `SELECT node_kind, node_ref, hidden_at FROM public.refinery_hidden WHERE refinery_id = $1 ORDER BY hidden_at`, [id],
       ),
       user_sources: await userSources(db, id),
+      // D17 archive: a resting refinery (engagement skips it, nothing is deleted)
+      archived: row.status === "archived",
     },
   };
 }

@@ -252,7 +252,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   await sql(`INSERT INTO public.podcast_teams (id, owner_sub, name) VALUES ($1, $2, $3)`, [pod.team, bSub, `${pod.presenter}-team`]);
   await sql(`INSERT INTO public.podcast_team_members (team_id, position, presenter_id) VALUES ($1, 0, $2)`, [pod.team, `${pod.team}-p`]);
   const podReq = await wb("POST", "/workbench/contract/podcasts/requests",
-    { team_id: pod.team, title: pod.request, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
+    { team_id: pod.team, title: pod.request, refinery_id: bRefinery, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
   assertEquals(podReq.status, 202, podReq.text);
   // rw-p8a3-room: B's research room on B's refinery and B's own room on B's session - a transcript entry
   // (B's question through the scoped chat where the lab turns chat on, and one planted), B's chat scope and the
@@ -268,6 +268,17 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   console.log(`sweep: B's scoped chat in B's room -> ${bChat.status}${bChat.json.code ? ` (${bChat.json.code})` : ""}`);
   await sql(`INSERT INTO public.workspace_room_entries (room_id, actor_sub, kind, body) VALUES ($1::uuid, $2, 'dossier', $3), ($4::uuid, $2, 'user', $3)`, [bRoom, bSub, room.entry, bSessRoom]);
   await sql(`UPDATE public.workspace_rooms SET draft = $2 WHERE id = $1::uuid`, [bRoom, room.draft]);
+  // rw-p8a4-ideas: B edits B's idea (a revision carrying a marker), B's refinery dossier lands in B's room (the
+  // refinery's own function, as the service role would call it), B's draft through the ideas route
+  const ideaMk = { edit: `IdeaEditSecret${rnd()}`, dossier: `DossierSecret${rnd()}`, draft: `IdeaDraftSecret${rnd()}` };
+  const bEdit = await wb("POST", `/workbench/ideas/${bRefinery}/edit`, { summary: `${M.idea} ${ideaMk.edit}` }, B);
+  assertEquals(bEdit.status, 200, bEdit.text);
+  await sql(`SELECT public.idea_deliver_dossier($1::uuid, $2, $3, '{}'::jsonb)`, [bRefinery, crypto.randomUUID(), `the dossier ${ideaMk.dossier}`]);
+  const bDraft = await wb("PUT", `/workbench/ideas/${bRefinery}/draft`, { text: `${room.draft} ${ideaMk.draft}` }, B);
+  assertEquals(bDraft.status, 200, bDraft.text);
+  const bIdeaBefore = (await sql(`SELECT summary, title, status, current_revision FROM public.ideas WHERE id = $1`, [bRefinery]))[0];
+  const bRoomEntriesBefore = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_room_entries WHERE room_id IN ($1::uuid, $2::uuid)`, [bRoom, bSessRoom]))[0].n;
+  const bMembersBefore = await sql(`SELECT member_kind, member_ref FROM public.refinery_members WHERE refinery_id = $1 ORDER BY member_kind, member_ref`, [bRefinery]);
   // rw-p8a2-cleanup: B's cleanup actions (D5; 07-MULTI-USER). B suppresses a source of the sweep's own,
   // severs it from the cleanup view, erases it there, runs a process-all and lifts the tombstone. The
   // shared rows those writes leave (trail, tombstone) name the ACTION (cleanup-action:<id>, an opaque id
@@ -312,7 +323,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
-    roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
+    roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, ideaEdit: ideaMk.edit, ideaDossier: ideaMk.dossier, ideaDraft: ideaMk.draft, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
   let calls = 0;
@@ -497,8 +508,15 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const bRoomRead = await wb("GET", `/workbench/rooms/${bRoom}`, undefined, B);
   assertEquals(bRoomRead.status, 200, bRoomRead.text);
   assert(bRoomRead.text.includes(room.entry) && bRoomRead.text.includes(room.draft), "B reads B's own room");
-  const roomWrites = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_room_entries WHERE room_id IN ($1::uuid, $2::uuid) AND actor_sub <> $3`, [bRoom, bSessRoom, bSub]);
-  assertEquals(roomWrites[0].n, 0, "user A's calls wrote nothing into B's rooms");
+  const roomWrites = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_room_entries WHERE room_id IN ($1::uuid, $2::uuid)`, [bRoom, bSessRoom]);
+  assertEquals(roomWrites[0].n, bRoomEntriesBefore, "user A's calls wrote nothing into B's rooms");
+  // rw-p8a4-ideas: A's calls of the ideas routes with B's id (edit, research now, draft, seed) changed nothing of B's idea
+  assertEquals((await sql(`SELECT summary, title, status, current_revision FROM public.ideas WHERE id = $1`, [bRefinery]))[0], bIdeaBefore,
+    "user A's calls left B's idea (its text, revision and state) unchanged");
+  assertEquals(await sql(`SELECT member_kind, member_ref FROM public.refinery_members WHERE refinery_id = $1 ORDER BY member_kind, member_ref`, [bRefinery]),
+    bMembersBefore, "user A's calls engaged nothing in B's refinery");
+  assert(bRoomRead.text.includes(ideaMk.dossier) && bRoomRead.text.includes(ideaMk.draft), "B reads B's dossier and draft in B's room");
+  console.log(`sweep: B's idea (edited, a dossier delivered, its draft) unchanged by A's ideas-route calls`);
   const bScope = bRoomRead.json.room?.scope;
   assertEquals(bScope, { enabled: true, sources: [FX_ACTIVE] }, "user A's calls left B's chat scope unchanged");
   console.log(`sweep: B's rooms (idea + session) unchanged by A; B still reads them`);

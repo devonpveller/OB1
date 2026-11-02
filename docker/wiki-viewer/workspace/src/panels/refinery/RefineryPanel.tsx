@@ -10,6 +10,7 @@ import { setState, useWorkspace } from "../../lib/store";
 import { Disclosure, type Leaf } from "../../shell/Disclosure";
 import { registerNav, registerPanel, type PanelProps } from "../../shell/registry";
 import { openRoom } from "../room/RoomPanels";
+import { openPanel } from "../../shell/dock";
 import { statusBadges } from "../../lib/sourceStatus";
 import { IntakeAdd } from "../intake/IntakeAdd";
 
@@ -84,7 +85,7 @@ export function RefineryPanel(p: PanelProps) {
     const room = idea.room;
     return [
       ...docLeaf,
-      { key: "room", label: <span>the room</span>, badges: [room.state], detail: <span>{room.note}{room.location ? ` (${room.location})` : ""}</span> },
+      { key: "room", label: <span>the room</span>, badges: [room.state], detail: <span>{room.inlet ? `its inlet: ${room.inlet}` : "the idea's one room"}</span> }, // rw-p8a4-ideas: the workspace room
       ...idea.refinery.members.sessions.map((s: string) => ({ key: `session:${s}`, label: <span>session {s.slice(0, 8)}</span>, badges: ["session"] })),
       ...idea.refinery.user_sources.map((u: any) => ({
         key: `user:${u.source_id}`, label: <span data-user-source={u.source_id}>{u.title}</span>, // P8a-1 (D5): the fold status AND the lifecycle state (a folded-in source may be suppressed since)
@@ -108,6 +109,8 @@ export function RefineryPanel(p: PanelProps) {
           )}
           {r && !r.archived && <button type="button" data-action="archive-refinery" onClick={() => docAction("archive")}>Archive this idea refinery</button>}
           {r?.archived && <button type="button" data-action="open-refinery" onClick={() => docAction("open")}>Open the refinery</button>}
+          {/* rw-p8a4-ideas: the refinery view (the idea view, its members, user sources and context graph) */}
+          {idea && <button type="button" data-action="refinery-view" onClick={() => openPanel("idea", { idea_id: idea.id })}>Refinery view</button>}
         </>
       );
     }

@@ -11,8 +11,9 @@
 //   the dossier                          -> a transclusion of its opening, pinned
 // The seed is composed, not generated: no model is called (all inference would go through LiteLLM
 // with its own key, and nothing in the acceptance needs one). The document is then an ordinary user
-// document (D12: authored, outbound links only, never ingested); the idea moves to `promoted`, and
-// the refinery is tethered to this, its one document.
+// document (D12: authored, outbound links only, never ingested); the idea moves to `promoted` through
+// idea_promote() (rw-p8a4-ideas: owner-checked, with the pointer to the document), and the refinery is
+// tethered to this, its one document. A second seed for the same refinery is refused: go to document.
 import type { Db } from "../contracts/db.ts";
 import type { RegistryReader } from "../contracts/registry.ts";
 import { idea as readIdea } from "../contracts/repo/ideas.ts";
@@ -41,6 +42,8 @@ export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, 
   if (idea.refinery.members.document) {
     throw new DocError("this refinery already has its document - go to document", 409, { path: idea.refinery.members.document.path });
   }
+  // rw-p8a4-ideas: engagement skips a resting refinery - nothing is created for an archived one
+  if (idea.status === "archived") throw new DocError("this idea's refinery is archived: reopen it first", 409);
   const held = idea.refinery.user_sources.filter((u) => u.state === "held");
   const sources = [...idea.produced.sources.filter((s) => s.id !== idea.dossier?.source_id), ...held.map((h) => ({ id: h.source_id, title: h.title }))];
   const created = await createDocument({ db, reg }, {
@@ -52,6 +55,8 @@ export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, 
   const holder = { kind: HOLDER_KIND, ref: rel, origin: "cited" };
   const parts: string[] = [];
   parts.push("## The idea\n", idea.summary || "(no statement yet)", "");
+  // rw-p8a4-ideas: the accreting draft (a field on the idea's room) seeds the document too
+  if (idea.draft.text.trim()) parts.push("## Draft\n", idea.draft.text.trim(), "");
   if (idea.revisions.length > 1) {
     parts.push("## How it developed\n", ...idea.revisions.map((r) => `- revision ${r.revision}: ${r.summary.replace(/\n+/g, " ")}`), "");
   }
@@ -96,7 +101,15 @@ export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, 
       `INSERT INTO public.refinery_state (refinery_id, origin_kind) VALUES ($1, 'captured_idea') ON CONFLICT (refinery_id) DO NOTHING`,
       [idea.id],
     );
-    await t.query(`UPDATE public.ideas SET status = 'promoted', updated_at = now() WHERE id = $1`, [idea.id]);
+    // rw-p8a4-ideas: PROMOTE is the owner-checked function the promote_idea MCP tool calls too (slot 370); it
+    // records the pointer to this, the refinery's one document. A refusal rolls the tether back with it.
+    const o = (await t.query<{ o: { outcome: string } }>(
+      `SELECT public.idea_promote($1::uuid, $2, $3, $4) AS o`, [idea.id, who.sub, who.actor, rel],
+    ))[0].o;
+    if (o.outcome !== "promoted" && o.outcome !== "unchanged") {
+      throw new DocError(o.outcome === "archived" ? "this idea's refinery is archived: reopen it first" : "no idea with this id",
+        o.outcome === "archived" ? 409 : 404);
+    }
   });
   const listed = await syncListing(db, reg, rel, content, who, "seed");
   await vaultCommitPath(rel, `documents: seed ${rel} from idea ${idea.id}`, who.name);

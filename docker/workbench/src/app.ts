@@ -28,6 +28,7 @@
 //   /workbench/workspace   — research-workbench P2b: the title bar bell's acknowledgement
 //   /workbench/exports     — research-workbench P6b: the caller's own gated export runs (the export panel)
 //   /workbench/rooms       — research-workbench rw-p8a3-room: the caller's research rooms and their scoped chat
+//   /workbench/ideas       — research-workbench rw-p8a4-ideas: idea edit, research now, the accreting draft (owner-checked SQL functions)
 //                            (chat IS the room; inference through LiteLLM under the 'workbench-chat' key, off when blank)
 //   /workbench/intake      — research-workbench P5a: the intake and queue panel (rw-p5a-intake)
 //   /workbench/auth        — rw-identity: who am I, admin impersonation and its audit log (sign-in
@@ -58,6 +59,7 @@ import { nav } from "./routes/nav.ts";
 import { documentsRouter, workspaceRouter } from "./routes/documents.ts";
 import { ideaScheduleRouter } from "./routes/idea-schedule.ts";
 import { roomsRouter } from "./routes/rooms.ts";
+import { ideasRouter } from "./ideas/routes.ts";
 import { refetchClient, researchClient } from "./documents/clients.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
 import { contractDeps } from "./contracts/wiring.ts";
@@ -136,6 +138,7 @@ app.route("/workbench/documents", documentsRouter(docDeps)); // research-workben
 app.route("/workbench/workspace", workspaceRouter(cdeps.db)); // research-workbench P2b — the bell's acknowledgement
 app.route("/workbench/idea-schedule", ideaScheduleRouter(cdeps.db)); // rw-idea-schedule - when research on my ideas starts; research now
 app.route("/workbench/rooms", roomsRouter({ db: cdeps.db, embed: cdeps.embed })); // rw-p8a3-room - the research room (per user) and its scoped chat
+app.route("/workbench/ideas", ideasRouter({ db: cdeps.db, embed: cdeps.embed })); // rw-p8a4-ideas - idea edit / research now / draft through the owner-checked functions
 app.route("/workbench/auth", authRouter({ // rw-identity — who am I, impersonation, the audit log
   db: cdeps.db, fa: seam.fa, mode: seam.fa ? "forward-auth" : seam.cfg.header ? "header" : "default",
 }));

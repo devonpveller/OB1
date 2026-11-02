@@ -570,3 +570,32 @@ a Mattermost thread's permalink included - the chat scope, the draft, whether ch
 
 Lab: `contract-test/run-room-tests.ps1 -Subnet <x.y.z.0/24>` (a stub gateway named `llama-cpp`, chat on /
 off / misrouted, the two-user sweep).
+
+## The ideas panel and the refinery view (rw-p8a4-ideas)
+
+Idea edit, research now and promote are **owner-checked SQL functions** (`init-idea-functions.sql`, slot 370;
+revert `revert-idea-functions.sql`) that BOTH this workbench and openbrain-mcp's `update_idea` / `research_idea`
+/ `promote_idea` call: `idea_edit(idea, owner, actor, summary, title, embedding, thought)`, `idea_research(idea,
+owner, actor)`, `idea_promote(idea, owner, actor, document_path)`. Another owner's idea answers `not_found`
+(404 here), an archived refinery `archived` (409). The database refuses an app role (`service_role`,
+`ob_app_memory`) that writes `ideas.title / summary / current_revision`, a revision after the first, or a move to
+`promoted` itself (`trg_ideas_write_guard`): an edit that bypasses the functions, or a promotion the refinery
+performs on its own, cannot happen.
+
+| route | what |
+|---|---|
+| `POST /workbench/ideas/:id/edit` `{summary, title?}` | a new revision through `idea_edit()` (no thought row: an idea is private); identical text = `unchanged` |
+| `POST /workbench/ideas/:id/research-now` | `idea_research()` (202 + the job); `/workbench/idea-schedule/research-now/:id` is the same call |
+| `PUT /workbench/ideas/:id/draft` `{text}` | the accreting draft - a field on the idea's one room (`workspace_rooms.draft`) |
+| `POST /workbench/documents/seed` `{idea_id}` | `create document` (P2b's seed): seeds the refinery's ONE document, then `idea_promote()` with its path |
+| `POST /workbench/contract/podcasts/requests` `{..., refinery_id?}` | a podcast engaged from inside a refinery is its member (`refinery_engage()`) |
+
+The contract's `ideas()` gains `last_session_at`, `dossier_at`, `resurfaced_at`; `idea(id)` gives `room` (the idea's
+one workspace room; `thread_root` is its Mattermost inlet), `draft` (the room's field), `refinery.members.chats`,
+`refinery.archived`, and per user source its `corroboration` (held: `not_run`; folded: the corroboration from the
+refinery's own sources) and `found_via` (what the admission trail admitted through it). The idea refinery service
+delivers each dossier into the idea's room first (`idea_deliver_dossier()`, one entry per research job; an archived
+idea gets nothing and no notification) and still posts it to Mattermost while `IDEA_REFINERY_MM_TOKEN` is set.
+Workspace panels: `ideas` (by state, archived in its own list), `idea` (the idea view = the refinery view) and
+`refinery-graph` (its context graph, hide / unhide). Lab: `run-workspace-tests.ps1 -Subnet <x.y.z.0/24>` [5h], or
+`-IdeasOnly` for [5h] + the two-user sweep; `-Red -IdeasOnly -BaseSha <sha>` stages the base's chain too.

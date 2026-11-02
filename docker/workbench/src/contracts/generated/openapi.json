@@ -2650,6 +2650,24 @@
           "document_path": {
             "type": "string",
             "nullable": true
+          },
+          "last_session_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "the newest session the idea spun off"
+          },
+          "dossier_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "the latest dossier delivered into its room (else the dossier source's date)"
+          },
+          "resurfaced_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "a dormant idea a newer idea's dossier cross-linked (IR section 8)"
           }
         },
         "required": [
@@ -2660,7 +2678,10 @@
           "summary",
           "current_revision",
           "updated_at",
-          "document_path"
+          "document_path",
+          "last_session_at",
+          "dossier_at",
+          "resurfaced_at"
         ]
       },
       "Idea": {
@@ -2753,10 +2774,10 @@
             ]
           },
           "draft": {
-            "$ref": "#/components/schemas/External"
+            "$ref": "#/components/schemas/IdeaDraft"
           },
           "room": {
-            "$ref": "#/components/schemas/External"
+            "$ref": "#/components/schemas/IdeaRoom"
           },
           "produced": {
             "type": "object",
@@ -2925,29 +2946,67 @@
           "finished_at"
         ]
       },
-      "External": {
+      "IdeaDraft": {
         "type": "object",
         "properties": {
           "state": {
             "type": "string",
-            "minLength": 1,
-            "x-registry": "record_states",
-            "example": "external",
-            "description": "A key of the `record_states` registry (GET /workbench/contract/registries/record_states)."
+            "example": "current",
+            "description": "current | empty"
           },
-          "location": {
+          "text": {
+            "type": "string"
+          },
+          "updated_at": {
             "type": "string",
             "nullable": true,
-            "description": "where the record lives today (the idea's Mattermost thread root)"
-          },
-          "note": {
-            "type": "string"
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
           }
         },
         "required": [
           "state",
-          "location",
-          "note"
+          "text",
+          "updated_at"
+        ]
+      },
+      "IdeaRoom": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "example": "current",
+            "description": "current | not_opened (the room is made on first open, or by the first dossier)"
+          },
+          "room_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "thread_root": {
+            "type": "string",
+            "nullable": true,
+            "description": "the Mattermost thread bound to this room (its inlet)"
+          },
+          "inlet": {
+            "type": "string",
+            "nullable": true,
+            "description": "mattermost:thread:<root>, when the idea has one"
+          },
+          "entries": {
+            "type": "integer"
+          },
+          "dossiers": {
+            "type": "integer",
+            "description": "refinery dossiers delivered into the room"
+          }
+        },
+        "required": [
+          "state",
+          "room_id",
+          "thread_root",
+          "inlet",
+          "entries",
+          "dossiers"
         ]
       },
       "Refinery": {
@@ -3015,7 +3074,15 @@
               },
               "room": {
                 "type": "string",
-                "nullable": true
+                "nullable": true,
+                "description": "rw-p8a4-ideas: the idea's one workspace room"
+              },
+              "chats": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "rw-p8a4-ideas: the caller's rooms engaged from inside the refinery - its own room and the caller's rooms on the refinery's sessions"
               }
             },
             "required": [
@@ -3023,7 +3090,8 @@
               "document",
               "podcasts",
               "exports",
-              "room"
+              "room",
+              "chats"
             ]
           },
           "context_graph": {
@@ -3080,6 +3148,10 @@
             "items": {
               "$ref": "#/components/schemas/UserSource"
             }
+          },
+          "archived": {
+            "type": "boolean",
+            "description": "D17 archive: the refinery rests (engagement skips it); nothing is deleted"
           }
         },
         "required": [
@@ -3087,7 +3159,8 @@
           "members",
           "context_graph",
           "hidden",
-          "user_sources"
+          "user_sources",
+          "archived"
         ]
       },
       "ContextNode": {
@@ -3192,6 +3265,57 @@
           },
           "revision": {
             "type": "integer"
+          },
+          "corroboration": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "example": "not_run",
+                "description": "not_run | scoped (no closed list, P0). held: not run until the source is folded in; folded: the corroboration it received from the refinery's own sources (its sessions' and its user sources)"
+              },
+              "givers": {
+                "type": "integer"
+              },
+              "amount": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "state",
+              "givers",
+              "amount"
+            ]
+          },
+          "found_via": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "trail_id": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "source_id": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "at": {
+                  "type": "string",
+                  "example": "2026-10-17T12:00:00.000Z",
+                  "description": "ISO-8601 timestamp"
+                }
+              },
+              "required": [
+                "trail_id",
+                "url",
+                "source_id",
+                "at"
+              ]
+            },
+            "description": "what the admission trail admitted found_via this source (directly or through its lead)"
           }
         },
         "required": [
@@ -3201,7 +3325,9 @@
           "state",
           "title",
           "url",
-          "revision"
+          "revision",
+          "corroboration",
+          "found_via"
         ]
       },
       "HiddenState": {
@@ -4540,6 +4666,12 @@
               "title",
               "turns"
             ]
+          },
+          "refinery_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+            "description": "rw-p8a4-ideas: requested from inside this idea refinery (the caller's own): recorded as its member; an archived refinery refuses (409)"
           }
         },
         "required": [
@@ -9334,7 +9466,10 @@
                       "summary": "An idea about the retrieval contract.",
                       "current_revision": 1,
                       "updated_at": "2026-10-17T12:00:00.000Z",
-                      "document_path": "documents/fixture-refinery.md"
+                      "document_path": "documents/fixture-refinery.md",
+                      "last_session_at": "2026-10-17T12:00:00.000Z",
+                      "dossier_at": "2026-10-17T12:00:00.000Z",
+                      "resurfaced_at": null
                     }
                   ]
                 },
@@ -9470,14 +9605,17 @@
                     "lifecycle": "active"
                   },
                   "draft": {
-                    "state": "external",
-                    "location": "mattermost:thread:mm-root-fixture",
-                    "note": "the accreting draft lives in the idea's Mattermost thread today; it moves into the workspace room in P8a (D17)"
+                    "state": "empty",
+                    "text": "",
+                    "updated_at": null
                   },
                   "room": {
-                    "state": "external",
-                    "location": "mattermost:thread:mm-root-fixture",
-                    "note": "the room transcript lives in the idea's Mattermost thread today; it moves into the workspace room in P8a (D17)"
+                    "state": "not_opened",
+                    "room_id": null,
+                    "thread_root": "mm-root-fixture",
+                    "inlet": "mattermost:thread:mm-root-fixture",
+                    "entries": 0,
+                    "dossiers": 0
                   },
                   "produced": {
                     "sources": [
@@ -9522,7 +9660,8 @@
                         "podcast-fixture-1"
                       ],
                       "exports": [],
-                      "room": "mm-root-fixture"
+                      "room": null,
+                      "chats": []
                     },
                     "context_graph": {
                       "nodes": [
@@ -9618,7 +9757,13 @@
                         "state": "held",
                         "title": "Held fixture source (linked)",
                         "url": "https://example.org/held-linked",
-                        "revision": 1
+                        "revision": 1,
+                        "corroboration": {
+                          "state": "not_run",
+                          "givers": 0,
+                          "amount": 0
+                        },
+                        "found_via": []
                       },
                       {
                         "source_id": "cccccccc-cccc-4ccc-8ccc-ccccccccccc2",
@@ -9627,9 +9772,16 @@
                         "state": "held",
                         "title": "Held fixture source (removable)",
                         "url": null,
-                        "revision": 1
+                        "revision": 1,
+                        "corroboration": {
+                          "state": "not_run",
+                          "givers": 0,
+                          "amount": 0
+                        },
+                        "found_via": []
                       }
-                    ]
+                    ],
+                    "archived": false
                   }
                 },
                 "schema": {
@@ -9846,7 +9998,13 @@
                     "state": "held",
                     "title": "A user-provided note on retrieval",
                     "url": "https://example.org/user-added",
-                    "revision": 1
+                    "revision": 1,
+                    "corroboration": {
+                      "state": "not_run",
+                      "givers": 0,
+                      "amount": 0
+                    },
+                    "found_via": []
                   },
                   "chunks": 1,
                   "embedded": true

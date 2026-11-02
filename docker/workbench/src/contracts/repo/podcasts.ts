@@ -3,7 +3,7 @@
 // subject_sub and nothing in a body can name another; another user's request, team or presenter
 // is "not found", never "forbidden" (it does not exist for the caller).
 import type { Db } from "../db.ts";
-import { NotFound } from "./lifecycle.ts";
+import { Conflict, NotFound } from "./lifecycle.ts";
 
 export async function presenters(db: Db, sub: string) {
   const rows = await db.query<Record<string, unknown>>(
@@ -58,6 +58,8 @@ export interface RequestIn {
   team_id: string;
   title: string;
   transcript: { title: string; turns: { presenterId: string; text: string }[] };
+  // rw-p8a4-ideas (D17 item 6): a podcast engaged from inside an idea refinery is recorded as its member
+  refinery_id?: string;
 }
 
 export async function createRequest(db: Db, who: { sub: string; actor: string }, b: RequestIn) {
@@ -68,10 +70,20 @@ export async function createRequest(db: Db, who: { sub: string; actor: string },
   )).map((m) => m.presenter_id));
   const stray = b.transcript.turns.find((t) => !members.has(t.presenterId));
   if (stray) throw new NotFound("a turn names a presenter who is not in the team");
-  const rows = await db.query<Record<string, unknown>>(
-    `INSERT INTO public.podcast_render_requests AS r (requester_sub, actor_sub, team_id, title, input)
-     VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING ${REQUEST_COLS}`,
-    [who.sub, who.actor, b.team_id, b.title, JSON.stringify({ transcript: b.transcript })],
-  );
-  return rows[0];
+  return await db.tx(async (t) => {
+    const rows = await t.query<Record<string, unknown>>(
+      `INSERT INTO public.podcast_render_requests AS r (requester_sub, actor_sub, team_id, title, input)
+       VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING ${REQUEST_COLS}`,
+      [who.sub, who.actor, b.team_id, b.title, JSON.stringify({ transcript: b.transcript })],
+    );
+    if (b.refinery_id) {
+      // the owner-checked engagement (slot 370): another user's refinery is none; a resting one records nothing
+      const o = (await t.query<{ o: { outcome: string } }>(
+        `SELECT public.refinery_engage($1::uuid, $2, 'podcast_request', $3) AS o`, [b.refinery_id, who.sub, String(rows[0].id)],
+      ))[0].o;
+      if (o.outcome === "not_found") throw new NotFound("no such refinery");
+      if (o.outcome !== "engaged") throw new Conflict("this refinery is archived: reopen it from its document first");
+    }
+    return rows[0];
+  });
 }
