@@ -427,6 +427,7 @@ try {
         '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
         $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', 'src/ideas/idea_privacy_integration_test.ts')
       $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+      $script:lastPhaseText = $clean
       Save $logName ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||^privacy |error:|AssertionError|Values are not equal' }) -join "`n")
       foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^privacy ' }) { Write-Host "    $l" }
       return ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
@@ -482,12 +483,12 @@ try {
     $script:made.dirs += @($r1i, $r1r)
     [System.IO.File]::WriteAllText($r1i, ((& git -C $ob1 show "${PrivacyRoundOneSha}:docker/init-idea-privacy.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
     [System.IO.File]::WriteAllText($r1r, ((& git -C $ob1 show "${PrivacyRoundOneSha}:docker/revert-idea-privacy.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
-    $rc = & $psqlFile $r1i "round 1 init ($PrivacyRoundOneSha)"
+    $r1rc = & $psqlFile $r1i "round 1 init ($PrivacyRoundOneSha)"
     $s = & $phase 'migrated' 'privacy-red-round1-380.log'
     # both tests that read a page surface fail (the wiki test, and the corpus test's kinds=page,claim,source search);
     # the archive and the owner's revisions pass
-    $red1 = Get-Content -Raw (Join-Path $evStage 'privacy-red-round1-380.log') -ErrorAction SilentlyContinue
-    Check ($rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 2 -and [int]$s.Groups[3].Value -eq 2 -and $red1 -match "B's search &kinds=page returns an idea marker" -and $red1 -match "B's contract search returns an idea marker") "[5j] RED: round 1's 380 ($PrivacyRoundOneSha) leaves the wiki copies - B's page search still finds idea text ($($s.Value))"
+    $red1 = [string]$script:lastPhaseText
+    Check ($r1rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 2 -and [int]$s.Groups[3].Value -eq 2 -and $red1 -match "B's search &kinds=page returns an idea marker" -and $red1 -match "B's contract search returns an idea marker") "[5j] RED: round 1's 380 ($PrivacyRoundOneSha) leaves the wiki copies - B's page search still finds idea text ($($s.Value))"
     $rc = & $psqlFile $r1r "round 1 revert ($PrivacyRoundOneSha)"
     Check ($rc -eq 0) "[5j] round 1's revert brings the planted state back"
     $rcs = @((& $psqlFile $init 'init'), (& $psqlFile $init 'init again'))
@@ -516,9 +517,9 @@ try {
       $s = & $phase 'reverted' "privacy-after-mutant-$($m[0]).log"
       Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5j] the refused mutant ($($m[0])) changed nothing ($($s.Value))"
     }
-    $rc = & $psqlFile $init 'init (the state the sweep runs on)'
+    $finalRc = & $psqlFile $init 'init (the state the sweep runs on)'
     $null = & $filesOut
-    Check ($rc -eq 0) '[5j] init-idea-privacy.sql again + the deploy step (the sweep runs on the migrated database)'
+    Check ($finalRc -eq 0) '[5j] init-idea-privacy.sql again + the deploy step (the sweep runs on the migrated database)'
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -c 'DROP TABLE IF EXISTS public.lab_idea_privacy_plant'
     Save 'privacy-psql.log' (($script:p380.GetEnumerator() | Sort-Object Name | ForEach-Object { "[$($_.Name)] $($_.Value)" }) -join "`n")
   }
