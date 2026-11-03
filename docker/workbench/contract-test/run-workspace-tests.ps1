@@ -539,16 +539,18 @@ try {
     # what it added (the admin tier contract_settings and idea_schedule are as they were)
     Write-Host '[5m] init-settings.sql twice more (3 runs with the chain''s), revert-settings.sql twice, then init again'
     $q = { param($x) (Dk exec $db psql -U postgres -d openbrain -X -tAc $x).Trim() }
-    $objs = "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('setting_get','setting_problem','user_setting_set','trg_user_settings_guard'))::text || ' fns, ' || (CASE WHEN to_regclass('public.settings_keys') IS NULL THEN 'no' ELSE (SELECT count(*)::text FROM public.settings_keys) END) || ' keys, ' || (CASE WHEN to_regclass('public.user_settings') IS NULL THEN 'no user_settings' ELSE 'user_settings' END)"
+    # the key count only when the table exists (a CASE branch still resolves its relation, so ask in two steps)
+    $objs0 = "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('setting_get','setting_problem','user_setting_set','trg_user_settings_guard'))::text || ' fns, ' || (to_regclass('public.settings_keys') IS NOT NULL)::text || ' ' || (to_regclass('public.user_settings') IS NOT NULL)::text"
+    $objsFn = { $r = & $q $objs0; $p = $r -split ' '; if ($p[2] -eq 'true') { $k = (& $q "SELECT count(*) FROM public.settings_keys") + ' keys' } else { $k = 'no keys' }; "$($p[0]) $($p[1]) $k, $(if ($p[3] -eq 'true') { 'user_settings' } else { 'no user_settings' })" }
     $kept = "SELECT (SELECT coalesce(md5(string_agg(key || value::text || version, ',' ORDER BY key)), '-') FROM public.contract_settings) || ' / ' || (SELECT count(*)::text || ':' || coalesce(md5(string_agg(owner_sub || mode || coalesce(at_time::text, '') || tz, ',' ORDER BY owner_sub)), '-') FROM public.idea_schedule)"
     $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('settings-revert-$rand', 'refinery.dormancy_days', '9') ON CONFLICT DO NOTHING"
     $keptBefore = & $q $kept
-    $objsBefore = & $q $objs
+    $objsBefore = & $objsFn
     $rv4 = @("before: $objsBefore | kept: $keptBefore")
     foreach ($f in @('init-settings.sql', 'init-settings.sql', 'revert-settings.sql', 'revert-settings.sql', 'init-settings.sql')) {
       $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv400.sql"
       $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv400.sql
-      $rv4 += "[$f] exit $($script:rc)$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> $(& $q $objs) | kept: $(& $q $kept)"
+      $rv4 += "[$f] exit $($script:rc)$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> $(& $objsFn) | kept: $(& $q $kept)"
     }
     Save 'revert-settings.log' ($rv4 -join "`n")
     foreach ($l in $rv4) { Write-Host "    $l" }
