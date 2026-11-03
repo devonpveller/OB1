@@ -598,7 +598,10 @@ delivers each dossier into the idea's room (`idea_deliver_dossier()`, one entry 
 idea gets nothing and no notification) and nowhere else: rw-idea-privacy stopped the post to the shared Mattermost
 channel (no owner-to-Mattermost mapping exists). Slot 380 (`init-idea-privacy.sql`, revert `revert-idea-privacy.sql`)
 moved the thoughts the idea doors wrote before slot 370 out of the shared corpus into `idea_thought_archive` (no app
-role reads it), their revisions made private; lab step [5j].
+role reads it), their revisions made private, and withholds the idea's presentation in the wiki - its leaf and every
+page linking it (`idea_wiki_archive`; the next entity compile rebuilds a general linking page without the idea), with
+a `wiki_pages` guard that refuses the leaf and the link (never shared wording); lab step [5j]. The wiki writer
+(`recipes/_shared/wiki-pages.mjs`) learns a row a database guard withheld and leaves its file out.
 Workspace panels: `ideas` (by state, archived in its own list), `idea` (the idea view = the refinery view) and
 `refinery-graph` (its context graph, hide / unhide). Lab: `run-workspace-tests.ps1 -Subnet <x.y.z.0/24>` [5h], or
 `-IdeasOnly` for [5h] + the two-user sweep; `-Red -IdeasOnly -BaseSha <sha>` stages the base's chain too.
