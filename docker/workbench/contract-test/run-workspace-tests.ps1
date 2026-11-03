@@ -42,6 +42,9 @@
 # the owner-checked idea functions (slot 370) as two users and as the app role, the refinery's dossier into the room,
 # archive, the user source list. -IdeasOnly runs [5h] and the sweep alone; with -Red -IdeasOnly the initdb chain is
 # staged from -BaseSha too (the base has no slot 370), the sweep is skipped, and [5h] must fail.
+# rw-idea-privacy adds [5j] (not with -Red): slot 380 over planted pre-370 idea thoughts (src/ideas/idea_privacy_integration_test.ts in
+# phases around psql runs): RED before 380 runs, init x2, revert x2 byte-identical, a mutant without the archive step refused, init
+# again - so the sweep that follows runs on the migrated database.
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
 param(
   [string]$Id = 'wt-rw-p2b-workspace',
@@ -238,6 +241,7 @@ try {
   foreach ($m in $chain) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stage $m[1]) }
   Check (@($chain | Where-Object { $_[1] -eq '270-init-documents.sql' }).Count -eq 1) "the chain mounts 270-init-documents.sql ($($chain.Count) migrations)"
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '370-init-idea-functions.sql' }).Count -eq 1) 'the chain mounts 370-init-idea-functions.sql (rw-p8a4-ideas)' }
+  if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '380-init-idea-privacy.sql' }).Count -eq 1) 'the chain mounts 380-init-idea-privacy.sql (rw-idea-privacy)' }
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] the internal network'
@@ -402,6 +406,64 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the ideas integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the ideas integration test ($($sum.Value))" }
+
+  # rw-idea-privacy: slot 380 moves the pre-370 idea thoughts out of the shared corpus. Phases of
+  # src/ideas/idea_privacy_integration_test.ts around psql runs: plant; the privacy checks BEFORE 380 runs on the planted
+  # rows (the base b43ecb5 has no slot 380: they must FAIL); init twice; the checks; revert twice; byte-identity; a
+  # MUTANT 380 without its archive step must refuse and delete nothing; init again (the sweep then runs on that state).
+  if (-not $Red) {
+    Write-Host '[5j] slot 380: the idea thoughts leave the shared corpus (plant, RED before, init x2, revert x2, mutant, init)'
+    $phase = {
+      param($ph, $logName)
+      $o = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-e', "PRIVACY_PHASE=$ph",
+        '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+        '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+        $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/ideas/idea_privacy_integration_test.ts')
+      $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+      Save $logName ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||^privacy |error:|AssertionError|Values are not equal' }) -join "`n")
+      foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^privacy ' }) { Write-Host "    $l" }
+      return ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+    }
+    $psqlFile = {
+      param($path, $tag)
+      $null = Dk cp $path "${db}:/tmp/p380.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/p380.sql
+      $rc = $script:rc
+      $msg = (($o -split "`n") | Where-Object { $_ -match 'NOTICE|ERROR' } | ForEach-Object { $_ -replace '^.*?(NOTICE|ERROR):\s*', '$1 ' }) -join ' | '
+      $script:p380 += "[$tag] exit ${rc}: $msg"
+      Write-Host "    [$tag] exit ${rc}: $msg"
+      return $rc
+    }
+    $script:p380 = @()
+    $s = & $phase 'plant' 'privacy-plant.log'
+    Check ($s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 1) "[5j] planted user A's ideas in every pre-370 shape ($($s.Value))"
+    $s = & $phase 'migrated' 'privacy-red-before-380.log'
+    Check ($s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 0) "[5j] RED: before slot 380 runs (= the base) every privacy check fails ($($s.Value))"
+    $init = Join-Path $dockerDir 'init-idea-privacy.sql'
+    $revert = Join-Path $dockerDir 'revert-idea-privacy.sql'
+    $rcs = @((& $psqlFile $init 'init'), (& $psqlFile $init 'init again'))
+    Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p380[0] -match 'NOTICE idea privacy: \d+ idea thought' -and $script:p380[1] -match 'nothing to move') '[5j] init-idea-privacy.sql moves the idea thoughts, and a second run has nothing to move'
+    $s = & $phase 'migrated' 'privacy-migrated.log'
+    Check ($s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 3 -and [int]$s.Groups[3].Value -eq 0) "[5j] after 380: no shared search finds idea text, the archive is exactly the rows removed, A reads every revision ($($s.Value))"
+    $rcs = @((& $psqlFile $revert 'revert'), (& $psqlFile $revert 'revert again'))
+    Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p380[2] -match 'restored' -and $script:p380[3] -match 'nothing to restore') '[5j] revert-idea-privacy.sql restores, and a second run has nothing to restore'
+    $s = & $phase 'reverted' 'privacy-reverted.log'
+    Check ($s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 1) "[5j] after the revert every thought, link, edge, queue row and revision is byte-identical ($($s.Value))"
+    # the mutant: the same file without its archive step must refuse - it would delete thoughts it did not archive
+    $mutant = Join-Path $env:TEMP "$P-380-mutant.sql"
+    $src = Get-Content -Raw $init
+    $cut = [regex]::Replace($src, '(?s)-- \[archive-step\].*?-- \[/archive-step\]', '-- (mutant: no archive step)')
+    [System.IO.File]::WriteAllText($mutant, $cut, (New-Object System.Text.UTF8Encoding $false))
+    $script:made.dirs += $mutant
+    $mrc = & $psqlFile $mutant 'mutant without the archive step'
+    Check ($cut -ne $src -and $mrc -ne 0 -and $script:p380[4] -match 'refused, nothing changed') '[5j] a 380 that deletes a thought it did not first archive FAILS (refused, nothing changed)'
+    $s = & $phase 'reverted' 'privacy-after-mutant.log'
+    Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5j] the refused mutant changed nothing ($($s.Value))"
+    $rc = & $psqlFile $init 'init (the state the sweep runs on)'
+    Check ($rc -eq 0) '[5j] init-idea-privacy.sql again (the sweep runs on the migrated database)'
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -c 'DROP TABLE IF EXISTS public.lab_idea_privacy_plant'
+    Save 'privacy-psql.log' ($script:p380 -join "`n")
+  }
 
   if (-not $IdeasOnly) {
   # rw-p5a-intake: the intake and queue panel over the real workbench and database, two users and OWUI's key
