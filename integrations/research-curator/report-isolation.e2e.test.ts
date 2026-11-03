@@ -255,3 +255,57 @@ Deno.test({ name: "RI4: an idea job attached to an EXISTING thread stays private
     eq((await sql<{ d: string }>(`SELECT description AS d FROM public.threads WHERE id = $1`, [thread]))[0].d, "the shared description", "RI4: the thread's description is untouched");
   } finally { await L.stop(); }
 } });
+
+Deno.test({ name: "RI5 (round 2, tester F1): two users whose ideas read alike share a research_key - each keeps their own private report, claims and prose, in either filing order", ...opts, fn: async () => {
+  const tag = `RI5${rnd()}`; const L = await lab(tag);
+  try {
+    const ownerA = `owner-a-${rnd()}`, ownerB = `owner-b-${rnd()}`;
+    const a = await ideaWithJob(ownerA, `Dark mode ${tag}`);
+    const b = await ideaWithJob(ownerB, `Dark mode ${tag}`);
+    const qs = await sql<{ q: string }>(`SELECT query AS q FROM public.research_jobs WHERE id IN ($1::uuid, $2::uuid)`, [a.job, b.job]);
+    eq(qs[0].q, qs[1].q, "RI5: the two ideas' research questions are identical (so the research service keys them alike)");
+    const key = `rs-${tag}`; const mkA = marks(`${tag}a`), mkB = marks(`${tag}b`);
+    const rows = async () => await sql<{ owner_sub: string; idea_id: string; job_id: string; content: string; prose: string | null; claims: string[] }>(
+      `SELECT p.owner_sub, p.idea_id::text, p.job_id::text, p.content, p.metadata ->> 'prose_synthesis' AS prose,
+              coalesce((SELECT array_agg(c.text ORDER BY c.text) FROM public.research_private_report_claims pc JOIN public.claims c ON c.id = pc.claim_id WHERE pc.report_id = p.id), '{}') AS claims
+         FROM public.research_private_reports p WHERE p.research_key = $1 ORDER BY p.owner_sub`, [key]);
+    const check = async (ctx: string, proseA: string, proseB: string) => {
+      const r = await rows();
+      eq(r.map((x) => [x.owner_sub, x.idea_id, x.job_id]), [[ownerA, a.idea, a.job], [ownerB, b.idea, b.job]], `${ctx}: one private row per user`);
+      assert(r[0].content.includes(mkA.report) && !r[0].content.includes(mkB.report), `${ctx}: A's row holds A's report only`);
+      assert(r[1].content.includes(mkB.report) && !r[1].content.includes(mkA.report), `${ctx}: B's row holds B's report only`);
+      eq([r[0].prose, r[1].prose], [`A readable report. ${proseA}`, `A readable report. ${proseB}`], `${ctx}: each row carries its own prose`);
+      assert(r[0].claims.length >= 2 && r[0].claims.every((t) => t.includes(mkA.claimWord)), `${ctx}: A's claims link to A's report only: ${JSON.stringify(r[0].claims)}`);
+      assert(r[1].claims.length >= 2 && r[1].claims.every((t) => t.includes(mkB.claimWord)), `${ctx}: B's claims link to B's report only: ${JSON.stringify(r[1].claims)}`);
+    };
+    let ra = await send(L.cur.base, pkgFor(key, a.job, mkA));
+    assert(ra.status === 200, `A: ${ra.status} ${ra.text.slice(0, 300)}\n${L.log()}`);
+    const rb = await send(L.cur.base, pkgFor(key, b.job, mkB));
+    assert(rb.status === 200, `B: ${rb.status} ${rb.text.slice(0, 300)}\n${L.log()}`);
+    await check("A then B", mkA.prose, mkB.prose);
+    // the stamp order: A files again AFTER B (a resend, new prose) - A's own row moves, B's does not
+    const proseA2 = `${mkA.prose}-second`;
+    ra = await send(L.cur.base, { ...pkgFor(key, a.job, mkA), prose: `A readable report. ${proseA2}` });
+    assert(ra.status === 200, `A again: ${ra.status}\n${L.log()}`);
+    await check("A again after B", proseA2, mkB.prose);
+  } finally { await L.stop(); }
+} });
+
+const RESEARCH_DIR = Deno.env.get("RI_E2E_RESEARCH_DIR") ?? "/research";
+Deno.test({ name: "RI6 (round 2): the research service's job view (GET /research/jobs/:id) withholds an idea job's report from anyone but the idea's owner - the default subject included", ...opts, fn: async () => {
+  const v = await import(`file://${RESEARCH_DIR}/viewer.ts`) as {
+    FOREIGN_PROMPTS_SQL: string; sharedJobView: (job: Record<string, unknown>, o?: { privateReport?: boolean }) => Record<string, unknown>;
+  };
+  const tag = `RI6${rnd()}`; const owner = `owner-a-${rnd()}`;
+  const { job } = await ideaWithJob(owner, `idea ${tag}`);
+  const secret = `JobReportSecret${tag}`;
+  await sql(`UPDATE public.research_jobs SET status = 'done', result = jsonb_build_object('outcome', 'complete', 'synthesis', $2::text, 'cited_sources', '[]'::jsonb) WHERE id = $1`, [job, secret]);
+  const row = (await sql<Record<string, unknown>>(`SELECT id::text AS id, status, result FROM public.research_jobs WHERE id = $1`, [job]))[0];
+  // the viewer: another user, the default subject (an ownerless job is the default subject's), the owner
+  for (const [who, viewer, dflt, foreign] of [["another user", `other-${rnd()}`, "", true], ["the default subject", "operator", "operator", true], ["the owner", owner, "operator", false]] as const) {
+    const s = (await sql<{ foreign_: boolean; private_report: boolean | undefined }>(v.FOREIGN_PROMPTS_SQL, [job, viewer, dflt]))[0];
+    eq(!!s.foreign_, foreign, `RI6 ${who}: foreign`);
+    const view = s.foreign_ ? v.sharedJobView(row, { privateReport: !!s.private_report }) : row;
+    eq(JSON.stringify(view).includes(secret), !foreign, `RI6 ${who}: the report ${foreign ? "is withheld" : "is the owner's"}`);
+  }
+} });

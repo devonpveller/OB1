@@ -606,4 +606,7 @@ of its tree - never the job's text or its caller-named inlet) files its final re
 never a shared `sources` row; the claims drawn from it stay shared knowledge (`synthesis_id` NULL) and the owner's link
 back is `research_private_report_claims`. `idea(id)` gives the owner `report` (the latest one: text, prose, claim
 count) and lists its claims in `produced.claims`; nothing else reads the table. `FOREIGN_JOB` applies the same rule,
-so such a job's result is redacted for anyone but the idea's owner. Revert: `revert-report-isolation.sql`.
+so such a job's result is redacted for anyone but the idea's owner. The private row is one per (research key, owner,
+idea): two users' alike ideas share a key, never a row. The move withholds every wiki page showing a moved report (its
+leaf, a page linking it) and a guard on `wiki_pages` keeps the viewer's reconcile and the compile from writing one back.
+Revert: `revert-report-isolation.sql`.

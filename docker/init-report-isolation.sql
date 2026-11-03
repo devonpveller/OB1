@@ -4,13 +4,15 @@
 -- is the only case where the final reports are user isolated rather than shared like other reports."
 --
 --   * research_job_report_owner(job): THE rule for "a research job run for an idea" - the job, or the root of its
---     tree, is the idea's branch (branch_kind 'idea'), carries the idea (refinery_id, set only by
---     research_idea_queue and the idea-revision inlet trigger) or is stamped on one of the idea's revisions
+--     tree, is the idea's branch (branch_kind 'idea'), carries the idea (refinery_id: the idea queue, the
+--     idea-revision inlet trigger and a refinery started from a document write it) or is stamped on one of the idea's revisions
 --     (idea_revisions.research_job_id). Never the job's text, and never inlet_ref (the caller names that). No row =
 --     not an idea job; a row = an idea job, with the idea's current owner (NULL when the idea is gone: then nobody
 --     reads the report - fail closed). openbrain-mcp's POST /research/persist and the research curator both ask it.
 --   * research_private_reports: where an idea job's final report is filed INSTEAD of a shared `sources` row
---     (content_type research_synthesis). One per research_key (supersede in place, as the shared row did). Nothing
+--     (content_type research_synthesis). One per (research_key, owner, idea) - round 2, tester F1: two users whose
+--     ideas read alike get the SAME research_key, so the key alone never names a private row; a re-run of the same
+--     idea supersedes its own row in place, as the shared row did, and nothing else. Nothing
 --     shared reads it: not sources / source_chunks / search / the wiki / any contract route - only the owner's
 --     idea read in the workbench (owner_sub filter, as every per-user table in this plane: rooms, listings).
 --   * research_private_report_claims: which claims were drawn from a private report - the owner's link back. The
@@ -20,17 +22,26 @@
 --     whose foreign key references it, and its wiki leaf page row) into research_report_isolation_archive, copied
 --     into research_private_reports, its claims linked, and then deleted from `sources` (the foreign keys cascade or
 --     set NULL exactly as they are declared). A synthesis that a NON-idea job also filed is left shared and counted.
---     Counts only are printed (NOTICE), never content. A second run moves nothing (idempotent).
+--     The columns a foreign key would set NULL are set NULL by the move itself with triggers off, so their rows'
+--     touch timestamps do not move (the revert is byte-identical). A dependent the move cannot archive (a foreign key
+--     that would refuse the delete, or ANY row - single- or multi-column key - hanging off a row the delete cascades)
+--     stops it with nothing moved. Counts only are printed (NOTICE), never content. A second run moves nothing.
+--   * THE WIKI (round 2, tester F2): every wiki_pages row that shows a moved report - its leaf content/source/<id>,
+--     a page linking that leaf (links, or [[content/source/<id>]] in its body) - is archived and withheld, and a guard
+--     on wiki_pages (report_isolation_page_shows_report) keeps such a page from being written back: not by the
+--     viewer's reconcile repairing a row from its vault file, not by a compile. The entities whose pages cited a moved
+--     report are bumped (entities.updated_at), so the next compile regenerates those pages from what is still shared,
+--     and the guard lets that clean page back in. The withheld pages' vault FILES are moved out of the vault by the
+--     deploy step; until then the guard holds (the same mechanism as rw-idea-privacy's slot 380).
 -- The archive is the superuser's alone (RLS on, no policy, no grant): it holds the reports' text.
--- Fresh-volume slot 390; live: psql -f BEFORE the new openbrain-mcp and research-curator images, with a fresh backup;
--- the moved reports' wiki leaf FILES (content/source/<id>.md in the vault) are moved out by hand first (the viewer's
--- reconcile would rewrite a leaf row from its file). Revert: revert-report-isolation.sql (restores every archived
--- row; keeps the tables).
+-- Fresh-volume slot 390; live: psql -f BEFORE the new openbrain-mcp, research-curator, research and workbench images,
+-- with a fresh backup. Revert: revert-report-isolation.sql (restores every archived row byte-identical; drops the
+-- guard; keeps the tables).
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS public.research_private_reports (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    research_key       TEXT NOT NULL UNIQUE,
+    research_key       TEXT NOT NULL,
     -- the idea's owner when it was filed; NULL = no owner to read it (the idea is gone): nobody reads it
     owner_sub          TEXT,
     idea_id            UUID REFERENCES public.ideas(id) ON DELETE SET NULL,
@@ -50,6 +61,10 @@ CREATE TABLE IF NOT EXISTS public.research_private_reports (
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- round 2 (tester F1): the key alone is not unique - one private row per (key, owner, idea)
+ALTER TABLE public.research_private_reports DROP CONSTRAINT IF EXISTS research_private_reports_research_key_key;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_research_private_reports_key_owner_idea
+    ON public.research_private_reports (research_key, (coalesce(owner_sub, '')), (coalesce(idea_id::text, '')));
 CREATE INDEX IF NOT EXISTS idx_research_private_reports_owner ON public.research_private_reports (owner_sub, idea_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_private_reports_job ON public.research_private_reports (job_id);
 
@@ -143,10 +158,58 @@ COMMENT ON FUNCTION public.research_job_report_owner(UUID) IS
 REVOKE ALL ON FUNCTION public.research_job_report_owner(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.research_job_report_owner(UUID) TO service_role;
 
+-- ── the wiki guard (round 2, tester F2) ─────────────────────────────────
+-- ONE predicate decides "this page shows a moved report", for the move below and for the guard: the page IS a moved
+-- report's leaf, or links it (links, or [[content/source/<id>]] in its body). "Moved" = the archive holds its sources
+-- row in a batch the revert has not restored. A page that also holds shared content (an entity page citing the report
+-- among others) is WITHHELD, not edited: the text was written around the citation and a textual cut cannot be proven
+-- complete; the move bumps those entities, so the next compile regenerates the page and the guard lets it back.
+-- (A new private report never has a leaf: it is not a source.)
+CREATE OR REPLACE FUNCTION public.report_isolation_page_shows_report(p_slug TEXT, p_body TEXT, p_links JSONB)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM public.research_report_isolation_archive a
+         WHERE a.action = 's' AND a.restored_at IS NULL
+           AND (p_slug = 'content/source/' || a.source_id::text
+                OR (jsonb_typeof(p_links) = 'array' AND p_links ? ('content/source/' || a.source_id::text))
+                OR (position('content/source/' IN coalesce(p_body, '')) > 0
+                    AND coalesce(p_body, '') ~ ('content/source/' || a.source_id::text || '([^0-9a-f-]|$)'))));
+$$;
+REVOKE ALL ON FUNCTION public.report_isolation_page_shows_report(TEXT, TEXT, JSONB) FROM PUBLIC;
+
+-- a compiled or reconciled page is skipped silently (RETURN NULL: one row must not fail the compile's or the
+-- reconcile's whole batch; the reconcile then reports the slug as drift); a NOTE is a person's own writing saved
+-- through the workbench, so it is refused out loud
+CREATE OR REPLACE FUNCTION public.trg_report_isolation_wiki_guard()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF public.report_isolation_page_shows_report(NEW.slug, NEW.body, NEW.links) THEN
+        IF NEW.page_class = 'note' THEN
+            RAISE EXCEPTION 'wiki_pages: this page cites an idea''s private research report' USING ERRCODE = '42501';
+        END IF;
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.trg_report_isolation_wiki_guard() FROM PUBLIC;
+DROP TRIGGER IF EXISTS trg_report_isolation_wiki_guard ON public.wiki_pages;
+CREATE TRIGGER trg_report_isolation_wiki_guard BEFORE INSERT OR UPDATE ON public.wiki_pages
+    FOR EACH ROW EXECUTE FUNCTION public.trg_report_isolation_wiki_guard();
+
 -- ── the move ────────────────────────────────────────────────────────────
 DO $$
 DECLARE
     v_batch   UUID := gen_random_uuid();
+    v_now     TIMESTAMPTZ := clock_timestamp();
     v_ids     UUID[];
     v_shared  INT;
     v_n       BIGINT;
@@ -188,46 +251,7 @@ BEGIN
     -- 1. archive the sources rows themselves
     INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
     SELECT v_batch, s.id, 'public.sources', 'id', 's', to_jsonb(s) FROM public.sources s WHERE s.id = ANY(v_ids);
-    -- 2. archive every row that references them, through every foreign key the database declares on sources
-    FOR r IN
-        SELECT con.conrelid::regclass::text AS tbl, a.attname AS col, con.confdeltype::text AS act
-          FROM pg_constraint con
-          JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1]
-         WHERE con.contype = 'f' AND con.confrelid = 'public.sources'::regclass AND cardinality(con.conkey) = 1
-    LOOP
-        EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I = ANY($1)', r.tbl, r.col) INTO v_n USING v_ids;
-        IF v_n = 0 THEN CONTINUE; END IF;
-        IF r.act NOT IN ('c', 'n', 'd') THEN
-            RAISE EXCEPTION 'rw-report-isolation: % rows of % reference a moved synthesis through a foreign key that would refuse the delete (%); nothing moved', v_n, r.tbl, r.act;
-        END IF;
-        IF r.act = 'c' THEN
-            -- a cascaded row must not take an un-archived row with it: no second-level dependent may hold one
-            FOR d IN
-                SELECT c2.conrelid::regclass::text AS tbl2, a2.attname AS col2, ra.attname AS refcol
-                  FROM pg_constraint c2
-                  JOIN pg_attribute a2 ON a2.attrelid = c2.conrelid AND a2.attnum = c2.conkey[1]
-                  JOIN pg_attribute ra ON ra.attrelid = c2.confrelid AND ra.attnum = c2.confkey[1]
-                 WHERE c2.contype = 'f' AND c2.confrelid = r.tbl::regclass AND cardinality(c2.conkey) = 1
-            LOOP
-                EXECUTE format('SELECT count(*) FROM %s t2 WHERE t2.%I IN (SELECT t.%I FROM %s t WHERE t.%I = ANY($1))',
-                               d.tbl2, d.col2, d.refcol, r.tbl, r.col) INTO v_n USING v_ids;
-                IF v_n > 0 THEN
-                    RAISE EXCEPTION 'rw-report-isolation: % rows of % hang off % rows the move would cascade; nothing moved', v_n, d.tbl2, r.tbl;
-                END IF;
-            END LOOP;
-        END IF;
-        EXECUTE format('INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
-                        SELECT $1, t.%I, %L, %L, %L, to_jsonb(t) FROM %s t WHERE t.%I = ANY($2)', r.col, r.tbl, r.col, r.act, r.tbl, r.col)
-            USING v_batch, v_ids;
-        GET DIAGNOSTICS v_n = ROW_COUNT;
-        v_total := v_total + v_n;
-    END LOOP;
-    -- 3. archive the moved reports' wiki leaf rows (no foreign key: keyed by slug)
-    INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
-    SELECT v_batch, m.source_id, 'public.wiki_pages', 'slug', 'w', to_jsonb(w)
-      FROM _ri_move m JOIN public.wiki_pages w ON w.slug = 'content/source/' || m.source_id::text;
-
-    -- 4. the private copies (owner-readable through the idea), and their claims' link back
+    -- 1b. the private copies (BEFORE step 2 sets the claims' synthesis_id NULL) (owner-readable through the idea), and their claims' link back
     INSERT INTO public.research_private_reports
         (research_key, owner_sub, idea_id, job_id, title, content, claim, research_query, run_kind, volatility,
          revalidate_days, researched_on, metadata, migrated_source_id, created_at, updated_at)
@@ -241,8 +265,84 @@ BEGIN
      WHERE c.synthesis_id = ANY(v_ids)
     ON CONFLICT DO NOTHING;
 
-    -- 5. out of the shared knowledge: the leaf rows, then the rows (the foreign keys cascade / set NULL as declared)
-    DELETE FROM public.wiki_pages w USING _ri_move m WHERE w.slug = 'content/source/' || m.source_id::text;
+    -- 2. archive every row that references them, through every foreign key the database declares on sources
+    -- (sources' key is one column, so a multi-column foreign key onto it cannot exist; one would stop the move)
+    IF EXISTS (SELECT 1 FROM pg_constraint con WHERE con.contype = 'f' AND con.confrelid = 'public.sources'::regclass
+                                               AND cardinality(con.conkey) <> 1) THEN
+        RAISE EXCEPTION 'rw-report-isolation: a multi-column foreign key references sources - not archived by this move; nothing moved';
+    END IF;
+    FOR r IN
+        SELECT con.conrelid::regclass::text AS tbl, a.attname AS col, con.confdeltype::text AS act
+          FROM pg_constraint con
+          JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1]
+         WHERE con.contype = 'f' AND con.confrelid = 'public.sources'::regclass AND cardinality(con.conkey) = 1
+    LOOP
+        EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I = ANY($1)', r.tbl, r.col) INTO v_n USING v_ids;
+        IF v_n = 0 THEN CONTINUE; END IF;
+        IF r.act NOT IN ('c', 'n', 'd') THEN
+            RAISE EXCEPTION 'rw-report-isolation: % rows of % reference a moved synthesis through a foreign key that would refuse the delete (%); nothing moved', v_n, r.tbl, r.act;
+        END IF;
+        IF r.act = 'c' THEN
+            -- a cascaded row must not take an un-archived row with it: no second-level dependent may hold one,
+            -- through ANY foreign key on the cascaded table - one column or several (round 2: fail closed)
+            FOR d IN
+                SELECT c2.conrelid::regclass::text AS tbl2,
+                       (SELECT string_agg(format('t2.%I = t.%I', ca.attname, pa.attname), ' AND ')
+                          FROM unnest(c2.conkey, c2.confkey) k(c, p)
+                          JOIN pg_attribute ca ON ca.attrelid = c2.conrelid AND ca.attnum = k.c
+                          JOIN pg_attribute pa ON pa.attrelid = c2.confrelid AND pa.attnum = k.p) AS on_clause
+                  FROM pg_constraint c2
+                 WHERE c2.contype = 'f' AND c2.confrelid = r.tbl::regclass
+            LOOP
+                EXECUTE format('SELECT count(*) FROM %s t2 WHERE EXISTS (SELECT 1 FROM %s t WHERE t.%I = ANY($1) AND %s)',
+                               d.tbl2, r.tbl, r.col, d.on_clause) INTO v_n USING v_ids;
+                IF v_n > 0 THEN
+                    RAISE EXCEPTION 'rw-report-isolation: % rows of % hang off % rows the move would cascade; nothing moved', v_n, d.tbl2, r.tbl;
+                END IF;
+            END LOOP;
+        END IF;
+        EXECUTE format('INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
+                        SELECT $1, t.%I, %L, %L, %L, to_jsonb(t) FROM %s t WHERE t.%I = ANY($2)', r.col, r.tbl, r.col, r.act, r.tbl, r.col)
+            USING v_batch, v_ids;
+        GET DIAGNOSTICS v_n = ROW_COUNT;
+        v_total := v_total + v_n;
+        IF r.act IN ('n', 'd') THEN
+            -- the move sets the column itself, with triggers off: the foreign key's own SET NULL would fire the
+            -- referencing table's touch trigger (claims / ideas updated_at), and the revert could not undo that
+            PERFORM set_config('session_replication_role', 'replica', true);
+            EXECUTE format('UPDATE %s t SET %I = %s WHERE t.%I = ANY($1)', r.tbl, r.col,
+                           CASE r.act WHEN 'n' THEN 'NULL' ELSE 'DEFAULT' END, r.col) USING v_ids;
+            PERFORM set_config('session_replication_role', 'origin', true);
+        END IF;
+    END LOOP;
+    -- the entities the moved reports' extraction cited: bumped (their old updated_at archived), so the next compile
+    -- regenerates their pages from what is still shared (the guard below lets a clean page back in)
+    IF to_regclass('public.source_entities') IS NOT NULL AND to_regclass('public.entities') IS NOT NULL THEN
+        INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
+        SELECT DISTINCT ON (e.id) v_batch, se.source_id, 'public.entities', 'updated_at', 'u',
+               jsonb_build_object('id', e.id, 'updated_at', e.updated_at, 'bumped_to', v_now)
+          FROM public.source_entities se JOIN public.entities e ON e.id = se.entity_id
+         WHERE se.source_id = ANY(v_ids)
+         ORDER BY e.id, se.source_id;
+        PERFORM set_config('session_replication_role', 'replica', true);
+        UPDATE public.entities e SET updated_at = v_now
+          FROM public.research_report_isolation_archive a
+         WHERE a.batch = v_batch AND a.action = 'u' AND (a.row_data ->> 'id') = e.id::text;
+        PERFORM set_config('session_replication_role', 'origin', true);
+    END IF;
+    -- 3. archive every wiki page that shows a moved report (its leaf, a page linking it): the archive's 's' rows
+    --    of this batch are what the predicate reads
+    INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
+    SELECT DISTINCT ON (w.slug) v_batch, m.source_id, 'public.wiki_pages', 'slug', 'w', to_jsonb(w)
+      FROM public.wiki_pages w
+      JOIN _ri_move m ON w.slug = 'content/source/' || m.source_id::text
+                      OR (jsonb_typeof(w.links) = 'array' AND w.links ? ('content/source/' || m.source_id::text))
+                      OR (position('content/source/' IN w.body) > 0 AND w.body ~ ('content/source/' || m.source_id::text || '([^0-9a-f-]|$)'))
+     ORDER BY w.slug, m.source_id;
+
+    -- 5. out of the shared knowledge: the withheld pages, then the rows (the foreign keys cascade as declared)
+    DELETE FROM public.wiki_pages w USING public.research_report_isolation_archive a
+     WHERE a.batch = v_batch AND a.action = 'w' AND a.row_data ->> 'slug' = w.slug;
     DELETE FROM public.sources s WHERE s.id = ANY(v_ids);
     RAISE NOTICE 'rw-report-isolation: moved % idea-job syntheses (% dependent rows archived; left shared, also filed by a non-idea job: %)',
         cardinality(v_ids), v_total, v_shared;

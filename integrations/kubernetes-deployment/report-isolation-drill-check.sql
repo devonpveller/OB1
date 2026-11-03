@@ -23,12 +23,21 @@ UNION ALL SELECT 'dossier_i1=' || CASE WHEN i.dossier_source_id::text = (SELECT 
                                        WHEN i.dossier_source_id IS NULL THEN 'null' ELSE 'other' END
             FROM public.ideas i WHERE i.id::text = (SELECT id FROM d WHERE name = 'i1')
 UNION ALL SELECT 'fn=' || count(*) FROM pg_proc WHERE proname = 'research_job_report_owner'
+UNION ALL SELECT 'guard=' || count(*) FROM pg_trigger WHERE tgname = 'trg_report_isolation_wiki_guard'
+UNION ALL SELECT 'wiki_report_pages=' || count(*) FROM public.wiki_pages w
+           WHERE w.slug IN (SELECT 'content/source/' || id FROM d WHERE name = 's1') OR w.slug IN (SELECT id FROM d WHERE name = 'entity_page')
+UNION ALL SELECT 'entity_ts=' || md5(coalesce((SELECT e.updated_at::text FROM public.entities e WHERE e.id::text = (SELECT id FROM d WHERE name = 'e')), ''))
 UNION ALL SELECT 'snapshot=' || md5(coalesce((SELECT string_agg(to_jsonb(s)::text, '|' ORDER BY s.id) FROM public.sources s WHERE s.id::text IN (SELECT id FROM d WHERE name IN ('s1', 's2'))), '')
     || coalesce((SELECT string_agg(to_jsonb(x)::text, '|' ORDER BY x.session_id, x.source_id) FROM public.session_sources x WHERE x.source_id::text IN (SELECT id FROM d WHERE name IN ('s1', 's2'))), '')
     || coalesce((SELECT string_agg(to_jsonb(x)::text, '|' ORDER BY x::text) FROM public.thread_sources x WHERE x.source_id::text IN (SELECT id FROM d WHERE name IN ('s1', 's2'))), '')
     || coalesce((SELECT string_agg(to_jsonb(x)::text, '|' ORDER BY x::text) FROM public.source_chunks x WHERE x.source_id::text IN (SELECT id FROM d WHERE name IN ('s1', 's2'))), '')
     || coalesce((SELECT string_agg(to_jsonb(x)::text, '|' ORDER BY x.slug) FROM public.wiki_pages x WHERE x.slug IN (SELECT 'content/source/' || id FROM d WHERE name IN ('s1', 's2'))), '')
-    || coalesce((SELECT string_agg(c.id::text || ':' || coalesce(c.synthesis_id::text, '-'), '|' ORDER BY c.id) FROM public.claims c WHERE c.id::text IN (SELECT id FROM d WHERE name IN ('c1', 'c2'))), ''));
+    -- round 2: the WHOLE rows the move sets NULL in (claims, the idea) and the entity it bumps, and the cited page
+    || coalesce((SELECT string_agg(to_jsonb(c)::text, '|' ORDER BY c.id) FROM public.claims c WHERE c.id::text IN (SELECT id FROM d WHERE name IN ('c1', 'c2'))), '')
+    || coalesce((SELECT to_jsonb(i)::text FROM public.ideas i WHERE i.id::text = (SELECT id FROM d WHERE name = 'i1')), '')
+    || coalesce((SELECT to_jsonb(e)::text FROM public.entities e WHERE e.id::text = (SELECT id FROM d WHERE name = 'e')), '')
+    || coalesce((SELECT string_agg(to_jsonb(x)::text, '|' ORDER BY x.source_id) FROM public.source_entities x WHERE x.source_id::text IN (SELECT id FROM d WHERE name IN ('s1', 's2'))), '')
+    || coalesce((SELECT to_jsonb(w)::text FROM public.wiki_pages w WHERE w.slug = (SELECT id FROM d WHERE name = 'entity_page')), ''));
 -- the private plane (absent before slot 390 first ran)
 SELECT CASE WHEN to_regclass('public.research_private_reports') IS NULL THEN 'private=absent' END
  WHERE to_regclass('public.research_private_reports') IS NULL;

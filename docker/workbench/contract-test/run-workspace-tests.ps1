@@ -57,7 +57,9 @@ param(
   [string]$Cases = '',
   [switch]$KeepImages,
   [switch]$IntakeOnly,
-  [switch]$IdeasOnly
+  [switch]$IdeasOnly,
+  # rw-report-isolation round 2: the round-1 slot 390 the [5k] RED step runs (it deletes the leaf row, not the copies)
+  [string]$ReportRoundOneSha = '364eba0'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -402,6 +404,73 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the ideas integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the ideas integration test ($($sum.Value))" }
+
+  # rw-report-isolation round 2 (tester F2): a moved report's wiki copies. Slot 390 over a planted idea-job report filed the
+  # way the base filed it (a shared research_synthesis source, its leaf page and an entity page citing it, BOTH with vault
+  # files). RED: round 1's 390 (-ReportRoundOneSha) deletes the leaf row but the viewer's REAL reconcile repair writes it
+  # back from the file and B's page search finds it. GREEN: this 390 withholds the leaf and the citing page and its guard
+  # keeps the reconcile repair (files still present) from writing either back; a clean page goes in; the revert brings
+  # them back; init again withholds them.
+  if (-not $Red) {
+    Write-Host '[5k] slot 390 and the wiki: plant, RED with round 1, init, the viewer''s reconcile repair with the files present, search as B, revert, init'
+    $wk = -join ((97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
+    $mark = "wikireportsecret$wk"
+    function Q1([string]$q) { $r = Dk exec $db psql -U postgres -d openbrain -X -tA -v ON_ERROR_STOP=1 -c $q; return (($r -replace "`r", '') -split "`n" | Where-Object { $_ -ne '' -and $_ -notmatch '^(INSERT|UPDATE|DELETE|DO)\b' }) -join "`n" }
+    $idea = Q1 "SELECT public.idea_capture('wiki-owner-$wk', 'service:lab', 'wiki idea $wk', 'wiki idea statement $wk', NULL, NULL)::text"
+    $job = Q1 "INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'wiki research $wk') RETURNING id::text"
+    $null = Q1 "UPDATE public.idea_revisions SET research_job_id = '$job' WHERE idea_id = '$idea' AND revision = 1; UPDATE public.research_jobs SET refinery_id = NULL, inlet_ref = NULL WHERE id = '$job'"
+    $src = Q1 "INSERT INTO public.sources (title, content, content_type, research_key) VALUES ('Report $mark', 'the report $mark body', 'research_synthesis', 'rk-wiki-$wk') RETURNING id::text"
+    $null = Q1 "UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', '$src'))) WHERE id = '$job'"
+    $leaf = "content/source/$src"; $ent = "content/tool/wiki-tool-$wk"
+    $files = @(@($leaf, "Report $mark", "the report $mark body"), @($ent, "Wiki Tool $wk", "the tool page cites [[$leaf|Report $mark]] and says $mark"))
+    foreach ($f in $files) {
+      $fp = Join-Path $vault ($f[0] + '.md'); New-Item -ItemType Directory -Force (Split-Path -Parent $fp) | Out-Null
+      [System.IO.File]::WriteAllText($fp, "---`ntitle: $($f[1])`n---`n$($f[2])`n", (New-Object System.Text.UTF8Encoding $false))
+    }
+    Start-Sleep -Seconds 2
+    $null = Q1 "INSERT INTO public.wiki_pages (slug, page_class, title, body, links) VALUES ('$leaf', 'source', 'Report $mark', 'the report $mark body', '[]'::jsonb), ('$ent', 'entity', 'Wiki Tool $wk', 'the tool page cites [[$leaf|Report $mark]] and says $mark', jsonb_build_array('$leaf'))"
+    $rows = { Q1 "SELECT count(*) FROM public.wiki_pages WHERE slug IN ('$leaf', '$ent')" }
+    $reconcile = { $r = Dk exec "$P-viewer" node /viewer/lib/shared/reconcile-wiki-pages.mjs --repair --vault /wiki; return "exit $($script:rc): $((($r -split "`n") | Select-Object -Last 6) -join ' | ')" }
+    $searchB = {
+      $r = Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://$P-wb:8000/workbench/contract/search?q=$mark&kinds=page,claim,source', { headers: { 'x-brain-key': '$key', 'X-Test-Sub': 'wiki-b-$wk' } }).then(async (r) => { const j = await r.json(); console.log('status', r.status, 'hits', JSON.stringify(j.results ?? []).split('$mark').length - 1); }).catch((e) => console.log('error', String(e)))"
+      return ($r -replace "`r", '').Trim()
+    }
+    $wlog = @("planted: idea, job, source, 2 wiki rows + 2 vault files; rows=$(& $rows); search as B: $(& $searchB)")
+    # RED: round 1's 390 (the current rule and guard off first: the chain ran this tree's 390)
+    $r1i = Join-Path $env:TEMP "$P-r1-init-390.sql"; $r1r = Join-Path $env:TEMP "$P-r1-revert-390.sql"
+    [System.IO.File]::WriteAllText($r1i, ((& git -C $ob1 show "${ReportRoundOneSha}:docker/init-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText($r1r, ((& git -C $ob1 show "${ReportRoundOneSha}:docker/revert-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $script:made.dirs += @($r1i, $r1r)
+    $run = { param([string]$file, [string]$name) $null = Dk cp $file "${db}:/tmp/$name"; $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f "/tmp/$name"; return "exit $($script:rc) :: $((($o -split "`n") | Where-Object { $_ -match 'rw-report-isolation|ERROR' } | ForEach-Object { ($_ -replace '^.*(NOTICE|ERROR):\s+', '').Trim() }) -join ' ; ')" }
+    $wlog += "[current revert, so round 1 runs alone] $(& $run (Join-Path $dockerDir 'revert-report-isolation.sql') 'ri-rv.sql')"
+    $wlog += "[round 1 init] $(& $run $r1i 'ri-r1-init.sql')"
+    $afterR1 = & $rows
+    $wlog += "[reconcile --repair, files present] $(& $reconcile)"
+    $afterR1Rec = & $rows; $searchR1 = & $searchB
+    $wlog += "round 1: rows after init $afterR1, after the reconcile $afterR1Rec; search as B: $searchR1"
+    Check ($afterR1Rec -ne '0' -and $searchR1 -match 'hits [1-9]') "[5k] RED: round 1's 390 - the viewer's reconcile writes the moved report's page back from its vault file and B's search finds it (rows $afterR1 -> $afterR1Rec; $searchR1)"
+    $wlog += "[round 1 revert] $(& $run $r1r 'ri-r1-revert.sql')"
+    # GREEN: this 390
+    $wlog += "[init] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init.sql')"
+    $afterInit = & $rows
+    $wlog += "[reconcile --repair, files present] $(& $reconcile)"
+    $afterRec = & $rows; $searchG = & $searchB
+    $null = Q1 "INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ('content/tool/wiki-clean-$wk', 'entity', 'Wiki Tool $wk', 'a clean regenerated page')"
+    $clean = Q1 "SELECT count(*) FROM public.wiki_pages WHERE slug = 'content/tool/wiki-clean-$wk'"
+    $null = Q1 "DELETE FROM public.wiki_pages WHERE slug = 'content/tool/wiki-clean-$wk'"
+    $shared = Q1 "SELECT count(*) FROM public.sources WHERE id = '$src'"
+    $wlog += "this 390: rows after init $afterInit, after the reconcile $afterRec; source rows $shared; search as B: $searchG; clean page in: $clean"
+    Check ($afterInit -eq '0' -and $afterRec -eq '0' -and $shared -eq '0' -and $searchG -match 'status 200 hits 0' -and $clean -eq '1') "[5k] this 390: the leaf and the citing page are withheld, the reconcile repair (files present) writes neither back, B's search finds nothing, a clean page goes in ($afterInit / $afterRec; $searchG)"
+    $wlog += "[revert] $(& $run (Join-Path $dockerDir 'revert-report-isolation.sql') 'ri-rv2.sql')"
+    $afterRv = & $rows
+    $wlog += "[init again] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init2.sql')"
+    $afterAgain = & $rows
+    $wlog += "rows after the revert $afterRv, after init again $afterAgain"
+    Check ($afterRv -eq '2' -and $afterAgain -eq '0') "[5k] the revert brings both pages back ($afterRv), init again withholds them ($afterAgain)"
+    foreach ($f in $files) { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $vault ($f[0] + '.md')) }
+    Save 'report-isolation-wiki.log' (($wlog -join "`n") -replace [regex]::Escape($key), '<key>')
+    foreach ($l in $wlog) { Write-Host "    $l" }
+  }
 
   if (-not $IdeasOnly) {
   # rw-p5a-intake: the intake and queue panel over the real workbench and database, two users and OWUI's key

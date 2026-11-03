@@ -63,6 +63,11 @@ Deno.test("sharedJobView: only status, the grounded report, its claims and sourc
   const failed = sharedJobView({ ...job, result: { ...job.result, outcome: "no_relevant_sources", synthesis: `about ${tok}` } });
   assert(!JSON.stringify(failed).includes(tok));
   assertEquals(sharedJobView({ id: "q", status: "queued", result: null }).result, null);
+  // rw-report-isolation: another user's idea job - its report is the idea owner's alone; its sources and claims stay
+  const idea = sharedJobView(job, { privateReport: true }) as { result: Record<string, unknown> };
+  assertEquals(idea.result.synthesis, "");
+  assertEquals(idea.result.cited_sources, [{ title: "Settlement basics", url: "https://example.org/s" }]);
+  assert(!JSON.stringify(idea).includes("Offers can be countered [Source 1]"));
 });
 
 Deno.test("sharedTree / sharedEvents: ids, kinds, status and time only", () => {

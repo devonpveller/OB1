@@ -31,6 +31,8 @@ param(
   # the new test file still comes from this tree
   [string]$CuratorRoot = '',
   [string]$ChainRoot = '',
+  # round 2: the research service directory whose viewer.ts RI6 imports (RED: the base's)
+  [string]$ResearchRoot = '',
   [switch]$Red
 )
 $ErrorActionPreference = 'Continue'
@@ -165,14 +167,15 @@ try {
   $riTest = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'research-curator') 'report-isolation.e2e.test.ts'
   # RED: the base's curator copy has no test file - copy this tree's into it (a file mount inside a read-only dir mount fails)
   if ($CuratorRoot) { Copy-Item -Force $riTest (Join-Path $curRoot 'report-isolation.e2e.test.ts') }
+  $resRoot = if ($ResearchRoot) { (Resolve-Path $ResearchRoot).Path } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'research-service' }
   $o = Dk run --rm --label $label --network $net -e "RI_E2E_DB_HOST=$db" -e "RI_E2E_DB_PASSWORD=$pw" -e NO_COLOR=1 `
-    -v "${curRoot}:/curator:ro" -w /curator `
+    -v "${curRoot}:/curator:ro" -v "${resRoot}:/research:ro" -w /curator `
     $testTag deno test --no-lock --unstable-net --allow-net --allow-env --allow-read --allow-run report-isolation.e2e.test.ts
   Save 'report-isolation-e2e.log' (($o -split "`n" | ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0, 400) } else { $_ } } | Select-Object -Last 200) -join "`n")
   foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = Summary $o
-  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -ge 3) "RED: report isolation e2e fails on the base ($($sum.Value))" }
-  else { Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 4) "report isolation e2e: $($sum.Value)" }
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -ge 2) "RED: report isolation e2e fails on the base ($($sum.Value))" }
+  else { Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "report isolation e2e: $($sum.Value)" }
 
   Write-Host '[4d] slot-390 drill: seed the base''s shapes, move, move again, revert, revert again, move again'
   $seed = Join-Path $PSScriptRoot 'report-isolation-drill-seed.sql'; $chk = Join-Path $PSScriptRoot 'report-isolation-drill-check.sql'
@@ -189,9 +192,40 @@ try {
     $f390 = Join-Path $dockerDir 'init-report-isolation.sql'; $r390 = Join-Path $dockerDir 'revert-report-isolation.sql'
     $null = Dk cp $f390 "${db}:/tmp/ri-init.sql"; $null = Dk cp $r390 "${db}:/tmp/ri-revert.sql"
     $snap0 = RiGet $before 'snapshot'
-    $steps = @(@('init', '/tmp/ri-init.sql'), @('init again', '/tmp/ri-init.sql'), @('revert', '/tmp/ri-revert.sql'), @('revert again', '/tmp/ri-revert.sql'), @('init after revert', '/tmp/ri-init.sql'))
+    $steps = @(@('init', '/tmp/ri-init.sql'), @('probe', ''), @('init again', '/tmp/ri-init.sql'), @('revert', '/tmp/ri-revert.sql'), @('revert again', '/tmp/ri-revert.sql'), @('mutant', ''), @('init after revert', '/tmp/ri-init.sql'))
     $states = @{}
+    function Sql1([string]$q) { $r = Dk exec $db psql -U postgres -d openbrain -X -tA -c $q; return @{ rc = $script:rc; out = ($r -replace "`r", '').Trim() } }
+    $s1 = (Sql1 "SELECT id FROM public._ri_drill WHERE name = 's1'").out
     foreach ($s in $steps) {
+      if ($s[0] -eq 'probe') {
+        # round 2 (tester F2): the guard on the write path the viewer's reconcile and the compile use - the leaf and
+        # a page citing it are skipped, a NOTE citing it is refused out loud, a clean page goes in
+        $p1 = Sql1 "INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ('content/source/$s1', 'source', 'Drill idea report one', 'DrillReportOne leaf') ON CONFLICT (slug) DO UPDATE SET body = EXCLUDED.body"
+        $p2 = Sql1 "INSERT INTO public.wiki_pages (slug, page_class, title, body, links) VALUES ('content/tool/drill-recompiled', 'entity', 'Drill Tool', 'cites [[content/source/$s1|x]]', '[]'::jsonb)"
+        $p3 = Sql1 "INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ('notes/drill-note', 'note', 'a note', 'my note cites [[content/source/$s1]]')"
+        $p4 = Sql1 "INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ('content/tool/drill-clean', 'entity', 'Drill Tool', 'a clean regenerated page')"
+        $n = (Sql1 "SELECT count(*) FROM public.wiki_pages WHERE slug IN ('content/source/$s1', 'content/tool/drill-recompiled', 'notes/drill-note')").out
+        $clean = (Sql1 "SELECT count(*) FROM public.wiki_pages WHERE slug = 'content/tool/drill-clean'").out
+        $null = Sql1 "DELETE FROM public.wiki_pages WHERE slug = 'content/tool/drill-clean'"
+        $drill += "[probe] leaf rc=$($p1.rc) citing rc=$($p2.rc) note rc=$($p3.rc) ($($p3.out -replace "`n", ' ')) clean rc=$($p4.rc); written back: $n; clean page in: $clean"
+        Check ($p1.rc -eq 0 -and $p2.rc -eq 0 -and $n -eq '0') "drill: after init the guard skips the moved report's leaf and a page citing it on the reconcile / compile write path (written back: $n)"
+        Check ($p3.rc -ne 0 -and $p3.out -match 'private research report') 'drill: a note citing a moved report is refused out loud (42501)'
+        Check ($p4.rc -eq 0 -and $clean -eq '1') 'drill: a clean regenerated page is let back in'
+        continue
+      }
+      if ($s[0] -eq 'mutant') {
+        # round 2 (the tester's composite CASCADE grandchild): a row hanging off a chunk the move would cascade, through
+        # a TWO-column foreign key - the move must refuse with nothing moved
+        $m1 = Sql1 "CREATE TABLE public._ri_mutant (source_id uuid, idx int, FOREIGN KEY (source_id, idx) REFERENCES public.source_chunks (source_id, idx) ON DELETE CASCADE); INSERT INTO public._ri_mutant VALUES ('$s1', 0)"
+        $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f /tmp/ri-init.sql
+        $mrc = $script:rc
+        $mst = RiState
+        $left = (Sql1 "SELECT count(*) FROM public._ri_mutant").out
+        $null = Sql1 "DROP TABLE public._ri_mutant"
+        $drill += "[mutant] create rc=$($m1.rc); init exit $mrc :: $((($o -split "`n") | Where-Object { $_ -match 'ERROR' }) -join ' ')`n    state: $mst; mutant rows left: $left"
+        Check ($m1.rc -eq 0 -and $mrc -ne 0 -and $o -match 'hang off' -and (RiGet $mst 'shared_idea') -eq '2' -and (RiGet $mst 'snapshot') -eq $snap0 -and $left -eq '1') 'drill: a composite-key row hanging off a cascaded chunk stops the move - nothing moved, nothing lost'
+        continue
+      }
       $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f $s[1]
       $rc = $script:rc
       $note = (($o -split "`n") | Where-Object { $_ -match 'rw-report-isolation|ERROR' } | ForEach-Object { ($_ -replace '^.*NOTICE:\s+', '').Trim() }) -join ' ; '
@@ -208,12 +242,15 @@ try {
     Check ((RiGet $mv 'claims_present') -eq '3' -and (RiGet $mv 'claim_edge_c1') -eq '1') 'drill: the claims stay (shared), with their source edges'
     Check ((RiGet $mv 'private') -eq '2' -and (RiGet $mv 'private_owned') -eq '2' -and (RiGet $mv 'private_s1_job') -eq 'j1' -and (RiGet $mv 'private_s2_job') -eq 'j2' -and (RiGet $mv 'private_text') -eq '2' -and (RiGet $mv 'private_links') -eq '2') 'drill: two private copies, owned by the idea''s owner, on their jobs, with their text and their claims linked'
     Check ((RiGet $mv 'dossier_i1') -eq 'null') 'drill: the idea''s dossier pointer no longer names a shared row'
+    Check ((RiGet $before 'wiki_report_pages') -eq '2' -and (RiGet $mv 'wiki_report_pages') -eq '0' -and (RiGet $mv 'guard') -eq '1') 'drill: the moved report''s leaf and the entity page citing it are withheld, the guard is on'
+    Check ((RiGet $mv 'entity_ts') -ne (RiGet $before 'entity_ts')) 'drill: the cited entity is bumped (its page recompiles from what is still shared)'
     Check ([int](RiGet $mv 'archive_open') -ge 7 -and (RiGet $mv 'archive_app_read') -eq 'no') "drill: every moved row archived first ($(RiGet $mv 'archive_open') rows), the archive unreadable by service_role"
     Check ($states['init again-note'] -match 'moved 0 idea-job syntheses' -and (RiGet $states['init again'] 'private') -eq '2' -and (RiGet $states['init again'] 'archive_open') -eq (RiGet $mv 'archive_open')) 'drill: a second init moves nothing and changes nothing'
     $rv = $states['revert']
     Check ($states['revert-note'] -match '1 batch\(es\) restored') "drill: revert restores the batch ($($states['revert-note']))"
     Check ((RiGet $rv 'snapshot') -eq $snap0 -and (RiGet $rv 'shared_idea') -eq '2' -and (RiGet $rv 'deps_idea') -eq (RiGet $before 'deps_idea')) "drill: after revert the rows, their dependents and the claim pointers are byte-identical to before (snapshot $(RiGet $rv 'snapshot') vs $snap0)"
-    Check ((RiGet $rv 'dossier_i1') -eq 's1' -and (RiGet $rv 'private') -eq '0' -and (RiGet $rv 'fn') -eq '0' -and (RiGet $rv 'archive_open') -eq '0') 'drill: the dossier pointer is back, the private copies and the rule are gone, the archive is marked restored'
+    Check ((RiGet $rv 'dossier_i1') -eq 's1' -and (RiGet $rv 'private') -eq '0' -and (RiGet $rv 'fn') -eq '0' -and (RiGet $rv 'guard') -eq '0' -and (RiGet $rv 'archive_open') -eq '0') 'drill: the dossier pointer is back, the private copies, the rule and the guard are gone, the archive is marked restored'
+    Check ((RiGet $rv 'wiki_report_pages') -eq '2' -and (RiGet $rv 'entity_ts') -eq (RiGet $before 'entity_ts')) 'drill: the withheld pages are back, the entity''s updated_at too (the snapshot covers the whole claim, idea, entity and page rows)'
     Check ($states['revert again-note'] -match '0 batch\(es\) restored' -and (RiGet $states['revert again'] 'snapshot') -eq $snap0) 'drill: a second revert restores nothing and changes nothing'
     $ag = $states['init after revert']
     Check ($states['init after revert-note'] -match 'moved 2 idea-job syntheses' -and (RiGet $ag 'shared_idea') -eq '0' -and (RiGet $ag 'private') -eq '2' -and (RiGet $ag 'fn') -eq '1') 'drill: init after the revert moves them again'

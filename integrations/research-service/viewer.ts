@@ -56,25 +56,32 @@ export const LISTED_FOR = (j: string, param: string, dflt: string) =>
 export const FOREIGN_PROMPTS_SQL =
   `WITH r AS (SELECT coalesce(root_job_id, id) AS root FROM research_jobs WHERE id = $1::uuid),
         o AS (SELECT p.owner_sub, p.prompt FROM research_prompts p JOIN r ON p.job_id = r.root),
+        -- rw-report-isolation: an idea's research (the database's one rule, slot 390) is its idea owner's - the owner
+        -- decides, not the prompt / ownerless rule (an idea job has no prompt row); for anyone else the job is foreign
+        -- and its report, the idea owner's private report, is withheld
+        x AS (SELECT EXISTS (SELECT 1 FROM public.research_job_report_owner($1::uuid)) AS idea_job,
+                     EXISTS (SELECT 1 FROM public.research_job_report_owner($1::uuid) ro WHERE ro.owner_sub IS DISTINCT FROM $2) AS private_report),
         f AS (SELECT CASE WHEN EXISTS (SELECT 1 FROM o)
                           THEN EXISTS (SELECT 1 FROM o WHERE o.owner_sub <> $2 AND o.owner_sub NOT LIKE 'service:%')
                           ELSE ($3 = '' OR $2 <> $3) END AS foreign_)
-   SELECT f.foreign_ AS foreign_,
+   SELECT CASE WHEN x.idea_job THEN x.private_report ELSE f.foreign_ END AS foreign_, x.private_report,
           coalesce((SELECT array_agg(x.prompt) FROM (SELECT prompt FROM o
                       UNION ALL SELECT j.query FROM research_jobs j JOIN r ON coalesce(j.root_job_id, j.id) = r.root) x
                      WHERE x.prompt IS NOT NULL AND x.prompt <> ''), '{}') AS prompts
-     FROM f`;
+     FROM f, x`;
 
 type Obj = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 
 /** The job as a non-owner reads it (detail and stream): the allow-list above. */
-export function sharedJobView(job: Obj): Obj {
+// rw-report-isolation: `privateReport` = the job is the research of an idea that is not the viewer's - its report
+// is the idea owner's alone (its claims and sources stay shared), so the synthesis is withheld
+export function sharedJobView(job: Obj, opts: { privateReport?: boolean } = {}): Obj {
   const r = job.result && typeof job.result === "object" ? job.result as Obj : null;
   const result = r === null ? null : {
     outcome: str(r.outcome),
     report_type: str(r.report_type),
-    synthesis: r.outcome === "no_relevant_sources" ? "" : (str(r.synthesis) ?? ""),
+    synthesis: r.outcome === "no_relevant_sources" || opts.privateReport ? "" : (str(r.synthesis) ?? ""),
     cited_sources: Array.isArray(r.cited_sources)
       ? r.cited_sources.map((s) => ({ title: str((s as Obj)?.title), url: str((s as Obj)?.url) })) : [],
     reuse_claims: Array.isArray(r.reuse_claims)

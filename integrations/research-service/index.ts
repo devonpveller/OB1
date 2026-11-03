@@ -1146,9 +1146,9 @@ function actingOf(req: Request, url: URL, viewer: { sub: string }): { actor: str
 }
 // whether job `id`'s tree belongs to another user than the viewer, and its texts (round 4: a foreign
 // viewer reads the allow-list of viewer.ts, the texts omitted from what is left)
-async function scopeOf(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<{ foreign: boolean; prompts: string[] }> {
-  const row = (await c.queryObject<{ foreign_: boolean; prompts: string[] }>(FOREIGN_PROMPTS_SQL, [id, viewer, DEFAULT_SUB])).rows[0];
-  return { foreign: !!row?.foreign_, prompts: row?.prompts ?? [] };
+async function scopeOf(c: { queryObject: <T>(q: string, a: unknown[]) => Promise<{ rows: T[] }> }, id: string, viewer: string): Promise<{ foreign: boolean; prompts: string[]; privateReport: boolean }> {
+  const row = (await c.queryObject<{ foreign_: boolean; prompts: string[]; private_report: boolean }>(FOREIGN_PROMPTS_SQL, [id, viewer, DEFAULT_SUB])).rows[0];
+  return { foreign: !!row?.foreign_, prompts: row?.prompts ?? [], privateReport: !!row?.private_report };
 }
 
 // rw-p4b-sessions round 3: a viewer who may not act on a (shared) job reads it without the step ids and
@@ -1556,7 +1556,7 @@ Deno.serve({ port: PORT }, async (req) => {
     const id = jobMatch[1];
     const acting = actingOf(req, url, viewer);
     if (acting instanceof Response) return acting;
-    let scope = { foreign: false, prompts: [] as string[] };
+    let scope = { foreign: false, prompts: [] as string[], privateReport: false };
     let steer = { hide: false, texts: [] as string[] };
     {
       const c = await pool.connect();
@@ -1600,7 +1600,7 @@ Deno.serve({ port: PORT }, async (req) => {
            FROM research_jobs j WHERE j.id=$1`, [id]);
         const row = r.rows[0] as Record<string, unknown> | undefined;
         if (!row) return null;
-        return scope.foreign ? omitPrompts(sharedJobView(row), scope.prompts) : steer.hide ? nonActorView(row, steer.texts) : row;
+        return scope.foreign ? omitPrompts(sharedJobView(row, { privateReport: scope.privateReport }), scope.prompts) : steer.hide ? nonActorView(row, steer.texts) : row;
       } finally { c.release(); }
     };
     if (!stream) {

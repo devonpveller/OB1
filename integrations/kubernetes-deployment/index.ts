@@ -2108,7 +2108,10 @@ app.post("/research/persist", async (c) => {
             volatility, revalidate_days, researched_on, metadata)
          SELECT $1, o.owner_sub, o.idea_id, $2::uuid, $3, $4, $5, $6, $7, $8, $9, CURRENT_DATE, $10::jsonb
            FROM public.research_job_report_owner($2::uuid) o
-         ON CONFLICT (research_key) DO UPDATE SET owner_sub = EXCLUDED.owner_sub, idea_id = EXCLUDED.idea_id,
+         -- round 2 (tester F1): one row per (key, owner, idea) - two users' ideas that read alike share a research_key,
+         -- and one user's filing never overwrites, re-owns or links into another's; a re-run of the SAME idea
+         -- supersedes its own row
+         ON CONFLICT (research_key, (coalesce(owner_sub, '')), (coalesce(idea_id::text, ''))) DO UPDATE SET
            job_id = EXCLUDED.job_id, title = EXCLUDED.title, content = EXCLUDED.content, claim = EXCLUDED.claim,
            research_query = EXCLUDED.research_query, run_kind = EXCLUDED.run_kind, volatility = EXCLUDED.volatility,
            revalidate_days = EXCLUDED.revalidate_days, researched_on = CURRENT_DATE, updated_at = now(),

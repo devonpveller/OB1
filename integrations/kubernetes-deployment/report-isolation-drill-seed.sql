@@ -16,7 +16,7 @@ DECLARE
     v_j1 UUID; v_j2 UUID; v_j3 UUID; v_j4 UUID; v_j5 UUID;
     v_s1 UUID := gen_random_uuid(); v_s2 UUID := gen_random_uuid(); v_s3 UUID := gen_random_uuid(); v_s4 UUID := gen_random_uuid();
     v_w  UUID := gen_random_uuid();
-    v_thread UUID; v_sess UUID; v_c1 UUID; v_c2 UUID; v_c3 UUID;
+    v_thread UUID; v_sess UUID; v_c1 UUID; v_c2 UUID; v_c3 UUID; v_e BIGINT;
 BEGIN
     v_i1 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea one', 'drill idea one statement', NULL, NULL);
     v_i2 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea two', 'drill idea two statement', NULL, NULL);
@@ -48,6 +48,13 @@ BEGIN
     INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES
       ('content/source/' || v_s1::text, 'source', 'Drill idea report one', 'DrillReportOne leaf'),
       ('content/source/' || v_s3::text, 'source', 'Drill shared report', 'DrillSharedThree leaf');
+    -- round 2: an entity the report's extraction cited, and its wiki page citing the report (withheld by the move)
+    INSERT INTO public.entities (entity_type, canonical_name, normalized_name) VALUES ('tool', 'Drill Tool', 'drill tool ' || v_s1::text)
+    RETURNING id INTO v_e;
+    INSERT INTO public.source_entities (source_id, entity_id, mention_role) VALUES (v_s1, v_e, 'mentioned');
+    INSERT INTO public.wiki_pages (slug, page_class, title, body, links) VALUES
+      ('content/tool/drill-tool-' || left(v_s1::text, 8), 'entity', 'Drill Tool',
+       'The drill tool page cites [[content/source/' || v_s1::text || '|Drill idea report one]].', jsonb_build_array('content/source/' || v_s1::text));
     UPDATE public.ideas SET dossier_source_id = v_s1 WHERE id = v_i1;
     UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', v_s1::text))) WHERE id = v_j1;
     INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload)
@@ -56,7 +63,8 @@ BEGIN
     UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', v_s4::text))) WHERE id IN (v_j4, v_j5);
 
     INSERT INTO public._ri_drill (name, id) VALUES ('s1', v_s1), ('s2', v_s2), ('s3', v_s3), ('s4', v_s4), ('w', v_w), ('i1', v_i1), ('i2', v_i2),
-      ('j1', v_j1), ('j2', v_j2), ('c1', v_c1), ('c2', v_c2), ('c3', v_c3), ('thread', v_thread), ('session', v_sess)
+      ('j1', v_j1), ('j2', v_j2), ('c1', v_c1), ('c2', v_c2), ('c3', v_c3), ('thread', v_thread), ('session', v_sess),
+      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8))
     ON CONFLICT (name) DO UPDATE SET id = EXCLUDED.id;
 END $$;
 COMMIT;

@@ -8,7 +8,9 @@
 --      is restored half-way).
 --   2. The private copies of the restored rows are removed (a copy a later filing superseded is kept: it holds a
 --      newer report the archive does not).
---   3. research_job_report_owner() is dropped. The tables and the archive are KEPT: nothing reads them once the
+--   3. research_job_report_owner() and the wiki guard (trg_report_isolation_wiki_guard) are dropped; an entity the
+--      move bumped gets its old updated_at back (only where nothing touched it since).
+--   (3.) The tables and the archive are KEPT: nothing reads them once the
 --      old images are back, and a report filed privately after 390 is not thrown away (fail closed).
 -- Runs twice cleanly (a second run finds no batch to restore).
 \set ON_ERROR_STOP on
@@ -40,12 +42,21 @@ BEGIN
         FOR r IN
             SELECT a.tbl, a.col, a.action FROM public.research_report_isolation_archive a WHERE a.batch = v_batch
              GROUP BY a.tbl, a.col, a.action
-             ORDER BY CASE a.action WHEN 's' THEN 0 WHEN 'c' THEN 1 WHEN 'n' THEN 2 WHEN 'd' THEN 2 ELSE 3 END, a.tbl
+             ORDER BY CASE a.action WHEN 's' THEN 0 WHEN 'c' THEN 1 WHEN 'n' THEN 2 WHEN 'd' THEN 2 WHEN 'w' THEN 3 ELSE 4 END, a.tbl
         LOOP
             IF to_regclass(r.tbl) IS NULL THEN
                 RAISE EXCEPTION 'rw-report-isolation revert: table % is gone; nothing restored', r.tbl;
             END IF;
-            IF r.action IN ('s', 'c', 'w') THEN
+            IF r.action = 'u' THEN
+                -- an entity the move bumped (so its page recompiled): its old updated_at, unless something touched it since
+                EXECUTE format('UPDATE %s t SET %I = (a.row_data ->> %L)::timestamptz
+                                  FROM public.research_report_isolation_archive a
+                                 WHERE a.batch = $1 AND a.tbl = $2 AND a.col = $3 AND a.action = ''u''
+                                   AND t.id::text = a.row_data ->> ''id''
+                                   AND t.%I = (a.row_data ->> ''bumped_to'')::timestamptz',
+                               r.tbl, r.col, r.col, r.col)
+                    USING v_batch, r.tbl, r.col;
+            ELSIF r.action IN ('s', 'c', 'w') THEN
                 SELECT string_agg(quote_ident(at.attname), ', ' ORDER BY at.attnum) INTO v_cols
                   FROM pg_attribute at
                  WHERE at.attrelid = r.tbl::regclass AND at.attnum > 0 AND NOT at.attisdropped AND at.attgenerated = '';
@@ -102,6 +113,9 @@ BEGIN
     END LOOP;
     RAISE NOTICE 'rw-report-isolation revert: % batch(es) restored, % rows written back', v_batches, v_restored;
 END $$;
+DROP TRIGGER IF EXISTS trg_report_isolation_wiki_guard ON public.wiki_pages;
+DROP FUNCTION IF EXISTS public.trg_report_isolation_wiki_guard();
+DROP FUNCTION IF EXISTS public.report_isolation_page_shows_report(TEXT, TEXT, JSONB);
 DROP FUNCTION IF EXISTS public.research_job_report_owner(UUID);
 COMMIT;
 NOTIFY pgrst, 'reload schema';

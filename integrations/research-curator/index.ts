@@ -459,9 +459,9 @@ async function writeGroundedClaims(
       await client.queryObject(
         `INSERT INTO public.research_private_report_claims (report_id, claim_id)
          SELECT p.id, c.id FROM public.research_private_reports p, unnest($2::uuid[]) AS c(id)
-          WHERE p.research_key = $1
+          WHERE p.research_key = $1 AND p.job_id = $3::uuid
          ON CONFLICT DO NOTHING`,
-        [pkg.research_key, res.claimIds],
+        [pkg.research_key, res.claimIds, pkg.job_id],
       );
     }
     await client.queryArray("COMMIT");
@@ -676,10 +676,12 @@ Deno.serve({ port: PORT }, async (req) => {
                 [synthesisId, JSON.stringify(stamp)],
               );
             } else {
-              // the idea's private report (rw-report-isolation): the owner's copy carries the readable prose
+              // the idea's private report (rw-report-isolation): the owner's copy carries the readable prose. Round 2
+              // (tester F1): keyed by THIS job too - another user's report can share the research_key, and a stamp
+              // that lands after another filing must land on this job's own row or nowhere
               await c.queryObject(
-                `UPDATE public.research_private_reports SET metadata = metadata || $2::jsonb WHERE research_key = $1`,
-                [pkg.research_key, JSON.stringify(stamp)],
+                `UPDATE public.research_private_reports SET metadata = metadata || $2::jsonb WHERE research_key = $1 AND job_id = $3::uuid`,
+                [pkg.research_key, JSON.stringify(stamp), pkg.job_id],
               );
             }
           } finally { c.release(); }
