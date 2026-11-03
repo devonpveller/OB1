@@ -187,6 +187,7 @@ services:
       - ./init-cleanup.sql:/docker-entrypoint-initdb.d/350-init-cleanup.sql:ro # research-workbench rw-p8a2-cleanup: the cleanup view's per-user action log (fresh-volume only; live: psql -f BEFORE the new image; revert: revert-cleanup.sql)
       - ./init-intake-queue.sql:/docker-entrypoint-initdb.d/360-init-intake-queue.sql:ro # research-workbench rw-p5a-intake: import_jobs owner + the user add, file payloads, the intake panel's job kinds (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-intake-queue.sql)
       - ./init-idea-functions.sql:/docker-entrypoint-initdb.d/370-init-idea-functions.sql:ro # research-workbench rw-p8a4-ideas: idea edit / research-now / promote as owner-checked functions (workbench + openbrain-mcp), the refinery's dossier into the room, the ideas write guard (fresh-volume only; live: psql -f BEFORE the new workbench + openbrain-mcp images and the refinery restart; revert: revert-idea-functions.sql)
+      - ./init-report-isolation.sql:/docker-entrypoint-initdb.d/390-init-report-isolation.sql:ro # research-workbench rw-report-isolation: an idea job's report is private to the idea's owner (research_private_reports + the rule research_job_report_owner); the existing idea-job syntheses moved out of sources, archived first (fresh-volume only; live: psql -f BEFORE the new openbrain-mcp + research-curator images, a fresh backup first, the moved wiki leaf files out of the vault first; revert: revert-report-isolation.sql)
     networks:
       - obnet
     restart: unless-stopped

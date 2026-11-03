@@ -10,6 +10,10 @@
 #      runs deno check) and runs research-filed.e2e.test.ts in it: the REAL index.ts persist route
 #      against the database and a stub embeddings endpoint, all inside the test container
 #   4. migration drill by psql: pre-check, apply twice (idempotent), revert, re-apply
+#   rw-report-isolation adds [4c] report-isolation.e2e.test.ts (the real curator + the real persist: an idea job's
+#   report is private, every other one shared) and [4d] the slot-390 drill (seed the base's shapes, move, move again,
+#   revert twice, move again; counts and hashes only). -Red runs ONLY [4c] and [4d] against -ServiceRoot /
+#   -CuratorRoot / -ChainRoot (copies of the pre-change base): both must FAIL there.
 #   5. tears down exactly what it created and verifies nothing labelled <Id> is left, no volume of ours
 #      is left and no :local image changed
 # It never touches the live stack: no compose up/down, no ai-stack_* / open-brain_* network, no host
@@ -22,7 +26,12 @@ param(
   [string]$SubnetBase = '10.244',
   # RED evidence only: build the server from another kubernetes-deployment directory (a copy of the
   # pre-change base); the test file and the initdb chain still come from this tree.
-  [string]$ServiceRoot = ''
+  [string]$ServiceRoot = '',
+  # rw-report-isolation RED: the curator directory and the OB1 tree whose docker/ chain is staged (the base's);
+  # the new test file still comes from this tree
+  [string]$CuratorRoot = '',
+  [string]$ChainRoot = '',
+  [switch]$Red
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -30,6 +39,7 @@ $label = "ai-stack.harness.owner=$Id"
 $rs = if ($ServiceRoot) { (Resolve-Path $ServiceRoot).Path } else { $PSScriptRoot }
 $ob1 = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $dockerDir = Join-Path $ob1 'docker'
+$chainDocker = if ($ChainRoot) { Join-Path (Resolve-Path $ChainRoot).Path 'docker' } else { $dockerDir }
 $rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
 $net = "rwcf-net-$rand"
 $db = "rwcf-db-$rand"
@@ -71,7 +81,7 @@ function New-PinnedNetwork([string]$name) {
   return ''
 }
 function Get-Chain {
-  $cf = Join-Path $dockerDir 'docker-compose.yml'
+  $cf = Join-Path $chainDocker 'docker-compose.yml'
   $compose = (@(Get-Content $cf) | ForEach-Object { $_ -replace '(^|\s)#.*$', '' }) -join "`n"
   $rx = [regex]'(\.{1,2}/[A-Za-z0-9_./-]+\.sql):/docker-entrypoint-initdb\.d/([0-9]{3}-[a-z0-9.-]+\.sql)'
   return , @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
@@ -89,7 +99,8 @@ try {
   Write-Host '[1] the initdb chain, derived from docker-compose.yml'
   New-Item -ItemType Directory -Force $stage | Out-Null
   $chain = Get-Chain
-  foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
+  foreach ($m in $chain) { Copy-Item (Join-Path $chainDocker $m[0]) (Join-Path $stage $m[1]) }
+  if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '390-init-report-isolation.sql' }).Count -eq 1) 'the chain mounts 390-init-report-isolation.sql (rw-report-isolation)' }
   Check ($chain.Count -ge 30) "staged $($chain.Count) migrations"
   Check (@($chain | Where-Object { $_[1] -eq '280-init-research-filed.sql' }).Count -eq 1) 'the chain mounts 280-init-research-filed.sql'
   $null = Dk image inspect $PgImage
@@ -129,6 +140,7 @@ try {
     if ($script:rc -eq 0) { break }
     Start-Sleep -Seconds 2
   }
+  if (-not $Red) {
   $testFile = Join-Path $PSScriptRoot 'research-filed.e2e.test.ts'
   $o = Dk run --rm --label $label --network $net -e "RF_E2E_DB_HOST=$db" -e "RF_E2E_DB_PASSWORD=$pw" -e NO_COLOR=1 `
     -v "${testFile}:/app/research-filed.e2e.test.ts:ro" -w /app `
@@ -145,7 +157,71 @@ try {
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 5) "resend e2e (real curator + real persist, always-new resolver): $($sum.Value)"
   $o = Dk exec $db psql -U postgres -d openbrain -X -A -F '|' -c "SELECT j.status, e.type, e.payload->>'research_key', (SELECT count(*) FROM sources s WHERE s.content_type='research_synthesis' AND s.research_key = e.payload->>'research_key') AS syntheses FROM research_job_events e JOIN research_jobs j ON j.id=e.job_id WHERE e.type='filed' ORDER BY e.id"
   Save 'events-after.txt' $o
+  }
 
+  # ---------------------------------------------------------------- rw-report-isolation
+  Write-Host '[4c] report-isolation.e2e.test.ts (the real curator + the real persist; an idea job''s report is private)'
+  $curRoot = if ($CuratorRoot) { (Resolve-Path $CuratorRoot).Path } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'research-curator' }
+  $riTest = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'research-curator') 'report-isolation.e2e.test.ts'
+  # RED: the base's curator copy has no test file - copy this tree's into it (a file mount inside a read-only dir mount fails)
+  if ($CuratorRoot) { Copy-Item -Force $riTest (Join-Path $curRoot 'report-isolation.e2e.test.ts') }
+  $o = Dk run --rm --label $label --network $net -e "RI_E2E_DB_HOST=$db" -e "RI_E2E_DB_PASSWORD=$pw" -e NO_COLOR=1 `
+    -v "${curRoot}:/curator:ro" -w /curator `
+    $testTag deno test --no-lock --unstable-net --allow-net --allow-env --allow-read --allow-run report-isolation.e2e.test.ts
+  Save 'report-isolation-e2e.log' (($o -split "`n" | ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0, 400) } else { $_ } } | Select-Object -Last 200) -join "`n")
+  foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = Summary $o
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -ge 3) "RED: report isolation e2e fails on the base ($($sum.Value))" }
+  else { Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 4) "report isolation e2e: $($sum.Value)" }
+
+  Write-Host '[4d] slot-390 drill: seed the base''s shapes, move, move again, revert, revert again, move again'
+  $seed = Join-Path $PSScriptRoot 'report-isolation-drill-seed.sql'; $chk = Join-Path $PSScriptRoot 'report-isolation-drill-check.sql'
+  $null = Dk cp $seed "${db}:/tmp/ri-seed.sql"; $null = Dk cp $chk "${db}:/tmp/ri-check.sql"
+  function RiState { $s = Dk exec $db psql -U postgres -d openbrain -X -q -f /tmp/ri-check.sql; return (($s -split "`n") | ForEach-Object { ($_ -replace '^.*NOTICE:\s+DRILL\s+', '').Trim() } | Where-Object { $_ -match '=' }) -join ' ' }
+  function RiGet([string]$st, [string]$k) { $m = [regex]::Match($st, "(^| )$([regex]::Escape($k))=(\S+)"); if ($m.Success) { $m.Groups[2].Value } else { '' } }
+  $drill = @()
+  $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f /tmp/ri-seed.sql
+  Check ($script:rc -eq 0) "drill: the base's shapes seeded$(if ($script:rc) { ': ' + $o })"
+  $before = RiState; $drill += "seeded: $before"
+  if ($Red) {
+    Check ((RiGet $before 'shared_idea') -eq '2') "RED: on the base the idea-job syntheses are still shared sources (shared_idea=$(RiGet $before 'shared_idea'))"
+  } else {
+    $f390 = Join-Path $dockerDir 'init-report-isolation.sql'; $r390 = Join-Path $dockerDir 'revert-report-isolation.sql'
+    $null = Dk cp $f390 "${db}:/tmp/ri-init.sql"; $null = Dk cp $r390 "${db}:/tmp/ri-revert.sql"
+    $snap0 = RiGet $before 'snapshot'
+    $steps = @(@('init', '/tmp/ri-init.sql'), @('init again', '/tmp/ri-init.sql'), @('revert', '/tmp/ri-revert.sql'), @('revert again', '/tmp/ri-revert.sql'), @('init after revert', '/tmp/ri-init.sql'))
+    $states = @{}
+    foreach ($s in $steps) {
+      $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f $s[1]
+      $rc = $script:rc
+      $note = (($o -split "`n") | Where-Object { $_ -match 'rw-report-isolation|ERROR' } | ForEach-Object { ($_ -replace '^.*NOTICE:\s+', '').Trim() }) -join ' ; '
+      $st = RiState
+      $states[$s[0]] = $st
+      $drill += "[$($s[0])] exit $rc :: $note`n    state: $st"
+      Check ($rc -eq 0) "drill: $($s[0]) runs cleanly"
+      if ($s[0] -like 'init*') { $states["$($s[0])-note"] = $note } else { $states["$($s[0])-note"] = $note }
+    }
+    $mv = $states['init']
+    Check ($states['init-note'] -match 'moved 2 idea-job syntheses' -and $states['init-note'] -match 'non-idea job: 1\)') "drill: init moves the 2 idea-job syntheses and leaves the 1 a non-idea job also filed shared ($($states['init-note']))"
+    Check ((RiGet $mv 'shared_idea') -eq '0' -and (RiGet $mv 'deps_idea') -eq '0' -and (RiGet $mv 'claims_on_idea_reports') -eq '0') "drill: after init no idea-job synthesis, dependent or claim pointer is left in the shared tables ($mv)"
+    Check ((RiGet $mv 'shared_other') -eq '3' -and (RiGet $mv 'deps_other') -eq (RiGet $before 'deps_other')) 'drill: the non-idea and the conflicted synthesis (and their dependents) are untouched'
+    Check ((RiGet $mv 'claims_present') -eq '3' -and (RiGet $mv 'claim_edge_c1') -eq '1') 'drill: the claims stay (shared), with their source edges'
+    Check ((RiGet $mv 'private') -eq '2' -and (RiGet $mv 'private_owned') -eq '2' -and (RiGet $mv 'private_s1_job') -eq 'j1' -and (RiGet $mv 'private_s2_job') -eq 'j2' -and (RiGet $mv 'private_text') -eq '2' -and (RiGet $mv 'private_links') -eq '2') 'drill: two private copies, owned by the idea''s owner, on their jobs, with their text and their claims linked'
+    Check ((RiGet $mv 'dossier_i1') -eq 'null') 'drill: the idea''s dossier pointer no longer names a shared row'
+    Check ([int](RiGet $mv 'archive_open') -ge 7 -and (RiGet $mv 'archive_app_read') -eq 'no') "drill: every moved row archived first ($(RiGet $mv 'archive_open') rows), the archive unreadable by service_role"
+    Check ($states['init again-note'] -match 'moved 0 idea-job syntheses' -and (RiGet $states['init again'] 'private') -eq '2' -and (RiGet $states['init again'] 'archive_open') -eq (RiGet $mv 'archive_open')) 'drill: a second init moves nothing and changes nothing'
+    $rv = $states['revert']
+    Check ($states['revert-note'] -match '1 batch\(es\) restored') "drill: revert restores the batch ($($states['revert-note']))"
+    Check ((RiGet $rv 'snapshot') -eq $snap0 -and (RiGet $rv 'shared_idea') -eq '2' -and (RiGet $rv 'deps_idea') -eq (RiGet $before 'deps_idea')) "drill: after revert the rows, their dependents and the claim pointers are byte-identical to before (snapshot $(RiGet $rv 'snapshot') vs $snap0)"
+    Check ((RiGet $rv 'dossier_i1') -eq 's1' -and (RiGet $rv 'private') -eq '0' -and (RiGet $rv 'fn') -eq '0' -and (RiGet $rv 'archive_open') -eq '0') 'drill: the dossier pointer is back, the private copies and the rule are gone, the archive is marked restored'
+    Check ($states['revert again-note'] -match '0 batch\(es\) restored' -and (RiGet $states['revert again'] 'snapshot') -eq $snap0) 'drill: a second revert restores nothing and changes nothing'
+    $ag = $states['init after revert']
+    Check ($states['init after revert-note'] -match 'moved 2 idea-job syntheses' -and (RiGet $ag 'shared_idea') -eq '0' -and (RiGet $ag 'private') -eq '2' -and (RiGet $ag 'fn') -eq '1') 'drill: init after the revert moves them again'
+  }
+  Save 'report-isolation-drill.txt' ($drill -join "`n")
+  foreach ($l in $drill) { Write-Host "    $l" }
+
+  if (-not $Red) {
   Write-Host '[4b] migration drill: pre-check, apply twice, revert, re-apply'
   $f = Join-Path $dockerDir 'init-research-filed.sql'; $r = Join-Path $dockerDir 'revert-research-filed.sql'
   $null = Dk cp $f "${db}:/tmp/apply.sql"; $null = Dk cp $r "${db}:/tmp/revert.sql"
@@ -160,6 +236,7 @@ try {
   $o4 = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -f /tmp/apply.sql
   Check ($script:rc -eq 0) 're-apply after revert runs'
   Save 'migration-drill.txt' ("== apply#2`n$o1`n== revert`n$o2`n== insert after revert`n$o3`n== re-apply`n$o4")
+  }
 }
 finally {
   Write-Host '[5] teardown'

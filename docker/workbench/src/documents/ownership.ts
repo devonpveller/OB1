@@ -62,11 +62,16 @@ export const FOREIGN_IDEA = (id: string, sub: string) =>
   `EXISTS (SELECT 1 FROM public.ideas own_i WHERE own_i.id::text = (${id})::text AND own_i.owner_sub <> ${sub})`;
 
 // research job `j` belongs to another user (see the header).
+// rw-report-isolation: ALSO when it is the research of another user's idea by the database's one rule
+// (research_job_report_owner, slot 390: the idea's branch, its refinery, a revision stamped with the job, or the root
+// of its tree) - an idea job tied to its idea only by a revision stamp carries no refinery_id, and its result holds
+// the idea's private report. An idea job whose idea has no owner is no one's (foreign to all).
 export const FOREIGN_JOB = (j: string, sub: string, key: string, adminSees = false) =>
   `(EXISTS (SELECT 1 FROM public.research_prompts own_p WHERE own_p.job_id IN (${j}.id, ${ROOT(j)}) AND own_p.owner_sub <> ${sub}
              AND own_p.owner_sub NOT LIKE 'service:%')
      OR ${OWNERLESS_FOREIGN(j, sub, adminSees)}
      OR ${FOREIGN_IDEA(`${j}.refinery_id`, sub)}
+     OR EXISTS (SELECT 1 FROM public.research_job_report_owner(${j}.id) own_f WHERE own_f.owner_sub IS DISTINCT FROM ${sub})
      OR (${j}.inlet_ref ->> 'kind' = 'refinery' AND ${FOREIGN_IDEA(`${j}.inlet_ref ->> 'id'`, sub)})
      OR ${FOREIGN_DOC(`${j}.inlet_ref ->> 'id'`, sub, key)})`;
 

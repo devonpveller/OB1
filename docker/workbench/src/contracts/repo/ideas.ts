@@ -51,7 +51,9 @@ export async function ideas(db: Db, limit: number, owner: string) {
             COALESCE((SELECT max(e.created_at) FROM public.workspace_room_entries e
                         JOIN public.workspace_rooms wr ON wr.id = e.room_id
                        WHERE wr.subject_kind = 'idea' AND wr.subject_id = i.id AND wr.owner_sub = i.owner_sub AND e.kind = 'dossier'),
-                     (SELECT s.created_at FROM public.sources s WHERE s.id = i.dossier_source_id)) AS dossier_at,
+                     (SELECT s.created_at FROM public.sources s WHERE s.id = i.dossier_source_id),
+                     (SELECT max(p.updated_at) FROM public.research_private_reports p
+                       WHERE p.idea_id = i.id AND p.owner_sub = i.owner_sub)) AS dossier_at,
             CASE WHEN i.status = 'dormant' AND (i.metadata -> 'resurfaced' ->> 'at') IS NOT NULL
                        AND (i.dormant_at IS NULL OR (i.metadata -> 'resurfaced' ->> 'at')::timestamptz >= i.dormant_at)
                  THEN (i.metadata -> 'resurfaced' ->> 'at')::timestamptz END AS resurfaced_at
@@ -84,7 +86,7 @@ async function sessionsOf(db: Db, i: IdeaRow) {
   );
 }
 
-async function producedOf(db: Db, sessionIds: string[], dossierId: string | null) {
+async function producedOf(db: Db, sessionIds: string[], dossierId: string | null, ideaId: string, owner: string) {
   const sources = await db.query<{ id: string; title: string; lifecycle: string }>(
     `SELECT DISTINCT s.id, s.title, public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at) AS lifecycle
        FROM public.sources s
@@ -100,8 +102,13 @@ async function producedOf(db: Db, sessionIds: string[], dossierId: string | null
                                 JOIN public.sources s ON s.id = ss.source_id AND s.content_type = 'research_synthesis'
                                WHERE ss.session_id = ANY($1::uuid[]))
          OR c.synthesis_id = $2::uuid
+         -- rw-report-isolation: the claims drawn from the idea's PRIVATE reports (the owner's link back; the claims
+         -- are shared, their synthesis_id NULL)
+         OR c.id IN (SELECT pc.claim_id FROM public.research_private_report_claims pc
+                       JOIN public.research_private_reports p ON p.id = pc.report_id
+                      WHERE p.idea_id = $3::uuid AND p.owner_sub = $4)
       ORDER BY c.text LIMIT 200`,
-    [sessionIds, dossierId],
+    [sessionIds, dossierId, ideaId, owner],
   );
   return { sources, claims: claims.map((c) => ({ ...c, confidence: Number(c.confidence) })) };
 }
@@ -255,6 +262,16 @@ export async function idea(db: Db, id: string, viewerIn: IdeaViewer) {
          FROM public.sources WHERE id = $1`, [row.dossier_source_id],
     ))[0] ?? null
     : null;
+  // rw-report-isolation (operator 2026-11-02): the idea's research report is PRIVATE to its owner - filed in
+  // research_private_reports (slot 390), never a shared source; the latest one is the dossier's report
+  const reportRow = (await db.query<{ job_id: string | null; title: string; content: string; prose: string | null; claims: number; updated_at: string }>(
+    `SELECT p.job_id::text AS job_id, p.title, p.content, p.metadata ->> 'prose_synthesis' AS prose, p.updated_at,
+            (SELECT count(*)::int FROM public.research_private_report_claims pc WHERE pc.report_id = p.id) AS claims
+       FROM public.research_private_reports p
+      WHERE p.idea_id = $1::uuid AND p.owner_sub = $2
+      ORDER BY p.updated_at DESC LIMIT 1`,
+    [id, owner],
+  ))[0] ?? null;
   // rw-p8a4-ideas: the idea's ONE long-lived room (workspace_rooms, slot 340; owner = the idea's owner), its
   // accreting draft a field on it; the Mattermost thread (thread_root) is the room's inlet, linked, never a mirror
   const roomRow = (await db.query<{ id: string; draft: string; draft_updated_at: string | null; entries: number; dossiers: number }>(
@@ -278,13 +295,14 @@ export async function idea(db: Db, id: string, viewerIn: IdeaViewer) {
     revisions,
     sessions: sessions.map(({ session_id: _s, ...rest }) => rest),
     dossier,
+    report: reportRow,
     draft: { state: roomRow?.draft ? "current" : "empty", text: roomRow?.draft ?? "", updated_at: roomRow?.draft_updated_at ?? null },
     room: {
       state: roomRow ? "current" : "not_opened", room_id: roomRow?.id ?? null, thread_root: row.thread_root,
       inlet: row.thread_root ? `mattermost:thread:${row.thread_root}` : null,
       entries: roomRow?.entries ?? 0, dossiers: roomRow?.dossiers ?? 0,
     },
-    produced: await producedOf(db, sessionPoolIds, row.dossier_source_id),
+    produced: await producedOf(db, sessionPoolIds, row.dossier_source_id, id, owner),
     refinery: {
       origin: { kind: state?.origin_kind ?? "captured_idea", document_path: state?.path ?? null },
       members: {
