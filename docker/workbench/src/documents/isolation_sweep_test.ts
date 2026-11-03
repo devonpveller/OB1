@@ -318,7 +318,25 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     console.log(`sweep: B's intake add ${add.status}, B's import ${imp.status}`);
   }
   const bIntakeBefore = await sql(`SELECT id::text AS id, status, attempts FROM public.import_jobs WHERE id::text = ANY($1) ORDER BY id`, [Object.values(bIntake)]);
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret,
+  // review RV1 (rw-p8a4-ideas): A's OWN refinery holds a shared (folded) source; B's research tree records a lead on it
+  // and admits a marker URL found via that lead, and another found via it directly. A's refinery view lists A's user
+  // sources with what was admitted found_via them - B's admissions must not be among them.
+  const viaSecret = `ViaSecret${rnd()}`;
+  {
+    const aDoc = await wb("POST", "/workbench/documents", { title: `sweep A refinery ${rnd()}`, idea: "A's own idea" });
+    assertEquals(aDoc.status, 201, aDoc.text);
+    const aStart = await wb("POST", "/workbench/documents/refinery/start", { path: aDoc.json.path });
+    assert(aStart.status < 300 && aStart.json.refinery_id, aStart.text);
+    const shared = crypto.randomUUID();
+    await sql(`INSERT INTO public.sources (id, url, title, content) VALUES ($1, $2, 'sweep shared source', 'shared')`, [shared, `https://example.org/sweep-shared/${shared}`]);
+    await sql(`INSERT INTO public.refinery_user_sources (refinery_id, source_id, status) VALUES ($1, $2, 'active')`, [aStart.json.refinery_id, shared]);
+    const lead = (await sql<{ id: string }>(
+      `INSERT INTO public.research_admission_trail (job_id, url, url_key, kind, source_id) VALUES ($1, $2, public.contract_url_key($2), 'lead', $3) RETURNING id::text AS id`,
+      [bJob, `https://example.org/sweep-shared/${shared}`, shared]))[0].id;
+    await sql(`INSERT INTO public.research_admission_trail (job_id, url, url_key, kind, found_via) VALUES ($1, $2, public.contract_url_key($2), 'admitted', $3), ($1, $4, public.contract_url_key($4), 'admitted', $5)`,
+      [bJob, `https://example.org/${viaSecret}/lead`, lead, `https://example.org/${viaSecret}/direct`, shared]);
+  }
+  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, viaSecret,
     ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),

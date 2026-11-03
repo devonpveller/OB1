@@ -51,7 +51,7 @@ Deno.test("rw-p8a4-ideas: refuse() maps the function's outcomes - another owner'
   assertEquals([st("not_found"), st("archived"), st("changed"), st("unchanged"), st("queued")], [404, 409, 200, 200, 200]);
 });
 
-Deno.test("rw-p8a4-ideas: edit is ONE idea_edit() call with the seam's subject and its corpus thought in the same transaction; no direct write of ideas / idea_revisions", async () => {
+Deno.test("rw-p8a4-ideas: edit is ONE idea_edit() call with the seam's subject, no corpus thought; no direct write of ideas / idea_revisions", async () => {
   const { db, seen } = fakeDb({ outcome: "changed", revision: 2, title: "t" });
   const r = await app(db).request(`/i/${ID}/edit`, json({ summary: "the new text", owner_sub: "someone-else", sub: "x" }));
   assertEquals(r.status, 200);
@@ -59,30 +59,11 @@ Deno.test("rw-p8a4-ideas: edit is ONE idea_edit() call with the seam's subject a
   const calls = seen.filter((s) => /idea_edit\(/.test(s.sql));
   assertEquals(calls.length, 1);
   assertEquals(calls[0].args.slice(0, 4), [ID, "operator", "operator", "the new text"]); // the seam's default subject + actor
-  // the revision's corpus thought is this door's, written first in the same transaction (the memory plane reads it)
-  assertEquals(calls[0].args[6], "42");
-  const th = seen.find((s) => /INSERT INTO public\.thoughts/.test(s.sql))!;
-  assertEquals([th.args[0], th.args[3]], ["the new text", "ops"]);
-  assert(seen.indexOf(th) < seen.indexOf(calls[0]));
+  // operator 2026-11-02 (ideas are completely user isolated): NO corpus thought - the 7th SQL arg is the literal NULL
+  assertEquals(calls[0].args[6], undefined);
+  assert(/\$6, NULL\)/.test(calls[0].sql));
+  assertEquals(seen.filter((s) => /thoughts/.test(s.sql)).length, 0, "nothing touches the thought corpus");
   assertEquals(seen.filter((s) => /(INSERT INTO|UPDATE) public\.(ideas|idea_revisions)\b/.test(s.sql)).length, 0);
-});
-
-Deno.test("rw-p8a4-ideas: an unchanged edit keeps no thought (the transaction is rolled back)", async () => {
-  const seen: string[] = [];
-  let rolled = false;
-  const inner: Db = {
-    query: (sql: string) => {
-      seen.push(sql);
-      if (/INSERT INTO public\.thoughts/.test(sql)) return Promise.resolve([{ id: "42" }] as never);
-      if (/idea_edit\(/.test(sql)) return Promise.resolve([{ o: { outcome: "unchanged", revision: 1 } }] as never);
-      return Promise.resolve([{ title: "t" }] as never);
-    },
-    tx: async (fn: (d: Db) => Promise<unknown>) => {
-      try { return await fn(inner); } catch (e) { rolled = true; throw e; }
-    },
-  } as never;
-  const r = await app(inner).request(`/i/${ID}/edit`, json({ summary: "same" }));
-  assertEquals([r.status, (await r.json()).outcome, rolled], [200, "unchanged", true]);
 });
 
 Deno.test("rw-p8a4-ideas: another owner's idea is 404 on every write, before any function runs", async () => {

@@ -3,8 +3,8 @@
 // update_idea / research_idea / promote_idea call - with the identity seam's subject as the owner, never a
 // caller-supplied user. Nothing here writes `ideas` or `idea_revisions` itself: the database refuses an app
 // role that tries (trg_ideas_write_guard).
-//   edit          idea_edit(idea, subject, actor, summary, title, embedding, thought) - the revision's corpus thought is this
-//                 door's (as update_idea's), in the same transaction; the memory plane reads a revision by its thought
+//   edit          idea_edit(idea, subject, actor, summary, title, embedding, NULL) - a PRIVATE revision, no corpus thought
+//                 (operator 2026-11-02: ideas are completely user isolated)
 //   research now  idea_research(idea, subject, actor)
 //   promote       idea_promote(idea, subject, actor, path) - documents/seed.ts calls it after the seed
 //   draft         the accreting draft, a field on the idea's ONE room (workspace_rooms.draft, slot 340)
@@ -72,29 +72,11 @@ export async function editIdea(
   } catch (e) {
     console.error("[ideas] embedding unavailable; the idea keeps its previous embedding:", String((e as Error)?.message ?? e).slice(0, 200));
   }
-  // The revision's corpus thought, written by THIS door in the same transaction (kept only when the edit changed
-  // something) - exactly as openbrain-mcp's update_idea writes one. Without it the revision cannot be read back: the
-  // memory-plane policy (slot 200) shows an app role only revisions whose thought it can see (thought_id IS NOT NULL).
-  return refuse(await db.tx(async (t) => {
-    const th = (await t.query<{ id: string }>(
-      `INSERT INTO public.thoughts (content, embedding, metadata, exposure)
-       VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id::text AS id`,
-      [input.summary, vec, JSON.stringify({ type: "idea", source: "workspace", kind: "idea", idea_id: id, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE],
-    ))[0].id;
-    const o = await fn(t, `SELECT public.idea_edit($1::uuid, $2, $3, $4, $5, $6, $7::bigint) AS o`,
-      [id, who.sub, who.actor, input.summary, input.title, vec, th]);
-    if (o.outcome !== "changed") throw new Unchanged(o); // the thought goes with an edit that did not happen
-    return o;
-  }).catch((e) => {
-    if (e instanceof Unchanged) return e.o;
-    throw e;
-  }));
-}
-
-// the corpus plane an idea's thought lands on: the door constant openbrain-mcp uses for the same rows (CORPUS_EXPOSURE)
-export const CORPUS_EXPOSURE = "ops";
-class Unchanged extends Error {
-  constructor(readonly o: Outcome) { super("unchanged"); }
+  // Operator decision 2026-11-02: ideas are completely user isolated - the revision carries NO corpus thought (the
+  // shared thought corpus is searchable by other users' tools). idea_edit() writes it as a PRIVATE revision of its owner
+  // (idea_revisions.private_owner), read through its own owner-established policy (slot 370), not through a thought.
+  return refuse(await fn(db, `SELECT public.idea_edit($1::uuid, $2, $3, $4, $5, $6, NULL) AS o`,
+    [id, who.sub, who.actor, input.summary, input.title, vec]));
 }
 
 export async function researchIdea(db: Db, id: string, who: Identity): Promise<Outcome> {

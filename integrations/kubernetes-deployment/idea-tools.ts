@@ -38,37 +38,35 @@ async function fn(client: IdeaClient, sql: string, args: unknown[]): Promise<Out
   return (await client.queryObject<{ o: Outcome }>(sql, args)).rows[0].o;
 }
 
-// update_idea: a new revision through idea_edit(). The corpus thought this door writes for every revision (ideas stay
-// first-class OB captures) is inserted in the SAME transaction and kept only when the edit changed something.
+// update_idea: a new revision through idea_edit(). Operator decision 2026-11-02 - "ideas are completely user isolated" -
+// so the revision carries NO corpus thought (the shared thought corpus is searchable by other users' tools): idea_edit()
+// writes it as a private revision of its owner (idea_revisions.private_owner, slot 370).
 export async function updateIdea(
   client: IdeaClient, owner: string,
-  a: { idea_id: string; idea: string; title?: string; embedding: string; exposure: string; channel: string },
+  a: { idea_id: string; idea: string; title?: string; embedding: string; channel: string },
 ): Promise<{ text: string; isError?: boolean }> {
   const body = a.idea.trim();
   if (!body) throw new Error("idea text is required");
-  await client.queryArray("BEGIN");
-  try {
-    const th = await client.queryObject<{ id: bigint }>(
-      `INSERT INTO thoughts (content, embedding, metadata, exposure)
-       VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id`,
-      [body, a.embedding, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id: a.idea_id, exposure: a.exposure }), a.exposure],
-    );
-    const o = await fn(client, `SELECT public.idea_edit($1::uuid, $2, $3, $4, $5, $6, $7) AS o`,
-      [a.idea_id, owner, MCP_ACTOR, body, a.title?.trim() || null, a.embedding, th.rows[0].id]);
-    if (o.outcome !== "changed") {
-      await client.queryArray("ROLLBACK"); // the thought goes with an edit that did not happen
-      if (o.outcome === "not_found") throw new Error(NOT_FOUND(a.idea_id));
-      if (o.outcome === "archived") return { text: ARCHIVED, isError: true };
-      return { text: `No change — the text is identical to the current version (idea_id: ${a.idea_id}); nothing re-queued.` };
-    }
-    await client.queryArray("COMMIT");
-    return { text:
-      `Updated idea "${o.title}" (idea_id: ${a.idea_id}, revision ${o.revision}). It will be re-researched in the background; ` +
-      `the refreshed findings will land in the idea's room in the research workspace and as an update on its Mattermost ${a.channel} thread.` };
-  } catch (e) {
-    try { await client.queryArray("ROLLBACK"); } catch { /* connection already broken, or rolled back above */ }
-    throw e;
+  const o = await fn(client, `SELECT public.idea_edit($1::uuid, $2, $3, $4, $5, $6, NULL) AS o`,
+    [a.idea_id, owner, MCP_ACTOR, body, a.title?.trim() || null, a.embedding]);
+  if (o.outcome === "not_found") throw new Error(NOT_FOUND(a.idea_id));
+  if (o.outcome === "archived") return { text: ARCHIVED, isError: true };
+  if (o.outcome !== "changed") {
+    return { text: `No change — the text is identical to the current version (idea_id: ${a.idea_id}); nothing re-queued.` };
   }
+  return { text:
+    `Updated idea "${o.title}" (idea_id: ${a.idea_id}, revision ${o.revision}). It will be re-researched in the background; ` +
+    `the refreshed findings will land in the idea's room in the research workspace and as an update on its Mattermost ${a.channel} thread.` };
+}
+
+// capture_idea's write: the idea and its private revision 1 through idea_capture() (no corpus thought, the same reason).
+export async function captureIdea(
+  client: IdeaClient, owner: string, a: { title: string; idea: string; domain?: string | null; embedding: string },
+): Promise<string> {
+  const r = await client.queryObject<{ id: string }>(
+    `SELECT public.idea_capture($1, $2, $3, $4, $5, $6)::text AS id`, [owner, MCP_ACTOR, a.title, a.idea, a.domain ?? null, a.embedding],
+  );
+  return r.rows[0].id;
 }
 
 // research_idea: research now through idea_research() (queued at once - no flag for a later pass).

@@ -10,6 +10,13 @@
 import type { Db } from "../db.ts";
 import { Conflict, NotFound } from "./lifecycle.ts";
 import { tombstoneForUrl, tombstoneOut } from "./sources.ts";
+import { adminSeesOwnerless, FOREIGN_JOB } from "../../documents/ownership.ts";
+import type { Who } from "../../sessions/repo.ts";
+
+// review RV1 (rw-p8a4-ideas): who is reading. A bare owner subject is a viewer with no documents key - stricter, never
+// looser (FOREIGN_JOB then treats a document-inlet job as foreign).
+export type IdeaViewer = string | Who;
+const viewerOf = (v: IdeaViewer): Who => (typeof v === "string" ? { sub: v, key: "" } : v);
 
 const IDEA_COLS = `i.id, i.title, i.status, i.summary, i.current_revision, i.created_at, i.updated_at,
   i.thread_root, i.last_job_id, i.dossier_source_id`;
@@ -106,7 +113,8 @@ interface UserSourceRow {
   source_id: string; refinery_id: string; status: string; state: string; title: string; url: string | null; revision: number;
   givers: number; amount: number;
 }
-export async function userSources(db: Db, refineryId: string) {
+export async function userSources(db: Db, refineryId: string, viewerIn: IdeaViewer) {
+  const viewer = viewerOf(viewerIn);
   const rows = await db.query<UserSourceRow>(
     `SELECT rus.source_id, rus.refinery_id, rus.status,
             COALESCE(CASE WHEN h.id IS NOT NULL THEN 'held' END,
@@ -130,13 +138,20 @@ export async function userSources(db: Db, refineryId: string) {
     [refineryId],
   );
   const ids = rows.map((r) => r.source_id);
+  // review RV1: an admission recorded by ANOTHER user's research tree is withheld (FOREIGN_JOB, the leads() rule of
+  // knowledge.ts - 07-MULTI-USER); a trail row whose job row is gone is skipped (fail closed). Both the admitted row and
+  // the lead it was found through are judged.
+  const admin = adminSeesOwnerless(viewer);
+  const mine = (jobCol: string) => `(${jobCol} IS NULL OR EXISTS (SELECT 1 FROM public.research_jobs j
+      WHERE j.id = ${jobCol} AND NOT ${FOREIGN_JOB("j", "$2", "$3", admin)}))`;
   const via = ids.length ? await db.query<{ from_id: string; trail_id: string; url: string; source_id: string | null; at: string }>(
     `SELECT COALESCE(l.source_id, a.found_via)::text AS from_id, a.id::text AS trail_id, a.url, a.source_id::text AS source_id, a.created_at AS at
        FROM public.research_admission_trail a
        LEFT JOIN public.research_admission_trail l ON l.id = a.found_via
       WHERE a.kind = 'admitted' AND (a.found_via::text = ANY($1::text[]) OR l.source_id::text = ANY($1::text[]))
+        AND ${mine("a.job_id")} AND (l.id IS NULL OR ${mine("l.job_id")})
       ORDER BY a.created_at LIMIT 500`,
-    [ids],
+    [ids, viewer.sub, viewer.key],
   ) : [];
   return rows.map(({ givers, amount, ...r }) => ({
     ...r,
@@ -213,7 +228,9 @@ async function pickedLinks(db: Db, refineryId: string, owner: string): Promise<L
   );
 }
 
-export async function idea(db: Db, id: string, owner: string) {
+export async function idea(db: Db, id: string, viewerIn: IdeaViewer) {
+  const viewer = viewerOf(viewerIn);
+  const owner = viewer.sub;
   const row = (await db.query<IdeaRow>(`SELECT ${IDEA_COLS} FROM public.ideas i WHERE i.id = $1 AND i.owner_sub = $2`, [id, owner]))[0];
   if (!row) return null;
   const revisions = await db.query<{ revision: number; summary: string; research_job_id: string | null; created_at: string }>(
@@ -282,7 +299,7 @@ export async function idea(db: Db, id: string, owner: string) {
       hidden: await db.query<{ node_kind: string; node_ref: string; hidden_at: string }>(
         `SELECT node_kind, node_ref, hidden_at FROM public.refinery_hidden WHERE refinery_id = $1 ORDER BY hidden_at`, [id],
       ),
-      user_sources: await userSources(db, id),
+      user_sources: await userSources(db, id, viewer),
       // D17 archive: a resting refinery (engagement skips it, nothing is deleted)
       archived: row.status === "archived",
     },
@@ -331,7 +348,7 @@ export async function addHeld(
   req: HeldInput,
   chunk: (t: string) => string[],
   embed: (t: string) => Promise<number[]>,
-  opts: { dedupe?: boolean; owner: string },
+  opts: { dedupe?: boolean; owner: string; viewer?: Who },
 ) {
   await requireIdea(db, refineryId, opts.owner);
   if (req.url) {
@@ -343,7 +360,7 @@ export async function addHeld(
   // any candidate (the tombstone check above); when the contents differ the match gets a new
   // revision. Another refinery lists the match as a member, never a second copy.
   const match = opts.dedupe === false ? null : await sameHeld(db, req);
-  if (match) return await dedupe(db, refineryId, match, req, chunk, embed);
+  if (match) return await dedupe(db, refineryId, match, req, chunk, embed, opts.viewer ?? opts.owner);
   const chunks = chunk(req.content);
   const vec = (v: number[]) => `[${v.join(",")}]`;
   const docVec = vec(await embed(`${req.title}\n\n${req.content}`));
@@ -366,7 +383,7 @@ export async function addHeld(
       `INSERT INTO public.refinery_user_sources (refinery_id, source_id, status, added_by) VALUES ($1, $2, 'held', $3)`,
       [refineryId, id, req.by ?? null],
     );
-    const src = (await userSources(t, refineryId)).find((u) => u.source_id === id)!;
+    const src = (await userSources(t, refineryId, opts.viewer ?? opts.owner)).find((u) => u.source_id === id)!;
     return { source: src, chunks: chunks.length, embedded: true };
   });
 }
@@ -390,7 +407,7 @@ async function sameHeld(db: Db, req: HeldInput) {
 
 async function dedupe(
   db: Db, refineryId: string, match: { id: string; refinery_id: string; content_hash: string | null }, req: HeldInput,
-  chunk: (t: string) => string[], embed: (t: string) => Promise<number[]>,
+  chunk: (t: string) => string[], embed: (t: string) => Promise<number[]>, viewer: IdeaViewer,
 ) {
   const same = (await db.query<{ same: boolean }>(`SELECT md5($1) IS NOT DISTINCT FROM $2 AS same`, [req.content, match.content_hash]))[0].same;
   if (!same) await reviseHeld(db, match.id, req.title, req.content, chunk, embed);
@@ -400,7 +417,7 @@ async function dedupe(
       [refineryId, match.id],
     );
   }
-  const src = (await userSources(db, match.refinery_id)).find((u) => u.source_id === match.id)!;
+  const src = (await userSources(db, match.refinery_id, viewer)).find((u) => u.source_id === match.id)!;
   const chunks = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM public.held_source_chunks WHERE held_source_id = $1`, [match.id]))[0].n;
   return { source: src, chunks, embedded: true, deduped: true, revised: !same };
 }

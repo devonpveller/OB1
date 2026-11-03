@@ -11,6 +11,10 @@ DROP TRIGGER IF EXISTS trg_idea_revisions_write_guard ON public.idea_revisions;
 DROP FUNCTION IF EXISTS public.trg_ideas_write_guard();
 DROP FUNCTION IF EXISTS public.trg_idea_revisions_write_guard();
 DROP FUNCTION IF EXISTS public.idea_edit(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT);
+DROP FUNCTION IF EXISTS public.idea_capture(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT);
+-- the private revision plane: its policy goes; the column is KEPT (dropping it would orphan which plane a private
+-- revision is on - without the policy those rows are simply invisible to an app role, fail closed)
+DROP POLICY IF EXISTS idea_revisions_owner_private ON public.idea_revisions;
 DROP FUNCTION IF EXISTS public.idea_research(UUID, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.idea_promote(UUID, TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.idea_deliver_dossier(UUID, TEXT, TEXT, JSONB);

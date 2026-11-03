@@ -29,7 +29,7 @@ import { registerAgentMemory } from "./agent-memory.ts";
 import { registerContractTools } from "./contract-tools.ts";
 import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
 import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
-import { ideaOwner, MCP_ACTOR, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
+import { captureIdea, ideaOwner, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
 import {
   buildEgress,
   dedupShareScope,
@@ -75,8 +75,8 @@ const MCP_PERSONAL_ACCESS_KEY = _personal.key;
 // IT IS A DOOR CONSTANT, NOT A FALLBACK. §1.1 puts lane stamping at doors, not in writers,
 // precisely because a writer is the party that cannot be trusted to report its own plane.
 // The agent-memory lane has its own door value and its own demotion rule (stampExposure);
-// this is the corpus lane's. Changing this one line moves every future capture_thought /
-// capture_idea / update_idea row, and nothing else.
+// this is the corpus lane's. Changing this one line moves every future capture_thought row, and nothing
+// else (rw-p8a4-ideas: capture_idea / update_idea write no corpus thought - ideas are completely user isolated).
 const CORPUS_EXPOSURE = "ops";
 
 // BigInt JSON safety: the postgres driver returns int8 columns (e.g. thoughts.id)
@@ -1028,31 +1028,9 @@ server.registerTool(
           }
         }
 
-        let ideaId = "";
-        await client.queryArray("BEGIN");
-        try {
-          const ins = await client.queryObject<{ id: string }>(
-            `INSERT INTO ideas (title, summary, domain, embedding, status, current_revision, owner_sub, actor_sub)
-             VALUES ($1, $2, COALESCE($3,'ai-stack'), $4::vector, 'new', 1, $5, $6)
-             RETURNING id`,
-            [ttl, body, domain ?? null, embStr, IDEA_OWNER, MCP_ACTOR],
-          );
-          ideaId = ins.rows[0].id;
-          const th = await client.queryObject<{ id: bigint }>(
-            `INSERT INTO thoughts (content, embedding, metadata, exposure)
-             VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id`,
-            [body, embStr, JSON.stringify({ type: "idea", source: "mcp", kind: "idea", idea_id: ideaId, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE],
-          );
-          await client.queryArray(
-            `INSERT INTO idea_revisions (idea_id, revision, summary, thought_id, content_hash)
-             VALUES ($1, 1, $2, $3, md5(lower(btrim($2))))`,
-            [ideaId, body, th.rows[0].id],
-          );
-          await client.queryArray("COMMIT");
-        } catch (e) {
-          try { await client.queryArray("ROLLBACK"); } catch { /* connection already broken */ }
-          throw e;
-        }
+        // rw-p8a4-ideas (operator 2026-11-02: ideas are completely user isolated): the idea and its private revision 1
+        // through idea_capture() - no corpus thought, so the idea's text is in no shared search
+        const ideaId = await captureIdea(client, IDEA_OWNER, { title: ttl, idea: body, domain: domain ?? null, embedding: embStr });
 
         return {
           content: [{ type: "text" as const, text:
@@ -1086,12 +1064,12 @@ server.registerTool(
     try {
       const body = idea.trim();
       if (!body) throw new Error("idea text is required");
-      // the embedding is computed first (outside the transaction); a no-op edit discards it with its thought
+      // the embedding keeps dedup and resurfacing true to the new text (no corpus thought: ideas are user isolated)
       const embedding = await getEmbedding(`${(title?.trim() || "")}\n\n${body}`.trim());
       const client = await pool.connect();
       try {
         const r = await updateIdea(client, IDEA_OWNER, {
-          idea_id, idea: body, title, embedding: `[${embedding.join(",")}]`, exposure: CORPUS_EXPOSURE, channel: IDEA_CHANNEL,
+          idea_id, idea: body, title, embedding: `[${embedding.join(",")}]`, channel: IDEA_CHANNEL,
         });
         return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
       } finally {

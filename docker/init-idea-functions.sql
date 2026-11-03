@@ -8,8 +8,11 @@
 --   * idea_edit(idea, owner, actor, summary, title, embedding, thought)   a new revision (the research trigger
 --       queues it, slot 260/300); identical text is 'unchanged'; an archived idea is 'archived' (engagement
 --       skips a resting refinery). The thought row, when there is one, is the DOOR's (openbrain-mcp writes
---       its own corpus thought in the same transaction); the workbench passes none (07-MULTI-USER: an idea is
---       private, the thought corpus is not).
+--       none any more): operator decision 2026-11-02 - "ideas are completely user isolated" - so a revision is
+--       PRIVATE (idea_revisions.private_owner = the idea's owner, no corpus thought) and is read through its own
+--       owner-established policy below, never through the shared thought corpus.
+--   * idea_capture(owner, actor, title, summary, domain, embedding)  capture_idea's write: the idea and its private
+--       revision 1, no corpus thought (the same reason).
 --   * idea_research(idea, owner, actor)       research now, owner-checked, over idea_research_now() (slot 300).
 --   * idea_promote(idea, owner, actor, path)  `create document` = PROMOTE: the idea moves to promoted with a
 --       pointer to its ONE tethered user document (the listing's refinery_id + metadata.promoted).
@@ -21,14 +24,35 @@
 --   * refinery_engage(refinery, owner, kind, ref)  record a member engaged from inside a refinery (a podcast);
 --       an archived refinery is 'archived' and records nothing.
 --   * trg_ideas_write_guard: an UPDATE of ideas.title / summary / current_revision / owner_sub or of the promotion
---       pointer (metadata.promoted), a move to `promoted`, an INSERT promoted or carrying a pointer, or a
---       revision after the first, is REFUSED unless it runs inside one of these functions (their owner: the
+--       pointer (metadata.promoted), a move to `promoted`, an INSERT promoted or carrying a pointer, a revision
+--       after the first, or an UPDATE of a revision other than its research_job_id, is REFUSED unless it runs inside
+--       one of these functions (their owner: the
 --       migration's role). An app role (service_role, ob_app_memory) writing them directly fails - an edit that
 --       bypasses the shared function, or a promotion the refinery performs on its own, cannot happen.
 --   * trg_ideas_notify (replaced): no "dossier delivered" notification for an archived idea.
 -- Additive and idempotent; no table is dropped. Fresh-volume slot 370; live: psql -f BEFORE the new workbench
 -- and openbrain-mcp images and the refinery restart. Revert: revert-idea-functions.sql.
 -- ============================================================
+
+-- ── a private revision plane (operator decision 2026-11-02: ideas are completely user isolated) ──────────
+-- Slot 200 shows an app role a revision only through its corpus thought (`thought_id IS NOT NULL AND
+-- ob_thought_visible(...)`). An idea's text must not be in the shared thought corpus, so a revision written by the idea
+-- functions carries NO thought and names its plane instead: private_owner = the idea's owner, written only by the
+-- SECURITY DEFINER functions here (the guard below refuses an app role that sets or changes it). The read policy
+-- requires that name AND that it is the idea's owner today: an orphaned corpus revision (its thought deleted, ON DELETE
+-- SET NULL) has no private_owner and stays invisible, exactly as slot 200 decided; the all-NULL row is denied. It is
+-- FOR SELECT only - it widens no write (INSERT / UPDATE keep slot 200's WITH CHECK). Owner scoping per user is the
+-- workbench's (every read filters ideas.owner_sub = the seam's subject).
+ALTER TABLE public.idea_revisions ADD COLUMN IF NOT EXISTS private_owner TEXT;
+DROP POLICY IF EXISTS idea_revisions_owner_private ON public.idea_revisions;
+CREATE POLICY idea_revisions_owner_private ON public.idea_revisions
+  AS PERMISSIVE FOR SELECT TO service_role
+  USING (private_owner IS NOT NULL AND thought_id IS NULL
+         AND EXISTS (SELECT 1 FROM public.ideas i WHERE i.id = idea_revisions.idea_id AND i.owner_sub = idea_revisions.private_owner));
+COMMENT ON POLICY idea_revisions_owner_private ON public.idea_revisions IS
+  'rw-p8a4-ideas (operator 2026-11-02, ideas are completely user isolated): a revision the idea functions wrote names '
+  'its plane (private_owner = the idea''s owner) instead of a corpus thought. Not an absence arm: private_owner IS NOT NULL '
+  'is required, an orphaned corpus revision has none, and the all-NULL row is denied. SELECT only.';
 
 -- ── who may write the guarded columns: a function owned by the table's owner, or the owner itself ──
 CREATE OR REPLACE FUNCTION public.ideas_door_open()
@@ -89,14 +113,27 @@ LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-    IF NEW.revision > 1 AND NOT public.ideas_door_open() THEN
-        RAISE EXCEPTION 'idea_revisions: a revision after the first is written only by idea_edit()' USING ERRCODE = '42501';
+    IF public.ideas_door_open() THEN RETURN NEW; END IF;
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.revision > 1 THEN
+            RAISE EXCEPTION 'idea_revisions: a revision after the first is written only by idea_edit()' USING ERRCODE = '42501';
+        END IF;
+        IF NEW.private_owner IS NOT NULL THEN
+            RAISE EXCEPTION 'idea_revisions: a private revision is written only by idea_capture() / idea_edit()' USING ERRCODE = '42501';
+        END IF;
+        RETURN NEW;
+    END IF;
+    -- review RV2: a revision is history - an app role rewrites nothing of it in place (summary, content_hash,
+    -- thought_id, idea_id, revision, metadata, created_at); only research_job_id, the run that researched it, stays
+    -- writable (research_idea_queue / idea_research_now stamp it)
+    IF (to_jsonb(NEW) - 'research_job_id') IS DISTINCT FROM (to_jsonb(OLD) - 'research_job_id') THEN
+        RAISE EXCEPTION 'idea_revisions: a revision is not rewritten (only its research_job_id is stamped)' USING ERRCODE = '42501';
     END IF;
     RETURN NEW;
 END;
 $$;
 DROP TRIGGER IF EXISTS trg_idea_revisions_write_guard ON public.idea_revisions;
-CREATE TRIGGER trg_idea_revisions_write_guard BEFORE INSERT ON public.idea_revisions
+CREATE TRIGGER trg_idea_revisions_write_guard BEFORE INSERT OR UPDATE ON public.idea_revisions
     FOR EACH ROW EXECUTE FUNCTION public.trg_idea_revisions_write_guard();
 
 -- ── edit ────────────────────────────────────────────────────────────────
@@ -124,13 +161,39 @@ BEGIN
         RETURN jsonb_build_object('outcome', 'unchanged', 'revision', v.current_revision, 'title', v.title);
     END IF;
     v_rev := v.current_revision + 1;
-    INSERT INTO public.idea_revisions (idea_id, revision, summary, thought_id, content_hash, metadata)
-    VALUES (p_idea, v_rev, v_body, p_thought_id, v_hash, jsonb_build_object('edited_by', coalesce(p_actor, 'system:outside-seam')));
+    -- no corpus thought = a private revision of its owner (both doors pass none: ideas are user isolated)
+    INSERT INTO public.idea_revisions (idea_id, revision, summary, thought_id, content_hash, metadata, private_owner)
+    VALUES (p_idea, v_rev, v_body, p_thought_id, v_hash, jsonb_build_object('edited_by', coalesce(p_actor, 'system:outside-seam')),
+            CASE WHEN p_thought_id IS NULL THEN p_owner END);
     UPDATE public.ideas
        SET summary = v_body, title = v_title, current_revision = v_rev, status = 'dirty',
            embedding = coalesce(p_embedding::vector, embedding), actor_sub = coalesce(p_actor, actor_sub)
      WHERE id = p_idea;
     RETURN jsonb_build_object('outcome', 'changed', 'revision', v_rev, 'title', v_title);
+END;
+$$;
+
+-- ── capture (capture_idea's write) ──────────────────────────────────────
+CREATE OR REPLACE FUNCTION public.idea_capture(
+    p_owner TEXT, p_actor TEXT, p_title TEXT, p_summary TEXT, p_domain TEXT DEFAULT NULL, p_embedding TEXT DEFAULT NULL)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_id UUID; v_body TEXT := btrim(coalesce(p_summary, ''));
+BEGIN
+    IF v_body = '' THEN RAISE EXCEPTION 'idea text is required' USING ERRCODE = '22023'; END IF;
+    IF coalesce(btrim(p_owner), '') = '' THEN RAISE EXCEPTION 'an idea has an owner' USING ERRCODE = '22023'; END IF;
+    INSERT INTO public.ideas (title, summary, domain, embedding, status, current_revision, owner_sub, actor_sub)
+    VALUES (left(coalesce(nullif(btrim(p_title), ''), split_part(v_body, E'\n', 1)), 120), v_body, coalesce(p_domain, 'ai-stack'),
+            p_embedding::vector, 'new', 1, p_owner, coalesce(p_actor, 'system:outside-seam'))
+    RETURNING id INTO v_id;
+    -- the private revision 1 (the capture trigger queues its research, slots 260 / 300)
+    INSERT INTO public.idea_revisions (idea_id, revision, summary, content_hash, private_owner)
+    VALUES (v_id, 1, v_body, md5(lower(v_body)), p_owner);
+    RETURN v_id;
 END;
 $$;
 
@@ -314,6 +377,7 @@ UPDATE public.ideas i
 -- ── grants (service_role only, like slots 300 / 340) ────────────────────
 REVOKE ALL ON FUNCTION public.ideas_door_open() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.idea_edit(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.idea_capture(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.idea_research(UUID, TEXT, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.idea_promote(UUID, TEXT, TEXT, TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.idea_deliver_dossier(UUID, TEXT, TEXT, JSONB) FROM PUBLIC;
@@ -321,6 +385,7 @@ REVOKE ALL ON FUNCTION public.idea_resurface(UUID, DOUBLE PRECISION, INT) FROM P
 REVOKE ALL ON FUNCTION public.refinery_engage(UUID, TEXT, TEXT, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ideas_door_open() TO service_role;
 GRANT EXECUTE ON FUNCTION public.idea_edit(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, BIGINT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.idea_capture(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.idea_research(UUID, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.idea_promote(UUID, TEXT, TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.idea_deliver_dossier(UUID, TEXT, TEXT, JSONB) TO service_role;

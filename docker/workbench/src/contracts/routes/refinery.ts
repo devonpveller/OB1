@@ -44,7 +44,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
       if (blocksMetadataless(parseMetadataFilter(c.req.valid("query").metadata_filter))) {
         return c.json({ error: "not found in scope" }, 404);
       }
-      const r = await ideas.idea(deps.db, c.req.valid("param").id, (await identityOf(c)).sub);
+      const r = await ideas.idea(deps.db, c.req.valid("param").id, await identityOf(c)); // review RV1: the viewer, not just its subject
       if (!r) return c.json({ error: "no idea with this id" }, 404);
       return send(c, Idea, r);
     } catch (e) {
@@ -80,7 +80,7 @@ export function registerRefinery(app: ContractApp, deps: ContractDeps) {
       const b = c.req.valid("json");
       if (b.content_type) await requireRegistered(deps.registry, "content_types", b.content_type);
       const r = await ideas.addHeld(deps.db, c.req.valid("param").id, { ...b, by: b.by ?? authorOf(c) ?? undefined },
-        deps.chunk, deps.embed, { owner: (await identityOf(c)).sub }).catch((e) => {
+        deps.chunk, deps.embed, { owner: (await identityOf(c)).sub, viewer: await identityOf(c) }).catch((e) => {
           if (String((e as Error)?.message ?? "").startsWith("embedding")) return { embedFailed: String((e as Error).message) };
           throw e;
         });

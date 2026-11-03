@@ -94,13 +94,12 @@ async function call(method: string, path: string, body?: unknown, who: Record<st
 
 // a captured idea (what capture_idea writes: the row + revision 1, under its owner); the capture trigger queues research
 async function captured(owner: string, title: string, summary = `${title} statement`) {
-  const id = crypto.randomUUID();
-  await sql(`INSERT INTO public.ideas (id, title, summary, owner_sub, embedding)
-             VALUES ($1, $2, $3, $4, array_fill(0.01::real, ARRAY[1024])::vector)`, [id, title, summary, owner]);
-  // revision 1 carries its corpus thought, as capture_idea writes it (the memory plane shows the app role a revision by it)
-  const th = (await sql<{ id: string }>(`INSERT INTO public.thoughts (content, metadata, exposure) VALUES ($1, jsonb_build_object('type', 'idea', 'exposure', 'ops'), 'ops') RETURNING id::text AS id`, [summary]))[0].id;
-  await sql(`INSERT INTO public.idea_revisions (idea_id, revision, summary, content_hash, thought_id) VALUES ($1, 1, $2, md5(lower(btrim($2))), $3::bigint)`, [id, summary, th]);
-  return id;
+  // exactly what capture_idea now does: idea_capture() as the app role - the idea and its PRIVATE revision 1, no thought
+  const rows = await asApp<{ id: string }>(
+    `SELECT public.idea_capture($1, 'service:openbrain-mcp', $2, $3, NULL, $4)::text AS id`,
+    [owner, title, summary, `[${Array(1024).fill(0.01).join(",")}]`],
+  );
+  return rows[0].id;
 }
 
 // a user document carrying an idea, its refinery started (P2b)
@@ -175,7 +174,9 @@ t("I3: edit goes through idea_edit(); identical text is unchanged; an edit that 
   const rev = (await sql<{ research_job_id: string | null; thought_id: string | null }>(
     `SELECT research_job_id, thought_id::text AS thought_id FROM public.idea_revisions WHERE idea_id = $1 AND revision = 2`, [id]))[0];
   assertNotEquals(rev.research_job_id, null, "the revision is queued for research by the database");
-  assertNotEquals(rev.thought_id, null, "the revision carries the door's corpus thought (the memory plane reads it by that)");
+  // operator 2026-11-02 (ideas are completely user isolated): no corpus thought; the revision is its owner's private one
+  assertEquals(rev.thought_id, null, "no thought in the shared corpus");
+  assertEquals((await sql<{ p: string }>(`SELECT private_owner AS p FROM public.idea_revisions WHERE idea_id = $1 AND revision = 2`, [id]))[0].p, sub(A));
   // the bypasses, as the app role every service runs as
   assertEquals(await refusedAsApp(`UPDATE public.ideas SET summary = 'bypass' WHERE id = $1`, [id]), "42501");
   assertEquals(await refusedAsApp(`UPDATE public.ideas SET title = 'bypass' WHERE id = $1`, [id]), "42501");
@@ -437,6 +438,27 @@ t("I12: the guard: no app-role sequence promotes or forges the pointer (G4, G4b)
   assertEquals(await refusedAsApp(`UPDATE public.ideas SET metadata = jsonb_set(metadata, '{promoted,document_path}', '"documents/evil.md"') WHERE id = $1`, [g7]), "42501", "G7 rewrite");
   assertEquals(await refusedAsApp(`UPDATE public.ideas SET metadata = metadata - 'promoted' WHERE id = $1`, [g7]), "42501", "G7 drop");
   assertEquals((await ideaRow(g7)).metadata?.promoted?.document_path, s7.json.path);
+  // review RV2: a revision is history. On a corpus-shaped (legacy) revision - one the app role can see by its thought -
+  // its summary / content_hash / thought_id are not rewritten in place; its research stamp (research_job_id) is.
+  const legacy = await captured(sub(A), `legacy ${rnd()}`, "legacy statement");
+  const th = (await sql<{ id: string }>(`INSERT INTO public.thoughts (content, metadata, exposure) VALUES ('legacy idea', '{"type":"idea","exposure":"ops"}'::jsonb, 'ops') RETURNING id::text AS id`))[0].id;
+  await sql(`UPDATE public.idea_revisions SET thought_id = $2::bigint, private_owner = NULL WHERE idea_id = $1 AND revision = 1`, [legacy, th]);
+  // the lab chain grants the app role no UPDATE on idea_revisions; LIVE it holds one (the review's has_table_privilege
+  // check) - reproduce the live grant for these probes so the GUARD is what answers, then take it back
+  await sql(`GRANT UPDATE ON public.idea_revisions TO ${APP_ROLE}`);
+  const rv2 = async (label: string, stmt: string, want: string) => {
+    const got = await refusedAsApp(stmt, [legacy]);
+    assertEquals(got, want, `${label}: got ${JSON.stringify(got)}`);
+  };
+  await rv2("RV2 summary", `UPDATE public.idea_revisions SET summary = 'rewritten history' WHERE idea_id = $1 AND revision = 1`, "42501");
+  await rv2("RV2 content_hash", `UPDATE public.idea_revisions SET content_hash = 'x' WHERE idea_id = $1 AND revision = 1`, "42501");
+  await rv2("RV2 the research stamp", `UPDATE public.idea_revisions SET research_job_id = 'rv2-stamp' WHERE idea_id = $1 AND revision = 1`, "");
+  assertEquals((await sql<{ j: string; s: string }>(`SELECT research_job_id AS j, summary AS s FROM public.idea_revisions WHERE idea_id = $1 AND revision = 1`, [legacy]))[0],
+    { j: "rv2-stamp", s: "legacy statement" }, "the stamp landed; the history did not change");
+  // a PRIVATE revision is not even visible to an app role's UPDATE (no write policy names its plane): nothing changes
+  await refusedAsApp(`UPDATE public.idea_revisions SET summary = 'rewritten history' WHERE idea_id = $1 AND revision = 1`, [g4]);
+  assertEquals((await sql<{ s: string }>(`SELECT summary AS s FROM public.idea_revisions WHERE idea_id = $1 AND revision = 1`, [g4]))[0].s.includes("rewritten"), false);
+  await sql(`REVOKE UPDATE ON public.idea_revisions FROM ${APP_ROLE}`);
   // the refinery's own lifecycle writes still work (status, the research flag)
   assertEquals(await refusedAsApp(`UPDATE public.ideas SET metadata = metadata || '{"research_now": true}'::jsonb, status = 'researched' WHERE id = $1`, [g4]), "");
 });
@@ -471,3 +493,65 @@ t("I13: create document under concurrent requests (tester S): exactly one docume
     assertEquals(await seededFiles(id), [won[0].json.path], `S${n}: one vault file seeded from the idea`);
   }
 });
+
+t("I14 (review RV1): found_via lists only the viewer's own admissions - another user's research admitting through a shared source in A's refinery is withheld", async () => {
+  const a = await docRefinery(A, `via ${rnd()}`);
+  const b = await docRefinery(B, `via-b ${rnd()}`);
+  const S = crypto.randomUUID();
+  await sql(`INSERT INTO public.sources (id, url, title, content) VALUES ($1, $2, 'shared S', 's')`, [S, `https://example.org/shared/${S}`]);
+  await sql(`INSERT INTO public.refinery_user_sources (refinery_id, source_id, status) VALUES ($1, $2, 'active')`, [a.id, S]);
+  const jobOf = async (who: Record<string, string>, path: string) => {
+    const r = await call("POST", "/workbench/documents/research", { path, query: `via q ${rnd()}`, kind: "research" }, who);
+    assertEquals(r.status, 202, r.text);
+    return r.json.job_id as string;
+  };
+  const jobA = await jobOf(A, a.path), jobB = await jobOf(B, b.path);
+  const trail = async (job: string, url: string, kind: string, extra: { found_via?: string; source_id?: string }) =>
+    (await sql<{ id: string }>(
+      `INSERT INTO public.research_admission_trail (job_id, url, url_key, kind, found_via, source_id) VALUES ($1, $2, public.contract_url_key($2), $3, $4, $5) RETURNING id::text AS id`,
+      [job, url, kind, extra.found_via ?? null, extra.source_id ?? null]))[0].id;
+  // B's tree: a lead on S, X admitted through it, and Y admitted found_via S directly
+  const leadB = await trail(jobB, `https://example.org/shared/${S}`, "lead", { source_id: S });
+  await trail(jobB, "https://example.org/b-admits-x", "admitted", { found_via: leadB });
+  await trail(jobB, "https://example.org/b-admits-y", "admitted", { found_via: S });
+  // A's own admission through S (the positive control) and an admission whose job row is gone (fail closed)
+  await trail(jobA, "https://example.org/a-admits-z", "admitted", { found_via: S });
+  await trail(crypto.randomUUID(), "https://example.org/orphan-job", "admitted", { found_via: S });
+  const r = await idea(a.id);
+  assertEquals(r.status, 200, r.text);
+  const us = (r.json.refinery.user_sources as any[]).find((u) => u.source_id === S);
+  assertEquals(us.found_via.map((v: any) => v.url), ["https://example.org/a-admits-z"], "A sees only A's own admission");
+  assert(!r.text.includes("b-admits") && !r.text.includes("orphan-job"), "nothing of B's tree (or of a vanished job) in A's refinery view");
+});
+
+t("I15 (operator 2026-11-02, ideas are completely user isolated): A's capture, edit and dossier reach no shared corpus search - yet A still reads every revision", async () => {
+  const mk = { cap: `CaptureSecret${rnd()}`, edit: `EditSecret${rnd()}`, dossier: `DossierSecret${rnd()}`, title: `IdeaTitle${rnd()}` };
+  const id = await captured(sub(A), mk.title, `the idea ${mk.cap}`);
+  assertEquals((await call("POST", `/workbench/ideas/${id}/edit`, { summary: `the idea, sharper ${mk.edit}` })).status, 200);
+  // the MCP tool's own door (update_idea): idea_edit() with no thought, as the app role
+  const mcp = await asApp<{ o: any }>(`SELECT public.idea_edit($1::uuid, $2, 'service:openbrain-mcp', $3, NULL, NULL, NULL) AS o`, [id, sub(A), `the idea, via mcp ${mk.edit}`]);
+  assertEquals(mcp[0].o.outcome, "changed");
+  assertEquals((await asApp<{ o: any }>(`SELECT public.idea_deliver_dossier($1::uuid, $2, $3, '{}'::jsonb) AS o`, [id, crypto.randomUUID(), `dossier ${mk.dossier}`]))[0].o.outcome, "delivered");
+  for (const m of Object.values(mk)) {
+    // the shared thought corpus (search_thoughts / search / fetch read it): not even as the superuser - the text is not there
+    assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.thoughts WHERE content LIKE '%' || $1 || '%' OR metadata::text LIKE '%' || $1 || '%'`, [m]))[0].n, 0, `thoughts carry ${m}`);
+    // the generic MCP lane's database role sees no thought of it either
+    assertEquals((await asApp<{ n: number }>(`SELECT count(*)::int AS n FROM public.thoughts WHERE content LIKE '%' || $1 || '%'`, [m]))[0].n, 0, `app-role thoughts carry ${m}`);
+    // nor any shared knowledge table a search reads (sources, their chunks)
+    assertEquals((await sql<{ n: number }>(`SELECT ((SELECT count(*) FROM public.sources WHERE content LIKE '%' || $1 || '%' OR title LIKE '%' || $1 || '%')
+                                              + (SELECT count(*) FROM public.source_chunks WHERE content LIKE '%' || $1 || '%'))::int AS n`, [m]))[0].n, 0, `sources carry ${m}`);
+  }
+  // user B's search of the shared knowledge (the contract search) finds nothing of A's idea
+  for (const m of [mk.cap, mk.edit, mk.title]) {
+    const r = await call("GET", `/workbench/contract/search?q=${encodeURIComponent(m)}&kinds=page,claim,source`, undefined, B);
+    assertEquals(r.status, 200, r.text);
+    assert(!JSON.stringify(r.json.results ?? []).includes(m), `B's search results carry ${m}`); // the response echoes the query itself
+  }
+  // A, through the workbench (the app role), still reads all three revisions - the private plane, not a thought
+  const r = await idea(id);
+  assertEquals(r.json.revisions.map((v: any) => v.revision), [1, 2, 3]);
+  assert(r.text.includes(mk.cap) && r.text.includes(mk.edit));
+  // an app role cannot write a private-plane revision itself (only the functions name the plane)
+  assertEquals(await refusedAsApp(`INSERT INTO public.idea_revisions (idea_id, revision, summary, private_owner) VALUES ($1, 1, 'forged', $2)`, [crypto.randomUUID(), sub(A)]), "42501");
+});
+

@@ -129,7 +129,7 @@ async function refineryOfDocument(db: Db, rel: string): Promise<string> {
 export async function addUserSource(deps: RefineryDeps, refineryId: string, input: HeldInput, who: Identity) {
   const exists = (await deps.db.query(`SELECT 1 FROM public.ideas WHERE id = $1 AND owner_sub = $2`, [refineryId, who.sub])).length;
   if (!exists) throw new DocError("no such refinery (the universal + adds to an existing refinery only)", 404);
-  return await addHeld(deps.db, refineryId, { ...input, by: who.name }, deps.chunk, deps.embed, { owner: who.sub });
+  return await addHeld(deps.db, refineryId, { ...input, by: who.name }, deps.chunk, deps.embed, { owner: who.sub, viewer: who });
 }
 
 // The contextual "+" on a document: the source is held in the document's refinery. A re-add that
@@ -138,7 +138,7 @@ export async function addUserSource(deps: RefineryDeps, refineryId: string, inpu
 export async function addFromDocument(deps: RefineryDeps, path: string, input: HeldInput, who: Identity) {
   const rel = await ownedPath(deps.db, path, who);
   const refineryId = await refineryOfDocument(deps.db, rel);
-  const added = await addHeld(deps.db, refineryId, { ...input, by: who.name }, deps.chunk, deps.embed, { owner: who.sub }) as
+  const added = await addHeld(deps.db, refineryId, { ...input, by: who.name }, deps.chunk, deps.embed, { owner: who.sub, viewer: who }) as
     Awaited<ReturnType<typeof addHeld>> & { revised?: boolean; deduped?: boolean };
   const pinned = added.revised ? await repinLinkRecord(deps, rel, added.source.source_id, who) : null;
   if (pinned) await relist(deps, rel, who);
@@ -286,7 +286,7 @@ export async function replaceUserSource(
   }
   if (!input.content?.trim()) throw new DocError("an uploaded file is replaced by the user: give the new contents", 400);
   const added = await addHeld(deps.db, h.refinery_id, { title: input.title || h.title, content: input.content, by: who.name },
-    deps.chunk, deps.embed, { dedupe: false, owner: who.sub }); // a replacement by hand is a new source, not a re-add
+    deps.chunk, deps.embed, { dedupe: false, owner: who.sub, viewer: who }); // a replacement by hand is a new source, not a re-add
   return { kind: "file", source_id: added.source.source_id, replaces: h.id, revision: added.source.revision, new_pin_id: true };
 }
 

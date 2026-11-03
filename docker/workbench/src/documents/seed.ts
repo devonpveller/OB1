@@ -42,7 +42,7 @@ const esc = (s: string) => s.replace(/[\]|\n]/g, " ").trim();
 // write of the seed (the document's listing, its references, the tether, the promotion) is in that transaction; if it
 // fails, the vault file it wrote is removed again, so no orphan document is left.
 export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, who: Identity, opts: { folder?: string } = {}) {
-  if (!(await readIdea(db, ideaId, who.sub))) throw new DocError("no idea with this id", 404); // another user's idea answers like none
+  if (!(await readIdea(db, ideaId, who))) throw new DocError("no idea with this id", 404); // another user's idea answers like none
   const made: { path?: string } = {};
   try {
     return await db.tx(async (t) => {
@@ -61,7 +61,7 @@ export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, 
 async function seedUnderClaim(
   db: Db, reg: RegistryReader, ideaId: string, who: Identity, opts: { folder?: string }, made: { path?: string },
 ) {
-  const idea = await readIdea(db, ideaId, who.sub); // re-read under the claim
+  const idea = await readIdea(db, ideaId, who); // re-read under the claim
   if (!idea) throw new DocError("no idea with this id", 404);
   if (idea.refinery.members.document) {
     throw new DocError("this refinery already has its document - go to document", 409, { path: idea.refinery.members.document.path });

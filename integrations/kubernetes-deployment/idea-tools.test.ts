@@ -4,7 +4,7 @@
 // Pinned: every write is ONE call of the owner-checked SQL function, the owner is this server's configured subject
 // (never a tool argument), nothing writes `ideas` / `idea_revisions` directly, and another owner's idea (the
 // function's not_found) fails the tool and leaves no thought behind.
-import { ideaOwner, promoteIdea, researchIdea, updateIdea, type IdeaClient } from "./idea-tools.ts";
+import { captureIdea, ideaOwner, promoteIdea, researchIdea, updateIdea, type IdeaClient } from "./idea-tools.ts";
 
 function assert(c: unknown, m = "assertion failed"): asserts c {
   if (!c) throw new Error(m);
@@ -20,6 +20,7 @@ function fake(outcome: Record<string, unknown>) {
     queryObject: <T>(sql: string, args: unknown[] = []) => {
       log.push({ sql, args });
       if (/INSERT INTO thoughts/.test(sql)) return Promise.resolve({ rows: [{ id: 42n }] as unknown as T[] });
+      if (/SELECT current_revision/.test(sql)) return Promise.resolve({ rows: [{ r: 2 }] as unknown as T[] });
       return Promise.resolve({ rows: [{ o: outcome }] as unknown as T[] });
     },
     queryArray: (sql: string, args: unknown[] = []) => {
@@ -31,7 +32,7 @@ function fake(outcome: Record<string, unknown>) {
 }
 
 const ID = "a1000000-0000-4000-8000-0000000000a1";
-const EDIT = { idea_id: ID, idea: " refined ", embedding: "[0.1]", exposure: "ops", channel: "#ideas" };
+const EDIT = { idea_id: ID, idea: " refined ", embedding: "[0.1]", channel: "#ideas" };
 const directWrites = (log: { sql: string }[]) => log.filter((l) => /(INSERT INTO|UPDATE)\s+(public\.)?(ideas|idea_revisions)\b/.test(l.sql));
 
 Deno.test("ideaOwner: the configured default subject, else the seam's placeholder - never a tool argument", () => {
@@ -40,38 +41,36 @@ Deno.test("ideaOwner: the configured default subject, else the seam's placeholde
   eq(ideaOwner((k) => (k === "WORKSPACE_DEFAULT_SUB" ? " sub-123 " : undefined)), "sub-123");
 });
 
-Deno.test("update_idea: one idea_edit() call with the server's owner, the thought in the same transaction; no direct write", async () => {
+Deno.test("update_idea: one idea_edit() call with the server's owner and NO corpus thought (ideas are user isolated); no direct write", async () => {
   const { client, log } = fake({ outcome: "changed", revision: 3, title: "T" });
   const r = await updateIdea(client, "owner-a", EDIT);
   assert(!r.isError && /revision 3/.test(r.text) && /room/.test(r.text), r.text);
   const calls = log.filter((l) => /idea_edit\(/.test(l.sql));
   eq(calls.length, 1, "one function call");
   eq(calls[0].args.slice(0, 4), [ID, "owner-a", "service:openbrain-mcp", "refined"], "owner, actor, text");
-  eq(String(calls[0].args[6]), "42", "the thought row is passed to the revision");
-  eq(log.map((l) => l.sql).filter((s) => /^(BEGIN|COMMIT|ROLLBACK)$/.test(s)), ["BEGIN", "COMMIT"]);
+  assert(/\$6, NULL\)/.test(calls[0].sql), "no thought passed: the revision is private");
+  eq(log.filter((l) => /thoughts/.test(l.sql)).length, 0, "nothing touches the shared thought corpus");
   eq(directWrites(log).length, 0, "no direct write of ideas / idea_revisions");
 });
 
-Deno.test("update_idea on ANOTHER owner's idea: the function says not_found, the tool fails, the thought is rolled back", async () => {
-  const { client, log } = fake({ outcome: "not_found" });
+Deno.test("update_idea on ANOTHER owner's idea: the function says not_found and the tool fails; identical text and archived say so", async () => {
   let err = "";
-  try {
-    await updateIdea(client, "owner-a", EDIT);
-  } catch (e) {
-    err = (e as Error).message;
-  }
+  try { await updateIdea(fake({ outcome: "not_found" }).client, "owner-a", EDIT); } catch (e) { err = (e as Error).message; }
   eq(err, `no idea with id ${ID}`);
-  assert(log.some((l) => l.sql === "ROLLBACK") && !log.some((l) => l.sql === "COMMIT"), "nothing committed");
-  eq(directWrites(log).length, 0);
+  eq(!!(await updateIdea(fake({ outcome: "unchanged" }).client, "owner-a", EDIT)).isError, false, "unchanged");
+  eq(!!(await updateIdea(fake({ outcome: "archived" }).client, "owner-a", EDIT)).isError, true, "archived");
 });
 
-Deno.test("update_idea: identical text and an archived refinery commit nothing", async () => {
-  for (const [o, err] of [["unchanged", false], ["archived", true]] as const) {
-    const { client, log } = fake({ outcome: o });
-    const r = await updateIdea(client, "owner-a", EDIT);
-    eq(!!r.isError, err, o);
-    assert(!log.some((l) => l.sql === "COMMIT"), `${o}: nothing committed`);
-  }
+Deno.test("capture_idea: one idea_capture() call with the server's owner - no thought, no direct write", async () => {
+  const { client, log } = fake({});
+  (client as unknown as { queryObject: unknown }).queryObject = <T>(sql: string, args: unknown[] = []) => {
+    log.push({ sql, args });
+    return Promise.resolve({ rows: [{ id: "new-idea" }] as unknown as T[] });
+  };
+  eq(await captureIdea(client, "owner-a", { title: "T", idea: "an idea", domain: null, embedding: "[0.1]" }), "new-idea");
+  eq(log.length, 1);
+  assert(/public\.idea_capture\(/.test(log[0].sql));
+  eq(log[0].args.slice(0, 4), ["owner-a", "service:openbrain-mcp", "T", "an idea"]);
 });
 
 Deno.test("research_idea: one idea_research() call with the server's owner; another owner's idea fails; no flag write", async () => {
@@ -112,7 +111,14 @@ Deno.test("the tools in index.ts call these functions - no idea write is left in
   }
   // capture_idea and find_idea read and file ideas for the server's owner only
   const cap = src.slice(src.indexOf(`"capture_idea",`), src.indexOf(`"update_idea",`));
-  assert(/owner_sub/.test(cap), "capture_idea files the idea under the owner and checks duplicates among the owner's ideas");
+  assert(/owner_sub/.test(cap), "capture_idea checks duplicates among the owner's ideas");
+  assert(/captureIdea\(/.test(cap), "capture_idea writes through idea_capture()");
+  // operator 2026-11-02: no idea tool writes the shared thought corpus
+  for (const tool of ["capture_idea", "update_idea"]) {
+    const at = src.indexOf(`"${tool}",`);
+    const body = src.slice(at, src.indexOf("server.registerTool(", at));
+    assert(!/INSERT INTO thoughts|INSERT INTO idea_revisions|INSERT INTO ideas/.test(body), `${tool} writes a thought, revision or idea inline`);
+  }
   const find = src.slice(src.indexOf(`"find_idea",`), src.indexOf(`"research_idea",`));
   assert(/owner_sub = \$/.test(find), "find_idea lists the owner's ideas only");
 });
