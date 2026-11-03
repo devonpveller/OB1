@@ -356,13 +356,15 @@ BEGIN
     -- round 4 (tester attempt 3): "minted" is decided from the DATA, not the stored curator label - a resend after the
     -- first attempt committed stores 'explicit', the filed-event recovery stores no decision at all, and both threads
     -- were minted by the first attempt. A thread counts as EXISTING only when it was created before every moved idea
-    -- job tied to it started (its job's curator thread_id, or the job of a moved report linked into it); anything the
-    -- timing cannot prove - a tied job with no time, a link with no job - is treated as minted (renamed: the
-    -- conservative choice). A 'new' label is minted whatever the times say.
-    CREATE TEMP TABLE _ri_threads ON COMMIT DROP AS
-    SELECT t.id,
-           bool_or(x.decision = 'new' OR x.job_id IS NULL OR j.id IS NULL
-                   OR coalesce(j.started_at, j.created_at) IS NULL OR t.created_at >= coalesce(j.started_at, j.created_at)) AS minted
+    -- job tied to it was CREATED (its job's curator thread_id, or the job of a moved report linked into it). Round 5
+    -- (tester attempt 4): not started_at - the boot recovery and the model-down requeue reset started_at and re-run
+    -- the job, so a thread the first run minted predates the re-run's start. created_at is written only by the job's
+    -- INSERT (the column default; no UPDATE, trigger or re-insert writes it - checked 2026-11-03), so no re-run moves
+    -- it. Anything the timing cannot prove - a link with no job - is treated as minted (renamed: the conservative
+    -- choice). A 'new' label is minted whatever the times say.
+    -- every (thread, moved job) tie - read by the classification below AND by the fail-closed check after it
+    CREATE TEMP TABLE _ri_ties ON COMMIT DROP AS
+    SELECT t.id AS thread_id, t.created_at AS thread_created, x.job_id, j.created_at AS job_created, x.decision
       FROM (SELECT j.result -> 'curator' ->> 'thread_id' AS tid, j.id AS job_id, j.result -> 'curator' ->> 'thread_decision' AS decision
               FROM public.research_jobs j
              WHERE j.id IN (SELECT l.job_id FROM _ri_links l WHERE l.idea_hit AND l.job_id IS NOT NULL AND l.source_id = ANY(v_ids))
@@ -371,8 +373,11 @@ BEGIN
               JOIN _ri_move m ON m.source_id = a.source_id
              WHERE a.batch = v_batch AND to_regclass(a.tbl) = 'public.thread_sources'::regclass) x
       JOIN public.threads t ON t.id::text = x.tid
-      LEFT JOIN public.research_jobs j ON j.id = x.job_id
-     GROUP BY t.id;
+      LEFT JOIN public.research_jobs j ON j.id = x.job_id;
+    CREATE TEMP TABLE _ri_threads ON COMMIT DROP AS
+    SELECT x.thread_id AS id,
+           bool_or(x.decision = 'new' OR x.job_id IS NULL OR x.job_created IS NULL OR x.thread_created >= x.job_created) AS minted
+      FROM _ri_ties x GROUP BY x.thread_id;
     INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
     SELECT v_batch, v_ids[1], 'public.threads', 'id', 't', to_jsonb(t) || jsonb_build_object('_minted', rt.minted)
       FROM _ri_threads rt JOIN public.threads t ON t.id = rt.id;
@@ -401,16 +406,18 @@ BEGIN
      WHERE a.batch = v_batch AND a.action = 'b' AND (a.row_data ->> 'id') = s.id::text;
     PERFORM set_config('session_replication_role', 'origin', true);
     -- fail closed, over EVERY affected thread (round 4): each is either renamed (minted) or proven older than every
-    -- moved job tied to it (so its name and slug cannot come from a report); none keeps its archived description or an
+    -- moved job tied to it - by the job's created_at, the same fact the classification reads (round 5) - so its name
+    -- and slug cannot come from a report; none keeps its archived description or an
     -- embedding; a minted one keeps neither its old name nor its old slug; and no shared source is still labelled with
     -- a minted thread's old name
     SELECT count(*) INTO v_n FROM public.threads t JOIN public.research_report_isolation_archive a
         ON a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'id') = t.id::text
      WHERE ((a.row_data ->> '_minted')::boolean AND (t.name = a.row_data ->> 'name' OR t.slug IS NOT DISTINCT FROM NULLIF(a.row_data ->> 'slug', '') AND a.row_data ->> 'slug' IS NOT NULL))
         OR (NOT (a.row_data ->> '_minted')::boolean AND EXISTS (
-              SELECT 1 FROM public.research_jobs j
-               WHERE j.id IN (SELECT m.job_id FROM _ri_move m) AND j.result -> 'curator' ->> 'thread_id' = t.id::text
-                 AND (coalesce(j.started_at, j.created_at) IS NULL OR t.created_at >= coalesce(j.started_at, j.created_at))))
+              SELECT 1 FROM _ri_ties x
+               WHERE x.thread_id = t.id
+                 AND (x.decision = 'new' OR x.job_id IS NULL OR x.job_created IS NULL
+                      OR (a.row_data ->> 'created_at')::timestamptz >= x.job_created)))
         OR (coalesce(a.row_data ->> 'description', '') <> '' AND t.description IS NOT DISTINCT FROM a.row_data ->> 'description')
         OR t.embedding IS NOT NULL;
     v_n := v_n + (SELECT count(*) FROM public.sources s JOIN public.research_report_isolation_archive a

@@ -19,6 +19,8 @@ DECLARE
     v_thread UUID; v_sess UUID; v_c1 UUID; v_c2 UUID; v_c3 UUID; v_e BIGINT; v_tnew UUID; v_tlink UUID;
     v_i6 UUID; v_i7 UUID; v_j6 UUID; v_j7 UUID; v_s6 UUID := gen_random_uuid(); v_s7 UUID := gen_random_uuid(); v_w6 UUID := gen_random_uuid();
     v_ta UUID; v_tb UUID;
+    v_i8 UUID; v_i9 UUID; v_j8 UUID; v_j9 UUID; v_s8 UUID := gen_random_uuid(); v_s9 UUID := gen_random_uuid(); v_w8 UUID := gen_random_uuid();
+    v_tc UUID; v_td UUID;
 BEGIN
     v_i1 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea one', 'drill idea one statement', NULL, NULL);
     v_i2 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea two', 'drill idea two statement', NULL, NULL);
@@ -108,13 +110,38 @@ BEGIN
     UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_tb::text,
                                                              'persist', jsonb_build_object('synthesis_id', v_s7::text, 'sources_written', 0, 'session_id', NULL),
                                                              'recovered', jsonb_build_object('via', 'filed_event', 'attempt', 2, 'why', 'timeout'))) WHERE id = v_j7;
-    -- the times the move reads: every idea job started now; the two EXISTING threads were made a day before
+    -- round 5 (tester attempt 4): a job the boot recovery / the model-down requeue RE-RAN - created 3h ago, its first
+    -- run minted tC 2h ago, the re-run started 1h ago and its 'explicit' resend reused tC (tC); and the same job caught
+    -- mid-requeue, started_at reset to NULL (tD)
+    v_i8 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea eight', 'drill idea eight statement', NULL, NULL);
+    v_i9 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea nine', 'drill idea nine statement', NULL, NULL);
+    SELECT id INTO v_j8 FROM public.research_jobs WHERE refinery_id = v_i8 AND branch_kind = 'idea';
+    SELECT id INTO v_j9 FROM public.research_jobs WHERE refinery_id = v_i9 AND branch_kind = 'idea';
+    INSERT INTO public.sources (id, url, title, content, content_type, research_key, metadata) VALUES
+      (v_s8, NULL, 'Drill idea report eight', 'DrillReportEight text', 'research_synthesis', 'rk-drill-8', '{"claim":"DrillReportEight claim"}'),
+      (v_s9, NULL, 'Drill idea report nine', 'DrillReportNine text', 'research_synthesis', 'rk-drill-9', '{"claim":"DrillReportNine claim"}'),
+      (v_w8, 'https://example.org/drill-web-eight', 'drill web eight', 'drill web eight text', 'web_article', NULL, '{}');
+    INSERT INTO public.threads (name, status, slug, created_at) VALUES
+      ('MintedName DrillReportEight', 'active', 'mintedname-drillreporteight-' || left(v_s8::text, 8), now() - interval '2 hours') RETURNING id INTO v_tc;
+    INSERT INTO public.threads (name, status, created_at) VALUES ('MintedName DrillReportNine', 'active', now() - interval '2 hours') RETURNING id INTO v_td;
+    PERFORM public.link_source_to_thread(v_tc, v_s8, 'automatic', NULL, 'confirmed');
+    PERFORM public.link_source_to_thread(v_tc, v_w8, 'automatic', NULL, 'confirmed');
+    PERFORM public.link_source_to_thread(v_td, v_s9, 'automatic', NULL, 'confirmed');
+    UPDATE public.sources SET notebook = 'MintedName DrillReportEight' WHERE id = v_w8;
+    UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_tc::text, 'thread_decision', 'explicit',
+                                                             'persist', jsonb_build_object('synthesis_id', v_s8::text))),
+                                     created_at = now() - interval '3 hours', started_at = now() - interval '1 hour' WHERE id = v_j8;
+    UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_td::text, 'thread_decision', 'explicit',
+                                                             'persist', jsonb_build_object('synthesis_id', v_s9::text))),
+                                     created_at = now() - interval '3 hours', started_at = NULL WHERE id = v_j9;
+    -- the times the move reads: the other idea jobs created and started now; the two EXISTING threads (tE: a truly old
+    -- thread keeps its name) were made a day before
     UPDATE public.research_jobs SET started_at = now() WHERE id IN (v_j1, v_j2, v_j6, v_j7);
     UPDATE public.threads SET created_at = now() - interval '1 day' WHERE id IN (v_thread, v_tlink);
 
     INSERT INTO public._ri_drill (name, id) VALUES ('s1', v_s1), ('s2', v_s2), ('s3', v_s3), ('s4', v_s4), ('w', v_w), ('i1', v_i1), ('i2', v_i2),
       ('j1', v_j1), ('j2', v_j2), ('c1', v_c1), ('c2', v_c2), ('c3', v_c3), ('thread', v_thread), ('session', v_sess),
-      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8)), ('tnew', v_tnew::text), ('tlink', v_tlink::text), ('ta', v_ta::text), ('tb', v_tb::text)
+      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8)), ('tnew', v_tnew::text), ('tlink', v_tlink::text), ('ta', v_ta::text), ('tb', v_tb::text), ('tc', v_tc::text), ('td', v_td::text)
     ON CONFLICT (name) DO UPDATE SET id = EXCLUDED.id;
 END $$;
 COMMIT;

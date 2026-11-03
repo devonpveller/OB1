@@ -63,7 +63,9 @@ param(
   # rw-report-isolation round 3: the round-2 slot 390 the [5k] thread RED runs (it leaves the reports' text in the threads)
   [string]$ReportRoundTwoSha = '30408c6',
   # round 4: the round-3 slot 390 (it reads "minted" from the stored label only)
-  [string]$ReportRoundThreeSha = 'b125959'
+  [string]$ReportRoundThreeSha = 'b125959',
+  # round 5: the round-4 slot 390 (it reads "existing" from started_at, which a re-run resets)
+  [string]$ReportRoundFourSha = '1d33b53'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -448,9 +450,10 @@ try {
     $tRec = Q1 "INSERT INTO public.threads (name, status) VALUES ('Recovered notebook $mark', 'active') RETURNING id::text"
     $null = Q1 "SELECT public.link_source_to_thread('$tRec', '$src2', 'automatic', NULL, 'confirmed')"
     $null = Q1 "UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', '$tRec', 'persist', jsonb_build_object('synthesis_id', '$src2'), 'recovered', jsonb_build_object('via', 'filed_event', 'attempt', 2, 'why', 'timeout'))) WHERE id = '$job2'"
-    # the times the move reads, as a real run has them: the jobs started BEFORE their filing minted the threads (an hour
-    # ago here - the plant made the threads moments ago), the existing thread a day before that
-    $null = Q1 "UPDATE public.research_jobs SET started_at = now() - interval '1 hour' WHERE id IN ('$job', '$job2'); UPDATE public.threads SET created_at = now() - interval '1 day' WHERE id = '$tOld'"
+    # the times the move reads (round 5, the tester's tC): each job was created 3h ago, its FIRST run minted the thread 2h
+    # ago, and a re-run (boot recovery / model-down requeue) reset started_at to 1h ago - its 'explicit' resend and the
+    # recovered answer name the thread the first run minted; the existing thread (tE) is a day old and keeps its name
+    $null = Q1 "UPDATE public.research_jobs SET created_at = now() - interval '3 hours', started_at = now() - interval '1 hour' WHERE id IN ('$job', '$job2'); UPDATE public.threads SET created_at = now() - interval '2 hours' WHERE id IN ('$tNew', '$tRec'); UPDATE public.threads SET created_at = now() - interval '1 day' WHERE id = '$tOld'"
     $notebooks = {
       $r = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
         const n = async (h) => { const r = await fetch('http://$P-wb:8000/workbench/notebooks', { headers: { 'x-brain-key': '$key', ...h } }); const t = await r.text(); return r.status + ':' + (t.split('$mark').length - 1); };
@@ -499,6 +502,17 @@ try {
     $wlog += "round 3: notebooks $nbR3"
     Check ($nbR3 -match 'B 200:[1-9]' -and $nbR3 -match 'lane 200:[1-9]') "[5k] RED: round 3's 390 - the threads minted by an 'explicit' resend and a recovered answer keep their report-derived names for B and the lane ($nbR3)"
     $wlog += "[round 3 revert] $(& $run $r3r 'ri-r3-revert.sql')"
+    # round 5 RED: round 4's 390 - "existing" read from started_at: the re-run job's threads (minted 2h ago, the re-run
+    # started 1h ago) are classed existing and keep their report-derived names
+    $r4i = Join-Path $env:TEMP "$P-r4-init-390.sql"; $r4r = Join-Path $env:TEMP "$P-r4-revert-390.sql"
+    [System.IO.File]::WriteAllText($r4i, ((& git -C $ob1 show "${ReportRoundFourSha}:docker/init-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText($r4r, ((& git -C $ob1 show "${ReportRoundFourSha}:docker/revert-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $script:made.dirs += @($r4i, $r4r)
+    $wlog += "[round 4 init] $(& $run $r4i 'ri-r4-init.sql')"
+    $nbR4 = & $notebooks
+    $wlog += "round 4: notebooks $nbR4"
+    Check ($nbR4 -match 'B 200:[1-9]' -and $nbR4 -match 'lane 200:[1-9]') "[5k] RED: round 4's 390 - a re-run job's threads (created before the re-run's start) keep their report-derived names for B and the lane ($nbR4)"
+    $wlog += "[round 4 revert] $(& $run $r4r 'ri-r4-revert.sql')"
     # GREEN: this 390
     $wlog += "[init] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init.sql')"
     $afterInit = & $rows
@@ -511,6 +525,8 @@ try {
     $nbG = & $notebooks
     $wlog += "this 390: rows after init $afterInit, after the reconcile $afterRec; source rows $shared; search as B: $searchG; clean page in: $clean; notebooks: $nbG"
     Check ($nbG -match 'B 200:0' -and $nbG -match 'lane 200:0') "[5k] this 390: GET /workbench/notebooks gives B and the lane no thread text of the report ($nbG)"
+    $teName = Q1 "SELECT name FROM public.threads WHERE id = '$tOld'"
+    Check ($teName -eq "Shared notebook $wk") "[5k] this 390: the truly old thread (tE) keeps its name ($teName)"
     Check ($afterInit -eq '0' -and $afterRec -eq '0' -and $shared -eq '0' -and $searchG -match 'status 200 hits 0' -and $clean -eq '1') "[5k] this 390: the leaf and the citing page are withheld, the reconcile repair (files present) writes neither back, B's search finds nothing, a clean page goes in ($afterInit / $afterRec; $searchG)"
     $wlog += "[revert] $(& $run (Join-Path $dockerDir 'revert-report-isolation.sql') 'ri-rv2.sql')"
     $afterRv = & $rows; $nbRv = & $notebooks
