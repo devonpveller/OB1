@@ -48,8 +48,8 @@ const KEY_RX = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
 export function settingsRouter(deps: SettingsDeps) {
   const r = new Hono();
   r.use("*", async (c, next) => {
-    await next();
     c.header("cache-control", "no-store");
+    await next();
   });
 
   const refused = (c: Context, e: unknown) => {
