@@ -477,19 +477,22 @@ try {
   # rw-settings-store round 2 (review G2) [5n]: slot 400 applied to an ALREADY-RUNNING PostgREST (the live deploy's
   # `psql -f`): rpc/setting_get must answer without a PostgREST restart. The staged chain's own files are used, so
   # with -Red they are the base's (ee127cc: no NOTIFY -> the 404 stays). The revert first takes the function away;
-  # if the revert itself does not make PostgREST drop it, the lab sends the reload so the start state is "unknown".
+  # if the revert itself does not make PostgREST drop it from its cache (PGRST202), the lab sends the reload, so the
+# start state is the live one: a running PostgREST that has never seen setting_get.
   Write-Host '[5n] slot 400 applied to a running PostgREST: rpc/setting_get answers without a restart (NOTIFY pgrst)'
-  $rpc = { (Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://openbrain-rest/rest/v1/rpc/setting_get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({p_owner:'g2-probe',p_key:'refinery.dormancy_days'})}).then(r=>console.log('rpc',r.status)).catch(e=>console.log('rpc ERR',e.message))") -replace '[^0-9A-Za-z ]', '' }
+  $rpc = { (Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://openbrain-rest/rest/v1/rpc/setting_get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({p_owner:'g2-probe',p_key:'refinery.dormancy_days'})}).then(async r=>{const j=await r.json().catch(()=>({}));console.log('rpc',r.status,j&&j.code?j.code:'')}).catch(e=>console.log('rpc ERR',e.message))") -replace '[^0-9A-Za-z ]', '' }
   $waitRpc = { param($want) $last = ''; for ($i = 0; $i -lt 15; $i++) { $last = & $rpc; if ($last -match "rpc $want") { break }; Start-Sleep -Seconds 1 }; $last }
   $g2 = @("before: $(& $rpc)")
   $null = Dk cp (Join-Path $chainDir 'revert-settings.sql') "${db}:/tmp/g2-revert.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert.sql
-  $afterRevert = & $waitRpc 404
-  $revertReloads = $afterRevert -match 'rpc 404'
+  # PGRST202 = PostgREST's own cache no longer lists the function; a plain 404 with 42883 is the DATABASE refusing a
+  # function the cache still lists (no reload happened) - only the first is the live start state
+  $afterRevert = & $waitRpc '404 PGRST202'
+  $revertReloads = $afterRevert -match 'rpc 404 PGRST202'
   $g2 += "revert (exit $($script:rc)): $afterRevert (the revert's own reload: $revertReloads)"
   if (-not $revertReloads) {
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "NOTIFY pgrst, 'reload schema'"
-    $g2 += "lab NOTIFY: $(& $waitRpc 404)"
+    $g2 += "lab NOTIFY: $(& $waitRpc '404 PGRST202')"
   }
   $null = Dk cp (Join-Path $chainDir 'init-settings.sql') "${db}:/tmp/g2-init.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init.sql
@@ -498,7 +501,7 @@ try {
   $g2 += "init (exit $initExit), PostgREST NOT restarted: $afterInit"
   Save 'postgrest-reload.log' ($g2 -join "`n")
   foreach ($l in $g2) { Write-Host "    $l" }
-  if ($Red) { Check ($initExit -eq 0 -and $afterInit -match 'rpc 404') "RED: without the NOTIFY the running PostgREST still answers 404 after slot 400 is applied ($afterInit)" }
+  if ($Red) { Check ($initExit -eq 0 -and $afterInit -match 'rpc 404 PGRST202') "RED: without the NOTIFY the running PostgREST still answers 404 after slot 400 is applied ($afterInit)" }
   else {
     Check ($revertReloads) "[5n] the revert makes the running PostgREST drop rpc/setting_get at once ($afterRevert)"
     Check ($initExit -eq 0 -and $afterInit -match 'rpc 200') "[5n] init-settings.sql makes the running PostgREST serve rpc/setting_get at once, no restart ($afterInit)"
