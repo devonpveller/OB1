@@ -59,7 +59,9 @@ param(
   [switch]$IntakeOnly,
   [switch]$IdeasOnly,
   # rw-report-isolation round 2: the round-1 slot 390 the [5k] RED step runs (it deletes the leaf row, not the copies)
-  [string]$ReportRoundOneSha = '364eba0'
+  [string]$ReportRoundOneSha = '364eba0',
+  # rw-report-isolation round 3: the round-2 slot 390 the [5k] thread RED runs (it leaves the reports' text in the threads)
+  [string]$ReportRoundTwoSha = '30408c6'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -429,13 +431,25 @@ try {
     }
     Start-Sleep -Seconds 2
     $null = Q1 "INSERT INTO public.wiki_pages (slug, page_class, title, body, links) VALUES ('$leaf', 'source', 'Report $mark', 'the report $mark body', '[]'::jsonb), ('$ent', 'entity', 'Wiki Tool $wk', 'the tool page cites [[$leaf|Report $mark]] and says $mark', jsonb_build_array('$leaf'))"
+    # round 3: the thread the base's curator minted from the report (named and described from it, decision 'new'), and an
+    # existing thread whose description refreshThread rewrote from it (the report linked into it)
+    $tNew = Q1 "INSERT INTO public.threads (name, description, status) VALUES ('Notebook $mark', '$mark - the report''s first paragraph', 'active') RETURNING id::text"
+    $tOld = Q1 "INSERT INTO public.threads (name, description, status) VALUES ('Shared notebook $wk', 'refreshed from $mark', 'active') RETURNING id::text"
+    $null = Q1 "SELECT public.link_source_to_thread('$tNew', '$src', 'automatic', NULL, 'confirmed'); SELECT public.link_source_to_thread('$tOld', '$src', 'automatic', NULL, 'confirmed'); SELECT public.link_source_to_thread('$tOld', '11111111-1111-4111-8111-111111111111', 'automatic', NULL, 'confirmed')"
+    $null = Q1 "UPDATE public.research_jobs SET result = result || jsonb_build_object('curator', (result -> 'curator') || jsonb_build_object('thread_id', '$tNew', 'thread_decision', 'new')) WHERE id = '$job'"
+    $notebooks = {
+      $r = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
+        const n = async (h) => { const r = await fetch('http://$P-wb:8000/workbench/notebooks', { headers: { 'x-brain-key': '$key', ...h } }); const t = await r.text(); return r.status + ':' + (t.split('$mark').length - 1); };
+        console.log('B', await n({ 'X-Test-Sub': 'wiki-b-$wk' }), 'lane', await n({}));"
+      return ($r -replace "`r", '').Trim()
+    }
     $rows = { Q1 "SELECT count(*) FROM public.wiki_pages WHERE slug IN ('$leaf', '$ent')" }
     $reconcile = { $r = Dk exec "$P-viewer" node /viewer/lib/shared/reconcile-wiki-pages.mjs --repair --vault /wiki; return "exit $($script:rc): $((($r -split "`n") | Select-Object -Last 6) -join ' | ')" }
     $searchB = {
       $r = Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://$P-wb:8000/workbench/contract/search?q=$mark&kinds=page,claim,source', { headers: { 'x-brain-key': '$key', 'X-Test-Sub': 'wiki-b-$wk' } }).then(async (r) => { const j = await r.json(); console.log('status', r.status, 'hits', JSON.stringify(j.results ?? []).split('$mark').length - 1); }).catch((e) => console.log('error', String(e)))"
       return ($r -replace "`r", '').Trim()
     }
-    $wlog = @("planted: idea, job, source, 2 wiki rows + 2 vault files; rows=$(& $rows); search as B: $(& $searchB)")
+    $wlog = @("planted: idea, job, source, 2 wiki rows + 2 vault files, 2 threads; rows=$(& $rows); search as B: $(& $searchB); notebooks: $(& $notebooks)")
     # RED: round 1's 390 (the current rule and guard off first: the chain ran this tree's 390)
     $r1i = Join-Path $env:TEMP "$P-r1-init-390.sql"; $r1r = Join-Path $env:TEMP "$P-r1-revert-390.sql"
     [System.IO.File]::WriteAllText($r1i, ((& git -C $ob1 show "${ReportRoundOneSha}:docker/init-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
@@ -450,6 +464,16 @@ try {
     $wlog += "round 1: rows after init $afterR1, after the reconcile $afterR1Rec; search as B: $searchR1"
     Check ($afterR1Rec -ne '0' -and $searchR1 -match 'hits [1-9]') "[5k] RED: round 1's 390 - the viewer's reconcile writes the moved report's page back from its vault file and B's search finds it (rows $afterR1 -> $afterR1Rec; $searchR1)"
     $wlog += "[round 1 revert] $(& $run $r1r 'ri-r1-revert.sql')"
+    # round 3 RED: round 2's 390 - the wiki is withheld, but the threads keep the report's name and description
+    $r2i = Join-Path $env:TEMP "$P-r2-init-390.sql"; $r2r = Join-Path $env:TEMP "$P-r2-revert-390.sql"
+    [System.IO.File]::WriteAllText($r2i, ((& git -C $ob1 show "${ReportRoundTwoSha}:docker/init-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText($r2r, ((& git -C $ob1 show "${ReportRoundTwoSha}:docker/revert-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $script:made.dirs += @($r2i, $r2r)
+    $wlog += "[round 2 init] $(& $run $r2i 'ri-r2-init.sql')"
+    $nbR2 = & $notebooks
+    $wlog += "round 2: notebooks $nbR2"
+    Check ($nbR2 -match 'B 200:[1-9]' -and $nbR2 -match 'lane 200:[1-9]') "[5k] RED: round 2's 390 - GET /workbench/notebooks still gives B and the lane the threads the report named and described ($nbR2)"
+    $wlog += "[round 2 revert] $(& $run $r2r 'ri-r2-revert.sql')"
     # GREEN: this 390
     $wlog += "[init] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init.sql')"
     $afterInit = & $rows
@@ -459,13 +483,16 @@ try {
     $clean = Q1 "SELECT count(*) FROM public.wiki_pages WHERE slug = 'content/tool/wiki-clean-$wk'"
     $null = Q1 "DELETE FROM public.wiki_pages WHERE slug = 'content/tool/wiki-clean-$wk'"
     $shared = Q1 "SELECT count(*) FROM public.sources WHERE id = '$src'"
-    $wlog += "this 390: rows after init $afterInit, after the reconcile $afterRec; source rows $shared; search as B: $searchG; clean page in: $clean"
+    $nbG = & $notebooks
+    $wlog += "this 390: rows after init $afterInit, after the reconcile $afterRec; source rows $shared; search as B: $searchG; clean page in: $clean; notebooks: $nbG"
+    Check ($nbG -match 'B 200:0' -and $nbG -match 'lane 200:0') "[5k] this 390: GET /workbench/notebooks gives B and the lane no thread text of the report ($nbG)"
     Check ($afterInit -eq '0' -and $afterRec -eq '0' -and $shared -eq '0' -and $searchG -match 'status 200 hits 0' -and $clean -eq '1') "[5k] this 390: the leaf and the citing page are withheld, the reconcile repair (files present) writes neither back, B's search finds nothing, a clean page goes in ($afterInit / $afterRec; $searchG)"
     $wlog += "[revert] $(& $run (Join-Path $dockerDir 'revert-report-isolation.sql') 'ri-rv2.sql')"
-    $afterRv = & $rows
+    $afterRv = & $rows; $nbRv = & $notebooks
     $wlog += "[init again] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init2.sql')"
-    $afterAgain = & $rows
-    $wlog += "rows after the revert $afterRv, after init again $afterAgain"
+    $afterAgain = & $rows; $nbAgain = & $notebooks
+    $wlog += "rows after the revert $afterRv, after init again $afterAgain; notebooks after the revert $nbRv, after init again $nbAgain"
+    Check ($nbRv -match 'B 200:[1-9]' -and $nbAgain -match 'B 200:0' -and $nbAgain -match 'lane 200:0') "[5k] the revert gives the threads back ($nbRv), init again re-describes them ($nbAgain)"
     Check ($afterRv -eq '2' -and $afterAgain -eq '0') "[5k] the revert brings both pages back ($afterRv), init again withholds them ($afterAgain)"
     foreach ($f in $files) { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $vault ($f[0] + '.md')) }
     Save 'report-isolation-wiki.log' (($wlog -join "`n") -replace [regex]::Escape($key), '<key>')

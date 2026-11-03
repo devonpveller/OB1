@@ -40,12 +40,14 @@ const rnd = () => crypto.randomUUID().slice(0, 8);
 
 const VEC = (() => { const v = new Array(1024).fill(0); v[0] = 1; return v; })();
 let threadSeq = 0;
+let chatDown = false; // round 3: the chat model down - the resolver's fallback (createThread(hint, pkg.claim))
 function stubModels(runTag: string) {
   const ac = new AbortController();
   const srv = Deno.serve({ port: 0, hostname: "127.0.0.1", signal: ac.signal, onListen: () => {} }, async (req) => {
     const u = new URL(req.url);
     const body = await req.json().catch(() => ({}));
     if (u.pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: VEC }] });
+    if (chatDown) return new Response("model down", { status: 503 });
     const sys = String(body?.messages?.[0]?.content ?? "");
     const user = String(body?.messages?.[1]?.content ?? "");
     let out: Record<string, unknown> = {};
@@ -309,3 +311,27 @@ Deno.test({ name: "RI6 (round 2): the research service's job view (GET /research
     eq(JSON.stringify(view).includes(secret), !foreign, `RI6 ${who}: the report ${foreign ? "is withheld" : "is the owner's"}`);
   }
 } });
+
+Deno.test({ name: "RI7 (round 3): with the chat model DOWN the resolver's fallback mints a thread from the report's first paragraph - never for an idea run (unthreaded, no thread text); a non-idea run still gets it", ...opts, fn: async () => {
+  const tag = `RI7${rnd()}`; const L = await lab(tag);
+  // the stub embeds every text alike, so any embedded thread would be a distance-0 candidate the fallback attaches to:
+  // no candidate (this case runs last), so the fallback's own branch - mint a thread named and described from the report - runs
+  await sql(`UPDATE public.threads SET embedding = NULL`);
+  chatDown = true;
+  try {
+    const owner = `owner-a-${rnd()}`;
+    const { idea, job } = await ideaWithJob(owner, `idea ${tag}`);
+    const mk = marks(tag); const key = `rs-${tag}`;
+    const r = await send(L.cur.base, pkgFor(key, job, mk));
+    await expectPrivate(L, r, key, job, owner, idea, mk, tag, "RI7 idea, model down");
+    eq(r.json.thread_decision, "unthreaded", "RI7: the idea run is unthreaded");
+    eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.threads WHERE coalesce(description, '') LIKE '%' || $1 || '%' OR name LIKE '%' || $1 || '%'`, [mk.report]))[0].n, 0, "RI7: no thread carries the report");
+    // the control: a non-idea run on the same fallback path DOES mint its thread from its first paragraph (shared, as before)
+    const mk2 = marks(`${tag}c`); const plain = await plainJob();
+    const r2 = await send(L.cur.base, pkgFor(`${key}-c`, plain, mk2));
+    assert(r2.status === 200, `control: ${r2.status} ${r2.text.slice(0, 300)}`);
+    eq(r2.json.thread_decision, "new", "RI7 control: the fallback minted a thread");
+    eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.threads WHERE coalesce(description, '') LIKE '%' || $1 || '%'`, [mk2.report]))[0].n, 1, "RI7 control: from the report's first paragraph (the path the idea run is kept off)");
+  } finally { chatDown = false; await L.stop(); }
+} });
+

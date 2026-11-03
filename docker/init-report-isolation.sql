@@ -177,7 +177,15 @@ AS $$
            AND (p_slug = 'content/source/' || a.source_id::text
                 OR (jsonb_typeof(p_links) = 'array' AND p_links ? ('content/source/' || a.source_id::text))
                 OR (position('content/source/' IN coalesce(p_body, '')) > 0
-                    AND coalesce(p_body, '') ~ ('content/source/' || a.source_id::text || '([^0-9a-f-]|$)'))));
+                    AND coalesce(p_body, '') ~ ('content/source/' || a.source_id::text || '([^0-9a-f-]|$)'))))
+        -- round 3: a thread the report named - its old hub page, or a page linking it (the notebook index)
+        OR EXISTS (
+        SELECT 1 FROM public.research_report_isolation_archive t
+         WHERE t.action = 't' AND t.restored_at IS NULL AND (t.row_data ->> '_minted')::boolean
+           AND coalesce(t.row_data ->> 'slug', '') <> ''
+           AND (p_slug LIKE 'notebooks/' || (t.row_data ->> 'slug') || '/%'
+                OR (jsonb_typeof(p_links) = 'array' AND p_links ? ('notebooks/' || (t.row_data ->> 'slug') || '/' || (t.row_data ->> 'slug')))
+                OR position('notebooks/' || (t.row_data ->> 'slug') || '/' IN coalesce(p_body, '')) > 0));
 $$;
 REVOKE ALL ON FUNCTION public.report_isolation_page_shows_report(TEXT, TEXT, JSONB) FROM PUBLIC;
 
@@ -210,6 +218,7 @@ DO $$
 DECLARE
     v_batch   UUID := gen_random_uuid();
     v_now     TIMESTAMPTZ := clock_timestamp();
+    v_threads BIGINT;
     v_ids     UUID[];
     v_shared  INT;
     v_n       BIGINT;
@@ -330,22 +339,80 @@ BEGIN
          WHERE a.batch = v_batch AND a.action = 'u' AND (a.row_data ->> 'id') = e.id::text;
         PERFORM set_config('session_replication_role', 'origin', true);
     END IF;
-    -- 3. archive every wiki page that shows a moved report (its leaf, a page linking it): the archive's 's' rows
-    --    of this batch are what the predicate reads
-    INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
-    SELECT DISTINCT ON (w.slug) v_batch, m.source_id, 'public.wiki_pages', 'slug', 'w', to_jsonb(w)
-      FROM public.wiki_pages w
-      JOIN _ri_move m ON w.slug = 'content/source/' || m.source_id::text
-                      OR (jsonb_typeof(w.links) = 'array' AND w.links ? ('content/source/' || m.source_id::text))
-                      OR (position('content/source/' IN w.body) > 0 AND w.body ~ ('content/source/' || m.source_id::text || '([^0-9a-f-]|$)'))
-     ORDER BY w.slug, m.source_id;
+    -- 3. out of the shared knowledge: the rows (the foreign keys cascade as declared; the set-NULL columns are done)
+    DELETE FROM public.sources s WHERE s.id = ANY(v_ids);
 
-    -- 5. out of the shared knowledge: the withheld pages, then the rows (the foreign keys cascade as declared)
+    -- 4. THE THREADS (round 3, tester attempt 2 finding A): the base's curator NAMED and DESCRIBED a new thread from the
+    --    report (decision 'new': the resolver's name and description, or the report's first paragraph verbatim), and
+    --    REWROTE an existing thread's description from it (refreshThread, every filing) - and the embedding with it. The
+    --    threads are every thread an idea job of this move filed into (result -> curator -> thread_id) and every thread
+    --    a moved report was linked into. Each is archived whole, then:
+    --      minted ('new' by any of those jobs): a neutral name and slug, a description made only of its remaining SHARED
+    --        sources' titles (none left: no description, and the thread is archived), no embedding; the shared sources
+    --        whose notebook label was the old name are relabelled (else the notebook backfill re-creates the old name);
+    --      existing: the same description from its remaining shared sources (the pre-report text is not recorded
+    --        anywhere: no history table, and the job data holds only the thread id), no embedding.
+    --    The embedding is re-made from the new text by the curator's backfill-thread-embeddings.ts (the deploy step).
+    CREATE TEMP TABLE _ri_threads ON COMMIT DROP AS
+    SELECT t.id, bool_or(x.minted) AS minted
+      FROM (SELECT j.result -> 'curator' ->> 'thread_id' AS tid, (j.result -> 'curator' ->> 'thread_decision') = 'new' AS minted
+              FROM public.research_jobs j
+             WHERE j.id IN (SELECT l.job_id FROM _ri_links l WHERE l.idea_hit AND l.job_id IS NOT NULL AND l.source_id = ANY(v_ids))
+            UNION ALL
+            SELECT a.row_data ->> 'thread_id', false FROM public.research_report_isolation_archive a
+             WHERE a.batch = v_batch AND to_regclass(a.tbl) = 'public.thread_sources'::regclass) x
+      JOIN public.threads t ON t.id::text = x.tid
+     GROUP BY t.id;
+    INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
+    SELECT v_batch, v_ids[1], 'public.threads', 'id', 't', to_jsonb(t) || jsonb_build_object('_minted', rt.minted)
+      FROM _ri_threads rt JOIN public.threads t ON t.id = rt.id;
+    GET DIAGNOSTICS v_threads = ROW_COUNT;
+    -- the shared sources labelled with a minted thread's old name: archived, relabelled below
+    INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
+    SELECT v_batch, v_ids[1], 'public.sources', 'notebook', 'b',
+           jsonb_build_object('id', s.id, 'notebook', s.notebook, 'relabelled_to', 'Research thread ' || left(t.id::text, 8))
+      FROM _ri_threads rt JOIN public.threads t ON t.id = rt.id AND rt.minted
+      JOIN public.sources s ON s.notebook = t.name;
+    UPDATE public.threads t
+       SET description = (SELECT 'Shared sources: ' || string_agg(x.title, '; ' ORDER BY x.title)
+                            FROM (SELECT DISTINCT s.title FROM public.thread_sources ts JOIN public.sources s ON s.id = ts.source_id
+                                   WHERE ts.thread_id = t.id AND s.retraction_committed_at IS NULL AND coalesce(s.title, '') <> ''
+                                   ORDER BY s.title LIMIT 8) x),
+           embedding = NULL,
+           name = CASE WHEN rt.minted THEN 'Research thread ' || left(t.id::text, 8) ELSE t.name END,
+           slug = CASE WHEN rt.minted AND t.slug IS NOT NULL THEN 'research-thread-' || left(t.id::text, 8) ELSE t.slug END,
+           status = CASE WHEN rt.minted AND NOT EXISTS (SELECT 1 FROM public.thread_sources ts WHERE ts.thread_id = t.id)
+                              AND NOT EXISTS (SELECT 1 FROM public.claims c WHERE c.thread_id = t.id)
+                         THEN 'archived' ELSE t.status END
+      FROM _ri_threads rt WHERE rt.id = t.id;
+    PERFORM set_config('session_replication_role', 'replica', true);
+    UPDATE public.sources s SET notebook = a.row_data ->> 'relabelled_to'
+      FROM public.research_report_isolation_archive a
+     WHERE a.batch = v_batch AND a.action = 'b' AND (a.row_data ->> 'id') = s.id::text;
+    PERFORM set_config('session_replication_role', 'origin', true);
+    -- fail closed: every thread archived, and none still carries its archived name (minted) or description
+    SELECT count(*) INTO v_n FROM public.threads t JOIN public.research_report_isolation_archive a
+        ON a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'id') = t.id::text
+     WHERE ((a.row_data ->> '_minted')::boolean AND (t.name = a.row_data ->> 'name' OR t.slug IS NOT DISTINCT FROM NULLIF(a.row_data ->> 'slug', '') AND a.row_data ->> 'slug' IS NOT NULL))
+        OR (coalesce(a.row_data ->> 'description', '') <> '' AND t.description IS NOT DISTINCT FROM a.row_data ->> 'description')
+        OR t.embedding IS NOT NULL;
+    IF v_threads <> (SELECT count(*) FROM _ri_threads) OR v_n <> 0 THEN
+        RAISE EXCEPTION 'rw-report-isolation: % thread(s) the moved reports named or described, % archived, % still carry it; nothing moved',
+            (SELECT count(*) FROM _ri_threads), v_threads, v_n;
+    END IF;
+
+    -- 5. every wiki page that shows a moved report (its leaf, a page linking it, a minted thread's old hub): archived
+    --    and withheld - the predicate reads this batch's archive rows
+    INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
+    SELECT v_batch, v_ids[1], 'public.wiki_pages', 'slug', 'w', to_jsonb(w)
+      FROM public.wiki_pages w WHERE public.report_isolation_page_shows_report(w.slug, w.body, w.links);
     DELETE FROM public.wiki_pages w USING public.research_report_isolation_archive a
      WHERE a.batch = v_batch AND a.action = 'w' AND a.row_data ->> 'slug' = w.slug;
-    DELETE FROM public.sources s WHERE s.id = ANY(v_ids);
-    RAISE NOTICE 'rw-report-isolation: moved % idea-job syntheses (% dependent rows archived; left shared, also filed by a non-idea job: %)',
-        cardinality(v_ids), v_total, v_shared;
+    IF EXISTS (SELECT 1 FROM public.wiki_pages w WHERE public.report_isolation_page_shows_report(w.slug, w.body, w.links)) THEN
+        RAISE EXCEPTION 'rw-report-isolation: a wiki page still shows a moved report; nothing moved';
+    END IF;
+    RAISE NOTICE 'rw-report-isolation: moved % idea-job syntheses (% dependent rows archived; left shared, also filed by a non-idea job: %); % thread(s) re-described (% minted from a report)',
+        cardinality(v_ids), v_total, v_shared, v_threads, (SELECT count(*) FROM _ri_threads WHERE minted);
 END $$;
 
 NOTIFY pgrst, 'reload schema';

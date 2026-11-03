@@ -33,6 +33,8 @@ param(
   [string]$ChainRoot = '',
   # round 2: the research service directory whose viewer.ts RI6 imports (RED: the base's)
   [string]$ResearchRoot = '',
+  # -Red: how many [4c] cases must fail on the base (round 3's base 30408c6 already passes every case: 0)
+  [int]$RedE2EFailures = 2,
   [switch]$Red
 )
 $ErrorActionPreference = 'Continue'
@@ -174,7 +176,7 @@ try {
   Save 'report-isolation-e2e.log' (($o -split "`n" | ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0, 400) } else { $_ } } | Select-Object -Last 200) -join "`n")
   foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = Summary $o
-  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -ge 2) "RED: report isolation e2e fails on the base ($($sum.Value))" }
+  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -ge $RedE2EFailures) "RED: report isolation e2e on the base - at least $RedE2EFailures failing ($($sum.Value))" }
   else { Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "report isolation e2e: $($sum.Value)" }
 
   Write-Host '[4d] slot-390 drill: seed the base''s shapes, move, move again, revert, revert again, move again'
@@ -188,6 +190,14 @@ try {
   $before = RiState; $drill += "seeded: $before"
   if ($Red) {
     Check ((RiGet $before 'shared_idea') -eq '2') "RED: on the base the idea-job syntheses are still shared sources (shared_idea=$(RiGet $before 'shared_idea'))"
+    # a base that HAS a slot 390 (round 3's base 30408c6): run it - it must leave the reports' text in the threads
+    $b390 = Join-Path $chainDocker 'init-report-isolation.sql'
+    if (Test-Path $b390) {
+      $null = Dk cp $b390 "${db}:/tmp/ri-base-init.sql"
+      $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f /tmp/ri-base-init.sql
+      $bst = RiState; $drill += "[the base's 390] exit $($script:rc)`n    state: $bst"
+      Check ((RiGet $bst 'shared_idea') -eq '0' -and (RiGet $bst 'thread_report_text') -ne '0') "RED: the base's 390 moves the syntheses but leaves their text in the threads (thread_report_text=$(RiGet $bst 'thread_report_text'), notebook_report_text=$(RiGet $bst 'notebook_report_text'))"
+    }
   } else {
     $f390 = Join-Path $dockerDir 'init-report-isolation.sql'; $r390 = Join-Path $dockerDir 'revert-report-isolation.sql'
     $null = Dk cp $f390 "${db}:/tmp/ri-init.sql"; $null = Dk cp $r390 "${db}:/tmp/ri-revert.sql"
@@ -244,6 +254,11 @@ try {
     Check ((RiGet $mv 'dossier_i1') -eq 'null') 'drill: the idea''s dossier pointer no longer names a shared row'
     Check ((RiGet $before 'wiki_report_pages') -eq '2' -and (RiGet $mv 'wiki_report_pages') -eq '0' -and (RiGet $mv 'guard') -eq '1') 'drill: the moved report''s leaf and the entity page citing it are withheld, the guard is on'
     Check ((RiGet $mv 'entity_ts') -ne (RiGet $before 'entity_ts')) 'drill: the cited entity is bumped (its page recompiles from what is still shared)'
+    # round 3 (tester attempt 2 finding A): the threads the reports named or described
+    Check ((RiGet $before 'thread_report_text') -eq '3' -and (RiGet $before 'notebook_report_text') -eq '1' -and [int](RiGet $before 'wiki_report_text') -ge 2) "drill: seeded - a thread named and described from s1, an existing thread re-described from s2, a source labelled with the minted name, their wiki pages ($(RiGet $before 'thread_report_text') / $(RiGet $before 'notebook_report_text') / $(RiGet $before 'wiki_report_text'))"
+    Check ((RiGet $mv 'thread_report_text') -eq '0' -and (RiGet $mv 'notebook_report_text') -eq '0' -and (RiGet $mv 'wiki_report_text') -eq '0' -and (RiGet $mv 'thread_embeddings') -eq '0') "drill: after init no thread name, description, slug or embedding, no notebook label and no wiki page carries a moved report's text"
+    Check ((RiGet $mv 'tnew_desc') -eq 'Shared_sources:_drill_web' -and $states['init-note'] -match '3 thread\(s\) re-described \(1 minted from a report\)') "drill: the minted thread is re-described from its remaining shared source only ($(RiGet $mv 'tnew_desc')); 3 threads (one reached only through a thread link), 1 minted"
+
     Check ([int](RiGet $mv 'archive_open') -ge 7 -and (RiGet $mv 'archive_app_read') -eq 'no') "drill: every moved row archived first ($(RiGet $mv 'archive_open') rows), the archive unreadable by service_role"
     Check ($states['init again-note'] -match 'moved 0 idea-job syntheses' -and (RiGet $states['init again'] 'private') -eq '2' -and (RiGet $states['init again'] 'archive_open') -eq (RiGet $mv 'archive_open')) 'drill: a second init moves nothing and changes nothing'
     $rv = $states['revert']
@@ -251,6 +266,7 @@ try {
     Check ((RiGet $rv 'snapshot') -eq $snap0 -and (RiGet $rv 'shared_idea') -eq '2' -and (RiGet $rv 'deps_idea') -eq (RiGet $before 'deps_idea')) "drill: after revert the rows, their dependents and the claim pointers are byte-identical to before (snapshot $(RiGet $rv 'snapshot') vs $snap0)"
     Check ((RiGet $rv 'dossier_i1') -eq 's1' -and (RiGet $rv 'private') -eq '0' -and (RiGet $rv 'fn') -eq '0' -and (RiGet $rv 'guard') -eq '0' -and (RiGet $rv 'archive_open') -eq '0') 'drill: the dossier pointer is back, the private copies, the rule and the guard are gone, the archive is marked restored'
     Check ((RiGet $rv 'wiki_report_pages') -eq '2' -and (RiGet $rv 'entity_ts') -eq (RiGet $before 'entity_ts')) 'drill: the withheld pages are back, the entity''s updated_at too (the snapshot covers the whole claim, idea, entity and page rows)'
+    Check ((RiGet $rv 'thread_report_text') -eq '3' -and (RiGet $rv 'notebook_report_text') -eq '1') 'drill: the revert gives the threads (whole rows, in the snapshot) and the notebook label back'
     Check ($states['revert again-note'] -match '0 batch\(es\) restored' -and (RiGet $states['revert again'] 'snapshot') -eq $snap0) 'drill: a second revert restores nothing and changes nothing'
     $ag = $states['init after revert']
     Check ($states['init after revert-note'] -match 'moved 2 idea-job syntheses' -and (RiGet $ag 'shared_idea') -eq '0' -and (RiGet $ag 'private') -eq '2' -and (RiGet $ag 'fn') -eq '1') 'drill: init after the revert moves them again'

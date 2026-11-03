@@ -609,4 +609,6 @@ count) and lists its claims in `produced.claims`; nothing else reads the table. 
 so such a job's result is redacted for anyone but the idea's owner. The private row is one per (research key, owner,
 idea): two users' alike ideas share a key, never a row. The move withholds every wiki page showing a moved report (its
 leaf, a page linking it) and a guard on `wiki_pages` keeps the viewer's reconcile and the compile from writing one back.
+A thread an idea job's filing named or described (the base's curator) is re-described from its remaining shared sources
+only (a minted one also renamed and relabelled), its embedding cleared for `backfill-thread-embeddings.ts`.
 Revert: `revert-report-isolation.sql`.

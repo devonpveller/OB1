@@ -16,7 +16,7 @@ DECLARE
     v_j1 UUID; v_j2 UUID; v_j3 UUID; v_j4 UUID; v_j5 UUID;
     v_s1 UUID := gen_random_uuid(); v_s2 UUID := gen_random_uuid(); v_s3 UUID := gen_random_uuid(); v_s4 UUID := gen_random_uuid();
     v_w  UUID := gen_random_uuid();
-    v_thread UUID; v_sess UUID; v_c1 UUID; v_c2 UUID; v_c3 UUID; v_e BIGINT;
+    v_thread UUID; v_sess UUID; v_c1 UUID; v_c2 UUID; v_c3 UUID; v_e BIGINT; v_tnew UUID; v_tlink UUID;
 BEGIN
     v_i1 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea one', 'drill idea one statement', NULL, NULL);
     v_i2 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea two', 'drill idea two statement', NULL, NULL);
@@ -56,7 +56,26 @@ BEGIN
       ('content/tool/drill-tool-' || left(v_s1::text, 8), 'entity', 'Drill Tool',
        'The drill tool page cites [[content/source/' || v_s1::text || '|Drill idea report one]].', jsonb_build_array('content/source/' || v_s1::text));
     UPDATE public.ideas SET dossier_source_id = v_s1 WHERE id = v_i1;
-    UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', v_s1::text))) WHERE id = v_j1;
+    -- round 3: the base's curator minted a thread NAMED and DESCRIBED from s1 (decision 'new'), with a hub page, its
+    -- web source labelled with that name; and rewrote the existing 'Drill thread' description from s2 (decision 'existing')
+    INSERT INTO public.threads (name, description, status, slug, embedding)
+    VALUES ('DrillReportOne minted thread', 'DrillReportOne text - the report''s first paragraph', 'active', 'drillreportone-minted-' || left(v_s1::text, 8),
+            array_fill(0.01::real, ARRAY[1024])::vector)
+    RETURNING id INTO v_tnew;
+    PERFORM public.link_source_to_thread(v_tnew, v_s1, 'automatic', NULL, 'confirmed');
+    PERFORM public.link_source_to_thread(v_tnew, v_w, 'automatic', NULL, 'confirmed');
+    UPDATE public.sources SET notebook = 'DrillReportOne minted thread' WHERE id = v_w;
+    UPDATE public.threads SET description = 'DrillReportTwo refreshed the description', embedding = array_fill(0.02::real, ARRAY[1024])::vector WHERE id = v_thread;
+    -- a thread reached ONLY through a moved report's thread link (no job names it)
+    INSERT INTO public.threads (name, description, status) VALUES ('Drill linked thread', 'DrillReportTwo described this one too', 'active') RETURNING id INTO v_tlink;
+    PERFORM public.link_source_to_thread(v_tlink, v_s2, 'automatic', NULL, 'confirmed');
+    PERFORM public.link_source_to_thread(v_tlink, v_s3, 'automatic', NULL, 'confirmed');
+    INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES
+      ('notebooks/drillreportone-minted-' || left(v_s1::text, 8) || '/drillreportone-minted-' || left(v_s1::text, 8), 'notebook',
+       'DrillReportOne minted thread', 'DrillReportOne text - the hub of a thread the report named');
+    UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_tnew::text, 'thread_decision', 'new',
+                                                             'persist', jsonb_build_object('synthesis_id', v_s1::text))) WHERE id = v_j1;
+    UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_thread::text, 'thread_decision', 'existing')) WHERE id = v_j2;
     INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload)
     VALUES (v_j2, v_j2, 'filed', 'due_process', jsonb_build_object('synthesis_id', v_s2::text, 'research_key', 'rk-drill-2'));
     UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', v_s3::text))) WHERE id = v_j3;
@@ -64,7 +83,7 @@ BEGIN
 
     INSERT INTO public._ri_drill (name, id) VALUES ('s1', v_s1), ('s2', v_s2), ('s3', v_s3), ('s4', v_s4), ('w', v_w), ('i1', v_i1), ('i2', v_i2),
       ('j1', v_j1), ('j2', v_j2), ('c1', v_c1), ('c2', v_c2), ('c3', v_c3), ('thread', v_thread), ('session', v_sess),
-      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8))
+      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8)), ('tnew', v_tnew::text), ('tlink', v_tlink::text)
     ON CONFLICT (name) DO UPDATE SET id = EXCLUDED.id;
 END $$;
 COMMIT;

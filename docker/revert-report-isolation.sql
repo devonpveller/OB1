@@ -8,6 +8,8 @@
 --      is restored half-way).
 --   2. The private copies of the restored rows are removed (a copy a later filing superseded is kept: it holds a
 --      newer report the archive does not).
+--   (round 3) every thread the move re-described or renamed gets its whole row back, and every shared source it
+--   relabelled its old notebook label.
 --   3. research_job_report_owner() and the wiki guard (trg_report_isolation_wiki_guard) are dropped; an entity the
 --      move bumped gets its old updated_at back (only where nothing touched it since).
 --   (3.) The tables and the archive are KEPT: nothing reads them once the
@@ -47,7 +49,24 @@ BEGIN
             IF to_regclass(r.tbl) IS NULL THEN
                 RAISE EXCEPTION 'rw-report-isolation revert: table % is gone; nothing restored', r.tbl;
             END IF;
-            IF r.action = 'u' THEN
+            IF r.action = 't' THEN
+                -- round 3: a thread the move re-described / renamed: the WHOLE row back, as it was
+                SELECT string_agg(format('%1$I = x.%1$I', at.attname), ', ' ORDER BY at.attnum) INTO v_cols
+                  FROM pg_attribute at
+                 WHERE at.attrelid = r.tbl::regclass AND at.attnum > 0 AND NOT at.attisdropped AND at.attgenerated = ''
+                   AND at.attname <> 'id';
+                EXECUTE format('UPDATE %s t SET %s
+                                  FROM public.research_report_isolation_archive a, jsonb_populate_record(NULL::%s, a.row_data) x
+                                 WHERE a.batch = $1 AND a.tbl = $2 AND a.action = ''t'' AND t.id = x.id',
+                               r.tbl, v_cols, r.tbl)
+                    USING v_batch, r.tbl;
+            ELSIF r.action = 'b' THEN
+                -- round 3: a shared source the move relabelled off a minted thread's old name (only where still so)
+                UPDATE public.sources s SET notebook = a.row_data ->> 'notebook'
+                  FROM public.research_report_isolation_archive a
+                 WHERE a.batch = v_batch AND a.action = 'b' AND (a.row_data ->> 'id') = s.id::text
+                   AND s.notebook IS NOT DISTINCT FROM a.row_data ->> 'relabelled_to';
+            ELSIF r.action = 'u' THEN
                 -- an entity the move bumped (so its page recompiled): its old updated_at, unless something touched it since
                 EXECUTE format('UPDATE %s t SET %I = (a.row_data ->> %L)::timestamptz
                                   FROM public.research_report_isolation_archive a
