@@ -35,10 +35,15 @@ CREATE TABLE IF NOT EXISTS public.settings_keys (
     editable      BOOLEAN NOT NULL DEFAULT true,
     store         TEXT NOT NULL DEFAULT 'settings' CHECK (store IN ('settings', 'contract')),
     CONSTRAINT settings_keys_store_tier CHECK (store = 'settings' OR tier = 'admin'),
-    -- no secrets (anchor): neither a secret type nor a key named like a credential, until PD4/PD5's encrypted store
-    CONSTRAINT settings_keys_no_secret CHECK (
-        type <> 'secret' AND key !~* '(secret|token|password|passwd|api_?key|credential|private_?key)')
+    CONSTRAINT settings_keys_no_secret_type CHECK (type <> 'secret')
 );
+-- no secrets (anchor): neither a secret type nor a key named like a credential, until PD4/PD5's encrypted store.
+-- Round 2 (review A2): any `key` / `*_key` segment (api_key, access_key, private_key, ssh_key, cloud.key), apikey,
+-- bearer, passphrase. Dropped and re-added so a re-run brings an existing table to this rule.
+ALTER TABLE public.settings_keys DROP CONSTRAINT IF EXISTS settings_keys_no_secret;
+ALTER TABLE public.settings_keys ADD CONSTRAINT settings_keys_no_secret CHECK (
+    type <> 'secret'
+    AND key !~* '(secret|token|passw(or)?d|passphrase|bearer|credential|apikey|(^|[._])key($|[._])|_key($|[._]))');
 
 CREATE TABLE IF NOT EXISTS public.user_settings (
     owner_sub  TEXT NOT NULL CHECK (btrim(owner_sub) <> ''),
@@ -101,8 +106,9 @@ BEGIN
         IF btrim(s) = '' THEN RETURN 'must not be empty (delete the setting to go back to the default)'; END IF;
         IF length(s) > mx THEN RETURN format('must be at most %s characters', mx); END IF;
         IF s ~ '[[:cntrl:]]' THEN RETURN 'must not hold control characters'; END IF;
-        -- no secret is stored here (anchor): a value shaped like a credential is refused
-        IF s ~ '^(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)' THEN
+        -- no secret is stored here (anchor): a value shaped like a credential is refused - anywhere in the text,
+        -- not only at its start (round 2, review A3: a leading space no longer slips past)
+        IF s ~ '(^|[^A-Za-z0-9])(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)' OR s ~* '(^|[^a-z0-9])bearer\s' THEN
             RETURN 'this looks like a credential; secrets are not stored in settings';
         END IF;
         IF v->>'ref' = 'podcast_team' AND NOT EXISTS (
@@ -192,6 +198,13 @@ BEGIN
 END;
 $$;
 
+-- Round 2 (review G1): nothing for PUBLIC - setting_get and user_setting_set are SECURITY DEFINER, so EXECUTE for
+-- PUBLIC would let ANY login (ob_pantry, anon, authenticated) read and write any owner's settings past RLS. As slots
+-- 300 and 370: REVOKE from PUBLIC, then grant the app role (service_role; ob_app_memory reaches it as a member).
+REVOKE ALL ON FUNCTION public.setting_problem(TEXT, TEXT, JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.setting_get(TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.user_setting_set(TEXT, TEXT, JSONB, TEXT, INT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.trg_user_settings_guard() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.setting_problem(TEXT, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.setting_get(TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.user_setting_set(TEXT, TEXT, JSONB, TEXT, INT) TO service_role;
@@ -254,3 +267,7 @@ ON CONFLICT (key) DO UPDATE SET
     tier = EXCLUDED.tier, type = EXCLUDED.type, section = EXCLUDED.section, position = EXCLUDED.position,
     label = EXCLUDED.label, help = EXCLUDED.help, default_value = EXCLUDED.default_value, env_name = EXCLUDED.env_name,
     read_by = EXCLUDED.read_by, validation = EXCLUDED.validation, editable = EXCLUDED.editable, store = EXCLUDED.store;
+
+-- Round 2 (review G2): PostgREST caches the schema; without this a live `psql -f` leaves /rest/v1/rpc/setting_get
+-- a 404 (the digest and the podcast then keep their env values) until PostgREST restarts.
+NOTIFY pgrst, 'reload schema';

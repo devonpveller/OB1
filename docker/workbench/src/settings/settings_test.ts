@@ -80,6 +80,10 @@ Deno.test("parseWrite: a value is required; version is optional and whole", () =
   assertEquals(typeof parseWrite({ value: null }), "string");
   assertEquals(typeof parseWrite({ value: 3, version: 1.5 }), "string");
   assertEquals(parseWrite({ value: 3 }), { value: 3, version: null });
+  // round 2 (review D1): a NUL in a string or a key is a 400 with a reason, never a 500 from jsonb
+  assert(String(parseWrite({ value: "a\u0000b" })).includes("NUL"));
+  assert(String(parseWrite({ value: { "k\u0000": 1 } })).includes("NUL"));
+  assertEquals(parseWrite({ value: "a\\u0000b" }), { value: "a\\u0000b", version: null }); // the six characters, not a NUL
   assertEquals(parseWrite({ value: false, version: 0 }), { value: false, version: 0 });
 });
 

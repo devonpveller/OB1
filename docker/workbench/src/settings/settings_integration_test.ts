@@ -177,6 +177,12 @@ t("I4: a value failing the registry's validation is refused (400) and nothing is
     ["podcast.team", "no-such-team", "no podcast team of yours"],
     ["podcast.team", team, "no podcast team of yours"], // B's team is not A's
     ["podcast.team", "sk-0123456789abcdef0123456789", "credential"],
+    // round 2 (review A3): not only at the start - a leading space, or a credential inside the text
+    ["podcast.team", " sk-0123456789abcdef0123456789", "credential"],
+    ["podcast.team", "my team ghp_0123456789abcdef0123456789abcd", "credential"],
+    ["podcast.team", "Bearer abc.def.ghi", "credential"],
+    // round 2 (review D1): a NUL is a 400 with a reason, never a 500
+    ["podcast.team", `a${String.fromCharCode(0)}b`, "NUL"],
     ["podcast.team", "x".repeat(121), "at most 120"],
   ];
   for (const [k, v, why] of cases) {
@@ -204,7 +210,51 @@ t("I5: the database refuses what the routes refuse, whoever writes: an admin or 
   assertEquals(await refused(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by) VALUES ('cloud.provider', 'user', 'secret', 'refinery', 't', 't')`), "23514");
   assertEquals(await refused(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by) VALUES ('cloud.api_key', 'user', 'string', 'refinery', 't', 't')`), "23514");
   assertEquals(await refused(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by) VALUES ('google.oauth_token', 'user', 'string', 'refinery', 't', 't')`), "23514");
+  // round 2 (review A2): any key / *_key segment, apikey, bearer, passphrase, access_key
+  for (const k of ["cloud.ssh_key", "cloud.access_key", "cloud.key", "cloud.key.value", "cloud.apikey", "cloud.bearer", "cloud.passphrase", "aws.access_key_id"]) {
+    assertEquals(await refused(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by) VALUES ($1, 'user', 'string', 'refinery', 't', 't')`, [k]), "23514", k);
+  }
+  // ... while ordinary names that merely contain the letters stay allowed
+  assertEquals(await refused(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by) VALUES ('digest.keyword_limit', 'user', 'integer', 'digest', 't', 't')`), "");
   assertEquals((await sql(`SELECT count(*)::int AS n FROM public.settings_keys WHERE type = 'secret' OR key ~* '(secret|token|password|api_?key|credential)'`))[0].n, 0);
+});
+
+// as `role`, in a transaction rolled back: "" = accepted, else the refusal code
+async function refusedAs(role: string, text: string, args: unknown[] = []): Promise<string> {
+  const c = await pool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject(`SET LOCAL ROLE ${role}`);
+    await c.queryObject(text, args);
+    await c.queryObject("ROLLBACK");
+    return "";
+  } catch (e) {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    return String((e as { fields?: { code?: string } }).fields?.code ?? (e as Error).message);
+  } finally {
+    c.release();
+  }
+}
+
+t("I7: no login outside the app role may run the settings functions (round 2, review G1): ob_pantry, anon and authenticated get 42501", async () => {
+  const roles = (await sql<{ r: string }>(`SELECT rolname AS r FROM pg_roles WHERE rolname IN ('ob_pantry', 'anon', 'authenticated') ORDER BY 1`)).map((x) => x.r);
+  assertEquals(roles, ["anon", "authenticated", "ob_pantry"], "the three roles exist in the chain");
+  await sql(`INSERT INTO public.user_settings (owner_sub, key, value) VALUES ($1, 'refinery.dormancy_days', '11') ON CONFLICT (owner_sub, key) DO UPDATE SET value = '11'`, [sub(B)]);
+  const calls: [string, unknown[]][] = [
+    [`SELECT public.setting_get($1, 'refinery.dormancy_days')`, [sub(B)]],
+    [`SELECT public.setting_problem($1, 'refinery.dormancy_days', '5'::jsonb)`, [sub(B)]],
+    [`SELECT public.user_setting_set($1, 'refinery.dormancy_days', '1'::jsonb, 'intruder', NULL)`, [sub(B)]],
+  ];
+  for (const role of roles) {
+    for (const [q, a] of calls) assertEquals(await refusedAs(role, q, a), "42501", `${role}: ${q}`);
+  }
+  assertEquals(await readFn(sub(B), "refinery.dormancy_days"), 11, "B's value was neither read nor changed by them");
+  // the app role (what the workbench and the refinery run as) still reads and writes through them
+  assertEquals(await refusedAs(APP_ROLE, calls[0][0], calls[0][1]), "");
+  assertEquals(await refusedAs(APP_ROLE, calls[1][0], calls[1][1]), "");
+  const member = (await sql<{ m: boolean }>(`SELECT pg_has_role($1, 'service_role', 'MEMBER') AS m`, [APP_ROLE]))[0].m;
+  assertEquals(member, true, `${APP_ROLE} reaches the functions as a member of service_role`);
+  await sql(`DELETE FROM public.user_settings WHERE owner_sub = $1 AND key = 'refinery.dormancy_days'`, [sub(B)]);
 });
 
 t("I6: the idea schedule answers exactly as before, and is not in the settings tables", async () => {

@@ -30,11 +30,21 @@ export interface SettingsDeps {
   mountsRoot: string;
 }
 
+// a NUL (U+0000) in any string or key of a value
+function holdsNul(v: unknown): boolean {
+  if (typeof v === "string") return v.includes(String.fromCharCode(0));
+  if (Array.isArray(v)) return v.some(holdsNul);
+  if (v && typeof v === "object") return Object.entries(v).some(([k, x]) => holdsNul(k) || holdsNul(x));
+  return false;
+}
+
 // The PUT body: {value, version?}. Returns the parsed body or a message.
 export function parseWrite(b: unknown): { value: unknown; version: number | null } | string {
   if (!b || typeof b !== "object" || Array.isArray(b)) return "send {\"value\": ...}";
   const o = b as Record<string, unknown>;
   if (!("value" in o) || o.value === null || o.value === undefined) return "send {\"value\": ...} (DELETE the setting to go back to the default)";
+  // round 2 (review D1): a NUL anywhere in the value (a string, a key) is refused here - jsonb cannot hold it (a 500)
+  if (holdsNul(o.value)) return "a value cannot hold a NUL character";
   let version: number | null = null;
   if (o.version !== undefined && o.version !== null) {
     if (!Number.isInteger(o.version) || (o.version as number) < 0) return "version must be a whole number";

@@ -16,3 +16,5 @@ DROP FUNCTION IF EXISTS public.setting_problem(TEXT, TEXT, JSONB);
 DROP TABLE IF EXISTS public.user_settings;
 DROP TABLE IF EXISTS public.settings_keys;
 COMMIT;
+-- round 2 (review G2): PostgREST drops rpc/setting_get from its cache at once (the readers fall back to env)
+NOTIFY pgrst, 'reload schema';
