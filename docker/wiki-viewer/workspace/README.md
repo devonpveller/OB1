@@ -5,6 +5,10 @@ the standard title bar (Settings, Theme, the notifications bell with its progres
 universal `+`), a fixed left nav, the writing surface (CodeMirror 6) and the side panels. Every
 panel and nav entry is **registered** by its own module (`src/shell/registry.ts`,
 `src/panels/index.ts`); the shell names none of them.
+Settings (rw-settings-store) is a registered panel like the others - the title bar's Settings button opens it in
+the dock (no nav entry, no popover) and the layout keeps it; it holds "Reset the layout", the idea-research
+schedule, "My idea refinery", "My digest and podcast" (`/workbench/settings`) and, for an admin only, the shared
+settings with research tuning read-only (`src/panels/settings/`).
 
 ## Build
 

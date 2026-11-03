@@ -1,10 +1,12 @@
 // rw-idea-schedule (front end): the schedule control in Settings and "Research now" in the refinery
 // panel, over a fake back end (helpers.ts). Runs with the rest of the workspace's vitest suite in the
 // viewer image's workspace stage.
+// rw-settings-store: Settings is a PANEL now (the popover is gone) and the schedule its first section - so
+// "open Settings" is: render the Settings panel and open that section. Every assertion below is unchanged.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "../src/panels";
-import { TitleBar } from "../src/shell/TitleBar";
+import { SettingsPanel } from "../src/panels/settings/SettingsPanel";
 import { RefineryPanel } from "../src/panels/refinery/RefineryPanel";
 import { resetState, setState } from "../src/lib/store";
 import { fakeApi, settle } from "./helpers";
@@ -14,8 +16,9 @@ const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const IMMEDIATE = { mode: "immediate", at_time: null, weekday: null, tz: "UTC", next_start: null };
 
 async function openSettings() {
-  render(<TitleBar />);
-  fireEvent.click(screen.getByTestId("settings"));
+  render(<SettingsPanel params={{}} />);
+  await settle();
+  fireEvent.click(document.querySelector('[data-section="schedule"] .ws-summary')!);
   await settle();
 }
 const field = (n: string) => document.querySelector(`[data-testid="idea-schedule"] [data-field="${n}"]`) as HTMLInputElement;

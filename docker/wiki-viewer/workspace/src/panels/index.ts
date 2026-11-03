@@ -22,3 +22,5 @@ import "./intake/IntakePanel";
 // research-workbench rw-p8a4-ideas: the ideas panel, the idea view (= the refinery view) and its context graph
 import "./ideas/IdeasPanel";
 import "./ideas/IdeaPanel";
+// research-workbench rw-settings-store: the Settings panel (opened from the title bar)
+import "./settings/SettingsPanel";

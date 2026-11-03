@@ -71,6 +71,7 @@ import {
 } from "./src/podcast/script-renderer.ts";
 import { castBlock, turnsFromHostScript, type Team } from "./src/podcast/presenters.ts";
 import { PresenterStore } from "./src/podcast/presenter-store.ts";
+import { podcastTeamFor, SettingReader } from "./src/clients/settings.ts";
 import { SegmentCache } from "./src/podcast/segment-cache.ts";
 import { gatewaySpeech } from "./src/podcast/tts-client.ts";
 import { ArchiveWriter, storeDestination } from "./src/podcast/archive.ts";
@@ -956,15 +957,17 @@ async function maybeRenderEpisode(team: Team | null): Promise<Episode | null> {
   return ep;
 }
 
-/** The team that voices the daily episode (PODCAST_TEAM of PODCAST_OWNER_SUB), or null. */
+/** The team that voices the daily episode of PODCAST_OWNER_SUB: their podcast.team (rw-settings-store, read on
+ * every run), else PODCAST_TEAM - or null. */
 async function loadTeam(): Promise<Team | null> {
-  if (!PODCAST_TEAM) {
-    if (AUDIO) console.warn("[link-enrich] PODCAST_TEAM is not set: the script is written for unnamed hosts and no audio is voiced.");
+  const teamName = await podcastTeamFor(new SettingReader(env("BRAIN_REST_URL", "http://openbrain-rest")), PODCAST_OWNER_SUB, PODCAST_TEAM);
+  if (!teamName) {
+    if (AUDIO) console.warn("[link-enrich] no podcast team (podcast.team / PODCAST_TEAM): the script is written for unnamed hosts and no audio is voiced.");
     return null;
   }
   try {
-    const t = await presenterStore.team(PODCAST_OWNER_SUB, PODCAST_TEAM);
-    if (!t) console.warn(`[link-enrich] no team "${PODCAST_TEAM}" in the presenter model: no audio is voiced.`);
+    const t = await presenterStore.team(PODCAST_OWNER_SUB, teamName);
+    if (!t) console.warn(`[link-enrich] no team "${teamName}" in the presenter model: no audio is voiced.`);
     return t;
   } catch (err) {
     console.warn(`[link-enrich] the presenter model is unreachable (${err}): no audio is voiced.`);

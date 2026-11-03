@@ -569,6 +569,54 @@ await step("C21 side panels at rest: summary first, no leaves, no actions", asyn
   }
 });
 
+// rw-settings-store: Settings is a regular panel - opened from the title bar into the dock, kept in the layout,
+// holding the idea schedule (working as before) and my settings; the lab's browser is the default subject with
+// sign-in off (the single-user mode), so it is the admin and sees the Admin section
+await step("ST1 Settings opens as a dock panel from the title bar, is kept in the layout, holds the schedule and my settings, and shows Admin to the admin", async () => {
+  await openWorkspace(P1);
+  await page.click("[data-testid=settings]");
+  await page.waitForSelector('[data-panel="settings"] .ws-settings');
+  ok(await page.locator(".ws-popover.ws-settings, [role=dialog][aria-label=settings]").count() === 0, "no popover");
+  const kept = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.includes("ws.layout")).map((k) => localStorage.getItem(k)).join(" "));
+  ok(kept.includes('"settings"'), "the layout keeps the Settings panel");
+  await page.reload();
+  await page.waitForSelector('[data-panel="settings"] .ws-settings', { timeout: 15000 });
+  // the schedule from its new section: daily at 06:30, then back to immediately
+  await page.click('[data-panel="settings"] [data-section="schedule"] .ws-summary');
+  await page.waitForSelector("[data-testid=idea-schedule]");
+  await page.selectOption("[data-testid=idea-schedule] [data-field=mode]", "daily");
+  await page.fill("[data-testid=idea-schedule] [data-field=at_time]", "06:30");
+  await page.click('[data-action="save-schedule"]');
+  await page.waitForFunction(() => (document.querySelector("[data-testid=idea-schedule-msg]")?.textContent ?? "") === "saved");
+  const sched = await api("GET", "/workbench/idea-schedule");
+  ok(sched.json.mode === "daily" && sched.json.at_time === "06:30", `the schedule saved from its section: ${sched.text}`);
+  await page.selectOption("[data-testid=idea-schedule] [data-field=mode]", "immediate");
+  await page.click('[data-action="save-schedule"]');
+  for (let i = 0; i < 20 && (await api("GET", "/workbench/idea-schedule")).json.mode !== "immediate"; i++) await sleep(150);
+  ok((await api("GET", "/workbench/idea-schedule")).json.mode === "immediate", "back to immediately");
+  // my idea refinery: a dormancy of 9 days is stored for me, and is what setting_get answers
+  await page.click('[data-panel="settings"] [data-section="refinery"] .ws-summary');
+  await page.waitForSelector('[data-field="refinery.dormancy_days"]');
+  await page.fill('[data-field="refinery.dormancy_days"]', "9");
+  await page.click('[data-action="save-setting"][data-key="refinery.dormancy_days"]');
+  await page.waitForSelector('[data-testid="setting-msg-refinery.dormancy_days"]');
+  const mine = await api("GET", "/workbench/settings");
+  ok(mine.json.settings.find((x) => x.key === "refinery.dormancy_days")?.value === 9, `stored: ${mine.text.slice(0, 300)}`);
+  ok((await sql(`SELECT public.setting_get('operator', 'refinery.dormancy_days') AS v`))[0].v === 9, "setting_get reads it");
+  await page.click('[data-action="reset-setting"][data-key="refinery.dormancy_days"]');
+  for (let i = 0; i < 20 && (await sql(`SELECT public.setting_get('operator', 'refinery.dormancy_days') AS v`))[0].v !== null; i++) await sleep(150);
+  ok((await sql(`SELECT public.setting_get('operator', 'refinery.dormancy_days') AS v`))[0].v === null, "back to the default");
+  // the Admin section: research tuning, read-only
+  ok(await page.locator('[data-panel="settings"] [data-section="admin"]').count() === 1, "the admin sees Admin");
+  await page.click('[data-panel="settings"] [data-section="admin"] .ws-summary');
+  await page.waitForSelector("[data-testid=settings-research-tuning]");
+  ok((await page.locator("[data-testid=settings-research-tuning]").innerText()).includes("MAX_FETCH"), "research tuning listed");
+  ok(await page.locator('[data-action="save-setting"][data-key="research.max_fetch"]').count() === 0, "research tuning is read-only");
+  // "Reset the layout" is kept, in the panel: the default layout has no Settings panel
+  await page.click('[data-panel="settings"] [data-testid=reset-layout]');
+  await page.waitForFunction(() => !document.querySelector('[data-panel="settings"]'));
+});
+
 await step("C22 the shell's nav is the registry's: every registered area, no other", async () => {
   await openWorkspace(P1);
   const navs = await page.$$eval("[data-nav]", (els) => els.map((e) => e.dataset.nav));

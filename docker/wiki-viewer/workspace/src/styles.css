@@ -129,3 +129,11 @@ textarea { width: 100%; min-height: 4em; }
 .ws-audit { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
 .ws-audit td, .ws-audit th { border: 1px solid var(--line); padding: 2px 4px; text-align: left; }
 .ws-error { color: #b91c1c; }
+/* rw-settings-store: the Settings panel */
+.ws-settings { padding: 8px; overflow: auto; height: 100%; box-sizing: border-box; }
+.ws-settings-layout { margin-bottom: 8px; }
+.ws-settings-body { padding: 4px 0 8px 18px; }
+.ws-setting { margin: 6px 0 10px; }
+.ws-setting p { margin: 2px 0; font-size: 0.9em; }
+.ws-settings-tuning { border-collapse: collapse; font-size: 0.9em; margin-top: 8px; }
+.ws-settings-tuning th, .ws-settings-tuning td { border-bottom: 1px solid var(--line); padding: 2px 6px; text-align: left; vertical-align: top; }

@@ -187,6 +187,7 @@ services:
       - ./init-cleanup.sql:/docker-entrypoint-initdb.d/350-init-cleanup.sql:ro # research-workbench rw-p8a2-cleanup: the cleanup view's per-user action log (fresh-volume only; live: psql -f BEFORE the new image; revert: revert-cleanup.sql)
       - ./init-intake-queue.sql:/docker-entrypoint-initdb.d/360-init-intake-queue.sql:ro # research-workbench rw-p5a-intake: import_jobs owner + the user add, file payloads, the intake panel's job kinds (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-intake-queue.sql)
       - ./init-idea-functions.sql:/docker-entrypoint-initdb.d/370-init-idea-functions.sql:ro # research-workbench rw-p8a4-ideas: idea edit / research-now / promote as owner-checked functions (workbench + openbrain-mcp), the refinery's dossier into the room, the ideas write guard (fresh-volume only; live: psql -f BEFORE the new workbench + openbrain-mcp images and the refinery restart; revert: revert-idea-functions.sql)
+      - ./init-settings.sql:/docker-entrypoint-initdb.d/400-init-settings.sql:ro # research-workbench rw-settings-store (plan 08 PD3): the settings registry, the per-user tier, setting_get() - the one read function services use (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-settings.sql)
     networks:
       - obnet
     restart: unless-stopped

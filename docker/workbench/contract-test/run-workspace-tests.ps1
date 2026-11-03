@@ -42,6 +42,12 @@
 # the owner-checked idea functions (slot 370) as two users and as the app role, the refinery's dossier into the room,
 # archive, the user source list. -IdeasOnly runs [5h] and the sweep alone; with -Red -IdeasOnly the initdb chain is
 # staged from -BaseSha too (the base has no slot 370), the sweep is skipped, and [5h] must fail.
+# rw-settings-store adds [5j] the settings store's integration test (src/settings/settings_integration_test.ts: two users,
+# the tiers, validation, setting_get, the database's guard), [5k] the REAL idea refinery image's next pass reading each
+# idea owner's refinery.dormancy_days, [5l] the digest's window and the podcast's team read per run for the run owner
+# (recipes/daily-digest/lab/settings-probe.ts over the real PostgREST), [5m] slot 400 init twice more + revert twice +
+# init again, and B's settings in the isolation sweep. -SettingsOnly runs those and the sweep alone; with -Red
+# -SettingsOnly the chain is staged from -BaseSha (no slot 400), the sweep is skipped, and [5j] must fail.
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
 param(
   [string]$Id = 'wt-rw-p2b-workspace',
@@ -57,7 +63,8 @@ param(
   [string]$Cases = '',
   [switch]$KeepImages,
   [switch]$IntakeOnly,
-  [switch]$IdeasOnly
+  [switch]$IdeasOnly,
+  [switch]$SettingsOnly
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -82,6 +89,8 @@ $net = "$P-net"
 $wbTag = "openbrain-workbench:wt-$short"; $wbTestTag = "openbrain-workbench:wt-$short-test"
 $viewerTag = "openbrain-wiki-viewer:wt-$short"; $e2eTag = "openbrain-workspace-e2e:wt-$short"
 if ($Red) { $wbTag = "openbrain-workbench:wt-$short-base"; $wbTestTag = "openbrain-workbench:wt-$short-test"; $viewerTag = "openbrain-wiki-viewer:wt-$short-base" }
+$refTag = "openbrain-idea-refinery:wt-$short-refinery" # rw-settings-store [5k]
+$baseChain = $IdeasOnly -or $SettingsOnly # the -Red run's chain comes from -BaseSha (the base has neither slot 370 nor 400)
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
@@ -220,7 +229,7 @@ try {
   # ---------------------------------------------------------------- 1. the initdb chain
   Write-Host '[1] the initdb chain, from docker-compose.yml'
   $chainDir = $dockerDir
-  if ($Red -and $IdeasOnly) {
+  if ($Red -and $baseChain) {
     # rw-p8a4-ideas: the base's own chain (no slot 370), from a pristine tree of -BaseSha
     $baseTree = Join-Path $env:TEMP "$P-chain-$BaseSha"
     New-Item -ItemType Directory -Force $baseTree | Out-Null
@@ -238,6 +247,7 @@ try {
   foreach ($m in $chain) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stage $m[1]) }
   Check (@($chain | Where-Object { $_[1] -eq '270-init-documents.sql' }).Count -eq 1) "the chain mounts 270-init-documents.sql ($($chain.Count) migrations)"
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '370-init-idea-functions.sql' }).Count -eq 1) 'the chain mounts 370-init-idea-functions.sql (rw-p8a4-ideas)' }
+  if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '400-init-settings.sql' }).Count -eq 1) 'the chain mounts 400-init-settings.sql (rw-settings-store)' }
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] the internal network'
@@ -275,6 +285,12 @@ try {
   $o = DkLong build --label $label -t $e2eTag (Join-Path $wsDir 'e2e'); Save 'build-e2e.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
   Check ($script:rc -eq 0) "$e2eTag (playwright-core + pg, lab only) built"
   $script:made.images += $e2eTag
+  if (-not $Red) {
+    # rw-settings-store [5k]: the idea refinery's own image (its Dockerfile: dependencies cached, deno check)
+    $o = DkLong build --label $label -t $refTag (Join-Path $ob1 'integrations/openbrain-idea-refinery'); Save 'build-refinery.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
+    Check ($script:rc -eq 0) "$refTag (the idea refinery, lab only) built"
+    $script:made.images += $refTag
+  }
 
   # ---------------------------------------------------------------- 4. the lab
   Write-Host '[4] the lab'
@@ -344,7 +360,7 @@ try {
     const ownBody = await own.text();
     console.log('guard csrf', csrf.status, 'no-origin', noOrigin.status, 'rebind', rebind, 'own-origin', /viewer's own origin|answers for/.test(ownBody) ? 'GUARDED' : 'reached-workbench');"
   Save 'edge-viewer.log' $edge
-  if ($Red -and -not $IdeasOnly) { Check ($edge -match 'workspace \d+ ' -and $edge -notmatch 'workspace 200 workspace true') 'RED: the base viewer does not serve /workspace' }
+  if ($Red -and -not $baseChain) { Check ($edge -match 'workspace \d+ ' -and $edge -notmatch 'workspace 200 workspace true') 'RED: the base viewer does not serve /workspace' }
   else { Check ($edge -match 'workspace 200 workspace true') 'the viewer serves /workspace (x-wiki-render: workspace)' }
   Check ($edge -match 'forwarded 200 direct-with-forged-key 401') 'the viewer forwards /workbench/* with the key injected server-side; a client key is never trusted'
   if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin reached-workbench') 'the forwarder refuses a cross-origin or Origin-less write (403) and a rebound Host (421); a write from the viewer''s own origin reaches the workbench' }
@@ -352,7 +368,7 @@ try {
   Check ($chromeIp -match '^\d+\.\d+\.\d+\.\d+$') 'the headless Chromium is on the network'
 
   # ---------------------------------------------------------------- 5. the tests
-  if (-not $IntakeOnly -and -not $IdeasOnly) {
+  if (-not $IntakeOnly -and -not $IdeasOnly -and -not $SettingsOnly) {
   Write-Host '[5a] the documents API integration test (as ob_app_memory? no: the fault trigger needs the superuser; the workbench itself runs as ob_app_memory)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'DOCS_TEST_PROXY_HOST=stub-target:8080',
@@ -391,6 +407,7 @@ try {
   }
 
   # rw-p8a4-ideas: the ideas panel and the refinery view over the real workbench and database (two users + the app role)
+  if (-not $SettingsOnly) {
   Write-Host '[5h] the ideas and refinery view integration test (owner-checked idea functions, the dossier into the room, archive, user sources)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault", '-e', 'DOCS_TEST_VAULT=/vault',
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
@@ -402,8 +419,62 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the ideas integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the ideas integration test ($($sum.Value))" }
+  }
 
-  if (-not $IdeasOnly) {
+  # rw-settings-store [5j]: the settings store over the real workbench and database
+  Write-Host '[5j] the settings store integration test (two users, the tiers, validation, setting_get, the database guard)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/settings/settings_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'settings-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the settings integration test fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the settings integration test ($($sum.Value))" }
+
+  if (-not $Red) {
+    # rw-settings-store [5k]: "a stored refinery value is what the service reads on its next run" - the REAL refinery
+    # (its image, as ob_app_memory, the production role) ages two users' quiet ideas on POST /run
+    Write-Host '[5k] the refinery''s next pass reads each idea owner''s refinery.dormancy_days (the real refinery image)'
+    $ra = "settings-ref-a-$rand"; $rb = "settings-ref-b-$rand"
+    $ia = [guid]::NewGuid().ToString(); $ib = [guid]::NewGuid().ToString()
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO public.ideas (id, title, summary, status, current_revision, owner_sub, updated_at) VALUES ('$ia', 'settings dormancy A', 'a', 'researched', 1, '$ra', now() - interval '5 days'), ('$ib', 'settings dormancy B', 'b', 'researched', 1, '$rb', now() - interval '5 days')"
+    Check ($script:rc -eq 0) "[5k] two users' researched ideas, five days without engagement $o"
+    $null = Run-Detached "$P-refinery" @('-e', 'PORT=8080', '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw",
+      '-e', 'RESEARCH_URL=http://stub-research:8000', '-e', 'IDEA_DELIVERY_POLL_MS=3600000', $refTag)
+    Check (Wait-Http "http://$P-refinery:8080/health" 60) '[5k] the refinery is up (no Mattermost token: brainstorm off, delivery to the room only)'
+    $refRun = { Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://$P-refinery:8080/run?wait=1',{method:'POST'}).then(async r=>console.log('run', r.status, await r.text())).catch(e=>console.log('run ERR', e.message))" }
+    $states = { ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT owner_sub || '=' || status FROM public.ideas WHERE id IN ('$ia', '$ib') ORDER BY owner_sub") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ' ' }
+    $putAs = { param($who, $days) Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://$P-wb:8000/workbench/settings/refinery.dormancy_days',{method:'PUT',headers:{'x-brain-key':'$key','content-type':'application/json','X-Test-Sub':'$who'},body:JSON.stringify({value:$days})}).then(r=>console.log('put', r.status))" }
+    $r1 = & $refRun; $s1 = & $states
+    $p1 = & $putAs $ra 3
+    $r2 = & $refRun; $s2 = & $states
+    $p2 = & $putAs $rb 2
+    $r3 = & $refRun; $s3 = & $states
+    $refLog = (Dk logs "$P-refinery") -split "`n" | Select-Object -Last 30
+    Save 'refinery-next-run.log' ("pass 1 (nothing stored): $r1`n  -> $s1`nA stores 3 days: $p1`npass 2: $r2`n  -> $s2`nB stores 2 days: $p2`npass 3: $r3`n  -> $s3`n--- refinery log (tail) ---`n" + ($refLog -join "`n"))
+    Write-Host "    pass 1: $s1 | pass 2: $s2 | pass 3: $s3"
+    Check ($s1 -eq "$ra=researched $rb=researched") "[5k] nothing stored: neither idea is dormant on the pass (the 14-day default, as today) ($s1)"
+    Check ($p1 -match 'put 200' -and $s2 -eq "$ra=dormant $rb=researched") "[5k] A stores 3 days: A's idea goes dormant on the NEXT pass, B's does not ($s2)"
+    Check ($p2 -match 'put 200' -and $s3 -eq "$ra=dormant $rb=dormant") "[5k] B stores 2 days: B's goes dormant on the pass after ($s3)"
+    $null = Dk rm -f "$P-refinery"
+
+    # rw-settings-store [5l]: the digest's AI-news window and the podcast's team, per run for the run owner
+    Write-Host '[5l] the digest''s window and the podcast''s team are read per run for the run owner (the services'' own functions, real PostgREST)'
+    $pa = "settings-pod-a-$rand"; $pb = "settings-pod-b-$rand"; $team = "settings-team-$rand"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO public.podcast_teams (id, owner_sub, name) VALUES ('$team', '$pa', 'probe team $rand')"
+    $o = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
+      '-e', 'PROBE_REST=http://openbrain-rest', '-e', "PROBE_WB=http://$P-wb:8000", '-e', "PROBE_KEY=$key",
+      '-e', "PROBE_OWNER=$pa", '-e', "PROBE_OTHER=$pb", '-e', "PROBE_TEAM=$team",
+      '--entrypoint', 'deno', $wbTag, 'run', '--no-config', '--allow-net', '--allow-env', '/recipes/daily-digest/lab/settings-probe.ts')
+    Save 'settings-probe.log' $o
+    foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^PROBE' }) { Write-Host "    $l" }
+    Check ($o -match 'PROBE OK \(0 failed\)') '[5l] the digest and the podcast read the owner''s stored value on their next run, the env value otherwise'
+  }
+
+  if (-not $IdeasOnly -and -not $SettingsOnly) {
   # rw-p5a-intake: the intake and queue panel over the real workbench and database, two users and OWUI's key
   Write-Host '[5e] the intake and queue panel integration test (two users, the OWUI inlet, every queue)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
@@ -422,7 +493,7 @@ try {
   # round 2 (tester attempt 1 F1-F6): the route-wide isolation sweep, LAST (it calls mutating routes
   # with user B's ids as user A). Its route table is the router's own (src/app.ts, imported in the test
   # stage image with the workbench's DB_* / recipes so the import resolves; never served there).
-  $walks = if ($Red -and $IdeasOnly) { @() } elseif ($WalkOff -or $Red) { @($(if ($WalkOff) { 'off' } else { 'on' })) } else { @('on', 'off') }
+  $walks = if ($Red -and $baseChain) { @() } elseif ($WalkOff -or $Red) { @($(if ($WalkOff) { 'off' } else { 'on' })) } else { @('on', 'off') }
   foreach ($walk in $walks) {
   if ($walk -eq 'off' -and -not $WalkOff) {
     # the same lab, the workbench restarted with the response walk OFF: the routes alone must hold
@@ -463,6 +534,28 @@ try {
   # rw-p5a-intake round 2 (tester T-F1): on this database (the whole chain ran), the slot-360 revert removes only
   # what init-intake-queue.sql added (revert-intake-queue-check.sql), and init + revert re-run cleanly. LAST: it
   # drops the intake queue's columns, so nothing may run against the workbench after it.
+  if (-not $Red) {
+    # rw-settings-store [5m]: slot 400 runs cleanly 3 times, its revert twice, and init again; the revert removes only
+    # what it added (the admin tier contract_settings and idea_schedule are as they were)
+    Write-Host '[5m] init-settings.sql twice more (3 runs with the chain''s), revert-settings.sql twice, then init again'
+    $q = { param($x) (Dk exec $db psql -U postgres -d openbrain -X -tAc $x).Trim() }
+    $objs = "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('setting_get','setting_problem','user_setting_set','trg_user_settings_guard'))::text || ' fns, ' || (CASE WHEN to_regclass('public.settings_keys') IS NULL THEN 'no' ELSE (SELECT count(*)::text FROM public.settings_keys) END) || ' keys, ' || (CASE WHEN to_regclass('public.user_settings') IS NULL THEN 'no user_settings' ELSE 'user_settings' END)"
+    $kept = "SELECT (SELECT coalesce(md5(string_agg(key || value::text || version, ',' ORDER BY key)), '-') FROM public.contract_settings) || ' / ' || (SELECT count(*)::text || ':' || coalesce(md5(string_agg(owner_sub || mode || coalesce(at_time::text, '') || tz, ',' ORDER BY owner_sub)), '-') FROM public.idea_schedule)"
+    $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('settings-revert-$rand', 'refinery.dormancy_days', '9') ON CONFLICT DO NOTHING"
+    $keptBefore = & $q $kept
+    $objsBefore = & $q $objs
+    $rv4 = @("before: $objsBefore | kept: $keptBefore")
+    foreach ($f in @('init-settings.sql', 'init-settings.sql', 'revert-settings.sql', 'revert-settings.sql', 'init-settings.sql')) {
+      $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv400.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv400.sql
+      $rv4 += "[$f] exit $($script:rc)$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> $(& $q $objs) | kept: $(& $q $kept)"
+    }
+    Save 'revert-settings.log' ($rv4 -join "`n")
+    foreach ($l in $rv4) { Write-Host "    $l" }
+    $afterRevert = @($rv4 | Where-Object { $_ -match '^\[revert-settings\.sql\] exit 0 -> 0 fns, no keys, no user_settings' }).Count
+    Check (@($rv4 | Where-Object { $_ -match 'exit 0 ' }).Count -eq 5 -and $afterRevert -eq 2 -and $rv4[-1] -match "-> $([regex]::Escape(($objsBefore -split ' keys')[0])) keys, user_settings" -and @($rv4 | Where-Object { $_ -match '^\[' -and $_ -notmatch ([regex]::Escape("kept: $keptBefore") + '$') }).Count -eq 0) 'slot 400: init runs 3 times, revert twice (removing exactly its own objects), init again restores them; contract_settings and idea_schedule untouched'
+    Check ((& $q "SELECT count(*) FROM public.user_settings") -eq '0') 'slot 400: the revert discarded the user tier (documented), init again starts it empty'
+  }
   if (-not $Red) {
     # rw-p8a4-ideas: the slot-370 revert runs cleanly twice and leaves the slot-230 notification trigger as it was
     Write-Host '[5i] init-idea-functions.sql twice more (3 runs with the chain''s), revert-idea-functions.sql twice, then init again'

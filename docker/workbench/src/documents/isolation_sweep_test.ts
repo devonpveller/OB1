@@ -254,6 +254,12 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const podReq = await wb("POST", "/workbench/contract/podcasts/requests",
     { team_id: pod.team, title: pod.request, refinery_id: bRefinery, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
   assertEquals(podReq.status, 202, podReq.text);
+  // rw-settings-store: B's own settings - B's team as B's podcast.team (so the podTeam marker covers it) and a
+  // refinery dormancy. No route names an owner: A must never read them, and A's calls must not change them.
+  const bSet = await wb("PUT", "/workbench/settings/podcast.team", { value: pod.team }, B);
+  const settingsPlanted = bSet.status === 200 && (await wb("PUT", "/workbench/settings/refinery.dormancy_days", { value: 7 }, B)).status === 200;
+  console.log(`sweep: B's settings ${settingsPlanted ? "planted (podcast.team, refinery.dormancy_days)" : `not planted (${bSet.status})`}`);
+  const bSettingsBefore = settingsPlanted ? await sql(`SELECT key, value, version FROM public.user_settings WHERE owner_sub = $1 ORDER BY key`, [bSub]) : [];
   // rw-p8a3-room: B's research room on B's refinery and B's own room on B's session - a transcript entry
   // (B's question through the scoped chat where the lab turns chat on, and one planted), B's chat scope and the
   // accreting draft, each carrying a marker. A must see none of it, by id or in any list.
@@ -538,6 +544,15 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const bScope = bRoomRead.json.room?.scope;
   assertEquals(bScope, { enabled: true, sources: [FX_ACTIVE] }, "user A's calls left B's chat scope unchanged");
   console.log(`sweep: B's rooms (idea + session) unchanged by A; B still reads them`);
+  // rw-settings-store: B's settings are B's - unchanged by A's calls, still B's own through the read function and B's GET
+  if (settingsPlanted) {
+    assertEquals(await sql(`SELECT key, value, version FROM public.user_settings WHERE owner_sub = $1 ORDER BY key`, [bSub]), bSettingsBefore,
+      "user A's calls left B's settings unchanged");
+    assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get($1, 'podcast.team') AS v`, [bSub]))[0].v, pod.team);
+    const bMine = await wb("GET", "/workbench/settings", undefined, B);
+    assert(bMine.text.includes(pod.team), `B reads B's own settings: ${bMine.status}`);
+    console.log(`sweep: B's settings unchanged by A; B still reads them`);
+  }
   const bList = await wb("GET", "/workbench/exports", undefined, B);
   assert(bExports.every((id) => bList.text.includes(id)), `B lists its own export runs: ${bList.status}`);
   assertEquals((await wb("GET", `/workbench/exports/${bExport}/file`, undefined, B)).status, 200, "B downloads its own passed export");

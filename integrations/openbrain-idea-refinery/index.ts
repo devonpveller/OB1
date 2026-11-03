@@ -26,6 +26,7 @@
  */
 import { Pool } from "postgres";
 import { deliverForIdea as deliverDossier, type JobResult } from "./deliver.ts";
+import { AGE_ONE_HORIZON, AGE_PER_OWNER, ownerSetting, settingBool, settingNumber } from "./settings.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const num = (k: string, d: number) => {
@@ -66,6 +67,8 @@ const BACKPRESSURE_RETRIES = num("IDEA_BACKPRESSURE_RETRIES", 3);
 
 // IR.5 fizzle/resurface knobs (DT-5): dormancy horizon (days) + resurface cosine
 // distance (<=; tighter than the research engine's 0.55 reuse cutoff).
+// rw-settings-store: these are now the DEFAULTS - each idea owner's own refinery.dormancy_days /
+// refinery.resurface_max_dist (the Settings panel, read through setting_get on every pass) wins when stored.
 const DORMANCY_DAYS = num("IDEA_DORMANCY_DAYS", 14);
 const RESURFACE_MAX_DIST = Number(env("IDEA_RESURFACE_MAX_DIST", "0.40"));
 
@@ -86,6 +89,7 @@ type OwedIdea = {
   thread_root: string | null;
   last_job_id: string | null;
   priority: boolean;
+  owner_sub: string | null;
 };
 
 
@@ -94,7 +98,7 @@ type OwedIdea = {
 
 const OWED_COLS =
   `i.id, i.title, i.summary, i.current_revision, i.domain, i.thread_root, i.last_job_id,
-   (i.metadata->>'research_now' = 'true') AS priority`;
+   (i.metadata->>'research_now' = 'true') AS priority, i.owner_sub`;
 
 // Deliver (P25 durability): an idea whose current job finished and was neither delivered nor
 // already counted as failed. A flaky post leaves it selectable for the next pass.
@@ -145,14 +149,13 @@ async function markFailed(idea: OwedIdea): Promise<void> {
 async function ageIdeas(): Promise<number> {
   const c = await pool.connect();
   try {
-    const r = await c.queryObject<{ id: string }>(
-      `UPDATE ideas SET status='dormant', dormant_at=now()
-        WHERE status='researched' AND engaged_at IS NULL
-          AND updated_at < now() - make_interval(days => $1)
-        RETURNING id`,
-      [DORMANCY_DAYS],
-    );
-    return r.rows.length;
+    // rw-settings-store: each owner's horizon (refinery.dormancy_days), else DORMANCY_DAYS
+    try {
+      return (await c.queryObject<{ id: string }>(AGE_PER_OWNER, [DORMANCY_DAYS])).rows.length;
+    } catch (e) {
+      if ((e as { fields?: { code?: string } }).fields?.code !== "42883") throw e; // setting_get not there (slot 400 not applied)
+      return (await c.queryObject<{ id: string }>(AGE_ONE_HORIZON, [DORMANCY_DAYS])).rows.length;
+    }
   } finally {
     c.release();
   }
@@ -278,7 +281,8 @@ async function deliverForIdea(idea: OwedIdea, result: JobResult): Promise<boolea
     sql: sqlRows,
     // Mattermost stays the bridge while a token is configured; without one the room alone is the delivery
     mm: MM_TOKEN ? { channel: () => ensureChannel(MM_CHANNEL), post: mmPost, permalink } : null,
-    resurfaceMaxDist: RESURFACE_MAX_DIST,
+    // rw-settings-store: the idea owner's refinery.resurface_max_dist, else IDEA_RESURFACE_MAX_DIST
+    resurfaceMaxDist: settingNumber(await ownerSetting(sqlRows, idea.owner_sub, "refinery.resurface_max_dist"), RESURFACE_MAX_DIST, 0.05, 1),
     log: (m) => console.log(m),
   }, idea, result);
   return out === "delivered";
@@ -673,6 +677,14 @@ async function gapResearch(channelId: string, threadRoot: string, query: string)
   await mmPost(channelId, parts.join("\n\n"), threadRoot);
 }
 
+/** rw-settings-store: the owner of the idea whose dossier thread this is wants brainstorms (default: yes). */
+async function brainstormWanted(threadRoot: string): Promise<boolean> {
+  const owner = (await sqlRows<{ owner_sub: string | null }>(`SELECT owner_sub FROM ideas WHERE thread_root = $1 LIMIT 1`, [threadRoot]).catch(() => []))[0]?.owner_sub;
+  const on = settingBool(await ownerSetting(sqlRows, owner, "refinery.brainstorm"), true);
+  if (!on) console.log(`brainstorm: off for the owner of thread ${threadRoot.slice(0, 8)} (their refinery.brainstorm)`);
+  return on;
+}
+
 // The brainstorm poll loop: watch #ideas for operator replies under a dossier + respond LOCALLY.
 async function brainstormLoop(): Promise<void> {
   let bid: string;
@@ -703,6 +715,9 @@ async function brainstormLoop(): Promise<void> {
         if (!p.root_id) continue;                    // only an operator REPLY under a dossier
         const uname = await userName(p.user_id);
         if (!mayBrainstorm(OPERATORS, uname)) continue;
+        // rw-settings-store: the idea's owner may turn brainstorms off for their ideas (refinery.brainstorm);
+        // IDEA_BRAINSTORM stays the service's master switch (this loop does not run without it)
+        if (!await brainstormWanted(String(p.root_id))) continue;
         try { await brainstormReply(channelId, p.root_id, bid); }
         catch (e) { console.error(`brainstorm reply failed (${String(p.root_id).slice(0, 8)}): ${(e as Error).message}`); }
       }

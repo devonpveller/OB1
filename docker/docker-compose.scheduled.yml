@@ -70,6 +70,9 @@ services:
       NEXT_TRIGGER_URL: ""
       # J.1 (2026-08-21): per-lane virtual key for the master-key'd gateway
       LOCAL_LLM_BEARER: ${OB_DIGEST_LLM_KEY:-no-key}
+      # rw-settings-store: whose digest this is - the Settings panel's digest.window_hours of this subject is
+      # read on every digest (else DIGEST_WINDOW_HOURS). = the workbench's WORKSPACE_DEFAULT_SUB (blank -> "operator").
+      DIGEST_OWNER_SUB: ${WORKSPACE_DEFAULT_SUB:-}
       # ── Morning routine (mr-routine-outage) ─────────────────────────────
       # This service owns today's routine record (ROUTINE_STATE_DIR) and the
       # ONE idempotent action ensureToday(): cron (/routine/start), the L14
@@ -285,6 +288,7 @@ services:
       # The team that voices the daily episode (a team id or name in the presenter
       # model, init-podcasts.sql) and whose it is (= the workbench's WORKSPACE_DEFAULT_SUB).
       # Blank team = the script is still written, no audio is voiced.
+      # rw-settings-store: the owner's podcast.team (the Settings panel) wins when stored, read on every run.
       PODCAST_TEAM: ${PODCAST_TEAM:-}
       PODCAST_OWNER_SUB: ${WORKSPACE_DEFAULT_SUB:-}
       # The configuration store is read here on every render (podcast.archive_destination).

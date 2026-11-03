@@ -16,6 +16,7 @@ import { ConsiderationsSynthesizer } from "./considerations/synthesizer.ts";
 import { WeatherSection } from "./sections/weather.ts";
 import { CalendarSection } from "./sections/calendar.ts";
 import { AiNewsSection } from "./sections/ai-news.ts";
+import { digestWindowFor, SettingReader } from "./clients/settings.ts";
 import { PodcastBriefSection } from "./sections/podcast-brief.ts";
 import { HtmlRenderer } from "./renderers/html.ts";
 import { MarkdownRenderer } from "./renderers/markdown.ts";
@@ -55,6 +56,9 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
 
   // ─── Clients ──────────────────────────────────────────────────────────────
   const brain = new BrainClient({ baseUrl: env("OPEN_BRAIN_URL", "http://openbrain-rest") });
+  const settings = new SettingReader(env("OPEN_BRAIN_URL", "http://openbrain-rest"), d.fetchFn);
+  // whose digest this is (rw-settings-store): the workbench's default subject, blank -> its fallback "operator"
+  const DIGEST_OWNER_SUB = env("DIGEST_OWNER_SUB").trim() || "operator";
   const llm = new LlmClient({
     chatBase: env("LOCAL_LLM_BASE", "http://llama-cpp:8080/v1"),
     chatModel: env("LOCAL_LLM_MODEL", "local-small"),
@@ -95,7 +99,9 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
     // routine includes it only when it is TODAY's (else it is marked pending).
     new PodcastBriefSection({ path: briefPath, maxAgeMs: envInt("PODCAST_BRIEF_MAX_AGE_MS", 12 * 3600 * 1000), now: () => clock.now() }),
     new AiNewsSection(brain, {
-      windowHours: envInt("DIGEST_WINDOW_HOURS", 24),
+      // rw-settings-store: the digest owner's digest.window_hours (the Settings panel), read on every digest;
+      // DIGEST_WINDOW_HOURS when they stored none. The owner is DIGEST_OWNER_SUB (= WORKSPACE_DEFAULT_SUB).
+      windowHours: () => digestWindowFor(settings, DIGEST_OWNER_SUB, envInt("DIGEST_WINDOW_HOURS", 24)),
       limit: envInt("DIGEST_LIMIT", 200),
     }),
   ];

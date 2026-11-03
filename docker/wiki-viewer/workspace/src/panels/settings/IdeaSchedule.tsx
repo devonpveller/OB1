@@ -1,8 +1,9 @@
-// rw-idea-schedule: the user's own "when does research on my ideas start" setting, in Settings.
+// rw-idea-schedule: the user's own "when does research on my ideas start" setting - the first section of the
+// Settings panel (rw-settings-store moved it in from the title bar popover; it works exactly as before).
 // Immediately (the default), daily at HH:MM, or weekly on a day at HH:MM, in a time zone that
 // defaults to the browser's. Reads and writes /workbench/idea-schedule (the caller's subject only).
 import { useEffect, useState } from "react";
-import { ApiError, api, get } from "../lib/api";
+import { ApiError, api, get } from "../../lib/api";
 
 export const SCHEDULE_URL = "/workbench/idea-schedule";
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];

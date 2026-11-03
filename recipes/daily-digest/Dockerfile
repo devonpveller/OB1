@@ -24,7 +24,7 @@ WORKDIR /app
 FROM runtime AS test
 COPY . /app
 RUN PODCAST_REQUIRE_FFMPEG=1 deno test --allow-read --allow-write --allow-env --allow-run --allow-net=127.0.0.1 \
-      src/podcast/podcast-audio.test.ts src/podcast/round2.test.ts src/podcast/notices_test.ts src/on-capture/on-capture.test.ts \
+      src/podcast/podcast-audio.test.ts src/podcast/round2.test.ts src/podcast/notices_test.ts src/on-capture/on-capture.test.ts src/clients/settings.test.ts \
  && PODCAST_REQUIRE_FFMPEG=1 deno test --allow-all src/podcast/chain-audio.e2e.test.ts  && touch /podcast-test-gate-passed && echo "podcast image gate: OK"
 
 FROM runtime

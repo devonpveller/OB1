@@ -48,7 +48,8 @@ export interface EmailGroup {
 }
 
 export interface AiNewsSectionOptions {
-  windowHours: number;
+  /** A number, or (rw-settings-store) read on every produce(): the run owner's digest.window_hours. */
+  windowHours: number | (() => Promise<number>);
   limit: number;
 }
 
@@ -61,8 +62,9 @@ export class AiNewsSection implements Section {
   ) {}
 
   async produce(): Promise<SectionData<AiNewsPayload> | null> {
+    const windowHours = typeof this.opts.windowHours === "function" ? await this.opts.windowHours() : this.opts.windowHours;
     const thoughts = await this.brain.fetchRecentThoughts({
-      windowHours: this.opts.windowHours,
+      windowHours,
       limit: this.opts.limit,
       // profile_field is internal config, not news. Calendar/todo events
       // will get their own sections so don't leak in here either.
@@ -76,7 +78,7 @@ export class AiNewsSection implements Section {
     return {
       kind: "ai_news",
       payload: {
-        windowHours: this.opts.windowHours,
+        windowHours,
         emails,
         ungrouped,
         bySender,

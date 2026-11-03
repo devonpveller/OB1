@@ -599,3 +599,36 @@ idea gets nothing and no notification) and still posts it to Mattermost while `I
 Workspace panels: `ideas` (by state, archived in its own list), `idea` (the idea view = the refinery view) and
 `refinery-graph` (its context graph, hide / unhide). Lab: `run-workspace-tests.ps1 -Subnet <x.y.z.0/24>` [5h], or
 `-IdeasOnly` for [5h] + the two-user sweep; `-Red -IdeasOnly -BaseSha <sha>` stages the base's chain too.
+
+## The Settings panel and the settings store (rw-settings-store, plan 08 PD3)
+
+`init-settings.sql` (slot 400; revert `revert-settings.sql`, which discards every user's settings) adds the
+registry `settings_keys` (per key: tier `user` | `admin`, type, the code default, the env variable the reading
+service falls back to, which service reads it, validation, editable) and the user tier `user_settings` (one row per
+`owner_sub` + key, versioned). The ADMIN tier is the existing global store `contract_settings` (slot 230):
+`podcast.archive_destination` is registered as an admin key whose writes go through that store's own validation.
+A key of type `secret`, or one named like a credential, is refused by the table itself; a credential-shaped text
+value is refused by the validation - no secret is stored here until PD4/PD5 add an encrypted store.
+
+Services read a setting through ONE function, `public.setting_get(owner, key)`: the owner's row for a user key, the
+shared row for an admin key, else NULL - and NULL means the service keeps its env value / code default, so nothing
+changes until a value is stored. Readers today: the idea refinery (each idea owner's `refinery.dormancy_days` on
+every pass, `refinery.resurface_max_dist` on every dossier, `refinery.brainstorm` on every brainstorm reply), the
+digest (`digest.window_hours` of `DIGEST_OWNER_SUB` on every digest) and the podcast (`podcast.team` of
+`PODCAST_OWNER_SUB` on every episode). `digest.send_time` and the research tuning (`research.*`, `curator.*`) are
+listed read-only.
+
+| route | what |
+|---|---|
+| `GET /workbench/settings` | my settings (the user tier, the seam's subject only) and `admin` (whether I see the Admin section) |
+| `PUT /workbench/settings/:key` `{value, version?}` | set one of mine; an admin key is 403, a read-only key 409, a value the registry refuses 400, a stale `version` 409 |
+| `DELETE /workbench/settings/:key` | mine back to the default |
+| `GET /workbench/settings/admin` | admins only: the shared settings, research tuning among them (read-only) |
+| `PUT` / `DELETE /workbench/settings/admin/:key` | admins only: an editable shared setting |
+
+No route names an owner: one user's value is never readable or writable by another. The admin decision is the
+contract store's `settingsAdmin` (a signed-in member of `WORKSPACE_FORWARD_AUTH_ADMIN_GROUP`; with sign-in not
+configured - the single-user mode as shipped - the default subject `WORKSPACE_DEFAULT_SUB` itself; never a service
+or another header user). Settings is a user front end: a service key gets 403 (`USER_ONLY`). Lab:
+`run-workspace-tests.ps1 -Subnet <x.y.z.0/24>` [5j]-[5m] (+ the e2e's ST1 and B's settings in the sweep), or
+`-SettingsOnly` for those and the sweep; `-Red -SettingsOnly -BaseSha <sha>` stages the base's chain too.
