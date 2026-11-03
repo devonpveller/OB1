@@ -62,8 +62,10 @@ param(
   [switch]$KeepImages,
   [switch]$IntakeOnly,
   [switch]$IdeasOnly,
-  # rw-idea-privacy round 3: the previous round's slot 380 the [5j] RED step runs (it misses the round-3 shapes)
-  [string]$PrivacyPrevSha = 'bf96782'
+  # rw-idea-privacy: the previous round's slot 380 the [5j] RED step runs (round 4: 0b5b646 - its 8-word rule withholds
+  # a general page that shares wording with an idea), and the wiki writer the R1 probe's RED runs
+  [string]$PrivacyPrevSha = '0b5b646',
+  [string]$PrivacyR1BaseSha = '0b5b646'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -487,7 +489,7 @@ try {
     $pvRc = & $psqlFile $pvi "previous round init ($PrivacyPrevSha)"
     $s = & $phase 'migrated' 'privacy-red-prev-380.log'
     $redPv = [string]$script:lastPhaseText
-    Check ($pvRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $redPv -match '\[migrated\] round 3: [^\n]*\.\.\. FAILED' -and $redPv -match '\[migrated\] the archive holds exactly[^\n]*\.\.\. ok' -and $redPv -match '\[migrated\] A still reads every revision[^\n]*\.\.\. ok') "[5j] RED: the previous round's 380 ($PrivacyPrevSha) misses the listed shapes - the round-3 test fails, the archive and revisions pass ($($s.Value))"
+    Check ($pvRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $redPv -match '\[migrated\] round 4: [^\n]*\.\.\. FAILED' -and $redPv -match 'a general page was withheld: content/topic/r3-fragment' -and $redPv -match '\[migrated\] the archive holds exactly[^\n]*\.\.\. ok' -and $redPv -match '\[migrated\] A still reads every revision[^\n]*\.\.\. ok') "[5j] RED: the previous round's 380 ($PrivacyPrevSha) withholds a general page that only shares 8+ words with an idea (the operator's round-4 bar) - the round-4 test fails on exactly that, the archive and revisions pass ($($s.Value))"
     $pvRevRc = & $psqlFile $pvr "previous round revert ($PrivacyPrevSha)"
     Check ($pvRevRc -eq 0) "[5j] the previous round's revert brings the planted state back"
     $rcs = @((& $psqlFile $init 'init'), (& $psqlFile $init 'init again'))
@@ -498,7 +500,7 @@ try {
     Write-Host "    [reconcile --repair, files present] exit $($script:rc)"
     $moved = & $filesOut
     $s = & $phase 'migrated' 'privacy-migrated.log'
-    Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 5 -and [int]$s.Groups[3].Value -eq 0) "[5j] after 380 (+ the reconcile repair, + the deploy step): no shared search or page surface shows idea text, the archives are exactly the rows removed, the guard holds, A reads every revision ($($s.Value))"
+    Check ($moved -ge 2 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 5 -and [int]$s.Groups[3].Value -eq 0) "[5j] after 380 (+ the reconcile repair, + the deploy step): no shared search or page surface shows idea text, the archives are exactly the rows removed, the guard holds, A reads every revision ($($s.Value))"
     $null = & $filesBack
     $rcs = @((& $psqlFile $revert 'revert'), (& $psqlFile $revert 'revert again'))
     Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p380['revert'] -match 'thought\(s\) restored' -and $script:p380['revert'] -match 'wiki page\(s\) restored' -and $script:p380['revert again'] -match 'nothing to restore' -and $script:p380['revert again'] -match 'no page to restore') '[5j] revert-idea-privacy.sql restores the thoughts and the pages, and a second run has nothing to restore'
@@ -519,6 +521,37 @@ try {
     $finalRc = & $psqlFile $init 'init (the state the sweep runs on)'
     $null = & $filesOut
     Check ($finalRc -eq 0) '[5j] init-idea-privacy.sql again + the deploy step (the sweep runs on the migrated database)'
+    # round 4 (review R1): the REAL wiki writer meets the guard. The probe (wiki-withheld-probe.mjs) writes a page that
+    # links an idea (the guard withholds it) and a clean page into the lab vault through PostgREST, as a compile does, then a reconcile
+    # check and the lab viewer's /__health drift. RED with the base's recipes/_shared ($PrivacyR1BaseSha): the guarded
+    # page's FILE is written with no row (reconcile drift, the viewer's drift up). GREEN with this tree's: no file, the
+    # clean page lands, exit 0, no drift.
+    $ideaLink = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT 'content/thought/' || (v->'thoughts'->>0) FROM public.lab_idea_privacy_plant WHERE k = 'plant'") | Out-String).Trim()
+    $oldShared = Join-Path $env:TEMP "$P-shared-$PrivacyR1BaseSha"
+    New-Item -ItemType Directory -Force $oldShared | Out-Null
+    $script:made.dirs += $oldShared
+    $tarS = Join-Path $env:TEMP "$P-shared.tar"
+    & git -C $ob1 archive --format=tar -o $tarS $PrivacyR1BaseSha recipes/_shared
+    & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $tarS -C $oldShared
+    Remove-Item -Force $tarS
+    $probe = @{}
+    foreach ($run in @(@('red', (Join-Path $oldShared 'recipes\_shared')), @('green', (Join-Path $ob1 'recipes\_shared')))) {
+      $o = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/shared:ro", '-v', "${vault}:/vault", '-v', "${ct}:/ct:ro",
+        '-e', 'SHARED=/shared', '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "PROBE_VIEWER=http://${P}-viewer:8080",
+        '-e', "PROBE_TAG=$($run[0])", '-e', "IDEA_LINK=$ideaLink", '--entrypoint', 'node', $viewerTag, '/ct/wiki-withheld-probe.mjs')
+      $line = (($o -split "`n") | Where-Object { $_ -match '^PROBE ' } | Select-Object -Last 1)
+      $probe[$run[0]] = if ($line) { $line.Substring(6) | ConvertFrom-Json } else { $null }
+      Save "privacy-r1-probe-$($run[0]).log" ((($o -split "`n") | Where-Object { $_ -match '^PROBE |\[wiki-pages\]|\[reconcile\]' }) -join "`n")
+      Write-Host "    [R1 probe $($run[0])] $line"
+      # the red run leaves its guarded file and the clean page: removed, so the green run measures from the same state
+      foreach ($sl in @("content/topic/r1-guarded-$($run[0])", "content/topic/r1-clean-$($run[0])")) {
+        $f = Join-Path $vault "$sl.md"; if (Test-Path -LiteralPath $f) { Remove-Item -Force -LiteralPath $f }
+        $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DELETE FROM public.wiki_pages WHERE slug = '$sl'"
+      }
+    }
+    $r = $probe['red']; $g = $probe['green']
+    Check ($r -and $r.guardedFile -and -not $r.guardedRow -and $r.reconcileMissingGuarded -and $r.healthAfter.drift -gt $r.healthBefore.drift) "[5j] R1 RED: the base's writer ($PrivacyR1BaseSha) writes the guarded page's file with no row - reconcile drift, the viewer's drift up ($(if ($r) { "drift $($r.healthBefore.drift) -> $($r.healthAfter.drift)" }))"
+    Check ($g -and $g.exitCode -eq 0 -and -not $g.guardedFile -and -not $g.guardedRow -and $g.cleanFile -and $g.cleanRow -and $g.unsynced -eq 0 -and -not $g.reconcileMissingGuarded -and $g.healthAfter.drift -le $g.healthBefore.drift) "[5j] R1 GREEN: no file for the withheld page, the clean page lands, the run ends 0 with nothing unsynced, no drift ($(if ($g) { "drift $($g.healthBefore.drift) -> $($g.healthAfter.drift), viewer $($g.healthAfter.status)" }))"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -c 'DROP TABLE IF EXISTS public.lab_idea_privacy_plant'
     Save 'privacy-psql.log' (($script:p380.GetEnumerator() | Sort-Object Name | ForEach-Object { "[$($_.Name)] $($_.Value)" }) -join "`n")
   }

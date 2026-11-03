@@ -18,11 +18,12 @@
 --   4. the linking revisions become private (private_owner = the idea's owner, thought_id NULL);
 --   5. delete ONLY the thoughts whose archived row equals the live row, and refuse unless every idea thought is gone and
 --      the archive holds exactly the rows removed.
---   6. the wiki's copies (round 2): every wiki_pages row that shows an archived idea's text (its thought leaf, a page
---      citing that leaf, a page quoting the text - normalised, any run of 8 words, title or body; round 3) is archived
---      into public.idea_wiki_archive and withheld, and a guard on
---      wiki_pages keeps such a page from being written back (the viewer's reconcile, a compile). The pages' vault FILES
---      are moved out of the vault by hand right after this file runs (the deploy step; the guard covers the gap).
+--   6. the wiki's copies (round 2; the rule since round 4 is the idea's PRESENTATION, never shared wording): every
+--      wiki_pages row that is an archived idea thought's leaf or links one in any form is archived into
+--      public.idea_wiki_archive and withheld, and a guard on wiki_pages refuses the leaf and the link being written
+--      back (the viewer's reconcile, a compile, an app role). A linking page that is otherwise general comes back
+--      rebuilt by the next compile, without the idea. The pages' vault FILES are moved out of the vault by hand right
+--      after this file runs (the deploy step; the guard covers the gap). Run it with the wiki compile paused.
 -- One transaction (the whole file): a failed check leaves everything as it was. Re-run: nothing left to move.
 -- The delete bumps the cited entities' updated_at (trg_touch_entities_on_thought_delete), so the entity wiki
 -- recompiles their pages. Revert: revert-idea-privacy.sql restores the thoughts byte-identical from the archive.
@@ -32,6 +33,10 @@
 -- ONE transaction for the whole file: a refusal below leaves nothing behind, not even the archive table
 BEGIN;
 SET LOCAL client_min_messages = warning;   -- the re-run's "already exists, skipping" notices
+-- round 4 (review R5): the run takes write locks on wiki_pages and idea_revisions (its triggers) for its whole length
+-- (~15 minutes on live: two scans of every page). Never queue behind a writer and stall everyone queued behind THIS:
+-- a lock not granted within 10 s stops the run, nothing changed (pause the wiki compile, then run it again)
+SET LOCAL lock_timeout = '10s';
 
 -- the archive: the thoughts' own columns (LIKE: same names and types, so a restore is byte-identical) + what the move
 -- recorded, under archive_* names
@@ -170,18 +175,12 @@ BEGIN
         n_deleted, n_private;
 END $$;
 
--- ── the wiki's copies (round 2, tester F1) ─────────────────────────────────────────────────────────────
+-- ── the wiki's copies (round 2, tester F1; the rule since round 4: the idea's presentation, by link and leaf) ──────
 -- The entity wiki compiled the idea thoughts into wiki_pages, which the contract search's `page` kind, the viewer and
 -- every other page reader serve to everyone: a thought leaf (content/thought/<id>) holding the idea's text, and pages
--- citing that leaf or quoting the text (entity, source, note). ONE predicate decides "this page shows an idea's text",
--- for the move below and for the guard after it (round 3: normalised text, 8-word runs, the title, every link form -
--- see "what shows an idea's text means" below):
---   * the page IS an archived idea thought's leaf, or references one in any link form;
---   * its normalised title or body holds a run of 8 or more words of an idea text (or a short idea's whole text).
--- A page that also holds shared content (an entity page citing an idea thought among others) is WITHHELD, not edited:
--- the text was written around the citation and a textual cut cannot be proven complete. The delete trigger on thoughts
--- already bumped those entities, so the next compile regenerates the page from what is still shared, and the guard
--- lets that clean page back in.
+-- citing that leaf. ONE predicate (idea_privacy_page_links_idea, below) decides which page is the idea's presentation,
+-- for the move and for the guard: the leaf, and any page that links it. Such a page is archived and withheld; a
+-- linking page that is otherwise general comes back rebuilt by the next compile, without the idea (see below).
 SET LOCAL client_min_messages = warning;
 CREATE TABLE IF NOT EXISTS public.idea_wiki_archive (LIKE public.wiki_pages);
 ALTER TABLE public.idea_wiki_archive ADD COLUMN IF NOT EXISTS archive_at TIMESTAMPTZ NOT NULL DEFAULT now();
@@ -196,9 +195,21 @@ BEGIN
                                                              AND b.attname = a.attname AND NOT b.attisdropped) LOOP
         EXECUTE format('ALTER TABLE public.idea_wiki_archive ADD COLUMN %I %s', c.attname, c.typ);
     END LOOP;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.idea_wiki_archive'::regclass AND contype = 'p') THEN
-        ALTER TABLE public.idea_wiki_archive ADD PRIMARY KEY (slug);
+    -- round 4 (review R6): a page may be archived more than once - withheld, regenerated clean, then matched again by a
+    -- newer idea text. Each archiving is its own row (archive_id); the slug is not a key. A round-2/3 archive keyed by
+    -- slug is re-keyed in place (no row is dropped).
+    IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.idea_wiki_archive'::regclass AND attname = 'archive_id' AND NOT attisdropped) THEN
+        ALTER TABLE public.idea_wiki_archive ADD COLUMN archive_id BIGINT GENERATED BY DEFAULT AS IDENTITY;
     END IF;
+    IF EXISTS (SELECT 1 FROM pg_constraint pc WHERE pc.conrelid = 'public.idea_wiki_archive'::regclass AND pc.contype = 'p'
+                AND pc.conkey <> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid = 'public.idea_wiki_archive'::regclass AND attname = 'archive_id')]) THEN
+        EXECUTE format('ALTER TABLE public.idea_wiki_archive DROP CONSTRAINT %I',
+                       (SELECT conname FROM pg_constraint WHERE conrelid = 'public.idea_wiki_archive'::regclass AND contype = 'p'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.idea_wiki_archive'::regclass AND contype = 'p') THEN
+        ALTER TABLE public.idea_wiki_archive ADD PRIMARY KEY (archive_id);
+    END IF;
+    CREATE INDEX IF NOT EXISTS idx_idea_wiki_archive_slug ON public.idea_wiki_archive (slug, archive_id DESC);
     REVOKE ALL ON public.idea_wiki_archive FROM PUBLIC;
     FOR r IN SELECT rolname FROM pg_roles
               WHERE NOT rolsuper AND rolname NOT LIKE 'pg\_%'
@@ -210,144 +221,56 @@ END $$;
 ALTER TABLE public.idea_wiki_archive ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.idea_wiki_archive FORCE ROW LEVEL SECURITY;
 COMMENT ON TABLE public.idea_wiki_archive IS
-  'rw-idea-privacy: the wiki_pages rows that showed an idea''s text (its thought leaf, pages citing or quoting it), '
+  'rw-idea-privacy: the wiki_pages rows that presented an idea (its thought leaf, pages linking it), '
   'withheld by init-idea-privacy.sql (slot 380). Readable by no app role. revert-idea-privacy.sql restores them.';
 
--- ── what "shows an idea's text" means (round 3, tester attempt 2; the bar frozen by the coordinator) ─────────
--- Every idea text is NORMALISED before it is compared, and so is the page: lower case, and every run of characters
--- that is not a letter or a digit becomes ONE space. That one rule removes case, every kind of whitespace (newlines,
--- doubled spaces), markdown emphasis, blockquote and heading marks, and link syntax.
--- A page shows an idea's text when its normalised TITLE or BODY holds:
---   * any run of 8 or more consecutive words of an idea text (kept as md5 hashes of every 8-word window, in
---     idea_privacy_shingles); or, for an idea text of fewer than 8 words, that whole text (idea_privacy_whole, matched
---     on word boundaries);
---   * or a reference to an archived idea thought in any form - content/thought/<id>, thought/<id>, [[...]], (...),
---     the slug itself or an entry of links - with the id ending there (<id>0 is another thought).
--- The idea texts: every archived idea thought's content, and every idea revision's summary (every user's: an idea is
--- private to its owner, so no idea text may be readable by anyone else). A new revision adds its windows as it is
--- written (trg_idea_privacy_learn on idea_revisions), so the guard knows it from then on.
--- Out of reach by construction, and named in the findings: a paraphrase or summary that shares no run of 8 words.
-CREATE TABLE IF NOT EXISTS public.idea_privacy_shingles (h TEXT PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS public.idea_privacy_whole (t TEXT PRIMARY KEY);
-DO $$
-DECLARE
-    tb TEXT; r TEXT;
-BEGIN
-    FOREACH tb IN ARRAY ARRAY['public.idea_privacy_shingles', 'public.idea_privacy_whole'] LOOP
-        EXECUTE format('REVOKE ALL ON %s FROM PUBLIC', tb);
-        FOR r IN SELECT rolname FROM pg_roles
-                  WHERE NOT rolsuper AND rolname NOT LIKE 'pg\_%'
-                    AND has_table_privilege(oid, tb, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-                    AND oid <> (SELECT relowner FROM pg_class WHERE oid = tb::regclass) LOOP
-            EXECUTE format('REVOKE ALL ON %s FROM %I', tb, r);
-        END LOOP;
-        EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', tb);
-        EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', tb);
-    END LOOP;
-END $$;
-
-CREATE OR REPLACE FUNCTION public.idea_privacy_norm(p TEXT)
-RETURNS TEXT
-LANGUAGE sql IMMUTABLE PARALLEL SAFE
-SET search_path = public, pg_temp
-AS $$
-    SELECT btrim(regexp_replace(lower(coalesce(p, '')), '[^[:alnum:]]+', ' ', 'g'));
-$$;
-
--- the md5 of every 8-word window of a text's normalised words (none for a text of fewer than 8 words). plpgsql, into
--- a local array: a SQL set-returning function that slices a large array re-reads (detoasts) the whole array on every
--- slice, which made this quadratic (measured: 210 ms for one 3 000-character page; this is about 1 ms)
-DROP FUNCTION IF EXISTS public.idea_privacy_windows(TEXT);
-CREATE FUNCTION public.idea_privacy_windows(p TEXT)
-RETURNS TEXT[]
-LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
-SET search_path = public, pg_temp
-AS $$
-DECLARE
-    a TEXT[] := string_to_array(public.idea_privacy_norm(p), ' ');
-    n INT := coalesce(cardinality(a), 0);
-    r TEXT[] := '{}';
-BEGIN
-    IF n < 8 THEN RETURN r; END IF;
-    FOR i IN 1 .. n - 7 LOOP
-        r := r || md5(array_to_string(a[i:i + 7], ' '));
-    END LOOP;
-    RETURN r;
-END;
-$$;
-
--- learn one idea text: its windows, or (fewer than 8 words) its whole normalised text
-CREATE OR REPLACE FUNCTION public.idea_privacy_learn(p TEXT)
-RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-DECLARE
-    v_norm TEXT := public.idea_privacy_norm(p);
-BEGIN
-    IF v_norm = '' THEN RETURN; END IF;
-    IF coalesce(cardinality(string_to_array(v_norm, ' ')), 0) < 8 THEN
-        INSERT INTO public.idea_privacy_whole (t) VALUES (v_norm) ON CONFLICT DO NOTHING;
-    ELSE
-        INSERT INTO public.idea_privacy_shingles (h) SELECT DISTINCT w FROM unnest(public.idea_privacy_windows(p)) AS w ON CONFLICT DO NOTHING;
-    END IF;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.trg_idea_privacy_learn()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$
-BEGIN
-    PERFORM public.idea_privacy_learn(NEW.summary);
-    RETURN NEW;
-END;
-$$;
+-- ── what a page withheld for an idea is (round 4: the operator's bar, 2026-11-03) ─────────────────────────────
+-- Operator: "isolate the original user idea and presentation of the idea but the associated/generated/supporting
+-- research results are general knowledge." So the wiki rule is about the idea's PRESENTATION, never about shared
+-- wording: a page is withheld when it IS an archived idea thought's leaf or LINKS one - content/thought/<id>,
+-- thought/<id>, [[...]], (...), an entry of links, the slug itself, anywhere in the slug, title, body or links - with
+-- the id ending there (<id>0 is another thought; afterthought/<id> is no link). Nothing else: a general page that
+-- shares wording with an idea is general knowledge and stays.
+-- A linking page that is otherwise general (an entity page citing the idea among other material) is withheld here
+-- and REBUILT by the next entity-wiki compile from shared material only: the compile reads an entity's evidence live
+-- (thought_entities joined to thoughts), the idea thoughts are gone from both, and the delete above bumped exactly
+-- those entities (trg_touch_entities_on_thought_delete), so they are in the compile's dirty set. A page whose ONLY
+-- evidence was the idea (an entity cited by idea thoughts alone) is not rebuilt (below the compile's minimum) and stays
+-- withheld. Private revisions never reach the thoughts the compile reads.
+-- Rounds 3-4's text matching is gone with this rule: the 8-word windows (idea_privacy_shingles), the short-text table
+-- (idea_privacy_whole), the normalisation and the trigger that taught every new revision's text.
 DROP TRIGGER IF EXISTS trg_idea_privacy_learn ON public.idea_revisions;
-CREATE TRIGGER trg_idea_privacy_learn AFTER INSERT ON public.idea_revisions
-    FOR EACH ROW EXECUTE FUNCTION public.trg_idea_privacy_learn();
+DROP FUNCTION IF EXISTS public.trg_idea_privacy_learn();
+DROP FUNCTION IF EXISTS public.idea_privacy_learn(TEXT);
+DROP FUNCTION IF EXISTS public.idea_privacy_page_shows_idea(TEXT, TEXT, JSONB);         -- round 2's (slug, body, links)
+DROP FUNCTION IF EXISTS public.idea_privacy_page_shows_idea(TEXT, TEXT, TEXT, JSONB);   -- rounds 3-4's text matcher
+DROP FUNCTION IF EXISTS public.idea_privacy_windows(TEXT);
+DROP FUNCTION IF EXISTS public.idea_privacy_norm(TEXT);
+DROP TABLE IF EXISTS public.idea_privacy_shingles;
+DROP TABLE IF EXISTS public.idea_privacy_whole;
 
--- every idea text there is now: the archived idea thoughts (this run's and earlier runs') and every revision
-DO $$
-DECLARE
-    v TEXT;
-BEGIN
-    FOR v IN SELECT content FROM public.idea_thought_archive UNION SELECT summary FROM public.idea_revisions LOOP
-        PERFORM public.idea_privacy_learn(v);
-    END LOOP;
-END $$;
-
-DROP FUNCTION IF EXISTS public.idea_privacy_page_shows_idea(TEXT, TEXT, JSONB);   -- round 2's (slug, body, links)
-CREATE OR REPLACE FUNCTION public.idea_privacy_page_shows_idea(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
+CREATE OR REPLACE FUNCTION public.idea_privacy_page_links_idea(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
-    SELECT
-        EXISTS (SELECT 1 FROM public.idea_thought_archive a
-                 WHERE a.id::text IN (
-                     SELECT m[1] FROM regexp_matches(
-                         coalesce(p_slug, '') || ' ' || coalesce(p_title, '') || ' ' || coalesce(p_body, '') || ' ' || coalesce(p_links::text, ''),
-                         '(?:^|[^[:alnum:]])thought/([0-9]+)(?![0-9])', 'g') AS m))
-     OR EXISTS (SELECT 1 FROM public.idea_privacy_shingles x WHERE x.h = ANY (public.idea_privacy_windows(p_title)))
-     OR EXISTS (SELECT 1 FROM public.idea_privacy_shingles x WHERE x.h = ANY (public.idea_privacy_windows(p_body)))
-     OR EXISTS (SELECT 1 FROM public.idea_privacy_whole w
-                 WHERE position(' ' || w.t || ' ' IN ' ' || public.idea_privacy_norm(p_title) || ' ') > 0
-                    OR position(' ' || w.t || ' ' IN ' ' || public.idea_privacy_norm(p_body) || ' ') > 0);
+    SELECT EXISTS (
+        SELECT 1 FROM public.idea_thought_archive a
+         WHERE a.id::text IN (
+             SELECT m[1] FROM regexp_matches(
+                 coalesce(p_slug, '') || ' ' || coalesce(p_title, '') || ' ' || coalesce(p_body, '') || ' ' || coalesce(p_links::text, ''),
+                 '(?:^|[^[:alnum:]])thought/([0-9]+)(?![0-9])', 'g') AS m));
 $$;
-REVOKE ALL ON FUNCTION public.idea_privacy_page_shows_idea(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.idea_privacy_learn(TEXT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.trg_idea_privacy_learn() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.idea_privacy_page_links_idea(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC;
 
--- the guard: a page that would show an idea's text is not written - on INSERT and on any UPDATE of its slug, title,
+-- the guard: the idea's leaf or a link to it is not written back - on INSERT and on any UPDATE of a page's slug, title,
 -- body or links, by any role (the viewer's reconcile repairing a row from its vault file, a compile, an app role's
--- UPDATE or PostgREST PATCH). A compiled or reconciled page is skipped silently (RETURN NULL: one bad row must not
--- fail the compile's whole batch; the reconcile then reports the slug as drift; an UPDATE leaves the row as it was);
--- a NOTE is a person's own writing saved through the workbench, so it is refused out loud instead
+-- UPDATE or PostgREST PATCH). It refuses the leaf and the link, not the page: a rebuilt page with no link to the idea
+-- goes through. A compiled or reconciled page is skipped silently (RETURN NULL: one bad row must not fail the compile's
+-- whole batch; the wiki writer learns it was withheld - recipes/_shared/wiki-pages.mjs - and leaves its file out; an
+-- UPDATE leaves the row as it was); a NOTE is a person's own writing saved through the workbench, so it is refused out
+-- loud instead
 CREATE OR REPLACE FUNCTION public.trg_idea_privacy_wiki_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -355,9 +278,9 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-    IF public.idea_privacy_page_shows_idea(NEW.slug, NEW.title, NEW.body, NEW.links) THEN
+    IF public.idea_privacy_page_links_idea(NEW.slug, NEW.title, NEW.body, NEW.links) THEN
         IF NEW.page_class = 'note' THEN
-            RAISE EXCEPTION 'wiki_pages: this page quotes an idea''s text, and an idea is private to its owner' USING ERRCODE = '42501';
+            RAISE EXCEPTION 'wiki_pages: this page links an idea, and an idea is private to its owner' USING ERRCODE = '42501';
         END IF;
         RETURN NULL;
     END IF;
@@ -375,10 +298,10 @@ DECLARE
     n_scope INT; n_before INT; n_archived INT; n_deleted INT; n_left INT; v_cols TEXT;
 BEGIN
     CREATE TEMP TABLE _idea_pages ON COMMIT DROP AS
-    SELECT w.slug FROM public.wiki_pages w WHERE public.idea_privacy_page_shows_idea(w.slug, w.title, w.body, w.links);
+    SELECT w.slug FROM public.wiki_pages w WHERE public.idea_privacy_page_links_idea(w.slug, w.title, w.body, w.links);
     SELECT count(*) INTO n_scope FROM _idea_pages;
     IF n_scope = 0 THEN
-        RAISE NOTICE 'idea privacy: no wiki page shows an idea''s text - nothing to withhold';
+        RAISE NOTICE 'idea privacy: no wiki page presents an idea - nothing to withhold';
         RETURN;
     END IF;
     SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO v_cols
@@ -397,12 +320,12 @@ BEGIN
                                WHERE k IN (SELECT jsonb_object_keys(to_jsonb(w))))
         RETURNING w.slug)
     SELECT count(*) INTO n_deleted FROM gone;
-    SELECT count(*) INTO n_left FROM public.wiki_pages w WHERE public.idea_privacy_page_shows_idea(w.slug, w.title, w.body, w.links);
+    SELECT count(*) INTO n_left FROM public.wiki_pages w WHERE public.idea_privacy_page_links_idea(w.slug, w.title, w.body, w.links);
     IF n_left <> 0 OR n_deleted <> n_scope OR n_archived <> n_deleted THEN
-        RAISE EXCEPTION 'idea privacy: refused, nothing changed - % wiki page(s) show an idea''s text, % archived, % withheld, % left',
+        RAISE EXCEPTION 'idea privacy: refused, nothing changed - % wiki page(s) present an idea, % archived, % withheld, % left',
             n_scope, n_archived, n_deleted, n_left USING ERRCODE = '55000';
     END IF;
-    RAISE NOTICE 'idea privacy: % wiki page(s) that showed an idea''s text archived and withheld (move their vault files out: the deploy step)',
+    RAISE NOTICE 'idea privacy: % wiki page(s) that presented an idea (its leaf, or linking it) archived and withheld (move their vault files out: the deploy step; the next compile rebuilds the general ones)',
         n_deleted;
 END $$;
 
