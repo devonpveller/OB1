@@ -18,6 +18,10 @@
 --   4. the linking revisions become private (private_owner = the idea's owner, thought_id NULL);
 --   5. delete ONLY the thoughts whose archived row equals the live row, and refuse unless every idea thought is gone and
 --      the archive holds exactly the rows removed.
+--   6. the wiki's copies (round 2): every wiki_pages row that shows an archived idea's text (its thought leaf, a page
+--      citing that leaf, a page quoting the text) is archived into public.idea_wiki_archive and withheld, and a guard on
+--      wiki_pages keeps such a page from being written back (the viewer's reconcile, a compile). The pages' vault FILES
+--      are moved out of the vault by hand right after this file runs (the deploy step; the guard covers the gap).
 -- One transaction (the whole file): a failed check leaves everything as it was. Re-run: nothing left to move.
 -- The delete bumps the cited entities' updated_at (trg_touch_entities_on_thought_delete), so the entity wiki
 -- recompiles their pages. Revert: revert-idea-privacy.sql restores the thoughts byte-identical from the archive.
@@ -163,6 +167,127 @@ BEGIN
     END IF;
     RAISE NOTICE 'idea privacy: % idea thought(s) archived and removed from the shared corpus; % revision(s) now private',
         n_deleted, n_private;
+END $$;
+
+-- ── the wiki's copies (round 2, tester F1) ─────────────────────────────────────────────────────────────
+-- The entity wiki compiled the idea thoughts into wiki_pages, which the contract search's `page` kind, the viewer and
+-- every other page reader serve to everyone: a thought leaf (content/thought/<id>) holding the idea's text, and pages
+-- citing that leaf or quoting the text (entity, source, note). ONE predicate decides "this page shows an idea's text",
+-- for the move below and for the guard after it, against the archived idea thoughts:
+--   * the page IS an archived idea thought's leaf;
+--   * it links that leaf (links, or a [[content/thought/<id>]] in its body);
+--   * its body holds an archived idea thought's whole text (24 characters or more: a shorter text matches by chance).
+-- A page that also holds shared content (an entity page citing an idea thought among others) is WITHHELD, not edited:
+-- the text was written around the citation and a textual cut cannot be proven complete. The delete trigger on thoughts
+-- already bumped those entities, so the next compile regenerates the page from what is still shared, and the guard
+-- lets that clean page back in.
+SET LOCAL client_min_messages = warning;
+CREATE TABLE IF NOT EXISTS public.idea_wiki_archive (LIKE public.wiki_pages);
+ALTER TABLE public.idea_wiki_archive ADD COLUMN IF NOT EXISTS archive_at TIMESTAMPTZ NOT NULL DEFAULT now();
+DO $$
+DECLARE
+    c RECORD; r TEXT;
+BEGIN
+    FOR c IN SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS typ
+               FROM pg_attribute a
+              WHERE a.attrelid = 'public.wiki_pages'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+                AND NOT EXISTS (SELECT 1 FROM pg_attribute b WHERE b.attrelid = 'public.idea_wiki_archive'::regclass
+                                                             AND b.attname = a.attname AND NOT b.attisdropped) LOOP
+        EXECUTE format('ALTER TABLE public.idea_wiki_archive ADD COLUMN %I %s', c.attname, c.typ);
+    END LOOP;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.idea_wiki_archive'::regclass AND contype = 'p') THEN
+        ALTER TABLE public.idea_wiki_archive ADD PRIMARY KEY (slug);
+    END IF;
+    REVOKE ALL ON public.idea_wiki_archive FROM PUBLIC;
+    FOR r IN SELECT rolname FROM pg_roles
+              WHERE NOT rolsuper AND rolname NOT LIKE 'pg\_%'
+                AND has_table_privilege(oid, 'public.idea_wiki_archive', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                AND oid <> (SELECT relowner FROM pg_class WHERE oid = 'public.idea_wiki_archive'::regclass) LOOP
+        EXECUTE format('REVOKE ALL ON public.idea_wiki_archive FROM %I', r);
+    END LOOP;
+END $$;
+ALTER TABLE public.idea_wiki_archive ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.idea_wiki_archive FORCE ROW LEVEL SECURITY;
+COMMENT ON TABLE public.idea_wiki_archive IS
+  'rw-idea-privacy: the wiki_pages rows that showed an idea''s text (its thought leaf, pages citing or quoting it), '
+  'withheld by init-idea-privacy.sql (slot 380). Readable by no app role. revert-idea-privacy.sql restores them.';
+
+CREATE OR REPLACE FUNCTION public.idea_privacy_page_shows_idea(p_slug TEXT, p_body TEXT, p_links JSONB)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM public.idea_thought_archive a
+         WHERE p_slug = 'content/thought/' || a.id::text
+            OR (jsonb_typeof(p_links) = 'array' AND p_links ? ('content/thought/' || a.id::text))
+            OR (position('content/thought/' IN coalesce(p_body, '')) > 0
+                AND coalesce(p_body, '') ~ ('content/thought/' || a.id::text || '([^0-9]|$)'))
+            OR (length(btrim(coalesce(a.content, ''))) >= 24 AND position(btrim(a.content) IN coalesce(p_body, '')) > 0));
+$$;
+REVOKE ALL ON FUNCTION public.idea_privacy_page_shows_idea(TEXT, TEXT, JSONB) FROM PUBLIC;
+
+-- the guard: a page that would show an idea's text is not written back - not by the viewer's reconcile repairing a
+-- row from its vault file, not by a compile, not by an app role. A compiled or reconciled page is skipped silently
+-- (RETURN NULL: one bad row must not fail the compile's whole batch; the reconcile then reports the slug as drift); a
+-- NOTE is a person's own writing saved through the workbench, so it is refused out loud instead
+CREATE OR REPLACE FUNCTION public.trg_idea_privacy_wiki_guard()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF public.idea_privacy_page_shows_idea(NEW.slug, NEW.body, NEW.links) THEN
+        IF NEW.page_class = 'note' THEN
+            RAISE EXCEPTION 'wiki_pages: this page quotes an idea''s text, and an idea is private to its owner' USING ERRCODE = '42501';
+        END IF;
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.trg_idea_privacy_wiki_guard() FROM PUBLIC;
+DROP TRIGGER IF EXISTS trg_idea_privacy_wiki_guard ON public.wiki_pages;
+CREATE TRIGGER trg_idea_privacy_wiki_guard BEFORE INSERT OR UPDATE ON public.wiki_pages
+    FOR EACH ROW EXECUTE FUNCTION public.trg_idea_privacy_wiki_guard();
+
+SET LOCAL client_min_messages = notice;
+DO $$
+DECLARE
+    n_scope INT; n_before INT; n_archived INT; n_deleted INT; n_left INT; v_cols TEXT;
+BEGIN
+    CREATE TEMP TABLE _idea_pages ON COMMIT DROP AS
+    SELECT w.slug FROM public.wiki_pages w WHERE public.idea_privacy_page_shows_idea(w.slug, w.body, w.links);
+    SELECT count(*) INTO n_scope FROM _idea_pages;
+    IF n_scope = 0 THEN
+        RAISE NOTICE 'idea privacy: no wiki page shows an idea''s text - nothing to withhold';
+        RETURN;
+    END IF;
+    SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO v_cols
+      FROM pg_attribute WHERE attrelid = 'public.wiki_pages'::regclass AND attnum > 0 AND NOT attisdropped;
+    SELECT count(*) INTO n_before FROM public.idea_wiki_archive;
+    -- [wiki-archive-step]
+    EXECUTE format('INSERT INTO public.idea_wiki_archive (%s) SELECT %s FROM public.wiki_pages w JOIN _idea_pages p USING (slug)',
+                   v_cols, v_cols);
+    -- [/wiki-archive-step]
+    SELECT count(*) - n_before INTO n_archived FROM public.idea_wiki_archive;
+    WITH gone AS (
+        DELETE FROM public.wiki_pages w
+         USING public.idea_wiki_archive a, _idea_pages p
+         WHERE p.slug = w.slug AND a.slug = w.slug
+           AND to_jsonb(w) = (SELECT jsonb_object_agg(k, v) FROM jsonb_each(to_jsonb(a)) AS j(k, v)
+                               WHERE k IN (SELECT jsonb_object_keys(to_jsonb(w))))
+        RETURNING w.slug)
+    SELECT count(*) INTO n_deleted FROM gone;
+    SELECT count(*) INTO n_left FROM public.wiki_pages w WHERE public.idea_privacy_page_shows_idea(w.slug, w.body, w.links);
+    IF n_left <> 0 OR n_deleted <> n_scope OR n_archived <> n_deleted THEN
+        RAISE EXCEPTION 'idea privacy: refused, nothing changed - % wiki page(s) show an idea''s text, % archived, % withheld, % left',
+            n_scope, n_archived, n_deleted, n_left USING ERRCODE = '55000';
+    END IF;
+    RAISE NOTICE 'idea privacy: % wiki page(s) that showed an idea''s text archived and withheld (move their vault files out: the deploy step)',
+        n_deleted;
 END $$;
 
 NOTIFY pgrst, 'reload schema';

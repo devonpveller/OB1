@@ -21,6 +21,10 @@ const KEY = Deno.env.get("DOCS_TEST_KEY") ?? "";
 const HOST = Deno.env.get("CONTRACT_TEST_DB_HOST");
 const PHASE = Deno.env.get("PRIVACY_PHASE") ?? "";
 const APP_ROLE = Deno.env.get("IDEAS_TEST_APP_ROLE") ?? "ob_app_memory";
+// round 2: the lab vault (rw), the viewer and PostgREST behind the OB1 rest Caddy (the compile's / reconcile's write path)
+const VAULT = (Deno.env.get("PRIVACY_VAULT") ?? "").replace(/\/+$/, "");
+const VIEWER = (Deno.env.get("PRIVACY_VIEWER") ?? "").replace(/\/+$/, "");
+const REST = (Deno.env.get("OPEN_BRAIN_URL") ?? "http://openbrain-rest").replace(/\/+$/, "");
 const off = !BASE || !HOST || !PHASE;
 const pool = !off
   ? new Pool({
@@ -131,11 +135,118 @@ t("plant", "user A's ideas in every pre-370 shape, an entity link, an edge, a co
   const t6 = await th(`an ordinary note ${mk.ctl}`, { type: "observation", source: "mcp" });
   const snap = await sql(SNAPSHOT);
   const ctl = (await sql<{ h: string }>(`SELECT md5(to_jsonb(t)::text) AS h FROM public.thoughts t WHERE id = $1::bigint`, [t6]))[0].h;
+  // round 2 (tester F1): the wiki's copies, as the entity wiki compiles them - each page's vault FILE first, then its
+  // row (newer than the file, so the viewer presents it): the idea thought's leaf, an entity page quoting idea 1's
+  // revision 2 and citing the leaf, a source page quoting the mailed idea, a person's note quoting the observed idea,
+  // and a control page that shows no idea
+  const pages: Record<string, { page_class: string; entity_type: string | null; title: string; body: string; links: string[] }> = {
+    [`content/thought/${t1}`]: { page_class: "thought", entity_type: null, title: `Thought ${t1}`, body: capText, links: [] },
+    [`content/topic/privacy-topic-${rnd}`]: { page_class: "entity", entity_type: "topic", title: `Privacy topic ${rnd}`,
+      body: `A topic page. It cites: ${updText} [[content/thought/${t1}]]`, links: [`content/thought/${t1}`] },
+    [`content/source/${crypto.randomUUID()}`]: { page_class: "source", entity_type: null, title: `Mail ${rnd}`, body: `Excerpt: ${gText}.`, links: [] },
+    [`notes/privacy-note-${rnd}`]: { page_class: "note", entity_type: null, title: `Note ${rnd}`, body: `My note says ${oText} too.`, links: [] },
+  };
+  const controlSlug = `content/topic/privacy-control-${rnd}`;
+  pages[controlSlug] = { page_class: "entity", entity_type: "topic", title: `Control ${rnd}`, body: `A shared page ${mk.ctl}, no idea in it.`, links: [] };
+  if (VAULT) {
+    for (const [slug, pg] of Object.entries(pages)) {
+      const f = `${VAULT}/${slug}.md`;
+      await Deno.mkdir(f.slice(0, f.lastIndexOf("/")), { recursive: true });
+      await Deno.writeTextFile(f, `---\ntitle: ${pg.title}\n---\n${pg.body}\n`);
+    }
+    await new Promise((r) => setTimeout(r, 1100)); // the row is newer than its file
+  }
+  for (const [slug, pg] of Object.entries(pages)) {
+    await sql(`INSERT INTO public.wiki_pages (slug, page_class, entity_type, title, body, links) VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+      [slug, pg.page_class, pg.entity_type, pg.title, pg.body, JSON.stringify(pg.links)]);
+  }
+  const wikiAll = Object.fromEntries((await sql<{ slug: string; h: string }>(`SELECT slug, md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w`)).map((r) => [r.slug, r.h]));
   await sql(`CREATE TABLE IF NOT EXISTS public.lab_idea_privacy_plant (k TEXT PRIMARY KEY, v JSONB NOT NULL)`);
   await sql(`INSERT INTO public.lab_idea_privacy_plant (k, v) VALUES ('plant', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
-    [JSON.stringify({ A, B, mk, ideas: [i1, i2, i3], thoughts: [t1, t2, t3, t4, t5], control: t6, control_hash: ctl, snapshot: snap })]);
-  console.log(`privacy plant: ${snap.length} idea-shaped thoughts in the shared corpus (5 planted + the fixtures'), 1 control`);
+    [JSON.stringify({ A, B, mk, ideas: [i1, i2, i3], thoughts: [t1, t2, t3, t4, t5], control: t6, control_hash: ctl, snapshot: snap,
+      wiki: { pages, withheld: Object.keys(pages).filter((s) => s !== controlSlug), control: controlSlug, all: wikiAll, files: !!VAULT } })]);
+  console.log(`privacy plant: ${snap.length} idea-shaped thoughts in the shared corpus (5 planted + the fixtures'), 1 control; ` +
+    `${Object.keys(pages).length - 1} wiki pages showing idea text + 1 control page${VAULT ? ", each with its vault file" : ""}`);
   assert(snap.length >= 5);
+  // positive control: before slot 380, B's page search DOES find the leaf's text (the probe can see a leak)
+  const r = await call("GET", `/workbench/contract/search?q=${encodeURIComponent(mk.cap)}&kinds=page`, B);
+  assert(JSON.stringify(r.json.results ?? []).includes(mk.cap), "positive control: B's page search should find the planted leaf before 380");
+});
+
+t("migrated", "the wiki: no shared page surface shows idea text (contract search page kind and every kind, the viewer); archive = withheld; the guard holds against the compile / reconcile write path; a clean regenerated page is let back", async () => {
+  const p = await plant();
+  const w = p.wiki;
+  const marks = [p.mk.cap, p.mk.upd, p.mk.gmail, p.mk.other];
+  // the contract search, page kind and with no kinds (every kind), as B and as A
+  for (const who of [p.B, p.A]) {
+    for (const m of marks) {
+      for (const k of ["&kinds=page", ""]) {
+        const r = await call("GET", `/workbench/contract/search?q=${encodeURIComponent(m)}${k}`, who);
+        assertEquals(r.status, 200);
+        assert(!JSON.stringify(r.json.results ?? []).includes(m), `${who === p.B ? "B" : "A"}'s search ${k || "(every kind)"} returns an idea marker (${marks.indexOf(m)})`);
+      }
+    }
+  }
+  // wiki_pages itself (what every page reader - the viewer, the grounding / note routes, PostgREST - reads)
+  for (const m of marks) {
+    assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE body LIKE '%' || $1 || '%' OR title LIKE '%' || $1 || '%'`, [m]))[0].n, 0, `a wiki page shows an idea marker (${marks.indexOf(m)})`);
+  }
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = ANY($1::text[])`, [w.withheld]))[0].n, 0, "a withheld page is back (the reconcile repair ran with its file present)");
+  // the archive is exactly the pages removed, each byte-identical to what it was
+  const now = new Set((await sql<{ slug: string }>(`SELECT slug FROM public.wiki_pages`)).map((r) => r.slug));
+  const removed = Object.keys(w.all).filter((s) => !now.has(s)).sort();
+  const arch = await sql<{ slug: string; h: string }>(`SELECT slug, md5((SELECT jsonb_object_agg(k, v) FROM jsonb_each(to_jsonb(a)) j(k, v) WHERE k <> 'archive_at')::text) AS h FROM public.idea_wiki_archive a ORDER BY slug`);
+  console.log(`privacy wiki archive: ${arch.length} archived, ${removed.length} removed from wiki_pages`);
+  assertEquals(arch.map((a) => a.slug).sort(), removed, "the wiki archive is not exactly the pages removed");
+  for (const a of arch) assertEquals(a.h, w.all[a.slug], "an archived page differs from the page it copies");
+  for (const s of w.withheld) assert(arch.some((a) => a.slug === s), "a planted page showing idea text was not withheld");
+  for (const role of [APP_ROLE, "service_role", "authenticated", "anon"]) {
+    const c = await pool!.connect();
+    try {
+      await c.queryObject("BEGIN");
+      await c.queryObject(`SET LOCAL ROLE ${role}`);
+      let code = "";
+      try { await c.queryObject(`SELECT count(*) FROM public.idea_wiki_archive`); } catch (e) { code = String((e as { fields?: { code?: string } }).fields?.code ?? ""); }
+      assertEquals(code, "42501", `${role} can read the wiki archive`);
+    } finally {
+      try { await c.queryObject("ROLLBACK"); } catch { /* */ }
+      c.release();
+    }
+  }
+  // the control page is untouched
+  assertEquals((await sql<{ h: string }>(`SELECT md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w WHERE slug = $1`, [w.control]))[0]?.h, w.all[w.control], "the control page changed");
+  // the viewer: a withheld page is not served (its row is gone and its file was moved out - the deploy step)
+  if (VIEWER) {
+    for (const s of w.withheld) {
+      const v = await fetch(`${VIEWER}/${s}`);
+      const body = await v.text();
+      assert(!marks.some((m) => body.includes(m)), `the viewer serves idea text at a withheld page (${w.withheld.indexOf(s)}, status ${v.status})`);
+    }
+  }
+  // the guard, on the write path the compile and the viewer's reconcile repair use (PostgREST upsert on slug)
+  const rest = async (method: string, path: string, body: unknown, prefer: string) =>
+    await fetch(`${REST}/rest/v1/${path}`, { method, headers: { "content-type": "application/json", apikey: "local-trust", prefer }, body: JSON.stringify(body) });
+  const generated = w.withheld.filter((s: string) => w.pages[s].page_class !== "note");
+  const up = await rest("POST", "wiki_pages?on_conflict=slug", generated.map((s: string) => ({ slug: s, ...w.pages[s], tags: [], frontmatter: {}, updated_at: new Date().toISOString() })),
+    "resolution=merge-duplicates,return=minimal");
+  await up.body?.cancel();
+  assert(up.ok, `the compile's batch upsert failed outright (${up.status}): one withheld row must not fail the batch`);
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = ANY($1::text[])`, [generated]))[0].n, 0, "the guard let a withheld page back in");
+  const noteSlug = w.withheld.find((s: string) => w.pages[s].page_class === "note");
+  const note = await rest("POST", "wiki_pages?on_conflict=slug", [{ slug: noteSlug, ...w.pages[noteSlug], tags: [], frontmatter: {}, updated_at: new Date().toISOString() }], "resolution=merge-duplicates,return=minimal");
+  await note.body?.cancel();
+  assert(!note.ok, "a note quoting an idea's text is refused out loud");
+  const ctlBefore = (await sql<{ h: string }>(`SELECT md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w WHERE slug = $1`, [w.control]))[0].h;
+  const patch = await rest("PATCH", `wiki_pages?slug=eq.${encodeURIComponent(w.control)}`, { body: `now quoting ${w.pages[w.withheld[0]].body}` }, "return=minimal");
+  await patch.body?.cancel();
+  assertEquals((await sql<{ h: string }>(`SELECT md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w WHERE slug = $1`, [w.control]))[0].h, ctlBefore, "an update writing idea text into a shared page went through");
+  // a page the compiler regenerates CLEAN under a withheld slug is let back (then removed again, so the revert's check stays exact)
+  const entitySlug = w.withheld.find((s: string) => w.pages[s].page_class === "entity");
+  const clean = await rest("POST", "wiki_pages?on_conflict=slug", [{ slug: entitySlug, ...w.pages[entitySlug], body: "A topic page, regenerated from shared sources only.", links: [], tags: [], frontmatter: {}, updated_at: new Date().toISOString() }],
+    "resolution=merge-duplicates,return=minimal");
+  await clean.body?.cancel();
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = $1`, [entitySlug]))[0].n, 1, "a clean regenerated page was refused");
+  await sql(`DELETE FROM public.wiki_pages WHERE slug = $1`, [entitySlug]);
 });
 
 t("migrated", "no shared-corpus search finds any idea text - as the superuser, as the app role (the generic MCP lane), as B and as A", async () => {
@@ -222,4 +333,10 @@ t("reverted", "the revert restores every thought byte-identical, with its entity
   }
   assertEquals((await sql<{ r: string | null }>(`SELECT to_regclass('public.idea_thought_archive')::text AS r`))[0].r, null, "the archive is left");
   assertEquals((await sql<{ h: string }>(`SELECT md5(to_jsonb(t)::text) AS h FROM public.thoughts t WHERE id = $1::bigint`, [p.control]))[0]?.h, p.control_hash, "the control thought changed");
+  // round 2: every wiki page as it was (the withheld ones byte-identical), no wiki archive, no guard left
+  const wiki = Object.fromEntries((await sql<{ slug: string; h: string }>(`SELECT slug, md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w`)).map((r) => [r.slug, r.h]));
+  for (const s of p.wiki.withheld) assertEquals(wiki[s], p.wiki.all[s], "a withheld page did not come back byte-identical");
+  assertEquals(wiki[p.wiki.control], p.wiki.all[p.wiki.control], "the control page changed");
+  assertEquals((await sql<{ r: string | null }>(`SELECT to_regclass('public.idea_wiki_archive')::text AS r`))[0].r, null, "the wiki archive is left");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'trg_idea_privacy_wiki_guard'`))[0].n, 0, "the guard is left");
 });

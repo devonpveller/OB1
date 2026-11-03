@@ -1,10 +1,51 @@
 -- Revert init-idea-privacy.sql (rw-idea-privacy, slot 380): the archived idea thoughts go back into the shared corpus
 -- byte-identical, with their entity links, edges and extraction-queue rows, and the revisions that linked them link them
 -- again (private_owner back to what it was). Then the archive is dropped. Idempotent: with no archive there is nothing
--- to restore. One transaction (the DO block): a failed check leaves everything as it was.
+-- to restore. One transaction (the whole file): a failed check leaves everything as it was. Round 2: the withheld wiki
+-- pages come back too (the guard dropped first), and the archive goes.
 -- The thought rows are written with session_replication_role = replica (superuser, for that one statement), so no
 -- trigger rewrites them: not the fingerprint, not the extraction queue (restored from the archive instead), and not
 -- the intake authority check (it judges a NEW write; these rows were written by their own doors once already).
+BEGIN;
+SET LOCAL client_min_messages = warning;   -- a re-run's "does not exist, skipping" notices
+
+-- round 2: the wiki's copies. The guard goes first (it would refuse the pages coming back), then every withheld page
+-- whose slug is free again is restored column for column (a page the compiler has since regenerated clean under the same
+-- slug is newer than the archived copy and is kept: counted, not overwritten), then the archive is dropped.
+DROP TRIGGER IF EXISTS trg_idea_privacy_wiki_guard ON public.wiki_pages;
+DROP FUNCTION IF EXISTS public.trg_idea_privacy_wiki_guard();
+DROP FUNCTION IF EXISTS public.idea_privacy_page_shows_idea(TEXT, TEXT, JSONB);
+SET LOCAL client_min_messages = notice;
+DO $$
+DECLARE
+    v_cols TEXT; n_archive INT; n_restored INT; n_kept INT; n_same INT;
+BEGIN
+    IF to_regclass('public.idea_wiki_archive') IS NULL THEN
+        RAISE NOTICE 'idea privacy revert: no wiki archive - no page to restore';
+        RETURN;
+    END IF;
+    SELECT count(*) INTO n_archive FROM public.idea_wiki_archive;
+    SELECT count(*) INTO n_kept FROM public.idea_wiki_archive a JOIN public.wiki_pages w ON w.slug = a.slug;
+    -- the generated column (search_tsv) is computed again from the same text
+    SELECT string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) INTO v_cols
+      FROM pg_attribute a
+     WHERE a.attrelid = 'public.wiki_pages'::regclass AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
+       AND EXISTS (SELECT 1 FROM pg_attribute b WHERE b.attrelid = 'public.idea_wiki_archive'::regclass
+                                                  AND b.attname = a.attname AND NOT b.attisdropped);
+    EXECUTE format('INSERT INTO public.wiki_pages (%s) SELECT %s FROM public.idea_wiki_archive a
+                     WHERE NOT EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.slug = a.slug)', v_cols, v_cols);
+    GET DIAGNOSTICS n_restored = ROW_COUNT;
+    SELECT count(*) INTO n_same FROM public.idea_wiki_archive a JOIN public.wiki_pages w ON w.slug = a.slug
+     WHERE to_jsonb(w) = (SELECT jsonb_object_agg(k, v) FROM jsonb_each(to_jsonb(a)) AS j(k, v)
+                           WHERE k IN (SELECT jsonb_object_keys(to_jsonb(w))));
+    IF n_restored + n_kept <> n_archive OR n_same < n_restored THEN
+        RAISE EXCEPTION 'idea privacy revert: refused, nothing changed - % wiki page(s) archived, % restored, % kept newer, % identical',
+            n_archive, n_restored, n_kept, n_same USING ERRCODE = '55000';
+    END IF;
+    DROP TABLE public.idea_wiki_archive;
+    RAISE NOTICE 'idea privacy revert: % wiki page(s) restored (% kept: regenerated since); move their vault files back', n_restored, n_kept;
+END $$;
+
 DO $$
 DECLARE
     v_cols TEXT; n_archive INT; n_restored INT; n_same INT; n_links INT;
@@ -61,3 +102,4 @@ BEGIN
 END $$;
 
 NOTIFY pgrst, 'reload schema';
+COMMIT;

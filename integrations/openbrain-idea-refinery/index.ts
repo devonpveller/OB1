@@ -229,7 +229,9 @@ async function mmTeam(): Promise<string> {
 
 // rw-idea-privacy: the channel is LOOKED UP, never created (#ideas was created PUBLIC: every member of the bot's team
 // could read every user's dossier), and it is used only while no second human can read it (mm-privacy.ts). Checked
-// when the loop starts and again before every reply, since a channel's members and type can change.
+// when the loop starts and again right before EVERY post (privatePost), since a channel's members and type can change
+// while a gap's research runs. No owner -> Mattermost mapping exists, so the channel's one human cannot be checked
+// against the idea's owner; it must be one of IDEA_BRAINSTORM_OPERATORS (the people a brainstorm answers).
 class ChannelRefused extends Error {}
 
 async function privateChannel(name: string): Promise<string> {
@@ -244,10 +246,16 @@ async function assertPrivate(channelId: string, type: string | null, name = MM_C
   const members: MmMember[] = [];
   for (const m of await mmGet(`/channels/${channelId}/members?per_page=200`)) {
     const u = await mmGet(`/users/${m.user_id}`);
-    members.push({ user_id: String(m.user_id), is_bot: !!u.is_bot });
+    members.push({ user_id: String(m.user_id), username: String(u.username ?? "").toLowerCase(), is_bot: !!u.is_bot });
   }
-  const why = channelRefusal(t, members);
+  const why = channelRefusal(t, members, OPERATORS);
   if (why) throw new ChannelRefused(`#${name} ${why}`);
+}
+
+// every brainstorm post: the channel is checked again first (a gap's research lands minutes after the check before it)
+async function privatePost(channelId: string, message: string, rootId: string | null): Promise<{ id: string }> {
+  await assertPrivate(channelId, null);
+  return await mmPost(channelId, message, rootId);
 }
 
 async function mmPost(channelId: string, message: string, rootId: string | null): Promise<{ id: string }> {
@@ -639,7 +647,7 @@ async function brainstormReply(channelId: string, threadRoot: string, bid: strin
         .map((id) => `${id} — ${evLabel(evById.get(id) ?? "")}`).join("\n");
       const body = survivors.map((s) => `• ${s.text}`).join("\n");
       const tail = gapLines.length ? `\n\n_Open (needs research): ${gapLines.join("; ")}_` : "";
-      await mmPost(channelId, `${body}${tail}\n\n**Grounded in:**\n${key}\n\n_Every point above is checked against a researched claim. Reply to keep honing._`, threadRoot);
+      await privatePost(channelId, `${body}${tail}\n\n**Grounded in:**\n${key}\n\n_Every point above is checked against a researched claim. Reply to keep honing._`, threadRoot);
       return;
     }
   }
@@ -647,7 +655,7 @@ async function brainstormReply(channelId: string, threadRoot: string, bid: strin
   // GAP — nothing grounded survived: open research on the specific gap (never answer from memory).
   const gq = await chatJson([{ role: "system", content: GAP_QUERY_SYSTEM }, { role: "user", content: `IDEA:\n${dossier.slice(0, 1500)}\n\nUSER ASKED:\n${lastUser.content}` }]);
   const gapQuery = String(gq.gap_query ?? "").trim() || lastUser.content;
-  await mmPost(channelId, `🔎 No grounded claims cover that yet — I won't answer from guesswork. I've started research on:\n> ${gapQuery}\n\nI'll follow up in this thread when it lands, then we can hone it on solid ground.`, threadRoot);
+  await privatePost(channelId, `🔎 No grounded claims cover that yet — I won't answer from guesswork. I've started research on:\n> ${gapQuery}\n\nI'll follow up in this thread when it lands, then we can hone it on solid ground.`, threadRoot);
   gapResearch(channelId, threadRoot, gapQuery).catch((e) => console.error(`gap research failed (${threadRoot.slice(0, 8)}): ${(e as Error).message}`));
 }
 
@@ -656,14 +664,14 @@ async function brainstormReply(channelId: string, threadRoot: string, bid: strin
 async function gapResearch(channelId: string, threadRoot: string, query: string): Promise<void> {
   const jobId = await submitWithBackpressure(query);
   const jr = await pollJob(jobId);
-  if (!jr.ok) { await mmPost(channelId, `⚠ Research on that gap didn't complete (${jr.error ?? "unknown"}). Try again or rephrase.`, threadRoot); return; }
+  if (!jr.ok) { await privatePost(channelId, `⚠ Research on that gap didn't complete (${jr.error ?? "unknown"}). Try again or rephrase.`, threadRoot); return; }
   const synthesis = String(jr.result?.synthesis ?? "").trim() || "_(the research returned no synthesis)_";
   // deno-lint-ignore no-explicit-any
   const sources = Array.isArray(jr.result?.cited_sources) ? jr.result!.cited_sources as any[] : [];
   const srcLines = sources.slice(0, 6).map((s, i) => `${i + 1}. ${String(s.title ?? s.url ?? "source")}${s.url ? ` — ${s.url}` : ""}`);
   const parts = [`🔬 **Research landed on that gap** — now grounded, so we can keep honing:`, synthesis];
   if (srcLines.length) parts.push(`**Sources**\n${srcLines.join("\n")}`);
-  await mmPost(channelId, parts.join("\n\n"), threadRoot);
+  await privatePost(channelId, parts.join("\n\n"), threadRoot);
 }
 
 // The brainstorm poll loop: watch #ideas for operator replies under a dossier + respond LOCALLY.

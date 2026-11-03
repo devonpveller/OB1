@@ -43,7 +43,7 @@ async function fn(client: IdeaClient, sql: string, args: unknown[]): Promise<Out
 // writes it as a private revision of its owner (idea_revisions.private_owner, slot 370).
 export async function updateIdea(
   client: IdeaClient, owner: string,
-  a: { idea_id: string; idea: string; title?: string; embedding: string; channel: string },
+  a: { idea_id: string; idea: string; title?: string; embedding: string },
 ): Promise<{ text: string; isError?: boolean }> {
   const body = a.idea.trim();
   if (!body) throw new Error("idea text is required");
@@ -56,7 +56,7 @@ export async function updateIdea(
   }
   return { text:
     `Updated idea "${o.title}" (idea_id: ${a.idea_id}, revision ${o.revision}). It will be re-researched in the background; ` +
-    `the refreshed findings will land in the idea's room in the research workspace and as an update on its Mattermost ${a.channel} thread.` };
+    `the refreshed findings will land in the idea's room in the research workspace (private to you).` };
 }
 
 // capture_idea's write: the idea and its private revision 1 through idea_capture() (no corpus thought, the same reason).
@@ -70,13 +70,13 @@ export async function captureIdea(
 }
 
 // research_idea: research now through idea_research() (queued at once - no flag for a later pass).
-export async function researchIdea(client: IdeaClient, owner: string, ideaId: string, channel: string): Promise<{ text: string; isError?: boolean }> {
+export async function researchIdea(client: IdeaClient, owner: string, ideaId: string): Promise<{ text: string; isError?: boolean }> {
   const o = await fn(client, `SELECT public.idea_research($1::uuid, $2, $3) AS o`, [ideaId, owner, MCP_ACTOR]);
   if (o.outcome === "not_found") throw new Error(NOT_FOUND(ideaId));
   if (o.outcome === "archived") return { text: ARCHIVED, isError: true };
   return { text:
     `Queued idea ${ideaId} for immediate research (job ${o.job_id}). ` +
-    `Findings will land in the idea's room in the research workspace and in Mattermost ${channel} — follow along there.` };
+    `Findings will land in the idea's room in the research workspace (private to you) — follow along there.` };
 }
 
 // promote_idea: PROMOTE through idea_promote(). The document is the refinery's ONE user document, already tethered to

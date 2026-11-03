@@ -971,8 +971,8 @@ server.registerTool(
 // (init-idea-functions.sql, rw-p8a4-ideas - the SAME functions the research workbench calls;
 // idea-tools.ts), for this server's ONE owner subject (WORKSPACE_DEFAULT_SUB). Another owner's
 // idea is "no idea with this id"; find_idea and the duplicate check read the owner's ideas only.
-// The refinery service owns research delivery (the idea's room + Mattermost).
-// Research is async and re-engages in Mattermost (a finished OWUI chat can't be
+// The refinery service owns research delivery: the idea's room in the research workspace, private to its owner
+// (rw-idea-privacy: no longer a shared Mattermost channel). Research is async (a finished OWUI chat can't be
 // pushed to) — so these tools only ACKNOWLEDGE in OWUI, never return research.
 // Spec: documentation/implementation-guide/idea-refinery/DESIGN-idea-refinery.md
 // ============================================================
@@ -981,7 +981,6 @@ server.registerTool(
 // idea is treated as a near-duplicate (DT-3): capture_idea ASKS (update vs new),
 // it never auto-merges. ~0.70 sim == ~0.30 distance.
 const IDEA_DEDUP_SIM = Number(Deno.env.get("IDEA_DEDUP_SIM") || "0.70");
-const IDEA_CHANNEL = Deno.env.get("IDEA_REFINERY_CHANNEL") || "#ideas";
 // rw-p8a4-ideas: whose ideas these tools read and write (never a tool argument)
 const IDEA_OWNER = ideaOwner();
 
@@ -990,7 +989,7 @@ server.registerTool(
   {
     title: "Capture Idea",
     description:
-      "Log a new product/feature IDEA for the Idea Refinery. The idea is stored and researched in the background (existing industry products + what Open Brain already knows); findings are delivered to Mattermost for a follow-up brainstorm — they are NOT returned here. Use when the user shares an idea they want to develop later. Returns an acknowledgement only. If the idea closely matches one already captured, this returns a possible-duplicate notice instead of forking — call again with force_new=true to create a separate idea, or use update_idea to refine the existing one.",
+      "Log a new product/feature IDEA for the Idea Refinery. The idea is stored and researched in the background (existing industry products + what Open Brain already knows); findings are delivered to the idea's room in the research workspace, private to the user — they are NOT returned here. Use when the user shares an idea they want to develop later. Returns an acknowledgement only. If the idea closely matches one already captured, this returns a possible-duplicate notice instead of forking — call again with force_new=true to create a separate idea, or use update_idea to refine the existing one.",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       idea: z.string().describe("The idea, in the user's words (what they want and why)."),
@@ -1035,8 +1034,8 @@ server.registerTool(
         return {
           content: [{ type: "text" as const, text:
             `Logged idea "${ttl}" (idea_id: ${ideaId}). It will be researched in the background batch ` +
-            `(existing industry tools + what Open Brain already knows); findings will arrive in Mattermost ${IDEA_CHANNEL} ` +
-            `for a follow-up brainstorm. Nothing to review here yet.` }],
+            `(existing industry tools + what Open Brain already knows); findings will arrive in the idea's room in the ` +
+            `research workspace (private to you). Nothing to review here yet.` }],
         };
       } finally {
         client.release();
@@ -1052,7 +1051,7 @@ server.registerTool(
   {
     title: "Update Idea",
     description:
-      "Refine an existing Idea Refinery idea (resolve the idea_id via find_idea first). Appends a new revision and marks it for re-research; the refreshed findings arrive as an update on the SAME Mattermost thread — not returned here. Use when the user changes or expands an idea they previously captured. Identical text is a no-op.",
+      "Refine an existing Idea Refinery idea (resolve the idea_id via find_idea first). Appends a new revision and marks it for re-research; the refreshed findings arrive in the SAME idea's room in the research workspace — not returned here. Use when the user changes or expands an idea they previously captured. Identical text is a no-op.",
     annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       idea_id: z.string().describe("The idea to update (from find_idea)."),
@@ -1069,7 +1068,7 @@ server.registerTool(
       const client = await pool.connect();
       try {
         const r = await updateIdea(client, IDEA_OWNER, {
-          idea_id, idea: body, title, embedding: `[${embedding.join(",")}]`, channel: IDEA_CHANNEL,
+          idea_id, idea: body, title, embedding: `[${embedding.join(",")}]`,
         });
         return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
       } finally {
@@ -1132,7 +1131,7 @@ server.registerTool(
   {
     title: "Research Idea Now",
     description:
-      "Request IMMEDIATE background research on an existing idea — for when the user says 'look into this now'. Research is async; findings land in the idea's room in the research workspace and in Mattermost, not here. Returns an acknowledgement.",
+      "Request IMMEDIATE background research on an existing idea — for when the user says 'look into this now'. Research is async; findings land in the idea's room in the research workspace, not here. Returns an acknowledgement.",
     annotations: { readOnlyHint: false, idempotentHint: true },
     inputSchema: { idea_id: z.string().describe("The idea to research now (from find_idea).") },
   },
@@ -1140,7 +1139,7 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
-        const r = await researchIdea(client, IDEA_OWNER, idea_id, IDEA_CHANNEL);
+        const r = await researchIdea(client, IDEA_OWNER, idea_id);
         return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
       } finally {
         client.release();
