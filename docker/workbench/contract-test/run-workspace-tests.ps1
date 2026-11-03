@@ -44,7 +44,7 @@
 # staged from -BaseSha too (the base has no slot 370), the sweep is skipped, and [5h] must fail.
 # rw-idea-privacy adds [5j] (not with -Red): slot 380 over planted pre-370 idea thoughts and the wiki pages / vault files that show
 # them (src/ideas/idea_privacy_integration_test.ts in phases around psql runs): RED before 380 runs and with round 1's 380
-# (-PrivacyRoundOneSha), init x2, the viewer's reconcile repair, the deploy step (files out), revert x2 byte-identical, two mutants
+# (-PrivacyPrevSha), init x2, the viewer's reconcile repair, the deploy step (files out), revert x2 byte-identical, two mutants
 # without an archive step refused, init again - so the sweep that follows runs on the migrated database.
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
 param(
@@ -62,8 +62,8 @@ param(
   [switch]$KeepImages,
   [switch]$IntakeOnly,
   [switch]$IdeasOnly,
-  # rw-idea-privacy round 2: the round-1 slot 380 the [5j] RED step runs (it leaves the wiki copies)
-  [string]$PrivacyRoundOneSha = 'b61c261'
+  # rw-idea-privacy round 3: the previous round's slot 380 the [5j] RED step runs (it misses the round-3 shapes)
+  [string]$PrivacyPrevSha = 'bf96782'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -413,7 +413,7 @@ try {
   # rw-idea-privacy: slot 380 moves the pre-370 idea thoughts out of the shared corpus, and (round 2, tester F1) withholds
   # the wiki pages that show their text. Phases of src/ideas/idea_privacy_integration_test.ts around psql runs:
   #   plant (thoughts + wiki rows + their vault files); RED before 380 (= the base b43ecb5); RED with round 1's 380
-  #   (-PrivacyRoundOneSha: it leaves the wiki copies) and its revert; init twice; the viewer's REAL reconcile repair with
+  #   (-PrivacyPrevSha: round 2's misses the round-3 shapes) and its revert; init twice; the viewer's REAL reconcile repair with
   #   the files still in the vault (the guard must hold); the deploy step (the withheld pages' files moved out); the
   #   checks; files back, revert twice; byte-identity; two MUTANTS (no thought archive step / no wiki archive step) must
   #   refuse and change nothing; init again + files out (the sweep then runs on that state).
@@ -478,19 +478,18 @@ try {
     Check ($s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 1) "[5j] planted user A's ideas in every pre-370 shape, and the wiki pages and vault files that show them ($($s.Value))"
     $s = & $phase 'migrated' 'privacy-red-before-380.log'
     Check ($s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 0) "[5j] RED: before slot 380 runs (= the base) every privacy check fails ($($s.Value))"
-    # RED for round 2: round 1's slot 380 moves the thoughts and leaves the wiki copies (only the wiki check fails)
-    $r1i = Join-Path $env:TEMP "$P-380-r1-init.sql"; $r1r = Join-Path $env:TEMP "$P-380-r1-revert.sql"
-    $script:made.dirs += @($r1i, $r1r)
-    [System.IO.File]::WriteAllText($r1i, ((& git -C $ob1 show "${PrivacyRoundOneSha}:docker/init-idea-privacy.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
-    [System.IO.File]::WriteAllText($r1r, ((& git -C $ob1 show "${PrivacyRoundOneSha}:docker/revert-idea-privacy.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
-    $r1rc = & $psqlFile $r1i "round 1 init ($PrivacyRoundOneSha)"
-    $s = & $phase 'migrated' 'privacy-red-round1-380.log'
-    # both tests that read a page surface fail (the wiki test, and the corpus test's kinds=page,claim,source search);
-    # the archive and the owner's revisions pass
-    $red1 = [string]$script:lastPhaseText
-    Check ($r1rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 2 -and [int]$s.Groups[3].Value -eq 2 -and $red1 -match "B's search &kinds=page returns an idea marker" -and $red1 -match "B's contract search returns an idea marker") "[5j] RED: round 1's 380 ($PrivacyRoundOneSha) leaves the wiki copies - B's page search still finds idea text ($($s.Value))"
-    $rc = & $psqlFile $r1r "round 1 revert ($PrivacyRoundOneSha)"
-    Check ($rc -eq 0) "[5j] round 1's revert brings the planted state back"
+    # RED for round 3: the PREVIOUS round's slot 380 (-PrivacyPrevSha, round 2) misses the shapes the tester listed: the
+    # round-3 test fails, while the archive and the owner's-revisions tests pass. Then its revert brings the planted state back.
+    $pvi = Join-Path $env:TEMP "$P-380-prev-init.sql"; $pvr = Join-Path $env:TEMP "$P-380-prev-revert.sql"
+    $script:made.dirs += @($pvi, $pvr)
+    [System.IO.File]::WriteAllText($pvi, ((& git -C $ob1 show "${PrivacyPrevSha}:docker/init-idea-privacy.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText($pvr, ((& git -C $ob1 show "${PrivacyPrevSha}:docker/revert-idea-privacy.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $pvRc = & $psqlFile $pvi "previous round init ($PrivacyPrevSha)"
+    $s = & $phase 'migrated' 'privacy-red-prev-380.log'
+    $redPv = [string]$script:lastPhaseText
+    Check ($pvRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $redPv -match '\[migrated\] round 3: [^\n]*\.\.\. FAILED' -and $redPv -match '\[migrated\] the archive holds exactly[^\n]*\.\.\. ok' -and $redPv -match '\[migrated\] A still reads every revision[^\n]*\.\.\. ok') "[5j] RED: the previous round's 380 ($PrivacyPrevSha) misses the listed shapes - the round-3 test fails, the archive and revisions pass ($($s.Value))"
+    $pvRevRc = & $psqlFile $pvr "previous round revert ($PrivacyPrevSha)"
+    Check ($pvRevRc -eq 0) "[5j] the previous round's revert brings the planted state back"
     $rcs = @((& $psqlFile $init 'init'), (& $psqlFile $init 'init again'))
     Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p380['init'] -match 'NOTICE idea privacy: \d+ idea thought' -and $script:p380['init'] -match 'NOTICE idea privacy: \d+ wiki page' -and $script:p380['init again'] -match 'nothing to move' -and $script:p380['init again'] -match 'nothing to withhold') '[5j] init-idea-privacy.sql moves the idea thoughts and withholds the wiki pages; a second run has nothing to do'
     # the viewer's own reconcile repair (the code that writes a missing row back from its vault file), files still present
@@ -499,7 +498,7 @@ try {
     Write-Host "    [reconcile --repair, files present] exit $($script:rc)"
     $moved = & $filesOut
     $s = & $phase 'migrated' 'privacy-migrated.log'
-    Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 4 -and [int]$s.Groups[3].Value -eq 0) "[5j] after 380 (+ the reconcile repair, + the deploy step): no shared search or page surface shows idea text, the archives are exactly the rows removed, the guard holds, A reads every revision ($($s.Value))"
+    Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 5 -and [int]$s.Groups[3].Value -eq 0) "[5j] after 380 (+ the reconcile repair, + the deploy step): no shared search or page surface shows idea text, the archives are exactly the rows removed, the guard holds, A reads every revision ($($s.Value))"
     $null = & $filesBack
     $rcs = @((& $psqlFile $revert 'revert'), (& $psqlFile $revert 'revert again'))
     Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p380['revert'] -match 'thought\(s\) restored' -and $script:p380['revert'] -match 'wiki page\(s\) restored' -and $script:p380['revert again'] -match 'nothing to restore' -and $script:p380['revert again'] -match 'no page to restore') '[5j] revert-idea-privacy.sql restores the thoughts and the pages, and a second run has nothing to restore'

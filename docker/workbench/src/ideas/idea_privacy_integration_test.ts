@@ -107,19 +107,21 @@ t("plant", "user A's ideas in every pre-370 shape, an entity link, an edge, a co
     sql(`INSERT INTO public.idea_revisions (idea_id, revision, summary, thought_id, research_job_id, content_hash) VALUES ($1::uuid, $2, $3, $4::bigint, 'backfill-parked', md5(lower(btrim($3))))`,
       [id, n, summary, thought]);
   // 1-2: capture_idea + update_idea (openbrain-mcp before slot 370): an ops thought per revision, naming the idea
-  const capText = `an idea ${mk.cap}`, updText = `the idea, sharper ${mk.upd}`;
+  // round 3: idea texts of a real idea's length (a run of 8 words is the fragment rule; a short text matches whole)
+  const capText = `an idea ${mk.cap} about routing the gateway through one queue per tenant`;
+  const updText = `the idea, sharper ${mk.upd}: every tenant gets its own admission queue and its own budget`;
   const i1 = await idea(`Idea ${mk.cap}`, updText, 2);
   const t1 = await th(capText, { type: "idea", source: "mcp", kind: "idea", idea_id: i1, exposure: "ops" });
   const t2 = await th(updText, { type: "idea", source: "mcp", kind: "idea", idea_id: i1, exposure: "ops" });
   await rev(i1, 1, capText, t1);
   await rev(i1, 2, updText, t2);
   // 3: migrate-ideas-backfill.py from a gmail capture (type idea, no idea_id: linked only through the revision)
-  const gText = `a mailed idea ${mk.gmail}`;
+  const gText = `a mailed idea ${mk.gmail} about a weekly digest of saved research for the whole team`;
   const i2 = await idea(`Mail ${mk.gmail}`, gText, 1);
   const t3 = await th(gText, { type: "idea", source: "gmail" });
   await rev(i2, 1, gText, t3);
   // 4: a backfill run with --type other: linked, but the metadata says nothing of ideas
-  const oText = `an observed idea ${mk.other}`;
+  const oText = `an observed idea ${mk.other} about tagging every source with the date it was retrieved`;
   const i3 = await idea(`Other ${mk.other}`, oText, 1);
   const t4 = await th(oText, { type: "observation", source: "mcp" });
   await rev(i3, 1, oText, t4);
@@ -156,15 +158,54 @@ t("plant", "user A's ideas in every pre-370 shape, an entity link, an edge, a co
     }
     await new Promise((r) => setTimeout(r, 1100)); // the row is newer than its file
   }
-  for (const [slug, pg] of Object.entries(pages)) {
-    await sql(`INSERT INTO public.wiki_pages (slug, page_class, entity_type, title, body, links) VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-      [slug, pg.page_class, pg.entity_type, pg.title, pg.body, JSON.stringify(pg.links)]);
+  // round 3 (tester attempt 2; the coordinator's frozen list): the same text in the shapes a compile or a person
+  // produces - each must be withheld - and the controls that must NOT be (the 8-word threshold is exact)
+  const page = (page_class: string, title: string, body: string, links: string[] = []) =>
+    ({ page_class, entity_type: page_class === "entity" ? "topic" : null, title, body, links });
+  const capWords = capText.split(" ");
+  const shapes: Record<string, ReturnType<typeof page>> = {
+    [`content/source/r3-upper-${rnd}`]: page("source", "R3 upper", `Excerpt: ${capText.toUpperCase()}.`),
+    [`content/source/r3-split-${rnd}`]: page("source", "R3 split", `Excerpt: ${capWords.slice(0, 5).join(" ")}\n${capWords.slice(5).join(" ")}`),
+    [`content/source/r3-dblspace-${rnd}`]: page("source", "R3 double space", `Excerpt: ${capWords.join("  ")}.`),
+    [`content/source/r3-markdown-${rnd}`]: page("source", "R3 markdown", `an idea **${mk.cap}** about _routing the gateway_ through one queue per tenant`),
+    [`content/source/r3-quote-${rnd}`]: page("source", "R3 blockquote", `> ${capWords.slice(0, 5).join(" ")}\n> ${capWords.slice(5).join(" ")}`),
+    [`content/topic/r3-fragment-${rnd}`]: page("entity", "R3 fragment", `It recalls: ${updText.split(" ").slice(2).join(" ")}`),
+    [`content/topic/r3-barelink-${rnd}`]: page("entity", "R3 bare link", `As noted, ${mk.cap} [[thought/${t1}]].`),
+    [`content/topic/r3-plainlink-${rnd}`]: page("entity", "R3 plain link", `see thought/${t1} for it`),
+    [`notes/r3-title-only-${rnd}`]: page("note", capText, "A clean body."),
+    [`content/topic/r3-eight-${rnd}`]: page("entity", "R3 eight words", "about a weekly digest of saved research for"),
+  };
+  const keep: Record<string, ReturnType<typeof page>> = {
+    [`content/topic/r3-seven-${rnd}`]: page("entity", "R3 seven words", "about a weekly digest of saved research"),
+    [`content/topic/r3-prefix-${rnd}`]: page("entity", "R3 prefix ids", `cites [[thought/${t1}0]] and content/thought/${t1}1`, [`content/thought/${t1}2`]),
+    [`content/topic/r3-afterthought-${rnd}`]: page("entity", "R3 afterthought", `an afterthought/${t1} is not a link`),
+    [`content/topic/r3-ctl-thought-${rnd}`]: page("entity", "R3 control thought", `cites [[content/thought/${t6}]]`, [`content/thought/${t6}`]),
+    [`content/topic/r3-guard-${rnd}`]: page("entity", "R3 guard target", "A clean guard target."),
+  };
+  // the pages a compile wrote BEFORE slot 380: the chain's guard is already on in this lab (it knows every revision as
+  // it is written), so they are planted with triggers off, as the superuser - the state a live database is in today
+  const c = await pool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject("SET LOCAL session_replication_role = replica");
+    for (const [slug, pg] of [...Object.entries(pages), ...Object.entries(shapes), ...Object.entries(keep)]) {
+      await c.queryObject(`INSERT INTO public.wiki_pages (slug, page_class, entity_type, title, body, links) VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+        [slug, pg.page_class, pg.entity_type, pg.title, pg.body, JSON.stringify(pg.links)]);
+    }
+    await c.queryObject("COMMIT");
+  } catch (e) {
+    try { await c.queryObject("ROLLBACK"); } catch { /* */ }
+    throw e;
+  } finally {
+    c.release();
   }
   const wikiAll = Object.fromEntries((await sql<{ slug: string; h: string }>(`SELECT slug, md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w`)).map((r) => [r.slug, r.h]));
   await sql(`CREATE TABLE IF NOT EXISTS public.lab_idea_privacy_plant (k TEXT PRIMARY KEY, v JSONB NOT NULL)`);
   await sql(`INSERT INTO public.lab_idea_privacy_plant (k, v) VALUES ('plant', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
     [JSON.stringify({ A, B, mk, ideas: [i1, i2, i3], thoughts: [t1, t2, t3, t4, t5], control: t6, control_hash: ctl, snapshot: snap,
-      wiki: { pages, withheld: Object.keys(pages).filter((s) => s !== controlSlug), control: controlSlug, all: wikiAll, files: !!VAULT } })]);
+      capText, updText, gText,
+      wiki: { pages, withheld: [...Object.keys(pages).filter((s) => s !== controlSlug), ...Object.keys(shapes)], control: controlSlug, all: wikiAll, files: !!VAULT,
+              shapes: Object.keys(shapes), keep: Object.keys(keep), keepPages: keep, guard: `content/topic/r3-guard-${rnd}` } })]);
   console.log(`privacy plant: ${snap.length} idea-shaped thoughts in the shared corpus (5 planted + the fixtures'), 1 control; ` +
     `${Object.keys(pages).length - 1} wiki pages showing idea text + 1 control page${VAULT ? ", each with its vault file" : ""}`);
   assert(snap.length >= 5);
@@ -226,13 +267,13 @@ t("migrated", "the wiki: no shared page surface shows idea text (contract search
   // the guard, on the write path the compile and the viewer's reconcile repair use (PostgREST upsert on slug)
   const rest = async (method: string, path: string, body: unknown, prefer: string) =>
     await fetch(`${REST}/rest/v1/${path}`, { method, headers: { "content-type": "application/json", apikey: "local-trust", prefer }, body: JSON.stringify(body) });
-  const generated = w.withheld.filter((s: string) => w.pages[s].page_class !== "note");
+  const generated = w.withheld.filter((s: string) => w.pages[s] && w.pages[s].page_class !== "note");
   const up = await rest("POST", "wiki_pages?on_conflict=slug", generated.map((s: string) => ({ slug: s, ...w.pages[s], tags: [], frontmatter: {}, updated_at: new Date().toISOString() })),
     "resolution=merge-duplicates,return=minimal");
   await up.body?.cancel();
   assert(up.ok, `the compile's batch upsert failed outright (${up.status}): one withheld row must not fail the batch`);
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = ANY($1::text[])`, [generated]))[0].n, 0, "the guard let a withheld page back in");
-  const noteSlug = w.withheld.find((s: string) => w.pages[s].page_class === "note");
+  const noteSlug = w.withheld.find((s: string) => w.pages[s] && w.pages[s].page_class === "note");
   const note = await rest("POST", "wiki_pages?on_conflict=slug", [{ slug: noteSlug, ...w.pages[noteSlug], tags: [], frontmatter: {}, updated_at: new Date().toISOString() }], "resolution=merge-duplicates,return=minimal");
   await note.body?.cancel();
   assert(!note.ok, "a note quoting an idea's text is refused out loud");
@@ -241,7 +282,7 @@ t("migrated", "the wiki: no shared page surface shows idea text (contract search
   await patch.body?.cancel();
   assertEquals((await sql<{ h: string }>(`SELECT md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w WHERE slug = $1`, [w.control]))[0].h, ctlBefore, "an update writing idea text into a shared page went through");
   // a page the compiler regenerates CLEAN under a withheld slug is let back (then removed again, so the revert's check stays exact)
-  const entitySlug = w.withheld.find((s: string) => w.pages[s].page_class === "entity");
+  const entitySlug = w.withheld.find((s: string) => w.pages[s] && w.pages[s].page_class === "entity");
   const clean = await rest("POST", "wiki_pages?on_conflict=slug", [{ slug: entitySlug, ...w.pages[entitySlug], body: "A topic page, regenerated from shared sources only.", links: [], tags: [], frontmatter: {}, updated_at: new Date().toISOString() }],
     "resolution=merge-duplicates,return=minimal");
   await clean.body?.cancel();
@@ -322,6 +363,95 @@ t("migrated", "A still reads every revision of every idea through the workbench;
   assertEquals(await refusedAsApp(`UPDATE public.idea_revisions SET private_owner = 'someone-else' WHERE private_owner IS NOT NULL`), "42501");
 });
 
+t("migrated", "round 3: every listed shape of an idea's text is withheld (case, newline, doubled space, emphasis, blockquote, an 8-word fragment, bare / plain thought links, the title); 7 words, other ids and other thoughts are kept; the guard refuses each shape as an app-role UPDATE and a PostgREST PATCH", async () => {
+  const p = await plant();
+  const w = p.wiki;
+  const present = async (slug: string) => (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = $1`, [slug]))[0].n === 1;
+  // 1-4: the shapes are withheld (archived) and the controls are not
+  const archived = new Set((await sql<{ slug: string }>(`SELECT slug FROM public.idea_wiki_archive`)).map((r) => r.slug));
+  for (const s of w.shapes) {
+    assert(!(await present(s)), `a shape is still a page: ${s.replace(/-[0-9a-f]{8}$/, "")}`);
+    assert(archived.has(s), `a shape was not archived: ${s.replace(/-[0-9a-f]{8}$/, "")}`);
+  }
+  for (const s of w.keep) {
+    assert(await present(s), `a control was withheld: ${s.replace(/-[0-9a-f]{8}$/, "")}`);
+    assertEquals((await sql<{ h: string }>(`SELECT md5(to_jsonb(x)::text) AS h FROM public.wiki_pages x WHERE slug = $1`, [s]))[0].h, w.all[s], "a control changed");
+  }
+  console.log(`privacy round 3: ${w.shapes.length} shapes withheld, ${w.keep.length} controls kept`);
+  // B's page search (and every kind) finds none of the shapes' text
+  for (const m of [p.mk.cap, p.mk.upd]) {
+    for (const k of ["&kinds=page", ""]) {
+      const r = await call("GET", `/workbench/contract/search?q=${encodeURIComponent(m)}${k}`, p.B);
+      const res = JSON.stringify(r.json.results ?? []).toLowerCase();
+      assert(!res.includes(m.toLowerCase()), `B's search ${k || "(every kind)"} returns an idea marker in some case`);
+    }
+  }
+  // 5: the guard, on the clean guard target, as the app role (UPDATE of body, title, links, slug) and through PostgREST
+  const g = w.guard;
+  const row = async () => (await sql<{ h: string }>(`SELECT coalesce((SELECT md5(slug || '|' || title || '|' || body || '|' || links::text) FROM public.wiki_pages WHERE slug = $1), 'gone') AS h`, [g]))[0].h;
+  const asAppTx = async (text: string, args: unknown[]) => {
+    const c = await pool!.connect();
+    try {
+      await c.queryObject("BEGIN");
+      await c.queryObject(`SET LOCAL ROLE ${APP_ROLE}`);
+      const r = await c.queryObject(text, args);
+      await c.queryObject("COMMIT");
+      return r.rowCount ?? 0;
+    } catch (e) {
+      try { await c.queryObject("ROLLBACK"); } catch { /* */ }
+      throw e;
+    } finally {
+      c.release();
+    }
+  };
+  // whatever happens below (a RED run lets the probes through), the target goes back to its planted state, triggers off
+  const gp = w.keepPages[g];
+  const restore = async () => {
+    const c = await pool!.connect();
+    try {
+      await c.queryObject("BEGIN");
+      await c.queryObject("SET LOCAL session_replication_role = replica");
+      await c.queryObject(`UPDATE public.wiki_pages SET slug = $1, title = $2, body = $3, links = $4::jsonb
+                            WHERE slug = $1 OR (slug = $5 AND title IS DISTINCT FROM 'Thought ' || $6)`,
+        [g, gp.title, gp.body, JSON.stringify(gp.links), `content/thought/${p.thoughts[0]}`, String(p.thoughts[0])]);
+      await c.queryObject("COMMIT");
+    } catch (e) {
+      try { await c.queryObject("ROLLBACK"); } catch { /* */ }
+      throw e;
+    } finally {
+      c.release();
+    }
+  };
+  try {
+  // the positive control first: the app role CAN update this page (so a refusal below is the guard, not a missing grant)
+  const seven = "about a weekly digest of saved research";
+  assertEquals(await asAppTx(`UPDATE public.wiki_pages SET body = $2 WHERE slug = $1`, [g, seven]), 1, "the app role cannot update a page at all (the probes below would prove nothing)");
+  const clean = await row();
+  const capWords = String(p.capText).split(" ");
+  const probes: [string, string, unknown[]][] = [
+    ["body := the text upper-cased", `UPDATE public.wiki_pages SET body = $2 WHERE slug = $1`, [g, String(p.capText).toUpperCase()]],
+    ["body := the text split by a newline", `UPDATE public.wiki_pages SET body = $2 WHERE slug = $1`, [g, `${capWords.slice(0, 5).join(" ")}\n${capWords.slice(5).join(" ")}`]],
+    ["body := an 8-word fragment", `UPDATE public.wiki_pages SET body = $2 WHERE slug = $1`, [g, `now: ${String(p.updText).split(" ").slice(2).join(" ")}`]],
+    ["title := the whole text", `UPDATE public.wiki_pages SET title = $2 WHERE slug = $1`, [g, p.capText]],
+    ["body := a bare [[thought/<id>]]", `UPDATE public.wiki_pages SET body = $2 WHERE slug = $1`, [g, `see [[thought/${p.thoughts[0]}]]`]],
+    ["links := [thought/<id>]", `UPDATE public.wiki_pages SET links = $2::jsonb WHERE slug = $1`, [g, JSON.stringify([`thought/${p.thoughts[0]}`])]],
+    ["slug := the idea leaf's slug", `UPDATE public.wiki_pages SET slug = $2 WHERE slug = $1`, [g, `content/thought/${p.thoughts[0]}`]],
+  ];
+  for (const [name, text, args] of probes) {
+    await asAppTx(text, args);
+    assertEquals(await row(), clean, `the guard let an app-role UPDATE through: ${name}`);
+  }
+  const patch = await fetch(`${REST}/rest/v1/wiki_pages?slug=eq.${encodeURIComponent(g)}`, {
+    method: "PATCH", headers: { "content-type": "application/json", apikey: "local-trust", prefer: "return=minimal" }, body: JSON.stringify({ title: p.capText }),
+  });
+  await patch.body?.cancel();
+  assertEquals(await row(), clean, "the guard let a PostgREST PATCH of the title through");
+  } finally {
+    await restore();
+  }
+  assertEquals((await sql<{ h: string }>(`SELECT md5(to_jsonb(x)::text) AS h FROM public.wiki_pages x WHERE slug = $1`, [g]))[0].h, w.all[g], "the guard target did not return to its planted state");
+});
+
 t("reverted", "the revert restores every thought byte-identical, with its entity links, edges, queue row and revision links; no archive is left", async () => {
   const p = await plant();
   const now = await sql<Record<string, string>>(SNAPSHOT);
@@ -336,6 +466,7 @@ t("reverted", "the revert restores every thought byte-identical, with its entity
   // round 2: every wiki page as it was (the withheld ones byte-identical), no wiki archive, no guard left
   const wiki = Object.fromEntries((await sql<{ slug: string; h: string }>(`SELECT slug, md5(to_jsonb(w)::text) AS h FROM public.wiki_pages w`)).map((r) => [r.slug, r.h]));
   for (const s of p.wiki.withheld) assertEquals(wiki[s], p.wiki.all[s], "a withheld page did not come back byte-identical");
+  for (const s of p.wiki.keep ?? []) assertEquals(wiki[s], p.wiki.all[s], "a round-3 control page changed");
   assertEquals(wiki[p.wiki.control], p.wiki.all[p.wiki.control], "the control page changed");
   assertEquals((await sql<{ r: string | null }>(`SELECT to_regclass('public.idea_wiki_archive')::text AS r`))[0].r, null, "the wiki archive is left");
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'trg_idea_privacy_wiki_guard'`))[0].n, 0, "the guard is left");

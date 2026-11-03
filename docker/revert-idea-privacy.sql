@@ -15,6 +15,15 @@ SET LOCAL client_min_messages = warning;   -- a re-run's "does not exist, skippi
 DROP TRIGGER IF EXISTS trg_idea_privacy_wiki_guard ON public.wiki_pages;
 DROP FUNCTION IF EXISTS public.trg_idea_privacy_wiki_guard();
 DROP FUNCTION IF EXISTS public.idea_privacy_page_shows_idea(TEXT, TEXT, JSONB);
+-- round 3: the normalised-text predicate, its window tables and the trigger that teaches it each new revision
+DROP FUNCTION IF EXISTS public.idea_privacy_page_shows_idea(TEXT, TEXT, TEXT, JSONB);
+DROP TRIGGER IF EXISTS trg_idea_privacy_learn ON public.idea_revisions;
+DROP FUNCTION IF EXISTS public.trg_idea_privacy_learn();
+DROP FUNCTION IF EXISTS public.idea_privacy_learn(TEXT);
+DROP FUNCTION IF EXISTS public.idea_privacy_windows(TEXT);
+DROP FUNCTION IF EXISTS public.idea_privacy_norm(TEXT);
+DROP TABLE IF EXISTS public.idea_privacy_shingles;
+DROP TABLE IF EXISTS public.idea_privacy_whole;
 SET LOCAL client_min_messages = notice;
 DO $$
 DECLARE
