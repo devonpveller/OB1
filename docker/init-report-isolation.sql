@@ -353,15 +353,25 @@ BEGIN
     --      existing: the same description from its remaining shared sources (the pre-report text is not recorded
     --        anywhere: no history table, and the job data holds only the thread id), no embedding.
     --    The embedding is re-made from the new text by the curator's backfill-thread-embeddings.ts (the deploy step).
+    -- round 4 (tester attempt 3): "minted" is decided from the DATA, not the stored curator label - a resend after the
+    -- first attempt committed stores 'explicit', the filed-event recovery stores no decision at all, and both threads
+    -- were minted by the first attempt. A thread counts as EXISTING only when it was created before every moved idea
+    -- job tied to it started (its job's curator thread_id, or the job of a moved report linked into it); anything the
+    -- timing cannot prove - a tied job with no time, a link with no job - is treated as minted (renamed: the
+    -- conservative choice). A 'new' label is minted whatever the times say.
     CREATE TEMP TABLE _ri_threads ON COMMIT DROP AS
-    SELECT t.id, bool_or(x.minted) AS minted
-      FROM (SELECT j.result -> 'curator' ->> 'thread_id' AS tid, (j.result -> 'curator' ->> 'thread_decision') = 'new' AS minted
+    SELECT t.id,
+           bool_or(x.decision = 'new' OR x.job_id IS NULL OR j.id IS NULL
+                   OR coalesce(j.started_at, j.created_at) IS NULL OR t.created_at >= coalesce(j.started_at, j.created_at)) AS minted
+      FROM (SELECT j.result -> 'curator' ->> 'thread_id' AS tid, j.id AS job_id, j.result -> 'curator' ->> 'thread_decision' AS decision
               FROM public.research_jobs j
              WHERE j.id IN (SELECT l.job_id FROM _ri_links l WHERE l.idea_hit AND l.job_id IS NOT NULL AND l.source_id = ANY(v_ids))
             UNION ALL
-            SELECT a.row_data ->> 'thread_id', false FROM public.research_report_isolation_archive a
+            SELECT a.row_data ->> 'thread_id', m.job_id, NULL FROM public.research_report_isolation_archive a
+              JOIN _ri_move m ON m.source_id = a.source_id
              WHERE a.batch = v_batch AND to_regclass(a.tbl) = 'public.thread_sources'::regclass) x
       JOIN public.threads t ON t.id::text = x.tid
+      LEFT JOIN public.research_jobs j ON j.id = x.job_id
      GROUP BY t.id;
     INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
     SELECT v_batch, v_ids[1], 'public.threads', 'id', 't', to_jsonb(t) || jsonb_build_object('_minted', rt.minted)
@@ -390,12 +400,21 @@ BEGIN
       FROM public.research_report_isolation_archive a
      WHERE a.batch = v_batch AND a.action = 'b' AND (a.row_data ->> 'id') = s.id::text;
     PERFORM set_config('session_replication_role', 'origin', true);
-    -- fail closed: every thread archived, and none still carries its archived name (minted) or description
+    -- fail closed, over EVERY affected thread (round 4): each is either renamed (minted) or proven older than every
+    -- moved job tied to it (so its name and slug cannot come from a report); none keeps its archived description or an
+    -- embedding; a minted one keeps neither its old name nor its old slug; and no shared source is still labelled with
+    -- a minted thread's old name
     SELECT count(*) INTO v_n FROM public.threads t JOIN public.research_report_isolation_archive a
         ON a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'id') = t.id::text
      WHERE ((a.row_data ->> '_minted')::boolean AND (t.name = a.row_data ->> 'name' OR t.slug IS NOT DISTINCT FROM NULLIF(a.row_data ->> 'slug', '') AND a.row_data ->> 'slug' IS NOT NULL))
+        OR (NOT (a.row_data ->> '_minted')::boolean AND EXISTS (
+              SELECT 1 FROM public.research_jobs j
+               WHERE j.id IN (SELECT m.job_id FROM _ri_move m) AND j.result -> 'curator' ->> 'thread_id' = t.id::text
+                 AND (coalesce(j.started_at, j.created_at) IS NULL OR t.created_at >= coalesce(j.started_at, j.created_at))))
         OR (coalesce(a.row_data ->> 'description', '') <> '' AND t.description IS NOT DISTINCT FROM a.row_data ->> 'description')
         OR t.embedding IS NOT NULL;
+    v_n := v_n + (SELECT count(*) FROM public.sources s JOIN public.research_report_isolation_archive a
+                     ON a.batch = v_batch AND a.action = 't' AND (a.row_data ->> '_minted')::boolean AND s.notebook = a.row_data ->> 'name');
     IF v_threads <> (SELECT count(*) FROM _ri_threads) OR v_n <> 0 THEN
         RAISE EXCEPTION 'rw-report-isolation: % thread(s) the moved reports named or described, % archived, % still carry it; nothing moved',
             (SELECT count(*) FROM _ri_threads), v_threads, v_n;

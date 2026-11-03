@@ -61,7 +61,9 @@ param(
   # rw-report-isolation round 2: the round-1 slot 390 the [5k] RED step runs (it deletes the leaf row, not the copies)
   [string]$ReportRoundOneSha = '364eba0',
   # rw-report-isolation round 3: the round-2 slot 390 the [5k] thread RED runs (it leaves the reports' text in the threads)
-  [string]$ReportRoundTwoSha = '30408c6'
+  [string]$ReportRoundTwoSha = '30408c6',
+  # round 4: the round-3 slot 390 (it reads "minted" from the stored label only)
+  [string]$ReportRoundThreeSha = 'b125959'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -436,7 +438,19 @@ try {
     $tNew = Q1 "INSERT INTO public.threads (name, description, status) VALUES ('Notebook $mark', '$mark - the report''s first paragraph', 'active') RETURNING id::text"
     $tOld = Q1 "INSERT INTO public.threads (name, description, status) VALUES ('Shared notebook $wk', 'refreshed from $mark', 'active') RETURNING id::text"
     $null = Q1 "SELECT public.link_source_to_thread('$tNew', '$src', 'automatic', NULL, 'confirmed'); SELECT public.link_source_to_thread('$tOld', '$src', 'automatic', NULL, 'confirmed'); SELECT public.link_source_to_thread('$tOld', '11111111-1111-4111-8111-111111111111', 'automatic', NULL, 'confirmed')"
-    $null = Q1 "UPDATE public.research_jobs SET result = result || jsonb_build_object('curator', (result -> 'curator') || jsonb_build_object('thread_id', '$tNew', 'thread_decision', 'new')) WHERE id = '$job'"
+    # round 4 (tester attempt 3): the stored answers of a job whose FIRST attempt minted the thread - a resend that reused
+    # it ('explicit') here, and on a second idea job the filed-event recovery (no thread_decision)
+    $null = Q1 "UPDATE public.research_jobs SET result = result || jsonb_build_object('curator', (result -> 'curator') || jsonb_build_object('thread_id', '$tNew', 'thread_decision', 'explicit')) WHERE id = '$job'"
+    $idea2 = Q1 "SELECT public.idea_capture('wiki-owner-$wk', 'service:lab', 'wiki idea two $wk', 'wiki idea two statement $wk', NULL, NULL)::text"
+    $job2 = Q1 "INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'wiki research two $wk') RETURNING id::text"
+    $null = Q1 "UPDATE public.idea_revisions SET research_job_id = '$job2' WHERE idea_id = '$idea2' AND revision = 1; UPDATE public.research_jobs SET refinery_id = NULL, inlet_ref = NULL WHERE id = '$job2'"
+    $src2 = Q1 "INSERT INTO public.sources (title, content, content_type, research_key) VALUES ('Report two $mark', 'the second report $mark body', 'research_synthesis', 'rk-wiki2-$wk') RETURNING id::text"
+    $tRec = Q1 "INSERT INTO public.threads (name, status) VALUES ('Recovered notebook $mark', 'active') RETURNING id::text"
+    $null = Q1 "SELECT public.link_source_to_thread('$tRec', '$src2', 'automatic', NULL, 'confirmed')"
+    $null = Q1 "UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', '$tRec', 'persist', jsonb_build_object('synthesis_id', '$src2'), 'recovered', jsonb_build_object('via', 'filed_event', 'attempt', 2, 'why', 'timeout'))) WHERE id = '$job2'"
+    # the times the move reads, as a real run has them: the jobs started BEFORE their filing minted the threads (an hour
+    # ago here - the plant made the threads moments ago), the existing thread a day before that
+    $null = Q1 "UPDATE public.research_jobs SET started_at = now() - interval '1 hour' WHERE id IN ('$job', '$job2'); UPDATE public.threads SET created_at = now() - interval '1 day' WHERE id = '$tOld'"
     $notebooks = {
       $r = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
         const n = async (h) => { const r = await fetch('http://$P-wb:8000/workbench/notebooks', { headers: { 'x-brain-key': '$key', ...h } }); const t = await r.text(); return r.status + ':' + (t.split('$mark').length - 1); };
@@ -474,6 +488,17 @@ try {
     $wlog += "round 2: notebooks $nbR2"
     Check ($nbR2 -match 'B 200:[1-9]' -and $nbR2 -match 'lane 200:[1-9]') "[5k] RED: round 2's 390 - GET /workbench/notebooks still gives B and the lane the threads the report named and described ($nbR2)"
     $wlog += "[round 2 revert] $(& $run $r2r 'ri-r2-revert.sql')"
+    # round 4 RED: round 3's 390 - it re-describes, but a thread minted by an 'explicit' resend or a recovered answer
+    # keeps its report-derived NAME
+    $r3i = Join-Path $env:TEMP "$P-r3-init-390.sql"; $r3r = Join-Path $env:TEMP "$P-r3-revert-390.sql"
+    [System.IO.File]::WriteAllText($r3i, ((& git -C $ob1 show "${ReportRoundThreeSha}:docker/init-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText($r3r, ((& git -C $ob1 show "${ReportRoundThreeSha}:docker/revert-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $script:made.dirs += @($r3i, $r3r)
+    $wlog += "[round 3 init] $(& $run $r3i 'ri-r3-init.sql')"
+    $nbR3 = & $notebooks
+    $wlog += "round 3: notebooks $nbR3"
+    Check ($nbR3 -match 'B 200:[1-9]' -and $nbR3 -match 'lane 200:[1-9]') "[5k] RED: round 3's 390 - the threads minted by an 'explicit' resend and a recovered answer keep their report-derived names for B and the lane ($nbR3)"
+    $wlog += "[round 3 revert] $(& $run $r3r 'ri-r3-revert.sql')"
     # GREEN: this 390
     $wlog += "[init] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init.sql')"
     $afterInit = & $rows
