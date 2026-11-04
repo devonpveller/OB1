@@ -219,7 +219,7 @@ try {
         $null = Sql1 "DELETE FROM public.wiki_pages WHERE slug = 'content/tool/drill-clean'"
         $drill += "[probe] leaf rc=$($p1.rc) citing rc=$($p2.rc) note rc=$($p3.rc) ($($p3.out -replace "`n", ' ')) clean rc=$($p4.rc); written back: $n; clean page in: $clean"
         Check ($p1.rc -eq 0 -and $p2.rc -eq 0 -and $n -eq '0') "drill: after init the guard skips the moved report's leaf and a page citing it on the reconcile / compile write path (written back: $n)"
-        Check ($p3.rc -ne 0 -and $p3.out -match 'private research report') 'drill: a note citing a moved report is refused out loud (42501)'
+        Check ($p3.rc -ne 0 -and $p3.out -match 'this page cannot be saved') 'drill: a note citing a moved report is refused out loud (42501)'
         Check ($p4.rc -eq 0 -and $clean -eq '1') 'drill: a clean regenerated page is let back in'
         continue
       }
