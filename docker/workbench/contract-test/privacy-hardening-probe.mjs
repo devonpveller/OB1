@@ -55,10 +55,22 @@ out.unsynced1 = wp.unsyncedWikiPages().length;
 
 // 3. a row that is missing from the answer although NO guard withheld it (the lab's stand-in: a trigger that silently drops a
 // slug): it is HIDDEN, not withheld - its file must stay, the page is unsynced, the run fails
+const oldText = page(`PH hidden old ${tag}`, "A page that was already there.");
+fs.writeFileSync(file("hidden-old"), oldText);
 wp.writeWikiPage(file("hidden"), page(`PH hidden ${tag}`, "A page the database does not return and no guard reports."));
+wp.writeWikiPage(file("hidden-old"), page(`PH hidden old ${tag}`, "New text for a row the database does not return."));
 out.exit2 = await wp.finishWikiPages(`ph-hidden-${tag}`);
 out.hidden = { file: fs.existsSync(file("hidden")), row: (await rowsNow(["hidden"])).has(slug("hidden")),
-  unsynced: wp.unsyncedWikiPages().some((x) => x.slug === slug("hidden")), withheldMemo: wp.isWithheldWikiPage(slug("hidden")) };
+  unsynced: wp.unsyncedWikiPages().some((x) => x.slug === slug("hidden")), withheldMemo: wp.isWithheldWikiPage(slug("hidden")),
+  oldKept: fs.existsSync(file("hidden-old")) && fs.readFileSync(file("hidden-old"), "utf8") === oldText,
+  staged: fs.readdirSync(dir).filter((f) => f.includes("wp-staged")).length };
+// a mixed batch: one row a guard withheld (a link to the idea) and one the lab trigger drops - one header count (1) for two
+// missing rows, so both are hidden and NEITHER file may be published
+wp.writeWikiPage(file("hidden-mixed"), page(`PH hidden mixed ${tag}`, "Hidden by the lab trigger."));
+wp.writeWikiPage(file("held-mixed"), page(`PH held mixed ${tag}`, `Withheld: [[thought/${th}]].`));
+out.exit3 = await wp.finishWikiPages(`ph-mixed-${tag}`);
+out.mixed = { heldFile: fs.existsSync(file("held-mixed")), hiddenFile: fs.existsSync(file("hidden-mixed")),
+  staged: fs.readdirSync(dir).filter((f) => f.includes("wp-staged")).length };
 
 // 4. R3: a NOTE that links an idea's thought, and a NOTE that cites a moved report: refused, with the same message that
 // names neither

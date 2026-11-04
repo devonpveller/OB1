@@ -263,6 +263,7 @@ const _queue = new Map();     // slug -> row (last write wins)
 const _unsynced = new Map();  // slug -> error (the page's file exists; its row did not land)
 const _pathOf = new Map();    // slug -> the absolute path it was queued from (round 2: staged files)
 let _synced = 0;
+let _hiddenRun = 0; // rows neither returned nor reported withheld this run (unsynced, nothing written)
 let _heldRun = 0; // rows a database guard withheld this run (not synced, not unsynced)
 
 // Vault-relative path from an absolute one; null OUTSIDE the vault root (a
@@ -432,7 +433,18 @@ export async function flushWikiPages() {
       const out = new Set(rep.withheld);
       // a missing row no guard accounts for (rw-privacy-hardening): unsynced, its file kept, the run ends 3
       const hid = new Set(rep.hidden || []);
-      for (const r of part) if (hid.has(r.slug)) { failed += 1; _unsynced.set(r.slug, "the row was not returned and no guard reported withholding it (row-level security?)"); commitStaged(_pathOf.get(r.slug), null); _pathOf.delete(r.slug); }
+      // It may BE a guard's withheld row whose count did not arrive (no header, a mixed batch): so nothing of it is published. The
+      // staged copy is thrown away, a file this run CREATED is removed, a file that was already there is left exactly as it is (not
+      // overwritten, not deleted), and the run ends EXIT_COMPLETED_WITH_FAILURES.
+      for (const r of part) if (hid.has(r.slug)) {
+        failed += 1; _hiddenRun += 1;
+        _unsynced.set(r.slug, "the row was not returned and no guard reported withholding it (row-level security? a guard whose count did not arrive?); nothing was written");
+        const p = _pathOf.get(r.slug);
+        const tmp = p && _staged.get(p);
+        if (tmp) { _staged.delete(p); try { fs.unlinkSync(tmp); } catch { /* gone */ } }
+        if (p && _created.has(p)) { _created.delete(p); try { fs.unlinkSync(p); } catch { /* gone */ } }
+        _pathOf.delete(r.slug);
+      }
       const landed = part.filter((r) => !out.has(r.slug) && !hid.has(r.slug));
       sent += landed.length;
       _synced += landed.length;
@@ -471,6 +483,8 @@ export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   const heldRun = _heldRun;
   _synced = 0; // per run: the next run (or wiki-service cycle) counts its own
   _heldRun = 0;
+  const hiddenRun = _hiddenRun;
+  _hiddenRun = 0;
   if (!u.length) {
     console.log(`[wiki-pages] ${tag}: all ${synced} written page row(s) landed` + (heldRun ? ` (${heldRun} withheld by the database, files left out)` : ""));
     return 0;
@@ -510,7 +524,7 @@ export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   } catch (e) {
     console.error(`[wiki-pages] ${tag}: notification for the unsynced rows FAILED: ${e?.message || e}`);
   }
-  return 1;
+  return hiddenRun ? EXIT_COMPLETED_WITH_FAILURES : 1;
 }
 
 // A database read or write that failed because the DATABASE was not there

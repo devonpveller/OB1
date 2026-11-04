@@ -15,6 +15,7 @@ import { join } from "node:path";
 const rowsInDb = new Set(["content/topic/held-update"]); // an older clean row the guard keeps on an update
 let representation = true;
 let sayWithheld = true;
+let headerDelta = 0; // a header that does not match the number of rows the stub dropped as "held"
 const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => { raw += c; });
@@ -28,7 +29,7 @@ const server = http.createServer((req, res) => {
       const written = rows.filter((r) => !r.slug.includes("held") && !r.slug.includes("hidden"));
       for (const r of written) rowsInDb.add(r.slug);
       const heldN = rows.filter((r) => r.slug.includes("held")).length;
-      res.writeHead(201, { "content-type": "application/json", ...(sayWithheld && heldN ? { "x-wiki-withheld": String(heldN) } : {}) });
+      res.writeHead(201, { "content-type": "application/json", ...(sayWithheld && heldN ? { "x-wiki-withheld": String(Math.max(0, heldN + headerDelta)) } : {}) });
       res.end(representation ? JSON.stringify(written.map((r) => ({ slug: r.slug }))) : "");
       return;
     }
@@ -107,23 +108,54 @@ test("a body that tells nothing (no representation) counts as landed - the behav
   }
 });
 
-test("a row nobody withheld (RLS hides it) is HIDDEN, not withheld: its file is KEPT, it is unsynced, the run does not end 0 (rw-privacy-hardening)", async () => {
+// rw-privacy-hardening (review r-privacy-hardening, reason 1): a row that is missing from the answer without a matching count is
+// HIDDEN - and may be a guard's withheld row whose count did not arrive. Nothing of it is published: no new file, a file that
+// was already there is byte-unchanged and not deleted, no staged copy is left, the slug is unsynced, the run ends 3.
+const before = (f) => readFileSync(join(dir, f), "utf8");
+const noStaged = () => readdirSync(dir).filter((f) => f.includes("wp-staged"));
+test("a row nobody withheld (RLS hides it) is HIDDEN: no new file, an existing file byte-unchanged and not deleted, unsynced, run ends 3", async () => {
+  writeFileSync(join(dir, "hidden-old.md"), page("Hidden old", "the page as it was"));
+  const oldBytes = before("hidden-old.md");
   m.writeWikiPage(join(dir, "hidden-new.md"), page("Hidden new", "a page the database does not return and no guard reports"));
+  m.writeWikiPage(join(dir, "hidden-old.md"), page("Hidden old", "new text for a row the database does not return"));
   m.writeWikiPage(join(dir, "clean-two.md"), page("Clean two", "a clean page in the same batch"));
   const code = await m.finishWikiPages("test");
-  assert.notEqual(code, 0, "a hidden row must fail the run, not be taken for withheld");
-  assert.equal(existsSync(join(dir, "hidden-new.md")), true, "the hidden page's file was deleted as if it were withheld");
+  assert.equal(code, 3, "a hidden row ends the run with EXIT_COMPLETED_WITH_FAILURES");
+  assert.equal(existsSync(join(dir, "hidden-new.md")), false, "a file was created for a hidden slug");
+  assert.equal(existsSync(join(dir, "hidden-old.md")), true, "an existing file was deleted");
+  assert.equal(before("hidden-old.md"), oldBytes, "an existing file was overwritten with the new text");
+  assert.deepEqual(noStaged(), [], "a staged copy is left behind");
   assert.equal(existsSync(join(dir, "clean-two.md")), true);
-  assert.ok(m.unsyncedWikiPages().some((x) => x.slug === "content/topic/hidden-new"));
+  const u = m.unsyncedWikiPages().map((x) => x.slug);
+  assert.ok(u.includes("content/topic/hidden-new") && u.includes("content/topic/hidden-old"));
   assert.equal(m.isWithheldWikiPage("content/topic/hidden-new"), false);
 });
 
-test("a guard that does not say it withheld (no X-Wiki-Withheld count) leaves its rows HIDDEN: nothing is deleted on an inference", async () => {
+test("a guard whose count did not arrive (no header) leaves its rows HIDDEN: no file is published", async () => {
   sayWithheld = false;
-  m.writeWikiPage(join(dir, "held-silent.md"), page("Held silent", "withheld by an old guard that never says so"));
+  writeFileSync(join(dir, "held-silent-old.md"), page("Held silent old", "the clean copy"));
+  const oldBytes = before("held-silent-old.md");
+  m.writeWikiPage(join(dir, "held-silent.md"), page("Held silent", "withheld by a guard whose count never arrives"));
+  m.writeWikiPage(join(dir, "held-silent-old.md"), page("Held silent old", "text the guard withheld"));
   const code = await m.finishWikiPages("test");
   sayWithheld = true;
-  assert.notEqual(code, 0);
-  assert.equal(existsSync(join(dir, "held-silent.md")), true);
+  assert.equal(code, 3);
+  assert.equal(existsSync(join(dir, "held-silent.md")), false, "the withheld page's content was published");
+  assert.equal(before("held-silent-old.md"), oldBytes);
+  assert.deepEqual(noStaged(), []);
   assert.equal(m.isWithheldWikiPage("content/topic/held-silent"), false);
+});
+
+test("a header that does not match, and a mixed batch (one withheld, one hidden), publish nothing", async () => {
+  headerDelta = 1; // says 2 withheld, 1 row is missing as "held": not equal
+  m.writeWikiPage(join(dir, "held-mismatch.md"), page("Held mismatch", "withheld, the count is wrong"));
+  assert.equal(await m.finishWikiPages("test"), 3);
+  assert.equal(existsSync(join(dir, "held-mismatch.md")), false);
+  headerDelta = 0; // says 1 withheld, 2 rows are missing (held-mixed withheld, hidden-mixed hidden)
+  m.writeWikiPage(join(dir, "held-mixed.md"), page("Held mixed", "withheld by a guard"));
+  m.writeWikiPage(join(dir, "hidden-mixed.md"), page("Hidden mixed", "hidden by something else"));
+  assert.equal(await m.finishWikiPages("test"), 3);
+  assert.equal(existsSync(join(dir, "held-mixed.md")), false, "the withheld half of a mixed batch was published");
+  assert.equal(existsSync(join(dir, "hidden-mixed.md")), false);
+  assert.deepEqual(noStaged(), []);
 });

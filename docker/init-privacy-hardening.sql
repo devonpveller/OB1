@@ -1,7 +1,7 @@
 -- ============================================================
 -- Privacy hardening: the follow-ups of slots 380, 390 and 400 (research-workbench rw-privacy-hardening). Slot 430.
--- A FORWARD migration: slots 380 and 390 are live and are not edited. This file replaces what they created (functions
--- only) and repairs what the 390 move did. Needs 380 and 390 applied (the chain order: 380, 390, 400, 430).
+-- A FORWARD migration for a database that already ran slots 380 and 390 (they are live). This file replaces what they created
+-- (functions only) and repairs what the 390 move did. Needs 380 and 390 applied (the chain order: 380, 390, 400, 430).
 --
 --   390-F1  the linkage relabel also relabelled a source whose label is the name (any case) of a thread OUTSIDE the move's
 --           tie set - a notebook the move never touched. Repaired: such a source gets its own label back (the 390 archive
@@ -27,8 +27,8 @@
 --   390-F3  is the revert of 390 (revert-report-isolation.sql), not SQL here.
 --
 -- One transaction: a failed check leaves everything as it was. Re-run: nothing left to repair, the functions are replaced
--- by themselves. After any re-run of 380 or 390 (their CREATE OR REPLACE puts the old function bodies back), run this
--- file again. Revert: revert-privacy-hardening.sql, BEFORE the 390 and 380 reverts.
+-- by themselves. The CURRENT 380 and 390 files carry the same function bodies as this file, so re-running them does not
+-- downgrade the guards; an OLDER copy of those files (the pre-430 text) would, and then this file is run again. Revert: revert-privacy-hardening.sql, BEFORE the 390 and 380 reverts.
 -- Fresh-volume slot 430 (an empty database: nothing to repair); live: psql -f after a fresh backup.
 -- ============================================================
 BEGIN;
