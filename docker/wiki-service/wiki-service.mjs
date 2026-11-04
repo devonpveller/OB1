@@ -624,8 +624,10 @@ async function fetchEntityLinkData() {
   const entities = await obFetchAll(
     "entities?select=id,canonical_name,entity_type,metadata,updated_at&order=id.asc",
   );
+  // rw-inlet-owner (slot 440): only SHARED thoughts (user_id NULL) count as a link - a page is shared output, and a
+  // thought with an owner is that owner's alone (the compile reads the same set: recipes/entity-wiki/generate-wiki.mjs)
   const tRows = await obFetchAll(
-    "thought_entities?select=entity_id&order=entity_id.asc,thought_id.asc",
+    "thought_entities?select=entity_id,thoughts!inner(id)&thoughts.user_id=is.null&order=entity_id.asc,thought_id.asc",
   );
   const sRows = await obFetchAll(
     "source_entities?select=entity_id,sources!inner(id)&sources.retraction_committed_at=is.null&order=entity_id.asc,source_id.asc",

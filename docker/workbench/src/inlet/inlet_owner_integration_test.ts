@@ -2,6 +2,7 @@
 // operator 2026-11-04 "all private"): every existing personal row becomes its owner's and private, over a REAL
 // workbench, viewer, PostgREST and database.
 //
+// Round 2 (tester attempt 1): a service-owned digest job, the function grants, the link and text variants, the manifest.
 // SKIPPED unless DOCS_TEST_BASE and INLET_PHASE are set. contract-test/run-workspace-tests.ps1 [5r] runs it in phases
 // around psql runs of contract-test/inlet-owner-plant.sql, init-inlet-owner.sql and revert-inlet-owner.sql, on a
 // DISPOSABLE internal network:
@@ -124,6 +125,17 @@ async function secondUserReads(p: Record<string, any>): Promise<string[]> {
     ["contract trail", `${W}/trail`],
     ["contract session (the seeded job)", `${W}/sessions/${j.seed}`],
     ["contract jobs", `${W}/jobs?kinds=research`],
+    // round 2 (tester 1): the SERVICE-owned digest job and its branch - every session and contract read
+    ["contract sessions (recent)", `${W}/sessions?state=recent`],
+    ["contract sessions (all)", `${W}/sessions`],
+    ["contract session (service-owned digest job)", `${W}/sessions/${j.svc}`],
+    ["contract session flow (service-owned)", `${W}/sessions/${j.svc}/flow`],
+    ["contract session coverage (service-owned)", `${W}/sessions/${j.svc}/coverage`],
+    ["contract session (its branch)", `${W}/sessions/${j.svcbranch}`],
+    ["contract session flow (its branch)", `${W}/sessions/${j.svcbranch}/flow`],
+    ["contract report credibility (service-owned)", `${W}/reports/${j.svc}/credibility`],
+    ["contract jobs (every kind)", `${W}/jobs?kinds=research,import`],
+    ["contract timeline (service-owned)", `${W}/timeline?session_id=${j.svc}`],
     ["sources search", `/workbench/sources?q=${m}`],
     ["source read (email body)", `/workbench/sources/${s.mail}`],
     ["source read (podcast)", `/workbench/sources/${s.pod}`],
@@ -251,7 +263,8 @@ t("migrated", "the guard: the leaf, a link and a withheld page's own text are no
 });
 
 t("migrated", "the archive and the private stores are readable by no app role; the stores hold the moved rows", async () => {
-  for (const tb of ["inlet_owner_archive", "inlet_private_sources", "inlet_private_source_chunks", "inlet_private_claims", "inlet_private_claim_links", "inlet_owner"]) {
+  for (const tb of ["inlet_owner_archive", "inlet_private_sources", "inlet_private_source_chunks", "inlet_private_claims", "inlet_private_claim_links", "inlet_owner",
+                    "inlet_owner_withheld_pages", "inlet_owner_withheld_chunks"]) {
     assertEquals(await errCode(() => asApp(`SELECT count(*) FROM public.${tb}`)), "42501", `${tb} is refused to the app role`);
   }
   const p = await plant();
@@ -262,6 +275,113 @@ t("migrated", "the archive and the private stores are readable by no app role; t
             (SELECT count(*)::int FROM public.inlet_private_claim_links WHERE claim_id = $3::uuid) AS l`,
     [[p.sources.mail, p.sources.pod], [p.claims.priv, p.claims.chain], p.claims.mixed]))[0];
   assertEquals([n.s, n.c, n.k, n.l], [2, 2, 2, 1]);
+});
+
+t("migrated", "round 2 (tester 2, 5): no slot-440 function executes for service_role (PostgREST's anon role), anon, authenticated or PUBLIC; ob_app_memory holds only the owner read; round 1's owner function is gone", async () => {
+  const fns = ["public.inlet_private_source(uuid,text)", "public.inlet_owner_page_private(text,text,text,jsonb)",
+    "public.inlet_owner_page_links_private(text,text,text,jsonb)", "public.inlet_owner_text_withheld(text)",
+    "public.inlet_owner_linked_source_ids(text,text,text,jsonb)", "public.inlet_owner_norm(text)", "public.trg_inlet_owner_wiki_guard()"];
+  const present = (await sql<{ f: string }>(`SELECT f FROM unnest($1::text[]) f WHERE to_regprocedure(f) IS NOT NULL`, [fns])).map((x) => x.f);
+  assertEquals(present.length, fns.length, "every slot-440 function exists");
+  const roles = (await sql<{ r: string }>(
+    `SELECT r FROM unnest(ARRAY['service_role','anon','authenticated','public','ob_app_memory']) r
+      WHERE r = 'public' OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r)`)).map((x) => x.r);
+  const grants = await sql<{ r: string; f: string }>(
+    `SELECT r, f FROM unnest($1::text[]) r, unnest($2::text[]) f WHERE has_function_privilege(r, f, 'EXECUTE') ORDER BY 1, 2`, [roles, fns]);
+  assertEquals(grants.map((g) => `${g.r}:${g.f}`), ["ob_app_memory:public.inlet_private_source(uuid,text)"]);
+  const gone = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'inlet_owner_default'`))[0].n;
+  assertEquals(gone, 0, "inlet_owner_default no longer exists");
+  // a role reachable without credentials asking the store for the owner's moved source, with the right subject: refused
+  const p = await plant();
+  for (const role of ["service_role", "authenticated"]) {
+    const code = await errCode(async () => {
+      const c = await pool!.connect();
+      try {
+        await c.queryObject("BEGIN");
+        await c.queryObject(`SET LOCAL ROLE ${role}`);
+        await c.queryObject(`SELECT * FROM public.inlet_private_source($1::uuid, $2)`, [p.sources.mail, A]);
+        await c.queryObject("COMMIT");
+      } catch (e) {
+        try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+        throw e;
+      } finally {
+        c.release();
+      }
+    });
+    assertEquals(code, "42501", `${role} may not execute the owner read`);
+  }
+  // the prune's view: the owner's gmail thoughts, no owner column
+  const cols = await sql<{ c: string }>(`SELECT attname::text AS c FROM pg_attribute WHERE attrelid = 'public.inlet_owner_mail'::regclass AND attnum > 0 ORDER BY attnum`);
+  assertEquals(cols.map((x) => x.c), ["id", "content", "metadata", "created_at"]);
+});
+
+t("migrated", "round 2 (tester 4, 6): every link form is withheld (any case, %2F); a note with [[Thought/<id>]] is refused with 430's one message; withheld text that comes back nearly whole is withheld at ANY slug, a quarter of it is not (the stated limit); every withheld row is marked", async () => {
+  const p = await plant();
+  const pg = p.pages;
+  const priv = p.thoughts[2];
+  const srcUpper = String(p.sources.mail).toUpperCase();
+  const arch = Object.fromEntries((await sql<{ ref: string; body: string }>(
+    `SELECT ref, row_data ->> 'body' AS body FROM public.inlet_owner_archive WHERE action = 'w' AND restored_at IS NULL AND ref = ANY($1)`,
+    [[pg.linking, pg.evidence]])).map((x) => [x.ref, x.body]));
+  const longBody = arch[pg.linking];
+  const smallBody = arch[pg.evidence];
+  assert(longBody && smallBody, "the long and the small withheld page are archived");
+  const longWords = longBody.split(" ").filter((w) => w !== "");
+  const tail = longWords.slice(12).join(" ");    // past the thought link: the text rule, not the link rule, must hold it
+  const variants: [string, string, boolean][] = [   // [name, body, withheld?]
+    ["[[Content/Thought/<id>]]", `see [[Content/Thought/${priv}]]`, true],
+    ["content/thought%2F<id>", `see content/thought%2F${priv}`, true],
+    ["(THOUGHT%2f<id>)", `see (THOUGHT%2f${priv})`, true],
+    ["[[content/SOURCE/<UUID>]]", `see [[content/SOURCE/${srcUpper}]]`, true],
+    ["source%2F<uuid>", `see source%2F${p.sources.mail}`, true],
+    ["long page, one byte changed, another slug", tail.replace("para50 ", "pare50 "), true],
+    ["small page, one word changed, another slug", smallBody.replace("topic", "topix"), true],
+    ["small page exact, another slug", smallBody, true],
+    ["a quarter of the long page (the stated limit)", longWords.slice(-24).join(" "), false],
+    ["new shared text", "Rebuilt from the shared article only: it has three parts.", false],
+    ["control: afterthought/<id>", `about afterthought/${priv}`, false],
+  ];
+  const bad: string[] = [];
+  let i = 0;
+  for (const [name, body, held] of variants) {
+    const sl = `content/topic/variant-${i++}-${String(p.mark).slice(-4)}`;
+    await asApp(`INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'v', $2)`, [sl, body]);
+    const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = $1`, [sl]))[0].n;
+    if ((n === 0) !== held) bad.push(`${name}: ${n === 0 ? "withheld" : "written"}`);
+    await sql(`DELETE FROM public.wiki_pages WHERE slug = $1`, [sl]);
+  }
+  console.log(`inlet privacy: guard variants judged wrongly: ${bad.length}${bad.length ? " - " + bad.join("; ") : ""}`);
+  assertEquals(bad, []);
+  // a NOTE with the upper-case link: refused, with 430's message (it names neither the guard nor the reason)
+  let msg = "";
+  try {
+    await asApp(`INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'note', 'n', $2)`,
+      [`notes/variant-${String(p.mark).slice(-4)}`, `see [[Thought/${priv}]]`]);
+  } catch (e) {
+    msg = `${(e as { fields?: { code?: string } }).fields?.code}: ${(e as Error).message}`;
+  }
+  assert(msg.startsWith("42501") && msg.includes("wiki_pages: this page cannot be saved"), "the note is refused with the uniform message");
+  // the marker: a raw PostgREST upsert of two withheld rows says 2, and returns neither
+  const r = await fetch(`${REST}/rest/v1/wiki_pages?on_conflict=slug&select=slug`, {
+    method: "POST",
+    headers: { "content-type": "application/json", prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify([{ slug: "content/topic/marker-a", page_class: "entity", title: "m", body: `[[thought/${priv}]]` },
+      { slug: "content/topic/marker-b", page_class: "entity", title: "m", body: tail }]),
+  });
+  const back = await r.json();
+  assertEquals([r.status < 300, r.headers.get("x-wiki-withheld"), Array.isArray(back) ? back.length : -1], [true, "2", 0]);
+});
+
+t("migrated", "round 2 (tester 3): the wiki-service manifest and the compile count only shared thoughts - the private-only entity has no link", async () => {
+  const p = await plant();
+  // the manifest's query (docker/wiki-service/wiki-service.mjs fetchEntityLinkData) and the compile's eligibility count
+  for (const q of [`thought_entities?select=entity_id,thoughts!inner(id)&thoughts.user_id=is.null&entity_id=eq.${p.entities.priv}`,
+                   `thought_entities?select=thought_id,thoughts!inner(id)&entity_id=eq.${p.entities.priv}&thoughts.user_id=is.null`]) {
+    const r = await fetch(`${REST}/rest/v1/${q}`);
+    assertEquals(((await r.json()) as unknown[]).length, 0, "no shared link for the private-only entity");
+  }
+  const edges = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.edges WHERE from_entity_id = $1`, [p.entities.priv]))[0].n;
+  assertEquals(edges, 1, "the entity keeps its typed edge (the runner's compile step proves no page is built from it)");
 });
 
 t("rerun", "a second run stamps and isolates exactly the rows that arrived unowned since the first", async () => {

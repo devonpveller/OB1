@@ -1,8 +1,8 @@
--- Revert init-inlet-owner.sql (rw-inlet-owner, slot 410).
+-- Revert init-inlet-owner.sql (rw-inlet-owner, slot 440).
 --   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -f revert-inlet-owner.sql
 -- Run it only with the images that do not read the private stores back in place (openbrain-mcp, the workbench, the
 -- wiki compile, the gmail prune), and the withheld pages' vault files moved BACK into the vault first (else the
--- writer's orphan handling could drop restored rows). Order with the other slots: revert 410 BEFORE 390 and 380.
+-- writer's orphan handling could drop restored rows); restart the wiki viewer after. Order: revert 440, then 430, 390, 380.
 --   Every archived batch not yet restored goes back, the newest first, with triggers off (session_replication_role =
 --   replica: nothing is re-fingerprinted, re-queued, re-judged or touched): the moved sources, the private claims and
 --   every row the deletes cascaded; every column set NULL (only where still NULL); every whole-row image (the shared
@@ -105,7 +105,13 @@ BEGIN
             ELSIF r.action = 'j' THEN
                 UPDATE public.research_jobs j
                    SET options = CASE WHEN jsonb_typeof(a.row_data -> 'options') = 'null' THEN NULL ELSE a.row_data -> 'options' END,
-                       result  = CASE WHEN jsonb_typeof(a.row_data -> 'result') = 'null' THEN NULL ELSE a.row_data -> 'result' END
+                       result  = CASE WHEN jsonb_typeof(a.row_data -> 'result') = 'null' THEN NULL ELSE a.row_data -> 'result' END,
+                       -- round 2: the question, anchor, topic and tree report (a round-1 archive row has none: kept as is)
+                       query = CASE WHEN a.row_data ? 'query' THEN a.row_data ->> 'query' ELSE j.query END,
+                       anchor = CASE WHEN a.row_data ? 'anchor' THEN a.row_data ->> 'anchor' ELSE j.anchor END,
+                       topic_estimate = CASE WHEN a.row_data ? 'topic_estimate' THEN a.row_data ->> 'topic_estimate' ELSE j.topic_estimate END,
+                       tree_report = CASE WHEN NOT (a.row_data ? 'tree_report') THEN j.tree_report
+                                          WHEN jsonb_typeof(a.row_data -> 'tree_report') = 'null' THEN NULL ELSE a.row_data -> 'tree_report' END
                   FROM public.inlet_owner_archive a
                  WHERE a.batch = v_batch AND a.action = 'j' AND (a.row_data ->> 'id')::uuid = j.id;
                 GET DIAGNOSTICS v_n = ROW_COUNT;
@@ -146,7 +152,11 @@ BEGIN
             END IF;
         END LOOP;
 
-        -- the private copies of what came back
+        -- the private copies of what came back, and the withheld text the guard kept for this batch's pages
+        IF to_regclass('public.inlet_owner_withheld_chunks') IS NOT NULL THEN
+            DELETE FROM public.inlet_owner_withheld_chunks c USING public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'w' AND c.page_ref = a.id;
+            DELETE FROM public.inlet_owner_withheld_pages p USING public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'w' AND p.page_ref = a.id;
+        END IF;
         DELETE FROM public.inlet_private_claim_links WHERE batch = v_batch;
         DELETE FROM public.inlet_private_source_chunks WHERE inlet_batch = v_batch;
         DELETE FROM public.inlet_private_claims WHERE inlet_batch = v_batch;
@@ -159,11 +169,31 @@ BEGIN
         RAISE NOTICE 'inlet owner revert: % batch(es) restored, % row(s) written back, % withheld page(s) kept (rebuilt since)', v_batches, v_restored, v_kept;
     END IF;
 END $$;
+SET LOCAL client_min_messages = warning;
 DROP TRIGGER IF EXISTS trg_inlet_owner_wiki_guard ON public.wiki_pages;
 DROP FUNCTION IF EXISTS public.trg_inlet_owner_wiki_guard();
 DROP FUNCTION IF EXISTS public.inlet_owner_page_private(TEXT, TEXT, TEXT, JSONB);
+DROP FUNCTION IF EXISTS public.inlet_owner_page_links_private(TEXT, TEXT, TEXT, JSONB);
+DROP FUNCTION IF EXISTS public.inlet_owner_text_withheld(TEXT);
+DROP FUNCTION IF EXISTS public.inlet_owner_linked_source_ids(TEXT, TEXT, TEXT, JSONB);
+DROP FUNCTION IF EXISTS public.inlet_owner_norm(TEXT);
 DROP FUNCTION IF EXISTS public.inlet_private_source(UUID, TEXT);
 DROP FUNCTION IF EXISTS public.inlet_owner_default();
+-- the prune's view and its role (the gmail prune then deletes nothing until 440 runs again)
+DROP VIEW IF EXISTS public.inlet_owner_mail;
+DO $$
+BEGIN
+    IF to_regclass('public.inlet_owner') IS NOT NULL THEN
+        DROP POLICY IF EXISTS inlet_owner_view_read ON public.inlet_owner;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_inlet_owner_view') THEN
+        IF to_regclass('public.inlet_owner') IS NOT NULL THEN
+            REVOKE ALL ON public.inlet_owner FROM ob_inlet_owner_view;
+        END IF;
+        REVOKE service_role FROM ob_inlet_owner_view;
+        DROP ROLE ob_inlet_owner_view;
+    END IF;
+END $$;
 -- match_thoughts as the first run found it
 DO $$
 DECLARE v_def TEXT;

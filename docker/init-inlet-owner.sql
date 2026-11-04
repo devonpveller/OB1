@@ -1,5 +1,6 @@
 -- ============================================================
--- Existing personal data becomes its owner's, and private (research-workbench rw-inlet-owner, plan 08 PD1). Slot 410.
+-- Existing personal data becomes its owner's, and private (research-workbench rw-inlet-owner, plan 08 PD1). Slot 440
+-- (after rw-privacy-hardening's 430, whose link helper and withheld-row marker it uses).
 -- Operator 2026-11-04, "all private": every existing thought is the operator's and private - Gmail, Google activity,
 -- the ChatGPT import and the operator's own captures. The email-body sources (url mail.google.com) and the podcast
 -- transcripts (metadata.source daily-digest-podcast) and the claims drawn ONLY from them are private too (decision D,
@@ -38,7 +39,13 @@
 -- new batch, and has nothing to do otherwise. Revert: revert-inlet-owner.sql, byte-identical from the archive.
 -- One transaction with lock_timeout 10s: a refusal or a lock not granted leaves everything as it was. Stop (do not
 -- pause) the writers that hold transactions first: the research curator, the wiki compile, the gmail pull / prune.
--- Fresh-volume slot 410 (an empty database: nothing to do, no owner needed).
+-- Fresh-volume slot 440 (an empty database: nothing to do, no owner needed). Revert order: 440, 430, 390, 380.
+-- Round 2 (tester attempt 1): every research job is stripped whoever owns it (a service-owned digest job is read in full by
+-- everyone): events (payload, trail), the seeded trees' query / anchor / topic / prompt, result arrays naming a moved
+-- source or a private claim; the new functions execute for ob_app_memory only (or nobody); the prune reads the owner
+-- through a view owned by its own role; the guard matches links case-insensitively with %2F decoded (430's helper),
+-- refuses withheld text that comes back nearly whole at any slug (8-word chunks), marks every withheld row for 430's
+-- writer and refuses a note with 430's one message.
 -- ============================================================
 \if :{?owner_sub}
 \else
@@ -48,6 +55,13 @@ BEGIN;
 SET LOCAL client_min_messages = warning;
 SET LOCAL lock_timeout = '10s';
 SELECT set_config('inlet_owner.sub', :'owner_sub', true) AS owner_given \gset
+DO $$
+BEGIN
+    IF to_regprocedure('public.idea_privacy_linked_thought_ids(text,text,text,jsonb)') IS NULL
+       OR to_regprocedure('public.wiki_guard_mark_withheld()') IS NULL THEN
+        RAISE EXCEPTION 'inlet owner: slot 430 (init-privacy-hardening.sql) must be applied first' USING ERRCODE = '55000';
+    END IF;
+END $$;
 
 -- ── the stores ─────────────────────────────────────────────────────────────────────────────────────────────────────
 -- the owner, recorded once (and the match_thoughts this file replaced, for the revert)
@@ -77,6 +91,19 @@ CREATE TABLE IF NOT EXISTS public.inlet_owner_archive (
 );
 CREATE INDEX IF NOT EXISTS idx_inlet_owner_archive_batch ON public.inlet_owner_archive (batch, restored_at);
 CREATE INDEX IF NOT EXISTS idx_inlet_owner_archive_page ON public.inlet_owner_archive (ref) WHERE action = 'w' AND restored_at IS NULL;
+-- round 2: the withheld pages' text as 8-word chunks (md5 of the normalised words), for the guard's "the withheld text
+-- came back" rule at ANY slug; page_ref = the archive row of the page
+CREATE TABLE IF NOT EXISTS public.inlet_owner_withheld_pages (
+    page_ref   BIGINT PRIMARY KEY,
+    n_chunks   INT NOT NULL,
+    whole_hash TEXT NOT NULL            -- md5 of the whole normalised body (a page under 8 words is matched whole)
+);
+CREATE TABLE IF NOT EXISTS public.inlet_owner_withheld_chunks (
+    h        TEXT NOT NULL,
+    page_ref BIGINT NOT NULL,
+    PRIMARY KEY (h, page_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_inlet_owner_withheld_whole ON public.inlet_owner_withheld_pages (whole_hash);
 -- the owner-private stores: the shared tables' own columns (LIKE) + the owner and the batch
 CREATE TABLE IF NOT EXISTS public.inlet_private_sources (LIKE public.sources);
 CREATE TABLE IF NOT EXISTS public.inlet_private_source_chunks (LIKE public.source_chunks);
@@ -118,7 +145,7 @@ BEGIN
     -- schema's default privileges hand new tables to the app roles). The owner reads a private source through
     -- inlet_private_source(id, sub) below, never the table.
     FOREACH t IN ARRAY ARRAY['inlet_owner', 'inlet_owner_prior', 'inlet_owner_archive', 'inlet_private_sources', 'inlet_private_source_chunks',
-                             'inlet_private_claims', 'inlet_private_claim_links'] LOOP
+                             'inlet_private_claims', 'inlet_private_claim_links', 'inlet_owner_withheld_pages', 'inlet_owner_withheld_chunks'] LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
         EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', t);
         EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC', t);
@@ -136,22 +163,41 @@ BEGIN
     END LOOP;
 END $$;
 COMMENT ON TABLE public.inlet_owner_archive IS
-  'rw-inlet-owner (slot 410): every row init-inlet-owner.sql changed or moved, as it was. Readable by no app role; revert-inlet-owner.sql restores from it.';
+  'rw-inlet-owner (slot 440): every row init-inlet-owner.sql changed or moved, as it was. Readable by no app role; revert-inlet-owner.sql restores from it.';
 COMMENT ON TABLE public.inlet_private_sources IS
-  'rw-inlet-owner (slot 410): the email-body and podcast-transcript sources, private to inlet_owner_sub. Read through inlet_private_source(id, sub).';
+  'rw-inlet-owner (slot 440): the email-body and podcast-transcript sources, private to inlet_owner_sub. Read through inlet_private_source(id, sub), which only ob_app_memory may execute.';
 
--- ── the owner, for the services that act for them (gmail prune: deletes by owner) ─────────────────────────────────
-CREATE OR REPLACE FUNCTION public.inlet_owner_default()
-RETURNS TEXT
-LANGUAGE sql STABLE
-SECURITY DEFINER
-SET search_path = public, pg_temp
-AS $$ SELECT owner_sub FROM public.inlet_owner WHERE singleton $$;
-REVOKE ALL ON FUNCTION public.inlet_owner_default() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.inlet_owner_default() TO service_role;
+-- ── the owner, for the services that act for them ───────────────────────────────────────────────────────────────────
+-- Round 2 (tester 2): no function reachable without credentials names the owner or opens the private store. PostgREST's
+-- anon role is service_role, so nothing here is executable by service_role, anon, authenticated or PUBLIC.
+-- The gmail prune (PostgREST, no credentials of its own) deletes by owner through a VIEW owned by its own role, which
+-- alone reads the owner record: it shows the owner's gmail thoughts (no owner column) and nothing it could not already
+-- read and delete in thoughts itself.
+DROP FUNCTION IF EXISTS public.inlet_owner_default();   -- round 1's anonymous-callable owner read
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_inlet_owner_view') THEN
+        CREATE ROLE ob_inlet_owner_view NOLOGIN NOBYPASSRLS;
+    END IF;
+END $$;
+GRANT service_role TO ob_inlet_owner_view;       -- the ops plane's policy on thoughts, and its table grants
+GRANT SELECT ON public.inlet_owner TO ob_inlet_owner_view;
+DROP POLICY IF EXISTS inlet_owner_view_read ON public.inlet_owner;
+CREATE POLICY inlet_owner_view_read ON public.inlet_owner AS PERMISSIVE FOR SELECT TO ob_inlet_owner_view USING (true);
+CREATE OR REPLACE VIEW public.inlet_owner_mail WITH (security_barrier = true) AS
+    SELECT t.id, t.content, t.metadata, t.created_at
+      FROM public.thoughts t
+     WHERE t.user_id = (SELECT o.owner_sub FROM public.inlet_owner o WHERE o.singleton)
+       AND t.metadata ->> 'source' = 'gmail';
+ALTER VIEW public.inlet_owner_mail OWNER TO ob_inlet_owner_view;
+REVOKE ALL ON public.inlet_owner_mail FROM PUBLIC;
+GRANT SELECT, DELETE ON public.inlet_owner_mail TO service_role;
+COMMENT ON VIEW public.inlet_owner_mail IS
+  'rw-inlet-owner (slot 440): the owner''s gmail thoughts, for prune-short-term.ts (deletes by owner). Owned by ob_inlet_owner_view, the only reader of inlet_owner.';
 
 -- the owner's read of a moved source (the workbench's GET /workbench/sources/:id falls back to it): a row only when the
--- subject asking is the source's owner
+-- subject is the source's owner. EXECUTE for ob_app_memory only - a login role with its own credentials (the workbench
+-- names the subject from its verified identity); never PostgREST's anon role
 CREATE OR REPLACE FUNCTION public.inlet_private_source(p_id UUID, p_sub TEXT)
 RETURNS TABLE (id UUID, url TEXT, title TEXT, content TEXT, content_type TEXT, notebook TEXT, metadata JSONB,
                created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)
@@ -161,42 +207,95 @@ SET search_path = public, pg_temp
 AS $$
     SELECT s.id, s.url, s.title, s.content, s.content_type, s.notebook, s.metadata, s.created_at, s.updated_at
       FROM public.inlet_private_sources s
-     WHERE s.id = p_id AND coalesce(btrim(p_sub), '') <> '' AND s.inlet_owner_sub = p_sub
+     WHERE s.id = p_id AND coalesce(btrim(p_sub), '') <> '' AND p_sub NOT LIKE 'service:%' AND s.inlet_owner_sub = p_sub
 $$;
-REVOKE ALL ON FUNCTION public.inlet_private_source(UUID, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.inlet_private_source(UUID, TEXT) TO service_role;
 
 -- ── what a page that presents private data is (the move and the guard) ─────────────────────────────────────────────
--- A page links a PRIVATE thought (one with an owner) - content/thought/<id>, thought/<id>, [[...]], (...), a links[]
--- entry, the slug - anywhere in the slug, title, body or links, the id ending there (380's form); or links a moved
--- source (source/<uuid>); or it is a withheld page's own text coming back (the reconcile repairing a row from its old
--- vault file). The move withholds more (a thought that is no longer in the shared corpus, an entity page by its
--- evidence: below); the guard holds the line on these three.
-CREATE OR REPLACE FUNCTION public.inlet_owner_page_private(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
+-- normalised text: lower case, every run of characters that is not a letter or a digit one space (case, markup, links)
+CREATE OR REPLACE FUNCTION public.inlet_owner_norm(p TEXT)
+RETURNS TEXT
+LANGUAGE sql IMMUTABLE
+SET search_path = public, pg_temp
+AS $$ SELECT btrim(regexp_replace(lower(coalesce(p, '')), '[^[:alnum:]]+', ' ', 'g')) $$;
+
+-- every source/<uuid> link form, case-insensitive, %2F decoded (the same decoding as 430's thought-link helper)
+CREATE OR REPLACE FUNCTION public.inlet_owner_linked_source_ids(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
+RETURNS TEXT[]
+LANGUAGE sql IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+    SELECT coalesce(array_agg(DISTINCT lower(m[1])), ARRAY[]::text[])
+      FROM regexp_matches(
+               regexp_replace(
+                   coalesce(p_slug, '') || ' ' || coalesce(p_title, '') || ' ' || coalesce(p_body, '') || ' ' || coalesce(p_links::text, ''),
+                   '%2[fF]', '/', 'g'),
+               'source/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', 'gi') AS m;
+$$;
+
+-- "the withheld text came back": the page's normalised body holds at least half (and at least min(2, all)) of the kept
+-- 8-word windows of ONE withheld page, at any slug (a page of up to 64 words keeps every window, a longer one every 8th);
+-- a withheld page of fewer than 8 words is matched whole. Limit: a rewrite that keeps less than half of a withheld page's
+-- 8-word runs verbatim (after normalisation: case, markup and punctuation do not count) is not caught.
+CREATE OR REPLACE FUNCTION public.inlet_owner_text_withheld(p_body TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    w TEXT[]; n INT; i INT; hs TEXT[] := ARRAY[]::text[]; norm TEXT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.inlet_owner_withheld_pages) THEN RETURN false; END IF;
+    norm := public.inlet_owner_norm(p_body);
+    IF norm = '' THEN RETURN false; END IF;
+    IF EXISTS (SELECT 1 FROM public.inlet_owner_withheld_pages p WHERE p.n_chunks = 0 AND p.whole_hash = md5(norm)) THEN
+        RETURN true;
+    END IF;
+    w := string_to_array(norm, ' ');
+    n := coalesce(array_length(w, 1), 0);
+    IF n < 8 THEN RETURN false; END IF;
+    FOR i IN 1 .. n - 7 LOOP
+        hs := hs || md5(w[i] || ' ' || w[i+1] || ' ' || w[i+2] || ' ' || w[i+3] || ' ' || w[i+4] || ' ' || w[i+5] || ' ' || w[i+6] || ' ' || w[i+7]);
+    END LOOP;
+    RETURN EXISTS (
+        SELECT 1 FROM (SELECT c.page_ref, count(DISTINCT c.h) AS hit
+                         FROM public.inlet_owner_withheld_chunks c WHERE c.h = ANY(hs) GROUP BY c.page_ref) x
+          JOIN public.inlet_owner_withheld_pages p ON p.page_ref = x.page_ref
+         WHERE p.n_chunks > 0 AND x.hit * 2 >= p.n_chunks AND x.hit >= least(2, p.n_chunks));
+END;
+$$;
+
+-- A page links a PRIVATE thought (one with an owner; 430's helper reads every link form, any case, %2F decoded), or a
+-- moved source (the same forms), or its body is a withheld page's text come back (above). The move withholds more (a
+-- thought that is no longer in the shared corpus, an entity page by its evidence: below).
+-- (the links alone: what the move scans every page with - the text rule costs a lookup per 8-word window and is for
+-- the guard, which sees one write at a time)
+CREATE OR REPLACE FUNCTION public.inlet_owner_page_links_private(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
     SELECT EXISTS (
-               SELECT 1 FROM regexp_matches(
-                   coalesce(p_slug, '') || ' ' || coalesce(p_title, '') || ' ' || coalesce(p_body, '') || ' ' || coalesce(p_links::text, ''),
-                   '(?:^|[^[:alnum:]])thought/([0-9]{1,18})(?![0-9])', 'g') AS m
-                 JOIN public.thoughts t ON t.id = m[1]::bigint
+               SELECT 1 FROM unnest(public.idea_privacy_linked_thought_ids(p_slug, p_title, p_body, p_links)) AS x
+                 JOIN public.thoughts t ON t.id = CASE WHEN length(x) <= 18 THEN x::bigint END
                 WHERE t.user_id IS NOT NULL)
         OR EXISTS (
-               SELECT 1 FROM regexp_matches(
-                   coalesce(p_slug, '') || ' ' || coalesce(p_body, '') || ' ' || coalesce(p_links::text, ''),
-                   'source/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})', 'g') AS m
-                 JOIN public.inlet_private_sources s ON s.id = lower(m[1])::uuid)
-        OR EXISTS (
-               SELECT 1 FROM public.inlet_owner_archive a
-                WHERE a.action = 'w' AND a.restored_at IS NULL AND a.ref = p_slug AND a.ref_hash = md5(coalesce(p_body, '')));
+               SELECT 1 FROM unnest(public.inlet_owner_linked_source_ids(p_slug, p_title, p_body, p_links)) AS x
+                 JOIN public.inlet_private_sources s ON s.id = x::uuid);
 $$;
-REVOKE ALL ON FUNCTION public.inlet_owner_page_private(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC;
-
--- the guard: a compiled or reconciled page is skipped silently (RETURN NULL: one row must not fail the batch; the wiki
--- writer learns it was withheld and leaves its file out); a NOTE is a person's own writing, refused out loud
+CREATE OR REPLACE FUNCTION public.inlet_owner_page_private(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT public.inlet_owner_page_links_private(p_slug, p_title, p_body, p_links)
+        OR public.inlet_owner_text_withheld(p_body);
+$$;
+-- the guard: a compiled or reconciled page is skipped silently (RETURN NULL: one row must not fail the batch) and
+-- MARKED (430's wiki_guard_mark_withheld: the X-Wiki-Withheld header, so the writer counts it withheld, not hidden); a
+-- NOTE is a person's own writing, refused with 430's one message (it names no guard and no reason)
 CREATE OR REPLACE FUNCTION public.trg_inlet_owner_wiki_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -206,17 +305,38 @@ AS $$
 BEGIN
     IF public.inlet_owner_page_private(NEW.slug, NEW.title, NEW.body, NEW.links) THEN
         IF NEW.page_class = 'note' THEN
-            RAISE EXCEPTION 'wiki_pages: this page links private personal data, which is its owner''s alone' USING ERRCODE = '42501';
+            RAISE EXCEPTION 'wiki_pages: this page cannot be saved' USING ERRCODE = '42501';
         END IF;
+        PERFORM public.wiki_guard_mark_withheld();
         RETURN NULL;
     END IF;
     RETURN NEW;
 END;
 $$;
-REVOKE ALL ON FUNCTION public.trg_inlet_owner_wiki_guard() FROM PUBLIC;
 DROP TRIGGER IF EXISTS trg_inlet_owner_wiki_guard ON public.wiki_pages;
 CREATE TRIGGER trg_inlet_owner_wiki_guard BEFORE INSERT OR UPDATE OF slug, title, body, links ON public.wiki_pages
     FOR EACH ROW EXECUTE FUNCTION public.trg_inlet_owner_wiki_guard();
+
+-- every function this file creates: no EXECUTE for anyone but its owner (PUBLIC, and every role the schema's default
+-- privileges handed it to - service_role included), then the one grant: the owner read, for ob_app_memory
+DO $$
+DECLARE f TEXT; r RECORD;
+BEGIN
+    FOREACH f IN ARRAY ARRAY['public.inlet_private_source(uuid,text)', 'public.inlet_owner_norm(text)',
+                             'public.inlet_owner_linked_source_ids(text,text,text,jsonb)', 'public.inlet_owner_text_withheld(text)',
+                             'public.inlet_owner_page_links_private(text,text,text,jsonb)',
+                             'public.inlet_owner_page_private(text,text,text,jsonb)', 'public.trg_inlet_owner_wiki_guard()'] LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
+        FOR r IN SELECT DISTINCT ro.rolname AS grantee
+                   FROM pg_proc pr, aclexplode(pr.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee
+                  WHERE pr.oid = f::regprocedure AND NOT ro.rolsuper AND ro.oid <> pr.proowner LOOP
+            EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', f, r.grantee);
+        END LOOP;
+    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
+        GRANT EXECUTE ON FUNCTION public.inlet_private_source(UUID, TEXT) TO ob_app_memory;
+    END IF;
+END $$;
 
 -- ── match_thoughts: shared rows plus the caller's own ──────────────────────────────────────────────────────────────
 -- Same signature and result as slot 010's. The caller names whose it is: filter->>'owner_scope' = 'shared' (the wiki
@@ -279,7 +399,7 @@ DECLARE
     v_dep     BIGINT := 0;
     n_thoughts BIGINT := 0; n_src_mail INT := 0; n_src_pod INT := 0; n_chunks BIGINT := 0; n_claims INT := 0;
     n_mixed   INT := 0; n_jobs INT := 0; n_seeds BIGINT := 0; n_meta INT := 0; n_pages INT := 0; n_ents INT := 0;
-    n_rebuild INT := 0; n_left BIGINT;
+    n_rebuild INT := 0; n_left BIGINT; n_prompts INT := 0; n_events INT := 0; n_chunk_pages INT := 0;
     r RECORD; d RECORD;
     c_mail CONSTANT TEXT := '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*';
 BEGIN
@@ -325,17 +445,98 @@ BEGIN
     SELECT DISTINCT cs.claim_id AS id FROM public.claim_sources cs
      WHERE (cs.source_id IN (SELECT id FROM _io_src) OR cs.parent_claim_id IN (SELECT id FROM _io_claims))
        AND cs.claim_id NOT IN (SELECT id FROM _io_claims);
-    -- the jobs that carry a moved source, a private claim or a Gmail URL
+    -- the research jobs (round 2, tester 1: a SERVICE-owned job - the digest's - is read in full by every user, so every
+    -- job is stripped, whoever owns it). What names private data: a moved source's id or url, a private claim's id, a
+    -- Gmail URL (_io_ids: matched as a token; dropping the array element that carries one), and a moved source's title
+    -- (_io_vals: replaced where a string equals it).
+    CREATE TEMP TABLE _io_ids (v TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_ids SELECT DISTINCT x FROM (SELECT id::text AS x FROM _io_src UNION SELECT url FROM _io_src WHERE coalesce(url, '') <> ''
+                                                UNION SELECT id::text FROM _io_claims) y ON CONFLICT DO NOTHING;
+    CREATE TEMP TABLE _io_vals (v TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_vals SELECT v FROM _io_ids;
+    INSERT INTO _io_vals SELECT DISTINCT s.title FROM public.sources s JOIN _io_src x ON x.id = s.id WHERE length(coalesce(s.title, '')) >= 6
+    ON CONFLICT DO NOTHING;
+    -- does a text name private data (a token of _io_ids, or a Gmail URL)?
+    CREATE FUNCTION pg_temp.io_hits(t TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
+        SELECT coalesce(t, '') ~* 'mail\.google\.com'
+            OR EXISTS (SELECT 1 FROM regexp_matches(coalesce(t, ''), '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', 'g') m
+                         JOIN pg_temp._io_ids i ON i.v = lower(m[1]))
+            OR EXISTS (SELECT 1 FROM regexp_matches(coalesce(t, ''), 'https?://[^][:space:]"<>\\]+', 'g') m JOIN pg_temp._io_ids i ON i.v = m[1])
+    $f$;
+    -- does a json value carry one anywhere (any nested string)?
+    CREATE FUNCTION pg_temp.io_refs(e JSONB) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
+        SELECT EXISTS (SELECT 1 FROM jsonb_path_query(e, 'strict $.**') x
+                        WHERE jsonb_typeof(x) = 'string'
+                          AND (EXISTS (SELECT 1 FROM pg_temp._io_ids i WHERE i.v = (x #>> '{}') OR i.v = lower(x #>> '{}'))
+                               OR (x #>> '{}') ~* 'mail\.google\.com'))
+    $f$;
+    -- the strip: an array element (an object) that names private data goes; a string equal to a private value becomes
+    -- private-source; the tree's own old texts (subs: its query, anchor, topic, prompt, its moved seeds' titles) are
+    -- cut out of every string; every Gmail URL becomes private-email
+    CREATE FUNCTION pg_temp.io_scrub(j JSONB, subs TEXT[]) RETURNS JSONB LANGUAGE plpgsql STABLE AS $f$
+    DECLARE
+        k TEXT; v JSONB; e JSONB; s TEXT; t TEXT; o JSONB; a JSONB;
+    BEGIN
+        IF j IS NULL THEN RETURN NULL; END IF;
+        IF jsonb_typeof(j) = 'string' THEN
+            s := j #>> '{}';
+            IF EXISTS (SELECT 1 FROM pg_temp._io_vals x WHERE x.v = s) THEN RETURN to_jsonb('private-source'::text); END IF;
+            IF subs IS NOT NULL THEN
+                FOREACH t IN ARRAY subs LOOP
+                    IF length(coalesce(t, '')) >= 6 THEN s := replace(s, t, 'private-source'); END IF;
+                END LOOP;
+            END IF;
+            RETURN to_jsonb(regexp_replace(s, '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*', 'private-email', 'gi'));
+        ELSIF jsonb_typeof(j) = 'array' THEN
+            a := '[]'::jsonb;
+            FOR e IN SELECT x FROM jsonb_array_elements(j) x LOOP
+                IF jsonb_typeof(e) = 'object' AND pg_temp.io_refs(e) THEN CONTINUE; END IF;
+                a := a || jsonb_build_array(pg_temp.io_scrub(e, subs));
+            END LOOP;
+            RETURN a;
+        ELSIF jsonb_typeof(j) = 'object' THEN
+            o := '{}'::jsonb;
+            FOR k, v IN SELECT * FROM jsonb_each(j) LOOP
+                o := o || jsonb_build_object(k, pg_temp.io_scrub(v, subs));
+            END LOOP;
+            RETURN o;
+        END IF;
+        RETURN j;
+    END;
+    $f$;
+    -- the SEEDED trees: a job seeded with an email body or a moved source (the digest's body fallback) carries the
+    -- email's subject in its question; the whole tree (root and branches) gets a neutral question, anchor and topic,
+    -- and so does its prompt row
+    CREATE TEMP TABLE _io_roots ON COMMIT DROP AS
+    SELECT DISTINCT coalesce(j.root_job_id, j.id) AS root
+      FROM public.research_jobs j
+     WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.options -> 'seed_sources') = 'array' THEN j.options -> 'seed_sources' ELSE '[]' END) e
+                    WHERE e::text ~* 'mail\.google\.com' OR coalesce(e ->> 'url', '') IN (SELECT url FROM _io_src WHERE url IS NOT NULL));
+    CREATE TEMP TABLE _io_tree ON COMMIT DROP AS
+    SELECT j.id, rr.root, 'Research job ' || left(rr.root::text, 8) AS neutral,
+           (SELECT array_agg(DISTINCT x) FILTER (WHERE length(coalesce(x, '')) >= 6) FROM (
+                SELECT rj.query AS x FROM public.research_jobs rj WHERE rj.id = rr.root
+                UNION ALL SELECT rj.anchor FROM public.research_jobs rj WHERE coalesce(rj.root_job_id, rj.id) = rr.root
+                UNION ALL SELECT rj.topic_estimate FROM public.research_jobs rj WHERE coalesce(rj.root_job_id, rj.id) = rr.root
+                UNION ALL SELECT rj.query FROM public.research_jobs rj WHERE coalesce(rj.root_job_id, rj.id) = rr.root
+                UNION ALL SELECT p.prompt FROM public.research_prompts p JOIN public.research_jobs rj ON rj.id = p.job_id WHERE coalesce(rj.root_job_id, rj.id) = rr.root
+                UNION ALL SELECT e ->> 'title' FROM public.research_jobs rj, jsonb_array_elements(CASE WHEN jsonb_typeof(rj.options -> 'seed_sources') = 'array' THEN rj.options -> 'seed_sources' ELSE '[]' END) e
+                           WHERE coalesce(rj.root_job_id, rj.id) = rr.root AND (e::text ~* 'mail\.google\.com' OR coalesce(e ->> 'url', '') IN (SELECT url FROM _io_src WHERE url IS NOT NULL))) q) AS subs
+      FROM _io_roots rr JOIN public.research_jobs j ON coalesce(j.root_job_id, j.id) = rr.root;
+    ALTER TABLE _io_tree ADD PRIMARY KEY (id);
+    -- every job, prompt and event that names private data, or belongs to a seeded tree
     CREATE TEMP TABLE _io_jobs ON COMMIT DROP AS
     SELECT j.id FROM public.research_jobs j
-     WHERE (j.options -> 'seed_sources')::text ~* 'mail\.google\.com'
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.options -> 'seed_sources') = 'array' THEN j.options -> 'seed_sources' ELSE '[]' END) e
-                    WHERE e ->> 'url' IN (SELECT url FROM _io_src WHERE url IS NOT NULL))
-        OR j.result::text ~* 'mail\.google\.com'
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'cited_sources') = 'array' THEN j.result -> 'cited_sources' ELSE '[]' END) e
-                    WHERE e ->> 'url' IN (SELECT url FROM _io_src WHERE url IS NOT NULL))
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'reuse_claims') = 'array' THEN j.result -> 'reuse_claims' ELSE '[]' END) e
-                    WHERE e ->> 'id' IN (SELECT id::text FROM _io_claims));
+     WHERE j.id IN (SELECT id FROM _io_tree)
+        OR pg_temp.io_hits(coalesce(j.options::text, '') || ' ' || coalesce(j.result::text, '') || ' ' || coalesce(j.tree_report::text, '')
+                           || ' ' || coalesce(j.query, '') || ' ' || coalesce(j.anchor, '') || ' ' || coalesce(j.topic_estimate, ''));
+    CREATE TEMP TABLE _io_prompts ON COMMIT DROP AS
+    SELECT p.job_id FROM public.research_prompts p
+     WHERE p.job_id IN (SELECT id FROM _io_tree) OR pg_temp.io_hits(p.prompt);
+    CREATE TEMP TABLE _io_events ON COMMIT DROP AS
+    SELECT e.id FROM public.research_job_events e
+     WHERE e.job_id IN (SELECT id FROM _io_tree) OR e.root_job_id IN (SELECT root FROM _io_roots)
+        OR pg_temp.io_hits(coalesce(e.payload::text, '') || ' ' || coalesce(e.trail::text, ''));
     -- the shared rows that carry a Gmail id or URL
     CREATE TEMP TABLE _io_meta_src ON COMMIT DROP AS
     SELECT s.id FROM public.sources s
@@ -350,10 +551,11 @@ BEGIN
      WHERE c.id NOT IN (SELECT id FROM _io_claims) AND coalesce(c.text, '') ~* 'mail\.google\.com';
 
     IF NOT EXISTS (SELECT 1 FROM _io_thoughts) AND v_src IS NULL AND NOT EXISTS (SELECT 1 FROM _io_jobs)
+       AND NOT EXISTS (SELECT 1 FROM _io_prompts) AND NOT EXISTS (SELECT 1 FROM _io_events)
        AND NOT EXISTS (SELECT 1 FROM _io_meta_src) AND NOT EXISTS (SELECT 1 FROM _io_meta_chunks) AND NOT EXISTS (SELECT 1 FROM _io_meta_claims)
        AND NOT EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.slug ~ '^content/thought/[0-9]+$'
                          AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id::text = substr(w.slug, 17) AND t.user_id IS NULL))
-       AND NOT EXISTS (SELECT 1 FROM public.wiki_pages w WHERE public.inlet_owner_page_private(w.slug, w.title, w.body, w.links)) THEN
+       AND NOT EXISTS (SELECT 1 FROM public.wiki_pages w WHERE public.inlet_owner_page_links_private(w.slug, w.title, w.body, w.links)) THEN
         RAISE NOTICE 'inlet owner: no unowned thought, private source, job seed, Gmail id or private page - nothing to do';
         RETURN;
     END IF;
@@ -382,36 +584,85 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
-    -- 4 (before the sources go: the jobs are matched by their urls). the jobs: archive (options, result), then strip
+    -- 4 (before the sources go: the jobs are matched by their ids and urls). the jobs, their prompts and their events:
+    --    the new values computed first; every row that changes is archived whole (j: the job's changed columns; m: a prompt
+    --    or an event row), then written with triggers off
+    CREATE TEMP TABLE _io_jobs_new ON COMMIT DROP AS
+    SELECT j.id,
+           CASE WHEN t.id IS NOT NULL THEN t.neutral ELSE j.query END AS query,
+           CASE WHEN t.id IS NOT NULL AND j.anchor IS NOT NULL THEN t.neutral ELSE j.anchor END AS anchor,
+           CASE WHEN t.id IS NOT NULL AND j.topic_estimate IS NOT NULL THEN t.neutral ELSE j.topic_estimate END AS topic_estimate,
+           pg_temp.io_scrub(j.options, t.subs) AS options,
+           pg_temp.io_scrub(j.result, t.subs) AS result,
+           pg_temp.io_scrub(j.tree_report, t.subs) AS tree_report
+      FROM public.research_jobs j JOIN _io_jobs x ON x.id = j.id LEFT JOIN _io_tree t ON t.id = j.id;
+    DELETE FROM _io_jobs_new n USING public.research_jobs j
+     WHERE j.id = n.id AND n.query IS NOT DISTINCT FROM j.query AND n.anchor IS NOT DISTINCT FROM j.anchor
+       AND n.topic_estimate IS NOT DISTINCT FROM j.topic_estimate AND n.options IS NOT DISTINCT FROM j.options
+       AND n.result IS NOT DISTINCT FROM j.result AND n.tree_report IS NOT DISTINCT FROM j.tree_report;
+    -- [archive-jobs]
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, row_data)
-    SELECT v_batch, 'public.research_jobs', 'options,result', 'j', jsonb_build_object('id', j.id, 'options', j.options, 'result', j.result)
-      FROM public.research_jobs j JOIN _io_jobs x ON x.id = j.id;
+    SELECT v_batch, 'public.research_jobs', 'query,anchor,topic_estimate,options,result,tree_report', 'j',
+           jsonb_build_object('id', j.id, 'query', j.query, 'anchor', j.anchor, 'topic_estimate', j.topic_estimate,
+                              'options', j.options, 'result', j.result, 'tree_report', j.tree_report)
+      FROM public.research_jobs j JOIN _io_jobs_new n ON n.id = j.id;
+    -- [/archive-jobs]
     SELECT coalesce(sum(jsonb_array_length(j.options -> 'seed_sources')), 0) INTO n_seeds
-      FROM public.research_jobs j JOIN _io_jobs x ON x.id = j.id WHERE jsonb_typeof(j.options -> 'seed_sources') = 'array';
+      FROM public.research_jobs j JOIN _io_jobs_new n ON n.id = j.id WHERE jsonb_typeof(j.options -> 'seed_sources') = 'array';
+    CREATE TEMP TABLE _io_prompts_new ON COMMIT DROP AS
+    SELECT p.job_id, CASE WHEN t.id IS NOT NULL THEN t.neutral
+                          ELSE regexp_replace(p.prompt, '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*', 'private-email', 'gi') END AS prompt
+      FROM public.research_prompts p JOIN _io_prompts x ON x.job_id = p.job_id LEFT JOIN _io_tree t ON t.id = p.job_id;
+    DELETE FROM _io_prompts_new n USING public.research_prompts p WHERE p.job_id = n.job_id AND p.prompt = n.prompt;
+    INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+    SELECT v_batch, 'public.research_prompts', '*', 'm', p.job_id::text, to_jsonb(p)
+      FROM public.research_prompts p JOIN _io_prompts_new n ON n.job_id = p.job_id;
+    CREATE TEMP TABLE _io_events_new ON COMMIT DROP AS
+    SELECT e.id, pg_temp.io_scrub(e.payload, t.subs) AS payload, pg_temp.io_scrub(e.trail, t.subs) AS trail
+      FROM public.research_job_events e JOIN _io_events x ON x.id = e.id
+      LEFT JOIN LATERAL (SELECT tt.subs FROM _io_tree tt WHERE tt.root = e.root_job_id OR tt.id = e.job_id LIMIT 1) t ON true;
+    DELETE FROM _io_events_new n USING public.research_job_events e
+     WHERE e.id = n.id AND n.payload IS NOT DISTINCT FROM e.payload AND n.trail IS NOT DISTINCT FROM e.trail;
+    -- [archive-events]
+    INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+    SELECT v_batch, 'public.research_job_events', '*', 'm', e.id::text, to_jsonb(e)
+      FROM public.research_job_events e JOIN _io_events_new n ON n.id = e.id;
+    -- [/archive-events]
     PERFORM set_config('session_replication_role', 'replica', true);
     UPDATE public.research_jobs j
-       SET options = CASE WHEN jsonb_typeof(j.options -> 'seed_sources') = 'array'
-                          THEN jsonb_set(j.options, '{seed_sources}', coalesce((
-                                 SELECT jsonb_agg(e ORDER BY o) FROM jsonb_array_elements(j.options -> 'seed_sources') WITH ORDINALITY AS z(e, o)
-                                  WHERE NOT (e::text ~* 'mail\.google\.com' OR coalesce(e ->> 'url', '') IN (SELECT url FROM _io_src WHERE url IS NOT NULL))), '[]'::jsonb))
-                          ELSE j.options END,
-           result = CASE WHEN j.result IS NULL THEN NULL ELSE regexp_replace((
-                      CASE WHEN jsonb_typeof(j.result) <> 'object' THEN j.result ELSE
-                        j.result
-                        || CASE WHEN jsonb_typeof(j.result -> 'cited_sources') = 'array' THEN jsonb_build_object('cited_sources', coalesce((
-                               SELECT jsonb_agg(e ORDER BY o) FROM jsonb_array_elements(j.result -> 'cited_sources') WITH ORDINALITY AS z(e, o)
-                                WHERE NOT (coalesce(e ->> 'url', '') ~* 'mail\.google\.com' OR coalesce(e ->> 'url', '') IN (SELECT url FROM _io_src WHERE url IS NOT NULL))), '[]'::jsonb))
-                               ELSE '{}'::jsonb END
-                        || CASE WHEN jsonb_typeof(j.result -> 'reuse_claims') = 'array' THEN jsonb_build_object('reuse_claims', coalesce((
-                               SELECT jsonb_agg(e ORDER BY o) FROM jsonb_array_elements(j.result -> 'reuse_claims') WITH ORDINALITY AS z(e, o)
-                                WHERE NOT coalesce(e ->> 'id', '') IN (SELECT id::text FROM _io_claims)), '[]'::jsonb))
-                               ELSE '{}'::jsonb END
-                      END)::text, c_mail, 'private-email', 'gi')::jsonb END
-      FROM _io_jobs x WHERE x.id = j.id;
+       SET query = n.query, anchor = n.anchor, topic_estimate = n.topic_estimate, options = n.options, result = n.result, tree_report = n.tree_report
+      FROM _io_jobs_new n, public.inlet_owner_archive a
+     WHERE n.id = j.id AND a.batch = v_batch AND a.action = 'j' AND (a.row_data ->> 'id')::uuid = j.id;
     GET DIAGNOSTICS n_jobs = ROW_COUNT;
+    UPDATE public.research_prompts p SET prompt = n.prompt
+      FROM _io_prompts_new n, public.inlet_owner_archive a
+     WHERE n.job_id = p.job_id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.research_prompts' AND a.ref = p.job_id::text;
+    GET DIAGNOSTICS n_prompts = ROW_COUNT;
+    UPDATE public.research_job_events e SET payload = n.payload, trail = n.trail
+      FROM _io_events_new n, public.inlet_owner_archive a
+     WHERE n.id = e.id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.research_job_events' AND a.ref = e.id::text;
+    GET DIAGNOSTICS n_events = ROW_COUNT;
     PERFORM set_config('session_replication_role', 'origin', true);
+    IF n_jobs <> (SELECT count(*) FROM _io_jobs_new) OR n_prompts <> (SELECT count(*) FROM _io_prompts_new)
+       OR n_events <> (SELECT count(*) FROM _io_events_new) THEN
+        RAISE EXCEPTION 'inlet owner: refused, nothing changed - % job(s), % prompt(s), % event(s) to strip; % / % / % archived and written',
+            (SELECT count(*) FROM _io_jobs_new), (SELECT count(*) FROM _io_prompts_new), (SELECT count(*) FROM _io_events_new), n_jobs, n_prompts, n_events
+            USING ERRCODE = '55000';
+    END IF;
     SELECT n_seeds - coalesce(sum(jsonb_array_length(j.options -> 'seed_sources')), 0) INTO n_seeds
-      FROM public.research_jobs j JOIN _io_jobs x ON x.id = j.id WHERE jsonb_typeof(j.options -> 'seed_sources') = 'array';
+      FROM public.research_jobs j JOIN _io_jobs_new n ON n.id = j.id WHERE jsonb_typeof(j.options -> 'seed_sources') = 'array';
+    -- fail closed: no job, prompt or event names private data any more, and every seeded tree carries only its neutral question
+    IF EXISTS (SELECT 1 FROM public.research_jobs j
+                WHERE pg_temp.io_hits(coalesce(j.options::text, '') || ' ' || coalesce(j.result::text, '') || ' ' || coalesce(j.tree_report::text, '')
+                                      || ' ' || coalesce(j.query, '') || ' ' || coalesce(j.anchor, '') || ' ' || coalesce(j.topic_estimate, '')))
+       OR EXISTS (SELECT 1 FROM public.research_prompts p WHERE pg_temp.io_hits(p.prompt))
+       OR EXISTS (SELECT 1 FROM public.research_job_events e WHERE pg_temp.io_hits(coalesce(e.payload::text, '') || ' ' || coalesce(e.trail::text, '')))
+       OR EXISTS (SELECT 1 FROM _io_tree t JOIN public.research_jobs j ON j.id = t.id
+                   WHERE j.query IS DISTINCT FROM t.neutral OR (j.anchor IS NOT NULL AND j.anchor IS DISTINCT FROM t.neutral)
+                      OR (j.topic_estimate IS NOT NULL AND j.topic_estimate IS DISTINCT FROM t.neutral))
+       OR EXISTS (SELECT 1 FROM _io_tree t JOIN public.research_prompts p ON p.job_id = t.id WHERE p.prompt IS DISTINCT FROM t.neutral) THEN
+        RAISE EXCEPTION 'inlet owner: refused, nothing changed - a research job, prompt or event still names private data after the strip' USING ERRCODE = '55000';
+    END IF;
 
     IF v_src IS NOT NULL THEN
         SELECT count(*) FILTER (WHERE mail), count(*) FILTER (WHERE NOT mail) INTO n_src_mail, n_src_pod FROM _io_src;
@@ -532,7 +783,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM public.sources s WHERE s.metadata ?| ARRAY['gmail_id', 'gmail_thread_id', 'gmail_labels'] OR s.metadata::text ~* 'mail\.google\.com' OR coalesce(s.content, '') ~* 'mail\.google\.com')
        OR EXISTS (SELECT 1 FROM public.source_chunks c WHERE coalesce(c.content, '') ~* 'mail\.google\.com')
        OR EXISTS (SELECT 1 FROM public.claims c WHERE coalesce(c.text, '') ~* 'mail\.google\.com')
-       OR EXISTS (SELECT 1 FROM public.research_jobs j WHERE (j.options -> 'seed_sources')::text ~* 'mail\.google\.com' OR j.result::text ~* 'mail\.google\.com') THEN
+       THEN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - a Gmail id or URL is still in a shared row after the strip' USING ERRCODE = '55000';
     END IF;
 
@@ -543,7 +794,7 @@ BEGIN
     SELECT w.slug FROM public.wiki_pages w
      WHERE (w.slug ~ '^content/thought/[0-9]{1,18}$'
             AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = substr(w.slug, 17)::bigint AND t.user_id IS NULL))
-        OR public.inlet_owner_page_private(w.slug, w.title, w.body, w.links)
+        OR public.inlet_owner_page_links_private(w.slug, w.title, w.body, w.links)
         OR (w.page_class = 'entity' AND (w.frontmatter ->> 'entity_id') IN (
                -- the evidence THIS batch made private (a re-run must not withhold a page rebuilt from shared material)
                SELECT te.entity_id::text FROM public.thought_entities te JOIN _io_thoughts x ON x.id = te.thought_id
@@ -568,6 +819,24 @@ BEGIN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - % wiki page(s) present private data, % archived and withheld', (SELECT count(*) FROM _io_pages), n_pages
             USING ERRCODE = '55000';
     END IF;
+    -- the withheld pages' text, for the guard's "came back" rule (at any slug): the normalised body as 8-word chunks
+    CREATE TEMP TABLE _io_norm ON COMMIT DROP AS
+    SELECT a.id AS page_ref, string_to_array(NULLIF(public.inlet_owner_norm(a.row_data ->> 'body'), ''), ' ') AS w,
+           md5(public.inlet_owner_norm(a.row_data ->> 'body')) AS whole
+      FROM public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'w';
+    -- a page of up to 64 words keeps EVERY 8-word window (a one-word change then breaks at most 8 of them); a longer page
+    -- keeps every 8th window (aligned chunks: storage stays near one hash per 8 words; the guard reads every window of the
+    -- page it judges, so alignment does not matter there)
+    INSERT INTO public.inlet_owner_withheld_chunks (h, page_ref)
+    SELECT DISTINCT md5(array_to_string(n.w[k + 1 : k + 8], ' ')), n.page_ref
+      FROM _io_norm n,
+           generate_series(0, coalesce(array_length(n.w, 1), 0) - 8,
+                           CASE WHEN coalesce(array_length(n.w, 1), 0) <= 64 THEN 1 ELSE 8 END) k
+    ON CONFLICT DO NOTHING;
+    INSERT INTO public.inlet_owner_withheld_pages (page_ref, n_chunks, whole_hash)
+    SELECT n.page_ref, (SELECT count(*) FROM public.inlet_owner_withheld_chunks c WHERE c.page_ref = n.page_ref), n.whole FROM _io_norm n
+    ON CONFLICT (page_ref) DO NOTHING;
+    GET DIAGNOSTICS n_chunk_pages = ROW_COUNT;
     -- the entities of the withheld entity pages and of the moved sources: bumped (old updated_at archived), so the next
     -- compile rebuilds the ones that still have shared evidence, from shared material only
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
@@ -591,8 +860,10 @@ BEGIN
 
     RAISE NOTICE 'inlet owner: % thought(s) now the owner''s; % email-body + % podcast-transcript source(s) and % chunk(s) moved private; % claim(s) private, % shared claim(s) lost a private link; % dependent row(s) archived',
         n_thoughts, n_src_mail, n_src_pod, n_chunks, n_claims, n_mixed, v_dep;
-    RAISE NOTICE 'inlet owner: % job(s) stripped (% private seed(s)); % shared source(s) lost a Gmail id or URL; % wiki page(s) withheld (move their vault files out: the deploy step); % entit(ies) bumped, % with shared evidence to rebuild from',
-        n_jobs, n_seeds, n_meta, n_pages, n_ents, n_rebuild;
+    RAISE NOTICE 'inlet owner: % job(s) stripped (% private seed(s), % seeded tree(s) given a neutral question), % prompt(s), % event(s); % shared source(s) lost a Gmail id or URL',
+        n_jobs, n_seeds, (SELECT count(*) FROM _io_roots), n_prompts, n_events, n_meta;
+    RAISE NOTICE 'inlet owner: % wiki page(s) withheld (move their vault files out, restart the viewer: the deploy step), their text kept as chunks for the guard (% page(s)); % entit(ies) bumped, % with shared evidence to rebuild from',
+        n_pages, n_chunk_pages, n_ents, n_rebuild;
 END $$;
 
 NOTIFY pgrst, 'reload schema';

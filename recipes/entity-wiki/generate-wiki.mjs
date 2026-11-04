@@ -1562,11 +1562,12 @@ async function generateForEntity(sb, env, entity, args, run = { citedThoughtIds:
   // Bail early if there is nothing to write about. Under --notebook the
   // global typed-edge graph is NOT in-scope evidence, so an entity needs
   // at least one in-scope linked thought or source to get a page.
+  // rw-inlet-owner (slot 440): typed edges are never evidence on their own. The entity worker writes them from the
+  // thoughts it reads, and those are the owner's private mail and activity: an entity whose only remaining material is
+  // its edges is a private-only entity and gets no page (and no model call). Edges still accompany shared evidence.
   const noEvidence = notebook
     ? linked.length === 0 && sources.length === 0
     : linked.length === 0 &&
-      eOut.length === 0 &&
-      eIn.length === 0 &&
       semantic.length === 0 &&
       sources.length === 0;
   if (noEvidence) {

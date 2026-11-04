@@ -619,21 +619,28 @@ A thread an idea job's filing named or described (the base's curator) is re-desc
 only (a minted one also renamed and relabelled), its embedding cleared for `backfill-thread-embeddings.ts`.
 Revert: `revert-report-isolation.sql`.
 
-**Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 410).** `init-inlet-owner.sql`
+**Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 440, after 430).** `init-inlet-owner.sql`
 (run with `-v owner_sub=<WORKSPACE_DEFAULT_SUB>`; the subject is recorded once in `inlet_owner`) gives every thought an
 owner (`thoughts.user_id`; only that column changes), moves the email-body sources (url mail.google.com) and the podcast
 transcripts out of `sources` into `inlet_private_sources` (chunks: `inlet_private_source_chunks`) and the claims drawn
 ONLY from them into `inlet_private_claims` (a claim also grounded on a shared source stays shared and loses only the
-private link, kept in `inlet_private_claim_links`), strips the email-body seeds from `research_jobs.options.seed_sources`
-and the moved sources / private claims / Gmail URLs from the jobs' results, strips `gmail_id` / `gmail_thread_id` /
-`gmail_labels` and Gmail URLs from the shared rows, and withholds every wiki page presenting a private thought or a moved
-source (leaf, link, entity evidence) behind `trg_inlet_owner_wiki_guard`. Every changed or moved row is archived first
-(`inlet_owner_archive`, one batch per run; no app role reads it or the private stores). Re-runnable: a run picks up what
-arrived unowned since. Readers: the entity-wiki compile reads shared thoughts only (`user_id` NULL); `match_thoughts`
-takes `filter.owner_scope` (`shared` or a subject) or `ob.user_id`; openbrain-mcp's thought tools read shared rows plus
-the lane's subject (`thought-owner.ts`); `GET /workbench/sources/:id` gives a moved source to its owner only
-(`inlet_private_source(id, sub)`); the gmail prune deletes by owner (`inlet_owner_default()`). Lab step [5r].
-Revert: `revert-inlet-owner.sql` (byte-identical; before 390 and 380).
+private link, kept in `inlet_private_claim_links`). Every research job is stripped, whoever owns it (a service-owned
+digest job is read in full by everyone): a seeded tree (a job seeded with an email body, and its branches) gets a neutral
+question, anchor, topic and prompt; result arrays, events (payload, trail) and seeds lose every entry naming a moved
+source or a private claim, and Gmail URLs become `private-email`. The shared rows lose `gmail_id` / `gmail_thread_id` /
+`gmail_labels` and Gmail URLs. Every wiki page presenting a private thought or a moved source (leaf, any link form - 430's
+case-insensitive, %2F-decoded helper - or entity evidence) is withheld behind `trg_inlet_owner_wiki_guard`, which also
+refuses a withheld page's text coming back nearly whole at any slug (half of its 8-word windows), marks every row it
+withholds for the writer (430's `wiki_guard_mark_withheld`) and refuses a note with 430's one message. Every changed or
+moved row is archived first (`inlet_owner_archive`, one batch per run; no app role reads it or the private stores).
+Re-runnable: a run picks up what arrived unowned since. No 440 function executes for PostgREST's anon role
+(service_role), anon, authenticated or PUBLIC. Readers: the entity-wiki compile reads shared thoughts only (`user_id`
+NULL) and never builds a page from typed edges alone; wiki-service's manifest counts shared thought links only;
+`match_thoughts` takes `filter.owner_scope` (`shared` or a subject) or `ob.user_id`; openbrain-mcp's thought tools read
+shared rows plus the lane's subject (`thought-owner.ts`); `GET /workbench/sources/:id` gives a moved source to its owner
+only (`inlet_private_source(id, sub)`, EXECUTE for ob_app_memory alone); the gmail prune deletes by owner through the view
+`inlet_owner_mail` (owned by its own role, the only reader of the owner record). Lab step [5r].
+Revert: `revert-inlet-owner.sql` (byte-identical; order 440, 430, 390, 380).
 
 ## The Settings panel and the settings store (rw-settings-store, plan 08 PD3)
 

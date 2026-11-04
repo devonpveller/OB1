@@ -25,7 +25,7 @@ DECLARE
     s_mail UUID; s_pod UUID; s_art UUID; s_art2 UUID; s_late UUID;
     c_priv UUID; c_mixed UUID; c_chain UUID; c_shared UUID;
     e_priv BIGINT; e_mixed BIGINT; e_clean BIGINT;
-    j_seed UUID; j_ctl UUID; th UUID;
+    j_seed UUID; j_ctl UUID; th UUID; j_svc UUID; j_svcb UUID;
     mail_url TEXT;
 BEGIN
     v  := '[' || array_to_string(array_fill('0.02'::text, ARRAY[greatest(dim, 1)]), ',') || ']';
@@ -43,6 +43,11 @@ BEGIN
         VALUES ('done', 'manual', 'late digest job', jsonb_build_object('seed_sources', jsonb_build_array(
             jsonb_build_object('url', mail_url, 'title', 'late seed ' || m || 'late', 'content', 'late seed body ' || m || 'late'))))
         RETURNING id INTO j_seed;
+        -- the late job is the digest's (service-owned), with the subject as its question and in an event
+        UPDATE public.research_jobs SET query = 'late subject ' || m || 'late' WHERE id = j_seed;
+        INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES (j_seed, 'service:digest', 'service:digest', 'late subject ' || m || 'late');
+        INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload)
+        VALUES (j_seed, j_seed, 's1', 'stage', 'due_process', jsonb_build_object('current_artifact', jsonb_build_object('label', mail_url)));
         INSERT INTO public.lab_inlet_owner_plant VALUES ('late', jsonb_build_object('thought', t_gmail, 'source', s_late, 'job', j_seed))
         ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;
         RETURN;
@@ -124,10 +129,39 @@ BEGIN
             jsonb_build_object('outcome', 'ok', 'cited_sources', jsonb_build_array(jsonb_build_object('url', 'https://news.example/b/ctl' || m, 'title', 'Article two ctl' || m))))
     RETURNING id INTO j_ctl;
 
+    -- round 2 (tester 1): a SERVICE-owned digest job (everyone reads it in full) seeded with the email body: the question
+    -- is the email's subject, the prompt row is the digest's, the events carry the Gmail URL and the subject (stage
+    -- artifact label, source trail, topic), the result names the moved source and the private claim in claims[] /
+    -- sources[]; a branch of it carries the subject as its anchor
+    INSERT INTO public.research_jobs (status, origin, query, anchor, topic_estimate, options, result)
+    VALUES ('done', 'manual', 'Subject ' || m, 'Subject ' || m, 'the topic of Subject ' || m,
+            jsonb_build_object('seed_sources', jsonb_build_array(jsonb_build_object('url', mail_url, 'title', 'Subject ' || m, 'content', 'the email body ' || m))),
+            jsonb_build_object('outcome', 'ok', 'synthesis', 'a digest report ctl' || m,
+                'claims', jsonb_build_array(jsonb_build_object('id', c_priv, 'text', 'the plan ' || m || ' is due in May'),
+                                            jsonb_build_object('id', c_shared, 'text', 'the article ctl' || m || ' is public')),
+                'sources', jsonb_build_array(jsonb_build_object('id', s_mail, 'url', mail_url, 'title', 'Subject ' || m),
+                                             jsonb_build_object('id', s_art2, 'url', 'https://news.example/b/ctl' || m, 'title', 'Article two ctl' || m)),
+                'cited_sources', jsonb_build_array(jsonb_build_object('url', mail_url, 'title', 'Subject ' || m))))
+    RETURNING id INTO j_svc;
+    INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES (j_svc, 'service:digest', 'service:digest', 'Subject ' || m);
+    INSERT INTO public.research_jobs (status, origin, query, anchor, root_job_id, parent_job_id, rooted_step_id, branch_kind)
+    VALUES ('done', 'manual', 'Subject ' || m, 'Subject ' || m, j_svc, j_svc, 's1', 'gap')
+    RETURNING id INTO j_svcb;
+    INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, trail, payload) VALUES
+      (j_svc, j_svc, 's1', 'stage', 'due_process', NULL, jsonb_build_object('current_artifact', jsonb_build_object('label', mail_url, 'kind', 'source'), 'stage', 'fetch')),
+      (j_svc, j_svc, NULL, 'source', 'due_process', jsonb_build_object('url', mail_url, 'title', 'Subject ' || m, 'decision', 'admitted'),
+         jsonb_build_object('sources', jsonb_build_array(jsonb_build_object('url', mail_url, 'title', 'Subject ' || m)), 'count', 1)),
+      (j_svc, j_svc, NULL, 'topic', 'due_process', NULL, jsonb_build_object('topic', 'Subject ' || m, 'anchor', 'Subject ' || m)),
+      (j_svcb, j_svc, NULL, 'topic', 'due_process', NULL, jsonb_build_object('topic', 'the topic of Subject ' || m));
+    -- round 2 (tester 3): a typed edge from the private-only entity (the entity worker writes them from the mail it read)
+    INSERT INTO public.edges (from_entity_id, to_entity_id, relation, support_count, confidence, metadata)
+    VALUES (e_priv, e_clean, 'works_with', 1, 0.8, jsonb_build_object('thought_id', t_gmail));
+
     -- the wiki
     INSERT INTO public.wiki_pages (slug, page_class, title, body, links, frontmatter) VALUES
       ('content/thought/' || t_gmail, 'thought', 'Thought #' || t_gmail, '# Thought' || chr(10) || 'an email ' || m || ' about the quarterly plan', '[]', jsonb_build_object('id', t_gmail)),
-      ('content/topic/priv-' || left(md5(m || 'p'), 10), 'entity', 'Priv ' || m, 'the topic ' || m || ' per [[content/thought/' || t_gmail || '|a mail]]', jsonb_build_array('content/thought/' || t_gmail), jsonb_build_object('entity_id', e_priv)),
+      ('content/topic/priv-' || left(md5(m || 'p'), 10), 'entity', 'Priv ' || m, 'the topic ' || m || ' per [[content/thought/' || t_gmail || '|a mail]] '
+         || (SELECT string_agg('para' || g || ' word' || (g * 7 % 13), ' ') FROM generate_series(1, 90) g), jsonb_build_array('content/thought/' || t_gmail), jsonb_build_object('entity_id', e_priv)),
       ('content/source/' || s_mail, 'source', 'Subject ' || m, 'the email body ' || m, '[]', jsonb_build_object('id', s_mail)),
       ('content/topic/mixed-' || left(md5(m || 'x'), 10), 'entity', 'Mixed ctl' || m, 'a topic synthesised from a chat: ' || m || ' and the article ctl' || m, '[]', jsonb_build_object('entity_id', e_mixed)),
       ('notes/note-' || left(md5(m || 'n'), 10), 'note', 'My note ' || m, 'see thought/' || t_chat, '[]', '{}'),
@@ -138,7 +172,7 @@ BEGIN
         'sources', jsonb_build_object('mail', s_mail, 'pod', s_pod, 'art', s_art, 'art2', s_art2),
         'claims', jsonb_build_object('priv', c_priv, 'mixed', c_mixed, 'chain', c_chain, 'shared', c_shared),
         'entities', jsonb_build_object('priv', e_priv, 'mixed', e_mixed, 'clean', e_clean),
-        'jobs', jsonb_build_object('seed', j_seed, 'ctl', j_ctl), 'thread', th,
+        'jobs', jsonb_build_object('seed', j_seed, 'ctl', j_ctl, 'svc', j_svc, 'svcbranch', j_svcb), 'thread', th,
         'pages', jsonb_build_object('leaf', 'content/thought/' || t_gmail, 'linking', 'content/topic/priv-' || left(md5(m || 'p'), 10),
                                     'srcleaf', 'content/source/' || s_mail, 'evidence', 'content/topic/mixed-' || left(md5(m || 'x'), 10),
                                     'note', 'notes/note-' || left(md5(m || 'n'), 10), 'clean', 'content/topic/clean-' || left(md5(m || 'c'), 10))))
