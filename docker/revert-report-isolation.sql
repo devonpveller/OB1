@@ -17,6 +17,7 @@
 -- Runs twice cleanly (a second run finds no batch to restore).
 \set ON_ERROR_STOP on
 BEGIN;
+SET LOCAL lock_timeout = '10s';  -- reviewer gate 2, as slot 380: a held live table stops the revert after 10s
 DO $$
 DECLARE
     v_batch    UUID;

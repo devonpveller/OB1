@@ -38,6 +38,11 @@
 -- with a fresh backup. Revert: revert-report-isolation.sql (restores every archived row byte-identical; drops the
 -- guard; keeps the tables).
 -- ============================================================
+-- One transaction, the whole file (as slot 380): a failed check leaves everything as it was. The lock wait is bounded
+-- (reviewer gate 2): a live table held by a running service makes the run stop after 10s instead of queueing every
+-- reader behind it - re-run it when the holder is done.
+BEGIN;
+SET LOCAL lock_timeout = '10s';
 
 CREATE TABLE IF NOT EXISTS public.research_private_reports (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -474,3 +479,4 @@ BEGIN
 END $$;
 
 NOTIFY pgrst, 'reload schema';
+COMMIT;
