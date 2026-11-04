@@ -172,6 +172,15 @@ try {
   function Q1([string]$q) { $r = Dk exec $db psql -U postgres -d openbrain -X -tA -v ON_ERROR_STOP=1 -c $q; return (($r -replace "`r", '') -split "`n" | Where-Object { $_ -ne '' -and $_ -notmatch '^(INSERT|UPDATE|DELETE|DO)\b' }) -join "`n" }
   function Notices([string]$o) { return (($o -split "`n") | Where-Object { $_ -match 'NOTICE|ERROR' } | ForEach-Object { ($_ -replace '^.*(NOTICE|ERROR):\s+', '').Trim() }) -join ' ; ' }
 
+  $fnSql = "SELECT md5(string_agg(replace(pg_get_functiondef(p.oid), E'
+', ''), '|' ORDER BY p.proname)) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('idea_privacy_page_links_idea', 'idea_privacy_linked_thought_ids', 'wiki_guard_mark_withheld', 'trg_idea_privacy_wiki_guard', 'trg_report_isolation_wiki_guard')"
+  if (-not $Red) {
+    # the 380 / 390 init files carry the same function bodies as 430 (a fresh volume, and a re-run of either, must not put the older ones back)
+    $fn1 = Q1 $fnSql
+    $null = File (Join-Path $dk 'init-privacy-hardening.sql') '430.sql'
+    $fn2 = Q1 $fnSql
+    Check ($fn1 -eq $fn2 -and $fn1 -match '^[0-9a-f]{32}$') "on the chain's own database the guard/rule functions of 380 + 390 equal the ones 430 installs (md5 $fn1)"
+  }
   if (-not $Red) {
     # the initdb chain ran 430 on the empty volume; the live database has not had it. Take it off, so the plant and the 380 / 390
     # runs below are the live order and "before 430" is a real state
@@ -236,9 +245,11 @@ CREATE TRIGGER lab_silent_drop BEFORE INSERT OR UPDATE ON public.wiki_pages FOR 
   if ($script:rc -ne 0) { Write-Host $o; throw 'seed' }
 
   Write-Host '[4] slot 380 then slot 390 over the plant (the live order), then the snapshot'
-  $o380 = File (Join-Path $dk 'init-idea-privacy.sql') '380.sql'; Save '380-init.log' $o380
+  # the live database ran the BASE's 380 and 390 (their older function bodies): the lab runs those, not this tree's
+  $liveInit = { param($name) $f = Join-Path $env:TEMP "$P-live-$name"; $t = (& git -C $ob1 show "${BaseSha}:docker/$name") -join "`n"; [System.IO.File]::WriteAllText($f, $t + "`n", (New-Object System.Text.UTF8Encoding $false)); $script:made.dirs += $f; return $f }
+  $o380 = File (& $liveInit 'init-idea-privacy.sql') '380.sql'; Save '380-init.log' $o380
   Check ($script:rc -eq 0 -and $o380 -match 'idea thought\(s\) archived') "slot 380 archived the planted idea thoughts ($(Notices $o380))"
-  $o390 = File (Join-Path $dk 'init-report-isolation.sql') '390.sql'; Save '390-init.log' $o390
+  $o390 = File (& $liveInit 'init-report-isolation.sql') '390.sql'; Save '390-init.log' $o390
   Check ($script:rc -eq 0 -and $o390 -match 'moved 2 idea-job') "slot 390 moved the planted report ($(Notices $o390))"
   $snapSql = @"
 SELECT md5(string_agg(x, '|' ORDER BY x)) FROM (
