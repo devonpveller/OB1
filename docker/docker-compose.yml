@@ -190,6 +190,7 @@ services:
       - ./init-idea-privacy.sql:/docker-entrypoint-initdb.d/380-init-idea-privacy.sql:ro # research-workbench rw-idea-privacy: the ideas' pre-370 shared-corpus thoughts move to an owner-only archive (their revisions made private), the operator's 'ideas are completely user isolated' (fresh-volume: nothing to move; live: psql -f after a fresh backup; revert: revert-idea-privacy.sql)
       - ./init-report-isolation.sql:/docker-entrypoint-initdb.d/390-init-report-isolation.sql:ro # research-workbench rw-report-isolation: an idea job's report is private to the idea's owner (research_private_reports + the rule research_job_report_owner); the existing idea-job syntheses moved out of sources, archived first (fresh-volume only; live: psql -f BEFORE the new openbrain-mcp + research-curator images, a fresh backup first, the moved wiki leaf files out of the vault first; revert: revert-report-isolation.sql)
       - ./init-settings.sql:/docker-entrypoint-initdb.d/400-init-settings.sql:ro # research-workbench rw-settings-store (plan 08 PD3): the settings registry, the per-user tier, setting_get() - the one read function services use (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-settings.sql)
+      - ./init-rest-door-auth.sql:/docker-entrypoint-initdb.d/450-init-rest-door-auth.sql:ro # research-workbench rw-rest-door-auth: the REST door's per-caller roles, PostgREST's authenticator, rest_setting_get, EXECUTE revoked from PUBLIC (catalog-generated stand-in grants for every non-door role) (fresh-volume only; live: psql -f, then the authenticator password, then the callers' code, then the door switch; revert: revert-rest-door-auth.sql)
     networks:
       - obnet
     restart: unless-stopped
@@ -865,8 +866,12 @@ services:
 
   # PostgREST over openbrain-db — the API surface the wiki-compiler
   # scripts expect (they were written for Supabase /rest/v1). Local
-  # only: loopback host port + obnet. anon-role = service_role (single
-  # user, same app-layer-trust posture as the MCP server as superuser).
+  # only: loopback host port (via openbrain-rest) + obnet.
+  # rw-rest-door-auth (slot 450): no anonymous role - a request without a valid token is refused (401)
+  # before it reaches the database. Each caller presents its own HS256 JWT (OB_REST_JWT_SECRET, aud
+  # openbrain-rest) naming its own role (ob_rest_<caller>); PostgREST logs in as ob_rest_authenticator,
+  # a member of those roles only, so a token naming service_role / postgres / any other role is refused.
+  # OB_REST_AUTHENTICATOR_PASSWORD is set on the role out of band (rest-door/mint-rest-tokens.ps1).
   openbrain-postgrest:
     image: postgrest/postgrest:v12.2.3
     container_name: openbrain-postgrest
@@ -874,9 +879,10 @@ services:
       openbrain-db:
         condition: service_healthy
     environment:
-      PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD}@openbrain-db:5432/openbrain
+      PGRST_DB_URI: postgres://ob_rest_authenticator:${OB_REST_AUTHENTICATOR_PASSWORD:-}@openbrain-db:5432/openbrain
       PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: service_role
+      PGRST_JWT_SECRET: ${OB_REST_JWT_SECRET:-}
+      PGRST_JWT_AUD: openbrain-rest
       PGRST_DB_POOL: "10"
       PGRST_SERVER_PORT: "3000"
     networks:
@@ -918,11 +924,11 @@ services:
     depends_on:
       - openbrain-rest
     environment:
-      # supabase-js → Caddy /rest/v1 proxy → PostgREST (anon=service_role).
-      # PostgREST has no JWT secret, so the key value is not verified;
-      # supabase-js only requires it be non-empty.
+      # supabase-js → Caddy /rest/v1 proxy → PostgREST. rw-rest-door-auth: supabase-js sends this key as
+      # `Authorization: Bearer`; it is this caller's own REST-door token (a JWT for role ob_rest_entity;
+      # OB1/docker/.env, minted by rest-door/mint-rest-tokens.ps1), no longer MCP_ACCESS_KEY. Blank = 401.
       SUPABASE_URL: http://openbrain-rest
-      SUPABASE_SERVICE_ROLE_KEY: ${MCP_ACCESS_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${OB_REST_TOKEN_ENTITY:-}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       # Local OpenAI-compatible chat (entity/relation extraction).
       CHAT_API_BASE: http://llama-cpp:8080/v1
@@ -1235,7 +1241,11 @@ services:
       - openbrain-entity-worker
     environment:
       OPEN_BRAIN_URL: http://openbrain-rest
-      OPEN_BRAIN_SERVICE_KEY: local-trust
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_wiki; OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1); the service hands it to the compile's child scripts as OPEN_BRAIN_SERVICE_KEY.
+      # Blank = the door refuses the compile's requests (401).
+      OPEN_BRAIN_REST_TOKEN: ${OB_REST_TOKEN_WIKI:-}
+      OPEN_BRAIN_SERVICE_KEY: ${OB_REST_TOKEN_WIKI:-}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       # P4.7 — commit working source-content edits as revisions, one per compile
       # (service-to-service call to the workbench; needs the X-Brain-Key).
@@ -1343,6 +1353,9 @@ services:
     depends_on:
       - openbrain-wiki
     environment:
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_viewer; OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1). Blank = the door refuses this service's requests (401).
+      OPEN_BRAIN_REST_TOKEN: ${OB_REST_TOKEN_VIEWER:-}
       # Heap cap of the renderer (its site index holds one entry per page;
       # rw-p1b-ready ran 401k synthetic rows under 6 GB). The value is the one
       # the retired Quartz builder needed, kept as a cap (a cap, not a reservation).

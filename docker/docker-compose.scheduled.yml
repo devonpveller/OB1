@@ -62,6 +62,9 @@ services:
       - path: ../recipes/daily-digest/.env
         required: false
     environment:
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_digest (sub = WORKSPACE_DEFAULT_SUB); OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1). Blank = the door refuses this service's requests (401).
+      OPEN_BRAIN_REST_TOKEN: ${OB_REST_TOKEN_DIGEST:-}
       # The digest is now the END of the chain (prune → podcast → digest). The
       # podcast triggers this digest when its research + episode are ready, so the
       # email is enriched (PodcastBriefSection reads the shared artifact). The
@@ -156,6 +159,9 @@ services:
       - path: ../recipes/email-history-import/.env
         required: false
     environment:
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_gmail_pull; OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1). Overrides the shared recipe .env's value: pull and prune hold different roles.
+      SUPABASE_SERVICE_ROLE_KEY: ${OB_REST_TOKEN_GMAIL_PULL:-}
       # On a successful pull, chain to prune (locked decision 13). Prune
       # then chains to digest. End-to-end: cron fires pull at 01:00, the
       # rest cascades. Set to empty string to disable chaining.
@@ -199,6 +205,9 @@ services:
       - path: ../recipes/email-history-import/.env
         required: false
     environment:
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_gmail_prune; OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1). Overrides the shared recipe .env's value: pull and prune hold different roles.
+      SUPABASE_SERVICE_ROLE_KEY: ${OB_REST_TOKEN_GMAIL_PRUNE:-}
       # Chain to the PODCAST pipeline (reordered 2026-06-08). The podcast
       # researches the day's links and produces the episode, then triggers the
       # digest — so the morning email WAITS for and is enriched by the research.
@@ -258,6 +267,9 @@ services:
       - path: ../recipes/daily-digest/.env
         required: false
     environment:
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_podcast (sub = WORKSPACE_DEFAULT_SUB); OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1). Blank = the door refuses this service's requests (401).
+      OPEN_BRAIN_REST_TOKEN: ${OB_REST_TOKEN_PODCAST:-}
       PORT: "8080"
       PODCAST_RUN_ARGS: "--commit --audio"
       # mr-routine-outage: same routine clock as openbrain-digest (run record +

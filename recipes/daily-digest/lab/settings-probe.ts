@@ -6,6 +6,9 @@
 //   deno run --no-config --allow-net --allow-env settings-probe.ts
 // Environment: PROBE_REST (http://openbrain-rest), PROBE_WB (the workbench), PROBE_KEY (its door key),
 //   PROBE_OWNER / PROBE_OTHER (two subjects, sent as X-Test-Sub), PROBE_TEAM (a podcast team of PROBE_OWNER's).
+// rw-rest-door-auth: PROBE_TOKEN_OWNER / PROBE_TOKEN_OTHER - each one's REST token (the digest role, sub = that
+//   subject): the door reads a setting for the owner the TOKEN names. OPEN_BRAIN_REST_TOKEN: the token the
+//   BrainClient / PresenterStore send (as the services read it from their env).
 import { digestWindowFor, podcastTeamFor, SettingReader } from "../src/clients/settings.ts";
 import { AiNewsSection } from "../src/sections/ai-news.ts";
 import { BrainClient } from "../src/clients/postgrest.ts";
@@ -14,6 +17,7 @@ import { PresenterStore } from "../src/podcast/presenter-store.ts";
 const env = (k: string) => (Deno.env.get(k) ?? "").trim();
 const REST = env("PROBE_REST"), WB = env("PROBE_WB").replace(/\/+$/, ""), KEY = env("PROBE_KEY");
 const OWNER = env("PROBE_OWNER"), OTHER = env("PROBE_OTHER"), TEAM = env("PROBE_TEAM");
+const TOKEN_OWNER = env("PROBE_TOKEN_OWNER"), TOKEN_OTHER = env("PROBE_TOKEN_OTHER");
 let fails = 0;
 const check = (ok: boolean, m: string) => {
   console.log(`${ok ? "PROBE PASS" : "PROBE FAIL"}  ${m}`);
@@ -28,7 +32,8 @@ const route = async (method: string, key: string, who: string, value?: unknown) 
   return r.status;
 };
 
-const reader = new SettingReader(REST);
+const reader = new SettingReader(REST, undefined, TOKEN_OWNER || undefined);
+const readerOther = new SettingReader(REST, undefined, TOKEN_OTHER || undefined);
 const asked: number[] = [];
 const brain = new (class extends BrainClient {
   override fetchRecentThoughts(o: { windowHours: number; limit: number; excludeTypes?: string[] }) {
@@ -53,7 +58,8 @@ const team = await podcastTeamFor(reader, OWNER, "env_team");
 check(team === TEAM, `the next episode reads the stored team (${team})`);
 const resolved = await new PresenterStore(REST).team(OWNER, team);
 check(resolved?.id === TEAM, "and that team resolves in the presenter model, as link-enrich then loads it");
-check(await digestWindowFor(reader, OTHER, 24) === 6 && await podcastTeamFor(reader, OTHER, "env_team") === "env_team", "the other user reads only their own");
+check(await digestWindowFor(readerOther, OTHER, 24) === 6 && await podcastTeamFor(readerOther, OTHER, "env_team") === "env_team", "the other user reads only their own");
+check(await digestWindowFor(readerOther, OWNER, 24) === 6, "naming the owner does not give the other user's token the owner's value");
 // 3. back to the default
 check(await route("DELETE", "digest.window_hours", OWNER) === 200 && await route("DELETE", "podcast.team", OWNER) === 200 && await route("DELETE", "digest.window_hours", OTHER) === 200, "both back to the default");
 await news.produce();

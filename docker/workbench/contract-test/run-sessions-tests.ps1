@@ -282,14 +282,16 @@ try {
   $ctMount = "${ct}:/ct:ro"
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-embed.ts')
   $null = Run-Detached "$P-gw" @('--network-alias', 'stub-gateway', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-gateway.ts')
-  $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
-      '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
-  $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
+  # rw-rest-door-auth: the REST door as compose stands it up (slot 450: per-caller tokens, no anonymous role); a -Red
+  # run's base images send no token, so it gets the old posture (anon = service_role, credentials stripped)
+  . (Join-Path $PSScriptRoot 'rest-door-lab.ps1')
+  $door = if ($Red) { Start-LabRestDoor -Db $db -Pw $pw -Legacy } else { Start-LabRestDoor -Db $db -Pw $pw }
+  $viewerRestToken = if ($door.Tokens.ContainsKey('VIEWER')) { $door.Tokens['VIEWER'] } else { '' }
   $null = Run-Detached "$P-rs" @('-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', "MCP_ACCESS_KEY=$key",
       '-e', "RESEARCH_CALLERS=owui-tool=owui:$kOwui;agent-org=mattermost:$kAo;digest=notebook:$kNb;workspace=workspace:$wsKey", '-e', "WORKSPACE_DEFAULT_SUB=$profSub",
       '-e', 'CHAT_API_BASE=http://stub-gateway:8080/v1', '-e', 'EMBEDDING_API_BASE=http://stub-gateway:8080/v1',
       '-e', 'CURATOR_URL=http://unreachable.invalid', '-e', 'SEARCH_API_BASE=http://unreachable.invalid', $rsTag)
-  $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'WIKI_NAV_MIN_ROWS=0',
+  $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$viewerRestToken", '-e', 'WIKI_NAV_MIN_ROWS=0',
       '-e', 'WIKI_BUILDER=0', '-e', 'WIKI_DB_TCP=openbrain-db:5432', '-e', 'WIKI_DB_PROBE_MS=1000', '-e', 'WIKI_RECONCILE_INTERVAL_MS=5000',
       '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "WORKSPACE_DOOR_KEY=$door", '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',

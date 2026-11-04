@@ -423,9 +423,8 @@ async function obFetch(method, pathq, body) {
     method,
     headers: {
       "content-type": "application/json",
-      // Caddy strips auth; PostgREST uses anon=service_role. Non-empty
-      // just to satisfy any client that expects it.
-      apikey: "local-trust",
+      // rw-rest-door-auth: this service's own token (the door refuses a request without one).
+      ...restAuth(),
       prefer: method === "POST" ? "return=representation" : "return=minimal",
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -949,7 +948,7 @@ async function compile(reason) {
     const childEnv = {
       ...ENV,
       OPEN_BRAIN_URL: OB_URL,
-      OPEN_BRAIN_SERVICE_KEY: ENV.OPEN_BRAIN_SERVICE_KEY || "local-trust",
+      OPEN_BRAIN_SERVICE_KEY: ENV.OPEN_BRAIN_SERVICE_KEY || ENV.OPEN_BRAIN_REST_TOKEN || "local-trust",
       OB_WIKI_OUT_DIR: WIKI_OUT_DIR,
     };
     // Incremental: regenerate only entities touched since last compile.
@@ -1426,4 +1425,12 @@ if (COMPILE_ON_BOOT) {
 if (WATCH_ENABLED) setInterval(() => changeWatchTick(), WATCH_INTERVAL_MIN * 60_000);
 if (BACKFILL_SUPERVISOR_MIN > 0) {
   setInterval(() => backfillSupervisorTick(), BACKFILL_SUPERVISOR_MIN * 60_000);
+}
+
+// rw-rest-door-auth: the REST door (openbrain-rest -> PostgREST) refuses a request that does not carry this caller's own
+// token - a JWT minted per caller whose role holds only what the caller uses. OPEN_BRAIN_REST_TOKEN, or
+// OPEN_BRAIN_SERVICE_KEY (the name the wiki compile hands its child scripts). No token = no header = 401 at the door.
+function restAuth() {
+  const t = String(process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_KEY || "").trim();
+  return t && t !== "local-trust" ? { authorization: `Bearer ${t}` } : {};
 }

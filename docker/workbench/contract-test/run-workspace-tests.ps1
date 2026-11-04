@@ -341,10 +341,19 @@ try {
   $null = Run-Detached "$P-target" @('--network-alias', 'stub-target', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-target.ts')
   $null = Run-Detached "$P-gate" @('--network-alias', 'stub-gate', '-v', $ctMount, '-e', "STUB_GATE_KEY=$gateKey", '-e', 'STUB_GATE_ALLOW=stub-target:8080',
       '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '--allow-env', '/ct/stub-gate.ts')
-  $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
-      '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
-  $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
-  $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'WIKI_NAV_MIN_ROWS=0',
+  # rw-rest-door-auth: the door as compose stands it up (slot 450 in the chain: per-caller tokens, no anonymous role);
+  # -Red runs the base's images, which send no token, so it gets the base posture (anon = service_role, the base
+  # Caddyfile). A second, lab-only legacy door serves the checks about PostgREST itself ([5n]) and the base writer ([5p] R1).
+  . (Join-Path $ct 'rest-door-lab.ps1')
+  if ($Red) {
+    $door = Start-LabRestDoor -Db $db -Pw $pw -Legacy
+  } else {
+    $door = Start-LabRestDoor -Db $db -Pw $pw
+    Check ($door.Door -eq 'auth') 'the REST door is up as compose configures it (slot 450: per-caller tokens, no anonymous role)'
+  }
+  $legacyRest = Start-LabLegacyDoor $pw
+  $tok = { param($k) if ($door.Tokens.ContainsKey($k)) { $door.Tokens[$k] } else { '' } }
+  $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'VIEWER')", '-e', 'WIKI_NAV_MIN_ROWS=0',
       '-e', 'WIKI_BUILDER=0', '-e', 'WIKI_DB_TCP=openbrain-db:5432', '-e', 'WIKI_DB_PROBE_MS=1000', '-e', 'WIKI_RECONCILE_INTERVAL_MS=5000',
       '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
@@ -489,6 +498,9 @@ try {
     $o = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
       '-e', 'PROBE_REST=http://openbrain-rest', '-e', "PROBE_WB=http://$P-wb:8000", '-e', "PROBE_KEY=$key",
       '-e', "PROBE_OWNER=$pa", '-e', "PROBE_OTHER=$pb", '-e', "PROBE_TEAM=$team",
+      # rw-rest-door-auth: the digest's token names its run owner (sub); the podcast role reads the team and the thoughts
+      '-e', "PROBE_TOKEN_OWNER=$(New-LabRestToken $door.Secret 'ob_rest_digest' $pa)", '-e', "PROBE_TOKEN_OTHER=$(New-LabRestToken $door.Secret 'ob_rest_digest' $pb)",
+      '-e', "OPEN_BRAIN_REST_TOKEN=$(New-LabRestToken $door.Secret 'ob_rest_podcast' $pa)",
       '--entrypoint', 'deno', $wbTag, 'run', '--no-config', '--allow-net', '--allow-env', '/recipes/daily-digest/lab/settings-probe.ts')
     Save 'settings-probe.log' $o
     foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^PROBE' }) { Write-Host "    $l" }
@@ -501,7 +513,7 @@ try {
   # if the revert itself does not make PostgREST drop it from its cache (PGRST202), the lab sends the reload, so the
 # start state is the live one: a running PostgREST that has never seen setting_get.
   Write-Host '[5n] slot 400 applied to a running PostgREST: rpc/setting_get answers without a restart (NOTIFY pgrst)'
-  $rpc = { (Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://openbrain-rest/rest/v1/rpc/setting_get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({p_owner:'g2-probe',p_key:'refinery.dormancy_days'})}).then(async r=>{const j=await r.json().catch(()=>({}));console.log('rpc',r.status,j&&j.code?j.code:'')}).catch(e=>console.log('rpc ERR',e.message))") -replace '[^0-9A-Za-z ]', '' }
+  $rpc = { (Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('$legacyRest/rest/v1/rpc/setting_get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({p_owner:'g2-probe',p_key:'refinery.dormancy_days'})}).then(async r=>{const j=await r.json().catch(()=>({}));console.log('rpc',r.status,j&&j.code?j.code:'')}).catch(e=>console.log('rpc ERR',e.message))") -replace '[^0-9A-Za-z ]', '' }
   $waitRpc = { param($want) $last = ''; for ($i = 0; $i -lt 15; $i++) { $last = & $rpc; if ($last -match "rpc $want") { break }; Start-Sleep -Seconds 1 }; $last }
   $g2 = @("before: $(& $rpc)")
   $null = Dk cp (Join-Path $chainDir 'revert-settings.sql') "${db}:/tmp/g2-revert.sql"
@@ -540,7 +552,7 @@ try {
     $phase = {
       param($ph, $logName)
       $o = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-e', "PRIVACY_PHASE=$ph", '-v', "${vault}:/vault",
-        '-e', 'PRIVACY_VAULT=/vault', '-e', "PRIVACY_VIEWER=http://${P}-viewer:8080", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
+        '-e', 'PRIVACY_VAULT=/vault', '-e', "PRIVACY_VIEWER=http://${P}-viewer:8080", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'WIKI')",
         '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
         '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
         $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', 'src/ideas/idea_privacy_integration_test.ts')
@@ -654,7 +666,7 @@ try {
     $viewerMissing = @{}
     foreach ($run in @(@('red', (Join-Path $oldShared 'recipes\_shared')), @('green', (Join-Path $ob1 'recipes\_shared')))) {
       $o = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/shared:ro", '-v', "${vault}:/vault", '-v', "${ct}:/ct:ro",
-        '-e', 'SHARED=/shared', '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "PROBE_VIEWER=http://${P}-viewer:8080",
+        '-e', 'SHARED=/shared', '-e', 'WIKI_GIT_DIR=/vault', '-e', "OPEN_BRAIN_URL=$(if ($run[0] -eq 'red') { $legacyRest } else { 'http://openbrain-rest' })", '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'WIKI')", '-e', "PROBE_VIEWER=http://${P}-viewer:8080",
         '-e', "PROBE_TAG=$($run[0])", '-e', "IDEA_LINK=$ideaLink", '--entrypoint', 'node', $viewerTag, '/ct/wiki-withheld-probe.mjs')
       $line = (($o -split "`n") | Where-Object { $_ -match '^PROBE ' } | Select-Object -Last 1)
       $probe[$run[0]] = if ($line) { $line.Substring(6) | ConvertFrom-Json } else { $null }
@@ -903,7 +915,7 @@ try {
     '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
     '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
-    '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
+    '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'WIKI')",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/isolation_sweep_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save "isolation-sweep-walk-$walk.log" ((($clean -split "`n") | Where-Object { $_ -match '^sweep:|HIT |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:' }) -join "`n")

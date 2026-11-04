@@ -5,26 +5,36 @@
  * or a database / PostgREST without the function yet - means the env value this service has always used,
  * so nothing changes until a value is stored. Never throws: a settings read can never fail a digest or an
  * episode. Read on every run, so a stored value is what the NEXT run uses.
+ *
+ * rw-rest-door-auth (slot 450): the door call is rpc/rest_setting_get(p_key), which takes the owner from the
+ * token's verified `sub`; setting_get itself is no longer reachable through the door.
  */
+
+import { restAuthHeaders } from "./rest-auth.ts";
 
 export class SettingReader {
   readonly #base: string;
   readonly #f: typeof fetch;
+  readonly #auth: Record<string, string>;
   #warned = false;
 
-  constructor(baseUrl: string, fetchFn?: typeof fetch) {
+  /** `token`: the caller's REST token; omitted = OPEN_BRAIN_REST_TOKEN (rest-auth.ts). */
+  constructor(baseUrl: string, fetchFn?: typeof fetch, token?: string) {
     this.#base = baseUrl.replace(/\/+$/, "");
     this.#f = fetchFn ?? fetch;
+    this.#auth = token === undefined ? restAuthHeaders() : (token.trim() ? { Authorization: `Bearer ${token.trim()}` } : {});
   }
 
   /** The owner's stored value, or null. */
   async get(owner: string, key: string): Promise<unknown> {
     if (!owner) return null;
     try {
-      const res = await this.#f(`${this.#base}/rest/v1/rpc/setting_get`, {
+      // rw-rest-door-auth: the owner is the one this service's token names (rest_setting_get reads the verified
+      // claim; slot 450) - no owner travels in the request. `owner` only says whether this run has one.
+      const res = await this.#f(`${this.#base}/rest/v1/rpc/rest_setting_get`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ p_owner: owner, p_key: key }),
+        headers: { "Content-Type": "application/json", Accept: "application/json", ...this.#auth },
+        body: JSON.stringify({ p_key: key }),
         signal: AbortSignal.timeout(10_000),
       });
       if (!res.ok) throw new Error(`${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
@@ -33,7 +43,7 @@ export class SettingReader {
     } catch (e) {
       if (!this.#warned) {
         this.#warned = true;
-        console.warn(`[settings] setting_get unavailable (${(e as Error).message}): the env values are used`);
+        console.warn(`[settings] rest_setting_get unavailable (${(e as Error).message}): the env values are used`);
       }
       return null;
     }

@@ -11,6 +11,7 @@
  *                    fixed menu (ffmpeg.ts TARGET_MENU); the sidecar records source and target.
  */
 import { type ArchiveWriter, type DestinationFn, transcodeArchived } from "./archive.ts";
+import { restAuthHeaders } from "../clients/rest-auth.ts";
 import { voiceAndArchive } from "./episode-audio.ts";
 import { type Ffmpeg, TARGET_MENU } from "./ffmpeg.ts";
 import type { RoomTranscript } from "./presenters.ts";
@@ -83,7 +84,7 @@ export class RenderService {
     let dir: string;
     if (typeof body.episode_id === "string") {
       if (!UUID.test(body.episode_id)) return { status: 400, body: { error: "episode_id must be a uuid" } };
-      const res = await fetch(`${this.#d.restBase.replace(/\/+$/, "")}/rest/v1/podcast_episodes?id=eq.${body.episode_id}&select=archive_dir`);
+      const res = await fetch(`${this.#d.restBase.replace(/\/+$/, "")}/rest/v1/podcast_episodes?id=eq.${body.episode_id}&select=archive_dir`, { headers: restAuthHeaders() });
       const rows = res.ok ? await res.json() as { archive_dir: string }[] : [];
       if (!rows[0]) return { status: 404, body: { error: "no such episode" } };
       dir = rows[0].archive_dir;
