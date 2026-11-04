@@ -99,7 +99,25 @@ interface Candidate {
   content: string;
 }
 
-async function previewCandidates(args: PruneArgs): Promise<Candidate[]> {
+// rw-inlet-owner (plan 08 PD1, slot 410): the mail belongs to its owner, so the prune deletes BY OWNER - the
+// mailbox's owner, which until per-user connections (PD4) is the one subject slot 410 recorded (rpc
+// inlet_owner_default; no new env). No owner (slot 410 not applied, or no personal data yet): nothing is deleted.
+// A row that arrived unowned since slot 410 last ran waits for its next run (which stamps it), then expires here.
+export async function resolveOwner(): Promise<string | null> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/inlet_owner_default`, {
+    method: "POST",
+    headers: pgrHeaders(),
+    body: "{}",
+  });
+  if (!res.ok) {
+    await res.text();
+    return null;
+  }
+  const v = await res.json().catch(() => null);
+  return typeof v === "string" && v.trim() !== "" ? v : null;
+}
+
+async function previewCandidates(args: PruneArgs, owner: string): Promise<Candidate[]> {
   const cutoff = new Date(Date.now() - args.retentionDays * 24 * 60 * 60 * 1000).toISOString();
   const cutoffEnc = encodeURIComponent(cutoff);
   // Pre-filter at the DB side: only gmail rows with email_date past
@@ -107,6 +125,7 @@ async function previewCandidates(args: PruneArgs): Promise<Candidate[]> {
   const url =
     `${SUPABASE_URL}/rest/v1/thoughts?select=id,metadata,content` +
     `&metadata->>source=eq.gmail` +
+    `&user_id=eq.${encodeURIComponent(owner)}` +
     `&metadata->>email_date=lt.${cutoffEnc}` +
     `&order=metadata->>email_date.asc&limit=10000`;
   const res = await fetch(url, { headers: pgrHeaders() });
@@ -118,7 +137,7 @@ async function previewCandidates(args: PruneArgs): Promise<Candidate[]> {
   return rows.filter((r) => isShortTermLabel(r.metadata?.gmail_labels, args.label));
 }
 
-async function deleteByIds(ids: number[]): Promise<number> {
+async function deleteByIds(ids: number[], owner: string): Promise<number> {
   if (ids.length === 0) return 0;
   // PostgREST `in.(1,2,3)` filter; batched to keep URL length sane.
   let deleted = 0;
@@ -126,7 +145,7 @@ async function deleteByIds(ids: number[]): Promise<number> {
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
     const url =
-      `${SUPABASE_URL}/rest/v1/thoughts?id=in.(${batch.join(",")})&select=id`;
+      `${SUPABASE_URL}/rest/v1/thoughts?id=in.(${batch.join(",")})&user_id=eq.${encodeURIComponent(owner)}&select=id`;
     const res = await fetch(url, {
       method: "DELETE",
       headers: pgrHeaders("return=representation"),
@@ -192,7 +211,12 @@ async function main(argsOverride?: Partial<PruneArgs>) {
   console.log(`  Mode:            ${args.dryRun ? "DRY RUN" : "LIVE"}`);
   console.log(`  Wiki trigger:    ${args.triggerWiki && !args.dryRun ? "yes" : "no"}\n`);
 
-  const candidates = await previewCandidates(args);
+  const owner = await resolveOwner();
+  if (!owner) {
+    console.log(`No owner recorded for the personal data (slot 410 not applied yet): nothing is pruned.`);
+    return;
+  }
+  const candidates = await previewCandidates(args, owner);
   console.log(`Found ${candidates.length} expired short-term row(s).`);
 
   // Sample preview so the morning log shows what got swept.
@@ -215,7 +239,7 @@ async function main(argsOverride?: Partial<PruneArgs>) {
   if (candidates.length === 0) {
     console.log(`\nNothing to prune. Triggering wiki anyway (entity-touch may have queued work).`);
   } else {
-    const deleted = await deleteByIds(candidates.map((c) => c.id));
+    const deleted = await deleteByIds(candidates.map((c) => c.id), owner);
     console.log(`\nDeleted ${deleted} row(s).`);
   }
 

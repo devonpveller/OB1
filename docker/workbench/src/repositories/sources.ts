@@ -19,6 +19,24 @@ export async function getSource(id: string): Promise<Source | null> {
   return rows[0] ?? null;
 }
 
+// rw-inlet-owner (slot 410): an email-body or podcast-transcript source moved out of the shared sources into its
+// owner's private store. Only its owner reads it (the database function answers no row for anyone else, or when
+// slot 410 is not applied); a service subject is never an owner. Never listed or searched: a read by id only.
+export async function getPrivateSource(id: string, sub: string): Promise<(Partial<Source> & { private: true }) | null> {
+  if (!sub || sub.startsWith("service:")) return null;
+  try {
+    const rows = await query<Partial<Source>>(
+      `SELECT id, url, title, content, content_type, notebook, created_at, updated_at FROM public.inlet_private_source($1::uuid, $2)`,
+      [id, sub],
+    );
+    return rows[0] ? { ...rows[0], private: true } : null;
+  } catch (e) {
+    // 42883: slot 410 is not applied (the function does not exist) - nothing is private yet
+    if ((e as { fields?: { code?: string } }).fields?.code === "42883") return null;
+    throw e;
+  }
+}
+
 // Search existing (non-retracted) sources by title/content — backs the modal's
 // "link an existing source" mode (#3, the deliberate-link path).
 export async function searchSources(q: string, limit = 20): Promise<Partial<Source>[]> {

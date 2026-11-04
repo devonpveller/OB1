@@ -52,6 +52,10 @@
 # them (src/ideas/idea_privacy_integration_test.ts in phases around psql runs): RED before 380 runs and with round 1's 380
 # (-PrivacyPrevSha), init x2, the viewer's reconcile repair, the deploy step (files out), revert x2 byte-identical, two mutants
 # without an archive step refused, init again - so the sweep that follows runs on the migrated database.
+# rw-inlet-owner adds [5r] (plan 08 PD1, slot 410; with -Red only together with -IdeasOnly): a marker in every personal field
+# (inlet-owner-plant.sql), src/inlet/inlet_owner_integration_test.ts in phases around init-inlet-owner.sql / revert-inlet-owner.sql:
+# RED (the base, and before 410 runs), the refusals, init x2, the reconcile repair, the deploy step, revert x2 byte-identical,
+# three mutants refused, init again, late unowned rows and the second run - the sweep then runs on that state.
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
 param(
   [string]$Id = 'wt-rw-p2b-workspace',
@@ -84,7 +88,9 @@ param(
   # round 6: the round-5 slot 390 (its tie set misses an errored minting job's filed event; it classifies by time)
   [string]$ReportRoundFiveSha = '65a8203',
   # round 7: the round-6 slot 390 (it relabels sources by the thread's CURRENT name)
-  [string]$ReportRoundSixSha = 'ccaf4c9'
+  [string]$ReportRoundSixSha = 'ccaf4c9',
+  # rw-inlet-owner [5r]: the base whose prune-short-term.ts is the prune's RED (the development pin before slot 410)
+  [string]$InletBaseSha = '8241755'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -269,6 +275,7 @@ try {
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '370-init-idea-functions.sql' }).Count -eq 1) 'the chain mounts 370-init-idea-functions.sql (rw-p8a4-ideas)' }
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '380-init-idea-privacy.sql' }).Count -eq 1) 'the chain mounts 380-init-idea-privacy.sql (rw-idea-privacy)' }
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '400-init-settings.sql' }).Count -eq 1) 'the chain mounts 400-init-settings.sql (rw-settings-store)' }
+  if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '410-init-inlet-owner.sql' }).Count -eq 1) 'the chain mounts 410-init-inlet-owner.sql (rw-inlet-owner)' }
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] the internal network'
@@ -855,6 +862,184 @@ try {
     foreach ($f in $files) { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $vault ($f[0] + '.md')) }
     Save 'report-isolation-wiki.log' (($wlog -join "`n") -replace [regex]::Escape($key), '<key>')
     foreach ($l in $wlog) { Write-Host "    $l" }
+  }
+
+  # rw-inlet-owner (plan 08 PD1, slot 410): every existing personal row becomes the owner's and private. A marker in every
+  # personal field (inlet-owner-plant.sql) with vault files for the planted pages; src/inlet/inlet_owner_integration_test.ts
+  # in phases around psql runs. -Red -IdeasOnly (the base's chain and images, -BaseSha): plant + the 'migrated' reads,
+  # which must all FAIL (B reads the markers). GREEN: snapshot; RED before 410 runs; a run with no owner subject refused;
+  # init x2; a run naming another owner refused; the viewer's reconcile repair with the files present; the deploy step
+  # (files out); migrated; files back; revert x2; byte-identical; three mutants without an archive step refused, nothing
+  # changed; init again; the late rows; the second run (exactly the new unowned rows). The sweep then runs on that state.
+  if (-not $SettingsOnly -and (-not $Red -or $IdeasOnly)) {
+    Write-Host '[5r] slot 410: personal data becomes its owner''s and private (plant, RED, refusals, init x2, reconcile, deploy step, revert x2, mutants, init, late rows, second run)'
+    $ir = -join ((97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
+    $inMark = "inletmark$ir"; $inA = "inlet-owner-$ir"; $inB = "inlet-second-$ir"
+    $script:p410 = @{}
+    $inPhase = {
+      param($ph, $logName)
+      $o = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-e', "INLET_PHASE=$ph",
+        '-e', "INLET_OWNER=$inA", '-e', "INLET_SECOND=$inB", '-e', "INLET_VIEWER=http://${P}-viewer:8080", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
+        '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+        '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+        $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/inlet/inlet_owner_integration_test.ts')
+      $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+      $script:lastInlet = $clean
+      Save $logName ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||^inlet privacy|error:|AssertionError|Values are not equal|\[Diff\]' } | Select-Object -First 200) -join "`n")
+      foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^inlet privacy' }) { Write-Host "    $l" }
+      return ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+    }
+    $inPsql = {
+      param($path, $tag, $vars)
+      $null = Dk cp $path "${db}:/tmp/p410.sql"
+      $a = @('exec', $db, 'psql', '-U', 'postgres', '-d', 'openbrain', '-X', '-q', '-v', 'ON_ERROR_STOP=1') + @($vars) + @('-f', '/tmp/p410.sql')
+      $o = Lab-Docker 600 $a
+      $rc = $script:rc
+      $msg = (($o -split "`n") | Where-Object { $_ -match 'NOTICE|ERROR' } | ForEach-Object { $_ -replace '^.*?(NOTICE|ERROR):\s*', '$1 ' }) -join ' | '
+      $script:p410[$tag] = "exit ${rc}: $msg"
+      Write-Host "    [$tag] exit ${rc}: $msg"
+      return $rc
+    }
+    $plantFile = Join-Path $ct 'inlet-owner-plant.sql'
+    $inInit = Join-Path $dockerDir 'init-inlet-owner.sql'
+    $inRevert = Join-Path $dockerDir 'revert-inlet-owner.sql'
+    $prc = & $inPsql $plantFile 'plant' @('-v', "mark=$inMark", '-v', 'phase=plant')
+    Check ($prc -eq 0) '[5r] planted a marker in every personal field (a thought of every inlet, an email body, a podcast transcript, chunks, claims, seeds, results, Gmail ids, the wiki pages)'
+    # the planted pages' vault files (what a compile wrote; the viewer's reconcile repairs a missing row from them)
+    $inPages = @((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT p.value FROM public.lab_inlet_owner_plant l, jsonb_each_text(l.v -> 'pages') p WHERE l.k = 'plant'") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    foreach ($sl in $inPages) {
+      $body = (Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT body FROM public.wiki_pages WHERE slug = '$sl'")
+      $fp = Join-Path $vault "$sl.md"
+      New-Item -ItemType Directory -Force (Split-Path -Parent $fp) | Out-Null
+      [System.IO.File]::WriteAllText($fp, "---`ntitle: planted`n---`n$body`n", (New-Object System.Text.UTF8Encoding $false))
+    }
+    if ($Red) {
+      $s = & $inPhase 'migrated' 'inlet-red-base.log'
+      Check ($s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 0 -and $script:lastInlet -match "B's reads with a personal marker: [1-9]") "[5r] RED on the base ($BaseSha): user B reads the planted markers, and every privacy check fails ($($s.Value))"
+    } else {
+      $s = & $inPhase 'snapshot' 'inlet-snapshot.log'
+      Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] the 14 touched tables hashed before the first run ($($s.Value))"
+      $s = & $inPhase 'migrated' 'inlet-red-before-410.log'
+      Check ($s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 0 -and $script:lastInlet -match "B's reads with a personal marker: [1-9]") "[5r] RED: before slot 410 runs, user B reads the markers and every privacy check fails ($($s.Value))"
+      $nrc = & $inPsql $inInit 'init without an owner' @()
+      $s = & $inPhase 'reverted' 'inlet-after-no-owner.log'
+      Check ($nrc -ne 0 -and $script:p410['init without an owner'] -match 'no owner subject' -and $s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] a run with personal data and no owner subject is refused, and changed nothing ($($s.Value))"
+      $rcs = @((& $inPsql $inInit 'init' @('-v', "owner_sub=$inA")), (& $inPsql $inInit 'init again' @()))
+      Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p410['init'] -match 'thought\(s\) now the owner' -and $script:p410['init again'] -match 'nothing to do') '[5r] init-inlet-owner.sql makes the personal data private; a second run (the recorded owner) has nothing to do'
+      $orc = & $inPsql $inInit 'init naming another owner' @('-v', "owner_sub=$inB")
+      Check ($orc -ne 0 -and $script:p410['init naming another owner'] -match 'another subject') '[5r] a run naming a different owner subject is refused'
+      $rec = Dk exec "$P-viewer" node /viewer/lib/shared/reconcile-wiki-pages.mjs --repair --vault /wiki
+      Save 'inlet-reconcile-repair.log' ((($rec -split "`n") | Select-Object -Last 30) -join "`n")
+      Write-Host "    [reconcile --repair, files present] exit $($script:rc)"
+      $inWithheld = "$vault-inlet-withheld"; $script:made.dirs += $inWithheld
+      $inOut = {
+        $sl2 = @((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT DISTINCT ref FROM public.inlet_owner_archive WHERE action = 'w' AND restored_at IS NULL ORDER BY 1") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $n = 0
+        foreach ($x in $sl2) {
+          $from = Join-Path $vault "$x.md"
+          if (Test-Path -LiteralPath $from) {
+            $to = Join-Path $inWithheld "$x.md"; New-Item -ItemType Directory -Force (Split-Path -Parent $to) | Out-Null
+            Move-Item -LiteralPath $from -Destination $to -Force; $n++
+          }
+        }
+        # the deploy step's viewer restart: its site index (/__nav, /static/graphIndex.json) is stale-while-revalidate and
+        # would serve the withheld pages' titles and links from its cached copy until the next rebuild
+        $null = Dk restart "$P-viewer"
+        $null = Wait-Http "http://${P}-viewer:8080/workspace/" 90
+        $null = Wait-Http "http://${P}-viewer:8080/__nav" 90
+        Write-Host "    [deploy step] $n vault file(s) of $($sl2.Count) withheld page(s) moved out of the vault; the viewer restarted"; return $n
+      }
+      $inBack = {
+        $n = 0
+        if (Test-Path $inWithheld) {
+          foreach ($f in @(Get-ChildItem -Recurse -File $inWithheld)) {
+            $to = Join-Path $vault ($f.FullName.Substring($inWithheld.Length).TrimStart([char[]]@([char]92, [char]47)))
+            New-Item -ItemType Directory -Force (Split-Path -Parent $to) | Out-Null
+            Move-Item -LiteralPath $f.FullName -Destination $to -Force; $n++
+          }
+        }
+        Write-Host "    [revert step] $n vault file(s) moved back"; return $n
+      }
+      $moved = & $inOut
+      $s = & $inPhase 'migrated' 'inlet-migrated.log'
+      Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 5 -and [int]$s.Groups[3].Value -eq 0) "[5r] after 410 (+ the reconcile repair, + the deploy step): B reads nothing personal anywhere, the mixed claim keeps only its shared source, A reads as before, the guard holds, the stores are closed ($($s.Value))"
+      # the REAL entity-wiki compile rebuilds the withheld entity pages: the one with shared evidence (the article) is
+      # rebuilt from shared material only, through the gateway alias (a stand-in that keeps every prompt); the one whose
+      # only evidence was a private thought is not rebuilt; the guard admits the rebuilt page
+      $null = Run-Detached "$P-wllm" @('--network-alias', 'llama-cpp', '-v', $ctMount, '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '/ct/stub-wiki-llm.ts')
+      $cmpAt = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT now()::text") | Out-String).Trim()
+      $ents = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT (v -> 'entities' ->> 'mixed') || ',' || (v -> 'entities' ->> 'priv') FROM public.lab_inlet_owner_plant WHERE k = 'plant'") | Out-String).Trim()
+      # lab hygiene (the compile writes the entities it rebuilds; that is a later write the revert must not undo): keep
+      # their rows as the migration left them, and put them back after the compile
+      $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DROP TABLE IF EXISTS public.lab_inlet_owner_ents; CREATE TABLE public.lab_inlet_owner_ents AS SELECT * FROM public.entities WHERE id IN ($ents)"
+      $cmp = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro", '-v', "${vault}:/vault",
+        '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'OPEN_BRAIN_SERVICE_KEY=lab-placeholder', '-e', 'LLM_API_KEY=lab-placeholder',
+        '-e', 'LLM_BASE_URL=http://llama-cpp:8080/v1', '-e', 'LLM_MODEL=lab-stub', '-e', 'WIKI_GIT_DIR=/vault',
+        '--entrypoint', 'node', $viewerTag, '/recipes/entity-wiki/generate-wiki.mjs', '--ids', $ents, '--include-sources', '--no-graph', '--out-dir', '/vault/content')
+      $cmpRc = $script:rc
+      Save 'inlet-compile.log' ((($cmp -split "`n") | Select-Object -Last 40) -join "`n")
+      $llog = Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('http://llama-cpp:8080/_log').then(r=>r.text()).then(t=>console.log(t))"
+      $lj = @(); try { $lj = @(((($llog -split "`n") | Where-Object { $_ -match '^\[' } | Select-Object -Last 1)) | ConvertFrom-Json) } catch { }
+      $chats = @($lj | Where-Object { $_.path -eq '/v1/chat/completions' })
+      $markHits = @($lj | Where-Object { $_.prompt -match "(?<!ctl)$inMark" -or $_.prompt -match 'mail\.google\.com' }).Count
+      $hosts = @($lj | ForEach-Object { ($_.host -split ':')[0] } | Sort-Object -Unique)
+      $rebuilt = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT count(*) FILTER (WHERE w.frontmatter ->> 'entity_id' = l.v -> 'entities' ->> 'mixed') || '|' || count(*) FILTER (WHERE w.frontmatter ->> 'entity_id' = l.v -> 'entities' ->> 'priv') || '|' || count(*) FILTER (WHERE w.body ~ ('(?<!ctl)' || (l.v ->> 'mark'))) FROM public.wiki_pages w, public.lab_inlet_owner_plant l WHERE l.k = 'plant'") | Out-String).Trim()
+      Write-Host "    [compile] exit $cmpRc; $($chats.Count) chat call(s) to $($hosts -join ','); prompts with a personal marker: $markHits; pages (rebuilt mixed | priv | with a marker): $rebuilt"
+      Check ($chats.Count -ge 1 -and $markHits -eq 0 -and ($hosts -join ',') -eq 'llama-cpp' -and $rebuilt -eq '1|0|0') "[5r] the real compile rebuilds the entity page that has shared evidence from shared material only, through the gateway alias; the private-only one is not rebuilt; no page carries a marker (calls $($chats.Count), marker prompts $markHits, pages $rebuilt)"
+      $null = Dk rm -f "$P-wllm"
+      # lab hygiene: the pages this compile wrote (the rebuilt entity page, the article's leaf) leave the lab again, row and
+      # file, so the revert below is measured against the state the migration made
+      $newSlugs = @((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT slug FROM public.wiki_pages WHERE updated_at >= '$cmpAt'::timestamptz") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+      foreach ($ns in $newSlugs) { $nf = Join-Path $vault "$ns.md"; if (Test-Path -LiteralPath $nf) { Remove-Item -Force -LiteralPath $nf } }
+      $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DELETE FROM public.wiki_pages WHERE updated_at >= '$cmpAt'::timestamptz"
+      $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "BEGIN; SET LOCAL session_replication_role = replica; UPDATE public.entities e SET entity_type = x.entity_type, canonical_name = x.canonical_name, normalized_name = x.normalized_name, aliases = x.aliases, metadata = x.metadata, first_seen_at = x.first_seen_at, last_seen_at = x.last_seen_at, created_at = x.created_at, updated_at = x.updated_at FROM public.lab_inlet_owner_ents x WHERE x.id = e.id; COMMIT; DROP TABLE public.lab_inlet_owner_ents"
+      Write-Host "    [compile] $($newSlugs.Count) page(s) the compile wrote removed again (row and file)"
+      $null = & $inBack
+      $rcs = @((& $inPsql $inRevert 'revert' @()), (& $inPsql $inRevert 'revert again' @()))
+      Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p410['revert'] -match 'batch\(es\) restored' -and $script:p410['revert again'] -match 'nothing to restore') '[5r] revert-inlet-owner.sql restores the batch; a second run has nothing to restore'
+      $s = & $inPhase 'reverted' 'inlet-reverted.log'
+      Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] after the revert the 14 tables are byte-identical (md5) to before the first run ($($s.Value))"
+      $srcText = Get-Content -Raw $inInit
+      foreach ($m in @(@('archive-thoughts', 'a thought'), @('archive-sources', 'a source'), @('archive-pages', 'a wiki page'))) {
+        $mutant = Join-Path $env:TEMP "$P-410-mutant-$($m[0]).sql"
+        $cut = [regex]::Replace($srcText, "(?s)-- \[$($m[0])\].*?-- \[/$($m[0])\]", '-- (mutant: no archive step)')
+        [System.IO.File]::WriteAllText($mutant, $cut, (New-Object System.Text.UTF8Encoding $false))
+        $script:made.dirs += $mutant
+        $mrc = & $inPsql $mutant "mutant without the $($m[0])" @()
+        Check ($cut -ne $srcText -and $mrc -ne 0 -and $script:p410["mutant without the $($m[0])"] -match 'refused, nothing changed') "[5r] a 410 that changes $($m[1]) it did not first archive FAILS (refused, nothing changed)"
+        $s = & $inPhase 'reverted' "inlet-after-mutant-$($m[0]).log"
+        Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] the refused mutant ($($m[0])) changed nothing ($($s.Value))"
+      }
+      $r3 = & $inPsql $inInit 'init (after the revert)' @()
+      $null = & $inOut
+      $lrc = & $inPsql $plantFile 'late plant' @('-v', "mark=$inMark", '-v', 'phase=late')
+      $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "INSERT INTO public.lab_inlet_owner_plant SELECT 'late-unowned', jsonb_build_object('ids', coalesce(jsonb_agg(id ORDER BY id), '[]')) FROM public.thoughts WHERE user_id IS NULL ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v"
+      $r4 = & $inPsql $inInit 'init (the second run, after new unowned rows)' @()
+      $s = & $inPhase 'rerun' 'inlet-rerun.log'
+      Check ($r3 -eq 0 -and $lrc -eq 0 -and $r4 -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 1) "[5r] the second run stamps and isolates exactly the rows that arrived unowned; B still reads nothing personal ($($s.Value))"
+      # the gmail prune deletes BY OWNER: three expired short-term mails (the owner's, B's, an unowned one that arrived
+      # since the last run). RED: the base's prune ($InletBaseSha) deletes all three. GREEN: this prune deletes the owner's only.
+      $pruneBase = Join-Path $env:TEMP "$P-prune-base"
+      New-Item -ItemType Directory -Force $pruneBase | Out-Null
+      $script:made.dirs += $pruneBase
+      [System.IO.File]::WriteAllText((Join-Path $pruneBase 'prune-short-term.ts'), ((& git -C $ob1 show "${InletBaseSha}:recipes/email-history-import/prune-short-term.ts") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+      $pruneRes = @{}
+      foreach ($run in @(@('red', $pruneBase), @('green', (Join-Path $ob1 'recipes\email-history-import')))) {
+        $ids = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "WITH x AS (INSERT INTO public.thoughts (content, metadata, exposure, user_id) SELECT 'Subject: lab prune | ' || o, jsonb_build_object('source', 'gmail', 'email_date', '2020-01-01T00:00:00Z', 'gmail_labels', jsonb_build_array('brain/keep-short-term')), 'ops', NULLIF(o, 'none') FROM unnest(ARRAY['$inA', '$inB', 'none']) o RETURNING id) SELECT string_agg(id::text, ',') FROM x") | Out-String).Trim()
+        $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', 'SUPABASE_URL=http://openbrain-rest',
+          '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '/p/prune-short-term.ts', '--retention-days=30', '--no-wiki-recompile')
+        Save "inlet-prune-$($run[0]).log" ((($po -split "`n") | Where-Object { $_ -match 'Found|Deleted|nothing|owner' }) -join "`n")
+        $left = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT coalesce(user_id, 'none') FROM public.thoughts WHERE id IN ($ids) ORDER BY 1") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ','
+        $pruneRes[$run[0]] = $left
+        Write-Host "    [prune $($run[0])] left: $left"
+        $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DELETE FROM public.thoughts WHERE id IN ($ids)"
+      }
+      Check ($pruneRes['red'] -eq '') "[5r] RED: the base's prune ($InletBaseSha) deletes every expired short-term mail, whoever's (left: '$($pruneRes['red'])')"
+      $pruneWant = (@($inB, 'none') | Sort-Object) -join ','
+      Check ($pruneRes['green'] -eq $pruneWant) "[5r] the prune deletes by owner: the owner's expired mail only; B's and the unowned one stay (left: $($pruneRes['green']))"
+      $null = & $inOut
+    }
+    Save 'inlet-psql.log' (($script:p410.GetEnumerator() | Sort-Object Name | ForEach-Object { "[$($_.Name)] $($_.Value)" }) -join "`n")
   }
 
   if (-not $IdeasOnly -and -not $SettingsOnly) {

@@ -278,7 +278,10 @@ async function fetchLinkedThoughts(sb, entityId, limit = 200) {
   // PostgREST embedded resources syntax.
   const query = [
     `entity_id=eq.${entityId}`,
-    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts(id,content,metadata,created_at)`,
+    // rw-inlet-owner (slot 410): shared thoughts only (user_id NULL) - a page is shared, a thought with an owner is
+    // that owner's alone; !inner drops the link row too, so the evidence count is the shared count
+    `select=thought_id,mention_role,confidence,source,evidence,created_at,thoughts!inner(id,content,metadata,created_at)`,
+    `thoughts.user_id=is.null`,
     `order=created_at.desc`,
     `limit=${limit}`,
   ].join("&");
@@ -352,7 +355,8 @@ async function listBatchCandidates(sb, minLinked, limit) {
     const tRows =
       (await sb.get(
         "thought_entities",
-        `select=thought_id&entity_id=eq.${e.id}&limit=${minLinked}`,
+        // rw-inlet-owner (slot 410): a thought with an owner is private - never evidence for a shared page
+        `select=thought_id,thoughts!inner(id)&entity_id=eq.${e.id}&thoughts.user_id=is.null&limit=${minLinked}`,
       )) || [];
     let count = tRows.length;
     if (count < minLinked) {
@@ -451,7 +455,8 @@ async function semanticExpand(sb, env, entity) {
     query_embedding: embedding,
     match_threshold: 0.35,
     match_count: 30,
-    filter: {},
+    // rw-inlet-owner (slot 410): shared thoughts only - match_thoughts' owner scope
+    filter: { owner_scope: "shared" },
   });
   return (rows || []).map((r) => ({
     id: r.id,
@@ -1290,7 +1295,8 @@ async function emitLeafPages(sb, outDir, run) {
     for (let i = 0; i < tIds.length; i += CHUNK) {
       const list = tIds.slice(i, i + CHUNK).join(",");
       const rows =
-        (await sb.get("thoughts", `select=id,content,metadata,created_at&id=in.(${list})`)) || [];
+        // rw-inlet-owner (slot 410): a leaf only for a shared thought (a private one's leaf is withheld, and guarded)
+        (await sb.get("thoughts", `select=id,content,metadata,created_at&id=in.(${list})&user_id=is.null`)) || [];
       for (const r of rows) {
         const date = String(r.created_at || "").slice(0, 10);
         const mtype = r.metadata?.type ?? null;

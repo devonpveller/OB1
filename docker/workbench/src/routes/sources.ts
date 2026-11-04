@@ -94,7 +94,12 @@ sources.delete("/:id/notebooks/:threadId", async (c) => {
 // GET /workbench/sources/:id — read view (+ live staged-retract marker fields).
 sources.get("/:id", async (c) => {
   const src = await repo.getSource(c.req.param("id"));
-  if (!src) return c.json({ error: "not found" }, 404);
+  if (!src) {
+    // rw-inlet-owner: the owner's own moved (private) source; anyone else gets the same 404 as for no source at all
+    const mine = await repo.getPrivateSource(c.req.param("id"), seamIdentity(c)?.sub ?? "");
+    if (mine) return c.json({ source: mine, gravity: null });
+    return c.json({ error: "not found" }, 404);
+  }
   return c.json({ source: src, gravity: await repo.gravity(src.id) });
 });
 

@@ -30,6 +30,7 @@ import { registerContractTools } from "./contract-tools.ts";
 import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
 import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
 import { captureIdea, ideaOwner, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
+import { thoughtOwnerSql, thoughtReader } from "./thought-owner.ts";
 import {
   buildEgress,
   dedupShareScope,
@@ -458,11 +459,14 @@ server.registerTool(
         const mdOn = hasMd(metadata_filter);
         const params: unknown[] = [embStr, 0.5, 10];
         if (mdOn) params.push(JSON.stringify(metadata_filter));
+        // rw-inlet-owner: shared thoughts plus the lane subject's own
+        const ownerIdx = params.push(thoughtReader());
         const result = await client.queryObject<ThoughtMatch>(
           `SELECT id, content, metadata, created_at,
                   1 - (embedding <=> $1::vector) AS similarity
            FROM thoughts
            WHERE 1 - (embedding <=> $1::vector) >= $2
+             AND ${thoughtOwnerSql(`$${ownerIdx}`)}
              ${mdOn ? "AND metadata @> $4::jsonb" : ""}
            ORDER BY embedding <=> $1::vector
            LIMIT $3`,
@@ -511,10 +515,13 @@ server.registerTool(
         const mdOn = hasMd(metadata_filter);
         const params: unknown[] = [id];
         if (mdOn) params.push(JSON.stringify(metadata_filter));
+        // rw-inlet-owner: another owner's thought is answered as no thought at all
+        const ownerIdx = params.push(thoughtReader());
         const result = await client.queryObject<ThoughtRecord>(
           `SELECT id, content, metadata, created_at, updated_at
            FROM thoughts
            WHERE id = $1
+             AND ${thoughtOwnerSql(`$${ownerIdx}`)}
              ${mdOn ? "AND metadata @> $2::jsonb" : ""}
            LIMIT 1`,
           params,
@@ -582,11 +589,14 @@ server.registerTool(
         const mdOn = hasMd(metadata_filter);
         const params: unknown[] = [embStr, threshold, limit];
         if (mdOn) params.push(JSON.stringify(metadata_filter));
+        // rw-inlet-owner: shared thoughts plus the lane subject's own
+        const ownerIdx = params.push(thoughtReader());
         const result = await client.queryObject<ThoughtMatch>(
           `SELECT id, content, metadata, created_at,
                   1 - (embedding <=> $1::vector) AS similarity
            FROM thoughts
            WHERE 1 - (embedding <=> $1::vector) >= $2
+             AND ${thoughtOwnerSql(`$${ownerIdx}`)}
              ${mdOn ? "AND metadata @> $4::jsonb" : ""}
            ORDER BY embedding <=> $1::vector
            LIMIT $3`,
@@ -768,6 +778,10 @@ server.registerTool(
         params.push(JSON.stringify(metadata_filter));
         paramIdx++;
       }
+      // rw-inlet-owner: shared thoughts plus the lane subject's own
+      conditions.push(thoughtOwnerSql(`$${paramIdx}`));
+      params.push(thoughtReader());
+      paramIdx++;
 
       const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
@@ -831,15 +845,16 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
+        // rw-inlet-owner: shared thoughts plus the lane subject's own
         const countResult = await client.queryObject<{ count: number }>(
-          "SELECT COUNT(*)::int AS count FROM thoughts"
+          `SELECT COUNT(*)::int AS count FROM thoughts WHERE ${thoughtOwnerSql("$1")}`, [thoughtReader()]
         );
 
         const dataResult = await client.queryObject<{
           metadata: Record<string, unknown>;
           created_at: string;
         }>(
-          "SELECT metadata, created_at FROM thoughts ORDER BY created_at DESC"
+          `SELECT metadata, created_at FROM thoughts WHERE ${thoughtOwnerSql("$1")} ORDER BY created_at DESC`, [thoughtReader()]
         );
 
         const count = countResult.rows[0]?.count || 0;

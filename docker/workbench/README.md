@@ -619,6 +619,22 @@ A thread an idea job's filing named or described (the base's curator) is re-desc
 only (a minted one also renamed and relabelled), its embedding cleared for `backfill-thread-embeddings.ts`.
 Revert: `revert-report-isolation.sql`.
 
+**Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 410).** `init-inlet-owner.sql`
+(run with `-v owner_sub=<WORKSPACE_DEFAULT_SUB>`; the subject is recorded once in `inlet_owner`) gives every thought an
+owner (`thoughts.user_id`; only that column changes), moves the email-body sources (url mail.google.com) and the podcast
+transcripts out of `sources` into `inlet_private_sources` (chunks: `inlet_private_source_chunks`) and the claims drawn
+ONLY from them into `inlet_private_claims` (a claim also grounded on a shared source stays shared and loses only the
+private link, kept in `inlet_private_claim_links`), strips the email-body seeds from `research_jobs.options.seed_sources`
+and the moved sources / private claims / Gmail URLs from the jobs' results, strips `gmail_id` / `gmail_thread_id` /
+`gmail_labels` and Gmail URLs from the shared rows, and withholds every wiki page presenting a private thought or a moved
+source (leaf, link, entity evidence) behind `trg_inlet_owner_wiki_guard`. Every changed or moved row is archived first
+(`inlet_owner_archive`, one batch per run; no app role reads it or the private stores). Re-runnable: a run picks up what
+arrived unowned since. Readers: the entity-wiki compile reads shared thoughts only (`user_id` NULL); `match_thoughts`
+takes `filter.owner_scope` (`shared` or a subject) or `ob.user_id`; openbrain-mcp's thought tools read shared rows plus
+the lane's subject (`thought-owner.ts`); `GET /workbench/sources/:id` gives a moved source to its owner only
+(`inlet_private_source(id, sub)`); the gmail prune deletes by owner (`inlet_owner_default()`). Lab step [5r].
+Revert: `revert-inlet-owner.sql` (byte-identical; before 390 and 380).
+
 ## The Settings panel and the settings store (rw-settings-store, plan 08 PD3)
 
 `init-settings.sql` (slot 400; revert `revert-settings.sql`, which discards every user's settings) adds the
