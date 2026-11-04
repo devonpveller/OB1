@@ -14,6 +14,7 @@ import { join } from "node:path";
 
 const rowsInDb = new Set(["content/topic/held-update"]); // an older clean row the guard keeps on an update
 let representation = true;
+let sayWithheld = true;
 const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => { raw += c; });
@@ -21,9 +22,13 @@ const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://x");
     if (req.method === "POST") {
       const rows = JSON.parse(raw || "[]");
-      const written = rows.filter((r) => !r.slug.includes("held"));
+      if (!Array.isArray(rows)) { res.writeHead(204); res.end(); return; } // the failure notice the writer posts
+      // "held" = a guard withheld it (and says so in the X-Wiki-Withheld count, as slot 430's guards do); "hidden" = a row the
+      // database does not return and no guard reports (a later RLS policy)
+      const written = rows.filter((r) => !r.slug.includes("held") && !r.slug.includes("hidden"));
       for (const r of written) rowsInDb.add(r.slug);
-      res.writeHead(201, { "content-type": "application/json" });
+      const heldN = rows.filter((r) => r.slug.includes("held")).length;
+      res.writeHead(201, { "content-type": "application/json", ...(sayWithheld && heldN ? { "x-wiki-withheld": String(heldN) } : {}) });
       res.end(representation ? JSON.stringify(written.map((r) => ({ slug: r.slug }))) : "");
       return;
     }
@@ -100,4 +105,25 @@ test("a body that tells nothing (no representation) counts as landed - the behav
   } finally {
     representation = true;
   }
+});
+
+test("a row nobody withheld (RLS hides it) is HIDDEN, not withheld: its file is KEPT, it is unsynced, the run does not end 0 (rw-privacy-hardening)", async () => {
+  m.writeWikiPage(join(dir, "hidden-new.md"), page("Hidden new", "a page the database does not return and no guard reports"));
+  m.writeWikiPage(join(dir, "clean-two.md"), page("Clean two", "a clean page in the same batch"));
+  const code = await m.finishWikiPages("test");
+  assert.notEqual(code, 0, "a hidden row must fail the run, not be taken for withheld");
+  assert.equal(existsSync(join(dir, "hidden-new.md")), true, "the hidden page's file was deleted as if it were withheld");
+  assert.equal(existsSync(join(dir, "clean-two.md")), true);
+  assert.ok(m.unsyncedWikiPages().some((x) => x.slug === "content/topic/hidden-new"));
+  assert.equal(m.isWithheldWikiPage("content/topic/hidden-new"), false);
+});
+
+test("a guard that does not say it withheld (no X-Wiki-Withheld count) leaves its rows HIDDEN: nothing is deleted on an inference", async () => {
+  sayWithheld = false;
+  m.writeWikiPage(join(dir, "held-silent.md"), page("Held silent", "withheld by an old guard that never says so"));
+  const code = await m.finishWikiPages("test");
+  sayWithheld = true;
+  assert.notEqual(code, 0);
+  assert.equal(existsSync(join(dir, "held-silent.md")), true);
+  assert.equal(m.isWithheldWikiPage("content/topic/held-silent"), false);
 });

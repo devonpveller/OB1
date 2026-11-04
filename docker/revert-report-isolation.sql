@@ -14,6 +14,7 @@
 --      move bumped gets its old updated_at back (only where nothing touched it since).
 --   (3.) The tables and the archive are KEPT: nothing reads them once the
 --      old images are back, and a report filed privately after 390 is not thrown away (fail closed).
+-- rw-privacy-hardening 390-F3: it refuses, changing nothing, when a moved report cannot be re-inserted into sources.
 -- Runs twice cleanly (a second run finds no batch to restore).
 \set ON_ERROR_STOP on
 BEGIN;
@@ -25,6 +26,7 @@ DECLARE
     v_cols     TEXT;
     v_pk       TEXT;
     v_n        BIGINT;
+    v_arch     BIGINT;
     v_restored BIGINT := 0;
     v_batches  INT := 0;
     r          RECORD;
@@ -86,6 +88,20 @@ BEGIN
                                 ON CONFLICT DO NOTHING',
                                r.tbl, v_cols, regexp_replace(v_cols, '([^, ]+)', 'x.\1', 'g'), r.tbl)
                     USING v_batch, r.tbl, r.col, r.action;
+                -- rw-privacy-hardening (390-F3): a moved report that is not in `sources` again after the insert would be lost
+                -- with its private copy deleted below; ON CONFLICT DO NOTHING skipped it silently (a re-filed research_key
+                -- or an id that came back). Count the sources rows actually inserted and refuse on a shortfall.
+                IF r.action = 's' THEN
+                    GET DIAGNOSTICS v_n = ROW_COUNT;
+                    SELECT count(*) INTO v_arch FROM public.research_report_isolation_archive a
+                     WHERE a.batch = v_batch AND a.tbl = r.tbl AND a.col = r.col AND a.action = 's';
+                    IF v_n <> v_arch THEN
+                        RAISE EXCEPTION 'rw-report-isolation revert: % of % moved report(s) could not be put back into % (a row with the same id or research_key is there); nothing restored',
+                            v_arch - v_n, v_arch, r.tbl;
+                    END IF;
+                    v_restored := v_restored + v_n;
+                    CONTINUE;   -- (the count below reads the last statement's rows, which is the count(*) above)
+                END IF;
             ELSE
                 -- a column the move's delete set NULL (or to its default): point it back, only where nothing re-pointed it since
                 SELECT string_agg(format('t.%1$I = x.%1$I', at.attname), ' AND ') INTO v_pk

@@ -190,10 +190,15 @@ const _withheld = new Set();
 export function isWithheldWikiPage(slug) { return _withheld.has(slug); }
 export function withheldWikiPageCount() { return _withheld.size; }
 
-/** Upsert rows; returns { written: [slug], withheld: [slug] }. THROWS on a failed request, like upsertWikiPages. */
+// rw-privacy-hardening (380, "withheld" vs "hidden"): a slug missing from the answer is WITHHELD only when the guards
+// (slot 430) said they withheld that many rows - the response header X-Wiki-Withheld, a count. A row missing that no
+// guard accounts for is HIDDEN (a later row-level-security policy on wiki_pages, a lost write): it is reported in
+// `hidden`, and the callers treat it as unsynced - its file is KEPT, never deleted as a withheld page's would be. When
+// some rows are withheld and some hidden the writer cannot tell which, so every missing row counts as hidden.
+/** Upsert rows; returns { written: [slug], withheld: [slug], hidden: [slug] }. THROWS on a failed request, like upsertWikiPages. */
 export async function upsertWikiPagesReport(rows) {
   const list = (Array.isArray(rows) ? rows : [rows]).filter((r) => r && r.slug);
-  if (!list.length) return { written: [], withheld: [] };
+  if (!list.length) return { written: [], withheld: [], hidden: [] };
   const now = new Date().toISOString();
   const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?on_conflict=slug&select=slug`, {
     method: "POST",
@@ -205,11 +210,15 @@ export async function upsertWikiPagesReport(rows) {
   if (!r.ok) throw new Error(`POST wiki_pages: ${r.status} ${text.slice(0, 200)}`);
   let back = null;
   try { const j = JSON.parse(text); if (Array.isArray(j)) back = new Set(j.map((x) => x && x.slug)); } catch { /* not JSON: tells nothing */ }
-  const written = [], withheld = [];
-  for (const x of list) (back && !back.has(x.slug) ? withheld : written).push(x.slug);
+  const written = [];
+  let missing = [];
+  for (const x of list) (back && !back.has(x.slug) ? missing : written).push(x.slug);
+  const said = parseInt(r.headers.get("x-wiki-withheld") || "0", 10) || 0;
+  const withheld = missing.length && said === missing.length ? missing : [];
+  const hidden = missing.length && !withheld.length ? missing : [];
   for (const s of withheld) _withheld.add(s);
   for (const s of written) _withheld.delete(s);
-  return { written, withheld };
+  return { written, withheld, hidden };
 }
 
 // The withheld rows' files: a staged update is dropped (the file keeps the content of the row the guard kept); a file
@@ -421,7 +430,10 @@ export async function flushWikiPages() {
       // a withheld row (a database guard refused it, see upsertWikiPagesReport) is neither synced nor a failure: its
       // file is left out, so it never becomes reconcile drift, and it is not retried
       const out = new Set(rep.withheld);
-      const landed = part.filter((r) => !out.has(r.slug));
+      // a missing row no guard accounts for (rw-privacy-hardening): unsynced, its file kept, the run ends 3
+      const hid = new Set(rep.hidden || []);
+      for (const r of part) if (hid.has(r.slug)) { failed += 1; _unsynced.set(r.slug, "the row was not returned and no guard reported withholding it (row-level security?)"); commitStaged(_pathOf.get(r.slug), null); _pathOf.delete(r.slug); }
+      const landed = part.filter((r) => !out.has(r.slug) && !hid.has(r.slug));
       sent += landed.length;
       _synced += landed.length;
       for (const r of landed) { _unsynced.delete(r.slug); const p = _pathOf.get(r.slug); _created.delete(p); commitStaged(p, landedAt); _pathOf.delete(r.slug); }
