@@ -21,7 +21,7 @@ import {
   loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord, type ScoredClaim,
   weightFor,
 } from "./credibility.ts";
-import { derivedQuestion, scrubList, withoutPromptSpans } from "./prompt-private.ts";
+import { derivedQuestion, scrubList, withoutPromptSpans, withoutPromptSpansKeepLines } from "./prompt-private.ts";
 import { assess, type AdmissionContext, type Assessment, finalScore, subjectTokens, type TrailEntry, trailEntry } from "./admission.ts";
 import { linkedDois, type ScholarlyResolver } from "./scholarly.ts";
 import { type CuratorFilingOptions, deliverToCurator, type FiledRecord } from "./curator-filed.ts";
@@ -477,6 +477,10 @@ export interface RunOptions {
   /** P4a - the typed event stream: per-source events (with the trail) and gap events (D15). A
    *  failing sink never fails the run. */
   onEvent?: (ev: TreeEvent) => Promise<void>;
+  /** rw-boundary-core (plan 09 2.6) - research_jobs.request_kind. Every kind but 'derived' (a typed or legacy
+   *  prompt) gets the prompt-span filter on the synthesis and claim it hands the curator; a derived job's question
+   *  is public by construction, so its synthesis is filed as written. Absent = not derived (the filter applies). */
+  requestKind?: string;
 }
 export interface RunMetrics extends ReturnType<typeof reuseMetric> {
   /** P3a - the entailment stage's counts (D10). */
@@ -1952,6 +1956,10 @@ export async function runResearch(
     ({ synthesis: curatorSynthesis, cited: curatorCited } =
       buildCitedAndRenumber(curatorLines.filter((l): l is string => l !== null).join("\n"), pool));
   }
+  // rw-boundary-core (plan 09 2.6, R7): the synthesis the curator files (sources.content) and the claim drawn from its
+  // first paragraph carry no 5-word span of a non-derived job's prompt - withheld HERE, before the package is scored,
+  // so the scored claims are still exactly the filed ones (line structure kept: the line-to-verdict mapping holds).
+  if (opts.requestKind !== "derived") curatorSynthesis = withoutPromptSpansKeepLines(curatorSynthesis, query);
 
   // THE FOLD RULE (attempt 2): on a claim, a cited source's total leaves out the corroboration it
   // received from the claim's other cited sources - each of those counts once, through claim_per

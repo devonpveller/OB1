@@ -2,7 +2,7 @@
 // metadata, so a metadata filter returns nothing (fail closed).
 import { importRows } from "../../intake/repo.ts";
 import type { Db } from "../db.ts";
-import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB, OWNERLESS_FOREIGN, type Viewer } from "../../documents/ownership.ts";
+import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB, OWNERLESS_FOREIGN, SERVICE_PROMPT_SHARED, type Viewer } from "../../documents/ownership.ts";
 // rw-p4b-sessions round 2: a steer branch's text (a person's words) reads as another user's for anyone
 // who may not act on its session and did not make the steer (sessions/repo.ts)
 import { STEER_TEXT_HIDDEN, type Who } from "../../sessions/repo.ts";
@@ -70,9 +70,11 @@ export function shapeSession(r: JobRow) {
 // THE one rule for a research job's question - the owner rule above AND the steer-text rule (a steer's
 // text is its actor's and of who may act on the session: sessions/repo.ts STEER_TEXT_HIDDEN). `who` is the
 // request's identity (its admin flag), `actorParam` the SQL parameter holding who.actor.
+// rw-boundary-core (plan 09 2.7): the service: exemption only for a 'service' job (or an admin, D5); a derived job's
+// question is everyone's (OWNERLESS_FOREIGN never holds for it).
 export const OWN_QUERY = (alias: string, ownerParam: string, who: Who, actorParam: string) =>
   `CASE WHEN EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id IN (${alias}.id, coalesce(${alias}.root_job_id, ${alias}.id))
-                     AND p.owner_sub <> ${ownerParam} AND p.owner_sub NOT LIKE 'service:%')
+                     AND p.owner_sub <> ${ownerParam} AND NOT (p.owner_sub LIKE 'service:%' AND ${SERVICE_PROMPT_SHARED(alias, ownerParam)}))
               OR ${OWNERLESS_FOREIGN(alias, ownerParam)}
               OR ${STEER_TEXT_HIDDEN(alias, ownerParam, actorParam, who)}
         THEN '' ELSE ${alias}.query END`;
