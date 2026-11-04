@@ -67,7 +67,9 @@ param(
   # round 5: the round-4 slot 390 (it reads "existing" from started_at, which a re-run resets)
   [string]$ReportRoundFourSha = '1d33b53',
   # round 6: the round-5 slot 390 (its tie set misses an errored minting job's filed event; it classifies by time)
-  [string]$ReportRoundFiveSha = '65a8203'
+  [string]$ReportRoundFiveSha = '65a8203',
+  # round 7: the round-6 slot 390 (it relabels sources by the thread's CURRENT name)
+  [string]$ReportRoundSixSha = 'ccaf4c9'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -466,6 +468,16 @@ try {
     $null = Q1 "INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ('$job3', '$job3', 'filed', 'due_process', jsonb_build_object('synthesis_id', '$src3', 'research_key', 'rk-wiki3-$wk', 'thread_id', '$tErr'))"
     $null = Q1 "UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', '$tErr', 'thread_decision', 'existing', 'persist', jsonb_build_object('synthesis_id', '$src4'))) WHERE id = '$job4'"
     $null = Q1 "UPDATE public.research_jobs SET created_at = now() - interval '3 hours' WHERE id = '$job3'"
+    # round 7 (tester attempt 6, tR): the curator minted a thread (its answer records the name), its web source was labelled
+    # with that name, then the USER renamed the notebook - the label is no longer the thread's name
+    $idea5 = Q1 "SELECT public.idea_capture('wiki-owner-$wk', 'service:lab', 'wiki idea five $wk', 'wiki idea five statement $wk', NULL, NULL)::text"
+    $job5 = Q1 "INSERT INTO public.research_jobs (status, origin, query, refinery_id) VALUES ('done', 'manual', 'wiki research five $wk', '$idea5') RETURNING id::text"
+    $src5 = Q1 "INSERT INTO public.sources (title, content, content_type, research_key) VALUES ('Report five $wk', 'the fifth report body $wk', 'research_synthesis', 'rk-wiki5-$wk') RETURNING id::text"
+    $web5 = Q1 "INSERT INTO public.sources (url, title, content, notebook) VALUES ('https://example.org/web5-$wk', 'web five $wk', 'web five text', 'Filed name $mark') RETURNING id::text"
+    $tRen = Q1 "INSERT INTO public.threads (name, status) VALUES ('User renamed $wk', 'active') RETURNING id::text"
+    $null = Q1 "SELECT public.link_source_to_thread('$tRen', '$src5', 'automatic', NULL, 'confirmed'); SELECT public.link_source_to_thread('$tRen', '$web5', 'automatic', NULL, 'confirmed')"
+    $null = Q1 "UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', '$tRen', 'thread_decision', 'new', 'thread_name', 'Filed name $mark', 'persist', jsonb_build_object('synthesis_id', '$src5'))) WHERE id = '$job5'"
+    $labels = { Q1 "SELECT count(*) FROM public.sources WHERE notebook LIKE '%$mark%'" }
     $tUntied = Q1 "INSERT INTO public.threads (name, status, created_at) VALUES ('Untied notebook $wk', 'active', now() - interval '1 day') RETURNING id::text"
     $null = Q1 "SELECT public.link_source_to_thread('$tUntied', '11111111-1111-4111-8111-111111111111', 'automatic', NULL, 'confirmed')"
     $null = Q1 "UPDATE public.research_jobs SET created_at = now() - interval '3 hours', started_at = now() - interval '1 hour' WHERE id IN ('$job', '$job2'); UPDATE public.threads SET created_at = now() - interval '2 hours' WHERE id IN ('$tNew', '$tRec'); UPDATE public.threads SET created_at = now() - interval '1 day' WHERE id = '$tOld'"
@@ -539,6 +551,17 @@ try {
     $wlog += "round 5: notebooks $nbR5"
     Check ($nbR5 -match 'B 200:[1-9]' -and $nbR5 -match 'lane 200:[1-9]') "[5k] RED: round 5's 390 - the thread an errored job minted keeps its report-derived name for B and the lane ($nbR5)"
     $wlog += "[round 5 revert] $(& $run $r5r 'ri-r5-revert.sql')"
+    # round 7 RED: round 6's 390 - it relabels by the thread's current name, so the renamed notebook's source keeps the
+    # filing-time (report-derived) label
+    $r6i = Join-Path $env:TEMP "$P-r6-init-390.sql"; $r6r = Join-Path $env:TEMP "$P-r6-revert-390.sql"
+    [System.IO.File]::WriteAllText($r6i, ((& git -C $ob1 show "${ReportRoundSixSha}:docker/init-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText($r6r, ((& git -C $ob1 show "${ReportRoundSixSha}:docker/revert-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $script:made.dirs += @($r6i, $r6r)
+    $wlog += "[round 6 init] $(& $run $r6i 'ri-r6-init.sql')"
+    $lbR6 = & $labels
+    $wlog += "round 6: sources still labelled with the report-derived name: $lbR6"
+    Check ($lbR6 -ne '0') "[5k] RED: round 6's 390 - the renamed notebook's source keeps its report-derived label ($lbR6)"
+    $wlog += "[round 6 revert] $(& $run $r6r 'ri-r6-revert.sql')"
     # GREEN: this 390
     $wlog += "[init] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init.sql')"
     $afterInit = & $rows
@@ -554,6 +577,8 @@ try {
     # round 6: every thread tied to a moved idea job is renamed - the old tied thread (tE) included; an untied old one is not
     $teName = Q1 "SELECT name FROM public.threads WHERE id = '$tOld'"
     $tuName = Q1 "SELECT name FROM public.threads WHERE id = '$tUntied'"
+    $lbG = & $labels
+    Check ($lbG -eq '0') "[5k] this 390: no shared source keeps a report-derived notebook label - the renamed notebook's relabelled by linkage ($lbG)"
     Check ($teName -match '^Research thread ' -and $tuName -eq "Untied notebook $wk") "[5k] this 390: the old thread tied to a moved job (tE) is renamed ($teName); the untied old thread keeps its name ($tuName)"
     Check ($afterInit -eq '0' -and $afterRec -eq '0' -and $shared -eq '0' -and $searchG -match 'status 200 hits 0' -and $clean -eq '1') "[5k] this 390: the leaf and the citing page are withheld, the reconcile repair (files present) writes neither back, B's search finds nothing, a clean page goes in ($afterInit / $afterRec; $searchG)"
     $wlog += "[revert] $(& $run (Join-Path $dockerDir 'revert-report-isolation.sql') 'ri-rv2.sql')"

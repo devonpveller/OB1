@@ -379,12 +379,50 @@ BEGIN
     SELECT v_batch, v_ids[1], 'public.threads', 'id', 't', to_jsonb(t) || jsonb_build_object('_minted', rt.minted)
       FROM _ri_threads rt JOIN public.threads t ON t.id = rt.id;
     GET DIAGNOSTICS v_threads = ROW_COUNT;
-    -- the shared sources labelled with a minted thread's old name: archived, relabelled below
+    -- the shared sources' notebook labels (round 7, tester attempt 6 shape tR: a user renamed a minted notebook, so its
+    -- web sources keep the FILING-time name, not the thread's current one). Relabelled by LINKAGE:
+    --   * every name a tied thread ever carried that the stack recorded - each tied job's curator thread_name, and its
+    --     name now (archived above) - labels a source that is relabelled wherever it is;
+    --   * every source LINKED to a tied thread (thread_sources) or filed by a tied job (its sessions' sources) that carries
+    --     ANY notebook label is relabelled, matched to a known name or not.
+    CREATE TEMP TABLE _ri_tjobs ON COMMIT DROP AS
+    SELECT DISTINCT t.id AS thread_id, y.job_id FROM (
+        SELECT (j.result -> 'curator' ->> 'thread_id') AS tid, j.id AS job_id FROM public.research_jobs j
+         WHERE j.id IN (SELECT l.job_id FROM _ri_links l WHERE l.idea_hit AND l.job_id IS NOT NULL AND l.source_id = ANY(v_ids))
+        UNION ALL
+        SELECT e.payload ->> 'thread_id', e.job_id FROM public.research_job_events e
+         WHERE e.type = 'filed'
+           AND (e.job_id IN (SELECT l.job_id FROM _ri_links l WHERE l.idea_hit AND l.job_id IS NOT NULL AND l.source_id = ANY(v_ids))
+                OR e.payload ->> 'synthesis_id' IN (SELECT x::text FROM unnest(v_ids) x))) y
+      JOIN public.threads t ON t.id::text = y.tid
+     WHERE t.id IN (SELECT id FROM _ri_threads);
+    CREATE TEMP TABLE _ri_names ON COMMIT DROP AS
+    SELECT DISTINCT tj.thread_id, j.result -> 'curator' ->> 'thread_name' AS name
+      FROM _ri_tjobs tj JOIN public.research_jobs j ON j.id = tj.job_id
+     WHERE coalesce(j.result -> 'curator' ->> 'thread_name', '') <> ''
+    UNION
+    SELECT t.id, t.name FROM public.threads t WHERE t.id IN (SELECT id FROM _ri_threads);
+    CREATE TEMP TABLE _ri_relabel ON COMMIT DROP AS
+    SELECT DISTINCT ON (s.id) s.id AS source_id, x.thread_id
+      FROM (SELECT ts.source_id, ts.thread_id FROM public.thread_sources ts WHERE ts.thread_id IN (SELECT id FROM _ri_threads)
+            UNION ALL
+            SELECT ss.source_id, tj.thread_id FROM _ri_tjobs tj
+              JOIN public.research_job_events e ON e.job_id = tj.job_id AND e.type = 'filed'
+              JOIN public.session_sources ss ON ss.session_id::text = e.payload ->> 'session_id'
+            UNION ALL
+            SELECT ss.source_id, tj.thread_id FROM _ri_tjobs tj
+              JOIN public.research_jobs j ON j.id = tj.job_id
+              JOIN public.session_sources ss ON ss.session_id = j.session_id
+            UNION ALL
+            SELECT s2.id, n.thread_id FROM _ri_names n JOIN public.sources s2 ON s2.notebook = n.name) x
+      JOIN public.sources s ON s.id = x.source_id
+     WHERE coalesce(s.notebook, '') <> ''
+     ORDER BY s.id, x.thread_id;
     INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
     SELECT v_batch, v_ids[1], 'public.sources', 'notebook', 'b',
-           jsonb_build_object('id', s.id, 'notebook', s.notebook, 'relabelled_to', 'Research thread ' || left(t.id::text, 8))
-      FROM _ri_threads rt JOIN public.threads t ON t.id = rt.id AND rt.minted
-      JOIN public.sources s ON s.notebook = t.name;
+           jsonb_build_object('id', s.id, 'notebook', s.notebook, 'relabelled_to', 'Research thread ' || left(rl.thread_id::text, 8))
+      FROM _ri_relabel rl JOIN public.sources s ON s.id = rl.source_id
+     WHERE s.notebook IS DISTINCT FROM 'Research thread ' || left(rl.thread_id::text, 8);
     UPDATE public.threads t
        SET description = (SELECT 'Shared sources: ' || string_agg(x.title, '; ' ORDER BY x.title)
                             FROM (SELECT DISTINCT s.title FROM public.thread_sources ts JOIN public.sources s ON s.id = ts.source_id
@@ -411,8 +449,11 @@ BEGIN
         OR NOT (a.row_data ->> '_minted')::boolean
         OR (coalesce(a.row_data ->> 'description', '') <> '' AND t.description IS NOT DISTINCT FROM a.row_data ->> 'description')
         OR t.embedding IS NOT NULL;
-    v_n := v_n + (SELECT count(*) FROM public.sources s JOIN public.research_report_isolation_archive a
-                     ON a.batch = v_batch AND a.action = 't' AND (a.row_data ->> '_minted')::boolean AND s.notebook = a.row_data ->> 'name');
+    -- round 7: the same linkage set - no linked / labelled source keeps a label other than its thread's new name, and no
+    -- source anywhere still carries a name a tied thread carried
+    v_n := v_n + (SELECT count(*) FROM _ri_relabel rl JOIN public.sources s ON s.id = rl.source_id
+                   WHERE s.notebook IS DISTINCT FROM 'Research thread ' || left(rl.thread_id::text, 8))
+               + (SELECT count(*) FROM public.sources s JOIN _ri_names n ON s.notebook = n.name);
     IF v_threads <> (SELECT count(*) FROM _ri_threads) OR v_n <> 0 THEN
         RAISE EXCEPTION 'rw-report-isolation: % thread(s) the moved reports named or described, % archived, % still carry it; nothing moved',
             (SELECT count(*) FROM _ri_threads), v_threads, v_n;

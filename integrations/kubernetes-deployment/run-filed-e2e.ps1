@@ -196,7 +196,7 @@ try {
       $null = Dk cp $b390 "${db}:/tmp/ri-base-init.sql"
       $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f /tmp/ri-base-init.sql
       $bst = RiState; $drill += "[the base's 390] exit $($script:rc)`n    state: $bst"
-      Check ((RiGet $bst 'shared_idea') -eq '0' -and (RiGet $bst 'thread_report_text') -ne '0') "RED: the base's 390 moves the syntheses but leaves their text in the threads (thread_report_text=$(RiGet $bst 'thread_report_text'), notebook_report_text=$(RiGet $bst 'notebook_report_text'))"
+      Check ((RiGet $bst 'shared_idea') -eq '0' -and ((RiGet $bst 'thread_report_text') -ne '0' -or (RiGet $bst 'notebook_report_text') -ne '0')) "RED: the base's 390 moves the syntheses but leaves their text in the threads or the notebook labels (thread_report_text=$(RiGet $bst 'thread_report_text'), notebook_report_text=$(RiGet $bst 'notebook_report_text'))"
     }
   } else {
     $f390 = Join-Path $dockerDir 'init-report-isolation.sql'; $r390 = Join-Path $dockerDir 'revert-report-isolation.sql'
@@ -246,7 +246,7 @@ try {
       if ($s[0] -like 'init*') { $states["$($s[0])-note"] = $note } else { $states["$($s[0])-note"] = $note }
     }
     $mv = $states['init']
-    Check ($states['init-note'] -match 'moved 8 idea-job syntheses' -and $states['init-note'] -match 'non-idea job: 1\)') "drill: init moves the 8 idea-job syntheses and leaves the 1 a non-idea job also filed shared ($($states['init-note']))"
+    Check ($states['init-note'] -match 'moved 9 idea-job syntheses' -and $states['init-note'] -match 'non-idea job: 1\)') "drill: init moves the 9 idea-job syntheses and leaves the 1 a non-idea job also filed shared ($($states['init-note']))"
     Check ((RiGet $mv 'shared_idea') -eq '0' -and (RiGet $mv 'deps_idea') -eq '0' -and (RiGet $mv 'claims_on_idea_reports') -eq '0') "drill: after init no idea-job synthesis, dependent or claim pointer is left in the shared tables ($mv)"
     Check ((RiGet $mv 'shared_other') -eq '3' -and (RiGet $mv 'deps_other') -eq (RiGet $before 'deps_other')) 'drill: the non-idea and the conflicted synthesis (and their dependents) are untouched'
     Check ((RiGet $mv 'claims_present') -eq '3' -and (RiGet $mv 'claim_edge_c1') -eq '1') 'drill: the claims stay (shared), with their source edges'
@@ -255,9 +255,9 @@ try {
     Check ((RiGet $before 'wiki_report_pages') -eq '2' -and (RiGet $mv 'wiki_report_pages') -eq '0' -and (RiGet $mv 'guard') -eq '1') 'drill: the moved report''s leaf and the entity page citing it are withheld, the guard is on'
     Check ((RiGet $mv 'entity_ts') -ne (RiGet $before 'entity_ts')) 'drill: the cited entity is bumped (its page recompiles from what is still shared)'
     # round 3 (tester attempt 2 finding A): the threads the reports named or described
-    Check ((RiGet $before 'thread_report_text') -eq '8' -and (RiGet $before 'notebook_report_text') -eq '3' -and [int](RiGet $before 'wiki_report_text') -ge 2) "drill: seeded - a thread named and described from s1, an existing thread re-described from s2, a source labelled with the minted name, their wiki pages ($(RiGet $before 'thread_report_text') / $(RiGet $before 'notebook_report_text') / $(RiGet $before 'wiki_report_text'))"
+    Check ((RiGet $before 'thread_report_text') -eq '8' -and (RiGet $before 'notebook_report_text') -eq '5' -and [int](RiGet $before 'wiki_report_text') -ge 2) "drill: seeded - a thread named and described from s1, an existing thread re-described from s2, a source labelled with the minted name, their wiki pages ($(RiGet $before 'thread_report_text') / $(RiGet $before 'notebook_report_text') / $(RiGet $before 'wiki_report_text'))"
     Check ((RiGet $mv 'thread_report_text') -eq '0' -and (RiGet $mv 'notebook_report_text') -eq '0' -and (RiGet $mv 'wiki_report_text') -eq '0' -and (RiGet $mv 'thread_embeddings') -eq '0') "drill: after init no thread name, description, slug or embedding, no notebook label and no wiki page carries a moved report's text"
-    Check ((RiGet $mv 'tnew_desc') -eq 'Shared_sources:_drill_web' -and (RiGet $mv 'te_name') -match '^Research_thread_' -and (RiGet $mv 'tu_name') -eq 'Drill_untied_thread' -and $states['init-note'] -match '8 thread\(s\) re-described \(8 minted from a report\)') "drill: the minted thread is re-described from its remaining shared source only ($(RiGet $mv 'tnew_desc')); 8 threads, ALL treated as minted (round 6): the 'new' one, tA, tB, tC, tD, tF (named only by an errored job's filed event), the old tied thread tE ($(RiGet $mv 'te_name')) and the thread reached only through a link; the untied old thread keeps its name ($(RiGet $mv 'tu_name'))"
+    Check ((RiGet $mv 'tnew_desc') -eq 'Shared_sources:_drill_web' -and (RiGet $mv 'te_name') -match '^Research_thread_' -and (RiGet $mv 'tu_name') -eq 'Drill_untied_thread' -and (RiGet $mv 'tr_labels') -eq 'neutral,neutral,neutral' -and $states['init-note'] -match '9 thread\(s\) re-described \(9 minted from a report\)') "drill: the minted thread is re-described from its remaining shared source only ($(RiGet $mv 'tnew_desc')); 9 threads, ALL treated as minted (round 6; round 7 adds tR, the notebook a user renamed - its sources relabelled by linkage: $(RiGet $mv 'tr_labels')): the 'new' one, tA, tB, tC, tD, tF (named only by an errored job's filed event), the old tied thread tE ($(RiGet $mv 'te_name')) and the thread reached only through a link; the untied old thread keeps its name ($(RiGet $mv 'tu_name'))"
 
     Check ([int](RiGet $mv 'archive_open') -ge 7 -and (RiGet $mv 'archive_app_read') -eq 'no') "drill: every moved row archived first ($(RiGet $mv 'archive_open') rows), the archive unreadable by service_role"
     Check ($states['init again-note'] -match 'moved 0 idea-job syntheses' -and (RiGet $states['init again'] 'private') -eq '2' -and (RiGet $states['init again'] 'archive_open') -eq (RiGet $mv 'archive_open')) 'drill: a second init moves nothing and changes nothing'
@@ -266,10 +266,10 @@ try {
     Check ((RiGet $rv 'snapshot') -eq $snap0 -and (RiGet $rv 'shared_idea') -eq '2' -and (RiGet $rv 'deps_idea') -eq (RiGet $before 'deps_idea')) "drill: after revert the rows, their dependents and the claim pointers are byte-identical to before (snapshot $(RiGet $rv 'snapshot') vs $snap0)"
     Check ((RiGet $rv 'dossier_i1') -eq 's1' -and (RiGet $rv 'private') -eq '0' -and (RiGet $rv 'fn') -eq '0' -and (RiGet $rv 'guard') -eq '0' -and (RiGet $rv 'archive_open') -eq '0') 'drill: the dossier pointer is back, the private copies, the rule and the guard are gone, the archive is marked restored'
     Check ((RiGet $rv 'wiki_report_pages') -eq '2' -and (RiGet $rv 'entity_ts') -eq (RiGet $before 'entity_ts')) 'drill: the withheld pages are back, the entity''s updated_at too (the snapshot covers the whole claim, idea, entity and page rows)'
-    Check ((RiGet $rv 'thread_report_text') -eq '8' -and (RiGet $rv 'te_name') -eq 'Drill_thread' -and (RiGet $rv 'notebook_report_text') -eq '3') 'drill: the revert gives the threads (whole rows, in the snapshot) and the notebook label back'
+    Check ((RiGet $rv 'thread_report_text') -eq '8' -and (RiGet $rv 'te_name') -eq 'Drill_thread' -and (RiGet $rv 'notebook_report_text') -eq '5' -and (RiGet $rv 'tr_labels') -eq 'kept,kept,kept') 'drill: the revert gives the threads (whole rows, in the snapshot) and the notebook label back'
     Check ($states['revert again-note'] -match '0 batch\(es\) restored' -and (RiGet $states['revert again'] 'snapshot') -eq $snap0) 'drill: a second revert restores nothing and changes nothing'
     $ag = $states['init after revert']
-    Check ($states['init after revert-note'] -match 'moved 8 idea-job syntheses' -and (RiGet $ag 'shared_idea') -eq '0' -and (RiGet $ag 'private') -eq '2' -and (RiGet $ag 'fn') -eq '1') 'drill: init after the revert moves them again'
+    Check ($states['init after revert-note'] -match 'moved 9 idea-job syntheses' -and (RiGet $ag 'shared_idea') -eq '0' -and (RiGet $ag 'private') -eq '2' -and (RiGet $ag 'fn') -eq '1') 'drill: init after the revert moves them again'
   }
   Save 'report-isolation-drill.txt' ($drill -join "`n")
   foreach ($l in $drill) { Write-Host "    $l" }

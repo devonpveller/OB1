@@ -27,11 +27,13 @@ UNION ALL SELECT 'guard=' || count(*) FROM pg_trigger WHERE tgname = 'trg_report
 -- round 3: any thread field, any shared source's notebook label, any wiki page carrying a moved report's text
 UNION ALL SELECT 'thread_report_text=' || count(*) FROM public.threads t
            WHERE t.name LIKE '%DrillReport%' OR coalesce(t.description, '') LIKE '%DrillReport%' OR coalesce(t.slug, '') LIKE '%drillreport%'
-UNION ALL SELECT 'thread_embeddings=' || count(t.embedding) FROM public.threads t WHERE t.id::text IN (SELECT id FROM d WHERE name IN ('tnew', 'thread', 'tlink', 'ta', 'tb', 'tc', 'td', 'tf', 'tu'))
+UNION ALL SELECT 'thread_embeddings=' || count(t.embedding) FROM public.threads t WHERE t.id::text IN (SELECT id FROM d WHERE name IN ('tnew', 'thread', 'tlink', 'ta', 'tb', 'tc', 'td', 'tf', 'tu', 'tr'))
 UNION ALL SELECT 'notebook_report_text=' || count(*) FROM public.sources s WHERE coalesce(s.notebook, '') LIKE '%DrillReport%'
 UNION ALL SELECT 'wiki_report_text=' || count(*) FROM public.wiki_pages w WHERE w.body LIKE '%DrillReport%' OR w.title LIKE '%DrillReport%'
 UNION ALL SELECT 'te_name=' || (SELECT replace(t.name, ' ', '_') FROM public.threads t WHERE t.id::text = (SELECT id FROM d WHERE name = 'thread'))
 UNION ALL SELECT 'tu_name=' || (SELECT replace(t.name, ' ', '_') FROM public.threads t WHERE t.id::text = (SELECT id FROM d WHERE name = 'tu'))
+UNION ALL SELECT 'tr_labels=' || coalesce((SELECT string_agg(CASE WHEN s.notebook LIKE 'Research thread %' THEN 'neutral' ELSE 'kept' END, ',' ORDER BY s.url)
+                                    FROM public.sources s WHERE s.id::text IN (SELECT id FROM d WHERE name IN ('w12', 'w13', 'w14'))), 'none')
 UNION ALL SELECT 'tnew_desc=' || coalesce(replace((SELECT t.description FROM public.threads t WHERE t.id::text = (SELECT id FROM d WHERE name = 'tnew')), ' ', '_'), 'null')
 UNION ALL SELECT 'wiki_report_pages=' || count(*) FROM public.wiki_pages w
            WHERE w.slug IN (SELECT 'content/source/' || id FROM d WHERE name = 's1') OR w.slug IN (SELECT id FROM d WHERE name = 'entity_page')
@@ -48,8 +50,8 @@ UNION ALL SELECT 'snapshot=' || md5(coalesce((SELECT string_agg(to_jsonb(s)::tex
     || coalesce((SELECT string_agg(to_jsonb(x)::text, '|' ORDER BY x.source_id) FROM public.source_entities x WHERE x.source_id::text IN (SELECT id FROM d WHERE name IN ('s1', 's2'))), '')
     || coalesce((SELECT to_jsonb(w)::text FROM public.wiki_pages w WHERE w.slug = (SELECT id FROM d WHERE name = 'entity_page')), '')
     -- round 3: the whole thread rows, the relabelled web source, every notebook hub page
-    || coalesce((SELECT string_agg(to_jsonb(t)::text, '|' ORDER BY t.id) FROM public.threads t WHERE t.id::text IN (SELECT id FROM d WHERE name IN ('tnew', 'thread', 'tlink', 'ta', 'tb', 'tc', 'td', 'tf', 'tu'))), '')
-    || coalesce((SELECT to_jsonb(s)::text FROM public.sources s WHERE s.id::text = (SELECT id FROM d WHERE name = 'w')), '')
+    || coalesce((SELECT string_agg(to_jsonb(t)::text, '|' ORDER BY t.id) FROM public.threads t WHERE t.id::text IN (SELECT id FROM d WHERE name IN ('tnew', 'thread', 'tlink', 'ta', 'tb', 'tc', 'td', 'tf', 'tu', 'tr'))), '')
+    || coalesce((SELECT string_agg(to_jsonb(s)::text, '|' ORDER BY s.id) FROM public.sources s WHERE s.id::text IN (SELECT id FROM d WHERE name IN ('w', 'w12', 'w13', 'w14'))), '')
     || coalesce((SELECT string_agg(to_jsonb(w)::text, '|' ORDER BY w.slug) FROM public.wiki_pages w WHERE w.slug LIKE 'notebooks/%'), ''));
 -- the private plane (absent before slot 390 first ran)
 SELECT CASE WHEN to_regclass('public.research_private_reports') IS NULL THEN 'private=absent' END

@@ -22,6 +22,8 @@ DECLARE
     v_i8 UUID; v_i9 UUID; v_j8 UUID; v_j9 UUID; v_s8 UUID := gen_random_uuid(); v_s9 UUID := gen_random_uuid(); v_w8 UUID := gen_random_uuid();
     v_tc UUID; v_td UUID;
     v_i10 UUID; v_j10 UUID; v_j11 UUID; v_s10 UUID := gen_random_uuid(); v_s11 UUID := gen_random_uuid(); v_tf UUID; v_tu UUID;
+    v_i12 UUID; v_j12 UUID; v_s12 UUID := gen_random_uuid(); v_w12 UUID := gen_random_uuid(); v_w13 UUID := gen_random_uuid();
+    v_w14 UUID := gen_random_uuid(); v_tr UUID;
 BEGIN
     v_i1 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea one', 'drill idea one statement', NULL, NULL);
     v_i2 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea two', 'drill idea two statement', NULL, NULL);
@@ -150,6 +152,23 @@ BEGIN
     VALUES (v_j10, v_j10, 'filed', 'due_process', jsonb_build_object('synthesis_id', v_s10::text, 'research_key', 'rk-drill-10', 'thread_id', v_tf::text));
     UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_tf::text, 'thread_decision', 'existing',
                                                              'persist', jsonb_build_object('synthesis_id', v_s11::text))) WHERE id = v_j11;
+    -- round 7 (tester attempt 6, tR): the curator minted 'MintedName DrillReportTwelve' (its answer records the name), its
+    -- web sources were labelled with it, and the USER then renamed the notebook - the thread's name is no longer the
+    -- label. w12: linked, labelled the filing-time name; w13: linked, some other label; w14: NOT linked, the old name
+    v_i12 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea twelve', 'drill idea twelve statement', NULL, NULL);
+    SELECT id INTO v_j12 FROM public.research_jobs WHERE refinery_id = v_i12 AND branch_kind = 'idea';
+    INSERT INTO public.sources (id, url, title, content, content_type, research_key, notebook, metadata) VALUES
+      (v_s12, NULL, 'Drill idea report twelve', 'DrillReportTwelve text', 'research_synthesis', 'rk-drill-12', NULL, '{"claim":"DrillReportTwelve claim"}'),
+      (v_w12, 'https://example.org/drill-web-twelve', 'drill web twelve', 'drill web twelve text', 'web_article', NULL, 'MintedName DrillReportTwelve', '{}'),
+      (v_w13, 'https://example.org/drill-web-thirteen', 'drill web thirteen', 'drill web thirteen text', 'web_article', NULL, 'Some other label', '{}'),
+      (v_w14, 'https://example.org/drill-web-fourteen', 'drill web fourteen', 'drill web fourteen text', 'web_article', NULL, 'MintedName DrillReportTwelve', '{}');
+    INSERT INTO public.threads (name, status) VALUES ('User renamed notebook', 'active') RETURNING id INTO v_tr;
+    PERFORM public.link_source_to_thread(v_tr, v_s12, 'automatic', NULL, 'confirmed');
+    PERFORM public.link_source_to_thread(v_tr, v_w12, 'automatic', NULL, 'confirmed');
+    PERFORM public.link_source_to_thread(v_tr, v_w13, 'automatic', NULL, 'confirmed');
+    UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_tr::text, 'thread_decision', 'new',
+                                                             'thread_name', 'MintedName DrillReportTwelve',
+                                                             'persist', jsonb_build_object('synthesis_id', v_s12::text))) WHERE id = v_j12;
     -- an OLD thread no moved job is tied to (linked only to the shared s3): it keeps its name
     INSERT INTO public.threads (name, status, created_at) VALUES ('Drill untied thread', 'active', now() - interval '1 day') RETURNING id INTO v_tu;
     PERFORM public.link_source_to_thread(v_tu, v_s3, 'automatic', NULL, 'confirmed');
@@ -160,7 +179,7 @@ BEGIN
 
     INSERT INTO public._ri_drill (name, id) VALUES ('s1', v_s1), ('s2', v_s2), ('s3', v_s3), ('s4', v_s4), ('w', v_w), ('i1', v_i1), ('i2', v_i2),
       ('j1', v_j1), ('j2', v_j2), ('c1', v_c1), ('c2', v_c2), ('c3', v_c3), ('thread', v_thread), ('session', v_sess),
-      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8)), ('tnew', v_tnew::text), ('tlink', v_tlink::text), ('ta', v_ta::text), ('tb', v_tb::text), ('tc', v_tc::text), ('td', v_td::text), ('tf', v_tf::text), ('tu', v_tu::text)
+      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8)), ('tnew', v_tnew::text), ('tlink', v_tlink::text), ('ta', v_ta::text), ('tb', v_tb::text), ('tc', v_tc::text), ('td', v_td::text), ('tf', v_tf::text), ('tu', v_tu::text), ('tr', v_tr::text), ('w12', v_w12::text), ('w13', v_w13::text), ('w14', v_w14::text)
     ON CONFLICT (name) DO UPDATE SET id = EXCLUDED.id;
 END $$;
 COMMIT;
