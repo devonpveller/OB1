@@ -13,7 +13,8 @@ const signIn = { ...single, header: "", signIn: true };
 
 Deno.test("settings admin: single-user mode = the default subject; another header user, a service or anonymous may not", () => {
   assert(settingsAdmin(who({}), single));
-  assert(settingsAdmin(who({ kind: "header" }), single), "the header naming the default subject is that subject");
+  // rw-privacy-hardening (400-A4): the header is the edge's word, not the operator's - a header request is a header user even when it names the default subject
+  assertEquals(settingsAdmin(who({ kind: "header" }), single), false, "a header naming the default subject is not the admin");
   assertEquals(settingsAdmin(who({ sub: "lab-bee", kind: "header" }), single), false);
   assertEquals(settingsAdmin(who({ sub: "service:internal", kind: "service" }), single), false);
   assertEquals(settingsAdmin(who({ sub: "anonymous:", kind: "anonymous" }), single), false);
