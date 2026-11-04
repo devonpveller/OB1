@@ -249,6 +249,23 @@ DROP FUNCTION IF EXISTS public.idea_privacy_norm(TEXT);
 DROP TABLE IF EXISTS public.idea_privacy_shingles;
 DROP TABLE IF EXISTS public.idea_privacy_whole;
 
+-- rw-privacy-hardening (slot 430): the rule below is the one slot 430 installs on a database that ran this file before it
+-- (case-insensitive, %2F decoded; a withheld row says so in a response header; a refused note names neither guard).
+-- Kept identical here so that a fresh volume, and a re-run of this file after 430, do not put the older bodies back.
+CREATE OR REPLACE FUNCTION public.idea_privacy_linked_thought_ids(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
+RETURNS TEXT[]
+LANGUAGE sql IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+    SELECT coalesce(array_agg(DISTINCT m[1]), ARRAY[]::text[])
+      FROM regexp_matches(
+               regexp_replace(
+                   coalesce(p_slug, '') || ' ' || coalesce(p_title, '') || ' ' || coalesce(p_body, '') || ' ' || coalesce(p_links::text, ''),
+                   '%2[fF]', '/', 'g'),
+               '(?:^|[^[:alnum:]])thought/([0-9]+)(?![0-9])', 'gi') AS m;
+$$;
+REVOKE ALL ON FUNCTION public.idea_privacy_linked_thought_ids(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.idea_privacy_page_links_idea(p_slug TEXT, p_title TEXT, p_body TEXT, p_links JSONB)
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
@@ -257,10 +274,7 @@ SET search_path = public, pg_temp
 AS $$
     SELECT EXISTS (
         SELECT 1 FROM public.idea_thought_archive a
-         WHERE a.id::text IN (
-             SELECT m[1] FROM regexp_matches(
-                 coalesce(p_slug, '') || ' ' || coalesce(p_title, '') || ' ' || coalesce(p_body, '') || ' ' || coalesce(p_links::text, ''),
-                 '(?:^|[^[:alnum:]])thought/([0-9]+)(?![0-9])', 'g') AS m));
+         WHERE a.id::text = ANY (public.idea_privacy_linked_thought_ids(p_slug, p_title, p_body, p_links)));
 $$;
 REVOKE ALL ON FUNCTION public.idea_privacy_page_links_idea(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC;
 
@@ -271,6 +285,19 @@ REVOKE ALL ON FUNCTION public.idea_privacy_page_links_idea(TEXT, TEXT, TEXT, JSO
 -- whole batch; the wiki writer learns it was withheld - recipes/_shared/wiki-pages.mjs - and leaves its file out; an
 -- UPDATE leaves the row as it was); a NOTE is a person's own writing saved through the workbench, so it is refused out
 -- loud instead
+CREATE OR REPLACE FUNCTION public.wiki_guard_mark_withheld()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE n INT;
+BEGIN
+    n := coalesce(nullif(current_setting('ob.wiki_withheld', true), ''), '0')::int + 1;
+    PERFORM set_config('ob.wiki_withheld', n::text, true);
+    PERFORM set_config('response.headers', json_build_array(json_build_object('X-Wiki-Withheld', n::text))::text, true);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.wiki_guard_mark_withheld() FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.trg_idea_privacy_wiki_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -280,8 +307,9 @@ AS $$
 BEGIN
     IF public.idea_privacy_page_links_idea(NEW.slug, NEW.title, NEW.body, NEW.links) THEN
         IF NEW.page_class = 'note' THEN
-            RAISE EXCEPTION 'wiki_pages: this page links an idea, and an idea is private to its owner' USING ERRCODE = '42501';
+            RAISE EXCEPTION 'wiki_pages: this page cannot be saved' USING ERRCODE = '42501';
         END IF;
+        PERFORM public.wiki_guard_mark_withheld();
         RETURN NULL;
     END IF;
     RETURN NEW;

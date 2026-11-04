@@ -197,6 +197,20 @@ REVOKE ALL ON FUNCTION public.report_isolation_page_shows_report(TEXT, TEXT, JSO
 -- a compiled or reconciled page is skipped silently (RETURN NULL: one row must not fail the compile's or the
 -- reconcile's whole batch; the reconcile then reports the slug as drift); a NOTE is a person's own writing saved
 -- through the workbench, so it is refused out loud
+-- rw-privacy-hardening (slot 430): identical to the body slot 430 installs (see init-privacy-hardening.sql)
+CREATE OR REPLACE FUNCTION public.wiki_guard_mark_withheld()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE n INT;
+BEGIN
+    n := coalesce(nullif(current_setting('ob.wiki_withheld', true), ''), '0')::int + 1;
+    PERFORM set_config('ob.wiki_withheld', n::text, true);
+    PERFORM set_config('response.headers', json_build_array(json_build_object('X-Wiki-Withheld', n::text))::text, true);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.wiki_guard_mark_withheld() FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.trg_report_isolation_wiki_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -206,8 +220,9 @@ AS $$
 BEGIN
     IF public.report_isolation_page_shows_report(NEW.slug, NEW.body, NEW.links) THEN
         IF NEW.page_class = 'note' THEN
-            RAISE EXCEPTION 'wiki_pages: this page cites an idea''s private research report' USING ERRCODE = '42501';
+            RAISE EXCEPTION 'wiki_pages: this page cannot be saved' USING ERRCODE = '42501';
         END IF;
+        PERFORM public.wiki_guard_mark_withheld();
         RETURN NULL;
     END IF;
     RETURN NEW;

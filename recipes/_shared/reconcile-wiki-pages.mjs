@@ -370,6 +370,7 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
     try {
       const rep = await upsertWikiPagesReport(part);
       repaired.push(...rep.written);   // a withheld row is not repaired (and is remembered: see leaveOutHeld)
+      failedWrites.push(...(rep.hidden || []).map((s) => ({ slug: s, error: "not returned and not reported withheld by a guard (row-level security?)" })));
     } catch (e) {
       failedWrites.push(...part.map((r) => ({ slug: r.slug, error: String(e?.message || e) })));
     }

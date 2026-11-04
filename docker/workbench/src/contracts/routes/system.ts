@@ -5,6 +5,9 @@ import { type Identity, identityConfig, identityOf } from "../../middleware/iden
 export function settingsAdmin(who: Identity, cfg = identityConfig()): boolean {
   if (who.kind === "service" || who.kind === "anonymous") return false;
   if (who.admin === true) return true;
+  // rw-privacy-hardening (400-A4): the default subject is the admin of single-user mode. A request that NAMES that subject in
+  // the identity header (header mode) is a header user like any other - the header is the edge's word, not the operator's.
+  if (who.kind === "header") return false;
   return !cfg.signIn && who.sub === cfg.defaultSub;
 }
 import { createRoute, z } from "../deps.ts";

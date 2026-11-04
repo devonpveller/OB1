@@ -155,3 +155,17 @@ Deno.test("settingsAdmin: with sign-in off the default subject is the admin (sin
   assertEquals(settingsAdmin(id({ sub: "bob", kind: "header" }), cfg), false);
   assertEquals(settingsAdmin(id({ sub: "service:digest", kind: "service" }), cfg), false);
 });
+
+Deno.test("settingsAdmin (400-A4): in header mode a header equal to WORKSPACE_DEFAULT_SUB is a header user, not the admin; no header is still the default subject", async () => {
+  const env: Record<string, string> = { WORKSPACE_IDENTITY_HEADER: "X-Test-Sub", WORKSPACE_DEFAULT_SUB: "owner-sub" };
+  const cfg = identityConfig((k: string) => env[k]);
+  const { resolveIdentity } = await import("../middleware/identity.ts");
+  const named = await resolveIdentity((n) => (n.toLowerCase() === "x-test-sub" ? "owner-sub" : undefined), cfg);
+  assertEquals([named.kind, named.sub], ["header", "owner-sub"]);
+  assertEquals(settingsAdmin(named, cfg), false);
+  const other = await resolveIdentity((n) => (n.toLowerCase() === "x-test-sub" ? "bob" : undefined), cfg);
+  assertEquals(settingsAdmin(other, cfg), false);
+  const none = await resolveIdentity(() => undefined, cfg);
+  assertEquals([none.kind, none.sub], ["default", "owner-sub"]);
+  assertEquals(settingsAdmin(none, cfg), true);
+});
