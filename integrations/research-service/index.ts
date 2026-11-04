@@ -32,7 +32,7 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, parseServiceCallers, promptOwner, requestKindOf, resolveOrigin } from "./origin.ts";
-import { formDerivedRequest, insertDerivedJob, openHandback, parseDoorBody, parseProposals, PROPOSER_SYSTEM, proposerUser } from "./boundary.ts";
+import { formDerivedRequest, insertDerivedJob, openHandback, parseDoorBody, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
 import { canonicalLink } from "./boundary-gate.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
@@ -841,13 +841,22 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal, gate: SlotGate =
       : undefined;
     // rw-boundary-core: the job's request kind (slot 420). A derived job carries no seed content - the service
     // fetches its public links itself, now (plan 09 2.3); a missing column / row reads as non-derived (span filter on).
-    const requestKind = (await client.queryObject<{ request_kind: string }>(
-      `SELECT request_kind FROM research_jobs WHERE id = $1`, [jobId]).catch(() => ({ rows: [] as { request_kind: string }[] }))).rows[0]?.request_kind ?? "unclassified";
+    const kindRow = (await client.queryObject<{ request_kind: string; boundary: Record<string, unknown> | null }>(
+      `SELECT request_kind, boundary FROM research_jobs WHERE id = $1`, [jobId]).catch(() => ({ rows: [] as { request_kind: string; boundary: null }[] }))).rows[0];
+    const requestKind = kindRow?.request_kind ?? "unclassified";
     if (requestKind === "derived" && Array.isArray(options?.public_links) && !seedSources?.length) {
+      // round 2 (TF4): the run uses a page only if it is still the page the gate judged - the final URL is public again
+      // (canonical, not a private host or token path, a public address) and its hash equals the gate-time snapshot's
+      const snap = new Map(((kindRow?.boundary?.evidence ?? []) as Array<{ url?: string; sha256?: string }>).map((e) => [String(e.url), String(e.sha256)]));
       const fetched: Array<{ url: string; title: string; content: string }> = [];
       for (const u of (options.public_links as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 5)) {
         const r = await realDeps.fetchPage(u).catch(() => null);
-        if (r?.page) fetched.push({ url: u, title: r.page.title, content: r.page.content });
+        if (!r?.page) continue;
+        const fin = canonicalLink(r.finalUrl ?? u);
+        if (!("url" in fin) || !(await publicAddress(fin.url, { resolve: intakeResolve }))) { console.warn(`[job ${jobId}] a public link left the public web at run time - not used`); continue; }
+        if (snap.get(u) !== await sha256Hex(`${r.page.title}
+${r.page.content}`)) { console.warn(`[job ${jobId}] a public link changed since the gate judged it - not used`); continue; }
+        fetched.push({ url: u, title: r.page.title, content: r.page.content });
       }
       if (fetched.length) seedSources = fetched;
     }
@@ -1336,7 +1345,10 @@ Deno.serve({ port: PORT }, async (req) => {
     const parsed = parseDoorBody(raw);
     if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
     const { item, purpose, deliver } = parsed;
-    const verdict = await formDerivedRequest(item, purpose, {
+    // round 2 (TF5): whatever the item holds, the door answers a fixed code - never an unhandled 500
+    let verdict: Awaited<ReturnType<typeof formDerivedRequest>>;
+    try {
+    verdict = await formDerivedRequest(item, purpose, {
       propose: async (it, ev) => parseProposals(await chat(PROPOSER_SYSTEM, proposerUser(it, ev),
         { json: true, nothink: true, tags: ["request-boundary"], signal: AbortSignal.timeout(BOUNDARY_PROPOSE_TIMEOUT_MS) })),
       fetchPublic: async (u) => {
@@ -1353,7 +1365,13 @@ Deno.serve({ port: PORT }, async (req) => {
           return r.rows.flatMap((x) => [x.name ?? "", x.email ?? ""]);
         } catch { return []; } finally { c.release(); }
       },
+      // round 2 (TF6): the same resolver the intake fetch uses (DoH through the proxy, or the system resolver on direct egress)
+      resolve: intakeResolve,
     });
+    } catch (e) {
+      console.error(`[boundary] forming the request failed (${(e as Error).name})`);
+      return Response.json({ error: "boundary_failed" }, { status: 422 });
+    }
     if (!verdict.ok && verdict.refusal === "no_owner") return Response.json({ refused: "no_owner", handback_id: null }, { status: 200 });
     const c = await pool.connect();
     try {

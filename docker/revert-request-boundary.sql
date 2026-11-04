@@ -154,6 +154,8 @@ BEGIN
     END IF;
 END $$;
 DROP FUNCTION IF EXISTS public.trg_research_prompts_boundary();
+DROP FUNCTION IF EXISTS public.request_boundary_options_ok(JSONB, BOOLEAN);
+DROP FUNCTION IF EXISTS public.request_boundary_stamp_ok(JSONB);
 DROP FUNCTION IF EXISTS public.handback_open(TEXT, TEXT, TEXT, INT, TEXT, UUID, TEXT, JSONB, JSONB, JSONB);
 DROP FUNCTION IF EXISTS public.handback_pending(TEXT, INT);
 DROP FUNCTION IF EXISTS public.handback_claim(UUID, UUID, TEXT, JSONB, JSONB);

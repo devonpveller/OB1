@@ -54,6 +54,7 @@ function deps(mode: keyof typeof proposers): BoundaryDeps & { fetched: string[] 
     propose: (it) => proposers[mode](it),
     fetchPublic: (u) => { fetched.push(u); return Promise.resolve(PAGES[u] ?? null); },
     identity: () => Promise.resolve([OWNER.name, OWNER.email]),
+    resolve: () => Promise.resolve(["93.184.216.34"]),   // a public address (round 2: every link's host is resolved)
   };
 }
 

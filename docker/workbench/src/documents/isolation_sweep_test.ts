@@ -312,7 +312,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
       [bSub, bnd.inlet, bnd.view, bnd.deliver]))[0].id;
     derivedJob = (await sql<{ id: string }>(
       `INSERT INTO public.research_jobs (status, origin, caller, query, anchor, request_kind, boundary, options, finished_at)
-       VALUES ('done', 'manual', 'boundary', $1, $1, 'derived', '{"version":"pd0a-1","lexicon":"x","verdict_id":"y"}'::jsonb, '{"public_links":[]}'::jsonb, now())
+       VALUES ('done', 'manual', 'boundary', $1, $1, 'derived', '{"version":"pd0a-2","lexicon":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verdict_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'::jsonb, '{"public_links":[]}'::jsonb, now())
        RETURNING id::text AS id`, [`What is publicly known about ${bnd.pub}?`]))[0].id;
   }
   const svcJob = (await sql<{ id: string }>(

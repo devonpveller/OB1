@@ -12,8 +12,12 @@
 #   4. one database (the chain only; ob_app_memory created as production has it: non-superuser, in service_role),
 #      then boundary.e2e.test.ts in the test image: the guard, the report-owner rule, the hand-back, and THE DOOR over
 #      HTTP - the REAL index.ts against the database, a stub gateway on the LiteLLM alias with a HOSTILE proposer,
-#      a stub search gate, stub public pages on the lab's own names (--add-host news.example.org / blog.example.org
-#      -> 127.0.0.1 inside the test container) and a stub curator; then the second user's reads and THE SWEEP
+#      a stub search gate, stub public pages in their own container (network aliases news.example.org /
+#      blog.example.org; round 2, TF6: the lab network is a DOCUMENTATION range - 203.0.113.0/24, else 198.51.100.0/24 -
+#      so those names resolve to an address the boundary's resolver judges public, while the network stays --internal)
+#      and a stub curator; then the second user's reads and THE SWEEP
+#   4b. round 2: the tester's COPY probes (as ob_app_memory and as the superuser) and TF2 through a REAL PostgREST
+#      configured as compose (anon = service_role, no token): every slot-420 function and table refused
 #   5. the slot-420 drill by psql: revert, revert again, init, init again, revert, revert again, init - md5 of every
 #      row of the touched tables (research_jobs, research_prompts) and the rule's definition compared to slot 390's
 #      text; plus the lock_timeout probe (a held research_jobs lock stops init after ~10s, nothing applied)
@@ -29,6 +33,7 @@ param(
   [string]$Evidence = '',
   [string]$Subnet = '',
   [string]$SubnetBase = '10.246',
+  [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [switch]$KeepImage
 )
 $ErrorActionPreference = 'Continue'
@@ -71,7 +76,9 @@ function Test-SubnetAllowed([string]$s) {
 }
 function New-PinnedNetwork([string]$name) {
   if ($SubnetBase -notmatch '^(\d{1,3})\.(\d{1,3})$' -or $SubnetBase -match '^192\.168$') { Fail "refusing -SubnetBase '$SubnetBase'"; return '' }
-  $cands = if ($Subnet) { @($Subnet) } else { @(1..8 | ForEach-Object { "$SubnetBase.$(Get-Random -Minimum 1 -Maximum 255).0/24" }) }
+  # round 2 (TF6): a documentation range first (the pages must resolve to an address judged public); the -SubnetBase draw
+  # only as a last resort (then the door refuses every lab link as private, and [4] fails loudly - never silently)
+  $cands = if ($Subnet) { @($Subnet) } else { @('203.0.113.0/24', '198.51.100.0/24') }
   foreach ($s in $cands) {
     if (-not (Test-SubnetAllowed $s)) { Fail "refusing subnet '$s'"; return '' }
     $null = Dk network create --driver bridge --internal --subnet $s --label $label $name
@@ -149,14 +156,45 @@ try {
   }
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN CREATE ROLE ob_app_memory LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE service_role; END IF; END `$`$; ALTER ROLE ob_app_memory LOGIN PASSWORD '$appPw'"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
-  $o = Dk run --rm --label $label --network $net --add-host 'news.example.org:127.0.0.1' --add-host 'blog.example.org:127.0.0.1' `
-    -e "BND_E2E_DB_HOST=$db" -e "BND_E2E_DB_PASSWORD=$pw" -e "BND_E2E_APP_PASSWORD=$appPw" -e NO_COLOR=1 `
+  # round 2 (TF2): the hand-back functions are ob_app_memory's alone - granted when 420 runs with the role present, so
+  # run it again now that the lab has created the role (idempotent: the documented step for a fresh volume)
+  $null = Dk cp (Join-Path $dockerDir 'init-request-boundary.sql') "${db}:/tmp/b-init0.sql"
+  $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f /tmp/b-init0.sql
+  Check ($script:rc -eq 0) "420 re-run after ob_app_memory exists (the grants)$(if ($script:rc) { ': ' + $o })"
+  $pages = "rwbnd-pages-$rand"
+  $o = Dk run -d --name $pages --label $label --network $net --network-alias news.example.org --network-alias blog.example.org -e PORT=8080 `
+    $testTag deno run --allow-net --allow-env --allow-read fixtures/boundary-lab-pages.ts
+  if ($script:rc -eq 0) { $made.containers += $pages } else { Fail "the pages container did not start: $o" }
+  $o = Dk run --rm --label $label --network $net `
+    -e "BND_E2E_DB_HOST=$db" -e BND_E2E_PAGES_PORT=8080 -e "BND_E2E_DB_PASSWORD=$pw" -e "BND_E2E_APP_PASSWORD=$appPw" -e NO_COLOR=1 `
     $testTag deno test --unstable-net --allow-net --allow-env --allow-read --allow-run boundary.e2e.test.ts
   $o = $o -replace [regex]::Escape($pw), '***' -replace [regex]::Escape($appPw), '***'
   Save 'boundary-e2e.log' $o
   foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(guard|report owner|hand-back|door|hand-backs|the derived|readers|sweep|egress):' }) { Write-Host "    $l" }
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "boundary e2e: $($sum.Value)"
+
+  Write-Host '[4b] round 2: the tester''s COPY probes; TF2 through a real PostgREST (anon = service_role, no token)'
+  $copy = "COPY public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary, refinery_id) FROM STDIN WITH (FORMAT csv);`nqueued,manual,boundary,q one two,q one two,{},derived,`"{`"`"version`"`":`"`"pd0a-2`"`",`"`"lexicon`"`":`"`"$('a' * 64)`"`",`"`"verdict_id`"`":`"`"$('b' * 64)`"`"}`",22222222-2222-4222-8222-222222222222`n\.`n"
+  $copyFile = Join-Path $Evidence 'copy-probe.sql'
+  [System.IO.File]::WriteAllText($copyFile, $copy, (New-Object System.Text.UTF8Encoding $false))
+  $null = Dk cp $copyFile "${db}:/tmp/copy-probe.sql"
+  $o1 = Dk exec $db psql -U postgres -d openbrain -X -q -c 'SET ROLE ob_app_memory' -f /tmp/copy-probe.sql
+  $o2 = Dk exec $db psql -U postgres -d openbrain -X -q -f /tmp/copy-probe.sql
+  # as ob_app_memory COPY is refused before the trigger (research_jobs has row security: COPY FROM is not supported) - a refusal
+  # either way; as the superuser the row trigger fires
+  Check ($o1 -match 'request boundary|COPY FROM not supported with row-level security' -and $o2 -match 'request boundary') 'X6 G2/G2b: COPY of a derived row with refinery_id refused as ob_app_memory and as the superuser'
+  $rst = "rwbnd-rest-$rand"
+  $o = Dk run -d --name $rst --label $label --network $net -e "PGRST_DB_URI=postgres://postgres:$pw@${db}:5432/openbrain" `
+    -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=service_role -e PGRST_SERVER_PORT=3000 $PgrstImage
+  if ($script:rc -eq 0) { $made.containers += $rst } else { Fail "PostgREST did not start: $(($o -replace [regex]::Escape($pw), '***'))" }
+  Start-Sleep -Seconds 6
+  $o = Dk run --rm --label $label --network $net -e "PGRST_PROBE_URL=http://${rst}:3000" -e PGRST_PROBE_MARKER=zq `
+    $testTag deno run --allow-net --allow-env --allow-read fixtures/boundary-pgrst-probe.ts
+  $prc = $script:rc
+  Save 'pgrst-probe.txt' $o
+  foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^PGRST' }) { Write-Host "    $l" }
+  Check ($prc -eq 0 -and $o -match 'PGRST summary: 0 slot-420 object') 'TF2: through PostgREST (anon = service_role) every slot-420 function and table is refused'
 
   Write-Host '[5] slot-420 drill: revert, revert again, init, init again, revert, revert again, init'
   $f420 = Join-Path $dockerDir 'init-request-boundary.sql'; $r420 = Join-Path $dockerDir 'revert-request-boundary.sql'
@@ -223,7 +261,7 @@ try {
   $allowed = @('docker/init-request-boundary.sql', 'docker/revert-request-boundary.sql', 'integrations/research-service/boundary.ts',
     'integrations/research-service/boundary.e2e.test.ts', 'integrations/research-service/fixtures/boundary-sweep.ts',
     'integrations/research-service/fixtures/boundary-drill-check.sql', 'integrations/research-service/run-boundary-e2e.ps1', 'integrations/research-service/README.md', 'docker/docker-compose.yml',
-    'docker/workbench/src/documents/isolation_sweep_test.ts')
+    'docker/workbench/src/documents/isolation_sweep_test.ts', 'integrations/research-service/fixtures/boundary-pgrst-probe.ts')
   $names = @(Get-ChildItem -Path $ob1 -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(node_modules|\.git|archive)\\' -and $_.Length -lt 5MB } |
     Where-Object { Select-String -Path $_.FullName -Pattern 'research_handbacks|handback_(open|pending|claim|deliverables|delivered|owned)' -Quiet } |
     ForEach-Object { $_.FullName.Substring($ob1.Length + 1).Replace('\', '/') })

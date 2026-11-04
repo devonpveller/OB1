@@ -23,17 +23,53 @@
 import { LEXICON_COUNT, LEXICON_SHA256, LEXICON_SOURCE, LEXICON_WORDS } from "./boundary-lexicon.ts";
 
 /** Bumped on any change to the rules here; every verdict records it. */
-export const BOUNDARY_VERSION = "pd0a-1";
+export const BOUNDARY_VERSION = "pd0a-2";
 export const COPY_RUN = 4;
 export const MIN_TOKENS = 3;
 export const MAX_TOKENS = 60;
 export const MAX_CHARS = 300;
 export const MAX_TOPIC_CHARS = 80;
 
+/** Round 2 (tester TF1): THE string the gate judges and the boundary stores - NFKC, then every Default_Ignorable_Code_Point
+ *  and every format character (Cf: soft hyphen U+00AD, zero-width U+200B-U+200D, word joiner U+2060, BOM U+FEFF,
+ *  bidi marks ...) removed, BEFORE tokenising, so an invisible character can neither split a token past the gate nor
+ *  survive into a shared row. NFKC runs again after the strip (a removal can join two halves NFKC composes). */
+export function cleanText(s: string): string {
+  return String(s ?? "").normalize("NFKC").replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, "").normalize("NFKC");
+}
+
 export function tokens(s: string): string[] {
   const out: string[] = [];
-  for (const m of String(s ?? "").normalize("NFKC").toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) out.push(m[0]);
+  for (const m of cleanText(s).toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) out.push(m[0]);
   return out;
+}
+
+/** Round 2 (tester TF7): DENY matching normalises plurals - a token and a denied token match when their STEMS match:
+ *  a trailing "es" after s / x / z / ch / sh, else a trailing "s" (not "ss"), is dropped from words of 4+ letters.
+ *  Possessives need nothing more ("Dana's" is the tokens dana + s). Hyphen-, space- or punctuation-joined variants
+ *  ("Quill-feather", "Quill feather") are caught by joining 2 or 3 consecutive tokens and matching that too. */
+export function stem(w: string): string {
+  if (w.length < 4) return w;
+  if (/(s|x|z|ch|sh)es$/.test(w)) return w.slice(0, -2);
+  if (w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+  return w;
+}
+export const JOIN_MAX = 3;
+
+/** The indices of `t` that a DENY entry matches: a token itself, or a run of 2-3 tokens whose concatenation does,
+ *  each compared by stem. */
+export function deniedIndices(t: string[], deny: ReadonlySet<string>): Set<number> {
+  const stems = new Set<string>();
+  for (const d of deny) stems.add(stem(d));
+  const hit = new Set<number>();
+  for (let i = 0; i < t.length; i++) {
+    let joined = "";
+    for (let n = 0; n < JOIN_MAX && i + n < t.length; n++) {
+      joined += t[i + n];
+      if (stems.has(stem(joined)) || deny.has(joined)) for (let k = i; k <= i + n; k++) hit.add(k);
+    }
+  }
+  return hit;
 }
 
 /** The frame vocabulary: question and research words a public question may always use (checked in, versioned with
@@ -108,11 +144,12 @@ export function evidenceTokens(ev: Evidence): { set: Set<string>; runs: Set<stri
 
 /** THE GATE (pure). `personal` = the item's personal field texts (titles, bodies, subjects, replies...). */
 export function gate(candidate: string, ev: Evidence, deny: ReadonlySet<string>, lex: Lexicon, personal: string[]): GateResult {
-  const c = String(candidate ?? "").normalize("NFKC").trim();
+  const c = cleanText(candidate).trim();
   const t = tokens(c);
   if (t.length < MIN_TOKENS || t.length > MAX_TOKENS || c.length > MAX_CHARS) return { ok: false, code: "length", tokens: [] };
   const e = evidenceTokens(ev);
-  const denied = t.filter((w) => deny.has(w));
+  const di = deniedIndices(t, deny);
+  const denied = t.filter((_w, i) => di.has(i));
   if (denied.length) return { ok: false, code: "denied_token", tokens: [...new Set(denied)] };
   const offList = t.filter((w) => !hasDigit(w) && !FRAME.has(w) && !lex.words.has(w) && !e.set.has(w));
   if (offList.length) return { ok: false, code: "token_not_allowed", tokens: [...new Set(offList)] };
@@ -170,7 +207,30 @@ export function denySet(d: DenyInput): Set<string> {
 }
 
 // ── links ────────────────────────────────────────────────────────────────────────────────────
-export type LinkRefusal = "not_a_url" | "scheme" | "userinfo" | "private_host" | "token_path";
+export type LinkRefusal = "not_a_url" | "scheme" | "userinfo" | "private_host" | "token_path" | "id_in_path" | "identity_in_path";
+
+/** decodeURIComponent that never throws (round 2, TF5): null for a malformed escape. */
+export function safeDecode(s: string): string | null {
+  try { return decodeURIComponent(s); } catch { return null; }
+}
+
+/** Round 2 (tester TF3): a public link's PATH goes through the same rules as a question's tokens. The link is refused
+ *  when any token of its decoded, cleaned path is id-shaped (`idShaped`: a hex run of 8 or more characters, or a token
+ *  of 8 or more characters mixing letters and digits - the threshold, whatever the segment's length) or matches DENY
+ *  (identity, the item's own ids, by stem and by joined runs). The host's labels are judged by the id-shaped rule only
+ *  (the name is resolved before any fetch, so it must not carry an id; an identity rule there would refuse every host
+ *  of the owner's own email domain - "gmail com"); privateHost and the resolver judge where it points. */
+export function linkPathRefusal(url: string, deny: ReadonlySet<string>): LinkRefusal | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return "not_a_url"; }
+  const decoded = u.pathname.split("/").map(safeDecode);
+  if (decoded.some((x) => x === null)) return "token_path";
+  // the host's labels too: a name is looked up (DNS) before any fetch, so an id or identity in it must not leave either
+  const t = tokens(decoded.join(" "));
+  if (t.some(idShaped) || tokens(u.hostname).some(idShaped)) return "id_in_path";
+  if (deniedIndices(t, deny).size) return "identity_in_path";
+  return null;
+}
 
 /** The private-host list (versioned with BOUNDARY_VERSION): a URL here is never public. */
 const PRIVATE_HOST_SUFFIXES = [".ts.net", ".local", ".internal", ".lan", ".home.arpa", ".localhost", ".openbrain", ".ai-stack"];
@@ -185,8 +245,18 @@ function ipv4Private(h: string): boolean {
     (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
 }
 
+/** Round 2 (tester TF6): the wildcard-DNS services that turn a name into any address (127.0.0.1.nip.io ...) - the same
+ *  list as intake-fetch.ts WILDCARD_DNS (boundary-gate.test.ts checks they agree; this module imports nothing but the
+ *  lexicon). The names are refused here; what any OTHER name resolves to is judged at fetch time (boundary.ts). */
+export const WILDCARD_DNS = [
+  "nip.io", "sslip.io", "xip.io", "traefik.me", "localtest.me", "lvh.me", "vcap.me",
+  "lacolhost.com", "fbi.com", "readme.localtest.me", "1u.ms", "nip.direct",
+];
+
 export function privateHost(u: URL): boolean {
-  const h = u.hostname.toLowerCase().replace(/\.$/, "");
+  const h = u.hostname.toLowerCase().replace(/\.+$/, "");
+  if (WILDCARD_DNS.some((w) => h === w || h.endsWith("." + w))) return true;
+  if (/^[0-9.]+$/.test(h) && !/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h)) return true;   // a numeric host form
   if (!h.includes(".")) return true;                     // localhost, a container name, a bare host
   if (h.startsWith("[")) return true;                    // any IPv6 literal: never a public link here
   if (ipv4Private(h)) return true;
@@ -200,7 +270,8 @@ export function privateHost(u: URL): boolean {
 export function tokenPath(u: URL): boolean {
   const segs = u.pathname.split("/").filter(Boolean);
   for (let i = 0; i < segs.length; i++) {
-    const s = decodeURIComponent(segs[i]);
+    const s = safeDecode(segs[i]);
+    if (s === null) return true;   // round 2 (TF5): a malformed percent-encoding is no public link
     if (TOKEN_SEGMENT.test(s)) return true;
     if (s.toLowerCase() === "p" && i + 1 < segs.length) return true;
     if (s.length > 40 && /^[A-Za-z0-9+/=_-]+$/.test(s)) return true;
@@ -213,7 +284,7 @@ export function tokenPath(u: URL): boolean {
  *  without the query then fails and the link is dropped). */
 export function canonicalLink(raw: string): { url: string } | { refused: LinkRefusal } {
   let u: URL;
-  try { u = new URL(String(raw ?? "").trim()); } catch { return { refused: "not_a_url" }; }
+  try { u = new URL(cleanText(String(raw ?? "")).trim()); } catch { return { refused: "not_a_url" }; }
   if (u.protocol !== "http:" && u.protocol !== "https:") return { refused: "scheme" };
   if (u.username || u.password) return { refused: "userinfo" };
   if (privateHost(u)) return { refused: "private_host" };
@@ -227,8 +298,10 @@ export function canonicalLink(raw: string): { url: string } | { refused: LinkRef
 export function templateQuestion(title: string, deny: ReadonlySet<string>): { question: string; topic: string } | null {
   const kept: string[] = [];
   const frameLen = tokens("What is publicly known about").length;
-  for (const w of tokens(title)) {
-    if (deny.has(w)) continue;
+  const tt = tokens(title);
+  const di = deniedIndices(tt, deny);
+  for (const [i, w] of tt.entries()) {
+    if (di.has(i)) continue;
     if (kept.length + frameLen >= MAX_TOKENS) break;
     const next = [...kept, w].join(" ");
     if (`What is publicly known about "${next}"?`.length > MAX_CHARS) break;

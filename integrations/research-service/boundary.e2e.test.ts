@@ -10,7 +10,8 @@
  *   C. the hand-back: forced RLS, no grant to any app role; the purpose-scoped functions; the owner's rows only.
  *   D. THE DOOR, over HTTP: the REAL research service (index.ts, spawned as the container runs it) with a stub gateway
  *      on the LiteLLM alias whose proposer is HOSTILE (it returns every personal field verbatim), a stub search gate,
- *      stub public pages (on the lab's own names: news.example.org / blog.example.org -> 127.0.0.1) and a stub curator.
+ *      stub public pages in their OWN container (fixtures/boundary-lab-pages.ts; the lab's DNS resolves news.example.org /
+ *      blog.example.org to a documentation-range address the resolver judges public - round 2, TF6) and a stub curator.
  *      Every personal field of every inlet kind carries its own marker. The derived jobs then RUN (the dispatcher,
  *      the harness, the curator hand-off) so the sweep sees what research does with them.
  *   E. the readers (acceptance 3): as a seeded second user, a derived job's question is visible; a service:shared-key
@@ -36,6 +37,11 @@ const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
 const SHARED = "e2e-shared-key-000000";
 const OWUI = "e2e-owui-key-0000000000", AGENT = "e2e-agent-key-000000000", WORKSPACE = "e2e-workspace-key-00000";
 const BEE = "user-bee-second";
+// round 2: the pages container (run-boundary-e2e.ps1 starts it; its log at /_log)
+const PAGES_PORT = Deno.env.get("BND_E2E_PAGES_PORT") ?? "8080";
+async function pageLog(): Promise<string[]> {
+  return ((await (await fetch(`http://news.example.org:${PAGES_PORT}/_log`)).json()).log ?? []) as string[];
+}
 const PERSONAL: Record<string, string> = Object.fromEntries(Object.entries(MK).filter(([k]) => k !== "PUB"));
 
 function pool(user: "postgres" | "ob_app_memory") {
@@ -53,7 +59,7 @@ async function refused(p: Pool | null, text: string, args: unknown[] = []): Prom
   throw new Error(`not refused: ${text.slice(0, 120)}`);
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const STAMP = JSON.stringify({ version: "pd0a-1", lexicon: "x", verdict_id: "y" });
+const STAMP = JSON.stringify({ version: "pd0a-2", lexicon: "a".repeat(64), verdict_id: "b".repeat(64) });
 
 function derivedInsert(extra: Record<string, string> = {}): string {
   const cols: Record<string, string> = { status: "'done'", origin: "'manual'", caller: "'boundary'", query: "'What is known about solar roofs?'",
@@ -202,6 +208,107 @@ Deno.test({ name: "C. research_handbacks: forced RLS, no app grant, the purpose-
   console.log("hand-back: open / coalesce / pending / claim / deliverables / delivered / owned - each scoped");
 }});
 
+// ── round 2: the tester's attempt-1 DB probes (db-probes.sql) and TF2 / TF8 / TF9, permanent ────────────────
+Deno.test({ name: "R2-TF8. the guard is an allow-list: unlisted, nested and extra stamp keys refused (the tester's X8)", ...opts, fn: async () => {
+  const bad: Array<[string, Record<string, string>]> = [
+    ["options.notes", { options: `'{"public_links":[],"notes":"zqNOTm1a2b3c4d"}'::jsonb` }],
+    ["nested options.context.seed_sources", { options: `'{"public_links":[],"context":{"seed_sources":[{"content":"zqNSTm1a2b3c4d"}]}}'::jsonb` }],
+    ["a public_links entry that is no URL", { options: `'{"public_links":["zqNOTm1a2b3c4d"]}'::jsonb` }],
+    ["a public_links entry with a query string", { options: `'{"public_links":["https://news.example.org/a?u=zqQRYm1"]}'::jsonb` }],
+    ["a nested object in public_links", { options: `'{"public_links":[{"url":"https://x.example.org/"}]}'::jsonb` }],
+    ["queue_origin carrying text", { options: `'{"queue_origin":"zq NOT m1a2b3c4d"}'::jsonb` }],
+    ["boundary.owner", { boundary: `'{"version":"pd0a-2","lexicon":"${"a".repeat(64)}","verdict_id":"${"b".repeat(64)}","owner":"sub-dana"}'::jsonb` }],
+    ["boundary.note", { boundary: `'{"version":"pd0a-2","lexicon":"${"a".repeat(64)}","verdict_id":"${"b".repeat(64)}","note":"zqBNDm1a2b3c4d"}'::jsonb` }],
+    ["boundary lexicon not a hash", { boundary: `'{"version":"pd0a-2","lexicon":"zqLEXm1","verdict_id":"${"b".repeat(64)}"}'::jsonb` }],
+    ["boundary.topic over 80", { boundary: `'{"version":"pd0a-2","lexicon":"${"a".repeat(64)}","verdict_id":"${"b".repeat(64)}","topic":"${"x".repeat(81)}"}'::jsonb` }],
+    ["boundary.evidence with an extra key", { boundary: `'{"version":"pd0a-2","lexicon":"${"a".repeat(64)}","verdict_id":"${"b".repeat(64)}","evidence":[{"url":"https://x.example.org/","sha256":"${"c".repeat(64)}","note":"zq"}]}'::jsonb` }],
+  ];
+  for (const [name, extra] of bad) {
+    assert((await refused(su, derivedInsert({ status: "'queued'", ...extra }))).includes("request boundary"), name);
+    console.log(`guard round 2: ${name} refused`);
+  }
+  const good = await derivedRow({ options: `'{"public_links":["https://news.example.org/a"],"queue_origin":"manual","model_down_requeues":1}'::jsonb`,
+    boundary: `'{"version":"pd0a-2","lexicon":"${"a".repeat(64)}","verdict_id":"${"b".repeat(64)}","topic":"solar roofs","evidence":[{"url":"https://news.example.org/a","sha256":"${"c".repeat(64)}"}]}'::jsonb` });
+  assert(good, "the allow-listed shape is accepted");
+  // the engine's own write (model_down requeue) still works; an extra key added by UPDATE does not
+  await q(su, `UPDATE public.research_jobs SET options = options || '{"model_down_requeues":2}'::jsonb WHERE id = $1::uuid`, [good]);
+  assert((await refused(su, `UPDATE public.research_jobs SET options = options || '{"notes":"x"}'::jsonb WHERE id = $1::uuid`, [good])).includes("request boundary"));
+}});
+
+Deno.test({ name: "R2-TF9. under a derived root no row (a steer included) carries refinery_id, inlet_ref, seed content or an unlisted option (the tester's X9)", ...opts, fn: async () => {
+  const root = await derivedRow({ status: "'running'" });
+  const idea = (await q<{ id: string }>(su, `INSERT INTO public.ideas (title, owner_sub) VALUES ('zqIDTm1a2b3c4d private idea', $1) RETURNING id::text AS id`, [OWNER.sub]))[0].id;
+  const branch = (kind: string, extra: string, vals: string) =>
+    `INSERT INTO public.research_jobs (status, origin, query, anchor, rooted_step_id, parent_job_id, root_job_id, branch_kind${extra})
+     VALUES ('done', 'manual', 'zqSTRm1a2b3c4d steer text', 'a', 's1', '${root}', '${root}', '${kind}'${vals}) RETURNING id::text AS id`;
+  for (const kind of ["steer", "gap", "interhub"]) {
+    assert((await refused(su, branch(kind, ", refinery_id", `, '${idea}'::uuid`))).includes("request boundary"), `${kind} + refinery_id`);
+    assert((await refused(su, branch(kind, ", inlet_ref", `, '{"kind":"idea","id":"${idea}"}'::jsonb`))).includes("request boundary"), `${kind} + inlet_ref`);
+    assert((await refused(su, branch(kind, ", options", `, '{"seed_sources":[{"url":"https://x.example.org","content":"zqSEDm1"}]}'::jsonb`))).includes("request boundary"), `${kind} + seed_sources`);
+    assert((await refused(su, branch(kind, ", options", `, '{"lane":"research-branch","notes":"zq"}'::jsonb`))).includes("request boundary"), `${kind} + an unlisted option`);
+  }
+  const steer = (await q<{ id: string }>(su, branch("steer", ", options", `, '{"lane":"research-branch"}'::jsonb`)))[0].id;
+  assertEquals((await q<{ k: string }>(su, `SELECT request_kind AS k FROM public.research_jobs WHERE id = $1::uuid`, [steer]))[0].k, "direct");
+  // a later UPDATE cannot add them either, and an idea-revision stamp copies nothing onto it (slot 230's trigger skips)
+  assert((await refused(su, `UPDATE public.research_jobs SET refinery_id = $2::uuid WHERE id = $1::uuid`, [steer, idea])).includes("request boundary"));
+  await q(su, `INSERT INTO public.idea_revisions (idea_id, revision, summary, research_job_id) VALUES ($1::uuid, 950, 'rev', $2)`, [idea, steer]);
+  assertEquals((await q<{ i: unknown; r: unknown }>(su, `SELECT inlet_ref AS i, refinery_id AS r FROM public.research_jobs WHERE id = $1::uuid`, [steer]))[0], { i: null, r: null });
+  assertEquals((await q(app, `SELECT * FROM public.research_job_report_owner($1::uuid)`, [steer])).length, 0, "the steer of a derived root: shared, and nothing of the idea on it");
+  console.log("guard round 2: under a derived root, steer / gap / inter-hub with refinery_id, inlet_ref, seed_sources or an unlisted option refused; the revision stamp copies nothing");
+}});
+
+Deno.test({ name: "R2-X6/X7. the tester's guard probes: service_role insert, COPY (app role and superuser), ON CONFLICT, one-UPDATE flips", ...opts, fn: async () => {
+  const c = await su!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject("SET LOCAL ROLE service_role");
+    await assertRejects(() => c.queryObject(`INSERT INTO public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary, inlet_ref)
+      VALUES ('queued','manual','boundary','q one two','q one two','{}','derived',$1::jsonb,'{"kind":"idea","id":"zqINLm1"}')`, [STAMP]), Error, "request boundary");
+  } finally { await c.queryObject("ROLLBACK").catch(() => {}); c.release(); }
+  const d = await derivedRow();
+  for (const sql of [
+    `INSERT INTO public.research_jobs (id, status, origin, query) VALUES ('${d}','queued','manual','x') ON CONFLICT (id) DO UPDATE SET inlet_ref = '{"kind":"gmail","id":"zqGIDm1"}'`,
+    `UPDATE public.research_jobs SET request_kind = 'direct', inlet_ref = '{"kind":"idea","id":"x"}', options = '{"seed_sources":[]}', boundary = NULL, caller = 'owui', anchor = 'zz' WHERE id = '${d}'`,
+  ]) assert((await refused(su, sql)).includes("request boundary"), sql.slice(0, 60));
+  const plain = (await q<{ id: string }>(su, `INSERT INTO public.research_jobs (status, origin, caller, query, request_kind) VALUES ('done','owui','owui','my own question','direct') RETURNING id::text AS id`))[0].id;
+  assert((await refused(su, `UPDATE public.research_jobs SET request_kind = 'derived', caller = 'boundary', anchor = query, boundary = $2::jsonb WHERE id = $1::uuid`, [plain, STAMP])).includes("request boundary"));
+  console.log("guard round 2: the tester's X6/X7 shapes refused (service_role insert, ON CONFLICT, one-UPDATE flips; COPY: run-boundary-e2e.ps1 [4b])");
+}});
+
+Deno.test({ name: "R2-TF2. no 420 function is executable by service_role, anon, authenticated or PUBLIC; the hand-back functions by ob_app_memory only", ...opts, fn: async () => {
+  const rows = await q<{ fn: string; role: string; ok: boolean }>(su,
+    `SELECT p.oid::regprocedure::text AS fn, r.role, has_function_privilege(r.role, p.oid, 'EXECUTE') AS ok
+       FROM pg_proc p, (VALUES ('service_role'), ('anon'), ('authenticated'), ('ob_app_memory')) r(role)
+      WHERE p.pronamespace = 'public'::regnamespace
+        AND p.proname IN ('handback_open','handback_pending','handback_claim','handback_deliverables','handback_delivered','handback_owned',
+                          'trg_research_jobs_boundary','trg_research_prompts_boundary','request_boundary_options_ok','request_boundary_stamp_ok')
+        AND EXISTS (SELECT 1 FROM pg_roles x WHERE x.rolname = r.role)`);
+  assert(rows.length >= 30, `the functions and roles exist (${rows.length})`);
+  for (const r of rows) {
+    const want = r.role === "ob_app_memory" && r.fn.startsWith("handback_");
+    assertEquals(r.ok, want, `${r.role} EXECUTE ${r.fn}`);
+  }
+  const pub = await q<{ n: number }>(su, `SELECT count(*)::int AS n FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+     WHERE p.pronamespace = 'public'::regnamespace AND a.grantee = 0
+       AND p.proname IN ('handback_open','handback_pending','handback_claim','handback_deliverables','handback_delivered','handback_owned','trg_research_jobs_boundary','trg_research_prompts_boundary','request_boundary_options_ok','request_boundary_stamp_ok')`);
+  assertEquals(pub[0].n, 0, "no PUBLIC grant");
+  // as service_role and anon, every hand-back function is refused (permission denied), through SET ROLE
+  for (const role of ["service_role", "anon", "authenticated"]) {
+    for (const call of [`SELECT * FROM public.handback_owned('${OWNER.sub}')`, `SELECT * FROM public.handback_pending('idea-research')`,
+      `SELECT * FROM public.handback_deliverables('digest-gap')`, `SELECT public.handback_delivered(gen_random_uuid())`,
+      `SELECT public.handback_claim(gen_random_uuid(), NULL, 'refused', NULL, NULL)`,
+      `SELECT public.handback_open('${OWNER.sub}', 'idea', 'x', NULL, 'idea-research', NULL, 'refused', NULL, NULL, NULL)`]) {
+      const c = await su!.connect();
+      try {
+        await c.queryObject("BEGIN");
+        await c.queryObject(`SET LOCAL ROLE ${role}`);
+        await assertRejects(() => c.queryObject(call), Error, "permission denied", `${role}: ${call}`);
+      } finally { await c.queryObject("ROLLBACK").catch(() => {}); c.release(); }
+    }
+  }
+  console.log("grants round 2: the 10 functions - EXECUTE for ob_app_memory on the 6 hand-back functions only; service_role / anon / authenticated refused on every call");
+}});
+
 // ── D/E/F. the door, the readers, the sweep ─────────────────────────────────────────────────
 const VEC = (() => { const v = new Array(1024).fill(0); v[0] = 1; return v; })();
 function stubs() {
@@ -216,15 +323,7 @@ function stubs() {
     if (u.pathname.endsWith("/observe/queue/estimate")) return Response.json({ max_concurrency: 2, capacity_declared: true });
     if (u.pathname === "/search") {
       log.search.push(u.searchParams.get("q") ?? "");
-      return Response.json({ results: [{ url: `http://news.example.org:${port}/solar-roofs`, title: "Community solar roofs cut winter bills", content: "solar roofs survey" }] });
-    }
-    if (host === "news.example.org" || host === "blog.example.org") {
-      log.pages.push(`${host}${u.pathname}${u.search}`);
-      if (u.pathname === "/solar-roofs" && !u.search) {
-        return page("Community solar roofs cut winter bills", `Community solar roofs cut winter bills by 18 percent in 2024, a survey found. The ${MK.PUB} method is described. `.repeat(8));
-      }
-      if (u.pathname === "/hello") return page("Hello Dana Quillfeather", "Hello Dana Quillfeather, here is your weekly letter about heat pumps. ".repeat(8));
-      return new Response("not found", { status: 404 });
+      return Response.json({ results: [{ url: `http://news.example.org:${PAGES_PORT}/solar-roofs`, title: "Community solar roofs cut winter bills", content: "solar roofs survey" }] });
     }
     const raw = await req.text();
     if (u.pathname.endsWith("/ingest/research-package")) {
@@ -299,8 +398,8 @@ Deno.test({ name: "D/E/F. the door, the second user's reads and the sweep (hosti
   const svc = await startService(st.base);
   const out: string[] = [];
   try {
-    const page = (p: string) => `http://news.example.org:${st.port}${p}`;
-    const blog = `http://blog.example.org:${st.port}/hello`;
+    const page = (p: string) => `http://news.example.org:${PAGES_PORT}${p}`;
+    const blog = `http://blog.example.org:${PAGES_PORT}/hello`;
     // ── D1: the door's refusals of its body
     assertEquals((await post(svc.base, "/research/derived", {}, "wrong-key")).status, 401);
     const base = { item: { kind: "gmail", id: "door-1", owner_sub: OWNER.sub, fields: { subject: "s" }, links: [page("/solar-roofs")] }, purpose: "digest-article" };
@@ -328,6 +427,15 @@ Deno.test({ name: "D/E/F. the door, the second user's reads and the sweep (hosti
           fields: { reply: `${MK.REPLY} maybe my cabin needs this`, dossier: `${MK.DOSSIER} thread text` } } },
       { purpose: "digest-article", deliver: {}, item: { kind: "gmail", id: "body-only", owner_sub: OWNER.sub, links: [`https://mail.google.com/mail/u/0/#inbox/${MK.THR}`],
           fields: { subject: MK.SUBJ, body: MK.BODY } } },
+      // round 2: TF3 (a marker in a link's path), TF6 (a name that resolves to nothing), TF5 (a malformed escape) - all
+      // three links refused before any fetch, so the item has no public link
+      { purpose: "digest-article", deliver: {}, item: { kind: "gmail", id: "bad-links", owner_sub: OWNER.sub,
+          links: [page(`/story/${MK.GID}`), `http://nowhere-${MK.TIT.toLowerCase()}.example.invalid/x`, page("/%E0%A4%A")], fields: { subject: MK.SUBJ } } },
+      // round 2: TF1 - the hostile proposer echoes a field whose surname is split by a soft hyphen
+      { purpose: "digest-gap", deliver: {}, item: { kind: "gmail", id: "soft-hyphen", owner_sub: OWNER.sub, links: [page("/solar-roofs")],
+          fields: { subject: "Quill\u00ADfeather roofs?", body: MK.BODY } } },
+      // round 2: TF4 - a page that changes between the gate and the run (its run-time hash differs: not used)
+      { purpose: "digest-article", deliver: {}, item: { kind: "gmail", id: "18c2f0e9a7b4d3c9", owner_sub: OWNER.sub, links: [page("/changing")], fields: { subject: MK.SUBJ } } },
     ];
     const jobs: string[] = [];
     const answers: string[] = [];
@@ -339,7 +447,8 @@ Deno.test({ name: "D/E/F. the door, the second user's reads and the sweep (hosti
       out.push(`door: ${it.item.kind}/${it.purpose} -> ${b.job_id ? "derived job" : `refused (${b.refused})`}`);
     }
     assert(st.log.proposer.length >= 3, `the hostile proposer was asked (${st.log.proposer.length})`);
-    assertEquals(jobs.length, 4, `4 derived jobs (the two link-less refusals: the idea -> awaiting_owner, the body-only email -> refused): ${answers.join(" ")}`);
+    assertEquals(jobs.length, 6, `6 derived jobs (refused: the link-less idea -> awaiting_owner, the body-only email and the bad-links email -> refused): ${answers.join(" ")}`);
+    assertEquals(JSON.parse(answers[6]).refused, "link_not_public", "TF3/TF5/TF6: no link of the bad-links item survives");
     const rows = await q<{ request_kind: string; caller: string; inlet_ref: unknown; refinery_id: unknown; options: Record<string, unknown>; query: string; anchor: string; boundary: Record<string, unknown>; prompts: number }>(su,
       `SELECT j.request_kind, j.caller, j.inlet_ref, j.refinery_id, j.options, j.query, j.anchor, j.boundary,
               (SELECT count(*)::int FROM public.research_prompts p WHERE p.job_id = j.id) AS prompts
@@ -354,6 +463,7 @@ Deno.test({ name: "D/E/F. the door, the second user's reads and the sweep (hosti
     const hb = await q<{ state: string; n: number }>(su, `SELECT state, count(*)::int AS n FROM public.research_handbacks WHERE owner_sub = $1 AND inlet_id <> ALL($2) GROUP BY state ORDER BY state`, [OWNER.sub, ["hb-c-1", "hb-c-3"]]);
     out.push(`hand-backs: ${hb.map((x) => `${x.state}=${x.n}`).join(" ")}`);
     // never fetched: the query-string form, the mail.google.com thread, the tracker's unsubscribe path
+    st.log.pages.push(...await pageLog());
     assertFalse(st.log.pages.some((p) => p.includes("?")), `a query string was fetched: ${st.log.pages.filter((p) => p.includes("?")).length}`);
 
     // ── the derived jobs RUN (dispatcher -> harness -> curator hand-off) before the sweep
@@ -365,6 +475,14 @@ Deno.test({ name: "D/E/F. the door, the second user's reads and the sweep (hosti
     const ran = await q<{ status: string; n: number }>(su, `SELECT status, count(*)::int AS n FROM public.research_jobs WHERE id = ANY($1::uuid[]) GROUP BY status`, [jobs]);
     out.push(`the derived jobs ran: ${ran.map((x) => `${x.status}=${x.n}`).join(" ")}; curator packages: ${st.log.curator.length}; searches: ${st.log.search.length}; page fetches: ${st.log.pages.length}`);
     assert(ran.every((x) => x.status === "done"), `${JSON.stringify(ran)}\n${svc.log.slice(-2500)}`);
+    // TF4: the changing page was refused at run time (its hash), and never the stored question's source
+    assert(svc.log.includes("a public link changed since the gate judged it - not used"), "TF4: the run used a page the gate never judged");
+    // TF1: the stored questions hold no invisible character and no surname
+    const qs = await q<{ query: string; topic: string }>(su, `SELECT query, boundary ->> 'topic' AS topic FROM public.research_jobs WHERE id = ANY($1::uuid[])`, [jobs]);
+    for (const x of qs) {
+      assertEquals(x.query, x.query.normalize("NFKC").replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, ""), "TF1: the stored question is the cleaned string");
+      assertFalse(/quill|feather/i.test(x.query + x.topic), `TF1: ${x.query}`);
+    }
     assert(st.log.curator.length >= 1, "a derived job's report was handed to the curator (filed shared, as before)");
     const pkg = JSON.parse(st.log.curator[0]);
     assert(String(pkg.synthesis ?? "").includes("Community solar roofs"), "a derived job's synthesis is handed over as written");
@@ -414,6 +532,7 @@ Deno.test({ name: "D/E/F. the door, the second user's reads and the sweep (hosti
     let res: Awaited<ReturnType<typeof sweepTables>>;
     try { res = await sweepTables(sc, PERSONAL); } finally { sc.release(); }
     out.push(describe(res));
+    st.log.pages.splice(0, st.log.pages.length, ...await pageLog());
     const egress = { search: sweepText(st.log.search.join("\n"), PERSONAL), pages: sweepText(st.log.pages.join("\n"), PERSONAL), curator: sweepText(st.log.curator.join("\n"), PERSONAL) };
     const reads: Record<string, number> = {};
     for (const j of [...jobs, sk.job_id]) for (const [k, n] of Object.entries(sweepText((await read(j)).text, PERSONAL))) reads[k] = (reads[k] ?? 0) + n;

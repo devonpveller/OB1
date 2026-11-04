@@ -14,9 +14,10 @@
  * `request-boundary`, D9); the pure gate DECIDES; the title template is the fallback. A refusal starts no job.
  */
 import {
-  BOUNDARY_VERSION, canonicalLink, denySet, type Evidence, gate, type GateCode, lexicon, type Lexicon, type PublicPage,
-  templateQuestion, tokens, topicOf,
+  BOUNDARY_VERSION, canonicalLink, cleanText, deniedIndices, denySet, type Evidence, gate, type GateCode, lexicon, type Lexicon,
+  linkPathRefusal, type PublicPage, templateQuestion, tokens, topicOf,
 } from "./boundary-gate.ts";
+import { judgeAddresses } from "./intake-fetch.ts";
 
 export type InletKind = "idea" | "gmail" | "google_activity" | "brainstorm" | "document" | "chat";
 export type Purpose = "idea-research" | "digest-article" | "digest-gap" | "brainstorm-gap";
@@ -38,7 +39,8 @@ export interface DerivedRequest {
   topic: string;                    // <= 80 chars
   links: string[];                  // canonical, anonymously fetched, public
   purpose: Purpose;
-  boundary: { version: string; lexicon: string; verdict_id: string };
+  // round 2 (TF4): the evidence snapshot rides on the stamp - the run-time fetch uses a page only if its hash matches
+  boundary: { version: string; lexicon: string; verdict_id: string; evidence: Array<{ url: string; sha256: string }> };
 }
 
 export type Refusal = "no_owner" | "no_public_evidence" | "no_candidate_passed" | "identity_token" | "link_not_public" | "empty";
@@ -69,11 +71,24 @@ export interface BoundaryDeps {
   propose: (item: PersonalItem, evidence: Evidence) => Promise<string[]>;
   fetchPublic: (url: string) => Promise<{ title: string; text: string } | null>;
   identity: (owner_sub: string) => Promise<string[]>;
+  /** round 2 (TF6): the host's addresses (A + AAAA); a link whose host resolves to any private, loopback, link-local or
+   *  reserved address (or does not resolve) is refused before its fetch (intake-fetch.ts judgeAddresses). */
+  resolve: (host: string) => Promise<string[]>;
   lexicon?: Lexicon;
 }
 
 export const MAX_LINKS = 5;
 export const MAX_CANDIDATES = 3;
+
+/** round 2 (TF6): every address the link's host resolves to is public (judgeAddresses: IPv4 private / loopback /
+ *  link-local / CGNAT / reserved, IPv6 outside global unicast, an empty answer - all refused). */
+export async function publicAddress(url: string, deps: Pick<BoundaryDeps, "resolve">): Promise<boolean> {
+  let host: string;
+  try { host = new URL(url).hostname.toLowerCase().replace(/\.+$/, ""); } catch { return false; }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return judgeAddresses(host, [host]).ok;
+  const addrs = await deps.resolve(host).catch(() => [] as string[]);
+  return judgeAddresses(host, addrs).ok;
+}
 
 export async function sha256Hex(s: string): Promise<string> {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
@@ -106,14 +121,20 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
   const rawLinks = (item.links ?? []).map((l) => String(l ?? "")).filter(Boolean);
   if (!Object.values(fields).some((v) => v.trim()) && !rawLinks.length) return refuse("empty");
 
-  // the public links: canonical, not on the private-host list, fetched anonymously with success (a snapshot)
+  // round 2 (TF3): the identity / id part of DENY is known before any link is judged - a link whose path carries one
+  // is refused before its fetch (the link-token part of DENY needs the public set, so it comes after)
+  const identity = [...(await deps.identity(owner).catch(() => [] as string[])), ...(item.identity ?? [])].map(String);
+  const baseDeny = denySet({ ownerSub: owner, identity, fields, links: [], publicLinks: [], id: item.id });
+  // the public links: canonical, not on the private-host list, a public address, no id or identity in the path,
+  // fetched anonymously with success (a snapshot)
   const pages: PublicPage[] = [];
   const seen = new Set<string>();
   for (const l of rawLinks) {
     const c = canonicalLink(l);
     if (!("url" in c) || seen.has(c.url)) { if (!("url" in c)) record.links_dropped++; continue; }
     seen.add(c.url);
-    if (pages.length >= MAX_LINKS) { record.links_dropped++; continue; }
+    if (pages.length >= MAX_LINKS || linkPathRefusal(c.url, baseDeny)) { record.links_dropped++; continue; }
+    if (!(await publicAddress(c.url, deps))) { record.links_dropped++; continue; }
     const got = await deps.fetchPublic(c.url).catch(() => null);
     if (!got || !String(got.text ?? "").trim()) { record.links_dropped++; continue; }
     const title = String(got.title ?? ""), text = String(got.text ?? "");
@@ -122,7 +143,6 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
   record.evidence = pages.map((p) => ({ url: p.url, sha256: p.sha256 }));
   if (purpose === "digest-article" && !pages.length) return refuse(rawLinks.length ? "link_not_public" : "no_public_evidence");
 
-  const identity = [...(await deps.identity(owner).catch(() => [] as string[])), ...(item.identity ?? [])].map(String);
   const deny = denySet({ ownerSub: owner, identity, fields, links: rawLinks, publicLinks: pages.map((p) => p.url), id: item.id });
   const ev: Evidence = { pages };
   const personal = Object.values(fields);
@@ -144,22 +164,23 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
   let best: OwnerView | null = null;
   for (const cand of candidates) {
     record.tried++;
-    const g = gate(cand.q, ev, deny, lex, personal);
+    const g = gate(cleanText(cand.q).trim(), ev, deny, lex, personal);
     record.codes.push(g.ok ? "ok" : g.code);
     if (!g.ok) {
       if (!best && cand.by === "model") best = { candidate: cand.q.slice(0, 300), failing: g.tokens.slice(0, 20), code: g.code };
       continue;
     }
-    const question = cand.q.normalize("NFKC").trim();
+    // round 2 (TF1): the stored question IS the string the gate judged (cleanText: no invisible characters)
+    const question = cleanText(cand.q).trim();
     const topic = (cand.topic ?? (pages[0] ? templateQuestion(pages[0].title, deny)?.topic : null) ?? topicOf(question)) || topicOf(question);
     // belt and braces (section 2.3, "an identity token present after the fallback"): neither string holds a DENY token
-    if ([...tokens(question), ...tokens(topic)].some((w) => deny.has(w))) return refuse("identity_token", best);
+    if (deniedIndices(tokens(question), deny).size || deniedIndices(tokens(topic), deny).size || question !== cleanText(question)) return refuse("identity_token", best);
     record.accepted_by = cand.by;
     record.candidate_sha256 = await sha256Hex(question);
     const verdict_id = await sha256Hex(canonicalJson(record));
     return {
       ok: true, record, verdict_id,
-      request: { question, topic, links: pages.map((p) => p.url), purpose, boundary: { version: BOUNDARY_VERSION, lexicon: lex.version, verdict_id } },
+      request: { question, topic, links: pages.map((p) => p.url), purpose, boundary: { version: BOUNDARY_VERSION, lexicon: lex.version, verdict_id, evidence: record.evidence } },
     };
   }
   return refuse("no_candidate_passed", purpose === "idea-research" ? best : null);

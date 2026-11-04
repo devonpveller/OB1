@@ -136,5 +136,5 @@ Deno.test("the template: a fetched title with DENY removed; it passes the gate b
   assertEquals(t.question, `What is publicly known about "hello community solar roofs cut winter bills"?`);
   assert(gate(t.question, EV, deny, lex, personal).ok);
   assertEquals(templateQuestion("Dana Quillfeather", deny), null);
-  assertEquals(BOUNDARY_VERSION, "pd0a-1");
+  assertEquals(BOUNDARY_VERSION, "pd0a-2");
 });

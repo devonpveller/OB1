@@ -41,6 +41,53 @@ COMMENT ON COLUMN public.research_jobs.request_kind IS
     'rw-boundary-core (plan 09 2.4): derived = formed by the request boundary (shared output and report, query public); direct = typed by a signed-in user; personal = formed from personal data without the boundary (report private); service = no personal data, a RESEARCH_SERVICE_CALLERS caller; unclassified = every pre-420 row';
 
 -- ── the guard ───────────────────────────────────────────────────────────
+-- Round 2 (tester TF8, TF9): an ALLOW-list, not a field list. A derived ROOT's options hold only public_links (an array
+-- of http(s) strings), queue_origin (a short name) and model_down_requeues (an integer the engine writes); its boundary
+-- only version, lexicon (64 hex), verdict_id (64 hex), topic (<= 80 chars) and evidence (an array of {url, sha256});
+-- nested keys included - anything else is refused. EVERY row under a derived root (its gap / inter-hub branches, and a
+-- steer, which is 'direct') carries no inlet_ref, no refinery_id and options only lane / queue_origin /
+-- model_down_requeues: no seed content, no personal link, nothing an idea stamp could make private.
+CREATE OR REPLACE FUNCTION public.request_boundary_options_ok(p_options JSONB, p_root BOOLEAN)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+    SELECT p_options IS NULL OR (jsonb_typeof(p_options) = 'object' AND NOT EXISTS (
+        SELECT 1 FROM jsonb_each(p_options) e(k, v)
+         WHERE NOT CASE
+             WHEN e.k = 'public_links' AND p_root THEN jsonb_typeof(e.v) = 'array' AND jsonb_array_length(e.v) <= 5
+                  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(e.v) l(x)
+                                   WHERE jsonb_typeof(l.x) <> 'string' OR (l.x #>> '{}') !~ '^https?://[^\s?#]+$' OR length(l.x #>> '{}') > 2000)
+             WHEN e.k = 'queue_origin' THEN jsonb_typeof(e.v) = 'string' AND (e.v #>> '{}') ~ '^[a-z0-9_-]{1,32}$'
+             WHEN e.k = 'model_down_requeues' THEN jsonb_typeof(e.v) = 'number'
+             WHEN e.k = 'lane' AND NOT p_root THEN e.v = '"research-branch"'::jsonb
+             ELSE false END));
+$$;
+
+CREATE OR REPLACE FUNCTION public.request_boundary_stamp_ok(p_boundary JSONB)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+SET search_path = public, pg_temp
+AS $$
+    SELECT p_boundary IS NOT NULL AND jsonb_typeof(p_boundary) = 'object'
+       AND p_boundary ?& ARRAY['version', 'lexicon', 'verdict_id']
+       AND NOT EXISTS (
+        SELECT 1 FROM jsonb_each(p_boundary) e(k, v)
+         WHERE NOT CASE
+             WHEN e.k = 'version' THEN jsonb_typeof(e.v) = 'string' AND (e.v #>> '{}') ~ '^[a-z0-9.-]{1,32}$'
+             WHEN e.k IN ('lexicon', 'verdict_id') THEN jsonb_typeof(e.v) = 'string' AND (e.v #>> '{}') ~ '^[0-9a-f]{64}$'
+             WHEN e.k = 'topic' THEN jsonb_typeof(e.v) = 'string' AND length(e.v #>> '{}') <= 80
+             WHEN e.k = 'evidence' THEN jsonb_typeof(e.v) = 'array' AND jsonb_array_length(e.v) <= 5
+                  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(e.v) x(o)
+                                   WHERE jsonb_typeof(x.o) <> 'object'
+                                      OR EXISTS (SELECT 1 FROM jsonb_object_keys(x.o) kk WHERE kk NOT IN ('url', 'sha256'))
+                                      OR coalesce(x.o ->> 'url', '') !~ '^https?://[^\s?#]+$' OR length(x.o ->> 'url') > 2000
+                                      OR coalesce(x.o ->> 'sha256', '') !~ '^[0-9a-f]{64}$')
+             ELSE false END);
+$$;
+
 CREATE OR REPLACE FUNCTION public.trg_research_jobs_boundary()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -49,6 +96,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
     v_parent TEXT;
+    v_root   TEXT;
 BEGIN
     IF TG_OP = 'INSERT' AND NEW.parent_job_id IS NOT NULL THEN
         -- a branch takes its parent's kind; a steer on a derived job is its actor's ('direct')
@@ -62,22 +110,26 @@ BEGIN
         RAISE EXCEPTION 'request boundary: request_kind % -> % refused (nothing becomes derived, a derived job stays derived)',
             OLD.request_kind, NEW.request_kind USING ERRCODE = '23514';
     END IF;
-    IF NEW.request_kind = 'derived' THEN
+    -- the kind of the tree's root (a root: its own)
+    IF NEW.parent_job_id IS NULL AND NEW.root_job_id IS NULL THEN
+        v_root := NEW.request_kind;
+    ELSE
+        SELECT j.request_kind INTO v_root FROM public.research_jobs j WHERE j.id = coalesce(NEW.root_job_id, NEW.parent_job_id);
+    END IF;
+    IF NEW.request_kind = 'derived' OR v_root = 'derived' THEN
         IF NEW.inlet_ref IS NOT NULL THEN
-            RAISE EXCEPTION 'request boundary: a derived job carries no inlet_ref' USING ERRCODE = '23514';
+            RAISE EXCEPTION 'request boundary: a derived job (or a branch of one) carries no inlet_ref' USING ERRCODE = '23514';
         END IF;
         IF NEW.refinery_id IS NOT NULL THEN
-            RAISE EXCEPTION 'request boundary: a derived job carries no refinery_id' USING ERRCODE = '23514';
+            RAISE EXCEPTION 'request boundary: a derived job (or a branch of one) carries no refinery_id' USING ERRCODE = '23514';
         END IF;
-        IF NEW.options IS NOT NULL AND jsonb_typeof(NEW.options) = 'object'
-           AND NEW.options ?| ARRAY['seed_sources', 'callback', 'on_behalf_of', 'inlet_ref', 'refinery_id', 'owner_sub', 'deliver', 'handback_id'] THEN
-            RAISE EXCEPTION 'request boundary: a derived job''s options carry no seed content, callback, on-behalf subject, inlet, owner or delivery'
+        IF NOT public.request_boundary_options_ok(NEW.options, NEW.parent_job_id IS NULL AND NEW.root_job_id IS NULL) THEN
+            RAISE EXCEPTION 'request boundary: a derived job''s options hold only the allow-listed keys (public_links, queue_origin, model_down_requeues; a branch: lane, queue_origin, model_down_requeues)'
                 USING ERRCODE = '23514';
         END IF;
-        IF NEW.parent_job_id IS NULL THEN
-            IF NEW.boundary IS NULL OR jsonb_typeof(NEW.boundary) <> 'object'
-               OR NOT (NEW.boundary ? 'version' AND NEW.boundary ? 'lexicon' AND NEW.boundary ? 'verdict_id') THEN
-                RAISE EXCEPTION 'request boundary: a derived job carries its boundary stamp (version, lexicon, verdict_id)' USING ERRCODE = '23514';
+        IF NEW.parent_job_id IS NULL AND NEW.root_job_id IS NULL THEN
+            IF NOT public.request_boundary_stamp_ok(NEW.boundary) THEN
+                RAISE EXCEPTION 'request boundary: a derived job carries its boundary stamp and nothing else (version, lexicon, verdict_id, topic, evidence)' USING ERRCODE = '23514';
             END IF;
             IF NEW.anchor IS DISTINCT FROM NEW.query THEN
                 RAISE EXCEPTION 'request boundary: a derived job''s anchor is its question' USING ERRCODE = '23514';
@@ -85,8 +137,10 @@ BEGIN
             IF NEW.caller IS DISTINCT FROM 'boundary' OR NEW.branch_kind <> 'root' THEN
                 RAISE EXCEPTION 'request boundary: a derived root is written by the boundary only (caller boundary, branch_kind root)' USING ERRCODE = '23514';
             END IF;
+        ELSIF NEW.boundary IS NOT NULL THEN
+            RAISE EXCEPTION 'request boundary: only a derived root carries a boundary stamp' USING ERRCODE = '23514';
         END IF;
-        IF EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = NEW.id) THEN
+        IF EXISTS (SELECT 1 FROM public.research_prompts p WHERE p.job_id = NEW.id) AND NEW.request_kind = 'derived' THEN
             RAISE EXCEPTION 'request boundary: a derived job has no research_prompts row (its question is public)' USING ERRCODE = '23514';
         END IF;
     END IF;
@@ -97,7 +151,7 @@ REVOKE ALL ON FUNCTION public.trg_research_jobs_boundary() FROM PUBLIC;
 DROP TRIGGER IF EXISTS trg_research_jobs_boundary ON public.research_jobs;
 -- every INSERT; an UPDATE only of the columns the guard reads (the progress / status writes of a running job skip it)
 CREATE TRIGGER trg_research_jobs_boundary
-    BEFORE INSERT OR UPDATE OF request_kind, boundary, inlet_ref, refinery_id, options, query, anchor, caller, branch_kind, parent_job_id
+    BEFORE INSERT OR UPDATE OF request_kind, boundary, inlet_ref, refinery_id, options, query, anchor, caller, branch_kind, parent_job_id, root_job_id
     ON public.research_jobs FOR EACH ROW EXECUTE FUNCTION public.trg_research_jobs_boundary();
 
 CREATE OR REPLACE FUNCTION public.trg_research_prompts_boundary()
@@ -279,18 +333,37 @@ AS $$
      ORDER BY h.created_at DESC LIMIT greatest(1, least(coalesce(p_limit, 100), 500));
 $$;
 
-REVOKE ALL ON FUNCTION public.handback_open(TEXT, TEXT, TEXT, INT, TEXT, UUID, TEXT, JSONB, JSONB, JSONB) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.handback_pending(TEXT, INT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.handback_claim(UUID, UUID, TEXT, JSONB, JSONB) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.handback_deliverables(TEXT, INT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.handback_delivered(UUID, BOOLEAN) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.handback_owned(TEXT, INT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.handback_open(TEXT, TEXT, TEXT, INT, TEXT, UUID, TEXT, JSONB, JSONB, JSONB) TO service_role;
-GRANT EXECUTE ON FUNCTION public.handback_pending(TEXT, INT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.handback_claim(UUID, UUID, TEXT, JSONB, JSONB) TO service_role;
-GRANT EXECUTE ON FUNCTION public.handback_deliverables(TEXT, INT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.handback_delivered(UUID, BOOLEAN) TO service_role;
-GRANT EXECUTE ON FUNCTION public.handback_owned(TEXT, INT) TO service_role;
+-- Round 2 (tester TF2): EXECUTE on the hand-back functions is ob_app_memory's alone (design 2.8: every app container
+-- connects as it) - NOT service_role, which is PostgREST's anonymous role (init-grants.sql's default privileges give
+-- every new function to service_role: taken back here), not anon / authenticated, not PUBLIC. The same for every other
+-- function this file creates (the guards, the allow-list checks). ob_app_memory is created out of band; on a volume
+-- where it does not exist yet, run this file again after creating it (idempotent) - until then the door fails closed.
+DO $$
+DECLARE
+    f TEXT;
+    r RECORD;
+BEGIN
+    FOREACH f IN ARRAY ARRAY[
+        'public.handback_open(text,text,text,integer,text,uuid,text,jsonb,jsonb,jsonb)', 'public.handback_pending(text,integer)',
+        'public.handback_claim(uuid,uuid,text,jsonb,jsonb)', 'public.handback_deliverables(text,integer)',
+        'public.handback_delivered(uuid,boolean)', 'public.handback_owned(text,integer)',
+        'public.trg_research_jobs_boundary()', 'public.trg_research_prompts_boundary()',
+        'public.request_boundary_options_ok(jsonb,boolean)', 'public.request_boundary_stamp_ok(jsonb)']
+    LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
+        FOR r IN SELECT DISTINCT ro.rolname FROM pg_proc p, aclexplode(p.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee
+                  WHERE p.oid = to_regprocedure(f) AND NOT ro.rolsuper AND ro.oid <> p.proowner
+        LOOP
+            EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', f, r.rolname);
+        END LOOP;
+        IF f LIKE 'public.handback_%' AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO ob_app_memory', f);
+        END IF;
+    END LOOP;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
+        RAISE NOTICE 'rw-boundary-core: ob_app_memory does not exist yet - the handback_* functions are executable by nobody until this file runs again after it is created';
+    END IF;
+END $$;
 
 -- ── archive first: the definitions this file replaces ──────────────────
 -- research_job_report_owner (slot 390) and trg_idea_revisions_inlet (slot 230) are saved as the database holds them
@@ -336,7 +409,8 @@ BEGIN
            SET inlet_ref = COALESCE(NULLIF(j.inlet_ref, 'null'::jsonb), jsonb_build_object('kind', 'idea', 'id', NEW.idea_id::text)),
                refinery_id = COALESCE(j.refinery_id, NEW.idea_id)
          WHERE j.id = NEW.research_job_id::uuid
-           AND j.request_kind <> 'derived';   -- rw-boundary-core: a derived job carries no inlet
+           AND j.request_kind <> 'derived'   -- rw-boundary-core: a derived job carries no inlet ...
+           AND NOT EXISTS (SELECT 1 FROM public.research_jobs r WHERE r.id = j.root_job_id AND r.request_kind = 'derived');   -- ... nor a branch of one
     END IF;
     RETURN NEW;
 END;
