@@ -65,7 +65,9 @@ param(
   # round 4: the round-3 slot 390 (it reads "minted" from the stored label only)
   [string]$ReportRoundThreeSha = 'b125959',
   # round 5: the round-4 slot 390 (it reads "existing" from started_at, which a re-run resets)
-  [string]$ReportRoundFourSha = '1d33b53'
+  [string]$ReportRoundFourSha = '1d33b53',
+  # round 6: the round-5 slot 390 (its tie set misses an errored minting job's filed event; it classifies by time)
+  [string]$ReportRoundFiveSha = '65a8203'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -453,6 +455,19 @@ try {
     # the times the move reads (round 5, the tester's tC): each job was created 3h ago, its FIRST run minted the thread 2h
     # ago, and a re-run (boot recovery / model-down requeue) reset started_at to 1h ago - its 'explicit' resend and the
     # recovered answer name the thread the first run minted; the existing thread (tE) is a day old and keeps its name
+    # round 6 (tester attempt 5, tF): the job that minted the thread ERRORED after filing (only its filed event names the
+    # thread); a later job of the same idea filed into it as 'existing'. And an old thread no moved job touches (tU).
+    $idea3 = Q1 "SELECT public.idea_capture('wiki-owner-$wk', 'service:lab', 'wiki idea three $wk', 'wiki idea three statement $wk', NULL, NULL)::text"
+    $job3 = Q1 "INSERT INTO public.research_jobs (status, origin, query, refinery_id, error) VALUES ('error', 'manual', 'wiki research three $wk', '$idea3', 'failed after filing') RETURNING id::text"
+    $job4 = Q1 "INSERT INTO public.research_jobs (status, origin, query, refinery_id) VALUES ('done', 'manual', 'wiki research four $wk', '$idea3') RETURNING id::text"
+    $src3 = Q1 "INSERT INTO public.sources (title, content, content_type, research_key) VALUES ('Report three $mark', 'the third report $mark body', 'research_synthesis', 'rk-wiki3-$wk') RETURNING id::text"
+    $src4 = Q1 "INSERT INTO public.sources (title, content, content_type, research_key) VALUES ('Report four $mark', 'the fourth report $mark body', 'research_synthesis', 'rk-wiki4-$wk') RETURNING id::text"
+    $tErr = Q1 "INSERT INTO public.threads (name, status, created_at) VALUES ('Errored notebook $mark', 'active', now() - interval '2 hours') RETURNING id::text"
+    $null = Q1 "INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ('$job3', '$job3', 'filed', 'due_process', jsonb_build_object('synthesis_id', '$src3', 'research_key', 'rk-wiki3-$wk', 'thread_id', '$tErr'))"
+    $null = Q1 "UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', '$tErr', 'thread_decision', 'existing', 'persist', jsonb_build_object('synthesis_id', '$src4'))) WHERE id = '$job4'"
+    $null = Q1 "UPDATE public.research_jobs SET created_at = now() - interval '3 hours' WHERE id = '$job3'"
+    $tUntied = Q1 "INSERT INTO public.threads (name, status, created_at) VALUES ('Untied notebook $wk', 'active', now() - interval '1 day') RETURNING id::text"
+    $null = Q1 "SELECT public.link_source_to_thread('$tUntied', '11111111-1111-4111-8111-111111111111', 'automatic', NULL, 'confirmed')"
     $null = Q1 "UPDATE public.research_jobs SET created_at = now() - interval '3 hours', started_at = now() - interval '1 hour' WHERE id IN ('$job', '$job2'); UPDATE public.threads SET created_at = now() - interval '2 hours' WHERE id IN ('$tNew', '$tRec'); UPDATE public.threads SET created_at = now() - interval '1 day' WHERE id = '$tOld'"
     $notebooks = {
       $r = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
@@ -513,6 +528,17 @@ try {
     $wlog += "round 4: notebooks $nbR4"
     Check ($nbR4 -match 'B 200:[1-9]' -and $nbR4 -match 'lane 200:[1-9]') "[5k] RED: round 4's 390 - a re-run job's threads (created before the re-run's start) keep their report-derived names for B and the lane ($nbR4)"
     $wlog += "[round 4 revert] $(& $run $r4r 'ri-r4-revert.sql')"
+    # round 6 RED: round 5's 390 - the thread an errored job minted (named only by its filed event) and a later job filed
+    # into as 'existing' is classed existing by time and keeps its report-derived name
+    $r5i = Join-Path $env:TEMP "$P-r5-init-390.sql"; $r5r = Join-Path $env:TEMP "$P-r5-revert-390.sql"
+    [System.IO.File]::WriteAllText($r5i, ((& git -C $ob1 show "${ReportRoundFiveSha}:docker/init-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText($r5r, ((& git -C $ob1 show "${ReportRoundFiveSha}:docker/revert-report-isolation.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $script:made.dirs += @($r5i, $r5r)
+    $wlog += "[round 5 init] $(& $run $r5i 'ri-r5-init.sql')"
+    $nbR5 = & $notebooks
+    $wlog += "round 5: notebooks $nbR5"
+    Check ($nbR5 -match 'B 200:[1-9]' -and $nbR5 -match 'lane 200:[1-9]') "[5k] RED: round 5's 390 - the thread an errored job minted keeps its report-derived name for B and the lane ($nbR5)"
+    $wlog += "[round 5 revert] $(& $run $r5r 'ri-r5-revert.sql')"
     # GREEN: this 390
     $wlog += "[init] $(& $run (Join-Path $dockerDir 'init-report-isolation.sql') 'ri-init.sql')"
     $afterInit = & $rows
@@ -525,8 +551,10 @@ try {
     $nbG = & $notebooks
     $wlog += "this 390: rows after init $afterInit, after the reconcile $afterRec; source rows $shared; search as B: $searchG; clean page in: $clean; notebooks: $nbG"
     Check ($nbG -match 'B 200:0' -and $nbG -match 'lane 200:0') "[5k] this 390: GET /workbench/notebooks gives B and the lane no thread text of the report ($nbG)"
+    # round 6: every thread tied to a moved idea job is renamed - the old tied thread (tE) included; an untied old one is not
     $teName = Q1 "SELECT name FROM public.threads WHERE id = '$tOld'"
-    Check ($teName -eq "Shared notebook $wk") "[5k] this 390: the truly old thread (tE) keeps its name ($teName)"
+    $tuName = Q1 "SELECT name FROM public.threads WHERE id = '$tUntied'"
+    Check ($teName -match '^Research thread ' -and $tuName -eq "Untied notebook $wk") "[5k] this 390: the old thread tied to a moved job (tE) is renamed ($teName); the untied old thread keeps its name ($tuName)"
     Check ($afterInit -eq '0' -and $afterRec -eq '0' -and $shared -eq '0' -and $searchG -match 'status 200 hits 0' -and $clean -eq '1') "[5k] this 390: the leaf and the citing page are withheld, the reconcile repair (files present) writes neither back, B's search finds nothing, a clean page goes in ($afterInit / $afterRec; $searchG)"
     $wlog += "[revert] $(& $run (Join-Path $dockerDir 'revert-report-isolation.sql') 'ri-rv2.sql')"
     $afterRv = & $rows; $nbRv = & $notebooks

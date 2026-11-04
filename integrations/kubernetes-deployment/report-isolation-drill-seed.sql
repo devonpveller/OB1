@@ -21,6 +21,7 @@ DECLARE
     v_ta UUID; v_tb UUID;
     v_i8 UUID; v_i9 UUID; v_j8 UUID; v_j9 UUID; v_s8 UUID := gen_random_uuid(); v_s9 UUID := gen_random_uuid(); v_w8 UUID := gen_random_uuid();
     v_tc UUID; v_td UUID;
+    v_i10 UUID; v_j10 UUID; v_j11 UUID; v_s10 UUID := gen_random_uuid(); v_s11 UUID := gen_random_uuid(); v_tf UUID; v_tu UUID;
 BEGIN
     v_i1 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea one', 'drill idea one statement', NULL, NULL);
     v_i2 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea two', 'drill idea two statement', NULL, NULL);
@@ -134,6 +135,24 @@ BEGIN
     UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_td::text, 'thread_decision', 'explicit',
                                                              'persist', jsonb_build_object('synthesis_id', v_s9::text))),
                                      created_at = now() - interval '3 hours', started_at = NULL WHERE id = v_j9;
+    -- round 6 (tester attempt 5, tF): the job that minted the thread (j10) ERRORED after filing - no curator answer, only
+    -- its typed 'filed' event names the thread; a later job of the same idea (j11) filed into it as 'existing'
+    v_i10 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea ten', 'drill idea ten statement', NULL, NULL);
+    SELECT id INTO v_j10 FROM public.research_jobs WHERE refinery_id = v_i10 AND branch_kind = 'idea';
+    INSERT INTO public.research_jobs (status, origin, query, refinery_id) VALUES ('done', 'manual', 'drill j11', v_i10) RETURNING id INTO v_j11;
+    INSERT INTO public.sources (id, url, title, content, content_type, research_key, metadata) VALUES
+      (v_s10, NULL, 'Drill idea report ten', 'DrillReportTen text', 'research_synthesis', 'rk-drill-10', '{"claim":"DrillReportTen claim"}'),
+      (v_s11, NULL, 'Drill idea report eleven', 'DrillReportEleven text', 'research_synthesis', 'rk-drill-11', '{"claim":"DrillReportEleven claim"}');
+    INSERT INTO public.threads (name, status, created_at) VALUES ('MintedName DrillReportTen', 'active', now() - interval '2 hours') RETURNING id INTO v_tf;
+    UPDATE public.research_jobs SET status = 'error', error = 'failed after filing', result = NULL, created_at = now() - interval '3 hours',
+                                    started_at = now() - interval '3 hours' WHERE id = v_j10;
+    INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload)
+    VALUES (v_j10, v_j10, 'filed', 'due_process', jsonb_build_object('synthesis_id', v_s10::text, 'research_key', 'rk-drill-10', 'thread_id', v_tf::text));
+    UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('thread_id', v_tf::text, 'thread_decision', 'existing',
+                                                             'persist', jsonb_build_object('synthesis_id', v_s11::text))) WHERE id = v_j11;
+    -- an OLD thread no moved job is tied to (linked only to the shared s3): it keeps its name
+    INSERT INTO public.threads (name, status, created_at) VALUES ('Drill untied thread', 'active', now() - interval '1 day') RETURNING id INTO v_tu;
+    PERFORM public.link_source_to_thread(v_tu, v_s3, 'automatic', NULL, 'confirmed');
     -- the times the move reads: the other idea jobs created and started now; the two EXISTING threads (tE: a truly old
     -- thread keeps its name) were made a day before
     UPDATE public.research_jobs SET started_at = now() WHERE id IN (v_j1, v_j2, v_j6, v_j7);
@@ -141,7 +160,7 @@ BEGIN
 
     INSERT INTO public._ri_drill (name, id) VALUES ('s1', v_s1), ('s2', v_s2), ('s3', v_s3), ('s4', v_s4), ('w', v_w), ('i1', v_i1), ('i2', v_i2),
       ('j1', v_j1), ('j2', v_j2), ('c1', v_c1), ('c2', v_c2), ('c3', v_c3), ('thread', v_thread), ('session', v_sess),
-      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8)), ('tnew', v_tnew::text), ('tlink', v_tlink::text), ('ta', v_ta::text), ('tb', v_tb::text), ('tc', v_tc::text), ('td', v_td::text)
+      ('e', v_e::text), ('entity_page', 'content/tool/drill-tool-' || left(v_s1::text, 8)), ('tnew', v_tnew::text), ('tlink', v_tlink::text), ('ta', v_ta::text), ('tb', v_tb::text), ('tc', v_tc::text), ('td', v_td::text), ('tf', v_tf::text), ('tu', v_tu::text)
     ON CONFLICT (name) DO UPDATE SET id = EXCLUDED.id;
 END $$;
 COMMIT;

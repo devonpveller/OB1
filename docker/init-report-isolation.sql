@@ -353,31 +353,28 @@ BEGIN
     --      existing: the same description from its remaining shared sources (the pre-report text is not recorded
     --        anywhere: no history table, and the job data holds only the thread id), no embedding.
     --    The embedding is re-made from the new text by the curator's backfill-thread-embeddings.ts (the deploy step).
-    -- round 4 (tester attempt 3): "minted" is decided from the DATA, not the stored curator label - a resend after the
-    -- first attempt committed stores 'explicit', the filed-event recovery stores no decision at all, and both threads
-    -- were minted by the first attempt. A thread counts as EXISTING only when it was created before every moved idea
-    -- job tied to it was CREATED (its job's curator thread_id, or the job of a moved report linked into it). Round 5
-    -- (tester attempt 4): not started_at - the boot recovery and the model-down requeue reset started_at and re-run
-    -- the job, so a thread the first run minted predates the re-run's start. created_at is written only by the job's
-    -- INSERT (the column default; no UPDATE, trigger or re-insert writes it - checked 2026-11-03), so no re-run moves
-    -- it. Anything the timing cannot prove - a link with no job - is treated as minted (renamed: the conservative
-    -- choice). A 'new' label is minted whatever the times say.
-    -- every (thread, moved job) tie - read by the classification below AND by the fail-closed check after it
+    -- round 6 (the coordinator's stopping rule, after tester attempts 3-5 each found a minted thread a timing rule
+    -- classed "existing"): EVERY thread tied to a moved idea job is treated as minted - renamed, re-slugged, its notebook
+    -- labels relabelled, its hub page withheld, its description re-made from shared material. A genuinely shared thread
+    -- an idea job merely filed into gets a neutral name too (the accepted cost). The ties are everything that links a
+    -- moved synthesis to a thread: the curator answer of EVERY idea job linked to it (not only the move's one pick), the
+    -- thread_id its jobs' typed 'filed' events carry, and every thread link (thread_sources) the move archived.
     CREATE TEMP TABLE _ri_ties ON COMMIT DROP AS
-    SELECT t.id AS thread_id, t.created_at AS thread_created, x.job_id, j.created_at AS job_created, x.decision
-      FROM (SELECT j.result -> 'curator' ->> 'thread_id' AS tid, j.id AS job_id, j.result -> 'curator' ->> 'thread_decision' AS decision
+    SELECT DISTINCT t.id AS thread_id
+      FROM (SELECT j.result -> 'curator' ->> 'thread_id' AS tid
               FROM public.research_jobs j
              WHERE j.id IN (SELECT l.job_id FROM _ri_links l WHERE l.idea_hit AND l.job_id IS NOT NULL AND l.source_id = ANY(v_ids))
             UNION ALL
-            SELECT a.row_data ->> 'thread_id', m.job_id, NULL FROM public.research_report_isolation_archive a
-              JOIN _ri_move m ON m.source_id = a.source_id
+            SELECT e.payload ->> 'thread_id' FROM public.research_job_events e
+             WHERE e.type = 'filed'
+               AND (e.job_id IN (SELECT l.job_id FROM _ri_links l WHERE l.idea_hit AND l.job_id IS NOT NULL AND l.source_id = ANY(v_ids))
+                    OR e.payload ->> 'synthesis_id' IN (SELECT x::text FROM unnest(v_ids) x))
+            UNION ALL
+            SELECT a.row_data ->> 'thread_id' FROM public.research_report_isolation_archive a
              WHERE a.batch = v_batch AND to_regclass(a.tbl) = 'public.thread_sources'::regclass) x
-      JOIN public.threads t ON t.id::text = x.tid
-      LEFT JOIN public.research_jobs j ON j.id = x.job_id;
+      JOIN public.threads t ON t.id::text = x.tid;
     CREATE TEMP TABLE _ri_threads ON COMMIT DROP AS
-    SELECT x.thread_id AS id,
-           bool_or(x.decision = 'new' OR x.job_id IS NULL OR x.job_created IS NULL OR x.thread_created >= x.job_created) AS minted
-      FROM _ri_ties x GROUP BY x.thread_id;
+    SELECT x.thread_id AS id, true AS minted FROM _ri_ties x;
     INSERT INTO public.research_report_isolation_archive (batch, source_id, tbl, col, action, row_data)
     SELECT v_batch, v_ids[1], 'public.threads', 'id', 't', to_jsonb(t) || jsonb_build_object('_minted', rt.minted)
       FROM _ri_threads rt JOIN public.threads t ON t.id = rt.id;
@@ -405,19 +402,13 @@ BEGIN
       FROM public.research_report_isolation_archive a
      WHERE a.batch = v_batch AND a.action = 'b' AND (a.row_data ->> 'id') = s.id::text;
     PERFORM set_config('session_replication_role', 'origin', true);
-    -- fail closed, over EVERY affected thread (round 4): each is either renamed (minted) or proven older than every
-    -- moved job tied to it - by the job's created_at, the same fact the classification reads (round 5) - so its name
-    -- and slug cannot come from a report; none keeps its archived description or an
-    -- embedding; a minted one keeps neither its old name nor its old slug; and no shared source is still labelled with
-    -- a minted thread's old name
+    -- fail closed, over EVERY thread in the tie set (round 6: the same set the move processed): each was archived, is
+    -- minted, keeps neither its old name nor its old slug nor its archived description, has no embedding; and no shared
+    -- source is still labelled with any of their old names
     SELECT count(*) INTO v_n FROM public.threads t JOIN public.research_report_isolation_archive a
         ON a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'id') = t.id::text
      WHERE ((a.row_data ->> '_minted')::boolean AND (t.name = a.row_data ->> 'name' OR t.slug IS NOT DISTINCT FROM NULLIF(a.row_data ->> 'slug', '') AND a.row_data ->> 'slug' IS NOT NULL))
-        OR (NOT (a.row_data ->> '_minted')::boolean AND EXISTS (
-              SELECT 1 FROM _ri_ties x
-               WHERE x.thread_id = t.id
-                 AND (x.decision = 'new' OR x.job_id IS NULL OR x.job_created IS NULL
-                      OR (a.row_data ->> 'created_at')::timestamptz >= x.job_created)))
+        OR NOT (a.row_data ->> '_minted')::boolean
         OR (coalesce(a.row_data ->> 'description', '') <> '' AND t.description IS NOT DISTINCT FROM a.row_data ->> 'description')
         OR t.embedding IS NOT NULL;
     v_n := v_n + (SELECT count(*) FROM public.sources s JOIN public.research_report_isolation_archive a
