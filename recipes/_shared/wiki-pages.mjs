@@ -172,12 +172,75 @@ export function toRestRow(r, now = new Date().toISOString()) {
  * not land is a failed compile, never a silent `false`.
  */
 export async function upsertWikiPages(rows) {
+  return (await upsertWikiPagesReport(rows)).written.length;
+}
+
+// ── WITHHELD ROWS (research-workbench rw-idea-privacy round 4, review R1) ──
+// A database guard can WITHHOLD a row: a BEFORE trigger on wiki_pages that
+// returns NULL (slot 380's trg_idea_privacy_wiki_guard: a page that shows an
+// idea's text; slot 390's trg_report_isolation_wiki_guard: a private report).
+// PostgREST then answers 2xx and the row is NOT written - so "2xx" no longer
+// means "landed". The upsert asks for the slugs it wrote (return=representation,
+// select=slug): a slug it does not get back was withheld. Generic: any guard of
+// that shape is covered, with no change to the guard. A body that is not a JSON
+// array (a stub, an old proxy) tells nothing, and everything counts as landed
+// (the behaviour before this change). Withheld slugs are remembered for this
+// process (the reconcile leaves them out of its drift) and never logged by name.
+const _withheld = new Set();
+export function isWithheldWikiPage(slug) { return _withheld.has(slug); }
+export function withheldWikiPageCount() { return _withheld.size; }
+
+/** Upsert rows; returns { written: [slug], withheld: [slug] }. THROWS on a failed request, like upsertWikiPages. */
+export async function upsertWikiPagesReport(rows) {
   const list = (Array.isArray(rows) ? rows : [rows]).filter((r) => r && r.slug);
-  if (!list.length) return 0;
+  if (!list.length) return { written: [], withheld: [] };
   const now = new Date().toISOString();
-  await obFetch("POST", "wiki_pages?on_conflict=slug", list.map((r) => toRestRow(r, now)),
-    { prefer: "resolution=merge-duplicates,return=minimal" });
-  return list.length;
+  const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?on_conflict=slug&select=slug`, {
+    method: "POST",
+    headers: { "content-type": "application/json", apikey: "local-trust", prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(list.map((x) => toRestRow(x, now))),
+    signal: AbortSignal.timeout(TIMEOUT_MS()),
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`POST wiki_pages: ${r.status} ${text.slice(0, 200)}`);
+  let back = null;
+  try { const j = JSON.parse(text); if (Array.isArray(j)) back = new Set(j.map((x) => x && x.slug)); } catch { /* not JSON: tells nothing */ }
+  const written = [], withheld = [];
+  for (const x of list) (back && !back.has(x.slug) ? withheld : written).push(x.slug);
+  for (const s of withheld) _withheld.add(s);
+  for (const s of written) _withheld.delete(s);
+  return { written, withheld };
+}
+
+// The withheld rows' files: a staged update is dropped (the file keeps the content of the row the guard kept); a file
+// this run CREATED is removed (it holds the withheld content); an older file whose slug has no row any more (a page
+// withheld before this run, its file not yet moved out) is removed too - a file with no row is reconcile drift and
+// shows what the database refused. A file whose slug still has a row is left (it is that row's page).
+async function leaveOutWithheld(slugs) {
+  const paths = new Map();
+  for (const s of slugs) {
+    const p = _pathOf.get(s);
+    _pathOf.delete(s);
+    _unsynced.delete(s);
+    if (!p) continue;
+    const tmp = _staged.get(p);
+    if (tmp) { _staged.delete(p); try { fs.unlinkSync(tmp); } catch { /* gone */ } }
+    paths.set(s, p);
+  }
+  if (!paths.size) return;
+  let hasRow = null;
+  try {
+    const inList = [...paths.keys()].map((s) => `"${s.replace(/"/g, '\\"')}"`).join(",");
+    const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?select=slug&slug=in.(${encodeURIComponent(inList)})`, {
+      headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(TIMEOUT_MS()),
+    });
+    if (r.ok) hasRow = new Set((await r.json()).map((x) => x.slug));
+  } catch { /* unknown: only the files this run created go */ }
+  for (const [s, p] of paths) {
+    const created = _created.has(p);
+    _created.delete(p);
+    if (created || (hasRow && !hasRow.has(s))) { try { fs.unlinkSync(p); } catch { /* gone */ } }
+  }
 }
 
 // A compile run that COMPLETED but with structural failures or unsynced rows
@@ -191,6 +254,7 @@ const _queue = new Map();     // slug -> row (last write wins)
 const _unsynced = new Map();  // slug -> error (the page's file exists; its row did not land)
 const _pathOf = new Map();    // slug -> the absolute path it was queued from (round 2: staged files)
 let _synced = 0;
+let _heldRun = 0; // rows a database guard withheld this run (not synced, not unsynced)
 
 // Vault-relative path from an absolute one; null OUTSIDE the vault root (a
 // scratch --out-dir must never write junk slugs, observed 2026-08-26). The
@@ -251,6 +315,7 @@ export function queueWikiPage(absPath, markdown) {
 // wikiPageExists (generate-wiki's collision check), so a staged page is not
 // invisible to its own compile.
 const _staged = new Map(); // absolute path -> hidden staged file
+const _created = new Set(); // absolute paths this run CREATED (written before their row): removed if the row is withheld
 let _createPending = false;
 const stagedName = (absPath) => nodePath.join(nodePath.dirname(absPath), `.${nodePath.basename(absPath)}.wp-staged-${process.pid}`);
 function stripVolatile(s, keys) {
@@ -286,7 +351,7 @@ export function writeWikiPage(absPath, content, { volatileKeys = null } = {}) {
     fs.mkdirSync(nodePath.dirname(absPath), { recursive: true });
     if (prev == null || !vaultRel(absPath)) {
       fs.writeFileSync(absPath, content, "utf8");
-      if (vaultRel(absPath)) _createPending = true;
+      if (vaultRel(absPath)) { _createPending = true; if (prev == null) _created.add(absPath); }
     } else {
       const tmp = _staged.get(absPath) || stagedName(absPath);
       fs.writeFileSync(tmp, content, "utf8");
@@ -332,14 +397,16 @@ export async function flushWikiPages() {
   const CHUNK = 200;
   let sent = 0;
   let failed = 0;
+  let held = 0;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const part = rows.slice(i, i + CHUNK);
     let err = null;
+    let rep = null;
     // at or before the rows' stamp (upsertWikiPages stamps them after this)
     const landedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        await upsertWikiPages(part);
+        rep = await upsertWikiPagesReport(part);
         err = null;
         break;
       } catch (e) {
@@ -351,13 +418,19 @@ export async function flushWikiPages() {
       for (const r of part) { _unsynced.set(r.slug, String(err?.message || err)); commitStaged(_pathOf.get(r.slug), null); _pathOf.delete(r.slug); }
       console.error(`[wiki-pages] row flush FAILED for ${part.length} page(s) after one retry: ${err?.message || err}`);
     } else {
-      sent += part.length;
-      _synced += part.length;
-      for (const r of part) { _unsynced.delete(r.slug); commitStaged(_pathOf.get(r.slug), landedAt); _pathOf.delete(r.slug); }
+      // a withheld row (a database guard refused it, see upsertWikiPagesReport) is neither synced nor a failure: its
+      // file is left out, so it never becomes reconcile drift, and it is not retried
+      const out = new Set(rep.withheld);
+      const landed = part.filter((r) => !out.has(r.slug));
+      sent += landed.length;
+      _synced += landed.length;
+      for (const r of landed) { _unsynced.delete(r.slug); const p = _pathOf.get(r.slug); _created.delete(p); commitStaged(p, landedAt); _pathOf.delete(r.slug); }
+      if (out.size) { held += out.size; _heldRun += out.size; await leaveOutWithheld([...out]); }
     }
   }
   if (sent) console.log(`[wiki-pages] synced ${sent} page row(s)`);
-  return { sent, failed };
+  if (held) console.log(`[wiki-pages] ${held} page(s) withheld by the database (a privacy guard): not written, their files left out`);
+  return held ? { sent, failed, withheld: held } : { sent, failed };
 }
 
 // Per-batch flush: call after each page write. Flushes when the queue holds a
@@ -383,9 +456,11 @@ export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   commitAllStagedWikiPages(); // anything staged but never queued (none expected): in place now
   const u = unsyncedWikiPages();
   const synced = _synced;
+  const heldRun = _heldRun;
   _synced = 0; // per run: the next run (or wiki-service cycle) counts its own
+  _heldRun = 0;
   if (!u.length) {
-    console.log(`[wiki-pages] ${tag}: all ${synced} written page row(s) landed`);
+    console.log(`[wiki-pages] ${tag}: all ${synced} written page row(s) landed` + (heldRun ? ` (${heldRun} withheld by the database, files left out)` : ""));
     return 0;
   }
   const first = u.slice(0, 10).map((x) => x.slug).join(", ");

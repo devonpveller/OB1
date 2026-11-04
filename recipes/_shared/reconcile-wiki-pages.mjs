@@ -43,7 +43,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseWikiPage, upsertWikiPages } from "./wiki-pages.mjs";
+import { parseWikiPage, upsertWikiPagesReport, isWithheldWikiPage } from "./wiki-pages.mjs";
 import { listOpen, STRUCTURAL_FILE } from "./structural-ledger.mjs";
 import { isContentDir, isPagePath } from "./quartz-slug.mjs";
 
@@ -332,14 +332,22 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
   const { classify } = await import("./page-classes.mjs");
   const cls = classOf || ((rel) => classify(rel).page_class);
   const files = await listFiles(vault);
+  // rw-idea-privacy round 4 (review R1): a page a database guard WITHHOLDS (its row refused - see wiki-pages.mjs
+  // upsertWikiPagesReport) is not drift: it has no row by design. Such slugs, as this process has learned them (from
+  // its own writes, or this pass's repair below), leave the file list before the diff, and only their COUNT is
+  // reported - never the slugs (which pages are withheld is itself private).
+  // (a withheld UPDATE keeps its older row and that row's file: only a withheld slug with NO row leaves the list)
+  const leaveOutHeld = (rowsNow) => { let n = 0; for (const s of [...files.keys()]) if (isWithheldWikiPage(s) && !rowsNow.has(s)) { files.delete(s); n++; } return n; };
   const rows = await listRows();
+  let withheld = leaveOutHeld(rows);
   await markEmptyFiles(vault, files, rows);
   const failed = listOpen(null, structuralFile || structuralFileFor(vault));
   let report = diffFilesRows(files, rows, cls, { failed });
+  report.withheld = withheld;
   if (report.missing.length) {
     // round 3: a page created inside this pass is re-read once before it counts
     const rc = await recheckMissing({ rows, missing: report.missing });
-    if (rc.resolved) { await markEmptyFiles(vault, files, rows); report = diffFilesRows(files, rows, cls, { failed }); }
+    if (rc.resolved) { await markEmptyFiles(vault, files, rows); report = diffFilesRows(files, rows, cls, { failed }); report.withheld = withheld; }
     report.missingRecheck = rc;
   }
   report.checkedAt = new Date().toISOString();
@@ -360,8 +368,8 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
   for (let i = 0; i < batch.length; i += 200) {
     const part = batch.slice(i, i + 200);
     try {
-      await upsertWikiPages(part);
-      repaired.push(...part.map((r) => r.slug));
+      const rep = await upsertWikiPagesReport(part);
+      repaired.push(...rep.written);   // a withheld row is not repaired (and is remembered: see leaveOutHeld)
     } catch (e) {
       failedWrites.push(...part.map((r) => ({ slug: r.slug, error: String(e?.message || e) })));
     }
@@ -370,8 +378,10 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
     (failedWrites.length ? `, ${failedWrites.length} FAILED (first ${failedWrites[0].slug}: ${failedWrites[0].error})` : "") +
     (repaired.length ? `; first: ${repaired.slice(0, 5).join(", ")}` : ""));
   const rowsAfter = await listRows();
+  withheld += leaveOutHeld(rowsAfter);
   await markEmptyFiles(vault, files, rowsAfter);
   const after = diffFilesRows(files, rowsAfter, cls, { failed });
+  after.withheld = withheld;
   return { ...report, repaired, repairFailed: failedWrites, after };
 }
 
@@ -379,7 +389,8 @@ export function formatReport(r) {
   const lines = [];
   const red = r.drift > 0;
   lines.push(`[reconcile] ${red ? "DRIFT" : "clean"}: ${r.files} file(s), ${r.rows} row(s); ${r.missing.length} missing, ` +
-    `${r.stale.length} stale, ${r.empty.length} empty, ${r.orphan.length} orphan, ${r.failed.length} failed`);
+    `${r.stale.length} stale, ${r.empty.length} empty, ${r.orphan.length} orphan, ${r.failed.length} failed` +
+    (r.withheld ? `; ${r.withheld} withheld by the database (not drift)` : ""));
   for (const [c, b] of Object.entries(r.byClass).sort()) {
     lines.push(`[reconcile]   ${c}: files=${b.files} rows=${b.rows} missing=${b.missing.length} stale=${b.stale.length} ` +
       `empty=${b.empty.length} orphan=${b.orphan.length} failed=${b.failed.length}`);

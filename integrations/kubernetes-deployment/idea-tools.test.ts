@@ -32,7 +32,7 @@ function fake(outcome: Record<string, unknown>) {
 }
 
 const ID = "a1000000-0000-4000-8000-0000000000a1";
-const EDIT = { idea_id: ID, idea: " refined ", embedding: "[0.1]", channel: "#ideas" };
+const EDIT = { idea_id: ID, idea: " refined ", embedding: "[0.1]" };
 const directWrites = (log: { sql: string }[]) => log.filter((l) => /(INSERT INTO|UPDATE)\s+(public\.)?(ideas|idea_revisions)\b/.test(l.sql));
 
 Deno.test("ideaOwner: the configured default subject, else the seam's placeholder - never a tool argument", () => {
@@ -45,6 +45,7 @@ Deno.test("update_idea: one idea_edit() call with the server's owner and NO corp
   const { client, log } = fake({ outcome: "changed", revision: 3, title: "T" });
   const r = await updateIdea(client, "owner-a", EDIT);
   assert(!r.isError && /revision 3/.test(r.text) && /room/.test(r.text), r.text);
+  assert(!/mattermost|#ideas/i.test(r.text), "rw-idea-privacy: findings go to the room, never a shared channel");
   const calls = log.filter((l) => /idea_edit\(/.test(l.sql));
   eq(calls.length, 1, "one function call");
   eq(calls[0].args.slice(0, 4), [ID, "owner-a", "service:openbrain-mcp", "refined"], "owner, actor, text");
@@ -75,15 +76,16 @@ Deno.test("capture_idea: one idea_capture() call with the server's owner - no th
 
 Deno.test("research_idea: one idea_research() call with the server's owner; another owner's idea fails; no flag write", async () => {
   const ok = fake({ outcome: "queued", job_id: "job-1" });
-  const r = await researchIdea(ok.client, "owner-a", ID, "#ideas");
+  const r = await researchIdea(ok.client, "owner-a", ID);
   assert(/job-1/.test(r.text), r.text);
+  assert(/room/.test(r.text) && !/mattermost|#ideas/i.test(r.text), r.text);
   eq(ok.log.filter((l) => /idea_research\(/.test(l.sql))[0].args, [ID, "owner-a", "service:openbrain-mcp"]);
   eq(directWrites(ok.log).length, 0, "the old metadata.research_now flag write is gone");
   const no = fake({ outcome: "not_found" });
   let err = "";
-  try { await researchIdea(no.client, "owner-a", ID, "#ideas"); } catch (e) { err = (e as Error).message; }
+  try { await researchIdea(no.client, "owner-a", ID); } catch (e) { err = (e as Error).message; }
   eq(err, `no idea with id ${ID}`);
-  const ar = await researchIdea(fake({ outcome: "archived" }).client, "owner-a", ID, "#ideas");
+  const ar = await researchIdea(fake({ outcome: "archived" }).client, "owner-a", ID);
   assert(ar.isError, "an archived refinery is not researched");
 });
 
@@ -121,4 +123,10 @@ Deno.test("the tools in index.ts call these functions - no idea write is left in
   }
   const find = src.slice(src.indexOf(`"find_idea",`), src.indexOf(`"research_idea",`));
   assert(/owner_sub = \$/.test(find), "find_idea lists the owner's ideas only");
+});
+
+Deno.test("rw-idea-privacy: no idea tool tells the user findings go to Mattermost (they go to the idea's room)", async () => {
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const tools = src.slice(src.indexOf('"capture_idea"'), src.indexOf('"promote_idea"'));
+  assert(tools.length > 0 && !/Mattermost|#ideas|IDEA_CHANNEL/.test(tools.replace(/\/\/.*$/gm, "")), "an idea tool still names Mattermost");
 });

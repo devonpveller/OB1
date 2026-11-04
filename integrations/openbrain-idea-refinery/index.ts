@@ -6,8 +6,9 @@
  * trg_idea_revisions_engage -> research_idea_queue(), init-research-trees.sql) in the research
  * service's research-branch lane, coalescing so a change during a run queues exactly one follow-up
  * run. The nightly drain is gone; this service DELIVERS: a short delivery loop writes each finished
- * dossier into the idea's room in the research workspace (rw-p8a4-ideas, deliver.ts) and still posts it
- * to the idea's Mattermost thread; POST /run stays as the explicit `research now`.
+ * dossier into the idea's room in the research workspace (rw-p8a4-ideas, deliver.ts) and nowhere else -
+ * rw-idea-privacy (operator 2026-11-02, ideas are completely user isolated) stopped the post to the
+ * shared Mattermost channel; POST /run stays as the explicit `research now`.
  *
  *   POST /run[?wait=1]  -> `research now` for flagged ideas + one delivery pass; wait=1 returns the summary
  *   GET  /health        -> {ok, db}
@@ -21,12 +22,13 @@
  * Design: documentation/implementation-guide/idea-refinery/DESIGN-idea-refinery.md
  *   §3 (research frame), §3.1 (dossier), §6/§6.2 (batch + throttle), §7 (delivery).
  *
- * Env: DB_*, RESEARCH_URL, MCP_ACCESS_KEY, MATTERMOST_URL, MATTERMOST_TOKEN,
- *      MATTERMOST_SITE_URL, IDEA_REFINERY_CHANNEL, PORT, IDEA_* tunables.
+ * Env: DB_*, RESEARCH_URL, MCP_ACCESS_KEY, MATTERMOST_URL, MATTERMOST_TOKEN (the brainstorm loop only),
+ *      IDEA_REFINERY_CHANNEL, PORT, IDEA_* tunables.
  */
 import { Pool } from "postgres";
 import { deliverForIdea as deliverDossier, type JobResult } from "./deliver.ts";
 import { AGE_ONE_HORIZON, AGE_PER_OWNER, ownerSetting, settingBool, settingNumber } from "./settings.ts";
+import { channelRefusal, type MmMember } from "./mm-privacy.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const num = (k: string, d: number) => {
@@ -47,11 +49,10 @@ const MCP_ACCESS_KEY = env("MCP_ACCESS_KEY");
 // ride the un-attributed `agent` lane and throttle ourselves (below).
 const RESEARCH_ORIGIN = env("RESEARCH_ORIGIN", "agent");
 
-// Mattermost delivery (§7). Mattermost runs in the agent-org compose project,
-// published on the host at :8065; an OB container reaches it via host.docker.internal.
+// Mattermost: the brainstorm loop only (dossiers go to the idea's room, rw-idea-privacy). Mattermost runs in the
+// agent-org compose project, published on the host at :8065; an OB container reaches it via host.docker.internal.
 const MM_URL = env("MATTERMOST_URL", "http://host.docker.internal:8065").replace(/\/+$/, "");
 const MM_TOKEN = env("MATTERMOST_TOKEN", "");
-const MM_SITE_URL = env("MATTERMOST_SITE_URL", "").replace(/\/+$/, "");
 const MM_CHANNEL = env("IDEA_REFINERY_CHANNEL", "#ideas").replace(/^#/, ""); // slug, no '#'
 const MM_MAX_CHARS = num("IDEA_MM_MAX_CHARS", 12000);
 
@@ -214,8 +215,6 @@ async function pollJob(jobId: string): Promise<{ ok: boolean; result?: JobResult
 
 // ── Mattermost REST v4 (mirrors agent-bridge MattermostAdapter) ─────────────────
 let _mmTeamId: string | null = null;
-let _mmTeamName: string | null = null;
-const _chanCache = new Map<string, string>();
 const mmHeaders = () => ({ Authorization: `Bearer ${MM_TOKEN}`, "content-type": "application/json" });
 
 async function mmTeam(): Promise<string> {
@@ -228,29 +227,38 @@ async function mmTeam(): Promise<string> {
   }
   const id = String(teams[0].id);
   _mmTeamId = id;
-  _mmTeamName = teams[0].name ?? "";
   return id;
 }
 
-async function ensureChannel(name: string): Promise<string> {
-  const cached = _chanCache.get(name);
-  if (cached) return cached;
+// rw-idea-privacy: the channel is LOOKED UP, never created (#ideas was created PUBLIC: every member of the bot's team
+// could read every user's dossier), and it is used only while no second human can read it (mm-privacy.ts). Checked
+// when the loop starts and again right before EVERY post (privatePost), since a channel's members and type can change
+// while a gap's research runs. No owner -> Mattermost mapping exists, so the channel's one human cannot be checked
+// against the idea's owner; it must be one of IDEA_BRAINSTORM_OPERATORS (the people a brainstorm answers).
+class ChannelRefused extends Error {}
+
+async function privateChannel(name: string): Promise<string> {
   const teamId = await mmTeam();
-  let r = await fetch(`${MM_URL}/api/v4/teams/${teamId}/channels/name/${name}`, { headers: mmHeaders() });
-  if (r.ok) { const c = await r.json(); _chanCache.set(name, c.id); return c.id; }
-  r = await fetch(`${MM_URL}/api/v4/channels`, {
-    method: "POST",
-    headers: mmHeaders(),
-    body: JSON.stringify({
-      team_id: teamId, name,
-      display_name: name.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()),
-      type: "O",
-    }),
-  });
-  if (!r.ok) throw new Error(`mm ensureChannel ${name} ${r.status}: ${(await r.text().catch(() => "")).slice(0, 150)}`);
-  const c = await r.json();
-  _chanCache.set(name, c.id);
-  return c.id;
+  const c = await mmGet(`/teams/${teamId}/channels/name/${name}`);
+  await assertPrivate(String(c.id), String(c.type ?? ""), name);
+  return String(c.id);
+}
+
+async function assertPrivate(channelId: string, type: string | null, name = MM_CHANNEL): Promise<void> {
+  const t = type ?? String((await mmGet(`/channels/${channelId}`)).type ?? "");
+  const members: MmMember[] = [];
+  for (const m of await mmGet(`/channels/${channelId}/members?per_page=200`)) {
+    const u = await mmGet(`/users/${m.user_id}`);
+    members.push({ user_id: String(m.user_id), username: String(u.username ?? "").toLowerCase(), is_bot: !!u.is_bot });
+  }
+  const why = channelRefusal(t, members, OPERATORS);
+  if (why) throw new ChannelRefused(`#${name} ${why}`);
+}
+
+// every brainstorm post: the channel is checked again first (a gap's research lands minutes after the check before it)
+async function privatePost(channelId: string, message: string, rootId: string | null): Promise<{ id: string }> {
+  await assertPrivate(channelId, null);
+  return await mmPost(channelId, message, rootId);
 }
 
 async function mmPost(channelId: string, message: string, rootId: string | null): Promise<{ id: string }> {
@@ -261,12 +269,7 @@ async function mmPost(channelId: string, message: string, rootId: string | null)
   return await r.json();
 }
 
-function permalink(postId: string): string | null {
-  if (!MM_SITE_URL || !_mmTeamName || !postId) return null;
-  return `${MM_SITE_URL}/${_mmTeamName}/pl/${postId}`;
-}
-
-// ── delivery (§7): the idea's room first, then Mattermost (rw-p8a4-ideas, deliver.ts) ─────────────
+// ── delivery (§7): the idea's room, and nowhere else (rw-p8a4-ideas, rw-idea-privacy; deliver.ts) ─────────────
 async function sqlRows<T>(text: string, args: unknown[] = []): Promise<T[]> {
   const c = await pool.connect();
   try {
@@ -279,8 +282,6 @@ async function sqlRows<T>(text: string, args: unknown[] = []): Promise<T[]> {
 async function deliverForIdea(idea: OwedIdea, result: JobResult): Promise<boolean> {
   const out = await deliverDossier({
     sql: sqlRows,
-    // Mattermost stays the bridge while a token is configured; without one the room alone is the delivery
-    mm: MM_TOKEN ? { channel: () => ensureChannel(MM_CHANNEL), post: mmPost, permalink } : null,
     // rw-settings-store: the idea owner's refinery.resurface_max_dist, else IDEA_RESURFACE_MAX_DIST
     resurfaceMaxDist: settingNumber(await ownerSetting(sqlRows, idea.owner_sub, "refinery.resurface_max_dist"), RESURFACE_MAX_DIST, 0.05, 1),
     log: (m) => console.log(m),
@@ -362,7 +363,7 @@ async function handleRun(wait: boolean): Promise<Record<string, unknown>> {
   return { started: true };
 }
 
-// The delivery loop: dossiers reach Mattermost shortly after their research finishes. This is
+// The delivery loop: dossiers reach the idea's room shortly after their research finishes. This is
 // delivery only - research is never waiting on it (the database queued it at capture/change).
 const DELIVERY_POLL_MS = num("IDEA_DELIVERY_POLL_MS", 60000);
 setInterval(() => { void handleRun(false).catch(() => {}); }, Math.max(5000, DELIVERY_POLL_MS));
@@ -650,7 +651,7 @@ async function brainstormReply(channelId: string, threadRoot: string, bid: strin
         .map((id) => `${id} — ${evLabel(evById.get(id) ?? "")}`).join("\n");
       const body = survivors.map((s) => `• ${s.text}`).join("\n");
       const tail = gapLines.length ? `\n\n_Open (needs research): ${gapLines.join("; ")}_` : "";
-      await mmPost(channelId, `${body}${tail}\n\n**Grounded in:**\n${key}\n\n_Every point above is checked against a researched claim. Reply to keep honing._`, threadRoot);
+      await privatePost(channelId, `${body}${tail}\n\n**Grounded in:**\n${key}\n\n_Every point above is checked against a researched claim. Reply to keep honing._`, threadRoot);
       return;
     }
   }
@@ -658,7 +659,7 @@ async function brainstormReply(channelId: string, threadRoot: string, bid: strin
   // GAP — nothing grounded survived: open research on the specific gap (never answer from memory).
   const gq = await chatJson([{ role: "system", content: GAP_QUERY_SYSTEM }, { role: "user", content: `IDEA:\n${dossier.slice(0, 1500)}\n\nUSER ASKED:\n${lastUser.content}` }]);
   const gapQuery = String(gq.gap_query ?? "").trim() || lastUser.content;
-  await mmPost(channelId, `🔎 No grounded claims cover that yet — I won't answer from guesswork. I've started research on:\n> ${gapQuery}\n\nI'll follow up in this thread when it lands, then we can hone it on solid ground.`, threadRoot);
+  await privatePost(channelId, `🔎 No grounded claims cover that yet — I won't answer from guesswork. I've started research on:\n> ${gapQuery}\n\nI'll follow up in this thread when it lands, then we can hone it on solid ground.`, threadRoot);
   gapResearch(channelId, threadRoot, gapQuery).catch((e) => console.error(`gap research failed (${threadRoot.slice(0, 8)}): ${(e as Error).message}`));
 }
 
@@ -667,14 +668,14 @@ async function brainstormReply(channelId: string, threadRoot: string, bid: strin
 async function gapResearch(channelId: string, threadRoot: string, query: string): Promise<void> {
   const jobId = await submitWithBackpressure(query);
   const jr = await pollJob(jobId);
-  if (!jr.ok) { await mmPost(channelId, `⚠ Research on that gap didn't complete (${jr.error ?? "unknown"}). Try again or rephrase.`, threadRoot); return; }
+  if (!jr.ok) { await privatePost(channelId, `⚠ Research on that gap didn't complete (${jr.error ?? "unknown"}). Try again or rephrase.`, threadRoot); return; }
   const synthesis = String(jr.result?.synthesis ?? "").trim() || "_(the research returned no synthesis)_";
   // deno-lint-ignore no-explicit-any
   const sources = Array.isArray(jr.result?.cited_sources) ? jr.result!.cited_sources as any[] : [];
   const srcLines = sources.slice(0, 6).map((s, i) => `${i + 1}. ${String(s.title ?? s.url ?? "source")}${s.url ? ` — ${s.url}` : ""}`);
   const parts = [`🔬 **Research landed on that gap** — now grounded, so we can keep honing:`, synthesis];
   if (srcLines.length) parts.push(`**Sources**\n${srcLines.join("\n")}`);
-  await mmPost(channelId, parts.join("\n\n"), threadRoot);
+  await privatePost(channelId, parts.join("\n\n"), threadRoot);
 }
 
 /** rw-settings-store: the owner of the idea whose dossier thread this is wants brainstorms (default: yes). */
@@ -691,10 +692,11 @@ async function brainstormLoop(): Promise<void> {
   let channelId: string;
   try {
     bid = await botId();
-    channelId = await ensureChannel(MM_CHANNEL);
+    channelId = await privateChannel(MM_CHANNEL);
   } catch (e) {
-    console.error(`brainstorm: cannot start (${(e as Error).message}); retrying in 60s`);
-    setTimeout(brainstormLoop, 60000);
+    const refused = e instanceof ChannelRefused;
+    console.error(`brainstorm: cannot start (${(e as Error).message}); retrying in ${refused ? "10 min" : "60s"}`);
+    setTimeout(brainstormLoop, refused ? 600000 : 60000);
     return;
   }
   console.log(`brainstorm loop live on #${MM_CHANNEL} (LOCAL model ${CHAT_MODEL} @ ${CHAT_API_BASE})`);
@@ -715,6 +717,13 @@ async function brainstormLoop(): Promise<void> {
         if (!p.root_id) continue;                    // only an operator REPLY under a dossier
         const uname = await userName(p.user_id);
         if (!mayBrainstorm(OPERATORS, uname)) continue;
+        try {
+          await assertPrivate(channelId, null);   // rw-idea-privacy: never answer where a second person reads
+        } catch (e) {
+          console.error(`brainstorm: stopped (${(e as Error).message})`);
+          setTimeout(brainstormLoop, 600000);
+          return;
+        }
         // rw-settings-store: the idea's owner may turn brainstorms off for their ideas (refinery.brainstorm);
         // IDEA_BRAINSTORM stays the service's master switch (this loop does not run without it)
         if (!await brainstormWanted(String(p.root_id))) continue;
