@@ -555,3 +555,107 @@ t("I15 (operator 2026-11-02, ideas are completely user isolated): A's capture, e
   assertEquals(await refusedAsApp(`INSERT INTO public.idea_revisions (idea_id, revision, summary, private_owner) VALUES ($1, 1, 'forged', $2)`, [crypto.randomUUID(), sub(A)]), "42501");
 });
 
+// ── rw-report-isolation (operator 2026-11-02): an idea's research report is private to its owner; the claims drawn
+// from it stay shared; every other report stays shared ──────────────────────────────────────────────────────────
+// The report as the code under test files it: research_private_reports (slot 390) where it exists, else the way the
+// base filed it (a shared research_synthesis source, the claims' synthesis_id, the idea's dossier pointer) - so the
+// same assertions are RED on the base and GREEN here. The job row holds the report text as the research service
+// stores it (result.synthesis). The job is tied to the idea ONLY by a revision stamp (the live shape: no refinery_id).
+async function plantIdeaReport(owner: string, ideaId: string, mk: { report: string; title: string; prose: string; key: string; word: string }) {
+  const job = (await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, finished_at) VALUES ('done', 'manual', 'research for an idea', now()) RETURNING id::text AS id`))[0].id;
+  await sql(`UPDATE public.idea_revisions SET research_job_id = $2 WHERE idea_id = $1 AND revision = 1`, [ideaId, job]);
+  await sql(`UPDATE public.research_jobs SET refinery_id = NULL, inlet_ref = NULL WHERE id = $1`, [job]);
+  const claim = (await sql<{ id: string }>(`SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+    [`The ${mk.word} result held in 12 trials.`]))[0].id;
+  await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [claim, FX.active]);
+  const priv = (await sql<{ ok: boolean }>(`SELECT to_regclass('public.research_private_reports') IS NOT NULL AS ok`))[0].ok;
+  let ref: string;
+  if (priv) {
+    ref = (await sql<{ id: string }>(
+      `INSERT INTO public.research_private_reports (research_key, owner_sub, idea_id, job_id, title, content, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, jsonb_build_object('prose_synthesis', $7::text)) RETURNING id::text AS id`,
+      [mk.key, owner, ideaId, job, mk.title, `${mk.report} the report body`, mk.prose]))[0].id;
+    await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [ref, claim]);
+  } else {
+    ref = (await sql<{ id: string }>(
+      `INSERT INTO public.sources (title, content, content_type, research_key, metadata)
+       VALUES ($1, $2, 'research_synthesis', $3, jsonb_build_object('prose_synthesis', $4::text)) RETURNING id::text AS id`,
+      [mk.title, `${mk.report} the report body`, mk.key, mk.prose]))[0].id;
+    await sql(`UPDATE public.claims SET synthesis_id = $2 WHERE id = $1`, [claim, ref]);
+    await sql(`UPDATE public.ideas SET dossier_source_id = $2 WHERE id = $1`, [ideaId, ref]);
+  }
+  await sql(`UPDATE public.research_jobs SET result = jsonb_build_object('synthesis', $2::text, 'prose', $3::text, 'claims', '[]'::jsonb, 'cited_sources', '[]'::jsonb,
+                                                         'curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', $4::text)))
+              WHERE id = $1`, [job, `${mk.report} the report body`, mk.prose, priv ? null : ref]);
+  return { job, claim, ref };
+}
+
+t("I16 (rw-report-isolation): an idea's research report is private - B and the lane get no text, title, key or id of it anywhere (the claim, its nested fields, search, the session, the report and source routes); its claim stays shared; the owner reads the report", async () => {
+  const tag = rnd();
+  const mk = { report: `PrivReport${tag}`, title: `PrivTitle${tag}`, prose: `PrivProse${tag}`, key: `rk-priv-${tag}`, word: `privclaimword${tag}` };
+  const ideaId = await captured(sub(A), `report idea ${tag}`);
+  const { job, claim, ref } = await plantIdeaReport(sub(A), ideaId, mk);
+  const secrets = [mk.report, mk.title, mk.prose, mk.key, ref];
+  const leaks = (label: string, text: string) => secrets.filter((s) => text.includes(s)).map((s) => `${label} carries ${s}`);
+  const LANE: Record<string, string> = {}; // no identity header: the default subject - what the MCP lanes act as
+  const found: string[] = [];
+  for (const [who, h] of [["B", B], ["lane", LANE]] as const) {
+    const reads = [
+      `/workbench/contract/ideas/${ideaId}`, `/workbench/contract/ideas?limit=200`,
+      `/workbench/contract/claims?q=${encodeURIComponent(mk.word)}`, `/workbench/contract/claims?synthesis_id=${ref}`,
+      `/workbench/contract/search?q=${encodeURIComponent(mk.report)}&kinds=page,claim,source`,
+      `/workbench/contract/search?q=${encodeURIComponent(mk.word)}&kinds=page,claim,source`,
+      `/workbench/contract/sessions/${job}`, `/workbench/contract/jobs?limit=200`, `/workbench/contract/timeline?limit=100`,
+      `/workbench/contract/reports/${ref}/credibility`, `/workbench/contract/sources/${ref}/quality`, `/workbench/contract/sources/${ref}/dependence`,
+      `/workbench/contract/trail?source_id=${ref}`, `/workbench/contract/notifications`,
+    ];
+    for (const path of reads) {
+      const r = await call("GET", path, undefined, h);
+      // the search echoes its own query, and a route may echo the id it was handed: judge the results, minus that echo
+      const raw = path.includes("/search?") ? JSON.stringify(r.json.results ?? []) : r.text;
+      const body = path.includes(ref) ? raw.replaceAll(ref, "") : raw;
+      found.push(...leaks(`${who} ${path} -> ${r.status}`, body));
+    }
+    // the claim drawn from the report: present for every user, pointing at no report
+    const c = await call("GET", `/workbench/contract/claims?q=${encodeURIComponent(mk.word)}`, undefined, h);
+    assertEquals(c.status, 200, c.text);
+    const mine = (c.json.claims as any[]).find((x) => x.id === claim);
+    assert(mine, `${who}: the claim from A's idea report is shared knowledge`);
+    assertEquals(mine.synthesis_id, null, `${who}: the claim names no report`);
+    const bySyn = await call("GET", `/workbench/contract/claims?synthesis_id=${ref}`, undefined, h);
+    assertEquals((bySyn.json.claims ?? []).length, 0, `${who}: following the report id finds nothing`);
+  }
+  assertEquals(found, [], "nothing of A's idea report reaches B or the lane");
+  // nor any shared knowledge table (as the superuser and as the app role: the generic MCP lane's database role)
+  for (const m of [mk.report, mk.title, mk.prose]) {
+    const shared = `SELECT ((SELECT count(*) FROM public.sources WHERE content LIKE '%' || $1 || '%' OR title LIKE '%' || $1 || '%' OR metadata::text LIKE '%' || $1 || '%')
+                          + (SELECT count(*) FROM public.source_chunks WHERE content LIKE '%' || $1 || '%')
+                          + (SELECT count(*) FROM public.wiki_pages WHERE body LIKE '%' || $1 || '%' OR title LIKE '%' || $1 || '%'))::int AS n`;
+    assertEquals((await sql<{ n: number }>(shared, [m]))[0].n, 0, `a shared table carries ${m}`);
+    assertEquals((await asApp<{ n: number }>(shared, [m]))[0].n, 0, `a shared table (app role) carries ${m}`);
+  }
+  // A, the owner, reads the report in the idea's dossier, and the claims it gave
+  const a = await idea(ideaId);
+  assertEquals(a.status, 200, a.text);
+  assert(String(a.json.report?.content ?? "").includes(mk.report), `A reads the report: ${JSON.stringify(a.json.report ?? null).slice(0, 200)}`);
+  assertEquals([a.json.report?.title, a.json.report?.prose, a.json.report?.claims, a.json.report?.job_id], [mk.title, mk.prose, 1, job]);
+  assert((a.json.produced.claims as any[]).some((x) => x.id === claim), "the idea's produced claims list the claim");
+});
+
+t("I17 (rw-report-isolation): a non-idea research report is still a shared source, exactly as before - every user follows its claims to it", async () => {
+  const tag = rnd();
+  const job = (await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, finished_at) VALUES ('done', 'manual', 'shared research', now()) RETURNING id::text AS id`))[0].id;
+  const src = (await sql<{ id: string }>(
+    `INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, $2, 'research_synthesis', $3) RETURNING id::text AS id`,
+    [`SharedTitle${tag}`, `SharedReport${tag} body`, `rk-shared-${tag}`]))[0].id;
+  const claim = (await sql<{ id: string }>(`SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, $2::uuid, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+    [`The sharedclaimword${tag} result held.`, src]))[0].id;
+  await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [claim, FX.active]);
+  await sql(`UPDATE public.research_jobs SET result = jsonb_build_object('curator', jsonb_build_object('persist', jsonb_build_object('synthesis_id', $2::text))) WHERE id = $1`, [job, src]);
+  for (const h of [A, B, {}]) {
+    const c = await call("GET", `/workbench/contract/claims?synthesis_id=${src}`, undefined, h);
+    assertEquals(c.status, 200, c.text);
+    assertEquals((c.json.claims as any[]).map((x) => [x.id, x.synthesis_id]), [[claim, src]], "the claim points at its shared report");
+  }
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE id = $1 AND content_type = 'research_synthesis'`, [src]))[0].n, 1);
+});

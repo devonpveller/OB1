@@ -22,13 +22,15 @@ export function parseFiledJobId(raw: unknown): { jobId: string | null; error: st
 
 /**
  * Record that `jobId` was filed as `synthesisId`. Call it on the filing's transaction client, before
- * COMMIT. Throws when the job does not exist (the whole filing then rolls back: an event without a
+ * COMMIT. rw-report-isolation: an idea job's report is filed privately (research_private_reports), so
+ * `synthesisId` is null and the event says `report: "private"` - never the private report's id (the
+ * event is read by the research service and the job routes, not only by the idea's owner). Throws when the job does not exist (the whole filing then rolls back: an event without a
  * job, or a filing the research service cannot find, is refused). A second call for the same job
  * (a retried hand-off) updates the one event instead of adding another.
  */
 export async function recordFiledEvent(
   c: FiledClient,
-  f: { jobId: string; researchKey: string; synthesisId: string; sourcesWritten: number; threadId: string | null; sessionId: string },
+  f: { jobId: string; researchKey: string; synthesisId: string | null; sourcesWritten: number; threadId: string | null; sessionId: string },
 ): Promise<number> {
   const r = await c.queryObject<{ id: string }>(
     `INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload)
@@ -39,6 +41,7 @@ export async function recordFiledEvent(
      RETURNING id::text AS id`,
     [f.jobId, JSON.stringify({
       synthesis_id: f.synthesisId,
+      ...(f.synthesisId ? {} : { report: "private" }),
       research_key: f.researchKey,
       sources_written: f.sourcesWritten,
       thread_id: f.threadId,

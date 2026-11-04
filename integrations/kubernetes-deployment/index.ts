@@ -2087,6 +2087,44 @@ app.post("/research/persist", async (c) => {
   const client = await pool.connect();
   try {
     await client.queryArray("BEGIN");
+    // rw-report-isolation (operator 2026-11-02): "the final reports are user isolated" for an idea - the one report
+    // that is private to its owner; its sources and the claims drawn from it stay shared. The rule is the database's
+    // (research_job_report_owner, slot 390: the idea's branch, its refinery, a revision stamped with the job - never
+    // the job's text). A row = an idea job: the report goes to research_private_reports, never a shared sources row,
+    // and nothing this answers or records names it. No job id = not an idea job (an interactive or legacy caller).
+    // A database without slot 390 fails the filing (never files an idea's report shared for want of the rule).
+    let privateReport = false;
+    if (filedJob.jobId) {
+      const o = await client.queryObject<{ hit: boolean }>(
+        `SELECT true AS hit FROM public.research_job_report_owner($1::uuid)`, [filedJob.jobId]);
+      privateReport = o.rows.length > 0;
+    }
+    let synthesisId: string | null = null;
+    if (privateReport) {
+      await client.queryObject(
+        `INSERT INTO public.research_private_reports
+           (research_key, owner_sub, idea_id, job_id, title, content, claim, research_query, run_kind,
+            volatility, revalidate_days, researched_on, metadata)
+         SELECT $1, o.owner_sub, o.idea_id, $2::uuid, $3, $4, $5, $6, $7, $8, $9, CURRENT_DATE, $10::jsonb
+           FROM public.research_job_report_owner($2::uuid) o
+         -- round 2 (tester F1): one row per (key, owner, idea) - two users' ideas that read alike share a research_key,
+         -- and one user's filing never overwrites, re-owns or links into another's; a re-run of the SAME idea
+         -- supersedes its own row
+         ON CONFLICT (research_key, (coalesce(owner_sub, '')), (coalesce(idea_id::text, ''))) DO UPDATE SET
+           job_id = EXCLUDED.job_id, title = EXCLUDED.title, content = EXCLUDED.content, claim = EXCLUDED.claim,
+           research_query = EXCLUDED.research_query, run_kind = EXCLUDED.run_kind, volatility = EXCLUDED.volatility,
+           revalidate_days = EXCLUDED.revalidate_days, researched_on = CURRENT_DATE, updated_at = now(),
+           -- as the shared row's supersede: the previous run's render keys go; and a superseded moved copy is no
+           -- longer the moved row (the revert of slot 390 keeps it)
+           metadata = (research_private_reports.metadata - 'prose_synthesis' - 'source_ids' - 'report_type') || EXCLUDED.metadata,
+           migrated_source_id = NULL`,
+        [
+          key, filedJob.jobId, (body.query || "research").slice(0, 200), content, claim, body.query ?? null,
+          body.kind ?? null, body.volatility ?? null, body.revalidate_days ?? null,
+          JSON.stringify({ source: "deep-research", claim }),
+        ],
+      );
+    } else {
     // Embed the short claim (focused, topical) — chunk-level retrieval over the
     // full content is handled separately by the chunk-embedding worker.
     const claimEmb = `[${(await getEmbedding(claim.slice(0, 1600))).join(",")}]`;
@@ -2120,6 +2158,8 @@ app.post("/research/persist", async (c) => {
         claimEmb, JSON.stringify({ source: "deep-research", claim }),
       ],
     );
+    synthesisId = synth.rows[0]?.id ?? null;
+    }
 
     // One session per persist run (provenance: where did these come from?).
     // rw-curator-filed2: a resend for a job that is already filed reuses that filing's session (one sessions
@@ -2150,7 +2190,6 @@ app.post("/research/persist", async (c) => {
     // "## Deep Research" section is driven by thread membership. Linking it here
     // makes the originating AI synthesis appear (and be referenceable) under the
     // curator-resolved thread.
-    const synthesisId = synth.rows[0]?.id;
     if (synthesisId) {
       await client.queryObject(
         `INSERT INTO session_sources (session_id, source_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
@@ -2241,12 +2280,14 @@ app.post("/research/persist", async (c) => {
     // filing without the event (when the caller names its job). A missing job rolls the filing back.
     let filedEventId: number | null = null;
     if (filedJob.jobId) {
-      if (!synthesisId) throw new Error("filed event: the synthesis row was not written");
+      if (!synthesisId && !privateReport) throw new Error("filed event: the synthesis row was not written");
       filedEventId = await recordFiledEvent(client, { jobId: filedJob.jobId, researchKey: key, synthesisId, sourcesWritten: written, threadId, sessionId });
     }
     await client.queryArray("COMMIT");
     return c.json({
-      synthesis_id: synth.rows[0]?.id,
+      // null for an idea job: its report is private (and never its private id - this answer is stored on the job)
+      synthesis_id: synthesisId,
+      report: privateReport ? "private" : "shared",
       filed_event_id: filedEventId,
       sources_written: written,
       source_ids: sourceIds,   // index-aligned with body.sources ([Source N] => [N-1])

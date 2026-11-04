@@ -282,6 +282,23 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   await sql(`SELECT public.idea_deliver_dossier($1::uuid, $2, $3, '{}'::jsonb)`, [bRefinery, crypto.randomUUID(), `the dossier ${ideaMk.dossier}`]);
   const bDraft = await wb("PUT", `/workbench/ideas/${bRefinery}/draft`, { text: `${room.draft} ${ideaMk.draft}` }, B);
   assertEquals(bDraft.status, 200, bDraft.text);
+  // rw-report-isolation: B's idea's research - a job on B's refinery whose result holds the report (as the research
+  // service stores it), the report itself (private, slot 390) and the claim drawn from it (SHARED: the claim and its
+  // text are not markers). A must reach no text, title, key or id of the report, through the claim or anywhere else.
+  const privMk = { text: `PrivReportSecret${rnd()}`, title: `PrivReportTitle${rnd()}`, key: `rk-sweep-${rnd()}` };
+  const bIdeaJob = (await sql<{ id: string }>(
+    `INSERT INTO public.research_jobs (status, origin, query, refinery_id, finished_at, result)
+     VALUES ('done', 'manual', 'research for B''s idea', $1, now(), jsonb_build_object('synthesis', $2::text, 'claims', '[]'::jsonb, 'cited_sources', '[]'::jsonb))
+     RETURNING id::text AS id`, [bRefinery, privMk.text]))[0].id;
+  const bReport = (await sql<{ id: string }>(
+    `INSERT INTO public.research_private_reports (research_key, owner_sub, idea_id, job_id, title, content, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, jsonb_build_object('prose_synthesis', $6::text)) RETURNING id::text AS id`,
+    [privMk.key, bSub, bRefinery, bIdeaJob, privMk.title, privMk.text]))[0].id;
+  const bReportClaim = (await sql<{ id: string }>(
+    `SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+    [`The sweep report claim ${rnd()} held in 12 trials.`]))[0].id;
+  await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bReportClaim, FX_ACTIVE]);
+  await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [bReport, bReportClaim]);
   const bIdeaBefore = (await sql(`SELECT summary, title, status, current_revision FROM public.ideas WHERE id = $1`, [bRefinery]))[0];
   const bRoomEntriesBefore = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_room_entries WHERE room_id IN ($1::uuid, $2::uuid)`, [bRoom, bSessRoom]))[0].n;
   const bMembersBefore = await sql(`SELECT member_kind, member_ref FROM public.refinery_members WHERE refinery_id = $1 ORDER BY member_kind, member_ref`, [bRefinery]);
@@ -347,6 +364,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
+    privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport,
     roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, ideaEdit: ideaMk.edit, ideaDossier: ideaMk.dossier, ideaDraft: ideaMk.draft, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];

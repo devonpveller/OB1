@@ -2773,6 +2773,47 @@
               "lifecycle"
             ]
           },
+          "report": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "nullable": true,
+                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                "example": "11111111-1111-4111-8111-111111111111",
+                "description": "uuid"
+              },
+              "title": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "prose": {
+                "type": "string",
+                "nullable": true
+              },
+              "claims": {
+                "type": "integer",
+                "description": "the claims drawn from it (shared knowledge, listed in produced.claims)"
+              },
+              "updated_at": {
+                "type": "string",
+                "example": "2026-10-17T12:00:00.000Z",
+                "description": "ISO-8601 timestamp"
+              }
+            },
+            "required": [
+              "job_id",
+              "title",
+              "content",
+              "prose",
+              "claims",
+              "updated_at"
+            ],
+            "description": "rw-report-isolation: the idea's latest research report - private to the idea's owner, never a shared source"
+          },
           "draft": {
             "$ref": "#/components/schemas/IdeaDraft"
           },
@@ -2859,6 +2900,7 @@
           "revisions",
           "sessions",
           "dossier",
+          "report",
           "draft",
           "room",
           "produced",
@@ -9603,6 +9645,14 @@
                     "source_id": "77777777-7777-4777-8777-777777777777",
                     "title": "Fixture research synthesis",
                     "lifecycle": "active"
+                  },
+                  "report": {
+                    "job_id": "99999999-9999-4999-8999-999999999999",
+                    "title": "Fixture private report",
+                    "content": "Fixture private report text.",
+                    "prose": null,
+                    "claims": 0,
+                    "updated_at": "2026-10-17T12:00:00.000Z"
                   },
                   "draft": {
                     "state": "empty",

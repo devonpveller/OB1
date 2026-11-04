@@ -308,13 +308,19 @@ async function refreshThread(threadId: string, pkg: Pkg): Promise<void> {
 }
 
 // --- Resolution policy ------------------------------------------------------
-async function resolve(pkg: Pkg, claimEmb: number[]): Promise<{
-  thread_id: string;
-  decision: "explicit" | "existing" | "new";
+// rw-report-isolation: an idea job's report is private to the idea's owner, so it never NAMES or DESCRIBES a
+// shared thread - a new thread's name and description come from the report. With mayCreate false the resolver
+// attaches to an existing thread as usual, and where it would mint one it files the run unthreaded instead.
+type Resolved = {
+  thread_id: string | null;
+  decision: "explicit" | "existing" | "new" | "unthreaded";
   confidence: number;
   name: string;
   shortlist: Candidate[];
-}> {
+};
+async function resolve(pkg: Pkg, claimEmb: number[], mayCreate = true): Promise<Resolved> {
+  const unthreaded = (confidence: number, shortlist: Candidate[]): Resolved =>
+    ({ thread_id: null, decision: "unthreaded", confidence, name: "", shortlist });
   // Explicit-thread bypass: a deliberately-set thread_id is honored as-is.
   const explicit = (pkg.thread_id || "").trim();
   if (explicit) {
@@ -343,6 +349,7 @@ async function resolve(pkg: Pkg, claimEmb: number[]): Promise<{
     if (top && top.distance <= MERGE_FLOOR_DISTANCE) {
       return { thread_id: top.thread_id, decision: "existing", confidence: 1 - top.distance, name: top.name, shortlist };
     }
+    if (!mayCreate) return unthreaded(0.5, shortlist);
     const id = await createThread(hint, (pkg.claim || "").slice(0, 400));
     return { thread_id: id, decision: "new", confidence: 0.5, name: hint, shortlist };
   }
@@ -364,6 +371,7 @@ async function resolve(pkg: Pkg, claimEmb: number[]): Promise<{
     return { thread_id: top.thread_id, decision: "existing", confidence: decision.confidence, name: top.name, shortlist };
   }
 
+  if (!mayCreate) return unthreaded(decision.confidence, shortlist);
   const name = (decision.new_thread_name || hint).slice(0, 200);
   const desc = (decision.new_thread_description || (pkg.claim || "").slice(0, 400)).slice(0, 2000);
   const id = await createThread(name, desc);
@@ -371,7 +379,7 @@ async function resolve(pkg: Pkg, claimEmb: number[]): Promise<{
 }
 
 // --- Delegate the write to the existing /research/persist -------------------
-async function delegatePersist(pkg: Pkg, threadId: string, notebookLabel: string): Promise<Record<string, unknown>> {
+async function delegatePersist(pkg: Pkg, threadId: string | null, notebookLabel: string | null): Promise<Record<string, unknown>> {
   const body = {
     research_key: pkg.research_key,
     job_id: pkg.job_id,
@@ -387,7 +395,9 @@ async function delegatePersist(pkg: Pkg, threadId: string, notebookLabel: string
     // new thread — so using the topic_hint here would re-fragment exactly what
     // the curator just consolidated. Matching the thread name makes backfill a
     // no-op for curator-routed research.
-    notebook: notebookLabel || pkg.topic_hint || pkg.notebook,
+    // rw-report-isolation: an unthreaded idea run (notebookLabel null) stamps no notebook - a hint would be
+    // backfilled into a new thread named after it
+    notebook: notebookLabel === null ? null : (notebookLabel || pkg.topic_hint || pkg.notebook),
     thread_id: threadId,
     model: pkg.model,
     sources: pkg.sources || [],
@@ -416,12 +426,15 @@ async function delegatePersist(pkg: Pkg, threadId: string, notebookLabel: string
 // is stored).
 async function writeGroundedClaims(
   pkg: Pkg,
-  threadId: string,
+  threadId: string | null,
   synthesisId: string | null,
   sourceIds: Array<string | null>,
+  privateReport = false,
 ): Promise<WriteClaimsResult | null> {
   const synthesis = (pkg.synthesis || "").trim();
-  if (!synthesis || !synthesisId) return null; // nothing to parse / nowhere to anchor
+  // nothing to parse / nowhere to anchor. rw-report-isolation: a private report anchors its claims in
+  // research_private_report_claims (the owner's link back); the claims themselves are shared, synthesis_id NULL
+  if (!synthesis || (!synthesisId && !privateReport)) return null;
   // P3a: a package without its claim kind files NO claim (loud; the caller reports the loss)
   const claimMetadata = claimMetadataFor(pkg);
   const client = await pool.connect();
@@ -442,6 +455,15 @@ async function writeGroundedClaims(
       onMetaSkip: (text, by) =>
         console.log(`claims: META (${by}) - refused "${text.slice(0, 160)}"`),
     });
+    if (privateReport && res.claimIds.length) {
+      await client.queryObject(
+        `INSERT INTO public.research_private_report_claims (report_id, claim_id)
+         SELECT p.id, c.id FROM public.research_private_reports p, unnest($2::uuid[]) AS c(id)
+          WHERE p.research_key = $1 AND p.job_id = $3::uuid
+         ON CONFLICT DO NOTHING`,
+        [pkg.research_key, res.claimIds, pkg.job_id],
+      );
+    }
     await client.queryArray("COMMIT");
 
     // Conflict auto-detection (#2) — separate txn; LLM judge calls shouldn't hold
@@ -498,7 +520,7 @@ async function conflictJudge(a: string, b: string): Promise<ConflictVerdict> {
 // now states which STAGE died, which research_key died with it, and exactly how
 // much went unwritten, in the log AND in the response body (which the research
 // service stores on the job row as result->'curator').
-type Stage = "lock" | "embed" | "resolve" | "persist" | "claims";
+type Stage = "lock" | "privacy" | "embed" | "resolve" | "persist" | "claims";
 
 interface Loss {
   stage: Stage;
@@ -534,6 +556,17 @@ function lossLine(l: Loss): string {
   return `ingest FAILED stage=${l.stage} research_key=${l.research_key} ` +
     `LOST ${l.sources_unwritten} source(s) + ${l.claims_unwritten} grounded claim(s) UNWRITTEN ` +
     `query="${l.query}" cause: ${l.detail}`;
+}
+
+// rw-report-isolation: the run is an idea's research when the database's rule says so (never its text)
+async function isIdeaJob(jobIdRaw: string | undefined): Promise<boolean> {
+  const jobId = (jobIdRaw || "").trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) return false; // no job: not an idea's run
+  const c = await pool.connect();
+  try {
+    const r = await c.queryObject<{ hit: boolean }>(`SELECT true AS hit FROM public.research_job_report_owner($1::uuid)`, [jobId]);
+    return r.rows.length > 0;
+  } finally { c.release(); }
 }
 
 // --- HTTP server ------------------------------------------------------------
@@ -587,16 +620,20 @@ Deno.serve({ port: PORT }, async (req) => {
           }
         }
       }
+      // rw-report-isolation: is this an idea's research? The database's rule (research_job_report_owner, slot 390) -
+      // the same one persist applies. A failure stops the filing (never treat an idea's run as shared by default).
+      stage = "privacy";
+      const privateRun = await isIdeaJob(pkg.job_id);
       stage = "embed";
       const claimEmb = await embed(claim.slice(0, 1600));
       stage = "resolve";
-      const res = await resolve(pkg, claimEmb);
+      const res = await resolve(pkg, claimEmb, !privateRun);
 
       let persist: Record<string, unknown>;
       stage = "persist";
       // res.name is passed as the notebook label (see delegatePersist).
       try {
-        persist = await delegatePersist(pkg, res.thread_id, res.name);
+        persist = await delegatePersist(pkg, res.thread_id, res.thread_id ? res.name : (privateRun ? null : res.name));
       } catch (e) {
         // Persist failed AFTER we resolved a thread. Surface it so the caller
         // can fall back to its own unthreaded persist (best-effort, never block).
@@ -611,13 +648,14 @@ Deno.serve({ port: PORT }, async (req) => {
       // Decompose the synthesis into grounded claims + edges (P2.1) — awaited
       // so the result is reported, but never fatal to the ingest.
       const synthesisId = (typeof persist.synthesis_id === "string" ? persist.synthesis_id : null);
+      const privateReport = persist.report === "private";
       const sourceIds = Array.isArray(persist.source_ids) ? persist.source_ids as Array<string | null> : [];
 
       // Stamp the readable prose + query breadcrumbs onto the synthesis row's
       // metadata, so the wiki renders a readable synthesis + a "Research
       // questions" section (the tagged `content` stays the grounded machine-truth
       // that claim decomposition reads). Best-effort — never fails the ingest.
-      if (synthesisId && (pkg.prose || pkg.needs?.length || pkg.followup_queries?.length)) {
+      if ((synthesisId || privateReport) && (pkg.prose || pkg.needs?.length || pkg.followup_queries?.length)) {
         try {
           const c = await pool.connect();
           try {
@@ -632,10 +670,20 @@ Deno.serve({ port: PORT }, async (req) => {
             };
             if (pkg.prose) stamp.prose_synthesis = pkg.prose;
             if (pkg.report_type) stamp.report_type = pkg.report_type;
-            await c.queryObject(
-              `UPDATE sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
-              [synthesisId, JSON.stringify(stamp)],
-            );
+            if (synthesisId) {
+              await c.queryObject(
+                `UPDATE sources SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+                [synthesisId, JSON.stringify(stamp)],
+              );
+            } else {
+              // the idea's private report (rw-report-isolation): the owner's copy carries the readable prose. Round 2
+              // (tester F1): keyed by THIS job too - another user's report can share the research_key, and a stamp
+              // that lands after another filing must land on this job's own row or nowhere
+              await c.queryObject(
+                `UPDATE public.research_private_reports SET metadata = metadata || $2::jsonb WHERE research_key = $1 AND job_id = $3::uuid`,
+                [pkg.research_key, JSON.stringify(stamp), pkg.job_id],
+              );
+            }
           } finally { c.release(); }
         } catch (e) {
           console.error(
@@ -648,7 +696,7 @@ Deno.serve({ port: PORT }, async (req) => {
       let claims: WriteClaimsResult | null = null;
       let claimsError: string | null = null;
       try {
-        claims = await writeGroundedClaims(pkg, res.thread_id, synthesisId, sourceIds);
+        claims = await writeGroundedClaims(pkg, res.thread_id, synthesisId, sourceIds, privateReport);
       } catch (e) {
         // The sources DID land (persist succeeded above); the grounded claims did
         // not, so this run is searchable but not reasoned over. Say so, with the
@@ -659,10 +707,14 @@ Deno.serve({ port: PORT }, async (req) => {
         claimsError = loss.detail;
       }
 
-      // Maintain the thread so future matching improves — best-effort.
-      refreshThread(res.thread_id, pkg).catch((e) =>
-        console.error("ingest: thread refresh failed:", (e as Error).message)
-      );
+      // Maintain the thread so future matching improves — best-effort. rw-report-isolation: never from an
+      // idea's private report (the refresh rewrites a SHARED thread's description from the report's summary)
+      if (res.thread_id && !privateRun && !privateReport) {
+        const tid = res.thread_id;
+        refreshThread(tid, pkg).catch((e) =>
+          console.error("ingest: thread refresh failed:", (e as Error).message)
+        );
+      }
 
       console.log(
         `ingest: decision=${res.decision} conf=${res.confidence.toFixed(2)} thread="${res.name}" (${res.thread_id}) sources=${persist.sources_written ?? "?"} claims=${claims ? `${claims.claimsWritten}+${claims.claimsDeduped}dup/${claims.gaps.length}gap/${claims.ungroundedSkipped}skip/${claims.metaSkipped}meta` : "0"}`,

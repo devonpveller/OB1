@@ -87,6 +87,14 @@ INSERT INTO public.idea_revisions (idea_id, revision, summary, research_job_id, 
   ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', 1, 'An idea about the retrieval contract.', '99999999-9999-4999-8999-999999999999', 900001);
 UPDATE public.ideas SET dossier_source_id = '77777777-7777-4777-8777-777777777777', last_job_id = '99999999-9999-4999-8999-999999999999'
  WHERE id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1';
+-- rw-report-isolation: the idea's private research report (slot 390; absent on a chain without it)
+DO $$ BEGIN
+  IF to_regclass('public.research_private_reports') IS NOT NULL THEN
+    INSERT INTO public.research_private_reports (research_key, owner_sub, idea_id, job_id, title, content, created_at, updated_at)
+    VALUES ('rk-fixture-private-report', 'operator', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', '99999999-9999-4999-8999-999999999999',
+            'Fixture private report', 'Fixture private report text.', '2026-10-17T12:00:00Z', '2026-10-17T12:00:00Z');
+  END IF;
+END $$;
 
 INSERT INTO public.import_jobs (id, status, source_id) VALUES
   ('99999999-9999-4999-8999-99999999999a', 'done', '11111111-1111-4111-8111-111111111111');

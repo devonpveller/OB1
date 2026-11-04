@@ -192,6 +192,16 @@ export const Idea = z.object({
     title: z.string(),
     lifecycle: registryValue(REGISTRY.sourceStates, "active"),
   }).nullable(),
+  report: z.object({
+    job_id: uuid().nullable(),
+    title: z.string(),
+    content: z.string(),
+    prose: z.string().nullable(),
+    claims: z.number().int().openapi({ description: "the claims drawn from it (shared knowledge, listed in produced.claims)" }),
+    updated_at: Iso,
+  }).nullable().openapi({
+    description: "rw-report-isolation: the idea's latest research report - private to the idea's owner, never a shared source",
+  }),
   draft: IdeaDraft,
   room: IdeaRoom,
   produced: z.object({

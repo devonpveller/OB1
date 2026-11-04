@@ -456,6 +456,14 @@ export type Idea = {
     title: string;
     lifecycle: string; /** registry: source_states */
   } | null;
+  report: {
+    job_id: string | null;
+    title: string;
+    content: string;
+    prose: string | null;
+    claims: number;
+    updated_at: string;
+  } | null;
   draft: IdeaDraft;
   room: IdeaRoom;
   produced: {

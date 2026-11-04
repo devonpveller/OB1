@@ -606,6 +606,19 @@ Workspace panels: `ideas` (by state, archived in its own list), `idea` (the idea
 `refinery-graph` (its context graph, hide / unhide). Lab: `run-workspace-tests.ps1 -Subnet <x.y.z.0/24>` [5h], or
 `-IdeasOnly` for [5h] + the two-user sweep; `-Red -IdeasOnly -BaseSha <sha>` stages the base's chain too.
 
+**An idea's research report is private (rw-report-isolation, slot 390).** A research job run for an idea (the database's
+rule, `research_job_report_owner(job)`: the idea's branch, its refinery, a revision stamped with the job, or the root
+of its tree - never the job's text or its caller-named inlet) files its final report into `research_private_reports`,
+never a shared `sources` row; the claims drawn from it stay shared knowledge (`synthesis_id` NULL) and the owner's link
+back is `research_private_report_claims`. `idea(id)` gives the owner `report` (the latest one: text, prose, claim
+count) and lists its claims in `produced.claims`; nothing else reads the table. `FOREIGN_JOB` applies the same rule,
+so such a job's result is redacted for anyone but the idea's owner. The private row is one per (research key, owner,
+idea): two users' alike ideas share a key, never a row. The move withholds every wiki page showing a moved report (its
+leaf, a page linking it) and a guard on `wiki_pages` keeps the viewer's reconcile and the compile from writing one back.
+A thread an idea job's filing named or described (the base's curator) is re-described from its remaining shared sources
+only (a minted one also renamed and relabelled), its embedding cleared for `backfill-thread-embeddings.ts`.
+Revert: `revert-report-isolation.sql`.
+
 ## The Settings panel and the settings store (rw-settings-store, plan 08 PD3)
 
 `init-settings.sql` (slot 400; revert `revert-settings.sql`, which discards every user's settings) adds the
