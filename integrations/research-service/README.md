@@ -147,6 +147,30 @@ for `categories=general,science` - the category the scholarly engines answer (se
   `research_steers.actor_sub` (a gap / inter-hub branch: `system:research`). A steer may carry
   `seed_sources` (`[{url, title, content}]`, 1-5): the branch is seeded with them (add-source).
 
+### The request boundary (research-workbench rw-boundary-core, plan 09 PD0a)
+
+Research formed from a person's private data (an idea, an email, a brainstorm reply) reaches the shared
+store only as a de-personalised request. Callers do not put such text into `POST /research`:
+
+- `POST /research/derived` `{item: {kind, id, revision?, owner_sub, fields, links, identity?}, purpose, deliver?}`
+  (any caller key) -> `202 {job_id}` | `200 {refused, handback_id}`. `kind`: idea, gmail, google_activity,
+  brainstorm, document, chat; `purpose`: idea-research, digest-article, digest-gap, brainstorm-gap. The item's
+  text is transient (the local model reads it to PROPOSE questions, on the research key, tagged
+  `request-boundary`); the pure gate (`boundary-gate.ts`) DECIDES: only tokens of the frame vocabulary, the
+  checked-in lexicon (`boundary-lexicon.ts`, SCOWL 2020.12.07 sizes 10-50, hashed) and the public pages it
+  fetched anonymously; never an identity or id-shaped token, a number not on a page, or a 4-word copy of a
+  personal field. The title template of a fetched page is the fallback; an article takes the template only.
+  `seed_sources`, `callback`, `inlet_ref`, `on_behalf_of`, `query`, `options` are refused (400): the job carries
+  only canonical public links (`options.public_links`), which the service fetches itself when it runs it.
+- `boundary.ts` `insertDerivedJob` is the only writer of `research_jobs.request_kind = 'derived'` (slot 420's
+  guard refuses a derived job with an inlet ref, a refinery, seed content, a callback, an on-behalf subject or a
+  prompt row); the private hand-back (`research_handbacks`, owner-only, forced RLS, no app grant) records who it
+  was for and where the result goes, through the `handback_*` SECURITY DEFINER functions.
+- `request_kind` on every other job: `direct` (Open WebUI on behalf of a user; the workspace's key), `service` (a
+  `RESEARCH_SERVICE_CALLERS` name: only these keep the `service:` prompt exemption in the readers), else
+  `unclassified` (the shared key above all). A non-derived job's curator copy (synthesis, claim) carries no 5-word
+  span of its prompt (R7). Lab: `run-boundary-e2e.ps1`.
+
 ## Inlets
 
 - **OWUI** → [`smolcrawl/deep_research_thin_client.py`](../../../smolcrawl/deep_research_thin_client.py) (P5). Replaces the heavy in-tool harness once this service is deployed + reachable from OWUI.

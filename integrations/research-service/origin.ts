@@ -121,3 +121,24 @@ export function promptOwner(caller: Caller, onBehalf: string | null): { owner_su
   const svc = `service:${caller.name}`;
   return { owner_sub: svc, actor_sub: svc };
 }
+
+/**
+ * rw-boundary-core (plan 09 2.4): the request kind POST /research records. Never 'derived' - only the boundary's
+ * door writes that (boundary.ts insertDerivedJob; slot 420's guard).
+ *   - direct: a signed-in user typed the question (Open WebUI on behalf of a user; the workspace's own key);
+ *   - service: a caller declared in RESEARCH_SERVICE_CALLERS (no personal data: agent-org grounding, repo sync) -
+ *     only these keep the service: prompt exemption in the readers;
+ *   - unclassified: everything else (the shared key above all: it names no caller) - its prompt is hidden.
+ */
+export type RequestKind = "derived" | "direct" | "personal" | "service" | "unclassified";
+
+export function parseServiceCallers(raw: string | undefined): ReadonlySet<string> {
+  return new Set((raw ?? "").split(/[,;\s]+/).map((s) => s.trim()).filter((s) => NAME.test(s) && s !== "shared-key"));
+}
+
+export function requestKindOf(caller: Caller, onBehalf: string | null, serviceCallers: ReadonlySet<string>): RequestKind {
+  if (onBehalf) return "direct";
+  if (caller.shared) return "unclassified";
+  if (caller.origin === "workspace") return "direct";
+  return serviceCallers.has(caller.name) ? "service" : "unclassified";
+}

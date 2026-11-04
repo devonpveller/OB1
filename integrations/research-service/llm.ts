@@ -136,6 +136,9 @@ export interface ChatOpts {
   nothink?: boolean;
   /** Job cancellation: aborts the in-flight request and the retry loop. */
   signal?: AbortSignal;
+  /** rw-boundary-core (plan 09 D9): LiteLLM request tags (`metadata.tags`) - the boundary's proposer calls are
+   *  tagged `request-boundary` on the research service's own key (no new consumer). */
+  tags?: string[];
 }
 
 export interface ChatConfig {
@@ -218,6 +221,7 @@ export function createChat(cfg: ChatConfig) {
       model, temperature: 0.2,
       ...(queueUser ? { user: queueUser } : {}),
       ...(opts.json ? { response_format: { type: "json_object" } } : {}),
+      ...(opts.tags?.length ? { metadata: { tags: opts.tags } } : {}),
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
     });
     const deadline = now() + cfg.retryBudgetMs;

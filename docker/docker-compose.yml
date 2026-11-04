@@ -190,6 +190,7 @@ services:
       - ./init-idea-privacy.sql:/docker-entrypoint-initdb.d/380-init-idea-privacy.sql:ro # research-workbench rw-idea-privacy: the ideas' pre-370 shared-corpus thoughts move to an owner-only archive (their revisions made private), the operator's 'ideas are completely user isolated' (fresh-volume: nothing to move; live: psql -f after a fresh backup; revert: revert-idea-privacy.sql)
       - ./init-report-isolation.sql:/docker-entrypoint-initdb.d/390-init-report-isolation.sql:ro # research-workbench rw-report-isolation: an idea job's report is private to the idea's owner (research_private_reports + the rule research_job_report_owner); the existing idea-job syntheses moved out of sources, archived first (fresh-volume only; live: psql -f BEFORE the new openbrain-mcp + research-curator images, a fresh backup first, the moved wiki leaf files out of the vault first; revert: revert-report-isolation.sql)
       - ./init-settings.sql:/docker-entrypoint-initdb.d/400-init-settings.sql:ro # research-workbench rw-settings-store (plan 08 PD3): the settings registry, the per-user tier, setting_get() - the one read function services use (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-settings.sql)
+      - ./init-request-boundary.sql:/docker-entrypoint-initdb.d/420-init-request-boundary.sql:ro # research-workbench rw-boundary-core (plan 09 PD0a): research_jobs.request_kind + boundary, the derived-job guard, the private research_handbacks (forced RLS, purpose-scoped functions), a derived root's report is shared (fresh-volume only; live: psql -f BEFORE the new research + workbench images, a fresh backup first; revert: revert-request-boundary.sql, before 390's)
       - ./init-privacy-hardening.sql:/docker-entrypoint-initdb.d/430-init-privacy-hardening.sql:ro # research-workbench rw-privacy-hardening: the follow-ups of slots 380/390 (390 notebook-label repair F1/F2, the wiki guard's case-insensitive thought/ link and %2F, the withheld marker header, one refusal message for a note, an idea's purge erases its archive rows) as a FORWARD migration (fresh-volume: nothing to repair; live: psql -f AFTER 380 + 390, a fresh backup first, the wiki compile stopped, then the new openbrain-wiki-viewer and openbrain-workbench images, openbrain-wiki and the curator restarted (bind-mounted recipes); revert: revert-privacy-hardening.sql BEFORE the 390 and 380 reverts)
     networks:
       - obnet
@@ -1089,6 +1090,10 @@ services:
       # subject's - the one operator's (07-MULTI-USER); blank = nobody reads its prompt
       WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
       RESEARCH_SHARED_KEY_ORIGIN: ${RESEARCH_SHARED_KEY_ORIGIN:-manual}
+      # rw-boundary-core (plan 09 2.4): the RESEARCH_CALLERS names whose research carries no personal data
+      # (agent-org grounding, repo sync), comma-separated; their jobs are request_kind 'service' and only
+      # theirs keep the service: prompt exemption. Empty = none (every other job's prompt stays its owner's).
+      RESEARCH_SERVICE_CALLERS: ${RESEARCH_SERVICE_CALLERS:-}
       # Async chat callback: where a finished job announces itself. A research run
       # outlives the OWUI tool call that submitted it, so the report is POSTed into
       # the originating chat message instead of the caller blocking on a poll.
