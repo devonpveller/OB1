@@ -76,4 +76,12 @@ if bad:
     print("REFUSED: " + ", ".join(bad))
     sys.exit(2)
 json.dump(lab, open(out, "w", encoding="utf-8"), indent=1)
+# the evidence copy: every secret-shaped environment value redacted (the lab's own synthetic values never leave $work)
+import re
+red = json.loads(json.dumps(lab))
+for n in red["services"].values():
+    for k in list((n.get("environment") or {}).keys()):
+        if re.search(r"SECRET|PASSWORD|TOKEN|KEY|URI", k):
+            n["environment"][k] = "<redacted>" if n["environment"][k] else ""
+json.dump(red, open(out + ".redacted", "w", encoding="utf-8"), indent=1)
 print(f"lab compose: {len(svcs)} services, {len(vols)} volume(s), network lab {subnet} (internal)")

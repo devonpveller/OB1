@@ -202,7 +202,7 @@ try {
   Place $BaseSha 'base'
   [System.IO.File]::WriteAllText((Join-Path $liveDocker '.env'), "POSTGRES_PASSWORD=$pw`nWORKSPACE_DEFAULT_SUB=lab-operator`nMCP_ACCESS_KEY=lab-mcp-key-not-a-secret`nOPS_GATEWAY_KEY=lab-ops-key-not-a-secret`n", (New-Object System.Text.UTF8Encoding $false))
   if (-not (Render 'base')) { throw 'render base' }
-  Save 'lab-compose-base.json' ([System.IO.File]::ReadAllText($labFile))
+  Save 'lab-compose-base.json' ([System.IO.File]::ReadAllText("$labFile.redacted"))
   Write-Host '[A] the pre-change stack: up -d (everything, from the base files)'
   $o = LabCompose up -d
   Save 'A-up.log' $o
@@ -231,7 +231,7 @@ try {
     Note "S3 password: $(($m -split "`n" | Where-Object { $_ -match 'set ob_rest' }) -join '')"
   } @() 'old'
   if (-not (Render 'new')) { throw 'render new' }
-  Save 'lab-compose-new.json' ([System.IO.File]::ReadAllText($labFile))
+  Save 'lab-compose-new.json' ([System.IO.File]::ReadAllText("$labFile.redacted"))
   if ($Red) {
     # ROUND 1 as written: step 4 recreated the callers with a plain `up -d <svc>` (ob1-deploy), step 5 `up -d` the door
     Step 'S4 callers' { $o = LabCompose up -d @callers; Save 'S4-up.log' $o } $callers 'old'
