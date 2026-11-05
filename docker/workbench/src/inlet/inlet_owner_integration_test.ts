@@ -427,6 +427,32 @@ t("migrated", "round 3 (tester attempt 2, P1b): a tree seeded with an email body
   assertEquals((other[0] as { n: number }).n, 0, "the owner read answers no row for another subject");
 });
 
+t("migrated", "round 4 (tester attempt 3, 4a - the tester's plant): a seeded tree's rows are rebuilt - no marker survives in a kept-shape value (urls with text, *_id hex / digits, code-shaped tokens, *_at strings that only start with a date), in a JSON key at any depth, in nested arrays or in an event's payload or trail; only an exact shared source url is kept, with the shared row's own title; the unseeded control stays", async () => {
+  const p = await plant();
+  const a = await plant("adv3");
+  const m = p.mark as string;
+  const ids = [a.j1, a.r, a.b1, a.b2];
+  const rows = await sql<{ t: string }>(
+    `SELECT to_jsonb(j)::text AS t FROM public.research_jobs j WHERE j.id = ANY($1::uuid[]) OR j.root_job_id = ANY($1::uuid[])
+     UNION ALL SELECT to_jsonb(e)::text FROM public.research_job_events e WHERE e.job_id = ANY($1::uuid[]) OR e.root_job_id = ANY($1::uuid[])
+     UNION ALL SELECT to_jsonb(r)::text FROM public.research_prompts r WHERE r.job_id = ANY($1::uuid[])`, [ids]);
+  const hits = rows.filter((r) => leaks(r.t, m) || r.t.includes(String(a.hx)) || r.t.includes("1234567890123456")).length;
+  console.log(`inlet privacy: the 4a tree's shared rows carrying a marker, the hex id or the digit id: ${hits} of ${rows.length}`);
+  assertEquals(hits, 0);
+  assert(rows.length >= 9, "the planted jobs, events and prompts are all there");
+  // the kept url: exactly the shared source's, with its own title; nothing else under cited_sources
+  const res = (await sql<{ r: Record<string, unknown> }>(`SELECT result AS r FROM public.research_jobs WHERE id = $1::uuid`, [a.j1]))[0].r;
+  const cited = (res.cited_sources ?? []) as { url: string; title: string }[];
+  assertEquals(cited.map((c) => c.url), [`https://news.example/b/ctl${m}`]);
+  assertEquals(Object.keys(res).sort(), ["cited_sources", "outcome", "synthesis"], "only known keys survive (report_type was not an enumerated value)");
+  // the unseeded control tree is untouched shared research output
+  const ctl = (await sql<{ q: string }>(`SELECT query AS q FROM public.research_jobs WHERE id = $1::uuid`, [a.ctl]))[0].q;
+  assertEquals(ctl, `ctl3 question ctl${m}q`);
+  // the owner reads the original through the owner-only store
+  const own = await asApp(`SELECT result FROM public.inlet_private_job($1::uuid, $2)`, [a.j1, A]);
+  assert(JSON.stringify(own[0]).includes(`${m}rt`), "the owner's copy keeps the original result");
+});
+
 t("rerun", "a second run stamps and isolates exactly the rows that arrived unowned since the first", async () => {
   const late = await plant("late");
   const before = await plant("late-unowned");     // every unowned thought id at the moment of the late plant (the runner records it)

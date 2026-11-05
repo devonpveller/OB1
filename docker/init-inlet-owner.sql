@@ -50,8 +50,9 @@
 -- branches) every text the job carries was derived from the private seed - the synthesis, the summaries, the error,
 -- progress messages, event notes - so it is the owner's: archived, copied to an owner-only store
 -- (inlet_private_jobs / inlet_private_job_events, read through inlet_private_job(id, sub)), and replaced in the shared
--- row by neutral system text. Only an allow-list of structural keys keeps its value (ids, shared urls, type / status /
--- phase codes, timestamps); numbers and booleans stay.
+-- row by neutral system text. Round 4 (tester attempt 3, 4a): the rows are REBUILT, neutral by default - only known
+-- key paths, each value strictly checked (an enumerated code, a number, a shared row's id or exact url); no key text
+-- survives.
 -- ============================================================
 \if :{?owner_sub}
 \else
@@ -564,34 +565,112 @@ BEGIN
         RETURN j;
     END;
     $f$;
-    -- round 3: a seeded tree's text is the owner's - every string becomes neutral system text unless its key is
-    -- structural (an id, a shared url, a type / status / phase code, a timestamp); numbers, booleans and keys stay, so
-    -- every shape check (the events' CHECKs, the readers' fields) still holds
-    CREATE FUNCTION pg_temp.io_neutral(j JSONB, k TEXT) RETURNS JSONB LANGUAGE plpgsql STABLE AS $f$
-    DECLARE
-        kk TEXT; v JSONB; e JSONB; o JSONB; a JSONB; s TEXT;
+    -- round 4 (tester attempt 3, 4a): a seeded tree's rows are REBUILT, never filtered. Neutral by default: a value is kept
+    -- only at a known key path, and only when it passes a strict check - an enumerated code (the research service's own
+    -- report-type ids in templates.ts, its job outcomes and progress phases), a number, a boolean, a uuid that is an
+    -- existing shared row's id, or a url that is EXACTLY a shared sources row's url with no query and no fragment. Every
+    -- other value is 'private-text' or dropped, and no key the row carried survives unless it is one of these known keys,
+    -- so no key text survives either. The events keep only the keys their CHECK constraints need.
+    CREATE TEMP TABLE _io_codes (k TEXT, v TEXT, PRIMARY KEY (k, v)) ON COMMIT DROP;
+    INSERT INTO _io_codes
+    SELECT 'report_type', x FROM unnest(ARRAY['buyers-guide', 'scientific-paper', 'technical-proposal', 'nontechnical-proposal',
+           'programming-doc', 'engineering-doc', 'product-comparison', 'market-analysis', 'value-proposition', 'general-report', 'explainer']) x
+    UNION ALL SELECT 'outcome', x FROM unnest(ARRAY['ok', 'complete', 'error', 'no_relevant_sources', 'cancelled', 'timeout', 'reuse', 'paused']) x
+    UNION ALL SELECT 'phase', x FROM unnest(ARRAY['queued', 'running', 'request', 'plan', 'reuse', 'gather', 'fetch', 'screen', 'synthesize',
+           'persist', 'done', 'cancelled', 'error']) x;
+    -- a code: kept only when it is one of the enumerated values for its key
+    CREATE FUNCTION pg_temp.io_code(p_k TEXT, p_v JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE WHEN jsonb_typeof(p_v) = 'string' AND EXISTS (SELECT 1 FROM pg_temp._io_codes c WHERE c.k = p_k AND c.v = (p_v #>> '{}'))
+                    THEN p_v END
+    $f$;
+    -- a shared source by its exact url (no query, no fragment, never a private one): its own url and title
+    CREATE FUNCTION pg_temp.io_shared_source(u JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT jsonb_build_object('url', s.url, 'title', regexp_replace(coalesce(s.title, ''), '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*', 'private-email', 'gi'))
+          FROM public.sources s
+         WHERE jsonb_typeof(u) = 'string' AND s.url = (u #>> '{}')
+           AND position('?' IN s.url) = 0 AND position('#' IN s.url) = 0 AND s.url ~* '^https?://'
+           AND s.url !~* 'mail\.google\.com' AND NOT EXISTS (SELECT 1 FROM pg_temp._io_ids i WHERE i.v = s.url)
+         ORDER BY s.created_at LIMIT 1
+    $f$;
+    -- a shared claim by its id: its id and its own (shared) text
+    CREATE FUNCTION pg_temp.io_shared_claim(i JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        -- (the shared claim's text, with any Gmail url cut as step 5 cuts it from the claims row itself)
+        SELECT jsonb_build_object('id', c.id, 'text', regexp_replace(coalesce(c.text, ''), '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*', 'private-email', 'gi'))
+          FROM public.claims c
+         WHERE jsonb_typeof(i) = 'string' AND (i #>> '{}') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           AND c.id = (i #>> '{}')::uuid AND NOT EXISTS (SELECT 1 FROM pg_temp._io_ids x WHERE x.v = c.id::text)
+    $f$;
+    -- result: outcome, report_type (codes), synthesis (private-text), cited_sources (shared sources only, rebuilt from the
+    -- sources rows), claims / reuse_claims (shared claims only, rebuilt from the claims rows). Nothing else
+    CREATE FUNCTION pg_temp.io_result(j JSONB) RETURNS JSONB LANGUAGE plpgsql STABLE AS $f$
+    DECLARE o JSONB := '{}'::jsonb; a JSONB; e JSONB; x JSONB;
     BEGIN
-        IF j IS NULL THEN RETURN NULL; END IF;
-        IF jsonb_typeof(j) = 'object' THEN
-            o := '{}'::jsonb;
-            FOR kk, v IN SELECT * FROM jsonb_each(j) LOOP o := o || jsonb_build_object(kk, pg_temp.io_neutral(v, kk)); END LOOP;
-            RETURN o;
-        ELSIF jsonb_typeof(j) = 'array' THEN
+        IF j IS NULL OR jsonb_typeof(j) <> 'object' THEN RETURN CASE WHEN j IS NULL THEN NULL ELSE '{}'::jsonb END; END IF;
+        IF pg_temp.io_code('outcome', j -> 'outcome') IS NOT NULL THEN o := o || jsonb_build_object('outcome', j -> 'outcome'); END IF;
+        IF pg_temp.io_code('report_type', j -> 'report_type') IS NOT NULL THEN o := o || jsonb_build_object('report_type', j -> 'report_type'); END IF;
+        IF j ? 'synthesis' THEN o := o || jsonb_build_object('synthesis', 'private-text'); END IF;
+        IF jsonb_typeof(j -> 'cited_sources') = 'array' THEN
             a := '[]'::jsonb;
-            FOR e IN SELECT x FROM jsonb_array_elements(j) x LOOP a := a || jsonb_build_array(pg_temp.io_neutral(e, k)); END LOOP;
-            RETURN a;
-        ELSIF jsonb_typeof(j) = 'string' THEN
-            s := j #>> '{}';
-            IF s = 'private-text' THEN RETURN j; END IF;
-            IF k = 'url' AND s ~* '^https?://' AND s !~* 'mail\.google\.com' AND NOT EXISTS (SELECT 1 FROM pg_temp._io_ids i WHERE i.v = s) THEN RETURN j; END IF;
-            IF k ~ '(^|_)(id|ids)$' AND s ~* '^[0-9a-f-]{8,64}$|^[0-9]{1,18}$' THEN RETURN j; END IF;
-            IF k IN ('type', 'kind', 'phase', 'stage', 'status', 'outcome', 'report_type', 'decision', 'branch_kind', 'mode', 'edge_type', 'lifecycle')
-               AND s ~ '^[a-z][a-z0-9_.-]{0,39}$' THEN RETURN j; END IF;
-            IF k ~ '(^|_)at$' AND s ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}' THEN RETURN j; END IF;
-            RETURN to_jsonb('private-text'::text);
+            FOR e IN SELECT y FROM jsonb_array_elements(j -> 'cited_sources') y LOOP
+                x := CASE WHEN jsonb_typeof(e) = 'object' THEN pg_temp.io_shared_source(e -> 'url') END;
+                IF x IS NOT NULL AND NOT a @> jsonb_build_array(x) THEN a := a || jsonb_build_array(x); END IF;
+            END LOOP;
+            o := o || jsonb_build_object('cited_sources', a);
         END IF;
-        RETURN j;
+        FOREACH x IN ARRAY ARRAY[to_jsonb('claims'::text), to_jsonb('reuse_claims'::text)] LOOP
+            IF jsonb_typeof(j -> (x #>> '{}')) = 'array' THEN
+                a := '[]'::jsonb;
+                FOR e IN SELECT y FROM jsonb_array_elements(j -> (x #>> '{}')) y LOOP
+                    IF jsonb_typeof(e) = 'object' THEN
+                        e := pg_temp.io_shared_claim(e -> 'id');
+                        IF e IS NOT NULL AND NOT a @> jsonb_build_array(e) THEN a := a || jsonb_build_array(e); END IF;
+                    END IF;
+                END LOOP;
+                o := o || jsonb_build_object(x #>> '{}', a);
+            END IF;
+        END LOOP;
+        RETURN o;
     END;
+    $f$;
+    -- progress: the phase (a code) and, where there was one, a neutral message
+    CREATE FUNCTION pg_temp.io_progress(j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE WHEN j IS NULL THEN NULL WHEN jsonb_typeof(j) <> 'object' THEN '{}'::jsonb ELSE
+               jsonb_strip_nulls(jsonb_build_object('phase', pg_temp.io_code('phase', j -> 'phase'),
+                                                    'message', CASE WHEN j ? 'message' THEN to_jsonb('private-text'::text) END)) END
+    $f$;
+    -- tree report: a neutral summary only
+    CREATE FUNCTION pg_temp.io_tree_report(j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE WHEN j IS NULL THEN NULL ELSE jsonb_build_object('summary', 'private-text') END
+    $f$;
+    -- metrics: the three numbers research_run_metrics reads (the nested credibility / entailment / admission objects go)
+    CREATE FUNCTION pg_temp.io_metrics(j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE WHEN j IS NULL THEN NULL WHEN jsonb_typeof(j) <> 'object' THEN '{}'::jsonb ELSE
+               jsonb_strip_nulls(jsonb_build_object(
+                   'claims_reused', CASE WHEN jsonb_typeof(j -> 'claims_reused') = 'number' THEN j -> 'claims_reused' END,
+                   'claims_freshly_gathered', CASE WHEN jsonb_typeof(j -> 'claims_freshly_gathered') = 'number' THEN j -> 'claims_freshly_gathered' END,
+                   'gap_ratio', CASE WHEN jsonb_typeof(j -> 'gap_ratio') = 'number' THEN j -> 'gap_ratio' END)) END
+    $f$;
+    -- an event's payload: only the keys its type's CHECK needs, each value neutral, a number, or a shared row's id
+    CREATE FUNCTION pg_temp.io_event_payload(typ TEXT, step TEXT, j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE typ
+            WHEN 'human_steer' THEN jsonb_build_object('topic_estimate', 'private-text', 'anchor', 'private-text', 'step_id', to_jsonb(step))
+            WHEN 'gap' THEN jsonb_build_object(
+                'claim_id', (pg_temp.io_shared_claim(j -> 'claim_id')) -> 'id',
+                'score', CASE WHEN jsonb_typeof(j -> 'score') = 'number' THEN j -> 'score' END,
+                'threshold', CASE WHEN jsonb_typeof(j -> 'threshold') = 'number' THEN j -> 'threshold' END)
+            WHEN 'interhub_gap' THEN jsonb_build_object('a', NULL, 'b', NULL,
+                'density', CASE WHEN jsonb_typeof(j -> 'density') = 'number' THEN j -> 'density' END)
+            WHEN 'filed' THEN jsonb_build_object(
+                'synthesis_id', (SELECT to_jsonb(s.id) FROM public.sources s
+                                  WHERE jsonb_typeof(j -> 'synthesis_id') = 'string'
+                                    AND (j ->> 'synthesis_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                                    AND s.id = (j ->> 'synthesis_id')::uuid),
+                'research_key', 'private-text')
+            ELSE '{}'::jsonb END
+    $f$;
+    -- an event's trail: a source event must keep a non-empty object (its CHECK); any other trail goes neutral or stays NULL
+    CREATE FUNCTION pg_temp.io_event_trail(typ TEXT, j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE WHEN j IS NULL AND typ <> 'source' THEN NULL ELSE jsonb_build_object('text', 'private-text') END
     $f$;
     -- the SEEDED trees: a job seeded with an email body or a moved source (the digest's body fallback) carries the
     -- email's subject in its question; the whole tree (root and branches) gets a neutral question, anchor and topic,
@@ -624,8 +703,9 @@ BEGIN
             AND (j.query IS DISTINCT FROM (SELECT t.neutral FROM _io_tree t WHERE t.id = j.id)
                  OR (j.anchor IS NOT NULL AND j.anchor IS DISTINCT FROM (SELECT t.neutral FROM _io_tree t WHERE t.id = j.id))
                  OR (j.topic_estimate IS NOT NULL AND j.topic_estimate IS DISTINCT FROM (SELECT t.neutral FROM _io_tree t WHERE t.id = j.id))
-                 OR pg_temp.io_neutral(j.result, NULL) IS DISTINCT FROM j.result OR pg_temp.io_neutral(j.progress, NULL) IS DISTINCT FROM j.progress
-                 OR pg_temp.io_neutral(j.options, NULL) IS DISTINCT FROM j.options OR pg_temp.io_neutral(j.tree_report, NULL) IS DISTINCT FROM j.tree_report
+                 OR pg_temp.io_result(j.result) IS DISTINCT FROM j.result OR pg_temp.io_progress(j.progress) IS DISTINCT FROM j.progress
+                 OR (j.options IS NOT NULL AND j.options <> '{}'::jsonb) OR pg_temp.io_tree_report(j.tree_report) IS DISTINCT FROM j.tree_report
+                 OR pg_temp.io_metrics(j.metrics) IS DISTINCT FROM j.metrics OR j.inlet_ref IS NOT NULL
                  OR (j.error IS NOT NULL AND j.error <> 'private-text') OR (j.gap_ref IS NOT NULL AND j.gap_ref <> 'private-text')))
         OR pg_temp.io_hits(coalesce(j.options::text, '') || ' ' || coalesce(j.result::text, '') || ' ' || coalesce(j.tree_report::text, '')
                            || ' ' || coalesce(j.query, '') || ' ' || coalesce(j.anchor, '') || ' ' || coalesce(j.topic_estimate, ''));
@@ -636,7 +716,7 @@ BEGIN
     CREATE TEMP TABLE _io_events ON COMMIT DROP AS
     SELECT e.id FROM public.research_job_events e
      WHERE ((e.job_id IN (SELECT id FROM _io_tree) OR e.root_job_id IN (SELECT root FROM _io_roots))
-            AND (pg_temp.io_neutral(e.payload, NULL) IS DISTINCT FROM e.payload OR pg_temp.io_neutral(e.trail, NULL) IS DISTINCT FROM e.trail))
+            AND (pg_temp.io_event_payload(e.type, e.step_id, e.payload) IS DISTINCT FROM e.payload OR pg_temp.io_event_trail(e.type, e.trail) IS DISTINCT FROM e.trail))
         OR pg_temp.io_hits(coalesce(e.payload::text, '') || ' ' || coalesce(e.trail::text, ''));
     -- the shared rows that carry a Gmail id or URL
     CREATE TEMP TABLE _io_meta_src ON COMMIT DROP AS
@@ -693,10 +773,12 @@ BEGIN
            CASE WHEN t.id IS NOT NULL THEN t.neutral ELSE j.query END AS query,
            CASE WHEN t.id IS NOT NULL AND j.anchor IS NOT NULL THEN t.neutral ELSE j.anchor END AS anchor,
            CASE WHEN t.id IS NOT NULL AND j.topic_estimate IS NOT NULL THEN t.neutral ELSE j.topic_estimate END AS topic_estimate,
-           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_neutral(pg_temp.io_scrub(j.options, t.subs), NULL) ELSE pg_temp.io_scrub(j.options, NULL) END AS options,
-           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_neutral(pg_temp.io_scrub(j.result, t.subs), NULL) ELSE pg_temp.io_scrub(j.result, NULL) END AS result,
-           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_neutral(pg_temp.io_scrub(j.tree_report, t.subs), NULL) ELSE pg_temp.io_scrub(j.tree_report, NULL) END AS tree_report,
-           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_neutral(pg_temp.io_scrub(j.progress, t.subs), NULL) ELSE pg_temp.io_scrub(j.progress, NULL) END AS progress,
+           CASE WHEN t.id IS NOT NULL THEN (CASE WHEN j.options IS NULL THEN NULL ELSE '{}'::jsonb END) ELSE pg_temp.io_scrub(j.options, NULL) END AS options,
+           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_result(j.result) ELSE pg_temp.io_scrub(j.result, NULL) END AS result,
+           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_tree_report(j.tree_report) ELSE pg_temp.io_scrub(j.tree_report, NULL) END AS tree_report,
+           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_progress(j.progress) ELSE pg_temp.io_scrub(j.progress, NULL) END AS progress,
+           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_metrics(j.metrics) ELSE j.metrics END AS metrics,
+           CASE WHEN t.id IS NOT NULL THEN NULL ELSE j.inlet_ref END AS inlet_ref,
            CASE WHEN j.error IS NULL THEN NULL
                 WHEN t.id IS NOT NULL THEN 'private-text'
                 ELSE regexp_replace(j.error, '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*', 'private-email', 'gi') END AS error,
@@ -706,13 +788,15 @@ BEGIN
      WHERE j.id = n.id AND n.query IS NOT DISTINCT FROM j.query AND n.anchor IS NOT DISTINCT FROM j.anchor
        AND n.topic_estimate IS NOT DISTINCT FROM j.topic_estimate AND n.options IS NOT DISTINCT FROM j.options
        AND n.result IS NOT DISTINCT FROM j.result AND n.tree_report IS NOT DISTINCT FROM j.tree_report
-       AND n.progress IS NOT DISTINCT FROM j.progress AND n.error IS NOT DISTINCT FROM j.error AND n.gap_ref IS NOT DISTINCT FROM j.gap_ref;
+       AND n.progress IS NOT DISTINCT FROM j.progress AND n.error IS NOT DISTINCT FROM j.error AND n.gap_ref IS NOT DISTINCT FROM j.gap_ref
+       AND n.metrics IS NOT DISTINCT FROM j.metrics AND n.inlet_ref IS NOT DISTINCT FROM j.inlet_ref;
     -- [archive-jobs]
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, row_data)
-    SELECT v_batch, 'public.research_jobs', 'query,anchor,topic_estimate,options,result,tree_report,progress,error,gap_ref', 'j',
+    SELECT v_batch, 'public.research_jobs', 'query,anchor,topic_estimate,options,result,tree_report,progress,error,gap_ref,metrics,inlet_ref', 'j',
            jsonb_build_object('id', j.id, 'query', j.query, 'anchor', j.anchor, 'topic_estimate', j.topic_estimate,
                               'options', j.options, 'result', j.result, 'tree_report', j.tree_report,
-                              'progress', j.progress, 'error', j.error, 'gap_ref', j.gap_ref)
+                              'progress', j.progress, 'error', j.error, 'gap_ref', j.gap_ref,
+                              'metrics', j.metrics, 'inlet_ref', j.inlet_ref)
       FROM public.research_jobs j JOIN _io_jobs_new n ON n.id = j.id;
     -- [/archive-jobs]
     -- the seeded trees' own text, for the owner
@@ -732,8 +816,8 @@ BEGIN
       FROM public.research_prompts p JOIN _io_prompts_new n ON n.job_id = p.job_id;
     CREATE TEMP TABLE _io_events_new ON COMMIT DROP AS
     SELECT e.id, e.job_id, (t.subs IS NOT NULL OR t.hit) AS tree,
-           CASE WHEN t.hit THEN pg_temp.io_neutral(pg_temp.io_scrub(e.payload, t.subs), NULL) ELSE pg_temp.io_scrub(e.payload, NULL) END AS payload,
-           CASE WHEN t.hit THEN pg_temp.io_neutral(pg_temp.io_scrub(e.trail, t.subs), NULL) ELSE pg_temp.io_scrub(e.trail, NULL) END AS trail
+           CASE WHEN t.hit THEN pg_temp.io_event_payload(e.type, e.step_id, e.payload) ELSE pg_temp.io_scrub(e.payload, NULL) END AS payload,
+           CASE WHEN t.hit THEN pg_temp.io_event_trail(e.type, e.trail) ELSE pg_temp.io_scrub(e.trail, NULL) END AS trail
       FROM public.research_job_events e JOIN _io_events x ON x.id = e.id
       LEFT JOIN LATERAL (SELECT tt.subs, true AS hit FROM _io_tree tt WHERE tt.root = e.root_job_id OR tt.id = e.job_id LIMIT 1) t ON true;
     DELETE FROM _io_events_new n USING public.research_job_events e
@@ -749,7 +833,7 @@ BEGIN
     PERFORM set_config('session_replication_role', 'replica', true);
     UPDATE public.research_jobs j
        SET query = n.query, anchor = n.anchor, topic_estimate = n.topic_estimate, options = n.options, result = n.result, tree_report = n.tree_report,
-           progress = n.progress, error = n.error, gap_ref = n.gap_ref
+           progress = n.progress, error = n.error, gap_ref = n.gap_ref, metrics = n.metrics, inlet_ref = n.inlet_ref
       FROM _io_jobs_new n, public.inlet_owner_archive a
      WHERE n.id = j.id AND a.batch = v_batch AND a.action = 'j' AND (a.row_data ->> 'id')::uuid = j.id;
     GET DIAGNOSTICS n_jobs = ROW_COUNT;
@@ -780,14 +864,17 @@ BEGIN
                    WHERE j.query IS DISTINCT FROM t.neutral OR (j.anchor IS NOT NULL AND j.anchor IS DISTINCT FROM t.neutral)
                       OR (j.topic_estimate IS NOT NULL AND j.topic_estimate IS DISTINCT FROM t.neutral))
        OR EXISTS (SELECT 1 FROM _io_tree t JOIN public.research_prompts p ON p.job_id = t.id WHERE p.prompt IS DISTINCT FROM t.neutral)
-       -- round 3: every text of a seeded tree is neutral (the neutral pass changes nothing more)
-       OR EXISTS (SELECT 1 FROM _io_tree t JOIN public.research_jobs j ON j.id = t.id
-                   WHERE pg_temp.io_neutral(j.result, NULL) IS DISTINCT FROM j.result OR pg_temp.io_neutral(j.progress, NULL) IS DISTINCT FROM j.progress
-                      OR pg_temp.io_neutral(j.options, NULL) IS DISTINCT FROM j.options OR pg_temp.io_neutral(j.tree_report, NULL) IS DISTINCT FROM j.tree_report
-                      OR (j.error IS NOT NULL AND j.error <> 'private-text') OR (j.gap_ref IS NOT NULL AND j.gap_ref <> 'private-text'))
+       -- round 4: every row of a seeded tree is its rebuild (the rebuild changes nothing more)
+       OR EXISTS (SELECT 1 FROM _io_tree t JOIN public.research_jobs j ON j.id = t.id WHERE (j.query IS DISTINCT FROM (SELECT t.neutral FROM _io_tree t WHERE t.id = j.id)
+                 OR (j.anchor IS NOT NULL AND j.anchor IS DISTINCT FROM (SELECT t.neutral FROM _io_tree t WHERE t.id = j.id))
+                 OR (j.topic_estimate IS NOT NULL AND j.topic_estimate IS DISTINCT FROM (SELECT t.neutral FROM _io_tree t WHERE t.id = j.id))
+                 OR pg_temp.io_result(j.result) IS DISTINCT FROM j.result OR pg_temp.io_progress(j.progress) IS DISTINCT FROM j.progress
+                 OR (j.options IS NOT NULL AND j.options <> '{}'::jsonb) OR pg_temp.io_tree_report(j.tree_report) IS DISTINCT FROM j.tree_report
+                 OR pg_temp.io_metrics(j.metrics) IS DISTINCT FROM j.metrics OR j.inlet_ref IS NOT NULL
+                 OR (j.error IS NOT NULL AND j.error <> 'private-text') OR (j.gap_ref IS NOT NULL AND j.gap_ref <> 'private-text')))
        OR EXISTS (SELECT 1 FROM public.research_job_events e
                    WHERE (e.root_job_id IN (SELECT root FROM _io_roots) OR e.job_id IN (SELECT id FROM _io_tree))
-                     AND (pg_temp.io_neutral(e.payload, NULL) IS DISTINCT FROM e.payload OR pg_temp.io_neutral(e.trail, NULL) IS DISTINCT FROM e.trail)) THEN
+                     AND (pg_temp.io_event_payload(e.type, e.step_id, e.payload) IS DISTINCT FROM e.payload OR pg_temp.io_event_trail(e.type, e.trail) IS DISTINCT FROM e.trail)) THEN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - a research job, prompt or event still names private data after the strip' USING ERRCODE = '55000';
     END IF;
 
