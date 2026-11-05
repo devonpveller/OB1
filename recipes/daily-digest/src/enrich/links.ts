@@ -827,6 +827,26 @@ export async function unwrapRedirect(
 const NOISE_TEXT_RE =
   /\b(unsubscribe|subscribe|sign ?up|manage (your )?(subscription|preferences|account)|view (this )?in (your )?browser|read in app|update your profile|invite (friends|a friend)|share|tweet|re-?stack|forward (this|to a friend)|follow us|privacy policy|terms of service|upgrade|annual plan|become a (paid )?(member|subscriber)|\d+% off)\b/i;
 
+/** rw-boundary-digest round 2 (tester F7): a tracker that carries its destination in a query parameter
+ *  (`?url=https://...`, `?u=`, `?q=` ...) is unwrapped from the URL itself - NO fetch: the click tracker then never
+ *  sees the per-recipient query the newsletter put on the wrapper. Only a value that parses as an http(s) URL counts
+ *  (a Mailchimp `u=<account hex>` does not), one level deep. Returns the destination or null. */
+const REDIRECT_PARAMS = ["url", "u", "q", "target", "dest", "destination", "redirect", "redirect_url", "redirect_uri", "r", "link", "to", "goto", "out", "href"];
+export function decodeParamRedirect(url: string): string | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  for (const k of REDIRECT_PARAMS) {
+    for (const v of u.searchParams.getAll(k)) {
+      for (const cand of [v, (() => { try { return decodeURIComponent(v); } catch { return v; } })()]) {
+        if (/^https?:\/\//i.test(cand)) {
+          try { return new URL(cand).toString(); } catch { /* not a url */ }
+        }
+      }
+    }
+  }
+  return null;
+}
+
 /** Substack encodes the real destination in redirect/2/<base64-json>.{e}.
  *  Decode it locally (no network). Returns the destination URL or null. */
 function decodeSubstackRedirect(url: string): string | null {
@@ -862,7 +882,38 @@ export function isResearchable(c: LinkCandidate): boolean {
   // The newsletter's own posts: the email body already covers them and the web
   // posts are often paywalled.
   if (c.domain.endsWith("substack.com")) return false;
+  // rw-boundary-digest round 2 (tester F1), defence in depth: a meeting, calendar, file-share or personal-page link is
+  // the user's, never research. The request boundary refuses these too (boundary-gate.ts shareLink, the authority);
+  // this keeps them from leaving the digest at all.
+  if (isPersonalLink(c.url)) return false;
   return true;
+}
+
+/** A link that opens the user's meeting, calendar entry, shared file or personal page (the digest-side list; the
+ *  research service's gate has the full rule). */
+const PERSONAL_HOSTS = /(^|\.)(meet\.google\.com|drive\.google\.com|docs\.google\.com|sites\.google\.com|calendar\.google\.com|mail\.google\.com|forms\.gle|whereby\.com|meet\.jit\.si|teams\.live\.com|1drv\.ms|onedrive\.live\.com|sharepoint\.com|we\.tl|wetransfer\.com|calendly\.com|cal\.com|notion\.site|docsend\.com|dl\.dropboxusercontent\.com)$/i;
+const PERSONAL_PATHS: Array<[RegExp, RegExp]> = [
+  [/(^|\.)zoom(gov)?\.(us|com)$/i, /^\/(j|my|w|s|wc|rec|meeting|webinar)\//i],
+  [/(^|\.)teams\.microsoft\.com$/i, /^\/(l\/|meet)/i],
+  [/(^|\.)webex\.com$/i, /^\/(meet|join|m|wbxmjs)\b/i],
+  [/(^|\.)(gotomeeting|goto)\.com$/i, /^\/(join|meeting)\b/i],
+  [/(^|\.)dropbox\.com$/i, /^\/(s|scl|sh|t|l|request|transfer)\//i],
+  [/(^|\.)box\.com$/i, /^\/(s|file|folder)\//i],
+  [/(^|\.)google\.com$/i, /^\/(calendar|file|open|folders|drive|docs|document|spreadsheets|presentation|forms)\b/i],
+];
+export function isPersonalLink(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  const h = u.hostname.toLowerCase();
+  if (PERSONAL_HOSTS.test(h) || /^(meet|meeting|meetings|join)\./.test(h.replace(/^www\./, ""))) return true;
+  if (PERSONAL_PATHS.some(([hr, pr]) => hr.test(h) && pr.test(u.pathname))) return true;
+  return /\.ics$/i.test(u.pathname) || /(^|\/)[a-z]{3}-[a-z]{4}-[a-z]{3}(\/|$)/i.test(u.pathname);
+}
+
+/** A calendar notification (an invitation, its update, a reply, a cancellation): its links are the meeting's, never
+ *  research - the digest takes none of them. */
+export function isCalendarInvite(subject: string): boolean {
+  return /^\s*(updated invitation|invitation|accepted|declined|tentatively accepted|canceled event|cancelled event|new event|updated event)( with note)?\s*:/i.test(subject ?? "");
 }
 
 /**
@@ -887,7 +938,7 @@ export async function gatherAnchors(
 
     // Resolve to the real destination so POI/hygiene see a real URL. Substack
     // base64 decodes for free; cap the NETWORK unwraps for opaque wrappers.
-    let url = decodeSubstackRedirect(raw) ?? raw;
+    let url = decodeSubstackRedirect(raw) ?? (isRedirectWrapper(raw) ? decodeParamRedirect(raw) : null) ?? raw;
     let unresolvedWrapper = false;
     if (url === raw && isRedirectWrapper(raw)) {
       if (unwraps >= maxUnwrap) continue; // out of unwrap budget → skip opaque wrapper
@@ -939,7 +990,7 @@ export async function gatherLinks(
     }
 
     const url = isRedirectWrapper(rawUrl)
-      ? await unwrapRedirect(rawUrl, { timeoutMs: opts.unwrapTimeoutMs })
+      ? decodeParamRedirect(rawUrl) ?? await unwrapRedirect(rawUrl, { timeoutMs: opts.unwrapTimeoutMs })
       : rawUrl;
 
     const drop = classifyLink(url);

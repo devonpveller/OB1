@@ -10,6 +10,8 @@ import { MK } from "./boundary-markers.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? "8080");
 const log: string[] = [];
+const SHARE_HOSTS = new Set(["meet.google.com", "drive.google.com", "docs.google.com", "sites.google.com", "zoom.us",
+  "teams.microsoft.com", "www.dropbox.com", "files.example.org", "calendar.google.com"]);
 const page = (title: string, body: string) => new Response(`<html><head><title>${title}</title></head><body><article><p>${body}</p></article></body></html>`,
   { headers: { "content-type": "text/html; charset=utf-8" } });
 
@@ -22,6 +24,11 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, (req) => {
   if (host === "news.example.org" && u.pathname === "/solar-roofs") {
     return page("Community solar roofs cut winter bills",
       `Community solar roofs cut winter bills by 18 percent in 2024, a survey of cooperative installations found. The ${MK.PUB} method is described in the appendix. `.repeat(8));
+  }
+  // round 2 (tester F1): the meeting / file-share hosts (network aliases in the lab) answer 200 with a page, so a link
+  // the filters let through really is fetched and filed - the RED run must be able to leak
+  if (SHARE_HOSTS.has(host)) {
+    return page("Shared document", "This shared document is available to anyone with the link. It holds the meeting notes and the plan. ".repeat(8));
   }
   return new Response("not found", { status: 404 });
 });

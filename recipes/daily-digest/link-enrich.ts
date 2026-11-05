@@ -55,7 +55,7 @@ import { BrainClient } from "./src/clients/postgrest.ts";
 import { GoogleOAuth } from "./src/clients/google-oauth.ts";
 import { AiNewsSection } from "./src/sections/ai-news.ts";
 import { reconstructEmailBody } from "./src/enrich/email-body.ts";
-import { extractUrls, gatherAnchors, gatherLinks, isResearchable } from "./src/enrich/links.ts";
+import { extractUrls, gatherAnchors, gatherLinks, isCalendarInvite, isResearchable } from "./src/enrich/links.ts";
 import { extractAnchors, GmailReader } from "./src/enrich/gmail-fetch.ts";
 import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml } from "./src/enrich/extract.ts";
@@ -132,7 +132,12 @@ const BLOCKLIST_PATH = env("PROMO_BLOCKLIST_PATH", `${REPORTS_DIR}/promo-blockli
 // to its newsletter's topic is researched, tangential ones are dropped. The
 // CEILING below is only a runaway safety valve; overflow + unfinished dives carry
 // in a freshness-bounded ledger. See implementation-guide/digest-gap-deep-research/.
-const GAP_DIVE_ENABLED = env("GAP_DIVE_ENABLED", "1") === "1";
+// rw-boundary-digest round 2 (tester F2): the digest asks for research with ITS OWN caller key (RESEARCH_CALLERS
+// `digest=notebook:<key>` on the research service), never the shared MCP_ACCESS_KEY that ~11 services hold - the door
+// stamps the caller on each private hand-back and only that caller may record its delivery. No key = no research at
+// all (fail closed: every link is email-only, no dive; the episode and the email still go out).
+const RESEARCH_KEY = env("RESEARCH_DIGEST_KEY").trim();
+const GAP_DIVE_ENABLED = env("GAP_DIVE_ENABLED", "1") === "1" && !!RESEARCH_KEY;
 const GAP_DIVE_CEILING = num("GAP_DIVE_CEILING", 12); // runaway safety, NOT the throttle
 const GAP_DIVE_MIN_TAGGED = num("GAP_DIVE_MIN_TAGGED", 2); // < this tagged lines = "thin"
 const GAP_DIVE_WAIT_MS = num("GAP_DIVE_WAIT_MS", 7_200_000); // same-night budget (2h)
@@ -145,7 +150,7 @@ const LEDGER_PATH = `${REPORTS_DIR}/gap-dives-pending${COMMIT ? "" : "-dryrun"}.
 const brain = new BrainClient({ baseUrl: env("BRAIN_REST_URL", "http://openbrain-rest") });
 const research = new ResearchClient({
   baseUrl: env("RESEARCH_URL", "http://openbrain-research:8000"),
-  brainKey: env("MCP_ACCESS_KEY"),
+  brainKey: RESEARCH_KEY,
 });
 // LiteLLM virtual key for every direct chat call this runner makes. The gateway
 // has REQUIRED an sk- key since J.1 (2026-08-21); before this was wired the calls
@@ -385,8 +390,12 @@ async function main() {
       `maxEmails=${MAX_EMAILS} label=${ONLY_LABEL ?? "(all " + LABEL_PREFIX + "*)"} egress=${egressMode()}`,
   );
   if (!env("MCP_ACCESS_KEY")) {
-    console.error("[link-enrich] MCP_ACCESS_KEY required (research API is authenticated); aborting.");
+    console.error("[link-enrich] MCP_ACCESS_KEY required (the workbench's archive destination is authenticated); aborting.");
     Deno.exit(2);
+  }
+  if (!RESEARCH_KEY) {
+    console.warn("[link-enrich] RESEARCH_DIGEST_KEY is not set: NO research this run (every link email-only, no gap dive) - " +
+      "the digest never researches with the shared key. The operator creates it (test plan, Live deploy).");
   }
 
   // Resolve yesterday's carried-over gap dives (durable server-side jobs) before
@@ -489,7 +498,8 @@ async function main() {
       // expression used to be inline here, where nothing could import it, and
       // the test that "guarded" it asserted a hand-typed copy - a tester put the
       // regression back and the whole suite stayed green.
-      external = gathered.filter(isResearchable);
+      // rw-boundary-digest round 2 (F1): a calendar notification's links are the meeting's - none is researched
+      external = isCalendarInvite(subject) ? [] : gathered.filter(isResearchable);
     }
     // Promo filter (blocklist → nothink): drop ad/sponsor links before POI so
     // they never become sources/claims. Domains judged promo are remembered.
@@ -608,6 +618,7 @@ async function processLink(item: WorkItem) {
     console.log(`      ✗ ${link.domain} — email-only (${note})`);
   };
 
+  if (!RESEARCH_KEY) return fallback("research: off (no RESEARCH_DIGEST_KEY)");
   const inlet = await inletId(email.gmailId, "article", link.url);
   if (seenInlets.has(inlet)) return; // the same link twice in one email: one request
   seenInlets.add(inlet);

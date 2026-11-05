@@ -92,12 +92,13 @@ async function oauthFiles(dir: string) {
   await Deno.writeTextFile(`${dir}/gmail-token.json`, JSON.stringify({ access_token: "lab-token", refresh_token: "lab", token_type: "Bearer", expiry_date: Date.now() + 86_400_000 }));
 }
 
-async function runLinkEnrich(o: { gwUrl: string; brainUrl: string; researchUrl: string; gmailUrl: string; dir: string; waitUntil?: number }) {
+async function runLinkEnrich(o: { gwUrl: string; brainUrl: string; researchUrl: string; gmailUrl: string; dir: string; waitUntil?: number; extraEnv?: Record<string, string> }) {
   const out = await new Deno.Command("deno", {
     args: ["run", "--unstable-net", "-A", "link-enrich.ts", "--commit"],
     cwd: RECIPE,
     env: {
       MCP_ACCESS_KEY: "test",
+      RESEARCH_DIGEST_KEY: "test-digest-key-000000", // round 2 (F2): the digest researches only with its own key
       BRAIN_REST_URL: o.brainUrl,
       RESEARCH_URL: o.researchUrl,
       CHAT_API_BASE: `${o.gwUrl}/v1`,
@@ -119,6 +120,7 @@ async function runLinkEnrich(o: { gwUrl: string; brainUrl: string; researchUrl: 
       HTTP_PROXY: "http://127.0.0.1:9",
       HTTPS_PROXY: "http://127.0.0.1:9",
       NO_PROXY: "127.0.0.1,localhost",
+      ...(o.extraEnv ?? {}),
     },
     stdout: "piped",
     stderr: "piped",
@@ -242,6 +244,25 @@ Deno.test({
       const brief = await readJson(`${t.dir}/reports/podcast-brief-latest.json`);
       assertEquals(brief.segments[0].items[0].emailOnly, false);
       assertMatch(JSON.stringify(brief.segments[0].items[0].keyPoints), /Routing recovers/);
+    } finally {
+      await t.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "L4 (rw-boundary-digest round 2, F2): no RESEARCH_DIGEST_KEY - no research request at all (never the shared key), the brief still goes out",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const t = await setup("up", ["done"]);
+    try {
+      const r = await runLinkEnrich({ gwUrl: t.gw.url, brainUrl: t.brain.url, researchUrl: t.engine.url, gmailUrl: t.gmail.url, dir: t.dir, extraEnv: { RESEARCH_DIGEST_KEY: "" } });
+      assertEquals(r.code, 0, r.log.slice(-2000));
+      assertMatch(r.log, /RESEARCH_DIGEST_KEY is not set: NO research this run/);
+      assertEquals(t.engine.bodies.length, 0, "nothing was sent to the research service");
+      const brief = await readJson(`${t.dir}/reports/podcast-brief-latest.json`);
+      assertEquals(brief.segments[0].items[0].emailOnly, true, "the article is email-only");
     } finally {
       await t.close();
     }

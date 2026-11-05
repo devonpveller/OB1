@@ -2,7 +2,9 @@
 # boundary).
 #
 #   powershell -NoProfile -File OB1\recipes\daily-digest\lab\run-digest-boundary-lab.ps1 [-Id <owner id>] [-Evidence <dir>]
-#       [-Red [-BaseSha 116b80e]] [-SkipPodcastGate] [-KeepImage]
+#       [-Red [-BaseSha 116b80e]] [-RedShare [-BaseSha 7a25233]] [-SkipPodcastGate] [-KeepImage]
+#   -RedShare (round 2, tester F1): the item's round-1 code (OB1 7a25233) - the e2e passes only if the meeting / Drive
+#   codes of the share links reach shared rows there (the leak attempt 1 found); GREEN must show none
 #
 # What it does, and ONLY this:
 #   1. stages the code under test: GREEN = this checkout's research service + digest; RED (-Red) = a git archive of
@@ -31,7 +33,8 @@ param(
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$Evidence = '',
   [switch]$Red,
-  [string]$BaseSha = '116b80e',
+  [switch]$RedShare,
+  [string]$BaseSha = '',
   [switch]$SkipPodcastGate,
   [switch]$KeepImage
 )
@@ -48,7 +51,10 @@ $podTag = "openbrain-podcast-test:wt-$short"
 if ($testTag -match ':local$' -or $podTag -match ':local$') { throw 'refusing a :local tag' }
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
-$mode = if ($Red) { 'red' } else { 'green' }
+if ($Red -and $RedShare) { throw '-Red or -RedShare, not both' }
+$base = $Red -or $RedShare
+if (-not $BaseSha) { $BaseSha = if ($RedShare) { '7a25233' } else { '116b80e' } }
+$mode = if ($Red) { 'red' } elseif ($RedShare) { 'red-share' } else { 'green' }
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwdg-evidence-$mode-$rand" }
 New-Item -ItemType Directory -Force $Evidence | Out-Null
 $work = Join-Path $env:TEMP "rwdg-work-$rand"
@@ -81,7 +87,7 @@ $made = @{ net = $false; containers = @(); images = @() }
 try {
   Write-Host "[1] the code under test ($mode)"
   New-Item -ItemType Directory -Force $work | Out-Null
-  if ($Red) {
+  if ($base) {
     $tar = Join-Path $work 'base.tar'
     & git -C $ob1 archive --format=tar -o $tar $BaseSha integrations/research-service integrations/intake recipes/daily-digest docker
     Check ($LASTEXITCODE -eq 0) "git archive of OB1 $BaseSha"
@@ -152,7 +158,10 @@ try {
     $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f "/tmp/$f"
     Check ($script:rc -eq 0) "$f re-run after ob_app_memory exists (the grants)$(if ($script:rc) { ': ' + $o })"
   }
-  $o = Dk run -d --name $pages --label $label --network $net --network-alias news.example.org -e PORT=8080 $testTag deno run --allow-net --allow-env --allow-read fixtures/digest-lab-pages.ts
+  $o = Dk run -d --name $pages --label $label --network $net --network-alias news.example.org `
+    --network-alias meet.google.com --network-alias drive.google.com --network-alias docs.google.com --network-alias sites.google.com `
+    --network-alias calendar.google.com --network-alias zoom.us --network-alias teams.microsoft.com --network-alias www.dropbox.com `
+    --network-alias files.example.org -e PORT=8080 $testTag deno run --allow-net --allow-env --allow-read fixtures/digest-lab-pages.ts
   if ($script:rc -eq 0) { $made.containers += $pages } else { Fail "the pages container did not start: $o" }
   $o = Dk run -d --name $rest --label $label --network $net -e "PGRST_DB_URI=postgres://postgres:$pw@${db}:5432/openbrain" -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=service_role -e PGRST_SERVER_PORT=3000 $PgrstImage
   if ($script:rc -eq 0) { $made.containers += $rest } else { Fail "PostgREST did not start: $(($o -replace [regex]::Escape($pw), '***'))" }
@@ -169,7 +178,7 @@ try {
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 2) "digest e2e ($mode): $($sum.Value)"
 
-  if (-not $Red) {
+  if (-not $base) {
     Write-Host '[5b] slot 460: the structural checks, then the drill (revert, revert again, init, init again, revert, init)'
     $null = Dk cp (Join-Path $PSScriptRoot 'boundary-digest-460-check.sql') "${db}:/tmp/460-check.sql"
     $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f /tmp/460-check.sql
@@ -206,7 +215,7 @@ try {
     Save 'drill-460.txt' ($drill -join "`n")
   }
 
-  if (-not $Red -and -not $SkipPodcastGate) {
+  if (-not $base -and -not $SkipPodcastGate) {
     Write-Host "[6] the podcast image's own gate: $podTag (--target test: podcast unit tests, notices, chain e2e with the real ffmpeg)"
     $o = Dk build --progress=plain --target test --label $label -t $podTag $dgDir
     Save 'podcast-gate-build.log' $o

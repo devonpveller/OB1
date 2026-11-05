@@ -261,7 +261,11 @@ export function parseRun(v: unknown): { run: DerivedRun } | { error: string } {
     if (typeof r.deadline_at !== "string" || !ISO.test(r.deadline_at.trim())) return { error: "run.deadline_at is an ISO-8601 date-time with a zone" };
     const d = new Date(r.deadline_at.trim());
     if (!Number.isFinite(d.getTime())) return { error: "run.deadline_at is not a valid time" };
-    run.deadline_at = d.toISOString();
+    // round 2 (tester F4): after its zone offset the time must still be a four-digit year (slot 460 stores only that
+    // shape; 9999-12-31T23:59:59-23:59 normalises to +010000-..., 0000-01-01T00:00:00+01:00 to -000001-...)
+    const iso = d.toISOString();
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(iso)) return { error: "run.deadline_at is outside the years 0000-9999" };
+    run.deadline_at = iso;
   }
   return { run };
 }

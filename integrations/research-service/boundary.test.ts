@@ -190,7 +190,9 @@ Deno.test("rw-boundary-digest: the door's run object carries only the four engin
   assert(!("error" in none) && Object.keys(none.run).length === 0, "no run: no knob");
   assertEquals(runOptions({ dry_run: false }), {}, "dry_run false is not stored");
   for (const bad of [{ seed_sources: [] }, { mode: "topic" }, { gap_research: "full" }, { dry_run: "yes" }, { deadline_at: 1767225600000 },
-    { deadline_at: "tomorrow" }, { deadline_at: "2026-11-05T01:00:00" }, { query: "q" }, "article", [1]]) {
+    { deadline_at: "tomorrow" }, { deadline_at: "2026-11-05T01:00:00" }, { query: "q" }, "article", [1],
+    // round 2 (tester F4): outside the years 0000-9999 once the zone offset is applied
+    { deadline_at: "9999-12-31T23:59:59-23:59" }, { deadline_at: "0000-01-01T00:00:00+01:00" }]) {
     assert("error" in parseRun(bad), JSON.stringify(bad));
     assert("error" in parseDoorBody({ ...ok, run: bad }), `door: ${JSON.stringify(bad)}`);
   }

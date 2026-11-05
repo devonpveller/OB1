@@ -41,18 +41,33 @@ const PGRST = E("BND_DG_PGRST").replace(/\/+$/, "");
 const DIGEST_DIR = E("BND_DG_DIGEST_DIR") || "/digest";
 const SERVICE_DIR: string | URL = E("BND_DG_SERVICE_DIR") || new URL(".", import.meta.url);
 const PAGES_PORT = E("BND_DG_PAGES_PORT") || "8080";
-const MODE = (E("BND_DG_MODE") || "green") as "green" | "red";
+const MODE = (E("BND_DG_MODE") || "green") as "green" | "red" | "red-share";
 const ignore = !DB_HOST;
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
 const SHARED = "e2e-shared-key-000000";
 const OWUI = "e2e-owui-key-0000000000";
+// round 2 (tester F2): the digest's OWN research caller key (RESEARCH_CALLERS digest=notebook:<key>)
+const DIGESTKEY = "e2e-digest-key-0000000000";
 const BEE = "user-bee-second";
 
 // the digest's markers (plan 09 section 5, the Gmail row)
-const DG: Record<string, string> = { SUBJ: MK.SUBJ, FROM: MK.FROM, BODY: MK.BODY, LABEL: MK.LABEL, GID: MK.GID, THR: MK.THR, QRY: MK.QRY };
+// round 2 (tester F1): the codes of meeting / share links - NOT id-shaped (a Meet code is letters and hyphens, a Drive id
+// letters only, a share code a word), so only the private-host rule can stop them
+const SHR: Record<string, string> = {
+  MEET: "zqx-mtgc-dqr", DRV: "QvXkTzRmWpLnBqHs", DOCS: "KwPzRtYvNqLsHm", SITE: "quillberryfarm", ZOOM: "8451239876",
+  TEAMS: "brindlemeetup", DBX: "plumtreeplanx", SHARE: "brindlewharfz",
+};
+const DG: Record<string, string> = { SUBJ: MK.SUBJ, FROM: MK.FROM, BODY: MK.BODY, LABEL: MK.LABEL, GID: MK.GID, THR: MK.THR, QRY: MK.QRY, ...SHR };
 const LABEL = `brain/${MK.LABEL}`;
 const ARTICLE = { gmailId: `${MK.GID}a1`, threadId: `${MK.THR}a1` };
 const BODYONLY = { gmailId: `${MK.GID}b2`, threadId: `${MK.THR}b2` };
+const INVITE = { gmailId: `${MK.GID}c3`, threadId: `${MK.THR}c3` };
+const SHARE_LINKS = [
+  `http://meet.google.com:${PAGES_PORT}/${SHR.MEET}`, `http://drive.google.com:${PAGES_PORT}/file/d/${SHR.DRV}/view`,
+  `http://docs.google.com:${PAGES_PORT}/document/d/${SHR.DOCS}/edit`, `http://sites.google.com:${PAGES_PORT}/view/${SHR.SITE}`,
+  `http://zoom.us:${PAGES_PORT}/j/${SHR.ZOOM}`, `http://teams.microsoft.com:${PAGES_PORT}/l/meetup-join/${SHR.TEAMS}`,
+  `http://www.dropbox.com:${PAGES_PORT}/scl/fi/${SHR.DBX}/plan.pdf`, `http://files.example.org:${PAGES_PORT}/share/${SHR.SHARE}`,
+];
 const ARTICLE_URL = `http://news.example.org:${PAGES_PORT}/solar-roofs?u=${MK.QRY}`;
 const FROM_NAME = `${MK.FROM} Letters`, FROM_ADDR = `${MK.FROM.toLowerCase()}@letters.example.com`;
 
@@ -70,7 +85,14 @@ const b64url = (s: string) => btoa(String.fromCharCode(...new TextEncoder().enco
 
 // ── the seeded mail (synthetic; the Gmail stub serves the HTML, the brain holds the stored chunks) ─────────────────
 const ARTICLE_HTML = `<html><body><p>${MK.BODY} This week in community energy: what readers asked us about cheap roofs.</p>` +
-  `<p><a href="${ARTICLE_URL}">Community solar roofs ${MK.SUBJ} read more</a></p></body></html>`;
+  `<p><a href="${ARTICLE_URL}">Community solar roofs ${MK.SUBJ} read more</a></p>` +
+  // round 2 (F1): the reader's meeting and shared files, linked from an ordinary newsletter
+  SHARE_LINKS.map((l, i) => `<p><a href="${l}">Our shared item ${i + 1}</a></p>`).join("") + `</body></html>`;
+// round 2 (F1): a calendar invitation - its links are the meeting's, never research
+const INVITE_TEXT = `${MK.BODY} You have been invited to a budget review. Join with Google Meet http://meet.google.com:${PAGES_PORT}/${SHR.MEET} ` +
+  "or dial in. Agenda: the winter plan, the roof quotes and the budget of the cooperative. ".repeat(6);
+const INVITE_HTML = `<html><body><p>${INVITE_TEXT}</p><p><a href="http://meet.google.com:${PAGES_PORT}/${SHR.MEET}">Join with Google Meet</a></p>` +
+  `<p><a href="${ARTICLE_URL}">Background reading</a></p></body></html>`;
 const BODY_TEXT = `${MK.BODY} Dear reader, this edition is a single long letter with no links at all. ` +
   "We walked through the history of heat pumps, how cooperative buying works, and what the winter looked like for our members. ".repeat(6);
 const BODY_HTML = `<html><body><p>${BODY_TEXT}</p></body></html>`;
@@ -78,8 +100,8 @@ const BODY_HTML = `<html><body><p>${BODY_TEXT}</p></body></html>`;
 async function seed() {
   await q(su, `INSERT INTO public.workspace_users (sub, name, email) VALUES ($1, $2, $3) ON CONFLICT (sub) DO NOTHING`, [OWNER.sub, OWNER.name, OWNER.email]);
   const now = new Date().toISOString();
-  for (const [m, subj, body] of [[ARTICLE, `${MK.SUBJ} your weekly energy notes`, `${MK.BODY} This week in community energy.`],
-    [BODYONLY, `${MK.SUBJ} a long letter`, BODY_TEXT]] as const) {
+  for (const [m, subj, body] of [[ARTICLE, `${MK.SUBJ} your weekly energy notes`, `${MK.BODY} This week in community energy. ${SHARE_LINKS.join(" ")}`],
+    [BODYONLY, `${MK.SUBJ} a long letter`, BODY_TEXT], [INVITE, `Invitation: ${MK.SUBJ} budget review @ Wed 10am`, INVITE_TEXT]] as const) {
     // the gmail pull's shape: an ops-plane thought per email chunk (openbrain-gmail-pull)
     await q(su, `INSERT INTO public.thoughts (content, metadata, exposure, created_at) VALUES ($1, $2::jsonb, 'ops', now())`, [
       `[Email from ${FROM_NAME} <${FROM_ADDR}> | Subject: ${subj} | Date: ${now}]\n${body}`,
@@ -114,7 +136,7 @@ function stubs() {
     if (p.startsWith("/gmail/v1/users/me/messages/")) {
       const id = decodeURIComponent(p.split("/").pop() ?? "");
       log.gmail.push(id);
-      const html = id === ARTICLE.gmailId ? ARTICLE_HTML : id === BODYONLY.gmailId ? BODY_HTML : "";
+      const html = id === ARTICLE.gmailId ? ARTICLE_HTML : id === BODYONLY.gmailId ? BODY_HTML : id === INVITE.gmailId ? INVITE_HTML : "";
       if (!html) return new Response("not found", { status: 404 });
       return Response.json({ id, payload: { mimeType: "text/html", body: { data: b64url(html) } } });
     }
@@ -150,7 +172,8 @@ function stubs() {
       log.chat.push(sys.slice(0, 60));
       if (sys.includes("advertisement filter")) content = "CONTENT";
       else if (sys.includes("KEEP or DROP a newsletter email body")) content = "VERDICT: KEEP";
-      else if (sys.includes("You curate the links in a newsletter")) content = `{"keep":[0]}`;
+      // keep EVERY link (the hostile choice: the share links must be stopped by the filters, not by the POI pass)
+      else if (sys.includes("You curate the links in a newsletter")) content = JSON.stringify({ keep: [...user.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1])) });
       // the digest's gap triage, HOSTILE: its question restates the email (subject, sender, label)
       else if (sys.includes(`You triage "gap dives"`)) content = JSON.stringify([{ ref: 0, question: `What did ${MK.SUBJ} from ${MK.FROM} in ${MK.LABEL} say about community solar roofs and winter bills?` }]);
       // the episode script, HOSTILE: it echoes the whole segment block (labels, titles, the newsletter's own text) -
@@ -204,7 +227,7 @@ async function startService(stubBase: string) {
     args: ["run", "--unstable-net", "--allow-net", "--allow-env", "index.ts"], cwd: SERVICE_DIR,
     env: {
       PORT: String(port), DB_HOST, DB_PORT: "5432", DB_NAME: "openbrain", DB_USER: "ob_app_memory", DB_PASSWORD: APP_PASSWORD,
-      MCP_ACCESS_KEY: SHARED, RESEARCH_CALLERS: `owui-tool=owui:${OWUI}`, RESEARCH_SERVICE_CALLERS: "",
+      MCP_ACCESS_KEY: SHARED, RESEARCH_CALLERS: `owui-tool=owui:${OWUI};digest=notebook:${DIGESTKEY}`, RESEARCH_SERVICE_CALLERS: "",
       CHAT_API_BASE: `${stubBase}/v1`, EMBEDDING_API_BASE: `${stubBase}/v1`, CURATOR_URL: stubBase, SEARCH_API_BASE: stubBase,
       CHAT_API_KEY: "lab-stub-key", RESEARCH_BRANCH_LLM_KEY: "lab-stub-branch-key", RESEARCH_LANE_REFRESH_MS: "1000",
       FETCH_PROXY_URL: "", OWUI_BASE_URL: "", CALLBACK_MIN_AGE_MS: "0", CURATOR_FILE_ATTEMPTS: "1",
@@ -229,7 +252,7 @@ async function runDigest(stubBase: string, svcBase: string, dir: string, args: s
   const out = await new Deno.Command(Deno.execPath(), {
     args: ["run", "--unstable-net", "-A", "link-enrich.ts", "--window=48", ...args], cwd: DIGEST_DIR,
     env: {
-      MCP_ACCESS_KEY: SHARED, RESEARCH_URL: svcBase, BRAIN_REST_URL: stubBase, WORKBENCH_URL: stubBase,
+      MCP_ACCESS_KEY: SHARED, RESEARCH_DIGEST_KEY: DIGESTKEY, RESEARCH_URL: svcBase, BRAIN_REST_URL: stubBase, WORKBENCH_URL: stubBase,
       CHAT_API_BASE: `${stubBase}/v1`, CHAT_API_KEY: "sk-lab", PODCAST_TTS_KEY: "sk-lab-tts", CHAT_MODEL: "local-large",
       REPORTS_DIR: `${dir}/reports`, GMAIL_API_BASE: stubBase,
       GMAIL_READ_CREDENTIALS: `${dir}/gmail-credentials.json`, GMAIL_READ_TOKEN: `${dir}/gmail-token.json`,
@@ -330,6 +353,13 @@ Deno.test({ name: `PD0c ${MODE.toUpperCase()}: a digest run (dry, then commit) o
     const items = (brief.segments ?? []).flatMap((s: { items: Array<{ title: string; emailOnly: boolean }> }) => s.items);
     out.push(`brief: ${items.length} item(s): ${items.map((i: { emailOnly: boolean }) => (i.emailOnly ? "email-only" : "researched")).join(" ")}`);
 
+    if (MODE === "red-share") {
+      // round 1's code (the item as attempt 1 tested it): the meeting / Drive codes reached shared rows
+      const leaked = [...new Set(res.hits.map((h) => h.marker))].filter((m) => m in SHR);
+      out.push(`RED-SHARE: share-link codes in shared rows: ${leaked.sort().join(",") || "none"}; in the second user's reads: ${Object.keys(reads).filter((k) => k in SHR).sort().join(",") || "none"}`);
+      assert(leaked.includes("MEET") && leaked.includes("DRV"), "RED-SHARE: round 1 lets the Meet code and the Drive id into shared rows (tester F1)");
+      return;
+    }
     if (MODE === "red") {
       // the leaks plan 09 names, on today's code (counts by marker and table)
       const at = (m: string, t: string, c?: string) => res.hits.some((h) => h.marker === m && h.table === t && (!c || h.column === c));
@@ -361,6 +391,31 @@ Deno.test({ name: `PD0c ${MODE.toUpperCase()}: a digest run (dry, then commit) o
     out.push(`hand-backs: ${hb.map((h) => `${h.purpose}/${h.state}${h.ep ? "+episode" : ""}`).join(" ")}`);
     assert(hb.some((h) => h.purpose === "digest-article" && h.state === "delivered" && h.ep), "the commit run's article hand-back is delivered with the episode");
     assert(!hb.some((h) => h.state === "queued" && h.purpose === "digest-article"), "no article hand-back is left open");
+    for (const m of Object.keys(SHR)) assert(privateEmails.includes(m), `the emails hold ${m} (the share link was really there)`);
+
+    // round 2 (F1), at THE GATE (not only the digest's filter): each share / meeting link sent straight to the door is
+    // refused with no job
+    const door = (key: string, body: unknown) => fetch(`${svc.base}/research/derived`, { method: "POST", headers: { "x-brain-key": key, "content-type": "application/json" }, body: JSON.stringify(body) });
+    const gateAnswers: string[] = [];
+    for (const [i, l] of SHARE_LINKS.entries()) {
+      const a = await (await door(DIGESTKEY, { item: { kind: "gmail", id: `probe-share-${i}`, owner_sub: OWNER.sub, fields: { subject: "s" }, links: [l] }, purpose: "digest-article", deliver: {} })).json();
+      gateAnswers.push(a.refused ?? `JOB ${a.job_id}`);
+    }
+    out.push(`gate: the ${SHARE_LINKS.length} share / meeting links sent straight to the door -> ${gateAnswers.join(" ")}`);
+    assert(gateAnswers.every((a) => a === "link_not_public"), "the boundary refuses every share / meeting link (420's gate, pd0c-1)");
+
+    // round 2 (F2): the digest's hand-backs carry the digest's own caller; another caller's key cannot close one
+    const callers = await q<{ c: string; n: number }>(su, `SELECT deliver ->> 'caller' AS c, count(*)::int AS n FROM public.research_handbacks WHERE inlet_id NOT LIKE 'probe-%' GROUP BY 1`);
+    out.push(`hand-back callers: ${callers.map((x) => `${x.c}=${x.n}`).join(" ")}`);
+    assert(callers.length === 1 && callers[0].c === "digest", "every hand-back the digest opened names the digest's own caller");
+    const open = await (await door(DIGESTKEY, { item: { kind: "gmail", id: "probe-f2", owner_sub: OWNER.sub, fields: { subject: "s" }, links: [`http://news.example.org:${PAGES_PORT}/solar-roofs`] },
+      purpose: "digest-article", deliver: { segment: "x" }, run: { dry_run: true } })).json();
+    assert(open.job_id, `the digest's key opens a hand-back: ${JSON.stringify(open)}`);
+    const forge = { deliveries: [{ job_id: open.job_id, ok: true, episode_id: "11111111-2222-4333-8444-555555555555" }] };
+    const by = async (key: string) => (await (await fetch(`${svc.base}/research/derived/delivered`, { method: "POST", headers: { "x-brain-key": key, "content-type": "application/json" }, body: JSON.stringify(forge) })).json()).delivered;
+    const f2 = { shared: await by(SHARED), owui: await by(OWUI), digest: await by(DIGESTKEY) };
+    out.push(`F2: delivered by the shared key ${f2.shared}, by Open WebUI's key ${f2.owui}, by the digest's own key ${f2.digest}`);
+    assertEquals(f2, { shared: 0, owui: 0, digest: 1 }, "only the digest's own key closes the digest's hand-back");
   } finally {
     for (const l of out) console.log(l);
     try { await Deno.copyFile(`${dir}/commit.log`, "/evidence/commit.log"); await Deno.copyFile(`${dir}/dry.log`, "/evidence/dry.log"); } catch { /* no evidence mount */ }
