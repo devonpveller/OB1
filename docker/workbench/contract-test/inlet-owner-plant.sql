@@ -210,3 +210,92 @@ BEGIN
                                     'note', 'notes/note-' || left(md5(m || 'n'), 10), 'clean', 'content/topic/clean-' || left(md5(m || 'c'), 10))))
     ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;
 END $$;
+
+-- round 4 (tester attempt 3, case 4a - the tester's plant, kept as a regression case): a service:daily-digest root seeded
+-- with an email, the marker ONLY in values of the shapes round 3's allow-list kept (urls with text in the query / a path
+-- / a Gmail-like host, *_id hex / digit strings, code-shaped tokens, *_at strings that only START with a date) and in JSON
+-- KEYS (top level, under by_title, deep inside arrays of objects), and in an event's payload and trail urls; a tree seeded
+-- only through a BRANCH (the unseeded root and sibling carry the marker); and an unseeded control tree that stays shared
+DO $$
+DECLARE
+    ph TEXT := current_setting('lab.phase');
+    p JSONB;
+    m TEXT;
+    hx TEXT;
+    mail_url TEXT;
+    j1 UUID; j1e BIGINT; r UUID; b1 UUID; b2 UUID; ctl UUID;
+BEGIN
+    IF ph <> 'plant' THEN RETURN; END IF;
+    p := (SELECT v FROM public.lab_inlet_owner_plant WHERE k = 'plant');
+    m := p ->> 'mark';
+    hx := substr(md5(m || 'hx'), 1, 20);
+    mail_url := 'https://mail.google.com/mail/u/0/#inbox/' || substr(md5(m || 'u'), 1, 16);
+    INSERT INTO public.research_jobs (status, origin, query, options, result, progress, error, finished_at, metrics)
+    VALUES ('done', 'manual', 'Daily digest: an adv3 newsletter',
+            jsonb_build_object('seed_sources', jsonb_build_array(jsonb_build_object('url', mail_url, 'title', 'plain title', 'content', 'body ' || m || 'zbody'))),
+            jsonb_build_object(
+              'outcome', 'ok',
+              'synthesis', 'derived ' || m || 'syn',
+              'cited_sources', jsonb_build_array(
+                  jsonb_build_object('url', 'https://news.example.org/a?note=' || m || 'qurl', 'title', 'x'),
+                  jsonb_build_object('url', 'https://www.google.com/mail/u/0/?q=subject:' || m || 'gm', 'title', 'y'),
+                  jsonb_build_object('url', 'https://inbox.google.com/mail/#search/' || m || 'ib', 'title', 'z'),
+                  jsonb_build_object('url', 'https://example.org/' || m || 'path/segment', 'title', 'w'),
+                  -- a shared source's EXACT url (kept, with the shared row's own title, never the job's)
+                  jsonb_build_object('url', 'https://news.example/b/ctl' || m, 'title', 'job title ' || m || 'jt')),
+              'message_id', hx,
+              'thread_id', '1234567890123456',
+              'status', m || 'st',
+              'phase', m || 'ph',
+              'report_type', m || 'rt',
+              'type', 'ok',
+              'created_at', '2026-11-04T10:00:00Z ' || m || 'ts',
+              'started_at', '2026-11-04 ' || m || 'ts2',
+              'finished_at', 'not a date ' || m || 'ts3',
+              m || 'topkey', 'v',
+              'by_title', jsonb_build_object(m || 'titlekey', jsonb_build_array(jsonb_build_object('n', 1))),
+              'nested', jsonb_build_array(jsonb_build_object('b', jsonb_build_array(jsonb_build_object('c', jsonb_build_object(m || 'deepkey',
+                  jsonb_build_array('s' || m || 'deepval', jsonb_build_object('url', 'https://deep.example.org/' || m || 'deepurl'))))))),
+              'counts', jsonb_build_object('n', 7, 'ok', true)),
+            jsonb_build_object('phase', 'done', 'message', 'msg ' || m || 'prog', 'url', 'https://prog.example.org/?x=' || m || 'progurl'),
+            'err ' || m || 'err', now(),
+            jsonb_build_object('claims_reused', 3, 'claims_freshly_gathered', 2, 'gap_ratio', 0.5,
+                               'credibility', jsonb_build_object('note', 'cred ' || m || 'cred'), m || 'mkey', 1))
+    RETURNING id INTO j1;
+    INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES (j1, 'service:daily-digest', 'service:daily-digest', 'Daily digest: an adv3 newsletter');
+    INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, trail, payload) VALUES
+      (j1, j1, 's1', 'stage', 'due_process',
+       jsonb_build_object('url', 'https://trail.example.org/?q=' || m || 'trailurl', 'kind', 'fetched'),
+       jsonb_build_object('stage', 'synth', 'url', 'https://ev.example.org/' || m || 'evurl', 'status', m || 'evst', 'note', 'n ' || m || 'evnote')),
+      (j1, j1, NULL, 'source', 'due_process',
+       jsonb_build_object('url', 'https://news.example/b/ctl' || m, m || 'trailkey', jsonb_build_array(jsonb_build_object('x', 'deep ' || m || 'trdeep'))),
+       jsonb_build_object('sources', jsonb_build_array(jsonb_build_object('url', 'https://e.example.org/?' || m || 'srcq')))),
+      (j1, j1, NULL, 'gap', 'due_process', NULL,
+       jsonb_build_object('claim_id', hx, 'score', 0.4, 'threshold', 0.5, 'query', 'gap ' || m || 'gapq'));
+    SELECT id INTO j1e FROM public.research_job_events WHERE job_id = j1 AND type = 'stage' LIMIT 1;
+    -- a tree seeded only through a BRANCH
+    INSERT INTO public.research_jobs (status, origin, query, anchor, result, progress, finished_at)
+    VALUES ('done', 'manual', 'Root question ' || m || 'rootq', 'Root anchor ' || m || 'roota',
+            jsonb_build_object('outcome', 'ok', 'synthesis', 'root synthesis ' || m || 'rootsyn'),
+            jsonb_build_object('phase', 'done', 'message', 'root msg ' || m || 'rootmsg'), now())
+    RETURNING id INTO r;
+    INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES (r, 'service:digest', 'service:digest', 'Root question ' || m || 'rootq');
+    INSERT INTO public.research_jobs (status, origin, query, anchor, root_job_id, parent_job_id, rooted_step_id, branch_kind, options)
+    VALUES ('done', 'manual', 'seeded branch', 'seeded branch', r, r, 's1', 'gap',
+            jsonb_build_object('seed_sources', jsonb_build_array(jsonb_build_object('url', mail_url, 'title', 'branch seed title', 'content', 'branch body'))))
+    RETURNING id INTO b1;
+    INSERT INTO public.research_jobs (status, origin, query, anchor, root_job_id, parent_job_id, rooted_step_id, branch_kind, result, tree_report)
+    VALUES ('done', 'manual', 'sibling ' || m || 'sibq', 'sibling ' || m || 'siba', r, r, 's2', 'gap',
+            jsonb_build_object('outcome', 'ok', 'synthesis', 'sibling synthesis ' || m || 'sibsyn'),
+            jsonb_build_object('summary', 'sibling summary ' || m || 'sibsum'))
+    RETURNING id INTO b2;
+    INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload) VALUES
+      (r, r, 's1', 'stage', 'due_process', jsonb_build_object('stage', 'synth', 'note', 'root note ' || m || 'rootnote')),
+      (b2, r, 's2', 'stage', 'due_process', jsonb_build_object('stage', 'synth', 'note', 'sibling note ' || m || 'sibnote'));
+    -- the CONTROL tree (no seed): stays shared research output (its text carries ctl + the mark)
+    INSERT INTO public.research_jobs (status, origin, query, result, finished_at)
+    VALUES ('done', 'manual', 'ctl3 question ctl' || m || 'q', jsonb_build_object('outcome', 'ok', 'synthesis', 'ctl3 ctl' || m || 'syn'), now())
+    RETURNING id INTO ctl;
+    INSERT INTO public.lab_inlet_owner_plant VALUES ('adv3', jsonb_build_object('mail_url', mail_url, 'hx', hx, 'j1', j1, 'j1e', j1e, 'r', r, 'b1', b1, 'b2', b2, 'ctl', ctl))
+    ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;
+END $$;
