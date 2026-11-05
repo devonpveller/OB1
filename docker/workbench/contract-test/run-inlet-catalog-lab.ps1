@@ -31,6 +31,11 @@ param(
   [string]$Evidence = '',
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$RedSha = '51f00ea',
+  # the cases that must FAIL on -RedSha (the others are judged as GREEN there too): round 4's pin (51f00ea) fails them
+  # all; round 5's (96c20aa) fails the catalog case only (its F2 / F6 / late / mutant fixes stand)
+  [string]$RedCases = 'catalog,f2,f6,late,mutant',
+  # with -Red: a table the catalog case must name among its leaks on -RedSha
+  [string]$RedLeakTable = 'research_steers',
   [switch]$Red
 )
 $ErrorActionPreference = 'Continue'
@@ -66,7 +71,7 @@ function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 # a case: with -Red a case that FAILS is the expected result (RED-OK), without it a pass is
 function Case([string]$id, [bool]$ok, [string]$m) {
   $script:res[$id] = $ok
-  if ($Red) { if (-not $ok) { Write-Host "  RED-OK  [$id] $m" } else { Write-Host "  RED-UNEXPECTED-PASS  [$id] $m"; $script:fail++ } }
+  if ($Red -and (($RedCases -split ',') -contains $id)) { if (-not $ok) { Write-Host "  RED-OK  [$id] $m" } else { Write-Host "  RED-UNEXPECTED-PASS  [$id] $m"; $script:fail++ } }
   else { Check $ok "[$id] $m" }
 }
 function Save([string]$name, [string]$text) { [System.IO.File]::WriteAllText((Join-Path $Evidence $name), $text, (New-Object System.Text.UTF8Encoding $false)) }
@@ -150,23 +155,41 @@ try {
 
   # ---------------------------------------------------------------- 1. the code scan
   Write-Host '[1] the code scan: the tables the research paths write'
-  $files = @()
-  $files += Get-ChildItem -File (Join-Path $ob1 'integrations\research-service') -Filter '*.ts' | Where-Object { $_.Name -notmatch '\.test\.ts$|_test\.ts$|\.e2e\.' }
-  $files += Get-ChildItem -File (Join-Path $ob1 'integrations\research-curator') -Filter '*.ts' | Where-Object { $_.Name -notmatch '\.test\.ts$|_test\.ts$|\.e2e\.|\.integration\.' }
-  $files += Get-ChildItem -File (Join-Path $wb 'src\sessions') -Filter '*.ts' | Where-Object { $_.Name -notmatch '_test\.ts$' }
-  $files += Get-Item (Join-Path $wb 'src\contracts\repo\sessions.ts')
-  $files += Get-ChildItem -File -Recurse (Join-Path $ob1 'recipes\daily-digest') -Filter '*.ts' | Where-Object { $_.FullName -notmatch '\\lab\\' -and $_.Name -notmatch '\.test\.ts$' }
-  $texts = @($files | ForEach-Object { Get-Content -Raw $_.FullName })
+  # round 6 (tester attempt 5, T19 3a): RECURSIVE, over every writer path - the research service with tools/, the curator,
+  # the grounding backfiller, the suggestion / entity / chunk workers, the idea refinery, the digest / podcast, the wiki
+  # compile and its service, the whole workbench - and the persist route of openbrain-mcp. A table any of them names in an
+  # INSERT / UPDATE / DELETE / upsert or a PostgREST path is in the case.
+  $writerDirs = @('integrations\research-service', 'integrations\research-curator', 'integrations\grounding-backfiller', 'integrations\suggestion-worker',
+                  'integrations\openbrain-idea-refinery', 'integrations\entity-extraction-worker', 'integrations\chunk-embedding-worker',
+                  'recipes\daily-digest', 'recipes\entity-wiki', 'docker\wiki-service', 'docker\workbench\src')
+  function Get-WriteSet([string[]]$roots) {
+    $fs = @()
+    foreach ($r in $roots) {
+      if (Test-Path $r) {
+        $fs += Get-ChildItem -File -Recurse $r -Include '*.ts', '*.mjs', '*.js', '*.py' -ErrorAction SilentlyContinue |
+          Where-Object { $_.FullName -notmatch '\\(node_modules|lab|fixtures|contract-test)\\' -and $_.Name -notmatch '(\.|_)(test|e2e|integration)\.|\.test\.' }
+      }
+    }
+    $tx = @($fs | ForEach-Object { Get-Content -Raw $_.FullName })
+    $set = New-Object System.Collections.Generic.SortedSet[string]
+    foreach ($t in $tx) {
+      foreach ($m in [regex]::Matches($t, '(?i)\b(insert\s+into|update|delete\s+from|upsert\s+into)\s+(public\.)?([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[3].Value.ToLower()) }
+      foreach ($m in [regex]::Matches($t, 'rest/v1/([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[1].Value.ToLower()) }
+      foreach ($m in [regex]::Matches($t, '\.from\(\s*[''"]([a-z_][a-z0-9_]*)[''"]\s*\)\s*\.(insert|update|upsert|delete)')) { [void]$set.Add($m.Groups[1].Value.ToLower()) }
+    }
+    return @{ files = $fs.Count; names = $set }
+  }
+  $ws = Get-WriteSet @($writerDirs | ForEach-Object { Join-Path $ob1 $_ })
+  $names = $ws.names
   # the persist route of openbrain-mcp (the curator's filing: sessions, sources, thread links, the filed event)
   $mcp = Get-Content -Raw (Join-Path $ob1 'integrations\kubernetes-deployment\index.ts')
   $pi = $mcp.IndexOf('"/research/persist"')
-  if ($pi -ge 0) { $pe = $mcp.IndexOf("`napp.", $pi + 20); if ($pe -lt 0) { $pe = $mcp.Length }; $texts += $mcp.Substring($pi, $pe - $pi) }
-  Check ($pi -ge 0) 'the code scan found the persist route (/research/persist) in openbrain-mcp'
-  $names = New-Object System.Collections.Generic.SortedSet[string]
-  foreach ($t in $texts) {
-    foreach ($m in [regex]::Matches($t, '(?i)\b(insert\s+into|update|delete\s+from)\s+(public\.)?([a-z_][a-z0-9_]*)')) { [void]$names.Add($m.Groups[3].Value.ToLower()) }
-    foreach ($m in [regex]::Matches($t, 'rest/v1/([a-z_][a-z0-9_]*)')) { [void]$names.Add($m.Groups[1].Value.ToLower()) }
+  if ($pi -ge 0) {
+    $pe = $mcp.IndexOf("`napp.", $pi + 20); if ($pe -lt 0) { $pe = $mcp.Length }
+    foreach ($m in [regex]::Matches($mcp.Substring($pi, $pe - $pi), '(?i)\b(insert\s+into|update|delete\s+from)\s+(public\.)?([a-z_][a-z0-9_]*)')) { [void]$names.Add($m.Groups[3].Value.ToLower()) }
   }
+  Check ($pi -ge 0) 'the code scan found the persist route (/research/persist) in openbrain-mcp'
+  $files = @(1..$ws.files)
   $writeSet = ($names -join ',')
   Save 'write-set.txt' ("files: $($files.Count) + the persist route`n" + ($names -join "`n"))
   Write-Host "    $($names.Count) name(s) (the SQL keeps the ones that are tables)"
@@ -214,7 +237,7 @@ try {
   Save 'A-leak-tables.txt' ($leakTables -join "`n")
   Check ($prc -eq 0) "the catalog plant ran ($(@($tables).Count) table(s) from the catalog and the code scan)"
   Case 'catalog' ($irc -eq 0 -and (& $verdict $co) -eq 'ok') "the catalog case: no seed marker in any shared-readable column outside the declared residuals; the owner's store holds it; the control keeps its text (440 exit $irc, $((Notices $co) -split "`n" | Where-Object { $_ -match 'CATALOG SUMMARY' }))"
-  if ($Red) { Check ($leakTables -contains 'research_steers') "RED: the catalog case catches research_steers on $RedSha (leaking tables: $($leakTables -join ', '))" }
+  if ($Red) { Check ($leakTables -contains $RedLeakTable) "RED: the catalog case catches $RedLeakTable on $RedSha (leaking tables: $($leakTables -join ', '))" }
 
   # ---------------------------------------------------------------- B. F2
   Write-Host '[B] F2: a filed event naming the email body this run moves'
@@ -225,7 +248,7 @@ try {
   $co = Psql 'cat_b' $catalog $checkVars; Save 'B-check.log' (Notices $co)
   Write-Host "    440 exit ${irc}: $(((Notices $io) -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ')"
   Case 'f2' ($irc -eq 0 -and (& $verdict $co) -eq 'ok' -and (Sql 'cat_b' "SELECT count(*) FROM public.research_job_events WHERE type = 'filed' AND payload ->> 'synthesis_id' = (SELECT v FROM public.lab_catalog_ids WHERE k = 'moved_source')") -eq '0') "F2: 440 runs; the filed event no longer names the moved source; the catalog holds"
-  if ($Red) { Check ($irc -ne 0 -and (Notices $io) -match 'still names private data') "RED: on $RedSha the run is refused ('still names private data')" }
+  if ($Red -and (($RedCases -split ',') -contains 'f2')) { Check ($irc -ne 0 -and (Notices $io) -match 'still names private data') "RED: on $RedSha the run is refused ('still names private data')" }
 
   # ---------------------------------------------------------------- C. F6
   Write-Host '[C] F6: two gap branches with a gap_ref in one seeded tree'
@@ -236,7 +259,7 @@ try {
   Write-Host "    440 exit ${irc}: $(((Notices $io) -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ')"
   $gr = Sql 'cat_c' "SELECT count(*) || '|' || count(DISTINCT gap_ref) || '|' || count(*) FILTER (WHERE gap_ref = 'private:' || id::text) FROM public.research_jobs WHERE root_job_id = (SELECT v::uuid FROM public.lab_catalog_ids WHERE k = 'seeded_root') AND gap_ref IS NOT NULL"
   Case 'f6' ($irc -eq 0 -and $gr -eq '2|2|2') "F6: 440 runs; each gap branch keeps a gap_ref of its own (branches | distinct | private:<id>: $gr)"
-  if ($Red) { Check ($irc -ne 0 -and (Notices $io) -match 'uq_research_jobs_tree_gap') "RED: on $RedSha the run aborts on uq_research_jobs_tree_gap" }
+  if ($Red -and (($RedCases -split ',') -contains 'f6')) { Check ($irc -ne 0 -and (Notices $io) -match 'uq_research_jobs_tree_gap') "RED: on $RedSha the run aborts on uq_research_jobs_tree_gap" }
 
   # ---------------------------------------------------------------- D. revert
   Write-Host '[D] revert: every table byte-identical'
@@ -287,6 +310,44 @@ try {
   $after = Sql 'cat_f' $md5Sql
   Save 'F-mutant.log' (Notices $mo)
   Case 'mutant' ($cut -ne $src -and $mrc -ne 0 -and (Notices $mo) -match 'refused, nothing changed' -and $before -eq $after) "a 440 that rebuilds the steers without archiving them first is refused and changes nothing"
+  # round 6: the content sweep without its archive step (only where the file under test has the step)
+  if ($src -match '-- \[archive-sweep\]') {
+    $null = Fresh 'cat_f2'
+    $null = Psql 'cat_f2' $catalog $plantVars
+    $cut2 = [regex]::Replace($src, '(?s)-- \[archive-sweep\].*?-- \[/archive-sweep\]', '-- (mutant: no archive step)')
+    $mut2 = Join-Path $work 'mutant-archive-sweep.sql'; Write-Utf8 $mut2 $cut2
+    $null = Dk exec $db psql -U postgres -d cat_f2 -X -q -c $md5Fn
+    $before2 = Sql 'cat_f2' $md5Sql
+    $mo2 = Psql 'cat_f2' $mut2 @('-v', "owner_sub=$owner"); $mrc2 = $script:rc
+    $after2 = Sql 'cat_f2' $md5Sql
+    Save 'F-mutant-sweep.log' (Notices $mo2)
+    Case 'mutant-sweep' ($cut2 -ne $src -and $mrc2 -ne 0 -and (Notices $mo2) -match 'refused, nothing changed' -and $before2 -eq $after2) "a 440 whose content sweep cuts rows it did not archive first is refused and changes nothing"
+  }
+
+  # ---------------------------------------------------------------- G. the case's own discovery (round 6, T19 3a)
+  # A table a writer under integrations/research-service/tools/ writes, one the grounding backfiller writes, and tables keyed
+  # by a job, a source or a session under other names and types (job_ref uuid, a TEXT job_id, a session foreign key), none
+  # planted or declared: the case must report every one UNPLANTED. Judged in both modes (it tests the case, not 440).
+  Write-Host '[G] the case finds tables nobody planted (a tools/ writer, a grounding-backfiller writer, job / session keys by name)'
+  $st = Join-Path $work 'selftest'
+  New-Item -ItemType Directory -Force (Join-Path $st 'integrations\research-service\tools'), (Join-Path $st 'integrations\grounding-backfiller') | Out-Null
+  Write-Utf8 (Join-Path $st 'integrations\research-service\tools\notes.ts') "await c.queryObject(``INSERT INTO public.research_tools_notes (note) VALUES (`$1)``, [n]);`n"
+  Write-Utf8 (Join-Path $st 'integrations\grounding-backfiller\notes.ts') "await c.queryObject(``INSERT INTO grounding_notes (note) VALUES (`$1)``, [n]);`n"
+  $ws2 = Get-WriteSet (@($writerDirs | ForEach-Object { Join-Path $ob1 $_ }) + @((Join-Path $st 'integrations\research-service'), (Join-Path $st 'integrations\grounding-backfiller')))
+  $null = Fresh 'cat_g'
+  $ddl = Join-Path $work 'selftest-tables.sql'
+  Write-Utf8 $ddl ("CREATE TABLE public.research_tools_notes (id serial PRIMARY KEY, note text);`n" +
+    "CREATE TABLE public.grounding_notes (id serial PRIMARY KEY, note text);`n" +
+    "CREATE TABLE public.research_job_notes (id serial PRIMARY KEY, job_ref uuid, note text);`n" +
+    "CREATE TABLE public.digest_job_text (id serial PRIMARY KEY, job_id text, note text);`n" +
+    "CREATE TABLE public.research_session_notes (id serial PRIMARY KEY, session_id uuid REFERENCES public.sessions(id), note text);`n" +
+    "GRANT SELECT ON public.research_tools_notes, public.grounding_notes, public.research_job_notes, public.digest_job_text, public.research_session_notes TO service_role;`n")
+  $null = Psql 'cat_g' $ddl @()
+  $go = Psql 'cat_g' $catalog @('-v', 'phase=plant', '-v', "mark=$mk", '-v', "ctl=$cm", '-v', "write_set=$($ws2.names -join ',')")
+  Save 'G-plant.log' $go
+  $want = @('research_tools_notes', 'grounding_notes', 'research_job_notes', 'digest_job_text', 'research_session_notes')
+  $found = @($want | Where-Object { $go -match "CATALOG TABLE public\.$_ UNPLANTED" })
+  Check ($found.Count -eq $want.Count) "[selftest] the case reports every unplanted new table UNPLANTED ($($found -join ', '); missing: $(@($want | Where-Object { $found -notcontains $_ }) -join ', '))"
 }
 catch { Fail "the lab stopped: $($_.Exception.Message)" }
 finally {

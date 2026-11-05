@@ -36,6 +36,12 @@ SELECT set_config('lab.mark', :'mark', false), set_config('lab.ctl', :'ctl', fal
 
 SELECT (current_setting('lab.phase') = 'plant') AS is_plant \gset
 \if :is_plant
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
+        CREATE ROLE ob_app_memory NOLOGIN NOSUPERUSER NOBYPASSRLS;
+        GRANT service_role TO ob_app_memory;
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS public.lab_catalog_rows (tree TEXT NOT NULL, tbl TEXT NOT NULL, role TEXT NOT NULL, key JSONB NOT NULL);
 CREATE TABLE IF NOT EXISTS public.lab_catalog_tables (tbl TEXT PRIMARY KEY, why TEXT NOT NULL, status TEXT, n_rows INT);
 CREATE TABLE IF NOT EXISTS public.lab_catalog_cols (tbl TEXT, col TEXT, tree TEXT, status TEXT, PRIMARY KEY (tbl, col, tree));
@@ -57,8 +63,6 @@ INSERT INTO public.lab_catalog_not_tree VALUES
   ('public.contract_registries', 'configuration'),
   ('public.credibility_trigger_state', 'numbers and timestamps of the credibility worker'),
   ('public.credibility_rescore_confirmations', 'the credibility worker''s confirmations (numbers, codes)'),
-  ('public.source_corroborations', 'a SHARED source corroborating another during a run: the report''s line it quotes stays shared (D4); moving it would change the shared score'),
-  ('public.source_trail_events', 'a SHARED source''s tombstone / retraction trail'),
   ('public.source_tombstones', 'refused urls (public pages)'),
   ('public.source_tombstone_attempts', 'refused urls'),
   ('public.podcast_teams', 'podcast configuration'),
@@ -73,8 +77,11 @@ INSERT INTO public.lab_catalog_not_tree VALUES
   ('public.source_entities', 'shared vocabulary: a moved source''s rows are archived by step 2'),
   ('public.source_extraction_queue', 'a work queue of source ids'),
   ('public.entities', 'shared vocabulary (topics stay shared, 380)'),
-  ('public.source_credibility_history', 'a SHARED source''s credibility a run computed (numbers, codes, the reasons); moving it would change the shared score (D4, D8)'),
-  ('public.thread_embeddings', 'vectors only')
+  ('public.thread_embeddings', 'vectors only'),
+  ('public.import_jobs', 'an intake import (the owner''s, owner_sub); its source_id has a foreign key onto sources, so a moved source''s import row is archived and handled by step 2 - not planted here'),
+  ('public.source_disputes', 'a dispute of a source (foreign key onto sources): step 2 archives a moved source''s rows and applies the key - not planted here'),
+  ('public.cleanup_actions', 'the cleanup view''s per-user action log (owner_sub); 440''s source rule moves a moved source''s rows - not planted here'),
+  ('public.reference_records', 'a reference to a SHARED source''s span; 440''s source rule moves a moved source''s rows - not planted here')
 ON CONFLICT (tbl) DO NOTHING;
 
 DO $$
@@ -103,6 +110,14 @@ BEGIN
             INSERT INTO public.claims (text) VALUES ('a private claim ' || mk) RETURNING id INTO cl;
             INSERT INTO public.claim_sources (claim_id, source_id, edge_type) VALUES (cl, sm, 'states');
             INSERT INTO public.lab_catalog_ids VALUES ('priv_claim', cl::text), ('moved_source', sm::text);
+            -- round 6 (tester attempt 5 F2): the research run's credibility record of the SEED itself, keyed by the moved
+            -- email body (no foreign key): an author name lifted from the email body, a corroboration, a trail event
+            INSERT INTO public.source_credibility_history (source_id, family, claim_kind, score, total, model_version, signals, reasons)
+            VALUES (sm, 'general', 'fact', 0.3, 0.3, 'v1', jsonb_build_object('author_identity', 'Zq' || mk || 'name'),
+                    jsonb_build_array('author stated (Zq' || mk || 'name): +0.1'));
+            INSERT INTO public.source_trail_events (source_id, kind, detail) VALUES (sm, 'found_via', jsonb_build_object('note', 'trail ' || mk));
+            INSERT INTO public.source_revisions (source_id, revision, content, title, edited_by) VALUES (sm, 1, 'an edit ' || mk, 'Subject ' || mk, 'lab');
+            INSERT INTO public.page_compile_marks (page_ref, source_id, reason) VALUES ('content/source/' || sm, sm, 'mark ' || mk);
             INSERT INTO public.claims (text) VALUES ('a chained claim ' || mk) RETURNING id INTO cl2;
             INSERT INTO public.claim_sources (claim_id, parent_claim_id, edge_type) VALUES (cl2, cl, 'inferred_from');
             INSERT INTO public.lab_catalog_ids VALUES ('chain_claim', cl2::text);
@@ -170,6 +185,10 @@ BEGIN
           (tr, 'public.claims', 'synthesis-claim', jsonb_build_object('id', cl)),
           (tr, 'public.claim_sources', 'synthesis-claim', jsonb_build_object('claim_id', cl, 'source_id', syn));
         INSERT INTO public.lab_catalog_ids VALUES (tr || '_thread', th::text), (tr || '_q', q), (tr || '_root', jr::text), (tr || '_branch', jb::text);
+        IF i = 1 THEN
+            INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version)
+            VALUES (sm, sc, 'weak', 0.1, 'the email line ' || mk, 'fact', 'supports', 'v1');
+        END IF;
     END LOOP;
 END $$;
 
@@ -178,13 +197,15 @@ DO $$
 DECLARE r RECORD; n INT; ws TEXT[] := string_to_array(nullif(current_setting('lab.write_set'), ''), ',');
 BEGIN
     INSERT INTO public.lab_catalog_tables (tbl, why)
-    SELECT DISTINCT format('%I.%I', ns.nspname, c.relname), 'a foreign key onto research_jobs or a uuid *job_id column'
+    SELECT DISTINCT format('%I.%I', ns.nspname, c.relname), 'a foreign key onto research_jobs, or a *job_id / *job_ref / *source_id / *session_id column'
       FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
      WHERE ns.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped AND c.relname NOT LIKE 'lab\_%'
        AND c.relname NOT LIKE 'inlet\_%'
+       -- round 6: a key by NAME, whatever its type or foreign key: *job_id, *job_ref, *source_id, *session_id
        AND (EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f' AND con.confrelid = 'public.research_jobs'::regclass)
-            OR (a.atttypid = 'uuid'::regtype AND a.attname ~ '(^|_)job_id$'
-                AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f' AND a.attnum = ANY (con.conkey))))
+            OR (a.attname ~ '(^|_)(job_id|job_ref|source_id|session_id)$'
+                AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f' AND a.attnum = ANY (con.conkey)
+                                   AND con.confrelid NOT IN ('public.research_jobs'::regclass, 'public.sessions'::regclass, 'public.sources'::regclass))))
     ON CONFLICT (tbl) DO NOTHING;
     INSERT INTO public.lab_catalog_tables (tbl, why)
     SELECT DISTINCT format('%I.%I', ns.nspname, c.relname), 'written by the research paths (the code scan)'
@@ -192,22 +213,29 @@ BEGIN
      WHERE ns.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname = ANY (coalesce(ws, ARRAY[]::text[]))
     ON CONFLICT (tbl) DO NOTHING;
     -- the job-tied tables' rows of each tree, by their job column (generic)
-    FOR r IN SELECT DISTINCT t.tbl, a.attname AS col
+    -- the rows of each tree by a key column (generic): a job key -> the tree's jobs ('tree'); a source key -> the moved
+    -- email body ('moved-source'); a session key -> the tree's sessions ('session-row')
+    CREATE TEMP TABLE lab_keyset (tree TEXT, kind TEXT, id TEXT) ON COMMIT DROP;
+    INSERT INTO lab_keyset SELECT tree, 'job', id::text FROM public.lab_catalog_jobs;
+    INSERT INTO lab_keyset SELECT 'seeded', 'source', v FROM public.lab_catalog_ids WHERE k = 'moved_source';
+    INSERT INTO lab_keyset SELECT tree, 'session', key ->> 'id' FROM public.lab_catalog_rows WHERE tbl = 'public.sessions' AND role = 'session';
+    FOR r IN SELECT DISTINCT t.tbl, a.attname AS col,
+                    CASE WHEN a.attname ~ '(^|_)source_id$' THEN 'source' WHEN a.attname ~ '(^|_)session_id$' THEN 'session' ELSE 'job' END AS kind
                FROM public.lab_catalog_tables t JOIN pg_attribute a ON a.attrelid = t.tbl::regclass
-              WHERE a.attnum > 0 AND NOT a.attisdropped AND a.atttypid = 'uuid'::regtype
-                AND (a.attname ~ '(^|_)job_id$' OR (a.attname = 'id' AND t.tbl = 'public.research_jobs')
+              WHERE a.attnum > 0 AND NOT a.attisdropped
+                AND (a.attname ~ '(^|_)(job_id|job_ref|source_id|session_id)$' OR (a.attname = 'id' AND t.tbl = 'public.research_jobs')
                      OR EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = t.tbl::regclass AND con.contype = 'f'
                                    AND con.confrelid = 'public.research_jobs'::regclass AND a.attnum = ANY (con.conkey))) LOOP
         EXECUTE format($q$INSERT INTO public.lab_catalog_rows (tree, tbl, role, key)
-                          SELECT DISTINCT j.tree, %L, 'tree', (SELECT jsonb_object_agg(pa.attname, to_jsonb(t) -> pa.attname)
+                          SELECT DISTINCT j.tree, %L, CASE %L WHEN 'job' THEN 'tree' WHEN 'source' THEN 'moved-source' ELSE 'session-row' END, (SELECT jsonb_object_agg(pa.attname, to_jsonb(t) -> pa.attname)
                                                                  FROM pg_index ix JOIN pg_attribute pa ON pa.attrelid = ix.indrelid AND pa.attnum = ANY (ix.indkey)
                                                                 WHERE ix.indrelid = %L::regclass AND ix.indisprimary)
-                            FROM %s t JOIN public.lab_catalog_jobs j ON j.id = t.%I
+                            FROM %s t JOIN lab_keyset j ON j.kind = %L AND j.id = t.%I::text
                            WHERE NOT EXISTS (SELECT 1 FROM public.lab_catalog_rows x WHERE x.tbl = %L AND x.tree = j.tree
                                               AND x.key = (SELECT jsonb_object_agg(pa.attname, to_jsonb(t) -> pa.attname)
                                                              FROM pg_index ix JOIN pg_attribute pa ON pa.attrelid = ix.indrelid AND pa.attnum = ANY (ix.indkey)
                                                             WHERE ix.indrelid = %L::regclass AND ix.indisprimary))$q$,
-                       r.tbl, r.tbl, r.tbl, r.col, r.tbl, r.tbl);
+                       r.tbl, r.kind, r.tbl, r.tbl, r.kind, r.col, r.tbl, r.tbl);
     END LOOP;
     UPDATE public.lab_catalog_tables t
        SET n_rows = (SELECT count(*) FROM public.lab_catalog_rows x WHERE x.tbl = t.tbl AND x.tree = 'seeded'),
@@ -215,6 +243,9 @@ BEGIN
                          WHEN EXISTS (SELECT 1 FROM public.lab_catalog_not_tree d WHERE d.tbl = t.tbl) THEN 'declared'
                          -- a table with FORCED row security is owner-only already (420's private hand-back): no app role reads it
                          WHEN (SELECT relforcerowsecurity FROM pg_class WHERE oid = t.tbl::regclass) THEN 'declared'
+                         -- a table neither service_role nor ob_app_memory may read (an owner-only archive, e.g. slot 390's)
+                         WHEN NOT has_table_privilege('service_role', t.tbl::regclass, 'SELECT')
+                              AND NOT has_table_privilege('ob_app_memory', t.tbl::regclass, 'SELECT') THEN 'declared'
                          ELSE 'UNPLANTED' END;
     -- a registered row's table is checked too (sources, threads, ... that the code scan may not list)
     INSERT INTO public.lab_catalog_tables (tbl, why, status, n_rows)
@@ -275,6 +306,33 @@ UPDATE public.lab_catalog_ids i SET v = j.query FROM public.lab_catalog_ids r, p
 UPDATE public.threads t SET description = coalesce(t.description, '') || ' Also: ' || q.v
   FROM public.lab_catalog_ids i, public.lab_catalog_ids q
  WHERE i.k IN ('seeded_thread', 'control_thread') AND q.k = replace(i.k, '_thread', '_q') AND t.id = i.v::uuid;
+-- round 6 (tester attempt 5 F1, F6; the coordinator's T19 variant): the seeded question as FREE TEXT where no link ties
+-- it to the tree - a legacy synthesis titled with it (upper case, doubled spaces) and no filed event; a session whose
+-- query text contains it; a notebook (thread) whose description quotes it and that no tree session names; a thread whose
+-- slug is its slug form; a wiki page titled with it; a short email subject (11 characters) reused whole as a thread name.
+-- None is registered: a marker found in any of them after 440 is a LEAK.
+DO $$
+DECLARE q TEXT := (SELECT v FROM public.lab_catalog_ids WHERE k = 'seeded_q'); m TEXT := current_setting('lab.mark'); x UUID;
+BEGIN
+    INSERT INTO public.sources (url, title, content, content_type, research_query)
+    VALUES (NULL, upper(replace(q, ' ', '  ')), 'an older report', 'research_synthesis', NULL) RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('free_synth', x::text);
+    INSERT INTO public.sessions (origin_tool, query_text, metadata) VALUES ('owui', 'Research: ' || q || ' (resend)', '{}'::jsonb) RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('free_session', x::text);
+    INSERT INTO public.threads (name, description, status) VALUES ('Industry news', 'Covers: ' || lower(q) || '; and more', 'active') RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('free_notebook', x::text);
+    INSERT INTO public.threads (name, description, slug, status)
+    VALUES ('Renamed thread', 'renamed', btrim(regexp_replace(lower(q), '[^a-z0-9]+', '-', 'g'), '-'), 'active') RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('free_slug_thread', x::text);
+    INSERT INTO public.wiki_pages (slug, page_class, title, body, links)
+    VALUES ('research/free-' || substr(md5(m), 1, 8), 'research', q, 'The report.', '[]'::jsonb);
+    INSERT INTO public.lab_catalog_ids VALUES ('free_page', 'research/free-' || substr(md5(m), 1, 8));
+    -- the short subject: an email body titled with it (moved), and a thread named exactly it
+    INSERT INTO public.sources (url, title, content, content_type)
+    VALUES ('https://mail.google.com/mail/u/0/#inbox/' || substr(md5(m || 'short'), 1, 16), 'Acme layoff', 'a short mail ' || m, 'web_article');
+    INSERT INTO public.threads (name, description) VALUES ('Acme layoff', 'a thread') RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('free_short_thread', x::text);
+END $$;
 SELECT 'CATALOG TABLE ' || tbl || ' ' || status || ' rows=' || coalesce(n_rows, 0) || ' (' || why || ')' FROM public.lab_catalog_tables ORDER BY status, tbl;
 SELECT 'CATALOG PLANTED columns written=' || count(*) FILTER (WHERE status = 'written') || ' refused=' || count(*) FILTER (WHERE status LIKE 'refused%')
        || ' fk/generated=' || count(*) FILTER (WHERE status = 'fk-or-generated')
@@ -329,27 +387,31 @@ BEGIN
                FROM information_schema.columns c JOIN pg_class pc ON pc.oid = (quote_ident(c.table_schema) || '.' || quote_ident(c.table_name))::regclass
               WHERE c.table_schema = 'public' AND pc.relkind IN ('r', 'p')   -- (the stored rows: a view reads these)
                 AND c.table_name NOT LIKE 'lab\_%'
-                AND has_table_privilege('service_role', pc.oid, 'SELECT')
+                AND (has_table_privilege('service_role', pc.oid, 'SELECT') OR has_table_privilege('ob_app_memory', pc.oid, 'SELECT'))
                 AND (c.data_type IN ('text', 'character varying', 'jsonb', 'json') OR (c.data_type = 'ARRAY' AND c.udt_name IN ('_text', '_varchar')))
               ORDER BY 1, 2 LOOP
-        EXECUTE 'SET LOCAL ROLE service_role';
-        BEGIN
-            EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I::text LIKE %L', r.tbl, r.col, '%' || m || '%') INTO n;
-        EXCEPTION WHEN insufficient_privilege THEN n := 0;
-        END;
-        EXECUTE 'RESET ROLE';
+        -- round 6: any case (F6), read as each role (ob_app_memory: a direct grant to it is read too)
+        n := 0;
+        FOREACH kk IN ARRAY ARRAY['service_role', 'ob_app_memory'] LOOP
+            EXECUTE format('SET LOCAL ROLE %I', kk);
+            BEGIN
+                EXECUTE format('SELECT greatest(%s, count(*)) FROM %s t WHERE t.%I::text ILIKE %L', n, r.tbl, r.col, '%' || m || '%') INTO n;
+            EXCEPTION WHEN insufficient_privilege THEN NULL;
+            END;
+            EXECUTE 'RESET ROLE';
+        END LOOP;
         IF n = 0 THEN CONTINUE; END IF;
         hits := hits + 1;
         ok := false; v_role := NULL;
         -- every row of this table holding the marker must be a registered row whose (role, col) is declared
-        FOR x IN EXECUTE format('SELECT to_jsonb(t) AS j FROM %s t WHERE t.%I::text LIKE %L', r.tbl, r.col, '%' || m || '%') LOOP
+        FOR x IN EXECUTE format('SELECT to_jsonb(t) AS j FROM %s t WHERE t.%I::text ILIKE %L', r.tbl, r.col, '%' || m || '%') LOOP
             SELECT lr.role INTO v_role FROM public.lab_catalog_rows lr
              WHERE lr.tbl = r.tbl AND lr.tree = 'seeded' AND x.j @> lr.key LIMIT 1;
             ok := v_role IS NOT NULL AND EXISTS (SELECT 1 FROM lab_catalog_allowed a WHERE a.tbl = r.tbl AND a.role IN (v_role, '*') AND a.col IN (r.col, '*'));
             IF ok THEN
                 -- a declared jsonb column: its question-derived keys must be clean all the same
                 FOR kk IN SELECT unnest(a.clean_keys) FROM lab_catalog_allowed a WHERE a.tbl = r.tbl AND a.role IN (v_role, '*') AND a.col IN (r.col, '*') AND a.clean_keys IS NOT NULL LOOP
-                    IF (x.j -> r.col -> kk)::text LIKE '%' || m || '%' THEN ok := false; END IF;
+                    IF (x.j -> r.col -> kk)::text ILIKE '%' || m || '%' THEN ok := false; END IF;
                 END LOOP;
                 IF (r.tbl, r.col) = ('public.sources', 'research_query') THEN ok := false; END IF;   -- the provenance question, never declared
             END IF;
@@ -408,6 +470,19 @@ BEGIN
     IF n <> 2 THEN fails := fails + 1; END IF;
     SELECT count(*) INTO n FROM public.claim_sources cs, public.lab_catalog_ids i WHERE i.k IN ('priv_claim', 'chain_claim') AND cs.claim_id = i.v::uuid;
     IF n <> 0 THEN RAISE NOTICE 'CATALOG CLAIM-EDGES % private edge(s) still shared', n; fails := fails + 1; END IF;
+    -- 9. (round 6) the free-text variants: the short subject used whole as a thread name is replaced; the moved email
+    -- body's credibility rows left the shared tables (the marker scan above covers the rest)
+    SELECT count(*) INTO n FROM public.threads t, public.lab_catalog_ids i WHERE i.k = 'free_short_thread' AND t.id = i.v::uuid AND lower(t.name) = 'acme layoff';
+    RAISE NOTICE 'CATALOG SHORT a thread named exactly a short email subject: % still so named (want 0)', n;
+    IF n <> 0 THEN fails := fails + 1; END IF;
+    SELECT (SELECT count(*) FROM public.source_credibility_history WHERE source_id = i.v::uuid) + (SELECT count(*) FROM public.source_trail_events WHERE source_id = i.v::uuid)
+         + (SELECT count(*) FROM public.source_corroborations WHERE from_source_id = i.v::uuid OR to_source_id = i.v::uuid)
+      INTO n FROM public.lab_catalog_ids i WHERE i.k = 'moved_source';
+    RAISE NOTICE 'CATALOG MOVED-SOURCE rows still keyed by the moved email body in shared tables: % (want 0)', n;
+    IF n <> 0 THEN fails := fails + 1; END IF;
+    SELECT count(*) INTO n FROM public.wiki_pages w, public.lab_catalog_ids i WHERE i.k = 'free_page' AND w.slug = i.v;
+    RAISE NOTICE 'CATALOG PAGE the page titled with the seeded question still served: % (want 0)', n;
+    IF n <> 0 THEN fails := fails + 1; END IF;
     RAISE NOTICE 'CATALOG SUMMARY columns with the seed marker: % (declared %, leaks %); tables % (planted %, declared %, unplanted %)',
         hits, allowed, hits - allowed, (SELECT count(*) FROM public.lab_catalog_tables),
         (SELECT count(*) FROM public.lab_catalog_tables WHERE status = 'planted'), (SELECT count(*) FROM public.lab_catalog_tables WHERE status = 'declared'),

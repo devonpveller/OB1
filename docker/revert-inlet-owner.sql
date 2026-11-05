@@ -173,6 +173,9 @@ BEGIN
         IF to_regclass('public.inlet_private_rows') IS NOT NULL THEN
             DELETE FROM public.inlet_private_rows WHERE batch = v_batch;
             DELETE FROM public.inlet_private_claim_sources WHERE batch = v_batch;
+            IF to_regclass('public.inlet_owner_seed_text') IS NOT NULL THEN
+                DELETE FROM public.inlet_owner_seed_text WHERE batch = v_batch;
+            END IF;
         END IF;
         IF to_regclass('public.inlet_private_jobs') IS NOT NULL THEN
             DELETE FROM public.inlet_private_jobs WHERE batch = v_batch;

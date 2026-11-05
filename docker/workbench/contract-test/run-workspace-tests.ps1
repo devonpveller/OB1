@@ -1121,7 +1121,7 @@ try {
       $s = & $inPhase 'reverted' 'inlet-reverted.log'
       Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] after the revert the 21 tables are byte-identical (md5) to before the first run ($($s.Value))"
       $srcText = Get-Content -Raw $inInit
-      foreach ($m in @(@('archive-thoughts', 'a thought'), @('archive-sources', 'a source'), @('archive-pages', 'a wiki page'), @('archive-jobs', 'a research job'), @('archive-events', 'a job event'), @('archive-steers', 'a research steer'), @('archive-leaf', 'a row that hangs on a seeded job'))) {
+      foreach ($m in @(@('archive-thoughts', 'a thought'), @('archive-sources', 'a source'), @('archive-pages', 'a wiki page'), @('archive-jobs', 'a research job'), @('archive-events', 'a job event'), @('archive-steers', 'a research steer'), @('archive-leaf', 'a row that hangs on a seeded job'), @('archive-sweep', 'a shared row carrying seed text'))) {
         $mutant = Join-Path $env:TEMP "$P-440-mutant-$($m[0]).sql"
         $cut = [regex]::Replace($srcText, "(?s)-- \[$($m[0])\].*?-- \[/$($m[0])\]", '-- (mutant: no archive step)')
         [System.IO.File]::WriteAllText($mutant, $cut, (New-Object System.Text.UTF8Encoding $false))
