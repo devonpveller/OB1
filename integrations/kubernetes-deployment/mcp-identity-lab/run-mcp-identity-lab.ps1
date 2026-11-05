@@ -198,12 +198,12 @@ CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROL
 -- chain grants them only to roles created before it ran
 GRANT SELECT, INSERT, UPDATE, DELETE ON agent_memories, agent_memory_artifacts, agent_memory_audit_events, agent_memory_recall_items,
   agent_memory_recall_traces, agent_memory_relations, agent_memory_review_actions, agent_memory_source_refs TO service_role;
-DO `$`$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = 'agent_memory_audit_events'::regclass) THEN
-    -- live parity: live carries agent_memory_audit_events_service_role_all (ALL, service_role, true / true)
-    CREATE POLICY agent_memory_audit_events_service_role_all ON agent_memory_audit_events AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true);
-  END IF;
-END `$`$;
+-- live parity (read on live 2026-11-04, schema only): live carries agent_memory_audit_events_service_role_all (ALL,
+-- service_role, true / true); the repo chain's slot 200 replaces it with agent_memory_audit_events_closed (false / false),
+-- which refuses every non-superuser writeback - a chain-vs-live drift outside this item (findings, "pre-existing")
+DROP POLICY IF EXISTS agent_memory_audit_events_closed ON agent_memory_audit_events;
+DROP POLICY IF EXISTS agent_memory_audit_events_service_role_all ON agent_memory_audit_events;
+CREATE POLICY agent_memory_audit_events_service_role_all ON agent_memory_audit_events AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true);
 INSERT INTO thoughts (content, embedding, metadata, exposure) VALUES ('lab marker shared row $($markers.shared)', ($vec)::vector, '{"source":"lab"}', 'ops');
 INSERT INTO thoughts (content, embedding, metadata, exposure, user_id) VALUES ('lab marker A private $($markers.a_thought)', ($vec)::vector, '{"source":"lab"}', 'ops', '$($subs.a)');
 SELECT public.idea_capture('$($subs.a)', 'service:lab', 'A lab marker idea', 'lab marker idea A $($markers.a_idea)', NULL, $vec);
