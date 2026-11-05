@@ -73,16 +73,31 @@ END $$;
 -- SHARE ROW EXCLUSIVE blocks writes and lets reads through. Once held, a writer the stack's watchdog starts again during
 -- the run queues behind it (and its own statement times out or waits) - it cannot take a lock the run needs later and
 -- bounce the run half-way; the bounce can only happen here, in the first 10 s, with nothing changed.
+-- round 5: also research_steers, sessions, threads, and every table that hangs a row on a research job (discovered from
+-- the catalog, as the move below discovers them: research_cancels and research_admission_trail today).
 DO $$
 DECLARE t TEXT;
 BEGIN
     FOREACH t IN ARRAY ARRAY['thoughts', 'sources', 'source_chunks', 'claims', 'claim_sources', 'research_jobs', 'research_job_events',
-                             'research_prompts', 'wiki_pages', 'entities', 'thread_sources', 'session_sources', 'source_entities',
-                             'source_extraction_queue', 'research_private_report_claims', 'import_jobs', 'ideas', 'source_revisions',
-                             'source_disputes'] LOOP
+                             'research_prompts', 'research_steers', 'sessions', 'threads', 'wiki_pages', 'entities', 'thread_sources',
+                             'session_sources', 'source_entities', 'source_extraction_queue', 'research_private_report_claims', 'import_jobs',
+                             'ideas', 'source_revisions', 'source_disputes'] LOOP
         IF to_regclass('public.' || t) IS NOT NULL THEN
             EXECUTE format('LOCK TABLE public.%I IN SHARE ROW EXCLUSIVE MODE', t);
         END IF;
+    END LOOP;
+    FOR t IN SELECT DISTINCT format('%I.%I', n.nspname, c.relname)
+               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
+              WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+                AND c.relname NOT IN ('research_jobs', 'research_job_events', 'research_prompts', 'research_steers',
+                                      'research_private_reports', 'research_prompt_moves', 'source_credibility_history', 'source_corroborations')
+                AND c.relname NOT LIKE 'inlet\_%'   -- (this file's own owner-only stores)
+                AND NOT c.relforcerowsecurity     -- (a table with FORCED row security is owner-only already: 420's private hand-back)
+                AND (EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f'
+                                AND con.confrelid = 'public.research_jobs'::regclass AND a.attnum = ANY (con.conkey))
+                     OR (a.atttypid = 'uuid'::regtype AND a.attname ~ '(^|_)job_id$'
+                AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f' AND a.attnum = ANY (con.conkey)))) LOOP
+        EXECUTE format('LOCK TABLE %s IN SHARE ROW EXCLUSIVE MODE', t);
     END LOOP;
 END $$;
 
@@ -143,6 +158,31 @@ CREATE TABLE IF NOT EXISTS public.inlet_private_job_events (
     row_data  JSONB NOT NULL,             -- the event row before this file
     PRIMARY KEY (event_id, batch)
 );
+-- round 5: every other row of a seeded tree, as it was, for its owner: the steers (tester attempt 4 F1), the sessions,
+-- the shared sources a tree's filing stamped with its question, the threads, the rows that hang on a tree job and move
+-- out (research_cancels, research_admission_trail, ...). tbl = the schema-qualified table, ref = its key (or the
+-- archive row's id for a moved row)
+CREATE TABLE IF NOT EXISTS public.inlet_private_rows (
+    tbl       TEXT NOT NULL,
+    ref       TEXT NOT NULL,
+    batch     UUID NOT NULL,
+    owner_sub TEXT NOT NULL,
+    row_data  JSONB NOT NULL,             -- the row before this file
+    PRIMARY KEY (tbl, ref, batch)
+);
+-- round 5 (the coordinator, for rw-owner-private-view): a PRIVATE claim's own edges (its claim_sources rows, source and
+-- parent-claim edges alike), keyed by claim and owner; edge_ref = md5 of the row as it was
+CREATE TABLE IF NOT EXISTS public.inlet_private_claim_sources (
+    claim_id  UUID NOT NULL,
+    edge_ref  TEXT NOT NULL,
+    owner_sub TEXT NOT NULL,
+    batch     UUID NOT NULL,
+    source_id UUID,
+    parent_claim_id UUID,
+    row_data  JSONB NOT NULL,             -- the claim_sources row as it was
+    PRIMARY KEY (claim_id, edge_ref, batch)
+);
+CREATE INDEX IF NOT EXISTS idx_inlet_private_claim_sources_owner ON public.inlet_private_claim_sources (owner_sub, claim_id);
 -- the owner-private stores: the shared tables' own columns (LIKE) + the owner and the batch
 CREATE TABLE IF NOT EXISTS public.inlet_private_sources (LIKE public.sources);
 CREATE TABLE IF NOT EXISTS public.inlet_private_source_chunks (LIKE public.source_chunks);
@@ -185,7 +225,7 @@ BEGIN
     -- inlet_private_source(id, sub) below, never the table.
     FOREACH t IN ARRAY ARRAY['inlet_owner', 'inlet_owner_prior', 'inlet_owner_archive', 'inlet_private_sources', 'inlet_private_source_chunks',
                              'inlet_private_claims', 'inlet_private_claim_links', 'inlet_owner_withheld_pages', 'inlet_owner_withheld_chunks',
-                             'inlet_private_jobs', 'inlet_private_job_events'] LOOP
+                             'inlet_private_jobs', 'inlet_private_job_events', 'inlet_private_rows', 'inlet_private_claim_sources'] LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
         EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', t);
         EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC', t);
@@ -461,6 +501,7 @@ DECLARE
     n_thoughts BIGINT := 0; n_src_mail INT := 0; n_src_pod INT := 0; n_chunks BIGINT := 0; n_claims INT := 0;
     n_mixed   INT := 0; n_jobs INT := 0; n_seeds BIGINT := 0; n_meta INT := 0; n_pages INT := 0; n_ents INT := 0;
     n_rebuild INT := 0; n_left BIGINT; n_prompts INT := 0; n_events INT := 0; n_chunk_pages INT := 0;
+    n_steers BIGINT := 0; n_sess BIGINT := 0; n_stamp BIGINT := 0; n_threads BIGINT := 0; n_leaf BIGINT := 0; n_want BIGINT; n_retitle INT := 0;
     r RECORD; d RECORD;
     c_mail CONSTANT TEXT := '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*';
 BEGIN
@@ -664,9 +705,56 @@ BEGIN
                 'synthesis_id', (SELECT to_jsonb(s.id) FROM public.sources s
                                   WHERE jsonb_typeof(j -> 'synthesis_id') = 'string'
                                     AND (j ->> 'synthesis_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                                    AND s.id = (j ->> 'synthesis_id')::uuid),
+                                    AND s.id = (j ->> 'synthesis_id')::uuid
+                                    -- round 5 (tester attempt 4 F2): never a source this run moves private (as
+                                    -- io_shared_source / io_shared_claim): it would refuse the whole run
+                                    AND NOT EXISTS (SELECT 1 FROM pg_temp._io_ids i WHERE i.v = s.id::text)),
                 'research_key', 'private-text')
             ELSE '{}'::jsonb END
+    $f$;
+    -- round 5 (tester attempt 4 F3): a step id in a seeded tree is rebuilt too - the same old id in the same tree maps to
+    -- the same new id everywhere it appears (events, the branches' rooted_step_id, the steers, a human_steer payload),
+    -- so the tree keeps its shape; an id already rebuilt maps to itself (a re-run changes nothing). 8 hex characters
+    -- carry no text.
+    CREATE FUNCTION pg_temp.io_step(p_root UUID, p_step TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE AS $f$
+        SELECT CASE WHEN p_step IS NULL THEN NULL WHEN p_step ~ '^step-[0-9a-f]{8}$' THEN p_step
+                    ELSE 'step-' || left(md5(p_root::text || ':' || p_step), 8) END
+    $f$;
+    -- round 5 (F1): a steer's gap record, rebuilt as the event's: a gap steer keeps a shared claim's id and the two
+    -- numbers, an inter-hub steer the density; a human steer has none (its CHECK allows NULL only for 'human')
+    CREATE FUNCTION pg_temp.io_steer_gap(p_kind TEXT, j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE p_kind
+            WHEN 'gap' THEN jsonb_build_object(
+                'claim_id', (pg_temp.io_shared_claim(j -> 'claim_id')) -> 'id',
+                'score', CASE WHEN jsonb_typeof(j -> 'score') = 'number' THEN j -> 'score' END,
+                'threshold', CASE WHEN jsonb_typeof(j -> 'threshold') = 'number' THEN j -> 'threshold' END)
+            WHEN 'interhub' THEN jsonb_build_object('a', NULL, 'b', NULL,
+                'density', CASE WHEN jsonb_typeof(j -> 'density') = 'number' THEN j -> 'density' END)
+            WHEN 'human' THEN NULL
+            ELSE '{}'::jsonb END
+    $f$;
+    -- round 5: a session tied to a seeded tree keeps only its source code and its research key (a hash)
+    CREATE FUNCTION pg_temp.io_session_meta(j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE WHEN j IS NULL THEN NULL WHEN jsonb_typeof(j) <> 'object' THEN '{}'::jsonb ELSE
+               jsonb_strip_nulls(jsonb_build_object(
+                   'source', CASE WHEN j ->> 'source' IN ('research-service', 'deep-research') THEN j -> 'source' END,
+                   'research_key', CASE WHEN j ->> 'research_key' ~ '^rs-[0-9a-f]{40}$' THEN j -> 'research_key' END)) END
+    $f$;
+    -- round 5: a seeded tree's filed synthesis stays shared (decision D4: the report and the claims of a non-derived job
+    -- stay shared), but its question does not: its metadata keeps the report itself (claim, prose_synthesis: D4), the
+    -- report type (a code), its citation ids (uuids) and the source code; needs and follow-up queries (written from the
+    -- question) go
+    CREATE FUNCTION pg_temp.io_synth_meta(j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
+        SELECT CASE WHEN j IS NULL THEN NULL WHEN jsonb_typeof(j) <> 'object' THEN '{}'::jsonb ELSE
+               jsonb_strip_nulls(jsonb_build_object(
+                   'source', CASE WHEN j ->> 'source' = 'deep-research' THEN j -> 'source' END,
+                   'claim', CASE WHEN jsonb_typeof(j -> 'claim') = 'string' THEN j -> 'claim' END,
+                   'prose_synthesis', CASE WHEN jsonb_typeof(j -> 'prose_synthesis') = 'string' THEN j -> 'prose_synthesis' END,
+                   'report_type', pg_temp.io_code('report_type', j -> 'report_type'),
+                   'source_ids', CASE WHEN jsonb_typeof(j -> 'source_ids') = 'array' THEN
+                       (SELECT coalesce(jsonb_agg(x), '[]'::jsonb) FROM jsonb_array_elements(j -> 'source_ids') x
+                         WHERE jsonb_typeof(x) = 'null'
+                            OR (jsonb_typeof(x) = 'string' AND (x #>> '{}') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')) END)) END
     $f$;
     -- an event's trail: a source event must keep a non-empty object (its CHECK); any other trail goes neutral or stays NULL
     CREATE FUNCTION pg_temp.io_event_trail(typ TEXT, j JSONB) RETURNS JSONB LANGUAGE sql STABLE AS $f$
@@ -706,7 +794,8 @@ BEGIN
                  OR pg_temp.io_result(j.result) IS DISTINCT FROM j.result OR pg_temp.io_progress(j.progress) IS DISTINCT FROM j.progress
                  OR (j.options IS NOT NULL AND j.options <> '{}'::jsonb) OR pg_temp.io_tree_report(j.tree_report) IS DISTINCT FROM j.tree_report
                  OR pg_temp.io_metrics(j.metrics) IS DISTINCT FROM j.metrics OR j.inlet_ref IS NOT NULL
-                 OR (j.error IS NOT NULL AND j.error <> 'private-text') OR (j.gap_ref IS NOT NULL AND j.gap_ref <> 'private-text')))
+                 OR (j.error IS NOT NULL AND j.error <> 'private-text') OR (j.gap_ref IS NOT NULL AND j.gap_ref <> 'private:' || j.id::text)
+                 OR j.rooted_step_id IS DISTINCT FROM pg_temp.io_step(coalesce(j.root_job_id, j.id), j.rooted_step_id)))
         OR pg_temp.io_hits(coalesce(j.options::text, '') || ' ' || coalesce(j.result::text, '') || ' ' || coalesce(j.tree_report::text, '')
                            || ' ' || coalesce(j.query, '') || ' ' || coalesce(j.anchor, '') || ' ' || coalesce(j.topic_estimate, ''));
     CREATE TEMP TABLE _io_prompts ON COMMIT DROP AS
@@ -716,7 +805,8 @@ BEGIN
     CREATE TEMP TABLE _io_events ON COMMIT DROP AS
     SELECT e.id FROM public.research_job_events e
      WHERE ((e.job_id IN (SELECT id FROM _io_tree) OR e.root_job_id IN (SELECT root FROM _io_roots))
-            AND (pg_temp.io_event_payload(e.type, e.step_id, e.payload) IS DISTINCT FROM e.payload OR pg_temp.io_event_trail(e.type, e.trail) IS DISTINCT FROM e.trail))
+            AND (pg_temp.io_event_payload(e.type, pg_temp.io_step(e.root_job_id, e.step_id), e.payload) IS DISTINCT FROM e.payload OR pg_temp.io_event_trail(e.type, e.trail) IS DISTINCT FROM e.trail
+                 OR e.step_id IS DISTINCT FROM pg_temp.io_step(e.root_job_id, e.step_id)))
         OR pg_temp.io_hits(coalesce(e.payload::text, '') || ' ' || coalesce(e.trail::text, ''));
     -- the shared rows that carry a Gmail id or URL
     CREATE TEMP TABLE _io_meta_src ON COMMIT DROP AS
@@ -731,7 +821,160 @@ BEGIN
     SELECT c.id FROM public.claims c
      WHERE c.id NOT IN (SELECT id FROM _io_claims) AND coalesce(c.text, '') ~* 'mail\.google\.com';
 
+    -- ── round 5: every other row the engine wrote for a seeded tree ──────────────────────────────────────────────────
+    -- (tester attempt 4 F1: research_steers; the coordinator's point 4: the sessions and threads a filing derives; the
+    -- catalog case: every table the research paths write.) Computed here, from the rows as they are, and applied after
+    -- the jobs. A row counts while it is not yet its rebuild, so a second run over rebuilt rows has nothing to do.
+    -- the trees' own question texts, wherever the engine copied them: the subs above, and the originals an earlier batch
+    -- kept for the owner (a late row may still carry them); never a neutral text
+    CREATE TEMP TABLE _io_qs (v TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_qs
+    SELECT DISTINCT x FROM (
+        SELECT unnest(t.subs) AS x FROM _io_tree t
+        UNION SELECT p.row_data ->> k FROM public.inlet_private_jobs p, unnest(ARRAY['query', 'anchor', 'topic_estimate']) k
+        UNION SELECT a.row_data ->> 'prompt' FROM public.inlet_owner_archive a
+               WHERE a.tbl = 'public.research_prompts' AND a.action = 'm' AND a.restored_at IS NULL AND a.ref IN (SELECT id::text FROM _io_tree)) q
+     WHERE length(coalesce(x, '')) >= 6 AND x !~ '^Research job [0-9a-f]{8}$' AND x <> 'private-text'
+    ON CONFLICT DO NOTHING;
+    -- cut the trees' question texts (the longest first) out of a shared text that is not the tree's own (a thread)
+    CREATE FUNCTION pg_temp.io_cut(p TEXT) RETURNS TEXT LANGUAGE plpgsql STABLE AS $f$
+    DECLARE q TEXT; s TEXT := p;
+    BEGIN
+        IF s IS NULL THEN RETURN NULL; END IF;
+        FOR q IN SELECT v FROM pg_temp._io_qs WHERE length(v) >= 12 ORDER BY length(v) DESC, v LOOP
+            s := replace(s, q, 'private-text');
+        END LOOP;
+        RETURN s;
+    END;
+    $f$;
+    -- (F1) the steers: a seeded tree's steer is rebuilt (the neutral question for its text, topic and anchor; its gap
+    -- record as the event's; no caller, no context snapshot; the step id rebuilt; its actor kept: who acted, a subject);
+    -- any other steer that names private data is cut as a job is
+    CREATE TEMP TABLE _io_steers_new ON COMMIT DROP AS
+    SELECT s.id, (t.id IS NOT NULL) AS tree,
+           CASE WHEN t.id IS NOT NULL THEN t.neutral ELSE regexp_replace(s.text, c_mail, 'private-email', 'gi') END AS text,
+           CASE WHEN t.id IS NOT NULL THEN t.neutral ELSE regexp_replace(s.topic_estimate, c_mail, 'private-email', 'gi') END AS topic_estimate,
+           CASE WHEN t.id IS NOT NULL THEN t.neutral ELSE regexp_replace(s.anchor, c_mail, 'private-email', 'gi') END AS anchor,
+           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_steer_gap(s.steer_kind, s.gap) ELSE pg_temp.io_scrub(s.gap, NULL) END AS gap,
+           CASE WHEN t.id IS NOT NULL THEN NULL ELSE s.caller END AS caller,
+           CASE WHEN t.id IS NOT NULL THEN NULL ELSE pg_temp.io_scrub(s.context_snapshot, NULL) END AS context_snapshot,
+           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_step(t.root, s.step_id) ELSE s.step_id END AS step_id
+      FROM public.research_steers s LEFT JOIN _io_tree t ON t.id = s.child_job_id
+     WHERE t.id IS NOT NULL
+        OR pg_temp.io_hits(s.text || ' ' || s.topic_estimate || ' ' || s.anchor || ' ' || coalesce(s.gap::text, '') || ' '
+                           || coalesce(s.context_snapshot::text, '') || ' ' || coalesce(s.caller, ''));
+    DELETE FROM _io_steers_new n USING public.research_steers s
+     WHERE s.id = n.id AND n.text IS NOT DISTINCT FROM s.text AND n.topic_estimate IS NOT DISTINCT FROM s.topic_estimate
+       AND n.anchor IS NOT DISTINCT FROM s.anchor AND n.gap IS NOT DISTINCT FROM s.gap AND n.caller IS NOT DISTINCT FROM s.caller
+       AND n.context_snapshot IS NOT DISTINCT FROM s.context_snapshot AND n.step_id IS NOT DISTINCT FROM s.step_id;
+    -- (point 4) the sessions a seeded tree's run or filing wrote (the job's staging session, the filed event's session -
+    -- in the event now or in the copy an earlier batch kept -, a session whose query text is a tree's question): the
+    -- session record's query text is the question; it keeps a neutral text, its source code and its research key (a hash)
+    CREATE TEMP TABLE _io_tsess (id UUID PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_tsess
+    SELECT DISTINCT x FROM (
+        SELECT j.session_id AS x FROM public.research_jobs j JOIN _io_tree t ON t.id = j.id
+        UNION SELECT (e.payload ->> 'session_id')::uuid FROM public.research_job_events e
+               WHERE (e.root_job_id IN (SELECT root FROM _io_roots) OR e.job_id IN (SELECT id FROM _io_tree))
+                 AND (e.payload ->> 'session_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        UNION SELECT (p.row_data -> 'payload' ->> 'session_id')::uuid FROM public.inlet_private_job_events p
+               WHERE (p.row_data -> 'payload' ->> 'session_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        UNION SELECT s.id FROM public.sessions s WHERE s.query_text IN (SELECT v FROM _io_qs)) q
+     WHERE x IS NOT NULL AND EXISTS (SELECT 1 FROM public.sessions s WHERE s.id = q.x);
+    CREATE TEMP TABLE _io_sess_new ON COMMIT DROP AS
+    SELECT s.id, CASE WHEN s.query_text IS NULL THEN NULL ELSE 'Research session ' || left(s.id::text, 8) END AS query_text,
+           pg_temp.io_session_meta(s.metadata) AS metadata
+      FROM public.sessions s JOIN _io_tsess x ON x.id = s.id;
+    DELETE FROM _io_sess_new n USING public.sessions s
+     WHERE s.id = n.id AND n.query_text IS NOT DISTINCT FROM s.query_text AND n.metadata IS NOT DISTINCT FROM s.metadata;
+    -- (point 4 / the catalog case) the shared sources a seeded tree's filing stamped with its question: the tree's filed
+    -- synthesis (the report stays shared, D4; its title and research_query are the question: neutral; its metadata
+    -- rebuilt, io_synth_meta), and every source the filing re-stamped (research_key the filing's, research_query /
+    -- metadata.originating_query a tree's question): its provenance question becomes private-text. The article's own
+    -- title, url and content are the public article's.
+    CREATE TEMP TABLE _io_syn (id UUID PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_syn
+    SELECT DISTINCT x::uuid FROM (
+        SELECT e.payload ->> 'synthesis_id' AS x FROM public.research_job_events e
+         WHERE e.type = 'filed' AND (e.root_job_id IN (SELECT root FROM _io_roots) OR e.job_id IN (SELECT id FROM _io_tree))
+        UNION SELECT p.row_data -> 'payload' ->> 'synthesis_id' FROM public.inlet_private_job_events p WHERE p.row_data ->> 'type' = 'filed') q
+     WHERE x ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       AND EXISTS (SELECT 1 FROM public.sources s WHERE s.id = x::uuid) AND x::uuid NOT IN (SELECT id FROM _io_src);
+    CREATE TEMP TABLE _io_rkeys (k TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_rkeys
+    SELECT DISTINCT x FROM (
+        SELECT e.payload ->> 'research_key' AS x FROM public.research_job_events e
+         WHERE e.type = 'filed' AND (e.root_job_id IN (SELECT root FROM _io_roots) OR e.job_id IN (SELECT id FROM _io_tree))
+        UNION SELECT p.row_data -> 'payload' ->> 'research_key' FROM public.inlet_private_job_events p WHERE p.row_data ->> 'type' = 'filed'
+        UNION SELECT s.research_key FROM public.sources s JOIN _io_syn y ON y.id = s.id) q
+     WHERE coalesce(x, '') NOT IN ('', 'private-text');
+    CREATE TEMP TABLE _io_stamp_new ON COMMIT DROP AS
+    SELECT s.id, (y.id IS NOT NULL) AS syn,
+           CASE WHEN y.id IS NOT NULL THEN 'Research report ' || left(s.id::text, 8) ELSE s.title END AS title,
+           CASE WHEN s.research_query IS NULL THEN NULL ELSE 'private-text' END AS research_query,
+           CASE WHEN y.id IS NOT NULL THEN pg_temp.io_synth_meta(s.metadata)
+                WHEN jsonb_typeof(s.metadata -> 'originating_query') IN ('string', 'object', 'array', 'number', 'boolean')
+                    THEN jsonb_set(s.metadata, '{originating_query}', to_jsonb('private-text'::text))
+                ELSE s.metadata END AS metadata
+      FROM public.sources s LEFT JOIN _io_syn y ON y.id = s.id
+     WHERE s.id NOT IN (SELECT id FROM _io_src)
+       AND (y.id IS NOT NULL OR s.research_key IN (SELECT k FROM _io_rkeys) OR s.research_query IN (SELECT v FROM _io_qs)
+            OR (s.metadata ->> 'originating_query') IN (SELECT v FROM _io_qs));
+    DELETE FROM _io_stamp_new n USING public.sources s
+     WHERE s.id = n.id AND n.title IS NOT DISTINCT FROM s.title AND n.research_query IS NOT DISTINCT FROM s.research_query
+       AND n.metadata IS NOT DISTINCT FROM s.metadata;
+    -- the synthesis pages to rebuild: a page presenting a source whose title this batch makes neutral is withheld (and
+    -- not kept as withheld text: the compile rebuilds it with the neutral title)
+    CREATE TEMP TABLE _io_retitled ON COMMIT DROP AS
+    SELECT n.id FROM _io_stamp_new n JOIN public.sources s ON s.id = n.id WHERE n.title IS DISTINCT FROM s.title;
+    -- the threads a tree's filing named or attached to: a thread is shared (many researches); the trees' exact question
+    -- texts are cut from its name and description (the curator's own wording of the shared report stays, D4)
+    CREATE TEMP TABLE _io_threads_new ON COMMIT DROP AS
+    SELECT t.id, CASE WHEN btrim(coalesce(pg_temp.io_cut(t.name), '')) = '' THEN 'Research thread ' || left(t.id::text, 8) ELSE pg_temp.io_cut(t.name) END AS name,
+           pg_temp.io_cut(t.description) AS description
+      FROM public.threads t
+     WHERE t.id IN (SELECT s.thread_id FROM public.sessions s JOIN _io_tsess x ON x.id = s.id
+                    UNION SELECT j.thread_id FROM public.research_jobs j JOIN _io_tree tt ON tt.id = j.id);
+    DELETE FROM _io_threads_new n USING public.threads t
+     WHERE t.id = n.id AND n.name IS NOT DISTINCT FROM t.name AND n.description IS NOT DISTINCT FROM t.description;
+    -- a thread link of a tree's synthesis carries no reason text (a suggestion's reason was written from the report's question)
+    CREATE TEMP TABLE _io_tts_new ON COMMIT DROP AS
+    SELECT ts.thread_id, ts.source_id FROM public.thread_sources ts
+     WHERE ts.source_id IN (SELECT id FROM _io_syn) AND ts.suggestion_reason IS NOT NULL;
+    -- every OTHER table that hangs a row on a research job (a foreign key onto research_jobs, or a uuid column named
+    -- *job_id), discovered from the catalog - so a table added later is covered without a change here: a seeded tree's
+    -- rows there move to the owner's store (archived first). Not these: the tree's own rows, rebuilt above (jobs, events,
+    -- prompts, steers); a table with FORCED row security (owner-only already: 420's private hand-back); an idea job's private
+    -- report (research_private_reports, slot 390's store); research_prompt_moves (who owned a prompt: subjects only);
+    -- a SHARED source's credibility a run computed (source_credibility_history, source_corroborations: moving them would
+    -- change the shared source's score; the report's lines they quote stay shared, D4). A uuid *job_id column with a
+    -- foreign key onto another table (import_job_payloads) is not a research job's.
+    CREATE TEMP TABLE _io_leaf (tbl TEXT, col TEXT, multi BOOLEAN, n BIGINT, PRIMARY KEY (tbl, col)) ON COMMIT DROP;
+    INSERT INTO _io_leaf (tbl, col, multi, n)
+    SELECT DISTINCT format('%I.%I', ns.nspname, c.relname), a.attname,
+           EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f'
+                      AND con.confrelid = 'public.research_jobs'::regclass AND a.attnum = ANY (con.conkey) AND cardinality(con.conkey) > 1), 0
+      FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
+     WHERE ns.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+       AND c.relname NOT IN ('research_jobs', 'research_job_events', 'research_prompts', 'research_steers',
+                             'research_private_reports', 'research_prompt_moves', 'source_credibility_history', 'source_corroborations')
+                AND c.relname NOT LIKE 'inlet\_%'   -- (this file's own owner-only stores)
+                AND NOT c.relforcerowsecurity     -- (a table with FORCED row security is owner-only already: 420's private hand-back)
+       AND (EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f'
+                       AND con.confrelid = 'public.research_jobs'::regclass AND a.attnum = ANY (con.conkey))
+            OR (a.atttypid = 'uuid'::regtype AND a.attname ~ '(^|_)job_id$'
+                AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conrelid = c.oid AND con.contype = 'f' AND a.attnum = ANY (con.conkey))));
+    FOR r IN SELECT * FROM _io_leaf LOOP
+        IF r.multi THEN
+            RAISE EXCEPTION 'inlet owner: refused, nothing changed - % has a multi-column foreign key onto research_jobs, not moved by this file', r.tbl USING ERRCODE = '55000';
+        END IF;
+        EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I IN (SELECT id FROM _io_tree)', r.tbl, r.col) INTO v_n;
+        UPDATE _io_leaf SET n = v_n WHERE tbl = r.tbl AND col = r.col;
+    END LOOP;
+
     IF NOT EXISTS (SELECT 1 FROM _io_thoughts) AND v_src IS NULL AND NOT EXISTS (SELECT 1 FROM _io_jobs)
+       AND NOT EXISTS (SELECT 1 FROM _io_steers_new) AND NOT EXISTS (SELECT 1 FROM _io_sess_new) AND NOT EXISTS (SELECT 1 FROM _io_stamp_new)
+       AND NOT EXISTS (SELECT 1 FROM _io_threads_new) AND NOT EXISTS (SELECT 1 FROM _io_tts_new) AND NOT EXISTS (SELECT 1 FROM _io_leaf WHERE n > 0)
        AND NOT EXISTS (SELECT 1 FROM _io_prompts) AND NOT EXISTS (SELECT 1 FROM _io_events)
        AND NOT EXISTS (SELECT 1 FROM _io_meta_src) AND NOT EXISTS (SELECT 1 FROM _io_meta_chunks) AND NOT EXISTS (SELECT 1 FROM _io_meta_claims)
        AND NOT EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.slug ~ '^content/thought/[0-9]+$'
@@ -782,21 +1025,25 @@ BEGIN
            CASE WHEN j.error IS NULL THEN NULL
                 WHEN t.id IS NOT NULL THEN 'private-text'
                 ELSE regexp_replace(j.error, '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*', 'private-email', 'gi') END AS error,
-           CASE WHEN t.id IS NOT NULL AND j.gap_ref IS NOT NULL THEN 'private-text' ELSE j.gap_ref END AS gap_ref
+           -- round 5: unique per tree (uq_research_jobs_tree_gap: one branch per gap per tree), so never one shared value -
+           -- the job's own id (round 4's 'private-text' for every branch broke the index on a tree with two gap branches)
+           CASE WHEN t.id IS NOT NULL AND j.gap_ref IS NOT NULL THEN 'private:' || j.id::text ELSE j.gap_ref END AS gap_ref,
+           CASE WHEN t.id IS NOT NULL THEN pg_temp.io_step(t.root, j.rooted_step_id) ELSE j.rooted_step_id END AS rooted_step_id
       FROM public.research_jobs j JOIN _io_jobs x ON x.id = j.id LEFT JOIN _io_tree t ON t.id = j.id;
     DELETE FROM _io_jobs_new n USING public.research_jobs j
      WHERE j.id = n.id AND n.query IS NOT DISTINCT FROM j.query AND n.anchor IS NOT DISTINCT FROM j.anchor
        AND n.topic_estimate IS NOT DISTINCT FROM j.topic_estimate AND n.options IS NOT DISTINCT FROM j.options
        AND n.result IS NOT DISTINCT FROM j.result AND n.tree_report IS NOT DISTINCT FROM j.tree_report
        AND n.progress IS NOT DISTINCT FROM j.progress AND n.error IS NOT DISTINCT FROM j.error AND n.gap_ref IS NOT DISTINCT FROM j.gap_ref
+       AND n.rooted_step_id IS NOT DISTINCT FROM j.rooted_step_id
        AND n.metrics IS NOT DISTINCT FROM j.metrics AND n.inlet_ref IS NOT DISTINCT FROM j.inlet_ref;
     -- [archive-jobs]
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, row_data)
-    SELECT v_batch, 'public.research_jobs', 'query,anchor,topic_estimate,options,result,tree_report,progress,error,gap_ref,metrics,inlet_ref', 'j',
+    SELECT v_batch, 'public.research_jobs', 'query,anchor,topic_estimate,options,result,tree_report,progress,error,gap_ref,metrics,inlet_ref,rooted_step_id', 'j',
            jsonb_build_object('id', j.id, 'query', j.query, 'anchor', j.anchor, 'topic_estimate', j.topic_estimate,
                               'options', j.options, 'result', j.result, 'tree_report', j.tree_report,
                               'progress', j.progress, 'error', j.error, 'gap_ref', j.gap_ref,
-                              'metrics', j.metrics, 'inlet_ref', j.inlet_ref)
+                              'metrics', j.metrics, 'inlet_ref', j.inlet_ref, 'rooted_step_id', j.rooted_step_id)
       FROM public.research_jobs j JOIN _io_jobs_new n ON n.id = j.id;
     -- [/archive-jobs]
     -- the seeded trees' own text, for the owner
@@ -816,12 +1063,13 @@ BEGIN
       FROM public.research_prompts p JOIN _io_prompts_new n ON n.job_id = p.job_id;
     CREATE TEMP TABLE _io_events_new ON COMMIT DROP AS
     SELECT e.id, e.job_id, (t.subs IS NOT NULL OR t.hit) AS tree,
-           CASE WHEN t.hit THEN pg_temp.io_event_payload(e.type, e.step_id, e.payload) ELSE pg_temp.io_scrub(e.payload, NULL) END AS payload,
-           CASE WHEN t.hit THEN pg_temp.io_event_trail(e.type, e.trail) ELSE pg_temp.io_scrub(e.trail, NULL) END AS trail
+           CASE WHEN t.hit THEN pg_temp.io_event_payload(e.type, pg_temp.io_step(e.root_job_id, e.step_id), e.payload) ELSE pg_temp.io_scrub(e.payload, NULL) END AS payload,
+           CASE WHEN t.hit THEN pg_temp.io_event_trail(e.type, e.trail) ELSE pg_temp.io_scrub(e.trail, NULL) END AS trail,
+           CASE WHEN t.hit THEN pg_temp.io_step(e.root_job_id, e.step_id) ELSE e.step_id END AS step_id
       FROM public.research_job_events e JOIN _io_events x ON x.id = e.id
       LEFT JOIN LATERAL (SELECT tt.subs, true AS hit FROM _io_tree tt WHERE tt.root = e.root_job_id OR tt.id = e.job_id LIMIT 1) t ON true;
     DELETE FROM _io_events_new n USING public.research_job_events e
-     WHERE e.id = n.id AND n.payload IS NOT DISTINCT FROM e.payload AND n.trail IS NOT DISTINCT FROM e.trail;
+     WHERE e.id = n.id AND n.payload IS NOT DISTINCT FROM e.payload AND n.trail IS NOT DISTINCT FROM e.trail AND n.step_id IS NOT DISTINCT FROM e.step_id;
     -- [archive-events]
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
     SELECT v_batch, 'public.research_job_events', '*', 'm', e.id::text, to_jsonb(e)
@@ -833,7 +1081,8 @@ BEGIN
     PERFORM set_config('session_replication_role', 'replica', true);
     UPDATE public.research_jobs j
        SET query = n.query, anchor = n.anchor, topic_estimate = n.topic_estimate, options = n.options, result = n.result, tree_report = n.tree_report,
-           progress = n.progress, error = n.error, gap_ref = n.gap_ref, metrics = n.metrics, inlet_ref = n.inlet_ref
+           progress = n.progress, error = n.error, gap_ref = n.gap_ref, metrics = n.metrics, inlet_ref = n.inlet_ref,
+           rooted_step_id = n.rooted_step_id
       FROM _io_jobs_new n, public.inlet_owner_archive a
      WHERE n.id = j.id AND a.batch = v_batch AND a.action = 'j' AND (a.row_data ->> 'id')::uuid = j.id;
     GET DIAGNOSTICS n_jobs = ROW_COUNT;
@@ -841,7 +1090,7 @@ BEGIN
       FROM _io_prompts_new n, public.inlet_owner_archive a
      WHERE n.job_id = p.job_id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.research_prompts' AND a.ref = p.job_id::text;
     GET DIAGNOSTICS n_prompts = ROW_COUNT;
-    UPDATE public.research_job_events e SET payload = n.payload, trail = n.trail
+    UPDATE public.research_job_events e SET payload = n.payload, trail = n.trail, step_id = n.step_id
       FROM _io_events_new n, public.inlet_owner_archive a
      WHERE n.id = e.id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.research_job_events' AND a.ref = e.id::text;
     GET DIAGNOSTICS n_events = ROW_COUNT;
@@ -852,6 +1101,97 @@ BEGIN
             (SELECT count(*) FROM _io_jobs_new), (SELECT count(*) FROM _io_prompts_new), (SELECT count(*) FROM _io_events_new), n_jobs, n_prompts, n_events
             USING ERRCODE = '55000';
     END IF;
+
+    -- round 5: the other rows of the seeded trees (computed above). Every changed row is archived whole first ('m'; a
+    -- moved row 'p'), its original copied to the owner's store (inlet_private_rows), then written with triggers off.
+    -- [archive-steers]
+    INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+    SELECT v_batch, 'public.research_steers', '*', 'm', s.id::text, to_jsonb(s) FROM public.research_steers s JOIN _io_steers_new n ON n.id = s.id;
+    -- [/archive-steers]
+    INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+    SELECT v_batch, 'public.sessions', '*', 'm', s.id::text, to_jsonb(s) FROM public.sessions s JOIN _io_sess_new n ON n.id = s.id;
+    INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+    SELECT v_batch, 'public.sources', '*', 'm', s.id::text, to_jsonb(s) FROM public.sources s JOIN _io_stamp_new n ON n.id = s.id;
+    INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+    SELECT v_batch, 'public.threads', '*', 'm', t.id::text, to_jsonb(t) FROM public.threads t JOIN _io_threads_new n ON n.id = t.id;
+    INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+    SELECT v_batch, 'public.thread_sources', '*', 'm', ts.thread_id::text || '|' || ts.source_id::text, to_jsonb(ts)
+      FROM public.thread_sources ts JOIN _io_tts_new n ON n.thread_id = ts.thread_id AND n.source_id = ts.source_id;
+    INSERT INTO public.inlet_private_rows (tbl, ref, batch, owner_sub, row_data)
+    SELECT a.tbl, a.ref, v_batch, v_owner, a.row_data FROM public.inlet_owner_archive a
+     WHERE a.batch = v_batch AND a.action = 'm' AND a.tbl IN ('public.research_steers', 'public.sessions', 'public.sources', 'public.threads', 'public.thread_sources')
+    ON CONFLICT DO NOTHING;
+    PERFORM set_config('session_replication_role', 'replica', true);
+    UPDATE public.research_steers s
+       SET text = n.text, topic_estimate = n.topic_estimate, anchor = n.anchor, gap = n.gap, caller = n.caller,
+           context_snapshot = n.context_snapshot, step_id = n.step_id
+      FROM _io_steers_new n, public.inlet_owner_archive a
+     WHERE n.id = s.id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.research_steers' AND a.ref = s.id::text;
+    GET DIAGNOSTICS v_n = ROW_COUNT; n_steers := v_n;
+    UPDATE public.sessions s SET query_text = n.query_text, metadata = n.metadata
+      FROM _io_sess_new n, public.inlet_owner_archive a
+     WHERE n.id = s.id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.sessions' AND a.ref = s.id::text;
+    GET DIAGNOSTICS v_n = ROW_COUNT; n_sess := v_n;
+    UPDATE public.sources s SET title = n.title, research_query = n.research_query, metadata = n.metadata
+      FROM _io_stamp_new n, public.inlet_owner_archive a
+     WHERE n.id = s.id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.sources' AND a.ref = s.id::text;
+    GET DIAGNOSTICS v_n = ROW_COUNT; n_stamp := v_n;
+    UPDATE public.threads t SET name = n.name, description = n.description
+      FROM _io_threads_new n, public.inlet_owner_archive a
+     WHERE n.id = t.id AND a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.threads' AND a.ref = t.id::text;
+    GET DIAGNOSTICS v_n = ROW_COUNT; n_threads := v_n;
+    UPDATE public.thread_sources ts SET suggestion_reason = NULL
+      FROM _io_tts_new n, public.inlet_owner_archive a
+     WHERE n.thread_id = ts.thread_id AND n.source_id = ts.source_id AND a.batch = v_batch AND a.action = 'm'
+       AND a.tbl = 'public.thread_sources' AND a.ref = ts.thread_id::text || '|' || ts.source_id::text;
+    GET DIAGNOSTICS v_n = ROW_COUNT; n_threads := n_threads + v_n;
+    PERFORM set_config('session_replication_role', 'origin', true);
+    IF n_steers <> (SELECT count(*) FROM _io_steers_new) OR n_sess <> (SELECT count(*) FROM _io_sess_new)
+       OR n_stamp <> (SELECT count(*) FROM _io_stamp_new)
+       OR n_threads <> (SELECT count(*) FROM _io_threads_new) + (SELECT count(*) FROM _io_tts_new) THEN
+        RAISE EXCEPTION 'inlet owner: refused, nothing changed - % steer(s), % session(s), % source(s), % thread row(s) to rebuild; % / % / % / % archived and written',
+            (SELECT count(*) FROM _io_steers_new), (SELECT count(*) FROM _io_sess_new), (SELECT count(*) FROM _io_stamp_new),
+            (SELECT count(*) FROM _io_threads_new) + (SELECT count(*) FROM _io_tts_new), n_steers, n_sess, n_stamp, n_threads
+            USING ERRCODE = '55000';
+    END IF;
+    -- the rows that hang on a tree job elsewhere move to the owner's store (a row something else still points at refuses)
+    FOR r IN SELECT * FROM _io_leaf WHERE n > 0 LOOP
+        EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I IN (SELECT id FROM _io_tree)', r.tbl, r.col) INTO n_want;
+        IF n_want = 0 THEN CONTINUE; END IF;   -- (a table with two job columns: the first one moved them)
+        FOR d IN
+            SELECT c2.conrelid::regclass::text AS tbl2,
+                   (SELECT string_agg(format('t2.%I = t.%I', ca.attname, pa.attname), ' AND ')
+                      FROM unnest(c2.conkey, c2.confkey) k(c, p)
+                      JOIN pg_attribute ca ON ca.attrelid = c2.conrelid AND ca.attnum = k.c
+                      JOIN pg_attribute pa ON pa.attrelid = c2.confrelid AND pa.attnum = k.p) AS on_clause
+              FROM pg_constraint c2 WHERE c2.contype = 'f' AND c2.confrelid = r.tbl::regclass
+        LOOP
+            EXECUTE format('SELECT count(*) FROM %s t2 WHERE EXISTS (SELECT 1 FROM %s t WHERE t.%I IN (SELECT id FROM _io_tree) AND %s)', d.tbl2, r.tbl, r.col, d.on_clause)
+                INTO v_n;
+            IF v_n > 0 THEN
+                RAISE EXCEPTION 'inlet owner: refused, nothing changed - % row(s) of % point at % rows of a seeded tree this file would move', v_n, d.tbl2, r.tbl USING ERRCODE = '55000';
+            END IF;
+        END LOOP;
+        -- [archive-leaf]
+        EXECUTE format('INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
+                        SELECT $1, %L, %L, ''p'', t.%I::text, to_jsonb(t) FROM %s t WHERE t.%I IN (SELECT id FROM _io_tree)', r.tbl, r.col, r.col, r.tbl, r.col)
+            USING v_batch;
+        -- [/archive-leaf]
+        INSERT INTO public.inlet_private_rows (tbl, ref, batch, owner_sub, row_data)
+        SELECT a.tbl, a.id::text, v_batch, v_owner, a.row_data FROM public.inlet_owner_archive a
+         WHERE a.batch = v_batch AND a.action = 'p' AND a.tbl = r.tbl AND a.col = r.col;
+        PERFORM set_config('session_replication_role', 'replica', true);
+        EXECUTE format('DELETE FROM %s t WHERE t.%I IN (SELECT id FROM _io_tree)
+                          AND EXISTS (SELECT 1 FROM public.inlet_owner_archive a WHERE a.batch = $1 AND a.action = ''p'' AND a.tbl = %L AND a.col = %L
+                                         AND a.row_data = to_jsonb(t))', r.tbl, r.col, r.tbl, r.col)
+            USING v_batch;
+        GET DIAGNOSTICS v_n = ROW_COUNT;
+        PERFORM set_config('session_replication_role', 'origin', true);
+        IF v_n <> n_want THEN
+            RAISE EXCEPTION 'inlet owner: refused, nothing changed - % row(s) of % hang on a seeded tree, % archived and moved', n_want, r.tbl, v_n USING ERRCODE = '55000';
+        END IF;
+        n_leaf := n_leaf + v_n;
+    END LOOP;
     SELECT n_seeds - coalesce(sum(jsonb_array_length(j.options -> 'seed_sources')), 0) INTO n_seeds
       FROM public.research_jobs j JOIN _io_jobs_new n ON n.id = j.id WHERE jsonb_typeof(j.options -> 'seed_sources') = 'array';
     -- fail closed: no job, prompt or event names private data any more, and every seeded tree carries only its neutral question
@@ -871,12 +1211,34 @@ BEGIN
                  OR pg_temp.io_result(j.result) IS DISTINCT FROM j.result OR pg_temp.io_progress(j.progress) IS DISTINCT FROM j.progress
                  OR (j.options IS NOT NULL AND j.options <> '{}'::jsonb) OR pg_temp.io_tree_report(j.tree_report) IS DISTINCT FROM j.tree_report
                  OR pg_temp.io_metrics(j.metrics) IS DISTINCT FROM j.metrics OR j.inlet_ref IS NOT NULL
-                 OR (j.error IS NOT NULL AND j.error <> 'private-text') OR (j.gap_ref IS NOT NULL AND j.gap_ref <> 'private-text')))
+                 OR (j.error IS NOT NULL AND j.error <> 'private-text') OR (j.gap_ref IS NOT NULL AND j.gap_ref <> 'private:' || j.id::text)
+                 OR j.rooted_step_id IS DISTINCT FROM pg_temp.io_step(coalesce(j.root_job_id, j.id), j.rooted_step_id)))
        OR EXISTS (SELECT 1 FROM public.research_job_events e
                    WHERE (e.root_job_id IN (SELECT root FROM _io_roots) OR e.job_id IN (SELECT id FROM _io_tree))
-                     AND (pg_temp.io_event_payload(e.type, e.step_id, e.payload) IS DISTINCT FROM e.payload OR pg_temp.io_event_trail(e.type, e.trail) IS DISTINCT FROM e.trail)) THEN
+                     AND (pg_temp.io_event_payload(e.type, pg_temp.io_step(e.root_job_id, e.step_id), e.payload) IS DISTINCT FROM e.payload OR pg_temp.io_event_trail(e.type, e.trail) IS DISTINCT FROM e.trail
+                 OR e.step_id IS DISTINCT FROM pg_temp.io_step(e.root_job_id, e.step_id))) THEN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - a research job, prompt or event still names private data after the strip' USING ERRCODE = '55000';
     END IF;
+    -- round 5, fail closed: every steer of a seeded tree is its rebuild and no steer names private data; every session
+    -- tied to a tree is its rebuild; no row hangs on a tree job outside the tree's own tables
+    IF EXISTS (SELECT 1 FROM public.research_steers s JOIN _io_tree t ON t.id = s.child_job_id
+                WHERE s.text IS DISTINCT FROM t.neutral OR s.topic_estimate IS DISTINCT FROM t.neutral OR s.anchor IS DISTINCT FROM t.neutral
+                   OR s.gap IS DISTINCT FROM pg_temp.io_steer_gap(s.steer_kind, s.gap) OR s.caller IS NOT NULL OR s.context_snapshot IS NOT NULL
+                   OR s.step_id IS DISTINCT FROM pg_temp.io_step(t.root, s.step_id))
+       OR EXISTS (SELECT 1 FROM public.research_steers s
+                   WHERE pg_temp.io_hits(s.text || ' ' || s.topic_estimate || ' ' || s.anchor || ' ' || coalesce(s.gap::text, '') || ' '
+                                         || coalesce(s.context_snapshot::text, '') || ' ' || coalesce(s.caller, '')))
+       OR EXISTS (SELECT 1 FROM public.sessions s JOIN _io_tsess x ON x.id = s.id
+                   WHERE s.query_text IS DISTINCT FROM (CASE WHEN s.query_text IS NULL THEN NULL ELSE 'Research session ' || left(s.id::text, 8) END)
+                      OR s.metadata IS DISTINCT FROM pg_temp.io_session_meta(s.metadata)) THEN
+        RAISE EXCEPTION 'inlet owner: refused, nothing changed - a steer or a session of a seeded tree still carries its text after the rebuild' USING ERRCODE = '55000';
+    END IF;
+    FOR r IN SELECT * FROM _io_leaf LOOP
+        EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I IN (SELECT id FROM _io_tree)', r.tbl, r.col) INTO v_n;
+        IF v_n > 0 THEN
+            RAISE EXCEPTION 'inlet owner: refused, nothing changed - % row(s) of % still hang on a seeded tree', v_n, r.tbl USING ERRCODE = '55000';
+        END IF;
+    END LOOP;
 
     IF v_src IS NOT NULL THEN
         SELECT count(*) FILTER (WHERE mail), count(*) FILTER (WHERE NOT mail) INTO n_src_mail, n_src_pod FROM _io_src;
@@ -906,6 +1268,11 @@ BEGIN
         INSERT INTO public.inlet_private_claim_links (claim_id, source_id, owner_sub, batch, row_data)
         SELECT cs.claim_id, cs.source_id, v_owner, v_batch, to_jsonb(cs) FROM public.claim_sources cs
          WHERE cs.source_id = ANY(v_src) AND cs.claim_id IN (SELECT id FROM _io_kept)
+        ON CONFLICT DO NOTHING;
+        -- round 5 (the coordinator, for rw-owner-private-view): a PRIVATE claim's own edges too, keyed by claim and owner
+        INSERT INTO public.inlet_private_claim_sources (claim_id, edge_ref, owner_sub, batch, source_id, parent_claim_id, row_data)
+        SELECT cs.claim_id, md5(to_jsonb(cs)::text), v_owner, v_batch, cs.source_id, cs.parent_claim_id, to_jsonb(cs)
+          FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _io_claims)
         ON CONFLICT DO NOTHING;
         INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
         SELECT v_batch, 'public.claims', '*', 'm', c.id::text, to_jsonb(c) FROM public.claims c WHERE c.id IN (SELECT id FROM _io_kept);
@@ -977,8 +1344,10 @@ BEGIN
 
     -- 5. Gmail ids and URLs out of the shared rows (whole rows archived first; triggers off: nothing else moves)
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
-    SELECT v_batch, 'public.sources', '*', 'm', s.id::text, to_jsonb(s) FROM public.sources s WHERE s.id IN (SELECT id FROM _io_meta_src);
-    GET DIAGNOSTICS n_meta = ROW_COUNT;
+    SELECT v_batch, 'public.sources', '*', 'm', s.id::text, to_jsonb(s) FROM public.sources s WHERE s.id IN (SELECT id FROM _io_meta_src)
+       -- (round 5: one image per row and batch - a source the tree rebuild already archived keeps that, its original)
+       AND NOT EXISTS (SELECT 1 FROM public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'm' AND a.tbl = 'public.sources' AND a.ref = s.id::text);
+    n_meta := (SELECT count(*) FROM _io_meta_src);
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
     SELECT v_batch, 'public.source_chunks', '*', 'm', c.source_id::text, to_jsonb(c)
       FROM public.source_chunks c JOIN _io_meta_chunks x ON x.source_id = c.source_id AND x.idx = c.idx;
@@ -1004,8 +1373,10 @@ BEGIN
     -- 6. the wiki. Withheld: a thought leaf whose thought is not in the shared corpus (private now, or gone); any page
     --    the guard's predicate matches (links a private thought or a moved source); an entity page whose evidence holds
     --    a private thought or a moved source. Archived first (with md5(body), so the same text cannot come back).
+    -- round 5: a page presenting a tree's synthesis whose title (the question) this batch made neutral is withheld too, but
+    -- its text is not kept for the guard (retitle_only): the compile rebuilds it with the neutral title
     CREATE TEMP TABLE _io_pages ON COMMIT DROP AS
-    SELECT w.slug FROM public.wiki_pages w
+    SELECT w.slug, false AS retitle_only FROM public.wiki_pages w
      WHERE (w.slug ~ '^content/thought/[0-9]{1,18}$'
             AND NOT EXISTS (SELECT 1 FROM public.thoughts t WHERE t.id = substr(w.slug, 17)::bigint AND t.user_id IS NULL))
         OR public.inlet_owner_page_links_private(w.slug, w.title, w.body, w.links)
@@ -1016,6 +1387,16 @@ BEGIN
                SELECT a.row_data ->> 'entity_id' FROM public.inlet_owner_archive a
                 WHERE a.batch = v_batch AND a.action = 'c' AND to_regclass(a.tbl) = 'public.source_entities'::regclass));
     ALTER TABLE _io_pages ADD PRIMARY KEY (slug);
+    IF EXISTS (SELECT 1 FROM _io_retitled) THEN
+        INSERT INTO _io_pages (slug, retitle_only)
+        SELECT w.slug, true FROM public.wiki_pages w
+         WHERE (lower(coalesce(w.slug, '') || ' ' || coalesce(w.body, '') || ' ' || coalesce(w.links::text, ''))
+                ~ (SELECT string_agg(id::text, '|') FROM _io_retitled))
+           AND EXISTS (SELECT 1 FROM unnest(public.inlet_owner_linked_source_ids(w.slug, w.title, w.body, w.links)) x
+                        WHERE x IN (SELECT id::text FROM _io_retitled))
+        ON CONFLICT (slug) DO NOTHING;
+        GET DIAGNOSTICS n_retitle = ROW_COUNT;
+    END IF;
     -- [archive-pages]
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, ref_hash, row_data)
     SELECT v_batch, 'public.wiki_pages', 'slug', 'w', w.slug, md5(coalesce(w.body, '')), to_jsonb(w)
@@ -1037,7 +1418,8 @@ BEGIN
     CREATE TEMP TABLE _io_norm ON COMMIT DROP AS
     SELECT a.id AS page_ref, string_to_array(NULLIF(public.inlet_owner_norm(a.row_data ->> 'body'), ''), ' ') AS w,
            md5(public.inlet_owner_norm(a.row_data ->> 'body')) AS whole
-      FROM public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'w';
+      FROM public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'w'
+       AND a.ref NOT IN (SELECT slug FROM _io_pages WHERE retitle_only);
     -- a page of up to 64 words keeps EVERY 8-word window (a one-word change then breaks at most 8 of them); a longer page
     -- keeps every 8th window (aligned chunks: storage stays near one hash per 8 words; the guard reads every window of the
     -- page it judges, so alignment does not matter there)
@@ -1080,6 +1462,8 @@ BEGIN
         n_prompts, n_events, n_meta;
     RAISE NOTICE 'inlet owner: % wiki page(s) withheld (move their vault files out, restart the viewer: the deploy step), their text kept as chunks for the guard (% page(s)); % entit(ies) bumped, % with shared evidence to rebuild from',
         n_pages, n_chunk_pages, n_ents, n_rebuild;
+    RAISE NOTICE 'inlet owner: round 5 - % steer(s), % session(s), % shared source(s) a tree''s filing stamped, % thread row(s) rebuilt; % row(s) that hung on a tree job moved private; % synthesis page(s) withheld for a rebuild; % private claim edge(s) kept for the owner',
+        n_steers, n_sess, n_stamp, n_threads, n_leaf, n_retitle, (SELECT count(*) FROM public.inlet_private_claim_sources WHERE batch = v_batch);
 END $$;
 
 NOTIFY pgrst, 'reload schema';
