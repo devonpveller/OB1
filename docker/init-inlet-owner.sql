@@ -1665,7 +1665,7 @@ BEGIN
         n_prompts, n_events, n_meta;
     RAISE NOTICE 'inlet owner: % wiki page(s) withheld (move their vault files out, restart the viewer: the deploy step), their text kept as chunks for the guard (% page(s)); % entit(ies) bumped, % with shared evidence to rebuild from',
         n_pages, n_chunk_pages, n_ents, n_rebuild;
-    RAISE NOTICE 'inlet owner: round 6 - % shared row(s) carried a seed text and were cut (the content sweep); % row(s) moved to the owner's store (keyed by a seeded job, a moved source or a tied session); % seed text(s) kept for the wiki guard',
+    RAISE NOTICE 'inlet owner: round 6 - % shared row(s) carried a seed text and were cut (the content sweep); % row(s) moved to the owner''s store (keyed by a seeded job, a moved source or a tied session); % seed text(s) kept for the wiki guard',
         n_sweep, (SELECT count(*) FROM public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'p'), (SELECT count(*) FROM _io_qn WHERE length(n) >= 12);
     RAISE NOTICE 'inlet owner: round 5 - % steer(s), % session(s), % shared source(s) a tree''s filing stamped, % thread row(s) rebuilt; % row(s) that hung on a tree job moved private; % synthesis page(s) withheld for a rebuild; % private claim edge(s) kept for the owner',
         n_steers, n_sess, n_stamp, n_threads, n_leaf, n_retitle, (SELECT count(*) FROM public.inlet_private_claim_sources WHERE batch = v_batch);
