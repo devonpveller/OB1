@@ -271,6 +271,14 @@ services:
       # identity (the subject capture_idea files ideas under); update_idea / research_idea / promote_idea refuse
       # any other owner's idea through the owner-checked SQL functions (slot 370). Blank = "operator", as the seam.
       WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
+      # rw-mcp-identity: WORKSPACE_DEFAULT_SUB above is ALSO who the full lane (MCP_ACCESS_KEY) acts as - the
+      # operator's own clients, named in this configuration - and the subject that makes an OWUI user the operator.
+      # The OWUI lane: Open WebUI's native MCP connection with the signed-in user's Authentik token (mcp-identity.ts).
+      # All four or none (none = the lane is off, exactly as before); the JWKS is static (no fetch, no egress).
+      MCP_OWUI_ACCESS_KEY: ${MCP_OWUI_ACCESS_KEY:-}
+      MCP_OWUI_OIDC_ISSUER: ${MCP_OWUI_OIDC_ISSUER:-}
+      MCP_OWUI_OIDC_AUDIENCE: ${MCP_OWUI_OIDC_AUDIENCE:-}
+      MCP_OWUI_OIDC_JWKS: ${MCP_OWUI_OIDC_JWKS:-}
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
     # obnet) talk to it directly. Two lanes by key: MCP_ACCESS_KEY = full
@@ -321,6 +329,15 @@ services:
       DEFAULT_USER_ID: ${DEFAULT_USER_ID}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       PORT: "8000"
+      # rw-mcp-identity: per-user rows. The OWUI lane (Open WebUI's native MCP connection, the signed-in user's
+      # Authentik token): the operator (WORKSPACE_DEFAULT_SUB) keeps DEFAULT_USER_ID's rows, any other user gets
+      # their own. MCP_ACCESS_KEY (held only by openbrain-mcpo-ext, which carries no user) has NO identity here:
+      # the wiki_* reads only. Same four OWUI variables as openbrain-mcp, all or none.
+      WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
+      MCP_OWUI_ACCESS_KEY: ${MCP_OWUI_ACCESS_KEY:-}
+      MCP_OWUI_OIDC_ISSUER: ${MCP_OWUI_OIDC_ISSUER:-}
+      MCP_OWUI_OIDC_AUDIENCE: ${MCP_OWUI_OIDC_AUDIENCE:-}
+      MCP_OWUI_OIDC_JWKS: ${MCP_OWUI_OIDC_JWKS:-}
       # Compiled wiki (read-only) for the wiki_* tools (req 13).
       WIKI_DIR: /wiki/content
       # CORE -> `wiki` PROFILE, at runtime only (sl-ob1-profiles). Deliberately
@@ -336,8 +353,12 @@ services:
     # personal-by-design and have no cloud surface. Reachable internally
     # via openbrain-mcpo-ext for OWUI; cloud is denied entirely (the
     # openbrain-gateway allow-list excludes every extension tool).
+    # rw-mcp-identity: ALSO on ai-stack_llm-net, so Open WebUI's native MCP connection reaches it directly
+    # (http://openbrain-ext:8000/, as openbrain-mcp:8000). llm-net is internal (no route out), and the only
+    # inference on it is llm-gateway behind a LiteLLM key this service does not hold: no egress, no inference path.
     networks:
       - obnet
+      - llm-net
     restart: unless-stopped
 
   # ── Household pantry / meal planner (pantry-meal-planner, item pantry-core) ──

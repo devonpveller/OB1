@@ -190,6 +190,12 @@ export interface AgentMemoryDeps {
   /** Same auth predicate the rest of the server uses (x-brain-key). */
   authed: (c: unknown) => boolean;
   /**
+   * rw-mcp-identity: whose the memory's thought is (thoughts.user_id) - the request's subject (the full lane = the
+   * operator). Returns null when the request has no verified identity: the writeback is then refused, nothing written.
+   * Omitted (a test of the policy alone) = refused as well: there is no default owner.
+   */
+  ownerSub?: () => string | null;
+  /**
    * Similarity floor + recency blend for recall. Omitted in production, where it is read
    * from the environment per call so calibration is a config change and not a redeploy;
    * injected in tests, which must not depend on the ambient environment.
@@ -224,6 +230,10 @@ export async function performWriteback(
   const unsafe = detectUnsafeContent(row.content);
   if (unsafe !== null) {
     return { ok: false, refused: unsafe, message: refusalMessage(unsafe) };
+  }
+  const owner = deps.ownerSub ? deps.ownerSub() : null;
+  if (!owner) {
+    return { ok: false, refused: "invalid", message: "this request carries no verified identity, so it cannot write; nothing was written" };
   }
 
   const client = await deps.pool.connect();
@@ -264,8 +274,8 @@ export async function performWriteback(
       // `exposure` is a COLUMN and it is NOT NULL with no default (DFU C.9 H3, operator
       // 2026-08-31). Omitting it here does not produce an unlabelled row that quietly
       // vanishes from its plane - it produces a not_null_violation, which is the point.
-      `INSERT INTO thoughts (content, embedding, metadata, exposure)
-       VALUES ($1, $2::vector, $3::jsonb, $4::text) RETURNING id`,
+      `INSERT INTO thoughts (content, embedding, metadata, user_id, exposure)
+       VALUES ($1, $2::vector, $3::jsonb, $4::text, $5::text) RETURNING id`,
       [
         row.content,
         `[${embedding.join(",")}]`,
@@ -279,6 +289,7 @@ export async function performWriteback(
           workspace_id: row.workspace_id,
           exposure: row.exposure,
         }),
+        owner,
         row.exposure,
       ],
     );

@@ -126,6 +126,7 @@ function stubDeps(): AgentMemoryDeps & { embedCalls: number; connects: number } 
         },
       };
     },
+    ownerSub: () => "sub-operator", // rw-mcp-identity: the writer's subject
     getEmbedding: () => {
       state.embedCalls++;
       return Promise.resolve([0.1, 0.2]);
@@ -182,6 +183,7 @@ Deno.test("an idempotency_key hit returns the existing memory and does not re-em
           release: () => {},
         }),
     },
+    ownerSub: () => "sub-operator", // rw-mcp-identity: the writer's subject
     getEmbedding: () => { embedCalls++; return Promise.resolve([0.1]); },
     authed: () => true,
   } as unknown as AgentMemoryDeps;
@@ -211,6 +213,7 @@ Deno.test("a fresh write inserts and reports not-duplicate", async () => {
           release: () => {},
         }),
     },
+    ownerSub: () => "sub-operator", // rw-mcp-identity: the writer's subject
     getEmbedding: () => Promise.resolve([0.1, 0.2]),
     authed: () => true,
   } as unknown as AgentMemoryDeps;
@@ -253,6 +256,7 @@ function recallDeps(rows: Array<Record<string, unknown>>) {
           release: () => {},
         }),
     },
+    ownerSub: () => "sub-operator", // rw-mcp-identity: the writer's subject
     getEmbedding: () => Promise.resolve([0.1, 0.2]),
     authed: () => true,
   } as unknown as AgentMemoryDeps;
@@ -287,6 +291,7 @@ Deno.test("SEAM: performWriteback THREADS THE DOOR - not just buildWritebackRow"
           release: () => {},
         }),
     },
+    ownerSub: () => "sub-operator", // rw-mcp-identity: the writer's subject
     getEmbedding: () => Promise.resolve([0.1]),
   } as unknown as AgentMemoryDeps;
 
@@ -324,6 +329,7 @@ Deno.test("SEAM: a tainted write is demoted at the call site too", async () => {
           release: () => {},
         }),
     },
+    ownerSub: () => "sub-operator", // rw-mcp-identity: the writer's subject
     getEmbedding: () => Promise.resolve([0.1]),
   } as unknown as AgentMemoryDeps;
 
@@ -444,8 +450,42 @@ Deno.test("a recall without a query is refused", async () => {
 Deno.test("a pool failure propagates rather than reporting success", async () => {
   const deps = {
     pool: { connect: () => Promise.reject(new Error("pool down")) },
+    ownerSub: () => "sub-operator", // rw-mcp-identity: the writer's subject
     getEmbedding: () => Promise.resolve([0.1]),
     authed: () => true,
   } as unknown as AgentMemoryDeps;
   await assertRejects(() => performWriteback(deps, INPUT), Error, "pool down");
+});
+
+Deno.test("rw-mcp-identity: the memory's thought is stamped with the writer's subject; no subject = refused, nothing written", async () => {
+  const run = async (owner: (() => string | null) | undefined) => {
+    const seen: unknown[][] = [];
+    const deps = {
+      doorExposure: "ops" as Exposure,
+      pool: {
+        connect: () =>
+          Promise.resolve({
+            queryObject: (sql: string, args?: unknown[]) => {
+              seen.push([sql, ...(args ?? [])]);
+              if (sql.includes("INSERT INTO thoughts")) return Promise.resolve({ rows: [{ id: 1 }] });
+              return Promise.resolve({ rows: [{ id: "m-1", thought_id: 1 }] });
+            },
+            release: () => {},
+          }),
+      },
+      ...(owner ? { ownerSub: owner } : {}),
+      getEmbedding: () => Promise.resolve([0.1]),
+    } as unknown as AgentMemoryDeps;
+    return { out: await performWriteback(deps, { ...INPUT, project_id: "p1" }), seen };
+  };
+  const ok = await run(() => "ak-operator-sub");
+  assertEquals(ok.out.ok, true);
+  const thought = ok.seen.find((r) => String(r[0]).includes("INSERT INTO thoughts"))!;
+  assertEquals(/\(content, embedding, metadata, user_id, exposure\)/.test(String(thought[0])), true, "the INSERT names user_id");
+  assertEquals(thought[4], "ak-operator-sub", "the writer's subject reaches thoughts.user_id");
+  for (const owner of [() => null, undefined]) {
+    const r = await run(owner);
+    assertEquals(r.out.ok, false, "no identity = refused");
+    assertEquals(r.seen.length, 0, "refused before any statement");
+  }
 });

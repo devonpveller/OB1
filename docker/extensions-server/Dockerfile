@@ -6,6 +6,8 @@ COPY deno.json ./
 RUN deno install
 
 COPY index.ts ./
+# rw-mcp-identity: who a request acts for (a byte-identical copy of integrations/kubernetes-deployment/mcp-identity.ts)
+COPY mcp-identity.ts ./
 
 USER deno
 

@@ -11,6 +11,14 @@
  *
  * Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD DEFAULT_USER_ID
  *      MCP_ACCESS_KEY PORT
+ *      rw-mcp-identity: WORKSPACE_DEFAULT_SUB, MCP_OWUI_ACCESS_KEY, MCP_OWUI_OIDC_ISSUER / _AUDIENCE / _JWKS
+ *
+ * WHOSE ROWS (rw-mcp-identity, operator 2026-11-04 "per user"): every personal tool acts for the request's
+ * subject (mcp-identity.ts). Open WebUI's native MCP connection (the owui lane) sends the signed-in user's
+ * Authentik token: the operator (WORKSPACE_DEFAULT_SUB) keeps DEFAULT_USER_ID's rows, any other user gets
+ * their own rows (user_id = a UUIDv5 of their subject). The full key (MCP_ACCESS_KEY) is held only by
+ * openbrain-mcpo-ext, which cannot carry a user, so here it has NO identity: the wiki_* reads (the shared
+ * compiled wiki) only, every personal tool and every write refused.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -18,6 +26,8 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { callerStore, extUserId, loadIdentityConfig, NO_IDENTITY_WRITE, resolveCaller, writerSubject } from "./mcp-identity.ts";
 
 const pool = new Pool({
   hostname: Deno.env.get("DB_HOST") || "openbrain-db",
@@ -27,8 +37,19 @@ const pool = new Pool({
   password: Deno.env.get("DB_PASSWORD")!,
 }, 10);
 
-const USER_ID = Deno.env.get("DEFAULT_USER_ID")!;
+const DEFAULT_USER_ID = Deno.env.get("DEFAULT_USER_ID")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
+// rw-mcp-identity: the lanes (mcp-identity.ts); a half-configured owui lane stops the server here
+const IDENTITY = loadIdentityConfig((k) => Deno.env.get(k));
+for (const w of IDENTITY.warnings) console.error(`[open-brain-extensions] ${w}`);
+// the request's row owner (user_id), set by the identity middleware for a request with a verified subject
+const extUserStore = new AsyncLocalStorage<string>();
+/** The row owner of the request being served; throws the refusal when it has no verified identity. */
+function uid(): string {
+  const u = extUserStore.getStore();
+  if (!u) throw new Error(NO_IDENTITY_WRITE.replace("cannot write", "has no rows of its own here"));
+  return u;
+}
 
 // Compiled wiki (read-only). Markdown pages + graph.json live on a
 // shared volume written by the openbrain-wiki compiler service.
@@ -36,8 +57,8 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const WIKI_DIR = Deno.env.get("WIKI_DIR") || "/wiki/content";
 const WIKI_RECOMPILE_URL = Deno.env.get("WIKI_RECOMPILE_URL") || "";
 
-if (!/^[0-9a-f-]{36}$/i.test(USER_ID)) {
-  console.error("DEFAULT_USER_ID is not a valid UUID:", USER_ID);
+if (!/^[0-9a-f-]{36}$/i.test(DEFAULT_USER_ID)) {
+  console.error("DEFAULT_USER_ID is not a valid UUID:", DEFAULT_USER_ID);
 }
 
 // deno-lint-ignore no-explicit-any
@@ -110,7 +131,7 @@ async function updateById(
   let sql =
     `UPDATE ${table} SET ${set} WHERE id = $${keys.length + 1}`;
   if (opts.scopeUser !== false) {
-    vals.push(USER_ID);
+    vals.push(uid());
     sql += ` AND user_id = $${keys.length + 2}`;
   }
   const rows = await q(`${sql} RETURNING *`, vals);
@@ -118,7 +139,17 @@ async function updateById(
   return rows[0];
 }
 
-const server = new McpServer({ name: "open-brain-extensions", version: "1.0.0" });
+// rw-mcp-identity: one McpServer PER REQUEST, replayed from these recorded registrations (a shared server connected to
+// each request's transport keeps only the last transport, so a response could reach another user's connection).
+const REGISTRY: unknown[][] = [];
+const server = {
+  tool: ((...args: unknown[]) => { REGISTRY.push(args); return undefined as never; }) as McpServer["tool"],
+};
+function buildServer(): McpServer {
+  const s = new McpServer({ name: "open-brain-extensions", version: "1.0.0" });
+  for (const a of REGISTRY) (s.tool as unknown as (...x: unknown[]) => unknown)(...a);
+  return s;
+}
 
 /* ===========================================================================
  * Extension 1: Household Knowledge Base
@@ -141,7 +172,7 @@ server.tool(
         try { detailsVal = JSON.parse(details); } catch { detailsVal = { raw: details }; }
       }
       const item = await insertRow("household_items", {
-        user_id: USER_ID,
+        user_id: uid(),
         name,
         category: category ?? null,
         location: location ?? null,
@@ -164,7 +195,7 @@ server.tool(
   async ({ query, category, location }) => {
     try {
       const cond = ["user_id = $1"];
-      const params: unknown[] = [USER_ID];
+      const params: unknown[] = [uid()];
       if (category) { params.push(`%${category}%`); cond.push(`category ILIKE $${params.length}`); }
       if (location) { params.push(`%${location}%`); cond.push(`location ILIKE $${params.length}`); }
       if (query) {
@@ -189,7 +220,7 @@ server.tool(
     try {
       const rows = await q(
         `SELECT * FROM household_items WHERE id = $1 AND user_id = $2`,
-        [item_id, USER_ID],
+        [item_id, uid()],
       );
       if (!rows[0]) throw new Error("Item not found or access denied");
       return ok({ success: true, item: rows[0] });
@@ -213,7 +244,7 @@ server.tool(
   async (a) => {
     try {
       const vendor = await insertRow("household_vendors", {
-        user_id: USER_ID,
+        user_id: uid(),
         name: a.name,
         service_type: a.service_type ?? null,
         phone: a.phone ?? null,
@@ -234,7 +265,7 @@ server.tool(
   { service_type: z.string().optional().describe("Filter by service type") },
   async ({ service_type }) => {
     try {
-      const params: unknown[] = [USER_ID];
+      const params: unknown[] = [uid()];
       let sql = `SELECT * FROM household_vendors WHERE user_id = $1`;
       if (service_type) { params.push(`%${service_type}%`); sql += ` AND service_type ILIKE $2`; }
       sql += ` ORDER BY name ASC`;
@@ -262,7 +293,7 @@ server.tool(
   async (a) => {
     try {
       const task = await insertRow("maintenance_tasks", {
-        user_id: USER_ID,
+        user_id: uid(),
         name: a.name,
         category: a.category ?? null,
         frequency_days: a.frequency_days ?? null,
@@ -290,7 +321,7 @@ server.tool(
     try {
       const log = await insertRow("maintenance_logs", {
         task_id: a.task_id,
-        user_id: USER_ID,
+        user_id: uid(),
         completed_at: a.completed_at ?? new Date().toISOString(),
         performed_by: a.performed_by ?? null,
         cost: a.cost ?? null,
@@ -315,7 +346,7 @@ server.tool(
          WHERE user_id = $1 AND next_due IS NOT NULL
            AND next_due <= now() + ($2 || ' days')::interval
          ORDER BY next_due ASC`,
-        [USER_ID, String(days_ahead)],
+        [uid(), String(days_ahead)],
       );
       return ok({ success: true, days_ahead, count: tasks.length, tasks });
     } catch (e) { return fail(e); }
@@ -334,7 +365,7 @@ server.tool(
   async (a) => {
     try {
       const cond = ["l.user_id = $1"];
-      const params: unknown[] = [USER_ID];
+      const params: unknown[] = [uid()];
       if (a.task_name) { params.push(`%${a.task_name}%`); cond.push(`t.name ILIKE $${params.length}`); }
       if (a.category) { params.push(`%${a.category}%`); cond.push(`t.category ILIKE $${params.length}`); }
       if (a.date_from) { params.push(a.date_from); cond.push(`l.completed_at >= $${params.length}`); }
@@ -371,7 +402,7 @@ server.tool(
   async (a) => {
     try {
       const row = await insertRow("family_members", {
-        user_id: USER_ID,
+        user_id: uid(),
         name: a.name,
         relationship: a.relationship ?? null,
         birth_date: a.birth_date ?? null,
@@ -400,7 +431,7 @@ server.tool(
   async (a) => {
     try {
       const row = await insertRow("activities", {
-        user_id: USER_ID,
+        user_id: uid(),
         family_member_id: a.family_member_id ?? null,
         title: a.title,
         activity_type: a.activity_type ?? null,
@@ -429,7 +460,7 @@ server.tool(
       const weekEnd = new Date(a.week_start);
       weekEnd.setDate(weekEnd.getDate() + 7);
       const weekEndStr = weekEnd.toISOString().split("T")[0];
-      const params: unknown[] = [USER_ID, weekEndStr, a.week_start];
+      const params: unknown[] = [uid(), weekEndStr, a.week_start];
       let sql =
         `SELECT act.*, ${FM_JOIN}
          FROM activities act
@@ -458,7 +489,7 @@ server.tool(
   async (a) => {
     try {
       const cond = ["act.user_id = $1"];
-      const params: unknown[] = [USER_ID];
+      const params: unknown[] = [uid()];
       if (a.query) { params.push(`%${a.query}%`); cond.push(`act.title ILIKE $${params.length}`); }
       if (a.activity_type) { params.push(a.activity_type); cond.push(`act.activity_type = $${params.length}`); }
       if (a.family_member_id) { params.push(a.family_member_id); cond.push(`act.family_member_id = $${params.length}`); }
@@ -489,7 +520,7 @@ server.tool(
   async (a) => {
     try {
       const row = await insertRow("important_dates", {
-        user_id: USER_ID,
+        user_id: uid(),
         family_member_id: a.family_member_id ?? null,
         title: a.title,
         date_value: a.date_value,
@@ -516,7 +547,7 @@ server.tool(
            AND idt.date_value >= CURRENT_DATE
            AND idt.date_value <= CURRENT_DATE + ($2 || ' days')::interval
          ORDER BY idt.date_value`,
-        [USER_ID, String(days_ahead)],
+        [uid(), String(days_ahead)],
       );
       return ok(rows);
     } catch (e) { return fail(e); }
@@ -546,7 +577,7 @@ server.tool(
   async (a) => {
     try {
       const row = await insertRow("recipes", {
-        user_id: USER_ID,
+        user_id: uid(),
         name: a.name,
         cuisine: a.cuisine ?? null,
         prep_time_minutes: a.prep_time_minutes ?? null,
@@ -576,7 +607,7 @@ server.tool(
   async (a) => {
     try {
       const cond = ["user_id = $1"];
-      const params: unknown[] = [USER_ID];
+      const params: unknown[] = [uid()];
       if (a.query) { params.push(`%${a.query}%`); cond.push(`name ILIKE $${params.length}`); }
       if (a.cuisine) { params.push(a.cuisine); cond.push(`cuisine = $${params.length}`); }
       if (a.tag) { params.push([a.tag]); cond.push(`tags @> $${params.length}::text[]`); }
@@ -644,7 +675,7 @@ server.tool(
       const out: Row[] = [];
       for (const m of a.meals) {
         out.push(await insertRow("meal_plans", {
-          user_id: USER_ID,
+          user_id: uid(),
           week_start: a.week_start,
           day_of_week: m.day_of_week,
           meal_type: m.meal_type,
@@ -675,7 +706,7 @@ server.tool(
          LEFT JOIN recipes r ON r.id = mp.recipe_id
          WHERE mp.user_id = $1 AND mp.week_start = $2
          ORDER BY mp.day_of_week, mp.meal_type`,
-        [USER_ID, week_start],
+        [uid(), week_start],
       );
       return ok(rows);
     } catch (e) { return fail(e); }
@@ -693,7 +724,7 @@ server.tool(
          FROM meal_plans mp
          JOIN recipes r ON r.id = mp.recipe_id
          WHERE mp.user_id = $1 AND mp.week_start = $2`,
-        [USER_ID, week_start],
+        [uid(), week_start],
       );
       const itemsMap = new Map<string, Row>();
       for (const m of meals) {
@@ -713,7 +744,7 @@ server.tool(
       const items = Array.from(itemsMap.values());
       const existing = (await q(
         `SELECT id FROM shopping_lists WHERE user_id = $1 AND week_start = $2`,
-        [USER_ID, week_start],
+        [uid(), week_start],
       ))[0];
       let result: Row;
       if (existing) {
@@ -722,7 +753,7 @@ server.tool(
         }, { casts: { items: "jsonb" }, scopeUser: false });
       } else {
         result = await insertRow("shopping_lists", {
-          user_id: USER_ID, week_start, items,
+          user_id: uid(), week_start, items,
         }, { items: "jsonb" });
       }
       return ok(result);
@@ -751,7 +782,7 @@ server.tool(
   async (a) => {
     try {
       const contact = await insertRow("professional_contacts", {
-        user_id: USER_ID,
+        user_id: uid(),
         name: a.name,
         company: a.company ?? null,
         title: a.title ?? null,
@@ -777,7 +808,7 @@ server.tool(
   async ({ query, tags }) => {
     try {
       const cond = ["user_id = $1"];
-      const params: unknown[] = [USER_ID];
+      const params: unknown[] = [uid()];
       if (query) {
         params.push(`%${query}%`);
         const p = `$${params.length}`;
@@ -807,7 +838,7 @@ server.tool(
   async (a) => {
     try {
       const interaction = await insertRow("contact_interactions", {
-        user_id: USER_ID,
+        user_id: uid(),
         contact_id: a.contact_id,
         interaction_type: a.interaction_type,
         occurred_at: a.occurred_at ?? new Date().toISOString(),
@@ -828,16 +859,16 @@ server.tool(
     try {
       const contact = (await q(
         `SELECT * FROM professional_contacts WHERE id = $1 AND user_id = $2`,
-        [contact_id, USER_ID],
+        [contact_id, uid()],
       ))[0];
       if (!contact) throw new Error("Contact not found or access denied");
       const interactions = await q(
         `SELECT * FROM contact_interactions WHERE contact_id = $1 AND user_id = $2 ORDER BY occurred_at DESC`,
-        [contact_id, USER_ID],
+        [contact_id, uid()],
       );
       const opportunities = await q(
         `SELECT * FROM opportunities WHERE contact_id = $1 AND user_id = $2 ORDER BY created_at DESC`,
-        [contact_id, USER_ID],
+        [contact_id, uid()],
       );
       return ok({ success: true, contact, interactions, opportunities, interaction_count: interactions.length });
     } catch (e) { return fail(e); }
@@ -859,7 +890,7 @@ server.tool(
   async (a) => {
     try {
       const opportunity = await insertRow("opportunities", {
-        user_id: USER_ID,
+        user_id: uid(),
         contact_id: a.contact_id ?? null,
         title: a.title,
         description: a.description ?? null,
@@ -885,7 +916,7 @@ server.tool(
          WHERE user_id = $1 AND follow_up_date IS NOT NULL
            AND follow_up_date <= (CURRENT_DATE + ($2 || ' days')::interval)
          ORDER BY follow_up_date ASC`,
-        [USER_ID, String(days_ahead)],
+        [uid(), String(days_ahead)],
       );
       const overdue = data.filter((c) => String(c.follow_up_date) < today);
       const upcoming = data.filter((c) => String(c.follow_up_date) >= today);
@@ -940,11 +971,15 @@ server.tool(
   },
   async ({ thought_id, contact_id }) => {
     try {
-      const thought = (await q(`SELECT * FROM thoughts WHERE id = $1`, [thought_id]))[0];
+      // rw-inlet-owner / rw-mcp-identity: a shared thought or the caller's own, never another user's
+      const thought = (await q(
+        `SELECT * FROM thoughts WHERE id = $1 AND (user_id IS NULL OR user_id = $2)`,
+        [thought_id, writerSubject()],
+      ))[0];
       if (!thought) throw new Error("Thought not found or access denied");
       const contact = (await q(
         `SELECT * FROM professional_contacts WHERE id = $1 AND user_id = $2`,
-        [contact_id, USER_ID],
+        [contact_id, uid()],
       ))[0];
       if (!contact) throw new Error("Contact not found or access denied");
       const linkNote =
@@ -987,7 +1022,7 @@ server.tool(
   async (a) => {
     try {
       const company = await insertRow("companies", {
-        user_id: USER_ID,
+        user_id: uid(),
         name: a.name,
         industry: a.industry ?? null,
         website: a.website ?? null,
@@ -1022,7 +1057,7 @@ server.tool(
   async (a) => {
     try {
       const job_posting = await insertRow("job_postings", {
-        user_id: USER_ID,
+        user_id: uid(),
         company_id: a.company_id,
         title: a.title,
         url: a.url ?? null,
@@ -1058,7 +1093,7 @@ server.tool(
   async (a) => {
     try {
       const inserted = await insertRow("job_contacts", {
-        user_id: USER_ID,
+        user_id: uid(),
         company_id: a.company_id ?? null,
         name: a.name,
         title: a.title ?? null,
@@ -1095,7 +1130,7 @@ server.tool(
   async (a) => {
     try {
       const application = await insertRow("applications", {
-        user_id: USER_ID,
+        user_id: uid(),
         job_posting_id: a.job_posting_id,
         status: a.status ?? "applied",
         applied_date: a.applied_date ?? null,
@@ -1124,7 +1159,7 @@ server.tool(
   async (a) => {
     try {
       const interview = await insertRow("interviews", {
-        user_id: USER_ID,
+        user_id: uid(),
         application_id: a.application_id,
         interview_type: a.interview_type,
         scheduled_at: a.scheduled_at ?? null,
@@ -1180,11 +1215,11 @@ server.tool(
     try {
       const apps = await q(
         `SELECT status FROM applications WHERE user_id = $1`,
-        [USER_ID],
+        [uid()],
       );
       const status_breakdown: Record<string, number> = {};
       for (const r of apps) status_breakdown[r.status] = (status_breakdown[r.status] || 0) + 1;
-      const upcoming = await q(INTERVIEW_NESTED, [USER_ID, String(days_ahead)]);
+      const upcoming = await q(INTERVIEW_NESTED, [uid(), String(days_ahead)]);
       return ok({
         success: true,
         total_applications: apps.length,
@@ -1202,7 +1237,7 @@ server.tool(
   { days_ahead: z.number().optional().describe("Number of days to look ahead (default: 14)") },
   async ({ days_ahead = 14 }) => {
     try {
-      const interviews = await q(INTERVIEW_NESTED, [USER_ID, String(days_ahead)]);
+      const interviews = await q(INTERVIEW_NESTED, [uid(), String(days_ahead)]);
       return ok({ success: true, count: interviews.length, interviews });
     } catch (e) { return fail(e); }
   },
@@ -1220,7 +1255,7 @@ server.tool(
   async (a) => {
     try {
       const cond = ["jc.user_id = $1"];
-      const params: unknown[] = [USER_ID];
+      const params: unknown[] = [uid()];
       const term = a.query?.trim();
       if (term) {
         params.push(`%${term}%`);
@@ -1252,7 +1287,7 @@ server.tool(
     try {
       const jc = (await q(
         `SELECT * FROM job_contacts WHERE id = $1 AND user_id = $2`,
-        [job_contact_id, USER_ID],
+        [job_contact_id, uid()],
       ))[0];
       if (!jc) throw new Error("Job contact not found or access denied");
       if (jc.professional_crm_contact_id) {
@@ -1269,7 +1304,7 @@ server.tool(
         companyName = co?.name ?? null;
       }
       const professional_contact = await insertRow("professional_contacts", {
-        user_id: USER_ID,
+        user_id: uid(),
         name: jc.name,
         company: companyName,
         title: jc.title,
@@ -1504,6 +1539,7 @@ server.tool(
   {},
   async () => {
     try {
+      writerSubject(); // rw-mcp-identity: an action, so a verified user only
       if (!WIKI_RECOMPILE_URL) {
         throw new Error("WIKI_RECOMPILE_URL not configured; recompile runs on schedule only.");
       }
@@ -1536,12 +1572,16 @@ const app = new Hono();
 app.options("*", (c) => c.text("ok", 200, corsHeaders));
 
 app.all("*", async (c) => {
-  const provided = c.req.header("x-brain-key") ||
-    c.req.header("x-access-key") ||
-    new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
-    return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
-  }
+  // rw-mcp-identity: the lane by key, forged user headers 403, a bad user token 401 (mcp-identity.ts)
+  const names: string[] = [];
+  for (const [n] of c.req.raw.headers) names.push(n);
+  const provided = c.req.header("x-brain-key") || c.req.header("x-access-key") || new URL(c.req.url).searchParams.get("key");
+  const r = await resolveCaller((n) => (n === "x-brain-key" ? provided ?? undefined : c.req.header(n)), names.filter((n) => n !== "x-access-key"), null, IDENTITY);
+  if (!r.ok) return c.json({ error: r.error }, r.status, corsHeaders);
+  if (r.caller.lane === "personal") return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
+  // the full key's one holder here is openbrain-mcpo-ext (no user): no identity on this server
+  const caller = r.caller.lane === "full" ? { ...r.caller, subject: null, via: "none" as const, operator: false } : r.caller;
+  const rowOwner = caller.subject ? await extUserId(caller.subject, IDENTITY.operatorSub, DEFAULT_USER_ID) : undefined;
 
   if (!c.req.header("accept")?.includes("text/event-stream")) {
     const headers = new Headers(c.req.raw.headers);
@@ -1556,9 +1596,14 @@ app.all("*", async (c) => {
     Object.defineProperty(c.req, "raw", { value: patched, writable: true });
   }
 
-  const transport = new StreamableHTTPTransport();
-  await server.connect(transport);
-  return transport.handleRequest(c);
+  return await callerStore.run(caller, () => {
+    const inner = async () => {
+      const transport = new StreamableHTTPTransport();
+      await buildServer().connect(transport);
+      return transport.handleRequest(c);
+    };
+    return rowOwner ? extUserStore.run(rowOwner, inner) : inner();
+  });
 });
 
 Deno.serve({ port: parseInt(Deno.env.get("PORT") || "8000", 10) }, app.fetch);
