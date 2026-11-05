@@ -94,6 +94,21 @@ for (const [who, tok] of [["anon", undefined], ["door wiki A", wikiA]] as const)
   await u(`${who}: A mcp (no connection) -> names gmail-b (B's)`, thought({ user_id: A }, { source: "mcp" }), { metadata: { exposure: "ops", source: "mcp", inlet_connection: "gmail-b" } }, tok);
   await u(`${who}: A mcp (no connection) -> metadata only (control)`, thought({ user_id: A }, { source: "mcp" }), { metadata: { exposure: "ops", source: "mcp", topics: ["x"] } }, tok);
 }
+// round 3 (tester attempt 2, F8): the dossier exemption only for a CLEAN dossier, and only on the compile's path
+await w("F8 import token for A: an unowned dossier-shaped row", "thoughts", thought({}, DOSSIER), importA);
+await w("F8 anon: an unowned dossier carrying source gmail + gmail_id", "thoughts", thought({}, { ...DOSSIER, source: "gmail", gmail_id: `f8-${TAG}` }));
+await w("F8 anon: an unowned dossier with a nested gmailId", "thoughts", thought({}, { ...DOSSIER, wiki_entity_name: { gmailId: "x" } }));
+await w("F8 anon: an unowned dossier with a Gmail URL in its text", "thoughts", { ...thought({}, DOSSIER), content: `dossier https://mail.google.com/mail/u/0/#inbox/${TAG}` });
+await w("F8 door wiki A: a clean dossier (control)", "thoughts", thought({}, DOSSIER), wikiA);
+await w("F8 anon: a clean dossier (control)", "thoughts", thought({}, DOSSIER));
+for (const [who, tok] of [["anon", undefined], ["door wiki A", wikiA]] as const) {
+  await u(`${who}: F8 dossier -> still a dossier + source gmail + gmail_id`, thought({}, DOSSIER), { metadata: { exposure: "ops", ...DOSSIER, source: "gmail", gmail_id: `f8u-${TAG}` } }, tok);
+  await u(`${who}: F8 dossier -> still a dossier + a nested Gmail_Thread_Id`, thought({}, DOSSIER), { metadata: { exposure: "ops", ...DOSSIER, x: { Gmail_Thread_Id: "t" } } }, tok);
+  await u(`${who}: F8 dossier -> still a dossier + a Gmail URL in its text`, thought({}, DOSSIER), { content: "see https://mail.google.com/x" }, tok);
+  // round 3 (low): a gmail row may not change its source and drop its connection in one write
+  await u(`${who}: A gmail/gmail -> source Gmail + connection dropped`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { metadata: { exposure: "ops", source: "Gmail", gmail_id: "x" } }, tok);
+  await u(`${who}: A gmail/gmail -> source mcp + connection dropped`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { metadata: { exposure: "ops", source: "mcp" } }, tok);
+}
 // a door caller with subject A may not write a row owned by B that names no connection, even by UPDATE from a dossier
 await u("door wiki A: dossier -> B with no connection", thought({}, DOSSIER), { user_id: B, metadata: { exposure: "ops", source: "mcp" } }, wikiA);
 // the wiki note mirror's shape (wiki-service.mjs)

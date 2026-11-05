@@ -11,6 +11,8 @@ BEGIN;
 SET LOCAL lock_timeout = '10s';
 DROP TRIGGER IF EXISTS trg_inlet_stamp_thoughts ON public.thoughts;
 DROP TRIGGER IF EXISTS trg_inlet_stamp_sources ON public.sources;
+DROP TRIGGER IF EXISTS trg_inlet_stamp_chunks ON public.source_chunks;
+DROP TRIGGER IF EXISTS trg_inlet_stamp_claims ON public.claims;
 DO $$
 DECLARE c TEXT;
 BEGIN
@@ -27,6 +29,10 @@ DROP FUNCTION IF EXISTS public.inlet_stamp_thoughts_guard();
 DROP FUNCTION IF EXISTS public.inlet_stamp_sources_guard();
 DROP FUNCTION IF EXISTS public.inlet_stamp_source_personal(TEXT, TEXT, JSONB, TEXT);
 DROP FUNCTION IF EXISTS public.inlet_stamp_source_personal(TEXT, TEXT, JSONB);
+DROP FUNCTION IF EXISTS public.inlet_stamp_chunks_guard();
+DROP FUNCTION IF EXISTS public.inlet_stamp_claims_guard();
+DROP FUNCTION IF EXISTS public.inlet_stamp_text_personal(TEXT);
+DROP FUNCTION IF EXISTS public.inlet_stamp_dossier_clean(JSONB, TEXT);
 DROP FUNCTION IF EXISTS public.inlet_stamp_is_dossier(JSONB);
 DROP FUNCTION IF EXISTS public.inlet_stamp_door_claims();
 DROP FUNCTION IF EXISTS public.inlet_connection_owner(TEXT);

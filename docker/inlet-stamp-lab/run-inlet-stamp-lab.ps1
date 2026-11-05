@@ -333,12 +333,17 @@ try {
   # no escape hatch (coordinator, 2026-11-05): a superuser is refused too, with or without a setting; the guard path
   # reads no setting and no role
   $mx = { param($pre) $o = Dk exec $db psql -U postgres -d openbrain -X -A -t -c "$pre INSERT INTO thoughts (content, metadata, exposure) VALUES ('escape probe $mode$rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops') RETURNING 'landed'"; @{ rc = $script:rc; refused = ($o -match 'inlet stamp'); out = $o } }
+  # round 3 (low): a source chunk or a claim carrying a Gmail URL (440's fail-closed text check) is refused
+  $srcId = Q "SELECT id FROM public.sources WHERE url LIKE 'https://example.org/%/article' ORDER BY created_at DESC LIMIT 1"
+  $chk = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "INSERT INTO source_chunks (source_id, idx, content) VALUES ('$srcId', 9999, 'see https://mail.google.com/mail/u/0/#inbox/x')"
+  $clm = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "INSERT INTO claims (text) VALUES ('a claim citing https://MAIL.google.com/mail/u/0/#inbox/y')"
+  $chkOk = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "INSERT INTO source_chunks (source_id, idx, content) VALUES ('$srcId', 9998, 'an ordinary chunk') RETURNING 'landed'"
   $su0 = & $mx ''
   $su1 = & $mx "SET inlet_stamp.allow_unowned = 'on';"
   $su2 = & $mx "SET session_replication_role = replica;"   # what 440's init / revert do for parts of themselves
-  $alwaysOn = Q "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A'"
+  $alwaysOn = Q "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources', 'trg_inlet_stamp_chunks', 'trg_inlet_stamp_claims') AND tgenabled = 'A'"
   $null = Q "DELETE FROM public.thoughts WHERE content LIKE 'escape probe%'"
-  $guardDefs = Q "SELECT string_agg(pg_get_functiondef(p.oid), ' ') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('inlet_stamp_thoughts_guard', 'inlet_stamp_sources_guard', 'inlet_stamp_is_dossier', 'inlet_stamp_source_personal', 'inlet_subject_ok', 'inlet_owner_column_ok', 'inlet_stamp_door_claims')"
+  $guardDefs = Q "SELECT string_agg(pg_get_functiondef(p.oid), ' ') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('inlet_stamp_thoughts_guard', 'inlet_stamp_sources_guard', 'inlet_stamp_is_dossier', 'inlet_stamp_dossier_clean', 'inlet_stamp_source_personal', 'inlet_stamp_text_personal', 'inlet_stamp_chunks_guard', 'inlet_stamp_claims_guard', 'inlet_subject_ok', 'inlet_stamp_door_claims')"
   $sqlText = if (Test-Path (Join-Path $dockerDir 'init-inlet-stamp.sql')) { [IO.File]::ReadAllText((Join-Path $dockerDir 'init-inlet-stamp.sql')) } else { '' }
   # the one setting the guard path reads is PostgREST's verified token (the caller's identity, read to refuse more)
   $escRx = "current_setting\s*\(\s*'(?!request\.jwt\.claims')|session_user|current_user|rolsuper|pg_has_role|allow_unowned|session_replication_role"
@@ -370,9 +375,11 @@ UPDATE thoughts SET metadata = jsonb_build_object('exposure', 'ops', 'source', '
       'pull shape, the literal operator', 'pull shape, a service principal', 'pull shape, blank owner', 'import shape, no owner', 'note shape, no owner',
       'note shape, B on the vault', 'dossier look-alike, unowned', 'source, an email body', 'source, a podcast transcript', 'source, a Gmail id',
       'source, a nested Gmail id', 'source, a Gmail_Id key', 'source, a Gmail URL in metadata', 'source, a Gmail URL in content',
-      'episode, the literal operator', 'episode, a service principal', "import token for A, a row with B's user_id", "import token for A, a row naming B's connection")
+      'episode, the literal operator', 'episode, a service principal', 'F8 import token for A: an unowned dossier-shaped row',
+      'F8 anon: an unowned dossier carrying source gmail + gmail_id', 'F8 anon: an unowned dossier with a nested gmailId', 'F8 anon: an unowned dossier with a Gmail URL in its text',
+      "import token for A, a row with B's user_id", "import token for A, a row naming B's connection")
     $okCases = @('pull shape, owned right (control)', 'import shape, owned (control)', 'note shape, the vault''s owner (control)', 'dossier, unowned (control)',
-      'source, a public article (control)', 'episode, A (control)', "import token for A, A's own row (control)")
+      'source, a public article (control)', 'episode, A (control)', 'F8 door wiki A: a clean dossier (control)', 'F8 anon: a clean dossier (control)', "import token for A, A's own row (control)")
     $refusedOk = @($refusedCases | Where-Object { $wr.$_.status -ge 400 -and $wr.$_.refused }).Count
     $acceptedBad = @($refusedCases | Where-Object { $wr.$_.status -lt 300 }).Count
     $controlsOk = @($okCases | Where-Object { $wr.$_.status -ge 200 -and $wr.$_.status -lt 300 }).Count
@@ -387,7 +394,7 @@ UPDATE thoughts SET metadata = jsonb_build_object('exposure', 'ops', 'source', '
       Check ($controlsOk -eq $okCases.Count) "PostgREST: the correctly owned controls land, and the compile's dossier stays shared ($controlsOk of $($okCases.Count))"
       Check ($m1.refused -and $m1.rc -ne 0 -and $m2.refused -and $m2.rc -ne 0) 'direct PG as ob_app_memory: an unstamped MCP-shaped capture_thought and agent-memory insert is refused (rw-mcp-identity must stamp them before 470 goes live)'
       Check ($clrRefused -and $chgRefused) 'an app role can neither clear nor change an owner'
-      Check ($su0.refused -and $su1.refused -and $su2.refused -and "$($su0.out)$($su1.out)$($su2.out)" -notmatch 'landed' -and $alwaysOn -eq '2') "no escape hatch: a superuser's unowned personal insert is refused too - with a setting, and under session_replication_role = replica (both guards are ALWAYS triggers: $alwaysOn)"
+      Check ($su0.refused -and $su1.refused -and $su2.refused -and "$($su0.out)$($su1.out)$($su2.out)" -notmatch 'landed' -and $alwaysOn -eq '4') "no escape hatch: a superuser's unowned personal insert is refused too - with a setting, and under session_replication_role = replica (all four guards are ALWAYS triggers: $alwaysOn)"
       # the dossier -> unowned gmail naming gmail and the dossier -> B naming gmail (A's connection) are refused; giving the
       # dossier an owner with no connection (B: direct PG has no verified subject) and then any metadata lands - it is an
       # OWNED row, never an unowned personal one and never owned against a connection
@@ -424,6 +431,7 @@ SELECT count(*) FILTER (WHERE (($($m1.Groups[1].Value)) OR ($($m2.Groups[1].Valu
       $drift = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -f /tmp/f2-drift.sql)".Trim()
       Save 'f2-drift.txt' "440 move scope: $($m1.Groups[1].Value)`n440 strip check: $($m2.Groups[1].Value)`nselected by 440 | by 440 but not by 470 | by 470: $drift"
       Check ($m1.Success -and $m2.Success -and $drift -eq '8|0|10') "F2: 470's personal-source predicate selects every candidate 440's own predicates select (read from init-inlet-owner.sql), plus a nested and a case-variant Gmail id ($drift = 440 | 440-not-470 | 470)"
+      Check ($chk -match 'inlet stamp' -and $clm -match 'inlet stamp' -and $chkOk -match 'landed') "round 3 (low): a source chunk and a claim carrying a Gmail URL are refused (440's fail-closed text check); an ordinary chunk lands"
       Check ($escInDb -eq 0 -and $escInFile -eq 0 -and $guardDefs.Length -gt 500) "no setting- or role-based escape in the guard path: the guards' definitions read no setting and no role ($escInDb), slot 470's file switches off nothing ($escInFile)"
       $rec = $pj.record
       Check ($rec.table_read_status -ge 400 -and -not $rec.table_read_gave_rows) "the owner record is not readable through PostgREST ($($rec.table_read_status))"

@@ -56,7 +56,7 @@ BEGIN
         RAISE EXCEPTION 'inlet stamp: slot 440 (init-inlet-owner.sql) must be applied first' USING ERRCODE = '55000';
     END IF;
 END $$;
-LOCK TABLE public.thoughts, public.sources IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE public.thoughts, public.sources, public.source_chunks, public.claims IN SHARE ROW EXCLUSIVE MODE;
 
 -- ── 2. what an owner may be ───────────────────────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.inlet_subject_ok(p_subject TEXT) RETURNS BOOLEAN
@@ -213,6 +213,23 @@ $$;
 REVOKE ALL ON FUNCTION public.inlet_stamp_door_claims() FROM PUBLIC;
 
 -- SECURITY DEFINER: the record is readable by no app role, and the helpers it calls need no grant to the writer
+-- Round 3 (tester attempt 2, F8): the unowned dossier must be CLEAN - no `source` key (a dossier is compiled output, it
+-- names no inlet), no inlet connection, no Gmail id key at any depth or case (gmail_id, gmailId, gmail_thread_id,
+-- gmail_message_id, gmail_labels, ...), no Gmail URL in its metadata or its text. Matched on the stored text of the
+-- metadata so depth and key case are covered.
+CREATE OR REPLACE FUNCTION public.inlet_stamp_dossier_clean(p_meta JSONB, p_content TEXT) RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT public.inlet_stamp_is_dossier(p_meta)
+       AND NOT (p_meta ? 'source')
+       AND coalesce(p_meta::text, '') !~* '"inlet_connection"\s*:'
+       AND coalesce(p_meta::text, '') !~* '"gmail_?[a-z_]*"\s*:'
+       AND coalesce(p_meta::text, '') !~* 'mail\.google\.com'
+       AND coalesce(p_content, '') !~* 'mail\.google\.com'
+$$;
+REVOKE ALL ON FUNCTION public.inlet_stamp_dossier_clean(JSONB, TEXT) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.inlet_stamp_thoughts_guard() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp
@@ -220,14 +237,17 @@ AS $$
 -- Round 2 (tester attempt 1, F1): the NEW row is judged IN FULL on every INSERT and UPDATE, whatever the statement
 -- changed - an UPDATE is a write like any other. The rules, in order:
 --   1. an owner is never cleared or changed (UPDATE);
---   2. no owner: only the wiki compile's dossier, naming no connection, and an UPDATE may not MAKE a dossier (the
---      exemption is not reachable from any other shape). After this slot applies there is no other unowned thought
---      (its precondition), so every other unowned row is refused, INSERT and UPDATE alike;
+--   2. no owner: only the wiki compile's dossier - CLEAN of every inlet key (round 3, F8: inlet_stamp_dossier_clean),
+--      written by the compile's own path (no door role but the wiki's: generate-wiki.mjs runs in openbrain-wiki) - and
+--      an UPDATE may not MAKE a dossier (the exemption is not reachable from any other shape) nor add an inlet key to
+--      one. After this slot applies there is no other unowned thought (its precondition), so every other unowned row
+--      is refused, INSERT and UPDATE alike;
 --   3. an owner must be a valid subject;
 --   4. a door request (slot 450's verified token): the import role names no connection; a row that names no
 --      connection is owned by the token's own subject;
---   5. a row that names a connection carries that connection's recorded owner; a gmail row names one - an UPDATE may
---      not drop it (a legacy gmail row that never named one keeps that shape).
+--   5. a row that names a connection carries that connection's recorded owner; a gmail row (any case) names one; an
+--      UPDATE may never drop a connection a row named, whatever else it changes (round 3: not with its source either).
+--      A legacy 440-stamped gmail row that never named one keeps that shape.
 DECLARE
     v_conn   TEXT := NEW.metadata ->> 'inlet_connection';
     v_owner  TEXT;
@@ -237,9 +257,11 @@ BEGIN
         RAISE EXCEPTION 'inlet stamp: a thought''s owner may not be cleared or changed' USING ERRCODE = '23514';
     END IF;
     IF NEW.user_id IS NULL THEN
-        IF public.inlet_stamp_is_dossier(NEW.metadata) AND v_conn IS NULL
+        v_claims := public.inlet_stamp_door_claims();
+        IF public.inlet_stamp_dossier_clean(NEW.metadata, NEW.content)
+           AND (coalesce(v_claims ->> 'role', '') NOT LIKE 'ob\_rest\_%' OR v_claims ->> 'role' = 'ob_rest_wiki')
            AND (TG_OP = 'INSERT' OR public.inlet_stamp_is_dossier(OLD.metadata)) THEN
-            RETURN NEW;               -- the compile's dossier (written, or rewritten, as a dossier)
+            RETURN NEW;               -- the compile's clean dossier (written, or rewritten, as a dossier)
         END IF;
         RAISE EXCEPTION 'inlet stamp: a personal row needs its owner (thoughts.user_id); nothing was written' USING ERRCODE = '23514';
     END IF;
@@ -259,8 +281,10 @@ BEGIN
         END IF;
     END IF;
     IF v_conn IS NULL THEN
-        IF NEW.metadata ->> 'source' = 'gmail'
-           AND (TG_OP = 'INSERT' OR (OLD.metadata ->> 'inlet_connection') IS NOT NULL) THEN
+        IF TG_OP = 'UPDATE' AND (OLD.metadata ->> 'inlet_connection') IS NOT NULL THEN
+            RAISE EXCEPTION 'inlet stamp: an UPDATE may not drop the inlet connection a row names' USING ERRCODE = '23514';
+        END IF;
+        IF TG_OP = 'INSERT' AND lower(coalesce(NEW.metadata ->> 'source', '')) = 'gmail' THEN
             RAISE EXCEPTION 'inlet stamp: a gmail row must name its inlet connection (metadata.inlet_connection)' USING ERRCODE = '23514';
         END IF;
         RETURN NEW;
@@ -317,6 +341,40 @@ REVOKE ALL ON FUNCTION public.inlet_stamp_is_dossier(JSONB) FROM PUBLIC;
 DROP FUNCTION IF EXISTS public.inlet_stamp_source_personal(TEXT, TEXT, JSONB);   -- round 1's narrower predicate
 REVOKE ALL ON FUNCTION public.inlet_stamp_source_personal(TEXT, TEXT, JSONB, TEXT) FROM PUBLIC;
 
+-- Round 3 (tester attempt 2, low): the shared text 440's fail-closed check reads besides sources - a source chunk's
+-- content, a claim's text - never carries a Gmail URL (440's own predicate: ~* 'mail\.google\.com'). One function.
+CREATE OR REPLACE FUNCTION public.inlet_stamp_text_personal(p_text TEXT) RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT coalesce(p_text, '') ~* 'mail\.google\.com'
+$$;
+REVOKE ALL ON FUNCTION public.inlet_stamp_text_personal(TEXT) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION public.inlet_stamp_chunks_guard() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF public.inlet_stamp_text_personal(NEW.content) THEN
+        RAISE EXCEPTION 'inlet stamp: a shared source chunk may not carry a Gmail URL; nothing was written' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE OR REPLACE FUNCTION public.inlet_stamp_claims_guard() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF public.inlet_stamp_text_personal(NEW.text) THEN
+        RAISE EXCEPTION 'inlet stamp: a shared claim may not carry a Gmail URL; nothing was written' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.inlet_stamp_chunks_guard() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.inlet_stamp_claims_guard() FROM PUBLIC;
+
 -- the preconditions: nothing left for 440 to make private (run 440 first), checked under the locks
 DO $$
 DECLARE v_first TIMESTAMPTZ; n_t BIGINT; n_s BIGINT;
@@ -326,6 +384,8 @@ BEGIN
      WHERE t.user_id IS NULL
        AND NOT (lower(coalesce(t.metadata ->> 'type', '')) = 'dossier' AND t.created_at > coalesce(v_first, '-infinity'::timestamptz));
     SELECT count(*) INTO n_s FROM public.sources s WHERE public.inlet_stamp_source_personal(s.url, s.content_type, s.metadata, s.content);
+    SELECT n_s + (SELECT count(*) FROM public.source_chunks c WHERE public.inlet_stamp_text_personal(c.content))
+               + (SELECT count(*) FROM public.claims c WHERE public.inlet_stamp_text_personal(c.text)) INTO n_s;
     IF n_t > 0 OR n_s > 0 THEN
         RAISE EXCEPTION 'inlet stamp: refused, nothing changed - % unowned thought(s) and % personal shared source(s) are still there: run slot 440 (init-inlet-owner.sql) first', n_t, n_s
             USING ERRCODE = '55000';
@@ -335,6 +395,14 @@ CREATE OR REPLACE TRIGGER trg_inlet_stamp_sources
     BEFORE INSERT OR UPDATE ON public.sources
     FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_sources_guard();
 ALTER TABLE public.sources ENABLE ALWAYS TRIGGER trg_inlet_stamp_sources;
+CREATE OR REPLACE TRIGGER trg_inlet_stamp_chunks
+    BEFORE INSERT OR UPDATE ON public.source_chunks
+    FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_chunks_guard();
+ALTER TABLE public.source_chunks ENABLE ALWAYS TRIGGER trg_inlet_stamp_chunks;
+CREATE OR REPLACE TRIGGER trg_inlet_stamp_claims
+    BEFORE INSERT OR UPDATE ON public.claims
+    FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_claims_guard();
+ALTER TABLE public.claims ENABLE ALWAYS TRIGGER trg_inlet_stamp_claims;
 
 -- the owner columns: the same rule as every owner (inlet_subject_ok) - never blank, never a service principal, never
 -- the literal 'operator' (coordinator 2026-11-05: not even for a lab convenience; the labs use a real-shaped subject)

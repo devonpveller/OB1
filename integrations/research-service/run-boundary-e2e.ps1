@@ -271,15 +271,17 @@ try {
   # rw-inlet-stamp (slot 470): its migration and revert name the table ONLY in their list of owner columns that get the
   # inlet_subject_ok CHECK (ARRAY['research_handbacks', 'owner_sub'] / the revert's table list) - no read, no write, no
   # hand-back function. They pass only while every line naming the hand-back there is such a list line.
-  $ownerCheckOnly = @{ 'docker/init-inlet-stamp.sql' = "ARRAY\['research_handbacks', 'owner_sub'\]"; 'docker/revert-inlet-stamp.sql' = "^\s*FOREACH c IN ARRAY ARRAY\['podcast_episodes', 'research_handbacks'," }
+  # round 3 (tester attempt 2, low): the WHOLE line, exactly - anything appended to an admitted line fails the check
+  $ownerCheckOnly = @{ 'docker/init-inlet-stamp.sql' = "^\s*ARRAY\['podcast_episodes', 'owner_sub'\], ARRAY\['research_handbacks', 'owner_sub'\],\s*$"; 'docker/revert-inlet-stamp.sql' = "^\s*FOREACH c IN ARRAY ARRAY\['podcast_episodes', 'research_handbacks', 'podcast_teams', 'podcast_presenters',\s*$" }
   foreach ($f in @($ownerCheckOnly.Keys)) {
     if ($names -notcontains $f) { continue }
     $hits = @(Select-String -Path (Join-Path $ob1 $f) -Pattern 'research_handbacks|handback_(open|pending|claim|deliverables|delivered|owned|deliver)' | ForEach-Object { $_.Line })
     if ($hits.Count -ge 1 -and @($hits | Where-Object { $_ -notmatch $ownerCheckOnly[$f] }).Count -eq 0) { $allowed += $f }
   }
   $stray = @($names | Where-Object { $allowed -notcontains $_ })
-  $selfTest = @("SELECT owner_sub FROM public.research_handbacks", "PERFORM public.handback_deliver(x)", "UPDATE public.research_handbacks SET state = 'x'") | Where-Object { $_ -notmatch $ownerCheckOnly['docker/init-inlet-stamp.sql'] -and $_ -notmatch $ownerCheckOnly['docker/revert-inlet-stamp.sql'] }
-  Check ($selfTest.Count -eq 3) "the slot-470 exception admits its owner-CHECK list lines only: a read, a write or a hand-back function there would fail this check (3 of 3 not admitted: $($selfTest.Count))"
+  $selfTest = @("SELECT owner_sub FROM public.research_handbacks", "PERFORM public.handback_deliver(x)", "UPDATE public.research_handbacks SET state = 'x'",
+    "        ARRAY['podcast_episodes', 'owner_sub'], ARRAY['research_handbacks', 'owner_sub'], (SELECT 1 FROM public.research_handbacks)") | Where-Object { $_ -notmatch $ownerCheckOnly['docker/init-inlet-stamp.sql'] -and $_ -notmatch $ownerCheckOnly['docker/revert-inlet-stamp.sql'] }
+  Check ($selfTest.Count -eq 4) "the slot-470 exception admits its owner-CHECK list lines only: a read, a write or a hand-back function there would fail this check (4 of 4 not admitted, an appended admitted line included: $($selfTest.Count))"
   Save 'handback-readers.txt' (($names | Sort-Object) -join "`n")
   Check ($names.Count -ge 4 -and $stray.Count -eq 0) "only the boundary's own files name the hand-back ($($names.Count) files; outside the set: $($stray -join ', '))"
 }
